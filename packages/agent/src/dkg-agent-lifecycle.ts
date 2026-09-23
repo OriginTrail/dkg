@@ -656,6 +656,7 @@ import {
   normalizeContextGraphSubscriptionTransition,
   projectContextGraphSubscriptionPersistence,
 } from './context-graph-subscription-policy.js';
+import { partitionSupersededContextGraphNamePlaceholders } from './dkg-agent-cg-name-resolution.js';
 import {
   authoritativeSyncPeerId,
   resolveBoundedCuratorSyncPeer,
@@ -4093,6 +4094,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.handlePeerUpdateForSyncRetry(peerIdObj.toString(), protocols);
     }, { signal });
 
+    // Subscriptions known only by an on-chain name hash sync nothing until the
+    // cleartext id is found; serve and resolve names for this node's lifetime.
+    this.startContextGraphNameResolution(signal);
+
     // Reconnect-on-gossip: when a gossip message arrives from a peer we're
     // not currently connected to, best-effort dial them. This catches the
     // case where two NAT'd edge nodes briefly lose their direct path but
@@ -5193,6 +5198,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     for (const contextGraphId of contextGraphIds) {
+      // Supersession before authorization: a name-hash id this node adopted
+      // under its cleartext id must not sync (or write) under the retired id,
+      // even though policy reads now answer for the graph it names.
+      const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
+      if (supersedingId) {
+        this.log.debug(
+          ctx,
+          `Skipping SWM sync for "${contextGraphId}": superseded by cleartext adoption of "${supersedingId}"`,
+        );
+        continue;
+      }
       const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
       const completeSwmProviders = this.resolveRfc64CompleteSwmProviderPeerIdsV1(
         contextGraphId,
@@ -9155,6 +9171,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...(adoptsWireOnlySubscription && next.onChainHash === undefined
         ? { onChainHash: localWireId }
         : {}),
+      // A Core's hosting obligation belongs to the graph, not to the id it
+      // was first recorded under.
+      ...(adoptsWireOnlySubscription
+        && wireOnlySubscription.subscription.coreHosted === true
+        && next.coreHosted === undefined
+        ? { coreHosted: true }
+        : {}),
     });
     if (adoptsWireOnlySubscription) {
       // A private chain event reaches an Edge before its join approval and can
@@ -9169,6 +9192,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (this.wireIdToLocalCgId.get(localWireId) === wireOnlySubscription.localId) {
         this.wireIdToLocalCgId.delete(localWireId);
       }
+      // A placeholder can be durable (a `dkg subscribe <hash> --save` row, or
+      // a Core's hosted row). Delete that record too, whatever this caller's
+      // persist flag: otherwise the next rehydration resurrects the hash row
+      // and re-points the reverse index away from the cleartext id.
+      this.retireDurableContextGraphSubscription?.(
+        wireOnlySubscription.localId,
+        wireOnlySubscription.subscription,
+      );
       this.log.info(
         createOperationContext('system'),
         `Promoted wire-only Context Graph ${localWireId.slice(0, 18)}… to local identity "${contextGraphId}"`,
@@ -9199,6 +9230,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
     this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
+    if (
+      (canonicalNext.subscribed === true || canonicalNext.coreHosted === true)
+      && previous?.subscribed !== true
+      && previous?.coreHosted !== true
+    ) {
+      // A graph known only by its on-chain name hash needs its cleartext id
+      // before anything can sync; a no-op for every other row.
+      this.requestContextGraphNameResolutionFor?.(contextGraphId);
+    }
     const rehydratedUserSubscription =
       this.contextGraphSubscriptionRehydrationStatus?.rehydrationEnabled === true
       && this.contextGraphSubscriptionRehydrationStatus.activationCap > 0
@@ -10650,7 +10690,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // dormant. Exclude them from the rehydration set entirely.
       const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
       const persistedRows = await store.loadAll();
-      const rows = persistedRows.filter((r) => !systemContextGraphs.has(r.id));
+      // A name-hash placeholder whose verified cleartext row is also durable
+      // was adopted earlier; the crash window between the two writes can
+      // leave both. Never reactivate the placeholder. Record the adoption as
+      // an alias first (dormant rows included) so a `--save`d hash entry in
+      // the sync scope keeps resolving to the cleartext id.
+      this.recordPersistedContextGraphIdAliases(persistedRows);
+      this.rewriteContextGraphSyncScopeAliases();
+      let rows = persistedRows.filter((r) => !systemContextGraphs.has(r.id));
+      // The operator kill-switch below promises not to touch durable state.
+      if (this.config.contextGraphSubscriptionRehydrationEnabled) {
+        const namePlaceholders = partitionSupersededContextGraphNamePlaceholders(rows);
+        for (const superseded of namePlaceholders.superseded) {
+          try {
+            await store.delete(superseded.id);
+            this.log.info(ctx, `Dropped superseded name-hash subscription row ${superseded.id.slice(0, 18)}…`);
+          } catch (error) {
+            this.log.warn(
+              ctx,
+              `Failed to drop superseded name-hash subscription row ${superseded.id.slice(0, 18)}…: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+        rows = namePlaceholders.active;
+      }
 
       // Validate the cap before either branch below so diagnostics retain the
       // operator's configured cap even when the independent rehydration gate

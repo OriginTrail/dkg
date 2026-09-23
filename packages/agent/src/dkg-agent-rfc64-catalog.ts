@@ -3062,6 +3062,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined) {
       return null;
     }
+    // A name-hash id this node adopted under its verified cleartext id is
+    // superseded: the cleartext graph owns this authority now. Re-reading it
+    // under the hash would compare keccak256(hash) with the slot's name and
+    // report the graph as name-bound elsewhere.
+    if (this.supersedingContextGraphIdFor?.(contextGraphId)) return null;
     const previousAuthorityProgress = rfc64CatalogAuthorityProgressV1
       .get(this)?.get(contextGraphId);
     const authorityRevision = nextRfc64CatalogAuthorityRevisionV1(this, contextGraphId);

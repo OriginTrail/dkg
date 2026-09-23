@@ -23,6 +23,7 @@ import {
   type UalOnlyExactAssetSelection,
 } from '../src/sync/exact-assets.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
+import { SyncTargetSupersededError } from '../src/sync/error-tags.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DurableBatchVerificationMode } from '../src/sync-verify-worker.js';
@@ -473,6 +474,102 @@ describe('exact-asset rolling-upgrade filter', () => {
     expect(authenticateChallengePinnedAsset).toHaveBeenCalledTimes(6);
     expect(storeGraphScopedAsset).not.toHaveBeenCalled();
     expect(detailed.result.insertedTriples).toBe(0);
+  });
+
+  describe('a Context Graph id superseded mid-sync (Base #34 canary)', () => {
+    // A name-hash id this node adopted under its cleartext id while the sync
+    // for it was in flight. The error starts where production raises it: the
+    // identity proof inside asset authentication.
+    const retired = `0x${'b9'.repeat(32)}`;
+    const cleartext = 'acme-fun-facts';
+    const assetUal = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/9';
+    const stoppedLine = `Sync for context graph "${retired}" from peerR stopped: `
+      + `Context Graph ${retired} was superseded by cleartext adoption of "${cleartext}"`;
+
+    function retiredAssetContext(options: {
+      contextGraphIds?: string[];
+      storeGraphScopedAsset?: () => Promise<never>;
+    } = {}) {
+      const graph = knowledgeAssetLayerGraphUri(
+        retired,
+        MemoryLayer.VerifiableMemory,
+        createGraphKnowledgeAssetScope(assetUal, '1'),
+      );
+      const data = [{ subject: 'urn:fact', predicate: 'urn:value', object: '"42"', graph }] as Quad[];
+      const meta = generateGraphKnowledgeAssetMetadata({
+        ual: assetUal,
+        contextGraphId: retired,
+        merkleRoot: new Uint8Array(32).fill(0x44),
+        publisherPeerId: 'peer',
+        accessPolicy: 'public',
+        timestamp: new Date(0),
+        assertionVersion: '1',
+        publicTripleCount: 1,
+        privateTripleCount: 0,
+        assertionGraph: graph,
+      }, { status: 'tentative' });
+      const harness = makeContext({
+        contextGraphIds: options.contextGraphIds ?? [retired],
+        pageQuads: { data, meta },
+        processResult: { verifiedData: data, verifiedMeta: meta, verifiedGraphScopedDataGraphs: [graph] },
+        storeGraphScopedAsset: options.storeGraphScopedAsset,
+      });
+      const warnings: string[] = [];
+      const debugs: string[] = [];
+      harness.context.logWarn = (_ctx, message) => { warnings.push(message); };
+      harness.context.logDebug = (_ctx, message) => { debugs.push(message); };
+      return { ...harness, warnings, debugs };
+    }
+
+    it('stops the durable store quietly when authentication finds the id superseded', async () => {
+      const storeGraphScopedAsset = vi.fn(async () => {
+        throw new SyncTargetSupersededError(retired, cleartext);
+      });
+      const { context, warnings, debugs } = retiredAssetContext({ storeGraphScopedAsset });
+
+      const summary = await runDurableSync(context);
+
+      expect(storeGraphScopedAsset).toHaveBeenCalledTimes(1);
+      expect(warnings.filter((message) => message.includes(retired))).toEqual([]);
+      expect(debugs).toContain(stoppedLine);
+      expect(summary.backoffWorthyFailures).toBe(0);
+      expect(summary.failedPeers).toBe(0);
+      expect(summary.insertedTriples).toBe(0);
+    });
+
+    it('stops a challenge-pinned exact fetch quietly when authentication finds the id superseded', async () => {
+      const authenticate = vi.fn(async () => {
+        throw new SyncTargetSupersededError(retired, cleartext);
+      });
+      const { context, warnings, debugs } = retiredAssetContext();
+      const selection = createChallengePinnedExactAssetSelection([
+        { assetUal, merkleRootHex: '44'.repeat(32), merkleLeafCount: 1n },
+      ]);
+
+      const result = await runChallengeExactAssetFetch(challengeContext(context, selection, authenticate));
+
+      expect(authenticate).toHaveBeenCalledTimes(1);
+      expect(result.authenticatedAssets).toEqual([]);
+      expect(warnings.filter((message) => message.includes(retired))).toEqual([]);
+      expect(debugs).toContain(stoppedLine);
+      expect(result.result.backoffWorthyFailures).toBe(0);
+    });
+
+    it('moves on to the next graph after a superseded one', async () => {
+      const { context, calls, warnings, debugs } = retiredAssetContext({ contextGraphIds: [retired, 'mfacts'] });
+      const fetchPage = context.fetchSyncPages;
+      context.fetchSyncPages = async (request) => {
+        if (request.contextGraphId === retired) throw new SyncTargetSupersededError(retired, cleartext);
+        return fetchPage(request);
+      };
+
+      const summary = await runDurableSync(context);
+
+      expect(warnings.filter((message) => message.includes(retired))).toEqual([]);
+      expect(debugs).toContain(stoppedLine);
+      expect(calls.some(({ contextGraphId }) => contextGraphId === 'mfacts')).toBe(true);
+      expect(summary.backoffWorthyFailures).toBe(0);
+    });
   });
 
   it('does not thread a filter when exactAssetSelectionFor is not wired', async () => {
