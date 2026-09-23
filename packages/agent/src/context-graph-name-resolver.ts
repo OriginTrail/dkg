@@ -25,6 +25,7 @@
  * `keccak256(utf8(candidate)) === nameHash` before it reaches `adopt`.
  */
 
+import { rememberBounded } from './bounded-map.js';
 import {
   findVerifiedContextGraphName,
   normalizeContextGraphNameHash,
@@ -178,17 +179,6 @@ function isUnexpectedAttemptError(error: unknown): boolean {
 function describeError(error: unknown): string {
   if (!(error instanceof Error)) return String(error);
   return isUnexpectedAttemptError(error) ? `${error.name}: ${error.message}` : error.message;
-}
-
-/** Insert as newest, evicting the oldest entries so at most `bound` remain. */
-export function rememberBounded<K, V>(map: Map<K, V>, key: K, value: V, bound: number): void {
-  map.delete(key);
-  while (map.size >= bound) {
-    const oldest = map.keys().next().value;
-    if (oldest === undefined) break;
-    map.delete(oldest);
-  }
-  map.set(key, value);
 }
 
 export class ContextGraphNameResolver {

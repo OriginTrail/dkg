@@ -27,6 +27,7 @@ import {
   isProtocolUnsupportedError,
 } from '@origintrail-official/dkg-core';
 
+import { rememberBounded } from './bounded-map.js';
 import { runBoundedOperation } from './bounded-operation.js';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import {
@@ -47,7 +48,6 @@ import {
 } from './context-graph-name-protocol.js';
 import {
   ContextGraphNameResolver,
-  rememberBounded,
   type ContextGraphNamePolicy,
   type ContextGraphNameResolutionEntry,
   type ContextGraphNameSource,
