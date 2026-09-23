@@ -407,8 +407,9 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
     requestAgentAddress,
   } = ctx;
   // Connecting, updating or refreshing an integration rewrites node config and
-  // can run its setup, so it requires a node-level admin token. Resolved once.
-  const nodeAuth = actorFromRequestContext(ctx).authentication;
+  // can run its setup, so it requires a node-level admin token. Resolved lazily,
+  // inside those routes only, so read-only routes never depend on it.
+  const nodeAuth = () => actorFromRequestContext(ctx).authentication;
 
 
   // GET /api/local-agent-integrations — generic local agent registry/status surface
@@ -429,7 +430,7 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
 
   // POST /api/local-agent-integrations/connect — upsert/connect an integration
   if (req.method === 'POST' && path === '/api/local-agent-integrations/connect') {
-    if (!requireNodeAdmin(nodeAuth, res, 'POST /api/local-agent-integrations/connect', 'connect local agent integrations')) return;
+    if (!requireNodeAdmin(nodeAuth(), res, 'POST /api/local-agent-integrations/connect', 'connect local agent integrations')) return;
     const body = await readBody(req, SMALL_BODY_BYTES);
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
@@ -465,7 +466,7 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
     && path.startsWith('/api/local-agent-integrations/')
     && path.endsWith('/refresh')
   ) {
-    if (!requireNodeAdmin(nodeAuth, res, 'POST /api/local-agent-integrations/:id/refresh', 'refresh local agent integrations')) return;
+    if (!requireNodeAdmin(nodeAuth(), res, 'POST /api/local-agent-integrations/:id/refresh', 'refresh local agent integrations')) return;
     const segments = path.slice('/api/local-agent-integrations/'.length, -'/refresh'.length);
     if (!segments || segments.includes('/')) {
       return jsonResponse(res, 404, { error: 'Unknown integration' });
@@ -486,7 +487,7 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
 
   // PUT /api/local-agent-integrations/:id — partial update for stored integration state
   if (req.method === 'PUT' && path.startsWith('/api/local-agent-integrations/')) {
-    if (!requireNodeAdmin(nodeAuth, res, 'PUT /api/local-agent-integrations/:id', 'update local agent integrations')) return;
+    if (!requireNodeAdmin(nodeAuth(), res, 'PUT /api/local-agent-integrations/:id', 'update local agent integrations')) return;
     const id = path.slice('/api/local-agent-integrations/'.length);
     if (!id) return jsonResponse(res, 404, { error: 'Integration not found' });
     if (normalizeIntegrationId(id) === 'local-llm') {

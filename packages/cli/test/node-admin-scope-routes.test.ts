@@ -152,6 +152,28 @@ describe('node-wide status routes require node-admin scope', () => {
     expect(allowed).toEqual({ status: 400, body: { error: 'Invalid JSON body' } });
   });
 
+  it('never resolves the caller for read-only routes (identity-less context)', async () => {
+    // The node-admin check must stay inside the gated routes. Evaluating it for
+    // every request throws on a context without `authentication`, which behind a
+    // raw test server leaves the request unanswered instead of failing.
+    for (const [handler, path, agent, status] of [
+      [handleStatusRoutes, '/api/identity', { publisher: { getIdentityId: () => 3n } }, 200],
+      [handleLocalAgentsRoutes, '/api/local-agent-integrations/not-installed', {}, 404],
+    ] as const) {
+      const res = fakeRes();
+      const url = new URL(`http://127.0.0.1${path}`);
+      await (handler as RouteHandler)({
+        req: fakeReq('GET', path),
+        res: res as unknown as ServerResponse,
+        agent,
+        config: {} as DkgConfig,
+        url,
+        path,
+      } as unknown as RequestContext);
+      expect(res.statusCode, path).toBe(status);
+    }
+  });
+
   it('leaves the read-only status routes open to agent tokens', async () => {
     const res = await callRoute(handleStatusRoutes, 'GET', '/api/identity', AGENT, {
       agent: { publisher: { getIdentityId: () => 3n } },
