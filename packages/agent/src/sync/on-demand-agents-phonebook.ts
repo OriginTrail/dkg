@@ -152,8 +152,6 @@ export interface OnDemandAgentsPhonebookDeps {
     peerId: string,
     options: { signal: AbortSignal; totalTimeoutMs: number },
   ): Promise<AgentsPhonebookPeerSyncResult>;
-  /** Profiles now in the local phonebook, for the log line only. */
-  countProfiles(signal: AbortSignal): Promise<number | undefined>;
   /** The wanted graphs whose curator now resolves; schedule their recovery. */
   onCuratorsResolved(contextGraphIds: readonly string[]): void;
   logInfo(message: string): void;
@@ -450,8 +448,10 @@ export class OnDemandAgentsPhonebookFetcher {
     const wanted = [...this.#wants.keys()];
     this.#wants.clear();
     const unresolved = new Set(await this.#unresolvedWantsOf(wanted, lifetime));
+    // Closed (stop()) while checking: a closed fetcher reports nothing, meters
+    // nothing and schedules no recovery for a host that is shutting down.
+    if (lifetime.aborted) return;
     const resolved = wanted.filter((contextGraphId) => !unresolved.has(contextGraphId));
-    const profiles = await this.#deps.countProfiles(lifetime).catch(() => undefined);
     const now = this.#now();
     // `empty`: peers answered but served no rows (a just-started or lean Core);
     // like `failed`, it keeps the short cooldown so another peer is asked soon.
@@ -478,7 +478,7 @@ export class OnDemandAgentsPhonebookFetcher {
       `On-demand agents phonebook fetch: trigger=${trigger} `
         + `graph=${firstWanted}${wanted.length > 1 ? ` (+${wanted.length - 1})` : ''} `
         + `peers=[${peerSummaries.join(' ')}] fetched=${fetchedTriples} inserted=${insertedTriples} `
-        + `profiles=${profiles ?? '?'} durationMs=${durationMs} `
+        + `durationMs=${durationMs} `
         + `curatorResolved=${resolved.length}/${wanted.length} outcome=${outcome} `
         + `nextFetchInMs=${this.#nextEligibleAt - now}`,
     );

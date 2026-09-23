@@ -161,7 +161,6 @@ export class AgentsPhonebookMethods extends DKGAgentBase {
           complete: result.complete,
         };
       },
-      countProfiles: (signal) => this.discovery.countAgents({ signal }),
       onCuratorsResolved: (contextGraphIds) => {
         this.scheduleVmRecoveryForResolvedCurators(contextGraphIds);
       },

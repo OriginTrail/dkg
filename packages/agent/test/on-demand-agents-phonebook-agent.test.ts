@@ -203,7 +203,6 @@ describe('on-demand agents phonebook on a fresh Edge', () => {
     expect(edge.fetchLogLines()).toHaveLength(1);
     expect(edge.fetchLogLines()[0]).toContain('trigger=subscribe');
     expect(edge.fetchLogLines()[0]).toContain('curatorResolved=1/1');
-    expect(edge.fetchLogLines()[0]).toContain('profiles=1');
 
     // The curator tier now resolves owner wallet -> profile -> publisher Edge;
     // recovery dials it through the profile's circuit and asks it first.
@@ -618,7 +617,6 @@ describe('on-demand agents phonebook across stop()', () => {
         syncSettledAt = performance.now();
         return { fetchedTriples: 0, insertedTriples: 0, complete: false };
       },
-      countProfiles: async () => 0,
       onCuratorsResolved: () => undefined,
       logInfo: () => undefined,
       logDebug: () => undefined,

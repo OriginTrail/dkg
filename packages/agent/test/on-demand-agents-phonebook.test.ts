@@ -77,7 +77,6 @@ function createHarness(
       syncCalls.push({ peerId, ...syncOptions });
       return sync(peerId, syncOptions);
     }),
-    countProfiles: vi.fn(async () => 1_926),
     onCuratorsResolved: (contextGraphIds) => { resolvedBatches.push([...contextGraphIds]); },
     logInfo: (message) => { info.push(message); },
     logDebug: (message) => { debug.push(message); },
@@ -101,6 +100,28 @@ function createHarness(
     advance(ms: number) { now += ms; },
     setEnabled(value: boolean) { enabled = value; },
   };
+}
+
+/**
+ * Hold the fetch's post-walk phonebook check: the owner's second lookup (the
+ * first is the qualification check). The peer walk is complete by then.
+ */
+function holdPostWalkOwnerCheck(h: ReturnType<typeof createHarness>) {
+  let release!: () => void;
+  const released = new Promise<void>((resolve) => { release = resolve; });
+  let held = false;
+  let ownerLookups = 0;
+  vi.mocked(h.deps.phonebookHasWallet).mockImplementation(async (wallet: string) => {
+    if (wallet.toLowerCase() === OWNER.toLowerCase()) {
+      ownerLookups += 1;
+      if (ownerLookups === 2) {
+        held = true;
+        await released;
+      }
+    }
+    return h.phonebook.has(wallet.toLowerCase());
+  });
+  return { release: () => release(), isHeld: () => held };
 }
 
 describe('resolveOnDemandAgentsPhonebookFetch', () => {
@@ -145,7 +166,7 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
     expect(h.info[0]).toContain('trigger=subscribe');
     expect(h.info[0]).toContain(`graph=${CG} (+1)`);
     expect(h.info[0]).toContain(`peers=[${CORE_A.slice(-8)}:core:complete:75141]`);
-    expect(h.info[0]).toContain('fetched=75141 inserted=75141 profiles=1926');
+    expect(h.info[0]).toContain('fetched=75141 inserted=75141 durationMs=');
     expect(h.info[0]).toContain('curatorResolved=2/2 outcome=complete');
     expect(h.info[0]).toContain(`nextFetchInMs=${AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS}`);
     expect(h.info[0]).toMatch(/durationMs=\d+/);
@@ -522,29 +543,45 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
   });
 
   it('drops a graph that qualifies after the fetch read its list instead of parking it', async () => {
-    let releaseCount!: () => void;
     const h = createHarness({ subscribed: [CG, CG_OTHER_OWNER] });
-    vi.mocked(h.deps.countProfiles).mockImplementation(() => new Promise((resolve) => {
-      releaseCount = () => resolve(1);
-    }));
+    const postWalk = holdPostWalkOwnerCheck(h);
 
     h.fetcher.request(CG, 'subscribe');
-    await vi.waitFor(() => expect(releaseCount).toBeTypeOf('function'));
+    await vi.waitFor(() => expect(postWalk.isHeld()).toBe(true));
     // Qualifies while the finished fetch is still reporting.
     h.fetcher.request(CG_OTHER_OWNER, 'vm-reconcile');
     await vi.waitFor(() => expect(h.deps.readAccessPolicy).toHaveBeenCalledWith(
       CG_OTHER_OWNER,
       expect.anything(),
     ));
-    releaseCount();
+    postWalk.release();
     await h.fetcher.whenIdle();
     expect(h.syncCalls).toHaveLength(1);
 
-    vi.mocked(h.deps.countProfiles).mockResolvedValue(2);
     h.advance(AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS);
     h.fetcher.request(CG_OTHER_OWNER, 'vm-reconcile');
     await h.fetcher.whenIdle();
     expect(h.syncCalls).toHaveLength(2);
+  });
+
+  it('reports nothing and schedules no recovery when closed after the peer walk', async () => {
+    const add = vi.spyOn(getMetrics().agentsPhonebookFetchTotal, 'add');
+    const h = createHarness();
+    const postWalk = holdPostWalkOwnerCheck(h);
+
+    h.fetcher.request(CG, 'subscribe');
+    await vi.waitFor(() => expect(postWalk.isHeld()).toBe(true));
+    // stop() closes the fetcher while the finished walk is still reporting.
+    const closing = h.fetcher.close();
+    postWalk.release();
+    await closing;
+
+    expect(h.syncCalls).toHaveLength(1);
+    expect(h.info).toEqual([]);
+    expect(h.resolvedBatches).toEqual([]);
+    expect(add.mock.calls.filter(([, attributes]) => (
+      attributes !== undefined && 'curator_resolved' in attributes
+    ))).toEqual([]);
   });
 
   it('close aborts an in-flight fetch without reporting it, and reopen admits requests again', async () => {
