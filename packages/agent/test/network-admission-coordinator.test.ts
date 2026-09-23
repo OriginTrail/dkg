@@ -938,6 +938,50 @@ describe('NetworkAdmissionCoordinator', () => {
     expect(fixture.coordinator.isRejectedPeer(REMOTE_PEER_ID)).toBe(false);
   });
 
+  it('re-arms the transport refusal and forgets the peer again when a lapsed quarantine re-rejects it', async () => {
+    // The churn the mismatch window accepts (NETWORK_MISMATCH_DENY_DEFAULT_MS in
+    // core) is bounded: a still-foreign peer costs one probe per window, and
+    // that probe puts back everything the lapse released, in the same order as
+    // the first rejection: the refusal for a new window, the closed
+    // connection, and the addresses removed from the peer store.
+    let now = 1_000;
+    const order: string[] = [];
+    const sendIdentityProbe = vi.fn(async () => new TextEncoder().encode(JSON.stringify({
+      version: 1,
+      peerId: REMOTE_PEER_ID,
+      networkId: 'network-b',
+      genesisId: identity.genesisId,
+      proofKind: 'ed25519-peer-id',
+      signature: 'invalid-signature',
+    })));
+    const fixture = buildCoordinator({
+      identity,
+      sendIdentityProbe,
+      quarantineCooldownMs: 60_000,
+      now: () => now,
+      onPeerRejected: (peerId, quarantineMs) => order.push(`deny:${peerId}:${quarantineMs}`),
+    });
+    fixture.close.mockImplementation(() => { order.push('close'); });
+    fixture.deletePeerFromPeerStore.mockImplementation(async () => { order.push('forget'); });
+    const rejection = [`deny:${REMOTE_PEER_ID}:60000`, 'close', 'forget'];
+    const ctx = createOperationContext('connect');
+
+    await expect(fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, ctx)).resolves.toBe(false);
+    expect(order).toEqual(rejection);
+
+    // Inside the window: no probe, nothing re-armed.
+    now += 59_999;
+    await expect(fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, ctx)).resolves.toBe(false);
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(rejection);
+
+    // Window over: exactly one probe, and the full rejection again.
+    now += 1;
+    await expect(fixture.coordinator.ensureAdmitted(REMOTE_PEER_ID, ctx)).resolves.toBe(false);
+    expect(sendIdentityProbe).toHaveBeenCalledTimes(2);
+    expect(order).toEqual([...rejection, ...rejection]);
+  });
+
   it('lifts the transport dial refusal when a peer passes the identity proof', async () => {
     const onPeerVerified = vi.fn();
     const onPeerRejected = vi.fn();

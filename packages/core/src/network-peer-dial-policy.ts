@@ -15,14 +15,21 @@ import { parseCircuitRelayPeerIds } from './relay-path.js';
  * whose operator fixed its network config is admitted, and a still-foreign one
  * is refused again.
  *
- * Refusing for exactly the quarantine, not longer, is a deliberate choice
- * (#2740 kept outbound refused for 30 min). The window is the re-admission
- * latency, and it now also covers a configured relay that failed the proof, so
- * a longer one would keep a node off its own relay long after that relay was
- * fixed. The accepted cost: once per window, a still-foreign peer that kad-dht
- * or discovery re-offers gets one outbound dial and one identity probe before
- * it is refused again. The other bundled networks' relays are on the static
- * list, refused permanently, and never pay it; remembered peers are capped at
+ * Refusing for exactly the quarantine, not longer, is a deliberate choice for
+ * every rejected peer, not only configured relays (#2740 kept outbound refused
+ * for 30 min). The window is the re-admission latency of any peer whose
+ * operator fixed its network config: while it lasts the peer can be neither
+ * dialed nor stored, so a longer window would keep a node off a fixed curator,
+ * catch-up peer or its own relay long after admission would re-probe it.
+ *
+ * The accepted cost, per still-foreign peer and window: once the window lapses
+ * the peer's addresses are storable again, so discovery can re-learn them (and
+ * this node's DHT view can hand them out), and the next dial or inbound
+ * connection costs one connection and one identity probe. That probe rejects
+ * the peer again, which closes its connections, deletes it from the peer store
+ * and re-arms both the refusal and the address filter for another window. The
+ * other bundled networks' relays are on the static list, refused permanently,
+ * and never pay it; remembered peers are capped at
  * {@link NETWORK_MISMATCH_DIAL_DENY_MAX_PEERS}.
  */
 export const NETWORK_MISMATCH_DENY_DEFAULT_MS = 5 * 60_000;

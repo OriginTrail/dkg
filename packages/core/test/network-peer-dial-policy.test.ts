@@ -152,11 +152,17 @@ describe('NetworkPeerDialPolicy — deny after identity mismatch', () => {
     expect(gater.filterMultiaddrForPeer(id(PEER), id('/ip4/1.2.3.4/tcp/9090'))).toBe(true);
     expect(mismatch.dialDenialReason(PEER)).toBeUndefined();
 
-    // A still-foreign peer fails that proof again, and the denial is back.
+    // A still-foreign peer fails that proof again, and everything the lapse
+    // released is back for another window: both directions and the address
+    // filter (the admission coordinator also forgets its stored addresses).
     expect(mismatch.denyAfterNetworkMismatch(PEER, 10_000)).toBe(true);
     expect(gater.denyDialPeer(id(PEER))).toBe(true);
+    expect(gater.denyDialMultiaddr(id(`/ip4/1.2.3.4/tcp/9090/p2p/${PEER}`))).toBe(true);
+    expect(gater.denyInboundEncryptedConnection(id(PEER))).toBe(true);
+    expect(gater.filterMultiaddrForPeer(id(PEER), id('/ip4/1.2.3.4/tcp/9090'))).toBe(false);
     now += 10_000;
     expect(gater.denyDialPeer(id(PEER))).toBe(false);
+    expect(gater.filterMultiaddrForPeer(id(PEER), id('/ip4/1.2.3.4/tcp/9090'))).toBe(true);
   });
 
   it('defaults to the 5-minute admission quarantine and ignores an invalid window', () => {
