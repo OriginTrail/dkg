@@ -442,6 +442,59 @@ describe('handleNodeUIRequest /api/node-log', () => {
   });
 });
 
+// --- Dashboard shell token injection ---
+
+describe('serveStatic token injection', () => {
+  let staticDir: string;
+
+  afterEach(() => {
+    if (staticDir) rmSync(staticDir, { recursive: true, force: true });
+  });
+
+  function setup(): void {
+    staticDir = mkdtempSync(join(tmpdir(), 'dkg-shell-'));
+    writeFileSync(join(staticDir, 'index.html'), '<html><head><title>DKG</title></head><body></body></html>');
+  }
+
+  function shellArgs(authToken: string | undefined, corsOrigin?: string) {
+    return [
+      { dataDir: staticDir }, staticDir, undefined, undefined, authToken, undefined, undefined,
+      undefined, corsOrigin,
+    ] as any;
+  }
+
+  it('embeds the token the caller passes', async () => {
+    setup();
+    harness.setArgs(shellArgs('shell-token-1'));
+
+    const res = await fetch(`${baseUrl}/ui`);
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('<script>window.__DKG_TOKEN__="shell-token-1"</script></head>');
+  });
+
+  it('serves the same shell without a token when the caller passes none', async () => {
+    setup();
+    harness.setArgs(shellArgs(undefined));
+
+    for (const path of ['/ui', '/ui/', '/ui/some/client/route']) {
+      const res = await fetch(`${baseUrl}${path}`);
+      expect(res.status, path).toBe(200);
+      const body = await res.text();
+      expect(body, path).toContain('<title>DKG</title>');
+      expect(body, path).not.toContain('__DKG_TOKEN__');
+    }
+  });
+
+  it('never marks the shell readable cross-origin', async () => {
+    setup();
+    harness.setArgs(shellArgs('shell-token-2', 'http://127.0.0.1:9200'));
+
+    const res = await fetch(`${baseUrl}/ui`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
+  });
+});
+
 describe('serveStatic path traversal prevention', () => {
   let staticDir: string;
 

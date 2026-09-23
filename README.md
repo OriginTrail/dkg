@@ -509,6 +509,8 @@ TOKEN=$(dkg auth show)
 curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9200/api/agents
 ```
 
+The dashboard signs in with this token automatically only when it is opened on the node host itself (`http://127.0.0.1:9200/ui` or `http://localhost:9200/ui`). Opened from another machine or under another host name, it asks for the token instead; an SSH tunnel to the API port keeps the automatic sign-in.
+
 The full node API surface (assertions, memory layers, context graphs, file ingestion, querying) is documented in [`packages/cli/skills/dkg-node/SKILL.md`](packages/cli/skills/dkg-node/SKILL.md) — this is the canonical reference loaded by any DKG-aware agent.
 
 ---

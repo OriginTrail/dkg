@@ -1013,7 +1013,11 @@ export interface DkgConfig {
      */
     postCommitRecoveryIntervalMs?: number;
   };
-  /** Allowed CORS origins. Defaults to '*' when apiHost is '127.0.0.1', otherwise restrictive. */
+  /**
+   * Allowed CORS origins. When unset, only the API port's loopback origins
+   * (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`)
+   * are allowed; `apiHost: '0.0.0.0'` keeps the legacy `'*'`.
+   */
   corsOrigins?: string | string[];
   /** HTTP rate limiting settings. */
   rateLimit?: { requestsPerMinute?: number; exempt?: string[] };

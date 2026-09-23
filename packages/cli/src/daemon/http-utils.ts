@@ -1995,6 +1995,75 @@ export function shouldBypassRateLimitForLoopbackTraffic(ip: string, pathname: st
   return isLoopbackClientIp(ip) && isLoopbackRateLimitExemptPath(pathname);
 }
 
+// Host names of the loopback interface, compared on the host component only.
+const LOCAL_HOST_NAMES = new Set(['127.0.0.1', 'localhost', '::1', '[::1]']);
+
+/**
+ * True when a `Host` header names the loopback interface: `127.0.0.1`,
+ * `localhost`, `::1` or `[::1]`, with any port. A missing header, a malformed
+ * port or any other host name is not local.
+ */
+export function hostIsLocal(host: string | undefined): boolean {
+  if (typeof host !== 'string') return false;
+  const value = host.trim().toLowerCase();
+  let name = value;
+  let port = '';
+  const colon = value.indexOf(':');
+  if (value.startsWith('[')) {
+    const close = value.indexOf(']');
+    if (close < 0) return false;
+    name = value.slice(0, close + 1);
+    const rest = value.slice(close + 1);
+    if (rest && !rest.startsWith(':')) return false;
+    port = rest.slice(1);
+  } else if (colon >= 0 && colon === value.lastIndexOf(':')) {
+    // One colon separates host and port; more than one is a bare IPv6 literal.
+    name = value.slice(0, colon);
+    port = value.slice(colon + 1);
+  }
+  if (port && !/^\d{1,5}$/.test(port)) return false;
+  return LOCAL_HOST_NAMES.has(name);
+}
+
+/**
+ * The first node-operator token in the set, i.e. one that no local agent owns.
+ * Agent tokens share the set and can precede it once the token file is
+ * reloaded, so the order of the set alone does not identify the operator.
+ */
+export function nodeOperatorToken(
+  validTokens: Iterable<string>,
+  resolveAgentByToken: (token: string) => string | undefined,
+): string | undefined {
+  for (const token of validTokens) {
+    if (!resolveAgentByToken(token)) return token;
+  }
+  return undefined;
+}
+
+/**
+ * The token to embed in the dashboard shell for this request, if any. The
+ * shell itself is public so every caller can load it and authenticate, but the
+ * node-operator token is injected only for a trusted local request: a loopback
+ * client socket AND a `Host` that names the loopback interface. A non-loopback
+ * client, or a loopback client presenting any other `Host`, is untrusted and is
+ * served the same shell without a token.
+ */
+export function nodeUiTokenForRequest(
+  req: Pick<IncomingMessage, 'socket' | 'headers'>,
+  opts: {
+    authEnabled: boolean;
+    validTokens: Iterable<string>;
+    resolveAgentByToken: (token: string) => string | undefined;
+  },
+): string | undefined {
+  if (!opts.authEnabled) return undefined;
+  if (!isLoopbackClientIp(req.socket?.remoteAddress ?? '')) return undefined;
+  if (!hostIsLocal(req.headers.host)) return undefined;
+  // TODO: operators who deliberately front the dashboard through a same-host
+  // proxy under another host name need an opt-in allowlist of extra Host names.
+  return nodeOperatorToken(opts.validTokens, opts.resolveAgentByToken);
+}
+
 /**
  * CLI-9 (
  * scrub raw chain-revert payloads from error messages before they

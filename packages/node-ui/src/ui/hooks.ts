@@ -28,7 +28,9 @@ export function useFetch<T>(
             window.location.reload();
             return;
           }
-          setError('Authentication expired — please refresh the page.');
+          setError(hasToken
+            ? 'Authentication expired — please refresh the page.'
+            : 'API token required — enter it at the top of the page.');
           return;
         }
         setError(err.message);

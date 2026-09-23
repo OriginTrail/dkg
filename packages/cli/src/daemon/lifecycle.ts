@@ -349,6 +349,7 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
+  nodeUiTokenForRequest,
   shortId,
   sleep,
   deriveBlockExplorerUrl,
@@ -3714,8 +3715,14 @@ async function runDaemonInnerWithStartupOwnership(
         }
       }
 
-      // Node UI routes (metrics, operations, logs, saved queries, chat, static UI)
-      const firstToken = validTokens.size > 0 ? validTokens.values().next().value as string : undefined;
+      // Node UI routes (metrics, operations, logs, saved queries, chat, static UI).
+      // The dashboard shell is served with the node-operator token only for a
+      // trusted local request (loopback socket and loopback Host).
+      const uiToken = nodeUiTokenForRequest(req, {
+        authEnabled,
+        validTokens,
+        resolveAgentByToken: (token) => agent.resolveAgentByToken(token),
+      });
       // Only inject the relay-stats provider when this node is actually
       // running a relay server. Without this gate, edge nodes always
       // hit the `relayStatsProvider != null` branch in `api.ts` and
@@ -3737,7 +3744,7 @@ async function runDaemonInnerWithStartupOwnership(
       // handler (below) so it only fires after rate-limit, admission, and auth
       // have accepted the request — a rejected/unauthenticated request cannot
       // open the store-metrics gate.
-      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, authEnabled ? firstToken : undefined, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider, () => metricsPresence.mark());
+      const handled = await handleNodeUIRequest(req, res, reqUrl, dashDb, nodeUiStaticDir, undefined, metricsCollector, uiToken, memoryManager, llmSettings, telemetrySettings, resolveCorsOrigin(req, corsAllowed), relayStatsProvider, () => metricsPresence.mark());
       if (handled) return;
 
       await handleRequest({
