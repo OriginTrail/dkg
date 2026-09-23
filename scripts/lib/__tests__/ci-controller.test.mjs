@@ -420,6 +420,9 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   }
   assert.ok(workflow.includes("needs.changes.outputs.contracts == 'true'"));
   assert.equal(parse(workflow).jobs['abi-freshness'].if, "needs.changes.outputs.abi_freshness == 'true'");
+  // The shared build runs on the planner's run_node, passed through unchanged.
+  assert.equal(parse(workflow).jobs.changes.outputs.run_node, '${{ steps.plan.outputs.run_node }}');
+  assert.equal(parse(workflow).jobs.build.if, "needs.changes.outputs.run_node == 'true'");
   assert.ok(
     workflow.includes(
       "if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.contracts == 'true'",
