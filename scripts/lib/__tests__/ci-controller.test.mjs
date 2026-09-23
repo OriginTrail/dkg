@@ -76,6 +76,16 @@ test('plan-ci compares modified workspace manifests through git blobs', (t) => {
   assert.equal(mode({ ...diff(exportsHead), [MANIFEST_READER_ENV.base]: '0'.repeat(40) }), 'full', 'missing blobs fail closed');
 });
 
+// Every CI-policy script a workflow step runs must come from the trusted
+// checkout, however the other checkout is named or the path is spelled.
+function untrustedPolicyRuns(workflowSource) {
+  const { jobs } = parse(workflowSource);
+  return Object.values(jobs).flatMap((job) => job.steps ?? [])
+    .flatMap(({ run = '' }) => [...run.matchAll(/(\S*?)scripts\/ci\/(?:plan-ci|assert-ci-results)\.mjs\b/g)])
+    .filter(([, prefix]) => prefix !== 'trusted-ci/')
+    .map(([reference]) => reference);
+}
+
 test('workflows execute the planner and aggregate gates from one immutable trusted checkout', () => {
   const workflows = new Map([
     ['primary', fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')],
@@ -86,11 +96,17 @@ test('workflows execute the planner and aggregate gates from one immutable trust
     assert.match(TRUSTED_CI_CONTROLLER_SHA, /^[0-9a-f]{40}$/);
     assert.match(workflow, /node trusted-ci\/scripts\/ci\/plan-ci\.mjs\b/);
     assert.match(workflow, /node trusted-ci\/scripts\/ci\/assert-ci-results\.mjs\b/);
-    assert.doesNotMatch(
-      workflow,
-      /node (?:\.\/)?scripts\/ci\/(?:plan-ci|assert-ci-results)\.mjs\b/,
-      `${name} must not execute CI policy from the merge candidate`,
-    );
+    assert.deepEqual(untrustedPolicyRuns(workflow), [], `${name} must not execute CI policy from the merge candidate`);
+  }
+  for (const prefix of ['', './', 'candidate/', '$GITHUB_WORKSPACE/candidate/']) {
+    const tampered = [
+      'jobs:',
+      '  plan:',
+      '    steps:',
+      '      - run: node trusted-ci/scripts/ci/plan-ci.mjs --event push',
+      `      - run: node ${prefix}scripts/ci/plan-ci.mjs --event push`,
+    ].join('\n');
+    assert.deepEqual(untrustedPolicyRuns(tampered), [`${prefix}scripts/ci/plan-ci.mjs`], prefix || '(bare path)');
   }
 
   const controller = validateTrustedControllerPins([
