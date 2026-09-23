@@ -3,6 +3,8 @@
 Profile 10.1.0 adds `updateNodeId(uint72 identityId, bytes nodeId)`, so an
 identity can point its profile `nodeId` at the node's real libp2p peer id.
 Upgraded daemons then fix their own nodeId (see "After the deploy").
+It also bounds every nodeId Profile writes (`createProfile`,
+`recreateProfile` and `updateNodeId`) at `MAX_NODE_ID_LENGTH` = 64 bytes.
 
 Only the **Profile logic contract** changes. `ProfileStorage` (which already has
 `setNodeId`), `ShardingTable` and `ShardingTableStorage` stay as deployed, and
@@ -22,6 +24,21 @@ must be flipped by hand (same as `KA_HIGH_WATER_GETTER_ROLLOUT_RUNBOOK.md`).
 | `base_sepolia_v10` | `0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6` | `0x175f876984802e4e898a47A420ACD0107A5f4a0E` (10.0.2) | 10.0.4 | 10.0.3 |
 | `base_mainnet` | `0x99Aa571fD5e681c2D27ee08A7b7989DB02541d13` | `0x370943487c766633Da68DB4048E57674a7a6c076` (10.0.2) | `0x98B045daeFFDA88741EEa76C18abAecaF14175eF` (10.0.4) | `0xa4F4f1e61f2BE32E92Fd1D07558a3DB5b519D288` (10.0.3) |
 | `gnosis_mainnet` | `0x882D0BF07F956b1b94BBfe9E77F47c6fc7D4EC8f` | `0x370943487c766633Da68DB4048E57674a7a6c076` (10.0.2) | `0x98B045daeFFDA88741EEa76C18abAecaF14175eF` (10.0.4) | `0xa4F4f1e61f2BE32E92Fd1D07558a3DB5b519D288` (10.0.3) |
+
+Existing nodeIds (read 2026-09-24, every identity up to `lastIdentityId`, plus
+the cached nodeId of every ring member):
+
+| Network | Block | Identities | With a profile | Ring | Longest nodeId |
+|---|---|---|---|---|---|
+| `base_sepolia_v10` | 47,217,512 | 18 | 18 | 7 | 32 bytes |
+| `base_mainnet` | 51,706,967 | 65 | 6 (60–65) | 5 | 32 bytes |
+| `gnosis_mainnet` | 48,405,326 | 72 | 11 (62–72) | 11 | 32 bytes |
+
+No nodeId, in ProfileStorage or in the ring cache, is longer than 64 bytes.
+The identities without a profile (1–59 on Base, 1–61 on Gnosis) all have an
+admin key and none is in the ring, so `recreateProfile` lets them choose any
+nodeId up to 64 bytes. A ring member must repeat its cached nodeId in
+`recreateProfile`; step 1 below re-checks that every cached value still fits.
 
 On both mainnets the Hub owner is a classic multisig wallet (not a Safe): it
 has 3 owners, requires 2 confirmations, and executes one call per transaction
@@ -44,13 +61,59 @@ manual path below).
 Run from `packages/evm-module/` with the network's RPC and deploy key
 configured (`RPC_<NETWORK>`, and the key `utils/network.ts` reads for it).
 
-1. Compile:
+1. Re-check that no nodeId is longer than 64 bytes. Profile 10.0.2 stays
+   unbounded until this deploy, so a longer one could have appeared since the
+   read above. Read-only; use the network's `RPC_<NETWORK>` endpoint and Hub
+   (public endpoints throttle bursts of calls):
+
+   ```bash
+   RPC="$RPC_BASE_MAINNET" HUB=0x99Aa571fD5e681c2D27ee08A7b7989DB02541d13 node -e '
+     const { ethers } = require("ethers");
+     (async () => {
+       const provider = new ethers.JsonRpcProvider(process.env.RPC);
+       const hub = new ethers.Contract(process.env.HUB, ["function getContractAddress(string) view returns (address)"], provider);
+       const at = async (name, abi) => new ethers.Contract(await hub.getContractAddress(name), abi, provider);
+       const ids = await at("IdentityStorage", ["function lastIdentityId() view returns (uint72)"]);
+       const ps = await at("ProfileStorage", ["function getNodeId(uint72) view returns (bytes)"]);
+       const sts = await at("ShardingTableStorage", [
+         "function nodesCount() view returns (uint72)",
+         "function indexToIdentityId(uint72) view returns (uint72)",
+         "function getNode(uint72) view returns (tuple(uint256 hashRingPosition, bytes nodeId, uint72 index, uint72 identityId))",
+       ]);
+       const over = [];
+       let longest = 0;
+       const check = (where, id, nodeId) => {
+         const length = ethers.dataLength(nodeId);
+         longest = Math.max(longest, length);
+         if (length > 64) over.push(`${where} ${id}: ${length} bytes`);
+       };
+       const last = await ids.lastIdentityId();
+       for (let id = 1n; id <= last; id++) check("ProfileStorage", id, await ps.getNodeId(id));
+       const count = await sts.nodesCount();
+       for (let i = 0n; i < count; i++) {
+         const id = await sts.indexToIdentityId(i);
+         check("ring cache", id, (await sts.getNode(id)).nodeId);
+       }
+       console.log(`identities ${last}, ring ${count}, longest nodeId ${longest} bytes`);
+       if (over.length > 0) {
+         console.error(over.join("\n"));
+         process.exit(1);
+       }
+     })();
+   '
+   ```
+
+   If it lists anything, stop. A ring member with a longer cached nodeId could
+   no longer `recreateProfile`; it has to `updateNodeId` to a shorter value
+   first, which also refreshes its ring entry.
+
+2. Compile:
 
    ```bash
    npx hardhat compile
    ```
 
-2. Force only `Profile` through the deploy helper (replace `NETWORK`):
+3. Force only `Profile` through the deploy helper (replace `NETWORK`):
 
    ```bash
    NETWORK=base_mainnet node -e '
@@ -66,7 +129,7 @@ configured (`RPC_<NETWORK>`, and the key `utils/network.ts` reads for it).
    '
    ```
 
-3. Deploy:
+4. Deploy:
 
    ```bash
    npx hardhat deploy --network base_mainnet --config hardhat.node.config.ts
@@ -87,7 +150,7 @@ configured (`RPC_<NETWORK>`, and the key `utils/network.ts` reads for it).
      chain. The deploy log prints `Encoded data for parameters settings`;
      that list must be empty, or contain only changes you intend.
 
-4. Verify:
+5. Verify:
 
    ```bash
    PROFILE=<contracts.Profile.evmAddress from the updated registry>
@@ -101,7 +164,7 @@ configured (`RPC_<NETWORK>`, and the key `utils/network.ts` reads for it).
    From any upgraded node on that network, `dkg identity node-id` should report
    `Profile contract: v10.1.0 at <new address>, can update nodeIds`.
 
-5. Commit the post-deploy registry (`deployments/<network>_contracts.json`
+6. Commit the post-deploy registry (`deployments/<network>_contracts.json`
    with the new address, `version: "10.1.0"`, `deployed: true`) in a follow-up
    PR, as for earlier single-contract redeploys.
 
@@ -115,7 +178,7 @@ If the deploy wallet is not one of the multisig's owners:
    owner confirms), call
    `Hub.setAndReinitializeContracts([["Profile", <newProfile>]], [], [<newProfile>], [])`.
    Only the new Profile needs `initialize()`.
-3. Verify as in step 4, then record the address in the registry.
+3. Verify as in step 5, then record the address in the registry.
 
 ## After the deploy
 

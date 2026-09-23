@@ -69,15 +69,18 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
     // daemon used to write random bytes). A node already in the sharding
     // table is re-positioned in the same transaction. Needs the Hub's
     // `ShardingTable`, now resolved in `initialize()`. No storage contract
-    // changes: `ProfileStorage.setNodeId` already exists.
+    // changes: `ProfileStorage.setNodeId` already exists. Every nodeId
+    // Profile writes (`createProfile`, `recreateProfile`, `updateNodeId`)
+    // is now bounded at MAX_NODE_ID_LENGTH bytes.
     string private constant _VERSION = "10.1.0";
 
-    /// @notice Upper bound on a nodeId written through `updateNodeId`. The
-    ///         canonical encoding is the UTF-8 bytes of the base58btc libp2p
-    ///         peer id string (V6/V8 compatible): 46 bytes for RSA/ECDSA
-    ///         (sha256 multihash), 52 for Ed25519, 53 for secp256k1, and at
-    ///         most 61 for any identity-multihash key (<= 42-byte key). The
-    ///         legacy random nodeIds are 32 bytes. 64 bounds the bytes every
+    /// @notice Upper bound on every nodeId Profile writes: `createProfile`,
+    ///         `recreateProfile` and `updateNodeId`. The canonical encoding is
+    ///         the UTF-8 bytes of the base58btc libp2p peer id string (V6/V8
+    ///         compatible): 46 bytes for RSA/ECDSA (sha256 multihash), 52 for
+    ///         Ed25519, 53 for secp256k1, and at most 61 for any
+    ///         identity-multihash key (<= 42-byte key). The legacy random
+    ///         nodeIds are 32 bytes. 64 bounds the bytes every
     ///         `ShardingTable.getShardingTable()` reader downloads per node.
     uint256 public constant MAX_NODE_ID_LENGTH = 64;
 
@@ -188,9 +191,7 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
         if (ps.isNameTaken(nodeName)) {
             revert ProfileLib.NodeNameAlreadyExists(nodeName);
         }
-        if (nodeId.length == 0) {
-            revert ProfileLib.EmptyNodeId();
-        }
+        _checkNodeIdLength(nodeId);
         if (ps.nodeIdsList(nodeId)) {
             revert ProfileLib.NodeIdAlreadyExists(nodeId);
         }
@@ -280,9 +281,10 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
         if (ps.isNameTaken(nodeName)) {
             revert ProfileLib.NodeNameAlreadyExists(nodeName);
         }
-        if (nodeId.length == 0) {
-            revert ProfileLib.EmptyNodeId();
-        }
+        // A ring member must repeat its cached nodeId (checked above), so the
+        // bound assumes every cached nodeId fits. It did on every live network
+        // when 10.1.0 was written: all nodeIds were 32 bytes.
+        _checkNodeIdLength(nodeId);
         if (ps.nodeIdsList(nodeId)) {
             revert ProfileLib.NodeIdAlreadyExists(nodeId);
         }
@@ -499,12 +501,7 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
         if (currentNodeId.length == 0) {
             revert ProfileLib.ProfileDoesntExist(identityId);
         }
-        if (nodeId.length == 0) {
-            revert ProfileLib.EmptyNodeId();
-        }
-        if (nodeId.length > MAX_NODE_ID_LENGTH) {
-            revert ProfileLib.NodeIdTooLong(nodeId.length, MAX_NODE_ID_LENGTH);
-        }
+        _checkNodeIdLength(nodeId);
         if (keccak256(nodeId) == keccak256(currentNodeId)) {
             return;
         }
@@ -519,6 +516,19 @@ contract Profile is INamed, IVersioned, ContractStatus, IInitializable {
             st.insertNode(identityId);
         } else {
             ps.setNodeId(identityId, nodeId);
+        }
+    }
+
+    /// @dev The nodeId rule shared by every write path (createProfile,
+    ///      recreateProfile, updateNodeId): non-empty and at most
+    ///      MAX_NODE_ID_LENGTH bytes. Uniqueness stays with each caller,
+    ///      because updateNodeId treats the identity's own value as a no-op.
+    function _checkNodeIdLength(bytes calldata nodeId) internal pure {
+        if (nodeId.length == 0) {
+            revert ProfileLib.EmptyNodeId();
+        }
+        if (nodeId.length > MAX_NODE_ID_LENGTH) {
+            revert ProfileLib.NodeIdTooLong(nodeId.length, MAX_NODE_ID_LENGTH);
         }
     }
 
