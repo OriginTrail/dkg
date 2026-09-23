@@ -152,7 +152,11 @@ const PINNED_DIGESTS: Record<string, string> = {
   // ContextGraphEscrowSwept + deposit accounting on ContextGraphs/ContextGraphStorage;
   // +contextGraphRegistrationDeposit getter/setter on ParametersStorage. Chain-local
   // ABIs refreshed in lockstep with evm-module/abi.
-  KnowledgeAssetsLifecycle:     '409efa6a580e3d374c0f53c70cd21dd6e78cd904b2f103edc9737803f0829820',
+  // Re-pinned (vendored ABI sync): the chain-local copy had fallen behind
+  // evm-module/abi; +errors `CannotWriteValueToInactiveContextGraph(uint256)` /
+  // `PublicKARequiresMerkleLeafCount(uint256)`. vendored-abi-sync.unit.test.ts
+  // now holds every vendored ABI byte-equal to its evm-module counterpart.
+  KnowledgeAssetsLifecycle:     '1b1a65084d29618cc77e34e7ebe086a384a01ff9ea98438901b01b8daa699ac6',
 
   // Re-pinned for OT-RFC-43 Option-1 (variant 1a, PR #975): deterministic
   // author-namespaced KA identity. `createKnowledgeAsset` now takes an explicit
@@ -188,7 +192,9 @@ const PINNED_DIGESTS: Record<string, string> = {
   // Merged surface: OT-RFC-53 deposit events/functions + main's KC→KA getter
   // rename (getContextGraphKCCount/At/List → getContextGraphKaCount/At/List).
   // Digests recomputed post-merge from the combined ABI.
-  ContextGraphs:                '54583e20167c37f4356247cb6bc657b0dccf6f17f99a3267427674a35a151bcf',
+  // Re-pinned (vendored ABI sync): +event
+  // `ContextGraphRegistrationDepositWaived(uint256,uint256,address)` from evm-module/abi.
+  ContextGraphs:                'c39fb7faf81da5f26782c80d53da2686d63e94fd3db419acb99f5b46b35d3cf8',
   // Repinned: decoupled sampling list (10.0.6). Adds getSamplingKaCount/At
   // (the compacted per-CG list the within-CG draw + keeper use) alongside the
   // RandomSampling-gated `swapRemoveSamplingKnowledgeAssetAt` pruning primitive
@@ -221,7 +227,10 @@ const PINNED_DIGESTS: Record<string, string> = {
   //
   // Updated PR #1083: added `ZeroShardingTableSizeLimit()` for the
   // governance guard that rejects `setShardingTableSizeLimit(0)`.
-  ParametersStorage:            'da6f8b6435f709e02d3730d04d79abe9a2ed27e04ad1a1d058ba00ebccc82aa9',
+  //
+  // Re-pinned (vendored ABI sync): +`minPcaCommitmentForCgWaiver()` getter and
+  // `setMinPcaCommitmentForCgWaiver(uint96)` setter from evm-module/abi.
+  ParametersStorage:            '2cc0ce9f09d974dfd15375c430052d14f6f29f3446c5b8906a68ab71eb476317',
   // Added PR #470 round 3: pin the V10 NFT-backed PCA contract so that
   // any drift in its events (CostCovered / WindowSettled /
   // AccountFinalSwept / TokensAddedToEpochRange consumers) or errors
@@ -244,8 +253,8 @@ const PINNED_DIGESTS: Record<string, string> = {
   // pins below capture all three surfaces; chain consumers MUST load
   // both `DKGPublishingConvictionNFT` (for ERC-721 + forwarders) and
   // `PublishingConviction` (for PCA event/error decoding) — see
-  // `getPcaLogicInterface` in `evm-adapter.ts` and the
-  // `ERROR_ABI_CONTRACTS` list update in the same file. This
+  // `getPcaLogicInterface` in `evm-adapter-errors.ts`, whose error decoder
+  // reads every vendored ABI. This
   // intentional break is documented as the v2.x → v3.0.0 wrapper
   // bump in the wrapper NatSpec.
   //
