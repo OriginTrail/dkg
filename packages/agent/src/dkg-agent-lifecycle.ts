@@ -278,7 +278,8 @@ import {
   type CiphertextChunkCatchupRequest,
   type CiphertextChunkCatchupResponse,
 } from './swm/ciphertext-chunk-catchup.js';
-import { toLibp2pPeerId, waitForPeerProtocol } from './p2p/protocol-readiness.js';
+import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
+import { toLibp2pPeerId } from './p2p/peer-id.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import {

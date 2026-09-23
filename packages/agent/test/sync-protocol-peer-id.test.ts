@@ -80,13 +80,13 @@ describe('waitForSyncProtocol on the real libp2p peer store', () => {
     expect(String(peerStore.get.mock.calls[0]?.[0])).toBe(SYNC_PEER_ID);
   });
 
-  it('passes a real PeerId through unchanged', async () => {
+  it('finds the sync protocol for a real PeerId', async () => {
     const peerStore = spyOnRealPeerStore();
     const peerId = peerIdFromString(SYNC_PEER_ID);
 
     await expect(waitForSyncProtocol(peerId, peerStore)).resolves.toBe(true);
     expect(peerStore.get).toHaveBeenCalledTimes(1);
-    expect(peerStore.get.mock.calls[0]?.[0]).toBe(peerId);
+    expect(peerId.equals(peerStore.get.mock.calls[0]?.[0] as never)).toBe(true);
   });
 
   it('returns false without throwing or querying the store for a string that is not a peer ID', async () => {

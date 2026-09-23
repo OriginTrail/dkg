@@ -213,6 +213,7 @@ import {
   type CiphertextChunkCatchupResponse,
 } from './swm/ciphertext-chunk-catchup.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
+import { toLibp2pPeerId } from './p2p/peer-id.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
@@ -1208,8 +1209,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    * known path in the real libp2p API, which would make this
    * predicate return false for peers we DO have cached addresses
    * for — dropping legitimate substrate targets. We parse with
-   * `peerIdFromString` first; on parse failure (malformed
-   * gossipsub entry) the catch returns false (safe drop).
+   * `toLibp2pPeerId` first; on parse failure (malformed
+   * gossipsub entry) we fall back to the connected-peer check.
    *
    * Pre-start: if libp2p hasn't booted, `getPeers()` throws →
    * caught → return false → substrate target set is empty →
@@ -1234,11 +1235,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       // "connected ⇒ dialable" semantics for them so existing
       // integration tests that stub gossip subscribers with
       // these short ids keep working.
-      const { peerIdFromString } = await import('@libp2p/peer-id');
-      let pid: ReturnType<typeof peerIdFromString>;
-      try {
-        pid = peerIdFromString(peerId);
-      } catch {
+      const pid = toLibp2pPeerId(peerId);
+      if (pid === undefined) {
         return this.node.libp2p.getPeers().some((p) => p.toString() === peerId);
       }
 
