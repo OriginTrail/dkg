@@ -78,7 +78,12 @@ const EXPLICIT_CONNECT_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
   probeRetrySuppression: 'bypass',
 };
 
-const DEFAULT_PREFLIGHT_CONCURRENCY = 4;
+/**
+ * Most identity probes one admission caller keeps in flight: the ceiling of a
+ * preflight round, and the bound the catch-up connected-peer filter
+ * (`DKGAgent.listAdmittedConnectedPeers`) probes with.
+ */
+export const MAX_IDENTITY_PROBE_CONCURRENCY = 4;
 
 export interface NetworkIdentityProtocolRegistrar {
   register(protocolId: string, handler: (data: Uint8Array) => Promise<Uint8Array>): void;
@@ -302,9 +307,9 @@ export class NetworkAdmissionCoordinator {
       .filter((peerId) => !this.isAcceptedPeer(peerId) && !this.isRejectedPeer(peerId));
     if (pending.length === 0) return { checked: 0, admitted: 0, unresolved: 0 };
 
-    const requestedConcurrency = options.maxConcurrency ?? DEFAULT_PREFLIGHT_CONCURRENCY;
+    const requestedConcurrency = options.maxConcurrency ?? MAX_IDENTITY_PROBE_CONCURRENCY;
     const maxConcurrency = Number.isInteger(requestedConcurrency) && requestedConcurrency > 0
-      ? Math.min(requestedConcurrency, DEFAULT_PREFLIGHT_CONCURRENCY)
+      ? Math.min(requestedConcurrency, MAX_IDENTITY_PROBE_CONCURRENCY)
       : 1;
     const results = await mapWithConcurrencySettled(
       pending,

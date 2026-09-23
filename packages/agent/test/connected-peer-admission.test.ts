@@ -3,6 +3,7 @@ import { createOperationContext } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { MAX_IDENTITY_PROBE_CONCURRENCY } from '../src/p2p/network-admission-coordinator.js';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const PEER_B = '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw';
@@ -38,7 +39,7 @@ describe('listAdmittedConnectedPeers', () => {
     ]);
   });
 
-  it('probes independent peers concurrently, at most four at a time', async () => {
+  it('probes independent peers concurrently, bounded by the coordinator\'s identity-probe limit', async () => {
     const peerIds = Array.from({ length: 10 }, (_, index) => `peer-${index}`);
     let inFlight = 0;
     let maxInFlight = 0;
@@ -53,7 +54,9 @@ describe('listAdmittedConnectedPeers', () => {
       },
     });
 
-    expect(maxInFlight).toBe(4);
+    // One shared bound with the coordinator's preflight ceiling, not a copy.
+    expect(MAX_IDENTITY_PROBE_CONCURRENCY).toBe(4);
+    expect(maxInFlight).toBe(MAX_IDENTITY_PROBE_CONCURRENCY);
     expect(admitted.map(String)).toEqual(peerIds.filter((peerId) => peerId !== 'peer-3'));
   });
 

@@ -218,6 +218,7 @@ import { resolveOutboxDrainerOptions } from './p2p/outbox-drainer.js';
 import { createSingleUseSyncSender } from './p2p/sync-transport.js';
 import { NetworkAdmissionService } from './p2p/network-admission.js';
 import {
+  MAX_IDENTITY_PROBE_CONCURRENCY,
   NetworkAdmissionCoordinator,
   NetworkAdmissionRejectedError,
 } from './p2p/network-admission-coordinator.js';
@@ -524,12 +525,6 @@ function rehydratedSubscriptionReachedSafeState(
 // scan and then waiting for an unrelated periodic reconciler. The cap is a
 // hard safety bound; the no-progress guard below is the normal termination.
 const MAX_POST_APPROVAL_CURATOR_SYNC_ROUNDS = 64;
-/**
- * Identity probes in flight while filtering connected catch-up peers. Matches
- * the coordinator's preflight bound, so catch-up cannot fan out more identity
- * streams than an ACK round does.
- */
-const CONNECTED_PEER_ADMISSION_CONCURRENCY = 4;
 /** A recovery owner stops starting new assets after this scheduling quantum. */
 const DURABLE_RECOVERY_SETTLEMENT_SLICE_TIMEOUT_MS = 120_000;
 /** Hard fault ceiling: maximum-size transfer plus local settlement headroom. */
@@ -8025,7 +8020,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     ).values()];
     const admitted = await mapWithConcurrency(
       connectedPeers,
-      CONNECTED_PEER_ADMISSION_CONCURRENCY,
+      MAX_IDENTITY_PROBE_CONCURRENCY,
       (peer) => this.ensurePeerAdmittedForRecovery(peer.toString(), ctx, 'Connected catchup peer'),
     );
     return connectedPeers.filter((_peer, index) => admitted[index]);
