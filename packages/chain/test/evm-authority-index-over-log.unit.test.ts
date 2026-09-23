@@ -1019,6 +1019,32 @@ describe('Context Graph authority index over the one log', () => {
       expect(calls.getLogs).toBe(0);
     });
 
+    it('lets a bounded peek fall back to the provider when the local revision moved',
+      async () => {
+        const store = seededStore({ head: retainedHead });
+        const original = logSource(store);
+        let current: ChainEventLogAuthoritySource | undefined = original;
+        const { reader, calls } = makeReader({
+          store,
+          sourceProvider: () => current,
+        });
+        expect(await reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).toBe(7n);
+
+        const moved = vi.fn(async () => false);
+        current = { ...original, anchorHolds: moved };
+        expect(await reader.peekContextGraphLiveAuthority(7n)).toEqual({
+          active: true,
+          accessPolicy: 1,
+          participantAgents: [OWNER],
+        });
+
+        // The provider confirms the anchor, so the retained fold is served:
+        // one block read, never a rescan.
+        expect(moved).toHaveBeenCalledTimes(1);
+        expect(calls.getBlock).toBe(1);
+        expect(calls.getLogs).toBe(0);
+      });
+
     it('honours caller abort after the peek local proof await without provider fallback',
       async () => {
         const store = seededStore({ head: retainedHead });
