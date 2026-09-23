@@ -1,5 +1,9 @@
 import { ethers } from 'ethers';
-import type { ChainAdapter, KnowledgeAssetVersionSnapshot } from './chain-adapter.js';
+import {
+  ContextGraphLiveAuthorityUnsupportedError,
+  type ChainAdapter,
+  type KnowledgeAssetVersionSnapshot,
+} from './chain-adapter.js';
 
 export type PublicFinalizedMaterializationAuthorityUnavailableReason =
   | 'capability-unavailable'
@@ -58,6 +62,58 @@ function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
  * materializers consume one typed decision and never reproduce Solidity
  * default-value, root-version, or temporal-coherence rules.
  */
+/**
+ * The public-CG gate: `active` AND `accessPolicy === 0`, from ONE read.
+ *
+ * The two point reads this replaces are correct — the caller pairs them, so
+ * the default-zero hazard on `getAccessPolicy` (no `_requireExists`, a
+ * nonexistent id reads back as PUBLIC) is already covered by checking `active`
+ * first. What they are not is COHERENT: issued as two `latest` calls they can
+ * land either side of a block, so a graph deactivated between them is read as
+ * active with a policy from after it stopped being one. `getContextGraph`
+ * answers both from a single tuple at a single block, so the pair cannot
+ * straddle, and it costs one billed request instead of two.
+ *
+ * A `null` resolution means the chain PROVED the id nonexistent. The adapter
+ * contract says callers must treat that exactly as a liveness probe returning
+ * `false` — terminal, never retried — so it is reported here as an inactive
+ * graph, which is the same verdict the point reads reach.
+ *
+ * Only a DETERMINISTIC failure of the single read falls back. A transient one
+ * rejects with the transport's own error and is not silently retried as three
+ * more requests, which would turn provider trouble into extra load.
+ */
+async function resolvePublicContextGraphGateV1(
+  chain: ChainAdapter,
+  onChainContextGraphId: bigint,
+): Promise<Readonly<{ active: boolean; accessPolicy: number }>> {
+  const oneRead = chain.getContextGraphLiveAuthority;
+  if (oneRead !== undefined) {
+    try {
+      const authority = await oneRead.call(chain, onChainContextGraphId);
+      return authority === null
+        ? Object.freeze({ active: false, accessPolicy: 0 })
+        : Object.freeze({
+          active: authority.active,
+          accessPolicy: authority.accessPolicy,
+        });
+    } catch (error) {
+      // Name check as well as `instanceof`: the adapter's own definitive-error
+      // predicate does the same, because a rebuilt module realm can carry a
+      // structurally identical class that fails the prototype test.
+      const deterministic = error instanceof ContextGraphLiveAuthorityUnsupportedError
+        || (error instanceof Error
+          && error.name === 'ContextGraphLiveAuthorityUnsupportedError');
+      if (!deterministic) throw error;
+    }
+  }
+  const [active, accessPolicy] = await Promise.all([
+    chain.isContextGraphActiveOnChain!(onChainContextGraphId),
+    chain.getContextGraphAccessPolicy!(onChainContextGraphId),
+  ]);
+  return Object.freeze({ active, accessPolicy });
+}
+
 export async function resolvePublicFinalizedMaterializationAuthority(
   request: PublicFinalizedMaterializationAuthorityRequest,
 ): Promise<PublicFinalizedMaterializationAuthorityResult> {
@@ -93,13 +149,12 @@ export async function resolvePublicFinalizedMaterializationAuthority(
     const rootCountBeforeRead = request.versionSnapshot
       ? Promise.resolve<bigint | undefined>(undefined)
       : chain.getMerkleRootCount!(request.kaId);
-    const [active, accessPolicy, legacyRootCountBefore] = await Promise.all([
-      chain.isContextGraphActiveOnChain(onChainContextGraphId),
-      chain.getContextGraphAccessPolicy(onChainContextGraphId),
+    const [gate, legacyRootCountBefore] = await Promise.all([
+      resolvePublicContextGraphGateV1(chain, onChainContextGraphId),
       rootCountBeforeRead,
     ]);
-    if (!active) return { kind: 'unavailable', reason: 'inactive-context-graph' };
-    if (accessPolicy !== 0) {
+    if (!gate.active) return { kind: 'unavailable', reason: 'inactive-context-graph' };
+    if (gate.accessPolicy !== 0) {
       return { kind: 'unavailable', reason: 'non-public-context-graph' };
     }
 
