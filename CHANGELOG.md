@@ -75,8 +75,13 @@ All notable changes to the DKG V10 node are documented here. The format is based
   30 minutes (10 after a failure), and a graph whose owner a complete Core
   phonebook lacks stops asking for 6 hours. Recovery for the graphs whose
   owner now resolves is re-scheduled at once. Curated graphs never trigger
-  the fetch. A node that already syncs `agents` on every connect (Cores,
-  or `DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT=1`) skips it. The kill switch
+  the fetch. In this mode the catch-up connection-priming walk, which dialled
+  every relay-advertising profile in the phonebook, now dials at most eight
+  new peers per walk, Cores first. With the whole phonebook present, the
+  unbounded walk made hundreds of relay dials per minute on Base mainnet.
+  A node that already syncs `agents` on every connect (Cores,
+  or `DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT=1`) skips the fetch and keeps
+  the unbounded walk. The kill switch
   is `onDemandAgentsPhonebook: false`, or `DKG_ON_DEMAND_AGENTS_PHONEBOOK=0`,
   which wins over config.
 - **Warm-core pinning (`DKG_WARM_CORE_CONNECTIONS=1`) no longer pins a

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { peerIdFromString } from '@libp2p/peer-id';
+import { generateKeyPair } from '@libp2p/crypto/keys';
+import { peerIdFromPrivateKey, peerIdFromString } from '@libp2p/peer-id';
 import { parseMultiaddrConnectTarget } from '../src/p2p/multiaddr-peer-target.js';
 import {
   connectToMultiaddr,
@@ -174,6 +175,44 @@ describe('primeCatchupConnections', () => {
     expect(merge.calls).toHaveLength(2);
     expect(dial.calls).toHaveLength(2);
     expect(admissionCalls).toEqual([foreignPeer, eligiblePeer]);
+  });
+
+  it('caps new dials, Cores first in a stable order, without counting skipped peers', async () => {
+    const relayAddress = '/ip4/203.0.113.7/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
+    const ids = await Promise.all(Array.from({ length: 6 }, async () => (
+      peerIdFromPrivateKey(await generateKeyPair('Ed25519')).toString()
+    )));
+    const [edgeA, edgeB, edgeC, coreA, coreB, connected] = ids as [string, string, string, string, string, string];
+    const dial = recorder(async (peer: { toString(): string }) => { void peer; });
+    const merge = recorder(async () => undefined);
+    const agents = [
+      { peerId: edgeA, relayAddress, nodeRole: 'edge' },
+      { peerId: 'self-peer', relayAddress, nodeRole: 'core' },
+      { peerId: connected, relayAddress, nodeRole: 'core' },
+      { peerId: edgeB, relayAddress, nodeRole: 'edge' },
+      { peerId: coreB, relayAddress, nodeRole: 'core' },
+      { peerId: edgeC, nodeRole: 'edge' },
+      { peerId: coreA, relayAddress, nodeRole: 'core' },
+    ];
+
+    await primeCatchupConnections({
+      getConnections: () => [{ remotePeer: { toString: () => connected } }],
+      dial,
+      peerStore: { merge },
+    }, { findAgents: async () => agents } as any, 'self-peer', undefined, { maxDials: 3 });
+
+    const cores = [coreA, coreB].sort();
+    const edges = [edgeA, edgeB].sort();
+    expect(dial.calls.map(([peer]) => peer.toString())).toEqual([...cores, edges[0]]);
+
+    // Omitted cap: today's unbounded walk in discovery order.
+    const unbounded = recorder(async (peer: { toString(): string }) => { void peer; });
+    await primeCatchupConnections({
+      getConnections: () => [{ remotePeer: { toString: () => connected } }],
+      dial: unbounded,
+      peerStore: { merge },
+    }, { findAgents: async () => agents } as any, 'self-peer');
+    expect(unbounded.calls.map(([peer]) => peer.toString())).toEqual([edgeA, edgeB, coreB, coreA]);
   });
 });
 

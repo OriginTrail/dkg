@@ -95,6 +95,15 @@ export const AGENTS_PHONEBOOK_NO_PEER_MAX_RETRIES = 20;
 export const AGENTS_PHONEBOOK_POLICY_VERDICT_TTL_MS = 30 * 60_000;
 /** Bound for every per-graph map this module keeps. */
 export const AGENTS_PHONEBOOK_STATE_MAX_ENTRIES = 1_024;
+/**
+ * New dials one catch-up connection-priming walk may attempt on a node in
+ * on-demand mode. Such a node ends up holding every relay-advertising profile
+ * (1,910 on Base mainnet in September 2026), and the unbounded walk dialled
+ * 150-500 relay circuits per minute there, against about 6 per minute on an
+ * Edge without the phonebook. Catch-up peers still come from admitted
+ * connections and the curator tier.
+ */
+export const AGENTS_PHONEBOOK_PRIME_MAX_DIALS = 8;
 
 export interface AgentsPhonebookCandidatePeer {
   readonly peerId: string;

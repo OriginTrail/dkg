@@ -10,11 +10,14 @@
  * fail on a build without it.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { generateKeyPair } from '@libp2p/crypto/keys';
+import { peerIdFromPrivateKey } from '@libp2p/peer-id';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
 import type { DurableSyncResult } from '../src/dkg-agent-types.js';
 import { DKGAgent } from '../src/index.js';
 import { buildAgentProfile } from '../src/profile.js';
+import { AGENTS_PHONEBOOK_PRIME_MAX_DIALS } from '../src/sync/on-demand-agents-phonebook.js';
 import { createVmRecoveryHostHarness } from './_helpers/vm-recovery-host.js';
 
 const OWNER = '0x64529c023d853371228923B4FdA5FB22F929bf51';
@@ -427,6 +430,38 @@ describe('on-demand agents phonebook on a fresh Edge', () => {
     expect(await edge.agent.readAgentsPhonebookAccessPolicy(CG, signal)).toBe('unknown');
     read.mockRejectedValueOnce(new Error('rpc down'));
     expect(await edge.agent.readAgentsPhonebookAccessPolicy(CG, signal)).toBe('unknown');
+  });
+
+  it('caps the catch-up connection-priming walk in on-demand mode only', async () => {
+    const edge = await createFreshEdge('PhonebookPrimeCap');
+    agents.push(edge.agent);
+    // A fetched phonebook: many relay-advertising profiles, a few Cores.
+    const profiles = await Promise.all(Array.from({ length: 20 }, async (_, index) => ({
+      agentUri: `did:dkg:agent:prime-${index}`,
+      name: `prime-${index}`,
+      peerId: peerIdFromPrivateKey(await generateKeyPair('Ed25519')).toString(),
+      nodeRole: index % 5 === 0 ? 'core' : 'edge',
+      relayAddress: RELAY,
+    })));
+    vi.spyOn(edge.agent.discovery, 'findAgents').mockResolvedValue(profiles);
+    const dial = vi.fn(async (_peer: { toString(): string }) => undefined);
+    edge.internals.node.libp2p.dial = dial;
+    edge.internals.node.libp2p.peerStore = { merge: vi.fn(async () => undefined) };
+    vi.spyOn(edge.internals.networkAdmissionCoordinator, 'ensureAdmitted').mockResolvedValue(true);
+
+    await edge.agent.primeCatchupConnections();
+    const coreIds = profiles.filter(({ nodeRole }) => nodeRole === 'core')
+      .map(({ peerId }) => peerId)
+      .sort();
+    expect(dial).toHaveBeenCalledTimes(AGENTS_PHONEBOOK_PRIME_MAX_DIALS);
+    expect(dial.mock.calls.slice(0, coreIds.length).map(([peer]) => peer.toString())).toEqual(coreIds);
+
+    // Nodes that sync the phonebook on every connect, and the kill switch,
+    // keep today's walk.
+    edge.internals.onDemandAgentsPhonebookEnabled = () => false;
+    dial.mockClear();
+    await edge.agent.primeCatchupConnections();
+    expect(dial).toHaveBeenCalledTimes(profiles.length);
   });
 
   it('re-scheduling clears the suppression that would otherwise delay the new curator', async () => {

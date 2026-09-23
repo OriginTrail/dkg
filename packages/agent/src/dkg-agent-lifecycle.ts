@@ -606,7 +606,10 @@ import {
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { peekFinalizedAuthorityColdResolution } from
   './finalized-authority-cold-resolution.js';
-import { peekOnDemandAgentsPhonebook } from './sync/on-demand-agents-phonebook.js';
+import {
+  AGENTS_PHONEBOOK_PRIME_MAX_DIALS,
+  peekOnDemandAgentsPhonebook,
+} from './sync/on-demand-agents-phonebook.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -8639,6 +8642,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       async (peerId) => {
         await this.networkAdmissionCoordinator.ensureAdmitted(peerId, ctx);
       },
+      // An on-demand phonebook holds every relay-advertising profile; walking
+      // all of them on each catch-up is a dial storm. Nodes that sync the
+      // phonebook on every connect (and the kill switch) keep today's walk.
+      this.onDemandAgentsPhonebookEnabled()
+        ? { maxDials: AGENTS_PHONEBOOK_PRIME_MAX_DIALS }
+        : {},
     );
   }
 
