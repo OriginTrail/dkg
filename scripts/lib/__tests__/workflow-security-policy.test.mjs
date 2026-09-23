@@ -27,7 +27,7 @@ import {
 } from '../../ci/validate-delta-rollout-ruleset.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-const CONTROLLER_SHA = 'a53dde2192b2c8f7e30c64543b83cf26773a1f89';
+const CONTROLLER_SHA = '4aca346d4818eb63e661c6028a4e2c1cbea2bd92';
 
 function rulesetDetail(id, overrides = {}) {
   return {

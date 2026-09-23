@@ -26,7 +26,7 @@ import { importSpecifiers } from './load-graph.mjs';
 // This SHA is already reachable from the protected default branch. Candidate
 // changes may update workflow wiring, but the planner and aggregate gates must
 // continue to execute only reviewed policy from this immutable controller.
-const TRUSTED_CI_CONTROLLER_SHA = 'a53dde2192b2c8f7e30c64543b83cf26773a1f89';
+const TRUSTED_CI_CONTROLLER_SHA = '4aca346d4818eb63e661c6028a4e2c1cbea2bd92';
 
 test('plan-ci compares modified workspace manifests through git blobs', (t) => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-ci-manifest-'));
