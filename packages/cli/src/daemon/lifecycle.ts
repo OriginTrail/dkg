@@ -200,15 +200,12 @@ export {
 } from './chain-discovery-scan.js';
 import { createDaemonLocalLlmService } from './local-llm-service.js';
 import { appendBoundedDaemonLogDiagnostic } from './daemon-log-diagnostics.js';
+import { createTelemetrySettings } from './telemetry-runtime.js';
 import {
-  createTelemetrySettings,
-  createTelemetryRuntime,
-} from './telemetry-runtime.js';
-import {
-  persistLlmSettings,
-  persistSharedMemoryTtl,
-  persistTelemetryEnabled,
-} from './settings-persistence.js';
+  applySharedMemoryTtl,
+  createDaemonTelemetryRuntime,
+  createLlmSettings,
+} from './runtime-settings.js';
 import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { handleRpcUsageSnapshotRequest } from './rpc-usage-snapshot-route.js';
@@ -3119,9 +3116,8 @@ async function runDaemonInnerWithStartupOwnership(
     log,
   });
 
-  const telemetryRuntime = createTelemetryRuntime({
+  const telemetryRuntime = createDaemonTelemetryRuntime({
     config,
-    persist: persistTelemetryEnabled,
     signals: telemetrySignals,
     onBootStartFailure: (error) => {
       // Boot remains best-effort per signal: a failed log shipper must not
@@ -3460,23 +3456,7 @@ async function runDaemonInnerWithStartupOwnership(
   if (config.llm) log('Memory enrichment LLM ready');
   else log('Memory enrichment LLM not configured');
 
-  const llmSettings = {
-    getLlm: () => config.llm,
-    setLlm: async (
-      llm: { apiKey: string; model?: string; baseURL?: string } | null,
-    ) => {
-      if (llm) {
-        config.llm = llm;
-        memoryManager.updateConfig(llm);
-        log("LLM config updated via settings");
-      } else {
-        delete config.llm;
-        memoryManager.updateConfig({ apiKey: '' });
-        log('LLM config cleared via settings');
-      }
-      await persistLlmSettings(llm);
-    },
-  };
+  const llmSettings = createLlmSettings({ config, memoryManager, log });
 
   const telemetrySettings = createTelemetrySettings(telemetryRuntime);
 
@@ -3803,10 +3783,7 @@ async function runDaemonInnerWithStartupOwnership(
             });
           }
           const ttlMs = Math.round(ttlDays * 24 * 60 * 60 * 1000);
-          config.sharedMemoryTtlMs = ttlMs;
-          config.workspaceTtlMs = ttlMs;
-          agent.setSharedMemoryTtlMs(ttlMs);
-          await persistSharedMemoryTtl(ttlMs);
+          await applySharedMemoryTtl({ config, agent }, ttlMs);
           return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
         } catch (err: any) {
           if (err instanceof PayloadTooLargeError) throw err;

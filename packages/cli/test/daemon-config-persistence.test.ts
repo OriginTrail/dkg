@@ -2,16 +2,16 @@ import { EventEmitter } from 'node:events';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DkgConfig } from '../src/config.js';
 import { connectLocalAgentIntegration, persistLocalAgentIntegration } from '../src/daemon/local-agents.js';
 import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 import {
-  persistLlmSettings,
-  persistSharedMemoryTtl,
-  persistTelemetryEnabled,
-} from '../src/daemon/settings-persistence.js';
+  applySharedMemoryTtl,
+  createDaemonTelemetryRuntime,
+  createLlmSettings,
+} from '../src/daemon/runtime-settings.js';
 
 // The daemon keeps the config it loaded at boot in memory. Each of its writes
 // patches only the keys that setting or integration owns, so an edit another
@@ -76,16 +76,20 @@ function jsonResponse() {
   return res;
 }
 
-describe('daemon settings writes', () => {
-  it('persists the telemetry gate and keeps the other telemetry settings', async () => {
+describe('daemon runtime settings', () => {
+  it('switches telemetry on and persists only the master gate', async () => {
     await fileEditedAfterBoot({
       name: 'node',
       contextGraphs: ['saved-by-cli'],
       telemetry: { enabled: false, logs: { exporter: 'otlp', endpoint: 'http://localhost:4318/v1/logs' } },
     });
+    const signals = { start: vi.fn(async () => ({ ok: true as const })), stop: vi.fn(async () => {}) };
+    const runtime = createDaemonTelemetryRuntime({ config: bootConfig(), signals });
 
-    await persistTelemetryEnabled(bootConfig({ telemetry: { enabled: true } }));
+    await expect(runtime.setEnabled(true)).resolves.toEqual({ ok: true });
 
+    expect(signals.start).toHaveBeenCalledTimes(1);
+    expect(runtime.isEnabled()).toBe(true);
     expect(await readFileConfig()).toEqual({
       name: 'node',
       contextGraphs: ['saved-by-cli'],
@@ -93,22 +97,33 @@ describe('daemon settings writes', () => {
     });
   });
 
-  it('persists the LLM settings and removes them when cleared', async () => {
+  it('applies the LLM settings, persists them, and removes them when cleared', async () => {
+    const config = bootConfig();
     await fileEditedAfterBoot({ name: 'node', contextGraphs: ['saved-by-cli'] });
+    const memoryManager = { updateConfig: vi.fn() };
+    const settings = createLlmSettings({ config, memoryManager, log: () => {} });
     const llm = { apiKey: 'key', model: 'model' };
 
-    await persistLlmSettings(llm);
+    await settings.setLlm(llm);
+    expect(settings.getLlm()).toEqual(llm);
+    expect(memoryManager.updateConfig).toHaveBeenLastCalledWith(llm);
     expect(await readFileConfig()).toEqual({ name: 'node', contextGraphs: ['saved-by-cli'], llm });
 
-    await persistLlmSettings(null);
+    await settings.setLlm(null);
+    expect(settings.getLlm()).toBeUndefined();
+    expect(memoryManager.updateConfig).toHaveBeenLastCalledWith({ apiKey: '' });
     expect(await readFileConfig()).toEqual({ name: 'node', contextGraphs: ['saved-by-cli'] });
   });
 
-  it('persists the shared memory TTL under its current and legacy keys', async () => {
+  it('applies the shared memory TTL to the agent and persists it under its current and legacy keys', async () => {
+    const config = bootConfig();
     await fileEditedAfterBoot({ name: 'node', contextGraphs: ['saved-by-cli'] });
+    const agent = { setSharedMemoryTtlMs: vi.fn() };
 
-    await persistSharedMemoryTtl(86_400_000);
+    await applySharedMemoryTtl({ config, agent }, 86_400_000);
 
+    expect(agent.setSharedMemoryTtlMs).toHaveBeenCalledWith(86_400_000);
+    expect(config).toMatchObject({ sharedMemoryTtlMs: 86_400_000, workspaceTtlMs: 86_400_000 });
     expect(await readFileConfig()).toEqual({
       name: 'node',
       contextGraphs: ['saved-by-cli'],
