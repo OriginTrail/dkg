@@ -298,6 +298,13 @@ jobs:
           pnpm release:build-info --dist-tag ci --commit "${GITHUB_SHA}" --ci-run "${GITHUB_RUN_ID}"
           pnpm release:verify-pack
 
+      # The controller wiring test checks this workflow's planner flags against
+      # the pinned controller's parser, which a depth-1 checkout does not hold.
+      - name: Fetch the pinned CI controller revision
+        run: |
+          set -euo pipefail
+          pin="$(grep -m1 -oE 'ref: [0-9a-f]{40}' .github/workflows/ci.yml | cut -d' ' -f2)"
+          git fetch --no-tags --depth=1 origin "${pin}"
       - name: Test repository scripts
         run: pnpm run test:scripts
       - name: Verify every test has an execution route

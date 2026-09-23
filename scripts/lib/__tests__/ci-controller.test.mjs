@@ -129,7 +129,7 @@ test('workflows execute the planner and aggregate gates from one immutable trust
   );
 });
 
-test('workflow controller invocations stay within the current and pinned parsers', (t) => {
+test('workflow controller invocations stay within the current and pinned parsers', () => {
   // Until a rotation lands, workflows run the pinned controller with this
   // branch's wiring; afterwards they run the current one. Both strict parsers
   // must accept every flag, and the manifest reader inputs must be exported
@@ -142,13 +142,15 @@ test('workflow controller invocations stay within the current and pinned parsers
     script,
     parserOptions(fs.readFileSync(path.join(REPO_ROOT, `scripts/ci/${script}.mjs`), 'utf8')),
   ]));
+  // The build job fetches the pinned revision before running this suite; a
+  // missing revision fails rather than silently skipping the pinned half.
   let pinned;
   try {
     pinned = Object.fromEntries(scripts.map((script) => [script, parserOptions(execFileSync('git', [
       '-C', REPO_ROOT, 'cat-file', 'blob', `${TRUSTED_CI_CONTROLLER_SHA}:scripts/ci/${script}.mjs`,
     ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }))]));
   } catch {
-    t.diagnostic('pinned controller revision is not in this checkout; checked the current parsers only');
+    assert.fail(`pinned controller ${TRUSTED_CI_CONTROLLER_SHA} is not in this checkout; run: git fetch --depth=1 origin ${TRUSTED_CI_CONTROLLER_SHA}`);
   }
 
   let invocations = 0;
@@ -166,7 +168,7 @@ test('workflow controller invocations stay within the current and pinned parsers
         }
         for (const [, flag] of command.join('\n').matchAll(/(?:^|\s)--([a-z][a-z-]*)/g)) {
           assert.ok(current[script].has(flag), `${name} passes --${flag}, which the current ${script}.mjs rejects`);
-          if (pinned) assert.ok(pinned[script].has(flag), `${name} passes --${flag}, which the pinned ${script}.mjs rejects`);
+          assert.ok(pinned[script].has(flag), `${name} passes --${flag}, which the pinned ${script}.mjs rejects`);
         }
         if (script === 'plan-ci') {
           const exported = run.indexOf(`export ${MANIFEST_READER_ENV.repository}=candidate`);
