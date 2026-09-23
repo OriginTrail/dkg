@@ -6,10 +6,31 @@ import {
   type HermesLocalAgentIntegrationPayload,
 } from './types.js';
 
+/** Deadline for registry and health reads and quick writes. */
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+/**
+ * Deadline for a whole Hermes agent turn (`send`, and `stream` including its
+ * body). The daemon waits up to 15 minutes for the agent
+ * (`HERMES_CHANNEL_RESPONSE_TIMEOUT_MS` in packages/cli/src/daemon/hermes.ts)
+ * and answers 504 itself after that; the margin lets that answer arrive
+ * instead of a client-side abort. A streamed turn gets the whole window. A
+ * `send` answers only when the turn ends, and Node's default fetch stops
+ * waiting for response headers after 300 s, so a longer `send` needs a
+ * `fetchImpl` whose dispatcher allows it.
+ */
+const TURN_TIMEOUT_MS = 15 * 60_000 + 30_000;
+
 export interface HermesDkgClientOptions {
   baseUrl?: string;
   apiToken?: string;
+  /** Deadline in ms for registry/health reads and quick writes (default 30 000). */
   timeoutMs?: number;
+  /**
+   * Deadline in ms for a whole agent turn (`sendHermesMessage`,
+   * `streamHermesMessage`); default 15.5 minutes, never below `timeoutMs`.
+   */
+  turnTimeoutMs?: number;
   fetchImpl?: typeof fetch;
 }
 
@@ -17,12 +38,14 @@ export class HermesDkgClient {
   readonly baseUrl: string;
   private readonly apiToken: string | undefined;
   private readonly timeoutMs: number;
+  private readonly turnTimeoutMs: number;
   private readonly fetchImpl: typeof fetch;
 
   constructor(options: HermesDkgClientOptions = {}) {
     this.baseUrl = stripTrailingSlashes(options.baseUrl ?? 'http://127.0.0.1:9200');
     this.apiToken = options.apiToken;
-    this.timeoutMs = options.timeoutMs ?? 10_000;
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.turnTimeoutMs = Math.max(options.turnTimeoutMs ?? TURN_TIMEOUT_MS, this.timeoutMs);
     this.fetchImpl = options.fetchImpl ?? fetch;
   }
 
@@ -91,7 +114,7 @@ export class HermesDkgClient {
   }
 
   async sendHermesMessage(payload: HermesChannelSendPayload): Promise<HermesChannelSendResponse> {
-    return this.post('/api/hermes-channel/send', payload);
+    return this.post('/api/hermes-channel/send', payload, this.turnTimeoutMs);
   }
 
   async persistHermesTurn(payload: HermesChannelPersistTurnPayload): Promise<{ ok?: boolean; turnId?: string }> {
@@ -110,7 +133,7 @@ export class HermesDkgClient {
         ...this.authHeaders(),
       },
       body: JSON.stringify(payload),
-    });
+    }, this.turnTimeoutMs);
     if (!response.body) return;
 
     const reader = response.body.getReader();
@@ -134,7 +157,7 @@ export class HermesDkgClient {
     return response.json() as Promise<T>;
   }
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
+  private async post<T>(path: string, body: unknown, timeoutMs = this.timeoutMs): Promise<T> {
     const response = await this.request(path, {
       method: 'POST',
       headers: {
@@ -143,7 +166,7 @@ export class HermesDkgClient {
         ...this.authHeaders(),
       },
       body: JSON.stringify(body),
-    });
+    }, timeoutMs);
     return response.json() as Promise<T>;
   }
 
@@ -160,10 +183,10 @@ export class HermesDkgClient {
     return response.json() as Promise<T>;
   }
 
-  private async request(path: string, init: RequestInit): Promise<Response> {
+  private async request(path: string, init: RequestInit, timeoutMs = this.timeoutMs): Promise<Response> {
     const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
       ...init,
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     if (!response.ok) {
       const body = await response.text().catch(() => '');

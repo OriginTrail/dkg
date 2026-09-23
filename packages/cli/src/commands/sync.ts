@@ -108,7 +108,7 @@ const syncCmd = program
 
 syncCmd
   .command('catchup-status <context-graph>')
-  .description('Show latest background catch-up status for a context graph')
+  .description('Show latest background catch-up status for a context graph (id, name hash or on-chain id, e.g. 32)')
   .option('--watch', 'Poll until the catch-up job reaches a terminal state')
   .option('--interval <seconds>', 'Polling interval for --watch', '2')
   .action(async (contextGraph: string, opts: CatchupStatusCommandOptions) => {

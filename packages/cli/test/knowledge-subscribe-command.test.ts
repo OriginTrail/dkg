@@ -135,6 +135,74 @@ describe('knowledge subscribe CLI sync lifetime', () => {
     expect(configMocks.file).toEqual({ name: 'node', contextGraphs: [nameHash] });
   });
 
+  // Gnosis-mainnet Context Graph #32 (2026-09-23): `dkg subscribe 32 --save`
+  // printed "Subscribed to context graph: 32" and saved the number.
+  const gnosisHash = '0xf6b06a3e98104aa0d565134e073c157ebc23fa39aad068c62f73d72551fed956';
+
+  it('saves the graph an on-chain id resolved to, never the number, replacing only the spelling typed', async () => {
+    configMocks.file = { name: 'node', contextGraphs: ['32', '#32', 'other-cg'] };
+    const onChainMessage = 'On-chain Context Graph #32 is Context Graph 0xf6b06a3e…d956 (its on-chain name hash).';
+    const identityMessage = 'Context Graph 0xf6b06a3e…d956 is known only by its on-chain name hash; '
+      + 'waiting for a peer to reveal the cleartext id, or subscribe with the cleartext id.';
+    const subscribeToContextGraph = vi.fn().mockResolvedValue({
+      subscribed: gnosisHash,
+      syncMode: 'always-on',
+      catchup: { status: 'queued', includeWorkspace: true, jobId: 'job-3' },
+      identity: { state: 'name-hash-only', nameHash: gnosisHash, onChainId: '32', message: identityMessage },
+      onChainReference: { onChainId: '32', message: onChainMessage },
+    });
+    vi.spyOn(ApiClient, 'connect').mockResolvedValue({ subscribeToContextGraph } as unknown as ApiClient);
+
+    await commandProgram().parseAsync(['node', 'dkg', 'subscribe', '#32', '--save']);
+
+    expect(subscribeToContextGraph).toHaveBeenCalledWith('#32', { syncMode: 'always-on', forceCatchup: false });
+    const output = logLines.join('\n');
+    expect(output).toContain(`Subscribed to context graph: ${gnosisHash}`);
+    expect(output).toContain(`Note: ${onChainMessage}`);
+    expect(output).toContain(`Note: ${identityMessage}`);
+    expect(output).toContain(`Replaced "#32" in config.contextGraphs with ${gnosisHash}.`);
+    // A bare "32" may name a different graph: it stays, with a hint.
+    expect(output).toContain(
+      'Note: config.contextGraphs also lists "32"; if it was saved for on-chain Context Graph #32, you can remove it.',
+    );
+    expect(output).toContain(`Saved ${gnosisHash} to config`);
+    expect(configMocks.file).toEqual({ name: 'node', contextGraphs: ['32', 'other-cg', gnosisHash] });
+  });
+
+  it('replaces a saved number typed the same way, and leaves unrelated entries without a note', async () => {
+    configMocks.file = { name: 'node', contextGraphs: ['32', 'other-cg'] };
+    const subscribeToContextGraph = vi.fn().mockResolvedValue({
+      subscribed: gnosisHash,
+      syncMode: 'always-on',
+      onChainReference: { onChainId: '32', message: 'On-chain Context Graph #32 is Context Graph 0xf6b06a3e…d956.' },
+    });
+    vi.spyOn(ApiClient, 'connect').mockResolvedValue({ subscribeToContextGraph } as unknown as ApiClient);
+
+    await commandProgram().parseAsync(['node', 'dkg', 'subscribe', '32', '--save']);
+
+    const output = logLines.join('\n');
+    expect(output).toContain(`Replaced "32" in config.contextGraphs with ${gnosisHash}.`);
+    expect(output).not.toContain('also lists');
+    expect(configMocks.file).toEqual({ name: 'node', contextGraphs: ['other-cg', gnosisHash] });
+  });
+
+  it('saves the verified cleartext id when the node already knew the graph an on-chain id names', async () => {
+    const subscribeToContextGraph = vi.fn().mockResolvedValue({
+      subscribed: 'gnosis-fun-facts',
+      syncMode: 'always-on',
+      onChainReference: {
+        onChainId: '32',
+        message: 'On-chain Context Graph #32 is "gnosis-fun-facts" (verified against its on-chain name hash).',
+      },
+    });
+    vi.spyOn(ApiClient, 'connect').mockResolvedValue({ subscribeToContextGraph } as unknown as ApiClient);
+
+    await commandProgram().parseAsync(['node', 'dkg', 'subscribe', '32', '--save']);
+
+    expect(logLines.join('\n')).toContain('Subscribed to context graph: gnosis-fun-facts');
+    expect(configMocks.file).toEqual({ name: 'node', contextGraphs: ['gnosis-fun-facts'] });
+  });
+
   it('subscribes and saves the verified cleartext id when the daemon resolved the hash', async () => {
     const subscribeToContextGraph = vi.fn().mockResolvedValue({
       subscribed: 'acme-fun-facts',

@@ -49,6 +49,8 @@ import {
   type StorageAckTiming,
 } from '@origintrail-official/dkg-publisher';
 import {
+  DEFAULT_REPLENISH_TARGET_ALLOWANCE,
+  DEFAULT_REPLENISH_TARGET_MULTIPLE,
   resolveRpcRequestGovernorPolicy,
   resolveContextGraphAuthorityIndexTickMs,
   resolveFinalityConfirmations,
@@ -306,25 +308,47 @@ export interface ApprovalPolicyConfig {
    *   - `per-publish` — approve exactly each publish's TRAC cost (with the
    *     on-chain `1n` floor). Cheapest blast radius, most approve-gas at
    *     scale. Backward-compatible.
-   *   - `replenishing` — approve a configurable ceiling (default 1000 TRAC),
-   *     refill when allowance drops below `target × refillBelowFraction`
-   *     (default 10%). One approve per ~9 publishes' worth of TRAC.
-   *     **Recommended for mainnet.**
+   *   - `replenishing` — approve a ceiling sized relative to this publish's
+   *     cost (`targetAllowanceMultiple`, default 20×), refill when allowance
+   *     drops below `target × refillBelowFraction` (default 10%). At the
+   *     defaults that is one approve per 19 publishes of comparable cost,
+   *     at any publish price. **Recommended for mainnet.**
    *   - `unlimited` — approve `MaxUint256` once per wallet, never again.
    *     Lowest gas, widest blast radius. Use only if you trust the V10 KA
    *     contract absolutely.
    */
   mode?: ApprovalPolicyMode;
   /**
-   * `replenishing` only. TRAC amount (decimal wei-TRAC string — `1000 *
-   * 10^18 = '1000000000000000000000'` for 1000 TRAC) to approve up to.
-   * Defaults to `'1000000000000000000000'` (1000 TRAC).
+   * `replenishing` only. ABSOLUTE ceiling as a decimal wei-TRAC string
+   * (`1000 * 10^18 = '1000000000000000000000'` for 1000 TRAC).
+   *
+   * **Overrides `targetAllowanceMultiple` when set.** Unset (the default)
+   * means the ceiling is derived from each publish's cost. Set this when
+   * you want standing exposure bounded by an absolute TRAC figure rather
+   * than by a multiple of whatever the triggering publish happened to
+   * cost — the derived ceiling tracks the most expensive recent publish,
+   * so a single outlier raises it.
    */
   targetAllowance?: string;
   /**
+   * `replenishing` only. Ceiling multiplier over the publish cost, used
+   * when no absolute `targetAllowance` is set: the adapter approves
+   * `publishCost × targetAllowanceMultiple`. Integer >= 1; defaults to
+   * `20`. Rejected at startup if it is anything else.
+   *
+   * Sizing relative to cost avoids a flat ceiling being simultaneously too
+   * large for a small node (blast radius) and too small for a busy one
+   * (constant re-approving), and needs no config change when TRAC prices
+   * move. Pair with `refillBelowFraction`: approves are amortised over
+   * roughly `multiple × (1 - refillBelowFraction) + 1` publishes of
+   * comparable cost — 19 at the defaults.
+   */
+  targetAllowanceMultiple?: number;
+  /**
    * `replenishing` only. Refill when current allowance drops below
-   * `targetAllowance × refillBelowFraction`. Float between 0 and 1.
-   * Defaults to `0.1` (refill at 10% remaining).
+   * `target × refillBelowFraction`, where `target` is the absolute
+   * `targetAllowance` or the derived `cost × targetAllowanceMultiple`.
+   * Float between 0 and 1. Defaults to `0.1` (refill at 10% remaining).
    */
   refillBelowFraction?: number;
 }
@@ -1358,9 +1382,10 @@ export function resolveSharedMemoryTtlMs(config: DkgConfig): number | undefined 
  *   the chain adapter fall back to its built-in default
  *   (`DEFAULT_APPROVAL_POLICY`, currently `per-publish`).
  * - Throws a descriptive `Error` if the operator supplied an unparseable
- *   `targetAllowance` (e.g. `'one thousand TRAC'`). Fails fast at startup
- *   rather than silently falling back — config bugs are easier to find
- *   when they don't lurk for hours.
+ *   `targetAllowance` (e.g. `'one thousand TRAC'`), an out-of-range
+ *   `refillBelowFraction`, or a `targetAllowanceMultiple` that isn't an
+ *   integer >= 1. Fails fast at startup rather than silently falling back
+ *   — config bugs are easier to find when they don't lurk for hours.
  */
 export function resolveApprovalPolicy(
   policy: ApprovalPolicyConfig | undefined,
@@ -1387,6 +1412,24 @@ export function resolveApprovalPolicy(
       );
     }
   }
+  // A multiple below 1 would put the derived ceiling under the publish
+  // floor on every call: the adapter's floor clamp would fire every time
+  // and `replenishing` would silently behave as `per-publish` — the
+  // operator's chosen mode quietly cancelled, visible only as an approve
+  // tx per publish on the gas bill. Throw rather than clamp, matching
+  // `finalityConfirmations` ("must be an integer >= 1") and the two
+  // sibling fields here, which all reject rather than repair.
+  if (policy.targetAllowanceMultiple !== undefined) {
+    if (
+      typeof policy.targetAllowanceMultiple !== 'number'
+      || !Number.isSafeInteger(policy.targetAllowanceMultiple)
+      || policy.targetAllowanceMultiple < 1
+    ) {
+      throw new Error(
+        `chain.approvalPolicy.targetAllowanceMultiple must be an integer >= 1 (got: ${JSON.stringify(policy.targetAllowanceMultiple)})`,
+      );
+    }
+  }
   if (policy.refillBelowFraction !== undefined) {
     if (
       typeof policy.refillBelowFraction !== 'number'
@@ -1402,8 +1445,35 @@ export function resolveApprovalPolicy(
   return {
     mode,
     targetAllowance,
+    targetAllowanceMultiple: policy.targetAllowanceMultiple,
     refillBelowFraction: policy.refillBelowFraction,
   };
+}
+
+/**
+ * Operator-visible migration warning for the one replenishing-policy shape
+ * whose meaning changed when relative sizing replaced the flat 1000 TRAC
+ * default. An explicit absolute target preserves the legacy ceiling; an
+ * explicit multiple opts into the new relative ceiling.
+ */
+export function approvalPolicyMigrationWarning(
+  policy: ApprovalPolicyConfig | undefined,
+): string | undefined {
+  if (
+    policy?.mode !== 'replenishing'
+    || policy.targetAllowance !== undefined
+    || policy.targetAllowanceMultiple !== undefined
+  ) {
+    return undefined;
+  }
+  const legacyTrac = DEFAULT_REPLENISH_TARGET_ALLOWANCE / (10n ** 18n);
+  return (
+    '[warn] chain.approvalPolicy mode=replenishing has no targetAllowance or '
+    + `targetAllowanceMultiple, so it now approves ${DEFAULT_REPLENISH_TARGET_MULTIPLE}x `
+    + `the triggering publish cost instead of the legacy flat ${legacyTrac.toString()} TRAC `
+    + 'ceiling. Set chain.approvalPolicy.targetAllowance explicitly to retain a flat ceiling, '
+    + 'or targetAllowanceMultiple to keep relative sizing.'
+  );
 }
 
 /**

@@ -53,7 +53,7 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     return this.requestBrowserWalletRpc(method, params);
   }
 
-  protected publisherConvictionPlanReader(): PublisherConvictionPlanReader {
+  protected override publisherConvictionPlanReader(): PublisherConvictionPlanReader {
     return {
       getAccountId: (publisherAddress) => withRpcRequestTimeout(
         RPC_READ_STALL_TIMEOUT_MS,
