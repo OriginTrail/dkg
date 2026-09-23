@@ -5,7 +5,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { replaceFileDurably } from '../src/durable-file-replace.js';
+import { directoryFsyncSupported, replaceFileDurably } from '../src/durable-file-replace.js';
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
@@ -164,6 +164,13 @@ describe('replaceFileDurably', () => {
 
     await expect(replaceFileDurably(target, 'new', { platform: 'linux' })).rejects.toMatchObject({ code: 'EPERM' });
     expect(rename).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a directory fsync as unsupported only on Windows, by default on this platform', () => {
+    expect(directoryFsyncSupported('win32')).toBe(false);
+    expect(directoryFsyncSupported('linux')).toBe(true);
+    expect(directoryFsyncSupported('darwin')).toBe(true);
+    expect(directoryFsyncSupported()).toBe(process.platform !== 'win32');
   });
 
   it('flushes the directory after the rename, except on Windows', async () => {

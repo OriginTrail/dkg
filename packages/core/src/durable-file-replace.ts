@@ -79,11 +79,17 @@ async function renameWithRetry(from: string, to: string, platform: NodeJS.Platfo
 }
 
 /**
- * Same policy as the agent's RFC-64 `fsyncRfc64DirectoryV1`, which that
- * package keeps internal: Windows cannot flush a directory handle.
+ * Whether a directory can be fsynced on `platform`. Node cannot
+ * FlushFileBuffers on a Windows directory handle, so a directory fsync is
+ * skipped there. This is the one definition of that rule: the atomic replace
+ * here and the agent's RFC-64 durable stores both use it.
  */
+export function directoryFsyncSupported(platform: NodeJS.Platform = process.platform): boolean {
+  return platform !== 'win32';
+}
+
 async function fsyncDirectory(path: string, platform: NodeJS.Platform): Promise<void> {
-  if (platform === 'win32') return;
+  if (!directoryFsyncSupported(platform)) return;
   const handle = await open(path, constants.O_RDONLY);
   try {
     await handle.sync();

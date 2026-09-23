@@ -351,6 +351,7 @@ export {
   type EnsureDkgNodeConfigResult,
 } from './ensure-dkg-node-config.js';
 export { withFileLock, type FileLockOptions } from './file-lock.js';
+export { directoryFsyncSupported } from './durable-file-replace.js';
 export {
   homeConfigFilePath,
   homeConfigLockPath,
