@@ -219,6 +219,19 @@ export type {
   ContextGraphListOnChainFacts,
   ListContextGraphsRow,
 } from './context-graph-list-authority-enrichment.js';
+export {
+  describeContextGraphOnChainIdResolution,
+  parseContextGraphOnChainIdReference,
+  refusesPrivateContextGraphByOnChainId,
+  type ContextGraphIdAsGiven,
+  type ContextGraphOnChainIdLookup,
+  type ContextGraphOnChainIdReference,
+  type ContextGraphOnChainIdRefusal,
+  type ContextGraphOnChainIdResolution,
+  type ResolveContextGraphOnChainIdOptions,
+  type ResolvedContextGraphOnChainId,
+  type RetiredNumericContextGraphSubscription,
+} from './context-graph-on-chain-reference.js';
 export type {
   ConfiguredContextGraphMetadataReconciliationDiagnostic,
   ConfiguredContextGraphMetadataReconciliationResult,

@@ -115,7 +115,8 @@ describe('context graph list formatting', () => {
 
     expect(lines.slice(-2)).toEqual([
       '  6 context graph(s): 2 public, 2 private',
-      '  3 known only by on-chain name hash (Name —). A public one can be subscribed by its ID (`dkg subscribe <ID>`); the node then resolves and verifies its name.',
+      '  3 known only by on-chain name hash (Name —). A public one can be subscribed by its ID or its '
+        + 'on-chain number (`dkg subscribe <ID>` or `dkg subscribe <n>`); the node then resolves and verifies its name.',
     ]);
   });
 

@@ -598,6 +598,28 @@ export interface OnChainContextGraphObservation {
 }
 
 /**
+ * One ContextGraphStorage entry as an observation at the block it was read
+ * at. Every storage lane maps it here: the enumeration pass, the checkpoint
+ * hydration and the on-demand read of a single id.
+ */
+export function contextGraphStorageObservation(
+  entry: ContextGraphStorageEntry,
+  blockNumber: number,
+): OnChainContextGraphObservation {
+  return {
+    contextGraphId: entry.contextGraphId,
+    owner: entry.owner,
+    accessPolicy: entry.accessPolicy,
+    publishPolicy: entry.publishPolicy,
+    publishAuthority: entry.publishAuthority,
+    nameHash: entry.nameHash,
+    blockNumber,
+    createdAt: entry.createdAt,
+    active: entry.active,
+  };
+}
+
+/**
  * Chain-public facts for one on-chain Context Graph, merged from every
  * observation the node made: the live `ContextGraphCreated` event and
  * ContextGraphStorage enumeration. Null means "not observed yet", never zero.

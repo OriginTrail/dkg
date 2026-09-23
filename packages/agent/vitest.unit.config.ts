@@ -105,6 +105,8 @@ export default defineConfig({
       "test/context-graph-name-hash-subscription.integration.test.ts",
       "test/context-graph-storage-discovery.test.ts",
       "test/context-graph-storage-discovery-agent.test.ts",
+      "test/context-graph-on-chain-reference.test.ts",
+      "test/context-graph-on-chain-id-resolution.test.ts",
       "test/vm-reconcile-peer-topology.test.ts",
       "test/swm-late-joiner-deferred-gossip.test.ts",
       "test/swm-plaintext-oracle-wiring.test.ts",

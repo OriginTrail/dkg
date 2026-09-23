@@ -41,6 +41,7 @@ import type {
   CatchupContextGraphIdentity,
   CatchupStatusResponse,
   CatchupStatusWireResponse,
+  ContextGraphOnChainReferenceNote,
 } from './catchup-status.js';
 import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
 import type { PublicQueryResult } from '@origintrail-official/dkg-core';
@@ -1844,6 +1845,8 @@ export class ApiClient {
       };
     /** Present when the requested id is (or was) known only by its on-chain name hash. */
     identity?: CatchupContextGraphIdentity;
+    /** Present when the request named an on-chain id (`32`, `#32`): what it resolved to. */
+    onChainReference?: ContextGraphOnChainReferenceNote;
   }> {
     return this.post('/api/context-graph/subscribe', {
       contextGraphId,
