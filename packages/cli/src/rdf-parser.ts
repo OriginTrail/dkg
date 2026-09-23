@@ -1,4 +1,5 @@
 import { Parser, type Quad as N3Quad } from 'n3';
+import { formatCanonicalRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 
 export interface SimpleQuad {
   subject: string;
@@ -95,11 +96,16 @@ export async function parseRdf(
 
 function termToString(term: { termType: string; value: string; language?: string; datatype?: { value: string } }): string {
   if (term.termType === 'Literal') {
-    if (term.language) return `"${term.value}"@${term.language}`;
-    if (term.datatype && term.datatype.value !== 'http://www.w3.org/2001/XMLSchema#string') {
-      return `"${term.value}"^^<${term.datatype.value}>`;
+    // The parser returns the unescaped lexical value. Re-escape it, in the
+    // canonical form the store returns, or a `"`, `\` or line break in the
+    // value breaks the store write.
+    if (term.language) {
+      return formatCanonicalRdfLiteralTerm({ kind: 'language', value: term.value, language: term.language });
     }
-    return `"${term.value}"`;
+    if (term.datatype) {
+      return formatCanonicalRdfLiteralTerm({ kind: 'typed', value: term.value, datatype: term.datatype.value });
+    }
+    return formatCanonicalRdfLiteralTerm({ kind: 'plain', value: term.value });
   }
   if (term.termType === 'BlankNode') return `_:${term.value}`;
   return term.value;

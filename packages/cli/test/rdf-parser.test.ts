@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { Parser } from 'n3';
+import { assertSafeRdfTerm } from '@origintrail-official/dkg-core';
 import { detectFormat, supportedExtensions, parseRdf } from '../src/rdf-parser.js';
 
 describe('detectFormat', () => {
@@ -154,6 +156,44 @@ describe('parseRdf', () => {
       const nt = '_:b0 <urn:p> "val" .';
       const quads = await parseRdf(nt, 'ntriples', DEFAULT_GRAPH);
       expect(quads[0].subject).toContain('_:');
+    });
+
+    it('escapes quotes, backslashes and line breaks in literal values', async () => {
+      const ttl = [
+        '@prefix ex: <urn:ex:> .',
+        'ex:s ex:quote "say \\"hi\\"" ;',
+        '  ex:path "C:\\\\new\\\\table" ;',
+        '  ex:multi """line one',
+        'line two\r""" ;',
+        '  ex:lang "a \\"b\\""@en ;',
+        '  ex:typed "x\\ny"^^<urn:dt> .',
+      ].join('\n');
+      const quads = await parseRdf(ttl, 'turtle', DEFAULT_GRAPH);
+      expect(quads.map((q) => q.object)).toEqual([
+        '"say \\"hi\\""',
+        // Unescaped, `\n` and `\t` would read back as a newline and a tab.
+        '"C:\\\\new\\\\table"',
+        '"line one\\nline two\\r"',
+        '"a \\"b\\""@en',
+        '"x\\ny"^^<urn:dt>',
+      ]);
+    });
+
+    it('produces literals that read back as the original values', async () => {
+      const values = ['plain', 'say "hi"', 'C:\\new\\table', 'one\ntwo\r\n', 'tab\there', 'café Δ 😀', '\u0001bell\u007f'];
+      const nt = values.map((value, i) => `<urn:s> <urn:p${i}> ${JSON.stringify(value)} .`).join('\n');
+      const quads = await parseRdf(nt, 'ntriples', DEFAULT_GRAPH);
+      const reparsed = new Parser({ format: 'N-Triples' }).parse(
+        quads.map((q) => `<${q.subject}> <${q.predicate}> ${q.object} .`).join('\n'),
+      );
+      expect(reparsed.map((q) => q.object.value)).toEqual(values);
+    });
+
+    it('produces literals the storage layer accepts as SPARQL terms', async () => {
+      const ttl = '<urn:s> <urn:p> """a "quoted" \\\\ value\nacross lines"""@en , "tab\\there" .';
+      const quads = await parseRdf(ttl, 'turtle', DEFAULT_GRAPH);
+      expect(quads).toHaveLength(2);
+      for (const quad of quads) expect(() => assertSafeRdfTerm(quad.object)).not.toThrow();
     });
   });
 });

@@ -59,6 +59,12 @@ All notable changes to the DKG V10 node are documented here. The format is based
   newer version replaces the held copy once it is in VM, or at once when the
   chain has already moved past it. SWM gossip of a newer version waits (the
   sender keeps it queued) until the owed copy is promoted.
+- **`dkg knowledge-asset create/write --input-file` keeps literal values
+  intact**: the RDF file importer wrapped each parsed literal in quotes without
+  re-escaping it. A value containing a `"` or a line break made the write fail
+  (`SPARQL HTTP insert failed (400)`), and a backslash sequence such as the
+  `\n` in `C:\new` was stored as a newline. Imported literals are now written
+  in the canonical escaped form the store returns.
 - **Random Sampling resolves the challenged Context Graph by its chain name
   commitment when local history contains multiple names for one numeric ID**:
   proof extraction no longer selects an arbitrary first ontology row, which

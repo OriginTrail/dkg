@@ -708,6 +708,9 @@ importers:
       '@origintrail-official/dkg-publisher':
         specifier: workspace:*
         version: link:../publisher
+      '@origintrail-official/dkg-rdf-utils':
+        specifier: workspace:*
+        version: link:../rdf-utils
       '@origintrail-official/dkg-storage':
         specifier: workspace:*
         version: link:../storage
