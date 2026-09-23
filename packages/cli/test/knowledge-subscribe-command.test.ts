@@ -137,7 +137,7 @@ describe('knowledge subscribe CLI sync lifetime', () => {
   // printed "Subscribed to context graph: 32" and saved the number.
   const gnosisHash = '0xf6b06a3e98104aa0d565134e073c157ebc23fa39aad068c62f73d72551fed956';
 
-  it('saves the graph an on-chain id resolved to, never the number, replacing a saved number', async () => {
+  it('saves the graph an on-chain id resolved to, never the number, replacing only the spelling typed', async () => {
     configMocks.loadConfig.mockResolvedValueOnce({ contextGraphs: ['32', '#32', 'other-cg'] });
     const onChainMessage = 'On-chain Context Graph #32 is Context Graph 0xf6b06a3e…d956 (its on-chain name hash).';
     const identityMessage = 'Context Graph 0xf6b06a3e…d956 is known only by its on-chain name hash; '
@@ -158,7 +158,31 @@ describe('knowledge subscribe CLI sync lifetime', () => {
     expect(output).toContain(`Subscribed to context graph: ${gnosisHash}`);
     expect(output).toContain(`Note: ${onChainMessage}`);
     expect(output).toContain(`Note: ${identityMessage}`);
+    expect(output).toContain(`Replaced "#32" in config.contextGraphs with ${gnosisHash}.`);
+    // A bare "32" may name a different graph: it stays, with a hint.
+    expect(output).toContain(
+      'Note: config.contextGraphs also lists "32"; if it was saved for on-chain Context Graph #32, you can remove it.',
+    );
     expect(output).toContain(`Saved ${gnosisHash} to config`);
+    expect(configMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphs: ['32', 'other-cg', gnosisHash],
+    }));
+  });
+
+  it('replaces a saved number typed the same way, and leaves unrelated entries without a note', async () => {
+    configMocks.loadConfig.mockResolvedValueOnce({ contextGraphs: ['32', 'other-cg'] });
+    const subscribeToContextGraph = vi.fn().mockResolvedValue({
+      subscribed: gnosisHash,
+      syncMode: 'always-on',
+      onChainReference: { onChainId: '32', message: 'On-chain Context Graph #32 is Context Graph 0xf6b06a3e…d956.' },
+    });
+    vi.spyOn(ApiClient, 'connect').mockResolvedValue({ subscribeToContextGraph } as unknown as ApiClient);
+
+    await commandProgram().parseAsync(['node', 'dkg', 'subscribe', '32', '--save']);
+
+    const output = logLines.join('\n');
+    expect(output).toContain(`Replaced "32" in config.contextGraphs with ${gnosisHash}.`);
+    expect(output).not.toContain('also lists');
     expect(configMocks.saveConfig).toHaveBeenCalledWith(expect.objectContaining({
       contextGraphs: ['other-cg', gnosisHash],
     }));

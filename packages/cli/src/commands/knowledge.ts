@@ -379,11 +379,21 @@ program
         const config = await loadConfig();
         const cgs = new Set(resolveContextGraphs(config));
         // Save a stable identity (the verified cleartext id, or the name hash
-        // the daemon re-resolves at start), never the on-chain number, and
-        // replace an entry that saved the number before.
+        // the daemon re-resolves at start), never the on-chain number. Only
+        // the entry spelled exactly as just typed is replaced: another
+        // spelling of the number may name a different graph, so it stays.
         if (onChainReference) {
-          cgs.delete(onChainReference.onChainId);
-          cgs.delete(`#${onChainReference.onChainId}`);
+          if (subscribedId !== contextGraph && cgs.delete(contextGraph)) {
+            console.log(`Replaced "${contextGraph}" in config.contextGraphs with ${subscribedId}.`);
+          }
+          const onChainId = onChainReference.onChainId;
+          for (const spelling of [onChainId, `#${onChainId}`]) {
+            if (spelling === contextGraph || !cgs.has(spelling)) continue;
+            console.log(
+              `Note: config.contextGraphs also lists "${spelling}"; if it was saved for on-chain `
+              + `Context Graph #${onChainId}, you can remove it.`,
+            );
+          }
         }
         cgs.add(subscribedId);
         config.contextGraphs = [...cgs];
