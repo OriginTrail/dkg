@@ -443,6 +443,10 @@ import {
   type ListContextGraphsRow,
 } from './context-graph-list-authority-enrichment.js';
 import {
+  toContextGraphListOnChainFacts,
+  type OnChainContextGraphFacts,
+} from './context-graph-storage-discovery.js';
+import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
 } from '@origintrail-official/dkg-chain';
@@ -503,7 +507,88 @@ function isPrivateContextGraphListRow(accessPolicy?: string): boolean {
   return contextGraphListRowPrivacy(accessPolicy) === 'private';
 }
 
+/**
+ * The agent state the list annotation reads. A structural, read-only view so
+ * the listing stays callable on the lightweight agents its tests build.
+ */
+interface ContextGraphListChainView {
+  readonly subscribedContextGraphs?: ReadonlyMap<string, { onChainHash?: string }>;
+  readonly wireIdToLocalCgId?: ReadonlyMap<string, string>;
+  readonly onChainContextGraphFacts?: ReadonlyMap<string, OnChainContextGraphFacts>;
+}
+
+function contextGraphListChainView(agent: DKGAgent): ContextGraphListChainView {
+  return agent as unknown as ContextGraphListChainView;
+}
+
+/**
+ * True for a row the node knows only by its on-chain name hash: the local id
+ * is the committed wire id itself, with no cleartext behind it. This is the
+ * canonical subscription setter's placeholder predicate (the row claims that
+ * exact `onChainHash` and the reverse index points at it), so a user-chosen
+ * cleartext id that merely looks like a hash never matches.
+ */
+function isWireOnlyContextGraphListRow(agent: DKGAgent, contextGraphId: string): boolean {
+  if (!/^0x[0-9a-f]{64}$/.test(contextGraphId)) return false;
+  const view = contextGraphListChainView(agent);
+  return view.subscribedContextGraphs?.get(contextGraphId)?.onChainHash?.toLowerCase() === contextGraphId
+    && view.wireIdToLocalCgId?.get(contextGraphId) === contextGraphId;
+}
+
+/**
+ * Attach the additive `nameKnown` and `onChain` fields to one list row.
+ *
+ * `onChain` holds chain-public facts only (see ContextGraphListOnChainFacts).
+ * A wire-only row is reduced to those facts: its name stays the hash and no
+ * locally projected field survives, so listing it for every caller never
+ * reveals more than the chain already publishes, including for a private
+ * graph. A cleartext name is shown only for rows the node itself indexes under
+ * that name (created, joined, adopted after keccak verification, or a local
+ * definition whose commitment matched); it is never guessed.
+ */
+function annotateContextGraphListRow(agent: DKGAgent, row: ListContextGraphsRow): ListContextGraphsRow {
+  const wireOnly = isWireOnlyContextGraphListRow(agent, row.id);
+  const facts = row.onChainId
+    ? contextGraphListChainView(agent).onChainContextGraphFacts?.get(row.onChainId)
+    : undefined;
+  const base: ListContextGraphsRow = wireOnly
+    ? {
+        id: row.id,
+        uri: row.uri,
+        name: row.id,
+        isSystem: false,
+        subscribed: row.subscribed,
+        synced: row.synced,
+        ...(row.onChainId ? { onChainId: row.onChainId } : {}),
+        ...(row.callerInvolved === undefined ? {} : { callerInvolved: row.callerInvolved }),
+      }
+    : row;
+  return {
+    ...base,
+    nameKnown: !wireOnly,
+    ...(facts ? { onChain: toContextGraphListOnChainFacts(facts) } : {}),
+  };
+}
+
 async function applyContextGraphListPrivacy(
+  agent: DKGAgent,
+  rows: InternalContextGraphListRow[],
+  opts?: { callerAgentAddress?: string | null },
+): Promise<ListContextGraphsRow[]> {
+  // A row known only by its on-chain name hash is listed for every caller:
+  // annotateContextGraphListRow reduces it to chain-public facts.
+  const wireOnlyRows = rows
+    .filter((r) => isWireOnlyContextGraphListRow(agent, r.id))
+    .map(({ policyKnown: _policyKnown, ...row }) => row);
+  const visible = await applyContextGraphListPrivacyToLocalRows(
+    agent,
+    rows.filter((r) => !isWireOnlyContextGraphListRow(agent, r.id)),
+    opts,
+  );
+  return [...visible, ...wireOnlyRows];
+}
+
+async function applyContextGraphListPrivacyToLocalRows(
   agent: DKGAgent,
   rows: InternalContextGraphListRow[],
   opts?: { callerAgentAddress?: string | null },
@@ -848,11 +933,11 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       };
     });
 
-    return applyContextGraphListPrivacy(
+    return (await applyContextGraphListPrivacy(
       this,
       rows.filter((row): row is InternalContextGraphListRow => row !== null),
       opts,
-    );
+    )).map((row) => annotateContextGraphListRow(this, row));
   }
 
   /**
@@ -3029,11 +3114,14 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       // curator-vs-identity fallback for OPEN graphs.
       return {
         rows: rows.filter((r) => {
+          // Known only by its on-chain name hash: annotation reduces the row
+          // to chain-public facts, so it is listed whatever its access policy.
+          if (isWireOnlyContextGraphListRow(this, r.id)) return true;
           const privacy = rowPrivacy(r);
           if (privacy === 'private') return false;
           if (privacy === 'unknown') return !scopedListing;
           return true;
-        }),
+        }).map((r) => annotateContextGraphListRow(this, r)),
         cacheable,
       };
     }
@@ -3072,11 +3160,12 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       rows: annotated
         .filter(({ row, privacy }) => {
           if (row.callerInvolved === true) return true;
+          if (isWireOnlyContextGraphListRow(this, row.id)) return true;
           if (privacy === 'unknown') return false;
           if (privacy === 'private') return false;
           return true;
         })
-        .map(({ row }) => row),
+        .map(({ row }) => annotateContextGraphListRow(this, row)),
       cacheable,
     };
   }

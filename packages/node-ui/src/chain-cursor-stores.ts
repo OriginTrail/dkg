@@ -161,6 +161,51 @@ export class SqliteContextGraphRegistryScanCursorStore {
 }
 
 /**
+ * SQLite-backed ContextGraphStorage discovery checkpoint: the enumeration
+ * cursor plus the chain facts of every id below it. One opaque JSON value per
+ * chain deployment `scope`; the agent owns and validates the codec, and a
+ * replace is one atomic row write.
+ */
+export class SqliteContextGraphStorageDiscoveryStore {
+  static readonly KEY_PREFIX = 'contextGraphStorageDiscovery.checkpoint:v1:';
+
+  private readonly db: Database.Database;
+  private readonly scope: string;
+
+  constructor(dashboard: DashboardDB, options: { scope?: string } = {}) {
+    this.db = dashboard.db;
+    this.scope = options.scope ?? 'default';
+  }
+
+  async load(): Promise<unknown> {
+    const row = this.db.prepare(
+      `SELECT value FROM settings WHERE key = ?`,
+    ).get(this.key()) as { value: string } | undefined;
+    if (row === undefined) return undefined;
+    try {
+      return JSON.parse(row.value) as unknown;
+    } catch {
+      // Hand back the raw text: the agent rejects it visibly and re-enumerates.
+      return row.value;
+    }
+  }
+
+  async save(checkpoint: unknown): Promise<void> {
+    const value = JSON.stringify(checkpoint);
+    if (value === undefined) {
+      throw new Error('Context Graph storage discovery checkpoint is not serializable');
+    }
+    this.db.prepare(
+      `INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)`,
+    ).run(this.key(), value);
+  }
+
+  private key(): string {
+    return `${SqliteContextGraphStorageDiscoveryStore.KEY_PREFIX}${this.scope}`;
+  }
+}
+
+/**
  * Opaque, SQLite-backed authority-history checkpoints.
  *
  * SQLite makes each replacement atomic. The chain package exclusively owns
