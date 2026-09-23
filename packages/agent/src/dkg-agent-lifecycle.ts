@@ -3221,7 +3221,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // Re-stage the Context Graphs a previous process enumerated from
       // ContextGraphStorage before the live tail starts, so a restart lists them
       // again without re-reading the chain; enumeration then resumes at its
-      // durable cursor. A store failure only delays that to the next pass.
+      // durable cursor. If the store cannot be read now, the next discovery or
+      // refresh pass restores them before reading past the cursor.
       try {
         await this.hydrateContextGraphsFromStorageCheckpoint();
       } catch (err) {
@@ -3242,7 +3243,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             accessPolicy,
             ...(publishPolicy === undefined ? {} : { publishPolicy }),
             nameHash: nameHash ?? null,
-            blockNumber,
+            observedAtBlock: blockNumber,
           }, { source: 'event', ctx, ...(signal ? { signal } : {}) });
         },
         // Phase B — live VM-reconcile nudge. A `KnowledgeAssetRegisteredToContextGraph`

@@ -213,10 +213,12 @@ export {
   CONTEXT_GRAPH_STORAGE_DISCOVERY_PAGE_SIZE,
   CONTEXT_GRAPH_STORAGE_REFRESH_INTERVAL_MS,
   createInMemoryContextGraphStorageDiscoveryStore,
-  type ContextGraphListOnChainFacts,
   type ContextGraphStorageDiscoveryStore,
 } from './context-graph-storage-discovery.js';
-export type { ListContextGraphsRow } from './context-graph-list-authority-enrichment.js';
+export type {
+  ContextGraphListOnChainFacts,
+  ListContextGraphsRow,
+} from './context-graph-list-authority-enrichment.js';
 export type {
   ConfiguredContextGraphMetadataReconciliationDiagnostic,
   ConfiguredContextGraphMetadataReconciliationResult,

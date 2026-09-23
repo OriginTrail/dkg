@@ -242,6 +242,7 @@ export default defineConfig({
       "test/context-graph-historical-name-binding.test.ts",
       "test/context-graph-registration-resolution.test.ts",
       "test/context-graph-list-concurrency.test.ts",
+      "test/context-graph-list-wire-only.test.ts",
       "test/cg-resolve-refresh.test.ts",
       "test/private-cg-membership-bootstrap.test.ts",
       "test/workspace-crypto-delegatee-filter.test.ts",
