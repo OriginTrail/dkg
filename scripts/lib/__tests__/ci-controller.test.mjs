@@ -229,7 +229,10 @@ test('workflows execute the planner and aggregate gates from one immutable trust
 
 test('every rotation shim is recorded next to the controller pin', () => {
   // Compatibility paths for older pinned controllers must be listed where the
-  // next rotation happens, so they are deleted with it rather than lingering.
+  // next rotation happens, so they are deleted with it rather than lingering:
+  // output fallbacks, any term in a lane job's condition besides its own
+  // lane's output (the current planner selects every lane a job runs for),
+  // and the gate's own Windows check.
   const source = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
   const { jobs } = parse(source);
   const start = source.indexOf('# Rotation shims:');
@@ -240,6 +243,10 @@ test('every rotation shim is recorded next to the controller pin', () => {
     ...Object.entries(jobs.changes.outputs)
       .filter(([, value]) => String(value).includes('||'))
       .map(([name]) => `jobs.changes.outputs.${name} fallback`),
+    ...Object.entries(PRIMARY_LANE_JOBS).flatMap(([lane, job]) => String(jobs[job].if).split('||')
+      .map((term) => term.trim().match(/^needs\.changes\.outputs\.(\w+) == 'true'$/)?.[1] ?? term.trim())
+      .filter((output) => output !== lane)
+      .map((output) => `jobs.${job}.if ${output} term`)),
     ...jobs['ci-gate'].steps
       .filter((step) => step.name === 'Require selected Windows lifecycle tests')
       .map((step) => `ci-gate step "${step.name}"`),
