@@ -1,4 +1,5 @@
 import { createServer, type Server } from 'node:http';
+import { execFileSync } from 'node:child_process';
 import type { AddressInfo } from 'node:net';
 import { Command } from 'commander';
 import {
@@ -151,6 +152,7 @@ async function closeServer(server: Server): Promise<void> {
 }
 
 interface StatusBody {
+  commit?: string | null;
   storeUrl: string | null;
   storeQuads: number | null;
   storeQuadsStatus?: string;
@@ -181,6 +183,17 @@ async function cleanUpStoreQuads(): Promise<void> {
 
 describe('/api/status external-store quad count', () => {
   afterEach(cleanUpStoreQuads);
+
+  it('reports the full source commit for exact-build devnet release checks', async () => {
+    const { server, baseUrl } = await startStatusServer(async () => COUNT_123, LOCAL_STORE);
+    try {
+      const expected = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf-8' }).trim();
+      const result = await fetchStatus(baseUrl);
+      expect(result.body.commit).toBe(expected);
+    } finally {
+      await closeServer(server);
+    }
+  });
 
   it.each([
     ['an external SPARQL store', SPARQL_HTTP_STORE, 'http://127.0.0.1:9/query'],

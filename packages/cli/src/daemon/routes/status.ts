@@ -198,6 +198,7 @@ import {
   loadMarkItDownTargets,
   getNodeVersion,
   getCurrentCommitShort,
+  getCurrentCommitFull,
   loadBuildInfo,
   detectInstallMode,
   loadSkillTemplate,
@@ -744,7 +745,9 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     return jsonResponse(res, 200, {
       name: config.name,
       version: nodeVersion,
-      commit: buildInfo.commit !== "uncommitted" ? buildInfo.commit : (nodeCommit || null),
+      commit: buildInfo.commit !== "uncommitted"
+        ? buildInfo.commit
+        : (getCurrentCommitFull() ?? nodeCommit ?? null),
       commitShort: buildInfo.commitShort !== "00000000"
         ? buildInfo.commitShort
         : (nodeCommit ? nodeCommit.slice(0, 8) : null),

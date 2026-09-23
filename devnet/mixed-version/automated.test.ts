@@ -27,8 +27,14 @@
  * Run: pnpm test:devnet:mixed-version
  *
  * For a release candidate whose package version still matches the previous
- * release, pin the actual builds as well. The suite then fails if any node
- * runs an unexpected commit (or the devnet is missing):
+ * release, rebuild both checkouts and pin their source commits. The suite
+ * then fails if any node reports an unexpected commit (or the devnet is
+ * missing):
+ *
+ *   pnpm build
+ *   DEVNET_VERSION_REBUILD=1 \
+ *   DEVNET_VERSION_LAYOUT="all:current,edges:v10.0.18" \
+ *   ./scripts/devnet.sh start 6
  *
  *   DKG_EXPECTED_CORE_COMMIT="$(git rev-parse HEAD)" \
  *   DKG_EXPECTED_EDGE_COMMIT="$(git rev-parse v10.0.18)" \
