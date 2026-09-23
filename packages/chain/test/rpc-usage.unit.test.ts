@@ -8,7 +8,7 @@
  * at the provider. Also asserts the OTel counter's bounded {rpc_method,
  * chain_id} labels, drain-resets-window semantics, and label bounding.
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -64,6 +64,23 @@ function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterCon
     allowNoAdminSigner: true,
     ...overrides,
   };
+}
+
+/**
+ * Resolve once every call a spy has observed has settled, including calls that
+ * start while waiting. On a provider's `_send` that is a point with no JSON-RPC
+ * request in flight: the client counts a request when it dispatches it and the
+ * loopback server when it receives it, so the two counts are only guaranteed
+ * to match there.
+ */
+async function settleSpiedCalls(
+  spy: { readonly mock: { readonly results: ReadonlyArray<{ readonly value: unknown }> } },
+): Promise<void> {
+  for (let settled = 0; settled < spy.mock.results.length;) {
+    const pending = spy.mock.results.slice(settled).map((result) => result.value);
+    settled += pending.length;
+    await Promise.all(pending);
+  }
 }
 
 describe('RPC usage accounting — raw request counts EQUAL the server-received requests', () => {
@@ -1023,11 +1040,17 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       providerOptions: { batchMaxCount: 1 },
       onRequest: (method, slot) => tracker.record(method, slot),
     });
+    // Every physical JSON-RPC request, primitive or drained, goes through `_send`.
+    const sends = vi.spyOn(provider, '_send');
 
     try {
-      // Complete provider startup before the paired calls. Both sends below
-      // then enqueue in one scheduling turn and share ethers' drain timer --
-      // the exact case where the timer owner's ALS used to label its peer.
+      // `getNetwork()` detects the chain with a primitive `_send` but does not
+      // start the provider; the header send below does. Its `_start()` queues
+      // ethers' bootstrap `eth_chainId` from inside the header's consumer scope,
+      // ahead of the pair, so all three payloads share one drain timer created
+      // by that probe's send -- the case where the timer owner's ALS used to
+      // label its peers. The lifecycle probe itself must still bill as
+      // unattributed.
       await provider.getNetwork();
       const header = withRpcUsageConsumer(
         'chainIndex.lineage',
@@ -1042,8 +1065,15 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       );
 
       await expect(Promise.all([header, authority])).resolves.toHaveLength(2);
+      // Neither paired promise waits for the probe, and it can reach the
+      // server after both paired responses. Read no count until every request
+      // has settled.
+      await settleSpiedCalls(sends);
       expect(rpc.hits('eth_getBlockByNumber')).toBe(1);
       expect(rpc.hits('eth_call')).toBe(1);
+      // getNetwork() + the startup probe: without the probe the unattributed
+      // assertion below would no longer exercise lifecycle isolation.
+      expect(rpc.hits('eth_chainId')).toBe(2);
 
       const snapshot = cumulative.snapshot();
       expect(snapshot.cumulative.methods).toMatchObject({
