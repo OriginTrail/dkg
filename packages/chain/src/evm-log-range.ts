@@ -85,15 +85,23 @@ const STATED_SPAN_CAP_PATTERNS: readonly RegExp[] = [
   new RegExp(String.raw`(?:max(?:imum)? (?:block )?range|block range limit)(?: size)?(?: is| of)?:? ${BLOCK_COUNT}`),
 ];
 
+/**
+ * Result-size limits (Infura, Alchemy): too many logs, not too many blocks. A
+ * narrower span returns fewer logs, so these always narrow — even below a cap
+ * the same message states (Alchemy names its 2K span beside its log cap).
+ */
+const RESULT_SIZE_PATTERN = new RegExp([
+  String.raw`query returned more than \d[\d,]* results`,
+  String.raw`log response size exceeded`,
+].join('|'));
+
 /** Span phrasings that name no cap: the reader halves until one succeeds. */
 const UNSTATED_SPAN_PATTERN = new RegExp([
   String.raw`range (?:is )?too (?:large|wide|big)`,
   String.raw`exceeds? (?:the )?(?:max(?:imum)? )?(?:allowed )?block range`,
   String.raw`block range (?:limit )?exceeded`,
   String.raw`too many blocks`,
-  // Result-size limits (Infura, Alchemy): a narrower span returns fewer logs.
-  String.raw`query returned more than \d[\d,]* results`,
-  String.raw`log response size exceeded`,
+  RESULT_SIZE_PATTERN.source,
 ].join('|'));
 
 /** Blocks the provider does not serve at any span. */
@@ -143,8 +151,10 @@ function matchSpanLimit(text: string): { maxBlocks?: number } | undefined {
  * refused request. With it, a stated cap is checked against what was actually
  * asked: a provider that refuses a request strictly BELOW its own stated cap
  * is not enforcing that span (dRPC's free plan refuses a 2,000-block request
- * with "ranges over 10000 blocks"), so the refusal is a depth limit. A refusal
- * AT the stated cap reads the cap as exclusive, and the cap becomes one less.
+ * with "ranges over 10000 blocks"), so the refusal is a depth limit — unless
+ * it is a result-size refusal, which a narrower span does fix, so it narrows
+ * with no stated cap (the reader halves). A refusal AT the stated cap reads
+ * the cap as exclusive, and the cap becomes one less.
  */
 export function classifyEvmLogRangeLimitError(
   err: unknown,
@@ -162,7 +172,9 @@ export function classifyEvmLogRangeLimitError(
   if (stated === undefined || requestedBlocks === undefined) {
     return stated === undefined ? { kind: 'span' } : { kind: 'span', maxBlocks: stated };
   }
-  if (requestedBlocks < stated) return { kind: 'depth' };
+  if (requestedBlocks < stated) {
+    return RESULT_SIZE_PATTERN.test(text) ? { kind: 'span' } : { kind: 'depth' };
+  }
   const maxBlocks = Math.min(stated, requestedBlocks - 1);
   return maxBlocks >= 1 ? { kind: 'span', maxBlocks } : { kind: 'span' };
 }

@@ -37,6 +37,11 @@ import {
 
 const HEAD = 51_689_638;
 
+/** Alchemy's result-size refusal: it states a 2K span beside a log-count cap. */
+const ALCHEMY_RESPONSE_SIZE = 'Log response size exceeded. You can make eth_getLogs requests with up to a 2K '
+  + 'block range and no limit on the response size, or you can request any block range with a cap of 10K logs '
+  + 'in the response.';
+
 /** The error ethers raises for one refused eth_getLogs, built by ethers itself. */
 async function ethersRefusal(refusal: FakeLogRpcRefusal): Promise<unknown> {
   const rpc = fakeLogRpc({
@@ -153,10 +158,7 @@ describe('classifyEvmLogRangeLimitError — provider phrasings', () => {
     ['eth_getLogs is limited to a 1000 block range', 1_000],
     ['exceed maximum block range: 5000', 5_000],
     ['ranges over 10000 blocks are not supported', 10_000],
-    [
-      'Log response size exceeded. You can make eth_getLogs requests with up to a 2K block range and no limit on the response size, or you can request any block range with a cap of 10K logs in the response.',
-      2_000,
-    ],
+    [ALCHEMY_RESPONSE_SIZE, 2_000],
     ['requested too many blocks from 0 to 20000, maximum is set to 2048', 2_048],
     ['max block range is 800', 800],
     ['block range limit of 10_000 exceeded', 10_000],
@@ -206,6 +208,18 @@ describe('classifyEvmLogRangeLimitError — provider phrasings', () => {
     expect(classifyEvmLogRangeLimitError(refusal, 1_999)).toEqual({ kind: 'depth' });
     // A one-block refusal leaves nothing to fit.
     expect(classifyEvmLogRangeLimitError(new Error('limited to 1 blocks'), 1)).toEqual({ kind: 'span' });
+  });
+
+  it('narrows a result-size refusal even below the cap its own message states', () => {
+    const alchemy = new Error(ALCHEMY_RESPONSE_SIZE);
+    expect(classifyEvmLogRangeLimitError(alchemy, 9_000)).toEqual({ kind: 'span', maxBlocks: 2_000 });
+    expect(classifyEvmLogRangeLimitError(alchemy, 2_000)).toEqual({ kind: 'span', maxBlocks: 1_999 });
+    // Too many logs, not too many blocks: fewer blocks still fix it, so it is
+    // a span to halve, never a history limit.
+    expect(classifyEvmLogRangeLimitError(alchemy, 1_999)).toEqual({ kind: 'span' });
+    expect(classifyEvmLogRangeLimitError(alchemy, 10)).toEqual({ kind: 'span' });
+    expect(classifyEvmLogRangeLimitError(new Error('query returned more than 10000 results'), 10))
+      .toEqual({ kind: 'span' });
   });
 
   it('reads a bare string refusal and ignores an empty error', () => {
@@ -319,6 +333,23 @@ describe('readAdaptiveEvmLogRange', () => {
     calls.length = 0;
     await readAdaptiveEvmLogRange({ provider, read, fromBlock: 4_001, toBlock: 6_000 });
     expect(calls).toEqual([[4_001, 5_000], [5_001, 6_000]]);
+  });
+
+  it('keeps narrowing a response-size refusal instead of reading it as a history limit', async () => {
+    const provider = {};
+    // A dense range: only 1,000 blocks at a time fit under the log cap.
+    const { calls, read } = cappedReader({ cap: 1_000, message: () => ALCHEMY_RESPONSE_SIZE });
+
+    const rows = await readAdaptiveEvmLogRange({ provider, read, fromBlock: 1, toBlock: 9_000 });
+
+    // The stated 2K, then one less at the cap, then halving below it.
+    expect(calls.slice(0, 4)).toEqual([[1, 9_000], [1, 2_000], [1, 1_999], [1, 999]]);
+    expect(learnedEvmLogSpanCap(provider)).toBe(999);
+    // Every block exactly once, in chain order.
+    const served = (rows as string[]).map((row) => row.split('-').map(Number) as [number, number]);
+    expect(served[0]![0]).toBe(1);
+    expect(served.at(-1)![1]).toBe(9_000);
+    for (let i = 1; i < served.length; i += 1) expect(served[i]![0]).toBe(served[i - 1]![1] + 1);
   });
 
   it('stays bounded when a provider refuses every multi-block span', async () => {
