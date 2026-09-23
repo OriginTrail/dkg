@@ -6,7 +6,7 @@
  * invalidates it without importing the route, which imports the supervisor.
  */
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
-import type { StoreQuadsStatusFields } from '../status-store-quads-wire.js';
+import type { StoreQuadsStatus, StoreQuadsStatusFields } from '../status-store-quads-wire.js';
 
 // Quad-count cache for external SPARQL backends. A full-store COUNT is not a
 // liveness check: on a multi-million-row namespace it can occupy the store for
@@ -27,17 +27,24 @@ import type { StoreQuadsStatusFields } from '../status-store-quads-wire.js';
 // (STORE_QUADS_REFRESH_AFTER_MS in commands/lifecycle.ts).
 const STORE_QUADS_CACHE_TTL_MS = 30_000;
 
+// The statuses come from the wire union, so renaming one there breaks the
+// daemon's compile instead of leaving a stale spelling here.
+type Ready = Extract<StoreQuadsStatus, 'ready'>;
+type Unreachable = Extract<StoreQuadsStatus, 'unreachable'>;
+
 /** A finished count, as cached. */
 type StoreQuadsCacheEntry =
-  | { status: 'ready'; value: number; fetchedAt: number }
-  | { status: 'unreachable'; fetchedAt: number };
+  | { status: Ready; value: number; fetchedAt: number }
+  | { status: Unreachable; fetchedAt: number };
 
 /** A cached result as reported; `ageMs` is null when the clock stepped back past it. */
 type CachedStoreQuadsSnapshot =
-  | { status: 'ready'; value: number; ageMs: number | null }
-  | { status: 'unreachable'; ageMs: number | null };
+  | { status: Ready; value: number; ageMs: number | null }
+  | { status: Unreachable; ageMs: number | null };
 
-type StoreQuadsSnapshot = { status: 'not-requested' | 'pending' } | CachedStoreQuadsSnapshot;
+type StoreQuadsSnapshot =
+  | { status: Extract<StoreQuadsStatus, 'not-requested' | 'pending'> }
+  | CachedStoreQuadsSnapshot;
 
 let storeQuadsCache: StoreQuadsCacheEntry | null = null;
 // The running count, if any. Only the count that still holds this marker may
@@ -128,12 +135,18 @@ export function peekCachedExternalStoreQuads(now: number): StoreQuadsSnapshot {
   return { status: storeQuadsInflight ? 'pending' : 'not-requested' };
 }
 
-/** The flat `/api/status` fields for a snapshot; a local backend has none. */
+/**
+ * The flat `/api/status` fields for a snapshot; a local backend has none.
+ * Call it as soon as the snapshot is taken: `storeQuadsRefreshing` reads the
+ * in-flight count, which may settle at any later await.
+ */
 export function storeQuadsStatusFields(snapshot: StoreQuadsSnapshot | null): StoreQuadsStatusFields {
   if (!snapshot) return { storeQuads: null };
   return {
     storeQuads: snapshot.status === 'ready' ? snapshot.value : null,
     storeQuadsStatus: snapshot.status,
     storeQuadsAgeMs: 'ageMs' in snapshot ? snapshot.ageMs : null,
+    // A count that will replace the reported result is running.
+    storeQuadsRefreshing: storeQuadsInflight !== null,
   };
 }

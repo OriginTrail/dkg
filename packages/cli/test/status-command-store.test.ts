@@ -10,6 +10,7 @@ interface StoreFields {
   // Widened so a status only a newer daemon sends can be rendered as well.
   storeQuadsStatus?: StoreQuadsStatusFields['storeQuadsStatus'] | 'from-a-newer-daemon';
   storeQuadsAgeMs?: number | null;
+  storeQuadsRefreshing?: boolean;
 }
 
 /**
@@ -117,6 +118,12 @@ const RENDER_CASES: Array<[label: string, store: StoreFields, rendered: string]>
   ['an old failure with its age', {
     storeQuads: null, storeQuadsStatus: 'unreachable', storeQuadsAgeMs: 125_000,
   }, 'UNREACHABLE (checked 2m 5s ago)'],
+  ['a count being refreshed as such', {
+    storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 660_000, storeQuadsRefreshing: true,
+  }, '66 quads (checked 11m 0s ago), refreshing'],
+  ['a failure being re-checked as such', {
+    storeQuads: null, storeQuadsStatus: 'unreachable', storeQuadsAgeMs: 125_000, storeQuadsRefreshing: true,
+  }, 'UNREACHABLE (checked 2m 5s ago), refreshing'],
   ['a count from an older daemon that sends no status', {
     storeQuads: 66,
   }, '66 quads'],
@@ -144,6 +151,15 @@ describe('dkg status external-store count requests', () => {
     );
 
     expect(storeLine).toBe('  Store:     sparql-http (http://127.0.0.1:9999/query) — CHECKING');
+  });
+
+  it('renders the count the refresh request returns, not the one it replaced', async () => {
+    const { storeLine } = await renderStatus(
+      { storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 700_000 },
+      { storeQuads: 70, storeQuadsStatus: 'ready', storeQuadsAgeMs: 0, storeQuadsRefreshing: false },
+    );
+
+    expect(storeLine).toBe('  Store:     sparql-http (http://127.0.0.1:9999/query) — 70 quads');
   });
 });
 

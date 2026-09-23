@@ -150,7 +150,10 @@ const STORE_QUADS_REFRESH_AFTER_MS = 10 * 60_000;
  * younger than STORE_QUADS_REFRESH_AFTER_MS, is shown as it is. Anything else
  * is re-checked (the daemon's cache TTL still limits the COUNTs): no count yet,
  * a failure (so a revived store stops showing UNREACHABLE), an old or unknown
- * age, and daemons that report no status or age.
+ * age, and daemons that report no status or age. So the ten-minute bound holds
+ * only for daemons that report `storeQuadsAgeMs`: against 10.0.7 to 10.0.18
+ * every run asks, capped by that daemon's own 30 s cache, because treating an
+ * ageless count as fresh would show the first count it ever cached forever.
  */
 function shouldRefreshStoreQuads(s: StoreQuadsStatusFields): boolean {
   if (s.storeQuadsStatus === 'pending') return false;
@@ -174,8 +177,11 @@ function formatStoreQuads(s: StoreQuadsStatusFields): string {
     : typeof s.storeQuadsAgeMs === 'number' && s.storeQuadsAgeMs >= STORE_QUADS_SHOW_AGE_AFTER_MS
       ? ` (checked ${formatUptime(s.storeQuadsAgeMs)} ago)`
       : '';
-  if (status === 'unreachable') return `UNREACHABLE${age}`;
-  if (typeof s.storeQuads === 'number') return `${s.storeQuads.toLocaleString()} quads${age}`;
+  // The daemon answers a refresh request with the result it already has while
+  // the new count runs, so say that this one is about to be replaced.
+  const refreshing = s.storeQuadsRefreshing === true ? ', refreshing' : '';
+  if (status === 'unreachable') return `UNREACHABLE${age}${refreshing}`;
+  if (typeof s.storeQuads === 'number') return `${s.storeQuads.toLocaleString()} quads${age}${refreshing}`;
   // A status this CLI does not know comes from a newer daemon, for which a
   // null count no longer implies an unreachable store.
   return status === undefined ? 'UNREACHABLE' : 'UNKNOWN';
