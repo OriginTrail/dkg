@@ -1,9 +1,18 @@
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
+import { createAuthorityIndexBootstrap } from './authority-index-bootstrap.js';
+import { planAuthorityIndexBootstrap } from './authority-index-config.js';
+import { createAuthorityIndexSnapshotTransport } from './authority-index-snapshot-transport.js';
+import {
+  createAuthorityIndexSnapshotClient,
+} from './authority-index-snapshot-service.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
+  PROTOCOL_STORAGE_ACK,
+  PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2,
+  PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
@@ -65,7 +74,7 @@ import {
   ratchetSwmSenderChainKey,
   uint64ForProto,
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
-  type DKGNodeConfig, type EvmAddressV1, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
+  type DKGNodeConfig, type EvmAddressV1, type ContextGraphIdV1, type NetworkIdV1, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,
@@ -92,9 +101,16 @@ import {
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { canonicalRootlessLifecycleGraph } from './rootless-lifecycle-graph.js';
+import {
+  normalizeContextGraphDiscoveryScan,
+  legacyChainListScanOptions,
+  type DiscoverContextGraphsFromChainOptions,
+  type NormalizedContextGraphDiscoveryScan,
+} from './context-graph-discovery-options.js';
+export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 import { prepareRfc64LateLegacySwmBoundaryV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ContextGraphOnChain, type ContextGraphChainScanOptions, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -115,6 +131,7 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
+  selectACKCandidateUniverse,
   selectACKCandidatePeersWithDiagnostics,
   createPromotePostCommitFailure,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
@@ -142,6 +159,7 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { prepareAssertionPromote } from './internal/promote/assertion-promote-precommit.js';
+import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -271,7 +289,6 @@ type JoinApprovalRetryEntry = {
   nextAttemptAt: number;
   lastError: string;
 };
-import { multiaddr } from '@multiformats/multiaddr';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
@@ -429,6 +446,9 @@ import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import { reconcileAndAllocateKaNumber } from './allocator.js';
 import { applyMixins } from './dkg-agent-apply-mixins.js';
+import { resolveChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
+import { peekFinalizedAuthorityColdResolution } from
+  './finalized-authority-cold-resolution.js';
 import { OwnershipMethods } from './dkg-agent-ownership.js';
 import { ContextGraphResolveMethods } from './dkg-agent-cg-resolve.js';
 import { CclPolicyMethods } from './dkg-agent-ccl.js';
@@ -438,6 +458,8 @@ import {
   snapshotRfc64CatalogAccessPolicyAuthorityV1,
 } from './dkg-agent-rfc64-catalog.js';
 import { Rfc64CatalogAutoPublishMethods } from './dkg-agent-rfc64-catalog-auto-publish.js';
+import { Rfc64SeedFetchMethods } from './dkg-agent-rfc64-seed-fetch.js';
+import { Rfc64MetaBootstrapMethods } from './dkg-agent-rfc64-meta-bootstrap.js';
 import { Rfc64SwmCatalogProjectionMethods } from
   './dkg-agent-rfc64-swm-catalog-projection.js';
 import {
@@ -457,6 +479,7 @@ import {
   Rfc64SwmRecoveryRuntimeMethods,
 } from './dkg-agent-rfc64-swm-recovery-runtime.js';
 import { Rfc64CatalogUpsertMethods } from './dkg-agent-rfc64-catalog-upsert.js';
+import { Rfc64SeedStoreMethods } from './dkg-agent-rfc64-seed-store.js';
 import { Rfc64CatalogRuntimeV1 } from './rfc64/catalog-runtime-v1.js';
 import { createRfc64CatalogAuthorityRefreshOwnerV1 } from
   './rfc64/catalog-authority-refresh-binding-v1.js';
@@ -468,7 +491,6 @@ import {
   assertResolvedRfc64CatalogActivationsV1,
   resolveRfc64RuntimeCatalogBootstrapConfigV1,
   resolveRfc64CatalogExecutionPlanV1,
-  resolveRfc64CatalogExecutionPlanModeV1,
   resolveRfc64CatalogActivationsV1,
   resolveRfc64CatalogAuthoringPolicyV1,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
@@ -581,25 +603,6 @@ export interface AssertionHistoryDescriptor extends AssertionDescriptor {
   publishedUal?: string;
 }
 
-export type DiscoverContextGraphsFromChainOptions = {
-  signal?: AbortSignal;
-  throwOnChainScanFailure?: boolean;
-  pageBudget?: number;
-  mode?: 'listAll' | 'incremental' | 'seedFull' | 'seedFromCursor' | 'seedLiveTail' | 'repair';
-  minimumIntervalMs?: number;
-  incremental?: boolean;
-  seedIncrementalWatermark?: boolean;
-  resumeFromCursor?: boolean;
-};
-
-type NormalizedContextGraphDiscoveryScan =
-  | { mode: 'listAll' }
-  | { mode: 'incremental'; pageBudget?: number }
-  | { mode: 'seedFull' }
-  | { mode: 'seedFromCursor'; pageBudget?: number }
-  | { mode: 'seedLiveTail'; pageBudget?: number }
-  | { mode: 'repair'; pageBudget: number; minimumIntervalMs?: number };
-
 type ContextGraphRegistryRepairProgress = {
   readonly pageBudget: number;
   readonly startedAt: number;
@@ -610,82 +613,6 @@ type ContextGraphRegistryRepairProgress = {
   targetBlock?: number;
   completed: boolean;
 };
-
-function normalizeContextGraphDiscoveryScan(
-  options: DiscoverContextGraphsFromChainOptions,
-): NormalizedContextGraphDiscoveryScan {
-  if (options.mode !== undefined) {
-    if (options.mode === 'incremental') {
-      return {
-        mode: 'incremental',
-        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-      };
-    }
-    if (options.mode === 'seedFull') return { mode: 'seedFull' };
-    if (options.mode === 'seedFromCursor') {
-      return {
-        mode: 'seedFromCursor',
-        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-      };
-    }
-    if (options.mode === 'seedLiveTail') {
-      return {
-        mode: 'seedLiveTail',
-        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-      };
-    }
-    if (options.mode === 'repair') {
-      return {
-        mode: 'repair',
-        pageBudget: options.pageBudget ?? 1,
-        ...(options.minimumIntervalMs !== undefined
-          ? { minimumIntervalMs: options.minimumIntervalMs }
-          : {}),
-      };
-    }
-    if (options.mode === 'listAll') return { mode: 'listAll' };
-    throw new Error(`Unsupported context graph chain discovery scan mode: ${String(options.mode)}`);
-  }
-
-  if (options.incremental === true) {
-    return {
-      mode: 'incremental',
-      ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-    };
-  }
-
-  if (options.seedIncrementalWatermark === true) {
-    if (options.resumeFromCursor === true) {
-      return {
-        mode: 'seedFromCursor',
-        ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-      };
-    }
-    return { mode: 'seedFull' };
-  }
-
-  return { mode: 'listAll' };
-}
-
-function legacyChainListScanOptions(
-  options: DiscoverContextGraphsFromChainOptions,
-): ContextGraphChainScanOptions | undefined {
-  if (options.mode !== undefined) return undefined;
-  if (options.incremental === true) {
-    return {
-      incremental: true,
-      ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-    };
-  }
-  if (options.seedIncrementalWatermark === true) {
-    return {
-      seedIncrementalWatermark: true,
-      ...(options.resumeFromCursor !== undefined ? { resumeFromCursor: options.resumeFromCursor } : {}),
-      ...(options.pageBudget !== undefined ? { pageBudget: options.pageBudget } : {}),
-    };
-  }
-  return undefined;
-}
 
 function assertLegacyStorageAckAlias(
   value: unknown,
@@ -769,6 +696,7 @@ function normalizeStorageAckConfig(config: DKGAgentConfig): StorageAckNormalized
 
 function constructConfiguredChainAdapter(
   config: StorageAckNormalizedDKGAgentConfig,
+  contextGraphAuthorityIndexBootstrap?: EVMAdapterConfig['contextGraphAuthorityIndexBootstrap'],
 ): Readonly<{ chain: ChainAdapter; operationalKeys: string[] | undefined }> {
   let operationalKeys = config.chainConfig?.operationalKeys;
   if (config.chainAdapter) {
@@ -791,6 +719,7 @@ function constructConfiguredChainAdapter(
       chainId: config.chainConfig.chainId,
       receiptTimeoutMs: config.chainConfig.receiptTimeoutMs,
       finalityConfirmations: config.chainConfig.finalityConfirmations,
+      indexTickMs: config.chainConfig.indexTickMs,
       maxFeePerGasWei: config.chainConfig.maxFeePerGasWei,
       approvalPolicy: config.chainConfig.approvalPolicy,
       cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
@@ -799,6 +728,11 @@ function constructConfiguredChainAdapter(
       contextGraphRegistryScanCursorStore: config.contextGraphRegistryScanCursorStore,
       localContextGraphAuthorityHistoryStore: config.localContextGraphAuthorityHistoryStore,
       localContextGraphAuthorityIndexStore: config.localContextGraphAuthorityIndexStore,
+      // THE one log. Only this adapter is given the store, so only this
+      // adapter owns a tick; every other adapter in the process reads the
+      // binding it publishes.
+      chainEventLogStore: config.chainEventLogStore,
+      contextGraphAuthorityIndexBootstrap,
     };
     const chain = config.chainConfig.adminPrivateKey
       ? new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey })
@@ -949,6 +883,19 @@ export class DKGAgent extends DKGAgentBase {
         )
       ),
       publicSnapshotStore: this.publicSnapshotStore,
+      ordinaryRootSnapshotApplyAllowed: (contextGraphId) => (
+        this.rfc64LegacySwmApplyAllowedForScope(contextGraphId, null)
+      ),
+      resolveRootSnapshotAtomicCompanion: (input) => {
+        if (this.config.dataDir === undefined) return;
+        return prepareRfc64LateLegacySwmBoundaryV1(
+          this,
+          input.contextGraphId,
+          input.kaUal,
+          input.shareOperationId,
+          input.assertionVersion,
+        );
+      },
       recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
       invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
       markMetaProjectionDirty: (quads) => this.contextGraphMetaProjection
@@ -1000,6 +947,20 @@ export class DKGAgent extends DKGAgentBase {
           this.config.rfc64CatalogBootstrap,
           this.config.rfc64PublicCatalogBootstrap,
         ),
+        resolveDynamicallyAcceptedPolicy: (contextGraphId) => {
+          const service = this.rfc64PublicCatalogServiceV1;
+          const networkId = (
+            this.config.rfc64CatalogDeploymentProfile?.networkId
+            ?? this.config.networkIdentity?.chainId
+          ) as NetworkIdV1 | undefined;
+          if (service === undefined || networkId === undefined || networkId === 'none') {
+            return null;
+          }
+          return service.acceptedPolicySnapshot(
+            networkId,
+            contextGraphId as ContextGraphIdV1,
+          )?.policy ?? null;
+        },
       },
       admission: {
         invalidateContextGraph: (contextGraphId) => (
@@ -1123,7 +1084,10 @@ export class DKGAgent extends DKGAgentBase {
           // authority reads inherit foreground priority and cancellation.
           withRpcRequestContext(
             { requestClass: 'background', signal },
-            () => this.rfc64AuthorityReadCoordinatorV1.run(signal, read),
+            () => this.rfc64AuthorityReadCoordinatorV1.run(
+              signal,
+              (readSignal, evidence) => read(evidence.chainReadOptions(readSignal)),
+            ),
           )
         ),
       },
@@ -1233,6 +1197,20 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
+    const log = new Logger('DKGAgent');
+    const ctx = createOperationContext('system');
+    // The daemon logs this same plan from this same config before calling here.
+    const authorityIndexPlan = planAuthorityIndexBootstrap(inputConfig);
+    const authorityIndex = authorityIndexPlan.config;
+    let agentRef: DKGAgent | undefined;
+    const snapshotClient = authorityIndex === undefined ? undefined : createAuthorityIndexSnapshotClient({
+      normalizedConfig: authorityIndex.snapshot,
+      request: createAuthorityIndexSnapshotTransport(() => agentRef === undefined ? undefined : {
+        started: agentRef.started,
+        node: agentRef.node,
+        router: agentRef.router,
+      }),
+    });
     const contextGraphSubscriptionRehydrationEnabled =
       inputConfig.contextGraphSubscriptionRehydrationEnabled === undefined
         ? true
@@ -1245,6 +1223,7 @@ export class DKGAgent extends DKGAgentBase {
     validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
     const normalizedConfig = normalizeStorageAckConfig({
       ...inputConfig,
+      authorityIndex,
       syncContextGraphPriorities: resolveSyncContextGraphPriorities(
         inputConfig.syncContextGraphPriorities,
       ),
@@ -1255,7 +1234,15 @@ export class DKGAgent extends DKGAgentBase {
     ) {
       throw new TypeError('finalizationRecoveryStoreFactory requires dataDir');
     }
-    const { chain, operationalKeys: opKeys } = constructConfiguredChainAdapter(normalizedConfig);
+    const { chain, operationalKeys: opKeys } = constructConfiguredChainAdapter(
+      normalizedConfig,
+      snapshotClient === undefined || authorityIndexPlan.source === 'local-history' ? undefined
+        : createAuthorityIndexBootstrap(
+          authorityIndexPlan,
+          (request, signal, validateSnapshot) => snapshotClient.fetchSnapshot(request, signal, validateSnapshot),
+          { info: (message) => log.info(ctx, message), warn: (message) => log.warn(ctx, message) },
+        ),
+    );
     const adapterChainId = chain.chainId !== 'none' ? chain.chainId : undefined;
     if (
       normalizedConfig.networkIdentity?.chainId
@@ -1430,8 +1417,6 @@ export class DKGAgent extends DKGAgentBase {
     } else {
       wallet = await DKGAgentWallet.generate();
     }
-    const log = new Logger('DKGAgent');
-    const ctx = createOperationContext('system');
     let store: TripleStore;
     if (config.store) {
       store = config.store;
@@ -1504,6 +1489,7 @@ export class DKGAgent extends DKGAgentBase {
       rfc64PublicCatalogBootstrap,
       contextGraphSubscriptionRehydrationEnabled,
       syncReconcilerTiming: resolveSyncReconcilerTiming(config),
+      chainAuthorityReadBudgets: resolveChainAuthorityReadBudgets(config.chainConfig),
     };
 
     const port = config.listenPort ?? 0;
@@ -1543,7 +1529,6 @@ export class DKGAgent extends DKGAgentBase {
       !adapterCanPublishFromAdvertisedSigner &&
       (!configuredPublisherAddress || publisherAddressMatchesLegacyKey),
     );
-    let agentRef: DKGAgent | undefined;
     const agentStore = createListContextGraphsCacheInvalidatingStore(
       store,
       () => {
@@ -1581,17 +1566,23 @@ export class DKGAgent extends DKGAgentBase {
       // RFC ka-metadata-trim P3.3 — `metadata.provenanceEvents` (default true).
       provenanceEvents: config.metadataProvenanceEvents,
       resolveDurableRootPromotionAtomicCompanion: (input) => {
-        const executionPlan = resolvedConfig.rfc64CatalogExecutionPlan;
-        const configuredMode = resolveRfc64CatalogExecutionPlanModeV1(
-          executionPlan,
+        // Every root graph may exist before its exact catalog head is durable,
+        // including the normal catalog lane. Persist its negative-completeness
+        // witness in the same transaction; exact catalog reconciliation alone
+        // retires it later.
+        if (resolvedConfig.dataDir === undefined) return;
+        if (agentRef === undefined) {
+          throw new Error('RFC-64 legacy SWM write-ahead owner is unavailable');
+        }
+        return prepareRfc64LateLegacySwmBoundaryV1(
+          agentRef,
           input.contextGraphId,
+          input.kaUal,
+          input.shareOperationId,
+          input.assertionVersion,
         );
-        if (!executionPlan.killSwitchActive && configuredMode !== 'legacy') return;
-
-        // Ephemeral legacy mode has no durable state to protect across a later
-        // catalog restart. Persistent legacy mode must have completed boundary
-        // initialization in start(); the marker owner deliberately throws when
-        // it has not, so a root cannot escape without its negative witness.
+      },
+      resolveDurableRootMaterializationAtomicCompanion: (input) => {
         if (resolvedConfig.dataDir === undefined) return;
         if (agentRef === undefined) {
           throw new Error('RFC-64 legacy SWM write-ahead owner is unavailable');
@@ -1943,14 +1934,22 @@ export class DKGAgent extends DKGAgentBase {
       participantAgents: metadata.participantAgents ?? existing?.participantAgents,
     };
 
-    if (metadata.onChainId) {
-      const bindingChanged = !!existing?.onChainId && existing.onChainId !== metadata.onChainId;
-      this.bindSubscriptionOnChainId(contextGraphId, next, metadata.onChainId);
+    const authoritativeOnChainId = isCanonicalAuthoritativeContextGraphId(metadata.onChainId)
+      ? metadata.onChainId
+      : undefined;
+    const invalidExplicitOnChainId = metadata.onChainId !== undefined
+      && authoritativeOnChainId === undefined;
+    if (authoritativeOnChainId !== undefined) {
+      const bindingChanged = !!existing?.onChainId
+        && existing.onChainId !== authoritativeOnChainId;
+      this.bindSubscriptionOnChainId(contextGraphId, next, authoritativeOnChainId);
       if (bindingChanged && metadata.onChainHash === undefined) {
         next.onChainHash = undefined;
       }
     }
-    if (metadata.onChainHash !== undefined) next.onChainHash = metadata.onChainHash;
+    if (!invalidExplicitOnChainId && metadata.onChainHash !== undefined) {
+      next.onChainHash = metadata.onChainHash;
+    }
 
     // Discovery-only rows stay in-memory. Metadata learned for an already
     // active member/host row is part of that durable state and must survive a
@@ -2029,7 +2028,12 @@ export class DKGAgent extends DKGAgentBase {
 
         const existing = discoveredEntries.get(id);
         const rowName = row['name'] ? stripLiteral(row['name']) : undefined;
-        const rowOnChainId = row['onChainId'] ? stripLiteral(row['onChainId']) : undefined;
+        const candidateOnChainId = row['onChainId']
+          ? stripLiteral(row['onChainId'])
+          : undefined;
+        const rowOnChainId = isCanonicalAuthoritativeContextGraphId(candidateOnChainId)
+          ? candidateOnChainId
+          : undefined;
         const ontologyWins = existing?.source === 'meta' && source === 'ontology';
         discoveredEntries.set(id, {
           id,
@@ -2203,8 +2207,21 @@ export class DKGAgent extends DKGAgentBase {
     minimumIntervalMs?: number;
     signal?: AbortSignal;
   }): Promise<number> {
-    const progress: ContextGraphRegistryRepairProgress = {
+    return this.repairContextGraphRegistryNormalized({
+      mode: 'repair',
       pageBudget: options.pageBudget,
+      ...(options.minimumIntervalMs !== undefined
+        ? { minimumIntervalMs: options.minimumIntervalMs }
+        : {}),
+    }, options.signal);
+  }
+
+  private async repairContextGraphRegistryNormalized(
+    scanMode: Extract<NormalizedContextGraphDiscoveryScan, { mode: 'repair' }>,
+    signal?: AbortSignal,
+  ): Promise<number> {
+    const progress: ContextGraphRegistryRepairProgress = {
+      pageBudget: scanMode.pageBudget,
       startedAt: Date.now(),
       observedPages: 0,
       acknowledgedPages: 0,
@@ -2213,10 +2230,9 @@ export class DKGAgent extends DKGAgentBase {
     let outcome: 'succeeded' | 'failed' = 'failed';
     try {
       const discovered = await this.discoverContextGraphsFromChainInternal({
-        mode: 'repair',
         throwOnChainScanFailure: true,
-        ...options,
-      }, progress);
+        ...(signal ? { signal } : {}),
+      }, scanMode, progress);
       outcome = 'succeeded';
       return discovered;
     } finally {
@@ -2248,31 +2264,29 @@ export class DKGAgent extends DKGAgentBase {
   async discoverContextGraphsFromChain(
     options: DiscoverContextGraphsFromChainOptions = {},
   ): Promise<number> {
-    if (options.mode === 'repair') {
-      return this.repairContextGraphRegistry({
-        pageBudget: options.pageBudget ?? 1,
-        ...(options.minimumIntervalMs !== undefined
-          ? { minimumIntervalMs: options.minimumIntervalMs }
-          : {}),
-        ...(options.signal ? { signal: options.signal } : {}),
-      });
+    const scanMode = normalizeContextGraphDiscoveryScan(options);
+    if (scanMode.mode === 'repair') {
+      return this.repairContextGraphRegistryNormalized(scanMode, options.signal);
     }
-    return this.discoverContextGraphsFromChainInternal(options);
+    return this.discoverContextGraphsFromChainInternal(options, scanMode);
   }
 
   /** Shared page application primitive; repair owns its orchestration above. */
   private async discoverContextGraphsFromChainInternal(
-    options: DiscoverContextGraphsFromChainOptions,
+    options: Pick<
+      DiscoverContextGraphsFromChainOptions,
+      'signal' | 'throwOnChainScanFailure'
+    >,
+    scanMode: NormalizedContextGraphDiscoveryScan,
     repairProgress?: ContextGraphRegistryRepairProgress,
   ): Promise<number> {
     options.signal?.throwIfAborted();
     const ctx = createOperationContext('system');
-    const scanMode = normalizeContextGraphDiscoveryScan(options);
     const scanFailureLane = repairProgress ? 'repair' : 'live';
     const scanFailureLabel = scanFailureLane === 'repair'
       ? 'Chain context graph repair scan'
       : 'Chain context graph scan';
-    const legacyListOptions = legacyChainListScanOptions(options);
+    const legacyListOptions = legacyChainListScanOptions(scanMode);
     const useLegacyListFallback =
       scanMode.mode !== 'listAll' &&
       legacyListOptions !== undefined &&
@@ -2512,6 +2526,16 @@ export class DKGAgent extends DKGAgentBase {
   async stop(): Promise<void> {
     if (!this.started) return;
     this.peerSyncSession.close();
+    // Cancelling a waiter alone does not retire the shared physical scan.
+    // Detached cold authority flights are aborted here too: after stop() no
+    // request can consume their result, and the chain reader closes below.
+    peekFinalizedAuthorityColdResolution(this)?.close();
+    const authorityIndexSnapshotDrain = Promise.all([
+      this.authorityIndexSnapshotRuntime?.close(),
+      this.chain.contextGraphAuthorityIndexSnapshots?.close(),
+      peekFinalizedAuthorityColdResolution(this)?.whenIdle(),
+    ]);
+    this.authorityIndexSnapshotRuntime = undefined;
     // Disconnect history survives sessions; transient freshness and cooldowns do not.
     const disconnectedAt = Date.now();
     for (const peer of this.node.libp2p.getPeers()) {
@@ -2521,6 +2545,8 @@ export class DKGAgent extends DKGAgentBase {
     this.randomSamplingRuntime?.cancel();
     const authorityRetryDrain =
       this.contextGraphSubscriptionAuthorityRecoveryRuntime?.close() ?? null;
+    const rehydrationPromotionDrain =
+      this.contextGraphSubscriptionRehydrationPromotionRuntime?.close() ?? null;
     // Fence every detached RFC-64 responsibility, observer, and recovery RPC
     // before sampling the physical drain. This owner signal reaches governor
     // admission and active HTTP through the shared request context.
@@ -2604,7 +2630,9 @@ export class DKGAgent extends DKGAgentBase {
       }
     };
     const drains: Promise<unknown>[] = [drainPhysicalRuns(), rfc64BackgroundDrain];
+    drains.push(authorityIndexSnapshotDrain);
     if (authorityRetryDrain) drains.push(authorityRetryDrain);
+    if (rehydrationPromotionDrain) drains.push(rehydrationPromotionDrain);
     if (chainPollerDrain) drains.push(chainPollerDrain);
     if (priorRetirement) drains.push(priorRetirement.catch(() => undefined));
     if (dispatcherDrain) drains.push(dispatcherDrain);
@@ -2882,6 +2910,52 @@ export class DKGAgent extends DKGAgentBase {
     await store.insert(quads);
   }
 
+  private connectedPeerIds(): string[] {
+    const connectedPeerIds = new Set<string>();
+    for (const peer of this.node.libp2p.getPeers()) {
+      connectedPeerIds.add(peer.toString());
+    }
+    for (const connection of this.node.libp2p.getConnections()) {
+      connectedPeerIds.add(connection.remotePeer.toString());
+    }
+    connectedPeerIds.delete(this.peerId);
+    return [...connectedPeerIds];
+  }
+
+  /**
+   * Resolve admission only for connected peers already known to be eligible
+   * for an ACK round. The publisher selector is the single source of truth: a
+   * configured ACK allowlist wins, otherwise every connected peer remains in
+   * the candidate universe because identify-derived core tiers may be partial.
+   * The coordinator owns admission, per-peer retry cooldown and bounded probe
+   * fan-out; signed same-network proof remains mandatory.
+   */
+  private async getACKCandidatePeersAfterAdmission(
+    protocol: string | undefined,
+    ctx: OperationContext,
+  ): Promise<string[]> {
+    const connected = this.connectedPeerIds();
+    const eligible = selectACKCandidateUniverse({
+      connectedPeers: connected,
+      ackCandidatePeerIds: this.config.ackCandidatePeerIds,
+      selfPeerId: this.peerId,
+    });
+
+    const result = await this.networkAdmissionCoordinator.preflightPeerAdmission(
+      eligible,
+      ctx,
+      { maxConcurrency: 4 },
+    );
+    if (result.checked > 0) {
+      this.log.info(
+        ctx,
+        `[ACKCollector] Admission preflight checked ${result.checked} ACK-eligible peer(s): ` +
+        `${result.admitted} newly admitted, ${result.unresolved} still excluded`,
+      );
+    }
+    return this.getACKCandidatePeers(protocol);
+  }
+
   /**
    * Candidate peer pool for ACK collection (#1093 / #1482).
    *
@@ -2926,16 +3000,10 @@ export class DKGAgent extends DKGAgentBase {
    * validation remain authoritative.
    */
   public getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
-    const connectedPeerIds = new Set<string>();
-    for (const peer of this.node.libp2p.getPeers()) {
-      connectedPeerIds.add(peer.toString());
-    }
-    for (const connection of this.node.libp2p.getConnections()) {
-      connectedPeerIds.add(connection.remotePeer.toString());
-    }
+    const connectedPeerIds = this.connectedPeerIds();
     const requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
     const selection = selectACKCandidatePeersWithDiagnostics({
-      connectedPeers: [...connectedPeerIds],
+      connectedPeers: connectedPeerIds,
       selfPeerId: this.peerId,
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
       preferredACKPeerIds: this.config.preferredACKPeerIds,
@@ -2974,9 +3042,30 @@ export class DKGAgent extends DKGAgentBase {
         await this.gossip.publish(topic, data);
       },
       sendP2P: this.createACKSendP2P(timeoutMs),
-      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
+      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeersAfterAdmission(
+        protocol,
+        this.ackOperationContext(protocol),
+      ),
       log: options.log,
     });
+  }
+
+  private ackOperationContext(protocol?: string): OperationContext {
+    const operation = protocol === PROTOCOL_STORAGE_UPDATE_ACK || protocol === PROTOCOL_STORAGE_UPDATE_ACK_V2
+      ? 'update'
+      : 'publish';
+    return createOperationContext(operation);
+  }
+
+  /**
+   * Current read-only binding of the chain adapter that owns the node's ONE
+   * log. Publisher-wallet adapters call this late for every read; no runtime,
+   * store, or stop authority crosses this boundary.
+   */
+  public getChainEventLogBinding(): ChainEventLogBinding | undefined {
+    return (this.chain as ChainAdapter & {
+      readonly chainEventLog?: ChainEventLogBinding;
+    }).chainEventLog;
   }
 
   private createACKSendP2P(
@@ -3023,7 +3112,10 @@ export class DKGAgent extends DKGAgentBase {
         await this.gossip.publish(topic, data);
       },
       sendP2P: this.createACKSendP2P(),
-      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
+      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeersAfterAdmission(
+        protocol,
+        this.ackOperationContext(protocol),
+      ),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -3133,35 +3225,37 @@ export class DKGAgent extends DKGAgentBase {
         throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
       }
 
-      const result = await this.withStorageACKCollectionSlot(() => collector.collect({
-        merkleRoot: params.merkleRoot,
-        contextGraphId: cgIdBigInt,
-        contextGraphIdStr: params.contextGraphId,
-        publisherPeerId: this.peerId,
-        publicByteSize: params.publicByteSize,
-        isPrivate: params.ackMode.kind !== 'public',
-        kaCount: params.kaCount,
-        rootEntities: params.rootEntities,
-        chainId: chainIdBig,
-        kav10Address,
-        requiredACKs,
-        stagingQuads: params.stagingQuads,
-        epochs: params.epochs,
-        tokenAmount: params.tokenAmount,
-        swmGraphId: params.swmGraphId,
-        subGraphName: params.subGraphName,
-        merkleLeafCount: params.merkleLeafCount,
-        assetUal: params.assetUal,
-        contentScopeVersion: params.contentScopeVersion,
-        kaUal: params.kaUal,
-        assertionVersion: params.assertionVersion,
-        publicTripleCount: params.publicTripleCount,
-        privateMerkleRoot: params.privateMerkleRoot,
-        privateTripleCount: params.privateTripleCount,
-        accessPolicy: params.accessPolicy,
-        allowedPeers: params.allowedPeers,
-        ackMode: params.ackMode,
-      }));
+      const result = await this.withStorageACKCollectionSlot(async () => {
+        return collector.collect({
+          merkleRoot: params.merkleRoot,
+          contextGraphId: cgIdBigInt,
+          contextGraphIdStr: params.contextGraphId,
+          publisherPeerId: this.peerId,
+          publicByteSize: params.publicByteSize,
+          isPrivate: params.ackMode.kind !== 'public',
+          kaCount: params.kaCount,
+          rootEntities: params.rootEntities,
+          chainId: chainIdBig,
+          kav10Address,
+          requiredACKs,
+          stagingQuads: params.stagingQuads,
+          epochs: params.epochs,
+          tokenAmount: params.tokenAmount,
+          swmGraphId: params.swmGraphId,
+          subGraphName: params.subGraphName,
+          merkleLeafCount: params.merkleLeafCount,
+          assetUal: params.assetUal,
+          contentScopeVersion: params.contentScopeVersion,
+          kaUal: params.kaUal,
+          assertionVersion: params.assertionVersion,
+          publicTripleCount: params.publicTripleCount,
+          privateMerkleRoot: params.privateMerkleRoot,
+          privateTripleCount: params.privateTripleCount,
+          accessPolicy: params.accessPolicy,
+          allowedPeers: params.allowedPeers,
+          ackMode: params.ackMode,
+        });
+      });
       return result.acks;
     };
   }
@@ -3188,7 +3282,10 @@ export class DKGAgent extends DKGAgentBase {
         await this.gossip.publish(topic, data);
       },
       sendP2P: this.createACKSendP2P(),
-      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeers(protocol),
+      getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeersAfterAdmission(
+        protocol,
+        this.ackOperationContext(protocol),
+      ),
       verifyIdentity: typeof this.chain.verifyACKIdentity === 'function'
         ? async (recoveredAddress: string, claimedIdentityId: bigint) => {
             try {
@@ -3300,35 +3397,37 @@ export class DKGAgent extends DKGAgentBase {
         throw wrapAsRpcPreconditionIfApplicable(err, 'getKnowledgeAssetsLifecycleAddress');
       }
 
-      const result = await this.withStorageACKCollectionSlot(() => collector.collectUpdate({
-        kaId: params.kaId,
-        contextGraphId: cgIdBigInt,
-        preUpdateMerkleRootCount: params.preUpdateMerkleRootCount,
-        newMerkleRoot: params.newMerkleRoot,
-        newByteSize: params.newByteSize,
-        newTokenAmount: params.newTokenAmount,
-        mintAmount: params.mintAmount,
-        burnTokenIds: params.burnTokenIds,
-        newMerkleLeafCount: params.newMerkleLeafCount,
-        newCatalogRoot: params.newCatalogRoot,
-        newCatalogLeafCount: params.newCatalogLeafCount,
-        chainId: chainIdBig,
-        kav10Address,
-        publisherPeerId: this.peerId,
-        requiredACKs,
-        swmGraphId: params.swmGraphId,
-        subGraphName: params.subGraphName,
-        stagingQuads: params.stagingQuads,
-        // OT-RFC-49 / WS-D — stamp `UpdateIntent.isEncryptedPayload` for a
-        // curated update so cores rebuild/verify/persist the inline catalog.
-        isEncryptedPayload: params.isEncryptedPayload,
-        contentScopeVersion: params.contentScopeVersion,
-        kaUal: params.kaUal,
-        assertionVersion: params.assertionVersion,
-        publicTripleCount: params.publicTripleCount,
-        privateMerkleRoot: params.privateMerkleRoot,
-        privateTripleCount: params.privateTripleCount,
-      }));
+      const result = await this.withStorageACKCollectionSlot(async () => {
+        return collector.collectUpdate({
+          kaId: params.kaId,
+          contextGraphId: cgIdBigInt,
+          preUpdateMerkleRootCount: params.preUpdateMerkleRootCount,
+          newMerkleRoot: params.newMerkleRoot,
+          newByteSize: params.newByteSize,
+          newTokenAmount: params.newTokenAmount,
+          mintAmount: params.mintAmount,
+          burnTokenIds: params.burnTokenIds,
+          newMerkleLeafCount: params.newMerkleLeafCount,
+          newCatalogRoot: params.newCatalogRoot,
+          newCatalogLeafCount: params.newCatalogLeafCount,
+          chainId: chainIdBig,
+          kav10Address,
+          publisherPeerId: this.peerId,
+          requiredACKs,
+          swmGraphId: params.swmGraphId,
+          subGraphName: params.subGraphName,
+          stagingQuads: params.stagingQuads,
+          // OT-RFC-49 / WS-D — stamp `UpdateIntent.isEncryptedPayload` for a
+          // curated update so cores rebuild/verify/persist the inline catalog.
+          isEncryptedPayload: params.isEncryptedPayload,
+          contentScopeVersion: params.contentScopeVersion,
+          kaUal: params.kaUal,
+          assertionVersion: params.assertionVersion,
+          publicTripleCount: params.publicTripleCount,
+          privateMerkleRoot: params.privateMerkleRoot,
+          privateTripleCount: params.privateTripleCount,
+        });
+      });
       return result.acks;
     };
   }
@@ -3464,13 +3563,24 @@ export class DKGAgent extends DKGAgentBase {
       return { author, allocateKaNumber };
     };
     return {
-      async create(contextGraphId: string, name: string, opts?: { subGraphName?: string; agentAddress?: string }): Promise<string> {
+      async create(
+        contextGraphId: string,
+        name: string,
+        opts?: {
+          subGraphName?: string;
+          agentAddress?: string;
+          onDisposition?: (disposition: 'created' | 'sealed-noop') => void;
+        },
+      ): Promise<string> {
         // D1 (identity-at-create): mint the KA number/UAL at create so the UAL is the
         // KA's identity from the first write. assertionCreate only allocates when the
         // draft has no preserved kaId (the re-open guard lives there), so passing the
         // callback is safe — re-opens reuse the preserved identity.
         const { author, allocateKaNumber } = resolveAuthorAndAllocator(opts?.agentAddress);
-        return agent.publisher.assertionCreate(contextGraphId, name, author, opts?.subGraphName, { allocateKaNumber });
+        return agent.publisher.assertionCreate(contextGraphId, name, author, opts?.subGraphName, {
+          allocateKaNumber,
+          onDisposition: opts?.onDisposition,
+        });
       },
 
       async migrateLegacyRootScopedWorkingMemory(
@@ -4153,5 +4263,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods {}
-applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods]);
+export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods {}
+applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods]);

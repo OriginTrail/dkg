@@ -25,6 +25,24 @@ import {
   type ExactAssetCommitment,
 } from '../exact-assets.js';
 
+/**
+ * Name the setting that grants the missing capability.
+ *
+ * The store refuses this write because its adapter reports no transactional
+ * replacement. For an explicitly configured `sparql-http` endpoint that is the
+ * `best-effort` default rather than a property of the server: the adapter
+ * cannot know what is behind the URL, so the operator declares it. Without
+ * this hint the failure reads as a product bug, which has cost real debugging
+ * sessions on nodes whose endpoint did support the guarantee all along.
+ */
+const ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1 = (capability: string): string => (
+  `Graph-scoped durable sync requires ${capability} support. An explicitly `
+  + 'configured sparql-http endpoint defaults to consistencyProfile '
+  + '"best-effort"; set store.options.consistencyProfile to "atomic-update" '
+  + '(or "atomic-readback" when the endpoint also guarantees read-after-write) '
+  + 'if it provides that guarantee.'
+);
+
 const ASSERTION_VERSION = 'http://dkg.io/ontology/assertionVersion';
 const MERKLE_ROOT = 'http://dkg.io/ontology/merkleRoot';
 const STATUS = 'http://dkg.io/ontology/status';
@@ -464,7 +482,9 @@ export async function materializeVerifiedGraphScopedAsset(params: {
     );
     if (!replaced) {
       throw Object.assign(
-        new Error('Graph-scoped durable sync requires atomic data/metadata replacement support'),
+        new Error(ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1(
+          'atomic data/metadata replacement',
+        )),
         { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
       );
     }
@@ -480,7 +500,9 @@ export async function materializeVerifiedGraphScopedAsset(params: {
       );
       if (!quarantined) {
         throw Object.assign(
-          new Error('Graph-scoped durable sync requires atomic stale-binding quarantine support'),
+          new Error(ATOMIC_REPLACE_UNSUPPORTED_MESSAGE_V1(
+            'atomic stale-binding quarantine',
+          )),
           { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
         );
       }

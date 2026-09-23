@@ -62,6 +62,10 @@ describe('RFC-64 default-on local unregistered SWM publication', () => {
       vi.spyOn(chain, 'resolveContextGraphIdByNameHash'),
       vi.spyOn(chain, 'getContextGraphNameHash'),
       vi.spyOn(chain, 'isContextGraphActiveOnChain'),
+      // The agent's default authority read since the three reads were folded
+      // into one; without it this guard would stay green while a real
+      // ContextGraphStorage.getContextGraph RPC was issued.
+      vi.spyOn(chain, 'getContextGraphLiveAuthority'),
       vi.spyOn(chain, 'getContextGraphAccessPolicy'),
       vi.spyOn(chain, 'getContextGraphPublishPolicy'),
       vi.spyOn(chain, 'getContextGraphParticipantAgents'),
@@ -85,6 +89,18 @@ describe('RFC-64 default-on local unregistered SWM publication', () => {
               : [vi.spyOn(
                   authorityIndexReader,
                   'resolveFinalizedContextGraphAuthoritySnapshotByNameHash',
+                )]
+          ),
+          ...(authorityIndexReader.resolveFinalizedContextGraphIdsByNameHashes === undefined
+            ? []
+            : [vi.spyOn(authorityIndexReader, 'resolveFinalizedContextGraphIdsByNameHashes')]),
+          ...(
+            authorityIndexReader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes
+              === undefined
+              ? []
+              : [vi.spyOn(
+                  authorityIndexReader,
+                  'resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes',
                 )]
           ),
         ];
@@ -121,6 +137,7 @@ describe('RFC-64 default-on local unregistered SWM publication', () => {
     expect(await agent.readLocalContextGraphRegistrationStatus(contextGraphId))
       .toBe('unregistered');
     expect(await agent.isLocalFirstUnregisteredContextGraph(contextGraphId)).toBe(true);
+    await agent.whenRfc64CatalogSupervisorsIdleV1();
 
     // Do not call getContextGraphOnChainId merely to prove absence: that API
     // is itself allowed to perform discovery. The durable marker plus a zero

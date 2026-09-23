@@ -153,6 +153,7 @@ describe('exact-asset rolling-upgrade filter', () => {
       dataQuads: [],
       metaQuads: [],
       descriptorCoverageComplete: false,
+      returnedDescriptorCount: 0,
       missingDescriptorUals: [],
       mismatchedDescriptorUals: [wanted],
     });

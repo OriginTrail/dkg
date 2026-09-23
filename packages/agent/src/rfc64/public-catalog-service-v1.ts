@@ -65,11 +65,13 @@ import {
 } from './catalog-access-policy-v1.js';
 import {
   Rfc64PublicCatalogReceiverV1,
+  type Rfc64PublicCatalogHeadSatisfactionCheckV1,
   type Rfc64PublicCatalogReceiverReconcilerV1,
   normalizeRfc64PublicCatalogReceiverReconcilerV1,
   type Rfc64PublicCatalogReceiverOptionsV1,
   type Rfc64PublicCatalogReceiverStatsV1,
 } from './public-catalog-receiver-v1.js';
+import { rfc64ReceiverPositiveIntV1 } from './public-catalog-receiver-task-lifecycle-v1.js';
 import {
   isRfc64PublicCatalogReceiverSuccessCompletionV1,
   type Rfc64PublicCatalogReceiverCompletionOutcomeV1,
@@ -89,6 +91,16 @@ import {
   Rfc64PublicCatalogNativeTransportV1,
   type Rfc64PublicCatalogNativeTransportOptionsV1,
 } from './public-catalog-native-transport-v1.js';
+import {
+  RFC64_UNREGISTERED_AUTHORITY_FANOUT_CONCURRENCY_V1,
+  RFC64_UNREGISTERED_AUTHORITY_FANOUT_TIMEOUT_MS_V1,
+  RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1,
+  RFC64_UNREGISTERED_AUTHORITY_PEER_TIMEOUT_MS_V1,
+  Rfc64UnregisteredAuthorityTransportV1,
+  type Rfc64UnregisteredAuthorityScopeV1,
+  type Rfc64UnregisteredAuthorityTransportOptionsV1,
+  type Rfc64VerifiedUnregisteredAuthoritySeedV1,
+} from './unregistered-authority-transport-v1.js';
 import {
   produceDirectAuthorCatalogIssuerDelegationV1,
 } from './public-catalog-issuer-delegation-v1.js';
@@ -121,7 +133,7 @@ import {
   snapshotRfc64RemoteCatalogAnnouncementPeersV1,
 } from './catalog-peers-v1.js';
 import { CoalescingRecurringTask } from '../coalescing-recurring-task.js';
-import { mapWithConcurrency } from '../map-with-concurrency.js';
+import { everyWithConcurrency, mapWithConcurrency } from '../map-with-concurrency.js';
 
 export {
   RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1,
@@ -132,7 +144,54 @@ export {
 const DEFAULT_TRANSPORT_TIMEOUT_MS = 10_000;
 const MAX_FAILOVER_PROVIDERS_V1 = 8;
 const MAX_CONCURRENT_PROVIDER_DISCOVERIES_V1 = 4;
+/**
+ * Bound on the whole announced-scope map, fresh hints and targets retained for
+ * re-pull alike. Admission refuses a new scope at the cap; a retained target
+ * re-inserted after a pass evicts older retained work to stay under it and
+ * never an entry the lane has not pulled yet.
+ */
 const MAX_ANNOUNCED_CURRENT_HEAD_SCOPES_V1 = 1_024;
+/**
+ * Delay armed AFTER a re-pull pass completes, before the next pass may start.
+ * Not a period: successive passes for a retained head are separated by the
+ * pass duration plus this interval.
+ */
+const DEFAULT_ANNOUNCED_CURRENT_HEAD_RETRY_INTERVAL_MS_V1 = 5_000;
+/**
+ * Passes that leave an announced head unapplied before the target is dropped.
+ * This bounds attempts, not wall-clock time: abandonment takes
+ * `maxAttempts x (pass duration + interval)`, and a pass is cheap only when it
+ * fails fast. Against unreachable providers discovery alone spans up to
+ * ceil(MAX_FAILOVER_PROVIDERS_V1 / MAX_CONCURRENT_PROVIDER_DISCOVERIES_V1)
+ * waves of `transportTimeoutMs` (20 s at the defaults), and a discovered but
+ * not-found head then awaits the receiver's whole failover chain
+ * (`maxProvidersPerHead x maxAttempts` reconciles with exponential backoff).
+ * With the defaults that is ~1 min only when every pass fails instantly and
+ * several minutes otherwise; size alerting on the abandoned record accordingly.
+ */
+const DEFAULT_ANNOUNCED_CURRENT_HEAD_MAX_PULL_ATTEMPTS_V1 = 12;
+
+/**
+ * Policy-less seed serving for wallet-namespaced unregistered graphs. The
+ * read must be a keyed point lookup; the service adds signature verification,
+ * the per-CG kill-switch gate, and the wire caps.
+ */
+export interface Rfc64PublicCatalogServiceUnregisteredAuthorityOptionsV1 {
+  readonly readSeedEnvelopeBytes:
+    Rfc64UnregisteredAuthorityTransportOptionsV1['readSeedEnvelopeBytes'];
+}
+
+export interface FetchRfc64UnregisteredAuthorityFromPeersInputV1
+  extends Rfc64UnregisteredAuthorityScopeV1 {
+  /** Candidate providers; self is removed and the list is capped at the fan-out bound. */
+  readonly peerIds: readonly string[];
+  readonly signal?: AbortSignal;
+}
+
+export interface FetchedRfc64UnregisteredAuthorityFromPeersV1 {
+  readonly remotePeerId: string;
+  readonly seed: Rfc64VerifiedUnregisteredAuthoritySeedV1;
+}
 
 export interface Rfc64PublicCatalogServiceOptionsV1 {
   readonly router: ProtocolRouter;
@@ -151,6 +210,30 @@ export interface Rfc64PublicCatalogServiceOptionsV1 {
    * ambient receiver queue.
    */
   readonly currentHeadDiscovery?: Rfc64PublicCatalogServiceCurrentHeadDiscoveryOptionsV1;
+  /**
+   * Bounded re-pull of an announced current head whose acceleration pull
+   * failed, found no provider head, or applied nothing while the announced
+   * version is still ahead of the durable applied head. Only WHEN a fully
+   * verified pull is retried changes; verification itself never does.
+   * Defaults: 12 passes, 5 s armed after each pass completes. The budget is a
+   * pass count, not a wall-clock deadline: see
+   * `DEFAULT_ANNOUNCED_CURRENT_HEAD_MAX_PULL_ATTEMPTS_V1`.
+   */
+  readonly announcedCurrentHeadRetry?: Rfc64AnnouncedCurrentHeadRetryOptionsV1;
+  /**
+   * Diagnostic-only observer for every acceleration pass that left an
+   * announced head unapplied, including the terminal pass that drops it.
+   */
+  readonly onAccelerationFailed?: (
+    event: Rfc64AnnouncedCurrentHeadAccelerationFailureV1,
+  ) => void;
+  /**
+   * Optional owner-signed seed exchange for wallet-namespaced unregistered
+   * graphs. Requires no held policy on the requester: the envelope is public
+   * and self-authenticating, and holding it grants nothing until the replica
+   * independently proves finalized on-chain absence.
+   */
+  readonly unregisteredAuthority?: Rfc64PublicCatalogServiceUnregisteredAuthorityOptionsV1;
   /** Per-peer announce/fetch timeout (ms). */
   readonly transportTimeoutMs?: number;
   /**
@@ -216,6 +299,34 @@ export interface Rfc64PublicCatalogServiceNativeOptionsV1 extends Pick<
   readonly readResourceStats?: () =>
     Readonly<Rfc64PublicCatalogNativeReceiverResourceStatsV1> | null;
 }
+
+export interface Rfc64AnnouncedCurrentHeadRetryOptionsV1 {
+  /**
+   * Positive integer milliseconds armed after a re-pull pass completes before
+   * the next pass may start (not a fixed period). Default 5000.
+   */
+  readonly intervalMs?: number;
+  /**
+   * Positive integer re-pull passes before the announced head is dropped. A
+   * pass bound, not a deadline: wall-clock abandonment is
+   * `maxAttempts x (pass duration + intervalMs)`. Default 12.
+   */
+  readonly maxAttempts?: number;
+}
+
+export type Rfc64AnnouncedCurrentHeadAccelerationFailureV1 = Readonly<{
+  readonly scope: Readonly<Rfc64PublicCatalogCurrentHeadScopeV1>;
+  readonly remotePeerIds: readonly string[];
+  readonly announcedCatalogVersion: string;
+  readonly catalogHeadObjectDigest: Digest32V1;
+  /** 1-based count of completed passes that left the announced head unapplied. */
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  /** True when this pass was the last: no further re-pull is armed for the head. */
+  readonly abandoned: boolean;
+  /** Null when the pass completed without throwing but applied nothing newer. */
+  readonly error: unknown;
+}>;
 
 export interface Rfc64PublicCatalogServiceCurrentHeadDiscoveryOptionsV1 {
   /**
@@ -324,6 +435,22 @@ export interface SynchronizedRfc64CatalogCurrentHeadProvidersV1 {
 interface AnnouncedCurrentHeadTargetV1 {
   readonly scope: Readonly<Rfc64PublicCatalogCurrentHeadScopeV1>;
   readonly remotePeerIds: Set<string>;
+  /** Highest policy-admitted announcement for the scope; drives the applied check. */
+  announcement: Rfc64PublicCatalogHeadAnnouncementV1;
+  /** Completed acceleration passes that left `announcement` unapplied. */
+  attempts: number;
+  /**
+   * A hint has asked for a pull this target has not had yet. Cleared when a
+   * pass takes the target, and NOT set again when the pass retains it: the
+   * timed re-pull is the lane's own business, not work a caller is waiting on.
+   */
+  pullRequested: boolean;
+}
+
+/** One parked per-context-graph acceleration wait; `dirty` closes the lost-wakeup gap. */
+interface AnnouncedCurrentHeadWatchV1 {
+  dirty: boolean;
+  wake: (() => void) | null;
 }
 
 export interface Rfc64PublicCatalogServiceStatsV1 {
@@ -331,6 +458,10 @@ export interface Rfc64PublicCatalogServiceStatsV1 {
   readonly acceptedPolicies: number;
   readonly receiver: Rfc64PublicCatalogReceiverStatsV1;
   readonly nativeReceiver: Readonly<Rfc64PublicCatalogNativeReceiverResourceStatsV1> | null;
+  /** Announced scopes awaiting a pull pass (fresh or retained); never above the scope cap. */
+  readonly announcedCurrentHeadPendingScopes: number;
+  /** True while a bounded re-pull deadline is armed for a retained scope. */
+  readonly announcedCurrentHeadRetryArmed: boolean;
 }
 
 export class Rfc64PublicCatalogServiceV1 {
@@ -344,6 +475,7 @@ export class Rfc64PublicCatalogServiceV1 {
   readonly #currentHeadDiscoveryTransport:
     Rfc64PublicCatalogCurrentHeadDiscoveryTransportV1 | undefined;
   readonly #nativeTransport: Rfc64PublicCatalogNativeTransportV1 | undefined;
+  readonly #unregisteredAuthorityTransport: Rfc64UnregisteredAuthorityTransportV1 | undefined;
   readonly #transportTimeoutMs: number;
   readonly #readNativeResourceStats: () =>
     Readonly<Rfc64PublicCatalogNativeReceiverResourceStatsV1> | null;
@@ -353,7 +485,18 @@ export class Rfc64PublicCatalogServiceV1 {
   ) => Rfc64CatalogAuthorityPolicyV1;
   readonly #localPeerId: string | undefined;
   readonly #announcedCurrentHeadTargets = new Map<string, AnnouncedCurrentHeadTargetV1>();
+  /**
+   * Targets a running pass has taken out of the map and not yet settled. The
+   * pass empties the map on entry, so without this a target being pulled would
+   * be recorded nowhere until its admission lands at the receiver.
+   */
+  readonly #announcedCurrentHeadInFlight = new Set<AnnouncedCurrentHeadTargetV1>();
+  readonly #announcedCurrentHeadWatches = new Map<string, Set<AnnouncedCurrentHeadWatchV1>>();
   readonly #announcedCurrentHeadSupervisor: CoalescingRecurringTask | undefined;
+  readonly #announcedCurrentHeadMaxPullAttempts: number;
+  readonly #isAnnouncedHeadSatisfied: Rfc64PublicCatalogHeadSatisfactionCheckV1;
+  readonly #onAccelerationFailed:
+    Rfc64PublicCatalogServiceOptionsV1['onAccelerationFailed'];
   #started = false;
   #closed = false;
 
@@ -409,6 +552,19 @@ export class Rfc64PublicCatalogServiceV1 {
         authorizeCatalogOperation: (input) =>
           this.#authorizeCurrentHeadDiscovery(input),
         verifyIssuerSignature: this.#verifyIssuerSignature,
+      });
+
+    this.#unregisteredAuthorityTransport = options.unregisteredAuthority === undefined
+      ? undefined
+      : new Rfc64UnregisteredAuthorityTransportV1(options.router, {
+        readSeedEnvelopeBytes: options.unregisteredAuthority.readSeedEnvelopeBytes,
+        verifyIssuerSignature: this.#verifyIssuerSignature,
+        // The seed is public and self-authenticating, so serving is gated only
+        // by the per-CG kill switch: never by Track-2 selection (an author in
+        // legacy mode must still seed its replicas) and never by a requester
+        // policy (a bootstrapping replica holds none yet).
+        isServingAllowed: (contextGraphId) =>
+          !this.#resolveContextGraphAuthority(contextGraphId, 'serving').killSwitchActive,
       });
 
     this.#nativeTransport = options.native === undefined
@@ -501,12 +657,39 @@ export class Rfc64PublicCatalogServiceV1 {
             );
         },
       };
-    this.#receiver = new Rfc64PublicCatalogReceiverV1(reconciler, options.receiver);
+    this.#receiver = new Rfc64PublicCatalogReceiverV1(reconciler, {
+      ...options.receiver,
+      onTerminalEvent: (event) => {
+        // A settled receiver task can satisfy the very head a per-context-graph
+        // wait is parked on an outstanding pull for; let it look again. First,
+        // so a throwing caller observer cannot swallow the wake-up.
+        this.#notifyAnnouncedCurrentHeadProgress(event.announcement.contextGraphId);
+        options.receiver?.onTerminalEvent?.(event);
+      },
+    });
+    this.#isAnnouncedHeadSatisfied =
+      normalizeRfc64PublicCatalogReceiverReconcilerV1(reconciler).isHeadSatisfied;
+    this.#onAccelerationFailed = options.onAccelerationFailed;
+    this.#announcedCurrentHeadMaxPullAttempts = rfc64ReceiverPositiveIntV1(
+      options.announcedCurrentHeadRetry?.maxAttempts,
+      DEFAULT_ANNOUNCED_CURRENT_HEAD_MAX_PULL_ATTEMPTS_V1,
+    );
     this.#announcedCurrentHeadSupervisor = (
       this.#currentHeadDiscoveryTransport === undefined || nativeReconciler === undefined
     )
       ? undefined
       : new CoalescingRecurringTask({
+        // Without retryIntervalMs the lane never retried on its own: a pass
+        // that left a target unapplied ran again only when a NEW hint called
+        // request() (a request during a running pass already coalesced into a
+        // follow-up pass), and a retained target has no announcement coming to
+        // do that. Now a pass that retains any target returns `rearm`, so the
+        // supervisor arms exactly one re-pull deadline once the pass
+        // completes; `idle` clears it.
+        retryIntervalMs: rfc64ReceiverPositiveIntV1(
+          options.announcedCurrentHeadRetry?.intervalMs,
+          DEFAULT_ANNOUNCED_CURRENT_HEAD_RETRY_INTERVAL_MS_V1,
+        ),
         runPass: (signal) => this.#synchronizeAnnouncedCurrentHeads(signal),
         onError: () => undefined,
         closingMessage: 'RFC-64 announced current-head synchronization closing',
@@ -587,6 +770,10 @@ export class Rfc64PublicCatalogServiceV1 {
     if (this.#started) return;
     this.#nativeTransport?.start();
     try {
+      // Seed serving registers before discovery and announce so a fresh
+      // replica's first bootstrap pull can never race this endpoint's
+      // registration on a node that has just come up.
+      this.#unregisteredAuthorityTransport?.start();
       this.#currentHeadDiscoveryTransport?.start();
       // Register the announcement protocol last so no callback can schedule
       // reconciliation before content-fetch and pull-discovery are live.
@@ -594,6 +781,7 @@ export class Rfc64PublicCatalogServiceV1 {
       this.#started = true;
     } catch (cause) {
       this.#currentHeadDiscoveryTransport?.stop();
+      this.#unregisteredAuthorityTransport?.stop();
       this.#nativeTransport?.stop();
       throw cause;
     }
@@ -603,6 +791,8 @@ export class Rfc64PublicCatalogServiceV1 {
   async closeReceiverAdmissionAndDrain(): Promise<void> {
     await this.#announcedCurrentHeadSupervisor?.close();
     this.#announcedCurrentHeadTargets.clear();
+    this.#announcedCurrentHeadInFlight.clear();
+    this.#notifyAnnouncedCurrentHeadProgress();
     await this.#receiver.close();
   }
 
@@ -613,6 +803,7 @@ export class Rfc64PublicCatalogServiceV1 {
         this.#announcedCurrentHeadTargets.delete(key);
       }
     }
+    this.#notifyAnnouncedCurrentHeadProgress(contextGraphId);
     this.#receiver.cancelContextGraph(contextGraphId);
   }
 
@@ -628,8 +819,76 @@ export class Rfc64PublicCatalogServiceV1 {
     } finally {
       this.#transport.stop();
       this.#currentHeadDiscoveryTransport?.stop();
+      this.#unregisteredAuthorityTransport?.stop();
       this.#nativeTransport?.stop();
     }
+  }
+
+  /**
+   * Bounded first-verified-wins pull of one wallet-namespaced graph's
+   * owner-signed seed from connected peers. Every answer is authenticated
+   * against the exact scope and the wallet prefix of the graph id before it
+   * counts; not-found, denial, wire, signature and mismatch failures are
+   * per-peer misses. Resolves null when no peer served a verified seed. This
+   * method persists and accepts nothing: the caller writes the seed through the
+   * keyed store and lets the finalized-absence reconcile decide.
+   */
+  async fetchUnregisteredAuthorityFromPeers(
+    input: FetchRfc64UnregisteredAuthorityFromPeersInputV1,
+  ): Promise<FetchedRfc64UnregisteredAuthorityFromPeersV1 | null> {
+    this.#requireStarted();
+    const transport = this.#unregisteredAuthorityTransport;
+    if (transport === undefined) {
+      throw new Error('RFC-64 unregistered-authority seed exchange is not configured');
+    }
+    const scope: Rfc64UnregisteredAuthorityScopeV1 = Object.freeze({
+      networkId: input.networkId,
+      contextGraphId: input.contextGraphId,
+    });
+    const peers = (this.#localPeerId === undefined
+      ? snapshotRfc64PublicCatalogAnnouncementPeersV1(input.peerIds)
+      : snapshotRfc64RemoteCatalogAnnouncementPeersV1(input.peerIds, this.#localPeerId)
+    ).slice(0, RFC64_UNREGISTERED_AUTHORITY_MAX_FANOUT_PEERS_V1);
+    input.signal?.throwIfAborted();
+    if (peers.length === 0) return null;
+
+    // The whole fan-out shares one deadline well inside the caller's bootstrap
+    // budget; each peer additionally gets a short send deadline so one slow
+    // dial cannot consume the budget on behalf of the others.
+    const budget = AbortSignal.timeout(RFC64_UNREGISTERED_AUTHORITY_FANOUT_TIMEOUT_MS_V1);
+    const signal = input.signal === undefined
+      ? budget
+      : AbortSignal.any([input.signal, budget]);
+    const perPeerTimeoutMs = Math.min(
+      this.#transportTimeoutMs,
+      RFC64_UNREGISTERED_AUTHORITY_PEER_TIMEOUT_MS_V1,
+    );
+    let winner: FetchedRfc64UnregisteredAuthorityFromPeersV1 | null = null;
+    await everyWithConcurrency(
+      peers,
+      RFC64_UNREGISTERED_AUTHORITY_FANOUT_CONCURRENCY_V1,
+      async (remotePeerId, _index, siblingSignal) => {
+        try {
+          const seed = await transport.fetchUnregisteredAuthority(remotePeerId, scope, {
+            timeoutMs: perPeerTimeoutMs,
+            signal: siblingSignal,
+          });
+          if (seed === null) return true;
+          if (winner === null) winner = Object.freeze({ remotePeerId, seed });
+          // First verified seed wins; abort the siblings still in flight.
+          return false;
+        } catch (cause) {
+          // A sibling cancelled by the winner is not a failure of anything.
+          if (winner !== null) return false;
+          // Caller abort or fan-out deadline: stop everything, surface it.
+          if (signal.aborted) throw signal.reason ?? cause;
+          // Per-peer miss (denied, wire, signature, mismatch, dial): next peer.
+          return true;
+        }
+      },
+      signal,
+    );
+    return winner;
   }
 
   /**
@@ -1015,12 +1274,150 @@ export class Rfc64PublicCatalogServiceV1 {
     await this.#receiver.whenIdle();
   }
 
+  /**
+   * The same wait, scoped to ONE context graph in BOTH halves.
+   *
+   * Neither half may be node-wide. `supervisor.whenIdle()` spans every
+   * coalesced pass, and a pass awaits the receiver completion of every graph's
+   * verified task, so it is another graph's queued or wedged receiver work
+   * reached by the other door: a caller parked on it holds its own
+   * replay-active flag, and with it this graph's reported parity, for as long
+   * as any other graph keeps the lane busy.
+   *
+   * What is awaited instead is this graph's own outstanding pulls: targets a
+   * running pass has taken (tracked in flight, because the pass empties the map
+   * on entry and they would otherwise be recorded nowhere until the admission
+   * lands) and targets a hint has requested a pull for. A target whose
+   * announced head is already satisfied is not waited on: the pull can no
+   * longer change what the caller is about to read, and it may be queued
+   * behind a pass that another graph is holding open. A target retained for
+   * the timed re-pull is not waited on either, exactly as `whenIdle()` never
+   * waited on an armed timer: that would park a graph's pass for the lane's
+   * whole retry budget on one head that cannot be pulled.
+   *
+   * Scoped still means queued: this graph's own receiver tasks share the
+   * receiver's slots and FIFO queue with every other graph.
+   */
+  async whenReceiverIdleForContextGraph(
+    contextGraphId: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    for (;;) {
+      signal?.throwIfAborted();
+      await this.#receiver.whenIdleForContextGraph(contextGraphId, signal);
+      signal?.throwIfAborted();
+      // A settled pull may just have admitted this graph's verified task, so
+      // every wait here goes back through the receiver before returning.
+      if (!(await this.#awaitAnnouncedCurrentHeadPulls(contextGraphId, signal))) return;
+    }
+  }
+
+  /** Park on this graph's unsatisfied outstanding pulls; false when there are none. */
+  async #awaitAnnouncedCurrentHeadPulls(
+    contextGraphId: string,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    signal?.throwIfAborted();
+    if (this.#closed) return false;
+    const outstanding = this.#outstandingAnnouncedCurrentHeadTargets(contextGraphId);
+    if (outstanding.length === 0) return false;
+    // Registered BEFORE the durable reads: progress that lands while they run
+    // marks the watch dirty instead of being lost.
+    const watch: AnnouncedCurrentHeadWatchV1 = { dirty: false, wake: null };
+    let watches = this.#announcedCurrentHeadWatches.get(contextGraphId);
+    if (watches === undefined) {
+      watches = new Set();
+      this.#announcedCurrentHeadWatches.set(contextGraphId, watches);
+    }
+    watches.add(watch);
+    try {
+      let unsatisfied = false;
+      for (const target of outstanding) {
+        signal?.throwIfAborted();
+        if (!(await this.#isAnnouncedHeadApplied(target.announcement))) {
+          unsatisfied = true;
+          break;
+        }
+      }
+      signal?.throwIfAborted();
+      if (!unsatisfied) return false;
+      if (!watch.dirty && !this.#closed) {
+        await new Promise<void>((resolve, reject) => {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            signal?.removeEventListener('abort', onAbort);
+            resolve();
+          };
+          const onAbort = () => {
+            if (settled) return;
+            settled = true;
+            signal?.removeEventListener('abort', onAbort);
+            reject(signal?.reason ?? new DOMException(
+              'RFC-64 announced-head idle wait aborted',
+              'AbortError',
+            ));
+          };
+          watch.wake = finish;
+          signal?.addEventListener('abort', onAbort, { once: true });
+          if (signal?.aborted) onAbort();
+        });
+      }
+      signal?.throwIfAborted();
+      return true;
+    } finally {
+      watches.delete(watch);
+      if (
+        watches.size === 0
+        && this.#announcedCurrentHeadWatches.get(contextGraphId) === watches
+      ) {
+        this.#announcedCurrentHeadWatches.delete(contextGraphId);
+      }
+    }
+  }
+
+  #outstandingAnnouncedCurrentHeadTargets(
+    contextGraphId: string,
+  ): AnnouncedCurrentHeadTargetV1[] {
+    const outstanding: AnnouncedCurrentHeadTargetV1[] = [];
+    for (const target of this.#announcedCurrentHeadInFlight) {
+      if (target.scope.contextGraphId === contextGraphId) outstanding.push(target);
+    }
+    for (const target of this.#announcedCurrentHeadTargets.values()) {
+      if (target.pullRequested && target.scope.contextGraphId === contextGraphId) {
+        outstanding.push(target);
+      }
+    }
+    return outstanding;
+  }
+
+  /**
+   * Something a parked per-context-graph wait depends on moved for this graph
+   * (every graph when omitted): a pull settled, a target was dropped, or one of
+   * its receiver tasks reached a terminal outcome.
+   */
+  #notifyAnnouncedCurrentHeadProgress(contextGraphId?: string): void {
+    const notified = contextGraphId === undefined
+      ? [...this.#announcedCurrentHeadWatches.values()]
+      : [this.#announcedCurrentHeadWatches.get(contextGraphId)];
+    for (const watches of notified) {
+      if (watches === undefined) continue;
+      for (const watch of watches) {
+        watch.dirty = true;
+        watch.wake?.();
+      }
+    }
+  }
+
   stats(): Rfc64PublicCatalogServiceStatsV1 {
     return Object.freeze({
       started: this.#started,
       acceptedPolicies: this.#policies.size,
       receiver: this.#receiver.stats(),
       nativeReceiver: this.#readNativeResourceStats(),
+      announcedCurrentHeadPendingScopes: this.#announcedCurrentHeadTargets.size,
+      announcedCurrentHeadRetryArmed: this.#announcedCurrentHeadSupervisor?.scheduled === true,
     });
   }
 
@@ -1056,36 +1453,222 @@ export class Rfc64PublicCatalogServiceV1 {
           catalogEra: announcement.catalogEra,
         }),
         remotePeerIds: new Set<string>(),
+        announcement,
+        attempts: 0,
+        pullRequested: true,
       };
       this.#announcedCurrentHeadTargets.set(key, target);
+    } else if (
+      compareCatalogVersionsV1(announcement.catalogVersion, target.announcement.catalogVersion)
+        > 0
+    ) {
+      // A strictly newer head is new work: it earns a fresh bounded budget.
+      target.announcement = announcement;
+      target.attempts = 0;
     }
     if (target.remotePeerIds.size < MAX_FAILOVER_PROVIDERS_V1) {
       target.remotePeerIds.add(remotePeerId);
     }
+    // Also for a target retained from an earlier pass: this hint coalesces a
+    // pass that pulls it now, so a caller waiting on this graph waits for it.
+    target.pullRequested = true;
     supervisor.request();
   }
 
-  /** One globally bounded pass; requests arriving during it coalesce into the next pass. */
-  async #synchronizeAnnouncedCurrentHeads(signal: AbortSignal): Promise<void> {
-    const targets = [...this.#announcedCurrentHeadTargets.values()];
+  /**
+   * One globally bounded pass; requests arriving during it coalesce into the
+   * next pass. A target whose pull threw, found no provider head, or applied
+   * nothing that satisfies the announced head is retained for one bounded
+   * re-pull (`rearm`) and dropped, observably, after the attempt budget or
+   * when retaining it would breach the scope cap. No step after the pull may
+   * throw: `mapWithConcurrency` settles on its first rejection while its other
+   * workers run on unsupervised, so one target's bad read would report the
+   * pass complete early, swallow the rejection, and hide its siblings' fates.
+   */
+  async #synchronizeAnnouncedCurrentHeads(signal: AbortSignal): Promise<'rearm' | 'idle'> {
+    const targets = [...this.#announcedCurrentHeadTargets.entries()];
     this.#announcedCurrentHeadTargets.clear();
+    // Same synchronous block as the clear, so a target is never recorded
+    // nowhere: a per-context-graph wait finds it here until its worker settles.
+    for (const [, target] of targets) {
+      target.pullRequested = false;
+      this.#announcedCurrentHeadInFlight.add(target);
+    }
+    let retained = false;
     await mapWithConcurrency(
       targets,
       MAX_CONCURRENT_PROVIDER_DISCOVERIES_V1,
-      async ({ scope, remotePeerIds }) => {
+      this.#settlingAnnouncedCurrentHeadTarget(async ([key, target]) => {
+        const { scope, remotePeerIds } = target;
         if (signal.aborted || remotePeerIds.size === 0) return;
+        let error: unknown = null;
         try {
           await this.synchronizeCurrentCatalogHeadFromProviders({
             remotePeerIds: [...remotePeerIds],
             scope,
             signal,
           });
-        } catch {
-          // Best-effort acceleration only. The original ambient task remains
-          // authoritative recovery work, and a later hint requests a new pull.
+        } catch (cause) {
+          // Best-effort acceleration: the ambient task remains authoritative
+          // recovery work, but the failure must neither vanish nor loop.
+          error = cause;
         }
-      },
-    );
+        if (signal.aborted || this.#closed) return;
+        if (await this.#isAnnouncedHeadApplied(target.announcement)) return;
+        const retryability = this.#announcedHeadRetryability(scope);
+        if (retryability === 'inactive') return;
+        target.attempts += 1;
+        if (retryability !== 'retryable') {
+          this.#observeAccelerationFailure(target, true, retryability.error);
+          return;
+        }
+        if (target.attempts >= this.#announcedCurrentHeadMaxPullAttempts) {
+          this.#observeAccelerationFailure(target, true, error);
+          return;
+        }
+        if (!this.#retainAnnouncedCurrentHeadTarget(key, target)) {
+          this.#observeAccelerationFailure(
+            target,
+            true,
+            announcedCurrentHeadRetainCapacityErrorV1(error),
+          );
+          return;
+        }
+        this.#observeAccelerationFailure(target, false, error);
+        retained = true;
+      }),
+    ).finally(() => {
+      // No step of a worker may throw, but a target stranded in flight would
+      // park its graph's replay pass for good, so the pass never leaves one.
+      for (const [, target] of targets) this.#settleAnnouncedCurrentHeadTarget(target);
+    });
+    return retained && !this.#closed ? 'rearm' : 'idle';
+  }
+
+  /** A pass worker whose target leaves the in-flight set however the worker ends. */
+  #settlingAnnouncedCurrentHeadTarget(
+    worker: (entry: [string, AnnouncedCurrentHeadTargetV1]) => Promise<void>,
+  ): (entry: [string, AnnouncedCurrentHeadTargetV1]) => Promise<void> {
+    return async (entry) => {
+      try {
+        await worker(entry);
+      } finally {
+        this.#settleAnnouncedCurrentHeadTarget(entry[1]);
+      }
+    };
+  }
+
+  #settleAnnouncedCurrentHeadTarget(target: AnnouncedCurrentHeadTargetV1): void {
+    if (!this.#announcedCurrentHeadInFlight.delete(target)) return;
+    this.#notifyAnnouncedCurrentHeadProgress(target.scope.contextGraphId);
+  }
+
+  /** Applied-head truth for the retry decision; a failing read is "not applied". */
+  async #isAnnouncedHeadApplied(
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ): Promise<boolean> {
+    try {
+      return await this.#isAnnouncedHeadSatisfied(announcement);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Never re-pull for a scope the receiver no longer applies: `inactive` is
+   * dropped silently. A policy or authority read that throws is not retryable
+   * either, but it is a failure rather than a deactivation, so the caller
+   * drops the target WITH the error; the throw itself must not leave the pass.
+   */
+  #announcedHeadRetryability(
+    scope: Readonly<Rfc64PublicCatalogCurrentHeadScopeV1>,
+  ): 'retryable' | 'inactive' | Readonly<{ error: unknown }> {
+    try {
+      return this.#policies.lookup(scope.networkId, scope.contextGraphId) !== null
+        && this.#resolveContextGraphAuthority(scope.contextGraphId, 'receiving')
+          .reconciliationLane === 'catalog-apply'
+        ? 'retryable'
+        : 'inactive';
+    } catch (error) {
+      return Object.freeze({ error });
+    }
+  }
+
+  /**
+   * Re-insert a target the pass left unapplied. It merges into any fresher
+   * hint that arrived during the pass; otherwise it must fit under
+   * `MAX_ANNOUNCED_CURRENT_HEAD_SCOPES_V1`, which admission enforced only
+   * against the map this pass cleared on entry, so fresh hints may have
+   * refilled it meanwhile. Retained work is older than any fresh hint: when
+   * the map is full the most-attempted retained entry yields (dropped
+   * observably), and an entry the lane has not pulled yet never does. Returns
+   * false when this target is the one that yields.
+   */
+  #retainAnnouncedCurrentHeadTarget(key: string, target: AnnouncedCurrentHeadTargetV1): boolean {
+    const targets = this.#announcedCurrentHeadTargets;
+    const current = targets.get(key);
+    if (current !== undefined) {
+      for (const remotePeerId of target.remotePeerIds) {
+        if (current.remotePeerIds.size >= MAX_FAILOVER_PROVIDERS_V1) break;
+        current.remotePeerIds.add(remotePeerId);
+      }
+      const order = compareCatalogVersionsV1(
+        current.announcement.catalogVersion,
+        target.announcement.catalogVersion,
+      );
+      if (order < 0) {
+        current.announcement = target.announcement;
+        current.attempts = target.attempts;
+      } else if (order === 0) {
+        current.attempts = Math.max(current.attempts, target.attempts);
+      }
+      return true;
+    }
+    if (targets.size >= MAX_ANNOUNCED_CURRENT_HEAD_SCOPES_V1) {
+      // `attempts` is 0 exactly for an entry never pulled, and this target has
+      // at least one, so a fresh hint can never be selected here.
+      let victim: [string, AnnouncedCurrentHeadTargetV1] | undefined;
+      let victimAttempts = target.attempts;
+      for (const entry of targets) {
+        if (entry[1].attempts > victimAttempts) {
+          victim = entry;
+          victimAttempts = entry[1].attempts;
+        }
+      }
+      if (victim === undefined) return false;
+      targets.delete(victim[0]);
+      this.#notifyAnnouncedCurrentHeadProgress(victim[1].scope.contextGraphId);
+      this.#observeAccelerationFailure(
+        victim[1],
+        true,
+        announcedCurrentHeadRetainCapacityErrorV1(null),
+      );
+    }
+    targets.set(key, target);
+    return true;
+  }
+
+  #observeAccelerationFailure(
+    target: AnnouncedCurrentHeadTargetV1,
+    abandoned: boolean,
+    error: unknown,
+  ): void {
+    const observer = this.#onAccelerationFailed;
+    if (observer === undefined) return;
+    try {
+      observer(Object.freeze({
+        scope: target.scope,
+        remotePeerIds: Object.freeze([...target.remotePeerIds]),
+        announcedCatalogVersion: target.announcement.catalogVersion,
+        catalogHeadObjectDigest: target.announcement.catalogHeadObjectDigest,
+        attempt: target.attempts,
+        maxAttempts: this.#announcedCurrentHeadMaxPullAttempts,
+        abandoned,
+        error,
+      }));
+    } catch {
+      // Observer failures never own acceleration work.
+    }
   }
 
   #authorityForOperation(
@@ -1315,6 +1898,21 @@ function exactHeadIdentityV1(
     announcement.catalogHeadObjectDigest,
     announcement.signatureVariantDigest,
   ].join('\n');
+}
+
+/** A retained re-pull target dropped so the announced-scope map stays under its cap. */
+function announcedCurrentHeadRetainCapacityErrorV1(cause: unknown): Error {
+  return new Error(
+    'RFC-64 announced current-head re-pull dropped: retained-scope capacity exhausted',
+    cause === null ? {} : { cause },
+  );
+}
+
+/** Numeric order of two validated decimal catalog versions. */
+function compareCatalogVersionsV1(left: string, right: string): -1 | 0 | 1 {
+  const l = BigInt(left);
+  const r = BigInt(right);
+  return l < r ? -1 : l > r ? 1 : 0;
 }
 
 function announcedCurrentHeadScopeKeyV1(

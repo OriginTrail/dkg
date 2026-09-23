@@ -42,6 +42,8 @@ import {
   AUTHOR_SCHEME_VERSION_V1,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
+  PROTOCOL_STORAGE_ACK_V2,
+  PROTOCOL_STORAGE_UPDATE_ACK_V2,
   buildUpdateAuthorAttestationTypedData,
   contextGraphDataUri,
   contextGraphMetaUri,
@@ -123,6 +125,7 @@ vi.mock('@origintrail-official/dkg-publisher', async () => {
  */
 interface ACKCollectorDepsCapture {
   sendP2P?: (peerId: string, protocol: string, data: Uint8Array) => Promise<Uint8Array>;
+  getConnectedCorePeers?: (protocol?: string) => string[] | Promise<string[]>;
   verifyIdentity?: (recoveredAddress: string, identityId: bigint) => Promise<boolean>;
   verifyIdentityDetailed?: (
     recoveredAddress: string,
@@ -152,6 +155,7 @@ interface ProviderInternals {
     log?: (message: string) => void;
   }): () => {
     sendP2P(peerId: string, protocol: string, data: Uint8Array): Promise<Uint8Array>;
+    getConnectedCorePeers(protocol?: string): string[] | Promise<string[]>;
   };
   router: unknown;
   gossip: unknown;
@@ -164,6 +168,7 @@ interface ProviderInternals {
     };
     ackHandlerDeadlineMs?: number;
     ackSendTimeoutMs?: number;
+    ackCandidatePeerIds?: string[];
   };
   chain: MockChainAdapter & {
     verifyACKIdentity?: (recoveredAddress: string, identityId: bigint) => Promise<boolean>;
@@ -172,7 +177,25 @@ interface ProviderInternals {
       identityId: bigint,
     ) => Promise<VerifyACKIdentityResult>;
   };
-  node: { libp2p: { getPeers(): unknown[] } };
+  node: {
+    libp2p: {
+      getPeers(): Array<{ toString(): string }>;
+      getConnections?(): Array<{ remotePeer: { toString(): string } }>;
+    };
+  };
+  knownCorePeerIds: Set<string>;
+  knownCorePeerIdsV2: Set<string>;
+  networkAdmissionCoordinator: {
+    enabled: boolean;
+    isAcceptedPeer(peerId: string): boolean;
+    isRejectedPeer(peerId: string): boolean;
+    verifiedSameNetworkPeerIds(): ReadonlySet<string>;
+    preflightPeerAdmission(
+      peerIds: Iterable<string>,
+      ctx: unknown,
+      options?: { maxConcurrency?: number },
+    ): Promise<{ checked: number; admitted: number; unresolved: number }>;
+  };
 }
 
 async function bootProviderAgent(options: Record<string, unknown> = {}): Promise<{ agent: DKGAgent; internals: ProviderInternals }> {
@@ -395,6 +418,117 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     await expect(first).resolves.toEqual([]);
     await vi.waitFor(() => expect(entered).toBe(2));
     await expect(second).resolves.toEqual([]);
+  });
+
+  it('preflights the selector candidate universe and exposes newly admitted peers to publish, update, and async pools', async () => {
+    const boot = await bootProviderAgent();
+    agent = boot.agent;
+    const internals = boot.internals;
+    const accepted = new Set(['already-admitted']);
+    const preflightPeerAdmission = vi.fn(async (peerIds: Iterable<string>) => {
+      const peers = [...peerIds];
+      // Admission is genuinely asynchronous in production. Yield before the
+      // side effect so this test fails if the pool is frozen without awaiting
+      // preflight completion.
+      await Promise.resolve();
+      accepted.add('new-v2-core');
+      accepted.add('unclassified-core');
+      return { checked: peers.length, admitted: 2, unresolved: 1 };
+    });
+    internals.networkAdmissionCoordinator = {
+      enabled: true,
+      isAcceptedPeer: (peerId) => accepted.has(peerId),
+      isRejectedPeer: (peerId) => peerId === 'rejected-peer',
+      verifiedSameNetworkPeerIds: () => accepted,
+      preflightPeerAdmission,
+    };
+    internals.knownCorePeerIds = new Set([
+      'already-admitted',
+      'new-v2-core',
+      'rejected-peer',
+      'retryable-probe-failure',
+    ]);
+    internals.knownCorePeerIdsV2 = new Set(['new-v2-core']);
+    internals.node = {
+      libp2p: {
+        getPeers: () => [
+          'already-admitted',
+          'new-v2-core',
+          'rejected-peer',
+          'retryable-probe-failure',
+          'unclassified-core',
+        ].map((id) => ({ toString: () => id })),
+        getConnections: () => [{
+          remotePeer: { toString: () => 'new-v2-core' },
+        }],
+      },
+    };
+    internals.createV10ACKProvider('test-cg');
+    internals.createV10UpdateACKProvider('test-cg');
+    const publishDeps = capturedAckCollectorDeps[0] as ACKCollectorDepsCapture;
+    const updateDeps = capturedAckCollectorDeps[1] as ACKCollectorDepsCapture;
+    const asyncTransport = internals.createACKTransportFactory()();
+
+    const publishPool = await publishDeps.getConnectedCorePeers!(PROTOCOL_STORAGE_ACK_V2);
+    const updatePool = await updateDeps.getConnectedCorePeers!(PROTOCOL_STORAGE_UPDATE_ACK_V2);
+    const asyncPool = await asyncTransport.getConnectedCorePeers(PROTOCOL_STORAGE_ACK_V2);
+
+    for (const pool of [publishPool, updatePool, asyncPool]) {
+      expect(pool).toContain('already-admitted');
+      expect(pool).toContain('new-v2-core');
+      expect(pool).toContain('unclassified-core');
+      expect(pool).not.toContain('retryable-probe-failure');
+      expect(pool).not.toContain('rejected-peer');
+    }
+    expect(preflightPeerAdmission).toHaveBeenCalledTimes(3);
+    const expectedOperationNames = ['publish', 'update', 'publish'];
+    for (const [index, [peerIds, ctx, options]] of preflightPeerAdmission.mock.calls.entries()) {
+      expect([...peerIds]).toEqual([
+        'already-admitted',
+        'new-v2-core',
+        'rejected-peer',
+        'retryable-probe-failure',
+        'unclassified-core',
+      ]);
+      expect(ctx).toMatchObject({ operationName: expectedOperationNames[index] });
+      expect(options).toEqual({ maxConcurrency: 4 });
+    }
+  });
+
+  it('keeps configured ACK allowlists authoritative during admission preflight', async () => {
+    const boot = await bootProviderAgent();
+    agent = boot.agent;
+    const internals = boot.internals;
+    const accepted = new Set<string>();
+    const preflightPeerAdmission = vi.fn(async (peerIds: Iterable<string>) => {
+      const peers = [...peerIds];
+      for (const peerId of peers) accepted.add(peerId);
+      return { checked: peers.length, admitted: peers.length, unresolved: 0 };
+    });
+    internals.networkAdmissionCoordinator = {
+      enabled: true,
+      isAcceptedPeer: (peerId) => accepted.has(peerId),
+      isRejectedPeer: () => false,
+      verifiedSameNetworkPeerIds: () => accepted,
+      preflightPeerAdmission,
+    };
+    internals.config.ackCandidatePeerIds = ['allow-a', 'allow-b', 'disconnected-allowlisted'];
+    internals.knownCorePeerIds = new Set(['outside-allowlist']);
+    internals.knownCorePeerIdsV2 = new Set();
+    internals.node = {
+      libp2p: {
+        getPeers: () => ['allow-a', 'allow-b', 'outside-allowlist']
+          .map((id) => ({ toString: () => id })),
+        getConnections: () => [],
+      },
+    };
+    internals.createV10ACKProvider('test-cg');
+    const publishDeps = capturedAckCollectorDeps[0] as ACKCollectorDepsCapture;
+
+    await expect(publishDeps.getConnectedCorePeers!(PROTOCOL_STORAGE_ACK_V2))
+      .resolves.toEqual(['allow-a', 'allow-b']);
+    expect(preflightPeerAdmission).toHaveBeenCalledTimes(1);
+    expect([...preflightPeerAdmission.mock.calls[0][0]]).toEqual(['allow-a', 'allow-b']);
   });
 
   it('shares a configurable FIFO StorageACK limit across publish and update and releases rejected slots', async () => {

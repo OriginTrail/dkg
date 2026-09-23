@@ -159,3 +159,45 @@ describe('strict finalized snapshot config validation', () => {
     ).toMatchObject({ blockReferenceProfile: 'eip1898' });
   });
 });
+
+describe('strict finalized snapshot config finality depth', () => {
+  it('forwards chain.finalityConfirmations through the snapshot rebuild', () => {
+    // The snapshot wrapper REBUILDS its base from proven data properties rather
+    // than spreading the caller's object, so a field it forgets to copy is
+    // silently replaced by the default. The RFC-64 precommits are the only real
+    // users of this path, so that omission would leave the precommit anchor at
+    // depth 1 while the one-shot read path honoured the operator.
+    expect(snapshotStrictFinalizedSnapshotConfigV1({
+      chainId: CHAIN_ID,
+      endpoints: [ENDPOINT],
+      finalityConfirmations: 7,
+      owner: 'rfc64',
+    })).toMatchObject({ finalityConfirmations: 7, owner: 'rfc64' });
+  });
+
+  it('defaults an omitted depth to the shared single definition', () => {
+    expect(snapshotStrictFinalizedSnapshotConfigV1({
+      chainId: CHAIN_ID,
+      endpoints: [ENDPOINT],
+    }).finalityConfirmations).toBe(1);
+    expect(snapshotStrictCurrentFinalizedEvmConfigV1({
+      chainId: CHAIN_ID,
+      endpoints: [ENDPOINT],
+    }).finalityConfirmations).toBe(1);
+  });
+
+  it.each([0, -1, 1.5, '2', null] as const)(
+    'rejects %p as a finality depth on both doors',
+    (finalityConfirmations) => {
+      const config = {
+        chainId: CHAIN_ID,
+        endpoints: [ENDPOINT],
+        finalityConfirmations,
+      } as never;
+      expect(() => snapshotStrictCurrentFinalizedEvmConfigV1(config))
+        .toThrow(/finalityConfirmations must be an integer >= 1/);
+      expect(() => snapshotStrictFinalizedSnapshotConfigV1(config))
+        .toThrow(/finalityConfirmations must be an integer >= 1/);
+    },
+  );
+});

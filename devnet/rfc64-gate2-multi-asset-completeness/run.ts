@@ -41,6 +41,10 @@ import {
 import { verify as verifyInventoryContract } from './src/verify.ts';
 import { canonicalDocument, type CanonicalValue } from './src/canonical.ts';
 import {
+  assertRuntimeProcessIdentityV1,
+  type RuntimeProcessIdentityV1,
+} from '../rfc64-runtime-process-evidence.mts';
+import {
   buildGate2RuntimeProvenanceV1,
   consumeGate2RuntimeLaunchReceiptV1,
   type Gate2ExecutedRuntimeManifestV1,
@@ -389,10 +393,23 @@ async function execute(): Promise<void> {
       'forged',
     );
     const statsAfterForged = await readReceiverStats(receiver, 'after-forged');
-    exact(
-      requiredSafeInteger(statsAfterForged.failed, 'statsAfterForged.failed'),
-      requiredSafeInteger(statsBeforeForged.failed, 'statsBeforeForged.failed') + 1,
-      'forged terminal failure count',
+    const forgedFailedDelta = requiredSafeInteger(
+      statsAfterForged.failed,
+      'statsAfterForged.failed',
+    ) - requiredSafeInteger(statsBeforeForged.failed, 'statsBeforeForged.failed');
+    const forgedNotFoundDelta = requiredSafeInteger(
+      statsAfterForged.notFound,
+      'statsAfterForged.notFound',
+    ) - requiredSafeInteger(statsBeforeForged.notFound, 'statsBeforeForged.notFound');
+    // Scoped provider closures intentionally collapse an unauthorized or
+    // missing object into the indistinguishable not-found result. The forged
+    // announcement must still produce exactly one terminal rejection, whether
+    // the receiver learns of the invalid delegation before or after transport.
+    requireCondition(
+      (forgedFailedDelta === 1 && forgedNotFoundDelta === 0)
+        || (forgedFailedDelta === 0 && forgedNotFoundDelta === 1),
+      `forged terminal rejection was not recorded exactly once (failedDelta=${forgedFailedDelta}, `
+        + `notFoundDelta=${forgedNotFoundDelta})`,
     );
     const forgedScopeDigest = computeAuthorCatalogScopeDigestV1({
       networkId: NETWORK_ID,
@@ -447,14 +464,18 @@ async function execute(): Promise<void> {
       'operation-completed',
       { catalogHeadDigest: forgedHeadDigest },
     ), 'forged terminal failure');
-    const failureCode = requiredString(terminalFailure.errorCode, 'terminalFailure.errorCode');
+    const failureCode = terminalFailure.errorCode;
     requiredString(terminalFailure.errorName, 'terminalFailure.errorName');
     exact(
       requiredDigest(terminalFailure.catalogHeadDigest, 'terminalFailure.catalogHeadDigest'),
       forgedHeadDigest,
       'terminal failure head digest',
     );
-    exact(failureCode, 'catalog-native-receiver-authorization', 'terminal failure code');
+    exact(
+      terminalFailure.errorCode,
+      forgedFailedDelta === 1 ? 'catalog-native-receiver-authorization' : null,
+      'terminal failure code',
+    );
 
     const receiverCrashBoundary = await receiver.killRestartBoundary('receiver-crash-v1');
     const restartedReceiver = spawnGate2HarnessAgentV1({
@@ -526,10 +547,12 @@ async function execute(): Promise<void> {
       [
         {
           id: 'author',
+          identity: requiredProcessIdentity(authorBoundary.event, 'author stop'),
           loaded: requiredExecutedRuntimeManifest(authorBoundary.event, 'author stop'),
         },
         {
           id: 'receiverBeforeCrash',
+          identity: requiredProcessIdentity(receiverCrashBoundary.event, 'receiver pre-SIGKILL'),
           loaded: requiredExecutedRuntimeManifest(
             receiverCrashBoundary.event,
             'receiver pre-SIGKILL',
@@ -537,6 +560,10 @@ async function execute(): Promise<void> {
         },
         {
           id: 'receiverAfterRestart',
+          identity: requiredProcessIdentity(
+            restartedReceiverBoundary.event,
+            'restarted receiver stop',
+          ),
           loaded: requiredExecutedRuntimeManifest(
             restartedReceiverBoundary.event,
             'restarted receiver stop',
@@ -1069,11 +1096,23 @@ function selectReady(event: Gate2AgentEvent): Record<string, unknown> {
   return {
     adapterId: event.adapterId,
     peerId: event.peerId,
+    processIdentity: requiredProcessIdentity(event, `${event.role} ready`),
     protocolVersion: event.protocolVersion,
     role: event.role,
     runtimeBuildManifestDigest: event.runtimeBuildManifestDigest,
     startupRepair: event.startupRepair,
   };
+}
+
+function requiredProcessIdentity(
+  event: Gate2AgentEvent,
+  label: string,
+): Readonly<RuntimeProcessIdentityV1> {
+  assertRuntimeProcessIdentityV1(event.processIdentity, `${label} process identity`);
+  return Object.freeze({
+    hostIdentity: event.processIdentity.hostIdentity,
+    pid: event.processIdentity.pid,
+  });
 }
 
 function requiredExecutedRuntimeManifest(

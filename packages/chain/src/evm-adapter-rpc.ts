@@ -16,6 +16,8 @@ import {
   errorStatus,
 } from './evm-adapter-errors.js';
 import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
+import { ContextGraphAuthorityIndexBootstrapUnavailableError } from
+  './context-graph-authority-index-snapshot.js';
 export { boundedRetryFetchRequest } from './rpc-request-transport.js';
 
 /**
@@ -112,6 +114,9 @@ export type RpcRetryDisposition = 'fail' | 'retry-later' | 'failover';
  * another endpoint attempt in the same process cannot help them.
  */
 export function classifyRpcRetryDisposition(err: unknown): RpcRetryDisposition {
+  // A failed trusted-core walk belongs to the bootstrap transport. Another RPC
+  // endpoint must not multiply its complete peer/deadline/CAS budget.
+  if (err instanceof ContextGraphAuthorityIndexBootstrapUnavailableError) return 'retry-later';
   if (err instanceof Error) enrichEvmError(err);
   const code = errorCode(err);
   const status = errorStatus(err);

@@ -36,6 +36,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-public-catalog-transport-v1.test.ts",
   "test/rfc64-public-catalog-current-head-discovery-v1.test.ts",
   "test/rfc64-public-catalog-receiver-v1.test.ts",
+  "test/rfc64-receiver-task-lifecycle-scoped-idle-v1.test.ts",
   "test/rfc64-public-catalog-reconciliation-outcome-v1.test.ts",
   "test/rfc64-public-catalog-reconciliation-failure-v1.test.ts",
   "test/rfc64-public-catalog-service-v1.test.ts",
@@ -71,6 +72,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-replay-worklist.integration.test.ts",
   "test/rfc64-catalog-replay-connection-runtime-v1.test.ts",
   "test/rfc64-catalog-replay-recovery-runtime-v1.test.ts",
+  "test/rfc64-replay-recovery-peer-failure-reporting.test.ts",
   "test/rfc64-private-catalog-gate-artifact.test.ts",
   "test/rfc64-policy-cell-v1.test.ts",
 ] as const;

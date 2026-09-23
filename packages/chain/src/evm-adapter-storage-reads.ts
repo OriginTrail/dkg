@@ -11,13 +11,18 @@
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { Contract, ethers, type JsonRpcProvider } from 'ethers';
-import type { ChainReadOptions, KnowledgeAssetUpdateContext } from './chain-adapter.js';
+import type {
+  ChainReadOptions,
+  KnowledgeAssetUpdateContext,
+  KnowledgeAssetVersionSnapshot,
+} from './chain-adapter.js';
 import {
   decodeKnowledgeAssetMerkleRootCount,
 } from './evm-knowledge-asset-update-context.js';
 import { confirmedStateBlockAtHead } from './evm-adapter-constants.js';
 import { isContractViewRetryable } from './rpc-failover-client.js';
 import { readAllProvidersWithTransientRetry } from './rpc-provider-poll.js';
+import { withRpcUsageConsumer } from './rpc-usage.js';
 
 /** One in-place retry per endpoint for transient transport blips in the unanimity poll. */
 const VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS = 250;
@@ -114,16 +119,13 @@ export class StorageReadMethods extends EVMChainAdapterBase {
   async readKnowledgeAssetVersionSnapshot(
     kaId: bigint,
     options: ChainReadOptions = {},
-  ): Promise<{
-    latestRoot: string;
-    rootCount: bigint;
-    latestAuthor: string;
-    latestPublisher: string;
-    blockNumber: number;
-  } | null> {
+  ): Promise<KnowledgeAssetVersionSnapshot | null> {
     await this.init();
     const kas = this.contracts.knowledgeAssetStorage;
     if (!kas) return null;
+    const knowledgeAssetStorageAddress = this.knowledgeAssetStorageBindingAddress(kas);
+    const knowledgeAssetStorageGeneration = this.knowledgeAssetStorageBindingGeneration;
+    if (knowledgeAssetStorageAddress === undefined) return null;
     const readOne = async (provider: JsonRpcProvider) => {
       // r15 (3814317260) / r17 (3814893080) — every endpoint must prove it is THIS chain before its
       // view is eligible, because the poll trusts the most advanced answer and an accidentally
@@ -146,13 +148,31 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       // the current head. Larger values pin head-depth+1. Using the RPC-specific `finalized` tag
       // here made one-block receipt finality ineffective because named-KA recovery still waited
       // many minutes for the endpoint's consensus finality marker to advance.
-      const latestBlockNumber = await provider.getBlockNumber();
-      if (!Number.isSafeInteger(latestBlockNumber) || latestBlockNumber < 0) return null;
+      // Deliberately NOT routed through `resolveEvmFinalityAnchorBlockV1`: this
+      // read pins by NUMBER only and never needs the anchor block's hash, so the
+      // shared resolver would add a `getBlock` round-trip for a field nothing
+      // here consumes. The arithmetic — the part that must stay singular — is
+      // still `confirmedStateBlockAtHead`, the same function the resolver uses.
+      const head = await withRpcUsageConsumer(
+        'getBlock',
+        () => provider.getBlock('latest'),
+      );
+      if (head === null || !Number.isSafeInteger(head.number) || head.number < 0) return null;
       const blockNumber = confirmedStateBlockAtHead(
-        latestBlockNumber,
+        head.number,
         this.finalityConfirmations,
       );
       if (blockNumber === null) return null;
+      const block = blockNumber === head.number
+        ? head
+        : await withRpcUsageConsumer(
+            'getBlock',
+            () => provider.getBlock(blockNumber),
+          );
+      if (block === null
+        || block.number !== blockNumber
+        || typeof block.hash !== 'string'
+        || !ethers.isHexString(block.hash, 32)) return null;
       const bound = this.rebindContract(kas as Contract, provider);
       const at = { blockTag: blockNumber };
       const [latestRoot, context, latestAuthor, latestPublisher] = await Promise.all([
@@ -162,12 +182,22 @@ export class StorageReadMethods extends EVMChainAdapterBase {
         bound.getLatestMerkleRootPublisher(kaId, at) as Promise<string>,
       ]);
       if (!latestRoot || !latestAuthor || !latestPublisher) return null;
+      options.signal?.throwIfAborted();
+      if (!this.knowledgeAssetStorageBindingIsCurrent(
+        kas,
+        knowledgeAssetStorageAddress,
+        knowledgeAssetStorageGeneration,
+      )) return null;
       return {
+        knowledgeAssetId: kaId,
         latestRoot,
         rootCount: decodeKnowledgeAssetMerkleRootCount(context, kaId),
         latestAuthor,
         latestPublisher,
         blockNumber,
+        blockHash: block.hash.toLowerCase(),
+        knowledgeAssetStorageAddress,
+        knowledgeAssetStorageGeneration,
       };
     };
     // r14 (3814017390) / r3 (3880005809) — endpoint retry, cancellation, and settlement are the
@@ -192,7 +222,99 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     // reporting a complete view is "cannot establish", and the caller must defer rather than
     // decide — recovery retries on the next tick, and the operator's by-id clear remains.
     if (views.length !== this.providers.length) return null;
-    return views.reduce((best, view) => (view.blockNumber > best.blockNumber ? view : best));
+    const best = views.reduce((current, view) => (
+      view.blockNumber > current.blockNumber ? view : current
+    ));
+    if (views.some((view) => view.blockNumber === best.blockNumber
+      && view.blockHash !== best.blockHash)) return null;
+    options.signal?.throwIfAborted();
+    return this.knowledgeAssetStorageBindingIsCurrent(
+      kas,
+      knowledgeAssetStorageAddress,
+      knowledgeAssetStorageGeneration,
+    ) ? best : null;
+  }
+
+  async knowledgeAssetVersionSnapshotIsCurrent(
+    kaId: bigint,
+    snapshot: KnowledgeAssetVersionSnapshot,
+    options: ChainReadOptions = {},
+  ): Promise<boolean> {
+    options.signal?.throwIfAborted();
+    const snapshotBlockHash = snapshot.blockHash;
+    const snapshotStorageAddress = snapshot.knowledgeAssetStorageAddress;
+    const snapshotStorageGeneration = snapshot.knowledgeAssetStorageGeneration;
+    if (snapshot.knowledgeAssetId !== kaId
+      || !Number.isSafeInteger(snapshot.blockNumber)
+      || snapshot.blockNumber < 0
+      || typeof snapshotBlockHash !== 'string'
+      || !ethers.isHexString(snapshotBlockHash, 32)
+      || typeof snapshotStorageAddress !== 'string'
+      || !ethers.isAddress(snapshotStorageAddress)
+      || !Number.isSafeInteger(snapshotStorageGeneration)
+      || snapshotStorageGeneration! < 0) return false;
+
+    await this.init();
+    options.signal?.throwIfAborted();
+    const kas = this.contracts.knowledgeAssetStorage;
+    if (!kas) return false;
+    const address = this.knowledgeAssetStorageBindingAddress(kas);
+    const generation = this.knowledgeAssetStorageBindingGeneration;
+    const expectedAddress = ethers.getAddress(
+      snapshotStorageAddress,
+    ).toLowerCase();
+    if (address !== expectedAddress
+      || generation !== snapshotStorageGeneration
+      || !this.knowledgeAssetStorageBindingIsCurrent(kas, address, generation)) return false;
+
+    const readOne = async (provider: JsonRpcProvider) => {
+      await this.ensureConfiguredStaticChainIdValidated(provider);
+      const expectedChainId = numericChainIdOf(this.chainId);
+      if (expectedChainId !== undefined) {
+        const network = await provider.getNetwork();
+        if (BigInt(network.chainId) !== expectedChainId) return null;
+      }
+      options.signal?.throwIfAborted();
+      const head = await withRpcUsageConsumer(
+        'getBlock',
+        () => provider.getBlock('latest'),
+      );
+      if (head === null || !Number.isSafeInteger(head.number) || head.number < 0) return null;
+      const blockNumber = confirmedStateBlockAtHead(
+        head.number,
+        this.finalityConfirmations,
+      );
+      if (blockNumber === null) return null;
+      const block = blockNumber === head.number
+        ? head
+        : await withRpcUsageConsumer(
+            'getBlock',
+            () => provider.getBlock(blockNumber),
+          );
+      if (block === null
+        || block.number !== blockNumber
+        || typeof block.hash !== 'string'
+        || !ethers.isHexString(block.hash, 32)) return null;
+      return { blockNumber, blockHash: block.hash.toLowerCase() };
+    };
+    const settled = await readAllProvidersWithTransientRetry(this.providers, readOne, {
+      retryDelayMs: VERSION_SNAPSHOT_TRANSIENT_RETRY_DELAY_MS,
+      isRetryable: isContractViewRetryable,
+      signal: options.signal,
+    });
+    options.signal?.throwIfAborted();
+    if (!settled) return false;
+    const views = settled.flatMap((view) => (view ? [view] : []));
+    if (views.length !== this.providers.length) return false;
+    const best = views.reduce((current, view) => (
+      view.blockNumber > current.blockNumber ? view : current
+    ));
+    if (views.some((view) => view.blockNumber === best.blockNumber
+      && view.blockHash !== best.blockHash)) return false;
+    return best.blockNumber === snapshot.blockNumber
+      && best.blockHash === snapshotBlockHash.toLowerCase()
+      && this.knowledgeAssetStorageBindingIsCurrent(kas, address, generation)
+      && generation === snapshotStorageGeneration;
   }
 
   async getMerkleLeafCount(kaId: bigint): Promise<number> {

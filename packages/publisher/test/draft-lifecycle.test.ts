@@ -1720,12 +1720,18 @@ describe('Working Memory Assertion Lifecycle', () => {
       object: '"Stable"',
       graph: '',
     }];
+    // Reopen the sealed, unpublished draft explicitly after rejection. Queue
+    // the write now so the snapshot still precedes the lifecycle-lock wait.
+    const discard = publisher.assertionDiscard(CG_ID, ASSERTION_NAME, AGENT);
+    const create = publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
     const write = publisher.assertionWritePrivate(CG_ID, ASSERTION_NAME, AGENT, input);
     input[0]!.subject = 'urn:dkg:file:mutated-after-validation';
     input[0]!.graph = 'urn:test:named-after-validation';
     releaseConfirmation();
 
     await expect(promote).rejects.toMatchObject({ name: 'CuratorRejectedError' });
+    await discard;
+    await create;
     await expect(write).resolves.toBeUndefined();
     expect(await publisher.assertionQueryPrivate(CG_ID, ASSERTION_NAME, AGENT)).toEqual([
       expect.objectContaining({ subject: 'urn:test:private:stable', graph: '' }),
@@ -1760,7 +1766,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     await publisher.assertionPromote(CG_ID, ASSERTION_NAME, AGENT, { publisherPeerId: PEER });
     expect(await publisher.hasSwmShareComplete(CG_ID, ASSERTION_NAME, AGENT)).toBe(true);
 
-    await publisher.assertionCreate(CG_ID, ASSERTION_NAME, AGENT);
+    await publisher.assertionPullFrom(CG_ID, ASSERTION_NAME, AGENT, 'swm');
     await publisher.assertionWrite(CG_ID, ASSERTION_NAME, AGENT, [{
       subject: 'urn:test:entity:new-version',
       predicate: 'http://schema.org/name',
