@@ -48,9 +48,8 @@ import type {
 } from './chain-adapter.js';
 import {
   PROFILE_NODE_ID_UPDATE_MIN_VERSION,
-  ProfileNodeIdTakenError,
-  ProfileNodeIdUpdateUnsupportedError,
   normalizeProfileNodeId,
+  planProfileNodeIdUpdate,
 } from './profile-node-id.js';
 import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
 import type { ContextGraphLiveAuthority } from './chain-adapter.js';
@@ -442,21 +441,9 @@ export class MockChainAdapter implements ChainAdapter {
     nodeId: Uint8Array | string,
     options?: { identityId?: bigint },
   ): Promise<ProfileNodeIdUpdateResult> {
-    const requested = normalizeProfileNodeId(nodeId, 'updateProfileNodeId');
-    const identityId = options?.identityId ?? (await this.getIdentityId());
-    if (identityId === 0n) {
-      throw new Error('updateProfileNodeId: node has no on-chain profile (create a profile first).');
-    }
-    const support = await this.getProfileNodeIdUpdateSupport();
-    if (!support.supported) throw new ProfileNodeIdUpdateUnsupportedError(support);
-    const previousNodeId = await this.getProfileNodeId(identityId);
-    if (previousNodeId === '0x') {
-      throw new Error(`updateProfileNodeId: identity ${identityId} has no on-chain profile.`);
-    }
-    if (previousNodeId === requested) {
-      return { identityId, previousNodeId, nodeId: requested, changed: false };
-    }
-    if (this.profileNodeIdHolder(requested) !== undefined) throw new ProfileNodeIdTakenError(requested);
+    const plan = await planProfileNodeIdUpdate(this, nodeId, options);
+    if (plan.kind === 'unchanged') return plan.result;
+    const { identityId, previousNodeId, nodeId: requested } = plan;
     this.profileNodeIds.set(identityId, requested);
     this.pushEvent('NodeIdUpdated', {
       identityId: identityId.toString(),

@@ -17,9 +17,8 @@ import { selectorInDeployedCode } from './evm-selector-probe.js';
 import {
   PROFILE_NODE_ID_UPDATE_MIN_VERSION,
   PROFILE_UPDATE_NODE_ID_SIGNATURE,
-  ProfileNodeIdTakenError,
-  ProfileNodeIdUpdateUnsupportedError,
   normalizeProfileNodeId,
+  planProfileNodeIdUpdate,
 } from './profile-node-id.js';
 import type {
   EnsureProfileOptions,
@@ -370,23 +369,9 @@ export class IdentityMethods extends EVMChainAdapterBase {
     options?: { identityId?: bigint },
   ): Promise<ProfileNodeIdUpdateResult> {
     await this.init();
-    const requested = normalizeProfileNodeId(nodeId, 'updateProfileNodeId');
-    const identityId = options?.identityId ?? (await this.getIdentityId());
-    if (identityId === 0n) {
-      throw new Error('updateProfileNodeId: node has no on-chain profile (create a profile first).');
-    }
-
-    const support = await this.getProfileNodeIdUpdateSupport();
-    if (!support.supported) throw new ProfileNodeIdUpdateUnsupportedError(support);
-
-    const previousNodeId = await this.getProfileNodeId(identityId);
-    if (previousNodeId === '0x') {
-      throw new Error(`updateProfileNodeId: identity ${identityId} has no on-chain profile.`);
-    }
-    if (previousNodeId === requested) {
-      return { identityId, previousNodeId, nodeId: requested, changed: false };
-    }
-    if (await this.isProfileNodeIdTaken(requested)) throw new ProfileNodeIdTakenError(requested);
+    const plan = await planProfileNodeIdUpdate(this, nodeId, options);
+    if (plan.kind === 'unchanged') return plan.result;
+    const { identityId, previousNodeId, nodeId: requested } = plan;
 
     // Profile 10.1.0 accepts the operational key (onlyIdentityOwner); a
     // deployment that made updateNodeId admin-only rejects it. Preflight each

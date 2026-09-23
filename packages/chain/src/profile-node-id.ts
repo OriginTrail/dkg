@@ -2,15 +2,16 @@
 
 /**
  * Profile nodeId support shared by the EVM and mock adapters: input
- * normalization, the `updateNodeId` probe signature, and the typed errors
- * that callers map to operator messages and HTTP statuses.
+ * normalization, the `updateNodeId` probe signature, the checks both run
+ * before an update, and the typed errors that callers map to operator
+ * messages and HTTP statuses.
  *
  * The canonical nodeId is the UTF-8 bytes of the node's base58btc libp2p peer
  * id (`encodeProfileNodeId` in dkg-core). The adapters take nodeIds as bytes
  * and do not interpret them; the contract bounds them at 64 bytes.
  */
 import { ethers } from 'ethers';
-import type { ProfileNodeIdUpdateSupport } from './chain-adapter.js';
+import type { ProfileNodeIdUpdateResult, ProfileNodeIdUpdateSupport } from './chain-adapter.js';
 
 /** First Profile version with `updateNodeId`. */
 export const PROFILE_NODE_ID_UPDATE_MIN_VERSION = '10.1.0';
@@ -63,6 +64,55 @@ export class ProfileNodeIdTakenError extends Error {
     this.name = 'ProfileNodeIdTakenError';
     Object.setPrototypeOf(this, ProfileNodeIdTakenError.prototype);
   }
+}
+
+/** The chain reads `planProfileNodeIdUpdate` makes; both adapters provide them. */
+export interface ProfileNodeIdUpdateReads {
+  getIdentityId(): Promise<bigint>;
+  getProfileNodeIdUpdateSupport(): Promise<ProfileNodeIdUpdateSupport>;
+  getProfileNodeId(identityId: bigint): Promise<string>;
+  isProfileNodeIdTaken(nodeId: string): Promise<boolean>;
+}
+
+/** What `updateProfileNodeId` does after the shared checks. */
+export type ProfileNodeIdUpdatePlan =
+  /** The profile already has the nodeId: return `result` and send nothing. */
+  | { kind: 'unchanged'; result: ProfileNodeIdUpdateResult }
+  /** Write `nodeId` (normalized 0x hex) for `identityId`. */
+  | { kind: 'write'; identityId: bigint; previousNodeId: string; nodeId: string };
+
+/**
+ * The checks the EVM and mock adapters run before writing a nodeId, in this
+ * order: normalize the input, require an identity, require a Profile with
+ * `updateNodeId`, require a profile, treat an unchanged value as a no-op, and
+ * refuse a value another identity holds. The identity's own value is always
+ * in `nodeIdsList`, so the unchanged check must come before the taken check.
+ * Throws `ProfileNodeIdUpdateUnsupportedError`, `ProfileNodeIdTakenError`, or
+ * an Error naming the missing identity or profile.
+ */
+export async function planProfileNodeIdUpdate(
+  chain: ProfileNodeIdUpdateReads,
+  nodeId: Uint8Array | string,
+  options?: { identityId?: bigint },
+): Promise<ProfileNodeIdUpdatePlan> {
+  const requested = normalizeProfileNodeId(nodeId, 'updateProfileNodeId');
+  const identityId = options?.identityId ?? (await chain.getIdentityId());
+  if (identityId === 0n) {
+    throw new Error('updateProfileNodeId: node has no on-chain profile (create a profile first).');
+  }
+
+  const support = await chain.getProfileNodeIdUpdateSupport();
+  if (!support.supported) throw new ProfileNodeIdUpdateUnsupportedError(support);
+
+  const previousNodeId = await chain.getProfileNodeId(identityId);
+  if (previousNodeId === '0x') {
+    throw new Error(`updateProfileNodeId: identity ${identityId} has no on-chain profile.`);
+  }
+  if (previousNodeId === requested) {
+    return { kind: 'unchanged', result: { identityId, previousNodeId, nodeId: requested, changed: false } };
+  }
+  if (await chain.isProfileNodeIdTaken(requested)) throw new ProfileNodeIdTakenError(requested);
+  return { kind: 'write', identityId, previousNodeId, nodeId: requested };
 }
 
 function hasCode(err: unknown, code: string): boolean {
