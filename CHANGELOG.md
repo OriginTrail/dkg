@@ -18,14 +18,13 @@ All notable changes to the DKG V10 node are documented here. The format is based
 - **Cores promote the data they acknowledge to Verifiable Memory again**: since
   10.0.14 (#2184) `syncReconcilerEnabled` also gated chain-driven VM
   reconciliation, which the 10.0.14 upgrade notes did not mention. A Core that
-  had switched the peer-sync reconciler off, as every Base mainnet Core did in
-  the 2026-07-16 containment, stopped recording public graphs as core-hosted
-  and stopped the VM reconcile sweep. Its acknowledged copies stayed in Shared
-  Working Memory and reached Verifiable Memory only through finalization
-  gossip, and only on Cores subscribed to the graph. Random sampling reads
-  only Verifiable Memory, so those Cores could not prove the Knowledge Assets.
-  VM reconciliation now has its own switch, and the peer-sync switch no longer
-  affects it.
+  had switched the peer-sync reconciler off stopped recording public graphs as
+  core-hosted and stopped the VM reconcile sweep. Its acknowledged copies stayed
+  in Shared Working Memory and reached Verifiable Memory only through
+  finalization gossip, and only on Cores subscribed to the graph. Random
+  sampling reads only Verifiable Memory, so those Cores could not prove the
+  Knowledge Assets. VM reconciliation now has its own switch, and the peer-sync
+  switch no longer affects it.
 - **The SWM TTL no longer deletes an acknowledged copy before promotion**: a
   Core records every public StorageACK it signs in a node-local ledger, and
   the 30-day shared-memory cleanup keeps a ledgered copy until its Knowledge
