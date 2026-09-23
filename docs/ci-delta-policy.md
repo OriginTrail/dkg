@@ -20,7 +20,9 @@ CI whenever it cannot prove that a smaller plan is safe.
 | Change/event | CI behavior |
 | --- | --- |
 | Pull request, known workspace | Owning lane plus declared downstream unit/integration lanes |
-| Documentation only | Planner and aggregate gates only |
+| Documentation only | Planner and aggregate gates only. A document a test reads (`RELEASE_PROCESS.md`, `packages/query/README.md`) is a CI input instead: its `PATH_TRIGGERS` entry selects the lane that reads it |
+| Agent lane | Also the Blazegraph lane: that job runs the agent's live Blazegraph suites, and `ci.yml` starts it for either lane |
+| A file another package's code or tests load by relative path, outside declared dependencies | The loading lane or EVM scope too, through `PATH_TRIGGERS` or the file's own workspace rule (for example the agent lane for the CLI markdown extractor, the chain scope for the identity-wallet code its node-ui suite loads) |
 | `core` / `rdf-utils` | All downstream Node and real-EVM lanes |
 | `evm-module` | Full Node/EVM CI; Solidity only for the established contract-relevant paths |
 | Root dependency/build config, lockfile, CI control-plane workflows (`ci.yml`, `evm-integration.yml`, `rfc64-inventory-windows.yml`), any nested path under `.github/workflows/`, composite actions, planner, or any `scripts/` file | Full Node/EVM CI; Solidity only when its independent path filter matches |
@@ -29,7 +31,7 @@ CI whenever it cannot prove that a smaller plan is safe.
 | Deletion, rename or copy | Routed by every old and new path, like edits |
 | Type change, unmerged or unknown git status, unknown path, or no diff | Full CI |
 | Several workspaces | Union of their rules |
-| `devnet/`, `test-systems/`, `bench/`, `tools/`, other top-level `.github/` files | Shared build checks plus the lanes that execute them: `devnet/` the agent lane (the Gate 1 harness also Blazegraph), `bench/` the CLI lane, `test-systems/` Blazegraph, `tools/` and `.github/` the build checks alone |
+| `devnet/`, `test-systems/`, `bench/`, `tools/`, other top-level `.github/` files | Shared build checks plus the lanes that load them: `devnet/` the agent lane (with Blazegraph; the Gate 2 adapter the CLI starts, the shared `rfc64-runtime-*` modules and the CP2 batch planning it imports also the CLI lane), `bench/` the CLI lane, `test-systems/` Blazegraph, `tools/` and `.github/` the build checks alone |
 | More than 100 production files | Full CI |
 | PR with `ci:full` label | Full Node/EVM CI; Solidity remains path-gated |
 | Merge queue | Every Node/EVM lane plus sharded Solidity on the exact candidate |
@@ -56,7 +58,11 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   skipped.
 - Shared packages run conservative reverse consumers and explicit integrations;
   this includes undeclared edges such as committed EVM ABIs consumed by `chain`
-  and the real devnet used by node-UI E2E.
+  and the real devnet used by node-UI E2E. Beyond declared dependencies, a
+  routing test follows every relative reference (imports, dynamic imports and
+  `new URL(...)` paths, documents included) from the files each lane runs,
+  across packages and support areas, and fails when a file it reaches does not
+  select that lane or EVM scope.
 - Unknown inputs fail closed to full CI instead of silently receiving no tests.
 - `CI gate` and `EVM integration gate` are always present. They fail when a
   selected job was accidentally skipped, failed, or was cancelled. The primary
@@ -98,8 +104,14 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   `assert-ci-results.mjs` from a copy of exactly `CONTROLLER_POLICY_FILES`,
   because an import outside that list makes the pin impossible to rotate.
 - PR plans depend only on the diff and labels. The former 5% SHA-sampled full
-  runs were retired; protected-branch pushes, merge-queue candidates and the
-  nightly schedule run full CI and are where a missing dependency edge surfaces.
+  runs were retired, so nothing at PR time runs a lane the plan skipped. Full CI
+  on protected-branch pushes, merge-queue candidates and the nightly schedule
+  catches a regression a skipped lane would have found, but it never evaluates
+  the PR's routing decision, and for a PR merged directly it surfaces after the
+  merge. The routing audit is static: the tests in `scripts/lib/__tests__/`
+  enumerate every workspace, derive consumers from declared dependencies and
+  from relative references, and pin the per-file triggers. Add `ci:full` when a
+  PR's paths understate its risk.
 - The routing tests enumerate all package/demo workspaces with a `test` script.
   They also close three existing coverage holes: `rdf-utils`, `okf`, and `demo`
   are now included in explicit CI lanes.
