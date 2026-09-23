@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { chmod, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -12,6 +12,9 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return { ...actual, rename: vi.fn(actual.rename) };
 });
+
+/** The pid of a process that has already exited. */
+const EXITED_PID = spawnSync(process.execPath, ['-e', ''], { stdio: 'ignore' }).pid!;
 
 describe('DkgHomeFiles.updateConfigFile', () => {
   let home = '';
@@ -60,6 +63,17 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       const written = await readJson();
       expect(written.name).toBe('node');
       for (let i = 0; i < 25; i += 1) expect(written[`key-${i}`]).toBe(i);
+    });
+
+    it('keeps every patch when the writers find a lock a crashed writer left behind', async () => {
+      await writeFile(files.configPath, JSON.stringify({ name: 'node' }));
+      await writeFile(files.configLockPath, JSON.stringify({ pid: EXITED_PID, createdAt: Date.now() }));
+
+      await Promise.all(Array.from({ length: 10 }, (_, i) => files.updateConfigFile(addKey(`key-${i}`, i))));
+
+      const written = await readJson();
+      for (let i = 0; i < 10; i += 1) expect(written[`key-${i}`]).toBe(i);
+      expect(existsSync(files.configLockPath)).toBe(false);
     });
 
     it('keeps every patch when separate processes write at the same time', async () => {
@@ -124,7 +138,9 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       expect(existsSync(files.configPath)).toBe(false);
       expect(yaml.load(await readFile(files.configYamlPath, 'utf-8')))
         .toEqual({ name: 'yaml-node', apiPort: 9317, contextGraphs: ['cg'] });
+      // Every reader resolves the same source of truth as the writer.
       expect((await files.loadConfig()).contextGraphs).toEqual(['cg']);
+      expect(files.readConfigSync()).toEqual({ name: 'yaml-node', apiPort: 9317, contextGraphs: ['cg'] });
     });
 
     it('updates config.json when both files exist and leaves the shadowed YAML alone', async () => {
@@ -201,6 +217,8 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       await writeFile(files.configPath, '{ not json');
       await writeFile(files.configYamlPath, 'name: stale-yaml\n');
 
+      // The reader and the writer agree: neither falls back to the YAML.
+      await expect(files.loadConfig()).rejects.toThrow(SyntaxError);
       await expect(files.updateConfigFile((config) => { config.name = 'x'; })).rejects.toThrow(SyntaxError);
 
       expect(await readFile(files.configPath, 'utf-8')).toBe('{ not json');
