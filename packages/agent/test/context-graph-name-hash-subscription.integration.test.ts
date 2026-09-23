@@ -18,6 +18,7 @@ import {
   contextGraphDataGraphUri,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
+  tripleContentV10,
 } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10,
@@ -202,6 +203,41 @@ async function vmQuadCount(agent: DKGAgent, contextGraphId: string): Promise<num
 }
 
 describe('Context Graph known only by its on-chain name hash (#33)', () => {
+  it('repairs challenge-pinned historical material over the real sync transport after name adoption', async () => {
+    const holderChain = await chainWithContextGraph33('0x70997970C51812dc3A010C7d01b50e0d17dc79C8');
+    const edgeChain = await chainWithContextGraph33('0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC');
+    const holder = await startAgent('RepairHolder33', holderChain);
+    const edge = await startAgent('RepairEdge33', edgeChain);
+    const { ual, quad, kaId, merkleRootHex } = await seedHolder(holder, holderChain);
+    registerKnowledgeAsset([holderChain, edgeChain], kaId, merkleRootHex);
+    seedEdge(edge);
+    await connect(edge, holder);
+    expect(await edge.resolveContextGraphNameHashNow(NAME_HASH)).toBe(CLEARTEXT_ID);
+    const exactFetch = vi.spyOn(edge, 'syncExactKnowledgeAssetsFromPeerDetailed');
+
+    // This goes through peer admission, the real libp2p sync protocol and
+    // challenge-pinned authentication; no proof material is mocked here.
+    const repaired = await edge.repairRandomSamplingKnowledgeAsset({
+      kaId,
+      cgId: BigInt(ON_CHAIN_ID),
+      expectedRoot: ethers.getBytes(merkleRootHex),
+      expectedLeafCount: 1n,
+    }).result;
+    expect(repaired).toEqual({
+      contents: [tripleContentV10(quad.subject, quad.predicate, quad.object)],
+      privateRoots: [],
+    });
+    expect(exactFetch).toHaveBeenCalledWith(
+      holder.peerId,
+      CLEARTEXT_ID,
+      expect.objectContaining({
+        kind: 'challenge-pinned',
+        commitments: [{ assetUal: ual, merkleRootHex: merkleRootHex.slice(2), merkleLeafCount: 1n }],
+      }),
+      expect.anything(),
+    );
+  }, 120_000);
+
   it('syncs nothing under the hash, then adopts the verified cleartext id and syncs the VM data', async () => {
     const holderChain = await chainWithContextGraph33('0x70997970C51812dc3A010C7d01b50e0d17dc79C8');
     const edgeChain = await chainWithContextGraph33('0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC');

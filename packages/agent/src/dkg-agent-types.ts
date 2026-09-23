@@ -1752,6 +1752,8 @@ export interface DKGAgentConfig {
      * Defaults to 6000.
      */
     indexTickMs?: number;
+    /** Enable bounded authority reads at read-only gates; defaults to false. */
+    boundedAuthorityReads?: boolean;
     /**
      * `chain.authorityReadTimeoutMs`: request-scoped deadline (ms) for one
      * on-chain Context Graph authority read (liveness, policy, roster, or the

@@ -889,6 +889,24 @@ node_cli_entry() {
   version_cli_entry "$(node_version_ref "$node_num" "$role")"
 }
 
+# Older checkouts report only a short commit from /api/status without the
+# build-info file release packages carry. Give devnet worktrees truthful full
+# checkout metadata so release-layout checks can pin the exact tag commit.
+write_devnet_version_build_info() {
+  local dest="$1" info="$1/packages/cli/build-info.json"
+  [ -f "$info" ] && return 0
+  local commit
+  commit="$(git -C "$dest" rev-parse HEAD)"
+  node -e '
+    const fs = require("node:fs");
+    const [path, commit] = process.argv.slice(1);
+    fs.writeFileSync(path, JSON.stringify({
+      commit, commitShort: commit.slice(0, 8),
+      buildTime: new Date().toISOString(), distTag: "devnet", ciRun: null,
+    }, null, 2) + "\n");
+  ' "$info" "$commit"
+}
+
 # Check out <ref> as a worktree under DEVNET_VERSIONS_DIR and build it once.
 prepare_version() {
   local ref="$1"
@@ -899,6 +917,7 @@ prepare_version() {
   fi
   local dest="$DEVNET_VERSIONS_DIR/$ref"
   if [ -f "$dest/packages/cli/dist/cli.js" ] && [ "${DEVNET_VERSION_REBUILD:-0}" != "1" ]; then
+    write_devnet_version_build_info "$dest"
     log "Version '$ref' already prepared at $dest"
     return 0
   fi
@@ -907,6 +926,7 @@ prepare_version() {
     log "Checking out version '$ref' as a worktree at $dest ..."
     git -C "$REPO_ROOT" worktree add --force "$dest" "$ref"
   fi
+  write_devnet_version_build_info "$dest"
   log "Building version '$ref' (runs once, then cached) ..."
   ( cd "$dest" && pnpm install --prefer-offline && pnpm run build )
   log "Version '$ref' prepared at $dest"

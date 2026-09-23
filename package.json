@@ -106,6 +106,7 @@
     "test:devnet:rich-scenario": "vitest run --config devnet/rich-scenario/vitest.config.ts",
     "test:devnet:rpc-quiet-window": "vitest run --config devnet/rpc-quiet-window/vitest.config.ts",
     "test:devnet:storage-ack-store-outage": "vitest run --config devnet/storage-ack-store-outage/vitest.config.ts",
+    "test:devnet:status-store-outage": "vitest run --config devnet/storage-ack-store-outage/vitest.config.ts -t 'status reports a real managed-store outage and recovery'",
     "test:devnet:rfc64-evidence": "vitest run --config devnet/_bootstrap/vitest.evidence.config.ts",
     "typecheck:devnet:rfc64-evidence": "tsc --project devnet/_bootstrap/tsconfig.evidence.json",
     "test:devnet:v10-rs-prune": "vitest run --config devnet/v10-rs-prune/vitest.config.ts",
