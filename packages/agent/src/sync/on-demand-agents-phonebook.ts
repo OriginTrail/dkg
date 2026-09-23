@@ -21,6 +21,7 @@
  *    obtained data than after one that failed;
  *  - a graph whose curator a complete Core phonebook did not contain stops
  *    asking for hours (live `agents` gossip still delivers later profiles);
+ *    an empty or near-empty "complete" answer does not count as one;
  *  - finding no usable peer starts no cooldown, and its re-check is bounded.
  *
  * Only wallet-scoped (`0x<wallet>/<slug>`) graphs whose on-chain access policy
@@ -87,6 +88,16 @@ export const AGENTS_PHONEBOOK_FETCH_MAX_CANDIDATES = 8;
  * that live gossip has not already delivered.
  */
 export const AGENTS_PHONEBOOK_CURATOR_MISS_SUPPRESSION_MS = 6 * 60 * 60_000;
+/**
+ * Triples a known Core's complete answer must carry before it counts as the
+ * network's phonebook: before it ends the peer walk or earns a graph the
+ * miss suppression above. "Known Core" only means the peer advertises the
+ * storage-ACK protocol, and a just-started Core, one with a reset store, or
+ * one that does not sync `agents` answers a full scan as complete with no
+ * rows, or with little more than its own profile. Base mainnet's phonebook
+ * was 75,141 triples (about 39 per profile), so this is roughly 25 profiles.
+ */
+export const AGENTS_PHONEBOOK_MIN_NETWORK_TRIPLES = 1_000;
 /** Re-check cadence while wanted graphs wait for a first usable peer. */
 export const AGENTS_PHONEBOOK_NO_PEER_RETRY_MS = 30_000;
 /** Consecutive no-peer re-checks before waiting for the next trigger. */
@@ -157,13 +168,14 @@ export interface OnDemandAgentsPhonebookOptions {
   maxPeers?: number;
   maxCandidates?: number;
   curatorMissSuppressionMs?: number;
+  minNetworkTriples?: number;
   noPeerRetryMs?: number;
   noPeerMaxRetries?: number;
   policyVerdictTtlMs?: number;
   maxStateEntries?: number;
 }
 
-type FetchOutcome = 'complete' | 'partial' | 'failed' | 'no-peers';
+type FetchOutcome = 'complete' | 'partial' | 'empty' | 'failed' | 'no-peers';
 
 const SYSTEM_CONTEXT_GRAPH_IDS = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
 
@@ -195,6 +207,7 @@ export class OnDemandAgentsPhonebookFetcher {
   readonly #maxPeers: number;
   readonly #maxCandidates: number;
   readonly #curatorMissSuppressionMs: number;
+  readonly #minNetworkTriples: number;
   readonly #noPeerRetryMs: number;
   readonly #noPeerMaxRetries: number;
   readonly #policyVerdictTtlMs: number;
@@ -223,6 +236,7 @@ export class OnDemandAgentsPhonebookFetcher {
     this.#maxCandidates = options.maxCandidates ?? AGENTS_PHONEBOOK_FETCH_MAX_CANDIDATES;
     this.#curatorMissSuppressionMs = options.curatorMissSuppressionMs
       ?? AGENTS_PHONEBOOK_CURATOR_MISS_SUPPRESSION_MS;
+    this.#minNetworkTriples = options.minNetworkTriples ?? AGENTS_PHONEBOOK_MIN_NETWORK_TRIPLES;
     this.#noPeerRetryMs = options.noPeerRetryMs ?? AGENTS_PHONEBOOK_NO_PEER_RETRY_MS;
     this.#noPeerMaxRetries = options.noPeerMaxRetries ?? AGENTS_PHONEBOOK_NO_PEER_MAX_RETRIES;
     this.#policyVerdictTtlMs = options.policyVerdictTtlMs ?? AGENTS_PHONEBOOK_POLICY_VERDICT_TTL_MS;
@@ -368,7 +382,10 @@ export class OnDemandAgentsPhonebookFetcher {
     let attemptedPeers = 0;
     let fetchedTriples = 0;
     let insertedTriples = 0;
-    let completeCore = false;
+    let answeredEmpty = false;
+    // A known Core's complete answer that carried a real phonebook. Only this
+    // ends the walk early or suppresses a graph whose owner it lacks.
+    let networkPhonebook = false;
     try {
       for (const { peerId, core } of candidates) {
         if (attemptedPeers >= this.#maxPeers || budget.signal.aborted) break;
@@ -391,7 +408,10 @@ export class OnDemandAgentsPhonebookFetcher {
           });
           fetchedTriples += result.fetchedTriples;
           insertedTriples += result.insertedTriples;
-          if (result.complete && core) completeCore = true;
+          if (result.fetchedTriples === 0) answeredEmpty = true;
+          if (core && result.complete && result.fetchedTriples >= this.#minNetworkTriples) {
+            networkPhonebook = true;
+          }
           peerSummaries.push(
             `${shortPeerId(peerId)}:${role}:${result.complete ? 'complete' : 'partial'}:${result.fetchedTriples}`,
           );
@@ -402,8 +422,9 @@ export class OnDemandAgentsPhonebookFetcher {
           );
         }
         // A complete Core phonebook is the network's phonebook; another Core
-        // would send the same rows. Also stop once every wanted curator is in.
-        if (completeCore || budget.signal.aborted) break;
+        // would send the same rows. An empty or near-empty "complete" answer
+        // is not. Also stop once every wanted curator is in.
+        if (networkPhonebook || budget.signal.aborted) break;
         if ((await this.#unresolvedWants(budget.signal)).length === 0) break;
       }
     } finally {
@@ -432,11 +453,15 @@ export class OnDemandAgentsPhonebookFetcher {
     const resolved = wanted.filter((contextGraphId) => !unresolved.has(contextGraphId));
     const profiles = await this.#deps.countProfiles(lifetime).catch(() => undefined);
     const now = this.#now();
-    const outcome: FetchOutcome = completeCore || (fetchedTriples > 0 && unresolved.size === 0)
+    // `empty`: peers answered but served no rows (a just-started or lean Core);
+    // like `failed`, it keeps the short cooldown so another peer is asked soon.
+    const outcome: FetchOutcome = networkPhonebook || (fetchedTriples > 0 && unresolved.size === 0)
       ? 'complete'
-      : fetchedTriples > 0 ? 'partial' : 'failed';
-    this.#nextEligibleAt = now + (outcome === 'failed' ? this.#failureCooldownMs : this.#cooldownMs);
-    if (completeCore) {
+      : fetchedTriples > 0 ? 'partial' : answeredEmpty ? 'empty' : 'failed';
+    this.#nextEligibleAt = now + (outcome === 'failed' || outcome === 'empty'
+      ? this.#failureCooldownMs
+      : this.#cooldownMs);
+    if (networkPhonebook) {
       for (const contextGraphId of unresolved) {
         setBounded(
           this.#curatorMissUntil,

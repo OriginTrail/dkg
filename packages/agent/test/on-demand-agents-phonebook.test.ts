@@ -5,6 +5,7 @@ import {
   AGENTS_PHONEBOOK_FETCH_BUDGET_MS,
   AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS,
   AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS,
+  AGENTS_PHONEBOOK_MIN_NETWORK_TRIPLES,
   AGENTS_PHONEBOOK_POLICY_VERDICT_TTL_MS,
   OnDemandAgentsPhonebookFetcher,
   onDemandAgentsPhonebookFor,
@@ -165,6 +166,70 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
     await h.fetcher.whenIdle();
 
     expect(h.syncCalls.map(({ peerId }) => peerId)).toEqual([CORE_A]);
+  });
+
+  it('does not take an empty "complete" Core answer for the network phonebook', async () => {
+    // A just-started or lean Core answers a full scan as complete with no rows.
+    const h = createHarness({
+      peers: [
+        { peerId: CORE_A, core: true },
+        { peerId: CORE_B, core: true },
+      ],
+      syncAddsWallets: [],
+      sync: async () => complete(0),
+    });
+
+    h.fetcher.request(CG, 'subscribe');
+    await h.fetcher.whenIdle();
+
+    // The empty answer neither ends the walk nor counts as a complete fetch...
+    expect(h.syncCalls.map(({ peerId }) => peerId)).toEqual([CORE_A, CORE_B]);
+    expect(h.info[0]).toContain('outcome=empty');
+    expect(h.info[0]).toContain(`nextFetchInMs=${AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS}`);
+
+    // ...and the graph is not suppressed for hours: it asks again after the
+    // short cooldown.
+    h.advance(AGENTS_PHONEBOOK_FETCH_FAILURE_COOLDOWN_MS);
+    h.fetcher.request(CG, 'vm-reconcile');
+    await h.fetcher.whenIdle();
+    expect(h.syncCalls).toHaveLength(4);
+  });
+
+  it('needs a real phonebook, not a lean Core answer, before suppressing a graph', async () => {
+    const leanTriples = 60;
+    const h = createHarness({
+      peers: [
+        { peerId: CORE_A, core: true },
+        { peerId: CORE_B, core: true },
+      ],
+      syncAddsWallets: [],
+      sync: async (peerId) => complete(
+        peerId === CORE_A ? leanTriples : AGENTS_PHONEBOOK_MIN_NETWORK_TRIPLES,
+      ),
+    });
+
+    h.fetcher.request(CG, 'subscribe');
+    await h.fetcher.whenIdle();
+    // The lean Core does not end the walk; the next Core's phonebook does.
+    expect(h.syncCalls.map(({ peerId }) => peerId)).toEqual([CORE_A, CORE_B]);
+    expect(h.info[0]).toContain('curatorResolved=0/1 outcome=complete');
+    h.advance(AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS);
+    h.fetcher.request(CG, 'vm-reconcile');
+    await h.fetcher.whenIdle();
+    expect(h.syncCalls).toHaveLength(2);
+
+    // Only lean answers: a partial fetch, the ordinary cooldown, no suppression.
+    const lean = createHarness({
+      syncAddsWallets: [],
+      sync: async () => complete(leanTriples),
+    });
+    lean.fetcher.request(CG, 'subscribe');
+    await lean.fetcher.whenIdle();
+    expect(lean.info[0]).toContain('outcome=partial');
+    lean.advance(AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS);
+    lean.fetcher.request(CG, 'vm-reconcile');
+    await lean.fetcher.whenIdle();
+    expect(lean.syncCalls).toHaveLength(2);
   });
 
   it('moves to the next peer after a failed one and never exceeds the peer cap', async () => {

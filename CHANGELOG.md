@@ -72,8 +72,10 @@ All notable changes to the DKG V10 node are documented here. The format is based
   is subscribed or restored at startup and its owner is not in the local
   phonebook, or when VM recovery finds that graph's curator tier empty. One
   fetch runs at a time within a 120-second budget. After it, fetching waits
-  30 minutes (10 after a failure), and a graph whose owner a complete Core
-  phonebook lacks stops asking for 6 hours. Recovery for the graphs whose
+  30 minutes (10 after a failure or an empty answer). A graph whose owner is
+  missing from a complete Core phonebook (at least 1,000 triples, so a
+  just-started Core's empty answer does not count) stops asking for 6 hours.
+  Recovery for the graphs whose
   owner now resolves is re-scheduled at once. Curated graphs never trigger
   the fetch. In this mode the catch-up connection-priming walk, which dialled
   every relay-advertising profile in the phonebook, now dials at most eight
