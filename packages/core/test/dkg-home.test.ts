@@ -557,6 +557,12 @@ describe('loadAuthToken / loadAuthTokenSync', () => {
     expect(await loadAuthToken(tempDir)).toBeUndefined();
     expect(loadAuthTokenSync(tempDir)).toBeUndefined();
   });
+
+  it('returns undefined when the token path is unreadable as a file', async () => {
+    await mkdir(join(tempDir, 'auth.token'));
+    expect(await loadAuthToken(tempDir)).toBeUndefined();
+    expect(loadAuthTokenSync(tempDir)).toBeUndefined();
+  });
 });
 
 describe('toEip55Checksum', () => {
