@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { CI_LANES, PRIMARY_LANE_JOBS, planCi } from '../ci-delta.mjs';
+import { CI_LANES, PRIMARY_LANE_JOBS, WORKSPACE_RULES, planCi } from '../ci-delta.mjs';
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 export const NON_SOLIDITY_LANES = CI_LANES.filter((lane) => lane !== 'contracts');
@@ -54,4 +54,40 @@ export function sourceFiles(directory) {
     if (entry.isDirectory()) return sourceFiles(relative);
     return /\.[cm]?[jt]sx?$/.test(entry.name) ? [relative] : [];
   });
+}
+
+function readWorkspaces() {
+  const manifests = new Map(Object.keys(WORKSPACE_RULES).map((workspace) => [
+    workspace,
+    JSON.parse(fs.readFileSync(path.join(REPO_ROOT, workspace, 'package.json'), 'utf8')),
+  ]));
+  return { manifests, workspaceByName: new Map([...manifests].map(([workspace, { name }]) => [name, workspace])) };
+}
+
+// `roots` plus every workspace they depend on (dependencies and
+// devDependencies). Roots that are not workspaces are ignored.
+export function workspaceClosure(roots) {
+  const { manifests, workspaceByName } = readWorkspaces();
+  const queue = [...roots];
+  const closure = new Set();
+  while (queue.length) {
+    const workspace = queue.shift();
+    if (closure.has(workspace) || !manifests.has(workspace)) continue;
+    closure.add(workspace);
+    const { dependencies = {}, devDependencies = {} } = manifests.get(workspace);
+    for (const name of Object.keys({ ...dependencies, ...devDependencies })) {
+      if (workspaceByName.has(name)) queue.push(workspaceByName.get(name));
+    }
+  }
+  return closure;
+}
+
+// The workspaces that `files` import by package name, plus everything those
+// workspaces depend on: what code outside the package lanes compiles against.
+export function importedWorkspaceClosure(files) {
+  const { workspaceByName } = readWorkspaces();
+  return workspaceClosure(files.flatMap((file) => [
+    ...fs.readFileSync(path.join(REPO_ROOT, file), 'utf8')
+      .matchAll(/(?:from|import\()\s*['"](@origintrail-official\/[a-z0-9-]+)/g),
+  ].map(([, name]) => workspaceByName.get(name)).filter(Boolean)));
 }

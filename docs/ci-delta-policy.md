@@ -62,7 +62,10 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   routing test follows every relative reference (imports, dynamic imports and
   `new URL(...)` paths, documents included) from the files each lane runs,
   across packages and support areas, and fails when a file it reaches does not
-  select that lane or EVM scope.
+  select that lane or EVM scope. Where that reach enters another package, the
+  workspaces it imports by package name (and their dependencies) must select
+  the lane too: the chain scope's node-ui suite starts a DKGAgent, so storage,
+  publisher, query and random-sampling changes run that scope.
 - Unknown inputs fail closed to full CI instead of silently receiving no tests.
 - `CI gate` and `EVM integration gate` are always present. They fail when a
   selected job was accidentally skipped, failed, or was cancelled. The primary
