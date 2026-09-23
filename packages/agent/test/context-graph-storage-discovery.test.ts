@@ -9,11 +9,11 @@ import {
   mergeOnChainContextGraphFacts,
   onChainContextGraphIdentityDiffers,
   sameOnChainContextGraphFacts,
-  toContextGraphListOnChainFacts,
   type ContextGraphStorageDiscoveryRecord,
   type ContextGraphStorageDiscoveryStore,
   type OnChainContextGraphFacts,
 } from '../src/context-graph-storage-discovery.js';
+import { toContextGraphListOnChainFacts } from '../src/context-graph-list-authority-enrichment.js';
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 

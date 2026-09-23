@@ -440,12 +440,10 @@ import {
 } from './curator-meta-refresh.js';
 import {
   enrichContextGraphListAuthorityV1,
+  toContextGraphListOnChainFacts,
   type ListContextGraphsRow,
 } from './context-graph-list-authority-enrichment.js';
-import {
-  toContextGraphListOnChainFacts,
-  type OnChainContextGraphFacts,
-} from './context-graph-storage-discovery.js';
+import type { OnChainContextGraphFacts } from './context-graph-storage-discovery.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
