@@ -15,7 +15,7 @@ import {
   type SwmSnapshotCoverage,
   type SyncPeerResolution,
 } from '@origintrail-official/dkg-agent';
-import { PROTOCOL_SYNC, createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
+import { PROTOCOL_SYNC, createOperationContext } from '@origintrail-official/dkg-core';
 
 const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
@@ -1022,46 +1022,6 @@ async function waitForSyncProtocolFromPeerProtocols(
   return false;
 }
 
-/** The slice of an agent (of any supported build) the catch-up peer filter reads. */
-interface CatchupAdmissionAgent {
-  listAdmittedConnectedPeers?: (ctx: OperationContext) => Promise<Array<{ toString(): string }>>;
-  ensurePeerAdmittedForRecovery?: (peerId: string, ctx: OperationContext, label: string) => Promise<boolean>;
-  node: { libp2p: { getConnections(): ReadonlyArray<{ remotePeer: { toString(): string } }> } };
-}
-
-/**
- * The catch-up candidate set for the worker bridge: live connections whose
- * peer passes network admission. A still-open connection to a peer that failed
- * the network-identity proof (another DKG network's relay, say) must not
- * become a sync peer, and filtering here also keeps it out of the prioritized
- * curator/SWM-provider slots.
- *
- * - The agent's own predicate (`listAdmittedConnectedPeers`), the one the
- *   in-process catch-up selects from, whenever the agent has it.
- * - An agent build without it still gets the same per-peer admission check
- *   through `ensurePeerAdmittedForRecovery`, so version skew never drops the
- *   filter.
- * - Only an agent with neither (older than network admission) takes every
- *   live connection, as the bridge always did for it.
- */
-async function listAdmittedCatchupPeers(agent: CatchupAdmissionAgent): Promise<Array<{ toString(): string }>> {
-  if (typeof agent.listAdmittedConnectedPeers === 'function') {
-    return agent.listAdmittedConnectedPeers(createOperationContext('sync'));
-  }
-  const connectedPeers = [...new Map<string, { toString(): string }>(
-    agent.node.libp2p.getConnections().map((connection) => [connection.remotePeer.toString(), connection.remotePeer]),
-  ).values()];
-  if (typeof agent.ensurePeerAdmittedForRecovery !== 'function') return connectedPeers;
-  const ctx = createOperationContext('sync');
-  const admittedPeers: Array<{ toString(): string }> = [];
-  for (const peer of connectedPeers) {
-    if (await agent.ensurePeerAdmittedForRecovery(peer.toString(), ctx, 'Connected catchup peer')) {
-      admittedPeers.push(peer);
-    }
-  }
-  return admittedPeers;
-}
-
 class WorkerCatchupRunner implements CatchupRunner {
   private readonly worker: Worker;
   private nextRunId = 0;
@@ -1194,7 +1154,15 @@ class WorkerCatchupRunner implements CatchupRunner {
         ]);
         await agent.primeCatchupConnections();
 
-        const admittedPeers = await listAdmittedCatchupPeers(agent);
+        // The agent's own admission predicate, the one the in-process catch-up
+        // selects from, never a copy of it: a still-open connection to a peer
+        // that failed the network-identity proof (another DKG network's relay,
+        // say) must not become a sync peer, and filtering here also keeps it out
+        // of the prioritized curator/SWM-provider slots below. The daemon's
+        // agent is always this package's DKGAgent, so there is no fallback: an
+        // agent without the predicate fails the preparation instead of handing
+        // every live connection to selection.
+        const admittedPeers = await this.agent.listAdmittedConnectedPeers(createOperationContext('sync'));
 
         const selectedPeerIds = agent.selectCatchupPeers(
           admittedPeers,
