@@ -64,6 +64,23 @@ the effective lane once at boot. A background query that is shed before
 execution returns HTTP 503 with `Retry-After: 1` and
 `code: "STORE_SCHEDULER_BUSY"`.
 
+## RDF file input
+
+Commands with `--file` accept N-Quads (`.nq`), N-Triples (`.nt`), Turtle (`.ttl`),
+TriG (`.trig`), JSON quad arrays (`.json`), and JSON-LD (`.jsonld`). JSON-LD
+supports inline `@context`, lists, named graphs and typed/language literals.
+Relative identifiers resolve against the input file's `file:` URL unless an
+inline `@base` overrides it. Expansion that would discard statements fails.
+
+JSON-LD named graphs can be stored in Working Memory with `dkg ka create --no-finalize`.
+A default-finalizing create rejects them before contacting the daemon: sealing, SWM
+sharing and VM publication do not yet preserve named-graph identity. Rewrite the
+document into the default graph to use those transitions.
+
+JSON-LD ingestion does not fetch remote contexts or `@import` URLs. Embed the
+required context inline before importing a file. Existing simple quad arrays
+remain supported in both `.json` and `.jsonld` files.
+
 ## Running a Core Node (relay operator)
 
 A Core Node is a publicly-reachable host that runs a libp2p circuit-relay v2

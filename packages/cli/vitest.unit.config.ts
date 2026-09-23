@@ -15,6 +15,7 @@ export default defineConfig({
           'test/mcp-config-document.test.ts',
           'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
+          'test/rdf-parser.test.ts',
           'test/api-client.test.ts',
           'test/finalized-publish-options.test.ts',
           'test/messenger-outbox-memory.test.ts',
@@ -211,6 +212,7 @@ export default defineConfig({
           // OxigraphWorkerStore; no hardhat needed.
           'test/write-preflight-resilience.test.ts',
           'test/http-literal-size-validation.test.ts',
+          'test/writable-quad-terms.test.ts',
           // CLI subprocess smoke with stub daemon only; no hardhat needed.
           'test/context-graph-join-policy-cli.test.ts',
           'test/context-graph-join-policy-route.test.ts',
