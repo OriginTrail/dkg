@@ -1,4 +1,5 @@
 // Shared fixtures for the CI planner, controller and aggregate-gate tests.
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CI_LANES, PRIMARY_LANE_JOBS, planCi } from '../ci-delta.mjs';
@@ -43,4 +44,14 @@ export function gateNeeds(results = {}) {
 
 export function succeeded(...jobs) {
   return Object.fromEntries(jobs.flat().map((job) => [job, 'success']));
+}
+
+// Source files (repo-relative) under `directory`, skipping installs and builds.
+export function sourceFiles(directory) {
+  return fs.readdirSync(path.join(REPO_ROOT, directory), { withFileTypes: true }).flatMap((entry) => {
+    if (['node_modules', 'dist', 'dist-ui', 'coverage'].includes(entry.name)) return [];
+    const relative = path.posix.join(directory, entry.name);
+    if (entry.isDirectory()) return sourceFiles(relative);
+    return /\.[cm]?[jt]sx?$/.test(entry.name) ? [relative] : [];
+  });
 }
