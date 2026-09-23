@@ -53,6 +53,20 @@ All notable changes to the DKG V10 node are documented here. The format is based
   rejects, so every peer looked unable to serve sync. Since 10.0.14 the same
   check has also made durable recovery treat every peer it asked about as not
   sync-capable. The peer ID is now parsed before the lookup.
+- **The API opens promptly after a restart on a node with many catalogued
+  context graphs**: the one-time readiness migration the daemon runs before
+  opening its API also walked every graph discovery had only catalogued,
+  including rows discovery added while it ran, and waited without a deadline
+  on chain reads to confirm each one, so the API could take many minutes to
+  open, or never open, and the auto-updater waited with it. Resetting those
+  catalogued rows also rewrote their subscription state, which deleted their
+  durable records and dormancy, so a later boot activated them. The migration
+  now covers only graphs the node subscribes to or hosts, and only those
+  present when it starts. It stamps a graph that never synced without any
+  lookup, gives each confirmation 8 seconds and the whole pass 30 seconds, and
+  fails a graph closed, needing a fresh catch-up, when either runs out. A
+  finalized authority read whose caller gives up now leaves the shared
+  authority-read queue instead of holding it.
 
 ## [10.0.18] - 2026-09-22
 
