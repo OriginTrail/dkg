@@ -22,7 +22,7 @@ CI whenever it cannot prove that a smaller plan is safe.
 | Pull request, known workspace | Owning lane plus declared downstream unit/integration lanes |
 | Documentation only | Planner and aggregate gates only. A document a test reads (`RELEASE_PROCESS.md`, `packages/query/README.md`) is a CI input instead: its `PATH_TRIGGERS` entry selects the lane that reads it |
 | Agent lane | Also the Blazegraph lane and the Windows lifecycle job: the Blazegraph job runs the agent's live Blazegraph suites and `ci.yml` starts it for either lane; the Windows job is described below |
-| A file another package's code or tests load by relative path, outside declared dependencies | The loading lane or EVM scope too, through `PATH_TRIGGERS` or the file's own workspace rule (for example the agent lane for the CLI markdown extractor, the node-ui lane for the CLI daemon sources its tests scan, the Blazegraph lane for the CLI's Oxigraph launcher that the storage conformance suite runs, the chain scope for the identity-wallet code its node-ui suite loads) |
+| A file another package's code or tests load by relative path, outside declared dependencies | The loading lane or EVM scope too, through `PATH_TRIGGERS` or the file's own workspace rule (for example the agent lane for the CLI markdown extractor, the node-ui lane for the CLI daemon sources its tests scan, the core lane for the agent, publisher and CLI sources the chain RPC-site census reads, the Blazegraph lane for the CLI's Oxigraph launcher that the storage conformance suite runs, the chain scope for the identity-wallet code its node-ui suite loads) |
 | `core` / `rdf-utils` | All downstream Node and real-EVM lanes, including the browser E2E suite (its harness imports `core`) |
 | Real-node browser E2E (Playwright, 7 devnet shards) | PRs touching the UI surface it drives (`node-ui`, `graph-viz`, and `cli`, the daemon HTTP API) or a package its harness code imports (`core` and its dependency `rdf-utils`). The rest of the daemon runtime (`agent`, `chain`, `storage`, `publisher`, `query`, adapters and the other packages `cli` depends on) is a deliberate exception: those PRs run their own lanes plus the CLI daemon tests and get the suite after merge. `ci-delta-routing.test.mjs` derives both sets from the harness imports and `scripts/devnet.sh`, and pins the exception list |
 | Windows lifecycle job (`rfc64-inventory-windows.yml`) | Every PR that runs the agent lane; the planner derives it once for every plan, whether a package, a `devnet/` harness or the Gate 0 paths selected the agent lane. Besides the SQLite suites it runs the RFC-64 Gate 0 lifecycle and evidence harnesses, which start a real agent and run on no Linux lane |
@@ -63,14 +63,16 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   Beyond declared dependencies, a routing test seeds from what each lane runs
   (package code and tests, and the support files CI jobs run directly, through
   root `package.json` scripts or through reusable workflows), follows every
-  relative reference (imports, dynamic imports, `new URL(...)` paths and paths
-  built with `path.resolve`/`join` from a file's own directory, documents
-  included; a built directory counts when the file walks it) across packages
-  and support areas, and fails when a file it reaches does not select that
-  lane or EVM scope. Where that reach enters another package, the workspaces
-  it imports by package name (and their dependencies) must select the lane
-  too: the chain scope's node-ui suite starts a DKGAgent, so storage,
-  publisher, query and random-sampling changes run that scope.
+  relative reference (imports, dynamic imports, `new URL(...)` paths, paths
+  built with `path.resolve`/`join` from a file's own directory and, in tests,
+  quoted repo paths naming a file; documents included, and a built directory
+  counts when the file walks it; a package's `dist/` output stands for its
+  `src/`) across packages and support areas, and fails when a file it reaches
+  does not select that lane or EVM scope. Where that reach enters another
+  package, the workspaces it imports by package name (and their dependencies)
+  must select the lane too: the chain scope's node-ui suite starts a
+  DKGAgent, so storage, publisher, query and random-sampling changes run that
+  scope.
   The most expensive system lane, real-node browser E2E, follows on PRs only
   the UI surface it drives and the packages its harness imports, and runs in
   full on every protected-branch push, merge-queue candidate and nightly run;

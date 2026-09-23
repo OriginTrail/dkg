@@ -11,6 +11,7 @@ import {
   change,
   gateNeeds,
   importedWorkspaceClosure,
+  loadReferences,
   pullRequestPlan,
   selectedLanes,
   sourceFiles,
@@ -381,72 +382,16 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   // and fixture workspaces (test-fixtures/) run only where a test builds them.
   // A lane job also runs the support files its steps name: directly, through
   // a root package.json script or through a reusable workflow it calls.
-  // A lane also loads everything those files reference by relative path
-  // (static and dynamic imports and `new URL(...)` paths, including documents
-  // a test reads), in other packages and support areas alike. Only module
-  // loads carry on to what the loaded file imports; any other `new URL(...)`
-  // path (a document read, a process to spawn) is loaded but not followed, and
-  // so is a path a file builds with path.resolve/join from its own directory
-  // and literal segments; a directory built that way counts only when the file
-  // walks directories (readdir), since otherwise it names a location rather
-  // than contents. Type-only imports are erased before anything runs, and a
-  // path built at run time from variables is out of reach. A package-name import
-  // loads that workspace and its dependencies, so wherever a lane's reach
-  // crosses into another package, the workspaces that package imports must
-  // select the lane too. Each file reached must select the lane or scope, or
-  // plan full CI.
-  const modulePattern = /(?:\bfrom\s*|\bimport\s*\(\s*(?:new\s+URL\(\s*)?)['"]((?:\.\.?\/)+[^'"]+)['"]/g;
-  const pathPattern = /\bnew\s+URL\(\s*['"]((?:\.\.?\/)+[^'"]+)['"]/g;
+  // A lane also loads what those files reference by path (loadReferences in
+  // ci-plan-fixtures.mjs lists the forms it sees), in other packages and
+  // support areas alike. Only module loads carry on to what the loaded file
+  // imports; a path read or run is loaded but not followed. A package-name
+  // import loads that workspace and its dependencies, so wherever a lane's
+  // reach crosses into another package, the workspaces that package imports
+  // must select the lane too. Each file reached must select the lane or scope,
+  // or plan full CI.
   const isFile = (candidate) => fs.statSync(path.join(REPO_ROOT, candidate), { throwIfNoEntry: false })?.isFile();
-  const resolve = (file, specifier) => {
-    const target = path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
-    // TypeScript sources are imported by their emitted extension, or none,
-    // and a package's built dist/ output comes from its src/.
-    const source = target.replace(/^(packages\/[^/]+)\/dist\/(.+)\.js$/, '$1/src/$2.ts');
-    return [
-      source,
-      target,
-      target.replace(/\.js$/, '.ts'),
-      target.replace(/\.js$/, '.tsx'),
-      target.replace(/\.mjs$/, '.mts'),
-      `${target}.ts`,
-      `${target}/index.ts`,
-    ].find(isFile) ?? target;
-  };
-  const packagePattern = /(?:\bfrom\s*|\bimport\s*\(\s*)['"](@origintrail-official\/[a-z0-9-]+)(?:\/[^'"]*)?['"]/g;
-  const joinPattern = /(?:\b(?:const|let)\s+([\w$]+)\s*=\s*)?(?:\bpath\.)?\b(?:resolve|join)\(\s*([\w$]+)\s*((?:,\s*(?:'[^']*'|"[^"]*"))+)\s*\)/g;
-  const builtPaths = (file, source) => {
-    const bases = new Map([['__dirname', path.posix.dirname(file)]]);
-    for (const [, name] of source.matchAll(/\b(?:const|let)\s+([\w$]+)\s*=\s*(?:path\.)?dirname\(\s*fileURLToPath\(\s*import\.meta\.url\s*\)\s*\)/g)) {
-      bases.set(name, path.posix.dirname(file));
-    }
-    const segments = (text) => [...text.matchAll(/'([^']*)'|"([^"]*)"/g)].map(([, single, double]) => single ?? double);
-    const joined = (base, text) => path.posix.normalize(path.posix.join(bases.get(base), ...segments(text)));
-    for (let size = -1; size !== bases.size;) {
-      size = bases.size;
-      for (const [, name, base, text] of source.matchAll(joinPattern)) {
-        if (name && !bases.has(name) && bases.has(base)) bases.set(name, joined(base, text));
-      }
-    }
-    const walks = /\b(?:readdir|opendir)(?:Sync)?\(/.test(source);
-    const isDirectory = (target) => fs.statSync(path.join(REPO_ROOT, target), { throwIfNoEntry: false })?.isDirectory();
-    return [...source.matchAll(joinPattern)]
-      .filter(([, , base]) => bases.has(base))
-      .map(([, , base, text]) => joined(base, text))
-      .filter((target) => !target.startsWith('../') && target !== '.' && (isFile(target) || (walks && isDirectory(target))));
-  };
-  const references = (file) => {
-    const source = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8')
-      .replace(/\b(?:import|export)\s+type\s+(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s*['"][^'"]+['"]/g, '');
-    const modules = [...source.matchAll(modulePattern)].map(([, specifier]) => resolve(file, specifier));
-    const paths = [
-      ...[...source.matchAll(pathPattern)].map(([, specifier]) => resolve(file, specifier)),
-      ...builtPaths(file, source),
-    ];
-    const packages = [...new Set([...source.matchAll(packagePattern)].map(([, name]) => name))];
-    const inRepo = (target) => !target.startsWith('../');
-    return { modules: modules.filter(inRepo), paths: [...new Set(paths)].filter((target) => inRepo(target) && !modules.includes(target)), packages };
-  };
+  const references = (file) => loadReferences(file, fs.readFileSync(path.join(REPO_ROOT, file), 'utf8'));
   const workspaceByName = new Map(Object.keys(WORKSPACE_RULES).map((workspace) => [
     JSON.parse(fs.readFileSync(path.join(REPO_ROOT, workspace, 'package.json'), 'utf8')).name,
     workspace,
@@ -454,15 +399,18 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   const closures = new Map();
   const closureOf = (workspace) => closures.get(workspace) ?? closures.set(workspace, workspaceClosure([workspace])).get(workspace);
 
-  const loadedBy = new Map(); // path -> Map(lane or evm:scope -> how it is reached)
   const needsOf = (map, key) => map.get(key) ?? map.set(key, new Map()).get(key);
-  const load = (target, requirements, via) => {
-    const entry = needsOf(loadedBy, target);
+  const add = (map, key, requirements, via) => {
+    const entry = needsOf(map, key);
     const added = requirements.filter((requirement) => !entry.has(requirement));
     for (const requirement of added) entry.set(requirement, via);
     return added.length > 0;
   };
-  // Workspaces loaded by package name, whose rule then covers every file.
+  const loadedBy = new Map(); // module -> Map(lane or evm:scope -> how it is reached)
+  const load = (target, requirements, via) => add(loadedBy, target, requirements, via);
+  // Paths read or run, and workspaces loaded by package name: required, but
+  // kept apart so their requirements never spread through a module's imports.
+  const readBy = new Map();
   const workspacesLoaded = new Map();
   const evmScopeFiles = new Map(Object.entries(EVM_TEST_SCOPES).flatMap(([scope, { packageDirectory, files }]) =>
     files.map((file) => [path.posix.normalize(path.posix.join(packageDirectory, file)), `evm:${scope}`])));
@@ -471,6 +419,8 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
     for (const file of sourceFiles(workspace)) {
       const inside = file.slice(workspace.length + 1);
       if (/^(?:scripts|test-fixtures|test\/archive)\//.test(inside)) continue;
+      // Demo apps' run.mjs entry points run by hand; the demo lane runs tests.
+      if (workspace === 'demo' && /^[^/]+\/run\.[cm]?[jt]s$/.test(inside)) continue;
       if (inside.startsWith('integration/')) {
         if (evmScopeFiles.has(file)) load(file, [evmScopeFiles.get(file)], 'EVM_TEST_SCOPES');
       } else if (workspace === 'packages/node-ui' && inside.startsWith('e2e/')) {
@@ -516,29 +466,27 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
     for (const target of modules) {
       if (load(target, requirements, file)) queue.push(target);
     }
-    for (const target of paths) load(target, requirements, file);
+    for (const target of paths) add(readBy, target, requirements, file);
     for (const name of packages) {
       if (!workspaceByName.has(name)) continue;
       for (const workspace of closureOf(workspaceByName.get(name))) {
-        const entry = needsOf(workspacesLoaded, workspace);
-        for (const requirement of requirements) {
-          if (!entry.has(requirement)) entry.set(requirement, `${file} (imports ${name})`);
-        }
+        add(workspacesLoaded, workspace, requirements, `${file} (imports ${name})`);
       }
     }
   }
   // Any path in a workspace routes by its rule; its src/index.ts stands for all.
-  for (const [workspace, requirements] of workspacesLoaded) {
-    const entry = needsOf(loadedBy, `${workspace}/src/index.ts`);
-    for (const [requirement, via] of requirements) {
-      if (!entry.has(requirement)) entry.set(requirement, via);
-    }
+  for (const [key, requirements] of [
+    ...readBy,
+    ...[...workspacesLoaded].map(([workspace, needs]) => [`${workspace}/src/index.ts`, needs]),
+  ]) {
+    for (const [requirement, via] of requirements) add(loadedBy, key, [requirement], via);
   }
 
   for (const [target, requirement, why] of [
     ['packages/query/README.md', 'bura_query', 'the query security tests read the README'],
     ['packages/cli/src/extraction/markdown-extractor.ts', 'tornado_agent', 'agent tests import CLI source'],
     ['packages/cli/src/daemon.ts', 'kosava_node_ui', 'node-ui tests scan the CLI daemon sources'],
+    ['packages/agent/src/dkg-agent-join.ts', 'tornado_core', 'the chain RPC-site census reads agent sources'],
     ['devnet/rfc64-runtime-provenance.mts', 'bura_cli', 'the CLI-started Gate 2 adapter imports the shared runtime modules'],
     ['devnet/rfc64-persistence-lifecycle/process-lifecycle.ts', 'tornado_blazegraph', 'the Blazegraph job runs the Gate 1 rollout tests'],
     ['test-systems/storage-conformance.test.ts', 'tornado_blazegraph', 'pnpm test:conformance runs in the Blazegraph job'],
@@ -558,6 +506,41 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
     }
   }
   assert.deepEqual(missing, [], 'a change to these files must select the lane or EVM scope that loads them');
+});
+
+test('the load scanner sees these forms, and nothing it cannot resolve statically', () => {
+  // The load-closure guard sees only what loadReferences recognises, so its
+  // reach is pinned here: each form below resolves to the named file, and the
+  // comment mention and the run-time path deliberately resolve to nothing.
+  const references = loadReferences('packages/node-ui/test/example.test.ts', [
+    "import { api } from '../src/ui/api.js';",
+    "import type { RequestContext } from '../../cli/src/daemon/routes/context.js';",
+    "const cli = await import('../../cli/src/cli.js');",
+    "import { resolveOxigraphBinary } from '../../cli/dist/daemon/oxigraph-binary.js';",
+    "const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');",
+    "const CLI_SRC = resolve(__dirname, '..', '..', 'cli', 'src');",
+    "const barrel = resolve(CLI_SRC, 'daemon.ts');",
+    'for (const entry of readdirSync(CLI_SRC)) void entry;',
+    "const census = ['packages/agent/src/dkg-agent-join.ts'];",
+    '// `packages/cli/src/keystore.ts` is only mentioned here.',
+    "import { contextGraphDataUri } from '@origintrail-official/dkg-core';",
+    'const late = readFileSync(`${root}/${name}`);',
+  ].join('\n'));
+  assert.deepEqual(references.modules.sort(), [
+    'packages/cli/src/cli.ts',
+    'packages/cli/src/daemon/oxigraph-binary.ts',
+    'packages/node-ui/src/ui/api.ts',
+  ]);
+  assert.deepEqual(references.paths.sort(), [
+    'packages/agent/src/dkg-agent-join.ts',
+    'packages/cli/src',
+    'packages/cli/src/daemon.ts',
+    'packages/node-ui/README.md',
+  ]);
+  assert.deepEqual(references.packages, ['@origintrail-official/dkg-core']);
+  // Repo-path literals count only in test files, and a directory only when walked.
+  const source = loadReferences('packages/node-ui/src/ui/example.ts', "const note = 'packages/agent/src/dkg-agent-join.ts';\nconst dir = resolve(__dirname, '..');");
+  assert.deepEqual(source.paths, []);
 });
 
 test('a document a test reads is a CI input; other documentation stays docs-only', () => {
