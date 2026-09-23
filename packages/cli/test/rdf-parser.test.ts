@@ -158,7 +158,7 @@ describe('parseRdf', () => {
       expect(quads[0].subject).toContain('_:');
     });
 
-    it('escapes quotes, backslashes and line breaks in literal values', async () => {
+    it('escapes quotes, backslashes, line breaks and control characters in literal values', async () => {
       const ttl = [
         '@prefix ex: <urn:ex:> .',
         'ex:s ex:quote "say \\"hi\\"" ;',
@@ -166,6 +166,7 @@ describe('parseRdf', () => {
         '  ex:multi """line one',
         'line two\r""" ;',
         '  ex:lang "a \\"b\\""@en ;',
+        '  ex:ctrl "\\u0001bell\\u007F\\b\\f" ;',
         '  ex:typed "x\\ny"^^<urn:dt> .',
       ].join('\n');
       const quads = await parseRdf(ttl, 'turtle', DEFAULT_GRAPH);
@@ -175,6 +176,8 @@ describe('parseRdf', () => {
         '"C:\\\\new\\\\table"',
         '"line one\\nline two\\r"',
         '"a \\"b\\""@en',
+        // Other control characters use \uXXXX, or the short \b / \f escapes.
+        '"\\u0001bell\\u007F\\b\\f"',
         '"x\\ny"^^<urn:dt>',
       ]);
     });
