@@ -252,6 +252,60 @@ describe('ContextGraphNameResolver', () => {
     expect(state.adopted).toEqual([]);
   });
 
+  it('records a decline reached through a pulled ontology graph, and leaves it off the retry schedule', async () => {
+    vi.useFakeTimers();
+    const state = harness({
+      peers: ['old-core'],
+      protocols: { 'old-core': false },
+      ontology: { 'old-core': new Map([[NAME_HASH, CLEARTEXT]]) },
+    });
+    let adoptCalls = 0;
+    state.deps.adopt = async () => {
+      adoptCalls += 1;
+      return false;
+    };
+    const resolver = resolverFor(state, {
+      retryBaseMs: 1_000,
+      retryMaxMs: 1_000,
+      ontologyPullCooldownMs: 0,
+      ontologyPullFailureCooldownMs: 0,
+    });
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({
+      state: 'declined',
+      contextGraphId: CLEARTEXT,
+      source: 'peer-ontology',
+    });
+    expect(vi.getTimerCount()).toBe(0);
+
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(state.pulled).toEqual(['old-core']);
+    expect(adoptCalls).toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('adopts on an explicit request once a declined id is accepted, with no background pass', async () => {
+    vi.useFakeTimers();
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    let conflict = true;
+    const adopt = state.deps.adopt;
+    state.deps.adopt = async (target, contextGraphId, source) => (
+      conflict ? false : adopt(target, contextGraphId, source)
+    );
+    const resolver = resolverFor(state);
+    expect(await resolver.resolveNow(TARGET)).toMatchObject({ state: 'declined' });
+
+    conflict = false; // the operator removed the conflicting row
+    const entry = await resolver.resolveNow(TARGET);
+    expect(entry).toMatchObject({ state: 'resolved', contextGraphId: CLEARTEXT, source: 'peer-protocol' });
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'resolved', contextGraphId: CLEARTEXT });
+    expect(state.adopted).toEqual([{ contextGraphId: CLEARTEXT, source: 'peer-protocol' }]);
+    // No timer ran and none is left: the explicit request alone did it.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('records nothing when adoption was declined because the row went away', async () => {
     const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
     state.deps.adopt = async () => {

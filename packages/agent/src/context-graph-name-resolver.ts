@@ -543,7 +543,10 @@ export class ContextGraphNameResolver {
         MAX_REMEMBERED_ASKS,
       );
       if (candidates === null) continue;
-      let adoptedHere: ContextGraphNameResolutionEntry | undefined;
+      // Like the other sources: once this target's own adoption has settled
+      // (resolved, declined, or the row changed under it), the attempt is
+      // over. Parking it as pending would re-schedule a decline forever.
+      let ownAdoption: { readonly entry: ContextGraphNameResolutionEntry | undefined } | undefined;
       for (const nameHash of pending) {
         const verified = verifyContextGraphNameCandidate(candidates.get(nameHash), nameHash);
         if (verified === null) continue;
@@ -552,9 +555,9 @@ export class ContextGraphNameResolver {
           : this.targetFor(nameHash);
         if (pendingTarget === undefined) continue;
         const adopted = await this.adopt(pendingTarget, verified, 'peer-ontology', peerId);
-        if (nameHash === target.nameHash) adoptedHere = adopted;
+        if (nameHash === target.nameHash) ownAdoption = { entry: adopted };
       }
-      if (adoptedHere?.state === 'resolved') return adoptedHere;
+      if (ownAdoption !== undefined) return ownAdoption.entry;
     }
 
     return this.pending(target, peers.length === 0 ? 'no-peers' : 'not-found', supporting);
