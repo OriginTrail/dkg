@@ -392,11 +392,10 @@ export function parseNameStatusZ(buffer) {
 //   4. a path claimed only by PATH_TRIGGERS (blazegraph-image.json)
 //   5. anything else -> full CI
 // PATH_TRIGGERS add lanes and EVM scopes on top of whichever of 2-4 applies.
-// Every decision has one shape, { full, lanes, evmScopes, buildChecks,
-// reasons }: `full` is the reason the path needs full CI (and the rest is
-// empty) or null when the other fields route it.
+// A decision is { kind: 'full', reason } when the path needs full CI, or
+// { kind: 'routed', lanes, evmScopes, buildChecks, reasons } otherwise.
 const NONE = Object.freeze([]);
-const fullRoute = (reason) => ({ full: reason, lanes: NONE, evmScopes: NONE, buildChecks: false, reasons: NONE });
+const fullRoute = (reason) => ({ kind: 'full', reason });
 
 function routePath(filePath, { modifiedFiles, readManifest }) {
   if (isGlobalFullPath(filePath)) return fullRoute(`Global CI input changed: ${filePath}`);
@@ -432,7 +431,7 @@ function routePath(filePath, { modifiedFiles, readManifest }) {
   const triggers = pathTriggers(filePath);
   if (!area && triggers.length === 0) return fullRoute(`Unclassified path changed: ${filePath}`);
   return {
-    full: null,
+    kind: 'routed',
     lanes: [...triggers.flatMap((trigger) => trigger.lanes), ...(area?.lanes ?? NONE)],
     evmScopes: [...triggers.flatMap((trigger) => trigger.evmScopes), ...(area?.evmScopes ?? NONE)],
     buildChecks: area?.buildChecks ?? false,
@@ -534,7 +533,7 @@ export function planCi({
 
   for (const filePath of productionFiles) {
     const route = routePath(filePath, { modifiedFiles, readManifest });
-    if (route.full) return fullForCurrentDiff([route.full]);
+    if (route.kind === 'full') return fullForCurrentDiff([route.reason]);
     for (const lane of route.lanes) lanes[lane] = true;
     for (const scope of route.evmScopes) evmScopes.add(scope);
     buildChecks ||= route.buildChecks;
