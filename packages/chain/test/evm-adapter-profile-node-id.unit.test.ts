@@ -91,6 +91,9 @@ function makeAdapter(opts: AdapterOptions = {}) {
   const a: any = new EVMChainAdapter(minimalConfig(opts.admin === false ? { allowNoAdminSigner: true } : { adminPrivateKey: ADMIN_PK }));
   a.init = async () => undefined;
 
+  // Every chain-facing step in the order it ran (identity lookup, reads,
+  // bytecode probe, preflight, send), to pin the check order.
+  const calls: string[] = [];
   const profile = { __name: 'Profile', interface: profileInterface, getAddress: async () => PROFILE_ADDRESS };
   const profileStorage = { __name: 'ProfileStorage' };
   const resolved: string[] = [];
@@ -100,12 +103,16 @@ function makeAdapter(opts: AdapterOptions = {}) {
     if (name === 'ProfileStorage') return profileStorage;
     return { __name: name };
   };
-  a.getIdentityId = async () => opts.identityId ?? 7n;
+  a.getIdentityId = async () => {
+    calls.push('getIdentityId');
+    return opts.identityId ?? 7n;
+  };
   a.refreshIdentityIdForAddress = async () => opts.identityId ?? 7n;
 
   const taken = new Set((opts.takenNodeIds ?? []).map((value) => value.toLowerCase()));
   const reads: Array<{ label: string; method: string; args: unknown[] }> = [];
   a.readContract = async (_contract: unknown, label: string, method: string, ...args: unknown[]) => {
+    calls.push(`read:${method}`);
     reads.push({ label, method, args });
     if (method === 'getNodeId') return opts.currentNodeId ?? LEGACY_NODE_ID;
     if (method === 'nodeIdsList') return taken.has(String(args[0]).toLowerCase());
@@ -119,6 +126,7 @@ function makeAdapter(opts: AdapterOptions = {}) {
   const codeReads: string[] = [];
   const provider = {
     getCode: async (address: string) => {
+      calls.push('getCode');
       codeReads.push(address);
       return opts.code ?? CODE_WITH_UPDATE;
     },
@@ -130,6 +138,7 @@ function makeAdapter(opts: AdapterOptions = {}) {
     getFunction: (fn: string) => ({
       staticCall: async (...args: unknown[]) => {
         const overrides = args[args.length - 1] as { from: string };
+        calls.push('preflight');
         preflights.push({ fn, args: args.slice(0, -1), from: overrides.from });
         return opts.preflight ? opts.preflight(overrides.from) : undefined;
       },
@@ -138,6 +147,7 @@ function makeAdapter(opts: AdapterOptions = {}) {
 
   const sends: Array<{ contract: string; method: string; args: unknown[]; signer: string }> = [];
   a.sendContractTransaction = async (contract: any, method: string, args: unknown[], signer: any) => {
+    calls.push(`send:${method}`);
     sends.push({ contract: contract.__name, method, args, signer: signer.address });
     return {
       hash: '0x' + 'ab'.repeat(32),
@@ -149,7 +159,7 @@ function makeAdapter(opts: AdapterOptions = {}) {
   };
   a.contracts.identity = { interface: identityInterface };
   a.contracts.profile = profile;
-  return { a, sends, preflights, reads, codeReads, resolved };
+  return { a, calls, sends, preflights, reads, codeReads, resolved };
 }
 
 afterEach(() => {
@@ -326,6 +336,65 @@ describe('updateProfileNodeId', () => {
     await expect(a.updateProfileNodeId('not-hex')).rejects.toThrow(/bytes or 0x-prefixed hex/);
     expect(reads).toEqual([]);
     expect(sends).toEqual([]);
+  });
+});
+
+// The same order and errors as the mock adapter (mock-adapter-profile-node-id.unit.test.ts).
+describe('updateProfileNodeId check order', () => {
+  const PROBE = ['getIdentityId', 'getCode', 'read:version'];
+
+  it('rejects malformed input before any chain call, even without an identity', async () => {
+    const { a, calls } = makeAdapter({ identityId: 0n });
+    await expect(a.updateProfileNodeId('0x')).rejects.toThrow('updateProfileNodeId: nodeId is empty');
+    expect(calls).toEqual([]);
+  });
+
+  it('refuses a node without an identity before probing the Profile', async () => {
+    const { a, calls } = makeAdapter({ identityId: 0n, code: CODE_WITHOUT_UPDATE });
+    await expect(a.updateProfileNodeId(PEER_NODE_ID))
+      .rejects.toThrow('updateProfileNodeId: node has no on-chain profile (create a profile first).');
+    expect(calls).toEqual(['getIdentityId']);
+  });
+
+  it('reports an older Profile before reading the nodeId, even for an unchanged value', async () => {
+    const { a, calls } = makeAdapter({ code: CODE_WITHOUT_UPDATE, version: '10.0.2', currentNodeId: PEER_NODE_ID });
+    await expect(a.updateProfileNodeId(PEER_NODE_ID)).rejects.toBeInstanceOf(ProfileNodeIdUpdateUnsupportedError);
+    expect(calls).toEqual(PROBE);
+  });
+
+  it('refuses an identity whose profile is gone before the unchanged and taken checks, sending nothing', async () => {
+    // The profile was deleted between the caller's status read and this call.
+    const { a, calls, sends } = makeAdapter({ identityId: 7n, currentNodeId: '0x', takenNodeIds: [PEER_NODE_ID] });
+    await expect(a.updateProfileNodeId(PEER_NODE_ID))
+      .rejects.toThrow('updateProfileNodeId: identity 7 has no on-chain profile.');
+    expect(calls).toEqual([...PROBE, 'read:getNodeId']);
+    expect(sends).toEqual([]);
+  });
+
+  it("treats the identity's own nodeId as unchanged, not as taken", async () => {
+    // nodeIdsList always holds an identity's own value, so this check must come first.
+    const { a, calls } = makeAdapter({ currentNodeId: PEER_NODE_ID, takenNodeIds: [PEER_NODE_ID] });
+    await expect(a.updateProfileNodeId(PEER_NODE_ID)).resolves.toMatchObject({ changed: false });
+    expect(calls).toEqual([...PROBE, 'read:getNodeId']);
+  });
+
+  it('refuses a taken nodeId before any preflight or send', async () => {
+    const { a, calls } = makeAdapter({ takenNodeIds: [PEER_NODE_ID] });
+    await expect(a.updateProfileNodeId(PEER_NODE_ID)).rejects.toBeInstanceOf(ProfileNodeIdTakenError);
+    expect(calls).toEqual([...PROBE, 'read:getNodeId', 'read:nodeIdsList']);
+  });
+
+  it('checks, then preflights, then sends; an explicit identityId skips the own-identity lookup', async () => {
+    const { a, calls } = makeAdapter();
+    await a.updateProfileNodeId(PEER_NODE_ID);
+    expect(calls).toEqual([...PROBE, 'read:getNodeId', 'read:nodeIdsList', 'preflight', 'send:updateNodeId']);
+
+    const explicit = makeAdapter();
+    await explicit.a.updateProfileNodeId(PEER_NODE_ID, { identityId: 12n });
+    expect(explicit.calls).toEqual([
+      'getCode', 'read:version', 'read:getNodeId', 'read:nodeIdsList', 'preflight', 'send:updateNodeId',
+    ]);
+    expect(explicit.sends[0].args).toEqual([12n, PEER_NODE_ID]);
   });
 });
 

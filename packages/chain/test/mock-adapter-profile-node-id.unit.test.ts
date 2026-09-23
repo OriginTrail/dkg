@@ -4,7 +4,7 @@
  * EVM adapter: nodeIds are unique, an unchanged value is a no-op, and a Hub
  * whose Profile predates updateNodeId is reported, not reverted into.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { encodeProfileNodeIdHex } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '../src/mock-adapter.js';
@@ -19,6 +19,10 @@ async function events(mock: MockChainAdapter, type: string) {
   for await (const event of mock.listenForEvents({ eventTypes: [type], fromBlock: 0 })) seen.push(event.data);
   return seen;
 }
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 describe('MockChainAdapter Profile nodeId', () => {
   it('creates the profile with the requested nodeId', async () => {
@@ -90,5 +94,84 @@ describe('MockChainAdapter Profile nodeId', () => {
   it('refuses a signer without an identity', async () => {
     const mock = new MockChainAdapter();
     await expect(mock.updateProfileNodeId(PEER_NODE_ID)).rejects.toThrow(/no on-chain profile/);
+  });
+});
+
+// The same order and errors as the EVM adapter (evm-adapter-profile-node-id.unit.test.ts).
+describe('MockChainAdapter updateProfileNodeId check order', () => {
+  /** Records the chain-facing lookups updateProfileNodeId makes, in order. */
+  function recordLookups(mock: MockChainAdapter): string[] {
+    const calls: string[] = [];
+    for (const name of ['getIdentityId', 'getProfileNodeIdUpdateSupport', 'getProfileNodeId'] as const) {
+      const original = mock[name].bind(mock) as (...args: unknown[]) => Promise<unknown>;
+      vi.spyOn(mock, name).mockImplementation(((...args: unknown[]) => {
+        calls.push(name);
+        return original(...args);
+      }) as never);
+    }
+    return calls;
+  }
+
+  it('rejects malformed input before any lookup, even without an identity', async () => {
+    const mock = new MockChainAdapter();
+    const calls = recordLookups(mock);
+    await expect(mock.updateProfileNodeId('0x')).rejects.toThrow('updateProfileNodeId: nodeId is empty');
+    expect(calls).toEqual([]);
+  });
+
+  it('refuses a node without an identity before probing the Profile', async () => {
+    const mock = new MockChainAdapter();
+    mock.profileNodeIdUpdateSupported = false;
+    const calls = recordLookups(mock);
+    await expect(mock.updateProfileNodeId(PEER_NODE_ID))
+      .rejects.toThrow('updateProfileNodeId: node has no on-chain profile (create a profile first).');
+    expect(calls).toEqual(['getIdentityId']);
+  });
+
+  it('reports an older Profile before reading the nodeId, even for an unchanged value', async () => {
+    const mock = new MockChainAdapter();
+    await mock.ensureProfile({ nodeId: PEER_NODE_ID });
+    mock.profileNodeIdUpdateSupported = false;
+    const calls = recordLookups(mock);
+    await expect(mock.updateProfileNodeId(PEER_NODE_ID)).rejects.toBeInstanceOf(ProfileNodeIdUpdateUnsupportedError);
+    expect(calls).toEqual(['getIdentityId', 'getProfileNodeIdUpdateSupport']);
+  });
+
+  it('refuses an identity whose profile is gone before the taken check, writing nothing', async () => {
+    const mock = new MockChainAdapter();
+    mock.seedIdentity(OTHER_OPERATOR, 5n);
+    await mock.updateProfileNodeId(PEER_NODE_ID, { identityId: 5n });
+    const calls = recordLookups(mock);
+
+    // Identity 99 has no profile, and another identity holds the value.
+    await expect(mock.updateProfileNodeId(PEER_NODE_ID, { identityId: 99n }))
+      .rejects.toThrow('updateProfileNodeId: identity 99 has no on-chain profile.');
+    expect(calls).toEqual(['getProfileNodeIdUpdateSupport', 'getProfileNodeId']);
+    await expect(mock.getProfileNodeId(99n)).resolves.toBe('0x');
+    expect(await events(mock, 'NodeIdUpdated')).toHaveLength(1);
+  });
+
+  it("treats the identity's own nodeId as unchanged, not as taken", async () => {
+    const mock = new MockChainAdapter();
+    const id = await mock.ensureProfile({ nodeId: PEER_NODE_ID });
+    await expect(mock.isProfileNodeIdTaken(PEER_NODE_ID)).resolves.toBe(true);
+    await expect(mock.updateProfileNodeId(PEER_NODE_ID)).resolves.toEqual({
+      identityId: id,
+      previousNodeId: PEER_NODE_ID,
+      nodeId: PEER_NODE_ID,
+      changed: false,
+    });
+  });
+
+  it('refuses a taken nodeId, writing nothing', async () => {
+    const mock = new MockChainAdapter();
+    mock.seedIdentity(OTHER_OPERATOR, 5n);
+    await mock.updateProfileNodeId(PEER_NODE_ID, { identityId: 5n });
+    await mock.ensureProfile();
+    const own = await mock.getProfileNodeId();
+
+    await expect(mock.updateProfileNodeId(PEER_NODE_ID)).rejects.toBeInstanceOf(ProfileNodeIdTakenError);
+    await expect(mock.getProfileNodeId()).resolves.toBe(own);
+    expect(await events(mock, 'NodeIdUpdated')).toHaveLength(1);
   });
 });
