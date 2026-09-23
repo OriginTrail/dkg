@@ -484,3 +484,10 @@ export * from './query-catalog-parameters.js';
 export * from './query-catalog.js';
 
 export { checkFdLimit, type FdLimitLogLevel } from './fd-limit.js';
+// On-chain Profile nodeId <-> libp2p peer id (canonical encoding + strict decode).
+export {
+  PROFILE_NODE_ID_MAX_BYTES,
+  decodeProfileNodeId,
+  encodeProfileNodeId,
+  encodeProfileNodeIdHex,
+} from './profile-node-id.js';
