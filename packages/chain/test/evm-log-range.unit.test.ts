@@ -74,6 +74,23 @@ describe('classifyEvmLogRangeLimitError — the default Base RPC set', () => {
     expect(classifyEvmLogRangeLimitError(err, 9_000)).toEqual({ kind: 'span', maxBlocks: 2_000 });
   });
 
+  it('ignores the request URL ethers embeds in an HTTP-level refusal', async () => {
+    // An operator endpoint whose host happens to say "archive" or "free-tier"
+    // must not turn a genuine span cap into a depth limit that is never split.
+    for (const url of ['https://base-archive.example.org', 'https://free-tier.pruned.example.org']) {
+      const rpc = fakeLogRpc({
+        url,
+        head: () => HEAD,
+        refuse: () => ({ ...BASE_SPAN_CAP_REFUSAL, httpStatus: 400 }),
+      });
+      const err = await rpc.provider.getLogs({ fromBlock: HEAD - 9_000, toBlock: HEAD - 1 })
+        .catch((e: unknown) => e);
+      rpc.provider.destroy();
+      expect((err as Error).message).toContain(url);
+      expect(classifyEvmLogRangeLimitError(err, 9_000)).toEqual({ kind: 'span', maxBlocks: 2_000 });
+    }
+  });
+
   it('reads publicnode\'s archive-token refusal as a depth limit at every span', async () => {
     for (const httpStatus of [200, 400]) {
       const err = await ethersRefusal({ ...PUBLICNODE_ARCHIVE_REFUSAL, httpStatus });

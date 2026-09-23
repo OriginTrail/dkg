@@ -117,6 +117,9 @@ const PLAN_PATTERN = new RegExp([
   String.raw`\bpersonal token\b`,
 ].join('|'));
 
+/** Any URL in error text (the request URL ethers embeds, a provider's sign-up link). */
+const URL_PATTERN = /[a-z][a-z0-9+.-]*:\/\/\S+/g;
+
 function parseBlockCount(digits: string, thousands: string | undefined): number | undefined {
   const value = Number(digits.replace(/[,_]/g, '')) * (thousands === undefined ? 1 : 1_000);
   return Number.isSafeInteger(value) && value >= 1 ? value : undefined;
@@ -147,7 +150,10 @@ export function classifyEvmLogRangeLimitError(
   err: unknown,
   requestedBlocks?: number,
 ): EvmLogRangeLimit | undefined {
-  const text = collectEvmErrorText(err);
+  // URLs are dropped first: ethers embeds the request URL in every HTTP-level
+  // error message, and an operator endpoint such as `base-archive.example.org`
+  // must not turn a span refusal into a depth limit.
+  const text = collectEvmErrorText(err).replace(URL_PATTERN, ' ');
   if (DEPTH_PATTERN.test(text)) return { kind: 'depth' };
   const span = matchSpanLimit(text);
   if (span === undefined) return undefined;
