@@ -33,8 +33,11 @@ All notable changes to the DKG V10 node are documented here. The format is based
   `dkg mcp setup --port`/`--name` created a `config.json` that took
   precedence over it. Setup now writes through the same lock, re-read and
   atomic replace as the daemon and the CLI, changes only the keys setup owns,
-  and keeps a YAML config in YAML. A config file that cannot be parsed now
-  stops setup with an error naming the file, where `dkg openclaw setup` and
+  and keeps a YAML config in YAML. `dkg mcp serve` now also reads such a
+  node's API port, token and default context graph from `config.yaml` under
+  `DKG_HOME`; it used to parse that file as a workspace config and start with
+  the default port and no token. A config file that cannot be parsed now stops
+  setup with an error naming the file, where `dkg openclaw setup` and
   `dkg mcp setup --port`/`--name` used to replace it with a new config.
 - **Random Sampling resolves the challenged Context Graph by its chain name
   commitment when local history contains multiple names for one numeric ID**:

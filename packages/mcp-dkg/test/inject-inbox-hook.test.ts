@@ -18,9 +18,12 @@
 // Note: vitest config (workspace) needs to allow importing .mjs hooks
 // from .ts tests; that's already the case for capture-chat-style hooks.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 // @ts-expect-error - importing the .mjs hook for its pure-function exports
-import { renderNotice, daemonIdentityHash, extractPrompt } from '../hooks/inject-inbox.mjs';
+import { renderNotice, daemonIdentityHash, extractPrompt, loadDaemonConfig } from '../hooks/inject-inbox.mjs';
 
 describe('inject-inbox.mjs renderNotice — SECURITY', () => {
   it('NEVER inlines peer message text into the rendered notice', () => {
@@ -162,6 +165,74 @@ describe('inject-inbox.mjs daemonIdentityHash — STATE KEYING', () => {
       source: '/proj/.dkg/config.yaml',
     });
     expect(jsHash).toBe(tsHash);
+  });
+});
+
+// A YAML-configured node keeps its daemon config in DKG_HOME/config.yaml:
+// setup no longer writes a shadowing config.json there. The hook must read
+// it like `src/config.ts` does — the same API and source path — or it would
+// query the default port with no token and key a different cursor file
+// than `dkg_check_inbox`.
+describe('inject-inbox.mjs loadDaemonConfig — DKG_HOME daemon config', () => {
+  const ENV_KEYS = ['DKG_HOME', 'DKG_WORKSPACE', 'DKG_API', 'DEVNET_API', 'DKG_TOKEN', 'DEVNET_TOKEN', 'DKG_AUTH'];
+  const savedEnv: Record<string, string | undefined> = {};
+  let root = '';
+  let home = '';
+
+  beforeEach(() => {
+    for (const key of ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+    root = mkdtempSync(join(tmpdir(), 'inject-inbox-config-'));
+    home = join(root, 'dkg-home');
+    mkdirSync(home);
+    process.env.DKG_HOME = home;
+    // An empty workspace, so the cwd-walk fallback finds no .dkg/config.yaml.
+    process.env.DKG_WORKSPACE = mkdtempSync(join(root, 'workspace-'));
+  });
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
+    }
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  function writeHome(files: Record<string, string>): void {
+    for (const [name, content] of Object.entries(files)) writeFileSync(join(home, name), content);
+  }
+
+  it('translates a daemon-shaped config.yaml and keys the same daemon identity as dkg_check_inbox', async () => {
+    writeHome({
+      'config.yaml': 'name: yaml-node\napiPort: 9317\nnodeRole: edge\nnetworkConfig: testnet\ncontextGraphs:\n  - yaml-ctx\n',
+      'auth.token': '# node token\nyaml-token\n',
+    });
+
+    const hookCfg = loadDaemonConfig();
+
+    expect(hookCfg).toEqual({ api: 'http://localhost:9317', token: 'yaml-token', source: join(home, 'config.yaml') });
+    const { loadConfig } = await import('../src/config.js');
+    const { daemonIdentityHash: toolIdentityHash } = await import('../src/inbox-cursor.js');
+    const toolCfg = loadConfig();
+    expect(toolCfg).toMatchObject({ api: hookCfg.api, token: hookCfg.token, sourcePath: hookCfg.source });
+    expect(daemonIdentityHash(hookCfg)).toBe(toolIdentityHash({ api: toolCfg.api, sourcePath: toolCfg.sourcePath }));
+  });
+
+  it('still prefers config.json over config.yaml', () => {
+    writeHome({
+      'config.json': JSON.stringify({ apiPort: 9001 }),
+      'config.yaml': 'apiPort: 9317\n',
+    });
+
+    expect(loadDaemonConfig()).toMatchObject({ api: 'http://localhost:9001', source: join(home, 'config.json') });
+  });
+
+  it('leaves a workspace-shaped config.yaml at DKG_HOME to the workspace lookup', () => {
+    writeHome({ 'config.yaml': 'node:\n  api: http://yaml:9300\napiPort: 9317\n' });
+
+    expect(loadDaemonConfig()).toEqual({ api: 'http://localhost:9200', token: '', source: null });
   });
 });
 
