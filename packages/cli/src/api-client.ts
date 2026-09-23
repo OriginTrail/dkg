@@ -349,9 +349,16 @@ export interface RandomSamplingStatusResponse {
     submittedCount: number;
     lastSubmittedTxHash: string | null;
     lastSubmittedAt: string | null;
-    /** Optional for older daemons; trailing process-local 24-hour health window. */
+    /**
+     * Distinct challenges (proof periods) first seen in the daemon's trailing
+     * 24-hour window; repeated ticks on one period count once. This and the
+     * three health fields below are optional because older daemons omit them;
+     * the CLI renders a missing counter as `n/a`, never as 0.
+     */
     challengesReceived24h?: number;
+    /** Of those periods, how many this daemon submitted a proof for. */
     proofsSubmitted24h?: number;
+    /** Kind of the most recent failed tick (for example `kc-not-synced`), or null. */
     lastFailureClassification?: string | null;
     lastFailureAt?: string | null;
   };

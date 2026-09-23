@@ -99,6 +99,15 @@ import {
   runForegroundSupervisor,
 } from '../cli-supervisor.js';
 
+/**
+ * Render one 24h health counter. Daemons that predate the counters omit them,
+ * so a missing value prints `n/a` rather than a misleading 0.
+ */
+function formatHealthCount(count: number | undefined, noun: string): string {
+  if (count === undefined) return `n/a ${noun}s`;
+  return `${count} ${noun}${count === 1 ? '' : 's'}`;
+}
+
 export function registerRandomSamplingCommand(program: Command): void {
 // ─── dkg random-sampling (alias: rs) ─────────────────────────────────
 
@@ -133,8 +142,9 @@ randomSamplingCmd
       console.log(`  Ticks:     ${status.loop.totalTicks} (in flight: ${status.loop.inflight})`);
       console.log(`  Last tick: ${status.loop.lastTickAt ?? '—'} (${last?.kind ?? 'never run'})`);
       console.log(`  Submitted: ${status.loop.submittedCount} proof${status.loop.submittedCount === 1 ? '' : 's'}`);
-      console.log(`  24h health: ${status.loop.challengesReceived24h ?? 0} challenge${status.loop.challengesReceived24h === 1 ? '' : 's'}, `
-        + `${status.loop.proofsSubmitted24h ?? 0} proof${status.loop.proofsSubmitted24h === 1 ? '' : 's'} submitted`);
+      const challenges24h = formatHealthCount(status.loop.challengesReceived24h, 'challenge');
+      const proofs24h = formatHealthCount(status.loop.proofsSubmitted24h, 'proof');
+      console.log(`  24h health: ${challenges24h}, ${proofs24h} submitted`);
       if (status.loop.lastFailureClassification) {
         console.log(`  Last failure: ${status.loop.lastFailureClassification} (${status.loop.lastFailureAt ?? '—'})`);
       }
