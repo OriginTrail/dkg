@@ -619,6 +619,9 @@ importers:
         specifier: ^8.3.3
         version: 8.3.3(web-streams-polyfill@3.3.3)
     devDependencies:
+      '@libp2p/crypto':
+        specifier: ^5.1.18
+        version: 5.1.18
       '@opentelemetry/sdk-metrics':
         specifier: ^2.8.0
         version: 2.8.0(@opentelemetry/api@1.9.1)

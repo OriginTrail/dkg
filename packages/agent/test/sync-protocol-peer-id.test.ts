@@ -14,9 +14,11 @@
  * the loop. A permissive peer-store double would hide exactly this bug.
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { peerIdFromString } from '@libp2p/peer-id';
+import { generateKeyPair } from '@libp2p/crypto/keys';
+import { peerIdFromPrivateKey, peerIdFromString } from '@libp2p/peer-id';
 import { DKGNode, PROTOCOL_SYNC, tripleContentV10 } from '@origintrail-official/dkg-core';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { toLibp2pPeerId } from '../src/p2p/peer-id.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { createIncompleteDurableSyncResult } from '../src/sync/durable-progress.js';
 
@@ -115,6 +117,32 @@ describe('waitForSyncProtocol on the real libp2p peer store', () => {
       ).rejects.toMatchObject({ name: 'AbortError' });
     }
     expect(peerStore.get).not.toHaveBeenCalled();
+  });
+});
+
+describe('toLibp2pPeerId for every key-derived peer ID type', () => {
+  // Ed25519 and secp256k1 IDs carry the public key inline. An RSA ID is the
+  // sha2-256 of its key, so it re-parses by CID and the store fills the key.
+  it.each([
+    { type: 'Ed25519', keyInline: true, generate: () => generateKeyPair('Ed25519') },
+    { type: 'secp256k1', keyInline: true, generate: () => generateKeyPair('secp256k1') },
+    { type: 'RSA', keyInline: false, generate: () => generateKeyPair('RSA', 2048) },
+  ])('re-parses a $type peer ID to one the real peer store finds', async ({ type, keyInline, generate }) => {
+    const original = peerIdFromPrivateKey(await generate());
+    const id = original.toString();
+    const reparsed = toLibp2pPeerId({ toString: () => id });
+
+    expect(reparsed?.type).toBe(type);
+    expect(reparsed?.equals(peerIdFromString(id))).toBe(true);
+    expect(reparsed?.equals(original)).toBe(true);
+    expect(reparsed?.publicKey?.equals(original.publicKey) ?? false).toBe(keyInline);
+
+    await node.libp2p.peerStore.merge(original, { protocols: [PROTOCOL_SYNC] });
+    const recorded = await node.libp2p.peerStore.get(reparsed!);
+    expect(recorded.id.equals(original)).toBe(true);
+    expect(recorded.id.publicKey?.equals(original.publicKey)).toBe(true);
+    expect(recorded.protocols).toContain(PROTOCOL_SYNC);
+    await expect(waitForSyncProtocol({ toString: () => id })).resolves.toBe(true);
   });
 });
 
