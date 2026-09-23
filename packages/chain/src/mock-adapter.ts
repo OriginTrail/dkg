@@ -42,7 +42,16 @@ import type {
   KnowledgeAssetUpdateContext,
   ContextGraphAuthoritySnapshot,
   ContextGraphFinalizedCreation,
+  EnsureProfileOptions,
+  ProfileNodeIdUpdateResult,
+  ProfileNodeIdUpdateSupport,
 } from './chain-adapter.js';
+import {
+  PROFILE_NODE_ID_UPDATE_MIN_VERSION,
+  ProfileNodeIdTakenError,
+  ProfileNodeIdUpdateUnsupportedError,
+  normalizeProfileNodeId,
+} from './profile-node-id.js';
 import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
 import type { ContextGraphLiveAuthority } from './chain-adapter.js';
 import type { RandomSamplingAvailability } from './random-sampling-availability.js';
@@ -60,6 +69,8 @@ import {
 } from './evm-context-graph-storage-enumeration.js';
 
 export const MOCK_DEFAULT_SIGNER = '0x' + '1'.repeat(40);
+/** Fixed Profile address the mock reports from its nodeId feature probe. */
+export const MOCK_PROFILE_ADDRESS = '0x' + 'af'.repeat(20);
 /** Fixed ContextGraphStorage address the mock reports for its enumeration. */
 export const MOCK_CONTEXT_GRAPH_STORAGE_ADDRESS = '0x' + 'c6'.repeat(20);
 
@@ -258,6 +269,17 @@ export class MockChainAdapter implements ChainAdapter {
   // on-chain shape. Multiaddrs are not stored on Profile (RFC 04 §5.2).
   private relayCapableByIdentity = new Map<bigint, boolean>();
 
+  // In-memory mirror of ProfileStorage.nodeId / nodeIdsList. An identity with
+  // no recorded nodeId reports a deterministic 32-byte legacy value, the shape
+  // daemons wrote before profiles carried the libp2p peer id.
+  private profileNodeIds = new Map<bigint, string>();
+
+  /**
+   * Whether the mock models a Profile with `updateNodeId` (Profile >= 10.1.0).
+   * Offline runs set false to model a Hub whose Profile predates it.
+   */
+  profileNodeIdUpdateSupported = true;
+
   constructor(
     chainId = 'mock:31337',
     signerAddress = MOCK_DEFAULT_SIGNER,
@@ -287,11 +309,19 @@ export class MockChainAdapter implements ChainAdapter {
     return emptyRpcUsageWindow();
   }
 
-  async ensureProfile(_options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint> {
+  async ensureProfile(options?: EnsureProfileOptions): Promise<bigint> {
     const existing = await this.getIdentityId();
     if (existing > 0n) return existing;
+    // Mirrors the EVM adapter: a requested nodeId another identity holds
+    // falls back to a random one rather than failing profile creation.
+    let nodeId = ethers.hexlify(ethers.randomBytes(32));
+    if (options?.nodeId !== undefined) {
+      const requested = normalizeProfileNodeId(options.nodeId, 'ensureProfile');
+      if (!this.profileNodeIdHolder(requested)) nodeId = requested;
+    }
     const id = this.nextIdentityId++;
     this.identities.set(this.signerAddress, id);
+    this.profileNodeIds.set(id, nodeId);
     return id;
   }
 
@@ -372,6 +402,75 @@ export class MockChainAdapter implements ChainAdapter {
       newValue: relayCapable,
     });
     return this.txResult(true);
+  }
+
+  // --- Profile nodeId (identity -> libp2p peer id) ---
+
+  private knownProfileIdentityIds(): bigint[] {
+    return [...new Set([...this.identities.values(), ...this.profileNodeIds.keys()])];
+  }
+
+  private profileNodeIdOf(identityId: bigint): string {
+    return this.profileNodeIds.get(identityId) ?? ethers.keccak256(ethers.toBeHex(identityId, 32));
+  }
+
+  private profileNodeIdHolder(nodeId: string): bigint | undefined {
+    const wanted = nodeId.toLowerCase();
+    return this.knownProfileIdentityIds().find((id) => this.profileNodeIdOf(id) === wanted);
+  }
+
+  async getProfileNodeId(identityId?: bigint): Promise<string> {
+    const id = identityId ?? (await this.getIdentityId());
+    if (id === 0n || !this.knownProfileIdentityIds().includes(id)) return '0x';
+    return this.profileNodeIdOf(id);
+  }
+
+  async isProfileNodeIdTaken(nodeId: Uint8Array | string): Promise<boolean> {
+    return this.profileNodeIdHolder(normalizeProfileNodeId(nodeId, 'isProfileNodeIdTaken')) !== undefined;
+  }
+
+  async getProfileNodeIdUpdateSupport(): Promise<ProfileNodeIdUpdateSupport> {
+    return {
+      supported: this.profileNodeIdUpdateSupported,
+      profileAddress: ethers.getAddress(MOCK_PROFILE_ADDRESS),
+      profileVersion: this.profileNodeIdUpdateSupported ? PROFILE_NODE_ID_UPDATE_MIN_VERSION : '10.0.2',
+      requiredVersion: PROFILE_NODE_ID_UPDATE_MIN_VERSION,
+    };
+  }
+
+  async updateProfileNodeId(
+    nodeId: Uint8Array | string,
+    options?: { identityId?: bigint },
+  ): Promise<ProfileNodeIdUpdateResult> {
+    const requested = normalizeProfileNodeId(nodeId, 'updateProfileNodeId');
+    const identityId = options?.identityId ?? (await this.getIdentityId());
+    if (identityId === 0n) {
+      throw new Error('updateProfileNodeId: node has no on-chain profile (create a profile first).');
+    }
+    const support = await this.getProfileNodeIdUpdateSupport();
+    if (!support.supported) throw new ProfileNodeIdUpdateUnsupportedError(support);
+    const previousNodeId = await this.getProfileNodeId(identityId);
+    if (previousNodeId === '0x') {
+      throw new Error(`updateProfileNodeId: identity ${identityId} has no on-chain profile.`);
+    }
+    if (previousNodeId === requested) {
+      return { identityId, previousNodeId, nodeId: requested, changed: false };
+    }
+    if (this.profileNodeIdHolder(requested) !== undefined) throw new ProfileNodeIdTakenError(requested);
+    this.profileNodeIds.set(identityId, requested);
+    this.pushEvent('NodeIdUpdated', {
+      identityId: identityId.toString(),
+      oldNodeId: previousNodeId,
+      newNodeId: requested,
+    });
+    return {
+      identityId,
+      previousNodeId,
+      nodeId: requested,
+      changed: true,
+      signer: this.signerAddress,
+      tx: this.txResult(true),
+    };
   }
 
   // --- V9 UAL-based methods ---

@@ -102,6 +102,22 @@
   {
     "inputs": [
       {
+        "internalType": "uint256",
+        "name": "length",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "maxLength",
+        "type": "uint256"
+      }
+    ],
+    "name": "NodeIdTooLong",
+    "type": "error"
+  },
+  {
+    "inputs": [
+      {
         "internalType": "string",
         "name": "nodeName",
         "type": "string"
@@ -228,6 +244,19 @@
     "inputs": [],
     "name": "ZeroAsk",
     "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "MAX_NODE_ID_LENGTH",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
   },
   {
     "inputs": [
@@ -442,6 +471,19 @@
   },
   {
     "inputs": [],
+    "name": "shardingTable",
+    "outputs": [
+      {
+        "internalType": "contract ShardingTable",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
     "name": "shardingTableStorage",
     "outputs": [
       {
@@ -480,6 +522,24 @@
       }
     ],
     "name": "updateAsk",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint72",
+        "name": "identityId",
+        "type": "uint72"
+      },
+      {
+        "internalType": "bytes",
+        "name": "nodeId",
+        "type": "bytes"
+      }
+    ],
+    "name": "updateNodeId",
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"

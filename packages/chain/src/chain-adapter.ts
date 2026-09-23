@@ -1345,6 +1345,47 @@ export interface OperationalWalletRegistrationResult {
   taken: Array<{ address: string; identityId: bigint }>;
 }
 
+/** Options for {@link ChainAdapter.ensureProfile}. */
+export interface EnsureProfileOptions {
+  nodeName?: string;
+  stakeAmount?: bigint;
+  lockTier?: number;
+  /**
+   * The Profile nodeId to register when a profile is created: the canonical
+   * encoding of this node's libp2p peer id (`encodeProfileNodeId` in
+   * dkg-core), as bytes or 0x hex, 1 to 64 bytes. Omitted means a random
+   * 32-byte nodeId (the legacy behaviour). If another identity already holds
+   * the value, the profile is created with a random nodeId instead and a
+   * warning is logged, so provisioning never fails permanently on it.
+   */
+  nodeId?: Uint8Array | string;
+}
+
+/** Whether the Hub's current Profile contract has `updateNodeId` (Profile >= 10.1.0). */
+export interface ProfileNodeIdUpdateSupport {
+  supported: boolean;
+  /** The Profile the Hub resolves right now (checksummed). */
+  profileAddress: string;
+  /** `Profile.version()`, or null when it could not be read. */
+  profileVersion: string | null;
+  /** The first Profile version with `updateNodeId`. */
+  requiredVersion: string;
+}
+
+/** Outcome of {@link ChainAdapter.updateProfileNodeId}. */
+export interface ProfileNodeIdUpdateResult {
+  identityId: bigint;
+  /** The nodeId before the call (0x hex). */
+  previousNodeId: string;
+  /** The requested nodeId (0x hex). */
+  nodeId: string;
+  /** False when the profile already had `nodeId`: no transaction was sent. */
+  changed: boolean;
+  /** The wallet that signed the update (an operational key, or the admin key). */
+  signer?: string;
+  tx?: TxResult;
+}
+
 /** Optional cancellation boundary for caller-owned, read-only chain work. */
 /**
  * GH#2270 PR-3 — what the adapter knows about a transaction it has SIGNED and is about to send.
@@ -1551,7 +1592,7 @@ export interface ChainAdapter {
    * legacy mock chains have no identity registry.
    */
   getIdentityIdForAddress?(address: string): Promise<bigint>;
-  ensureProfile(options?: { nodeName?: string; stakeAmount?: bigint; lockTier?: number }): Promise<bigint>;
+  ensureProfile(options?: EnsureProfileOptions): Promise<bigint>;
 
   // V9 UAL reservation (publisher address is derived from signer)
   reserveUALRange(count: number): Promise<ReservedRange>;
@@ -2136,6 +2177,38 @@ export interface ChainAdapter {
    * no profile is registered.
    */
   setRelayCapable?(relayCapable: boolean): Promise<TxResult>;
+
+  // ----- Profile nodeId (identity -> libp2p peer id) -----
+  //
+  // The canonical nodeId is the UTF-8 bytes of the node's base58btc peer id
+  // (`encodeProfileNodeId` / `decodeProfileNodeId` in dkg-core). Profile
+  // >= 10.1.0 lets an identity re-point its nodeId via `updateNodeId`.
+
+  /** The profile nodeId (0x hex) of `identityId`, default this node's; `'0x'` when there is no profile. */
+  getProfileNodeId?(identityId?: bigint): Promise<string>;
+
+  /** Whether any identity holds `nodeId` (`ProfileStorage.nodeIdsList`). */
+  isProfileNodeIdTaken?(nodeId: Uint8Array | string): Promise<boolean>;
+
+  /**
+   * Feature-detect `Profile.updateNodeId` on the Profile the Hub resolves
+   * now (bytecode selector probe), so older deployments report unsupported
+   * instead of reverting.
+   */
+  getProfileNodeIdUpdateSupport?(): Promise<ProfileNodeIdUpdateSupport>;
+
+  /**
+   * Set this node's profile nodeId through `Profile.updateNodeId`, signed by
+   * the first configured key the contract accepts (the operational key, then
+   * the admin key). Returns `changed: false` without a transaction when the
+   * value is already set. Throws `ProfileNodeIdUpdateUnsupportedError` when
+   * the deployed Profile lacks `updateNodeId`, and `ProfileNodeIdTakenError`
+   * when another identity holds `nodeId`.
+   */
+  updateProfileNodeId?(
+    nodeId: Uint8Array | string,
+    options?: { identityId?: bigint },
+  ): Promise<ProfileNodeIdUpdateResult>;
 
   /**
    * Confirm that an address is registered as an OPERATIONAL_KEY for an identity.
