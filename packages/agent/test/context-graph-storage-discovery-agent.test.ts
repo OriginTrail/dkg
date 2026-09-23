@@ -134,7 +134,9 @@ describe('historical Context Graph discovery through ContextGraphStorage enumera
       callerAgentAddress: ethers.Wallet.createRandom().address,
     }));
     expect(walletRows.map((row) => row.onChain!.id)).toEqual(['1', '2', '3', '5']);
-    expect(walletRows.find((row) => row.onChain!.id === '2')!.callerInvolved).toBe(false);
+    // Hash-only rows skip caller annotation on every listing path: the node
+    // holds no local allowlist or curator for a graph it knows only by hash.
+    expect(walletRows.every((row) => row.callerInvolved === undefined)).toBe(true);
     expect(chainRows(await agent.listContextGraphs()).map((row) => row.onChain!.id))
       .toEqual(['1', '2', '3', '5']);
 
