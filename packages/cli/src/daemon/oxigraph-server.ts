@@ -188,6 +188,12 @@ export async function startOxigraphServer(
   const markStoreDown = (): void => {
     invalidateExternalStoreQuadsCache();
   };
+  // A store count requested while the child was recovering fails and is cached
+  // as unreachable; drop it once the child is healthy again, or /api/status
+  // keeps reporting the recovered store as unreachable.
+  const markStoreUp = (): void => {
+    invalidateExternalStoreQuadsCache();
+  };
   const log = opts.log ?? (() => {});
   const host = opts.host ?? DEFAULT_HOST;
   const { port } = opts;
@@ -447,6 +453,7 @@ export async function startOxigraphServer(
           generation,
         };
         restarts = 0;
+        markStoreUp();
         log(`[oxigraph] server restarted and healthy on ${bind}.`);
         return;
       }

@@ -39,9 +39,16 @@ type StoreQuadsCacheEntry =
   | { status: Unreachable; fetchedAt: number };
 
 let storeQuadsCache: StoreQuadsCacheEntry | null = null;
+// The running count, if any. Only the count that still holds this marker may
+// publish its result: see requestExternalStoreQuads().
 let storeQuadsInflight: Promise<void> | null = null;
 
-/** Drop cached quad counts (e.g. when the managed Oxigraph child exits). */
+/**
+ * Drop cached quad counts. The managed Oxigraph calls this when its child goes
+ * down and again when it is healthy after a restart. A count already running
+ * cannot be cancelled, so it loses the in-flight marker instead, and its
+ * result is discarded when it settles.
+ */
 export function invalidateExternalStoreQuadsCache(): void {
   storeQuadsCache = null;
   storeQuadsInflight = null;
@@ -64,6 +71,31 @@ function snapshotStoreQuadsCache(
   };
 }
 
+// One full-store COUNT. A failure is a result too, so this never rejects: a
+// rejection would leave the in-flight marker set and block every later count.
+async function countStoreQuads(agent: DKGAgent): Promise<StoreQuadsCacheEntry> {
+  try {
+    const r = await agent.store.query(
+      'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
+      { priority: 'health', source: 'daemon.status.storeQuads' },
+    );
+    // No binding at all is no count; an empty or unparseable one is 0.
+    let value: number | null = null;
+    if (r.type === 'bindings' && r.bindings.length > 0) {
+      value = parseRdfInt(r.bindings[0].c);
+    }
+    return value === null
+      ? { status: 'unreachable', fetchedAt: Date.now() }
+      : { status: 'ready', value, fetchedAt: Date.now() };
+  } catch {
+    // Surface "unknown" rather than a stale value; operators can
+    // distinguish unreachable from genuinely-empty via storeBackend +
+    // their network logs. Cache the null briefly to avoid hammering
+    // a flapping endpoint.
+    return { status: 'unreachable', fetchedAt: Date.now() };
+  }
+}
+
 // A result younger than the TTL. An unknown age (the clock stepped back past
 // the result) is stale, never fresh.
 function isStoreQuadsCacheFresh(now: number): boolean {
@@ -83,34 +115,18 @@ export function requestExternalStoreQuads(
   now: number,
 ): StoreQuadsStatusFields {
   if (!isStoreQuadsCacheFresh(now) && !storeQuadsInflight) {
-    const refresh = (async () => {
-      let result: StoreQuadsCacheEntry;
-      try {
-        const r = await agent.store.query(
-          'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
-          { priority: 'health', source: 'daemon.status.storeQuads' },
-        );
-        // No binding at all is no count; an empty or unparseable one is 0.
-        let value: number | null = null;
-        if (r.type === 'bindings' && r.bindings.length > 0) {
-          value = parseRdfInt(r.bindings[0].c);
-        }
-        result = value === null
-          ? { status: 'unreachable', fetchedAt: Date.now() }
-          : { status: 'ready', value, fetchedAt: Date.now() };
-      } catch {
-        // Surface "unknown" rather than a stale value; operators can
-        // distinguish unreachable from genuinely-empty via storeBackend +
-        // their network logs. Cache the null briefly to avoid hammering
-        // a flapping endpoint.
-        result = { status: 'unreachable', fetchedAt: Date.now() };
-      }
+    // A count that lost the marker to an invalidation (the managed Oxigraph
+    // went down or came back up), or to a newer count started after one,
+    // neither writes the cache nor clears the marker: typically a failure
+    // while the store was going down or recovering, its result would report
+    // the healthy store as unreachable. The callback runs asynchronously,
+    // after `refresh` holds the marker.
+    const refresh: Promise<void> = countStoreQuads(agent).then((result) => {
+      if (storeQuadsInflight !== refresh) return;
       storeQuadsCache = result;
-    })();
-    storeQuadsInflight = refresh;
-    void refresh.finally(() => {
-      if (storeQuadsInflight === refresh) storeQuadsInflight = null;
+      storeQuadsInflight = null;
     });
+    storeQuadsInflight = refresh;
   }
   return peekCachedExternalStoreQuads(now);
 }

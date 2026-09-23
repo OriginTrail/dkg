@@ -534,6 +534,124 @@ describe('/api/status external-store quad count', () => {
       await closeServer(server);
     }
   });
+
+  it.each([
+    ['fails', (count: Deferred<unknown>) => count.reject(new Error('store unavailable'))],
+    ['succeeds', (count: Deferred<unknown>) => count.resolve(COUNT_123)],
+  ])('drops a count that %s after an invalidation instead of caching its result', async (
+    _outcome,
+    settle,
+  ) => {
+    const staleCount = deferred<unknown>();
+    const freshCount = deferred<unknown>();
+    let queryCalls = 0;
+    const { server, baseUrl } = await startStatusServer(async () => {
+      queryCalls += 1;
+      return queryCalls === 1 ? staleCount.promise : freshCount.promise;
+    }, MANAGED_OXIGRAPH_STORE);
+
+    try {
+      const requested = await fetchStatus(baseUrl, true);
+      expect(requested.body.storeQuadsStatus).toBe('pending');
+      expect(queryCalls).toBe(1);
+
+      // The managed Oxigraph goes down while that count runs. The count keeps
+      // running but loses the in-flight marker, so nothing that will be
+      // published is being counted.
+      invalidateExternalStoreQuadsCache();
+      const invalidated = await fetchStatus(baseUrl);
+      expect(invalidated.body).toMatchObject({
+        storeQuads: null,
+        storeQuadsStatus: 'not-requested',
+        storeQuadsAgeMs: null,
+        storeQuadsRefreshing: false,
+      });
+
+      // Whatever the count then returns, typically a failure against the
+      // dying server, describes a store that is gone.
+      settle(staleCount);
+      await nextTick();
+
+      const polled = await fetchStatus(baseUrl);
+      expect(polled.body).toMatchObject({
+        storeQuads: null,
+        storeQuadsStatus: 'not-requested',
+        storeQuadsAgeMs: null,
+        storeQuadsRefreshing: false,
+      });
+      expect(queryCalls).toBe(1);
+
+      const rerequested = await fetchStatus(baseUrl, true);
+      expect(rerequested.body).toMatchObject({
+        storeQuads: null,
+        storeQuadsStatus: 'pending',
+        storeQuadsRefreshing: true,
+      });
+      expect(queryCalls).toBe(2);
+
+      freshCount.resolve(COUNT_66);
+      await nextTick();
+
+      const counted = await fetchStatus(baseUrl);
+      expect(counted.body).toMatchObject({
+        storeQuads: 66,
+        storeQuadsStatus: 'ready',
+        storeQuadsRefreshing: false,
+      });
+    } finally {
+      staleCount.resolve({ type: 'bindings', bindings: [] });
+      freshCount.resolve({ type: 'bindings', bindings: [] });
+      await closeServer(server);
+    }
+  });
+
+  it('keeps a count started after an invalidation pending when the older count settles', async () => {
+    const staleCount = deferred<unknown>();
+    const freshCount = deferred<unknown>();
+    let queryCalls = 0;
+    const { server, baseUrl } = await startStatusServer(async () => {
+      queryCalls += 1;
+      return queryCalls === 1 ? staleCount.promise : freshCount.promise;
+    }, MANAGED_OXIGRAPH_STORE);
+
+    try {
+      await fetchStatus(baseUrl, true);
+      invalidateExternalStoreQuadsCache();
+      const restarted = await fetchStatus(baseUrl, true);
+      expect(restarted.body.storeQuadsStatus).toBe('pending');
+      expect(queryCalls).toBe(2);
+
+      staleCount.reject(new Error('store unavailable'));
+      await nextTick();
+
+      // The newer count still holds the marker, so it is the one refreshing.
+      const polled = await fetchStatus(baseUrl);
+      expect(polled.body).toMatchObject({
+        storeQuads: null,
+        storeQuadsStatus: 'pending',
+        storeQuadsAgeMs: null,
+        storeQuadsRefreshing: true,
+      });
+      const rerequested = await fetchStatus(baseUrl, true);
+      expect(rerequested.body.storeQuadsStatus).toBe('pending');
+      expect(queryCalls).toBe(2);
+
+      freshCount.resolve(COUNT_66);
+      await nextTick();
+
+      const counted = await fetchStatus(baseUrl);
+      expect(counted.body).toMatchObject({
+        storeQuads: 66,
+        storeQuadsStatus: 'ready',
+        storeQuadsRefreshing: false,
+      });
+      expect(queryCalls).toBe(2);
+    } finally {
+      staleCount.resolve({ type: 'bindings', bindings: [] });
+      freshCount.resolve({ type: 'bindings', bindings: [] });
+      await closeServer(server);
+    }
+  });
 });
 
 describe('dkg status against the status route', () => {
