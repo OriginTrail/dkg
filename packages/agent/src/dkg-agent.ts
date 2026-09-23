@@ -113,6 +113,7 @@ import {
   CONTEXT_GRAPH_STORAGE_DISCOVERY_ID_BUDGET,
   CONTEXT_GRAPH_STORAGE_REFRESH_INTERVAL_MS,
   ContextGraphStorageDiscovery,
+  contextGraphStorageObservation,
   createInMemoryContextGraphStorageDiscoveryStore,
   mergeOnChainContextGraphFacts,
   onChainContextGraphIdentityDiffers,
@@ -529,6 +530,7 @@ import { VmReconcileSchedulingMethods } from './dkg-agent-vm-reconcile-schedulin
 import { AgentsPhonebookMethods } from './dkg-agent-agents-phonebook.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
 import { ContextGraphNameResolutionMethods } from './dkg-agent-cg-name-resolution.js';
+import { ContextGraphOnChainIdMethods } from './dkg-agent-cg-on-chain-id.js';
 import { ImportedArtifactMethods } from './imported-artifact.js';
 // Public surface re-exported so external consumers that import directly
 // from `./dkg-agent.js` keep working. The new file `dkg-agent-types.ts`
@@ -2306,17 +2308,10 @@ export class DKGAgent extends DKGAgentBase {
     const ctx = createOperationContext('init');
     const records = await discovery.loadRecords();
     for (const record of records) {
-      this.applyOnChainContextGraphObservation({
-        contextGraphId: record.contextGraphId,
-        owner: record.owner,
-        accessPolicy: record.accessPolicy,
-        publishPolicy: record.publishPolicy,
-        publishAuthority: record.publishAuthority,
-        nameHash: record.nameHash,
-        blockNumber: record.observedAtBlock,
-        createdAt: record.createdAt,
-        active: record.active,
-      }, { source: 'checkpoint', ctx });
+      this.applyOnChainContextGraphObservation(
+        contextGraphStorageObservation(record, record.observedAtBlock),
+        { source: 'checkpoint', ctx },
+      );
     }
     if (records.length > 0) {
       this.log.info(
@@ -2345,17 +2340,10 @@ export class DKGAgent extends DKGAgentBase {
         maxIds,
         ...(signal ? { signal } : {}),
       }),
-      apply: (record) => this.applyOnChainContextGraphObservation({
-        contextGraphId: record.contextGraphId,
-        owner: record.owner,
-        accessPolicy: record.accessPolicy,
-        publishPolicy: record.publishPolicy,
-        publishAuthority: record.publishAuthority,
-        nameHash: record.nameHash,
-        blockNumber: record.observedAtBlock,
-        createdAt: record.createdAt,
-        active: record.active,
-      }, { source: 'storage', ctx }),
+      apply: (record) => this.applyOnChainContextGraphObservation(
+        contextGraphStorageObservation(record, record.observedAtBlock),
+        { source: 'storage', ctx },
+      ),
       log: (message) => this.log.warn(ctx, message),
     });
     return this.contextGraphStorageDiscovery;
@@ -4608,5 +4596,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods {}
-applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods]);
+export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods {}
+applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods]);

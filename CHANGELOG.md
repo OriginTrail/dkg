@@ -4,6 +4,12 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Upgrading from 10.0.18
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| Mode-only `replenishing` approval configs use a relative ceiling | When `chain.approvalPolicy.mode` is `replenishing` and neither sizing field is set, the implicit ceiling changes from a flat 1000 TRAC to 20 times the triggering publish cost. This can lower or raise the standing allowance depending on publish cost; startup emits a warning for this exact legacy shape | Set `targetAllowance: '1000000000000000000000'` to retain the former flat 1000 TRAC ceiling, or set `targetAllowanceMultiple` explicitly to adopt relative sizing |
+
 ### Fixed
 
 - **Random Sampling resolves the challenged Context Graph by its chain name

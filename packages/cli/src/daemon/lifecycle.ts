@@ -71,11 +71,14 @@ import {
 } from '@origintrail-official/dkg-chain';
 import {
   DKGAgent,
+  describeContextGraphOnChainIdResolution,
   loadOpWallets,
+  refusesPrivateContextGraphByOnChainId,
   KaNumberAllocator,
   planAuthorityIndexBootstrap,
   resolveAuthorityIndexConfig,
   resolveSyncAgentsMeta,
+  type ContextGraphOnChainIdResolution,
   type DKGAgentConfig,
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
@@ -142,6 +145,7 @@ import {
   type LocalAgentIntegrationTransport,
   resolveContextGraphs,
   resolveContextGraphSubscriptionRehydrationEnabled,
+  approvalPolicyMigrationWarning,
   resolveNetworkDefaultContextGraphs,
   isPublisherRuntimeEnabled,
   resolvePublisherRetryTuning,
@@ -1010,6 +1014,77 @@ export async function resolveDaemonPublishEncryption(
   };
 }
 
+/** Bound on the chain reads one start may spend resolving configured on-chain ids. */
+const CONFIGURED_ON_CHAIN_ID_RESOLUTION_BUDGET_MS = 15_000;
+
+/**
+ * Map configured on-chain ids (`32`, `#32`) to the Context Graphs they name.
+ *
+ * Before this fix, `dkg subscribe 32 --save` wrote the number to
+ * config.contextGraphs and kept a durable subscription keyed by it; neither
+ * can ever sync. Each configured on-chain id is resolved again at every
+ * start, through the chain's name hash only (the discovery checkpoint answers
+ * offline for graphs already listed), so the mapping is verified, idempotent
+ * and never taken from a peer. The config file is not rewritten. A numeric
+ * subscription with no config entry (made through the API) is retired the
+ * same way, and its member intent moves to the graph it named. An id that
+ * resolves to nothing subscribable is logged and skipped; its number is never
+ * subscribed.
+ */
+export async function resolveConfiguredOnChainContextGraphIds(
+  agent: DKGAgent,
+  configuredContextGraphIds: readonly string[],
+  log: (message: string) => void,
+  signal: AbortSignal = AbortSignal.timeout(CONFIGURED_ON_CHAIN_ID_RESOLUTION_BUDGET_MS),
+): Promise<string[]> {
+  const configured = new Set(configuredContextGraphIds);
+  const numericSubscriptions = [...(agent.getSubscribedContextGraphs?.() ?? new Map())]
+    .filter(([contextGraphId, subscription]) => (
+      !configured.has(contextGraphId)
+      && subscription.subscribed === true
+      && subscription.onChainId === contextGraphId
+    ))
+    .map(([contextGraphId]) => contextGraphId);
+  const contextGraphIds: string[] = [];
+  for (const contextGraphId of [...configured, ...numericSubscriptions]) {
+    const isConfigured = configured.has(contextGraphId);
+    let resolution: ContextGraphOnChainIdResolution;
+    try {
+      // Start-up waits the cold budget for a chain read (within its own), so a
+      // slow RPC does not drop a configured graph for the whole boot.
+      resolution = await agent.resolveContextGraphOnChainIdReference?.(contextGraphId, { signal, wait: 'background' })
+        ?? { kind: 'as-given' };
+    } catch (error) {
+      // The resolver reports its own failures; a throw is a defect, so fail closed.
+      log(
+        `Context graph "${contextGraphId}" could not be resolved `
+        + `(${error instanceof Error ? error.message : String(error)}) — not subscribing it`,
+      );
+      continue;
+    }
+    if (resolution.kind === 'as-given') {
+      if (isConfigured) contextGraphIds.push(contextGraphId);
+      continue;
+    }
+    const label = isConfigured ? 'Configured context graph' : 'Context graph subscription';
+    if (resolution.kind !== 'resolved' || refusesPrivateContextGraphByOnChainId(resolution)) {
+      const refusal = resolution.kind === 'resolved'
+        ? { kind: 'private' as const, onChainId: resolution.onChainId }
+        : resolution;
+      log(`${label} "${contextGraphId}" is not subscribed: ${describeContextGraphOnChainIdResolution(refusal)}`);
+      continue;
+    }
+    if (!isConfigured && resolution.retiredNumericSubscription?.subscribed !== true) continue;
+    contextGraphIds.push(resolution.contextGraphId);
+    log(
+      `${label} "${contextGraphId}": ${describeContextGraphOnChainIdResolution(resolution)} `
+      + `Subscribing "${resolution.contextGraphId}"`
+      + (isConfigured ? `; you can replace "${contextGraphId}" in config.contextGraphs with it.` : '.'),
+    );
+  }
+  return contextGraphIds;
+}
+
 /**
  * Activate operator/network-configured context graphs without inventing a
  * local definition for an unknown namespaced graph.
@@ -1038,10 +1113,16 @@ export async function bootstrapConfiguredContextGraphs(input: {
   log: (message: string) => void;
 }): Promise<void> {
   const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
+  // A configured on-chain id (`32`, `#32`) subscribes the graph it names.
+  const onChainResolvedContextGraphIds = await resolveConfiguredOnChainContextGraphIds(
+    input.agent,
+    [...input.configuredContextGraphIds],
+    input.log,
+  );
   // A `--save`d on-chain name hash that this node already resolved subscribes
   // its verified cleartext graph. The durable cleartext row re-proves the
   // commitment offline, so the operator's config file is never rewritten.
-  const configuredContextGraphIds = new Set([...input.configuredContextGraphIds].map((contextGraphId) => {
+  const configuredContextGraphIds = new Set(onChainResolvedContextGraphIds.map((contextGraphId) => {
     const alias = input.agent.resolveContextGraphIdAlias?.(contextGraphId) ?? null;
     if (alias === null) return contextGraphId;
     input.log(
@@ -1389,6 +1470,8 @@ async function runDaemonInnerWithStartupOwnership(
   // network manifest fails before subscriptions, stores, wallets, or agent
   // runtime construction begin. The same immutable chainBase is reused below.
   const chainBase = resolveChainConfig(config, network);
+  const approvalPolicyWarning = approvalPolicyMigrationWarning(chainBase?.approvalPolicy);
+  if (approvalPolicyWarning) log(approvalPolicyWarning);
   const rfc64CatalogActivations = resolveRfc64CatalogActivations(
     config,
     resolveRfc64PublicCatalogActivationChainIdentityV1(chainBase?.chainId),
