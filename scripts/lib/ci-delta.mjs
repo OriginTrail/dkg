@@ -531,9 +531,13 @@ function hasDocumentationExtension(filePath) {
   return DOCUMENTATION_EXTENSIONS.has(extension);
 }
 
+// A document a test reads is a CI input claimed by PATH_TRIGGERS, its one
+// home: it leaves the docs-only profile and routes to the reading lanes alone.
 function isDocumentationOnlyPath(filePath) {
-  // A document a test reads is claimed by PATH_TRIGGERS, its one home.
-  if (pathTriggers(filePath).length > 0) return false;
+  return isDocumentationPath(filePath) && pathTriggers(filePath).length === 0;
+}
+
+function isDocumentationPath(filePath) {
   if (
     filePath === 'LICENSE'
     || filePath === 'SECURITY.md'
@@ -798,10 +802,13 @@ const fullRoute = (reason) => ({ full: reason, lanes: NONE, evmScopes: NONE, bui
 function routePath(filePath, { modifiedFiles, readManifest }) {
   if (isGlobalFullPath(filePath)) return fullRoute(`Global CI input changed: ${filePath}`);
 
-  // The area that owns the path: its workspace rule, else a support route.
+  // The area that owns the path: its workspace rule, else a support route. A
+  // document reaching here is claimed by PATH_TRIGGERS, so only the lanes that
+  // read it run, not the rule of the package it documents.
   let area;
+  const document = isDocumentationPath(filePath);
   const workspace = workspaceForPath(filePath);
-  if (workspace) {
+  if (workspace && !document) {
     const rule = WORKSPACE_RULES[workspace];
     if (rule.forceFull) return fullRoute(`Highest-risk workspace changed: ${workspace}`);
     const reasons = [];
@@ -818,7 +825,7 @@ function routePath(filePath, { modifiedFiles, readManifest }) {
     }
     reasons.push(`${workspace} and its downstream consumers`);
     area = { lanes: rule.lanes, evmScopes: rule.evmScopes, buildChecks: false, reasons };
-  } else {
+  } else if (!document) {
     const supportRoute = supportPathRoute(filePath);
     if (supportRoute?.full) return fullRoute(`${supportRoute.full}: ${filePath}`);
     if (supportRoute) area = { lanes: supportRoute.lanes, evmScopes: NONE, buildChecks: true, reasons: [supportRoute.reason] };

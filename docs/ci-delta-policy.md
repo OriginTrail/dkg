@@ -20,7 +20,7 @@ CI whenever it cannot prove that a smaller plan is safe.
 | Change/event | CI behavior |
 | --- | --- |
 | Pull request, known workspace | Owning lane plus declared downstream unit/integration lanes |
-| Documentation only | Planner and aggregate gates only. A document a test reads (`RELEASE_PROCESS.md`, `packages/query/README.md`) is a CI input instead: its `PATH_TRIGGERS` entry selects the lane that reads it |
+| Documentation only | Planner and aggregate gates only. A document a test reads (`RELEASE_PROCESS.md`, `packages/query/README.md`) is a CI input instead: its `PATH_TRIGGERS` entry selects only the lanes that read it, not the rule of the package it documents |
 | Agent lane | Also the Blazegraph lane and the Windows lifecycle job: the Blazegraph job runs the agent's live Blazegraph suites and `ci.yml` starts it for either lane; the Windows job is described below |
 | A file another package's code or tests load by relative path, outside declared dependencies | The loading lane or EVM scope too, through `PATH_TRIGGERS` or the file's own workspace rule (for example the agent lane for the CLI markdown extractor, the node-ui lane for the CLI daemon sources its tests scan, the core lane for the agent, publisher and CLI sources the chain RPC-site census reads, the Blazegraph lane for the CLI's Oxigraph launcher that the storage conformance suite runs, the chain scope for the identity-wallet code its node-ui suite loads) |
 | `core` / `rdf-utils` | All downstream Node and real-EVM lanes, including the browser E2E suite (its harness imports `core`) |
@@ -63,10 +63,11 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   Beyond declared dependencies, a routing test seeds from what each lane runs
   (package code and tests, and the support files CI jobs run directly, through
   root `package.json` scripts or through reusable workflows), follows every
-  relative reference (imports, dynamic imports, `new URL(...)` paths, paths
-  built with `path.resolve`/`join` from a file's own directory and, in tests,
-  quoted repo paths naming a file; documents included, and a built directory
-  counts when the file walks it; a package's `dist/` output stands for its
+  relative reference (imports, dynamic imports, CommonJS `require`,
+  `new URL(...)` paths, paths built with `path.resolve`/`join` or their
+  imported aliases from a file's own directory and, in tests and test-runner
+  configs, quoted repo paths naming a file; documents included, and a built
+  directory counts when the file walks it; built `dist/` output stands for its
   `src/`) across packages and support areas, and fails when a file it reaches
   does not select that lane or EVM scope. Where that reach enters another
   package, the workspaces it imports by package name (and their dependencies)

@@ -15,6 +15,7 @@ import {
   selectedLanes,
   sourceFiles,
   succeeded,
+  traceLaneLoads,
   workspaceClosure,
 } from './ci-plan-fixtures.mjs';
 
@@ -394,36 +395,14 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   // and fixture workspaces (test-fixtures/) run only where a test builds them.
   // A lane job also runs the support files its steps name: directly, through
   // a root package.json script or through a reusable workflow it calls.
-  // A lane also loads what those files reference by path (loadReferences in
-  // ci-plan-fixtures.mjs lists the forms it sees), in other packages and
-  // support areas alike. Only module loads carry on to what the loaded file
-  // imports; a path read or run is loaded but not followed. A package-name
-  // import loads that workspace and its dependencies, so wherever a lane's
-  // reach crosses into another package, the workspaces that package imports
-  // must select the lane too. Each file reached must select the lane or scope,
-  // or plan full CI.
-  const isFile = (candidate) => fs.statSync(path.join(REPO_ROOT, candidate), { throwIfNoEntry: false })?.isFile();
-  const references = (file) => loadReferences(file, fs.readFileSync(path.join(REPO_ROOT, file), 'utf8'));
-  const workspaceByName = new Map(Object.keys(WORKSPACE_RULES).map((workspace) => [
-    JSON.parse(fs.readFileSync(path.join(REPO_ROOT, workspace, 'package.json'), 'utf8')).name,
-    workspace,
-  ]));
-  const closures = new Map();
-  const closureOf = (workspace) => closures.get(workspace) ?? closures.set(workspace, workspaceClosure([workspace])).get(workspace);
-
-  const needsOf = (map, key) => map.get(key) ?? map.set(key, new Map()).get(key);
-  const add = (map, key, requirements, via) => {
-    const entry = needsOf(map, key);
-    const added = requirements.filter((requirement) => !entry.has(requirement));
-    for (const requirement of added) entry.set(requirement, via);
-    return added.length > 0;
+  // What those files load comes from traceLaneLoads and loadReferences in
+  // ci-plan-fixtures.mjs, which list the forms they follow. Each file reached
+  // must select the lane or scope that loads it, or plan full CI.
+  const seeds = new Map();
+  const seed = (file, requirements, via) => {
+    const entry = seeds.get(file) ?? seeds.set(file, new Map()).get(file);
+    for (const requirement of requirements) if (!entry.has(requirement)) entry.set(requirement, via);
   };
-  const loadedBy = new Map(); // module -> Map(lane or evm:scope -> how it is reached)
-  const load = (target, requirements, via) => add(loadedBy, target, requirements, via);
-  // Paths read or run, and workspaces loaded by package name: required, but
-  // kept apart so their requirements never spread through a module's imports.
-  const readBy = new Map();
-  const workspacesLoaded = new Map();
   const evmScopeFiles = new Map(Object.entries(EVM_TEST_SCOPES).flatMap(([scope, { packageDirectory, files }]) =>
     files.map((file) => [path.posix.normalize(path.posix.join(packageDirectory, file)), `evm:${scope}`])));
   for (const [workspace, owningLanes] of Object.entries(WORKSPACE_OWNING_LANES)) {
@@ -434,11 +413,11 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
       // Demo apps' run.mjs entry points run by hand; the demo lane runs tests.
       if (workspace === 'demo' && /^[^/]+\/run\.[cm]?[jt]s$/.test(inside)) continue;
       if (inside.startsWith('integration/')) {
-        if (evmScopeFiles.has(file)) load(file, [evmScopeFiles.get(file)], 'EVM_TEST_SCOPES');
+        if (evmScopeFiles.has(file)) seed(file, [evmScopeFiles.get(file)], 'EVM_TEST_SCOPES');
       } else if (workspace === 'packages/node-ui' && inside.startsWith('e2e/')) {
-        load(file, ['kosava_node_ui_e2e'], 'the browser suite');
+        seed(file, ['kosava_node_ui_e2e'], 'the browser suite');
       } else {
-        load(file, [...owningLanes, ...(evmScopeFiles.has(file) ? [evmScopeFiles.get(file)] : [])], `${workspace} lanes`);
+        seed(file, [...owningLanes, ...(evmScopeFiles.has(file) ? [evmScopeFiles.get(file)] : [])], `${workspace} lanes`);
       }
     }
   }
@@ -462,37 +441,14 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
       if (uses.startsWith('./')) seedJobs(workflowJobs(uses.slice(2)), () => lane);
       for (const { run = '' } of steps) {
         for (const [file] of withScripts(run).matchAll(/\b(?:bench|devnet|test-systems|tools)\/[^\s'"]+\.[cm]?[jt]sx?\b/g)) {
-          load(file, [lane], `${job} job`);
+          seed(file, [lane], `${job} job`);
         }
       }
     }
   };
   seedJobs(workflowJobs('.github/workflows/ci.yml'), (job) => laneByJob[job]);
 
-  const queue = [...loadedBy.keys()];
-  while (queue.length) {
-    const file = queue.shift();
-    if (!isFile(file) || !/\.[cm]?[jt]sx?$/.test(file)) continue;
-    const requirements = [...loadedBy.get(file).keys()];
-    const { modules, paths, packages } = references(file);
-    for (const target of modules) {
-      if (load(target, requirements, file)) queue.push(target);
-    }
-    for (const target of paths) add(readBy, target, requirements, file);
-    for (const name of packages) {
-      if (!workspaceByName.has(name)) continue;
-      for (const workspace of closureOf(workspaceByName.get(name))) {
-        add(workspacesLoaded, workspace, requirements, `${file} (imports ${name})`);
-      }
-    }
-  }
-  // Any path in a workspace routes by its rule; its src/index.ts stands for all.
-  for (const [key, requirements] of [
-    ...readBy,
-    ...[...workspacesLoaded].map(([workspace, needs]) => [`${workspace}/src/index.ts`, needs]),
-  ]) {
-    for (const [requirement, via] of requirements) add(loadedBy, key, [requirement], via);
-  }
+  const loadedBy = traceLaneLoads(seeds);
 
   for (const [target, requirement, why] of [
     ['packages/query/README.md', 'bura_query', 'the query security tests read the README'],
@@ -553,17 +509,69 @@ test('the load scanner sees these forms, and nothing it cannot resolve staticall
   // Repo-path literals count only in test files, and a directory only when walked.
   const source = loadReferences('packages/node-ui/src/ui/example.ts', "const note = 'packages/agent/src/dkg-agent-join.ts';\nconst dir = resolve(__dirname, '..');");
   assert.deepEqual(source.paths, []);
+
+  // CommonJS, aliased path helpers, import.meta.dirname and URL-derived bases;
+  // a fixture workspace's built output stands for its sources.
+  const other = loadReferences('packages/kafka-plugin/test/example.test.ts', [
+    "import { join, resolve as resolvePath } from 'node:path';",
+    "const { helper } = require('../src/index.js');",
+    "const entry = require.resolve('../../cli/src/cli.js');",
+    "const CLI_ENTRY = resolvePath(__dirname, '..', '..', 'cli', 'dist', 'cli.js');",
+    "const FIXTURE = join(resolvePath(__dirname, '..', '..', 'cli', 'test-fixtures', 'sample-kafka-plugin'), 'dist', 'index.js');",
+    "const PLUGIN = resolvePath(__dirname, '..', '..', 'cli', 'test-fixtures', 'sample-kafka-plugin', 'dist', 'index.js');",
+    "const RULES = resolve(import.meta.dirname, '..', '..', 'rdf-utils', 'package.json');",
+    "const ROOT = fileURLToPath(new URL('../../../', import.meta.url));",
+    "const BLAZEGRAPH = join(ROOT, 'blazegraph-image.json');",
+  ].join('\n'));
+  assert.deepEqual(other.modules, ['packages/kafka-plugin/src/index.ts']);
+  assert.deepEqual(other.paths.sort(), [
+    'blazegraph-image.json',
+    'packages/cli/src/cli.ts',
+    'packages/cli/test-fixtures/sample-kafka-plugin/src/index.ts',
+    'packages/rdf-utils/package.json',
+  ]);
+  // Test-runner configs list the files a lane runs, like tests do.
+  const config = loadReferences('devnet/_bootstrap/vitest.example.config.ts', "export default { test: { include: ['devnet/_bootstrap/smoke.test.ts'] } };");
+  assert.deepEqual(config.paths, ['devnet/_bootstrap/smoke.test.ts']);
+});
+
+test('traceLaneLoads carries lanes through module loads, not through reads', () => {
+  const sources = new Map([
+    ['packages/node-ui/test/example.test.ts', [
+      "import { api } from '../src/ui/api.js';",
+      "const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');",
+      "import { quads } from '@origintrail-official/dkg-rdf-utils';",
+    ].join('\n')],
+    ['packages/node-ui/src/ui/api.ts', "import { http } from './http.js';"],
+    ['packages/node-ui/src/ui/http.ts', ''],
+    // A path read is required but never followed.
+    ['packages/node-ui/README.md', "import { never } from './src/ui/pca-api.js';"],
+  ]);
+  const seeds = new Map([['packages/node-ui/test/example.test.ts', new Map([['kosava_node_ui', 'seed']])]]);
+  const loads = traceLaneLoads(seeds, { read: (file) => sources.get(file) });
+  assert.equal(loads.get('packages/node-ui/src/ui/api.ts')?.get('kosava_node_ui'), 'packages/node-ui/test/example.test.ts');
+  assert.equal(loads.get('packages/node-ui/src/ui/http.ts')?.get('kosava_node_ui'), 'packages/node-ui/src/ui/api.ts');
+  assert.equal(loads.get('packages/node-ui/README.md')?.get('kosava_node_ui'), 'packages/node-ui/test/example.test.ts');
+  assert.equal(loads.has('packages/node-ui/src/ui/pca-api.ts'), false);
+  // A package-name import requires the workspace and its dependencies.
+  assert.match(loads.get('packages/rdf-utils/src/index.ts')?.get('kosava_node_ui') ?? '', /imports @origintrail-official\/dkg-rdf-utils/);
 });
 
 test('a document a test reads is a CI input; other documentation stays docs-only', () => {
   // PATH_TRIGGERS is the one home of that fact: its claim alone lifts a path
   // out of the docs-only profile (RELEASE_PROCESS.md matches the root *.md
   // documentation rule) and selects the lane whose tests read it.
+  // Only that lane: not the rule of the package the document belongs to.
   for (const [filePath, lane] of [['RELEASE_PROCESS.md', 'bura_cli'], ['packages/query/README.md', 'bura_query']]) {
     const plan = pullRequestPlan([change(filePath)]);
     assert.equal(plan.mode, 'delta', filePath);
-    assert.equal(plan.lanes[lane], true, filePath);
+    assert.deepEqual(selectedLanes(plan), [lane], filePath);
+    assert.deepEqual(plan.evmScopes, [], filePath);
   }
+  // A claimed file that is not documentation keeps its package rule too.
+  const skill = pullRequestPlan([change('packages/cli/skills/dkg-node/SKILL.md')]);
+  assert.equal(skill.lanes.bura_cli, true);
+  assert.equal(skill.lanes.kosava_supporting, true);
   for (const filePath of ['CHANGELOG.md', 'packages/agent/README.md', 'packages/query/CHANGELOG.md', 'docs/ci-delta-policy.md']) {
     assert.equal(pullRequestPlan([change(filePath)]).mode, 'docs-only', filePath);
   }

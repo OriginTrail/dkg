@@ -85,15 +85,17 @@ export function workspaceClosure(roots) {
 const isRepoFile = (candidate) => fs.statSync(path.join(REPO_ROOT, candidate), { throwIfNoEntry: false })?.isFile() === true;
 const isRepoDirectory = (candidate) => fs.statSync(path.join(REPO_ROOT, candidate), { throwIfNoEntry: false })?.isDirectory() === true;
 const outsideSources = (target) => target === '.' || target.startsWith('../') || /(?:^|\/)node_modules\//.test(target);
+const readRepoFile = (file) => (isRepoFile(file) ? fs.readFileSync(path.join(REPO_ROOT, file), 'utf8') : undefined);
 
-// The repo path a reference names. A package's dist/ output stands for its
-// src/, so the answer does not depend on whether the build has run, and
-// TypeScript sources are imported by their emitted extension or none.
+// The repo path a reference names. Built output (a dist/ directory, including
+// a fixture workspace's) stands for its src/, so the answer does not depend on
+// whether the build has run, and TypeScript sources are imported by their
+// emitted extension or none.
 function sourcePath(target) {
-  const built = target.match(/^(packages\/[^/]+)\/dist(\/.*)?$/);
+  const built = target.match(/^(.+?)\/dist(\/.*)?$/);
   if (built) {
-    const [, packageDirectory, rest = ''] = built;
-    const inSources = `${packageDirectory}/src${rest}`;
+    const [, directory, rest = ''] = built;
+    const inSources = `${directory}/src${rest}`;
     if (!/\.[cm]?js$/.test(inSources)) return inSources;
     const candidates = ['ts', 'tsx', 'mts'].map((extension) => inSources.replace(/\.[cm]?js$/, `.${extension}`));
     return candidates.find(isRepoFile) ?? candidates[0];
@@ -108,54 +110,69 @@ function sourcePath(target) {
   ].find(isRepoFile) ?? target;
 }
 
-const MODULE_LOAD = /(?:\bfrom\s*|\bimport\s*\(\s*(?:new\s+URL\(\s*)?)['"]((?:\.\.?\/)+[^'"]+)['"]/g;
-const URL_PATH = /\bnew\s+URL\(\s*['"]((?:\.\.?\/)+[^'"]+)['"]/g;
-const PACKAGE_IMPORT = /(?:\bfrom\s*|\bimport\s*\(\s*)['"](@origintrail-official\/[a-z0-9-]+)(?:\/[^'"]*)?['"]/g;
-const PATH_JOIN = /(?:\b(?:const|let)\s+([\w$]+)\s*=\s*)?(?:\bpath\.)?\b(?:resolve|join)\(\s*([\w$]+)\s*((?:,\s*(?:'[^']*'|"[^"]*"))+)\s*\)/g;
+const RELATIVE = String.raw`['"]((?:\.\.?\/)+[^'"]+)['"]`;
+const MODULE_LOAD = new RegExp(String.raw`(?:\bfrom\s*|\bimport\s*\(\s*(?:new\s+URL\(\s*)?|\brequire\s*\(\s*)` + RELATIVE, 'g');
+const URL_PATH = new RegExp(String.raw`(?:\bnew\s+URL\(\s*|\brequire\.resolve\s*\(\s*)` + RELATIVE, 'g');
+const PACKAGE_IMPORT = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*)['"](@origintrail-official\/[a-z0-9-]+)(?:\/[^'"]*)?['"]/g;
 const REPO_PATH_LITERAL = /['"]((?:[\w@.-]+\/)+[\w.-]+\.[A-Za-z0-9]+)['"]/g;
-const TEST_FILE = /(?:^|\/)(?:test|tests|test-live|__tests__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/;
+// Files that list the paths a lane runs or reads: tests, and test-runner configs.
+const TEST_FILE = /(?:^|\/)(?:test|tests|test-live|__tests__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)(?:vitest|playwright)[\w.-]*\.config\.[cm]?[jt]s$/;
 const TYPE_ONLY_IMPORT = /\b(?:import|export)\s+type\s+(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s*['"][^'"]+['"]/g;
 
 // A path a file reads or runs (not a module it imports): an existing file,
 // or a directory when the file walks directories; otherwise it names a
 // location rather than contents.
 function readTarget(target, walks) {
-  const mapped = /^packages\/[^/]+\/dist(?:\/|$)/.test(target) ? sourcePath(target) : target;
+  const mapped = /(?:^|\/)dist(?:\/|$)/.test(target) ? sourcePath(target) : target;
   if (outsideSources(mapped)) return undefined;
   if (isRepoDirectory(mapped)) return walks ? mapped : undefined;
   const file = isRepoFile(mapped) ? mapped : sourcePath(mapped);
   return isRepoFile(file) ? file : undefined;
 }
 
-// Paths `file` builds with path.resolve/join from its own directory
-// (__dirname or import.meta.url) and literal segments, including bindings
-// built on earlier ones. A directory counts only when the file walks
-// directories; otherwise it names a location rather than contents.
+// Paths `file` builds with path.resolve/join (or an alias imported from
+// node:path) from its own directory - __dirname, import.meta.dirname or a
+// binding of either, dirname(fileURLToPath(import.meta.url)) or
+// fileURLToPath(new URL(..., import.meta.url)) - and literal segments,
+// including bindings built on earlier ones.
 function builtPaths(file, source) {
-  const bases = new Map([['__dirname', path.posix.dirname(file)]]);
-  for (const [, name] of source.matchAll(/\b(?:const|let)\s+([\w$]+)\s*=\s*(?:path\.)?dirname\(\s*fileURLToPath\(\s*import\.meta\.url\s*\)\s*\)/g)) {
-    bases.set(name, path.posix.dirname(file));
+  const directory = path.posix.dirname(file);
+  const helpers = ['resolve', 'join'];
+  for (const [, specifiers] of source.matchAll(/\bimport\s*\{([^}]*)\}\s*from\s*['"](?:node:)?path(?:\/posix)?['"]/g)) {
+    for (const [, alias] of specifiers.matchAll(/\b(?:resolve|join)\s+as\s+([\w$]+)/g)) helpers.push(alias);
+  }
+  const pathJoin = new RegExp(
+    String.raw`(?:\b(?:const|let)\s+([\w$]+)\s*=\s*)?(?:\bpath\.(?:posix\.)?)?\b(?:${helpers.join('|')})\(\s*([\w$]+|import\.meta\.dirname)\s*((?:,\s*(?:'[^']*'|"[^"]*"))+)\s*\)`,
+    'g',
+  );
+  const bases = new Map([['__dirname', directory], ['import.meta.dirname', directory]]);
+  for (const [, name] of source.matchAll(/\b(?:const|let)\s+([\w$]+)\s*=\s*(?:(?:path\.)?dirname\(\s*fileURLToPath\(\s*import\.meta\.url\s*\)\s*\)|import\.meta\.dirname\b)/g)) {
+    bases.set(name, directory);
+  }
+  for (const [, name, specifier] of source.matchAll(/\b(?:const|let)\s+([\w$]+)\s*=\s*fileURLToPath\(\s*new\s+URL\(\s*['"]([^'"]+)['"]\s*,\s*import\.meta\.url\s*\)\s*\)/g)) {
+    bases.set(name, path.posix.normalize(path.posix.join(directory, specifier)));
   }
   const segments = (text) => [...text.matchAll(/'([^']*)'|"([^"]*)"/g)].map(([, single, double]) => single ?? double);
   const joined = (base, text) => path.posix.normalize(path.posix.join(bases.get(base), ...segments(text)));
   for (let size = -1; size !== bases.size;) {
     size = bases.size;
-    for (const [, name, base, text] of source.matchAll(PATH_JOIN)) {
+    for (const [, name, base, text] of source.matchAll(pathJoin)) {
       if (name && !bases.has(name) && bases.has(base)) bases.set(name, joined(base, text));
     }
   }
-  return [...source.matchAll(PATH_JOIN)]
+  return [...source.matchAll(pathJoin)]
     .filter(([, , base]) => bases.has(base))
     .map(([, , base, text]) => joined(base, text));
 }
 
 // What `file` (repo-relative, with `source` as its contents) loads by path:
-// - `modules`: relative imports, dynamic imports and `import(new URL(...))`,
-//   whose own imports load too;
+// - `modules`: relative imports, dynamic imports, `import(new URL(...))` and
+//   CommonJS require(), whose own imports load too;
 // - `paths`: files it reads or runs without importing: other `new URL(...)`
-//   paths, paths built from its own directory (see builtPaths) and, in test
-//   files, quoted literals naming an existing repo file
-//   (`'packages/agent/src/x.ts'`, as source-scanning tests list them);
+//   paths, require.resolve(), paths built from its own directory (see
+//   builtPaths) and, in tests and test-runner configs, quoted literals naming
+//   an existing repo file (`'packages/agent/src/x.ts'`, as source-scanning
+//   tests list them);
 // - `packages`: workspaces it imports by package name.
 // Type-only imports are erased before anything runs; paths assembled at run
 // time from variables are out of reach.
@@ -178,4 +195,57 @@ export function loadReferences(file, source) {
     paths: [...new Set(paths)].filter((target) => !modules.includes(target) && target !== file),
     packages: [...new Set([...code.matchAll(PACKAGE_IMPORT)].map(([, name]) => name))],
   };
+}
+
+// Everything the seeded files load, and which requirement (a lane, or
+// `evm:<scope>`) reaches each file through which file. `seeds` maps a file to
+// a Map from requirement to where it comes from, the same shape as the result.
+// A module load carries its importer's requirements on to what it imports; a
+// path read or run is required but not followed; a package-name import
+// requires the imported workspace and its dependencies, recorded against the
+// workspace's src/index.ts since any path in a workspace routes by its rule.
+// `read(file)` returns a file's source, or undefined when it has none.
+export function traceLaneLoads(seeds, { read = readRepoFile } = {}) {
+  const { workspaceByName } = readWorkspaces();
+  const closures = new Map();
+  const closureOf = (workspace) => closures.get(workspace) ?? closures.set(workspace, workspaceClosure([workspace])).get(workspace);
+  const needsOf = (map, key) => map.get(key) ?? map.set(key, new Map()).get(key);
+  const add = (map, key, requirements, via) => {
+    const entry = needsOf(map, key);
+    const added = requirements.filter((requirement) => !entry.has(requirement));
+    for (const requirement of added) entry.set(requirement, via);
+    return added.length > 0;
+  };
+  const loaded = new Map();
+  for (const [file, needs] of seeds) {
+    for (const [requirement, via] of needs) add(loaded, file, [requirement], via);
+  }
+  // Kept apart while tracing so they never spread through a module's imports.
+  const readPaths = new Map();
+  const workspacesLoaded = new Map();
+  const queue = [...loaded.keys()];
+  while (queue.length) {
+    const file = queue.shift();
+    const source = /\.[cm]?[jt]sx?$/.test(file) ? read(file) : undefined;
+    if (source === undefined) continue;
+    const requirements = [...loaded.get(file).keys()];
+    const { modules, paths, packages } = loadReferences(file, source);
+    for (const target of modules) {
+      if (add(loaded, target, requirements, file)) queue.push(target);
+    }
+    for (const target of paths) add(readPaths, target, requirements, file);
+    for (const name of packages) {
+      if (!workspaceByName.has(name)) continue;
+      for (const workspace of closureOf(workspaceByName.get(name))) {
+        add(workspacesLoaded, workspace, requirements, `${file} (imports ${name})`);
+      }
+    }
+  }
+  for (const [key, needs] of [
+    ...readPaths,
+    ...[...workspacesLoaded].map(([workspace, requirements]) => [`${workspace}/src/index.ts`, requirements]),
+  ]) {
+    for (const [requirement, via] of needs) add(loaded, key, [requirement], via);
+  }
+  return loaded;
 }
