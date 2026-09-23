@@ -6450,7 +6450,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
             resolvePublicAccess: async (contextGraphId) => (
               await withRpcUsageSite(
                 CG_AUTH_RPC_SITES.vmSizing,
-                () => this.readLiveOnChainAccessPolicy(contextGraphId.toString(), ctx),
+                // Sizing a recovery batch: this decides how much to READ, not
+                // who may. A bound stale by one index tick changes a batch
+                // size, and the next pass corrects it. Inert unless the
+                // operator enables `chain.boundedAuthorityReads`.
+                () => this.readLiveOnChainAccessPolicy(
+                  contextGraphId.toString(), ctx, { freshness: 'bounded' },
+                ),
               )
             ) === 0,
             sizing: typeof readVmRecoveryUpdateContext === 'function'
