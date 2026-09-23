@@ -6,6 +6,13 @@ import { isDeepStrictEqual } from 'node:util';
 // the other controller files, nothing else, or every planner run fails with
 // ERR_MODULE_NOT_FOUND and the pin can never be rotated. The executable lane
 // topology in ci-lanes.mjs is checked against this map instead.
+//
+// It is deliberately one policy module (lane map, routing tables, manifest
+// classification, plan shape and outputs): every controller file widens the
+// security-reviewed sparse checkout that four workflow checkouts pin. If it
+// grows past ~1,000 lines, move the routing tables (WORKSPACE_RULES,
+// SUPPORT_PATH_ROUTES, PATH_TRIGGERS) into a sibling controller file and add
+// it to CONTROLLER_POLICY_FILES and every trusted checkout in one change.
 export const PRIMARY_LANE_JOBS = Object.freeze({
   tornado_core: 'tornado-core',
   tornado_blazegraph: 'tornado-blazegraph',
