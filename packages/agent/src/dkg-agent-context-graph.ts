@@ -388,6 +388,7 @@ import type { ContextGraphJoinAdmissionLockToken } from './context-graph-join-ad
 import type { PreparedContextGraphMembershipMutation } from './context-graph-membership-mutation.js';
 import {
   commitRegisteredParticipantMutation,
+  LIVE_PARTICIPANT_MUTATION_AUTHORITY_READ,
   prepareRegisteredParticipantMutation,
   type PreparedRegisteredParticipantMutation,
 } from './registered-context-graph-participant-mutation.js';
@@ -2107,14 +2108,12 @@ export class ContextGraphMethods extends DKGAgentBase {
       agentAddresses: candidateChainAgents,
       chain: this.chain,
       // This roster decides whether a transaction is sent, not merely when.
-      // `allowCachedRoster` is passed explicitly so a future default cannot
-      // quietly hand the idempotence filter a projection to read.
       rosterFreshness: 'live',
       resolveAuthority: () => withRpcUsageSite(
         CG_AUTH_RPC_SITES.memberAdd,
         () => this.resolveRegisteredContextGraphAuthority(
           contextGraphId,
-          { allowCachedRoster: false },
+          LIVE_PARTICIPANT_MUTATION_AUTHORITY_READ,
         ),
       ),
     });
@@ -2352,7 +2351,7 @@ export class ContextGraphMethods extends DKGAgentBase {
         CG_AUTH_RPC_SITES.memberRemove,
         () => this.resolveRegisteredContextGraphAuthority(
           contextGraphId,
-          { allowCachedRoster: false },
+          LIVE_PARTICIPANT_MUTATION_AUTHORITY_READ,
         ),
       ),
     });
