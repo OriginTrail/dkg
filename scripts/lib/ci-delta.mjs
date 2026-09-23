@@ -198,16 +198,21 @@ export const WORKSPACE_RULES = Object.freeze({
   },
   'packages/cli': {
     // tornado_blazegraph: that job's storage conformance suite runs the CLI's
-    // built Oxigraph launcher (test-systems/storage-conformance.test.ts).
+    // built Oxigraph launcher (test-systems/storage-conformance.test.ts),
+    // which loads the daemon status route and, through it and the local agent
+    // registry, node-ui, graph-viz, mcp-dkg and the three agent adapters.
     lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/node-ui': {
-    lanes: ['bura_cli', 'kosava_node_ui', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
+    // tornado_blazegraph: loaded by the CLI's Oxigraph launcher (see packages/cli).
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/graph-viz': {
+    // tornado_blazegraph: loaded by the CLI's Oxigraph launcher (see packages/cli).
     lanes: [
+      'tornado_blazegraph',
       'bura_cli',
       'kosava_node_ui',
       'kosava_node_ui_e2e',
@@ -221,7 +226,8 @@ export const WORKSPACE_RULES = Object.freeze({
     evmScopes: [],
   },
   'packages/mcp-dkg': {
-    lanes: ['bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    // tornado_blazegraph: loaded by the CLI's Oxigraph launcher (see packages/cli).
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/local-llm': {
@@ -233,15 +239,18 @@ export const WORKSPACE_RULES = Object.freeze({
     evmScopes: [],
   },
   'packages/adapter-hermes': {
-    lanes: ['bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    // tornado_blazegraph: loaded by the CLI's Oxigraph launcher (see packages/cli).
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/adapter-openclaw': {
-    lanes: ['bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    // tornado_blazegraph: loaded by the CLI's Oxigraph launcher (see packages/cli).
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/adapter-prime-agent': {
-    lanes: ['bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    // tornado_blazegraph: loaded by the CLI's Oxigraph launcher (see packages/cli).
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/adapter-elizaos': {
