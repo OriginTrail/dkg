@@ -1,0 +1,34 @@
+import { describe, expect, it } from 'vitest';
+import {
+  CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
+  contextGraphOnChainIdBindingQuery,
+} from '../src/context-graph-on-chain-binding.js';
+
+const PREDICATE = 'https://dkg.network/ontology#ContextGraphOnChainId';
+
+describe('context graph on-chain id binding query', () => {
+  it('pins the predicate earlier builds wrote', () => {
+    expect(CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE).toBe(PREDICATE);
+  });
+
+  it('reads the ontology binding first and falls back to the graph’s own _meta', () => {
+    const query = contextGraphOnChainIdBindingQuery('team-a');
+    const ontology = `GRAPH <did:dkg:context-graph:ontology> { <did:dkg:context-graph:team-a> <${PREDICATE}> ?ontologyId }`;
+    const meta = `GRAPH <did:dkg:context-graph:team-a/_meta> { <did:dkg:context-graph:team-a> <${PREDICATE}> ?metaId }`;
+
+    expect(query).toMatch(/^SELECT \?id WHERE \{/);
+    expect(query).toContain(`OPTIONAL { ${ontology} }`);
+    expect(query).toContain(`OPTIONAL { ${meta} }`);
+    expect(query).toContain('BIND(COALESCE(?ontologyId, ?metaId) AS ?id)');
+    expect(query).toContain('FILTER(BOUND(?id))');
+    expect(query).toMatch(/\} LIMIT 1$/);
+  });
+
+  it('names only the requested graph', () => {
+    const query = contextGraphOnChainIdBindingQuery('team-b');
+    const graphs = [...query.matchAll(/GRAPH <([^>]+)>/g)].map((match) => match[1]);
+
+    expect(graphs).toEqual(['did:dkg:context-graph:ontology', 'did:dkg:context-graph:team-b/_meta']);
+    expect(query).not.toContain('team-a');
+  });
+});

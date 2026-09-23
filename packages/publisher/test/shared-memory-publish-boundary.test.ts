@@ -669,6 +669,43 @@ describe('publishFromSharedMemory multi-root selection (OT-RFC-44 / Design B: on
   });
 });
 
+describe('publishFromSharedMemory VM registration guard', () => {
+  // The guard runs only on a real chain; mock and `none` chains skip it.
+  function registrationGuardChain() {
+    const chain = new NoChainAdapter() as any;
+    Object.defineProperty(chain, 'chainId', { value: 'evm:31337' });
+    return chain;
+  }
+
+  it('accepts a graph whose on-chain binding is only in its own _meta', async () => {
+    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    await store.insert([
+      q('urn:test:root:one'),
+      {
+        subject: CONTEXT_GRAPH_URI,
+        predicate: ON_CHAIN_ID_PREDICATE,
+        object: '"7"',
+        graph: `${CONTEXT_GRAPH_URI}/_meta`,
+      },
+    ]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all')).resolves.toMatchObject({
+      status: 'tentative',
+    });
+    expect(publishSpy.calls).toHaveLength(1);
+  });
+
+  it('rejects a graph with neither a registration status nor an on-chain binding', async () => {
+    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    await store.insert([q('urn:test:root:one')]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all')).rejects.toMatchObject({
+      code: 'CG_NOT_REGISTERED',
+    });
+    expect(publishSpy.calls).toHaveLength(0);
+  });
+});
+
 describe('SharedMemoryHandler lifecycle UAL derivation', () => {
   it('uses the authoritative v2 UAL without waiting for the legacy resolver', async () => {
     const store = new OxigraphStore();
