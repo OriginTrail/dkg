@@ -236,6 +236,16 @@ export type {
 export type {
   Rfc64CatalogShadowExecutionStatusV1,
 } from './rfc64/catalog-shadow-observability-v1.js';
+export {
+  buildRfc64CatalogConfigurationEvidenceV1,
+  buildRfc64CatalogStatusSnapshotV1,
+  type Rfc64CatalogConfigurationEvidenceV1,
+  type Rfc64CatalogStatusRuntimeV1,
+  type Rfc64CatalogStatusSnapshotV1,
+} from './rfc64/catalog-status-snapshot-v1.js';
+export type {
+  ResolvedRfc64CatalogActivationsV1,
+} from './rfc64/public-catalog-activation-config-v1.js';
 export type {
   Rfc64PublicCatalogBootstrapStatusV1,
 } from './dkg-agent-rfc64-catalog-bootstrap.js';
