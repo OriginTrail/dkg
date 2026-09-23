@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
 import { Rfc64BackgroundWorkDispatcherV1 } from
   '../src/rfc64/background-work-dispatcher-v1.js';
+import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
+  '../src/rfc64/catalog-limits-v1.js';
 import { Rfc64CatalogReplayRecoveryRuntimeV1 } from
   '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 
@@ -22,6 +24,62 @@ function pruneSupersededTargets(targets: readonly Target[]): readonly Target[] {
   return targets.filter(
     (target) => (target.version ?? 0) === newestByScope.get(target.scope ?? target.id),
   );
+}
+
+/**
+ * Three providers, each promising one head, and a durable parity read that can
+ * be parked once so another request can join the pass waiting inside it.
+ */
+function createParkableParityRuntime() {
+  const targetsByPeer = new Map<string, readonly Target[]>([
+    ['peer-a', [{ id: 'head-a' }]],
+    ['peer-b', [{ id: 'head-b' }]],
+    ['peer-c', [{ id: 'head-c' }]],
+  ]);
+  let failingPeer: string | null = null;
+  let parked: { readonly entered: () => void; readonly release: Promise<void> } | null = null;
+  const requestPeer = vi.fn(async (_contextGraphId: string, peerId: string) => {
+    if (peerId === failingPeer) throw new Error('dial failed');
+    return Object.freeze({
+      status: 'completed' as const,
+      targets: targetsByPeer.get(peerId) ?? [],
+    });
+  });
+  const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+    requestPeer,
+    whenReceiverIdleForContextGraph: async () => undefined,
+    targetIdentity: (target) => target.id,
+    parityFailed: async () => {
+      const park = parked;
+      parked = null;
+      if (park !== null) {
+        park.entered();
+        await park.release;
+      }
+      return false;
+    },
+  });
+  return {
+    runtime,
+    requestPeer,
+    failPeer(peerId: string | null) {
+      failingPeer = peerId;
+    },
+    fullPass(connectedPeerIds: readonly string[]) {
+      return runtime.request({
+        contextGraphId: 'public-cg',
+        policyDigest: 'policy',
+        kind: 'full-connected-peers',
+        connectedPeerIds: Object.freeze([...connectedPeerIds]),
+      });
+    },
+    parkNextParityRead() {
+      const entered = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      parked = { entered: () => entered.resolve(), release: release.promise };
+      return { entered: entered.promise, release: () => release.resolve() };
+    },
+  };
 }
 
 function run(
@@ -400,6 +458,115 @@ describe('RFC-64 catalog replay recovery runtime', () => {
       { id: 'head-a' },
       { id: 'head-b' },
     ]);
+  });
+
+  it('keeps a promise when a full pass that joins a scoped run mid-parity loses an answer', async () => {
+    const replay = createParkableParityRuntime();
+    await expect(replay.fullPass(['peer-a', 'peer-b']))
+      .resolves.toEqual({ requested: 2, failed: 0 });
+    expect(replay.runtime.promisedTargets('public-cg', 'policy')).toEqual([
+      { id: 'head-a' },
+      { id: 'head-b' },
+    ]);
+
+    // A reconnect demand starts a scoped run, parked inside its durable parity
+    // read with only peer-c's promise heard.
+    const parity = replay.parkNextParityRead();
+    replay.runtime.markPeerPending('public-cg', 'policy', 'peer-c');
+    const scoped = run(replay.runtime, 'policy');
+    await parity.entered;
+
+    // A full pass joins the running pass: coalescing hands it the full-replay
+    // entitlement and queues its peers, and peer-a no longer answers.
+    replay.failPeer('peer-a');
+    replay.requestPeer.mockClear();
+    const joined = replay.fullPass(['peer-a', 'peer-b']);
+    expect(joined).toBe(scoped);
+    parity.release();
+
+    await expect(scoped).resolves.toEqual({ requested: 2, failed: 1 });
+    // The running pass absorbed the join and dialed its peers itself.
+    expect(replay.requestPeer.mock.calls.map(([, peerId]) => peerId).sort())
+      .toEqual(['peer-a', 'peer-a', 'peer-b']);
+    // A full pass may clear a witness past one unreachable provider, so the
+    // promise snapshot is the only record left of head-a.
+    expect(replay.runtime.status('public-cg', 'policy')).toEqual({
+      active: false,
+      failed: false,
+      unresolvedPeerCount: 1,
+      unverified: false,
+    });
+    expect(replay.runtime.promisedTargets('public-cg', 'policy')).toEqual([
+      { id: 'head-a' },
+      { id: 'head-b' },
+      { id: 'head-c' },
+    ]);
+  });
+
+  it('still replaces the promise snapshot when a joined full pass re-hears every peer', async () => {
+    const replay = createParkableParityRuntime();
+    await expect(replay.fullPass(['peer-a', 'peer-b']))
+      .resolves.toEqual({ requested: 2, failed: 0 });
+
+    const parity = replay.parkNextParityRead();
+    replay.runtime.markPeerPending('public-cg', 'policy', 'peer-c');
+    const scoped = run(replay.runtime, 'policy');
+    await parity.entered;
+
+    // peer-b has disconnected; the joined pass covers peer-a, which answers.
+    const joined = replay.fullPass(['peer-a']);
+    expect(joined).toBe(scoped);
+    parity.release();
+
+    await expect(scoped).resolves.toEqual({ requested: 2, failed: 0 });
+    expect(replay.runtime.promisedTargets('public-cg', 'policy')).toEqual([
+      { id: 'head-c' },
+      { id: 'head-a' },
+    ]);
+  });
+
+  it('keeps a merged promise overflow latched on a full pass that may clear the witness', async () => {
+    const half = RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 / 2;
+    const heads = (prefix: string) => Array.from(
+      { length: half },
+      (_, index) => Object.freeze({ id: `${prefix}-${index}` }),
+    );
+    const targetsByPeer = new Map<string, readonly Target[]>([
+      ['peer-a', heads('a')],
+      ['peer-b', heads('b')],
+    ]);
+    let failingPeer: string | null = null;
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async (_contextGraphId, peerId) => {
+        if (peerId === failingPeer) throw new Error('dial failed');
+        return Object.freeze({
+          status: 'completed' as const,
+          targets: targetsByPeer.get(peerId) ?? [],
+        });
+      },
+      whenReceiverIdleForContextGraph: async () => undefined,
+      targetIdentity: (target) => target.id,
+      parityFailed: async () => false,
+    });
+    const fullPass = () => runtime.request({
+      contextGraphId: 'public-cg',
+      policyDigest: 'policy',
+      kind: 'full-connected-peers',
+      connectedPeerIds: Object.freeze(['peer-a', 'peer-b']),
+    });
+
+    await expect(fullPass()).resolves.toEqual({ requested: 2, failed: 0 });
+    expect(runtime.promisedTargets('public-cg', 'policy'))
+      .toHaveLength(RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1);
+
+    // peer-a moves to new heads and peer-b stops answering. The pass passes
+    // parity and may clear a witness, but it may only ADD to the snapshot, and
+    // the union no longer fits the bound.
+    targetsByPeer.set('peer-a', heads('a-next'));
+    failingPeer = 'peer-b';
+    await expect(fullPass()).resolves.toEqual({ requested: 1, failed: 1 });
+    expect(runtime.promisedTargets('public-cg', 'policy')).toBeNull();
+    expect(runtime.status('public-cg', 'policy')?.failed).toBe(true);
   });
 
   it('prunes superseded promises instead of blocking a graph that advanced often', async () => {

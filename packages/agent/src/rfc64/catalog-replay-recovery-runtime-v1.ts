@@ -254,6 +254,11 @@ interface ReplayProgressV1<Target> {
    * projection. A complete connected-peer pass replaces the snapshot; scoped
    * recovery can only add evidence until another complete pass supersedes it.
    * `null` means no bounded authoritative snapshot is available.
+   *
+   * It changes only when a run settles, and only from the promise set of the
+   * run's last parity read -- the one taken after the run confirmed no joined
+   * request left a peer queued. A run that exhausts its worklist, fails, or is
+   * aborted leaves it as the last settled run left it.
    */
   promisedTargets: readonly Target[] | null;
   completion: Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> | null;
@@ -420,9 +425,16 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
      * Peers this pass queued and never heard an answer from -- a failed dial
      * or a local precondition. Distinct from `providerFailures`, which is
      * provider evidence only: both leave a peer's earlier promises unre-heard,
-     * which is what the snapshot-replacement decision below turns on.
+     * which is what the settle-time snapshot-replacement decision turns on.
      */
     let unansweredPeers = 0;
+    /**
+     * The promise set of the last parity read, recorded only once the run has
+     * confirmed that no joined request left a peer queued. Until then a joining
+     * full pass can still hand this run its entitlement and its peers, so no
+     * earlier iteration's set may decide the snapshot.
+     */
+    let coveredPromised: readonly Target[] | null = null;
     let replayFailed = true;
     let requiresFullReplay = false;
     try {
@@ -492,50 +504,11 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
           promisedByIdentity.set(this.#ports.targetIdentity(target), target);
         }
         const promised = [...promisedByIdentity.values()];
-        const promisedOverflowed = promised.length
-          > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1;
         input.signal?.throwIfAborted();
-        const parityFailed = promisedOverflowed
+        const parityFailed = promised.length
+          > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
           || await this.#ports.parityFailed(input.contextGraphId, promised);
         input.signal?.throwIfAborted();
-        if (requested > 0) {
-          // Replacement discards every promise this pass did not re-hear, so
-          // it needs more than the right to CLEAR a witness.
-          // `requestedFullReplay` only says the pass QUEUED every connected
-          // peer, and clearing is deliberately tolerant of a retained provider
-          // that never answered -- replacing a promise snapshot is not, because
-          // that peer's earlier promised head can still be durable and
-          // unapplied, and dropping it reports the very zero this snapshot
-          // exists to prevent. A pass that lost an answer may only ADD.
-          const replacesSnapshot = progress.requestedFullReplay && unansweredPeers === 0;
-          if (promisedOverflowed) {
-            progress.promisedTargets = null;
-          } else if (replacesSnapshot || progress.promisedTargets === null) {
-            progress.promisedTargets = Object.freeze([...promised]);
-          } else {
-            const merged = new Map<string, Target>();
-            for (const target of progress.promisedTargets) {
-              merged.set(this.#ports.targetIdentity(target), target);
-            }
-            for (const target of promised) {
-              merged.set(this.#ports.targetIdentity(target), target);
-            }
-            // `targetIdentity` is exact, so each head advance a scoped pass
-            // observes adds an entry while the superseded one stays and
-            // nothing prunes it between full passes. Pruning before the bound
-            // keeps the capacity latch a statement about live scopes -- which
-            // is what the projection reads -- instead of one about how often
-            // those scopes advanced.
-            const live = this.#ports.pruneSupersededTargets === undefined
-              ? [...merged.values()]
-              : this.#ports.pruneSupersededTargets([...merged.values()]);
-            progress.promisedTargets = live.length
-              > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
-              ? null
-              : Object.freeze([...live]);
-            if (progress.promisedTargets === null) requiresFullReplay = true;
-          }
-        }
         // A reconnect generation arriving during the durable parity read owns
         // another pass. The worklist budget keeps that fence finite.
         if (progress.peerWorklist.exhausted) {
@@ -544,6 +517,9 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
           break;
         }
         if (progress.peerWorklist.hasPending) continue;
+        // Nothing awaits between here and the settle block, so the
+        // `requestedFullReplay` it reads is the one this set was checked under.
+        coveredPromised = promised;
         if (parityFailed) {
           failed += 1;
           requiresFullReplay = true;
@@ -578,6 +554,22 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       if (current === progress && current.token === token) {
         const wasFullPass = current.requestedFullReplay;
         current.active = false;
+        // The promise snapshot settles with the status it is read beside, under
+        // this token fence and the revision bump below. A merged set past its
+        // bound is capacity evidence, so it latches the witness and must also
+        // stop this same settle from clearing it.
+        if (
+          coveredPromised !== null
+          && requested > 0
+          && !this.#settlePromisedTargets(
+            current,
+            coveredPromised,
+            wasFullPass && unansweredPeers === 0,
+          )
+        ) {
+          requiresFullReplay = true;
+          replayFailed = true;
+        }
         // Only evidence that applied rows may be missing (parity, worklist or
         // attribution overflow) fails the Context Graph. A provider that could
         // not be replayed from stays retained for retry and is reported on its
@@ -618,6 +610,55 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         this.#bumpRevision();
       }
     }
+  }
+
+  /**
+   * Settle the retained promise snapshot from a covered run's promise set.
+   * Returns false when the merged snapshot outgrew its bound.
+   *
+   * Replacement discards every promise the run did not re-hear, so it needs
+   * more than the right to CLEAR a witness. `requestedFullReplay` only says
+   * some request QUEUED every connected peer, and clearing is deliberately
+   * tolerant of a retained provider that never answered -- replacing a
+   * promise snapshot is not, because that peer's earlier promised head can
+   * still be durable and unapplied, and dropping it reports the very zero this
+   * snapshot exists to prevent. A run that lost an answer may only ADD.
+   */
+  #settlePromisedTargets(
+    progress: ReplayProgressV1<Target>,
+    promised: readonly Target[],
+    replaces: boolean,
+  ): boolean {
+    if (promised.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1) {
+      // This run's parity read already failed on the same overflow.
+      progress.promisedTargets = null;
+      return true;
+    }
+    if (replaces || progress.promisedTargets === null) {
+      progress.promisedTargets = Object.freeze([...promised]);
+      return true;
+    }
+    const merged = new Map<string, Target>();
+    for (const target of progress.promisedTargets) {
+      merged.set(this.#ports.targetIdentity(target), target);
+    }
+    for (const target of promised) {
+      merged.set(this.#ports.targetIdentity(target), target);
+    }
+    // `targetIdentity` is exact, so each head advance a scoped pass observes
+    // adds an entry while the superseded one stays and nothing prunes it
+    // between full passes. Pruning before the bound keeps the capacity latch a
+    // statement about live scopes -- which is what the projection reads --
+    // instead of one about how often those scopes advanced.
+    const live = this.#ports.pruneSupersededTargets === undefined
+      ? [...merged.values()]
+      : this.#ports.pruneSupersededTargets([...merged.values()]);
+    if (live.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1) {
+      progress.promisedTargets = null;
+      return false;
+    }
+    progress.promisedTargets = Object.freeze([...live]);
+    return true;
   }
 
   /**
