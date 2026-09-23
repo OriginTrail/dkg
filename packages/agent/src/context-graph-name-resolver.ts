@@ -400,7 +400,7 @@ export class ContextGraphNameResolver {
         this.entries.set(target.nameHash, rechecked);
         return Promise.resolve(rechecked);
       }
-      return this.track(target, this.adopt(target, entry.contextGraphId, entry.source));
+      return this.track(target, this.readopt(target, entry));
     }
     if (
       onlyPeers === undefined
@@ -412,6 +412,31 @@ export class ContextGraphNameResolver {
       return Promise.resolve(entry);
     }
     return this.track(target, this.attemptOnce(target, onlyPeers, options.ignorePeerCooldowns === true));
+  }
+
+  /**
+   * Adopt the id a decline already verified, now that its refusal has
+   * cleared. A throw fails closed, like the refusal check: the decline and
+   * its verified id are kept (never swapped for a pending entry that would
+   * have to find the id again) and the next check retries the adoption.
+   */
+  private async readopt(
+    target: ContextGraphNameTarget,
+    declined: Extract<ContextGraphNameResolutionEntry, { state: 'declined' }>,
+  ): Promise<ContextGraphNameResolutionEntry | undefined> {
+    try {
+      return await this.adopt(target, declined.contextGraphId, declined.source);
+    } catch (error: unknown) {
+      if (this.lifetime.signal.aborted) throw error;
+      this.reportFailure(
+        `readopt\u0000${target.nameHash}`,
+        `Context Graph ${short(target.nameHash)} adopting its verified cleartext id failed; `
+        + `keeping it for the next check: ${describeError(error)}`,
+      );
+      const kept: ContextGraphNameResolutionEntry = { ...declined, nextCheckAt: this.now() + this.retryMaxMs };
+      this.entries.set(target.nameHash, kept);
+      return kept;
+    }
   }
 
   /** Run one attempt as this hash's in-flight attempt; a failure stays on the retry schedule. */

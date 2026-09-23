@@ -341,6 +341,51 @@ describe('ContextGraphNameResolver', () => {
     expect(state.asked).toEqual(['holder']);
   });
 
+  it('keeps a decline and its verified id when re-adopting it throws, and retries it on the next check', async () => {
+    vi.useFakeTimers();
+    const warn: string[] = [];
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    state.deps.log = { ...state.deps.log, warn: (message) => { warn.push(message); } };
+    let conflict = true;
+    let failWrite = true;
+    const adopt = state.deps.adopt;
+    state.deps.adopt = async (target, contextGraphId, source) => {
+      if (conflict) return false;
+      if (failWrite) {
+        failWrite = false;
+        throw new Error('store write failed');
+      }
+      return adopt(target, contextGraphId, source);
+    };
+    state.deps.isRefusalCurrent = () => conflict;
+    const resolver = resolverFor(state, { retryMaxMs: 1_000, peerAskTtlMs: 0 });
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'declined' });
+
+    // The conflict clears, the revealing peer is gone, no local definition.
+    conflict = false;
+    state.deps.listPeers = () => [];
+    state.deps.findLocalCandidates = async () => [];
+    await vi.advanceTimersByTimeAsync(1_000);
+    // The write failed: still declined, the verified id and source kept.
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({
+      state: 'declined',
+      contextGraphId: CLEARTEXT,
+      source: 'peer-protocol',
+    });
+    expect(warn).toEqual([
+      `Context Graph ${NAME_HASH.slice(0, 18)}… adopting its verified cleartext id failed; `
+        + 'keeping it for the next check: Error: store write failed',
+    ]);
+
+    // The next check adopts the kept id, with no peer and no store definition.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'resolved', contextGraphId: CLEARTEXT });
+    expect(state.adopted).toEqual([{ contextGraphId: CLEARTEXT, source: 'peer-protocol' }]);
+    expect(state.asked).toEqual(['holder']);
+  });
+
   it('keeps a decline when the refusal check throws, and reports it once', async () => {
     vi.useFakeTimers();
     const warn: string[] = [];
