@@ -316,7 +316,7 @@ describe('historical Context Graph discovery through ContextGraphStorage enumera
       contextGraphId: '1',
       accessPolicy: 0,
       nameHash: replacement,
-      blockNumber: 1,
+      observedAtBlock: 1,
     }, { source: 'event' })).toEqual({ isNew: false, changed: false });
 
     const newer = before.onChain!.observedAtBlock + 1;
@@ -326,7 +326,7 @@ describe('historical Context Graph discovery through ContextGraphStorage enumera
       accessPolicy: 0,
       publishPolicy: 1,
       nameHash: replacement,
-      blockNumber: newer,
+      observedAtBlock: newer,
       createdAt: 1_790_000_000,
       active: true,
     }, { source: 'storage' });

@@ -3226,7 +3226,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             accessPolicy,
             ...(publishPolicy === undefined ? {} : { publishPolicy }),
             nameHash: nameHash ?? null,
-            blockNumber,
+            observedAtBlock: blockNumber,
           }, { source: 'event', ctx, ...(signal ? { signal } : {}) });
         },
         // Phase B — live VM-reconcile nudge. A `KnowledgeAssetRegisteredToContextGraph`

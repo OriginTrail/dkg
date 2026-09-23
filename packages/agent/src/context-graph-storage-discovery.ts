@@ -537,7 +537,7 @@ function compareDecimalIds(a: string, b: string): number {
  * One chain observation of a Context Graph, as the shared discovery path takes
  * it. The live `ContextGraphCreated` event carries owner, policies and name
  * hash; a ContextGraphStorage read adds the creation time, active flag and
- * publish authority.
+ * publish authority. A ContextGraphStorageDiscoveryRecord is one as it stands.
  */
 export interface OnChainContextGraphObservation {
   /** Positive decimal ContextGraphStorage id. */
@@ -549,7 +549,7 @@ export interface OnChainContextGraphObservation {
   /** Curator-committed name hash, or null when the curator opted out. */
   readonly nameHash: string | null;
   /** Event block, or the anchor block of the storage read. */
-  readonly blockNumber: number;
+  readonly observedAtBlock: number;
   /** Unix seconds (storage reads only). */
   readonly createdAt?: number;
   /** Storage reads only. */
@@ -599,7 +599,7 @@ export function onChainContextGraphFactsFromObservation(
       : observation.publishAuthority?.toLowerCase() ?? null,
     createdAt: observation.createdAt ?? null,
     active: observation.active ?? null,
-    observedAtBlock: observation.blockNumber,
+    observedAtBlock: observation.observedAtBlock,
   };
 }
 
