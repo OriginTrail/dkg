@@ -239,6 +239,43 @@ describe('historical Context Graph discovery through ContextGraphStorage enumera
     expect((second as any).onChainPublishPolicyCache.get('6')).toBe(0);
   }, 90_000);
 
+  it('restores the enumerated catalog on the next pass when the boot restore failed', async () => {
+    const chain = await chainWithHistory();
+    const store = createInMemoryContextGraphStorageDiscoveryStore();
+    const first = await startAgent(chain, store, 'BeforeRestart');
+    await first.discoverContextGraphsFromStorage();
+    await first.stop();
+    agents.splice(agents.indexOf(first), 1);
+
+    // The DashboardDB is briefly locked while the node restarts.
+    let failures = 1;
+    const flaky: ContextGraphStorageDiscoveryStore = {
+      load: async () => {
+        if (failures-- > 0) throw new Error('sqlite busy');
+        return store.load();
+      },
+      save: (checkpoint) => store.save(checkpoint),
+    };
+    const reads: bigint[] = [];
+    const readRange = chain.readContextGraphStorageRange.bind(chain);
+    chain.readContextGraphStorageRange = async (options) => {
+      reads.push(options.fromId);
+      return readRange(options);
+    };
+    const second = await startAgent(chain, flaky, 'AfterRestart');
+    expect(chainRows(await second.listContextGraphs({ callerAgentAddress: null }))).toEqual([]);
+
+    // The next pass restores the saved rows before resuming at the cursor, so
+    // they are back without waiting for a refresh generation or re-reading ids.
+    await expect(second.discoverContextGraphsFromStorage()).resolves.toBe(0);
+    expect(chainRows(await second.listContextGraphs({ callerAgentAddress: null })).map((row) => row.onChain!.id))
+      .toEqual(['1', '2', '3', '5']);
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((fromId) => fromId >= 6n)).toBe(true);
+    // Restored rows stay chain-old: they seed no authorization cache.
+    expect((second as any).onChainAccessPolicyCache.has('2')).toBe(false);
+  }, 90_000);
+
   it('does not duplicate a graph the live lane saw before enumeration reached it', async () => {
     const chain = await chainWithHistory();
     const liveHash = cgHash('created-after-history');

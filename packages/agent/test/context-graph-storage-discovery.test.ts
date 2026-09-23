@@ -54,6 +54,7 @@ function harness(
 ) {
   const reads: Array<[bigint, number]> = [];
   const applied: string[] = [];
+  const restored: string[] = [];
   const known = new Set<string>();
   const logs: string[] = [];
   let readRange = (fromId: bigint, maxIds: number, signal?: AbortSignal) =>
@@ -64,9 +65,9 @@ function harness(
       reads.push([fromId, maxIds]);
       return readRange(fromId, maxIds, signal);
     },
-    apply: (record) => {
+    apply: (record, origin) => {
       options.apply?.(record);
-      applied.push(record.contextGraphId);
+      (origin === 'checkpoint' ? restored : applied).push(record.contextGraphId);
       const isNew = !known.has(record.contextGraphId);
       known.add(record.contextGraphId);
       return { isNew, changed: isNew };
@@ -78,6 +79,7 @@ function harness(
     discovery,
     reads,
     applied,
+    restored,
     logs,
     overrideReadRange(next: typeof readRange) {
       readRange = next;
@@ -117,17 +119,52 @@ describe('ContextGraphStorageDiscovery', () => {
     expect(first.reads).toEqual([[1n, 16], [17n, 4]]);
 
     const restarted = harness(chain, store);
-    const hydrated = await restarted.discovery.loadRecords();
-    expect(hydrated.map((record) => record.contextGraphId)).toEqual(
-      Array.from({ length: 20 }, (_, i) => String(i + 1)),
-    );
+    await expect(restarted.discovery.restore()).resolves.toBe(20);
+    expect(restarted.restored).toEqual(Array.from({ length: 20 }, (_, i) => String(i + 1)));
     expect(restarted.reads).toEqual([]);
     await expect(restarted.discovery.cursor()).resolves.toBe(21n);
+    // Once per process.
+    await expect(restarted.discovery.restore()).resolves.toBe(0);
 
     const rest = await restarted.discovery.discover();
     expect(restarted.reads[0]).toEqual([21n, 16]);
-    expect(rest).toMatchObject({ discovered: 20, read: 20, complete: true, nextId: 41n });
+    expect(rest).toMatchObject({ discovered: 20, read: 20, complete: true, nextId: 41n, restored: 0 });
     expect(restarted.applied).toEqual(Array.from({ length: 20 }, (_, i) => String(i + 21)));
+    expect(restarted.restored).toHaveLength(20);
+  });
+
+  it('restores the saved records on the next pass when the first restore failed', async () => {
+    const chain = await chainWith(40);
+    const enumeratedStore = new RecordingStore();
+    await harness(chain, enumeratedStore).discovery.discover({ idBudget: 20 });
+    const enumerated = Array.from({ length: 20 }, (_, i) => String(i + 1));
+
+    for (const pass of ['discover', 'refresh'] as const) {
+      const store = new RecordingStore();
+      store.value = structuredClone(enumeratedStore.value);
+      // A store that is briefly unreadable when the node boots.
+      let failures = 1;
+      const flaky: ContextGraphStorageDiscoveryStore = {
+        load: async () => {
+          if (failures-- > 0) throw new Error('sqlite busy');
+          return store.load();
+        },
+        save: (checkpoint) => store.save(checkpoint),
+      };
+      const restarted = harness(chain, flaky);
+      await expect(restarted.discovery.restore(), pass).rejects.toThrow('sqlite busy');
+      expect(restarted.restored, pass).toEqual([]);
+
+      // The pass restores before it reads anything past the cursor, even a
+      // refresh that is not due yet.
+      const result = await restarted.discovery[pass]({ idBudget: 4 });
+      expect(result.restored, pass).toBe(20);
+      expect(restarted.restored, pass).toEqual(enumerated);
+      expect(restarted.reads.every(([fromId]) => fromId >= 21n), pass).toBe(true);
+      await expect(restarted.discovery[pass]({ idBudget: 4 }), pass)
+        .resolves.toMatchObject({ restored: 0 });
+      expect(restarted.restored, pass).toHaveLength(20);
+    }
   });
 
   it('spends two view calls on a quiet pass and saves nothing', async () => {
@@ -258,8 +295,9 @@ describe('ContextGraphStorageDiscovery', () => {
       refreshNextId: '1',
       entries: [valid.entries[0], { ...valid.entries[0], contextGraphId: '9' }],
     };
-    const loaded = await harness(chain, beyond).discovery.loadRecords();
-    expect(loaded.map((record) => record.contextGraphId)).toEqual(['1']);
+    const loaded = harness(chain, beyond);
+    await expect(loaded.discovery.restore()).resolves.toBe(1);
+    expect(loaded.restored).toEqual(['1']);
   });
 
   it('refreshes mutable facts at most once per interval and resumes an unfinished generation', async () => {

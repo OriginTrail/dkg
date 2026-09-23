@@ -15,8 +15,9 @@
  * and the chain facts of every id below it, saved atomically after each page
  * has been applied. That pairing is what makes a restart resume from the
  * cursor: discovered rows are process-local, so boot re-stages them from the
- * saved facts without any chain read, and only ids at or above the cursor are
- * read again.
+ * saved facts without any chain read (or, when boot could not read the store,
+ * the next pass does before reading on), and only ids at or above the cursor
+ * are read again.
  *
  * A second, independent frontier re-reads `[1, cursor)` at most once per
  * `minimumIntervalMs` so the mutable facts (active flag, owner, publish
@@ -80,6 +81,9 @@ export interface ContextGraphStorageDiscoveryApplyResult {
   readonly changed: boolean;
 }
 
+/** Where an applied record came from: a chain read, or the durable checkpoint. */
+export type ContextGraphStorageDiscoveryRecordOrigin = 'read' | 'checkpoint';
+
 export interface ContextGraphStorageDiscoveryOptions {
   readonly store: ContextGraphStorageDiscoveryStore;
   readonly readRange: (
@@ -87,9 +91,14 @@ export interface ContextGraphStorageDiscoveryOptions {
     maxIds: number,
     signal?: AbortSignal,
   ) => Promise<ContextGraphStorageRange>;
-  /** Apply one freshly read record through the node's shared discovery path. */
+  /**
+   * Apply one record through the node's shared discovery path: `'read'` for a
+   * record a pass just read from chain, `'checkpoint'` for one restored from
+   * the durable checkpoint.
+   */
   readonly apply: (
     record: ContextGraphStorageDiscoveryRecord,
+    origin: ContextGraphStorageDiscoveryRecordOrigin,
   ) => ContextGraphStorageDiscoveryApplyResult | Promise<ContextGraphStorageDiscoveryApplyResult>;
   readonly log?: (message: string) => void;
   readonly pageSize?: number;
@@ -111,6 +120,11 @@ export interface ContextGraphStorageDiscoveryPassResult {
   readonly nextId: bigint;
   /** `getLatestContextGraphId()` at the last anchor read in this pass. */
   readonly latestId?: bigint;
+  /**
+   * Checkpoint records this call restored before the pass, because no earlier
+   * restore had succeeded (see {@link ContextGraphStorageDiscovery.restore}).
+   */
+  readonly restored: number;
 }
 
 interface CheckpointV1 {
@@ -136,6 +150,8 @@ export class ContextGraphStorageDiscovery {
   private tail: Promise<unknown> = Promise.resolve();
   private readonly pageSize: number;
   private readonly now: () => number;
+  /** The checkpoint's records have been applied in this process. */
+  private restored = false;
 
   constructor(private readonly options: ContextGraphStorageDiscoveryOptions) {
     const pageSize = options.pageSize ?? CONTEXT_GRAPH_STORAGE_DISCOVERY_PAGE_SIZE;
@@ -147,12 +163,18 @@ export class ContextGraphStorageDiscovery {
   }
 
   /**
-   * Every record saved below the durable cursor, for boot hydration. Reads the
-   * store only; never the chain.
+   * Apply every record saved below the durable cursor, as `'checkpoint'`, once
+   * per process. Reads the store only; never the chain. Returns the number of
+   * records this call applied, 0 once an earlier call succeeded.
+   *
+   * The cursor stops discovery from re-reading the ids below it, so these
+   * records are the only way their graphs come back after a restart. Every
+   * discovery and refresh pass therefore restores first: a restore that
+   * failed at boot (a store briefly unreadable) is retried by the next pass
+   * rather than leaving those graphs unlisted until a refresh generation.
    */
-  async loadRecords(): Promise<readonly ContextGraphStorageDiscoveryRecord[]> {
-    const checkpoint = await this.load();
-    return [...checkpoint.entries.values()];
+  restore(): Promise<number> {
+    return this.serialize(() => this.restoreOnce());
   }
 
   /** The durable cursor: the next id discovery will read. */
@@ -183,12 +205,23 @@ export class ContextGraphStorageDiscovery {
     return next;
   }
 
+  private async restoreOnce(): Promise<number> {
+    if (this.restored) return 0;
+    const checkpoint = await this.load();
+    for (const record of checkpoint.entries.values()) {
+      await this.options.apply(record, 'checkpoint');
+    }
+    this.restored = true;
+    return checkpoint.entries.size;
+  }
+
   private async runDiscover(options: {
     idBudget?: number;
     signal?: AbortSignal;
   }): Promise<ContextGraphStorageDiscoveryPassResult> {
     const { signal } = options;
     let remaining = normalizeBudget(options.idBudget);
+    const restored = await this.restoreOnce();
     let checkpoint = await this.load();
     let discovered = 0;
     let changed = 0;
@@ -245,6 +278,7 @@ export class ContextGraphStorageDiscovery {
       due: true,
       nextId: checkpoint.nextId,
       ...(latestId === undefined ? {} : { latestId }),
+      restored,
     });
   }
 
@@ -256,6 +290,7 @@ export class ContextGraphStorageDiscovery {
     const { signal } = options;
     let remaining = normalizeBudget(options.idBudget);
     const minimumIntervalMs = options.minimumIntervalMs ?? CONTEXT_GRAPH_STORAGE_REFRESH_INTERVAL_MS;
+    const restored = await this.restoreOnce();
     let checkpoint = await this.load();
     const notDue = (): ContextGraphStorageDiscoveryPassResult => Object.freeze({
       discovered: 0,
@@ -264,6 +299,7 @@ export class ContextGraphStorageDiscovery {
       complete: false,
       due: false,
       nextId: checkpoint.nextId,
+      restored,
     });
     if (checkpoint.nextId <= 1n) return notDue();
     if (checkpoint.refreshNextId === null) {
@@ -331,6 +367,7 @@ export class ContextGraphStorageDiscovery {
       due: true,
       nextId: checkpoint.nextId,
       ...(latestId === undefined ? {} : { latestId }),
+      restored,
     });
   }
 
@@ -344,7 +381,7 @@ export class ContextGraphStorageDiscovery {
     for (const entry of range.entries) {
       signal?.throwIfAborted();
       const record = Object.freeze({ ...entry, observedAtBlock: range.anchorBlockNumber });
-      const result = await this.options.apply(record);
+      const result = await this.options.apply(record, 'read');
       if (result.isNew) discovered += 1;
       if (result.changed) changed += 1;
       records.push(record);

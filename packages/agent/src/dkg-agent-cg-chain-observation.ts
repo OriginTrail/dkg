@@ -79,6 +79,7 @@ export class ContextGraphChainObservationMethods extends DKGAgentBase {
       idBudget: options.idBudget ?? CONTEXT_GRAPH_STORAGE_DISCOVERY_ID_BUDGET,
       ...(options.signal ? { signal: options.signal } : {}),
     });
+    this.logContextGraphStorageRestore(result.restored, 'before this discovery pass');
     if (result.read > 0) {
       this.log.info(
         createOperationContext('system'),
@@ -108,6 +109,7 @@ export class ContextGraphChainObservationMethods extends DKGAgentBase {
       minimumIntervalMs: options.minimumIntervalMs ?? CONTEXT_GRAPH_STORAGE_REFRESH_INTERVAL_MS,
       ...(options.signal ? { signal: options.signal } : {}),
     });
+    this.logContextGraphStorageRestore(result.restored, 'before this refresh pass');
     if (result.read > 0) {
       this.log.info(
         createOperationContext('system'),
@@ -123,24 +125,24 @@ export class ContextGraphChainObservationMethods extends DKGAgentBase {
    * start before the chain poller, after durable subscriptions are restored so
    * a known cleartext row binds instead of a duplicate placeholder. Reads the
    * store only: no chain calls, and none of the authorization caches that a
-   * fresh chain observation seeds.
+   * fresh chain observation seeds. When it fails, the next discovery or
+   * refresh pass restores the checkpoint before reading on. Returns the number
+   * of graphs restored, 0 once they have been.
    */
   async hydrateContextGraphsFromStorageCheckpoint(this: DKGAgent): Promise<number> {
     const discovery = this.getContextGraphStorageDiscovery();
     if (discovery === null) return 0;
-    const ctx = createOperationContext('init');
-    const records = await discovery.loadRecords();
-    for (const record of records) {
-      this.applyOnChainContextGraphObservation(record, { source: 'checkpoint', ctx });
-    }
-    if (records.length > 0) {
-      this.log.info(
-        ctx,
-        `Restored ${records.length} on-chain context graph(s) from the storage discovery checkpoint `
-          + `(next id ${await discovery.cursor()})`,
-      );
-    }
-    return records.length;
+    const restored = await discovery.restore();
+    this.logContextGraphStorageRestore(restored, `at start (next id ${await discovery.cursor()})`);
+    return restored;
+  }
+
+  private logContextGraphStorageRestore(this: DKGAgent, restored: number, when: string): void {
+    if (restored === 0) return;
+    this.log.info(
+      createOperationContext('init'),
+      `Restored ${restored} on-chain context graph(s) from the storage discovery checkpoint ${when}`,
+    );
   }
 
   /** The ContextGraphStorage enumeration, or null when the adapter cannot enumerate. */
@@ -160,7 +162,10 @@ export class ContextGraphChainObservationMethods extends DKGAgentBase {
         maxIds,
         ...(signal ? { signal } : {}),
       }),
-      apply: (record) => this.applyOnChainContextGraphObservation(record, { source: 'storage', ctx }),
+      apply: (record, origin) => this.applyOnChainContextGraphObservation(record, {
+        source: origin === 'checkpoint' ? 'checkpoint' : 'storage',
+        ctx,
+      }),
       log: (message) => this.log.warn(ctx, message),
     });
     return this.contextGraphStorageDiscovery;
