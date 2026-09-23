@@ -563,14 +563,21 @@ export function planCi({
   });
 }
 
-// Plan fields only the summary reports; the gate reads every other field, so
-// a new plan field reaches it without another list to update.
-const REPORT_ONLY_PLAN_FIELDS = new Set(['changedFileCount', 'changedFiles', 'reasons']);
+// The plan fields the aggregate gates validate, in plan order: plan_json
+// carries exactly these. The other plan fields (changedFileCount,
+// changedFiles, reasons) are for the summary only.
+export const GATE_PLAN_FIELDS = Object.freeze([
+  'mode',
+  'fullCi',
+  'runNode',
+  'buildChecks',
+  'abiFreshnessRelevant',
+  'lanes',
+  'evmScopes',
+]);
 
 export function githubOutputsForPlan(plan) {
-  const gatePlan = Object.fromEntries(
-    Object.entries(plan).filter(([field]) => !REPORT_ONLY_PLAN_FIELDS.has(field)),
-  );
+  const gatePlan = Object.fromEntries(GATE_PLAN_FIELDS.map((field) => [field, plan[field]]));
   return {
     full_ci: String(plan.fullCi),
     run_node: String(plan.runNode),

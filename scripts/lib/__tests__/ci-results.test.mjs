@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   CI_LANES,
+  GATE_PLAN_FIELDS,
   NODE_TEST_ARTIFACT_LANES,
   githubOutputsForPlan,
   needsNodeTestArtifacts,
@@ -11,6 +12,18 @@ import { PRIMARY_LANE_JOBS, validateEvmResults, validatePrimaryResults } from '.
 import { LANE_JOBS, change, gateNeeds, pullRequestPlan, succeeded } from './ci-plan-fixtures.mjs';
 
 // The aggregate gates: which job results each plan shape accepts or rejects.
+
+test('plan_json carries exactly the gate fields; the rest of the plan is summary-only', () => {
+  // A new plan field reaches the gate only once GATE_PLAN_FIELDS declares it;
+  // otherwise it has to be listed here as summary-only.
+  for (const plan of [pullRequestPlan([change('packages/network-sim/src/index.ts')]), planCi({ eventName: 'push' })]) {
+    assert.deepEqual(Object.keys(JSON.parse(githubOutputsForPlan(plan).plan_json)), GATE_PLAN_FIELDS);
+    assert.deepEqual(
+      Object.keys(plan).filter((field) => !GATE_PLAN_FIELDS.includes(field)),
+      ['changedFileCount', 'changedFiles', 'reasons'],
+    );
+  }
+});
 
 test('a build-only plan requires the shared build and nothing else', () => {
   const plan = pullRequestPlan([change('tools/observability/lib/w1.mjs')]);
