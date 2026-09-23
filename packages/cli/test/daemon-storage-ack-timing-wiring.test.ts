@@ -890,6 +890,7 @@ describe('runDaemonInner StorageACK timing wiring', () => {
       publishProfile: vi.fn(async () => undefined),
       ensureProfilePublished: vi.fn(async () => undefined),
       publishRelayRegistry: vi.fn(async () => undefined),
+      reconcileProfileNodeIdOnStartup: vi.fn(async () => null),
       ensureContextGraphLocal: vi.fn(async () => undefined),
       getSubscribedContextGraphs: vi.fn(() => new Map()),
       subscribeToContextGraph: vi.fn(),

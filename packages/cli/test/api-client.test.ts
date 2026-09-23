@@ -1111,6 +1111,27 @@ describe('ApiClient', () => {
       expect(calls[0].opts.method).toBe('DELETE');
     });
 
+    it('getProfileNodeIdStatus() GETs /api/identity/node-id', async () => {
+      const body = { identityId: '63', state: 'legacy', profile: { updateNodeIdSupported: false } };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+      const result = await client.getProfileNodeIdStatus();
+      expect(result).toEqual(body);
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/identity/node-id`);
+      expect(calls[0].opts.method ?? 'GET').toBe('GET');
+    });
+
+    it('syncProfileNodeId() POSTs /api/identity/node-id/sync with no parameters', async () => {
+      const body = { outcome: 'updated', message: 'ok', txHash: '0xabc' };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+      const result = await client.syncProfileNodeId();
+      expect(result).toEqual(body);
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/identity/node-id/sync`);
+      expect(calls[0].opts.method).toBe('POST');
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({});
+    });
+
     it('listPcas() GETs /api/pca', async () => {
       const body = { accounts: [] };
       const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });

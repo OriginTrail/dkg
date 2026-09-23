@@ -151,6 +151,7 @@ describe('runDaemonInner VM-publish intent backfill wiring (#1828)', () => {
       stop: vi.fn(async () => undefined),
       publishProfile: vi.fn(async () => undefined),
       publishRelayRegistry: vi.fn(async () => undefined),
+      reconcileProfileNodeIdOnStartup: vi.fn(async () => null),
       ensureContextGraphLocal: vi.fn(async () => undefined),
       getSubscribedContextGraphs: vi.fn(() => new Map()),
       subscribeToContextGraph: vi.fn(),
