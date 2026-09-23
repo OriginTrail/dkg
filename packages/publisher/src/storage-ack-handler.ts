@@ -43,6 +43,8 @@ import {
   computeCatalogRoot,
   catalogCommittedLeaves,
   contextGraphCatalogUri,
+  contextGraphDataUri,
+  partitionCatalogQuads,
   isSwmMerkleExcludedQuad,
   STORAGE_ACK_MAX_STAGING_BYTES,
   createGraphKnowledgeAssetScope,
@@ -824,6 +826,43 @@ export class StorageACKHandler {
     }
   }
 
+  /**
+   * An inline curated catalog must be exactly a catalog partition: every quad
+   * on the Context Graph's own DID (under the target on-chain id, or the SWM
+   * graph id the intent names), one subject throughout, only catalog
+   * predicates, and `rdf:type` only with a catalog class. This is the
+   * publisher's own partition rule (`partitionCatalogQuads`). Without it a
+   * publisher could commit arbitrary triples, on any subject, into this
+   * core's public `<cg>/_catalog`. Returns the decline, or undefined.
+   */
+  private declineUnlessCatalogPartition(
+    cgId: string,
+    swmGraphId: string | undefined,
+    parsedCatalog: readonly Quad[],
+    label: string,
+  ): Uint8Array | undefined {
+    const allowedSubjects = new Set<string>([contextGraphDataUri(cgId)]);
+    if (swmGraphId && swmGraphId.length > 0) allowedSubjects.add(contextGraphDataUri(swmGraphId));
+    const subject = parsedCatalog[0]?.subject;
+    if (subject === undefined || !allowedSubjects.has(subject)) {
+      return this.encodeDecline(
+        cgId,
+        STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+        `${label}: inline catalog subject is not this Context Graph's DID`,
+      );
+    }
+    const { catalogQuads, otherQuads } = partitionCatalogQuads(parsedCatalog, subject);
+    if (otherQuads.length > 0 || catalogQuads.length !== parsedCatalog.length) {
+      return this.encodeDecline(
+        cgId,
+        STORAGE_ACK_DECLINE_CODES.CATALOG_ROOT_MISMATCH,
+        `${label}: inline catalog carries ${otherQuads.length} quad(s) outside the catalog partition ` +
+          `(another subject, a non-catalog predicate, or a non-catalog rdf:type)`,
+      );
+    }
+    return undefined;
+  }
+
   /** Persist a verified public catalog under the shared store-error boundary. */
   private async persistCatalogOrDecline(
     cgId: string,
@@ -1345,6 +1384,13 @@ export class StorageACKHandler {
       // rebuilt root is byte-identical to the producer's committed root AND the
       // prover's later rebuild. DECLINE on any disagreement.
       const parsedCatalog = parseSimpleNQuads(new TextDecoder().decode(intent.stagingQuads));
+      const partitionDecline = this.declineUnlessCatalogPartition(
+        cgId,
+        swmGraphIdForCuration,
+        parsedCatalog,
+        'curated ACK',
+      );
+      if (partitionDecline) return partitionDecline;
       const committedLeaves = catalogCommittedLeaves(parsedCatalog);
       if (committedLeaves.length === 0) {
         return this.encodeDecline(
@@ -1371,18 +1417,12 @@ export class StorageACKHandler {
         );
       }
 
-      // Root verified — persist the public catalog to `<cg>/_catalog` so this
-      // core can serve it (the §7 facet open-serve) and the prover can later
-      // rebuild the SAME root for curated proving. CLEAR/REPLACE the subjects.
-      // `assertSafeIri` stays OUTSIDE the persist helper below: an unsafe graph
-      // IRI is a malformed-request condition (stream reset), not a store outage.
-      // A failing store (worker restarting, 'store is closed') instead returns
-      // the transient decline so the publisher retries once the store recovers
-      // rather than bucketing us as no_response after a stream reset.
+      // Root verified. The catalog is persisted to `<cg>/_catalog` only after
+      // every remaining check and the signer gate below, so a request this
+      // core declines never changes its public catalog. An unsafe graph IRI
+      // is a malformed request (stream reset), so it is checked up front.
       const catalogGraph = contextGraphCatalogUri(cgId);
       assertSafeIri(catalogGraph);
-      const persistedCatalog = await this.persistCatalogOrDecline(cgId, catalogGraph, parsedCatalog, signal);
-      if (!persistedCatalog.ok) return persistedCatalog.decline;
 
       // OT-RFC-43 / V10: every publish mints exactly ONE Knowledge Asset.
       if (intent.kaCount !== 1) {
@@ -1448,6 +1488,13 @@ export class StorageACKHandler {
         'curated StorageACK signer is not confirmed on-chain as an operational wallet',
       );
       if (!curatedSignerGate.ok) return curatedSignerGate.decline;
+
+      // Persist the verified catalog so this core can serve it (the §7 facet
+      // open-serve) and the prover can rebuild the SAME root for curated
+      // proving (CLEAR/REPLACE). A failing store returns the transient decline
+      // so the publisher retries once the store recovers.
+      const persistedCatalog = await this.persistCatalogOrDecline(cgId, catalogGraph, parsedCatalog, signal);
+      if (!persistedCatalog.ok) return persistedCatalog.decline;
 
       const signature = ethers.Signature.from(
         await this.config.signerWallet.signMessage(digest),
@@ -1933,6 +1980,10 @@ export class StorageACKHandler {
     // payload, so they leave it null.
     let publicUpdateByteSizeFloor: bigint | null = null;
     let publicUpdateFloorBasis = '';
+    // A curated update's verified catalog, persisted only once the signer gate passed.
+    let persistVerifiedCatalog:
+      | (() => Promise<{ ok: true } | { ok: false; decline: Uint8Array }>)
+      | undefined;
     if (intent.isEncryptedPayload === true) {
       const swmGraphIdForCuration = intent.swmGraphId && intent.swmGraphId.length > 0
         ? intent.swmGraphId
@@ -2013,6 +2064,13 @@ export class StorageACKHandler {
         const parsedCatalog = parseSimpleNQuads(
           new TextDecoder().decode(intent.stagingQuads),
         );
+        const partitionDecline = this.declineUnlessCatalogPartition(
+          cgId,
+          swmGraphIdForCuration,
+          parsedCatalog,
+          'curated UPDATE ACK',
+        );
+        if (partitionDecline) return partitionDecline;
         const committedLeaves = catalogCommittedLeaves(parsedCatalog);
         if (committedLeaves.length === 0) {
           return this.encodeDecline(
@@ -2038,16 +2096,13 @@ export class StorageACKHandler {
             `does not match publisher claim=${ethers.hexlify(intent.newCatalogRoot).slice(0, 18)}...`,
           );
         }
-        // Root verified — REPLACE-persist the updated public catalog to
-        // `<cg>/_catalog` so this core serves + later proves the rotated root.
-        // `assertSafeIri` stays OUTSIDE the persist helper: an unsafe IRI is
-        // malformed-request territory (stream reset), not a store outage. A
-        // store outage during the persist returns the same transient decline
-        // as the publish handler's catalog persist (shared helper).
+        // Root verified. The updated catalog is REPLACE-persisted to
+        // `<cg>/_catalog` (so this core serves and later proves the rotated
+        // root) only after every remaining check and the signer gate below.
+        // An unsafe IRI is a malformed request (stream reset), checked now.
         const catalogGraph = contextGraphCatalogUri(cgId);
         assertSafeIri(catalogGraph);
-        const persistedCatalog = await this.persistCatalogOrDecline(cgId, catalogGraph, parsedCatalog, signal);
-        if (!persistedCatalog.ok) return persistedCatalog.decline;
+        persistVerifiedCatalog = () => this.persistCatalogOrDecline(cgId, catalogGraph, parsedCatalog, signal);
       }
       // Encrypted updates trust the publisher's claimed newMerkleRoot —
       // no recompute. Fall through to the digest sign below.
@@ -2287,6 +2342,10 @@ export class StorageACKHandler {
       'UpdateStorageACK signer is not confirmed on-chain as an operational wallet',
     );
     if (!updateSignerGate.ok) return updateSignerGate.decline;
+    if (persistVerifiedCatalog) {
+      const persistedCatalog = await persistVerifiedCatalog();
+      if (!persistedCatalog.ok) return persistedCatalog.decline;
+    }
 
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),
