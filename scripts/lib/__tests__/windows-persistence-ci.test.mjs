@@ -60,6 +60,7 @@ test('each matrix leg builds once and only inventory runs named evidence steps',
     'pnpm typecheck:devnet:rfc64-evidence',
     'pnpm test:devnet:rfc64-evidence',
     'pnpm typecheck:gate0:rfc64-persistence-lifecycle',
+    `pnpm ${prefix}:unit`,
     `pnpm ${prefix}:generate:only`,
     `pnpm ${prefix}:verify`,
     'pnpm exec tsc --noEmit --target ES2022 --module NodeNext --moduleResolution NodeNext --types node,vitest/globals --skipLibCheck packages/agent/test/rfc64-inventory-v1-lifecycle.test.ts packages/agent/test/fixtures/rfc64-inventory-v1-child.ts',
@@ -69,9 +70,9 @@ test('each matrix leg builds once and only inventory runs named evidence steps',
   assert.equal(job.steps.filter((step) => step.if).length, evidence.length);
   assert.ok(evidence.every((step) => step.name && !step['continue-on-error']));
   assert.ok(job.steps.indexOf(build) < job.steps.indexOf(evidence[0]));
-  assert.equal(evidence[3]['timeout-minutes'], 20);
+  assert.equal(evidence[4]['timeout-minutes'], 20);
   for (const group of job.strategy.matrix.include) {
     const selected = group.evidence ? evidence : [];
-    assert.equal(selected.length, group.group === 'inventory' ? 6 : 0);
+    assert.equal(selected.length, group.group === 'inventory' ? 7 : 0);
   }
 });

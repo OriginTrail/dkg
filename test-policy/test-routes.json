@@ -47,6 +47,18 @@
     ]
   },
   {
+    "pattern": "devnet/rfc64-persistence-lifecycle/{evidence,process-lifecycle,verifier}.test.ts",
+    "lane": "inventory-windows",
+    "reason": "Gate 0 evidence-encoder, child-process cleanup and verifier unit tests run in the Windows inventory evidence leg before generation",
+    "cadence": "required",
+    "command": "pnpm test:gate0:rfc64-persistence-lifecycle:unit",
+    "layer": "unit/component",
+    "prerequisites": [
+      "pnpm frozen install",
+      "Git"
+    ]
+  },
+  {
     "pattern": "devnet/**",
     "lane": "devnet",
     "reason": "Developer and certification suites; suite manifest and root scripts document prerequisites",

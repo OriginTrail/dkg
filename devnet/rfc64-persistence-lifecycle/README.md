@@ -58,6 +58,9 @@ artifact-publication tests run with:
 pnpm test:gate0:rfc64-persistence-lifecycle:unit
 ```
 
+The Windows inventory shard runs this as a named step before generation; the
+POSIX-only symlink and file-mode cases skip there.
+
 Strictly typecheck the producer, runner, verifier, and focused tests with:
 
 ```sh
