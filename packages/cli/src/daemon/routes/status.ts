@@ -128,7 +128,7 @@ import { buildRelayStatusBlock } from '../relay-status-block.js';
 import { fetchAllEntries, resolveRegistryConfig } from '../../integrations/registry-client.js';
 import type { IntegrationEntry, TrustTier } from '../../integrations/schema.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { canAdministerNode, loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -239,6 +239,7 @@ import {
   sleep,
   deriveBlockExplorerUrl,
   respondIfChainRpcTransportError,
+  requireNodeAdmin,
 } from '../http-utils.js';
 import {
   normalizeRepo,
@@ -568,8 +569,8 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
   } = ctx;
   // Registering adapters, creating the node identity, backfilling the store and
   // shutting down act on the whole node, so they require a node-level admin
-  // token. Resolved per route so read-only routes never depend on it.
-  const isNodeAdminCaller = (): boolean => canAdministerNode(actorFromRequestContext(ctx).authentication);
+  // token. Resolved once so read-only routes never depend on it.
+  const nodeAuth = actorFromRequestContext(ctx).authentication;
 
   if ((req.method === "GET" || req.method === "HEAD") && path === "/.well-known/skill.md") {
     // HEAD must return the same ETag/Cache-Control/Vary headers as GET so HTTP-cache-aware clients
@@ -1004,11 +1005,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
 
   // POST /api/register-adapter — legacy OpenClaw alias for /api/local-agent-integrations/connect
   if (req.method === 'POST' && path === '/api/register-adapter') {
-    if (!isNodeAdminCaller()) {
-      return jsonResponse(res, 403, {
-        error: 'POST /api/register-adapter requires a node-level admin token; agent-scoped tokens cannot connect local agent integrations.',
-      });
-    }
+    if (!requireNodeAdmin(nodeAuth, res, 'POST /api/register-adapter', 'connect local agent integrations')) return;
     const body = await readBody(req, SMALL_BODY_BYTES);
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
@@ -1173,11 +1170,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
 
   // POST /api/identity/ensure — (re)attempt on-chain identity creation
   if (req.method === "POST" && path === "/api/identity/ensure") {
-    if (!isNodeAdminCaller()) {
-      return jsonResponse(res, 403, {
-        error: 'POST /api/identity/ensure requires a node-level admin token; agent-scoped tokens cannot create the node identity.',
-      });
-    }
+    if (!requireNodeAdmin(nodeAuth, res, 'POST /api/identity/ensure', 'create the node identity')) return;
     try {
       const identityId = await agent.ensureIdentity();
       return jsonResponse(res, 200, {
@@ -1238,11 +1231,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
   //     "dryRun": true                     // probe-only: don't write, just report what would happen
   //   }
   if (req.method === 'POST' && path === '/api/random-sampling/backfill-percgid-meta') {
-    if (!isNodeAdminCaller()) {
-      return jsonResponse(res, 403, {
-        error: 'POST /api/random-sampling/backfill-percgid-meta requires a node-level admin token; agent-scoped tokens cannot rewrite node metadata.',
-      });
-    }
+    if (!requireNodeAdmin(nodeAuth, res, 'POST /api/random-sampling/backfill-percgid-meta', 'rewrite node metadata')) return;
     const body = await readBody(req, SMALL_BODY_BYTES);
     let parsed: { contextGraphIds?: unknown; dryRun?: unknown };
     try {
@@ -1428,11 +1417,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
 
   // POST /api/shutdown
   if (req.method === "POST" && path === "/api/shutdown") {
-    if (!isNodeAdminCaller()) {
-      return jsonResponse(res, 403, {
-        error: 'POST /api/shutdown requires a node-level admin token; agent-scoped tokens cannot stop the node.',
-      });
-    }
+    if (!requireNodeAdmin(nodeAuth, res, 'POST /api/shutdown', 'stop the node')) return;
     jsonResponse(res, 200, { ok: true });
     setTimeout(() => process.kill(process.pid, "SIGTERM"), 100);
     return;

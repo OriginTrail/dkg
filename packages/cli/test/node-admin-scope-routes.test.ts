@@ -189,6 +189,21 @@ describe('bulk publisher-queue changes require node-admin scope', () => {
     const allowed = await callRoute(handlePublisherRoutes, 'POST', '/api/publisher/clear', OPERATOR, { body: '{"status":"queued"}', overrides });
     expect(allowed).toEqual({ status: 400, body: { error: 'status must be failed or finalized' } });
   });
+
+  it('POST /api/publisher/retry: agent token → 403 before any job is reaccepted; operator reaches validation', async () => {
+    const retryDetailed = vi.fn(async () => ({ retried: 3, blockedPendingRecovery: 0, skipped: 0 }));
+    const overrides = { publisherControl: { retryDetailed } };
+    const denied = await callRoute(handlePublisherRoutes, 'POST', '/api/publisher/retry', AGENT, { body: '{"status":"failed"}', overrides });
+    expect(denied.status).toBe(403);
+    expect(denied.body.error).toMatch(/agent-scoped tokens cannot reaccept publisher jobs/);
+    expect(retryDetailed).not.toHaveBeenCalled();
+
+    const allowed = await callRoute(handlePublisherRoutes, 'POST', '/api/publisher/retry', OPERATOR, { body: '{"status":"queued"}', overrides });
+    expect(allowed).toEqual({ status: 400, body: { error: 'Only status=failed is supported' } });
+    expect(retryDetailed).not.toHaveBeenCalled();
+    const disabled = await callRoute(handlePublisherRoutes, 'POST', '/api/publisher/retry', AUTH_DISABLED, { body: '{"status":"failed"}', overrides });
+    expect(disabled).toEqual({ status: 200, body: { retried: 3, blockedPendingRecovery: 0, skipped: 0 } });
+  });
 });
 
 describe('local agent integration changes require node-admin scope', () => {
@@ -207,6 +222,17 @@ describe('local agent integration changes require node-admin scope', () => {
 
     const allowed = await callRoute(handleLocalAgentsRoutes, method, path, OPERATOR, { body: '{bad', overrides: { config } });
     expect(allowed).toEqual({ status: 400, body: { error: 'Invalid JSON body' } });
+  });
+
+  it('POST /api/local-agent-integrations/:id/refresh: agent token → 403; operator reaches id validation', async () => {
+    const config = {} as DkgConfig;
+    const path = '/api/local-agent-integrations/does-not-exist/refresh';
+    const denied = await callRoute(handleLocalAgentsRoutes, 'POST', path, AGENT, { overrides: { config } });
+    expect(denied.status).toBe(403);
+    expect(denied.body.error).toMatch(/agent-scoped tokens cannot refresh local agent integrations/);
+
+    const allowed = await callRoute(handleLocalAgentsRoutes, 'POST', path, OPERATOR, { overrides: { config } });
+    expect(allowed).toEqual({ status: 404, body: { error: 'Unknown integration' } });
   });
 
   it('keeps integration reads open to agent tokens', async () => {

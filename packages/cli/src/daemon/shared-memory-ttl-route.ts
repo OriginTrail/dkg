@@ -1,8 +1,8 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { PayloadTooLargeError } from '@origintrail-official/dkg-core';
-import { canAdministerNode, type AllowedHttpAuthentication } from '../auth.js';
+import { type AllowedHttpAuthentication } from '../auth.js';
 import { resolveSharedMemoryTtlMs, type DkgConfig } from '../config.js';
-import { jsonResponse, readBody, SMALL_BODY_BYTES } from './http-utils.js';
+import { jsonResponse, readBody, requireNodeAdmin, SMALL_BODY_BYTES } from './http-utils.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_SHARED_MEMORY_TTL_MS = 30 * DAY_MS;
@@ -37,10 +37,7 @@ export async function handleSharedMemoryTtlSettingsRequest(input: {
   }
   if (req.method !== 'PUT') return false;
 
-  if (!canAdministerNode(input.authentication)) {
-    jsonResponse(res, 403, {
-      error: `PUT ${input.pathname} requires a node-level admin token; agent-scoped tokens cannot change node settings.`,
-    });
+  if (!requireNodeAdmin(input.authentication, res, `PUT ${input.pathname}`, 'change node settings')) {
     return true;
   }
   try {

@@ -28,7 +28,7 @@ import {
   isStoreOperationTimeoutError,
 } from '@origintrail-official/dkg-storage';
 import type { DkgConfig } from '../config.js';
-import { enforceSignedRequestPostBody } from '../auth.js';
+import { canAdministerNode, enforceSignedRequestPostBody, type AllowedHttpAuthentication } from '../auth.js';
 
 import type { CorsAllowlist } from './state.js';
 
@@ -2059,9 +2059,32 @@ export function nodeUiTokenForRequest(
   if (!opts.authEnabled) return undefined;
   if (!isLoopbackClientIp(req.socket?.remoteAddress ?? '')) return undefined;
   if (!hostIsLocal(req.headers.host)) return undefined;
-  // TODO: operators who deliberately front the dashboard through a same-host
-  // proxy under another host name need an opt-in allowlist of extra Host names.
+  // TODO: a same-host reverse proxy that forwards a loopback Host (e.g. nginx's
+  // default `proxy_set_header Host $proxy_host`) reaches this as a local caller.
+  // Operators who deliberately front the dashboard that way need an opt-in
+  // allowlist of extra Host names, and should keep authentication in front of
+  // the proxy until it exists.
   return nodeOperatorToken(opts.validTokens, opts.resolveAgentByToken);
+}
+
+/**
+ * Gate a node-wide operation: return true when the caller may administer the
+ * node (a node-operator token, or any caller when auth is disabled), otherwise
+ * send the standard 403 and return false. `route` and `action` fill the shared
+ * message, e.g. "POST /api/shutdown requires a node-level admin token;
+ * agent-scoped tokens cannot stop the node."
+ */
+export function requireNodeAdmin(
+  authentication: AllowedHttpAuthentication,
+  res: ServerResponse,
+  route: string,
+  action: string,
+): boolean {
+  if (canAdministerNode(authentication)) return true;
+  jsonResponse(res, 403, {
+    error: `${route} requires a node-level admin token; agent-scoped tokens cannot ${action}.`,
+  });
+  return false;
 }
 
 /**

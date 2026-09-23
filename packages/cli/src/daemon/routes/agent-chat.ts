@@ -226,6 +226,7 @@ import {
   shortId,
   sleep,
   deriveBlockExplorerUrl,
+  requireNodeAdmin,
 } from '../http-utils.js';
 import {
   normalizeRepo,
@@ -455,11 +456,7 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   // only: registration mints a new API token (and, for custodial agents, a
   // node-held key), which is an operator decision.
   if (req.method === "POST" && path === "/api/agent/register") {
-    if (!canAdministerNode(authentication)) {
-      return jsonResponse(res, 403, {
-        error: 'POST /api/agent/register requires a node-level admin token; agent-scoped tokens cannot register agents.',
-      });
-    }
+    if (!requireNodeAdmin(authentication, res, 'POST /api/agent/register', 'register agents')) return;
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = JSON.parse(body);
     const { name, publicKey, framework } = parsed;
