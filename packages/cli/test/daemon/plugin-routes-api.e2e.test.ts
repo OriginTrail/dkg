@@ -110,7 +110,12 @@ async function writeDaemonConfig(
   }
 }
 
-class DaemonExitedEarly extends Error {}
+class DaemonExitedEarly extends Error {
+  // portConflict: the daemon logged EADDRINUSE for its own API or libp2p port.
+  constructor(message: string, readonly portConflict: boolean) {
+    super(message);
+  }
+}
 
 async function startDaemon(publisherEnabled = false): Promise<Daemon> {
   if (!existsSync(CLI_ENTRY)) {
@@ -126,8 +131,12 @@ async function startDaemon(publisherEnabled = false): Promise<Daemon> {
   } catch (err) {
     // Each port was free when probed, but another process can bind it before
     // the daemon does. That race ends in EADDRINUSE; retry it once on new ports.
-    if (!(err instanceof DaemonExitedEarly) || !err.message.includes('EADDRINUSE')) throw err;
-    return launchDaemon(publisherEnabled);
+    if (!(err instanceof DaemonExitedEarly) || !err.portConflict) throw err;
+    // Report the lost race even when the retry passes, and keep it if the retry fails.
+    console.warn(`Retrying the daemon start on new ports after a port conflict.\n${err.message}`);
+    return launchDaemon(publisherEnabled).catch((retryErr: Error) => {
+      throw new Error(`${retryErr.message}\n--- first attempt (port conflict) ---\n${err.message}`);
+    });
   }
 }
 
@@ -165,10 +174,15 @@ async function launchDaemon(publisherEnabled: boolean): Promise<Daemon> {
   // An API port conflict is logged only to daemon.log, a libp2p one only to stdio.
   const exitedEarly = async (): Promise<DaemonExitedEarly> => {
     const daemonLog = await readFile(join(home, 'daemon.log'), 'utf-8').catch(() => '<could not read daemon.log>');
+    const stdio = await readFile(stdioLog, 'utf-8').catch(() => '');
+    // Scan both whole logs, not the tails. Node reports a lost bind as
+    // "listen EADDRINUSE: address already in use <host>:<port>".
+    const portConflict = new RegExp(`EADDRINUSE.*:(?:${apiPort}|${listenPort})\\b`).test(`${stdio}\n${daemonLog}`);
     return new DaemonExitedEarly(
       `Daemon exited early (code=${child.exitCode}, signal=${child.signalCode}).\n` +
       `--- daemon stdio tail ---\n${await readDaemonStdioTail()}\n` +
       `--- daemon.log tail ---\n${daemonLog.split('\n').slice(-40).join('\n').trim()}`,
+      portConflict,
     );
   };
 
