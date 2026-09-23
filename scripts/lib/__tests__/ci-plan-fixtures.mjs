@@ -82,16 +82,6 @@ export function workspaceClosure(roots) {
   return closure;
 }
 
-// The workspaces that `files` import by package name, plus everything those
-// workspaces depend on: what code outside the package lanes compiles against.
-export function importedWorkspaceClosure(files) {
-  const { workspaceByName } = readWorkspaces();
-  return workspaceClosure(files.flatMap((file) => [
-    ...fs.readFileSync(path.join(REPO_ROOT, file), 'utf8')
-      .matchAll(/(?:from|import\()\s*['"](@origintrail-official\/[a-z0-9-]+)/g),
-  ].map(([, name]) => workspaceByName.get(name)).filter(Boolean)));
-}
-
 const isRepoFile = (candidate) => fs.statSync(path.join(REPO_ROOT, candidate), { throwIfNoEntry: false })?.isFile() === true;
 const isRepoDirectory = (candidate) => fs.statSync(path.join(REPO_ROOT, candidate), { throwIfNoEntry: false })?.isDirectory() === true;
 const outsideSources = (target) => target === '.' || target.startsWith('../') || /(?:^|\/)node_modules\//.test(target);
