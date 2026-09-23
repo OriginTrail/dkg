@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { applyMixins } from '../src/dkg-agent-apply-mixins.js';
+import { applyMixins } from '../src/apply-mixins.js';
 
-describe('DKGAgent applyMixins', () => {
+describe('applyMixins', () => {
   it('copies every holder member, accessors included, but never constructor', () => {
     class Target {}
     class First {

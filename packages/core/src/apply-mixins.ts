@@ -1,19 +1,15 @@
-// SPDX-License-Identifier: Apache-2.0
-
 /**
- * Copies own-prototype methods from each holder class onto a target class,
- * implementing the mixin assembly for the EVMChainAdapter split. Holder
- * classes define cohesive method groups (extending `EVMChainAdapterBase` for
- * shared `this` state); `EVMChainAdapter` merges their declarations via
- * `interface EVMChainAdapter extends ...` and adopts their implementations at
- * module load via this helper.
+ * Copies own-prototype members from each holder class onto a target class —
+ * the standard TS handbook mixin pattern behind the DKGAgent and
+ * EVMChainAdapter splits. Holder classes define cohesive method groups
+ * (extending a shared base class for `this` state); the target merges their
+ * declarations via `interface Target extends ...` and adopts their
+ * implementations at module load via this helper.
  *
- * Standard TS handbook mixin pattern. `constructor` is skipped — EVMChainAdapter
- * keeps its own (inherited from EVMChainAdapterBase).
- *
- * Each member must come from exactly one holder. A plain copy would let the
- * later holder in the list silently replace the earlier one's implementation,
- * so a name defined by two holders throws at module load instead.
+ * `constructor` is skipped, so the target keeps its own. Each member must come
+ * from exactly one holder. A plain copy would let the later holder in the list
+ * silently replace the earlier one's implementation, so a name defined by two
+ * holders throws at module load instead.
  */
 export function applyMixins(
   derivedCtor: { name: string; prototype: object },

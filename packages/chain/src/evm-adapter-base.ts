@@ -2854,9 +2854,9 @@ export class EVMChainAdapterBase {
 
   /**
    * Optional typed PCA planning capability consumed by publish planning. The
-   * conviction mixin overrides this hook; adapter assemblies without that
-   * mixin safely stay direct-spend. The fallback lives here rather than on the
-   * publish holder because `applyMixins` rejects a member two holders define.
+   * base owns the direct-spend default and the conviction mixin is its only
+   * override, so adapter assemblies without that mixin safely stay
+   * direct-spend.
    */
   protected publisherConvictionPlanReader(): PublisherConvictionPlanReader | undefined {
     return undefined;

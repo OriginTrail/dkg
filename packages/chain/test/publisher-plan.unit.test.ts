@@ -2,12 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   resolveLegacyPublisherCandidatePricing,
   resolveQuotedPublisherCandidatePricing,
+  type PublisherConvictionPlanReader,
 } from '../src/publisher-plan.js';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { EVMChainAdapterBase } from '../src/evm-adapter-base.js';
 import { PublishMethods } from '../src/evm-adapter-publish.js';
 import { ContextGraphMethods } from '../src/evm-adapter-context-graph.js';
-import { ConvictionMethods } from '../src/evm-adapter-conviction.js';
 
 describe('publisher candidate pricing boundaries', () => {
   it('keeps publish/PCA orchestration on the publish feature boundary', () => {
@@ -21,11 +21,21 @@ describe('publisher candidate pricing boundaries', () => {
     expect(Object.hasOwn(ContextGraphMethods.prototype, 'resolvePublisherPublishPlan')).toBe(false);
   });
 
-  it('takes the PCA plan reader from the conviction mixin alone', () => {
-    type PlanReaderHost = { publisherConvictionPlanReader(): unknown };
+  it('takes the PCA plan reader from the conviction mixin alone', async () => {
+    type PlanReaderHost = {
+      publisherConvictionPlanReader(): PublisherConvictionPlanReader | undefined;
+    };
+    const publisher = '0x0000000000000000000000000000000000000001';
     expect(Object.hasOwn(PublishMethods.prototype, 'publisherConvictionPlanReader')).toBe(false);
-    expect((EVMChainAdapter.prototype as unknown as PlanReaderHost).publisherConvictionPlanReader)
-      .toBe((ConvictionMethods.prototype as unknown as PlanReaderHost).publisherConvictionPlanReader);
+
+    // The assembled adapter's reader delegates to the conviction account lookups.
+    const getConvictionAgentAccountId = vi.fn(async () => 42n);
+    const assembled = Object.assign(Object.create(EVMChainAdapter.prototype), {
+      getConvictionAgentAccountId,
+    }) as PlanReaderHost;
+    await expect(assembled.publisherConvictionPlanReader()?.getAccountId(publisher)).resolves.toBe(42n);
+    expect(getConvictionAgentAccountId).toHaveBeenCalledWith(publisher);
+
     // Without the conviction mixin, publish planning reaches the base hook and stays direct-spend.
     const withoutConviction = Object.create(PublishMethods.prototype) as PlanReaderHost;
     expect(withoutConviction.publisherConvictionPlanReader()).toBeUndefined();
