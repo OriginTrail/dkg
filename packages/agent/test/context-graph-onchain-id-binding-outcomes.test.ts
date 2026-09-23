@@ -135,8 +135,6 @@ describe('Context Graph registration binding: strict on-chain id fallback outcom
   it('keeps a genuine absence reported as unregistered rather than unavailable', async () => {
     const fixture = selectedFixture();
     fixture.subscription.onChainId = '0';
-    // The chain proves a slot, but no ontology claim names it.
-    proveOnChainSlot(fixture, '77');
     fixture.query.mockResolvedValueOnce({ type: 'bindings', bindings: [] });
 
     const binding = await fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID);
@@ -149,8 +147,6 @@ describe('Context Graph registration binding: strict on-chain id fallback outcom
   it('surfaces a failing fallback dependency as unavailable with its message', async () => {
     const fixture = selectedFixture();
     fixture.subscription.onChainId = '0';
-    // A claim can count only for a proven slot, so there is a read to fail.
-    proveOnChainSlot(fixture, '77');
     fixture.query.mockRejectedValueOnce(new Error('oxigraph store is unreachable'));
 
     await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
@@ -164,7 +160,6 @@ describe('Context Graph registration binding: strict on-chain id fallback outcom
   it('stringifies a non-Error fallback rejection into the unavailable detail', async () => {
     const fixture = selectedFixture();
     fixture.subscription.onChainId = '0';
-    proveOnChainSlot(fixture, '77');
     fixture.query.mockRejectedValueOnce('rpc socket closed');
 
     await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
@@ -202,7 +197,6 @@ describe('Context Graph registration binding: strict on-chain id fallback outcom
     try {
       const fixture = selectedFixture();
       fixture.subscription.onChainId = '0';
-      proveOnChainSlot(fixture, '77');
       let capturedSignal: AbortSignal | undefined;
       fixture.query.mockImplementation((_sparql, options) => {
         capturedSignal = options?.signal;

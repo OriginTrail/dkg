@@ -588,10 +588,17 @@ describe('ontology Context Graph claims on a node that synced the ontology graph
     await expect(agent.getContextGraphOnChainId('many-claims')).resolves.toBe('137');
     await expect(agent.resolveContextGraphOnChainIdBinding('many-claims'))
       .resolves.toEqual({ onChainId: '137', provenance: 'ontology' });
-    // Nothing this chain proves: no store read at all.
-    const query = vi.spyOn(agent.store, 'query');
+    // Nothing this chain proves: the store is still read, so a failing store
+    // fails closed, and nothing it returns binds.
+    await agent.store.insert([{
+      subject: contextGraphDataGraphUri('unproven-claims'),
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+      object: '"137"',
+      graph,
+    }]);
     await expect(agent.getContextGraphOnChainId('unproven-claims')).resolves.toBeNull();
-    expect(query.mock.calls.some(([sparql]) => String(sparql).includes('unproven-claims'))).toBe(false);
+    vi.spyOn(agent.store, 'query').mockRejectedValueOnce(new Error('store unreachable'));
+    await expect(agent.getContextGraphOnChainId('unproven-claims')).rejects.toThrow('store unreachable');
   });
 
   it('proves a name-hash placeholder by its own slot, and nothing for a malformed id', async () => {

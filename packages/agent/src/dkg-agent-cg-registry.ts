@@ -1518,14 +1518,18 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // so a subject can carry any number of them, and `_meta` receives what
     // earlier builds left in the ontology. Only a claim this chain proves
     // counts, so ask for exactly those: how many other claims exist cannot
-    // push the proven one out of the answer.
+    // push the proven one out of the answer. With none proven the store is
+    // still read, so a failing store fails closed instead of reading as an
+    // unregistered graph; nothing it returns can be proven then.
     const provenIds = this.provenOnChainIdsFor(contextGraphId);
-    if (provenIds.length === 0) return null;
+    const provenFilter = provenIds.length === 0
+      ? ''
+      : `FILTER(STR(?id) IN (${provenIds.map((id) => sparqlString(id)).join(', ')})) `;
     const result = await this.store.query(
       `SELECT ?id WHERE { `
         + `VALUES ?g { <${contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)}> <${contextGraphMetaGraphUri(contextGraphId)}> } `
         + `GRAPH ?g { <${contextGraphDataGraphUri(contextGraphId)}> <${CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE}> ?id } `
-        + `FILTER(STR(?id) IN (${provenIds.map((id) => sparqlString(id)).join(', ')})) } LIMIT 1`,
+        + `${provenFilter}} LIMIT 1`,
       {
         signal: options.signal,
         source: options.source ?? 'agent.contextGraph.onChainId',
