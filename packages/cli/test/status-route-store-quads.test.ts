@@ -368,6 +368,17 @@ describe('/api/status external-store quad count', () => {
       const requested = await fetchStatus(baseUrl, true);
       expect(requested.body).toMatchObject({ storeQuads: 66, storeQuadsAgeMs: null });
       expect(queryCalls).toBe(2);
+
+      // That recount dates its result on the stepped-back clock, so the TTL
+      // caps counts again: one recount per clock step, not one per request.
+      await nextTick();
+      const again = await fetchStatus(baseUrl, true);
+      expect(again.body).toMatchObject({
+        storeQuads: 66,
+        storeQuadsAgeMs: 0,
+        storeQuadsRefreshing: false,
+      });
+      expect(queryCalls).toBe(2);
     } finally {
       await closeServer(server);
     }
@@ -482,7 +493,7 @@ describe('/api/status external-store quad count', () => {
       expect(queryCalls).toBe(1);
 
       const staleNow = Date.now() + 30_001;
-      vi.spyOn(Date, 'now').mockReturnValue(staleNow);
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(staleNow);
       const [firstStale, secondStale] = await Promise.all([
         fetchStatus(baseUrl, true),
         fetchStatus(baseUrl, true),
@@ -505,6 +516,18 @@ describe('/api/status external-store quad count', () => {
       expect(afterFailure.body.storeQuadsAgeMs).toBe(0);
       expect(afterFailure.body.storeQuadsRefreshing).toBe(false);
       expect(queryCalls).toBe(2);
+
+      // Past the TTL, a request re-checks the failed count: the reply is the
+      // failure it has, marked as being refreshed, with one more count.
+      clock.mockReturnValue(staleNow + 30_001);
+      const recheck = await fetchStatus(baseUrl, true);
+      expect(recheck.body).toMatchObject({
+        storeQuads: null,
+        storeQuadsStatus: 'unreachable',
+        storeQuadsAgeMs: 30_001,
+        storeQuadsRefreshing: true,
+      });
+      expect(queryCalls).toBe(3);
     } finally {
       firstCount.resolve({ type: 'bindings', bindings: [] });
       staleRefresh.resolve({ type: 'bindings', bindings: [] });

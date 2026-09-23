@@ -74,7 +74,7 @@ import {
   parseProbeStore,
   type StoreQuadsStatusFields,
 } from '../../status-store-quads-wire.js';
-import { getCachedExternalStoreQuads, peekCachedExternalStoreQuads } from '../store-quads-cache.js';
+import { requestExternalStoreQuads, peekCachedExternalStoreQuads } from '../store-quads-cache.js';
 import { probeExternalStore } from '../store-reachability.js';
 import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
@@ -674,7 +674,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     const storeQuadsFields: StoreQuadsStatusFields = !reportsExternalStoreQuads
       ? { storeQuads: null }
       : includeStoreQuads
-        ? getCachedExternalStoreQuads(agent, storeQuadsNow)
+        ? requestExternalStoreQuads(agent, storeQuadsNow)
         : peekCachedExternalStoreQuads(storeQuadsNow);
     // Started now so its wait overlaps the awaits below; awaited for the reply.
     const storeReachabilityCheck = reportsExternalStoreQuads && parseProbeStore(url.searchParams)

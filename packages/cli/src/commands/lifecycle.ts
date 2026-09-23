@@ -371,8 +371,14 @@ program
       let s = await client.status({ probeStore: true });
       const storeAnswered = s.storeReachability !== 'unreachable' && s.storeReachability !== 'no-answer';
       if (s.storeUrl && storeAnswered && shouldRefreshStoreQuads(s)) {
-        const refreshed = await client.status({ includeStoreQuads: true });
-        s = { ...refreshed, storeReachability: s.storeReachability };
+        // Best effort: the plain response is complete, so if this request
+        // fails (the daemon restarting between the two, say) print that one.
+        try {
+          const refreshed = await client.status({ includeStoreQuads: true });
+          s = { ...refreshed, storeReachability: s.storeReachability };
+        } catch {
+          // Keep the plain response.
+        }
       }
       const uptime = formatUptime(s.uptimeMs);
       console.log(`  Node:      ${s.name}`);

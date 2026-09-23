@@ -78,7 +78,7 @@ function isStoreQuadsCacheFresh(now: number): boolean {
  * that decision, so a recount this call started already shows as `pending`
  * (no cached result) or as refreshing the cached one.
  */
-export function getCachedExternalStoreQuads(
+export function requestExternalStoreQuads(
   agent: DKGAgent,
   now: number,
 ): StoreQuadsStatusFields {
