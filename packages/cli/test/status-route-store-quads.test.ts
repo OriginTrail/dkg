@@ -445,7 +445,13 @@ describe('/api/status external-store quad count', () => {
     }
   });
 
-  it('drops a count that fails after an invalidation instead of caching the store as unreachable', async () => {
+  it.each([
+    ['fails', (count: Deferred<unknown>) => count.reject(new Error('store unavailable'))],
+    ['succeeds', (count: Deferred<unknown>) => count.resolve(COUNT_123)],
+  ])('drops a count that %s after an invalidation instead of caching its result', async (
+    _outcome,
+    settle,
+  ) => {
     const staleCount = deferred<unknown>();
     const freshCount = deferred<unknown>();
     let queryCalls = 0;
@@ -459,10 +465,11 @@ describe('/api/status external-store quad count', () => {
       expect(requested.body.storeQuadsStatus).toBe('pending');
       expect(queryCalls).toBe(1);
 
-      // The managed Oxigraph goes down while that count runs, and the count
-      // then fails against the dying server.
+      // The managed Oxigraph goes down while that count runs. Whatever the
+      // count then returns, typically a failure against the dying server,
+      // describes a store that is gone.
       invalidateExternalStoreQuadsCache();
-      staleCount.reject(new Error('store unavailable'));
+      settle(staleCount);
       await nextTick();
 
       const polled = await fetchStatus(baseUrl);

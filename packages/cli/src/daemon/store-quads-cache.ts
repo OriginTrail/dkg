@@ -40,14 +40,16 @@ type CachedStoreQuadsSnapshot =
 type StoreQuadsSnapshot = { status: 'not-requested' | 'pending' } | CachedStoreQuadsSnapshot;
 
 let storeQuadsCache: StoreQuadsCacheEntry | null = null;
+// The running count, if any. Only the count that still holds this marker may
+// publish its result: see getCachedExternalStoreQuads().
 let storeQuadsInflight: Promise<void> | null = null;
-// Bumped by every invalidation. A running COUNT cannot be cancelled, so a
-// refresh writes its result only if no invalidation happened since it began.
-let storeQuadsGeneration = 0;
 
-/** Drop cached quad counts (e.g. when the managed Oxigraph child exits). */
+/**
+ * Drop cached quad counts (e.g. when the managed Oxigraph child exits). A count
+ * already running cannot be cancelled, so it loses the in-flight marker
+ * instead, and its result is discarded when it settles.
+ */
 export function invalidateExternalStoreQuadsCache(): void {
-  storeQuadsGeneration += 1;
   storeQuadsCache = null;
   storeQuadsInflight = null;
 }
@@ -65,6 +67,32 @@ function snapshotStoreQuadsCache(
     : { status: 'unreachable', ageMs };
 }
 
+// One full-store COUNT. A failure is a result too, so this never rejects: a
+// rejection would leave the in-flight marker set and block every later count.
+async function countStoreQuads(agent: DKGAgent): Promise<StoreQuadsCacheEntry> {
+  try {
+    const r = await agent.store.query(
+      'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
+      { priority: 'health', source: 'daemon.status.storeQuads' },
+    );
+    let value: number | null = null;
+    if (r.type === 'bindings' && r.bindings.length > 0) {
+      const cell = r.bindings[0].c ?? '';
+      const digits = cell.match(/\d+/)?.[0];
+      value = digits ? parseInt(digits, 10) : 0;
+    }
+    return value === null
+      ? { status: 'unreachable', fetchedAt: Date.now() }
+      : { status: 'ready', value, fetchedAt: Date.now() };
+  } catch {
+    // Surface "unknown" rather than a stale value; operators can
+    // distinguish unreachable from genuinely-empty via storeBackend +
+    // their network logs. Cache the null briefly to avoid hammering
+    // a flapping endpoint.
+    return { status: 'unreachable', fetchedAt: Date.now() };
+  }
+}
+
 export function getCachedExternalStoreQuads(
   agent: DKGAgent,
   now: number,
@@ -77,40 +105,17 @@ export function getCachedExternalStoreQuads(
 
   const currentSnapshot: StoreQuadsSnapshot = cached ?? { status: 'pending' };
   if (!storeQuadsInflight) {
-    const generation = storeQuadsGeneration;
-    const refresh = (async () => {
-      let result: StoreQuadsCacheEntry;
-      try {
-        const r = await agent.store.query(
-          'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
-          { priority: 'health', source: 'daemon.status.storeQuads' },
-        );
-        let value: number | null = null;
-        if (r.type === 'bindings' && r.bindings.length > 0) {
-          const cell = r.bindings[0].c ?? '';
-          const digits = cell.match(/\d+/)?.[0];
-          value = digits ? parseInt(digits, 10) : 0;
-        }
-        result = value === null
-          ? { status: 'unreachable', fetchedAt: Date.now() }
-          : { status: 'ready', value, fetchedAt: Date.now() };
-      } catch {
-        // Surface "unknown" rather than a stale value; operators can
-        // distinguish unreachable from genuinely-empty via storeBackend +
-        // their network logs. Cache the null briefly to avoid hammering
-        // a flapping endpoint.
-        result = { status: 'unreachable', fetchedAt: Date.now() };
-      }
-      // Drop the result if the cache was invalidated while this count ran
-      // (the managed Oxigraph went down): typically a failure against the
-      // dying server, it would report the revived store as unreachable.
-      if (generation === storeQuadsGeneration) storeQuadsCache = result;
-    })();
-    storeQuadsInflight = refresh;
-    void refresh.finally(() => {
-      // After an invalidation a newer count may own the marker; leave it.
-      if (storeQuadsInflight === refresh) storeQuadsInflight = null;
+    // A count that lost the marker to an invalidation (the managed Oxigraph
+    // went down), or to a newer count started after one, neither writes the
+    // cache nor clears the marker: typically a failure against the dying
+    // server, its result would report the revived store as unreachable. The
+    // callback runs asynchronously, after `refresh` holds the marker.
+    const refresh: Promise<void> = countStoreQuads(agent).then((result) => {
+      if (storeQuadsInflight !== refresh) return;
+      storeQuadsCache = result;
+      storeQuadsInflight = null;
     });
+    storeQuadsInflight = refresh;
   }
   return currentSnapshot;
 }
