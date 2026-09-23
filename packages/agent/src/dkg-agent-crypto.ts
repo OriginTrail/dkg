@@ -611,6 +611,30 @@ function bindOptionalChainRead<T>(
     : read.call(chain, numericId);
 }
 
+/**
+ * Bind the one-read authority WITH the caller's freshness choice.
+ *
+ * Separate from {@link bindOptionalChainRead} because only this read honours
+ * `freshness`; the point reads it falls back to are always live. That is the
+ * safe direction — a node whose adapter cannot serve the single tuple simply
+ * keeps today's behaviour rather than inheriting a bounded answer from a path
+ * that never offered one.
+ */
+function bindLiveAuthorityRead<T>(
+  chain: unknown,
+  read: ((
+    numericId: bigint,
+    options?: { signal?: AbortSignal; freshness?: 'live' | 'bounded' },
+  ) => Promise<T>) | undefined,
+  freshness: 'live' | 'bounded',
+): ((numericId: bigint, signal?: AbortSignal) => Promise<T>) | undefined {
+  if (typeof read !== 'function') return undefined;
+  return (numericId, signal) => read.call(chain, numericId, {
+    ...(signal ? { signal } : {}),
+    freshness,
+  });
+}
+
 export class WorkspaceCryptoMethods extends DKGAgentBase {
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
     const defaultAddress = this.defaultAgentAddress?.toLowerCase();
@@ -909,7 +933,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   protected async resolveLiveOnChainAccessPolicyState(this: DKGAgent,
     onChainId: string,
     opCtx?: OperationContext,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; freshness?: 'live' | 'bounded' } = {},
   ): Promise<LiveOnChainAccessPolicyState> {
     const readLiveness = this.chain.isContextGraphActiveOnChain;
     const readAccessPolicy = this.chain.getContextGraphAccessPolicy;
@@ -917,7 +941,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     return resolveLiveAccessPolicyState(
       {
         readTimeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
-        readLiveAuthority: bindOptionalChainRead(this.chain, readLiveAuthority),
+        // Defaults to live. Only a caller that has said its decision can wait
+        // for the next read is allowed to ask the index.
+        readLiveAuthority: bindLiveAuthorityRead(
+          this.chain, readLiveAuthority, options.freshness ?? 'live',
+        ),
         isContextGraphActiveOnChain: bindOptionalChainRead(this.chain, readLiveness),
         getContextGraphAccessPolicy: bindOptionalChainRead(this.chain, readAccessPolicy),
         runBoundedRead: async (start, label, signal) => {
@@ -953,7 +981,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async readLiveOnChainAccessPolicy(this: DKGAgent,
     onChainId: string,
     opCtx?: OperationContext,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; freshness?: 'live' | 'bounded' } = {},
   ): Promise<0 | 1 | null> {
     const state = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.livePolicy,

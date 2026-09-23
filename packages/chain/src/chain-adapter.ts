@@ -1356,6 +1356,27 @@ export interface ContextGraphLiveAuthorityReadOptions extends ChainReadOptions {
    * unshared read would have used anyway.
    */
   requestClass?: RpcRequestClass;
+  /**
+   * How fresh this caller's answer has to be. Defaults to `'live'`.
+   *
+   * `'live'` is the existing behaviour and the only safe setting for a decision
+   * that cannot be taken back: issuing a sender key, permitting a plaintext
+   * downgrade, or sending a roster-mutating transaction. A roster that is
+   * behind the chain hands a key to a removed member, and the epoch will not
+   * re-wrap until the roster catches up — so the exposure is not repaired by
+   * the next read.
+   *
+   * `'bounded'` permits the node's own event index to answer instead, when it
+   * can prove coverage, lineage and freshness at its anchor. It is for reads
+   * where being briefly behind only DELAYS a decision that the next read
+   * corrects: query and sync authorization, reconciliation, sizing.
+   *
+   * THE CHOICE IS MADE AT THE CALLEE, never by inspecting an RPC usage label:
+   * `withRpcUsageSite` is outermost-wins, so the label a read appears under is
+   * a property of the call stack above it and a switch on it would fail open
+   * for exactly the nested callers that matter most.
+   */
+  freshness?: 'live' | 'bounded';
 }
 
 /** Options honored only by finalized Context Graph authority projections. */
