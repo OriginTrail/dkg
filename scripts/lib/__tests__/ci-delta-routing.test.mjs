@@ -5,7 +5,8 @@ import test from 'node:test';
 import { parse } from 'yaml';
 import { CI_LANES, PRIMARY_LANE_JOBS, WORKSPACE_OWNING_LANES, WORKSPACE_RULES } from '../ci-delta.mjs';
 import { EVM_TEST_SCOPES } from '../../ci/evm-test-scopes.mjs';
-import { REPO_ROOT, change, loadReferences, pullRequestPlan, selectedLanes, sourceFiles, traceLaneLoads } from './ci-plan-fixtures.mjs';
+import { REPO_ROOT, change, pullRequestPlan, selectedLanes, sourceFiles } from './ci-plan-fixtures.mjs';
+import { loadReferences, traceLaneLoads } from './load-graph.mjs';
 
 // Path routing: what individual changed paths select on pull requests -
 // git statuses, workspace manifests, repository support areas and the
@@ -227,7 +228,7 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   // A lane job also runs the support files its steps name: directly, through
   // a root package.json script or through a reusable workflow it calls.
   // What those files load comes from traceLaneLoads and loadReferences in
-  // ci-plan-fixtures.mjs, which list the forms they follow. Each file reached
+  // load-graph.mjs, which list the forms they follow. Each file reached
   // must select the lane or scope that loads it, or plan full CI.
   const seeds = new Map();
   const seed = (file, requirements, via) => {
