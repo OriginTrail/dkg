@@ -41,6 +41,7 @@ import {
   postJson,
   getJson,
   postMultipart,
+  caseVariantAddress,
   type LiveDaemon,
 } from './helpers/live-daemon.js';
 
@@ -233,26 +234,22 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(descriptor.body.wmCurrentAssertion).toBeTruthy();
     });
 
-    it('atomic create canonicalizes a mixed-case self authorAgentAddress before sealing', async () => {
+    it('atomic create canonicalizes a differently-cased self authorAgentAddress before sealing', async () => {
       const agent = await registerAgentClient('ka-atomic-author-case');
       const cg = `ka-atomic-author-case-${Date.now().toString(36)}`;
       await createRegisteredAgentContextGraph(agent, cg);
-      // The EIP-55 checksum can already have every hex letter in upper case
-      // (about 1 in 4,000 addresses); fall back to lower case then.
-      const upperCaseAgent = `0x${agent.agentAddress.slice(2).toUpperCase()}`;
-      const mixedCaseAgent =
-        upperCaseAgent === agent.agentAddress ? agent.agentAddress.toLowerCase() : upperCaseAgent;
-      expect(mixedCaseAgent).not.toBe(agent.agentAddress);
+      const caseVariantAgent = caseVariantAddress(agent.agentAddress);
+      expect(caseVariantAgent).not.toBe(agent.agentAddress);
 
       const res = await agent.post('/api/knowledge-assets', {
         contextGraphId: cg,
         name: 'agent-case-atomic',
         quads: [{ subject: 'ex:Case', predicate: 'ex:p', object: '"x"' }],
         finalize: true,
-        authorAgentAddress: mixedCaseAgent,
+        authorAgentAddress: caseVariantAgent,
       });
 
-      expect(res.status, `mixed-case atomic create: ${JSON.stringify(res.body)}`).toBe(201);
+      expect(res.status, `differently-cased atomic create: ${JSON.stringify(res.body)}`).toBe(201);
       expect(String(res.body.authorAddress).toLowerCase()).toBe(agent.agentAddress.toLowerCase());
     });
 

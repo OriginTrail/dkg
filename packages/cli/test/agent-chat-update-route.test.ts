@@ -37,6 +37,7 @@ import {
   startLiveDaemon,
   stopLiveDaemon,
   postJson,
+  caseVariantAddress,
   type LiveDaemon,
 } from './helpers/live-daemon.js';
 
@@ -172,16 +173,12 @@ describe('POST /api/update — kaId + attestation contract (KC→KA), real daemo
     expect(String(res.body.error)).toContain('precomputedUpdateAttestation.authorAddress');
   });
 
-  it('allows an agent token with a mixed-case self update attestation through the guard', async () => {
+  it('allows an agent token with a differently-cased self update attestation through the guard', async () => {
     const agent = await registerAgentClient(daemon, 'update-author-case');
-    // The EIP-55 checksum can already have every hex letter in upper case
-    // (about 1 in 4,000 addresses); fall back to lower case then.
-    const upperCaseAgent = `0x${agent.agentAddress.slice(2).toUpperCase()}`;
-    const mixedCaseAgent =
-      upperCaseAgent === agent.agentAddress ? agent.agentAddress.toLowerCase() : upperCaseAgent;
-    expect(mixedCaseAgent).not.toBe(agent.agentAddress);
+    const caseVariantAgent = caseVariantAddress(agent.agentAddress);
+    expect(caseVariantAgent).not.toBe(agent.agentAddress);
     const seal = {
-      authorAddress: mixedCaseAgent,
+      authorAddress: caseVariantAgent,
       expectedNewMerkleRoot: HEX32,
       signature: { r: HEX32, vs: HEX32 },
     };
