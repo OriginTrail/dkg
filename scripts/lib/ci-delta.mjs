@@ -27,6 +27,14 @@ export const NODE_EVM_LANES = Object.freeze(Object.keys(PRIMARY_LANE_JOBS));
 // image contract and the reusable Windows lifecycle workflow), so selecting
 // them alone never requires the shared Linux build.
 export const SELF_BUILDING_LANES = Object.freeze(['tornado_agent_windows', 'bura_blazegraph_arm64']);
+const NODE_LANES = NODE_EVM_LANES.filter((lane) => !SELF_BUILDING_LANES.includes(lane));
+
+// Whether a plan must run the shared build job: a selected lane consumes its
+// outputs, or the plan declared the build job's own repository checks. The
+// planner derives runNode from it and the aggregate gate checks against it.
+export function needsSharedBuild(plan) {
+  return plan.buildChecks === true || NODE_LANES.some((lane) => plan.lanes?.[lane] === true);
+}
 
 // `contracts` remains a workflow output for compatibility, but Solidity is an
 // independent relevance gate rather than part of the Node/EVM "full" profile.
@@ -330,7 +338,6 @@ const BLAZEGRAPH_ARM64_PATTERNS = [
   /^packages\/cli\/(?:src|test)\/.*blazegraph.*\.(?:[cm]?[jt]s|json)$/i,
 ];
 
-const NODE_LANES = NODE_EVM_LANES.filter((lane) => !SELF_BUILDING_LANES.includes(lane));
 const MAX_REPORTED_FILES = 200;
 
 // Source of truth for WHAT this protects: EVM_TEST_SCOPES.chain.files in
@@ -823,7 +830,7 @@ export function planCi({
   if (lanes.tornado_agent) lanes.tornado_agent_windows = true;
 
   const deduplicatedReasons = [...new Set(reasons)];
-  const runNode = buildChecks || NODE_LANES.some((lane) => lanes[lane]);
+  const runNode = needsSharedBuild({ lanes, buildChecks });
   const selfBuildingLane = SELF_BUILDING_LANES.some((lane) => lanes[lane]);
   if (!runNode && !selfBuildingLane && !lanes.contracts && evmScopes.size === 0) {
     return fullForCurrentDiff(['Planner selected no lane for a production change; failing closed']);
