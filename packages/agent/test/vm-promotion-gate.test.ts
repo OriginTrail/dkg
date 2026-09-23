@@ -732,6 +732,25 @@ describe('core VM-promotion guarantees', () => {
       expect(internals.subscribedContextGraphs.get('z-live')).toMatchObject({ coreHosted: true, onChainId: '77' });
     });
 
+    it('pages past a full page holding a system namespace instead of restarting at the first page', async () => {
+      setStatic('VM_PROMOTION_BACKFILL_PAGE_SIZE', 2);
+      const internals = await boot();
+      internals.chain.getKAContextGraphId = async () => 0n;
+      await internals.ensureStorageAckLedgerReady();
+      // Sorted ledger namespaces: the first page is `aaa-public` and the
+      // system graph `agents`, which the backfill never records.
+      await seedCopy(internals.store, { namespace: 'aaa-public', n: 140, ageMs: 0, target: '42' });
+      await seedCopy(internals.store, { namespace: 'agents', n: 141, ageMs: 0, target: '44' });
+      await seedCopy(internals.store, { namespace: 'zz-later', n: 142, ageMs: 0, target: '77' });
+
+      for (let pass = 0; pass < 4 && !internals.subscribedContextGraphs.has('zz-later'); pass += 1) {
+        await internals.runVmPromotionAudit();
+      }
+
+      expect(internals.subscribedContextGraphs.get('aaa-public')).toMatchObject({ coreHosted: true, onChainId: '42' });
+      expect(internals.subscribedContextGraphs.get('zz-later')).toMatchObject({ coreHosted: true, onChainId: '77' });
+    });
+
     it('marks ACKed copies registered on chain, promotes them per asset, and never lets them expire', async () => {
       const internals = await boot({ sharedMemoryTtlMs: DAY });
       await internals.ensureStorageAckLedgerReady();
@@ -1094,6 +1113,13 @@ describe('core VM-promotion guarantees', () => {
     });
     await agent.start();
     const internals = agent as unknown as Internals;
+    // start() arms the ACK promotion audit and the pending-update lane.
+    const promotionTimers = agent as unknown as {
+      vmPromotionAuditStartupTimer: unknown;
+      vmPromotionUpdateTimer: unknown;
+    };
+    expect(promotionTimers.vmPromotionAuditStartupTimer).not.toBeNull();
+    expect(promotionTimers.vmPromotionUpdateTimer).not.toBeNull();
     const handlers = (agent as unknown as {
       messenger: { handlers: Map<string, (payload: Uint8Array, peerId: string) => Promise<Uint8Array>> };
     }).messenger.handlers;
@@ -1176,6 +1202,30 @@ describe('core VM-promotion guarantees', () => {
     await agent!.stop();
     agent = null;
     expect(drained).toBe(true);
+    expect(promotionTimers.vmPromotionAuditStartupTimer).toBeNull();
+    expect(promotionTimers.vmPromotionUpdateTimer).toBeNull();
+  });
+
+  it('does not arm the ACK promotion audit on a started core with VM reconcile off', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('otp:20430', primary.address);
+    chain.seedIdentity(primary.address, 42n);
+    agent = await DKGAgent.create({
+      name: 'StartedCoreVmReconcileOff',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      vmReconcilerEnabled: false,
+    });
+    await agent.start();
+    const promotionTimers = agent as unknown as {
+      vmPromotionAuditStartupTimer: unknown;
+      vmPromotionUpdateTimer: unknown;
+    };
+
+    expect(promotionTimers.vmPromotionAuditStartupTimer).toBeNull();
+    expect(promotionTimers.vmPromotionUpdateTimer).toBeNull();
   });
 
   describe('sub-graph copies', () => {
@@ -1590,6 +1640,35 @@ describe('core VM-promotion guarantees', () => {
         metrics.disable();
         rebuildMetrics();
       }
+    });
+
+    it('resolves cleartext namespaces through the finalized authority index, falling back and retrying singly', async () => {
+      const internals = await boot() as Internals & Record<string, any>;
+      internals.chain.contextGraphAuthorityIndexRevisionReader = { whenIdle: async () => undefined };
+      const snapshot = (active: boolean, id: bigint) => ({
+        kind: 'resolved-snapshot', finalizedSnapshot: { active }, expectedOnChainId: id,
+      });
+      const calls: string[][] = [];
+      internals.resolveFinalizedContextGraphAuthorityTargetsV1 = async (ids: readonly string[]) => {
+        calls.push([...ids]);
+        if (ids.includes('idx-broken')) throw new Error(ids.length > 1 ? 'ambiguous batch' : 'unreadable');
+        if (ids.includes('idx-legacy')) return { kind: 'legacy' };
+        const known = new Map<string, unknown>([['idx-live', snapshot(true, 4242n)], ['idx-closed', snapshot(false, 4343n)]]);
+        return { kind: 'finalized-index', targets: new Map([...known].filter(([id]) => ids.includes(id))) };
+      };
+      internals.getContextGraphOnChainId = async (id: string) => (id === 'idx-legacy' ? '4444' : null);
+
+      // The index's id is taken; an inactive snapshot is skipped.
+      await expect(internals.resolveStorageAckNamespaceTargets(['idx-live', 'idx-closed']))
+        .resolves.toEqual(new Map([['idx-live', '4242']]));
+      // No finalized index yet: local bindings answer.
+      await expect(internals.resolveStorageAckNamespaceTargets(['idx-legacy']))
+        .resolves.toEqual(new Map([['idx-legacy', '4444']]));
+      // One unreadable name does not block the rest of the batch.
+      calls.length = 0;
+      await expect(internals.resolveStorageAckNamespaceTargets(['idx-broken', 'idx-live']))
+        .resolves.toEqual(new Map([['idx-live', '4242']]));
+      expect(calls).toEqual([['idx-broken', 'idx-live'], ['idx-broken'], ['idx-live']]);
     });
 
     it('lists the sub-graphs a namespace holds ledgered copies in', async () => {

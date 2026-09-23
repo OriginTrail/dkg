@@ -477,27 +477,38 @@ export class VmPromotionMethods extends DKGAgentBase {
   /** Every SWM namespace that holds ledgered ACK copies. */
   async listStorageAckLedgerNamespaces(this: DKGAgent): Promise<string[]> {
     const namespaces: string[] = [];
-    let after = '';
-    for (;;) {
+    let after: string | undefined = '';
+    while (after !== undefined) {
       const page = await this.queryStorageAckLedgerNamespaces(after, 1_000);
-      namespaces.push(...page);
-      if (page.length < 1_000) return namespaces;
-      after = page[page.length - 1]!;
+      namespaces.push(...page.namespaces);
+      after = page.next;
     }
+    return namespaces;
   }
 
-  async queryStorageAckLedgerNamespaces(this: DKGAgent, after: string, limit: number): Promise<string[]> {
+  /**
+   * One keyset page of ledger namespaces: the usable ones, and the cursor of
+   * the next page (absent after the last). The cursor follows the raw rows, so
+   * a namespace dropped here never ends or resets the walk.
+   */
+  async queryStorageAckLedgerNamespaces(
+    this: DKGAgent,
+    after: string,
+    limit: number,
+  ): Promise<{ namespaces: string[]; next?: string }> {
     const result = await this.store.query(storageAckLedgerNamespacesQuery(after, limit), {
       source: 'agent.storageAckLedger.namespaces',
       priority: 'background',
     });
-    if (result.type !== 'bindings') return [];
+    if (result.type !== 'bindings') return { namespaces: [] };
     const namespaces: string[] = [];
+    let last = after;
     for (const row of result.bindings) {
       const namespace = row['namespace'] === undefined ? '' : stripLiteral(row['namespace']);
+      if (namespace > last) last = namespace;
       if (isStorageAckNamespace(namespace)) namespaces.push(namespace);
     }
-    return namespaces;
+    return result.bindings.length < limit || last === after ? { namespaces } : { namespaces, next: last };
   }
 
   /**
@@ -615,10 +626,10 @@ export class VmPromotionMethods extends DKGAgentBase {
     active: () => boolean,
   ): Promise<{ namespaces: number; wrapped: boolean; recorded: number; pending: number; unresolved: number }> {
     const limit = DKGAgentBase.VM_PROMOTION_BACKFILL_PAGE_SIZE;
-    const page = (await this.queryStorageAckLedgerNamespaces(this.vmPromotionBackfillCursor, limit))
-      .filter((namespace) => !SYSTEM_CONTEXT_GRAPH_IDS.has(namespace));
-    const wrapped = page.length < limit;
-    this.vmPromotionBackfillCursor = wrapped ? '' : page[page.length - 1]!;
+    const raw = await this.queryStorageAckLedgerNamespaces(this.vmPromotionBackfillCursor, limit);
+    const page = raw.namespaces.filter((namespace) => !SYSTEM_CONTEXT_GRAPH_IDS.has(namespace));
+    const wrapped = raw.next === undefined;
+    this.vmPromotionBackfillCursor = raw.next ?? '';
     let recorded = 0;
     let unresolved = 0;
     const pending: string[] = [];

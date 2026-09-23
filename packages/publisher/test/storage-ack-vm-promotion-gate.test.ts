@@ -541,10 +541,11 @@ describe('StorageACK VM-promotion finality gate', () => {
 
     const values = await h.store.query(`SELECT ?p ?o WHERE { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> { <${op}> ?p ?o } }`);
     const rows = values.type === 'bindings' ? values.bindings : [];
-    const registered = rows.filter((r) => r['p'] === LEDGER.registeredAt).map((r) => r['o']);
-    const signed = rows.filter((r) => r['p'] === LEDGER.signedAt).map((r) => Date.parse(r['o']!.slice(1, r['o']!.indexOf('"', 1))));
-    expect(registered).toHaveLength(1);
-    expect(registered[0]).toContain(registeredAt.toISOString());
+    // Stores normalize the dateTime lexical form (`.860Z` reads back as `.86Z`): compare instants.
+    const instant = (literal: string) => Date.parse(literal.slice(1, literal.indexOf('"', 1)));
+    const registered = rows.filter((r) => r['p'] === LEDGER.registeredAt).map((r) => instant(r['o']!));
+    const signed = rows.filter((r) => r['p'] === LEDGER.signedAt).map((r) => instant(r['o']!));
+    expect(registered).toEqual([registeredAt.getTime()]);
     expect(signed).toHaveLength(1);
     expect(Date.now() - signed[0]!).toBeLessThan(60_000);
   });

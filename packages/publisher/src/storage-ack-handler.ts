@@ -465,7 +465,8 @@ export interface StorageAckVmPromotionRequest {
   readonly contextGraphId: string;
   /** Cleartext SWM graph id when the publisher supplied one. */
   readonly swmGraphId?: string;
-  readonly operation: 'publish' | 'update';
+  /** Informational only: publish and update requests are gated alike. */
+  readonly operation?: 'publish' | 'update';
   readonly signal?: AbortSignal;
 }
 

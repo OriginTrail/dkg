@@ -872,12 +872,6 @@ export class SharedMemoryHandler {
   }
 
   /**
-   * Enforce CAS conditions carried in a gossip message.
-   * Must be called inside a write lock so no concurrent mutation can
-   * interleave between the check and the subsequent write.
-   * Returns false if any condition fails (write should be skipped).
-   */
-  /**
    * Whether the head is a StorageACK copy this node signed and still owes
    * (see storage-ack-ledger.ts) that is not in the namespace's VM at its
    * version yet. Nodes that keep no ledger always answer false.
@@ -906,6 +900,12 @@ export class SharedMemoryHandler {
     return !(promoted.type === 'boolean' && promoted.value);
   }
 
+  /**
+   * Enforce CAS conditions carried in a gossip message.
+   * Must be called inside a write lock so no concurrent mutation can
+   * interleave between the check and the subsequent write.
+   * Returns false if any condition fails (write should be skipped).
+   */
   private async enforceCASConditions(
     conditions: WorkspaceCASConditionMsg[],
     swmGraph: string,
