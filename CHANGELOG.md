@@ -4,38 +4,84 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Fixed
+
+- **`dkg status` no longer reports a healthy store as UNREACHABLE on a cold
+  daemon**: since 10.0.7 plain `/api/status` never starts the full-store quad
+  count, so on a node where nothing had requested one, `dkg status` showed a
+  working managed Oxigraph or external SPARQL store as `UNREACHABLE`.
+  `dkg status` now requests the count itself (`?includeStoreQuads=true`),
+  shows `CHECKING` while the first count runs, and says how old a count is
+  once it is more than a minute old. `/api/status` reports a count nobody has
+  requested as `storeQuadsStatus: "not-requested"` and one in progress as
+  `"pending"` instead of omitting the status, and adds `storeQuadsAgeMs`, the
+  age of the cached count, which ordinary polling still never refreshes.
+
 ## [10.0.18] - 2026-09-22
 
-A hotfix for the 10.0.17 authority-index cold start; **10.0.17 is withdrawn**.
-On first start after updating to 10.0.17, every node rebuilds the new RFC-64
-authority index from chain history in `local-history` mode. On mainnet over a
-public RPC endpoint that rebuild took 24 minutes for a freshly registered graph
-and did not finish within 50 minutes for two-week-old graphs, and while the
-index is unresolved an edge denies public-graph subscriptions and skips their
-SWM sync. 10.0.18 bootstraps edge indexes from snapshots served by the
-network's relay cores by default and keeps the 10.0.17 scan as the fallback,
-so no node starts slower than it did on 10.0.17. It also carries the
-authority-read, sync, publisher and peer-connection fixes from the same
-validation round (#2714 to #2717, #2724 to #2726). **No smart-contract, ABI,
+Nodes for AI agents now run leaner and get up to speed in seconds. Edge nodes
+bootstrap the RFC-64 authority index from snapshots served by the network's
+relay cores instead of scanning chain history, authority and query checks are
+answered from the finalized index before a live RPC read, and publishing and
+peer connections recover on their own. Upgrading from 10.0.16 also brings the
+durable contract-wide authority index, the node-wide RPC request budget and the
+other changes listed under 10.0.17 below. **No smart-contract, ABI,
 wire-protocol, or deployment registry changes are required.**
 
-### Upgrading from 10.0.17
+### Upgrading from 10.0.16
+
+The 10.0.17 upgrade notes below also apply (shared RPC request budget,
+delta-driven refresh, resumable registry discovery, daemon SQLite schema v36).
+No configuration change is required, and nodes running 10.0.17 update directly.
 
 | Change | Impact | Action |
 | --- | --- | --- |
-| Edge nodes bootstrap the authority index from the network relays by default | An edge with no `authorityIndex` block and a configured EVM chain with operational keys trusts the relays listed in its network file, each pinned by the PeerID in its multiaddr, and imports a snapshot instead of scanning chain history (measured: a two-week-old graph bound in 3 s). An edge without that chain wiring (mock chain adapter, no chain configuration, or no operational wallets) or with `relay: "none"` keeps the local-history scan and logs why | No configuration change is required; update directly from 10.0.16 or 10.0.17. An explicit `authorityIndex` block keeps its pinned trust |
-| Local history remains the fallback | If no relay supplies a usable snapshot within the 30 s bootstrap budget, the node logs the outcome and continues with the 10.0.17 local-history scan, resuming from any checkpoint it already scanned locally instead of rescanning; the scan now logs its progress | Watch the `[authority-index]` startup line and the scan progress lines. Cores are unaffected and keep building the index from chain |
+| Edge nodes bootstrap the authority index from the network relays by default | An edge with no `authorityIndex` block and a configured EVM chain with operational keys trusts the relays listed in its network file, each pinned by the PeerID in its multiaddr, and imports a snapshot instead of scanning chain history (measured: a two-week-old graph bound in 3 s). An edge without that chain wiring (mock chain adapter, no chain configuration, or no operational wallets) or with `relay: "none"` keeps the local-history scan and logs why | No configuration change is required. An explicit `authorityIndex` block keeps its pinned trust |
+| Local history remains the fallback | If no relay supplies a usable snapshot within the 30 s bootstrap budget, the node logs the outcome and continues with the local-history scan, resuming from any checkpoint it already scanned locally instead of rescanning; the scan logs its progress | Watch the `[authority-index]` startup line and the scan progress lines. Cores are unaffected and keep building the index from chain |
+
+### Changed
+
+- **Edge nodes bootstrap the authority index in seconds**: building the
+  contract-wide authority index from chain logs (`local-history` mode) over a
+  public mainnet RPC endpoint took 24 minutes for a freshly registered graph
+  and more than 50 minutes for two-week-old graphs, and until the index
+  resolves an edge denies public-graph subscriptions and skips their SWM sync.
+  Edge nodes now bootstrap the index from a relay snapshot by default; a
+  two-week-old graph bound in 3 s.
+- **Network relays seed edge snapshot bootstrap**: an edge with no explicit
+  `authorityIndex` block trusts the relays listed in its network file (at
+  most eight, each pinned by the PeerID in its multiaddr; placeholder entries
+  are skipped) and requests a snapshot over
+  `/dkg/10.0.0/authority-index-snapshot/1`. The network file is the trust
+  anchor, as it already is for the chain the node joins. Operator-configured
+  `relay` and `preferredRelays` entries never enter the trust set, and
+  neither do agent-registry (phonebook) cores: registry profiles are
+  unauthenticated gossip, and nothing binds a profile's PeerID to the staked
+  identity it names. The startup line reports `mode=core-snapshot
+  trustedCoreCount=<relays> source=network-relays fallback=local-history`
+  together with the tail and cache-epoch values.
+- **The default applies only where it can run**: it needs a configured EVM
+  chain (`chain.rpcUrl` and `chain.hubAddress`) with operational keys and a
+  local index store, which the agent requires for any core-snapshot
+  configuration, plus at least one usable network-file relay. An edge on the
+  mock chain adapter, without a chain configuration, without operational
+  wallets, or with `relay: "none"` keeps the local-history scan: its startup
+  line reports `mode=local-history`, preceded by
+  `[authority-index] network-relay default skipped: <reason>; using local history`.
+  The agent makes this decision from its own configuration; the daemon logs
+  the same decision before constructing it.
+- **Local-history fallback**: when no relay supplies a usable snapshot within
+  the 30 s bootstrap budget, the node logs it and continues with the
+  local-history scan, resuming from any checkpoint it already scanned locally
+  instead of rescanning from the deployment block, so a failed bootstrap never
+  costs more than the local scan alone.
+- An explicit `authorityIndex` block still wins over the network-relay default
+  and keeps its pinned trusted-core semantics, its fail-closed behavior, and
+  its existing startup line. Cores receive no default and keep building the
+  index from chain history.
+- Authority-index scans now log their progress.
 
 ### Fixed
-
-- **Authority-index cold start on public RPC**: 10.0.17 rebuilt the
-  contract-wide authority index from chain logs on every node's first start
-  (`local-history` mode). On mainnet with public RPC this took 24 minutes for
-  a freshly registered graph and had not finished after 50 minutes for
-  two-week-old graphs; until the index resolves, an edge denies public-graph
-  subscriptions and skips their SWM sync. Edge nodes now bootstrap the index
-  from a core snapshot by default: a two-week-old graph bound in 3 s, versus
-  still unresolved after 40 minutes on 10.0.17.
 
 - **Authority reads under slow public RPC** (#2715): the request-scoped
   authority read deadline is configurable (`chain.authorityReadTimeoutMs`, env
@@ -74,41 +120,6 @@ wire-protocol, or deployment registry changes are required.**
   connects a few milliseconds later. A healthy, connected peer is no longer kept
   out by a failed probe's backoff (about 18 s at first, growing to 120 s).
 
-### Changed
-
-- **Network relays seed edge snapshot bootstrap**: an edge with no explicit
-  `authorityIndex` block trusts the relays listed in its network file (at
-  most eight, each pinned by the PeerID in its multiaddr; placeholder entries
-  are skipped) and requests a snapshot over
-  `/dkg/10.0.0/authority-index-snapshot/1`. The network file is the trust
-  anchor, as it already is for the chain the node joins. Operator-configured
-  `relay` and `preferredRelays` entries never enter the trust set, and
-  neither do agent-registry (phonebook) cores: registry profiles are
-  unauthenticated gossip, and nothing binds a profile's PeerID to the staked
-  identity it names. The startup line reports `mode=core-snapshot
-  trustedCoreCount=<relays> source=network-relays fallback=local-history`
-  together with the tail and cache-epoch values.
-- **The default applies only where it can run**: it needs a configured EVM
-  chain (`chain.rpcUrl` and `chain.hubAddress`) with operational keys and a
-  local index store, which the agent requires for any core-snapshot
-  configuration, plus at least one usable network-file relay. An edge on the
-  mock chain adapter, without a chain configuration, without operational
-  wallets, or with `relay: "none"` keeps the local-history scan: its startup
-  line reports `mode=local-history`, preceded by
-  `[authority-index] network-relay default skipped: <reason>; using local history`.
-  The agent makes this decision from its own configuration; the daemon logs
-  the same decision before constructing it.
-- **Local-history fallback**: when no relay supplies a usable snapshot within
-  the 30 s bootstrap budget, the node logs it and continues with the
-  local-history scan, resuming from any checkpoint it already scanned locally
-  instead of rescanning from the deployment block, so it is never worse than
-  10.0.17.
-- An explicit `authorityIndex` block still wins over the network-relay default
-  and keeps its pinned trusted-core semantics, its fail-closed behavior, and
-  its existing startup line. Cores receive no default and keep building the
-  index from chain history.
-- Authority-index scans now log their progress.
-
 ### Deployment and validation
 
 - Deploy through the normal package path; no contract, ABI, or deployment
@@ -117,7 +128,8 @@ wire-protocol, or deployment registry changes are required.**
 
 ## [10.0.17] - 2026-09-22
 
-**Withdrawn.** Superseded by 10.0.18; see above.
+Superseded by 10.0.18, which includes every change below; update to 10.0.18
+rather than 10.0.17.
 
 An RPC-bounded RFC-64 operational-hardening release. RFC-64 remains active by
 default for persistent nodes and keeps its 10.0.16 responsibility model, while
