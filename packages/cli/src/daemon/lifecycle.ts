@@ -122,6 +122,7 @@ import {
   loadResolvedNetworkConfig,
   resolveAutoUpdateConfig,
   resolveChainConfig,
+  resolveOtherNetworkRelays,
   dkgDir,
   writeApiPort,
   removeApiPort,
@@ -1686,6 +1687,21 @@ async function runDaemonInnerWithStartupOwnership(
     }
   }
 
+  // Transport-level network isolation: the node refuses to dial, store or
+  // accept the relays of every OTHER bundled network (testnet refuses mainnet
+  // relays exactly as mainnet refuses testnet ones). Our own effective
+  // relayPeers are always exempt.
+  const otherNetworkRelays = resolveOtherNetworkRelays({
+    activeNetworkName: selectedNetworkConfig,
+    activeNetwork: network,
+    localRelayPeers: relayPeers,
+  });
+  if (otherNetworkRelays.relays.length > 0) {
+    log(
+      `Network isolation: refusing connections to ${otherNetworkRelays.relays.length} relay peer(s) of other DKG networks (${otherNetworkRelays.networkNames.join(", ")})`,
+    );
+  }
+
   if (
     !relayPeers?.length &&
     !config.bootstrapPeers?.length &&
@@ -1843,6 +1859,7 @@ async function runDaemonInnerWithStartupOwnership(
     // `relayPeers` may carry operator transport relays, which never become
     // snapshot trust, and `relay: "none"` means no relay is contacted at all.
     networkRelays: config.relay === "none" ? [] : network?.relays ?? [],
+    otherNetworkRelays: otherNetworkRelays.relays,
     preferredACKPeerIds: preferredACKPeerIds.length > 0 ? preferredACKPeerIds : undefined,
     announceAddresses: config.announceAddresses,
     nodeRole: role,
