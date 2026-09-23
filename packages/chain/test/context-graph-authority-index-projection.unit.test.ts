@@ -1147,3 +1147,90 @@ describe('the projection stamp', () => {
     }
   });
 });
+
+describe('peekProjection', () => {
+  // `projection` answers at any cost: a miss waits for an in-flight refresh and
+  // then performs one, which is a live head read plus a paged scan back to the
+  // deployment block. `peekProjection` exists for a caller trying to AVOID a
+  // single `eth_call`; escalating its miss would cost orders of magnitude more
+  // than the read it was skipping, and would do so when the index is coldest.
+
+  const anyProjection = (candidate: unknown) => ({ complete: true, value: candidate });
+
+  it('reports a miss instead of scanning when nothing is retained', async () => {
+    const h = makeHarness();
+
+    const peeked = await h.index.peekProjection({
+      scope: h.scope,
+      project: anyProjection,
+    });
+
+    expect(peeked).toEqual({ hit: false });
+    expect(h.reads.refreshes).toBe(0);
+    expect(h.physicalReads()).toBe(0);
+  });
+
+  it('serves a retained projection without any physical read', async () => {
+    const h = makeHarness();
+    await h.read();
+    const physical = h.physicalReads();
+
+    h.clock.nowMs += T - 1;
+    const peeked = await h.index.peekProjection({
+      scope: h.scope,
+      project: anyProjection,
+    });
+
+    expect(peeked.hit).toBe(true);
+    expect(h.physicalReads()).toBe(physical);
+    expect(h.reads.refreshes).toBe(1);
+  });
+
+  it('misses rather than scanning once the retained projection is too old', async () => {
+    const h = makeHarness();
+    await h.read();
+    const refreshes = h.reads.refreshes;
+    const physical = h.physicalReads();
+
+    // Past the service window the retained projection may not be served.
+    // `projection` would rescan here; this must not.
+    h.clock.nowMs += CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS * 2;
+    const peeked = await h.index.peekProjection({
+      scope: h.scope,
+      project: anyProjection,
+    });
+
+    expect(peeked).toEqual({ hit: false });
+    // The miss cost NOTHING: no refresh, and not one more physical read.
+    expect(h.reads.refreshes).toBe(refreshes);
+    expect(h.physicalReads()).toBe(physical);
+  });
+
+  it("misses when the caller's own projection is incomplete", async () => {
+    // Completeness is the caller's predicate, not the cache's: a retained
+    // projection that does not carry THIS graph is a miss for this caller even
+    // though it is perfectly good for another.
+    const h = makeHarness();
+    await h.read();
+
+    const peeked = await h.index.peekProjection({
+      scope: h.scope,
+      project: () => ({ complete: false, value: undefined }),
+    });
+
+    expect(peeked).toEqual({ hit: false });
+    expect(h.reads.refreshes).toBe(1);
+  });
+
+  it('honours an already-aborted signal', async () => {
+    const h = makeHarness();
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(h.index.peekProjection({
+      scope: h.scope,
+      signal: controller.signal,
+      project: anyProjection,
+    })).rejects.toMatchObject({ name: 'AbortError' });
+  });
+});
