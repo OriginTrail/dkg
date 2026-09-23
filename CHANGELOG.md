@@ -23,9 +23,19 @@ All notable changes to the DKG V10 node are documented here. The format is based
   remembers the cap per provider so later reads start there, and fails over
   without splitting when a provider refuses history, archive or plan-limited
   ranges. The event lanes still page 9,000 blocks and advance their cursor
-  only after a whole page succeeds. A provider's refusal is quoted in these
-  errors with every URL reduced to its host, so an API key in a configured
-  RPC URL does not reach logs or error messages.
+  only after a whole page succeeds. Every provider error these reads report,
+  whether or not it is a range refusal, has each URL reduced to its host, so
+  an API key in a configured RPC URL does not reach logs or error messages.
+- **RPC read errors no longer quote a configured RPC URL**: when every
+  configured endpoint failed a chain read and the last one had answered with
+  an HTTP error status (a gateway's 401, 403, 429 or 5xx page, for example),
+  the `… read failed on all configured RPC endpoints` error quoted ethers' own
+  message, which embeds the full request URL. With a single endpoint the
+  error was that message. Daemon log lines that print the error, such as the
+  event lanes' `Poll lane … failed` line, then carried an API key from the
+  URL's path or query into the log. Every URL in that error, and in the log
+  page scan's `no configured RPC could serve the log range` error, is now
+  reduced to its host.
 - **`dkg status` no longer reports a healthy store as UNREACHABLE on a cold
   daemon**: since 10.0.7 plain `/api/status` never starts the full-store quad
   count, so on a node where nothing had requested one, `dkg status` showed a

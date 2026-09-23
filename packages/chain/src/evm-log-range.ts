@@ -259,6 +259,26 @@ function providerMessage(err: unknown): string {
   return found.length > 300 ? `${found.slice(0, 300)}…` : found;
 }
 
+/**
+ * An error the reader does not classify, as it rethrows it. Callers quote its
+ * message in their own errors and logs (the RPC exhaustion message, the event
+ * lanes' failure line), and for an HTTP-level refusal ethers' message embeds
+ * the full request URL, API key included. So an error whose message names a
+ * URL is rethrown as a copy with every URL reduced to its host. The copy keeps
+ * the `name` and `code` the retry and failover classifiers read (status and
+ * `Retry-After` they find through `cause`), and carries the provider's error as
+ * `cause`. Any other error is rethrown as the same object.
+ */
+function withHostOnlyMessage(err: unknown): unknown {
+  if (!(err instanceof Error)) return err;
+  const message = hostOnlyRpcText(err.message);
+  if (message === err.message) return err;
+  const copy = new Error(message, { cause: err });
+  if (copy.name !== err.name) copy.name = err.name;
+  const { code } = err as { code?: unknown };
+  return code === undefined ? copy : Object.assign(copy, { code });
+}
+
 export interface AdaptiveEvmLogRangeParams<T> {
   /** One physical eth_getLogs over an inclusive range. Give it its own deadline. */
   read: (fromBlock: number, toBlock: number) => Promise<readonly T[]>;
@@ -282,7 +302,8 @@ export interface AdaptiveEvmLogRangeParams<T> {
  *   span) and retries the refused range at it.
  * - A depth refusal is never split: it becomes a failover-eligible
  *   {@link EvmLogRangeUnavailableError} after a single request.
- * - Anything else propagates unchanged.
+ * - Anything else propagates as thrown, except that a URL in its message is
+ *   reduced to its host (see `withHostOnlyMessage`).
  *
  * Requests are sequential, so a compatibility retry never becomes a burst, and
  * bounded by {@link EVM_LOG_RANGE_MAX_REQUESTS_PER_READ}: a range the cap
@@ -356,7 +377,7 @@ export async function readAdaptiveEvmLogRange<T>(
       rows.push(...await read(lo, hi));
     } catch (err) {
       const limit = classifyEvmLogRangeLimitError(err, span);
-      if (limit === undefined) throw err;
+      if (limit === undefined) throw withHostOnlyMessage(err);
       if (limit.kind === 'depth') {
         throw unavailable('is beyond the history, archive or plan limit', limit, err);
       }

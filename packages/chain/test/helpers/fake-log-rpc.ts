@@ -4,10 +4,11 @@
  * A real ethers `JsonRpcProvider` over a scripted HTTP transport.
  *
  * The fake sits at `FetchRequest.getUrlFunc`, below ethers: every refusal is
- * an HTTP status plus a JSON body, and ethers itself builds the error the
- * adapter sees — `UNKNOWN_ERROR` with the JSON-RPC `{ code, message }` nested
- * for an HTTP 200 error body, `SERVER_ERROR` with `info.responseBody` for an
- * HTTP 4xx/5xx. That is the shape the classifier meets in production, which
+ * an HTTP status plus a JSON-RPC body or a gateway's own page, and ethers
+ * itself builds the error the adapter sees — `UNKNOWN_ERROR` with the JSON-RPC
+ * `{ code, message }` nested for an HTTP 200 error body, `SERVER_ERROR` with
+ * `info.responseBody` (and the full request URL in its message) for an HTTP
+ * 4xx/5xx. That is the shape the classifier meets in production, which
  * hand-built nested objects would not prove.
  */
 
@@ -24,11 +25,17 @@ export interface FakeRpcLog {
   readonly logIndex: number;
 }
 
-/** How the endpoint answers one eth_getLogs, instead of serving logs. */
+/** How the endpoint answers one request, instead of serving it. */
 export type FakeLogRpcRefusal =
   | { readonly rpcError: { readonly code: number; readonly message: string }; readonly httpStatus?: number }
   /** An HTTP error whose body is not JSON-RPC at all (a gateway's HTML or text page). */
-  | { readonly rawBody: string; readonly httpStatus: number; readonly contentType?: string }
+  | {
+    readonly rawBody: string;
+    readonly httpStatus: number;
+    readonly contentType?: string;
+    /** Sent as the `Retry-After` header. */
+    readonly retryAfterSeconds?: number;
+  }
   | { readonly networkError: string };
 
 export interface FakeLogRpcRequest {
@@ -43,8 +50,10 @@ export interface FakeLogRpcOptions {
   readonly head: () => number;
   /** Every log the chain holds; eth_getLogs filters by range, address and topic0. */
   readonly logs?: () => readonly FakeRpcLog[];
-  /** Refuse a request (return a refusal) or serve it (return undefined). */
+  /** Refuse an eth_getLogs (return a refusal) or serve it (return undefined). */
   readonly refuse?: (request: { fromBlock: number; toBlock: number; head: number }) => FakeLogRpcRefusal | undefined;
+  /** Refuse eth_chainId, the adapter's configured-chain preflight, or answer it (return undefined). */
+  readonly refuseChainId?: () => FakeLogRpcRefusal | undefined;
   /** Delay before answering an eth_getLogs, for deadline tests. */
   readonly delay?: (request: FakeLogRpcRequest) => Promise<void>;
 }
@@ -61,10 +70,13 @@ export interface FakeLogRpc {
 const STATUS_TEXT: Readonly<Record<number, string>> = {
   200: 'OK',
   400: 'Bad Request',
+  401: 'Unauthorized',
   403: 'Forbidden',
   408: 'Request Timeout',
   413: 'Payload Too Large',
+  429: 'Too Many Requests',
   500: 'Internal Server Error',
+  502: 'Bad Gateway',
   503: 'Service Unavailable',
 };
 
@@ -79,6 +91,11 @@ function blockParam(value: unknown, head: number): number {
 export function fakeLogRpc(options: FakeLogRpcOptions): FakeLogRpc {
   const requests: FakeLogRpcRequest[] = [];
   const request = new FetchRequest(options.url);
+  // ethers otherwise retries a 429 itself, up to 12 times with a growing
+  // backoff. The adapter's multi-RPC transport turns that off too
+  // (`boundedRetryFetchRequest` with 0 retries), and here one refusal is one
+  // request.
+  request.retryFunc = async () => false;
   request.getUrlFunc = async (req) => {
     const payload = JSON.parse(new TextDecoder().decode(req.body!)) as {
       id: number;
@@ -93,10 +110,32 @@ export function fakeLogRpc(options: FakeLogRpcOptions): FakeLogRpc {
       body: new TextEncoder().encode(JSON.stringify(body)),
     });
     const ok = (result: unknown) => respond(200, { jsonrpc: '2.0', id: payload.id, result });
+    const refused = (refusal: FakeLogRpcRefusal) => {
+      if ('networkError' in refusal) throw new TypeError(refusal.networkError);
+      if ('rawBody' in refusal) {
+        return {
+          statusCode: refusal.httpStatus,
+          statusMessage: STATUS_TEXT[refusal.httpStatus] ?? 'Status',
+          headers: {
+            'content-type': refusal.contentType ?? 'text/plain',
+            ...(refusal.retryAfterSeconds === undefined
+              ? {}
+              : { 'retry-after': String(refusal.retryAfterSeconds) }),
+          },
+          body: new TextEncoder().encode(refusal.rawBody),
+        };
+      }
+      return respond(refusal.httpStatus ?? 200, {
+        jsonrpc: '2.0',
+        id: payload.id,
+        error: refusal.rpcError,
+      });
+    };
 
     if (payload.method === 'eth_chainId') {
       requests.push({ method: payload.method });
-      return ok(hex(options.chainId ?? 8453));
+      const refusal = options.refuseChainId?.();
+      return refusal === undefined ? ok(hex(options.chainId ?? 8453)) : refused(refusal);
     }
     if (payload.method === 'eth_blockNumber') {
       requests.push({ method: payload.method });
@@ -118,22 +157,7 @@ export function fakeLogRpc(options: FakeLogRpcOptions): FakeLogRpc {
     await options.delay?.(entry);
 
     const refusal = options.refuse?.({ fromBlock, toBlock, head });
-    if (refusal !== undefined) {
-      if ('networkError' in refusal) throw new TypeError(refusal.networkError);
-      if ('rawBody' in refusal) {
-        return {
-          statusCode: refusal.httpStatus,
-          statusMessage: STATUS_TEXT[refusal.httpStatus] ?? 'Status',
-          headers: { 'content-type': refusal.contentType ?? 'text/plain' },
-          body: new TextEncoder().encode(refusal.rawBody),
-        };
-      }
-      return respond(refusal.httpStatus ?? 200, {
-        jsonrpc: '2.0',
-        id: payload.id,
-        error: refusal.rpcError,
-      });
-    }
+    if (refusal !== undefined) return refused(refusal);
 
     const addresses = filter.address === undefined
       ? undefined

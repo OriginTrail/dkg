@@ -300,4 +300,102 @@ describe('listenForEvents keeps configured RPC URLs out of errors and logs', () 
       [[from, from + 8_999]],
     ]);
   });
+
+  describe('for refusals the log-range classifier does not recognise', () => {
+    // Fake keys in the path and the query.
+    const PRIMARY_URL = 'https://rpc.example.invalid/v2/FAKEKEY123?apikey=FAKEKEY123';
+    const BACKUP_URL = 'https://backup.example.invalid/?apikey=FAKEKEY123';
+    const LEAK = /FAKEKEY123|\/v2\/|apikey=/;
+    const page = (httpStatus: number, text: string) => ({
+      httpStatus,
+      contentType: 'text/html',
+      rawBody: `<html><body><h1>${httpStatus} ${text}</h1></body></html>`,
+    });
+    const keyed = (url: string, refusal: ReturnType<typeof page>) => fakeLogRpc({
+      url,
+      head: () => HEAD,
+      logs: () => LOGS,
+      refuse: () => refusal,
+    });
+
+    /** Everything `console.log` and `console.warn` printed while `run` ran. */
+    async function printedWhile(run: () => Promise<unknown>) {
+      const printers = [
+        vi.spyOn(console, 'log').mockImplementation(() => {}),
+        vi.spyOn(console, 'warn').mockImplementation(() => {}),
+      ];
+      const err = await run().catch((e: unknown) => e);
+      const printed = printers
+        .flatMap((printer) => printer.mock.calls.map((call) => call.map(String).join(' ')))
+        .join('\n');
+      return { err, printed };
+    }
+
+    it('reports them by host only, after one request per endpoint', async () => {
+      const endpoints = [
+        keyed(PRIMARY_URL, page(401, 'Unauthorized')),
+        keyed(BACKUP_URL, page(502, 'Bad Gateway')),
+      ];
+      const adapter = makeAdapter(endpoints);
+      const from = HEAD - 20_000 + 1;
+
+      const { err, printed } = await printedWhile(() => collect(adapter, from, from + 8_999));
+
+      expect(err).toBeInstanceOf(Error);
+      const message = (err as Error).message;
+      expect(message).toContain(
+        'cgStorage.queryFilter(ContextGraphCreated) read failed on all configured RPC endpoints '
+          + '(rpc.example.invalid, backup.example.invalid): server response 502 Bad Gateway',
+      );
+      expect(message).toContain('"requestUrl": "backup.example.invalid"');
+      expect(printed).toContain('via rpc.example.invalid failed');
+      for (const text of [message, printed]) expect(text).not.toMatch(LEAK);
+      // Not a range limit, so never split: one request per endpoint.
+      expect(endpoints.map((endpoint) => endpoint.logRanges())).toEqual([
+        [[from, from + 8_999]],
+        [[from, from + 8_999]],
+      ]);
+    });
+
+    it('reports a single endpoint\'s refusal by host only too', async () => {
+      const only = keyed(PRIMARY_URL, page(403, 'Forbidden'));
+      const adapter = makeAdapter([only]);
+      const from = HEAD - 20_000 + 1;
+
+      const { err, printed } = await printedWhile(() => collect(adapter, from, from + 8_999));
+
+      // With one endpoint the exhaustion error keeps the provider's own message.
+      const message = (err as Error).message;
+      expect(message).toMatch(/^server response 403 Forbidden /);
+      expect(message).toContain('"requestUrl": "rpc.example.invalid"');
+      for (const text of [message, printed]) expect(text).not.toMatch(LEAK);
+      expect(only.logRanges()).toEqual([[from, from + 8_999]]);
+    });
+
+    it('reports an open-ended scan, which skips the range reader, by host only', async () => {
+      const endpoints = [
+        keyed(PRIMARY_URL, page(401, 'Unauthorized')),
+        keyed(BACKUP_URL, page(502, 'Bad Gateway')),
+      ];
+      const adapter = makeAdapter(endpoints);
+
+      const { err, printed } = await printedWhile(async () => {
+        for await (const event of adapter.listenForEvents({
+          eventTypes: ['ContextGraphCreated'],
+          fromBlock: HEAD - 1_000,
+        })) void event;
+      });
+
+      const message = (err as Error).message;
+      expect(message).toContain(
+        'read failed on all configured RPC endpoints (rpc.example.invalid, backup.example.invalid): '
+          + 'server response 502 Bad Gateway',
+      );
+      for (const text of [message, printed]) expect(text).not.toMatch(LEAK);
+      expect(endpoints.map((endpoint) => endpoint.logRanges())).toEqual([
+        [[HEAD - 1_000, HEAD]],
+        [[HEAD - 1_000, HEAD]],
+      ]);
+    });
+  });
 });

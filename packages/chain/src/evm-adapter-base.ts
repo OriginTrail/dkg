@@ -58,7 +58,7 @@ import {
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
-import { rpcHost } from './rpc-failover-log.js';
+import { hostOnlyRpcText, rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
 } from './chain-rpc-transport-error.js';
@@ -3665,9 +3665,11 @@ export class EVMChainAdapterBase {
         metrics.chainRpcDuration.record(Date.now() - startedAt, {
           rpc_method: 'eth_getLogs', chain_id: this.chainId,
         });
+        // Host-only: the last error can be ethers' own (the chainId preflight
+        // runs outside the range reader), which quotes the full request URL.
         throw new Error(
           `${label}: no configured RPC could serve the log range [${lo}, ${hi}]` +
-            `${pageError ? `: ${errorMessage(pageError)}` : ''}.`,
+            `${pageError ? `: ${hostOnlyRpcText(errorMessage(pageError))}` : ''}.`,
           pageError ? { cause: pageError } : undefined,
         );
       },
