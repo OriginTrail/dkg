@@ -386,11 +386,17 @@ test('a document a test reads is a CI input; other documentation stays docs-only
   // PATH_TRIGGERS is the one home of that fact: its claim alone lifts a path
   // out of the docs-only profile (RELEASE_PROCESS.md matches the root *.md
   // documentation rule) and selects the lane whose tests read it.
+  // Only that lane: not the rule of the package the document belongs to.
   for (const [filePath, lane] of [['RELEASE_PROCESS.md', 'bura_cli'], ['packages/query/README.md', 'bura_query']]) {
     const plan = pullRequestPlan([change(filePath)]);
     assert.equal(plan.mode, 'delta', filePath);
-    assert.equal(plan.lanes[lane], true, filePath);
+    assert.deepEqual(selectedLanes(plan), [lane], filePath);
+    assert.deepEqual(plan.evmScopes, [], filePath);
   }
+  // A claimed file that is not documentation keeps its package rule too.
+  const skill = pullRequestPlan([change('packages/cli/skills/dkg-node/SKILL.md')]);
+  assert.equal(skill.lanes.bura_cli, true);
+  assert.equal(skill.lanes.kosava_supporting, true);
   for (const filePath of ['CHANGELOG.md', 'packages/agent/README.md', 'packages/query/CHANGELOG.md', 'docs/ci-delta-policy.md']) {
     assert.equal(pullRequestPlan([change(filePath)]).mode, 'docs-only', filePath);
   }
