@@ -4,6 +4,7 @@ export * from './context-graph-storage-uri.js';
 export * from './context-graph-snapshot-uri.js';
 export * from './agent-identity.js';
 export * from './agents-list-wire.js';
+export * from './context-graph-list-wire.js';
 export * from './assertion-scoped-graphs.js';
 export * from './protocol-limits.js';
 export * from './context-graph-join-policy.js';

@@ -17,15 +17,17 @@ import type {
   PublicQueryResult,
 } from '@origintrail-official/dkg-core/query-result';
 import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
+import { fetchContextGraphs } from './context-graph-api.js';
 
 // Re-export the shared transport so existing `../api.js` consumers of these
 // keep working (barrel), and domain clients from their extracted modules.
 export { authHeaders, HttpError } from './http.js';
 export * from './pca-api.js';
 export * from './identity-wallet-api.js';
+export * from './context-graph-api.js';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
-const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60000;
+const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60_000;
 
 function normalizeContextGraphId(contextGraphIdOrUri: string): string {
   const trimmed = contextGraphIdOrUri.trim();
@@ -274,16 +276,6 @@ export const fetchNodeLog = (params: { lines?: number; q?: string } = {}) => {
   const q = qs.toString();
   return get<{ lines: string[]; totalSize: number }>(`/api/node-log${q ? '?' + q : ''}`);
 };
-
-// --- Context graphs (V10) — legacy daemon paths keep working server-side redirects.
-export async function fetchContextGraphs(): Promise<{ contextGraphs: any[] }> {
-  const data = await getWithTimeout<{ contextGraphs?: any[] }>(
-    '/api/context-graph/list',
-    CONTEXT_GRAPH_LOAD_TIMEOUT_MS,
-  );
-  const list = data.contextGraphs ?? [];
-  return { contextGraphs: list.filter((p: any) => !p.isSystem) };
-}
 
 // --- Agent Identity ---
 export interface AgentIdentity {

@@ -345,6 +345,7 @@ import {
 
 import type { RequestContext } from './context.js';
 import { actorFromRequestContext } from './context.js';
+import { handleContextGraphListRoute } from './context-graph-list.js';
 
 /**
  * Map a `registerContextGraph` failure to an HTTP status +
@@ -2367,12 +2368,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
 
   // GET /api/context-graph/list
   if (req.method === "GET" && path === "/api/context-graph/list") {
-    const contextGraphs = await agent.listContextGraphs({
-      callerAgentAddress: requestAgentAddress ?? null,
-    });
-    return jsonResponse(res, 200, {
-      contextGraphs,
-    });
+    return handleContextGraphListRoute(ctx);
   }
 
   // GET /api/context-graph/exists

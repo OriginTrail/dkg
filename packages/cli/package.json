@@ -30,6 +30,7 @@
     "build:prepared": "tsc && pnpm run test:types && node scripts/test-catchup-worker-package-boundary.mjs && node ../../scripts/copy-cli-runtime-assets.mjs",
     "prepack": "node ../../scripts/copy-cli-runtime-assets.mjs",
     "benchmark:catchup-runner": "node scripts/catchup-runner-benchmark.cjs",
+    "benchmark:context-graph-list": "node --expose-gc scripts/context-graph-list-benchmark.cjs",
     "benchmark:daemon-responsiveness": "node scripts/daemon-responsiveness-benchmark.cjs",
     "benchmark:publish-async-get": "node scripts/publish-async-get-benchmark.cjs",
     "benchmark:swm-large-payload": "node scripts/swm-large-payload-benchmark.cjs",
