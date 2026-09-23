@@ -142,6 +142,7 @@ import {
   type LocalAgentIntegrationTransport,
   resolveContextGraphs,
   resolveContextGraphSubscriptionRehydrationEnabled,
+  approvalPolicyMigrationWarning,
   resolveNetworkDefaultContextGraphs,
   isPublisherRuntimeEnabled,
   resolvePublisherRetryTuning,
@@ -1389,6 +1390,8 @@ async function runDaemonInnerWithStartupOwnership(
   // network manifest fails before subscriptions, stores, wallets, or agent
   // runtime construction begin. The same immutable chainBase is reused below.
   const chainBase = resolveChainConfig(config, network);
+  const approvalPolicyWarning = approvalPolicyMigrationWarning(chainBase?.approvalPolicy);
+  if (approvalPolicyWarning) log(approvalPolicyWarning);
   const rfc64CatalogActivations = resolveRfc64CatalogActivations(
     config,
     resolveRfc64PublicCatalogActivationChainIdentityV1(chainBase?.chainId),
