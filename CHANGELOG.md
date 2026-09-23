@@ -11,7 +11,7 @@ All notable changes to the DKG V10 node are documented here. The format is based
 | Chain-driven VM reconciliation has its own switch, `vmReconcilerEnabled` (env `DKG_VM_RECONCILER_ENABLED`, default on) | `syncReconcilerEnabled: false` / `DKG_SYNC_RECONCILER_ENABLED=0` now only stops the periodic peer-sync reconciler. A Core that set it (every Base mainnet Core has since the 2026-07-16 containment) resumes promoting acknowledged public data to Verifiable Memory on upgrade | None to restore promotion. Keep `syncReconcilerEnabled` as it is if peer-sync containment is still wanted. Do not set `vmReconcilerEnabled: false` on a Core |
 | **Cores with VM reconcile disabled will decline all storage ACKs** for public Context Graphs | A Core signs a public StorageACK (publish or update) only when the data is guaranteed to reach its Verifiable Memory. With VM reconciliation off it declines every one with `CORE_VM_PROMOTION_DISABLED`, which publishers treat as final for that Core. While it cannot commit yet (starting up, chain or store unavailable, an older version of the asset still awaiting promotion) it declines with `CORE_TEMPORARILY_UNAVAILABLE` and a message starting `VM promotion unavailable:`, which every deployed publisher, 10.0.18 included, retries. Curated catalog ACKs are unaffected | After the upgrade check `GET /api/status`: `vmPromotion.storageAckGate` is `"ready"` and `vmPromotion.storageAckHandler` is `"registered"`; `vmPromotion.storageAckDeclinesLastHour` counts declines per reason. The startup log warns when a Core cannot promote to VM |
 | Cores decline legacy (not graph-scoped) public ACK requests | A Core cannot keep a copy of a legacy root-entity publish that it could later promote, so it declines those requests with `CORE_VM_PROMOTION_DISABLED`. Every default publish and update path (API, CLI, MCP, adapters) has sent graph-scoped requests since 10.0.7. Still legacy: raw-lift jobs queued before 10.0.7 or restored with the legacy raw-lift import, and `publishFromSharedMemory` called without `contentScopeVersion`. These can no longer collect ACKs from upgraded Cores | Run publishers on 10.0.7 or later. Finish or discard legacy raw-lift jobs before the Cores upgrade, and publish that data again through the current publish API |
-| Graphs acknowledged while VM reconcile was off are backfilled | From 1 to 6 minutes after start, then every 15 minutes, the Core records the public graphs holding the StorageACK copies it signed as core-hosted, at most 32 per pass. The reconciler then walks each graph's chain registrations and promotes the Knowledge Assets the chain registered to it, including ones this Core never held and fetches from peers. On the Base mainnet Cores this is a catch-up of 10,000 to 17,000 unpromoted ACK copies each. Copies of publishes that never landed are not promoted; they expire as described under Fixed | Upgrade Cores one at a time and watch `vmPromotion.audit` and the `ACK promotion audit` log line. The catch-up runs in the background RPC class and store lane; `DKG_VM_RECONCILE_CONCURRENCY` (graphs at once, default 2) and `DKG_VM_RECONCILE_ORDINAL_CONCURRENCY` (registrations per graph at once, default 5) throttle it further |
+| Graphs acknowledged while VM reconcile was off are backfilled | From 1 to 6 minutes after start, then every 15 minutes, the Core records the public graphs holding the StorageACK copies it signed as core-hosted, at most 32 per pass. The reconciler then walks each graph's chain registrations and promotes the Knowledge Assets the chain registered to it, including ones this Core never held and fetches from peers. On the Base mainnet Cores this is a catch-up of 10,000 to 17,000 unpromoted ACK copies each. Copies of publishes that never landed are not promoted; they expire as described under Fixed | Before upgrading, check that subscription rehydration is enabled and `/api/status` lists no dormant core-hosted rows (a dormant row's graph is declined). Upgrade Cores one at a time, and start the next only when the previous one reports `vmPromotion.audit.backfillPending` 0 and `staleUnpromotedCopies` near 0 (watch the `ACK promotion audit` log line). The catch-up runs in the background RPC class and store lane; `DKG_VM_RECONCILE_CONCURRENCY` (graphs at once, default 2) and `DKG_VM_RECONCILE_ORDINAL_CONCURRENCY` (registrations per graph at once, default 5) throttle it further |
 
 ### Fixed
 
@@ -32,8 +32,11 @@ All notable changes to the DKG V10 node are documented here. The format is based
   Asset is confirmed in VM at that version or later. Only copies the Core
   actually signed are kept: declined requests, copies synced from peers and
   gossip operations that reuse the `storage-ack-` prefix expire as before.
-  Copies stored before the upgrade are ledgered once at first start. A copy
-  the chain has registered is kept until it is promoted. A copy the chain has
+  Copies stored before the upgrade are ledgered once per store, and copies
+  stored while another version ran for over an hour (a rollback) are ledgered
+  when the node comes back. A copy the chain has registered is kept until it
+  is promoted; a copy the chain has moved past (a later version landed) is
+  released, since it can no longer be promoted as-is. A copy the chain has
   not registered expires once the ACK promotion audit has found it absent on
   chain twice, at least 15 minutes apart and both after the SWM TTL (an ACK
   may still belong to a publish in flight), or at the latest 90 days after the
@@ -41,11 +44,17 @@ All notable changes to the DKG V10 node are documented here. The format is based
   on-chain deadline and does not name the Knowledge Asset id, so this absence
   check is conservative evidence, not proof; the reference publisher never
   submits ACKs that late.
-- **An ACK can no longer overwrite a copy the Core still owes to VM**: a
-  StorageACK for a Knowledge Asset the Core already holds is declined with the
-  new, final `CONFLICTING_KA_ASSERTION` when it carries different content at
-  the same assertion version or an older version, matching the SWM gossip
-  rules. A retry with the same content is signed again.
+- **An ACK or share can no longer overwrite a copy the Core still owes to
+  VM**: only a copy this Core signed and still owes can hold a Knowledge
+  Asset's SWM head; any other head (a synced or gossiped copy) is replaced.
+  Against an owed copy, an older version is declined with the new, final
+  `CONFLICTING_KA_ASSERTION`, as SWM gossip does. The same version with
+  different content is declined that way only once that version has landed
+  on chain; before that the held copy is replaced, so a retry after a failed
+  round (which reuses the version) is signed instead of locking the asset. A
+  newer version replaces the held copy once it is in VM, or at once when the
+  chain has already moved past it. SWM gossip of a newer version waits (the
+  sender keeps it queued) until the owed copy is promoted.
 - **`dkg status` no longer reports a healthy store as UNREACHABLE on a cold
   daemon**: since 10.0.7 plain `/api/status` never starts the full-store quad
   count, so on a node where nothing had requested one, `dkg status` showed a
@@ -65,19 +74,28 @@ All notable changes to the DKG V10 node are documented here. The format is based
   and running, durably records the graph as core-hosted in the namespace the
   copy is stored in, and only then stores the copy with its SWM head and its
   ledger entry and signs. A declined request stores nothing. The core-hosted
-  record goes through the strict subscription-store path once per graph; a
-  namespace whose persisted subscription row is dormant, or that reconciles a
-  different live graph, is never rewritten by an ACK (the Core declines
-  instead, transiently or finally).
+  record goes through the strict subscription-store path once per graph. The
+  SWM graph id a request names must belong to the graph it is signed for: a
+  numeric id must be that graph, and a name must be the graph's committed
+  on-chain name (or, for a graph without one, locally bound to it); anything
+  else is declined finally, so one request cannot bind another graph's
+  namespace. A namespace that reconciles a different live graph is never
+  rewritten by an ACK. A namespace whose persisted subscription row is dormant
+  is declined transiently for up to 10 minutes while the dormancy can clear
+  (authority retry, activation slot), then finally; with subscription
+  rehydration disabled it is declined finally at once.
 - **Public update ACKs are durable too**: a Core stores the verified updated
   version as its own ACK copy with a new SWM head and ledger entry, but only
   once the version it replaces is in its VM. Until then it declines the update
   transiently and promotes that version at once (it is on chain, since an
-  update requires it), so the publisher's retry is normally signed within
-  seconds. A pending-update lane (every VM sweep, at most 8 chain checks)
-  promotes the new version with a per-asset VM reconcile once the update lands
-  on chain, since the registration walk never revisits an updated asset. The
-  update copy is retained under the same rules as a publish copy.
+  update requires it) in the foreground RPC class and the normal store lane,
+  ahead of the background catch-up, so the publisher's retry is usually signed
+  within its retry window. A pending-update lane (every VM sweep, keyset paged,
+  at most 8 chain checks) promotes the new version with a per-asset VM
+  reconcile once the update lands on chain, since the registration walk never
+  revisits an updated asset. The update copy is retained under the same rules
+  as a publish copy. Sub-graph copies are promoted the same way: the ledger
+  records the sub-graph, and the walk and both lanes read it.
 - **What an ACK guarantees for curated graphs**: a Core never receives a
   curated graph's plaintext, so there is nothing to promote. A curated catalog
   ACK guarantees that the Core verified the graph is curated on chain, rebuilt
