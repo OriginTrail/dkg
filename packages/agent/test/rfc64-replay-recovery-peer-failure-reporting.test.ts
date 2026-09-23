@@ -673,6 +673,32 @@ async function applyConsistentGenesisHead(edge: Awaited<ReturnType<typeof startA
   return publication;
 }
 
+/**
+ * Publish a durable one-row successor with no announcement recipient,
+ * reproducing the post-denial state: the replica still has only genesis.
+ */
+async function publishUnannouncedSuccessor(
+  edge: Awaited<ReturnType<typeof startAgent>>,
+  genesis: Awaited<ReturnType<typeof applyConsistentGenesisHead>>,
+) {
+  const successor = await edge.publishOpenAuthorCatalogSuccessorV1({
+    previousHead: {
+      objectDigest: genesis.headObjectDigest,
+      signatureVariantDigest: genesis.signatureVariantDigest,
+    },
+    author: AUTHOR_WALLET,
+    catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+    assertionCoordinate: 'replay-promised-missing-row' as never,
+    projectionBytes: PROJECTION,
+    seal: await authorSeal(),
+    deployment: DEPLOYMENT,
+    issuedAt: SUCCESSOR_ISSUED_AT,
+    peers: [],
+  });
+  expect(successor.inventoryRowCount).toBe('1');
+  return successor;
+}
+
 /** Narrow view of the production catalog service used to stub provider replay. */
 interface ReplayServiceV1 {
   requestCatalogHeadReplay(input: { remotePeerId: string }): Promise<unknown>;
@@ -806,24 +832,10 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       name: 'replay-promised-row-missing',
       activation: activation('catalog'),
     });
-    const genesis = await applyConsistentGenesisHead(edge);
-    // The successor is durable but deliberately has no announcement recipient,
-    // reproducing the post-denial state: the replica still has only genesis.
-    const successor = await edge.publishOpenAuthorCatalogSuccessorV1({
-      previousHead: {
-        objectDigest: genesis.headObjectDigest,
-        signatureVariantDigest: genesis.signatureVariantDigest,
-      },
-      author: AUTHOR_WALLET,
-      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
-      assertionCoordinate: 'replay-promised-missing-row' as never,
-      projectionBytes: PROJECTION,
-      seal: await authorSeal(),
-      deployment: DEPLOYMENT,
-      issuedAt: SUCCESSOR_ISSUED_AT,
-      peers: [],
-    });
-    expect(successor.inventoryRowCount).toBe('1');
+    const successor = await publishUnannouncedSuccessor(
+      edge,
+      await applyConsistentGenesisHead(edge),
+    );
 
     const providerPeer = '12D3KooWReplayPromisedMissingRow';
     vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([
@@ -845,6 +857,71 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       expectedRowCount: '1',
       appliedRowCount: '0',
       missingRowCount: '1',
+    });
+  });
+
+  it('reports a retained promised row gap known-incomplete once a full pass clears the witness', async () => {
+    const edge = await startAgent({
+      name: 'replay-promised-row-known-incomplete',
+      activation: activation('catalog'),
+    });
+    const successor = await publishUnannouncedSuccessor(
+      edge,
+      await applyConsistentGenesisHead(edge),
+    );
+    const providerPeer = '12D3KooWReplayPromisedRowProvider';
+    const emptyPeer = '12D3KooWReplayPromisedRowEmptyPeer';
+    const getPeers = vi.spyOn(edge.node.libp2p, 'getPeers');
+    const requestReplay = vi.spyOn(replayService(edge), 'requestCatalogHeadReplay');
+
+    // The provider promises the successor: parity fails and this pass's
+    // promise set becomes the snapshot.
+    getPeers.mockReturnValue([{ toString: () => providerPeer }] as never);
+    requestReplay.mockResolvedValue(Object.freeze({
+      kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+      heads: Object.freeze([successor.announcement]),
+    }));
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual({ requested: 1, failed: 1 });
+    expect((await readStatus(edge)).stableReason).toBe('catalog-replay-incomplete');
+
+    // The provider stops answering and another peer promises nothing. The pass
+    // passes parity and clears the witness, but it lost the provider's answer,
+    // so it may only add to the snapshot: the promise survives.
+    getPeers.mockReturnValue([
+      { toString: () => providerPeer },
+      { toString: () => emptyPeer },
+    ] as never);
+    requestReplay.mockImplementation(async ({ remotePeerId }) => {
+      if (remotePeerId === providerPeer) {
+        throw new Rfc64PublicCatalogTransportErrorV1(
+          'catalog-transport-wire',
+          'provider unreachable',
+        );
+      }
+      return Object.freeze({
+        kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
+        heads: Object.freeze([]),
+      });
+    });
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(
+      CONTEXT_GRAPH_ID,
+    )).resolves.toEqual({ requested: 1, failed: 1 });
+
+    // Nothing blocks the graph and nothing is applying the successor -- the
+    // target tracker never saw it -- so only the row gap keeps it off
+    // `complete`.
+    expect(await readStatus(edge)).toMatchObject({
+      phase: 'known-incomplete',
+      stableReason: null,
+      expectedRowCount: '1',
+      appliedRowCount: '0',
+      missingRowCount: '1',
+      providerHealth: expect.objectContaining({
+        candidateCount: 0,
+        unresolvedReplayPeers: 1,
+      }),
     });
   });
 
