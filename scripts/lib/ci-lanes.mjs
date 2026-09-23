@@ -22,6 +22,7 @@ export const TEST_LANE_METADATA = Object.freeze({
   'browser-local': { layer: 'browser', prerequisites: [...SYSTEM_PREREQUISITES, 'Playwright Chromium'] },
   devnet: { layer: 'system', prerequisites: SYSTEM_PREREQUISITES },
   'tornado-blazegraph': { layer: 'system', prerequisites: ['built runtime packages', 'native Oxigraph binary', 'BLAZEGRAPH_TEST_URL'] },
+  'inventory-windows': { layer: 'unit/component', prerequisites: ['pnpm frozen install', 'Git'] },
   archive: { layer: 'historical', prerequisites: [] },
   scripts: { layer: 'repository tooling', prerequisites: UNIT_PREREQUISITES },
   demo: { layer: 'system', prerequisites: SYSTEM_PREREQUISITES },

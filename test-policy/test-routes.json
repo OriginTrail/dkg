@@ -51,12 +51,7 @@
     "lane": "inventory-windows",
     "reason": "Gate 0 evidence-encoder, child-process cleanup and verifier unit tests run on the Windows inventory evidence leg before generation and on the Linux tornado-agent Gate 1 shard, which also runs the POSIX-only cases",
     "cadence": "required",
-    "command": "pnpm test:gate0:rfc64-persistence-lifecycle:unit",
-    "layer": "unit/component",
-    "prerequisites": [
-      "pnpm frozen install",
-      "Git"
-    ]
+    "command": "pnpm test:gate0:rfc64-persistence-lifecycle:unit"
   },
   {
     "pattern": "devnet/**",
