@@ -298,12 +298,16 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-// Compares the base and head copies of a modified workspace manifest. Any
-// missing reader, unreadable side or unparseable JSON fails closed.
+// Compares the base and head copies of a modified workspace manifest and
+// says what changed, leaving the wording to manifestReason: 'package-scoped'
+// (with the changed fields) routes to the workspace; 'install-inputs' (fields,
+// or install lifecycle scripts) and 'uncomparable' (with the problem) keep
+// full CI. Any missing reader, unreadable side or malformed JSON is
+// uncomparable, and the problem keeps the underlying error so a fail-closed
+// plan explains itself.
 function classifyManifestChange(filePath, readManifest) {
-  if (typeof readManifest !== 'function') {
-    return { packageScoped: false, detail: `${filePath} contents are unavailable to the planner` };
-  }
+  const uncomparable = (problem) => ({ outcome: 'uncomparable', problem });
+  if (typeof readManifest !== 'function') return uncomparable('contents are unavailable to the planner');
   let texts;
   let before;
   let after;
@@ -311,43 +315,37 @@ function classifyManifestChange(filePath, readManifest) {
     texts = { base: readManifest('base', filePath), head: readManifest('head', filePath) };
     before = JSON.parse(texts.base);
     after = JSON.parse(texts.head);
-  } catch {
-    return { packageScoped: false, detail: `${filePath} could not be read and compared` };
+  } catch (error) {
+    return uncomparable(`could not be read and parsed: ${String(error?.message ?? error).split('\n')[0]}`);
   }
   // git reports the manifest as modified, so identical text means the compared
   // commits are not the diff being routed.
-  if (texts.base === texts.head) {
-    return { packageScoped: false, detail: `${filePath} is identical in both compared commits although the diff modifies it` };
-  }
-  if (!isPlainObject(before) || !isPlainObject(after)) {
-    return { packageScoped: false, detail: `${filePath} is not a JSON object` };
-  }
+  if (texts.base === texts.head) return uncomparable('is identical in both compared commits although the diff modifies it');
+  if (!isPlainObject(before) || !isPlainObject(after)) return uncomparable('is not a JSON object');
 
   const changedFields = [...new Set([...Object.keys(before), ...Object.keys(after)])]
     .filter((field) => !isDeepStrictEqual(before[field], after[field]))
     .sort();
   const installFields = changedFields.filter((field) => !PACKAGE_SCOPED_MANIFEST_FIELDS.has(field));
-  if (installFields.length) {
-    return { packageScoped: false, detail: `${filePath} changed ${installFields.join(', ')}` };
-  }
+  if (installFields.length) return { outcome: 'install-inputs', fields: installFields };
   const scripts = { before: before.scripts ?? {}, after: after.scripts ?? {} };
   if (!isPlainObject(scripts.before) || !isPlainObject(scripts.after)) {
-    return { packageScoped: false, detail: `${filePath} scripts is not a JSON object` };
+    return uncomparable('scripts is not a JSON object');
   }
   const lifecycleScripts = [...new Set([...Object.keys(scripts.before), ...Object.keys(scripts.after)])]
     .filter((name) => isInstallLifecycleScript(name))
     .filter((name) => !isDeepStrictEqual(scripts.before[name], scripts.after[name]))
     .sort();
-  if (lifecycleScripts.length) {
-    return {
-      packageScoped: false,
-      detail: `${filePath} changed install lifecycle scripts ${lifecycleScripts.join(', ')}`,
-    };
-  }
-  return {
-    packageScoped: true,
-    detail: `${filePath} changed ${changedFields.join(', ') || 'formatting only'}`,
-  };
+  if (lifecycleScripts.length) return { outcome: 'install-inputs', scripts: lifecycleScripts };
+  return { outcome: 'package-scoped', fields: changedFields };
+}
+
+// The plan reason for a modified workspace manifest, worded in one place.
+function manifestReason(filePath, { outcome, fields = [], scripts, problem }) {
+  if (outcome === 'uncomparable') return `Workspace manifest could not be compared: ${filePath} ${problem}`;
+  const change = scripts ? `install lifecycle scripts ${scripts.join(', ')}` : fields.join(', ') || 'formatting only';
+  const kind = outcome === 'install-inputs' ? 'Workspace manifest changed install inputs' : 'Package-scoped manifest change';
+  return `${kind}: ${filePath} changed ${change}`;
 }
 
 function workspaceForPath(filePath) {
@@ -414,10 +412,8 @@ function routePath(filePath, { modifiedFiles, readManifest }) {
     if (filePath === `${workspace}/package.json`) {
       if (!modifiedFiles.has(filePath)) return fullRoute(`Workspace manifest added, removed or moved: ${filePath}`);
       const manifestChange = classifyManifestChange(filePath, readManifest);
-      if (!manifestChange.packageScoped) {
-        return fullRoute(`Workspace manifest changed install inputs: ${manifestChange.detail}`);
-      }
-      reasons.push(`Package-scoped manifest change: ${manifestChange.detail}`);
+      if (manifestChange.outcome !== 'package-scoped') return fullRoute(manifestReason(filePath, manifestChange));
+      reasons.push(manifestReason(filePath, manifestChange));
     } else if (filePath.endsWith('/package.json')) {
       // A manifest below a workspace root is its own pnpm workspace
       // (packages/cli/test-fixtures/*), so it is an install input too.
