@@ -456,22 +456,27 @@ function createRouteEvmProvider(
 // liveness check: on a multi-million-row namespace it can occupy the store for
 // seconds and compete directly with sync. Normal /api/status polling therefore
 // never starts it. Operators may request a background refresh explicitly with
-// `?includeStoreQuads=true`; subsequent ordinary status calls can reuse the
-// cached value without touching the store. Cold/stale explicit callers get the
-// current snapshot while one refresh runs in the background, so status never
-// waits on the count.
+// `?includeStoreQuads=true` (`dkg status` does); subsequent ordinary status
+// calls can reuse the cached value without touching the store. Cold/stale
+// explicit callers get the current snapshot while one refresh runs in the
+// background, so status never waits on the count.
+// Every snapshot names its status, so a count nobody has requested yet
+// ('not-requested') cannot be read as an unreachable store, and carries the
+// age of the cached result, because ordinary polling never refreshes it.
 // Local backends bypass this entirely (file-bytes metric stays on the
 // metrics collector tick).
 const STORE_QUADS_CACHE_TTL_MS = 30_000;
-type StoreQuadsStatus = 'pending' | 'ready' | 'unreachable';
+type StoreQuadsStatus = 'not-requested' | 'pending' | 'ready' | 'unreachable';
 interface StoreQuadsSnapshot {
   value: number | null;
   status: StoreQuadsStatus;
+  /** Daemon-clock ms since the cached result was recorded; null before one exists. */
+  ageMs: number | null;
 }
 
 let storeQuadsCache: {
   value: number | null;
-  status: Exclude<StoreQuadsStatus, 'pending'>;
+  status: Extract<StoreQuadsStatus, 'ready' | 'unreachable'>;
   fetchedAt: number;
 } | null = null;
 let storeQuadsInflight: Promise<void> | null = null;
@@ -482,17 +487,25 @@ export function invalidateExternalStoreQuadsCache(): void {
   storeQuadsInflight = null;
 }
 
+function snapshotStoreQuadsCache(
+  cache: NonNullable<typeof storeQuadsCache>,
+  now: number,
+): StoreQuadsSnapshot {
+  // Clamped so a wall-clock step backwards cannot report a negative age.
+  return { value: cache.value, status: cache.status, ageMs: Math.max(0, now - cache.fetchedAt) };
+}
+
 function getCachedExternalStoreQuads(
   agent: DKGAgent,
   now: number,
 ): StoreQuadsSnapshot {
   if (storeQuadsCache && now - storeQuadsCache.fetchedAt < STORE_QUADS_CACHE_TTL_MS) {
-    return { value: storeQuadsCache.value, status: storeQuadsCache.status };
+    return snapshotStoreQuadsCache(storeQuadsCache, now);
   }
 
   const currentSnapshot: StoreQuadsSnapshot = storeQuadsCache
-    ? { value: storeQuadsCache.value, status: storeQuadsCache.status }
-    : { value: null, status: 'pending' };
+    ? snapshotStoreQuadsCache(storeQuadsCache, now)
+    : { value: null, status: 'pending', ageMs: null };
   if (!storeQuadsInflight) {
     const refresh = (async () => {
       try {
@@ -527,9 +540,14 @@ function getCachedExternalStoreQuads(
   return currentSnapshot;
 }
 
-function peekCachedExternalStoreQuads(): StoreQuadsSnapshot | null {
-  if (!storeQuadsCache) return null;
-  return { value: storeQuadsCache.value, status: storeQuadsCache.status };
+// Ordinary polling: report what is already known and never start a count.
+function peekCachedExternalStoreQuads(now: number): StoreQuadsSnapshot {
+  if (storeQuadsCache) return snapshotStoreQuadsCache(storeQuadsCache, now);
+  return {
+    value: null,
+    status: storeQuadsInflight ? 'pending' : 'not-requested',
+    ageMs: null,
+  };
 }
 
 async function getRegistryCacheSnapshot(): Promise<RegistryCacheSnapshot> {
@@ -743,10 +761,11 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       isExternalBackend(config.store?.backend) || config.store?.backend === 'oxigraph-server';
     const includeStoreQuads = url.searchParams.get('includeStoreQuads') === 'true'
       || url.searchParams.get('includeStoreQuads') === '1';
+    const storeQuadsNow = Date.now();
     const storeQuadsSnapshot = reportsExternalStoreQuads
       ? includeStoreQuads
-        ? getCachedExternalStoreQuads(agent, Date.now())
-        : peekCachedExternalStoreQuads()
+        ? getCachedExternalStoreQuads(agent, storeQuadsNow)
+        : peekCachedExternalStoreQuads(storeQuadsNow)
       : null;
     const backpressure = backpressureRegistry.capture();
     // RFC-41 §4.9 + §4.3: expose build-info + installMode for
@@ -806,7 +825,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       networkName: network?.networkName ?? null,
       storeBackend: config.store?.backend ?? "oxigraph-worker",
       // External backend visibility (RFC 120 / plan PR 1 item 3). For
-      // local backends the URL/count stay null and count status is omitted.
+      // local backends the URL/count stay null and count status/age are omitted.
       storeUrl: isExternalBackend(config.store?.backend)
         ? (() => {
             const opts = (config.store?.options ?? {}) as Record<string, unknown>;
@@ -831,8 +850,12 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // for that backend (getStoreBytes is null, there's no store.nq), and a
       // failed query here is how operators see the managed server is down
       // (e.g. after a failed revive) instead of it always looking healthy.
+      // `storeQuadsStatus` says what a null count means ('not-requested',
+      // 'pending', 'unreachable'); `storeQuadsAgeMs` is how old the cached
+      // result is, since ordinary polling never refreshes it.
       storeQuads: storeQuadsSnapshot?.value ?? null,
       storeQuadsStatus: storeQuadsSnapshot?.status,
+      storeQuadsAgeMs: storeQuadsSnapshot?.ageMs,
       uptimeMs: Date.now() - startedAt,
       // Concurrency admission control (PR #1209): inFlight = requests currently
       // holding a slot, max = the configured cap (0 = disabled), rejectedTotal =

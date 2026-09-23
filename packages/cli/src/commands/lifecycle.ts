@@ -29,7 +29,7 @@ import {
   readNodeRoleFromConfigSync,
   type AutoUpdateConfig,
 } from '../config.js';
-import { ApiClient } from '../api-client.js';
+import { ApiClient, type DaemonStatusResponse } from '../api-client.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
@@ -129,6 +129,31 @@ export async function executeStopCommand(
     dependencies.log('Daemon stopping...');
   });
   return reportDaemonShutdownResult(result, dependencies);
+}
+
+// A display threshold, deliberately independent of the daemon's cache TTL:
+// past it `dkg status` says how old the store count it prints is.
+const STORE_QUADS_SHOW_AGE_AFTER_MS = 60_000;
+
+/**
+ * The quad-count part of the `dkg status` store line. A daemon that reports
+ * `storeQuadsStatus` says what a missing count means; only an older daemon
+ * that omits it keeps the legacy reading of `null` as unreachable.
+ */
+function formatStoreQuads(
+  s: Pick<DaemonStatusResponse, 'storeQuads' | 'storeQuadsStatus' | 'storeQuadsAgeMs'>,
+): string {
+  const status: string | undefined = s.storeQuadsStatus;
+  if (status === 'pending') return 'CHECKING';
+  if (status === 'not-requested') return 'NOT CHECKED';
+  const age = typeof s.storeQuadsAgeMs === 'number' && s.storeQuadsAgeMs >= STORE_QUADS_SHOW_AGE_AFTER_MS
+    ? ` (checked ${formatUptime(s.storeQuadsAgeMs)} ago)`
+    : '';
+  if (status === 'unreachable') return `UNREACHABLE${age}`;
+  if (typeof s.storeQuads === 'number') return `${s.storeQuads.toLocaleString()} quads${age}`;
+  // A status this CLI does not know comes from a newer daemon, for which a
+  // null count no longer implies an unreachable store.
+  return status === undefined ? 'UNREACHABLE' : 'UNKNOWN';
 }
 
 export function registerLifecycleCommands(program: Command): void {
@@ -300,7 +325,10 @@ program
   .action(async () => {
     try {
       const client = await ApiClient.connect({ allowConfigFallback: true });
-      const s = await client.status();
+      // An operator running `dkg status` is the explicit request the daemon
+      // waits for before spending a full-store COUNT; plain /api/status
+      // polling only ever reads the cached count.
+      const s = await client.status({ includeStoreQuads: true });
       const uptime = formatUptime(s.uptimeMs);
       console.log(`  Node:      ${s.name}`);
       console.log(`  Role:      ${s.nodeRole ?? 'edge'}`);
@@ -314,17 +342,11 @@ program
       // bytes are graphed via /api/dashboard); external backends print
       // backend + endpoint + quad count, falling back to a clear
       // "unreachable" signal when the daemon couldn't talk to the
-      // remote store. A new daemon marks the initial background count
-      // as pending so it renders as CHECKING; absent that marker, null
-      // retains its legacy unreachable meaning for older daemons.
+      // remote store. The first request on a cold daemon starts the count
+      // and renders as CHECKING (see formatStoreQuads).
       const backend = s.storeBackend ?? 'oxigraph-worker';
       if (s.storeUrl) {
-        const quads = s.storeQuadsStatus === 'pending'
-          ? 'CHECKING'
-          : s.storeQuads == null
-            ? 'UNREACHABLE'
-            : `${s.storeQuads.toLocaleString()} quads`;
-        console.log(`  Store:     ${backend} (${s.storeUrl}) — ${quads}`);
+        console.log(`  Store:     ${backend} (${s.storeUrl}) — ${formatStoreQuads(s)}`);
       } else {
         console.log(`  Store:     ${backend}`);
       }
