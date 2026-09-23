@@ -64,9 +64,10 @@ test('package-scoped manifest edits route to their workspace; install inputs sta
     scripts: { build: 'tsc', test: 'vitest run' },
     dependencies: { ethers: '^6.13.0' },
   };
-  const manifestPlan = (head, entries = [change('packages/agent/package.json')]) => pullRequestPlan(entries, {
-    readManifest: (side) => JSON.stringify(side === 'base' ? manifest : head),
+  const manifestPlan = (head, entries = [change('packages/agent/package.json')], base = manifest) => pullRequestPlan(entries, {
+    readManifest: (side) => JSON.stringify(side === 'base' ? base : head),
   });
+  const without = (object, field) => Object.fromEntries(Object.entries(object).filter(([key]) => key !== field));
   const sourcePlan = pullRequestPlan([change('packages/agent/src/agent.ts')]);
 
   for (const head of [
@@ -89,6 +90,11 @@ test('package-scoped manifest edits route to their workspace; install inputs sta
     [{ ...manifest, devDependencies: { tsx: '^4.0.0' } }, /changed devDependencies$/],
     [{ ...manifest, type: 'commonjs' }, /changed type$/],
     [{ ...manifest, bin: { dkg: './dist/cli.js' } }, /changed bin$/],
+    [{ ...manifest, directories: { bin: './bin' } }, /changed directories$/],
+    [{ ...manifest, name: '@origintrail-official/dkg-agent-next' }, /changed name$/],
+    // A field only the base has changed too.
+    [without(manifest, 'dependencies'), /changed dependencies$/],
+    [without(manifest, 'type'), /changed type$/],
     [{ ...manifest, pnpm: { overrides: {} } }, /changed pnpm$/],
     [{ ...manifest, engines: { node: '>=22' } }, /changed engines$/],
     [{ ...manifest, somethingNew: true }, /changed somethingNew$/],
@@ -106,6 +112,10 @@ test('package-scoped manifest edits route to their workspace; install inputs sta
     assert.equal(plan.mode, 'full', String(reason));
     assert.match(plan.reasons[0], reason);
   }
+  const withHook = { ...manifest, scripts: { ...manifest.scripts, postinstall: 'node setup.js' } };
+  const removedHook = manifestPlan(manifest, undefined, withHook);
+  assert.equal(removedHook.mode, 'full', 'removing an install hook');
+  assert.match(removedHook.reasons[0], /install lifecycle scripts postinstall$/);
 
   const agentManifest = [change('packages/agent/package.json')];
   for (const readManifest of [

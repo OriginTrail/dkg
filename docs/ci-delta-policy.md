@@ -27,7 +27,7 @@ CI whenever it cannot prove that a smaller plan is safe.
 | `evm-module` | Full Node/EVM CI; Solidity only for the established contract-relevant paths |
 | Root dependency/build config, lockfile, CI control-plane workflows (`ci.yml`, `evm-integration.yml`, `rfc64-inventory-windows.yml`), any nested path under `.github/workflows/`, composite actions, planner, or any `scripts/` file | Full Node/EVM CI; Solidity only when its independent path filter matches |
 | Workspace `package.json` changing only package-scoped fields (`exports`, `scripts` other than install hooks, `version`, `files`, metadata) | Same lanes as a source change in that workspace |
-| Workspace `package.json` changing dependencies, `pnpm`/overrides, `engines`, `bin`, `name`, `type`, install-time scripts (npm install/prepare lifecycle, `prepublish`, `dependencies`, any `pnpm:` hook) or unknown fields; added, removed or moved manifests; root and `devnet/*` manifests | Full CI because the install or dependency graph may differ |
+| Workspace `package.json` changing dependencies, `pnpm`/overrides, `engines`, `bin`, `directories`, `name`, `type`, install-time scripts (npm install/prepare lifecycle, `prepublish`, `dependencies`, any `pnpm:` hook) or unknown fields; added, removed or moved manifests; root and `devnet/*` manifests | Full CI because the install or dependency graph may differ |
 | Deletion, rename or copy | Routed by every old and new path, like edits |
 | Type change, unmerged or unknown git status, unknown path, or no diff | Full CI |
 | Several workspaces | Union of their rules |
