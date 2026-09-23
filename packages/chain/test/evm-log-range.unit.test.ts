@@ -27,7 +27,9 @@ import {
 import {
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
+  isThrottleRpcError,
 } from '../src/evm-adapter-rpc.js';
+import { errorRetryAfterMs } from '../src/evm-adapter-errors.js';
 import {
   BASE_SPAN_CAP_REFUSAL,
   DRPC_FREE_PLAN_REFUSAL,
@@ -685,5 +687,142 @@ describe('readAdaptiveEvmLogRange keeps configured RPC URLs out of its errors an
       `eth_getLogs [1, 2000] is beyond the history, archive or plan limit at ${HOST}: `
         + 'Archive requests require a personal token. Get one at: www.allnodes.com',
     );
+  });
+});
+
+describe('readAdaptiveEvmLogRange keeps configured RPC URLs out of the errors it does not classify', () => {
+  // A fake key in both the path and the query.
+  const KEYED_URL = 'https://rpc.example.invalid/v2/FAKEKEY123?apikey=FAKEKEY123';
+  const HOST = 'rpc.example.invalid';
+  const LEAK = /FAKEKEY123|\/v2\/|apikey=/;
+
+  /**
+   * One read of [1, 2000] from a keyed endpoint that refuses it. Returns the
+   * raw ethers error for the same request, the reader's error, the ranges the
+   * reader asked for, and everything printed while it ran.
+   */
+  async function unclassifiedRead(refusal: FakeLogRpcRefusal) {
+    const printers = (['log', 'warn', 'error'] as const)
+      .map((level) => vi.spyOn(console, level).mockImplementation(() => {}));
+    const rpc = fakeLogRpc({ url: KEYED_URL, head: () => HEAD, refuse: () => refusal });
+    const read = (from: number, to: number) => rpc.provider.getLogs({ fromBlock: from, toBlock: to });
+    try {
+      const raw = await read(1, 2_000).catch((e: unknown) => e);
+      rpc.requests.length = 0;
+      const err = await readAdaptiveEvmLogRange({ provider: rpc.provider, read, fromBlock: 1, toBlock: 2_000 })
+        .catch((e: unknown) => e);
+      const printed = printers
+        .flatMap((printer) => printer.mock.calls.map((call) => call.map(String).join(' ')))
+        .join('\n');
+      return { raw, err, ranges: rpc.logRanges(), printed };
+    } finally {
+      rpc.provider.destroy();
+    }
+  }
+
+  it.each([
+    [
+      'an HTML 401 page',
+      {
+        httpStatus: 401,
+        contentType: 'text/html',
+        rawBody: '<html><body><h1>401 Unauthorized</h1><p>Invalid API key.</p></body></html>',
+      },
+    ],
+    [
+      'an HTML 403 page with no archive wording',
+      {
+        httpStatus: 403,
+        contentType: 'text/html',
+        rawBody: '<html><body><h1>403 Forbidden</h1><p>Access denied.</p></body></html>',
+      },
+    ],
+    ['a text 429', { httpStatus: 429, rawBody: 'Too Many Requests' }],
+    // A JSON-RPC body does not help: any HTTP error status puts the URL in
+    // ethers' message.
+    ['a JSON-RPC 401', { httpStatus: 401, rpcError: { code: -32001, message: 'invalid API key' } }],
+    [
+      'an HTML 502 page',
+      {
+        httpStatus: 502,
+        contentType: 'text/html',
+        rawBody: '<html><body><h1>502 Bad Gateway</h1></body></html>',
+      },
+    ],
+  ] as const)('rethrows %s by host only, and it still fails over', async (_name, refusal) => {
+    const { raw, err, ranges, printed } = await unclassifiedRead(refusal);
+
+    // ethers' own message quotes the full request URL, key included, and the
+    // classifier does not recognise the page: this is the rethrow path.
+    expect((raw as Error).message).toContain(KEYED_URL);
+    expect(classifyEvmLogRangeLimitError(raw, 2_000)).toBeUndefined();
+
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(EvmLogRangeUnavailableError);
+    const message = (err as Error).message;
+    expect(message).not.toMatch(LEAK);
+    expect(message).toMatch(new RegExp(`^server response ${refusal.httpStatus} `));
+    expect(message).toContain(`"requestUrl": "${HOST}"`);
+    expect(printed).not.toMatch(LEAK);
+    // Every failover and retry classifier reads it as it read the provider's error.
+    expect((err as { code?: unknown }).code).toBe('SERVER_ERROR');
+    expect(classifyRpcRetryDisposition(err)).toBe('failover');
+    expect(classifyRpcRetryDisposition(err)).toBe(classifyRpcRetryDisposition(raw));
+    expect(isThrottleRpcError(err)).toBe(refusal.httpStatus === 429);
+    // The provider's own error stays attached for diagnosis.
+    const cause = (err as { cause?: unknown }).cause as { code?: unknown; message?: unknown };
+    expect(cause.code).toBe('SERVER_ERROR');
+    expect(cause.message).toContain(KEYED_URL);
+    // An unclassified refusal costs one request: never split, never repeated.
+    expect(ranges).toEqual([[1, 2_000]]);
+  });
+
+  it('keeps a throttled refusal\'s Retry-After readable through the rethrown error', async () => {
+    const { err } = await unclassifiedRead({ httpStatus: 429, rawBody: 'Too Many Requests', retryAfterSeconds: 7 });
+    expect((err as Error).message).not.toMatch(LEAK);
+    expect(isThrottleRpcError(err)).toBe(true);
+    expect(errorRetryAfterMs(err)).toBe(7_000);
+  });
+
+  it('rethrows a JSON-RPC error whose own words quote the configured URL by host only', async () => {
+    const { raw, err, ranges, printed } = await unclassifiedRead({
+      rpcError: { code: -32000, message: `invalid API key for ${KEYED_URL}` },
+    });
+    expect((raw as Error).message).toContain(KEYED_URL);
+    const message = (err as Error).message;
+    expect(message).not.toMatch(LEAK);
+    expect(message).toContain(`invalid API key for ${HOST}`);
+    expect(printed).not.toMatch(LEAK);
+    expect((err as { code?: unknown }).code).toBe((raw as { code?: unknown }).code);
+    expect(classifyRpcRetryDisposition(err)).toBe(classifyRpcRetryDisposition(raw));
+    expect(ranges).toEqual([[1, 2_000]]);
+  });
+
+  it('keeps the name and code of a transport error it rewrites', async () => {
+    const reset = Object.assign(new TypeError(`fetch failed: socket closed by ${KEYED_URL}`), { code: 'ECONNRESET' });
+    const err = await readAdaptiveEvmLogRange({
+      provider: {},
+      read: async () => { throw reset; },
+      fromBlock: 1,
+      toBlock: 2_000,
+    }).catch((e: unknown) => e);
+    expect((err as Error).message).toBe(`fetch failed: socket closed by ${HOST}`);
+    expect((err as Error).name).toBe('TypeError');
+    expect((err as { code?: unknown }).code).toBe('ECONNRESET');
+    expect((err as { cause?: unknown }).cause).toBe(reset);
+    expect(classifyRpcRetryDisposition(err)).toBe('failover');
+  });
+
+  it('rethrows an error with no URL in it as the very same object', async () => {
+    const timeout = Object.assign(new Error('eth_getLogs [1, 2000] timed out after 30000ms'), { code: 'RPC_TIMEOUT' });
+    const aborted = new DOMException('This operation was aborted', 'AbortError');
+    for (const failure of [timeout, aborted]) {
+      await expect(readAdaptiveEvmLogRange({
+        provider: {},
+        read: async () => { throw failure; },
+        fromBlock: 1,
+        toBlock: 2_000,
+      })).rejects.toBe(failure);
+    }
   });
 });

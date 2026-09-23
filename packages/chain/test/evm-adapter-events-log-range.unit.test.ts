@@ -17,7 +17,12 @@ import { EVMChainAdapter } from '../src/evm-adapter.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import { RPC_LOG_SCAN_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import type { ChainEvent } from '../src/chain-adapter.js';
-import { baseDefaultRpcSet, fakeLogRpc, type FakeRpcLog } from './helpers/fake-log-rpc.js';
+import {
+  baseDefaultRpcSet,
+  fakeLogRpc,
+  type FakeLogRpc,
+  type FakeRpcLog,
+} from './helpers/fake-log-rpc.js';
 
 const DEPLOYER_PK = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 const CG_STORAGE = '0x1B37447CC735Ab8Ac29f057c8874087Fe9A98154';
@@ -61,24 +66,30 @@ const LOGS: readonly FakeRpcLog[] = [
 
 type RpcSet = ReturnType<typeof baseDefaultRpcSet>;
 
-function makeAdapter(set: RpcSet | { primary: ReturnType<typeof fakeLogRpc> }) {
+/** The default set in its configured order: the primary, then the two backups. */
+const inOrder = (set: RpcSet): FakeLogRpc[] => [set.primary, set.publicnode, set.drpc];
+
+/**
+ * The real adapter over scripted endpoints, configured with each endpoint's own
+ * URL in the order given (the first is the primary). The URLs must be distinct:
+ * the adapter drops a repeated one.
+ */
+function makeAdapter(endpoints: readonly FakeLogRpc[]): EVMChainAdapter {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const adapter: any = new EVMChainAdapter({
-    rpcUrl: 'https://mainnet.base.org',
-    rpcUrls: 'publicnode' in set ? ['https://base-rpc.publicnode.com', 'https://base.drpc.org'] : [],
+    rpcUrl: endpoints[0]!.url,
+    rpcUrls: endpoints.slice(1).map((endpoint) => endpoint.url),
     privateKey: DEPLOYER_PK,
     hubAddress: '0x0000000000000000000000000000000000000001',
     chainId: 'base:8453',
     staticNetwork: false,
   });
   for (const unused of adapter.providers as ethers.JsonRpcProvider[]) unused.destroy();
-  adapter.providers = 'publicnode' in set
-    ? [set.primary.provider, set.publicnode.provider, set.drpc.provider]
-    : [set.primary.provider];
+  adapter.providers = endpoints.map((endpoint) => endpoint.provider);
   adapter.initialized = true;
   adapter.init = async () => { adapter.initialized = true; };
   adapter.contracts = {
-    contextGraphStorage: new ethers.Contract(CG_STORAGE, cgInterface, set.primary.provider),
+    contextGraphStorage: new ethers.Contract(CG_STORAGE, cgInterface, endpoints[0]!.provider),
   };
   return adapter as EVMChainAdapter;
 }
@@ -104,7 +115,7 @@ describe('listenForEvents on the default Base RPC set', () => {
   it('serves a 9,000-block page through the primary\'s 2,000-block cap, then starts later pages at the cap', async () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     const set = baseDefaultRpcSet({ head: () => HEAD, logs: () => LOGS });
-    const adapter = makeAdapter(set);
+    const adapter = makeAdapter(inOrder(set));
     const from = HEAD - 20_000 + 1;
 
     const first = await collect(adapter, from, from + 8_999);
@@ -136,7 +147,7 @@ describe('listenForEvents on the default Base RPC set', () => {
       logs: () => LOGS,
       primaryRefuse: () => (primaryDown ? { networkError: 'fetch failed' } : undefined),
     });
-    const adapter = makeAdapter(set);
+    const adapter = makeAdapter(inOrder(set));
     primaryDown = true;
     const from = HEAD - 20_000 + 1;
 
@@ -176,7 +187,7 @@ describe('listenForEvents on the default Base RPC set', () => {
           : undefined
       ),
     });
-    const adapter = makeAdapter({ ...set, primary: slow });
+    const adapter = makeAdapter([slow, set.publicnode, set.drpc]);
     const from = HEAD - 20_000 + 1;
 
     const pending = collect(adapter, from, from + 8_999);
@@ -192,7 +203,7 @@ describe('listenForEvents on the default Base RPC set', () => {
       logs: () => LOGS,
       delay: () => new Promise(() => { /* never answers */ }),
     });
-    const hungAdapter = makeAdapter({ ...set, primary: hung });
+    const hungAdapter = makeAdapter([hung, set.publicnode, set.drpc]);
     const hungRead = collect(hungAdapter, HEAD - 900, HEAD);
     await vi.advanceTimersByTimeAsync(RPC_LOG_SCAN_TIMEOUT_MS + 1_000);
     await expect(hungRead.then(ids)).resolves.toEqual(['34']);
@@ -213,7 +224,7 @@ describe('listenForEvents on the default Base RPC set', () => {
           : undefined
       ),
     });
-    const adapter = makeAdapter({ primary });
+    const adapter = makeAdapter([primary]);
     const from = HEAD - 9_999;
 
     const pending = collect(adapter, from, from + 2_999);
@@ -228,7 +239,7 @@ describe('listenForEvents on the default Base RPC set', () => {
 
   it('passes an open-ended range straight through', async () => {
     const set = baseDefaultRpcSet({ head: () => HEAD, logs: () => LOGS, recentBlocks: 100_000 });
-    const adapter = makeAdapter(set);
+    const adapter = makeAdapter(inOrder(set));
     const events: ChainEvent[] = [];
     for await (const event of adapter.listenForEvents({
       eventTypes: ['ContextGraphCreated'],
@@ -262,25 +273,10 @@ describe('listenForEvents keeps configured RPC URLs out of errors and logs', () 
       logs: () => LOGS,
       refuse: () => archivePage,
     }));
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const adapter: any = new EVMChainAdapter({
-      rpcUrl: urls[0]!,
-      rpcUrls: urls.slice(1),
-      privateKey: DEPLOYER_PK,
-      hubAddress: '0x0000000000000000000000000000000000000001',
-      chainId: 'base:8453',
-      staticNetwork: false,
-    });
-    for (const unused of adapter.providers as ethers.JsonRpcProvider[]) unused.destroy();
-    adapter.providers = endpoints.map((endpoint) => endpoint.provider);
-    adapter.initialized = true;
-    adapter.init = async () => { adapter.initialized = true; };
-    adapter.contracts = {
-      contextGraphStorage: new ethers.Contract(CG_STORAGE, cgInterface, endpoints[0]!.provider),
-    };
+    const adapter = makeAdapter(endpoints);
     const from = HEAD - 20_000 + 1;
 
-    const err = await collect(adapter as EVMChainAdapter, from, from + 8_999).catch((e: unknown) => e);
+    const err = await collect(adapter, from, from + 8_999).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(Error);
     const message = (err as Error).message;
@@ -303,5 +299,103 @@ describe('listenForEvents keeps configured RPC URLs out of errors and logs', () 
       [[from, from + 8_999]],
       [[from, from + 8_999]],
     ]);
+  });
+
+  describe('for refusals the log-range classifier does not recognise', () => {
+    // Fake keys in the path and the query.
+    const PRIMARY_URL = 'https://rpc.example.invalid/v2/FAKEKEY123?apikey=FAKEKEY123';
+    const BACKUP_URL = 'https://backup.example.invalid/?apikey=FAKEKEY123';
+    const LEAK = /FAKEKEY123|\/v2\/|apikey=/;
+    const page = (httpStatus: number, text: string) => ({
+      httpStatus,
+      contentType: 'text/html',
+      rawBody: `<html><body><h1>${httpStatus} ${text}</h1></body></html>`,
+    });
+    const keyed = (url: string, refusal: ReturnType<typeof page>) => fakeLogRpc({
+      url,
+      head: () => HEAD,
+      logs: () => LOGS,
+      refuse: () => refusal,
+    });
+
+    /** Everything `console.log` and `console.warn` printed while `run` ran. */
+    async function printedWhile(run: () => Promise<unknown>) {
+      const printers = [
+        vi.spyOn(console, 'log').mockImplementation(() => {}),
+        vi.spyOn(console, 'warn').mockImplementation(() => {}),
+      ];
+      const err = await run().catch((e: unknown) => e);
+      const printed = printers
+        .flatMap((printer) => printer.mock.calls.map((call) => call.map(String).join(' ')))
+        .join('\n');
+      return { err, printed };
+    }
+
+    it('reports them by host only, after one request per endpoint', async () => {
+      const endpoints = [
+        keyed(PRIMARY_URL, page(401, 'Unauthorized')),
+        keyed(BACKUP_URL, page(502, 'Bad Gateway')),
+      ];
+      const adapter = makeAdapter(endpoints);
+      const from = HEAD - 20_000 + 1;
+
+      const { err, printed } = await printedWhile(() => collect(adapter, from, from + 8_999));
+
+      expect(err).toBeInstanceOf(Error);
+      const message = (err as Error).message;
+      expect(message).toContain(
+        'cgStorage.queryFilter(ContextGraphCreated) read failed on all configured RPC endpoints '
+          + '(rpc.example.invalid, backup.example.invalid): server response 502 Bad Gateway',
+      );
+      expect(message).toContain('"requestUrl": "backup.example.invalid"');
+      expect(printed).toContain('via rpc.example.invalid failed');
+      for (const text of [message, printed]) expect(text).not.toMatch(LEAK);
+      // Not a range limit, so never split: one request per endpoint.
+      expect(endpoints.map((endpoint) => endpoint.logRanges())).toEqual([
+        [[from, from + 8_999]],
+        [[from, from + 8_999]],
+      ]);
+    });
+
+    it('reports a single endpoint\'s refusal by host only too', async () => {
+      const only = keyed(PRIMARY_URL, page(403, 'Forbidden'));
+      const adapter = makeAdapter([only]);
+      const from = HEAD - 20_000 + 1;
+
+      const { err, printed } = await printedWhile(() => collect(adapter, from, from + 8_999));
+
+      // With one endpoint the exhaustion error keeps the provider's own message.
+      const message = (err as Error).message;
+      expect(message).toMatch(/^server response 403 Forbidden /);
+      expect(message).toContain('"requestUrl": "rpc.example.invalid"');
+      for (const text of [message, printed]) expect(text).not.toMatch(LEAK);
+      expect(only.logRanges()).toEqual([[from, from + 8_999]]);
+    });
+
+    it('reports an open-ended scan, which skips the range reader, by host only', async () => {
+      const endpoints = [
+        keyed(PRIMARY_URL, page(401, 'Unauthorized')),
+        keyed(BACKUP_URL, page(502, 'Bad Gateway')),
+      ];
+      const adapter = makeAdapter(endpoints);
+
+      const { err, printed } = await printedWhile(async () => {
+        for await (const event of adapter.listenForEvents({
+          eventTypes: ['ContextGraphCreated'],
+          fromBlock: HEAD - 1_000,
+        })) void event;
+      });
+
+      const message = (err as Error).message;
+      expect(message).toContain(
+        'read failed on all configured RPC endpoints (rpc.example.invalid, backup.example.invalid): '
+          + 'server response 502 Bad Gateway',
+      );
+      for (const text of [message, printed]) expect(text).not.toMatch(LEAK);
+      expect(endpoints.map((endpoint) => endpoint.logRanges())).toEqual([
+        [[HEAD - 1_000, HEAD]],
+        [[HEAD - 1_000, HEAD]],
+      ]);
+    });
   });
 });
