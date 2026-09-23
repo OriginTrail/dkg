@@ -320,7 +320,15 @@ export class QueryHandler {
     // default configs, yet allowed THROUGH explicitly denied CGs whenever
     // any other public CG existed on the node.
     const denied = await this.checkContextGraphAccess('ENTITY_BY_UAL', resolved.contextGraphId, peerId);
-    if (denied) return { ...denied, operationId: opId };
+    if (denied) {
+      // Report the UAL the requester sent. The graph it resolved to is local
+      // detail the requester didn't name, and may be private.
+      return {
+        ...denied,
+        operationId: opId,
+        error: `Knowledge asset '${ual}' is not queryable on this node`,
+      };
+    }
     const ntriples = quadsToNQuads(
       resolved.quads.map((quad) => ({ ...quad, graph: '' })),
     );

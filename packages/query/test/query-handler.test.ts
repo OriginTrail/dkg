@@ -504,6 +504,9 @@ describe('QueryHandler', () => {
       );
       expect(response.status).toBe('ACCESS_DENIED');
       expect(response.ntriples).toBeUndefined();
+      // The denial reports the requested UAL, not the graph it resolved to.
+      expect(response.error).toContain('did:dkg:ual:ka-2');
+      expect(response.error).not.toContain(PRIVATE_CG);
     });
 
     it('ENTITY_BY_UAL no longer leaks THROUGH an explicitly denied CG when another public CG exists (🔴 2)', async () => {
