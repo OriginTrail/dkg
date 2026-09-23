@@ -10,7 +10,8 @@ import { loadReferences, traceLaneLoads } from './load-graph.mjs';
 
 // Path routing: what individual changed paths select on pull requests -
 // git statuses, workspace manifests, repository support areas and the
-// per-file triggers (identity wallet, Blazegraph arm64).
+// per-file triggers (identity wallet, Blazegraph arm64) - and that the lane
+// a path selects runs or loads it.
 
 test('deletions, renames and copies route every path they touch like edits', () => {
   const deleted = pullRequestPlan([change('packages/network-sim/src/removed.ts', 'D')]);
@@ -312,6 +313,17 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
     }
   }
   assert.deepEqual(missing, [], 'a change to these files must select the lane or EVM scope that loads them');
+});
+
+test('demo suites stay wired into the supporting job', () => {
+  // Demo changes route to the supporting lane, whose job runs both demo apps' suites.
+  assert.deepEqual(WORKSPACE_OWNING_LANES.demo, ['kosava_supporting']);
+  const { jobs } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
+  const supportingRuns = jobs[PRIMARY_LANE_JOBS.kosava_supporting].steps.map(({ run = '' }) => run).join('\n');
+  assert.ok(supportingRuns.includes('--filter @origintrail-official/dkg-demo'), 'demo tests must stay in CI');
+  const demoManifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'demo/package.json'), 'utf8'));
+  assert.match(demoManifest.scripts.test, /kafka-streams\/test\/\*\.mjs/);
+  assert.match(demoManifest.scripts.test, /epcis-bike\/test\/\*\.mjs/);
 });
 
 test('the load scanner sees these forms, and nothing it cannot resolve statically', () => {

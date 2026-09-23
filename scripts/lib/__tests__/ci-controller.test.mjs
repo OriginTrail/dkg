@@ -483,14 +483,6 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.match(evmWorkflow, /^  evm-gate:/m);
 });
 
-test('demo suites stay wired into the supporting job', () => {
-  const workflow = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
-  assert.ok(workflow.includes('--filter @origintrail-official/dkg-demo'), 'demo tests must stay in CI');
-  const demoManifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'demo/package.json'), 'utf8'));
-  assert.match(demoManifest.scripts.test, /kafka-streams\/test\/\*\.mjs/);
-  assert.match(demoManifest.scripts.test, /epcis-bike\/test\/\*\.mjs/);
-});
-
 test('all shared Hardhat consumers require and restore the matching artifact', () => {
   const { jobs } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
   const restorePath = './.github/actions/restore-evm-node-test-artifacts';
