@@ -190,6 +190,29 @@ describe('/api/status external-store quad count', () => {
     }
   });
 
+  it.each([
+    ['true', true],
+    ['1', true],
+    ['false', false],
+    ['0', false],
+    ['yes', false],
+  ])('treats includeStoreQuads=%s as a count request: %s', async (spelling, requestsCount) => {
+    let queryCalls = 0;
+    const { server, baseUrl } = await startStatusServer(async () => {
+      queryCalls += 1;
+      return COUNT_123;
+    });
+
+    try {
+      const response = await fetch(`${baseUrl}/api/status?includeStoreQuads=${spelling}`);
+      const body = await response.json() as StatusBody;
+      expect(body.storeQuadsStatus).toBe(requestsCount ? 'pending' : 'not-requested');
+      expect(queryCalls).toBe(requestsCount ? 1 : 0);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
   it('returns a pending cold count without waiting for the store refresh', async () => {
     const countResult = deferred<unknown>();
     const queryStarted = deferred<void>();

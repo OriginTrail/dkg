@@ -137,7 +137,11 @@ export async function executeStopCommand(
 const STORE_QUADS_SHOW_AGE_AFTER_MS = 60_000;
 // A full-store COUNT can occupy a large store for seconds, and scripts or
 // agents may run `dkg status` on a schedule, so a successful count is reused
-// until it is this old.
+// until it is this old. This is `dkg status`'s own freshness policy, separate
+// from the daemon's 30 s cache TTL (STORE_QUADS_CACHE_TTL_MS in
+// daemon/store-quads-cache.ts), which only caps how often any caller can
+// trigger a recount. Keeping the policy with its only caller needs no wire
+// parameter; the cost is the plain status read before a refresh request.
 const STORE_QUADS_REFRESH_AFTER_MS = 10 * 60_000;
 
 /**

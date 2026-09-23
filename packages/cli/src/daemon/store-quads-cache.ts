@@ -21,6 +21,10 @@ import type { StoreQuadsStatusFields } from '../status-store-quads-wire.js';
 // result carries its age, because ordinary polling never refreshes it.
 // Local backends bypass this entirely (file-bytes metric stays on the
 // metrics collector tick).
+// The TTL caps how often explicit requests can trigger a recount, whoever
+// sends them. How old a count a caller accepts is the caller's own policy:
+// `dkg status` asks for a recount once its count is ten minutes old
+// (STORE_QUADS_REFRESH_AFTER_MS in commands/lifecycle.ts).
 const STORE_QUADS_CACHE_TTL_MS = 30_000;
 
 /** A finished count, as cached. */
