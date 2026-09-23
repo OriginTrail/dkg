@@ -22,7 +22,7 @@ CI whenever it cannot prove that a smaller plan is safe.
 | Pull request, known workspace | Owning lane plus declared downstream unit/integration lanes |
 | Documentation only | Planner and aggregate gates only. A document a test reads (`RELEASE_PROCESS.md`, `packages/query/README.md`) is a CI input instead: its `PATH_TRIGGERS` entry selects the lane that reads it |
 | Agent lane | Also the Blazegraph lane: that job runs the agent's live Blazegraph suites, and `ci.yml` starts it for either lane |
-| A file another package's code or tests load by relative path, outside declared dependencies | The loading lane or EVM scope too, through `PATH_TRIGGERS` or the file's own workspace rule (for example the agent lane for the CLI markdown extractor, the chain scope for the identity-wallet code its node-ui suite loads) |
+| A file another package's code or tests load by relative path, outside declared dependencies | The loading lane or EVM scope too, through `PATH_TRIGGERS` or the file's own workspace rule (for example the agent lane for the CLI markdown extractor, the node-ui lane for the CLI daemon sources its tests scan, the chain scope for the identity-wallet code its node-ui suite loads) |
 | `core` / `rdf-utils` | All downstream Node and real-EVM lanes |
 | `evm-module` | Full Node/EVM CI; Solidity only for the established contract-relevant paths |
 | Root dependency/build config, lockfile, CI control-plane workflows (`ci.yml`, `evm-integration.yml`, `rfc64-inventory-windows.yml`), any nested path under `.github/workflows/`, composite actions, planner, or any `scripts/` file | Full Node/EVM CI; Solidity only when its independent path filter matches |
@@ -59,8 +59,10 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
 - Shared packages run conservative reverse consumers and explicit integrations;
   this includes undeclared edges such as committed EVM ABIs consumed by `chain`
   and the real devnet used by node-UI E2E. Beyond declared dependencies, a
-  routing test follows every relative reference (imports, dynamic imports and
-  `new URL(...)` paths, documents included) from the files each lane runs,
+  routing test follows every relative reference (imports, dynamic imports,
+  `new URL(...)` paths and paths built with `path.resolve`/`join` from a file's
+  own directory, documents included; a built directory counts when the file
+  walks it) from the files each lane runs,
   across packages and support areas, and fails when a file it reaches does not
   select that lane or EVM scope. Where that reach enters another package, the
   workspaces it imports by package name (and their dependencies) must select

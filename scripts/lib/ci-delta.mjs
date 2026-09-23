@@ -181,7 +181,9 @@ export const WORKSPACE_RULES = Object.freeze({
     evmScopes: ['chain', 'agent'],
   },
   'packages/cli': {
-    lanes: ['bura_cli', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
+    // kosava_node_ui: node-ui tests scan the CLI daemon sources
+    // (packages/node-ui/test/helpers/read-cli-daemon.ts).
+    lanes: ['bura_cli', 'kosava_node_ui', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/node-ui': {

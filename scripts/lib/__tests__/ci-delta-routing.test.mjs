@@ -225,7 +225,11 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   // a test reads), in other packages and support areas alike. Only module
   // loads carry on to what the loaded file imports; any other `new URL(...)`
   // path (a document read, a process to spawn) is loaded but not followed, and
-  // type-only imports are erased before anything runs. A package-name import
+  // so is a path a file builds with path.resolve/join from its own directory
+  // and literal segments; a directory built that way counts only when the file
+  // walks directories (readdir), since otherwise it names a location rather
+  // than contents. Type-only imports are erased before anything runs, and a
+  // path built at run time from variables is out of reach. A package-name import
   // loads that workspace and its dependencies, so wherever a lane's reach
   // crosses into another package, the workspaces that package imports must
   // select the lane too. Each file reached must select the lane or scope, or
@@ -246,14 +250,38 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
     ].find(isFile) ?? target;
   };
   const packagePattern = /(?:\bfrom\s*|\bimport\s*\(\s*)['"](@origintrail-official\/[a-z0-9-]+)(?:\/[^'"]*)?['"]/g;
+  const joinPattern = /(?:\b(?:const|let)\s+([\w$]+)\s*=\s*)?(?:\bpath\.)?\b(?:resolve|join)\(\s*([\w$]+)\s*((?:,\s*(?:'[^']*'|"[^"]*"))+)\s*\)/g;
+  const builtPaths = (file, source) => {
+    const bases = new Map([['__dirname', path.posix.dirname(file)]]);
+    for (const [, name] of source.matchAll(/\b(?:const|let)\s+([\w$]+)\s*=\s*(?:path\.)?dirname\(\s*fileURLToPath\(\s*import\.meta\.url\s*\)\s*\)/g)) {
+      bases.set(name, path.posix.dirname(file));
+    }
+    const segments = (text) => [...text.matchAll(/'([^']*)'|"([^"]*)"/g)].map(([, single, double]) => single ?? double);
+    const joined = (base, text) => path.posix.normalize(path.posix.join(bases.get(base), ...segments(text)));
+    for (let size = -1; size !== bases.size;) {
+      size = bases.size;
+      for (const [, name, base, text] of source.matchAll(joinPattern)) {
+        if (name && !bases.has(name) && bases.has(base)) bases.set(name, joined(base, text));
+      }
+    }
+    const walks = /\b(?:readdir|opendir)(?:Sync)?\(/.test(source);
+    const isDirectory = (target) => fs.statSync(path.join(REPO_ROOT, target), { throwIfNoEntry: false })?.isDirectory();
+    return [...source.matchAll(joinPattern)]
+      .filter(([, , base]) => bases.has(base))
+      .map(([, , base, text]) => joined(base, text))
+      .filter((target) => !target.startsWith('../') && target !== '.' && (isFile(target) || (walks && isDirectory(target))));
+  };
   const references = (file) => {
     const source = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8')
       .replace(/\b(?:import|export)\s+type\s+(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s*['"][^'"]+['"]/g, '');
     const modules = [...source.matchAll(modulePattern)].map(([, specifier]) => resolve(file, specifier));
-    const paths = [...source.matchAll(pathPattern)].map(([, specifier]) => resolve(file, specifier));
+    const paths = [
+      ...[...source.matchAll(pathPattern)].map(([, specifier]) => resolve(file, specifier)),
+      ...builtPaths(file, source),
+    ];
     const packages = [...new Set([...source.matchAll(packagePattern)].map(([, name]) => name))];
     const inRepo = (target) => !target.startsWith('../');
-    return { modules: modules.filter(inRepo), paths: paths.filter((target) => inRepo(target) && !modules.includes(target)), packages };
+    return { modules: modules.filter(inRepo), paths: [...new Set(paths)].filter((target) => inRepo(target) && !modules.includes(target)), packages };
   };
   const workspaceByName = new Map(Object.keys(WORKSPACE_RULES).map((workspace) => [
     JSON.parse(fs.readFileSync(path.join(REPO_ROOT, workspace, 'package.json'), 'utf8')).name,
@@ -319,6 +347,7 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
 
   assert.ok(loadedBy.get('packages/query/README.md')?.has('bura_query'), 'the query security tests read the README');
   assert.ok(loadedBy.get('packages/cli/src/extraction/markdown-extractor.ts')?.has('tornado_agent'), 'agent tests import CLI source');
+  assert.ok(loadedBy.get('packages/cli/src/daemon.ts')?.has('kosava_node_ui'), 'node-ui tests scan the CLI daemon sources');
   const missing = [];
   for (const [target, requirements] of loadedBy) {
     const plan = pullRequestPlan([change(target)]);
@@ -416,6 +445,7 @@ test('Blazegraph provisioning changes include the native arm64 contract lane', (
   assert.deepEqual(selectedLanes(cliProvisioner), [
     'bura_cli',
     'bura_blazegraph_arm64',
+    'kosava_node_ui',
     'kosava_node_ui_e2e',
     'kosava_hardhat_plugins',
   ]);
