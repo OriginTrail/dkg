@@ -41,6 +41,36 @@ Optional:
 - **`updateEndpoint`** — SPARQL update endpoint. Defaults to `queryEndpoint` when omitted.
 - **`timeout`** — request timeout in ms (default `30000`).
 - **`auth`** — `Authorization` header value, e.g. `"Bearer <token>"` or `"Basic <base64>"`.
+- **`consistencyProfile`** — the transactional guarantee your endpoint provides. Defaults to `"best-effort"`. See below.
+
+### Transactional guarantees (`consistencyProfile`)
+
+The node cannot infer what runs behind a SPARQL URL, so an explicitly configured `sparql-http` endpoint is assumed to give no transactional guarantees. Declare what your server actually provides:
+
+| Value | Meaning | Unlocks |
+| --- | --- | --- |
+| `"best-effort"` (default) | No guarantee is claimed. | — |
+| `"atomic-update"` | A whole multi-operation SPARQL Update applies as one transaction. | Atomic data/metadata replacement, required by RFC-64 graph-scoped materialization and durable sync. |
+| `"atomic-readback"` | Adds that a query issued after a completed update observes that update. | Everything above, plus receipt-bearing author-commit CAS. |
+
+```json
+{
+  "store": {
+    "backend": "sparql-http",
+    "options": {
+      "queryEndpoint": "http://127.0.0.1:7878/query",
+      "updateEndpoint": "http://127.0.0.1:7878/update",
+      "consistencyProfile": "atomic-readback"
+    }
+  }
+}
+```
+
+A single-process Oxigraph server (the `oxigraph serve` command below, or the same binary in Docker) provides `atomic-readback`; the daemon-managed `oxigraph-server` backend declares it for you. Declare it only when your deployment really provides it — the setting states a guarantee, it does not relax a check. A federating proxy, a read replica or a multi-writer cluster in front of the endpoint may not qualify.
+
+{% hint style="warning" %}
+Leaving this at the default on a node that syncs RFC-64 Context Graphs means every graph-scoped materialization is refused with `VM_ATOMIC_REPLACE_UNSUPPORTED`, and the node converges nothing while its peers look healthy.
+{% endhint %}
 
 ### Oxigraph server
 

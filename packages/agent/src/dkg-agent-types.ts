@@ -16,6 +16,7 @@
 
 import type { ethers } from 'ethers';
 import type { SharedMemorySyncDiagnostics } from './sync/shared-memory-diagnostics.js';
+import type { ChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
 export type {
   SharedMemorySyncDiagnostics,
   SharedMemorySyncResult,
@@ -62,6 +63,7 @@ import type {
 import type {
   ApprovalPolicy,
   ChainAdapter,
+  ChainEventLogStore,
   ContextGraphAuthorityHistoryStore,
   ContextGraphAuthorityIndexStore,
   ContextGraphRegistryScanCursorStore,
@@ -89,6 +91,7 @@ import type {
 } from './sync/policy.js';
 import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
 import type { FinalizationRecoveryStore } from './finalization-recovery-store.js';
+import type { AuthorityIndexConfig } from './authority-index-config.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
@@ -808,6 +811,17 @@ export interface ContextGraphSubscriptionRecord {
   syncScoped: boolean;
 }
 
+/**
+ * Exact durable identity carried from one freshly loaded subscription row into
+ * bootstrap authority resolution. It may shortcut or repair name-to-id
+ * discovery, but never substitutes for fresh policy or roster authority.
+ */
+export interface DurableContextGraphSubscriptionBinding {
+  contextGraphId: string;
+  onChainId?: string;
+  onChainHash?: string;
+}
+
 export interface VmReconcilePeerTopologyPeer {
   peerId: string;
   core: boolean;
@@ -1065,7 +1079,13 @@ export interface LocalContextGraphOriginPersistence {
   recordLocalOrigin(record: LocalContextGraphOriginRecord): Promise<void>;
 }
 
-export interface ContextGraphMembershipStore extends Partial<LocalContextGraphOriginPersistence> {
+export interface ContextGraphMembershipStore {
+  /**
+   * Optional graph-level origin journal. Presence statically guarantees the
+   * complete read/write capability; absence selects the legacy membership-row
+   * compatibility path.
+   */
+  localOrigins?: LocalContextGraphOriginPersistence;
   /**
    * Load persisted membership facts for restart recovery. Optional so custom
    * stores written before membership rehydration remain source-compatible.
@@ -1074,16 +1094,6 @@ export interface ContextGraphMembershipStore extends Partial<LocalContextGraphOr
     firstSeenAt?: number;
     updatedAt: number;
   }>>;
-  /**
-   * Load graph-level local-origin facts. Optional for source compatibility
-   * with custom stores predating the independent provenance journal.
-   */
-  loadLocalOrigins?(): Promise<LocalContextGraphOriginRecord[]>;
-  /**
-   * Insert a graph-level origin fact monotonically. Implementations must not
-   * replace an existing row for the same Context Graph id.
-   */
-  recordLocalOrigin?(record: LocalContextGraphOriginRecord): Promise<void>;
   upsert(record: ContextGraphMembershipRecord & { firstSeenAt?: number; updatedAt: number }): Promise<void>;
   delete(contextGraphId: string, principalType: ContextGraphMemberPrincipalType, principalId: string): Promise<void>;
 }
@@ -1463,6 +1473,15 @@ export interface DKGAgentConfig {
   bootstrapPeers?: string[];
   /** Multiaddrs of relay nodes for NAT traversal. */
   relayPeers?: string[];
+  /**
+   * The relay multiaddrs from the network file. An edge without
+   * `authorityIndex` seeds its authority index from these relays, each pinned
+   * by the PeerID in its multiaddr, and falls back to local history. Distinct
+   * from `relayPeers`, the connectivity set, which may carry operator relays
+   * the network never vouched for. Empty or absent keeps the edge on local
+   * history; the daemon passes none for `relay: "none"`.
+   */
+  networkRelays?: readonly string[];
   /** Legacy ACK candidate allowlist. When set, unlisted connected peers are not dialed for ACKs. */
   ackCandidatePeerIds?: string[];
   /**
@@ -1718,6 +1737,29 @@ export interface DKGAgentConfig {
      * increase reorganization risk; 1 gives no successor-block buffer. Defaults to 1.
      */
     finalityConfirmations?: number;
+    /**
+     * `chain.indexTickMs`: how long one completed finalized Context Graph
+     * authority projection answers reads before it is refreshed. Cache service
+     * is always capped at the five-minute RFC-64 accepted-authority interval.
+     * Defaults to 6000.
+     */
+    indexTickMs?: number;
+    /**
+     * `chain.authorityReadTimeoutMs`: request-scoped deadline (ms) for one
+     * on-chain Context Graph authority read (liveness, policy, roster, or the
+     * finalized-index snapshot behind a query/share/SWM decision). A read that
+     * misses it fails closed for that request. Env
+     * `DKG_CHAIN_AUTHORITY_READ_TIMEOUT_MS` wins. Defaults to 2500.
+     */
+    authorityReadTimeoutMs?: number;
+    /**
+     * `chain.authorityColdResolutionTimeoutMs`: budget (ms) for the detached
+     * cold finalized-authority resolution that keeps running after a request
+     * deadline trips so its result reaches the chain reader's projection
+     * cache. Never below `authorityReadTimeoutMs`. Env
+     * `DKG_CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS` wins. Defaults to 20000.
+     */
+    authorityColdResolutionTimeoutMs?: number;
     /** Optional operator cap for transaction fee-per-gas fields (wei). */
     maxFeePerGasWei?: bigint;
     /**
@@ -1830,6 +1872,15 @@ export interface DKGAgentConfig {
   /** Process-owned durable contract-wide Context Graph authority index. */
   localContextGraphAuthorityIndexStore?: ContextGraphAuthorityIndexStore;
   /**
+   * Durable backing for the node's ONE chain log. Giving it to the agent is
+   * what starts the single background tick: the agent's own chain adapter owns
+   * it, and every other adapter in the process reads the same log rather than
+   * opening a scanner of its own.
+   */
+  chainEventLogStore?: ChainEventLogStore;
+  /** Opt in to trusted core bootstrap and a bounded chain tail on edges. */
+  authorityIndex?: AuthorityIndexConfig;
+  /**
    * Intentional cap on how many persisted context-graph subscriptions are
    * *activated* (gossip-subscribed + sync-tracked) when rehydrating at startup.
    * A large backlog of stale subscriptions otherwise fans out store-touching
@@ -1910,6 +1961,8 @@ export type ResolvedDKGAgentConfig =
     contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
     syncReconcilerTiming: SyncReconcilerTiming;
+    /** Resolved once per boot from `chainConfig` and the environment overrides. */
+    chainAuthorityReadBudgets: ChainAuthorityReadBudgets;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
     rfc64CatalogBootstrap?: Readonly<Rfc64CatalogBootstrapConfigV1>;
     /** Sole immutable restart-stable D17/D18 runtime authority for this boot. */

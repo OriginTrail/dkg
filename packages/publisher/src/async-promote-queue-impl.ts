@@ -39,6 +39,7 @@ import {
   type PromoteJob,
   type PromoteJobState,
   type PromoteListFilter,
+  type PromotePostCommitRecoveryEvent,
   type PromoteRecoverySummary,
   type PromoteRequest,
   type PromoteResult,
@@ -56,11 +57,13 @@ import {
   comparePromoteJobs,
   defaultBackoffMs,
   expectBindings,
+  isPromotePostCommitAttemptError,
   isTerminalPromoteJobState,
   jobSubject,
   literal,
   normalizePromoteAgentLane,
   parseJobPayload,
+  postCommitRecoveryExhaustedReason,
   promoteLaneConflictScope,
   promoteLaneScopesConflict,
   serializeJobRecord,
@@ -516,6 +519,79 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     }
 
     return { reclaimed, abandoned };
+  }
+
+  async recoverPostCommitFailures(): Promise<PromotePostCommitRecoveryEvent[]> {
+    // No scheduler wake: every requeued row carries a future `nextRetryAt`
+    // that the worker's durable poll already honours.
+    return this.withMutationLock(async () => {
+      await this.ensureGraph();
+      return this.reconcilePostCommitFailures(this.now());
+    });
+  }
+
+  /**
+   * A post-commit failure is recorded only after the exact SWM replace was
+   * dispatched, so the promote may have committed. The publisher's promote is
+   * idempotent for exactly that case: a replay validates whatever the exact
+   * graph holds against the sealed payload and repairs the durable tail, or
+   * re-runs the commit when nothing landed. Re-running it is therefore the
+   * same recovery an operator performs through `recover()`, minus the reset
+   * of the attempt counter: the replay spends the job's own retry budget so
+   * a durable tail that keeps failing cannot loop forever.
+   */
+  private async reconcilePostCommitFailures(now: number): Promise<PromotePostCommitRecoveryEvent[]> {
+    const events: PromotePostCommitRecoveryEvent[] = [];
+    const failed = await this.listUnlocked(
+      { state: ['failed'] },
+      'publisher.asyncPromote.recoverPostCommit',
+    );
+    for (const job of failed) {
+      if (!this.isAutomaticallyRecoverablePostCommitFailure(job)) continue;
+      const attemptCount = Math.max(1, job.attempt.count);
+      const maxAttempts = job.attempt.maxRetries;
+      if (attemptCount >= maxAttempts) {
+        // One durable verdict: the `reason` keeps this row out of every later
+        // sweep while leaving explicit operator recovery available.
+        await this.writeJob({
+          ...job,
+          updatedAt: now,
+          reason: postCommitRecoveryExhaustedReason(attemptCount),
+        });
+        events.push({ jobId: job.jobId, action: 'exhausted', attempt: attemptCount, maxAttempts });
+        continue;
+      }
+      // Another active job already owns this assertion; leave the row for a
+      // later sweep rather than breaking the per-assertion uniqueness key.
+      const conflicting = await this.findActiveConflict(this.conflictLookupForStoredJob(job), job.jobId);
+      if (conflicting) continue;
+      const nextRetryAt = now + this.backoff(attemptCount);
+      const requeued: PromoteJob = {
+        ...job,
+        state: 'failed_retrying',
+        updatedAt: now,
+        lease: undefined,
+        attempt: {
+          count: attemptCount,
+          maxRetries: maxAttempts,
+          nextRetryAt,
+          lastError: job.attempt.lastError,
+        },
+      };
+      await this.writeJob(requeued);
+      events.push({ jobId: job.jobId, action: 'requeued', attempt: attemptCount, maxAttempts, nextRetryAt });
+    }
+    return events;
+  }
+
+  private isAutomaticallyRecoverablePostCommitFailure(job: PromoteJob): boolean {
+    return job.state === 'failed'
+      && job.reason === undefined
+      && job.commitMarker?.swmInserted !== true
+      && (job.formatVersion ?? 0) >= ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION
+      && !this.missingStorageLaneForAuthorOnlyJob(job)
+      && !this.requiresManualInspection(job)
+      && isPromotePostCommitAttemptError(job.attempt.lastError);
   }
 
   async pause(): Promise<void> {

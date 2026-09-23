@@ -68,6 +68,7 @@ const DKG_ASSERTION_GRAPH = `${DKG}assertionGraph`;
 const DKG_ASSERTION_NAME = `${DKG}assertionName`;
 const DKG_MEMORY_LAYER = `${DKG}memoryLayer`;
 const DKG_CONTEXT_GRAPH = `${DKG}contextGraph`;
+const DKG_CONTEXT_GRAPH_ID = `${DKG}contextGraphId`;
 const DKG_PUBLIC_TRIPLE_COUNT = `${DKG}publicTripleCount`;
 const DKG_PRIVATE_TRIPLE_COUNT = `${DKG}privateTripleCount`;
 const DKG_STATUS = `${DKG}status`;
@@ -102,7 +103,8 @@ export interface SubGraphNameMemo {
 
 interface FreshSwmDataGraphPlanEntry {
   graph: string;
-  roots: readonly string[];
+  /** Null selects a complete graph-scoped KA; otherwise select root closures. */
+  roots: readonly string[] | null;
   rowCount: number;
 }
 
@@ -196,6 +198,24 @@ interface ExactGraphPagePlanEntry {
   rowCount: number;
 }
 
+/**
+ * The last row consumed from one exact graph.  The responder wire still uses
+ * numeric offsets, so this is an internal session cursor: the next sequential
+ * page can seek from the last row without asking the store to walk every
+ * preceding row again.
+ *
+ * `graphOffset` is retained only for the plan/count invariant.  It lets the
+ * seek query request one sentinel row when it reaches the committed graph
+ * boundary, just like the legacy OFFSET path does.
+ */
+interface ExactGraphPageCursor {
+  graph: string;
+  graphOffset: number;
+  s: string;
+  p: string;
+  o: string;
+}
+
 interface ConfirmedGraphScopedVmManifestEntry extends ExactGraphPagePlanEntry {
   ual: string;
 }
@@ -221,6 +241,12 @@ interface ExactGraphPagePlan {
   };
   /** Graphs that exceeded the bounded local snapshot and require ordered paging. */
   pagedGraphs: Set<string>;
+  /**
+   * Session-bound page boundaries.  The map is deliberately bounded: a
+   * requester may probe arbitrary offsets, and those probes must not turn a
+   * pagination session into an unbounded control-plane cache.
+   */
+  cursors: Map<number, ExactGraphPageCursor | null>;
 }
 
 export interface ExactGraphPagePlanMemo {
@@ -986,6 +1012,7 @@ export async function readSwmDataPage(params: {
       dataGraphs,
       params.graphMembership,
       params.cutoffIso!,
+      params.contextGraphId,
       signal,
     );
     const plan = params.freshGraphPlanMemo && params.rowListCacheKey
@@ -1566,16 +1593,34 @@ export async function readChangelogDeltaPage(params: {
     records.push({ seq, graph, op: 'upsert', quads });
   }
 
-  // (5) nextSeq: on a budget-truncated page, the last emitted record's seq; else
-  // the scanned-through high-water — head.seq if the scan drained the log,
-  // otherwise the max raw seq scanned (more remains beyond this window).
-  const scannedTo = raw.length > 0 ? raw[raw.length - 1].seq : head.seq;
+  // (5) The page may reach past the head captured in (1): this node's own
+  // writes landed meanwhile, or readChanges adopted markers another writer
+  // appended above this instance's counter. The wire requires `headSeq` to
+  // cover every emitted record, so it comes from the head AFTER the read. An
+  // era that rotated underneath the read is a restore in progress: hand the
+  // requester a resync rather than records from two eras.
+  const headAfter = await params.reader.changelogHead(
+    syncResponderStoreOptions(params.signal, 'sync.responder.changelogHead'),
+  );
+  if (headAfter.era !== head.era) {
+    return { kind: 'resync', era: headAfter.era, headSeq: headAfter.seq };
+  }
+
+  // (6) nextSeq: on a budget-truncated page, the last emitted record's seq;
+  // else the scanned-through high-water. A full window stops at the last raw
+  // seq (more remains beyond it). A drained scan read everything up to at
+  // least the head captured in (1) — readChanges skips holes and stops only at
+  // the head — so it advances to the higher of that head and the last raw seq.
+  // Never the head AFTER the read: a marker committed while this page was
+  // serialized was not scanned, and counting it would make the requester skip
+  // it for good.
+  const lastRawSeq = raw.length > 0 ? raw[raw.length - 1].seq : head.seq;
   const drained = raw.length < params.limit;
   const nextSeq = budgetStopped
     ? records[records.length - 1].seq
-    : drained ? head.seq : scannedTo;
+    : drained ? Math.max(lastRawSeq, head.seq) : lastRawSeq;
 
-  return { kind: 'delta', era: head.era, headSeq: head.seq, nextSeq, records };
+  return { kind: 'delta', era: headAfter.era, headSeq: headAfter.seq, nextSeq, records };
 }
 
 export async function readDurableDataPage(params: {
@@ -1872,12 +1917,153 @@ async function buildExactGraphPagePlan(
         ? entries.map((entry) => entry.graph)
         : [],
     ),
+    cursors: new Map([[0, null]]),
   };
 }
 
 interface ExactGraphSnapshotLimits {
   maxRows: number;
   maxBytesEstimate: number;
+}
+
+const EXACT_GRAPH_CURSOR_CACHE_MAX_ENTRIES = 512;
+
+/** Datatypes whose SPARQL value comparison is numeric/date-like, not lexical. */
+const SPARQL_VALUE_ORDERED_DATATYPES = [
+  'http://www.w3.org/2001/XMLSchema#boolean',
+  'http://www.w3.org/2001/XMLSchema#date',
+  'http://www.w3.org/2001/XMLSchema#dateTime',
+  'http://www.w3.org/2001/XMLSchema#dateTimeStamp',
+  'http://www.w3.org/2001/XMLSchema#dayTimeDuration',
+  'http://www.w3.org/2001/XMLSchema#decimal',
+  'http://www.w3.org/2001/XMLSchema#double',
+  'http://www.w3.org/2001/XMLSchema#duration',
+  'http://www.w3.org/2001/XMLSchema#float',
+  'http://www.w3.org/2001/XMLSchema#gDay',
+  'http://www.w3.org/2001/XMLSchema#gMonth',
+  'http://www.w3.org/2001/XMLSchema#gMonthDay',
+  'http://www.w3.org/2001/XMLSchema#gYear',
+  'http://www.w3.org/2001/XMLSchema#gYearMonth',
+  'http://www.w3.org/2001/XMLSchema#integer',
+  'http://www.w3.org/2001/XMLSchema#nonNegativeInteger',
+  'http://www.w3.org/2001/XMLSchema#nonPositiveInteger',
+  'http://www.w3.org/2001/XMLSchema#negativeInteger',
+  'http://www.w3.org/2001/XMLSchema#positiveInteger',
+  'http://www.w3.org/2001/XMLSchema#long',
+  'http://www.w3.org/2001/XMLSchema#int',
+  'http://www.w3.org/2001/XMLSchema#short',
+  'http://www.w3.org/2001/XMLSchema#time',
+  'http://www.w3.org/2001/XMLSchema#byte',
+  'http://www.w3.org/2001/XMLSchema#unsignedLong',
+  'http://www.w3.org/2001/XMLSchema#unsignedInt',
+  'http://www.w3.org/2001/XMLSchema#unsignedShort',
+  'http://www.w3.org/2001/XMLSchema#unsignedByte',
+  'http://www.w3.org/2001/XMLSchema#yearMonthDuration',
+] as const;
+
+const SPARQL_VALUE_ORDERED_DATATYPE_VALUES = SPARQL_VALUE_ORDERED_DATATYPES
+  .map((datatype) => `<${datatype}>`)
+  .join(', ');
+
+function hasValueOrderedDatatype(term: string): boolean {
+  return SPARQL_VALUE_ORDERED_DATATYPES
+    .some((datatype) => term.endsWith(`^^<${datatype}>`));
+}
+
+function hasUnsupportedExactGraphCursorTerm(cursor: ExactGraphPageCursor): boolean {
+  // SPARQL exposes no portable ordering relation for blank-node identifiers.
+  // Ordered XSD values also cannot be continued portably with `>`: float and
+  // double admit NaN, duration comparison can be partial, and distinct lexical
+  // forms can denote the same date/time or numeric value. ORDER BY can still
+  // place those terms after the cursor even when `>` is false. Falling back
+  // preserves the pre-existing deterministic path for each unsafe boundary.
+  return [cursor.s, cursor.p, cursor.o].some((term) => (
+    term.startsWith('_:') || hasValueOrderedDatatype(term)
+  ));
+}
+
+/**
+ * Build a SPARQL predicate for one term being strictly after a cursor term in
+ * the backend's `ORDER BY` order. IRI rank is explicit, while
+ * literal values use value comparison for ordered XSD datatypes and lexical
+ * comparison otherwise.  The datatype/language tie-break mirrors Oxigraph's
+ * RDF-term ordering and is covered by the mixed-term regression fixture.
+ */
+function termAfterExactGraphCursor(variable: string, cursorTerm: string): string {
+  const formatted = formatTerm(cursorTerm);
+  if (!cursorTerm.startsWith('"')) {
+    return `(isLiteral(${variable}) || (isIRI(${variable}) && STR(${variable}) > STR(${formatted})))`;
+  }
+  return `(
+    isLiteral(${variable}) && (
+      (
+        STR(${variable}) > STR(${formatted})
+        && !(
+          DATATYPE(${variable}) = DATATYPE(${formatted})
+          && DATATYPE(${variable}) IN (${SPARQL_VALUE_ORDERED_DATATYPE_VALUES})
+        )
+      )
+      || (
+        STR(${variable}) = STR(${formatted}) && (
+          STR(DATATYPE(${variable})) > STR(DATATYPE(${formatted}))
+          || (
+            DATATYPE(${variable}) = DATATYPE(${formatted})
+            && LANG(${variable}) > LANG(${formatted})
+          )
+        )
+      )
+      || (
+        DATATYPE(${variable}) = DATATYPE(${formatted})
+        && DATATYPE(${variable}) IN (${SPARQL_VALUE_ORDERED_DATATYPE_VALUES})
+        && ${variable} > ${formatted}
+      )
+    )
+  )`;
+}
+
+function exactGraphCursorFilter(cursor: ExactGraphPageCursor): string {
+  const s = formatTerm(cursor.s);
+  const p = formatTerm(cursor.p);
+  return `(
+    ${termAfterExactGraphCursor('?s', cursor.s)}
+    || (?s = ${s} && ${termAfterExactGraphCursor('?p', cursor.p)})
+    || (
+      ?s = ${s}
+      && ?p = ${p}
+      && ${termAfterExactGraphCursor('?o', cursor.o)}
+    )
+  )`;
+}
+
+function rememberExactGraphPageCursor(
+  plan: ExactGraphPagePlan,
+  offset: number,
+  cursor: ExactGraphPageCursor,
+): void {
+  const existing = plan.cursors.get(offset);
+  if (existing && (
+    existing.graph !== cursor.graph
+    || existing.graphOffset !== cursor.graphOffset
+    || existing.s !== cursor.s
+    || existing.p !== cursor.p
+    || existing.o !== cursor.o
+  )) {
+    // A boundary changing within one memoized session means the source no
+    // longer describes the committed plan. Do not silently choose one cursor.
+    throw new Error(`Sync exact-graph cursor changed at offset ${offset}`);
+  }
+  plan.cursors.delete(offset);
+  plan.cursors.set(offset, cursor);
+  while (plan.cursors.size > EXACT_GRAPH_CURSOR_CACHE_MAX_ENTRIES) {
+    let evict = plan.cursors.keys().next().value as number;
+    // Offset zero is the session origin and is never evicted.
+    if (evict === 0) {
+      const next = plan.cursors.keys();
+      next.next();
+      evict = next.next().value as number;
+    }
+    plan.cursors.delete(evict);
+  }
 }
 
 function snapshotResponseByteLimit(maxBytesEstimate: number): number {
@@ -2030,17 +2216,54 @@ async function readRowsPageFromExactGraphPlan(
   snapshotLimits: ExactGraphSnapshotLimits,
   signal?: AbortSignal,
 ): Promise<SyncRow[]> {
-  let skip = Math.max(0, Math.floor(offset));
+  const safeOffset = Math.max(0, Math.floor(offset));
+  let skip = safeOffset;
   let remaining = Math.max(0, Math.floor(limit));
   if (remaining === 0 || skip >= plan.totalRows) return [];
   const rows: SyncRow[] = [];
+  const cursor = plan.cursors.get(safeOffset);
+  const useSeek = cursor !== undefined
+    && cursor !== null
+    && !hasUnsupportedExactGraphCursorTerm(cursor);
+  let cursorActive = useSeek;
+  let lastGraphOffset = 0;
+  let lastRow: SyncRow | undefined;
+
   for (const entry of plan.entries) {
-    if (skip >= entry.rowCount) {
-      skip -= entry.rowCount;
+    let entryOffset: number;
+    let seekFilter: string | undefined;
+    if (cursorActive && cursor) {
+      const graphOrder = compareCodePoint(entry.graph, cursor.graph);
+      if (graphOrder < 0) continue;
+      if (graphOrder === 0) {
+        entryOffset = cursor.graphOffset;
+        if (entryOffset > entry.rowCount) {
+          throw new Error(
+            `Sync exact-graph cursor is past the committed row count for ${entry.graph}`,
+          );
+        }
+        seekFilter = exactGraphCursorFilter(cursor);
+      } else {
+        // Once the cursor's graph is exhausted, every later graph starts at
+        // row zero and can be read with a plain LIMIT.  There is no OFFSET to
+        // make the store revisit the already-consumed prefix.
+        entryOffset = 0;
+      }
+    } else {
+      if (skip >= entry.rowCount) {
+        skip -= entry.rowCount;
+        continue;
+      }
+      entryOffset = skip;
+    }
+    const expectedRows = Math.min(entry.rowCount - entryOffset, remaining);
+    if (expectedRows <= 0) {
+      cursorActive = false;
+      // The cursor already consumed this graph. Subsequent graphs start at
+      // their own zero offset rather than reusing the request's global offset.
+      skip = 0;
       continue;
     }
-    const entryOffset = skip;
-    const expectedRows = Math.min(entry.rowCount - entryOffset, remaining);
     let added = 0;
     const graphRows = await loadExactGraphRowsSnapshot(
       store,
@@ -2055,12 +2278,23 @@ async function readRowsPageFromExactGraphPlan(
       added = page.length;
     } else {
       const isFinalGraphPage = entryOffset + expectedRows === entry.rowCount;
+      const seekEntry = cursorActive && cursor !== undefined && cursor !== null;
+      const offsetClause = seekFilter || seekEntry ? '' : `\n        OFFSET ${entryOffset}`;
+      // Keep the no-cursor query compact and compatible with adapters and
+      // instrumentation that recognize the established one-line graph
+      // pattern.  Cursor pages need the expanded form for their FILTER.
+      const graphPattern = seekFilter
+        ? `GRAPH <${assertSafeIri(entry.graph)}> {
+            ?s ?p ?o
+            FILTER(${seekFilter})
+          }`
+        : `GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }`;
       const result = await store.query(`
         SELECT ?s ?p ?o WHERE {
-          GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
+          ${graphPattern}
         }
         ORDER BY ?s ?p ?o
-        OFFSET ${entryOffset}
+        ${offsetClause}
         LIMIT ${expectedRows + (isFinalGraphPage ? 1 : 0)}
       `, {
         ...syncResponderStoreOptions(signal, 'sync.responder.readExactGraphRowsPage'),
@@ -2094,9 +2328,34 @@ async function readRowsPageFromExactGraphPlan(
         `expected ${expectedRows} rows at offset ${entryOffset}, found ${added}`,
       );
     }
+    if (added > 0) {
+      lastRow = rows[rows.length - 1];
+      lastGraphOffset = entryOffset + added;
+    }
     remaining -= added;
     if (remaining <= 0) break;
     skip = 0;
+    // The cursor has served its graph.  Later entries are read from their
+    // beginning, still without OFFSET.
+    cursorActive = false;
+  }
+
+  const expectedTotal = Math.min(safeOffset + Math.max(0, Math.floor(limit)), plan.totalRows)
+    - safeOffset;
+  if (rows.length !== expectedTotal) {
+    throw new Error(
+      `Sync exact-graph plan changed at offset ${safeOffset}: `
+      + `expected ${expectedTotal} rows, found ${rows.length}`,
+    );
+  }
+  if (lastRow) {
+    rememberExactGraphPageCursor(plan, safeOffset + rows.length, {
+      graph: lastRow.g,
+      graphOffset: lastGraphOffset,
+      s: lastRow.s,
+      p: lastRow.p,
+      o: lastRow.o,
+    });
   }
   return rows;
 }
@@ -2199,18 +2458,17 @@ function createSessionPlanGetter<T>(
  * is not a `snapshot_rows`/`snapshot_bytes` error, so it propagates as the quiet
  * retryable limit and the requester retries once other sessions drain.
  *
- * KNOWN LIMITATION (tracked as follow-up): the store-bounded fallback pages via
- * a per-exact-graph `OFFSET`, which — unlike a retained session snapshot — is
- * NOT stable if that exact graph mutates between two page requests of the same
- * session (a row inserted before the current offset can shift the window,
- * duplicating or skipping a row). New graph-scoped KAs are immutable for one
- * assertion version, so this caveat is limited to legacy mutable graph shapes.
- * It is bounded in blast radius:
- * durable data is Merkle-verified end-to-end, so an inconsistent assembly fails
- * verification and the requester restarts the phase (churn, not silent
- * corruption); it only bites an oversized AND concurrently-mutating context
- * graph. The durable legacy fix is a stable keyset/seek cursor within the exact
- * graph; the global cross-graph sort/offset is deliberately no longer used.
+ * Sequential store-bounded fallback pages retain a bounded per-session cursor
+ * for the last row returned by each page and use a keyset filter for the next
+ * request. This avoids making the store revisit a growing exact-graph OFFSET
+ * prefix while preserving the committed graph row count and final-page
+ * sentinel checks. Unknown offsets and cursor boundaries containing blank
+ * nodes retain the deterministic OFFSET compatibility path because portable
+ * SPARQL does not define a backend-independent blank-node ordering.
+ *
+ * The cursor map is session-local and bounded. A boundary changing within the
+ * memoized plan, a row-count mismatch, or a surplus final-page row still fails
+ * closed; durable data remains Merkle-verified end-to-end by the requester.
  */
 type StorePageLoader = (
   offset: number,
@@ -3329,6 +3587,85 @@ function parseSparqlInteger(value: string | undefined): number {
 }
 
 /**
+ * Discover complete graph-scoped KA graphs selected by fresh V2 operation/head
+ * pairs in one SWM metadata bucket. These graphs already belong to the normal
+ * `_shared_memory/{address}/{number}` family; this only teaches the TTL planner
+ * that V2 operations have no `rootEntity` and must be paged as exact graphs.
+ */
+async function readFreshGraphScopedSwmDataGraphs(params: {
+  store: TripleStore;
+  graphMembership: GraphMembershipSnapshot;
+  contextGraphId: string;
+  bucketGraph: string;
+  metaGraph: string;
+  cutoffIso: string;
+  signal?: AbortSignal;
+}): Promise<string[]> {
+  const result = await params.store.query(`
+    SELECT DISTINCT ?op ?head ?ual ?version ?shareId ?assertionGraph WHERE {
+      GRAPH <${assertSafeIri(params.metaGraph)}> {
+        ?op <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
+            <${DKG_CONTENT_SCOPE_VERSION}> ?opScope ;
+            <${DKG_CONTEXT_GRAPH_ID}> ?operationContextGraphId ;
+            <${DKG_KA_UAL}> ?ual ;
+            <${DKG_ASSERTION_VERSION}> ?version ;
+            <${DKG_SHARE_OPERATION_ID}> ?shareId ;
+            <${DKG_PUBLISHED_AT}> ?ts .
+        ?head <${DKG_CONTENT_SCOPE_VERSION}> ?headScope ;
+              <${DKG_KA_UAL}> ?ual ;
+              <${DKG_ASSERTION_VERSION}> ?version ;
+              <${DKG_SHARE_OPERATION_ID}> ?shareId ;
+              <${DKG_ASSERTION_GRAPH}> ?assertionGraph .
+        FILTER(STR(?opScope) = ${sparqlString(String(GRAPH_KA_CONTENT_SCOPE_VERSION))})
+        FILTER(STR(?headScope) = ${sparqlString(String(GRAPH_KA_CONTENT_SCOPE_VERSION))})
+        FILTER(STR(?operationContextGraphId) = ${sparqlString(params.contextGraphId)})
+        FILTER(?ts >= ${sparqlString(params.cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+      }
+    }
+  `, syncResponderStoreOptions(params.signal, 'sync.responder.readFreshGraphScopedSwmDataGraphs'));
+  if (result.type !== 'bindings') return [];
+
+  const rootBucket = `${contextGraphDataGraphUri(params.contextGraphId)}/_shared_memory`;
+  let subGraphName: string | undefined;
+  if (params.bucketGraph !== rootBucket) {
+    const prefix = `${contextGraphDataGraphUri(params.contextGraphId)}/`;
+    const suffix = '/_shared_memory';
+    if (!params.bucketGraph.startsWith(prefix) || !params.bucketGraph.endsWith(suffix)) return [];
+    subGraphName = params.bucketGraph.slice(prefix.length, -suffix.length);
+    if (!validateSubGraphName(subGraphName).valid) return [];
+  }
+
+  const graphs = new Set<string>();
+  for (const row of result.bindings) {
+    const ual = row['ual'];
+    const assertionVersion = stripLiteral(row['version'] ?? '').trim();
+    const shareOperationId = stripLiteral(row['shareId'] ?? '').trim();
+    const assertionGraph = row['assertionGraph'];
+    if (!ual || !assertionVersion || !shareOperationId || !assertionGraph) continue;
+    if (row['op'] !== `urn:dkg:share:${params.contextGraphId}:${shareOperationId}`) continue;
+    if (row['head'] !== `${ual}#dkg-swm-head`) continue;
+    let expectedGraph: string;
+    try {
+      expectedGraph = knowledgeAssetLayerGraphUri(
+        params.contextGraphId,
+        MemoryLayer.SharedWorkingMemory,
+        createGraphKnowledgeAssetScope(ual, assertionVersion),
+        subGraphName,
+      );
+    } catch {
+      continue;
+    }
+    if (
+      assertionGraph !== expectedGraph
+      || !params.graphMembership.has(expectedGraph)
+      || !isSharedMemoryBucketDescendantDataGraph(expectedGraph, params.bucketGraph)
+    ) continue;
+    graphs.add(expectedGraph);
+  }
+  return [...graphs].sort(compareCodePoint);
+}
+
+/**
  * Build a tiny, stable pagination plan for an oversized TTL-filtered SWM phase.
  *
  * The old fallback put all candidate graphs behind one `FILTER EXISTS` join for
@@ -3357,15 +3694,26 @@ async function buildFreshSwmDataGraphPlan(
   dataGraphs: readonly string[],
   graphMembership: GraphMembershipSnapshot,
   cutoffIso: string,
+  contextGraphId: string,
   signal?: AbortSignal,
 ): Promise<FreshSwmDataGraphPlan> {
   const rootsByGraph = new Map<string, Set<string>>();
+  const exactGraphs = new Set<string>();
   for (const bucketGraph of dedupeStrings(dataGraphs).sort(compareCodePoint)) {
     throwIfAborted(signal);
     const metaGraph = `${bucketGraph}_meta`;
     if (!graphMembership.has(metaGraph)) continue;
     const roots = [...await readFreshSwmRoots(store, metaGraph, cutoffIso, signal)]
       .sort(compareCodePoint);
+    for (const graph of await readFreshGraphScopedSwmDataGraphs({
+      store,
+      graphMembership,
+      contextGraphId,
+      bucketGraph,
+      metaGraph,
+      cutoffIso,
+      signal,
+    })) exactGraphs.add(graph);
     for (const chunk of chunkValues(roots, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
       const chunkSet = new Set(chunk);
       // sparql-scan-allow: R2 -- ?root is VALUES-bound to at most 100 fresh metadata roots and every result graph is admitted against the finite current graph snapshot
@@ -3403,11 +3751,20 @@ async function buildFreshSwmDataGraphPlan(
   }
 
   const countsByGraph = new Map<string, number>();
-  const admitted = [...rootsByGraph.entries()]
-    .map(([graph, roots]) => ({ graph, roots: [...roots].sort(compareCodePoint) }))
+  const admitted: Array<{ graph: string; roots: readonly string[] | null }> = [
+    ...[...rootsByGraph.entries()]
+      .filter(([graph]) => !exactGraphs.has(graph))
+      .map(([graph, roots]) => ({ graph, roots: [...roots].sort(compareCodePoint) })),
+    ...[...exactGraphs].map((graph) => ({ graph, roots: null })),
+  ]
     .sort((a, b) => compareCodePoint(a.graph, b.graph));
   for (const chunk of chunkValues(admitted, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
-    const unions = chunk.map(({ graph, roots }) => `
+    const unions = chunk.map(({ graph, roots }) => roots === null ? `
+      {
+        SELECT (<${assertSafeIri(graph)}> AS ?g) (COUNT(*) AS ?count) WHERE {
+          GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+        }
+      }` : `
       {
         SELECT (<${assertSafeIri(graph)}> AS ?g) (COUNT(*) AS ?count) WHERE {
           {
@@ -3457,11 +3814,15 @@ async function readFreshSwmDataRowsPageFromPlan(
       skip -= entry.rowCount;
       continue;
     }
+    const selection = entry.roots === null
+      ? `GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }`
+      : `VALUES ?root { ${graphValues(entry.roots)} }
+        GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
+        FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))`;
+    // sparql-scan-allow: R3 -- the retained session plan pre-counts each exact admitted graph, bounds skip to that graph rowCount, and LIMIT is the remaining response page
     const result = await store.query(`
       SELECT DISTINCT ?s ?p ?o WHERE {
-        VALUES ?root { ${graphValues(entry.roots)} }
-        GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
-        FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
+        ${selection}
       }
       ORDER BY ?s ?p ?o
       OFFSET ${skip}

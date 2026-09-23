@@ -1,4 +1,9 @@
-import type { ChainAdapter, ChainEvent, EventFilter } from '@origintrail-official/dkg-chain';
+import type {
+  ChainAdapter,
+  ChainEvent,
+  EventFilter,
+  EventScanHorizonLease,
+} from '@origintrail-official/dkg-chain';
 import { createOperationContext, type Logger, type OperationContext } from '@origintrail-official/dkg-core';
 import {
   createLaneCursorStore,
@@ -18,10 +23,34 @@ export type ChainEventPollerLane =
 interface ChainEventPollerLaneState {
   lastBlock: number;
   headKnown: boolean;
-  requiresFullHistory?: boolean;
+  cursorStrategyKind?: ChainEventPollerLaneCursorStrategy['kind'];
   nextRunAtMs?: number;
   failureBackoffMs?: number;
 }
+
+/**
+ * Describes the cursor lifecycle for a lane as one explicit strategy.
+ *
+ * `legacyAggregateCursor` is required on both variants, and deliberately so.
+ * It is not derivable from `kind`: the restored-publish lane is `full-history`
+ * yet must keep reading the shared legacy cursor, while the live publish lane
+ * is `live-tail` yet must stay out of it. It is also not safely omissible - an
+ * omitted marker reads as opt-out in `loadPersistedLaneCursor`, and via the
+ * `every(...)` in `legacyAggregateCursorToSave` a single opted-out lane zeroes
+ * the aggregate save for every other active lane. Stating it per lane is what
+ * makes that combination impossible to reach by accident.
+ */
+export type ChainEventPollerLaneCursorStrategy =
+  | {
+    kind: 'full-history';
+    legacyAggregateCursor: boolean;
+    onBackfillFromGenesis?(ctx: OperationContext): void;
+  }
+  | {
+    kind: 'live-tail';
+    legacyAggregateCursor: boolean;
+    liveSeedLookbackBlocks?: number;
+  };
 
 const DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS = 500;
 const FAILURE_BACKOFF_INITIAL_MS = 60_000;
@@ -31,27 +60,29 @@ export interface ChainEventPollerLaneSpec {
   name: ChainEventPollerLane;
   enabled(): boolean;
   eventTypes(): readonly string[];
-  requiresFullHistory(): boolean;
-  canUseLegacyAggregateCursor?(): boolean;
-  liveSeedLookbackBlocks?: number;
+  cursorStrategy(): ChainEventPollerLaneCursorStrategy;
   cadenceMs: number;
-  dispatch(event: ChainEvent, ctx: OperationContext): Promise<void>;
-  onBackfillFromGenesis?(ctx: OperationContext): void;
+  dispatch(event: ChainEvent, ctx: OperationContext, signal?: AbortSignal): Promise<void>;
 }
 
 interface ChainEventPollerLaneRuntime {
   spec: ChainEventPollerLaneSpec;
   state: ChainEventPollerLaneState;
   eventTypes: string[];
-  requiresFullHistory: boolean;
-  canUseLegacyAggregateCursor: boolean;
-  liveSeedLookbackBlocks: number;
+  cursorStrategy: ChainEventPollerLaneCursorStrategy;
 }
 
 interface ChainEventPollerLaneScanResult {
   lane: ChainEventPollerLaneRuntime;
   blockNumber: number;
   advanced: boolean;
+  lease?: EventScanHorizonLease;
+  stateBefore?: ChainEventPollerLaneState;
+}
+
+interface ChainEventLaneBoundary {
+  readonly head: number | undefined;
+  readonly lease?: EventScanHorizonLease;
 }
 
 type ChainEventLaneScheduleOutcome =
@@ -108,23 +139,54 @@ export class ChainEventLaneRunner {
     const dueLanes = activeLanes.filter((lane) => this.laneDue(lane, now));
     if (dueLanes.length === 0) return;
 
-    let head: number | undefined;
-    if (this.chain.getBlockNumber) {
-      try {
-        head = await this.chain.getBlockNumber();
-      } catch {
-        if (signal?.aborted) signal.throwIfAborted();
-        // Head is optional; lanes can still scan their next bounded range.
-      }
-    }
+    let liveHeadRead: Promise<number | undefined> | undefined;
+    const readLiveHead = (): Promise<number | undefined> => {
+      liveHeadRead ??= this.readLiveHead(signal);
+      return liveHeadRead;
+    };
 
     const scanResults: ChainEventPollerLaneScanResult[] = [];
     for (const lane of dueLanes) {
       signal?.throwIfAborted();
-      scanResults.push(await this.scanLane(lane, head, now, ctx, signal));
+      const boundary = await this.eventScanBoundary(lane, readLiveHead, signal);
+      scanResults.push(await this.scanLane(lane, boundary, now, ctx, signal));
     }
     signal?.throwIfAborted();
-    await this.persistScanResults(scanResults, activeLanes);
+    const currentResults = await this.revalidateScanResults(scanResults, now, ctx, signal);
+    await this.persistScanResults(currentResults, activeLanes, now, ctx, signal);
+  }
+
+  private async readLiveHead(signal?: AbortSignal): Promise<number | undefined> {
+    if (!this.chain.getBlockNumber) return undefined;
+    try {
+      return await this.chain.getBlockNumber();
+    } catch {
+      if (signal?.aborted) signal.throwIfAborted();
+      // Head is optional; lanes can still scan their next bounded range.
+      return undefined;
+    }
+  }
+
+  private async eventScanBoundary(
+    lane: ChainEventPollerLaneRuntime,
+    readLiveHead: () => Promise<number | undefined>,
+    signal?: AbortSignal,
+  ): Promise<ChainEventLaneBoundary> {
+    const acquire = this.chain.acquireEventScanHorizonLease;
+    if (acquire !== undefined) {
+      try {
+        const lease = await acquire.call(this.chain, lane.eventTypes);
+        if (
+          lease !== undefined
+          && Number.isSafeInteger(lease.throughBlockNumber)
+          && lease.throughBlockNumber >= 0
+        ) return { head: lease.throughBlockNumber, lease };
+      } catch {
+        if (signal?.aborted) signal.throwIfAborted();
+        // Refusal or uncertainty restores this lane's live-head path.
+      }
+    }
+    return { head: await readLiveHead() };
   }
 
   private activeLaneSpecs(): ChainEventPollerLaneRuntime[] {
@@ -132,20 +194,20 @@ export class ChainEventLaneRunner {
       if (!spec.enabled()) return [];
       const eventTypes = [...spec.eventTypes()];
       if (eventTypes.length === 0) return [];
-      const requiresFullHistory = spec.requiresFullHistory();
+      const cursorStrategy = spec.cursorStrategy();
       return [{
         spec,
         state: this.stateFor(spec.name),
         eventTypes,
-        requiresFullHistory,
-        canUseLegacyAggregateCursor: spec.canUseLegacyAggregateCursor?.() ?? !requiresFullHistory,
-        liveSeedLookbackBlocks: this.liveSeedLookbackBlocks(spec),
+        cursorStrategy,
       }];
     });
   }
 
-  private liveSeedLookbackBlocks(spec: ChainEventPollerLaneSpec): number {
-    const lookback = spec.liveSeedLookbackBlocks ?? DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS;
+  private liveSeedLookbackBlocks(strategy: ChainEventPollerLaneCursorStrategy): number {
+    const lookback = strategy.kind === 'live-tail'
+      ? strategy.liveSeedLookbackBlocks ?? DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS
+      : DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS;
     return Number.isFinite(lookback) && lookback >= 0
       ? Math.floor(lookback)
       : DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS;
@@ -189,7 +251,7 @@ export class ChainEventLaneRunner {
   private async loadPersistedLaneCursor(lane: ChainEventPollerLaneRuntime): Promise<number | undefined> {
     if (!this.cursorStore) return undefined;
     if (this.cursorStore.kind === 'lane') return this.cursorStore.loadLane(lane.spec.name);
-    if (lane.canUseLegacyAggregateCursor) return this.cursorStore.loadLegacyAggregate();
+    if (lane.cursorStrategy.legacyAggregateCursor) return this.cursorStore.loadLegacyAggregate();
     return undefined;
   }
 
@@ -201,6 +263,9 @@ export class ChainEventLaneRunner {
   private async persistScanResults(
     scanResults: readonly ChainEventPollerLaneScanResult[],
     activeLanes: readonly ChainEventPollerLaneRuntime[],
+    now: number,
+    ctx: OperationContext,
+    signal?: AbortSignal,
   ): Promise<void> {
     if (!this.cursorStore) return;
     const advancedResults = scanResults.filter((result) => result.advanced && result.blockNumber > 0);
@@ -208,6 +273,8 @@ export class ChainEventLaneRunner {
 
     if (this.cursorStore.kind === 'lane') {
       for (const result of advancedResults) {
+        signal?.throwIfAborted();
+        if (!await this.scanResultLeaseHoldsForPersistence(result, now, ctx, signal)) continue;
         try {
           await this.cursorStore.saveLane(result.lane.spec.name, result.blockNumber);
         } catch {
@@ -216,6 +283,38 @@ export class ChainEventLaneRunner {
       }
       return;
     }
+
+    const leasedResults = advancedResults.filter((
+      result,
+    ): result is ChainEventPollerLaneScanResult & {
+      lease: EventScanHorizonLease;
+      stateBefore: ChainEventPollerLaneState;
+    } => result.lease !== undefined && result.stateBefore !== undefined);
+    if (leasedResults.length > 1) {
+      // A legacy cursor persists all lanes in one scalar. Independent leases
+      // cannot be proven atomically: while the second awaits, the first can
+      // retire. Refuse the aggregate and replay every leased lane instead of
+      // composing separately-current observations into one stale commit.
+      for (const result of leasedResults) {
+        this.retireScanResult(
+          result,
+          result.stateBefore,
+          now,
+          ctx,
+          'legacy aggregate cursor persistence',
+        );
+      }
+      return;
+    }
+    if (
+      leasedResults[0] !== undefined
+      && !await this.scanResultLeaseHoldsForPersistence(
+        leasedResults[0],
+        now,
+        ctx,
+        signal,
+      )
+    ) return;
 
     const legacySafeCursor = this.legacyAggregateCursorToSave(activeLanes);
     if (legacySafeCursor > 0) {
@@ -229,7 +328,7 @@ export class ChainEventLaneRunner {
 
   private legacyAggregateCursorToSave(activeLanes: readonly ChainEventPollerLaneRuntime[]): number {
     if (activeLanes.length === 0) return 0;
-    if (!activeLanes.every((lane) => lane.canUseLegacyAggregateCursor)) return 0;
+    if (!activeLanes.every((lane) => lane.cursorStrategy.legacyAggregateCursor)) return 0;
 
     let min = Number.POSITIVE_INFINITY;
     for (const lane of activeLanes) {
@@ -241,22 +340,24 @@ export class ChainEventLaneRunner {
 
   private async scanLane(
     lane: ChainEventPollerLaneRuntime,
-    head: number | undefined,
+    boundary: ChainEventLaneBoundary,
     now: number,
     ctx: OperationContext,
     signal?: AbortSignal,
   ): Promise<ChainEventPollerLaneScanResult> {
     const state = lane.state;
+    const stateBefore = { ...state };
+    const { head, lease } = boundary;
 
-    this.applyHistoryModeTransition(lane, head, ctx);
+    this.applyCursorStrategyTransition(lane, head, ctx);
 
     if (head != null && !state.headKnown) {
       state.headKnown = true;
-      if (state.lastBlock === 0 && !lane.requiresFullHistory) {
-        state.lastBlock = Math.max(0, head - lane.liveSeedLookbackBlocks);
+      if (state.lastBlock === 0 && lane.cursorStrategy.kind === 'live-tail') {
+        state.lastBlock = Math.max(0, head - this.liveSeedLookbackBlocks(lane.cursorStrategy));
         this.log.info(ctx, `Seeded poller cursor near chain head: lane=${lane.spec.name} head=${head} scanning from ${state.lastBlock}`);
-      } else if (state.lastBlock === 0 && lane.spec.onBackfillFromGenesis) {
-        lane.spec.onBackfillFromGenesis(ctx);
+      } else if (state.lastBlock === 0 && lane.cursorStrategy.kind === 'full-history') {
+        lane.cursorStrategy.onBackfillFromGenesis?.(ctx);
       }
     }
 
@@ -277,21 +378,131 @@ export class ChainEventLaneRunner {
     };
     const caughtUp = head != null && upperBound >= head;
     let advanced = false;
+    let leaseExpired = false;
 
     try {
       for await (const event of this.chain.listenForEvents(filter)) {
-        await lane.spec.dispatch(event, ctx);
+        signal?.throwIfAborted();
+        if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
+          leaseExpired = true;
+          throw new Error('event scan horizon lease expired before event dispatch');
+        }
+        signal?.throwIfAborted();
+        await lane.spec.dispatch(event, ctx, signal);
+        signal?.throwIfAborted();
+        if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
+          leaseExpired = true;
+          throw new Error('event scan horizon lease expired after event dispatch');
+        }
+        signal?.throwIfAborted();
       }
 
+      signal?.throwIfAborted();
+      if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
+        leaseExpired = true;
+        throw new Error('event scan horizon lease expired before cursor advance');
+      }
+      signal?.throwIfAborted();
       state.lastBlock = upperBound;
       advanced = true;
       this.applyLaneSchedule(lane, { kind: 'success', now, caughtUp });
     } catch (err) {
       if (signal?.aborted) signal.throwIfAborted();
+      if (leaseExpired) this.restoreLaneState(state, stateBefore);
       this.log.error(ctx, `Poll lane ${lane.spec.name} failed: ${err instanceof Error ? err.message : String(err)}`);
       this.applyLaneSchedule(lane, { kind: 'failure', now });
     }
-    return { lane, blockNumber: state.lastBlock, advanced };
+    return {
+      lane,
+      blockNumber: state.lastBlock,
+      advanced,
+      ...(advanced && lease !== undefined ? { lease, stateBefore } : {}),
+    };
+  }
+
+  private async revalidateScanResults(
+    scanResults: readonly ChainEventPollerLaneScanResult[],
+    now: number,
+    ctx: OperationContext,
+    signal?: AbortSignal,
+  ): Promise<readonly ChainEventPollerLaneScanResult[]> {
+    const current: ChainEventPollerLaneScanResult[] = [];
+    for (const result of scanResults) {
+      if (!result.advanced || result.lease === undefined || result.stateBefore === undefined) {
+        current.push(result);
+        continue;
+      }
+      signal?.throwIfAborted();
+      if (await this.eventScanLeaseHolds(result.lease)) {
+        signal?.throwIfAborted();
+        current.push(result);
+        continue;
+      }
+
+      current.push(this.retireScanResult(
+        result,
+        result.stateBefore,
+        now,
+        ctx,
+        'cursor persistence',
+      ));
+    }
+    return current;
+  }
+
+  private async scanResultLeaseHoldsForPersistence(
+    result: ChainEventPollerLaneScanResult,
+    now: number,
+    ctx: OperationContext,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (result.lease === undefined || result.stateBefore === undefined) return true;
+    signal?.throwIfAborted();
+    if (await this.eventScanLeaseHolds(result.lease)) {
+      signal?.throwIfAborted();
+      return true;
+    }
+    this.retireScanResult(result, result.stateBefore, now, ctx, 'cursor save');
+    return false;
+  }
+
+  private retireScanResult(
+    result: ChainEventPollerLaneScanResult,
+    stateBefore: ChainEventPollerLaneState,
+    now: number,
+    ctx: OperationContext,
+    phase: string,
+  ): ChainEventPollerLaneScanResult {
+    this.restoreLaneState(result.lane.state, stateBefore);
+    this.applyLaneSchedule(result.lane, { kind: 'failure', now });
+    this.log.warn(
+      ctx,
+      `Poll lane ${result.lane.spec.name} lease expired before ${phase}; range will replay`,
+    );
+    return {
+      lane: result.lane,
+      blockNumber: result.lane.state.lastBlock,
+      advanced: false,
+    };
+  }
+
+  private async eventScanLeaseHolds(lease: EventScanHorizonLease): Promise<boolean> {
+    try {
+      return await lease.holds();
+    } catch {
+      return false;
+    }
+  }
+
+  private restoreLaneState(
+    state: ChainEventPollerLaneState,
+    previous: ChainEventPollerLaneState,
+  ): void {
+    state.lastBlock = previous.lastBlock;
+    state.headKnown = previous.headKnown;
+    state.cursorStrategyKind = previous.cursorStrategyKind;
+    state.nextRunAtMs = previous.nextRunAtMs;
+    state.failureBackoffMs = previous.failureBackoffMs;
   }
 
   private applyLaneSchedule(lane: ChainEventPollerLaneRuntime, outcome: ChainEventLaneScheduleOutcome): void {
@@ -314,18 +525,18 @@ export class ChainEventLaneRunner {
     state.nextRunAtMs = outcome.now + next;
   }
 
-  private applyHistoryModeTransition(
+  private applyCursorStrategyTransition(
     lane: ChainEventPollerLaneRuntime,
     head: number | undefined,
     ctx: OperationContext,
   ): void {
     const state = lane.state;
-    const previousRequiresFullHistory = state.requiresFullHistory;
-    state.requiresFullHistory = lane.requiresFullHistory;
+    const previousStrategyKind = state.cursorStrategyKind;
+    state.cursorStrategyKind = lane.cursorStrategy.kind;
 
-    if (previousRequiresFullHistory !== true || lane.requiresFullHistory || head == null) return;
+    if (previousStrategyKind !== 'full-history' || lane.cursorStrategy.kind === 'full-history' || head == null) return;
 
-    const liveSeedBlock = Math.max(0, head - lane.liveSeedLookbackBlocks);
+    const liveSeedBlock = Math.max(0, head - this.liveSeedLookbackBlocks(lane.cursorStrategy));
     if (state.lastBlock >= liveSeedBlock) return;
 
     state.lastBlock = liveSeedBlock;

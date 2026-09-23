@@ -63,9 +63,7 @@ export async function makeEntitySharePublisherFixture(options: {
       rootEntity,
       options.subGraphName,
     ));
-    // Preserve the recovery suite's manifest order independently of CONSTRUCT ordering.
-    const meta = result.quads.map(quad => ({ ...quad, graph: metaGraph }))
-      .sort((a, b) => sliceSubjects.indexOf(a.subject) - sliceSubjects.indexOf(b.subject));
+    const meta = result.quads.map(quad => ({ ...quad, graph: metaGraph }));
     const decodedSlices = decodeEntityShareMetadata(options.contextGraphId, meta)
       .filter(record => record.kind === 'slice');
     const slices = options.rootEntities.map((rootEntity, index): EntitySharePublisherSlice => {

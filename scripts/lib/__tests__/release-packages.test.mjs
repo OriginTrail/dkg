@@ -11,6 +11,8 @@ import ts from 'typescript';
 import {
   buildInfoPayload,
   discoverPublishablePackages,
+  findNodeSqliteEngineViolations,
+  findNodeSqliteInstallGuardViolations,
   findMissingCliPackAssets,
   findReleaseVersionMismatches,
   verifyReleaseTag,
@@ -158,6 +160,50 @@ test('discovers public OriginTrail packages only', () => withFixture((root) => {
     discoverPublishablePackages(root).map((pkg) => pkg.name),
     ['@origintrail-official/dkg', '@origintrail-official/dkg-query'],
   );
+}));
+
+test('requires the declared Node.js range for publishable node:sqlite consumers', () => withFixture((root) => {
+  const queryDir = path.join(root, 'packages/query');
+  fs.mkdirSync(path.join(queryDir, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(queryDir, 'src/index.js'), "import 'node:sqlite';\n");
+  assert.deepEqual(findNodeSqliteEngineViolations(root).map((violation) => violation.name), [
+    '@origintrail-official/dkg-query',
+  ]);
+
+  writePackage(root, 'packages/query', {
+    name: '@origintrail-official/dkg-query',
+    version: '1.2.3',
+    engines: { node: '>=22.13.0 <23.0.0 || >=23.4.0' },
+  });
+  assert.deepEqual(findNodeSqliteEngineViolations(root), []);
+}));
+
+test('requires target-owned install guards for predecessor npm and git updaters', () => withFixture((root) => {
+  assert.deepEqual(
+    findNodeSqliteInstallGuardViolations(root).map((violation) => violation.path),
+    [
+      'package.json',
+      'packages/cli/package.json',
+      'packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+    ],
+  );
+
+  writePackage(root, '.', {
+    name: 'dkg-v10',
+    version: '1.2.3',
+    private: true,
+    scripts: { preinstall: 'node packages/cli/scripts/verify-node-sqlite-runtime.mjs' },
+  });
+  writePackage(root, 'packages/cli', {
+    name: '@origintrail-official/dkg',
+    version: '1.2.3',
+    scripts: { preinstall: 'node ./scripts/verify-node-sqlite-runtime.mjs' },
+  });
+  const guardPath = path.join(root, 'packages/cli/scripts/verify-node-sqlite-runtime.mjs');
+  fs.mkdirSync(path.dirname(guardPath), { recursive: true });
+  fs.writeFileSync(guardPath, '#!/usr/bin/env node\n');
+
+  assert.deepEqual(findNodeSqliteInstallGuardViolations(root), []);
 }));
 
 test('finds every release package version mismatch, including private packages and the root', () => withFixture((root) => {
@@ -346,6 +392,7 @@ test('flags a cli tarball missing required runtime assets (the 10.0.4 drop)', ()
       'network/mainnet-base.json',
       'network/testnet.json',
       'project.json',
+      'scripts/verify-node-sqlite-runtime.mjs',
     ],
   );
 }));
@@ -355,6 +402,7 @@ test('passes when the cli tarball includes every required runtime asset', () => 
   // npm reports Windows paths with backslashes — the check must normalize them.
   const packReport = () => JSON.stringify([{ files: [
     { path: 'project.json' },
+    { path: 'scripts/verify-node-sqlite-runtime.mjs' },
     { path: 'blazegraph-image.json' },
     { path: 'blazegraph-image-metadata.cjs' },
     { path: 'blazegraph-namespace-contract.cjs' },
@@ -435,7 +483,18 @@ test('copyCliRuntimeAssets fails loudly when a source asset is missing', () => w
 }));
 
 test('packages/cli lifecycle is wired to the copy script (build + prepack)', () => {
+  const rootPkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
   const cliPkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'packages', 'cli', 'package.json'), 'utf8'));
+  assert.equal(
+    rootPkg.scripts.preinstall,
+    'node packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+    'git-slot installs must run the target-owned node:sqlite guard',
+  );
+  assert.equal(
+    cliPkg.scripts.preinstall,
+    'node ./scripts/verify-node-sqlite-runtime.mjs',
+    'published CLI installs must run the target-owned node:sqlite guard',
+  );
   assert.match(cliPkg.scripts.prepack ?? '', /copy-cli-runtime-assets\.mjs/, 'prepack must run the copy script');
   assert.match(cliPkg.scripts.build ?? '', /build:prepared/, 'build must run the prepared CLI phase');
   assert.match(
@@ -466,7 +525,11 @@ test('the manifest distinguishes copied assets from complete pack requirements',
   ]);
   assert.ok(copiedRuntimeAssets.every((asset) => requiredPackAssets.includes(asset)));
   const spyReport = () => JSON.stringify([{
-    files: [...requiredPackAssets, 'build-info.json'].map((p) => ({ path: p })),
+    files: [
+      ...requiredPackAssets,
+      'build-info.json',
+      'scripts/verify-node-sqlite-runtime.mjs',
+    ].map((p) => ({ path: p })),
   }]);
   assert.deepEqual(findMissingCliPackAssets(root, spyReport), []);
 }));

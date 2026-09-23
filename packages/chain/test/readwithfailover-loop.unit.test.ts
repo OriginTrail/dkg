@@ -305,6 +305,21 @@ describe('RpcFailoverClient.read — per-attempt cap (named policies, log-scan s
     expect(backup.read.calls).toEqual([]); // completed on the primary → backup never consulted
   });
 
+  it('MULTI-RPC: a durable paged scan may exceed 30s in aggregate without false failover', async () => {
+    vi.useFakeTimers();
+    const primary = { read: delayedRead(35_000, 'PRIMARY') };
+    const backup = { read: recorder(async () => 'BACKUP') };
+    const client = makeClient([primary, backup], ['https://primary.example', 'https://backup.example']);
+
+    const p = client.read('durable scan', (pr: any) => pr.read(), {
+      policy: 'durablePagedLogScan',
+    });
+    await vi.advanceTimersByTimeAsync(36_000);
+    expect(await p).toBe('PRIMARY');
+    expect(primary.read.calls).toHaveLength(1);
+    expect(backup.read.calls).toEqual([]);
+  });
+
   it('MULTI-RPC: the SAME wide read under the DEFAULT pointRead cap aborts at ~4s and fails over (proves the cap matters)', async () => {
     vi.useFakeTimers();
     const primary = { read: delayedRead(5_000, 'PRIMARY') };
