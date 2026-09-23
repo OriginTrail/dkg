@@ -282,11 +282,39 @@ describe('/api/status external-store quad count', () => {
         storeQuadsAgeMs: 3_600_000,
       });
 
-      // A wall-clock step backwards must not produce a negative age.
-      clock.mockReturnValue(countedAt - 5_000);
-      const stepped = await fetchStatus(baseUrl);
-      expect(stepped.body.storeQuadsAgeMs).toBe(0);
       expect(queryCalls).toBe(1);
+    } finally {
+      await closeServer(server);
+    }
+  });
+
+  it('reports a count from before a backwards clock step with an unknown age and refreshes it on request', async () => {
+    let queryCalls = 0;
+    const { server, baseUrl } = await startStatusServer(async () => {
+      queryCalls += 1;
+      return COUNT_66;
+    });
+    const countedAt = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(countedAt);
+
+    try {
+      await fetchStatus(baseUrl, true);
+      await nextTick();
+
+      // The wall clock steps back past the count: its age is unknown, not 0.
+      clock.mockReturnValue(countedAt - 5_000);
+      const polled = await fetchStatus(baseUrl);
+      expect(polled.body).toMatchObject({
+        storeQuads: 66,
+        storeQuadsStatus: 'ready',
+        storeQuadsAgeMs: null,
+      });
+      expect(queryCalls).toBe(1);
+
+      // Nor does it count as fresh: an explicit request refreshes it.
+      const requested = await fetchStatus(baseUrl, true);
+      expect(requested.body).toMatchObject({ storeQuads: 66, storeQuadsAgeMs: null });
+      expect(queryCalls).toBe(2);
     } finally {
       await closeServer(server);
     }
@@ -445,6 +473,32 @@ describe('dkg status against the status route', () => {
       expect(queryCalls).toBe(1);
     } finally {
       countResult.resolve({ type: 'bindings', bindings: [] });
+      await closeServer(server);
+    }
+  });
+
+  it('starts no count while the cached one is under ten minutes old, then refreshes it', async () => {
+    let queryCalls = 0;
+    const { server, baseUrl } = await startStatusServer(async () => {
+      queryCalls += 1;
+      return COUNT_66;
+    }, MANAGED_OXIGRAPH_STORE);
+    const countedAt = Date.now();
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(countedAt);
+
+    try {
+      expect(await runStatusCommand(baseUrl)).toContain('— CHECKING');
+      await nextTick();
+      expect(queryCalls).toBe(1);
+
+      clock.mockReturnValue(countedAt + 9 * 60_000);
+      expect(await runStatusCommand(baseUrl)).toContain('— 66 quads (checked 9m 0s ago)');
+      expect(queryCalls).toBe(1);
+
+      clock.mockReturnValue(countedAt + 10 * 60_000);
+      expect(await runStatusCommand(baseUrl)).toContain('— 66 quads (checked 10m 0s ago)');
+      expect(queryCalls).toBe(2);
+    } finally {
       await closeServer(server);
     }
   });

@@ -29,7 +29,8 @@ import {
   readNodeRoleFromConfigSync,
   type AutoUpdateConfig,
 } from '../config.js';
-import { ApiClient, type DaemonStatusResponse } from '../api-client.js';
+import { ApiClient } from '../api-client.js';
+import type { StoreQuadsStatusFields } from '../status-store-quads-wire.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
@@ -134,21 +135,41 @@ export async function executeStopCommand(
 // A display threshold, deliberately independent of the daemon's cache TTL:
 // past it `dkg status` says how old the store count it prints is.
 const STORE_QUADS_SHOW_AGE_AFTER_MS = 60_000;
+// A full-store COUNT can occupy a large store for seconds, and scripts or
+// agents may run `dkg status` on a schedule, so a successful count is reused
+// until it is this old.
+const STORE_QUADS_REFRESH_AFTER_MS = 10 * 60_000;
+
+/**
+ * Whether `dkg status` should ask the daemon to refresh its store count, given
+ * a plain status response. A count that is running, or a successful one
+ * younger than STORE_QUADS_REFRESH_AFTER_MS, is shown as it is. Anything else
+ * is re-checked (the daemon's cache TTL still limits the COUNTs): no count yet,
+ * a failure (so a revived store stops showing UNREACHABLE), an old or unknown
+ * age, and daemons that report no status or age.
+ */
+function shouldRefreshStoreQuads(s: StoreQuadsStatusFields): boolean {
+  if (s.storeQuadsStatus === 'pending') return false;
+  if (s.storeQuadsStatus !== 'ready') return true;
+  return typeof s.storeQuadsAgeMs !== 'number' || s.storeQuadsAgeMs >= STORE_QUADS_REFRESH_AFTER_MS;
+}
 
 /**
  * The quad-count part of the `dkg status` store line. A daemon that reports
  * `storeQuadsStatus` says what a missing count means; only an older daemon
  * that omits it keeps the legacy reading of `null` as unreachable.
  */
-function formatStoreQuads(
-  s: Pick<DaemonStatusResponse, 'storeQuads' | 'storeQuadsStatus' | 'storeQuadsAgeMs'>,
-): string {
-  const status: string | undefined = s.storeQuadsStatus;
+function formatStoreQuads(s: StoreQuadsStatusFields): string {
+  const status = s.storeQuadsStatus;
   if (status === 'pending') return 'CHECKING';
   if (status === 'not-requested') return 'NOT CHECKED';
-  const age = typeof s.storeQuadsAgeMs === 'number' && s.storeQuadsAgeMs >= STORE_QUADS_SHOW_AGE_AFTER_MS
-    ? ` (checked ${formatUptime(s.storeQuadsAgeMs)} ago)`
-    : '';
+  // A cached result reports a null age only when the daemon's clock stepped
+  // back past it; older daemons send no age at all.
+  const age = s.storeQuadsAgeMs === null
+    ? ' (age unknown)'
+    : typeof s.storeQuadsAgeMs === 'number' && s.storeQuadsAgeMs >= STORE_QUADS_SHOW_AGE_AFTER_MS
+      ? ` (checked ${formatUptime(s.storeQuadsAgeMs)} ago)`
+      : '';
   if (status === 'unreachable') return `UNREACHABLE${age}`;
   if (typeof s.storeQuads === 'number') return `${s.storeQuads.toLocaleString()} quads${age}`;
   // A status this CLI does not know comes from a newer daemon, for which a
@@ -325,10 +346,12 @@ program
   .action(async () => {
     try {
       const client = await ApiClient.connect({ allowConfigFallback: true });
-      // An operator running `dkg status` is the explicit request the daemon
-      // waits for before spending a full-store COUNT; plain /api/status
-      // polling only ever reads the cached count.
-      const s = await client.status({ includeStoreQuads: true });
+      // Plain /api/status never starts a full-store COUNT. Ask for one only
+      // when the cached count is missing, failed or old.
+      let s = await client.status();
+      if (s.storeUrl && shouldRefreshStoreQuads(s)) {
+        s = await client.status({ includeStoreQuads: true });
+      }
       const uptime = formatUptime(s.uptimeMs);
       console.log(`  Node:      ${s.name}`);
       console.log(`  Role:      ${s.nodeRole ?? 'edge'}`);

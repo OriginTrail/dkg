@@ -69,6 +69,7 @@ import {
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
+import { parseIncludeStoreQuads, type StoreQuadsStatusFields } from '../../status-store-quads-wire.js';
 import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
@@ -456,29 +457,30 @@ function createRouteEvmProvider(
 // liveness check: on a multi-million-row namespace it can occupy the store for
 // seconds and compete directly with sync. Normal /api/status polling therefore
 // never starts it. Operators may request a background refresh explicitly with
-// `?includeStoreQuads=true` (`dkg status` does); subsequent ordinary status
-// calls can reuse the cached value without touching the store. Cold/stale
-// explicit callers get the current snapshot while one refresh runs in the
-// background, so status never waits on the count.
+// `?includeStoreQuads=true` (`dkg status` does when it has no recent count);
+// subsequent ordinary status calls can reuse the cached value without touching
+// the store. Cold/stale explicit callers get the current snapshot while one
+// refresh runs in the background, so status never waits on the count.
 // Every snapshot names its status, so a count nobody has requested yet
-// ('not-requested') cannot be read as an unreachable store, and carries the
-// age of the cached result, because ordinary polling never refreshes it.
+// ('not-requested') cannot be read as an unreachable store, and a cached
+// result carries its age, because ordinary polling never refreshes it.
 // Local backends bypass this entirely (file-bytes metric stays on the
 // metrics collector tick).
 const STORE_QUADS_CACHE_TTL_MS = 30_000;
-type StoreQuadsStatus = 'not-requested' | 'pending' | 'ready' | 'unreachable';
-interface StoreQuadsSnapshot {
-  value: number | null;
-  status: StoreQuadsStatus;
-  /** Daemon-clock ms since the cached result was recorded; null before one exists. */
-  ageMs: number | null;
-}
 
-let storeQuadsCache: {
-  value: number | null;
-  status: Extract<StoreQuadsStatus, 'ready' | 'unreachable'>;
-  fetchedAt: number;
-} | null = null;
+/** A finished count, as cached. */
+type StoreQuadsCacheEntry =
+  | { status: 'ready'; value: number; fetchedAt: number }
+  | { status: 'unreachable'; fetchedAt: number };
+
+/** A cached result as reported; `ageMs` is null when the clock stepped back past it. */
+type CachedStoreQuadsSnapshot =
+  | { status: 'ready'; value: number; ageMs: number | null }
+  | { status: 'unreachable'; ageMs: number | null };
+
+type StoreQuadsSnapshot = { status: 'not-requested' | 'pending' } | CachedStoreQuadsSnapshot;
+
+let storeQuadsCache: StoreQuadsCacheEntry | null = null;
 let storeQuadsInflight: Promise<void> | null = null;
 
 /** Drop cached quad counts (e.g. when the managed Oxigraph child exits). */
@@ -488,26 +490,32 @@ export function invalidateExternalStoreQuadsCache(): void {
 }
 
 function snapshotStoreQuadsCache(
-  cache: NonNullable<typeof storeQuadsCache>,
+  cache: StoreQuadsCacheEntry,
   now: number,
-): StoreQuadsSnapshot {
-  // Clamped so a wall-clock step backwards cannot report a negative age.
-  return { value: cache.value, status: cache.status, ageMs: Math.max(0, now - cache.fetchedAt) };
+): CachedStoreQuadsSnapshot {
+  // After a wall-clock step backwards the age is unknown: report it as such
+  // rather than as 0, which would present an old count as just checked.
+  const elapsedMs = now - cache.fetchedAt;
+  const ageMs = elapsedMs >= 0 ? elapsedMs : null;
+  return cache.status === 'ready'
+    ? { status: 'ready', value: cache.value, ageMs }
+    : { status: 'unreachable', ageMs };
 }
 
 function getCachedExternalStoreQuads(
   agent: DKGAgent,
   now: number,
 ): StoreQuadsSnapshot {
-  if (storeQuadsCache && now - storeQuadsCache.fetchedAt < STORE_QUADS_CACHE_TTL_MS) {
-    return snapshotStoreQuadsCache(storeQuadsCache, now);
+  const cached = storeQuadsCache ? snapshotStoreQuadsCache(storeQuadsCache, now) : null;
+  // An unknown age is stale, never fresh.
+  if (cached && cached.ageMs !== null && cached.ageMs < STORE_QUADS_CACHE_TTL_MS) {
+    return cached;
   }
 
-  const currentSnapshot: StoreQuadsSnapshot = storeQuadsCache
-    ? snapshotStoreQuadsCache(storeQuadsCache, now)
-    : { value: null, status: 'pending', ageMs: null };
+  const currentSnapshot: StoreQuadsSnapshot = cached ?? { status: 'pending' };
   if (!storeQuadsInflight) {
     const refresh = (async () => {
+      let result: StoreQuadsCacheEntry;
       try {
         const r = await agent.store.query(
           'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
@@ -519,18 +527,17 @@ function getCachedExternalStoreQuads(
           const digits = cell.match(/\d+/)?.[0];
           value = digits ? parseInt(digits, 10) : 0;
         }
-        storeQuadsCache = {
-          value,
-          status: value === null ? 'unreachable' : 'ready',
-          fetchedAt: Date.now(),
-        };
+        result = value === null
+          ? { status: 'unreachable', fetchedAt: Date.now() }
+          : { status: 'ready', value, fetchedAt: Date.now() };
       } catch {
         // Surface "unknown" rather than a stale value; operators can
         // distinguish unreachable from genuinely-empty via storeBackend +
         // their network logs. Cache the null briefly to avoid hammering
         // a flapping endpoint.
-        storeQuadsCache = { value: null, status: 'unreachable', fetchedAt: Date.now() };
+        result = { status: 'unreachable', fetchedAt: Date.now() };
       }
+      storeQuadsCache = result;
     })();
     storeQuadsInflight = refresh;
     void refresh.finally(() => {
@@ -543,10 +550,16 @@ function getCachedExternalStoreQuads(
 // Ordinary polling: report what is already known and never start a count.
 function peekCachedExternalStoreQuads(now: number): StoreQuadsSnapshot {
   if (storeQuadsCache) return snapshotStoreQuadsCache(storeQuadsCache, now);
+  return { status: storeQuadsInflight ? 'pending' : 'not-requested' };
+}
+
+/** The flat `/api/status` fields for a snapshot; a local backend has none. */
+function storeQuadsStatusFields(snapshot: StoreQuadsSnapshot | null): StoreQuadsStatusFields {
+  if (!snapshot) return { storeQuads: null };
   return {
-    value: null,
-    status: storeQuadsInflight ? 'pending' : 'not-requested',
-    ageMs: null,
+    storeQuads: snapshot.status === 'ready' ? snapshot.value : null,
+    storeQuadsStatus: snapshot.status,
+    storeQuadsAgeMs: 'ageMs' in snapshot ? snapshot.ageMs : null,
   };
 }
 
@@ -759,8 +772,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     });
     const reportsExternalStoreQuads =
       isExternalBackend(config.store?.backend) || config.store?.backend === 'oxigraph-server';
-    const includeStoreQuads = url.searchParams.get('includeStoreQuads') === 'true'
-      || url.searchParams.get('includeStoreQuads') === '1';
+    const includeStoreQuads = parseIncludeStoreQuads(url.searchParams);
     const storeQuadsNow = Date.now();
     const storeQuadsSnapshot = reportsExternalStoreQuads
       ? includeStoreQuads
@@ -853,9 +865,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // `storeQuadsStatus` says what a null count means ('not-requested',
       // 'pending', 'unreachable'); `storeQuadsAgeMs` is how old the cached
       // result is, since ordinary polling never refreshes it.
-      storeQuads: storeQuadsSnapshot?.value ?? null,
-      storeQuadsStatus: storeQuadsSnapshot?.status,
-      storeQuadsAgeMs: storeQuadsSnapshot?.ageMs,
+      ...storeQuadsStatusFields(storeQuadsSnapshot),
       uptimeMs: Date.now() - startedAt,
       // Concurrency admission control (PR #1209): inFlight = requests currently
       // holding a slot, max = the configured cap (0 = disabled), rejectedTotal =

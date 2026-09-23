@@ -1,16 +1,22 @@
 import { Command } from 'commander';
 import { describe, expect, it, vi } from 'vitest';
-import { ApiClient, type DaemonStatusResponse } from '../src/api-client.js';
+import { ApiClient } from '../src/api-client.js';
 import { registerLifecycleCommands } from '../src/commands/lifecycle.js';
+import type { StoreQuadsStatusFields } from '../src/status-store-quads-wire.js';
 
 interface StoreFields {
+  storeUrl?: string | null;
   storeQuads: number | null;
   // Widened so a status only a newer daemon sends can be rendered as well.
-  storeQuadsStatus?: DaemonStatusResponse['storeQuadsStatus'] | 'from-a-newer-daemon';
+  storeQuadsStatus?: StoreQuadsStatusFields['storeQuadsStatus'] | 'from-a-newer-daemon';
   storeQuadsAgeMs?: number | null;
 }
 
-async function renderStatus(store: StoreFields): Promise<{
+/**
+ * Run `dkg status` against a stubbed client. `peek` answers plain status
+ * requests and `requested` answers those asking for a store count.
+ */
+async function renderStatus(peek: StoreFields, requested: StoreFields = peek): Promise<{
   storeLine: string | undefined;
   statusRequests: unknown[][];
 }> {
@@ -23,6 +29,7 @@ async function renderStatus(store: StoreFields): Promise<{
     controlPlaneWarning: null,
     status: async (...args: unknown[]) => {
       statusRequests.push(args);
+      const options = args[0] as { includeStoreQuads?: boolean } | undefined;
       return {
         name: 'status-store-test',
         peerId: 'peer-status-store-test',
@@ -32,7 +39,7 @@ async function renderStatus(store: StoreFields): Promise<{
         multiaddrs: [],
         storeBackend: 'sparql-http',
         storeUrl: 'http://127.0.0.1:9999/query',
-        ...store,
+        ...(options?.includeStoreQuads ? requested : peek),
       };
     },
   } as never);
@@ -52,6 +59,39 @@ async function renderStatus(store: StoreFields): Promise<{
   }
 }
 
+const PLAIN_ONLY = [[]];
+const PLAIN_THEN_COUNT = [[], [{ includeStoreQuads: true }]];
+
+const REQUEST_CASES: Array<[label: string, peek: StoreFields, requests: unknown[][]]> = [
+  ['asks for a count nobody has requested yet', {
+    storeQuads: null, storeQuadsStatus: 'not-requested', storeQuadsAgeMs: null,
+  }, PLAIN_THEN_COUNT],
+  ['asks for a count when a 10.0.7 to 10.0.18 daemon reports no status', {
+    storeQuads: null,
+  }, PLAIN_THEN_COUNT],
+  ['re-checks a failed count', {
+    storeQuads: null, storeQuadsStatus: 'unreachable', storeQuadsAgeMs: 1_000,
+  }, PLAIN_THEN_COUNT],
+  ['refreshes a count ten minutes old', {
+    storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 600_000,
+  }, PLAIN_THEN_COUNT],
+  ['refreshes a count whose age is unknown', {
+    storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: null,
+  }, PLAIN_THEN_COUNT],
+  ['refreshes a count from a daemon that reports no age', {
+    storeQuads: 66, storeQuadsStatus: 'ready',
+  }, PLAIN_THEN_COUNT],
+  ['starts no count while a successful one is under ten minutes old', {
+    storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 599_999,
+  }, PLAIN_ONLY],
+  ['starts no count while one is running', {
+    storeQuads: null, storeQuadsStatus: 'pending', storeQuadsAgeMs: null,
+  }, PLAIN_ONLY],
+  ['never asks a local backend for a count', {
+    storeUrl: null, storeQuads: null,
+  }, PLAIN_ONLY],
+];
+
 const RENDER_CASES: Array<[label: string, store: StoreFields, rendered: string]> = [
   ['a count in progress as checking', {
     storeQuads: null, storeQuadsStatus: 'pending', storeQuadsAgeMs: null,
@@ -68,6 +108,9 @@ const RENDER_CASES: Array<[label: string, store: StoreFields, rendered: string]>
   ['a cached count past a minute old with its age', {
     storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 3_720_000,
   }, '66 quads (checked 1h 2m ago)'],
+  ['a count of unknown age as such', {
+    storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: null,
+  }, '66 quads (age unknown)'],
   ['a failed count as unreachable', {
     storeQuads: null, storeQuadsStatus: 'unreachable', storeQuadsAgeMs: 1_000,
   }, 'UNREACHABLE'],
@@ -85,17 +128,26 @@ const RENDER_CASES: Array<[label: string, store: StoreFields, rendered: string]>
   }, 'UNKNOWN'],
 ];
 
-describe('dkg status external-store rendering', () => {
-  it('asks the daemon for the store count explicitly', async () => {
-    const { statusRequests } = await renderStatus({
-      storeQuads: 66,
-      storeQuadsStatus: 'ready',
-      storeQuadsAgeMs: 0,
+describe('dkg status external-store count requests', () => {
+  it.each(REQUEST_CASES)('%s', async (_label, peek, requests) => {
+    const { statusRequests } = await renderStatus(peek, {
+      storeQuads: null, storeQuadsStatus: 'pending', storeQuadsAgeMs: null,
     });
 
-    expect(statusRequests).toEqual([[{ includeStoreQuads: true }]]);
+    expect(statusRequests).toEqual(requests);
   });
 
+  it('renders the response to the count request', async () => {
+    const { storeLine } = await renderStatus(
+      { storeQuads: null, storeQuadsStatus: 'not-requested', storeQuadsAgeMs: null },
+      { storeQuads: null, storeQuadsStatus: 'pending', storeQuadsAgeMs: null },
+    );
+
+    expect(storeLine).toBe('  Store:     sparql-http (http://127.0.0.1:9999/query) — CHECKING');
+  });
+});
+
+describe('dkg status external-store rendering', () => {
   it.each(RENDER_CASES)('renders %s', async (_label, store, rendered) => {
     const { storeLine } = await renderStatus(store);
 

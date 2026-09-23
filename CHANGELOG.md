@@ -10,12 +10,16 @@ All notable changes to the DKG V10 node are documented here. The format is based
   daemon**: since 10.0.7 plain `/api/status` never starts the full-store quad
   count, so on a node where nothing had requested one, `dkg status` showed a
   working managed Oxigraph or external SPARQL store as `UNREACHABLE`.
-  `dkg status` now requests the count itself (`?includeStoreQuads=true`),
-  shows `CHECKING` while the first count runs, and says how old a count is
-  once it is more than a minute old. `/api/status` reports a count nobody has
-  requested as `storeQuadsStatus: "not-requested"` and one in progress as
-  `"pending"` instead of omitting the status, and adds `storeQuadsAgeMs`, the
-  age of the cached count, which ordinary polling still never refreshes.
+  `dkg status` now requests a count itself (`?includeStoreQuads=true`) when
+  none is cached, the last one failed, or the cached one is at least ten
+  minutes old, so running it on a schedule against a healthy store starts at
+  most one full-store count per ten minutes. It shows `CHECKING` while the
+  first count runs and says how old a count is once it is more than a minute
+  old. `/api/status` reports a count nobody has requested as
+  `storeQuadsStatus: "not-requested"` and one in progress as `"pending"`
+  instead of omitting the status, and adds `storeQuadsAgeMs`, the age of the
+  cached count (null when unknown), which ordinary polling still never
+  refreshes.
 
 ## [10.0.18] - 2026-09-22
 
