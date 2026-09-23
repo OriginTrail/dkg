@@ -136,8 +136,10 @@ test('repository support paths route to the lanes that execute them', () => {
     ['devnet/rfc64-runtime-provenance.mts', ['tornado_agent', 'tornado_agent_windows']],
     ['devnet/suites.json', ['tornado_agent', 'tornado_agent_windows']],
     ['test-systems/storage-conformance.test.ts', ['tornado_blazegraph']],
+    ['RELEASE_PROCESS.md', ['bura_cli']],
     ['devnet/v10-stress/automated.test.ts', ['tornado_agent', 'tornado_agent_windows']],
-    ['devnet/rfc64-gate2-multi-asset-completeness/runtime-load-hook.ts', ['tornado_agent', 'tornado_agent_windows']],
+    ['devnet/rfc64-gate2-multi-asset-completeness/runtime-load-hook.ts', ['tornado_agent', 'tornado_agent_windows', 'bura_cli']],
+    ['devnet/rfc64-gate2-multi-asset-completeness/adapter-process.ts', ['tornado_agent', 'tornado_agent_windows', 'bura_cli']],
     ['bench/publish-async-get.bench.ts', ['bura_cli']],
     ['tools/observability/lib/w1.mjs', []],
     ['.github/oxlint-baseline.json', []],
@@ -288,15 +290,18 @@ test('the Windows lifecycle lane follows the agent dependency closure its harnes
 });
 
 test('each changed path gets one routing decision with a fixed precedence', () => {
-  // 1. Global CI inputs win over the support area or trigger they sit in.
-  for (const filePath of [
-    '.github/actions/upload-vitest-junit/action.yml',
-    '.github/workflows/nested/policy.yml',
-    '.github/workflows/rfc64-inventory-windows.yml',
-    'scripts/ci/plan-ci.mjs',
-    'devnet/v10-stress/package.json',
+  // 1. Global CI inputs, and the fail-closed entries that open the support
+  // table, keep full CI with a reason naming what they are.
+  for (const [filePath, reason] of [
+    ['scripts/ci/plan-ci.mjs', 'Global CI input changed'],
+    ['.github/workflows/rfc64-inventory-windows.yml', 'CI control-plane workflow changed'],
+    ['.github/workflows/nested/policy.yml', 'Unrecognised path under .github/workflows'],
+    ['.github/actions/upload-vitest-junit/action.yml', 'Composite action used by CI jobs changed'],
+    ['devnet/v10-stress/package.json', 'Devnet workspace manifest changed'],
   ]) {
-    assert.equal(pullRequestPlan([change(filePath)]).mode, 'full', filePath);
+    const plan = pullRequestPlan([change(filePath)]);
+    assert.equal(plan.mode, 'full', filePath);
+    assert.equal(plan.reasons[0], `${reason}: ${filePath}`);
   }
   // 2. A workspace wins over a support area with the same path shape.
   const agentDevnet = pullRequestPlan([change('packages/agent/devnet/rfc64-private-catalog/run.mjs')]);
@@ -318,10 +323,11 @@ test('each changed path gets one routing decision with a fixed precedence', () =
 });
 
 test('support routes include every package lane that imports from them', () => {
-  // A package file importing something outside the workspaces (bench/,
+  // A package file referencing something outside the workspaces (bench/,
   // devnet/, test-systems/, tools/) makes that package's lane a CI consumer
   // of it, so a change there must select the lane; full CI covers the rest.
-  const importPattern = /(?:\bfrom\s*|\bimport\s*\(\s*)['"]((?:\.\.\/)+[^'"]+)['"]/g;
+  // References are static and dynamic imports and `new URL(...)` module paths.
+  const importPattern = /(?:\bfrom\s*|\bimport\s*\(\s*|\bnew\s+URL\(\s*)['"]((?:\.\.\/)+[^'"]+)['"]/g;
   const skipped = new Set(['node_modules', 'dist', 'dist-ui', 'coverage']);
   const sourceFiles = (directory) => fs.readdirSync(path.join(REPO_ROOT, directory), { withFileTypes: true })
     .flatMap((entry) => {

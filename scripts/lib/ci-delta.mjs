@@ -439,7 +439,12 @@ function hasDocumentationExtension(filePath) {
   return DOCUMENTATION_EXTENSIONS.has(extension);
 }
 
+// Documents that package tests read and assert on; they are test inputs, so
+// they route through SUPPORT_PATH_ROUTES instead of the docs-only profile.
+const DOCUMENTS_READ_BY_TESTS = new Set(['RELEASE_PROCESS.md']);
+
 function isDocumentationOnlyPath(filePath) {
+  if (DOCUMENTS_READ_BY_TESTS.has(filePath)) return false;
   if (
     filePath === 'LICENSE'
     || filePath === 'SECURITY.md'
@@ -465,34 +470,48 @@ function isDocumentationOnlyPath(filePath) {
     || (filePath.startsWith('demo/docs/') && hasDocumentationExtension(filePath));
 }
 
-// Workflows whose jobs, conditions and gates define what "CI gate" means. Other
-// top-level workflows run (or are linted) on their own; see supportPathRoute.
-const CI_CONTROL_WORKFLOWS = new Set([
-  '.github/workflows/ci.yml',
-  '.github/workflows/evm-integration.yml',
-  '.github/workflows/rfc64-inventory-windows.yml',
-]);
-
 function isGlobalFullPath(filePath) {
   return GLOBAL_FULL_PATHS.has(filePath)
-    || CI_CONTROL_WORKFLOWS.has(filePath)
-    // GitHub only runs top-level workflow files; anything nested is unknown.
-    || /^\.github\/workflows\/[^/]+\/./.test(filePath)
-    || filePath.startsWith('.github/actions/')
     || filePath.startsWith('patches/')
     || filePath.startsWith('scripts/')
-    // devnet suites are pnpm workspaces: their manifests are install inputs.
-    || /^devnet\/[^/]+\/package\.json$/.test(filePath)
     || /^tsconfig(?:\.[^/]+)?\.json$/.test(filePath);
 }
 
-// Repository areas outside the package workspaces, mapped to the lanes that
-// actually execute them in CI (ci.yml and its reusable workflows). Every route
-// also selects the shared build job's own checks (`buildChecks`): its lint,
+// Repository areas outside the package workspaces, in first-match order. An
+// entry with `full` keeps full CI with its own reason (the CI control plane,
+// unknown workflow paths, devnet install inputs). Every other entry selects
+// the lanes that actually execute the area in CI (ci.yml and its reusable
+// workflows) plus the shared build job's own checks (`buildChecks`): its lint,
 // repository-script tests and test-inventory checks cover these files, and for
 // routes with no lanes they are the only CI consumer (the suites are manual or
 // have their own workflow).
 const SUPPORT_PATH_ROUTES = Object.freeze([
+  {
+    // Workflows whose jobs, conditions and gates define what "CI gate" means.
+    // Other top-level workflows run (or are linted) on their own.
+    pattern: /^\.github\/workflows\/(?:ci|evm-integration|rfc64-inventory-windows)\.yml$/,
+    full: 'CI control-plane workflow changed',
+  },
+  {
+    // GitHub only runs top-level workflow files; anything nested is unknown.
+    pattern: /^\.github\/workflows\/[^/]+\//,
+    full: 'Unrecognised path under .github/workflows',
+  },
+  {
+    pattern: /^\.github\/actions\//,
+    full: 'Composite action used by CI jobs changed',
+  },
+  {
+    // devnet suites are pnpm workspaces: their manifests are install inputs.
+    pattern: /^devnet\/[^/]+\/package\.json$/,
+    full: 'Devnet workspace manifest changed',
+  },
+  {
+    // packages/cli/test/markitdown-binaries.test.ts asserts its wording.
+    pattern: /^RELEASE_PROCESS\.md$/,
+    lanes: ['bura_cli'],
+    reason: 'the CLI release tests assert the release process document',
+  },
   {
     pattern: /^devnet\/rfc64-gate1-public-open\//,
     lanes: ['tornado_agent', 'tornado_blazegraph'],
@@ -505,6 +524,13 @@ const SUPPORT_PATH_ROUTES = Object.freeze([
     pattern: /^devnet\/(?:rfc64-persistence-lifecycle|_bootstrap)\//,
     lanes: ['tornado_agent'],
     reason: 'RFC-64 persistence harness runs in the agent and Windows lifecycle jobs',
+  },
+  {
+    // The CLI's harness-only `rfc64-gate2-adapter` command loads
+    // adapter-process.ts from here, and agent fixtures import its runtime hooks.
+    pattern: /^devnet\/rfc64-gate2-multi-asset-completeness\//,
+    lanes: ['tornado_agent', 'bura_cli'],
+    reason: 'RFC-64 Gate 2 harness is loaded by the CLI and agent fixtures',
   },
   {
     // Devnet harnesses are built on the agent, and agent tests, fixtures and
@@ -679,11 +705,12 @@ export function parseNameStatusZ(buffer) {
 }
 
 // The routing decision for one changed path. Precedence, first match wins:
-//   1. global CI inputs (control plane, lockfile, scripts/, ...) -> full CI
+//   1. global CI inputs (lockfile, root configs, patches/, scripts/) -> full CI
 //   2. a package workspace -> its WORKSPACE_RULES entry; the highest-risk
 //      workspace and install-affecting manifest edits -> full CI
-//   3. a repository support area -> SUPPORT_PATH_ROUTES plus the shared
-//      build job's own checks
+//   3. a repository support area -> the first matching SUPPORT_PATH_ROUTES
+//      entry: full CI for the control plane, unknown workflow paths and
+//      devnet manifests, otherwise its lanes plus the shared build checks
 //   4. a path claimed only by PATH_TRIGGERS (blazegraph-image.json)
 //   5. anything else -> full CI
 // PATH_TRIGGERS add lanes and EVM scopes on top of whichever of 2-4 applies.
@@ -719,6 +746,7 @@ function routePath(filePath, { modifiedFiles, readManifest }) {
   }
 
   const supportRoute = supportPathRoute(filePath);
+  if (supportRoute?.full) return { full: `${supportRoute.full}: ${filePath}` };
   if (supportRoute) {
     route.lanes.push(...supportRoute.lanes);
     route.buildChecks = true;
@@ -735,6 +763,16 @@ function routePath(filePath, { modifiedFiles, readManifest }) {
 // and new paths. Type changes (T), unmerged (U), unknown (X) and broken
 // pairings (B) - and anything git adds later - still fail closed.
 const ROUTABLE_CHANGE_STATUSES = new Set(['A', 'M', 'D', 'R', 'C']);
+
+// The environment through which the workflows hand plan-ci.mjs the candidate
+// checkout and the two diffed commits that back `readManifest` (environment,
+// not flags, so an older pinned controller simply ignores it). Workflows and
+// tests are checked against these names.
+export const MANIFEST_READER_ENV = Object.freeze({
+  repository: 'CI_CANDIDATE_REPO',
+  base: 'CI_DIFF_BASE_SHA',
+  head: 'CI_DIFF_HEAD_SHA',
+});
 
 // `readManifest(side, path)` returns the raw text of `path` at the diff base
 // ('base') or the merge candidate ('head'); plan-ci.mjs backs it with git.

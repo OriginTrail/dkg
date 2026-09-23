@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { parseArgs } from 'node:util';
 import {
+  MANIFEST_READER_ENV,
   githubOutputsForPlan,
   parseNameStatusZ,
   planCi,
@@ -37,10 +38,10 @@ if (!Array.isArray(labels) || labels.some((label) => typeof label !== 'string'))
 // filters and runs nothing from the merge candidate. Without all three, the
 // planner receives no reader and every workspace manifest edit stays full.
 function manifestReaderFromEnvironment(environment) {
-  const repository = environment.CI_CANDIDATE_REPO;
+  const repository = environment[MANIFEST_READER_ENV.repository];
   const commits = {
-    base: environment.CI_DIFF_BASE_SHA,
-    head: environment.CI_DIFF_HEAD_SHA,
+    base: environment[MANIFEST_READER_ENV.base],
+    head: environment[MANIFEST_READER_ENV.head],
   };
   const isObjectId = (value) => /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value ?? '');
   if (!repository || !isObjectId(commits.base) || !isObjectId(commits.head)) return undefined;
