@@ -362,6 +362,41 @@ describe('subscribing a Context Graph by its on-chain numeric id', () => {
     expect(route.catchupTracker.jobs.size).toBe(0);
   }, 60_000);
 
+  it('refuses an on-chain id on a node that cannot read ContextGraphStorage', async () => {
+    useEmptyCatchupRunner();
+    const unsupported = {
+      error: 'This node cannot read ContextGraphStorage, so it cannot resolve on-chain id #32. '
+        + 'Subscribe with the Context Graph id or its name hash.',
+      code: 'CONTEXT_GRAPH_ON_CHAIN_ID_UNSUPPORTED',
+    };
+    const chain = await gnosisShapedChain();
+    Object.defineProperty(chain, 'readContextGraphStorageRange', { value: undefined });
+    const noReader = await startNode(chain);
+    const route = await startRoute(noReader);
+    for (const reference of ['#32', '32']) {
+      expect(await route.subscribe(reference)).toEqual({ status: 422, retryAfter: null, body: unsupported });
+    }
+    expect(noReader.getSubscribedContextGraphs().has('32')).toBe(false);
+    expect(route.catchupTracker.jobs.size).toBe(0);
+
+    // Without a chain there are no on-chain ids: `#32` is refused the same
+    // way, while a bare `32` is only a name and is not refused as one.
+    const chainless = await DKGAgent.create({
+      name: 'ChainlessEdge',
+      listenHost: '127.0.0.1',
+      nodeRole: 'edge',
+      rfc64CatalogActivation: { enabled: false },
+    });
+    cleanups.push(() => chainless.stop());
+    await chainless.start();
+    const chainlessRoute = await startRoute(chainless);
+    expect(await chainlessRoute.subscribe('#32')).toEqual({ status: 422, retryAfter: null, body: unsupported });
+    expect(chainlessRoute.catchupTracker.jobs.size).toBe(0);
+    const literal = await chainlessRoute.subscribe('32');
+    expect(literal.body.code).not.toBe('CONTEXT_GRAPH_ON_CHAIN_ID_UNSUPPORTED');
+    expect(literal.body).not.toHaveProperty('onChainReference');
+  }, 60_000);
+
   it('refuses a private graph alike whether or not this node holds its cleartext id', async () => {
     useEmptyCatchupRunner();
     const outsider = ethers.Wallet.createRandom().address;
