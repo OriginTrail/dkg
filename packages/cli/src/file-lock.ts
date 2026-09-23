@@ -1,10 +1,15 @@
 import { randomUUID } from 'node:crypto';
+import { readlinkSync } from 'node:fs';
 import { open, readFile, stat, unlink, type FileHandle } from 'node:fs/promises';
+import { hostname } from 'node:os';
 import { threadId } from 'node:worker_threads';
 import { hasErrorCode } from '@origintrail-official/dkg-core';
 
-/** A lock this old is abandoned even when its pid is alive again: the pid was reused. */
-const LOCK_STALE_MS = 5 * 60 * 1000;
+/**
+ * No holder keeps a lock this long, so an older one is abandoned even when its
+ * pid is alive (the pid was reused) or cannot be checked from here.
+ */
+const LOCK_STALE_MS = 60 * 1000;
 /** Until a lock file is this old, missing metadata means its holder is still writing it. */
 const LOCK_WRITE_GRACE_MS = 5000;
 const LOCK_POLL_MS = 25;
@@ -17,6 +22,26 @@ const DEFAULT_LOCK_TIMEOUT_MS = 1_000;
  */
 const heldTokens = new Set<string>();
 
+let cachedPidNamespace: string | undefined;
+
+/**
+ * Where this process's pid means something: the host and, on Linux, its pid
+ * namespace. Two containers sharing one home can both run as pid 1, and a pid
+ * recorded in another namespace cannot be checked from this one.
+ */
+function pidNamespace(): string {
+  if (cachedPidNamespace === undefined) {
+    let namespace = '';
+    try {
+      namespace = readlinkSync('/proc/self/ns/pid');
+    } catch {
+      // No /proc (not Linux): the host name alone identifies the namespace.
+    }
+    cachedPidNamespace = `${hostname()} ${namespace}`;
+  }
+  return cachedPidNamespace;
+}
+
 export interface FileLockOptions {
   /** How long to wait for a live holder before giving up. */
   timeoutMs?: number;
@@ -26,6 +51,7 @@ export interface FileLockOptions {
 
 interface LockHolder {
   pid?: unknown;
+  pidNamespace?: unknown;
   threadId?: unknown;
   token?: unknown;
   createdAt?: unknown;
@@ -35,11 +61,12 @@ type LockState = 'gone' | 'live' | 'stale';
 
 /**
  * Run `fn` while holding an exclusive lock file at `lockPath`. The lock is
- * shared across processes: the holder records its pid and a token, and a
- * waiter takes the lock over only when its holder is gone (the pid is dead, or
- * is this thread's own pid without a lock this thread holds) or the lock is
- * older than any holder keeps it, so a crashed holder does not wedge later
- * writers.
+ * shared across processes: the holder records its pid, the pid namespace it
+ * belongs to and a token. A waiter takes the lock over only when its holder
+ * is gone (the pid is dead, or is this thread's own pid without a lock this
+ * thread holds) or the lock is older than any holder keeps it, so a crashed
+ * holder does not wedge later writers. A lock from another pid namespace is
+ * judged by its age alone.
  */
 export async function withFileLock<T>(
   lockPath: string,
@@ -61,25 +88,41 @@ async function acquireLock(
 ): Promise<{ handle: FileHandle; token: string }> {
   const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS);
   for (;;) {
+    let handle: FileHandle;
     try {
-      const handle = await open(lockPath, 'wx', 0o600);
-      const token = randomUUID();
-      heldTokens.add(token);
-      await handle.writeFile(JSON.stringify({ pid: process.pid, threadId, token, createdAt: Date.now() }));
-      return { handle, token };
+      handle = await open(lockPath, 'wx', 0o600);
     } catch (error) {
       if (!hasErrorCode(error, 'EEXIST')) {
         throw error;
       }
+      const retryNow = await reapStaleLock(lockPath);
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out waiting for ${options.label ?? 'file'} lock: ${lockPath} `
+          + '(remove it if no DKG process is still running)',
+        );
+      }
+      if (!retryNow) await sleep(LOCK_POLL_MS);
+      continue;
     }
-    const retryNow = await reapStaleLock(lockPath);
-    if (Date.now() >= deadline) {
-      throw new Error(
-        `Timed out waiting for ${options.label ?? 'file'} lock: ${lockPath} `
-        + '(remove it if no DKG process is still running)',
-      );
+    const token = randomUUID();
+    heldTokens.add(token);
+    try {
+      await handle.writeFile(JSON.stringify({
+        pid: process.pid,
+        pidNamespace: pidNamespace(),
+        threadId,
+        token,
+        createdAt: Date.now(),
+      }));
+      return { handle, token };
+    } catch (error) {
+      // Without its holder record the lock would stand until it aged out.
+      await handle.close().catch(() => {});
+      await unlink(lockPath).catch(() => {});
+      heldTokens.delete(token);
+      throw error;
     }
-    if (!retryNow) await sleep(LOCK_POLL_MS);
   }
 }
 
@@ -160,12 +203,20 @@ async function inspectLock(lockPath: string): Promise<LockState> {
   }
   const pid = Number(holder.pid);
   if (!Number.isFinite(pid)) return 'stale';
+  // A lock written before the namespace was recorded counts as this one's.
+  if ((holder.pidNamespace ?? pidNamespace()) !== pidNamespace()) {
+    return isAged(holder) ? 'stale' : 'live';
+  }
   if (pid === process.pid && (holder.threadId ?? 0) === threadId) {
     return heldTokens.has(String(holder.token)) ? 'live' : 'stale';
   }
   if (!isProcessRunning(pid)) return 'stale';
+  return isAged(holder) ? 'stale' : 'live';
+}
+
+function isAged(holder: LockHolder): boolean {
   const createdAt = Number(holder.createdAt);
-  return Number.isFinite(createdAt) && Date.now() - createdAt > LOCK_STALE_MS ? 'stale' : 'live';
+  return Number.isFinite(createdAt) && Date.now() - createdAt > LOCK_STALE_MS;
 }
 
 function parseHolder(raw: string): LockHolder | undefined {

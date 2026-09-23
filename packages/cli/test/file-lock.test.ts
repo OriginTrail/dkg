@@ -1,6 +1,6 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { threadId } from 'node:worker_threads';
@@ -9,8 +9,10 @@ import { withFileLock } from '../src/file-lock.js';
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, readFile: vi.fn(actual.readFile), stat: vi.fn(actual.stat) };
+  return { ...actual, open: vi.fn(actual.open), readFile: vi.fn(actual.readFile), stat: vi.fn(actual.stat) };
 });
+
+const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
 
 function enoent(): NodeJS.ErrnoException {
   return Object.assign(new Error('ENOENT: simulated'), { code: 'ENOENT' });
@@ -35,8 +37,7 @@ describe('withFileLock', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
-    vi.mocked(readFile).mockReset();
-    vi.mocked(stat).mockReset();
+    for (const mocked of [open, readFile, stat]) vi.mocked(mocked).mockReset();
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -45,10 +46,17 @@ describe('withFileLock', () => {
     await utimes(path, then, then);
   }
 
+  /** The holder record this process writes, read from a real lock. */
+  async function ownHolderRecord(): Promise<Record<string, unknown>> {
+    let record: Record<string, unknown> = {};
+    await withFileLock(lockPath, async () => { record = JSON.parse(await readFile(lockPath, 'utf-8')); });
+    return record;
+  }
+
   it('holds the lock, recording its holder, only while the callback runs', async () => {
     const result = await withFileLock(lockPath, async () => {
       const holder = JSON.parse(await readFile(lockPath, 'utf-8'));
-      expect(holder).toMatchObject({ pid: process.pid, threadId, token: expect.any(String) });
+      expect(holder).toMatchObject({ pid: process.pid, pidNamespace: expect.any(String), threadId, token: expect.any(String) });
       return 'done';
     });
 
@@ -94,15 +102,55 @@ describe('withFileLock', () => {
   });
 
   it('takes over a lock that an earlier process with this pid left behind', async () => {
-    // A restarted container runs the daemon as the same pid (often 1) again.
-    await writeFile(lockPath, JSON.stringify({ pid: process.pid, threadId, token: 'earlier-process', createdAt: Date.now() }));
+    // A process restarted in the same pid namespace can get the same pid again.
+    const own = await ownHolderRecord();
+    await writeFile(lockPath, JSON.stringify({ ...own, token: 'earlier-process', createdAt: Date.now() }));
 
     await expect(withFileLock(lockPath, async () => 'ran', { timeoutMs: 200 })).resolves.toBe('ran');
   });
 
   it('takes over a lock older than any holder keeps it, even when its pid is alive', async () => {
-    await writeFile(lockPath, liveHolder({ createdAt: Date.now() - 6 * 60_000 }));
+    await writeFile(lockPath, liveHolder({ createdAt: Date.now() - 2 * 60_000 }));
 
+    await expect(withFileLock(lockPath, async () => 'ran', { timeoutMs: 200 })).resolves.toBe('ran');
+  });
+
+  // Two containers sharing one home can both run their DKG process as pid 1.
+  // A pid recorded in the other container's namespace says nothing here.
+  it('leaves alone a lock that a process with this pid holds in another pid namespace', async () => {
+    const own = await ownHolderRecord();
+    await writeFile(lockPath, JSON.stringify({
+      ...own, pidNamespace: 'other-container pid:[4026532001]', token: 'other-container', createdAt: Date.now(),
+    }));
+    let entered = false;
+
+    const waiter = withFileLock(lockPath, async () => { entered = true; }, { timeoutMs: 5_000 });
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(entered).toBe(false);
+    expect(existsSync(lockPath)).toBe(true);
+
+    await rm(lockPath);
+    await waiter;
+    expect(entered).toBe(true);
+  });
+
+  it('takes over a lock from another pid namespace once it is older than any holder keeps it', async () => {
+    await writeFile(lockPath, JSON.stringify({
+      pid: process.pid, pidNamespace: 'other-container pid:[4026532001]', token: 'crashed', createdAt: Date.now() - 2 * 60_000,
+    }));
+
+    await expect(withFileLock(lockPath, async () => 'ran', { timeoutMs: 200 })).resolves.toBe('ran');
+  });
+
+  it('removes its lock file when it cannot write its holder record', async () => {
+    vi.mocked(open).mockImplementationOnce(async (...args: Parameters<typeof open>) => {
+      const handle = await actualFs.open(...args);
+      handle.writeFile = async () => { throw Object.assign(new Error('ENOSPC: simulated'), { code: 'ENOSPC' }); };
+      return handle;
+    });
+
+    await expect(withFileLock(lockPath, async () => {})).rejects.toMatchObject({ code: 'ENOSPC' });
+    expect(existsSync(lockPath)).toBe(false);
     await expect(withFileLock(lockPath, async () => 'ran', { timeoutMs: 200 })).resolves.toBe('ran');
   });
 
