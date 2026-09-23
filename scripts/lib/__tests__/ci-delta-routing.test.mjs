@@ -368,6 +368,13 @@ test('the load scanner sees these forms, and nothing it cannot resolve staticall
     'packages/cli/test-fixtures/sample-kafka-plugin/src/index.ts',
     'packages/rdf-utils/package.json',
   ]);
+  // A bare side-effect import loads its module, relative or by package name.
+  const sideEffects = loadReferences('packages/storage/test/example.test.ts', [
+    "import '../src/adapters/oxigraph.js';",
+    "import '@origintrail-official/dkg-core';",
+  ].join('\n'));
+  assert.deepEqual(sideEffects.modules, ['packages/storage/src/adapters/oxigraph.ts']);
+  assert.deepEqual(sideEffects.packages, ['@origintrail-official/dkg-core']);
   // Test-runner configs list the files a lane runs, like tests do.
   const config = loadReferences('devnet/_bootstrap/vitest.example.config.ts', "export default { test: { include: ['devnet/_bootstrap/smoke.test.ts'] } };");
   assert.deepEqual(config.paths, ['devnet/_bootstrap/smoke.test.ts']);

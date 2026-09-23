@@ -62,9 +62,9 @@ function sourcePath(target) {
 }
 
 const RELATIVE = String.raw`['"]((?:\.\.?\/)+[^'"]+)['"]`;
-const MODULE_LOAD = new RegExp(String.raw`(?:\bfrom\s*|\bimport\s*\(\s*(?:new\s+URL\(\s*)?|\brequire\s*\(\s*)` + RELATIVE, 'g');
+const MODULE_LOAD = new RegExp(String.raw`(?:\bfrom\s*|\bimport\s*(?:\(\s*(?:new\s+URL\(\s*)?)?|\brequire\s*\(\s*)` + RELATIVE, 'g');
 const URL_PATH = new RegExp(String.raw`(?:\bnew\s+URL\(\s*|\brequire\.resolve\s*\(\s*)` + RELATIVE, 'g');
-const PACKAGE_IMPORT = /(?:\bfrom\s*|\bimport\s*\(\s*|\brequire\s*\(\s*)['"](@origintrail-official\/[a-z0-9-]+)(?:\/[^'"]*)?['"]/g;
+const PACKAGE_IMPORT = /(?:\bfrom\s*|\bimport\s*(?:\(\s*)?|\brequire\s*\(\s*)['"](@origintrail-official\/[a-z0-9-]+)(?:\/[^'"]*)?['"]/g;
 const REPO_PATH_LITERAL = /['"]((?:[\w@.-]+\/)+[\w.-]+\.[A-Za-z0-9]+)['"]/g;
 // Files that list the paths a lane runs or reads: tests, and test-runner configs.
 const TEST_FILE = /(?:^|\/)(?:test|tests|test-live|__tests__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)(?:vitest|playwright)[\w.-]*\.config\.[cm]?[jt]s$/;
@@ -117,14 +117,16 @@ function builtPaths(file, source) {
 }
 
 // What `file` (repo-relative, with `source` as its contents) loads by path:
-// - `modules`: relative imports, dynamic imports, `import(new URL(...))` and
-//   CommonJS require(), whose own imports load too;
+// - `modules`: relative imports (side-effect `import './x.js'` included),
+//   dynamic imports, `import(new URL(...))` and CommonJS require(), whose own
+//   imports load too;
 // - `paths`: files it reads or runs without importing: other `new URL(...)`
 //   paths, require.resolve(), paths built from its own directory (see
 //   builtPaths) and, in tests and test-runner configs, quoted literals naming
 //   an existing repo file (`'packages/agent/src/x.ts'`, as source-scanning
 //   tests list them);
-// - `packages`: workspaces it imports by package name.
+// - `packages`: workspaces it imports by package name, side-effect imports
+//   included.
 // Type-only imports are erased before anything runs; paths assembled at run
 // time from variables are out of reach.
 export function loadReferences(file, source) {
