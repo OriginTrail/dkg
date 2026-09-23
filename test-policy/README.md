@@ -51,7 +51,7 @@ A new temporary `test-disable-allow:` exception needs the scanner's issue/reason
 
 The named lane must actually execute the platform/backend obligation; the marker alone does not create that lane. Review is still required to evaluate whether an exception's reason and execution obligation are truthful.
 
-Main CI now requires both merged coverage and the selected Windows lifecycle job. The Windows workflow is reusable and is invoked by the primary workflow, including merge queue. Expected skips remain explicit. The reviewed controller stays pinned at `780f14aa60c39bdca788967121085c3c0d82d85c`; this change does not repin an unreviewed controller.
+Main CI now requires both merged coverage and the selected Windows lifecycle job. The Windows workflow is reusable and is invoked by the primary workflow, including merge queue. Expected skips remain explicit. The reviewed controller stays pinned at `a53dde2192b2c8f7e30c64543b83cf26773a1f89`; this change does not repin an unreviewed controller.
 
 ## 3. Generated tests exercise independent invariants
 
