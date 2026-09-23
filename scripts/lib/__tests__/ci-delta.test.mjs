@@ -7,6 +7,7 @@ import {
   CI_LANES,
   EVM_SCOPES,
   NODE_EVM_LANES,
+  SELF_BUILDING_LANES,
   WORKSPACE_OWNING_EVM_SCOPES,
   WORKSPACE_OWNING_LANES,
   WORKSPACE_RULES,
@@ -423,6 +424,24 @@ test('routing rules cover every current reverse workspace dependency', () => {
       `${changedWorkspace} misses downstream EVM scopes for ${[...downstream].join(', ')}`,
     );
   }
+});
+
+test('the shared build serves every lane except those that build on their own runner', () => {
+  // needsSharedBuild decides the build job's condition and what the gate
+  // requires, so every lane is probed on its own, whether or not a routing
+  // rule can currently select it alone.
+  const plan = (selected, buildChecks = false) => ({
+    buildChecks,
+    lanes: Object.fromEntries(CI_LANES.map((lane) => [lane, selected.includes(lane)])),
+  });
+  assert.ok(SELF_BUILDING_LANES.length > 0);
+  for (const lane of NODE_EVM_LANES) {
+    assert.equal(needsSharedBuild(plan([lane])), !SELF_BUILDING_LANES.includes(lane), lane);
+  }
+  assert.equal(needsSharedBuild(plan([...SELF_BUILDING_LANES])), false, 'self-building lanes together');
+  assert.equal(needsSharedBuild(plan(['contracts'])), false, 'Solidity builds on its own');
+  assert.equal(needsSharedBuild(plan([])), false, 'no lane');
+  assert.equal(needsSharedBuild(plan([], true)), true, 'the build checks alone');
 });
 
 test('GitHub outputs are booleans plus compact JSON matrices', () => {

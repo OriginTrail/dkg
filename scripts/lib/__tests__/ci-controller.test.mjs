@@ -85,6 +85,10 @@ test('plan-ci compares modified workspace manifests through git blobs', (t) => {
   assert.equal(mode({ ...diff(dependencyHead), [MANIFEST_READER_ENV.base]: dependencyHead }), 'full', 'base equal to head');
   assert.equal(mode({ ...diff(dependencyHead), [MANIFEST_READER_ENV.base]: base }), 'full', 'base is an older ancestor');
   assert.equal(mode({ ...diff(dependencyHead), [MANIFEST_READER_ENV.base]: base, [MANIFEST_READER_ENV.head]: exportsHead }), 'full', 'head is not the checkout');
+  // The routed change list must be the pair's diff: an extra path, even a
+  // harmless one, leaves the manifest on full CI.
+  fs.writeFileSync(changesPath, Buffer.from('M\0packages/agent/package.json\0M\0packages/agent/README.md\0'));
+  assert.equal(mode(diff(exportsHead)), 'full', 'routed changes differ from the diff');
 });
 
 // Every CI-policy script a workflow step runs must come from the trusted

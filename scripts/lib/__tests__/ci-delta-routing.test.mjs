@@ -10,14 +10,12 @@ import {
   REPO_ROOT,
   change,
   gateNeeds,
-  loadReferences,
   pullRequestPlan,
   selectedLanes,
   sourceFiles,
   succeeded,
-  traceLaneLoads,
-  workspaceClosure,
 } from './ci-plan-fixtures.mjs';
+import { loadReferences, traceLaneLoads, workspaceClosure } from './load-graph.mjs';
 
 // The workspaces that `files` import by package name, plus everything those
 // workspaces depend on: what code outside the package lanes compiles against.
@@ -400,7 +398,7 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   // A lane job also runs the support files its steps name: directly, through
   // a root package.json script or through a reusable workflow it calls.
   // What those files load comes from traceLaneLoads and loadReferences in
-  // ci-plan-fixtures.mjs, which list the forms they follow. Each file reached
+  // load-graph.mjs, which list the forms they follow. Each file reached
   // must select the lane or scope that loads it, or plan full CI.
   const seeds = new Map();
   const seed = (file, requirements, via) => {

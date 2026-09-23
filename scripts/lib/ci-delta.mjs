@@ -57,6 +57,15 @@ export function needsSharedBuild(plan) {
   return plan.buildChecks === true || NODE_LANES.some((lane) => plan.lanes?.[lane] === true);
 }
 
+// Lanes whose jobs run whenever another lane's do. tornado_agent_windows is
+// defined as the agent lane (see PRIMARY_LANE_JOBS). The Blazegraph job also
+// runs the agent's live Blazegraph suites (packages/agent/vitest.blazegraph
+// .config.ts), so ci.yml starts it for either lane; every plan records that,
+// so the gate requires the job.
+const IMPLIED_LANES = Object.freeze({
+  tornado_agent: Object.freeze(['tornado_agent_windows', 'tornado_blazegraph']),
+});
+
 // `contracts` remains a workflow output for compatibility, but Solidity is an
 // independent relevance gate rather than part of the Node/EVM "full" profile.
 export const CI_LANES = Object.freeze([...NODE_EVM_LANES, 'contracts']);
@@ -536,12 +545,9 @@ export function planCi({
     reasons.push(...route.reasons);
   }
 
-  // tornado_agent_windows is defined as the agent lane (see PRIMARY_LANE_JOBS).
-  if (lanes.tornado_agent) lanes.tornado_agent_windows = true;
-  // The Blazegraph job also runs the agent's live Blazegraph suites
-  // (packages/agent/vitest.blazegraph.config.ts), so ci.yml starts it for
-  // either lane; the plan records that, so the gate requires the job.
-  if (lanes.tornado_agent) lanes.tornado_blazegraph = true;
+  for (const [lane, implied] of Object.entries(IMPLIED_LANES)) {
+    if (lanes[lane]) for (const other of implied) lanes[other] = true;
+  }
 
   const deduplicatedReasons = [...new Set(reasons)];
   if (!buildChecks && !CI_LANES.some((lane) => lanes[lane]) && evmScopes.size === 0) {
