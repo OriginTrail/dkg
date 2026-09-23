@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import path from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
+import { isTestSurface, secondaryRoutes } from '../test-inventory-surface.mjs';
 
 const workflow = parse(readFileSync(new URL('../../../.github/workflows/rfc64-inventory-windows.yml', import.meta.url), 'utf8'));
 const ciWorkflow = parse(readFileSync(new URL('../../../.github/workflows/ci.yml', import.meta.url), 'utf8'));
@@ -53,15 +53,19 @@ test('canonical scripts retain developer build/generate/verify composition', () 
   assert.equal(scripts[`${prefix}:unit`], `node --import tsx --test ${unitFiles.join(' ')}`);
 });
 
-test('the required unit route matches the existing unit files and also runs on Linux', () => {
+test('the required unit route owns exactly the existing unit files and also runs on Linux', () => {
   // `node --test` silently skips a missing path while any other listed path exists.
   for (const file of unitFiles) assert.ok(existsSync(new URL(`../../../${file}`, import.meta.url)), file);
   const routes = JSON.parse(readFileSync(new URL('../../../test-policy/test-routes.json', import.meta.url), 'utf8'));
   const route = routes.find((entry) => entry.command === `pnpm ${prefix}:unit`);
+  assert.equal(route.lane, 'inventory-windows');
   assert.equal(route.cadence, 'required');
+  // The first matching route wins, so the route must also precede the devnet/** catch-all.
   const harness = readdirSync(new URL('../../../devnet/rfc64-persistence-lifecycle/', import.meta.url))
-    .map((name) => `devnet/rfc64-persistence-lifecycle/${name}`);
-  assert.deepEqual(harness.filter((file) => path.posix.matchesGlob(file, route.pattern)).sort(), unitFiles);
+    .map((name) => `devnet/rfc64-persistence-lifecycle/${name}`).filter(isTestSurface);
+  const owners = secondaryRoutes(harness, routes.filter((entry) => entry === route || entry.pattern === 'devnet/**'));
+  const owned = [...owners].filter(([, owner]) => owner.lane === route.lane).map(([file]) => file);
+  assert.deepEqual(owned.sort(), [...unitFiles].sort());
   // Windows skips the POSIX-only cases; the Linux Gate 1 agent shard runs them.
   const posix = ciWorkflow.jobs['tornado-agent'].steps.find((step) => step.run === `pnpm ${prefix}:unit`);
   assert.equal(posix?.if, 'matrix.gate1');
