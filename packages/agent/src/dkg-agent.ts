@@ -459,6 +459,7 @@ import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import { reconcileAndAllocateKaNumber } from './allocator.js';
 import { resolveChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
+import { peekOnDemandAgentsPhonebook } from './sync/on-demand-agents-phonebook.js';
 import { peekFinalizedAuthorityColdResolution } from
   './finalized-authority-cold-resolution.js';
 import { OwnershipMethods } from './dkg-agent-ownership.js';
@@ -2867,6 +2868,9 @@ export class DKGAgent extends DKGAgentBase {
     // Detached cold authority flights are aborted here too: after stop() no
     // request can consume their result, and the chain reader closes below.
     peekFinalizedAuthorityColdResolution(this)?.close();
+    // Abort an on-demand phonebook fetch and its re-check timer; the durable
+    // sync observes the abort at its next page or commit boundary.
+    void peekOnDemandAgentsPhonebook(this)?.close();
     const authorityIndexSnapshotDrain = Promise.all([
       this.authorityIndexSnapshotRuntime?.close(),
       this.chain.contextGraphAuthorityIndexSnapshots?.close(),

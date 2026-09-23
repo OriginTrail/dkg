@@ -1936,6 +1936,7 @@ async function runDaemonInnerWithStartupOwnership(
     syncBackoffJitter: config.syncBackoffJitter,
     syncOnConnectEnabled: config.syncOnConnectEnabled,
     syncSystemContextGraphsOnConnect: config.syncSystemContextGraphsOnConnect,
+    onDemandAgentsPhonebook: config.onDemandAgentsPhonebook,
     durableSyncEnabled: config.durableSyncEnabled,
     syncGlobalMaxInflight: config.syncGlobalMaxInflight,
     syncGlobalLimit: config.syncGlobalLimit,

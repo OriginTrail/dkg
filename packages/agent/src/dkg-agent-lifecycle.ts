@@ -606,6 +606,7 @@ import {
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { peekFinalizedAuthorityColdResolution } from
   './finalized-authority-cold-resolution.js';
+import { peekOnDemandAgentsPhonebook } from './sync/on-demand-agents-phonebook.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -2126,6 +2127,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // stop() aborts detached cold authority flights; a restarted agent admits
     // new ones (the runtime is created lazily on first use otherwise).
     peekFinalizedAuthorityColdResolution(this)?.reopen();
+    peekOnDemandAgentsPhonebook(this)?.reopen();
     this.vmReconcileRuntimeReady = false;
     this.graphScopedStoreClosed = false;
     this.coreHostRecordingGeneration += 1;
@@ -10148,6 +10150,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         trackSyncScope: false,
         persist: false,
         syncMode: 'always-on',
+        agentsPhonebookTrigger: 'startup',
       }),
       persistMembership: (contextGraphId) => {
         this.persistLocalNodeMembership(contextGraphId, 'rehydrated-subscription');

@@ -61,6 +61,25 @@ All notable changes to the DKG V10 node are documented here. The format is based
   check has also made durable recovery treat every peer it asked about as not
   sync-capable. The peer ID is now parsed before the lookup.
 
+- **An Edge subscribed to a public Context Graph finds holders that are not
+  already connected to it**: an Edge keeps no `agents` phonebook by default,
+  so for a wallet-scoped public graph the curator tier of VM recovery (owner
+  wallet → profile → peer and relay addresses) was empty, and recovery asked
+  only peers it happened to be connected to. On Base mainnet a fresh Edge
+  stopped at 7 of 25 and 10 of 24 Knowledge Assets while the only holder was
+  the publisher's own Edge. The Edge now fetches the phonebook once, from one
+  to three connected, network-admitted peers (Cores first), when such a graph
+  is subscribed or restored at startup and its owner is not in the local
+  phonebook, or when VM recovery finds that graph's curator tier empty. One
+  fetch runs at a time within a 120-second budget. After it, fetching waits
+  30 minutes (10 after a failure), and a graph whose owner a complete Core
+  phonebook lacks stops asking for 6 hours. Recovery for the graphs whose
+  owner now resolves is re-scheduled at once. Curated graphs never trigger
+  the fetch. A node that already syncs `agents` on every connect (Cores,
+  or `DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT=1`) skips it. The kill switch
+  is `onDemandAgentsPhonebook: false`, or `DKG_ON_DEMAND_AGENTS_PHONEBOOK=0`,
+  which wins over config.
+
 ## [10.0.18] - 2026-09-22
 
 Nodes for AI agents now run leaner and get up to speed in seconds. Edge nodes

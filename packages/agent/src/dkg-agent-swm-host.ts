@@ -6244,6 +6244,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
       this.vmReconcileCuratorPeersByCg.delete(localCgId);
       this.vmReconcileCuratorPeersByCg.set(localCgId, curatorPeerIds);
     }
+    if (!curatorResolution.curatorIsLocal && curatorPeerIds.length === 0) {
+      // Without the durable phonebook an empty curator tier usually means the
+      // owner's profile was never fetched, and this pass can only ask peers it
+      // is already connected to. One bounded phonebook fetch serves every
+      // graph; its completion re-schedules this graph's recovery.
+      this.requestOnDemandAgentsPhonebook(localCgId, 'vm-reconcile');
+    }
     this.pruneVmReconcileState();
 
     const connectedByPeerId = new Map(

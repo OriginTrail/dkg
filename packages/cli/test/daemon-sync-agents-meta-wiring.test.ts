@@ -431,6 +431,14 @@ describe('runDaemonInner wires sync and authority index options into DKGAgent.cr
     expect(createArg.syncSystemContextGraphsOnConnect).toBe(false);
   });
 
+  it('passes the on-demand agents phonebook kill switch through unchanged', async () => {
+    const disabled = await captureCreateArg({ onDemandAgentsPhonebook: false });
+    expect(disabled.onDemandAgentsPhonebook).toBe(false);
+
+    const unset = await captureCreateArg({});
+    expect(unset.onDemandAgentsPhonebook).toBeUndefined();
+  });
+
   it('passes snapshot limits and Context Graph priorities through unchanged', async () => {
     const syncResponderSnapshotLimits = {
       global: { rows: 500, bytesEstimate: 600 },

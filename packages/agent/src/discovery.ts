@@ -221,6 +221,17 @@ export class DiscoveryClient implements AgentPeerDiscovery {
     return options.limit === undefined ? unique : unique.slice(0, options.limit);
   }
 
+  /** Number of distinct agent profiles in the local registry. */
+  async countAgents(options: { signal?: AbortSignal } = {}): Promise<number> {
+    const result = await this.engine.query(
+      `SELECT (COUNT(DISTINCT ?agent) AS ?count) WHERE { ?agent a <${DKG}Agent> }`,
+      { contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH, signal: options.signal },
+    );
+    const raw = result.bindings[0]?.['count'];
+    const count = raw === undefined ? Number.NaN : Number(stripQuotes(raw));
+    return Number.isSafeInteger(count) && count >= 0 ? count : 0;
+  }
+
   /**
    * @deprecated Use findAgentPeerPageByAddress for bounded page consumption.
    * Preserves the existing optional-limit array API for explicit legacy callers;

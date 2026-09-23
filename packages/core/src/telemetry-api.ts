@@ -345,6 +345,11 @@ export interface DkgMetrics {
   contextGraphCatchupJobsTotal: Counter;
   /** I9 — ms; walk jobs only, monotonic clock. admission={walk}. */
   contextGraphCatchupJobDurationMs: Histogram;
+  /** On-demand `agents` phonebook fetches. trigger={subscribe|startup|vm-reconcile},
+   *  outcome={complete|partial|failed|no-peers}, curator_resolved={true|false}. */
+  agentsPhonebookFetchTotal: Counter;
+  /** ms; on-demand `agents` phonebook fetches that reached a peer. trigger, outcome. */
+  agentsPhonebookFetchDurationMs: Histogram;
 }
 
 function buildMetrics(): DkgMetrics {
@@ -590,6 +595,13 @@ function buildMetrics(): DkgMetrics {
       unit: 'ms',
       description: 'Walk catch-up job wall-time, monotonic clock',
       advice: { explicitBucketBoundaries: CATCHUP_DURATION_BUCKETS },
+    }),
+    agentsPhonebookFetchTotal: meter.createCounter('dkg.sync.agents_phonebook.fetch_total', {
+      description: 'On-demand agents phonebook fetches by trigger, outcome and whether a wanted curator resolved',
+    }),
+    agentsPhonebookFetchDurationMs: meter.createHistogram('dkg.sync.agents_phonebook.fetch_duration_ms', {
+      unit: 'ms',
+      description: 'Wall time of on-demand agents phonebook fetches that reached a peer',
     }),
   };
 }

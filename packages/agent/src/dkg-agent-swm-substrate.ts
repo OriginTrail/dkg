@@ -406,6 +406,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     syncMode?: 'on-demand' | 'always-on';
     /** Authoritative numeric slot established by the admission owner. */
     onChainId?: string;
+    /** Label for an on-demand `agents` phonebook fetch this subscribe may start. */
+    agentsPhonebookTrigger?: 'subscribe' | 'startup';
   }): ContextGraphSub {
     // A name hash this node already resolved (and holds no row for) is the
     // verified cleartext graph: never mint a second, empty identity for it.
@@ -414,6 +416,13 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     // Subscribing the cleartext of a graph held only by its name hash moves
     // the subscription: nothing may keep running under the hash id.
     this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
+    // An Edge keeps no durable `agents` phonebook, so the curator tier of a
+    // public wallet-scoped graph cannot reach its owner's holders. Ask for one
+    // bounded fetch; the request is O(1) here and does its checks detached.
+    this.requestOnDemandAgentsPhonebook(
+      contextGraphId,
+      options?.agentsPhonebookTrigger ?? 'subscribe',
+    );
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     const nextSubscription = (): ContextGraphSub => {
       const next = {
