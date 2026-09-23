@@ -15,7 +15,9 @@ import {
   gateNeeds,
   selectedLanes,
   succeeded,
+  workflowJobCommands,
 } from './ci-plan-fixtures.mjs';
+import { importSpecifiers } from './load-graph.mjs';
 
 // The trusted controller: the plan-ci/assert-ci-results CLIs, their pinned
 // sparse checkout, and how the workflows wire planner outputs to jobs.
@@ -91,59 +93,14 @@ test('plan-ci compares modified workspace manifests through git blobs', (t) => {
   assert.equal(mode(diff(exportsHead)), 'full', 'routed changes differ from the diff');
 });
 
-function readRepoText(file) {
-  try {
-    return fs.readFileSync(path.join(REPO_ROOT, file), 'utf8');
-  } catch {
-    return undefined;
-  }
-}
-
 // Every CI-policy script a workflow step runs must come from the trusted
 // checkout, however the other checkout is named or the path is spelled, and
 // whether the step runs it directly or through a root package.json script, a
 // shell script, a local composite action or a local reusable workflow.
-function untrustedPolicyRuns(workflowSource, readRepoFile = readRepoText) {
-  const { scripts = {} } = JSON.parse(readRepoFile('package.json') ?? '{}');
-  const followed = new Set();
-  const unseen = (key) => !followed.has(key) && Boolean(followed.add(key));
-  const commands = [];
-  const followRun = (text) => {
-    commands.push(text);
-    for (const [, name] of text.matchAll(/\b(?:pnpm|npm|yarn)\s+(?:run\s+)?([\w:.-]+)/g)) {
-      if (Object.hasOwn(scripts, name) && unseen(`script ${name}`)) followRun(scripts[name]);
-    }
-    for (const [script] of text.matchAll(/[\w./-]+\.sh\b/g)) {
-      const file = path.posix.normalize(script);
-      const source = readRepoFile(file);
-      if (source !== undefined && unseen(file)) followRun(source);
-    }
-  };
-  const followUses = (uses) => {
-    const target = uses?.match(/^\.\/(.+?)\/?$/)?.[1];
-    if (!target || !unseen(target)) return;
-    const definition = /\.ya?ml$/.test(target)
-      ? readRepoFile(target)
-      : ['action.yml', 'action.yaml'].map((name) => readRepoFile(`${target}/${name}`)).find((text) => text !== undefined);
-    assert.ok(definition !== undefined, `${uses} names no local workflow or action`);
-    const { jobs, runs } = parse(definition);
-    if (jobs) followJobs(jobs);
-    else followSteps(runs?.steps);
-  };
-  const followSteps = (steps = []) => {
-    for (const { run, uses } of steps) {
-      if (run) followRun(run);
-      followUses(uses);
-    }
-  };
-  const followJobs = (jobs) => {
-    for (const job of Object.values(jobs)) {
-      followSteps(job.steps);
-      followUses(job.uses);
-    }
-  };
-  followJobs(parse(workflowSource).jobs);
-  return commands.flatMap((text) => [...text.matchAll(/(\S*?)scripts\/ci\/(?:plan-ci|assert-ci-results)\.mjs\b/g)])
+function untrustedPolicyRuns(workflowSource, readRepoFile) {
+  return workflowJobCommands(workflowSource, { readRepoFile })
+    .flatMap(({ commands }) => commands)
+    .flatMap((text) => [...text.matchAll(/(\S*?)scripts\/ci\/(?:plan-ci|assert-ci-results)\.mjs\b/g)])
     .filter(([, prefix]) => prefix !== 'trusted-ci/')
     .map(([reference]) => reference);
 }
@@ -395,7 +352,7 @@ test('the trusted controller runs from a checkout of exactly its policy files', 
     fs.copyFileSync(path.join(REPO_ROOT, file), path.join(controllerRoot, file));
 
     const source = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8');
-    for (const [, specifier] of source.matchAll(/(?:\bfrom\s*|\bimport\s*\(\s*)['"]([^'"]+)['"]/g)) {
+    for (const specifier of importSpecifiers(source)) {
       if (specifier.startsWith('node:')) continue;
       const resolved = path.posix.join(path.posix.dirname(file), specifier);
       assert.ok(
@@ -447,6 +404,9 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   }
   assert.ok(workflow.includes("needs.changes.outputs.contracts == 'true'"));
   assert.equal(parse(workflow).jobs['abi-freshness'].if, "needs.changes.outputs.abi_freshness == 'true'");
+  // The shared build runs on the planner's run_node, passed through unchanged.
+  assert.equal(parse(workflow).jobs.changes.outputs.run_node, '${{ steps.plan.outputs.run_node }}');
+  assert.equal(parse(workflow).jobs.build.if, "needs.changes.outputs.run_node == 'true'");
   assert.ok(
     workflow.includes(
       "if: (github.event_name == 'pull_request' || github.event_name == 'merge_group') && needs.changes.outputs.contracts == 'true'",

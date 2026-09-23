@@ -1,8 +1,5 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import path from 'node:path';
 import test from 'node:test';
-import { parse } from 'yaml';
 import {
   CI_LANES,
   GATE_PLAN_FIELDS,
@@ -12,7 +9,7 @@ import {
   planCi,
 } from '../ci-delta.mjs';
 import { validateEvmResults, validatePrimaryResults } from '../ci-results.mjs';
-import { LANE_JOBS, REPO_ROOT, change, gateNeeds, pullRequestPlan, succeeded } from './ci-plan-fixtures.mjs';
+import { LANE_JOBS, change, gateNeeds, pullRequestPlan, succeeded } from './ci-plan-fixtures.mjs';
 
 // The aggregate gates: which job results each plan shape accepts or rejects.
 
@@ -51,11 +48,9 @@ test('a build-only plan requires the shared build and nothing else', () => {
 });
 
 test('the build job condition and the gate derive the shared build from one rule', () => {
-  // The build job runs on the run_node output; the gate reads plan_json back
-  // and requires the build through the same needsSharedBuild call.
-  const { jobs } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
-  assert.equal(jobs.changes.outputs.run_node, '${{ steps.plan.outputs.run_node }}');
-  assert.equal(jobs.build.if, "needs.changes.outputs.run_node == 'true'");
+  // The build job runs on the run_node output (ci-controller.test.mjs pins
+  // that wiring); the gate reads plan_json back and requires the build
+  // through the same needsSharedBuild call.
   for (const [filePath, buildNeeded] of [
     ['tools/observability/lib/w1.mjs', true],
     ['packages/network-sim/src/index.ts', true],

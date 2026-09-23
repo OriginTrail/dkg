@@ -62,18 +62,23 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   this includes undeclared edges such as committed EVM ABIs consumed by `chain`.
   Beyond declared dependencies, a routing test seeds from what each lane runs
   (package code and tests, and the support files CI jobs run directly, through
-  root `package.json` scripts or through reusable workflows), follows every
-  relative reference (imports, dynamic imports, CommonJS `require`,
-  `new URL(...)` paths, paths built with `path.resolve`/`join` or their
-  imported aliases from a file's own directory and, in tests and test-runner
-  configs, quoted repo paths naming a file; documents included, and a built
-  directory counts when the file walks it; built `dist/` output stands for its
-  `src/`) across packages and support areas, and fails when a file it reaches
-  does not select that lane or EVM scope. Where that reach enters another
-  package, the workspaces it imports by package name (and their dependencies)
-  must select the lane too: the chain scope's node-ui suite starts a
-  DKGAgent, so storage, publisher, query and random-sampling changes run that
-  scope.
+  root `package.json` or shell scripts, or through local actions and reusable
+  workflows), follows every relative reference (imports, dynamic imports,
+  CommonJS `require`, `new URL(...)` paths, paths built with
+  `path.resolve`/`join` or their imported aliases from a file's own directory
+  and, in tests and test-runner configs, quoted repo paths naming a file;
+  documents included, and a built directory counts when the file walks it;
+  built `dist/` output stands for its `src/`) across packages and support
+  areas, and fails when a file it reaches does not select that lane or EVM
+  scope. It also fails on a module load it cannot follow, one whose specifier
+  is computed at run time, until the test lists that load with the reason it
+  needs no route; a file read through a computed path is still out of its
+  reach. The owning lanes it seeds from are checked against what CI executes,
+  and a negative control plants an unrouted load to show the test reports it.
+  Where that reach enters another package, the workspaces it imports by
+  package name (and their dependencies) must select the lane too: the chain
+  scope's node-ui suite starts a DKGAgent, so storage, publisher, query and
+  random-sampling changes run that scope.
   The most expensive system lane, real-node browser E2E, follows on PRs only
   the UI surface it drives and the packages its harness imports, and runs in
   full on every protected-branch push, merge-queue candidate and nightly run;

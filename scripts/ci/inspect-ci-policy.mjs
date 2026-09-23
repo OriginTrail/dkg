@@ -19,6 +19,17 @@ const API_ROOT = 'https://api.github.com';
 const API_PAGE_SIZE = 100;
 const CHECK_STATUSES = new Set(['pass', 'fail', 'error', 'not-run']);
 
+// A non-2xx GitHub API response. It carries the HTTP status because some
+// callers read a status as an answer: a 404 for a controller file means the
+// file is missing at that ref.
+export class GitHubApiError extends Error {
+  constructor(endpoint, status) {
+    super(`GitHub API ${endpoint} returned ${status}`);
+    this.name = 'GitHubApiError';
+    this.status = status;
+  }
+}
+
 async function githubRequest(endpoint, token) {
   const response = await fetch(`${API_ROOT}/${endpoint}`, {
     headers: {
@@ -28,7 +39,7 @@ async function githubRequest(endpoint, token) {
     },
   });
   if (!response.ok) {
-    throw Object.assign(new Error(`GitHub API ${endpoint} returned ${response.status}`), { status: response.status });
+    throw new GitHubApiError(endpoint, response.status);
   }
   return response.json();
 }
@@ -167,7 +178,7 @@ export async function inspectCiPolicyFreshness({
         try {
           contents = await requestJson(`${endpoint}?ref=${encodeURIComponent(ref)}`, token);
         } catch (error) {
-          if (error?.status === 404) return null;
+          if (error instanceof GitHubApiError && error.status === 404) return null;
           throw error;
         }
         if (typeof contents?.sha !== 'string') {
