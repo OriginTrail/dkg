@@ -17,7 +17,7 @@
  * tests.
  */
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
-import { startLiveDaemon, stopLiveDaemon, postJson, type LiveDaemon } from './helpers/live-daemon.js';
+import { startLiveDaemon, stopLiveDaemon, getJson, postJson, type LiveDaemon } from './helpers/live-daemon.js';
 
 let daemon: LiveDaemon | undefined;
 const CG = 'wq-validation-cg';
@@ -139,16 +139,20 @@ describe('GH #306/#787 follow-up — malformed object TERM is 4xx, not a 500 par
  * Subject and predicate terms used to reach the store's SPARQL builder
  * unchecked, which either failed the whole write or, for characters it strips
  * (`^`, `{`, `|`, …), stored the triple under a different IRI than the caller
- * sent. Both write routes now answer 400 first. The create route also checks
- * objects, keeping every form the store accepts (blank nodes included).
+ * sent. Both write routes now check every term against the same rule, exactly
+ * as written, and answer 400 first.
  */
-describe('malformed subject / predicate TERM is 400 on both KA write routes', () => {
-  const MALFORMED: Array<[string, { subject?: string; predicate?: string }, 'subject' | 'predicate', string]> = [
+describe('malformed or padded TERM is 400 on both KA write routes', () => {
+  const MALFORMED: Array<[string, { subject?: string; predicate?: string; object?: string }, 'subject' | 'predicate' | 'object', string]> = [
     ['subject with a space', { subject: 'urn:wq:a b' }, 'subject', 'space'],
     ['relative subject', { subject: 'not-an-iri' }, 'subject', 'relative'],
     ['invalid blank-node label', { subject: '_:a b' }, 'subject', 'bnode'],
+    ['whitespace-padded subject', { subject: ' urn:wq:padded' }, 'subject', 'padded-subject'],
     ['predicate with a caret (formerly stored as …/name)', { predicate: 'http://schema.org/na^me' }, 'predicate', 'caret'],
     ['blank-node predicate', { predicate: '_:p' }, 'predicate', 'bnode-predicate'],
+    ['malformed object IRI', { object: 'https://example.org/o^1' }, 'object', 'object-caret'],
+    ['whitespace-padded blank-node object', { object: ' _:b0 ' }, 'object', 'padded-bnode'],
+    ['whitespace-padded bracketed object', { object: ' <urn:wq:o> ' }, 'object', 'padded-bracketed'],
   ];
   const termQuad = (overrides: { subject?: string; predicate?: string; object?: string }) => ({
     subject: 'urn:wq:term', predicate: 'http://schema.org/name', object: '"v"', ...overrides,
@@ -172,22 +176,42 @@ describe('malformed subject / predicate TERM is 400 on both KA write routes', ()
     expect(body.error).toContain(`quads[0].${field}`);
   });
 
-  it('create rejects a malformed object IRI but keeps accepting blank-node objects', async () => {
-    const rejected = await postJson(daemon!, '/api/knowledge-assets', {
-      contextGraphId: CG, name: 'ka-term-object', finalize: false,
-      quads: [termQuad({ object: 'https://example.org/o^1' })],
-    });
-    expect(rejected.status, JSON.stringify(rejected.body)).toBe(400);
-    expect(rejected.body.error).toContain('quads[0].object');
+  const BLANK_NODE_QUADS = [
+    termQuad({ subject: '_:parent', predicate: 'http://schema.org/address', object: '_:address' }),
+    termQuad({ subject: '_:address', predicate: 'http://schema.org/streetAddress', object: '"1 Main St"' }),
+    termQuad({ subject: '_:parent', predicate: 'http://schema.org/sameAs', object: '<urn:wq:bracketed-object>' }),
+  ];
 
-    const accepted = await postJson(daemon!, '/api/knowledge-assets', {
-      contextGraphId: CG, name: 'ka-term-object', finalize: false,
-      quads: [
-        termQuad({ subject: '_:parent', predicate: 'http://schema.org/address', object: '_:address' }),
-        termQuad({ subject: '_:address', predicate: 'http://schema.org/streetAddress', object: '"1 Main St"' }),
-      ],
+  it('accepts the same blank-node and bracketed terms on create and on a later wm/write', async () => {
+    const created = await postJson(daemon!, '/api/knowledge-assets', {
+      contextGraphId: CG, name: 'ka-term-object', finalize: false, quads: BLANK_NODE_QUADS,
     });
-    expect(accepted.status, JSON.stringify(accepted.body)).toBeLessThan(300);
+    expect(created.status, JSON.stringify(created.body)).toBeLessThan(300);
+    const appended = await postJson(daemon!, '/api/knowledge-assets/ka-term-object/wm/write', {
+      contextGraphId: CG, quads: BLANK_NODE_QUADS,
+    });
+    expect(appended.status, JSON.stringify(appended.body)).toBe(200);
+  });
+
+  it('seals a create carrying blank nodes, as the MCP one-shot create does', async () => {
+    const sealed = await postJson(daemon!, '/api/knowledge-assets', {
+      contextGraphId: CG, name: 'ka-term-sealed', quads: BLANK_NODE_QUADS,
+    });
+    expect(sealed.status, JSON.stringify(sealed.body)).toBeLessThan(300);
+    expect(sealed.body.status).toBe('wm-sealed');
+    expect(sealed.body.merkleRoot).toMatch(/^0x[0-9a-f]{64}$/);
+
+    const { status, body } = await getJson(
+      daemon!,
+      `/api/knowledge-assets/ka-term-sealed/wm/quads?contextGraphId=${encodeURIComponent(CG)}`,
+    );
+    expect(status, JSON.stringify(body)).toBe(200);
+    // Sealing replaces the blank nodes with canonical skolem IRIs.
+    expect(body.count).toBe(BLANK_NODE_QUADS.length);
+    for (const quad of body.quads) {
+      expect(quad.subject).toMatch(/^urn:dkg:ka-skolem:/);
+      expect(quad.object.startsWith('_:')).toBe(false);
+    }
   });
 
   it('still writes bracketed and blank-node subjects through wm/write (regression)', async () => {

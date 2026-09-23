@@ -6,15 +6,21 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Fixed
 
-- **Knowledge Asset write routes answer 400 for a malformed subject or
-  predicate**: `POST /api/knowledge-assets` and
+- **Knowledge Asset write routes answer 400 for a malformed term**:
+  `POST /api/knowledge-assets` and
   `POST /api/knowledge-assets/{name}/wm/write` passed subject and predicate
-  terms to the store unchecked. A malformed IRI either failed the write with a
-  store error or, for characters the store strips such as `^`, stored the
-  triple under a different predicate than the caller sent. Both routes now
-  require an absolute IRI or blank node as the subject and an absolute IRI as
-  the predicate. The create route also rejects a malformed object; blank-node
-  and angle-bracketed terms stay accepted wherever the store accepts them.
+  terms to the store unchecked, and the create route checked no terms at all.
+  A malformed IRI either failed the write with a store error or, for
+  characters the store strips such as `^`, stored the triple under a different
+  predicate than the caller sent. Both routes now check every term, exactly as
+  sent, against one rule:
+  - the subject must be an absolute IRI or a blank node;
+  - the predicate must be an absolute IRI;
+  - the object must be a quoted literal, an absolute IRI or a blank node.
+
+  Angle-bracketed IRIs count as IRIs, and whitespace-padded terms are
+  rejected. `wm/write` now also accepts blank-node and angle-bracketed
+  objects, as create and the store already did.
 - **Random Sampling resolves the challenged Context Graph by its chain name
   commitment when local history contains multiple names for one numeric ID**:
   proof extraction no longer selects an arbitrary first ontology row, which

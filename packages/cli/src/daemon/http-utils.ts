@@ -12,6 +12,7 @@ import {
   validateContextGraphId,
   validateSubGraphName,
   isSafeIri,
+  isAbsoluteIriTerm,
   isSafeBlankNodeLabel,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   messageIndicatesNoFundedPublisherWallet,
@@ -315,60 +316,59 @@ export function validateWritableQuadLiteralSizes(
   }
 }
 
-/**
- * GH #306 / #787 (follow-up) — validate each quad's `object` term is either a
- * quoted RDF literal (`"…"`) or an absolute IRI. Shared by lifecycle write
- * routes and other quad-accepting validation paths: the shape guard
- * ({@link isWritableQuad}) only checks that fields
- * are strings, so an object that is neither a literal nor an IRI (e.g. a bare
- * word `hello` or a number `123`) slips past them and crashes the RDF parser
- * with an uncaught "No scheme found in an absolute IRI" → HTTP 500 instead of an
- * actionable 400.
- */
-export function validateQuadObjectTerms(
-  label: string,
-  quads: ReadonlyArray<{ object: string }>,
-  options: { blankNodes?: boolean; bracketedIris?: boolean } = {},
-): string | null {
-  const badIndex = quads.findIndex((q) => {
-    const object = q.object.trim();
-    if (object.startsWith('"')) return false;
-    if (options.blankNodes && isSafeBlankNodeLabel(object)) return false;
-    return !(options.bracketedIris ? isIriTerm(object) : isSafeIri(object));
-  });
-  if (badIndex === -1) return null;
-  const allowed = options.blankNodes
-    ? 'a quoted literal term, blank node or absolute IRI'
-    : 'a quoted literal term or absolute IRI';
-  return `Invalid "${label}[${badIndex}].object": RDF object must be ${allowed}`;
-}
+/** The term kinds each quad position accepts on the lifecycle write routes. */
+const WRITABLE_QUAD_TERMS = {
+  subject: { accepts: ['iri', 'blank-node'], expected: 'an absolute IRI or blank node' },
+  predicate: { accepts: ['iri'], expected: 'an absolute IRI' },
+  object: {
+    accepts: ['literal', 'iri', 'blank-node'],
+    expected: 'a quoted literal term, absolute IRI or blank node',
+  },
+} as const satisfies Record<'subject' | 'predicate' | 'object', {
+  accepts: readonly WritableTermKind[];
+  expected: string;
+}>;
 
-/** A bare or angle-bracketed absolute IRI; the store accepts both forms. */
-function isIriTerm(term: string): boolean {
-  return isSafeIri(term.startsWith('<') && term.endsWith('>') ? term.slice(1, -1) : term);
+type WritableTermKind = 'literal' | 'iri' | 'blank-node';
+
+/** Classify a term exactly as written: no trimming, since nothing downstream trims. */
+function writableTermKind(term: string): WritableTermKind | null {
+  if (term.startsWith('"')) return 'literal';
+  if (isSafeBlankNodeLabel(term)) return 'blank-node';
+  if (isAbsoluteIriTerm(term)) return 'iri';
+  return null;
 }
 
 /**
- * Validate each quad's subject (an absolute IRI or a blank node) and predicate
- * (an absolute IRI) at the write-route boundary. The shape guard only checks
- * that the fields are strings, so a term such as `urn:a b` or `…/na^me` used
- * to reach the store's SPARQL builder, which either failed the whole write or
- * stored the triple under a different IRI with the offending characters
- * removed.
+ * GH #306 / #787 — the boundary check for quads a lifecycle write route stores
+ * (create and wm/write): shape, then every term against
+ * {@link WRITABLE_QUAD_TERMS}, then literal size. A string-shaped quad, a bare
+ * word, or a malformed IRI such as `urn:a b` or `…/na^me` would otherwise reach
+ * the store, which either fails the write (HTTP 500) or, for characters it
+ * strips, stores the triple under a different IRI. Returns the 400 body for
+ * the first failure, or null.
  */
-export function validateQuadSubjectPredicateTerms(
+export function validateWritableQuads(
   label: string,
-  quads: ReadonlyArray<{ subject: string; predicate: string }>,
-): string | null {
-  for (const [index, quad] of quads.entries()) {
-    if (!isIriTerm(quad.subject) && !isSafeBlankNodeLabel(quad.subject)) {
-      return `Invalid "${label}[${index}].subject": RDF subject must be an absolute IRI or blank node`;
-    }
-    if (!isIriTerm(quad.predicate)) {
-      return `Invalid "${label}[${index}].predicate": RDF predicate must be an absolute IRI`;
+  quads: readonly unknown[],
+): Record<string, unknown> | null {
+  if (!quads.every(isWritableQuad)) {
+    return {
+      error: `"${label}" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted`,
+    };
+  }
+  const writable = quads as ReadonlyArray<{ subject: string; predicate: string; object: string; graph?: string }>;
+  for (const [index, quad] of writable.entries()) {
+    for (const field of ['subject', 'predicate', 'object'] as const) {
+      const rule = WRITABLE_QUAD_TERMS[field];
+      const kind = writableTermKind(quad[field]);
+      if (kind === null || !(rule.accepts as readonly WritableTermKind[]).includes(kind)) {
+        return { error: `Invalid "${label}[${index}].${field}": RDF ${field} must be ${rule.expected}` };
+      }
     }
   }
-  return null;
+  const literalSize = validateWritableQuadLiteralSizes(label, [...writable]);
+  return literalSize.ok ? null : literalSize.body;
 }
 
 /**

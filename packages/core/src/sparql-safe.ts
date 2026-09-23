@@ -41,6 +41,16 @@ export function isSafeIri(value: string): boolean {
   return IRI_SCHEME_RE.test(value);
 }
 
+/**
+ * Returns true for an IRI term with a scheme, bare or in angle brackets
+ * (`urn:x`, `<urn:x>`), under the character rules of {@link isSafeIri}.
+ * Unlike the IRI branch of {@link assertSafeRdfTerm}, this requires a scheme
+ * and also accepts the bare form.
+ */
+export function isAbsoluteIriTerm(value: string): boolean {
+  return isSafeIri(value.startsWith('<') && value.endsWith('>') ? value.slice(1, -1) : value);
+}
+
 // SPARQL 1.1 BLANK_NODE_LABEL, which N-Triples and N-Quads share.
 const PN_CHARS_BASE =
   'A-Za-z\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF' +
