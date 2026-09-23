@@ -39,10 +39,11 @@ import type {
   ContextGraphSubInput,
 } from './dkg-agent-types.js';
 import { normalizeContextGraphSubscriptionTransition } from './context-graph-subscription-policy.js';
+import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
+import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
 
 /** One registration announces one binding; more in a message are dropped unread. */
 const MAX_ONTOLOGY_GOSSIP_BINDING_CLASSIFICATIONS = 4;
-import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
 
@@ -167,8 +168,8 @@ export interface GossipPublishHandlerCallbacks {
   getContextGraphOnChainId?: (id: string) => Promise<string | null>;
   /**
    * Classify the on-chain slot named by an ontology id binding (see
-   * `DKGAgent#classifyOntologyBindingSlot`). Only a binding to a slot proven
-   * live and public is stored from ontology gossip.
+   * `DKGAgent#classifyOntologyBindingSlot`). A binding to a slot proven
+   * curated is not stored from ontology gossip.
    */
   classifyOnChainSlot?: (onChainId: string) => Promise<OntologyBindingSlotClass>;
   markCgMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
@@ -397,7 +398,7 @@ export class GossipPublishHandler {
         }
 
         normalized = await this.filterInvalidOntologyPolicyBindings(normalized, ctx);
-        normalized = await this.filterUnprovenOnChainBindings(normalized, ctx);
+        normalized = await this.filterCuratedOnChainBindings(normalized, ctx);
       } else {
         const allowedPeers = await this.getContextGraphAllowedPeers(request.contextGraphId);
 
@@ -910,15 +911,16 @@ export class GossipPublishHandler {
   }
 
   /**
-   * Keep only on-chain id bindings whose slot is proven live and public:
-   * ontology carries public graphs, and a curated graph's binding stays in its
-   * own `_meta`. A registration announcement usually outruns this node's view
-   * of a new slot, so an unproven binding is dropped too: this only declines
-   * to store it, and removes nothing already stored. It is a hint, and
-   * ontology sync or chain discovery delivers a public binding again later.
-   * Each distinct slot costs a chain read, so a message gets only a few.
+   * Drop on-chain id bindings whose slot the chain proves curated: ontology
+   * carries public graphs, and a curated graph's binding stays in its own
+   * `_meta`. A binding whose slot isn't proven either way is stored, as
+   * before: a registration announcement usually outruns this node's view of
+   * a new slot, and a node without chain reads can't classify at all. The
+   * metadata relocation removes such a binding later if its slot proves
+   * curated. Each distinct slot costs a chain read, so a message gets only a
+   * few.
    */
-  private async filterUnprovenOnChainBindings(quads: Quad[], ctx: OperationContext): Promise<Quad[]> {
+  private async filterCuratedOnChainBindings(quads: Quad[], ctx: OperationContext): Promise<Quad[]> {
     const classify = this.callbacks.classifyOnChainSlot;
     if (!classify) return quads;
     const bindingPredicate = CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE;
@@ -926,17 +928,17 @@ export class GossipPublishHandler {
       .filter((q) => q.predicate === bindingPredicate)
       .map((q) => stripLiteral(q.object).trim()))];
     if (onChainIds.length === 0) return quads;
-    const publicIds = new Set<string>();
+    const kept = new Set<string>();
     for (const onChainId of onChainIds.slice(0, MAX_ONTOLOGY_GOSSIP_BINDING_CLASSIFICATIONS)) {
-      if (!/^[1-9]\d*$/.test(onChainId)) continue;
-      if (await classify(onChainId).catch(() => 'unknown') === 'public') publicIds.add(onChainId);
+      if (!isCanonicalAuthoritativeContextGraphId(onChainId)) continue;
+      if (await classify(onChainId).catch(() => 'unknown') !== 'curated') kept.add(onChainId);
     }
-    const dropped = onChainIds.length - publicIds.size;
+    const dropped = onChainIds.length - kept.size;
     if (dropped > 0) {
-      this.log.info(ctx, `Skipped ${dropped} ontology gossip binding(s) whose slot isn't a proven public graph`);
+      this.log.info(ctx, `Skipped ${dropped} ontology gossip binding(s) of a curated or unreadable slot`);
     }
     return quads.filter((q) => (
-      q.predicate !== bindingPredicate || publicIds.has(stripLiteral(q.object).trim())
+      q.predicate !== bindingPredicate || kept.has(stripLiteral(q.object).trim())
     ));
   }
 

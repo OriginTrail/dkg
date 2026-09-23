@@ -11,7 +11,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { MockChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
@@ -26,6 +26,11 @@ import { deleteByPatternWithoutCount, type Quad, type TripleStore } from '@origi
 import { DKGAgent } from '../src/index.js';
 import { relocatePrivateContextGraphMetadata } from '../src/context-graph-metadata-relocation.js';
 import { replaceContextGraphMetadataFact } from '../src/context-graph-metadata-fact.js';
+import {
+  ONTOLOGY_BINDING_SLOT_RECHECK_MS,
+  ONTOLOGY_BINDING_SLOTS_MAX,
+  OntologyBindingSlotClassifier,
+} from '../src/ontology-binding-slot-classifier.js';
 
 const ONTOLOGY_GRAPH = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
 const ON_CHAIN_ID = `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`;
@@ -575,7 +580,7 @@ describe('relocating curated and private metadata that earlier builds left in on
     // ...then the slot is read again and proven public.
     vi.useFakeTimers({ toFake: ['Date'] });
     try {
-      vi.setSystemTime(Date.now() + DKGAgent.INACTIVE_ONTOLOGY_BINDING_SLOT_RECHECK_MS + 1);
+      vi.setSystemTime(Date.now() + ONTOLOGY_BINDING_SLOT_RECHECK_MS + 1);
       await expect(agent.relocatePrivateContextGraphMetadata())
         .resolves.toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 0 });
     } finally {
@@ -600,7 +605,7 @@ describe('relocating curated and private metadata that earlier builds left in on
 
   it('forgets the oldest not-live slot once it holds the most it keeps', async () => {
     const { agent } = await createAgent('slot-memory-bound');
-    const max = DKGAgent.INACTIVE_ONTOLOGY_BINDING_SLOTS_MAX;
+    const max = ONTOLOGY_BINDING_SLOTS_MAX;
     // None of these slots exists on the mock chain, so each reads not live.
     for (let slot = 1; slot <= max + 1; slot += 1) {
       await expect(agent.classifyOntologyBindingSlot(String(slot))).resolves.toBe('inactive');
@@ -848,7 +853,7 @@ describe('ontology gossip bindings', () => {
     await expect(lookupBinding(agent.store, '0xabc/gossiped-public')).resolves.toBe(publicSlot);
   });
 
-  it('drops a binding to a slot this node cannot see yet, without caching a public answer', async () => {
+  it('stores a binding to a slot this node can’t see yet, and removes it once the slot proves curated', async () => {
     const id = '0xabc/fresh-curated';
     const { agent, chain } = await createAgent('gossip-fresh-slot');
     const handler = agent.getOrCreateGossipPublishHandler();
@@ -860,23 +865,72 @@ describe('ontology gossip bindings', () => {
       undefined,
       '12D3KooWRegistrar',
     );
-    await expect(lookupBinding(agent.store, id)).resolves.toBeUndefined();
-
-    // A copy that arrives by ontology sync stays until its slot is proven...
-    await agent.store.insert([bindingQuad(id, '1')]);
+    await expect(lookupBinding(agent.store, id)).resolves.toBe('1');
     await expect(agent.relocatePrivateContextGraphMetadata())
       .resolves.toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 1 });
-    await expect(lookupBinding(agent.store, id)).resolves.toBe('1');
 
     // Neither read may leave a default "public" answer behind for StorageACK
     // curation checks once the curated slot becomes visible...
     await expect(createOnChain(chain, 1)).resolves.toBe('1');
     await expect(agent.resolveCgCurationForAck('1')).resolves.toBe(true);
 
-    // ...and goes once the slot is known to be curated.
+    // ...and the binding goes once the slot is known to be curated.
     await expect(agent.relocatePrivateContextGraphMetadata())
       .resolves.toEqual({ movedToMeta: [], deletedForeign: 1, unclassified: 0 });
     await expect(lookupBinding(agent.store, id)).resolves.toBeUndefined();
+  });
+
+  it('stores a public binding whose slot first reads not live', async () => {
+    const id = '0xabc/public-behind-rpc';
+    const { agent, chain } = await createAgent('gossip-lagging-rpc');
+    const slot = await createOnChain(chain, 0);
+    vi.spyOn(chain, 'isContextGraphActiveOnChain').mockResolvedValueOnce(false);
+
+    await agent.getOrCreateGossipPublishHandler().handlePublishMessage(
+      registrationGossip([[id, slot]]),
+      SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      undefined,
+      '12D3KooWRegistrar',
+    );
+
+    await expect(lookupBinding(agent.store, id)).resolves.toBe(slot);
+  });
+
+  it('stores bindings on a node that can’t read slots on chain', async () => {
+    const id = '0xabc/no-chain-public';
+    const agent = await DKGAgent.create({
+      name: 'metadata-placement-no-chain',
+      chainAdapter: new NoChainAdapter(),
+    }) as TestAgent;
+    (agent as unknown as { gossip: RecordingGossip }).gossip = new RecordingGossip();
+
+    await agent.getOrCreateGossipPublishHandler().handlePublishMessage(
+      registrationGossip([[id, '42']]),
+      SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      undefined,
+      '12D3KooWRegistrar',
+    );
+
+    await expect(lookupBinding(agent.store, id)).resolves.toBe('42');
+  });
+
+  it('finishes a message and a relocation pass when slot reads hang', async () => {
+    const id = '0xabc/hung-rpc';
+    const { agent, chain } = await createAgent('gossip-hung-rpc');
+    Object.defineProperty(agent, 'chainAuthorityReadBudgets', {
+      value: { ...agent.chainAuthorityReadBudgets, requestTimeoutMs: 20 },
+    });
+    vi.spyOn(chain, 'isContextGraphActiveOnChain').mockImplementation(() => new Promise<boolean>(() => {}));
+
+    await agent.getOrCreateGossipPublishHandler().handlePublishMessage(
+      registrationGossip([[id, '7']]),
+      SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+      undefined,
+      '12D3KooWRegistrar',
+    );
+    await expect(lookupBinding(agent.store, id)).resolves.toBe('7');
+    await expect(agent.relocatePrivateContextGraphMetadata())
+      .resolves.toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 1 });
   });
 
   it('classifies at most a few bindings per message and drops the rest', async () => {
@@ -897,4 +951,74 @@ describe('ontology gossip bindings', () => {
     const stored = await Promise.all(slots.map((_, index) => lookupBinding(agent.store, `0xabc/many-${index}`)));
     expect(stored.filter((value) => value !== undefined).length).toBeLessThanOrEqual(4);
   });
+});
+
+describe('ontology binding slot classifier', () => {
+  it('answers unknown when a read runs out of time, and reads the slot again next time', async () => {
+    const isActive = vi.fn(() => new Promise<boolean>(() => {}));
+    const accessPolicy = vi.fn(async () => 0);
+    const classifier = new OntologyBindingSlotClassifier({
+      reads: () => ({ isActive, accessPolicy }),
+      knownCurated: () => false,
+      readTimeoutMs: () => 10,
+    });
+
+    await expect(classifier.classify('5')).resolves.toBe('unknown');
+    expect(classifier.known('5')).toBeUndefined();
+    await expect(classifier.classify('5')).resolves.toBe('unknown');
+    expect(isActive).toHaveBeenCalledTimes(2);
+    expect(accessPolicy).not.toHaveBeenCalled();
+  });
+
+  it('answers unknown without reads for a chain that has none, or an id that isn’t a slot', async () => {
+    const accessPolicy = vi.fn(async () => 1);
+    const noReads = new OntologyBindingSlotClassifier({
+      reads: () => ({}),
+      knownCurated: () => false,
+      readTimeoutMs: () => 10,
+    });
+    const withReads = new OntologyBindingSlotClassifier({
+      reads: () => ({ isActive: async () => true, accessPolicy }),
+      knownCurated: () => false,
+      readTimeoutMs: () => 10,
+    });
+
+    await expect(noReads.classify('5')).resolves.toBe('unknown');
+    await expect(withReads.classify('05')).resolves.toBe('unknown');
+    await expect(withReads.classify('1'.repeat(79))).resolves.toBe('unknown');
+    expect(accessPolicy).not.toHaveBeenCalled();
+  });
+});
+
+describe('relocation at startup', () => {
+  it('moves a held curated graph’s legacy ontology rows into its _meta, without chain reads, as the node starts', async () => {
+    const id = '0xabc/legacy-at-start';
+    const chain = new MockChainAdapter();
+    const agent = await DKGAgent.create({
+      name: 'metadata-placement-startup',
+      listenHost: '127.0.0.1',
+      chainAdapter: chain,
+    }) as TestAgent;
+    const subject = contextGraphDataGraphUri(id);
+    const metaGraph = contextGraphMetaGraphUri(id);
+    // What an upgraded node finds: its curated graph's `_meta`, plus the
+    // binding and name earlier builds also wrote to ontology.
+    await agent.store.insert([
+      { subject, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: metaGraph },
+      { subject, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"private"', graph: metaGraph },
+      bindingQuad(id, '31'),
+      ontologyQuad(subject, DKG_ONTOLOGY.SCHEMA_NAME, '"Legacy"'),
+    ]);
+    const relocate = vi.spyOn(agent, 'relocatePrivateContextGraphMetadata');
+
+    try {
+      await agent.start();
+
+      expect(relocate).toHaveBeenCalledWith({ classifyOnChain: false });
+      expect(await ontologyRowsAbout(agent, id)).toEqual([]);
+      expect(await metaOnChainId(agent, id)).toBe('31');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
 });

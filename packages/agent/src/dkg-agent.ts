@@ -467,7 +467,8 @@ import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import { reconcileAndAllocateKaNumber } from './allocator.js';
 import { applyMixins } from './dkg-agent-apply-mixins.js';
-import { resolveChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
+import { chainAuthorityReadBudgetsOf, resolveChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
+import { OntologyBindingSlotClassifier } from './ontology-binding-slot-classifier.js';
 import { peekFinalizedAuthorityColdResolution } from
   './finalized-authority-cold-resolution.js';
 import { OwnershipMethods } from './dkg-agent-ownership.js';
@@ -841,12 +842,26 @@ export function mergeRfc64CatalogBootstrapsV1(
 export class DKGAgent extends DKGAgentBase {
   /** One store discovery pass is shared by concurrent peer-connect sessions. */
   private contextGraphStoreDiscoveryInFlight?: Promise<number>;
-  /** Chain-proven access policy of slots named by ontology bindings. */
-  private readonly ontologyBindingSlotVerdicts = new Map<string, 'curated' | 'public'>();
-  /** Slots named by ontology bindings that last read not live, with when to read them again. */
-  private readonly inactiveOntologyBindingSlots = new Map<string, number>();
-  static readonly INACTIVE_ONTOLOGY_BINDING_SLOT_RECHECK_MS = 5 * 60_000;
-  static readonly INACTIVE_ONTOLOGY_BINDING_SLOTS_MAX = 1024;
+  /**
+   * Slots named by ontology bindings. It never writes `onChainAccessPolicyCache`,
+   * which StorageACK curation checks trust, since its unproven reads can be 0.
+   */
+  private readonly ontologyBindingSlots = new OntologyBindingSlotClassifier({
+    reads: () => {
+      const chain = this.chain;
+      return {
+        ...(typeof chain.isContextGraphActiveOnChain === 'function'
+          ? { isActive: (slot: bigint, signal: AbortSignal) => chain.isContextGraphActiveOnChain!(slot, { signal }) }
+          : {}),
+        ...(typeof chain.getContextGraphAccessPolicy === 'function'
+          ? { accessPolicy: (slot: bigint, signal: AbortSignal) => chain.getContextGraphAccessPolicy!(slot, { signal }) }
+          : {}),
+      };
+    },
+    // Only a real read of a curated slot can have cached a 1.
+    knownCurated: (onChainId) => this.onChainAccessPolicyCache.get(onChainId) === 1,
+    readTimeoutMs: () => chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
+  });
 
   private constructor(
     config: ResolvedDKGAgentConfig,
@@ -2056,65 +2071,14 @@ export class DKGAgent extends DKGAgentBase {
     return result;
   }
 
-  /**
-   * The class of an ontology binding's slot that this node already knows
-   * without a chain read: a proven verdict, or `inactive` while a recent
-   * not-live read is fresh.
-   */
+  /** The class of an ontology binding's slot this node knows without a chain read. */
   knownOntologyBindingSlotClass(onChainId: string): OntologyBindingSlotClass | undefined {
-    const proven = this.ontologyBindingSlotVerdicts.get(onChainId);
-    if (proven !== undefined) return proven;
-    // Only a real read of a curated slot can have cached a 1.
-    if (this.onChainAccessPolicyCache.get(onChainId) === 1) return 'curated';
-    const recheckAt = this.inactiveOntologyBindingSlots.get(onChainId);
-    if (recheckAt === undefined) return undefined;
-    if (Date.now() < recheckAt) return 'inactive';
-    this.inactiveOntologyBindingSlots.delete(onChainId);
-    return undefined;
+    return this.ontologyBindingSlots.known(onChainId);
   }
 
-  /**
-   * Access policy of an on-chain slot named by an ontology binding.
-   *
-   * The policy getter answers 0 for a slot this node's RPC can't see yet, so
-   * 0 proves a public graph only after the slot reads live, and an unproven
-   * read never reaches `onChainAccessPolicyCache`, which StorageACK curation
-   * checks trust. 1 is never a default, so it proves a curated graph even
-   * when the slot isn't live. The access policy is fixed at creation, so
-   * proven verdicts are cached. A slot that reads 0 and not live is
-   * `inactive`: it isn't read again for a while, and callers must not treat
-   * that answer as proof of anything.
-   */
-  async classifyOntologyBindingSlot(onChainId: string): Promise<OntologyBindingSlotClass> {
-    const known = this.knownOntologyBindingSlotClass(onChainId);
-    if (known !== undefined) return known;
-    const isActive = this.chain.isContextGraphActiveOnChain;
-    const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
-    if (typeof isActive !== 'function' || typeof getAccessPolicy !== 'function') return 'unknown';
-    if (!/^[1-9]\d*$/.test(onChainId)) return 'unknown';
-    const slot = BigInt(onChainId);
-    try {
-      // Liveness first: the policy read that follows a live read is the slot's own.
-      const live = await isActive.call(this.chain, slot);
-      const policy = await getAccessPolicy.call(this.chain, slot);
-      if (policy === 1 || (policy === 0 && live)) {
-        const verdict = policy === 1 ? 'curated' : 'public';
-        this.ontologyBindingSlotVerdicts.set(onChainId, verdict);
-        return verdict;
-      }
-      if (policy !== 0) return 'unknown';
-      if (this.inactiveOntologyBindingSlots.size >= DKGAgent.INACTIVE_ONTOLOGY_BINDING_SLOTS_MAX) {
-        const oldest = this.inactiveOntologyBindingSlots.keys().next().value;
-        if (oldest !== undefined) this.inactiveOntologyBindingSlots.delete(oldest);
-      }
-      this.inactiveOntologyBindingSlots.set(
-        onChainId,
-        Date.now() + DKGAgent.INACTIVE_ONTOLOGY_BINDING_SLOT_RECHECK_MS,
-      );
-      return 'inactive';
-    } catch {
-      return 'unknown';
-    }
+  /** The class of the on-chain slot an ontology binding names (see `OntologyBindingSlotClassifier`). */
+  classifyOntologyBindingSlot(onChainId: string): Promise<OntologyBindingSlotClass> {
+    return this.ontologyBindingSlots.classify(onChainId);
   }
 
   async discoverContextGraphsFromStore(): Promise<number> {

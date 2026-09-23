@@ -46,6 +46,7 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { stripLiteral } from './dkg-agent-utils.js';
+import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 const SYSTEM_IDS = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
@@ -176,7 +177,7 @@ export async function relocatePrivateContextGraphMetadata(
   const classifySlot = async (onChainId: string): Promise<OntologyBindingSlotClass> => {
     const seen = slotClasses.get(onChainId);
     if (seen !== undefined) return seen;
-    if (!deps.classifyOnChainSlot || !/^[1-9]\d*$/.test(onChainId)) return 'unknown';
+    if (!deps.classifyOnChainSlot || !isCanonicalAuthoritativeContextGraphId(onChainId)) return 'unknown';
     const known = deps.knownSlotClass?.(onChainId);
     if (known !== undefined) {
       slotClasses.set(onChainId, known);
