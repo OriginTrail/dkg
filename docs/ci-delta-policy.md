@@ -62,10 +62,11 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   routing test seeds from what each lane runs (package code and tests, and the
   support files CI jobs run directly, through root `package.json` scripts or
   through reusable workflows), follows every relative reference (imports,
-  dynamic imports, `new URL(...)` paths, paths built with `path.resolve`/`join`
-  from a file's own directory and, in tests, quoted repo paths naming a file;
-  documents included, and a built directory counts when the file walks it; a
-  package's `dist/` output stands for its `src/`) across packages and support
+  dynamic imports, CommonJS `require`, `new URL(...)` paths, paths built with
+  `path.resolve`/`join` or their imported aliases from a file's own directory
+  and, in tests and test-runner configs, quoted repo paths naming a file;
+  documents included, and a built directory counts when the file walks it;
+  built `dist/` output stands for its `src/`) across packages and support
   areas, and fails when a file it reaches does not select that lane or EVM
   scope. Where that reach enters another package, the workspaces it imports by
   package name (and their dependencies) must select the lane too: the chain
