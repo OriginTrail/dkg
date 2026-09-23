@@ -2304,14 +2304,19 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const body = await readBody(req, SMALL_BODY_BYTES);
     const unsubscribeParsed = JSON.parse(body);
     // #1102: accept `id` as an alias for `contextGraphId`.
-    const contextGraphId = unsubscribeParsed?.contextGraphId ?? unsubscribeParsed?.id;
-    if (!contextGraphId) {
+    const requestedContextGraphId = unsubscribeParsed?.contextGraphId ?? unsubscribeParsed?.id;
+    if (!requestedContextGraphId) {
       return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "id")' });
     }
+    // A name hash this node resolved no longer keys any row: its subscription
+    // moved to the verified cleartext id, which is what must be stopped.
+    const contextGraphId: string =
+      agent.resolveContextGraphIdAlias?.(requestedContextGraphId) ?? requestedContextGraphId;
     agent.unsubscribeFromContextGraph(contextGraphId);
     const sub = agent.getSubscribedContextGraphs()?.get(contextGraphId);
     return jsonResponse(res, 200, {
       unsubscribed: contextGraphId,
+      ...(contextGraphId === requestedContextGraphId ? {} : { requestedContextGraphId }),
       subscribed: sub?.subscribed === true,
       coreHosted: sub?.coreHosted === true,
     });
