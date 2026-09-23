@@ -2,28 +2,48 @@
  * RDF term formatting for SPARQL that the storage layer builds by string
  * interpolation.
  *
- * A term is validated against the SPARQL grammar for its position and emitted
- * unchanged, or it is rejected. It is never repaired: deleting characters from
- * an IRI silently retargets the triple at a different resource. Plain string
- * values (not RDF terms) are escaped instead.
+ * The strict `format*` functions validate a term against the SPARQL grammar for
+ * its position and render it unchanged, or throw a
+ * {@link SparqlTermValidationError}. They never repair a term: deleting
+ * characters from an IRI would retarget the triple at a different resource.
+ * The atomic-replace and RFC-64 commit builders call them directly.
  *
- * The `format*` functions are strict and throw. The atomic-replace and RFC-64
- * commit builders call them directly. The adapters call the `sparql*` entry
- * points, which currently run in observe mode (see `observeInvalidTerm`).
+ * The adapters call the `sparql*` entry points, which currently run in observe
+ * mode (see `renderInvalidTerm`): a term that fails validation is counted and
+ * logged, then rendered exactly as before this module existed. Until the
+ * hard-reject flip, that still means stripping characters from a malformed IRI.
  */
 import {
   assertSafeIri,
   assertSafeRdfTerm,
   getMetrics,
+  sparqlIri,
+  sparqlString,
 } from '@origintrail-official/dkg-core';
 import type { StoreOperation } from './store-operation-outcome.js';
 
 export type SparqlTermPosition = 'graph' | 'subject' | 'predicate' | 'object';
 
+/** Metric position label: a term position, or a `deleteBySubjectPrefix` prefix. */
+export type ObservedTermPosition = SparqlTermPosition | 'subject-prefix';
+
+export type SparqlTermKind = 'iri' | 'literal' | 'blank-node';
+
 /** Where a term entered SPARQL; both fields are bounded metric labels. */
 export interface SparqlTermSite {
   readonly adapter: 'oxigraph' | 'sparql-http' | 'blazegraph';
   readonly operation: StoreOperation;
+}
+
+/** A term the SPARQL grammar does not accept in its position. */
+export class SparqlTermValidationError extends Error {
+  readonly kind: SparqlTermKind;
+
+  constructor(message: string, kind: SparqlTermKind, options?: ErrorOptions) {
+    super(message, options);
+    this.name = 'SparqlTermValidationError';
+    this.kind = kind;
+  }
 }
 
 const BARE_DATATYPE_LITERAL = /^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/;
@@ -40,13 +60,22 @@ const BLANK_NODE_LABEL = new RegExp(
   'u',
 );
 
-// Exactly the characters STRING_LITERAL2 forbids unescaped.
-const STRING_LITERAL_ESCAPES: Readonly<Record<string, string>> = {
-  '\\': '\\\\',
-  '"': '\\"',
-  '\n': '\\n',
-  '\r': '\\r',
-};
+/**
+ * Run one core validator. A throw from it is a validation failure of `kind`
+ * and keeps core's message; keep formatter logic outside `check`, so a bug
+ * there is not mistaken for a bad term.
+ */
+function validated<T>(kind: SparqlTermKind, check: () => T): T {
+  try {
+    return check();
+  } catch (cause) {
+    throw new SparqlTermValidationError(
+      cause instanceof Error ? cause.message : String(cause),
+      kind,
+      { cause },
+    );
+  }
+}
 
 export function unwrapIri(term: string): string {
   return term.startsWith('<') && term.endsWith('>')
@@ -57,16 +86,17 @@ export function unwrapIri(term: string): string {
 /** `<iri>` for a bare or angle-bracketed IRI; a blank-node label is NOT rejected. */
 export function formatResource(term: string, role: string): string {
   if (term.startsWith('"')) {
-    throw new Error(`SPARQL ${role} must be an IRI`);
+    throw new SparqlTermValidationError(`SPARQL ${role} must be an IRI`, 'literal');
   }
-  return `<${assertSafeIri(unwrapIri(term))}>`;
+  const iri = unwrapIri(term);
+  return validated('iri', () => sparqlIri(iri));
 }
 
 /** An IRI or literal object term; a blank-node label is NOT rejected. */
 export function formatObject(term: string): string {
   if (term.startsWith('"')) {
     const normalized = normalizeLiteralDatatype(term);
-    assertSafeRdfTerm(normalized);
+    validated('literal', () => assertSafeRdfTerm(normalized));
     return normalized;
   }
   return formatResource(term, 'object');
@@ -74,9 +104,9 @@ export function formatObject(term: string): string {
 
 function normalizeLiteralDatatype(term: string): string {
   const bareDatatype = term.match(BARE_DATATYPE_LITERAL);
-  return bareDatatype
-    ? `${bareDatatype[1]}^^<${assertSafeIri(unwrapIri(bareDatatype[2]))}>`
-    : term;
+  if (!bareDatatype) return term;
+  const datatype = unwrapIri(bareDatatype[2]);
+  return `${bareDatatype[1]}^^${validated('literal', () => sparqlIri(datatype))}`;
 }
 
 /**
@@ -86,9 +116,13 @@ function normalizeLiteralDatatype(term: string): string {
  */
 export function formatIriTerm(term: string, position: SparqlTermPosition): string {
   if (term.startsWith('_:')) {
-    throw new Error(`SPARQL ${position} must be an IRI, not a blank node`);
+    throw new SparqlTermValidationError(
+      `SPARQL ${position} must be an IRI, not a blank node`,
+      'blank-node',
+    );
   }
-  return `<${assertSafeIri(position === 'graph' ? term : unwrapIri(term))}>`;
+  const iri = position === 'graph' ? term : unwrapIri(term);
+  return validated('iri', () => sparqlIri(iri));
 }
 
 /**
@@ -102,22 +136,34 @@ export function formatRdfTerm(
 ): string {
   if (term.startsWith('_:')) {
     if (blankNodes === 'reject') {
-      throw new Error(`SPARQL ${position} cannot be a blank node here`);
+      throw new SparqlTermValidationError(
+        `SPARQL ${position} cannot be a blank node here`,
+        'blank-node',
+      );
     }
     if (!BLANK_NODE_LABEL.test(term)) {
-      throw new Error(`Invalid blank node label in SPARQL ${position}`);
+      throw new SparqlTermValidationError(
+        `Invalid blank node label in SPARQL ${position}`,
+        'blank-node',
+      );
     }
     return term;
   }
   return position === 'object' ? formatObject(term) : formatResource(term, position);
 }
 
-/** A SPARQL string literal (`"…"`) holding `value` verbatim. */
-export function sparqlStringLiteral(value: string): string {
-  return `"${value.replace(/[\\"\n\r]/g, (character) => STRING_LITERAL_ESCAPES[character]!)}"`;
+/**
+ * The string literal for the subject-IRI prefix a `STRSTARTS` filter matches.
+ * The prefix may contain only characters an IRI can (empty matches every IRI
+ * subject). Anything else can never match, so it is rejected rather than
+ * escaped into a filter that deletes nothing and reports success.
+ */
+export function formatIriPrefix(prefix: string): string {
+  if (prefix !== '') validated('iri', () => assertSafeIri(prefix));
+  return sparqlString(prefix);
 }
 
-/** {@link formatIriTerm} for adapters, in observe mode (see `observeInvalidTerm`). */
+/** {@link formatIriTerm} for adapters, under the policy in `renderInvalidTerm`. */
 export function sparqlIriTerm(
   term: string,
   position: SparqlTermPosition,
@@ -125,13 +171,12 @@ export function sparqlIriTerm(
 ): string {
   try {
     return formatIriTerm(term, position);
-  } catch {
-    observeInvalidTerm(term, position, site);
-    return legacyStrippedIri(term);
+  } catch (error) {
+    return renderInvalidTerm(error, term, position, site, legacyStrippedIri);
   }
 }
 
-/** {@link formatRdfTerm} for adapters, in observe mode (see `observeInvalidTerm`). */
+/** {@link formatRdfTerm} for adapters, under the policy in `renderInvalidTerm`. */
 export function sparqlRdfTerm(
   term: string,
   position: 'subject' | 'object',
@@ -140,39 +185,68 @@ export function sparqlRdfTerm(
 ): string {
   try {
     return formatRdfTerm(term, position, blankNodes);
-  } catch {
-    observeInvalidTerm(term, position, site);
-    return legacyRdfTerm(term);
+  } catch (error) {
+    return renderInvalidTerm(error, term, position, site, legacyRdfTerm);
   }
+}
+
+/** {@link formatIriPrefix} for adapters, under the policy in `renderInvalidTerm`. */
+export function sparqlIriPrefix(prefix: string, site: SparqlTermSite): string {
+  try {
+    return formatIriPrefix(prefix);
+  } catch (error) {
+    return renderInvalidTerm(error, prefix, 'subject-prefix', site, legacyStringLiteral);
+  }
+}
+
+/** How the adapter entry points treat a term that fails validation. */
+const ADAPTER_ENFORCEMENT = 'observe';
+
+/**
+ * The adapter policy for a term that failed validation. Any error other than a
+ * {@link SparqlTermValidationError} is a bug, not a bad term, and propagates.
+ *
+ * Observe mode: count and log the term, then render it the pre-validation way
+ * (`legacy`), so a release can confirm that no well-formed write trips the
+ * validators before they start rejecting.
+ *
+ * TODO(sparql-term-hard-reject): once a release shows
+ * `dkg.store.sparql_invalid_terms_total` staying at zero, switch
+ * `ADAPTER_ENFORCEMENT` to 'reject', rethrow `error` here instead of
+ * rendering, and delete the legacy renderers. Before flipping, audit callers
+ * that pass `<…>`-wrapped graph names: the graph position accepts only a bare
+ * IRI.
+ */
+function renderInvalidTerm(
+  error: unknown,
+  term: string,
+  position: ObservedTermPosition,
+  site: SparqlTermSite,
+  legacy: (term: string) => string,
+): string {
+  if (!(error instanceof SparqlTermValidationError)) throw error;
+  recordInvalidTerm(term, position, error.kind, site);
+  return legacy(term);
 }
 
 const INVALID_TERM_WARN_INTERVAL_MS = 60_000;
 const INVALID_TERM_SAMPLE_CHARS = 120;
 const lastInvalidTermWarnAt = new Map<string, number>();
 
-/**
- * Observe mode: count and log a term the validators rejected. The caller then
- * renders it the pre-validation way, so a release can confirm that no
- * well-formed write trips the validators before they start rejecting.
- *
- * TODO(sparql-term-hard-reject): once a release shows
- * `dkg.store.sparql_invalid_terms_total` staying at zero, count with
- * `enforcement: 'reject'` and make `sparqlIriTerm` / `sparqlRdfTerm` rethrow
- * the validation error, then delete `legacyStrippedIri` and `legacyRdfTerm`.
- */
-function observeInvalidTerm(
+/** Count every invalid term; warn at most once a minute per site and label. */
+function recordInvalidTerm(
   term: string,
-  position: SparqlTermPosition,
+  position: ObservedTermPosition,
+  kind: SparqlTermKind,
   site: SparqlTermSite,
 ): void {
-  const kind = term.startsWith('"') ? 'literal' : term.startsWith('_:') ? 'blank-node' : 'iri';
   try {
     getMetrics().storeSparqlInvalidTermsTotal.add(1, {
       adapter: site.adapter,
       operation: site.operation,
       position,
       kind,
-      enforcement: 'observe',
+      enforcement: ADAPTER_ENFORCEMENT,
     });
   } catch { /* metrics unavailable in some harnesses — never fail the write */ }
 
@@ -191,8 +265,8 @@ function observeInvalidTerm(
   );
 }
 
-// The pre-validation adapter formatters, byte for byte. Only a term that
-// failed validation reaches them.
+// The pre-validation adapter renderers, byte for byte. Only a term that failed
+// validation reaches them.
 
 /** Former `escapeUri`: deletes IRI-breaking characters, retargeting the IRI. */
 function legacyStrippedIri(term: string): string {
@@ -207,4 +281,9 @@ function legacyRdfTerm(term: string): string {
   }
   if (term.startsWith('_:') || term.startsWith('<')) return term;
   return `<${term}>`;
+}
+
+/** Former `escapeString`: escapes only `\` and `"`, so a line break still breaks the update. */
+function legacyStringLiteral(value: string): string {
+  return `"${value.replace(/[\\"]/g, '\\$&')}"`;
 }

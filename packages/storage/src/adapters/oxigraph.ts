@@ -34,7 +34,7 @@ import {
   type Rfc64AuthorCommitCasUpdateV1,
 } from '../rfc64-author-commit-cas.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
-import { sparqlIriTerm, sparqlStringLiteral } from '../sparql-terms.js';
+import { sparqlIriPrefix, sparqlIriTerm } from '../sparql-terms.js';
 import {
   assertQuadLiteralsMutf8Safe,
   classifySparqlOperation,
@@ -534,12 +534,10 @@ export class OxigraphStore implements TripleStore {
     prefix: string,
   ): Promise<number> {
     const before = this.store.size;
-    const graph = sparqlIriTerm(graphUri, 'graph', {
-      adapter: 'oxigraph',
-      operation: 'deleteBySubjectPrefix',
-    });
+    const site = { adapter: 'oxigraph', operation: 'deleteBySubjectPrefix' } as const;
+    const graph = sparqlIriTerm(graphUri, 'graph', site);
     this.store.update(
-      `DELETE { GRAPH ${graph} { ?s ?p ?o } } WHERE { GRAPH ${graph} { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), ${sparqlStringLiteral(prefix)})) } }`,
+      `DELETE { GRAPH ${graph} { ?s ?p ?o } } WHERE { GRAPH ${graph} { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), ${sparqlIriPrefix(prefix, site)})) } }`,
     );
     const removed = before - this.store.size;
     if (removed > 0) this.scheduleFlush();

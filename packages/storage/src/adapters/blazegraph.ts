@@ -43,7 +43,7 @@ import {
   type Rfc64AuthorCommitCasResultV1,
 } from '../rfc64-author-commit-cas.js';
 import { quadToNQuad } from '../bounded-rdf.js';
-import { sparqlIriTerm, sparqlRdfTerm, sparqlStringLiteral } from '../sparql-terms.js';
+import { sparqlIriPrefix, sparqlIriTerm, sparqlRdfTerm } from '../sparql-terms.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
@@ -426,12 +426,10 @@ export class BlazegraphStore implements TripleStore {
       ...options,
       source: options?.source ?? 'blazegraph.deleteBySubjectPrefix.countBefore',
     });
-    const graph = sparqlIriTerm(graphUri, 'graph', {
-      adapter: 'blazegraph',
-      operation: 'deleteBySubjectPrefix',
-    });
+    const site = { adapter: 'blazegraph', operation: 'deleteBySubjectPrefix' } as const;
+    const graph = sparqlIriTerm(graphUri, 'graph', site);
     await this.sparqlUpdate(
-      `DELETE { GRAPH ${graph} { ?s ?p ?o } } WHERE { GRAPH ${graph} { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), ${sparqlStringLiteral(prefix)})) } }`,
+      `DELETE { GRAPH ${graph} { ?s ?p ?o } } WHERE { GRAPH ${graph} { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), ${sparqlIriPrefix(prefix, site)})) } }`,
       { ...options, source: options?.source ?? 'blazegraph.deleteBySubjectPrefix' },
       'deleteBySubjectPrefix',
     );

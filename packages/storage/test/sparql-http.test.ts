@@ -1962,7 +1962,7 @@ describe('SparqlHttpStore RDF term formatting', () => {
           object: '"v"@en',
         });
         await store.deleteByPatternWithoutCount({ object: 'http://ex.org/o' });
-        await store.deleteBySubjectPrefix('http://ex.org/g', 'http://ex.org/"q"');
+        await store.deleteBySubjectPrefix('http://ex.org/g', 'http://ex.org/q/');
         await store.dropGraph('http://ex.org/g');
         await store.hasGraph('http://ex.org/g');
       });
@@ -1980,7 +1980,7 @@ describe('SparqlHttpStore RDF term formatting', () => {
         'DELETE { GRAPH ?g_ctx { ?s ?p <http://ex.org/o> } } WHERE { GRAPH ?g_ctx { ?s ?p <http://ex.org/o> } }',
         'SELECT (COUNT(*) AS ?c) WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }',
         'DELETE { GRAPH <http://ex.org/g> { ?s ?p ?o } } '
-          + 'WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "http://ex.org/\\"q\\"")) } }',
+          + 'WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "http://ex.org/q/")) } }',
         'SELECT (COUNT(*) AS ?c) WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }',
         'DROP SILENT GRAPH <http://ex.org/g>',
         'ASK { GRAPH <http://ex.org/g> { ?s ?p ?o } }',
@@ -2038,15 +2038,53 @@ describe('SparqlHttpStore RDF term formatting', () => {
     }
   });
 
-  it('escapes a line break in a subject prefix instead of sending it raw', async () => {
+  it('counts a subject prefix no IRI can start with and sends it as before', async () => {
     const observed = observeInvalidSparqlTerms();
     try {
-      const bodies = await captureSparql((store) => store.deleteBySubjectPrefix('http://ex.org/g', 'urn:a\r\nb'));
+      const bodies = await captureSparql(async (store) => {
+        await store.deleteBySubjectPrefix('http://ex.org/g', 'urn:a\r\nb');
+        await store.deleteBySubjectPrefix('http://ex.org/g', 'urn:"q"');
+      });
+      // The line break stays raw, so a real endpoint still rejects the update
+      // rather than reporting that nothing matched.
       expect(bodies[1]).toBe(
         'DELETE { GRAPH <http://ex.org/g> { ?s ?p ?o } } '
-          + 'WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "urn:a\\r\\nb")) } }',
+          + 'WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "urn:a\r\nb")) } }',
       );
-      expect(observed.counted).toEqual([]);
+      expect(bodies[4]).toContain('FILTER(STRSTARTS(STR(?s), "urn:\\"q\\""))');
+      expect(observed.counted).toEqual(Array(2).fill({
+        value: 1,
+        adapter: 'sparql-http',
+        operation: 'deleteBySubjectPrefix',
+        position: 'subject-prefix',
+        kind: 'iri',
+        enforcement: 'observe',
+      }));
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('labels the graph term of every graph-scoped operation', async () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      await captureSparql(async (store) => {
+        await store.hasGraph('http://g{x}');
+        await store.countQuads('http://g{x}');
+        await store.deleteBySubjectPrefix('http://g{x}', 'urn:ok/');
+        await store.dropGraph('http://g{x}');
+      });
+      const graphPoint = (operation: string) => ({
+        value: 1, adapter: 'sparql-http', operation, position: 'graph', kind: 'iri', enforcement: 'observe',
+      });
+      expect(observed.counted).toEqual([
+        graphPoint('hasGraph'),
+        graphPoint('countQuads'),
+        graphPoint('countQuads'),
+        graphPoint('deleteBySubjectPrefix'),
+        graphPoint('countQuads'),
+        graphPoint('dropGraph'),
+      ]);
     } finally {
       observed.restore();
     }

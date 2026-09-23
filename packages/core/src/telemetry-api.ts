@@ -246,10 +246,11 @@ export interface DkgMetrics {
   storeCancellationCompletedTotal: Counter;
   /** scope and reason identify the bounded retry loop; attempt is capped */
   storeRetryAttemptsTotal: Counter;
-  /** adapter, operation, position={graph|subject|predicate|object},
+  /** adapter, operation, position={graph|subject|predicate|object|subject-prefix},
    *  kind={iri|literal|blank-node}, enforcement={observe|reject} — malformed RDF
-   *  terms reaching a storage adapter's SPARQL builders. `observe` = logged, and
-   *  the pre-validation SPARQL was still sent. */
+   *  terms reaching a storage adapter's SPARQL builders. `observe` = counted and
+   *  logged, and the pre-validation SPARQL (which still strips characters from
+   *  a malformed IRI) was sent anyway. */
   storeSparqlInvalidTermsTotal: Counter;
   /** current durable finalization entries whose retry gate is open */
   finalizationRecoveryDueEntries: Gauge;

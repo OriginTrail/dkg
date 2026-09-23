@@ -71,11 +71,7 @@ import {
   raceStoreWorkAgainstAbort,
 } from '../abortable-store-work-lifecycle.js';
 import { parseNQuadsTextTolerant } from '../nquads-text.js';
-import {
-  sparqlIriTerm,
-  sparqlRdfTerm,
-  sparqlStringLiteral,
-} from '../sparql-terms.js';
+import { sparqlIriPrefix, sparqlIriTerm, sparqlRdfTerm } from '../sparql-terms.js';
 import { buildBlankNodeSafeDelete } from './blank-node-safe-delete.js';
 import {
   isStoreOperationTimeoutError,
@@ -782,11 +778,9 @@ export class SparqlHttpStore implements TripleStore {
       ...options,
       source: options?.source ?? 'sparql-http.deleteBySubjectPrefix.countBefore',
     });
-    const graph = sparqlIriTerm(graphUri, 'graph', {
-      adapter: 'sparql-http',
-      operation: 'deleteBySubjectPrefix',
-    });
-    const update = `DELETE { GRAPH ${graph} { ?s ?p ?o } } WHERE { GRAPH ${graph} { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), ${sparqlStringLiteral(prefix)})) } }`;
+    const site = { adapter: 'sparql-http', operation: 'deleteBySubjectPrefix' } as const;
+    const graph = sparqlIriTerm(graphUri, 'graph', site);
+    const update = `DELETE { GRAPH ${graph} { ?s ?p ?o } } WHERE { GRAPH ${graph} { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), ${sparqlIriPrefix(prefix, site)})) } }`;
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri] },
       update,

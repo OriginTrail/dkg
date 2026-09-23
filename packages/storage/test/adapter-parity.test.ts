@@ -36,7 +36,7 @@ it.each(STORES)('$name preserves real stored state across duplicate insert and s
   } finally { await store.close(); }
 });
 
-it.each(STORES)('$name logs a malformed graph IRI and escapes a line break in a subject prefix', async ({ name, adapter, createStore }) => {
+it.each(STORES)('$name counts a malformed graph IRI and a line-break subject prefix', async ({ name, adapter, createStore }) => {
   const observed = observeInvalidSparqlTerms();
   const store = createStore();
   const graph = `urn:parity:terms:${name}`;
@@ -51,10 +51,13 @@ it.each(STORES)('$name logs a malformed graph IRI and escapes a line break in a 
     }]);
     expect(observed.warnings).toEqual([expect.stringContaining(JSON.stringify(malformed))]);
 
-    // Sent raw, the line break used to make the update unparseable.
-    expect(await store.deleteBySubjectPrefix(graph, 'urn:o\nne')).toBe(0);
+    // A prefix no IRI can start with is counted, and still sent as before, so
+    // the update stays unparseable and the call fails instead of deleting nothing.
+    await expect(store.deleteBySubjectPrefix(graph, 'urn:o\nne')).rejects.toThrow();
     expect(await store.countQuads(graph)).toBe(1);
-    expect(observed.counted).toHaveLength(1);
+    expect(observed.counted.slice(1)).toEqual([{
+      value: 1, adapter, operation: 'deleteBySubjectPrefix', position: 'subject-prefix', kind: 'iri', enforcement: 'observe',
+    }]);
   } finally {
     observed.restore();
     await store.close();

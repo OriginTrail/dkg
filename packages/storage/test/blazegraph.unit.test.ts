@@ -1166,7 +1166,7 @@ describe('BlazegraphStore (mocked HTTP)', () => {
       }
     });
 
-    it('labels blank-node-safe deletes and escapes subject prefixes', async () => {
+    it('labels blank-node-safe deletes and counts subject prefixes no IRI can start with', async () => {
       const observed = observeInvalidSparqlTerms();
       try {
         respondToSparql();
@@ -1174,12 +1174,41 @@ describe('BlazegraphStore (mocked HTTP)', () => {
         await s.delete([{ subject: 'http://s', predicate: 'http://p q', object: '"v"', graph: 'http://g' }]);
         await s.deleteBySubjectPrefix('http://g', 'http://s/\n"x"');
         expect(bodies()[0]).toBe('DELETE DATA {\nGRAPH <http://g> { <http://s> <http://p q> "v" . }\n}');
-        expect(bodies()[2]).toContain('FILTER(STRSTARTS(STR(?s), "http://s/\\n\\"x\\""))');
-        expect(observed.counted).toEqual([expect.objectContaining({
-          adapter: 'blazegraph',
-          operation: 'delete',
-          position: 'predicate',
-        })]);
+        // Sent as before: the quote is escaped and the line break stays raw.
+        expect(bodies()[2]).toContain('FILTER(STRSTARTS(STR(?s), "http://s/\n\\"x\\""))');
+        expect(observed.counted).toEqual([
+          expect.objectContaining({ adapter: 'blazegraph', operation: 'delete', position: 'predicate' }),
+          expect.objectContaining({
+            adapter: 'blazegraph', operation: 'deleteBySubjectPrefix', position: 'subject-prefix', kind: 'iri',
+          }),
+        ]);
+      } finally {
+        observed.restore();
+      }
+    });
+
+    it('labels the graph term of every graph-scoped operation', async () => {
+      const observed = observeInvalidSparqlTerms();
+      try {
+        respondToSparql();
+        const s = new BlazegraphStore(baseUrl);
+        await s.hasGraph('http://g{x}');
+        await s.countQuads('http://g{x}');
+        await s.deleteBySubjectPrefix('http://g{x}', 'urn:ok/');
+        await s.deleteByPatternWithoutCount({ graph: 'http://g{x}' });
+        await s.dropGraph('http://g{x}');
+        const graphPoint = (operation: string) => ({
+          value: 1, adapter: 'blazegraph', operation, position: 'graph', kind: 'iri', enforcement: 'observe',
+        });
+        expect(observed.counted).toEqual([
+          graphPoint('hasGraph'),
+          graphPoint('countQuads'),
+          graphPoint('countQuads'),
+          graphPoint('deleteBySubjectPrefix'),
+          graphPoint('countQuads'),
+          graphPoint('deleteByPattern'),
+          graphPoint('dropGraph'),
+        ]);
       } finally {
         observed.restore();
       }

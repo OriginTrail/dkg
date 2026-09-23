@@ -2,11 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import oxigraph from 'oxigraph';
 import { getMetrics } from '@origintrail-official/dkg-core';
 import {
+  formatIriPrefix,
   formatIriTerm,
+  formatObject,
   formatRdfTerm,
+  SparqlTermValidationError,
+  sparqlIriPrefix,
   sparqlIriTerm,
   sparqlRdfTerm,
-  sparqlStringLiteral,
   type SparqlTermPosition,
   type SparqlTermSite,
 } from '../src/sparql-terms.js';
@@ -114,10 +117,12 @@ describe('well-formed terms render byte-identically to the replaced formatters',
     '',
     'http://ex.org/',
     'did:dkg:context-graph:0x1234/',
-    'urn:with "quotes" and \\ backslash',
-    'tab\tinside',
-  ])('string literal for prefix %j', (value) => {
-    expect(sparqlStringLiteral(value)).toBe(`"${legacyEscapeString(value)}"`);
+    'https://ex.org/entity/.well-known/genid/',
+    'urn:café#',
+  ])('subject prefix %j', (prefix) => {
+    const observed = observeInvalidSparqlTerms();
+    expect(sparqlIriPrefix(prefix, SITE)).toBe(`"${legacyEscapeString(prefix)}"`);
+    expect(observed.counted).toEqual([]);
   });
 });
 
@@ -237,7 +242,12 @@ describe('malformed terms are logged and counted, then sent in the pre-validatio
 
 describe('strict formatters (the hard-reject path)', () => {
   it.each(MALFORMED)('$name throws', ({ strict }) => {
-    expect(strict).toThrow();
+    expect(strict).toThrow(SparqlTermValidationError);
+  });
+
+  it('keeps the core validator message for callers that match on it', () => {
+    expect(() => formatIriTerm('urn:a b', 'graph')).toThrow(/^Unsafe or empty IRI value: urn:a b$/);
+    expect(() => formatObject('"x\ny"')).toThrow(/^Unsafe RDF term/);
   });
 
   it('names the violated rule', () => {
@@ -249,21 +259,53 @@ describe('strict formatters (the hard-reject path)', () => {
   });
 });
 
-describe('sparqlStringLiteral', () => {
-  it('escapes line breaks the replaced escapeString sent raw', () => {
-    expect(sparqlStringLiteral('a\nb\r\n"c"\\')).toBe('"a\\nb\\r\\n\\"c\\"\\\\"');
-    expect(`"${legacyEscapeString('a\nb')}"`).toBe('"a\nb"');
+describe('subject prefixes', () => {
+  it.each([
+    ['a line break', 'urn:line\nbreak'],
+    ['a carriage return', 'urn:line\rbreak'],
+    ['a tab', 'urn:tab\there'],
+    ['a space', 'urn:a b'],
+    ['a quote', 'urn:with "quotes"'],
+    ['a backslash', 'urn:back\\slash'],
+  ])('counts a prefix with %s and renders it as before', (_name, prefix) => {
+    const observed = observeInvalidSparqlTerms();
+    expect(sparqlIriPrefix(prefix, SITE)).toBe(`"${legacyEscapeString(prefix)}"`);
+    expect(observed.counted).toEqual([{
+      value: 1, adapter: 'sparql-http', operation: 'insert', position: 'subject-prefix', kind: 'iri', enforcement: 'observe',
+    }]);
+    expect(() => formatIriPrefix(prefix)).toThrow(SparqlTermValidationError);
   });
 
-  it('yields a prefix filter a SPARQL engine parses, where the raw form did not', () => {
+  it('keeps a line-break prefix failing loudly instead of deleting nothing', () => {
     const store = new oxigraph.Store();
     store.load('<urn:keep> <urn:p> "v" <urn:g> .', { format: 'application/n-quads' });
-    const prefix = 'urn:line\nbreak';
-    const update = (literal: string) =>
-      `DELETE { GRAPH <urn:g> { ?s ?p ?o } } WHERE { GRAPH <urn:g> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), ${literal})) } }`;
+    const update = (prefix: string) =>
+      `DELETE { GRAPH <urn:g> { ?s ?p ?o } } WHERE { GRAPH <urn:g> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), ${sparqlIriPrefix(prefix, SITE)})) } }`;
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
 
-    expect(() => store.update(update(`"${legacyEscapeString(prefix)}"`))).toThrow();
-    expect(() => store.update(update(sparqlStringLiteral(prefix)))).not.toThrow();
+    expect(() => store.update(update('urn:ke\nep'))).toThrow();
     expect(store.size).toBe(1);
+    store.update(update('urn:ke'));
+    expect(store.size).toBe(0);
+  });
+});
+
+describe('the observe policy', () => {
+  it('lets a formatter bug propagate instead of counting it as an invalid term', () => {
+    const observed = observeInvalidSparqlTerms();
+    let calls = 0;
+    // Throws on the formatter's first call and behaves on every later one, so
+    // a catch-all would count it and render the stripped IRI without a throw.
+    const term = Object.assign(new String('urn:ok'), {
+      startsWith(this: string, search: string) {
+        calls += 1;
+        if (calls === 1) throw new RangeError('formatter bug');
+        return String.prototype.startsWith.call(this, search);
+      },
+    }) as unknown as string;
+
+    expect(() => sparqlIriTerm(term, 'graph', SITE)).toThrow(RangeError);
+    expect(observed.counted).toEqual([]);
+    expect(observed.warnings).toEqual([]);
   });
 });
