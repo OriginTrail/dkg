@@ -18,6 +18,10 @@ export const PRIMARY_LANE_JOBS = Object.freeze({
   tornado_blazegraph: 'tornado-blazegraph',
   tornado_publisher: 'tornado-publisher',
   tornado_agent: 'tornado-agent',
+  // Defined as the agent lane: planCi selects it exactly when it selects
+  // tornado_agent, because the Windows harnesses need the agent closure. It is
+  // a lane of its own only so the generic gate loop validates the
+  // inventory-windows job like every other selected job.
   tornado_agent_windows: 'inventory-windows',
   bura_cli: 'bura-cli',
   bura_blazegraph_arm64: 'bura-blazegraph-arm64',
@@ -879,7 +883,7 @@ export function planCi({
     reasons.push(...route.reasons);
   }
 
-  // The Windows lifecycle job follows the agent lane (see WORKSPACE_RULES).
+  // tornado_agent_windows is defined as the agent lane (see PRIMARY_LANE_JOBS).
   if (lanes.tornado_agent) lanes.tornado_agent_windows = true;
 
   const deduplicatedReasons = [...new Set(reasons)];
