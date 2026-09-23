@@ -573,9 +573,11 @@ describe('discoverContextGraphsFromStore', () => {
     releaseFirstQuery();
 
     await expect(Promise.all([first, second])).resolves.toEqual([1, 1]);
-    expect(discoveryQueries).toBe(3);
+    // One pass reads ontology definitions, `_meta` bindings, ontology bindings
+    // and `_meta` definitions.
+    expect(discoveryQueries).toBe(4);
     await expect(agent.discoverContextGraphsFromStore()).resolves.toBe(0);
-    expect(discoveryQueries).toBe(6);
+    expect(discoveryQueries).toBe(8);
   }, 15000);
 
   it('does not re-discover already known contextGraphs', async () => {
