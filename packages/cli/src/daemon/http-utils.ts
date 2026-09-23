@@ -12,6 +12,7 @@ import {
   validateContextGraphId,
   validateSubGraphName,
   isSafeIri,
+  isSafeBlankNodeLabel,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   messageIndicatesNoFundedPublisherWallet,
   Logger,
@@ -327,13 +328,47 @@ export function validateWritableQuadLiteralSizes(
 export function validateQuadObjectTerms(
   label: string,
   quads: ReadonlyArray<{ object: string }>,
+  options: { blankNodes?: boolean; bracketedIris?: boolean } = {},
 ): string | null {
   const badIndex = quads.findIndex((q) => {
     const object = q.object.trim();
-    return !object.startsWith('"') && !isSafeIri(object);
+    if (object.startsWith('"')) return false;
+    if (options.blankNodes && isSafeBlankNodeLabel(object)) return false;
+    return !(options.bracketedIris ? isIriTerm(object) : isSafeIri(object));
   });
   if (badIndex === -1) return null;
-  return `Invalid "${label}[${badIndex}].object": RDF object must be a quoted literal term or absolute IRI`;
+  const allowed = options.blankNodes
+    ? 'a quoted literal term, blank node or absolute IRI'
+    : 'a quoted literal term or absolute IRI';
+  return `Invalid "${label}[${badIndex}].object": RDF object must be ${allowed}`;
+}
+
+/** A bare or angle-bracketed absolute IRI; the store accepts both forms. */
+function isIriTerm(term: string): boolean {
+  return isSafeIri(term.startsWith('<') && term.endsWith('>') ? term.slice(1, -1) : term);
+}
+
+/**
+ * Validate each quad's subject (an absolute IRI or a blank node) and predicate
+ * (an absolute IRI) at the write-route boundary. The shape guard only checks
+ * that the fields are strings, so a term such as `urn:a b` or `…/na^me` used
+ * to reach the store's SPARQL builder, which either failed the whole write or
+ * stored the triple under a different IRI with the offending characters
+ * removed.
+ */
+export function validateQuadSubjectPredicateTerms(
+  label: string,
+  quads: ReadonlyArray<{ subject: string; predicate: string }>,
+): string | null {
+  for (const [index, quad] of quads.entries()) {
+    if (!isIriTerm(quad.subject) && !isSafeBlankNodeLabel(quad.subject)) {
+      return `Invalid "${label}[${index}].subject": RDF subject must be an absolute IRI or blank node`;
+    }
+    if (!isIriTerm(quad.predicate)) {
+      return `Invalid "${label}[${index}].predicate": RDF predicate must be an absolute IRI`;
+    }
+  }
+  return null;
 }
 
 /**

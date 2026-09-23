@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   assertSafeIri,
   assertSafeRdfTerm,
+  isSafeBlankNodeLabel,
   isSafeIri,
   sparqlIri,
   escapeSparqlLiteral,
@@ -60,6 +61,22 @@ describe('assertSafeIri', () => {
     expect(() => assertSafeIri('http://x\ry')).toThrow();
     expect(() => assertSafeIri('http://x\ty')).toThrow();
   });
+});
+
+describe('isSafeBlankNodeLabel', () => {
+  it.each(['_:b0', '_:0', '_:7f3a9c0e5d', '_:c14n0', '_:n3-0', '_:a.b', '_:genid_1', '_:é', '_:x·y'])(
+    'accepts %s',
+    (label) => {
+      expect(isSafeBlankNodeLabel(label)).toBe(true);
+    },
+  );
+
+  it.each(['', '_:', '_:b.', '_:a b', '_:-b', '_:b\n', '_:b>', 'b0', '<_:b0>', 'urn:b0'])(
+    'rejects %j',
+    (label) => {
+      expect(isSafeBlankNodeLabel(label)).toBe(false);
+    },
+  );
 });
 
 describe('isSafeIri', () => {

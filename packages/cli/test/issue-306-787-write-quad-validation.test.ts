@@ -134,3 +134,72 @@ describe('GH #306/#787 follow-up — malformed object TERM is 4xx, not a 500 par
     expect(status, JSON.stringify(body)).toBe(200);
   });
 });
+
+/**
+ * Subject and predicate terms used to reach the store's SPARQL builder
+ * unchecked, which either failed the whole write or, for characters it strips
+ * (`^`, `{`, `|`, …), stored the triple under a different IRI than the caller
+ * sent. Both write routes now answer 400 first. The create route also checks
+ * objects, keeping every form the store accepts (blank nodes included).
+ */
+describe('malformed subject / predicate TERM is 400 on both KA write routes', () => {
+  const MALFORMED: Array<[string, { subject?: string; predicate?: string }, 'subject' | 'predicate', string]> = [
+    ['subject with a space', { subject: 'urn:wq:a b' }, 'subject', 'space'],
+    ['relative subject', { subject: 'not-an-iri' }, 'subject', 'relative'],
+    ['invalid blank-node label', { subject: '_:a b' }, 'subject', 'bnode'],
+    ['predicate with a caret (formerly stored as …/name)', { predicate: 'http://schema.org/na^me' }, 'predicate', 'caret'],
+    ['blank-node predicate', { predicate: '_:p' }, 'predicate', 'bnode-predicate'],
+  ];
+  const termQuad = (overrides: { subject?: string; predicate?: string; object?: string }) => ({
+    subject: 'urn:wq:term', predicate: 'http://schema.org/name', object: '"v"', ...overrides,
+  });
+
+  it.each(MALFORMED)('wm/write rejects a %s with 400', async (_name, overrides, field, id) => {
+    const created = await postJson(daemon!, '/api/knowledge-assets', { contextGraphId: CG, name: `ka-term-wm-${id}` });
+    expect(created.status, 'KA create precondition').toBeLessThan(300);
+    const { status, body } = await postJson(daemon!, `/api/knowledge-assets/ka-term-wm-${id}/wm/write`, {
+      contextGraphId: CG, quads: [termQuad(overrides)],
+    });
+    expect(status, JSON.stringify(body)).toBe(400);
+    expect(body.error).toContain(`quads[0].${field}`);
+  });
+
+  it.each(MALFORMED)('create rejects a %s with 400 before creating the KA', async (_name, overrides, field) => {
+    const { status, body } = await postJson(daemon!, '/api/knowledge-assets', {
+      contextGraphId: CG, name: 'ka-term-create', finalize: false, quads: [termQuad(overrides)],
+    });
+    expect(status, JSON.stringify(body)).toBe(400);
+    expect(body.error).toContain(`quads[0].${field}`);
+  });
+
+  it('create rejects a malformed object IRI but keeps accepting blank-node objects', async () => {
+    const rejected = await postJson(daemon!, '/api/knowledge-assets', {
+      contextGraphId: CG, name: 'ka-term-object', finalize: false,
+      quads: [termQuad({ object: 'https://example.org/o^1' })],
+    });
+    expect(rejected.status, JSON.stringify(rejected.body)).toBe(400);
+    expect(rejected.body.error).toContain('quads[0].object');
+
+    const accepted = await postJson(daemon!, '/api/knowledge-assets', {
+      contextGraphId: CG, name: 'ka-term-object', finalize: false,
+      quads: [
+        termQuad({ subject: '_:parent', predicate: 'http://schema.org/address', object: '_:address' }),
+        termQuad({ subject: '_:address', predicate: 'http://schema.org/streetAddress', object: '"1 Main St"' }),
+      ],
+    });
+    expect(accepted.status, JSON.stringify(accepted.body)).toBeLessThan(300);
+  });
+
+  it('still writes bracketed and blank-node subjects through wm/write (regression)', async () => {
+    const created = await postJson(daemon!, '/api/knowledge-assets', { contextGraphId: CG, name: 'ka-term-ok' });
+    expect(created.status, 'KA create precondition').toBeLessThan(300);
+    const { status, body } = await postJson(daemon!, '/api/knowledge-assets/ka-term-ok/wm/write', {
+      contextGraphId: CG,
+      quads: [
+        termQuad({ subject: '<urn:wq:bracketed>', predicate: '<http://schema.org/name>' }),
+        termQuad({ subject: '_:wq-b0' }),
+      ],
+    });
+    expect(status, JSON.stringify(body)).toBe(200);
+  });
+});

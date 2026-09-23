@@ -38,6 +38,7 @@ import {
   validateRequiredContextGraphId,
   isWritableQuad,
   validateQuadObjectTerms,
+  validateQuadSubjectPredicateTerms,
   respondIfReconcileUnavailable,
   respondIfStoreUnavailable,
   classifyStoreUnavailable,
@@ -1024,6 +1025,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       if (!quads.every(isWritableQuad)) {
         return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
       }
+      // Reject terms the store cannot represent before any create/write. Objects
+      // keep every form the store accepts, including the blank nodes the MCP
+      // create tool forwards, so this route stays laxer than wm/write.
+      const termErr = validateQuadSubjectPredicateTerms("quads", quads)
+        ?? validateQuadObjectTerms("quads", quads, { blankNodes: true, bracketedIris: true });
+      if (termErr) return jsonResponse(res, 400, { error: termErr });
       const literalSize = validateWritableQuadLiteralSizes("quads", quads);
       if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
     }
@@ -1432,10 +1439,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (!parsed.quads.every(isWritableQuad)) {
           return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
         }
-        // GH #306/#787 (follow-up) — reject objects that are neither a quoted
-        // literal nor an absolute IRI before they reach (and crash) the parser.
-        const wmObjErr = validateQuadObjectTerms("quads", parsed.quads);
-        if (wmObjErr) return jsonResponse(res, 400, { error: wmObjErr });
+        // GH #306/#787 (follow-up) — reject subjects, predicates and objects the
+        // store cannot represent before they reach (and crash) the parser.
+        const wmTermErr = validateQuadSubjectPredicateTerms("quads", parsed.quads)
+          ?? validateQuadObjectTerms("quads", parsed.quads);
+        if (wmTermErr) return jsonResponse(res, 400, { error: wmTermErr });
         const literalSize = validateWritableQuadLiteralSizes("quads", parsed.quads);
         if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
         // A bare write to a name that was never created used to fall through to

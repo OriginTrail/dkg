@@ -360,6 +360,7 @@ export { startDaemon } from './daemon-lifecycle.js';
 export {
   assertSafeIri,
   isSafeIri,
+  isSafeBlankNodeLabel,
   sparqlIri,
   escapeSparqlLiteral,
   sparqlString,

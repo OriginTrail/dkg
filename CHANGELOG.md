@@ -6,6 +6,15 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Fixed
 
+- **Knowledge Asset write routes answer 400 for a malformed subject or
+  predicate**: `POST /api/knowledge-assets` and
+  `POST /api/knowledge-assets/{name}/wm/write` passed subject and predicate
+  terms to the store unchecked. A malformed IRI either failed the write with a
+  store error or, for characters the store strips such as `^`, stored the
+  triple under a different predicate than the caller sent. Both routes now
+  require an absolute IRI or blank node as the subject and an absolute IRI as
+  the predicate. The create route also rejects a malformed object; blank-node
+  and angle-bracketed terms stay accepted wherever the store accepts them.
 - **Random Sampling resolves the challenged Context Graph by its chain name
   commitment when local history contains multiple names for one numeric ID**:
   proof extraction no longer selects an arbitrary first ontology row, which
