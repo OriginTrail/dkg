@@ -7,6 +7,7 @@
  */
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import type { StoreQuadsStatus, StoreQuadsStatusFields } from '../status-store-quads-wire.js';
+import { parseRdfInt } from './metrics-queries.js';
 
 // Quad-count cache for external SPARQL backends. A full-store COUNT is not a
 // liveness check: on a multi-million-row namespace it can occupy the store for
@@ -63,17 +64,25 @@ function snapshotStoreQuadsCache(
   };
 }
 
+// A result younger than the TTL. An unknown age (the clock stepped back past
+// the result) is stale, never fresh.
+function isStoreQuadsCacheFresh(now: number): boolean {
+  if (!storeQuadsCache) return false;
+  const ageMs = now - storeQuadsCache.fetchedAt;
+  return ageMs >= 0 && ageMs < STORE_QUADS_CACHE_TTL_MS;
+}
+
+/**
+ * Explicit request: start a recount unless the cached result is fresh or one
+ * is already running, then report what is known. The report is read after
+ * that decision, so a recount this call started already shows as `pending`
+ * (no cached result) or as refreshing the cached one.
+ */
 export function getCachedExternalStoreQuads(
   agent: DKGAgent,
   now: number,
 ): StoreQuadsStatusFields {
-  const known = peekCachedExternalStoreQuads(now);
-  // An unknown age is stale, never fresh.
-  if (typeof known.storeQuadsAgeMs === 'number' && known.storeQuadsAgeMs < STORE_QUADS_CACHE_TTL_MS) {
-    return known;
-  }
-
-  if (!storeQuadsInflight) {
+  if (!isStoreQuadsCacheFresh(now) && !storeQuadsInflight) {
     const refresh = (async () => {
       let result: StoreQuadsCacheEntry;
       try {
@@ -81,11 +90,10 @@ export function getCachedExternalStoreQuads(
           'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
           { priority: 'health', source: 'daemon.status.storeQuads' },
         );
+        // No binding at all is no count; an empty or unparseable one is 0.
         let value: number | null = null;
         if (r.type === 'bindings' && r.bindings.length > 0) {
-          const cell = r.bindings[0].c ?? '';
-          const digits = cell.match(/\d+/)?.[0];
-          value = digits ? parseInt(digits, 10) : 0;
+          value = parseRdfInt(r.bindings[0].c);
         }
         result = value === null
           ? { status: 'unreachable', fetchedAt: Date.now() }
@@ -104,7 +112,6 @@ export function getCachedExternalStoreQuads(
       if (storeQuadsInflight === refresh) storeQuadsInflight = null;
     });
   }
-  // Read again: a recount is running now, whether or not this call started it.
   return peekCachedExternalStoreQuads(now);
 }
 
