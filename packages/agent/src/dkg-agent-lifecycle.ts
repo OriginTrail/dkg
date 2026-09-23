@@ -11113,6 +11113,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     options?: {
       rejectUnregisteredPlaceholder?: boolean;
+      /**
+       * Caller deadline for the chain proof. An aborted proof is `unknown`,
+       * which confirms nothing, so the answer fails closed.
+       */
+      signal?: AbortSignal;
     },
   ): Promise<boolean> {
     return confirmContextGraphMetadataV1({
@@ -11120,6 +11125,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       resolveActivePublicChainProof: () => this.resolveActivePublicContextGraphChainProof(
         contextGraphId,
         createOperationContext('sync'),
+        options?.signal,
       ),
       isPrivateContextGraph: (id) => this.isPrivateContextGraph(id),
       localApprovedAgentByContextGraph: this.localApprovedAgentByCG,

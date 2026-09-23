@@ -1629,10 +1629,17 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
      * index, which is never taken from a projection served as `stale-cache`.
      */
     publishPolicyMaxCacheAgeMs?: number;
+    /**
+     * Caller deadline for the chain lookups: the on-chain id resolution (which
+     * can fall back to a reverse name-hash scan) and the finalized snapshot
+     * read. An aborted lookup leaves its field unknown.
+     */
+    signal?: AbortSignal;
   }): Promise<{
     accessPolicy?: number;
     publishPolicy?: number;
   }> {
+    const signal = options?.signal;
     // Keep the explicitly-created local-first state off the registry lookup
     // path. The registration guard below used to run only after the cache
     // re-key step had already called `getContextGraphOnChainId()` (twice on a
@@ -1687,7 +1694,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
 
     if (accessPolicy === undefined || publishPolicy === undefined) {
       onChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId
-        ?? (await this.getContextGraphOnChainId(contextGraphId).catch(() => null))
+        ?? (await this.getContextGraphOnChainId(contextGraphId, { signal }).catch(() => null))
         ?? undefined;
       if (onChainId && onChainId !== contextGraphId) {
         if (accessPolicy === undefined) accessPolicy = this.onChainAccessPolicyCache.get(onChainId);
@@ -1731,7 +1738,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       if (!registeredViaStatus) {
         if (onChainId === undefined) {
           onChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId
-            ?? (await this.getContextGraphOnChainId(contextGraphId).catch(() => null))
+            ?? (await this.getContextGraphOnChainId(contextGraphId, { signal }).catch(() => null))
             ?? undefined;
         }
         if (onChainId) {
@@ -1780,7 +1787,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     ) {
       if (onChainId === undefined) {
         onChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId
-          ?? (await this.getContextGraphOnChainId(contextGraphId).catch(() => null))
+          ?? (await this.getContextGraphOnChainId(contextGraphId, { signal }).catch(() => null))
           ?? undefined;
       }
       let numericId: bigint | undefined;
@@ -1813,7 +1820,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           ?.readContextGraphAuthorityIndexSnapshots !== undefined
           && typeof this.readFinalizedContextGraphAuthoritySnapshotV1 === 'function'
           ? (id: bigint, readOptions: { label: string }) => (
-              this.readFinalizedContextGraphAuthoritySnapshotV1(id, readOptions)
+              this.readFinalizedContextGraphAuthoritySnapshotV1(id, { ...readOptions, signal })
             )
           : undefined;
         const finalizedPolicy = await readFinalizedContextGraphPolicyV1(

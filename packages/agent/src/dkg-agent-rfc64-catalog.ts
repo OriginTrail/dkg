@@ -59,6 +59,7 @@ import {
   verifyControlEnvelopeIssuerSignatureV1,
   withRpcRequestContext,
   type ContextGraphAuthorityIndexId,
+  type ContextGraphAuthorityIndexRevisionReader,
   type ContextGraphAuthoritySnapshot,
   type ContextGraphAuthorityReader,
   type ContextGraphAuthorityReaderCapability,
@@ -2167,11 +2168,29 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       'RFC-64 responsibility authority-index id',
     );
     const authorityIndexId = onChainId as ContextGraphAuthorityIndexId;
+    return this.rfc64FinalizedAuthoritySnapshotBatchRuntimeV1(indexedReader, readSnapshots)
+      .read(authorityIndexId, signal);
+  }
+
+  /**
+   * The agent's one finalized-index batch runtime. Every physical read takes a
+   * turn on the shared authority-read coordinator. A read owned by a single
+   * caller carries that caller's signal into its turn, so a caller that gives
+   * up is dropped from the queue, or has its in-flight read cancelled, instead
+   * of holding the single permit for everyone behind it.
+   */
+  private rfc64FinalizedAuthoritySnapshotBatchRuntimeV1(
+    this: DKGAgent,
+    indexedReader: ContextGraphAuthorityIndexRevisionReader,
+    readSnapshots: NonNullable<
+      ContextGraphAuthorityIndexRevisionReader['readContextGraphAuthorityIndexSnapshots']
+    >,
+  ): Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1 {
     let runtime = rfc64ResponsibilityAuthorityBatchRuntimesV1.get(this);
     if (runtime === undefined) {
       runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
-        readSnapshots: (targets) => this.rfc64AuthorityReadCoordinatorV1.run(
-          undefined,
+        readSnapshots: (targets, ownerSignal) => this.rfc64AuthorityReadCoordinatorV1.run(
+          ownerSignal,
           async (readSignal, evidence) => {
             try {
               return await readSnapshots.call(
@@ -2187,7 +2206,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       });
       rfc64ResponsibilityAuthorityBatchRuntimesV1.set(this, runtime);
     }
-    return runtime.read(authorityIndexId, signal);
+    return runtime;
   }
 
   /**
@@ -2287,27 +2306,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       Rfc64FinalizedAuthoritySnapshotEvidenceV1
     >();
     if (numericTargetIds.length > 0 && readSnapshots !== undefined) {
-      let runtime = rfc64ResponsibilityAuthorityBatchRuntimesV1.get(this);
-      if (runtime === undefined) {
-        runtime = new Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1({
-          readSnapshots: (targets) => this.rfc64AuthorityReadCoordinatorV1.run(
-            undefined,
-            async (readSignal, evidence) => {
-              try {
-                return await readSnapshots.call(
-                  indexedReader,
-                  targets,
-                  evidence.chainReadOptions(readSignal),
-                );
-              } finally {
-                await indexedReader.whenIdle();
-              }
-            },
-          ),
-        });
-        rfc64ResponsibilityAuthorityBatchRuntimesV1.set(this, runtime);
-      }
-      const evidenceBatch = runtime.createBatch(numericTargetIds);
+      const evidenceBatch = this
+        .rfc64FinalizedAuthoritySnapshotBatchRuntimeV1(indexedReader, readSnapshots)
+        .createBatch(numericTargetIds);
       await Promise.all(numericTargetIds.map(async (targetId) => {
         evidenceByTargetId.set(targetId, await evidenceBatch.read(targetId, signal));
       }));
