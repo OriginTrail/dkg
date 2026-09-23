@@ -1,6 +1,6 @@
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Logger } from '@origintrail-official/dkg-core';
+import { Logger, SUBSCRIPTION_SOURCES } from '@origintrail-official/dkg-core';
 import { MOCK_DEFAULT_SIGNER, MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 import {
@@ -288,8 +288,12 @@ describe('historical Context Graph discovery through ContextGraphStorage enumera
   it('refreshes mutable facts so a later deactivation shows in the list', async () => {
     const chain = await chainWithHistory();
     const agent = await startAgent(chain, createInMemoryContextGraphStorageDiscoveryStore());
-    await agent.discoverContextGraphsFromStorage();
     const nudges = vi.spyOn(agent as any, 'reconcileSwmHostModeSubscription');
+    await agent.discoverContextGraphsFromStorage();
+    // Enumeration nudges host mode for the one curated graph it first finds,
+    // by its hash-only row, exactly as the live event would have.
+    expect(nudges.mock.calls).toEqual([[HISTORY[1]!.nameHash, SUBSCRIPTION_SOURCES.CHAIN_EVENT]]);
+    nudges.mockClear();
 
     // Not due yet: the catalog is fresh as of the first pass.
     await expect(agent.refreshContextGraphsFromStorage()).resolves.toBe(0);
