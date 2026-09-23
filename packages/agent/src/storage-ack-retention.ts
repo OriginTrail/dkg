@@ -113,6 +113,39 @@ export function storageAckRetainedByPrefix(input: Readonly<{
 }
 
 /**
+ * The TTL-cleanup exclusion for StorageACK copies: one `FILTER NOT EXISTS`
+ * per way a copy can be retained (registered; younger than the ceiling; and,
+ * until the ledger is ready, the pre-ledger prefix fail-safe). `binding` is
+ * spliced into each so it binds `opVar`/`tsVar` there (empty when the outer
+ * group binds them). Every block gets its own variable suffix derived from
+ * `suffix`, so blocks never share a variable by accident.
+ */
+export function storageAckNotRetainedFilters(input: Readonly<{
+  rootMetaGraph: string;
+  metaGraph: string;
+  binding: string;
+  opVar: string;
+  tsVar: string;
+  retentionCutoffIso: string;
+  suffix: string;
+  ledgerReady: boolean;
+}>): string {
+  const { rootMetaGraph, metaGraph, opVar, tsVar, retentionCutoffIso, suffix } = input;
+  return [
+    storageAckRetainedAsRegistered({ rootMetaGraph, opVar, suffix: `${suffix}Registered` }),
+    storageAckRetainedByAge({ rootMetaGraph, opVar, tsVar, retentionCutoffIso, suffix: `${suffix}Age` }),
+    ...(input.ledgerReady ? [] : [storageAckRetainedByPrefix({
+      metaGraph,
+      opVar,
+      tsVar,
+      retentionCutoffIso,
+      suffix: `${suffix}Prefix`,
+    })]),
+  ].map((retained) => `FILTER NOT EXISTS { ${input.binding}
+    ${retained} }`).join('\n');
+}
+
+/**
  * One store-side INSERT that grandfathers every `storage-ack-` copy stored
  * before `throughIso` (and, after a node ran a version without the ledger,
  * after `sinceIso`) into the ledger. Idempotent (skips ledgered copies) and

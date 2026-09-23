@@ -132,8 +132,11 @@ function ntriple(quad: Quad): string {
 
 /**
  * One atomic SPARQL update that (re)records a signed ACK: it replaces every
- * row of the operation except `registeredAt`, so a re-signed copy keeps what
- * the audit already proved and there is no window without a ledger row.
+ * row of the operation except `registeredAt`, so there is no window without a
+ * ledger row. `registeredAt` alone survives a re-sign because it is chain
+ * evidence the audit gathered (the copy's version landed), and retention keeps
+ * a registered copy past the ceiling until it is promoted; clearing it would
+ * put a landed copy back under the ceiling.
  */
 export function storageAckLedgerRecordUpdate(entry: StorageAckLedgerEntry): string {
   const graph = STORAGE_ACK_LEDGER_GRAPH;

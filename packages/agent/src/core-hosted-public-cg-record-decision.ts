@@ -50,10 +50,11 @@ export type CoreHostedPublicCgRecordOutcome =
  * looks.
  */
 export function resolveCoreHostedPublicCgLocalId(input: Readonly<{
-  onChainId: bigint;
+  /** The on-chain id, parsed or as a request carries it (normalized here). */
+  onChainId: bigint | string;
   swmGraphId?: string;
 }>): string {
-  const onChainId = input.onChainId.toString();
+  const onChainId = canonicalOnChainIdString(input.onChainId);
   // An all-numeric local Context Graph id is still a valid cleartext hint.
   // Only the empty string and the on-chain id itself carry no information.
   // A chain-discovered name-hash placeholder of the same graph (#2744) is not
@@ -62,6 +63,15 @@ export function resolveCoreHostedPublicCgLocalId(input: Readonly<{
   return input.swmGraphId && input.swmGraphId !== onChainId
     ? input.swmGraphId
     : onChainId;
+}
+
+function canonicalOnChainIdString(onChainId: bigint | string): string {
+  if (typeof onChainId === 'bigint') return onChainId.toString();
+  try {
+    return BigInt(onChainId).toString();
+  } catch {
+    return onChainId; // not an on-chain id; recording declines it as invalid
+  }
 }
 
 /** True when the durable row already records this exact hosted binding. */

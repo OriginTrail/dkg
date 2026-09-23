@@ -471,6 +471,19 @@ describe('StorageACK VM-promotion finality gate', () => {
       expect(await supersededRows(h.store)).toHaveLength(1);
     });
 
+    it('replaces a held version the chain has moved past for the next version too', async () => {
+      // A later version landed without this core; a +1 request against the
+      // held copy releases it instead of waiting on a promotion that fails.
+      const h = harness(async () => OK, { rootCount: async () => 2n });
+      await signedPublish(h, 'v1');
+
+      const ack = decodeStorageACK(await h.handler.updateHandler(updateIntent('v2-other').bytes, PEER));
+
+      expect(isStorageACKDecline(ack)).toBe(false);
+      expect(h.priorVersions).toEqual([]);
+      expect(await supersededRows(h.store)).toHaveLength(1);
+    });
+
     it('still waits for a held version that is the chain\'s latest', async () => {
       const h = harness(async () => OK, { rootCount: async () => 1n });
       await signedPublish(h, 'v1');
@@ -513,6 +526,27 @@ describe('StorageACK VM-promotion finality gate', () => {
     expect(other.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
     expect(await swmValues(h.store)).toEqual(['"first"']);
     expect(await supersededRows(h.store)).toEqual([]);
+  });
+
+  it('keeps registeredAt and refreshes signedAt when the same copy is signed again', async () => {
+    const h = harness(async () => OK);
+    await signedPublish(h, 'v1');
+    const [row] = await ledgerRows(h.store);
+    const op = row!['op']!;
+    const registeredAt = new Date(Date.now() - 60_000);
+    await h.store.update!(storageAckLedgerMarkUpdate(op, LEDGER.registeredAt, registeredAt));
+    await h.store.update!(storageAckLedgerMarkUpdate(op, LEDGER.signedAt, new Date(Date.now() - 120_000)));
+
+    await signedPublish(h, 'v1');
+
+    const values = await h.store.query(`SELECT ?p ?o WHERE { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> { <${op}> ?p ?o } }`);
+    const rows = values.type === 'bindings' ? values.bindings : [];
+    const registered = rows.filter((r) => r['p'] === LEDGER.registeredAt).map((r) => r['o']);
+    const signed = rows.filter((r) => r['p'] === LEDGER.signedAt).map((r) => Date.parse(r['o']!.slice(1, r['o']!.indexOf('"', 1))));
+    expect(registered).toHaveLength(1);
+    expect(registered[0]).toContain(registeredAt.toISOString());
+    expect(signed).toHaveLength(1);
+    expect(Date.now() - signed[0]!).toBeLessThan(60_000);
   });
 
   it('reads the head in the reserved ACK lane under the ACK deadline', async () => {

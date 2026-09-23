@@ -30,7 +30,10 @@ import { withOwnedRpcRequestContext, withRpcRequestContext } from '@origintrail-
 import { ethers } from 'ethers';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
-import type { CoreHostedPublicCgRecordOutcome } from './core-hosted-public-cg-record-decision.js';
+import {
+  resolveCoreHostedPublicCgLocalId,
+  type CoreHostedPublicCgRecordOutcome,
+} from './core-hosted-public-cg-record-decision.js';
 import { DEFAULT_SWM_TTL_MS } from './dkg-agent-constants.js';
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 import { resolveVmReconcilerEnabled } from './sync/backpressure.js';
@@ -70,7 +73,6 @@ const PENDING_UPDATE_MIN_AGE_MS = 60_000;
  * version (a rollback) may have signed ACKs meanwhile: grandfather that window.
  */
 const STORAGE_ACK_LEDGER_REGRANDFATHER_GAP_MS = 60 * 60_000;
-/** Concurrent per-asset promotions declined update ACKs may request. */
 /** Per-asset promotions requested by declined update ACKs that run at once. */
 const PRIOR_VERSION_PROMOTION_CONCURRENCY = 8;
 /** Further requests queue (single-flight per asset); beyond this they are left to the lanes. */
@@ -181,9 +183,11 @@ export class VmPromotionMethods extends DKGAgentBase {
       );
       return unavailable('core-hosted record unavailable');
     }
-    const localCgId = request.swmGraphId && request.swmGraphId !== request.contextGraphId
-      ? request.swmGraphId
-      : request.contextGraphId;
+    // The namespace the recorder keyed the row (and its dormancy) under.
+    const localCgId = resolveCoreHostedPublicCgLocalId({
+      onChainId: request.contextGraphId,
+      swmGraphId: request.swmGraphId,
+    });
     if (outcome !== 'dormant') this.storageAckDormantSince.delete(localCgId);
     switch (outcome) {
       case 'recorded':
@@ -674,11 +678,13 @@ export class VmPromotionMethods extends DKGAgentBase {
           break;
         case 'curated':
         case 'invalid-id':
-        case 'namespace-conflict':
           // Ineligible for good: nothing this core can promote there.
           this.vmPromotionBackfillSettled.add(namespace);
           this.vmPromotionBackfillBackoff.delete(namespace);
           break;
+        case 'namespace-conflict':
+          // Clears once the other graph is gone from the chain or the member
+          // binding settles, so retry; it counts as unresolved meanwhile.
         case 'policy-unknown':
         case 'persist-failed':
         case 'dormant':

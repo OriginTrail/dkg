@@ -134,8 +134,10 @@ type GraphScopedPublishIntent = {
 };
 
 /**
- * What an ACK copy persists: a publish intent's envelope, or an update's,
- * whose access policy is carried from the existing head when known.
+ * What an ACK copy persists: a publish intent's envelope, or an update's.
+ * An update intent carries no access envelope, so `accessPolicy` is absent
+ * and the copy's head records the legacy default (public, or owner-only when
+ * private triples are committed) with no access rows.
  */
 type GraphScopedAckCopy = Omit<GraphScopedPublishIntent, 'accessPolicy'> & {
   accessPolicy?: GraphKnowledgeAssetAccessPolicy;
@@ -1357,13 +1359,12 @@ export class StorageACKHandler {
       ackStoreOptions('storage-ack.persistGraphScoped.priorVersionPromoted', input.signal),
     );
     if (promoted.type === 'boolean' && promoted.value) return replace;
-    if (incomingVersion > currentVersion + 1n) {
-      // The request skips a version, so a later version may have landed
-      // without this core. Its held copy can then never be promoted as-is.
-      const chain = await this.readRootCountOrDecline(input.cgId, input.scope.ual, input.signal);
-      if ('decline' in chain) return chain;
-      if (chain.count !== undefined && chain.count > currentVersion) return { supersede: owed };
-    }
+    // A later version may have landed without this core. Its held copy can
+    // then never be promoted as-is (promotion follows the chain's latest
+    // root), so release it instead of waiting on a promotion that fails.
+    const chain = await this.readRootCountOrDecline(input.cgId, input.scope.ual, input.signal);
+    if ('decline' in chain) return chain;
+    if (chain.count !== undefined && chain.count > currentVersion) return { supersede: owed };
     this.notifyPriorVersionAwaitingPromotion({
       contextGraphId: input.cgId,
       swmGraphId: input.swmGraphId,

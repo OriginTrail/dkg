@@ -130,9 +130,7 @@ import {
   type FinalizedSwmTwinRetirement,
 } from './sync/requester/finalized-swm-twin-reconciliation.js';
 import {
-  storageAckRetainedAsRegistered,
-  storageAckRetainedByAge,
-  storageAckRetainedByPrefix,
+  storageAckNotRetainedFilters,
 } from './storage-ack-retention.js';
 import {
   EVMChainAdapter,
@@ -11399,31 +11397,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             const wsSubGraphName = metaRest === '_shared_memory_meta'
               ? undefined
               : metaRest.slice(0, -'/_shared_memory_meta'.length);
-            // One FILTER NOT EXISTS per way a copy can be retained, each
-            // spliced into the group that binds the operation variable.
             const storageAckNotRetained = (
               binding: string,
               opVar: string,
               tsVar: string,
               suffix: string,
-            ): string => [
-              storageAckRetainedAsRegistered({ rootMetaGraph, opVar, suffix: `${suffix}Registered` }),
-              storageAckRetainedByAge({
-                rootMetaGraph,
-                opVar,
-                tsVar,
-                retentionCutoffIso: storageAckRetentionCutoff,
-                suffix: `${suffix}Age`,
-              }),
-              ...(ledgerReady ? [] : [storageAckRetainedByPrefix({
-                metaGraph: wsMetaGraph,
-                opVar,
-                tsVar,
-                retentionCutoffIso: storageAckRetentionCutoff,
-                suffix: `${suffix}Prefix`,
-              })]),
-            ].map((retained) => `FILTER NOT EXISTS { ${binding}
-                ${retained} }`).join('\n');
+            ): string => storageAckNotRetainedFilters({
+              rootMetaGraph,
+              metaGraph: wsMetaGraph,
+              binding,
+              opVar,
+              tsVar,
+              retentionCutoffIso: storageAckRetentionCutoff,
+              suffix,
+              ledgerReady,
+            });
 
             let wsGraphs: string[] | undefined;
             let ownershipKeys: string[] | undefined;

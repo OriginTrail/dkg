@@ -14,6 +14,13 @@
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
+import { metrics } from '@opentelemetry/api';
+import {
+  AggregationTemporality,
+  InMemoryMetricExporter,
+  MeterProvider,
+  PeriodicExportingMetricReader,
+} from '@opentelemetry/sdk-metrics';
 import { MockChainAdapter, activeRpcRequestContext } from '@origintrail-official/dkg-chain';
 import {
   DKG_ONTOLOGY,
@@ -33,6 +40,7 @@ import {
   contextGraphSharedMemoryMetaUri,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
+  rebuildMetrics,
 } from '@origintrail-official/dkg-core';
 import {
   STORAGE_ACK_LEDGER_GRAPH,
@@ -142,6 +150,7 @@ interface Internals {
   storageAckPriorVersionFlights: Map<string, Promise<unknown>>;
   storageAckLedgerReady: boolean;
   storageAckDormantSince: Map<string, number>;
+  vmPromotionBackfillBackoff: Map<string, unknown>;
   contextGraphSubscriptionDormancyById: Map<string, string>;
   writeLocks: Map<string, Promise<void>>;
   readStorageAckKnowledgeAssetRootCount(kaUal: string, signal?: AbortSignal): Promise<bigint>;
@@ -224,11 +233,14 @@ describe('core VM-promotion guarantees', () => {
       ledger?: 'signed' | 'none';
       target?: string;
       registered?: boolean;
+      subGraphName?: string;
+      /** Share operation id prefix; anything but `storage-ack-` is an ordinary share. */
+      opPrefix?: string;
     },
   ): Promise<SeededCopy> {
     const version = input.version ?? 1;
-    const metaGraph = contextGraphSharedMemoryMetaUri(input.namespace);
-    const shareOperationId = `storage-ack-${input.namespace}-${input.n}-${version}`;
+    const metaGraph = contextGraphSharedMemoryMetaUri(input.namespace, input.subGraphName);
+    const shareOperationId = `${input.opPrefix ?? 'storage-ack-'}${input.namespace}-${input.n}-${version}`;
     const publishedAt = new Date(Date.now() - input.ageMs);
     const metadata = generateKnowledgeAssetShareMetadata({
       shareOperationId,
@@ -241,6 +253,7 @@ describe('core VM-promotion guarantees', () => {
       accessPolicy: 'public',
       allowedPeers: [],
       timestamp: publishedAt,
+      subGraphName: input.subGraphName,
     }, metaGraph);
     await store.insert(metadata);
     await storeKnowledgeAssetWorkspaceHead({
@@ -250,11 +263,13 @@ describe('core VM-promotion guarantees', () => {
       kaUal: ual(input.n),
       assertionVersion: version,
       shareOperationId,
+      subGraphName: input.subGraphName,
     });
     const assertionGraph = knowledgeAssetLayerGraphUri(
       input.namespace,
       MemoryLayer.SharedWorkingMemory,
       createGraphKnowledgeAssetScope(ual(input.n), version),
+      input.subGraphName,
     );
     await store.insert([{
       subject: `urn:entity:${input.n}`,
@@ -273,6 +288,7 @@ describe('core VM-promotion guarantees', () => {
         assertionVersion: version,
         operation: version > 1 ? 'update' : 'publish',
         signedAt: publishedAt,
+        subGraphName: input.subGraphName,
       }));
       if (input.registered) {
         await store.insert([{
@@ -443,6 +459,15 @@ describe('core VM-promotion guarantees', () => {
       expect(saved).toHaveLength(0);
     });
 
+    it('keys dormancy under the namespace the recorder uses, however the request spells the id', async () => {
+      const internals = await boot();
+      internals.contextGraphSubscriptionDormancyById.set('46', 'authorityUnavailable');
+
+      await expect(internals.ensureStorageAckVmPromotion({ contextGraphId: '046', operation: 'publish' }))
+        .resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE });
+      expect([...internals.storageAckDormantSince.keys()]).toEqual(['46']);
+    });
+
     it('declines transiently when the core-hosted row cannot be persisted, then recovers', async () => {
       const internals = await boot();
       failSaves = true;
@@ -609,6 +634,23 @@ describe('core VM-promotion guarantees', () => {
 
       expect(await count(internals.store, promoted.metaGraph, promoted.op)).toBe(0);
       expect(await count(internals.store, owed.metaGraph, owed.op)).toBeGreaterThan(0);
+    });
+
+    it('keeps young pre-ledger ACK copies while the ledger is not ready, and still expires other shares', async () => {
+      const internals = await boot({ sharedMemoryTtlMs: 60_000 }) as Internals & Record<string, any>;
+      internals.ensureStorageAckLedgerReady = async () => false;
+      const preLedger = await seedCopy(internals.store, { namespace: 'pre-ledger-cg', n: 20, ageMs: HOUR, ledger: 'none' });
+      const share = await seedCopy(internals.store, {
+        namespace: 'pre-ledger-cg', n: 21, ageMs: HOUR, ledger: 'none', opPrefix: 'share-',
+      });
+
+      await internals.cleanupExpiredSharedMemory();
+
+      expect(await count(internals.store, preLedger.metaGraph, preLedger.op)).toBeGreaterThan(0);
+      expect(await count(internals.store, preLedger.metaGraph, preLedger.head)).toBeGreaterThan(0);
+      expect(await count(internals.store, preLedger.assertionGraph)).toBe(1);
+      expect(await count(internals.store, share.metaGraph, share.op)).toBe(0);
+      expect(await count(internals.store, share.metaGraph, share.head)).toBe(0);
     });
 
     it('does not retain copies on a node that never signed them', async () => {
@@ -1403,7 +1445,9 @@ describe('core VM-promotion guarantees', () => {
 
       await expect(internals.ensureStorageAckVmPromotion({ contextGraphId: '0', operation: 'publish' }))
         .resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED });
-      internals.recordCoreHostedPublicCg = async () => { throw new Error('store down'); };
+      await expect(internals.ensureStorageAckVmPromotion({ contextGraphId: 'not-a-graph', operation: 'publish' }))
+        .resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED });
+      internals.recordCoreHostedPublicCg =async () => { throw new Error('store down'); };
       await expect(internals.ensureStorageAckVmPromotion({ contextGraphId: '42', swmGraphId: 'public-cg', operation: 'publish' }))
         .resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE });
     });
@@ -1485,6 +1529,67 @@ describe('core VM-promotion guarantees', () => {
 
       expect(internals.subscribedContextGraphs.get('77')).toMatchObject({ coreHosted: true, onChainId: '77' });
       expect(status).toMatchObject({ unresolvedGraphs: 1 });
+    });
+
+    it('retries a namespace bound to another live graph, and records it once that graph is gone', async () => {
+      const internals = await boot();
+      internals.chain.getKAContextGraphId = async () => 0n;
+      await internals.ensureStorageAckLedgerReady();
+      internals.subscribedContextGraphs.set('rebound-cg', { subscribed: false, onChainId: '7' });
+      await seedCopy(internals.store, { namespace: 'rebound-cg', n: 130, ageMs: 0, target: '42' });
+      let previousLive = true;
+      internals.chain.isContextGraphActiveOnChain = async (id) => id !== 7n || previousLive;
+
+      expect(await internals.runVmPromotionAudit()).toMatchObject({ unresolvedGraphs: 1 });
+      expect(internals.subscribedContextGraphs.get('rebound-cg')).toMatchObject({ onChainId: '7' });
+
+      previousLive = false;
+      internals.vmPromotionBackfillBackoff.clear();
+      const status = await internals.runVmPromotionAudit();
+
+      expect(internals.subscribedContextGraphs.get('rebound-cg')).toMatchObject({ coreHosted: true, onChainId: '42' });
+      expect(status).toMatchObject({ unresolvedGraphs: 0 });
+    });
+
+    it('exports the stalled gauge and the backfill and retry counters operators watch', async () => {
+      const exporter = new InMemoryMetricExporter(AggregationTemporality.CUMULATIVE);
+      const meterProvider = new MeterProvider({
+        readers: [new PeriodicExportingMetricReader({ exporter, exportIntervalMillis: 60_000 })],
+      });
+      metrics.disable();
+      expect(metrics.setGlobalMeterProvider(meterProvider)).toBe(true);
+      rebuildMetrics();
+      try {
+        const internals = await boot({ sharedMemoryTtlMs: DAY });
+        await internals.ensureStorageAckLedgerReady();
+        await internals.recordCoreHostedPublicCg('55', 'watched-cg');
+        internals.chain.getKAContextGraphId = async (id) => (id === kaId(10) ? 55n : 0n);
+        internals.chain.getMerkleRootCount = async (id) => (id === kaId(10) ? 1n : 0n);
+        (internals as any).reconcileStorageAckCopy = async () => false;
+        await seedCopy(internals.store, { namespace: 'watched-cg', n: 10, ageMs: 2 * HOUR });
+        await seedCopy(internals.store, { namespace: 'metric-backfill-cg', n: 11, ageMs: 0, target: '42' });
+
+        await internals.runVmPromotionAudit();
+        await meterProvider.forceFlush();
+
+        const points = new Map<string, number>();
+        for (const resourceMetrics of exporter.getMetrics()) {
+          for (const scopeMetrics of resourceMetrics.scopeMetrics) {
+            for (const metric of scopeMetrics.metrics) {
+              for (const point of metric.dataPoints) {
+                if (typeof point.value === 'number') points.set(metric.descriptor.name, point.value);
+              }
+            }
+          }
+        }
+        expect(points.get('dkg.vm_promotion.stalled_acks')).toBe(1);
+        expect(points.get('dkg.vm_promotion.backfill_recorded_total')).toBe(1);
+        expect(points.get('dkg.vm_promotion.retries_total')).toBe(1);
+      } finally {
+        await meterProvider.shutdown().catch(() => {});
+        metrics.disable();
+        rebuildMetrics();
+      }
     });
 
     it('lists the sub-graphs a namespace holds ledgered copies in', async () => {
@@ -1706,6 +1811,63 @@ describe('core VM-promotion guarantees', () => {
       expect(status).toMatchObject({ stalledOnChain: 0, supersededCopies: 1 });
       expect(await ledgerHas(internals.store, copy.op, LEDGER.supersededAt)).toBe(true);
     });
+  });
+
+  it('keeps a ledgered sub-graph copy past the TTL and expires an unledgered one', async () => {
+    const internals = await boot({ sharedMemoryTtlMs: 60_000 });
+    await internals.ensureStorageAckLedgerReady();
+    const kept = await seedCopy(internals.store, {
+      namespace: 'sub-ttl-cg', n: 96, ageMs: 2 * HOUR, subGraphName: 'research',
+    });
+    const expired = await seedCopy(internals.store, {
+      namespace: 'sub-ttl-cg', n: 97, ageMs: 2 * HOUR, subGraphName: 'research', ledger: 'none',
+    });
+
+    await internals.cleanupExpiredSharedMemory();
+
+    expect(kept.metaGraph).toBe('did:dkg:context-graph:sub-ttl-cg/research/_shared_memory_meta');
+    expect(await count(internals.store, kept.metaGraph, kept.op)).toBeGreaterThan(0);
+    expect(await count(internals.store, kept.metaGraph, kept.head)).toBeGreaterThan(0);
+    expect(await count(internals.store, kept.assertionGraph)).toBe(1);
+    expect(await count(internals.store, expired.metaGraph, expired.op)).toBe(0);
+    expect(await count(internals.store, expired.metaGraph, expired.head)).toBe(0);
+    expect(await count(internals.store, expired.assertionGraph)).toBe(0);
+  });
+
+  it('tears an expired sub-graph head down only under that sub-graph\'s per-KA write lock', async () => {
+    const internals = await boot({ sharedMemoryTtlMs: 60_000 });
+    await internals.ensureStorageAckLedgerReady();
+    await seedCopy(internals.store, {
+      namespace: 'lock-sub-cg', n: 98, ageMs: HOUR, subGraphName: 'research', ledger: 'none',
+    });
+    // A retained ledgered copy names the namespace to the cleanup walk.
+    await seedCopy(internals.store, { namespace: 'lock-sub-cg', n: 99, ageMs: HOUR, subGraphName: 'research' });
+    const sources: string[] = [];
+    const query = internals.store.query.bind(internals.store);
+    internals.store.query = (async (sparql: string, options?: { source?: string }) => {
+      if (options?.source) sources.push(options.source);
+      return query(sparql, options as never);
+    }) as typeof internals.store.query;
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const holder = withKeyedLocks(
+      internals.writeLocks,
+      [swmKaWriteLockKey('lock-sub-cg', 'research', ual(98))],
+      () => held,
+    );
+
+    const cleanup = internals.cleanupExpiredSharedMemory();
+    for (let i = 0; i < 100 && !sources.includes('agent.swmCleanup.graphScopedMetadata'); i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(sources).toContain('agent.swmCleanup.graphScopedMetadata');
+    expect(sources).not.toContain('agent.swmCleanup.currentHeadOwner');
+    release();
+    await holder;
+    await cleanup;
+    expect(sources).toContain('agent.swmCleanup.currentHeadOwner');
   });
 
   it('tears an expired head down only under the per-KA write lock', async () => {
