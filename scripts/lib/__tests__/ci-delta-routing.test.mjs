@@ -368,8 +368,9 @@ test('each changed path gets one routing decision with a fixed precedence', () =
 test('support routes include every lane that loads them, directly or through other support files', () => {
   // A package file referencing something outside the workspaces (bench/,
   // devnet/, test-systems/, tools/) makes that package's lane a CI consumer
-  // of it, and so does a CI job that runs a support file directly. The lane
-  // also loads whatever that file imports, so consumers carry through
+  // of it, and so does a lane job that runs a support file: in its own steps,
+  // through a root package.json script or through a reusable workflow it
+  // calls. The lane also loads whatever that file imports, so consumers carry through
   // support-to-support imports (a harness importing a shared devnet module):
   // a change anywhere on the chain must select the lane; full CI covers the
   // rest. References are static and dynamic imports and `new URL(...)` paths.
@@ -393,16 +394,32 @@ test('support routes include every lane that loads them, directly or through oth
       for (const target of references(file)) load(target, owningLanes, file);
     }
   }
+  const rootScripts = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')).scripts;
+  // A command plus the bodies of the root package.json scripts it runs.
+  const withScripts = (command, seen = new Set()) => {
+    const nested = [];
+    for (const [, name] of command.matchAll(/\bpnpm (?:run )?([\w:-]+)/g)) {
+      if (!Object.hasOwn(rootScripts, name) || seen.has(name)) continue;
+      seen.add(name);
+      nested.push(withScripts(rootScripts[name], seen));
+    }
+    return [command, ...nested].join('\n');
+  };
+  const workflowJobs = (file) => Object.entries(parse(fs.readFileSync(path.join(REPO_ROOT, file), 'utf8')).jobs);
   const laneByJob = Object.fromEntries(Object.entries(PRIMARY_LANE_JOBS).map(([lane, job]) => [job, lane]));
-  const workflow = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
-  for (const [job, { steps = [] }] of Object.entries(workflow.jobs)) {
-    if (!laneByJob[job]) continue;
-    for (const { run = '' } of steps) {
-      for (const [file] of run.matchAll(/\b(?:bench|devnet|test-systems|tools)\/[^\s'"]+\.[cm]?[jt]sx?\b/g)) {
-        load(file, [laneByJob[job]], `${job} job`);
+  const seedJobs = (jobs, laneFor) => {
+    for (const [job, { steps = [], uses = '' }] of jobs) {
+      const lane = laneFor(job);
+      if (!lane) continue;
+      if (uses.startsWith('./')) seedJobs(workflowJobs(uses.slice(2)), () => lane);
+      for (const { run = '' } of steps) {
+        for (const [file] of withScripts(run).matchAll(/\b(?:bench|devnet|test-systems|tools)\/[^\s'"]+\.[cm]?[jt]sx?\b/g)) {
+          load(file, [lane], `${job} job`);
+        }
       }
     }
-  }
+  };
+  seedJobs(workflowJobs('.github/workflows/ci.yml'), (job) => laneByJob[job]);
   const queue = [...consumers.keys()];
   while (queue.length) {
     const file = queue.shift();
@@ -413,6 +430,8 @@ test('support routes include every lane that loads them, directly or through oth
   }
   assert.ok(consumers.get('devnet/rfc64-runtime-provenance.mts')?.has('bura_cli'), 'the CLI-started Gate 2 adapter imports the shared runtime modules');
   assert.ok(consumers.get('devnet/rfc64-persistence-lifecycle/process-lifecycle.ts')?.has('tornado_blazegraph'), 'the Blazegraph job runs the Gate 1 rollout tests');
+  assert.ok(consumers.get('test-systems/storage-conformance.test.ts')?.has('tornado_blazegraph'), 'pnpm test:conformance runs in the Blazegraph job');
+  assert.ok(consumers.get('devnet/rfc64-persistence-lifecycle/verify.ts')?.has('tornado_agent_windows'), 'the reusable Windows workflow runs the Gate 0 harness');
   for (const [target, loadedBy] of consumers) {
     const plan = pullRequestPlan([change(target)]);
     if (plan.mode === 'full') continue;
