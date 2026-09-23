@@ -2404,6 +2404,13 @@ export type DkgConfigFilePatch = (config: Partial<DkgConfig>) => void;
 
 const CONFIG_LOCK_TIMEOUT_MS = 10_000;
 
+/** A home config file and how to parse it. */
+interface ConfigFileSource {
+  path: string;
+  format: 'json' | 'yaml';
+  parse(text: string): unknown;
+}
+
 /** Immutable filesystem context for one selected local daemon home. */
 export class DkgHomeFiles {
   constructor(readonly home: string = dkgDir()) { Object.freeze(this); }
@@ -2415,45 +2422,49 @@ export class DkgHomeFiles {
   get apiPortPath(): string { return join(this.home, 'api.port'); }
   get tokenPath(): string { return dkgAuthTokenPath(this.home); }
 
-  configExists(): boolean { return existsSync(this.configPath) || existsSync(this.configYamlPath); }
+  /**
+   * The config files in precedence order: the first one that exists is the
+   * source of truth for every read and write, and a home without either gets
+   * the first on its first write.
+   */
+  private get configSources(): readonly ConfigFileSource[] {
+    return [
+      { path: this.configPath, format: 'json', parse: (text) => JSON.parse(text) },
+      { path: this.configYamlPath, format: 'yaml', parse: (text) => yaml.load(text) },
+    ];
+  }
+
+  configExists(): boolean { return this.configSources.some(({ path }) => existsSync(path)); }
 
   readConfigSync(): unknown {
-    if (existsSync(this.configPath)) return JSON.parse(readFileSync(this.configPath, 'utf-8'));
-    if (existsSync(this.configYamlPath)) return yaml.load(readFileSync(this.configYamlPath, 'utf-8'));
-    return null;
+    const source = this.configSources.find(({ path }) => existsSync(path));
+    return source ? source.parse(readFileSync(source.path, 'utf-8')) : null;
   }
 
   async loadConfig(): Promise<DkgConfig> {
-    try {
-      return mergePersistedConfig(JSON.parse(await readFile(this.configPath, 'utf-8')));
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
-    }
-    try {
-      return mergePersistedConfig(yaml.load(await readFile(this.configYamlPath, 'utf-8')));
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
-    }
-    return { ...DEFAULT_CONFIG };
+    const source = await this.readConfigSource();
+    return source ? mergePersistedConfig(source.raw) : { ...DEFAULT_CONFIG };
   }
 
   /**
    * Apply `patch` under a lock the daemon and CLI share: re-read the file
-   * that is the source of truth (config.json, else config.yaml), patch its
-   * object, and replace the file atomically in the same format. A patch that
-   * changes nothing writes nothing. Returns the path of that file.
+   * that is the source of truth, patch its object, and replace the file
+   * atomically in the same format. A patch that changes nothing writes
+   * nothing. Returns the path of that file. Every CLI and daemon write to the
+   * home config goes through here.
    */
   async updateConfigFile(patch: DkgConfigFilePatch): Promise<string> {
     await mkdir(this.home, { recursive: true });
     return withFileLock(this.configLockPath, async () => {
-      const source = await this.readConfigFileForUpdate();
-      const before = JSON.stringify(source.config, null, 2);
-      const result: unknown = patch(source.config);
+      const source = await this.readConfigSource() ?? { ...this.configSources[0], raw: {} };
+      const config = configFileObject(source.raw, source.path);
+      const before = JSON.stringify(config, null, 2);
+      const result: unknown = patch(config);
       if (typeof (result as PromiseLike<unknown> | undefined)?.then === 'function') {
         Promise.resolve(result).catch(() => {});
         throw new TypeError('A config file patch must be synchronous');
       }
-      const after = JSON.stringify(source.config, null, 2);
+      const after = JSON.stringify(config, null, 2);
       if (after === before) return source.path;
       // Serialize through JSON in both formats so YAML persists exactly what
       // JSON would: undefined keys are dropped instead of failing the dump.
@@ -2465,25 +2476,20 @@ export class DkgHomeFiles {
     }, { timeoutMs: CONFIG_LOCK_TIMEOUT_MS, label: 'config' });
   }
 
-  /** Same precedence as `loadConfig`, but the file's own object without defaults. */
-  private async readConfigFileForUpdate(): Promise<{
-    path: string;
-    format: 'json' | 'yaml';
-    config: Partial<DkgConfig>;
-  }> {
-    try {
-      const raw = JSON.parse(await readFile(this.configPath, 'utf-8'));
-      return { path: this.configPath, format: 'json', config: configFileObject(raw, this.configPath) };
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
+  /**
+   * Read and parse the source-of-truth config file, or undefined when the home
+   * has none. A file that cannot be read or parsed throws; only a missing one
+   * falls through to the next.
+   */
+  private async readConfigSource(): Promise<(ConfigFileSource & { raw: unknown }) | undefined> {
+    for (const source of this.configSources) {
+      try {
+        return { ...source, raw: source.parse(await readFile(source.path, 'utf-8')) };
+      } catch (err) {
+        if (!isEnoent(err)) throw err;
+      }
     }
-    try {
-      const raw = yaml.load(await readFile(this.configYamlPath, 'utf-8'));
-      return { path: this.configYamlPath, format: 'yaml', config: configFileObject(raw, this.configYamlPath) };
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
-    }
-    return { path: this.configPath, format: 'json', config: {} };
+    return undefined;
   }
 
   readPid(): Promise<number | null> { return this.readControlNumber(this.pidPath); }
