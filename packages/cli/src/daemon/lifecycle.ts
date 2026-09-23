@@ -1695,8 +1695,10 @@ async function runDaemonInnerWithStartupOwnership(
   // Transport-level network isolation: the node refuses to dial, store or
   // accept the relays of every OTHER bundled network (testnet refuses mainnet
   // relays exactly as mainnet refuses testnet ones). Our own effective
-  // relayPeers are always exempt. The operator kill switch turns the whole
-  // transport layer off; network admission still rejects foreign peers.
+  // relayPeers are kept off this static list; one that fails the identity
+  // proof is still refused like any other peer. The operator kill switch
+  // turns the whole transport layer off; network admission still rejects
+  // foreign peers.
   const otherNetworkRelays = networkPeerIsolationEnabled
     ? resolveOtherNetworkRelays({
         activeNetworkName: selectedNetworkConfig,

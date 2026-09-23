@@ -48,13 +48,16 @@ export interface DKGNodeConfig {
    * Relay multiaddrs (or bare peer ids) declared by the OTHER DKG networks
    * bundled with this build. With a `networkIdentity`, the node refuses to dial
    * these peers, store their addresses, or accept their connections. Peers in
-   * `relayPeers` are always exempt. Ignored without a `networkIdentity`.
+   * `relayPeers` are never refused for being on this static list, but a
+   * `relayPeers` entry that FAILS the network-identity proof is refused like
+   * any other peer (see `networkPeerIsolation`). Ignored without a
+   * `networkIdentity`.
    */
   otherNetworkRelays?: readonly string[];
   /**
    * Transport-level network peer isolation: with a `networkIdentity`, refuse
-   * `otherNetworkRelays` and peers that failed the network-identity proof at
-   * the connection gater. Default true. `false` is the operator kill switch:
+   * `otherNetworkRelays` and any peer that failed the network-identity proof
+   * (configured `relayPeers` included) at the connection gater. Default true. `false` is the operator kill switch:
    * the node keeps exactly the pre-existing gater (the `/p2p-circuit` relay
    * path gate and the relay flap guard), and admission alone rejects other
    * networks' peers.
