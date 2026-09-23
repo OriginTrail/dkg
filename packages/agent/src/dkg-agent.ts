@@ -19,6 +19,7 @@ import {
   contextGraphSharedMemoryUri,
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
   contextGraphDataUri, contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
+  contextGraphOnChainIdBindingQuery,
   deriveCuratorDidFromCgId,
   MemoryLayer,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -287,6 +288,11 @@ import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-ha
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { resolveDiscoveredContextGraphBinding } from './context-graph-chain-discovery-binding.js';
+import {
+  relocatePrivateContextGraphMetadata,
+  type OntologyBindingSlotClass,
+  type ContextGraphMetadataRelocationResult,
+} from './context-graph-metadata-relocation.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 // type alias so listPendingJoinApprovalRetries() retains its old
@@ -832,6 +838,8 @@ export function mergeRfc64CatalogBootstrapsV1(
 export class DKGAgent extends DKGAgentBase {
   /** One store discovery pass is shared by concurrent peer-connect sessions. */
   private contextGraphStoreDiscoveryInFlight?: Promise<number>;
+  /** Live-proven access policy of slots named by ontology bindings. */
+  private readonly ontologyBindingSlotVerdicts = new Map<string, 'curated' | 'public'>();
 
   private constructor(
     config: ResolvedDKGAgentConfig,
@@ -2003,6 +2011,71 @@ export class DKGAgent extends DKGAgentBase {
     return recorded;
   }
 
+  /**
+   * Move curated and local-only graph metadata that earlier builds left in the
+   * `ontology` graph into each graph's `_meta` (see
+   * `context-graph-metadata-relocation.ts`). Every store discovery pass runs
+   * this first, so discovery only acts on ontology rows that belong there.
+   * Without `classifyOnChain`, bare bindings of graphs this node doesn't hold
+   * are left for a later pass (no chain reads).
+   */
+  async relocatePrivateContextGraphMetadata(
+    options: { classifyOnChain?: boolean } = {},
+  ): Promise<ContextGraphMetadataRelocationResult> {
+    const result = await relocatePrivateContextGraphMetadata({
+      store: this.store,
+      localAccessPolicy: async (contextGraphId) => {
+        if (await this.isPrivateContextGraph(contextGraphId)) return 'private';
+        return (await this.getExplicitAccessPolicy(contextGraphId)) === 'public' ? 'public' : null;
+      },
+      ...(options.classifyOnChain === false
+        ? {}
+        : { classifyOnChainSlot: (onChainId: string) => this.classifyOntologyBindingSlot(onChainId) }),
+    });
+    if (result.movedToMeta.length > 0 || result.deletedForeign > 0) {
+      this.invalidateListContextGraphsCache();
+      for (const contextGraphId of result.movedToMeta) {
+        this.contextGraphMetaProjection.markDirty(contextGraphId);
+      }
+      this.log.info(
+        createOperationContext('system'),
+        `Relocated private context graph metadata out of the ontology graph: ` +
+          `${result.movedToMeta.length} moved to their own _meta, ${result.deletedForeign} removed`,
+      );
+    }
+    return result;
+  }
+
+  /**
+   * Access policy of an on-chain slot named by an ontology binding. A verdict
+   * comes only from a slot proven live: the policy getter answers 0 for a
+   * slot this node's RPC can't see yet, so an unproven read must neither keep
+   * a binding nor reach `onChainAccessPolicyCache`, which StorageACK curation
+   * checks trust. The access policy is fixed at creation, so a live verdict
+   * is cached here.
+   */
+  async classifyOntologyBindingSlot(onChainId: string): Promise<OntologyBindingSlotClass> {
+    const proven = this.ontologyBindingSlotVerdicts.get(onChainId);
+    if (proven !== undefined) return proven;
+    // Only a real read of a curated slot can have cached a 1.
+    if (this.onChainAccessPolicyCache.get(onChainId) === 1) return 'curated';
+    const isActive = this.chain.isContextGraphActiveOnChain;
+    const getAccessPolicy = this.chain.getContextGraphAccessPolicy;
+    if (typeof isActive !== 'function' || typeof getAccessPolicy !== 'function') return 'unknown';
+    if (!/^[1-9]\d*$/.test(onChainId)) return 'unknown';
+    const slot = BigInt(onChainId);
+    try {
+      if (!(await isActive.call(this.chain, slot))) return 'inactive';
+      const policy = await getAccessPolicy.call(this.chain, slot);
+      if (policy !== 0 && policy !== 1) return 'unknown';
+      const verdict = policy === 1 ? 'curated' : 'public';
+      this.ontologyBindingSlotVerdicts.set(onChainId, verdict);
+      return verdict;
+    } catch {
+      return 'unknown';
+    }
+  }
+
   async discoverContextGraphsFromStore(): Promise<number> {
     const existingPass = this.contextGraphStoreDiscoveryInFlight;
     if (existingPass !== undefined) return existingPass;
@@ -2019,6 +2092,14 @@ export class DKGAgent extends DKGAgentBase {
 
   private async runContextGraphStoreDiscoveryPass(): Promise<number> {
     const ctx = createOperationContext('system');
+    try {
+      await this.relocatePrivateContextGraphMetadata();
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Context graph metadata relocation failed before store discovery: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const prefix = 'did:dkg:context-graph:';
     let discovered = 0;
@@ -2028,11 +2109,14 @@ export class DKGAgent extends DKGAgentBase {
       name: string;
       source: 'ontology' | 'meta';
       onChainId?: string;
+      /** False when only a bare on-chain id binding was found. */
+      hasDefinition: boolean;
     }>();
 
     const collectEntries = (
       rows: Record<string, string>[],
       source: 'ontology' | 'meta',
+      definition: boolean,
     ) => {
       for (const row of rows) {
         const uri = row['ctxGraph'] ?? '';
@@ -2054,6 +2138,7 @@ export class DKGAgent extends DKGAgentBase {
           name: rowName ?? existing?.name ?? id,
           source: !existing || ontologyWins ? source : existing.source,
           onChainId: rowOnChainId ?? existing?.onChainId,
+          hasDefinition: definition || existing?.hasDefinition === true,
         });
       }
     };
@@ -2070,7 +2155,7 @@ export class DKGAgent extends DKGAgentBase {
       { source: 'agent.contextGraph.discovery.ontologyDefinitions' },
     );
     if (ontologyResult.type === 'bindings') {
-      collectEntries(ontologyResult.bindings as Record<string, string>[], 'ontology');
+      collectEntries(ontologyResult.bindings as Record<string, string>[], 'ontology', true);
     }
 
     // Chain discovery persists the authoritative binding even when it cannot
@@ -2089,7 +2174,7 @@ export class DKGAgent extends DKGAgentBase {
       { source: 'agent.contextGraph.discovery.onChainBindings' },
     );
     if (onChainBindingResult.type === 'bindings') {
-      collectEntries(onChainBindingResult.bindings as Record<string, string>[], 'ontology');
+      collectEntries(onChainBindingResult.bindings as Record<string, string>[], 'ontology', false);
     }
 
     const metaResult = await this.store.query(
@@ -2105,7 +2190,7 @@ export class DKGAgent extends DKGAgentBase {
       { source: 'agent.contextGraph.discovery.metaDefinitions' },
     );
     if (metaResult.type === 'bindings') {
-      collectEntries(metaResult.bindings as Record<string, string>[], 'meta');
+      collectEntries(metaResult.bindings as Record<string, string>[], 'meta', true);
     }
 
     this.log.debug(ctx, `Discovery scan found ${discoveredEntries.size} CG(s) in store`);
@@ -2131,7 +2216,7 @@ export class DKGAgent extends DKGAgentBase {
     const releaseResponsibilityBatch =
       this.beginRfc64ScheduledCatalogResponsibilityBatchV1();
     try {
-      for (const { id, name, source, onChainId } of discoveredEntries.values()) {
+      for (const { id, name, source, onChainId, hasDefinition } of discoveredEntries.values()) {
         const existing = this.subscribedContextGraphs.get(id);
         if (existing) {
           // Enrich an existing active/hosted record and persist the binding. The
@@ -2158,6 +2243,14 @@ export class DKGAgent extends DKGAgentBase {
           if (current.subscribed && curatedById.get(id) === true && this.trackSyncContextGraph(id)) {
             this.log.info(ctx, `Re-tracked already-subscribed private CG "${id.slice(0, 28)}" into the SWM-sync scope on discovery`);
           }
+          continue;
+        }
+
+        if (!hasDefinition && (this.config.nodeRole ?? 'edge') === 'core') {
+          // A bare binding carries no access policy: activating it would host
+          // and advertise a graph whose policy is unknown, and recording it
+          // inactive would leave a row the later definition can't activate.
+          // Wait for the definition.
           continue;
         }
 
@@ -2673,10 +2766,8 @@ export class DKGAgent extends DKGAgentBase {
       knownNameHashes.add(ethers.keccak256(ethers.toUtf8Bytes(localId)).toLowerCase());
     }
     const readDurableContextGraphOnChainId = async (contextGraphId: string): Promise<string | null> => {
-      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-      const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
       const result = await this.store.query(
-        `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?id } } LIMIT 1`,
+        contextGraphOnChainIdBindingQuery(contextGraphId),
         { source: 'agent.contextGraph.chainDiscovery.durableOnChainId' },
       );
       if (result.type !== 'bindings' || result.bindings.length === 0) return null;
@@ -2736,27 +2827,34 @@ export class DKGAgent extends DKGAgentBase {
           continue;
         }
 
-        // Persist the on-chain ID to the ontology graph so the publisher's
-        // VM registration guard can find it via RDF (it has no access to
-        // the in-memory subscribedContextGraphs map).
+        // Persist the on-chain ID durably so the publisher's VM registration
+        // guard can find it via RDF (it has no access to the in-memory
+        // subscribedContextGraphs map). A public graph's binding goes to the
+        // ontology graph; a curated graph's (only its curator gets here) stays
+        // in its own `_meta`, like the rest of its metadata.
         const cgUri = contextGraphDataGraphUri(binding.name);
         const ontoGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+        const bindingGraph = Number(p.accessPolicy) === 1
+          ? contextGraphMetaGraphUri(binding.name)
+          : ontoGraph;
         // Single-valued binding guard (RS heal): on-chain id is immutable; clear
         // any prior value so the cgId resolver / heal never read a multi-valued
         // (LIMIT-1-nondeterministic) binding.
         // Keep this durable write before in-memory catalogue mutation: cursor
         // pages are acked after this function returns, and an in-memory onChainId
         // alone must not make a retry skip the RDF binding.
-        await deleteByPatternWithoutCount(this.store, {
-          graph: ontoGraph,
-          subject: cgUri,
-          predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-        });
+        for (const graph of new Set([ontoGraph, bindingGraph])) {
+          await deleteByPatternWithoutCount(this.store, {
+            graph,
+            subject: cgUri,
+            predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+          });
+        }
         await this.store.insert([{
           subject: cgUri,
           predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
           object: `"${binding.onChainId}"`,
-          graph: ontoGraph,
+          graph: bindingGraph,
         }]);
 
         await this.recordDiscoveredContextGraphStrict(binding.name, {

@@ -503,10 +503,16 @@ export class AgentRegistryMethods extends DKGAgentBase {
     //
     // System CGs (`agents`, `ontology`) are excluded — they are universal
     // and don't need to be re-advertised in every profile.
+    //
+    // `isPrivateContextGraph` is false when no policy is known yet, so a graph
+    // must also have a definition to be advertised. A graph without one (a
+    // joiner still waiting for its curator's `_meta`, or one known only from a
+    // bare on-chain binding) has no known policy yet.
     const publicServed: string[] = [];
     for (const [id, sub] of this.subscribedContextGraphs) {
       if (id === SYSTEM_CONTEXT_GRAPHS.AGENTS || id === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY) continue;
       if (!sub.subscribed) continue;
+      if (!(await this.getCgMeta(id)).declared) continue;
       if (await this.isPrivateContextGraph(id)) continue;
       publicServed.push(id);
     }

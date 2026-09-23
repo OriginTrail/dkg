@@ -2,6 +2,7 @@ export * from './types.js';
 export * from './constants.js';
 export * from './context-graph-storage-uri.js';
 export * from './context-graph-snapshot-uri.js';
+export * from './context-graph-on-chain-binding.js';
 export * from './agent-identity.js';
 export * from './agents-list-wire.js';
 export * from './assertion-scoped-graphs.js';

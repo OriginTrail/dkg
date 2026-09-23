@@ -1,5 +1,6 @@
 import {
   decodePublishRequest, SYSTEM_CONTEXT_GRAPHS, isAgentRegistryContextGraph, DKG_ONTOLOGY,
+  CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
   Logger, createOperationContext,
   isSafeIri, assertSafeIri, validateSubGraphName, validateContextGraphId,
   contextGraphSubGraphUri,
@@ -38,6 +39,10 @@ import type {
   ContextGraphSubInput,
 } from './dkg-agent-types.js';
 import { normalizeContextGraphSubscriptionTransition } from './context-graph-subscription-policy.js';
+import type { OntologyBindingSlotClass } from './context-graph-metadata-relocation.js';
+
+/** One registration announces one binding; more in a message are dropped unread. */
+const MAX_ONTOLOGY_GOSSIP_BINDING_CLASSIFICATIONS = 4;
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
@@ -161,6 +166,12 @@ export interface GossipPublishHandlerCallbacks {
   getCgMeta?: (id: string) => Promise<ContextGraphMetaRecord>;
   /** Resolve the topic Context Graph to its authoritative on-chain id. */
   getContextGraphOnChainId?: (id: string) => Promise<string | null>;
+  /**
+   * Classify the on-chain slot named by an ontology id binding (see
+   * `DKGAgent#classifyOntologyBindingSlot`). Only a binding to a slot proven
+   * live and public is stored from ontology gossip.
+   */
+  classifyOnChainSlot?: (onChainId: string) => Promise<OntologyBindingSlotClass>;
   markCgMetaDirtyFromQuads?: (quads: readonly Quad[]) => void;
   persistContextGraphSubscription?: (id: string) => void;
   onPhase?: GossipPhaseCallback;
@@ -387,6 +398,7 @@ export class GossipPublishHandler {
         }
 
         normalized = await this.filterInvalidOntologyPolicyBindings(normalized, ctx);
+        normalized = await this.filterUnprovenOnChainBindings(normalized, ctx);
       } else {
         const allowedPeers = await this.getContextGraphAllowedPeers(request.contextGraphId);
 
@@ -896,6 +908,36 @@ export class GossipPublishHandler {
         `Failed to promote gossip tentative→confirmed for ${ual}: ${err instanceof Error ? err.message : String(err)}`,
       );
     }
+  }
+
+  /**
+   * Keep only on-chain id bindings whose slot is proven live and public:
+   * ontology carries public graphs, and a curated graph's binding stays in its
+   * own `_meta`. A registration announcement usually outruns this node's view
+   * of a new slot, so an unproven binding is dropped too; it is a hint, and
+   * ontology sync delivers it again later. Each distinct slot costs a chain
+   * read, so a message gets only a few.
+   */
+  private async filterUnprovenOnChainBindings(quads: Quad[], ctx: OperationContext): Promise<Quad[]> {
+    const classify = this.callbacks.classifyOnChainSlot;
+    if (!classify) return quads;
+    const bindingPredicate = CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE;
+    const onChainIds = [...new Set(quads
+      .filter((q) => q.predicate === bindingPredicate)
+      .map((q) => stripLiteral(q.object).trim()))];
+    if (onChainIds.length === 0) return quads;
+    const publicIds = new Set<string>();
+    for (const onChainId of onChainIds.slice(0, MAX_ONTOLOGY_GOSSIP_BINDING_CLASSIFICATIONS)) {
+      if (!/^[1-9]\d*$/.test(onChainId)) continue;
+      if (await classify(onChainId).catch(() => 'unknown') === 'public') publicIds.add(onChainId);
+    }
+    const dropped = onChainIds.length - publicIds.size;
+    if (dropped > 0) {
+      this.log.info(ctx, `Skipped ${dropped} ontology gossip binding(s) whose slot isn't a proven public graph`);
+    }
+    return quads.filter((q) => (
+      q.predicate !== bindingPredicate || publicIds.has(stripLiteral(q.object).trim())
+    ));
   }
 
   private async filterInvalidOntologyPolicyBindings(quads: Quad[], ctx: OperationContext): Promise<Quad[]> {
