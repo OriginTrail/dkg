@@ -748,6 +748,16 @@ function routePath(filePath, { modifiedFiles, readManifest }) {
 // pairings (B) - and anything git adds later - still fail closed.
 const ROUTABLE_CHANGE_STATUSES = new Set(['A', 'M', 'D', 'R', 'C']);
 
+// The environment through which the workflows hand plan-ci.mjs the candidate
+// checkout and the two diffed commits that back `readManifest` (environment,
+// not flags, so an older pinned controller simply ignores it). Workflows and
+// tests are checked against these names.
+export const MANIFEST_READER_ENV = Object.freeze({
+  repository: 'CI_CANDIDATE_REPO',
+  base: 'CI_DIFF_BASE_SHA',
+  head: 'CI_DIFF_HEAD_SHA',
+});
+
 // `readManifest(side, path)` returns the raw text of `path` at the diff base
 // ('base') or the merge candidate ('head'); plan-ci.mjs backs it with git.
 // Without it, every workspace manifest edit keeps the full profile.

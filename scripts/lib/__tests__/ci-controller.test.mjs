@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
 import { ciJobRow, COVERAGE_JOBS } from '../ci-lanes.mjs';
-import { EVM_SCOPES, NODE_TEST_ARTIFACT_LANES, githubOutputsForPlan } from '../ci-delta.mjs';
+import { EVM_SCOPES, MANIFEST_READER_ENV, NODE_TEST_ARTIFACT_LANES, githubOutputsForPlan } from '../ci-delta.mjs';
 import { PRIMARY_LANE_JOBS } from '../ci-results.mjs';
 import { CONTROLLER_POLICY_FILES, validateTrustedControllerPins } from '../../ci/trusted-controller-pins.mjs';
 import {
@@ -58,7 +58,7 @@ test('plan-ci compares modified workspace manifests through git blobs', (t) => {
 
   const changesPath = path.join(temporaryDirectory, 'changes.z');
   fs.writeFileSync(changesPath, Buffer.from('M\0packages/agent/package.json\0'));
-  const readerVariables = new Set(['CI_CANDIDATE_REPO', 'CI_DIFF_BASE_SHA', 'CI_DIFF_HEAD_SHA']);
+  const readerVariables = new Set(Object.values(MANIFEST_READER_ENV));
   const environment = Object.fromEntries(
     Object.entries(process.env).filter(([name]) => !readerVariables.has(name)),
   );
@@ -73,13 +73,17 @@ test('plan-ci compares modified workspace manifests through git blobs', (t) => {
     assert.equal(planner.status, 0, planner.stderr);
     return JSON.parse(planner.stdout).mode;
   };
-  const diff = (head) => ({ CI_CANDIDATE_REPO: repository, CI_DIFF_BASE_SHA: base, CI_DIFF_HEAD_SHA: head });
+  const diff = (head) => ({
+    [MANIFEST_READER_ENV.repository]: repository,
+    [MANIFEST_READER_ENV.base]: base,
+    [MANIFEST_READER_ENV.head]: head,
+  });
 
   assert.equal(mode(diff(exportsHead)), 'delta');
   assert.equal(mode(diff(dependencyHead)), 'full');
   assert.equal(mode({}), 'full', 'no reader without the workflow variables');
-  assert.equal(mode({ ...diff(exportsHead), CI_DIFF_BASE_SHA: 'HEAD~2' }), 'full', 'only object IDs are accepted');
-  assert.equal(mode({ ...diff(exportsHead), CI_DIFF_BASE_SHA: '0'.repeat(40) }), 'full', 'missing blobs fail closed');
+  assert.equal(mode({ ...diff(exportsHead), [MANIFEST_READER_ENV.base]: 'HEAD~2' }), 'full', 'only object IDs are accepted');
+  assert.equal(mode({ ...diff(exportsHead), [MANIFEST_READER_ENV.base]: '0'.repeat(40) }), 'full', 'missing blobs fail closed');
 });
 
 test('workflows execute the planner and aggregate gates from one immutable trusted checkout', () => {
@@ -175,7 +179,7 @@ test('workflow controller invocations stay within the current and pinned parsers
           if (pinned) assert.ok(pinned[script].has(flag), `${name} passes --${flag}, which the pinned ${script}.mjs rejects`);
         }
         if (script === 'plan-ci') {
-          const exported = run.indexOf('export CI_CANDIDATE_REPO=candidate');
+          const exported = run.indexOf(`export ${MANIFEST_READER_ENV.repository}=candidate`);
           assert.ok(exported !== -1 && exported < at, `${name} must export the manifest reader inputs before planning`);
         }
       }
@@ -378,7 +382,9 @@ test('every planner output is wired to a real workflow job and omitted tests sta
   assert.equal(evmWorkflow.includes('github.event.pull_request.base.sha'), false);
   // Both planners must see the same manifest contents for the same diff, and
   // no workflow may reintroduce SHA-sampled full runs.
-  const manifestReader = 'export CI_CANDIDATE_REPO=candidate CI_DIFF_BASE_SHA="${BASE_SHA}" CI_DIFF_HEAD_SHA="${MERGE_SHA}"';
+  // The workflows must export exactly the names plan-ci.mjs reads.
+  const { repository, base, head } = MANIFEST_READER_ENV;
+  const manifestReader = `export ${repository}=candidate ${base}="\${BASE_SHA}" ${head}="\${MERGE_SHA}"`;
   for (const [name, source] of [['ci.yml', workflow], ['evm-integration.yml', evmWorkflow]]) {
     assert.ok(source.includes(manifestReader), `${name} must expose the manifest reader inputs`);
     assert.equal(source.includes('--sample-key'), false, `${name} must not request audit sampling`);
