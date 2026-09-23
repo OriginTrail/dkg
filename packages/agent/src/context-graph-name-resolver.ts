@@ -37,7 +37,9 @@ export type ContextGraphNamePendingOutcome =
   | 'not-attempted'
   | 'policy-unavailable'
   | 'no-peers'
-  | 'not-found';
+  | 'not-found'
+  /** The attempt threw (an adoption that failed midway, say); retried with backoff. */
+  | 'attempt-failed';
 
 export interface ContextGraphNameTarget {
   /** Lowercase name hash; also the placeholder row's local id. */
@@ -130,7 +132,8 @@ function short(nameHash: string): string {
   return `${nameHash.slice(0, 18)}…`;
 }
 
-function rememberBounded<K, V>(map: Map<K, V>, key: K, value: V, bound: number): void {
+/** Insert as newest, evicting the oldest entries so at most `bound` remain. */
+export function rememberBounded<K, V>(map: Map<K, V>, key: K, value: V, bound: number): void {
   map.delete(key);
   while (map.size >= bound) {
     const oldest = map.keys().next().value;
@@ -352,12 +355,44 @@ export class ContextGraphNameResolver {
     ) {
       return Promise.resolve(entry);
     }
-    const run = this.attemptOnce(target, onlyPeers, options.ignorePeerCooldowns === true).finally(() => {
-      if (this.inflight.get(target.nameHash) === run) this.inflight.delete(target.nameHash);
-      this.drainQueuedPeers(target);
-    });
+    const run = this.attemptOnce(target, onlyPeers, options.ignorePeerCooldowns === true)
+      .catch((error: unknown) => this.failedAttempt(target, error))
+      .finally(() => {
+        if (this.inflight.get(target.nameHash) === run) this.inflight.delete(target.nameHash);
+        this.drainQueuedPeers(target);
+      });
     this.inflight.set(target.nameHash, run);
     return run;
+  }
+
+  /**
+   * An attempt that throws (an adoption that failed midway, a dependency
+   * that is restarting) must still leave the hash on the retry schedule:
+   * retries are driven only by pending entries, so without one nothing would
+   * ever attempt this hash again. Shutdown is the one failure not retried.
+   */
+  private failedAttempt(target: ContextGraphNameTarget, error: unknown): ContextGraphNameResolutionEntry | undefined {
+    if (this.lifetime.signal.aborted) throw error;
+    this.deps.log.debug(
+      `Context Graph ${short(target.nameHash)} name resolution attempt failed: `
+      + `${error instanceof Error ? error.message : String(error)}`,
+    );
+    return this.pendingIfCurrent(target, 'attempt-failed');
+  }
+
+  /** Schedule a retry while the row still wants a cleartext id. */
+  private pendingIfCurrent(
+    target: ContextGraphNameTarget,
+    outcome: ContextGraphNamePendingOutcome,
+  ): ContextGraphNameResolutionEntry | undefined {
+    let current: boolean;
+    try {
+      current = this.deps.isTargetCurrent(target);
+    } catch {
+      // Unknown is not "gone": keep retrying; the next pass re-checks it.
+      current = true;
+    }
+    return current ? this.pending(target, outcome, 0) : this.entries.get(target.nameHash);
   }
 
   private async attemptOnce(
@@ -487,7 +522,9 @@ export class ContextGraphNameResolver {
     peerId?: string,
   ): Promise<ContextGraphNameResolutionEntry | undefined> {
     const adopted = await this.deps.adopt(target, contextGraphId, source);
-    if (!adopted) return this.entries.get(target.nameHash);
+    // Declined: the row changed under us. If it still wants a cleartext id,
+    // keep it on the retry schedule rather than dropping it silently.
+    if (!adopted) return this.pendingIfCurrent(target, 'not-found');
     const entry: ContextGraphNameResolutionEntry = {
       state: 'resolved',
       nameHash: target.nameHash,
@@ -497,6 +534,8 @@ export class ContextGraphNameResolver {
       resolvedAt: this.now(),
     };
     this.entries.delete(target.nameHash);
+    // Unlike rememberBounded, only resolutions count toward this bound:
+    // pending and private entries are already bounded by the live targets.
     let resolvedCount = 0;
     for (const existing of this.entries.values()) if (existing.state === 'resolved') resolvedCount += 1;
     if (resolvedCount >= MAX_REMEMBERED_RESOLUTIONS) {

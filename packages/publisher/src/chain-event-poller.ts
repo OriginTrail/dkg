@@ -157,7 +157,21 @@ export class ChainEventPoller {
    */
   private inFlightPoll: Promise<void> | null = null;
 
-  /** Max blocks to scan per poll — stays within typical RPC range limits. */
+  /**
+   * Max blocks one lane scans per poll: the page the lane cursor advances by
+   * (only once the whole page succeeded) and the live publish lane's seed
+   * window.
+   *
+   * It is NOT the eth_getLogs span. The EVM adapter fits each page to every
+   * provider's own span cap (learned once per provider; mainnet.base.org's is
+   * 2,000 blocks, so a page there is five requests) and fails over past
+   * history/plan limits without splitting them. Kept at 9,000 rather than
+   * lowered to the smallest cap: an uncapped or high-cap provider still reads
+   * a page in one request, a capped one spends the same requests either way,
+   * and a node 20,000 blocks behind catches up in three polls instead of ten.
+   * The trade-off is granularity: a transient failure on any request of a
+   * page replays the whole page after the lane's failure backoff.
+   */
   private static readonly MAX_RANGE = 9_000;
 
   constructor(config: ChainEventPollerConfig) {

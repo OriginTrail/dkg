@@ -106,7 +106,6 @@ import {
   ciphertextChunkStoreSubject,
   CIPHERTEXT_CHUNK_PREDICATE,
   type SubscriptionSource,
-  SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
   tripleContentV10,
   withRetry,
@@ -3217,6 +3216,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Start chain event poller for trustless confirmation of tentative publishes
     // and discovery of on-chain context graphs. Only with a real chain adapter.
     if (this.chain.chainId !== 'none') {
+      // Re-stage the Context Graphs a previous process enumerated from
+      // ContextGraphStorage before the live tail starts, so a restart lists them
+      // again without re-reading the chain; enumeration then resumes at its
+      // durable cursor. A store failure only delays that to the next pass.
+      try {
+        await this.hydrateContextGraphsFromStorageCheckpoint();
+      } catch (err) {
+        this.log.warn(ctx, `Could not restore the Context Graph storage discovery checkpoint: ${err instanceof Error ? err.message : String(err)}`);
+      }
       this.chainPoller = new ChainEventPoller({
         chain: this.chain,
         publishHandler,
@@ -3224,107 +3232,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         onContextGraphCreated: async ({ contextGraphId, creator, accessPolicy, publishPolicy, nameHash, blockNumber, signal }) => {
           signal?.throwIfAborted();
           this.log.info(ctx, `Discovered on-chain context graph ${contextGraphId.slice(0, 16)}… (block ${blockNumber}, creator ${creator.slice(0, 10)}…, policy ${accessPolicy}, publishPolicy ${publishPolicy ?? '?'}, nameHash ${nameHash ? nameHash.slice(0, 10) + '…' : '(opt-out)'})`);
-
-          // The finalized event can arrive before or after the explicit local
-          // subscription. Bind an already-indexed cleartext row immediately;
-          // otherwise retain a process-local wire-only placeholder that the
-          // canonical setter will promote when create/join/subscribe supplies
-          // the matching cleartext id. This applies to public graphs too: they
-          // do not enter the curated host-mode block below, and a cold Edge
-          // must not lose its only authoritative chain-id/policy binding while
-          // waiting for an ontology announcement it may have missed.
-          const eventLocalId = nameHash
-            ? this.stageOnChainContextGraphBindingFromNameHash(
-                nameHash,
-                contextGraphId,
-              )
-            : null;
-          if (nameHash && eventLocalId === null) {
-            this.log.warn(
-              ctx,
-              `Skipped ambiguous Context Graph name-hash binding ${nameHash.slice(0, 18)}…`,
-            );
-          }
-
-          // Track the numeric on-chain id for dedup.
-          const alreadyKnown = this.seenOnChainIds.has(contextGraphId)
-            || [...this.subscribedContextGraphs.values()].some(s => s.onChainId === contextGraphId);
-          if (!alreadyKnown) {
-            this.seenOnChainIds.add(contextGraphId);
-            this.log.info(ctx, `Noted on-chain context graph ${contextGraphId.slice(0, 16)}… — will subscribe once cleartext name is resolved`);
-          }
-
-          // OT-RFC-38 / LU-5: eagerly populate the on-chain access-policy
-          // cache so the StorageACK encrypted-payload guard can answer
-          // `isCgCurated` from local state without an extra RPC. The
-          // event itself carries the policy enum — no need to re-read.
-          // `contextGraphId` here is the on-chain numeric id (stringified
-          // bigint) for V10 `ContextGraphCreated` events, which is also
-          // what the publish-intent ships in `PublishIntent.contextGraphId`,
-          // so the keying matches the lazy-fallback lookup below.
-          if (accessPolicy === 0 || accessPolicy === 1) {
-            this.onChainAccessPolicyCache.set(contextGraphId, accessPolicy);
-          }
-          // Issue #872 — same eager-cache pattern for the `publishPolicy`
-          // enum so daemon routes can recognise a public + open CG from
-          // local state and relax owner-scoped artifact-read guards.
-          if (publishPolicy === 0 || publishPolicy === 1) {
-            this.onChainPublishPolicyCache.set(contextGraphId, publishPolicy);
-            this.onChainPublishPolicyCacheUpdatedAt.set(contextGraphId, Date.now());
-          }
-
-          // OT-RFC-38 / LU-6 Phase B — host-mode auto-subscribe path for
-          // sharding-table cores. The event carries the curator-committed
-          // wire id (`nameHash`); cores derive the SWM gossip topic from
-          // it directly and start hosting ciphertext for the CG without
-          // needing the cleartext name, without an operator-driven
-          // `/api/shared-memory/host-mode/subscribe`, and without an off-
-          // chain discovery channel for *registered* CGs (pre-reg CGs
-          // go through the discovery-beacon path instead).
-          //
-          // Gate conditions (all must hold):
-          //   1. Curator opted into the hash commitment (nameHash != null
-          //      — opt-out CGs run through the beacon path only).
-          //   2. CG is curated (accessPolicy == 1). Public CGs don't have
-          //      curated SWM substrate to host; LU-6 only applies to
-          //      curated.
-          //   3. Local node has `nodeRole === 'core'` AND swmHostMode is
-          //      enabled. The reconciler below applies the same checks
-          //      so this branch is purely an optimisation (eliminates
-          //      the discovery-beacon round-trip + the host-mode
-          //      reconciler poll latency).
-          //   4. Local node is in the sharding table. Probed by the
-          //      reconciler; we pass through to it rather than
-          //      duplicating the check here.
-          //
-          // The reconciler is robust to being called for a CG it can't
-          // act on (returns early on `nodeRole !== 'core'`, swmHostMode
-          // disabled, off-sharding-table, etc.), so the call below
-          // doesn't need any of those gates beyond the event-side hash
-          // presence and the curated flag.
-          if (nameHash && accessPolicy === 1 && eventLocalId !== null) {
-            signal?.throwIfAborted();
-            // Register the wire id → numeric id mapping so the receive
-            // path's chain fallback resolver (Scope A) can take a hash
-            // input and find the on-chain participant agents without an
-            // RPC round-trip per envelope.
-            const hashLower = this.contextGraphWireId(nameHash);
-
-            // Delegate to the host-mode reconciler — it owns the
-            // sharding-table check, swmHostMode flag, and the wire-up
-            // of the host-mode gossip handler. Async + best-effort:
-            // the periodic reconciler covers the timer-driven fallback
-            // path, so a missed event here heals on the next sweep.
-            void this.reconcileSwmHostModeSubscription(
-              eventLocalId,
-              SUBSCRIPTION_SOURCES.CHAIN_EVENT,
-            ).catch((err) => {
-              this.log.warn(
-                ctx,
-                `Phase B chain-event auto-subscribe for ${hashLower.slice(0, 18)}… failed: ${err instanceof Error ? err.message : String(err)}`,
-              );
-            });
-          }
+          // The live tail and ContextGraphStorage enumeration share one path,
+          // so a graph seen by both lanes yields one row with the same facts.
+          this.applyOnChainContextGraphObservation({
+            contextGraphId,
+            owner: creator,
+            accessPolicy,
+            ...(publishPolicy === undefined ? {} : { publishPolicy }),
+            nameHash: nameHash ?? null,
+            blockNumber,
+          }, { source: 'event', ctx, ...(signal ? { signal } : {}) });
         },
         // Phase B — live VM-reconcile nudge. A `KnowledgeAssetRegisteredToContextGraph`
         // event doesn't carry the registration ordinal (only kaId + cgId), so it is
@@ -5230,9 +5147,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     for (const contextGraphId of contextGraphIds) {
-      // Supersession before authorization: a name-hash id this node adopted
-      // under its cleartext id must not sync (or write) under the retired id,
-      // even though policy reads now answer for the graph it names.
+      // Retired name-hash id: drop the work before any authorization check,
+      // which would now pass for the graph it names (see supersedingContextGraphIdFor).
       const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
       if (supersedingId) {
         this.log.debug(
@@ -9049,6 +8965,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     throw new NetworkAdmissionRejectedError(peerId);
   }
 
+  /**
+   * Sync-protocol readiness for one peer. Random Sampling exact repair,
+   * durable recovery and the CLI catch-up fallback pass a string-backed
+   * `{ toString }` wrapper, which the libp2p peer store rejects outright;
+   * `waitForPeerProtocol` canonicalizes it to a real PeerId and owns the
+   * abort contract.
+   */
   async waitForSyncProtocol(
     this: DKGAgent,
     pid: { toString(): string },
@@ -9228,7 +9151,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // a Core's hosted row). Delete that record too, whatever this caller's
       // persist flag: otherwise the next rehydration resurrects the hash row
       // and re-points the reverse index away from the cleartext id.
-      this.retireDurableContextGraphSubscription?.(
+      this.retirePersistedContextGraphNamePlaceholder(
         wireOnlySubscription.localId,
         wireOnlySubscription.subscription,
       );
@@ -9269,7 +9192,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     ) {
       // A graph known only by its on-chain name hash needs its cleartext id
       // before anything can sync; a no-op for every other row.
-      this.requestContextGraphNameResolutionFor?.(contextGraphId);
+      this.requestContextGraphNameResolutionFor(contextGraphId);
     }
     const rehydratedUserSubscription =
       this.contextGraphSubscriptionRehydrationStatus?.rehydrationEnabled === true

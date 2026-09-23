@@ -158,7 +158,7 @@ function directHistoryInput(params: Readonly<{
     read: (fromBlock: number, toBlock: number) => Promise<readonly T[]>,
     fromBlock: number,
     toBlock: number,
-  ) => readAdaptiveEvmLogRange({ read, fromBlock, toBlock, signal: params.signal });
+  ) => readAdaptiveEvmLogRange({ provider: {}, read, fromBlock, toBlock, signal: params.signal });
   return {
     cache: params.cache,
     cacheKey: params.cacheKey,
@@ -793,6 +793,7 @@ describe('adaptive EVM log-range transport', () => {
   it('recognizes nested managed-provider errors and preserves both split halves', async () => {
     const calls: Array<readonly [number, number]> = [];
     const result = await readAdaptiveEvmLogRange({
+      provider: {},
       fromBlock: 1,
       toBlock: 100,
       read: async (fromBlock, toBlock) => {

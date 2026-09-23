@@ -47,7 +47,7 @@ import {
   createOxigraphLaunchStrategy,
   type OxigraphMemoryLimits,
 } from './oxigraph-launch-strategy.js';
-import { invalidateExternalStoreQuadsCache } from './routes/status.js';
+import { invalidateExternalStoreQuadsCache } from './store-quads-cache.js';
 import {
   readCgroupOomSnapshot,
   readCgroupOomKill,
@@ -447,6 +447,10 @@ export async function startOxigraphServer(
           generation,
         };
         restarts = 0;
+        // A store count requested while the child was recovering failed and
+        // is cached as unreachable; drop it now that the child is healthy, or
+        // /api/status keeps reporting the recovered store as unreachable.
+        invalidateExternalStoreQuadsCache();
         log(`[oxigraph] server restarted and healthy on ${bind}.`);
         return;
       }

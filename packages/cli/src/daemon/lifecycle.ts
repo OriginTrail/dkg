@@ -111,6 +111,7 @@ import {
   SqliteContextGraphAuthorityIndexStore,
   SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
+  SqliteContextGraphStorageDiscoveryStore,
   SqliteKaNumberStore,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
@@ -1810,6 +1811,13 @@ async function runDaemonInnerWithStartupOwnership(
   const changelogEraGuard = config.store?.changelog ? new SqliteChangelogEraGuard(dashDb) : undefined;
   const chainEventCursorStore = new SqliteChainEventCursorStore(dashDb, { scope: chainCursorScope });
   const contextGraphRegistryScanCursorStore = new SqliteContextGraphRegistryScanCursorStore(dashDb);
+  // Historical Context Graph discovery: ContextGraphStorage enumeration cursor
+  // plus the chain facts below it, scoped like the event cursors so a node home
+  // reused across networks never replays another deployment's catalog.
+  const contextGraphStorageDiscoveryStore = new SqliteContextGraphStorageDiscoveryStore(
+    dashDb,
+    { scope: chainCursorScope },
+  );
   // DashboardDB is process-owned local state under the same integrity boundary
   // as the node identity/configuration. Authority generations cannot be proven
   // from a watermark hash alone, so this composition-root admission is
@@ -1950,6 +1958,7 @@ async function runDaemonInnerWithStartupOwnership(
     changelogCursorStore,
     chainEventCursorStore,
     contextGraphRegistryScanCursorStore,
+    contextGraphStorageDiscoveryStore,
     localContextGraphAuthorityHistoryStore,
     localContextGraphAuthorityIndexStore,
     chainEventLogStore,

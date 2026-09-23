@@ -92,6 +92,7 @@ import type {
 import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
 import type { FinalizationRecoveryStore } from './finalization-recovery-store.js';
 import type { AuthorityIndexConfig } from './authority-index-config.js';
+import type { ContextGraphStorageDiscoveryStore } from './context-graph-storage-discovery.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
@@ -1885,6 +1886,12 @@ export interface DKGAgentConfig {
   chainEventCursorStore?: ChainEventCursorPersistence;
   /** Durable ContextGraphNameRegistry discovery cursor store. Defaults to in-memory adapter state. */
   contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
+  /**
+   * Durable ContextGraphStorage enumeration checkpoint (cursor plus the chain
+   * facts below it), scoped to one chain deployment. Defaults to in-memory, in
+   * which case each process re-enumerates from id 1.
+   */
+  contextGraphStorageDiscoveryStore?: ContextGraphStorageDiscoveryStore;
   /** Process-owned local durable finalized Context Graph authority-history checkpoints. */
   localContextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
   /** Process-owned durable contract-wide Context Graph authority index. */

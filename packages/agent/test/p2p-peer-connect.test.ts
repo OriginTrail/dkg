@@ -231,7 +231,7 @@ describe('abortable recovery connection helpers', () => {
           return { protocols: [] };
         },
       },
-      { toString: () => 'peer-under-test' },
+      { toString: () => '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6' },
       '/dkg/test/sync',
       3,
       10_000,
@@ -242,5 +242,22 @@ describe('abortable recovery connection helpers', () => {
     controller.abort();
     await expect(readiness).rejects.toMatchObject({ name: 'AbortError' });
     expect(reads).toBe(1);
+  });
+
+  it('owns the abort check and the peer-ID parse ahead of any store read', async () => {
+    const peerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    const get = recorder(async (_peer: unknown) => ({ protocols: ['/dkg/test/sync'] }));
+    const wait = (peer: { toString(): string }, signal?: AbortSignal) =>
+      waitForPeerProtocol({ get }, peer, '/dkg/test/sync', 3, 0, signal);
+
+    for (const peer of [{ toString: () => 'not-a-peer-id' }, { toString: () => peerId }]) {
+      await expect(wait(peer, AbortSignal.abort())).rejects.toMatchObject({ name: 'AbortError' });
+    }
+    await expect(wait({ toString: () => 'not-a-peer-id' })).resolves.toBe(false);
+    expect(get.calls).toEqual([]);
+
+    await expect(wait({ toString: () => peerId })).resolves.toBe(true);
+    expect(get.calls).toHaveLength(1);
+    expect(peerIdFromString(peerId).equals(get.calls[0]?.[0] as never)).toBe(true);
   });
 });

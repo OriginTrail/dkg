@@ -212,10 +212,24 @@ describe('ContextGraphNameResolver', () => {
     expect(state.adopted).toHaveLength(1);
   });
 
-  it('stays pending when the row changed and adoption was declined', async () => {
+  it('stays pending, with a retry scheduled, when adoption was declined and the row still wants an id', async () => {
     const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT }, adopt: false });
     const entry = await resolverFor(state).resolveNow(TARGET);
-    expect(entry?.state).not.toBe('resolved');
+    expect(entry).toMatchObject({ state: 'pending', lastOutcome: 'not-found', attempts: 1 });
+    expect(entry?.state === 'pending' ? entry.nextAttemptAt : undefined).toBeTypeOf('number');
+    expect(state.adopted).toEqual([]);
+  });
+
+  it('records nothing when adoption was declined because the row went away', async () => {
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    state.deps.adopt = async () => {
+      state.targets = []; // e.g. the operator unsubscribed while the peer answered
+      return false;
+    };
+    const resolver = resolverFor(state);
+    expect(await resolver.resolveNow(TARGET)).toBeUndefined();
+    expect(resolver.entryFor(NAME_HASH)).toBeUndefined();
+    expect(state.adopted).toEqual([]);
   });
 
   it('stops cleanly', async () => {
@@ -388,6 +402,48 @@ describe('ContextGraphNameResolver: background passes', () => {
     expect(resolver.entryFor(NAME_HASH)).toBeUndefined();
     resolver.request();
     await waitFor(() => resolver.entryFor(NAME_HASH)?.state === 'resolved');
+  });
+
+  it('keeps retrying in the background after an attempt throws', async () => {
+    vi.useFakeTimers();
+    const debug: string[] = [];
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    let adoptCalls = 0;
+    state.deps = {
+      ...state.deps,
+      adopt: async (_target, contextGraphId, source) => {
+        adoptCalls += 1;
+        // The first adoption fails midway (the gossip layer is restarting).
+        if (adoptCalls === 1) throw new Error('gossip layer restarting');
+        state.adopted.push({ contextGraphId, source });
+        return true;
+      },
+      log: { info: () => undefined, debug: (message) => { debug.push(message); } },
+    };
+    const resolver = resolverFor(state, { retryBaseMs: 1_000, peerAskTtlMs: 0 });
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'pending', lastOutcome: 'attempt-failed', attempts: 1 });
+    expect(debug.some((line) => line.includes('name resolution attempt failed: gossip layer restarting'))).toBe(true);
+    expect(state.adopted).toEqual([]);
+
+    // No request(), no peer update: the retry schedule alone gets it done.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'resolved', contextGraphId: CLEARTEXT });
+    expect(state.adopted).toEqual([{ contextGraphId: CLEARTEXT, source: 'peer-protocol' }]);
+  });
+
+  it('does not schedule a retry for an attempt cut short by shutdown', async () => {
+    const state = harness({ peers: ['holder'], protocols: { holder: true } });
+    let stopResolver!: () => void;
+    state.deps.askPeer = async () => {
+      stopResolver();
+      throw new DOMException('stopped', 'AbortError');
+    };
+    const resolver = resolverFor(state);
+    stopResolver = () => resolver.stop();
+    await expect(resolver.resolveNow(TARGET)).rejects.toThrow('Context Graph name resolver stopped');
+    expect(resolver.entryFor(NAME_HASH)).toBeUndefined();
   });
 
   it('bounds remembered asks, forgetting the oldest first', async () => {

@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
+import { handleQueryRoutes } from '../src/daemon/routes/query.js';
 import { daemonState } from '../src/daemon/state.js';
 import { toCatchupStatusResponse } from '../src/daemon/types.js';
 import { summarizeContextGraphIdentityStatus } from '../src/daemon/routes/status.js';
@@ -52,11 +53,20 @@ interface NameHashAgentOptions {
   resolveNow?: () => Promise<string | null>;
   /** Whether the hash already resolves (before or during the job). */
   isResolved?: () => boolean;
+  /** The node's subscription rows (empty unless a case needs them). */
+  subscriptions?: Map<string, { subscribed: boolean; synced: boolean; coreHosted?: boolean }>;
 }
 
 function nameHashAgent(options: NameHashAgentOptions = {}) {
   const isResolved = options.isResolved ?? (() => false);
-  const calls = { authority: [] as string[], subscribe: [] as string[], markState: 0 };
+  const subscriptions = options.subscriptions ?? new Map();
+  const calls = {
+    authority: [] as string[],
+    subscribe: [] as string[],
+    unsubscribe: [] as string[],
+    graphSync: [] as string[],
+    markState: 0,
+  };
   const agent = {
     calls,
     resolveContextGraphSubscriptionBootstrapAuthority: async (contextGraphId: string) => {
@@ -81,10 +91,20 @@ function nameHashAgent(options: NameHashAgentOptions = {}) {
         : { state: 'name-hash-only', nameHash: NAME_HASH, onChainId: '33', message: HASH_ONLY_MESSAGE };
     },
     getContextGraphAllowedAgents: async () => [],
-    getSubscribedContextGraphs: () => new Map(),
+    getSubscribedContextGraphs: () => subscriptions,
     subscribeToContextGraph: (contextGraphId: string) => {
       calls.subscribe.push(contextGraphId);
       return { subscribed: true, synced: false, syncMode: 'always-on' as const };
+    },
+    // Like the agent: a literal row lookup, a no-op for an id no row is keyed by.
+    unsubscribeFromContextGraph: (contextGraphId: string) => {
+      calls.unsubscribe.push(contextGraphId);
+      const row = subscriptions.get(contextGraphId);
+      if (row) subscriptions.set(contextGraphId, { ...row, subscribed: false });
+    },
+    getRfc64SelectedSwmGraphSyncStatus: (contextGraphId: string) => {
+      calls.graphSync.push(contextGraphId);
+      return undefined;
     },
     contextGraphHasLocalContent: async () => false,
     hasConfirmedMetaState: async () => false,
@@ -110,7 +130,7 @@ async function startRoute(agent: ReturnType<typeof nameHashAgent>) {
   const catchupTracker = { jobs: new Map<string, any>(), latestByContextGraph: new Map<string, string>() };
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
-    await handleContextGraphRoutes({
+    const routeContext = {
       req, res, agent,
       publisherControl: {}, publisherRuntime: null, config: {}, startedAt: Date.now(),
       dashDb: {}, opWallets: {}, network: {}, tracker: {}, memoryManager: {},
@@ -120,7 +140,9 @@ async function startRoute(agent: ReturnType<typeof nameHashAgent>) {
       apiPortRef: { value: 0 }, routePlugins: [], url, path: url.pathname,
       requestAgentAddress: '0x0000000000000000000000000000000000000001',
       authentication: requestAuthentication({ kind: 'nodeOperator' }),
-    } as any);
+    } as any;
+    await handleContextGraphRoutes(routeContext);
+    if (!res.writableEnded) await handleQueryRoutes(routeContext);
     if (!res.writableEnded) {
       res.statusCode = 404;
       res.end();
@@ -130,14 +152,26 @@ async function startRoute(agent: ReturnType<typeof nameHashAgent>) {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   if (!address || typeof address === 'string') throw new Error('route server did not bind');
-  const subscribe = async (contextGraphId: string) => {
-    const response = await fetch(`http://127.0.0.1:${address.port}/api/context-graph/subscribe`, {
+  const base = `http://127.0.0.1:${address.port}`;
+  const post = async (path: string, body: unknown) => {
+    const response = await fetch(`${base}${path}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contextGraphId, includeSharedMemory: true }),
+      body: JSON.stringify(body),
     });
     return { status: response.status, body: await response.json() as any };
   };
+  const get = async (path: string) => {
+    const response = await fetch(`${base}${path}`);
+    return { status: response.status, body: await response.json() as any };
+  };
+  const subscribe = (contextGraphId: string) => post(
+    '/api/context-graph/subscribe',
+    { contextGraphId, includeSharedMemory: true },
+  );
+  const unsubscribe = (contextGraphId: string) => post('/api/context-graph/unsubscribe', { contextGraphId });
+  const catchupStatus = (jobId: string) => get(`/api/sync/catchup-status?jobId=${encodeURIComponent(jobId)}`);
+  const listSubscriptions = () => get('/api/context-graph/subscriptions');
   const settled = async (jobId: string) => {
     for (let i = 0; i < 100; i += 1) {
       if (catchupTracker.jobs.get(jobId)?.finishedAt) break;
@@ -145,7 +179,7 @@ async function startRoute(agent: ReturnType<typeof nameHashAgent>) {
     }
     return catchupTracker.jobs.get(jobId);
   };
-  return { subscribe, settled, catchupTracker };
+  return { subscribe, unsubscribe, catchupStatus, listSubscriptions, settled, catchupTracker };
 }
 
 describe('subscribing a Context Graph by its on-chain name hash', () => {
@@ -174,8 +208,16 @@ describe('subscribing a Context Graph by its on-chain name hash', () => {
     // Nothing a peer returned under the hash may change readiness state.
     expect(agent.calls.markState).toBe(0);
     expect(runs).toEqual([NAME_HASH]);
-    expect(toCatchupStatusResponse(job, undefined, agent.describeContextGraphIdentity(NAME_HASH) as never))
-      .toMatchObject({ jobStatus: 'unreachable', status: 'unreachable', identity: { state: 'name-hash-only' } });
+    // The catch-up status an operator polls explains the same thing.
+    const polled = await route.catchupStatus(body.catchup.jobId);
+    expect(polled.status).toBe(200);
+    expect(polled.body).toMatchObject({
+      jobStatus: 'unreachable',
+      status: 'unreachable',
+      error: HASH_ONLY_MESSAGE,
+      identity: { state: 'name-hash-only', nameHash: NAME_HASH, message: HASH_ONLY_MESSAGE },
+    });
+    expect(polled.body).not.toHaveProperty('resolvedContextGraphId');
   });
 
   it('subscribes the cleartext id when a peer reveals it within the bounded wait', async () => {
@@ -221,6 +263,15 @@ describe('subscribing a Context Graph by its on-chain name hash', () => {
     // The cleartext round is classified normally (this round was unproductive).
     expect(job.status).toBe('failed');
     expect(toCatchupStatusResponse(job)).toMatchObject({ resolvedContextGraphId: CLEARTEXT });
+    // Polled by job id: the status names the id the job continued under, and
+    // the graph-sync view is the cleartext graph's, not the hash's.
+    const polled = await route.catchupStatus(body.catchup.jobId);
+    expect(polled.body).toMatchObject({
+      contextGraphId: NAME_HASH,
+      resolvedContextGraphId: CLEARTEXT,
+      identity: { state: 'resolved', contextGraphId: CLEARTEXT, message: RESOLVED_MESSAGE },
+    });
+    expect(agent.calls.graphSync).toEqual([CLEARTEXT]);
   });
 
   it('subscribes an already-resolved hash under its cleartext id', async () => {
@@ -237,6 +288,61 @@ describe('subscribing a Context Graph by its on-chain name hash', () => {
     expect(agent.calls.authority).toEqual([CLEARTEXT]);
     expect(agent.calls.subscribe).toEqual([CLEARTEXT]);
     expect(body).toMatchObject({ subscribed: CLEARTEXT, identity: { state: 'resolved' } });
+  });
+});
+
+describe('managing a subscription made by name hash', () => {
+  it('unsubscribes the cleartext graph a resolved name hash moved to', async () => {
+    const subscriptions = new Map([[CLEARTEXT, { subscribed: true, synced: true }]]);
+    const agent = nameHashAgent({ isResolved: () => true, subscriptions });
+    const route = await startRoute(agent);
+
+    const { status, body } = await route.unsubscribe(NAME_HASH);
+    expect(status).toBe(200);
+    expect(body).toEqual({
+      unsubscribed: CLEARTEXT,
+      requestedContextGraphId: NAME_HASH,
+      subscribed: false,
+      coreHosted: false,
+    });
+    expect(agent.calls.unsubscribe).toEqual([CLEARTEXT]);
+    expect(subscriptions.get(CLEARTEXT)).toMatchObject({ subscribed: false });
+  });
+
+  it('unsubscribes a hash-only row and an ordinary id as given', async () => {
+    const subscriptions = new Map([
+      [NAME_HASH, { subscribed: true, synced: false }],
+      ['acme-other', { subscribed: true, synced: true }],
+    ]);
+    const agent = nameHashAgent({ subscriptions });
+    const route = await startRoute(agent);
+
+    for (const id of [NAME_HASH, 'acme-other']) {
+      const { body } = await route.unsubscribe(id);
+      expect(body).toEqual({ unsubscribed: id, subscribed: false, coreHosted: false });
+    }
+    expect(agent.calls.unsubscribe).toEqual([NAME_HASH, 'acme-other']);
+  });
+
+  it('lists what a hash-only subscription is waiting for, and nothing extra for ordinary rows', async () => {
+    const subscriptions = new Map([
+      [NAME_HASH, { subscribed: true, synced: false, coreHosted: false }],
+      ['acme-other', { subscribed: true, synced: true, coreHosted: false }],
+    ]);
+    const route = await startRoute(nameHashAgent({ subscriptions }));
+
+    const { status, body } = await route.listSubscriptions();
+    expect(status).toBe(200);
+    expect(body.subscriptions).toEqual([
+      {
+        contextGraphId: NAME_HASH,
+        subscribed: true,
+        synced: false,
+        coreHosted: false,
+        identity: { state: 'name-hash-only', nameHash: NAME_HASH, onChainId: '33', message: HASH_ONLY_MESSAGE },
+      },
+      { contextGraphId: 'acme-other', subscribed: true, synced: true, coreHosted: false },
+    ]);
   });
 });
 

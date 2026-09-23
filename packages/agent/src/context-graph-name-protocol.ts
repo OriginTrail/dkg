@@ -17,9 +17,11 @@
  *    on-chain access policy is PUBLIC (0). Curated/private graphs keep their
  *    cleartext private by design.
  *  - Every other outcome, including private, unknown policy, unregistered,
- *    unavailable and "never heard of it", is the same `not-found`. A distinct
- *    answer would tell the requester that this node is a member of a private
- *    graph.
+ *    unavailable, "never heard of it" and "too many policy reads in flight",
+ *    is the same `not-found`. A distinct answer would tell the requester that
+ *    this node is a member of a private graph. Load shedding is no exception:
+ *    only a request for a graph this node holds ever reaches the policy-read
+ *    bound, so a separate `busy` reply would itself be a membership oracle.
  *
  * Requesters never trust an answer: `verifyContextGraphNameCandidate` checks
  * `keccak256(utf8(answer)) === nameHash` before anything is adopted.
@@ -45,9 +47,13 @@ export interface ContextGraphNameRequest {
   readonly nameHash: string;
 }
 
+/**
+ * `invalid-request` depends only on the request bytes, never on local state.
+ * There is deliberately no `busy`: see the privacy contract above.
+ */
 export type ContextGraphNameResponse =
   | { readonly version: 1; readonly status: 'found'; readonly contextGraphId: string }
-  | { readonly version: 1; readonly status: 'not-found' | 'busy' | 'invalid-request' };
+  | { readonly version: 1; readonly status: 'not-found' | 'invalid-request' };
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
@@ -117,7 +123,7 @@ export function decodeContextGraphNameResponse(bytes: Uint8Array): ContextGraphN
     return { version: 1, status: 'found', contextGraphId: value.contextGraphId };
   }
   if (
-    (value.status === 'not-found' || value.status === 'busy' || value.status === 'invalid-request')
+    (value.status === 'not-found' || value.status === 'invalid-request')
     && hasExactKeys(value, ['version', 'status'])
   ) {
     return { version: 1, status: value.status };
@@ -169,9 +175,9 @@ export function createContextGraphNameRequestHandler(
     // Reveal only the exact preimage of the requested commitment.
     const contextGraphId = verifyContextGraphNameCandidate(localId, request.nameHash);
     if (contextGraphId === null) return notFound;
-    if (inflight >= maxConcurrent) {
-      return encodeContextGraphNameResponse({ version: 1, status: 'busy' });
-    }
+    // Shed load with the ordinary refusal. Only held graphs get this far, so
+    // any distinct overload answer would reveal that this node holds one.
+    if (inflight >= maxConcurrent) return notFound;
     inflight += 1;
     try {
       const deadline = AbortSignal.timeout(timeoutMs);

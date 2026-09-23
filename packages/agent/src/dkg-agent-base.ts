@@ -440,6 +440,10 @@ import { ContextGraphJoinAdmissionLockManager } from './context-graph-join-admis
 import { ContextGraphMembershipMutationStore } from './context-graph-membership-mutation.js';
 import { LocalContextGraphProvenance } from './local-context-graph-provenance.js';
 import { createVmPromotionAuditStatus, type VmPromotionAuditStatus } from './vm-promotion-audit.js';
+import type {
+  ContextGraphStorageDiscovery,
+  OnChainContextGraphFacts,
+} from './context-graph-storage-discovery.js';
 import {
   resolveChainAuthorityReadBudgets,
   type ChainAuthorityReadBudgets,
@@ -1473,6 +1477,16 @@ export class DKGAgentBase {
   protected readonly gossipRegistered = new Set<string>();
   protected readonly sharedMemoryGossipRegistered = new Set<string>();
   protected readonly seenOnChainIds = new Set<string>();
+  /**
+   * Chain-public facts per on-chain Context Graph id (decimal), merged from the
+   * live `ContextGraphCreated` tail and ContextGraphStorage enumeration. Feeds
+   * the `onChain` field of `listContextGraphs` rows; never an authority input.
+   */
+  protected readonly onChainContextGraphFacts = new Map<string, OnChainContextGraphFacts>();
+  /** Lazily built ContextGraphStorage id enumeration (historical discovery). */
+  protected contextGraphStorageDiscovery?: ContextGraphStorageDiscovery | null;
+  /** One-shot guard for the "ContextGraphNameRegistry is not in the Hub" notice. */
+  protected contextGraphNameRegistryAbsenceLogged = false;
   /**
    * OT-RFC-38 / LU-6 Phase B — reverse index from `onChainHash` (the
    * curator-committed wire id) to the local cleartext id. Lets the

@@ -3062,10 +3062,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     if (this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined) {
       return null;
     }
-    // A name-hash id this node adopted under its verified cleartext id is
-    // superseded: the cleartext graph owns this authority now. Re-reading it
-    // under the hash would compare keccak256(hash) with the slot's name and
-    // report the graph as name-bound elsewhere.
+    // Retired name-hash id: the cleartext graph owns this authority now
+    // (see supersedingContextGraphIdFor).
     if (this.supersedingContextGraphIdFor?.(contextGraphId)) return null;
     const previousAuthorityProgress = rfc64CatalogAuthorityProgressV1
       .get(this)?.get(contextGraphId);
@@ -3519,7 +3517,10 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const timer = setTimeout(() => {
       if (rfc64AuthorityAcceptedCatchupTimersV1.get(this) !== timer) return;
       rfc64AuthorityAcceptedCatchupTimersV1.delete(this);
-      if (!this.started) return;
+      // The node can be stopped or restarting while the agent still reports
+      // started, and reading libp2p then throws from this timer, outside any
+      // caller that could catch it.
+      if (!this.started || !this.node.isStarted) return;
       for (const peer of this.node.libp2p.getPeers()) {
         const peerId = peer.toString();
         this.queueSyncFromPeerOnConnect(
