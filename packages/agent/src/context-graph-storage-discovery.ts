@@ -545,6 +545,10 @@ export interface OnChainContextGraphObservation {
   readonly owner?: string | null;
   readonly accessPolicy: number;
   readonly publishPolicy?: number | null;
+  /**
+   * Storage reads only: null when the read found no authority. Omitted when
+   * the observation did not read it, which keeps any authority read before.
+   */
   readonly publishAuthority?: string | null;
   /** Curator-committed name hash, or null when the curator opted out. */
   readonly nameHash: string | null;
@@ -578,13 +582,24 @@ export interface OnChainContextGraphFacts {
 }
 
 /**
+ * The facts one observation carries, before they are merged. Identical to
+ * OnChainContextGraphFacts except for `publishAuthority`: `undefined` when the
+ * observation did not read it (the live `ContextGraphCreated` event carries the
+ * publish policy, never the authority), as opposed to `null`, a read that found
+ * none.
+ */
+export type ObservedOnChainContextGraphFacts = Omit<OnChainContextGraphFacts, 'publishAuthority'> & {
+  readonly publishAuthority: string | null | undefined;
+};
+
+/**
  * Normalize one observation into facts: lowercase addresses and hash, an empty
  * name hash as an opt-out, and null for every field the observation does not
- * carry.
+ * carry. An authority counts as read only alongside its publish policy.
  */
 export function onChainContextGraphFactsFromObservation(
   observation: OnChainContextGraphObservation,
-): OnChainContextGraphFacts {
+): ObservedOnChainContextGraphFacts {
   const publishPolicy = observation.publishPolicy ?? null;
   return {
     onChainId: observation.contextGraphId,
@@ -594,8 +609,8 @@ export function onChainContextGraphFactsFromObservation(
     owner: observation.owner ? observation.owner.toLowerCase() : null,
     accessPolicy: Number.isSafeInteger(observation.accessPolicy) ? observation.accessPolicy : null,
     publishPolicy,
-    publishAuthority: publishPolicy === null
-      ? null
+    publishAuthority: publishPolicy === null || observation.publishAuthority === undefined
+      ? undefined
       : observation.publishAuthority?.toLowerCase() ?? null,
     createdAt: observation.createdAt ?? null,
     active: observation.active ?? null,
@@ -612,30 +627,54 @@ export function onChainContextGraphFactsFromObservation(
  */
 export function mergeOnChainContextGraphFacts(
   current: OnChainContextGraphFacts | undefined,
-  incoming: OnChainContextGraphFacts,
+  incoming: ObservedOnChainContextGraphFacts,
 ): OnChainContextGraphFacts {
-  if (current === undefined) return Object.freeze({ ...incoming });
-  const [older, newer] = current.observedAtBlock <= incoming.observedAtBlock
-    ? [current, incoming]
-    : [incoming, current];
-  if (onChainContextGraphIdentityDiffers(older, newer)) return Object.freeze({ ...newer });
+  if (current === undefined) return settledOnChainContextGraphFacts(incoming);
+  const [older, newer]: readonly [ObservedOnChainContextGraphFacts, ObservedOnChainContextGraphFacts] =
+    current.observedAtBlock <= incoming.observedAtBlock ? [current, incoming] : [incoming, current];
+  if (onChainContextGraphIdentityDiffers(older, newer)) return settledOnChainContextGraphFacts(newer);
   return Object.freeze({
     onChainId: newer.onChainId,
     nameHash: newer.nameHash ?? older.nameHash,
     owner: newer.owner ?? older.owner,
     accessPolicy: newer.accessPolicy ?? older.accessPolicy,
     publishPolicy: newer.publishPolicy ?? older.publishPolicy,
-    publishAuthority: newer.publishPolicy !== null ? newer.publishAuthority : older.publishAuthority,
+    publishAuthority: mergedPublishAuthority(older, newer),
     createdAt: newer.createdAt ?? older.createdAt,
     active: newer.active ?? older.active,
     observedAtBlock: newer.observedAtBlock,
   });
 }
 
+/**
+ * The newer observation's authority when it read one alongside its policy,
+ * including a read that found none (a curated graph turned open). Otherwise
+ * the older reading stands, unless the newer observation reports a different
+ * publish policy: an authority read under another policy says nothing about
+ * this one.
+ */
+function mergedPublishAuthority(
+  older: ObservedOnChainContextGraphFacts,
+  newer: ObservedOnChainContextGraphFacts,
+): string | null {
+  if (newer.publishAuthority !== undefined && newer.publishPolicy !== null) {
+    return newer.publishAuthority;
+  }
+  if (newer.publishPolicy !== null && newer.publishPolicy !== older.publishPolicy) return null;
+  return older.publishAuthority ?? null;
+}
+
+/** Facts as the node keeps them: an authority not read yet is null. */
+function settledOnChainContextGraphFacts(
+  facts: ObservedOnChainContextGraphFacts,
+): OnChainContextGraphFacts {
+  return Object.freeze({ ...facts, publishAuthority: facts.publishAuthority ?? null });
+}
+
 /** True when two observations of one id disagree on a write-once field. */
 export function onChainContextGraphIdentityDiffers(
-  a: OnChainContextGraphFacts,
-  b: OnChainContextGraphFacts,
+  a: ObservedOnChainContextGraphFacts,
+  b: ObservedOnChainContextGraphFacts,
 ): boolean {
   const differs = <T>(x: T | null, y: T | null) => x !== null && y !== null && x !== y;
   return differs(a.nameHash, b.nameHash)

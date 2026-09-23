@@ -7,10 +7,12 @@ import {
   ContextGraphStorageDiscovery,
   createInMemoryContextGraphStorageDiscoveryStore,
   mergeOnChainContextGraphFacts,
+  onChainContextGraphFactsFromObservation,
   onChainContextGraphIdentityDiffers,
   sameOnChainContextGraphFacts,
   type ContextGraphStorageDiscoveryRecord,
   type ContextGraphStorageDiscoveryStore,
+  type ObservedOnChainContextGraphFacts,
   type OnChainContextGraphFacts,
 } from '../src/context-graph-storage-discovery.js';
 import { toContextGraphListOnChainFacts } from '../src/context-graph-list-authority-enrichment.js';
@@ -370,6 +372,103 @@ describe('on-chain Context Graph facts', () => {
     const event: OnChainContextGraphFacts = { ...base, owner: null, publishPolicy: null, observedAtBlock: 300 };
     expect(mergeOnChainContextGraphFacts(storage, event)).toEqual({ ...storage, observedAtBlock: 300 });
     expect(mergeOnChainContextGraphFacts(undefined, base)).toEqual(base);
+  });
+
+  describe('publish authority', () => {
+    const authority = '0x' + '33'.repeat(20);
+    // A storage read carries the authority; the live event never does.
+    const storageRead: OnChainContextGraphFacts = {
+      ...base,
+      publishPolicy: 0,
+      publishAuthority: authority,
+      createdAt: 1_790_000_000,
+      active: true,
+      observedAtBlock: 200,
+    };
+    const eventAt = (block: number, publishPolicy: number | null): ObservedOnChainContextGraphFacts => ({
+      ...base,
+      publishPolicy,
+      publishAuthority: undefined,
+      observedAtBlock: block,
+    });
+
+    it('keeps a read authority when a live event for the same block is applied after it', () => {
+      // finalityConfirmations = 0: enumeration anchored at the minting block,
+      // then the poller applies (or, after a restart, replays) that block's event.
+      expect(mergeOnChainContextGraphFacts(storageRead, eventAt(200, 0))).toEqual(storageRead);
+      expect(mergeOnChainContextGraphFacts(storageRead, eventAt(300, 0)))
+        .toEqual({ ...storageRead, observedAtBlock: 300 });
+      // Either arrival order ends in the same facts.
+      expect(mergeOnChainContextGraphFacts(
+        mergeOnChainContextGraphFacts(undefined, eventAt(200, 0)),
+        storageRead,
+      )).toEqual(storageRead);
+    });
+
+    it('lets a newer read clear the authority when the graph turns open', () => {
+      const turnedOpen: OnChainContextGraphFacts = {
+        ...storageRead,
+        publishPolicy: 1,
+        publishAuthority: null,
+        observedAtBlock: 250,
+      };
+      expect(mergeOnChainContextGraphFacts(storageRead, turnedOpen)).toEqual(turnedOpen);
+      // An older read cannot bring it back.
+      expect(mergeOnChainContextGraphFacts(turnedOpen, storageRead)).toEqual(turnedOpen);
+    });
+
+    it('does not pair a read authority with a different policy an event reports', () => {
+      expect(mergeOnChainContextGraphFacts(storageRead, eventAt(200, 1))).toMatchObject({
+        publishPolicy: 1,
+        publishAuthority: null,
+      });
+    });
+
+    it('records an event-only graph as "authority not observed yet", never undefined', () => {
+      expect(mergeOnChainContextGraphFacts(undefined, eventAt(200, 0)).publishAuthority).toBeNull();
+      const replaced = { ...eventAt(300, 0), nameHash: '0x' + '99'.repeat(32) };
+      expect(mergeOnChainContextGraphFacts(storageRead, replaced).publishAuthority).toBeNull();
+    });
+
+    it('reads the authority from an observation only alongside its publish policy', () => {
+      const observation = {
+        contextGraphId: '7',
+        owner: '0x' + 'AB'.repeat(20),
+        accessPolicy: 1,
+        nameHash: '0x' + 'CD'.repeat(32),
+        observedAtBlock: 40,
+      };
+      // The live event: a policy, no authority evidence.
+      expect(onChainContextGraphFactsFromObservation({ ...observation, publishPolicy: 0 }))
+        .toMatchObject({ publishPolicy: 0, publishAuthority: undefined });
+      // A storage read that found no authority.
+      expect(onChainContextGraphFactsFromObservation({
+        ...observation,
+        publishPolicy: 1,
+        publishAuthority: null,
+      })).toMatchObject({ publishPolicy: 1, publishAuthority: null });
+      expect(onChainContextGraphFactsFromObservation({
+        ...observation,
+        publishPolicy: 0,
+        publishAuthority: '0x' + 'EF'.repeat(20),
+      })).toEqual({
+        onChainId: '7',
+        nameHash: '0x' + 'cd'.repeat(32),
+        owner: '0x' + 'ab'.repeat(20),
+        accessPolicy: 1,
+        publishPolicy: 0,
+        publishAuthority: '0x' + 'ef'.repeat(20),
+        createdAt: null,
+        active: null,
+        observedAtBlock: 40,
+      });
+      // An authority without its policy is not evidence of anything.
+      expect(onChainContextGraphFactsFromObservation({
+        ...observation,
+        publishAuthority: '0x' + 'EF'.repeat(20),
+      })).toMatchObject({ publishPolicy: null, publishAuthority: undefined });
+      expect(onChainContextGraphFactsFromObservation({ ...observation, nameHash: '' }).nameHash).toBeNull();
+    });
   });
 
   it('replaces the facts outright when a write-once field changes', () => {

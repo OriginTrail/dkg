@@ -27,6 +27,7 @@ import {
   onChainContextGraphIdentityDiffers,
   sameOnChainContextGraphFacts,
   type ContextGraphStorageDiscoveryApplyResult,
+  type ObservedOnChainContextGraphFacts,
   type OnChainContextGraphFacts,
   type OnChainContextGraphObservation,
 } from './context-graph-storage-discovery.js';
@@ -216,7 +217,7 @@ export class ContextGraphChainObservationMethods extends DKGAgentBase {
   private admitOnChainContextGraphIdentity(
     this: DKGAgent,
     previous: OnChainContextGraphFacts | undefined,
-    incoming: OnChainContextGraphFacts,
+    incoming: ObservedOnChainContextGraphFacts,
     ctx: OperationContext,
   ): boolean {
     if (previous === undefined || !onChainContextGraphIdentityDiffers(previous, incoming)) return true;
@@ -251,7 +252,7 @@ export class ContextGraphChainObservationMethods extends DKGAgentBase {
    */
   private bindOnChainContextGraphObservation(
     this: DKGAgent,
-    incoming: OnChainContextGraphFacts,
+    incoming: ObservedOnChainContextGraphFacts,
     source: OnChainContextGraphObservationSource,
     knownBefore: boolean,
     ctx: OperationContext,
@@ -291,7 +292,7 @@ export class ContextGraphChainObservationMethods extends DKGAgentBase {
    */
   private seedOnChainContextGraphPolicyCaches(
     this: DKGAgent,
-    incoming: OnChainContextGraphFacts,
+    incoming: ObservedOnChainContextGraphFacts,
   ): void {
     const { onChainId, accessPolicy, publishPolicy } = incoming;
     if (accessPolicy === 0 || accessPolicy === 1) {
@@ -313,7 +314,7 @@ export class ContextGraphChainObservationMethods extends DKGAgentBase {
    */
   private nudgeOnChainContextGraphHostMode(
     this: DKGAgent,
-    incoming: OnChainContextGraphFacts,
+    incoming: ObservedOnChainContextGraphFacts,
     localId: string | null,
     ctx: OperationContext,
     signal: AbortSignal | undefined,
@@ -343,7 +344,7 @@ export class ContextGraphChainObservationMethods extends DKGAgentBase {
   private recordOnChainContextGraphFacts(
     this: DKGAgent,
     previous: OnChainContextGraphFacts | undefined,
-    incoming: OnChainContextGraphFacts,
+    incoming: ObservedOnChainContextGraphFacts,
   ): boolean {
     const merged = mergeOnChainContextGraphFacts(previous, incoming);
     if (sameOnChainContextGraphFacts(previous, merged)) return false;

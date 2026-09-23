@@ -303,6 +303,33 @@ describe('historical Context Graph discovery through ContextGraphStorage enumera
     expect(nudges).not.toHaveBeenCalled();
   }, 60_000);
 
+  it('keeps the publish authority a storage read saw when the same block\'s event lands after it', async () => {
+    const chain = await chainWithHistory();
+    const agent = await startAgent(chain, createInMemoryContextGraphStorageDiscoveryStore());
+    await agent.discoverContextGraphsFromStorage();
+    const onChainOf = async (id: string) => chainRows(await agent.listContextGraphs({ callerAgentAddress: null }))
+      .find((row) => row.onChain!.id === id)!.onChain!;
+    const read = await onChainOf('3');
+    expect(read).toMatchObject({
+      publishPolicy: 'curated',
+      publishAuthority: MOCK_DEFAULT_SIGNER.toLowerCase(),
+    });
+
+    // With finalityConfirmations = 0 the read anchors at the minting block, and
+    // the poller then applies (or, after a restart, replays) that block's
+    // event, which carries the publish policy but never the authority.
+    agent.applyOnChainContextGraphObservation({
+      contextGraphId: '3',
+      owner: MOCK_DEFAULT_SIGNER,
+      accessPolicy: 0,
+      publishPolicy: 0,
+      nameHash: HISTORY[2]!.nameHash,
+      observedAtBlock: read.observedAtBlock,
+    }, { source: 'event' });
+
+    expect(await onChainOf('3')).toEqual(read);
+  }, 60_000);
+
   it('retires the hash-only row of a slot a reorg replaced', async () => {
     const chain = await chainWithHistory();
     const agent = await startAgent(chain, createInMemoryContextGraphStorageDiscoveryStore());
