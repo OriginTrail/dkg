@@ -1,5 +1,6 @@
 import {
   SparqlHttpStore,
+  StoreOperationTimeoutError,
   StorePriorityScheduler,
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
@@ -107,6 +108,19 @@ describe('probeExternalStore', () => {
   it('reports a query that throws synchronously as unreachable instead of rejecting', async () => {
     const { agent } = agentAnswering(() => {
       throw new Error('store closed');
+    });
+
+    await expect(probeExternalStore(agent)).resolves.toBe('unreachable');
+  });
+
+  // The errors a managed Oxigraph's store raises while the server restarts:
+  // the read was refused, or the restart cut it off.
+  it.each([
+    ['not_started', 'Managed Oxigraph is recovering; query was not started'],
+    ['indeterminate', 'Managed Oxigraph recovery interrupted query; outcome is indeterminate'],
+  ] as const)('reports a managed Oxigraph that is restarting (%s) as unreachable', async (outcome, message) => {
+    const { agent } = agentAnswering(async () => {
+      throw new StoreOperationTimeoutError({ backend: 'oxigraph-server', operation: 'query', outcome, message });
     });
 
     await expect(probeExternalStore(agent)).resolves.toBe('unreachable');

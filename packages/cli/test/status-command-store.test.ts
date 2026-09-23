@@ -16,7 +16,8 @@ interface StoreFields {
   storeQuadsStatus?: StoreQuadsStatusFields['storeQuadsStatus'] | 'from-a-newer-daemon';
   storeQuadsAgeMs?: number | null;
   storeQuadsRefreshing?: boolean;
-  storeReachability?: StoreReachability;
+  // Widened like the status, for a check result only a newer daemon sends.
+  storeReachability?: StoreReachability | 'from-a-newer-daemon';
 }
 
 /**
@@ -109,6 +110,9 @@ const REQUEST_CASES: Array<[label: string, peek: StoreFields, requests: unknown[
   }, PLAIN_ONLY],
   ['starts no count while the store gives no answer', {
     storeQuads: null, storeQuadsStatus: 'not-requested', storeQuadsAgeMs: null, storeReachability: 'no-answer',
+  }, PLAIN_ONLY],
+  ['starts no count on a check result only a newer daemon sends', {
+    storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 700_000, storeReachability: 'from-a-newer-daemon',
   }, PLAIN_ONLY],
   ['still refreshes an old count when the store answers', {
     storeQuads: 66, storeQuadsStatus: 'ready', storeQuadsAgeMs: 700_000, storeReachability: 'reachable',

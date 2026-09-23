@@ -75,29 +75,23 @@ export const STORE_QUADS_CACHE_TTL_MS = 30_000;
  */
 export const STORE_QUADS_REFRESH_AFTER_MS = 10 * 60_000;
 
-/**
- * Option name -> query parameter name. `satisfies` makes the map total: an
- * option added to {@link StatusQueryOptions} without a wire key is a compile
- * error.
- */
-const STATUS_QUERY_WIRE_KEYS = {
-  includeStoreQuads: 'includeStoreQuads',
-  probeStore: 'probeStore',
-} as const satisfies Record<keyof StatusQueryOptions, string>;
+// Each query parameter is spelled like its option.
 
 /** The query string for a status request; empty when nothing is asked. */
 export function serializeStatusQuery(options: StatusQueryOptions): string {
   const params = new URLSearchParams();
-  for (const option of Object.keys(STATUS_QUERY_WIRE_KEYS) as Array<keyof StatusQueryOptions>) {
-    if (options[option]) params.set(STATUS_QUERY_WIRE_KEYS[option], 'true');
-  }
+  const setFlag = (flag: keyof StatusQueryOptions): void => {
+    if (options[flag]) params.set(flag, 'true');
+  };
+  setFlag('includeStoreQuads');
+  setFlag('probeStore');
   return params.toString();
 }
 
 /** What a status request asked for. Each flag accepts `true` and the legacy `1`. */
 export function parseStatusQuery(params: URLSearchParams): Required<StatusQueryOptions> {
-  const isSet = (option: keyof StatusQueryOptions): boolean => {
-    const value = params.get(STATUS_QUERY_WIRE_KEYS[option]);
+  const isSet = (flag: keyof StatusQueryOptions): boolean => {
+    const value = params.get(flag);
     return value === 'true' || value === '1';
   };
   return { includeStoreQuads: isSet('includeStoreQuads'), probeStore: isSet('probeStore') };

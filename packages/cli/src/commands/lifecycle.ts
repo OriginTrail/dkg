@@ -34,6 +34,7 @@ import {
   STORE_QUADS_REFRESH_AFTER_MS,
   type StoreQuadsStatusFields,
   type StoreReachability,
+  type StoreReachabilityFields,
 } from '../status-store-quads-wire.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js';
@@ -159,10 +160,23 @@ function shouldRefreshStoreQuads(s: StoreQuadsStatusFields): boolean {
 
 /** What `dkg status` prints from. */
 interface DkgStatusReading {
-  /** The daemon's status: the count request's response when one was answered. */
-  status: DaemonStatusResponse;
+  /**
+   * The daemon's status: the count request's response when one was answered.
+   * Its reachability field is left out, since the count request makes no check.
+   */
+  status: Omit<DaemonStatusResponse, keyof StoreReachabilityFields>;
   /** This run's reachability check, which only the first request makes. */
   storeReachability: StoreReachability | undefined;
+}
+
+/**
+ * Whether this run's check allows asking for a count: the store answered it,
+ * or no check was made (a daemon without it, or a local store). A store that
+ * failed the check or gave no answer gets no COUNT, and neither does a result
+ * only a newer daemon sends.
+ */
+function checkAllowsCount(storeReachability: StoreReachability | undefined): boolean {
+  return storeReachability === undefined || storeReachability === 'reachable';
 }
 
 /**
@@ -176,8 +190,9 @@ interface DkgStatusReading {
 async function readDkgStatus(client: Pick<ApiClient, 'status'>): Promise<DkgStatusReading> {
   const probed = await client.status({ probeStore: true });
   const reading: DkgStatusReading = { status: probed, storeReachability: probed.storeReachability };
-  const storeAnswered = reading.storeReachability !== 'unreachable' && reading.storeReachability !== 'no-answer';
-  if (!probed.storeUrl || !storeAnswered || !shouldRefreshStoreQuads(probed)) return reading;
+  if (!probed.storeUrl || !checkAllowsCount(reading.storeReachability) || !shouldRefreshStoreQuads(probed)) {
+    return reading;
+  }
   try {
     return { ...reading, status: await client.status({ includeStoreQuads: true }) };
   } catch {
