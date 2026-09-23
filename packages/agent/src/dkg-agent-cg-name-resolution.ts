@@ -87,6 +87,8 @@ export interface ContextGraphIdentityNote {
   readonly onChainId?: string;
   /** The verified cleartext id, once resolved. */
   readonly contextGraphId?: string;
+  /** Hash-only because its cleartext id is bound to another on-chain graph here. */
+  readonly bindingConflict?: true;
   readonly message: string;
 }
 
@@ -108,8 +110,16 @@ function contextGraphNameHashOnlyPrivateMessage(nameHash: string): string {
 
 function contextGraphNameDeclinedMessage(nameHash: string): string {
   return `Context Graph ${shortHash(nameHash)}'s verified cleartext id is already bound to a different on-chain `
-    + 'Context Graph on this node, so the two were not merged and this subscription cannot sync (see the node log). '
-    + 'Subscribing again checks once more.';
+    + 'Context Graph on this node, so the two are not merged and this subscription cannot sync until that binding '
+    + 'changes (see the node log). It is retried when it does; subscribing again checks at once.';
+}
+
+/** The adopter's two-slot rule: a cleartext row bound to another on-chain id is never merged. */
+function isBoundElsewhere(
+  row: ContextGraphSub | undefined,
+  onChainId: string,
+): row is ContextGraphSub & { onChainId: string } {
+  return row?.onChainId !== undefined && row.onChainId !== onChainId;
 }
 
 function contextGraphNameResolvedMessage(nameHash: string, contextGraphId: string): string {
@@ -210,6 +220,7 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
       adopt: (target, contextGraphId, source) => (
         this.adoptVerifiedContextGraphCleartext(target, contextGraphId, source)
       ),
+      isRefusalCurrent: (target, contextGraphId) => this.isContextGraphNameRefusalCurrent(target, contextGraphId),
       log: {
         info: (message) => this.log.info(ctx, message),
         debug: (message) => this.log.debug(ctx, message),
@@ -278,6 +289,12 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
 
   isContextGraphNameTargetCurrent(this: DKGAgent, target: ContextGraphNameTarget): boolean {
     return this.contextGraphNamePlaceholder(target.nameHash)?.subscription.onChainId === target.onChainId;
+  }
+
+  /** Would adoption still refuse this id for this row: same placeholder, cleartext row bound elsewhere? */
+  isContextGraphNameRefusalCurrent(this: DKGAgent, target: ContextGraphNameTarget, contextGraphId: string): boolean {
+    return this.isContextGraphNameTargetCurrent(target)
+      && isBoundElsewhere(this.subscribedContextGraphs.get(contextGraphId), target.onChainId);
   }
 
   /**
@@ -421,13 +438,19 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     const onChainId = placeholder.subscription.onChainId;
     const isPrivate = entry?.state === 'private'
       || (onChainId !== undefined && this.onChainAccessPolicyCache.get(onChainId) === 1);
+    const bindingConflict = !isPrivate
+      && entry?.state === 'declined'
+      && onChainId !== undefined
+      && entry.onChainId === onChainId
+      && this.isContextGraphNameRefusalCurrent({ nameHash: placeholder.nameHash, onChainId }, entry.contextGraphId);
     return {
       state: isPrivate ? 'name-hash-only-private' : 'name-hash-only',
       nameHash: placeholder.nameHash,
       ...(onChainId === undefined ? {} : { onChainId }),
+      ...(bindingConflict ? { bindingConflict: true as const } : {}),
       message: isPrivate
         ? contextGraphNameHashOnlyPrivateMessage(placeholder.nameHash)
-        : entry?.state === 'declined' && entry.onChainId === onChainId
+        : bindingConflict
           ? contextGraphNameDeclinedMessage(placeholder.nameHash)
           : contextGraphNameHashOnlyMessage(placeholder.nameHash),
     };
@@ -499,7 +522,7 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     const hashRow = placeholder.subscription;
     if (hashRow.onChainId !== target.onChainId) return false;
     const cleartextRow = this.subscribedContextGraphs.get(contextGraphId);
-    if (cleartextRow?.onChainId !== undefined && cleartextRow.onChainId !== target.onChainId) {
+    if (isBoundElsewhere(cleartextRow, target.onChainId)) {
       // Two different on-chain slots share this name commitment. Merging them
       // would splice two graphs together; leave both rows alone.
       this.log.warn(

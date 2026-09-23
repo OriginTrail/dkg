@@ -365,7 +365,9 @@ describe('a declined adoption, through the agent resolver', () => {
       contextGraphId: CLEARTEXT,
       source: 'local-store',
     };
-    expect(internals.getContextGraphNameResolutionStatus()).toEqual([{ ...declined, declinedAt: expect.any(Number) }]);
+    expect(internals.getContextGraphNameResolutionStatus()).toEqual([
+      { ...declined, declinedAt: expect.any(Number), nextCheckAt: expect.any(Number) },
+    ]);
     expect(adopt).toHaveBeenCalledTimes(1);
     await expect(adopt.mock.results[0]!.value).resolves.toBe(false);
     expect(conflictWarnings()).toHaveLength(1);
@@ -374,6 +376,7 @@ describe('a declined adoption, through the agent resolver', () => {
     // The operator is told why it cannot sync, not to wait for a peer.
     expect(internals.describeContextGraphIdentity(NAME_HASH)).toMatchObject({
       state: 'name-hash-only',
+      bindingConflict: true,
       message: expect.stringContaining('already bound to a different on-chain Context Graph'),
     });
 
@@ -391,6 +394,22 @@ describe('a declined adoption, through the agent resolver', () => {
     await expect(internals.resolveContextGraphNameHashNow(NAME_HASH)).resolves.toBeNull();
     expect(adopt).toHaveBeenCalledTimes(2);
     expect(internals.getContextGraphNameResolutionStatus()).toEqual([expect.objectContaining(declined)]);
+
+    // The conflicting row loses its binding (a binding refresh, say): the
+    // refusal no longer holds, the note stops reporting a conflict, and an
+    // ordinary background pass adopts.
+    internals.subscribedContextGraphs.set(CLEARTEXT, {
+      ...internals.subscribedContextGraphs.get(CLEARTEXT),
+      onChainId: undefined,
+    });
+    expect(internals.describeContextGraphIdentity(NAME_HASH)).not.toHaveProperty('bindingConflict');
+    internals.requestContextGraphNameResolutionFor(NAME_HASH);
+    await waitFor(() => internals.resolveContextGraphIdAlias(NAME_HASH) === CLEARTEXT);
+    expect(adopt).toHaveBeenCalledTimes(3);
+    expect(internals.getContextGraphNameResolutionStatus()).toEqual([
+      expect.objectContaining({ state: 'resolved', nameHash: NAME_HASH, contextGraphId: CLEARTEXT }),
+    ]);
+    expect(internals.subscribedContextGraphs.get(CLEARTEXT)).toMatchObject({ onChainId: ON_CHAIN_ID, onChainHash: NAME_HASH });
   });
 
   it('records nothing for the old binding when the row is re-bound while the attempt runs', async () => {
