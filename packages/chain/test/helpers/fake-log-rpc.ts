@@ -50,6 +50,8 @@ export interface FakeLogRpcOptions {
 }
 
 export interface FakeLogRpc {
+  /** The URL the provider was built on: an adapter configures it for this endpoint. */
+  readonly url: string;
   readonly provider: JsonRpcProvider;
   readonly requests: FakeLogRpcRequest[];
   /** eth_getLogs ranges only, in the order they were sent. */
@@ -165,6 +167,7 @@ export function fakeLogRpc(options: FakeLogRpcOptions): FakeLogRpc {
     cacheTimeout: -1,
   });
   return {
+    url: options.url,
     provider,
     requests,
     logRanges: () => requests
