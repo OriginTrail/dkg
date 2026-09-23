@@ -682,9 +682,13 @@ describe('dkg status against the status route', () => {
 
   it('shows a cold, healthy managed Oxigraph as CHECKING and then its count, never UNREACHABLE', async () => {
     const countResult = deferred<unknown>();
+    let asks = 0;
     let queryCalls = 0;
     const { server, baseUrl } = await startStatusServer(async (sparql) => {
-      if (isAsk(sparql)) return ASK_TRUE;
+      if (isAsk(sparql)) {
+        asks += 1;
+        return ASK_TRUE;
+      }
       queryCalls += 1;
       return countResult.promise;
     }, MANAGED_OXIGRAPH_STORE);
@@ -694,6 +698,8 @@ describe('dkg status against the status route', () => {
       expect(cold).toContain('Store:     oxigraph-server (http://127.0.0.1:7880/query) — CHECKING');
       expect(cold).not.toContain('UNREACHABLE');
       expect(queryCalls).toBe(1);
+      // The managed store is checked like an external one, once per run.
+      expect(asks).toBe(1);
 
       countResult.resolve(COUNT_66);
       await nextTick();
@@ -701,6 +707,7 @@ describe('dkg status against the status route', () => {
       const counted = await runStatusCommand(baseUrl);
       expect(counted).toContain('Store:     oxigraph-server (http://127.0.0.1:7880/query) — 66 quads');
       expect(queryCalls).toBe(1);
+      expect(asks).toBe(2);
     } finally {
       countResult.resolve({ type: 'bindings', bindings: [] });
       await closeServer(server);
@@ -708,9 +715,13 @@ describe('dkg status against the status route', () => {
   });
 
   it('starts no count while the cached one is under ten minutes old, then refreshes it', async () => {
+    let asks = 0;
     let queryCalls = 0;
     const { server, baseUrl } = await startStatusServer(async (sparql) => {
-      if (isAsk(sparql)) return ASK_TRUE;
+      if (isAsk(sparql)) {
+        asks += 1;
+        return ASK_TRUE;
+      }
       queryCalls += 1;
       return COUNT_66;
     }, MANAGED_OXIGRAPH_STORE);
@@ -732,12 +743,21 @@ describe('dkg status against the status route', () => {
       clock.mockReturnValue(countedAt + 10 * 60_000);
       expect(await runStatusCommand(baseUrl)).toContain('— 66 quads (checked 10m 0s ago), refreshing');
       expect(queryCalls).toBe(2);
+      // Every run checked the managed store, the ones that reused the count too.
+      expect(asks).toBe(3);
     } finally {
       await closeServer(server);
     }
   });
 
-  it('shows an external store that stopped answering as UNREACHABLE on the next run, without a count', async () => {
+  it.each([
+    ['an external store', SPARQL_HTTP_STORE, 'sparql-http (http://127.0.0.1:9/query)'],
+    ['a managed Oxigraph', MANAGED_OXIGRAPH_STORE, 'oxigraph-server (http://127.0.0.1:7880/query)'],
+  ])('shows %s that stopped answering as UNREACHABLE on the next run, without a count', async (
+    _label,
+    store,
+    storeDescription,
+  ) => {
     let storeUp = true;
     let asks = 0;
     let counts = 0;
@@ -746,7 +766,7 @@ describe('dkg status against the status route', () => {
       else counts += 1;
       if (!storeUp) throw new Error('connect ECONNREFUSED 127.0.0.1:9');
       return isAsk(sparql) ? ASK_TRUE : COUNT_66;
-    });
+    }, store);
     const countedAt = Date.now();
     const clock = vi.spyOn(Date, 'now').mockReturnValue(countedAt);
 
@@ -760,7 +780,7 @@ describe('dkg status against the status route', () => {
       storeUp = false;
       clock.mockReturnValue(countedAt + 2 * 60_000);
       expect(await runStatusCommand(baseUrl))
-        .toContain('Store:     sparql-http (http://127.0.0.1:9/query) — UNREACHABLE');
+        .toContain(`Store:     ${storeDescription} — UNREACHABLE`);
       expect(counts).toBe(1);
 
       // Back up: the cached count shows again, with its age.
@@ -827,12 +847,15 @@ describe('/api/status store reachability check', () => {
     return await response.json() as StatusBody;
   }
 
-  it('checks with one ASK when asked, and starts no count', async () => {
+  it.each([
+    ['an external SPARQL store', SPARQL_HTTP_STORE],
+    ['a managed oxigraph-server', MANAGED_OXIGRAPH_STORE],
+  ])('checks %s with one ASK when asked, and starts no count', async (_label, store) => {
     const queries: string[] = [];
     const { server, baseUrl } = await startStatusServer(async (sparql) => {
       queries.push(sparql);
       return isAsk(sparql) ? ASK_TRUE : COUNT_66;
-    });
+    }, store);
 
     try {
       expect(await fetchProbed(baseUrl)).toMatchObject({
