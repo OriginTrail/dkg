@@ -334,8 +334,11 @@ import {
 } from '../local-agents.js';
 
 import { actorFromRequestContext, type RequestContext } from './context.js';
-import { mayFollowOnChainIdToRow, type OnChainIdCaller } from '../context-graph-on-chain-id-gate.js';
-import { admitContextGraphFollow } from '../context-graph-subscription-admission.js';
+import { mayFollowOnChainIdToRow } from '../context-graph-on-chain-id-gate.js';
+import {
+  admitContextGraphFollow,
+  type ContextGraphFollowCaller,
+} from '../context-graph-subscription-admission.js';
 import {
   API_QUERY_CALLER_DISCONNECTED,
   createStoreQueryRequestLifecycle,
@@ -431,7 +434,7 @@ export async function latestCatchupJobIdFor(
   agent: DKGAgent,
   catchupTracker: CatchupTracker,
   contextGraphId: string,
-  caller: OnChainIdCaller,
+  caller: ContextGraphFollowCaller,
 ): Promise<string | undefined> {
   const direct = catchupTracker.latestByContextGraph.get(contextGraphId);
   if (direct !== undefined) {
