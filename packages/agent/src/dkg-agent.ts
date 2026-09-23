@@ -112,6 +112,7 @@ import {
   CONTEXT_GRAPH_STORAGE_DISCOVERY_ID_BUDGET,
   CONTEXT_GRAPH_STORAGE_REFRESH_INTERVAL_MS,
   ContextGraphStorageDiscovery,
+  contextGraphStorageObservation,
   createInMemoryContextGraphStorageDiscoveryStore,
   mergeOnChainContextGraphFacts,
   onChainContextGraphIdentityDiffers,
@@ -2304,17 +2305,10 @@ export class DKGAgent extends DKGAgentBase {
     const ctx = createOperationContext('init');
     const records = await discovery.loadRecords();
     for (const record of records) {
-      this.applyOnChainContextGraphObservation({
-        contextGraphId: record.contextGraphId,
-        owner: record.owner,
-        accessPolicy: record.accessPolicy,
-        publishPolicy: record.publishPolicy,
-        publishAuthority: record.publishAuthority,
-        nameHash: record.nameHash,
-        blockNumber: record.observedAtBlock,
-        createdAt: record.createdAt,
-        active: record.active,
-      }, { source: 'checkpoint', ctx });
+      this.applyOnChainContextGraphObservation(
+        contextGraphStorageObservation(record, record.observedAtBlock),
+        { source: 'checkpoint', ctx },
+      );
     }
     if (records.length > 0) {
       this.log.info(
@@ -2343,17 +2337,10 @@ export class DKGAgent extends DKGAgentBase {
         maxIds,
         ...(signal ? { signal } : {}),
       }),
-      apply: (record) => this.applyOnChainContextGraphObservation({
-        contextGraphId: record.contextGraphId,
-        owner: record.owner,
-        accessPolicy: record.accessPolicy,
-        publishPolicy: record.publishPolicy,
-        publishAuthority: record.publishAuthority,
-        nameHash: record.nameHash,
-        blockNumber: record.observedAtBlock,
-        createdAt: record.createdAt,
-        active: record.active,
-      }, { source: 'storage', ctx }),
+      apply: (record) => this.applyOnChainContextGraphObservation(
+        contextGraphStorageObservation(record, record.observedAtBlock),
+        { source: 'storage', ctx },
+      ),
       log: (message) => this.log.warn(ctx, message),
     });
     return this.contextGraphStorageDiscovery;

@@ -27,6 +27,7 @@ import {
   type ContextGraphOnChainIdResolution,
   type RetiredNumericContextGraphSubscription,
 } from './context-graph-on-chain-reference.js';
+import { contextGraphStorageObservation } from './context-graph-storage-discovery.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { ContextGraphSub } from './dkg-agent-types.js';
@@ -235,17 +236,10 @@ export class ContextGraphOnChainIdMethods extends DKGAgentBase {
         ? { kind: 'absent', latestId: range.latestId.toString(10) }
         : { kind: 'unavailable', detail: `id ${onChainId} is not readable yet at block ${range.anchorBlockNumber}` };
     }
-    this.applyOnChainContextGraphObservation({
-      contextGraphId: entry.contextGraphId,
-      owner: entry.owner,
-      accessPolicy: entry.accessPolicy,
-      publishPolicy: entry.publishPolicy,
-      publishAuthority: entry.publishAuthority,
-      nameHash: entry.nameHash,
-      blockNumber: range.anchorBlockNumber,
-      createdAt: entry.createdAt,
-      active: entry.active,
-    }, { source: 'storage' });
+    this.applyOnChainContextGraphObservation(
+      contextGraphStorageObservation(entry, range.anchorBlockNumber),
+      { source: 'storage' },
+    );
     return { kind: 'entry' };
   }
 }
