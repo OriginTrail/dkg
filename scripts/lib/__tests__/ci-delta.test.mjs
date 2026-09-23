@@ -42,7 +42,14 @@ test('parses NUL-delimited git name-status output without shell-splitting file n
 });
 
 test('non-PR events run every lane while full-PR overrides preserve the Solidity gate', () => {
-  for (const eventName of ['push', 'merge_group', 'workflow_dispatch']) {
+  // Every trigger the planning workflows declare other than pull_request,
+  // the nightly schedule included: these full runs are the post-merge net.
+  const triggers = new Set(['ci.yml', 'evm-integration.yml'].flatMap((name) => Object.keys(
+    parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows', name), 'utf8')).on,
+  )));
+  assert.ok(triggers.has('schedule'), 'ci.yml runs nightly');
+  triggers.delete('pull_request');
+  for (const eventName of triggers) {
     const plan = planCi({ eventName });
     assert.equal(plan.fullCi, true, eventName);
     assert.deepEqual(selectedLanes(plan), CI_LANES, eventName);

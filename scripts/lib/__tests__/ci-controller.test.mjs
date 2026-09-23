@@ -8,7 +8,7 @@ import { parse } from 'yaml';
 import { EVM_SCOPES, MANIFEST_READER_ENV, NODE_TEST_ARTIFACT_LANES, githubOutputsForPlan } from '../ci-delta.mjs';
 import { PRIMARY_LANE_JOBS } from '../ci-results.mjs';
 import { CONTROLLER_POLICY_FILES, validateTrustedControllerPins } from '../../ci/trusted-controller-pins.mjs';
-import { pinnedControllerRef } from '../../ci/fetch-trusted-controller.mjs';
+import { fetchPinnedController, pinnedControllerRef } from '../../ci/fetch-trusted-controller.mjs';
 import {
   NON_SOLIDITY_LANES,
   REPO_ROOT,
@@ -180,6 +180,9 @@ test('the build job fetches the pinned controller through the canonical pin vali
   // history. The build job's shallow checkout fetches it by the ref the pin
   // validator derives, so workflow layout cannot change which ref it fetches.
   assert.equal(pinnedControllerRef(), TRUSTED_CI_CONTROLLER_SHA);
+  const calls = [];
+  fetchPinnedController({ run: (...call) => calls.push(call) });
+  assert.deepEqual(calls, [['git', ['fetch', '--no-tags', '--depth=1', 'origin', TRUSTED_CI_CONTROLLER_SHA], { stdio: 'inherit' }]]);
   const { steps } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')).jobs.build;
   const fetch = steps.findIndex(({ run = '' }) => run.trim() === 'node scripts/ci/fetch-trusted-controller.mjs');
   const scriptTests = steps.findIndex(({ run = '' }) => run.includes('pnpm run test:scripts'));

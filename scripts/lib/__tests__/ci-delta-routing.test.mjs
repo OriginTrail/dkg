@@ -438,9 +438,15 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   };
   const workflowJobs = (file) => Object.entries(parse(fs.readFileSync(path.join(REPO_ROOT, file), 'utf8')).jobs);
   const laneByJob = Object.fromEntries(Object.entries(PRIMARY_LANE_JOBS).map(([lane, job]) => [job, lane]));
+  // A job runs for its mapped lane or, like a job that only calls a reusable
+  // workflow, for the lane output its condition reads.
+  const laneOf = (job, condition = '') => [
+    laneByJob[job],
+    condition.match(/needs\.changes\.outputs\.(\w+) == 'true'/)?.[1],
+  ].find((lane) => CI_LANES.includes(lane));
   const seedJobs = (jobs, laneFor) => {
-    for (const [job, { steps = [], uses = '' }] of jobs) {
-      const lane = laneFor(job);
+    for (const [job, { steps = [], uses = '', if: condition }] of jobs) {
+      const lane = laneFor(job, condition);
       if (!lane) continue;
       if (uses.startsWith('./')) seedJobs(workflowJobs(uses.slice(2)), () => lane);
       for (const { run = '' } of steps) {
@@ -450,7 +456,7 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
       }
     }
   };
-  seedJobs(workflowJobs('.github/workflows/ci.yml'), (job) => laneByJob[job]);
+  seedJobs(workflowJobs('.github/workflows/ci.yml'), laneOf);
 
   const loadedBy = traceLaneLoads(seeds);
 

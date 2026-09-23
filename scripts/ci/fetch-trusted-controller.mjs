@@ -18,6 +18,8 @@ export function pinnedControllerRef(
   ).ref;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
-  execFileSync('git', ['fetch', '--no-tags', '--depth=1', 'origin', pinnedControllerRef()], { stdio: 'inherit' });
+export function fetchPinnedController({ run = execFileSync, ref = pinnedControllerRef() } = {}) {
+  run('git', ['fetch', '--no-tags', '--depth=1', 'origin', ref], { stdio: 'inherit' });
 }
+
+if (import.meta.url === pathToFileURL(process.argv[1]).href) fetchPinnedController();
