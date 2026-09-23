@@ -10,8 +10,9 @@
  *  - SPAN caps. The requested block span is wider than the provider serves in
  *    one request (`eth_getLogs is limited to a 2,000 range`, `block range too
  *    large`). Narrower requests over the SAME blocks succeed, so the reader
- *    splits, and remembers the cap for that provider so later reads start at
- *    it instead of failing first.
+ *    splits, and remembers the cap for that provider (for
+ *    {@link EVM_LOG_SPAN_CAP_TTL_MS}) so later reads start at it instead of
+ *    failing first.
  *  - DEPTH limits. The blocks are older than the provider serves at all:
  *    archive gating, pruned history, or a plan tier (`Archive requests require
  *    a personal token`; `ranges over 10000 blocks are not supported on free
@@ -36,12 +37,26 @@ export type EvmLogRangeLimit =
 /**
  * Most physical eth_getLogs requests one adaptive read may issue against one
  * provider, failed attempts included. A 9,000-block event-lane page costs five
- * requests on a 2,000-block cap, so this admits caps down to roughly 300
- * blocks for the widest page any reader asks for; a provider whose cap is
- * smaller than that is treated as unable to serve the range and the caller
- * fails over instead of issuing hundreds of tiny requests.
+ * requests on a 2,000-block cap and 181 on a 50-block one (the smallest stated
+ * cap the reader this one replaced already split and served), so this serves a
+ * page that wide down to caps of roughly 36 blocks, and a 2,000-block page
+ * down to 8. On a one-RPC node there is no other endpoint to fail over to, so
+ * a servable range must be served. Requests are sequential and each passes the
+ * shared RPC request governor, so a narrow cap costs time, never a burst. A
+ * provider whose cap is smaller still is treated as unable to serve the range
+ * and the caller fails over instead of issuing thousands of requests.
  */
-export const EVM_LOG_RANGE_MAX_REQUESTS_PER_READ = 32;
+export const EVM_LOG_RANGE_MAX_REQUESTS_PER_READ = 256;
+
+/**
+ * How long a learned span cap stands. A stated cap is the provider's word, but
+ * an inferred one (half a refused span) can come from a dense range under a
+ * result-size limit, and a provider can raise its cap. Once this passes, the
+ * next read asks for the full range again: a cap that still holds is relearned
+ * with one refused request, and a stale narrow one stops holding the provider
+ * down for the rest of the process.
+ */
+export const EVM_LOG_SPAN_CAP_TTL_MS = 10 * 60_000;
 
 /**
  * A provider cannot serve an eth_getLogs range: a depth/archive/plan limit, or
@@ -179,17 +194,30 @@ export function classifyEvmLogRangeLimitError(
   return maxBlocks >= 1 ? { kind: 'span', maxBlocks } : { kind: 'span' };
 }
 
+interface LearnedSpanCap {
+  readonly maxBlocks: number;
+  readonly learnedAtMs: number;
+}
+
 /**
  * Learned span caps, keyed by the provider object every reader of that
  * endpoint shares. Weakly held: a rebuilt provider pool starts fresh and
- * relearns with one refused request. Only span caps live here; a depth limit
+ * relearns with one refused request. Each cap stands for
+ * {@link EVM_LOG_SPAN_CAP_TTL_MS}. Only span caps live here; a depth limit
  * never narrows how a provider is asked for recent blocks.
  */
-const learnedSpanCaps = new WeakMap<object, number>();
+const learnedSpanCaps = new WeakMap<object, LearnedSpanCap>();
 
-/** The span cap learned for `provider`, if any (observability and tests). */
+function liveSpanCap(provider: object): number | undefined {
+  const learned = learnedSpanCaps.get(provider);
+  return learned !== undefined && Date.now() - learned.learnedAtMs < EVM_LOG_SPAN_CAP_TTL_MS
+    ? learned.maxBlocks
+    : undefined;
+}
+
+/** The span cap `provider` is read at now, if any (observability and tests). */
 export function learnedEvmLogSpanCap(provider: object): number | undefined {
-  return learnedSpanCaps.get(provider);
+  return liveSpanCap(provider);
 }
 
 function providerHost(provider: object | undefined): string {
@@ -296,7 +324,7 @@ export async function readAdaptiveEvmLogRange<T>(
   const maxRequests = params.maxRequests ?? EVM_LOG_RANGE_MAX_REQUESTS_PER_READ;
   let localCap: number | undefined;
   const currentCap = (): number | undefined => (
-    provider === undefined ? localCap : learnedSpanCaps.get(provider)
+    provider === undefined ? localCap : liveSpanCap(provider)
   );
   const learn = (maxBlocks: number, stated: boolean): void => {
     const previous = currentCap();
@@ -305,7 +333,10 @@ export async function readAdaptiveEvmLogRange<T>(
       localCap = maxBlocks;
       return;
     }
-    learnedSpanCaps.set(provider, maxBlocks);
+    const before = learnedSpanCaps.get(provider);
+    learnedSpanCaps.set(provider, { maxBlocks, learnedAtMs: Date.now() });
+    // An expired cap relearned at the same span is not news.
+    if (before?.maxBlocks === maxBlocks) return;
     // eslint-disable-next-line no-console
     console.log(
       `[chain] eth_getLogs span cap for ${providerHost(provider)}: ${maxBlocks} blocks `

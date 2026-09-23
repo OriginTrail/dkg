@@ -18,6 +18,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   EVM_LOG_RANGE_MAX_REQUESTS_PER_READ,
+  EVM_LOG_SPAN_CAP_TTL_MS,
   EvmLogRangeUnavailableError,
   classifyEvmLogRangeLimitError,
   learnedEvmLogSpanCap,
@@ -60,8 +61,17 @@ async function ethersRefusal(refusal: FakeLogRpcRefusal): Promise<unknown> {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
+
+/** Rows a reader returned as `from-to` strings, checked to tile [from, to] in order. */
+function expectContiguous(rows: readonly unknown[], fromBlock: number, toBlock: number): void {
+  const served = (rows as string[]).map((row) => row.split('-').map(Number) as [number, number]);
+  expect(served[0]![0]).toBe(fromBlock);
+  expect(served.at(-1)![1]).toBe(toBlock);
+  for (let i = 1; i < served.length; i += 1) expect(served[i]![0]).toBe(served[i - 1]![1] + 1);
+}
 
 describe('classifyEvmLogRangeLimitError — the default Base RPC set', () => {
   it('reads mainnet.base.org\'s comma-grouped "limited to a 2,000 range" as a 2,000-block span cap', async () => {
@@ -346,10 +356,7 @@ describe('readAdaptiveEvmLogRange', () => {
     expect(calls.slice(0, 4)).toEqual([[1, 9_000], [1, 2_000], [1, 1_999], [1, 999]]);
     expect(learnedEvmLogSpanCap(provider)).toBe(999);
     // Every block exactly once, in chain order.
-    const served = (rows as string[]).map((row) => row.split('-').map(Number) as [number, number]);
-    expect(served[0]![0]).toBe(1);
-    expect(served.at(-1)![1]).toBe(9_000);
-    for (let i = 1; i < served.length; i += 1) expect(served[i]![0]).toBe(served[i - 1]![1] + 1);
+    expectContiguous(rows, 1, 9_000);
   });
 
   it('stays bounded when a provider refuses every multi-block span', async () => {
@@ -365,11 +372,79 @@ describe('readAdaptiveEvmLogRange', () => {
       toBlock: 9_000,
     }).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(EvmLogRangeUnavailableError);
-    expect((err as Error).message).toContain('(budget 32)');
+    expect((err as Error).message).toContain(`(budget ${EVM_LOG_RANGE_MAX_REQUESTS_PER_READ})`);
     // Halving stopped where the remaining range no longer fit the budget —
-    // no single-block storm.
-    expect(calls.length).toBeLessThanOrEqual(EVM_LOG_RANGE_MAX_REQUESTS_PER_READ);
-    expect(calls.every(([from, to]) => to - from + 1 >= 128)).toBe(true);
+    // eight refusals, no single-block storm.
+    expect(calls).toEqual([
+      [1, 9_000], [1, 4_500], [1, 2_250], [1, 1_125], [1, 562], [1, 281], [1, 140], [1, 70],
+    ]);
+  });
+
+  it.each([
+    ['Block range too large: maximum allowed is 50 blocks', 50],
+    ['eth_getLogs is limited to a 100 block range', 100],
+  ])('serves a 9,000-block page at a small stated cap in one read: %s', async (message, cap) => {
+    const provider = {};
+    const { calls, read } = cappedReader({ cap, message: () => message });
+
+    const rows = await readAdaptiveEvmLogRange({ provider, read, fromBlock: 1, toBlock: 9_000 });
+
+    // One refusal teaches the cap; every later request fits it.
+    expect(calls).toHaveLength(1 + 9_000 / cap);
+    expect(calls.slice(1).every(([from, to]) => to - from + 1 === cap)).toBe(true);
+    expectContiguous(rows, 1, 9_000);
+    expect(learnedEvmLogSpanCap(provider)).toBe(cap);
+  });
+
+  it('lets a learned cap expire, so a stale narrow cap stops holding the provider down', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const provider = {};
+    let cap: number | undefined = 100;
+    const calls: Array<[number, number]> = [];
+    const read = async (from: number, to: number): Promise<string[]> => {
+      calls.push([from, to]);
+      if (cap !== undefined && to - from + 1 > cap) throw new Error(`eth_getLogs is limited to a ${cap} range`);
+      return [`${from}-${to}`];
+    };
+
+    await readAdaptiveEvmLogRange({ provider, read, fromBlock: 1, toBlock: 1_000 });
+    expect(learnedEvmLogSpanCap(provider)).toBe(100);
+
+    // The limit is gone (a lifted cap, or the dense range that taught it has
+    // passed), but until the cap expires reads still start at it.
+    cap = undefined;
+    vi.setSystemTime(Date.now() + EVM_LOG_SPAN_CAP_TTL_MS - 1);
+    calls.length = 0;
+    await readAdaptiveEvmLogRange({ provider, read, fromBlock: 1_001, toBlock: 2_000 });
+    expect(calls).toHaveLength(10);
+
+    vi.setSystemTime(Date.now() + 1);
+    expect(learnedEvmLogSpanCap(provider)).toBeUndefined();
+    calls.length = 0;
+    await expect(readAdaptiveEvmLogRange({ provider, read, fromBlock: 2_001, toBlock: 3_000 }))
+      .resolves.toEqual(['2001-3000']);
+    expect(calls).toEqual([[2_001, 3_000]]);
+  });
+
+  it('relearns a cap that still holds after it expires, with one refusal and no new log line', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const provider = {};
+    const { calls, read } = cappedReader({ cap: 2_000 });
+
+    await readAdaptiveEvmLogRange({ provider, read, fromBlock: 1, toBlock: 9_000 });
+    expect(log).toHaveBeenCalledTimes(1);
+
+    vi.setSystemTime(Date.now() + EVM_LOG_SPAN_CAP_TTL_MS);
+    calls.length = 0;
+    await readAdaptiveEvmLogRange({ provider, read, fromBlock: 9_001, toBlock: 18_000 });
+    expect(calls).toEqual([
+      [9_001, 18_000],
+      [9_001, 11_000], [11_001, 13_000], [13_001, 15_000], [15_001, 17_000], [17_001, 18_000],
+    ]);
+    expect(learnedEvmLogSpanCap(provider)).toBe(2_000);
+    expect(log).toHaveBeenCalledTimes(1);
   });
 
   it('refuses a range a tiny stated cap cannot cover within the budget, then refuses up front', async () => {
