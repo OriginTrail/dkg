@@ -235,6 +235,9 @@ export default defineConfig({
           'test/daemon-prime-agent-persistence.test.ts',
           'test/daemon-sse-final-frame.test.ts',
           'test/chain-discovery-scan-mode.test.ts',
+          'test/chain-discovery-scan-storage.test.ts',
+          'test/context-graph-list-cli.test.ts',
+          'test/historical-context-graph-discovery.test.ts',
           'test/context-graph-subscriptions-route.test.ts',
           // Daemon call-site wiring guard: runDaemonInner passes the resolved
           // syncAgentsMeta into DKGAgent.create. Fully mocked (network/agent/
