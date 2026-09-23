@@ -33,7 +33,7 @@ function importedWorkspaceClosure(files) {
 // Path routing: what individual changed paths select on pull requests -
 // git statuses, workspace manifests, repository support areas and the
 // per-file triggers (browser surface, Windows lifecycle, identity wallet,
-// Blazegraph arm64).
+// Blazegraph arm64) - and that the lane a path selects runs or loads it.
 
 test('deletions, renames and copies route every path they touch like edits', () => {
   const deleted = pullRequestPlan([change('packages/network-sim/src/removed.ts', 'D')]);
@@ -484,6 +484,17 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   assert.deepEqual(missing, [], 'a change to these files must select the lane or EVM scope that loads them');
 });
 
+test('demo suites stay wired into the supporting job', () => {
+  // Demo changes route to the supporting lane, whose job runs both demo apps' suites.
+  assert.deepEqual(WORKSPACE_OWNING_LANES.demo, ['kosava_supporting']);
+  const { jobs } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
+  const supportingRuns = jobs[PRIMARY_LANE_JOBS.kosava_supporting].steps.map(({ run = '' }) => run).join('\n');
+  assert.ok(supportingRuns.includes('--filter @origintrail-official/dkg-demo'), 'demo tests must stay in CI');
+  const demoManifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'demo/package.json'), 'utf8'));
+  assert.match(demoManifest.scripts.test, /kafka-streams\/test\/\*\.mjs/);
+  assert.match(demoManifest.scripts.test, /epcis-bike\/test\/\*\.mjs/);
+});
+
 test('the load scanner sees these forms, and nothing it cannot resolve statically', () => {
   // The load-closure guard sees only what loadReferences recognises, so its
   // reach is pinned here: each form below resolves to the named file, and the
@@ -538,6 +549,13 @@ test('the load scanner sees these forms, and nothing it cannot resolve staticall
     'packages/cli/test-fixtures/sample-kafka-plugin/src/index.ts',
     'packages/rdf-utils/package.json',
   ]);
+  // A bare side-effect import loads its module, relative or by package name.
+  const sideEffects = loadReferences('packages/storage/test/example.test.ts', [
+    "import '../src/adapters/oxigraph.js';",
+    "import '@origintrail-official/dkg-core';",
+  ].join('\n'));
+  assert.deepEqual(sideEffects.modules, ['packages/storage/src/adapters/oxigraph.ts']);
+  assert.deepEqual(sideEffects.packages, ['@origintrail-official/dkg-core']);
   // Test-runner configs list the files a lane runs, like tests do.
   const config = loadReferences('devnet/_bootstrap/vitest.example.config.ts', "export default { test: { include: ['devnet/_bootstrap/smoke.test.ts'] } };");
   assert.deepEqual(config.paths, ['devnet/_bootstrap/smoke.test.ts']);

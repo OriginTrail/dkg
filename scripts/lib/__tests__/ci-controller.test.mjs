@@ -91,12 +91,59 @@ test('plan-ci compares modified workspace manifests through git blobs', (t) => {
   assert.equal(mode(diff(exportsHead)), 'full', 'routed changes differ from the diff');
 });
 
+function readRepoText(file) {
+  try {
+    return fs.readFileSync(path.join(REPO_ROOT, file), 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
 // Every CI-policy script a workflow step runs must come from the trusted
-// checkout, however the other checkout is named or the path is spelled.
-function untrustedPolicyRuns(workflowSource) {
-  const { jobs } = parse(workflowSource);
-  return Object.values(jobs).flatMap((job) => job.steps ?? [])
-    .flatMap(({ run = '' }) => [...run.matchAll(/(\S*?)scripts\/ci\/(?:plan-ci|assert-ci-results)\.mjs\b/g)])
+// checkout, however the other checkout is named or the path is spelled, and
+// whether the step runs it directly or through a root package.json script, a
+// shell script, a local composite action or a local reusable workflow.
+function untrustedPolicyRuns(workflowSource, readRepoFile = readRepoText) {
+  const { scripts = {} } = JSON.parse(readRepoFile('package.json') ?? '{}');
+  const followed = new Set();
+  const unseen = (key) => !followed.has(key) && Boolean(followed.add(key));
+  const commands = [];
+  const followRun = (text) => {
+    commands.push(text);
+    for (const [, name] of text.matchAll(/\b(?:pnpm|npm|yarn)\s+(?:run\s+)?([\w:.-]+)/g)) {
+      if (Object.hasOwn(scripts, name) && unseen(`script ${name}`)) followRun(scripts[name]);
+    }
+    for (const [script] of text.matchAll(/[\w./-]+\.sh\b/g)) {
+      const file = path.posix.normalize(script);
+      const source = readRepoFile(file);
+      if (source !== undefined && unseen(file)) followRun(source);
+    }
+  };
+  const followUses = (uses) => {
+    const target = uses?.match(/^\.\/(.+?)\/?$/)?.[1];
+    if (!target || !unseen(target)) return;
+    const definition = /\.ya?ml$/.test(target)
+      ? readRepoFile(target)
+      : ['action.yml', 'action.yaml'].map((name) => readRepoFile(`${target}/${name}`)).find((text) => text !== undefined);
+    assert.ok(definition !== undefined, `${uses} names no local workflow or action`);
+    const { jobs, runs } = parse(definition);
+    if (jobs) followJobs(jobs);
+    else followSteps(runs?.steps);
+  };
+  const followSteps = (steps = []) => {
+    for (const { run, uses } of steps) {
+      if (run) followRun(run);
+      followUses(uses);
+    }
+  };
+  const followJobs = (jobs) => {
+    for (const job of Object.values(jobs)) {
+      followSteps(job.steps);
+      followUses(job.uses);
+    }
+  };
+  followJobs(parse(workflowSource).jobs);
+  return commands.flatMap((text) => [...text.matchAll(/(\S*?)scripts\/ci\/(?:plan-ci|assert-ci-results)\.mjs\b/g)])
     .filter(([, prefix]) => prefix !== 'trusted-ci/')
     .map(([reference]) => reference);
 }
@@ -123,6 +170,27 @@ test('workflows execute the planner and aggregate gates from one immutable trust
     ].join('\n');
     assert.deepEqual(untrustedPolicyRuns(tampered), [`${prefix}scripts/ci/plan-ci.mjs`], prefix || '(bare path)');
   }
+  // An indirect invocation is followed to the command it runs.
+  const repoFiles = {
+    'package.json': JSON.stringify({ scripts: { 'ci:plan': 'pnpm run ci:plan:inner', 'ci:plan:inner': 'bash scripts/plan.sh' } }),
+    'scripts/plan.sh': 'node scripts/ci/plan-ci.mjs --event push\n',
+    '.github/actions/gate/action.yml': 'runs:\n  using: composite\n  steps:\n    - run: node candidate/scripts/ci/assert-ci-results.mjs\n      shell: bash\n',
+    '.github/workflows/reusable.yml': 'jobs:\n  plan:\n    steps:\n      - run: node ./scripts/ci/plan-ci.mjs --event push\n',
+  };
+  const indirect = [
+    'jobs:',
+    '  plan:',
+    '    steps:',
+    '      - run: pnpm ci:plan',
+    '      - uses: ./.github/actions/gate',
+    '  reuse:',
+    '    uses: ./.github/workflows/reusable.yml',
+  ].join('\n');
+  assert.deepEqual(untrustedPolicyRuns(indirect, (file) => repoFiles[file]), [
+    'scripts/ci/plan-ci.mjs',
+    'candidate/scripts/ci/assert-ci-results.mjs',
+    './scripts/ci/plan-ci.mjs',
+  ]);
 
   const controller = validateTrustedControllerPins([
     { sourceName: 'primary', source: workflows.get('primary') },
@@ -433,14 +501,6 @@ test('every planner output is wired to a real workflow job and omitted tests sta
     assert.equal(source.includes('--sample-key'), false, `${name} must not request audit sampling`);
   }
   assert.match(evmWorkflow, /^  evm-gate:/m);
-});
-
-test('demo suites stay wired into the supporting job', () => {
-  const workflow = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
-  assert.ok(workflow.includes('--filter @origintrail-official/dkg-demo'), 'demo tests must stay in CI');
-  const demoManifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'demo/package.json'), 'utf8'));
-  assert.match(demoManifest.scripts.test, /kafka-streams\/test\/\*\.mjs/);
-  assert.match(demoManifest.scripts.test, /epcis-bike\/test\/\*\.mjs/);
 });
 
 test('all shared Hardhat consumers require and restore the matching artifact', () => {

@@ -384,6 +384,32 @@ test('protection inspection excludes controller freshness acquisition', async ()
     requestedEndpoints.filter((endpoint) => endpoint.includes('/rulesets/')).sort(),
     ['repos/OriginTrail/dkg/rulesets/1', 'repos/OriginTrail/dkg/rulesets/2'],
   );
+
+  // A controller file the pin predates is reported as drift, not an error;
+  // any other failure still errors the check.
+  const [addedLater] = CONTROLLER_POLICY_FILES.slice(-1);
+  const pinnedRef = `ref=${encodeURIComponent(inspection.controller.pin)}`;
+  const withNewFile = await inspectCiPolicyFreshness({
+    inspection,
+    token: 'test-token',
+    requestJson: async (endpoint, token) => {
+      if (endpoint.includes(`/contents/${addedLater}?${pinnedRef}`)) {
+        throw Object.assign(new Error('GitHub API returned 404'), { status: 404 });
+      }
+      return requestJson(endpoint, token);
+    },
+  });
+  assert.equal(withNewFile.checks.freshness.status, 'fail');
+  assert.deepEqual(withNewFile.checks.freshness.details.driftedFiles, [addedLater]);
+  const unreachable = await inspectCiPolicyFreshness({
+    inspection,
+    token: 'test-token',
+    requestJson: async (endpoint, token) => {
+      if (endpoint.includes('/contents/')) throw Object.assign(new Error('GitHub API returned 500'), { status: 500 });
+      return requestJson(endpoint, token);
+    },
+  });
+  assert.equal(unreachable.checks.freshness.status, 'error');
 });
 
 test('effective policy inspection reads every rules page and rejects malformed pages', async () => {
