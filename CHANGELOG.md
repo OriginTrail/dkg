@@ -6,6 +6,17 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Fixed
 
+- **Chain log reads fit each RPC provider's `eth_getLogs` limits**: a Base
+  mainnet node more than 2,000 blocks behind (about 67 minutes of downtime)
+  stopped advancing its chain event lanes on the default public RPC set,
+  because `mainnet.base.org` caps a request at 2,000 blocks while the two
+  backups refuse older blocks at any span. Every log scanner — the event
+  poller, the chain index, Hub rotation polling, the authority readers and the
+  paged history scans — now splits a range to the provider's span cap,
+  remembers the cap per provider so later reads start there, and fails over
+  without splitting when a provider refuses history, archive or plan-limited
+  ranges. The event lanes still page 9,000 blocks and advance their cursor
+  only after a whole page succeeds.
 - **`dkg status` no longer reports a healthy store as UNREACHABLE on a cold
   daemon**: since 10.0.7 plain `/api/status` never starts the full-store quad
   count, so on a node where nothing had requested one, `dkg status` showed a
