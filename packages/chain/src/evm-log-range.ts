@@ -295,7 +295,6 @@ export async function readAdaptiveEvmLogRange<T>(
   params: Readonly<AdaptiveEvmLogRangeParams<T>>,
 ): Promise<T[]> {
   const { read, fromBlock, toBlock, signal, provider } = params;
-  const maxRequests = EVM_LOG_RANGE_MAX_REQUESTS_PER_READ;
   const learn = (maxBlocks: number, stated: boolean): void => {
     const previous = liveSpanCap(provider);
     if (previous !== undefined && previous <= maxBlocks) return;
@@ -334,9 +333,10 @@ export async function readAdaptiveEvmLogRange<T>(
     const needed = pending.reduce((sum, [lo, hi]) => (
       sum + (cap === undefined ? 1 : Math.max(1, Math.ceil((hi - lo + 1) / cap)))
     ), 0);
-    if (requests + needed > maxRequests) {
+    if (requests + needed > EVM_LOG_RANGE_MAX_REQUESTS_PER_READ) {
       throw unavailable(
-        `needs ${needed} more requests at a ${cap ?? 'full'}-block span (budget ${maxRequests})`,
+        `needs ${needed} more requests at a ${cap ?? 'full'}-block span `
+          + `(budget ${EVM_LOG_RANGE_MAX_REQUESTS_PER_READ})`,
         { kind: 'span', ...(cap === undefined ? {} : { maxBlocks: cap }) },
         lastSpanRefusal,
       );
