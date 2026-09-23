@@ -19,13 +19,13 @@
  * - this node's own policy for a graph it holds says so;
  * - ontology carries its private definition, or only its name (a public
  *   graph's definition carries its name);
- * - a bare on-chain id binding names a slot the chain proves curated, or a
- *   slot the chain proves isn't live (it may be a curated slot this node's RPC
- *   can't see yet; a public binding comes back with the next sync).
+ * - a bare on-chain id binding names a slot the chain proves curated.
  *
  * A public definition, a held graph whose own policy is public, and a binding
- * to a live public slot are kept. A binding whose slot can't be classified
- * now is kept and retried on the next pass. Chain reads are bounded per pass.
+ * to a live public slot are kept. So is a binding whose slot isn't proven
+ * either way: a slot that doesn't read live may still be a public one this
+ * node's RPC can't see yet, so it is retried on a later pass. Chain reads are
+ * bounded per pass; a slot the classifier already knows costs none.
  *
  * A graph with a public definition in ontology is never a candidate, so the
  * common case costs one store query and no chain read.
@@ -38,25 +38,20 @@ import {
   assertSafeIri,
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
+  type OntologyBindingSlotClass,
 } from '@origintrail-official/dkg-core';
 import {
   deleteByPatternWithoutCount,
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
+import { stripLiteral } from './dkg-agent-utils.js';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 const SYSTEM_IDS = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
 
 /** Chain classifications one pass may start; the rest wait for the next pass. */
 export const METADATA_RELOCATION_MAX_CHAIN_CLASSIFICATIONS = 16;
-
-/**
- * An on-chain slot named by an ontology binding. `curated` and `public` are
- * proven on a live slot; `inactive` means the chain proved the slot isn't
- * live; `unknown` means no proof either way right now.
- */
-export type OntologyBindingSlotClass = 'curated' | 'public' | 'inactive' | 'unknown';
 
 export interface ContextGraphMetadataRelocationDependencies {
   readonly store: TripleStore;
@@ -71,6 +66,11 @@ export interface ContextGraphMetadataRelocationDependencies {
    * that need the chain untouched (no chain access).
    */
   readonly classifyOnChainSlot?: (onChainId: string) => Promise<OntologyBindingSlotClass>;
+  /**
+   * A class the classifier already knows without a chain read, if any. Such
+   * slots don't count against {@link maxChainClassifications}.
+   */
+  readonly knownSlotClass?: (onChainId: string) => OntologyBindingSlotClass | undefined;
   /** Defaults to {@link METADATA_RELOCATION_MAX_CHAIN_CLASSIFICATIONS}. */
   readonly maxChainClassifications?: number;
 }
@@ -80,7 +80,7 @@ export interface ContextGraphMetadataRelocationResult {
   readonly movedToMeta: readonly string[];
   /** Graphs not held here whose private rows were deleted from ontology. */
   readonly deletedForeign: number;
-  /** Graphs kept because a binding's slot couldn't be classified this pass. */
+  /** Graphs kept because a binding's slot wasn't proven public or curated this pass. */
   readonly unclassified: number;
 }
 
@@ -93,10 +93,6 @@ interface Candidate {
   readonly ontologyRows: OntologyRow[];
   /** This node has the graph's own `_meta`, so it holds the graph. */
   held: boolean;
-}
-
-function stripLiteral(value: string): string {
-  return value.replace(/^"|"(?:\^\^<[^>]*>|@[A-Za-z-]+)?$/g, '');
 }
 
 async function candidates(store: TripleStore, ontologyGraph: string): Promise<Map<string, Candidate>> {
@@ -178,9 +174,14 @@ export async function relocatePrivateContextGraphMetadata(
   const slotClasses = new Map<string, OntologyBindingSlotClass>();
   let chainClassifications = 0;
   const classifySlot = async (onChainId: string): Promise<OntologyBindingSlotClass> => {
-    const known = slotClasses.get(onChainId);
-    if (known !== undefined) return known;
+    const seen = slotClasses.get(onChainId);
+    if (seen !== undefined) return seen;
     if (!deps.classifyOnChainSlot || !/^[1-9]\d*$/.test(onChainId)) return 'unknown';
+    const known = deps.knownSlotClass?.(onChainId);
+    if (known !== undefined) {
+      slotClasses.set(onChainId, known);
+      return known;
+    }
     if (chainClassifications >= maxChainClassifications) return 'unknown';
     chainClassifications += 1;
     const slotClass = await deps.classifyOnChainSlot(onChainId)
@@ -216,17 +217,17 @@ export async function relocatePrivateContextGraphMetadata(
         .filter((row) => row.predicate === CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE)
         .map((row) => stripLiteral(row.object).trim());
       if (onChainIds.length === 0 || !deps.classifyOnChainSlot) continue;
-      let anyUnknown = false;
+      let anyUnproven = false;
       for (const onChainId of onChainIds) {
         const slotClass = await classifySlot(onChainId);
-        if (slotClass === 'curated' || slotClass === 'inactive') {
+        if (slotClass === 'curated') {
           remove = true;
           break;
         }
-        if (slotClass === 'unknown') anyUnknown = true;
+        if (slotClass !== 'public') anyUnproven = true;
       }
       if (!remove) {
-        if (anyUnknown) unclassified += 1;
+        if (anyUnproven) unclassified += 1;
         continue;
       }
     }

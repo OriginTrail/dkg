@@ -1,6 +1,6 @@
 import {
   decodePublishRequest, SYSTEM_CONTEXT_GRAPHS, isAgentRegistryContextGraph, DKG_ONTOLOGY,
-  CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
+  CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE, type OntologyBindingSlotClass,
   Logger, createOperationContext,
   isSafeIri, assertSafeIri, validateSubGraphName, validateContextGraphId,
   contextGraphSubGraphUri,
@@ -39,7 +39,6 @@ import type {
   ContextGraphSubInput,
 } from './dkg-agent-types.js';
 import { normalizeContextGraphSubscriptionTransition } from './context-graph-subscription-policy.js';
-import type { OntologyBindingSlotClass } from './context-graph-metadata-relocation.js';
 
 /** One registration announces one binding; more in a message are dropped unread. */
 const MAX_ONTOLOGY_GOSSIP_BINDING_CLASSIFICATIONS = 4;
@@ -914,9 +913,10 @@ export class GossipPublishHandler {
    * Keep only on-chain id bindings whose slot is proven live and public:
    * ontology carries public graphs, and a curated graph's binding stays in its
    * own `_meta`. A registration announcement usually outruns this node's view
-   * of a new slot, so an unproven binding is dropped too; it is a hint, and
-   * ontology sync delivers it again later. Each distinct slot costs a chain
-   * read, so a message gets only a few.
+   * of a new slot, so an unproven binding is dropped too: this only declines
+   * to store it, and removes nothing already stored. It is a hint, and
+   * ontology sync or chain discovery delivers a public binding again later.
+   * Each distinct slot costs a chain read, so a message gets only a few.
    */
   private async filterUnprovenOnChainBindings(quads: Quad[], ctx: OperationContext): Promise<Quad[]> {
     const classify = this.callbacks.classifyOnChainSlot;

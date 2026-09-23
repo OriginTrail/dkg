@@ -432,18 +432,104 @@ describe('relocating curated and private metadata that earlier builds left in on
     await expect(lookupBinding(store, '0xabc/unknown-policy')).resolves.toBeUndefined();
   });
 
-  it('deletes a bare binding to a slot the chain proves inactive', async () => {
+  it('keeps a bare binding to a slot that doesn’t read live until the slot is proven curated', async () => {
     const store = (await createAgent('relocate-inactive')).agent.store;
-    await store.insert([bindingQuad('0xabc/not-minted', '77')]);
+    await store.insert([bindingQuad('0xabc/not-live', '77')]);
 
-    const result = await relocatePrivateContextGraphMetadata({
+    const notLive = await relocatePrivateContextGraphMetadata({
       store,
       localAccessPolicy: async () => null,
       classifyOnChainSlot: async () => 'inactive',
     });
+    expect(notLive).toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 1 });
+    await expect(lookupBinding(store, '0xabc/not-live')).resolves.toBe('77');
 
-    expect(result).toEqual({ movedToMeta: [], deletedForeign: 1, unclassified: 0 });
-    await expect(lookupBinding(store, '0xabc/not-minted')).resolves.toBeUndefined();
+    const curated = await relocatePrivateContextGraphMetadata({
+      store,
+      localAccessPolicy: async () => null,
+      classifyOnChainSlot: async () => 'curated',
+    });
+    expect(curated).toEqual({ movedToMeta: [], deletedForeign: 1, unclassified: 0 });
+    await expect(lookupBinding(store, '0xabc/not-live')).resolves.toBeUndefined();
+  });
+
+  it('spends the per-pass chain budget only on slots the classifier doesn’t know yet', async () => {
+    const store = (await createAgent('relocate-known')).agent.store;
+    await store.insert([
+      ...Array.from({ length: 3 }, (_, index) => bindingQuad(`0xabc/known-public-${index}`, String(300 + index))),
+      bindingQuad('0xabc/known-not-live', '310'),
+      bindingQuad('0xabc/new-curated', '320'),
+    ]);
+    const known = new Map([['300', 'public'], ['301', 'public'], ['302', 'public'], ['310', 'inactive']] as const);
+    const classify = vi.fn(async (_slot: string) => 'curated' as const);
+
+    const result = await relocatePrivateContextGraphMetadata({
+      store,
+      localAccessPolicy: async () => null,
+      classifyOnChainSlot: classify,
+      knownSlotClass: (slot) => known.get(slot as '300'),
+      maxChainClassifications: 1,
+    });
+
+    expect(classify.mock.calls).toEqual([['320']]);
+    expect(result).toEqual({ movedToMeta: [], deletedForeign: 1, unclassified: 1 });
+    await expect(lookupBinding(store, '0xabc/new-curated')).resolves.toBeUndefined();
+    await expect(lookupBinding(store, '0xabc/known-not-live')).resolves.toBe('310');
+    await expect(lookupBinding(store, '0xabc/known-public-0')).resolves.toBe('300');
+  });
+
+  it('keeps a public graph’s binding through a read that says its slot isn’t live', async () => {
+    const id = '0xabc/public-behind-rpc';
+    const { agent, chain } = await createAgent('relocate-lagging-rpc');
+    const slot = await createOnChain(chain, 0);
+    await agent.store.insert([bindingQuad(id, slot)]);
+    const liveness = vi.spyOn(chain, 'isContextGraphActiveOnChain').mockResolvedValueOnce(false);
+
+    await expect(agent.relocatePrivateContextGraphMetadata())
+      .resolves.toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 1 });
+    await expect(lookupBinding(agent.store, id)).resolves.toBe(slot);
+
+    // The not-live answer is reused for a while rather than read every pass...
+    await agent.relocatePrivateContextGraphMetadata();
+    expect(liveness).toHaveBeenCalledTimes(1);
+
+    // ...then the slot is read again and proven public.
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      vi.setSystemTime(Date.now() + DKGAgent.INACTIVE_ONTOLOGY_BINDING_SLOT_RECHECK_MS + 1);
+      await expect(agent.relocatePrivateContextGraphMetadata())
+        .resolves.toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 0 });
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(liveness).toHaveBeenCalledTimes(2);
+    await expect(lookupBinding(agent.store, id)).resolves.toBe(slot);
+    expect(agent.knownOntologyBindingSlotClass(slot)).toBe('public');
+  });
+
+  it('removes a binding to a curated slot that no longer reads live', async () => {
+    const id = '0xabc/deactivated-curated';
+    const { agent, chain } = await createAgent('relocate-deactivated');
+    const slot = await createOnChain(chain, 1);
+    await agent.store.insert([bindingQuad(id, slot)]);
+    vi.spyOn(chain, 'isContextGraphActiveOnChain').mockResolvedValue(false);
+
+    await expect(agent.relocatePrivateContextGraphMetadata())
+      .resolves.toEqual({ movedToMeta: [], deletedForeign: 1, unclassified: 0 });
+    await expect(lookupBinding(agent.store, id)).resolves.toBeUndefined();
+  });
+
+  it('forgets the oldest not-live slot once it holds the most it keeps', async () => {
+    const { agent } = await createAgent('slot-memory-bound');
+    const max = DKGAgent.INACTIVE_ONTOLOGY_BINDING_SLOTS_MAX;
+    // None of these slots exists on the mock chain, so each reads not live.
+    for (let slot = 1; slot <= max + 1; slot += 1) {
+      await expect(agent.classifyOntologyBindingSlot(String(slot))).resolves.toBe('inactive');
+    }
+
+    expect(agent.knownOntologyBindingSlotClass('1')).toBeUndefined();
+    expect(agent.knownOntologyBindingSlotClass('2')).toBe('inactive');
+    expect(agent.knownOntologyBindingSlotClass(String(max + 1))).toBe('inactive');
   });
 
   it('bounds chain classification per pass and reads a shared slot once', async () => {
@@ -589,6 +675,56 @@ describe('store discovery on a Core with a bare on-chain binding', () => {
   });
 });
 
+describe('store discovery of an on-chain id binding kept in _meta', () => {
+  it('restores a curated graph’s on-chain id from its own _meta', async () => {
+    const id = 'curated-discovery-restart';
+    const { agent, ownerAddress } = await createAgent('discovery-meta-binding');
+    await agent.createContextGraph({
+      id,
+      name: 'Restored',
+      accessPolicy: 1,
+      allowedAgents: [ownerAddress],
+      callerAgentAddress: ownerAddress,
+    });
+    const { onChainId } = await agent.registerContextGraph(id, { callerAgentAddress: ownerAddress });
+    agent.subscribedContextGraphs.delete(id);
+
+    await agent.discoverContextGraphsFromStore();
+
+    expect(agent.subscribedContextGraphs.get(id)?.onChainId).toBe(onChainId);
+  });
+
+  it('catalogues a bare binding that chain discovery left in a graph’s _meta', async () => {
+    const id = '0x1111111111111111111111111111111111111111/curator-restored';
+    const { agent } = await createAgent('discovery-meta-bare');
+    await agent.store.insert([
+      bindingQuad(id, '904', contextGraphMetaGraphUri(id)),
+      // A binding about the graph in some other graph's `_meta` is not its own.
+      bindingQuad('0x1111111111111111111111111111111111111111/elsewhere', '905', contextGraphMetaGraphUri(id)),
+    ]);
+
+    await agent.discoverContextGraphsFromStore();
+
+    expect(agent.subscribedContextGraphs.get(id)?.onChainId).toBe('904');
+    expect(agent.subscribedContextGraphs.get('0x1111111111111111111111111111111111111111/elsewhere'))
+      .toBeUndefined();
+  });
+
+  it('prefers the ontology copy when both graphs hold a binding', async () => {
+    const id = '0x1111111111111111111111111111111111111111/both-copies';
+    const { agent } = await createAgent('discovery-both-copies');
+    await agent.store.insert([
+      ontologyQuad(contextGraphDataGraphUri(id), DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
+      bindingQuad(id, '31'),
+      bindingQuad(id, '32', contextGraphMetaGraphUri(id)),
+    ]);
+
+    await agent.discoverContextGraphsFromStore();
+
+    expect(agent.subscribedContextGraphs.get(id)?.onChainId).toBe('31');
+  });
+});
+
 describe('agent profile contextGraphsServed', () => {
   it('leaves out a subscribed graph that has no definition yet', async () => {
     const { agent, ownerAddress } = await createAgent('profile');
@@ -647,15 +783,21 @@ describe('ontology gossip bindings', () => {
     );
     await expect(lookupBinding(agent.store, id)).resolves.toBeUndefined();
 
-    // A copy that arrives by ontology sync is removed for the same reason.
+    // A copy that arrives by ontology sync stays until its slot is proven...
     await agent.store.insert([bindingQuad(id, '1')]);
-    await agent.relocatePrivateContextGraphMetadata();
-    await expect(lookupBinding(agent.store, id)).resolves.toBeUndefined();
+    await expect(agent.relocatePrivateContextGraphMetadata())
+      .resolves.toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 1 });
+    await expect(lookupBinding(agent.store, id)).resolves.toBe('1');
 
     // Neither read may leave a default "public" answer behind for StorageACK
-    // curation checks once the curated slot becomes visible.
+    // curation checks once the curated slot becomes visible...
     await expect(createOnChain(chain, 1)).resolves.toBe('1');
     await expect(agent.resolveCgCurationForAck('1')).resolves.toBe(true);
+
+    // ...and goes once the slot is known to be curated.
+    await expect(agent.relocatePrivateContextGraphMetadata())
+      .resolves.toEqual({ movedToMeta: [], deletedForeign: 1, unclassified: 0 });
+    await expect(lookupBinding(agent.store, id)).resolves.toBeUndefined();
   });
 
   it('classifies at most a few bindings per message and drops the rest', async () => {

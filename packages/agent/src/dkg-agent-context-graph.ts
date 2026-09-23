@@ -70,6 +70,7 @@ import {
   ratchetSwmSenderChainKey,
   uint64ForProto,
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
+  CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
   type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
   type ContextGraphIdV1, type EvmAddressV1, type NetworkIdV1,
   type SwmSenderKeyMessageMsg,
@@ -1195,25 +1196,25 @@ export class ContextGraphMethods extends DKGAgentBase {
           await deleteByPatternWithoutCount(this.store, {
             graph: ontologyGraph,
             subject: contextGraphUri,
-            predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+            predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
           });
           await deleteByPatternWithoutCount(this.store, {
             graph: cgMetaGraph,
             subject: contextGraphUri,
-            predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+            predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
           });
           await this.store.insert([
             ...(reconciledIsCurated
               ? []
               : [{
                   subject: contextGraphUri,
-                  predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+                  predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
                   object: `"${resolvedOnChainId}"`,
                   graph: ontologyGraph,
                 }]),
             {
               subject: contextGraphUri,
-              predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+              predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
               object: `"${resolvedOnChainId}"`,
               graph: cgMetaGraph,
             },
@@ -1754,18 +1755,18 @@ export class ContextGraphMethods extends DKGAgentBase {
       await deleteByPatternWithoutCount(this.store, {
         graph: ontologyGraph,
         subject: contextGraphUri,
-        predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+        predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
       });
       await deleteByPatternWithoutCount(this.store, {
         graph: cgMetaGraph,
         subject: contextGraphUri,
-        predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+        predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
       });
       await this.store.insert([
         ...(isCuratedRegistration
           ? []
-          : [{ subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph: ontologyGraph }]),
-        { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph: cgMetaGraph },
+          : [{ subject: contextGraphUri, predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE, object: `"${onChainId}"`, graph: ontologyGraph }]),
+        { subject: contextGraphUri, predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE, object: `"${onChainId}"`, graph: cgMetaGraph },
         // Persist the wire-id commitment in the cg's _meta graph so a
         // restart can resume host-mode subscription on the correct
         // topic without re-reading the chain event.

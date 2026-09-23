@@ -1106,15 +1106,6 @@ describe('Context Graph discovery/subscription boundary', () => {
       (offlineChain as any).listContextGraphsFromChain = async () => {
         throw new Error('chain RPC unavailable');
       };
-      // The ontology metadata relocation checks a bare binding's slot. Offline,
-      // those reads fail rather than report the slot as not live (which would
-      // remove the binding as stale).
-      (offlineChain as any).isContextGraphActiveOnChain = async () => {
-        throw new Error('chain RPC unavailable');
-      };
-      (offlineChain as any).getContextGraphAccessPolicy = async () => {
-        throw new Error('chain RPC unavailable');
-      };
       restarted = await DKGAgent.create({
         name: 'RestartCatalogueOffline',
         listenHost: '127.0.0.1',
