@@ -480,11 +480,11 @@ describe('ContextGraphNameResolver: background passes', () => {
         }
         return listTargets();
       },
-      log: { ...state.deps.log, debug: (message) => { debug.push(message); } },
+      log: { ...state.deps.log, warn: (message) => { debug.push(message); } },
     };
     const resolver = resolverFor(state);
     resolver.request();
-    await waitFor(() => debug.some((line) => line.includes('name resolution pass failed: subscription table busy')));
+    await waitFor(() => debug.includes('Context Graph name resolution pass failed: Error: subscription table busy'));
     expect(resolver.entryFor(NAME_HASH)).toBeUndefined();
     resolver.request();
     await waitFor(() => resolver.entryFor(NAME_HASH)?.state === 'resolved');
@@ -511,9 +511,11 @@ describe('ContextGraphNameResolver: background passes', () => {
     resolver.request();
     await vi.advanceTimersByTimeAsync(0);
     expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'pending', lastOutcome: 'attempt-failed', attempts: 1 });
-    expect(debug.some((line) => line.includes('name resolution attempt failed: gossip layer restarting'))).toBe(true);
-    // An anticipated failure is routine: nothing at warn.
-    expect(warn).toEqual([]);
+    expect(warn).toEqual([
+      `Context Graph ${NAME_HASH.slice(0, 18)}… name resolution attempt failed (retrying with backoff): `
+        + 'Error: gossip layer restarting',
+    ]);
+    expect(debug.some((line) => line.includes('attempt failed'))).toBe(false);
     expect(state.adopted).toEqual([]);
 
     // No request(), no peer update: the retry schedule alone gets it done.
@@ -522,39 +524,59 @@ describe('ContextGraphNameResolver: background passes', () => {
     expect(state.adopted).toEqual([{ contextGraphId: CLEARTEXT, source: 'peer-protocol' }]);
   });
 
-  it('reports a defect-shaped failure at warn as attempt-error, and still retries it', async () => {
+  it('reports every failed attempt at warn at most once per interval, whatever it threw, and keeps retrying', async () => {
     vi.useFakeTimers();
     const debug: string[] = [];
     const warn: string[] = [];
     const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    // A defect thrown as a plain Error, a routine parse failure, a non-Error
+    // value: none is singled out by its class, and none is swallowed.
+    const failures: unknown[] = [
+      new Error('promoteRow missing'),
+      new SyntaxError('Unexpected token < in JSON'),
+      new RangeError('Invalid array length'),
+      'boom',
+    ];
     let adoptCalls = 0;
     state.deps = {
       ...state.deps,
       adopt: async (_target, contextGraphId, source) => {
+        const failure = failures[adoptCalls];
         adoptCalls += 1;
-        // A refactor left a step undefined; it is fixed by the third attempt.
-        if (adoptCalls <= 2) throw new TypeError('promoteRow is not a function');
+        if (failure !== undefined) throw failure;
         state.adopted.push({ contextGraphId, source });
         return true;
       },
       log: { info: () => undefined, debug: (message) => { debug.push(message); }, warn: (message) => { warn.push(message); } },
     };
-    const resolver = resolverFor(state, { retryBaseMs: 1_000, peerAskTtlMs: 0 });
+    const failed = (detail: string) => `Context Graph ${NAME_HASH.slice(0, 18)}… name resolution attempt failed `
+      + `(retrying with backoff): ${detail}`;
+    const resolver = resolverFor(state, {
+      retryBaseMs: 1_000,
+      retryMaxMs: 1_000,
+      peerAskTtlMs: 0,
+      failureWarnIntervalMs: 2_500,
+    });
     resolver.request();
     await vi.advanceTimersByTimeAsync(0);
-    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'pending', lastOutcome: 'attempt-error', attempts: 1 });
-    expect(warn).toEqual([
-      expect.stringContaining('name resolution attempt hit an unexpected error (retrying with backoff): '
-        + 'TypeError: promoteRow is not a function'),
-    ]);
-    expect(debug.some((line) => line.includes('attempt failed'))).toBe(false);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'pending', lastOutcome: 'attempt-failed', attempts: 1 });
+    expect(warn).toEqual([failed('Error: promoteRow missing')]);
 
-    // Every attempt that hits it says so at warn...
-    await vi.advanceTimersByTimeAsync(1_000);
-    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'pending', lastOutcome: 'attempt-error', attempts: 2 });
-    expect(warn).toHaveLength(2);
-    // ...and it stays on the retry schedule, so a misread transient failure still recovers.
+    // Within the interval, repeats go to debug: still logged, not flooding warn.
     await vi.advanceTimersByTimeAsync(2_000);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'pending', lastOutcome: 'attempt-failed', attempts: 3 });
+    expect(warn).toHaveLength(1);
+    expect(debug.filter((line) => line.includes('attempt failed'))).toEqual([
+      failed('SyntaxError: Unexpected token < in JSON'),
+      failed('RangeError: Invalid array length'),
+    ]);
+
+    // Past the interval it is at warn again, and a thrown non-Error keeps its value.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(warn).toEqual([failed('Error: promoteRow missing'), failed('boom')]);
+
+    // It stayed on the retry schedule throughout.
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'resolved', contextGraphId: CLEARTEXT });
   });
 
@@ -569,14 +591,16 @@ describe('ContextGraphNameResolver: background passes', () => {
     expect(entry).toMatchObject({ state: 'pending', lastOutcome: 'attempt-failed', attempts: 1 });
     expect(entry?.state === 'pending' ? entry.nextAttemptAt : undefined).toBeTypeOf('number');
     expect(state.asked).toEqual(['holder']);
-    expect(warn.length).toBeGreaterThan(0);
-    expect(new Set(warn)).toEqual(new Set([
+    // Each kind of failure is reported once; the repeats of the row check went to debug.
+    expect(warn).toEqual([
       `Context Graph ${NAME_HASH.slice(0, 18)}… row check failed; treating the row as still wanting `
         + 'a cleartext id: TypeError: rows.get is not a function',
-    ]));
+      `Context Graph ${NAME_HASH.slice(0, 18)}… name resolution attempt failed (retrying with backoff): `
+        + 'Error: gossip layer restarting',
+    ]);
   });
 
-  it('logs a pass that fails with a defect at warn', async () => {
+  it('logs a failed pass at warn with its error class', async () => {
     const warn: string[] = [];
     const state = harness();
     state.deps = {

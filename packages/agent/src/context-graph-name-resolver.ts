@@ -40,12 +40,7 @@ export type ContextGraphNamePendingOutcome =
   | 'no-peers'
   | 'not-found'
   /** The attempt threw (an adoption that failed midway, say); retried with backoff. */
-  | 'attempt-failed'
-  /**
-   * The attempt threw an error that signals a defect in this node's code
-   * (see `isUnexpectedAttemptError`): logged at warn, still retried.
-   */
-  | 'attempt-error';
+  | 'attempt-failed';
 
 export interface ContextGraphNameTarget {
   /** Lowercase name hash; also the placeholder row's local id. */
@@ -143,6 +138,8 @@ export interface ContextGraphNameResolverOptions {
   readonly ontologyPullFailureCooldownMs?: number;
   readonly retryBaseMs?: number;
   readonly retryMaxMs?: number;
+  /** A failure is logged at warn at most once per this interval per hash (debug otherwise). */
+  readonly failureWarnIntervalMs?: number;
 }
 
 const CONTEXT_GRAPH_NAME_MAX_PEERS_PER_ATTEMPT = 8;
@@ -152,33 +149,20 @@ const CONTEXT_GRAPH_NAME_ONTOLOGY_PULL_COOLDOWN_MS = 30 * 60_000;
 const CONTEXT_GRAPH_NAME_ONTOLOGY_PULL_FAILURE_COOLDOWN_MS = 2 * 60_000;
 const CONTEXT_GRAPH_NAME_RETRY_BASE_MS = 30_000;
 const CONTEXT_GRAPH_NAME_RETRY_MAX_MS = 10 * 60_000;
+const CONTEXT_GRAPH_NAME_FAILURE_WARN_INTERVAL_MS = 30 * 60_000;
 /** Bounds on remembered state; oldest entries are evicted first. */
 const MAX_REMEMBERED_ASKS = 4_096;
 const MAX_REMEMBERED_RESOLUTIONS = 256;
 const MAX_QUEUED_PEERS_PER_TARGET = 64;
+const MAX_REMEMBERED_FAILURE_WARNINGS = 256;
 
 function short(nameHash: string): string {
   return `${nameHash.slice(0, 18)}…`;
 }
 
-/**
- * Errors the JavaScript runtime raises for a defect in this node's own code
- * (calling something that is not a function, a missing binding, an invalid
- * argument), as opposed to a peer, store or gossip layer that is briefly
- * unavailable. Both are retried: a transient failure that happens to surface
- * as one of these still recovers on its own, but a real defect is logged at
- * warn on every attempt instead of hiding among ordinary retries.
- */
-function isUnexpectedAttemptError(error: unknown): boolean {
-  return error instanceof TypeError
-    || error instanceof ReferenceError
-    || error instanceof RangeError
-    || error instanceof SyntaxError;
-}
-
+/** The error's class and message (`TypeError: x is not a function`), or the thrown value. */
 function describeError(error: unknown): string {
-  if (!(error instanceof Error)) return String(error);
-  return isUnexpectedAttemptError(error) ? `${error.name}: ${error.message}` : error.message;
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 }
 
 export class ContextGraphNameResolver {
@@ -190,6 +174,8 @@ export class ContextGraphNameResolver {
   private readonly ontologyPullBlockedUntil = new Map<string, number>();
   /** nameHash -> newly identified peers waiting for the in-flight attempt. */
   private readonly queuedPeers = new Map<string, Set<string>>();
+  /** failure kind + name hash -> when a failure of that kind last went out at warn. */
+  private readonly failureWarnedAt = new Map<string, number>();
   private readonly lifetime = new AbortController();
   private readonly now: () => number;
   private readonly maxPeersPerAttempt: number;
@@ -199,6 +185,7 @@ export class ContextGraphNameResolver {
   private readonly ontologyPullFailureCooldownMs: number;
   private readonly retryBaseMs: number;
   private readonly retryMaxMs: number;
+  private readonly failureWarnIntervalMs: number;
   private timer: ReturnType<typeof setTimeout> | undefined;
   private timerDueAt = Number.POSITIVE_INFINITY;
   private pass: Promise<void> | undefined;
@@ -219,6 +206,7 @@ export class ContextGraphNameResolver {
       ?? CONTEXT_GRAPH_NAME_ONTOLOGY_PULL_FAILURE_COOLDOWN_MS;
     this.retryBaseMs = options.retryBaseMs ?? CONTEXT_GRAPH_NAME_RETRY_BASE_MS;
     this.retryMaxMs = options.retryMaxMs ?? CONTEXT_GRAPH_NAME_RETRY_MAX_MS;
+    this.failureWarnIntervalMs = options.failureWarnIntervalMs ?? CONTEXT_GRAPH_NAME_FAILURE_WARN_INTERVAL_MS;
   }
 
   /** Current entry for one name hash (any case). */
@@ -336,9 +324,7 @@ export class ContextGraphNameResolver {
     }
     this.pass = this.passOnce()
       .catch((error: unknown) => {
-        const message = `Context Graph name resolution pass failed: ${describeError(error)}`;
-        if (isUnexpectedAttemptError(error)) this.deps.log.warn(message);
-        else this.deps.log.debug(message);
+        this.reportFailure('pass', `Context Graph name resolution pass failed: ${describeError(error)}`);
       })
       .finally(() => {
         this.pass = undefined;
@@ -412,22 +398,35 @@ export class ContextGraphNameResolver {
    * that is restarting) must still leave the hash on the retry schedule:
    * retries are driven only by pending entries, so without one nothing would
    * ever attempt this hash again. Shutdown is the one failure not retried.
-   * A defect-shaped error is retried too, but reported as `attempt-error`
-   * and logged at warn, so it cannot pass for "not found yet".
+   * Whatever threw, it is reported (see `reportFailure`), so a defect cannot
+   * pass for "not found yet".
    */
   private failedAttempt(target: ContextGraphNameTarget, error: unknown): ContextGraphNameResolutionEntry | undefined {
     if (this.lifetime.signal.aborted) throw error;
-    if (isUnexpectedAttemptError(error)) {
-      this.deps.log.warn(
-        `Context Graph ${short(target.nameHash)} name resolution attempt hit an unexpected error `
-        + `(retrying with backoff): ${describeError(error)}`,
-      );
-      return this.pendingIfCurrent(target, 'attempt-error');
-    }
-    this.deps.log.debug(
-      `Context Graph ${short(target.nameHash)} name resolution attempt failed: ${describeError(error)}`,
+    this.reportFailure(
+      `attempt\u0000${target.nameHash}`,
+      `Context Graph ${short(target.nameHash)} name resolution attempt failed (retrying with backoff): `
+      + describeError(error),
     );
     return this.pendingIfCurrent(target, 'attempt-failed');
+  }
+
+  /**
+   * Every failure goes out at warn, at most once per interval for the same
+   * kind and hash; repeats in between go to debug. The class of the error
+   * says nothing reliable about its cause (a peer payload fails `JSON.parse`
+   * with a SyntaxError, a defect can throw a plain Error), so none is
+   * singled out: a persistent failure stays visible without flooding the log.
+   */
+  private reportFailure(key: string, message: string): void {
+    const now = this.now();
+    const warnedAt = this.failureWarnedAt.get(key);
+    if (warnedAt !== undefined && now - warnedAt < this.failureWarnIntervalMs) {
+      this.deps.log.debug(message);
+      return;
+    }
+    rememberBounded(this.failureWarnedAt, key, now, MAX_REMEMBERED_FAILURE_WARNINGS);
+    this.deps.log.warn(message);
   }
 
   /** Schedule a retry while the row still wants a cleartext id. */
@@ -439,16 +438,17 @@ export class ContextGraphNameResolver {
   }
 
   /**
-   * Every `isTargetCurrent` call goes through here. A throw is a defect: it
-   * is logged at warn and read as "still current", since unknown is not
-   * gone. That keeps the hash on the retry schedule, and nothing is changed
-   * on the strength of it: the adoption hook re-validates the row itself.
+   * Every `isTargetCurrent` call goes through here. A throw is reported and
+   * read as "still current", since unknown is not gone. That keeps the hash
+   * on the retry schedule, and nothing is changed on the strength of it: the
+   * adoption hook re-validates the row itself.
    */
   private isCurrent(target: ContextGraphNameTarget): boolean {
     try {
       return this.deps.isTargetCurrent(target);
     } catch (error: unknown) {
-      this.deps.log.warn(
+      this.reportFailure(
+        `row-check\u0000${target.nameHash}`,
         `Context Graph ${short(target.nameHash)} row check failed; treating the row as still wanting `
         + `a cleartext id: ${describeError(error)}`,
       );
