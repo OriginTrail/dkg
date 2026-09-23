@@ -10,12 +10,30 @@ All notable changes to the DKG V10 node are documented here. The format is based
   daemon**: since 10.0.7 plain `/api/status` never starts the full-store quad
   count, so on a node where nothing had requested one, `dkg status` showed a
   working managed Oxigraph or external SPARQL store as `UNREACHABLE`.
-  `dkg status` now requests the count itself (`?includeStoreQuads=true`),
-  shows `CHECKING` while the first count runs, and says how old a count is
-  once it is more than a minute old. `/api/status` reports a count nobody has
-  requested as `storeQuadsStatus: "not-requested"` and one in progress as
-  `"pending"` instead of omitting the status, and adds `storeQuadsAgeMs`, the
-  age of the cached count, which ordinary polling still never refreshes.
+  `dkg status` now requests a count itself (`?includeStoreQuads=true`) when
+  none is cached, the last one failed, or the cached one is at least ten
+  minutes old, so running it on a schedule against a healthy store starts at
+  most one full-store count per ten minutes. That bound needs a daemon that
+  reports the count's age: against a 10.0.7 to 10.0.18 daemon every run asks,
+  limited by that daemon's 30-second cache. It shows `CHECKING` while the
+  first count runs, says how old a count is once it is more than a minute
+  old, and marks a count that is being refreshed. `/api/status` reports a
+  count nobody has requested as `storeQuadsStatus: "not-requested"` and one
+  in progress as `"pending"` instead of omitting the status. It adds
+  `storeQuadsAgeMs`, the age of the cached count (null when unknown), which
+  ordinary polling still never refreshes, and `storeQuadsRefreshing`, true
+  while a count runs in the background.
+  Because a reused count says nothing about the store's current state, every
+  `dkg status` run also checks that the store answers at all, with a cheap
+  `ASK` (`?probeStore=true`, reported as `storeReachability`). A store that
+  stops answering shows as `UNREACHABLE` on the next run even while its last
+  count is cached, and no count is started for it. A store that gives no
+  answer within five seconds shows as `NOT RESPONDING`, with its last count,
+  since a busy store, or a busy daemon, delays the check too. The check is never cancelled, so it cannot trigger a
+  managed Oxigraph's deadline restart. A count still running when a managed
+  Oxigraph goes down or restarts is discarded instead of caching the outage,
+  and the cache is cleared once the restarted server is healthy, so a revived
+  store stops showing `UNREACHABLE`.
 
 ## [10.0.18] - 2026-09-22
 

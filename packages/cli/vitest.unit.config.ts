@@ -41,6 +41,7 @@ export default defineConfig({
           'test/status-route-rpc.test.ts',
           'test/backpressure-route.test.ts',
       'test/status-route-store-quads.test.ts',
+      'test/store-reachability.test.ts',
       'test/query-route-lifecycle.test.ts',
       'test/query-catalog-profile-route.test.ts',
       'test/store-unavailable-response.test.ts',
