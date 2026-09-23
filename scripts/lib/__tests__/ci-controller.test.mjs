@@ -26,7 +26,7 @@ import { importSpecifiers } from './load-graph.mjs';
 // This SHA is already reachable from the protected default branch. Candidate
 // changes may update workflow wiring, but the planner and aggregate gates must
 // continue to execute only reviewed policy from this immutable controller.
-const TRUSTED_CI_CONTROLLER_SHA = '780f14aa60c39bdca788967121085c3c0d82d85c';
+const TRUSTED_CI_CONTROLLER_SHA = 'a53dde2192b2c8f7e30c64543b83cf26773a1f89';
 
 test('plan-ci compares modified workspace manifests through git blobs', (t) => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-ci-manifest-'));
@@ -187,15 +187,15 @@ test('workflows execute the planner and aggregate gates from one immutable trust
 
 test('every rotation shim is recorded next to the controller pin', () => {
   // Compatibility paths for older pinned controllers must be listed where the
-  // next rotation happens, so they are deleted with it rather than lingering:
-  // output fallbacks, any term in a lane job's condition besides its own
-  // lane's output (the current planner selects every lane a job runs for),
-  // and the gate's own Windows check.
+  // next rotation happens (a '# Rotation shims:' note before the trusted
+  // checkout), so they are deleted with it rather than lingering: output
+  // fallbacks, any term in a lane job's condition besides its own lane's
+  // output (the current planner selects every lane a job runs for), and a
+  // gate-side Windows check. With none, there is no note.
   const source = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8');
   const { jobs } = parse(source);
   const start = source.indexOf('# Rotation shims:');
-  assert.notEqual(start, -1, 'ci.yml must list its rotation shims next to the controller pin');
-  const note = source.slice(start, source.indexOf('- name: Checkout trusted CI controller', start));
+  const note = start === -1 ? '' : source.slice(start, source.indexOf('- name: Checkout trusted CI controller', start));
   const recorded = [...note.matchAll(/^\s*#\s+- (.+)$/gm)].map(([, entry]) => entry.trim());
   const shims = [
     ...Object.entries(jobs.changes.outputs)
@@ -498,10 +498,7 @@ test('all shared Hardhat consumers require and restore the matching artifact', (
   assert.equal(extract.env.ARTIFACT_DIR, download.with.path);
   assert.match(extract.run, /tar -xzf "\$\{ARTIFACT_DIR\}\/evm-node-test-artifacts\.tgz"/);
   assert.equal(jobs['evm-node-test-artifacts'].if, "needs.changes.outputs.node_test_artifacts == 'true'");
-  const output = jobs.changes.outputs.node_test_artifacts;
-  assert.ok(output.startsWith('${{ steps.plan.outputs.node_test_artifacts || ('));
-  const legacyLanes = [...output.matchAll(/steps\.plan\.outputs\.(\w+) == 'true'/g)].map((match) => match[1]);
-  assert.deepEqual(new Set(legacyLanes), new Set(NODE_TEST_ARTIFACT_LANES));
+  assert.equal(jobs.changes.outputs.node_test_artifacts, '${{ steps.plan.outputs.node_test_artifacts }}');
   for (const lane of NODE_TEST_ARTIFACT_LANES) {
     const job = PRIMARY_LANE_JOBS[lane];
     const consumer = jobs[job];

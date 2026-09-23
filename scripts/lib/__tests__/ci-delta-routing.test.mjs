@@ -682,12 +682,12 @@ test('a document a test reads is a CI input; other documentation stays docs-only
   }
 });
 
-test('the Blazegraph lane follows the agent lane, as ci.yml starts its job', () => {
-  // The Blazegraph job runs the agent's live Blazegraph suites and starts for
-  // either lane; every plan that runs the agent lane says so, so the gate
-  // requires the job.
+test('the Blazegraph lane follows the agent lane, whose live suites its job runs', () => {
+  // The Blazegraph job runs the agent's live Blazegraph suites, so every plan
+  // that runs the agent lane selects the Blazegraph lane too: its output
+  // starts the job, and the gate requires it.
   const job = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')).jobs['tornado-blazegraph'];
-  assert.match(job.if, /needs\.changes\.outputs\.tornado_agent == 'true'/);
+  assert.equal(job.if, "needs.changes.outputs.tornado_blazegraph == 'true'");
   assert.ok(job.steps.some(({ run = '' }) => run.includes('dkg-agent exec vitest run --config vitest.blazegraph.config.ts')));
   for (const filePath of [
     'packages/agent/test-live/rfc64-legacy-swm-boundary-v1.blazegraph.test.ts',
