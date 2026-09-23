@@ -10,6 +10,9 @@ import {
   type GraphWriteRevisionSource,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
+import type { SignedAgentDelegation } from '../src/auth/agent-delegation.js';
+import type { DKGAgent } from '../src/dkg-agent.js';
+import { JoinRequestMethods } from '../src/dkg-agent-join.js';
 import { QueryMethods } from '../src/dkg-agent-query.js';
 import { canReadUnscopedQuery } from '../src/unscoped-query-admission.js';
 import {
@@ -65,6 +68,30 @@ describe('query caller-provided store labels', () => {
       'did:dkg:context-graph:',
       { source: 'agent.swmHostMode.listContextGraphs' },
     );
+  });
+
+  it('attributes the already-member delegation refresh state lookup', async () => {
+    const query = vi.fn<TripleStore['query']>(async () => ({
+      type: 'bindings',
+      bindings: [],
+    }));
+    const delegation = {
+      agentAddress: `0x${'22'.repeat(20)}`,
+      delegateePeerId: 'carrier-peer',
+      issuedAtMs: 1,
+    } as SignedAgentDelegation;
+
+    await expect(
+      JoinRequestMethods.prototype.assertAlreadyMemberDelegationRefresh.call(
+        { store: { query } } as unknown as DKGAgent,
+        'delegation-refresh-cg',
+        delegation,
+        'carrier-peer',
+      ),
+    ).resolves.toBeUndefined();
+
+    expect(query).toHaveBeenCalledOnce();
+    expect(query.mock.calls[0]?.[1]?.source).toBe('agent.delegationRefresh.currentState');
   });
 });
 

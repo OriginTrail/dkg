@@ -83,6 +83,7 @@ import {
 } from './keyed-ttl-single-flight-cache.js';
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
+import type { PublisherConvictionPlanReader } from './publisher-plan.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import type {
   ChainEventLogBinding,
@@ -2849,6 +2850,16 @@ export class EVMChainAdapterBase {
     _publishEpochs?: number,
   ): Promise<boolean> {
     return false;
+  }
+
+  /**
+   * Optional typed PCA planning capability consumed by publish planning. The
+   * conviction mixin overrides this hook; adapter assemblies without that
+   * mixin safely stay direct-spend. The fallback lives here rather than on the
+   * publish holder because `applyMixins` rejects a member two holders define.
+   */
+  protected publisherConvictionPlanReader(): PublisherConvictionPlanReader | undefined {
+    return undefined;
   }
 
   /**

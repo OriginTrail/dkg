@@ -165,6 +165,7 @@ export default defineConfig({
       "test/swm-recovery.test.ts",
       "test/swm-recovery-identity-preservation.test.ts",
       "test/dkg-agent-snapshot-store-injection.test.ts",
+      "test/dkg-agent-apply-mixins.test.ts",
       "test/swm-snapshot-sync.test.ts",
       "test/sync-responder-protection.test.ts",
       "test/sync-on-connect-retry.test.ts",
