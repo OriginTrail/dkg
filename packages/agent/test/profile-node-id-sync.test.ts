@@ -154,6 +154,26 @@ describe('syncProfileNodeId races and diagnostics', () => {
     expect(describeProfileNodeIdSync(result!)).toContain('is already registered as the nodeId of identity 63');
   });
 
+  it('still reports taken when the sharding-table read for the holder fails', async () => {
+    const neverCalled = async (): Promise<never> => { throw new Error('must not send when the peer id is taken'); };
+    const chain = Object.assign(racingChain(neverCalled, 63n), {
+      listDesignatableNodes: async () => { throw new Error('RPC endpoints exhausted'); },
+    });
+    const result = await syncProfileNodeId({ chain, peerId: PEER_ID }, 'manual');
+    expect(result!.outcome).toBe('taken');
+    expect(result!.status.expectedNodeIdHolder).toBeNull();
+  });
+
+  it('reports no-profile for an identity whose profile is gone', async () => {
+    // The testnet ProfileStorage-redeploy state: the Identity survives, the
+    // Profile does not, so there is no nodeId to update.
+    const neverCalled = async (): Promise<never> => { throw new Error('must not send without a profile'); };
+    const chain = Object.assign(racingChain(neverCalled), { getProfileNodeId: async () => '0x' });
+    const result = await syncProfileNodeId({ chain, peerId: PEER_ID }, 'manual');
+    expect(result!.outcome).toBe('no-profile');
+    expect(result!.status).toMatchObject({ identityId: 7n, onChainNodeId: '0x', state: 'no-profile' });
+  });
+
   it('treats a concurrent identical update as in-sync', async () => {
     const chain = racingChain(async (nodeId) => ({
       identityId: 7n, previousNodeId: String(nodeId), nodeId: String(nodeId), changed: false,
