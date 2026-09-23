@@ -6,6 +6,7 @@ import type {
   FinalizedContextGraphAuthorityTargetsResolutionV1,
 } from './dkg-agent-cg-registry.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
+import type { ContextGraphListOnChainFacts } from './context-graph-storage-discovery.js';
 
 export type ListContextGraphsRow = {
   id: string;
@@ -21,6 +22,14 @@ export type ListContextGraphsRow = {
   synced: boolean;
   onChainId?: string;
   callerInvolved?: boolean;
+  /**
+   * `false` when the node knows this graph only by its on-chain name hash:
+   * `id` and `name` are then that hash, never a guessed cleartext. Subscribing
+   * by the hash lets the node resolve and verify the cleartext id.
+   */
+  nameKnown?: boolean;
+  /** Chain-public ContextGraphStorage facts, when the node has observed them. */
+  onChain?: ContextGraphListOnChainFacts;
 };
 
 type ContextGraphListAuthorityAttemptV1<T> =

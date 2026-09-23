@@ -208,6 +208,28 @@ export {
 export { ContextGraphPolicyAuthorizationError } from './dkg-agent-ownership.js';
 export { DKGAgent } from './dkg-agent.js';
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
+export {
+  CONTEXT_GRAPH_STORAGE_DISCOVERY_ID_BUDGET,
+  CONTEXT_GRAPH_STORAGE_DISCOVERY_PAGE_SIZE,
+  CONTEXT_GRAPH_STORAGE_REFRESH_INTERVAL_MS,
+  createInMemoryContextGraphStorageDiscoveryStore,
+  type ContextGraphListOnChainFacts,
+  type ContextGraphStorageDiscoveryStore,
+} from './context-graph-storage-discovery.js';
+export {
+  describeContextGraphOnChainIdResolution,
+  parseContextGraphOnChainIdReference,
+  refusesPrivateContextGraphByOnChainId,
+  type ContextGraphIdAsGiven,
+  type ContextGraphOnChainIdLookup,
+  type ContextGraphOnChainIdReference,
+  type ContextGraphOnChainIdRefusal,
+  type ContextGraphOnChainIdResolution,
+  type ResolveContextGraphOnChainIdOptions,
+  type ResolvedContextGraphOnChainId,
+  type RetiredNumericContextGraphSubscription,
+} from './context-graph-on-chain-reference.js';
+export type { ListContextGraphsRow } from './context-graph-list-authority-enrichment.js';
 export type {
   ConfiguredContextGraphMetadataReconciliationDiagnostic,
   ConfiguredContextGraphMetadataReconciliationResult,

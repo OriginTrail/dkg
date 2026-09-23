@@ -49,6 +49,16 @@ import { normalizeContextGraphAuthorityHash } from
   './context-graph-authority-generation.js';
 import { CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER } from
   './context-graph-authority-rpc-sites.js';
+import type {
+  ContextGraphStorageRange,
+  ContextGraphStorageRangeOptions,
+} from './chain-adapter.js';
+import {
+  CONTEXT_GRAPH_STORAGE_ENUMERATION_RPC_CONSUMER,
+  isContextGraphStorageEnumerationReadRetryable,
+  isNonexistentContextGraphStorageRevert,
+  readContextGraphStorageRangeV1,
+} from './evm-context-graph-storage-enumeration.js';
 
 type ContextGraphRegistryLiveScanPlan =
   | {
@@ -1428,6 +1438,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             fromBlock,
             toBlock,
             signal: options.signal,
+            provider,
           });
         };
         const readAuthorityHistory = () => resolveContextGraphAuthorityHistory({
@@ -1650,6 +1661,75 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     options: ChainReadOptions = {},
   ): Promise<ReadonlyMap<string, bigint | null>> {
     return this.getContextGraphNameHashResolver().resolveMany(nameHashes, options.signal);
+  }
+
+  /** See ChainAdapter.hasContextGraphNameRegistry. */
+  async hasContextGraphNameRegistry(): Promise<boolean> {
+    await this.init();
+    return this.contracts.contextGraphNameRegistry !== undefined;
+  }
+
+  /**
+   * See ChainAdapter.readContextGraphStorageRange and
+   * evm-context-graph-storage-enumeration.ts.
+   */
+  async readContextGraphStorageRange(
+    options: ContextGraphStorageRangeOptions,
+  ): Promise<ContextGraphStorageRange> {
+    await this.init();
+    options.signal?.throwIfAborted();
+    const storage = this.requireContextGraphStorage();
+    const storageAddress = (await storage.getAddress()).toLowerCase();
+    const label = CONTEXT_GRAPH_STORAGE_ENUMERATION_RPC_CONSUMER;
+    const readOptions = {
+      signal: options.signal,
+      rpcUsageConsumer: CONTEXT_GRAPH_STORAGE_ENUMERATION_RPC_CONSUMER,
+      // Background bulk reads, like the authority snapshot: the wide-scan
+      // attempt cap lets a pass queued behind the RPC governor's background
+      // startup jitter finish instead of timing out on the 4 s point-read cap.
+      policy: 'wideLogScan' as const,
+    };
+    const viewReadOptions = {
+      ...readOptions,
+      isRetryable: isContextGraphStorageEnumerationReadRetryable,
+    };
+    return readContextGraphStorageRangeV1({
+      storageAddress,
+      readAnchor: () => this.readTipProvider(
+        `${label} anchor`,
+        async (provider) => {
+          const anchor = await resolveEvmFinalityAnchorBlockV1({
+            finalityConfirmations: this.finalityConfirmations,
+            readHead: () => provider.getBlock('latest'),
+            readBlockAt: (blockNumber) => provider.getBlock(blockNumber),
+            unavailable: (detail) => new Error(
+              `Context Graph storage enumeration anchor unavailable: ${detail}`,
+            ),
+          });
+          return { number: anchor.number, hash: anchor.hash };
+        },
+        readOptions,
+      ),
+      readLatestId: (blockTag) => this.readContractWith(
+        storage,
+        `${label} getLatestContextGraphId`,
+        (c) => c.getLatestContextGraphId({ blockTag }),
+        viewReadOptions,
+      ),
+      readContextGraph: (contextGraphId, blockTag) => this.readContractWith(
+        storage,
+        `${label} getContextGraph`,
+        (c) => c.getContextGraph(contextGraphId, { blockTag }),
+        viewReadOptions,
+      ),
+      readNameHash: (contextGraphId, blockTag) => this.readContractWith(
+        storage,
+        `${label} getNameHash`,
+        (c) => c.getNameHash(contextGraphId, { blockTag }),
+        viewReadOptions,
+      ),
+      isNonexistentContextGraph: isNonexistentContextGraphStorageRevert,
+    }, options);
   }
 }
 

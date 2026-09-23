@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useCallback, lazy, Suspense } from 'react';
 import { useFetch } from '../hooks.js';
-import { executeQuery, fetchStatus, listAssertions, promoteAssertion, publishAssertionsToVm, partialPublishWarning, describePromoteResult, describePromoteError, type AssertionInfo, type BatchPublishResult } from '../api.js';
+import { executeQuery, fetchStatus, listAssertions, promoteAssertion, publishAssertionsToVm, partialPublishWarning, outcomeUnknownPublishNote, describePromoteResult, describePromoteError, type AssertionInfo, type BatchPublishResult } from '../api.js';
 import { FilePreviewModal } from '../components/Modals/FilePreviewModal.js';
 import { DiscountAppliedBadge } from '../components/Pca/index.js';
 import { useMemoryGraphEvents } from '../hooks/useNodeEvents.js';
@@ -794,6 +794,7 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
 
       {publishResult && (() => {
         const { published, total, partial, partialError, failures, sample, convictionCostCovered } = publishResult;
+        const unknownNote = outcomeUnknownPublishNote(publishResult);
         // "Clean" only when every asset published AND none came back as a 207
         // partial (minted on-chain but the CG binding failed).
         const allOk = published === total && published > 0 && partial === 0;
@@ -803,7 +804,9 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
             <div className="v10-publish-result-title">
               {published > 0
                 ? `Published ${published} of ${total} knowledge asset${total === 1 ? '' : 's'} to Verifiable Memory`
-                : 'NOT published to Verifiable Memory'}
+                : unknownNote && failures.length === 0
+                  ? 'Publish outcome unknown'
+                  : 'NOT published to Verifiable Memory'}
             </div>
             {partial > 0 && (
               <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
@@ -814,6 +817,11 @@ export function PublishPanel({ contextGraphId, onPublished }: { contextGraphId: 
               <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
                 {failures.length} asset{failures.length === 1 ? '' : 's'} could not be published — {failures[0].name}: {failures[0].error}
                 {failures.length > 1 ? ` (+${failures.length - 1} more)` : ''}
+              </div>
+            )}
+            {unknownNote && (
+              <div className="v10-publish-result-details" style={{ marginBottom: 6 }}>
+                ⚠ {unknownNote}
               </div>
             )}
             <div className="v10-publish-result-details">

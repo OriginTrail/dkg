@@ -4,8 +4,32 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Upgrading from 10.0.18
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| Mode-only `replenishing` approval configs use a relative ceiling | When `chain.approvalPolicy.mode` is `replenishing` and neither sizing field is set, the implicit ceiling changes from a flat 1000 TRAC to 20 times the triggering publish cost. This can lower or raise the standing allowance depending on publish cost; startup emits a warning for this exact legacy shape | Set `targetAllowance: '1000000000000000000000'` to retain the former flat 1000 TRAC ceiling, or set `targetAllowanceMultiple` explicitly to adopt relative sizing |
+
 ### Fixed
 
+- **Random Sampling resolves the challenged Context Graph by its chain name
+  commitment when local history contains multiple names for one numeric ID**:
+  proof extraction no longer selects an arbitrary first ontology row, which
+  could report a locally present KA as missing. Proof-time peer repair also
+  checks a direct local binding against the chain commitment before using it.
+  Existing opt-out graphs without a committed name hash retain their direct
+  binding behavior.
+- **Chain log reads fit each RPC provider's `eth_getLogs` limits**: a Base
+  mainnet node more than 2,000 blocks behind (about 67 minutes of downtime)
+  stopped advancing its chain event lanes on the default public RPC set,
+  because `mainnet.base.org` caps a request at 2,000 blocks while the two
+  backups refuse older blocks at any span. Every log scanner — the event
+  poller, the chain index, Hub rotation polling, the authority readers and the
+  paged history scans — now splits a range to the provider's span cap,
+  remembers the cap per provider so later reads start there, and fails over
+  without splitting when a provider refuses history, archive or plan-limited
+  ranges. The event lanes still page 9,000 blocks and advance their cursor
+  only after a whole page succeeds.
 - **`dkg status` no longer reports a healthy store as UNREACHABLE on a cold
   daemon**: since 10.0.7 plain `/api/status` never starts the full-store quad
   count, so on a node where nothing had requested one, `dkg status` showed a

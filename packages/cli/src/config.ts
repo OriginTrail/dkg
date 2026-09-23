@@ -1,4 +1,5 @@
 import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError } from './oxigraph-memory-limits.js';
+import { resolveBooleanEnvOverride } from './boolean-env-override.js';
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
 import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origintrail-official/dkg-publisher';
 import { join, dirname, basename } from 'node:path';
@@ -48,6 +49,8 @@ import {
   type StorageAckTiming,
 } from '@origintrail-official/dkg-publisher';
 import {
+  DEFAULT_REPLENISH_TARGET_ALLOWANCE,
+  DEFAULT_REPLENISH_TARGET_MULTIPLE,
   resolveRpcRequestGovernorPolicy,
   resolveContextGraphAuthorityIndexTickMs,
   resolveFinalityConfirmations,
@@ -303,25 +306,47 @@ export interface ApprovalPolicyConfig {
    *   - `per-publish` — approve exactly each publish's TRAC cost (with the
    *     on-chain `1n` floor). Cheapest blast radius, most approve-gas at
    *     scale. Backward-compatible.
-   *   - `replenishing` — approve a configurable ceiling (default 1000 TRAC),
-   *     refill when allowance drops below `target × refillBelowFraction`
-   *     (default 10%). One approve per ~9 publishes' worth of TRAC.
-   *     **Recommended for mainnet.**
+   *   - `replenishing` — approve a ceiling sized relative to this publish's
+   *     cost (`targetAllowanceMultiple`, default 20×), refill when allowance
+   *     drops below `target × refillBelowFraction` (default 10%). At the
+   *     defaults that is one approve per 19 publishes of comparable cost,
+   *     at any publish price. **Recommended for mainnet.**
    *   - `unlimited` — approve `MaxUint256` once per wallet, never again.
    *     Lowest gas, widest blast radius. Use only if you trust the V10 KA
    *     contract absolutely.
    */
   mode?: ApprovalPolicyMode;
   /**
-   * `replenishing` only. TRAC amount (decimal wei-TRAC string — `1000 *
-   * 10^18 = '1000000000000000000000'` for 1000 TRAC) to approve up to.
-   * Defaults to `'1000000000000000000000'` (1000 TRAC).
+   * `replenishing` only. ABSOLUTE ceiling as a decimal wei-TRAC string
+   * (`1000 * 10^18 = '1000000000000000000000'` for 1000 TRAC).
+   *
+   * **Overrides `targetAllowanceMultiple` when set.** Unset (the default)
+   * means the ceiling is derived from each publish's cost. Set this when
+   * you want standing exposure bounded by an absolute TRAC figure rather
+   * than by a multiple of whatever the triggering publish happened to
+   * cost — the derived ceiling tracks the most expensive recent publish,
+   * so a single outlier raises it.
    */
   targetAllowance?: string;
   /**
+   * `replenishing` only. Ceiling multiplier over the publish cost, used
+   * when no absolute `targetAllowance` is set: the adapter approves
+   * `publishCost × targetAllowanceMultiple`. Integer >= 1; defaults to
+   * `20`. Rejected at startup if it is anything else.
+   *
+   * Sizing relative to cost avoids a flat ceiling being simultaneously too
+   * large for a small node (blast radius) and too small for a busy one
+   * (constant re-approving), and needs no config change when TRAC prices
+   * move. Pair with `refillBelowFraction`: approves are amortised over
+   * roughly `multiple × (1 - refillBelowFraction) + 1` publishes of
+   * comparable cost — 19 at the defaults.
+   */
+  targetAllowanceMultiple?: number;
+  /**
    * `replenishing` only. Refill when current allowance drops below
-   * `targetAllowance × refillBelowFraction`. Float between 0 and 1.
-   * Defaults to `0.1` (refill at 10% remaining).
+   * `target × refillBelowFraction`, where `target` is the absolute
+   * `targetAllowance` or the derived `cost × targetAllowanceMultiple`.
+   * Float between 0 and 1. Defaults to `0.1` (refill at 10% remaining).
    */
   refillBelowFraction?: number;
 }
@@ -704,6 +729,14 @@ export interface DkgConfig {
    * (standing up a relay VM, sharing multiaddrs, monitoring).
    */
   preferredRelays?: string[];
+  /**
+   * Transport-level network peer isolation: refuse to dial, store or accept
+   * the relays of the other bundled DKG networks and peers that failed the
+   * network-identity proof. Defaults to true. Set false (or
+   * DKG_NETWORK_PEER_ISOLATION_ENABLED=0, which wins) to fall back to
+   * admission-only isolation without a new release.
+   */
+  networkPeerIsolationEnabled?: boolean;
   /** Public multiaddrs to announce (for VPS/cloud nodes where the public IP is not on the interface). */
   announceAddresses?: string[];
   /** Bootstrap peer multiaddrs to connect to on startup (for direct peer discovery without relay). */
@@ -1223,23 +1256,13 @@ export function resolveContextGraphSubscriptionRehydrationEnabled(
   configValue: unknown,
   envValue: string | undefined = process.env[CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV],
 ): boolean {
-  if (envValue !== undefined) {
-    const normalized = envValue.trim().toLowerCase();
-    if (normalized === '1' || normalized === 'true') return true;
-    if (normalized === '0' || normalized === 'false') return false;
-    throw new Error(
-      `${CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV} must be one of 1, 0, true, or false ` +
-      `(received ${JSON.stringify(envValue)})`,
-    );
-  }
-  if (configValue === undefined) return true;
-  if (typeof configValue !== 'boolean') {
-    throw new Error(
-      'contextGraphSubscriptionRehydrationEnabled must be a boolean ' +
-      `(received ${JSON.stringify(configValue)})`,
-    );
-  }
-  return configValue;
+  return resolveBooleanEnvOverride({
+    envName: CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV,
+    configName: 'contextGraphSubscriptionRehydrationEnabled',
+    envValue,
+    configValue,
+    defaultValue: true,
+  });
 }
 
 /**
@@ -1357,9 +1380,10 @@ export function resolveSharedMemoryTtlMs(config: DkgConfig): number | undefined 
  *   the chain adapter fall back to its built-in default
  *   (`DEFAULT_APPROVAL_POLICY`, currently `per-publish`).
  * - Throws a descriptive `Error` if the operator supplied an unparseable
- *   `targetAllowance` (e.g. `'one thousand TRAC'`). Fails fast at startup
- *   rather than silently falling back — config bugs are easier to find
- *   when they don't lurk for hours.
+ *   `targetAllowance` (e.g. `'one thousand TRAC'`), an out-of-range
+ *   `refillBelowFraction`, or a `targetAllowanceMultiple` that isn't an
+ *   integer >= 1. Fails fast at startup rather than silently falling back
+ *   — config bugs are easier to find when they don't lurk for hours.
  */
 export function resolveApprovalPolicy(
   policy: ApprovalPolicyConfig | undefined,
@@ -1386,6 +1410,24 @@ export function resolveApprovalPolicy(
       );
     }
   }
+  // A multiple below 1 would put the derived ceiling under the publish
+  // floor on every call: the adapter's floor clamp would fire every time
+  // and `replenishing` would silently behave as `per-publish` — the
+  // operator's chosen mode quietly cancelled, visible only as an approve
+  // tx per publish on the gas bill. Throw rather than clamp, matching
+  // `finalityConfirmations` ("must be an integer >= 1") and the two
+  // sibling fields here, which all reject rather than repair.
+  if (policy.targetAllowanceMultiple !== undefined) {
+    if (
+      typeof policy.targetAllowanceMultiple !== 'number'
+      || !Number.isSafeInteger(policy.targetAllowanceMultiple)
+      || policy.targetAllowanceMultiple < 1
+    ) {
+      throw new Error(
+        `chain.approvalPolicy.targetAllowanceMultiple must be an integer >= 1 (got: ${JSON.stringify(policy.targetAllowanceMultiple)})`,
+      );
+    }
+  }
   if (policy.refillBelowFraction !== undefined) {
     if (
       typeof policy.refillBelowFraction !== 'number'
@@ -1401,8 +1443,35 @@ export function resolveApprovalPolicy(
   return {
     mode,
     targetAllowance,
+    targetAllowanceMultiple: policy.targetAllowanceMultiple,
     refillBelowFraction: policy.refillBelowFraction,
   };
+}
+
+/**
+ * Operator-visible migration warning for the one replenishing-policy shape
+ * whose meaning changed when relative sizing replaced the flat 1000 TRAC
+ * default. An explicit absolute target preserves the legacy ceiling; an
+ * explicit multiple opts into the new relative ceiling.
+ */
+export function approvalPolicyMigrationWarning(
+  policy: ApprovalPolicyConfig | undefined,
+): string | undefined {
+  if (
+    policy?.mode !== 'replenishing'
+    || policy.targetAllowance !== undefined
+    || policy.targetAllowanceMultiple !== undefined
+  ) {
+    return undefined;
+  }
+  const legacyTrac = DEFAULT_REPLENISH_TARGET_ALLOWANCE / (10n ** 18n);
+  return (
+    '[warn] chain.approvalPolicy mode=replenishing has no targetAllowance or '
+    + `targetAllowanceMultiple, so it now approves ${DEFAULT_REPLENISH_TARGET_MULTIPLE}x `
+    + `the triggering publish cost instead of the legacy flat ${legacyTrac.toString()} TRAC `
+    + 'ceiling. Set chain.approvalPolicy.targetAllowance explicitly to retain a flat ceiling, '
+    + 'or targetAllowanceMultiple to keep relative sizing.'
+  );
 }
 
 /**
@@ -1955,6 +2024,29 @@ export function loadNetworkRegistryFromRoots(
   }
 
   return registry;
+}
+
+const NETWORK_PEER_ISOLATION_ENV = 'DKG_NETWORK_PEER_ISOLATION_ENABLED';
+
+/**
+ * Resolve the transport-level network peer isolation switch (default on). The
+ * environment override wins so an operator can turn it off for one boot
+ * without rewriting the config file. Same rule as every other env-overrides-
+ * config flag ({@link resolveBooleanEnvOverride}): 1, 0, true or false, and
+ * anything else, an empty value included, fails startup instead of silently
+ * picking a side.
+ */
+export function resolveNetworkPeerIsolationEnabled(
+  configValue: unknown,
+  envValue: string | undefined = process.env[NETWORK_PEER_ISOLATION_ENV],
+): boolean {
+  return resolveBooleanEnvOverride({
+    envName: NETWORK_PEER_ISOLATION_ENV,
+    configName: 'networkPeerIsolationEnabled',
+    envValue,
+    configValue,
+    defaultValue: true,
+  });
 }
 
 type NetworkRelayIdentity = Partial<Pick<NetworkConfig, 'networkId' | 'genesisId' | 'relays'>>;

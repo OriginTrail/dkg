@@ -19,6 +19,7 @@ import {
   SAFE_JOB_ID_ERROR,
 } from '@origintrail-official/dkg-publisher';
 import { DkgHomeFiles, isProcessRunning } from './config.js';
+import type { ContextGraphListOnChainView } from './context-graph-list-format.js';
 import {
   serializeAgentListOptions,
   type AgentListPageOptions,
@@ -40,11 +41,92 @@ import type {
   CatchupContextGraphIdentity,
   CatchupStatusResponse,
   CatchupStatusWireResponse,
+  ContextGraphOnChainReferenceNote,
 } from './catchup-status.js';
 import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
 import type { PublicQueryResult } from '@origintrail-official/dkg-core';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
+
+/** Deadline for GET reads, which answer from local daemon state. */
+export const API_READ_TIMEOUT_MS = 30_000;
+
+/**
+ * Deadline for every other request: several wait on peers or the chain.
+ * `vm/publish` holds the request open for the publisher's storage-ACK window
+ * (`ACK_TIMEOUT_MS`, 120 s, in packages/publisher/src/ack-collector.ts) plus
+ * chain confirmation; registration, PCA and wallet routes wait for their
+ * transactions. It stays under the 300 s Node's fetch waits on its own, so this
+ * deadline, and a long mutation's outcome-unknown report, comes first.
+ */
+export const API_LONG_TIMEOUT_MS = 240_000;
+
+/**
+ * `/api/verify` collects signatures for up to 30 minutes when the request names
+ * no `timeoutMs` (the agent default in packages/agent/src/dkg-agent-endorse.ts).
+ * Its deadline follows the request plus this margin, so the client never cuts
+ * the collection short; Node's fetch still stops waiting for headers after
+ * 300 s, as it did before this client had deadlines of its own.
+ */
+const VERIFY_DEFAULT_COLLECTION_TIMEOUT_MS = 30 * 60_000;
+const REQUEST_CARRIED_TIMEOUT_MARGIN_MS = 30_000;
+
+/**
+ * A long Knowledge Asset mutation (`vm/publish`, `swm/share`, `wm/import-file`,
+ * or a create that also shares or publishes) reached the daemon but no response
+ * arrived before the client deadline. The daemon keeps working after the client
+ * disconnects, so the operation may still complete, and a blind retry can 409.
+ */
+export class DaemonOutcomeUnknownError extends Error {
+  readonly code = 'OUTCOME_UNKNOWN';
+  readonly method: string;
+  readonly path: string;
+  readonly timeoutMs: number;
+  constructor(method: string, path: string, timeoutMs: number, historyHint: string) {
+    super(
+      `Outcome unknown: the daemon did not answer ${method} ${path} within ${Math.round(timeoutMs / 1000)}s. ` +
+      `It keeps working after the client disconnects, so the operation may still complete. ${historyHint}`,
+    );
+    this.name = 'DaemonOutcomeUnknownError';
+    this.method = method;
+    this.path = path;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+interface RequestDeadline {
+  /** Overrides the method's default deadline. */
+  timeoutMs?: number;
+  /**
+   * Set on the long Knowledge Asset mutations: a timeout then throws
+   * {@link DaemonOutcomeUnknownError} carrying this hint.
+   */
+  outcomeUnknownHint?: string;
+}
+
+/**
+ * Whether a failed request got no daemon answer: the client deadline expired,
+ * or Node's fetch (undici) stopped waiting on its own after 300 s without
+ * headers or body progress (a `fetch failed` / `terminated` TypeError with an
+ * `UND_ERR_HEADERS_TIMEOUT` / `UND_ERR_BODY_TIMEOUT` cause). An HTTP error
+ * answer never counts, even one that lands as the deadline expires.
+ */
+function isUnansweredRequest(err: unknown, signal: AbortSignal): boolean {
+  const facts = classifyTransportError(err);
+  if (facts.httpStatus !== undefined) return false;
+  return signal.aborted
+    || facts.codes.has('UND_ERR_HEADERS_TIMEOUT')
+    || facts.codes.has('UND_ERR_BODY_TIMEOUT');
+}
+
+function knowledgeAssetHistoryHint(name: string, contextGraphId: string, subGraphName?: string): string {
+  const subGraph = subGraphName ? ` --sub-graph-name ${subGraphName}` : '';
+  return `Check \`dkg ka history ${name} --context-graph-id ${contextGraphId}${subGraph}\` before retrying.`;
+}
+
+function knowledgeAssetMutationDeadline(name: string, contextGraphId: string, subGraphName?: string): RequestDeadline {
+  return { outcomeUnknownHint: knowledgeAssetHistoryHint(name, contextGraphId, subGraphName) };
+}
 
 export interface PublisherJobResponse {
   job: PersistedLiftJob;
@@ -588,10 +670,16 @@ export class ApiClient {
   private baseUrl: string;
   private token?: string;
   private readonly configFallback?: Readonly<ConfigFallbackContext>;
+  private readonly readTimeoutMs: number;
+  private readonly longTimeoutMs: number;
   readonly controlPlaneWarning?: string;
 
   constructor(portOrBaseUrl: number | string, token?: string, opts?: {
     configFallback?: ConfigFallbackContext;
+    /** Deadline in ms for GET reads (default 30 000). */
+    readTimeoutMs?: number;
+    /** Deadline in ms for every other request (default 240 000, never below `readTimeoutMs`). */
+    longTimeoutMs?: number;
   }) {
     this.baseUrl = typeof portOrBaseUrl === 'number'
       ? `http://127.0.0.1:${portOrBaseUrl}`
@@ -599,6 +687,8 @@ export class ApiClient {
     this.token = token;
     this.configFallback = opts?.configFallback && Object.freeze({ ...opts.configFallback });
     this.controlPlaneWarning = this.configFallback?.controlPlaneWarning;
+    this.readTimeoutMs = opts?.readTimeoutMs ?? API_READ_TIMEOUT_MS;
+    this.longTimeoutMs = Math.max(opts?.longTimeoutMs ?? API_LONG_TIMEOUT_MS, this.readTimeoutMs);
   }
 
   static async connect(opts: ApiClientConnectOptions = {}): Promise<ApiClient> {
@@ -859,7 +949,14 @@ export class ApiClient {
     if (options?.alsoPublishVm !== undefined) {
       payload.alsoPublishVm = createAlsoPublishVmPayload(options.alsoPublishVm);
     }
-    return this.post('/api/knowledge-assets', payload);
+    // A create that also shares or publishes runs that work inside this request.
+    const sharesOrPublishes = payload.alsoShareSwm === true
+      || (payload.alsoPublishVm !== undefined && payload.alsoPublishVm !== false);
+    return this.post(
+      '/api/knowledge-assets',
+      payload,
+      sharesOrPublishes ? knowledgeAssetMutationDeadline(name, contextGraphId, options?.subGraphName) : {},
+    );
   }
 
   /** GET a KA's lifecycle state by name. */
@@ -935,7 +1032,11 @@ export class ApiClient {
     if (options?.skipSeal === true) {
       throw new Error('skipSeal is not supported; graph-scoped Knowledge Assets are always seal-before-share');
     }
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, { contextGraphId, ...(options ?? {}) });
+    return this.post(
+      `/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`,
+      { contextGraphId, ...(options ?? {}) },
+      knowledgeAssetMutationDeadline(name, contextGraphId, options?.subGraphName),
+    );
   }
 
   async knowledgeAssetShareAsync(
@@ -1002,7 +1103,7 @@ export class ApiClient {
       // letting normal author resolution publish a different author.
       ...(selectedAuthorAgentAddress !== undefined ? { selectedAuthorAgentAddress } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
-    });
+    }, knowledgeAssetMutationDeadline(name, contextGraphId, subGraphName));
   }
 
   async knowledgeAssetPublishAsync(
@@ -1585,17 +1686,20 @@ export class ApiClient {
     body: unknown;
     nextPageUrl: string | null;
   }> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      headers: this.authHeaders(),
+    return this.withDeadline('GET', path, {}, async (signal) => {
+      const res = await fetch(`${this.baseUrl}${path}`, {
+        headers: this.authHeaders(),
+        signal,
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: res.statusText }));
+        throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(body, res.statusText), body);
+      }
+      const body = (await res.json()) as unknown;
+      const linkHeader = res.headers.get('Link') ?? res.headers.get('link');
+      const nextPageUrl = parseNextLink(linkHeader);
+      return { body, nextPageUrl };
     });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({ error: res.statusText }));
-      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(body, res.statusText), body);
-    }
-    const body = (await res.json()) as unknown;
-    const linkHeader = res.headers.get('Link') ?? res.headers.get('link');
-    const nextPageUrl = parseNextLink(linkHeader);
-    return { body, nextPageUrl };
   }
 
   /**
@@ -1741,6 +1845,8 @@ export class ApiClient {
       };
     /** Present when the requested id is (or was) known only by its on-chain name hash. */
     identity?: CatchupContextGraphIdentity;
+    /** Present when the request named an on-chain id (`32`, `#32`): what it resolved to. */
+    onChainReference?: ContextGraphOnChainReferenceNote;
   }> {
     return this.post('/api/context-graph/subscribe', {
       contextGraphId,
@@ -2104,6 +2210,11 @@ export class ApiClient {
       curator?: string;
       accessPolicy?: string;
       callerInvolved?: boolean;
+      onChainId?: string;
+      /** `false` when the node knows the graph only by its on-chain name hash. */
+      nameKnown?: boolean;
+      /** Chain-public ContextGraphStorage facts (additive; absent on older daemons). */
+      onChain?: ContextGraphListOnChainView;
     }>;
   }> {
     return this.get('/api/context-graph/list');
@@ -2127,7 +2238,10 @@ export class ApiClient {
     status?: 'verified' | 'partial' | 'no_quorum';
     trustLevel?: number;
   }> {
-    return this.post('/api/verify', request);
+    const collectionMs = request.timeoutMs ?? VERIFY_DEFAULT_COLLECTION_TIMEOUT_MS;
+    return this.post('/api/verify', request, {
+      timeoutMs: Math.max(this.longTimeoutMs, collectionMs + REQUEST_CARRIED_TIMEOUT_MARGIN_MS),
+    });
   }
 
   async endorse(request: {
@@ -2175,7 +2289,11 @@ export class ApiClient {
     if (request.ontologyRef) form.append('ontologyRef', request.ontologyRef);
     if (request.subGraphName) form.append('subGraphName', request.subGraphName);
 
-    return this.postForm(`/api/knowledge-assets/${encodeURIComponent(name)}/wm/import-file`, form);
+    return this.postForm(
+      `/api/knowledge-assets/${encodeURIComponent(name)}/wm/import-file`,
+      form,
+      knowledgeAssetMutationDeadline(name, request.contextGraphId, request.subGraphName),
+    );
   }
 
   async assertionExtractionStatus(name: string, contextGraphId: string, subGraphName?: string): Promise<{
@@ -2207,7 +2325,11 @@ export class ApiClient {
     sharedMemoryGraph?: string;
     rootEntities?: string[];
   }> {
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`, request);
+    return this.post(
+      `/api/knowledge-assets/${encodeURIComponent(name)}/swm/share`,
+      request,
+      knowledgeAssetMutationDeadline(name, request.contextGraphId, request.subGraphName),
+    );
   }
 
   async queryAssertion(name: string, request: {
@@ -2337,65 +2459,67 @@ export class ApiClient {
   }
 
   private async get<T>(path: string, opts: { auth?: boolean } = {}): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      headers: opts.auth === false ? {} : this.authHeaders(),
-    });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({ error: res.statusText }));
-      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(body, res.statusText), body);
-    }
-    return res.json() as Promise<T>;
+    return this.send<T>(path, { headers: opts.auth === false ? {} : this.authHeaders() });
   }
 
-  private async post<T>(path: string, body: unknown): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
+  private async post<T>(path: string, body: unknown, deadline: RequestDeadline = {}): Promise<T> {
+    return this.send<T>(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({ error: res.statusText }));
-      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
-    }
-    return res.json() as Promise<T>;
+    }, deadline);
   }
 
   private async put<T>(path: string, body: unknown): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
+    return this.send<T>(path, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...this.authHeaders() },
       body: JSON.stringify(body),
     });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({ error: res.statusText }));
-      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
-    }
-    return res.json() as Promise<T>;
   }
 
   private async del<T>(path: string): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      method: 'DELETE',
-      headers: this.authHeaders(),
-    });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({ error: res.statusText }));
-      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
-    }
-    return res.json() as Promise<T>;
+    return this.send<T>(path, { method: 'DELETE', headers: this.authHeaders() });
   }
 
-  private async postForm<T>(path: string, body: FormData): Promise<T> {
-    const res = await fetch(`${this.baseUrl}${path}`, {
-      method: 'POST',
-      headers: this.authHeaders(),
-      body,
+  private async postForm<T>(path: string, body: FormData, deadline: RequestDeadline = {}): Promise<T> {
+    return this.send<T>(path, { method: 'POST', headers: this.authHeaders(), body }, deadline);
+  }
+
+  private async send<T>(path: string, init: RequestInit, deadline: RequestDeadline = {}): Promise<T> {
+    return this.withDeadline(init.method ?? 'GET', path, deadline, async (signal) => {
+      const res = await fetch(`${this.baseUrl}${path}`, { ...init, signal });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({ error: res.statusText }));
+        throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
+      }
+      return (await res.json()) as T;
     });
-    if (!res.ok) {
-      const data = await res.json().catch(() => ({ error: res.statusText }));
-      throw ApiClient.httpError(res.status, ApiClient.errorMessageFromBody(data, res.statusText), data);
+  }
+
+  /**
+   * Run one daemon round-trip under its deadline: GET reads take the read
+   * deadline, every other method the long one, unless the route overrides it.
+   * The deadline also covers reading the body. A long Knowledge Asset mutation
+   * that times out throws {@link DaemonOutcomeUnknownError}; other timeouts keep
+   * fetch's TimeoutError.
+   */
+  private async withDeadline<T>(
+    method: string,
+    path: string,
+    deadline: RequestDeadline,
+    run: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    const timeoutMs = deadline.timeoutMs ?? (method === 'GET' ? this.readTimeoutMs : this.longTimeoutMs);
+    const signal = AbortSignal.timeout(timeoutMs);
+    try {
+      return await run(signal);
+    } catch (err) {
+      if (deadline.outcomeUnknownHint !== undefined && isUnansweredRequest(err, signal)) {
+        throw new DaemonOutcomeUnknownError(method, path, timeoutMs, deadline.outcomeUnknownHint);
+      }
+      throw err;
     }
-    return res.json() as Promise<T>;
   }
 
   /** Create an Error with an `httpStatus` property so callers can distinguish

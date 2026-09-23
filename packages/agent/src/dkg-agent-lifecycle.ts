@@ -48,7 +48,7 @@ import {
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   validateSubGraphName,
-  Logger, createOperationContext, isKaPublishLifecycleDebugLoggingEnabled, isStorageACKDecline, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  Logger, createOperationContext, isKaPublishLifecycleDebugLoggingEnabled, isStorageACKDecline, sparqlString, escapeSparqlLiteral, isSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -106,7 +106,6 @@ import {
   ciphertextChunkStoreSubject,
   CIPHERTEXT_CHUNK_PREDICATE,
   type SubscriptionSource,
-  SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
   tripleContentV10,
   withRetry,
@@ -218,6 +217,7 @@ import { resolveOutboxDrainerOptions } from './p2p/outbox-drainer.js';
 import { createSingleUseSyncSender } from './p2p/sync-transport.js';
 import { NetworkAdmissionService } from './p2p/network-admission.js';
 import {
+  MAX_IDENTITY_PROBE_CONCURRENCY,
   NetworkAdmissionCoordinator,
   NetworkAdmissionRejectedError,
 } from './p2p/network-admission-coordinator.js';
@@ -2378,9 +2378,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       },
       cleanupRejectedPeerState: (peerId) => this.clearNetworkRejectedPeerState(peerId),
       // Transport half of the verdict: stop libp2p (kad-dht, relay discovery,
-      // reconnect queue) from redialing a peer of another network, and lift
-      // that as soon as the peer proves it belongs to this one.
-      onPeerRejected: (peerId) => { this.node.denyPeerAfterNetworkMismatch(peerId); },
+      // reconnect queue) from redialing a peer of another network for exactly
+      // the quarantine just applied, and lift that as soon as the peer proves
+      // it belongs to this one.
+      onPeerRejected: (peerId, quarantineMs) => { this.node.denyPeerAfterNetworkMismatch(peerId, quarantineMs); },
       onPeerVerified: (peerId) => { this.node.clearPeerNetworkMismatchDenial(peerId); },
       log: this.log,
     });
@@ -3203,6 +3204,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Start chain event poller for trustless confirmation of tentative publishes
     // and discovery of on-chain context graphs. Only with a real chain adapter.
     if (this.chain.chainId !== 'none') {
+      // Re-stage the Context Graphs a previous process enumerated from
+      // ContextGraphStorage before the live tail starts, so a restart lists them
+      // again without re-reading the chain; enumeration then resumes at its
+      // durable cursor. A store failure only delays that to the next pass.
+      try {
+        await this.hydrateContextGraphsFromStorageCheckpoint();
+      } catch (err) {
+        this.log.warn(ctx, `Could not restore the Context Graph storage discovery checkpoint: ${err instanceof Error ? err.message : String(err)}`);
+      }
       this.chainPoller = new ChainEventPoller({
         chain: this.chain,
         publishHandler,
@@ -3210,107 +3220,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         onContextGraphCreated: async ({ contextGraphId, creator, accessPolicy, publishPolicy, nameHash, blockNumber, signal }) => {
           signal?.throwIfAborted();
           this.log.info(ctx, `Discovered on-chain context graph ${contextGraphId.slice(0, 16)}… (block ${blockNumber}, creator ${creator.slice(0, 10)}…, policy ${accessPolicy}, publishPolicy ${publishPolicy ?? '?'}, nameHash ${nameHash ? nameHash.slice(0, 10) + '…' : '(opt-out)'})`);
-
-          // The finalized event can arrive before or after the explicit local
-          // subscription. Bind an already-indexed cleartext row immediately;
-          // otherwise retain a process-local wire-only placeholder that the
-          // canonical setter will promote when create/join/subscribe supplies
-          // the matching cleartext id. This applies to public graphs too: they
-          // do not enter the curated host-mode block below, and a cold Edge
-          // must not lose its only authoritative chain-id/policy binding while
-          // waiting for an ontology announcement it may have missed.
-          const eventLocalId = nameHash
-            ? this.stageOnChainContextGraphBindingFromNameHash(
-                nameHash,
-                contextGraphId,
-              )
-            : null;
-          if (nameHash && eventLocalId === null) {
-            this.log.warn(
-              ctx,
-              `Skipped ambiguous Context Graph name-hash binding ${nameHash.slice(0, 18)}…`,
-            );
-          }
-
-          // Track the numeric on-chain id for dedup.
-          const alreadyKnown = this.seenOnChainIds.has(contextGraphId)
-            || [...this.subscribedContextGraphs.values()].some(s => s.onChainId === contextGraphId);
-          if (!alreadyKnown) {
-            this.seenOnChainIds.add(contextGraphId);
-            this.log.info(ctx, `Noted on-chain context graph ${contextGraphId.slice(0, 16)}… — will subscribe once cleartext name is resolved`);
-          }
-
-          // OT-RFC-38 / LU-5: eagerly populate the on-chain access-policy
-          // cache so the StorageACK encrypted-payload guard can answer
-          // `isCgCurated` from local state without an extra RPC. The
-          // event itself carries the policy enum — no need to re-read.
-          // `contextGraphId` here is the on-chain numeric id (stringified
-          // bigint) for V10 `ContextGraphCreated` events, which is also
-          // what the publish-intent ships in `PublishIntent.contextGraphId`,
-          // so the keying matches the lazy-fallback lookup below.
-          if (accessPolicy === 0 || accessPolicy === 1) {
-            this.onChainAccessPolicyCache.set(contextGraphId, accessPolicy);
-          }
-          // Issue #872 — same eager-cache pattern for the `publishPolicy`
-          // enum so daemon routes can recognise a public + open CG from
-          // local state and relax owner-scoped artifact-read guards.
-          if (publishPolicy === 0 || publishPolicy === 1) {
-            this.onChainPublishPolicyCache.set(contextGraphId, publishPolicy);
-            this.onChainPublishPolicyCacheUpdatedAt.set(contextGraphId, Date.now());
-          }
-
-          // OT-RFC-38 / LU-6 Phase B — host-mode auto-subscribe path for
-          // sharding-table cores. The event carries the curator-committed
-          // wire id (`nameHash`); cores derive the SWM gossip topic from
-          // it directly and start hosting ciphertext for the CG without
-          // needing the cleartext name, without an operator-driven
-          // `/api/shared-memory/host-mode/subscribe`, and without an off-
-          // chain discovery channel for *registered* CGs (pre-reg CGs
-          // go through the discovery-beacon path instead).
-          //
-          // Gate conditions (all must hold):
-          //   1. Curator opted into the hash commitment (nameHash != null
-          //      — opt-out CGs run through the beacon path only).
-          //   2. CG is curated (accessPolicy == 1). Public CGs don't have
-          //      curated SWM substrate to host; LU-6 only applies to
-          //      curated.
-          //   3. Local node has `nodeRole === 'core'` AND swmHostMode is
-          //      enabled. The reconciler below applies the same checks
-          //      so this branch is purely an optimisation (eliminates
-          //      the discovery-beacon round-trip + the host-mode
-          //      reconciler poll latency).
-          //   4. Local node is in the sharding table. Probed by the
-          //      reconciler; we pass through to it rather than
-          //      duplicating the check here.
-          //
-          // The reconciler is robust to being called for a CG it can't
-          // act on (returns early on `nodeRole !== 'core'`, swmHostMode
-          // disabled, off-sharding-table, etc.), so the call below
-          // doesn't need any of those gates beyond the event-side hash
-          // presence and the curated flag.
-          if (nameHash && accessPolicy === 1 && eventLocalId !== null) {
-            signal?.throwIfAborted();
-            // Register the wire id → numeric id mapping so the receive
-            // path's chain fallback resolver (Scope A) can take a hash
-            // input and find the on-chain participant agents without an
-            // RPC round-trip per envelope.
-            const hashLower = this.contextGraphWireId(nameHash);
-
-            // Delegate to the host-mode reconciler — it owns the
-            // sharding-table check, swmHostMode flag, and the wire-up
-            // of the host-mode gossip handler. Async + best-effort:
-            // the periodic reconciler covers the timer-driven fallback
-            // path, so a missed event here heals on the next sweep.
-            void this.reconcileSwmHostModeSubscription(
-              eventLocalId,
-              SUBSCRIPTION_SOURCES.CHAIN_EVENT,
-            ).catch((err) => {
-              this.log.warn(
-                ctx,
-                `Phase B chain-event auto-subscribe for ${hashLower.slice(0, 18)}… failed: ${err instanceof Error ? err.message : String(err)}`,
-              );
-            });
-          }
+          // The live tail and ContextGraphStorage enumeration share one path,
+          // so a graph seen by both lanes yields one row with the same facts.
+          this.applyOnChainContextGraphObservation({
+            contextGraphId,
+            owner: creator,
+            accessPolicy,
+            ...(publishPolicy === undefined ? {} : { publishPolicy }),
+            nameHash: nameHash ?? null,
+            blockNumber,
+          }, { source: 'event', ctx, ...(signal ? { signal } : {}) });
         },
         // Phase B — live VM-reconcile nudge. A `KnowledgeAssetRegisteredToContextGraph`
         // event doesn't carry the registration ordinal (only kaId + cgId), so it is
@@ -8016,6 +7935,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /**
+   * The live connections' remote peers (one per peer id, in connection order)
+   * that pass network admission: the catch-up candidate set. A still-open
+   * connection to a peer that failed the network-identity proof (another DKG
+   * network's relay, say) must never become a sync peer. Both catch-up runners
+   * (in-process and the CLI worker bridge) select from this one predicate.
+   * Uncached peers are probed with bounded concurrency; a failed probe drops
+   * the peer from this round.
+   */
+  async listAdmittedConnectedPeers(
+    this: DKGAgent,
+    ctx: OperationContext,
+  ): Promise<Array<{ toString(): string }>> {
+    const connectedPeers = [...new Map<string, { toString(): string }>(
+      this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
+    ).values()];
+    const admitted = await mapWithConcurrency(
+      connectedPeers,
+      MAX_IDENTITY_PROBE_CONCURRENCY,
+      (peer) => this.ensurePeerAdmittedForRecovery(peer.toString(), ctx, 'Connected catchup peer'),
+    );
+    return connectedPeers.filter((_peer, index) => admitted[index]);
+  }
+
+  /**
    * Catch up a single context graph from currently connected peers that advertise
    * the sync protocol. Useful after runtime subscribe so historical data is
    * backfilled immediately (not only future gossip messages).
@@ -8062,15 +8005,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
       await this.primeCatchupConnections();
 
-      const connectedPeers = [...new Map(
-        this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
-      ).values()];
-      const admittedConnectedPeers: Array<{ toString(): string }> = [];
-      for (const peer of connectedPeers) {
-        if (await this.ensurePeerAdmittedForRecovery(peer.toString(), ctx, 'Connected catchup peer')) {
-          admittedConnectedPeers.push(peer);
-        }
-      }
+      const admittedConnectedPeers = await this.listAdmittedConnectedPeers(ctx);
       const orderedPeers = this.selectCatchupPeers(
         admittedConnectedPeers,
         preferredPeerId,
@@ -10013,76 +9948,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }),
       { strict: true },
     );
-  }
-
-  async assertAlreadyMemberDelegationRefresh(this: DKGAgent,
-    contextGraphId: string,
-    delegation: SignedAgentDelegation,
-    carrierPeerId: string,
-  ): Promise<void> {
-    const signedPeerId = delegation.delegateePeerId;
-    if (!signedPeerId || signedPeerId !== carrierPeerId) {
-      throw new Error(
-        'Already-member delegation refresh carrier mismatch: ' +
-        `signed delegateePeerId=${signedPeerId || '<missing>'}, carrier=${carrierPeerId}`,
-      );
-    }
-    if (!Number.isSafeInteger(delegation.issuedAtMs) || delegation.issuedAtMs < 0) {
-      throw new Error('Already-member delegation refresh has an invalid issuedAtMs');
-    }
-    const incomingExpiresAtMs = delegation.expiresAtMs ?? 0;
-    if (!Number.isSafeInteger(incomingExpiresAtMs) || incomingExpiresAtMs < 0) {
-      throw new Error('Already-member delegation refresh has an invalid expiresAtMs');
-    }
-
-    const metaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
-    const delegationUri = assertSafeIri(
-      `did:dkg:agent-delegation:${contextGraphId}:${delegation.agentAddress.toLowerCase()}`,
-    );
-    const result = await this.store.query(
-      `SELECT ?issuedAt ?expiresAt ?peer ?opKey WHERE {
-        GRAPH <${metaGraph}> {
-          <${delegationUri}> <${DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT}> ?issuedAt .
-          OPTIONAL { <${delegationUri}> <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}> ?expiresAt }
-          OPTIONAL { <${delegationUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER}> ?peer }
-          OPTIONAL { <${delegationUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY}> ?opKey }
-        }
-      } LIMIT 1`,
-      { source: 'agent.delegationRefresh.currentState' },
-    );
-    if (result.type !== 'bindings' || result.bindings.length === 0) return;
-
-    const row = result.bindings[0] as Record<string, string>;
-    const currentIssuedAtMs = Number(stripLiteral(row['issuedAt'] ?? ''));
-    const currentExpiresAtMs = row['expiresAt'] == null
-      ? 0
-      : Number(stripLiteral(row['expiresAt']));
-    if (
-      !Number.isSafeInteger(currentIssuedAtMs) || currentIssuedAtMs < 0 ||
-      !Number.isSafeInteger(currentExpiresAtMs) || currentExpiresAtMs < 0
-    ) {
-      throw new Error('Stored already-member delegation has an invalid validity timestamp');
-    }
-    if (delegation.issuedAtMs < currentIssuedAtMs) {
-      throw new Error(
-        `Stale already-member delegation refresh: issuedAtMs ${delegation.issuedAtMs} ` +
-        `is older than active credential ${currentIssuedAtMs}`,
-      );
-    }
-    if (delegation.issuedAtMs > currentIssuedAtMs) return;
-
-    const currentPeerId = row['peer'] == null ? '' : stripLiteral(row['peer']);
-    const currentOpKey = row['opKey'] == null ? '' : stripLiteral(row['opKey']).toLowerCase();
-    const incomingOpKey = delegation.delegateeOpKey?.toLowerCase() ?? '';
-    if (
-      signedPeerId !== currentPeerId ||
-      incomingOpKey !== currentOpKey ||
-      incomingExpiresAtMs !== currentExpiresAtMs
-    ) {
-      throw new Error(
-        `Conflicting already-member delegation refresh at issuedAtMs ${delegation.issuedAtMs}`,
-      );
-    }
   }
 
   normalizeMembershipPrincipal(this: DKGAgent,

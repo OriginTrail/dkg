@@ -92,6 +92,7 @@ import type {
 import type { SyncReconcilerTiming } from './sync/reconciler-timing.js';
 import type { FinalizationRecoveryStore } from './finalization-recovery-store.js';
 import type { AuthorityIndexConfig } from './authority-index-config.js';
+import type { ContextGraphStorageDiscoveryStore } from './context-graph-storage-discovery.js';
 
 // ── File-local structural types ─────────────────────────────────────
 
@@ -1486,9 +1487,17 @@ export interface DKGAgentConfig {
    * Relay multiaddrs declared by the OTHER DKG networks bundled with this
    * build (the daemon derives them from network/*.json). With a network
    * identity the node refuses to dial these peers, store their addresses or
-   * accept their connections; `relayPeers` always win.
+   * accept their connections. `relayPeers` win over this static list only: a
+   * `relayPeers` entry that fails the network-identity proof is refused like
+   * any other peer (`DKGNodeConfig.otherNetworkRelays`).
    */
   otherNetworkRelays?: readonly string[];
+  /**
+   * Transport-level network peer isolation (`DKGNodeConfig.networkPeerIsolation`).
+   * Default true; false is the operator kill switch, leaving other networks'
+   * peers to network admission alone.
+   */
+  networkPeerIsolation?: boolean;
   /** Legacy ACK candidate allowlist. When set, unlisted connected peers are not dialed for ACKs. */
   ackCandidatePeerIds?: string[];
   /**
@@ -1874,6 +1883,12 @@ export interface DKGAgentConfig {
   chainEventCursorStore?: ChainEventCursorPersistence;
   /** Durable ContextGraphNameRegistry discovery cursor store. Defaults to in-memory adapter state. */
   contextGraphRegistryScanCursorStore?: ContextGraphRegistryScanCursorStore;
+  /**
+   * Durable ContextGraphStorage enumeration checkpoint (cursor plus the chain
+   * facts below it), scoped to one chain deployment. Defaults to in-memory, in
+   * which case each process re-enumerates from id 1.
+   */
+  contextGraphStorageDiscoveryStore?: ContextGraphStorageDiscoveryStore;
   /** Process-owned local durable finalized Context Graph authority-history checkpoints. */
   localContextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
   /** Process-owned durable contract-wide Context Graph authority index. */
