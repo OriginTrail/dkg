@@ -3,7 +3,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
-import { CI_LANES, WORKSPACE_OWNING_LANES, WORKSPACE_RULES, needsSharedBuild, planCi } from '../ci-delta.mjs';
+import {
+  CI_LANES,
+  WORKSPACE_OWNING_EVM_SCOPES,
+  WORKSPACE_OWNING_LANES,
+  WORKSPACE_RULES,
+  needsSharedBuild,
+  planCi,
+} from '../ci-delta.mjs';
+import { COVERAGE_JOBS } from '../ci-lanes.mjs';
 import { PRIMARY_LANE_JOBS, validatePrimaryResults } from '../ci-results.mjs';
 import { EVM_TEST_SCOPES } from '../../ci/evm-test-scopes.mjs';
 import {
@@ -472,6 +480,46 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   assert.deepEqual(missing, [], 'a change to these files must select the lane or EVM scope that loads them');
 });
 
+test('owning lanes and scopes cover every job that runs the workspace', () => {
+  // The guard above seeds each workspace's files with its owning lanes, so
+  // those are checked here against what CI executes, not against the routing
+  // tables: the Vitest topology the lane jobs' matrices are compiled from,
+  // the workspaces a lane job's steps filter to (such as the Blazegraph job's
+  // storage, EPCIS and agent suites) and the workspace each EVM scope's suites
+  // live in.
+  const laneByJob = Object.fromEntries(Object.entries(PRIMARY_LANE_JOBS).map(([lane, job]) => [job, lane]));
+  const missing = [];
+  for (const [job, packages] of Object.entries(COVERAGE_JOBS)) {
+    for (const name of Object.keys(packages)) {
+      if (!WORKSPACE_OWNING_LANES[`packages/${name}`]?.includes(laneByJob[job])) {
+        missing.push(`${laneByJob[job]} runs the packages/${name} Vitest suite`);
+      }
+    }
+  }
+  for (const [scope, { packageDirectory }] of Object.entries(EVM_TEST_SCOPES)) {
+    if (!WORKSPACE_OWNING_EVM_SCOPES[packageDirectory]?.includes(scope)) missing.push(`evm:${scope} runs ${packageDirectory} suites`);
+  }
+  // A job that runs a workspace by filter may be selected through an implied
+  // lane (the agent lane brings the Blazegraph job), so check the plan.
+  const workspaceByName = new Map(Object.keys(WORKSPACE_RULES).map((workspace) => [
+    JSON.parse(fs.readFileSync(path.join(REPO_ROOT, workspace, 'package.json'), 'utf8')).name,
+    workspace,
+  ]));
+  const { jobs } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
+  let filtered = 0;
+  for (const [lane, job] of Object.entries(PRIMARY_LANE_JOBS)) {
+    const runs = (jobs[job].steps ?? []).map(({ run = '' }) => run).join('\n');
+    for (const [, name] of runs.matchAll(/--filter\s+(@origintrail-official\/[\w-]+)/g)) {
+      const workspace = workspaceByName.get(name);
+      if (!workspace || WORKSPACE_RULES[workspace].forceFull) continue;
+      filtered += 1;
+      if (!pullRequestPlan([change(`${workspace}/src/index.ts`)]).lanes[lane]) missing.push(`${lane} runs ${workspace} in ${job}`);
+    }
+  }
+  assert.ok(filtered >= 5, 'the lane jobs that filter to a workspace are checked');
+  assert.deepEqual(missing, []);
+});
+
 test('demo suites stay wired into the supporting job', () => {
   // Demo changes route to the supporting lane, whose job runs both demo apps' suites.
   assert.deepEqual(WORKSPACE_OWNING_LANES.demo, ['kosava_supporting']);
@@ -486,7 +534,8 @@ test('demo suites stay wired into the supporting job', () => {
 test('the load scanner sees these forms, and nothing it cannot resolve statically', () => {
   // The load-closure guard sees only what loadReferences recognises, so its
   // reach is pinned here: each form below resolves to the named file, and the
-  // comment mention and the run-time path deliberately resolve to nothing.
+  // comment mentions (even one shaped like an import) and the run-time path
+  // deliberately resolve to nothing.
   const references = loadReferences('packages/node-ui/test/example.test.ts', [
     "import { api } from '../src/ui/api.js';",
     "import type { RequestContext } from '../../cli/src/daemon/routes/context.js';",
@@ -498,6 +547,7 @@ test('the load scanner sees these forms, and nothing it cannot resolve staticall
     'for (const entry of readdirSync(CLI_SRC)) void entry;',
     "const census = ['packages/agent/src/dkg-agent-join.ts'];",
     '// `packages/cli/src/keystore.ts` is only mentioned here.',
+    "// import { retired } from '../src/ui/retired.js';",
     "import { contextGraphDataUri } from '@origintrail-official/dkg-core';",
     'const late = readFileSync(`${root}/${name}`);',
   ].join('\n'));
@@ -529,12 +579,14 @@ test('the load scanner sees these forms, and nothing it cannot resolve staticall
     "const RULES = resolve(import.meta.dirname, '..', '..', 'rdf-utils', 'package.json');",
     "const ROOT = fileURLToPath(new URL('../../../', import.meta.url));",
     "const BLAZEGRAPH = join(ROOT, 'blazegraph-image.json');",
+    "const MANIFEST = join(\n  import.meta.dirname,\n  '..',\n  'package.json',\n);",
   ].join('\n'));
   assert.deepEqual(other.modules, ['packages/kafka-plugin/src/index.ts']);
   assert.deepEqual(other.paths.sort(), [
     'blazegraph-image.json',
     'packages/cli/src/cli.ts',
     'packages/cli/test-fixtures/sample-kafka-plugin/src/index.ts',
+    'packages/kafka-plugin/package.json',
     'packages/rdf-utils/package.json',
   ]);
   // A bare side-effect import loads its module, relative or by package name.

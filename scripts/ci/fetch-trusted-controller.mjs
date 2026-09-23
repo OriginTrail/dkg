@@ -22,4 +22,4 @@ export function fetchPinnedController({ run = execFileSync, ref = pinnedControll
   run('git', ['fetch', '--no-tags', '--depth=1', 'origin', ref], { stdio: 'inherit' });
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) fetchPinnedController();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) fetchPinnedController();
