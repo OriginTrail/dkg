@@ -199,7 +199,7 @@ ACKs, and sign. A declined request stores nothing.
 
 | Decline on the wire | When | Publisher behavior |
 | --- | --- | --- |
-| `CORE_TEMPORARILY_UNAVAILABLE`, message `VM promotion unavailable: ...` | The Core cannot commit right now: VM reconciliation is starting or stopping; the graph's liveness, access policy, on-chain name or core-hosted record could not be read or written; its persisted subscription row is dormant for a reason that can clear (for up to 10 minutes); or (for an update) the version being replaced is not in VM yet | Retries this Core with backoff (every deployed publisher, 10.0.18 included) |
+| `CORE_TEMPORARILY_UNAVAILABLE`, message `VM promotion unavailable: ...` | The Core cannot commit right now: VM reconciliation is starting or stopping; the graph's liveness, access policy, on-chain name or core-hosted record could not be read, confirmed or written; its persisted subscription row is dormant for a reason that can clear (for up to 10 minutes); a same-version copy it signed may still land; or (for an update) the version being replaced is not in VM yet | Retries this Core with backoff (every deployed publisher, 10.0.18 included) |
 | `CORE_VM_PROMOTION_DISABLED` | VM reconciliation is switched off or the chain adapter cannot run it; the SWM graph id the request names is not the graph it is signed for (see below); the namespace already reconciles a different live graph; the persisted subscription row stays dormant (rehydration disabled, authority denied, or 10 minutes without clearing); a curated graph was sent on the public path; or the intent is not graph-scoped | Moves on to other Cores |
 | `CONFLICTING_KA_ASSERTION` | The Core signed and still owes a copy of this Knowledge Asset at a newer version, or at the same version with different content that has already landed on chain | Moves on to other Cores |
 
@@ -213,15 +213,20 @@ names (`swmGraphId`), which is also where the Core records the graph as
 core-hosted. That id must belong to the graph the ACK is signed for: a numeric
 id must be that graph's id, and a name must be the graph's committed on-chain
 name (`keccak256(name)` equals the graph's name hash) or, for a graph created
-without a committed name, bound to it locally. Otherwise the Core declines
-finally, so a request cannot bind another graph's namespace.
+without a committed name, bound to it locally. A mismatch is declined finally,
+so a request cannot bind another graph's namespace; a name the Core cannot
+confirm yet (for example a brand-new graph whose registration it cannot see)
+is declined transiently.
 
 **Which copy holds the head.** Only a copy this Core signed and still owes can
 hold a Knowledge Asset's SWM head against a new request; any other head (a
 synced or gossiped copy, a released copy) is replaced. A same-version request
-with different content replaces the held copy while that version has not
-landed on chain (a retry after a failed round reuses the version), and is
-declined once it has. A newer version replaces the held copy once it is in VM,
+with different content is declined once that version has landed on chain.
+Before that it replaces the held copy (a retry after a failed round reuses the
+version), but only once the held copy's own transaction can no longer be
+pending: it is older than 5 minutes (`DKG_STORAGE_ACK_PENDING_TX_WINDOW_MS`)
+or the audit has seen it absent on chain. Until then the request is declined
+transiently. A copy whose version landed with different content is released. A newer version replaces the held copy once it is in VM,
 or at once when the chain has already moved past it. SWM gossip of a newer
 version waits, queued by its sender, until an owed copy is promoted.
 

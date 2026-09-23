@@ -2888,6 +2888,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               onPriorVersionAwaitingPromotion: (request) => this.promoteStorageAckPriorVersion(request),
               readKnowledgeAssetRootCount: (kaUal, signal) =>
                 this.readStorageAckKnowledgeAssetRootCount(kaUal, signal),
+              pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS,
               // Testnet dead-air fix: `isOperationalWalletRegistered` is a
               // LIVE chain read the handler runs on EVERY inbound StorageACK.
               // With the raw wiring, one degraded shared RPC made the lookup

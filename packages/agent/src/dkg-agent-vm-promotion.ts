@@ -19,6 +19,7 @@ import {
   STORAGE_ACK_LEDGER_GRAPH,
   STORAGE_ACK_LEDGER_PREDICATES as LEDGER,
   storageAckLedgerMarkUpdate,
+  storageAckOperationId,
   xsdDateTimeLiteral,
   type StorageAckPriorVersionRequest,
   type StorageAckVmPromotionRequest,
@@ -1029,22 +1030,32 @@ export class VmPromotionMethods extends DKGAgentBase {
   ): Promise<CopyClassification> {
     const kaId = knowledgeAssetIdFromUal(candidate.kaUal);
     if (kaId === null) return 'unknown';
-    const byRootCount = (rootCount: bigint): CopyClassification => {
-      if (rootCount === candidate.assertionVersion) return 'landed';
+    // The copy's operation id commits to its Merkle root; a version that
+    // landed with a different root can never be promoted from this copy.
+    const copyOperationId = /:(storage-ack-[0-9a-f]{64})$/.exec(candidate.operationSubject)?.[1];
+    const landedRootMatches = async (): Promise<boolean> => {
+      if (copyOperationId === undefined || typeof this.chain.getLatestMerkleRoot !== 'function') return true;
+      const root = await this.chain.getLatestMerkleRoot(kaId);
+      return storageAckOperationId(candidate.kaUal, candidate.assertionVersion, root) === copyOperationId;
+    };
+    const byRootCount = async (rootCount: bigint): Promise<CopyClassification> => {
+      if (rootCount === candidate.assertionVersion) {
+        return await landedRootMatches() ? 'landed' : 'superseded';
+      }
       return rootCount > candidate.assertionVersion ? 'superseded' : 'absent';
     };
     try {
       if (candidate.assertionVersion > 1n) {
         const rootCount = await this.chain.getMerkleRootCount?.(kaId);
         if (typeof rootCount !== 'bigint') return 'unknown';
-        return byRootCount(rootCount);
+        return await byRootCount(rootCount);
       }
       const readRegistration = this.chain.getKAContextGraphId;
       if (typeof readRegistration !== 'function') return 'unknown';
       const registeredTo = await readRegistration.call(this.chain, kaId);
       if (registeredTo.toString() === onChainId) {
         const rootCount = await this.chain.getMerkleRootCount?.(kaId);
-        return typeof rootCount === 'bigint' ? byRootCount(rootCount) : 'landed';
+        return typeof rootCount === 'bigint' ? await byRootCount(rootCount) : 'landed';
       }
       if (registeredTo !== 0n) return 'absent';
       const rootCount = await this.chain.getMerkleRootCount?.(kaId);
@@ -1256,11 +1267,16 @@ export class VmPromotionMethods extends DKGAgentBase {
       this.storageAckNamespaceBindings.add(bindingKey);
       return undefined;
     }
-    return disabled(
-      local === null
-        ? `cannot verify that "${namespace}" names context graph ${cgId}: the graph has no on-chain name and no local binding`
-        : `SWM graph id "${namespace}" is bound to context graph ${local} on this core, not ${cgId}`,
-    );
+    if (local !== null) {
+      return disabled(`SWM graph id "${namespace}" is bound to context graph ${local} on this core, not ${cgId}`);
+    }
+    // Nothing contradicts the name yet: a brand-new graph's registration may
+    // not be visible here. Retryable, not final.
+    return {
+      ok: false,
+      code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE,
+      message: `the on-chain name of context graph ${cgId} cannot be confirmed yet`,
+    };
   }
 
   /**

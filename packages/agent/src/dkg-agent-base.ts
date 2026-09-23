@@ -982,6 +982,14 @@ export class DKGAgentBase {
     'DKG_VM_PROMOTION_AUDIT_INTERVAL_MS',
     15 * 60_000,
   );
+  /**
+   * A signed ACK copy this young may still land (quorum round plus inclusion),
+   * so a same-version request with different content cannot replace it yet.
+   */
+  static readonly STORAGE_ACK_PENDING_TX_WINDOW_MS = readPositiveSafeIntegerEnv(
+    'DKG_STORAGE_ACK_PENDING_TX_WINDOW_MS',
+    5 * 60_000,
+  );
   /** An ACKed KA not in VM this long after its ACK is reported as stalled. */
   static readonly VM_PROMOTION_STALL_THRESHOLD_MS = readPositiveSafeIntegerEnv(
     'DKG_VM_PROMOTION_STALL_THRESHOLD_MS',

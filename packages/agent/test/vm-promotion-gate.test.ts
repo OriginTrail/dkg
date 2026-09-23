@@ -960,12 +960,42 @@ describe('core VM-promotion guarantees', () => {
       const handler = realHandler(internals);
       expect(isStorageACKDecline(await ack(handler, 'first-attempt', 1))).toBe(false);
 
+      // While the first copy's transaction may still be pending, the retry waits.
+      const early = await ack(handler, 'edited-retry', 1);
+      expect(early.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+      // Past the pending-transaction window it replaces the held copy.
+      const held = await internals.store.query(`SELECT ?op WHERE { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
+        ?op <${LEDGER.kaUal}> <${ual(N)}>
+      } }`);
+      const heldOp = held.type === 'bindings' ? held.bindings[0]?.['op'] : undefined;
+      await internals.store.update!(storageAckLedgerMarkUpdate(heldOp!, LEDGER.signedAt, new Date(Date.now() - 6 * 60_000)));
       expect(isStorageACKDecline(await ack(handler, 'edited-retry', 1))).toBe(false);
 
       // Once that version landed with some content, different content is refused.
       landOnChain(internals, 'edited-retry', 1);
       const late = await ack(handler, 'third-try', 1);
       expect(late.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CONFLICTING_KA_ASSERTION);
+    });
+
+    it('releases a copy whose version landed with different content', async () => {
+      const internals = await boot();
+      await internals.ensureStorageAckLedgerReady();
+      const handler = realHandler(internals);
+      expect(isStorageACKDecline(await ack(handler, 'first', 1))).toBe(false);
+      landOnChain(internals, 'first', 1);
+      expect(await internals.reconcileStorageAckCopy({
+        operationSubject: 'unused', namespace: NAMESPACE, kaUal: ual(N), assertionVersion: 1n,
+        signedAtMs: 0, contextGraphId: TARGET, registered: true,
+      }, TARGET)).toBe(true);
+      expect(isStorageACKDecline(await ack(handler, 'second', 2))).toBe(false);
+      // Version 2 lands through other cores with content this core never held.
+      landOnChain(internals, 'rival', 2);
+
+      const lane = await internals.promotePendingStorageAckUpdates(Date.now() + 2 * 60_000);
+
+      expect(lane).toMatchObject({ superseded: 1, promoted: 0 });
+      // The held copy no longer blocks the next update.
+      expect(isStorageACKDecline(await ack(handler, 'third', 3))).toBe(false);
     });
 
     it('promotes the version an update waits on, so the publisher retry is signed', async () => {
@@ -1269,9 +1299,24 @@ describe('core VM-promotion guarantees', () => {
       await expect(internals.ensureStorageAckVmPromotion({
         contextGraphId: '60', swmGraphId: 'locally-bound', operation: 'publish',
       })).resolves.toEqual({ ok: true });
+      // Nothing confirms or contradicts the name yet: retryable.
       await expect(internals.ensureStorageAckVmPromotion({
         contextGraphId: '61', swmGraphId: 'unknown-name', operation: 'publish',
-      })).resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED });
+      })).resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE });
+    });
+
+    it("declines transiently until a brand-new graph's registration is visible, then binds", async () => {
+      const internals = await boot();
+      let registered = false;
+      internals.chain.getContextGraphNameHash = async (id) => (
+        id === 62n && registered ? nameHash('brand-new-cg') : null
+      );
+      const request = { contextGraphId: '62', swmGraphId: 'brand-new-cg', operation: 'publish' as const };
+
+      await expect(internals.ensureStorageAckVmPromotion(request))
+        .resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE });
+      registered = true;
+      await expect(internals.ensureStorageAckVmPromotion(request)).resolves.toEqual({ ok: true });
     });
 
     it('declines transiently when the committed name cannot be read', async () => {

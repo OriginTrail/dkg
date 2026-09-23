@@ -69,6 +69,7 @@ import {
   STORAGE_ACK_LEDGER_PREDICATES,
   storageAckLedgerEntryQuads,
   storageAckLedgerRecordUpdate,
+  storageAckOperationId,
   storageAckOwedOperationsQuery,
   xsdDateTimeLiteral,
   type StorageAckLedgerEntry,
@@ -443,6 +444,9 @@ function formatStorePressureSnapshot(snapshot: StorePressureSnapshot | undefined
  * graph-scoped publish, its SWM head) is stored and verified.
  */
 /** A version an update ACK waits on: registered on chain, not yet in this core's VM. */
+/** See {@link StorageACKHandlerConfig.pendingAckTxWindowMs}. */
+export const DEFAULT_PENDING_ACK_TX_WINDOW_MS = 5 * 60_000;
+
 export interface StorageAckPriorVersionRequest {
   /** On-chain Context Graph id the update targets. */
   readonly contextGraphId: string;
@@ -539,6 +543,12 @@ export interface StorageACKHandlerConfig {
    * Without it such copies hold the head (the pre-hook behaviour).
    */
   readKnowledgeAssetRootCount?: (kaUal: string, signal?: AbortSignal) => Promise<bigint>;
+  /**
+   * How long a signed ACK copy is treated as possibly still landing (quorum
+   * collection plus transaction inclusion) before a same-version request with
+   * different content may replace it. Default 5 minutes.
+   */
+  pendingAckTxWindowMs?: number;
   /**
    * Optional live confirmation hook. When provided, the handler calls it
    * immediately before signing so removed/unregistered operational keys stop
@@ -1003,14 +1013,15 @@ export class StorageACKHandler {
     merkleRoot: Uint8Array,
     replaceGraph: boolean,
     signal?: AbortSignal,
+    recordLedger = false,
   ): Promise<{ ok: true; ledger: StorageAckLedgerEntry } | { ok: false; decline: Uint8Array }> {
     assertPersistQuadTermsSafe(parsed);
     const normalized = parsed.map((quad) => ({ ...quad, graph: swmGraphUri }));
-    const operationId = `storage-ack-${ethers.keccak256(ethers.toUtf8Bytes([
+    const operationId = storageAckOperationId(
       graphPublish.scope.ual,
       graphPublish.scope.assertionVersion,
-      ethers.hexlify(merkleRoot),
-    ].join('\0'))).slice(2)}`;
+      merkleRoot,
+    );
     const metaGraph = this.graphManager.sharedMemoryMetaUri(
       swmGraphId,
       graphPublish.subGraphName,
@@ -1052,6 +1063,17 @@ export class StorageACKHandler {
     const incomingPrivateRoot = graphPublish.privateMerkleRoot
       ? ethers.hexlify(graphPublish.privateMerkleRoot).toLowerCase()
       : undefined;
+    const ledgerEntry = (): StorageAckLedgerEntry => ({
+      operationSubject,
+      namespace: swmGraphId,
+      metaGraph,
+      contextGraphId: cgId,
+      kaUal: graphPublish.scope.ual,
+      assertionVersion: graphPublish.scope.assertionVersion,
+      operation: BigInt(graphPublish.scope.assertionVersion) > 1n ? 'update' : 'publish',
+      signedAt: new Date(),
+      ...(graphPublish.subGraphName ? { subGraphName: graphPublish.subGraphName } : {}),
+    });
 
     const persist = async () => this.runStoreOpOrDecline(cgId, async (): Promise<Uint8Array | undefined> => {
       const verdict = await this.checkAckCopyAgainstHead({
@@ -1124,6 +1146,11 @@ export class StorageACKHandler {
         queryOptions: ackStoreOptions('storage-ack.persistGraphScoped.workspaceHead'),
       });
       await this.supersedeLedgerOperations(verdict.supersede);
+      // Record the signature-to-be under the same lock, so a request that
+      // takes the lock next already sees this copy as owed. Only the
+      // signature follows; like the head write, this is not tied to the
+      // ACK deadline once started.
+      if (recordLedger) await this.recordSignedAck(ledgerEntry());
       await this.store.flush?.(
         ackStoreOptions('storage-ack.persistGraphScoped.flush'),
       );
@@ -1142,20 +1169,7 @@ export class StorageACKHandler {
       : await persist();
     if (!result.ok) return result;
     if (result.value !== undefined) return { ok: false, decline: result.value };
-    return {
-      ok: true,
-      ledger: {
-        operationSubject,
-        namespace: swmGraphId,
-        metaGraph,
-        contextGraphId: cgId,
-        kaUal: graphPublish.scope.ual,
-        assertionVersion: graphPublish.scope.assertionVersion,
-        operation: BigInt(graphPublish.scope.assertionVersion) > 1n ? 'update' : 'publish',
-        signedAt: new Date(),
-        ...(graphPublish.subGraphName ? { subGraphName: graphPublish.subGraphName } : {}),
-      },
-    };
+    return { ok: true, ledger: ledgerEntry() };
   }
 
   private notifyPriorVersionAwaitingPromotion(request: StorageAckPriorVersionRequest): void {
@@ -1177,7 +1191,7 @@ export class StorageACKHandler {
     swmGraphId: string,
     head: KnowledgeAssetWorkspaceHead,
     signal?: AbortSignal,
-  ): Promise<string[]> {
+  ): Promise<Array<{ op: string; signedAtMs: number; absentSeen: boolean }>> {
     const operations = [...new Set(head.operationAliases.map(
       (alias) => workspaceOperationSubject(swmGraphId, alias.shareOperationId),
     ))];
@@ -1187,9 +1201,22 @@ export class StorageACKHandler {
       ackStoreOptions('storage-ack.persistGraphScoped.owedHead', signal),
     );
     if (result.type !== 'bindings') return [];
-    return result.bindings
-      .map((row) => row['op'])
-      .filter((op): op is string => typeof op === 'string' && op.length > 0);
+    const owed = new Map<string, { op: string; signedAtMs: number; absentSeen: boolean }>();
+    for (const row of result.bindings) {
+      const op = row['op'];
+      if (typeof op !== 'string' || op.length === 0) continue;
+      const literal = row['signedAt'] ?? '';
+      const lexical = literal.startsWith('"') ? literal.slice(1, literal.indexOf('"', 1)) : literal;
+      const parsed = Date.parse(lexical);
+      const previous = owed.get(op);
+      owed.set(op, {
+        op,
+        // An unreadable timestamp counts as recent: never release on a guess.
+        signedAtMs: Math.max(Number.isFinite(parsed) ? parsed : Date.now(), previous?.signedAtMs ?? -Infinity),
+        absentSeen: (previous?.absentSeen ?? false) || row['absentSeen'] !== undefined,
+      });
+    }
+    return [...owed.values()];
   }
 
   /**
@@ -1278,8 +1305,9 @@ export class StorageACKHandler {
     ) {
       return replace;
     }
-    const owed = await this.owedHeadOperations(input.swmGraphId, head, input.signal);
-    if (owed.length === 0) return replace;
+    const owedRows = await this.owedHeadOperations(input.swmGraphId, head, input.signal);
+    if (owedRows.length === 0) return replace;
+    const owed = owedRows.map((row) => row.op);
     if (incomingVersion < currentVersion) {
       return {
         decline: this.encodeDecline(
@@ -1298,6 +1326,20 @@ export class StorageACKHandler {
             input.cgId,
             STORAGE_ACK_DECLINE_CODES.CONFLICTING_KA_ASSERTION,
             `assertion version ${incomingVersion} is already bound to different content on this core`,
+          ),
+        };
+      }
+      // Not on chain yet is not proof it never will be: the held copy's
+      // transaction may still be pending. Release it only once the audit saw
+      // it absent, or once it is older than any quorum round plus inclusion.
+      const pendingWindowMs = this.config.pendingAckTxWindowMs ?? DEFAULT_PENDING_ACK_TX_WINDOW_MS;
+      const now = Date.now();
+      const dead = owedRows.every((row) => row.absentSeen || now - row.signedAtMs > pendingWindowMs);
+      if (!dead) {
+        return {
+          decline: this.declineVmPromotionUnavailable(
+            input.cgId,
+            `a copy of version ${currentVersion} this core signed may still land on chain; retry later`,
           ),
         };
       }
@@ -1353,32 +1395,23 @@ export class StorageACKHandler {
   }
 
   /**
-   * Record, immediately before the signature, that this core signs this ACK
-   * copy. One atomic update keeps the row's `registeredAt` and leaves no
-   * window without a row; like the head write, it is not tied to the ACK
-   * deadline once started.
+   * Record that this core signs this ACK copy: one atomic update that keeps
+   * the row's `registeredAt` and leaves no window without a row. Called under
+   * the per-KA write lock, right before the signature.
    */
-  private async recordSignedAckOrDecline(
-    cgId: string,
-    entry: StorageAckLedgerEntry,
-    signal?: AbortSignal,
-  ): Promise<{ ok: true } | { ok: false; decline: Uint8Array }> {
-    const result = await this.runStoreOpOrDecline(cgId, async () => {
-      const signed = { ...entry, signedAt: new Date() };
-      if (typeof this.store.update === 'function') {
-        await this.store.update(
-          storageAckLedgerRecordUpdate(signed),
-          ackStoreOptions('storage-ack.ledger.record'),
-        );
-      } else {
-        await this.store.insert(
-          storageAckLedgerEntryQuads(signed),
-          ackStoreOptions('storage-ack.ledger.insert'),
-        );
-      }
-      await this.store.flush?.(ackStoreOptions('storage-ack.ledger.flush'));
-    }, signal);
-    return result.ok ? { ok: true } : result;
+  private async recordSignedAck(entry: StorageAckLedgerEntry): Promise<void> {
+    const signed = { ...entry, signedAt: new Date() };
+    if (typeof this.store.update === 'function') {
+      await this.store.update(
+        storageAckLedgerRecordUpdate(signed),
+        ackStoreOptions('storage-ack.ledger.record'),
+      );
+      return;
+    }
+    await this.store.insert(
+      storageAckLedgerEntryQuads(signed),
+      ackStoreOptions('storage-ack.ledger.insert'),
+    );
   }
 
   /**
@@ -2023,6 +2056,7 @@ export class StorageACKHandler {
           merkleRoot,
           true,
           signal,
+          this.config.ensureVmPromotion !== undefined,
         );
       } else {
         // Ungated embeddings only (a gated core declined legacy intents above).
@@ -2102,6 +2136,7 @@ export class StorageACKHandler {
           merkleRoot,
           false,
           signal,
+          this.config.ensureVmPromotion !== undefined,
         );
       }
     }
@@ -2256,12 +2291,6 @@ export class StorageACKHandler {
     if (persistGraphCopy) {
       const persisted = await persistGraphCopy();
       if (!persisted.ok) return persisted.decline;
-      // The ledger drives retention on a gated core; an embedding without the
-      // gate keeps the pre-gate write set.
-      if (this.config.ensureVmPromotion) {
-        const recorded = await this.recordSignedAckOrDecline(cgId, persisted.ledger, signal);
-        if (!recorded.ok) return recorded.decline;
-      }
     }
 
     const signature = ethers.Signature.from(
@@ -2644,6 +2673,7 @@ export class StorageACKHandler {
         newMerkleRoot,
         writeData,
         signal,
+        true,
       );
     } else if (intent.stagingQuads && intent.stagingQuads.length > 0) {
       if (intent.stagingQuads.length > STORAGE_ACK_MAX_STAGING_BYTES) {
@@ -2809,8 +2839,6 @@ export class StorageACKHandler {
     if (persistUpdateCopy) {
       const persisted = await persistUpdateCopy();
       if (!persisted.ok) return persisted.decline;
-      const recorded = await this.recordSignedAckOrDecline(cgId, persisted.ledger, signal);
-      if (!recorded.ok) return recorded.decline;
     }
 
     const signature = ethers.Signature.from(

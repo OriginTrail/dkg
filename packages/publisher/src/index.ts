@@ -205,6 +205,7 @@ export {
   storageAckLedgerEntryQuads,
   storageAckLedgerMarkUpdate,
   storageAckLedgerRecordUpdate,
+  storageAckOperationId,
   storageAckOwedOperationsQuery,
   xsdDateTimeLiteral,
   type StorageAckLedgerEntry,

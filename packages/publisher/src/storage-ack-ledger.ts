@@ -14,6 +14,7 @@
  * (`urn:dkg:share:<namespace>:storage-ack-<hash>`).
  */
 
+import { ethers } from 'ethers';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 export const STORAGE_ACK_LEDGER_GRAPH = 'urn:dkg:node:storage-ack-ledger';
@@ -68,6 +69,23 @@ export interface StorageAckLedgerEntry {
   readonly operation: 'publish' | 'update';
   readonly signedAt: Date;
   readonly subGraphName?: string;
+}
+
+/**
+ * The share-operation id of the ACK copy for (UAL, version, Merkle root): the
+ * same id for the same content, whichever request stored it.
+ */
+export function storageAckOperationId(
+  kaUal: string,
+  assertionVersion: string | number | bigint,
+  merkleRoot: Uint8Array | string,
+): string {
+  const root = typeof merkleRoot === 'string' ? merkleRoot.toLowerCase() : ethers.hexlify(merkleRoot);
+  return `storage-ack-${ethers.keccak256(ethers.toUtf8Bytes([
+    kaUal,
+    String(assertionVersion),
+    root,
+  ].join('\0'))).slice(2)}`;
 }
 
 export function xsdDateTimeLiteral(date: Date): string {
@@ -145,9 +163,10 @@ export function storageAckLedgerMarkUpdate(operationSubject: string, predicate: 
 export function storageAckOwedOperationsQuery(operationSubjects: readonly string[]): string {
   const values = operationSubjects.map((op) => `<${op}>`).join(' ');
   const p = STORAGE_ACK_LEDGER_PREDICATES;
-  return `SELECT DISTINCT ?op WHERE { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
+  return `SELECT ?op ?signedAt ?absentSeen WHERE { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
     VALUES ?op { ${values} }
     ?op <${p.signedAt}> ?signedAt .
+    OPTIONAL { ?op <${p.absentSeenAt}> ?absentSeen }
     FILTER NOT EXISTS { ?op <${p.unregisteredAt}> ?unregistered }
     FILTER NOT EXISTS { ?op <${p.supersededAt}> ?superseded }
   } }`;

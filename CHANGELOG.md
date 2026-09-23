@@ -50,8 +50,13 @@ All notable changes to the DKG V10 node are documented here. The format is based
   Against an owed copy, an older version is declined with the new, final
   `CONFLICTING_KA_ASSERTION`, as SWM gossip does. The same version with
   different content is declined that way only once that version has landed
-  on chain; before that the held copy is replaced, so a retry after a failed
-  round (which reuses the version) is signed instead of locking the asset. A
+  on chain. Before that, the held copy is replaced once its own transaction
+  can no longer be pending (it is older than 5 minutes,
+  `DKG_STORAGE_ACK_PENDING_TX_WINDOW_MS`, or the audit saw it absent on
+  chain), and the request is declined transiently until then; so a retry
+  after a failed round (which reuses the version) is signed instead of
+  locking the asset. A copy whose version landed with different content is
+  released like a superseded one. A
   newer version replaces the held copy once it is in VM, or at once when the
   chain has already moved past it. SWM gossip of a newer version waits (the
   sender keeps it queued) until the owed copy is promoted.
@@ -77,9 +82,10 @@ All notable changes to the DKG V10 node are documented here. The format is based
   record goes through the strict subscription-store path once per graph. The
   SWM graph id a request names must belong to the graph it is signed for: a
   numeric id must be that graph, and a name must be the graph's committed
-  on-chain name (or, for a graph without one, locally bound to it); anything
-  else is declined finally, so one request cannot bind another graph's
-  namespace. A namespace that reconciles a different live graph is never
+  on-chain name (or, for a graph without one, locally bound to it). A
+  mismatch is declined finally, so one request cannot bind another graph's
+  namespace; a name that cannot be confirmed yet (a brand-new graph whose
+  registration is not visible) is declined transiently. A namespace that reconciles a different live graph is never
   rewritten by an ACK. A namespace whose persisted subscription row is dormant
   is declined transiently for up to 10 minutes while the dormancy can clear
   (authority retry, activation slot), then finally; with subscription

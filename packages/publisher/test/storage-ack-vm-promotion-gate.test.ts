@@ -25,7 +25,11 @@ import {
 } from '../src/storage-ack-handler.js';
 import { tryResolveKnowledgeAssetWorkspaceHead } from '../src/workspace-resolution.js';
 import { computeFlatKCMerkleLeafCountV10, computeFlatKCRootV10 } from '../src/merkle.js';
-import { STORAGE_ACK_LEDGER_GRAPH, STORAGE_ACK_LEDGER_PREDICATES as LEDGER } from '../src/storage-ack-ledger.js';
+import {
+  STORAGE_ACK_LEDGER_GRAPH,
+  STORAGE_ACK_LEDGER_PREDICATES as LEDGER,
+  storageAckLedgerMarkUpdate,
+} from '../src/storage-ack-ledger.js';
 
 const CG_ID = '42';
 const SWM_GRAPH_ID = 'public-source-cg';
@@ -78,6 +82,7 @@ function harness(
     curated?: boolean;
     store?: OxigraphStore;
     rootCount?: (kaUal: string) => Promise<bigint>;
+    locks?: Map<string, Promise<void>>;
   } = {},
 ): Harness {
   const store = options.store ?? new OxigraphStore();
@@ -97,6 +102,7 @@ function harness(
     onDecline: (details) => { declines.push(details); },
     onPriorVersionAwaitingPromotion: (request) => { priorVersions.push({ ...request }); },
     ...(options.rootCount ? { readKnowledgeAssetRootCount: options.rootCount } : {}),
+    ...(options.locks ? { workspaceWriteLocks: options.locks } : {}),
   }, new TypedEventBus());
   return { wallet, store, handler, signMessage, declines, priorVersions };
 }
@@ -385,17 +391,34 @@ describe('StorageACK VM-promotion finality gate', () => {
   });
 
   describe('held copies the core no longer owes', () => {
-    it('replaces a same-version copy it signed that never landed, and releases the old ledger row', async () => {
+    it('declines a same-version retry while the held copy may still land on chain', async () => {
+      // Not on chain yet (count < version) is not proof it never lands: its
+      // transaction may be pending.
+      const h = harness(async () => OK, { rootCount: async () => 0n });
+      await signedPublish(h, 'first-attempt');
+
+      const retry = decodeStorageACK(await h.handler.handler(publishIntent('edited-retry').bytes, PEER));
+
+      expect(retry.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+      expect(retry.declineMessage).toContain('may still land');
+      expect(await swmValues(h.store)).toEqual(['"first-attempt"']);
+      expect(await supersededRows(h.store)).toEqual([]);
+    });
+
+    it.each([
+      { label: 'older than the pending-transaction window', mark: LEDGER.signedAt, at: () => new Date(Date.now() - 6 * 60_000) },
+      { label: 'seen absent on chain by the audit', mark: LEDGER.absentSeenAt, at: () => new Date() },
+    ])('replaces a same-version copy it signed once it is $label', async ({ mark, at }) => {
       const h = harness(async () => OK, { rootCount: async () => 0n });
       await signedPublish(h, 'first-attempt');
       const [firstRow] = await ledgerRows(h.store);
+      await h.store.update!(storageAckLedgerMarkUpdate(firstRow!['op']!, mark, at()));
 
       const retry = decodeStorageACK(await h.handler.handler(publishIntent('edited-retry').bytes, PEER));
 
       expect(isStorageACKDecline(retry)).toBe(false);
       expect(await swmValues(h.store)).toEqual(['"edited-retry"']);
       expect(await supersededRows(h.store)).toEqual([firstRow!['op']]);
-      expect(await ledgerRows(h.store)).toHaveLength(2);
     });
 
     it('still refuses different content once that version landed on chain', async () => {
@@ -458,6 +481,38 @@ describe('StorageACK VM-promotion finality gate', () => {
       expect(h.priorVersions).toHaveLength(1);
       expect(await supersededRows(h.store)).toEqual([]);
     });
+  });
+
+  it('records a signed copy as owed before the next request for the asset takes the lock', async () => {
+    const locks = new Map<string, Promise<void>>();
+    const h = harness(async () => OK, { rootCount: async () => 0n, locks });
+    // Hold the first request's ledger write open.
+    let ledgerWriteStarted!: () => void;
+    const started = new Promise<void>((resolve) => { ledgerWriteStarted = resolve; });
+    let releaseLedgerWrite!: () => void;
+    const released = new Promise<void>((resolve) => { releaseLedgerWrite = resolve; });
+    const update = h.store.update!.bind(h.store);
+    let held = false;
+    h.store.update = (async (sparql: string, options?: { source?: string }) => {
+      if (!held && options?.source === 'storage-ack.ledger.record') {
+        held = true;
+        ledgerWriteStarted();
+        await released;
+      }
+      return update(sparql, options as never);
+    }) as typeof h.store.update;
+
+    const first = h.handler.handler(publishIntent('first').bytes, PEER);
+    await started;
+    const second = h.handler.handler(publishIntent('concurrent-other').bytes, PEER);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    releaseLedgerWrite();
+
+    expect(isStorageACKDecline(decodeStorageACK(await first))).toBe(false);
+    const other = decodeStorageACK(await second);
+    expect(other.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+    expect(await swmValues(h.store)).toEqual(['"first"']);
+    expect(await supersededRows(h.store)).toEqual([]);
   });
 
   it('reads the head in the reserved ACK lane under the ACK deadline', async () => {
