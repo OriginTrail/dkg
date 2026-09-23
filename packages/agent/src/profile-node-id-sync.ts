@@ -124,7 +124,10 @@ async function ringHolderOf(chain: ChainAdapter, nodeId: string): Promise<bigint
 /** Where this node's on-chain nodeId stands; null when the chain adapter has no Profile nodeId surface. */
 export async function readProfileNodeIdStatus(deps: ProfileNodeIdSyncDeps): Promise<ProfileNodeIdStatus | null> {
   const { chain, peerId } = deps;
-  if (!hasProfileNodeIdSurface(chain)) return null;
+  return hasProfileNodeIdSurface(chain) ? readStatus(chain, peerId) : null;
+}
+
+async function readStatus(chain: ProfileNodeIdChain, peerId: string): Promise<ProfileNodeIdStatus> {
   const expectedNodeId = encodeProfileNodeIdHex(peerId);
   const identityId = await chain.getIdentityId();
   const support = await chain.getProfileNodeIdUpdateSupport();
@@ -176,15 +179,15 @@ export async function syncProfileNodeId(
   deps: ProfileNodeIdSyncDeps,
   mode: ProfileNodeIdSyncMode,
 ): Promise<ProfileNodeIdSyncResult | null> {
-  const status = await readProfileNodeIdStatus(deps);
-  if (status === null) return null;
+  const { chain, peerId } = deps;
+  if (!hasProfileNodeIdSurface(chain)) return null;
+  const status = await readStatus(chain, peerId);
   if (status.state === 'no-profile') return { outcome: 'no-profile', status };
   if (status.state === 'in-sync') return { outcome: 'in-sync', status };
   if (!status.support.supported) return { outcome: 'unsupported', status };
   if (status.expectedNodeIdTaken) return { outcome: 'taken', status };
   if (mode === 'startup' && status.state === 'other-peer') return { outcome: 'skipped-other-peer', status };
 
-  const chain = deps.chain as ProfileNodeIdChain;
   try {
     const result = await chain.updateProfileNodeId(status.expectedNodeId, { identityId: status.identityId });
     const synced: ProfileNodeIdStatus = {
