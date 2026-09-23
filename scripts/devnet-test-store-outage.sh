@@ -16,9 +16,10 @@
 # exercised: a REAL store going down mid-publish, end-to-end across live nodes.
 #
 # How: SIGSTOP one core's daemon-managed oxigraph-server process to simulate a
-# transient outage (fully reversible — no restart, no data loss), publish from
-# an EDGE node, assert the publish confirms AND the paused core logs the typed
-# decline, then SIGCONT and assert the cluster publishes again.
+# transient outage (no data loss; the daemon may replace a stalled child), check status,
+# publish from an EDGE node, assert the publish confirms AND the paused core
+# logs the typed decline, then resume (or observe supervised replacement) and
+# assert the cluster publishes again.
 #
 # TOPOLOGY — why the publisher defaults to an EDGE node (otReviewAgent #1517):
 # `minimumRequiredSignatures` is pinned to 3 on the devnet chain and a publisher
@@ -71,6 +72,8 @@
 #   STORE_OUTAGE_TARGET (node number; default = first eligible core, preferring
 #   not-node1 so the mesh anchor / default curator stays pristine),
 #   STORE_OUTAGE_MIN_SIG (default 3), STORE_OUTAGE_DECLINE_WAIT_SECS (default 75).
+#   STORE_OUTAGE_STATUS_ONLY=1 checks status pause/recovery without a publish,
+#     so the status release lane can distinguish its result from ACK interop.
 #   DEVNET_REQUIRE_STORE_OUTAGE=1 — REQUIRED-LANE opt-in. Consumed by the vitest
 #     wrapper (and any CI "required devnet" lane): it turns a precondition SKIP
 #     into a HARD FAILURE, so the lane can guarantee the outage was actually
@@ -80,6 +83,7 @@
 #
 # Run standalone (against a running devnet):  scripts/devnet-test-store-outage.sh
 # Or via the suite:                           pnpm test:devnet:storage-ack-store-outage
+# Status pause/recovery without publishing:    pnpm test:devnet:status-store-outage
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -256,6 +260,27 @@ case "$STORE_CMD" in
 esac
 say "store process pid = ${STORE_PID} (cmd: ${STORE_CMD})"
 
+# Prime the status count while the store is healthy. Ordinary polling must
+# reuse this cached count during the outage without another expensive query.
+status_body() { # <path> -> JSON body; fail on a non-200 response
+  local response
+  response="$(api "$target_node" GET "$1")"
+  [ "$(code_of "$response")" = "200" ] || fail "node${target_node} status $1 returned HTTP $(code_of "$response")"
+  body_of "$response"
+}
+status_body '/api/status?includeStoreQuads=true' >/dev/null
+healthy_count=""
+for _ in $(seq 1 20); do
+  healthy_status="$(status_body '/api/status')"
+  if [ "$(field "$healthy_status" storeQuadsStatus)" = "ready" ]; then
+    healthy_count="$(field "$healthy_status" storeQuads)"
+    break
+  fi
+  sleep 1
+done
+[ -n "$healthy_count" ] || fail "node${target_node} did not finish a healthy store count before the outage"
+say "status baseline: node${target_node} reports ${healthy_count} quads"
+
 # --- publish helper (structured daemon API, not CLI text — otReviewAgent #1517)
 # Mirrors devnet-soak.sh publish_ka: named-KA lifecycle create → wm/write →
 # wm/finalize → swm/share → vm/publish. The synchronous vm/publish route answers
@@ -288,40 +313,64 @@ log_before=0
 say "pausing node${target_node}'s store (SIGSTOP ${STORE_PID}) ..."
 kill -STOP "$STORE_PID"
 
-say "publishing during the outage (from node${PUBLISHER_NODE}) ..."
-if ! publish_ka outage; then
-  fail "publish did NOT confirm during a single-core store outage (HTTP ${PUBLISH_CODE:-?}, status '${PUBLISH_STATUS:-?}') — quorum should have formed on the ${healthy_peer_cores} healthy cores. Response: ${PUBLISH_BODY:-<none>}"
-fi
-say "OK: publish confirmed via the healthy cores while node${target_node}'s store was down (kaId=${PUBLISH_KAID})"
+plain_started="$(date +%s)"
+paused_status="$(status_body '/api/status')"
+plain_elapsed="$(( $(date +%s) - plain_started ))"
+[ "$plain_elapsed" -lt 5 ] || fail "ordinary /api/status blocked for ${plain_elapsed}s on the paused store"
+[ "$(field "$paused_status" storeQuadsStatus)" = "ready" ] || fail "ordinary status lost its cached count while the store was paused: $paused_status"
+[ "$(field "$paused_status" storeQuads)" = "$healthy_count" ] || fail "ordinary status changed the cached count during the outage: $paused_status"
+[ -z "$(field "$paused_status" storeReachability)" ] || fail "ordinary status unexpectedly probed the paused store: $paused_status"
+paused_probe="$(status_body '/api/status?probeStore=true')"
+paused_reachability="$(field "$paused_probe" storeReachability)"
+case "$paused_reachability" in
+  no-answer|unreachable) : ;;
+  *) fail "explicit status probe did not report the paused store as unavailable: $paused_probe" ;;
+esac
+say "OK: ordinary status stayed responsive with its cached count; explicit probe reported ${paused_reachability}"
 
-# The paused core was dialed at ACK-round start (the collector dials every
-# connected core concurrently); its store read hangs until the ~30s sparql-http
-# client timeout, THEN the typed decline is logged. Poll for it — absence is
-# the dead-air incident regression, so it FAILS the suite (otReviewAgent #1517).
-say "waiting up to ${DECLINE_WAIT_SECS}s for node${target_node}'s typed decline (store reads hang until the ~30s client timeout) ..."
-declined=""
-waited=0
-while [ "$waited" -lt "$DECLINE_WAIT_SECS" ]; do
-  if [ -f "$target_log" ]; then
-    declined="$(tail -n "+$((log_before + 1))" "$target_log" 2>/dev/null | grep -a 'StorageACK declined.*CORE_TEMPORARILY_UNAVAILABLE' | head -1 || true)"
-    [ -n "$declined" ] && break
+if [ "${STORE_OUTAGE_STATUS_ONLY:-0}" != "1" ]; then
+  say "publishing during the outage (from node${PUBLISHER_NODE}) ..."
+  if ! publish_ka outage; then
+    fail "publish did NOT confirm during a single-core store outage (HTTP ${PUBLISH_CODE:-?}, status '${PUBLISH_STATUS:-?}') — quorum should have formed on the ${healthy_peer_cores} healthy cores. Response: ${PUBLISH_BODY:-<none>}"
   fi
-  sleep 3
-  waited=$((waited + 3))
-done
-if [ -z "$declined" ]; then
-  fail "node${target_node} logged NO typed 'StorageACK declined: code=CORE_TEMPORARILY_UNAVAILABLE' within ${DECLINE_WAIT_SECS}s of the outage publish — the paused core dead-aired (or was never dialed), which is exactly the incident regression this suite exists to catch. Log: $target_log"
+  say "OK: publish confirmed via the healthy cores while node${target_node}'s store was down (kaId=${PUBLISH_KAID})"
+
+  # The paused core was dialed at ACK-round start (the collector dials every
+  # connected core concurrently); its store read hangs until the ~30s sparql-http
+  # client timeout, THEN the typed decline is logged. Poll for it — absence is
+  # the dead-air incident regression, so it FAILS the suite (otReviewAgent #1517).
+  say "waiting up to ${DECLINE_WAIT_SECS}s for node${target_node}'s typed decline (store reads hang until the ~30s client timeout) ..."
+  declined=""
+  waited=0
+  while [ "$waited" -lt "$DECLINE_WAIT_SECS" ]; do
+    if [ -f "$target_log" ]; then
+      declined="$(tail -n "+$((log_before + 1))" "$target_log" 2>/dev/null | grep -a 'StorageACK declined.*CORE_TEMPORARILY_UNAVAILABLE' | head -1 || true)"
+      [ -n "$declined" ] && break
+    fi
+    sleep 3
+    waited=$((waited + 3))
+  done
+  if [ -z "$declined" ]; then
+    fail "node${target_node} logged NO typed 'StorageACK declined: code=CORE_TEMPORARILY_UNAVAILABLE' within ${DECLINE_WAIT_SECS}s of the outage publish — the paused core dead-aired (or was never dialed), which is exactly the incident regression this suite exists to catch. Log: $target_log"
+  fi
+  say "OK: node${target_node} returned a typed CORE_TEMPORARILY_UNAVAILABLE decline:"
+  echo "$declined" | sed 's/^/[store-outage][decline] /'
 fi
-say "OK: node${target_node} returned a typed CORE_TEMPORARILY_UNAVAILABLE decline:"
-echo "$declined" | sed 's/^/[store-outage][decline] /'
 
 # --- 2. recovery: store resumes, cluster keeps publishing ---------------------
-say "resuming node${target_node}'s store (SIGCONT ${STORE_PID}) ..."
-kill -CONT "$STORE_PID"
-STORE_PID=""   # resumed; disarm the cleanup pause
+resume_cmd="$(ps -p "$STORE_PID" -o args= 2>/dev/null || true)"
+if [ "$resume_cmd" = "$STORE_CMD" ]; then
+  say "resuming node${target_node}'s store (SIGCONT ${STORE_PID}) ..."
+  kill -CONT "$STORE_PID" || fail "could not resume node${target_node}'s original store process"
+elif [ -z "$resume_cmd" ]; then
+  say "node${target_node}'s paused store process already exited; checking supervisor recovery ..."
+else
+  fail "store PID ${STORE_PID} now belongs to another process; refusing to signal it"
+fi
+STORE_PID=""   # original process resumed or exited; disarm the cleanup pause
 
-# Informational probe that the SPARQL endpoint answers again (the functional
-# recovery check is the publish below).
+# Probe the SPARQL endpoint, then verify recovery through the status API and
+# (in the ACK lane) a fresh publish.
 recovered=false
 for _ in $(seq 1 20); do
   if curl -sf --max-time 3 "http://127.0.0.1:${target_port}/query?query=ASK%20%7B%7D" \
@@ -332,6 +381,20 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 $recovered || say "note: store port ${target_port} did not answer an ASK probe within 20s; continuing to the functional recovery check"
+
+recovered_status=""
+for _ in $(seq 1 10); do
+  recovered_status="$(status_body '/api/status?probeStore=true')"
+  [ "$(field "$recovered_status" storeReachability)" = "reachable" ] && break
+  sleep 2
+done
+[ "$(field "$recovered_status" storeReachability)" = "reachable" ] || fail "status probe did not recover after the store resumed or restarted: $recovered_status"
+say "OK: status probe reports the recovered store as reachable"
+
+if [ "${STORE_OUTAGE_STATUS_ONLY:-0}" = "1" ]; then
+  say "PASS (status pause/recovery)"
+  exit 0
+fi
 
 say "publishing after recovery (from node${PUBLISHER_NODE}) ..."
 if ! publish_ka recovery; then

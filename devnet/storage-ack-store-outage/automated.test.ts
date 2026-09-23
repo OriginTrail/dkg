@@ -14,10 +14,11 @@
  * exercised: a REAL store going down mid-publish, end-to-end across live nodes.
  *
  * The orchestration (identify the target core's managed store process, SIGSTOP
- * it, publish from an edge node, assert quorum + the typed decline, SIGCONT to
- * recover) lives in `scripts/devnet-test-store-outage.sh`, so an operator can
- * run it by hand and process control stays in shell — same shape as the
- * edge-update-flow suite. This file is the thin vitest wrapper.
+ * it, assert status stays responsive and reports the outage, publish from an
+ * edge node, assert quorum + the typed decline, resume or replace the store and assert
+ * status is healthy again) lives in `scripts/devnet-test-store-outage.sh`, so
+ * an operator can run it by hand and process control stays in shell — same
+ * shape as the edge-update-flow suite. This file is the thin vitest wrapper.
  *
  * SKIP is NOT a pass (otReviewAgent #1517). When a precondition is unmet the
  * script exits with a DISTINCT code (3, not 0) and this wrapper reports the
@@ -182,6 +183,28 @@ describe('storage-ack-store-outage — a core store failing mid-publish degrades
     expect(stdout).toMatch(/publish confirmed after node\d+'s store recovered/);
     expect(stdout).toMatch(/\[store-outage\] PASS/);
   }, 360_000);
+});
+
+describe('managed-store status outage', () => {
+  it('status reports a real managed-store outage and recovery', async (ctx) => {
+    const { exitCode, stdout, stderr } = await runScript(
+      SCRIPT,
+      REPO_ROOT,
+      { ...process.env, STORE_OUTAGE_STATUS_ONLY: '1' },
+      true,
+    );
+    const outcome = classifyStoreOutageRun(exitCode, stdout, stderr, REQUIRE_RUN);
+    if (outcome.kind === 'skip') {
+      ctx.skip();
+      return;
+    }
+    if (outcome.kind === 'fail') throw new Error(outcome.reason);
+    expect(stdout).toMatch(/status baseline: node\d+ reports \d+ quads/);
+    expect(stdout).toMatch(/ordinary status stayed responsive with its cached count; explicit probe reported (no-answer|unreachable)/);
+    expect(stdout).toMatch(/status probe reports the recovered store as reachable/);
+    expect(stdout).toMatch(/PASS \(status pause\/recovery\)/);
+    expect(stdout).not.toMatch(/publishing during the outage/);
+  }, 120_000);
 });
 
 // Harness assertions (otReviewAgent #1517) — unit-level, NO live devnet needed.

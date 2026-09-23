@@ -29,7 +29,8 @@
  * For a release candidate whose package version still matches the previous
  * release, rebuild both checkouts and pin their source commits. The suite
  * then fails if any node reports an unexpected commit (or the devnet is
- * missing):
+ * missing). The devnet writes full checkout metadata to the older worktree,
+ * matching the full commit metadata in published packages:
  *
  *   pnpm build
  *   DEVNET_VERSION_REBUILD=1 \
@@ -37,7 +38,7 @@
  *   ./scripts/devnet.sh start 6
  *
  *   DKG_EXPECTED_CORE_COMMIT="$(git rev-parse HEAD)" \
- *   DKG_EXPECTED_EDGE_COMMIT="$(git rev-parse v10.0.18)" \
+ *   DKG_EXPECTED_EDGE_COMMIT="$(git rev-parse 'v10.0.18^{commit}')" \
  *   pnpm test:devnet:mixed-version
  */
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -138,11 +139,16 @@ describe('mixed-version devnet interop', () => {
     if (!devnet) return;
     const distinct = [...new Set(versions.map((v) => v.version))];
     if (distinct.length < 2) {
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[mixed-version] single-version cluster (${distinct.join(', ')}). ` +
-          'Start with DEVNET_VERSION_LAYOUT="all:current,edges:prev" to exercise version skew.',
-      );
+      if (process.env.DKG_EXPECTED_CORE_COMMIT && process.env.DKG_EXPECTED_EDGE_COMMIT) {
+        // eslint-disable-next-line no-console
+        console.log('[mixed-version] package versions match; the full-commit release gate checks build skew');
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[mixed-version] single-version cluster (${distinct.join(', ')}). ` +
+            'Start with DEVNET_VERSION_LAYOUT="all:current,edges:prev" to exercise version skew.',
+        );
+      }
       return;
     }
     expect(distinct.length).toBeGreaterThanOrEqual(2);
