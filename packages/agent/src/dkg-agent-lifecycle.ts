@@ -48,7 +48,7 @@ import {
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   validateSubGraphName,
-  Logger, createOperationContext, isKaPublishLifecycleDebugLoggingEnabled, isStorageACKDecline, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
+  Logger, createOperationContext, isKaPublishLifecycleDebugLoggingEnabled, isStorageACKDecline, sparqlString, escapeSparqlLiteral, isSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -217,6 +217,7 @@ import { resolveOutboxDrainerOptions } from './p2p/outbox-drainer.js';
 import { createSingleUseSyncSender } from './p2p/sync-transport.js';
 import { NetworkAdmissionService } from './p2p/network-admission.js';
 import {
+  MAX_IDENTITY_PROBE_CONCURRENCY,
   NetworkAdmissionCoordinator,
   NetworkAdmissionRejectedError,
 } from './p2p/network-admission-coordinator.js';
@@ -2257,6 +2258,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
 
+    // Curated and local-only graph metadata belongs in each graph's `_meta`.
+    // Move what earlier builds left in ontology, using local metadata only,
+    // before sync serving starts. Bare bindings of graphs this node doesn't
+    // hold need a chain read; that pass runs once start completes and before
+    // every store discovery pass.
+    try {
+      await this.relocatePrivateContextGraphMetadata({ classifyOnChain: false });
+    } catch (err) {
+      this.log.warn(
+        ctx,
+        `Failed to relocate private context graph metadata out of the ontology graph: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
     // Load registered agents from triple store; auto-register default if none exist.
     // loadAgentsFromStore restores defaultAgentAddress from the persisted
     // isDefaultAgent marker, avoiding reliance on SPARQL result ordering.
@@ -2377,9 +2392,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       },
       cleanupRejectedPeerState: (peerId) => this.clearNetworkRejectedPeerState(peerId),
       // Transport half of the verdict: stop libp2p (kad-dht, relay discovery,
-      // reconnect queue) from redialing a peer of another network, and lift
-      // that as soon as the peer proves it belongs to this one.
-      onPeerRejected: (peerId) => { this.node.denyPeerAfterNetworkMismatch(peerId); },
+      // reconnect queue) from redialing a peer of another network for exactly
+      // the quarantine just applied, and lift that as soon as the peer proves
+      // it belongs to this one.
+      onPeerRejected: (peerId, quarantineMs) => { this.node.denyPeerAfterNetworkMismatch(peerId, quarantineMs); },
       onPeerVerified: (peerId) => { this.node.clearPeerNetworkMismatchDenial(peerId); },
       log: this.log,
     });
@@ -4186,6 +4202,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // one flaky `getIdentityId()` call does not disable proving until the
     // next process restart.
     await this.randomSamplingRuntime.start();
+
+    void this.relocatePrivateContextGraphMetadata().catch((err: unknown) => {
+      this.log.warn(
+        ctx,
+        `Failed to relocate curated context graph bindings out of the ontology graph: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
 
     // Arm VM work only at the final successful-start boundary. Every network,
     // subscription, protocol, and persistence dependency is now initialized,
@@ -7933,6 +7956,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /**
+   * The live connections' remote peers (one per peer id, in connection order)
+   * that pass network admission: the catch-up candidate set. A still-open
+   * connection to a peer that failed the network-identity proof (another DKG
+   * network's relay, say) must never become a sync peer. Both catch-up runners
+   * (in-process and the CLI worker bridge) select from this one predicate.
+   * Uncached peers are probed with bounded concurrency; a failed probe drops
+   * the peer from this round.
+   */
+  async listAdmittedConnectedPeers(
+    this: DKGAgent,
+    ctx: OperationContext,
+  ): Promise<Array<{ toString(): string }>> {
+    const connectedPeers = [...new Map<string, { toString(): string }>(
+      this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
+    ).values()];
+    const admitted = await mapWithConcurrency(
+      connectedPeers,
+      MAX_IDENTITY_PROBE_CONCURRENCY,
+      (peer) => this.ensurePeerAdmittedForRecovery(peer.toString(), ctx, 'Connected catchup peer'),
+    );
+    return connectedPeers.filter((_peer, index) => admitted[index]);
+  }
+
+  /**
    * Catch up a single context graph from currently connected peers that advertise
    * the sync protocol. Useful after runtime subscribe so historical data is
    * backfilled immediately (not only future gossip messages).
@@ -7979,15 +8026,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
       await this.primeCatchupConnections();
 
-      const connectedPeers = [...new Map(
-        this.node.libp2p.getConnections().map((conn) => [conn.remotePeer.toString(), conn.remotePeer]),
-      ).values()];
-      const admittedConnectedPeers: Array<{ toString(): string }> = [];
-      for (const peer of connectedPeers) {
-        if (await this.ensurePeerAdmittedForRecovery(peer.toString(), ctx, 'Connected catchup peer')) {
-          admittedConnectedPeers.push(peer);
-        }
-      }
+      const admittedConnectedPeers = await this.listAdmittedConnectedPeers(ctx);
       const orderedPeers = this.selectCatchupPeers(
         admittedConnectedPeers,
         preferredPeerId,
@@ -9930,76 +9969,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }),
       { strict: true },
     );
-  }
-
-  async assertAlreadyMemberDelegationRefresh(this: DKGAgent,
-    contextGraphId: string,
-    delegation: SignedAgentDelegation,
-    carrierPeerId: string,
-  ): Promise<void> {
-    const signedPeerId = delegation.delegateePeerId;
-    if (!signedPeerId || signedPeerId !== carrierPeerId) {
-      throw new Error(
-        'Already-member delegation refresh carrier mismatch: ' +
-        `signed delegateePeerId=${signedPeerId || '<missing>'}, carrier=${carrierPeerId}`,
-      );
-    }
-    if (!Number.isSafeInteger(delegation.issuedAtMs) || delegation.issuedAtMs < 0) {
-      throw new Error('Already-member delegation refresh has an invalid issuedAtMs');
-    }
-    const incomingExpiresAtMs = delegation.expiresAtMs ?? 0;
-    if (!Number.isSafeInteger(incomingExpiresAtMs) || incomingExpiresAtMs < 0) {
-      throw new Error('Already-member delegation refresh has an invalid expiresAtMs');
-    }
-
-    const metaGraph = assertSafeIri(contextGraphMetaGraphUri(contextGraphId));
-    const delegationUri = assertSafeIri(
-      `did:dkg:agent-delegation:${contextGraphId}:${delegation.agentAddress.toLowerCase()}`,
-    );
-    const result = await this.store.query(
-      `SELECT ?issuedAt ?expiresAt ?peer ?opKey WHERE {
-        GRAPH <${metaGraph}> {
-          <${delegationUri}> <${DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT}> ?issuedAt .
-          OPTIONAL { <${delegationUri}> <${DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT}> ?expiresAt }
-          OPTIONAL { <${delegationUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER}> ?peer }
-          OPTIONAL { <${delegationUri}> <${DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_KEY}> ?opKey }
-        }
-      } LIMIT 1`,
-      { source: 'agent.delegationRefresh.currentState' },
-    );
-    if (result.type !== 'bindings' || result.bindings.length === 0) return;
-
-    const row = result.bindings[0] as Record<string, string>;
-    const currentIssuedAtMs = Number(stripLiteral(row['issuedAt'] ?? ''));
-    const currentExpiresAtMs = row['expiresAt'] == null
-      ? 0
-      : Number(stripLiteral(row['expiresAt']));
-    if (
-      !Number.isSafeInteger(currentIssuedAtMs) || currentIssuedAtMs < 0 ||
-      !Number.isSafeInteger(currentExpiresAtMs) || currentExpiresAtMs < 0
-    ) {
-      throw new Error('Stored already-member delegation has an invalid validity timestamp');
-    }
-    if (delegation.issuedAtMs < currentIssuedAtMs) {
-      throw new Error(
-        `Stale already-member delegation refresh: issuedAtMs ${delegation.issuedAtMs} ` +
-        `is older than active credential ${currentIssuedAtMs}`,
-      );
-    }
-    if (delegation.issuedAtMs > currentIssuedAtMs) return;
-
-    const currentPeerId = row['peer'] == null ? '' : stripLiteral(row['peer']);
-    const currentOpKey = row['opKey'] == null ? '' : stripLiteral(row['opKey']).toLowerCase();
-    const incomingOpKey = delegation.delegateeOpKey?.toLowerCase() ?? '';
-    if (
-      signedPeerId !== currentPeerId ||
-      incomingOpKey !== currentOpKey ||
-      incomingExpiresAtMs !== currentExpiresAtMs
-    ) {
-      throw new Error(
-        `Conflicting already-member delegation refresh at issuedAtMs ${delegation.issuedAtMs}`,
-      );
-    }
   }
 
   normalizeMembershipPrincipal(this: DKGAgent,

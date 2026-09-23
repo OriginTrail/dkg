@@ -6,6 +6,7 @@ import {
   decodeFinalizationMessage,
   contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
   contextGraphDataUri, contextGraphMetaUri,
+  contextGraphOnChainIdBindingQuery,
   contextGraphSubGraphUri, validateSubGraphName, validateContextGraphId,
   DKGEvent, Logger, createOperationContext,
   assertSafeIri, isSafeIri,
@@ -2973,10 +2974,8 @@ export class FinalizationHandler {
   }
 
   private async storedOnChainContextGraphId(contextGraphId: string): Promise<string | undefined> {
-    const ontologyGraph = contextGraphDataUri('ontology');
-    const contextGraphUri = contextGraphDataUri(contextGraphId);
     const result = await this.store.query(
-      `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <https://dkg.network/ontology#ContextGraphOnChainId> ?id } } LIMIT 1`,
+      contextGraphOnChainIdBindingQuery(contextGraphId),
       { source: 'agent.finalization.contextGraphOnChainId' },
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
