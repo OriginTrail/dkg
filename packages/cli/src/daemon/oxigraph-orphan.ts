@@ -3,41 +3,46 @@
  *
  * RocksDB lets one process hold `<location>/LOCK`. A worker that dies
  * without cleanup (a SIGKILL from the supervisor's liveness watchdog, an OOM
- * kill) can leave its `oxigraph serve` child running, reparented to init.
- * Every later start then fails with "While lock file: … Resource temporarily
- * unavailable" until someone stops that process by hand. The parent watchdog
- * prevents new orphans on Unix; this covers the ones it cannot: a watchdog
- * killed together with its worker on a host without a parent-death signal,
- * or an orphan left by a release that predates the direct-launch watchdog.
+ * kill) can leave its `oxigraph serve` child running. Every later start then
+ * fails with "While lock file: … Resource temporarily unavailable" until
+ * someone stops that process by hand. The parent watchdog stops new orphans
+ * on Unix within about a second; this covers what it cannot: a respawned
+ * worker that starts inside that second, a watchdog killed together with its
+ * worker on a host without a parent-death signal, and an orphan left by a
+ * release that predates the direct-launch watchdog.
  *
  * Before each spawn the daemon terminates a lock holder only when all of
  * these hold:
  *   - the process has `<location>/LOCK` open;
- *   - its command line runs this daemon's Oxigraph binary as
- *     `serve --location <location>`;
- *   - its parent is gone: it was reparented to PID 1, so no live daemon owns it.
- * Any other holder is reported and left running. The LOCK file itself is
- * never modified.
+ *   - it runs this node's Oxigraph as `serve --location <location>`: the
+ *     current binary, or another `oxigraph*` executable beside it, which is
+ *     where the binary pinned by an earlier release lives;
+ *   - no live daemon owns it: it was reparented to PID 1, or its parent is a
+ *     watchdog of this store whose daemon has exited.
+ * Any other holder is reported, with its parent, and left running. The LOCK
+ * file itself is never modified.
  */
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { readdir, readFile, readlink, realpath } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { realpath } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { OXIGRAPH_WATCHDOG_DIRECT_FLAG } from './oxigraph-parent-watchdog.js';
+import {
+  procFdTargets,
+  procPids,
+  processDescriber,
+  type ProcessDescription,
+} from './process-probe.js';
 
 const execFileAsync = promisify(execFile);
-
-export interface OxigraphLockHolder {
-  ppid: number;
-  /** argv joined by single spaces. */
-  command: string;
-}
 
 export interface OrphanedOxigraphIo {
   /** PIDs that have the lock file open. */
   listLockHolders(lockPath: string): Promise<number[]>;
   /** Null when the process has exited. */
-  describeProcess(pid: number): Promise<OxigraphLockHolder | null>;
+  describeProcess(pid: number): Promise<ProcessDescription | null>;
+  isProcessAlive(pid: number): boolean;
   signal(pid: number, signal: NodeJS.Signals): void;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -80,79 +85,72 @@ export async function lsofLockHolders(lockPath: string): Promise<number[]> {
 export async function procLockHolders(lockPath: string): Promise<number[]> {
   const target = await realpath(lockPath);
   const holders: number[] = [];
-  for (const entry of await readdir('/proc')) {
-    const pid = Number(entry);
-    if (!Number.isInteger(pid) || pid === process.pid) continue;
-    let fds: string[];
-    try {
-      fds = await readdir(`/proc/${entry}/fd`);
-    } catch {
-      continue;
-    }
-    for (const fd of fds) {
-      if (await readlink(`/proc/${entry}/fd/${fd}`).catch(() => null) === target) {
-        holders.push(pid);
-        break;
-      }
-    }
+  for (const pid of await procPids()) {
+    if (pid === process.pid) continue;
+    if ((await procFdTargets(pid)).includes(target)) holders.push(pid);
   }
   return holders;
 }
 
-export async function psDescribeProcess(pid: number): Promise<OxigraphLockHolder | null> {
+function processIsAlive(pid: number): boolean {
   try {
-    const { stdout } = await execFileAsync(
-      'ps',
-      ['-ww', '-o', 'ppid=,command=', '-p', String(pid)],
-      { timeout: 2_000 },
-    );
-    const match = /^\s*(\d+)\s+(.*)$/s.exec(stdout.trimEnd());
-    return match ? { ppid: Number(match[1]), command: match[2] } : null;
-  } catch {
-    return null;
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
   }
 }
 
-export async function procDescribeProcess(pid: number): Promise<OxigraphLockHolder | null> {
-  try {
-    // `pid (comm) state ppid …`; comm may itself contain spaces and parens.
-    const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
-    const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
-    const argv = (await readFile(`/proc/${pid}/cmdline`, 'utf8')).split('\0');
-    if (argv.at(-1) === '') argv.pop();
-    return Number.isInteger(ppid) ? { ppid, command: argv.join(' ') } : null;
-  } catch {
-    return null;
-  }
-}
-
-// The per-platform probes above are exported so tests can run each one on
-// every host that has its tool, not only the host that uses it by default.
 const defaultIo: OrphanedOxigraphIo = {
   listLockHolders: process.platform === 'linux' ? procLockHolders : lsofLockHolders,
-  describeProcess: process.platform === 'linux' ? procDescribeProcess : psDescribeProcess,
+  describeProcess: processDescriber(process.platform),
+  isProcessAlive: processIsAlive,
   signal: (pid, signal) => { process.kill(pid, signal); },
   sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
   now: () => Date.now(),
 };
 
 /**
- * Whether a command line runs `binaryPath serve --location <location>`. A
- * binary started through an interpreter (`#!`) lists the interpreter first.
+ * Whether a command line runs this node's Oxigraph as
+ * `serve --location <location>`: `binaryPath` itself, or another `oxigraph*`
+ * executable in its directory. A binary started through an interpreter (`#!`)
+ * lists the interpreter first.
  */
 export function runsManagedOxigraphStore(
   command: string,
   binaryPath: string,
   location: string,
 ): boolean {
-  return ` ${command} `.includes(` ${binaryPath} serve --location ${location} `);
+  const padded = ` ${command} `;
+  const serveAt = padded.indexOf(` serve --location ${location} `);
+  if (serveAt < 0) return false;
+  const launched = padded.slice(0, serveAt);
+  if (launched.endsWith(` ${binaryPath}`)) return true;
+  const binaryDir = ` ${dirname(binaryPath)}/`;
+  const dirAt = launched.lastIndexOf(binaryDir);
+  return dirAt >= 0 && /^oxigraph[^/\s]*$/.test(launched.slice(dirAt + binaryDir.length));
+}
+
+const WATCHDOG_DAEMON_PID = new RegExp(
+  `oxigraph-parent-watchdog\\.[cm]?[jt]s (?:${OXIGRAPH_WATCHDOG_DIRECT_FLAG} )?(\\d+) `,
+);
+
+/** The daemon PID that a parent watchdog of this store watches; null for any other command. */
+export function watchedDaemonPid(
+  command: string,
+  binaryPath: string,
+  location: string,
+): number | null {
+  if (!runsManagedOxigraphStore(command, binaryPath, location)) return null;
+  const match = WATCHDOG_DAEMON_PID.exec(command);
+  return match ? Number(match[1]) : null;
 }
 
 /**
  * Terminate orphaned Oxigraph processes that hold this store's lock and wait
  * until they release it. Returns the PIDs that were signalled. Never throws;
  * when a holder cannot be stopped, the next spawn fails with Oxigraph's own
- * lock error, preceded by a log line naming the holder.
+ * lock error, preceded by a log line naming the holder and its parent.
  */
 export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): Promise<number[]> {
   // Windows processes are not reparented, so an orphan cannot be told apart.
@@ -168,6 +166,22 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
   // Holders already reported as left running, or that refused a signal.
   const leftRunning = new Set<number>();
 
+  // Why a holder of this store must stay, or null when no live daemon owns it.
+  const liveOwner = async (holder: ProcessDescription): Promise<string | null> => {
+    if (holder.ppid === 1) return null;
+    const parent = await io.describeProcess(holder.ppid);
+    if (!parent) return null;
+    const daemonPid = watchedDaemonPid(parent.command, opts.binaryPath, opts.location);
+    if (daemonPid === null) {
+      return `its parent pid ${holder.ppid} is still running: ${parent.command.slice(0, 200)}`;
+    }
+    // The watchdog of an exited daemon is about to stop it; do it now, so a
+    // worker respawned within that second does not fail on the lock.
+    return io.isProcessAlive(daemonPid)
+      ? `its watchdog pid ${holder.ppid} still serves live daemon pid ${daemonPid}`
+      : null;
+  };
+
   for (;;) {
     const orphans: number[] = [];
     let holders: number[] = [];
@@ -180,15 +194,14 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
       if (pid === process.pid || leftRunning.has(pid)) continue;
       const holder = await io.describeProcess(pid);
       if (!holder) continue;
-      const ours = runsManagedOxigraphStore(holder.command, opts.binaryPath, opts.location);
-      if (!ours || holder.ppid !== 1) {
+      const reason = runsManagedOxigraphStore(holder.command, opts.binaryPath, opts.location)
+        ? (signalled.has(pid) ? null : await liveOwner(holder))
+        : `it is not this node's Oxigraph serving this store`;
+      if (reason !== null) {
         leftRunning.add(pid);
         opts.log(
           `[oxigraph] ${lockPath} is held by pid ${pid} (parent ${holder.ppid}): ` +
-            `${holder.command.slice(0, 300)}. Leaving it running: ` +
-            (ours
-              ? 'its parent process is still running.'
-              : `it is not ${opts.binaryPath} serving this store.`),
+            `${holder.command.slice(0, 300)}. Leaving it running: ${reason}.`,
         );
         continue;
       }

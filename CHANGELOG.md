@@ -16,9 +16,10 @@ All notable changes to the DKG V10 node are documented here. The format is based
   whether or not memory limits are set, and the daemon's stop and restart
   signals reach it through the watchdog's process group. Before each Oxigraph
   start, the daemon also stops an orphan that holds this store's lock, runs
-  this node's binary for this store, and has been reparented to PID 1. Any
-  other lock holder is logged and left running, and the lock file itself is
-  never touched.
+  this node's Oxigraph for this store (including a binary pinned by an
+  earlier release), and has no live daemon: it was reparented to PID 1, or
+  its watchdog's daemon has exited. Any other lock holder is logged and left
+  running, and the lock file itself is never touched.
 - **Random Sampling resolves the challenged Context Graph by its chain name
   commitment when local history contains multiple names for one numeric ID**:
   proof extraction no longer selects an arbitrary first ontology row, which

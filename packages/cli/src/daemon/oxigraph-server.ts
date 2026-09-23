@@ -244,7 +244,6 @@ export async function startOxigraphServer(
   // childAlive() wrongly report it alive. Track them so childAlive() and the
   // ready/revive loops treat a spawn error as a dead child.
   const erroredChildren = new WeakSet<ChildProcess>();
-  const processGroupLeaders = new WeakSet<ChildProcess>();
   const oomSnapshots = new WeakMap<ChildProcess, CgroupOomSnapshot>();
   const isStopping = (): boolean => lifecycle.phase === 'stopping';
   const childAlive = (candidate: ChildProcess | null): candidate is ChildProcess =>
@@ -268,7 +267,6 @@ export async function startOxigraphServer(
           : {}),
       },
     );
-    if (spawnSpec.processGroup) processGroupLeaders.add(c);
     // Without this listener Node throws the `error` event as an uncaught
     // exception, killing the daemon. Route it through the normal
     // startup/revive failure path instead (the binary couldn't be executed).
@@ -333,20 +331,6 @@ export async function startOxigraphServer(
     return c;
   };
 
-  // Callers signal only a child that has not exited, so its group id cannot
-  // have been reused yet.
-  const signalChild = (c: ChildProcess, signal: NodeJS.Signals): void => {
-    if (c.pid !== undefined && processGroupLeaders.has(c)) {
-      try {
-        process.kill(-c.pid, signal);
-        return;
-      } catch {
-        // Fall back to the wrapper alone.
-      }
-    }
-    c.kill(signal);
-  };
-
   const captureOomSnapshotForListener = (c: ChildProcess, listenerPid: number): void => {
     if (oomSnapshots.has(c)) return;
     const snapshot = io.readCgroupOomSnapshot(listenerPid);
@@ -401,11 +385,25 @@ export async function startOxigraphServer(
     }, delay).unref?.();
   };
 
-  const releaseOrphanedStore = (): Promise<number[]> => stopOrphanedOxigraph({
-    binaryPath: opts.binaryPath,
-    location: opts.location,
-    log,
-  });
+  // Every spawn runs the same sequence. First free the store lock: a worker
+  // or watchdog that died without stopping its Oxigraph leaves it holding
+  // LOCK, and the new child could not open the store. Then size the ready
+  // budget (GH#1400) — measured BEFORE the spawn, so the child cannot delete
+  // segments underneath the scan — and say how much retained WAL it covers.
+  const prepareSpawn = async (
+    kind: 'boot' | 'restart',
+  ): Promise<{ timeoutMs: number; walBytes: number }> => {
+    await stopOrphanedOxigraph({ binaryPath: opts.binaryPath, location: opts.location, log });
+    const ready = nextReadyTimeout();
+    if (ready.walBytes > 0) {
+      log(kind === 'boot'
+        ? `[oxigraph] ${formatWalBytes(ready.walBytes)} of retained write-ahead log to replay; ` +
+          `allowing up to ${Math.round(ready.timeoutMs / 1000)}s for the database to open.`
+        : `[oxigraph] restart: ${formatWalBytes(ready.walBytes)} of retained write-ahead log ` +
+          `to replay; allowing up to ${Math.round(ready.timeoutMs / 1000)}s.`);
+    }
+    return ready;
+  };
 
   // Respawn and re-validate ownership after a steady-state crash. Mirrors
   // the startup ownership guard: `ready` is restored ONLY once the child WE
@@ -420,25 +418,15 @@ export async function startOxigraphServer(
     const reason = lifecycle.phase === 'recovering'
       ? lifecycle.reason
       : 'supervised recovery';
-    // A watchdog killed abruptly on a host without a parent-death signal can
-    // leave Oxigraph holding the store lock while this daemon lives on.
-    await releaseOrphanedStore();
-    if (isStopping()) return;
     // GH#1400 — size THIS attempt, not the one at boot. The WAL grows during
     // the session, so a mid-life respawn (onClientTimeout, a crashed child)
     // faces a larger replay than the daemon ever measured at startup. Reusing
     // the boot value re-arms the exact ratchet: kill a healthy replaying
-    // child, leave the WAL, retry, kill it again. Measured before the spawn,
-    // same as boot, so the child cannot delete segments underneath the scan.
-    const reviveReady = nextReadyTimeout();
+    // child, leave the WAL, retry, kill it again.
+    const reviveReady = await prepareSpawn('restart');
+    if (isStopping()) return;
     const candidate = spawnChild();
     lifecycle = { phase: 'recovering', child: candidate, reason, generation };
-    if (reviveReady.walBytes > 0) {
-      log(
-        `[oxigraph] restart: ${formatWalBytes(reviveReady.walBytes)} of retained write-ahead log ` +
-          `to replay; allowing up to ${Math.round(reviveReady.timeoutMs / 1000)}s.`,
-      );
-    }
     const reviveDeadline = Date.now() + reviveReady.timeoutMs;
     let reviveProgressLog = Date.now();
     while (Date.now() < reviveDeadline) {
@@ -494,7 +482,7 @@ export async function startOxigraphServer(
     // EADDRINUSE). Its exit handler won't restart (ready is false).
     if (childAlive(candidate)) {
       try {
-        signalChild(candidate, 'SIGKILL');
+        launchStrategy.terminate(candidate, 'SIGKILL');
       } catch {
         /* best-effort */
       }
@@ -515,7 +503,7 @@ export async function startOxigraphServer(
     };
     markStoreDown();
     try {
-      if (childAlive(candidate)) signalChild(candidate, 'SIGTERM');
+      if (childAlive(candidate)) launchStrategy.terminate(candidate, 'SIGTERM');
     } catch {
       /* best-effort */
     }
@@ -623,11 +611,11 @@ export async function startOxigraphServer(
         resolve();
       };
       c.once('exit', done);
-      signalChild(c, 'SIGTERM');
+      launchStrategy.terminate(c, 'SIGTERM');
       const killTimer = setTimeout(() => {
         if (c.exitCode === null && c.signalCode === null) {
           log('[oxigraph] did not exit on SIGTERM; sending SIGKILL');
-          signalChild(c, 'SIGKILL');
+          launchStrategy.terminate(c, 'SIGKILL');
         }
       }, stopGraceMs);
       killTimer.unref?.();
@@ -642,19 +630,7 @@ export async function startOxigraphServer(
   );
   const launchSummary = launchStrategy.logSummary();
   if (launchSummary) log(launchSummary);
-  // A previous worker that died without stopping its Oxigraph (SIGKILL from
-  // the supervisor's liveness watchdog, OOM) leaves it holding the store
-  // lock, and this child would fail to open the store.
-  await releaseOrphanedStore();
-  // GH#1400 — measure BEFORE the spawn, so the child cannot delete segments
-  // underneath the scan.
-  const bootReady = nextReadyTimeout();
-  if (bootReady.walBytes > 0) {
-    log(
-      `[oxigraph] ${formatWalBytes(bootReady.walBytes)} of retained write-ahead log to replay; ` +
-        `allowing up to ${Math.round(bootReady.timeoutMs / 1000)}s for the database to open.`,
-    );
-  }
+  const bootReady = await prepareSpawn('boot');
   const initialChild = spawnChild();
   lifecycle = {
     phase: 'starting',

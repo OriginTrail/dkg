@@ -1,7 +1,6 @@
 import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError, type OxigraphMemoryLimits } from '../oxigraph-memory-limits.js';
 import type { ChildProcess } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { resolveHelperModuleNodeArgs } from '../daemon-entrypoint.js';
 import type { CgroupOomSnapshot } from './oxigraph-memory.js';
 import {
   OXIGRAPH_WATCHDOG_DIRECT_FLAG,
@@ -47,6 +46,11 @@ export interface OxigraphLaunchStrategy {
     readOomKill: (dir: string) => number | null;
   }): boolean;
   logSummary(): string | null;
+  /**
+   * Signal a spawned child and whatever it launched. Call it only while the
+   * child has not exited, so a process-group id cannot have been reused.
+   */
+  terminate(child: ChildProcess, signal: NodeJS.Signals): void;
 }
 
 function cgroupEvidenceIncremented(
@@ -58,17 +62,23 @@ function cgroupEvidenceIncremented(
   return typeof oomKillNow === 'number' && oomKillNow > input.snapshot.oomKill;
 }
 
-/**
- * Node arguments that run the parent watchdog. A built install ships
- * `oxigraph-parent-watchdog.js` beside this module; a source checkout
- * (tsx, tests) only has the `.ts` file, which Node runs through tsx.
- */
-function defaultWatchdogNodeArgs(): string[] {
-  const built = fileURLToPath(new URL('./oxigraph-parent-watchdog.js', import.meta.url));
-  if (existsSync(built)) return [built];
-  const source = fileURLToPath(new URL('./oxigraph-parent-watchdog.ts', import.meta.url));
-  if (existsSync(source)) return ['--import', import.meta.resolve('tsx'), source];
-  return [built];
+function signalChild(child: ChildProcess, signal: NodeJS.Signals): void {
+  child.kill(signal);
+}
+
+// The direct watchdog leads its own process group (`processGroup`). A signal
+// to the group reaches Oxigraph even when the watchdog cannot forward it:
+// SIGKILL sent to the watchdog alone would leave Oxigraph running.
+function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Fall back to the wrapper alone.
+    }
+  }
+  child.kill(signal);
 }
 
 export function createOxigraphLaunchStrategy(opts: {
@@ -79,42 +89,46 @@ export function createOxigraphLaunchStrategy(opts: {
   nodeExecutable?: string;
   watchdogPath?: string;
 }): OxigraphLaunchStrategy {
+  const direct = {
+    mode: 'direct',
+    observeStderr: () => {},
+    classifyOomExit: cgroupEvidenceIncremented,
+    logSummary: () => null,
+  } as const;
+  // Windows resolves listener ownership for the direct child only (netstat
+  // has no process tree), so it keeps launching the binary itself.
+  if (!opts.memoryLimits && opts.platform === 'win32') {
+    return {
+      ...direct,
+      nextSpawnSpec: (binaryPath, binaryArgs) => ({ command: binaryPath, args: binaryArgs }),
+      resolveListenerPid: (child, port, host, resolver) => resolver(child, port, host, 'child-only'),
+      terminate: signalChild,
+    };
+  }
+
   const nodeExecutable = opts.nodeExecutable ?? process.execPath;
-  const watchdogNodeArgs = (): string[] =>
-    opts.watchdogPath === undefined ? defaultWatchdogNodeArgs() : [opts.watchdogPath];
+  const watchdogNodeArgs = opts.watchdogPath === undefined
+    ? resolveHelperModuleNodeArgs(new URL('./oxigraph-parent-watchdog.js', import.meta.url))
+    : [opts.watchdogPath];
 
   if (!opts.memoryLimits) {
-    // Windows resolves listener ownership for the direct child only (netstat
-    // has no process tree), so it keeps launching the binary itself.
-    if (opts.platform === 'win32') {
-      return {
-        mode: 'direct',
-        nextSpawnSpec: (binaryPath, binaryArgs) => ({ command: binaryPath, args: binaryArgs }),
-        resolveListenerPid: (child, port, host, resolver) => resolver(child, port, host, 'child-only'),
-        observeStderr: () => {},
-        classifyOomExit: cgroupEvidenceIncremented,
-        logSummary: () => null,
-      };
-    }
     // A worker SIGKILLed by the supervisor's liveness watchdog cannot stop
     // its children. Without the parent watchdog, Oxigraph would be reparented
     // to init and keep `<location>/LOCK`, and every respawned worker would
     // fail to open the store.
     return {
-      mode: 'direct',
+      ...direct,
       nextSpawnSpec: (binaryPath, binaryArgs) => ({
         command: nodeExecutable,
         args: [
-          ...watchdogNodeArgs(),
+          ...watchdogNodeArgs,
           OXIGRAPH_WATCHDOG_DIRECT_FLAG, String(opts.parentPid),
           binaryPath, ...binaryArgs,
         ],
         processGroup: true,
       }),
       resolveListenerPid: (child, port, host, resolver) => resolver(child, port, host, 'process-tree'),
-      observeStderr: () => {},
-      classifyOomExit: cgroupEvidenceIncremented,
-      logSummary: () => null,
+      terminate: signalProcessGroup,
     };
   }
 
@@ -141,7 +155,7 @@ export function createOxigraphLaunchStrategy(opts: {
           ...(limits.highMiB === undefined ? [] : [`--property=MemoryHigh=${limits.highMiB}M`]),
           `--property=MemoryMax=${limits.maxMiB}M`,
           '--property=MemorySwapMax=0',
-          '--', nodeExecutable, ...watchdogNodeArgs(), String(opts.parentPid), binaryPath, ...binaryArgs,
+          '--', nodeExecutable, ...watchdogNodeArgs, String(opts.parentPid), binaryPath, ...binaryArgs,
         ],
         environment: {
           XDG_RUNTIME_DIR: runtimeDir,
@@ -159,5 +173,7 @@ export function createOxigraphLaunchStrategy(opts: {
     logSummary: () =>
       `Starting Oxigraph in an isolated systemd user scope ` +
       `(MemoryHigh=${limits.highMiB ?? 'unset'}MiB, MemoryMax=${limits.maxMiB}MiB).`,
+    // setpriv's parent-death signal stops Oxigraph with its watchdog.
+    terminate: signalChild,
   };
 }

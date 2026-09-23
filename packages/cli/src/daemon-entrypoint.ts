@@ -28,6 +28,23 @@ function cliEntryPointPath(): string {
 }
 
 /**
+ * Node arguments that run one of this CLI's own helper modules (the managed
+ * Oxigraph parent watchdog) as a separate process, given the URL of its built
+ * `.js`. A built install runs that file; a source checkout (tsx, tests) has
+ * only the `.ts`, which runs through tsx, the repository's source runner.
+ * Unlike `resolveDaemonNodeCommand`, a helper does not inherit this process's
+ * `execArgv`: inspector or heap flags meant for the daemon must not apply to
+ * it, and a test runner's flags carry no TypeScript loader.
+ */
+export function resolveHelperModuleNodeArgs(builtModule: URL): string[] {
+  const built = fileURLToPath(builtModule);
+  if (existsSync(built)) return [built];
+  const source = built.replace(/\.js$/, '.ts');
+  if (existsSync(source)) return ['--import', import.meta.resolve('tsx'), source];
+  return [built];
+}
+
+/**
  * Resolve the daemon entrypoint used by the supervisor on its next spawn.
  * Edge and non-blue-green nodes use this installed CLI; Core may use the
  * active blue-green slot.

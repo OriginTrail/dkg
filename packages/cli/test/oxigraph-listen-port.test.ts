@@ -2,12 +2,13 @@ import { describe, it, expect } from 'vitest';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
+import { findListenOwnerPid, procNetLocalPortHex } from '../src/daemon/oxigraph-listen-port.js';
 import {
-  findListenOwnerPid,
   linuxProcessTree,
-  procNetLocalPortHex,
+  processTreeWalker,
   psProcessTree,
-} from '../src/daemon/oxigraph-listen-port.js';
+  type ProcessTreeWalker,
+} from '../src/daemon/process-probe.js';
 
 describe('procNetLocalPortHex', () => {
   it('formats the local port in big-endian hex for /proc/net/tcp matching', () => {
@@ -45,18 +46,35 @@ describe('findListenOwnerPid (real processes)', () => {
       expect(await findListenOwnerPid(wrapper, wrapped.port, '127.0.0.1', 'child-only')).toBeNull();
       expect(await findListenOwnerPid(wrapper, unrelated.port, '127.0.0.1', 'process-tree')).toBeNull();
 
-      // Both tree walkers, wherever the host supports them.
-      const walkers: Array<[string, (pid: number) => Promise<Set<number>>]> = [['ps', psProcessTree]];
+      // Each tree walker the host supports, through the same ownership check
+      // (the `ps` walker is what macOS selects; CI runs it on Linux here).
+      const walkers: Array<[string, ProcessTreeWalker]> = [['ps', psProcessTree]];
       if (existsSync('/proc/self/task')) walkers.push(['procfs', linuxProcessTree]);
       for (const [name, processTree] of walkers) {
         const tree = await processTree(wrapper.pid!);
         expect(tree.has(wrapped.pid), name).toBe(true);
         expect(tree.has(unrelated.pid), name).toBe(false);
+        expect(
+          await findListenOwnerPid(wrapper, wrapped.port, '127.0.0.1', 'process-tree', processTree),
+          name,
+        ).toBe(wrapped.pid);
+        expect(
+          await findListenOwnerPid(wrapper, unrelated.port, '127.0.0.1', 'process-tree', processTree),
+          name,
+        ).toBeNull();
       }
     } finally {
       wrapper.kill('SIGKILL');
       foreign.kill('SIGKILL');
       if (wrapped) { try { process.kill(wrapped.pid, 'SIGKILL'); } catch { /* already gone */ } }
     }
+  });
+});
+
+describe('processTreeWalker', () => {
+  it('walks /proc on Linux and one ps snapshot on other Unix hosts', () => {
+    expect(processTreeWalker('linux')).toBe(linuxProcessTree);
+    expect(processTreeWalker('darwin')).toBe(psProcessTree);
+    expect(processTreeWalker('freebsd')).toBe(psProcessTree);
   });
 });

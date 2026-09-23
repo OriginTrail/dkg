@@ -22,6 +22,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer, type Server } from 'node:net';
 import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -46,6 +47,7 @@ import {
   freePort,
   portAnswers,
   sleep,
+  waitForCondition,
   type OxigraphStandinFixture,
 } from './fixtures/oxigraph-server-real-fixture.js';
 
@@ -121,6 +123,39 @@ describe('buildOxigraphSpawnSpec', () => {
       expect(resolver).toHaveBeenCalledWith(child, 7878, '127.0.0.1', 'process-tree');
     },
   );
+
+  it('signals the direct watchdog\'s whole process group, so a SIGKILL also reaches Oxigraph', async () => {
+    const strategy = createOxigraphLaunchStrategy({ platform: process.platform, parentPid: 42, uid: 1000 });
+    // A wrapper that leads its own group and launches a long-lived child.
+    const wrapper = spawn(process.execPath, [
+      '-e',
+      "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); console.log(c.pid); setInterval(() => {}, 1000);",
+    ], { stdio: ['ignore', 'pipe', 'ignore'], detached: true });
+    const [chunk] = await once(wrapper.stdout!, 'data');
+    const grandchild = Number(String(chunk).trim());
+    try {
+      const exited = once(wrapper, 'exit');
+      strategy.terminate(wrapper, 'SIGKILL');
+      await exited;
+      expect(await waitForCondition(() => {
+        try { process.kill(grandchild, 0); return false; } catch { return true; }
+      })).toBe(true);
+    } finally {
+      try { process.kill(grandchild, 'SIGKILL'); } catch { /* already gone */ }
+    }
+  });
+
+  it.each([
+    ['Windows', { platform: 'win32' as const, parentPid: 42, uid: -1 }],
+    ['a systemd scope, whose parent-death signal stops Oxigraph', {
+      platform: 'linux' as const, parentPid: 42, uid: 1000, memoryLimits: { maxMiB: 3072 },
+    }],
+  ])('signals only the spawned child on %s', (_label, options) => {
+    const strategy = createOxigraphLaunchStrategy(options);
+    const kill = vi.fn(() => true);
+    strategy.terminate({ pid: 4242, kill } as unknown as import('node:child_process').ChildProcess, 'SIGTERM');
+    expect(kill).toHaveBeenCalledWith('SIGTERM');
+  });
 
   it('launches the binary directly on Windows, where only the direct child can own the listener', async () => {
     const strategy = createOxigraphLaunchStrategy({
@@ -228,7 +263,7 @@ describe('startOxigraphServer (real child processes)', () => {
     }
   });
 
-  it('accepts a descendant process as the verified listener owner', async () => {
+  it.runIf(process.platform !== 'win32')('accepts a descendant process as the verified listener owner', async () => {
     const port = await freePort();
     const wrapper = spawn('/bin/sh', [
       '-c',
