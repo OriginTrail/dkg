@@ -60,10 +60,7 @@ jobs:
     outputs:
       full_ci: ${{ steps.plan.outputs.full_ci }}
       run_node: ${{ steps.plan.outputs.run_node }}
-      # The protected-history controller pin predates this capability output.
-      # Keep its trusted lane outputs as a compatibility path until a reviewed
-      # controller rotation after merge; never execute candidate policy here.
-      node_test_artifacts: ${{ steps.plan.outputs.node_test_artifacts || (steps.plan.outputs.tornado_core == 'true' || steps.plan.outputs.tornado_publisher == 'true' || steps.plan.outputs.tornado_agent == 'true' || steps.plan.outputs.bura_cli == 'true' || steps.plan.outputs.kosava_hardhat_plugins == 'true') }}
+      node_test_artifacts: ${{ steps.plan.outputs.node_test_artifacts }}
       tornado_core: ${{ steps.plan.outputs.tornado_core }}
       tornado_blazegraph: ${{ steps.plan.outputs.tornado_blazegraph }}
       tornado_publisher: ${{ steps.plan.outputs.tornado_publisher }}
@@ -93,12 +90,6 @@ jobs:
       # This immutable controller is the authority for test selection. A
       # policy update intentionally uses a new reviewed commit SHA; never use
       # the merge candidate or a mutable branch here.
-      #
-      # Rotation shims: compatibility paths for older pinned controllers, to
-      # delete once this pin rotates to a controller that provides them:
-      #   - jobs.changes.outputs.node_test_artifacts fallback
-      #   - jobs.tornado-blazegraph.if tornado_agent term
-      #   - ci-gate step "Require selected Windows lifecycle tests"
       - name: Checkout trusted CI controller
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -517,7 +508,7 @@ jobs:
   tornado-blazegraph:
     name: "Tornado: storage Blazegraph integration (live server)"
     needs: [changes, build]
-    if: needs.changes.outputs.tornado_blazegraph == 'true' || needs.changes.outputs.tornado_agent == 'true'
+    if: needs.changes.outputs.tornado_blazegraph == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     services:
@@ -1591,12 +1582,6 @@ jobs:
             scripts/lib/ci-results.mjs
             scripts/lib/ci-routing.mjs
           sparse-checkout-cone-mode: false
-      - name: Require selected Windows lifecycle tests
-        env:
-          SELECTED: ${{ needs.changes.outputs.tornado_agent }}
-          RESULT: ${{ needs.inventory-windows.result }}
-        run: |
-          if [[ "$SELECTED" == true ]]; then test "$RESULT" = success; else test "$RESULT" = skipped; fi
       - name: Require the coverage verdict
         env:
           COVERAGE_RESULT: ${{ needs.coverage-results.result }}
