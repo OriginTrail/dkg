@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { assertSafeIri } from '@origintrail-official/dkg-core';
+import { assertSafeIri, formatSparqlTerm } from '@origintrail-official/dkg-core';
 import type { Quad } from './triple-store.js';
-import { formatSparqlTerm } from './sparql-terms.js';
 
 /** Never expose these operation-internal graphs through graph enumeration. */
 export const ATOMIC_GRAPH_REPLACE_STAGING_PREFIX =

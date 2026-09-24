@@ -1,26 +1,26 @@
 /**
- * RDF term syntax for SPARQL that the storage layer builds by string
- * interpolation.
+ * RDF term syntax for SPARQL built by string interpolation, next to the
+ * injection-safety primitives in `sparql-safe.ts`.
  *
  * {@link formatSparqlTerm} is the one serializer. It validates a term against
  * the SPARQL grammar for its {@link SparqlTermContext} and renders it
  * unchanged, or throws a {@link SparqlTermValidationError}. It never repairs a
  * term: deleting characters from an IRI would retarget the triple at a
- * different resource. The atomic-replace and RFC-64 commit builders call it
- * directly. The adapters reach it through the rollout policy in
- * `adapters/sparql-term-policy.ts`, which decides what happens to a term that
- * fails and how that is observed.
+ * different resource. Storage's atomic-replace and RFC-64 commit builders call
+ * it directly; storage adapters reach it through their rollout policy, which
+ * decides what happens to a term that fails and how that is observed.
  *
  * This module owns position rules and rendering only. RDF lexical recognition
  * comes from shared validators: the literal split and blank-node labels from
- * `@origintrail-official/dkg-rdf-utils`, IRI and literal safety from core.
+ * `@origintrail-official/dkg-rdf-utils`, IRI and literal safety from
+ * `sparql-safe.ts`.
  */
 import {
   assertSafeIri,
   assertSafeRdfTerm,
   sparqlIri,
   sparqlString,
-} from '@origintrail-official/dkg-core';
+} from './sparql-safe.js';
 import {
   isRdfBlankNodeLabel,
   parseRdfLiteralLexicalTerm,

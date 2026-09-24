@@ -30,7 +30,7 @@ import oxigraph from 'oxigraph';
 import { SparqlHttpStore, type Quad } from '../src/index.js';
 import { buildBlankNodeSafeDelete, isBlankNodeTerm } from '../src/adapters/blank-node-safe-delete.js';
 import { createSparqlTermPolicy } from '../src/adapters/sparql-term-policy.js';
-import { SparqlTermValidationError } from '../src/sparql-terms.js';
+import { SparqlTermValidationError } from '@origintrail-official/dkg-core';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 const G = 'http://example.org/graph/wm';

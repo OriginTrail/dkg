@@ -1,14 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import oxigraph from 'oxigraph';
-import { getMetrics } from '@origintrail-official/dkg-core';
 import {
   formatIriPrefix,
   formatSparqlTerm,
+  getMetrics,
   SparqlTermValidationError,
-  type SparqlTermContext,
-  type SparqlTermKind,
   type SparqlTermPosition,
-} from '../src/sparql-terms.js';
+} from '@origintrail-official/dkg-core';
 import {
   ADAPTER_SPARQL_TERM_POLICY,
   createSparqlTermPolicy,
@@ -260,60 +258,9 @@ describe('malformed terms are logged and counted, then sent in the pre-validatio
   });
 });
 
-const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
-
-describe('formatSparqlTerm, the one serializer', () => {
-  it.each<[string, SparqlTermContext, string, string]>([
-    ['a graph name', { position: 'graph' }, 'urn:g', '<urn:g>'],
-    ['a bare subject', { position: 'subject' }, 'urn:s', '<urn:s>'],
-    ['an angle-bracketed subject', { position: 'subject' }, '<urn:s>', '<urn:s>'],
-    ['a subject blank node where allowed', { position: 'subject', blankNodes: 'allow' }, '_:b0', '_:b0'],
-    ['a predicate', { position: 'predicate' }, '<urn:p>', '<urn:p>'],
-    ['an object IRI', { position: 'object' }, 'urn:o', '<urn:o>'],
-    ['an object literal', { position: 'object' }, '"v"@en', '"v"@en'],
-    ['an object literal with a bare datatype', { position: 'object' }, `"42"^^${XSD_INTEGER}`, `"42"^^<${XSD_INTEGER}>`],
-    ['an object blank node where allowed', { position: 'object', blankNodes: 'allow' }, '_:b1', '_:b1'],
-  ])('renders %s', (_name, context, term, rendered) => {
-    expect(formatSparqlTerm(term, context)).toBe(rendered);
-  });
-
-  it.each<[string, SparqlTermContext, string, SparqlTermKind]>([
-    ['an angle-bracketed graph name', { position: 'graph' }, '<urn:g>', 'iri'],
-    ['a blank-node graph name', { position: 'graph', blankNodes: 'allow' }, '_:g', 'blank-node'],
-    ['a literal graph name', { position: 'graph' }, '"g"', 'literal'],
-    ['a blank-node subject by default', { position: 'subject' }, '_:b0', 'blank-node'],
-    ['a literal subject', { position: 'subject', blankNodes: 'allow' }, '"s"', 'literal'],
-    ['a blank-node predicate, even where blank nodes are allowed', { position: 'predicate', blankNodes: 'allow' }, '_:p', 'blank-node'],
-    ['a literal predicate', { position: 'predicate' }, '"p"', 'literal'],
-    ['a blank-node object by default', { position: 'object' }, '_:b0', 'blank-node'],
-    ['an invalid blank-node label', { position: 'object', blankNodes: 'allow' }, '_:a b', 'blank-node'],
-    ['a literal with a raw line break', { position: 'object' }, '"x\ny"', 'literal'],
-    ['an IRI with a space', { position: 'predicate' }, 'urn:p q', 'iri'],
-  ])('rejects %s', (_name, context, term, kind) => {
-    let error: unknown;
-    try {
-      formatSparqlTerm(term, context);
-    } catch (caught) {
-      error = caught;
-    }
-    expect(error).toBeInstanceOf(SparqlTermValidationError);
-    expect((error as SparqlTermValidationError).kind).toBe(kind);
-  });
-
+describe('the strict serializer behind each adapter entry point', () => {
   it.each(MALFORMED)('$name throws', ({ strict }) => {
     expect(strict).toThrow(SparqlTermValidationError);
-  });
-
-  it('keeps the core validator message for callers that match on it', () => {
-    expect(() => formatSparqlTerm('urn:a b', { position: 'graph' })).toThrow(/^Unsafe or empty IRI value: urn:a b$/);
-    expect(() => formatSparqlTerm('"x\ny"', { position: 'object' })).toThrow(/^Unsafe RDF term/);
-  });
-
-  it('names the violated rule', () => {
-    expect(() => formatSparqlTerm('_:b0', { position: 'object' })).toThrow(/cannot be a blank node/);
-    expect(() => formatSparqlTerm('_:a b', { position: 'subject', blankNodes: 'allow' })).toThrow(/Invalid blank node label/);
-    expect(() => formatSparqlTerm('"x"', { position: 'subject', blankNodes: 'allow' })).toThrow(/must be an IRI/);
-    expect(() => formatSparqlTerm('<urn:g>', { position: 'graph' })).toThrow(/Unsafe or empty IRI/);
   });
 });
 

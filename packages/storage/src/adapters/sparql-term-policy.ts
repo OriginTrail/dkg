@@ -1,7 +1,7 @@
 /**
  * The storage adapters' rollout policy for SPARQL terms: what happens to a
  * term that fails {@link formatSparqlTerm}, and how that is observed. The term
- * syntax itself lives in `sparql-terms.ts`.
+ * syntax itself is core's (`@origintrail-official/dkg-core`, `sparql-terms.ts`).
  *
  * The adapters build their statements with `sparql-statements.ts`, which
  * renders every term under {@link ADAPTER_SPARQL_TERM_POLICY}. That policy is
@@ -11,14 +11,14 @@
  * IRI.
  */
 import { createHmac, randomBytes } from 'node:crypto';
-import { getMetrics } from '@origintrail-official/dkg-core';
 import {
   formatIriPrefix,
   formatSparqlTerm,
+  getMetrics,
   SparqlTermValidationError,
   type SparqlTermKind,
   type SparqlTermPosition,
-} from '../sparql-terms.js';
+} from '@origintrail-official/dkg-core';
 import type { StoreOperation } from '../store-operation-outcome.js';
 
 /** Metric position label: a term position, or a `deleteBySubjectPrefix` prefix. */

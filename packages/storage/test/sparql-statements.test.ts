@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { sparqlStatements, type SparqlStatements } from '../src/adapters/sparql-statements.js';
 import { createSparqlTermPolicy } from '../src/adapters/sparql-term-policy.js';
-import { SparqlTermValidationError } from '../src/sparql-terms.js';
+import { SparqlTermValidationError } from '@origintrail-official/dkg-core';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 const ADAPTERS = ['oxigraph', 'sparql-http', 'blazegraph'] as const;

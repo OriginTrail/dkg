@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { assertSafeIri } from '@origintrail-official/dkg-core';
+import { assertSafeIri, formatSparqlTerm, unwrapIri } from '@origintrail-official/dkg-core';
 import type { Quad } from './triple-store.js';
 import {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
@@ -8,7 +8,6 @@ import {
   formatGraphBlock,
   isAtomicGraphReplaceStagingGraph,
 } from './atomic-graph-replace.js';
-import { formatSparqlTerm, unwrapIri } from './sparql-terms.js';
 import {
   decodeRfc64AuthorCommitPlanV1,
   finalizeRfc64AuthorCommitPlanV1,

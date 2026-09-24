@@ -372,6 +372,15 @@ export {
   assertSafeRdfTerm,
 } from './sparql-safe.js';
 export {
+  formatIriPrefix,
+  formatSparqlTerm,
+  SparqlTermValidationError,
+  unwrapIri,
+  type SparqlTermContext,
+  type SparqlTermKind,
+  type SparqlTermPosition,
+} from './sparql-terms.js';
+export {
   JAVA_WRITE_UTF_MAX_BYTES,
   DKG_RDF_LITERAL_SAFE_MUTF8_BYTES,
   OVERSIZED_RDF_LITERAL_ERROR_CODE,
