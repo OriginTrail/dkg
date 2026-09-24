@@ -8,7 +8,12 @@ import { Command } from 'commander';
 import yaml from 'js-yaml';
 import type { DkgConfig } from '../src/config.js';
 import { registerPublisherCommand } from '../src/commands/publisher.js';
-import { connectLocalAgentIntegration, persistLocalAgentIntegration } from '../src/daemon/local-agents.js';
+import {
+  connectLocalAgentIntegration,
+  persistLocalAgentIntegration,
+  updateLocalAgentIntegration,
+} from '../src/daemon/local-agents.js';
+import { withFileLock } from '../src/file-lock.js';
 import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 import {
@@ -61,6 +66,15 @@ async function readRaw(): Promise<string> {
 
 async function readFileConfig(): Promise<Record<string, any>> {
   return JSON.parse(await readRaw());
+}
+
+/** Hold the config lock, as another write would, until the returned release is called. */
+async function holdConfigLock(): Promise<{ release: () => Promise<void> }> {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const holder = withFileLock(join(home, 'config.lock'), () => held, { timeoutMs: 5_000 });
+  await vi.waitFor(() => expect(existsSync(join(home, 'config.lock'))).toBe(true));
+  return { release: async () => { release(); await holder; } };
 }
 
 function jsonRequest(method: string, path: string, payload: unknown) {
@@ -128,6 +142,20 @@ describe('daemon runtime settings', () => {
     expect(await readFileConfig()).toEqual({ name: 'node', contextGraphs: ['saved-by-cli'] });
   });
 
+  it('writes the LLM settings the daemon holds when the write runs, not when it was requested', async () => {
+    const config = bootConfig();
+    await fileEditedAfterBoot({ name: 'node' });
+    const settings = createLlmSettings({ config, memoryManager: { updateConfig: vi.fn() }, log: () => {} });
+    const lock = await holdConfigLock();
+
+    const write = settings.setLlm({ apiKey: 'requested' });
+    config.llm = { apiKey: 'changed-while-waiting' };
+    await lock.release();
+    await write;
+
+    expect((await readFileConfig()).llm).toEqual({ apiKey: 'changed-while-waiting' });
+  });
+
   it('applies the shared memory TTL to the agent and persists it under its current and legacy keys', async () => {
     const config = bootConfig();
     await fileEditedAfterBoot({ name: 'node', contextGraphs: ['saved-by-cli'] });
@@ -163,6 +191,23 @@ describe('daemon local agent integration writes', () => {
     expect(file.localAgentIntegrations.hermes).toEqual({ id: 'hermes', enabled: false, metadata: { changedBy: 'cli' } });
     expect(file.localAgentIntegrations['custom-agent'])
       .toEqual(JSON.parse(JSON.stringify(config.localAgentIntegrations!['custom-agent'])));
+  });
+
+  // A connect route's write and its attach job's write can both wait for the
+  // lock; whichever runs last must store the newer record.
+  it('writes the integration record the daemon holds when the write runs, not when it was requested', async () => {
+    const config = bootConfig();
+    connectLocalAgentIntegration(config, { id: 'custom-agent', runtime: { status: 'connecting' } });
+    await fileEditedAfterBoot({ name: 'node' });
+    const lock = await holdConfigLock();
+
+    const write = persistLocalAgentIntegration(config, 'custom-agent');
+    updateLocalAgentIntegration(config, 'custom-agent', { runtime: { status: 'ready', ready: true } });
+    await lock.release();
+    await write;
+
+    expect((await readFileConfig()).localAgentIntegrations['custom-agent'].runtime)
+      .toMatchObject({ status: 'ready', ready: true });
   });
 
   it('drops the legacy OpenClaw keys when it writes the OpenClaw entry', async () => {

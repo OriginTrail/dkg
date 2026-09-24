@@ -41,6 +41,7 @@ export default defineConfig({
           // Home config writes: the shared file lock, atomic replace, and
           // re-read-then-patch updates (no lost update, YAML stays YAML).
           'test/config-file-update.test.ts',
+          'test/config-write-sites.test.ts',
           'test/daemon-config-persistence.test.ts',
           'test/durable-file-replace.test.ts',
           'test/file-lock.test.ts',
