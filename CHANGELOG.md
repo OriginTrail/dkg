@@ -16,6 +16,32 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Fixed
 
+- **Config writes no longer undo each other, truncate the file or hide a
+  YAML config**: the daemon and the CLI each rewrote the whole `config.json`
+  from their own in-memory copy. A CLI edit such as `dkg context-graph create
+  --save` made while the daemon was running could silently undo a settings
+  change made in the node UI, or the reverse. A crash during a write could
+  leave a truncated file that stopped the node from starting. On a node
+  configured through `config.yaml`, the first write created a `config.json`
+  that took precedence, so later edits to the YAML no longer applied. Writes
+  now take a lock shared by the daemon and the CLI, re-read the file, change
+  only the values that command or setting edits (each edit is given only the
+  value it replaces), and replace the file atomically in its own format. A
+  write that stalled for a minute and lost the lock fails instead of
+  overwriting the write that took it over. The file keeps its owner, group
+  and permissions, and a symlinked config is written through its link, even
+  when the link's target does not exist yet. When the
+  writing process may not give the file its owner (a config belonging to
+  another user), or the file's directory refuses a new file or a rename (a
+  config linked into a directory another account owns), the file is
+  rewritten in place instead, as before, without the crash guarantee. An ACL
+  set on the file itself is kept only in that case. A YAML config stays YAML,
+  and a write edits it in place, so comments and every key the write does
+  not change keep their layout; a change the edit cannot make in place (one
+  through an alias or a merge key) rewrites the whole file, without its
+  comments. The
+  `dkg openclaw`, `dkg hermes` and `dkg mcp` setup commands still write
+  `config.json` the old way.
 - **Cores promote the data they acknowledge to Verifiable Memory again**: since
   10.0.14 (#2184) `syncReconcilerEnabled` also gated chain-driven VM
   reconciliation, which the 10.0.14 upgrade notes did not mention. A Core that

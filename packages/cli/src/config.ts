@@ -5,7 +5,6 @@ import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origint
 import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import yaml from 'js-yaml';
 import type {
   DKGAgentConfig,
   SyncAdmissionConfig,
@@ -59,6 +58,15 @@ import {
   type RpcRequestGovernorPolicyInput,
 } from '@origintrail-official/dkg-chain';
 import { runtimeAssetRoots } from './runtime-assets.js';
+import {
+  homeConfigPaths,
+  homeConfigSources,
+  readHomeConfigSource,
+  readHomeConfigSourceSync,
+  updateHomeConfigFile,
+  type DkgConfigEdit,
+  type DkgConfigFileUpdate,
+} from './home-config-file.js';
 
 /**
  * Per-step build timeouts (milliseconds) used by the git-based auto-update
@@ -1249,7 +1257,7 @@ export {
 };
 
 /** Resolve context graphs from config. */
-export function resolveContextGraphs(config: DkgConfig): string[] {
+export function resolveContextGraphs(config: Pick<DkgConfig, 'contextGraphs'>): string[] {
   return config.contextGraphs ?? [];
 }
 
@@ -2402,41 +2410,40 @@ export async function swapSlot(target: 'a' | 'b'): Promise<void> {
   await writeFile(join(rDir, 'active'), target);
 }
 
+export { configEdit, configValues } from './home-config-file.js';
+export type {
+  DkgConfigEdit, DkgConfigFile, DkgConfigFileUpdate, DkgConfigPath, DkgConfigValue,
+} from './home-config-file.js';
+export type { ReplaceStrategy } from './durable-file-replace.js';
+
 /** Immutable filesystem context for one selected local daemon home. */
 export class DkgHomeFiles {
   constructor(readonly home: string = dkgDir()) { Object.freeze(this); }
 
-  get configPath(): string { return join(this.home, 'config.json'); }
-  get configYamlPath(): string { return join(this.home, 'config.yaml'); }
+  get configPath(): string { return homeConfigPaths(this.home).json; }
+  get configYamlPath(): string { return homeConfigPaths(this.home).yaml; }
+  get configLockPath(): string { return homeConfigPaths(this.home).lock; }
   get pidPath(): string { return join(this.home, 'daemon.pid'); }
   get apiPortPath(): string { return join(this.home, 'api.port'); }
   get tokenPath(): string { return dkgAuthTokenPath(this.home); }
 
-  configExists(): boolean { return existsSync(this.configPath) || existsSync(this.configYamlPath); }
+  configExists(): boolean { return homeConfigSources(this.home).some(({ path }) => existsSync(path)); }
 
-  readConfigSync(): unknown {
-    if (existsSync(this.configPath)) return JSON.parse(readFileSync(this.configPath, 'utf-8'));
-    if (existsSync(this.configYamlPath)) return yaml.load(readFileSync(this.configYamlPath, 'utf-8'));
-    return null;
-  }
+  readConfigSync(): unknown { return readHomeConfigSourceSync(this.home)?.raw ?? null; }
 
   async loadConfig(): Promise<DkgConfig> {
-    try {
-      return mergePersistedConfig(JSON.parse(await readFile(this.configPath, 'utf-8')));
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
-    }
-    try {
-      return mergePersistedConfig(yaml.load(await readFile(this.configYamlPath, 'utf-8')));
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
-    }
-    return { ...DEFAULT_CONFIG };
+    const source = await readHomeConfigSource(this.home);
+    return source ? mergePersistedConfig(source.raw) : { ...DEFAULT_CONFIG };
   }
 
-  async saveConfig(config: DkgConfig): Promise<void> {
-    await mkdir(this.home, { recursive: true });
-    await writeFile(this.configPath, JSON.stringify(config, null, 2) + '\n');
+  /**
+   * Apply `edits` (see configEdit) to the home config, together, under the
+   * lock the daemon and CLI share (see updateHomeConfigFile). The daemon and
+   * the CLI commands write the home config through here; the openclaw, hermes
+   * and mcp setup commands still write it through core's ensureDkgNodeConfig.
+   */
+  updateConfigFile(edits: readonly DkgConfigEdit[]): Promise<DkgConfigFileUpdate> {
+    return updateHomeConfigFile(this.home, edits);
   }
 
   readPid(): Promise<number | null> { return this.readControlNumber(this.pidPath); }
@@ -2629,7 +2636,9 @@ export function exitOnStoreConfigErrors(
   process.exit(1);
 }
 
-export async function saveConfig(config: DkgConfig): Promise<void> { await new DkgHomeFiles().saveConfig(config); }
+export async function updateConfigFile(edits: readonly DkgConfigEdit[]): Promise<DkgConfigFileUpdate> {
+  return new DkgHomeFiles().updateConfigFile(edits);
+}
 export function configExists(): boolean { return new DkgHomeFiles().configExists(); }
 export async function readPid(): Promise<number | null> { return new DkgHomeFiles().readPid(); }
 export async function writePid(pid: number): Promise<void> { await new DkgHomeFiles().writePid(pid); }

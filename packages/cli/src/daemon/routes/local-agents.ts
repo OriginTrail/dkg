@@ -71,7 +71,6 @@ import {
 } from "@origintrail-official/dkg-node-ui";
 import {
   loadConfig,
-  saveConfig,
   loadNetworkConfig,
   dkgDir,
   writePid,
@@ -316,6 +315,7 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
+import { persistLocalAgentIntegration } from '../local-agent-config-store.js';
 import {
   primeAgentDkgSessionId,
   readPrimeAgentSessions,
@@ -427,7 +427,8 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
     const body = await readBody(req, SMALL_BODY_BYTES);
     let parsed: Record<string, unknown>;
     try { parsed = JSON.parse(body); } catch { return jsonResponse(res, 400, { error: 'Invalid JSON body' }); }
-    if (normalizeIntegrationId(typeof parsed.id === 'string' ? parsed.id : '') === 'local-llm') {
+    const integrationId = normalizeIntegrationId(typeof parsed.id === 'string' ? parsed.id : '');
+    if (integrationId === 'local-llm') {
       return jsonResponse(res, 409, {
         error: 'DKG Local LLM is daemon-managed and does not require a connect or install step.',
         code: 'DAEMON_MANAGED_INTEGRATION',
@@ -438,16 +439,18 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
         ? parsed.metadata.source
         : undefined;
       const result = source === 'node-ui'
-        ? await connectLocalAgentIntegrationFromUi(config, parsed, bridgeAuthToken, { saveConfig })
+        ? await connectLocalAgentIntegrationFromUi(config, parsed, bridgeAuthToken, {
+            persistIntegration: persistLocalAgentIntegration,
+          })
         : { integration: connectLocalAgentIntegration(config, parsed) };
-      await saveConfig(config);
+      await persistLocalAgentIntegration(config, integrationId);
       return jsonResponse(res, 200, {
         ok: true,
         integration: withPrimeAgentSessionCount(result.integration),
         notice: result.notice,
       });
     } catch (err: any) {
-      try { await saveConfig(config); } catch { /* best effort: preserve failed attach state when available */ }
+      try { await persistLocalAgentIntegration(config, integrationId); } catch { /* best effort: preserve failed attach state when available */ }
       return jsonResponse(res, 400, { error: err?.message ?? 'Invalid local agent integration payload' });
     }
   }
@@ -470,7 +473,7 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
     }
     try {
       const integration = await refreshLocalAgentIntegrationFromUi(config, normalizedId, bridgeAuthToken);
-      await saveConfig(config);
+      await persistLocalAgentIntegration(config, normalizedId);
       return jsonResponse(res, 200, { ok: true, integration: withPrimeAgentSessionCount(integration) });
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? 'Integration refresh failed' });
@@ -511,7 +514,7 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
               lastError: `OpenClaw disconnect failed: ${err?.message ?? 'unknown error'}`,
             },
           });
-          await saveConfig(config);
+          await persistLocalAgentIntegration(config, normalizedId);
           return jsonResponse(res, 200, { ok: true, integration });
         }
       }
@@ -537,7 +540,7 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
             lastError: restoreError ?? null,
           },
         });
-        await saveConfig(config);
+        await persistLocalAgentIntegration(config, normalizedId);
         return jsonResponse(res, 200, { ok: true, integration });
       }
 
@@ -557,7 +560,7 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
               lastError: `Hermes disconnect failed: ${err?.message ?? 'unknown error'}`,
             },
           });
-          await saveConfig(config);
+          await persistLocalAgentIntegration(config, normalizedId);
           return jsonResponse(res, 200, { ok: true, integration });
         }
 
@@ -577,13 +580,13 @@ export async function handleLocalAgentsRoutes(ctx: RequestContext): Promise<void
               lastError: hermesRestoreError,
             },
           });
-          await saveConfig(config);
+          await persistLocalAgentIntegration(config, normalizedId);
           return jsonResponse(res, 200, { ok: true, integration });
         }
       }
 
       const integration = updateLocalAgentIntegration(config, id, normalizedPatch);
-      await saveConfig(config);
+      await persistLocalAgentIntegration(config, normalizedId);
       return jsonResponse(res, 200, { ok: true, integration });
     } catch (err: any) {
       return jsonResponse(res, 400, { error: err?.message ?? 'Invalid local agent integration payload' });

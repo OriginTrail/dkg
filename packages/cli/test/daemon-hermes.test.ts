@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi, afterEach } from 'vitest';
@@ -1134,6 +1134,7 @@ describe('Hermes local-agent registry lifecycle', () => {
       runtime: { status: 'disconnected' },
     });
     const res = makeJsonResponse();
+    let persisted: any;
 
     try {
       await handleLocalAgentsRoutes({
@@ -1142,12 +1143,18 @@ describe('Hermes local-agent registry lifecycle', () => {
         config,
         path: '/api/local-agent-integrations/hermes',
       } as any);
+      persisted = JSON.parse(readFileSync(join(dkgHome, 'config.json'), 'utf8'));
     } finally {
       if (previousDkgHome === undefined) delete process.env.DKG_HOME;
       else process.env.DKG_HOME = previousDkgHome;
       rmSync(dkgHome, { recursive: true, force: true });
     }
 
+    // The disconnect survives a restart: the config file has it too.
+    expect(persisted.localAgentIntegrations.hermes).toMatchObject({
+      enabled: false,
+      runtime: { status: 'disconnected', ready: false },
+    });
     expect(disconnectHermesProfileMock).toHaveBeenCalledWith({
       profileName: 'research',
       hermesHome: 'C:\\Hermes\\research',

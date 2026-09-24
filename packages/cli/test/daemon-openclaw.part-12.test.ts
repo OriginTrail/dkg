@@ -139,8 +139,8 @@ describe('local agent integration registry helpers', () => {
     const restartGateway = () => {};
     const waitForReady = () => {};
     const probeHealth = async () => ({ ok: false as const, error: 'bridge offline' });
-    const saveConfigCalls: unknown[][] = [];
-    const saveConfig = async (...args: unknown[]) => { saveConfigCalls.push(args); };
+    const persistCalls: unknown[][] = [];
+    const persistIntegration = async (...args: unknown[]) => { persistCalls.push(args); };
     let attachJob: Promise<void> | null = null;
 
     const result = await connectLocalAgentIntegrationFromUi(
@@ -155,7 +155,7 @@ describe('local agent integration registry helpers', () => {
         restartGateway,
         waitForReady,
         probeHealth,
-        saveConfig,
+        persistIntegration,
         verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
@@ -171,7 +171,8 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.runtime.ready).toBe(false);
     expect(integration?.runtime.lastError).toBe('setup failed');
     expect(integration?.metadata?.userDisabled).not.toBe(true);
-    expect(saveConfigCalls.length).toBeGreaterThanOrEqual(1);
+    expect(persistCalls.length).toBeGreaterThanOrEqual(1);
+    expect(persistCalls.every(([persisted, id]) => persisted === config && id === 'openclaw')).toBe(true);
   });
 
   it('keeps an already attached OpenClaw integration enabled when a UI reconnect attempt fails', async () => {
@@ -190,8 +191,8 @@ describe('local agent integration registry helpers', () => {
     const restartGateway = () => {};
     const waitForReady = () => {};
     const probeHealth = async () => ({ ok: false as const, error: 'bridge offline' });
-    const saveConfigCalls: unknown[][] = [];
-    const saveConfig = async (...args: unknown[]) => { saveConfigCalls.push(args); };
+    const persistCalls: unknown[][] = [];
+    const persistIntegration = async (...args: unknown[]) => { persistCalls.push(args); };
     let attachJob: Promise<void> | null = null;
 
     const result = await connectLocalAgentIntegrationFromUi(
@@ -206,7 +207,7 @@ describe('local agent integration registry helpers', () => {
         restartGateway,
         waitForReady,
         probeHealth,
-        saveConfig,
+        persistIntegration,
         verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
@@ -220,7 +221,7 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.enabled).toBe(true);
     expect(integration?.status).toBe('error');
     expect(integration?.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
-    expect(saveConfigCalls.length).toBeGreaterThanOrEqual(1);
+    expect(persistCalls.length).toBeGreaterThanOrEqual(1);
   });
 
   it('UI connect runs OpenClaw setup, restarts the gateway, and leaves the integration in connecting state while the gateway is still coming up', async () => {
@@ -238,8 +239,8 @@ describe('local agent integration registry helpers', () => {
       { ok: false as const, error: 'bridge still starting' },
     ];
     const probeHealth = async (...args: unknown[]) => { probeHealthCalls.push(args); return probeResults[probeIdx++]; };
-    const saveConfigCalls: unknown[][] = [];
-    const saveConfig = async (...args: unknown[]) => { saveConfigCalls.push(args); };
+    const persistCalls: unknown[][] = [];
+    const persistIntegration = async (...args: unknown[]) => { persistCalls.push(args); };
     let attachJob: Promise<void> | null = null;
 
     const result = await connectLocalAgentIntegrationFromUi(
@@ -254,7 +255,7 @@ describe('local agent integration registry helpers', () => {
         restartGateway,
         waitForReady,
         probeHealth,
-        saveConfig,
+        persistIntegration,
         verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
@@ -275,7 +276,7 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.status).toBe('connecting');
     expect(integration?.runtime.ready).toBe(false);
     expect(integration?.runtime.lastError).toBe('bridge still starting');
-    expect(saveConfigCalls.length).toBeGreaterThanOrEqual(1);
+    expect(persistCalls.length).toBeGreaterThanOrEqual(1);
   });
 
   it('UI connect retries OpenClaw readiness after a gateway restart and reports chat-ready when the bridge comes up', async () => {
@@ -292,8 +293,8 @@ describe('local agent integration registry helpers', () => {
       { ok: false as const, error: 'bridge still starting' },
     ];
     const probeHealth = async () => probeResults[probeIdx++];
-    const saveConfigCalls: unknown[][] = [];
-    const saveConfig = async (...args: unknown[]) => { saveConfigCalls.push(args); };
+    const persistCalls: unknown[][] = [];
+    const persistIntegration = async (...args: unknown[]) => { persistCalls.push(args); };
     let attachJob: Promise<void> | null = null;
 
     const result = await connectLocalAgentIntegrationFromUi(
@@ -308,7 +309,7 @@ describe('local agent integration registry helpers', () => {
         restartGateway,
         waitForReady,
         probeHealth,
-        saveConfig,
+        persistIntegration,
         verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
@@ -326,7 +327,7 @@ describe('local agent integration registry helpers', () => {
     expect(integration?.status).toBe('ready');
     expect(integration?.runtime.ready).toBe(true);
     expect(integration?.transport.bridgeUrl).toBe('http://127.0.0.1:9201');
-    expect(saveConfigCalls.length).toBeGreaterThanOrEqual(1);
+    expect(persistCalls.length).toBeGreaterThanOrEqual(1);
   });
 
   it('cancels a pending OpenClaw attach job when the integration is disconnected before attach finishes', async () => {
@@ -340,7 +341,7 @@ describe('local agent integration registry helpers', () => {
     const waitForReadyCalls: unknown[][] = [];
     const waitForReady = (...args: unknown[]) => { waitForReadyCalls.push(args); };
     const probeHealth = async () => ({ ok: false as const, error: 'bridge offline' });
-    const saveConfig = async () => {};
+    const persistIntegration = async () => {};
     let attachJob: Promise<void> | null = null;
 
     const result = await connectLocalAgentIntegrationFromUi(
@@ -355,7 +356,7 @@ describe('local agent integration registry helpers', () => {
         restartGateway,
         waitForReady,
         probeHealth,
-        saveConfig,
+        persistIntegration,
         verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },
@@ -413,7 +414,7 @@ describe('local agent integration registry helpers', () => {
       { ok: false as const, error: 'still starting' },
     ];
     const probeHealth = async () => probeResults[probeIdx++];
-    const saveConfig = async () => {};
+    const persistIntegration = async () => {};
     let attachJob: Promise<void> | null = null;
 
     const result = await connectLocalAgentIntegrationFromUi(
@@ -428,7 +429,7 @@ describe('local agent integration registry helpers', () => {
         restartGateway,
         waitForReady,
         probeHealth,
-        saveConfig,
+        persistIntegration,
         verifyMemorySlot: () => true,
         onAttachScheduled: (_id, job) => { attachJob = job; },
       },

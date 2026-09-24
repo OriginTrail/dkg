@@ -3,19 +3,25 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DkgConfig } from '../src/config.js';
+import type { DkgConfig, DkgConfigEdit, DkgConfigFileUpdate } from '../src/config.js';
+import { applyConfigEdits } from '../src/home-config-file.js';
 
 const mocks = vi.hoisted(() => ({
   home: '',
   answers: {} as Record<string, string>,
   questions: [] as string[],
   loadConfig: vi.fn(),
-  saveConfig: vi.fn<(config: DkgConfig) => Promise<void>>(),
+  updateConfigFile: vi.fn<(edits: readonly DkgConfigEdit[]) => Promise<DkgConfigFileUpdate>>(),
+  // The config file each patch is applied to; defaults to what loadConfig returned.
+  fileAtWrite: undefined as Partial<DkgConfig> | undefined,
+  // The file updateConfigFile reports as written; defaults to config.json.
+  sourcePath: undefined as string | undefined,
+  written: [] as Partial<DkgConfig>[],
 }));
 vi.mock('../src/config.js', async (importOriginal) => ({
   ...await importOriginal<typeof import('../src/config.js')>(),
   loadConfig: mocks.loadConfig,
-  saveConfig: mocks.saveConfig,
+  updateConfigFile: mocks.updateConfigFile,
   dkgDir: () => mocks.home,
   configPath: () => join(mocks.home, 'config.json'),
   ensureDkgDir: async () => {},
@@ -48,10 +54,10 @@ async function runInit(networkName = 'testnet') {
   const program = new Command().exitOverride();
   registerInitCommand(program);
   await program.parseAsync(['init', '--network', networkName, '--role', 'edge'], { from: 'user' });
-  expect(mocks.saveConfig).toHaveBeenCalledTimes(1);
+  expect(mocks.updateConfigFile).toHaveBeenCalledTimes(1);
   expect(mocks.questions.some((prompt) => prompt.startsWith('RPC URL'))).toBe(true);
   expect(mocks.questions.some((prompt) => prompt.startsWith('Hub contract address'))).toBe(true);
-  return mocks.saveConfig.mock.calls[0][0];
+  return mocks.written[0];
 }
 
 describe('init wizard chain persistence', () => {
@@ -66,7 +72,15 @@ describe('init wizard chain persistence', () => {
     await writeFile(join(mocks.home, 'config.json'), '{}');
     mocks.answers = {};
     mocks.questions = [];
-    mocks.saveConfig.mockResolvedValue(undefined);
+    mocks.fileAtWrite = undefined;
+    mocks.sourcePath = undefined;
+    mocks.written = [];
+    mocks.updateConfigFile.mockImplementation(async (edits) => {
+      const file = (mocks.fileAtWrite ?? await mocks.loadConfig()) as Record<string, unknown>;
+      // The real edit step, applied to the stand-in file.
+      mocks.written.push(applyConfigEdits(file, edits).after);
+      return { path: mocks.sourcePath ?? join(mocks.home, 'config.json'), changed: true };
+    });
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('unexpected process.exit'); });
@@ -90,6 +104,46 @@ describe('init wizard chain persistence', () => {
     expect(saved.chain).toBeUndefined();
     expect(JSON.parse(JSON.stringify(saved))).not.toHaveProperty('chain');
     expect(resolveChainConfig(saved, network)).toEqual(effective);
+  });
+
+  it('patches only the keys it prompts for, so a write made while it prompted survives', async () => {
+    mocks.loadConfig.mockResolvedValue({
+      name: 'node', apiPort: 9200, networkConfig: 'testnet', auth: { enabled: true, tokens: ['loaded'] },
+    });
+    // The daemon connected an integration and rotated a token after init loaded the config.
+    mocks.fileAtWrite = {
+      name: 'node', apiPort: 9200, networkConfig: 'testnet', auth: { enabled: true, tokens: ['rotated'] },
+      localAgentIntegrations: { hermes: { id: 'hermes', enabled: true } },
+    };
+    mocks.answers = { 'Node name': 'renamed', 'Enable API authentication': 'n' };
+
+    const saved = await runInit();
+    expect(saved.localAgentIntegrations).toEqual({ hermes: { id: 'hermes', enabled: true } });
+    expect(saved.auth).toEqual({ enabled: false, tokens: ['rotated'] });
+    expect(saved.name).toBe('renamed');
+  });
+
+  // The store prompt answering "use the local default" (a null block) clears
+  // a block an earlier run wrote, so re-running init can switch back.
+  it('clears an existing store block when the operator picks the local default', async () => {
+    mocks.loadConfig.mockResolvedValue({
+      name: 'node', apiPort: 9200, networkConfig: 'testnet',
+      store: { backend: 'blazegraph', options: { url: 'http://127.0.0.1:9999/blazegraph/sparql' } },
+    });
+
+    const saved = await runInit();
+    // As persisted: the patch leaves the key undefined, which the file drops.
+    expect(JSON.parse(JSON.stringify(saved))).not.toHaveProperty('store');
+    expect(saved.name).toBe('node');
+  });
+
+  it('names the file it wrote, which is config.yaml for a YAML-configured node', async () => {
+    mocks.loadConfig.mockResolvedValue({ name: 'node', apiPort: 9200, networkConfig: 'testnet' });
+    mocks.sourcePath = join(mocks.home, 'config.yaml');
+
+    await runInit();
+
+    expect(console.log).toHaveBeenCalledWith(`\nConfig saved to ${join(mocks.home, 'config.yaml')}`);
   });
 
   it('persists genuine operator overrides without pinning the inherited Hub', async () => {
