@@ -63,6 +63,7 @@ type Gate1RolloutAgentOptions = Readonly<
     | 'onReplicationEvent'
     | 'rfc64PublicCatalogActivation'
     | 'syncReconcilerEnabled'
+    | 'vmReconcilerEnabled'
   >
   & Partial<Pick<DKGAgentConfig, 'chainAdapter'>>
 >;
@@ -166,6 +167,7 @@ export class Gate1RolloutAdapterFixture {
       onReplicationEvent: this.onReplicationEvent,
       rfc64PublicCatalogActivation: this.activation,
       syncReconcilerEnabled: vmChain !== undefined,
+      vmReconcilerEnabled: vmChain !== undefined,
       ...(vmChain === undefined ? {} : { chainAdapter: vmChain }),
     });
     this.#handlers = Object.freeze({

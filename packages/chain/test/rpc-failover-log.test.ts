@@ -5,6 +5,7 @@ import {
   noteRpcExhaustion,
   noteRpcServed,
   classifyRpcFailoverError,
+  hostOnlyRpcText,
   rpcHost,
   getRpcFailoverStats,
   _resetRpcFailoverStatsForTest,
@@ -52,6 +53,32 @@ describe('rpc-failover-log', () => {
     it('reduces a URL to host-only and never throws on garbage', () => {
       expect(rpcHost('https://base-rpc.publicnode.com/v1/key')).toBe('base-rpc.publicnode.com');
       expect(rpcHost('not a url')).toBe('unparseable-rpc');
+    });
+  });
+
+  describe('hostOnlyRpcText', () => {
+    it('reduces every URL in provider text to its host, however the text quotes it', () => {
+      // ethers' message for an HTTP-level error quotes the request URL in JSON.
+      expect(hostOnlyRpcText(
+        'server response 401 Unauthorized (info={ "requestUrl": '
+          + '"https://rpc.example.invalid/v2/FAKEKEY123?apikey=FAKEKEY123", "responseStatus": "401 Unauthorized" })',
+      )).toBe(
+        'server response 401 Unauthorized (info={ "requestUrl": "rpc.example.invalid", '
+          + '"responseStatus": "401 Unauthorized" })',
+      );
+      // HTML attributes and angle brackets end a URL too; any scheme, any case,
+      // and userinfo never survives.
+      expect(hostOnlyRpcText(
+        '<a href="HTTPS://user:FAKEKEY123@rpc.example.invalid:8545/v2/FAKEKEY123">sign up</a>',
+      )).toBe('<a href="rpc.example.invalid:8545">sign up</a>');
+      expect(hostOnlyRpcText("see <wss://rpc.example.invalid/ws/FAKEKEY123> or 'https://docs.example.invalid/limits'"))
+        .toBe("see <rpc.example.invalid> or 'docs.example.invalid'");
+      // Nothing of a URL that cannot be parsed survives either.
+      expect(hostOnlyRpcText('https://[FAKEKEY123')).toBe('unparseable-rpc');
+    });
+
+    it('returns text without a URL unchanged', () => {
+      expect(hostOnlyRpcText('connect ECONNREFUSED 127.0.0.1:8545')).toBe('connect ECONNREFUSED 127.0.0.1:8545');
     });
   });
 

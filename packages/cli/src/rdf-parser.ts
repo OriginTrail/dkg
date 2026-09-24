@@ -1,4 +1,5 @@
 import { Parser, type Quad as N3Quad } from 'n3';
+import { formatCanonicalRdfTerm } from '@origintrail-official/dkg-rdf-utils';
 
 export interface SimpleQuad {
   subject: string;
@@ -84,23 +85,11 @@ export async function parseRdf(
       if (!quad) { resolve(quads); return; }
 
       quads.push({
-        subject: termToString(quad.subject),
-        predicate: termToString(quad.predicate),
-        object: termToString(quad.object),
-        graph: quad.graph.value ? termToString(quad.graph) : defaultGraph,
+        subject: formatCanonicalRdfTerm(quad.subject),
+        predicate: formatCanonicalRdfTerm(quad.predicate),
+        object: formatCanonicalRdfTerm(quad.object),
+        graph: quad.graph.value ? formatCanonicalRdfTerm(quad.graph) : defaultGraph,
       });
     });
   });
-}
-
-function termToString(term: { termType: string; value: string; language?: string; datatype?: { value: string } }): string {
-  if (term.termType === 'Literal') {
-    if (term.language) return `"${term.value}"@${term.language}`;
-    if (term.datatype && term.datatype.value !== 'http://www.w3.org/2001/XMLSchema#string') {
-      return `"${term.value}"^^<${term.datatype.value}>`;
-    }
-    return `"${term.value}"`;
-  }
-  if (term.termType === 'BlankNode') return `_:${term.value}`;
-  return term.value;
 }

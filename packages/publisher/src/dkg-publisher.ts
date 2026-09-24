@@ -38,7 +38,7 @@ import {
   splitTrustedGeneratedCatalogRootMap,
   trustedCatalogTripleKeySet,
 } from './catalog-trust.js';
-import { partitionCatalogQuads, catalogCommittedLeaves, computeCatalogRoot, contextGraphCatalogUri, isAgentRegistryContextGraph } from '@origintrail-official/dkg-core';
+import { partitionCatalogQuads, catalogCommittedLeaves, computeCatalogRoot, contextGraphCatalogUri, contextGraphOnChainIdBindingQuery, isAgentRegistryContextGraph } from '@origintrail-official/dkg-core';
 import { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 import { skolemize } from './skolemize.js';
 import {
@@ -1269,11 +1269,7 @@ export class DKGPublisher implements Publisher {
   }
 
   private async storedOnChainContextGraphId(contextGraphId: string): Promise<string | undefined> {
-    const ontologyGraph = contextGraphDataUri('ontology');
-    const contextGraphUri = contextGraphDataUri(contextGraphId);
-    const result = await this.store.query(
-      `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <https://dkg.network/ontology#ContextGraphOnChainId> ?id } } LIMIT 1`,
-    );
+    const result = await this.store.query(contextGraphOnChainIdBindingQuery(contextGraphId));
     if (result.type !== 'bindings' || result.bindings.length === 0) return undefined;
     return stripOptionalLiteral(result.bindings[0]?.['id'])?.trim();
   }
@@ -2316,12 +2312,10 @@ export class DKGPublisher implements Publisher {
       const regStatus = regResult.type === 'bindings' ? regResult.bindings[0]?.['status']?.replace(/^"|"$/g, '') : undefined;
 
       if (regStatus !== 'registered') {
-        // Fall back to checking for an OnChainId triple in ontology — chain-discovered
-        // CGs have this but may not have _meta.registrationStatus synced yet.
-        const ontologyGraph = contextGraphDataUri('ontology');
-        const onChainResult = await this.store.query(
-          `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${cgDataUri}> <https://dkg.network/ontology#ContextGraphOnChainId> ?id } } LIMIT 1`,
-        );
+        // Fall back to checking for a durable OnChainId binding (ontology for
+        // a public graph, `_meta` for a curated one) — chain-discovered CGs
+        // have this but may not have _meta.registrationStatus synced yet.
+        const onChainResult = await this.store.query(contextGraphOnChainIdBindingQuery(contextGraphId));
         const hasOnChainId = onChainResult.type === 'bindings' && onChainResult.bindings.length > 0;
 
         if (!hasOnChainId) {

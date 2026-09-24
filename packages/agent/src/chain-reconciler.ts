@@ -138,6 +138,7 @@ export interface ChainReconcilerDeps {
     onChainCgId: bigint,
     ordinal: number,
     headBlock: number | undefined,
+    context?: { readonly headOrdinal: number },
   ) => Promise<OrdinalOutcome>;
   /** Maximum ordinals attempted before yielding the global VM worker. */
   maxOrdinalsPerPass?: number;
@@ -402,7 +403,13 @@ export async function reconcileContextGraph(
             return;
           }
           const ordinal = ordinals[index]!;
-          const outcome = await deps.reconcileOrdinal(localCgId, onChainCgId, ordinal, headBlock);
+          const outcome = await deps.reconcileOrdinal(
+            localCgId,
+            onChainCgId,
+            ordinal,
+            headBlock,
+            { headOrdinal: head },
+          );
           processed += 1;
           if (deps.isTargetCurrent && !(await deps.isTargetCurrent(localCgId, onChainCgId))) {
             staleTarget = true;
