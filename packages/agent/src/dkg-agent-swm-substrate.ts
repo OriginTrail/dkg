@@ -414,40 +414,21 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     contextGraphId: string,
     options?: ContextGraphSubscribeOptions,
   ): ContextGraphSub {
-    const installed = this.adoptAndInstallContextGraphSubscription(contextGraphId, options);
-    // The row is installed, so the phonebook check sees the subscription it
-    // qualifies against. An Edge keeps no durable `agents` phonebook, so the
-    // curator tier of a public wallet-scoped graph cannot reach its owner's
-    // holders: ask for one bounded fetch. The request is O(1) and does its
-    // checks detached.
-    this.requestOnDemandAgentsPhonebook(installed.contextGraphId, 'subscribe');
-    return installed.subscription;
-  }
-
-  /**
-   * Subscribe without asking for the on-demand `agents` phonebook: alias
-   * adoption, then the install. Returns the id actually subscribed. A caller
-   * that subscribes for another reason (startup rehydration) asks for the
-   * phonebook itself, under its own trigger.
-   */
-  adoptAndInstallContextGraphSubscription(
-    this: DKGAgent,
-    contextGraphId: string,
-    options?: ContextGraphSubscribeOptions,
-  ): { contextGraphId: string; subscription: ContextGraphSub } {
     // A name hash this node already resolved (and holds no row for) is the
     // verified cleartext graph: never mint a second, empty identity for it.
     const adoptedCleartextId = this.resolveContextGraphIdAlias(contextGraphId);
-    if (adoptedCleartextId !== null) {
-      return this.adoptAndInstallContextGraphSubscription(adoptedCleartextId, options);
-    }
+    if (adoptedCleartextId !== null) return this.subscribeToContextGraph(adoptedCleartextId, options);
     // Subscribing the cleartext of a graph held only by its name hash moves
     // the subscription: nothing may keep running under the hash id.
     this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
-    return {
-      contextGraphId,
-      subscription: this.installContextGraphSubscription(contextGraphId, options),
-    };
+    const subscription = this.installContextGraphSubscription(contextGraphId, options);
+    // The row is installed, so the phonebook check sees the subscription it
+    // qualifies against. An Edge keeps no durable `agents` phonebook, so the
+    // curator tier of a public wallet-scoped graph cannot reach its owner's
+    // holders: ask for one bounded fetch. Startup rehydration subscribes
+    // through here too. The request is O(1) and does its checks detached.
+    this.requestOnDemandAgentsPhonebook(contextGraphId, 'subscribe');
+    return subscription;
   }
 
   /**

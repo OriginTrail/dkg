@@ -1457,7 +1457,7 @@ describe('private read authorization uses the on-chain participant roster', () =
       reason: 'test-chain-unavailable',
       metadataBootstrap: 'eligible',
     });
-    const subscribe = vi.spyOn(agent, 'adoptAndInstallContextGraphSubscription');
+    const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
 
     await agent.rehydrateContextGraphsFromDurableState();
 
@@ -1740,7 +1740,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     const local = await agent.registerAgent('Restart no-metadata member');
     localAgentAddress = local.agentAddress;
     await agent.markDefaultAgent(localAgentAddress);
-    const subscribe = vi.spyOn(agent, 'adoptAndInstallContextGraphSubscription');
+    const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
     const resume = vi.spyOn(agent, 'resumePendingJoinApprovalMetadata')
       .mockResolvedValue(undefined);
 
@@ -1810,7 +1810,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     const local = await agent.registerAgent('Revoked restart member');
     localAgentAddress = local.agentAddress;
     await agent.markDefaultAgent(localAgentAddress);
-    const subscribe = vi.spyOn(agent, 'adoptAndInstallContextGraphSubscription');
+    const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
     const resume = vi.spyOn(agent, 'resumePendingJoinApprovalMetadata')
       .mockResolvedValue(undefined);
 

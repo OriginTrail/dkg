@@ -36,8 +36,11 @@ import {
   type AutomaticSystemContextGraphSyncOptions,
 } from './system-context-graph-policy.js';
 
-/** What asked for the phonebook. A closed set: it is also a metric label. */
-export type AgentsPhonebookFetchTrigger = 'subscribe' | 'startup' | 'vm-reconcile';
+/**
+ * What asked for the phonebook. A closed set: it is also a metric label.
+ * `subscribe` includes startup rehydration, which re-subscribes saved graphs.
+ */
+export type AgentsPhonebookFetchTrigger = 'subscribe' | 'vm-reconcile';
 
 export type AgentsPhonebookAccessPolicy = 'public' | 'not-public' | 'unknown';
 

@@ -328,7 +328,7 @@ describe('metrics — bounded, low-cardinality attributes only', () => {
     m.contextGraphCatchupJobsTotal.add(1, { status: 'done', admission: 'walk' });
     m.contextGraphCatchupJobDurationMs.record(305_000, { admission: 'walk' });
 
-    // On-demand agents phonebook fetches: trigger {subscribe|startup|vm-reconcile},
+    // On-demand agents phonebook fetches: trigger {subscribe|vm-reconcile},
     // outcome {complete|partial|empty|failed|no-peers}, curator_resolved {true|false}.
     m.agentsPhonebookFetchTotal.add(1, {
       trigger: 'subscribe', outcome: 'complete', curator_resolved: 'true',

@@ -1311,7 +1311,7 @@ describe('Context Graph subscription authority retry', () => {
             metadataBootstrap: 'forbidden',
           } as const;
     });
-    const subscribe = vi.spyOn(agent, 'adoptAndInstallContextGraphSubscription');
+    const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
     const persistMembership = vi.spyOn(agent, 'persistLocalNodeMembership');
     vi.useFakeTimers();
 
@@ -1528,7 +1528,7 @@ describe('Context Graph subscription authority retry', () => {
           onChainId: 7n,
         } as const;
       });
-    const subscribe = vi.spyOn(agent, 'adoptAndInstallContextGraphSubscription');
+    const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
     const persistMembership = vi.spyOn(agent, 'persistLocalNodeMembership');
 
     await agent.start();

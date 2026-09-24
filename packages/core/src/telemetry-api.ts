@@ -345,7 +345,7 @@ export interface DkgMetrics {
   contextGraphCatchupJobsTotal: Counter;
   /** I9 — ms; walk jobs only, monotonic clock. admission={walk}. */
   contextGraphCatchupJobDurationMs: Histogram;
-  /** On-demand `agents` phonebook fetches. trigger={subscribe|startup|vm-reconcile},
+  /** On-demand `agents` phonebook fetches. trigger={subscribe|vm-reconcile},
    *  outcome={complete|partial|empty|failed|no-peers}, curator_resolved={true|false}. */
   agentsPhonebookFetchTotal: Counter;
   /** ms; on-demand `agents` phonebook fetches that reached a peer. trigger, outcome. */

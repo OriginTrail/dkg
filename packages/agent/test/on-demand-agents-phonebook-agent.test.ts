@@ -315,7 +315,8 @@ describe('on-demand agents phonebook on a fresh Edge', () => {
 
     await vi.waitFor(() => expect(edge.agentsFetches()).toHaveLength(1), { timeout: 5_000 });
     await vi.waitFor(() => expect(edge.fetchLogLines()).toHaveLength(1), { timeout: 5_000 });
-    expect(edge.fetchLogLines()[0]).toContain('trigger=startup');
+    // A restored subscription re-subscribes: the fetch is a subscribe.
+    expect(edge.fetchLogLines()[0]).toContain('trigger=subscribe');
     expect(edge.scheduling.triggerLive).toHaveBeenCalledWith(CG);
   });
 
