@@ -1,3 +1,4 @@
+import { spawn } from 'node:child_process';
 import { constants } from 'node:fs';
 import {
   access, chmod, chown, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink,
@@ -135,7 +136,8 @@ describe('replaceFileDurably', () => {
 
     await replaceFileDurably(target, 'new');
 
-    expect(events).toEqual([`chown ${owner.uid}:${owner.gid}`, 'chmod 640']);
+    // The mode stat reports: Windows keeps only a read-only flag.
+    expect(events).toEqual([`chown ${owner.uid}:${owner.gid}`, `chmod ${(actual.mode & 0o777).toString(8)}`]);
     expect(await readFile(target, 'utf-8')).toBe('new');
     expect((await stat(target)).ino).not.toBe(actual.ino);
   });
@@ -150,10 +152,10 @@ describe('replaceFileDurably', () => {
       handle.chown = async () => { throw fsError('EPERM'); };
     });
 
-    // A failed pre-commit check leaves even the in-place path untouched.
+    // A commit step that refuses to publish leaves even the in-place path untouched.
     vi.mocked(stat).mockImplementationOnce(anotherUser);
     await expect(replaceFileDurably(target, 'new', {
-      beforeCommit: async () => { throw new Error('lock lost'); },
+      commit: async () => { throw new Error('lock lost'); },
     })).rejects.toThrow('lock lost');
     expect(await readFile(target, 'utf-8')).toBe('old');
 
@@ -172,7 +174,7 @@ describe('replaceFileDurably', () => {
     // The same inode, so its owner, group, mode and any ACL stay as they were.
     const after = await stat(target);
     expect(after.ino).toBe(actual.ino);
-    expect(after.mode & 0o777).toBe(0o640);
+    expect(after.mode & 0o777).toBe(actual.mode & 0o777);
     expect(await readFile(target, 'utf-8')).toBe('new content');
     expect(syncs.mock.calls).toEqual([['config.json']]);
     expect(await readdir(dir)).toEqual(['config.json']);
@@ -381,20 +383,92 @@ describe('replaceFileDurably', () => {
     expect(await readFile(target, 'utf-8')).toBe('windows');
   });
 
-  it('leaves the file alone when the pre-commit check fails', async () => {
+  it('publishes through the commit step, once the content is synced', async () => {
+    await writeFile(target, 'old');
+    const events = recordSyncsAndRenames();
+
+    await replaceFileDurably(target, 'new', {
+      platform: 'win32',
+      commit: async (publish) => {
+        events.push('commit:start');
+        await publish();
+        events.push('commit:end');
+      },
+    });
+
+    expect(events).toEqual([
+      expect.stringMatching(/^sync \.config\.json\./), 'commit:start', expect.stringMatching(/ -> config\.json$/), 'commit:end',
+    ]);
+    expect(await readFile(target, 'utf-8')).toBe('new');
+  });
+
+  it('leaves the file alone when the commit step refuses to publish', async () => {
     await writeFile(target, 'old');
     const events = recordSyncsAndRenames();
 
     await expect(replaceFileDurably(target, 'new', {
-      beforeCommit: async () => {
+      commit: async () => {
         events.push('check');
         throw new Error('lock lost');
       },
     })).rejects.toThrow('lock lost');
 
-    // The check runs on content already synced, and nothing is renamed after it fails.
+    // The step runs on content already synced, and nothing is renamed when it refuses.
     expect(events).toEqual([expect.stringMatching(/^sync \.config\.json\./), 'check']);
     expect(await readFile(target, 'utf-8')).toBe('old');
+    expect(await readdir(dir)).toEqual(['config.json']);
+  });
+
+  it('gives the file the requested mode, over a looser original and without a looser moment when new', async () => {
+    await writeFile(target, 'old');
+    await chmod(target, 0o644);
+    const fresh = join(dir, 'fresh.json');
+
+    await replaceFileDurably(target, 'new', { mode: 0o600 });
+    await replaceFileDurably(fresh, 'new', { mode: 0o600 });
+
+    expect(await readFile(target, 'utf-8')).toBe('new');
+    // The new file's temp file is created owner-only, never with the umask default.
+    const freshTemps = vi.mocked(open).mock.calls.filter(([path]) => /\.fresh\.json\..+\.tmp$/.test(String(path)));
+    expect(freshTemps.map(([, flags, mode]) => [flags, mode])).toEqual([['wx', 0o600]]);
+    // Windows keeps only a read-only flag, not POSIX permission bits.
+    if (process.platform !== 'win32') {
+      expect((await stat(target)).mode & 0o777).toBe(0o600);
+      expect((await stat(fresh)).mode & 0o777).toBe(0o600);
+    }
+  });
+
+  // Antivirus or an editor can hold a file open without FILE_SHARE_DELETE,
+  // which makes Windows refuse a rename over it until the handle closes.
+  it('replaces a file Windows holds open without delete sharing once the handle closes', async () => {
+    if (process.platform !== 'win32') return;
+    await writeFile(target, 'old');
+    const holder = spawn('powershell.exe', [
+      '-NoProfile', '-Command',
+      `$f = [System.IO.File]::Open('${target}', 'Open', 'Read', 'Read'); [Console]::Out.WriteLine('held'); `
+      + '[Console]::In.ReadLine() | Out-Null; $f.Close()',
+    ], { stdio: ['pipe', 'pipe', 'inherit'] });
+    const exited = new Promise((resolve) => { holder.on('exit', resolve); });
+    await new Promise<void>((resolve, reject) => {
+      holder.on('error', reject);
+      holder.stdout.on('data', (chunk: Buffer) => { if (chunk.toString().includes('held')) resolve(); });
+    });
+    let refused = 0;
+    vi.mocked(rename).mockImplementation(async (from, to) => {
+      try {
+        await actualFs.rename(from, to);
+      } catch (error) {
+        // Release the handle once Windows has refused the rename.
+        if (refused++ === 0) holder.stdin.end('\n');
+        throw error;
+      }
+    });
+
+    await replaceFileDurably(target, 'new');
+    await exited;
+
+    expect(refused).toBeGreaterThan(0);
+    expect(await readFile(target, 'utf-8')).toBe('new');
     expect(await readdir(dir)).toEqual(['config.json']);
   });
 

@@ -11,7 +11,6 @@ import jsYaml from 'js-yaml';
 import { parseDocument, type Document } from 'yaml';
 import { hasErrorCode } from '@origintrail-official/dkg-core';
 import type { DkgConfig } from './config.js';
-import { replaceFileDurably } from './durable-file-replace.js';
 import { withFileLock } from './file-lock.js';
 
 /** Keys older releases wrote that the config type no longer declares; they are only ever removed. */
@@ -116,7 +115,7 @@ export async function updateHomeConfigFile<const K extends DkgConfigFileKey>(
     const content = source.format === 'yaml'
       ? patchYamlText(source.text, before, after)
       : `${JSON.stringify(after, null, 2)}\n`;
-    await replaceFileDurably(source.path, content, { beforeCommit: () => lock.assertHeld() });
+    await lock.replaceFile(source.path, content);
     return { path: source.path, changed: true };
   }, { timeoutMs: CONFIG_LOCK_TIMEOUT_MS, label: 'config' });
 }

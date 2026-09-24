@@ -15,11 +15,14 @@ export interface DurableReplaceOptions {
   /** Selects the Windows rename retry and directory-fsync skip; tests override it. */
   platform?: NodeJS.Platform;
   /**
-   * Runs once the new content is on disk, immediately before it replaces the
-   * file; if it throws, the file is left as it was. A lock holder uses it to
-   * confirm it still holds the lock.
+   * Runs `publish`, the step that makes the new content visible (the rename,
+   * or the in-place rewrite), once that content is on disk. A lock holder
+   * passes one that runs it only while it still holds the lock; if it throws
+   * without running it, the file is left as it was.
    */
-  beforeCommit?: () => Promise<void>;
+  commit?: (publish: () => Promise<void>) => Promise<void>;
+  /** Permission bits for the file, in place of the original's (or, for a new file, the umask default). */
+  mode?: number;
 }
 
 /**
@@ -29,8 +32,9 @@ export interface DurableReplaceOptions {
  * the target; the directory is fsynced last so the rename itself survives a
  * power loss.
  *
- * The replacement keeps the file's owner, group and permission bits: the temp
- * file starts owner-only and takes them before the rename makes it visible.
+ * The replacement keeps the file's owner, group and permission bits (or takes
+ * `mode`): the temp file starts owner-only and takes them before the rename
+ * makes it visible.
  * An ACL the directory passes on applies to it as to any new file, but one set
  * on the file itself cannot be read from Node and is not carried over. When
  * this process may not give the temp file the original's owner or group (it
@@ -110,21 +114,23 @@ async function replaceByRename(
   const platform = options.platform ?? process.platform;
   const directory = dirname(target);
   const temporary = join(directory, `.${basename(target)}.${process.pid}.${randomUUID()}.tmp`);
+  const mode = options.mode ?? (original ? original.mode & 0o7777 : undefined);
   let renamed = false;
   try {
-    const handle = await open(temporary, 'wx', original ? 0o600 : 0o666);
+    const handle = await open(temporary, 'wx', mode === undefined ? 0o666 : 0o600);
     try {
       if (original && !await takeOwnership(handle, original)) return false;
       await handle.writeFile(content, 'utf-8');
       // After the chown, which can clear set-id bits.
-      if (original) await handle.chmod(original.mode & 0o7777);
+      if (mode !== undefined) await handle.chmod(mode);
       await handle.sync();
     } finally {
       await handle.close();
     }
-    await options.beforeCommit?.();
-    await renameWithRetry(temporary, target, platform);
-    renamed = true;
+    await commit(options, async () => {
+      await renameWithRetry(temporary, target, platform);
+      renamed = true;
+    });
   } finally {
     if (!renamed) await unlink(temporary).catch(() => {});
   }
@@ -161,13 +167,19 @@ async function takeOwnership(handle: FileHandle, original: Stats): Promise<boole
 async function rewriteInPlace(target: string, content: string, options: DurableReplaceOptions): Promise<void> {
   const handle = await open(target, 'r+');
   try {
-    await options.beforeCommit?.();
-    await handle.truncate(0);
-    await handle.writeFile(content, 'utf-8');
-    await handle.sync();
+    await commit(options, async () => {
+      if (options.mode !== undefined) await handle.chmod(options.mode);
+      await handle.truncate(0);
+      await handle.writeFile(content, 'utf-8');
+      await handle.sync();
+    });
   } finally {
     await handle.close();
   }
+}
+
+async function commit(options: DurableReplaceOptions, publish: () => Promise<void>): Promise<void> {
+  await (options.commit ? options.commit(publish) : publish());
 }
 
 async function renameWithRetry(from: string, to: string, platform: NodeJS.Platform): Promise<void> {

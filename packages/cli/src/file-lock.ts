@@ -1,15 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { readlinkSync } from 'node:fs';
-import { open, readFile, stat, unlink, type FileHandle } from 'node:fs/promises';
+import { link, open, readFile, stat, unlink, type FileHandle } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { threadId } from 'node:worker_threads';
 import { hasErrorCode } from '@origintrail-official/dkg-core';
+import { replaceFileDurably, type DurableReplaceOptions } from './durable-file-replace.js';
 
 /**
  * How long a holder's lease lasts without renewal. A holder renews it several
  * times over while its callback runs, so a lock not renewed for this long was
  * abandoned (its pid was reused, or cannot be checked from here) or belongs to
- * a holder stalled for as long, which the pre-commit check then stops.
+ * a holder stalled for as long, which can then no longer commit.
  */
 const LOCK_STALE_MS = 60 * 1000;
 const LEASE_RENEWALS_PER_STALE_PERIOD = 6;
@@ -17,11 +18,15 @@ const LEASE_RENEWALS_PER_STALE_PERIOD = 6;
 const LOCK_WRITE_GRACE_MS = 5000;
 const LOCK_POLL_MS = 25;
 const DEFAULT_LOCK_TIMEOUT_MS = 1_000;
+/** The longest a holder waits for the guard to commit or release; it is held only across a check and one step. */
+const GUARD_TIMEOUT_MS = 10_000;
+/** What link() fails with on a filesystem without hard links. */
+const NO_HARD_LINK_CODES = ['EPERM', 'ENOTSUP', 'EOPNOTSUPP', 'ENOSYS'];
 
 /**
- * Tokens of the locks this thread holds. A lock naming this thread's pid with
- * any other token was left by an earlier process that had the same pid, as a
- * restarted container's pid 1 does.
+ * Tokens of the locks and guards this thread holds. One naming this thread's
+ * pid with any other token was left by an earlier process that had the same
+ * pid, as a restarted container's pid 1 does.
  */
 const heldTokens = new Set<string>();
 
@@ -54,14 +59,17 @@ export interface FileLockOptions {
   staleMs?: number;
 }
 
-/** The lock a `withFileLock` callback holds. */
+/** The lock a `withFileLock` callback holds; what it writes is published only while it still holds it. */
 export interface HeldFileLock {
   /**
-   * Throw unless the lock file still carries this holder's token. A holder
-   * that stalls past its lease can be taken over; checking immediately before
-   * committing its change keeps it from overwriting the new holder's.
+   * Run `publish`, the step that makes the callback's work visible (such as a
+   * rename), only if this holder still holds the lock, and with takeover held
+   * off until it returns. When a waiter took the lock over after this holder
+   * stalled past its lease, throws without running it.
    */
-  assertHeld(): Promise<void>;
+  commit<T>(publish: () => Promise<T>): Promise<T>;
+  /** Durably replace the file at `path` with `content`, publishing it through `commit`. */
+  replaceFile(path: string, content: string, options?: Omit<DurableReplaceOptions, 'commit'>): Promise<void>;
 }
 
 interface LockHolder {
@@ -84,10 +92,13 @@ type LockState = 'gone' | 'live' | 'stale';
  * while a live one keeps its lock however long it works. A lock from another
  * pid namespace is judged by its lease alone.
  *
- * A holder whose event loop or filesystem stalls for a whole lease can still
- * be taken over. `fn` receives the lock so that it can `assertHeld()` just
- * before it commits, and then stops instead of overwriting the new holder's
- * work. That check and the commit are two steps, not one atomic operation.
+ * A holder that stalls for a whole lease can be taken over, so `fn` publishes
+ * its work through the lock (`replaceFile`, or `commit` for any other step).
+ * Every step that removes the lock or publishes under it holds the guard, a
+ * second file at `<lockPath>.guard`: a waiter's takeover, a holder's release
+ * and a holder's commit. A takeover therefore cannot come between a holder's
+ * check that it still holds the lock and its commit, and a holder that was
+ * taken over throws instead of committing.
  */
 export async function withFileLock<T>(
   lockPath: string,
@@ -95,14 +106,19 @@ export async function withFileLock<T>(
   options: FileLockOptions = {},
 ): Promise<T> {
   const staleMs = options.staleMs ?? LOCK_STALE_MS;
-  const { handle, token } = await acquireLock(lockPath, options, staleMs);
+  const label = options.label ?? 'file';
+  const { handle, token } = await acquireLock(lockPath, label, options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS, staleMs);
   const lease = renewLease(handle, staleMs / LEASE_RENEWALS_PER_STALE_PERIOD);
+  const commit = <R>(publish: () => Promise<R>): Promise<R> => commitUnderGuard(lockPath, token, label, staleMs, publish);
   try {
-    return await fn({ assertHeld: () => assertHeld(lockPath, token, options.label) });
+    return await fn({
+      commit,
+      replaceFile: (path, content, replaceOptions) => replaceFileDurably(path, content, { ...replaceOptions, commit }),
+    });
   } finally {
     await lease.stop();
     await handle.close().catch(() => {});
-    await releaseLock(lockPath, token);
+    await releaseLock(lockPath, token, staleMs);
   }
 }
 
@@ -124,75 +140,117 @@ function renewLease(handle: FileHandle, intervalMs: number): { stop(): Promise<v
   };
 }
 
-async function assertHeld(lockPath: string, token: string, label: string | undefined): Promise<void> {
-  let raw = '';
-  try {
-    raw = await readFile(lockPath, 'utf-8');
-  } catch (error) {
-    if (!hasErrorCode(error, 'ENOENT')) throw error;
+async function commitUnderGuard<T>(
+  lockPath: string,
+  token: string,
+  label: string,
+  staleMs: number,
+  publish: () => Promise<T>,
+): Promise<T> {
+  const guard = await acquireGuard(lockPath, staleMs, Date.now() + guardTimeoutMs(staleMs));
+  if (guard === undefined) {
+    throw new Error(`Timed out waiting to commit under the ${label} lock: ${guardPath(lockPath)} is held`);
   }
-  if (parseHolder(raw)?.token !== token) {
-    throw new Error(
-      `Lost the ${label ?? 'file'} lock: ${lockPath} was taken over after this process stalled `
-      + 'for longer than its lease',
-    );
+  try {
+    if (!await holdsLock(lockPath, token)) {
+      throw new Error(
+        `Lost the ${label} lock: ${lockPath} was taken over after this process stalled for longer than its lease`,
+      );
+    }
+    return await publish();
+  } finally {
+    await releaseGuard(lockPath, guard);
   }
 }
 
 async function acquireLock(
   lockPath: string,
-  options: FileLockOptions,
+  label: string,
+  timeoutMs: number,
   staleMs: number,
 ): Promise<{ handle: FileHandle; token: string }> {
-  const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS);
+  const deadline = Date.now() + timeoutMs;
   for (;;) {
-    let handle: FileHandle;
-    try {
-      handle = await open(lockPath, 'wx', 0o600);
-    } catch (error) {
-      if (!hasErrorCode(error, 'EEXIST')) {
-        throw error;
-      }
-      const retryNow = await reapStaleLock(lockPath, staleMs);
-      if (Date.now() >= deadline) {
-        throw new Error(
-          `Timed out waiting for ${options.label ?? 'file'} lock: ${lockPath} `
-          + '(remove it if no DKG process is still running)',
-        );
-      }
-      if (!retryNow) await sleep(LOCK_POLL_MS);
-      continue;
-    }
     const token = randomUUID();
+    // Registered before the file exists, so this thread never mistakes it for a leftover.
     heldTokens.add(token);
+    let handle: FileHandle | undefined;
     try {
-      await handle.writeFile(JSON.stringify({
-        pid: process.pid,
-        pidNamespace: pidNamespace(),
-        threadId,
-        token,
-        createdAt: Date.now(),
-      }));
-      return { handle, token };
-    } catch (error) {
-      // Without its holder record the lock would stand until it aged out.
-      await handle.close().catch(() => {});
-      await unlink(lockPath).catch(() => {});
-      heldTokens.delete(token);
-      throw error;
+      handle = await createHeldFile(lockPath, token);
+    } finally {
+      if (!handle) heldTokens.delete(token);
     }
+    if (handle) return { handle, token };
+    const retryNow = await reapStaleLock(lockPath, staleMs);
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Timed out waiting for ${label} lock: ${lockPath} `
+        + `(remove it, and ${guardPath(lockPath)} if present, if no DKG process is still running)`,
+      );
+    }
+    if (!retryNow) await sleep(LOCK_POLL_MS);
   }
 }
 
 /**
- * Remove the lock only while it still carries this holder's token: a waiter
- * may have taken over a lock whose lease lapsed. A lock left behind because
- * the removal failed is abandoned: this thread recognises it at once and
- * other processes once its lease lapses.
+ * Create `path` holding this thread's holder record for `token`, returning a
+ * handle to it, or undefined if the path is taken. The record is written to a
+ * staging file that is then hard-linked into place, so the file never appears
+ * without it. Where the filesystem has no hard links, the file is created
+ * exclusively and then written, and can briefly appear empty.
  */
-async function releaseLock(lockPath: string, token: string): Promise<void> {
+async function createHeldFile(path: string, token: string): Promise<FileHandle | undefined> {
+  const record = holderRecord(token);
+  const stagingPath = `${path}.${token}.tmp`;
+  const staging = await open(stagingPath, 'wx', 0o600);
+  let placed = false;
   try {
-    if (parseHolder(await readFile(lockPath, 'utf-8'))?.token === token) await unlink(lockPath);
+    await staging.writeFile(record);
+    await link(stagingPath, path);
+    placed = true;
+    return staging;
+  } catch (error) {
+    if (hasErrorCode(error, 'EEXIST')) return undefined;
+    if (!NO_HARD_LINK_CODES.some((code) => hasErrorCode(error, code))) throw error;
+  } finally {
+    if (!placed) await staging.close().catch(() => {});
+    await unlink(stagingPath).catch(() => {});
+  }
+  const handle = await open(path, 'wx', 0o600).catch((error: unknown) => {
+    if (hasErrorCode(error, 'EEXIST')) return undefined;
+    throw error;
+  });
+  if (!handle) return undefined;
+  try {
+    await handle.writeFile(record);
+    return handle;
+  } catch (error) {
+    // Without its record the file would stand until it looked abandoned.
+    await handle.close().catch(() => {});
+    await unlink(path).catch(() => {});
+    throw error;
+  }
+}
+
+function holderRecord(token: string): string {
+  return JSON.stringify({ pid: process.pid, pidNamespace: pidNamespace(), threadId, token, createdAt: Date.now() });
+}
+
+/**
+ * Remove the lock, under the guard, only while it still carries this holder's
+ * token: a waiter may have taken over a lock whose lease lapsed. A lock left
+ * behind because the guard stayed taken or the removal failed is abandoned:
+ * this thread recognises it at once and other processes once its lease lapses.
+ */
+async function releaseLock(lockPath: string, token: string, staleMs: number): Promise<void> {
+  try {
+    const guard = await acquireGuard(lockPath, staleMs, Date.now() + guardTimeoutMs(staleMs));
+    if (guard === undefined) return;
+    try {
+      if (await holdsLock(lockPath, token)) await unlink(lockPath);
+    } finally {
+      await releaseGuard(lockPath, guard);
+    }
   } catch {
     // Recovered as abandoned, as described above.
   } finally {
@@ -200,30 +258,30 @@ async function releaseLock(lockPath: string, token: string): Promise<void> {
   }
 }
 
+async function holdsLock(lockPath: string, token: string): Promise<boolean> {
+  try {
+    return parseHolder(await readFile(lockPath, 'utf-8'))?.token === token;
+  } catch (error) {
+    if (hasErrorCode(error, 'ENOENT')) return false;
+    throw error;
+  }
+}
+
 /**
  * Decide whether to retry at once (the lock is gone, or was stale and has been
- * removed) or to wait. Several waiters can find the same stale lock: only the
- * one holding the reaper lock removes it, and only after finding it still
- * stale, so no waiter can delete a lock that another waiter has just taken. A
- * lock that disappears while it is being inspected was released, and is
- * retried without deleting anything. A holder stalled past its lease can still
- * release its own lock between that check and the removal; a lock taken in
- * that gap is then removed, and its holder's pre-commit check fails.
+ * removed) or to wait. The lock is removed only under the guard, after finding
+ * it still stale, so a takeover can neither remove a lock another waiter has
+ * just taken nor come between a holder's final check and its commit. A lock
+ * that disappears while it is being inspected was released, and is retried
+ * without deleting anything.
  */
 async function reapStaleLock(lockPath: string, staleMs: number): Promise<boolean> {
-  const state = await inspectLock(lockPath, staleMs);
+  const state = await inspectHolder(lockPath, staleMs, 'lock');
   if (state !== 'stale') return state === 'gone';
-  const reaperPath = `${lockPath}.reap`;
-  let reaper: FileHandle;
+  const guard = await acquireGuard(lockPath, staleMs, Date.now());
+  if (guard === undefined) return false;
   try {
-    reaper = await open(reaperPath, 'wx', 0o600);
-  } catch (error) {
-    if (!hasErrorCode(error, 'EEXIST')) throw error;
-    await clearAbandonedReaper(reaperPath);
-    return false;
-  }
-  try {
-    const current = await inspectLock(lockPath, staleMs);
+    const current = await inspectHolder(lockPath, staleMs, 'lock');
     if (current !== 'stale') return current === 'gone';
     await unlink(lockPath);
     return true;
@@ -231,36 +289,91 @@ async function reapStaleLock(lockPath: string, staleMs: number): Promise<boolean
     // Wait rather than spin on a stale lock that cannot be removed.
     return hasErrorCode(error, 'ENOENT');
   } finally {
-    await reaper.close().catch(() => {});
-    await unlink(reaperPath).catch(() => {});
+    await releaseGuard(lockPath, guard);
+  }
+}
+
+function guardPath(lockPath: string): string {
+  return `${lockPath}.guard`;
+}
+
+/** A guard is only ever held across a check and one step, so waiting longer than a lease for one is pointless. */
+function guardTimeoutMs(staleMs: number): number {
+  return Math.min(GUARD_TIMEOUT_MS, staleMs);
+}
+
+/**
+ * Take the guard, returning its token, or undefined once `deadline` passes.
+ * A guard is taken over only when its holder has died, or, recorded in
+ * another pid namespace where that cannot be checked, once it is as old as a
+ * lapsed lease. Clearing a guard whose holder died is not itself serialized,
+ * but it needs a holder to die inside a step that takes microseconds.
+ */
+async function acquireGuard(lockPath: string, staleMs: number, deadline: number): Promise<string | undefined> {
+  const path = guardPath(lockPath);
+  for (;;) {
+    const token = randomUUID();
+    heldTokens.add(token);
+    let handle: FileHandle | undefined;
+    try {
+      handle = await createHeldFile(path, token);
+    } finally {
+      if (!handle) heldTokens.delete(token);
+    }
+    if (handle) {
+      await handle.close().catch(() => {});
+      return token;
+    }
+    if (await clearStaleGuard(path, staleMs)) continue;
+    if (Date.now() >= deadline) return undefined;
+    await sleep(LOCK_POLL_MS);
+  }
+}
+
+async function releaseGuard(lockPath: string, token: string): Promise<void> {
+  const path = guardPath(lockPath);
+  try {
+    if (parseHolder(await readFile(path, 'utf-8'))?.token === token) await unlink(path);
+  } catch {
+    // A guard left behind is cleared once it is found stale.
+  } finally {
+    heldTokens.delete(token);
+  }
+}
+
+async function clearStaleGuard(path: string, staleMs: number): Promise<boolean> {
+  const state = await inspectHolder(path, staleMs, 'guard');
+  if (state !== 'stale') return state === 'gone';
+  try {
+    await unlink(path);
+    return true;
+  } catch (error) {
+    return hasErrorCode(error, 'ENOENT');
   }
 }
 
 /**
- * A reaper holds its lock only to re-check and remove one file. One left by a
- * waiter that crashed doing so is removed once it is LOCK_WRITE_GRACE_MS old.
+ * Whether the holder recorded in a lock or guard file still holds it. Both are
+ * given up when their holder is gone. A lock is also given up once its lease
+ * lapses; a guard, never taken from a live holder, only when it was recorded
+ * in another pid namespace (whose pids cannot be checked) and is that old.
  */
-async function clearAbandonedReaper(reaperPath: string): Promise<void> {
-  const st = await stat(reaperPath).catch(() => null);
-  if (st && Date.now() - st.mtimeMs >= LOCK_WRITE_GRACE_MS) await unlink(reaperPath).catch(() => {});
-}
-
-async function inspectLock(lockPath: string, staleMs: number): Promise<LockState> {
+async function inspectHolder(path: string, staleMs: number, kind: 'lock' | 'guard'): Promise<LockState> {
   let raw: string;
   try {
-    raw = await readFile(lockPath, 'utf-8');
+    raw = await readFile(path, 'utf-8');
   } catch (error) {
     if (hasErrorCode(error, 'ENOENT')) return 'gone';
     raw = '';
   }
-  // The lease is read after the record: a lock replaced in between then looks
+  // The age is read after the record: a file replaced in between then looks
   // freshly renewed, never lapsed.
-  const st = await stat(lockPath).catch(() => null);
+  const st = await stat(path).catch(() => null);
   if (!st) return 'gone';
   const idleMs = Date.now() - st.mtimeMs;
   const holder = parseHolder(raw);
   if (!holder) {
-    // Empty or partial metadata: the lock was just created and its holder is
+    // Empty or partial metadata: the file was just created and its holder is
     // still writing it, unless that was a while ago.
     return idleMs < LOCK_WRITE_GRACE_MS ? 'live' : 'stale';
   }
@@ -275,7 +388,7 @@ async function inspectLock(lockPath: string, staleMs: number): Promise<LockState
     return heldTokens.has(String(holder.token)) ? 'live' : 'stale';
   }
   if (!isProcessRunning(pid)) return 'stale';
-  return lapsed ? 'stale' : 'live';
+  return kind === 'lock' && lapsed ? 'stale' : 'live';
 }
 
 function parseHolder(raw: string): LockHolder | undefined {

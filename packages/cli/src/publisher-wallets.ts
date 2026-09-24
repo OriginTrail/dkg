@@ -1,7 +1,7 @@
 import { ethers } from 'ethers';
-import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { withFileLock } from './file-lock.js';
+import { withFileLock, type HeldFileLock } from './file-lock.js';
 
 export interface PublisherWalletsConfig {
   wallets: Array<{
@@ -29,7 +29,7 @@ export async function loadPublisherWallets(dataDir: string): Promise<PublisherWa
 }
 
 export async function addPublisherWallet(dataDir: string, privateKey: string): Promise<PublisherWalletsConfig> {
-  return withPublisherWalletLock(dataDir, async () => {
+  return withPublisherWalletLock(dataDir, async (lock) => {
     const normalizedKey = privateKey.trim();
     const wallet = new ethers.Wallet(normalizedKey);
     const existing = await loadPublisherWallets(dataDir);
@@ -40,13 +40,13 @@ export async function addPublisherWallet(dataDir: string, privateKey: string): P
     const config: PublisherWalletsConfig = {
       wallets: [...existing.wallets, { address: wallet.address, privateKey: wallet.privateKey }],
     };
-    await savePublisherWallets(dataDir, config);
+    await savePublisherWallets(lock, dataDir, config);
     return config;
   });
 }
 
 export async function removePublisherWallet(dataDir: string, address: string): Promise<PublisherWalletsConfig> {
-  return withPublisherWalletLock(dataDir, async () => {
+  return withPublisherWalletLock(dataDir, async (lock) => {
     const normalized = address.trim().toLowerCase();
     const existing = await loadPublisherWallets(dataDir);
     const next = existing.wallets.filter((entry) => entry.address.toLowerCase() !== normalized);
@@ -54,19 +54,18 @@ export async function removePublisherWallet(dataDir: string, address: string): P
       throw new Error(`Publisher wallet not found: ${address}`);
     }
     const config: PublisherWalletsConfig = { wallets: next };
-    await savePublisherWallets(dataDir, config);
+    await savePublisherWallets(lock, dataDir, config);
     return config;
   });
 }
 
-async function savePublisherWallets(dataDir: string, config: PublisherWalletsConfig): Promise<void> {
-  await mkdir(dataDir, { recursive: true });
-  const filePath = publisherWalletsPath(dataDir);
-  const tempPath = `${filePath}.tmp-${process.pid}-${Date.now()}`;
-  await writeFile(tempPath, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
-  await chmod(tempPath, 0o600);
-  await rename(tempPath, filePath);
-  await chmod(filePath, 0o600);
+/**
+ * Replace the wallets file through the lock, so a writer that was taken over
+ * after stalling past its lease cannot overwrite its successor's change. The
+ * file holds private keys: it is owner-only however it was found.
+ */
+async function savePublisherWallets(lock: HeldFileLock, dataDir: string, config: PublisherWalletsConfig): Promise<void> {
+  await lock.replaceFile(publisherWalletsPath(dataDir), `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 }
 
 function validatePublisherWallets(config: PublisherWalletsConfig): PublisherWalletsConfig {
@@ -80,7 +79,7 @@ function validatePublisherWallets(config: PublisherWalletsConfig): PublisherWall
   return { wallets };
 }
 
-async function withPublisherWalletLock<T>(dataDir: string, fn: () => Promise<T>): Promise<T> {
+async function withPublisherWalletLock<T>(dataDir: string, fn: (lock: HeldFileLock) => Promise<T>): Promise<T> {
   await mkdir(dataDir, { recursive: true });
   return withFileLock(`${publisherWalletsPath(dataDir)}.lock`, fn, { label: 'publisher wallet' });
 }

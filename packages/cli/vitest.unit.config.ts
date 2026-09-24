@@ -45,6 +45,7 @@ export default defineConfig({
           'test/daemon-config-persistence.test.ts',
           'test/durable-file-replace.test.ts',
           'test/file-lock.test.ts',
+          'test/publisher-wallets-lock.test.ts',
           'test/status-route-rpc.test.ts',
           'test/backpressure-route.test.ts',
       'test/status-route-store-quads.test.ts',
