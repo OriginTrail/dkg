@@ -2,10 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   assertSafeIri,
   assertSafeRdfTerm,
-  isAbsoluteIriTerm,
-  isSafeBlankNodeLabel,
   isSafeIri,
-  isSafeLiteralTerm,
   sparqlIri,
   escapeSparqlLiteral,
   sparqlString,
@@ -63,77 +60,6 @@ describe('assertSafeIri', () => {
     expect(() => assertSafeIri('http://x\ry')).toThrow();
     expect(() => assertSafeIri('http://x\ty')).toThrow();
   });
-});
-
-describe('isAbsoluteIriTerm', () => {
-  it.each(['urn:x', '<urn:x>', 'https://ex.org/a?b=1#c', '<did:dkg:context-graph:0xabc/cg>', 'https://ex.org/café'])(
-    'accepts %s',
-    (term) => {
-      expect(isAbsoluteIriTerm(term)).toBe(true);
-    },
-  );
-
-  it.each(['', '<>', '<', 'foo', '<foo>', '<urn:x', 'urn:x>', 'urn:a b', '<urn:a b>', ' urn:x', '_:b0', '"urn:x"'])(
-    'rejects %j',
-    (term) => {
-      expect(isAbsoluteIriTerm(term)).toBe(false);
-    },
-  );
-});
-
-describe('isSafeLiteralTerm', () => {
-  it.each([
-    '""',
-    '"plain"',
-    '"with \\"escaped\\" quotes \\\\ and \\n escapes"',
-    '"raw\ttab"',
-    '"hallo"@de-CH-1996',
-    '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
-    '"42"^^http://www.w3.org/2001/XMLSchema#integer',
-    '"\\u00E9 and \\U0001F600"',
-  ])('accepts %s', (term) => {
-    expect(isSafeLiteralTerm(term)).toBe(true);
-  });
-
-  it('accepts raw control characters other than line breaks, as N-Quads and SPARQL do', () => {
-    expect(isSafeLiteralTerm('"form\ffeed and \u001B[31mansi\u001B[0m"')).toBe(true);
-  });
-
-  it.each([
-    '"',
-    '"unterminated',
-    '"raw\nnewline"',
-    '"raw\rreturn"',
-    '"bad \\x escape"',
-    '"x" .\n<urn:dkg:file:deadbeef> <http://dkg.io/ontology/trustLevel> "y"',
-    '"x"@',
-    '"x"^^<urn:dt with space>',
-    '"x"^^urn:dt with space',
-    '"42"^^<integer>',
-    '"42"^^integer',
-    '"42"^^<#integer>',
-    '"\\uD800"',
-    'plain',
-    '<urn:x>',
-  ])('rejects %j', (term) => {
-    expect(isSafeLiteralTerm(term)).toBe(false);
-  });
-});
-
-describe('isSafeBlankNodeLabel', () => {
-  it.each(['_:b0', '_:0', '_:7f3a9c0e5d', '_:c14n0', '_:n3-0', '_:a.b', '_:genid_1', '_:é', '_:x·y'])(
-    'accepts %s',
-    (label) => {
-      expect(isSafeBlankNodeLabel(label)).toBe(true);
-    },
-  );
-
-  it.each(['', '_:', '_:b.', '_:a b', '_:-b', '_:b\n', '_:b>', 'b0', '<_:b0>', 'urn:b0'])(
-    'rejects %j',
-    (label) => {
-      expect(isSafeBlankNodeLabel(label)).toBe(false);
-    },
-  );
 });
 
 describe('isSafeIri', () => {

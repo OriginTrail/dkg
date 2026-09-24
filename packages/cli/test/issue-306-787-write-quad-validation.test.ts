@@ -153,14 +153,18 @@ describe('malformed or padded TERM is 400 on both KA write routes', () => {
     ['relative subject', { subject: 'not-an-iri' }, 'subject', 'relative'],
     ['invalid blank-node label', { subject: '_:a b' }, 'subject', 'bnode'],
     ['whitespace-padded subject', { subject: ' urn:wq:padded' }, 'subject', 'padded-subject'],
+    ['subject with a malformed percent escape', { subject: 'https://example.org/%zz' }, 'subject', 'pct-subject'],
     ['predicate with a caret (formerly stored as …/name)', { predicate: 'http://schema.org/na^me' }, 'predicate', 'caret'],
+    ['predicate with a malformed authority', { predicate: 'http://user@@example.org/p' }, 'predicate', 'authority'],
     ['blank-node predicate', { predicate: '_:p' }, 'predicate', 'bnode-predicate'],
     ['malformed object IRI', { object: 'https://example.org/o^1' }, 'object', 'object-caret'],
+    ['object IRI with a non-numeric port', { object: 'http://example.org:bad/' }, 'object', 'object-port'],
     ['whitespace-padded blank-node object', { object: ' _:b0 ' }, 'object', 'padded-bnode'],
     ['whitespace-padded bracketed object', { object: ' <urn:wq:o> ' }, 'object', 'padded-bracketed'],
     ['unterminated literal object', { object: '"unterminated' }, 'object', 'unterminated'],
     ['literal with a relative bracketed datatype', { object: '"42"^^<integer>' }, 'object', 'relative-datatype'],
     ['literal with a relative bare datatype', { object: '"42"^^integer' }, 'object', 'relative-bare-datatype'],
+    ['literal with a malformed datatype IRI', { object: '"42"^^<https://example.org/%zz>' }, 'object', 'pct-datatype'],
     [
       'literal object that would add its own statement',
       { object: '"x" .\n<urn:dkg:file:deadbeef> <http://dkg.io/ontology/trustLevel> "0x7f"' },
@@ -168,6 +172,7 @@ describe('malformed or padded TERM is 400 on both KA write routes', () => {
       'injected',
     ],
     ['graph with a caret', { graph: 'urn:wq:g^1' }, 'graph', 'graph-caret'],
+    ['graph with a malformed percent escape', { graph: 'https://example.org/%zz' }, 'graph', 'pct-graph'],
   ];
   const kaExists = async (name: string) =>
     (await getJson(daemon!, `/api/knowledge-assets/${name}?contextGraphId=${encodeURIComponent(CG)}`)).status !== 404;
@@ -231,6 +236,27 @@ describe('malformed or padded TERM is 400 on both KA write routes', () => {
       contextGraphId: CG, quads,
     });
     expect(appended.status, JSON.stringify(appended.body)).toBe(200);
+  });
+
+  it('accepts an empty-path IRI such as a: on a sealed create and on wm/write', async () => {
+    // RFC 3987 allows an empty path, and the store keeps <a:> as sent.
+    const quads = [termQuad({ subject: 'a:', object: '<a:>' })];
+    const sealed = await postJson(daemon!, '/api/knowledge-assets', {
+      contextGraphId: CG, name: 'ka-term-empty-path', quads,
+    });
+    expect(sealed.status, JSON.stringify(sealed.body)).toBeLessThan(300);
+    expect(sealed.body.status).toBe('wm-sealed');
+    const { status, body } = await getJson(
+      daemon!,
+      `/api/knowledge-assets/ka-term-empty-path/wm/quads?contextGraphId=${encodeURIComponent(CG)}`,
+    );
+    expect(status, JSON.stringify(body)).toBe(200);
+    expect(body.quads).toEqual([expect.objectContaining({ subject: 'a:', object: 'a:' })]);
+
+    const written = await postJson(daemon!, '/api/knowledge-assets/ka-term-empty-path-wm/wm/write', {
+      contextGraphId: CG, quads,
+    });
+    expect(written.status, JSON.stringify(written.body)).toBe(200);
   });
 
   it('seals a create carrying blank nodes, as the MCP one-shot create does', async () => {

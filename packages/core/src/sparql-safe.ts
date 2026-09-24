@@ -15,8 +15,6 @@
  *   Use `sparqlInt`.
  */
 
-import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
-
 const UNSAFE_IRI_CHARS = /[<>"{}|\\^`\x00-\x20]/;
 
 const IRI_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`\x00-\x20]+$/;
@@ -41,36 +39,6 @@ export function assertSafeIri(value: string): string {
 export function isSafeIri(value: string): boolean {
   if (!value) return false;
   return IRI_SCHEME_RE.test(value);
-}
-
-/**
- * Returns true for an IRI term with a scheme, bare or in angle brackets
- * (`urn:x`, `<urn:x>`), under the character rules of {@link isSafeIri}.
- * Unlike the IRI branch of {@link assertSafeRdfTerm}, this requires a scheme
- * and also accepts the bare form.
- */
-export function isAbsoluteIriTerm(value: string): boolean {
-  return isSafeIri(value.startsWith('<') && value.endsWith('>') ? value.slice(1, -1) : value);
-}
-
-// SPARQL 1.1 BLANK_NODE_LABEL, which N-Triples and N-Quads share.
-const PN_CHARS_BASE =
-  'A-Za-z\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF' +
-  '\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF' +
-  '\\uFDF0-\\uFFFD\\u{10000}-\\u{EFFFF}';
-const PN_CHARS_U = `${PN_CHARS_BASE}_`;
-const PN_CHARS = `${PN_CHARS_U}\\-0-9\\u00B7\\u0300-\\u036F\\u203F-\\u2040`;
-const BLANK_NODE_LABEL_RE = new RegExp(
-  `^_:[${PN_CHARS_U}0-9](?:[${PN_CHARS}.]*[${PN_CHARS}])?$`,
-  'u',
-);
-
-/**
- * Returns true when the string is a blank-node label (`_:b0`) that SPARQL and
- * N-Quads accept verbatim.
- */
-export function isSafeBlankNodeLabel(value: string): boolean {
-  return BLANK_NODE_LABEL_RE.test(value);
 }
 
 /**
@@ -134,20 +102,6 @@ export function assertSafeRdfTerm(value: string): void {
   if (SAFE_RDF_LITERAL.test(value)) return;
   if (SAFE_RDF_IRI_TERM.test(value)) return;
   throw new Error(`Unsafe RDF term for CAS condition: ${value.slice(0, 80)}`);
-}
-
-/**
- * Returns true for a quoted literal term that SPARQL and N-Quads accept
- * verbatim, parsed by the rdf-utils literal parser in its writable mode: plain,
- * language-tagged, or typed with an absolute datatype IRI, bracketed or in the
- * legacy bare form. Raw control characters other than line breaks are allowed,
- * as both grammars allow them. A raw line break, a stray or missing quote, a
- * malformed or surrogate escape, or a relative datatype such as `<integer>`
- * fails.
- */
-export function isSafeLiteralTerm(value: string): boolean {
-  const literal = parseRdfLiteralTerm(value, { writable: true });
-  return literal !== null && (literal.kind !== 'typed' || isSafeIri(literal.datatype));
 }
 
 export function sparqlInt(

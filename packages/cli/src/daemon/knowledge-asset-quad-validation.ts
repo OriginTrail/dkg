@@ -4,15 +4,12 @@
 // `validateWritableQuads` before any create or write.
 
 import {
-  isAbsoluteIriTerm,
-  isSafeBlankNodeLabel,
-  isSafeIri,
-  isSafeLiteralTerm,
-} from '@origintrail-official/dkg-core';
+  isAbsoluteRfc3987IriV1,
+  parseWritableRdfTerm,
+} from '@origintrail-official/dkg-rdf-utils';
 import {
   WRITABLE_QUAD_TERMS,
   type KnowledgeAssetWritableQuad,
-  type WritableTermKind,
 } from '../knowledge-asset-write-contract.js';
 import { validateWritableQuadLiteralSizes } from './http-utils.js';
 
@@ -35,24 +32,16 @@ export function isWritableQuad(value: unknown): value is KnowledgeAssetWritableQ
   );
 }
 
-/** Classify a term exactly as written: no trimming, since nothing downstream trims. */
-function writableTermKind(term: string): WritableTermKind | null {
-  if (isSafeLiteralTerm(term)) return 'literal';
-  if (isSafeBlankNodeLabel(term)) return 'blank-node';
-  if (isAbsoluteIriTerm(term)) return 'iri';
-  return null;
-}
-
 /**
  * GH #306 / #787 — the boundary check for quads a lifecycle write route stores
- * (create and wm/write): shape, then every term against
- * {@link WRITABLE_QUAD_TERMS} and an optional bare graph IRI, then literal
- * size. A string-shaped quad, a bare word, an unterminated literal or a
- * malformed IRI such as `urn:a b` or `…/na^me` would otherwise reach the store,
- * which either fails the write (HTTP 500), or, for characters it strips,
- * stores the triple under a different IRI. A literal carrying a raw line break
- * could even add statements of its own. Returns the 400 body for the first
- * failure, or null.
+ * (create and wm/write): shape, then every term, parsed exactly as sent by
+ * rdf-utils' `parseWritableRdfTerm`, against {@link WRITABLE_QUAD_TERMS}, and an
+ * optional bare graph IRI, then literal size. A string-shaped quad, a bare
+ * word, an unterminated literal or a malformed IRI such as `urn:a b`,
+ * `…/na^me` or `…/%zz` would otherwise reach the store. The store either fails
+ * the write (HTTP 500), or, for characters it strips, stores the triple under
+ * a different IRI. A literal carrying a raw line break could even add
+ * statements of its own. Returns the 400 body for the first failure, or null.
  */
 export function validateWritableQuads(
   label: string,
@@ -66,13 +55,13 @@ export function validateWritableQuads(
   for (const [index, quad] of quads.entries()) {
     for (const field of ['subject', 'predicate', 'object'] as const) {
       const rule = WRITABLE_QUAD_TERMS[field];
-      const kind = writableTermKind(quad[field]);
-      if (kind === null || !rule.accepts.includes(kind)) {
+      const term = parseWritableRdfTerm(quad[field]);
+      if (term === null || !rule.accepts.includes(term.kind)) {
         return { error: `Invalid "${label}[${index}].${field}": RDF ${field} must be ${rule.expected}` };
       }
     }
     // The publisher writes a supplied graph as a bare IRI; empty means none.
-    if (quad.graph !== undefined && quad.graph !== '' && !isSafeIri(quad.graph)) {
+    if (quad.graph !== undefined && quad.graph !== '' && !isAbsoluteRfc3987IriV1(quad.graph)) {
       return { error: `Invalid "${label}[${index}].graph": RDF graph must be an absolute IRI` };
     }
   }

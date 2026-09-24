@@ -30,6 +30,9 @@ All notable changes to the DKG V10 node are documented here. The format is based
     node;
   - a supplied `graph` must be a bare absolute IRI.
 
+  IRIs, including datatypes and the graph, are checked against RFC 3987, as
+  the store's own IRI parser does: `a:` is accepted, while a malformed percent
+  escape, authority or port gets a 400 instead of a store error.
   Angle-bracketed IRIs count as IRIs, and whitespace-padded terms are
   rejected. A literal must be complete: an unterminated one, or one carrying a
   raw line break, is rejected. Such a literal could previously add statements
