@@ -16,6 +16,7 @@ import { PeerSyncSession } from './sync/peer-sync-session.js';
 import { ACKCapabilityRegistry } from './p2p/ack-capability.js';
 import { ACKCandidateDiscoveryCoordinator } from './p2p/ack-candidate-discovery.js';
 import type { StorageACKEndpoint } from './p2p/storage-ack-endpoint.js';
+import { LocalStorageACKTransport } from './p2p/local-storage-ack-transport.js';
 import {
   openRfc64PersistenceV1,
   type Rfc64PersistenceV1,
@@ -1720,6 +1721,7 @@ export class DKGAgentBase {
   protected readonly peerHealth = new Map<string, PeerHealth>();
   protected readonly ackCapabilityRegistry = new ACKCapabilityRegistry();
   protected readonly ackCandidateDiscovery = new ACKCandidateDiscoveryCoordinator(this.ackCapabilityRegistry);
+  protected localStorageACKTransport = new LocalStorageACKTransport();
   protected get knownCorePeerIds(): ReadonlySet<string> {
     return this.ackCapabilityRegistry.knownCorePeerIds;
   }

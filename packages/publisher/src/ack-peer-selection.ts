@@ -9,6 +9,8 @@ export type ACKCapabilitySelectionPolicy =
 
 export interface ACKCandidatePeerSelectionInput {
   connectedPeers: readonly string[];
+  /** The publishing core is eligible only while its local ACK endpoint is registered. */
+  localCandidate?: { peerId: string; available: boolean };
   /** Legacy eligibility allowlist. When set, unlisted connected peers are not ACK candidates. */
   ackCandidatePeerIds?: readonly string[];
   /** Preference-only ranking list. Listed peers are ordered first within each tier but never gate eligibility. */
@@ -85,11 +87,12 @@ function capabilityViews(capability: ACKCapabilitySelectionPolicy | undefined, p
 
 export function selectACKCandidateUniverse(input: Pick<
   ACKCandidatePeerSelectionInput,
-  'connectedPeers' | 'ackCandidatePeerIds' | 'selfPeerId'
+  'connectedPeers' | 'ackCandidatePeerIds' | 'selfPeerId' | 'localCandidate'
   | 'capability' | 'knownCorePeerIds' | 'knownCorePeerIdsV2'
 >): string[] {
+  const selfPeerId = input.localCandidate?.peerId ?? input.selfPeerId;
   const connected = [...new Set(input.connectedPeers)]
-    .filter((id) => id !== input.selfPeerId);
+    .filter((id) => id !== selfPeerId);
   const allowlistedACKPeers = normalizePeerIdSet(input.ackCandidatePeerIds);
   const allowlisted = allowlistedACKPeers.size > 0
     ? connected.filter((id) => allowlistedACKPeers.has(id))
@@ -189,8 +192,9 @@ export function selectACKCandidatePeersWithDiagnostics(
 ): ACKCandidatePeerSelectionResult {
   const capability = resolveCapability(input);
   const views = capabilityViews(capability, input.protocol);
+  const selfPeerId = input.localCandidate?.peerId ?? input.selfPeerId;
   const connected = [...new Set(input.connectedPeers)]
-    .filter((id) => id !== input.selfPeerId);
+    .filter((id) => id !== selfPeerId);
   const allowlistedACKPeers = normalizePeerIdSet(input.ackCandidatePeerIds);
   const preferredACKPeers = normalizePeerIdSet(input.preferredACKPeerIds);
   const allowlistEnabled = allowlistedACKPeers.size > 0;
@@ -203,11 +207,11 @@ export function selectACKCandidatePeersWithDiagnostics(
     ...views,
   });
 
-  const peers = flattenTiers(tiers, preferredACKPeers);
+  const remotePeers = flattenTiers(tiers, preferredACKPeers);
 
   const tierMap = tierByPeer(tiers);
-  const selected = new Set(peers);
-  const diagnostics = connected.map((peerId) => diagnosticForPeer({
+  const selected = new Set(remotePeers);
+  const remoteDiagnostics = connected.map((peerId) => diagnosticForPeer({
     peerId,
     selected,
     tier: tierMap.get(peerId) ?? 'rest',
@@ -221,7 +225,21 @@ export function selectACKCandidatePeersWithDiagnostics(
     requestedProtocolPeers: views.requestedProtocolPeers,
   }));
 
-  return { peers, diagnostics };
+  const local = input.localCandidate;
+  if (!local) return { peers: remotePeers, diagnostics: remoteDiagnostics };
+  const localDiagnostic: ACKCandidatePeerDiagnostic = {
+    peerId: local.peerId,
+    tier: 'confirmedCore',
+    preferred: false,
+    allowlisted: true,
+    protocolMatch: local.available,
+    selected: local.available,
+    reason: local.available ? 'selected-local' : 'local-unavailable',
+  };
+  return {
+    peers: local.available ? [local.peerId, ...remotePeers] : remotePeers,
+    diagnostics: [localDiagnostic, ...remoteDiagnostics],
+  };
 }
 
 export function selectACKCandidatePeers(input: ACKCandidatePeerSelectionInput): string[] {

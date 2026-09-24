@@ -20,6 +20,7 @@ import { createHash } from 'node:crypto';
 import { setTimeout as waitForPeerEventTurn } from 'node:timers/promises';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
 import { registerStorageACKEndpoint } from './p2p/storage-ack-endpoint.js';
+import { LocalStorageACKTransport } from './p2p/local-storage-ack-transport.js';
 import { syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
@@ -2113,6 +2114,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     if (this.started) return;
+    this.localStorageACKTransport = new LocalStorageACKTransport();
     this.chain.contextGraphAuthorityIndexSnapshots?.open();
     // Validate and capture the substrate before persistence/network startup.
     // Caller changes during awaits cannot introduce a late configuration error.

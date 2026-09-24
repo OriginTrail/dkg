@@ -17,6 +17,37 @@ const RELAYS = ['relay-1', 'relay-2', 'relay-3', 'relay-4'];
 const STAKED = ['staked-core-5', 'staked-core-6', 'staked-core-7'];
 
 describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () => {
+  it('plans a local core with remote protocol tiers and one diagnostic model', () => {
+    const input: ACKCandidatePeerSelectionInput = {
+      connectedPeers: ['self', 'edge', 'base-core', 'v2-core'],
+      ackCandidatePeerIds: ['v2-core', 'base-core'],
+      localCandidate: { peerId: 'self', available: true },
+      capability: {
+        mode: 'require',
+        corePeers: new Set(['base-core', 'v2-core']),
+        requestedProtocolPeers: new Set(['v2-core']),
+      },
+      protocol: PROTOCOL_STORAGE_ACK_V2,
+      requiredACKs: 3,
+    };
+    const available = selectACKCandidatePeersWithDiagnostics(input);
+    expect(available.peers).toEqual(['self', 'v2-core', 'base-core']);
+    expect(available.diagnostics[0]).toMatchObject({
+      peerId: 'self', selected: true, protocolMatch: true, reason: 'selected-local',
+    });
+    expect(available.diagnostics.find(({ peerId }) => peerId === 'edge')).toMatchObject({
+      selected: false, reason: 'not-allowlisted',
+    });
+
+    const unavailable = selectACKCandidatePeersWithDiagnostics({
+      ...input, localCandidate: { peerId: 'self', available: false },
+    });
+    expect(unavailable.peers).toEqual(['v2-core', 'base-core']);
+    expect(unavailable.diagnostics[0]).toMatchObject({
+      peerId: 'self', selected: false, protocolMatch: false, reason: 'local-unavailable',
+    });
+  });
+
   it('preserves legacy source and runtime core ranking', () => {
     const legacy: ACKCandidatePeerSelectionInput = {
       connectedPeers: ['edge', 'core'],

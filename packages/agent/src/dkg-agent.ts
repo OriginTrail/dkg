@@ -1,6 +1,5 @@
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
 import type { ACKCandidatePeerSelectionResult } from '@origintrail-official/dkg-publisher';
-import { isStorageACKProtocol } from './p2p/storage-ack-protocols.js';
 import { randomUUID } from 'node:crypto';
 import { createAuthorityIndexBootstrap } from './authority-index-bootstrap.js';
 import { planAuthorityIndexBootstrap } from './authority-index-config.js';
@@ -1198,8 +1197,6 @@ export class DKGAgent extends DKGAgentBase {
    */
   private activeStorageACKCollections = 0;
   private readonly storageACKCollectionWaiters: Array<() => void> = [];
-  /** A timed-out self request keeps its slot until handler cleanup finishes. */
-  private localACKWorkTail: Promise<void> = Promise.resolve();
 
   private async acquireStorageACKCollectionSlot(): Promise<void> {
     const limit = this.config.storageAckTiming.maxConcurrentCollections;
@@ -2678,6 +2675,7 @@ export class DKGAgent extends DKGAgentBase {
 
   async stop(): Promise<void> {
     if (!this.started) return;
+    this.localStorageACKTransport.close();
     this.peerSyncSession.close();
     // Cancelling a waiter alone does not retire the shared physical scan.
     // Detached cold authority flights are aborted here too: after stop() no
@@ -2891,6 +2889,9 @@ export class DKGAgent extends DKGAgentBase {
     this.storageACKRegistrationRetryInFlight = false;
     this.storageAckEndpoint?.dispose();
     this.storageAckEndpoint = null;
+    // A timed-out or shutdown-aborted self ACK retains ownership until its
+    // physical handler work retires. Never close the store underneath it.
+    await this.localStorageACKTransport.drain();
     // The owner joins both an installed prover and any in-flight WAL/handle
     // creation. A timeout retains ownership and blocks store/network teardown.
     await this.randomSamplingRuntime?.stop();
@@ -3253,33 +3254,14 @@ export class DKGAgent extends DKGAgentBase {
       messenger: this.messenger,
       timeoutMs,
     });
+    const localTransport = this.localStorageACKTransport;
     return async (peerId: string, protocol: string, data: Uint8Array) => {
       if (peerId === this.peerId) {
-        if (!isStorageACKProtocol(protocol)) throw new Error(`Unsupported StorageACK protocol: ${protocol}`);
         const local = this.storageAckEndpoint;
         if (!local || !this.localACKCandidate().available) {
           throw new Error('Local StorageACK handler is not registered');
         }
-        const controller = new AbortController();
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const timeout = new Promise<never>((_resolve, reject) => {
-          timer = setTimeout(() => {
-            const error = new Error(`Local StorageACK request timed out after ${timeoutMs}ms`);
-            controller.abort(error);
-            reject(error);
-          }, Math.max(0, timeoutMs));
-          timer.unref?.();
-        });
-        const work = this.localACKWorkTail.then(() => {
-          controller.signal.throwIfAborted();
-          return local.dispatch(protocol, data, this.peerId, controller.signal);
-        });
-        this.localACKWorkTail = work.then(() => {}, () => {});
-        try {
-          return await Promise.race([work, timeout]);
-        } finally {
-          if (timer) clearTimeout(timer);
-        }
+        return localTransport.send(local, this.peerId, protocol, data, timeoutMs);
       }
       if (!this.networkAdmissionCoordinator.isAcceptedPeer(peerId)) {
         throw new Error(`peer ${peerId.slice(-8)} is not admitted for active-network ACK collection`);

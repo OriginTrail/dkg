@@ -15,6 +15,7 @@ import {
 import type { QueryOptions, Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent, MockChainAdapter, OxigraphStore } from './agent.shared';
 import { registerStorageACKEndpoint, type StorageACKEndpoint } from '../src/p2p/storage-ack-endpoint.js';
+import { LocalStorageACKDrainTimeoutError, LocalStorageACKTransport } from '../src/p2p/local-storage-ack-transport.js';
 
 const graph = 'did:dkg:context-graph:42/_shared_memory';
 const quads: Quad[] = [
@@ -32,7 +33,29 @@ type LocalAgent = DKGAgent & {
 
 describe('local StorageACK cancellation through the registered real handler', () => {
   let agent: DKGAgent | undefined;
-  afterEach(async () => { await agent?.stop(); });
+  afterEach(async () => { await agent?.stop(); agent = undefined; });
+
+  it('fails stop drain closed when physical handler work refuses to retire', async () => {
+    const transport = new LocalStorageACKTransport();
+    let entered!: () => void;
+    let release!: (value: Uint8Array) => void;
+    const inHandler = new Promise<void>((resolve) => { entered = resolve; });
+    const work = new Promise<Uint8Array>((resolve) => { release = resolve; });
+    const endpoint: StorageACKEndpoint = {
+      dispatch: () => { entered(); return work; },
+      dispose: () => {},
+    };
+    const send = transport.send(endpoint, 'self', PROTOCOL_STORAGE_ACK, new Uint8Array(), 1_000)
+      .then(() => undefined, (error: unknown) => error);
+    await inHandler;
+    transport.close();
+    expect(await send).toBeInstanceOf(Error);
+    await expect(transport.drain(10)).rejects.toBeInstanceOf(LocalStorageACKDrainTimeoutError);
+    release(new Uint8Array());
+    await expect(transport.drain()).resolves.toBeUndefined();
+    await expect(transport.send(endpoint, 'self', PROTOCOL_STORAGE_ACK, new Uint8Array(), 10))
+      .rejects.toThrow(/closed/);
+  });
 
   for (const kind of ['publish', 'update'] as const) {
     it(`aborts ${kind} store work and prevents late signing when the local send times out`, async () => {

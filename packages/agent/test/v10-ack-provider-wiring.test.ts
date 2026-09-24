@@ -83,6 +83,7 @@ const capturedPublishCollectParams: unknown[] = [];
 const capturedUpdateCollectParams: unknown[] = [];
 let publishCollectHook: (() => Promise<{ acks: [] }>) | undefined;
 let updateCollectHook: (() => Promise<{ acks: [] }>) | undefined;
+let localACKHandlerWorkHook: ((signal?: AbortSignal) => Promise<void>) | undefined;
 
 vi.mock('@origintrail-official/dkg-publisher', async () => {
   const actual = await vi.importActual<typeof import('@origintrail-official/dkg-publisher')>(
@@ -118,6 +119,7 @@ vi.mock('@origintrail-official/dkg-publisher', async () => {
       async handler(data: Uint8Array, peer: { toString(): string }, signal?: AbortSignal): Promise<Uint8Array> {
         capturedStorageACKHandlerCalls.push({ kind: 'publish', data, peerId: peer.toString() });
         capturedStorageACKHandlerSignals.push(signal);
+        await localACKHandlerWorkHook?.(signal);
         return new Uint8Array([1]);
       }
       async updateHandler(data: Uint8Array, peer: { toString(): string }, signal?: AbortSignal): Promise<Uint8Array> {
@@ -263,6 +265,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     capturedUpdateCollectParams.length = 0;
     publishCollectHook = undefined;
     updateCollectHook = undefined;
+    localACKHandlerWorkHook = undefined;
   });
 
   afterEach(async () => {
@@ -1117,6 +1120,57 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     await agent.stop();
     expect(internals.storageAckEndpoint).toBeNull();
     agent = undefined;
+  });
+
+  it('aborts and drains a running local handler before closing the store on stop', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 42n);
+    const store = new OxigraphStore();
+    agent = await DKGAgent.create({
+      name: 'LocalACKShutdownDrainTest',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      store,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+    });
+    await agent.start();
+    const internals = agent as unknown as ProviderInternals;
+    const close = vi.spyOn(store, 'close');
+    let entered!: () => void;
+    let release!: () => void;
+    const insideWork = new Promise<void>((resolve) => { entered = resolve; });
+    const workGate = new Promise<void>((resolve) => { release = resolve; });
+    let mutation = false;
+    const query = store.query.bind(store);
+    vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+      entered();
+      await workGate;
+      options?.signal?.throwIfAborted();
+      return query(sparql, options);
+    });
+    localACKHandlerWorkHook = async (signal) => {
+      await store.query('SELECT * WHERE { ?s ?p ?o } LIMIT 1', { signal });
+      mutation = true;
+    };
+    const send = internals.createACKTransportFactory({ sendTimeoutMs: 10_000 })().sendP2P;
+    const sendOutcome = send(internals.peerId, PROTOCOL_STORAGE_ACK, new Uint8Array([1]))
+      .then(() => undefined, (error: unknown) => error);
+    await insideWork;
+
+    const stopping = agent.stop();
+    await vi.waitFor(() => expect(capturedStorageACKHandlerSignals.at(-1)?.aborted).toBe(true));
+    expect(close).not.toHaveBeenCalled();
+    expect(mutation).toBe(false);
+    release();
+    await stopping;
+    expect(close).toHaveBeenCalledOnce();
+    expect(mutation).toBe(false);
+    expect(await sendOutcome).toBeInstanceOf(Error);
+    agent = null;
   });
 
   it('rolls back partial ACK registration and restores all routes on retry', async () => {

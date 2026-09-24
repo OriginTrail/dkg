@@ -41,31 +41,18 @@ export class ACKCandidateDiscoveryCoordinator {
   constructor(private readonly registry: ACKCapabilityRegistry) {}
 
   selectCandidates(
-    input: Omit<ACKCandidatePeerSelectionInput, 'capability' | 'selfPeerId'>,
+    input: Omit<ACKCandidatePeerSelectionInput, 'capability' | 'selfPeerId' | 'localCandidate'>,
     localCandidate: LocalACKCandidate,
     snapshot: ACKCapabilitySnapshot = this.registry.snapshot(),
   ): ACKCandidatePeerSelectionResult {
     const requestedProtocolPeers = input.protocol && input.protocol !== PROTOCOL_STORAGE_ACK && isStorageACKProtocol(input.protocol)
       ? snapshot.supportByProtocol.get(input.protocol)
       : undefined;
-    const remote = selectACKCandidatePeersWithDiagnostics({
+    return selectACKCandidatePeersWithDiagnostics({
       ...input,
-      selfPeerId: localCandidate.peerId,
+      localCandidate,
       capability: { mode: 'require', corePeers: snapshot.corePeerIds, requestedProtocolPeers },
     });
-    const local = {
-      peerId: localCandidate.peerId,
-      tier: 'confirmedCore' as const,
-      preferred: false,
-      allowlisted: true,
-      protocolMatch: localCandidate.available,
-      selected: localCandidate.available,
-      reason: localCandidate.available ? 'selected-local' : 'local-unavailable',
-    };
-    return {
-      peers: localCandidate.available ? [local.peerId, ...remote.peers] : remote.peers,
-      diagnostics: [local, ...remote.diagnostics],
-    };
   }
 
   async resolveRound(ports: ACKRoundPorts): Promise<ACKCandidatePeerSelectionResult> {
