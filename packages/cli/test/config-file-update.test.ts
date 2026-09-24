@@ -171,6 +171,58 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       expect(existsSync(files.configPath)).toBe(false);
     });
 
+    it('patches a YAML config in place, keeping its comments and untouched lines', async () => {
+      const original = [
+        '# Node config, edited by hand',
+        'name: yaml-node # display name',
+        '',
+        '# pinned until the Q3 hub rotation',
+        'chain:',
+        '  hubAddress: "0xabc"',
+        '  rpcUrl: https://rpc.example/a/long/path/that/runs/well/past/eighty/columns/without/being/folded',
+        'llm:',
+        '  apiKey: secret',
+        '',
+      ].join('\n');
+      await writeFile(files.configYamlPath, original);
+
+      await files.updateConfigFile((config) => {
+        config.localAgentIntegrations = { hermes: { id: 'hermes', enabled: true } };
+        config.chain = { ...config.chain, chainId: 'evm:100' };
+        delete config.llm;
+      });
+
+      const written = await readFile(files.configYamlPath, 'utf-8');
+      for (const line of [
+        '# Node config, edited by hand',
+        '# pinned until the Q3 hub rotation',
+        '  hubAddress: "0xabc"',
+        '  rpcUrl: https://rpc.example/a/long/path/that/runs/well/past/eighty/columns/without/being/folded',
+      ]) expect(written).toContain(line);
+      expect(written).toMatch(/^name: yaml-node +# display name$/m);
+      expect(yaml.load(written)).toEqual({
+        name: 'yaml-node',
+        chain: {
+          hubAddress: '0xabc',
+          rpcUrl: 'https://rpc.example/a/long/path/that/runs/well/past/eighty/columns/without/being/folded',
+          chainId: 'evm:100',
+        },
+        localAgentIntegrations: { hermes: { id: 'hermes', enabled: true } },
+      });
+      expect(existsSync(files.configPath)).toBe(false);
+    });
+
+    it('rewrites a YAML config whole when a change runs through an alias', async () => {
+      await writeFile(files.configYamlPath, 'base: &base\n  level: info\nlogging: *base\n');
+
+      await files.updateConfigFile((config) => {
+        (config as Record<string, any>).logging = { level: 'debug' };
+      });
+
+      expect(yaml.load(await readFile(files.configYamlPath, 'utf-8')))
+        .toEqual({ base: { level: 'info' }, logging: { level: 'debug' } });
+    });
+
     it('writes nothing for a patch that changes nothing, so YAML comments survive', async () => {
       const original = '# operator notes\nname: yaml-node # inline\n';
       await writeFile(files.configYamlPath, original);

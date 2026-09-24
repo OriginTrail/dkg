@@ -4,8 +4,10 @@ import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'n
 import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origintrail-official/dkg-publisher';
 import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { isDeepStrictEqual } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
+import { parseDocument, type Document as YamlDocument } from 'yaml';
 import type {
   DKGAgentConfig,
   SyncAdmissionConfig,
@@ -2465,7 +2467,7 @@ export class DkgHomeFiles {
   async updateConfigFile(patch: DkgConfigFilePatch): Promise<DkgConfigFileUpdate> {
     await mkdir(this.home, { recursive: true });
     return withFileLock(this.configLockPath, async () => {
-      const source = await this.readConfigSource() ?? { ...this.configSources[0], raw: {} };
+      const source = await this.readConfigSource() ?? { ...this.configSources[0], text: '', raw: {} };
       const config = configFileObject(source.raw, source.path);
       const before = JSON.stringify(config, null, 2);
       // A caller outside the type system can still pass an async patch.
@@ -2476,10 +2478,10 @@ export class DkgHomeFiles {
       }
       const after = JSON.stringify(config, null, 2);
       if (after === before) return { path: source.path, changed: false };
-      // Serialize through JSON in both formats so YAML persists exactly what
-      // JSON would: undefined keys are dropped instead of failing the dump.
+      // Compare through JSON in both formats so YAML persists exactly what JSON
+      // would: undefined keys are dropped instead of failing the dump.
       const content = source.format === 'yaml'
-        ? yaml.dump(JSON.parse(after), { noRefs: true, lineWidth: -1 })
+        ? patchYamlText(source.text, JSON.parse(before), JSON.parse(after))
         : `${after}\n`;
       await replaceFileDurably(source.path, content);
       return { path: source.path, changed: true };
@@ -2491,10 +2493,11 @@ export class DkgHomeFiles {
    * has none. A file that cannot be read or parsed throws; only a missing one
    * falls through to the next.
    */
-  private async readConfigSource(): Promise<(ConfigFileSource & { raw: unknown }) | undefined> {
+  private async readConfigSource(): Promise<(ConfigFileSource & { text: string; raw: unknown }) | undefined> {
     for (const source of this.configSources) {
       try {
-        return { ...source, raw: source.parse(await readFile(source.path, 'utf-8')) };
+        const text = await readFile(source.path, 'utf-8');
+        return { ...source, text, raw: source.parse(text) };
       } catch (err) {
         if (!isEnoent(err)) throw err;
       }
@@ -2545,6 +2548,36 @@ function mergePersistedConfig(raw: unknown): DkgConfig {
   const config = { ...DEFAULT_CONFIG, ...(raw as Partial<DkgConfig>) };
   assertAuthorityIndexConfigPlacement(config);
   return config;
+}
+
+/**
+ * Apply the difference between the parsed and the patched config to the YAML
+ * text itself, so comments, blank lines and untouched keys keep their layout.
+ * A change the document cannot take in place, such as one reached through an
+ * alias, falls back to writing the whole config.
+ */
+function patchYamlText(text: string, before: unknown, after: unknown): string {
+  const doc = parseDocument(text);
+  try {
+    if (doc.errors.length > 0) throw doc.errors[0];
+    applyYamlChanges(doc, [], before, after);
+    return doc.toString({ lineWidth: 0 });
+  } catch {
+    return yaml.dump(after, { noRefs: true, lineWidth: -1 });
+  }
+}
+
+function applyYamlChanges(doc: YamlDocument, path: string[], before: unknown, after: unknown): void {
+  if (!isPlainConfigObject(before) || !isPlainConfigObject(after)) {
+    doc.setIn(path, after);
+    return;
+  }
+  for (const key of Object.keys(before)) {
+    if (!Object.hasOwn(after, key)) doc.deleteIn([...path, key]);
+  }
+  for (const [key, value] of Object.entries(after)) {
+    if (!isDeepStrictEqual(before[key], value)) applyYamlChanges(doc, [...path, key], before[key], value);
+  }
 }
 
 function isThenable(value: unknown): value is PromiseLike<unknown> {
