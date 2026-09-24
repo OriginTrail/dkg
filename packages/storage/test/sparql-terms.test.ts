@@ -466,6 +466,27 @@ describe('rendering and reporting', () => {
 });
 
 describe('the observe policy', () => {
+  it('lets an unexpected failure inside a core validator propagate unchanged', () => {
+    const observed = observeInvalidSparqlTerms();
+    // 'urn:ok' to the formatters' own checks, but throws when the validator's
+    // regex converts it to a string: a stand-in for a bug inside core.
+    const validatorBug = {
+      startsWith: (search: string) => 'urn:ok'.startsWith(search),
+      endsWith: (search: string) => 'urn:ok'.endsWith(search),
+      [Symbol.toPrimitive]() {
+        throw new RangeError('validator bug');
+      },
+    } as unknown as string;
+    for (const policy of [ADAPTER_SPARQL_TERM_POLICY, createSparqlTermPolicy('reject')]) {
+      const renderer = policy.renderer(SITE);
+      expect(() => renderer.iri(validatorBug, 'graph')).toThrow(RangeError);
+      expect(() => renderer.prefix(validatorBug)).toThrow(RangeError);
+      expect(renderer.invalidTerms).toEqual([]);
+    }
+    expect(observed.counted).toEqual([]);
+    expect(observed.warnings).toEqual([]);
+  });
+
   it('lets a formatter bug propagate instead of counting it as an invalid term', () => {
     const observed = observeInvalidSparqlTerms();
     let calls = 0;

@@ -370,6 +370,7 @@ export {
   sparqlString,
   sparqlInt,
   assertSafeRdfTerm,
+  UnsafeSparqlValueError,
 } from './sparql-safe.js';
 export {
   formatIriPrefix,

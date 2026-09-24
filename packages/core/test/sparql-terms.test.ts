@@ -3,6 +3,7 @@ import {
   formatIriPrefix,
   formatSparqlTerm,
   SparqlTermValidationError,
+  UnsafeSparqlValueError,
   unwrapIri,
   type SparqlTermContext,
   type SparqlTermKind,
@@ -93,5 +94,33 @@ describe('the validation error', () => {
     expect(error).toBeInstanceOf(SparqlTermValidationError);
     expect(error).toMatchObject({ name: 'SparqlTermValidationError', kind: 'literal' });
     expect((error as Error).cause).toBeInstanceOf(Error);
+  });
+});
+
+describe('validator failures', () => {
+  // Behaves as 'urn:ok' for the formatter's own checks, but throws when the
+  // validator's regex converts it to a string: a stand-in for a validator bug.
+  const validatorBug = {
+    startsWith: (search: string) => 'urn:ok'.startsWith(search),
+    endsWith: (search: string) => 'urn:ok'.endsWith(search),
+    [Symbol.toPrimitive]() {
+      throw new RangeError('validator bug');
+    },
+  } as unknown as string;
+
+  it('lets an unexpected validator failure propagate unchanged', () => {
+    expect(() => formatSparqlTerm(validatorBug, { position: 'graph' })).toThrow(RangeError);
+    expect(() => formatIriPrefix(validatorBug)).toThrow(RangeError);
+  });
+
+  it('turns only the validators\' own failure into a validation error, keeping it as the cause', () => {
+    let error: unknown;
+    try {
+      formatSparqlTerm('urn:a b', { position: 'graph' });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(SparqlTermValidationError);
+    expect((error as Error).cause).toBeInstanceOf(UnsafeSparqlValueError);
   });
 });

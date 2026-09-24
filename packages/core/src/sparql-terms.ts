@@ -20,6 +20,7 @@ import {
   assertSafeRdfTerm,
   sparqlIri,
   sparqlString,
+  UnsafeSparqlValueError,
 } from './sparql-safe.js';
 import {
   isRdfBlankNodeLabel,
@@ -56,19 +57,16 @@ export class SparqlTermValidationError extends Error {
 }
 
 /**
- * Run one core validator. A throw from it is a validation failure of `kind`
- * and keeps core's message; keep formatter logic outside `check`, so a bug
- * there is not mistaken for a bad term.
+ * Run one core validator. Its {@link UnsafeSparqlValueError} is a validation
+ * failure of `kind` and keeps core's message. Anything else it throws is a bug,
+ * not a bad term, and propagates unchanged.
  */
 function validated<T>(kind: SparqlTermKind, check: () => T): T {
   try {
     return check();
   } catch (cause) {
-    throw new SparqlTermValidationError(
-      cause instanceof Error ? cause.message : String(cause),
-      kind,
-      { cause },
-    );
+    if (!(cause instanceof UnsafeSparqlValueError)) throw cause;
+    throw new SparqlTermValidationError(cause.message, kind, { cause });
   }
 }
 
