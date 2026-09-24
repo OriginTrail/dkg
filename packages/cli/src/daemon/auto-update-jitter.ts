@@ -250,8 +250,11 @@ export interface UpdateHoldoffStep<T extends string = string> {
    * return the CURRENT one. The jitter delay means the target detected before
    * the wait may have been withdrawn (dist-tag rolled back, ref moved) or the
    * node may have caught up; returning null skips the apply so a superseded /
-   * withdrawn release is never installed. A refreshed target (e.g. a newer
-   * version published during the wait) is applied in place of the stale one.
+   * withdrawn release is never installed, and drops the persisted deadline.
+   * A refreshed target (e.g. a newer version published during the wait) is
+   * applied in place of the stale one. THROW when the check itself failed
+   * (network, registry): that says nothing about the target, so the gate skips
+   * the apply but keeps the deadline, and the next poll retries without a new hold.
    */
   revalidate: () => Promise<T | null>;
   /** Apply the revalidated target (owns its own post-apply restart/log). */
@@ -263,13 +266,13 @@ export interface UpdateHoldoffStep<T extends string = string> {
 }
 
 export interface UpdateHoldoffGate {
-  /** Run one rollout attempt for a detected update. Concurrent calls while a
-   *  run is in flight are no-ops (single-flight across polling ticks). */
+  /** Run one rollout attempt for a detected update. A no-op while a run or a
+   *  clearHold() is in flight (single-flight across polling ticks). */
   run<T extends string>(step: UpdateHoldoffStep<T>): Promise<void>;
-  /** Drop the persisted deadline because the poll found nothing to apply (node
-   *  caught up, or the target was withdrawn). A no-op while a run is in flight:
-   *  that run owns the record and settles it itself. Serialized with the runs'
-   *  store calls, so it can never delete a deadline a later run wrote. */
+  /** The poll found nothing to apply (node caught up, or the target was
+   *  withdrawn): drop the persisted deadline. Shares run()'s single-flight, so
+   *  it is a no-op while a run owns the record, and a run cannot start (and
+   *  write a deadline this clear would then delete) until it is done. */
   clearHold(): Promise<void>;
 }
 
@@ -281,14 +284,17 @@ export interface UpdateHoldoffGate {
  *
  *   single-flight guard -> hold-off (jitter, deadline persisted per target)
  *     -> abort if shutting down (record kept: next boot resumes it)
- *     -> REVALIDATE the target -> abort if shutting down (revalidate is async)
+ *     -> REVALIDATE the target (check failed: stop, record kept)
+ *     -> abort if shutting down (revalidate is async)
  *     -> nothing to apply: drop the record and stop
+ *     -> newer target: record it as due -> abort if shutting down (last check)
  *     -> set isUpdating -> apply -> clear isUpdating
  *     -> drop the record unless the daemon is now shutting down
  *
- * The second shutdown check matters: revalidate() is a network call, so SIGTERM
- * can arrive while it runs; without the re-check the gate would start a
- * build/install after shutdown cleanup has begun.
+ * The later shutdown checks matter: revalidate() is a network call and the
+ * record write is async, so SIGTERM can arrive during either; without a re-check
+ * the gate would start a build/install after shutdown cleanup has begun. No
+ * await separates the last check from starting the apply.
  *
  * The record survives an apply that is cut short by a restart, so the next boot
  * retries without a second hold. After an apply that returns (failed, or the node
@@ -298,28 +304,15 @@ export interface UpdateHoldoffGate {
  */
 export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): UpdateHoldoffGate {
   // Owned here so single-flight holds across ticks — do NOT recreate per tick.
+  // Held by run() and by clearHold(), the two transitions of the record.
   let pending = false;
+  const store = config.store ?? null;
   const now = config.now ?? Date.now;
 
-  // Every store call goes through one queue. clearHold() checks `pending` when
-  // its turn comes, so a clear issued before a run started either completes
-  // before that run reads the record or sees the run and skips.
-  let storeQueue: Promise<void> = Promise.resolve();
-  function serialized<R>(op: () => Promise<R>): Promise<R> {
-    const result = storeQueue.then(op);
-    storeQueue = result.then(() => undefined, () => undefined);
-    return result;
-  }
-  const rawStore = config.store ?? null;
-  const store: UpdateHoldoffStore | null = rawStore && {
-    read: () => serialized(() => rawStore.read()),
-    write: (record) => serialized(() => rawStore.write(record)),
-    clear: () => serialized(() => rawStore.clear()),
-  };
-
-  async function forget(op: () => Promise<void>): Promise<void> {
+  async function forget(): Promise<void> {
+    if (!store) return;
     try {
-      await op();
+      await store.clear();
     } catch (err) {
       config.log(`Auto-update: could not remove the rollout hold-off record (${errorMessage(err)}).`);
     }
@@ -345,7 +338,16 @@ export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): Update
           return;
         }
 
-        const target = await step.revalidate();
+        let target: T | null;
+        try {
+          target = await step.revalidate();
+        } catch (err) {
+          config.log(
+            `Auto-update: re-check after the hold-off failed (${errorMessage(err)}); ` +
+              'not applying. The rollout deadline is kept and the next poll retries.',
+          );
+          return;
+        }
         // revalidate() is async (a network check); shutdown may have started
         // during it, so re-check before committing to an install/restart.
         if (config.isShuttingDown()) {
@@ -354,7 +356,7 @@ export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): Update
         }
         if (target === null || target === undefined) {
           config.log(step.supersededMessage);
-          if (store) await forget(store.clear);
+          await forget();
           return;
         }
         // A newer target replaced the detected one during the wait. This node has
@@ -363,24 +365,31 @@ export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): Update
         if (store && target !== step.detectedTarget && config.jitterMs > 0) {
           await persistHoldoffRecord(store, { target, deadlineEpochMs: now() }, config.log);
         }
+        // Last shutdown check: nothing async may run between it and the apply.
+        if (config.isShuttingDown()) {
+          config.log(step.shutdownMessage);
+          return;
+        }
 
         config.setUpdating(true);
         try {
           await step.apply(target);
         } finally {
           config.setUpdating(false);
-          if (store && !config.isShuttingDown()) await forget(store.clear);
+          if (!config.isShuttingDown()) await forget();
         }
       } finally {
         pending = false;
       }
     },
     async clearHold(): Promise<void> {
-      if (!rawStore) return;
-      await forget(() => serialized(async () => {
-        if (pending) return; // the in-flight run owns the record
-        await rawStore.clear();
-      }));
+      if (!store || pending) return; // an in-flight run owns the record
+      pending = true;
+      try {
+        await forget();
+      } finally {
+        pending = false;
+      }
     },
   };
 }

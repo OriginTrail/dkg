@@ -378,9 +378,9 @@ import {
 } from './auto-update.js';
 import { formatAutoUpdateTagVerificationWarning, isValidRef, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
 import {
-  createDaemonUpdateHoldoffGate,
-  createGitUpdateRunCheck,
-  createNpmUpdateRunCheck,
+  startGitUpdatePolling,
+  startNpmUpdatePolling,
+  type DaemonUpdatePollingDeps,
 } from './auto-update-runner.js';
 import {
   chainResetWipe,
@@ -2704,9 +2704,21 @@ async function runDaemonInnerWithStartupOwnership(
   const configuredAutoUpdateSource = au?.source ?? resolveAutoUpdateSource(config, network);
   const standalone = resolveStandaloneInstall(configuredAutoUpdateSource);
   const pollingMode = resolveAutoUpdatePollingMode(configuredAutoUpdateSource, standalone);
+  // Rollout jitter: each mode's gate holds off a per-node random delay between
+  // detecting an update and applying it, so a release never restarts the whole
+  // fleet in one window (the 2026-07-10 bootstrap-storm trigger). The deadline
+  // is persisted under the DKG home, so a restart mid-hold resumes it instead of
+  // drawing a fresh hold.
+  const updatePollingDeps: DaemonUpdatePollingDeps = {
+    dkgHome: dkgDir(),
+    isShuttingDown: () => shuttingDown,
+    setUpdating: (updating) => { daemonState.isUpdating = updating; },
+    log,
+    lastUpdateCheck: daemonState.lastUpdateCheck,
+    onRestart: () => shutdown(DAEMON_EXIT_CODE_RESTART),
+  };
 
   if (pollingMode === "git" && au) {
-    const checkIntervalMs = au.checkIntervalMinutes * 60_000;
     let watchedRef = "";
     let watchedRepo = "";
     let watchedRefPlan: ReturnType<typeof resolveAutoUpdateGitRefPlan> | null = null;
@@ -2729,34 +2741,12 @@ async function runDaemonInnerWithStartupOwnership(
       const verificationWarning = watchedRefPlan ? formatAutoUpdateTagVerificationWarning(watchedRefPlan) : null;
       if (verificationWarning) log(verificationWarning);
 
-      // Rollout jitter: hold off a per-node random delay between detecting an
-      // available commit and applying it, so a release never restarts the whole
-      // fleet in one window (the 2026-07-10 bootstrap-storm trigger). The gate is
-      // created ONCE here so its single-flight guard holds across polling ticks.
-      // The per-commit deadline is persisted under the DKG home so a restart
-      // mid-hold resumes it instead of drawing a fresh hold.
-      const gate = createDaemonUpdateHoldoffGate({
-        au,
-        dkgHome: dkgDir(),
-        isShuttingDown: () => shuttingDown,
-        setUpdating: (updating) => { daemonState.isUpdating = updating; },
-        log,
-      });
-      const runCheck = createGitUpdateRunCheck({
-        gate,
-        log,
-        lastUpdateCheck: daemonState.lastUpdateCheck,
-        au,
-        onRestart: () => shutdown(DAEMON_EXIT_CODE_RESTART),
-      });
-
-      setTimeout(runCheck, 15_000);
-      updateInterval = setInterval(runCheck, checkIntervalMs);
+      updateInterval = startGitUpdatePolling(au, updatePollingDeps);
     }
   } else if (pollingMode === "git") {
     log("Auto-update (git): disabled — autoUpdate.enabled is false.");
   } else if (pollingMode === "npm") {
-    const checkIntervalMs = (au?.checkIntervalMinutes ?? 30) * 60_000;
+    const checkIntervalMinutes = au?.checkIntervalMinutes ?? 30;
     // Even in version-check-only mode (au is null because auto-apply is
     // disabled) the policy used for the check must reflect the operator's
     // shipped intent, and must mirror resolveAutoUpdateConfig's precedence:
@@ -2767,35 +2757,14 @@ async function runDaemonInnerWithStartupOwnership(
     const channel = au?.channel ?? config.autoUpdate?.channel ?? network?.autoUpdate?.channel;
 
     log(
-      `Auto-update (npm): ${au ? "enabled" : "disabled — version check only"}${channel ? ` channel="${channel}"` : ""} (every ${au?.checkIntervalMinutes ?? 30}min)`,
+      `Auto-update (npm): ${au ? "enabled" : "disabled — version check only"}${channel ? ` channel="${channel}"` : ""} (every ${checkIntervalMinutes}min)`,
     );
 
-    // Rollout jitter (same rationale as the git path): stagger the fleet's
-    // restarts by holding off a per-node random delay before applying. The gate
-    // is null in version-check-only mode (au disabled) — detect + record only.
-    // Created ONCE so single-flight holds across polling ticks. The per-version
-    // deadline is persisted like the git path's, so a restart mid-hold resumes it.
-    const gate = au
-      ? createDaemonUpdateHoldoffGate({
-          au,
-          dkgHome: dkgDir(),
-          isShuttingDown: () => shuttingDown,
-          setUpdating: (updating) => { daemonState.isUpdating = updating; },
-          log,
-        })
-      : null;
-    const runCheck = createNpmUpdateRunCheck({
-      gate,
-      log,
-      lastUpdateCheck: daemonState.lastUpdateCheck,
-      allowPrerelease: allowPre,
-      channel,
-      nodeRole: config.nodeRole ?? "edge",
-      onRestart: () => shutdown(DAEMON_EXIT_CODE_RESTART),
-    });
-
-    setTimeout(runCheck, 15_000);
-    updateInterval = setInterval(runCheck, checkIntervalMs);
+    // With auto-apply disabled (au null) there is no gate: detect + record only.
+    updateInterval = startNpmUpdatePolling(
+      { au, checkIntervalMinutes, allowPrerelease: allowPre, channel, nodeRole: config.nodeRole ?? "edge" },
+      updatePollingDeps,
+    );
   } else if (au?.enabled) {
     // Monorepo dev daemon with auto-update enabled in config — log
     // once at boot so contributors understand why polling is silent.

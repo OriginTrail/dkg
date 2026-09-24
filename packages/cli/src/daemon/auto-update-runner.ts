@@ -8,9 +8,9 @@
  *
  * The mode differences (which check, which installer, log wording) live here;
  * the cross-cutting rollout state machine (single-flight, hold-off, shutdown
- * abort, isUpdating) is owned by the {@link UpdateHoldoffGate}. Lifecycle wires
- * these into setInterval and provides the gate (built by
- * {@link createDaemonUpdateHoldoffGate}) + a restart callback.
+ * abort, isUpdating) is owned by the {@link UpdateHoldoffGate}. Lifecycle starts
+ * polling through {@link startGitUpdatePolling} / {@link startNpmUpdatePolling},
+ * which build the persisted gate, the runCheck and its timers.
  */
 import { join } from 'node:path';
 import {
@@ -36,8 +36,10 @@ import type { ResolvedAutoUpdateConfig } from '../config.js';
 /**
  * Re-resolve the CURRENT npm channel target after the hold-off, mapping to the
  * version to apply or null when there is nothing to apply now (withdrawn /
- * rolled back / caught up). Private to the runner — a one-line adapter over the
- * already-public `checkForNpmVersionUpdate`, not part of the daemon's API.
+ * rolled back / caught up). Throws when the registry check itself failed, so
+ * the gate keeps the rollout deadline instead of treating the failure as "no
+ * target". Private to the runner — an adapter over the already-public
+ * `checkForNpmVersionUpdate`, not part of the daemon's API.
  */
 export async function resolveCurrentNpmTarget(
   log: (msg: string) => void,
@@ -45,16 +47,19 @@ export async function resolveCurrentNpmTarget(
   channel?: string,
 ): Promise<string | null> {
   const status = await checkForNpmVersionUpdate(log, allowPrerelease, channel);
+  if (status.status === 'error') throw new Error('npm registry check failed');
   return status.status === 'available' ? status.version : null;
 }
 
 /** Git counterpart to {@link resolveCurrentNpmTarget}: the current ref tip, or
- *  null when it no longer points ahead of the running commit. Runner-private. */
+ *  null when it no longer points ahead of the running commit. Throws when the
+ *  ref check itself failed. Runner-private. */
 export async function resolveCurrentGitTarget(
   au: ResolvedAutoUpdateConfig,
   log: (msg: string) => void,
 ): Promise<string | null> {
   const status = await checkForNewCommitWithStatus(au, log);
+  if (status.status === 'error') throw new Error('git ref check failed');
   return status.status === 'available' && status.commit ? status.commit : null;
 }
 
@@ -71,9 +76,8 @@ export interface DaemonUpdateHoldoffGateDeps {
 /**
  * The rollout gate both daemon auto-update modes (git and npm) use: the jitter
  * window from config/env, and the deadline persisted under the DKG home so a
- * restart mid-hold resumes it. Lifecycle builds its gates only through this
- * function, so neither mode can lose the persistence on its own. `seams` is for
- * tests (deterministic rng, clock and sleep).
+ * restart mid-hold resumes it. The polling helpers below build their gates only
+ * through this function. `seams` is for tests (deterministic rng, clock and sleep).
  */
 export function createDaemonUpdateHoldoffGate(
   deps: DaemonUpdateHoldoffGateDeps,
@@ -222,4 +226,91 @@ export function createGitUpdateRunCheck(deps: GitUpdateRunCheckDeps): () => Prom
       },
     });
   };
+}
+
+/** Delay before the first update check after boot. */
+const FIRST_UPDATE_CHECK_DELAY_MS = 15_000;
+
+/** The timers polling is scheduled on. Injectable for tests. */
+export interface UpdatePollingTimers {
+  setTimeout(fn: () => unknown, ms: number): unknown;
+  setInterval(fn: () => unknown, ms: number): ReturnType<typeof setInterval>;
+}
+
+const globalTimers: UpdatePollingTimers = {
+  setTimeout: (fn, ms) => setTimeout(fn, ms),
+  setInterval: (fn, ms) => setInterval(fn, ms),
+};
+
+/** What the daemon hands both polling helpers. */
+export interface DaemonUpdatePollingDeps {
+  /** The DKG home; the rollout deadline is kept in `<dkgHome>/.update-holdoff.json`. */
+  dkgHome: string;
+  isShuttingDown: () => boolean;
+  setUpdating: (updating: boolean) => void;
+  log: (msg: string) => void;
+  lastUpdateCheck: LastUpdateCheck;
+  /** Trigger the supervised restart after a successful install. */
+  onRestart: () => Promise<void>;
+  /** Test seams. */
+  timers?: UpdatePollingTimers;
+  gateSeams?: Pick<UpdateHoldoffGateConfig, 'rng' | 'now' | 'sleep'>;
+}
+
+function schedulePolling(
+  runCheck: () => Promise<void>,
+  intervalMs: number,
+  timers: UpdatePollingTimers = globalTimers,
+): ReturnType<typeof setInterval> {
+  timers.setTimeout(runCheck, FIRST_UPDATE_CHECK_DELAY_MS);
+  return timers.setInterval(runCheck, intervalMs);
+}
+
+/**
+ * Start git-mode auto-update polling: one persisted rollout gate (created once,
+ * so single-flight holds across ticks) behind a runCheck that fires shortly
+ * after boot and then every `checkIntervalMinutes`. Returns the interval handle
+ * for shutdown.
+ */
+export function startGitUpdatePolling(
+  au: ResolvedAutoUpdateConfig,
+  deps: DaemonUpdatePollingDeps,
+): ReturnType<typeof setInterval> {
+  const gate = createDaemonUpdateHoldoffGate({ ...deps, au }, deps.gateSeams);
+  const runCheck = createGitUpdateRunCheck({
+    gate,
+    log: deps.log,
+    lastUpdateCheck: deps.lastUpdateCheck,
+    au,
+    onRestart: deps.onRestart,
+  });
+  return schedulePolling(runCheck, au.checkIntervalMinutes * 60_000, deps.timers);
+}
+
+export interface NpmUpdatePollingOptions {
+  /** null: auto-apply disabled. The poll still checks and records the latest
+   *  version, but there is no gate and nothing is installed. */
+  au: ResolvedAutoUpdateConfig | null;
+  checkIntervalMinutes: number;
+  allowPrerelease: boolean;
+  channel?: string;
+  nodeRole: 'edge' | 'core';
+}
+
+/** npm-mode counterpart to {@link startGitUpdatePolling}. */
+export function startNpmUpdatePolling(
+  opts: NpmUpdatePollingOptions,
+  deps: DaemonUpdatePollingDeps,
+): ReturnType<typeof setInterval> {
+  const gate = opts.au ? createDaemonUpdateHoldoffGate({ ...deps, au: opts.au }, deps.gateSeams) : null;
+  const runCheck = createNpmUpdateRunCheck({
+    gate,
+    log: deps.log,
+    lastUpdateCheck: deps.lastUpdateCheck,
+    allowPrerelease: opts.allowPrerelease,
+    channel: opts.channel,
+    nodeRole: opts.nodeRole,
+    onRestart: deps.onRestart,
+  });
+  return schedulePolling(runCheck, opts.checkIntervalMinutes * 60_000, deps.timers);
 }

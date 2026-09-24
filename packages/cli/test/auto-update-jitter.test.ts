@@ -1,5 +1,4 @@
 import { describe, it, expect, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -603,38 +602,42 @@ describe('createUpdateHoldoffGate — persisted rollout deadline', () => {
     await expect(b.gate.clearHold(), 'idempotent when there is no record').resolves.toBeUndefined();
   });
 
-  it('a clearHold that starts before a run cannot delete the deadline that run writes', async () => {
-    // clearHold's unlink stalls until released. Without serialization the run
-    // reads the old record, writes its own, and the stalled unlink then deletes
-    // it, so a restart during the hold would draw a fresh hold again.
+  it('a run that starts while a clearHold is in flight is a no-op, so the clear cannot delete its deadline', async () => {
+    // clearHold's unlink stalls until released. If the run went ahead, it would
+    // read the old record, write its own, and the stalled unlink would then
+    // delete it, so a restart during the hold would draw a fresh hold again.
     let unlinkEntered!: () => void;
     const entered = new Promise<void>((r) => { unlinkEntered = r; });
     let releaseUnlink!: () => void;
     const unlinkReleased = new Promise<void>((r) => { releaseUnlink = r; });
+    let stall = true;
     const node = persistentNode({
       wrapFs: (fs) => ({
         ...fs,
         unlink: async (path) => {
-          unlinkEntered();
-          await unlinkReleased;
+          if (stall) {
+            unlinkEntered();
+            await unlinkReleased;
+          }
           return fs.unlink(path);
         },
       }),
     });
     await node.store.write({ target: 'c-old', deadlineEpochMs: node.clock.t });
-    let releaseHold!: () => void;
-    const held = new Promise<void>((r) => { releaseHold = r; });
-    const first = node.boot({ sleep: () => held });
+    const first = node.boot({ killAfterMs: 0 }); // the run's hold ends in a restart
 
     const clearing = first.gate.clearHold();
     await entered; // the clear is in flight
-    const running = first.run('c1');
-    // Let the run get as far as it can (the in-memory fs is all microtasks)
-    // before the stalled unlink completes.
-    await new Promise<void>((r) => { setImmediate(r); });
+    await first.run('c1');
+    expect(first.rng, 'the run yielded to the in-flight clear').not.toHaveBeenCalled();
     releaseUnlink();
     await clearing;
-    await vi.waitFor(() => expect(node.record()?.target).toBe('c1'));
+    expect(node.record()).toBeNull();
+    stall = false;
+
+    // The next poll's run writes its deadline, and nothing deletes it.
+    await first.run('c1');
+    expect(first.rng).toHaveBeenCalledOnce();
     expect(node.record()).toEqual({ target: 'c1', deadlineEpochMs: node.clock.t + 900_000 });
 
     // The daemon restarts during that hold: the next boot resumes c1's deadline.
@@ -643,9 +646,77 @@ describe('createUpdateHoldoffGate — persisted rollout deadline', () => {
     expect(second.rng).not.toHaveBeenCalled();
     expect(second.holds).toEqual([[900_000, true]]);
     expect(second.apply).toHaveBeenCalledWith('c1');
+  });
 
-    releaseHold();
+  it('a failed re-check after the hold keeps the deadline; the next poll applies without a new hold', async () => {
+    const node = persistentNode();
+    const first = node.boot({ rng: () => 0.5 });
+    await expect(first.run('c1', {
+      revalidate: async () => { throw new Error('registry returned 503'); },
+    })).resolves.toBeUndefined();
+    expect(first.apply).not.toHaveBeenCalled();
+    expect(first.setUpdating).not.toHaveBeenCalled();
+    expect(node.logs.some((m) => m.includes('re-check after the hold-off failed (registry returned 503)'))).toBe(true);
+    const deadline = node.record();
+    expect(deadline?.target).toBe('c1');
+    expect(deadline!.deadlineEpochMs).toBeLessThanOrEqual(node.clock.t);
+
+    await first.run('c1');
+    expect(first.rng, 'drawn once, on first detection').toHaveBeenCalledOnce();
+    expect(first.holds).toEqual([[900_000, false], [0, true]]);
+    expect(first.apply).toHaveBeenCalledWith('c1');
+  });
+
+  it('shutdown during the write of a newer target stops before the apply and keeps that target', async () => {
+    let writeEntered!: () => void;
+    const entered = new Promise<void>((r) => { writeEntered = r; });
+    let releaseWrite!: () => void;
+    const writeReleased = new Promise<void>((r) => { releaseWrite = r; });
+    const node = persistentNode({
+      wrapFs: (fs) => ({
+        ...fs,
+        writeFile: async (path, data) => {
+          if (data.includes('"c2"')) {
+            writeEntered();
+            await writeReleased;
+          }
+          return fs.writeFile(path, data);
+        },
+      }),
+    });
+    const b = node.boot();
+
+    const running = b.run('c1', { revalidate: async () => 'c2' });
+    await entered;
+    b.shutDown(); // SIGTERM while the new target is being recorded
+    releaseWrite();
     await running;
+    expect(b.apply).not.toHaveBeenCalled();
+    expect(b.setUpdating).not.toHaveBeenCalled();
+    expect(node.logs).toEqual(['SHUTDOWN']);
+    expect(node.record()).toEqual({ target: 'c2', deadlineEpochMs: node.clock.t });
+  });
+
+  it('a record that cannot be removed is logged and never breaks the update flow', async () => {
+    const eacces = () => Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    const node = persistentNode({ wrapFs: (fs) => ({ ...fs, unlink: async () => { throw eacces(); } }) });
+    const removalFailures = () => node.logs.filter((m) => m.includes('could not remove the rollout hold-off record')).length;
+
+    const b = node.boot();
+    await expect(b.run('c1')).resolves.toBeUndefined(); // apply returns, then the clear fails
+    expect(b.apply).toHaveBeenCalledWith('c1');
+    expect(b.setUpdating).toHaveBeenLastCalledWith(false);
+    expect(removalFailures()).toBe(1);
+
+    await expect(b.run('c1', { revalidate: async () => null })).resolves.toBeUndefined(); // superseded
+    expect(removalFailures()).toBe(2);
+
+    await expect(b.gate.clearHold()).resolves.toBeUndefined(); // up-to-date poll
+    expect(removalFailures()).toBe(3);
+
+    // Single-flight was released each time: the gate still runs.
+    await b.run('c1');
+    expect(b.apply).toHaveBeenCalledTimes(2);
   });
 
   it('writes no record when jitter is disabled', async () => {
@@ -751,14 +822,5 @@ describe('createDaemonUpdateHoldoffGate (the gate lifecycle.ts builds for git an
       vi.unstubAllEnvs();
       await rm(home, { recursive: true, force: true });
     }
-  });
-
-  it('is how lifecycle.ts builds both auto-update gates (git and npm), rooted at the DKG home', () => {
-    // runDaemonInner cannot be driven to its auto-update section in a unit test,
-    // so guard the call sites: a gate built any other way would lose the
-    // persisted deadline and bring back the restart starvation.
-    const src = readFileSync(new URL('../src/daemon/lifecycle.ts', import.meta.url), 'utf-8');
-    expect(src).not.toMatch(/\bcreateUpdateHoldoffGate\s*\(/);
-    expect(src.match(/\bcreateDaemonUpdateHoldoffGate\(\{[^}]*dkgHome: dkgDir\(\)/g)).toHaveLength(2);
   });
 });
