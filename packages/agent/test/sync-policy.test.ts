@@ -42,6 +42,17 @@ describe('sync Context Graph policy', () => {
     }
   });
 
+  it('keeps an own "__proto__" priority through normalize and resolve', () => {
+    // Parsed like the daemon's JSON config, which makes "__proto__" an own key.
+    const config = JSON.parse('{"__proto__": 5, "constructor": -3}');
+    const resolved = resolveSyncContextGraphPriorities(config);
+    expect(contextGraphPriority(normalizeSyncContextGraphPriorities(config), '__proto__')).toBe(5);
+    expect(contextGraphPriority(resolved, '__proto__')).toBe(5);
+    expect(contextGraphPriority(resolved, 'constructor')).toBe(-3);
+    expect(countSyncPriorityClasses(resolved).elevated).toBe(1);
+    expect(Object.isFrozen(resolved)).toBe(true);
+  });
+
   it('uses bounded priority classes and counts configured entries only', () => {
     expect(syncPriorityClass(9)).toBe('elevated');
     expect(syncPriorityClass(0)).toBe('default');
