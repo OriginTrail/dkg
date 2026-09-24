@@ -5,7 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { handleNodeUIRequest } from '@origintrail-official/dkg-node-ui';
-import { hostIsLocal, nodeOperatorToken, nodeUiTokenForRequest } from '../src/daemon/http-utils.js';
+import { hostIsLocal } from '../src/daemon/http-utils.js';
+import { nodeOperatorToken, nodeUiTokenForRequest } from '../src/daemon/node-ui-access.js';
 
 // The dashboard shell is public, but the daemon embeds the node-operator token
 // in it only for a trusted local request: a loopback client socket AND a Host

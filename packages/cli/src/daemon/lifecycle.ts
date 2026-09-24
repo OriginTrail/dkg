@@ -204,6 +204,7 @@ import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { handleRpcUsageSnapshotRequest } from './rpc-usage-snapshot-route.js';
 import { handleSharedMemoryTtlSettingsRequest } from './shared-memory-ttl-route.js';
+import { nodeUiTokenForRequest } from './node-ui-access.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
 import {
   decodeVmReconcileNegativeRow,
@@ -347,7 +348,6 @@ import {
   isLoopbackClientIp,
   isLoopbackRateLimitExemptPath,
   shouldBypassRateLimitForLoopbackTraffic,
-  nodeUiTokenForRequest,
   shortId,
   sleep,
   deriveBlockExplorerUrl,

@@ -239,8 +239,8 @@ import {
   sleep,
   deriveBlockExplorerUrl,
   respondIfChainRpcTransportError,
-  requireNodeAdmin,
 } from '../http-utils.js';
+import { requireNodeAdmin } from '../node-admin-guard.js';
 import {
   normalizeRepo,
   isValidRepoSpec,
