@@ -8,7 +8,9 @@ The fix addresses two independently reproduced mechanisms: a KA-to-graph lookup 
 
 KA point reads select the registration signature and indexed KA ID (`topic2`) before decoding. A SQLite index covers scope, emitter, event signature, KA ID and event order; the point query explicitly selects it so a database without planner statistics cannot silently scan the history. Existing databases receive the additive index during initialization, before serving requests.
 
-The daemon owns one reader worker with a read-only SQLite connection. It captures cursor, coverage, matching rows and own-write evidence in one transaction, releases that transaction, then decodes. The existing event-log connection remains the writer. Small responses are checked against the current revision, lineage, topic set, fork suspicion and head age before being accepted; adapter binding checks remain in place.
+The daemon owns one reader worker with a read-only SQLite connection. It captures cursor, coverage, matching rows and own-write evidence in one transaction, releases that transaction, then decodes. Inline and worker readers use the same explicit snapshot planner and evaluator in the chain package, including finality, coverage and own-write gates. The worker does not simulate a writable store or replace registry methods. The existing event-log connection remains the writer. Small responses are checked against the current revision, lineage, topic set, fork suspicion and head age before being accepted; adapter binding checks remain in place.
+
+A single `ChainIndexCapability` pairs the required store with its optional reader factory through the agent and EVM adapter. The daemon resource owns that capability and one idempotent close operation, which retires the worker before closing the database on startup failure, fatal prerequisites and normal shutdown. Database closure also requires dependent work to have stopped: failed teardown keeps the database open, while startup errors retain their original cause. Existing SDK callers may still supply the store-only option.
 
 Limits are explicit:
 
@@ -17,6 +19,8 @@ Limits are explicit:
 - SQLite reads at most 8,193 rows; a result exceeding 8,192 rows is refused, never treated as a complete history. This bounds native allocation before JavaScript decoding.
 - Decoding yields every 128 rows. Ordinal callers receive one KA ID; the compatibility list port refuses lists larger than 1,024 entries.
 - Cancelled physical work retains its slot and watchdog until the worker replies. Stuck workers are terminated; replacements wait for retirement and a one-second cooldown. Shutdown also awaits retired workers.
+
+The worker process owner represents idle, starting, ready, retiring, cooling and closed states explicitly. Scheduling uses one physical-read record with queued, dispatched, detached and completed phases. Detaching the last caller removes the coalescing entry but retains the physical record until the reply or confirmed worker retirement.
 
 Misses, incomplete coverage, oversized graphs, stale answers, overload and worker failure use the existing RPC fallback. They cannot revive a full-history main-thread replay. Large graphs therefore still incur RPC calls for ordinal reads. The SDK's non-worker path also benefits from the indexed point lookup.
 
@@ -54,7 +58,7 @@ sequenceDiagram
     alt Snapshot exceeds 8192 rows
         W-->>C: Unavailable (row-limit)
     else Snapshot is bounded
-        W->>W: Decode in batches and apply existing read-model gates
+        W->>W: Run shared snapshot evaluator with batched decoding
         Note over W: Latest/finalized view, coverage, own-write hash,<br/>head age and fork suspicion remain authoritative
         W-->>C: Scalar answer plus revision fence, or unavailable
     end
@@ -150,7 +154,11 @@ Health-caller cancellation detaches that observer without cancelling the shared 
 
 Work began from freshly fetched `origin/testnet-canary` commit `24341ba73ab1f8a6f4330e34ae905bab725f0db6`; this remained the current base during validation. Tests use local fixtures and loopback peers.
 
-All 226 focused tests passed on Node 22.23.1: chain 99, SQLite store 27, CLI worker/lifecycle 81, core ping/diagnostics 17 and agent wiring 2. Coverage includes indexed SQL selection and migration, finality, coverage, own-write hashes, replaced tails, tombstones, retired revisions and bindings, caller cancellation, queue limits, physical timeouts, worker startup/crash/recovery, startup cleanup and shutdown. Real TCP/Noise/Yamux tests reproduce and fix health/monitor and monitor/monitor collisions while also checking silent peers, delayed remote stream closure and reconnect behavior. Package builds, type checks and repository lint pass.
+The updated implementation passes 255 focused tests on Node 22.23.1: chain 110, SQLite store 27, CLI worker/lifecycle 98, core ping/diagnostics 18 and agent wiring 2. Package builds, type checks, package boundary checks and repository lint pass. Coverage includes indexed SQL selection and migration, finality, coverage, own-write hashes, replaced tails, tombstones, retired revisions and bindings, caller cancellation, queue limits, physical timeouts, worker startup/crash/recovery, startup cleanup and shutdown. Real TCP/Noise/Yamux tests reproduce and fix health/monitor and monitor/monitor collisions while also checking silent peers, delayed remote stream closure and reconnect behavior.
+
+The first CI run exposed an additional diagnostics regression: metadata-only synthetic `connection:open` events have no per-connection `addEventListener`. The optional close diagnostics now check that capability before subscribing. The five affected agent suites pass locally with 218 tests and no unhandled connection errors.
+
+Review coverage adds expected-result parity between inline and explicit snapshot evaluation, worker lifecycle races, and real-worker contention with 8,000 registrations. A synchronous test barrier holds the first decode batch while point/cancellation messages are queued. Both contention tests fail when the production `await yieldTurn()` is removed, and pass after restoring it; the cancellation case proves that the same worker continues serving requests.
 
 The repeatable benchmark is:
 
@@ -166,12 +174,12 @@ Measured on Apple M3 with five fresh-worker samples and 100 warm/mixed point sam
 
 | Runtime | History | Warm point p99 | Mixed point success | Local HTTP maximum | Event-loop maximum |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Node 22.23.1 | 35,963 captured rows | 3.75 ms | 100/100 | 4.03 ms | 11.37 ms |
-| Node 22.23.1 | 359,630 generated rows | 3.84 ms | 100/100 | 1.12 ms | 11.40 ms |
-| Node 25.2.1 | 35,963 captured rows | 1.86 ms | 100/100 | 3.42 ms | 16.91 ms |
-| Node 25.2.1 | 359,630 generated rows | 2.45 ms | 100/100 | 0.93 ms | 11.27 ms |
+| Node 22.23.1 | 35,963 captured rows | 3.13 ms | 100/100 | 4.06 ms | 11.41 ms |
+| Node 22.23.1 | 359,630 generated rows | 3.48 ms | 100/100 | 1.11 ms | 11.42 ms |
+| Node 25.2.1 | 35,963 captured rows | 1.96 ms | 100/100 | 3.92 ms | 11.58 ms |
+| Node 25.2.1 | 359,630 generated rows | 1.74 ms | 100/100 | 0.79 ms | 11.60 ms |
 
-Every point lookup selected one row. No historical arrays crossed the worker boundary; the largest response was 284 bytes. Cold reads completed within 409 ms in these runs. Concurrent oversized ordinal reads refused with `row-limit` and left point reads available; the benchmark records fallback without sending RPC. The Node 22 patch release tested here is 22.23.1, rather than the investigated production host's 22.23.0.
+Every point lookup selected one row. No historical arrays crossed the worker boundary; the largest response was 284 bytes. Cold reads completed within 418 ms in these runs. Concurrent oversized ordinal reads refused with `row-limit` and left point reads available; the benchmark records fallback without sending RPC. The Node 22 patch release tested here is 22.23.1, rather than the investigated production host's 22.23.0.
 
 On the 359,630-row local database, direct index creation took 866 ms; reopening a compact database through the real initializer took 767 ms. The added index used 78.30 MiB and the row count was unchanged. A fragmented fixture took 7.19 seconds to reopen because the existing startup free-page policy also ran `VACUUM`. Account for database size, fragmentation and available disk space when planning startup; these timings are not production measurements.
 
