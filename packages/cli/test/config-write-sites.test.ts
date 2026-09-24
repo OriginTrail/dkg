@@ -15,7 +15,7 @@ describe('daemon settings writes', () => {
 
     expect(lifecycle).toMatch(/\bcreateDaemonTelemetryRuntime\(\{/);
     expect(lifecycle).toMatch(/\bcreateLlmSettings\(\{ config, memoryManager, log \}\)/);
-    expect(lifecycle).toMatch(/\bapplySharedMemoryTtl\(\{ config, agent \}, ttlMs\)/);
+    expect(lifecycle).toMatch(/\bcreateSharedMemoryTtlSetting\(\{ config, agent \}\)/);
     expect(lifecycle).not.toMatch(/\bcreateTelemetryRuntime\(/);
   });
 });

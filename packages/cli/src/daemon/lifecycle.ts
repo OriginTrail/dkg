@@ -202,9 +202,9 @@ import { createDaemonLocalLlmService } from './local-llm-service.js';
 import { appendBoundedDaemonLogDiagnostic } from './daemon-log-diagnostics.js';
 import { createTelemetrySettings } from './telemetry-runtime.js';
 import {
-  applySharedMemoryTtl,
   createDaemonTelemetryRuntime,
   createLlmSettings,
+  createSharedMemoryTtlSetting,
 } from './runtime-settings.js';
 import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
@@ -3461,6 +3461,7 @@ async function runDaemonInnerWithStartupOwnership(
   else log('Memory enrichment LLM not configured');
 
   const llmSettings = createLlmSettings({ config, memoryManager, log });
+  const sharedMemoryTtl = createSharedMemoryTtlSetting({ config, agent });
 
   const telemetrySettings = createTelemetrySettings(telemetryRuntime);
 
@@ -3787,7 +3788,7 @@ async function runDaemonInnerWithStartupOwnership(
             });
           }
           const ttlMs = Math.round(ttlDays * 24 * 60 * 60 * 1000);
-          await applySharedMemoryTtl({ config, agent }, ttlMs);
+          await sharedMemoryTtl.set(ttlMs);
           return jsonResponse(res, 200, { ok: true, ttlMs, ttlDays });
         } catch (err: any) {
           if (err instanceof PayloadTooLargeError) throw err;

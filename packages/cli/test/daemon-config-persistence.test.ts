@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import yaml from 'js-yaml';
-import { loadConfig, type DkgConfig } from '../src/config.js';
+import { loadConfig, updateConfigFile, type DkgConfig, type DkgConfigFileUpdate } from '../src/config.js';
 import { registerPublisherCommand } from '../src/commands/publisher.js';
 import {
   connectLocalAgentIntegration,
@@ -18,10 +18,16 @@ import { withFileLease } from '../src/file-lock.js';
 import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 import {
-  applySharedMemoryTtl,
   createDaemonTelemetryRuntime,
   createLlmSettings,
+  createSharedMemoryTtlSetting,
 } from '../src/daemon/runtime-settings.js';
+
+// The writer runs for real unless a test stands in for it.
+vi.mock('../src/config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/config.js')>();
+  return { ...actual, updateConfigFile: vi.fn(actual.updateConfigFile) };
+});
 
 // The Hermes attach job and refresh probe run for real; only the bridge probe
 // and the setup entrypoint they call are stubbed.
@@ -44,6 +50,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.mocked(updateConfigFile).mockReset();
   if (previousDkgHome === undefined) delete process.env.DKG_HOME;
   else process.env.DKG_HOME = previousDkgHome;
   await rm(home, { recursive: true, force: true });
@@ -143,18 +150,68 @@ describe('daemon runtime settings', () => {
     expect(await readFileConfig()).toEqual({ name: 'node', contextGraphs: ['saved-by-cli'] });
   });
 
-  it('writes the LLM settings the daemon holds when the write runs, not when it was requested', async () => {
+  it('applies overlapping LLM changes in the order they were requested, whichever write finishes first', async () => {
     const config = bootConfig();
+    const memoryManager = { updateConfig: vi.fn() };
+    const settings = createLlmSettings({ config, memoryManager, log: () => {} });
+    const pending: Array<() => void> = [];
+    vi.mocked(updateConfigFile).mockImplementation(() => new Promise<DkgConfigFileUpdate>((resolve) => {
+      pending.push(() => resolve({ path: join(home, 'config.json'), changed: true, strategy: 'rename' }));
+    }));
+
+    const first = settings.setLlm({ apiKey: 'first' });
+    const second = settings.setLlm({ apiKey: 'second' });
+    // Finish the newest write in flight first, as a lock handed to the later writer would.
+    for (let finished = 0; finished < 2; finished += 1) {
+      await vi.waitFor(() => expect(pending.length).toBeGreaterThan(0));
+      pending.pop()!();
+    }
+    await Promise.all([first, second]);
+
+    expect(memoryManager.updateConfig.mock.calls).toEqual([[{ apiKey: 'first' }], [{ apiKey: 'second' }]]);
+    expect(config.llm).toEqual({ apiKey: 'second' });
+  });
+
+  // An operator's typo in config.json makes the write fail, as a lock
+  // timeout or a failed replace would: the running node keeps its setting.
+  it('changes neither the node nor the file when the LLM write fails, and the next change still goes through', async () => {
+    const config = bootConfig({ llm: { apiKey: 'booted' } });
+    const unparseable = '{ "name": "node",';
+    await writeFile(join(home, 'config.json'), unparseable);
+    const memoryManager = { updateConfig: vi.fn() };
+    const settings = createLlmSettings({ config, memoryManager, log: () => {} });
+
+    await expect(settings.setLlm({ apiKey: 'requested' })).rejects.toThrow(SyntaxError);
+    await expect(settings.setLlm(null)).rejects.toThrow(SyntaxError);
+
+    expect(config.llm).toEqual({ apiKey: 'booted' });
+    expect(memoryManager.updateConfig).not.toHaveBeenCalled();
+    expect(await readRaw()).toBe(unparseable);
+
     await fileEditedAfterBoot({ name: 'node' });
-    const settings = createLlmSettings({ config, memoryManager: { updateConfig: vi.fn() }, log: () => {} });
-    const lock = await holdConfigLock();
+    await settings.setLlm({ apiKey: 'requested' });
+    expect(config.llm).toEqual({ apiKey: 'requested' });
+    expect(memoryManager.updateConfig).toHaveBeenCalledWith({ apiKey: 'requested' });
+    expect((await readFileConfig()).llm).toEqual({ apiKey: 'requested' });
+  });
 
-    const write = settings.setLlm({ apiKey: 'requested' });
-    config.llm = { apiKey: 'changed-while-waiting' };
-    await lock.release();
-    await write;
+  it('changes neither the agent nor the file when the shared memory TTL write fails, and the next change still goes through', async () => {
+    const config = bootConfig({ sharedMemoryTtlMs: 3_600_000, workspaceTtlMs: 3_600_000 });
+    const unparseable = '{ "name": "node",';
+    await writeFile(join(home, 'config.json'), unparseable);
+    const agent = { setSharedMemoryTtlMs: vi.fn() };
+    const ttl = createSharedMemoryTtlSetting({ config, agent });
 
-    expect((await readFileConfig()).llm).toEqual({ apiKey: 'changed-while-waiting' });
+    await expect(ttl.set(86_400_000)).rejects.toThrow(SyntaxError);
+
+    expect(config).toMatchObject({ sharedMemoryTtlMs: 3_600_000, workspaceTtlMs: 3_600_000 });
+    expect(agent.setSharedMemoryTtlMs).not.toHaveBeenCalled();
+    expect(await readRaw()).toBe(unparseable);
+
+    await fileEditedAfterBoot({ name: 'node' });
+    await ttl.set(86_400_000);
+    expect(agent.setSharedMemoryTtlMs).toHaveBeenCalledWith(86_400_000);
+    expect(await readFileConfig()).toEqual({ name: 'node', sharedMemoryTtlMs: 86_400_000, workspaceTtlMs: 86_400_000 });
   });
 
   it('applies the shared memory TTL to the agent and persists it under its current and legacy keys', async () => {
@@ -162,7 +219,7 @@ describe('daemon runtime settings', () => {
     await fileEditedAfterBoot({ name: 'node', contextGraphs: ['saved-by-cli'] });
     const agent = { setSharedMemoryTtlMs: vi.fn() };
 
-    await applySharedMemoryTtl({ config, agent }, 86_400_000);
+    await createSharedMemoryTtlSetting({ config, agent }).set(86_400_000);
 
     expect(agent.setSharedMemoryTtlMs).toHaveBeenCalledWith(86_400_000);
     expect(config).toMatchObject({ sharedMemoryTtlMs: 86_400_000, workspaceTtlMs: 86_400_000 });
