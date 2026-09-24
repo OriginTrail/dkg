@@ -22,6 +22,9 @@ describe('privately parsed JSON SELECT decoding', () => {
     { type: 'uri', value: 'urn:test:value' },
     { type: 'bnode', value: 'node' },
     { type: 'bnode', value: 'x·y.z' },
+    // Results labels are response-local, not SPARQL source tokens: `ª` is
+    // outside the SPARQL BLANK_NODE_LABEL grammar but a valid results label.
+    { type: 'bnode', value: 'ª' },
     { type: 'literal', value: 'quotes " and slash \\ and \n' },
     { type: 'literal', value: 'bonjour', 'xml:lang': 'fr' },
     { type: 'typed-literal', value: '42', datatype: 'urn:test:number' },
@@ -35,8 +38,6 @@ describe('privately parsed JSON SELECT decoding', () => {
     null, [], { type: 'uri' }, { value: 'x' }, { type: 'uri', value: 1 },
     { type: 'uri', value: 'relative' }, { type: 'uri', value: 'urn:x', extra: true },
     { type: 'uri', value: 'urn:bad>' }, { type: 'bnode', value: 'bad.' },
-    // Outside PN_CHARS_BASE: the shared BLANK_NODE_LABEL grammar, not a Unicode-category approximation.
-    { type: 'bnode', value: 'ª' },
     { type: 'unsupported', value: 'x' }, { type: 'typed-literal', value: '42' },
     { type: 'literal', value: 'x', datatype: 'relative' },
     { type: 'literal', value: 'x', 'xml:lang': 'not valid' },
@@ -45,6 +46,23 @@ describe('privately parsed JSON SELECT decoding', () => {
     const input = response(term);
     expect(() => parseSparqlJsonSelectResponse(input)).toThrow(SparqlJsonResultsShapeError);
     expect(() => decodeSparqlJsonQueryResult(JSON.stringify(input), 'select')).toThrow(SparqlJsonResultsShapeError);
+  });
+
+  it('keeps a results label outside the SPARQL grammar usable, and consistent within the response', () => {
+    const text = JSON.stringify({
+      head: { vars: ['a', 'b'] },
+      results: {
+        bindings: [
+          { a: { type: 'bnode', value: 'ª' }, b: { type: 'bnode', value: 'ª' } },
+          { a: { type: 'bnode', value: 'ª' }, b: { type: 'bnode', value: 'node' } },
+        ],
+      },
+    });
+    const result = decodeSparqlJsonQueryResult(text, 'select');
+    expect(result).toMatchObject({
+      type: 'bindings',
+      bindings: [{ a: '_:ª', b: '_:ª' }, { a: '_:ª', b: '_:node' }],
+    });
   });
 
   it.each([
