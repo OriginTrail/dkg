@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { DkgClient, DkgHttpError, DkgOutcomeUnknownError } from '../src/client.js';
 import { registerAssertionTools } from '../src/tools/assertions.js';
 import { FakeClient, FakeServer, makeConfig } from './harness.js';
@@ -524,5 +524,85 @@ describe('DkgClient per-route timeout classes', () => {
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
+  });
+
+  it('a list read that outlasts the read timeout is not cut short', async () => {
+    const client = timed(80, 1_000, 200, { contextGraphs: [], subGraphs: [] });
+    await expect(client.listProjects()).resolves.toEqual([]);
+    await expect(client.listSubGraphs('cg-1')).resolves.toEqual([]);
+  });
+
+  describe('deadline values', () => {
+    let deadlines: number[];
+
+    beforeEach(() => {
+      deadlines = [];
+      const timeout = AbortSignal.timeout.bind(AbortSignal);
+      vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+        deadlines.push(ms);
+        return timeout(ms);
+      });
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    });
+
+    const client = (opts: { readTimeoutMs?: number; longTimeoutMs?: number } = {}) =>
+      new DkgClient({ config: makeConfig(), fetcher: slowDaemon(0, 200, {}), ...opts });
+    const readAll = async (c: DkgClient) => {
+      // The client has no PCA or publisher-job method yet; the route classes
+      // still cover them, as in the CLI client.
+      const request = (c as unknown as {
+        request(method: 'GET', route: string): Promise<unknown>;
+      }).request.bind(c);
+      await c.listProjects();
+      await c.listSubGraphs('cg-1');
+      await request('GET', '/api/pca');
+      await request('GET', '/api/publisher/jobs?status=queued');
+      await request('GET', '/api/pca/1');
+      await c.getStatus();
+      await c.registerContextGraph({ id: 'cg-1' });
+    };
+
+    it('gives the graph, PCA and publisher-job lists 60 s, other reads 30 s and writes 240 s', async () => {
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '');
+      vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', '');
+      await readAll(client());
+      expect(deadlines).toEqual([60_000, 60_000, 60_000, 60_000, 30_000, 30_000, 240_000]);
+    });
+
+    it('takes the read and long deadlines from the environment', async () => {
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '45000');
+      vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', ' 600000 ');
+      await readAll(client());
+      expect(deadlines).toEqual([60_000, 60_000, 60_000, 60_000, 45_000, 45_000, 600_000]);
+    });
+
+    it('never gives a list less than the read deadline, nor a write less than either', async () => {
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '90000');
+      vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', '5000');
+      await readAll(client());
+      expect(deadlines).toEqual([90_000, 90_000, 90_000, 90_000, 90_000, 90_000, 90_000]);
+    });
+
+    it('lets explicit client options win over the environment', async () => {
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '45000');
+      vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', '600000');
+      await readAll(client({ readTimeoutMs: 20, longTimeoutMs: 1_000 }));
+      expect(deadlines).toEqual([60_000, 60_000, 60_000, 60_000, 20, 20, 1_000]);
+    });
+
+    it.each(['0', '-1', '1.5', '30s', '1e4', '0x10', '2147483648'])(
+      'rejects %j as a timeout override',
+      (value) => {
+        vi.stubEnv('DKG_API_READ_TIMEOUT_MS', value);
+        expect(() => client()).toThrow(/DKG_API_READ_TIMEOUT_MS must be a whole number of milliseconds/);
+        vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '');
+        vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', value);
+        expect(() => client()).toThrow(/DKG_API_LONG_TIMEOUT_MS must be a whole number of milliseconds/);
+      },
+    );
   });
 });
