@@ -46,17 +46,11 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
     // the boot-time wiring (incl. this registration) now lives in a sibling
     // file (`dkg-agent-lifecycle.ts`) rather than `dkg-agent.ts`. Scan the
     // whole agent `src` tree so the pin tracks the agent package, not one file.
-    const combined = walk(AGENT_SRC)
-      .map((f) => readFileSync(f, 'utf8'))
-      .join('\n');
-    expect(combined).toMatch(/PROTOCOL_STORAGE_ACK/);
-    // rc.9 PR-11: registration moved from `router.register` to
-    // `messenger.register` (substrate auto-wraps with envelope
-    // decode + receiver-side dedup). Pin against the new shape.
-    const registerRE = /messenger\.register\s*\(\s*PROTOCOL_STORAGE_ACK\s*,/;
-    expect(combined).toMatch(registerRE);
-    const registerV2RE = /messenger\.register\s*\(\s*PROTOCOL_STORAGE_ACK_V2\s*,/;
-    expect(combined).toMatch(registerV2RE);
+    const lifecycle = readFileSync(join(AGENT_SRC, 'dkg-agent-lifecycle.ts'), 'utf8');
+    // Both IDs must enter the one registered endpoint through Messenger,
+    // which supplies envelope decoding and receiver-side deduplication.
+    expect(lifecycle).toMatch(/const storageACKProtocols = \[\s*PROTOCOL_STORAGE_ACK,\s*PROTOCOL_STORAGE_ACK_V2,/);
+    expect(lifecycle).toMatch(/for \(const protocol of storageACKProtocols\) \{\s*this\.messenger\.register\(protocol,/);
   });
 
   it('agent wires core-side StorageACK decline logging', () => {
