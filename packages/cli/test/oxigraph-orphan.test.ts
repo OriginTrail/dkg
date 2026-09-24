@@ -49,6 +49,7 @@ import {
   portAnswers,
   spawnOrphan,
   waitForCondition,
+  withStoreOwnership,
   type OxigraphStandinFixture,
 } from './fixtures/oxigraph-server-real-fixture.js';
 
@@ -266,9 +267,9 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
         readyIntervalMs: 50,
         log: (line) => lines.push(line),
         storeOwnership: {
-          releaseOrphans: async () => [],
-          recordLaunch: async ({ launcherPid, oxigraphPid }) => {
-            if (oxigraphPid === undefined) return;
+          beforeSpawn: async () => {},
+          spawned: async () => {},
+          ready: async ({ launcherPid, oxigraphPid }) => {
             // The verified Oxigraph dies during the ready-time write, and its
             // watchdog exits with it before the write completes.
             process.kill(oxigraphPid, 'SIGKILL');
@@ -282,7 +283,7 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
     }
   }, 30_000);
 
-  it('releases orphans before every spawn and records each launch at spawn and at readiness', async () => {
+  it('calls the store ownership before every spawn, at spawn and at readiness, for boot and restart', async () => {
     const port = await freePort();
     const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-sequence-'));
     const events: string[] = [];
@@ -296,10 +297,9 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
       restartBackoffMaxMs: 50,
       log: () => {},
       storeOwnership: {
-        releaseOrphans: async () => { events.push('release'); return []; },
-        recordLaunch: async ({ launcherPid, oxigraphPid }) => {
-          events.push(oxigraphPid === undefined ? `spawned:${launcherPid}` : `ready:${launcherPid}:${oxigraphPid}`);
-        },
+        beforeSpawn: async () => { events.push('before-spawn'); },
+        spawned: async ({ launcherPid }) => { events.push(`spawned:${launcherPid}`); },
+        ready: async ({ launcherPid, oxigraphPid }) => { events.push(`ready:${launcherPid}:${oxigraphPid}`); },
       },
     });
     try {
@@ -309,12 +309,51 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
       const second = await fetchPid(port);
       const [launch1, launch2] = [events[1].split(':')[1], events[4].split(':')[1]];
       expect(events).toEqual([
-        'release', `spawned:${launch1}`, `ready:${launch1}:${first}`,
-        'release', `spawned:${launch2}`, `ready:${launch2}:${second}`,
+        'before-spawn', `spawned:${launch1}`, `ready:${launch1}:${first}`,
+        'before-spawn', `spawned:${launch2}`, `ready:${launch2}:${second}`,
       ]);
       expect(launch2).not.toBe(launch1);
     } finally {
       await handle.stop();
+      await rm(location, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('does not resolve stop() while an owner record is still being written', async () => {
+    const port = await freePort();
+    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-stop-write-'));
+    const events: string[] = [];
+    let launches = 0;
+    // The restart's spawn-time write is slow; stop() is called during it.
+    const slowHandle = await startOxigraphServer({
+      binaryPath: lockingStandin.binaryPath,
+      location,
+      port,
+      readyTimeoutMs: 10_000,
+      readyIntervalMs: 50,
+      restartBackoffBaseMs: 50,
+      restartBackoffMaxMs: 50,
+      log: () => {},
+      storeOwnership: {
+        beforeSpawn: async () => {},
+        spawned: async () => {
+          launches += 1;
+          if (launches < 2) return;
+          events.push('spawned-write-started');
+          await new Promise((resolve) => setTimeout(resolve, 500));
+          events.push('spawned-write-finished');
+        },
+        ready: async () => { events.push('ready-write'); },
+      },
+    });
+    try {
+      process.kill(await fetchPid(port), 'SIGKILL');
+      expect(await waitForCondition(() => events.includes('spawned-write-started'), 10_000)).toBe(true);
+      await slowHandle.stop();
+      events.push('stopped');
+      expect(events).toEqual(['ready-write', 'spawned-write-started', 'spawned-write-finished', 'stopped']);
+    } finally {
+      await slowHandle.stop();
       await rm(location, { recursive: true, force: true });
     }
   }, 30_000);
@@ -324,7 +363,7 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
     const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-restart-'));
     const lines: string[] = [];
     let listenerPid: number | undefined;
-    const handle = await startOxigraphServer({
+    const handle = await startOxigraphServer(withStoreOwnership({
       binaryPath: lockingStandin.binaryPath,
       location,
       port,
@@ -333,7 +372,7 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
       restartBackoffBaseMs: 50,
       restartBackoffMaxMs: 50,
       log: (line) => lines.push(line),
-    });
+    }));
     try {
       listenerPid = await fetchPid(port);
       const watchdog = parentPid(listenerPid);
@@ -363,7 +402,7 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
     let withholdOwnership = false;
     const listenerPids: number[] = [];
     const lines: string[] = [];
-    const handle = await startOxigraphServer({
+    const handle = await startOxigraphServer(withStoreOwnership({
       binaryPath: lockingStandin.binaryPath,
       location,
       port,
@@ -377,7 +416,7 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
           ? null
           : await findListenOwnerPid(child, childPort, host, ownership),
       },
-    });
+    }));
     try {
       listenerPids.push(await fetchPid(port));
       withholdOwnership = true;
@@ -939,14 +978,14 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       expect(parentPid(orphanPid), 'fixture orphan was not adopted by init').toBe(1);
       const lockInode = statSync(lockPath).ino;
 
-      const handle = await startOxigraphServer({
+      const handle = await startOxigraphServer(withStoreOwnership({
         binaryPath: lockingStandin.binaryPath,
         location,
         port,
         readyTimeoutMs: 10_000,
         readyIntervalMs: 50,
         log: (line) => lines.push(line),
-      });
+      }));
       try {
         expect(pidIsGone(orphanPid)).toBe(true);
         expect(await fetchPid(port)).not.toBe(orphanPid);

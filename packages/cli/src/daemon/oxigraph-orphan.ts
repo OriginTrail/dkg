@@ -33,8 +33,7 @@
  * (same PID and start time). The LOCK file itself is never modified.
  *
  * `createOxigraphStoreOwnership` bundles the reclaim and the record for one
- * store, so the managed server only asks it to release orphans before each
- * spawn and to record each launch.
+ * store; the managed server calls its three steps around each launch.
  */
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
@@ -514,12 +513,17 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
   }
 }
 
-/** Who may use one managed store: reclaim before each spawn, record each launch. */
+/**
+ * The store-ownership steps of each managed Oxigraph launch, called in order.
+ * Built where the binary catalog is known (the managed layer).
+ */
 export interface OxigraphStoreOwnership {
-  /** Stop orphaned Oxigraph processes holding the store lock; returns the PIDs signalled. */
-  releaseOrphans(): Promise<number[]>;
-  /** Record a launch at spawn, then again with Oxigraph's PID once it is verified ready. */
-  recordLaunch(launch: { launcherPid: number; oxigraphPid?: number }): Promise<void>;
+  /** Stop orphaned Oxigraph processes that hold the store lock. */
+  beforeSpawn(): Promise<void>;
+  /** Record the new launch as the store's owner. */
+  spawned(launch: { launcherPid: number }): Promise<void>;
+  /** Add the verified Oxigraph to the owner record. */
+  ready(launch: { launcherPid: number; oxigraphPid: number }): Promise<void>;
 }
 
 export function createOxigraphStoreOwnership(opts: {
@@ -528,14 +532,16 @@ export function createOxigraphStoreOwnership(opts: {
   knownBinaryDirs?: readonly string[];
   log: (message: string) => void;
 }): OxigraphStoreOwnership {
+  const record = (launcherPid: number, oxigraphPid?: number): Promise<void> => recordOxigraphOwner({
+    location: opts.location,
+    binaryPath: opts.binaryPath,
+    launcherPid,
+    oxigraphPid,
+    log: opts.log,
+  });
   return {
-    releaseOrphans: () => stopOrphanedOxigraph(opts),
-    recordLaunch: ({ launcherPid, oxigraphPid }) => recordOxigraphOwner({
-      location: opts.location,
-      binaryPath: opts.binaryPath,
-      launcherPid,
-      oxigraphPid,
-      log: opts.log,
-    }),
+    beforeSpawn: async () => { await stopOrphanedOxigraph(opts); },
+    spawned: ({ launcherPid }) => record(launcherPid),
+    ready: ({ launcherPid, oxigraphPid }) => record(launcherPid, oxigraphPid),
   };
 }

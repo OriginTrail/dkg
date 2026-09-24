@@ -1,4 +1,5 @@
 import { startOxigraphServer } from '../../src/daemon/oxigraph-server.js';
+import { withStoreOwnership } from './oxigraph-server-real-fixture.js';
 
 // Stand-in daemon worker: owns one managed Oxigraph through the production
 // supervisor (direct launch, no memory limits), reports readiness, then idles
@@ -9,7 +10,7 @@ if (!binaryPath || !location || !rawPort) {
   throw new Error('expected binaryPath, location and port');
 }
 
-const handle = await startOxigraphServer({
+const handle = await startOxigraphServer(withStoreOwnership({
   binaryPath,
   location,
   port: Number(rawPort),
@@ -19,7 +20,7 @@ const handle = await startOxigraphServer({
   // `never-ready`: Oxigraph starts but ownership is never proven, as for a
   // store that is still replaying its write-ahead log.
   ...(mode === 'never-ready' ? { io: { findListenOwnerPid: async () => null } } : {}),
-});
+}));
 process.once('SIGTERM', () => {
   void handle.stop().finally(() => process.exit(0));
 });

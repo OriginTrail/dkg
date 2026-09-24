@@ -49,11 +49,7 @@ import {
 } from './oxigraph-launch-strategy.js';
 import { invalidateExternalStoreQuadsCache } from './store-quads-cache.js';
 import { OXIGRAPH_STOP_GRACE_MS } from './oxigraph-parent-watchdog.js';
-import {
-  createOxigraphStoreOwnership,
-  oxigraphStoreArgs,
-  type OxigraphStoreOwnership,
-} from './oxigraph-orphan.js';
+import { oxigraphStoreArgs, type OxigraphStoreOwnership } from './oxigraph-orphan.js';
 import {
   readCgroupOomSnapshot,
   readCgroupOomKill,
@@ -118,9 +114,9 @@ export interface StartOxigraphServerOptions {
   platform?: NodeJS.Platform;
   /**
    * Reclaims the store from orphaned Oxigraph processes before each spawn and
-   * records each launch. Defaults to one that knows only `binaryPath`.
+   * records each launch; built by the caller, which knows the binary catalog.
    */
-  storeOwnership?: OxigraphStoreOwnership;
+  storeOwnership: OxigraphStoreOwnership;
   io?: Partial<OxigraphServerIo>;
 }
 
@@ -195,11 +191,7 @@ export async function startOxigraphServer(
     invalidateExternalStoreQuadsCache();
   };
   const log = opts.log ?? (() => {});
-  const storeOwnership = opts.storeOwnership ?? createOxigraphStoreOwnership({
-    location: opts.location,
-    binaryPath: opts.binaryPath,
-    log,
-  });
+  const { storeOwnership } = opts;
   const host = opts.host ?? DEFAULT_HOST;
   const { port } = opts;
   const bind = `${host}:${port}`;
@@ -403,7 +395,7 @@ export async function startOxigraphServer(
   const prepareSpawn = async (
     kind: 'boot' | 'restart',
   ): Promise<{ timeoutMs: number; walBytes: number }> => {
-    await storeOwnership.releaseOrphans();
+    await storeOwnership.beforeSpawn();
     const ready = nextReadyTimeout();
     if (ready.walBytes > 0) {
       log(kind === 'boot'
@@ -418,10 +410,23 @@ export async function startOxigraphServer(
   // Recorded at spawn, then again once the launch is verified ready, so the
   // reclaim can identify this launch's Oxigraph even if the daemon dies
   // before readiness.
-  const recordLaunch = (c: ChildProcess, listenerPid?: number): Promise<void> =>
+  // A stopped server writes nothing more, and stop() waits for writes in
+  // flight, so its store directory is quiet once stop() resolves.
+  let ownershipWrites: Promise<void> = Promise.resolve();
+  const trackOwnershipWrite = (write: () => Promise<void>): Promise<void> => {
+    if (isStopping()) return Promise.resolve();
+    const pending = write().catch(() => {});
+    ownershipWrites = ownershipWrites.then(() => pending);
+    return pending;
+  };
+  const recordSpawned = (c: ChildProcess): Promise<void> =>
     c.pid === undefined
       ? Promise.resolve()
-      : storeOwnership.recordLaunch({ launcherPid: c.pid, oxigraphPid: listenerPid });
+      : trackOwnershipWrite(() => storeOwnership.spawned({ launcherPid: c.pid! }));
+  const recordReady = (c: ChildProcess, oxigraphPid: number): Promise<void> =>
+    c.pid === undefined
+      ? Promise.resolve()
+      : trackOwnershipWrite(() => storeOwnership.ready({ launcherPid: c.pid!, oxigraphPid }));
 
   type StoreOpenOutcome =
     | { outcome: 'ready'; probes: number }
@@ -469,7 +474,7 @@ export async function startOxigraphServer(
         // Record before declaring ready, then look again: a child that exits
         // during the write is a failed open, not a ready server whose exit
         // handler has already started recovery.
-        await recordLaunch(c, listenerPid);
+        await recordReady(c, listenerPid);
         if (attempt.superseded?.()) return { outcome: 'superseded' };
         if (!childAlive(c)) return { outcome: 'child-died' };
         // Keep the actual listener PID, not the watchdog or systemd-run
@@ -509,7 +514,7 @@ export async function startOxigraphServer(
     if (isStopping()) return;
     const candidate = spawnChild();
     lifecycle = { phase: 'recovering', child: candidate, reason, generation };
-    await recordLaunch(candidate);
+    await recordSpawned(candidate);
     const opened = await awaitStoreOpen(candidate, reviveReady, {
       generation,
       progress: (elapsedS, allowedS) =>
@@ -650,7 +655,10 @@ export async function startOxigraphServer(
     };
     markStoreDown();
     const c = candidate;
-    if (!c || c.exitCode !== null || c.signalCode !== null) return;
+    if (!c || c.exitCode !== null || c.signalCode !== null) {
+      await ownershipWrites;
+      return;
+    }
     await new Promise<void>((resolve) => {
       let settled = false;
       const done = () => {
@@ -669,6 +677,7 @@ export async function startOxigraphServer(
       }, stopGraceMs);
       killTimer.unref?.();
     });
+    await ownershipWrites;
     log('[oxigraph] server stopped');
   };
 
@@ -702,7 +711,7 @@ export async function startOxigraphServer(
   // caller's own reaper remains harmless.
   process.on('exit', exitGuard);
 
-  await recordLaunch(initialChild);
+  await recordSpawned(initialChild);
   const opened = await awaitStoreOpen(initialChild, bootReady, {
     generation: lifecycle.generation,
     // Only an exit-time kill (process.exit) moves boot out of `starting`.
