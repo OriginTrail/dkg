@@ -157,6 +157,16 @@ All notable changes to the DKG V10 node are documented here. The format is based
   fails a graph closed, needing a fresh catch-up, when either runs out. A
   finalized authority read whose caller gives up now leaves the shared
   authority-read queue instead of holding it.
+- **Catch-up status and public node status no longer name private Context
+  Graphs to other callers**: `GET /api/sync/catchup-status?jobId=` now applies
+  the rule a lookup by name hash already follows. Once the name hash a job was
+  created under resolves to a cleartext id, only the node operator and an
+  agent the subscribe route would admit to that graph see the job; any other
+  token gets the answer for an unknown job id. `GET /api/status`, which needs
+  no token, lists in `rfc64SelectedPublicSync.requestedContextGraphs` only the
+  graphs also in `catalogBackedContextGraphs`, and reports the size of the
+  whole scope as `requestedContextGraphCount`; a request with the
+  node-operator token still gets the whole list.
 
 ### Changed
 
