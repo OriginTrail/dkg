@@ -2011,8 +2011,9 @@ describe('SparqlHttpStore RDF term formatting', () => {
         enforcement: 'observe',
       }]);
       expect(observed.warnings).toEqual([
-        expect.stringContaining('sparql-http.insert: invalid iri in SPARQL graph position "http://ex.org/g^x"'),
+        expect.stringContaining('sparql-http.insert: invalid iri in SPARQL graph position (17 chars, fingerprint '),
       ]);
+      expect(observed.warnings[0]).not.toContain('http://ex.org/g^x');
     } finally {
       observed.restore();
     }

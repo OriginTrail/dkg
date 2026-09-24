@@ -13,6 +13,7 @@
  * logged, then rendered exactly as before this module existed. Until the
  * hard-reject flip, that still means stripping characters from a malformed IRI.
  */
+import { createHmac, randomBytes } from 'node:crypto';
 import {
   assertSafeIri,
   assertSafeRdfTerm,
@@ -230,10 +231,22 @@ function renderInvalidTerm(
 }
 
 const INVALID_TERM_WARN_INTERVAL_MS = 60_000;
-const INVALID_TERM_SAMPLE_CHARS = 120;
 const lastInvalidTermWarnAt = new Map<string, number>();
 
-/** Count every invalid term; warn at most once a minute per site and label. */
+// Terms are untrusted data that may hold private graph content or secrets, so
+// the warning never includes one. A fingerprint keyed per process lets an
+// operator match repeats in one node's logs, but it cannot be checked against
+// guessed values or correlated across nodes and restarts.
+const INVALID_TERM_FINGERPRINT_KEY = randomBytes(32);
+
+function invalidTermFingerprint(term: string): string {
+  return createHmac('sha256', INVALID_TERM_FINGERPRINT_KEY).update(term).digest('hex').slice(0, 12);
+}
+
+/**
+ * Count every invalid term; warn at most once a minute per site and label,
+ * with the term's length and fingerprint but never the term itself.
+ */
 function recordInvalidTerm(
   term: string,
   position: ObservedTermPosition,
@@ -255,11 +268,10 @@ function recordInvalidTerm(
   const lastWarnAt = lastInvalidTermWarnAt.get(key);
   if (lastWarnAt !== undefined && now - lastWarnAt < INVALID_TERM_WARN_INTERVAL_MS) return;
   lastInvalidTermWarnAt.set(key, now);
-  const sample = JSON.stringify(term.slice(0, INVALID_TERM_SAMPLE_CHARS));
-  const truncated = term.length > INVALID_TERM_SAMPLE_CHARS ? '…' : '';
   console.warn(
     `[storage] ${site.adapter}.${site.operation}: invalid ${kind} in SPARQL ${position} ` +
-      `position ${sample}${truncated}. Sent it in the pre-validation form (observe mode); ` +
+      `position (${term.length} chars, fingerprint ${invalidTermFingerprint(term)}; the value is not logged). ` +
+      'Sent it in the pre-validation form (observe mode); ' +
       'a later release will reject it. Further occurrences are counted in ' +
       'dkg.store.sparql_invalid_terms_total and warned at most once a minute.',
   );

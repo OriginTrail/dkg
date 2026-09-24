@@ -254,7 +254,10 @@ describe('buildBlankNodeSafeDelete — generated SPARQL shape', () => {
         kind: 'iri',
         enforcement: 'observe',
       }]);
-      expect(observed.warnings).toEqual([expect.stringContaining('"http://ex/p|q"')]);
+      expect(observed.warnings).toEqual([
+        expect.stringContaining('sparql-http.delete: invalid iri in SPARQL predicate position (13 chars, fingerprint '),
+      ]);
+      expect(observed.warnings[0]).not.toContain('http://ex/p|q');
     } finally {
       observed.restore();
     }

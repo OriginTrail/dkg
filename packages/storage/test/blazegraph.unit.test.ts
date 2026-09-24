@@ -1159,8 +1159,9 @@ describe('BlazegraphStore (mocked HTTP)', () => {
           enforcement: 'observe',
         }]);
         expect(observed.warnings).toEqual([
-          expect.stringContaining('blazegraph.dropGraph: invalid iri in SPARQL graph position "http://g{x}"'),
+          expect.stringContaining('blazegraph.dropGraph: invalid iri in SPARQL graph position (11 chars, fingerprint '),
         ]);
+        expect(observed.warnings[0]).not.toContain('http://g{x}');
       } finally {
         observed.restore();
       }

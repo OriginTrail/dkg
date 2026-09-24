@@ -49,7 +49,10 @@ it.each(STORES)('$name counts a malformed graph IRI and a line-break subject pre
     expect(observed.counted).toEqual([{
       value: 1, adapter, operation: 'dropGraph', position: 'graph', kind: 'iri', enforcement: 'observe',
     }]);
-    expect(observed.warnings).toEqual([expect.stringContaining(JSON.stringify(malformed))]);
+    expect(observed.warnings).toEqual([
+      expect.stringContaining(`graph position (${malformed.length} chars, fingerprint `),
+    ]);
+    expect(observed.warnings[0]).not.toContain(malformed);
 
     // A prefix no IRI can start with is counted, and still sent as before, so
     // the update stays unparseable and the call fails instead of deleting nothing.

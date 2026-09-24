@@ -198,8 +198,11 @@ describe('malformed terms are logged and counted, then sent in the pre-validatio
     }]);
     expect(observed.warnings).toHaveLength(1);
     const [warning] = observed.warnings;
-    expect(warning).toContain(`blazegraph.deleteByPattern: invalid ${kind} in SPARQL ${position} position`);
-    expect(warning).toContain(JSON.stringify(term));
+    expect(warning).toContain(
+      `blazegraph.deleteByPattern: invalid ${kind} in SPARQL ${position} position (${term.length} chars, fingerprint `,
+    );
+    expect(warning).not.toContain(JSON.stringify(term));
+    if (term !== '') expect(warning).not.toContain(term);
     expect(warning).not.toMatch(/[\r\n]/);
   });
 
@@ -224,19 +227,28 @@ describe('malformed terms are logged and counted, then sent in the pre-validatio
     sparqlIriTerm('urn:e f', 'graph', site);
 
     expect(observed.counted).toHaveLength(4);
-    expect(observed.warnings.map((line) => line.match(/"[^"]*"/)?.[0])).toEqual([
-      '"urn:a b"',
-      '"_:g"',
-      '"urn:e f"',
-    ]);
+    expect(observed.warnings.map((line) => line.match(/invalid (\S+) in SPARQL graph position \((\d+) chars/)?.slice(1)))
+      .toEqual([['iri', '7'], ['blank-node', '3'], ['iri', '7']]);
   });
 
-  it('truncates the logged sample', () => {
+  it('never logs the term itself, only its length and a keyed fingerprint', () => {
     const observed = observeInvalidSparqlTerms();
-    const term = `urn:${'x'.repeat(200)} tail`;
-    sparqlIriTerm(term, 'graph', SITE);
-    expect(observed.warnings[0]).toContain(`${JSON.stringify(term.slice(0, 120))}…`);
-    expect(observed.warnings[0]).not.toContain('tail');
+    const secret = '"apiKey=sk-secret\n"';
+    sparqlRdfTerm(secret, 'object', SITE, 'allow');
+    sparqlRdfTerm(secret, 'object', SITE, 'allow');
+    sparqlRdfTerm('"apiKey=sk-other\n"', 'object', SITE, 'allow');
+
+    const fingerprints = observed.warnings.map((line) => {
+      expect(line).not.toContain('apiKey');
+      expect(line).not.toContain('sk-');
+      return line.match(/\((\d+) chars, fingerprint ([0-9a-f]{12}); the value is not logged\)/)?.slice(1);
+    });
+    // The same term fingerprints the same within a process, so repeats correlate.
+    expect(fingerprints).toEqual([
+      [String(secret.length), fingerprints[0]![1]],
+      [String(secret.length), fingerprints[0]![1]],
+      ['18', expect.not.stringMatching(fingerprints[0]![1])],
+    ]);
   });
 });
 
