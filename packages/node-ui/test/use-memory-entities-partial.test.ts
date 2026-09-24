@@ -6,21 +6,12 @@
 // counts as exact. (Codex round-7/8.)
 
 import React, { act } from 'react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { useMemoryEntities } from '../src/ui/hooks/useMemoryEntities.js';
+import { stubNodeEventStream, type FetchFallback } from './helpers/fake-event-stream.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-
-class MockEventSource {
-  static instances: MockEventSource[] = [];
-  readonly listeners = new Map<string, Array<(e: MessageEvent) => void>>();
-  constructor(readonly url: string) { MockEventSource.instances.push(this); }
-  addEventListener(t: string, l: (e: MessageEvent) => void) {
-    const a = this.listeners.get(t) ?? []; a.push(l); this.listeners.set(t, a);
-  }
-  close() {}
-}
 
 function triple(subject: string, graph: string) {
   return { s: { value: subject }, p: { value: RDF_TYPE }, o: { value: 'http://schema.org/Thing' }, g: { value: graph } };
@@ -54,11 +45,10 @@ describe('useMemoryEntities — partial layer failure', () => {
   let container: HTMLDivElement;
   let root: Root;
   let scenario: 'swm-error' | 'swm-limit';
+  let queryFetch: Mock<FetchFallback>;
 
   beforeEach(() => {
     scenario = 'swm-error';
-    MockEventSource.instances = [];
-    (globalThis as any).EventSource = MockEventSource;
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     container = document.createElement('div');
     document.body.appendChild(container);
@@ -66,7 +56,7 @@ describe('useMemoryEntities — partial layer failure', () => {
 
     // WM (/assertion/) and VM (the exclusion query) succeed; the SWM
     // query (ends in /_shared_memory) returns a 500.
-    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+    queryFetch = vi.fn<FetchFallback>(async (_input, init) => {
       const { sparql = '', contextGraphId = 'cg' } =
         JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; contextGraphId?: string };
       // Robust layer discriminators: every query references both
@@ -99,7 +89,8 @@ describe('useMemoryEntities — partial layer failure', () => {
       return { ok: true, json: async () => ({ result: { bindings: [
         triple(`urn:${contextGraphId}:vm-1`, `did:dkg:context-graph:${contextGraphId}`),
       ] } }) } as Response;
-    }));
+    });
+    stubNodeEventStream(queryFetch);
   });
 
   afterEach(() => {
@@ -141,7 +132,7 @@ describe('useMemoryEntities — partial layer failure', () => {
     expect(el.getAttribute('data-vm-status')).toBe('ok');
     expect(el.getAttribute('data-swm')).toBe('1');
 
-    const queryBodies = vi.mocked(fetch).mock.calls
+    const queryBodies = queryFetch.mock.calls
       .map(([, init]) => JSON.parse(String(init?.body ?? '{}')) as { layerLimit?: number });
     expect(queryBodies.every(body => body.layerLimit === undefined)).toBe(true);
   });

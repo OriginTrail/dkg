@@ -1,37 +1,12 @@
 // @vitest-environment happy-dom
 
 import React, { act } from 'react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { useMemoryEntities } from '../src/ui/hooks/useMemoryEntities.js';
+import { stubNodeEventStream, type FakeNodeEventStream, type FetchFallback } from './helpers/fake-event-stream.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-
-class MockEventSource {
-  static instances: MockEventSource[] = [];
-  readonly listeners = new Map<string, Array<(event: MessageEvent) => void>>();
-  closed = false;
-
-  constructor(readonly url: string) {
-    MockEventSource.instances.push(this);
-  }
-
-  addEventListener(type: string, listener: (event: MessageEvent) => void) {
-    const existing = this.listeners.get(type) ?? [];
-    existing.push(listener);
-    this.listeners.set(type, existing);
-  }
-
-  emit(type: string, data: Record<string, unknown>) {
-    for (const listener of this.listeners.get(type) ?? []) {
-      listener({ data: JSON.stringify(data) } as MessageEvent);
-    }
-  }
-
-  close() {
-    this.closed = true;
-  }
-}
 
 function tripleBinding(subject: string, graph: string) {
   return {
@@ -80,25 +55,26 @@ describe('useMemoryEntities live updates', () => {
   let container: HTMLDivElement;
   let root: Root;
   let revision = 1;
+  let queryFetch: Mock<FetchFallback>;
+  let events: FakeNodeEventStream;
 
   beforeEach(() => {
     vi.useFakeTimers();
-    MockEventSource.instances = [];
-    (globalThis as any).EventSource = MockEventSource;
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     revision = 1;
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
 
-    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
+    queryFetch = vi.fn<FetchFallback>(async (_input, init) => {
       const body = JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; contextGraphId?: string };
       const bindings = bindingsForLayer(body.sparql ?? '', body.contextGraphId ?? 'unknown', revision);
       return {
         ok: true,
         json: async () => ({ result: { bindings } }),
       } as Response;
-    }));
+    });
+    events = stubNodeEventStream(queryFetch);
   });
 
   afterEach(() => {
@@ -114,12 +90,12 @@ describe('useMemoryEntities live updates', () => {
     });
     await flush();
 
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(queryFetch).toHaveBeenCalledTimes(3);
     expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('1');
 
     revision = 2;
     await act(async () => {
-      MockEventSource.instances[0].emit('memory_graph_changed', {
+      await events.latest().emit('memory_graph_changed', {
         contextGraphId: 'project-a',
         layers: ['wm'],
         operation: 'assertion_written',
@@ -127,14 +103,14 @@ describe('useMemoryEntities live updates', () => {
       });
       vi.advanceTimersByTime(349);
     });
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(queryFetch).toHaveBeenCalledTimes(3);
 
     await act(async () => {
       vi.advanceTimersByTime(1);
     });
     await flush();
 
-    expect(fetch).toHaveBeenCalledTimes(6);
+    expect(queryFetch).toHaveBeenCalledTimes(6);
     expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('2');
   });
 
@@ -146,7 +122,7 @@ describe('useMemoryEntities live updates', () => {
 
     revision = 2;
     await act(async () => {
-      MockEventSource.instances[0].emit('memory_graph_changed', {
+      await events.latest().emit('memory_graph_changed', {
         contextGraphId: 'project-b',
         layers: ['wm'],
         operation: 'assertion_written',
@@ -155,7 +131,7 @@ describe('useMemoryEntities live updates', () => {
     });
     await flush();
 
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(queryFetch).toHaveBeenCalledTimes(3);
     expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('1');
   });
 });
