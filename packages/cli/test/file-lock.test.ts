@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import {
-  appendFile, link, mkdir, mkdtemp, open, readFile, readdir, rm, rmdir, stat, utimes, writeFile,
+  appendFile, link, mkdir, mkdtemp, open, readFile, readdir, rename, rm, rmdir, stat, utimes, writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,6 +17,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     link: vi.fn(actual.link),
     open: vi.fn(actual.open),
     readFile: vi.fn(actual.readFile),
+    rename: vi.fn(actual.rename),
     rmdir: vi.fn(actual.rmdir),
     stat: vi.fn(actual.stat),
   };
@@ -53,7 +54,7 @@ describe('withFileLock', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
-    for (const mocked of [link, open, readFile, rmdir, stat]) vi.mocked(mocked).mockReset();
+    for (const mocked of [link, open, readFile, rename, rmdir, stat]) vi.mocked(mocked).mockReset();
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -508,6 +509,25 @@ describe('withFileLock', () => {
         expect(publish).not.toHaveBeenCalled();
         vi.mocked(readFile).mockReset();
       });
+
+      expect(await readdir(dir)).toEqual([]);
+    });
+
+    // Windows refuses a rename onto any existing directory with EPERM or EACCES,
+    // which elsewhere can mean a permission problem instead.
+    it('counts a guard refused with EPERM or EACCES as taken only while one exists', async () => {
+      await withFileLock(lockPath, async (lock) => {
+        await writeGuard(liveHolder({ token: 'committing' }), 'committing');
+        vi.mocked(rename).mockImplementation(async (from, to) => {
+          if (to === guardPath) throw fsError(existsSync(guardPath) ? 'EPERM' : 'EACCES');
+          return actualFs.rename(from, to);
+        });
+        await expect(lock.commit(async () => {})).rejects.toThrow('Timed out waiting to commit');
+
+        await rm(guardPath, { recursive: true });
+        await expect(lock.commit(async () => {})).rejects.toMatchObject({ code: 'EACCES' });
+        vi.mocked(rename).mockReset();
+      }, { label: 'config', staleMs: 150 });
 
       expect(await readdir(dir)).toEqual([]);
     });
