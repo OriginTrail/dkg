@@ -1,6 +1,6 @@
 import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError, type OxigraphMemoryLimits } from '../oxigraph-memory-limits.js';
 import type { ChildProcess } from 'node:child_process';
-import { resolveHelperModuleNodeArgs } from '../daemon-entrypoint.js';
+import { resolveHelperModuleNodeArgs } from '../own-module-path.js';
 import type { CgroupOomSnapshot } from './oxigraph-memory.js';
 import {
   OXIGRAPH_WATCHDOG_DIRECT_FLAG,

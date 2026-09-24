@@ -8,8 +8,8 @@ import { pathToFileURL } from 'node:url';
 import {
   resolveDaemonEntryPoint,
   resolveDaemonNodeCommand,
-  resolveHelperModuleNodeArgs,
 } from '../src/daemon-entrypoint.js';
+import { resolveHelperModuleNodeArgs } from '../src/own-module-path.js';
 
 /**
  * Regression guard for #962 (cli.ts split review): `resolveDaemonEntryPoint`
@@ -113,6 +113,11 @@ describe('resolveHelperModuleNodeArgs', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it('fails clearly instead of returning a path that does not exist', () => {
+    expect(() => resolveHelperModuleNodeArgs(new URL('file:///nonexistent/dkg-helper.js')))
+      .toThrow(/CLI helper module not found: \/nonexistent\/dkg-helper\.js/);
   });
 
   it('resolves the Oxigraph parent watchdog to a file that exists in this run mode', () => {

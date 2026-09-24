@@ -10,14 +10,17 @@
  * worker that starts inside that second, a watchdog killed on its own, and an
  * orphan left by a release that predates the direct-launch watchdog.
  *
- * Ownership comes from a record, not from the process table. Once Oxigraph
- * is verified ready, the daemon writes `dkg-oxigraph-owner.json` in the store
- * directory: its own identity, the spawned launcher's and Oxigraph's, each a
- * PID plus process start time, and the binary it launched. Before each spawn
- * the daemon terminates a holder of `<location>/LOCK` only when
- *   - it is the recorded Oxigraph (same PID and start time) and the recorded
- *     daemon or launcher has exited, whatever process adopted it (PID 1, a
- *     subreaper, a stopped watchdog); or
+ * Ownership comes from a record, not from the process table. Right after
+ * each spawn the daemon writes `dkg-oxigraph-owner.json` in the store
+ * directory with its own identity, the spawned launcher's and the binary;
+ * once Oxigraph is verified ready it adds Oxigraph's identity. Identities are
+ * a PID plus process start time. Before each spawn the daemon terminates a
+ * holder of `<location>/LOCK` only when
+ *   - the recorded daemon or launcher has exited and the holder is the
+ *     recorded Oxigraph (same PID and start time), whatever process adopted
+ *     it (PID 1, a subreaper, a stopped watchdog), or, for a launch killed
+ *     before it was ready, a child of the recorded launcher that runs this
+ *     node's Oxigraph for this store; or
  *   - it runs this node's Oxigraph for this store (the recorded or current
  *     binary, or another `oxigraph*` executable in a known binary directory),
  *     no live recorded owner exists, and its parent is gone: it was
@@ -32,6 +35,7 @@ import { existsSync } from 'node:fs';
 import { readFile, realpath, rename, writeFile } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { OXIGRAPH_STOP_GRACE_MS } from './oxigraph-parent-watchdog.js';
 import {
   procFdTargets,
   procPids,
@@ -54,7 +58,8 @@ export interface OxigraphOwnerRecord {
   daemon: ProcessIdentity;
   /** The spawned child: the parent watchdog, or Oxigraph itself. */
   launcher: ProcessIdentity;
-  oxigraph: ProcessIdentity;
+  /** Added once the launch is verified ready. */
+  oxigraph?: ProcessIdentity;
   binaryPath: string;
 }
 
@@ -80,7 +85,7 @@ export interface StopOrphanedOxigraphOptions {
    */
   knownBinaryDirs?: readonly string[];
   log: (message: string) => void;
-  /** SIGTERM → SIGKILL escalation, matching the managed server's own stop grace. */
+  /** SIGTERM → SIGKILL escalation; defaults to the shared Oxigraph stop grace. */
   stopGraceMs?: number;
   /** Upper bound on waiting for signalled orphans to release the lock. */
   timeoutMs?: number;
@@ -88,7 +93,6 @@ export interface StopOrphanedOxigraphOptions {
   io?: Partial<OrphanedOxigraphIo>;
 }
 
-const DEFAULT_STOP_GRACE_MS = 5_000;
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_POLL_INTERVAL_MS = 100;
 
@@ -174,7 +178,8 @@ function isIdentity(value: unknown): value is ProcessIdentity {
 export async function readOxigraphOwnerRecord(location: string): Promise<OxigraphOwnerRecord | null> {
   try {
     const record = JSON.parse(await readFile(ownerRecordPath(location), 'utf8')) as OxigraphOwnerRecord;
-    return isIdentity(record.daemon) && isIdentity(record.launcher) && isIdentity(record.oxigraph)
+    return isIdentity(record.daemon) && isIdentity(record.launcher)
+      && (record.oxigraph === undefined || isIdentity(record.oxigraph))
       && typeof record.binaryPath === 'string'
       ? record
       : null;
@@ -184,31 +189,35 @@ export async function readOxigraphOwnerRecord(location: string): Promise<Oxigrap
 }
 
 /**
- * Record this daemon as the owner of a store whose Oxigraph is verified
- * ready. Never throws: without a record, reclaim falls back to PID 1.
+ * Record this daemon as the owner of a store: at spawn with the launcher,
+ * then again with `oxigraphPid` once that launch is verified ready. Never
+ * throws: without a record, reclaim falls back to PID 1.
  */
 export async function recordOxigraphOwner(input: {
   location: string;
   binaryPath: string;
   launcherPid: number;
-  oxigraphPid: number;
+  oxigraphPid?: number;
   log: (message: string) => void;
-  processStart?: OrphanedOxigraphIo['processStart'];
 }): Promise<void> {
   if (process.platform === 'win32') return;
-  const processStart = input.processStart ?? defaultIo.processStart;
   const identify = async (pid: number): Promise<ProcessIdentity | null> => {
-    const start = await processStart(pid);
+    const start = await defaultIo.processStart(pid);
     return start === null ? null : { pid, start };
   };
   try {
     const [daemon, launcher, oxigraph] = await Promise.all([
       identify(process.pid),
       identify(input.launcherPid),
-      identify(input.oxigraphPid),
+      input.oxigraphPid === undefined ? undefined : identify(input.oxigraphPid),
     ]);
-    if (!daemon || !launcher || !oxigraph) return;
-    const record: OxigraphOwnerRecord = { daemon, launcher, oxigraph, binaryPath: input.binaryPath };
+    if (!daemon || !launcher || oxigraph === null) return;
+    const record: OxigraphOwnerRecord = {
+      daemon,
+      launcher,
+      ...(oxigraph ? { oxigraph } : {}),
+      binaryPath: input.binaryPath,
+    };
     const path = ownerRecordPath(input.location);
     const pending = `${path}.${process.pid}.tmp`;
     await writeFile(pending, `${JSON.stringify(record)}\n`, 'utf8');
@@ -266,12 +275,18 @@ async function classifyHolder(
         `${record.launcher.pid} are still running`,
     };
   }
-  if (record && ctx.recordedOwnerGone !== null && record.oxigraph.pid === pid
+  if (record && ctx.recordedOwnerGone !== null && record.oxigraph?.pid === pid
     && await identityAlive(io, record.oxigraph)) {
     return { action: 'stop', because: ctx.recordedOwnerGone };
   }
   if (!runsManagedOxigraphStore(holder.command, ctx.location, ctx.binaryPaths, ctx.binaryDirs)) {
     return { action: 'leave', because: `it is not this node's Oxigraph serving this store` };
+  }
+  // A launch killed before it was ready: its watchdog is alive but cannot
+  // act (frozen, wedged), and the daemon that recorded it is gone.
+  if (record && ctx.recordedOwnerGone !== null && holder.ppid === record.launcher.pid
+    && await identityAlive(io, record.launcher)) {
+    return { action: 'stop', because: ctx.recordedOwnerGone };
   }
   if (holder.ppid === 1) return { action: 'stop', because: 'it was reparented to PID 1' };
   const parent = await io.describeProcess(holder.ppid);
@@ -295,7 +310,7 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
   const lockPath = resolve(opts.location, 'LOCK');
   if (!existsSync(lockPath)) return [];
   const io: OrphanedOxigraphIo = { ...defaultIo, ...opts.io };
-  const stopGraceMs = opts.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
+  const stopGraceMs = opts.stopGraceMs ?? OXIGRAPH_STOP_GRACE_MS;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const deadline = io.now() + timeoutMs;

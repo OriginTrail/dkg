@@ -15,11 +15,12 @@ All notable changes to the DKG V10 node are documented here. The format is based
   gave up. Oxigraph now runs under the parent watchdog on Linux and macOS
   whether or not memory limits are set, and the daemon's stop and restart
   signals reach it through the watchdog's process group. The daemon records
-  each ready Oxigraph's owner (PID and start time) in the store directory.
-  Before each Oxigraph start, it stops the recorded Oxigraph once its daemon
-  or launcher has exited, whatever process adopted it. It also stops an
-  orphan from an earlier release that runs this node's Oxigraph for this
-  store and was reparented to PID 1. Any other lock holder is logged and left
+  each launch's owner (PID and start time) in the store directory when it
+  starts Oxigraph. Before each Oxigraph start, it stops the recorded
+  Oxigraph, or a child of the recorded launcher if the store never became
+  ready, once the recorded daemon or launcher has exited, whatever process
+  adopted it. It also stops an orphan from an earlier release that runs this
+  node's Oxigraph for this store and was reparented to PID 1. Any other lock holder is logged and left
   running, and the lock file itself is never touched.
 - **Random Sampling resolves the challenged Context Graph by its chain name
   commitment when local history contains multiple names for one numeric ID**:

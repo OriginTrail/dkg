@@ -7,6 +7,7 @@ import {
   releasesDir,
   slotEntryPoint,
 } from './config.js';
+import { ownModulePath } from './own-module-path.js';
 
 /** Fully assembled Node command used to start or probe this daemon entrypoint. */
 export interface DaemonNodeCommand {
@@ -16,38 +17,12 @@ export interface DaemonNodeCommand {
 }
 
 /**
- * One of this CLI's own modules, given the URL of its built `.js`: that file
- * in a built install, the `.ts` beside it in a source checkout (tsx /
- * ts-node), or null when neither exists.
+ * Absolute path to THIS CLI's own entrypoint module. A built install runs
+ * `cli.js`, while source execution (tsx / ts-node) runs `cli.ts`.
  */
-function ownModulePath(builtModule: URL): { path: string; source: boolean } | null {
-  const built = fileURLToPath(builtModule);
-  if (existsSync(built)) return { path: built, source: false };
-  const source = built.replace(/\.js$/, '.ts');
-  return existsSync(source) ? { path: source, source: true } : null;
-}
-
-/** Absolute path to THIS CLI's own entrypoint module. */
 function cliEntryPointPath(): string {
   const builtEntry = new URL('./cli.js', import.meta.url);
   return ownModulePath(builtEntry)?.path ?? fileURLToPath(builtEntry);
-}
-
-/**
- * Node arguments that run one of this CLI's own helper modules (the managed
- * Oxigraph parent watchdog) as a separate process, given the URL of its built
- * `.js`. A built install runs that file; a source checkout (tsx, tests) has
- * only the `.ts`, which runs through tsx, the repository's source runner.
- * Unlike `resolveDaemonNodeCommand`, a helper does not inherit this process's
- * `execArgv`: inspector or heap flags meant for the daemon must not apply to
- * it, and a test runner's flags carry no TypeScript loader.
- */
-export function resolveHelperModuleNodeArgs(builtModule: URL): string[] {
-  const helper = ownModulePath(builtModule);
-  if (!helper) {
-    throw new Error(`CLI helper module not found: ${fileURLToPath(builtModule)} (or its .ts source)`);
-  }
-  return helper.source ? ['--import', import.meta.resolve('tsx'), helper.path] : [helper.path];
 }
 
 /**

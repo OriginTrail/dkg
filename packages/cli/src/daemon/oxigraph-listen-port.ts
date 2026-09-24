@@ -136,7 +136,9 @@ async function windowsListenOwnerPid(pid: number, port: number): Promise<number 
 /**
  * Return the PID when `child` (or, when explicitly enabled, one of its Unix
  * descendants) is alive and owns the TCP listener on `port`.
- * For non-loopback hosts we only require the child to be alive (tests).
+ * For non-loopback hosts a child-only caller only requires the child to be
+ * alive (tests); a process-tree caller still needs the listening descendant,
+ * never the wrapper.
  * `processTree` overrides the host's descendant walker, so each walker can be
  * exercised on any Unix host.
  */
@@ -150,7 +152,7 @@ export async function findListenOwnerPid(
   if (!child.pid || child.exitCode !== null || child.signalCode !== null) {
     return null;
   }
-  if (host !== '127.0.0.1' && host !== 'localhost') return child.pid;
+  if (host !== '127.0.0.1' && host !== 'localhost' && ownership === 'child-only') return child.pid;
 
   const pid = child.pid;
   if (process.platform === 'win32') {

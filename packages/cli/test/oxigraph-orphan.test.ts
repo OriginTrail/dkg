@@ -13,7 +13,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, statSync } from 'node:fs';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,6 +46,7 @@ import {
   fetchPid,
   freePort,
   portAnswers,
+  spawnOrphan,
   waitForCondition,
   type OxigraphStandinFixture,
 } from './fixtures/oxigraph-server-real-fixture.js';
@@ -126,22 +127,6 @@ async function startWorker(port: number, location: string): Promise<WorkerProces
   return { child, stderr: () => stderr };
 }
 
-/** Start a process whose parent exits at once, so init adopts it. */
-async function spawnOrphan(command: string, args: string[]): Promise<number> {
-  const launcher = spawn(process.execPath, [
-    '-e',
-    `const child = require('node:child_process').spawn(process.argv[1], process.argv.slice(2), { detached: true, stdio: 'ignore' });
-     child.unref();
-     console.log(child.pid);`,
-    command,
-    ...args,
-  ], { stdio: ['ignore', 'pipe', 'inherit'] });
-  const launcherExited = once(launcher, 'exit');
-  const [chunk] = await once(launcher.stdout!, 'data');
-  await launcherExited;
-  return Number(String(chunk).trim());
-}
-
 function parentPid(pid: number): number | null {
   try {
     return Number(execFileSync('ps', ['-o', 'ppid=', '-p', String(pid)], { encoding: 'utf8' }).trim());
@@ -159,7 +144,7 @@ async function stopWorker(worker: WorkerProcess): Promise<void> {
 }
 
 describe('directly launched Oxigraph under the parent watchdog', () => {
-  it('releases the store, so the respawned worker can open it', async () => {
+  it('stops Oxigraph with its SIGKILLed worker, so the respawned worker can start', async () => {
     const port = await freePort();
     const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-worker-'));
     let first: WorkerProcess | undefined;
@@ -184,7 +169,6 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
       second = await startWorker(port, location);
       secondListenerPid = await fetchPid(port);
       expect(secondListenerPid).not.toBe(firstListenerPid);
-      expect(existsSync(join(location, 'LOCK'))).toBe(true);
     } finally {
       if (second) await stopWorker(second);
       if (first) first.child.kill('SIGKILL');
@@ -223,6 +207,47 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
       if (first) first.child.kill('SIGKILL');
       killIfAlive(stoppedWatchdog ?? undefined);
       killIfAlive(firstListenerPid);
+      await rm(location, { recursive: true, force: true });
+    }
+  }, 60_000);
+
+  it('reclaims the Oxigraph of a worker killed before its store was ready, with its watchdog frozen', async () => {
+    const port = await freePort();
+    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-preready-'));
+    // Oxigraph starts but is never verified ready, like a long WAL replay.
+    const first = spawn(process.execPath, [
+      '--import', 'tsx',
+      fileURLToPath(new URL('./fixtures/oxigraph-worker-process.ts', import.meta.url)),
+      lockingStandin.binaryPath, location, String(port), 'never-ready',
+    ], { stdio: 'ignore' });
+    let second: WorkerProcess | undefined;
+    let listenerPid: number | undefined;
+    let frozenWatchdog: number | null = null;
+    try {
+      expect(await waitForCondition(() => portAnswers(port), 10_000)).toBe(true);
+      listenerPid = await fetchPid(port);
+      frozenWatchdog = parentPid(listenerPid);
+      // The launch was recorded at spawn, before any readiness.
+      const recorded = await waitForCondition(async () => {
+        const text = await readFile(join(location, OXIGRAPH_OWNER_RECORD), 'utf8').catch(() => '');
+        return text.includes(`"pid":${frozenWatchdog}`);
+      }, 10_000);
+      expect(recorded, 'the launch was not recorded at spawn').toBe(true);
+      process.kill(frozenWatchdog!, 'SIGSTOP');
+      const exited = once(first, 'exit');
+      first.kill('SIGKILL');
+      await exited;
+
+      second = await startWorker(port, location);
+      expect(await fetchPid(port)).not.toBe(listenerPid);
+      expect(second.stderr()).toContain(
+        `stopping orphaned Oxigraph pid ${listenerPid} (its recorded daemon pid ${first.pid} has exited)`,
+      );
+    } finally {
+      if (second) await stopWorker(second);
+      first.kill('SIGKILL');
+      killIfAlive(frozenWatchdog ?? undefined);
+      killIfAlive(listenerPid);
       await rm(location, { recursive: true, force: true });
     }
   }, 60_000);
@@ -531,8 +556,8 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     it('leaves an unrecorded holder with a live parent running even when the recorded owner exited', async () => {
       await writeRecord();
       const { table, signals, io } = processTable({
-        4099: { ppid: 1, command: '/bin/bash', holdsLock: false },
-        4200: { ppid: 4099, command: serve(location), holdsLock: true },
+        4098: { ppid: 1, command: '/bin/bash', holdsLock: false },
+        4200: { ppid: 4098, command: serve(location), holdsLock: true },
       });
 
       const { signalled, log } = await run(io);
@@ -541,8 +566,40 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
       expect(table.get(4200)!.alive).toBe(true);
       expect(log).toContain(
         'Leaving it running: it is not the Oxigraph recorded for this store, ' +
-          'and its parent pid 4099 is still running: /bin/bash.',
+          'and its parent pid 4098 is still running: /bin/bash.',
       );
+    });
+
+    it('stops a child of the recorded launcher when the launch was killed before it was ready', async () => {
+      await writeRecord({ oxigraph: undefined });
+      const { signals, io } = processTable({
+        // The daemon (4000) is gone; its watchdog (4099) lives on but cannot act.
+        4099: { ppid: 1, command: 'node oxigraph-parent-watchdog.js --direct 4000', holdsLock: false },
+        4100: { ppid: 4099, command: serve(location), holdsLock: true },
+      });
+
+      const { signalled, log } = await run(io);
+      expect(signalled).toEqual([4100]);
+      expect(signals).toEqual([[4100, 'SIGTERM']]);
+      expect(log).toContain('stopping orphaned Oxigraph pid 4100 (its recorded daemon pid 4000 has exited)');
+    });
+
+    it.each([
+      ['its parent only reuses the recorded launcher PID', {
+        4099: { ppid: 1, command: '/bin/bash', holdsLock: false, start: 'later' },
+        4100: { ppid: 4099, command: serve(location), holdsLock: true },
+      }],
+      ['it is not this node\'s Oxigraph for this store', {
+        4099: { ppid: 1, command: 'node oxigraph-parent-watchdog.js --direct 4000', holdsLock: false },
+        4100: { ppid: 4099, command: `/usr/bin/backup ${location}`, holdsLock: true },
+      }],
+    ] as const)('leaves a child of the recorded launcher PID running when %s', async (_label, entries) => {
+      await writeRecord({ oxigraph: undefined });
+      const { signals, io } = processTable(entries);
+
+      const { signalled } = await run(io);
+      expect(signalled).toEqual([]);
+      expect(signals).toEqual([]);
     });
 
     it('does not stop a foreign holder whose PID the record names but whose start time differs', async () => {

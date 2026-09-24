@@ -27,6 +27,7 @@ import { mkdtemp, readFile, rm, stat, writeFile, chmod, access } from 'node:fs/p
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  findOxigraphOnPath,
   resolveOxigraphBinary,
   resolveOxigraphAsset,
   OXIGRAPH_ASSETS,
@@ -255,6 +256,19 @@ describe('PATH fallback (real directories, real executables)', () => {
     } finally {
       process.env.PATH = prevPath;
       await rm(cacheDir, { recursive: true, force: true });
+    }
+  });
+
+  it('finds the executable oxigraph on PATH, skipping a non-executable decoy, and null without one', async () => {
+    const emptyDir = await mkdtemp(join(tmpdir(), 'oxi-path-empty-'));
+    try {
+      process.env.PATH = `${pathDirA}:${pathDirB}`;
+      await expect(findOxigraphOnPath('linux')).resolves.toBe(join(pathDirB, 'oxigraph'));
+      process.env.PATH = `${pathDirA}:${emptyDir}`;
+      await expect(findOxigraphOnPath('linux')).resolves.toBeNull();
+    } finally {
+      process.env.PATH = prevPath;
+      await rm(emptyDir, { recursive: true, force: true });
     }
   });
 

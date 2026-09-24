@@ -12,6 +12,15 @@ export const OXIGRAPH_WATCHDOG_OOM_MARKER =
   '[oxigraph-watchdog] scoped child OOM-killed by cgroup memory cap (or host OOM)';
 
 /**
+ * SIGTERM → SIGKILL grace for Oxigraph, shared by every path that stops it.
+ * GH#1400 — a LEAK GUARD, not a flush window. Measured: oxigraph 0.5.8
+ * installs no SIGTERM handler, so the child dies by default disposition and
+ * the WAL is byte-identical across the signal. Raising this cannot buy a
+ * RocksDB flush; it would only delay teardown.
+ */
+export const OXIGRAPH_STOP_GRACE_MS = 5_000;
+
+/**
  * How the daemon launched this watchdog. `systemd-scope` places Oxigraph in a
  * sibling cgroup that stopping the daemon's service does not reach; `direct`
  * leaves it inside the daemon's own process tree and cgroup.
@@ -27,6 +36,8 @@ export interface OxigraphParentWatchdogOptions {
   stopGraceMs?: number;
   spawnChild?: typeof spawn;
   isProcessAlive?: (pid: number) => boolean;
+  /** This process's current parent PID. */
+  readParentPid?: () => number;
   readOomSnapshot?: (pid: number) => CgroupOomSnapshot | null;
   readOomKill?: (dir: string) => number | null;
 }
@@ -109,10 +120,11 @@ export function startOxigraphParentWatchdog(
 
   const spawnChild = opts.spawnChild ?? spawn;
   const isProcessAlive = opts.isProcessAlive ?? processIsAlive;
+  const readParentPid = opts.readParentPid ?? (() => process.ppid);
   const readOomSnapshot = opts.readOomSnapshot ?? readCgroupOomSnapshot;
   const readOomKill = opts.readOomKill ?? readCgroupOomKill;
   const pollIntervalMs = opts.pollIntervalMs ?? 1_000;
-  const stopGraceMs = opts.stopGraceMs ?? 5_000;
+  const stopGraceMs = opts.stopGraceMs ?? OXIGRAPH_STOP_GRACE_MS;
   if (!Number.isInteger(stopGraceMs) || stopGraceMs <= 0) {
     throw new Error('Oxigraph watchdog stop grace must be a positive integer');
   }
@@ -154,8 +166,14 @@ export function startOxigraphParentWatchdog(
     }
   };
 
+  // A direct watchdog is the daemon's own child, so the daemon's death
+  // reparents it at once. That cannot be mistaken for a live daemon the way
+  // a recycled PID can. A scoped watchdog is started through systemd-run.
+  const parentGone = (): boolean =>
+    (opts.launchMode === 'direct' && readParentPid() !== opts.parentPid)
+    || !isProcessAlive(opts.parentPid);
   const timer = setInterval(() => {
-    if (stopping || isProcessAlive(opts.parentPid)) return;
+    if (stopping || !parentGone()) return;
     parentLost = true;
     stop();
   }, pollIntervalMs);

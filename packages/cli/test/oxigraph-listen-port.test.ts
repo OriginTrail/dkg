@@ -45,6 +45,9 @@ describe('findListenOwnerPid (real processes)', () => {
       expect(await findListenOwnerPid(wrapper, wrapped.port, '127.0.0.1', 'process-tree')).toBe(wrapped.pid);
       expect(await findListenOwnerPid(wrapper, wrapped.port, '127.0.0.1', 'child-only')).toBeNull();
       expect(await findListenOwnerPid(wrapper, unrelated.port, '127.0.0.1', 'process-tree')).toBeNull();
+      // Off loopback, only a child-only caller may take the child on trust.
+      expect(await findListenOwnerPid(wrapper, wrapped.port, '0.0.0.0', 'process-tree')).toBe(wrapped.pid);
+      expect(await findListenOwnerPid(wrapper, wrapped.port, '0.0.0.0', 'child-only')).toBe(wrapper.pid);
 
       // Each tree walker the host supports, through the same ownership check
       // (the `ps` walker is what macOS selects; CI runs it on Linux here).

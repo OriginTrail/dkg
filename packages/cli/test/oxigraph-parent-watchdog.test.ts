@@ -250,6 +250,7 @@ describe('Oxigraph parent watchdog', () => {
       args: ['-e', 'setInterval(() => {}, 1000)'],
       launchMode: 'direct',
       pollIntervalMs: 5,
+      readParentPid: () => process.pid,
       readOomSnapshot,
       readOomKill: () => 5,
     });
@@ -259,6 +260,40 @@ describe('Oxigraph parent watchdog', () => {
     expect(result.signal).toBe('SIGKILL');
     expect(result.oomKilled).toBe(false);
     expect(readOomSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('treats a direct watchdog\'s reparenting as parent loss even while the old parent PID answers', async () => {
+    // The daemon died and its PID was recycled: kill(pid, 0) still succeeds,
+    // but the watchdog has been adopted by another process.
+    const handle = startOxigraphParentWatchdog({
+      parentPid: 4242,
+      command: process.execPath,
+      args: ['-e', 'setInterval(() => {}, 1000)'],
+      launchMode: 'direct',
+      pollIntervalMs: 5,
+      isProcessAlive: () => true,
+      readParentPid: () => 1,
+    });
+
+    const result = await handle.result;
+    expect(result.parentLost).toBe(true);
+    expect(result.signal).toBe('SIGTERM');
+  });
+
+  it('does not use reparenting for a scoped watchdog, which systemd-run starts', async () => {
+    const handle = startOxigraphParentWatchdog({
+      parentPid: 4242,
+      command: process.execPath,
+      args: ['-e', 'setInterval(() => {}, 1000)'],
+      pollIntervalMs: 5,
+      isProcessAlive: () => true,
+      readParentPid: () => 1,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    handle.stop('SIGTERM');
+
+    const result = await handle.result;
+    expect(result.parentLost).toBe(false);
   });
 
   it('captures scoped OOM evidence before the watchdog cgroup can disappear', async () => {

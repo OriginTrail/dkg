@@ -48,6 +48,7 @@ import {
   type OxigraphMemoryLimits,
 } from './oxigraph-launch-strategy.js';
 import { invalidateExternalStoreQuadsCache } from './store-quads-cache.js';
+import { OXIGRAPH_STOP_GRACE_MS } from './oxigraph-parent-watchdog.js';
 import {
   oxigraphStoreArgs,
   recordOxigraphOwner,
@@ -155,11 +156,6 @@ export interface OxigraphRecoveryState {
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_READY_TIMEOUT_MS = 30_000;
 const DEFAULT_READY_INTERVAL_MS = 500;
-// GH#1400 — a LEAK GUARD, not a flush window. Measured: oxigraph 0.5.8
-// installs no SIGTERM handler, so the child dies by default disposition and
-// the WAL is byte-identical across the signal. Raising this cannot buy a
-// RocksDB flush; it would only delay teardown.
-const DEFAULT_STOP_GRACE_MS = 5_000;
 const DEFAULT_RESTART_BASE_MS = 1_000;
 const DEFAULT_RESTART_MAX_MS = 30_000;
 
@@ -231,7 +227,7 @@ export async function startOxigraphServer(
   };
   const readyIntervalMs = opts.readyIntervalMs ?? DEFAULT_READY_INTERVAL_MS;
   const progressLogIntervalMs = normalizePositiveInteger(opts.progressLogIntervalMs) ?? 10_000;
-  const stopGraceMs = opts.stopGraceMs ?? DEFAULT_STOP_GRACE_MS;
+  const stopGraceMs = opts.stopGraceMs ?? OXIGRAPH_STOP_GRACE_MS;
   const restartBase = opts.restartBackoffBaseMs ?? DEFAULT_RESTART_BASE_MS;
   const restartMax = opts.restartBackoffMaxMs ?? DEFAULT_RESTART_MAX_MS;
   const queryTimeoutS = normalizePositiveInteger(opts.queryTimeoutS);
@@ -420,9 +416,10 @@ export async function startOxigraphServer(
     return ready;
   };
 
-  // Written only for a child verified to own the listener, so the record
-  // always names a launch that opened this store.
-  const recordOwner = (c: ChildProcess, listenerPid: number): Promise<void> =>
+  // Recorded at spawn, then again once the launch is verified ready, so the
+  // reclaim can identify this launch's Oxigraph even if the daemon dies
+  // before readiness.
+  const recordLaunch = (c: ChildProcess, listenerPid?: number): Promise<void> =>
     c.pid === undefined
       ? Promise.resolve()
       : recordOxigraphOwner({
@@ -432,6 +429,65 @@ export async function startOxigraphServer(
           oxigraphPid: listenerPid,
           log,
         });
+
+  type StoreOpenOutcome =
+    | { outcome: 'ready'; probes: number }
+    | { outcome: 'child-died' | 'timed-out' | 'superseded' };
+
+  // Wait until `c` answers as the verified owner of the listener, then mark it
+  // ready and record it as the store's Oxigraph. Boot and restart share this;
+  // they differ only in progress wording and in what a failure leads to.
+  const awaitStoreOpen = async (
+    c: ChildProcess,
+    ready: { timeoutMs: number; walBytes: number },
+    attempt: {
+      generation: number;
+      progress: (elapsedS: number, allowedS: number) => string;
+      superseded?: () => boolean;
+    },
+  ): Promise<StoreOpenOutcome> => {
+    const startedAt = Date.now();
+    let lastProgressLog = startedAt;
+    let probes = 0;
+    while (Date.now() < startedAt + ready.timeoutMs) {
+      // GH#1400 — RocksDB writes no progress records during replay, so this
+      // daemon-side line is the only thing distinguishing "recovering" from
+      // "hung" for an operator watching a multi-minute open.
+      if (ready.walBytes > 0 && Date.now() - lastProgressLog >= progressLogIntervalMs) {
+        lastProgressLog = Date.now();
+        log(attempt.progress(
+          Math.round((Date.now() - startedAt) / 1000),
+          Math.round(ready.timeoutMs / 1000),
+        ));
+      }
+      if (attempt.superseded?.()) return { outcome: 'superseded' };
+      probes += 1;
+      // Our child exited while opening — almost always a bind or lock
+      // failure. Never adopt whatever may be answering on the port (it could
+      // be a foreign SPARQL server).
+      if (!childAlive(c)) return { outcome: 'child-died' };
+      const listenerPid = await probeReady(c);
+      if (listenerPid !== null) {
+        // Only trust a 200 if the child WE spawned is still alive and bound —
+        // guards the race where a foreign server answers while our child has
+        // just died on EADDRINUSE.
+        if (!childAlive(c)) return { outcome: 'child-died' };
+        captureOomSnapshotForListener(c, listenerPid);
+        // Keep the actual listener PID, not the watchdog or systemd-run
+        // wrapper, so timeout recovery terminates Oxigraph itself.
+        lifecycle = { phase: 'ready', child: c, listenerPid, generation: attempt.generation };
+        restarts = 0;
+        // A store count requested while the child was down failed and is
+        // cached as unreachable; drop it now that the child is healthy, or
+        // /api/status keeps reporting the store as unreachable.
+        invalidateExternalStoreQuadsCache();
+        await recordLaunch(c, listenerPid);
+        return { outcome: 'ready', probes };
+      }
+      await sleep(readyIntervalMs);
+    }
+    return { outcome: 'timed-out' };
+  };
 
   // Respawn and re-validate ownership after a steady-state crash. Mirrors
   // the startup ownership guard: `ready` is restored ONLY once the child WE
@@ -455,52 +511,18 @@ export async function startOxigraphServer(
     if (isStopping()) return;
     const candidate = spawnChild();
     lifecycle = { phase: 'recovering', child: candidate, reason, generation };
-    const reviveDeadline = Date.now() + reviveReady.timeoutMs;
-    let reviveProgressLog = Date.now();
-    while (Date.now() < reviveDeadline) {
-      // Same reasoning as the boot loop: RocksDB emits no progress records
-      // during replay, so without this a multi-minute restart is silent.
-      if (
-        reviveReady.walBytes > 0
-        && Date.now() - reviveProgressLog >= progressLogIntervalMs
-      ) {
-        reviveProgressLog = Date.now();
-        log(
-          `[oxigraph] restart still opening: ` +
-            `${Math.round((Date.now() - (reviveDeadline - reviveReady.timeoutMs)) / 1000)}s elapsed ` +
-            `of ${Math.round(reviveReady.timeoutMs / 1000)}s allowed.`,
-        );
-      }
-      if (
-        lifecycle.phase !== 'recovering'
-        || lifecycle.child !== candidate
-      ) return;
-      // Respawned child died (its own exit handler stays out of the way
-      // because `ready` is false). Retry with backoff; never adopt whatever
-      // may now be answering on the port.
-      if (!childAlive(candidate)) break;
-      const verifiedListenerPid = await probeReady(candidate);
-      if (verifiedListenerPid !== null && childAlive(candidate)) {
-        captureOomSnapshotForListener(candidate, verifiedListenerPid);
-        // Keep the actual listener PID, not the optional systemd-run wrapper,
-        // so timeout recovery terminates Oxigraph itself inside its scope.
-        lifecycle = {
-          phase: 'ready',
-          child: candidate,
-          listenerPid: verifiedListenerPid,
-          generation,
-        };
-        restarts = 0;
-        // A store count requested while the child was recovering failed and
-        // is cached as unreachable; drop it now that the child is healthy, or
-        // /api/status keeps reporting the recovered store as unreachable.
-        invalidateExternalStoreQuadsCache();
-        await recordOwner(candidate, verifiedListenerPid);
-        log(`[oxigraph] server restarted and healthy on ${bind}.`);
-        return;
-      }
-      await sleep(readyIntervalMs);
+    await recordLaunch(candidate);
+    const opened = await awaitStoreOpen(candidate, reviveReady, {
+      generation,
+      progress: (elapsedS, allowedS) =>
+        `[oxigraph] restart still opening: ${elapsedS}s elapsed of ${allowedS}s allowed.`,
+      superseded: () => lifecycle.phase !== 'recovering' || lifecycle.child !== candidate,
+    });
+    if (opened.outcome === 'ready') {
+      log(`[oxigraph] server restarted and healthy on ${bind}.`);
+      return;
     }
+    // A respawned child that died or never answered is retried with backoff.
     if (
       lifecycle.phase !== 'recovering'
       || lifecycle.child !== candidate
@@ -682,67 +704,28 @@ export async function startOxigraphServer(
   // caller's own reaper remains harmless.
   process.on('exit', exitGuard);
 
-  const deadline = Date.now() + bootReady.timeoutMs;
-  const readyTimeoutMs = bootReady.timeoutMs;
-  let attempt = 0;
-  let childDied = false;
-  let lastProgressLog = Date.now();
-  while (Date.now() < deadline) {
-    // GH#1400 — RocksDB writes no progress records during replay, so this
-    // daemon-side line is the only thing distinguishing "recovering" from
-    // "hung" for an operator watching a multi-minute boot.
-    if (
-      bootReady.walBytes > 0
-      && Date.now() - lastProgressLog >= progressLogIntervalMs
-    ) {
-      lastProgressLog = Date.now();
-      log(
-        `[oxigraph] still opening: ${Math.round((Date.now() - (deadline - readyTimeoutMs)) / 1000)}s ` +
-          `elapsed of ${Math.round(readyTimeoutMs / 1000)}s allowed ` +
-          `(${formatWalBytes(bootReady.walBytes)} of write-ahead log).`,
-      );
-    }
-    attempt += 1;
-    // Our spawned child exited during startup — almost always a bind
-    // failure. Stop probing and fail fast; do NOT adopt whatever may be
-    // answering on the port (it could be a foreign SPARQL server).
-    if (!childAlive(initialChild)) {
-      childDied = true;
-      break;
-    }
-    const verifiedListenerPid = await probeReady(initialChild);
-    if (verifiedListenerPid !== null) {
-      // Only trust a 200 if the child WE spawned is the one still alive
-      // and bound — guards the race where a foreign server answers while
-      // our child has just died on EADDRINUSE.
-      if (childAlive(initialChild)) {
-        captureOomSnapshotForListener(initialChild, verifiedListenerPid);
-        // Persist the verified listener owner for targeted timeout recovery.
-        // This differs from `child.pid` when Oxigraph runs in a systemd scope.
-        lifecycle = {
-          phase: 'ready',
-          child: initialChild,
-          listenerPid: verifiedListenerPid,
-          generation: lifecycle.generation,
-        };
-        await recordOwner(initialChild, verifiedListenerPid);
-        log(`Oxigraph server ready on ${bind} after ${attempt} probe(s).`);
-        return {
-          host,
-          port,
-          queryEndpoint,
-          updateEndpoint,
-          requestRestart,
-          getRecoveryState,
-          stop,
-          killSync,
-        };
-      }
-      childDied = true;
-      break;
-    }
-    await sleep(readyIntervalMs);
+  await recordLaunch(initialChild);
+  const opened = await awaitStoreOpen(initialChild, bootReady, {
+    generation: lifecycle.generation,
+    progress: (elapsedS, allowedS) =>
+      `[oxigraph] still opening: ${elapsedS}s elapsed of ${allowedS}s allowed ` +
+      `(${formatWalBytes(bootReady.walBytes)} of write-ahead log).`,
+  });
+  if (opened.outcome === 'ready') {
+    log(`Oxigraph server ready on ${bind} after ${opened.probes} probe(s).`);
+    return {
+      host,
+      port,
+      queryEndpoint,
+      updateEndpoint,
+      requestRestart,
+      getRecoveryState,
+      stop,
+      killSync,
+    };
   }
+  const childDied = opened.outcome === 'child-died';
+  const readyTimeoutMs = bootReady.timeoutMs;
 
   // Never became ready — stop the child so we don't leak it, then throw.
   // `stop()` removes the exit guard.
