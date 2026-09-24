@@ -72,14 +72,12 @@ export class ACKCapabilityRegistry {
   }
 
   selectCandidates(
-    input: Omit<ACKCandidatePeerSelectionInput, 'knownCorePeerIds' | 'knownCorePeerIdsV2' | 'eligiblePeerIds'>,
+    input: Omit<ACKCandidatePeerSelectionInput, 'capability'>,
     snapshot: ACKCapabilitySnapshot = this.snapshot(),
   ): ACKCandidatePeerSelectionResult {
     return selectACKCandidatePeersWithDiagnostics({
       ...input,
-      knownCorePeerIds: snapshot.knownCorePeerIds,
-      knownCorePeerIdsV2: snapshot.knownCorePeerIdsV2,
-      eligiblePeerIds: snapshot.knownCorePeerIds,
+      capability: { mode: 'require', v1: snapshot.knownCorePeerIds, v2: snapshot.knownCorePeerIdsV2 },
     });
   }
 
@@ -95,7 +93,7 @@ export class ACKCapabilityRegistry {
       connectedPeers: ports.connectedPeers,
       ackCandidatePeerIds: ports.ackCandidatePeerIds,
       selfPeerId: ports.selfPeerId,
-      eligiblePeerIds: corePeerIds,
+      capability: { mode: 'require' as const, v1: corePeerIds },
     };
     await ports.preflight(selectACKCandidateUniverse(base));
 

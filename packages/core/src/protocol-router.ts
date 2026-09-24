@@ -2,6 +2,7 @@ import type { Stream } from '@libp2p/interface';
 import type { StreamHandler as DKGStreamHandler } from './types.js';
 import type { DKGNode } from './node.js';
 import type { PeerResolver } from './network/peer-resolver.js';
+import type { Network } from './network/network.js';
 import { LibP2PNetwork } from './network/libp2p-network.js';
 import {
   MessageStreamPool,
@@ -128,6 +129,8 @@ export interface AdmissionCheckOptions {
 
 export interface ProtocolRouterOptions {
   maxReadBytes?: number;
+  /** Shared outbound transport, normally the same instance used by PeerResolver. */
+  network?: Network;
   /**
    * RFC 07 §3.2 — when present, `send()` consults the resolver before
    * dialing so the libp2p peerStore is primed with whatever multiaddrs
@@ -230,7 +233,7 @@ export class QuietRetryableHandlerError extends Error {
 
 export class ProtocolRouter {
   private readonly node: DKGNode;
-  private readonly network: LibP2PNetwork;
+  private readonly network: Network;
   private readonly peerResolver?: PeerResolver;
   private readonly isPeerAccepted?: ProtocolRouterOptions['isPeerAccepted'];
   private readonly isPeerKnownRejected?: ProtocolRouterOptions['isPeerKnownRejected'];
@@ -277,7 +280,7 @@ export class ProtocolRouter {
 
   constructor(node: DKGNode, options?: ProtocolRouterOptions) {
     this.node = node;
-    this.network = new LibP2PNetwork(node);
+    this.network = options?.network ?? new LibP2PNetwork(node);
     this.peerResolver = options?.peerResolver;
     this.isPeerAccepted = options?.isPeerAccepted;
     this.isPeerKnownRejected = options?.isPeerKnownRejected;

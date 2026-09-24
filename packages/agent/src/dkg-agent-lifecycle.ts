@@ -2407,6 +2407,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       log: this.log,
     });
     this.router = new ProtocolRouter(this.node, {
+      network,
       peerResolver,
       // Both admission phases — the probing full check and the cached-verdict
       // pre-read gate — installed as one policy from one coordinator; see
@@ -2940,12 +2941,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               onSignerUnregistered: () => {
                 if (storageACKFailoverInFlight) return;
                 storageACKFailoverInFlight = true;
+                const staleEndpoint = this.storageAckEndpoint;
                 this.storageAckEndpoint = null;
-                // rc.9 PR-11: messenger.register stored the handler
-                // in the substrate's wrapper which delegates to
-                // router.register under the hood (see Messenger.register
-                // implementation), so router.unregister still removes it.
-                for (const [protocol] of STORAGE_ACK_PROTOCOLS) this.router.unregister(protocol);
+                staleEndpoint?.dispose();
                 this.log.warn(
                   attemptCtx,
                   `Unregistered V10 StorageACK handler: signer ${ackSignerWallet.address} ` +
@@ -3061,20 +3059,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   ? ackHandler.handler(data, peerId)
                   : ackHandler.updateHandler(data, peerId);
               },
+              dispose: (): void => {},
             };
-            try {
-              for (const [protocol] of STORAGE_ACK_PROTOCOLS) {
-                this.messenger.register(protocol, (data, peerIdStr) => {
+            endpoint.dispose = this.messenger.registerGroup(
+              STORAGE_ACK_PROTOCOLS.map(([protocol]) => ({
+                protocolId: protocol,
+                handler: (data: Uint8Array, peerIdStr: string) => {
                   if (this.storageAckEndpoint !== endpoint) {
                     throw new Error('StorageACK handler is not registered');
                   }
                   return endpoint.dispatch(protocol, data, peerIdStr);
-                });
-              }
-            } catch (error) {
-              for (const [protocol] of STORAGE_ACK_PROTOCOLS) this.router.unregister(protocol);
-              throw error;
-            }
+                },
+              })),
+            );
             this.storageAckEndpoint = endpoint;
             this.clearStorageACKRegistrationRetry();
             this.log.info(

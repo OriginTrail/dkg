@@ -1,5 +1,9 @@
 import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 
+export type ACKCapabilitySelectionPolicy =
+  | { mode: 'rank'; v1?: ReadonlySet<string>; v2?: ReadonlySet<string> }
+  | { mode: 'require'; v1: ReadonlySet<string>; v2?: ReadonlySet<string> };
+
 export interface ACKCandidatePeerSelectionInput {
   connectedPeers: readonly string[];
   /** Legacy eligibility allowlist. When set, unlisted connected peers are not ACK candidates. */
@@ -8,10 +12,8 @@ export interface ACKCandidatePeerSelectionInput {
   preferredACKPeerIds?: readonly string[];
   /** Active-network admission filter. When set, peers outside this set are not ACK candidates. */
   verifiedSameNetworkPeerIds?: ReadonlySet<string>;
-  knownCorePeerIds?: ReadonlySet<string>;
-  knownCorePeerIdsV2?: ReadonlySet<string>;
-  /** When supplied, only these capability-confirmed peers may receive an ACK request. */
-  eligiblePeerIds?: ReadonlySet<string>;
+  /** One capability snapshot drives eligibility, ordering, and diagnostics. */
+  capability?: ACKCapabilitySelectionPolicy;
   requiredACKs: number;
   protocol?: string;
   selfPeerId?: string;
@@ -46,7 +48,7 @@ function normalizePeerIdSet(ids: readonly string[] | undefined): Set<string> {
 export function selectACKCandidateUniverse(input: Pick<
   ACKCandidatePeerSelectionInput,
   'connectedPeers' | 'ackCandidatePeerIds' | 'selfPeerId'
-  | 'eligiblePeerIds'
+  | 'capability'
 >): string[] {
   const connected = [...new Set(input.connectedPeers)]
     .filter((id) => id !== input.selfPeerId);
@@ -54,8 +56,9 @@ export function selectACKCandidateUniverse(input: Pick<
   const allowlisted = allowlistedACKPeers.size > 0
     ? connected.filter((id) => allowlistedACKPeers.has(id))
     : connected;
-  return input.eligiblePeerIds
-    ? allowlisted.filter((id) => input.eligiblePeerIds!.has(id))
+  const capability = input.capability;
+  return capability?.mode === 'require'
+    ? allowlisted.filter((id) => capability.v1.has(id))
     : allowlisted;
 }
 
@@ -73,17 +76,16 @@ function flattenTiers(tiers: readonly ACKCandidateTier[], preferred: ReadonlySet
 
 function buildCandidateTiers(input: {
   connected: readonly string[];
-  knownCorePeerIds?: ReadonlySet<string>;
-  knownCorePeerIdsV2?: ReadonlySet<string>;
+  capability?: ACKCapabilitySelectionPolicy;
   protocol?: string;
 }): ACKCandidateTier[] {
-  const confirmedCore = input.knownCorePeerIds
-    ? input.connected.filter((id) => input.knownCorePeerIds!.has(id))
+  const confirmedCore = input.capability?.v1
+    ? input.connected.filter((id) => input.capability?.v1?.has(id))
     : [];
 
   if (input.protocol === PROTOCOL_STORAGE_ACK_V2) {
-    const v2Advertised = input.knownCorePeerIdsV2
-      ? input.connected.filter((id) => input.knownCorePeerIdsV2!.has(id))
+    const v2Advertised = input.capability?.v2
+      ? input.connected.filter((id) => input.capability?.v2?.has(id))
       : [];
     const v2Set = new Set(v2Advertised);
     const remainingConfirmedCore = confirmedCore.filter((id) => !v2Set.has(id));
@@ -117,19 +119,17 @@ function diagnosticForPeer(input: {
   preferred: ReadonlySet<string>;
   allowlisted: boolean;
   protocol?: string;
-  knownCorePeerIds?: ReadonlySet<string>;
-  knownCorePeerIdsV2?: ReadonlySet<string>;
-  eligiblePeerIds?: ReadonlySet<string>;
+  capability?: ACKCapabilitySelectionPolicy;
 }): ACKCandidatePeerDiagnostic {
   const protocolMatch = input.protocol === PROTOCOL_STORAGE_ACK_V2
-    ? (input.knownCorePeerIdsV2?.has(input.peerId) ?? false)
+    ? (input.capability?.v2?.has(input.peerId) ?? false)
     : input.protocol === PROTOCOL_STORAGE_ACK
-      ? (input.knownCorePeerIds?.has(input.peerId) ?? false)
+      ? (input.capability?.v1?.has(input.peerId) ?? false)
       : true;
   const selected = input.selected.has(input.peerId);
   let reason = selected ? 'selected' : 'not-selected';
   if (!input.allowlisted) reason = 'not-allowlisted';
-  else if (input.eligiblePeerIds && !input.eligiblePeerIds.has(input.peerId)) reason = 'not-core-capable';
+  else if (input.capability?.mode === 'require' && !input.capability.v1.has(input.peerId)) reason = 'not-core-capable';
   else if (!protocolMatch && input.protocol === PROTOCOL_STORAGE_ACK_V2) reason = selected ? 'selected-protocol-fallback' : 'protocol-fallback';
   return {
     peerId: input.peerId,
@@ -156,8 +156,7 @@ export function selectACKCandidatePeersWithDiagnostics(
     : allowlisted;
   const tiers = buildCandidateTiers({
     connected: eligible,
-    knownCorePeerIds: input.knownCorePeerIds,
-    knownCorePeerIdsV2: input.knownCorePeerIdsV2,
+    capability: input.capability,
     protocol: input.protocol,
   });
 
@@ -174,9 +173,7 @@ export function selectACKCandidatePeersWithDiagnostics(
       (!allowlistEnabled || allowlistedACKPeers.has(peerId)) &&
       (!input.verifiedSameNetworkPeerIds || input.verifiedSameNetworkPeerIds.has(peerId)),
     protocol: input.protocol,
-    knownCorePeerIds: input.knownCorePeerIds,
-    knownCorePeerIdsV2: input.knownCorePeerIdsV2,
-    eligiblePeerIds: input.eligiblePeerIds,
+    capability: input.capability,
   }));
 
   return { peers, diagnostics };

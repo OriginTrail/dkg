@@ -56,7 +56,7 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
       [PROTOCOL_STORAGE_UPDATE_ACK, 'update'],
       [PROTOCOL_STORAGE_UPDATE_ACK_V2, 'update'],
     ]);
-    expect(lifecycle).toMatch(/for \(const \[protocol\] of STORAGE_ACK_PROTOCOLS\) \{\s*this\.messenger\.register\(protocol,/);
+    expect(lifecycle).toMatch(/this\.messenger\.registerGroup\(\s*STORAGE_ACK_PROTOCOLS\.map\(/);
   });
 
   it('agent wires core-side StorageACK decline logging', () => {

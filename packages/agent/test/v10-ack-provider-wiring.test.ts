@@ -463,13 +463,14 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       verifiedSameNetworkPeerIds: () => accepted,
       preflightPeerAdmission,
     };
-    internals.knownCorePeerIds = new Set([
+    internals.knownCorePeerIds.clear();
+    for (const peerId of [
       'already-admitted',
       'new-v2-core',
       'rejected-peer',
       'retryable-probe-failure',
-    ]);
-    internals.knownCorePeerIdsV2 = new Set(['new-v2-core']);
+    ]) internals.knownCorePeerIds.add(peerId);
+    internals.knownCorePeerIdsV2.add('new-v2-core');
     internals.node = {
       libp2p: {
         getPeers: () => [
@@ -533,8 +534,9 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       preflightPeerAdmission,
     };
     internals.config.ackCandidatePeerIds = ['allow-a', 'allow-b', 'disconnected-allowlisted'];
-    internals.knownCorePeerIds = new Set(['allow-a', 'allow-b', 'outside-allowlist']);
-    internals.knownCorePeerIdsV2 = new Set();
+    internals.knownCorePeerIds.clear();
+    for (const peerId of ['allow-a', 'allow-b', 'outside-allowlist']) internals.knownCorePeerIds.add(peerId);
+    internals.knownCorePeerIdsV2.clear();
     internals.node = {
       libp2p: {
         getPeers: () => ['allow-a', 'allow-b', 'outside-allowlist']
@@ -1015,6 +1017,12 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     const ackSigner = ethers.Wallet.createRandom();
     const chain = new MockChainAdapter('mock:31337', primary.address);
     chain.seedIdentity(primary.address, 42n);
+    const remoteHandlers: Array<(data: Uint8Array, peerId: string) => Promise<Uint8Array>> = [];
+    const originalRegister = Messenger.prototype.register;
+    vi.spyOn(Messenger.prototype, 'register').mockImplementation(function (protocol, handler, options) {
+      if (protocol === PROTOCOL_STORAGE_ACK) remoteHandlers.push(handler);
+      return originalRegister.call(this, protocol, handler, options);
+    });
 
     agent = await DKGAgent.create({
       name: 'ACKHandlerDeadlineWiringTest',
@@ -1048,11 +1056,19 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     ]);
     const handlerConfig = capturedStorageACKHandlerConfigs.at(-1) as StorageACKHandlerConfigCapture;
     expect(handlerConfig.onSignerUnregistered).toBeTypeOf('function');
+    const staleRemoteHandler = remoteHandlers[0]!;
     handlerConfig.onSignerUnregistered?.();
     expect(internals.storageAckEndpoint).toBeNull();
     expect(internals.storageAckHandlerRegistered).toBe(false);
     expect(internals.getACKCandidatePeers()).not.toContain(localPeerId);
+    const callsBeforeStale = capturedStorageACKHandlerCalls.length;
+    expect(() => staleRemoteHandler(request, 'remote-peer')).toThrow(/StorageACK handler is not registered/);
+    expect(capturedStorageACKHandlerCalls).toHaveLength(callsBeforeStale);
     await expect.poll(() => internals.storageAckHandlerRegistered).toBe(true);
+    expect(remoteHandlers).toHaveLength(2);
+    expect(() => staleRemoteHandler(request, 'remote-peer')).toThrow(/StorageACK handler is not registered/);
+    expect(capturedStorageACKHandlerCalls).toHaveLength(callsBeforeStale);
+    await expect(remoteHandlers.at(-1)!(request, 'remote-peer')).resolves.toEqual(new Uint8Array([1]));
     await agent.stop();
     expect(internals.storageAckEndpoint).toBeNull();
     agent = undefined;
@@ -1090,14 +1106,17 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     await agent.start();
     const internals = agent as unknown as ProviderInternals;
     const routerHandlers = (internals.router as { handlers: Map<string, unknown> }).handlers;
+    const messengerHandlers = (internals.messenger as { handlers: Map<string, unknown> }).handlers;
     expect(ackRegistrations).toBe(3);
     expect(internals.storageAckEndpoint).toBeNull();
     expect(internals.getACKCandidatePeers()).not.toContain(internals.peerId);
     expect(protocols.every((protocol) => !routerHandlers.has(protocol))).toBe(true);
+    expect(protocols.every((protocol) => !messengerHandlers.has(protocol))).toBe(true);
 
     await expect.poll(() => internals.storageAckHandlerRegistered, { timeout: 5_000 }).toBe(true);
     expect(internals.getACKCandidatePeers()).toContain(internals.peerId);
     expect(protocols.every((protocol) => routerHandlers.has(protocol))).toBe(true);
+    expect(protocols.every((protocol) => messengerHandlers.has(protocol))).toBe(true);
     const send = internals.createACKTransportFactory()().sendP2P;
     const request = new Uint8Array([4, 5]);
     const responses = await Promise.all(protocols.map((protocol) => send(internals.peerId, protocol, request)));

@@ -1240,6 +1240,7 @@ export class DKGAgentBase {
   /** One registered endpoint serves both remote streams and local ACK requests. */
   protected storageAckEndpoint: {
     dispatch(protocol: StorageACKProtocol, data: Uint8Array, peerId: string): Promise<Uint8Array>;
+    dispose(): void;
   } | null = null;
   protected get storageAckHandlerRegistered(): boolean {
     return this.storageAckEndpoint !== null;

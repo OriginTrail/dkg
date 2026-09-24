@@ -2887,6 +2887,7 @@ export class DKGAgent extends DKGAgentBase {
     // via the messengerOutboxTimer cleared just above.
     this.clearStorageACKRegistrationRetry();
     this.storageACKRegistrationRetryInFlight = false;
+    this.storageAckEndpoint?.dispose();
     this.storageAckEndpoint = null;
     // The owner joins both an installed prover and any in-flight WAL/handle
     // creation. A timeout retains ownership and blocks store/network teardown.

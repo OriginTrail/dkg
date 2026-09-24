@@ -173,7 +173,7 @@ const ALLOWLIST = new Map([
     'packages/core/src/protocol-router.ts',
     {
       expectedHits: 2,
-      justification: 'ProtocolRouter.send and the admission-gated, payload-free capability probe both use LibP2PNetwork after PeerResolver (RFC 07 PR-3)',
+      justification: 'ProtocolRouter.send and the admission-gated, payload-free capability probe both use the injected Network transport after PeerResolver (RFC 07 PR-3)',
     },
   ],
   [

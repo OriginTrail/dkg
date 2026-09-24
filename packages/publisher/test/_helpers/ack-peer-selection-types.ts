@@ -6,10 +6,10 @@ const rankedOnly: ACKCandidatePeerSelectionInput = {
 };
 const coreOnly: ACKCandidatePeerSelectionInput = {
   ...rankedOnly,
-  eligiblePeerIds: new Set(['core']),
+  capability: { mode: 'require', v1: new Set(['core']) },
 };
 
-// @ts-expect-error Core filtering is represented only by an explicit eligible peer set.
-const invalid: ACKCandidatePeerSelectionInput = { ...rankedOnly, requireConfirmedCore: true };
+// @ts-expect-error Requiring core capability also requires a V1 capability set.
+const invalid: ACKCandidatePeerSelectionInput = { ...rankedOnly, capability: { mode: 'require' } };
 
 void [rankedOnly, coreOnly, invalid];

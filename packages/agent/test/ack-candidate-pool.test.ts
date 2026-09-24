@@ -156,19 +156,21 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     a.getPeerProtocols = async (peerId) => peerId === CORE[0]
       ? [PROTOCOL_STORAGE_ACK]
       : ['/dkg/10.0.0/sync'];
-    let preflightPeers: string[] = [];
+    const preflightCalls: string[][] = [];
     a.networkAdmissionCoordinator = {
       enabled: false,
       isAcceptedPeer: () => true,
       verifiedSameNetworkPeerIds: () => new Set(),
       preflightPeerAdmission: async (peerIds) => {
-        preflightPeers = [...peerIds];
-        return { checked: preflightPeers.length, admitted: 0, unresolved: 0 };
+        const peers = [...peerIds];
+        preflightCalls.push(peers);
+        return { checked: peers.length, admitted: 0, unresolved: 0 };
       },
     };
 
     expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([CORE[0]]);
-    expect(preflightPeers).toEqual([CORE[0]]);
+    expect(preflightCalls).toEqual([[CORE[0]]]);
+    expect(preflightCalls.flat()).not.toContain(EDGE[0]);
     expect(a.knownCorePeerIds.has(EDGE[0])).toBe(false);
   });
 
