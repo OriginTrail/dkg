@@ -260,11 +260,13 @@ All notable changes to the DKG V10 node are documented here. The format is based
   audit.
 - **`GET /api/status` reports main-thread stalls**: a new `eventLoopDelay`
   block gives the event-loop delay over the last complete 60-second window
-  (`p50Ms`, `p99Ms`, `maxMs` and `windowMs`, in milliseconds; the three delays
-  are `null` before the first sample), sampled every 20 ms. When a window's
-  longest stall reaches 2 seconds the daemon logs one
-  `[warn] Event loop blocked: ...` line, at most once every 10 minutes, and
-  the next warning counts the windows it skipped.
+  (`p50Ms`, `p99Ms`, `maxMs` and `windowMs`, in milliseconds), sampled every
+  20 ms. The delays are how late each sample ran beyond that 20 ms interval,
+  so an idle node reads about 0, and they are `null` before the first sample.
+  A stall that spans two windows is counted once, in the window it ends in or
+  the next. When a window's longest stall reaches 2 seconds the daemon logs
+  one `[warn] Event loop blocked: ...` line, at most once every 10 minutes,
+  and the next warning counts the windows it skipped.
 
 ## [10.0.18] - 2026-09-22
 
