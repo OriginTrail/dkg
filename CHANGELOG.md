@@ -2,6 +2,29 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+
+## [10.0.18 core hotfix] - 2026-09-24
+
+Deployed to Core nodes from the `hotfix/v10.0.18-cores` git branch, on top of
+10.0.18. Nodes report the branch commit in `/api/status`.
+
+### Fixed
+
+- **Subscriptions for a context graph the chain reports unknown are no longer
+  retried every 30 seconds**: the deferred subscription authority recovery
+  re-read the chain for every dormant row whose stored on-chain id does not
+  exist or is not active, and never stopped. A Core carrying such rows made
+  thousands of `getContextGraph` calls an hour. That answer is now final for
+  the running process; the row stays on disk and is checked again at the next
+  start. Timeouts and failed reads are still retried.
+- **Random Sampling resolves the challenged Context Graph by its chain name
+  commitment when local history holds several names for one numeric id**
+  (from #2759): proof extraction no longer picks an arbitrary ontology row, and
+  proof-time repair checks a direct local binding against the chain first.
+- **The sync-protocol readiness check accepts the string-backed peer
+  references that Random Sampling repair and durable recovery pass** (from
+  #2741): the peer is canonicalized to a libp2p PeerId before the peer-store
+  lookup, so exact repair no longer fails with `Invalid PeerId`.
 ## [Unreleased]
 
 ## [10.0.18] - 2026-09-22
