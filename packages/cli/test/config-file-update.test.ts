@@ -244,6 +244,24 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       expect(existsSync(files.configPath)).toBe(false);
     });
 
+    // An edit returns the whole new value at its path; applying only what
+    // changed inside it keeps an operator's notes on the keys it kept.
+    it('keeps the comments inside a mapping that an edit merges into', async () => {
+      await writeFile(files.configYamlPath, [
+        'publisher:',
+        '  # tuned for testnet',
+        '  retryJitterRatio: 0.2 # jitter',
+        '',
+      ].join('\n'));
+
+      await files.updateConfigFile([configEdit(['publisher'], (publisher) => ({ ...publisher, enabled: true }))]);
+
+      const written = await readFile(files.configYamlPath, 'utf-8');
+      expect(written).toContain('  # tuned for testnet\n');
+      expect(written).toMatch(/retryJitterRatio: 0\.2 +# jitter/);
+      expect(yaml.load(written)).toEqual({ publisher: { retryJitterRatio: 0.2, enabled: true } });
+    });
+
     it('rewrites a YAML config whole when a change runs through an alias', async () => {
       await writeFile(files.configYamlPath, 'base: &base\n  level: info\nlogging: *base\n');
 
