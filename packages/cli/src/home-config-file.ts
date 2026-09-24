@@ -12,7 +12,7 @@ import { parseDocument, type Document } from 'yaml';
 import { hasErrorCode } from '@origintrail-official/dkg-core';
 import type { DkgConfig } from './config.js';
 import type { ReplaceStrategy } from './durable-file-replace.js';
-import { withFileLock } from './file-lock.js';
+import { updateFileUnderLease } from './file-lock.js';
 
 /** What the config file holds: the config, and keys older releases wrote that are now only ever removed. */
 export type DkgConfigFile = DkgConfig & { openclawAdapter?: unknown; openclawChannel?: unknown };
@@ -140,23 +140,26 @@ export function readHomeConfigSourceSync(home: string): { path: string; raw: unk
 }
 
 /**
- * Apply `edits`, together, under a lock the daemon and CLI share: re-read the
- * file that is the source of truth, edit its object, and replace the file
- * atomically in the same format. Edits that change nothing write nothing, and
- * a writer that lost the lock while it worked writes nothing either.
+ * Apply `edits`, together, under a lease the daemon and CLI share: re-read
+ * the file that is the source of truth, edit its object, and replace the
+ * file atomically in the same format. Edits that change nothing write
+ * nothing, and a writer that lost the lease while it worked writes nothing
+ * either.
  */
 export async function updateHomeConfigFile(home: string, edits: readonly DkgConfigEdit[]): Promise<DkgConfigFileUpdate> {
   await mkdir(home, { recursive: true });
-  return withFileLock(homeConfigPaths(home).lock, async (lock) => {
+  const update = await updateFileUnderLease(homeConfigPaths(home).lock, async () => {
     const source = await readHomeConfigSource(home) ?? { ...homeConfigSources(home)[0], text: '', raw: {} };
     const { before, after, changed } = applyConfigEdits(configFileObject(source.raw, source.path), edits);
-    if (!changed) return { path: source.path, changed: false };
+    if (!changed) return { result: source.path };
     const content = source.format === 'yaml'
       ? patchYamlText(source.text, before, after)
       : `${JSON.stringify(after, null, 2)}\n`;
-    const strategy = await lock.replaceFile(source.path, content);
-    return { path: source.path, changed: true, strategy };
+    return { result: source.path, path: source.path, content };
   }, { timeoutMs: CONFIG_LOCK_TIMEOUT_MS, label: 'config' });
+  return update.replaced
+    ? { path: update.result, changed: true, strategy: update.strategy }
+    : { path: update.result, changed: false };
 }
 
 /** The config file's data before and after its edits, as both formats persist it. */

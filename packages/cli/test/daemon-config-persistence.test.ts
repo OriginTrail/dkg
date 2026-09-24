@@ -14,7 +14,7 @@ import {
   persistLocalAgentIntegration,
   updateLocalAgentIntegration,
 } from '../src/daemon/local-agents.js';
-import { withFileLock } from '../src/file-lock.js';
+import { withFileLease } from '../src/file-lock.js';
 import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 import {
@@ -73,7 +73,7 @@ async function readFileConfig(): Promise<Record<string, any>> {
 async function holdConfigLock(): Promise<{ release: () => Promise<void> }> {
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
-  const holder = withFileLock(join(home, 'config.lock'), () => held, { timeoutMs: 5_000 });
+  const holder = withFileLease(join(home, 'config.lock'), () => held, { timeoutMs: 5_000 });
   await vi.waitFor(() => expect(existsSync(join(home, 'config.lock'))).toBe(true));
   return { release: async () => { release(); await holder; } };
 }

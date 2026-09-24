@@ -53,7 +53,7 @@ function pidNamespace(): string {
   return cachedPidNamespace;
 }
 
-export interface FileLockOptions {
+export interface FileLeaseOptions {
   /** How long to wait for a live holder before giving up. */
   timeoutMs?: number;
   /** Names the protected resource in the timeout error, e.g. `config`. */
@@ -62,8 +62,8 @@ export interface FileLockOptions {
   staleMs?: number;
 }
 
-/** The lock a `withFileLock` callback holds; what it writes is published only while it still holds it. */
-export interface HeldFileLock {
+/** The lease a `withFileLease` callback holds; what it writes is published only while it still holds it. */
+export interface HeldFileLease {
   /**
    * Run `publish`, the step that makes the callback's work visible (such as a
    * rename), only if this holder still holds the lock, and with takeover held
@@ -100,28 +100,64 @@ type ParsedHolder =
 
 type LockState = 'gone' | 'live' | 'stale';
 
+/** A change that `prepare` asks updateFileUnderLease to publish: its result, and the file to replace, if any. */
+export type LeasedFileChange<T> =
+  | { result: T }
+  | { result: T; path: string; content: string; mode?: number };
+
+/** What updateFileUnderLease did: the result `prepare` gave, and how the file was replaced if it was. */
+export type LeasedFileUpdate<T> =
+  | { result: T; replaced: false }
+  | { result: T; replaced: true; strategy: ReplaceStrategy };
+
 /**
- * Run `fn` while holding an exclusive lock file at `lockPath`. The lock is
- * shared across processes: the holder records its pid, the pid namespace it
- * belongs to and a token, and renews its lease (the lock file's mtime) while
- * `fn` runs. A waiter takes the lock over only when its holder is gone (the
- * pid is dead, or is this thread's own pid without a lock this thread holds)
- * or its lease has lapsed, so a crashed holder does not wedge later writers
- * while a live one keeps its lock however long it works. A lock from another
- * pid namespace is judged by its lease alone.
- *
- * A holder that stalls for a whole lease can be taken over, so `fn` publishes
- * its work through the lock (`replaceFile`, or `commit` for any other step).
- * Every step that removes the lock or publishes under it holds the guard, a
- * directory at `<lockPath>.guard`: a waiter's takeover, a holder's release and
- * a holder's commit. A takeover therefore cannot come between a holder's
- * check that it still holds the lock and its commit, and a holder that was
- * taken over throws instead of committing.
+ * Prepare a change to one file under the lease at `lockPath` (see
+ * withFileLease), and publish it. `prepare` runs while the lease is held,
+ * reads what it needs and returns the file's new content, if any; the file
+ * is then replaced only while the lease is still held, through the guarded
+ * commit. `prepare` is given no way to write, so a holder that stalled past
+ * its lease and was taken over publishes nothing.
  */
-export async function withFileLock<T>(
+export async function updateFileUnderLease<T>(
   lockPath: string,
-  fn: (lock: HeldFileLock) => Promise<T>,
-  options: FileLockOptions = {},
+  prepare: () => Promise<LeasedFileChange<T>>,
+  options: FileLeaseOptions = {},
+): Promise<LeasedFileUpdate<T>> {
+  return withFileLease(lockPath, async (lease) => {
+    const change = await prepare();
+    if (!('path' in change)) return { result: change.result, replaced: false };
+    const replaceOptions = change.mode === undefined ? {} : { mode: change.mode };
+    const strategy = await lease.replaceFile(change.path, change.content, replaceOptions);
+    return { result: change.result, replaced: true, strategy };
+  }, options);
+}
+
+/**
+ * Run `fn` while holding a lease on the lock file at `lockPath`. This is the
+ * machinery beneath updateFileUnderLease, which writers use: `fn` is not
+ * mutually exclusive once its lease lapses, so anything it does outside
+ * `commit` or `replaceFile` can overlap a successor's work.
+ *
+ * The lock is shared across processes: the holder records its pid, the pid
+ * namespace it belongs to and a token, and renews its lease (the lock file's
+ * mtime) while `fn` runs. A waiter takes the lock over only when its holder
+ * is gone (the pid is dead, or is this thread's own pid without a lock this
+ * thread holds) or its lease has lapsed, so a crashed holder does not wedge
+ * later writers while a live one keeps its lock however long it works. A
+ * lock from another pid namespace is judged by its lease alone.
+ *
+ * A holder that stalls for a whole lease can be taken over, so its work is
+ * published through the lease (`replaceFile`, or `commit` for any other
+ * step). Every step that removes the lock or publishes under it holds the
+ * guard, a directory at `<lockPath>.guard`: a waiter's takeover, a holder's
+ * release and a holder's commit. A takeover therefore cannot come between a
+ * holder's check that it still holds the lock and its commit, and a holder
+ * that was taken over throws instead of committing.
+ */
+export async function withFileLease<T>(
+  lockPath: string,
+  fn: (lease: HeldFileLease) => Promise<T>,
+  options: FileLeaseOptions = {},
 ): Promise<T> {
   const staleMs = options.staleMs ?? LOCK_STALE_MS;
   const label = options.label ?? 'file';
