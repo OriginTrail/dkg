@@ -77,6 +77,8 @@ describe('DKGNode DHT network identity wiring', () => {
 
     expect(mocks.createLibp2p).toHaveBeenCalledOnce();
     const options = mocks.createLibp2p.mock.calls[0][0];
+    expect(options.connectionMonitor).toEqual({ enabled: false });
+    expect(options.services.ping).toEqual(expect.any(Function));
     const denyDialMultiaddr = options.connectionGater?.denyDialMultiaddr;
     expect(denyDialMultiaddr).toEqual(expect.any(Function));
     expect(
