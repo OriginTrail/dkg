@@ -7,6 +7,7 @@ name: Config file native writes
 on:
   pull_request:
     paths:
+      - 'packages/cli/src/config.ts'
       - 'packages/cli/src/durable-file-replace.ts'
       - 'packages/cli/src/file-lock.ts'
       - 'packages/cli/src/home-config-file.ts'
