@@ -456,6 +456,52 @@ describe('ontology Context Graph claims on a node that synced the ontology graph
     expect(agent.repairContextGraphNameHashSubscription('33', NAME_HASH)).toBe(false);
   });
 
+  it('does not repair a hash row whose cleartext is bound to another slot', async () => {
+    const agent = await startAgent(await baseShapedChain());
+    // Two slots can commit one name. Here #33's hash row and the cleartext
+    // row the node holds bound to #35.
+    agent.setContextGraphSubscription(NAME_HASH, { subscribed: true, synced: false, onChainId: '33' });
+    agent.setContextGraphSubscription(REAL_ID, { subscribed: true, synced: false, onChainId: '35' });
+
+    // Merging them would splice two slots' data into one graph.
+    expect(agent.repairContextGraphNameHashSubscription('33', NAME_HASH)).toBe(false);
+    expect(row(agent, NAME_HASH)).toMatchObject({ subscribed: true, onChainId: '33' });
+    expect(row(agent, NAME_HASH)?.onChainHash).toBeUndefined();
+    expect(row(agent, REAL_ID)).toMatchObject({ subscribed: true, onChainId: '35' });
+    expect(row(agent, REAL_ID)?.onChainHash).toBeUndefined();
+  });
+
+  it('lists one row per on-chain id through the projection listing as well', async () => {
+    const previous = process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION;
+    process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION = '1';
+    try {
+      const agent = await startAgent(await baseShapedChain());
+      await syncOntologyClaims(agent);
+      // A scoped listing shows a graph to a caller only once its policy is known.
+      const ontology = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      await agent.store.insert(CLAIMS.map(({ id }) => ({
+        subject: contextGraphDataGraphUri(id),
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: ontology,
+      })));
+      await agent.discoverContextGraphsFromStore();
+      await agent.discoverContextGraphsFromStorage();
+
+      const rows = await agent.listContextGraphs({ callerAgentAddress: null });
+      expect(rows.filter((r) => r.onChainId === '33').map((r) => r.id)).toEqual([REAL_ID]);
+      for (const id of REFUTED) {
+        const listed = rows.find((r) => r.id === id);
+        expect(listed, id).toBeDefined();
+        expect(listed?.onChainId, id).toBeUndefined();
+        expect(listed?.onChain, id).toBeUndefined();
+      }
+    } finally {
+      if (previous === undefined) delete process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION;
+      else process.env.DKG_LIST_CONTEXT_GRAPHS_PROJECTION = previous;
+    }
+  });
+
   it('never turns a hash-shaped row the chain does not bind to the slot into a placeholder', async () => {
     const agent = await startAgent(await baseShapedChain());
     // A cleartext id that happens to be hash-shaped (here, the very hash #33

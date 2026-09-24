@@ -951,7 +951,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         isSystem: meta.isSystem,
         subscribed: sub?.subscribed ?? false,
         synced: sub?.synced ?? false,
-        onChainId: sub?.onChainId ?? meta.onChainId,
+        // As in the default listing: a projected `OnChainId` is a claim.
+        onChainId: sub?.onChainId ?? provenProjectedOnChainId(this, id, meta.onChainId),
         policyKnown,
       };
     });

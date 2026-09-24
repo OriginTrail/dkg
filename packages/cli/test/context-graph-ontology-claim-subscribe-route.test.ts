@@ -6,7 +6,8 @@
  *
  * Live, the route answered with no `identity` (the CLI printed no note), kept
  * a row keyed by the hash string, and RFC-64 rejected that row as an "invalid
- * identity". The hash must subscribe the one graph this chain proves #33 is.
+ * identity". The hash must subscribe the one graph this chain proves #33 is,
+ * or, when the node holds no cleartext for it, the hash's placeholder.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
@@ -17,7 +18,11 @@ import {
   contextGraphDataGraphUri,
 } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent } from '@origintrail-official/dkg-agent';
+import {
+  DKGAgent,
+  type ContextGraphSubscriptionRecord,
+  type ContextGraphSubscriptionStore,
+} from '@origintrail-official/dkg-agent';
 import { handleContextGraphRoutes } from '../src/daemon/routes/context-graph.js';
 import { daemonState } from '../src/daemon/state.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
@@ -28,6 +33,7 @@ const REAL_ID = '0x64529c023d853371228923B4FdA5FB22F929bf51/bb-open-20260923-9c3
 const NAME_HASH = '0x69a1d4a3500548577083af0be5c4376dcf171907ab7da012d25dc778ced894e3';
 const RESOLVED_MESSAGE = `Context Graph 0x69a1d4a3…94e3 resolves to "${REAL_ID}" `
   + '(verified against the on-chain name hash); it syncs under that id.';
+const NAME_HASH_ONLY_MESSAGE = 'Context Graph 0x69a1d4a3…94e3 is known only by its on-chain name hash';
 const CLAIMS_33 = [
   { id: 'pr68-open-test', name: 'PR68 Open Test' },
   { id: REAL_ID, name: 'open run open-20260923-9c3f0' },
@@ -67,20 +73,33 @@ async function baseShapedChain(): Promise<MockChainAdapter> {
   return chain;
 }
 
+/** A durable subscription store holding what an earlier version persisted. */
+function memorySubscriptionStore(rows: ContextGraphSubscriptionRecord[]): ContextGraphSubscriptionStore {
+  const records = new Map(rows.map((record) => [record.id, { ...record }]));
+  return {
+    loadAll: async () => [...records.values()].map((record) => ({ ...record })),
+    save: async (record) => { records.set(record.id, { ...record }); },
+    delete: async (contextGraphId) => { records.delete(contextGraphId); },
+  };
+}
+
 /** An edge that synced the ontology on connect and ran both discovery lanes. */
-async function startEdge(): Promise<DKGAgent> {
+async function startEdge(
+  options: { claims?: readonly { id: string; name: string }[]; store?: ContextGraphSubscriptionStore } = {},
+): Promise<DKGAgent> {
   const agent = await DKGAgent.create({
     name: 'OntologyClaimsEdge',
     listenHost: '127.0.0.1',
     nodeRole: 'edge',
     chainAdapter: await baseShapedChain(),
     rfc64CatalogActivation: { enabled: false },
+    ...(options.store ? { contextGraphSubscriptionStore: options.store } : {}),
   });
   cleanups.push(() => agent.stop());
   await agent.start();
   await agent.awaitInitialChainPoll();
   const graph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-  await agent.store.insert(CLAIMS_33.flatMap(({ id, name }) => {
+  await agent.store.insert((options.claims ?? CLAIMS_33).flatMap(({ id, name }) => {
     const subject = contextGraphDataGraphUri(id);
     return [
       { subject, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph },
@@ -129,15 +148,20 @@ async function startRoute(agent: DKGAgent) {
   return { subscribe };
 }
 
+/** No peers: catch-up finds nothing to sync. */
+function stubCatchup(): void {
+  daemonState.catchupRunner = {
+    run: async () => ({
+      connectedPeers: 0, syncCapablePeers: 0, peersTried: 0, peersResponded: 0, peersSucceeded: 0,
+      dataSynced: 0, sharedMemorySynced: 0, denied: false, deniedPeers: 0, deferredBackpressure: 0,
+    }),
+    close: async () => undefined,
+  } as any;
+}
+
 describe('subscribing by name hash on a node that synced the ontology graph', () => {
   it('subscribes the graph this chain proves the hash names, with the identity note', async () => {
-    daemonState.catchupRunner = {
-      run: async () => ({
-        connectedPeers: 0, syncCapablePeers: 0, peersTried: 0, peersResponded: 0, peersSucceeded: 0,
-        dataSynced: 0, sharedMemorySynced: 0, denied: false, deniedPeers: 0, deferredBackpressure: 0,
-      }),
-      close: async () => undefined,
-    } as any;
+    stubCatchup();
     const agent = await startEdge();
     const route = await startRoute(agent);
 
@@ -152,6 +176,30 @@ describe('subscribing by name hash on a node that synced the ontology graph', ()
     expect(rows.has(NAME_HASH)).toBe(false);
     expect(rows.get(REAL_ID)).toMatchObject({ subscribed: true, onChainId: '33', onChainHash: NAME_HASH });
     // The other definitions that claimed #33 are catalogued, never bound.
+    expect(rows.get('baseball')?.onChainId).toBeUndefined();
+    expect(rows.get('pr68-open-test')?.onChainId).toBeUndefined();
+  });
+
+  it('keeps the name-hash note for a hash it holds no cleartext for, on the row an earlier version saved', async () => {
+    stubCatchup();
+    // `dkg subscribe <hash> --save` on the unfixed edge: the hash string, bound
+    // to #33, with no recorded name hash. Its ontology holds only other
+    // networks' #33 claims, so nothing local names the graph.
+    const agent = await startEdge({
+      claims: CLAIMS_33.filter(({ id }) => id !== REAL_ID),
+      store: memorySubscriptionStore([
+        { id: NAME_HASH, subscribed: true, synced: false, onChainId: '33', syncScoped: true },
+      ]),
+    });
+    const route = await startRoute(agent);
+
+    const { status, body } = await route.subscribe(NAME_HASH);
+
+    expect(status).toBe(200);
+    expect(body.identity).toMatchObject({ state: 'name-hash-only', nameHash: NAME_HASH, onChainId: '33' });
+    expect(body.identity.message).toContain(NAME_HASH_ONLY_MESSAGE);
+    const rows = agent.getSubscribedContextGraphs();
+    expect(rows.get(NAME_HASH)).toMatchObject({ subscribed: true, onChainId: '33', onChainHash: NAME_HASH });
     expect(rows.get('baseball')?.onChainId).toBeUndefined();
     expect(rows.get('pr68-open-test')?.onChainId).toBeUndefined();
   });
