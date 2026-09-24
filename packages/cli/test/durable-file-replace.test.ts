@@ -1,9 +1,10 @@
 import { constants } from 'node:fs';
 import {
-  access, chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile,
+  access, chmod, chown, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile,
+  type FileHandle,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { replaceFileDurably } from '../src/durable-file-replace.js';
 
@@ -23,6 +24,43 @@ const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:
 function fsError(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(`${code}: simulated`), { code });
 }
+
+/** Have every file handle the code opens go through `wrap` first. */
+function wrapOpenedHandles(wrap: (handle: FileHandle, path: string) => void): void {
+  vi.mocked(open).mockImplementation(async (path, ...rest) => {
+    const handle = await actualFs.open(path, ...rest);
+    wrap(handle, String(path));
+    return handle;
+  });
+}
+
+/** Record, in order, each fsync of an opened file or directory and each rename. */
+function recordSyncsAndRenames(): string[] {
+  const events: string[] = [];
+  wrapOpenedHandles((handle, path) => {
+    const sync = handle.sync.bind(handle);
+    handle.sync = async () => {
+      events.push(`sync ${basename(path)}`);
+      await sync();
+    };
+  });
+  vi.mocked(rename).mockImplementation(async (from, to) => {
+    events.push(`rename ${basename(String(from))} -> ${basename(String(to))}`);
+    await actualFs.rename(from, to);
+  });
+  return events;
+}
+
+/** The mode writeFile gives a new file in `dir`, which the umask decides. */
+async function newFileMode(dir: string): Promise<number> {
+  const reference = join(dir, '.reference');
+  await writeFile(reference, 'x');
+  const { mode } = await stat(reference);
+  await rm(reference);
+  return mode & 0o777;
+}
+
+const TEMP_FILE = /^\.config\.json\.\d+\.[0-9a-f-]+\.tmp$/;
 
 describe('replaceFileDurably', () => {
   let dir = '';
@@ -59,6 +97,97 @@ describe('replaceFileDurably', () => {
       // Windows keeps only a read-only flag, not POSIX permission bits.
       if (process.platform !== 'win32') expect((await stat(target)).mode & 0o777).toBe(mode);
     }
+  });
+
+  it('keeps the group of the file it replaces', async () => {
+    // A new file gets the writer's group or the directory's, as this one did;
+    // move it to another group the writer is in, as an operator sharing it would.
+    await writeFile(target, 'old');
+    const { uid, gid: createdGid } = await stat(target);
+    const otherGid = process.getgroups?.().find((gid) => gid !== createdGid);
+    // Windows has no POSIX groups, and a writer in a single group has nowhere to move it.
+    if (otherGid === undefined) return;
+    await chown(target, uid, otherGid);
+
+    await replaceFileDurably(target, 'new');
+
+    expect(await readFile(target, 'utf-8')).toBe('new');
+    expect(await stat(target)).toMatchObject({ uid, gid: otherGid });
+  });
+
+  it("gives the replacement the owner and group of another user's file before its mode", async () => {
+    await writeFile(target, 'old');
+    await chmod(target, 0o640);
+    const actual = await stat(target);
+    // The file belongs to another user, as when a root daemon writes an operator's config.
+    const owner = { uid: actual.uid + 1, gid: actual.gid + 1 };
+    vi.mocked(stat).mockImplementationOnce(async (path) => Object.assign(await actualFs.stat(path), owner));
+    const events: string[] = [];
+    wrapOpenedHandles((handle) => {
+      handle.chown = async (uid, gid) => { events.push(`chown ${uid}:${gid}`); };
+      const chmodHandle = handle.chmod.bind(handle);
+      handle.chmod = async (mode) => {
+        events.push(`chmod ${(Number(mode) & 0o777).toString(8)}`);
+        await chmodHandle(mode);
+      };
+    });
+
+    await replaceFileDurably(target, 'new');
+
+    expect(events).toEqual([`chown ${owner.uid}:${owner.gid}`, 'chmod 640']);
+    expect(await readFile(target, 'utf-8')).toBe('new');
+    expect((await stat(target)).ino).not.toBe(actual.ino);
+  });
+
+  it('rewrites the file in place when it may not give the replacement the original owner', async () => {
+    await writeFile(target, 'old');
+    await chmod(target, 0o640);
+    const actual = await stat(target);
+    const anotherUser = async (path: Parameters<typeof stat>[0]) =>
+      Object.assign(await actualFs.stat(path), { uid: actual.uid + 1 });
+    wrapOpenedHandles((handle) => {
+      handle.chown = async () => { throw fsError('EPERM'); };
+    });
+
+    // A failed pre-commit check leaves even the in-place path untouched.
+    vi.mocked(stat).mockImplementationOnce(anotherUser);
+    await expect(replaceFileDurably(target, 'new', {
+      beforeCommit: async () => { throw new Error('lock lost'); },
+    })).rejects.toThrow('lock lost');
+    expect(await readFile(target, 'utf-8')).toBe('old');
+
+    vi.mocked(stat).mockImplementationOnce(anotherUser);
+    const syncs = vi.fn();
+    wrapOpenedHandles((handle, path) => {
+      handle.chown = async () => { throw fsError('EPERM'); };
+      const sync = handle.sync.bind(handle);
+      handle.sync = async () => {
+        syncs(basename(path));
+        await sync();
+      };
+    });
+    await replaceFileDurably(target, 'new content');
+
+    // The same inode, so its owner, group, mode and any ACL stay as they were.
+    const after = await stat(target);
+    expect(after.ino).toBe(actual.ino);
+    expect(after.mode & 0o777).toBe(0o640);
+    expect(await readFile(target, 'utf-8')).toBe('new content');
+    expect(syncs.mock.calls).toEqual([['config.json']]);
+    expect(await readdir(dir)).toEqual(['config.json']);
+  });
+
+  it('propagates a chown failure other than a refusal', async () => {
+    await writeFile(target, 'old');
+    const actual = await stat(target);
+    vi.mocked(stat).mockImplementationOnce(async (path) => Object.assign(await actualFs.stat(path), { uid: actual.uid + 1 }));
+    wrapOpenedHandles((handle) => {
+      handle.chown = async () => { throw fsError('EIO'); };
+    });
+
+    await expect(replaceFileDurably(target, 'new')).rejects.toMatchObject({ code: 'EIO' });
+    expect(await readFile(target, 'utf-8')).toBe('old');
+    expect(await readdir(dir)).toEqual(['config.json']);
   });
 
   it('gives a new file the same default mode writeFile would', async () => {
@@ -99,6 +228,54 @@ describe('replaceFileDurably', () => {
     expect((await lstat(link)).isSymbolicLink()).toBe(true);
     expect(await readFile(join(realDir, 'config.json'), 'utf-8')).toBe('new');
     expect(await readdir(realDir)).toEqual(['config.json']);
+  });
+
+  // A config managed elsewhere is linked in before the managed copy exists.
+  it.each([
+    ['an absolute', (managed: string) => managed],
+    ['a relative', () => join('managed', 'config.json')],
+  ])('creates the missing file behind %s symlink and keeps the link', async (_kind, linkTo) => {
+    // Creating a file symlink needs a privilege Windows users usually lack.
+    if (process.platform === 'win32') return;
+    const managed = join(dir, 'managed', 'config.json');
+    await mkdir(join(dir, 'managed'));
+    await symlink(linkTo(managed), target);
+
+    await replaceFileDurably(target, 'new');
+
+    expect((await lstat(target)).isSymbolicLink()).toBe(true);
+    expect(await readFile(managed, 'utf-8')).toBe('new');
+    expect((await stat(managed)).mode & 0o777).toBe(await newFileMode(dir));
+    expect(await readdir(join(dir, 'managed'))).toEqual(['config.json']);
+    expect((await readdir(dir)).sort()).toEqual(['config.json', 'managed']);
+  });
+
+  it('resolves a relative symlink from the directory it really sits in', async () => {
+    if (process.platform === 'win32') return;
+    // The home is itself a link, so `..` from the link must mean `data/..`.
+    await mkdir(join(dir, 'data', 'home'), { recursive: true });
+    await mkdir(join(dir, 'data', 'managed'));
+    await symlink(join(dir, 'data', 'home'), join(dir, 'home'));
+    await symlink(join('..', 'managed', 'config.json'), join(dir, 'data', 'home', 'config.json'));
+
+    await replaceFileDurably(join(dir, 'home', 'config.json'), 'new');
+
+    expect(await readFile(join(dir, 'data', 'managed', 'config.json'), 'utf-8')).toBe('new');
+    expect((await lstat(join(dir, 'data', 'home', 'config.json'))).isSymbolicLink()).toBe(true);
+  });
+
+  it('gives up on a cycle of links instead of following it forever', async () => {
+    if (process.platform === 'win32') return;
+    await symlink(join(dir, 'b.json'), join(dir, 'a.json'));
+    await symlink(join(dir, 'a.json'), join(dir, 'b.json'));
+    // realpath reports the cycle itself; make it look like a missing target to reach the walk.
+    vi.mocked(realpath).mockImplementation(async (path) => {
+      if (String(path).endsWith('.json')) throw fsError('ENOENT');
+      return actualFs.realpath(path);
+    });
+
+    await expect(replaceFileDurably(join(dir, 'a.json'), 'new')).rejects.toMatchObject({ code: 'ELOOP' });
+    expect((await readdir(dir)).sort()).toEqual(['a.json', 'b.json']);
   });
 
   it('propagates a failure to resolve the target other than a missing file', async () => {
@@ -166,16 +343,39 @@ describe('replaceFileDurably', () => {
     expect(rename).toHaveBeenCalledTimes(1);
   });
 
-  it('flushes the directory after the rename, except on Windows', async () => {
-    const directoryOpens = () => vi.mocked(open).mock.calls.filter(([path]) => path === dir);
+  it('syncs the new content before the rename and the directory after it, except on Windows', async () => {
+    await writeFile(target, 'old');
+    const events = recordSyncsAndRenames();
 
     await replaceFileDurably(target, 'posix', { platform: 'linux' });
-    expect(directoryOpens()).toEqual([[dir, constants.O_RDONLY]]);
+    const temp = events[0]?.slice('sync '.length) ?? '';
+    expect(temp).toMatch(TEMP_FILE);
+    // A Windows host cannot open the directory to flush it; the linux path still tries.
+    const directorySync = process.platform === 'win32' ? [] : [`sync ${basename(dir)}`];
+    expect(events).toEqual([`sync ${temp}`, `rename ${temp} -> config.json`, ...directorySync]);
+    expect(await readFile(target, 'utf-8')).toBe('posix');
 
-    vi.mocked(open).mockClear();
+    events.length = 0;
     await replaceFileDurably(target, 'windows', { platform: 'win32' });
-    expect(directoryOpens()).toEqual([]);
+    expect(events).toEqual([expect.stringMatching(/^sync /), expect.stringMatching(/ -> config\.json$/)]);
     expect(await readFile(target, 'utf-8')).toBe('windows');
+  });
+
+  it('leaves the file alone when the pre-commit check fails', async () => {
+    await writeFile(target, 'old');
+    const events = recordSyncsAndRenames();
+
+    await expect(replaceFileDurably(target, 'new', {
+      beforeCommit: async () => {
+        events.push('check');
+        throw new Error('lock lost');
+      },
+    })).rejects.toThrow('lock lost');
+
+    // The check runs on content already synced, and nothing is renamed after it fails.
+    expect(events).toEqual([expect.stringMatching(/^sync \.config\.json\./), 'check']);
+    expect(await readFile(target, 'utf-8')).toBe('old');
+    expect(await readdir(dir)).toEqual(['config.json']);
   });
 
   it('still succeeds when the directory cannot be flushed', async () => {
