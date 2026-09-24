@@ -343,7 +343,8 @@ describe('private CG membership bootstrap recovery', () => {
     (agent as any).resolveFinalizedOnChainAccessPolicyState = publicOnChainProof;
 
     expect(await (agent as any).hasConfirmedMetaState(contextGraphId)).toBe(true);
-    expect(publicOnChainProof).toHaveBeenCalledWith(contextGraphId, expect.any(Object));
+    // No caller deadline, so no signal.
+    expect(publicOnChainProof).toHaveBeenCalledWith(contextGraphId, expect.any(Object), undefined);
   });
 
   it('accepts an unregistered public replica only with active public on-chain proof', async () => {
@@ -369,6 +370,7 @@ describe('private CG membership bootstrap recovery', () => {
     expect(strictPublicOnChainProof).toHaveBeenCalledWith(
       contextGraphId,
       expect.any(Object),
+      undefined,
     );
   });
 
@@ -878,6 +880,7 @@ describe('private CG membership bootstrap recovery', () => {
       contextGraphSubscriptionStore: subscriptionStore,
       syncSharedMemoryOnConnect: false,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       syncOnConnectEnabled: false,
       durableSyncEnabled: false,
       rfc64CatalogActivation: { enabled: false },

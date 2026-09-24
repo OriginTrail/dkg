@@ -21,7 +21,9 @@ import {
   readLocallyTrustedKnowledgeAssetControls,
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
+  storageAckLedgerEntryQuads,
 } from '../src/index.js';
+import { workspaceOperationSubject } from '../src/workspace-metadata-subjects.js';
 import { SharedMemoryHandler } from '../src/workspace-handler.js';
 
 const CONTEXT_GRAPH = 'rootless-receiver';
@@ -174,6 +176,47 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
       type: 'bindings',
       bindings: [{ section, name: '"Safety"' }],
     });
+  });
+
+  it('defers a newer share while the head is a signed StorageACK copy not yet in VM', async () => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    expect((await handler.handle(v2Request(), PEER_ID)).applied).toBe(true);
+    // This node signed a StorageACK over the v1 copy that is now the head.
+    await store.insert(storageAckLedgerEntryQuads({
+      operationSubject: workspaceOperationSubject(CONTEXT_GRAPH, 'rootless-op-1'),
+      namespace: CONTEXT_GRAPH,
+      metaGraph: new GraphManager(store).sharedMemoryMetaUri(CONTEXT_GRAPH),
+      contextGraphId: '42',
+      kaUal: UAL,
+      assertionVersion: 1,
+      operation: 'publish',
+      signedAt: new Date(),
+    }));
+    const next = v2Request({
+      nquads: new TextEncoder().encode(nquad('urn:entity:2', 'two')),
+      shareOperationId: 'rootless-op-2',
+      assertionVersion: '2',
+    });
+
+    const deferred = await handler.handle(next, PEER_ID);
+
+    expect(deferred.applied).toBe(false);
+    if (deferred.applied) throw new Error('unreachable');
+    expect(deferred.retryable).toBe(true);
+    expect(deferred.reason).toContain('OWED_STORAGE_ACK_COPY');
+
+    // Once v1 is in VM the share applies.
+    await store.insert([
+      { subject: UAL, predicate: 'http://dkg.io/ontology/status', object: '"confirmed"', graph: `${DATA_GRAPH}/_meta` },
+      {
+        subject: UAL,
+        predicate: 'http://dkg.io/ontology/assertionVersion',
+        object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: `${DATA_GRAPH}/_meta`,
+      },
+    ]);
+    expect((await handler.handle(next, PEER_ID)).applied).toBe(true);
   });
 
   it('replaces the whole KA graph without leaving prior subjects behind', async () => {

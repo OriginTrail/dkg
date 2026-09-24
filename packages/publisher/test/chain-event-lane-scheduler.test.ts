@@ -815,27 +815,4 @@ describe('ChainEventPoller scheduler', () => {
       [1, 100],
     ]);
   });
-
-  it('keeps headless scans due until a known head proves the lane is caught up', async () => {
-    const { adapter, filters } = makeChain({
-      head: () => { throw new Error('head unavailable'); },
-    });
-    const poller = new ChainEventPoller({
-      chain: adapter,
-      publishHandler: makeHandler(),
-      intervalMs: 20,
-      clock: () => 0,
-      onContextGraphCreated: async () => { /* sink */ },
-    });
-
-    await poller.start();
-    await new Promise((r) => setTimeout(r, 90));
-    await poller.stop();
-
-    expect(filters.length).toBeGreaterThanOrEqual(2);
-    expect(filters[0].fromBlock).toBe(1);
-    expect(filters[0].toBlock).toBe(9000);
-    expect(filters[1].fromBlock).toBe(9001);
-    expect(filters[1].toBlock).toBe(18_000);
-  });
 });

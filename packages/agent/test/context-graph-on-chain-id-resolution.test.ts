@@ -316,7 +316,7 @@ describe('resolving an on-chain Context Graph id', () => {
       accessPolicy: 0,
       publishPolicy: 0,
       nameHash: NAME_HASH,
-      blockNumber: 5,
+      observedAtBlock: 5,
     };
     const chain = await chainWithGraph32({ active: false });
     const agent = await startAgent(chain);

@@ -805,8 +805,18 @@ export interface DkgConfig {
   sharedMemoryPublicSnapshotStorage?: SharedMemoryPublicSnapshotStorageConfig;
   /** Disable expensive peer-connect SWM catch-up for bulk benchmark/devnet runs. */
   syncSharedMemoryOnConnect?: boolean;
-  /** Emergency switch for the periodic sync reconciler. Env DKG_SYNC_RECONCILER_ENABLED wins. */
+  /**
+   * Emergency switch for the periodic peer-sync reconciler only. Env
+   * DKG_SYNC_RECONCILER_ENABLED wins. Chain-driven VM reconciliation has its
+   * own `vmReconcilerEnabled` switch and is not affected by this one.
+   */
   syncReconcilerEnabled?: boolean;
+  /**
+   * Chain-driven VM reconciliation (core-hosted recording, KA-registered
+   * nudge, VM reconcile sweep). Env DKG_VM_RECONCILER_ENABLED wins; default
+   * on. A core with it off declines every StorageACK.
+   */
+  vmReconcilerEnabled?: boolean;
   /** Period between automatic sync-reconciler passes. Default: 5 minutes. */
   syncReconcilerIntervalMs?: number;
   /** Age after which a peer is eligible for automatic sync retry. Default: 10 minutes. */

@@ -72,6 +72,26 @@ export function rpcHost(url: string): string {
   }
 }
 
+/**
+ * A URL inside error text, in any case: the request URL ethers embeds in the
+ * message of an HTTP-level error, or a link in a provider's own words. It ends
+ * at whitespace, a quote or an angle bracket, so a URL quoted in JSON
+ * (`"requestUrl": "https://…"`) or in HTML is matched without its closing
+ * delimiter. Global: use it only with `replace`.
+ */
+export const RPC_TEXT_URL_PATTERN = /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
+
+/**
+ * `text` with every URL in it reduced to its host ({@link rpcHost}). A
+ * configured RPC URL can carry an API key in its path or query, and ethers
+ * embeds the full request URL in the message of an HTTP-level error, so
+ * provider text passes through this before an error message or a log line
+ * quotes it.
+ */
+export function hostOnlyRpcText(text: string): string {
+  return text.replace(RPC_TEXT_URL_PATTERN, (url) => rpcHost(url));
+}
+
 // --- Process-wide counters (host-only) --------------------------------------
 
 interface MutableStats {
