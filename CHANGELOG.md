@@ -37,6 +37,17 @@ All notable changes to the DKG V10 node are documented here. The format is based
   thousands of `getContextGraph` calls an hour. That answer is now final for
   the running process; the row stays on disk and is checked again at the next
   start. Timeouts and failed reads are still retried.
+- **Remote queries no longer pass the per-graph access check with a graph id
+  named like a built-in object property**: the query handler looked up a
+  peer-chosen Context Graph id in `queryAccess.contextGraphs` with a plain
+  property lookup, so ids such as `constructor`, `toString` or `valueOf`
+  matched an inherited object member instead of nothing. On a node with
+  `defaultPolicy: 'deny'` and a `contextGraphs` map, entity lookups into a
+  local graph with such a name skipped both the default deny and the
+  public-graph check; under `defaultPolicy: 'public'` the same ids were
+  wrongly refused SPARQL. Only the map's own keys count now, and the sync
+  responder's per-graph priority lookup gets the same rule. Nodes without a
+  `contextGraphs` map were not affected.
 - **Knowledge Asset write routes answer 400 for a malformed term**:
   `POST /api/knowledge-assets` and
   `POST /api/knowledge-assets/{name}/wm/write` passed subject and predicate
