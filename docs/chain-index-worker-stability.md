@@ -10,11 +10,11 @@ KA point reads select the registration signature and indexed KA ID (`topic2`) be
 
 The daemon owns one reader worker with a read-only SQLite connection and a reader API that exposes no commit or tombstone operations. The writable daemon store reuses the same query implementation. The worker captures cursor, coverage, matching rows and own-write evidence in one transaction, releases that transaction, then decodes. Inline and worker readers use the same explicit snapshot planner and evaluator in the chain package, including finality, coverage and own-write gates. The worker does not simulate a writable store or replace registry methods. The existing event-log connection remains the writer. Small responses are checked against the current revision, lineage, topic set, fork suspicion and head age before being accepted; adapter binding checks remain in place.
 
-A single `ChainIndexCapability` pairs the required store with its optional reader factory through the agent and EVM adapter. Existing configuration and runtime-option interfaces remain extendable. Opt-in strict configuration types exclude contradictory ownership, and construction rejects it at runtime. The exported runtime factory still accepts its existing `{ store }` options, whose legacy interface retains a required store. Modern factories must provide scalar ordinal reads; a malformed JavaScript factory is rejected instead of receiving list replay. List-only adaptation is limited to explicit legacy binding attachments and sources. Injected factories remain attached across Hub binding rotations.
+A single `ChainIndexCapability` pairs the required store with its optional reader factory through the agent and EVM adapter. Existing configuration and runtime-option interfaces remain extendable. Opt-in strict configuration types exclude contradictory ownership, and construction rejects it at runtime. The exported runtime factory still accepts its existing `{ store }` options, whose legacy interface retains a required store. Modern factories must provide scalar ordinal reads; a malformed JavaScript factory is rejected instead of receiving list replay. List-only adaptation is limited to explicit legacy binding attachments and sources. A WeakMap caches only the adapted reader; the original binding and its method receivers remain unchanged, and object identity remains the generation token. Injected factories remain attached across Hub binding rotations.
 
 The daemon resource owns that capability and one parameterless, idempotent close operation. Its dependency-drain callback is fixed at construction: concurrent callers cannot replace or omit it. Cleanup retires the worker and awaits the dependency barrier before closing the database on startup failure, fatal prerequisites and normal shutdown. Failed retirement keeps the database open, while startup errors retain their original cause.
 
-Snapshot and worker protocol types preserve the relationship between each operation, its required request fields and its result. A served response requires both its result and revision fence. Window planning is separate from own-write hash verification, which runs during evaluation. Shared snapshot implementation details are exposed to the CLI through the explicit `@origintrail-official/dkg-chain/internal/chain-index-worker` subpath instead of widening the public package root.
+Snapshot and worker protocol types preserve the relationship between each operation, its required request fields and its result. A served response requires both its result and revision fence. One exhaustive operation table owns each read kind's query, coverage family and caught-up requirement, decoder, and typed result projection. Window planning is separate from own-write hash verification, which runs during evaluation. Shared snapshot implementation details are exposed to the CLI through the explicit `@origintrail-official/dkg-chain/internal/chain-index-worker` subpath instead of widening the public package root.
 
 Limits are explicit:
 
@@ -28,7 +28,7 @@ The worker process owner represents idle, starting, ready, retiring, cooling and
 
 Misses, incomplete coverage, oversized graphs, stale answers, overload and worker failure use the existing RPC fallback. They cannot revive a full-history main-thread replay. Large graphs therefore still incur RPC calls for ordinal reads. The SDK's non-worker path also benefits from the indexed point lookup.
 
-The ping service now coordinates periodic liveness probes and explicit health calls per connection. It replaces the independent built-in monitor using the supported configuration option, retaining the standard inbound responder, 10-second interval, adaptive deadlines, echo validation and dead-peer teardown. A probe holds its outbound slot until the remote stream closes. Cancelling one observer does not cancel the shared probe. Connection close logs preserve the supplied initiator and bounded, escaped error details.
+The ping service now coordinates periodic liveness probes and explicit health calls per connection. It replaces the independent built-in monitor using the supported configuration option, retaining the standard inbound responder, 10-second interval, adaptive deadlines, echo validation and dead-peer teardown. A small transport primitive isolates the outbound ping implementation and its required remote-FIN extension. The coordinator honors caller stream options, shares compatible probes, serializes incompatible probes, and delivers stream progress to each observer. A probe holds its outbound slot until the remote stream closes. Cancelling one observer does not cancel the shared probe. Connection close logs preserve the supplied initiator and bounded, escaped error details.
 
 ## Sequence diagrams
 
@@ -128,8 +128,8 @@ sequenceDiagram
     P->>C: Open one outbound ping stream
     C->>R: Send random challenge
     M->>P: Probe the same connection
-    P->>P: Join pending physical probe
-    Note over P,C: Repeated monitor ticks also join<br/>Outbound protocol stream limit stays at one
+    P->>P: Join compatible pending physical probe
+    Note over P,C: Compatible callers and monitor ticks join<br/>Incompatible stream options wait for remote FIN<br/>Outbound protocol stream limit stays at one
     alt Correct echo and clean stream closure
         R-->>C: Echo challenge
         C-->>P: Received bytes
@@ -152,17 +152,17 @@ sequenceDiagram
     end
 ```
 
-Health-caller cancellation detaches that observer without cancelling the shared probe. Service shutdown cancels and drains probes without using the ordinary failure path to abort connections. The standard inbound ping responder remains installed. Only the independent built-in monitor is disabled; the replacement monitor still checks liveness every 10 seconds with the existing adaptive timeout behavior.
+Compatible callers share one probe; caller stream options that differ wait for the active probe to finish. Stream-opening progress is delivered to each observer, including callers that join later. Refusing a caller-excluded limited connection does not abort the connection. Health-caller cancellation detaches that observer without cancelling the shared probe. Service shutdown cancels and drains probes without using the ordinary failure path to abort connections. The standard inbound ping responder remains installed. Only the independent built-in monitor is disabled; the replacement monitor still checks liveness every 10 seconds with the existing adaptive timeout behavior.
 
 ## Validation
 
 Work began from freshly fetched `origin/testnet-canary` commit `24341ba73ab1f8a6f4330e34ae905bab725f0db6`; this remained the current base during validation. Tests use local fixtures and loopback peers.
 
-The updated implementation has 413 passing focused tests on Node 22.23.1: chain 144, SQLite store 29, CLI worker/lifecycle/startup 216, core ping/diagnostics 18 and agent wiring 6. Package builds, type checks, package boundary checks and repository lint pass. Coverage includes indexed SQL selection and migration, finality, coverage, own-write hashes, replaced tails, tombstones, retired revisions and bindings, caller cancellation, queue limits, physical timeouts, worker startup/crash/recovery, startup cleanup and shutdown. Real TCP/Noise/Yamux tests reproduce and fix health/monitor and monitor/monitor collisions while also checking silent peers, delayed remote stream closure and reconnect behavior.
+The updated implementation has 431 passing focused tests on Node 22.23.1: chain 150, SQLite store 29, CLI worker/lifecycle/startup 217, core ping/diagnostics 29 and agent wiring 6. This review round reran all 402 affected chain/CLI/core/agent cases; the SQLite implementation is unchanged from its passing 29-test run. Package builds, type checks, package boundary checks and repository lint pass. Coverage includes indexed SQL selection and migration, finality, coverage, own-write hashes, replaced tails, tombstones, retired revisions and bindings, caller cancellation, queue limits, physical timeouts, worker startup/crash/recovery, startup cleanup and shutdown. Real TCP/Noise/Yamux tests reproduce and fix health/monitor and monitor/monitor collisions while also checking silent peers, delayed remote stream closure and reconnect behavior.
 
 The first CI run exposed an additional diagnostics regression: metadata-only synthetic `connection:open` events have no per-connection `addEventListener`. The optional close diagnostics now check that capability before subscribing. The five affected agent suites pass locally with 218 tests and no unhandled connection errors.
 
-Review coverage adds expected-result parity between inline and explicit snapshot evaluation, worker lifecycle races, and real-worker contention with 8,000 registrations. A synchronous test barrier holds the first decode batch while point/cancellation messages are queued. Both contention tests fail when the production `await yieldTurn()` is removed, and pass after restoring it; the cancellation case proves that the same worker continues serving requests. Additional entry-module tests use the actual entry source and real SQLite with a message-port test double. They cover dispatch, deadlines, cancellation, bounded SQL and refusal behavior under Vitest coverage, which does not collect execution in the separately spawned worker. Coverage exclusions and required thresholds are unchanged.
+Review coverage adds expected-result parity between inline and explicit snapshot evaluation, worker lifecycle races, and real-worker contention with 8,000 registrations. A test-only worker entry holds the first decode batch while point/cancellation messages are queued, then calls the same cooperative checkpoint as production. Production worker data and the request handler contain no test barrier or `Atomics.wait`. Both contention tests fail when the real checkpoint stops yielding; a separate actual-entry test fails if production wiring substitutes a no-op checkpoint. Restoring the yield and wiring makes all three tests pass. Handler tests use real SQLite and injected checkpoints to cover deterministic deadline/cancellation cases, while entry tests exercise the actual message-port wiring. These tests cover dispatch, deadlines, cancellation, bounded SQL and refusal behavior under Vitest coverage, which does not collect execution in the separately spawned worker. Coverage exclusions and required thresholds are unchanged.
 
 Further regressions cover the legacy public runtime and agent APIs, list-only reader normalization with preserved method receivers, injected-factory preservation across Hub rotation, fixed dependency drain across concurrent closes, and explicit planning versus own-write evidence verification. Package builds compile negative type cases for contradictory ownership through strict configuration aliases, missing ordinal indices, mismatched results and incomplete served replies. A worker reply for the wrong operation is refused before cursor validation. The production node wiring test identifies the exact coordinated-ping factory; substituting stock ping makes that test fail.
 
@@ -182,12 +182,12 @@ Measured on Apple M3 with five fresh-worker samples and 100 warm/mixed point sam
 
 | Runtime | History | Warm point p99 | Mixed point success | Local HTTP maximum | Event-loop maximum |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Node 22.23.1 | 35,963 captured rows | 3.71 ms | 100/100 | 4.13 ms | 11.53 ms |
-| Node 22.23.1 | 359,630 generated rows | 2.33 ms | 100/100 | 1.19 ms | 11.17 ms |
-| Node 25.2.1 | 35,963 captured rows | 2.09 ms | 100/100 | 3.38 ms | 12.45 ms |
-| Node 25.2.1 | 359,630 generated rows | 1.98 ms | 100/100 | 1.20 ms | 11.48 ms |
+| Node 22.23.1 | 35,963 captured rows | 3.19 ms | 100/100 | 3.18 ms | 11.31 ms |
+| Node 22.23.1 | 359,630 generated rows | 2.39 ms | 100/100 | 1.79 ms | 11.20 ms |
+| Node 25.2.1 | 35,963 captured rows | 2.42 ms | 100/100 | 3.41 ms | 11.32 ms |
+| Node 25.2.1 | 359,630 generated rows | 2.51 ms | 100/100 | 0.86 ms | 10.95 ms |
 
-Every point lookup selected one row. No historical arrays crossed the worker boundary; the largest response was 301 bytes. Cold reads completed within 421 ms in these runs. Concurrent oversized ordinal reads refused with `row-limit` and left point reads available; the benchmark records fallback without sending RPC. The Node 22 patch release tested here is 22.23.1, rather than the investigated production host's 22.23.0.
+Every point lookup selected one row. No historical arrays crossed the worker boundary; the largest response was 301 bytes. Cold reads completed within 370 ms in these runs. Concurrent oversized ordinal reads refused with `row-limit` and left point reads available; the benchmark records fallback without sending RPC. The Node 22 patch release tested here is 22.23.1, rather than the investigated production host's 22.23.0.
 
 On the 359,630-row local database, direct index creation took 866 ms; reopening a compact database through the real initializer took 767 ms. The added index used 78.30 MiB and the row count was unchanged. A fragmented fixture took 7.19 seconds to reopen because the existing startup free-page policy also ran `VACUUM`. Account for database size, fragmentation and available disk space when planning startup; these timings are not production measurements.
 
