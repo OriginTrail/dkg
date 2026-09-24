@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1027,6 +1027,78 @@ describe('DashboardDB — chain log KA point-read index', () => {
     db = new DashboardDB({ dataDir: dir });
     expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
     expect(kaIndexCount(db.db)).toBe(1);
+  });
+
+  /** A current-version database whose KA index is gone, with one registration row. */
+  function withoutKaIndex(): void {
+    db.close();
+    const raw = new Database(join(dir, 'node-ui.db'));
+    raw.exec(`DROP INDEX ${KA_INDEX}`);
+    raw.prepare(`
+      INSERT INTO chain_events (
+        scope, block_number, log_index, block_hash, tx_hash, address,
+        topic0, topic1, topic2, topic3, data, settled
+      ) VALUES ('scope', 7, 0, '0xb', '0xt', '0xa', '0x0', '0x1', '0x2', NULL, '0x', 1)
+    `).run();
+    raw.close();
+  }
+
+  async function kaPointRead(handle: DashboardDB) {
+    const { SqliteChainEventLogStore } = await import('../src/chain-event-log-store.js');
+    return new SqliteChainEventLogStore(handle).readEvents('scope', {
+      fromBlockNumber: 0, throughBlockNumber: 10, addresses: ['0xa'], topic0: ['0x0'], topic2: ['0x2'],
+    });
+  }
+
+  it('starts without the index when the disk is full, and builds it on a later start', async () => {
+    withoutKaIndex();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const exec = Database.prototype.exec;
+    const full = vi.spyOn(Database.prototype, 'exec').mockImplementation(function (this: Database.Database, sql: string) {
+      if (sql.includes(`CREATE INDEX IF NOT EXISTS ${KA_INDEX}`)) {
+        throw new Database.SqliteError('database or disk is full', 'SQLITE_FULL');
+      }
+      return exec.call(this, sql);
+    });
+    let warnings: string[];
+    try {
+      db = new DashboardDB({ dataDir: dir });
+    } finally {
+      warnings = warn.mock.calls.map((call) => String(call[0]));
+      full.mockRestore();
+      warn.mockRestore();
+    }
+    expect(warnings.join('\n'))
+      .toMatch(/could not build idx_chain_events_scope_address_ka.*database or disk is full/);
+    expect(kaIndexCount(db.db)).toBe(0);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    // The rest of the chain log came up, and the KA read is served unpinned.
+    await expect(kaPointRead(db)).resolves.toHaveLength(1);
+
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    expect(kaIndexColumns(db.db))
+      .toEqual(['scope', 'address', 'topic0', 'topic2', 'block_number', 'log_index']);
+    await expect(kaPointRead(db)).resolves.toHaveLength(1);
+  });
+
+  it('starts when SQLite itself refuses to build the index', () => {
+    // A real failure, not a mocked one: another schema object already holds
+    // the index's name, so CREATE INDEX IF NOT EXISTS errors.
+    withoutKaIndex();
+    const raw = new Database(join(dir, 'node-ui.db'));
+    raw.exec(`CREATE TABLE ${KA_INDEX} (placeholder INTEGER)`);
+    raw.close();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let warnings: string[];
+    try {
+      db = new DashboardDB({ dataDir: dir });
+    } finally {
+      warnings = warn.mock.calls.map((call) => String(call[0]));
+      warn.mockRestore();
+    }
+    expect(warnings.join('\n')).toMatch(/there is already a table named/);
+    expect(kaIndexCount(db.db)).toBe(0);
   });
 });
 

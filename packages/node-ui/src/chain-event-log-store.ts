@@ -167,9 +167,9 @@ export class SqliteChainEventLogStore {
   /**
    * The pinnable indexes that exist. `INDEXED BY` turns a missing index into a
    * query ERROR, not a slower plan. `DashboardDB` creates them on every open it
-   * migrates, but a database written by a NEWER schema is opened without
-   * migrating at all, so a hint is only used once its index is known to be
-   * there.
+   * migrates (the KA index best-effort), but a database written by a NEWER
+   * schema is opened without migrating at all, so a hint is only used once its
+   * index is known to be there.
    */
   private readonly indexes: ReadonlySet<string>;
 

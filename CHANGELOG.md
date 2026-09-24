@@ -168,7 +168,12 @@ All notable changes to the DKG V10 node are documented here. The format is based
   only that Knowledge Asset's registration rows through a new index on the
   chain log table, and returns the same answers as before. The daemon adds
   the index to `node-ui.db` on the first start after the upgrade (a one-time
-  build over the existing rows).
+  build over the existing rows, about a quarter of a second per 100,000
+  stored chain events). The index takes about 300 bytes of disk per stored
+  chain event (about 30 MB per 100,000) and makes the occasional `VACUUM` of
+  `node-ui.db` about 40% slower. If the build fails, for example on a full
+  disk, the node logs a warning, starts without the index (the lookup is then
+  slower but still correct) and retries on the next start.
 - **Walking a Context Graph's registrations no longer reads the whole graph
   for every step**: VM reconciliation reads a graph's Knowledge Asset
   registrations one position at a time, and since 10.0.17 each read was
