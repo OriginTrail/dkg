@@ -1018,6 +1018,8 @@ function rfc64CatalogReplaySnapshotRuntimeForV1(
   const runtime = new Rfc64CatalogReplaySnapshotRuntimeV1(
     Object.freeze({
       listAppliedCatalogHeadsV1: () => persistence.inventory.listAppliedCatalogHeadsV1(),
+      readAppliedCatalogHeadsRevisionV1: () =>
+        persistence.inventory.readAppliedCatalogHeadsRevisionV1(),
       readVerifiedCatalogHeadV1: async (objectDigest: Digest32V1) => (
         await persistence.controlObjects.getVerifiedObjectByDigest({
           objectDigest,

@@ -98,11 +98,19 @@ function appliedSnapshot(
 
 type StoredHeadFaultV1 = 'missing' | 'verification' | 'not-a-head' | 'closed';
 
-/** A persistence fake that counts every head-object read. */
-function createStorageFixture(initialHeads: readonly SignedAuthorCatalogHeadEnvelopeV1[]) {
+/**
+ * A persistence fake that counts every head-object read. With `revision`, the
+ * inventory also reports a revision that every write (`setInventory`, or
+ * `bumpRevision` for a write that changed nothing) moves.
+ */
+function createStorageFixture(
+  initialHeads: readonly SignedAuthorCatalogHeadEnvelopeV1[],
+  options: Readonly<{ revision?: boolean }> = {},
+) {
   let inventory: readonly AppliedCatalogHeadSnapshotV1[] = Object.freeze(
     initialHeads.map((head) => appliedSnapshot(head)),
   );
+  let revision = 1;
   const objects = new Map<string, SignedAuthorCatalogHeadEnvelopeV1>();
   const faults = new Map<string, StoredHeadFaultV1>();
   const reads: Digest32V1[] = [];
@@ -120,6 +128,9 @@ function createStorageFixture(initialHeads: readonly SignedAuthorCatalogHeadEnve
         if (listingFailure !== null) throw listingFailure;
         return inventory;
       },
+      ...(options.revision === true
+        ? { readAppliedCatalogHeadsRevisionV1: () => revision }
+        : {}),
     }),
     controlObjects: Object.freeze({
       getVerifiedObjectByDigest: (input: { readonly objectDigest: Digest32V1 }) => {
@@ -156,6 +167,10 @@ function createStorageFixture(initialHeads: readonly SignedAuthorCatalogHeadEnve
     store,
     setInventory(next: readonly AppliedCatalogHeadSnapshotV1[]) {
       inventory = Object.freeze([...next]);
+      revision += 1;
+    },
+    bumpRevision() {
+      revision += 1;
     },
     get inventory() {
       return inventory;
@@ -516,5 +531,72 @@ describe('RFC-64 operational applied heads', () => {
       // And again, from the cache or the retry path.
       await expectMatchesUncached(fixture, objects, faults);
     }
+  });
+
+  it('answers from the cache without listing while the inventory revision is unchanged', async () => {
+    const fixture = createStorageFixture([HEAD_A1, HEAD_B1, HEAD_C1], { revision: true });
+    fixture.store(...ALL_OBJECTS);
+
+    const first = await expectMatchesUncached(fixture, ALL_OBJECTS);
+    expect(fixture.listings).toBe(1);
+    for (let call = 0; call < 25; call += 1) {
+      expect(await loadRfc64OperationalAppliedHeadsV1(fixture.storage)).toBe(first);
+    }
+    expect(fixture.listings).toBe(1);
+    expect(fixture.reads).toHaveLength(3);
+
+    // A write that changed no row moves the revision: list once, reuse all.
+    fixture.bumpRevision();
+    expect(await loadRfc64OperationalAppliedHeadsV1(fixture.storage)).toBe(first);
+    expect(await loadRfc64OperationalAppliedHeadsV1(fixture.storage)).toBe(first);
+    expect(fixture.listings).toBe(2);
+    expect(fixture.reads).toHaveLength(3);
+
+    // A write that changed a row is seen on the very next call.
+    fixture.setInventory([appliedSnapshot(HEAD_A2), appliedSnapshot(HEAD_B1)]);
+    const replaced = await expectMatchesUncached(fixture, ALL_OBJECTS);
+    expect(replaced.map((head) => head.snapshot.currentCatalogHeadDigest))
+      .toEqual([HEAD_A2.objectDigest, HEAD_B1.objectDigest]);
+    expect(fixture.reads.slice(3)).toEqual([HEAD_A2.objectDigest]);
+    const listingsAfterReplace = fixture.listings;
+    expect(await loadRfc64OperationalAppliedHeadsV1(fixture.storage)).toBe(replaced);
+    expect(fixture.listings).toBe(listingsAfterReplace);
+  });
+
+  it('shares one listing and one load between callers under one revision', async () => {
+    const fixture = createStorageFixture([HEAD_A1, HEAD_B1, HEAD_C1], { revision: true });
+    const release = fixture.holdReads();
+
+    const pending = Array.from({ length: 6 }, () =>
+      loadRfc64OperationalAppliedHeadsV1(fixture.storage));
+    await Promise.resolve();
+    release();
+    const results = await Promise.all(pending);
+
+    expect(fixture.listings).toBe(1);
+    expect(fixture.reads).toHaveLength(3);
+    for (const result of results) expect(result).toBe(results[0]);
+  });
+
+  it('keeps retrying a failed head under an unchanged revision', async () => {
+    const fixture = createStorageFixture([HEAD_A1, HEAD_B1], { revision: true });
+    fixture.fault(HEAD_B1.objectDigest, 'missing');
+    const faults = new Map([[HEAD_B1.objectDigest, 'missing' as const]]);
+
+    await expectMatchesUncached(fixture, ALL_OBJECTS, faults);
+    await expectMatchesUncached(fixture, ALL_OBJECTS, faults);
+    expect(fixture.reads).toEqual([
+      HEAD_A1.objectDigest,
+      HEAD_B1.objectDigest,
+      HEAD_B1.objectDigest,
+    ]);
+    expect(fixture.listings).toBe(2);
+
+    fixture.fault(HEAD_B1.objectDigest, null);
+    const recovered = await expectMatchesUncached(fixture, ALL_OBJECTS);
+    expect(recovered).toHaveLength(2);
+    const listings = fixture.listings;
+    expect(await loadRfc64OperationalAppliedHeadsV1(fixture.storage)).toBe(recovered);
+    expect(fixture.listings).toBe(listings);
   });
 });
