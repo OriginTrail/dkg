@@ -16,6 +16,31 @@ All notable changes to the DKG V10 node are documented here. The format is based
 | Mode-only `replenishing` approval configs use a relative ceiling | When `chain.approvalPolicy.mode` is `replenishing` and neither sizing field is set, the implicit ceiling changes from a flat 1000 TRAC to 20 times the triggering publish cost. The same ceiling sizes the Context Graph registration deposit approval: when a registration reverts for too low an allowance, the node now approves the ContextGraphs contract for 20 times the on-chain registration deposit, where it approved 1000 TRAC (or the deposit, when larger). This can lower or raise the standing allowance depending on publish cost and the deposit; startup emits a warning for this exact legacy shape | Set `targetAllowance: '1000000000000000000000'` to retain the former flat 1000 TRAC ceiling for publishes and the registration deposit (a larger deposit is still approved in full), or set `targetAllowanceMultiple` explicitly to adopt relative sizing |
 | Curated and local-only Context Graph metadata leaves `ontology`, which a rollback to 10.0.18 does not undo | On start, and before each store discovery pass, a node moves the on-chain id binding, definition and name of each curated or `private: true` graph that earlier builds wrote to the shared `ontology` graph into the graph's own `_meta`, and no longer writes or gossips a curated graph's binding to `ontology`. Such rows for graphs the node does not hold are deleted, a bare binding only once the chain proves its slot curated. The VM publish registration guard of 10.0.18 reads a binding from `ontology` only: it passes a graph whose `_meta` records it as `registered`, as the registering node's does, or that has an `ontology` binding. So on a node rolled back to 10.0.18 after running 10.0.19, publishing into a curated graph with an open publish policy that the node did not register can fail the guard with `CG_NOT_REGISTERED` (`... is not registered on-chain`). Nothing on 10.0.18 restores the row: its chain discovery writes a curated binding only on the graph's curator, registration refuses a registered graph, and upgraded peers no longer carry the row, so only ontology sync from a peer still on 10.0.18 can bring it back | Do not roll back a node that publishes into curated graphs it did not register. The error's advice to run `dkg context-graph register` does not help there. If one was rolled back, upgrade it to 10.0.19 again: the binding is still in the graph's `_meta`, which 10.0.19 reads, so publishing resumes after the restart without a resync |
 
+### Known issues
+
+- **An edge can fail to publish into a public Context Graph that another
+  node registered**, with `Context graph "<id>" is not registered on-chain`,
+  although `dkg context-graph list` shows the graph's on-chain id. The edge
+  learns the id from the chain, but the publish check looks for a
+  registration record that an edge receives only from the registering node's
+  one-time announcement. Publishing into a graph the node registered itself
+  is not affected, and neither is publishing from a Core. 10.0.18 behaves the
+  same. A fix is in review.
+- **An on-demand subscription can stay partly synced**: after
+  `dkg subscribe <id>` without `--save` (the CLI default since 10.0.13), the
+  VM reconciler fails to save the subscription's cursor on every sweep and
+  logs `Cannot acknowledge join approval ... durable subscription intent or
+  host state is missing`, so Knowledge Assets the initial fetch missed are
+  never fetched. Subscribe with `--save` to avoid it. A Core that hosts a
+  graph that is also subscribed on demand is affected the same way. A fix is
+  in review.
+- **A node that holds the shared `ontology` system graph can bind on-chain id
+  claims its own chain does not confirm**: `dkg context-graph list` can show
+  one on-chain id under several graph names, and subscribing to a public
+  Context Graph by its name hash can create a row keyed by the hash, whose
+  Verifiable Memory fetches then come back empty. Subscribing by the graph's
+  cleartext id avoids the name-hash path. A fix is in review.
+
 ### Fixed
 
 - **Less CPU per connecting peer for RFC-64 catalog replay**: every new
