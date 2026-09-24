@@ -1,13 +1,13 @@
 /**
  * File-backed persistence for the auto-update rollout deadline.
  *
- * The rollout gate (`createUpdateHoldoffGate`) owns the scheduling rules;
- * this module only reads, atomically replaces and removes the
- * `<DKG home>/.update-holdoff.json` record the gate keeps across restarts.
+ * The persisted deadline policy (`createPersistedHoldoffDeadline`) owns the
+ * rules; this module only reads, atomically replaces and removes the
+ * `<DKG home>/.update-holdoff.json` record it keeps across restarts.
  */
 import { writeFileAtomic } from './fs-utils.js';
 import { _autoUpdateIo } from './manifest.js';
-import type { UpdateHoldoffRecord, UpdateHoldoffStore } from './auto-update-jitter.js';
+import type { UpdateHoldoffRecord, UpdateHoldoffStore } from './auto-update-holdoff-deadline.js';
 
 /** File under the DKG home (next to `releases/`) that holds the persisted deadline. */
 export const UPDATE_HOLDOFF_FILE = '.update-holdoff.json';
@@ -42,7 +42,7 @@ export function parseUpdateHoldoffRecord(raw: string): UpdateHoldoffRecord {
  * JSON-file store for the rollout deadline. Writes go through the daemon's
  * `writeFileAtomic` (temp sibling + rename), so a crash mid-write never leaves
  * a torn record. `read` returns null when the file is absent and throws when
- * it cannot be read or parsed; the gate logs that and draws a fresh hold.
+ * it cannot be read or parsed; the policy logs that and draws a fresh hold.
  */
 export function createFileUpdateHoldoffStore(
   path: string,

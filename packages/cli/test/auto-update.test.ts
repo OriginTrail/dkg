@@ -204,7 +204,8 @@ import {
   resolveAutoUpdateGitRef,
   resolveAutoUpdateGitRefPlan,
 } from '../src/daemon.js';
-import { createUpdateHoldoffGate } from '../src/daemon/auto-update-jitter.js';
+import { createVolatileHoldoffDeadline } from '../src/daemon/auto-update-holdoff-deadline.js';
+import { createUpdateHoldoffGate } from '../src/daemon/auto-update-holdoff-gate.js';
 import { createNpmUpdateRunCheck, createGitUpdateRunCheck } from '../src/daemon/auto-update-runner.js';
 import type { LastUpdateCheck } from '../src/daemon/state.js';
 
@@ -2413,7 +2414,12 @@ function freshLastCheck(): LastUpdateCheck {
   return { upToDate: false, checkedAt: 0, latestCommit: '', latestVersion: '', channelTargetMissing: false };
 }
 function noJitterGate(log: (m: string) => void) {
-  return createUpdateHoldoffGate({ jitterMs: 0, isShuttingDown: () => false, setUpdating: () => {}, log });
+  return createUpdateHoldoffGate({
+    deadline: createVolatileHoldoffDeadline({ jitterMs: 0 }),
+    isShuttingDown: () => false,
+    setUpdating: () => {},
+    log,
+  });
 }
 describe('createNpmUpdateRunCheck (end-to-end polling wiring)', () => {
   function currentVersion(v: string) {

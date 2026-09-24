@@ -1,12 +1,17 @@
 import { describe, it, expect, vi } from 'vitest';
+import { pickUpdateHoldoffMs } from '../src/daemon/auto-update-jitter.js';
+import {
+  createPersistedHoldoffDeadline,
+  createVolatileHoldoffDeadline,
+  MAX_HOLDOFF_OVERDUE_MS,
+  type UpdateHoldoffRecord,
+} from '../src/daemon/auto-update-holdoff-deadline.js';
 import {
   createUpdateHoldoffGate,
-  pickUpdateHoldoffMs,
-  MAX_HOLDOFF_OVERDUE_MS,
   type UpdateCheckOutcome,
-  type UpdateHoldoffRecord,
+  type UpdateHoldoffGateConfig,
   type UpdateHoldoffStep,
-} from '../src/daemon/auto-update-jitter.js';
+} from '../src/daemon/auto-update-holdoff-gate.js';
 import {
   createFileUpdateHoldoffStore,
   parseUpdateHoldoffRecord,
@@ -16,6 +21,140 @@ import {
 import { memoryFs } from './_helpers/holdoff-memory-fs.js';
 
 const available = (target: string): UpdateCheckOutcome<string> => ({ status: 'available', target });
+
+describe('createUpdateHoldoffGate (the shared rollout gate)', () => {
+  const DETECTED: UpdateCheckOutcome<string> = { status: 'available', target: 'v-detected' };
+  const FRESH: UpdateCheckOutcome<string> = { status: 'available', target: 'v-fresh' };
+
+  // Typed harness — the deps keep the real UpdateHoldoffGateConfig / Step types
+  // so drift between the gate contract and the fixtures is a compile error.
+  function harness(opts: {
+    jitterMs?: number;
+    isShuttingDown?: () => boolean;
+    sleep?: (ms: number) => Promise<void>;
+    revalidate?: () => Promise<UpdateCheckOutcome<string>>;
+    apply?: (t: string) => Promise<void>;
+  } = {}) {
+    const calls: string[] = [];
+    const log = vi.fn((m: string) => { calls.push(`log:${m}`); });
+    const setUpdating = vi.fn((v: boolean) => { calls.push(`setUpdating:${v}`); });
+    const sleep = vi.fn(opts.sleep ?? (async () => { calls.push('sleep'); }));
+    const revalidate = vi.fn(opts.revalidate ?? (async () => { calls.push('revalidate'); return FRESH; }));
+    const apply = vi.fn(opts.apply ?? (async (t: string) => { calls.push(`apply:${t}`); }));
+    const config: UpdateHoldoffGateConfig = {
+      deadline: createVolatileHoldoffDeadline({ jitterMs: opts.jitterMs ?? 600_000, rng: () => 0.5 }),
+      isShuttingDown: opts.isShuttingDown ?? (() => false),
+      setUpdating,
+      log,
+      sleep,
+    };
+    const step: UpdateHoldoffStep<string> = {
+      onHold: () => { calls.push('onHold'); },
+      revalidate,
+      apply,
+      shutdownMessage: 'SHUTDOWN',
+      supersededMessage: 'SUPERSEDED',
+      recheckFailedMessage: 'RECHECK_FAILED',
+    };
+    const gate = createUpdateHoldoffGate(config);
+    return { gate, poll: gate.bindRollout(step), step, calls, log, setUpdating, sleep, revalidate, apply };
+  }
+
+  it('runs the gate in order and applies the REVALIDATED target (not the detected one)', async () => {
+    const { poll, calls, apply } = harness();
+    await poll(DETECTED);
+    expect(calls).toEqual([
+      'onHold', 'sleep', 'revalidate', 'setUpdating:true', 'apply:v-fresh', 'setUpdating:false',
+    ]);
+    expect(apply).toHaveBeenCalledWith('v-fresh');
+  });
+
+  it('holds single-flight WHILE a hold-off is in flight — a second tick during the wait is a no-op', async () => {
+    // A hold-off that outlasts the poll interval must still block a second tick.
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const revalidate = vi.fn(async () => FRESH);
+    const apply = vi.fn(async () => {});
+    const { poll } = harness({ sleep: () => held, revalidate, apply });
+
+    const first = poll(DETECTED); // enters, sets pending, awaits the un-resolved hold-off
+    await Promise.resolve();
+    // Second concurrent tick while the first rollout is mid-hold-off:
+    await poll(DETECTED);
+    expect(revalidate, 'second tick must not start a second rollout').not.toHaveBeenCalled();
+    expect(apply).not.toHaveBeenCalled();
+
+    release(); // let the first hold-off complete
+    await first;
+    expect(revalidate).toHaveBeenCalledTimes(1); // exactly ONE rollout ran
+    expect(apply).toHaveBeenCalledTimes(1);
+  });
+
+  it('does NOT apply a target withdrawn during the hold-off (re-check -> none)', async () => {
+    const { poll, apply, setUpdating, log } = harness({ revalidate: async () => ({ status: 'none' }) });
+    await poll(DETECTED);
+    expect(apply).not.toHaveBeenCalled();
+    expect(setUpdating).not.toHaveBeenCalledWith(true);
+    expect(log).toHaveBeenCalledWith('SUPERSEDED');
+  });
+
+  it('aborts before revalidate/apply when shutting down during the hold-off', async () => {
+    let sd = false;
+    const { poll, revalidate, apply, log } = harness({
+      isShuttingDown: () => sd,
+      sleep: async () => { sd = true; },
+    });
+    await poll(DETECTED);
+    expect(revalidate).not.toHaveBeenCalled();
+    expect(apply).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith('SHUTDOWN');
+  });
+
+  it('aborts AFTER revalidation if shutdown began during the (async) revalidate call', async () => {
+    // The hold-off completes with shutdown=false, so revalidate runs; shutdown
+    // then flips DURING revalidate. The gate must re-check and NOT apply.
+    let sd = false;
+    const { poll, apply, setUpdating, log } = harness({
+      isShuttingDown: () => sd,
+      revalidate: async () => { sd = true; return FRESH; },
+    });
+    await poll(DETECTED);
+    expect(apply).not.toHaveBeenCalled();
+    expect(setUpdating).not.toHaveBeenCalledWith(true);
+    expect(log).toHaveBeenCalledWith('SHUTDOWN');
+  });
+
+  it('clears isUpdating (and recovers single-flight) even if apply throws', async () => {
+    const { gate, poll, step, setUpdating } = harness({ apply: async () => { throw new Error('boom'); } });
+    await expect(poll(DETECTED)).rejects.toThrow('boom');
+    expect(setUpdating).toHaveBeenLastCalledWith(false);
+    // pending was cleared in finally, so the gate is usable again:
+    const ok = vi.fn(async () => {});
+    await gate.bindRollout({ ...step, apply: ok })(DETECTED);
+    expect(ok).toHaveBeenCalledOnce();
+  });
+
+  it('does NOT apply when the re-check itself failed', async () => {
+    const { poll, apply, setUpdating, log } = harness({ revalidate: async () => ({ status: 'failed' }) });
+    await poll(DETECTED);
+    expect(apply).not.toHaveBeenCalled();
+    expect(setUpdating).not.toHaveBeenCalledWith(true);
+    expect(log).toHaveBeenCalledWith('RECHECK_FAILED');
+  });
+
+  it('never starts a rollout for a none or failed poll', async () => {
+    const { poll, calls } = harness();
+    await poll({ status: 'none' });
+    await poll({ status: 'failed' });
+    expect(calls).toEqual([]);
+  });
+
+  it('applies with no hold-off log/sleep when jitter is disabled', async () => {
+    const { poll, calls } = harness({ jitterMs: 0 });
+    await poll(DETECTED);
+    expect(calls).toEqual(['revalidate', 'setUpdating:true', 'apply:v-fresh', 'setUpdating:false']);
+  });
+});
 
 // --- Persisted rollout deadline -------------------------------------------
 //
@@ -64,33 +203,40 @@ function persistentNode(opts: {
       }
       clock.t += ms;
     }));
+    const jitterMs = opts.jitterMs ?? WINDOW_MS;
+    const log = (m: string) => { logs.push(m); };
     const gate = createUpdateHoldoffGate({
-      jitterMs: opts.jitterMs ?? WINDOW_MS,
+      deadline: opts.persist === false
+        ? createVolatileHoldoffDeadline({ jitterMs, rng })
+        : createPersistedHoldoffDeadline({ store, jitterMs, log, rng, now: () => clock.t }),
       isShuttingDown: () => shuttingDown,
       setUpdating,
-      log: (m) => logs.push(m),
-      store: opts.persist === false ? null : store,
-      rng,
-      now: () => clock.t,
+      log,
       sleep,
     });
     const apply = vi.fn(async (_target: string) => {});
-    const rollout = (target: string, overrides: Partial<UpdateHoldoffStep<string>>): UpdateHoldoffStep<string> => ({
+    // One rollout bound per boot, as each daemon mode does. By default the
+    // re-check confirms the detected target; a run can override that or the apply.
+    let detected = '';
+    let overrides: Pick<Partial<UpdateHoldoffStep<string>>, 'revalidate' | 'apply'> = {};
+    const poll = gate.bindRollout<string>({
       onHold: (_target, ms, resumed) => { holds.push([ms, resumed]); },
-      revalidate: async () => available(target),
-      apply,
+      revalidate: () => (overrides.revalidate ?? (async () => available(detected)))(),
+      apply: (target) => (overrides.apply ?? apply)(target),
       shutdownMessage: 'SHUTDOWN',
       supersededMessage: 'SUPERSEDED',
       recheckFailedMessage: 'RECHECK_FAILED',
-      ...overrides,
     });
     /** A poll that detected `target`. */
-    const run = (target: string, overrides: Partial<UpdateHoldoffStep<string>> = {}) =>
-      gate.poll({ status: 'available', target, rollout: rollout(target, overrides) });
+    const run = (target: string, runOverrides: typeof overrides = {}) => {
+      detected = target;
+      overrides = runOverrides;
+      return poll(available(target));
+    };
     /** A poll that found nothing to apply (up to date / withdrawn). */
-    const pollNone = () => gate.poll({ status: 'none' });
+    const pollNone = () => poll({ status: 'none' });
     /** A poll whose check itself failed. */
-    const pollFailed = () => gate.poll({ status: 'failed' });
+    const pollFailed = () => poll({ status: 'failed' });
     return { run, pollNone, pollFailed, apply, rng, sleep, sleeps, holds, setUpdating, shutDown: () => { shuttingDown = true; } };
   }
 

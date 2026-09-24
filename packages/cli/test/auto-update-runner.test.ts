@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ResolvedAutoUpdateConfig } from '../src/config.js';
 import { _autoUpdateIo } from '../src/daemon/manifest.js';
-import { createUpdateHoldoffGate, type UpdateHoldoffRecord } from '../src/daemon/auto-update-jitter.js';
+import { createPersistedHoldoffDeadline, type UpdateHoldoffRecord } from '../src/daemon/auto-update-holdoff-deadline.js';
+import { createUpdateHoldoffGate } from '../src/daemon/auto-update-holdoff-gate.js';
 import {
   createGitUpdateRunCheck,
   createNpmUpdateRunCheck,
+  describeUpdateHold,
   resolveCurrentGitTarget,
   resolveCurrentNpmTarget,
 } from '../src/daemon/auto-update-runner.js';
@@ -101,18 +103,27 @@ function gateFixture(opts: {
   const rng = vi.fn(() => 0.5);
   const sleep = vi.fn(async () => { if (opts.restartDuringHold) shuttingDown = true; });
   const logs: string[] = [];
+  const log = (m: string) => { logs.push(m); };
   const gate = createUpdateHoldoffGate({
-    jitterMs: 600_000,
+    deadline: createPersistedHoldoffDeadline({ store, jitterMs: 600_000, log, rng, now: () => 1_000 }),
     isShuttingDown: () => shuttingDown,
     setUpdating: () => {},
-    log: (m) => logs.push(m),
-    store,
-    rng,
-    now: () => 1_000,
+    log,
     sleep,
   });
   return { gate, store, rng, sleep, logs };
 }
+
+describe('describeUpdateHold', () => {
+  it('words a fresh hold, a resumed hold and an already-passed deadline', () => {
+    expect(describeUpdateHold(1_155_000, false))
+      .toBe('holding 1155s before applying (rollout jitter — spreads fleet restarts).');
+    expect(describeUpdateHold(75_000, true))
+      .toBe('resuming the rollout hold-off carried over from before a restart — 75s left before applying.');
+    expect(describeUpdateHold(0, true))
+      .toBe('rollout hold-off deadline carried over from before a restart has passed — applying now.');
+  });
+});
 
 describe('re-check adapters', () => {
   it('npm: a failed registry check is reported as failed, not as nothing to apply', async () => {

@@ -3,12 +3,7 @@ import {
   resolveUpdateJitterMs,
   pickUpdateHoldoffMs,
   awaitUpdateHoldoff,
-  createUpdateHoldoffGate,
-  describeUpdateHold,
   UPDATE_JITTER_ENV,
-  type UpdateCheckOutcome,
-  type UpdateHoldoffGateConfig,
-  type UpdateHoldoffStep,
 } from '../src/daemon/auto-update-jitter.js';
 
 describe('resolveUpdateJitterMs', () => {
@@ -63,11 +58,10 @@ describe('pickUpdateHoldoffMs', () => {
 });
 
 describe('awaitUpdateHoldoff', () => {
-  it('proceeds immediately without sleeping when jitter is disabled', async () => {
+  it('proceeds immediately without sleeping or logging on a zero hold', async () => {
     const sleep = vi.fn(async () => {});
     const onHold = vi.fn();
-    const decision = await awaitUpdateHoldoff({
-      jitterMs: 0,
+    const decision = await awaitUpdateHoldoff({ holdMs: 0, resumed: false }, {
       isShuttingDown: () => false,
       onHold,
       sleep,
@@ -77,20 +71,27 @@ describe('awaitUpdateHoldoff', () => {
     expect(onHold).not.toHaveBeenCalled();
   });
 
-  it('sleeps the picked hold-off and reports the window via onHold, then proceeds', async () => {
+  it('sleeps the hold and reports it via onHold, then proceeds', async () => {
     const sleep = vi.fn(async () => {});
     const onHold = vi.fn();
-    const decision = await awaitUpdateHoldoff({
-      jitterMs: 600_000,
+    const decision = await awaitUpdateHoldoff({ holdMs: 300_000, resumed: false }, {
       isShuttingDown: () => false,
       onHold,
       sleep,
-      rng: () => 0.5,
     });
     expect(decision).toBe('proceed');
     expect(sleep).toHaveBeenCalledOnce();
     expect(sleep).toHaveBeenCalledWith(300_000);
     expect(onHold).toHaveBeenCalledWith(300_000, false);
+  });
+
+  it('reports a resumed hold, including one that has already run out', async () => {
+    const onHold = vi.fn();
+    const sleep = vi.fn(async () => {});
+    await awaitUpdateHoldoff({ holdMs: 120_000, resumed: true }, { isShuttingDown: () => false, onHold, sleep });
+    await awaitUpdateHoldoff({ holdMs: 0, resumed: true }, { isShuttingDown: () => false, onHold, sleep });
+    expect(onHold.mock.calls).toEqual([[120_000, true], [0, true]]);
+    expect(sleep.mock.calls).toEqual([[120_000]]);
   });
 
   it('aborts when the daemon began shutting down DURING the hold-off', async () => {
@@ -100,187 +101,21 @@ describe('awaitUpdateHoldoff', () => {
     const sleep = vi.fn(async () => {
       shuttingDown = true;
     });
-    const decision = await awaitUpdateHoldoff({
-      jitterMs: 600_000,
+    const decision = await awaitUpdateHoldoff({ holdMs: 300_000, resumed: false }, {
       isShuttingDown: () => shuttingDown,
       sleep,
-      rng: () => 0.5,
     });
     expect(sleep).toHaveBeenCalledOnce();
     expect(decision).toBe('abort-shutdown');
   });
 
-  it('waits a hold the caller already resolved (a resumed deadline) without drawing one', async () => {
-    const rng = vi.fn(() => 0.5);
+  it('aborts on a zero hold if already shutting down (never applies during shutdown)', async () => {
     const sleep = vi.fn(async () => {});
-    const onHold = vi.fn();
-    const decision = await awaitUpdateHoldoff({
-      jitterMs: 600_000,
-      isShuttingDown: () => false,
-      hold: { holdMs: 120_000, resumed: true },
-      onHold,
-      sleep,
-      rng,
-    });
-    expect(decision).toBe('proceed');
-    expect(rng).not.toHaveBeenCalled();
-    expect(sleep).toHaveBeenCalledWith(120_000);
-    expect(onHold).toHaveBeenCalledWith(120_000, true);
-  });
-
-  it('aborts even with jitter disabled if already shutting down (never applies during shutdown)', async () => {
-    const sleep = vi.fn(async () => {});
-    const decision = await awaitUpdateHoldoff({
-      jitterMs: 0,
+    const decision = await awaitUpdateHoldoff({ holdMs: 0, resumed: false }, {
       isShuttingDown: () => true,
       sleep,
     });
     expect(decision).toBe('abort-shutdown');
     expect(sleep).not.toHaveBeenCalled();
-  });
-});
-
-describe('createUpdateHoldoffGate (the shared rollout gate)', () => {
-  const detected = (rollout: UpdateHoldoffStep<string>) => ({ status: 'available' as const, target: 'v-detected', rollout });
-  const FRESH: UpdateCheckOutcome<string> = { status: 'available', target: 'v-fresh' };
-
-  // Typed harness — the deps keep the real UpdateHoldoffGateConfig / Step types
-  // so drift between the gate contract and the fixtures is a compile error.
-  function harness(opts: {
-    jitterMs?: number;
-    isShuttingDown?: () => boolean;
-    sleep?: (ms: number) => Promise<void>;
-    revalidate?: () => Promise<UpdateCheckOutcome<string>>;
-    apply?: (t: string) => Promise<void>;
-  } = {}) {
-    const calls: string[] = [];
-    const log = vi.fn((m: string) => { calls.push(`log:${m}`); });
-    const setUpdating = vi.fn((v: boolean) => { calls.push(`setUpdating:${v}`); });
-    const sleep = vi.fn(opts.sleep ?? (async () => { calls.push('sleep'); }));
-    const revalidate = vi.fn(opts.revalidate ?? (async () => { calls.push('revalidate'); return FRESH; }));
-    const apply = vi.fn(opts.apply ?? (async (t: string) => { calls.push(`apply:${t}`); }));
-    const config: UpdateHoldoffGateConfig = {
-      jitterMs: opts.jitterMs ?? 600_000,
-      isShuttingDown: opts.isShuttingDown ?? (() => false),
-      setUpdating,
-      log,
-      rng: () => 0.5,
-      sleep,
-    };
-    const step: UpdateHoldoffStep<string> = {
-      onHold: () => { calls.push('onHold'); },
-      revalidate,
-      apply,
-      shutdownMessage: 'SHUTDOWN',
-      supersededMessage: 'SUPERSEDED',
-      recheckFailedMessage: 'RECHECK_FAILED',
-    };
-    return { gate: createUpdateHoldoffGate(config), step, calls, log, setUpdating, sleep, revalidate, apply };
-  }
-
-  it('runs the gate in order and applies the REVALIDATED target (not the detected one)', async () => {
-    const { gate, step, calls, apply } = harness();
-    await gate.poll(detected(step));
-    expect(calls).toEqual([
-      'onHold', 'sleep', 'revalidate', 'setUpdating:true', 'apply:v-fresh', 'setUpdating:false',
-    ]);
-    expect(apply).toHaveBeenCalledWith('v-fresh');
-  });
-
-  it('holds single-flight WHILE a hold-off is in flight — a second tick during the wait is a no-op', async () => {
-    // A hold-off that outlasts the poll interval must still block a second tick.
-    let release!: () => void;
-    const held = new Promise<void>((r) => { release = r; });
-    const revalidate = vi.fn(async () => FRESH);
-    const apply = vi.fn(async () => {});
-    const { gate, step } = harness({ sleep: () => held, revalidate, apply });
-
-    const first = gate.poll(detected(step)); // enters, sets pending, awaits the un-resolved hold-off
-    await Promise.resolve();
-    // Second concurrent tick while the first rollout is mid-hold-off:
-    await gate.poll(detected(step));
-    expect(revalidate, 'second tick must not start a second rollout').not.toHaveBeenCalled();
-    expect(apply).not.toHaveBeenCalled();
-
-    release(); // let the first hold-off complete
-    await first;
-    expect(revalidate).toHaveBeenCalledTimes(1); // exactly ONE rollout ran
-    expect(apply).toHaveBeenCalledTimes(1);
-  });
-
-  it('does NOT apply a target withdrawn during the hold-off (re-check -> none)', async () => {
-    const { gate, step, apply, setUpdating, log } = harness({ revalidate: async () => ({ status: 'none' }) });
-    await gate.poll(detected(step));
-    expect(apply).not.toHaveBeenCalled();
-    expect(setUpdating).not.toHaveBeenCalledWith(true);
-    expect(log).toHaveBeenCalledWith('SUPERSEDED');
-  });
-
-  it('aborts before revalidate/apply when shutting down during the hold-off', async () => {
-    let sd = false;
-    const { gate, step, revalidate, apply, log } = harness({
-      isShuttingDown: () => sd,
-      sleep: async () => { sd = true; },
-    });
-    await gate.poll(detected(step));
-    expect(revalidate).not.toHaveBeenCalled();
-    expect(apply).not.toHaveBeenCalled();
-    expect(log).toHaveBeenCalledWith('SHUTDOWN');
-  });
-
-  it('aborts AFTER revalidation if shutdown began during the (async) revalidate call', async () => {
-    // The hold-off completes with shutdown=false, so revalidate runs; shutdown
-    // then flips DURING revalidate. The gate must re-check and NOT apply.
-    let sd = false;
-    const { gate, step, apply, setUpdating, log } = harness({
-      isShuttingDown: () => sd,
-      revalidate: async () => { sd = true; return FRESH; },
-    });
-    await gate.poll(detected(step));
-    expect(apply).not.toHaveBeenCalled();
-    expect(setUpdating).not.toHaveBeenCalledWith(true);
-    expect(log).toHaveBeenCalledWith('SHUTDOWN');
-  });
-
-  it('clears isUpdating (and recovers single-flight) even if apply throws', async () => {
-    const { gate, step, setUpdating } = harness({ apply: async () => { throw new Error('boom'); } });
-    await expect(gate.poll(detected(step))).rejects.toThrow('boom');
-    expect(setUpdating).toHaveBeenLastCalledWith(false);
-    // pending was cleared in finally, so the gate is usable again:
-    const ok = vi.fn(async () => {});
-    await gate.poll(detected({ ...step, apply: ok }));
-    expect(ok).toHaveBeenCalledOnce();
-  });
-
-  it('does NOT apply when the re-check itself failed', async () => {
-    const { gate, step, apply, setUpdating, log } = harness({ revalidate: async () => ({ status: 'failed' }) });
-    await gate.poll(detected(step));
-    expect(apply).not.toHaveBeenCalled();
-    expect(setUpdating).not.toHaveBeenCalledWith(true);
-    expect(log).toHaveBeenCalledWith('RECHECK_FAILED');
-  });
-
-  it('does nothing for a none or failed poll outcome without a store', async () => {
-    const { gate, calls } = harness();
-    await gate.poll({ status: 'none' });
-    await gate.poll({ status: 'failed' });
-    expect(calls).toEqual([]);
-  });
-
-  it('applies with no hold-off log/sleep when jitter is disabled', async () => {
-    const { gate, step, calls } = harness({ jitterMs: 0 });
-    await gate.poll(detected(step));
-    expect(calls).toEqual(['revalidate', 'setUpdating:true', 'apply:v-fresh', 'setUpdating:false']);
-  });
-});
-
-describe('describeUpdateHold', () => {
-  it('words a fresh hold, a resumed hold and an already-passed deadline', () => {
-    expect(describeUpdateHold(1_155_000, false))
-      .toBe('holding 1155s before applying (rollout jitter — spreads fleet restarts).');
-    expect(describeUpdateHold(75_000, true))
-      .toBe('resuming the rollout hold-off carried over from before a restart — 75s left before applying.');
-    expect(describeUpdateHold(0, true))
-      .toBe('rollout hold-off deadline carried over from before a restart has passed — applying now.');
   });
 });

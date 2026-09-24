@@ -4,10 +4,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { ResolvedAutoUpdateConfig } from '../src/config.js';
 import { _autoUpdateIo } from '../src/daemon/manifest.js';
-import { UPDATE_JITTER_ENV, type UpdateHoldoffRecord } from '../src/daemon/auto-update-jitter.js';
+import { UPDATE_JITTER_ENV } from '../src/daemon/auto-update-jitter.js';
+import type { UpdateHoldoffRecord } from '../src/daemon/auto-update-holdoff-deadline.js';
+import { DAEMON_EXIT_CODE_RESTART } from '../src/daemon/manifest.js';
+import { daemonState } from '../src/daemon/state.js';
 import { parseUpdateHoldoffRecord, UPDATE_HOLDOFF_FILE } from '../src/daemon/auto-update-holdoff-store.js';
 import {
   createDaemonUpdateHoldoffGate,
+  startDaemonAutoUpdate,
   startDaemonUpdatePolling,
   startGitUpdatePolling,
   startNpmUpdatePolling,
@@ -42,6 +46,7 @@ beforeEach(async () => {
 afterEach(async () => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  daemonState.standaloneCache = null;
   await rm(home, { recursive: true, force: true });
 });
 
@@ -68,18 +73,15 @@ describe('createDaemonUpdateHoldoffGate', () => {
         },
       );
       const apply = vi.fn(async (_target: string) => {});
-      const run = () => gate.poll({
-        status: 'available',
-        target: 'c1',
-        rollout: {
-          onHold: () => {},
-          revalidate: async () => ({ status: 'available', target: 'c1' }),
-          apply,
-          shutdownMessage: 'SHUTDOWN',
-          supersededMessage: 'SUPERSEDED',
-          recheckFailedMessage: 'RECHECK_FAILED',
-        },
+      const poll = gate.bindRollout<string>({
+        onHold: () => {},
+        revalidate: async () => ({ status: 'available', target: 'c1' }),
+        apply,
+        shutdownMessage: 'SHUTDOWN',
+        supersededMessage: 'SUPERSEDED',
+        recheckFailedMessage: 'RECHECK_FAILED',
       });
+      const run = () => poll({ status: 'available', target: 'c1' });
       return { run, apply, sleeps };
     }
 
@@ -250,5 +252,76 @@ describe('startDaemonUpdatePolling', () => {
     expect(logs.some((m) => m.startsWith('Auto-update: skipped — monorepo checkout detected'))).toBe(true);
     expect(starters.git).not.toHaveBeenCalled();
     expect(starters.npm).not.toHaveBeenCalled();
+  });
+});
+
+// The daemon's handoff: lifecycle passes its config and runtime; this resolves
+// the mode and policy, starts polling, and stops it on shutdown.
+describe('startDaemonAutoUpdate', () => {
+  function daemon(config: Record<string, unknown>, network: Record<string, unknown> | null = null) {
+    const shutdown = vi.fn(async (_exitCode: number) => {});
+    const handle = setInterval(() => {}, 60_000);
+    clearInterval(handle);
+    const start = vi.fn((_selection: Parameters<typeof startDaemonUpdatePolling>[0], _deps: DaemonUpdatePollingDeps) =>
+      handle as ReturnType<typeof setInterval> | null);
+    const context = {
+      config: config as any,
+      network: network as any,
+      isShuttingDown: () => false,
+      setUpdating: () => {},
+      log: () => {},
+      lastUpdateCheck: { upToDate: false, checkedAt: 0, latestCommit: '', latestVersion: '', channelTargetMissing: false },
+      shutdown,
+    };
+    return { context, start, shutdown, handle };
+  }
+
+  beforeEach(() => { vi.stubEnv('DKG_HOME', home); });
+
+  it('npm check only: resolves mode and policy from local and network config, hands over the DKG home and restart', async () => {
+    const { context, start, shutdown, handle } = daemon(
+      { autoUpdate: { enabled: false, source: 'npm', channel: 'beta' }, nodeRole: 'core' },
+      { autoUpdate: { allowPrerelease: false, channel: 'latest' } },
+    );
+    const clear = vi.spyOn(globalThis, 'clearInterval');
+
+    const autoUpdate = startDaemonAutoUpdate(context, start);
+    expect(start).toHaveBeenCalledOnce();
+    const [selection, deps] = start.mock.calls[0];
+    expect(selection).toEqual({
+      pollingMode: 'npm',
+      au: null,
+      preferences: { allowPrerelease: false, source: 'npm', channel: 'beta' },
+      nodeRole: 'core',
+    });
+    expect(deps.dkgHome).toBe(home);
+    expect(deps.lastUpdateCheck).toBe(context.lastUpdateCheck);
+
+    await deps.onRestart();
+    expect(shutdown).toHaveBeenCalledWith(DAEMON_EXIT_CODE_RESTART);
+
+    autoUpdate.stop();
+    expect(clear).toHaveBeenCalledWith(handle);
+  });
+
+  it('git source with auto-update enabled: git mode with the merged config', () => {
+    const { context, start } = daemon({
+      autoUpdate: { enabled: true, source: 'git', repo: GIT_AU.repo, branch: 'main', checkIntervalMinutes: 3 },
+    });
+    startDaemonAutoUpdate(context, start);
+    const [selection] = start.mock.calls[0];
+    expect(selection.pollingMode).toBe('git');
+    expect(selection.au).toMatchObject({ enabled: true, repo: GIT_AU.repo, branch: 'main', checkIntervalMinutes: 3 });
+    expect(selection.nodeRole).toBe('edge');
+  });
+
+  it('when nothing polls, stop() has no interval to clear', () => {
+    const { context, start } = daemon({ autoUpdate: { enabled: false, source: 'monorepo' } });
+    start.mockReturnValueOnce(null);
+    const clear = vi.spyOn(globalThis, 'clearInterval');
+    const autoUpdate = startDaemonAutoUpdate(context, start);
+    expect(start.mock.calls[0][0].pollingMode).toBe('monorepo');
+    autoUpdate.stop();
+    expect(clear).not.toHaveBeenCalled();
   });
 });

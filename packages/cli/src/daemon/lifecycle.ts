@@ -124,7 +124,6 @@ import {
   saveConfig,
   loadNetworkConfig,
   loadResolvedNetworkConfig,
-  resolveAutoUpdateConfig,
   resolveChainConfig,
   resolveOtherNetworkRelays,
   resolveNetworkPeerIsolationEnabled,
@@ -161,8 +160,6 @@ import {
   gitCommandEnv,
   gitCommandArgs,
   isStandaloneInstall,
-  resolveAutoUpdateSource,
-  resolveUpdatePreferences,
   slotEntryPoint,
   CLI_NPM_PACKAGE,
   exitOnStoreConfigErrors,
@@ -264,8 +261,6 @@ import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 // the project's tsconfig (`noUnusedLocals` is off).
 import {
   daemonState,
-  resolveStandaloneInstall,
-  resolveAutoUpdatePollingMode,
   type CorsAllowlist,
 } from './state.js';
 import {
@@ -311,7 +306,6 @@ import {
   loadSkillTemplate,
   buildSkillMd,
   skillEtag,
-  DAEMON_EXIT_CODE_RESTART,
   parseRequiredSignatures,
   normalizeDetectedContentType,
   currentBundledMarkItDownAssetName,
@@ -377,7 +371,7 @@ import {
   releaseUpdateLock,
 } from './auto-update.js';
 import { isValidRef } from '../auto-update-ref.js';
-import { startDaemonUpdatePolling } from './auto-update-polling.js';
+import { startDaemonAutoUpdate } from './auto-update-polling.js';
 import {
   chainResetWipe,
   detectBackendSwitch,
@@ -2695,25 +2689,15 @@ async function runDaemonInnerWithStartupOwnership(
   // restarts the whole fleet in one window (the 2026-07-10 bootstrap-storm
   // trigger); the deadline is persisted under the DKG home, so a restart
   // mid-hold resumes it instead of drawing a fresh hold.
-  const au = resolveAutoUpdateConfig(config, network);
-  const configuredAutoUpdateSource = au?.source ?? resolveAutoUpdateSource(config, network);
-  const standalone = resolveStandaloneInstall(configuredAutoUpdateSource);
-  const updateInterval = startDaemonUpdatePolling(
-    {
-      pollingMode: resolveAutoUpdatePollingMode(configuredAutoUpdateSource, standalone),
-      au,
-      preferences: resolveUpdatePreferences(config, network),
-      nodeRole: config.nodeRole ?? "edge",
-    },
-    {
-      dkgHome: dkgDir(),
-      isShuttingDown: () => shuttingDown,
-      setUpdating: (updating) => { daemonState.isUpdating = updating; },
-      log,
-      lastUpdateCheck: daemonState.lastUpdateCheck,
-      onRestart: () => shutdown(DAEMON_EXIT_CODE_RESTART),
-    },
-  );
+  const autoUpdate = startDaemonAutoUpdate({
+    config,
+    network,
+    isShuttingDown: () => shuttingDown,
+    setUpdating: (updating) => { daemonState.isUpdating = updating; },
+    log,
+    lastUpdateCheck: daemonState.lastUpdateCheck,
+    shutdown,
+  });
 
   // --- Dashboard DB + Metrics ---
 
@@ -3895,7 +3879,7 @@ async function runDaemonInnerWithStartupOwnership(
     };
     const cleanup = (async () => {
       try {
-        if (updateInterval) clearInterval(updateInterval);
+        autoUpdate.stop();
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
         await runChainDiscoveryScan.close().catch((err: unknown) => {

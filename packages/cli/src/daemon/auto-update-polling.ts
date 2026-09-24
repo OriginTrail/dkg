@@ -1,26 +1,39 @@
 /**
  * Daemon auto-update polling setup.
  *
- * Lifecycle hands the resolved polling mode and config to
- * {@link startDaemonUpdatePolling}, which picks the mode, logs it, and starts
- * polling: one rollout gate per daemon, with its deadline persisted under the
- * DKG home (so a restart mid-hold resumes it), behind one runCheck that fires
- * shortly after boot and then on the interval. Everything here is injectable,
- * so the lifecycle-to-polling boundary is unit-tested.
+ * Lifecycle calls {@link startDaemonAutoUpdate} once with the daemon's config
+ * and runtime, and stops it on shutdown. That resolves the update mode and
+ * policy, then {@link startDaemonUpdatePolling} picks the mode, logs it, and
+ * starts polling: one rollout gate per daemon, with its deadline persisted
+ * under the DKG home (so a restart mid-hold resumes it), behind one runCheck
+ * that fires shortly after boot and then on the interval. Everything here is
+ * injectable, so the lifecycle-to-polling boundary is unit-tested.
  */
 import { join } from 'node:path';
 import { formatAutoUpdateTagVerificationWarning, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
-import type { ResolvedAutoUpdateConfig, ResolvedUpdatePreferences } from '../config.js';
-import { repoToFetchUrl } from './auto-update.js';
-import { createFileUpdateHoldoffStore, UPDATE_HOLDOFF_FILE } from './auto-update-holdoff-store.js';
 import {
-  createUpdateHoldoffGate,
-  resolveUpdateJitterMs,
-  type UpdateHoldoffGate,
-  type UpdateHoldoffGateConfig,
-} from './auto-update-jitter.js';
+  dkgDir,
+  resolveAutoUpdateConfig,
+  resolveAutoUpdateSource,
+  resolveUpdatePreferences,
+  type DkgConfig,
+  type NetworkConfig,
+  type ResolvedAutoUpdateConfig,
+  type ResolvedUpdatePreferences,
+} from '../config.js';
+import { repoToFetchUrl } from './auto-update.js';
+import { createPersistedHoldoffDeadline } from './auto-update-holdoff-deadline.js';
+import { createUpdateHoldoffGate, type UpdateHoldoffGate } from './auto-update-holdoff-gate.js';
+import { createFileUpdateHoldoffStore, UPDATE_HOLDOFF_FILE } from './auto-update-holdoff-store.js';
+import { resolveUpdateJitterMs } from './auto-update-jitter.js';
 import { createGitUpdateRunCheck, createNpmUpdateRunCheck } from './auto-update-runner.js';
-import type { AutoUpdatePollingMode, LastUpdateCheck } from './state.js';
+import { DAEMON_EXIT_CODE_RESTART } from './manifest.js';
+import {
+  resolveAutoUpdatePollingMode,
+  resolveStandaloneInstall,
+  type AutoUpdatePollingMode,
+  type LastUpdateCheck,
+} from './state.js';
 
 export interface DaemonUpdateHoldoffGateDeps {
   au: Pick<ResolvedAutoUpdateConfig, 'updateJitterMinutes' | 'checkIntervalMinutes'>;
@@ -32,23 +45,35 @@ export interface DaemonUpdateHoldoffGateDeps {
   log: (msg: string) => void;
 }
 
+/** Deterministic rng, clock and sleep for tests of the daemon gate. */
+export interface UpdateGateSeams {
+  rng?: () => number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
 /**
  * The rollout gate both daemon auto-update modes (git and npm) use: the jitter
- * window from config/env, and the deadline persisted under the DKG home so a
- * restart mid-hold resumes it. The polling helpers below build their gates only
- * through this function. `seams` is for tests (deterministic rng, clock and sleep).
+ * window from config/env, and the persisted deadline policy over
+ * `<dkgHome>/.update-holdoff.json`, so a restart mid-hold resumes it. The
+ * polling helpers below build their gates only through this function.
  */
 export function createDaemonUpdateHoldoffGate(
   deps: DaemonUpdateHoldoffGateDeps,
-  seams: Pick<UpdateHoldoffGateConfig, 'rng' | 'now' | 'sleep'> = {},
+  seams: UpdateGateSeams = {},
 ): UpdateHoldoffGate {
   return createUpdateHoldoffGate({
-    jitterMs: resolveUpdateJitterMs(deps.au.updateJitterMinutes, deps.au.checkIntervalMinutes),
+    deadline: createPersistedHoldoffDeadline({
+      store: createFileUpdateHoldoffStore(join(deps.dkgHome, UPDATE_HOLDOFF_FILE)),
+      jitterMs: resolveUpdateJitterMs(deps.au.updateJitterMinutes, deps.au.checkIntervalMinutes),
+      log: deps.log,
+      rng: seams.rng,
+      now: seams.now,
+    }),
     isShuttingDown: deps.isShuttingDown,
     setUpdating: deps.setUpdating,
     log: deps.log,
-    store: createFileUpdateHoldoffStore(join(deps.dkgHome, UPDATE_HOLDOFF_FILE)),
-    ...seams,
+    sleep: seams.sleep,
   });
 }
 
@@ -78,7 +103,7 @@ export interface DaemonUpdatePollingDeps {
   onRestart: () => Promise<void>;
   /** Test seams. */
   timers?: UpdatePollingTimers;
-  gateSeams?: Pick<UpdateHoldoffGateConfig, 'rng' | 'now' | 'sleep'>;
+  gateSeams?: UpdateGateSeams;
 }
 
 function schedulePolling(
@@ -234,4 +259,52 @@ export function startDaemonUpdatePolling(
     log('Auto-update: skipped — monorepo checkout detected. Use `git pull && pnpm install && pnpm build` to update.');
   }
   return null;
+}
+
+/** What the daemon hands {@link startDaemonAutoUpdate}. */
+export interface DaemonAutoUpdateContext {
+  config: Pick<DkgConfig, 'autoUpdate' | 'nodeRole'>;
+  network: Pick<NetworkConfig, 'autoUpdate'> | null | undefined;
+  isShuttingDown: () => boolean;
+  setUpdating: (updating: boolean) => void;
+  log: (msg: string) => void;
+  lastUpdateCheck: LastUpdateCheck;
+  /** The daemon's shutdown; an update restarts through it with DAEMON_EXIT_CODE_RESTART. */
+  shutdown: (exitCode: number) => Promise<void>;
+}
+
+/**
+ * The daemon's auto-update handoff: resolve the mode and policy from the
+ * daemon's config (merged field by field across ~/.dkg/config.json →
+ * network/<env>.json → project.json), start polling with the deadline under the
+ * DKG home, and return `stop()` for shutdown. `start` is injectable for tests.
+ */
+export function startDaemonAutoUpdate(
+  daemon: DaemonAutoUpdateContext,
+  start: typeof startDaemonUpdatePolling = startDaemonUpdatePolling,
+): { stop(): void } {
+  const { config, network } = daemon;
+  const au = resolveAutoUpdateConfig(config, network);
+  const source = au?.source ?? resolveAutoUpdateSource(config, network);
+  const interval = start(
+    {
+      pollingMode: resolveAutoUpdatePollingMode(source, resolveStandaloneInstall(source)),
+      au,
+      preferences: resolveUpdatePreferences(config, network),
+      nodeRole: config.nodeRole ?? 'edge',
+    },
+    {
+      dkgHome: dkgDir(),
+      isShuttingDown: daemon.isShuttingDown,
+      setUpdating: daemon.setUpdating,
+      log: daemon.log,
+      lastUpdateCheck: daemon.lastUpdateCheck,
+      onRestart: () => daemon.shutdown(DAEMON_EXIT_CODE_RESTART),
+    },
+  );
+  return {
+    stop() {
+      if (interval) clearInterval(interval);
+    },
+  };
 }
