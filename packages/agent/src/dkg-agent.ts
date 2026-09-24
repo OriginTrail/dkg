@@ -1198,6 +1198,8 @@ export class DKGAgent extends DKGAgentBase {
    */
   private activeStorageACKCollections = 0;
   private readonly storageACKCollectionWaiters: Array<() => void> = [];
+  /** A timed-out self request keeps its slot until handler cleanup finishes. */
+  private localACKWorkTail: Promise<void> = Promise.resolve();
 
   private async acquireStorageACKCollectionSlot(): Promise<void> {
     const limit = this.config.storageAckTiming.maxConcurrentCollections;
@@ -3268,11 +3270,13 @@ export class DKGAgent extends DKGAgentBase {
           }, Math.max(0, timeoutMs));
           timer.unref?.();
         });
+        const work = this.localACKWorkTail.then(() => {
+          controller.signal.throwIfAborted();
+          return local.dispatch(protocol, data, this.peerId, controller.signal);
+        });
+        this.localACKWorkTail = work.then(() => {}, () => {});
         try {
-          return await Promise.race([
-            Promise.resolve().then(() => local.dispatch(protocol, data, this.peerId, controller.signal)),
-            timeout,
-          ]);
+          return await Promise.race([work, timeout]);
         } finally {
           if (timer) clearTimeout(timer);
         }

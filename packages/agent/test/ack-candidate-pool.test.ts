@@ -123,6 +123,20 @@ function installOpenACKAdmission(agent: AgentInternals): void {
 }
 
 describe('getACKCandidatePeers — core-only candidates', () => {
+  it('isolates round evidence from peer updates while committing negotiated cores', () => {
+    const registry = new ACKCapabilityRegistry();
+    registry.reconcile(CORE[0], [PROTOCOL_STORAGE_ACK]);
+    const round = registry.beginRound();
+    registry.reconcile(CORE[0], [PROTOCOL_SYNC]);
+    expect(round.supports(CORE[0], PROTOCOL_STORAGE_ACK)).toBe(true);
+    expect(registry.hasCoreCapability(CORE[0])).toBe(false);
+
+    round.observeNegotiated(CORE[1], PROTOCOL_STORAGE_ACK);
+    round.observeNegotiated(CORE[1], PROTOCOL_STORAGE_UPDATE_ACK_V2);
+    expect(round.snapshot().supportByProtocol.get(PROTOCOL_STORAGE_UPDATE_ACK_V2)?.has(CORE[1])).toBe(true);
+    expect(registry.snapshot().supportByProtocol.get(PROTOCOL_STORAGE_UPDATE_ACK_V2)?.has(CORE[1])).toBe(true);
+  });
+
   it('shares one capability state across peer updates and sync-on-connect reconciliation', async () => {
     const a = await buildAgent({ confirmedCores: [], connected: [CORE[0]] });
     a.handlePeerUpdateForSyncRetry(CORE[0], [PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2]);

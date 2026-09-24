@@ -76,32 +76,31 @@ export class ACKCandidateDiscoveryCoordinator {
     }));
     // Keep preflight and final selection on this round's snapshot even if
     // peer:update changes the registry while the round is in progress.
-    const roundSnapshot = this.registry.snapshot();
-    const corePeerIds = new Set(roundSnapshot.corePeerIds);
-    const supportByProtocol = new Map([...roundSnapshot.supportByProtocol]
-      .map(([protocol, peers]) => [protocol, new Set(peers)]));
-    const protocolPeerIds = requestedProtocol === PROTOCOL_STORAGE_ACK
-      ? corePeerIds : supportByProtocol.get(requestedProtocol)!;
+    const round = this.registry.beginRound();
     const base = {
       connectedPeers: ports.connectedPeers,
       ackCandidatePeerIds: ports.ackCandidatePeerIds,
       selfPeerId: ports.localCandidate.peerId,
-      capability: { mode: 'require' as const, corePeers: corePeerIds },
+      capability: { mode: 'require' as const, corePeers: round.snapshot().corePeerIds },
     };
     await ports.preflight(selectACKCandidateUniverse(base));
 
     // One spare beyond bare quorum lets the collector survive one candidate
     // decline or timeout without another discovery round.
     const target = ports.requiredACKs + 1;
-    const admitted = (): number => selectACKCandidateUniverse(base)
-      .filter((peerId) => protocolPeerIds.has(peerId) && ports.isAcceptedPeer(peerId)).length +
+    const admitted = (): number => selectACKCandidateUniverse({
+      connectedPeers: ports.connectedPeers,
+      ackCandidatePeerIds: ports.ackCandidatePeerIds,
+      selfPeerId: ports.localCandidate.peerId,
+    })
+      .filter((peerId) => round.supports(peerId, requestedProtocol) && ports.isAcceptedPeer(peerId)).length +
       Number(ports.localCandidate.available);
     if (ports.probeProtocol) {
       const unconfirmed = selectACKCandidateUniverse({
         connectedPeers: ports.connectedPeers,
         ackCandidatePeerIds: ports.ackCandidatePeerIds,
         selfPeerId: ports.localCandidate.peerId,
-      }).filter((peerId) => !protocolPeerIds.has(peerId));
+      }).filter((peerId) => !round.supports(peerId, requestedProtocol));
       const preferredIds = new Set(ports.preferredACKPeerIds ?? []);
       const preferred = unconfirmed.filter((peerId) => preferredIds.has(peerId));
       const other = unconfirmed.filter((peerId) => !preferredIds.has(peerId));
@@ -124,15 +123,12 @@ export class ACKCandidateDiscoveryCoordinator {
         await ports.preflight(batch);
         const discovered = (await Promise.all(batch.map(async (peerId) => {
           if (await ports.probeProtocol!(peerId, requestedProtocol) !== 'supported') return null;
-          if (!corePeerIds.has(peerId)) {
+          if (!round.supports(peerId, PROTOCOL_STORAGE_ACK)) {
             if (requestedProtocol !== PROTOCOL_STORAGE_ACK &&
                 await ports.probeProtocol!(peerId, PROTOCOL_STORAGE_ACK) !== 'supported') return null;
-            this.registry.observeNegotiated(peerId, PROTOCOL_STORAGE_ACK);
-            corePeerIds.add(peerId);
-            supportByProtocol.get(PROTOCOL_STORAGE_ACK)?.add(peerId);
+            round.observeNegotiated(peerId, PROTOCOL_STORAGE_ACK);
           }
-          this.registry.observeNegotiated(peerId, requestedProtocol);
-          protocolPeerIds.add(peerId);
+          round.observeNegotiated(peerId, requestedProtocol);
           return peerId;
         }))).filter((peerId): peerId is string => peerId !== null);
         this.preferredProbeCursor += batch.filter((peerId) => preferredIds.has(peerId)).length;
@@ -150,9 +146,6 @@ export class ACKCandidateDiscoveryCoordinator {
       verifiedSameNetworkPeerIds: ports.verifiedSameNetworkPeerIds(),
       requiredACKs: ports.requiredACKs,
       protocol: requestedProtocol,
-    }, ports.localCandidate, {
-      corePeerIds,
-      supportByProtocol,
-    });
+    }, ports.localCandidate, round.snapshot());
   }
 }

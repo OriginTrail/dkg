@@ -10,6 +10,25 @@ interface PeerCapabilityEvidence {
   negotiated: Set<StorageACKProtocol>;
 }
 
+function supportsProtocol(record: PeerCapabilityEvidence, protocol: StorageACKProtocol): boolean {
+  if (protocol !== PROTOCOL_STORAGE_ACK &&
+      !record.advertised.has(PROTOCOL_STORAGE_ACK) &&
+      !record.negotiated.has(PROTOCOL_STORAGE_ACK)) return false;
+  return record.advertised.has(protocol) || record.negotiated.has(protocol);
+}
+
+function snapshotEvidence(peers: ReadonlyMap<string, PeerCapabilityEvidence>): ACKCapabilitySnapshot {
+  const supporters = (protocol: StorageACKProtocol): ReadonlySet<string> =>
+    new Set(new CapabilityPeerView(peers, protocol));
+  const corePeerIds = supporters(PROTOCOL_STORAGE_ACK);
+  return {
+    corePeerIds,
+    supportByProtocol: new Map(STORAGE_ACK_PROTOCOLS.map(([protocol]) => [
+      protocol, protocol === PROTOCOL_STORAGE_ACK ? corePeerIds : supporters(protocol),
+    ])),
+  };
+}
+
 /** Stable read-only view: membership is a map lookup; iteration is explicit. */
 class CapabilityPeerView implements ReadonlySet<string> {
   constructor(
@@ -17,26 +36,19 @@ class CapabilityPeerView implements ReadonlySet<string> {
     private readonly protocol: StorageACKProtocol,
   ) {}
 
-  private supports(record: PeerCapabilityEvidence): boolean {
-    if (this.protocol !== PROTOCOL_STORAGE_ACK &&
-        !record.advertised.has(PROTOCOL_STORAGE_ACK) &&
-        !record.negotiated.has(PROTOCOL_STORAGE_ACK)) return false;
-    return record.advertised.has(this.protocol) || record.negotiated.has(this.protocol);
-  }
-
   has(peerId: string): boolean {
     const record = this.records.get(peerId);
-    return record !== undefined && this.supports(record);
+    return record !== undefined && supportsProtocol(record, this.protocol);
   }
 
   get size(): number {
     let count = 0;
-    for (const record of this.records.values()) if (this.supports(record)) count++;
+    for (const record of this.records.values()) if (supportsProtocol(record, this.protocol)) count++;
     return count;
   }
 
   *values(): SetIterator<string> {
-    for (const [peerId, record] of this.records) if (this.supports(record)) yield peerId;
+    for (const [peerId, record] of this.records) if (supportsProtocol(record, this.protocol)) yield peerId;
   }
 
   keys(): SetIterator<string> { return this.values(); }
@@ -51,6 +63,35 @@ class CapabilityPeerView implements ReadonlySet<string> {
 
   [Symbol.iterator](): SetIterator<string> { return this.values(); }
   get [Symbol.toStringTag](): string { return 'Set'; }
+}
+
+/** Isolated evidence for one ACK round; observations also commit to the registry. */
+export class ACKCapabilityRound {
+  private readonly peers: Map<string, PeerCapabilityEvidence>;
+
+  constructor(private readonly registry: ACKCapabilityRegistry, source: ReadonlyMap<string, PeerCapabilityEvidence>) {
+    this.peers = new Map([...source].map(([peerId, evidence]) => [peerId, {
+      advertised: new Set(evidence.advertised),
+      negotiated: new Set(evidence.negotiated),
+    }]));
+  }
+
+  supports(peerId: string, protocol: StorageACKProtocol): boolean {
+    const evidence = this.peers.get(peerId);
+    return evidence !== undefined && supportsProtocol(evidence, protocol);
+  }
+
+  observeNegotiated(peerId: string, protocol: StorageACKProtocol): void {
+    let evidence = this.peers.get(peerId);
+    if (!evidence) {
+      evidence = { advertised: new Set(), negotiated: new Set() };
+      this.peers.set(peerId, evidence);
+    }
+    evidence.negotiated.add(protocol);
+    this.registry.observeNegotiated(peerId, protocol);
+  }
+
+  snapshot(): ACKCapabilitySnapshot { return snapshotEvidence(this.peers); }
 }
 
 /** Owns peer capability evidence; round discovery lives in the coordinator. */
@@ -90,18 +131,12 @@ export class ACKCapabilityRegistry {
     this.record(peerId).negotiated.add(protocol);
   }
 
-  private supporters(protocol: StorageACKProtocol): Set<string> {
-    return new Set(new CapabilityPeerView(this.peers, protocol));
-  }
-
   hasCoreCapability(peerId: string): boolean { return this.knownCorePeerIds.has(peerId); }
   snapshotCorePeerIds(): ReadonlySet<string> { return new Set(this.knownCorePeerIds); }
+  beginRound(): ACKCapabilityRound { return new ACKCapabilityRound(this, this.peers); }
 
   snapshot(): ACKCapabilitySnapshot {
-    return {
-      corePeerIds: this.snapshotCorePeerIds(),
-      supportByProtocol: new Map(STORAGE_ACK_PROTOCOLS.map(([protocol]) => [protocol, this.supporters(protocol)])),
-    };
+    return snapshotEvidence(this.peers);
   }
 
 }

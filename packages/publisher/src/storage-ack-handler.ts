@@ -409,10 +409,6 @@ function isACKHandlerDeadlineAbort(err: unknown): boolean {
   return false;
 }
 
-function isACKHandlerDeadlineAbortSignal(signal: AbortSignal | undefined): boolean {
-  return Boolean(signal?.aborted && isACKHandlerDeadlineAbort(signal.reason));
-}
-
 async function runWithDeadline<T>(
   work: Promise<T>,
   deadlineMs: number,
@@ -942,10 +938,13 @@ export class StorageACKHandler {
     signal?: AbortSignal,
   ): Promise<{ ok: true; value: T } | { ok: false; decline: Uint8Array }> {
     try {
-      return { ok: true, value: await op() };
+      signal?.throwIfAborted();
+      const value = await op();
+      signal?.throwIfAborted();
+      return { ok: true, value };
     } catch (err) {
       if (isACKHandlerDeadlineAbort(err)) throw err;
-      if (isACKHandlerDeadlineAbortSignal(signal)) throw signal!.reason;
+      signal?.throwIfAborted();
       return { ok: false, decline: this.declineTemporarilyUnavailable(cgId, 'store unavailable', err) };
     }
   }
@@ -1087,12 +1086,15 @@ export class StorageACKHandler {
     // as a transient decline (see assertPersistQuadTermsSafe).
     assertPersistQuadTermsSafe(parsed);
     const result = await this.runStoreOpOrDecline(cgId, async () => {
+      signal?.throwIfAborted();
       await this.store.dropGraph(
         stagingGraphUri,
         ackStoreOptions('storage-ack.persistStaging.dropGraph', signal),
       );
+      signal?.throwIfAborted();
       const graphedQuads = parsed.map((q) => ({ ...q, graph: stagingGraphUri }));
       await this.store.insert(graphedQuads, ackStoreOptions('storage-ack.persistStaging.insert', signal));
+      signal?.throwIfAborted();
       // Durability boundary: the ACK we are about to sign asserts this data is
       // stored, and a worker respawn can recover from a snapshot that predates
       // the debounced flush — so force it durable before signing. A flush
@@ -1203,6 +1205,7 @@ export class StorageACKHandler {
         privateMerkleRoot: incomingPrivateRoot,
         signal,
       });
+      signal?.throwIfAborted();
       if ('decline' in verdict) return verdict.decline;
       const companion = graphPublish.subGraphName === undefined
         ? this.config.resolveDurableRootAtomicCompanion?.(Object.freeze({
@@ -1213,6 +1216,7 @@ export class StorageACKHandler {
           }))
         : undefined;
       if (replaceGraph || companion !== undefined) {
+        signal?.throwIfAborted();
         const replaced = await tryReplaceGraphWithDurableRootCompanionAtomically(
           this.store,
           swmGraphUri,
@@ -1220,6 +1224,7 @@ export class StorageACKHandler {
           companion,
           ackStoreOptions('storage-ack.persistGraphScoped.replaceGraph', signal),
         );
+        signal?.throwIfAborted();
         if (!replaced) {
           throw Object.assign(
             new Error('Graph-scoped StorageACK requires atomic TripleStore.replaceGraph support'),
@@ -1235,7 +1240,9 @@ export class StorageACKHandler {
           swmGraphUri,
           ackStoreOptions('storage-ack.persistGraphScoped.witnessInvalidate', signal),
         ).catch(() => {});
+        signal?.throwIfAborted();
       }
+      signal?.throwIfAborted();
       await deleteByPatternWithoutCount(
         this.store,
         { graph: metaGraph, subject: operationSubject },
@@ -1348,10 +1355,13 @@ export class StorageACKHandler {
     const read = this.config.readKnowledgeAssetRootCount;
     if (!read) return { count: undefined };
     try {
-      return { count: await read(kaUal, signal) };
+      signal?.throwIfAborted();
+      const count = await read(kaUal, signal);
+      signal?.throwIfAborted();
+      return { count };
     } catch (err) {
       if (isACKHandlerDeadlineAbort(err)) throw err;
-      if (isACKHandlerDeadlineAbortSignal(signal)) throw signal!.reason;
+      signal?.throwIfAborted();
       return {
         decline: this.declineTemporarilyUnavailable(cgId, 'chain version lookup unavailable', err),
       };
@@ -1543,11 +1553,14 @@ export class StorageACKHandler {
     signal?: AbortSignal,
   ): Promise<{ ok: true; quads: Quad[] } | { ok: false; decline: Uint8Array }> {
     try {
-      return { ok: true, quads: await this.loadSWMQuads(graphUri, rootEntities, signal) };
+      signal?.throwIfAborted();
+      const quads = await this.loadSWMQuads(graphUri, rootEntities, signal);
+      signal?.throwIfAborted();
+      return { ok: true, quads };
     } catch (err) {
       if (err instanceof StoreUnavailableError) {
         if (isACKHandlerDeadlineAbort(err)) throw err;
-        if (isACKHandlerDeadlineAbortSignal(signal)) throw signal!.reason;
+        signal?.throwIfAborted();
         return { ok: false, decline: this.declineTemporarilyUnavailable(cgId, 'store unavailable', err) };
       }
       throw err;
@@ -1571,10 +1584,12 @@ export class StorageACKHandler {
     if (!gate) return { ok: true };
     let verdict: StorageAckVmPromotionVerdict;
     try {
+      request.signal?.throwIfAborted();
       verdict = await gate(request);
+      request.signal?.throwIfAborted();
     } catch (err) {
       if (isACKHandlerDeadlineAbort(err)) throw err;
-      if (isACKHandlerDeadlineAbortSignal(request.signal)) throw request.signal!.reason;
+      request.signal?.throwIfAborted();
       // An unanswered gate is not a commitment: never sign on it.
       return {
         ok: false,
@@ -1803,6 +1818,7 @@ export class StorageACKHandler {
     peerId: PeerId,
     signal?: AbortSignal,
   ): Promise<Uint8Array> => {
+    signal?.throwIfAborted();
     if (this.config.nodeRole !== 'core') {
       throw new Error('Only core nodes can issue StorageACKs');
     }
@@ -1880,6 +1896,7 @@ export class StorageACKHandler {
         );
       }
       const curationVerdict = await this.config.isCgCurated(cgId, swmGraphIdForCuration);
+      signal?.throwIfAborted();
       if (curationVerdict !== true) {
         throw new Error(
           `PublishIntent.isEncryptedPayload=true rejected for cg=${cgId}${swmGraphIdForCuration ? ` (swmGraph=${swmGraphIdForCuration})` : ''}: ` +
@@ -2007,17 +2024,21 @@ export class StorageACKHandler {
         cgId,
         'curated StorageACK signer is not confirmed on-chain as an operational wallet',
       );
+      signal?.throwIfAborted();
       if (!curatedSignerGate.ok) return curatedSignerGate.decline;
       // No VM-promotion gate here: the core never receives curated plaintext.
       // What this ACK guarantees is the catalog commitment verified above and
       // persisted to `<cg>/_catalog` below, the artifact random sampling proves.
 
       const persistedCatalog = await this.persistCatalogOrDecline(cgId, verifiedCatalog.catalog, signal);
+      signal?.throwIfAborted();
       if (!persistedCatalog.ok) return persistedCatalog.decline;
 
+      signal?.throwIfAborted();
       const signature = ethers.Signature.from(
         await this.config.signerWallet.signMessage(digest),
       );
+      signal?.throwIfAborted();
       const MAX_UINT64 = (1n << 64n) - 1n;
       if (this.config.nodeIdentityId > MAX_UINT64) {
         throw new Error(
@@ -2370,6 +2391,7 @@ export class StorageACKHandler {
       cgId,
       'StorageACK signer is not confirmed on-chain as an operational wallet',
     );
+    signal?.throwIfAborted();
     if (!signerGate.ok) return signerGate.decline;
     // Finality gate: sign only once this core has committed to carry the KA
     // into its Verifiable Memory after the publish finalizes.
@@ -2379,15 +2401,19 @@ export class StorageACKHandler {
       operation: 'publish',
       ...(signal ? { signal } : {}),
     });
+    signal?.throwIfAborted();
     if (!promotionGate.ok) return promotionGate.decline;
     if (persistGraphCopy) {
       const persisted = await persistGraphCopy();
+      signal?.throwIfAborted();
       if (!persisted.ok) return persisted.decline;
     }
 
+    signal?.throwIfAborted();
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),
     );
+    signal?.throwIfAborted();
 
     const MAX_UINT64 = (1n << 64n) - 1n;
     if (this.config.nodeIdentityId > MAX_UINT64) {
@@ -2462,6 +2488,7 @@ export class StorageACKHandler {
     peerId: PeerId,
     signal?: AbortSignal,
   ): Promise<Uint8Array> => {
+    signal?.throwIfAborted();
     if (this.config.nodeRole !== 'core') {
       throw new Error('Only core nodes can issue StorageACKs');
     }
@@ -2558,6 +2585,7 @@ export class StorageACKHandler {
         );
       }
       const curationVerdict = await this.config.isCgCurated(cgId, swmGraphIdForCuration);
+      signal?.throwIfAborted();
       if (curationVerdict !== true) {
         return this.encodeDecline(
           cgId,
@@ -2890,6 +2918,7 @@ export class StorageACKHandler {
       cgId,
       'UpdateStorageACK signer is not confirmed on-chain as an operational wallet',
     );
+    signal?.throwIfAborted();
     if (!updateSignerGate.ok) return updateSignerGate.decline;
     // Finality gate for public updates, as for publishes. A curated update's
     // guarantee is the catalog commitment verified above and persisted below.
@@ -2900,20 +2929,25 @@ export class StorageACKHandler {
         operation: 'update',
         ...(signal ? { signal } : {}),
       });
+      signal?.throwIfAborted();
       if (!updatePromotionGate.ok) return updatePromotionGate.decline;
     }
     if (verifiedUpdateCatalog) {
       const persistedCatalog = await this.persistCatalogOrDecline(cgId, verifiedUpdateCatalog, signal);
+      signal?.throwIfAborted();
       if (!persistedCatalog.ok) return persistedCatalog.decline;
     }
     if (persistUpdateCopy) {
       const persisted = await persistUpdateCopy();
+      signal?.throwIfAborted();
       if (!persisted.ok) return persisted.decline;
     }
 
+    signal?.throwIfAborted();
     const signature = ethers.Signature.from(
       await this.config.signerWallet.signMessage(digest),
     );
+    signal?.throwIfAborted();
     const MAX_UINT64 = (1n << 64n) - 1n;
     if (this.config.nodeIdentityId > MAX_UINT64) {
       throw new Error(

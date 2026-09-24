@@ -20,6 +20,7 @@ import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { STORAGE_ACK_PROTOCOLS } from '../src/p2p/storage-ack-protocols.js';
+import { registerStorageACKEndpoint } from '../src/p2p/storage-ack-endpoint.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_SRC = resolve(__dirname, '..', 'src');
@@ -60,6 +61,30 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
     expect(lifecycle).toMatch(/this\.storageAckEndpoint\s*=\s*registerStorageACKEndpoint\(/);
     expect(lifecycle).toMatch(/registerGroup:\s*\(entries\)\s*=>\s*this\.messenger\.registerGroup\(entries\)/);
     expect(endpoint).toMatch(/ports\.registerGroup\(STORAGE_ACK_PROTOCOLS\.map\(/);
+  });
+
+  it('routes every registered protocol and revokes all routes on disposal', async () => {
+    const routes = new Map<string, (data: Uint8Array, peerId: string) => Promise<Uint8Array>>();
+    let disposed = false;
+    const endpoint = registerStorageACKEndpoint({
+      registerGroup: (entries) => {
+        for (const entry of entries) routes.set(entry.protocolId, entry.handler);
+        return () => { disposed = true; routes.clear(); };
+      },
+      publish: async () => new Uint8Array([1]),
+      update: async () => new Uint8Array([2]),
+    });
+
+    expect([...routes.keys()]).toEqual(STORAGE_ACK_PROTOCOLS.map(([protocol]) => protocol));
+    for (const [protocol, kind] of STORAGE_ACK_PROTOCOLS) {
+      await expect(routes.get(protocol)!(new Uint8Array(), 'peer'))
+        .resolves.toEqual(new Uint8Array([kind === 'publish' ? 1 : 2]));
+    }
+    const stale = routes.get(PROTOCOL_STORAGE_ACK)!;
+    endpoint.dispose();
+    expect(disposed).toBe(true);
+    expect(routes.size).toBe(0);
+    expect(() => stale(new Uint8Array(), 'peer')).toThrow(/not registered/);
   });
 
   it('agent wires core-side StorageACK decline logging', () => {

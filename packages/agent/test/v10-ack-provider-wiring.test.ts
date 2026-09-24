@@ -1021,8 +1021,10 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     internals.config.nodeRole = 'core';
     let observedSignal: AbortSignal | undefined;
     let lateMutation = false;
+    let dispatchCalls = 0;
     internals.storageAckEndpoint = {
       dispatch: async (_protocol, _data, _peerId, signal) => {
+        dispatchCalls++;
         observedSignal = signal;
         await new Promise((resolve) => setTimeout(resolve, 45));
         if (!signal?.aborted) lateMutation = true;
@@ -1032,9 +1034,13 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     const send = internals.createACKTransportFactory({ sendTimeoutMs: 10 })().sendP2P;
     await expect(send(internals.peerId, PROTOCOL_STORAGE_ACK, new Uint8Array([3])))
       .rejects.toThrow(/timed out after 10ms/);
+    await expect(send(internals.peerId, PROTOCOL_STORAGE_ACK, new Uint8Array([3])))
+      .rejects.toThrow(/timed out after 10ms/);
     expect(observedSignal?.aborted).toBe(true);
+    expect(dispatchCalls).toBe(1);
     await new Promise((resolve) => setTimeout(resolve, 55));
     expect(lateMutation).toBe(false);
+    expect(dispatchCalls).toBe(1);
   });
 
   it('rejects misaligned direct agent ACK timing before boot side effects', async () => {
