@@ -16,6 +16,18 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Fixed
 
+- **Less CPU per connecting peer for RFC-64 catalog replay**: every new
+  connection replays each catalog-eligible graph's heads to the peer, and every
+  replay re-read and re-verified every applied head on the node. A Core with
+  many graphs spent close to 20 s of main-thread CPU per connecting peer. The
+  node now reuses verified applied heads while the applied-head inventory is
+  unchanged, answers a re-announced head that is already applied without
+  reading or verifying it again or scheduling a receiver task, and names the
+  StorageACK ledger graph on ledger updates so graph-set indexes skip a rescan.
+  In a benchmark with 60 graphs of 2,000 heads each, CPU per connecting peer
+  fell from 18.7 s to 2.35 s. The replay loop itself (replays that come back
+  incomplete and repeat on every reconnect) is not changed; keep the RFC-64
+  kill switch on where it is set.
 - **Cores promote the data they acknowledge to Verifiable Memory again**: since
   10.0.14 (#2184) `syncReconcilerEnabled` also gated chain-driven VM
   reconciliation, which the 10.0.14 upgrade notes did not mention. A Core that

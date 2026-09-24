@@ -1519,7 +1519,13 @@ export class StorageACKHandler {
     if (typeof this.store.update === 'function') {
       await this.store.update(
         storageAckLedgerRecordUpdate(signed),
-        ackStoreOptions('storage-ack.ledger.record'),
+        {
+          ...ackStoreOptions('storage-ack.ledger.record'),
+          // The update writes only the ledger graph. Naming it keeps a
+          // graph-set index current with one bounded probe; an undeclared
+          // update makes the next graph listing rescan the whole store.
+          touchedGraphs: [STORAGE_ACK_LEDGER_GRAPH],
+        },
       );
       return;
     }

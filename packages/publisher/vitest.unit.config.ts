@@ -77,6 +77,7 @@ export default defineConfig({
       'test/publish-lifecycle-logger.test.ts',
       'test/storage-ack-handler.test.ts',
       'test/storage-ack-priority-lane.test.ts',
+      'test/storage-ack-ledger-graph-index.test.ts',
       'test/swm-slice-ack-unbounded.test.ts',
       'test/workspace-snapshot-store.test.ts',
       'test/workspace-snapshot-validation.test.ts',

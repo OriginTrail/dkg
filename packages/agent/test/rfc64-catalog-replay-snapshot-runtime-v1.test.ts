@@ -101,24 +101,37 @@ function scopedSelection(contextGraphId = CONTEXT_GRAPH_ID) {
   });
 }
 
-function createReplayFixture(initialHeads: readonly SignedAuthorCatalogHeadEnvelopeV1[]) {
+function createReplayFixture(
+  initialHeads: readonly SignedAuthorCatalogHeadEnvelopeV1[],
+  options: Readonly<{ revision?: boolean }> = {},
+) {
   let inventory = initialHeads.map(appliedSnapshot);
+  // Moved by every inventory write, as the durable inventory's revision is.
+  let revision = 1;
   const storedHeads = new Map<string, SignedAuthorCatalogHeadEnvelopeV1>(
     initialHeads.map((head) => [head.objectDigest, head]),
   );
   const readVerifiedCatalogHeadV1 = vi.fn(async (objectDigest: Digest32V1) => (
     storedHeads.get(objectDigest) ?? null
   ));
+  const listAppliedCatalogHeadsV1 = vi.fn(() => inventory);
   const storage: Rfc64CatalogReplaySnapshotStorageV1 = Object.freeze({
-    listAppliedCatalogHeadsV1: () => inventory,
+    listAppliedCatalogHeadsV1,
     readVerifiedCatalogHeadV1,
+    ...(options.revision === true
+      ? { readAppliedCatalogHeadsRevisionV1: () => revision }
+      : {}),
   });
   const coordinator = new Rfc64CatalogMutationCoordinatorV1();
   const runtime = new Rfc64CatalogReplaySnapshotRuntimeV1(storage, coordinator);
   return Object.freeze({
     coordinator,
+    listAppliedCatalogHeadsV1,
     readVerifiedCatalogHeadV1,
     runtime,
+    bumpRevision(): void {
+      revision += 1;
+    },
     stage(head: SignedAuthorCatalogHeadEnvelopeV1): void {
       storedHeads.set(head.objectDigest, head);
     },
@@ -131,6 +144,7 @@ function createReplayFixture(initialHeads: readonly SignedAuthorCatalogHeadEnvel
     replaceAppliedHeads(heads: readonly SignedAuthorCatalogHeadEnvelopeV1[]): void {
       for (const head of heads) storedHeads.set(head.objectDigest, head);
       inventory = heads.map(appliedSnapshot);
+      revision += 1;
     },
   });
 }
@@ -300,5 +314,79 @@ describe('RFC-64 catalog replay snapshot runtime', () => {
       selection: scopedSelection(),
       operation: async () => undefined,
     })).rejects.toThrow(/durable catalog inventory contains an invalid head/u);
+  });
+});
+
+describe('RFC-64 catalog replay snapshot runtime with an inventory revision', () => {
+  it('lists the inventory once per revision across scoped replays', async () => {
+    const initial = signedHead(catalogScope(CONTEXT_GRAPH_ID), '0');
+    const other = signedHead(catalogScope(OTHER_CONTEXT_GRAPH_ID), '0');
+    const successor = signedHead(catalogScope(CONTEXT_GRAPH_ID), '1');
+    const fixture = createReplayFixture([initial, other], { revision: true });
+    const readDigests = async (contextGraphId = CONTEXT_GRAPH_ID) => fixture.runtime.withSnapshot({
+      selection: scopedSelection(contextGraphId),
+      operation: async (entries) => entries.map(({ head }) => head.objectDigest),
+    });
+
+    // One connecting peer asks for a scoped replay of every graph.
+    for (let connect = 0; connect < 5; connect += 1) {
+      await expect(readDigests()).resolves.toEqual([initial.objectDigest]);
+      await expect(readDigests(OTHER_CONTEXT_GRAPH_ID)).resolves.toEqual([other.objectDigest]);
+    }
+    expect(fixture.listAppliedCatalogHeadsV1).toHaveBeenCalledTimes(1);
+    expect(fixture.readVerifiedCatalogHeadV1).toHaveBeenCalledTimes(2);
+
+    // A write that changed nothing: listed again, the index is kept.
+    fixture.bumpRevision();
+    await expect(readDigests()).resolves.toEqual([initial.objectDigest]);
+    expect(fixture.listAppliedCatalogHeadsV1).toHaveBeenCalledTimes(2);
+    expect(fixture.readVerifiedCatalogHeadV1).toHaveBeenCalledTimes(2);
+
+    fixture.replaceAppliedHeads([successor, other]);
+    await expect(readDigests()).resolves.toEqual([successor.objectDigest]);
+    await expect(readDigests()).resolves.toEqual([successor.objectDigest]);
+    expect(fixture.listAppliedCatalogHeadsV1).toHaveBeenCalledTimes(3);
+    expect(fixture.readVerifiedCatalogHeadV1).toHaveBeenCalledTimes(4);
+  });
+
+  it('still rejects replays whose inventory changes while they run', async () => {
+    const scope = catalogScope(CONTEXT_GRAPH_ID);
+    const initial = signedHead(scope, '0');
+    const successor = signedHead(scope, '1');
+    const third = signedHead(scope, '2');
+
+    const unscoped = createReplayFixture([initial], { revision: true });
+    await expect(unscoped.runtime.withSnapshot({
+      selection: Object.freeze({ kind: 'all' }),
+      operation: async () => {
+        unscoped.replaceAppliedHeads([successor]);
+        return 'delivered';
+      },
+    })).rejects.toThrow(/durable catalog inventory changed during replay/u);
+
+    const scoped = createReplayFixture([initial], { revision: true });
+    await expect(scoped.runtime.withSnapshot({
+      selection: scopedSelection(),
+      operation: async () => {
+        scoped.replaceAppliedHeads([successor]);
+        return 'delivered';
+      },
+    })).rejects.toThrow(/scoped catalog inventory changed during replay/u);
+
+    const beforeLocks = createReplayFixture([initial], { revision: true });
+    const held = await holdScope(beforeLocks.coordinator, scope);
+    const operation = vi.fn(async () => 'delivered');
+    const replay = beforeLocks.runtime.withSnapshot({
+      selection: Object.freeze({ kind: 'all' }),
+      operation,
+    });
+    await vi.waitFor(() => {
+      expect(beforeLocks.readVerifiedCatalogHeadV1).toHaveBeenCalledTimes(1);
+    });
+    beforeLocks.replaceAppliedHeads([third]);
+    held.release();
+    await held.completion;
+    await expect(replay).rejects.toThrow(/inventory changed before replay snapshot/u);
+    expect(operation).not.toHaveBeenCalled();
   });
 });
