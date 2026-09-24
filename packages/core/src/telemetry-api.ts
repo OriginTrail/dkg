@@ -602,6 +602,9 @@ function buildMetrics(): DkgMetrics {
     agentsPhonebookFetchDurationMs: meter.createHistogram('dkg.sync.agents_phonebook.fetch_duration_ms', {
       unit: 'ms',
       description: 'Wall time of on-demand agents phonebook fetches that reached a peer',
+      // Full fetches take tens of seconds, and one that runs into its 120 s
+      // budget ends a little after it: the 300 s bound keeps both finite.
+      advice: { explicitBucketBoundaries: SYNC_OPERATION_DURATION_BUCKETS },
     }),
   };
 }

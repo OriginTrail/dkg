@@ -17,6 +17,7 @@ import {
   type OnDemandAgentsPhonebookDeps,
   type OnDemandAgentsPhonebookOptions,
 } from '../src/sync/on-demand-agents-phonebook.js';
+import { W1MetricsHarness } from './_helpers/w1-metrics.js';
 
 const OWNER = '0x64529c023d853371228923B4FdA5FB22F929bf51';
 const OTHER_OWNER = '0x00000000000000000000000000000000000000a2';
@@ -759,5 +760,45 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
     expect(onDemandAgentsPhonebookFor(host, create)).toBe(first);
     expect(peekOnDemandAgentsPhonebook(host)).toBe(first);
     expect(create).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('on-demand agents phonebook fetch duration buckets', () => {
+  const harness = new W1MetricsHarness();
+
+  afterEach(async () => {
+    await harness.dispose();
+  });
+
+  it('resolves every fetch duration, up to one that ran into its budget, in a finite bucket', async () => {
+    harness.install();
+    // Observed full fetches (24.1 s on 2026-09-23, 34.6 s on 2026-09-24), and
+    // one that ran into its budget: its abort lands a little after the budget.
+    const DURATIONS_MS = [24_120, 34_577, AGENTS_PHONEBOOK_FETCH_BUDGET_MS + 1_000];
+    for (const durationMs of DURATIONS_MS) {
+      let h!: ReturnType<typeof createHarness>;
+      h = createHarness({
+        sync: async () => {
+          h.advance(durationMs);
+          h.phonebook.add(OWNER.toLowerCase());
+          return complete(75_141);
+        },
+      });
+      h.fetcher.request(CG, 'subscribe');
+      await vi.waitFor(() => expect(h.info).toHaveLength(1));
+      await h.fetcher.whenIdle();
+    }
+
+    const points = await harness.buckets('dkg.sync.agents_phonebook.fetch_duration_ms');
+    expect(points).toHaveLength(1);
+    const { boundaries, counts } = points[0]!;
+    // Precondition: every sample was recorded, so an empty histogram cannot
+    // satisfy the overflow check below.
+    expect(counts.reduce((sum, n) => sum + n, 0)).toBe(DURATIONS_MS.length);
+    // Checked against the top finite boundary, never a bucket index, so a
+    // retuned list still passes as long as it reaches past the budget.
+    expect(boundaries[boundaries.length - 1]!).toBeGreaterThanOrEqual(Math.max(...DURATIONS_MS));
+    // The trailing entry is the +Inf overflow: nothing may land there.
+    expect(counts[counts.length - 1]!).toBe(0);
   });
 });
