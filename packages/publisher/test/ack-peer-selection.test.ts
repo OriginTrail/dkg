@@ -17,6 +17,23 @@ const RELAYS = ['relay-1', 'relay-2', 'relay-3', 'relay-4'];
 const STAKED = ['staked-core-5', 'staked-core-6', 'staked-core-7'];
 
 describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () => {
+  it('preserves legacy source and runtime core ranking', () => {
+    const legacy: ACKCandidatePeerSelectionInput = {
+      connectedPeers: ['edge', 'core'],
+      knownCorePeerIds: new Set(['core']),
+      requiredACKs: 3,
+    };
+    expect(selectACKCandidatePeers(legacy)).toEqual(['core', 'edge']);
+  });
+
+  it('rejects conflicting legacy and capability ownership', () => {
+    expect(() => selectACKCandidatePeers({
+      connectedPeers: ['core'], requiredACKs: 1,
+      knownCorePeerIds: new Set(['core']),
+      capability: { mode: 'rank', v1: new Set(['core']) },
+    })).toThrow(/either capability or legacy/);
+  });
+
   it('uses the same core-only gate for preflight and final selection, with edge diagnostics', () => {
     const input: ACKCandidatePeerSelectionInput = {
       connectedPeers: ['edge', 'core-v1', 'core-v2'],

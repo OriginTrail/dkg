@@ -1,4 +1,4 @@
-import { createOperationContext, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
 import type { ACKCapabilityRegistry } from '../../p2p/ack-capability.js';
 import {
   classifyDurableProgress,
@@ -117,10 +117,9 @@ function admitPeerSyncContext(context: CompatiblePeerSyncContext): SessionPeerSy
   };
 }
 
-export interface SyncOnConnectContext extends CompatiblePeerSyncContext {
+interface SyncOnConnectBaseContext extends CompatiblePeerSyncContext {
   remotePeer: string;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
-  ackCapabilities: Pick<ACKCapabilityRegistry, 'reconcile'>;
   getSyncContextGraphs: () => string[];
   /** Exact durable scope for this automatic run; explicit catch-up bypasses it. */
   getDurableSyncContextGraphs?: () => string[];
@@ -152,6 +151,31 @@ export interface SyncOnConnectContext extends CompatiblePeerSyncContext {
    * controls whether the periodic reconciler may write its long cooldown.
    */
   onSyncAccounting?: (peerId: string, outcome: SyncOnConnectPeerOutcome) => void;
+}
+
+type ACKCapabilitySink = Pick<ACKCapabilityRegistry, 'reconcile'>;
+
+/** The public legacy set form remains supported, but it cannot compete with the registry port. */
+export type SyncOnConnectContext = SyncOnConnectBaseContext & (
+  | { ackCapabilities: ACKCapabilitySink; knownCorePeerIds?: never; knownCorePeerIdsV2?: never }
+  | { ackCapabilities?: never; knownCorePeerIds: Set<string>; knownCorePeerIdsV2?: Set<string> }
+);
+
+function ackCapabilitySink(context: SyncOnConnectContext): ACKCapabilitySink {
+  if (context.ackCapabilities) return context.ackCapabilities;
+  const { knownCorePeerIds, knownCorePeerIdsV2 } = context;
+  return {
+    reconcile(peerId, protocols) {
+      if (protocols.length === 0) return;
+      if (protocols.includes(PROTOCOL_STORAGE_ACK)) knownCorePeerIds.add(peerId);
+      else knownCorePeerIds.delete(peerId);
+      if (protocols.includes(PROTOCOL_STORAGE_ACK) && protocols.includes(PROTOCOL_STORAGE_ACK_V2)) {
+        knownCorePeerIdsV2?.add(peerId);
+      } else {
+        knownCorePeerIdsV2?.delete(peerId);
+      }
+    },
+  };
 }
 
 /** Every continuation inside an admitted session has an explicit lifetime and lease owner. */
@@ -384,17 +408,17 @@ async function runSessionSelectedSharedMemoryRetry(
 export async function runSyncOnConnect(
   context: SyncOnConnectContext,
 ): Promise<SyncOnConnectOutcome> {
-  return runSessionSyncOnConnect(context, admitPeerSyncContext(context));
+  return runSessionSyncOnConnect(context, admitPeerSyncContext(context), ackCapabilitySink(context));
 }
 
 async function runSessionSyncOnConnect(
-  context: SyncOnConnectContext,
+  context: SyncOnConnectBaseContext,
   { signal, syncingPeers }: SessionPeerSyncContext,
+  ackCapabilities: ACKCapabilitySink,
 ): Promise<SyncOnConnectOutcome> {
   const {
     remotePeer,
     getPeerProtocols,
-    ackCapabilities,
     getSyncContextGraphs,
     getDurableSyncContextGraphs,
     ordinarySharedMemoryLane,

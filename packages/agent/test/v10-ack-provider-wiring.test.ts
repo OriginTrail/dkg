@@ -207,7 +207,7 @@ interface ProviderInternals {
   ackCapabilityRegistry: ACKCapabilityRegistry;
   storageAckHandlerRegistered: boolean;
   storageAckEndpoint: {
-    dispatch(protocol: string, data: Uint8Array, peerId: string): Promise<Uint8Array>;
+    dispatch(protocol: string, data: Uint8Array, peerId: string, signal?: AbortSignal): Promise<Uint8Array>;
   } | null;
   networkAdmissionCoordinator: {
     enabled: boolean;
@@ -505,16 +505,21 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       expect(pool).not.toContain('retryable-probe-failure');
       expect(pool).not.toContain('rejected-peer');
     }
-    expect(preflightPeerAdmission).toHaveBeenCalledTimes(3);
-    const expectedOperationNames = ['publish', 'update', 'publish'];
-    for (const [index, [peerIds, ctx, options]] of preflightPeerAdmission.mock.calls.entries()) {
-      expect([...peerIds]).toEqual([
-        'already-admitted',
-        'new-v2-core',
-        'rejected-peer',
-        'retryable-probe-failure',
-      ]);
-      expect(ctx).toMatchObject({ operationName: expectedOperationNames[index] });
+    const knownCorePool = [
+      'already-admitted',
+      'new-v2-core',
+      'rejected-peer',
+      'retryable-probe-failure',
+    ];
+    for (const operationName of ['publish', 'update']) {
+      expect(preflightPeerAdmission.mock.calls.some(([peerIds, ctx]) =>
+        JSON.stringify([...peerIds]) === JSON.stringify(knownCorePool) &&
+        ctx.operationName === operationName,
+      )).toBe(true);
+    }
+    // A bounded live protocol probe preflights still-unclassified peers too.
+    for (const [peerIds, _ctx, options] of preflightPeerAdmission.mock.calls) {
+      expect([...peerIds].length).toBeLessThanOrEqual(4);
       expect(options).toEqual({ maxConcurrency: 4 });
     }
   });
@@ -552,8 +557,10 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
 
     await expect(publishDeps.getConnectedCorePeers!(PROTOCOL_STORAGE_ACK_V2))
       .resolves.toEqual(['allow-a', 'allow-b']);
-    expect(preflightPeerAdmission).toHaveBeenCalledTimes(1);
     expect([...preflightPeerAdmission.mock.calls[0][0]]).toEqual(['allow-a', 'allow-b']);
+    for (const [peerIds] of preflightPeerAdmission.mock.calls) {
+      expect([...peerIds].every((peerId) => ['allow-a', 'allow-b'].includes(peerId))).toBe(true);
+    }
   });
 
   it('shares a configurable FIFO StorageACK limit across publish and update and releases rejected slots', async () => {
@@ -1005,6 +1012,29 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
 
     internals.storageAckEndpoint = null;
     await expect(send(internals.peerId, PROTOCOL_STORAGE_ACK, request)).rejects.toThrow(/not registered/);
+  });
+
+  it('bounds local ACK dispatch by the configured send timeout and aborts late work', async () => {
+    const boot = await bootProviderAgent();
+    agent = boot.agent;
+    const internals = boot.internals;
+    internals.config.nodeRole = 'core';
+    let observedSignal: AbortSignal | undefined;
+    let lateMutation = false;
+    internals.storageAckEndpoint = {
+      dispatch: async (_protocol, _data, _peerId, signal) => {
+        observedSignal = signal;
+        await new Promise((resolve) => setTimeout(resolve, 45));
+        if (!signal?.aborted) lateMutation = true;
+        return new Uint8Array([1]);
+      },
+    };
+    const send = internals.createACKTransportFactory({ sendTimeoutMs: 10 })().sendP2P;
+    await expect(send(internals.peerId, PROTOCOL_STORAGE_ACK, new Uint8Array([3])))
+      .rejects.toThrow(/timed out after 10ms/);
+    expect(observedSignal?.aborted).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 55));
+    expect(lateMutation).toBe(false);
   });
 
   it('rejects misaligned direct agent ACK timing before boot side effects', async () => {

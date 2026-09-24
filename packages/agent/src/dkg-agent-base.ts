@@ -14,7 +14,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
 import { ACKCapabilityRegistry } from './p2p/ack-capability.js';
-import type { StorageACKProtocol } from './p2p/storage-ack-protocols.js';
+import { ACKCandidateDiscoveryCoordinator } from './p2p/ack-candidate-discovery.js';
+import type { StorageACKEndpoint } from './p2p/storage-ack-endpoint.js';
 import {
   openRfc64PersistenceV1,
   type Rfc64PersistenceV1,
@@ -1238,10 +1239,7 @@ export class DKGAgentBase {
   protected storageAckLedgerReady = false;
   protected storageAckLedgerReadyFlight: Promise<boolean> | null = null;
   /** One registered endpoint serves both remote streams and local ACK requests. */
-  protected storageAckEndpoint: {
-    dispatch(protocol: StorageACKProtocol, data: Uint8Array, peerId: string): Promise<Uint8Array>;
-    dispose(): void;
-  } | null = null;
+  protected storageAckEndpoint: StorageACKEndpoint | null = null;
   protected get storageAckHandlerRegistered(): boolean {
     return this.storageAckEndpoint !== null;
   }
@@ -1721,6 +1719,7 @@ export class DKGAgentBase {
   protected readonly onChainParticipantAgentsCache = new Map<string, string[]>();
   protected readonly peerHealth = new Map<string, PeerHealth>();
   protected readonly ackCapabilityRegistry = new ACKCapabilityRegistry();
+  protected readonly ackCandidateDiscovery = new ACKCandidateDiscoveryCoordinator(this.ackCapabilityRegistry);
   protected get knownCorePeerIds(): ReadonlySet<string> {
     return this.ackCapabilityRegistry.knownCorePeerIds;
   }

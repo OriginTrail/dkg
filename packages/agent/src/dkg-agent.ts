@@ -3098,7 +3098,7 @@ export class DKGAgent extends DKGAgentBase {
    * StorageACK protocol. Unknown peers may become eligible after identify
    * completes, but edges must never be dialled for an ACK.
    * The admission coordinator owns same-network proof and retry cooldown;
-   * the ACK capability registry owns the bounded discovery round.
+   * the ACK candidate coordinator owns bounded discovery for this round.
    */
   private async getACKCandidatePeersAfterAdmission(
     protocol: string | undefined,
@@ -3107,7 +3107,7 @@ export class DKGAgent extends DKGAgentBase {
     const connectedPeers = this.connectedPeerIds();
     const requestedProtocol = protocol ?? PROTOCOL_STORAGE_ACK;
     const requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
-    const selection = await this.ackCapabilityRegistry.resolveRound({
+    const selection = await this.ackCandidateDiscovery.resolveRound({
       connectedPeers,
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
       preferredACKPeerIds: this.config.preferredACKPeerIds,
@@ -3164,7 +3164,7 @@ export class DKGAgent extends DKGAgentBase {
    */
   public getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
     const requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
-    const selection = this.ackCapabilityRegistry.selectCandidates({
+    const selection = this.ackCandidateDiscovery.selectCandidates({
       connectedPeers: this.connectedPeerIds(),
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
       preferredACKPeerIds: this.config.preferredACKPeerIds,
@@ -3258,7 +3258,24 @@ export class DKGAgent extends DKGAgentBase {
         if (!local || !this.localACKCandidate().available) {
           throw new Error('Local StorageACK handler is not registered');
         }
-        return local.dispatch(protocol, data, this.peerId);
+        const controller = new AbortController();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            const error = new Error(`Local StorageACK request timed out after ${timeoutMs}ms`);
+            controller.abort(error);
+            reject(error);
+          }, Math.max(0, timeoutMs));
+          timer.unref?.();
+        });
+        try {
+          return await Promise.race([
+            Promise.resolve().then(() => local.dispatch(protocol, data, this.peerId, controller.signal)),
+            timeout,
+          ]);
+        } finally {
+          if (timer) clearTimeout(timer);
+        }
       }
       if (!this.networkAdmissionCoordinator.isAcceptedPeer(peerId)) {
         throw new Error(`peer ${peerId.slice(-8)} is not admitted for active-network ACK collection`);

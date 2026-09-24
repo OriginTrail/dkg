@@ -19,7 +19,7 @@ import {
 import { createHash } from 'node:crypto';
 import { setTimeout as waitForPeerEventTurn } from 'node:timers/promises';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
-import { STORAGE_ACK_PROTOCOLS, storageACKProtocolKind, type StorageACKProtocol } from './p2p/storage-ack-protocols.js';
+import { registerStorageACKEndpoint } from './p2p/storage-ack-endpoint.js';
 import { syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
@@ -3052,27 +3052,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // substrate (wire prefix /dkg/10.0.1/storage-ack).
             // messenger.register handles envelope decode + receiver
             // dedup; ackHandler's signature stays the same.
-            const endpoint = {
-              dispatch: (protocol: StorageACKProtocol, data: Uint8Array, peerIdStr: string): Promise<Uint8Array> => {
+            this.storageAckEndpoint = registerStorageACKEndpoint({
+              registerGroup: (entries) => this.messenger.registerGroup(entries),
+              publish: (data, peerIdStr, signal) => {
                 const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-                return storageACKProtocolKind(protocol) === 'publish'
-                  ? ackHandler.handler(data, peerId)
-                  : ackHandler.updateHandler(data, peerId);
+                return ackHandler.handler(data, peerId, signal);
               },
-              dispose: (): void => {},
-            };
-            endpoint.dispose = this.messenger.registerGroup(
-              STORAGE_ACK_PROTOCOLS.map(([protocol]) => ({
-                protocolId: protocol,
-                handler: (data: Uint8Array, peerIdStr: string) => {
-                  if (this.storageAckEndpoint !== endpoint) {
-                    throw new Error('StorageACK handler is not registered');
-                  }
-                  return endpoint.dispatch(protocol, data, peerIdStr);
-                },
-              })),
-            );
-            this.storageAckEndpoint = endpoint;
+              update: (data, peerIdStr, signal) => {
+                const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
+                return ackHandler.updateHandler(data, peerId, signal);
+              },
+            });
             this.clearStorageACKRegistrationRetry();
             this.log.info(
               attemptCtx,

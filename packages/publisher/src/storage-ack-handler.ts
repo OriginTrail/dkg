@@ -1695,7 +1695,7 @@ export class StorageACKHandler {
    * for the `ackHandlerTotal` metric; a thrown error resets the stream and
    * is auto-recorded as a span ERROR by withSpan.
    */
-  handler = async (data: Uint8Array, peerId: PeerId): Promise<Uint8Array> => {
+  handler = async (data: Uint8Array, peerId: PeerId, externalSignal?: AbortSignal): Promise<Uint8Array> => {
     const chainIdLabel = this.config.chainId != null
       ? this.config.chainId.toString()
       : undefined;
@@ -1715,6 +1715,7 @@ export class StorageACKHandler {
         const result = await this.runHandlerWithDeadline(
           (signal) => this.handlePublishIntent(data, peerId, signal),
           cgIdAttr,
+          externalSignal,
         );
         const decision = this.buildStorageAckDecision(intentPreview, result, peerId);
         await this.observeStorageAckDecision(decision);
@@ -1768,12 +1769,16 @@ export class StorageACKHandler {
   private runHandlerWithDeadline = async (
     workFactory: (signal?: AbortSignal) => Promise<Uint8Array>,
     cgIdForDecline: string | undefined,
+    externalSignal?: AbortSignal,
   ): Promise<Uint8Array> => {
+    externalSignal?.throwIfAborted();
     const deadlineMs = this.config.ackHandlerDeadlineMs ?? DEFAULT_ACK_HANDLER_DEADLINE_MS;
-    if (deadlineMs <= 0) return workFactory();
-
     const abortController = new AbortController();
-    const work = workFactory(abortController.signal);
+    const signal = externalSignal
+      ? AbortSignal.any([abortController.signal, externalSignal])
+      : abortController.signal;
+    const work = workFactory(signal);
+    if (deadlineMs <= 0) return work;
 
     return runWithDeadline(work, deadlineMs, () => {
       const storePressure = formatStorePressureSnapshot(this.getStorePressureSnapshot());
@@ -2430,7 +2435,7 @@ export class StorageACKHandler {
    * per-send timeout exactly as publish did, and the update collector
    * rides the same transient-decline retry ladder.
    */
-  updateHandler = async (data: Uint8Array, peerId: PeerId): Promise<Uint8Array> => {
+  updateHandler = async (data: Uint8Array, peerId: PeerId, externalSignal?: AbortSignal): Promise<Uint8Array> => {
     let cgIdForDecline: string | undefined;
     try {
       // contextGraphId is cheap to read off the decoded intent for the
@@ -2442,6 +2447,7 @@ export class StorageACKHandler {
     return this.runHandlerWithDeadline(
       (signal) => this.handleUpdateIntent(data, peerId, signal),
       cgIdForDecline,
+      externalSignal,
     );
   };
 

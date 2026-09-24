@@ -3,10 +3,13 @@
 // ACK candidate selection dials only peers confirmed to advertise the
 // core-only StorageACK protocol. Unclassified connections may include edges.
 import { describe, it, expect, vi } from 'vitest';
-import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK_V2, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { createOperationContext, ed25519Sign, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { DKGAgent, MockChainAdapter, OxigraphStore } from './agent.shared';
 import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
+import { NetworkAdmissionCoordinator } from '../src/p2p/network-admission-coordinator.js';
+import { signNetworkIdentityResponse } from '../src/p2p/network-identity-proof.js';
 import { ACKCapabilityRegistry } from '../src/p2p/ack-capability.js';
+import { ACKCandidateDiscoveryCoordinator } from '../src/p2p/ack-candidate-discovery.js';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { InMemoryPeerSyncLease, runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
 
@@ -148,10 +151,11 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     const unknown = Array.from({ length: 8 }, (_, index) => `unknown-${index}`);
     const resolve = async (available: boolean) => {
       const registry = new ACKCapabilityRegistry();
+      const coordinator = new ACKCandidateDiscoveryCoordinator(registry);
       for (const id of CORE.slice(0, 2)) registry.reconcile(id, [PROTOCOL_STORAGE_ACK]);
       const probe = vi.fn(async (peerId: string) =>
         peerId === unknown[0] || peerId === unknown[4] ? 'supported' as const : 'unsupported' as const);
-      const plan = await registry.resolveRound({
+      const plan = await coordinator.resolveRound({
         connectedPeers: [...CORE.slice(0, 2), ...unknown],
         localCandidate: { peerId: 'local-core', available },
         requiredACKs: 3,
@@ -264,6 +268,49 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     expect(preflightPeers).toEqual([CORE[0]]);
   });
 
+  it('preflights a stale-identify core through admission cooldown before protocol negotiation', async () => {
+    const remotePeerId = ADMISSION_FOREIGN[0];
+    const selfPeerId = ADMISSION_FOREIGN[1];
+    const seed = Buffer.from('vHxcSg3ecwP9UfJWdmlnWQeJe83jD2yKtOJlWuLpIrTRh3QiB5sL6iRhAidCZ3bHQLaE0RwBfHBNEmV7ylcjqg==', 'base64').slice(0, 32);
+    const identity = { networkId: 'network-a', genesisId: 'base-testnet' };
+    const a = await buildAgent({ confirmedCores: [], connected: [remotePeerId] });
+    a.getPeerProtocols = async () => [PROTOCOL_SYNC];
+    const admission = new NetworkAdmissionService({ networkId: identity.networkId, selfPeerId });
+    admission.rememberRetryableProbeFailure(remotePeerId, 'connection/open race', 'transient');
+    const sequence: string[] = [];
+    const coordinator = new NetworkAdmissionCoordinator({
+      admission,
+      identity,
+      selfPeerId,
+      sign: async () => new Uint8Array(),
+      sendIdentityProbe: async (_peerId, data) => {
+        sequence.push('identity');
+        const request = JSON.parse(new TextDecoder().decode(data));
+        const response = await signNetworkIdentityResponse({
+          request,
+          identity,
+          responderPeerId: remotePeerId,
+          sign: (payload) => ed25519Sign(payload, seed),
+        });
+        return new TextEncoder().encode(JSON.stringify(response));
+      },
+      getConnections: () => [],
+      deletePeerFromPeerStore: async () => {},
+    });
+    a.networkAdmission = admission;
+    a.networkAdmissionCoordinator = coordinator;
+    const probe = vi.fn(async (peerId: string) => {
+      sequence.push('capability');
+      await coordinator.ensureAdmitted(peerId, createOperationContext('publish'));
+      return 'supported' as const;
+    });
+    a.router = { probeProtocol: probe };
+
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([remotePeerId]);
+    expect(sequence).toEqual(['identity', 'capability']);
+    expect(probe).toHaveBeenCalledWith(remotePeerId, PROTOCOL_STORAGE_ACK);
+  });
+
   it('still probes unknown peers when identified cores fail active-network admission', async () => {
     const a = await buildAgent({
       confirmedCores: CORE.slice(0, 3),
@@ -367,6 +414,52 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     }
   });
 
+  it('keeps publish-v2 and update-v2 capability evidence separate', async () => {
+    const registry = new ACKCapabilityRegistry();
+    registry.reconcile(CORE[0], [PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2]);
+    registry.reconcile(CORE[1], [PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2]);
+    const coordinator = new ACKCandidateDiscoveryCoordinator(registry);
+    const input = {
+      connectedPeers: CORE.slice(0, 2),
+      requiredACKs: 1,
+      verifiedSameNetworkPeerIds: undefined,
+    };
+    const local = { peerId: 'local-core', available: false };
+
+    expect(coordinator.selectCandidates({ ...input, protocol: PROTOCOL_STORAGE_ACK_V2 }, local).peers).toEqual(CORE.slice(0, 2));
+    expect(coordinator.selectCandidates({ ...input, protocol: PROTOCOL_STORAGE_UPDATE_ACK_V2 }, local).peers).toEqual([CORE[1], CORE[0]]);
+    expect(registry.snapshot().supportByProtocol.get(PROTOCOL_STORAGE_ACK_V2)?.has(CORE[1])).toBe(false);
+    expect(registry.snapshot().supportByProtocol.get(PROTOCOL_STORAGE_UPDATE_ACK_V2)?.has(CORE[0])).toBe(false);
+  });
+
+  it('discovers a stale-identify V1 update handler and excludes unsupported edges', async () => {
+    const a = await buildAgent({ confirmedCores: [CORE[1]], connected: [EDGE[0], CORE[0], CORE[1]] });
+    a.getPeerProtocols = async (peerId) => peerId === CORE[1]
+      ? [PROTOCOL_STORAGE_ACK] : [PROTOCOL_SYNC];
+    const probe = vi.fn(async (peerId: string, protocol: string) =>
+      peerId === CORE[0] && (protocol === PROTOCOL_STORAGE_UPDATE_ACK || protocol === PROTOCOL_STORAGE_ACK)
+        ? 'supported' as const : 'unsupported' as const);
+    a.router = { probeProtocol: probe };
+    installOpenACKAdmission(a);
+
+    expect(await a.getACKCandidatePeersAfterAdmission(PROTOCOL_STORAGE_UPDATE_ACK, createOperationContext('update'))).toEqual([CORE[0], CORE[1]]);
+    expect(probe).toHaveBeenCalledWith(EDGE[0], PROTOCOL_STORAGE_UPDATE_ACK);
+    expect(probe).toHaveBeenCalledWith(CORE[0], PROTOCOL_STORAGE_ACK);
+    expect(a.knownCorePeerIds.has(EDGE[0])).toBe(false);
+    const diagnostics = new ACKCandidateDiscoveryCoordinator(a.ackCapabilityRegistry).selectCandidates({
+      connectedPeers: [EDGE[0], CORE[0], CORE[1]],
+      requiredACKs: 1,
+      verifiedSameNetworkPeerIds: undefined,
+      protocol: PROTOCOL_STORAGE_UPDATE_ACK,
+    }, { peerId: a.peerId, available: false }).diagnostics;
+    expect(diagnostics.find(({ peerId }) => peerId === CORE[0])).toMatchObject({
+      selected: true, protocolMatch: true,
+    });
+    expect(diagnostics.find(({ peerId }) => peerId === CORE[1])).toMatchObject({
+      selected: true, protocolMatch: false, reason: 'selected-protocol-fallback',
+    });
+  });
+
   it('samples healthy stale-identify cores even when advertised peers meet target', async () => {
     const advertised = ['invalid-1', 'invalid-2', 'invalid-3', 'invalid-4'];
     const healthy = ['healthy-1', 'healthy-2', 'healthy-3'];
@@ -400,6 +493,33 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([a.peerId, unknown[39]]);
     expect(probe.mock.calls.slice(32).map(([peerId]) => peerId)).toContain(unknown[39]);
     expect(probe.mock.calls.length - 32).toBeLessThanOrEqual(32);
+  });
+
+  it('rotates through preferred peers beyond the first per-round probe budget', async () => {
+    const preferred = Array.from({ length: 40 }, (_, index) => `preferred-${index}`);
+    const registry = new ACKCapabilityRegistry();
+    const coordinator = new ACKCandidateDiscoveryCoordinator(registry);
+    const probe = vi.fn(async (peerId: string) => peerId === preferred[39]
+      ? 'supported' as const : 'unsupported' as const);
+    const ports = {
+      connectedPeers: preferred,
+      preferredACKPeerIds: preferred,
+      localCandidate: { peerId: 'local-core', available: false },
+      requiredACKs: 1,
+      protocol: PROTOCOL_STORAGE_ACK,
+      verifiedSameNetworkPeerIds: () => undefined,
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      preflight: async () => {},
+      isAcceptedPeer: () => true,
+      probeProtocol: probe,
+    };
+
+    await coordinator.resolveRound(ports);
+    expect(probe).toHaveBeenCalledTimes(32);
+    expect(probe.mock.calls.map(([peerId]) => peerId)).not.toContain(preferred[39]);
+    const secondRound = await coordinator.resolveRound(ports);
+    expect(probe.mock.calls.slice(32).map(([peerId]) => peerId)).toContain(preferred[39]);
+    expect(secondRound.peers).toEqual([preferred[39]]);
   });
 
   it('probes a preferred late-position core first and stops after the successful batch', async () => {
