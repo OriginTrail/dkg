@@ -10,6 +10,7 @@
  */
 import {
   contextGraphDataGraphUri,
+  PROTOCOL_STORAGE_ACK,
   type ContextGraphIdV1,
   type EvmAddressV1,
   type NetworkIdV1,
@@ -18,6 +19,7 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { DKGAgent } from '../src/dkg-agent.js';
+import { ACKCapabilityRegistry } from '../src/p2p/ack-capability.js';
 import {
   RFC64_UNREGISTERED_AUTHORITY_COMPAT_NEGATIVE_TTL_MS_V1,
   RFC64_UNREGISTERED_AUTHORITY_RESERVED_NON_CORE_PEERS_V1,
@@ -111,7 +113,9 @@ function createFetchAgent(options: FakeAgentOptions = {}) {
     configurable: true,
   });
   Reflect.set(agent, 'node', options.libp2p === undefined ? undefined : { libp2p: options.libp2p });
-  Reflect.set(agent, 'knownCorePeerIds', corePeerIds);
+  const ackCapabilities = new ACKCapabilityRegistry();
+  for (const peerId of corePeerIds) ackCapabilities.reconcile(peerId, [PROTOCOL_STORAGE_ACK]);
+  Reflect.set(agent, 'ackCapabilityRegistry', ackCapabilities);
   if (options.completeProviders !== undefined) {
     const completeProviders = options.completeProviders;
     Reflect.set(agent, 'rfc64SwmRecoveryRuntimeV1', {

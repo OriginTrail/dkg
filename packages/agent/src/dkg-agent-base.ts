@@ -1721,8 +1721,12 @@ export class DKGAgentBase {
   protected readonly onChainParticipantAgentsCache = new Map<string, string[]>();
   protected readonly peerHealth = new Map<string, PeerHealth>();
   protected readonly ackCapabilityRegistry = new ACKCapabilityRegistry();
-  protected readonly knownCorePeerIds = this.ackCapabilityRegistry.knownCorePeerIds;
-  protected readonly knownCorePeerIdsV2 = this.ackCapabilityRegistry.knownCorePeerIdsV2;
+  protected get knownCorePeerIds(): ReadonlySet<string> {
+    return this.ackCapabilityRegistry.knownCorePeerIds;
+  }
+  protected get knownCorePeerIdsV2(): ReadonlySet<string> {
+    return this.ackCapabilityRegistry.knownCorePeerIdsV2;
+  }
   /**
    * Last chain-reported ACK quorum (ParametersStorage
    * minimumRequiredSignatures), refreshed by the V10 ACK provider before

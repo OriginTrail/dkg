@@ -4909,9 +4909,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncingPeers: session,
       signal,
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
-      knownCorePeerIds: this.knownCorePeerIds,
-      knownCorePeerIdsV2: this.knownCorePeerIdsV2,
-      onACKProtocols: (peerId, protocols) => this.ackCapabilityRegistry.reconcile(peerId, protocols),
+      ackCapabilities: this.ackCapabilityRegistry,
       getSyncContextGraphs: () => this.config.syncContextGraphs ?? [],
       getDurableSyncContextGraphs: () => automaticDurableSyncContextGraphs(
         this.config.syncContextGraphs ?? [],

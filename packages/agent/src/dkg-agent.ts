@@ -1,5 +1,5 @@
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
-import type { ACKCapabilitySnapshot } from './p2p/ack-capability.js';
+import type { ACKCandidatePeerSelectionResult } from '@origintrail-official/dkg-publisher';
 import { isStorageACKProtocol } from './p2p/storage-ack-protocols.js';
 import { randomUUID } from 'node:crypto';
 import { createAuthorityIndexBootstrap } from './authority-index-bootstrap.js';
@@ -3105,14 +3105,18 @@ export class DKGAgent extends DKGAgentBase {
     ctx: OperationContext,
   ): Promise<string[]> {
     const connectedPeers = this.connectedPeerIds();
-    const snapshot = await this.ackCapabilityRegistry.resolveRound({
+    const requestedProtocol = protocol ?? PROTOCOL_STORAGE_ACK;
+    const requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
+    const selection = await this.ackCapabilityRegistry.resolveRound({
       connectedPeers,
-      selfPeerId: this.peerId,
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
       preferredACKPeerIds: this.config.preferredACKPeerIds,
-      requiredACKs: this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS,
-      protocol: protocol ?? PROTOCOL_STORAGE_ACK,
-      selfCount: this.config.nodeRole === 'core' && this.storageAckHandlerRegistered ? 1 : 0,
+      requiredACKs,
+      protocol: requestedProtocol,
+      localCandidate: this.localACKCandidate(),
+      verifiedSameNetworkPeerIds: () => this.networkAdmissionCoordinator.enabled
+        ? this.networkAdmissionCoordinator.verifiedSameNetworkPeerIds()
+        : undefined,
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
       isAcceptedPeer: (peerId) => this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
       probeProtocol: this.router
@@ -3129,7 +3133,7 @@ export class DKGAgent extends DKGAgentBase {
         }
       },
     });
-    return this.selectACKCandidatePeersFromSnapshot(protocol ?? PROTOCOL_STORAGE_ACK, snapshot, connectedPeers);
+    return this.logACKCandidatePlan(selection, requestedProtocol, requiredACKs);
   }
 
   /**
@@ -3159,20 +3163,9 @@ export class DKGAgent extends DKGAgentBase {
    * validation remain authoritative.
    */
   public getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
-    return this.selectACKCandidatePeersFromSnapshot(
-      protocol, this.ackCapabilityRegistry.snapshot(), this.connectedPeerIds(),
-    );
-  }
-
-  private selectACKCandidatePeersFromSnapshot(
-    protocol: string,
-    capabilitySnapshot: ACKCapabilitySnapshot,
-    connectedPeerIds: readonly string[],
-  ): string[] {
     const requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
     const selection = this.ackCapabilityRegistry.selectCandidates({
-      connectedPeers: connectedPeerIds,
-      selfPeerId: this.peerId,
+      connectedPeers: this.connectedPeerIds(),
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
       preferredACKPeerIds: this.config.preferredACKPeerIds,
       verifiedSameNetworkPeerIds: this.networkAdmissionCoordinator.enabled
@@ -3180,25 +3173,39 @@ export class DKGAgent extends DKGAgentBase {
         : undefined,
       requiredACKs,
       protocol,
-    }, capabilitySnapshot);
-    const includeSelf = this.config.nodeRole === 'core' && this.storageAckHandlerRegistered;
-    const peers = includeSelf ? [this.peerId, ...selection.peers] : selection.peers;
+    }, this.localACKCandidate());
+    return this.logACKCandidatePlan(selection, protocol, requiredACKs);
+  }
+
+  private localACKCandidate(): { peerId: string; available: boolean } {
+    const peerId = this.peerId || '';
+    return {
+      peerId,
+      available: peerId.length > 0 && this.config.nodeRole === 'core' && this.storageAckHandlerRegistered,
+    };
+  }
+
+  private logACKCandidatePlan(
+    selection: ACKCandidatePeerSelectionResult,
+    protocol: string,
+    requiredACKs: number,
+  ): string[] {
     const selected = selection.diagnostics
       .filter((diagnostic) => diagnostic.selected)
-      .map((diagnostic) => `${diagnostic.peerId.slice(-8)}:${diagnostic.tier}${diagnostic.preferred ? ':preferred' : ''}`)
+      .map((diagnostic) => diagnostic.reason === 'selected-local' ? 'self'
+        : `${diagnostic.peerId.slice(-8)}:${diagnostic.tier}${diagnostic.preferred ? ':preferred' : ''}`)
       .join(',');
     const filtered = selection.diagnostics
       .filter((diagnostic) => !diagnostic.selected)
       .slice(0, 8)
       .map((diagnostic) => `${diagnostic.peerId.slice(-8)}:${diagnostic.reason}`)
       .join(',');
-    const selectedLabel = [includeSelf ? 'self' : '', selected].filter(Boolean).join(',') || 'none';
     this.log.info(
-      createOperationContext('publish'),
-      `[ACKCollector] Selected ${peers.length}/${selection.diagnostics.length + (includeSelf ? 1 : 0)} ACK candidate core(s) ` +
-      `(required=${requiredACKs}, protocol=${protocol}, selected=${selectedLabel}, filtered=${filtered || 'none'})`,
+      this.ackOperationContext(protocol),
+      `[ACKCollector] Selected ${selection.peers.length}/${selection.diagnostics.length} ACK candidate core(s) ` +
+      `(required=${requiredACKs}, protocol=${protocol}, selected=${selected || 'none'}, filtered=${filtered || 'none'})`,
     );
-    return peers;
+    return selection.peers;
   }
 
   public createACKTransportFactory(
@@ -3248,7 +3255,7 @@ export class DKGAgent extends DKGAgentBase {
       if (peerId === this.peerId) {
         if (!isStorageACKProtocol(protocol)) throw new Error(`Unsupported StorageACK protocol: ${protocol}`);
         const local = this.storageAckEndpoint;
-        if (!local || this.config.nodeRole !== 'core') {
+        if (!local || !this.localACKCandidate().available) {
           throw new Error('Local StorageACK handler is not registered');
         }
         return local.dispatch(protocol, data, this.peerId);

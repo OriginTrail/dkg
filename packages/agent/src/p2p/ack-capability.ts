@@ -1,5 +1,5 @@
 import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK_V2 } from '@origintrail-official/dkg-core';
-import { STORAGE_ACK_PROTOCOLS } from './storage-ack-protocols.js';
+import { isStorageACKProtocol, type StorageACKProtocol } from './storage-ack-protocols.js';
 import {
   selectACKCandidateUniverse,
   selectACKCandidatePeersWithDiagnostics,
@@ -12,32 +12,23 @@ export interface ACKCapabilitySnapshot {
   knownCorePeerIdsV2: ReadonlySet<string>;
 }
 
+export interface LocalACKCandidate {
+  peerId: string;
+  available: boolean;
+}
+
 export interface ACKRoundPorts {
   connectedPeers: readonly string[];
-  selfPeerId: string;
   ackCandidatePeerIds?: readonly string[];
   preferredACKPeerIds?: readonly string[];
   requiredACKs: number;
   protocol: string;
-  selfCount: number;
+  localCandidate: LocalACKCandidate;
+  verifiedSameNetworkPeerIds(): ReadonlySet<string> | undefined;
   getPeerProtocols(peerId: string): Promise<string[]>;
   preflight(peerIds: string[]): Promise<void>;
   isAcceptedPeer(peerId: string): boolean;
   probeProtocol?(peerId: string, protocol: string): Promise<'supported' | 'unsupported' | 'unavailable'>;
-}
-
-/** Reconcile a populated identify record; an empty record means identify is still pending. */
-export function reconcileACKCapabilities(
-  peerId: string,
-  protocols: readonly string[],
-  knownCorePeerIds: Set<string>,
-  knownCorePeerIdsV2: Set<string>,
-): void {
-  if (protocols.length === 0) return;
-  if (protocols.includes(PROTOCOL_STORAGE_ACK)) knownCorePeerIds.add(peerId);
-  else knownCorePeerIds.delete(peerId);
-  if (protocols.includes(PROTOCOL_STORAGE_ACK_V2)) knownCorePeerIdsV2.add(peerId);
-  else knownCorePeerIdsV2.delete(peerId);
 }
 
 function rotated<T>(items: readonly T[], cursor: number): T[] {
@@ -48,52 +39,61 @@ function rotated<T>(items: readonly T[], cursor: number): T[] {
 
 /** Owns ACK capability state and bounded, fair discovery for a publish round. */
 export class ACKCapabilityRegistry {
-  readonly knownCorePeerIds = new Set<string>();
-  readonly knownCorePeerIdsV2 = new Set<string>();
-  private readonly advertised = new Map<string, Set<string>>();
-  private readonly negotiated = new Map<string, Set<string>>();
+  private readonly peers = new Map<string, {
+    advertised: Set<StorageACKProtocol>;
+    negotiated: Set<StorageACKProtocol>;
+  }>();
   private preferredProbeCursor = 0;
   private otherProbeCursor = 0;
 
-  reconcile(peerId: string, protocols: readonly string[]): void {
-    if (protocols.length === 0) return;
-    for (const peers of this.negotiated.values()) peers.delete(peerId);
-    this.refresh(peerId, protocols);
+  get knownCorePeerIds(): ReadonlySet<string> {
+    return this.supporters(PROTOCOL_STORAGE_ACK);
   }
 
+  get knownCorePeerIdsV2(): ReadonlySet<string> {
+    return this.supporters(PROTOCOL_STORAGE_ACK_V2);
+  }
+
+  private record(peerId: string): { advertised: Set<StorageACKProtocol>; negotiated: Set<StorageACKProtocol> } {
+    let record = this.peers.get(peerId);
+    if (!record) {
+      record = { advertised: new Set(), negotiated: new Set() };
+      this.peers.set(peerId, record);
+    }
+    return record;
+  }
+
+  /** A populated peer:update supersedes earlier negotiation evidence. */
+  reconcile(peerId: string, protocols: readonly string[]): void {
+    if (protocols.length === 0) return;
+    const record = this.record(peerId);
+    record.negotiated.clear();
+    record.advertised = new Set(protocols.filter(isStorageACKProtocol));
+  }
+
+  /** Identify cache reads can lag a live probe; retain negotiated support. */
   private refresh(peerId: string, protocols: readonly string[]): void {
     if (protocols.length === 0) return;
-    reconcileACKCapabilities(peerId, protocols, this.knownCorePeerIds, this.knownCorePeerIdsV2);
-    for (const [protocol] of STORAGE_ACK_PROTOCOLS) {
-      let peers = this.advertised.get(protocol);
-      if (!peers) this.advertised.set(protocol, peers = new Set());
-      if (protocols.includes(protocol)) peers.add(peerId);
-      else peers.delete(peerId);
-    }
-    if (this.negotiated.get(PROTOCOL_STORAGE_ACK)?.has(peerId)) this.knownCorePeerIds.add(peerId);
-    if (this.negotiated.get(PROTOCOL_STORAGE_ACK_V2)?.has(peerId)) this.knownCorePeerIdsV2.add(peerId);
+    this.record(peerId).advertised = new Set(protocols.filter(isStorageACKProtocol));
   }
 
   forget(peerId: string): void {
-    this.knownCorePeerIds.delete(peerId);
-    this.knownCorePeerIdsV2.delete(peerId);
-    for (const peers of this.advertised.values()) peers.delete(peerId);
-    for (const peers of this.negotiated.values()) peers.delete(peerId);
+    this.peers.delete(peerId);
   }
 
-  private markNegotiated(peerId: string, protocol: string): void {
-    let peers = this.negotiated.get(protocol);
-    if (!peers) this.negotiated.set(protocol, peers = new Set());
-    peers.add(peerId);
-    if (protocol === PROTOCOL_STORAGE_ACK) this.knownCorePeerIds.add(peerId);
-    if (protocol === PROTOCOL_STORAGE_ACK_V2) this.knownCorePeerIdsV2.add(peerId);
+  private markNegotiated(peerId: string, protocol: StorageACKProtocol): void {
+    this.record(peerId).negotiated.add(protocol);
   }
 
-  private supporters(protocol: string): Set<string> {
-    return new Set([
-      ...(this.advertised.get(protocol) ?? []),
-      ...(this.negotiated.get(protocol) ?? []),
-    ]);
+  private supporters(protocol: StorageACKProtocol): Set<string> {
+    const peers = new Set<string>();
+    for (const [peerId, record] of this.peers) {
+      if (protocol !== PROTOCOL_STORAGE_ACK &&
+          !record.advertised.has(PROTOCOL_STORAGE_ACK) &&
+          !record.negotiated.has(PROTOCOL_STORAGE_ACK)) continue;
+      if (record.advertised.has(protocol) || record.negotiated.has(protocol)) peers.add(peerId);
+    }
+    return peers;
   }
 
   snapshot(): ACKCapabilitySnapshot {
@@ -104,31 +104,48 @@ export class ACKCapabilityRegistry {
   }
 
   selectCandidates(
-    input: Omit<ACKCandidatePeerSelectionInput, 'capability'>,
+    input: Omit<ACKCandidatePeerSelectionInput, 'capability' | 'selfPeerId'>,
+    localCandidate: LocalACKCandidate,
     snapshot: ACKCapabilitySnapshot = this.snapshot(),
   ): ACKCandidatePeerSelectionResult {
-    return selectACKCandidatePeersWithDiagnostics({
+    const remote = selectACKCandidatePeersWithDiagnostics({
       ...input,
+      selfPeerId: localCandidate.peerId,
       capability: { mode: 'require', v1: snapshot.knownCorePeerIds, v2: snapshot.knownCorePeerIdsV2 },
     });
+    const local = {
+      peerId: localCandidate.peerId,
+      tier: 'confirmedCore' as const,
+      preferred: false,
+      allowlisted: true,
+      protocolMatch: localCandidate.available,
+      selected: localCandidate.available,
+      reason: localCandidate.available ? 'selected-local' : 'local-unavailable',
+    };
+    return {
+      peers: localCandidate.available ? [local.peerId, ...remote.peers] : remote.peers,
+      diagnostics: [local, ...remote.diagnostics],
+    };
   }
 
-  async resolveRound(ports: ACKRoundPorts): Promise<ACKCapabilitySnapshot> {
+  async resolveRound(ports: ACKRoundPorts): Promise<ACKCandidatePeerSelectionResult> {
+    if (!isStorageACKProtocol(ports.protocol)) throw new Error(`Unsupported ACK protocol: ${ports.protocol}`);
+    const requestedProtocol = ports.protocol;
     await Promise.all(ports.connectedPeers.map(async (peerId) => {
       this.refresh(peerId, await ports.getPeerProtocols(peerId));
     }));
     // Keep preflight and final selection on this round's snapshot even if
     // peer:update changes the registry while the round is in progress.
     const corePeerIds = new Set(this.knownCorePeerIds);
-    const protocolPeerIds = ports.protocol === PROTOCOL_STORAGE_ACK
-      ? corePeerIds : this.supporters(ports.protocol);
-    const corePeerIdsV2 = ports.protocol === PROTOCOL_STORAGE_ACK_V2
+    const protocolPeerIds = requestedProtocol === PROTOCOL_STORAGE_ACK
+      ? corePeerIds : this.supporters(requestedProtocol);
+    const corePeerIdsV2 = requestedProtocol === PROTOCOL_STORAGE_ACK_V2
       ? new Set(this.knownCorePeerIdsV2)
-      : this.supporters(ports.protocol);
+      : this.supporters(requestedProtocol);
     const base = {
       connectedPeers: ports.connectedPeers,
       ackCandidatePeerIds: ports.ackCandidatePeerIds,
-      selfPeerId: ports.selfPeerId,
+      selfPeerId: ports.localCandidate.peerId,
       capability: { mode: 'require' as const, v1: corePeerIds },
     };
     await ports.preflight(selectACKCandidateUniverse(base));
@@ -137,12 +154,13 @@ export class ACKCapabilityRegistry {
     // decline or timeout without another discovery round.
     const target = ports.requiredACKs + 1;
     const admitted = (): number => selectACKCandidateUniverse(base)
-      .filter((peerId) => protocolPeerIds.has(peerId) && ports.isAcceptedPeer(peerId)).length + ports.selfCount;
+      .filter((peerId) => protocolPeerIds.has(peerId) && ports.isAcceptedPeer(peerId)).length +
+      Number(ports.localCandidate.available);
     if (ports.probeProtocol) {
       const unconfirmed = selectACKCandidateUniverse({
         connectedPeers: ports.connectedPeers,
         ackCandidatePeerIds: ports.ackCandidatePeerIds,
-        selfPeerId: ports.selfPeerId,
+        selfPeerId: ports.localCandidate.peerId,
       }).filter((peerId) => !protocolPeerIds.has(peerId));
       const preferredIds = new Set(ports.preferredACKPeerIds ?? []);
       const preferred = unconfirmed.filter((peerId) => preferredIds.has(peerId));
@@ -151,7 +169,7 @@ export class ACKCapabilityRegistry {
       // the per-round cap. Both groups rotate so no stable prefix can starve.
       // A non-base probe may need a second negotiation to confirm the core
       // role, so cap it at 16 peers to retain 32 total protocol probes.
-      const peerLimit = ports.protocol === PROTOCOL_STORAGE_ACK ? 32 : 16;
+      const peerLimit = requestedProtocol === PROTOCOL_STORAGE_ACK ? 32 : 16;
       const preferredBudget = other.length > 0 && preferred.length >= peerLimit
         ? peerLimit - 8 : peerLimit;
       const chosen = [
@@ -161,16 +179,16 @@ export class ACKCapabilityRegistry {
       for (let offset = 0; offset < chosen.length; offset += 4) {
         const batch = chosen.slice(offset, offset + 4);
         const discovered = (await Promise.all(batch.map(async (peerId) => {
-          if (await ports.probeProtocol!(peerId, ports.protocol) !== 'supported') return null;
+          if (await ports.probeProtocol!(peerId, requestedProtocol) !== 'supported') return null;
           if (!corePeerIds.has(peerId)) {
-            if (ports.protocol !== PROTOCOL_STORAGE_ACK &&
+            if (requestedProtocol !== PROTOCOL_STORAGE_ACK &&
                 await ports.probeProtocol!(peerId, PROTOCOL_STORAGE_ACK) !== 'supported') return null;
             this.markNegotiated(peerId, PROTOCOL_STORAGE_ACK);
             corePeerIds.add(peerId);
           }
-          this.markNegotiated(peerId, ports.protocol);
+          this.markNegotiated(peerId, requestedProtocol);
           protocolPeerIds.add(peerId);
-          if (ports.protocol === PROTOCOL_STORAGE_ACK_V2 || ports.protocol === PROTOCOL_STORAGE_UPDATE_ACK_V2) {
+          if (requestedProtocol === PROTOCOL_STORAGE_ACK_V2 || requestedProtocol === PROTOCOL_STORAGE_UPDATE_ACK_V2) {
             corePeerIdsV2.add(peerId);
           }
           return peerId;
@@ -183,6 +201,16 @@ export class ACKCapabilityRegistry {
         if (admitted() >= target) break;
       }
     }
-    return { knownCorePeerIds: corePeerIds, knownCorePeerIdsV2: corePeerIdsV2 };
+    return this.selectCandidates({
+      connectedPeers: ports.connectedPeers,
+      ackCandidatePeerIds: ports.ackCandidatePeerIds,
+      preferredACKPeerIds: ports.preferredACKPeerIds,
+      verifiedSameNetworkPeerIds: ports.verifiedSameNetworkPeerIds(),
+      requiredACKs: ports.requiredACKs,
+      protocol: requestedProtocol,
+    }, ports.localCandidate, {
+      knownCorePeerIds: corePeerIds,
+      knownCorePeerIdsV2: corePeerIdsV2,
+    });
   }
 }

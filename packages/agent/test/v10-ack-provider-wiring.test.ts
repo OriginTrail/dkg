@@ -69,6 +69,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/index.js';
 import { Messenger } from '../src/p2p/messenger.js';
+import { ACKCapabilityRegistry } from '../src/p2p/ack-capability.js';
 
 /**
  * Capture every `ACKCollector` constructor call so each test can
@@ -195,13 +196,15 @@ interface ProviderInternals {
     ) => Promise<VerifyACKIdentityResult>;
   };
   node: {
+    peerId: string;
     libp2p: {
       getPeers(): Array<{ toString(): string }>;
       getConnections?(): Array<{ remotePeer: { toString(): string } }>;
     };
   };
-  knownCorePeerIds: Set<string>;
-  knownCorePeerIdsV2: Set<string>;
+  knownCorePeerIds: ReadonlySet<string>;
+  knownCorePeerIdsV2: ReadonlySet<string>;
+  ackCapabilityRegistry: ACKCapabilityRegistry;
   storageAckHandlerRegistered: boolean;
   storageAckEndpoint: {
     dispatch(protocol: string, data: Uint8Array, peerId: string): Promise<Uint8Array>;
@@ -230,7 +233,7 @@ async function bootProviderAgent(options: Record<string, unknown> = {}): Promise
   // The guards at the top of `createV10ACKProvider` only check
   // truthiness, not type. Pass empty objects so the function reaches
   // the `new ACKCollector(...)` call site.
-  internals.router = { probeProtocol: async () => false };
+  internals.router = { probeProtocol: async () => 'unsupported' };
   internals.gossip = { publish: async () => undefined };
   // Unconditionally override `node` — the real `DKGNode` getter
   // throws on access before `start()` is called, so even the
@@ -238,7 +241,8 @@ async function bootProviderAgent(options: Record<string, unknown> = {}): Promise
   // structurally-typed stub that satisfies the `getConnectedCorePeers`
   // callback's `this.node.libp2p.getPeers()` call without spinning
   // libp2p.
-  (internals as { node: { libp2p: { getPeers(): unknown[] } } }).node = {
+  (internals as { node: { peerId: string; libp2p: { getPeers(): unknown[] } } }).node = {
+    peerId: 'local-core',
     libp2p: { getPeers: () => [] },
   };
   return { agent, internals };
@@ -463,14 +467,13 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       verifiedSameNetworkPeerIds: () => accepted,
       preflightPeerAdmission,
     };
-    internals.knownCorePeerIds.clear();
     for (const peerId of [
       'already-admitted',
       'new-v2-core',
       'rejected-peer',
       'retryable-probe-failure',
-    ]) internals.knownCorePeerIds.add(peerId);
-    internals.knownCorePeerIdsV2.add('new-v2-core');
+    ]) internals.ackCapabilityRegistry.reconcile(peerId,
+      peerId === 'new-v2-core' ? [PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2] : [PROTOCOL_STORAGE_ACK]);
     internals.node = {
       libp2p: {
         getPeers: () => [
@@ -534,9 +537,9 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       preflightPeerAdmission,
     };
     internals.config.ackCandidatePeerIds = ['allow-a', 'allow-b', 'disconnected-allowlisted'];
-    internals.knownCorePeerIds.clear();
-    for (const peerId of ['allow-a', 'allow-b', 'outside-allowlist']) internals.knownCorePeerIds.add(peerId);
-    internals.knownCorePeerIdsV2.clear();
+    for (const peerId of ['allow-a', 'allow-b', 'outside-allowlist']) {
+      internals.ackCapabilityRegistry.reconcile(peerId, [PROTOCOL_STORAGE_ACK]);
+    }
     internals.node = {
       libp2p: {
         getPeers: () => ['allow-a', 'allow-b', 'outside-allowlist']

@@ -19,7 +19,7 @@ export async function flushMicrotasks(): Promise<void> {
 
 // Expose protected state once. All workflow spies use DKGAgent's real signatures.
 interface PeerEventState {
-  knownCorePeerIds: Set<string>;
+  knownCorePeerIds: ReadonlySet<string>;
   peerSyncSession: PeerSyncSession;
   lastSyncDisconnectedAt: Map<string, number>;
   log: { warn(ctx: OperationContext, message: string): void };

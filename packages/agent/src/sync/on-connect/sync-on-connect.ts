@@ -1,5 +1,5 @@
 import { createOperationContext, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
-import { reconcileACKCapabilities } from '../../p2p/ack-capability.js';
+import type { ACKCapabilityRegistry } from '../../p2p/ack-capability.js';
 import {
   classifyDurableProgress,
 } from '../durable-progress.js';
@@ -120,9 +120,7 @@ function admitPeerSyncContext(context: CompatiblePeerSyncContext): SessionPeerSy
 export interface SyncOnConnectContext extends CompatiblePeerSyncContext {
   remotePeer: string;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
-  knownCorePeerIds: Set<string>;
-  knownCorePeerIdsV2?: Set<string>;
-  onACKProtocols?: (peerId: string, protocols: readonly string[]) => void;
+  ackCapabilities: Pick<ACKCapabilityRegistry, 'reconcile'>;
   getSyncContextGraphs: () => string[];
   /** Exact durable scope for this automatic run; explicit catch-up bypasses it. */
   getDurableSyncContextGraphs?: () => string[];
@@ -396,9 +394,7 @@ async function runSessionSyncOnConnect(
   const {
     remotePeer,
     getPeerProtocols,
-    knownCorePeerIds,
-    knownCorePeerIdsV2 = new Set<string>(),
-    onACKProtocols,
+    ackCapabilities,
     getSyncContextGraphs,
     getDurableSyncContextGraphs,
     ordinarySharedMemoryLane,
@@ -508,8 +504,7 @@ async function runSessionSyncOnConnect(
     const protocols = await getPeerProtocols(remotePeer);
     signal.throwIfAborted();
 
-    if (onACKProtocols) onACKProtocols(remotePeer, protocols);
-    else reconcileACKCapabilities(remotePeer, protocols, knownCorePeerIds, knownCorePeerIdsV2);
+    ackCapabilities.reconcile(remotePeer, protocols);
 
     const hasSync = protocols.includes(PROTOCOL_SYNC);
     if (!hasSync) {
