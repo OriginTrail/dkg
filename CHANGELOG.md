@@ -157,6 +157,14 @@ All notable changes to the DKG V10 node are documented here. The format is based
   fails a graph closed, needing a fresh catch-up, when either runs out. A
   finalized authority read whose caller gives up now leaves the shared
   authority-read queue instead of holding it.
+- **SELECT queries return a stored IRI such as `<a:>`**: RFC 3987 allows an
+  absolute IRI with nothing after the scheme's colon, and the Oxigraph server
+  and Blazegraph backends store one. The SPARQL results decoder required a
+  character after the colon, so any SELECT that returned such an IRI, as a
+  value or as a literal's datatype, failed with `URI value must be an absolute
+  safe IRI` (or `datatype must be an absolute safe IRI`), while CONSTRUCT
+  returned the same quads. The decoder now accepts a bare `scheme:` IRI and
+  checks every other value exactly as before.
 
 ### Changed
 
