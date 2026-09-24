@@ -173,8 +173,9 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
     expect(h.info[0]).toMatch(/durationMs=\d+/);
   });
 
-  it('asks known Cores first and stops after the first complete Core phonebook', async () => {
+  it('asks known Cores first, in connection order, and stops after the first complete Core phonebook', async () => {
     const h = createHarness({
+      // Connection order differs from peer-id order: CORE_B connected first.
       peers: [
         { peerId: EDGE, core: false },
         { peerId: CORE_B, core: true },
@@ -187,7 +188,7 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
     h.fetcher.request(CG, 'subscribe');
     await h.fetcher.whenIdle();
 
-    expect(h.syncCalls.map(({ peerId }) => peerId)).toEqual([CORE_A]);
+    expect(h.syncCalls.map(({ peerId }) => peerId)).toEqual([CORE_B]);
   });
 
   it('does not take an empty "complete" Core answer for the network phonebook', async () => {
@@ -297,9 +298,9 @@ describe('OnDemandAgentsPhonebookFetcher', () => {
     const h = createHarness({
       maxPeers: 5,
       peers: [
-        { peerId: EDGE_3, core: false },
-        { peerId: EDGE_2, core: false },
         { peerId: EDGE, core: false },
+        { peerId: EDGE_2, core: false },
+        { peerId: EDGE_3, core: false },
         { peerId: CORE_A, core: true },
       ],
       sync: async (peerId) => {

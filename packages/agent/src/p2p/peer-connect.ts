@@ -1,4 +1,5 @@
 import type { DiscoveryClient } from '../discovery.js';
+import { orderCoresFirst } from './peer-selection.js';
 import {
   connectLibp2pCandidate,
   type Libp2pConnectCandidate,
@@ -62,9 +63,9 @@ export async function ensurePeerConnected(
 export interface PrimeCatchupConnectionsOptions {
   /**
    * New dials one walk may attempt. Omitted keeps the unbounded walk over the
-   * whole phonebook. When set, core-role profiles come first and the rest
-   * follow in peer-id order, so a capped walk is deterministic; peers that are
-   * connected, are this node, or advertise no relay do not count.
+   * whole phonebook. When set, core-role profiles come first (`orderCoresFirst`),
+   * each group in discovery order; peers that are connected, are this node, or
+   * advertise no relay do not count.
    */
   readonly maxDials?: number;
 }
@@ -81,10 +82,7 @@ export async function primeCatchupConnections(
     const maxDials = options.maxDials;
     const agents = maxDials === undefined
       ? discovered
-      : [...discovered].sort((left, right) => (
-        Number(right.nodeRole === 'core') - Number(left.nodeRole === 'core')
-        || (left.peerId < right.peerId ? -1 : left.peerId > right.peerId ? 1 : 0)
-      ));
+      : orderCoresFirst(discovered, (agent) => agent.nodeRole === 'core');
     const { peerIdFromString } = await import('@libp2p/peer-id');
     const { multiaddr } = await import('@multiformats/multiaddr');
     let dials = 0;

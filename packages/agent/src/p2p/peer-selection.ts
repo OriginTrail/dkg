@@ -27,15 +27,24 @@ export function orderCatchupPeers(
   const hasCores = !!corePeerIds && corePeerIds.size > 0;
   if (!preferredPeerId && !hasCores) return peers;
 
-  const tierOf = (peer: { toString(): string }): number => {
-    const id = peer.toString();
-    if (preferredPeerId && id === preferredPeerId) return 0;
-    if (hasCores && corePeerIds!.has(id)) return 1;
-    return 2;
-  };
+  const byRole = hasCores
+    ? orderCoresFirst(peers, (peer) => corePeerIds!.has(peer.toString()))
+    : peers;
+  if (!preferredPeerId) return byRole;
+  const isPreferred = (peer: { toString(): string }) => peer.toString() === preferredPeerId;
+  return [...byRole.filter(isPreferred), ...byRole.filter((peer) => !isPreferred(peer))];
+}
 
-  return peers
-    .map((peer, index) => ({ peer, index, tier: tierOf(peer) }))
-    .sort((a, b) => a.tier - b.tier || a.index - b.index)
-    .map((entry) => entry.peer);
+/**
+ * Stable Cores-first order: the items `isCore` accepts, then the rest, each
+ * group in input order. Every Cores-first choice uses this one rule. Callers
+ * differ only in how they know a peer is a Core: `knownCorePeerIds` (from
+ * identify) for a connected peer, the profile's `nodeRole` for one that is
+ * not connected yet.
+ */
+export function orderCoresFirst<T>(items: readonly T[], isCore: (item: T) => boolean): T[] {
+  const cores: T[] = [];
+  const rest: T[] = [];
+  for (const item of items) (isCore(item) ? cores : rest).push(item);
+  return [...cores, ...rest];
 }

@@ -30,6 +30,7 @@
  */
 
 import { getMetrics, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { orderCoresFirst } from '../p2p/peer-selection.js';
 import { parseBooleanEnv } from './agents-meta-policy.js';
 import {
   resolveAutomaticSystemContextGraphSync,
@@ -369,9 +370,7 @@ export class OnDemandAgentsPhonebookFetcher {
     const lifetime = this.#lifetime.signal;
     const startedAt = this.#now();
     const trigger = this.#wants.values().next().value ?? 'vm-reconcile';
-    const candidates = [...this.#deps.listConnectedPeers()]
-      .sort((left, right) => Number(right.core) - Number(left.core)
-        || left.peerId.localeCompare(right.peerId))
+    const candidates = orderCoresFirst(this.#deps.listConnectedPeers(), (peer) => peer.core)
       .slice(0, this.#maxCandidates);
 
     const budget = new AbortController();

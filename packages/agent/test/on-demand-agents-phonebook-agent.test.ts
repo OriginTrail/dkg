@@ -493,9 +493,9 @@ describe('on-demand agents phonebook on a fresh Edge', () => {
     vi.spyOn(edge.internals.networkAdmissionCoordinator, 'ensureAdmitted').mockResolvedValue(true);
 
     await edge.agent.primeCatchupConnections();
+    // Cores first, in discovery order.
     const coreIds = profiles.filter(({ nodeRole }) => nodeRole === 'core')
-      .map(({ peerId }) => peerId)
-      .sort();
+      .map(({ peerId }) => peerId);
     expect(dial).toHaveBeenCalledTimes(AGENTS_PHONEBOOK_PRIME_MAX_DIALS);
     expect(dial.mock.calls.slice(0, coreIds.length).map(([peer]) => peer.toString())).toEqual(coreIds);
 
