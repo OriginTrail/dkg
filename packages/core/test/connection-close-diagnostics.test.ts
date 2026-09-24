@@ -3,6 +3,15 @@ import { StreamCloseEvent, type Connection } from '@libp2p/interface';
 import { observeConnectionClose } from '../src/connection-close-diagnostics.js';
 
 describe('connection close diagnostics', () => {
+  it('accepts metadata-only connection notifications without interrupting the open listener', () => {
+    const connection = {
+      id: 'metadata-only', remotePeer: { toString: () => 'peer-12345678' },
+    } as unknown as Connection;
+    const lines: string[] = [];
+    expect(() => observeConnectionClose(connection, (line) => lines.push(line))).not.toThrow();
+    expect(lines).toEqual([]);
+  });
+
   it('preserves the local failure, escapes the message, and records one cause per connection', () => {
     const connection = Object.assign(new EventTarget(), {
       id: 'connection-1', remotePeer: { toString: () => 'peer-12345678' },
