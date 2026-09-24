@@ -1,9 +1,13 @@
 import { EventEmitter } from 'node:events';
+import { existsSync } from 'node:fs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Command } from 'commander';
+import yaml from 'js-yaml';
 import type { DkgConfig } from '../src/config.js';
+import { registerPublisherCommand } from '../src/commands/publisher.js';
 import { connectLocalAgentIntegration, persistLocalAgentIntegration } from '../src/daemon/local-agents.js';
 import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
@@ -274,6 +278,36 @@ describe('daemon local agent integration writes', () => {
     expect(file.localAgentIntegrations.hermes.runtime).toMatchObject({ status: 'ready', ready: true, lastError: null });
   });
 
+  it('persists a disconnect as that integration entry only', async () => {
+    const connected = { id: 'custom-agent', enabled: true, runtime: { status: 'ready', ready: true } };
+    const config = bootConfig({ localAgentIntegrations: { 'custom-agent': connected } });
+    await fileEditedAfterBoot({
+      name: 'node',
+      contextGraphs: ['saved-by-cli'],
+      localAgentIntegrations: { 'custom-agent': connected },
+    });
+    const res = jsonResponse();
+
+    await handleLocalAgentsRoutes({
+      req: jsonRequest('PUT', '/api/local-agent-integrations/custom-agent', {
+        enabled: false,
+        runtime: { status: 'disconnected' },
+      }),
+      res,
+      config,
+      path: '/api/local-agent-integrations/custom-agent',
+    } as any);
+
+    expect(res.statusCode).toBe(200);
+    const file = await readFileConfig();
+    expect(file.contextGraphs).toEqual(['saved-by-cli']);
+    expect(file.localAgentIntegrations['custom-agent']).toMatchObject({
+      enabled: false,
+      runtime: { status: 'disconnected', ready: false },
+      metadata: { userDisabled: true },
+    });
+  });
+
   it('writes nothing when a connect request is rejected', async () => {
     const before = await fileEditedAfterBoot({ name: 'node' });
     const res = jsonResponse();
@@ -306,5 +340,50 @@ describe('daemon local agent integration writes', () => {
     expect(file.contextGraphs).toEqual(['saved-by-cli']);
     expect(file).not.toHaveProperty('openclawAdapter');
     expect(file.localAgentIntegrations.openclaw.enabled).toBe(true);
+  });
+});
+
+// A node configured through config.yaml must stay on it: every daemon and CLI
+// write edits that file in place and never adds a config.json, which would
+// take precedence and hide the YAML from then on.
+describe('a node configured through config.yaml', () => {
+  const yamlConfig = [
+    '# pinned until the Q3 hub rotation',
+    'chain:',
+    '  hubAddress: "0xabc"',
+    'name: yaml-node',
+    '',
+  ].join('\n');
+
+  async function readYaml(): Promise<{ text: string; config: Record<string, any> }> {
+    const text = await readFile(join(home, 'config.yaml'), 'utf-8');
+    return { text, config: yaml.load(text) as Record<string, any> };
+  }
+
+  it('keeps its YAML and comments through a daemon write and a CLI command', async () => {
+    await writeFile(join(home, 'config.yaml'), yamlConfig);
+    const config = bootConfig();
+    connectLocalAgentIntegration(config, { id: 'hermes', name: 'Hermes' });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+      throw new Error(`process.exit:${code}`);
+    }) as never);
+
+    await persistLocalAgentIntegration(config, 'hermes');
+    const program = new Command();
+    program.exitOverride();
+    registerPublisherCommand(program);
+    await program.parseAsync(['publisher', 'enable'], { from: 'user' });
+
+    expect(existsSync(join(home, 'config.json'))).toBe(false);
+    const { text, config: written } = await readYaml();
+    expect(text).toContain('# pinned until the Q3 hub rotation\nchain:\n  hubAddress: "0xabc"');
+    expect(written).toMatchObject({
+      name: 'yaml-node',
+      chain: { hubAddress: '0xabc' },
+      localAgentIntegrations: { hermes: { id: 'hermes', enabled: true } },
+      publisher: { enabled: true },
+    });
+    vi.restoreAllMocks();
   });
 });
