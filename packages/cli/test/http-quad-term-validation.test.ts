@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { validateWritableQuads } from '../src/daemon/http-utils.js';
+import { validateWritableQuads } from '../src/daemon/knowledge-asset-quad-validation.js';
 
 const quad = (overrides: Partial<{ subject: string; predicate: string; object: string; graph: string }> = {}) => ({
   subject: 'https://example.org/s',
@@ -27,6 +27,7 @@ describe('validateWritableQuads', () => {
     ['a language-tagged literal object', quad({ object: '"hallo"@de' })],
     ['a bare-datatype literal object', quad({ object: '"42"^^http://www.w3.org/2001/XMLSchema#integer' })],
     ['a literal with escaped quotes and a raw tab', quad({ object: '"say \\"hi\\"\tthere"' })],
+    ['a literal with raw control characters', quad({ object: '"page\fbreak \u001B[1mbold\u001B[0m"' })],
     ['an empty graph', quad({ graph: '' })],
     ['an absolute graph IRI', quad({ graph: 'did:dkg:context-graph:0xabc/cg' })],
   ])('accepts %s', (_name, value) => {
@@ -56,6 +57,9 @@ describe('validateWritableQuads', () => {
     ['an unterminated literal object', { object: '"unterminated' }, 'object'],
     ['a literal with a raw line break', { object: '"line\nbreak"' }, 'object'],
     ['a literal with an unknown escape', { object: '"bad \\x escape"' }, 'object'],
+    ['a literal with a surrogate escape', { object: '"\\uD83D\\uDE00"' }, 'object'],
+    ['a literal with a relative bracketed datatype', { object: '"42"^^<integer>' }, 'object'],
+    ['a literal with a relative bare datatype', { object: '"42"^^integer' }, 'object'],
     [
       'a literal that would add its own statement',
       { object: '"x" .\n<urn:dkg:file:deadbeef> <http://dkg.io/ontology/trustLevel> "y"' },

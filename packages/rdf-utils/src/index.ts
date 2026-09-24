@@ -122,6 +122,10 @@ const RDF_LITERAL_LEXICAL_PATTERN =
   /^"((?:[^"\\]|\\.)*)"(?:@([A-Za-z0-9-]+)|\^\^(?:<([^>]+)>|([^<].*)))?$/;
 const RDF_LITERAL_BODY_PATTERN =
   /^(?:[^"\\\u0000-\u0008\u000A-\u001F\u007F]|\\(?:[tbnrf"'\\]|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}))*$/;
+// N-Quads STRING_LITERAL_QUOTE, like SPARQL STRING_LITERAL2, only requires
+// quotes, backslashes and line breaks to be escaped.
+const WRITABLE_RDF_LITERAL_BODY_PATTERN =
+  /^(?:[^"\\\n\r]|\\(?:[tbnrf"'\\]|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}))*$/;
 const RDF_LANGUAGE_TAG_PATTERN = /^[A-Za-z]+(?:-[A-Za-z0-9]+)*$/;
 
 /**
@@ -295,10 +299,25 @@ function scanNTriplesEscape(
   return { kind: 'uchar', decoded: String.fromCodePoint(codePoint), nextIndex: end };
 }
 
+export interface ParseRdfLiteralTermOptions {
+  /**
+   * Accept every literal that N-Quads and SPARQL store verbatim, which is what
+   * DKG write routes accept, not only the canonical form: raw control
+   * characters other than line breaks, and the legacy bare-datatype suffix
+   * (`"v"^^http://…`), which the stores bracket on write.
+   */
+  writable?: boolean;
+}
+
 /** Parse the N-Triples-style literal term emitted by {@link formatCanonicalRdfLiteralTerm}. */
-export function parseRdfLiteralTerm(term: string): RdfLiteralTerm | null {
+export function parseRdfLiteralTerm(
+  term: string,
+  options: ParseRdfLiteralTermOptions = {},
+): RdfLiteralTerm | null {
+  const writable = options.writable === true;
   const lexical = parseRdfLiteralLexicalTerm(term);
-  if (!lexical || !RDF_LITERAL_BODY_PATTERN.test(lexical.body)) return null;
+  const bodyPattern = writable ? WRITABLE_RDF_LITERAL_BODY_PATTERN : RDF_LITERAL_BODY_PATTERN;
+  if (!lexical || !bodyPattern.test(lexical.body)) return null;
   const value = decodeRdfLiteralBody(lexical.body);
   if (value === null) return null;
   if (lexical.suffix.kind === 'language') {
@@ -306,7 +325,7 @@ export function parseRdfLiteralTerm(term: string): RdfLiteralTerm | null {
     return { kind: 'language', value, language: lexical.suffix.language };
   }
   if (lexical.suffix.kind === 'datatype') {
-    if (lexical.suffix.syntax !== 'bracketed') return null;
+    if (lexical.suffix.syntax !== 'bracketed' && !writable) return null;
     return { kind: 'typed', value, datatype: lexical.suffix.datatype };
   }
   return { kind: 'plain', value };

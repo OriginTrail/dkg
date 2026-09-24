@@ -159,6 +159,8 @@ describe('malformed or padded TERM is 400 on both KA write routes', () => {
     ['whitespace-padded blank-node object', { object: ' _:b0 ' }, 'object', 'padded-bnode'],
     ['whitespace-padded bracketed object', { object: ' <urn:wq:o> ' }, 'object', 'padded-bracketed'],
     ['unterminated literal object', { object: '"unterminated' }, 'object', 'unterminated'],
+    ['literal with a relative bracketed datatype', { object: '"42"^^<integer>' }, 'object', 'relative-datatype'],
+    ['literal with a relative bare datatype', { object: '"42"^^integer' }, 'object', 'relative-bare-datatype'],
     [
       'literal object that would add its own statement',
       { object: '"x" .\n<urn:dkg:file:deadbeef> <http://dkg.io/ontology/trustLevel> "0x7f"' },
@@ -213,6 +215,20 @@ describe('malformed or padded TERM is 400 on both KA write routes', () => {
     expect(created.status, JSON.stringify(created.body)).toBeLessThan(300);
     const appended = await postJson(daemon!, '/api/knowledge-assets/ka-term-object/wm/write', {
       contextGraphId: CG, quads: BLANK_NODE_QUADS,
+    });
+    expect(appended.status, JSON.stringify(appended.body)).toBe(200);
+  });
+
+  it('accepts a literal with raw control characters on create and on a later wm/write', async () => {
+    // N-Quads and SPARQL only require quotes, backslashes and line breaks to be
+    // escaped, and writers such as core's sparqlString leave the rest raw.
+    const quads = [termQuad({ object: '"page\fbreak \u001B[1mbold\u001B[0m"' })];
+    const created = await postJson(daemon!, '/api/knowledge-assets', {
+      contextGraphId: CG, name: 'ka-term-controls', finalize: false, quads,
+    });
+    expect(created.status, JSON.stringify(created.body)).toBeLessThan(300);
+    const appended = await postJson(daemon!, '/api/knowledge-assets/ka-term-controls/wm/write', {
+      contextGraphId: CG, quads,
     });
     expect(appended.status, JSON.stringify(appended.body)).toBe(200);
   });

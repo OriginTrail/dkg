@@ -95,6 +95,10 @@ describe('isSafeLiteralTerm', () => {
     expect(isSafeLiteralTerm(term)).toBe(true);
   });
 
+  it('accepts raw control characters other than line breaks, as N-Quads and SPARQL do', () => {
+    expect(isSafeLiteralTerm('"form\ffeed and \u001B[31mansi\u001B[0m"')).toBe(true);
+  });
+
   it.each([
     '"',
     '"unterminated',
@@ -105,6 +109,10 @@ describe('isSafeLiteralTerm', () => {
     '"x"@',
     '"x"^^<urn:dt with space>',
     '"x"^^urn:dt with space',
+    '"42"^^<integer>',
+    '"42"^^integer',
+    '"42"^^<#integer>',
+    '"\\uD800"',
     'plain',
     '<urn:x>',
   ])('rejects %j', (term) => {

@@ -15,6 +15,8 @@
  *   Use `sparqlInt`.
  */
 
+import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
+
 const UNSAFE_IRI_CHARS = /[<>"{}|\\^`\x00-\x20]/;
 
 const IRI_SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:[^\s<>"{}|\\^`\x00-\x20]+$/;
@@ -134,18 +136,18 @@ export function assertSafeRdfTerm(value: string): void {
   throw new Error(`Unsafe RDF term for CAS condition: ${value.slice(0, 80)}`);
 }
 
-// The legacy `"v"^^http://…` form, whose datatype the stores bracket on write.
-const BARE_DATATYPE_LITERAL = /^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/;
-
 /**
  * Returns true for a quoted literal term that SPARQL and N-Quads accept
- * verbatim, under the literal rule of {@link assertSafeRdfTerm}. The legacy
- * bare-datatype form is accepted and checked as if bracketed. A raw line
- * break, a stray or missing quote, or an unknown escape fails.
+ * verbatim, parsed by the rdf-utils literal parser in its writable mode: plain,
+ * language-tagged, or typed with an absolute datatype IRI, bracketed or in the
+ * legacy bare form. Raw control characters other than line breaks are allowed,
+ * as both grammars allow them. A raw line break, a stray or missing quote, a
+ * malformed or surrogate escape, or a relative datatype such as `<integer>`
+ * fails.
  */
 export function isSafeLiteralTerm(value: string): boolean {
-  const bare = value.match(BARE_DATATYPE_LITERAL);
-  return SAFE_RDF_LITERAL.test(bare ? `${bare[1]}^^<${bare[2]}>` : value);
+  const literal = parseRdfLiteralTerm(value, { writable: true });
+  return literal !== null && (literal.kind !== 'typed' || isSafeIri(literal.datatype));
 }
 
 export function sparqlInt(

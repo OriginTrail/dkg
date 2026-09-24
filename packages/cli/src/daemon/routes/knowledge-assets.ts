@@ -36,7 +36,6 @@ import {
   validateEntities,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
-  validateWritableQuads,
   respondIfReconcileUnavailable,
   respondIfStoreUnavailable,
   classifyStoreUnavailable,
@@ -48,6 +47,7 @@ import {
   noFundedPublisherWalletBody,
   SMALL_BODY_BYTES,
 } from "../http-utils.js";
+import { validateWritableQuads } from "../knowledge-asset-quad-validation.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
 import { recordAssertionActivity, recordConvictionCostCovered } from "../activity-notification.js";
 import {

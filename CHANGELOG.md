@@ -33,8 +33,12 @@ All notable changes to the DKG V10 node are documented here. The format is based
   Angle-bracketed IRIs count as IRIs, and whitespace-padded terms are
   rejected. A literal must be complete: an unterminated one, or one carrying a
   raw line break, is rejected. Such a literal could previously add statements
-  of its own to the draft. `wm/write` now also accepts blank-node and
-  angle-bracketed objects, as create and the store already did.
+  of its own to the draft. A typed literal needs an absolute datatype IRI:
+  `"42"^^<integer>` used to be stored with its datatype resolved against the
+  managed Oxigraph's own URL. Raw control characters other than line breaks are
+  still accepted, as N-Quads and SPARQL allow them. `wm/write` now also
+  accepts blank-node and angle-bracketed objects, as create and the store
+  already did.
 - **Cores promote the data they acknowledge to Verifiable Memory again**: since
   10.0.14 (#2184) `syncReconcilerEnabled` also gated chain-driven VM
   reconciliation, which the 10.0.14 upgrade notes did not mention. A Core that

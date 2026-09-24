@@ -211,7 +211,6 @@ import {
 } from '../manifest.js';
 import {
   resolveNameToPeerId,
-  isWritableQuad,
   validateWritableQuadLiteralSizes,
   oversizedRdfLiteralResponseBody,
   jsonResponse,
