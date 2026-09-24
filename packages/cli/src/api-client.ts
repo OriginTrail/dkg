@@ -25,6 +25,7 @@ import {
   type AgentListPageOptions,
 } from '@origintrail-official/dkg-core';
 import { loadApiClientToken } from './auth.js';
+import type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contract.js';
 import {
   finalizedPublishOptionsPayload,
   type KnowledgeAssetFinalizedPublishOptions,
@@ -47,6 +48,7 @@ import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/qu
 import type { PublicQueryResult } from '@origintrail-official/dkg-core';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
+export type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contract.js';
 
 /** Deadline for GET reads, which answer from local daemon state. */
 export const API_READ_TIMEOUT_MS = 30_000;
@@ -217,13 +219,6 @@ export interface PreSignedAuthorAttestationPayload {
    */
   reservedKaId: string;
   signature: { r: string; vs: string };
-}
-
-export interface KnowledgeAssetWritableQuad {
-  subject: string;
-  predicate: string;
-  object: string;
-  graph?: string;
 }
 
 export interface KnowledgeAssetCreateOptions {

@@ -36,6 +36,32 @@ All notable changes to the DKG V10 node are documented here. The format is based
   thousands of `getContextGraph` calls an hour. That answer is now final for
   the running process; the row stays on disk and is checked again at the next
   start. Timeouts and failed reads are still retried.
+- **Knowledge Asset write routes answer 400 for a malformed term**:
+  `POST /api/knowledge-assets` and
+  `POST /api/knowledge-assets/{name}/wm/write` passed subject and predicate
+  terms to the store unchecked, and the create route checked no terms at all.
+  A malformed IRI either failed the write with a store error or, for
+  characters the store strips such as `^`, stored the triple under a different
+  predicate than the caller sent. Both routes now check every term, exactly as
+  sent, against one rule:
+  - the subject must be an absolute IRI or a blank node;
+  - the predicate must be an absolute IRI;
+  - the object must be a well-formed quoted literal, an absolute IRI or a blank
+    node;
+  - a supplied `graph` must be a bare absolute IRI.
+
+  IRIs, including datatypes and the graph, are checked against RFC 3987, as
+  the store's own IRI parser does: `a:` is accepted, while a malformed percent
+  escape, authority or port gets a 400 instead of a store error.
+  Angle-bracketed IRIs count as IRIs, and whitespace-padded terms are
+  rejected. A literal must be complete: an unterminated one, or one carrying a
+  raw line break, is rejected. Such a literal could previously add statements
+  of its own to the draft. A typed literal needs an absolute datatype IRI:
+  `"42"^^<integer>` used to be stored with its datatype resolved against the
+  managed Oxigraph's own URL. Raw control characters other than line breaks are
+  still accepted, as N-Quads and SPARQL allow them. `wm/write` now also
+  accepts blank-node and angle-bracketed objects, as create and the store
+  already did.
 - **Cores promote the data they acknowledge to Verifiable Memory again**: since
   10.0.14 (#2184) `syncReconcilerEnabled` also gated chain-driven VM
   reconciliation, which the 10.0.14 upgrade notes did not mention. A Core that
