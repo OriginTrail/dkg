@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { readlinkSync } from 'node:fs';
-import { link, open, readFile, stat, unlink, type FileHandle } from 'node:fs/promises';
+import {
+  link, mkdir, open, readdir, readFile, rename, rm, rmdir, stat, unlink, writeFile, type FileHandle,
+} from 'node:fs/promises';
 import { hostname } from 'node:os';
+import { join } from 'node:path';
 import { threadId } from 'node:worker_threads';
 import { hasErrorCode } from '@origintrail-official/dkg-core';
 import { replaceFileDurably, type DurableReplaceOptions } from './durable-file-replace.js';
@@ -72,13 +75,28 @@ export interface HeldFileLock {
   replaceFile(path: string, content: string, options?: Omit<DurableReplaceOptions, 'commit'>): Promise<void>;
 }
 
-interface LockHolder {
-  pid?: unknown;
-  pidNamespace?: unknown;
-  threadId?: unknown;
-  token?: unknown;
-  createdAt?: unknown;
+/** Who holds a lock or a guard, as its record says, with an older record's missing fields filled in. */
+interface Holder {
+  pid: number;
+  pidNamespace: string;
+  threadId: number;
+  token: string | undefined;
 }
+
+/** A lock or guard record as read from its file. */
+type ParsedHolder =
+  /** Empty or cut short: its holder is still writing it. */
+  | { kind: 'writing' }
+  /** Complete JSON, but not a record any version wrote. */
+  | { kind: 'malformed' }
+  /** Written by this version, with every field. */
+  | ({ kind: 'current' } & Holder)
+  /**
+   * Written before the pid namespace, thread or token was recorded, such as
+   * the publisher wallet lock's `{ pid, createdAt }`. Those fields take the
+   * values such a writer had: this namespace, the main thread and no token.
+   */
+  | ({ kind: 'legacy' } & Holder);
 
 type LockState = 'gone' | 'live' | 'stale';
 
@@ -95,8 +113,8 @@ type LockState = 'gone' | 'live' | 'stale';
  * A holder that stalls for a whole lease can be taken over, so `fn` publishes
  * its work through the lock (`replaceFile`, or `commit` for any other step).
  * Every step that removes the lock or publishes under it holds the guard, a
- * second file at `<lockPath>.guard`: a waiter's takeover, a holder's release
- * and a holder's commit. A takeover therefore cannot come between a holder's
+ * directory at `<lockPath>.guard`: a waiter's takeover, a holder's release and
+ * a holder's commit. A takeover therefore cannot come between a holder's
  * check that it still holds the lock and its commit, and a holder that was
  * taken over throws instead of committing.
  */
@@ -176,7 +194,7 @@ async function acquireLock(
     heldTokens.add(token);
     let handle: FileHandle | undefined;
     try {
-      handle = await createHeldFile(lockPath, token);
+      handle = await createLockFile(lockPath, token);
     } finally {
       if (!handle) heldTokens.delete(token);
     }
@@ -193,13 +211,14 @@ async function acquireLock(
 }
 
 /**
- * Create `path` holding this thread's holder record for `token`, returning a
- * handle to it, or undefined if the path is taken. The record is written to a
- * staging file that is then hard-linked into place, so the file never appears
- * without it. Where the filesystem has no hard links, the file is created
- * exclusively and then written, and can briefly appear empty.
+ * Create the lock file holding this thread's record for `token`, returning a
+ * handle to it, or undefined if the lock exists. The record is written to a
+ * staging file that is then hard-linked into place, so the lock never
+ * appears without it. Where the filesystem has no hard links, the lock is
+ * created exclusively and then written, and can briefly appear empty; a
+ * holder stalled that long can then be taken over, but not commit.
  */
-async function createHeldFile(path: string, token: string): Promise<FileHandle | undefined> {
+async function createLockFile(path: string, token: string): Promise<FileHandle | undefined> {
   const record = holderRecord(token);
   const stagingPath = `${path}.${token}.tmp`;
   const staging = await open(stagingPath, 'wx', 0o600);
@@ -225,7 +244,7 @@ async function createHeldFile(path: string, token: string): Promise<FileHandle |
     await handle.writeFile(record);
     return handle;
   } catch (error) {
-    // Without its record the file would stand until it looked abandoned.
+    // Without its record the lock would stand until it looked abandoned.
     await handle.close().catch(() => {});
     await unlink(path).catch(() => {});
     throw error;
@@ -233,7 +252,7 @@ async function createHeldFile(path: string, token: string): Promise<FileHandle |
 }
 
 function holderRecord(token: string): string {
-  return JSON.stringify({ pid: process.pid, pidNamespace: pidNamespace(), threadId, token, createdAt: Date.now() });
+  return JSON.stringify({ pid: process.pid, pidNamespace: pidNamespace(), threadId, token });
 }
 
 /**
@@ -259,12 +278,15 @@ async function releaseLock(lockPath: string, token: string, staleMs: number): Pr
 }
 
 async function holdsLock(lockPath: string, token: string): Promise<boolean> {
+  let raw: string;
   try {
-    return parseHolder(await readFile(lockPath, 'utf-8'))?.token === token;
+    raw = await readFile(lockPath, 'utf-8');
   } catch (error) {
     if (hasErrorCode(error, 'ENOENT')) return false;
     throw error;
   }
+  const holder = parseHolder(raw);
+  return holder.kind === 'current' && holder.token === token;
 }
 
 /**
@@ -278,7 +300,7 @@ async function holdsLock(lockPath: string, token: string): Promise<boolean> {
 async function reapStaleLock(lockPath: string, staleMs: number): Promise<boolean> {
   const state = await inspectHolder(lockPath, staleMs, 'lock');
   if (state !== 'stale') return state === 'gone';
-  const guard = await acquireGuard(lockPath, staleMs, Date.now());
+  const guard = await acquireGuard(lockPath, staleMs, Date.now() + LOCK_POLL_MS);
   if (guard === undefined) return false;
   try {
     const current = await inspectHolder(lockPath, staleMs, 'lock');
@@ -293,6 +315,17 @@ async function reapStaleLock(lockPath: string, staleMs: number): Promise<boolean
   }
 }
 
+/*
+ * The guard is a directory, `<lock>.guard`, holding one file: its holder's
+ * record, named by the holder's token. It is taken by renaming a prepared
+ * directory into place, so it never appears without its record, and only
+ * while it is absent or empty. It is cleared by removing the record of each
+ * holder that is gone, by that record's name, and then the directory only if
+ * that left it empty. A clearer acting on what it read about a guard that
+ * has since been cleared and taken again therefore removes nothing of the
+ * new holder's.
+ */
+
 function guardPath(lockPath: string): string {
   return `${lockPath}.guard`;
 }
@@ -304,64 +337,106 @@ function guardTimeoutMs(staleMs: number): number {
 
 /**
  * Take the guard, returning its token, or undefined once `deadline` passes.
- * A guard is taken over only when its holder has died, or, recorded in
- * another pid namespace where that cannot be checked, once it is as old as a
- * lapsed lease. Where the filesystem has no hard links, a guard is created
- * before its record is written, and one still without it after
- * LOCK_WRITE_GRACE_MS counts as abandoned even if its holder is only stalled.
- * Clearing a guard whose holder died is not itself serialized, but it needs a
- * holder to die inside a step that takes microseconds.
+ * A guard is never taken from a live holder in this pid namespace: it is
+ * cleared when its holder has died, or, recorded in another pid namespace
+ * where that cannot be checked, once its record is as old as a lapsed lease.
  */
 async function acquireGuard(lockPath: string, staleMs: number, deadline: number): Promise<string | undefined> {
   const path = guardPath(lockPath);
   for (;;) {
     const token = randomUUID();
+    // Registered before the guard exists, so this thread never mistakes it for a leftover.
     heldTokens.add(token);
-    let handle: FileHandle | undefined;
+    let taken = false;
     try {
-      handle = await createHeldFile(path, token);
+      taken = await createGuard(path, token);
     } finally {
-      if (!handle) heldTokens.delete(token);
+      if (!taken) heldTokens.delete(token);
     }
-    if (handle) {
-      await handle.close().catch(() => {});
-      return token;
-    }
-    if (await clearStaleGuard(path, staleMs)) continue;
+    if (taken) return token;
+    const cleared = await clearStaleGuard(path, staleMs);
     if (Date.now() >= deadline) return undefined;
-    await sleep(LOCK_POLL_MS);
+    if (!cleared) await sleep(LOCK_POLL_MS);
   }
+}
+
+/** Take the guard by renaming a directory that holds this holder's record into place; false if it is taken. */
+async function createGuard(path: string, token: string): Promise<boolean> {
+  const staging = `${path}.${token}.tmp`;
+  await mkdir(staging, { mode: 0o700 });
+  try {
+    await writeFile(join(staging, token), holderRecord(token), { mode: 0o600 });
+    await rename(staging, path);
+    return true;
+  } catch (error) {
+    if (await isTakenGuardError(error, path)) return false;
+    throw error;
+  } finally {
+    // Gone once renamed into place.
+    await rm(staging, { recursive: true, force: true }).catch(() => {});
+  }
+}
+
+/**
+ * Whether a rename onto the guard failed because a guard is there. POSIX
+ * refuses a directory that is not empty (ENOTEMPTY or EEXIST) or a file
+ * (ENOTDIR). Windows refuses any existing directory with EPERM or EACCES,
+ * which can also be a permission problem, so those count only while the
+ * guard path exists.
+ */
+async function isTakenGuardError(error: unknown, path: string): Promise<boolean> {
+  if (['EEXIST', 'ENOTEMPTY', 'ENOTDIR'].some((code) => hasErrorCode(error, code))) return true;
+  if (!hasErrorCode(error, 'EPERM') && !hasErrorCode(error, 'EACCES')) return false;
+  return stat(path).then(() => true, () => false);
 }
 
 async function releaseGuard(lockPath: string, token: string): Promise<void> {
   const path = guardPath(lockPath);
   try {
-    if (parseHolder(await readFile(path, 'utf-8'))?.token === token) await unlink(path);
+    await unlink(join(path, token));
+    // Only while empty: a guard taken again in the meantime keeps its record.
+    await rmdir(path);
   } catch {
-    // A guard left behind is cleared once it is found stale.
+    // An emptied guard left behind is removed by the next one to find it.
   } finally {
     heldTokens.delete(token);
   }
 }
 
+/**
+ * Clear the guard if its holder is gone, returning whether it is now free:
+ * remove the record of each holder that is gone, by its name, then the
+ * directory if that left it empty. A path that is not a guard directory is
+ * left in place, for the lock's timeout error to name.
+ */
 async function clearStaleGuard(path: string, staleMs: number): Promise<boolean> {
-  const state = await inspectHolder(path, staleMs, 'guard');
-  if (state !== 'stale') return state === 'gone';
+  let records: string[];
   try {
-    await unlink(path);
+    records = await readdir(path);
+  } catch (error) {
+    return hasErrorCode(error, 'ENOENT');
+  }
+  for (const record of records) {
+    const recordPath = join(path, record);
+    if (await inspectHolder(recordPath, staleMs, 'guard') === 'live') return false;
+    await unlink(recordPath).catch(() => {});
+  }
+  try {
+    await rmdir(path);
     return true;
   } catch (error) {
+    // Not empty: the guard was taken again in the meantime.
     return hasErrorCode(error, 'ENOENT');
   }
 }
 
 /**
- * Whether the holder recorded in a lock or guard file still holds it. Both are
- * given up when their holder is gone, or when they still lack a record after
- * LOCK_WRITE_GRACE_MS. A lock is also given up once its lease lapses; a guard
- * with a record, never taken from a live holder in this pid namespace, only
- * when it was recorded in another one (whose pids cannot be checked) and is
- * that old.
+ * Whether the holder recorded in a lock file, or in a guard's record, still
+ * holds it. Both are given up when their holder is gone, or when their
+ * record is still being written after LOCK_WRITE_GRACE_MS. A lock is also
+ * given up once its lease lapses; a guard, never taken from a live holder in
+ * this pid namespace, only when it was recorded in another one (whose pids
+ * cannot be checked) and is that old.
  */
 async function inspectHolder(path: string, staleMs: number, kind: 'lock' | 'guard'): Promise<LockState> {
   let raw: string;
@@ -377,33 +452,54 @@ async function inspectHolder(path: string, staleMs: number, kind: 'lock' | 'guar
   if (!st) return 'gone';
   const idleMs = Date.now() - st.mtimeMs;
   const holder = parseHolder(raw);
-  if (!holder) {
-    // Empty or partial metadata: the file was just created and its holder is
-    // still writing it, unless that was a while ago.
-    return idleMs < LOCK_WRITE_GRACE_MS ? 'live' : 'stale';
-  }
-  const pid = Number(holder.pid);
-  if (!Number.isFinite(pid)) return 'stale';
+  if (holder.kind === 'writing') return idleMs < LOCK_WRITE_GRACE_MS ? 'live' : 'stale';
+  if (holder.kind === 'malformed') return 'stale';
   const lapsed = idleMs > staleMs;
-  // A lock written before the namespace was recorded counts as this one's.
-  if ((holder.pidNamespace ?? pidNamespace()) !== pidNamespace()) {
-    return lapsed ? 'stale' : 'live';
+  if (holder.pidNamespace !== pidNamespace()) return lapsed ? 'stale' : 'live';
+  if (holder.pid === process.pid && holder.threadId === threadId) {
+    return holder.token !== undefined && heldTokens.has(holder.token) ? 'live' : 'stale';
   }
-  if (pid === process.pid && (holder.threadId ?? 0) === threadId) {
-    return heldTokens.has(String(holder.token)) ? 'live' : 'stale';
-  }
-  if (!isProcessRunning(pid)) return 'stale';
+  if (!isProcessRunning(holder.pid)) return 'stale';
   return kind === 'lock' && lapsed ? 'stale' : 'live';
 }
 
-function parseHolder(raw: string): LockHolder | undefined {
-  if (!raw.trim()) return undefined;
+/**
+ * Read a lock or guard record. A field present with the wrong type makes the
+ * record malformed; a missing namespace, thread or token makes it legacy.
+ */
+function parseHolder(raw: string): ParsedHolder {
+  let record: unknown;
   try {
-    const parsed: unknown = JSON.parse(raw);
-    return parsed !== null && typeof parsed === 'object' ? parsed as LockHolder : undefined;
+    record = JSON.parse(raw);
   } catch {
-    return undefined;
+    return { kind: 'writing' };
   }
+  if (!isPlainRecord(record)) return { kind: 'malformed' };
+  const { pid, pidNamespace: namespace, threadId: thread, token } = record;
+  if (!isPositiveInteger(pid)
+    || !(namespace === undefined || typeof namespace === 'string')
+    || !(thread === undefined || isThreadId(thread))
+    || !(token === undefined || (typeof token === 'string' && token !== ''))) {
+    return { kind: 'malformed' };
+  }
+  const holder: Holder = { pid, pidNamespace: namespace ?? pidNamespace(), threadId: thread ?? 0, token };
+  return namespace !== undefined && thread !== undefined && token !== undefined
+    ? { kind: 'current', ...holder }
+    : { kind: 'legacy', ...holder };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return false;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+}
+
+function isThreadId(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
 }
 
 /** A process we may not signal (EPERM) still holds its lock. */

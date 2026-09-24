@@ -2,7 +2,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
 import { chmod, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -140,10 +140,17 @@ describe('DkgHomeFiles.updateConfigFile', () => {
   it('leaves the previous complete config in place when a write stops before the rename', async () => {
     const original = `${JSON.stringify({ name: 'node', apiPort: 9200 }, null, 2)}\n`;
     await writeFile(files.configPath, original);
-    vi.mocked(rename).mockRejectedValueOnce(Object.assign(new Error('EIO: simulated'), { code: 'EIO' }));
+    // Only the rename that would replace the config fails (not the lock guard's).
+    const actualRename = (await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')).rename;
+    vi.mocked(rename).mockImplementation(async (from, to) => {
+      // The writer renames onto the resolved path, so match the name.
+      if (basename(String(to)) === 'config.json') throw Object.assign(new Error('EIO: simulated'), { code: 'EIO' });
+      return actualRename(from, to);
+    });
 
     await expect(files.updateConfigFile([configEdit(['name'], () => 'renamed')]))
       .rejects.toMatchObject({ code: 'EIO' });
+    vi.mocked(rename).mockReset();
 
     expect(await readFile(files.configPath, 'utf-8')).toBe(original);
     // Neither the temp file nor the lock outlives the failed write.
@@ -273,7 +280,8 @@ describe('DkgHomeFiles.updateConfigFile', () => {
         .toEqual({ path: files.configYamlPath, changed: false });
 
       expect(await readFile(files.configYamlPath, 'utf-8')).toBe(original);
-      expect(rename).not.toHaveBeenCalled();
+      // Nothing was renamed over the config (the lock's guard is renamed into place on release).
+      expect(vi.mocked(rename).mock.calls.filter(([, to]) => basename(String(to)) === 'config.yaml')).toEqual([]);
     });
   });
 

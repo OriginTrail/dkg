@@ -1,6 +1,8 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { appendFile, link, mkdir, mkdtemp, open, readFile, readdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import {
+  appendFile, link, mkdir, mkdtemp, open, readFile, readdir, rm, rmdir, stat, utimes, writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +13,12 @@ import { withFileLock } from '../src/file-lock.js';
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
-    ...actual, link: vi.fn(actual.link), open: vi.fn(actual.open), readFile: vi.fn(actual.readFile), stat: vi.fn(actual.stat),
+    ...actual,
+    link: vi.fn(actual.link),
+    open: vi.fn(actual.open),
+    readFile: vi.fn(actual.readFile),
+    rmdir: vi.fn(actual.rmdir),
+    stat: vi.fn(actual.stat),
   };
 });
 
@@ -46,7 +53,7 @@ describe('withFileLock', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
-    for (const mocked of [link, open, readFile, stat]) vi.mocked(mocked).mockReset();
+    for (const mocked of [link, open, readFile, rmdir, stat]) vi.mocked(mocked).mockReset();
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -182,14 +189,13 @@ describe('withFileLock', () => {
     await expect(withFileLock(lockPath, async () => 'ran', { timeoutMs: 200 })).resolves.toBe('ran');
   });
 
-  it('creates the lock and the guard directly where the filesystem has no hard links', async () => {
+  it('creates the lock directly where the filesystem has no hard links', async () => {
     vi.mocked(link).mockRejectedValue(fsError('EPERM'));
 
     await withFileLock(lockPath, async (lock) => {
       expect(JSON.parse(await readFile(lockPath, 'utf-8'))).toMatchObject({ pid: process.pid });
-      await lock.commit(async () => {
-        expect(JSON.parse(await readFile(guardPath, 'utf-8'))).toMatchObject({ pid: process.pid });
-      });
+      // The guard needs no hard links: it is a directory renamed into place.
+      await lock.commit(async () => { expect(await readdir(guardPath)).toHaveLength(1); });
     });
 
     expect(await readdir(dir)).toEqual([]);
@@ -232,6 +238,40 @@ describe('withFileLock', () => {
 
     await expect(withFileLock(lockPath, async () => {})).rejects.toMatchObject({ code: 'EIO' });
     expect(await readdir(dir)).toEqual([]);
+  });
+
+  describe('holder records', () => {
+    // The publisher wallet lock recorded only its pid (and when it was taken).
+    it('reads a record without a namespace, thread or token as this namespace\'s main thread', async () => {
+      await writeFile(lockPath, JSON.stringify({ pid: process.ppid, createdAt: Date.now() }));
+      await expect(withFileLock(lockPath, async () => {}, { timeoutMs: 100 })).rejects.toThrow(/Timed out/);
+
+      await writeFile(lockPath, JSON.stringify({ pid: EXITED_PID, createdAt: Date.now() }));
+      await expect(withFileLock(lockPath, async () => 'ran', { timeoutMs: 200 })).resolves.toBe('ran');
+    });
+
+    it('takes over a record whose fields have the wrong types, instead of coercing them', async () => {
+      for (const record of [
+        '{"pid":"123","token":{}}',
+        '{"pid":1.5}',
+        '{"pid":-1}',
+        '[1, 2]',
+        'null',
+        // A live pid, but a thread or token no version wrote.
+        JSON.stringify({ pid: process.ppid, threadId: '0' }),
+        JSON.stringify({ pid: process.ppid, token: '' }),
+      ]) {
+        await writeFile(lockPath, record);
+        await expect(withFileLock(lockPath, async () => 'ran', { timeoutMs: 200 })).resolves.toBe('ran');
+      }
+    });
+
+    it('writes the fields a waiter checks, and no others', async () => {
+      await withFileLock(lockPath, async () => {
+        const record = JSON.parse(await readFile(lockPath, 'utf-8'));
+        expect(Object.keys(record).sort()).toEqual(['pid', 'pidNamespace', 'threadId', 'token']);
+      });
+    });
   });
 
   it('waits for a live holder and names the lock file when it gives up', async () => {
@@ -307,23 +347,31 @@ describe('withFileLock', () => {
   });
 
   describe('the guard', () => {
-    const staleLock = () => JSON.stringify({ pid: EXITED_PID, createdAt: Date.now() });
+    const staleLock = () => JSON.stringify({ pid: EXITED_PID });
+
+    /** A guard as a holder leaves it: a directory holding its record, named by its token. */
+    async function writeGuard(record: string, name: string): Promise<string> {
+      await mkdir(guardPath);
+      const recordPath = join(guardPath, name);
+      await writeFile(recordPath, record);
+      return recordPath;
+    }
 
     // A live process holds the guard only while it commits, releases or
     // removes a lock; taking it over could let that step interleave with this one.
     it('never takes the guard from a live holder, however long it has held it', async () => {
       await writeFile(lockPath, staleLock());
-      await writeFile(guardPath, liveHolder({ token: 'committing' }));
-      await backdate(guardPath, 10 * 60_000);
+      const record = await writeGuard(liveHolder({ token: 'committing' }), 'committing');
+      await backdate(record, 10 * 60_000);
 
       await expect(withFileLock(lockPath, async () => {}, { timeoutMs: 100 })).rejects.toThrow(/Timed out/);
       expect(existsSync(lockPath)).toBe(true);
-      expect(existsSync(guardPath)).toBe(true);
+      expect(await readdir(guardPath)).toEqual(['committing']);
     });
 
     it('clears a guard whose holder died, then takes the stale lock over', async () => {
       await writeFile(lockPath, staleLock());
-      await writeFile(guardPath, JSON.stringify({ pid: EXITED_PID, token: 'crashed', createdAt: Date.now() }));
+      await writeGuard(JSON.stringify({ pid: EXITED_PID, token: 'crashed' }), 'crashed');
 
       await expect(withFileLock(lockPath, async () => 'ran', { timeoutMs: 200 })).resolves.toBe('ran');
       expect(await readdir(dir)).toEqual([]);
@@ -332,36 +380,95 @@ describe('withFileLock', () => {
     it('clears a guard an earlier process with this pid left behind', async () => {
       const own = await ownHolderRecord();
       await writeFile(lockPath, staleLock());
-      await writeFile(guardPath, JSON.stringify({ ...own, token: 'earlier-process' }));
+      await writeGuard(JSON.stringify({ ...own, token: 'earlier-process' }), 'earlier-process');
 
       await expect(withFileLock(lockPath, async () => 'ran', { timeoutMs: 200 })).resolves.toBe('ran');
     });
 
-    it('clears a guard from another pid namespace only once it is as old as a lapsed lease', async () => {
+    it('clears a guard from another pid namespace only once its record is as old as a lapsed lease', async () => {
       await writeFile(lockPath, staleLock());
-      await writeFile(guardPath, JSON.stringify({
-        pid: process.pid, pidNamespace: 'other-container pid:[4026532001]', token: 'other', createdAt: Date.now(),
-      }));
+      const record = await writeGuard(JSON.stringify({
+        pid: process.pid, pidNamespace: 'other-container pid:[4026532001]', threadId: 0, token: 'other',
+      }), 'other');
       await expect(withFileLock(lockPath, async () => {}, { timeoutMs: 100 })).rejects.toThrow(/Timed out/);
 
-      await backdate(guardPath, 2 * 60_000);
+      await backdate(record, 2 * 60_000);
       await expect(withFileLock(lockPath, async () => 'ran', { timeoutMs: 200 })).resolves.toBe('ran');
     });
 
-    // Only a guard created without hard links can briefly lack its record.
-    it('treats a guard without its record as being written until it is old', async () => {
+    // A holder's release, or a clearer, stopped between removing the record
+    // and the directory. Only an empty directory is ever removed, so there is
+    // nothing to wait for.
+    it('removes an empty guard at once', async () => {
       await writeFile(lockPath, staleLock());
-      await writeFile(guardPath, '');
-      await expect(withFileLock(lockPath, async () => {}, { timeoutMs: 100 })).rejects.toThrow(/Timed out/);
+      await mkdir(guardPath);
 
-      await backdate(guardPath, 10_000);
       await expect(withFileLock(lockPath, async () => 'ran', { timeoutMs: 200 })).resolves.toBe('ran');
+      expect(await readdir(dir)).toEqual([]);
+    });
+
+    it('waits, instead of spinning, on a stale guard record it cannot remove', async () => {
+      await writeFile(lockPath, staleLock());
+      // A directory where the record should be: not a record, and not removable as one.
+      const stuck = join(guardPath, 'stuck');
+      await mkdir(stuck, { recursive: true });
+      await backdate(stuck, 10_000);
+
+      await expect(withFileLock(lockPath, async () => {}, { timeoutMs: 150 })).rejects.toThrow(/Timed out/);
+      expect(existsSync(lockPath)).toBe(true);
+    });
+
+    // The race a clearer must not lose: it judges a dead holder's guard gone,
+    // and before it acts, another contender clears that guard and takes it
+    // again. What the first clearer then removes must leave the new guard.
+    it('never removes a guard taken since a clearer judged the old one gone', async () => {
+      await writeFile(lockPath, staleLock());
+      const deadRecord = await writeGuard(JSON.stringify({ pid: EXITED_PID, token: 'crashed' }), 'crashed');
+      let resumeSlow!: () => void;
+      const slowResumed = new Promise<void>((resolve) => { resumeSlow = resolve; });
+      let slowPaused = false;
+      // The slow clearer's read of the dead record returns only once the guard has been taken again.
+      vi.mocked(readFile).mockImplementation(async (...args: Parameters<typeof readFile>) => {
+        const content = await actualFs.readFile(...args);
+        if (args[0] === deadRecord && !slowPaused) {
+          slowPaused = true;
+          await slowResumed;
+        }
+        return content;
+      });
+      const guardRemovals: string[] = [];
+      vi.mocked(rmdir).mockImplementation(async (...args: Parameters<typeof rmdir>) => {
+        guardRemovals.push(String(args[0]));
+        return actualFs.rmdir(...args);
+      });
+      let guardBefore: string[] = [];
+      let guardAfter: string[] = [];
+
+      const slow = withFileLock(lockPath, async () => 'slow', { timeoutMs: 10_000 });
+      await vi.waitFor(() => expect(slowPaused).toBe(true));
+      const fast = withFileLock(lockPath, async (lock) => lock.commit(async () => {
+        guardBefore = await readdir(guardPath);
+        const removalsBefore = guardRemovals.length;
+        resumeSlow();
+        // The slow clearer now acts on what it read about the dead guard.
+        await vi.waitFor(() => expect(guardRemovals.length).toBeGreaterThan(removalsBefore));
+        guardAfter = await readdir(guardPath);
+        return 'fast';
+      }), { timeoutMs: 10_000 });
+
+      expect(await Promise.all([slow, fast])).toEqual(['slow', 'fast']);
+      expect(guardBefore).toHaveLength(1);
+      expect(guardBefore).not.toEqual(['crashed']);
+      expect(guardAfter).toEqual(guardBefore);
     });
 
     it('commits only while it holds the lock, holding the guard meanwhile', async () => {
       await withFileLock(lockPath, async (lock) => {
         await expect(lock.commit(async () => {
-          expect(JSON.parse(await readFile(guardPath, 'utf-8'))).toMatchObject({ pid: process.pid, threadId });
+          const records = await readdir(guardPath);
+          expect(records).toHaveLength(1);
+          expect(JSON.parse(await readFile(join(guardPath, records[0]!), 'utf-8')))
+            .toMatchObject({ pid: process.pid, threadId, token: records[0] });
           return 'published';
         })).resolves.toBe('published');
         expect(existsSync(guardPath)).toBe(false);
@@ -405,34 +512,25 @@ describe('withFileLock', () => {
       expect(await readdir(dir)).toEqual([]);
     });
 
-    it('waits, instead of spinning, on a stale guard it cannot remove', async () => {
-      await writeFile(lockPath, staleLock());
-      await mkdir(guardPath);
-      await backdate(guardPath, 10_000);
-
-      await expect(withFileLock(lockPath, async () => {}, { timeoutMs: 150 })).rejects.toThrow(/Timed out/);
-      expect(existsSync(lockPath)).toBe(true);
-    });
-
     it('gives up committing while the guard stays taken', async () => {
       await withFileLock(lockPath, async (lock) => {
-        await writeFile(guardPath, liveHolder({ token: 'committing' }));
+        await writeGuard(liveHolder({ token: 'committing' }), 'committing');
         const publish = vi.fn(async () => {});
         await expect(lock.commit(publish)).rejects.toThrow(
           `Timed out waiting to commit under the config lock: ${guardPath} is held`,
         );
         expect(publish).not.toHaveBeenCalled();
-        await rm(guardPath);
+        await rm(guardPath, { recursive: true });
       }, { label: 'config', staleMs: 150 });
     });
 
     it('leaves its lock to lapse when the guard stays taken as it releases', async () => {
       await withFileLock(lockPath, async () => {
-        await writeFile(guardPath, liveHolder({ token: 'committing' }));
+        await writeGuard(liveHolder({ token: 'committing' }), 'committing');
       }, { staleMs: 150 });
       expect(existsSync(lockPath)).toBe(true);
 
-      await rm(guardPath);
+      await rm(guardPath, { recursive: true });
       // No longer held by this thread, so it is taken over at once.
       await expect(withFileLock(lockPath, async () => 'ran', { timeoutMs: 200 })).resolves.toBe('ran');
     });
