@@ -35,6 +35,7 @@ import {
 import {
   procDescribeProcess,
   procProcessStart,
+  processStartProbe,
   psDescribeProcess,
   psProcessStart,
   type ProcessDescriber,
@@ -746,7 +747,8 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       expect(await waitForCondition(() => portAnswers(port))).toBe(true);
       databasePid = await fetchPid(port);
       expect(parentPid(databasePid)).toBe(adopter.pid);
-      const [, start] = hostStartProbes()[0]!;
+      // The same probe the reclaim reads identities with on this platform.
+      const start = processStartProbe(process.platform);
       await writeFile(join(location, OXIGRAPH_OWNER_RECORD), JSON.stringify({
         daemon: { pid: deadDaemon.pid, start: 'exited' },
         launcher: { pid: adopter.pid, start: await start(adopter.pid!) },
