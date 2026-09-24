@@ -12,9 +12,6 @@ import {
 import {
   ADAPTER_SPARQL_TERM_POLICY,
   createSparqlTermPolicy,
-  sparqlIriPrefix,
-  sparqlIriTerm,
-  sparqlRdfTerm,
   type SparqlTermSite,
 } from '../src/adapters/sparql-term-policy.js';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
@@ -39,6 +36,13 @@ function legacyEscapeString(s: string): string {
 }
 
 const SITE: SparqlTermSite = { adapter: 'sparql-http', operation: 'insert' };
+
+// The entry points the adapters' statement builders call.
+const {
+  iriTerm: sparqlIriTerm,
+  rdfTerm: sparqlRdfTerm,
+  iriPrefix: sparqlIriPrefix,
+} = ADAPTER_SPARQL_TERM_POLICY;
 
 const IRIS = [
   'http://ex.org/s',

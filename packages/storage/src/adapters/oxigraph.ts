@@ -34,7 +34,7 @@ import {
   type Rfc64AuthorCommitCasUpdateV1,
 } from '../rfc64-author-commit-cas.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
-import { sparqlIriPrefix, sparqlIriTerm } from './sparql-term-policy.js';
+import { sparqlStatements } from './sparql-statements.js';
 import {
   assertQuadLiteralsMutf8Safe,
   classifySparqlOperation,
@@ -46,6 +46,9 @@ import {
   executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
+
+/** Every SPARQL statement this adapter builds by interpolation. */
+const statements = sparqlStatements('oxigraph');
 
 // SWM DATA segment (bucket `…/_shared_memory` + per-KA `…/_shared_memory/{author}/{n}`),
 // NOT the sibling `…/_shared_memory_meta`. Kept in sync with the sync-ingest guard.
@@ -378,8 +381,7 @@ export class OxigraphStore implements TripleStore {
   }
 
   async dropGraph(graphUri: string): Promise<void> {
-    const graph = sparqlIriTerm(graphUri, 'graph', { adapter: 'oxigraph', operation: 'dropGraph' });
-    this.store.update(`DROP SILENT GRAPH ${graph}`);
+    this.store.update(statements.dropGraph(graphUri));
     this.scheduleFlush();
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }
@@ -534,11 +536,7 @@ export class OxigraphStore implements TripleStore {
     prefix: string,
   ): Promise<number> {
     const before = this.store.size;
-    const site = { adapter: 'oxigraph', operation: 'deleteBySubjectPrefix' } as const;
-    const graph = sparqlIriTerm(graphUri, 'graph', site);
-    this.store.update(
-      `DELETE { GRAPH ${graph} { ?s ?p ?o } } WHERE { GRAPH ${graph} { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), ${sparqlIriPrefix(prefix, site)})) } }`,
-    );
+    this.store.update(statements.deleteBySubjectPrefix(graphUri, prefix));
     const removed = before - this.store.size;
     if (removed > 0) this.scheduleFlush();
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });

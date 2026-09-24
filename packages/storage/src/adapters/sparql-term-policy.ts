@@ -3,10 +3,12 @@
  * term that fails {@link formatSparqlTerm}, and how that is observed. The term
  * syntax itself lives in `sparql-terms.ts`.
  *
- * The adapters run under {@link ADAPTER_SPARQL_TERM_POLICY}, currently in
- * observe mode: a term that fails validation is counted and logged, then
- * rendered exactly as before validation existed. Until the hard-reject flip,
- * that still means stripping characters from a malformed IRI.
+ * The adapters build their statements with `sparql-statements.ts`, which
+ * renders every term under {@link ADAPTER_SPARQL_TERM_POLICY}. That policy is
+ * currently in observe mode: a term that fails validation is counted and
+ * logged, then rendered exactly as before validation existed. Until the
+ * hard-reject flip, that still means stripping characters from a malformed
+ * IRI.
  */
 import { createHmac, randomBytes } from 'node:crypto';
 import { getMetrics } from '@origintrail-official/dkg-core';
@@ -137,13 +139,6 @@ export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): Spar
  * position accepts only a bare IRI.
  */
 export const ADAPTER_SPARQL_TERM_POLICY = createSparqlTermPolicy('observe');
-
-/** The adapters' entry points, under {@link ADAPTER_SPARQL_TERM_POLICY}. */
-export const {
-  iriTerm: sparqlIriTerm,
-  rdfTerm: sparqlRdfTerm,
-  iriPrefix: sparqlIriPrefix,
-} = ADAPTER_SPARQL_TERM_POLICY;
 
 const INVALID_TERM_WARN_INTERVAL_MS = 60_000;
 const lastInvalidTermWarnAt = new Map<string, number>();

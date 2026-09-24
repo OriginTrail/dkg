@@ -71,8 +71,7 @@ import {
   raceStoreWorkAgainstAbort,
 } from '../abortable-store-work-lifecycle.js';
 import { parseNQuadsTextTolerant } from '../nquads-text.js';
-import { sparqlIriPrefix, sparqlIriTerm, sparqlRdfTerm } from './sparql-term-policy.js';
-import { buildBlankNodeSafeDelete } from './blank-node-safe-delete.js';
+import { sparqlStatements } from './sparql-statements.js';
 import {
   isStoreOperationTimeoutError,
   StoreOperationTimeoutError,
@@ -102,6 +101,10 @@ import {
   ManagedReadRecoveryCoordinatorV1,
 } from
   '../managed-read-recovery-coordinator.js';
+
+/** Every SPARQL statement this adapter builds by interpolation. */
+const statements = sparqlStatements('sparql-http');
+
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
@@ -667,27 +670,9 @@ export class SparqlHttpStore implements TripleStore {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'SparqlHttpStore.insert',
     });
-    const byGraph = new Map<string, DKGQuad[]>();
-    for (const q of quads) {
-      const g = q.graph || '';
-      if (!byGraph.has(g)) byGraph.set(g, []);
-      byGraph.get(g)!.push(q);
-    }
-    const site = { adapter: 'sparql-http', operation: 'insert' } as const;
-    const parts: string[] = [];
-    for (const [graph, list] of byGraph) {
-      const triples = list.map((q) =>
-        `${sparqlRdfTerm(q.subject, 'subject', site, 'allow')} ${sparqlIriTerm(q.predicate, 'predicate', site)} ${sparqlRdfTerm(q.object, 'object', site, 'allow')} .`,
-      ).join('\n    ');
-      if (graph) {
-        parts.push(`GRAPH ${sparqlIriTerm(graph, 'graph', site)} {\n    ${triples}\n  }`);
-      } else {
-        parts.push(triples);
-      }
-    }
-    const update = `INSERT DATA {\n  ${parts.join('\n  ')}\n}`;
+    const update = statements.insertData(quads);
     await this.runRemoteGraphMutation({
-      scope: { kind: 'graphs', graphs: [...byGraph.keys()] },
+      scope: { kind: 'graphs', graphs: [...new Set(quads.map((q) => q.graph || ''))] },
       update,
       options: {
         ...options,
@@ -701,12 +686,12 @@ export class SparqlHttpStore implements TripleStore {
     if (quads.length === 0) return;
     // SPARQL forbids blank nodes in `DELETE DATA` — a spec-compliant endpoint
     // (Oxigraph, Fuseki, …) rejects the whole statement with HTTP 400 if any
-    // quad's subject or object is a blank node. `buildBlankNodeSafeDelete`
-    // keeps ground quads on the fast `DELETE DATA` path and removes
+    // quad's subject or object is a blank node. The blank-node-safe builder
+    // behind `deleteData` keeps ground quads on the fast `DELETE DATA` path and removes
     // blank-node quads with `DELETE { … } WHERE { … }` (blank nodes rewritten
     // to variables) — the only spec-legal way to target existing blank-node
     // structure over the SPARQL protocol. See the helper for details.
-    const update = buildBlankNodeSafeDelete(quads, 'sparql-http');
+    const update = statements.deleteData(quads);
     if (!update) return;
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [...new Set(quads.map((q) => q.graph || ''))] },
@@ -745,21 +730,7 @@ export class SparqlHttpStore implements TripleStore {
     options?: QueryOptions,
   ): Promise<void> {
     const graphUri = pattern.graph;
-    const site = { adapter: 'sparql-http', operation: 'deleteByPattern' } as const;
-    const s = pattern.subject ? sparqlIriTerm(pattern.subject, 'subject', site) : '?s';
-    const p = pattern.predicate ? sparqlIriTerm(pattern.predicate, 'predicate', site) : '?p';
-    // A DELETE template cannot contain a blank node.
-    const o = pattern.object ? sparqlRdfTerm(pattern.object, 'object', site, 'reject') : '?o';
-    const triple = `${s} ${p} ${o}`;
-    let update: string;
-    if (graphUri) {
-      const graph = sparqlIriTerm(graphUri, 'graph', site);
-      update = `DELETE { GRAPH ${graph} { ${triple} } } WHERE { GRAPH ${graph} { ${triple} } }`;
-    } else {
-      // The DELETE template must use the `GRAPH` keyword — `{ ?g_ctx { … } }`
-      // is a syntax error that a spec-compliant endpoint rejects with HTTP 400.
-      update = `DELETE { GRAPH ?g_ctx { ${triple} } } WHERE { GRAPH ?g_ctx { ${triple} } }`;
-    }
+    const update = statements.deleteByPattern(pattern);
     await this.runRemoteGraphMutation({
       scope: graphUri
         ? { kind: 'graphs', graphs: [graphUri] }
@@ -778,9 +749,7 @@ export class SparqlHttpStore implements TripleStore {
       ...options,
       source: options?.source ?? 'sparql-http.deleteBySubjectPrefix.countBefore',
     });
-    const site = { adapter: 'sparql-http', operation: 'deleteBySubjectPrefix' } as const;
-    const graph = sparqlIriTerm(graphUri, 'graph', site);
-    const update = `DELETE { GRAPH ${graph} { ?s ?p ?o } } WHERE { GRAPH ${graph} { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), ${sparqlIriPrefix(prefix, site)})) } }`;
+    const update = statements.deleteBySubjectPrefix(graphUri, prefix);
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri] },
       update,
@@ -1149,9 +1118,8 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
-    const graph = sparqlIriTerm(graphUri, 'graph', { adapter: 'sparql-http', operation: 'hasGraph' });
     const r = await this.queryWithOperation(
-      `ASK { GRAPH ${graph} { ?s ?p ?o } }`,
+      statements.hasGraph(graphUri),
       { ...options, source: options?.source ?? 'sparql-http.hasGraph' },
       'hasGraph',
     );
@@ -1163,8 +1131,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
-    const graph = sparqlIriTerm(graphUri, 'graph', { adapter: 'sparql-http', operation: 'dropGraph' });
-    const update = `DROP SILENT GRAPH ${graph}`;
+    const update = statements.dropGraph(graphUri);
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri] },
       update,
@@ -1238,12 +1205,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
-    const graph = graphUri
-      ? sparqlIriTerm(graphUri, 'graph', { adapter: 'sparql-http', operation: 'countQuads' })
-      : undefined;
-    const sparql = graph
-      ? `SELECT (COUNT(*) AS ?c) WHERE { GRAPH ${graph} { ?s ?p ?o } }`
-      : `SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }`;
+    const sparql = statements.countQuads(graphUri);
     const r = await this.queryWithOperation(
       sparql,
       {
