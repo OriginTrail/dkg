@@ -11,6 +11,7 @@
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
+  AGENT_DID_PREFIX,
   createOperationContext,
   deriveCuratorDidFromCgId,
   SYSTEM_CONTEXT_GRAPHS,
@@ -26,8 +27,6 @@ import {
   type AgentsPhonebookFetchTrigger,
   type OnDemandAgentsPhonebookDeps,
 } from './sync/on-demand-agents-phonebook.js';
-
-const AGENT_DID_PREFIX = 'did:dkg:agent:';
 
 export class AgentsPhonebookMethods extends DKGAgentBase {
   /**
