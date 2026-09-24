@@ -1,12 +1,14 @@
 /**
- * The storage adapters' rollout policy for SPARQL terms: what happens to a
- * term that fails {@link formatSparqlTerm}, and how that is observed. The term
- * syntax itself is core's (`@origintrail-official/dkg-core`, `sparql-terms.ts`).
+ * The storage adapters' rollout policy for SPARQL terms: what a statement
+ * renders for a term that fails {@link formatSparqlTerm}. The term syntax
+ * itself is core's (`@origintrail-official/dkg-core`, `sparql-terms.ts`).
  *
- * The adapters build their statements with `sparql-statements.ts`, which
- * renders every term under {@link ADAPTER_SPARQL_TERM_POLICY}. That policy is
- * currently in observe mode: a term that fails validation is counted and
- * logged, then rendered exactly as before validation existed. Until the
+ * Rendering has no side effects. A term that fails validation becomes an
+ * {@link InvalidSparqlTerm} on the statement being built. The adapter reports
+ * it (`sparql-term-observer.ts`) when it runs the operation, through
+ * `reportedPlan` in `sparql-statements.ts`. The adapters use
+ * {@link ADAPTER_SPARQL_TERM_POLICY}, currently in observe mode: a failing
+ * term is rendered exactly as before validation existed. Until the
  * hard-reject flip, that still means stripping characters from a malformed
  * IRI.
  */
@@ -14,7 +16,6 @@ import { createHmac, randomBytes } from 'node:crypto';
 import {
   formatIriPrefix,
   formatSparqlTerm,
-  getMetrics,
   SparqlTermValidationError,
   unwrapIri,
   type SparqlTermKind,
@@ -32,107 +33,161 @@ export interface SparqlTermSite {
 }
 
 /**
- * What an adapter does with a term that fails validation. Both modes count it
- * in `dkg.store.sparql_invalid_terms_total` under this value as the
- * `enforcement` label, and warn at most once a minute.
+ * What a statement does with a term that fails validation. Either way the
+ * term is reported, under this value as the metric's `enforcement` label,
+ * when the adapter runs the operation.
  * - `observe`: render the term in its pre-validation form, so the statement
  *   is built exactly as before validation existed, and a release can confirm
  *   that no well-formed write trips the validators before they start
  *   rejecting. Whether the statement is then sent is up to the adapter: an
  *   aborted or refused operation never dispatches it.
- * - `reject`: throw a {@link SparqlTermValidationError}, so nothing is sent.
+ * - `reject`: throw a {@link SparqlTermRejectedError}, so the statement is
+ *   never built.
  */
 export type SparqlTermEnforcement = 'observe' | 'reject';
 
-/** The adapters' term entry points under one enforcement mode. */
-export interface SparqlTermPolicy {
+/**
+ * A term that failed validation, carried by the statement plan until the
+ * adapter reports it. It never holds the term itself, which is untrusted data
+ * that may be private content or a secret: only its length and a keyed
+ * fingerprint.
+ */
+export interface InvalidSparqlTerm {
+  readonly site: SparqlTermSite;
+  readonly position: ObservedTermPosition;
+  readonly kind: SparqlTermKind;
   readonly enforcement: SparqlTermEnforcement;
+  readonly length: number;
+  readonly fingerprint: string;
+}
+
+/** `<length> chars, fingerprint <hex>`, for logs and errors. */
+export function describeInvalidTerm(invalidTerm: InvalidSparqlTerm): string {
+  return `${invalidTerm.length} chars, fingerprint ${invalidTerm.fingerprint}`;
+}
+
+/**
+ * What reject mode throws. Its message carries only the diagnostic's metadata,
+ * and it has no `cause`, because the validator's own message quotes the term.
+ */
+export class SparqlTermRejectedError extends SparqlTermValidationError {
+  readonly invalidTerm: InvalidSparqlTerm;
+
+  constructor(invalidTerm: InvalidSparqlTerm) {
+    super(
+      `${invalidTerm.site.adapter}.${invalidTerm.site.operation}: invalid ${invalidTerm.kind} ` +
+        `in SPARQL ${invalidTerm.position} position (${describeInvalidTerm(invalidTerm)})`,
+      invalidTerm.kind,
+    );
+    this.name = 'SparqlTermRejectedError';
+    this.invalidTerm = invalidTerm;
+  }
+}
+
+/**
+ * Renders the terms of one statement built at one site, and collects those
+ * that fail validation. It never reports them itself.
+ */
+export interface SparqlTermRenderer {
   /**
    * A graph name, predicate or match-pattern subject: an IRI, never a blank
    * node. Pre-validation form: `<iri>` with IRI-breaking characters deleted.
    */
-  iriTerm(term: string, position: SparqlTermPosition, site: SparqlTermSite): string;
+  iri(term: string, position: SparqlTermPosition): string;
   /**
    * A statement subject or object, or a match-pattern object. Pre-validation
    * form: the term as given, `<…>`-wrapped when it is a bare IRI.
    */
-  rdfTerm(
-    term: string,
-    position: 'subject' | 'object',
-    site: SparqlTermSite,
-    blankNodes: 'allow' | 'reject',
-  ): string;
+  rdf(term: string, position: 'subject' | 'object', blankNodes: 'allow' | 'reject'): string;
   /**
    * A `deleteBySubjectPrefix` prefix. Pre-validation form: a string literal
    * that escapes only `\` and `"`.
    */
-  iriPrefix(prefix: string, site: SparqlTermSite): string;
+  prefix(prefix: string): string;
   /**
    * A blank-node label that the caller rewrites to a query variable instead of
    * sending. It is checked like any rendered term.
    */
-  checkBlankNodeLabel(label: string, position: 'subject' | 'object', site: SparqlTermSite): void;
+  checkBlankNodeLabel(label: string, position: 'subject' | 'object'): void;
+  /** The terms that failed validation so far, in rendering order. */
+  readonly invalidTerms: readonly InvalidSparqlTerm[];
+}
+
+export interface SparqlTermPolicy {
+  readonly enforcement: SparqlTermEnforcement;
+  /** A renderer for one statement built at `site`. */
+  renderer(site: SparqlTermSite): SparqlTermRenderer;
 }
 
 export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): SparqlTermPolicy {
-  /**
-   * A term failed validation. Any error other than a
-   * {@link SparqlTermValidationError} is a bug, not a bad term, and propagates.
-   */
-  function onInvalidTerm(
-    error: unknown,
-    term: string,
-    position: ObservedTermPosition,
-    site: SparqlTermSite,
-    legacy: (term: string) => string,
-  ): string {
-    if (!(error instanceof SparqlTermValidationError)) throw error;
-    recordInvalidTerm(term, position, error.kind, site, enforcement);
-    if (enforcement === 'reject') {
-      // A fresh error, without `cause`: the validator's message quotes the term.
-      throw new SparqlTermValidationError(
-        `${site.adapter}.${site.operation}: invalid ${error.kind} in SPARQL ${position} ` +
-          `position (${describeInvalidTerm(term)})`,
-        error.kind,
-      );
-    }
-    return legacy(term);
-  }
-
   return {
     enforcement,
-    iriTerm(term, position, site) {
-      try {
-        // Adapters key write scopes and revisions on the raw graph string, so a
-        // graph name must be bare here, although the grammar allows `<…>`.
-        if (position === 'graph' && unwrapIri(term) !== term) {
-          throw new SparqlTermValidationError('A storage graph name must be a bare IRI', 'iri');
-        }
-        return formatSparqlTerm(term, { position });
-      } catch (error) {
-        return onInvalidTerm(error, term, position, site, legacyStrippedIri);
+    renderer(site) {
+      const invalidTerms: InvalidSparqlTerm[] = [];
+
+      /**
+       * A term failed validation. Any error other than a
+       * {@link SparqlTermValidationError} is a bug, not a bad term, and
+       * propagates.
+       */
+      function onInvalidTerm(
+        error: unknown,
+        term: string,
+        position: ObservedTermPosition,
+        legacy: (term: string) => string,
+      ): string {
+        if (!(error instanceof SparqlTermValidationError)) throw error;
+        const invalidTerm: InvalidSparqlTerm = {
+          site,
+          position,
+          kind: error.kind,
+          enforcement,
+          length: term.length,
+          fingerprint: invalidTermFingerprint(term),
+        };
+        if (enforcement === 'reject') throw new SparqlTermRejectedError(invalidTerm);
+        invalidTerms.push(invalidTerm);
+        return legacy(term);
       }
-    },
-    rdfTerm(term, position, site, blankNodes) {
-      try {
-        return formatSparqlTerm(term, { position, blankNodes });
-      } catch (error) {
-        return onInvalidTerm(error, term, position, site, legacyRdfTerm);
-      }
-    },
-    iriPrefix(prefix, site) {
-      try {
-        return formatIriPrefix(prefix);
-      } catch (error) {
-        return onInvalidTerm(error, prefix, 'subject-prefix', site, legacyStringLiteral);
-      }
-    },
-    checkBlankNodeLabel(label, position, site) {
-      try {
-        formatSparqlTerm(label, { position, blankNodes: 'allow' });
-      } catch (error) {
-        onInvalidTerm(error, label, position, site, (term) => term);
-      }
+
+      return {
+        iri(term, position) {
+          try {
+            // Adapters key write scopes and revisions on the raw graph string,
+            // so a graph name must be bare here, although the grammar allows `<…>`.
+            if (position === 'graph' && unwrapIri(term) !== term) {
+              throw new SparqlTermValidationError('A storage graph name must be a bare IRI', 'iri');
+            }
+            return formatSparqlTerm(term, { position });
+          } catch (error) {
+            return onInvalidTerm(error, term, position, legacyStrippedIri);
+          }
+        },
+        rdf(term, position, blankNodes) {
+          try {
+            return formatSparqlTerm(term, { position, blankNodes });
+          } catch (error) {
+            return onInvalidTerm(error, term, position, legacyRdfTerm);
+          }
+        },
+        prefix(prefix) {
+          try {
+            return formatIriPrefix(prefix);
+          } catch (error) {
+            return onInvalidTerm(error, prefix, 'subject-prefix', legacyStringLiteral);
+          }
+        },
+        checkBlankNodeLabel(label, position) {
+          try {
+            formatSparqlTerm(label, { position, blankNodes: 'allow' });
+          } catch (error) {
+            onInvalidTerm(error, label, position, (term) => term);
+          }
+        },
+        get invalidTerms() {
+          return [...invalidTerms];
+        },
+      };
     },
   };
 }
@@ -148,59 +203,13 @@ export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): Spar
  */
 export const ADAPTER_SPARQL_TERM_POLICY = createSparqlTermPolicy('observe');
 
-const INVALID_TERM_WARN_INTERVAL_MS = 60_000;
-const lastInvalidTermWarnAt = new Map<string, number>();
-
-// Terms are untrusted data that may hold private graph content or secrets, so
-// the warning never includes one. A fingerprint keyed per process lets an
-// operator match repeats in one node's logs, but it cannot be checked against
-// guessed values or correlated across nodes and restarts.
+// A fingerprint keyed per process lets an operator match repeats in one
+// node's logs, but it cannot be checked against guessed values or correlated
+// across nodes and restarts.
 const INVALID_TERM_FINGERPRINT_KEY = randomBytes(32);
 
 function invalidTermFingerprint(term: string): string {
   return createHmac('sha256', INVALID_TERM_FINGERPRINT_KEY).update(term).digest('hex').slice(0, 12);
-}
-
-function describeInvalidTerm(term: string): string {
-  return `${term.length} chars, fingerprint ${invalidTermFingerprint(term)}`;
-}
-
-/**
- * Count every invalid term under its enforcement mode; warn at most once a
- * minute per site, label and mode, with the term's length and fingerprint but
- * never the term itself.
- */
-function recordInvalidTerm(
-  term: string,
-  position: ObservedTermPosition,
-  kind: SparqlTermKind,
-  site: SparqlTermSite,
-  enforcement: SparqlTermEnforcement,
-): void {
-  try {
-    getMetrics().storeSparqlInvalidTermsTotal.add(1, {
-      adapter: site.adapter,
-      operation: site.operation,
-      position,
-      kind,
-      enforcement,
-    });
-  } catch { /* metrics unavailable in some harnesses — never fail the write */ }
-
-  const key = `${site.adapter}|${site.operation}|${position}|${kind}|${enforcement}`;
-  const now = Date.now();
-  const lastWarnAt = lastInvalidTermWarnAt.get(key);
-  if (lastWarnAt !== undefined && now - lastWarnAt < INVALID_TERM_WARN_INTERVAL_MS) return;
-  lastInvalidTermWarnAt.set(key, now);
-  const outcome = enforcement === 'reject'
-    ? 'Rejected it (reject mode). '
-    : 'Rendered it in the pre-validation form (observe mode); a later release will reject it. ';
-  console.warn(
-    `[storage] ${site.adapter}.${site.operation}: invalid ${kind} in SPARQL ${position} ` +
-      `position (${describeInvalidTerm(term)}; the value is not logged). ${outcome}` +
-      'Further occurrences are counted in dkg.store.sparql_invalid_terms_total ' +
-      'and warned at most once a minute.',
-  );
 }
 
 // The pre-validation adapter renderers, byte for byte. Only a term that failed

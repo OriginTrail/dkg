@@ -2,32 +2,38 @@
  * The SPARQL statements the storage adapters build by string interpolation.
  *
  * Each builder returns a plan: the statement, the store operation it runs as,
- * and for an update the graphs it may write. The same operation labels every
- * term the builder renders through the adapters' term policy
- * (`sparql-term-policy.ts`), and the write scope comes from the same pass that
- * builds the statement. An adapter supplies only its identity, then sends the
- * plan under the plan's own operation and scope.
+ * for an update the graphs it may write, and the terms that failed validation
+ * while it was rendered. Building a plan has no side effects. The adapter
+ * reports the plan's invalid terms when it runs the operation, through
+ * {@link reportedPlan}, and then sends the plan under its own operation and
+ * scope. The same operation labels every term the builder renders, and the
+ * write scope comes from the same pass that builds the statement.
  */
 import type { GraphWriteScope } from '../graph-write-gen.js';
 import type { Quad } from '../triple-store.js';
-import { buildBlankNodeSafeDelete } from './blank-node-safe-delete.js';
+import { renderBlankNodeSafeDelete } from './blank-node-safe-delete.js';
+import { reportInvalidSparqlTerms } from './sparql-term-observer.js';
 import {
   ADAPTER_SPARQL_TERM_POLICY,
+  SparqlTermRejectedError,
+  type InvalidSparqlTerm,
   type SparqlTermPolicy,
   type SparqlTermSite,
 } from './sparql-term-policy.js';
 
-/** A query, and the store operation it runs as. */
+/** A query, the store operation it runs as, and its invalid terms. */
 export interface SparqlQueryPlan {
   readonly operation: 'hasGraph' | 'countQuads';
   readonly sparql: string;
+  readonly invalidTerms: readonly InvalidSparqlTerm[];
 }
 
-/** An update, the store operation it runs as, and the graphs it may write. */
+/** An update, the store operation it runs as, the graphs it may write, and its invalid terms. */
 export interface SparqlUpdatePlan {
   readonly operation: 'insert' | 'delete' | 'deleteByPattern' | 'deleteBySubjectPrefix' | 'dropGraph';
   readonly update: string;
   readonly scope: GraphWriteScope;
+  readonly invalidTerms: readonly InvalidSparqlTerm[];
 }
 
 export interface SparqlStatements {
@@ -51,17 +57,38 @@ export interface SparqlStatements {
   countQuads(graph?: string): SparqlQueryPlan;
 }
 
+/**
+ * Build a plan and report its invalid terms: the adapter-operation boundary.
+ * Adapters call this when they run an operation, before admission or
+ * dispatch, so each invalid term is reported exactly once, whether or not the
+ * statement is then sent. A term rejected in reject mode is reported the same
+ * way before the error propagates.
+ */
+export function reportedPlan<P extends { readonly invalidTerms: readonly InvalidSparqlTerm[] } | null>(
+  build: () => P,
+): P {
+  let plan: P;
+  try {
+    plan = build();
+  } catch (error) {
+    if (error instanceof SparqlTermRejectedError) reportInvalidSparqlTerms([error.invalidTerm]);
+    throw error;
+  }
+  if (plan !== null) reportInvalidSparqlTerms(plan.invalidTerms);
+  return plan;
+}
+
 export function sparqlStatements(
   adapter: SparqlTermSite['adapter'],
   terms: SparqlTermPolicy = ADAPTER_SPARQL_TERM_POLICY,
 ): SparqlStatements {
-  const site = (operation: SparqlTermSite['operation']): SparqlTermSite => ({ adapter, operation });
+  const renderer = (operation: SparqlTermSite['operation']) => terms.renderer({ adapter, operation });
   const graphs = (...graphUris: string[]): GraphWriteScope => ({ kind: 'graphs', graphs: graphUris });
 
   return {
     insertData(quads) {
       const operation = 'insert';
-      const at = site(operation);
+      const render = renderer(operation);
       const byGraph = new Map<string, Quad[]>();
       for (const q of quads) {
         const g = q.graph || '';
@@ -71,85 +98,80 @@ export function sparqlStatements(
       const parts: string[] = [];
       for (const [graph, list] of byGraph) {
         const triples = list.map((q) =>
-          `${terms.rdfTerm(q.subject, 'subject', at, 'allow')} ${terms.iriTerm(q.predicate, 'predicate', at)} ${terms.rdfTerm(q.object, 'object', at, 'allow')} .`,
+          `${render.rdf(q.subject, 'subject', 'allow')} ${render.iri(q.predicate, 'predicate')} ${render.rdf(q.object, 'object', 'allow')} .`,
         ).join('\n    ');
         if (graph) {
-          parts.push(`GRAPH ${terms.iriTerm(graph, 'graph', at)} {\n    ${triples}\n  }`);
+          parts.push(`GRAPH ${render.iri(graph, 'graph')} {\n    ${triples}\n  }`);
         } else {
           parts.push(triples);
         }
       }
-      return {
-        operation,
-        update: `INSERT DATA {\n  ${parts.join('\n  ')}\n}`,
-        scope: graphs(...byGraph.keys()),
-      };
+      const update = `INSERT DATA {\n  ${parts.join('\n  ')}\n}`;
+      return { operation, update, scope: graphs(...byGraph.keys()), invalidTerms: render.invalidTerms };
     },
 
     deleteData(quads) {
-      const update = buildBlankNodeSafeDelete(quads, adapter, terms);
+      const operation = 'delete';
+      const render = renderer(operation);
+      const update = renderBlankNodeSafeDelete(quads, render);
       if (update === null) return null;
       return {
-        operation: 'delete',
+        operation,
         update,
         scope: graphs(...new Set(quads.map((q) => q.graph || ''))),
+        invalidTerms: render.invalidTerms,
       };
     },
 
     deleteByPattern(pattern) {
       const operation = 'deleteByPattern';
-      const at = site(operation);
-      const s = pattern.subject ? terms.iriTerm(pattern.subject, 'subject', at) : '?s';
-      const p = pattern.predicate ? terms.iriTerm(pattern.predicate, 'predicate', at) : '?p';
-      const o = pattern.object ? terms.rdfTerm(pattern.object, 'object', at, 'reject') : '?o';
+      const render = renderer(operation);
+      const s = pattern.subject ? render.iri(pattern.subject, 'subject') : '?s';
+      const p = pattern.predicate ? render.iri(pattern.predicate, 'predicate') : '?p';
+      const o = pattern.object ? render.rdf(pattern.object, 'object', 'reject') : '?o';
       const triple = `${s} ${p} ${o}`;
       // The template needs the `GRAPH` keyword even for the graph variable:
       // `{ ?g_ctx { … } }` is a syntax error that a spec-compliant endpoint
       // rejects with HTTP 400.
-      const graph = pattern.graph ? terms.iriTerm(pattern.graph, 'graph', at) : '?g_ctx';
+      const graph = pattern.graph ? render.iri(pattern.graph, 'graph') : '?g_ctx';
+      const update = `DELETE { GRAPH ${graph} { ${triple} } } WHERE { GRAPH ${graph} { ${triple} } }`;
       return {
         operation,
-        update: `DELETE { GRAPH ${graph} { ${triple} } } WHERE { GRAPH ${graph} { ${triple} } }`,
+        update,
         scope: pattern.graph ? graphs(pattern.graph) : { kind: 'all' },
+        invalidTerms: render.invalidTerms,
       };
     },
 
     deleteBySubjectPrefix(graphUri, prefix) {
       const operation = 'deleteBySubjectPrefix';
-      const at = site(operation);
-      const graph = terms.iriTerm(graphUri, 'graph', at);
-      return {
-        operation,
-        update: `DELETE { GRAPH ${graph} { ?s ?p ?o } } WHERE { GRAPH ${graph} { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), ${terms.iriPrefix(prefix, at)})) } }`,
-        scope: graphs(graphUri),
-      };
+      const render = renderer(operation);
+      const graph = render.iri(graphUri, 'graph');
+      const update = `DELETE { GRAPH ${graph} { ?s ?p ?o } } WHERE { GRAPH ${graph} { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), ${render.prefix(prefix)})) } }`;
+      return { operation, update, scope: graphs(graphUri), invalidTerms: render.invalidTerms };
     },
 
     dropGraph(graphUri) {
       const operation = 'dropGraph';
-      return {
-        operation,
-        update: `DROP SILENT GRAPH ${terms.iriTerm(graphUri, 'graph', site(operation))}`,
-        scope: graphs(graphUri),
-      };
+      const render = renderer(operation);
+      const update = `DROP SILENT GRAPH ${render.iri(graphUri, 'graph')}`;
+      return { operation, update, scope: graphs(graphUri), invalidTerms: render.invalidTerms };
     },
 
     hasGraph(graphUri) {
       const operation = 'hasGraph';
-      return {
-        operation,
-        sparql: `ASK { GRAPH ${terms.iriTerm(graphUri, 'graph', site(operation))} { ?s ?p ?o } }`,
-      };
+      const render = renderer(operation);
+      const sparql = `ASK { GRAPH ${render.iri(graphUri, 'graph')} { ?s ?p ?o } }`;
+      return { operation, sparql, invalidTerms: render.invalidTerms };
     },
 
     countQuads(graphUri) {
       const operation = 'countQuads';
-      return {
-        operation,
-        sparql: graphUri
-          ? `SELECT (COUNT(*) AS ?c) WHERE { GRAPH ${terms.iriTerm(graphUri, 'graph', site(operation))} { ?s ?p ?o } }`
-          : 'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }',
-      };
+      const render = renderer(operation);
+      const sparql = graphUri
+        ? `SELECT (COUNT(*) AS ?c) WHERE { GRAPH ${render.iri(graphUri, 'graph')} { ?s ?p ?o } }`
+        : 'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }';
+      return { operation, sparql, invalidTerms: render.invalidTerms };
     },
   };
 }

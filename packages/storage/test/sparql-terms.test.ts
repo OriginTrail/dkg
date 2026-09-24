@@ -10,8 +10,12 @@ import {
 import {
   ADAPTER_SPARQL_TERM_POLICY,
   createSparqlTermPolicy,
+  SparqlTermRejectedError,
+  type SparqlTermPolicy,
+  type SparqlTermRenderer,
   type SparqlTermSite,
 } from '../src/adapters/sparql-term-policy.js';
+import { reportedPlan } from '../src/adapters/sparql-statements.js';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 // Frozen copies of the adapter formatters sparql-terms replaced. They are the
@@ -35,15 +39,37 @@ function legacyEscapeString(s: string): string {
 
 const SITE: SparqlTermSite = { adapter: 'sparql-http', operation: 'insert' };
 
-// The same entry points under the reject policy: the hard-reject path.
-const REJECT = createSparqlTermPolicy('reject');
+/**
+ * One term at a time, the way an adapter handles a statement: render it for
+ * the site, then report the invalid terms through `reportedPlan`.
+ */
+function asAdapter(policy: SparqlTermPolicy) {
+  const run = <T>(site: SparqlTermSite, render: (renderer: SparqlTermRenderer) => T): T =>
+    reportedPlan(() => {
+      const renderer = policy.renderer(site);
+      const value = render(renderer);
+      return { value, invalidTerms: renderer.invalidTerms };
+    }).value;
+  return {
+    iriTerm: (term: string, position: SparqlTermPosition, site: SparqlTermSite) =>
+      run(site, (renderer) => renderer.iri(term, position)),
+    rdfTerm: (term: string, position: 'subject' | 'object', site: SparqlTermSite, blankNodes: 'allow' | 'reject') =>
+      run(site, (renderer) => renderer.rdf(term, position, blankNodes)),
+    iriPrefix: (prefix: string, site: SparqlTermSite) => run(site, (renderer) => renderer.prefix(prefix)),
+    checkBlankNodeLabel: (label: string, position: 'subject' | 'object', site: SparqlTermSite) =>
+      run(site, (renderer) => renderer.checkBlankNodeLabel(label, position)),
+  };
+}
 
-// The entry points the adapters' statement builders call.
+// The same entry points under the reject policy: the hard-reject path.
+const REJECT = asAdapter(createSparqlTermPolicy('reject'));
+
+// The entry points the adapters' statement builders use.
 const {
   iriTerm: sparqlIriTerm,
   rdfTerm: sparqlRdfTerm,
   iriPrefix: sparqlIriPrefix,
-} = ADAPTER_SPARQL_TERM_POLICY;
+} = asAdapter(ADAPTER_SPARQL_TERM_POLICY);
 
 const IRIS = [
   'http://ex.org/s',
@@ -324,7 +350,7 @@ describe('the enforcement policy', () => {
 
   it('observe mode sends the pre-validation form and reports observe', () => {
     const observed = observeInvalidSparqlTerms();
-    const policy = createSparqlTermPolicy('observe');
+    const policy = asAdapter(createSparqlTermPolicy('observe'));
     expect(policy.iriTerm('urn:a^b', 'graph', SITE)).toBe('<urn:ab>');
     expect(observed.counted).toEqual([invalid('observe', 'graph', 'iri')]);
     // Rendering is all the policy knows about; the adapter may never dispatch it.
@@ -336,7 +362,7 @@ describe('the enforcement policy', () => {
 
   it('reject mode throws without quoting the term, and reports reject', () => {
     const observed = observeInvalidSparqlTerms();
-    const policy = createSparqlTermPolicy('reject');
+    const policy = asAdapter(createSparqlTermPolicy('reject'));
     const secret = '"apiKey=sk-secret\n"';
     let error: unknown;
     try {
@@ -359,7 +385,7 @@ describe('the enforcement policy', () => {
 
   it('reject mode throws from every entry point and passes well-formed terms', () => {
     const observed = observeInvalidSparqlTerms();
-    const policy = createSparqlTermPolicy('reject');
+    const policy = asAdapter(createSparqlTermPolicy('reject'));
     expect(() => policy.iriTerm('urn:a b', 'graph', SITE)).toThrow(SparqlTermValidationError);
     expect(() => policy.rdfTerm('_:b0', 'object', SITE, 'reject')).toThrow(SparqlTermValidationError);
     expect(() => policy.iriPrefix('urn:a\nb', SITE)).toThrow(SparqlTermValidationError);
@@ -371,6 +397,57 @@ describe('the enforcement policy', () => {
     expect(policy.iriPrefix('urn:', SITE)).toBe('"urn:"');
     expect(() => policy.checkBlankNodeLabel('_:b0', 'subject', SITE)).not.toThrow();
     expect(observed.counted).toHaveLength(4);
+  });
+});
+
+describe('rendering and reporting', () => {
+  it('renders without side effects, keeping only metadata about an invalid term', () => {
+    const observed = observeInvalidSparqlTerms();
+    const renderer = ADAPTER_SPARQL_TERM_POLICY.renderer(SITE);
+    const secret = '"apiKey=sk-secret\n"';
+
+    expect(renderer.rdf(secret, 'object', 'allow')).toBe(secret);
+    expect(observed.counted).toEqual([]);
+    expect(observed.warnings).toEqual([]);
+    expect(renderer.invalidTerms).toEqual([{
+      site: SITE,
+      position: 'object',
+      kind: 'literal',
+      enforcement: 'observe',
+      length: secret.length,
+      fingerprint: expect.stringMatching(/^[0-9a-f]{12}$/),
+    }]);
+    expect(JSON.stringify(renderer.invalidTerms)).not.toContain('sk-secret');
+  });
+
+  it('reports each invalid term exactly once, at the adapter boundary', () => {
+    const observed = observeInvalidSparqlTerms();
+    const plan = reportedPlan(() => {
+      const renderer = ADAPTER_SPARQL_TERM_POLICY.renderer(SITE);
+      renderer.iri('urn:a b', 'graph');
+      renderer.iri('urn:c^d', 'predicate');
+      return { invalidTerms: renderer.invalidTerms };
+    });
+    expect(plan.invalidTerms).toHaveLength(2);
+    expect(observed.counted.map(({ position }) => position)).toEqual(['graph', 'predicate']);
+  });
+
+  it('throws in reject mode without reporting, until the adapter boundary reports it once', () => {
+    const observed = observeInvalidSparqlTerms();
+    const renderer = createSparqlTermPolicy('reject').renderer(SITE);
+    let error: unknown;
+    try {
+      renderer.iri('urn:a b', 'graph');
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(SparqlTermRejectedError);
+    expect(observed.counted).toEqual([]);
+
+    expect(() => reportedPlan(() => {
+      throw error;
+    })).toThrow(SparqlTermRejectedError);
+    expect(observed.counted.map(({ enforcement }) => enforcement)).toEqual(['reject']);
   });
 });
 

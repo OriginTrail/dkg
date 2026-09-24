@@ -72,6 +72,7 @@ import {
 } from '../abortable-store-work-lifecycle.js';
 import { parseNQuadsTextTolerant } from '../nquads-text.js';
 import {
+  reportedPlan,
   sparqlStatements,
   type SparqlQueryPlan,
   type SparqlUpdatePlan,
@@ -674,7 +675,7 @@ export class SparqlHttpStore implements TripleStore {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'SparqlHttpStore.insert',
     });
-    await this.runUpdatePlan(statements.insertData(quads), options);
+    await this.runUpdatePlan(() => statements.insertData(quads), options);
   }
 
   async delete(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
@@ -686,9 +687,7 @@ export class SparqlHttpStore implements TripleStore {
     // blank-node quads with `DELETE { … } WHERE { … }` (blank nodes rewritten
     // to variables) — the only spec-legal way to target existing blank-node
     // structure over the SPARQL protocol. See the helper for details.
-    const plan = statements.deleteData(quads);
-    if (!plan) return;
-    await this.runUpdatePlan(plan, options);
+    await this.runUpdatePlan(() => statements.deleteData(quads), options);
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>, options?: QueryOptions): Promise<number> {
@@ -716,7 +715,7 @@ export class SparqlHttpStore implements TripleStore {
     pattern: Partial<DKGQuad>,
     options?: QueryOptions,
   ): Promise<void> {
-    await this.runUpdatePlan(statements.deleteByPattern(pattern), options);
+    await this.runUpdatePlan(() => statements.deleteByPattern(pattern), options);
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
@@ -724,7 +723,7 @@ export class SparqlHttpStore implements TripleStore {
       ...options,
       source: options?.source ?? 'sparql-http.deleteBySubjectPrefix.countBefore',
     });
-    await this.runUpdatePlan(statements.deleteBySubjectPrefix(graphUri, prefix), options);
+    await this.runUpdatePlan(() => statements.deleteBySubjectPrefix(graphUri, prefix), options);
     const after = await this.countQuads(graphUri, {
       ...options,
       source: options?.source ?? 'sparql-http.deleteBySubjectPrefix.countAfter',
@@ -893,9 +892,17 @@ export class SparqlHttpStore implements TripleStore {
       || this.consistencyProfile === required;
   }
 
-  /** Send a statement plan under its own operation and write scope. */
-  private runUpdatePlan(plan: SparqlUpdatePlan, options?: QueryOptions): Promise<void> {
-    return this.runRemoteGraphMutation({
+  /**
+   * Build a statement plan and report its invalid terms, then send it under
+   * its own operation and write scope. Nothing to send when the plan is null.
+   */
+  private async runUpdatePlan(
+    build: () => SparqlUpdatePlan | null,
+    options?: QueryOptions,
+  ): Promise<void> {
+    const plan = reportedPlan(build);
+    if (plan === null) return;
+    await this.runRemoteGraphMutation({
       scope: plan.scope,
       update: plan.update,
       options: { ...options, source: options?.source ?? `sparql-http.${plan.operation}` },
@@ -903,8 +910,9 @@ export class SparqlHttpStore implements TripleStore {
     });
   }
 
-  /** Run a statement plan's query under its own operation. */
-  private runQueryPlan(plan: SparqlQueryPlan, options?: QueryOptions): Promise<QueryResult> {
+  /** Build a statement plan and report its invalid terms, then run its query under its own operation. */
+  private async runQueryPlan(build: () => SparqlQueryPlan, options?: QueryOptions): Promise<QueryResult> {
+    const plan = reportedPlan(build);
     return this.queryWithOperation(
       plan.sparql,
       { ...options, source: options?.source ?? `sparql-http.${plan.operation}` },
@@ -1103,7 +1111,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
-    const r = await this.runQueryPlan(statements.hasGraph(graphUri), options);
+    const r = await this.runQueryPlan(() => statements.hasGraph(graphUri), options);
     return r.type === 'boolean' && r.value;
   }
 
@@ -1112,7 +1120,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
-    await this.runUpdatePlan(statements.dropGraph(graphUri), options);
+    await this.runUpdatePlan(() => statements.dropGraph(graphUri), options);
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {
@@ -1177,7 +1185,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
-    const r = await this.runQueryPlan(statements.countQuads(graphUri), options);
+    const r = await this.runQueryPlan(() => statements.countQuads(graphUri), options);
     if (r.type === 'bindings' && r.bindings.length > 0) {
       const c = String(r.bindings[0].c ?? '');
       const stripped = c.replace(/^"|"$/g, '');

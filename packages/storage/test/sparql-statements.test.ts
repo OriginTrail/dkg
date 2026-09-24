@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
+  reportedPlan,
   sparqlStatements,
   type SparqlQueryPlan,
   type SparqlStatements,
   type SparqlUpdatePlan,
 } from '../src/adapters/sparql-statements.js';
-import { createSparqlTermPolicy } from '../src/adapters/sparql-term-policy.js';
-import { SparqlTermValidationError } from '@origintrail-official/dkg-core';
+import { createSparqlTermPolicy, SparqlTermRejectedError } from '../src/adapters/sparql-term-policy.js';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 const ADAPTERS = ['oxigraph', 'sparql-http', 'blazegraph'] as const;
@@ -28,6 +28,7 @@ const WELL_FORMED: Array<[string, (statements: SparqlStatements) => Plan, Plan]>
       update: 'INSERT DATA {\n  GRAPH <http://ex.org/g> {\n    <http://ex.org/s> <http://ex.org/p> "v" .\n  }\n' +
         '  _:b0 <http://ex.org/p> <http://ex.org/o> .\n}',
       scope: { kind: 'graphs', graphs: [G, ''] },
+      invalidTerms: [],
     },
   ],
   [
@@ -42,6 +43,7 @@ const WELL_FORMED: Array<[string, (statements: SparqlStatements) => Plan, Plan]>
         'DELETE { GRAPH <http://ex.org/g> {\n    ?b0 <http://ex.org/p> "w" .\n  } } ' +
         'WHERE { GRAPH <http://ex.org/g> {\n    ?b0 <http://ex.org/p> "w" .\n  } }',
       scope: { kind: 'graphs', graphs: [G] },
+      invalidTerms: [],
     },
   ],
   ['deleteData with nothing to delete', (statements) => statements.deleteData([]), null],
@@ -53,6 +55,7 @@ const WELL_FORMED: Array<[string, (statements: SparqlStatements) => Plan, Plan]>
       update: 'DELETE { GRAPH <http://ex.org/g> { <http://ex.org/s> ?p "v" } } ' +
         'WHERE { GRAPH <http://ex.org/g> { <http://ex.org/s> ?p "v" } }',
       scope: { kind: 'graphs', graphs: [G] },
+      invalidTerms: [],
     },
   ],
   [
@@ -62,6 +65,7 @@ const WELL_FORMED: Array<[string, (statements: SparqlStatements) => Plan, Plan]>
       operation: 'deleteByPattern',
       update: 'DELETE { GRAPH ?g_ctx { ?s <http://ex.org/p> ?o } } WHERE { GRAPH ?g_ctx { ?s <http://ex.org/p> ?o } }',
       scope: { kind: 'all' },
+      invalidTerms: [],
     },
   ],
   [
@@ -72,22 +76,32 @@ const WELL_FORMED: Array<[string, (statements: SparqlStatements) => Plan, Plan]>
       update: 'DELETE { GRAPH <http://ex.org/g> { ?s ?p ?o } } WHERE { GRAPH <http://ex.org/g> ' +
         '{ ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "http://ex.org/entity/")) } }',
       scope: { kind: 'graphs', graphs: [G] },
+      invalidTerms: [],
     },
   ],
   [
     'dropGraph',
     (statements) => statements.dropGraph(G),
-    { operation: 'dropGraph', update: 'DROP SILENT GRAPH <http://ex.org/g>', scope: { kind: 'graphs', graphs: [G] } },
+    {
+      operation: 'dropGraph',
+      update: 'DROP SILENT GRAPH <http://ex.org/g>',
+      scope: { kind: 'graphs', graphs: [G] },
+      invalidTerms: [],
+    },
   ],
   [
     'hasGraph',
     (statements) => statements.hasGraph(G),
-    { operation: 'hasGraph', sparql: 'ASK { GRAPH <http://ex.org/g> { ?s ?p ?o } }' },
+    { operation: 'hasGraph', sparql: 'ASK { GRAPH <http://ex.org/g> { ?s ?p ?o } }', invalidTerms: [] },
   ],
   [
     'countQuads in one graph',
     (statements) => statements.countQuads(G),
-    { operation: 'countQuads', sparql: 'SELECT (COUNT(*) AS ?c) WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }' },
+    {
+      operation: 'countQuads',
+      sparql: 'SELECT (COUNT(*) AS ?c) WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }',
+      invalidTerms: [],
+    },
   ],
   [
     'countQuads across the store',
@@ -95,6 +109,7 @@ const WELL_FORMED: Array<[string, (statements: SparqlStatements) => Plan, Plan]>
     {
       operation: 'countQuads',
       sparql: 'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }',
+      invalidTerms: [],
     },
   ],
 ];
@@ -112,7 +127,7 @@ describe('sparqlStatements', () => {
     }
   });
 
-  it.each(ADAPTERS)('labels every builder with adapter %s and its own operation', (adapter) => {
+  it.each(ADAPTERS)('labels every builder with adapter %s and its own operation, without reporting', (adapter) => {
     const observed = observeInvalidSparqlTerms();
     try {
       const statements = sparqlStatements(adapter);
@@ -128,17 +143,41 @@ describe('sparqlStatements', () => {
         statements.countQuads(bad),
       ];
 
-      expect(observed.counted.map((point) => [point.adapter, point.operation, point.position])).toEqual([
-        [adapter, 'insert', 'graph'],
-        [adapter, 'delete', 'graph'],
-        [adapter, 'deleteByPattern', 'graph'],
-        [adapter, 'deleteBySubjectPrefix', 'graph'],
-        [adapter, 'dropGraph', 'graph'],
-        [adapter, 'hasGraph', 'graph'],
-        [adapter, 'countQuads', 'graph'],
+      // Building is side-effect free: each plan only carries its invalid term.
+      expect(observed.counted).toEqual([]);
+      expect(observed.warnings).toEqual([]);
+      expect(plans.map((plan) => plan.invalidTerms.map((term) => [term.site.adapter, term.site.operation, term.position])))
+        .toEqual([
+          [[adapter, 'insert', 'graph']],
+          [[adapter, 'delete', 'graph']],
+          [[adapter, 'deleteByPattern', 'graph']],
+          [[adapter, 'deleteBySubjectPrefix', 'graph']],
+          [[adapter, 'dropGraph', 'graph']],
+          [[adapter, 'hasGraph', 'graph']],
+          [[adapter, 'countQuads', 'graph']],
+        ]);
+      // A plan runs as the same operation its terms are labelled with.
+      expect(plans.map((plan) => plan.operation)).toEqual(plans.map((plan) => plan.invalidTerms[0].site.operation));
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('reports a plan\'s invalid terms once, when the adapter runs it', () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const statements = sparqlStatements('oxigraph');
+      const plan = reportedPlan(() => statements.deleteByPattern({
+        graph: 'http://ex.org/g^x',
+        predicate: 'http://ex.org/p q',
+      }));
+      expect(plan.invalidTerms).toHaveLength(2);
+      expect(observed.counted.map((point) => [point.operation, point.position])).toEqual([
+        ['deleteByPattern', 'predicate'],
+        ['deleteByPattern', 'graph'],
       ]);
-      // A plan runs as the same operation its terms were counted under.
-      expect(plans.map((plan) => plan.operation)).toEqual(observed.counted.map((point) => point.operation));
+      expect(reportedPlan(() => statements.deleteData([]))).toBeNull();
+      expect(observed.counted).toHaveLength(2);
     } finally {
       observed.restore();
     }
@@ -148,12 +187,15 @@ describe('sparqlStatements', () => {
     const observed = observeInvalidSparqlTerms();
     try {
       const statements = sparqlStatements('sparql-http', createSparqlTermPolicy('reject'));
-      expect(() => statements.dropGraph('http://ex.org/g^x')).toThrow(SparqlTermValidationError);
+      expect(() => statements.dropGraph('http://ex.org/g^x')).toThrow(SparqlTermRejectedError);
       expect(() => statements.deleteData([
         { subject: '_:bad label', predicate: 'http://ex.org/p', object: '"v"', graph: G },
-      ])).toThrow(SparqlTermValidationError);
+      ])).toThrow(SparqlTermRejectedError);
       expect(statements.dropGraph(G).update).toBe('DROP SILENT GRAPH <http://ex.org/g>');
-      expect(observed.counted.map((point) => point.enforcement)).toEqual(['reject', 'reject']);
+      // Building reports nothing; the adapter boundary reports a rejection once.
+      expect(observed.counted).toEqual([]);
+      expect(() => reportedPlan(() => statements.dropGraph('http://ex.org/g^x'))).toThrow(SparqlTermRejectedError);
+      expect(observed.counted.map((point) => point.enforcement)).toEqual(['reject']);
     } finally {
       observed.restore();
     }

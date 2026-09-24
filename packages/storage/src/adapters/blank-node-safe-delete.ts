@@ -6,6 +6,7 @@ import type { Quad as DKGQuad } from '../triple-store.js';
 import {
   ADAPTER_SPARQL_TERM_POLICY,
   type SparqlTermPolicy,
+  type SparqlTermRenderer,
   type SparqlTermSite,
 } from './sparql-term-policy.js';
 
@@ -79,17 +80,28 @@ function connectedBlankNodeComponents(quads: DKGQuad[]): DKGQuad[][] {
  * real IRI, so the match is precise. Two byte-for-byte isomorphic anchored
  * components are indistinguishable in RDF and both delete — which is correct.
  *
- * `adapter` labels invalid-term observations, and `terms` decides what happens
- * to an invalid term, including a blank-node label that becomes a variable
- * (see sparql-term-policy.ts).
+ * `adapter` labels invalid terms, and `terms` decides what happens to one,
+ * including a blank-node label that becomes a variable (see
+ * sparql-term-policy.ts). Nothing is reported: statement builders use
+ * {@link renderBlankNodeSafeDelete} and report through their plan.
  */
 export function buildBlankNodeSafeDelete(
   quads: DKGQuad[],
   adapter: SparqlTermSite['adapter'],
   terms: SparqlTermPolicy = ADAPTER_SPARQL_TERM_POLICY,
 ): string | null {
+  return renderBlankNodeSafeDelete(quads, terms.renderer({ adapter, operation: 'delete' }));
+}
+
+/**
+ * {@link buildBlankNodeSafeDelete} with a caller's renderer, which collects the
+ * invalid terms for the caller's plan.
+ */
+export function renderBlankNodeSafeDelete(
+  quads: DKGQuad[],
+  render: SparqlTermRenderer,
+): string | null {
   if (quads.length === 0) return null;
-  const site: SparqlTermSite = { adapter, operation: 'delete' };
 
   const ground: DKGQuad[] = [];
   const bnode: DKGQuad[] = [];
@@ -102,8 +114,8 @@ export function buildBlankNodeSafeDelete(
 
   if (ground.length > 0) {
     const body = ground.map((q) => {
-      const g = q.graph ? `GRAPH ${terms.iriTerm(q.graph, 'graph', site)} ` : '';
-      return `${g}{ ${terms.rdfTerm(q.subject, 'subject', site, 'reject')} ${terms.iriTerm(q.predicate, 'predicate', site)} ${terms.rdfTerm(q.object, 'object', site, 'reject')} . }`;
+      const g = q.graph ? `GRAPH ${render.iri(q.graph, 'graph')} ` : '';
+      return `${g}{ ${render.rdf(q.subject, 'subject', 'reject')} ${render.iri(q.predicate, 'predicate')} ${render.rdf(q.object, 'object', 'reject')} . }`;
     }).join('\n');
     statements.push(`DELETE DATA {\n${body}\n}`);
   }
@@ -120,23 +132,23 @@ export function buildBlankNodeSafeDelete(
     for (const [graph, list] of byGraph) {
       for (const component of connectedBlankNodeComponents(list)) {
         const vars = new Map<string, string>();
-        const render = (t: string, position: 'subject' | 'object'): string => {
-          if (!isBlankNodeTerm(t)) return terms.rdfTerm(t, position, site, 'reject');
+        const renderTerm = (t: string, position: 'subject' | 'object'): string => {
+          if (!isBlankNodeTerm(t)) return render.rdf(t, position, 'reject');
           let v = vars.get(t);
           if (!v) {
             // The label is never sent, but a malformed one is still an invalid
             // term: check it once, before it becomes a variable.
-            terms.checkBlankNodeLabel(t, position, site);
+            render.checkBlankNodeLabel(t, position);
             v = `?b${vars.size}`;
             vars.set(t, v);
           }
           return v;
         };
         const triples = component
-          .map((q) => `${render(q.subject, 'subject')} ${terms.iriTerm(q.predicate, 'predicate', site)} ${render(q.object, 'object')} .`)
+          .map((q) => `${renderTerm(q.subject, 'subject')} ${render.iri(q.predicate, 'predicate')} ${renderTerm(q.object, 'object')} .`)
           .join('\n    ');
         const inner = graph
-          ? `GRAPH ${terms.iriTerm(graph, 'graph', site)} {\n    ${triples}\n  }`
+          ? `GRAPH ${render.iri(graph, 'graph')} {\n    ${triples}\n  }`
           : triples;
         statements.push(`DELETE { ${inner} } WHERE { ${inner} }`);
       }
