@@ -218,9 +218,9 @@ describe('replaceFileDurably', () => {
     expect(await readdir(dir)).toEqual(['config.json']);
   });
 
+  // The symlink cases run on Windows too, which lets an administrator (as on
+  // CI's runners) or a user in Developer Mode create a symlink.
   it('replaces a symlinked file behind its link', async () => {
-    // Creating a file symlink needs a privilege Windows users usually lack.
-    if (process.platform === 'win32') return;
     const realDir = join(dir, 'managed');
     await mkdir(realDir);
     await writeFile(join(realDir, 'config.json'), 'old');
@@ -239,8 +239,6 @@ describe('replaceFileDurably', () => {
     ['an absolute', (managed: string) => managed],
     ['a relative', () => join('managed', 'config.json')],
   ])('creates the missing file behind %s symlink and keeps the link', async (_kind, linkTo) => {
-    // Creating a file symlink needs a privilege Windows users usually lack.
-    if (process.platform === 'win32') return;
     const managed = join(dir, 'managed', 'config.json');
     await mkdir(join(dir, 'managed'));
     await symlink(linkTo(managed), target);
@@ -255,7 +253,6 @@ describe('replaceFileDurably', () => {
   });
 
   it('resolves a relative symlink from the directory it really sits in', async () => {
-    if (process.platform === 'win32') return;
     // The home is itself a link, so `..` from the link must mean `data/..`.
     await mkdir(join(dir, 'data', 'home'), { recursive: true });
     await mkdir(join(dir, 'data', 'managed'));
@@ -269,7 +266,6 @@ describe('replaceFileDurably', () => {
   });
 
   it('gives up on a cycle of links instead of following it forever', async () => {
-    if (process.platform === 'win32') return;
     await symlink(join(dir, 'b.json'), join(dir, 'a.json'));
     await symlink(join(dir, 'a.json'), join(dir, 'b.json'));
     // realpath reports the cycle itself; make it look like a missing target to reach the walk.
