@@ -46,11 +46,19 @@ async function renderAt(url: string, probeStatus: number): Promise<HTMLDivElemen
   document.body.appendChild(container);
   root = createRoot(container);
   await act(async () => { root!.render(React.createElement(Root)); });
-  // Let the lazy /network page and the token probe settle.
-  for (let i = 0; i < 5; i += 1) {
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
-  }
   return container;
+}
+
+/**
+ * Flush React until `ready()` holds or the deadline passes. The /network page
+ * is lazy-loaded, and its import settles later under coverage instrumentation,
+ * so a fixed number of ticks is not enough.
+ */
+async function settle(ready: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!ready() && Date.now() < deadline) {
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+  }
 }
 
 beforeEach(() => {
@@ -77,13 +85,21 @@ describe('token prompt in the dashboard route tree', () => {
     ['/ui/network', 'network-page'],
   ])('asks for the API token at %s when the node rejects the page', async (url, pageTestId) => {
     const container = await renderAt(url, 401);
-    expect(container.querySelector(`[data-testid="${pageTestId}"]`)).not.toBeNull();
-    expect(container.querySelector('form[aria-label="Node API token"]')).not.toBeNull();
+    const page = () => container.querySelector(`[data-testid="${pageTestId}"]`);
+    const prompt = () => container.querySelector('form[aria-label="Node API token"]');
+    await settle(() => page() !== null && prompt() !== null);
+    expect(page()).not.toBeNull();
+    expect(prompt()).not.toBeNull();
   });
 
-  it.each(['/ui/', '/ui/network'])('shows no prompt at %s when the page was served with a token', async (url) => {
+  it.each([
+    ['/ui/', 'center-panel'],
+    ['/ui/network', 'network-page'],
+  ])('shows no prompt at %s when the page was served with a token', async (url, pageTestId) => {
     window.__DKG_TOKEN__ = 'served-token';
     const container = await renderAt(url, 401);
+    await settle(() => container.querySelector(`[data-testid="${pageTestId}"]`) !== null);
+    expect(container.querySelector(`[data-testid="${pageTestId}"]`)).not.toBeNull();
     expect(container.querySelector('form[aria-label="Node API token"]')).toBeNull();
   });
 });

@@ -117,6 +117,6 @@ describe('current agent', () => {
     await mount(React.createElement(Consumer));
     expect(hoisted.loadsUnderToken).toEqual(['agent-token-a', 'agent-token-b']);
 
-    release();
+    await act(async () => { release(); });
   });
 });
