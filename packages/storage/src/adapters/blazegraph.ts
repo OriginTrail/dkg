@@ -340,6 +340,9 @@ export class BlazegraphStore implements TripleStore {
 
   async insert(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
     if (quads.length === 0) return;
+    // The N-Quads body bypasses the SPARQL builders. Blazegraph rejects a
+    // relative IRI here but stores an RFC 3987-invalid one verbatim.
+    statements.checkIris('insert', quads);
     await this.runStoreWork('insert', {
       ...options,
       source: options?.source ?? 'blazegraph.insert',
@@ -442,6 +445,7 @@ export class BlazegraphStore implements TripleStore {
       label: 'BlazegraphStore.replaceGraph',
     });
     const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
+    statements.checkIris('replaceGraph', quads);
     try {
       await this.sparqlUpdate(
         plan.update,
@@ -479,6 +483,7 @@ export class BlazegraphStore implements TripleStore {
       metadataSubject,
       metadataQuads,
     );
+    statements.checkIris('replaceGraphAndSubject', [...graphQuads, ...metadataQuads]);
     try {
       await this.sparqlUpdate(
         plan.update,
@@ -508,8 +513,10 @@ export class BlazegraphStore implements TripleStore {
     // Blazegraph runs one UPDATE request (DELETE WHERE + INSERT DATA) as a single
     // transaction, so the subject is replaced atomically. No staging/cleanup: a
     // failed request commits nothing.
+    const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
+    statements.checkIris('replaceSubject', quads);
     await this.sparqlUpdate(
-      buildAtomicSubjectReplaceUpdate(graphUri, subject, quads),
+      update,
       { ...options, source: options?.source ?? 'blazegraph.replaceSubject' },
       'replaceSubject',
     );
@@ -525,6 +532,7 @@ export class BlazegraphStore implements TripleStore {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'BlazegraphStore.rfc64AuthorCommitCasV1',
     });
+    statements.checkIris('rfc64AuthorCommitCasV1', plan.semanticQuads);
     return executeRfc64AuthorCommitCasV1({
       executeUpdate: () => this.sparqlUpdate(
         plan.update,

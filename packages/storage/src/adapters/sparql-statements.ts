@@ -10,7 +10,9 @@
  * factory, and every renderer it creates reports each invalid term
  * (`sparql-term-observer.ts`) the moment it renders it: exactly once, and
  * before the adapter admits or dispatches anything. In reject mode the term
- * is reported, then the error is thrown.
+ * is reported, then the error is thrown. The same holds for
+ * {@link SparqlStatements.checkIris}, which checks the IRIs of the writes
+ * whose terms these builders do not render.
  */
 import type { GraphWriteScope } from '../graph-write-gen.js';
 import type { Quad } from '../triple-store.js';
@@ -24,6 +26,13 @@ import {
 } from './sparql-term-policy.js';
 
 export type SparqlQueryOperation = 'hasGraph' | 'countQuads';
+/** A write whose terms no builder here renders: atomic replace, RFC-64 commit, N-Quads insert. */
+export type QuadIriCheckOperation =
+  | 'insert'
+  | 'replaceGraph'
+  | 'replaceGraphAndSubject'
+  | 'replaceSubject'
+  | 'rfc64AuthorCommitCasV1';
 export type SparqlUpdateOperation =
   | 'insert'
   | 'delete'
@@ -64,6 +73,14 @@ export interface SparqlStatements {
   hasGraph(graph: string): SparqlQueryPlan<'hasGraph'>;
   /** Count the quads in `graph`, or in the default graph and every named graph. */
   countQuads(graph?: string): SparqlQueryPlan<'countQuads'>;
+  /**
+   * Check the IRIs of `quads`, a literal's datatype included, against the
+   * storage absolute-IRI rule, for a write whose terms none of these builders
+   * render: an atomic-replace or RFC-64 update, whose builder checks the rest
+   * of the syntax itself, or an N-Quads load. Builds nothing, so the write is
+   * unchanged. Call it once per write, after its own builder has succeeded.
+   */
+  checkIris(operation: QuadIriCheckOperation, quads: readonly Quad[]): void;
 }
 
 type SparqlUpdateBody = Omit<SparqlUpdatePlan, 'operation'>;
@@ -185,6 +202,16 @@ export function sparqlStatements(
           ? `SELECT (COUNT(*) AS ?c) WHERE { GRAPH ${render.iri(graphUri, 'graph')} { ?s ?p ?o } }`
           : 'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }',
       }));
+    },
+
+    checkIris(operation, quads) {
+      const render = renderer(operation);
+      for (const q of quads) {
+        render.checkIri(q.subject, 'subject');
+        render.checkIri(q.predicate, 'predicate');
+        render.checkIri(q.object, 'object');
+        if (q.graph) render.checkIri(q.graph, 'graph');
+      }
     },
   };
 }

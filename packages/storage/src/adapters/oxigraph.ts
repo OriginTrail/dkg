@@ -269,6 +269,9 @@ export class OxigraphStore implements TripleStore {
         label: 'OxigraphStore.insert',
       });
     }
+    // The N-Quads load bypasses the SPARQL builders; it rejects a relative or
+    // RFC 3987-invalid IRI, failing the whole batch.
+    statements.checkIris('insert', quads);
     const nquads = `${quadsToNQuads(quads)}\n`;
     this.store.load(nquads, { format: 'application/n-quads' });
     this.scheduleFlush();
@@ -398,6 +401,7 @@ export class OxigraphStore implements TripleStore {
       });
     }
     const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
+    statements.checkIris('replaceGraph', quads);
     try {
       this.store.update(plan.update);
     } catch (error) {
@@ -434,6 +438,7 @@ export class OxigraphStore implements TripleStore {
       metadataSubject,
       metadataQuads,
     );
+    statements.checkIris('replaceGraphAndSubject', [...graphQuads, ...metadataQuads]);
     try {
       this.store.update(plan.update);
     } catch (error) {
@@ -463,7 +468,9 @@ export class OxigraphStore implements TripleStore {
     // DELETE WHERE + INSERT DATA as a single commit, so a reader never sees the
     // subject transiently empty. No staging graph / cleanup: a failed request
     // rolls the whole thing back.
-    this.store.update(buildAtomicSubjectReplaceUpdate(graphUri, subject, quads));
+    const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
+    statements.checkIris('replaceSubject', quads);
+    this.store.update(update);
     this.scheduleFlush();
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
   }
@@ -499,6 +506,7 @@ export class OxigraphStore implements TripleStore {
         label: 'OxigraphStore.rfc64AuthorCommitCasV1',
       });
     }
+    statements.checkIris('rfc64AuthorCommitCasV1', plan.semanticQuads);
     return executeRfc64AuthorCommitCasV1({
       executeUpdate: () => this.store.update(plan.update),
       readReceipt: () => this.store.query(plan.receiptAsk),

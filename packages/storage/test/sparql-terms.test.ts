@@ -75,7 +75,7 @@ const IRIS = [
   'http://ex.org/caf%C3%A9',
   'http://ex.org/café/Δ/😀',
   'urn:dkg:internal:atomic-graph-replace:1',
-  'relative/path',
+  'a:',
 ];
 
 const LITERALS = [
@@ -279,6 +279,181 @@ describe('malformed terms are logged and counted, then sent in the pre-validatio
       [String(secret.length), fingerprints[0]![1]],
       ['18', expect.not.stringMatching(fingerprints[0]![1])],
     ]);
+  });
+});
+
+interface NonAbsoluteIriCase {
+  name: string;
+  /** The adapter entry point (observe mode). */
+  render: (site: SparqlTermSite) => string;
+  /** The same entry point under the reject policy. */
+  strict: () => string;
+  term: string;
+  /** Core's rendering, which observe mode must send unchanged. */
+  rendered: string;
+  /** The replaced formatters' output for the same term. */
+  legacy: string;
+  position: 'graph' | 'subject' | 'predicate' | 'object' | 'datatype';
+  kind: 'relative-iri' | 'rfc3987-iri';
+}
+
+const nonAbsoluteIri = (
+  term: string,
+  position: IriTermPosition,
+  kind: NonAbsoluteIriCase['kind'],
+): Omit<NonAbsoluteIriCase, 'name'> => ({
+  render: (site) => sparqlIriTerm(term, position, site),
+  strict: () => REJECT.iriTerm(term, position, SITE),
+  term,
+  rendered: formatSparqlTerm(term, { position }),
+  legacy: `<${legacyEscapeUri(term)}>`,
+  position,
+  kind,
+});
+const nonAbsoluteRdf = (
+  term: string,
+  position: 'subject' | 'object',
+  kind: NonAbsoluteIriCase['kind'],
+): Omit<NonAbsoluteIriCase, 'name'> => ({
+  render: (site) => sparqlRdfTerm(term, position, site, 'allow'),
+  strict: () => REJECT.rdfTerm(term, position, SITE, 'allow'),
+  term,
+  rendered: formatSparqlTerm(term, { position, blankNodes: 'allow' }),
+  legacy: legacyFormatTerm(term),
+  position: term.startsWith('"') ? 'datatype' : position,
+  kind,
+});
+
+// Terms core's grammar accepts that are not absolute RFC 3987 IRIs.
+// oxigraph-server resolves the relative ones against its own URL.
+const NON_ABSOLUTE_IRIS: NonAbsoluteIriCase[] = [
+  { name: 'relative graph name', ...nonAbsoluteIri('relative/path', 'graph', 'relative-iri') },
+  { name: 'relative subject', ...nonAbsoluteIri('relative/path', 'subject', 'relative-iri') },
+  { name: 'angle-bracketed relative predicate', ...nonAbsoluteIri('<p>', 'predicate', 'relative-iri') },
+  { name: 'relative object IRI', ...nonAbsoluteRdf('integer', 'object', 'relative-iri') },
+  { name: 'angle-bracketed relative subject', ...nonAbsoluteRdf('<relative/path>', 'subject', 'relative-iri') },
+  { name: 'fragment-only object', ...nonAbsoluteRdf('#frag', 'object', 'relative-iri') },
+  { name: 'network-path object', ...nonAbsoluteRdf('//example.org/x', 'object', 'relative-iri') },
+  { name: 'relative datatype', ...nonAbsoluteRdf('"42"^^<integer>', 'object', 'relative-iri') },
+  { name: 'relative bare datatype', ...nonAbsoluteRdf('"42"^^integer', 'object', 'relative-iri') },
+  { name: 'malformed percent-encoding', ...nonAbsoluteIri('http://ex.org/%zz', 'predicate', 'rfc3987-iri') },
+  { name: 'two @ in the authority', ...nonAbsoluteRdf('http://user@@example.org/', 'object', 'rfc3987-iri') },
+  { name: 'non-numeric port', ...nonAbsoluteIri('http://example.org:bad/', 'graph', 'rfc3987-iri') },
+  { name: 'bracket in a path', ...nonAbsoluteRdf('http://example.org/[0]', 'subject', 'rfc3987-iri') },
+  { name: 'second fragment', ...nonAbsoluteRdf('urn:test:#a#b', 'object', 'rfc3987-iri') },
+  { name: 'RFC 3987-invalid datatype', ...nonAbsoluteRdf('"x"^^<http://ex.org/%zz>', 'object', 'rfc3987-iri') },
+];
+
+describe('IRIs that are not absolute RFC 3987 IRIs are counted, then sent exactly as rendered', () => {
+  it.each(NON_ABSOLUTE_IRIS)('$name', ({ render, term, rendered, legacy, position, kind }) => {
+    const observed = observeInvalidSparqlTerms();
+    const site: SparqlTermSite = { adapter: 'sparql-http', operation: 'insert' };
+
+    expect(render(site)).toBe(rendered);
+    expect(rendered).toBe(legacy);
+
+    expect(observed.counted).toEqual([{
+      value: 1,
+      adapter: 'sparql-http',
+      operation: 'insert',
+      position,
+      kind,
+      enforcement: 'observe',
+    }]);
+    expect(observed.warnings).toHaveLength(1);
+    const [warning] = observed.warnings;
+    expect(warning).toContain(
+      `sparql-http.insert: invalid ${kind} in SPARQL ${position} position (${term.length} chars, fingerprint `,
+    );
+    expect(warning).not.toContain(term);
+  });
+
+  it.each(NON_ABSOLUTE_IRIS)('$name throws under the reject policy', ({ strict, kind }) => {
+    const observed = observeInvalidSparqlTerms();
+    let error: unknown;
+    try {
+      strict();
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(SparqlTermValidationError);
+    expect((error as SparqlTermValidationError).kind).toBe(kind);
+    expect(observed.counted.map(({ kind: counted, enforcement }) => [counted, enforcement])).toEqual([[kind, 'reject']]);
+  });
+
+  it.each([
+    'a:',
+    'urn:x',
+    // A prefixed name is still an absolute IRI, with scheme `xsd`.
+    'xsd:integer',
+    'http://ex.org/café/Δ/😀',
+    'http://[2001:db8::1]:8080/a?q=%C3%A9#f',
+  ])('passes the absolute IRI %s in every position and as a datatype', (iri) => {
+    const observed = observeInvalidSparqlTerms();
+    for (const position of ['graph', 'subject', 'predicate'] as const) sparqlIriTerm(iri, position, SITE);
+    sparqlRdfTerm(iri, 'object', SITE, 'reject');
+    sparqlRdfTerm(`"42"^^<${iri}>`, 'object', SITE, 'reject');
+    sparqlRdfTerm(`"42"^^${iri}`, 'object', SITE, 'reject');
+    expect(observed.counted).toEqual([]);
+  });
+
+  it('checks no IRI in a plain or language-tagged literal, a blank node or a subject prefix', () => {
+    const observed = observeInvalidSparqlTerms();
+    expect(sparqlRdfTerm('"integer"', 'object', SITE, 'reject')).toBe('"integer"');
+    expect(sparqlRdfTerm('"relative/path"@en', 'object', SITE, 'reject')).toBe('"relative/path"@en');
+    expect(sparqlRdfTerm('_:relative', 'object', SITE, 'allow')).toBe('_:relative');
+    // A prefix is only the start of an IRI, so it need not be absolute.
+    expect(sparqlIriPrefix('', SITE)).toBe('""');
+    expect(sparqlIriPrefix('relative/', SITE)).toBe('"relative/"');
+    expect(sparqlIriPrefix('http:', SITE)).toBe('"http:"');
+    expect(observed.counted).toEqual([]);
+  });
+
+  it('reports a term that fails core\'s grammar once, under its grammar kind', () => {
+    const observed = observeInvalidSparqlTerms();
+    expect(sparqlIriTerm('relative path', 'predicate', SITE)).toBe('<relative path>');
+    expect(sparqlRdfTerm('"5"^^dt with space', 'object', SITE, 'allow')).toBe('"5"^^<dt with space>');
+    expect(observed.counted.map(({ position, kind }) => [position, kind])).toEqual([
+      ['predicate', 'iri'],
+      ['object', 'literal'],
+    ]);
+  });
+});
+
+describe('checkIri, the absolute-IRI rule alone', () => {
+  it('reports each IRI the rule rejects, a datatype included, and renders nothing', () => {
+    const observed = observeInvalidSparqlTerms();
+    const seen: InvalidSparqlTerm[] = [];
+    const renderer = ADAPTER_SPARQL_TERM_POLICY.renderer(SITE, (invalidTerm) => seen.push(invalidTerm));
+
+    expect(renderer.checkIri('integer', 'object')).toBeUndefined();
+    renderer.checkIri('"42"^^<integer>', 'object');
+    renderer.checkIri('<http://ex.org/%zz>', 'graph');
+    renderer.checkIri('urn:ok', 'subject');
+    renderer.checkIri('"42"^^<urn:ok>', 'object');
+    renderer.checkIri('_:b0', 'subject');
+    renderer.checkIri('"plain"@en', 'object');
+    // Without core's grammar in front of it, an IRI with a space fails the RFC 3987 rule.
+    renderer.checkIri('urn:a b', 'predicate');
+
+    expect(seen.map(({ position, kind, enforcement, length }) => [position, kind, enforcement, length])).toEqual([
+      ['object', 'relative-iri', 'observe', 7],
+      ['datatype', 'relative-iri', 'observe', 15],
+      ['graph', 'rfc3987-iri', 'observe', 19],
+      ['predicate', 'rfc3987-iri', 'observe', 7],
+    ]);
+    // Only the observer hears about it.
+    expect(observed.counted).toEqual([]);
+  });
+
+  it('throws in reject mode, without quoting the term', () => {
+    const seen: InvalidSparqlTerm[] = [];
+    const renderer = createSparqlTermPolicy('reject').renderer(SITE, (invalidTerm) => seen.push(invalidTerm));
+    expect(() => renderer.checkIri('"42"^^integer', 'object')).toThrow(
+      /^sparql-http\.insert: invalid relative-iri in SPARQL datatype position \(13 chars, fingerprint [0-9a-f]{12}\)$/,
+    );
+    expect(() => renderer.checkIri('urn:ok', 'object')).not.toThrow();
+    expect(seen.map(({ kind, enforcement }) => [kind, enforcement])).toEqual([['relative-iri', 'reject']]);
   });
 });
 
