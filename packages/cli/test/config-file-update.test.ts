@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DkgHomeFiles, configEdit, configValues, type DkgConfig, type DkgConfigEdit, type DkgConfigPath } from '../src/config.js';
-import { applyConfigEdits } from '../src/home-config-file.js';
+import { Document } from 'yaml';
+import { applyConfigEdits, editYamlInPlace, type YamlRewriteReason } from '../src/home-config-file.js';
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
@@ -290,6 +291,77 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       await files.updateConfigFile([edit(['logging', 'level'], () => undefined)]);
 
       expect((await files.loadConfig()).logging).toEqual({ format: 'json' });
+    });
+
+    // The two parsers can disagree about a YAML construct; each known case is
+    // written whole for a named reason, and anything else is a defect.
+    describe('what cannot be edited in place', () => {
+      function editYaml(text: string, change: (config: Record<string, any>) => void) {
+        const before = JSON.parse(JSON.stringify(yaml.load(text) ?? {})) as Record<string, unknown>;
+        const after = structuredClone(before);
+        change(after);
+        return editYamlInPlace(text, before, after);
+      }
+
+      it.each<[string, string, (config: Record<string, any>) => void, YamlRewriteReason]>([
+        ['a flow list the yaml package reads as badly indented', 'contextGraphs: [a,\nb]\nname: node\n',
+          (config) => { config.name = 'renamed'; }, 'unparsed'],
+        ['a change inside an alias', 'base: &base\n  level: info\nlogging: *base\n',
+          (config) => { config.logging.level = 'debug'; }, 'not-a-mapping'],
+        ['a removal inside a mapping a merge key supplies', 'defaults: &defaults\n  telemetry:\n    enabled: false\n<<: *defaults\n',
+          (config) => { delete config.telemetry.enabled; }, 'not-a-mapping'],
+        ['a change inside a !!set', 'localAgentIntegrations: !!set\n  ? hermes\n',
+          (config) => { config.localAgentIntegrations.openclaw = { id: 'openclaw' }; }, 'not-a-mapping'],
+        // YAML 1.1 reads the key `on` as true; js-yaml reads it as "on".
+        ['a change inside a key the parsers read differently', 'localAgentIntegrations:\n  on:\n    enabled: false\n',
+          (config) => { config.localAgentIntegrations.on.enabled = true; }, 'not-a-mapping'],
+        ['a removal of the value an alias refers to', 'llm: &llm\n  provider: openai\nfallbackLlm: *llm\n',
+          (config) => { delete config.llm; }, 'orphaned-alias'],
+        ['a removal of a key a merge key supplies', 'defaults: &defaults\n  level: info\nlogging:\n  <<: *defaults\n  format: json\n',
+          (config) => { delete config.logging.level; }, 'read-back'],
+        ['a key the parsers read differently, written again', 'localAgentIntegrations:\n  on: legacy\n',
+          (config) => { config.localAgentIntegrations.on = { enabled: true }; }, 'read-back'],
+      ])('writes the config whole for %s', (_case, text, change, reason) => {
+        expect(editYaml(text, change)).toEqual({ rewrite: reason });
+      });
+
+      it.each([
+        ['a mapping', '# notes\nname: node # inline\n', '# notes\nname: renamed # inline\n'],
+        ['a file of comments only', '# notes\n', '# notes\n\nname: renamed\n'],
+      ])('edits %s in place', (_case, text, edited) => {
+        expect(editYaml(text, (config) => { config.name = 'renamed'; })).toEqual({ text: edited });
+      });
+
+      it.each(['setIn', 'toString'] as const)(
+        'propagates a failure of the yaml package it does not expect (%s), writing nothing',
+        async (method) => {
+          const original = '# operator notes\nname: yaml-node\n';
+          await writeFile(files.configYamlPath, original);
+          const defect = new TypeError(`yaml ${method} regressed`);
+          const spy = vi.spyOn(Document.prototype, method).mockImplementation(() => { throw defect; });
+          try {
+            await expect(files.updateConfigFile([configEdit(['name'], () => 'renamed')])).rejects.toBe(defect);
+          } finally {
+            spy.mockRestore();
+          }
+
+          expect(await readFile(files.configYamlPath, 'utf-8')).toBe(original);
+          // Neither a temp file nor the lock outlives it.
+          expect(await readdir(home)).toEqual(['config.yaml']);
+          await files.updateConfigFile([configEdit(['name'], () => 'renamed')]);
+          expect(await readFile(files.configYamlPath, 'utf-8')).toBe('# operator notes\nname: renamed\n');
+        },
+      );
+
+      it('propagates a failure of js-yaml, reading the edit back, other than refusing the text', () => {
+        const defect = new TypeError('js-yaml load regressed');
+        const spy = vi.spyOn(yaml, 'load').mockImplementationOnce(() => { throw defect; });
+        try {
+          expect(() => editYamlInPlace('name: node\n', { name: 'node' }, { name: 'renamed' })).toThrow(defect);
+        } finally {
+          spy.mockRestore();
+        }
+      });
     });
 
     it('writes nothing for edits that change nothing, so YAML comments survive', async () => {

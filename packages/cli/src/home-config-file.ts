@@ -8,7 +8,7 @@ import { mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import jsYaml from 'js-yaml';
-import { parseDocument, type Document } from 'yaml';
+import { isMap, parseDocument, visit, type Document, type YAMLMap } from 'yaml';
 import { hasErrorCode } from '@origintrail-official/dkg-core';
 import type { DkgConfig } from './config.js';
 import type { ReplaceStrategy } from './durable-file-replace.js';
@@ -233,39 +233,115 @@ function toJsonRecord(config: Record<string, unknown>): Record<string, unknown> 
   return toJsonData(config) as Record<string, unknown>;
 }
 
+/** The YAML config's new text: the file edited in place where it can be, the whole config where it cannot. */
+function patchYamlText(text: string, before: Record<string, unknown>, after: Record<string, unknown>): string {
+  const edit = editYamlInPlace(text, before, after);
+  return 'text' in edit ? edit.text : jsYaml.dump(after, { noRefs: true, lineWidth: -1 });
+}
+
+/** Why a YAML config is written whole instead of edited in place. */
+export type YamlRewriteReason =
+  /** The yaml package reports errors in text js-yaml read. */
+  | 'unparsed'
+  /**
+   * An edit changes keys inside a value this document does not hold as a
+   * plain mapping: an alias, a value a merge key supplies, a tagged mapping
+   * such as !!set, or a key the two parsers read differently.
+   */
+  | 'not-a-mapping'
+  /** An edit replaced or removed the value an alias refers to. */
+  | 'orphaned-alias'
+  /** The edited text does not read back, with js-yaml, as the edited config. */
+  | 'read-back';
+
 /**
  * Apply the difference between the parsed and the edited config to the YAML
  * text itself, so comments, blank lines and untouched keys keep their layout.
  * The document is edited under YAML 1.1 rules so that new strings which js-yaml
- * would read as another type (timestamps, yes/no) are quoted. If the edit
- * cannot be made in place (through an alias) or does not read back as the
- * edited config, the whole config is written instead.
+ * would read as another type (timestamps, yes/no) are quoted. Returns the
+ * edited text, or why the edit cannot be made in place, in which case the
+ * caller writes the whole config. Anything else that fails is a defect, and
+ * propagates.
  */
-function patchYamlText(text: string, before: unknown, after: unknown): string {
-  try {
-    const doc = parseDocument(text, { version: '1.1' });
-    if (doc.errors.length > 0) throw doc.errors[0];
-    applyYamlChanges(doc, [], before, after);
-    const edited = doc.toString({ lineWidth: 0 });
-    if (isDeepStrictEqual(toJsonData(jsYaml.load(edited)), after)) return edited;
-  } catch {
-    // Fall back to writing the whole config below.
-  }
-  return jsYaml.dump(after, { noRefs: true, lineWidth: -1 });
+export function editYamlInPlace(
+  text: string,
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+): { text: string } | { rewrite: YamlRewriteReason } {
+  const doc: Document = parseDocument(text, { version: '1.1' });
+  if (doc.errors.length > 0) return { rewrite: 'unparsed' };
+  // An empty file, or one of comments only, has no mapping yet; setIn would
+  // add one as a YAML 1.1 !!omap, which js-yaml reads as a list.
+  doc.contents ??= doc.createNode({});
+  const rewrite = applyYamlChanges(doc, [], before, after);
+  if (rewrite) return { rewrite };
+  if (!aliasesFollowAnchors(doc)) return { rewrite: 'orphaned-alias' };
+  const edited = doc.toString({ lineWidth: 0 });
+  return readsBackAs(edited, after) ? { text: edited } : { rewrite: 'read-back' };
 }
 
-function applyYamlChanges(doc: Document, path: string[], before: unknown, after: unknown): void {
-  if (!isPlainRecord(before) || !isPlainRecord(after)) {
-    doc.setIn(path, after);
-    return;
-  }
+/**
+ * Make the changes from `before` to `after` in the mapping at `path`,
+ * recursing into the mappings both hold. Every mapping it changes anything
+ * in must be a plain mapping of this document, which setIn and deleteIn can
+ * always edit; the reason is returned when one is not.
+ */
+function applyYamlChanges(
+  doc: Document,
+  path: readonly string[],
+  before: Record<string, unknown>,
+  after: Record<string, unknown>,
+): YamlRewriteReason | undefined {
+  if (!isPlainMapping(doc.getIn(path, true))) return 'not-a-mapping';
   for (const key of Object.keys(before)) {
     if (!Object.hasOwn(after, key)) doc.deleteIn([...path, key]);
   }
   for (const [key, value] of Object.entries(after)) {
     const was = getOwn(before, key);
-    if (!isDeepStrictEqual(was, value)) applyYamlChanges(doc, [...path, key], was, value);
+    if (isDeepStrictEqual(was, value)) continue;
+    if (isPlainRecord(was) && isPlainRecord(value)) {
+      const rewrite = applyYamlChanges(doc, [...path, key], was, value);
+      if (rewrite) return rewrite;
+    } else {
+      doc.setIn([...path, key], value);
+    }
   }
+  return undefined;
+}
+
+/** A mapping the document holds itself: not an alias to one, and not tagged as another type (!!set). */
+function isPlainMapping(node: unknown): node is YAMLMap {
+  return isMap(node) && (node.tag === undefined || node.tag === 'tag:yaml.org,2002:map');
+}
+
+/** Whether every alias still comes after an anchor of its name, which the yaml package needs to write the document. */
+function aliasesFollowAnchors(doc: Document): boolean {
+  const anchors = new Set<string>();
+  let follow = true;
+  visit(doc, {
+    Value(_key, node) {
+      if (node.anchor) anchors.add(node.anchor);
+    },
+    Alias(_key, alias) {
+      if (anchors.has(alias.source)) return;
+      follow = false;
+      return visit.BREAK;
+    },
+  });
+  return follow;
+}
+
+/** Whether js-yaml, which every reader uses, reads `text` as `config`. */
+function readsBackAs(text: string, config: Record<string, unknown>): boolean {
+  let loaded: unknown;
+  try {
+    loaded = jsYaml.load(text);
+  } catch (error) {
+    // As when a key the two parsers read differently (on, 1) was written a second time.
+    if (error instanceof jsYaml.YAMLException) return false;
+    throw error;
+  }
+  return isDeepStrictEqual(toJsonData(loaded), config);
 }
 
 /** A mapping, as JSON or YAML parses one: not an array, and not a Date or any other object. */
