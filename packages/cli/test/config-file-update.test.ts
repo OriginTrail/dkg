@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, writeFileSync } from 'node:fs';
 import { chmod, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -75,6 +75,23 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       const written = await readJson();
       for (let i = 0; i < 10; i += 1) expect(written[`key-${i}`]).toBe(i);
       expect(existsSync(files.configLockPath)).toBe(false);
+    });
+
+    // The writer stalled past its lease and a waiter took the lock over; what
+    // this writer read may be stale, so it must not replace the waiter's file.
+    it('writes nothing when another writer took the lock over while the patch ran', async () => {
+      await writeFile(files.configPath, JSON.stringify({ name: 'node' }));
+      const successor = JSON.stringify({ pid: EXITED_PID, token: 'successor', createdAt: Date.now() });
+
+      await expect(files.updateConfigFile((config) => {
+        config.name = 'stale';
+        writeFileSync(files.configLockPath, successor);
+      })).rejects.toThrow(`Lost the config lock: ${files.configLockPath} was taken over`);
+
+      expect(await readJson()).toEqual({ name: 'node' });
+      // The successor's lock is left to it, and no temp file is left behind.
+      expect((await readdir(home)).sort()).toEqual(['config.json', 'config.lock']);
+      expect(await readFile(files.configLockPath, 'utf-8')).toBe(successor);
     });
 
     it('keeps every patch when separate processes write at the same time', async () => {

@@ -6,10 +6,13 @@ import { threadId } from 'node:worker_threads';
 import { hasErrorCode } from '@origintrail-official/dkg-core';
 
 /**
- * No holder keeps a lock this long, so an older one is abandoned even when its
- * pid is alive (the pid was reused) or cannot be checked from here.
+ * How long a holder's lease lasts without renewal. A holder renews it several
+ * times over while its callback runs, so a lock not renewed for this long was
+ * abandoned (its pid was reused, or cannot be checked from here) or belongs to
+ * a holder stalled for as long, which the pre-commit check then stops.
  */
 const LOCK_STALE_MS = 60 * 1000;
+const LEASE_RENEWALS_PER_STALE_PERIOD = 6;
 /** Until a lock file is this old, missing metadata means its holder is still writing it. */
 const LOCK_WRITE_GRACE_MS = 5000;
 const LOCK_POLL_MS = 25;
@@ -47,6 +50,18 @@ export interface FileLockOptions {
   timeoutMs?: number;
   /** Names the protected resource in the timeout error, e.g. `config`. */
   label?: string;
+  /** How long a lease lasts without renewal; tests shorten it. */
+  staleMs?: number;
+}
+
+/** The lock a `withFileLock` callback holds. */
+export interface HeldFileLock {
+  /**
+   * Throw unless the lock file still carries this holder's token. A holder
+   * that stalls past its lease can be taken over; checking immediately before
+   * committing its change keeps it from overwriting the new holder's.
+   */
+  assertHeld(): Promise<void>;
 }
 
 interface LockHolder {
@@ -62,29 +77,72 @@ type LockState = 'gone' | 'live' | 'stale';
 /**
  * Run `fn` while holding an exclusive lock file at `lockPath`. The lock is
  * shared across processes: the holder records its pid, the pid namespace it
- * belongs to and a token. A waiter takes the lock over only when its holder
- * is gone (the pid is dead, or is this thread's own pid without a lock this
- * thread holds) or the lock is older than any holder keeps it, so a crashed
- * holder does not wedge later writers. A lock from another pid namespace is
- * judged by its age alone.
+ * belongs to and a token, and renews its lease (the lock file's mtime) while
+ * `fn` runs. A waiter takes the lock over only when its holder is gone (the
+ * pid is dead, or is this thread's own pid without a lock this thread holds)
+ * or its lease has lapsed, so a crashed holder does not wedge later writers
+ * while a live one keeps its lock however long it works. A lock from another
+ * pid namespace is judged by its lease alone.
+ *
+ * A holder whose event loop or filesystem stalls for a whole lease can still
+ * be taken over. `fn` receives the lock so that it can `assertHeld()` just
+ * before it commits, and then stops instead of overwriting the new holder's
+ * work. That check and the commit are two steps, not one atomic operation.
  */
 export async function withFileLock<T>(
   lockPath: string,
-  fn: () => Promise<T>,
+  fn: (lock: HeldFileLock) => Promise<T>,
   options: FileLockOptions = {},
 ): Promise<T> {
-  const { handle, token } = await acquireLock(lockPath, options);
+  const staleMs = options.staleMs ?? LOCK_STALE_MS;
+  const { handle, token } = await acquireLock(lockPath, options, staleMs);
+  const lease = renewLease(handle, staleMs / LEASE_RENEWALS_PER_STALE_PERIOD);
   try {
-    return await fn();
+    return await fn({ assertHeld: () => assertHeld(lockPath, token, options.label) });
   } finally {
+    await lease.stop();
     await handle.close().catch(() => {});
     await releaseLock(lockPath, token);
+  }
+}
+
+/** Refresh the lock file's mtime every `intervalMs` until stopped. */
+function renewLease(handle: FileHandle, intervalMs: number): { stop(): Promise<void> } {
+  let renewal: Promise<void> | undefined;
+  const timer = setInterval(() => {
+    // A renewal still waiting on the filesystem is not doubled up.
+    if (renewal) return;
+    const now = new Date();
+    renewal = handle.utimes(now, now).catch(() => {}).finally(() => { renewal = undefined; });
+  }, intervalMs);
+  timer.unref();
+  return {
+    async stop() {
+      clearInterval(timer);
+      await renewal;
+    },
+  };
+}
+
+async function assertHeld(lockPath: string, token: string, label: string | undefined): Promise<void> {
+  let raw = '';
+  try {
+    raw = await readFile(lockPath, 'utf-8');
+  } catch (error) {
+    if (!hasErrorCode(error, 'ENOENT')) throw error;
+  }
+  if (parseHolder(raw)?.token !== token) {
+    throw new Error(
+      `Lost the ${label ?? 'file'} lock: ${lockPath} was taken over after this process stalled `
+      + 'for longer than its lease',
+    );
   }
 }
 
 async function acquireLock(
   lockPath: string,
   options: FileLockOptions,
+  staleMs: number,
 ): Promise<{ handle: FileHandle; token: string }> {
   const deadline = Date.now() + (options.timeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS);
   for (;;) {
@@ -95,7 +153,7 @@ async function acquireLock(
       if (!hasErrorCode(error, 'EEXIST')) {
         throw error;
       }
-      const retryNow = await reapStaleLock(lockPath);
+      const retryNow = await reapStaleLock(lockPath, staleMs);
       if (Date.now() >= deadline) {
         throw new Error(
           `Timed out waiting for ${options.label ?? 'file'} lock: ${lockPath} `
@@ -128,9 +186,9 @@ async function acquireLock(
 
 /**
  * Remove the lock only while it still carries this holder's token: a waiter
- * may have taken over a lock held past LOCK_STALE_MS. A lock left behind
- * because the removal failed is abandoned: this thread recognises it at once
- * and other processes once it is LOCK_STALE_MS old.
+ * may have taken over a lock whose lease lapsed. A lock left behind because
+ * the removal failed is abandoned: this thread recognises it at once and
+ * other processes once its lease lapses.
  */
 async function releaseLock(lockPath: string, token: string): Promise<void> {
   try {
@@ -150,8 +208,8 @@ async function releaseLock(lockPath: string, token: string): Promise<void> {
  * that disappears while it is being inspected was released, and is retried
  * without deleting anything.
  */
-async function reapStaleLock(lockPath: string): Promise<boolean> {
-  const state = await inspectLock(lockPath);
+async function reapStaleLock(lockPath: string, staleMs: number): Promise<boolean> {
+  const state = await inspectLock(lockPath, staleMs);
   if (state !== 'stale') return state === 'gone';
   const reaperPath = `${lockPath}.reap`;
   let reaper: FileHandle;
@@ -163,7 +221,7 @@ async function reapStaleLock(lockPath: string): Promise<boolean> {
     return false;
   }
   try {
-    const current = await inspectLock(lockPath);
+    const current = await inspectLock(lockPath, staleMs);
     if (current !== 'stale') return current === 'gone';
     await unlink(lockPath);
     return true;
@@ -185,7 +243,7 @@ async function clearAbandonedReaper(reaperPath: string): Promise<void> {
   if (st && Date.now() - st.mtimeMs >= LOCK_WRITE_GRACE_MS) await unlink(reaperPath).catch(() => {});
 }
 
-async function inspectLock(lockPath: string): Promise<LockState> {
+async function inspectLock(lockPath: string, staleMs: number): Promise<LockState> {
   let raw: string;
   try {
     raw = await readFile(lockPath, 'utf-8');
@@ -193,30 +251,29 @@ async function inspectLock(lockPath: string): Promise<LockState> {
     if (hasErrorCode(error, 'ENOENT')) return 'gone';
     raw = '';
   }
+  // The lease is read after the record: a lock replaced in between then looks
+  // freshly renewed, never lapsed.
+  const st = await stat(lockPath).catch(() => null);
+  if (!st) return 'gone';
+  const idleMs = Date.now() - st.mtimeMs;
   const holder = parseHolder(raw);
   if (!holder) {
-    // Empty or partial metadata — the lock was just created and its holder is
-    // still writing it. Check file age via mtime; treat as live if recent.
-    const st = await stat(lockPath).catch(() => null);
-    if (!st) return 'gone';
-    return Date.now() - st.mtimeMs < LOCK_WRITE_GRACE_MS ? 'live' : 'stale';
+    // Empty or partial metadata: the lock was just created and its holder is
+    // still writing it, unless that was a while ago.
+    return idleMs < LOCK_WRITE_GRACE_MS ? 'live' : 'stale';
   }
   const pid = Number(holder.pid);
   if (!Number.isFinite(pid)) return 'stale';
+  const lapsed = idleMs > staleMs;
   // A lock written before the namespace was recorded counts as this one's.
   if ((holder.pidNamespace ?? pidNamespace()) !== pidNamespace()) {
-    return isAged(holder) ? 'stale' : 'live';
+    return lapsed ? 'stale' : 'live';
   }
   if (pid === process.pid && (holder.threadId ?? 0) === threadId) {
     return heldTokens.has(String(holder.token)) ? 'live' : 'stale';
   }
   if (!isProcessRunning(pid)) return 'stale';
-  return isAged(holder) ? 'stale' : 'live';
-}
-
-function isAged(holder: LockHolder): boolean {
-  const createdAt = Number(holder.createdAt);
-  return Number.isFinite(createdAt) && Date.now() - createdAt > LOCK_STALE_MS;
+  return lapsed ? 'stale' : 'live';
 }
 
 function parseHolder(raw: string): LockHolder | undefined {

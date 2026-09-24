@@ -1,8 +1,9 @@
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, open, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, open, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { threadId } from 'node:worker_threads';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { withFileLock } from '../src/file-lock.js';
@@ -109,10 +110,27 @@ describe('withFileLock', () => {
     await expect(withFileLock(lockPath, async () => 'ran', { timeoutMs: 200 })).resolves.toBe('ran');
   });
 
-  it('takes over a lock older than any holder keeps it, even when its pid is alive', async () => {
-    await writeFile(lockPath, liveHolder({ createdAt: Date.now() - 2 * 60_000 }));
+  // A holder renews its lease while it works, so a live pid whose lease has
+  // lapsed is a reused pid, or a holder stalled for a whole lease.
+  it('takes over a lock whose lease lapsed, even when its pid is alive', async () => {
+    await writeFile(lockPath, liveHolder());
+    await backdate(lockPath, 2 * 60_000);
 
     await expect(withFileLock(lockPath, async () => 'ran', { timeoutMs: 200 })).resolves.toBe('ran');
+  });
+
+  it('keeps waiting on a live holder that took its lock long ago but renewed its lease', async () => {
+    await writeFile(lockPath, liveHolder({ createdAt: Date.now() - 10 * 60_000 }));
+
+    await expect(withFileLock(lockPath, async () => {}, { timeoutMs: 200 })).rejects.toThrow(/Timed out/);
+    expect(existsSync(lockPath)).toBe(true);
+  });
+
+  it('renews its lease while the callback runs', async () => {
+    await withFileLock(lockPath, async () => {
+      await backdate(lockPath, 10_000);
+      await vi.waitFor(async () => expect(Date.now() - (await stat(lockPath)).mtimeMs).toBeLessThan(5_000));
+    }, { staleMs: 120 });
   });
 
   // Two containers sharing one home can both run their DKG process as pid 1.
@@ -134,10 +152,11 @@ describe('withFileLock', () => {
     expect(entered).toBe(true);
   });
 
-  it('takes over a lock from another pid namespace once it is older than any holder keeps it', async () => {
+  it('takes over a lock from another pid namespace once its lease lapses', async () => {
     await writeFile(lockPath, JSON.stringify({
-      pid: process.pid, pidNamespace: 'other-container pid:[4026532001]', token: 'crashed', createdAt: Date.now() - 2 * 60_000,
+      pid: process.pid, pidNamespace: 'other-container pid:[4026532001]', token: 'crashed', createdAt: Date.now(),
     }));
+    await backdate(lockPath, 2 * 60_000);
 
     await expect(withFileLock(lockPath, async () => 'ran', { timeoutMs: 200 })).resolves.toBe('ran');
   });
@@ -238,6 +257,17 @@ describe('withFileLock', () => {
     expect(existsSync(`${lockPath}.reap`)).toBe(false);
   });
 
+  it('confirms a held lock, and reports one taken over while it was held', async () => {
+    await withFileLock(lockPath, async (lock) => {
+      await expect(lock.assertHeld()).resolves.toBeUndefined();
+      // A waiter took the lock over after this holder's lease lapsed.
+      await writeFile(lockPath, liveHolder({ token: 'successor' }));
+      await expect(lock.assertHeld()).rejects.toThrow(`Lost the config lock: ${lockPath} was taken over`);
+      await rm(lockPath);
+      await expect(lock.assertHeld()).rejects.toThrow('Lost the config lock');
+    }, { label: 'config' });
+  });
+
   it('releases only a lock that still carries its token', async () => {
     const successor = liveHolder({ token: 'successor' });
 
@@ -281,5 +311,73 @@ describe('withFileLock', () => {
   it('propagates failures other than an existing lock', async () => {
     await expect(withFileLock(join(dir, 'missing', 'resource.lock'), async () => {}))
       .rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  // A holder in another process, reading a counter when it takes the lock and
+  // writing it back when it is done, as a config writer reads and commits.
+  describe('a holder in another process', () => {
+    // Long enough that a loaded CI runner does not starve the holder's renewals.
+    const STALE_MS = 1_000;
+    const HOLD_MS = 3 * STALE_MS;
+    let counterPath = '';
+    let logPath = '';
+
+    beforeEach(async () => {
+      counterPath = join(dir, 'counter');
+      logPath = join(dir, 'events.log');
+      await writeFile(counterPath, '0');
+      await writeFile(logPath, '');
+    });
+
+    /** Start the holder, and resolve once it holds the lock with its exit code. */
+    async function startHolder(mode: 'await' | 'block'): Promise<{ exited: Promise<number | null> }> {
+      const fixture = fileURLToPath(new URL('./fixtures/file-lock-holder.fixture.ts', import.meta.url));
+      const child = spawn(
+        process.execPath,
+        ['--import', import.meta.resolve('tsx/esm'), fixture, lockPath, counterPath, logPath, mode, String(HOLD_MS), String(STALE_MS)],
+        { stdio: 'ignore' },
+      );
+      const exited = new Promise<number | null>((resolve, reject) => {
+        child.on('error', reject);
+        child.on('exit', resolve);
+      });
+      await vi.waitFor(async () => expect(await events()).toContain('holder:enter'), { timeout: 30_000, interval: 20 });
+      return { exited };
+    }
+
+    async function events(): Promise<string[]> {
+      return (await readFile(logPath, 'utf-8')).split('\n').filter(Boolean);
+    }
+
+    async function incrementAsWaiter(): Promise<void> {
+      await withFileLock(lockPath, async () => {
+        await appendFile(logPath, 'waiter:enter\n');
+        await writeFile(counterPath, String(Number(await readFile(counterPath, 'utf-8')) + 1));
+        await appendFile(logPath, 'waiter:leave\n');
+      }, { staleMs: STALE_MS, timeoutMs: 20_000 });
+    }
+
+    it('keeps its lock while it works past the lease, so neither update is lost', async () => {
+      const holder = await startHolder('await');
+
+      await incrementAsWaiter();
+
+      expect(await holder.exited).toBe(0);
+      expect(await events()).toEqual(['holder:enter', 'holder:leave', 'waiter:enter', 'waiter:leave']);
+      expect(await readFile(counterPath, 'utf-8')).toBe('2');
+    }, 60_000);
+
+    it('loses its lock when it stalls past the lease, and then does not commit', async () => {
+      const holder = await startHolder('block');
+
+      await incrementAsWaiter();
+
+      expect(await holder.exited).toBe(3);
+      expect(await events()).toEqual([
+        'holder:enter', 'waiter:enter', 'waiter:leave',
+        expect.stringMatching(/^holder:error: Lost the file lock: .* was taken over/),
+      ]);
+      expect(await readFile(counterPath, 'utf-8')).toBe('1');
+    }, 60_000);
   });
 });

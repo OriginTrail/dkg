@@ -84,11 +84,12 @@ export function readHomeConfigSourceSync(home: string): { path: string; raw: unk
 /**
  * Apply `patch` under a lock the daemon and CLI share: re-read the file that
  * is the source of truth, patch its object, and replace the file atomically
- * in the same format. A patch that changes nothing writes nothing.
+ * in the same format. A patch that changes nothing writes nothing, and a
+ * writer that lost the lock while it worked writes nothing either.
  */
 export async function updateHomeConfigFile(home: string, patch: DkgConfigFilePatch): Promise<DkgConfigFileUpdate> {
   await mkdir(home, { recursive: true });
-  return withFileLock(homeConfigPaths(home).lock, async () => {
+  return withFileLock(homeConfigPaths(home).lock, async (lock) => {
     const source = await readHomeConfigSource(home) ?? { ...homeConfigSources(home)[0], text: '', raw: {} };
     const config = configFileObject(source.raw, source.path);
     const before = toJsonData(config);
@@ -103,7 +104,7 @@ export async function updateHomeConfigFile(home: string, patch: DkgConfigFilePat
     const content = source.format === 'yaml'
       ? patchYamlText(source.text, before, after)
       : `${JSON.stringify(after, null, 2)}\n`;
-    await replaceFileDurably(source.path, content);
+    await replaceFileDurably(source.path, content, { beforeCommit: () => lock.assertHeld() });
     return { path: source.path, changed: true };
   }, { timeoutMs: CONFIG_LOCK_TIMEOUT_MS, label: 'config' });
 }
