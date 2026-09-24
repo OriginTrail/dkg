@@ -446,6 +446,7 @@ import {
   toContextGraphListOnChainFacts,
   type OnChainContextGraphFacts,
 } from './context-graph-storage-discovery.js';
+import { proveOnChainIdClaim } from './context-graph-claim-proof.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
@@ -515,10 +516,32 @@ interface ContextGraphListChainView {
   readonly subscribedContextGraphs?: ReadonlyMap<string, { onChainHash?: string }>;
   readonly wireIdToLocalCgId?: ReadonlyMap<string, string>;
   readonly onChainContextGraphFacts?: ReadonlyMap<string, OnChainContextGraphFacts>;
+  isWireIdKeyedSubscription?(localId: string): boolean;
 }
 
 function contextGraphListChainView(agent: DKGAgent): ContextGraphListChainView {
   return agent as unknown as ContextGraphListChainView;
+}
+
+/**
+ * The on-chain id a list row may show from the metadata projection: the
+ * claimed id when this chain proves it, otherwise undefined. The projection
+ * copies `OnChainId` from the shared ontology graph, which holds every
+ * network's claims (context-graph-claim-proof.ts). Both listings use this.
+ */
+function provenProjectedOnChainId(
+  agent: DKGAgent,
+  contextGraphId: string,
+  claimedOnChainId: string | undefined,
+): string | undefined {
+  if (claimedOnChainId === undefined) return undefined;
+  const view = contextGraphListChainView(agent);
+  return proveOnChainIdClaim(
+    contextGraphId,
+    claimedOnChainId,
+    view.onChainContextGraphFacts?.get(claimedOnChainId)?.nameHash,
+    (localId) => view.isWireIdKeyedSubscription?.(localId) ?? false,
+  )?.onChainId;
 }
 
 /**
@@ -3024,10 +3047,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         // The projection copies the `OnChainId` triple from the shared ontology
         // graph, which holds every network's claims: show it only when this
         // chain proves it, else the row's own binding.
-        onChainId: (meta.onChainId !== undefined
-          && this.provenOnChainContextGraphClaim(r.id, meta.onChainId) !== null
-          ? meta.onChainId
-          : undefined) ?? r.onChainId,
+        onChainId: provenProjectedOnChainId(this, r.id, meta.onChainId) ?? r.onChainId,
       };
     });
     rows = projectedRows.map((entry) => {

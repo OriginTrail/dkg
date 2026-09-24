@@ -29,6 +29,7 @@ import {
 
 import { runBoundedOperation } from './bounded-operation.js';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
+import { isUnrecordedNameHashRow } from './context-graph-claim-proof.js';
 import {
   CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
   CONTEXT_GRAPH_SUBJECT_PREFIX,
@@ -390,7 +391,7 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     const hash = normalizeContextGraphNameHash(nameHash);
     if (hash === null) return false;
     const row = this.subscribedContextGraphs.get(hash);
-    if (row === undefined || row.onChainHash !== undefined || row.onChainId !== onChainId) return false;
+    if (row === undefined || !isUnrecordedNameHashRow(hash, row, onChainId, hash)) return false;
     const indexed = this.wireIdToLocalCgId.get(hash);
     const cleartext = indexed !== undefined && indexed !== hash
       && verifyContextGraphNameCandidate(indexed, hash) === indexed

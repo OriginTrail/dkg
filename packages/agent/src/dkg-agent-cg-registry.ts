@@ -94,7 +94,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
   assertRdfLiteralMutf8Safe,
-  CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
+  contextGraphOnChainIdBindingQuery,
   contextGraphMetadataHomeGraph,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
@@ -394,7 +394,6 @@ import { LocalContextGraphRegistrationStatusStore } from
   './local-context-graph-registration-status.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
-  isCanonicalAuthoritativeContextGraphId,
   isCanonicalPositiveContextGraphId,
   localContextGraphIdMatchesCommittedNameHash,
 } from './context-graph-binding-state.js';
@@ -402,7 +401,12 @@ import {
   createContextGraphRegistrationReadPlan,
   type ContextGraphRegistrationReadPlan,
 } from './context-graph-registration-read-plan.js';
-import { contextGraphNameCommitmentOf } from './context-graph-name-candidate.js';
+import {
+  proveOnChainIdClaim,
+  provenOnChainIdsFor,
+  refutesOnChainBinding,
+  type ProvenOnChainBinding,
+} from './context-graph-claim-proof.js';
 
 const CHAIN_ATTESTED_DECLARATION_SCAN_MAX = 512;
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
@@ -1514,22 +1518,17 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
 
     // The durable RDF binding: ontology for a public graph, the graph's own
     // `_meta` for a curated one (reported with the same provenance). Both are
-    // claims: the ontology graph holds every creator's from every network,
-    // so a subject can carry any number of them, and `_meta` receives what
-    // earlier builds left in the ontology. Only a claim this chain proves
-    // counts, so ask for exactly those: how many other claims exist cannot
-    // push the proven one out of the answer. With none proven the store is
-    // still read, so a failing store fails closed instead of reading as an
-    // unregistered graph; nothing it returns can be proven then.
+    // claims (see context-graph-claim-proof.ts), and a subject can carry any
+    // number of them, so ask only for the ones this chain proves: no other
+    // claim can then push the proven one out of the answer. With none proven
+    // the store is still read, so a failing store fails closed instead of
+    // reading as an unregistered graph; nothing it returns can be proven then.
     const provenIds = this.provenOnChainIdsFor(contextGraphId);
-    const provenFilter = provenIds.length === 0
-      ? ''
-      : `FILTER(STR(?id) IN (${provenIds.map((id) => sparqlString(id)).join(', ')})) `;
     const result = await this.store.query(
-      `SELECT ?id WHERE { `
-        + `VALUES ?g { <${contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)}> <${contextGraphMetaGraphUri(contextGraphId)}> } `
-        + `GRAPH ?g { <${contextGraphDataGraphUri(contextGraphId)}> <${CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE}> ?id } `
-        + `${provenFilter}} LIMIT 1`,
+      contextGraphOnChainIdBindingQuery(
+        contextGraphId,
+        provenIds.length === 0 ? {} : { onChainIds: provenIds },
+      ),
       {
         signal: options.signal,
         source: options.source ?? 'agent.contextGraph.onChainId',
@@ -1546,66 +1545,42 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
   }
 
   /**
-   * The on-chain ids whose committed name hash, as this node read it from its
-   * own chain, proves `contextGraphId`: usually one, none when the chain has
-   * no such graph or this node has not read it yet.
+   * The on-chain ids this node's chain facts prove for `contextGraphId`
+   * (`provenOnChainIdsFor` in context-graph-claim-proof.ts).
    */
   provenOnChainIdsFor(this: DKGAgent, contextGraphId: string): string[] {
+    // Shared read paths also run on the partial agents unit fixtures build,
+    // which have no facts map.
     const facts = this.onChainContextGraphFacts;
     if (facts === undefined || facts.size === 0) return [];
-    let commitment: string | null;
-    try {
-      commitment = contextGraphNameCommitmentOf(contextGraphId);
-    } catch {
-      commitment = null;
-    }
-    const wireKey = contextGraphId.toLowerCase();
-    const proven: string[] = [];
-    for (const [onChainId, fact] of facts) {
-      // A cheap exact-match prefilter; the canonical predicate decides.
-      const committed = typeof fact.nameHash === 'string' ? fact.nameHash.toLowerCase() : null;
-      if (committed === null || (committed !== commitment && committed !== wireKey)) continue;
-      if (this.provenOnChainContextGraphClaim(contextGraphId, onChainId) !== null) proven.push(onChainId);
-    }
-    return proven;
+    return provenOnChainIdsFor(contextGraphId, facts, (localId) => this.isWireIdKeyedSubscription(localId));
   }
 
   /**
    * The binding an off-chain claim names, when this node's own chain proves
-   * it; otherwise null.
-   *
-   * An off-chain statement that a Context Graph id is on-chain id N is a
-   * claim. The `ontology` system graph is shared by every network and
-   * deployment, so it carries every creator's `dkg:ContextGraphOnChainId`
-   * from every chain. A claim holds only when slot N on this chain commits
-   * the id's name commitment, keccak256(utf8(id)): the check the policy read
-   * and random sampling already apply to a local binding. The committed hash
-   * is one this node read from its own chain (storage enumeration, the live
-   * event tail, or the enumeration checkpoint), so no RPC is spent here. A
-   * slot this node has no facts for, including one this chain does not have,
-   * proves nothing.
+   * it; otherwise null (`proveOnChainIdClaim` in context-graph-claim-proof.ts,
+   * against the name hash this node read for the claimed slot). No RPC is
+   * spent: a slot this node has no facts for proves nothing.
    */
   provenOnChainContextGraphClaim(
     this: DKGAgent,
     contextGraphId: string,
     claimedOnChainId: string,
-  ): { onChainId: string; onChainHash: string } | null {
-    if (!isCanonicalAuthoritativeContextGraphId(claimedOnChainId)) return null;
-    // `?.`: shared read paths also run on the partial agents unit fixtures build.
-    const committed = this.onChainContextGraphFacts?.get(claimedOnChainId)?.nameHash;
-    if (typeof committed !== 'string' || !/^0x[0-9a-fA-F]{64}$/.test(committed)) return null;
-    return localContextGraphIdMatchesCommittedNameHash(
+  ): ProvenOnChainBinding | null {
+    return proveOnChainIdClaim(
       contextGraphId,
-      committed,
+      claimedOnChainId,
+      // `?.`: partial agents built by unit fixtures have no facts map.
+      this.onChainContextGraphFacts?.get(claimedOnChainId)?.nameHash,
       (localId) => this.isWireIdKeyedSubscription(localId),
-    )
-      ? { onChainId: claimedOnChainId, onChainHash: committed.toLowerCase() }
-      : null;
+    );
   }
 
   /**
    * Clear every binding to `onChainId` that this chain refutes, now that the
-   * slot's committed name hash is known. Returns the ids it unbound.
+   * slot's committed name hash is known (`refutesOnChainBinding` in
+   * context-graph-claim-proof.ts decides, from the hash passed in). Returns
+   * the ids it unbound.
    *
    * Store discovery used to bind every ontology claim unchecked, and a Core
    * auto-subscribes what it discovers and persists the binding, so upgraded
@@ -1613,31 +1588,17 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
    * binding can only fail: RFC-64 rejects its evidence as an invalid
    * identity, a reverse lookup of the id can return it instead of the graph
    * the slot names, and every authority read of it fails closed as a stale
-   * mapping. A row is refuted when neither keccak256(utf8(id)) nor the
-   * commitment it records is the slot's hash. Name-hash rows (a placeholder,
-   * or a row keyed by the committed hash itself) follow their own lifecycle
-   * and are never touched here, nor is a row keyed by the bare number: that
-   * is a `dkg subscribe N` row, which the on-chain id resolver retires as a
-   * whole while it is still bound to N.
+   * mapping.
    */
   clearRefutedOnChainContextGraphBindings(
     this: DKGAgent,
     onChainId: string,
     committedNameHash: string,
   ): string[] {
-    const committed = committedNameHash.toLowerCase();
-    const refuted: string[] = [];
-    for (const [localId, sub] of this.subscribedContextGraphs) {
-      if (sub.onChainId !== onChainId || localId === onChainId) continue;
-      if (localId.toLowerCase() === committed || this.isWireIdKeyedSubscription(localId)) continue;
-      if (sub.onChainHash !== undefined && this.contextGraphWireId(sub.onChainHash) === committed) continue;
-      if (localContextGraphIdMatchesCommittedNameHash(
-        localId,
-        committed,
-        (candidate) => this.isWireIdKeyedSubscription(candidate),
-      )) continue;
-      refuted.push(localId);
-    }
+    const isWireIdKeyedRow = (localId: string) => this.isWireIdKeyedSubscription(localId);
+    const refuted = [...this.subscribedContextGraphs]
+      .filter(([localId, row]) => refutesOnChainBinding(localId, row, onChainId, committedNameHash, isWireIdKeyedRow))
+      .map(([localId]) => localId);
     for (const localId of refuted) this.unbindSubscriptionOnChainId(localId);
     return refuted;
   }

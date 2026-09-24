@@ -108,6 +108,7 @@ export default defineConfig({
       "test/context-graph-on-chain-reference.test.ts",
       "test/context-graph-on-chain-id-resolution.test.ts",
       "test/context-graph-ontology-claim-binding.test.ts",
+      "test/context-graph-claim-proof.test.ts",
       "test/vm-reconcile-peer-topology.test.ts",
       "test/swm-late-joiner-deferred-gossip.test.ts",
       "test/context-graph-metadata-placement.test.ts",
