@@ -128,6 +128,7 @@ import {
 } from './rfc64/catalog-synchronization-evidence-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
+  createRfc64VerifiedStagedCatalogHeadMemoV1,
   type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1,
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
 } from './rfc64/public-catalog-native-reconciler-v1.js';
@@ -4992,28 +4993,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           Object.freeze({
             synchronizeBoundedPublicRootCatalog,
           });
-        const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
-          nativeReceiver: nativeReceiverClient,
-          inventory: persistence.inventory,
-          resolveTrustedCatalogScope: clients.resolveTrustedCatalogScope,
-          resolveDeployment,
-          requiresAppliedHeadPrecommit: (announcement) => {
-            const accepted = this.requireRfc64PublicCatalogServiceV1()
-              .acceptedPolicySnapshotForCatalogScope(
-                clients.resolveTrustedCatalogScope(announcement),
-              );
-            return accepted.policy.accessPolicy === 1
-              && accepted.policy.source.kind === 'finalized-chain'
-              // A durable head alone cannot prove that finalized VM/SWM
-              // post-commit work finished on a prior process, so restart must
-              // replay it. Within this process, however, synchronization
-              // evidence is recorded only after that lifecycle succeeds and
-              // safely closes the scheduler's check/lock race for this head.
-              && !this.rfc64PublicCatalogSynchronizationEvidenceV1.has(
-                announcement.catalogHeadObjectDigest,
-              );
-          },
-          readStagedCatalogHead: async (announcement) => {
+        const stagedCatalogHeads = createRfc64VerifiedStagedCatalogHeadMemoV1(
+          async (announcement) => {
             const stored = await persistence.controlObjects.getVerifiedObject({
               objectDigest: announcement.catalogHeadObjectDigest,
               signatureVariantDigest: announcement.signatureVariantDigest,
@@ -5038,12 +5019,48 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               signatureVariantDigest,
             });
           },
+        );
+        const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
+          nativeReceiver: nativeReceiverClient,
+          inventory: persistence.inventory,
+          resolveTrustedCatalogScope: clients.resolveTrustedCatalogScope,
+          resolveDeployment,
+          requiresAppliedHeadPrecommit: (announcement) => {
+            const accepted = this.requireRfc64PublicCatalogServiceV1()
+              .acceptedPolicySnapshotForCatalogScope(
+                clients.resolveTrustedCatalogScope(announcement),
+              );
+            return accepted.policy.accessPolicy === 1
+              && accepted.policy.source.kind === 'finalized-chain'
+              // A durable head alone cannot prove that finalized VM/SWM
+              // post-commit work finished on a prior process, so restart must
+              // replay it. Within this process, however, synchronization
+              // evidence is recorded only after that lifecycle succeeds and
+              // safely closes the scheduler's check/lock race for this head.
+              && !this.rfc64PublicCatalogSynchronizationEvidenceV1.has(
+                announcement.catalogHeadObjectDigest,
+              );
+          },
+          // Control objects are content-addressed and never rewritten or
+          // removed, and an EIP-191 head verifies from its envelope alone, so
+          // an exact staged head read and verified once is reused by the
+          // applied-head check instead of being re-read on every announcement.
+          readStagedCatalogHead: stagedCatalogHeads.read,
+          peekStagedCatalogHead: stagedCatalogHeads.peek,
         });
         const deploymentAwareReconciler: Rfc64PublicCatalogCurrentReceiverReconcilerV1 = {
           isHeadSatisfied: (announcement) => withRpcRequestContext({ requestClass: 'background' }, () => {
             this.assertRfc64CatalogNetworkMatchesTrustedSourceV1(announcement.networkId);
             return reconciler.isHeadSatisfied(announcement);
           }),
+          isHeadKnownSatisfied: (announcement) => {
+            try {
+              this.assertRfc64CatalogNetworkMatchesTrustedSourceV1(announcement.networkId);
+            } catch {
+              return false;
+            }
+            return reconciler.isHeadKnownSatisfied?.(announcement) === true;
+          },
           reconcileHead: (remotePeerId, announcement, signal) =>
             withRpcRequestContext(
               { requestClass: 'background', signal },

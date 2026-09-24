@@ -7255,6 +7255,21 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       dedupedAlreadyApplied: 1,
     });
 
+    // That check verified the exact staged head once. Every later connect
+    // re-announces the head; each is now answered without a receiver task.
+    const beforeReconnects = receiver.rfc64PublicCatalogStatsV1()!;
+    for (let connect = 0; connect < 3; connect += 1) {
+      await expect(author.announceRfc64PublicCatalogHeadV1({
+        announcement: successor.announcement,
+        peers: [receiver.peerId],
+      })).resolves.toMatchObject({ announcedPeers: [receiver.peerId] });
+    }
+    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
+    expect(receiver.rfc64PublicCatalogStatsV1()).toMatchObject({
+      announcedHeadsAlreadySatisfied: beforeReconnects.announcedHeadsAlreadySatisfied + 3,
+      receiver: beforeReconnects.receiver,
+    });
+
     const oneRow = await author.publishAuthorCatalogExactSetSuccessorV1({
       previousHead: {
         objectDigest: successor.headObjectDigest,
