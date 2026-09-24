@@ -44,54 +44,13 @@ import type {
   ContextGraphOnChainReferenceNote,
 } from './catchup-status.js';
 import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
+import {
+  resolveDaemonRequestDeadlines,
+  type DaemonRequestDeadlines,
+} from '@origintrail-official/dkg-core/daemon-request-deadlines';
 import type { PublicQueryResult } from '@origintrail-official/dkg-core';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
-
-/** Deadline for GET reads, which answer from local daemon state. */
-export const API_READ_TIMEOUT_MS = 30_000;
-
-/**
- * Deadline for the GET lists in {@link API_LIST_READ_PATHS}, which walk every
- * context graph, sub-graph, PCA or publisher job (the PCA list reads each
- * account from the chain). It matches the node UI's graph-list deadline and
- * never falls below the read deadline.
- */
-export const API_LIST_READ_TIMEOUT_MS = 60_000;
-const API_LIST_READ_PATHS: ReadonlySet<string> = new Set([
-  '/api/context-graph/list',
-  '/api/sub-graph/list',
-  '/api/pca',
-  '/api/publisher/jobs',
-]);
-
-/**
- * Deadline for every other request: several wait on peers or the chain.
- * `vm/publish` holds the request open for the publisher's storage-ACK window
- * (`ACK_TIMEOUT_MS`, 120 s, in packages/publisher/src/ack-collector.ts) plus
- * chain confirmation; registration, PCA and wallet routes wait for their
- * transactions. It stays under the 300 s Node's fetch waits on its own, so this
- * deadline, and a long mutation's outcome-unknown report, comes first.
- */
-export const API_LONG_TIMEOUT_MS = 240_000;
-
-/** Environment overrides, in ms, for the read and long deadlines. */
-export const API_READ_TIMEOUT_ENV = 'DKG_API_READ_TIMEOUT_MS';
-export const API_LONG_TIMEOUT_ENV = 'DKG_API_LONG_TIMEOUT_MS';
-
-/** Longest deadline a Node timer honours; a longer one fires after 1 ms. */
-const MAX_TIMEOUT_MS = 2_147_483_647;
-
-/** A deadline override from the environment; unset or empty means none. */
-function timeoutFromEnv(name: string): number | undefined {
-  const raw = process.env[name]?.trim();
-  if (raw === undefined || raw === '') return undefined;
-  const value = Number(raw);
-  if (!/^\d+$/.test(raw) || value < 1 || value > MAX_TIMEOUT_MS) {
-    throw new Error(`${name} must be a whole number of milliseconds from 1 to ${MAX_TIMEOUT_MS}, got "${raw}"`);
-  }
-  return value;
-}
 
 /**
  * `/api/verify` collects signatures for up to 30 minutes when the request names
@@ -707,9 +666,7 @@ export class ApiClient {
   private baseUrl: string;
   private token?: string;
   private readonly configFallback?: Readonly<ConfigFallbackContext>;
-  private readonly readTimeoutMs: number;
-  private readonly listReadTimeoutMs: number;
-  private readonly longTimeoutMs: number;
+  private readonly deadlines: DaemonRequestDeadlines;
   readonly controlPlaneWarning?: string;
 
   constructor(portOrBaseUrl: number | string, token?: string, opts?: {
@@ -728,12 +685,7 @@ export class ApiClient {
     this.token = token;
     this.configFallback = opts?.configFallback && Object.freeze({ ...opts.configFallback });
     this.controlPlaneWarning = this.configFallback?.controlPlaneWarning;
-    this.readTimeoutMs = opts?.readTimeoutMs ?? timeoutFromEnv(API_READ_TIMEOUT_ENV) ?? API_READ_TIMEOUT_MS;
-    this.listReadTimeoutMs = Math.max(API_LIST_READ_TIMEOUT_MS, this.readTimeoutMs);
-    this.longTimeoutMs = Math.max(
-      opts?.longTimeoutMs ?? timeoutFromEnv(API_LONG_TIMEOUT_ENV) ?? API_LONG_TIMEOUT_MS,
-      this.readTimeoutMs,
-    );
+    this.deadlines = resolveDaemonRequestDeadlines(opts);
   }
 
   static async connect(opts: ApiClientConnectOptions = {}): Promise<ApiClient> {
@@ -2285,7 +2237,10 @@ export class ApiClient {
   }> {
     const collectionMs = request.timeoutMs ?? VERIFY_DEFAULT_COLLECTION_TIMEOUT_MS;
     return this.post('/api/verify', request, {
-      timeoutMs: Math.max(this.longTimeoutMs, collectionMs + REQUEST_CARRIED_TIMEOUT_MARGIN_MS),
+      timeoutMs: Math.max(
+        this.deadlines.longTimeoutMs,
+        collectionMs + REQUEST_CARRIED_TIMEOUT_MARGIN_MS,
+      ),
     });
   }
 
@@ -2543,12 +2498,11 @@ export class ApiClient {
   }
 
   /**
-   * Run one daemon round-trip under its deadline: GET reads take the read
-   * deadline (the list deadline for {@link API_LIST_READ_PATHS}), every other
-   * method the long one, unless the route overrides it. The deadline also
-   * covers reading the body. A long Knowledge Asset mutation that times out
-   * throws {@link DaemonOutcomeUnknownError}; other timeouts keep fetch's
-   * TimeoutError.
+   * Run one daemon round-trip under its deadline: the shared daemon policy's
+   * deadline for the method and path, unless the route overrides it. The
+   * deadline also covers reading the body. A long Knowledge Asset mutation
+   * that times out throws {@link DaemonOutcomeUnknownError}; other timeouts
+   * keep fetch's TimeoutError.
    */
   private async withDeadline<T>(
     method: string,
@@ -2556,11 +2510,7 @@ export class ApiClient {
     deadline: RequestDeadline,
     run: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    const timeoutMs = deadline.timeoutMs ?? (method !== 'GET'
-      ? this.longTimeoutMs
-      : API_LIST_READ_PATHS.has(path.replace(/\?.*$/, ''))
-        ? this.listReadTimeoutMs
-        : this.readTimeoutMs);
+    const timeoutMs = deadline.timeoutMs ?? this.deadlines.timeoutMsFor({ method, path });
     const signal = AbortSignal.timeout(timeoutMs);
     try {
       return await run(signal);
