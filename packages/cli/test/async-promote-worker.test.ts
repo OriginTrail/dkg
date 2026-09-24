@@ -16,6 +16,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
+  PROMOTE_STAGES,
   TripleStoreAsyncPromoteQueue,
   type AsyncPromoteQueue,
   type PromoteJob,
@@ -179,6 +180,27 @@ describe('runPromoteJob', () => {
     if (!claimed) throw new Error('expected claimable job');
     return claimed;
   }
+
+  it('recognizes every publisher-owned canonical stage in diagnostics', async () => {
+    for (const stage of PROMOTE_STAGES) {
+      const job = await enqueueAndClaim();
+      await runPromoteJob({
+        job,
+        queue,
+        workerId: 'worker-test',
+        runPromote: async () => {
+          throw new Error(`[promote:${stage}] failure`);
+        },
+        now: () => now,
+        heartbeatIntervalMs: 0,
+        log: (message) => logs.push(message),
+      });
+    }
+
+    expect(promoteFailureDiagnostics(logs).map((entry) => entry['stage'])).toEqual([
+      ...PROMOTE_STAGES,
+    ]);
+  });
 
   it('on success, records the recovery commit marker and transitions to succeeded', async () => {
     const job = await enqueueAndClaim();

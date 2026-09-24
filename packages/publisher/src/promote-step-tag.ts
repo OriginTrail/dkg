@@ -25,6 +25,43 @@
  */
 
 const PROMOTE_STEP_TAG_PREFIX = '[promote:';
+const PROMOTE_STEP_TAG = /^\[promote:([^\]]*)\]\s*/;
+
+export const PROMOTE_STAGES = [
+  'ensureSubGraphRegistered',
+  'assertGraphScopedLifecycleWritable',
+  'knowledgeAssetPrivateQuads',
+  'assertionScopedQuads',
+  'assertTrustedCatalogTriplesAllowed',
+  'encodeWorkspaceGossipPayload',
+] as const;
+
+export type PromoteStage = (typeof PROMOTE_STAGES)[number];
+export type NormalizedPromoteStage = PromoteStage | 'unknown';
+
+const PROMOTE_STAGE_SET: ReadonlySet<string> = new Set(PROMOTE_STAGES);
+
+export interface PromoteStageDescriptor {
+  stage: NormalizedPromoteStage;
+  message: string;
+}
+
+/**
+ * Parse a producer-owned promote tag without exposing an untrusted stage label.
+ * A syntactically valid but unknown tag is still removed from the message so it
+ * cannot influence downstream classification, while its stage becomes unknown.
+ */
+export function normalizePromoteStage(message: string): PromoteStageDescriptor {
+  const match = PROMOTE_STEP_TAG.exec(message);
+  if (!match) return { stage: 'unknown', message };
+  const candidate = match[1];
+  return {
+    stage: candidate !== undefined && PROMOTE_STAGE_SET.has(candidate)
+      ? candidate as PromoteStage
+      : 'unknown',
+    message: message.slice(match[0].length),
+  };
+}
 
 /**
  * Return `err` re-labelled with the promote step that produced it. Idempotent:
@@ -64,7 +101,7 @@ export function tagPromoteError(step: string, err: unknown): unknown {
  * {@link tagPromoteError}. Resolved values pass through unchanged. The `op` is
  * a thunk so it is invoked inside the try — a synchronous throw is tagged too.
  */
-export async function tagPromoteStep<T>(step: string, op: () => Promise<T>): Promise<T> {
+export async function tagPromoteStep<T>(step: PromoteStage, op: () => Promise<T>): Promise<T> {
   try {
     return await op();
   } catch (err) {
