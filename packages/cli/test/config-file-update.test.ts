@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
-import { chmod, mkdtemp, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,8 +11,10 @@ import { applyConfigEdits } from '../src/home-config-file.js';
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return { ...actual, rename: vi.fn(actual.rename) };
+  return { ...actual, open: vi.fn(actual.open), rename: vi.fn(actual.rename), stat: vi.fn(actual.stat) };
 });
+
+const actualFs = await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises');
 
 /** The pid of a process that has already exited. */
 const EXITED_PID = spawnSync(process.execPath, ['-e', ''], { stdio: 'ignore' }).pid!;
@@ -27,7 +29,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
   });
 
   afterEach(async () => {
-    vi.mocked(rename).mockReset();
+    for (const mocked of [open, rename, stat]) vi.mocked(mocked).mockReset();
     await rm(home, { recursive: true, force: true });
   });
 
@@ -54,7 +56,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
 
   it('creates config.json in a home that has no config yet', async () => {
     expect(await files.updateConfigFile([configEdit(['name'], () => 'fresh')]))
-      .toEqual({ path: files.configPath, changed: true });
+      .toEqual({ path: files.configPath, changed: true, strategy: 'rename' });
 
     expect(await readJson()).toEqual({ name: 'fresh' });
     expect(existsSync(files.configYamlPath)).toBe(false);
@@ -141,7 +143,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
     const original = `${JSON.stringify({ name: 'node', apiPort: 9200 }, null, 2)}\n`;
     await writeFile(files.configPath, original);
     // Only the rename that would replace the config fails (not the lock guard's).
-    const actualRename = (await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')).rename;
+    const actualRename = actualFs.rename;
     vi.mocked(rename).mockImplementation(async (from, to) => {
       // The writer renames onto the resolved path, so match the name.
       if (basename(String(to)) === 'config.json') throw Object.assign(new Error('EIO: simulated'), { code: 'EIO' });
@@ -164,7 +166,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       await writeFile(files.configYamlPath, 'name: yaml-node\napiPort: 9317\n');
 
       expect(await files.updateConfigFile([configEdit(['contextGraphs'], () => ['cg'])]))
-        .toEqual({ path: files.configYamlPath, changed: true });
+        .toEqual({ path: files.configYamlPath, changed: true, strategy: 'rename' });
 
       expect(existsSync(files.configPath)).toBe(false);
       expect(yaml.load(await readFile(files.configYamlPath, 'utf-8')))
@@ -283,6 +285,29 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       // Nothing was renamed over the config (the lock's guard is renamed into place on release).
       expect(vi.mocked(rename).mock.calls.filter(([, to]) => basename(String(to)) === 'config.yaml')).toEqual([]);
     });
+  });
+
+  // A config belonging to another user, written by a process that may not
+  // give a new file to that user, is rewritten in place to keep its owner;
+  // the update says so, since that write has no crash guarantee.
+  it('reports rewriting a config in place when it may not give a new file its owner', async () => {
+    await writeFile(files.configPath, JSON.stringify({ name: 'node' }));
+    const { uid, ino } = await actualFs.stat(files.configPath);
+    vi.mocked(stat).mockImplementation(async (...args: Parameters<typeof stat>) => {
+      const found = await actualFs.stat(...args);
+      return basename(String(args[0])) === 'config.json' ? Object.assign(found, { uid: uid + 1 }) : found;
+    });
+    vi.mocked(open).mockImplementation(async (...args: Parameters<typeof open>) => {
+      const handle = await actualFs.open(...args);
+      handle.chown = async () => { throw Object.assign(new Error('EPERM: simulated'), { code: 'EPERM' }); };
+      return handle;
+    });
+
+    expect(await files.updateConfigFile([configEdit(['name'], () => 'renamed')]))
+      .toEqual({ path: files.configPath, changed: true, strategy: 'in-place' });
+
+    expect(await readJson()).toEqual({ name: 'renamed' });
+    expect((await actualFs.stat(files.configPath)).ino).toBe(ino);
   });
 
   it('keeps the permission bits of the config file', async () => {

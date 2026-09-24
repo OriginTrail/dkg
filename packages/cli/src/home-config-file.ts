@@ -11,6 +11,7 @@ import jsYaml from 'js-yaml';
 import { parseDocument, type Document } from 'yaml';
 import { hasErrorCode } from '@origintrail-official/dkg-core';
 import type { DkgConfig } from './config.js';
+import type { ReplaceStrategy } from './durable-file-replace.js';
 import { withFileLock } from './file-lock.js';
 
 /** What the config file holds: the config, and keys older releases wrote that are now only ever removed. */
@@ -79,11 +80,13 @@ export function configValues(values: Partial<DkgConfig>): DkgConfigEdit[] {
   return Object.entries(values).map(([key, value]) => makeConfigEdit([key], () => value));
 }
 
-/** Where a config update was written, and whether its edits changed anything. */
-export interface DkgConfigFileUpdate {
-  path: string;
-  changed: boolean;
-}
+/**
+ * Where a config update was written and whether its edits changed anything,
+ * and, when they did, how the file was replaced (see ReplaceStrategy).
+ */
+export type DkgConfigFileUpdate =
+  | { path: string; changed: false }
+  | { path: string; changed: true; strategy: ReplaceStrategy };
 
 /** A home config file and how to parse it. */
 export interface HomeConfigSource {
@@ -151,8 +154,8 @@ export async function updateHomeConfigFile(home: string, edits: readonly DkgConf
     const content = source.format === 'yaml'
       ? patchYamlText(source.text, before, after)
       : `${JSON.stringify(after, null, 2)}\n`;
-    await lock.replaceFile(source.path, content);
-    return { path: source.path, changed: true };
+    const strategy = await lock.replaceFile(source.path, content);
+    return { path: source.path, changed: true, strategy };
   }, { timeoutMs: CONFIG_LOCK_TIMEOUT_MS, label: 'config' });
 }
 

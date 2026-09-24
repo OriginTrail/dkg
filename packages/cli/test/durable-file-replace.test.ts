@@ -79,10 +79,10 @@ describe('replaceFileDurably', () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it('replaces the file and leaves no temp file behind', async () => {
+  it('replaces the file by rename and leaves no temp file behind', async () => {
     await writeFile(target, 'old');
 
-    await replaceFileDurably(target, 'new');
+    expect(await replaceFileDurably(target, 'new')).toBe('rename');
 
     expect(await readFile(target, 'utf-8')).toBe('new');
     expect(await readdir(dir)).toEqual(['config.json']);
@@ -169,7 +169,8 @@ describe('replaceFileDurably', () => {
         await sync();
       };
     });
-    await replaceFileDurably(target, 'new content');
+    // Reported, since a crash part-way through could have left it incomplete.
+    expect(await replaceFileDurably(target, 'new content')).toBe('in-place');
 
     // The same inode, so its owner, group, mode and any ACL stay as they were.
     const after = await stat(target);

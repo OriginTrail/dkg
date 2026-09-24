@@ -7,7 +7,7 @@ import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { threadId } from 'node:worker_threads';
 import { hasErrorCode } from '@origintrail-official/dkg-core';
-import { replaceFileDurably, type DurableReplaceOptions } from './durable-file-replace.js';
+import { replaceFileDurably, type DurableReplaceOptions, type ReplaceStrategy } from './durable-file-replace.js';
 
 /**
  * How long a holder's lease lasts without renewal. A holder renews it several
@@ -72,7 +72,7 @@ export interface HeldFileLock {
    */
   commit<T>(publish: () => Promise<T>): Promise<T>;
   /** Durably replace the file at `path` with `content`, publishing it through `commit`. */
-  replaceFile(path: string, content: string, options?: Omit<DurableReplaceOptions, 'commit'>): Promise<void>;
+  replaceFile(path: string, content: string, options?: Omit<DurableReplaceOptions, 'commit'>): Promise<ReplaceStrategy>;
 }
 
 /** Who holds a lock or a guard, as its record says, with an older record's missing fields filled in. */

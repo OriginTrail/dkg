@@ -2414,6 +2414,7 @@ export { configEdit, configValues } from './home-config-file.js';
 export type {
   DkgConfigEdit, DkgConfigFile, DkgConfigFileUpdate, DkgConfigPath, DkgConfigValue,
 } from './home-config-file.js';
+export type { ReplaceStrategy } from './durable-file-replace.js';
 
 /** Immutable filesystem context for one selected local daemon home. */
 export class DkgHomeFiles {

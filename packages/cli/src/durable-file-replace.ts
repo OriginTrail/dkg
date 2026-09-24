@@ -11,6 +11,13 @@ const WINDOWS_RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 250];
 /** Links followed to a missing file before giving up, as Linux's own limit. */
 const MAX_SYMLINK_HOPS = 40;
 
+/**
+ * How new content reached the file: renamed into place, which a crash cannot
+ * leave half done, or rewritten in place, which keeps an owner this process
+ * could not give a new file, but which a crash can leave incomplete.
+ */
+export type ReplaceStrategy = 'rename' | 'in-place';
+
 export interface DurableReplaceOptions {
   /** Selects the Windows rename retry and directory-fsync skip; tests override it. */
   platform?: NodeJS.Platform;
@@ -39,7 +46,8 @@ export interface DurableReplaceOptions {
  * on the file itself cannot be read from Node and is not carried over. When
  * this process may not give the temp file the original's owner or group (it
  * belongs to another user), the file is rewritten in place instead, keeping
- * its owner and ACL at the cost of the crash guarantee.
+ * its owner and ACL at the cost of the crash guarantee. The strategy used is
+ * returned, so a caller can tell when that guarantee did not apply.
  *
  * A file that is not writable is refused, as `writeFile` would refuse it. A
  * symlink is followed as `writeFile` follows it: the file behind it is
@@ -51,16 +59,16 @@ export async function replaceFileDurably(
   path: string,
   content: string,
   options: DurableReplaceOptions = {},
-): Promise<void> {
+): Promise<ReplaceStrategy> {
   const target = await resolveWriteTarget(path);
   const original = await stat(target).catch((error: unknown) => {
     if (hasErrorCode(error, 'ENOENT')) return undefined;
     throw error;
   });
   if (original) await access(target, constants.W_OK);
-  if (!await replaceByRename(target, content, original, options)) {
-    await rewriteInPlace(target, content, options);
-  }
+  if (await replaceByRename(target, content, original, options)) return 'rename';
+  await rewriteInPlace(target, content, options);
+  return 'in-place';
 }
 
 /**
