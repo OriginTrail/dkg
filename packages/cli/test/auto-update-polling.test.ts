@@ -135,62 +135,60 @@ describe('startGitUpdatePolling / startNpmUpdatePolling', () => {
   }
 
   function pollingHarness() {
-    const scheduled: Array<{ kind: 'timeout' | 'interval'; ms: number; fn: () => unknown }> = [];
+    const scheduled: Array<{ ms: number; fn: () => unknown }> = [];
     const cleared: unknown[] = [];
     const timers: UpdatePollingTimers = {
-      setTimeout: (fn, ms) => { scheduled.push({ kind: 'timeout', ms, fn }); return 'startup-timer'; },
+      setTimeout: (fn, ms) => { scheduled.push({ ms, fn }); return `timer-${scheduled.length}`; },
       clearTimeout: (handle) => { cleared.push(handle); },
-      setInterval: (fn, ms) => { scheduled.push({ kind: 'interval', ms, fn }); return 'interval-timer'; },
-      clearInterval: (handle) => { cleared.push(handle); },
     };
     let shuttingDown = false;
+    const logs: string[] = [];
     const deps: DaemonUpdatePollingDeps = {
       dkgHome: home,
       isShuttingDown: () => shuttingDown,
       setUpdating: () => {},
-      log: () => {},
+      log: (m) => { logs.push(m); },
       lastUpdateCheck: { upToDate: false, checkedAt: 0, latestCommit: '', latestVersion: '', channelTargetMissing: false },
       onRestart: async () => {},
       timers,
       // The hold ends in a restart, so a tick persists its deadline and stops.
       gateSeams: { rng: () => 0.5, now: () => 1_000, sleep: async () => { shuttingDown = true; } },
     };
-    return { scheduled, cleared, deps };
+    return { scheduled, cleared, logs, deps };
   }
 
   beforeEach(() => { stubChecks(); });
 
-  it('git: both scheduled checks share one gate that persists the deadline under the DKG home', async () => {
+  it('git: checks 15 s after boot, then an interval after each check, through one gate persisting under the DKG home', async () => {
     const { scheduled, deps } = pollingHarness();
 
     startGitUpdatePolling(GIT_AU, deps);
-    expect(scheduled.map(({ kind, ms }) => [kind, ms])).toEqual([['timeout', 15_000], ['interval', 3 * 60_000]]);
-    expect(scheduled[0].fn, 'one runCheck (one gate) for both timers').toBe(scheduled[1].fn);
+    expect(scheduled.map(({ ms }) => ms)).toEqual([15_000]);
 
     await scheduled[0].fn();
     expect(await readRecord(home)).toEqual({ target: 'bbb2222', deadlineEpochMs: 1_000 + 900_000 });
+    expect(scheduled.map(({ ms }) => ms), 'next check armed once this one finished').toEqual([15_000, 3 * 60_000]);
+    expect(scheduled[1].fn, 'the same runCheck (one gate) every time').toBe(scheduled[0].fn);
   });
 
   it('npm auto-apply: interval and policy come from the config; both checks share one persisted gate', async () => {
     const { scheduled, deps } = pollingHarness();
 
     startNpmUpdatePolling({ mode: 'npm-auto-apply', au: GIT_AU, nodeRole: 'core' }, deps);
-    expect(scheduled.map(({ kind, ms }) => [kind, ms])).toEqual([['timeout', 15_000], ['interval', 3 * 60_000]]);
-    expect(scheduled[0].fn).toBe(scheduled[1].fn);
-
     await scheduled[0].fn();
     expect(await readRecord(home)).toEqual({ target: '9.1.0', deadlineEpochMs: 1_000 + 900_000 });
+    expect(scheduled.map(({ ms }) => ms)).toEqual([15_000, 3 * 60_000]);
+    expect(scheduled[1].fn).toBe(scheduled[0].fn);
   });
 
   it('npm with auto-apply disabled: checks and records the version, but has no gate and writes no deadline', async () => {
     const { scheduled, deps } = pollingHarness();
 
     startNpmUpdatePolling({ mode: 'npm-check-only', policy: { allowPrerelease: false } }, deps);
-    expect(scheduled.map(({ kind, ms }) => [kind, ms])).toEqual([['timeout', 15_000], ['interval', 30 * 60_000]]);
-
     await scheduled[0].fn();
     expect(deps.lastUpdateCheck.latestVersion).toBe('9.1.0');
     expect(await readdir(home)).toEqual([]);
+    expect(scheduled.map(({ ms }) => ms)).toEqual([15_000, 30 * 60_000]);
   });
 
   it('npm auto-apply with no node role configured installs through the edge (global npm) installer', async () => {
@@ -225,15 +223,54 @@ describe('startGitUpdatePolling / startNpmUpdatePolling', () => {
     expect(await readdir(home)).toEqual([]);
   });
 
-  it('stop() clears both timers, and a tick that was already queued does nothing', async () => {
+  it('stop() clears the armed timer, and a tick that was already queued does nothing', async () => {
     const { scheduled, cleared, deps } = pollingHarness();
     const polling = startGitUpdatePolling(GIT_AU, deps);
     polling.stop();
-    expect(cleared).toEqual(['startup-timer', 'interval-timer']);
+    expect(cleared).toEqual(['timer-1']);
 
     await scheduled[0].fn();
     expect(_autoUpdateIo.execFile).not.toHaveBeenCalled();
     expect(await readdir(home)).toEqual([]);
+    expect(scheduled, 'nothing re-armed after stop()').toHaveLength(1);
+  });
+
+  it('a check that has not finished blocks the next one: no second check or deadline transition starts', async () => {
+    let answerLsRemote!: () => void;
+    const lsRemoteAnswered = new Promise<void>((r) => { answerLsRemote = r; });
+    vi.mocked(_autoUpdateIo.execFile).mockImplementation((async () => {
+      await lsRemoteAnswered; // the first check's ref lookup stalls
+      return { stdout: 'aaa1111\trefs/heads/main\n', stderr: '' }; // then: up to date
+    }) as any);
+    const { deps } = pollingHarness();
+    vi.useFakeTimers();
+    let polling: UpdatePolling | undefined;
+    try {
+      polling = startGitUpdatePolling(GIT_AU, { ...deps, timers: undefined });
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(_autoUpdateIo.execFile, 'the first check started').toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(60 * 60_000); // twenty intervals
+      expect(_autoUpdateIo.execFile, 'no second check while the first is unfinished').toHaveBeenCalledOnce();
+    } finally {
+      polling?.stop();
+      vi.useRealTimers();
+      answerLsRemote();
+    }
+    // Let the released check finish (it only clears) before the temp home is removed.
+    await vi.waitFor(() => expect(deps.lastUpdateCheck.upToDate).toBe(true));
+    await new Promise<void>((r) => { setImmediate(r); });
+  });
+
+  it('a check that throws is logged, and polling carries on', async () => {
+    installers.npmEdge.mockRejectedValueOnce(new Error('npm install -g exploded'));
+    const { scheduled, logs, deps } = pollingHarness();
+    startNpmUpdatePolling(
+      { mode: 'npm-auto-apply', au: GIT_AU, nodeRole: 'edge' },
+      { ...deps, gateSeams: { rng: () => 0.5, now: () => 1_000, sleep: async () => {} } },
+    );
+    await expect(scheduled[0].fn()).resolves.toBeUndefined();
+    expect(logs).toContain('Auto-update: update check failed (npm install -g exploded).');
+    expect(scheduled.map(({ ms }) => ms), 'next check still armed').toEqual([15_000, 3 * 60_000]);
   });
 });
 

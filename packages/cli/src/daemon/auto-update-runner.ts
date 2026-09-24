@@ -9,7 +9,7 @@
  * The mode differences (which check, which installer, log wording) live here.
  * Each check result is mapped onto the gate's mode-neutral
  * {@link UpdateCheckOutcome}; the cross-cutting rollout state machine
- * (single-flight, hold-off, persisted deadline, shutdown abort, isUpdating) is
+ * (hold-off, persisted deadline, shutdown abort, isUpdating) is
  * owned by the {@link UpdateHoldoffGate}; each runCheck binds its mode's rollout
  * step to the gate once. `auto-update-polling.ts` builds the
  * daemon's gate, these runChecks and their timers.

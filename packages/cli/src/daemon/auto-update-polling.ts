@@ -84,16 +84,16 @@ const FIRST_UPDATE_CHECK_DELAY_MS = 15_000;
 export interface UpdatePollingTimers {
   setTimeout(fn: () => unknown, ms: number): unknown;
   clearTimeout(handle: unknown): void;
-  setInterval(fn: () => unknown, ms: number): unknown;
-  clearInterval(handle: unknown): void;
 }
 
 const globalTimers: UpdatePollingTimers = {
   setTimeout: (fn, ms) => setTimeout(fn, ms),
   clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-  setInterval: (fn, ms) => setInterval(fn, ms),
-  clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
 };
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 /** What the daemon hands both polling helpers. */
 export interface DaemonUpdatePollingDeps {
@@ -110,34 +110,51 @@ export interface DaemonUpdatePollingDeps {
   gateSeams?: UpdateGateSeams;
 }
 
-/** Running auto-update polling. `stop()` cancels the startup check and the interval. */
+/** Running auto-update polling. `stop()` cancels the next check. */
 export interface UpdatePolling {
   stop(): void;
 }
 
+/**
+ * Run `runCheck` shortly after boot, then `intervalMs` after each check
+ * finishes. This is the single flight: a check (the poll, its hold-off, the
+ * re-check and the apply) always finishes before the next one is scheduled, so
+ * two checks never race on the persisted deadline. A failed check is logged and
+ * polling goes on.
+ */
 function schedulePolling(
   runCheck: () => Promise<void>,
   intervalMs: number,
+  log: (msg: string) => void,
   timers: UpdatePollingTimers = globalTimers,
 ): UpdatePolling {
   let stopped = false;
-  // A timer callback already queued when stop() runs must not start a check either.
-  const tick = () => (stopped ? undefined : runCheck());
-  const first = timers.setTimeout(tick, FIRST_UPDATE_CHECK_DELAY_MS);
-  const every = timers.setInterval(tick, intervalMs);
+  let next: unknown = null;
+  const tick = async (): Promise<void> => {
+    next = null;
+    // A timer callback already queued when stop() runs must not start a check.
+    if (stopped) return;
+    try {
+      await runCheck();
+    } catch (err) {
+      log(`Auto-update: update check failed (${errorMessage(err)}).`);
+    }
+    if (!stopped) next = timers.setTimeout(tick, intervalMs);
+  };
+  next = timers.setTimeout(tick, FIRST_UPDATE_CHECK_DELAY_MS);
   return {
     stop() {
       stopped = true;
-      timers.clearTimeout(first);
-      timers.clearInterval(every);
+      if (next !== null) timers.clearTimeout(next);
+      next = null;
     },
   };
 }
 
 /**
- * Start git-mode auto-update polling: one persisted rollout gate (created once,
- * so single-flight holds across ticks) behind a runCheck that fires shortly
- * after boot and then every `checkIntervalMinutes`.
+ * Start git-mode auto-update polling: one persisted rollout gate behind a
+ * runCheck that runs shortly after boot and then `checkIntervalMinutes` after
+ * each check finishes.
  */
 export function startGitUpdatePolling(
   au: ResolvedAutoUpdateConfig,
@@ -151,7 +168,7 @@ export function startGitUpdatePolling(
     au,
     onRestart: deps.onRestart,
   });
-  return schedulePolling(runCheck, au.checkIntervalMinutes * 60_000, deps.timers);
+  return schedulePolling(runCheck, au.checkIntervalMinutes * 60_000, deps.log, deps.timers);
 }
 
 /** Poll interval when auto-update is disabled and npm mode only checks versions. */
@@ -177,7 +194,7 @@ export function startNpmUpdatePolling(
       channel: opts.policy.channel,
       autoApply: null,
     });
-    return schedulePolling(runCheck, CHECK_ONLY_INTERVAL_MINUTES * 60_000, deps.timers);
+    return schedulePolling(runCheck, CHECK_ONLY_INTERVAL_MINUTES * 60_000, deps.log, deps.timers);
   }
   const { au } = opts;
   const runCheck = createNpmUpdateRunCheck({
@@ -190,7 +207,7 @@ export function startNpmUpdatePolling(
       onRestart: deps.onRestart,
     },
   });
-  return schedulePolling(runCheck, au.checkIntervalMinutes * 60_000, deps.timers);
+  return schedulePolling(runCheck, au.checkIntervalMinutes * 60_000, deps.log, deps.timers);
 }
 
 /** The daemon's auto-update startup state, as resolved from its config. */

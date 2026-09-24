@@ -69,27 +69,6 @@ describe('createUpdateHoldoffGate (the shared rollout gate)', () => {
     expect(apply).toHaveBeenCalledWith('v-fresh');
   });
 
-  it('holds single-flight WHILE a hold-off is in flight — a second tick during the wait is a no-op', async () => {
-    // A hold-off that outlasts the poll interval must still block a second tick.
-    let release!: () => void;
-    const held = new Promise<void>((r) => { release = r; });
-    const revalidate = vi.fn(async () => FRESH);
-    const apply = vi.fn(async () => {});
-    const { poll } = harness({ sleep: () => held, revalidate, apply });
-
-    const first = poll(DETECTED); // enters, sets pending, awaits the un-resolved hold-off
-    await Promise.resolve();
-    // Second concurrent tick while the first rollout is mid-hold-off:
-    await poll(DETECTED);
-    expect(revalidate, 'second tick must not start a second rollout').not.toHaveBeenCalled();
-    expect(apply).not.toHaveBeenCalled();
-
-    release(); // let the first hold-off complete
-    await first;
-    expect(revalidate).toHaveBeenCalledTimes(1); // exactly ONE rollout ran
-    expect(apply).toHaveBeenCalledTimes(1);
-  });
-
   it('does NOT apply a target withdrawn during the hold-off (re-check -> none)', async () => {
     const { poll, apply, setUpdating, log } = harness({ revalidate: async () => ({ status: 'none' }) });
     await poll(DETECTED);
@@ -124,11 +103,10 @@ describe('createUpdateHoldoffGate (the shared rollout gate)', () => {
     expect(log).toHaveBeenCalledWith('SHUTDOWN');
   });
 
-  it('clears isUpdating (and recovers single-flight) even if apply throws', async () => {
+  it('clears isUpdating even if apply throws, and the gate keeps working', async () => {
     const { gate, poll, step, setUpdating } = harness({ apply: async () => { throw new Error('boom'); } });
     await expect(poll(DETECTED)).rejects.toThrow('boom');
     expect(setUpdating).toHaveBeenLastCalledWith(false);
-    // pending was cleared in finally, so the gate is usable again:
     const ok = vi.fn(async () => {});
     await gate.bindRollout({ ...step, apply: ok })(DETECTED);
     expect(ok).toHaveBeenCalledOnce();
@@ -438,19 +416,9 @@ describe('createUpdateHoldoffGate — persisted rollout deadline', () => {
     expect(redrawn.holds).toEqual([[900_000, false]]);
   });
 
-  it('a none poll drops the record, except while an in-flight rollout owns it', async () => {
+  it('a none poll drops the record; a failed poll keeps it', async () => {
     const node = persistentNode();
-    let release!: () => void;
-    const held = new Promise<void>((r) => { release = r; });
-    const b = node.boot({ sleep: () => held });
-
-    const running = b.run('c1');
-    await vi.waitFor(() => expect(node.record()?.target).toBe('c1'));
-    await b.pollNone();
-    expect(node.record()?.target, 'the in-flight run owns the record').toBe('c1');
-    release();
-    await running;
-    expect(node.record()).toBeNull();
+    const b = node.boot();
 
     await node.store.write({ target: 'c9', deadlineEpochMs: node.clock.t });
     await b.pollNone();
@@ -460,52 +428,6 @@ describe('createUpdateHoldoffGate — persisted rollout deadline', () => {
     await node.store.write({ target: 'c9', deadlineEpochMs: node.clock.t });
     await b.pollFailed();
     expect(node.record()?.target, 'a failed check keeps the record').toBe('c9');
-  });
-
-  it('a rollout that starts while a none poll is clearing is a no-op, so the clear cannot delete its deadline', async () => {
-    // The clear's unlink stalls until released. If the rollout went ahead, it would
-    // read the old record, write its own, and the stalled unlink would then
-    // delete it, so a restart during the hold would draw a fresh hold again.
-    let unlinkEntered!: () => void;
-    const entered = new Promise<void>((r) => { unlinkEntered = r; });
-    let releaseUnlink!: () => void;
-    const unlinkReleased = new Promise<void>((r) => { releaseUnlink = r; });
-    let stall = true;
-    const node = persistentNode({
-      wrapFs: (fs) => ({
-        ...fs,
-        unlink: async (path) => {
-          if (stall) {
-            unlinkEntered();
-            await unlinkReleased;
-          }
-          return fs.unlink(path);
-        },
-      }),
-    });
-    await node.store.write({ target: 'c-old', deadlineEpochMs: node.clock.t });
-    const first = node.boot({ killAfterMs: 0 }); // the run's hold ends in a restart
-
-    const clearing = first.pollNone();
-    await entered; // the clear is in flight
-    await first.run('c1');
-    expect(first.rng, 'the run yielded to the in-flight clear').not.toHaveBeenCalled();
-    releaseUnlink();
-    await clearing;
-    expect(node.record()).toBeNull();
-    stall = false;
-
-    // The next poll's run writes its deadline, and nothing deletes it.
-    await first.run('c1');
-    expect(first.rng).toHaveBeenCalledOnce();
-    expect(node.record()).toEqual({ target: 'c1', deadlineEpochMs: node.clock.t + 900_000 });
-
-    // The daemon restarts during that hold: the next boot resumes c1's deadline.
-    const second = node.boot({ rng: () => 0.99 });
-    await second.run('c1');
-    expect(second.rng).not.toHaveBeenCalled();
-    expect(second.holds).toEqual([[900_000, true]]);
-    expect(second.apply).toHaveBeenCalledWith('c1');
   });
 
   it('a failed re-check after the hold keeps the deadline; the next poll applies without a new hold', async () => {

@@ -74,19 +74,18 @@ export type UpdatePoller<T extends string = string> = (outcome: UpdateCheckOutco
 
 export interface UpdateHoldoffGate {
   /** Bind a mode's rollout step once; poll every tick through the result.
-   *  All pollers of one gate share its single-flight guard. */
+   *  Polls must not overlap: the daemon's scheduler starts a check only after
+   *  the previous one, including its hold-off and apply, has finished. */
   bindRollout<T extends string>(rollout: UpdateHoldoffStep<T>): UpdatePoller<T>;
 }
 
 /**
- * The single auto-update rollout gate. A factory so it OWNS its single-flight
- * state (the `pending` flag) instead of making callers allocate and thread a
- * mutable object — create it ONCE, at the daemon scope. A poll is a no-op while
- * an earlier one is still being handled, or once shutdown has begun. An
- * `available` poll runs one rollout:
+ * The single auto-update rollout gate — create it ONCE, at the daemon scope.
+ * Polls are serialized by the caller (see UpdateHoldoffGate.bindRollout). A
+ * poll is a no-op once shutdown has begun. An `available` poll runs one rollout:
  *
- *   single-flight guard -> hold (the deadline policy's) -> log it if it is
- *     non-zero or resumed -> sleep it if non-zero
+ *   hold (the deadline policy's) -> log it if it is non-zero or resumed
+ *     -> sleep it if non-zero
  *     -> abort if shutting down (deadline kept: next boot resumes it)
  *     -> RE-CHECK -> abort if shutting down (the re-check is async)
  *     -> re-check failed: stop, deadline kept
@@ -108,9 +107,6 @@ export interface UpdateHoldoffGate {
  * drops it.
  */
 export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): UpdateHoldoffGate {
-  // Owned here so single-flight holds across ticks — do NOT recreate per tick.
-  // It covers both transitions of the deadline: a rollout and a clear.
-  let pending = false;
   const { deadline } = config;
 
   async function rollout<T extends string>(detected: T, step: UpdateHoldoffStep<T>): Promise<void> {
@@ -162,14 +158,8 @@ export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): Update
       return async (outcome) => {
         if (outcome.status === 'failed') return; // says nothing: keep the deadline
         if (config.isShuttingDown()) return; // no new transitions once shutdown began
-        if (pending) return; // an earlier poll still owns the deadline
-        pending = true;
-        try {
-          if (outcome.status === 'none') await deadline.clear();
-          else await rollout(outcome.target, step);
-        } finally {
-          pending = false;
-        }
+        if (outcome.status === 'none') await deadline.clear();
+        else await rollout(outcome.target, step);
       };
     },
   };

@@ -3,9 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 // The installers are replaced (the checks stay real), so a test sees which
 // installer an apply reaches and nothing is built or installed.
 const installers = vi.hoisted(() => ({
-  npmCore: vi.fn(async (_version: string, _log: (msg: string) => void) => 'failed' as const),
-  npmEdge: vi.fn(async (_version: string, _current: string | null, _log: (msg: string) => void) => 'failed' as const),
-  git: vi.fn(async (..._args: unknown[]) => 'failed' as const),
+  npmCore: vi.fn(async (_version: string, _log: (msg: string) => void): Promise<UpdateStatus> => 'failed'),
+  npmEdge: vi.fn(async (_version: string, _current: string | null, _log: (msg: string) => void): Promise<UpdateStatus> => 'failed'),
+  git: vi.fn(async (..._args: unknown[]): Promise<UpdateStatus> => 'failed'),
 }));
 vi.mock('../src/daemon/auto-update.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/daemon/auto-update.js')>()),
@@ -14,6 +14,7 @@ vi.mock('../src/daemon/auto-update.js', async (importOriginal) => ({
   performUpdateWithStatus: installers.git,
 }));
 import type { ResolvedAutoUpdateConfig } from '../src/config.js';
+import type { UpdateStatus } from '../src/daemon/auto-update.js';
 import { _autoUpdateIo } from '../src/daemon/manifest.js';
 import { createPersistedHoldoffDeadline, type UpdateHoldoffRecord } from '../src/daemon/auto-update-holdoff-deadline.js';
 import { createUpdateHoldoffGate } from '../src/daemon/auto-update-holdoff-gate.js';
@@ -118,7 +119,7 @@ function gateFixture(opts: {
     log,
     sleep,
   });
-  return { gate, store, rng, sleep, logs };
+  return { gate, store, rng, sleep, logs, shutDown: () => { shuttingDown = true; } };
 }
 
 describe('describeUpdateHold', () => {
@@ -145,13 +146,18 @@ describe('re-check adapters', () => {
 });
 
 describe('createNpmUpdateRunCheck — persisted rollout deadline', () => {
-  function npmRunCheck(fixture: ReturnType<typeof gateFixture>, channel?: string, nodeRole: 'edge' | 'core' = 'core') {
+  function npmRunCheck(
+    fixture: ReturnType<typeof gateFixture>,
+    channel?: string,
+    nodeRole: 'edge' | 'core' = 'core',
+    onRestart: () => Promise<void> = async () => {},
+  ) {
     return createNpmUpdateRunCheck({
       log: (m) => fixture.logs.push(m),
       lastUpdateCheck: freshLastCheck(),
       allowPrerelease: false,
       channel,
-      autoApply: { gate: fixture.gate, nodeRole, onRestart: async () => {} },
+      autoApply: { gate: fixture.gate, nodeRole, onRestart },
     });
   }
 
@@ -207,6 +213,21 @@ describe('createNpmUpdateRunCheck — persisted rollout deadline', () => {
     expect(installers[other]).not.toHaveBeenCalled();
   });
 
+  it('a successful install restarts the daemon and keeps the due deadline for the next boot to resume', async () => {
+    installers.npmCore.mockResolvedValueOnce('updated');
+    const fixture = gateFixture({ record: { target: '9.1.0', deadlineEpochMs: 500 } }); // due
+    const onRestart = vi.fn(async () => { fixture.shutDown(); }); // the supervised restart begins shutdown
+    await npmRunCheck(fixture, undefined, 'core', onRestart)();
+    expect(installers.npmCore).toHaveBeenCalledOnce();
+    expect(onRestart).toHaveBeenCalledOnce();
+    expect(fixture.store.clear, 'shutting down: the deadline stays').not.toHaveBeenCalled();
+
+    const nextBoot = gateFixture({ record: fixture.store.record! });
+    await npmRunCheck(nextBoot)();
+    expect(nextBoot.rng, 'resumed at once, no new hold').not.toHaveBeenCalled();
+    expect(nextBoot.sleep).not.toHaveBeenCalled();
+  });
+
   it('records a newer version found by the re-check as due, and keeps it when a restart comes first', async () => {
     io.registry = [{ latest: '9.1.0' }, { latest: '9.2.0' }]; // detect 9.1.0, re-check finds 9.2.0
     const fixture = gateFixture({ record: { target: '9.1.0', deadlineEpochMs: 500 }, restartOnRetargetFrom: '9.1.0' });
@@ -218,13 +239,13 @@ describe('createNpmUpdateRunCheck — persisted rollout deadline', () => {
 });
 
 describe('createGitUpdateRunCheck — persisted rollout deadline', () => {
-  function gitRunCheck(fixture: ReturnType<typeof gateFixture>) {
+  function gitRunCheck(fixture: ReturnType<typeof gateFixture>, onRestart: () => Promise<void> = async () => {}) {
     return createGitUpdateRunCheck({
       gate: fixture.gate,
       log: (m) => fixture.logs.push(m),
       lastUpdateCheck: freshLastCheck(),
       au: GIT_AU,
-      onRestart: async () => {},
+      onRestart,
     });
   }
 
@@ -264,6 +285,21 @@ describe('createGitUpdateRunCheck — persisted rollout deadline', () => {
     expect(installers.git, 'updater entered on the next poll').toHaveBeenCalledWith(GIT_AU, expect.any(Function), { expectedCommit: 'bbb2222' });
     expect(fixture.rng, 'no new hold drawn').not.toHaveBeenCalled();
     expect(fixture.sleep).not.toHaveBeenCalled();
+  });
+
+  it('a successful update restarts the daemon and keeps the due deadline for the next boot to resume', async () => {
+    installers.git.mockResolvedValueOnce('updated');
+    const fixture = gateFixture({ record: { target: 'bbb2222', deadlineEpochMs: 500 } }); // due
+    const onRestart = vi.fn(async () => { fixture.shutDown(); }); // the supervised restart begins shutdown
+    await gitRunCheck(fixture, onRestart)();
+    expect(installers.git).toHaveBeenCalledOnce();
+    expect(onRestart).toHaveBeenCalledOnce();
+    expect(fixture.store.clear, 'shutting down: the deadline stays').not.toHaveBeenCalled();
+
+    const nextBoot = gateFixture({ record: fixture.store.record! });
+    await gitRunCheck(nextBoot)();
+    expect(nextBoot.rng, 'resumed at once, no new hold').not.toHaveBeenCalled();
+    expect(nextBoot.sleep).not.toHaveBeenCalled();
   });
 
   it('records a newer commit found by the re-check as due, and keeps it when a restart comes first', async () => {
