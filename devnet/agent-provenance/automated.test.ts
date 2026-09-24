@@ -2,7 +2,7 @@
  * Automated 5-node devnet validation for the agent-provenance work.
  *
  * Walks through the runbook in `README.md` end-to-end against a real
- * 5-daemon devnet (4 core + 1 edge + Hardhat chain on port 8545). Each
+ * 5-daemon devnet (4 core + 1 edge + its Hardhat chain, see DEVNET_RPC). Each
  * `it()` block maps 1:1 to a mode in §4 of RFC-001 and asserts the
  * on-chain side-effects the spec requires. Companion to the
  * single-node Hardhat e2e suite at
@@ -44,10 +44,11 @@ import { spawn } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers } from 'ethers';
+import { DEVNET_RPC, assertDevnetChain } from '../_bootstrap/devnet-chain.mjs';
 import { runKaPublishLifecycle } from '../_bootstrap/harness';
 
 const REPO_ROOT = resolve(__dirname, '../..');
-const RPC = 'http://127.0.0.1:8545';
+const RPC = DEVNET_RPC;
 const DEVNET_DIR = join(REPO_ROOT, '.devnet');
 const HARDHAT_DEPLOYER_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
@@ -457,6 +458,8 @@ async function detectDevnet(): Promise<DevnetState | null> {
     return null;
   }
 
+  // Refuse to touch a chain this devnet did not deploy (another devnet's port).
+  await assertDevnetChain(RPC);
   const provider = new ethers.JsonRpcProvider(RPC, { chainId: 31337, name: 'localhost' });
   const addrs = await loadContractAddresses(provider, hubAddress);
 

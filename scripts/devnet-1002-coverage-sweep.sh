@@ -24,6 +24,9 @@
 set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"; cd "$REPO_ROOT"
+# This devnet's ports: the environment, else what devnet.sh start recorded.
+# shellcheck source=devnet-layout.sh
+source "$REPO_ROOT/scripts/devnet-layout.sh"
 TS=$(date -u +'%Y%m%dT%H%M%SZ')
 RESULTS="${RESULTS_DIR:-$REPO_ROOT/.devnet/1002-sweep/$TS}"; mkdir -p "$RESULTS"
 ln -sfn "$RESULTS" "$(dirname "$RESULTS")/latest" 2>/dev/null || true
@@ -50,11 +53,11 @@ loop_deadline() { echo $(( TARGET_SECONDS - ORCH_RESERVE_SECONDS )); }
 # single-probe check). Retry the whole check up to 3× with a 5s gap before
 # declaring the devnet down — real death stays down across retries; a blip clears.
 _probe_once() {
-  curl -sf --max-time 5 http://127.0.0.1:8545 -X POST -H 'Content-Type: application/json' \
+  curl -sf --max-time 5 "$DEVNET_RPC_URL" -X POST -H 'Content-Type: application/json' \
     -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' >/dev/null 2>&1 || return 1
   local n code
   for n in 1 2 3 4 5 6; do
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:920$n/api/status" 2>/dev/null || echo 000)
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$((API_PORT_BASE + n - 1))/api/status" 2>/dev/null || echo 000)
     [ "$code" = "200" ] || return 1
   done
   return 0

@@ -3,8 +3,8 @@
 # End-to-end test of the join-request REJECTION notification flow.
 #
 # Drives 2 devnet nodes over HTTP:
-#   N1 (port 9201) — curator, creates a private (curated) CG
-#   N2 (port 9202) — invitee, never allowlisted; request should be rejected
+#   N1 (API_PORT_BASE, default 9201) — curator, creates a private (curated) CG
+#   N2 (API_PORT_BASE + 1) — invitee, never allowlisted; request should be rejected
 #
 # Verifies that after the curator rejects the join request:
 #   * N2 receives a `join_rejected` notification via /api/notifications
@@ -35,8 +35,10 @@ else
 fi
 
 CG_ID="reject-test-$(date +%s)"
-N1=http://127.0.0.1:9201
-N2=http://127.0.0.1:9202
+# shellcheck source=devnet-layout.sh
+source "$SCRIPT_DIR/devnet-layout.sh"
+N1="http://127.0.0.1:$API_PORT_BASE"
+N2="http://127.0.0.1:$((API_PORT_BASE + 1))"
 
 N1_ADDR=""
 N2_ADDR=""

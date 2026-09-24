@@ -26,7 +26,6 @@ const REPO_ROOT = path.resolve(__dirname, '../..');
 const EVM_PKG = path.join(REPO_ROOT, 'packages/evm-module');
 const ethers = require(path.join(EVM_PKG, 'node_modules/ethers'));
 
-const RPC = 'http://127.0.0.1:8545';
 const DEVNET_DIR = path.join(REPO_ROOT, '.devnet');
 const CONTRACTS_PATH = path.join(
   EVM_PKG,
@@ -134,6 +133,12 @@ async function main() {
   const contractsJson = JSON.parse(fs.readFileSync(CONTRACTS_PATH, 'utf8'));
   const c = (name) => contractsJson.contracts && contractsJson.contracts[name] && contractsJson.contracts[name].evmAddress;
 
+  // This devnet's RPC (DEVNET_RPC, HARDHAT_PORT, or what devnet.sh recorded),
+  // and proof that it is this devnet's chain: the funding below writes storage
+  // slots and balances, which would corrupt another devnet sharing the machine.
+  const { DEVNET_RPC: RPC, assertDevnetChain } = await import('./devnet-chain.mjs');
+  await assertDevnetChain(RPC);
+  log(`Using devnet chain at ${RPC}`);
   const provider = new ethers.JsonRpcProvider(RPC, {
     chainId: 31337,
     name: 'localhost',

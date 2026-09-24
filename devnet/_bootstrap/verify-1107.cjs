@@ -13,7 +13,15 @@ const path = require('path');
 const TOK = process.argv[2] || process.env.DKG_AUTH_TOKEN;
 if (!TOK) { console.error('usage: node verify-1107.cjs <authToken>'); process.exit(2); }
 
-const PORTS = { core1: 9201, core2: 9202, core3: 9203, core4: 9204, edge5: 9205, edge6: 9206 };
+// Each node's API port from its devnet config, so a devnet started on
+// non-default ports (API_PORT_BASE) is the one this script talks to.
+const DEVNET_DIR = path.join(__dirname, '../../.devnet');
+const apiPortOf = (n) =>
+  JSON.parse(fs.readFileSync(path.join(DEVNET_DIR, `node${n}`, 'config.json'), 'utf8')).apiPort;
+const PORTS = {
+  core1: apiPortOf(1), core2: apiPortOf(2), core3: apiPortOf(3),
+  core4: apiPortOf(4), edge5: apiPortOf(5), edge6: apiPortOf(6),
+};
 const base = (p) => `http://127.0.0.1:${p}`;
 const ts = Date.now();
 const results = [];

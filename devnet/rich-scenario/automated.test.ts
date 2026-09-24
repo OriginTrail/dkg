@@ -9,10 +9,11 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { readFileSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers, Wallet } from 'ethers';
+import { DEVNET_RPC, assertDevnetChain } from '../_bootstrap/devnet-chain.mjs';
 import { buildUpdateSeal } from '../../packages/publisher/test/_helpers/seal.js';
 
 const REPO_ROOT = resolve(__dirname, '../..');
-const RPC = 'http://127.0.0.1:8545';
+const RPC = DEVNET_RPC;
 const DEVNET_DIR = join(REPO_ROOT, '.devnet');
 /** Bulk WM/SWM/VM publishes (cores have this CG synced from devnet.sh). */
 const BULK_CG = process.env.DEVNET_CONTEXT_GRAPH ?? 'devnet-isolation';
@@ -484,6 +485,8 @@ async function detectDevnet(): Promise<DevnetState | null> {
     contractsJson.contracts?.Hub?.evmAddress ?? contractsJson.Hub;
   if (!hubAddress) return null;
 
+  // Refuse to touch a chain this devnet did not deploy (another devnet's port).
+  await assertDevnetChain(RPC);
   const provider = new ethers.JsonRpcProvider(RPC, {
     chainId: 31337,
     name: 'localhost',

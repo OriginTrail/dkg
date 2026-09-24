@@ -50,9 +50,10 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers } from 'ethers';
+import { DEVNET_RPC, assertDevnetChain } from '../_bootstrap/devnet-chain.mjs';
 
 const REPO_ROOT = resolve(__dirname, '../..');
-const RPC = 'http://127.0.0.1:8545';
+const RPC = DEVNET_RPC;
 const HARDHAT_DEPLOYER_KEY =
   '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
 
@@ -87,6 +88,8 @@ async function loadContracts(): Promise<Contracts> {
   const contracts = JSON.parse(readFileSync(contractsPath, 'utf8'));
   const c = (n: string): string => contracts.contracts[n]?.evmAddress;
 
+  // Refuse to touch a chain this devnet did not deploy (another devnet's port).
+  await assertDevnetChain(RPC);
   const provider = new ethers.JsonRpcProvider(RPC, { chainId: 31337, name: 'localhost' });
   // Mining is on a 1s interval (devnet.sh) — disable client-side caching to
   // avoid 0-block-old readbacks racing the interval miner.

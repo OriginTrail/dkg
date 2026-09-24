@@ -36,11 +36,12 @@ import { spawn } from 'node:child_process';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers } from 'ethers';
+import { DEVNET_RPC, assertDevnetChain } from '../_bootstrap/devnet-chain.mjs';
 import { runKaPublishLifecycle } from '../_bootstrap/harness.js';
 
 // ───────────────────────────── constants ─────────────────────────────────
 const REPO_ROOT = resolve(__dirname, '../..');
-const RPC = 'http://127.0.0.1:8545';
+const RPC = DEVNET_RPC;
 const DEVNET_DIR = join(REPO_ROOT, '.devnet');
 // Well-known hardhat account #0 — funded; the keeper is permissionless so any
 // funded wallet can call it (that is the point of the test).
@@ -173,6 +174,8 @@ describe('V10 RS prune keeper — flood → expire → prune → reconciler-safe
     if (!existsSync(DEVNET_DIR)) {
       throw new Error('No .devnet/ — start a devnet first: ./scripts/devnet.sh start 6');
     }
+    // Refuse to touch a chain this devnet did not deploy (another devnet's port).
+    await assertDevnetChain(RPC);
     const provider = new ethers.JsonRpcProvider(RPC, undefined, { staticNetwork: true });
     const contractsPath = join(REPO_ROOT, 'packages/evm-module/deployments/localhost_contracts.json');
     // The deploy writes { contracts: { Hub: { evmAddress } } } (schema since the

@@ -31,10 +31,13 @@ import {
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { ethers } from 'ethers';
+import { DEVNET_RPC, assertDevnetChain } from './devnet-chain.mjs';
 
 export const REPO_ROOT = resolve(import.meta.dirname, '../..');
-export const RPC = process.env.DEVNET_RPC ?? 'http://127.0.0.1:8545';
+/** This devnet's Hardhat RPC (DEVNET_RPC, HARDHAT_PORT, or what devnet.sh recorded). */
+export const RPC = DEVNET_RPC;
 export const DEVNET_DIR = join(REPO_ROOT, '.devnet');
+export { assertDevnetChain };
 export const CONTEXT_GRAPH = 'devnet-test';
 
 export const sleep = (ms: number): Promise<void> =>
@@ -462,6 +465,8 @@ export async function detectDevnet(nodeCount = 6): Promise<DevnetState | null> {
   } catch {
     return null;
   }
+  // A chain answers: refuse to go further unless it is this devnet's own.
+  await assertDevnetChain(RPC);
   const contractsPath = join(
     REPO_ROOT,
     'packages/evm-module/deployments/localhost_contracts.json',

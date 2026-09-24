@@ -31,12 +31,13 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers, Wallet } from 'ethers';
+import { DEVNET_RPC, assertDevnetChain } from '../_bootstrap/devnet-chain.mjs';
 import { buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
 import { buildUpdateSeal } from '../../packages/publisher/test/_helpers/seal.js';
 import { runKaPublishLifecycle } from '../_bootstrap/harness.js';
 
 const REPO_ROOT = resolve(__dirname, '../..');
-const RPC = 'http://127.0.0.1:8545';
+const RPC = DEVNET_RPC;
 const DEVNET_DIR = join(REPO_ROOT, '.devnet');
 /** Registered by devnet.sh; use isolation CG when devnet-test publish ACL is tight. */
 /** devnet-test is registered open (publishPolicy=1) by devnet.sh; isolation may be curated. */
@@ -273,6 +274,8 @@ async function detectDevnet(): Promise<DevnetState | null> {
     contractsJson.contracts?.Hub?.evmAddress ?? contractsJson.Hub;
   if (!hubAddress) return null;
 
+  // Refuse to touch a chain this devnet did not deploy (another devnet's port).
+  await assertDevnetChain(RPC);
   const provider = new ethers.JsonRpcProvider(RPC, {
     chainId: 31337,
     name: 'localhost',
