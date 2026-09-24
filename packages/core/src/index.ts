@@ -362,6 +362,7 @@ export {
   isSafeIri,
   isAbsoluteIriTerm,
   isSafeBlankNodeLabel,
+  isSafeLiteralTerm,
   sparqlIri,
   escapeSparqlLiteral,
   sparqlString,

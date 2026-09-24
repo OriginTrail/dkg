@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { validateWritableQuads } from '../src/daemon/http-utils.js';
 
-const quad = (overrides: Partial<{ subject: string; predicate: string; object: string }> = {}) => ({
+const quad = (overrides: Partial<{ subject: string; predicate: string; object: string; graph: string }> = {}) => ({
   subject: 'https://example.org/s',
   predicate: 'https://schema.org/name',
   object: '"v"',
@@ -12,6 +12,7 @@ const EXPECTED = {
   subject: 'an absolute IRI or blank node',
   predicate: 'an absolute IRI',
   object: 'a quoted literal term, absolute IRI or blank node',
+  graph: 'an absolute IRI',
 } as const;
 
 describe('validateWritableQuads', () => {
@@ -24,6 +25,10 @@ describe('validateWritableQuads', () => {
     ['a bare IRI object', quad({ object: 'urn:o' })],
     ['a typed literal object', quad({ object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>' })],
     ['a language-tagged literal object', quad({ object: '"hallo"@de' })],
+    ['a bare-datatype literal object', quad({ object: '"42"^^http://www.w3.org/2001/XMLSchema#integer' })],
+    ['a literal with escaped quotes and a raw tab', quad({ object: '"say \\"hi\\"\tthere"' })],
+    ['an empty graph', quad({ graph: '' })],
+    ['an absolute graph IRI', quad({ graph: 'did:dkg:context-graph:0xabc/cg' })],
   ])('accepts %s', (_name, value) => {
     expect(validateWritableQuads('quads', [value])).toBeNull();
   });
@@ -47,6 +52,18 @@ describe('validateWritableQuads', () => {
     ['a whitespace-padded bracketed object', { object: ' <urn:o> ' }, 'object'],
     ['a whitespace-padded IRI object', { object: ' urn:o' }, 'object'],
     ['a whitespace-padded literal object', { object: ' "v"' }, 'object'],
+    ['a lone quote object', { object: '"' }, 'object'],
+    ['an unterminated literal object', { object: '"unterminated' }, 'object'],
+    ['a literal with a raw line break', { object: '"line\nbreak"' }, 'object'],
+    ['a literal with an unknown escape', { object: '"bad \\x escape"' }, 'object'],
+    [
+      'a literal that would add its own statement',
+      { object: '"x" .\n<urn:dkg:file:deadbeef> <http://dkg.io/ontology/trustLevel> "y"' },
+      'object',
+    ],
+    ['a graph with a caret', { graph: 'urn:g^1' }, 'graph'],
+    ['an angle-bracketed graph', { graph: '<urn:g>' }, 'graph'],
+    ['a relative graph', { graph: 'graph-1' }, 'graph'],
   ] as const)('rejects %s', (_name, overrides, field) => {
     expect(validateWritableQuads('quads', [quad(), quad(overrides)])).toEqual({
       error: `Invalid "quads[1].${field}": RDF ${field} must be ${EXPECTED[field]}`,

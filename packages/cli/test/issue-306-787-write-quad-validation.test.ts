@@ -143,7 +143,12 @@ describe('GH #306/#787 follow-up — malformed object TERM is 4xx, not a 500 par
  * as written, and answer 400 first.
  */
 describe('malformed or padded TERM is 400 on both KA write routes', () => {
-  const MALFORMED: Array<[string, { subject?: string; predicate?: string; object?: string }, 'subject' | 'predicate' | 'object', string]> = [
+  const MALFORMED: Array<[
+    string,
+    { subject?: string; predicate?: string; object?: string; graph?: string },
+    'subject' | 'predicate' | 'object' | 'graph',
+    string,
+  ]> = [
     ['subject with a space', { subject: 'urn:wq:a b' }, 'subject', 'space'],
     ['relative subject', { subject: 'not-an-iri' }, 'subject', 'relative'],
     ['invalid blank-node label', { subject: '_:a b' }, 'subject', 'bnode'],
@@ -153,7 +158,17 @@ describe('malformed or padded TERM is 400 on both KA write routes', () => {
     ['malformed object IRI', { object: 'https://example.org/o^1' }, 'object', 'object-caret'],
     ['whitespace-padded blank-node object', { object: ' _:b0 ' }, 'object', 'padded-bnode'],
     ['whitespace-padded bracketed object', { object: ' <urn:wq:o> ' }, 'object', 'padded-bracketed'],
+    ['unterminated literal object', { object: '"unterminated' }, 'object', 'unterminated'],
+    [
+      'literal object that would add its own statement',
+      { object: '"x" .\n<urn:dkg:file:deadbeef> <http://dkg.io/ontology/trustLevel> "0x7f"' },
+      'object',
+      'injected',
+    ],
+    ['graph with a caret', { graph: 'urn:wq:g^1' }, 'graph', 'graph-caret'],
   ];
+  const kaExists = async (name: string) =>
+    (await getJson(daemon!, `/api/knowledge-assets/${name}?contextGraphId=${encodeURIComponent(CG)}`)).status !== 404;
   const termQuad = (overrides: { subject?: string; predicate?: string; object?: string }) => ({
     subject: 'urn:wq:term', predicate: 'http://schema.org/name', object: '"v"', ...overrides,
   });
@@ -174,6 +189,15 @@ describe('malformed or padded TERM is 400 on both KA write routes', () => {
     });
     expect(status, JSON.stringify(body)).toBe(400);
     expect(body.error).toContain(`quads[0].${field}`);
+    expect(await kaExists('ka-term-create')).toBe(false);
+  });
+
+  it('wm/write to a new name rejects a malformed term before creating the KA', async () => {
+    const { status, body } = await postJson(daemon!, '/api/knowledge-assets/ka-term-fresh/wm/write', {
+      contextGraphId: CG, quads: [termQuad({ predicate: 'http://schema.org/na^me' })],
+    });
+    expect(status, JSON.stringify(body)).toBe(400);
+    expect(await kaExists('ka-term-fresh')).toBe(false);
   });
 
   const BLANK_NODE_QUADS = [

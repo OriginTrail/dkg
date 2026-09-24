@@ -134,6 +134,20 @@ export function assertSafeRdfTerm(value: string): void {
   throw new Error(`Unsafe RDF term for CAS condition: ${value.slice(0, 80)}`);
 }
 
+// The legacy `"v"^^http://…` form, whose datatype the stores bracket on write.
+const BARE_DATATYPE_LITERAL = /^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/;
+
+/**
+ * Returns true for a quoted literal term that SPARQL and N-Quads accept
+ * verbatim, under the literal rule of {@link assertSafeRdfTerm}. The legacy
+ * bare-datatype form is accepted and checked as if bracketed. A raw line
+ * break, a stray or missing quote, or an unknown escape fails.
+ */
+export function isSafeLiteralTerm(value: string): boolean {
+  const bare = value.match(BARE_DATATYPE_LITERAL);
+  return SAFE_RDF_LITERAL.test(bare ? `${bare[1]}^^<${bare[2]}>` : value);
+}
+
 export function sparqlInt(
   value: number | bigint,
   opts?: { min?: number; max?: number },

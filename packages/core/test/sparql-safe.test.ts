@@ -5,6 +5,7 @@ import {
   isAbsoluteIriTerm,
   isSafeBlankNodeLabel,
   isSafeIri,
+  isSafeLiteralTerm,
   sparqlIri,
   escapeSparqlLiteral,
   sparqlString,
@@ -78,6 +79,37 @@ describe('isAbsoluteIriTerm', () => {
       expect(isAbsoluteIriTerm(term)).toBe(false);
     },
   );
+});
+
+describe('isSafeLiteralTerm', () => {
+  it.each([
+    '""',
+    '"plain"',
+    '"with \\"escaped\\" quotes \\\\ and \\n escapes"',
+    '"raw\ttab"',
+    '"hallo"@de-CH-1996',
+    '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    '"42"^^http://www.w3.org/2001/XMLSchema#integer',
+    '"\\u00E9 and \\U0001F600"',
+  ])('accepts %s', (term) => {
+    expect(isSafeLiteralTerm(term)).toBe(true);
+  });
+
+  it.each([
+    '"',
+    '"unterminated',
+    '"raw\nnewline"',
+    '"raw\rreturn"',
+    '"bad \\x escape"',
+    '"x" .\n<urn:dkg:file:deadbeef> <http://dkg.io/ontology/trustLevel> "y"',
+    '"x"@',
+    '"x"^^<urn:dt with space>',
+    '"x"^^urn:dt with space',
+    'plain',
+    '<urn:x>',
+  ])('rejects %j', (term) => {
+    expect(isSafeLiteralTerm(term)).toBe(false);
+  });
 });
 
 describe('isSafeBlankNodeLabel', () => {

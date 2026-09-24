@@ -14,6 +14,7 @@ import {
   isSafeIri,
   isAbsoluteIriTerm,
   isSafeBlankNodeLabel,
+  isSafeLiteralTerm,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   messageIndicatesNoFundedPublisherWallet,
   Logger,
@@ -290,7 +291,14 @@ export async function resolveNameToPeerId(
  * check and crashes the agent write path with a TypeError → HTTP 500 instead
  * of an actionable 4xx.
  */
-export function isWritableQuad(value: unknown): boolean {
+export interface WritableQuad {
+  subject: string;
+  predicate: string;
+  object: string;
+  graph?: string;
+}
+
+export function isWritableQuad(value: unknown): value is WritableQuad {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const v = value as Record<string, unknown>;
   return (
@@ -303,7 +311,7 @@ export function isWritableQuad(value: unknown): boolean {
 
 export function validateWritableQuadLiteralSizes(
   label: string,
-  quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
+  quads: WritableQuad[],
 ): { ok: true } | { ok: false; body: Record<string, unknown> } {
   try {
     assertQuadLiteralsMutf8Safe(quads, { label });
@@ -316,24 +324,27 @@ export function validateWritableQuadLiteralSizes(
   }
 }
 
-/** The term kinds each quad position accepts on the lifecycle write routes. */
-const WRITABLE_QUAD_TERMS = {
+type WritableTermKind = 'literal' | 'iri' | 'blank-node';
+
+/**
+ * The term kinds each quad position accepts on the lifecycle write routes.
+ * The object accepts every kind, so its check is that the term is well-formed.
+ */
+const WRITABLE_QUAD_TERMS: Record<'subject' | 'predicate' | 'object', {
+  accepts: readonly WritableTermKind[];
+  expected: string;
+}> = {
   subject: { accepts: ['iri', 'blank-node'], expected: 'an absolute IRI or blank node' },
   predicate: { accepts: ['iri'], expected: 'an absolute IRI' },
   object: {
     accepts: ['literal', 'iri', 'blank-node'],
     expected: 'a quoted literal term, absolute IRI or blank node',
   },
-} as const satisfies Record<'subject' | 'predicate' | 'object', {
-  accepts: readonly WritableTermKind[];
-  expected: string;
-}>;
-
-type WritableTermKind = 'literal' | 'iri' | 'blank-node';
+};
 
 /** Classify a term exactly as written: no trimming, since nothing downstream trims. */
 function writableTermKind(term: string): WritableTermKind | null {
-  if (term.startsWith('"')) return 'literal';
+  if (isSafeLiteralTerm(term)) return 'literal';
   if (isSafeBlankNodeLabel(term)) return 'blank-node';
   if (isAbsoluteIriTerm(term)) return 'iri';
   return null;
@@ -342,32 +353,37 @@ function writableTermKind(term: string): WritableTermKind | null {
 /**
  * GH #306 / #787 — the boundary check for quads a lifecycle write route stores
  * (create and wm/write): shape, then every term against
- * {@link WRITABLE_QUAD_TERMS}, then literal size. A string-shaped quad, a bare
- * word, or a malformed IRI such as `urn:a b` or `…/na^me` would otherwise reach
- * the store, which either fails the write (HTTP 500) or, for characters it
- * strips, stores the triple under a different IRI. Returns the 400 body for
- * the first failure, or null.
+ * {@link WRITABLE_QUAD_TERMS} and an optional bare graph IRI, then literal
+ * size. A string-shaped quad, a bare word, an unterminated literal or a
+ * malformed IRI such as `urn:a b` or `…/na^me` would otherwise reach the store,
+ * which either fails the write (HTTP 500), or, for characters it strips,
+ * stores the triple under a different IRI. A literal carrying a raw line break
+ * could even add statements of its own. Returns the 400 body for the first
+ * failure, or null.
  */
 export function validateWritableQuads(
   label: string,
-  quads: readonly unknown[],
+  quads: unknown[],
 ): Record<string, unknown> | null {
   if (!quads.every(isWritableQuad)) {
     return {
       error: `"${label}" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted`,
     };
   }
-  const writable = quads as ReadonlyArray<{ subject: string; predicate: string; object: string; graph?: string }>;
-  for (const [index, quad] of writable.entries()) {
+  for (const [index, quad] of quads.entries()) {
     for (const field of ['subject', 'predicate', 'object'] as const) {
       const rule = WRITABLE_QUAD_TERMS[field];
       const kind = writableTermKind(quad[field]);
-      if (kind === null || !(rule.accepts as readonly WritableTermKind[]).includes(kind)) {
+      if (kind === null || !rule.accepts.includes(kind)) {
         return { error: `Invalid "${label}[${index}].${field}": RDF ${field} must be ${rule.expected}` };
       }
     }
+    // The publisher writes a supplied graph as a bare IRI; empty means none.
+    if (quad.graph !== undefined && quad.graph !== '' && !isSafeIri(quad.graph)) {
+      return { error: `Invalid "${label}[${index}].graph": RDF graph must be an absolute IRI` };
+    }
   }
-  const literalSize = validateWritableQuadLiteralSizes(label, [...writable]);
+  const literalSize = validateWritableQuadLiteralSizes(label, quads);
   return literalSize.ok ? null : literalSize.body;
 }
 

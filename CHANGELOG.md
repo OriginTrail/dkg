@@ -16,11 +16,15 @@ All notable changes to the DKG V10 node are documented here. The format is based
   sent, against one rule:
   - the subject must be an absolute IRI or a blank node;
   - the predicate must be an absolute IRI;
-  - the object must be a quoted literal, an absolute IRI or a blank node.
+  - the object must be a well-formed quoted literal, an absolute IRI or a blank
+    node;
+  - a supplied `graph` must be a bare absolute IRI.
 
   Angle-bracketed IRIs count as IRIs, and whitespace-padded terms are
-  rejected. `wm/write` now also accepts blank-node and angle-bracketed
-  objects, as create and the store already did.
+  rejected. A literal must be complete: an unterminated one, or one carrying a
+  raw line break, is rejected. Such a literal could previously add statements
+  of its own to the draft. `wm/write` now also accepts blank-node and
+  angle-bracketed objects, as create and the store already did.
 - **Random Sampling resolves the challenged Context Graph by its chain name
   commitment when local history contains multiple names for one numeric ID**:
   proof extraction no longer selects an arbitrary first ontology row, which
