@@ -196,6 +196,7 @@ export {
   type StorageAckDecisionObserver,
   type StorageACKHandlerConfig,
   type StorageAckPriorVersionRequest,
+  type StorageAckRequestOrigin,
   type StorageAckVmPromotionRequest,
   type StorageAckVmPromotionVerdict,
 } from './storage-ack-handler.js';
