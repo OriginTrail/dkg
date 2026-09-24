@@ -24,66 +24,103 @@ import {
   type SparqlTermSite,
 } from './sparql-term-policy.js';
 
+export type SparqlQueryOperation = 'hasGraph' | 'countQuads';
+export type SparqlUpdateOperation =
+  | 'insert'
+  | 'delete'
+  | 'deleteByPattern'
+  | 'deleteBySubjectPrefix'
+  | 'dropGraph';
+
 /** A query, and the store operation it runs as. */
-export interface SparqlQueryPlan {
-  readonly operation: 'hasGraph' | 'countQuads';
+export interface SparqlQueryPlan<O extends SparqlQueryOperation = SparqlQueryOperation> {
+  readonly operation: O;
   readonly sparql: string;
 }
 
 /** An update, the store operation it runs as, and the graphs it may write. */
-export interface SparqlUpdatePlan {
-  readonly operation: 'insert' | 'delete' | 'deleteByPattern' | 'deleteBySubjectPrefix' | 'dropGraph';
+export interface SparqlUpdatePlan<O extends SparqlUpdateOperation = SparqlUpdateOperation> {
+  readonly operation: O;
   readonly update: string;
   readonly scope: GraphWriteScope;
 }
 
+/** Each builder's plan is typed by its exact operation. */
 export interface SparqlStatements {
   /** `INSERT DATA` for `quads`, grouped by graph; subjects and objects may be blank nodes. */
-  insertData(quads: readonly Quad[]): SparqlUpdatePlan;
+  insertData(quads: readonly Quad[]): SparqlUpdatePlan<'insert'>;
   /**
    * An update deleting exactly `quads`, blank-node-bearing ones included, or
    * null when there are none (see `blank-node-safe-delete.ts`).
    */
-  deleteData(quads: Quad[]): SparqlUpdatePlan | null;
+  deleteData(quads: Quad[]): SparqlUpdatePlan<'delete'> | null;
   /**
    * Delete every quad matching `pattern`, where an unset term matches
    * anything. A DELETE template cannot hold a blank node.
    */
-  deleteByPattern(pattern: Partial<Quad>): SparqlUpdatePlan;
+  deleteByPattern(pattern: Partial<Quad>): SparqlUpdatePlan<'deleteByPattern'>;
   /** Delete every quad in `graph` whose subject IRI starts with `prefix`. */
-  deleteBySubjectPrefix(graph: string, prefix: string): SparqlUpdatePlan;
-  dropGraph(graph: string): SparqlUpdatePlan;
-  hasGraph(graph: string): SparqlQueryPlan;
+  deleteBySubjectPrefix(graph: string, prefix: string): SparqlUpdatePlan<'deleteBySubjectPrefix'>;
+  dropGraph(graph: string): SparqlUpdatePlan<'dropGraph'>;
+  hasGraph(graph: string): SparqlQueryPlan<'hasGraph'>;
   /** Count the quads in `graph`, or in the default graph and every named graph. */
-  countQuads(graph?: string): SparqlQueryPlan;
+  countQuads(graph?: string): SparqlQueryPlan<'countQuads'>;
 }
+
+type SparqlUpdateBody = Omit<SparqlUpdatePlan, 'operation'>;
+type SparqlQueryBody = Omit<SparqlQueryPlan, 'operation'>;
 
 /** The adapters' statement factory (see the module comment for its reporting invariant). */
 export function sparqlStatements(
   adapter: SparqlTermSite['adapter'],
   terms: SparqlTermPolicy = ADAPTER_SPARQL_TERM_POLICY,
 ): SparqlStatements {
-  /** Render one statement, then report its invalid terms: the one reporting boundary. */
-  function build<P>(
-    operation: SparqlTermSite['operation'],
-    render: (renderer: SparqlTermRenderer) => P,
-  ): P {
+  /**
+   * Render one statement's body at `operation`, then report its invalid terms:
+   * the one reporting boundary.
+   */
+  function reported<B>(operation: SparqlTermSite['operation'], render: (renderer: SparqlTermRenderer) => B): B {
     const renderer = terms.renderer({ adapter, operation });
-    let plan: P;
+    let body: B;
     try {
-      plan = render(renderer);
+      body = render(renderer);
     } catch (error) {
       if (error instanceof SparqlTermRejectedError) reportInvalidSparqlTerms([error.invalidTerm]);
       throw error;
     }
     reportInvalidSparqlTerms(renderer.invalidTerms);
-    return plan;
+    return body;
+  }
+
+  // The plan's operation comes from the same value that labelled its terms,
+  // so the two cannot diverge.
+  function update<O extends SparqlUpdateOperation>(
+    operation: O,
+    render: (renderer: SparqlTermRenderer) => SparqlUpdateBody,
+  ): SparqlUpdatePlan<O>;
+  function update<O extends SparqlUpdateOperation>(
+    operation: O,
+    render: (renderer: SparqlTermRenderer) => SparqlUpdateBody | null,
+  ): SparqlUpdatePlan<O> | null;
+  function update<O extends SparqlUpdateOperation>(
+    operation: O,
+    render: (renderer: SparqlTermRenderer) => SparqlUpdateBody | null,
+  ): SparqlUpdatePlan<O> | null {
+    const body = reported(operation, render);
+    return body === null ? null : { operation, ...body };
+  }
+
+  function query<O extends SparqlQueryOperation>(
+    operation: O,
+    render: (renderer: SparqlTermRenderer) => SparqlQueryBody,
+  ): SparqlQueryPlan<O> {
+    return { operation, ...reported(operation, render) };
   }
   const graphs = (...graphUris: string[]): GraphWriteScope => ({ kind: 'graphs', graphs: graphUris });
 
   return {
     insertData(quads) {
-      return build<SparqlUpdatePlan>('insert', (render) => {
+      return update('insert', (render) => {
         const byGraph = new Map<string, Quad[]>();
         for (const q of quads) {
           const g = q.graph || '';
@@ -102,7 +139,6 @@ export function sparqlStatements(
           }
         }
         return {
-          operation: 'insert',
           update: `INSERT DATA {\n  ${parts.join('\n  ')}\n}`,
           scope: graphs(...byGraph.keys()),
         };
@@ -110,15 +146,15 @@ export function sparqlStatements(
     },
 
     deleteData(quads) {
-      return build<SparqlUpdatePlan | null>('delete', (render) => {
-        const update = renderBlankNodeSafeDelete(quads, render);
-        if (update === null) return null;
-        return { operation: 'delete', update, scope: graphs(...new Set(quads.map((q) => q.graph || ''))) };
+      return update('delete', (render) => {
+        const statement = renderBlankNodeSafeDelete(quads, render);
+        if (statement === null) return null;
+        return { update: statement, scope: graphs(...new Set(quads.map((q) => q.graph || ''))) };
       });
     },
 
     deleteByPattern(pattern) {
-      return build<SparqlUpdatePlan>('deleteByPattern', (render) => {
+      return update('deleteByPattern', (render) => {
         const s = pattern.subject ? render.iri(pattern.subject, 'subject') : '?s';
         const p = pattern.predicate ? render.iri(pattern.predicate, 'predicate') : '?p';
         const o = pattern.object ? render.rdf(pattern.object, 'object', 'reject') : '?o';
@@ -128,7 +164,6 @@ export function sparqlStatements(
         // rejects with HTTP 400.
         const graph = pattern.graph ? render.iri(pattern.graph, 'graph') : '?g_ctx';
         return {
-          operation: 'deleteByPattern',
           update: `DELETE { GRAPH ${graph} { ${triple} } } WHERE { GRAPH ${graph} { ${triple} } }`,
           scope: pattern.graph ? graphs(pattern.graph) : { kind: 'all' },
         };
@@ -136,10 +171,9 @@ export function sparqlStatements(
     },
 
     deleteBySubjectPrefix(graphUri, prefix) {
-      return build<SparqlUpdatePlan>('deleteBySubjectPrefix', (render) => {
+      return update('deleteBySubjectPrefix', (render) => {
         const graph = render.iri(graphUri, 'graph');
         return {
-          operation: 'deleteBySubjectPrefix',
           update: `DELETE { GRAPH ${graph} { ?s ?p ?o } } WHERE { GRAPH ${graph} { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), ${render.prefix(prefix)})) } }`,
           scope: graphs(graphUri),
         };
@@ -147,23 +181,20 @@ export function sparqlStatements(
     },
 
     dropGraph(graphUri) {
-      return build<SparqlUpdatePlan>('dropGraph', (render) => ({
-        operation: 'dropGraph',
+      return update('dropGraph', (render) => ({
         update: `DROP SILENT GRAPH ${render.iri(graphUri, 'graph')}`,
         scope: graphs(graphUri),
       }));
     },
 
     hasGraph(graphUri) {
-      return build<SparqlQueryPlan>('hasGraph', (render) => ({
-        operation: 'hasGraph',
+      return query('hasGraph', (render) => ({
         sparql: `ASK { GRAPH ${render.iri(graphUri, 'graph')} { ?s ?p ?o } }`,
       }));
     },
 
     countQuads(graphUri) {
-      return build<SparqlQueryPlan>('countQuads', (render) => ({
-        operation: 'countQuads',
+      return query('countQuads', (render) => ({
         sparql: graphUri
           ? `SELECT (COUNT(*) AS ?c) WHERE { GRAPH ${render.iri(graphUri, 'graph')} { ?s ?p ?o } }`
           : 'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }',
