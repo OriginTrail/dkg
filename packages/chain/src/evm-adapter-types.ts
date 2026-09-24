@@ -10,7 +10,8 @@ import type { ApprovalPolicy, ContextGraphRegistryScanCursorStore } from './chai
 import type { ContextGraphAuthorityHistoryStore } from './context-graph-authority-history.js';
 import type { ContextGraphAuthorityIndexStore } from './context-graph-authority-index-checkpoint.js';
 import type { ContextGraphAuthorityIndexBootstrap } from './context-graph-authority-index-snapshot.js';
-import type { ChainEventLogStore, KnowledgeAssetReadModelFactory } from './chain-index/index.js';
+import type { ChainEventLogStore } from './chain-index/index.js';
+import type { ChainIndexCapability } from './chain-index-capability.js';
 import type { ChainEventLogBindingSource } from './chain-event-log-binding.js';
 import type { RpcRequestAdmission } from './rpc-request-transport.js';
 
@@ -158,9 +159,9 @@ export interface EVMAdapterBaseConfig {
    * because a second one would be the second scanner this log exists to
    * delete. An adapter without it keeps every pre-log path exactly as it was.
    */
+  chainIndex?: ChainIndexCapability;
+  /** @deprecated Store-only SDK compatibility; use chainIndex: { store } for new callers. */
   chainEventLogStore?: ChainEventLogStore;
-  /** Optional process-owned implementation of KA reads, such as a worker-backed reader. */
-  chainEventLogReadModelFactory?: KnowledgeAssetReadModelFactory;
   /**
    * Late-bound read-only access to the ONE log owned by another adapter in
    * this process. Intended for publisher-wallet adapters: they borrow the
@@ -168,7 +169,7 @@ export interface EVMAdapterBaseConfig {
    *
    * This source is authoritative over `attachChainEventLog`, including while
    * it returns `undefined` during cold start, rotation/rebuild, or shutdown.
-   * A source and `chainEventLogStore` are mutually exclusive.
+   * A source and an owning `chainIndex` capability are mutually exclusive.
    */
   chainEventLogBindingSource?: ChainEventLogBindingSource;
   /**

@@ -17,6 +17,11 @@ import {
 } from '../src/chain-index/chain-event-decoders.js';
 import { createKnowledgeAssetReadModel } from
   '../src/chain-index/knowledge-asset-read-model.js';
+import type { KnowledgeAssetReadOptions } from '../src/chain-index/knowledge-asset-read-model.js';
+import {
+  createKnowledgeAssetReadSnapshot, evaluateKnowledgeAssetSnapshot, planKnowledgeAssetSnapshotRead,
+  type KnowledgeAssetSnapshotRead, type KnowledgeAssetSnapshotResult,
+} from '../src/chain-index/knowledge-asset-read-model-snapshot.js';
 import type { ChainEventLogCoverage, ChainEventLogRow } from
   '../src/chain-index/chain-event-log.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
@@ -157,6 +162,88 @@ function model(
 
 /** The head the fixture commits, in the same units the gate measures. */
 const SEEDED_FETCHED_AT_MS = 1_700_000_000_000;
+
+describe('canonical snapshot evaluation agrees with inline capture', () => {
+  const bound = { kind: 'bound' as const, contextGraphId: 7n, asOfBlockNumber: 100 };
+  const list = { contextGraphId: 7n, kaIds: [4242n, 8888n], throughBlockNumber: 100 };
+  const cases: Array<{
+    name: string; read: KnowledgeAssetSnapshotRead; seed?: SeedOptions;
+    options?: KnowledgeAssetReadOptions; now?: number; fork?: boolean;
+    expected: KnowledgeAssetSnapshotResult | undefined;
+  }> = [
+    { name: 'settled binding', read: { kind: 'binding', kaId: 4242n }, expected: bound },
+    { name: 'missing binding', read: { kind: 'binding', kaId: 99n }, expected: undefined },
+    { name: 'full list', read: { kind: 'list', contextGraphId: 7n }, expected: list },
+    { name: 'scalar ordinal', read: { kind: 'ordinal', contextGraphId: 7n, index: 1n },
+      expected: { kaId: 8888n, asOfBlockNumber: 100 } },
+    { name: 'unknown ordinal', read: { kind: 'ordinal', contextGraphId: 7n, index: 2n }, expected: undefined },
+    { name: 'finalized ignores tail', read: { kind: 'binding', kaId: 9999n }, expected: undefined },
+    { name: 'latest includes tail', read: { kind: 'binding', kaId: 9999n }, options: { view: 'latest' },
+      expected: { ...bound, asOfBlockNumber: 105 } },
+    { name: 'latest ordinal', read: { kind: 'ordinal', contextGraphId: 7n, index: 2n }, options: { view: 'latest' },
+      expected: { kaId: 9999n, asOfBlockNumber: 105 } },
+    { name: 'partial positive binding', read: { kind: 'binding', kaId: 4242n },
+      seed: { cgCoverage: { coveredFromBlock: 45 } }, expected: bound },
+    { name: 'partial ordinal refused', read: { kind: 'ordinal', contextGraphId: 7n, index: 0n },
+      seed: { cgCoverage: { coveredFromBlock: 45 } }, expected: undefined },
+    { name: 'unknown creation refused', read: { kind: 'list', contextGraphId: 7n },
+      seed: { rows: [registration(50, 7n, 4242n)] }, expected: undefined },
+    { name: 'empty created graph', read: { kind: 'list', contextGraphId: 7n },
+      seed: { rows: [creation(40, 7n)] }, expected: { ...list, kaIds: [] } },
+    { name: 'matching own write', read: { kind: 'binding', kaId: 4242n },
+      options: { ownWrite: { blockNumber: 50, blockHash: hash(50) } }, expected: bound },
+    { name: 'mismatching own write', read: { kind: 'binding', kaId: 4242n },
+      options: { ownWrite: { blockNumber: 50, blockHash: hash(99) } }, expected: undefined },
+    { name: 'ordinal own-write mismatch', read: { kind: 'ordinal', contextGraphId: 7n, index: 0n },
+      options: { ownWrite: { blockNumber: 50, blockHash: hash(99) } }, expected: undefined },
+    { name: 'own write ahead of horizon', read: { kind: 'binding', kaId: 4242n },
+      options: { ownWrite: { blockNumber: 140, blockHash: hash(140) } }, expected: undefined },
+    { name: 'stale head', read: { kind: 'binding', kaId: 4242n }, now: SEEDED_FETCHED_AT_MS + 18_001,
+      expected: undefined },
+    { name: 'backwards clock', read: { kind: 'binding', kaId: 4242n }, now: SEEDED_FETCHED_AT_MS - 1,
+      expected: undefined },
+    { name: 'held fork suspicion', read: { kind: 'binding', kaId: 4242n }, fork: true, expected: undefined },
+  ];
+  it.each(cases)('$name', async ({ read, seed, options, now: clock, fork, expected }) => {
+    const rows = [creation(40, 7n), registration(50, 7n, 4242n), registration(60, 7n, 8888n),
+      registration(103, 7n, 9999n, { settled: false })];
+    const store = seeded({ rows, ...seed });
+    if (fork) store.seed(SCOPE, { ...(await store.load(SCOPE))!, suspectedForkBlockNumber: 99 }, rows);
+    const now = () => clock ?? SEEDED_FETCHED_AT_MS;
+    const inline = model(store, { maxHeadAgeMs: 18_000, now });
+    const inlineResult = read.kind === 'binding' ? await inline.readContextGraphForKa(read.kaId, options)
+      : read.kind === 'list' ? await inline.readContextGraphKaList(read.contextGraphId, options)
+        : await inline.readContextGraphKaAt!(read.contextGraphId, read.index, options);
+    const state = (await store.load(SCOPE))!;
+    const plan = planKnowledgeAssetSnapshotRead({ state, read, options,
+      contextGraphStorageAddress: CG_STORAGE, maxHeadAgeMs: 18_000, nowMs: now() });
+    const snapshot = plan && createKnowledgeAssetReadSnapshot(plan,
+      await store.readEvents(SCOPE, plan.query), options?.ownWrite
+        ? await store.blockHashAt(SCOPE, options.ownWrite.blockNumber) : undefined);
+    // Cloned snapshots work without row identity or decoder call-order tricks.
+    const snapshotResult = snapshot && await evaluateKnowledgeAssetSnapshot(structuredClone(snapshot), registry(), { now });
+    expect(inlineResult).toEqual(expected);
+    expect(snapshotResult).toEqual(expected);
+  });
+
+  it('freezes detached snapshot values and observes cancellation between decode batches', async () => {
+    const store = seeded({ rows: [creation(40, 7n), ...Array.from({ length: 300 }, (_, n) =>
+      registration(50, 7n, BigInt(n), { logIndex: n }))] });
+    const plan = planKnowledgeAssetSnapshotRead({ state: (await store.load(SCOPE))!,
+      contextGraphStorageAddress: CG_STORAGE, read: { kind: 'list', contextGraphId: 7n } })!;
+    const rows = await store.readEvents(SCOPE, plan.query);
+    const snapshot = createKnowledgeAssetReadSnapshot(plan, rows);
+    expect(snapshot.rows[0]).not.toBe(rows[0]);
+    expect(Object.isFrozen(snapshot.rows[0]!.topics)).toBe(true);
+    expect(Object.isFrozen(snapshot.plan.state.cursor.head)).toBe(true);
+    const controller = new AbortController();
+    const checkpoint = vi.fn(async () => { controller.abort(new Error('decode cancelled')); });
+    await expect(evaluateKnowledgeAssetSnapshot(snapshot, registry(), {
+      signal: controller.signal, yieldBetweenBatches: checkpoint,
+    })).rejects.toThrow('decode cancelled');
+    expect(checkpoint).toHaveBeenCalledExactlyOnceWith({ decodedRows: 128, totalRows: 301 });
+  });
+});
 
 describe('knowledge asset read model — the tick is still running', () => {
   it('refuses EVERY read once the tick head read is older than the bound', async () => {

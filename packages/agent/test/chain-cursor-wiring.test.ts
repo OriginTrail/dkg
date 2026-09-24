@@ -60,8 +60,7 @@ describe('DKGAgent chain cursor wiring', () => {
       contextGraphRegistryScanCursorStore: registryCursorStore,
       localContextGraphAuthorityHistoryStore: authorityHistoryStore,
       localContextGraphAuthorityIndexStore: authorityIndexStore,
-      chainEventLogStore,
-      chainEventLogReadModelFactory,
+      chainIndex: { store: chainEventLogStore, readModelFactory: chainEventLogReadModelFactory },
     });
 
     expect((agent as any).chain.contextGraphRegistryScanCursor?.input?.store).toBe(registryCursorStore);
@@ -70,24 +69,24 @@ describe('DKGAgent chain cursor wiring', () => {
     expect((agent as any).chain.minPublisherNativeWei).toBe(123n);
     expect((agent as any).chain.minPublisherTracWei).toBe(456n);
     expect((agent as any).chain.receiptTimeoutMs).toBe(1_200_000);
-    expect((agent as any).chain.chainEventLogReadModelFactory).toBe(chainEventLogReadModelFactory);
     expect((agent as any).chain.contextGraphAuthorityIndex?.projectionTickMs).toBe(12_000);
     // The adapter delegates ownership of the durable store to the extracted
     // runtime owner. Exercise that boundary instead of asserting the removed
     // adapter implementation field.
-    let receivedStore: unknown;
+    let receivedCapability: any;
     const runtime = {
       binding: undefined,
       start: vi.fn(),
       stop: vi.fn(async () => {}),
     };
     const owner = (agent as any).chain.chainIndexOwner;
-    owner.start(async (store: unknown) => {
-      receivedStore = store;
+    owner.start(async (capability: unknown) => {
+      receivedCapability = capability;
       return runtime;
     });
     await owner.starting;
-    expect(receivedStore).toBe(chainEventLogStore);
+    expect(receivedCapability.store).toBe(chainEventLogStore);
+    expect(receivedCapability.readModelFactory).toBe(chainEventLogReadModelFactory);
     expect(runtime.start).toHaveBeenCalledOnce();
     expect((agent as any).chain.indexTickMs).toBe(12_000);
   });

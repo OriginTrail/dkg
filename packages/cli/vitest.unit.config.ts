@@ -135,6 +135,7 @@ export default defineConfig({
           'test/async-promote-worker.test.ts',
           'test/chain-index-read-worker.test.ts',
           'test/chain-index-read-worker.integration.test.ts',
+          'test/chain-index-resource.test.ts',
           'test/daemon-startup-validation.test.ts',
           'test/async-promote-error-classification.test.ts',
           'test/async-promote-publisher-recovery.test.ts',

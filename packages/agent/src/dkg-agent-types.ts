@@ -64,7 +64,7 @@ import type {
   ApprovalPolicy,
   ChainAdapter,
   ChainEventLogStore,
-  KnowledgeAssetReadModelFactory,
+  ChainIndexCapability,
   ContextGraphAuthorityHistoryStore,
   ContextGraphAuthorityIndexStore,
   ContextGraphRegistryScanCursorStore,
@@ -1911,9 +1911,9 @@ export interface DKGAgentConfig {
    * it, and every other adapter in the process reads the same log rather than
    * opening a scanner of its own.
    */
+  chainIndex?: ChainIndexCapability;
+  /** @deprecated Store-only SDK compatibility; use chainIndex: { store } for new callers. */
   chainEventLogStore?: ChainEventLogStore;
-  /** Process-owned KA read implementation supplied alongside the one-log store. */
-  chainEventLogReadModelFactory?: KnowledgeAssetReadModelFactory;
   /** Opt in to trusted core bootstrap and a bounded chain tail on edges. */
   authorityIndex?: AuthorityIndexConfig;
   /**

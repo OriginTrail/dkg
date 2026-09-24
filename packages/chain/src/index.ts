@@ -348,3 +348,16 @@ export {
   type EvmChainIndexRuntime,
   type EvmChainIndexRuntimeOptions,
 } from './evm-chain-index-runtime.js';
+
+export {
+  planKnowledgeAssetSnapshotRead,
+  createKnowledgeAssetReadSnapshot,
+  evaluateKnowledgeAssetSnapshot,
+  type KnowledgeAssetSnapshotRead,
+  type KnowledgeAssetSnapshotResult,
+  type KnowledgeAssetSnapshotPlan,
+  type KnowledgeAssetReadSnapshot,
+  type KnowledgeAssetSnapshotEvaluationOptions,
+} from './chain-index/knowledge-asset-read-model-snapshot.js';
+
+export { resolveChainIndexCapability, type ChainIndexCapability } from './chain-index-capability.js';

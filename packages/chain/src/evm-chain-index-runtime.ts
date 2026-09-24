@@ -45,7 +45,6 @@ import {
   normalizeChainEventLogAddress,
   resolveChainIndexAuthorityAnchor,
   type ChainEventLogFetchedRow,
-  type ChainEventLogStore,
   type ChainIndexAnchorResult,
   type ChainIndexAuthorityAnchor,
   type ChainIndexLogRequest,
@@ -53,8 +52,8 @@ import {
   type ChainIndexRunnerOptions,
   type ChainIndexTickResult,
   type HubBinding,
-  type KnowledgeAssetReadModelFactory,
 } from './chain-index/index.js';
+import type { ChainIndexCapability } from './chain-index-capability.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
   CONTEXT_GRAPH_AUTHORITY_INDEX_STALE_FLOOR_MS,
@@ -88,9 +87,7 @@ export type EvmChainIndexReadProvider = <T>(
 
 export interface EvmChainIndexRuntimeOptions {
   readonly scope: string;
-  readonly store: ChainEventLogStore;
-  /** When supplied, all KA reads use this implementation, including when it refuses a read. */
-  readonly chainEventLogReadModelFactory?: KnowledgeAssetReadModelFactory;
+  readonly chainIndex: ChainIndexCapability;
   /** `chain.indexTickMs` (T). One pass per T; every staleness bound is T. */
   readonly intervalMs: number;
   /** Blocks held back from the settled prefix; the reorg tail. */
@@ -401,7 +398,7 @@ export function createEvmChainIndexRuntime(
     },
     {
       scope: options.scope,
-      store: options.store,
+      store: options.chainIndex.store,
       registry,
       deploymentBlockNumber: options.hub.deploymentBlockNumber,
       familyFloorBlocks: chainIndexFloorBlocks(options),
@@ -429,7 +426,7 @@ export function createEvmChainIndexRuntime(
 
   const subscription = createChainEventLogSubscription({
     scope: options.scope,
-    store: options.store,
+    store: options.chainIndex.store,
     registry,
   });
   const hubAddress = options.hub.address;
@@ -452,7 +449,7 @@ export function createEvmChainIndexRuntime(
     lastScannedBlock: number | undefined,
     reorgBufferBlocks: number,
   ): Promise<ChainEventLogHubRotationWindow | undefined> {
-    const state = await options.store.load(options.scope);
+    const state = await options.chainIndex.store.load(options.scope);
     if (state === undefined) return undefined;
     // The suspicion pass deliberately keeps coverage while it waits for a
     // second hash read. It also refreshes fetchedAtMs, so the age guard below
@@ -564,7 +561,7 @@ export function createEvmChainIndexRuntime(
       || identity.topic0.toLowerCase() !== event.topic0
     ) return undefined;
 
-    const state = await options.store.load(options.scope);
+    const state = await options.chainIndex.store.load(options.scope);
     if (state === undefined) return undefined;
     // A runtime can be attached before its first tick. Refuse coverage left by
     // an older decoder/topic generation until this runtime commits the topic
@@ -591,7 +588,7 @@ export function createEvmChainIndexRuntime(
     return Object.freeze({
       throughBlockNumber: horizon,
       async holds(): Promise<boolean> {
-        const current = await options.store.load(options.scope);
+        const current = await options.chainIndex.store.load(options.scope);
         if (
           current === undefined
           || current.cursor.revision !== revision
@@ -627,7 +624,7 @@ export function createEvmChainIndexRuntime(
       contractAddress: contextGraphStorageAddress,
       pageSource: createChainIndexAuthorityPageSource({
         scope: options.scope,
-        store: options.store,
+        store: options.chainIndex.store,
         registry,
         contractAddress: contextGraphStorageAddress,
         // The log knows the hash of every block that emitted an indexed event
@@ -651,7 +648,7 @@ export function createEvmChainIndexRuntime(
         requiredBlockNumber?: number;
       }>): Promise<ChainIndexAnchorResult> {
         return resolveChainIndexAuthorityAnchor({
-          state: await options.store.load(options.scope),
+          state: await options.chainIndex.store.load(options.scope),
           contractAddress: contextGraphStorageAddress,
           deploymentBlockNumber: input.deploymentBlockNumber,
           finalityConfirmations: input.finalityConfirmations,
@@ -668,7 +665,7 @@ export function createEvmChainIndexRuntime(
       },
       anchorHolds(anchor: ChainIndexAuthorityAnchor): Promise<boolean> {
         return chainIndexAuthorityAnchorHolds(
-          () => options.store.load(options.scope),
+          () => options.chainIndex.store.load(options.scope),
           anchor,
           {
             nowMs: now(),
@@ -713,8 +710,8 @@ export function createEvmChainIndexRuntime(
     const maxHeadAgeMs = chainIndexAuthorityAnchorMaxAgeMs(options.intervalMs);
     // An injected reader owns the complete read path. In particular, worker
     // unavailability must never revive the synchronous decoder on this thread.
-    binding.knowledgeAssets = options.chainEventLogReadModelFactory !== undefined
-      ? options.chainEventLogReadModelFactory({
+    binding.knowledgeAssets = options.chainIndex.readModelFactory !== undefined
+      ? options.chainIndex.readModelFactory({
         scope: options.scope,
         contextGraphStorageAddress,
         contextGraphStorageAbi: options.contextGraphStorage!.contractInterface.formatJson(),
@@ -722,7 +719,7 @@ export function createEvmChainIndexRuntime(
       })
       : createKnowledgeAssetReadModel({
         scope: options.scope,
-        store: options.store,
+        store: options.chainIndex.store,
         registry,
         contextGraphStorageAddress,
         // The authority anchor's bound exactly — `min(max(3T, 15s), 5m)`,

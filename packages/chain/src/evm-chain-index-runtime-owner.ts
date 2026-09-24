@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { ChainEventLogBinding } from './chain-event-log-binding.js';
-import type { ChainEventLogStore } from './chain-index/chain-event-log.js';
+import type { ChainIndexCapability } from './chain-index-capability.js';
 import type { EvmChainIndexRuntime } from './evm-chain-index-runtime.js';
 
 /**
@@ -13,7 +13,7 @@ import type { EvmChainIndexRuntime } from './evm-chain-index-runtime.js';
  * attached binding, rotation retirement, and shutdown.
  */
 export class EvmChainIndexRuntimeOwner {
-  readonly #store: ChainEventLogStore | undefined;
+  readonly #capability: ChainIndexCapability | undefined;
   readonly #onError: (error: unknown) => void;
   #binding: ChainEventLogBinding | undefined;
   #runtime: EvmChainIndexRuntime | undefined;
@@ -21,10 +21,10 @@ export class EvmChainIndexRuntimeOwner {
   #generation = 0;
 
   constructor(
-    store: ChainEventLogStore | undefined,
+    capability: ChainIndexCapability | undefined,
     onError: (error: unknown) => void,
   ) {
-    this.#store = store;
+    this.#capability = capability;
     this.#onError = onError;
   }
 
@@ -52,12 +52,12 @@ export class EvmChainIndexRuntimeOwner {
    * synchronously up to its first await, so callers can close over a snapshot
    * of the Hub-resolved contracts before a concurrent rotation mutates them.
    */
-  start(build: (store: ChainEventLogStore) => Promise<EvmChainIndexRuntime>): void {
-    const store = this.#store;
-    if (store === undefined || this.#starting !== undefined) return;
+  start(build: (capability: ChainIndexCapability) => Promise<EvmChainIndexRuntime>): void {
+    const capability = this.#capability;
+    if (capability === undefined || this.#starting !== undefined) return;
     const generation = ++this.#generation;
     this.#starting = (async () => {
-      const runtime = await build(store);
+      const runtime = await build(capability);
       if (generation !== this.#generation) {
         await runtime.stop();
         return;
@@ -75,7 +75,7 @@ export class EvmChainIndexRuntimeOwner {
 
   /** Retire an owned runtime after an indexed Hub binding rotates. */
   rebuild(): void {
-    if (this.#store === undefined) return;
+    if (this.#capability === undefined) return;
     this.#generation += 1;
     const runtime = this.#runtime;
     this.#runtime = undefined;

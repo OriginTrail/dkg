@@ -208,9 +208,9 @@ describe('EVMChainAdapter chain index wiring', () => {
     };
     const factory = vi.fn(() => readModel);
     const adapter = new EVMChainAdapter({
-      ...config(new MemoryChainEventLogStore()),
+      ...config(),
       indexTickMs: 60_000,
-      chainEventLogReadModelFactory: factory,
+      chainIndex: { store: new MemoryChainEventLogStore(), readModelFactory: factory },
     });
     const { internals } = stubInitBoundary(adapter);
     try {

@@ -185,8 +185,7 @@ function harness(options?: {
     : undefined;
   const runtime = createEvmChainIndexRuntime({
     scope: RUNTIME_SCOPE,
-    store,
-    chainEventLogReadModelFactory: options?.chainEventLogReadModelFactory,
+    chainIndex: { store, readModelFactory: options?.chainEventLogReadModelFactory },
     intervalMs: options?.intervalMs ?? 6_000,
     reorgHoldbackBlocks: options?.reorgHoldbackBlocks ?? 5,
     backfillPageBlocks: 100,

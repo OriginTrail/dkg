@@ -89,7 +89,7 @@ import type {
   ChainEventLogBinding,
   ChainEventLogBindingSource,
 } from './chain-event-log-binding.js';
-import type { KnowledgeAssetReadModelFactory } from './chain-index/index.js';
+import { resolveChainIndexCapability } from './chain-index-capability.js';
 import {
   createEvmChainIndexRuntime,
   type EvmChainIndexContract,
@@ -953,7 +953,6 @@ export class EVMChainAdapterBase {
    */
   private readonly chainIndexOwner: EvmChainIndexRuntimeOwner;
   private readonly chainEventLogBindingSource: ChainEventLogBindingSource | undefined;
-  private readonly chainEventLogReadModelFactory: KnowledgeAssetReadModelFactory | undefined;
 
   /** Durable identity of the one-log runtime this adapter is allowed to read. */
   private get chainEventLogScope(): string {
@@ -1330,12 +1329,12 @@ export class EVMChainAdapterBase {
   }
 
   constructor(config: EVMAdapterConfig) {
-    if (config.chainEventLogStore !== undefined
+    const chainIndex = resolveChainIndexCapability(config);
+    if (chainIndex !== undefined
       && config.chainEventLogBindingSource !== undefined) {
       throw new TypeError('An EVM adapter cannot own and borrow the one-log runtime at the same time');
     }
     this.chainEventLogBindingSource = config.chainEventLogBindingSource;
-    this.chainEventLogReadModelFactory = config.chainEventLogReadModelFactory;
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
     this.receiptTimeoutMs = resolveReceiptTimeoutMs(config.receiptTimeoutMs);
     this.signerTxSerializer = new SignerTxSerializer({
@@ -1480,7 +1479,7 @@ export class EVMChainAdapterBase {
       },
     );
     this.chainIndexOwner = new EvmChainIndexRuntimeOwner(
-      config.chainEventLogStore,
+      chainIndex,
       (error) => {
         console.warn(
           `[chain] one-log chain index disabled: ${error instanceof Error ? error.message : String(error)}`,
@@ -4910,7 +4909,7 @@ export class EVMChainAdapterBase {
     const hubContract = this.contracts.hub;
     const contextGraphStorageContract = this.contracts.contextGraphStorage;
     const knowledgeAssetStorageContract = this.contracts.knowledgeAssetStorage;
-    this.chainIndexOwner.start(async (store) => {
+    this.chainIndexOwner.start(async (chainIndex) => {
       const hub = await this.chainIndexContract(hubContract, 'Hub');
       if (hub === undefined) throw new Error('Hub address is unresolvable');
       const contextGraphStorage = await this.chainIndexContract(
@@ -4956,8 +4955,7 @@ export class EVMChainAdapterBase {
         // identity; it stays because this is a DURABLE key, and shortening it
         // would strand every existing node's cursor and re-walk history.
         scope: this.chainEventLogScope,
-        store,
-        chainEventLogReadModelFactory: this.chainEventLogReadModelFactory,
+        chainIndex,
         intervalMs: resolveContextGraphAuthorityIndexTickMs(this.indexTickMs),
         // The depth the Context Graph registry scan already treats as
         // reorg-safe. Reusing it keeps ONE definition of "settled" on this

@@ -2,10 +2,14 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Worker } from 'node:worker_threads';
 import { Interface } from 'ethers';
 import { DashboardDB, SqliteChainEventLogStore } from '@origintrail-official/dkg-node-ui';
 import type { ChainEventLogStore, ChainEventLogState, ChainEventLogRow } from '@origintrail-official/dkg-chain';
 import { ChainIndexReadWorker, type ChainIndexReadDiagnostic } from '../src/daemon/worker/chain-index-read-worker.js';
+import type {
+  ChainIndexReadRequest, ChainIndexReadResponse, ChainIndexReadWorkerMessage,
+} from '../src/daemon/worker/chain-index-read-worker-protocol.js';
 
 type ChainEventLogCommit = Parameters<ChainEventLogStore['commit']>[2];
 type ChainEventLogCoverage = ChainEventLogState['coverage'][number];
@@ -37,6 +41,26 @@ function commit(rows: ChainEventLogRow[], overrides: Partial<ChainEventLogCommit
   };
 }
 
+type TestWorkerMessage = ChainIndexReadWorkerMessage
+  | { type: 'test-decode-batch'; id: number; decodedRows: number; totalRows: number };
+
+function nextMessage(worker: Worker, matches: (message: TestWorkerMessage) => boolean): Promise<TestWorkerMessage> {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(timer);
+      worker.off('message', receive);
+      worker.off('error', fail);
+    };
+    const fail = (error: Error) => { cleanup(); reject(error); };
+    const receive = (message: TestWorkerMessage) => {
+      if (matches(message)) { cleanup(); resolve(message); }
+    };
+    const timer = setTimeout(() => fail(new Error('Worker did not reach the expected checkpoint')), 10_000);
+    worker.on('message', receive);
+    worker.on('error', fail);
+  });
+}
+
 describe('chain-index reader with the packaged worker and a real SQLite log', () => {
   const cleanup: (() => Promise<void>)[] = [];
   afterEach(async () => { for (const close of cleanup.splice(0)) await close(); });
@@ -53,8 +77,69 @@ describe('chain-index reader with the packaged worker and a real SQLite log', ()
     await store.commit(scope, undefined, commit(rows, coverage ? { coverage } : {}));
     const model = worker.createReadModel({ scope, contextGraphStorageAddress: address,
       contextGraphStorageAbi: abi, maxHeadAgeMs: 60_000 });
-    return { db, store, worker, model, diagnostics };
+    return { db, store, worker, model, diagnostics, dataDir };
   }
+
+  async function heldBulkDecode() {
+    const rows = Array.from({ length: 8_000 }, (_, n) => registration(BigInt(n + 1), 10, 7n, n));
+    const { dataDir } = await fixture([creation(), ...rows]);
+    const barrier = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+    const thread = new Worker(new URL('../dist/daemon/worker/chain-index-read-worker-entry.js', import.meta.url), {
+      workerData: { dbPath: join(dataDir, 'node-ui.db'), testDecodeBarrier: barrier.buffer },
+    });
+    const release = () => { Atomics.store(barrier, 0, 2); Atomics.notify(barrier, 0); };
+    // Terminate before the fixture closes/removes its database, including on assertion failure.
+    cleanup.unshift(async () => { release(); await thread.terminate(); });
+    const responses: number[] = [];
+    const errors: Error[] = [];
+    thread.on('error', (error) => errors.push(error));
+    thread.on('message', (message: TestWorkerMessage) => {
+      if (!('type' in message)) responses.push(message.id);
+    });
+    await nextMessage(thread, (message) => 'type' in message && message.type === 'ready');
+    const request = (id: number, method: 'ordinal' | 'binding', key: bigint): ChainIndexReadRequest => ({
+      type: 'read', id, method, key, ...(method === 'ordinal' ? { index: 7_999n } : {}),
+      model: { scope, contextGraphStorageAddress: address, contextGraphStorageAbi: abi, maxHeadAgeMs: 60_000 },
+      options: {}, deadlineAt: Date.now() + 30_000,
+    });
+    const checkpoint = nextMessage(thread, (message) => 'type' in message && message.type === 'test-decode-batch');
+    const bulk = nextMessage(thread, (message) => !('type' in message) && message.id === 1);
+    thread.postMessage(request(1, 'ordinal', 7n));
+    await expect(checkpoint).resolves.toMatchObject({ decodedRows: 128, totalRows: 8_001 });
+    return { thread, release, request, bulk, responses, errors };
+  }
+
+  it('serves a concurrent point read at a real batch yield before a permitted bulk ordinal completes', async () => {
+    const { thread, release, request, bulk, responses, errors } = await heldBulkDecode();
+    const point = nextMessage(thread, (message) => !('type' in message) && message.id === 2);
+    // Queue while decode is synchronously held; the hook cannot process messages.
+    // Removing the production yield makes ordinal 1 finish before point 2.
+    thread.postMessage(request(2, 'binding', 8_000n));
+    release();
+    await expect(point).resolves.toMatchObject({ id: 2, reason: 'served', rowsRead: 1,
+      result: { kind: 'bound', contextGraphId: 7n } });
+    await expect(bulk).resolves.toMatchObject({ id: 1, reason: 'served', rowsRead: 8_001,
+      result: { kaId: 8_000n } });
+    expect(responses.indexOf(2)).toBeLessThan(responses.indexOf(1));
+    expect(errors).toEqual([]);
+  });
+
+  it('observes cancellation at a real batch yield without recycling the worker', async () => {
+    const { thread, release, request, bulk, errors } = await heldBulkDecode();
+    const point = nextMessage(thread, (message) => !('type' in message) && message.id === 2);
+    thread.postMessage({ type: 'cancel', id: 1 });
+    thread.postMessage(request(2, 'binding', 8_000n));
+    release();
+    const cancelled = await bulk as ChainIndexReadResponse;
+    expect(cancelled.result).toBeUndefined();
+    expect(cancelled.reason).toBe('timeout');
+    await expect(point).resolves.toMatchObject({ reason: 'served', result: { contextGraphId: 7n } });
+    // The same real worker still serves after cancellation; no client/watchdog is involved.
+    const after = nextMessage(thread, (message) => !('type' in message) && message.id === 3);
+    thread.postMessage(request(3, 'binding', 1n));
+    await expect(after).resolves.toMatchObject({ reason: 'served', result: { contextGraphId: 7n } });
+    expect(errors).toEqual([]);
+  });
 
   it('reads only one registration for a point lookup and never changes the database', async () => {
     const rows = Array.from({ length: 2_000 }, (_, n) => registration(BigInt(n + 1), 10, 7n, n));

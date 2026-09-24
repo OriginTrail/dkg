@@ -1,5 +1,4 @@
-import { Worker } from 'node:worker_threads';
-import { existsSync } from 'node:fs';
+import type { Worker } from 'node:worker_threads';
 import { chainEventLogStateReadRefusal } from '@origintrail-official/dkg-chain';
 import type {
   ChainEventLogStore,
@@ -14,8 +13,8 @@ import type {
   ChainIndexReadRequest,
   ChainIndexReadResponse,
   ChainIndexReadResult,
-  ChainIndexReadWorkerMessage,
 } from './chain-index-read-worker-protocol.js';
+import { ChainIndexReadWorkerOwner } from './chain-index-read-worker-owner.js';
 
 export interface ChainIndexReadDiagnostic {
   method: ChainIndexReadMethod;
@@ -33,11 +32,18 @@ interface ReadWaiter {
   detach: () => void;
 }
 
-interface ReadJob {
+type ReadPhase =
+  | { phase: 'queued' }
+  | { phase: 'dispatched'; worker: Worker; dispatchedAt: number }
+  | { phase: 'detached'; worker: Worker; dispatchedAt: number }
+  | { phase: 'completed'; dispatchedAt?: number };
+
+/** Retained until the physical read replies or its worker actually retires. */
+interface PhysicalRead {
   key: string;
   request: ChainIndexReadRequest;
   createdAt: number;
-  dispatchedAt?: number;
+  state: ReadPhase;
   timer: ReturnType<typeof setTimeout>;
   waiters: Set<ReadWaiter>;
 }
@@ -54,34 +60,34 @@ export interface ChainIndexReadWorkerOptions {
 
 /** One process-owned reader. The writer remains the daemon's existing store. */
 export class ChainIndexReadWorker {
-  private worker?: Worker;
-  private workerReady = false;
-  private startupTimer?: ReturnType<typeof setTimeout>;
-  private closed = false;
-  private cooldownUntil = 0;
+  private readonly owner: ChainIndexReadWorkerOwner;
   private nextId = 0;
   private nextModelId = 0;
-  private readonly jobs = new Map<number, ReadJob>();
-  private readonly activeIds = new Map<number, ReturnType<typeof setTimeout>>();
-  private readonly retirements = new Set<Promise<void>>();
-  private readonly equivalent = new Map<string, ReadJob>();
+  private readonly reads = new Map<number, PhysicalRead>();
+  private readonly equivalent = new Map<string, PhysicalRead>();
   private readonly timeoutMs: number;
-  private readonly startupTimeoutMs: number;
   private readonly maxPending: number;
   private readonly maxInFlight: number;
 
   constructor(
-    private readonly dbPath: string,
+    dbPath: string,
     private readonly store: Pick<ChainEventLogStore, 'load'>,
     private readonly options: ChainIndexReadWorkerOptions = {},
   ) {
     this.timeoutMs = options.timeoutMs ?? 1_500;
-    this.startupTimeoutMs = options.startupTimeoutMs ?? 10_000;
+    const startupTimeoutMs = options.startupTimeoutMs ?? 10_000;
     this.maxPending = options.maxPending ?? 64;
     this.maxInFlight = options.maxInFlight ?? 4;
-    for (const value of [this.timeoutMs, this.startupTimeoutMs, this.maxPending, this.maxInFlight]) {
+    for (const value of [this.timeoutMs, startupTimeoutMs, this.maxPending, this.maxInFlight]) {
       if (!Number.isSafeInteger(value) || value < 1) throw new Error('Invalid chain-index worker limits');
     }
+    this.owner = new ChainIndexReadWorkerOwner({
+      dbPath, startupTimeoutMs, workerFactory: options.workerFactory,
+      onReady: () => this.dispatch(),
+      onResponse: (worker, response) => { void this.receive(worker, response); },
+      onUnavailable: (reason) => this.unavailable(reason),
+      onRetired: (worker) => this.retired(worker),
+    });
   }
 
   createReadModel = (model: KnowledgeAssetReadModelFactoryOptions): KnowledgeAssetReadModel => {
@@ -107,47 +113,42 @@ export class ChainIndexReadWorker {
     index?: bigint,
   ): Promise<ChainIndexReadResult | undefined> {
     if (options.signal?.aborted) return Promise.reject(options.signal.reason ?? new Error('Chain-index read aborted'));
-    if (this.closed || Date.now() < this.cooldownUntil) return Promise.resolve(undefined);
+    if (!this.owner.acceptsReads()) return Promise.resolve(undefined);
     // Bound callers as well as distinct jobs: a stalled shared read must not
     // accumulate unlimited promise callbacks and AbortSignal listeners.
     let callers = 0;
-    for (const job of this.jobs.values()) callers += job.waiters.size;
+    for (const read of this.reads.values()) callers += read.waiters.size;
     if (callers >= this.maxPending) return Promise.resolve(undefined);
     const jobKey = JSON.stringify([generation, method, key.toString(), index?.toString(),
       options.view ?? 'finalized', options.ownWrite?.blockNumber, options.ownWrite?.blockHash]);
-    let job = this.equivalent.get(jobKey);
-    if (job === undefined) {
-      if (this.jobs.size >= this.maxPending) return Promise.resolve(undefined);
+    let read = this.equivalent.get(jobKey);
+    if (read === undefined) {
+      if (this.reads.size >= this.maxPending) return Promise.resolve(undefined);
       const id = ++this.nextId;
       const createdAt = Date.now();
-      job = {
+      read = {
         key: jobKey,
         createdAt,
+        state: { phase: 'queued' },
         request: {
           type: 'read', id, model, method, key, index,
           options: { view: options.view, ownWrite: options.ownWrite && { ...options.ownWrite } },
           deadlineAt: createdAt + this.timeoutMs,
         },
-        timer: setTimeout(() => {
-          const worker = this.activeIds.has(id) ? this.worker : undefined;
-          this.finish(id, undefined, 'timeout');
-          // A stuck SQL call cannot observe cancellation. Recycle the reader
-          // rather than queueing more work behind a wedged worker indefinitely.
-          if (worker !== undefined) this.failed(worker);
-        }, this.timeoutMs),
+        timer: setTimeout(() => this.expire(id), this.timeoutMs),
         waiters: new Set(),
       };
-      job.timer.unref();
-      this.jobs.set(id, job);
-      this.equivalent.set(jobKey, job);
+      read.timer.unref();
+      this.reads.set(id, read);
+      this.equivalent.set(jobKey, read);
     }
-    const pending = job;
+    const pending = read;
     return new Promise((resolve, reject) => {
       const onAbort = () => {
         pending.waiters.delete(waiter);
         waiter.detach();
         reject(options.signal?.reason ?? new Error('Chain-index read aborted'));
-        if (pending.waiters.size === 0) this.finish(pending.request.id, undefined, 'cancelled');
+        if (pending.waiters.size === 0) this.settleObservers(pending, undefined, 'cancelled');
       };
       const waiter: ReadWaiter = {
         resolve, reject,
@@ -159,90 +160,77 @@ export class ChainIndexReadWorker {
     });
   }
 
-  private ensureWorker(): Worker | undefined {
-    if (this.worker !== undefined) return this.worker;
-    if (this.closed || this.retirements.size > 0 || Date.now() < this.cooldownUntil) return undefined;
-    try {
-      const sibling = new URL('./chain-index-read-worker-entry.js', import.meta.url);
-      const entry = existsSync(sibling) ? sibling :
-        new URL('../../../dist/daemon/worker/chain-index-read-worker-entry.js', import.meta.url);
-      const worker = this.options.workerFactory?.() ?? new Worker(entry, {
-        workerData: { dbPath: this.dbPath },
-        resourceLimits: { maxOldGenerationSizeMb: 256 },
-      });
-      this.worker = worker;
-      this.workerReady = false;
-      this.startupTimer = setTimeout(() => this.failed(worker), this.startupTimeoutMs);
-      this.startupTimer.unref();
-      worker.on('message', (response: ChainIndexReadWorkerMessage) => {
-        if (this.worker !== worker) return;
-        if ('type' in response && response.type === 'ready') {
-          this.workerReady = true;
-          clearTimeout(this.startupTimer);
-          this.startupTimer = undefined;
-          this.dispatch();
-        } else {
-          void this.receive(response as ChainIndexReadResponse);
-        }
-      });
-      worker.on('error', () => this.failed(worker));
-      worker.on('exit', () => this.failed(worker));
-      worker.unref();
-      return worker;
-    } catch {
-      this.cooldownUntil = Date.now() + 1_000;
-      return undefined;
-    }
-  }
-
   private dispatch(): void {
-    if (this.closed || this.jobs.size === 0) return;
-    const worker = this.ensureWorker();
-    if (worker === undefined) {
-      for (const id of this.jobs.keys()) this.finish(id, undefined, 'worker-unavailable');
-      return;
-    }
-    // Imports and opening SQLite get a separate bounded startup budget. Read
-    // callers can fall back promptly without repeatedly killing a cold worker.
-    if (!this.workerReady) {
-      worker.ref();
-      return;
-    }
-    let active = this.activeIds.size;
-    const queued = [...this.jobs.values()].filter((job) => job.dispatchedAt === undefined)
+    const queued = [...this.reads.values()].filter((read) => read.state.phase === 'queued')
       .sort((a, b) => Number(b.request.method === 'binding') - Number(a.request.method === 'binding'));
-    for (const job of queued) {
+    if (queued.length === 0) {
+      this.updateReference();
+      return;
+    }
+    const live = this.owner.acquire();
+    if (live === undefined) {
+      for (const read of queued) this.settleObservers(read, undefined, 'worker-unavailable');
+      return;
+    }
+    if (live.phase === 'starting') {
+      this.updateReference();
+      return;
+    }
+    let active = [...this.reads.values()].filter((read) =>
+      (read.state.phase === 'dispatched' || read.state.phase === 'detached')
+      && read.state.worker === live.worker).length;
+    for (const read of queued) {
       if (active >= this.maxInFlight) break;
-      job.dispatchedAt = Date.now();
+      // A synchronous ready notification can already have dispatched this read.
+      if (read.state.phase !== 'queued') continue;
+      read.state = { phase: 'dispatched', worker: live.worker, dispatchedAt: Date.now() };
       try {
-        worker.ref();
-        this.activeIds.set(job.request.id, job.timer);
-        worker.postMessage(job.request);
+        this.owner.setReferenced(true);
+        live.worker.postMessage(read.request);
         active++;
       } catch {
-        this.failed(worker);
+        this.owner.fail(live.worker);
         return;
       }
     }
   }
 
-  private async receive(response: ChainIndexReadResponse): Promise<void> {
-    const job = this.jobs.get(response.id);
-    if (job === undefined) clearTimeout(this.activeIds.get(response.id));
-    this.activeIds.delete(response.id);
+  private expire(id: number): void {
+    const read = this.reads.get(id);
+    if (read === undefined) return;
+    const state = read.state;
+    this.settleObservers(read, undefined, 'timeout');
+    if (state.phase === 'dispatched' || state.phase === 'detached') {
+      // Cancellation cannot interrupt synchronous SQLite. The physical read's
+      // own deadline survives its observers and forces retirement if necessary.
+      this.owner.fail(state.worker);
+    }
+  }
+
+  private async receive(worker: Worker, response: ChainIndexReadResponse): Promise<void> {
+    const read = this.reads.get(response.id);
+    if (read === undefined) return;
+    const previous = read.state;
+    if ((previous.phase !== 'dispatched' && previous.phase !== 'detached')
+      || previous.worker !== worker) return;
+    read.state = { phase: 'completed', dispatchedAt: previous.dispatchedAt };
     queueMicrotask(() => this.dispatch());
-    if (job === undefined) return;
-    if (Date.now() >= job.request.deadlineAt) {
-      this.finish(response.id, undefined, 'timeout', response);
+    if (previous.phase === 'detached') {
+      this.release(read);
+      return;
+    }
+    // Physical work is finished, but the observer deadline remains in force
+    // through the asynchronous validation of the committed cursor.
+    if (Date.now() >= read.request.deadlineAt) {
+      this.settleObservers(read, undefined, 'timeout', response);
       return;
     }
     if (response.result !== undefined) {
       try {
-        // Tiny cursor/coverage reads only. No historical rows cross this port.
-        const state = await this.store.load(job.request.model.scope);
+        const state = await this.store.load(read.request.model.scope);
         const nowMs = Date.now();
-        if (nowMs >= job.request.deadlineAt) {
-          this.finish(response.id, undefined, 'timeout', response);
+        if (nowMs >= read.request.deadlineAt) {
+          this.settleObservers(read, undefined, 'timeout', response);
           return;
         }
         const fence = response.fence;
@@ -251,80 +239,86 @@ export class ChainIndexReadWorker {
           || state.cursor.lineage !== fence.lineage
           || state.cursor.topicSetVersion !== fence.topicSetVersion
           || chainEventLogStateReadRefusal(state, {
-            nowMs, maxHeadAgeMs: job.request.model.maxHeadAgeMs,
+            nowMs, maxHeadAgeMs: read.request.model.maxHeadAgeMs,
           }) !== undefined) {
-          this.finish(response.id, undefined, 'retired-revision', response);
+          this.settleObservers(read, undefined, 'retired-revision', response);
           return;
         }
       } catch {
-        this.finish(response.id, undefined, 'store-unavailable', response);
+        this.settleObservers(read, undefined, 'store-unavailable', response);
         return;
       }
     }
-    this.finish(response.id, response.result, response.reason ?? 'served', response);
+    this.settleObservers(read, response.result, response.reason ?? 'served', response);
   }
 
-  private finish(id: number, result: ChainIndexReadResult | undefined, reason: string, response?: ChainIndexReadResponse): void {
-    const job = this.jobs.get(id);
-    if (job === undefined) return;
-    this.jobs.delete(id);
-    this.equivalent.delete(job.key);
-    // A cancelled caller does not prove the physical task stopped. Retain its
-    // deadline until the reply arrives, even when nobody is awaiting it.
-    if (!this.activeIds.has(id)) clearTimeout(job.timer);
-    if (response === undefined && job.dispatchedAt !== undefined) {
-      try { this.worker?.postMessage({ type: 'cancel', id }); } catch { /* exiting worker */ }
+  private settleObservers(
+    read: PhysicalRead,
+    result: ChainIndexReadResult | undefined,
+    reason: string,
+    response?: ChainIndexReadResponse,
+  ): void {
+    if (this.reads.get(read.request.id) !== read || read.state.phase === 'detached') return;
+    const previous = read.state;
+    const dispatchedAt = previous.phase === 'queued' ? undefined : previous.dispatchedAt;
+    if (this.equivalent.get(read.key) === read) this.equivalent.delete(read.key);
+    if (previous.phase === 'dispatched') {
+      // Losing the final observer does not finish the physical task. Keep its
+      // record and deadline until its reply or its worker's retirement arrives.
+      read.state = { ...previous, phase: 'detached' };
+      try { previous.worker.postMessage({ type: 'cancel', id: read.request.id }); } catch { /* exiting worker */ }
+    } else {
+      this.release(read);
     }
-    for (const waiter of job.waiters) {
+    for (const waiter of read.waiters) {
       waiter.detach();
       waiter.resolve(result);
     }
+    read.waiters.clear();
     try {
       this.options.onDiagnostic?.({
-        method: job.request.method,
-        durationMs: Date.now() - job.createdAt,
-        queueMs: (job.dispatchedAt ?? Date.now()) - job.createdAt,
+        method: read.request.method,
+        durationMs: Date.now() - read.createdAt,
+        queueMs: (dispatchedAt ?? Date.now()) - read.createdAt,
         rowsRead: response?.rowsRead ?? 0,
         readMs: response?.readMs ?? 0,
         decodeMs: response?.decodeMs ?? 0,
         reason,
       });
     } catch { /* Observability cannot change read correctness. */ }
-    if (this.jobs.size === 0) this.worker?.unref();
-    // Defer to avoid recursion while draining a failed/closed worker's queue.
+    this.updateReference();
     queueMicrotask(() => this.dispatch());
   }
 
-  private failed(worker: Worker): void {
-    if (this.worker !== worker) return;
-    this.worker = undefined;
-    this.workerReady = false;
-    clearTimeout(this.startupTimer);
-    this.startupTimer = undefined;
-    for (const timer of this.activeIds.values()) clearTimeout(timer);
-    this.activeIds.clear();
-    this.cooldownUntil = Date.now() + 1_000;
-    for (const id of this.jobs.keys()) this.finish(id, undefined, 'worker-unavailable');
-    this.retire(worker);
+  private release(read: PhysicalRead): void {
+    const dispatchedAt = read.state.phase === 'queued' ? undefined : read.state.dispatchedAt;
+    read.state = { phase: 'completed', dispatchedAt };
+    clearTimeout(read.timer);
+    this.reads.delete(read.request.id);
+    if (this.equivalent.get(read.key) === read) this.equivalent.delete(read.key);
   }
 
-  private retire(worker: Worker): void {
-    const retirement = worker.terminate().then(() => undefined, () => undefined);
-    this.retirements.add(retirement);
-    void retirement.then(() => this.retirements.delete(retirement));
+  private unavailable(reason: 'closed' | 'worker-unavailable'): void {
+    for (const read of this.reads.values()) {
+      // Retirement owns physical completion now; no independent watchdog can
+      // create another worker or discard its outstanding physical records.
+      clearTimeout(read.timer);
+      this.settleObservers(read, undefined, reason);
+    }
   }
 
-  async close(): Promise<void> {
-    this.closed = true;
-    for (const id of this.jobs.keys()) this.finish(id, undefined, 'closed');
-    const worker = this.worker;
-    this.worker = undefined;
-    this.workerReady = false;
-    clearTimeout(this.startupTimer);
-    this.startupTimer = undefined;
-    for (const timer of this.activeIds.values()) clearTimeout(timer);
-    this.activeIds.clear();
-    if (worker !== undefined) this.retire(worker);
-    await Promise.all(this.retirements);
+  private retired(worker: Worker): void {
+    for (const read of this.reads.values()) {
+      if ((read.state.phase === 'dispatched' || read.state.phase === 'detached')
+        && read.state.worker === worker) this.release(read);
+    }
+  }
+
+  private updateReference(): void {
+    this.owner.setReferenced([...this.reads.values()].some((read) => read.waiters.size > 0));
+  }
+
+  close(): Promise<void> {
+    return this.owner.close();
   }
 }

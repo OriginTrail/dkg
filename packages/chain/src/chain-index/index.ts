@@ -113,3 +113,14 @@ export {
   type ChainIndexAuthorityPageSource,
   type ChainIndexAuthorityPageSourceOptions,
 } from './chain-index-authority-page.js';
+
+export {
+  planKnowledgeAssetSnapshotRead,
+  createKnowledgeAssetReadSnapshot,
+  evaluateKnowledgeAssetSnapshot,
+  type KnowledgeAssetSnapshotRead,
+  type KnowledgeAssetSnapshotResult,
+  type KnowledgeAssetSnapshotPlan,
+  type KnowledgeAssetReadSnapshot,
+  type KnowledgeAssetSnapshotEvaluationOptions,
+} from './knowledge-asset-read-model-snapshot.js';

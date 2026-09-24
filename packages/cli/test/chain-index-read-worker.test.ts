@@ -204,6 +204,26 @@ describe('chain-index read worker client', () => {
     expect(f.worker().messages.some((message) => message.type === 'cancel')).toBe(false);
   });
 
+  it('retains a detached physical read in admission accounting until its reply', async () => {
+    const f = fixture({ maxPending: 1 });
+    const controller = new AbortController();
+    const first = f.model.readContextGraphForKa(42n, { signal: controller.signal });
+    const rejected = expect(first).rejects.toThrow('detached');
+    const request = f.worker().reads[0]!;
+    controller.abort(new Error('detached'));
+    await rejected;
+    // Neither the same key nor a different key can reclaim a physically busy
+    // record's bounded capacity just because its observers have gone away.
+    await expect(f.model.readContextGraphForKa(42n)).resolves.toBeUndefined();
+    await expect(f.model.readContextGraphForKa(43n)).resolves.toBeUndefined();
+    expect(f.worker().reads).toHaveLength(1);
+    f.worker().reply(request, { result: undefined, reason: 'cancelled' });
+    const next = f.model.readContextGraphForKa(42n);
+    expect(f.worker().reads[1]!.id).not.toBe(request.id);
+    f.worker().reply(f.worker().reads[1]!);
+    await expect(next).resolves.toEqual(BINDING);
+  });
+
   it('rejects an already-aborted caller without starting a worker', async () => {
     const f = fixture();
     const signal = AbortSignal.abort(new Error('already stopped'));
@@ -348,6 +368,48 @@ describe('chain-index read worker client', () => {
     await expect(recovered).resolves.toEqual(BINDING);
   });
 
+  it.each(['unref', 'on'] as const)('retires a constructed worker when %s setup throws', async (method) => {
+    const worker = new FakeWorker();
+    vi.spyOn(worker, method).mockImplementationOnce(() => { throw new Error('setup failed'); });
+    let release!: (code: number) => void;
+    worker.terminate.mockReturnValueOnce(new Promise((resolve) => { release = resolve; }));
+    const factory = vi.fn(() => worker as unknown as Worker);
+    const f = fixture({ workerFactory: factory });
+    try {
+      await expect(f.model.readContextGraphForKa(42n)).resolves.toBeUndefined();
+      expect(worker.terminate).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(11_000);
+      // The startup timer is gone; retirement, rather than elapsed cooldown,
+      // prevents a replacement while this physical thread is still exiting.
+      await expect(f.model.readContextGraphForKa(43n)).resolves.toBeUndefined();
+      expect(factory).toHaveBeenCalledOnce();
+      expect(worker.terminate).toHaveBeenCalledOnce();
+    } finally {
+      release(0);
+      await f.client.close();
+    }
+  });
+
+  it.each(['throws', 'rejects'] as const)('keeps failed retirement unavailable when terminate %s', async (mode) => {
+    const f = fixture();
+    const read = f.model.readContextGraphForKa(42n);
+    const worker = f.worker();
+    const error = new Error('termination failed');
+    if (mode === 'throws') worker.terminate.mockImplementationOnce(() => { throw error; });
+    else worker.terminate.mockRejectedValueOnce(error);
+    worker.emit('error', new Error('worker failed'));
+    await expect(read).resolves.toBeUndefined();
+    await vi.advanceTimersByTimeAsync(11_000);
+    await expect(f.model.readContextGraphForKa(43n)).resolves.toBeUndefined();
+    expect(f.workerFactory).toHaveBeenCalledOnce();
+    await expect(f.client.close()).rejects.toThrow('termination failed');
+    await expect(f.client.close()).rejects.toThrow('termination failed');
+    expect(worker.terminate).toHaveBeenCalledOnce();
+    // This fake allocated no thread. Its deliberately failed close has been
+    // asserted already; ordinary fixtures must still fail on teardown errors.
+    clients.splice(clients.indexOf(f.client), 1);
+  });
+
   it.each([
     ['advanced revision', () => ({ ...state(), cursor: { ...state().cursor, revision: 2 } })],
     ['replaced lineage', () => ({ ...state(), cursor: { ...state().cursor, lineage: 'lineage-2' } })],
@@ -415,6 +477,44 @@ describe('chain-index read worker client', () => {
     expect(result).toBeUndefined();
     // The physical worker completed; only validation was stuck.
     expect(f.worker().terminate).not.toHaveBeenCalled();
+  });
+
+  it('reuses physical capacity while a completed response awaits cursor validation', async () => {
+    const f = fixture();
+    let release!: (value: ChainEventLogState) => void;
+    f.load.mockReturnValueOnce(new Promise((resolve) => { release = resolve; }));
+    const first = f.model.readContextGraphForKa(42n);
+    f.worker().reply(f.worker().reads[0]!);
+    const second = f.model.readContextGraphForKa(43n);
+    expect(f.worker().reads.map((request) => request.key)).toEqual([42n, 43n]);
+    f.worker().reply(f.worker().reads[1]!);
+    await expect(second).resolves.toEqual(BINDING);
+    release(state());
+    await expect(first).resolves.toEqual(BINDING);
+  });
+
+  it('shares close completion while retirement ignores late ready and response events', async () => {
+    const f = fixture();
+    const read = f.model.readContextGraphForKa(42n);
+    const worker = f.worker();
+    let release!: (code: number) => void;
+    worker.terminate.mockReturnValueOnce(new Promise((resolve) => { release = resolve; }));
+    const first = f.client.close();
+    const second = f.client.close();
+    expect(first).toBe(second);
+    await expect(read).resolves.toBeUndefined();
+    const closed = vi.fn();
+    void first.then(closed);
+    worker.ready();
+    worker.reply(worker.reads[0]!);
+    await vi.advanceTimersByTimeAsync(11_000);
+    expect(f.load).not.toHaveBeenCalled();
+    expect(closed).not.toHaveBeenCalled();
+    expect(worker.terminate).toHaveBeenCalledOnce();
+    await expect(f.model.readContextGraphForKa(43n)).resolves.toBeUndefined();
+    release(0);
+    await Promise.all([first, second]);
+    expect(closed).toHaveBeenCalledOnce();
   });
 
   it('settles active and queued callers on close and never restarts afterwards', async () => {
