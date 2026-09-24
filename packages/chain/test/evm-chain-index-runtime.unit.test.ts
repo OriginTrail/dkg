@@ -130,7 +130,7 @@ function harness(options?: {
    * read's policy deadline applies as it does in production.
    */
   failoverClient?: boolean;
-  chainEventLogReadModelFactory?: KnowledgeAssetReadModelFactory;
+  readModelFactory?: KnowledgeAssetReadModelFactory;
   legacyStoreInput?: boolean;
 }): Harness {
   const headNumber = options?.headNumber ?? 1_000;
@@ -188,7 +188,7 @@ function harness(options?: {
     scope: RUNTIME_SCOPE,
     ...(options?.legacyStoreInput
       ? { store }
-      : { chainIndex: { store, readModelFactory: options?.chainEventLogReadModelFactory } }),
+      : { chainIndex: { store, readModelFactory: options?.readModelFactory } }),
     intervalMs: options?.intervalMs ?? 6_000,
     reorgHoldbackBlocks: options?.reorgHoldbackBlocks ?? 5,
     backfillPageBlocks: 100,
@@ -279,7 +279,7 @@ describe('createEvmChainIndexRuntime', () => {
       readContextGraphKaAt: vi.fn(async () => undefined),
     };
     const factory = vi.fn<KnowledgeAssetReadModelFactory>(() => readModel);
-    const { runtime, store } = harness({ chainEventLogReadModelFactory: factory });
+    const { runtime, store } = harness({ readModelFactory: factory });
     const readEvents = vi.spyOn(store, 'readEvents');
 
     expect(factory).toHaveBeenCalledExactlyOnceWith({
@@ -307,7 +307,7 @@ describe('createEvmChainIndexRuntime', () => {
     const model = { readContextGraphForKa: vi.fn(async () => undefined), readContextGraphKaList: readList };
     // Simulate an untyped JavaScript caller violating the modern factory contract.
     const factory = vi.fn(() => model);
-    expect(() => harness({ chainEventLogReadModelFactory: factory as unknown as KnowledgeAssetReadModelFactory }))
+    expect(() => harness({ readModelFactory: factory as unknown as KnowledgeAssetReadModelFactory }))
       .toThrow('Chain-index read model factory must implement readContextGraphKaAt');
     expect(factory).toHaveBeenCalledOnce();
     expect(readList).not.toHaveBeenCalled();
@@ -316,7 +316,7 @@ describe('createEvmChainIndexRuntime', () => {
   it('does not substitute an inline reader when the injected factory fails', () => {
     const unavailable = new Error('worker unavailable');
     expect(() => harness({
-      chainEventLogReadModelFactory: () => { throw unavailable; },
+      readModelFactory: () => { throw unavailable; },
     })).toThrow(unavailable);
   });
 

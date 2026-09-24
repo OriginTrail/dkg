@@ -30,8 +30,5 @@ describe('chain-index capability admission', () => {
       .toThrow('not both');
     expect(() => resolveChainIndexCapability({ chainIndex: {} as ChainIndexCapability }))
       .toThrow('requires its process-owned store');
-    expect(() => resolveChainIndexCapability({
-      chainEventLogReadModelFactory: () => undefined,
-    } as Parameters<typeof resolveChainIndexCapability>[0])).toThrow('with its store');
   });
 });

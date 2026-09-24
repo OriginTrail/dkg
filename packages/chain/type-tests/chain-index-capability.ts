@@ -16,11 +16,6 @@ const legacy: EVMAdapterConfig = { ...common, chainEventLogStore: store };
 const noOwner: EVMAdapterConfig = { ...common };
 // @ts-expect-error Modern and legacy ownership cannot coexist.
 const dualOwner: StrictEVMAdapterConfig = { ...common, chainIndex: { store }, chainEventLogStore: store };
-// @ts-expect-error A legacy reader cannot exist independently of a capability.
-const legacyReaderOnly: StrictEVMAdapterConfig = { ...common, chainEventLogReadModelFactory: readModelFactory };
-const legacyReaderVariable = { ...common, chainEventLogReadModelFactory: readModelFactory };
-// @ts-expect-error Structural variables cannot bypass the removed reader-only option.
-const structuralLegacyReader: StrictEVMAdapterConfig = legacyReaderVariable;
 
 declare const runtimeCommon: Omit<EvmChainIndexRuntimeOptions, 'chainIndex' | 'store'>;
 createEvmChainIndexRuntime({ ...runtimeCommon, store });
@@ -29,7 +24,7 @@ createEvmChainIndexRuntime({ ...runtimeCommon, chainIndex: { store, readModelFac
 createEvmChainIndexRuntime({ ...runtimeCommon, store, chainIndex: { store } });
 // @ts-expect-error A runtime cannot be created without its store.
 createEvmChainIndexRuntime(runtimeCommon);
-void [modern, legacy, noOwner, dualOwner, legacyReaderOnly, structuralLegacyReader];
+void [modern, legacy, noOwner, dualOwner];
 
 // Existing SDK extensions are checked through the actual public constructor.
 interface TenantAdapterConfig extends EVMAdapterConfig { tenantId: string }

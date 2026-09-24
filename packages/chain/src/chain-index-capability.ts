@@ -17,21 +17,17 @@ export interface ChainIndexCompatibilityConfig {
 }
 
 /** Exactly one owning capability, its legacy store-only input, or no owner. */
-export type ChainIndexConfig = { readonly chainEventLogReadModelFactory?: never } & (
+export type ChainIndexConfig =
   | { readonly chainIndex: ChainIndexCapability; readonly chainEventLogStore?: never }
   | {
     readonly chainIndex?: never;
     /** @deprecated Use chainIndex: { store } for new callers. */
     readonly chainEventLogStore: ChainEventLogStore;
   }
-  | { readonly chainIndex?: never; readonly chainEventLogStore?: never }
-);
+  | { readonly chainIndex?: never; readonly chainEventLogStore?: never };
 
 /** Normalize the store-only SDK input once, before passing the capability on. */
 export function resolveChainIndexCapability(config: ChainIndexCompatibilityConfig): ChainIndexCapability | undefined {
-  if ('chainEventLogReadModelFactory' in config) {
-    throw new TypeError('A custom chain-index reader must be supplied with its store in chainIndex');
-  }
   if (config.chainIndex !== undefined && config.chainEventLogStore !== undefined) {
     throw new TypeError('Supply chainIndex or the legacy chainEventLogStore, not both');
   }

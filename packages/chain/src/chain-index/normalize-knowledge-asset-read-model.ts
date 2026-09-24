@@ -9,7 +9,7 @@ export function isScalarKnowledgeAssetReadModel(
   return typeof model?.readContextGraphKaAt === 'function';
 }
 
-/** Adapt compatibility once at binding creation, never after a scalar refusal. */
+/** Adapt a legacy reader once, never after a scalar refusal. */
 export function normalizeKnowledgeAssetReadModel(
   model: KnowledgeAssetReadModel,
 ): ScalarKnowledgeAssetReadModel {

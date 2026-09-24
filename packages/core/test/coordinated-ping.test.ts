@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createLibp2p, type Libp2p } from 'libp2p';
 import { tcp } from '@libp2p/tcp';
 import { noise } from '@libp2p/noise';
 import { yamux } from '@libp2p/yamux';
 import { ping, PING_PROTOCOL } from '@libp2p/ping';
 import { coordinatedPing } from '../src/coordinated-ping.js';
+import { pingConnection } from '../src/ping-transport.js';
 
 function deferred() {
   let resolve!: () => void;
@@ -23,7 +24,7 @@ describe('shared connection ping', () => {
     await Promise.all(nodes.splice(0).map((node) => node.stop()));
   });
 
-  async function pair(timeoutMs = 1_000) {
+  async function pair(timeoutMs = 1_000, intervalMs = 25, stockResponder = false) {
     const remote = await createLibp2p({
       addresses: { listen: ['/ip4/127.0.0.1/tcp/0'] },
       transports: [tcp()], connectionEncrypters: [noise()], streamMuxers: [yamux()],
@@ -33,7 +34,7 @@ describe('shared connection ping', () => {
     const local = await createLibp2p({
       addresses: { listen: ['/ip4/127.0.0.1/tcp/0'] },
       transports: [tcp()], connectionEncrypters: [noise()], streamMuxers: [yamux()],
-      services: { ping: coordinatedPing({ intervalMs: 25, minTimeoutMs: timeoutMs, maxTimeoutMs: timeoutMs }) },
+      services: { ping: coordinatedPing({ intervalMs, minTimeoutMs: timeoutMs, maxTimeoutMs: timeoutMs }) },
       connectionMonitor: { enabled: false },
     });
     nodes.push(local);
@@ -41,17 +42,19 @@ describe('shared connection ping', () => {
     const entered = deferred();
     releases.push(gate.resolve);
     let receivedStreams = 0;
-    await remote.unhandle(PING_PROTOCOL);
-    await remote.handle(PING_PROTOCOL, async (stream) => {
-      receivedStreams++;
-      for await (const data of stream) {
-        entered.resolve();
-        await gate.promise;
-        if (stream.status !== 'open') return;
-        stream.send(data);
-      }
-      await stream.close();
-    }, { maxInboundStreams: 2, maxOutboundStreams: 1 });
+    if (!stockResponder) {
+      await remote.unhandle(PING_PROTOCOL);
+      await remote.handle(PING_PROTOCOL, async (stream) => {
+        receivedStreams++;
+        for await (const data of stream) {
+          entered.resolve();
+          await gate.promise;
+          if (stream.status !== 'open') return;
+          stream.send(data);
+        }
+        await stream.close();
+      }, { maxInboundStreams: 2, maxOutboundStreams: 1 });
+    }
     const connection = await local.dial(remote.getMultiaddrs());
     return { local, remote, connection, gate, entered, receivedStreams: () => receivedStreams };
   }
@@ -83,7 +86,7 @@ describe('shared connection ping', () => {
     gate.resolve();
   });
 
-  it('keeps the shared probe until the remote closes its half of the stream', async () => {
+  it.each([true, false])('holds the stream until remote FIN with runOnLimitedConnection=%s on the next caller', async (runOnLimitedConnection) => {
     const { local, remote, connection } = await pair();
     const fin = deferred();
     const localClosed = deferred();
@@ -99,7 +102,7 @@ describe('shared connection ping', () => {
     }, { maxInboundStreams: 2, maxOutboundStreams: 1 });
     const first = local.services.ping.ping(remote.peerId);
     await localClosed.promise;
-    const second = local.services.ping.ping(remote.peerId);
+    const second = local.services.ping.ping(remote.peerId, { runOnLimitedConnection });
     await pause(100);
     expect(streams).toBe(1);
     expect(connection.status).toBe('open');
@@ -117,6 +120,49 @@ describe('shared connection ping', () => {
       local.services.ping.ping(remote.peerId),
     ]);
     expect(times.every((time) => time >= 0)).toBe(true);
+  });
+
+  it('conforms to the stock responder and releases its physical stream before returning', async () => {
+    const { local, remote, connection } = await pair(1_000, 60_000, true);
+    const elapsed = await pingConnection(connection, { signal: AbortSignal.timeout(1_000), runOnLimitedConnection: true });
+    expect(elapsed).toBeGreaterThanOrEqual(0);
+    expect(connection.streams.filter((stream) => stream.protocol === PING_PROTOCOL && stream.direction === 'outbound')).toHaveLength(0);
+    // The next coordinated ping immediately reuses the one-stream slot, while
+    // canonical outbound ping exercises the unchanged inbound responder.
+    expect(await local.services.ping.ping(remote.peerId)).toBeGreaterThanOrEqual(0);
+    expect(await remote.services.ping.ping(local.peerId)).toBeGreaterThanOrEqual(0);
+    expect(connection.status).toBe('open');
+  });
+
+  it('passes stream options and delivers opening progress to every coalesced caller', async () => {
+    const { local, remote, connection, entered, gate, receivedStreams } = await pair(1_000, 60_000);
+    const newStream = vi.spyOn(connection, 'newStream');
+    const early: string[] = [];
+    const late: string[] = [];
+    const policy = { runOnLimitedConnection: false, negotiateFully: false, maxOutboundStreams: 1 };
+    const first = local.services.ping.ping(remote.peerId, { ...policy, onProgress: (event) => early.push(event.type) });
+    await entered.promise;
+    const second = local.services.ping.ping(remote.peerId, { ...policy, onProgress: (event) => late.push(event.type) });
+    await vi.waitFor(() => expect(late).toContain('connection:opened-stream'));
+    gate.resolve();
+    expect((await Promise.all([first, second]))[0]).toBeGreaterThanOrEqual(0);
+    expect(newStream).toHaveBeenCalledWith(PING_PROTOCOL, expect.objectContaining({ ...policy, onProgress: expect.any(Function) }));
+    expect(early.filter((type) => type.startsWith('connection:'))).toEqual(['connection:open', 'connection:opened', 'connection:open-stream', 'connection:opened-stream']);
+    expect(late.filter((type) => type.startsWith('connection:'))).toEqual(['connection:open', 'connection:opened', 'connection:open-stream', 'connection:opened-stream']);
+    expect(receivedStreams()).toBe(1);
+  });
+
+  it('rejects caller-excluded limited connections without sending ping traffic or killing liveness', async () => {
+    const { local, remote, connection, gate, receivedStreams } = await pair(1_000, 60_000);
+    connection.limits = { seconds: 60 };
+    await expect(local.services.ping.ping(remote.peerId, { runOnLimitedConnection: false }))
+      .rejects.toMatchObject({ name: 'LimitedConnectionError' });
+    expect(receivedStreams()).toBe(0);
+    expect(connection.status).toBe('open');
+    gate.resolve();
+    expect(await local.services.ping.ping(remote.peerId)).toBeGreaterThanOrEqual(0);
+    expect(receivedStreams()).toBe(1);
+    expect(connection.status).toBe('open');
   });
 
   it('aborts a genuinely silent connection within the shared probe deadline', async () => {
@@ -146,12 +192,17 @@ describe('shared connection ping', () => {
   });
 
   it('stops and drains an unfinished probe without waiting for its deadline', async () => {
-    const { local, remote, entered } = await pair(60_000);
+    const { local, remote, connection, entered } = await pair(60_000);
+    const newStream = vi.spyOn(connection, 'newStream');
     const pending = local.services.ping.ping(remote.peerId).catch((error: Error) => error);
     await entered.promise;
+    const queued = local.services.ping.ping(remote.peerId, { runOnLimitedConnection: false }).catch((error: Error) => error);
+    await pause(10);
     const started = Date.now();
     await local.stop();
     expect(await pending).toBeInstanceOf(Error);
+    expect(await queued).toBeInstanceOf(Error);
+    expect(newStream).toHaveBeenCalledTimes(1);
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 

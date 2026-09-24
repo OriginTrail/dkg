@@ -37,22 +37,30 @@ export interface KnowledgeAssetSnapshotEvaluationOptions {
   readonly yieldBetweenBatches?: (progress: Readonly<{ decodedRows: number; totalRows: number }>) => Promise<void>;
 }
 
+type SnapshotWindowContext = Omit<KnowledgeAssetSnapshotPlan, 'query' | 'read'>;
+
+interface SnapshotCoveragePolicy {
+  readonly family: 'context-graph-ka' | 'context-graph-authority';
+  readonly requireCaughtUp: boolean;
+}
+
 const REGISTRATION_TOPIC = id('KnowledgeAssetRegisteredToContextGraph(uint256,uint256)');
 const UINT256_LIMIT = 1n << 256n;
 const topic = (value: bigint): string => `0x${value.toString(16).padStart(64, '0')}`;
 
 function windowFor(
-  plan: Omit<KnowledgeAssetSnapshotPlan, 'query' | 'read'>,
-  family: string,
+  plan: SnapshotWindowContext,
+  policy: SnapshotCoveragePolicy,
   nowMs: number,
   requiredFrom?: number,
 ) {
   const { state, options, contextGraphStorageAddress: address, maxHeadAgeMs } = plan;
   if (chainEventLogStateReadRefusal(state, maxHeadAgeMs === undefined ? {}
     : { nowMs, maxHeadAgeMs }) !== undefined) return undefined;
-  const coverage = findChainEventLogCoverage(state.coverage, family, address);
+  const coverage = findChainEventLogCoverage(state.coverage, policy.family, address);
   if (coverage === undefined) return undefined;
   const target = options.view === 'latest' ? state.cursor.head.number : state.cursor.settledBlockNumber;
+  if (policy.requireCaughtUp && coverage.coveredThroughBlock < target) return undefined;
   const through = Math.min(coverage.coveredThroughBlock, target);
   if (through < coverage.coveredFromBlock) return undefined;
   if (options.ownWrite !== undefined) {
@@ -64,7 +72,6 @@ function windowFor(
   return {
     fromBlockNumber: Math.max(requiredFrom ?? coverage.coveredFromBlock, coverage.coveredFromBlock),
     throughBlockNumber: through,
-    caughtUp: coverage.coveredThroughBlock >= target,
   };
 }
 
@@ -77,6 +84,112 @@ function ownWriteMatches(snapshot: { plan: Pick<KnowledgeAssetSnapshotPlan, 'opt
   return expected !== undefined && held !== undefined && expected === held;
 }
 
+interface DecodedSnapshot {
+  readonly registrations: ContextGraphKaRegistration[];
+  readonly authority: RawContextGraphAuthorityIndexEvent[];
+}
+
+interface SnapshotProjectionContext {
+  readonly plan: SnapshotWindowContext;
+  readonly window: NonNullable<ReturnType<typeof windowFor>>;
+  readonly decoded: DecodedSnapshot;
+  readonly now: () => number;
+}
+
+type SnapshotTopics = Pick<ChainEventLogQuery, 'topic0' | 'topic1' | 'topic2'>;
+
+interface SnapshotOperation<K extends KnowledgeAssetReadKind> {
+  readonly coverage: SnapshotCoveragePolicy;
+  readonly select: (args: KnowledgeAssetSnapshotRead<K>['args']) => SnapshotTopics | undefined;
+  readonly decode: (registry: ChainEventDecoderRegistry, rows: readonly ChainEventLogRow[], into: DecodedSnapshot) => void;
+  readonly project: (args: KnowledgeAssetSnapshotRead<K>['args'], context: SnapshotProjectionContext) =>
+    KnowledgeAssetResultByKind[K] | undefined;
+}
+
+/** Every operation must explicitly supply all selection and evaluation semantics. */
+export type KnowledgeAssetSnapshotOperationTable = {
+  readonly [K in KnowledgeAssetReadKind]: SnapshotOperation<K>;
+};
+
+function graphTopics(contextGraphId: bigint): SnapshotTopics | undefined {
+  return contextGraphId < 0n || contextGraphId >= UINT256_LIMIT ? undefined
+    : { topic1: Object.freeze([topic(contextGraphId)]) };
+}
+
+function decodeRegistrations(
+  registry: ChainEventDecoderRegistry,
+  rows: readonly ChainEventLogRow[],
+  into: DecodedSnapshot,
+): void {
+  into.registrations.push(...registry.decodeContextGraphKaRegistrations(rows));
+}
+
+function decodeGraphHistory(
+  registry: ChainEventDecoderRegistry,
+  rows: readonly ChainEventLogRow[],
+  into: DecodedSnapshot,
+): void {
+  decodeRegistrations(registry, rows, into);
+  into.authority.push(...registry.decodeContextGraphAuthority(rows));
+}
+
+/** Complete graph projections need KA coverage from the witnessed creation. */
+function graphListFromCreation(
+  contextGraphId: bigint,
+  context: SnapshotProjectionContext,
+  registrationCoverage: SnapshotCoveragePolicy,
+): ContextGraphKaList | undefined {
+  const { plan, window, decoded, now } = context;
+  const created = decoded.authority.find((entry) => entry.name === 'ContextGraphCreated'
+    && entry.contextGraphId === contextGraphId
+    && normalizeChainEventLogBlockNumber(entry.blockNumber) !== undefined);
+  if (created === undefined) return undefined;
+  const createdBlock = normalizeChainEventLogBlockNumber(created.blockNumber)!;
+  const kaWindow = windowFor(plan, registrationCoverage, now(), createdBlock);
+  if (kaWindow === undefined) return undefined;
+  const throughBlockNumber = Math.min(window.throughBlockNumber, kaWindow.throughBlockNumber);
+  const fold = reduceContextGraphKaRegistrations(decoded.registrations.filter((entry) =>
+    entry.blockNumber >= createdBlock && entry.blockNumber <= throughBlockNumber));
+  return Object.freeze({ contextGraphId,
+    kaIds: fold.listsByContextGraph.get(contextGraphId.toString())?.kaIds ?? Object.freeze([]), throughBlockNumber });
+}
+
+// The sole operation dispatch table. Adding a kind without its own policy,
+// query, decoder and correctly typed result projector is a compile error.
+const operations: KnowledgeAssetSnapshotOperationTable = Object.freeze({
+  binding: {
+    coverage: { family: 'context-graph-ka', requireCaughtUp: false },
+    select: ({ kaId }) => kaId < 0n || kaId >= UINT256_LIMIT ? undefined : {
+      topic0: Object.freeze([REGISTRATION_TOPIC]), topic2: Object.freeze([topic(kaId)]),
+    },
+    decode: decodeRegistrations,
+    project: ({ kaId }, { decoded, window }) => {
+      const registration = decoded.registrations.find((entry) => entry.kaId === kaId);
+      return registration === undefined ? undefined : Object.freeze({ kind: 'bound',
+        contextGraphId: registration.contextGraphId, asOfBlockNumber: window.throughBlockNumber });
+    },
+  },
+  list: {
+    coverage: { family: 'context-graph-authority', requireCaughtUp: true },
+    select: ({ contextGraphId }) => graphTopics(contextGraphId),
+    decode: decodeGraphHistory,
+    project: ({ contextGraphId }, context) => graphListFromCreation(contextGraphId, context,
+      { family: 'context-graph-ka', requireCaughtUp: true }),
+  },
+  ordinal: {
+    coverage: { family: 'context-graph-authority', requireCaughtUp: true },
+    select: ({ contextGraphId, index }) => index < 0n ? undefined : graphTopics(contextGraphId),
+    decode: decodeGraphHistory,
+    project: ({ contextGraphId, index }, context) => {
+      const list = graphListFromCreation(contextGraphId, context,
+        { family: 'context-graph-ka', requireCaughtUp: true });
+      return list === undefined || index >= BigInt(list.kaIds.length) ? undefined : Object.freeze({
+        kaId: list.kaIds[Number(index)], asOfBlockNumber: list.throughBlockNumber,
+      });
+    },
+  },
+});
+
 /** Plan selection once for both inline and SQLite-worker readers. No I/O. */
 export function planKnowledgeAssetSnapshotRead<K extends KnowledgeAssetReadKind>(input: Readonly<{
   state: ChainEventLogState;
@@ -88,14 +201,9 @@ export function planKnowledgeAssetSnapshotRead<K extends KnowledgeAssetReadKind>
 }>): KnowledgeAssetSnapshotPlan<K> | undefined {
   const address = normalizeChainEventLogAddress(input.contextGraphStorageAddress);
   if (address === undefined) throw new Error('Knowledge asset snapshot ContextGraphStorage address is invalid');
-  const selections: { [P in KnowledgeAssetReadKind]:
-    (args: KnowledgeAssetSnapshotRead<P>['args']) => { key: bigint; valid: boolean } } = {
-    binding: ({ kaId }) => ({ key: kaId, valid: true }),
-    list: ({ contextGraphId }) => ({ key: contextGraphId, valid: true }),
-    ordinal: ({ contextGraphId, index }) => ({ key: contextGraphId, valid: index >= 0n }),
-  };
-  const { key, valid } = selections[input.read.kind](input.read.args);
-  if (key < 0n || key >= UINT256_LIMIT || !valid) return undefined;
+  const operation = operations[input.read.kind];
+  const topics = operation.select(input.read.args);
+  if (topics === undefined) return undefined;
   const state: ChainEventLogState = Object.freeze({
     ...input.state,
     cursor: Object.freeze({ ...input.state.cursor, head: Object.freeze({ ...input.state.cursor.head }) }),
@@ -107,16 +215,13 @@ export function planKnowledgeAssetSnapshotRead<K extends KnowledgeAssetReadKind>
       ownWrite: input.options?.ownWrite && Object.freeze({ ...input.options.ownWrite }) }),
     maxHeadAgeMs: input.maxHeadAgeMs,
   };
-  const window = windowFor(base, input.read.kind === 'binding'
-    ? 'context-graph-ka' : 'context-graph-authority', input.nowMs ?? Date.now());
-  if (window === undefined || (input.read.kind !== 'binding' && !window.caughtUp)) return undefined;
+  const window = windowFor(base, operation.coverage, input.nowMs ?? Date.now());
+  if (window === undefined) return undefined;
   const query = Object.freeze({
     fromBlockNumber: window.fromBlockNumber,
     throughBlockNumber: window.throughBlockNumber,
     addresses: Object.freeze([address]),
-    ...(input.read.kind === 'binding'
-      ? { topic0: Object.freeze([REGISTRATION_TOPIC]), topic2: Object.freeze([topic(key)]) }
-      : { topic1: Object.freeze([topic(key)]) }),
+    ...topics,
   });
   return Object.freeze({ ...base, query });
 }
@@ -142,55 +247,23 @@ export async function evaluateKnowledgeAssetSnapshot<K extends KnowledgeAssetRea
   const now = controls.now ?? (() => Date.now());
   controls.signal?.throwIfAborted();
   if (!ownWriteMatches(snapshot)) return undefined;
-  const firstWindow = windowFor(plan, plan.read.kind === 'binding'
-    ? 'context-graph-ka' : 'context-graph-authority', now());
-  if (firstWindow === undefined || (plan.read.kind !== 'binding' && !firstWindow.caughtUp)) return undefined;
+  const operation = operations[plan.read.kind];
+  const window = windowFor(plan, operation.coverage, now());
+  if (window === undefined) return undefined;
   const rows = snapshot.rows.filter((row) => row.address === plan.contextGraphStorageAddress
     && row.blockNumber >= plan.query.fromBlockNumber && row.blockNumber <= plan.query.throughBlockNumber
     && (plan.options.view === 'latest' || row.settled));
-  const registrations: ContextGraphKaRegistration[] = [];
-  const authority: RawContextGraphAuthorityIndexEvent[] = [];
+  const decoded: DecodedSnapshot = { registrations: [], authority: [] };
   for (let offset = 0; offset < rows.length; offset += 128) {
     controls.signal?.throwIfAborted();
     const batch = rows.slice(offset, offset + 128);
-    registrations.push(...registry.decodeContextGraphKaRegistrations(batch));
-    if (plan.read.kind !== 'binding') authority.push(...registry.decodeContextGraphAuthority(batch));
+    operation.decode(registry, batch, decoded);
     if (offset + 128 < rows.length) {
       await controls.yieldBetweenBatches?.({ decodedRows: offset + 128, totalRows: rows.length });
     }
   }
   controls.signal?.throwIfAborted();
   // Freshness can expire during a cooperative decode, even without a new write.
-  if (windowFor(plan, plan.read.kind === 'binding' ? 'context-graph-ka'
-    : 'context-graph-authority', now()) === undefined) return undefined;
-  const graphList = (contextGraphId: bigint): ContextGraphKaList | undefined => {
-    const created = authority.find((entry) => entry.name === 'ContextGraphCreated'
-      && entry.contextGraphId === contextGraphId
-      && normalizeChainEventLogBlockNumber(entry.blockNumber) !== undefined);
-    if (created === undefined) return undefined;
-    const createdBlock = normalizeChainEventLogBlockNumber(created.blockNumber)!;
-    const kaWindow = windowFor(plan, 'context-graph-ka', now(), createdBlock);
-    if (kaWindow === undefined || !kaWindow.caughtUp) return undefined;
-    const throughBlockNumber = Math.min(firstWindow.throughBlockNumber, kaWindow.throughBlockNumber);
-    const fold = reduceContextGraphKaRegistrations(registrations.filter((entry) =>
-      entry.blockNumber >= createdBlock && entry.blockNumber <= throughBlockNumber));
-    return Object.freeze({ contextGraphId,
-      kaIds: fold.listsByContextGraph.get(contextGraphId.toString())?.kaIds ?? Object.freeze([]), throughBlockNumber });
-  };
-  const evaluate: { [P in KnowledgeAssetReadKind]:
-    (args: KnowledgeAssetSnapshotRead<P>['args']) => KnowledgeAssetResultByKind[P] | undefined } = {
-    binding: ({ kaId }) => {
-      const registration = registrations.find((entry) => entry.kaId === kaId);
-      return registration === undefined ? undefined : Object.freeze({ kind: 'bound',
-        contextGraphId: registration.contextGraphId, asOfBlockNumber: firstWindow.throughBlockNumber });
-    },
-    list: ({ contextGraphId }) => graphList(contextGraphId),
-    ordinal: ({ contextGraphId, index }) => {
-      const list = graphList(contextGraphId);
-      return list === undefined || index >= BigInt(list.kaIds.length) ? undefined : Object.freeze({
-        kaId: list.kaIds[Number(index)], asOfBlockNumber: list.throughBlockNumber,
-      });
-    },
-  };
-  return evaluate[plan.read.kind](plan.read.args);
+  if (windowFor(plan, operation.coverage, now()) === undefined) return undefined;
+  return operation.project(plan.read.args, { plan, window, decoded, now });
 }

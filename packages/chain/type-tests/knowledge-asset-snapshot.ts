@@ -1,5 +1,6 @@
 import type { ContextGraphForKaAnswer } from '../src/chain-index/knowledge-asset-read-model.js';
 import type { ContextGraphKaList } from '../src/chain-index/knowledge-asset-reducer.js';
+import type { KnowledgeAssetSnapshotOperationTable } from '../src/chain-index/knowledge-asset-read-model-snapshot.js';
 import {
   planKnowledgeAssetSnapshotRead, createKnowledgeAssetReadSnapshot, evaluateKnowledgeAssetSnapshot,
   type ChainEventDecoderRegistry, type ChainEventLogState, type KnowledgeAssetSnapshotRead,
@@ -19,6 +20,14 @@ if (bindingPlan !== undefined) {
 // @ts-expect-error An ordinal snapshot requires its index.
 const missingOrdinalIndex: KnowledgeAssetSnapshotRead = { kind: 'ordinal', args: { contextGraphId: 7n } };
 void missingOrdinalIndex;
+
+declare const incompleteOperations: Pick<KnowledgeAssetSnapshotOperationTable, 'binding' | 'list'>;
+// @ts-expect-error Every read kind requires its own operation descriptor.
+const missingOrdinalOperation: KnowledgeAssetSnapshotOperationTable = incompleteOperations;
+declare const bindingOperation: KnowledgeAssetSnapshotOperationTable['binding'];
+// @ts-expect-error An ordinal descriptor cannot inherit a binding selector/projector.
+const wrongOperation: KnowledgeAssetSnapshotOperationTable['ordinal'] = bindingOperation;
+void missingOrdinalOperation; void wrongOperation;
 
 // The root SDK must not acquire the worker's decoder/planner/snapshot machinery.
 type PublicRoot = typeof import('../src/index.js');

@@ -298,6 +298,7 @@ const report = {
   builtArtifactSha256: Object.fromEntries([
     '../dist/daemon/worker/chain-index-read-worker.js',
     '../dist/daemon/worker/chain-index-read-worker-entry.js',
+    '../dist/daemon/worker/chain-index-read-worker-handler.js',
     '../dist/daemon/worker/chain-index-read-worker-protocol.js',
     '../../node-ui/dist/chain-event-log-store.js',
     '../../chain/dist/chain-index/knowledge-asset-read-model.js',

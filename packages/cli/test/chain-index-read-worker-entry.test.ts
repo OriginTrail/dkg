@@ -6,15 +6,19 @@ import { join } from 'node:path';
 import { Interface } from 'ethers';
 import { DashboardDB, SqliteChainEventLogStore } from '@origintrail-official/dkg-node-ui';
 import type { ChainEventLogRow } from '@origintrail-official/dkg-chain/internal/chain-index-worker';
+import {
+  yieldChainIndexReadWorker,
+  type ChainIndexReadCheckpoint,
+} from '../src/daemon/worker/chain-index-read-worker-handler.js';
 import type {
   ChainIndexReadRequest, ChainIndexReadResponse, ChainIndexReadWorkerMessage,
 } from '../src/daemon/worker/chain-index-read-worker-protocol.js';
 
-// Only the transport boundary is replaced. Import the actual entry source so
-// coverage sees its dispatch, SQL transaction, decoder and refusal paths.
+// Most cases replace only the transport boundary and load the production entry.
+// Checkpoint fault cases exercise its shared handler with an injected dependency.
 const environment = vi.hoisted(() => ({
   parentPort: null as unknown,
-  workerData: {} as { dbPath?: string; testDecodeBarrier?: SharedArrayBuffer },
+  workerData: {} as { dbPath?: string },
 }));
 vi.mock('node:worker_threads', async (importOriginal) => ({
   ...(await importOriginal<typeof import('node:worker_threads')>()),
@@ -22,8 +26,7 @@ vi.mock('node:worker_threads', async (importOriginal) => ({
   get workerData() { return environment.workerData; },
 }));
 
-type EntryMessage = ChainIndexReadWorkerMessage
-  | { type: 'test-decode-batch'; id: number; decodedRows: number; totalRows: number };
+type EntryMessage = ChainIndexReadWorkerMessage;
 
 class TestPort extends EventEmitter {
   readonly posted: EntryMessage[] = [];
@@ -99,7 +102,10 @@ afterEach(() => {
   vi.resetModules();
 });
 
-async function fixture(rows: ChainEventLogRow[], barrier?: Int32Array) {
+async function fixture(
+  rows: ChainEventLogRow[],
+  checkpoint?: (progress: ChainIndexReadCheckpoint, port: TestPort) => Promise<void>,
+) {
   const dataDir = mkdtempSync(join(tmpdir(), 'dkg-entry-test-'));
   const db = new DashboardDB({ dataDir });
   const store = new SqliteChainEventLogStore(db);
@@ -114,10 +120,21 @@ async function fixture(rows: ChainEventLogRow[], barrier?: Int32Array) {
     rows, replacedRange: { fromBlockNumber: 11, throughBlockNumber: 12 },
   });
   environment.parentPort = port;
-  environment.workerData = { dbPath: join(dataDir, 'node-ui.db'),
-    ...(barrier === undefined ? {} : { testDecodeBarrier: barrier.buffer as SharedArrayBuffer }) };
+  environment.workerData = { dbPath: join(dataDir, 'node-ui.db') };
   vi.resetModules();
-  await import('../src/daemon/worker/chain-index-read-worker-entry.js');
+  if (checkpoint === undefined) {
+    await import('../src/daemon/worker/chain-index-read-worker-entry.js');
+  } else {
+    const { createChainIndexReadWorkerHandler } = await import('../src/daemon/worker/chain-index-read-worker-handler.js');
+    const handler = createChainIndexReadWorkerHandler({
+      dbPath: environment.workerData.dbPath!,
+      postMessage: (response) => port.postMessage(response),
+      checkpoint: (progress) => checkpoint(progress, port),
+    });
+    port.on('message', handler.handle);
+    port.on('close', handler.close);
+    port.postMessage({ type: 'ready' });
+  }
   expect(port.posted).toEqual([{ type: 'ready' }]);
   let nextId = 0;
   const request = (overrides: Partial<ChainIndexReadRequest> = {}): ChainIndexReadRequest => ({
@@ -128,7 +145,7 @@ async function fixture(rows: ChainEventLogRow[], barrier?: Int32Array) {
   return { db, store, port, request };
 }
 
-describe('actual chain-index worker entry over a message port and real SQLite', () => {
+describe('chain-index worker entry and handler over a message port and real SQLite', () => {
   it('requires a worker message port before opening a database', async () => {
     environment.parentPort = null;
     vi.resetModules();
@@ -212,27 +229,34 @@ describe('actual chain-index worker entry over a message port and real SQLite', 
       reason: 'served', result: { kaId: 1_025n } });
   });
 
-  it.each(['cancel', 'deadline'] as const)('observes %s at a decode yield and handles the next request', async (kind) => {
-    const barrier = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
-    const { port, request } = await fixture([creation(), ...registrations(300)], barrier);
+  it('wires the real cooperative checkpoint through the production entry', async () => {
+    const { port, request } = await fixture([creation(), ...registrations(300)]);
+    const bulk = request({ method: 'ordinal', key: 7n, index: 299n });
+    const result = port.send(bulk);
+    // Capture starts in microtasks. The production entry must yield an event-loop
+    // turn during decoding for this queued cancellation to reach the handler.
+    setImmediate(() => port.emit('message', { type: 'cancel', id: bulk.id }));
+    await expect(result).resolves.toMatchObject({ reason: 'timeout' });
+    await expect(port.send(request())).resolves.toMatchObject({ reason: 'served', rowsRead: 1 });
+  });
+
+  it.each(['cancel', 'deadline'] as const)('observes %s at an injected decode checkpoint and handles the next request', async (kind) => {
     let clock = Date.now();
-    vi.spyOn(Date, 'now').mockImplementation(() => clock);
-    const bulk = request({ method: 'ordinal', key: 7n, index: 299n, deadlineAt: clock + 1_000 });
     const checkpoints: number[] = [];
-    port.on('outbound', (message: EntryMessage) => {
-      if (!('type' in message) || message.type !== 'test-decode-batch') return;
-      checkpoints.push(message.decodedRows);
-      Atomics.store(barrier, 0, 2);
-      Atomics.notify(barrier, 0);
-      // The actual entry's yield lets this turn deliver cancellation/expiry.
+    const { port, request } = await fixture([creation(), ...registrations(300)], async (progress, entryPort) => {
+      checkpoints.push(progress.decodedRows);
       setImmediate(() => {
-        if (kind === 'cancel') port.emit('message', { type: 'cancel', id: bulk.id });
+        if (kind === 'cancel') entryPort.emit('message', { type: 'cancel', id: progress.id });
         else clock += 2_000;
       });
+      await yieldChainIndexReadWorker();
     });
+    clock = Date.now();
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const bulk = request({ method: 'ordinal', key: 7n, index: 299n, deadlineAt: clock + 1_000 });
     await expect(port.send(bulk)).resolves.toMatchObject({ reason: 'timeout' });
     expect(checkpoints).toEqual([128]);
-    // A cancel for a completed/unknown request is harmless, and the live entry
+    // A cancel for a completed/unknown request is harmless, and the live handler
     // serves the next request without any worker replacement or reset.
     port.emit('message', { type: 'cancel', id: bulk.id });
     await expect(port.send(request())).resolves.toMatchObject({ reason: 'served', rowsRead: 1 });

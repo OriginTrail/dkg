@@ -88,10 +88,6 @@ import { HubRotationPoller } from './hub-rotation-poller.js';
 import type {
   ChainEventLogBinding,
 } from './chain-event-log-binding.js';
-import {
-  normalizeChainEventLogBinding,
-  type NormalizedChainEventLogBinding,
-} from './normalized-chain-event-log-binding.js';
 import { resolveChainIndexCapability } from './chain-index-capability.js';
 import {
   createEvmChainIndexRuntime,
@@ -955,21 +951,21 @@ export class EVMChainAdapterBase {
    * pre-log behaviour and never a degraded one.
    */
   private readonly chainIndexOwner: EvmChainIndexRuntimeOwner;
-  private readonly chainEventLogBindingSource: (() => NormalizedChainEventLogBinding | undefined) | undefined;
+  private readonly chainEventLogBindingSource: (() => ChainEventLogBinding | undefined) | undefined;
 
   /** Durable identity of the one-log runtime this adapter is allowed to read. */
   private get chainEventLogScope(): string {
     return [this.deploymentId, this.hubAddress.toLowerCase()].join(':');
   }
 
-  protected get chainEventLogBinding(): NormalizedChainEventLogBinding | undefined {
+  protected get chainEventLogBinding(): ChainEventLogBinding | undefined {
     const source = this.chainEventLogBindingSource;
     if (source === undefined) return this.chainIndexOwner.binding;
 
     // The borrowed source is authoritative, including an empty interval while
     // its owner rebuilds or stops. Falling through to a static attachment here
     // would resurrect precisely the retired generation the late binding avoids.
-    let binding: NormalizedChainEventLogBinding | undefined;
+    let binding: ChainEventLogBinding | undefined;
     try {
       binding = source();
     } catch {
@@ -1337,9 +1333,7 @@ export class EVMChainAdapterBase {
       && config.chainEventLogBindingSource !== undefined) {
       throw new TypeError('An EVM adapter cannot own and borrow the one-log runtime at the same time');
     }
-    const bindingSource = config.chainEventLogBindingSource;
-    this.chainEventLogBindingSource = bindingSource === undefined ? undefined
-      : () => normalizeChainEventLogBinding(bindingSource());
+    this.chainEventLogBindingSource = config.chainEventLogBindingSource;
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
     this.receiptTimeoutMs = resolveReceiptTimeoutMs(config.receiptTimeoutMs);
     this.signerTxSerializer = new SignerTxSerializer({

@@ -85,7 +85,7 @@ describe('chain-index reader with the packaged worker and a real SQLite log', ()
     const rows = Array.from({ length: 8_000 }, (_, n) => registration(BigInt(n + 1), 10, 7n, n));
     const { dataDir } = await fixture([creation(), ...rows]);
     const barrier = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
-    const thread = new Worker(new URL('../dist/daemon/worker/chain-index-read-worker-entry.js', import.meta.url), {
+    const thread = new Worker(new URL('./fixtures/chain-index-read-worker-entry.mjs', import.meta.url), {
       workerData: { dbPath: join(dataDir, 'node-ui.db'), testDecodeBarrier: barrier.buffer },
     });
     const release = () => { Atomics.store(barrier, 0, 2); Atomics.notify(barrier, 0); };

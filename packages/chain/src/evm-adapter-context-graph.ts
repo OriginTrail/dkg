@@ -24,6 +24,7 @@ import {
   type ContextGraphLiveAuthority,
 } from './chain-adapter.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
+import { knowledgeAssetReaderForBinding } from './chain-event-log-reader.js';
 import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthorityReadOptions, type ContextGraphLiveAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type ContextGraphFinalizedCreation, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import {
@@ -1185,8 +1186,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
    */
   private async knowledgeAssetsFromLogFor(contract: Contract) {
     const binding = this.chainEventLogBinding;
-    if (binding?.knowledgeAssets === undefined
-      || binding.contextGraphStorageAddress === undefined) return undefined;
+    const readModel = knowledgeAssetReaderForBinding(binding);
+    if (readModel === undefined || binding?.contextGraphStorageAddress === undefined) return undefined;
     let currentAddress: string;
     try {
       currentAddress = (await contract.getAddress()).toLowerCase();
@@ -1197,7 +1198,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     // runtime has rebuilt. Never answer the successor from the retired proxy's
     // folded rows; an address mismatch takes the existing live eth_call below.
     return binding.contextGraphStorageAddress === currentAddress
-      ? { binding, readModel: binding.knowledgeAssets }
+      ? { binding, readModel }
       : undefined;
   }
 

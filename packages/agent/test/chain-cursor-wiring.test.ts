@@ -39,7 +39,7 @@ describe('DKGAgent chain cursor wiring', () => {
       readEvents: vi.fn(async () => []),
       blockHashAt: vi.fn(async () => undefined),
     };
-    const chainEventLogReadModelFactory = vi.fn(() => ({
+    const readModelFactory = vi.fn(() => ({
       async readContextGraphForKa() { return undefined; },
       async readContextGraphKaList() { return undefined; },
       async readContextGraphKaAt() { return undefined; },
@@ -62,7 +62,7 @@ describe('DKGAgent chain cursor wiring', () => {
       localContextGraphAuthorityHistoryStore: authorityHistoryStore,
       localContextGraphAuthorityIndexStore: authorityIndexStore,
       ...(ownership === 'capability'
-        ? { chainIndex: { store: chainEventLogStore, readModelFactory: chainEventLogReadModelFactory } }
+        ? { chainIndex: { store: chainEventLogStore, readModelFactory } }
         : { chainEventLogStore }),
     });
 
@@ -89,7 +89,7 @@ describe('DKGAgent chain cursor wiring', () => {
     });
     await owner.starting;
     expect(receivedCapability.store).toBe(chainEventLogStore);
-    expect(receivedCapability.readModelFactory).toBe(ownership === 'capability' ? chainEventLogReadModelFactory : undefined);
+    expect(receivedCapability.readModelFactory).toBe(ownership === 'capability' ? readModelFactory : undefined);
     expect(runtime.start).toHaveBeenCalledOnce();
     expect((agent as any).chain.indexTickMs).toBe(12_000);
   });

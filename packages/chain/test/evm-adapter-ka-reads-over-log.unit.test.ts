@@ -139,8 +139,9 @@ function makeAdapter(options: {
     calls.push(label);
     return live.get(label) ?? 0n;
   };
+  let initialBinding: unknown;
   if (options.attach !== false && options.store !== undefined) {
-    internals.attachChainEventLog(Object.freeze({
+    initialBinding = Object.freeze({
       subscription: {},
       contextGraphStorageAddress: CG_STORAGE.toLowerCase(),
       knowledgeAssets: options.knowledgeAssets ?? createKnowledgeAssetReadModel({
@@ -153,9 +154,11 @@ function makeAdapter(options: {
         maxHeadAgeMs: 18_000,
         now: options.now ?? (() => FETCHED_AT_MS),
       }),
-    }));
+    });
+    internals.attachChainEventLog(initialBinding);
   }
   return {
+    initialBinding,
     adapter,
     calls,
     live,
@@ -353,10 +356,11 @@ describe('knowledge-asset views over the one log', () => {
     }
     const legacy = new LegacyReadModel();
     const readList = vi.spyOn(legacy, 'readContextGraphKaList');
-    const { adapter, calls, live } = makeAdapter({ store: populated(), knowledgeAssets: legacy });
+    const { adapter, calls, live, initialBinding } = makeAdapter({ store: populated(), knowledgeAssets: legacy });
     const attached = adapter.chainEventLog;
-    expect(attached?.knowledgeAssets).not.toBe(legacy);
-    expect(attached?.knowledgeAssets?.readContextGraphKaAt).toBeTypeOf('function');
+    expect(attached).toBe(initialBinding);
+    expect(attached?.knowledgeAssets).toBe(legacy);
+    expect(attached?.knowledgeAssets?.readContextGraphKaAt).toBeUndefined();
     expect(await adapter.getContextGraphKCAt(7n, 1n)).toBe(4343n);
     expect(await adapter.getContextGraphKCAt(7n, 0n)).toBe(4242n);
     expect(adapter.chainEventLog).toBe(attached);

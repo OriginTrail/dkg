@@ -54,7 +54,8 @@ import {
 } from './chain-index/index.js';
 import { resolveChainIndexCapability, type ChainIndexCapability } from './chain-index-capability.js';
 import { isScalarKnowledgeAssetReadModel } from './chain-index/normalize-knowledge-asset-read-model.js';
-import type { NormalizedChainEventLogBinding } from './normalized-chain-event-log-binding.js';
+import type { ChainEventLogBinding } from './chain-event-log-binding.js';
+import type { ScalarKnowledgeAssetReadModel } from './chain-index/knowledge-asset-read-model.js';
 import type { ChainEventLogStore } from './chain-index/chain-event-log.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
@@ -138,9 +139,13 @@ interface EvmChainIndexRuntimeCommonOptions {
   ];
 }
 
+type RuntimeChainEventLogBinding = ChainEventLogBinding & {
+  readonly knowledgeAssets?: ScalarKnowledgeAssetReadModel;
+};
+
 export interface EvmChainIndexRuntime {
   /** What eligible adapters in this process may borrow instead of the chain. */
-  readonly binding: NormalizedChainEventLogBinding;
+  readonly binding: RuntimeChainEventLogBinding;
   readonly tick: ChainIndexTick;
   start(): void;
   stop(): Promise<void>;
@@ -708,7 +713,7 @@ export function createEvmChainIndexRuntime(
     });
 
   type MutableChainEventLogBinding = {
-    -readonly [Key in keyof NormalizedChainEventLogBinding]: NormalizedChainEventLogBinding[Key];
+    -readonly [Key in keyof RuntimeChainEventLogBinding]: RuntimeChainEventLogBinding[Key];
   };
   const binding: MutableChainEventLogBinding = {
     scope: options.scope,

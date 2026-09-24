@@ -1,142 +1,16 @@
 import { parentPort, workerData } from 'node:worker_threads';
-import { setImmediate as yieldTurn } from 'node:timers/promises';
-import Database from 'better-sqlite3';
-import { Interface } from 'ethers';
 import {
-  ChainEventDecoderRegistry,
-  createKnowledgeAssetReadSnapshot,
-  evaluateKnowledgeAssetSnapshot,
-  planKnowledgeAssetSnapshotRead,
-  type KnowledgeAssetSnapshotPlan,
-  type KnowledgeAssetSnapshotRead,
-  type ChainEventLogRow,
-} from '@origintrail-official/dkg-chain/internal/chain-index-worker';
-import { SqliteChainEventLogReader } from '@origintrail-official/dkg-node-ui';
-import type {
-  ChainIndexReadMessage,
-  ChainIndexReadRequest,
-  ChainIndexReadResponseFor,
-  ChainIndexReadMethod,
-  ChainIndexReadMetrics,
-} from './chain-index-read-worker-protocol.js';
+  createChainIndexReadWorkerHandler,
+  yieldChainIndexReadWorker,
+} from './chain-index-read-worker-handler.js';
 
 if (parentPort === null) throw new Error('Chain-index reader requires a worker');
 const port = parentPort;
-const db = new Database(workerData.dbPath, { readonly: true, fileMustExist: true, timeout: 50 });
-db.pragma('query_only = ON');
-const store = new SqliteChainEventLogReader(db);
-const active = new Map<number, AbortController>();
-// Bound native SQLite allocation before .all() constructs JS rows. A worker
-// heap limit alone cannot safely contain an OOM inside a native addon.
-const MAX_SNAPSHOT_ROWS = 8_192;
-// Integration tests can queue messages while the first decode batch is held.
-// This synchronous barrier does NOT process messages or yield: progress after
-// release still requires the production yieldTurn() below.
-const testDecodeBarrier = workerData.testDecodeBarrier instanceof SharedArrayBuffer
-  ? new Int32Array(workerData.testDecodeBarrier) : undefined;
-
-
-async function read<K extends ChainIndexReadMethod>(
-  request: Pick<ChainIndexReadRequest, 'id' | 'model' | 'options' | 'deadlineAt'> & { method: K },
-  selection: KnowledgeAssetSnapshotRead<K>,
-): Promise<ChainIndexReadResponseFor<K>> {
-  const metrics: ChainIndexReadMetrics = { rowsRead: 0, readMs: 0, decodeMs: 0 };
-  const response = () => ({ id: request.id, method: request.method, ...metrics });
-  const task = new AbortController();
-  active.set(request.id, task);
-  const expired = () => task.signal.aborted || Date.now() >= request.deadlineAt;
-  const assertActive = () => {
-    if (Date.now() >= request.deadlineAt) task.abort(new Error('Chain-index read deadline expired'));
-    task.signal.throwIfAborted();
-  };
-  try {
-    if (expired()) return { ...response(), reason: 'unavailable' };
-    const started = performance.now();
-    // SQL is synchronous and these awaits only yield microtasks. Capture one
-    // immutable snapshot, then release the transaction before cooperative work.
-    db.exec('BEGIN');
-    let plan: KnowledgeAssetSnapshotPlan<K> | undefined;
-    let rows: readonly ChainEventLogRow[] | undefined;
-    let ownWriteHash: string | undefined;
-    try {
-      const state = await store.load(request.model.scope);
-      if (state !== undefined) {
-        plan = planKnowledgeAssetSnapshotRead({
-          state, contextGraphStorageAddress: request.model.contextGraphStorageAddress,
-          read: selection, options: request.options,
-          maxHeadAgeMs: request.model.maxHeadAgeMs,
-        });
-        if (plan !== undefined) {
-          rows = await store.readEventsBounded(request.model.scope, plan.query, MAX_SNAPSHOT_ROWS);
-          if (request.options.ownWrite !== undefined) {
-            ownWriteHash = await store.blockHashAt(request.model.scope, request.options.ownWrite.blockNumber);
-          }
-        }
-      }
-    } finally {
-      db.exec('ROLLBACK');
-    }
-    metrics.readMs = performance.now() - started;
-    metrics.rowsRead = rows?.length ?? 0;
-    if (plan === undefined) return { ...response(), reason: 'proof-miss' };
-    if (rows === undefined) return { ...response(), rowsRead: MAX_SNAPSHOT_ROWS + 1, reason: 'row-limit' };
-    if (expired()) return { ...response(), reason: 'unavailable' };
-
-    const registry = new ChainEventDecoderRegistry();
-    const abi = new Interface(JSON.parse(request.model.contextGraphStorageAbi));
-    registry.registerContextGraphAuthority(request.model.contextGraphStorageAddress, abi);
-    registry.registerContextGraphKnowledgeAssets(request.model.contextGraphStorageAddress, abi);
-    const decodeStarted = performance.now();
-    let result;
-    try {
-      result = await evaluateKnowledgeAssetSnapshot(
-        createKnowledgeAssetReadSnapshot(plan, rows, ownWriteHash), registry, {
-          signal: task.signal,
-          yieldBetweenBatches: async (progress) => {
-            if (testDecodeBarrier !== undefined && request.method === 'ordinal'
-              && Atomics.compareExchange(testDecodeBarrier, 0, 0, 1) === 0) {
-              port.postMessage({ type: 'test-decode-batch', id: request.id, ...progress });
-              Atomics.wait(testDecodeBarrier, 0, 1, 10_000);
-            }
-            await yieldTurn();
-            assertActive();
-          },
-        },
-      );
-    } finally {
-      metrics.decodeMs = performance.now() - decodeStarted;
-    }
-    // The compatibility list port must not copy a large list to the main loop.
-    if (result !== undefined && 'kaIds' in result && result.kaIds.length > 1_024) return { ...response(), reason: 'proof-miss' };
-    if (expired()) return { ...response(), reason: 'timeout' };
-    if (result === undefined) return { ...response(), reason: 'proof-miss' };
-    const fence = {
-      revision: plan.state.cursor.revision,
-      lineage: plan.state.cursor.lineage,
-      topicSetVersion: plan.state.cursor.topicSetVersion,
-    };
-    return { ...response(), reason: 'served', result, fence };
-  } catch {
-    // Refusal never starts a scanner or a main-thread historical fold.
-    return { ...response(), reason: expired() ? 'timeout' : 'read-error' };
-  } finally {
-    active.delete(request.id);
-  }
-}
-
-port.on('message', (message: ChainIndexReadMessage) => {
-  if (message.type === 'cancel') {
-    active.get(message.id)?.abort(new Error('Chain-index read cancelled'));
-    return;
-  }
-  switch (message.method) {
-    case 'binding': void read(message, { kind: 'binding', args: { kaId: message.key } })
-      .then((response) => port.postMessage(response)); break;
-    case 'list': void read(message, { kind: 'list', args: { contextGraphId: message.key } })
-      .then((response) => port.postMessage(response)); break;
-    case 'ordinal': void read(message, { kind: 'ordinal', args: { contextGraphId: message.key, index: message.index } })
-      .then((response) => port.postMessage(response)); break;
-  }
+const handler = createChainIndexReadWorkerHandler({
+  dbPath: workerData.dbPath,
+  postMessage: (response) => port.postMessage(response),
+  checkpoint: yieldChainIndexReadWorker,
 });
-port.on('close', () => db.close());
+port.on('message', handler.handle);
+port.on('close', handler.close);
 port.postMessage({ type: 'ready' });

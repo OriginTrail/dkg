@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { KnowledgeAssetReadModel } from '../src/chain-index/knowledge-asset-read-model.js';
 import type { ChainEventLogBinding } from '../src/chain-event-log-binding.js';
 import { normalizeKnowledgeAssetReadModel } from '../src/chain-index/normalize-knowledge-asset-read-model.js';
-import { normalizeChainEventLogBinding } from '../src/normalized-chain-event-log-binding.js';
+import { knowledgeAssetReaderForBinding } from '../src/chain-event-log-reader.js';
 import { createChainEventLogSubscription } from '../src/chain-index/chain-event-log-subscription.js';
 import { ChainEventDecoderRegistry } from '../src/chain-index/chain-event-decoders.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
@@ -61,23 +61,24 @@ describe('legacy knowledge-asset model normalization', () => {
       get readHubRotationWindow() { return readHubRotationWindow; }
     }
     const binding: ChainEventLogBinding = Object.freeze(new LegacyBinding());
-    const normalized = normalizeChainEventLogBinding(binding)!;
-    expect(normalizeChainEventLogBinding(binding)).toBe(normalized);
-    expect(normalizeChainEventLogBinding(new LegacyBinding())).not.toBe(normalized);
-    expect(normalized.scope).toBe('scope');
-    expect(normalized.subscription).toBe(subscription);
-    expect(normalized.knowledgeAssets?.readContextGraphKaAt).toBeTypeOf('function');
-    await normalized.readHubRotationWindow!(undefined, 2);
-    await normalized.readEventScanLease!({
+    const normalized = knowledgeAssetReaderForBinding(binding)!;
+    expect(knowledgeAssetReaderForBinding(binding)).toBe(normalized);
+    expect(knowledgeAssetReaderForBinding(new LegacyBinding())).not.toBe(normalized);
+    expect(binding.scope).toBe('scope');
+    expect(binding.subscription).toBe(subscription);
+    expect(binding.knowledgeAssets).toBe(model);
+    expect(normalized.readContextGraphKaAt).toBeTypeOf('function');
+    await binding.readHubRotationWindow!(undefined, 2);
+    await binding.readEventScanLease!({
       eventType: 'ContextGraphCreated', contextGraphStorageAddress: `0x${'12'.repeat(20)}`,
       topic0: `0x${'34'.repeat(32)}`,
     });
 
-    const native = Object.freeze({ subscription, knowledgeAssets: normalized.knowledgeAssets });
-    expect(normalizeChainEventLogBinding(native)).toBe(native);
-    expect(normalizeChainEventLogBinding(native)).toBe(native);
+    const native = Object.freeze({ subscription, knowledgeAssets: normalized });
+    expect(knowledgeAssetReaderForBinding(native)).toBe(normalized);
+    expect(knowledgeAssetReaderForBinding(native)).toBe(normalized);
     const withoutModel = { subscription };
-    expect(normalizeChainEventLogBinding(withoutModel)).toBe(withoutModel);
-    expect(normalizeChainEventLogBinding(undefined)).toBeUndefined();
+    expect(knowledgeAssetReaderForBinding(withoutModel)).toBeUndefined();
+    expect(knowledgeAssetReaderForBinding(undefined)).toBeUndefined();
   });
 });

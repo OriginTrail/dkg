@@ -163,6 +163,57 @@ function model(
 /** The head the fixture commits, in the same units the gate measures. */
 const SEEDED_FETCHED_AT_MS = 1_700_000_000_000;
 
+describe('snapshot operation descriptors', () => {
+  const operations: Array<{
+    read: KnowledgeAssetSnapshotRead;
+    family: 'context-graph-ka' | 'context-graph-authority';
+    from: number;
+    caughtUp: boolean;
+    authorityDecodes: number;
+    topics: Record<string, readonly string[]>;
+    expected: KnowledgeAssetSnapshotResult;
+  }> = [
+    { read: { kind: 'binding', args: { kaId: 4242n } }, family: 'context-graph-ka',
+      from: 30, caughtUp: false, authorityDecodes: 0,
+      topics: { topic0: [ethers.id('KnowledgeAssetRegisteredToContextGraph(uint256,uint256)')],
+        topic2: [`0x${(4242n).toString(16).padStart(64, '0')}`] },
+      expected: { kind: 'bound', contextGraphId: 7n, asOfBlockNumber: 100 } },
+    { read: { kind: 'list', args: { contextGraphId: 7n } }, family: 'context-graph-authority',
+      from: 20, caughtUp: true, authorityDecodes: 1,
+      topics: { topic1: [`0x${(7n).toString(16).padStart(64, '0')}`] },
+      expected: { contextGraphId: 7n, kaIds: [4242n], throughBlockNumber: 100 } },
+    { read: { kind: 'ordinal', args: { contextGraphId: 7n, index: 0n } }, family: 'context-graph-authority',
+      from: 20, caughtUp: true, authorityDecodes: 1,
+      topics: { topic1: [`0x${(7n).toString(16).padStart(64, '0')}`] },
+      expected: { kaId: 4242n, asOfBlockNumber: 100 } },
+  ];
+
+  it.each(operations)('$read.kind owns its query, coverage family, decoder needs and projection', async (operation) => {
+    const store = seeded({ rows: [creation(40, 7n), registration(50, 7n, 4242n)],
+      cgCoverage: { coveredFromBlock: 30 }, authorityCoverage: { coveredFromBlock: 20 } });
+    const plan = planKnowledgeAssetSnapshotRead({ state: (await store.load(SCOPE))!,
+      contextGraphStorageAddress: CG_STORAGE, read: operation.read })!;
+    expect(plan.query).toEqual({ fromBlockNumber: operation.from, throughBlockNumber: 100,
+      addresses: [CG_STORAGE.toLowerCase()], ...operation.topics });
+    const decoder = registry();
+    const registrations = vi.spyOn(decoder, 'decodeContextGraphKaRegistrations');
+    const authority = vi.spyOn(decoder, 'decodeContextGraphAuthority');
+    const snapshot = createKnowledgeAssetReadSnapshot(plan, await store.readEvents(SCOPE, plan.query));
+    await expect(evaluateKnowledgeAssetSnapshot(snapshot, decoder)).resolves.toEqual(operation.expected);
+    expect(registrations).toHaveBeenCalledOnce();
+    expect(authority).toHaveBeenCalledTimes(operation.authorityDecodes);
+  });
+
+  it.each(operations)('$read.kind owns its caught-up requirement', async (operation) => {
+    const store = seeded(operation.family === 'context-graph-ka'
+      ? { cgCoverage: { coveredThroughBlock: 90 } }
+      : { authorityCoverage: { coveredThroughBlock: 90 } });
+    const plan = planKnowledgeAssetSnapshotRead({ state: (await store.load(SCOPE))!,
+      contextGraphStorageAddress: CG_STORAGE, read: operation.read });
+    expect(plan?.query.throughBlockNumber).toBe(operation.caughtUp ? undefined : 90);
+  });
+});
+
 describe('canonical snapshot evaluation agrees with inline capture', () => {
   it.each([
     { name: 'missing held hash', held: undefined, served: false },

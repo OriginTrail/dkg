@@ -3,10 +3,6 @@
 import type { ChainEventLogBinding } from './chain-event-log-binding.js';
 import type { ChainIndexCapability } from './chain-index-capability.js';
 import type { EvmChainIndexRuntime } from './evm-chain-index-runtime.js';
-import {
-  normalizeChainEventLogBinding,
-  type NormalizedChainEventLogBinding,
-} from './normalized-chain-event-log-binding.js';
 
 /**
  * Owns the process-wide one-log runtime lifecycle for an adapter.
@@ -19,7 +15,7 @@ import {
 export class EvmChainIndexRuntimeOwner {
   readonly #capability: ChainIndexCapability | undefined;
   readonly #onError: (error: unknown) => void;
-  #binding: NormalizedChainEventLogBinding | undefined;
+  #binding: ChainEventLogBinding | undefined;
   #runtime: EvmChainIndexRuntime | undefined;
   #starting: Promise<void> | undefined;
   #generation = 0;
@@ -32,7 +28,7 @@ export class EvmChainIndexRuntimeOwner {
     this.#onError = onError;
   }
 
-  get binding(): NormalizedChainEventLogBinding | undefined {
+  get binding(): ChainEventLogBinding | undefined {
     return this.#binding;
   }
 
@@ -48,7 +44,7 @@ export class EvmChainIndexRuntimeOwner {
 
   /** Attach or clear a binding supplied from outside this owner. */
   attach(binding: ChainEventLogBinding | undefined): void {
-    this.#binding = normalizeChainEventLogBinding(binding);
+    this.#binding = binding;
   }
 
   /**
