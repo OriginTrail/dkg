@@ -10,5 +10,6 @@ it('keeps the moved helpers importable from their former dist paths', () => {
     { subject: 'http://ex/s', predicate: 'http://ex/p', object: '"v"', graph: 'http://ex/g' },
   ])).toBe('DELETE DATA {\nGRAPH <http://ex/g> { <http://ex/s> <http://ex/p> "v" . }\n}');
   expect(atomicGraphReplace.formatObject('<urn:o>')).toBe('<urn:o>');
+  expect(() => atomicGraphReplace.formatObject('_:b0')).toThrow(/object cannot be a blank node/);
   expect(atomicGraphReplace.unwrapIri('<urn:x>')).toBe('urn:x');
 });

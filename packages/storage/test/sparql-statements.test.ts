@@ -1,11 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
-  pureSparqlStatements,
   sparqlStatements,
-  type PureSparqlStatements,
   type SparqlQueryPlan,
+  type SparqlStatements,
   type SparqlUpdatePlan,
-  type WithInvalidTerms,
 } from '../src/adapters/sparql-statements.js';
 import { createSparqlTermPolicy, SparqlTermRejectedError } from '../src/adapters/sparql-term-policy.js';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
@@ -13,19 +11,11 @@ import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observe
 const ADAPTERS = ['oxigraph', 'sparql-http', 'blazegraph'] as const;
 const G = 'http://ex.org/g';
 
-type PurePlan = WithInvalidTerms<SparqlQueryPlan | SparqlUpdatePlan> | null;
+type Plan = SparqlQueryPlan | SparqlUpdatePlan | null;
 
-function withoutInvalidTerms(plan: WithInvalidTerms<SparqlQueryPlan | SparqlUpdatePlan>): object {
-  const copy: Record<string, unknown> = { ...plan };
-  delete copy.invalidTerms;
-  return copy;
-}
-
-// Each builder with well-formed terms, and the exact plan the pure builder
-// returns: the statement, its operation, for an update the graphs it writes,
-// and no invalid terms. The adapters' factory returns the same plan without
-// the invalidTerms field.
-const WELL_FORMED: Array<[string, (statements: PureSparqlStatements) => PurePlan, PurePlan]> = [
+// Each builder with well-formed terms, and the exact plan it returns: the
+// statement, its operation, and for an update the graphs it writes.
+const WELL_FORMED: Array<[string, (statements: SparqlStatements) => Plan, Plan]> = [
   [
     'insertData',
     (statements) => statements.insertData([
@@ -37,7 +27,6 @@ const WELL_FORMED: Array<[string, (statements: PureSparqlStatements) => PurePlan
       update: 'INSERT DATA {\n  GRAPH <http://ex.org/g> {\n    <http://ex.org/s> <http://ex.org/p> "v" .\n  }\n' +
         '  _:b0 <http://ex.org/p> <http://ex.org/o> .\n}',
       scope: { kind: 'graphs', graphs: [G, ''] },
-      invalidTerms: [],
     },
   ],
   [
@@ -52,7 +41,6 @@ const WELL_FORMED: Array<[string, (statements: PureSparqlStatements) => PurePlan
         'DELETE { GRAPH <http://ex.org/g> {\n    ?b0 <http://ex.org/p> "w" .\n  } } ' +
         'WHERE { GRAPH <http://ex.org/g> {\n    ?b0 <http://ex.org/p> "w" .\n  } }',
       scope: { kind: 'graphs', graphs: [G] },
-      invalidTerms: [],
     },
   ],
   ['deleteData with nothing to delete', (statements) => statements.deleteData([]), null],
@@ -64,7 +52,6 @@ const WELL_FORMED: Array<[string, (statements: PureSparqlStatements) => PurePlan
       update: 'DELETE { GRAPH <http://ex.org/g> { <http://ex.org/s> ?p "v" } } ' +
         'WHERE { GRAPH <http://ex.org/g> { <http://ex.org/s> ?p "v" } }',
       scope: { kind: 'graphs', graphs: [G] },
-      invalidTerms: [],
     },
   ],
   [
@@ -74,7 +61,6 @@ const WELL_FORMED: Array<[string, (statements: PureSparqlStatements) => PurePlan
       operation: 'deleteByPattern',
       update: 'DELETE { GRAPH ?g_ctx { ?s <http://ex.org/p> ?o } } WHERE { GRAPH ?g_ctx { ?s <http://ex.org/p> ?o } }',
       scope: { kind: 'all' },
-      invalidTerms: [],
     },
   ],
   [
@@ -85,7 +71,6 @@ const WELL_FORMED: Array<[string, (statements: PureSparqlStatements) => PurePlan
       update: 'DELETE { GRAPH <http://ex.org/g> { ?s ?p ?o } } WHERE { GRAPH <http://ex.org/g> ' +
         '{ ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "http://ex.org/entity/")) } }',
       scope: { kind: 'graphs', graphs: [G] },
-      invalidTerms: [],
     },
   ],
   [
@@ -95,13 +80,12 @@ const WELL_FORMED: Array<[string, (statements: PureSparqlStatements) => PurePlan
       operation: 'dropGraph',
       update: 'DROP SILENT GRAPH <http://ex.org/g>',
       scope: { kind: 'graphs', graphs: [G] },
-      invalidTerms: [],
     },
   ],
   [
     'hasGraph',
     (statements) => statements.hasGraph(G),
-    { operation: 'hasGraph', sparql: 'ASK { GRAPH <http://ex.org/g> { ?s ?p ?o } }', invalidTerms: [] },
+    { operation: 'hasGraph', sparql: 'ASK { GRAPH <http://ex.org/g> { ?s ?p ?o } }' },
   ],
   [
     'countQuads in one graph',
@@ -109,7 +93,6 @@ const WELL_FORMED: Array<[string, (statements: PureSparqlStatements) => PurePlan
     {
       operation: 'countQuads',
       sparql: 'SELECT (COUNT(*) AS ?c) WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }',
-      invalidTerms: [],
     },
   ],
   [
@@ -118,21 +101,16 @@ const WELL_FORMED: Array<[string, (statements: PureSparqlStatements) => PurePlan
     {
       operation: 'countQuads',
       sparql: 'SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }',
-      invalidTerms: [],
     },
   ],
 ];
 
 describe('sparqlStatements', () => {
-  it.each(WELL_FORMED)('%s builds the same plan for every adapter', (_name, build, pure) => {
+  it.each(WELL_FORMED)('%s builds the same plan for every adapter, reporting nothing', (_name, build, plan) => {
     const observed = observeInvalidSparqlTerms();
     try {
-      const reported = pure === null ? null : withoutInvalidTerms(pure);
       for (const adapter of ADAPTERS) {
-        expect(build(pureSparqlStatements(adapter))).toEqual(pure);
-        const plan = build(sparqlStatements(adapter) as unknown as PureSparqlStatements);
-        expect(plan).toEqual(reported);
-        if (plan !== null) expect(plan).not.toHaveProperty('invalidTerms');
+        expect(build(sparqlStatements(adapter))).toEqual(plan);
       }
       expect(observed.counted).toEqual([]);
     } finally {
@@ -140,12 +118,13 @@ describe('sparqlStatements', () => {
     }
   });
 
-  it.each(ADAPTERS)('labels every builder with adapter %s and its own operation; only the factory reports', (adapter) => {
+  it.each(ADAPTERS)('reports each invalid term once, labelled with adapter %s and the plan\'s operation', (adapter) => {
     const observed = observeInvalidSparqlTerms();
     try {
+      const statements = sparqlStatements(adapter);
       const bad = 'http://ex.org/g^x';
       const quad = { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"v"', graph: bad };
-      const buildAll = (statements: PureSparqlStatements) => [
+      const plans = [
         statements.insertData([quad]),
         statements.deleteData([quad])!,
         statements.deleteByPattern({ graph: bad }),
@@ -154,42 +133,30 @@ describe('sparqlStatements', () => {
         statements.hasGraph(bad),
         statements.countQuads(bad),
       ];
-      const plans = buildAll(pureSparqlStatements(adapter));
 
-      // The pure builder is side-effect free: each plan only carries its invalid term.
-      expect(observed.counted).toEqual([]);
-      expect(observed.warnings).toEqual([]);
-      expect(plans.map((plan) => plan.invalidTerms.map((term) => [term.site.adapter, term.site.operation, term.position])))
-        .toEqual([
-          [[adapter, 'insert', 'graph']],
-          [[adapter, 'delete', 'graph']],
-          [[adapter, 'deleteByPattern', 'graph']],
-          [[adapter, 'deleteBySubjectPrefix', 'graph']],
-          [[adapter, 'dropGraph', 'graph']],
-          [[adapter, 'hasGraph', 'graph']],
-          [[adapter, 'countQuads', 'graph']],
-        ]);
-      // A plan runs as the same operation its terms are labelled with.
-      expect(plans.map((plan) => plan.operation)).toEqual(plans.map((plan) => plan.invalidTerms[0].site.operation));
-
-      // The adapters' factory reports each of them exactly once as it builds.
-      buildAll(sparqlStatements(adapter) as unknown as PureSparqlStatements);
-      expect(observed.counted.map((point) => [point.adapter, point.operation, point.position]))
-        .toEqual(plans.map((plan) => [adapter, plan.operation, 'graph']));
+      expect(observed.counted.map((point) => [point.adapter, point.operation, point.position])).toEqual([
+        [adapter, 'insert', 'graph'],
+        [adapter, 'delete', 'graph'],
+        [adapter, 'deleteByPattern', 'graph'],
+        [adapter, 'deleteBySubjectPrefix', 'graph'],
+        [adapter, 'dropGraph', 'graph'],
+        [adapter, 'hasGraph', 'graph'],
+        [adapter, 'countQuads', 'graph'],
+      ]);
+      // A plan runs as the same operation its terms were reported under, and
+      // carries no diagnostics of its own.
+      expect(plans.map((plan) => plan.operation)).toEqual(observed.counted.map((point) => point.operation));
+      for (const plan of plans) expect(plan).not.toHaveProperty('invalidTerms');
     } finally {
       observed.restore();
     }
   });
 
-  it('reports every invalid term of a plan once, and hands the adapter the plan without them', () => {
+  it('reports every invalid term of one statement, and nothing for an empty delete', () => {
     const observed = observeInvalidSparqlTerms();
     try {
       const statements = sparqlStatements('oxigraph');
-      const plan = statements.deleteByPattern({
-        graph: 'http://ex.org/g^x',
-        predicate: 'http://ex.org/p q',
-      });
-      expect(plan).not.toHaveProperty('invalidTerms');
+      statements.deleteByPattern({ graph: 'http://ex.org/g^x', predicate: 'http://ex.org/p q' });
       expect(observed.counted.map((point) => [point.operation, point.position])).toEqual([
         ['deleteByPattern', 'predicate'],
         ['deleteByPattern', 'graph'],
@@ -201,21 +168,19 @@ describe('sparqlStatements', () => {
     }
   });
 
-  it('builds under the policy it is given', () => {
+  it('builds under the policy it is given, reporting a rejection once', () => {
     const observed = observeInvalidSparqlTerms();
     try {
-      const reject = createSparqlTermPolicy('reject');
-      const pure = pureSparqlStatements('sparql-http', reject);
-      expect(() => pure.dropGraph('http://ex.org/g^x')).toThrow(SparqlTermRejectedError);
-      expect(() => pure.deleteData([
+      const statements = sparqlStatements('sparql-http', createSparqlTermPolicy('reject'));
+      expect(() => statements.dropGraph('http://ex.org/g^x')).toThrow(SparqlTermRejectedError);
+      expect(() => statements.deleteData([
         { subject: '_:bad label', predicate: 'http://ex.org/p', object: '"v"', graph: G },
       ])).toThrow(SparqlTermRejectedError);
-      expect(pure.dropGraph(G).update).toBe('DROP SILENT GRAPH <http://ex.org/g>');
-      // The pure builder reports nothing; the factory reports a rejection once.
-      expect(observed.counted).toEqual([]);
-      expect(() => sparqlStatements('sparql-http', reject).dropGraph('http://ex.org/g^x'))
-        .toThrow(SparqlTermRejectedError);
-      expect(observed.counted.map((point) => point.enforcement)).toEqual(['reject']);
+      expect(statements.dropGraph(G).update).toBe('DROP SILENT GRAPH <http://ex.org/g>');
+      expect(observed.counted.map((point) => [point.operation, point.enforcement])).toEqual([
+        ['dropGraph', 'reject'],
+        ['delete', 'reject'],
+      ]);
     } finally {
       observed.restore();
     }

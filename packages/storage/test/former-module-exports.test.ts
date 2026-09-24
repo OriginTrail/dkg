@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as sparqlHttp from '../src/adapters/sparql-http.js';
 import * as atomicGraphReplace from '../src/atomic-graph-replace.js';
-import { pureSparqlStatements } from '../src/adapters/sparql-statements.js';
+import { sparqlStatements } from '../src/adapters/sparql-statements.js';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 // These helpers moved, but `dist/adapters/sparql-http.js` and
@@ -22,19 +22,18 @@ describe('exports kept at their former module paths', () => {
     );
   });
 
-  it('the deprecated delete shim returns the canonical update, while only the plan carries diagnostics', () => {
+  it('the deprecated delete shim returns the canonical update and reports nothing', () => {
     const observed = observeInvalidSparqlTerms();
     try {
       const valid = [{ subject: '_:b0', predicate: 'http://ex/p', object: '"v"', graph: 'http://ex/g' }];
       const invalid = [{ subject: '_:b0', predicate: 'http://ex/p q', object: '"v"', graph: 'http://ex/g' }];
-      for (const quads of [valid, invalid]) {
-        const plan = pureSparqlStatements('sparql-http').deleteData(quads)!;
-        expect(sparqlHttp.buildBlankNodeSafeDelete(quads)).toBe(plan.update);
-      }
-      expect(pureSparqlStatements('sparql-http').deleteData(valid)!.invalidTerms).toEqual([]);
-      expect(pureSparqlStatements('sparql-http').deleteData(invalid)!.invalidTerms).toHaveLength(1);
+      const shimmed = [valid, invalid].map((quads) => sparqlHttp.buildBlankNodeSafeDelete(quads));
       // The shim, like the function it replaces, reports nothing.
       expect(observed.counted).toEqual([]);
+      // The adapters' factory builds the same updates, and reports the invalid term once.
+      expect([valid, invalid].map((quads) => sparqlStatements('sparql-http').deleteData(quads)!.update))
+        .toEqual(shimmed);
+      expect(observed.counted.map((point) => [point.operation, point.position])).toEqual([['delete', 'predicate']]);
     } finally {
       observed.restore();
     }
@@ -46,6 +45,8 @@ describe('exports kept at their former module paths', () => {
     expect(atomicGraphReplace.formatObject('"42"^^http://www.w3.org/2001/XMLSchema#integer'))
       .toBe('"42"^^<http://www.w3.org/2001/XMLSchema#integer>');
     expect(() => atomicGraphReplace.formatObject('"x\ny"')).toThrow(/^Unsafe RDF term/);
+    // A blank node used to be rendered as the invalid IRI <_:b0>; it now throws.
+    expect(() => atomicGraphReplace.formatObject('_:b0')).toThrow(/object cannot be a blank node/);
     expect(atomicGraphReplace.unwrapIri('<urn:x>')).toBe('urn:x');
   });
 });

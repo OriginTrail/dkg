@@ -75,9 +75,10 @@ function connectedBlankNodeComponents(quads: DKGQuad[]): DKGQuad[][] {
  * real IRI, so the match is precise. Two byte-for-byte isomorphic anchored
  * components are indistinguishable in RDF and both delete — which is correct.
  *
- * Every term is rendered by `render`, which collects the invalid ones for the
- * caller's plan, a blank-node label that becomes a variable included. Only
- * `sparqlStatements(...).deleteData` calls this; it owns the diagnostics.
+ * Every term is rendered by `render`, which collects the invalid ones, a
+ * blank-node label that becomes a variable included. `sparqlStatements(...)
+ * .deleteData` calls this and reports them; the deprecated
+ * `buildBlankNodeSafeDelete` in `sparql-http.ts` ignores them.
  */
 export function renderBlankNodeSafeDelete(
   quads: DKGQuad[],
@@ -119,8 +120,8 @@ export function renderBlankNodeSafeDelete(
           let v = vars.get(t);
           if (!v) {
             // The label is never sent, but a malformed one is still an invalid
-            // term: check it once, before it becomes a variable.
-            render.checkBlankNodeLabel(t, position);
+            // term: render it once, only to check it, before it becomes a variable.
+            render.rdf(t, position, 'allow');
             v = `?b${vars.size}`;
             vars.set(t, v);
           }

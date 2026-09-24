@@ -64,8 +64,6 @@ function asAdapter(policy: SparqlTermPolicy) {
     rdfTerm: (term: string, position: 'subject' | 'object', site: SparqlTermSite, blankNodes: 'allow' | 'reject') =>
       run(site, (renderer) => renderer.rdf(term, position, blankNodes)),
     iriPrefix: (prefix: string, site: SparqlTermSite) => run(site, (renderer) => renderer.prefix(prefix)),
-    checkBlankNodeLabel: (label: string, position: 'subject' | 'object', site: SparqlTermSite) =>
-      run(site, (renderer) => renderer.checkBlankNodeLabel(label, position)),
   };
 }
 
@@ -397,13 +395,13 @@ describe('the enforcement policy', () => {
     expect(() => policy.iriTerm('urn:a b', 'graph', SITE)).toThrow(SparqlTermValidationError);
     expect(() => policy.rdfTerm('_:b0', 'object', SITE, 'reject')).toThrow(SparqlTermValidationError);
     expect(() => policy.iriPrefix('urn:a\nb', SITE)).toThrow(SparqlTermValidationError);
-    expect(() => policy.checkBlankNodeLabel('_:a b', 'subject', SITE)).toThrow(SparqlTermValidationError);
+    expect(() => policy.rdfTerm('_:a b', 'subject', SITE, 'allow')).toThrow(SparqlTermValidationError);
     expect(observed.counted.map(({ enforcement }) => enforcement)).toEqual(['reject', 'reject', 'reject', 'reject']);
 
     expect(policy.iriTerm('urn:g', 'graph', SITE)).toBe('<urn:g>');
     expect(policy.rdfTerm('"v"', 'object', SITE, 'reject')).toBe('"v"');
     expect(policy.iriPrefix('urn:', SITE)).toBe('"urn:"');
-    expect(() => policy.checkBlankNodeLabel('_:b0', 'subject', SITE)).not.toThrow();
+    expect(policy.rdfTerm('_:b0', 'subject', SITE, 'allow')).toBe('_:b0');
     expect(observed.counted).toHaveLength(4);
   });
 });

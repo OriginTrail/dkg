@@ -72,11 +72,12 @@ import {
 } from '../abortable-store-work-lifecycle.js';
 import { parseNQuadsTextTolerant } from '../nquads-text.js';
 import {
-  pureSparqlStatements,
   sparqlStatements,
   type SparqlQueryPlan,
   type SparqlUpdatePlan,
 } from './sparql-statements.js';
+import { renderBlankNodeSafeDelete } from './blank-node-safe-delete.js';
+import { ADAPTER_SPARQL_TERM_POLICY } from './sparql-term-policy.js';
 import {
   isStoreOperationTimeoutError,
   StoreOperationTimeoutError,
@@ -1349,9 +1350,12 @@ export { isBlankNodeTerm } from './blank-node-safe-delete.js';
 /**
  * @deprecated The blank-node-safe delete is now `deleteData` in
  * `./sparql-statements.js`. This keeps the former one-argument signature and
- * returns the same update.
+ * returns the same update. It reports nothing, as the function it replaces
+ * never counted invalid terms.
  */
 export function buildBlankNodeSafeDelete(quads: DKGQuad[]): string | null {
-  // Unreported, as the function it replaces never counted invalid terms.
-  return pureSparqlStatements('sparql-http').deleteData(quads)?.update ?? null;
+  return renderBlankNodeSafeDelete(
+    quads,
+    ADAPTER_SPARQL_TERM_POLICY.renderer({ adapter: 'sparql-http', operation: 'delete' }),
+  );
 }

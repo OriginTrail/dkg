@@ -107,11 +107,6 @@ export interface SparqlTermRenderer {
    * that escapes only `\` and `"`.
    */
   prefix(prefix: string): string;
-  /**
-   * A blank-node label that the caller rewrites to a query variable instead of
-   * sending. It is checked like any rendered term.
-   */
-  checkBlankNodeLabel(label: string, position: 'subject' | 'object'): void;
   /** The terms that failed validation so far, in rendering order. */
   readonly invalidTerms: readonly InvalidSparqlTerm[];
 }
@@ -182,13 +177,6 @@ export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): Spar
             return formatIriPrefix(prefix);
           } catch (error) {
             return onInvalidTerm(error, prefix, 'subject-prefix', legacyStringLiteral);
-          }
-        },
-        checkBlankNodeLabel(label, position) {
-          try {
-            formatSparqlTerm(label, { position, blankNodes: 'allow' });
-          } catch (error) {
-            onInvalidTerm(error, label, position, (term) => term);
           }
         },
         get invalidTerms() {
