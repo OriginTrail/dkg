@@ -1,4 +1,26 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { apiTokenSurvivesReload, currentApiToken } from './lib/apiToken.js';
+
+const RELOADED_FOR_401_KEY = '__dkg_401_reloaded';
+
+// Storage can throw when site data is blocked; treat that as "already retried"
+// so a 401 never becomes a reload loop.
+function reloadedFor401(): boolean {
+  try {
+    return window.sessionStorage.getItem(RELOADED_FOR_401_KEY) === '1';
+  } catch {
+    return true;
+  }
+}
+
+function markReloadedFor401(): boolean {
+  try {
+    window.sessionStorage.setItem(RELOADED_FOR_401_KEY, '1');
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /** Fetch data on mount and optionally on a polling interval. */
 export function useFetch<T>(
@@ -21,10 +43,10 @@ export function useFetch<T>(
     } catch (err: any) {
       if (mountedRef.current) {
         if (err?.status === 401) {
-          const hasToken = !!(window as any).__DKG_TOKEN__;
-          const alreadyRetried = sessionStorage.getItem('__dkg_401_reloaded') === '1';
-          if (hasToken && !alreadyRetried) {
-            sessionStorage.setItem('__dkg_401_reloaded', '1');
+          const hasToken = currentApiToken() !== undefined;
+          // Reload once to pick up a rotated token — but only when the token
+          // survives the reload; one held only in this page would be lost.
+          if (hasToken && apiTokenSurvivesReload() && !reloadedFor401() && markReloadedFor401()) {
             window.location.reload();
             return;
           }

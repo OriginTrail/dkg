@@ -17,7 +17,7 @@ type PromptState = 'hidden' | 'required' | 'rejected';
  * host name) loads without one. Nothing shows when the page was served with a
  * token or when authentication is disabled.
  */
-export function ApiTokenPrompt({ onSaved = () => window.location.reload() }: { onSaved?: () => void }) {
+export function ApiTokenPrompt({ reload = () => window.location.reload() }: { reload?: () => void }) {
   const [state, setState] = useState<PromptState>('hidden');
   const [value, setValue] = useState('');
 
@@ -40,8 +40,10 @@ export function ApiTokenPrompt({ onSaved = () => window.location.reload() }: { o
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
     if (!value.trim()) return;
-    saveEnteredApiToken(value);
-    onSaved();
+    // A token kept in tab storage survives a reload, which refetches everything
+    // with it. A token that could only be kept in memory would be lost by a
+    // reload, so `Root` remounts the dashboard in place instead.
+    if (saveEnteredApiToken(value)) reload();
   };
 
   return (
