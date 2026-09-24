@@ -11,9 +11,9 @@ import { registerPublisherCommand } from '../src/commands/publisher.js';
 import {
   connectLocalAgentIntegration,
   listLocalAgentIntegrations,
-  persistLocalAgentIntegration,
   updateLocalAgentIntegration,
 } from '../src/daemon/local-agents.js';
+import { persistLocalAgentIntegration } from '../src/daemon/local-agent-config-store.js';
 import { withFileLease } from '../src/file-lock.js';
 import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';

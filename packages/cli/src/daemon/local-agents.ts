@@ -17,8 +17,6 @@ import { createRequire } from 'node:module';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   loadConfig,
-  updateConfigFile,
-  configEdit,
   dkgDir,
   type DkgConfig,
   type LocalAgentIntegrationCapabilities,
@@ -447,24 +445,6 @@ export function updateLocalAgentIntegration(
   config.localAgentIntegrations = { ...getStoredLocalAgentIntegrations(config), [normalizedId]: next };
   if (normalizedId === 'openclaw') pruneLegacyOpenClawConfig(config);
   return getLocalAgentIntegration(config, normalizedId)!;
-}
-
-/**
- * Write one integration's in-memory record to the config file, plus the
- * legacy OpenClaw key cleanup that `connect`/`update` apply in memory. Other
- * integrations and every other config key are left as they are on disk. The
- * record is read when the write runs, so of two writes for one integration
- * (a connect route and its attach job) the later one stores the newer state.
- */
-export async function persistLocalAgentIntegration(config: DkgConfig, id: string): Promise<void> {
-  const normalizedId = normalizeIntegrationId(id);
-  if (!getStoredLocalAgentIntegrations(config)[normalizedId]) return;
-  await updateConfigFile([
-    configEdit(['localAgentIntegrations', normalizedId], () => getStoredLocalAgentIntegrations(config)[normalizedId]),
-    ...(normalizedId === 'openclaw'
-      ? [configEdit(['openclawAdapter'], () => undefined), configEdit(['openclawChannel'], () => undefined)]
-      : []),
-  ]);
 }
 
 export function hasConfiguredLocalAgentChat(config: DkgConfig, id: string): boolean {

@@ -334,7 +334,6 @@ import {
   pruneLegacyOpenClawConfig,
   extractLocalAgentIntegrationPatch,
   connectLocalAgentIntegration,
-  persistLocalAgentIntegration,
   updateLocalAgentIntegration,
   hasConfiguredLocalAgentChat,
   hasStoredLocalAgentTransportConfig,
@@ -343,6 +342,7 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
+import { persistLocalAgentIntegration } from '../local-agent-config-store.js';
 
 import type { RequestContext } from './context.js';
 
