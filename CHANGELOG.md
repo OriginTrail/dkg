@@ -187,6 +187,35 @@ All notable changes to the DKG V10 node are documented here. The format is based
   graphs also in `catalogBackedContextGraphs`, and reports the size of the
   whole scope as `requestedContextGraphCount`; a request with the
   node-operator token still gets the whole list.
+- **Looking up a Knowledge Asset's Context Graph no longer blocks the node
+  for seconds**: since 10.0.17 the node answers this lookup from its chain
+  event log, and each lookup read and decoded every Knowledge Asset
+  registration of the ContextGraphStorage contract on the main thread (about
+  36,000 rows on a mainnet Core, 2 to 3 seconds per call). Finalization,
+  Random Sampling repair, sync and VM promotion all make this lookup, so Cores
+  stalled for 8 to 11 seconds after finalizations and repairs, and the VM
+  promotion backfill made it once per acknowledged copy. The lookup now reads
+  only that Knowledge Asset's registration rows through a new index on the
+  chain log table, and returns the same answers as before. The daemon adds
+  the index to `node-ui.db` on the first start after the upgrade (a one-time
+  build over the existing rows, about a quarter of a second per 100,000
+  stored chain events). The index takes about 300 bytes of disk per stored
+  chain event (about 30 MB per 100,000) and makes the occasional `VACUUM` of
+  `node-ui.db` about 40% slower. If the build fails, for example on a full
+  disk, the node logs a warning, starts without the index (the lookup is then
+  slower but still correct) and retries on the next start.
+- **Walking a Context Graph's registrations no longer reads the whole graph
+  for every step**: VM reconciliation reads a graph's Knowledge Asset
+  registrations one position at a time, and since 10.0.17 each read was
+  answered by reading and decoding every registration of that graph from the
+  chain event log on the main thread. On the largest mainnet graph (about
+  29,500 registrations) that took about 4 seconds per position, so walking
+  200 positions blocked the node for about 13 minutes. The node now keeps
+  each graph's list of registrations in memory and, when the chain log
+  changes, reads only the registrations added since, after checking that the
+  part it already holds has not changed (anything it cannot confirm is read
+  again in full). The same walk now takes well under a second, and reading
+  a whole graph from scratch takes under 0.2 seconds. Answers are unchanged.
 
 ### Changed
 
@@ -277,6 +306,15 @@ All notable changes to the DKG V10 node are documented here. The format is based
   reason, with VM-promotion declines under `CORE_VM_PROMOTION_UNAVAILABLE` and
   `CORE_VM_PROMOTION_DISABLED`), the number of core-hosted graphs and the last
   audit.
+- **`GET /api/status` reports main-thread stalls**: a new `eventLoopDelay`
+  block gives the event-loop delay over the last complete 60-second window
+  (`p50Ms`, `p99Ms`, `maxMs` and `windowMs`, in milliseconds), sampled every
+  20 ms. The delays are how late each sample ran beyond that 20 ms interval,
+  so an idle node reads about 0, and they are `null` before the first sample.
+  A stall that spans two windows is counted once, in the window it ends in or
+  the next. When a window's longest stall reaches 2 seconds the daemon logs
+  one `[warn] Event loop blocked: ...` line, at most once every 10 minutes,
+  and the next warning counts the windows it skipped.
 
 ## [10.0.18] - 2026-09-22
 

@@ -1240,20 +1240,22 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     await this.init();
     const cgs = this.requireContextGraphStorage();
     const knowledgeAssetsFromLog = await this.knowledgeAssetsFromLogFor(cgs);
-    const logged = await knowledgeAssetsFromLog?.readModel.readContextGraphKaList(
+    // One ordinal, not the list: the read model answers it from its per-graph
+    // ordinal cache, so a walk over a graph's ordinals costs one fold per log
+    // revision instead of one per ordinal (scalar read from PR #2784).
+    const logged = await knowledgeAssetsFromLog?.readModel.readContextGraphKaAt(
       contextGraphId,
+      index,
       { view: 'latest' },
     );
     // Position IS the ordinal — the on-chain list only ever appends. An index
     // the log does not hold is NOT an out-of-range answer to invent: the chain
     // reverts on one, and callers read that revert, so the call below must be
-    // the thing that produces it.
+    // the thing that produces it. The read model returns `undefined` for it.
     if (logged !== undefined
       && knowledgeAssetsFromLog !== undefined
-      && this.chainEventLogBindingIsCurrent(knowledgeAssetsFromLog.binding)
-      && index >= 0n
-      && index < BigInt(logged.kaIds.length)) {
-      return logged.kaIds[Number(index)]!;
+      && this.chainEventLogBindingIsCurrent(knowledgeAssetsFromLog.binding)) {
+      return logged.kaId;
     }
     const kaId: bigint = await this.readContract(
       cgs, 'cgStorage.getContextGraphKaAt', 'getContextGraphKaAt', contextGraphId, index,

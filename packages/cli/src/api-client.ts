@@ -544,6 +544,14 @@ export interface DaemonStatusResponse extends StoreQuadsStatusFields, StoreReach
     max: number;
     rejectedTotal: number;
   };
+  // Event-loop delay over the last complete window (ms; null before the first
+  // sample). Null when the daemon runs no gauge; absent on older daemons.
+  eventLoopDelay?: {
+    p50Ms: number | null;
+    p99Ms: number | null;
+    maxMs: number | null;
+    windowMs: number;
+  } | null;
   // Auto-update status (surfaced by /api/status). Optional — daemons may omit.
   // `updateAvailable` is null until the first check completes;
   // `updateChannelTargetMissing` is true when a pinned auto-update channel has

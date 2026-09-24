@@ -125,6 +125,9 @@ export default defineConfig({
           // on the job-level scalar), and denial counts DISTINCT peers.
           'test/catchup-runner-worker-continuation-deferral.test.ts',
           'test/relay-status-block.test.ts',
+          // `/api/status` → `eventLoopDelay`: the gauge with a fake histogram
+          // plus one real-histogram smoke test, and the route block shape.
+          'test/event-loop-delay-monitor.test.ts',
           'test/supervisor-liveness.test.ts',
           'test/promote-async-routes.test.ts',
           'test/promote-async-daemon-lifecycle.test.ts',

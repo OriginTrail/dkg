@@ -415,6 +415,31 @@ export class DashboardDB {
         PRIMARY KEY (scope, family, address)
       );
     `);
+    /**
+     * The kaToContextGraph point read's index:
+     * KnowledgeAssetRegisteredToContextGraph carries the KA id in topic2.
+     *
+     * Added after V38 shipped, so it relies on running on every open of a
+     * current-version database, and on a populated one the first run builds it
+     * over every stored row (tens of MB and a few hundred ms on a mainnet core).
+     * BEST-EFFORT: it is an optimization the store checks for before pinning,
+     * so a build that fails (SQLITE_FULL on a full disk, say) must not stop the
+     * node from starting. It is retried on the next open.
+     */
+    const ensureChainEventKaPointReadIndex = () => {
+      try {
+        this.db.exec(`
+          CREATE INDEX IF NOT EXISTS idx_chain_events_scope_address_ka
+            ON chain_events(scope, address, topic0, topic2, block_number, log_index);
+        `);
+      } catch (err) {
+        console.warn(
+          '[DashboardDB] could not build idx_chain_events_scope_address_ka; '
+            + 'Knowledge Asset lookups read without it until the next start: '
+            + `${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    };
     const ensureLocalContextGraphOriginSchema = () => this.db.exec(`
       CREATE TABLE IF NOT EXISTS local_context_graph_origins (
         context_graph_id TEXT PRIMARY KEY CHECK (length(trim(context_graph_id)) > 0),
@@ -446,6 +471,7 @@ export class DashboardDB {
       ensureContextGraphAuthorityIndexSchema();
       ensureLocalContextGraphOriginSchema();
       ensureChainEventLogSchema();
+      ensureChainEventKaPointReadIndex();
       installRoutineLogRetentionSchema(this.db);
       return;
     }
@@ -1399,6 +1425,7 @@ export class DashboardDB {
       // keeps its revision and its folded prefix, so the first tick resumes at
       // that cursor and no node rescans history to adopt this table.
       ensureChainEventLogSchema();
+      ensureChainEventKaPointReadIndex();
     }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
