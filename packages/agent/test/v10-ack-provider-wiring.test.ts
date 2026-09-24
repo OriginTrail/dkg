@@ -42,7 +42,9 @@ import {
   AUTHOR_SCHEME_VERSION_V1,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
+  PROTOCOL_STORAGE_ACK,
   PROTOCOL_STORAGE_ACK_V2,
+  PROTOCOL_STORAGE_UPDATE_ACK,
   PROTOCOL_STORAGE_UPDATE_ACK_V2,
   buildUpdateAuthorAttestationTypedData,
   contextGraphDataUri,
@@ -155,6 +157,7 @@ interface StorageACKHandlerConfigCapture {
  * without ever constructing an `ACKCollector`.
  */
 interface ProviderInternals {
+  peerId: string;
   createV10ACKProvider(cgId: string): unknown;
   createV10UpdateACKProvider(cgId: string): unknown;
   createACKTransportFactory(options?: {
@@ -176,6 +179,7 @@ interface ProviderInternals {
     ackHandlerDeadlineMs?: number;
     ackSendTimeoutMs?: number;
     ackCandidatePeerIds?: string[];
+    nodeRole?: string;
   };
   chain: MockChainAdapter & {
     verifyACKIdentity?: (recoveredAddress: string, identityId: bigint) => Promise<boolean>;
@@ -192,6 +196,11 @@ interface ProviderInternals {
   };
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2: Set<string>;
+  storageAckHandlerRegistered: boolean;
+  storageAckLocalHandler: {
+    publish(data: Uint8Array): Promise<Uint8Array>;
+    update(data: Uint8Array): Promise<Uint8Array>;
+  } | null;
   networkAdmissionCoordinator: {
     enabled: boolean;
     isAcceptedPeer(peerId: string): boolean;
@@ -427,7 +436,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     await expect(second).resolves.toEqual([]);
   });
 
-  it('preflights the selector candidate universe and exposes newly admitted peers to publish, update, and async pools', async () => {
+  it('preflights confirmed cores and exposes newly admitted cores to publish, update, and async pools', async () => {
     const boot = await bootProviderAgent();
     agent = boot.agent;
     const internals = boot.internals;
@@ -439,8 +448,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       // preflight completion.
       await Promise.resolve();
       accepted.add('new-v2-core');
-      accepted.add('unclassified-core');
-      return { checked: peers.length, admitted: 2, unresolved: 1 };
+      return { checked: peers.length, admitted: 1, unresolved: 1 };
     });
     internals.networkAdmissionCoordinator = {
       enabled: true,
@@ -483,7 +491,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     for (const pool of [publishPool, updatePool, asyncPool]) {
       expect(pool).toContain('already-admitted');
       expect(pool).toContain('new-v2-core');
-      expect(pool).toContain('unclassified-core');
+      expect(pool).not.toContain('unclassified-core');
       expect(pool).not.toContain('retryable-probe-failure');
       expect(pool).not.toContain('rejected-peer');
     }
@@ -495,7 +503,6 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
         'new-v2-core',
         'rejected-peer',
         'retryable-probe-failure',
-        'unclassified-core',
       ]);
       expect(ctx).toMatchObject({ operationName: expectedOperationNames[index] });
       expect(options).toEqual({ maxConcurrency: 4 });
@@ -520,7 +527,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       preflightPeerAdmission,
     };
     internals.config.ackCandidatePeerIds = ['allow-a', 'allow-b', 'disconnected-allowlisted'];
-    internals.knownCorePeerIds = new Set(['outside-allowlist']);
+    internals.knownCorePeerIds = new Set(['allow-a', 'allow-b', 'outside-allowlist']);
     internals.knownCorePeerIdsV2 = new Set();
     internals.node = {
       libp2p: {
@@ -959,6 +966,32 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     ).rejects.toThrow(/substrate delivered \(transport\) without response/);
   });
 
+  it('routes self ACK requests through the registered core handler for publish and update', async () => {
+    const boot = await bootProviderAgent();
+    agent = boot.agent;
+    const internals = boot.internals;
+    const remoteSend = vi.fn();
+    internals.messenger = { sendRequestOwned: remoteSend };
+    internals.config.nodeRole = 'core';
+    internals.storageAckHandlerRegistered = true;
+    const publish = vi.fn(async () => new Uint8Array([1]));
+    const update = vi.fn(async () => new Uint8Array([2]));
+    internals.storageAckLocalHandler = { publish, update };
+    const send = internals.createACKTransportFactory()().sendP2P;
+    const request = new Uint8Array([3]);
+
+    await expect(send(internals.peerId, PROTOCOL_STORAGE_ACK, request)).resolves.toEqual(new Uint8Array([1]));
+    await expect(send(internals.peerId, PROTOCOL_STORAGE_ACK_V2, request)).resolves.toEqual(new Uint8Array([1]));
+    await expect(send(internals.peerId, PROTOCOL_STORAGE_UPDATE_ACK, request)).resolves.toEqual(new Uint8Array([2]));
+    await expect(send(internals.peerId, PROTOCOL_STORAGE_UPDATE_ACK_V2, request)).resolves.toEqual(new Uint8Array([2]));
+    expect(publish).toHaveBeenCalledTimes(2);
+    expect(update).toHaveBeenCalledTimes(2);
+    expect(remoteSend).not.toHaveBeenCalled();
+
+    internals.storageAckHandlerRegistered = false;
+    await expect(send(internals.peerId, PROTOCOL_STORAGE_ACK, request)).rejects.toThrow(/not registered/);
+  });
+
   it('rejects misaligned direct agent ACK timing before boot side effects', async () => {
     await expect(DKGAgent.create({
       name: 'ACKTimingInvalidPairTest',
@@ -987,6 +1020,12 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     expect(capturedStorageACKHandlerConfigs).toContainEqual(
       expect.objectContaining({ ackHandlerDeadlineMs: 55_000 }),
     );
+    const internals = agent as unknown as ProviderInternals;
+    expect(internals.storageAckHandlerRegistered).toBe(true);
+    expect(internals.storageAckLocalHandler).not.toBeNull();
+    await agent.stop();
+    expect(internals.storageAckLocalHandler).toBeNull();
+    agent = undefined;
   });
 
   it('delegates StorageACK curation config to the named target-policy resolver', async () => {

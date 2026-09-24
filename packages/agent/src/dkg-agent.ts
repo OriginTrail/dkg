@@ -10,7 +10,7 @@ import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
-  PROTOCOL_STORAGE_ACK,
+  PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2,
   PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2,
   PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
@@ -2888,6 +2888,7 @@ export class DKGAgent extends DKGAgentBase {
     this.clearStorageACKRegistrationRetry();
     this.storageACKRegistrationRetryInFlight = false;
     this.storageAckHandlerRegistered = false;
+    this.storageAckLocalHandler = null;
     // The owner joins both an installed prover and any in-flight WAL/handle
     // creation. A timeout retains ownership and blocks store/network teardown.
     await this.randomSamplingRuntime?.stop();
@@ -3093,10 +3094,9 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   /**
-   * Resolve admission only for connected peers already known to be eligible
-   * for an ACK round. The publisher selector is the single source of truth: a
-   * configured ACK allowlist wins, otherwise every connected peer remains in
-   * the candidate universe because identify-derived core tiers may be partial.
+   * Resolve admission only for connected peers that advertise the core-only
+   * StorageACK protocol. Unknown peers may become eligible after identify
+   * completes, but edges must never be dialled for an ACK.
    * The coordinator owns admission, per-peer retry cooldown and bounded probe
    * fan-out; signed same-network proof remains mandatory.
    */
@@ -3104,7 +3104,18 @@ export class DKGAgent extends DKGAgentBase {
     protocol: string | undefined,
     ctx: OperationContext,
   ): Promise<string[]> {
-    const connected = this.connectedPeerIds();
+    const connectedPeers = this.connectedPeerIds();
+    // Re-read local identify metadata before freezing the collector pool. A
+    // missed peer:update must not hide a connected core for the whole round.
+    await Promise.all(connectedPeers.map(async (peerId) => {
+      const protocols = await this.getPeerProtocols(peerId);
+      if (protocols.length === 0) return; // identify may still be pending
+      if (protocols.includes(PROTOCOL_STORAGE_ACK)) this.knownCorePeerIds.add(peerId);
+      else this.knownCorePeerIds.delete(peerId);
+      if (protocols.includes(PROTOCOL_STORAGE_ACK_V2)) this.knownCorePeerIdsV2.add(peerId);
+      else this.knownCorePeerIdsV2.delete(peerId);
+    }));
+    const connected = connectedPeers.filter((peerId) => this.knownCorePeerIds.has(peerId));
     const eligible = selectACKCandidateUniverse({
       connectedPeers: connected,
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
@@ -3129,33 +3140,16 @@ export class DKGAgent extends DKGAgentBase {
   /**
    * Candidate peer pool for ACK collection (#1093 / #1482).
    *
-   * `knownCorePeerIds` is populated from identify-time protocol lists in
-   * `runSyncOnConnect`, but identify races `connection:open` — so the set
-   * routinely contains only a SUBSET of the actually-connected core nodes
-   * (the rest were read before their protocol list was populated and were
-   * never re-classified). The old behaviour returned that subset as soon
-   * as it was non-empty, which permanently capped the ACK pool below
-   * quorum (`pool_below_quorum`) and bricked publishing on core nodes.
-   *
-   * Fix: return confirmed cores FIRST followed by the remaining connected
-   * ACK-eligible peers. Do not narrow to a quorum-sized identify-derived tier:
-   * the collector fixes the pool once and retries within it, so one stale or
-   * saturated classified peer can make quorum impossible while healthy
-   * connected-but-unclassified cores sit idle. External callers can still set
-   * `ackCandidatePeerIds` as a true allowlist; configured public networks use
-   * `preferredACKPeerIds` for relay ranking without excluding connected
-   * non-relay cores. Signer validity is enforced per collected ACK against
-   * chain truth (operational key + sharding-table membership), so a stale
-   * foreign-network connection costs a wasted dial, while hard-gating on the
-   * bundled relay list bricked publishing when those relays were degraded
-   * (2026-07-07 Base/Gnosis mainnet incident).
+   * Identify-time protocol lists can lag connection events. Only peers that
+   * have advertised the core-only StorageACK protocol are eligible; a later
+   * peer:update can add newly identified cores. Connected edges and unknown
+   * peers cannot serve ACKs and must not consume collector slots. Preferences
+   * still rank all confirmed cores without restricting them to relay lists.
    *
    * Folded-private publishes require `PROTOCOL_STORAGE_ACK_V2` because their
    * PublishIntent carries field 20 (`privateMerkleRoots`). Prefer peers that
-   * explicitly advertise V2, but do not make peer-store protocol metadata the
-   * only gate: StorageACK handlers register after identity resolution, often
-   * after peers are already connected, and libp2p identify does not always
-   * refresh the stored protocol list. NOTE the wire protocol is not a
+   * explicitly advertise V2. A confirmed V1 core remains a V2 fallback if
+   * its identify metadata has not refreshed. NOTE the wire protocol is not a
    * version gate either — nodes have registered the V2 protocol id (for
    * the LU-11 chunked-ciphertext intent) since v10.0.0-rc.15, so a
    * pre-field-20 core ACCEPTS the V2 dial, silently drops
@@ -3170,7 +3164,7 @@ export class DKGAgent extends DKGAgentBase {
    * validation remain authoritative.
    */
   public getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
-    const connectedPeerIds = this.connectedPeerIds();
+    const connectedPeerIds = this.connectedPeerIds().filter((peerId) => this.knownCorePeerIds.has(peerId));
     const requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
     const selection = selectACKCandidatePeersWithDiagnostics({
       connectedPeers: connectedPeerIds,
@@ -3185,6 +3179,10 @@ export class DKGAgent extends DKGAgentBase {
       requiredACKs,
       protocol,
     });
+    const includeSelf = this.config.nodeRole === 'core'
+      && this.storageAckHandlerRegistered
+      && this.storageAckLocalHandler !== null;
+    const peers = includeSelf ? [this.peerId, ...selection.peers] : selection.peers;
     const selected = selection.diagnostics
       .filter((diagnostic) => diagnostic.selected)
       .map((diagnostic) => `${diagnostic.peerId.slice(-8)}:${diagnostic.tier}${diagnostic.preferred ? ':preferred' : ''}`)
@@ -3194,12 +3192,13 @@ export class DKGAgent extends DKGAgentBase {
       .slice(0, 8)
       .map((diagnostic) => `${diagnostic.peerId.slice(-8)}:${diagnostic.reason}`)
       .join(',');
+    const selectedLabel = [includeSelf ? 'self' : '', selected].filter(Boolean).join(',') || 'none';
     this.log.info(
       createOperationContext('publish'),
-      `[ACKCollector] Selected ${selection.peers.length}/${selection.diagnostics.length} ACK candidate peer(s) ` +
-      `(required=${requiredACKs}, protocol=${protocol}, selected=${selected || 'none'}, filtered=${filtered || 'none'})`,
+      `[ACKCollector] Selected ${peers.length}/${selection.diagnostics.length + (includeSelf ? 1 : 0)} ACK candidate core(s) ` +
+      `(required=${requiredACKs}, protocol=${protocol}, selected=${selectedLabel}, filtered=${filtered || 'none'})`,
     );
-    return selection.peers;
+    return peers;
   }
 
   public createACKTransportFactory(
@@ -3246,6 +3245,19 @@ export class DKGAgent extends DKGAgentBase {
       timeoutMs,
     });
     return async (peerId: string, protocol: string, data: Uint8Array) => {
+      if (peerId === this.peerId) {
+        const local = this.storageAckHandlerRegistered ? this.storageAckLocalHandler : null;
+        if (!local || this.config.nodeRole !== 'core') {
+          throw new Error('Local StorageACK handler is not registered');
+        }
+        if (protocol === PROTOCOL_STORAGE_ACK || protocol === PROTOCOL_STORAGE_ACK_V2) {
+          return local.publish(data);
+        }
+        if (protocol === PROTOCOL_STORAGE_UPDATE_ACK || protocol === PROTOCOL_STORAGE_UPDATE_ACK_V2) {
+          return local.update(data);
+        }
+        throw new Error(`Unsupported local StorageACK protocol: ${protocol}`);
+      }
       if (!this.networkAdmissionCoordinator.isAcceptedPeer(peerId)) {
         throw new Error(`peer ${peerId.slice(-8)} is not admitted for active-network ACK collection`);
       }

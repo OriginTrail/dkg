@@ -1237,6 +1237,11 @@ export class DKGAgentBase {
   protected storageAckLedgerReadyFlight: Promise<boolean> | null = null;
   /** The StorageACK protocol handler is registered (this core can answer ACKs). */
   protected storageAckHandlerRegistered = false;
+  /** The registered core handler, also used for local ACK requests. */
+  protected storageAckLocalHandler: {
+    publish(data: Uint8Array): Promise<Uint8Array>;
+    update(data: Uint8Array): Promise<Uint8Array>;
+  } | null = null;
   /** StorageACK declines per minute bucket and code, for the last hour. */
   protected readonly storageAckDeclineBuckets = new Map<number, Map<string, number>>();
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */

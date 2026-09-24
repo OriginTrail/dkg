@@ -1,11 +1,9 @@
 // ack-candidate-pool.test.ts
 //
-// ACK candidate selection ranks identify-derived core metadata first but keeps
-// connected fallbacks dialable. `knownCorePeerIds` is add-only/partial and can
-// contain stale or saturated peers; narrowing to a quorum-sized metadata tier
-// reintroduces ACK quorum failures when healthy unclassified cores are present.
+// ACK candidate selection dials only peers confirmed to advertise the
+// core-only StorageACK protocol. Unclassified connections may include edges.
 import { describe, it, expect } from 'vitest';
-import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
+import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { DKGAgent, MockChainAdapter, OxigraphStore } from './agent.shared';
 import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
@@ -19,7 +17,7 @@ type AgentInternals = {
     };
   };
   peerId: string;
-  config: { ackCandidatePeerIds?: string[]; preferredACKPeerIds?: string[] };
+  config: { ackCandidatePeerIds?: string[]; preferredACKPeerIds?: string[]; nodeRole?: string };
   peerSyncSession: PeerSyncSession;
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2: Set<string>;
@@ -28,8 +26,20 @@ type AgentInternals = {
     enabled: boolean;
     isAcceptedPeer(peerId: string): boolean;
     verifiedSameNetworkPeerIds(): ReadonlySet<string>;
+    preflightPeerAdmission?(peerIds: Iterable<string>): Promise<{
+      checked: number;
+      admitted: number;
+      unresolved: number;
+    }>;
   };
   lastKnownRequiredACKs?: number;
+  getPeerProtocols(peerId: string): Promise<string[]>;
+  getACKCandidatePeersAfterAdmission(protocol: string | undefined, ctx: unknown): Promise<string[]>;
+  storageAckHandlerRegistered: boolean;
+  storageAckLocalHandler: {
+    publish(data: Uint8Array): Promise<Uint8Array>;
+    update(data: Uint8Array): Promise<Uint8Array>;
+  } | null;
   getACKCandidatePeers: (protocol?: string) => string[];
   handlePeerUpdateForSyncRetry: (peerId: string, protocols: readonly string[]) => void;
 };
@@ -96,43 +106,61 @@ function installAdmission(agent: AgentInternals, admission: NetworkAdmissionServ
   };
 }
 
-describe('getACKCandidatePeers — confirmed peers first with stale-metadata fallback (#1093 / #1482)', () => {
-  it('default quorum (3): a 3-strong confirmed-core set keeps connected fallbacks dialable', async () => {
+describe('getACKCandidatePeers — core-only candidates', () => {
+  it('excludes connected edges from a 3-core pool', async () => {
     const a = await buildAgent({
       confirmedCores: CORE.slice(0, 3),
       connected: [...CORE.slice(0, 3), ...EDGE],
     });
-    expect(a.getACKCandidatePeers()).toEqual([...CORE.slice(0, 3), ...EDGE]);
+    expect(a.getACKCandidatePeers()).toEqual(CORE.slice(0, 3));
   });
 
-  it('runtime quorum 5: the SAME 3-strong confirmed-core set is NOT trusted alone — all connected peers are returned, cores first', async () => {
+  it('does not add edges even when confirmed cores are below runtime quorum', async () => {
     const a = await buildAgent({
       confirmedCores: CORE.slice(0, 3),
       connected: [...CORE.slice(0, 3), ...EDGE],
       lastKnownRequiredACKs: 5,
     });
     const out = a.getACKCandidatePeers();
-    // confirmed cores first, then the rest — nothing dropped below quorum.
-    expect(out).toEqual([...CORE.slice(0, 3), ...EDGE]);
+    expect(out).toEqual(CORE.slice(0, 3));
   });
 
-  it('runtime quorum 4: returns confirmed cores alone only once 4 are classified', async () => {
+  it('waits for identify to classify additional connected cores', async () => {
     const below = await buildAgent({
       confirmedCores: CORE.slice(0, 3),
       connected: [...CORE, ...EDGE],
       lastKnownRequiredACKs: 4,
     });
-    // 3 confirmed < quorum 4 → over-ask everyone (cores first).
-    expect(below.getACKCandidatePeers()).toEqual([...CORE.slice(0, 3), CORE[3], ...EDGE]);
+    expect(below.getACKCandidatePeers()).toEqual(CORE.slice(0, 3));
+    below.handlePeerUpdateForSyncRetry(CORE[3], [PROTOCOL_STORAGE_ACK]);
+    expect(below.getACKCandidatePeers()).toEqual(CORE);
 
     const at = await buildAgent({
       confirmedCores: CORE,
       connected: [...CORE, ...EDGE],
       lastKnownRequiredACKs: 4,
     });
-    // 4 confirmed ≥ quorum 4, but identify-derived metadata can be stale.
-    // Keep connected fallbacks dialable after the confirmed tier.
-    expect(at.getACKCandidatePeers()).toEqual([...CORE, ...EDGE]);
+    expect(at.getACKCandidatePeers()).toEqual(CORE);
+  });
+
+  it('refreshes identify metadata before admission and never preflights edges', async () => {
+    const a = await buildAgent({ confirmedCores: [], connected: [CORE[0], EDGE[0]] });
+    a.getPeerProtocols = async (peerId) => peerId === CORE[0]
+      ? [PROTOCOL_STORAGE_ACK]
+      : ['/dkg/10.0.0/sync'];
+    let preflightPeers: string[] = [];
+    a.networkAdmissionCoordinator = {
+      enabled: false,
+      isAcceptedPeer: () => true,
+      verifiedSameNetworkPeerIds: () => new Set(),
+      preflightPeerAdmission: async (peerIds) => {
+        preflightPeers = [...peerIds];
+        return { checked: preflightPeers.length, admitted: 0, unresolved: 0 };
+      },
+    };
+
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([CORE[0]]);
+    expect(preflightPeers).toEqual([CORE[0]]);
   });
 
   it('ackCandidatePeerIds remains an allowlist for callers that intentionally restrict candidacy', async () => {
@@ -148,19 +176,15 @@ describe('getACKCandidatePeers — confirmed peers first with stale-metadata fal
   it('a configured ACK preference list orders listed peers first and retains below-quorum fallback candidates (2026-07-07 incident)', async () => {
     const foreign = ['testnet-core-1', 'testnet-core-2', 'testnet-core-3'];
     const a = await buildAgent({
-      confirmedCores: [CORE[2]],
+      confirmedCores: CORE,
       connected: [CORE[2], ...foreign, CORE[0], CORE[1], CORE[3]],
       preferredACKPeerIds: CORE,
     });
 
-    // Listed peers are preferred within each tier (confirmed cores, then
-    // rest). Because the confirmed tier is below quorum, every connected
-    // fallback candidate remains dialable; this intentionally avoids the old
-    // 2x-quorum cap making quorum unreachable under correlated failures.
+    // Every confirmed non-relay core remains dialable; unrelated peers do not.
     expect(a.getACKCandidatePeers()).toEqual([
       CORE[2],
       CORE[0], CORE[1], CORE[3],
-      foreign[0], foreign[1], foreign[2],
     ]);
   });
 
@@ -210,19 +234,16 @@ describe('getACKCandidatePeers — confirmed peers first with stale-metadata fal
     });
     for (const id of upgraded) a.knownCorePeerIdsV2.add(id);
 
-    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([
-      ...upgraded,
-      ...relays,
-    ]);
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([...upgraded, ...relays]);
   });
 
-  it('runtime quorum below default (2): 2 confirmed cores stay first but do not suppress fallbacks', async () => {
+  it('runtime quorum below default still excludes edges', async () => {
     const a = await buildAgent({
       confirmedCores: CORE.slice(0, 2),
       connected: [...CORE.slice(0, 2), ...EDGE],
       lastKnownRequiredACKs: 2,
     });
-    expect(a.getACKCandidatePeers()).toEqual([...CORE.slice(0, 2), ...EDGE]);
+    expect(a.getACKCandidatePeers()).toEqual(CORE.slice(0, 2));
   });
 
   it('excludes self from the candidate pool', async () => {
@@ -239,6 +260,27 @@ describe('getACKCandidatePeers — confirmed peers first with stale-metadata fal
       },
     };
     expect(a.getACKCandidatePeers()).not.toContain(self);
+  });
+
+  it('includes the publishing core when its real StorageACK handler is registered', async () => {
+    const a = await buildAgent({
+      confirmedCores: CORE.slice(0, 2),
+      connected: [...CORE.slice(0, 2), ...EDGE],
+    });
+    a.config.nodeRole = 'core';
+    a.storageAckHandlerRegistered = true;
+    a.storageAckLocalHandler = {
+      publish: async () => new Uint8Array([1]),
+      update: async () => new Uint8Array([2]),
+    };
+
+    expect(a.getACKCandidatePeers()).toEqual([a.peerId, ...CORE.slice(0, 2)]);
+    expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([a.peerId, ...CORE.slice(0, 2)]);
+    a.config.ackCandidatePeerIds = [CORE[0]];
+    expect(a.getACKCandidatePeers()).toEqual([a.peerId, CORE[0]]);
+
+    a.storageAckHandlerRegistered = false;
+    expect(a.getACKCandidatePeers()).toEqual([CORE[0]]);
   });
 
   it('uses active connections when the peer-store peer list is still empty after startup', async () => {
@@ -271,7 +313,6 @@ describe('getACKCandidatePeers — confirmed peers first with stale-metadata fal
       CORE[2],
       CORE[1],
       CORE[3],
-      ...EDGE,
     ]);
   });
 
@@ -289,8 +330,6 @@ describe('getACKCandidatePeers — confirmed peers first with stale-metadata fal
       CORE[1],
       CORE[2],
       CORE[3],
-      ...EDGE,
-      extraEdge,
     ]);
   });
 
@@ -308,7 +347,6 @@ describe('getACKCandidatePeers — confirmed peers first with stale-metadata fal
       CORE[2],
       CORE[1],
       CORE[3],
-      ...EDGE,
     ]);
   });
 
@@ -341,5 +379,14 @@ describe('getACKCandidatePeers — confirmed peers first with stale-metadata fal
     expect(a.knownCorePeerIdsV2.has(CORE[0])).toBe(false);
     expect(a.knownCorePeerIds.has(CORE[0])).toBe(true);
     expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual(CORE);
+  });
+
+  it('revokes core candidacy when a populated protocol update no longer advertises StorageACK', async () => {
+    const a = await buildAgent({ confirmedCores: CORE, connected: [...CORE, ...EDGE] });
+    a.handlePeerUpdateForSyncRetry(CORE[0], []);
+    expect(a.getACKCandidatePeers()).toEqual(CORE);
+
+    a.handlePeerUpdateForSyncRetry(CORE[0], ['/dkg/10.0.0/sync']);
+    expect(a.getACKCandidatePeers()).toEqual(CORE.slice(1));
   });
 });

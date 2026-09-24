@@ -2942,6 +2942,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 storageACKFailoverInFlight = true;
                 storageACKProtocolRegistered = false;
                 this.storageAckHandlerRegistered = false;
+                this.storageAckLocalHandler = null;
                 // rc.9 PR-11: messenger.register stored the handler
                 // in the substrate's wrapper which delegates to
                 // router.register under the hood (see Messenger.register
@@ -3087,6 +3088,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
               return ackHandler.updateHandler(data, peerId);
             });
+            const localPeer = { toString: () => this.peerId, toBytes: () => new Uint8Array() };
+            this.storageAckLocalHandler = {
+              publish: (data) => ackHandler.handler(data, localPeer),
+              update: (data) => ackHandler.updateHandler(data, localPeer),
+            };
             storageACKProtocolRegistered = true;
             this.storageAckHandlerRegistered = true;
             this.clearStorageACKRegistrationRetry();
@@ -5363,11 +5369,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // identify — a core peer whose identify completed late was never
     // re-classified, leaving `knownCorePeerIds` permanently partial and
     // the ACK candidate pool capped below quorum. Identify delivers the
-    // complete protocol list, so add-on-present is always safe; we only
-    // add (never delete) here because some `peer:update` events fire
-    // with a not-yet-populated list and must not evict a known core.
+    // complete protocol list, so add-on-present is safe. Retain
+    // classification on an empty identify list, but revoke it when a
+    // populated update no longer advertises the core-only ACK protocol.
     if (protocols.includes(PROTOCOL_STORAGE_ACK)) {
       this.knownCorePeerIds.add(peerId);
+    } else if (protocols.length > 0) {
+      this.knownCorePeerIds.delete(peerId);
     }
     // V2 is a strict compatibility gate for field-20 folded-private ACKs. Keep
     // empty-list races non-destructive, but clear stale V2 membership when
