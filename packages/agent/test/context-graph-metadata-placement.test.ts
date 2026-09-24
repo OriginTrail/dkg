@@ -22,7 +22,7 @@ import {
   decodePublishRequest,
   encodePublishRequest,
 } from '@origintrail-official/dkg-core';
-import { deleteByPatternWithoutCount, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, deleteByPatternWithoutCount, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import {
   METADATA_RELOCATION_STARTUP_BUDGET_MS,
@@ -715,6 +715,57 @@ function withDeleteHook(store: TripleStore, onDelete: (deletes: number) => void)
   });
 }
 
+const CREATE_ACTIVITY_PREFIX = 'did:dkg:activity:create-context-graph:';
+
+/** A private graph this node holds, with the rows an earlier build left in ontology. */
+function heldPrivateGraphQuads(id: string): Quad[] {
+  const subject = contextGraphDataGraphUri(id);
+  const activity = `${CREATE_ACTIVITY_PREFIX}${id}:1`;
+  return [
+    { subject, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: 'did:dkg:agent:0xcurator', graph: contextGraphMetaGraphUri(id) },
+    ontologyQuad(subject, DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
+    ontologyQuad(subject, DKG_ONTOLOGY.SCHEMA_NAME, '"Notes"'),
+    ontologyQuad(subject, DKG_ONTOLOGY.DKG_ACCESS_POLICY, '"private"'),
+    ontologyQuad(subject, DKG_ONTOLOGY.PROV_GENERATED_BY, activity),
+    ontologyQuad(activity, DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.PROV_ACTIVITY),
+  ];
+}
+
+/** Per graph seeded by {@link heldPrivateGraphQuads}: what ontology still holds, and whether `_meta` has its name. */
+async function heldPrivateGraphPlacement(
+  store: TripleStore,
+  subjectPrefix: string,
+): Promise<Map<string, { ontologyRows: number; activityRows: number; metaName: boolean }>> {
+  const placement = new Map<string, { ontologyRows: number; activityRows: number; metaName: boolean }>();
+  const of = (id: string) => {
+    const entry = placement.get(id) ?? { ontologyRows: 0, activityRows: 0, metaName: false };
+    placement.set(id, entry);
+    return entry;
+  };
+  const graphPrefix = 'did:dkg:context-graph:';
+  const ontology = await store.query(`
+    SELECT ?s ?p WHERE { GRAPH <${ONTOLOGY_GRAPH}> { ?s ?p ?o } }
+  `);
+  for (const row of ontology.type === 'bindings' ? ontology.bindings : []) {
+    const subject = row['s']!;
+    if (subject.startsWith(subjectPrefix)) {
+      of(subject.slice(graphPrefix.length)).ontologyRows += 1;
+    } else if (subject.startsWith(`${CREATE_ACTIVITY_PREFIX}${subjectPrefix.slice(graphPrefix.length)}`)) {
+      of(subject.slice(CREATE_ACTIVITY_PREFIX.length).replace(/:1$/, '')).activityRows += 1;
+    }
+  }
+  const names = await store.query(`
+    SELECT ?s WHERE {
+      GRAPH ?g { ?s <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }
+      FILTER(STRSTARTS(STR(?g), "${subjectPrefix}") && STRENDS(STR(?g), "/_meta"))
+    }
+  `);
+  for (const row of names.type === 'bindings' ? names.bindings : []) {
+    of(row['s']!.slice(graphPrefix.length)).metaName = true;
+  }
+  return placement;
+}
+
 async function graphsHolding(store: TripleStore, subject: string): Promise<string[]> {
   const result = await store.query(`SELECT DISTINCT ?g WHERE { GRAPH ?g { <${subject}> ?p ?o } }`);
   return result.type === 'bindings' ? result.bindings.map((row) => row['g']!).sort() : [];
@@ -748,6 +799,65 @@ describe('bounded and interrupted relocation passes', () => {
     expect(later).toEqual({ movedToMeta: [], deletedForeign: 3, unclassified: 0, deferred: 0 });
     for (const id of ids) expect(await ontologyRowsAbout(agent, id)).toEqual([]);
   });
+
+  it('starts no candidate once its time budget is spent, measured on a monotonic clock', async () => {
+    const store = new OxigraphStore();
+    const ids = Array.from({ length: 10 }, (_, index) => `0xabc/clocked-${index}`);
+    await store.insert(ids.map((id) => (
+      ontologyQuad(contextGraphDataGraphUri(id), DKG_ONTOLOGY.SCHEMA_NAME, '"Renamed"')
+    )));
+    vi.useFakeTimers({ toFake: ['performance'] });
+    try {
+      // Each removal takes 4 ms: the third ends past the 10 ms budget, so no
+      // fourth starts, however the store's promises settle.
+      const result = await relocatePrivateContextGraphMetadata({
+        store: withDeleteHook(store, () => { vi.advanceTimersByTime(4); }),
+        localAccessPolicy: async () => null,
+        budgetMs: 10,
+      });
+
+      expect(result).toEqual({ movedToMeta: [], deletedForeign: 3, unclassified: 0, deferred: 7 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('lets a timeout signal fire while it works through the synchronous embedded store', async () => {
+    // The embedded store answers from the calling thread, so without a yield
+    // no timer runs until the whole pass has ended.
+    const store = new OxigraphStore();
+    const ids = Array.from({ length: 2_000 }, (_, index) => `0xabc/embedded-${index}`);
+    await store.insert(ids.flatMap((id) => heldPrivateGraphQuads(id)));
+    const signal = AbortSignal.timeout(1);
+
+    const bounded = await relocatePrivateContextGraphMetadata({
+      store,
+      localAccessPolicy: async () => 'private',
+      signal,
+    });
+
+    expect(signal.aborted).toBe(true);
+    expect(bounded.deferred).toBeGreaterThan(0);
+    expect(bounded.movedToMeta.length).toBeGreaterThan(0);
+    expect(bounded.movedToMeta.length + bounded.deferred).toBe(ids.length);
+    // A graph is moved whole or not at all: the pass stops only between them.
+    const moved = new Set(bounded.movedToMeta);
+    const placement = await heldPrivateGraphPlacement(store, 'did:dkg:context-graph:0xabc/embedded-');
+    for (const id of ids) {
+      expect(placement.get(id)).toEqual(moved.has(id)
+        ? { ontologyRows: 0, activityRows: 0, metaName: true }
+        : { ontologyRows: 4, activityRows: 1, metaName: false });
+    }
+
+    const later = await relocatePrivateContextGraphMetadata({ store, localAccessPolicy: async () => 'private' });
+
+    expect(later.deferred).toBe(0);
+    expect(later.movedToMeta).toHaveLength(bounded.deferred);
+    const after = await heldPrivateGraphPlacement(store, 'did:dkg:context-graph:0xabc/embedded-');
+    for (const id of ids) {
+      expect(after.get(id)).toEqual({ ontologyRows: 0, activityRows: 0, metaName: true });
+    }
+  }, 60_000);
 
   it('logs what a spent budget left, and the next store discovery pass relocates it', async () => {
     const { agent, chain } = await createAgent('relocate-deferred', { nodeRole: 'core' });
@@ -1210,7 +1320,10 @@ describe('relocation at startup', () => {
     try {
       await agent.start();
 
-      expect(relocate).toHaveBeenCalledWith({ classifyOnChain: false, signal: expect.any(AbortSignal) });
+      expect(relocate).toHaveBeenCalledWith({
+        classifyOnChain: false,
+        budgetMs: METADATA_RELOCATION_STARTUP_BUDGET_MS,
+      });
       await expect(relocate.mock.results[0]!.value).resolves.toMatchObject({ movedToMeta: [id], deferred: 0 });
       expect(await ontologyRowsAbout(agent, id)).toEqual([]);
       expect(await metaOnChainId(agent, id)).toBe('31');

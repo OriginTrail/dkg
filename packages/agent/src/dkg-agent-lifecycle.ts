@@ -2274,7 +2274,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     try {
       await this.relocatePrivateContextGraphMetadata({
         classifyOnChain: false,
-        signal: AbortSignal.timeout(METADATA_RELOCATION_STARTUP_BUDGET_MS),
+        budgetMs: METADATA_RELOCATION_STARTUP_BUDGET_MS,
       });
     } catch (err) {
       this.log.warn(
