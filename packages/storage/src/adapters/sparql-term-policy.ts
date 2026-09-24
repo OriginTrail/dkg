@@ -4,9 +4,9 @@
  * itself is core's (`@origintrail-official/dkg-core`, `sparql-terms.ts`).
  *
  * Rendering has no side effects. A term that fails validation becomes an
- * {@link InvalidSparqlTerm} on the statement being built. The adapter reports
- * it (`sparql-term-observer.ts`) when it runs the operation, through
- * `reportedPlan` in `sparql-statements.ts`. The adapters use
+ * {@link InvalidSparqlTerm} on the statement being built. The adapters'
+ * statement factory (`sparqlStatements` in `sparql-statements.ts`) reports it
+ * (`sparql-term-observer.ts`) as it hands the plan to the adapter. The adapters use
  * {@link ADAPTER_SPARQL_TERM_POLICY}, currently in observe mode: a failing
  * term is rendered exactly as before validation existed. Until the
  * hard-reject flip, that still means stripping characters from a malformed

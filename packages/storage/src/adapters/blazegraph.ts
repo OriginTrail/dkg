@@ -43,7 +43,6 @@ import {
 } from '../rfc64-author-commit-cas.js';
 import { quadToNQuad } from '../bounded-rdf.js';
 import {
-  reportedPlan,
   sparqlStatements,
   type SparqlQueryPlan,
   type SparqlUpdatePlan,
@@ -372,7 +371,7 @@ export class BlazegraphStore implements TripleStore {
     // Blazegraph is SPARQL 1.1, so blank nodes are illegal in `DELETE DATA`
     // (same constraint as Oxigraph). Reuse the shared blank-node-safe builder
     // so blank-node quads are removed via `DELETE { … } WHERE { … }`.
-    await this.runUpdatePlan(() => statements.deleteData(quads), options);
+    await this.runUpdatePlan(statements.deleteData(quads), options);
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>, options?: QueryOptions): Promise<number> {
@@ -399,7 +398,7 @@ export class BlazegraphStore implements TripleStore {
     pattern: Partial<DKGQuad>,
     options?: QueryOptions,
   ): Promise<void> {
-    await this.runUpdatePlan(() => statements.deleteByPattern(pattern), options);
+    await this.runUpdatePlan(statements.deleteByPattern(pattern), options);
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
@@ -407,7 +406,7 @@ export class BlazegraphStore implements TripleStore {
       ...options,
       source: options?.source ?? 'blazegraph.deleteBySubjectPrefix.countBefore',
     });
-    await this.runUpdatePlan(() => statements.deleteBySubjectPrefix(graphUri, prefix), options);
+    await this.runUpdatePlan(statements.deleteBySubjectPrefix(graphUri, prefix), options);
     const after = await this.countQuads(graphUri, {
       ...options,
       source: options?.source ?? 'blazegraph.deleteBySubjectPrefix.countAfter',
@@ -673,7 +672,7 @@ export class BlazegraphStore implements TripleStore {
   // -------------------------------------------------------------------
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
-    const r = await this.runQueryPlan(() => statements.hasGraph(graphUri), options);
+    const r = await this.runQueryPlan(statements.hasGraph(graphUri), options);
     return r.type === 'boolean' && r.value;
   }
 
@@ -682,7 +681,7 @@ export class BlazegraphStore implements TripleStore {
   }
 
   async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
-    await this.runUpdatePlan(() => statements.dropGraph(graphUri), options);
+    await this.runUpdatePlan(statements.dropGraph(graphUri), options);
   }
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
@@ -702,7 +701,7 @@ export class BlazegraphStore implements TripleStore {
   // -------------------------------------------------------------------
 
   async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
-    const r = await this.runQueryPlan(() => statements.countQuads(graphUri), options);
+    const r = await this.runQueryPlan(statements.countQuads(graphUri), options);
     if (r.type === 'bindings' && r.bindings.length > 0) {
       const cell = r.bindings[0].c ?? '';
       const digits = cell.match(/\d+/)?.[0];
@@ -724,15 +723,11 @@ export class BlazegraphStore implements TripleStore {
   // -------------------------------------------------------------------
 
   /**
-   * Build a statement plan and report its invalid terms, then send it under
-   * its own operation. Blazegraph keeps no write-scope bookkeeping, so the
-   * plan's scope is not needed here. Nothing to send when the plan is null.
+   * Send a statement plan under its own operation; nothing for a null plan.
+   * Blazegraph keeps no write-scope bookkeeping, so the plan's scope is not
+   * needed here.
    */
-  private async runUpdatePlan(
-    build: () => SparqlUpdatePlan | null,
-    options?: QueryOptions,
-  ): Promise<void> {
-    const plan = reportedPlan(build);
+  private async runUpdatePlan(plan: SparqlUpdatePlan | null, options?: QueryOptions): Promise<void> {
     if (plan === null) return;
     await this.sparqlUpdate(
       plan.update,
@@ -741,9 +736,8 @@ export class BlazegraphStore implements TripleStore {
     );
   }
 
-  /** Build a statement plan and report its invalid terms, then run its query under its own operation. */
-  private async runQueryPlan(build: () => SparqlQueryPlan, options?: QueryOptions): Promise<QueryResult> {
-    const plan = reportedPlan(build);
+  /** Run a statement plan's query under its own operation. */
+  private runQueryPlan(plan: SparqlQueryPlan, options?: QueryOptions): Promise<QueryResult> {
     return this.queryWithOperation(
       plan.sparql,
       { ...options, source: options?.source ?? `blazegraph.${plan.operation}` },

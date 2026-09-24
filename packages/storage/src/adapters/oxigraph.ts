@@ -34,7 +34,7 @@ import {
   type Rfc64AuthorCommitCasUpdateV1,
 } from '../rfc64-author-commit-cas.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
-import { reportedPlan, sparqlStatements } from './sparql-statements.js';
+import { sparqlStatements } from './sparql-statements.js';
 import {
   assertQuadLiteralsMutf8Safe,
   classifySparqlOperation,
@@ -381,7 +381,7 @@ export class OxigraphStore implements TripleStore {
   }
 
   async dropGraph(graphUri: string): Promise<void> {
-    const plan = reportedPlan(() => statements.dropGraph(graphUri));
+    const plan = statements.dropGraph(graphUri);
     this.store.update(plan.update);
     this.scheduleFlush();
     this.writeGen.recordWrite(plan.scope);
@@ -536,7 +536,7 @@ export class OxigraphStore implements TripleStore {
     graphUri: string,
     prefix: string,
   ): Promise<number> {
-    const plan = reportedPlan(() => statements.deleteBySubjectPrefix(graphUri, prefix));
+    const plan = statements.deleteBySubjectPrefix(graphUri, prefix);
     const before = this.store.size;
     this.store.update(plan.update);
     const removed = before - this.store.size;

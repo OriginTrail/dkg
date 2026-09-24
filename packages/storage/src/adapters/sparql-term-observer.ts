@@ -1,8 +1,8 @@
 /**
  * Reports the invalid SPARQL terms that statement plans carry. This is the
  * only code that touches the counter, the warning log and its once-a-minute
- * throttle. Adapters report a plan's terms when they run its operation, via
- * `reportedPlan` in `sparql-statements.ts`.
+ * throttle. The adapters' statement factory (`sparqlStatements` in
+ * `sparql-statements.ts`) reports each plan's terms as it builds the plan.
  */
 import { getMetrics } from '@origintrail-official/dkg-core';
 import { describeInvalidTerm, type InvalidSparqlTerm } from './sparql-term-policy.js';

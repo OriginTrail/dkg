@@ -2,12 +2,16 @@
  * The SPARQL statements the storage adapters build by string interpolation.
  *
  * Each builder returns a plan: the statement, the store operation it runs as,
- * for an update the graphs it may write, and the terms that failed validation
- * while it was rendered. Building a plan has no side effects. The adapter
- * reports the plan's invalid terms when it runs the operation, through
- * {@link reportedPlan}, and then sends the plan under its own operation and
- * scope. The same operation labels every term the builder renders, and the
- * write scope comes from the same pass that builds the statement.
+ * and for an update the graphs it may write. The same operation labels every
+ * term the builder renders, and the write scope comes from the same pass that
+ * builds the statement.
+ *
+ * {@link sparqlStatements} is the adapters' factory, and it reports as an
+ * invariant: every builder reports the invalid terms it rendered, exactly once
+ * and before the adapter admits or dispatches anything, so an adapter cannot
+ * forget to. Underneath, {@link pureSparqlStatements} renders the same plans
+ * without reporting, each carrying its invalid terms, for the deprecated
+ * compatibility exports and isolated tests.
  */
 import type { GraphWriteScope } from '../graph-write-gen.js';
 import type { Quad } from '../triple-store.js';
@@ -21,21 +25,23 @@ import {
   type SparqlTermSite,
 } from './sparql-term-policy.js';
 
-/** A query, the store operation it runs as, and its invalid terms. */
+/** A query, and the store operation it runs as. */
 export interface SparqlQueryPlan {
   readonly operation: 'hasGraph' | 'countQuads';
   readonly sparql: string;
-  readonly invalidTerms: readonly InvalidSparqlTerm[];
 }
 
-/** An update, the store operation it runs as, the graphs it may write, and its invalid terms. */
+/** An update, the store operation it runs as, and the graphs it may write. */
 export interface SparqlUpdatePlan {
   readonly operation: 'insert' | 'delete' | 'deleteByPattern' | 'deleteBySubjectPrefix' | 'dropGraph';
   readonly update: string;
   readonly scope: GraphWriteScope;
-  readonly invalidTerms: readonly InvalidSparqlTerm[];
 }
 
+/** A plan as {@link pureSparqlStatements} returns it, with the terms that failed validation. */
+export type WithInvalidTerms<P> = P & { readonly invalidTerms: readonly InvalidSparqlTerm[] };
+
+/** The adapters' statement builders; each reports its invalid terms (see {@link sparqlStatements}). */
 export interface SparqlStatements {
   /** `INSERT DATA` for `quads`, grouped by graph; subjects and objects may be blank nodes. */
   insertData(quads: readonly Quad[]): SparqlUpdatePlan;
@@ -57,31 +63,63 @@ export interface SparqlStatements {
   countQuads(graph?: string): SparqlQueryPlan;
 }
 
-/**
- * Build a plan and report its invalid terms: the adapter-operation boundary.
- * Adapters call this when they run an operation, before admission or
- * dispatch, so each invalid term is reported exactly once, whether or not the
- * statement is then sent. A term rejected in reject mode is reported the same
- * way before the error propagates.
- */
-export function reportedPlan<P extends { readonly invalidTerms: readonly InvalidSparqlTerm[] } | null>(
-  build: () => P,
-): P {
-  let plan: P;
-  try {
-    plan = build();
-  } catch (error) {
-    if (error instanceof SparqlTermRejectedError) reportInvalidSparqlTerms([error.invalidTerm]);
-    throw error;
-  }
-  if (plan !== null) reportInvalidSparqlTerms(plan.invalidTerms);
-  return plan;
+/** The same builders, unreported: each plan carries the terms that failed validation. */
+export interface PureSparqlStatements {
+  insertData(quads: readonly Quad[]): WithInvalidTerms<SparqlUpdatePlan>;
+  deleteData(quads: Quad[]): WithInvalidTerms<SparqlUpdatePlan> | null;
+  deleteByPattern(pattern: Partial<Quad>): WithInvalidTerms<SparqlUpdatePlan>;
+  deleteBySubjectPrefix(graph: string, prefix: string): WithInvalidTerms<SparqlUpdatePlan>;
+  dropGraph(graph: string): WithInvalidTerms<SparqlUpdatePlan>;
+  hasGraph(graph: string): WithInvalidTerms<SparqlQueryPlan>;
+  countQuads(graph?: string): WithInvalidTerms<SparqlQueryPlan>;
 }
 
+/**
+ * The adapters' statement factory. Each builder renders its plan, reports the
+ * plan's invalid terms, or a reject-mode rejection before it propagates,
+ * exactly once, and returns the plan without them.
+ */
 export function sparqlStatements(
   adapter: SparqlTermSite['adapter'],
   terms: SparqlTermPolicy = ADAPTER_SPARQL_TERM_POLICY,
 ): SparqlStatements {
+  const pure = pureSparqlStatements(adapter, terms);
+  return {
+    insertData: (quads) => reported(() => pure.insertData(quads)),
+    deleteData: (quads) => reported(() => pure.deleteData(quads)),
+    deleteByPattern: (pattern) => reported(() => pure.deleteByPattern(pattern)),
+    deleteBySubjectPrefix: (graph, prefix) => reported(() => pure.deleteBySubjectPrefix(graph, prefix)),
+    dropGraph: (graph) => reported(() => pure.dropGraph(graph)),
+    hasGraph: (graph) => reported(() => pure.hasGraph(graph)),
+    countQuads: (graph) => reported(() => pure.countQuads(graph)),
+  };
+}
+
+function reported<P>(build: () => WithInvalidTerms<P>): P;
+function reported<P>(build: () => WithInvalidTerms<P> | null): P | null;
+function reported<P>(build: () => WithInvalidTerms<P> | null): P | null {
+  let built: WithInvalidTerms<P> | null;
+  try {
+    built = build();
+  } catch (error) {
+    if (error instanceof SparqlTermRejectedError) reportInvalidSparqlTerms([error.invalidTerm]);
+    throw error;
+  }
+  if (built === null) return null;
+  const { invalidTerms, ...plan } = built;
+  reportInvalidSparqlTerms(invalidTerms);
+  return plan as P;
+}
+
+/**
+ * {@link sparqlStatements} without reporting: plans carry their invalid terms.
+ * Adapters never use it directly. It serves the deprecated compatibility
+ * exports, which never reported, and isolated tests.
+ */
+export function pureSparqlStatements(
+  adapter: SparqlTermSite['adapter'],
+  terms: SparqlTermPolicy = ADAPTER_SPARQL_TERM_POLICY,
+): PureSparqlStatements {
   const renderer = (operation: SparqlTermSite['operation']) => terms.renderer({ adapter, operation });
   const graphs = (...graphUris: string[]): GraphWriteScope => ({ kind: 'graphs', graphs: graphUris });
 

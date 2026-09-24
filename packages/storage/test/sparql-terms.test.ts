@@ -16,7 +16,7 @@ import {
   type SparqlTermRenderer,
   type SparqlTermSite,
 } from '../src/adapters/sparql-term-policy.js';
-import { reportedPlan } from '../src/adapters/sparql-statements.js';
+import { reportInvalidSparqlTerms } from '../src/adapters/sparql-term-observer.js';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 // Frozen copies of the adapter formatters sparql-terms replaced. They are the
@@ -41,16 +41,23 @@ function legacyEscapeString(s: string): string {
 const SITE: SparqlTermSite = { adapter: 'sparql-http', operation: 'insert' };
 
 /**
- * One term at a time, the way an adapter handles a statement: render it for
- * the site, then report the invalid terms through `reportedPlan`.
+ * One term at a time, the way the adapters' statement factory handles a
+ * statement: render it for the site, then report the invalid terms, or a
+ * reject-mode rejection, once.
  */
 function asAdapter(policy: SparqlTermPolicy) {
-  const run = <T>(site: SparqlTermSite, render: (renderer: SparqlTermRenderer) => T): T =>
-    reportedPlan(() => {
-      const renderer = policy.renderer(site);
-      const value = render(renderer);
-      return { value, invalidTerms: renderer.invalidTerms };
-    }).value;
+  const run = <T>(site: SparqlTermSite, render: (renderer: SparqlTermRenderer) => T): T => {
+    const renderer = policy.renderer(site);
+    let value: T;
+    try {
+      value = render(renderer);
+    } catch (error) {
+      if (error instanceof SparqlTermRejectedError) reportInvalidSparqlTerms([error.invalidTerm]);
+      throw error;
+    }
+    reportInvalidSparqlTerms(renderer.invalidTerms);
+    return value;
+  };
   return {
     iriTerm: (term: string, position: IriTermPosition, site: SparqlTermSite) =>
       run(site, (renderer) => renderer.iri(term, position)),
@@ -434,19 +441,17 @@ describe('rendering and reporting', () => {
     expect(JSON.stringify(renderer.invalidTerms)).not.toContain('sk-secret');
   });
 
-  it('reports each invalid term exactly once, at the adapter boundary', () => {
+  it('counts each reported invalid term exactly once', () => {
     const observed = observeInvalidSparqlTerms();
-    const plan = reportedPlan(() => {
-      const renderer = ADAPTER_SPARQL_TERM_POLICY.renderer(SITE);
-      renderer.iri('urn:a b', 'graph');
-      renderer.iri('urn:c^d', 'predicate');
-      return { invalidTerms: renderer.invalidTerms };
-    });
-    expect(plan.invalidTerms).toHaveLength(2);
+    const renderer = ADAPTER_SPARQL_TERM_POLICY.renderer(SITE);
+    renderer.iri('urn:a b', 'graph');
+    renderer.iri('urn:c^d', 'predicate');
+    expect(observed.counted).toEqual([]);
+    reportInvalidSparqlTerms(renderer.invalidTerms);
     expect(observed.counted.map(({ position }) => position)).toEqual(['graph', 'predicate']);
   });
 
-  it('throws in reject mode without reporting, until the adapter boundary reports it once', () => {
+  it('throws in reject mode without reporting, carrying the diagnostic to report', () => {
     const observed = observeInvalidSparqlTerms();
     const renderer = createSparqlTermPolicy('reject').renderer(SITE);
     let error: unknown;
@@ -458,9 +463,7 @@ describe('rendering and reporting', () => {
     expect(error).toBeInstanceOf(SparqlTermRejectedError);
     expect(observed.counted).toEqual([]);
 
-    expect(() => reportedPlan(() => {
-      throw error;
-    })).toThrow(SparqlTermRejectedError);
+    reportInvalidSparqlTerms([(error as SparqlTermRejectedError).invalidTerm]);
     expect(observed.counted.map(({ enforcement }) => enforcement)).toEqual(['reject']);
   });
 });
