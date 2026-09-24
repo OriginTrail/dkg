@@ -502,12 +502,32 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(true);
     const onDemand = 'gh1098-on-demand';
     const saved = 'gh1098-saved';
-    await internals.store.insert([[onDemand, '4250'], [saved, '4251']].map(([localCgId, onChainId]) => ({
+    const claims = [[onDemand, '4250'], [saved, '4251']] as const;
+    await internals.store.insert(claims.map(([localCgId, onChainId]) => ({
       subject: `did:dkg:context-graph:${localCgId}`,
       predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
       object: `"${onChainId}"`,
       graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
     })));
+    // Each OnChainId quad is only a claim. Record that this node's chain
+    // commits the graph's name hash at the claimed id, as enumeration would,
+    // so the claim binds even where only chain-proven claims do.
+    const slotFacts = (internals as unknown as {
+      onChainContextGraphFacts: Map<string, unknown>;
+    }).onChainContextGraphFacts;
+    for (const [localCgId, onChainId] of claims) {
+      slotFacts.set(onChainId, {
+        onChainId,
+        nameHash: ethers.keccak256(ethers.toUtf8Bytes(localCgId)).toLowerCase(),
+        owner: null,
+        accessPolicy: 0,
+        publishPolicy: 1,
+        publishAuthority: null,
+        createdAt: null,
+        active: true,
+        observedAtBlock: 1,
+      });
+    }
     // This chain has no finalized authority index, so VM target resolution
     // binds both unbound subscriptions through self-prime.
     internals.subscribedContextGraphs.set(onDemand, { subscribed: true, syncMode: 'on-demand' });
