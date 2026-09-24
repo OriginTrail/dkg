@@ -14,6 +14,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter, NoChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   DKG_ONTOLOGY,
+  PROTOCOL_QUERY_REMOTE,
+  PROTOCOL_SYNC,
+  QuietRetryableHandlerError,
   SYSTEM_CONTEXT_GRAPHS,
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
@@ -31,6 +34,7 @@ import {
   slotRelocationVerdict,
 } from '../src/context-graph-metadata-relocation.js';
 import { replaceContextGraphMetadataFact } from '../src/context-graph-metadata-fact.js';
+import { encodeChangelogRequest } from '../src/sync/changelog/wire.js';
 import {
   ONTOLOGY_BINDING_SLOT_RECHECK_MS,
   ONTOLOGY_BINDING_SLOTS_MAX,
@@ -868,18 +872,36 @@ describe('bounded and interrupted relocation passes', () => {
       ontologyQuad(contextGraphDataGraphUri(renamed), DKG_ONTOLOGY.SCHEMA_NAME, '"Renamed"'),
     ]);
     const info = vi.spyOn((agent as unknown as { log: { info: (...args: unknown[]) => void } }).log, 'info');
+    expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(true);
 
     await expect(agent.relocatePrivateContextGraphMetadata({ classifyOnChain: false, signal: AbortSignal.abort() }))
       .resolves.toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 0, deferred: 2 });
     expect(info.mock.calls.map(([, message]) => message))
       .toContain('Context graph metadata relocation stopped early: 2 candidate(s) left for a later pass');
     expect(await ontologyRowsAbout(agent, renamed)).toEqual([`${DKG_ONTOLOGY.SCHEMA_NAME} "Renamed"`]);
+    expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(true);
+    expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.AGENTS)).toBe(false);
 
     await agent.discoverContextGraphsFromStore();
 
     expect(await ontologyRowsAbout(agent, curated)).toEqual([]);
     expect(await ontologyRowsAbout(agent, renamed)).toEqual([]);
     expect(agent.subscribedContextGraphs.get(curated)).toBeUndefined();
+    expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(false);
+    expect(info.mock.calls.map(([, message]) => message))
+      .toContain('Context graph metadata relocation reached every candidate; serving the ontology graph to peers again');
+  });
+
+  it('keeps ontology withheld after a pass that fails, until one finishes', async () => {
+    const { agent } = await createAgent('relocate-failed');
+    const query = vi.spyOn(agent.store, 'query').mockRejectedValueOnce(new Error('store unavailable'));
+
+    await expect(agent.relocatePrivateContextGraphMetadata()).rejects.toThrow('store unavailable');
+    expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(true);
+
+    query.mockRestore();
+    await expect(agent.relocatePrivateContextGraphMetadata()).resolves.toMatchObject({ deferred: 0 });
+    expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(false);
   });
 
   it('changes nothing for a candidate set it finishes within budget', async () => {
@@ -1327,7 +1349,118 @@ describe('relocation at startup', () => {
       await expect(relocate.mock.results[0]!.value).resolves.toMatchObject({ movedToMeta: [id], deferred: 0 });
       expect(await ontologyRowsAbout(agent, id)).toEqual([]);
       expect(await metaOnChainId(agent, id)).toBe('31');
+      expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(false);
     } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
+
+  it('serves ontology to peers only once a startup pass that ran out of time has been finished', async () => {
+    const privateId = '0xabc/held-private-at-start';
+    const publicId = '0xabc/public-at-start';
+    const agent = await DKGAgent.create({
+      name: 'metadata-placement-startup-withheld',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+      // Opens ontology to remote queries too, so that path is covered.
+      queryAccess: { defaultPolicy: 'public' },
+    }) as TestAgent;
+    const subject = contextGraphDataGraphUri(privateId);
+    const metaGraph = contextGraphMetaGraphUri(privateId);
+    // An upgraded node's private graph, whose definition and name an earlier
+    // build also wrote to ontology, next to a public graph's definition.
+    await agent.store.insert([
+      { subject, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: metaGraph },
+      { subject, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"private"', graph: metaGraph },
+      ontologyQuad(subject, DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
+      ontologyQuad(subject, DKG_ONTOLOGY.SCHEMA_NAME, '"Private Plans"'),
+      ontologyQuad(subject, DKG_ONTOLOGY.DKG_ACCESS_POLICY, '"private"'),
+      ontologyQuad(contextGraphDataGraphUri(publicId), DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
+      ontologyQuad(contextGraphDataGraphUri(publicId), DKG_ONTOLOGY.SCHEMA_NAME, '"Open Data"'),
+    ]);
+    // The startup pass finds its budget already spent; the pass start leaves
+    // running in the background waits until the test lets it go.
+    const relocate = agent.relocatePrivateContextGraphMetadata.bind(agent);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(agent, 'relocatePrivateContextGraphMetadata').mockImplementation(async (options = {}) => {
+      if (options.budgetMs !== undefined) return relocate({ ...options, budgetMs: 0 });
+      await held;
+      return relocate(options);
+    });
+    const warn = vi.spyOn((agent as unknown as { log: { warn: (...args: unknown[]) => void } }).log, 'warn');
+    const peer = '12D3KooWUnauthenticatedRequester';
+    const internals = agent as unknown as {
+      router: { handlers: Map<string, (data: Uint8Array, peerId: { toString(): string }) => Promise<Uint8Array>> };
+      messenger: { handlers: Map<string, (data: Uint8Array, peerId: string) => Promise<Uint8Array>> };
+      handleChangelogSync: (data: Uint8Array, peerId: string, options: undefined, reader: unknown) => Promise<Uint8Array>;
+    };
+    const syncPage = (request: string) => internals.router.handlers.get(PROTOCOL_SYNC)!(
+      new TextEncoder().encode(request),
+      { toString: () => peer },
+    );
+    const syncAll = async (contextGraphId: string): Promise<string> => {
+      const pages: string[] = [];
+      for (let offset = 0; offset < 100_000; offset += 100) {
+        const page = new TextDecoder().decode(await syncPage(`${contextGraphId}|${offset}|100|data`));
+        if (page === '') break;
+        pages.push(page);
+      }
+      return pages.join('\n');
+    };
+    const queryNames = async (contextGraphId: string): Promise<{ status: string; error?: string; bindings?: string }> => (
+      JSON.parse(new TextDecoder().decode(await internals.messenger.handlers.get(PROTOCOL_QUERY_REMOTE)!(
+        new TextEncoder().encode(JSON.stringify({
+          operationId: 'names',
+          lookupType: 'SPARQL_QUERY',
+          contextGraphId,
+          sparql: `SELECT ?name WHERE { ?graph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }`,
+        })),
+        peer,
+      )))
+    );
+
+    try {
+      await agent.start();
+
+      expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(true);
+      expect(warn.mock.calls.map(([, message]) => message)).toContain(
+        'Not serving the ontology graph to peers until the context graph metadata relocation reaches every candidate',
+      );
+      expect(await ontologyRowsAbout(agent, privateId)).not.toEqual([]);
+      // Refused the way a busy responder refuses, so the requester retries
+      // rather than taking an empty page as the end of the graph.
+      await expect(syncPage('ontology|0|100|data')).rejects.toBeInstanceOf(QuietRetryableHandlerError);
+      await expect(syncPage('ontology|0|100|meta')).rejects.toBeInstanceOf(QuietRetryableHandlerError);
+      await expect(syncPage('workspace:ontology|0|100|data')).rejects.toBeInstanceOf(QuietRetryableHandlerError);
+      await expect(internals.handleChangelogSync(
+        encodeChangelogRequest({ contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, sinceSeq: 0, era: null, limit: 100 }),
+        peer,
+        undefined,
+        {},
+      )).rejects.toBeInstanceOf(QuietRetryableHandlerError);
+      await expect(queryNames(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).resolves.toMatchObject({
+        status: 'ERROR',
+        error: "Context graph 'ontology' is not served yet; retry later",
+      });
+      // Other graphs are served as usual.
+      await expect(syncAll(SYSTEM_CONTEXT_GRAPHS.AGENTS)).resolves.toEqual(expect.any(String));
+
+      release();
+      await vi.waitFor(() => {
+        expect(agent.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toBe(false);
+      });
+
+      const served = await syncAll(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      expect(served).toContain('"Open Data"');
+      expect(served).not.toContain(privateId);
+      expect(served).not.toContain('Private Plans');
+      const names = await queryNames(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      expect(names.status).toBe('OK');
+      expect(names.bindings).toContain('Open Data');
+      expect(names.bindings).not.toContain('Private Plans');
+    } finally {
+      release();
       await agent.stop().catch(() => {});
     }
   }, 30_000);

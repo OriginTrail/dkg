@@ -834,6 +834,12 @@ export class DKGAgent extends DKGAgentBase {
   /** One store discovery pass is shared by concurrent peer-connect sessions. */
   private contextGraphStoreDiscoveryInFlight?: Promise<number>;
   /**
+   * Progress of the ontology metadata relocation (see
+   * {@link contextGraphServingWithheld}): no pass has ended yet, a pass ended
+   * without reaching every candidate, or one did.
+   */
+  private ontologyRelocation: 'pending' | 'withheld' | 'relocated' = 'pending';
+  /**
    * Slots named by ontology bindings. It never writes `onChainAccessPolicyCache`,
    * which StorageACK curation checks trust, since its unproven reads can be 0.
    */
@@ -2032,26 +2038,34 @@ export class DKGAgent extends DKGAgentBase {
    * this first, so discovery only acts on ontology rows that belong there.
    * Without `classifyOnChain`, bare bindings of graphs this node doesn't hold
    * are left for a later pass (no chain reads). Once `budgetMs` is spent or
-   * `signal` aborts, the remaining candidates are also left for a later pass.
+   * `signal` aborts, the remaining candidates are also left for a later pass,
+   * and {@link contextGraphServingWithheld} holds `ontology` back until a pass
+   * reaches them.
    */
   async relocatePrivateContextGraphMetadata(
     options: { classifyOnChain?: boolean; budgetMs?: number; signal?: AbortSignal } = {},
   ): Promise<ContextGraphMetadataRelocationResult> {
-    const result = await relocatePrivateContextGraphMetadata({
-      store: this.store,
-      localAccessPolicy: async (contextGraphId) => {
-        if (await this.isPrivateContextGraph(contextGraphId)) return 'private';
-        return (await this.getExplicitAccessPolicy(contextGraphId)) === 'public' ? 'public' : null;
-      },
-      ...(options.classifyOnChain === false
-        ? {}
-        : {
-          classifyOnChainSlot: (onChainId: string) => this.classifyOntologyBindingSlot(onChainId),
-          knownSlotClass: (onChainId: string) => this.knownOntologyBindingSlotClass(onChainId),
-        }),
-      ...(options.budgetMs !== undefined ? { budgetMs: options.budgetMs } : {}),
-      ...(options.signal ? { signal: options.signal } : {}),
-    });
+    let result: ContextGraphMetadataRelocationResult;
+    try {
+      result = await relocatePrivateContextGraphMetadata({
+        store: this.store,
+        localAccessPolicy: async (contextGraphId) => {
+          if (await this.isPrivateContextGraph(contextGraphId)) return 'private';
+          return (await this.getExplicitAccessPolicy(contextGraphId)) === 'public' ? 'public' : null;
+        },
+        ...(options.classifyOnChain === false
+          ? {}
+          : {
+            classifyOnChainSlot: (onChainId: string) => this.classifyOntologyBindingSlot(onChainId),
+            knownSlotClass: (onChainId: string) => this.knownOntologyBindingSlotClass(onChainId),
+          }),
+        ...(options.budgetMs !== undefined ? { budgetMs: options.budgetMs } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (err) {
+      if (this.ontologyRelocation === 'pending') this.ontologyRelocation = 'withheld';
+      throw err;
+    }
     if (result.movedToMeta.length > 0 || result.deletedForeign > 0) {
       this.invalidateListContextGraphsCache();
       for (const contextGraphId of result.movedToMeta) {
@@ -2068,8 +2082,30 @@ export class DKGAgent extends DKGAgentBase {
         createOperationContext('system'),
         `Context graph metadata relocation stopped early: ${result.deferred} candidate(s) left for a later pass`,
       );
+      if (this.ontologyRelocation === 'pending') this.ontologyRelocation = 'withheld';
+    } else if (this.ontologyRelocation !== 'relocated') {
+      if (this.ontologyRelocation === 'withheld') {
+        this.log.info(
+          createOperationContext('system'),
+          'Context graph metadata relocation reached every candidate; serving the ontology graph to peers again',
+        );
+      }
+      this.ontologyRelocation = 'relocated';
     }
     return result;
+  }
+
+  /**
+   * Whether peers asking for `contextGraphId` are to be told to retry later
+   * rather than be served it: `ontology`, until a metadata relocation pass
+   * has reached every candidate. Until then it may still hold private
+   * metadata that earlier builds wrote there, and it is a public graph, so
+   * sync, changelog sync and remote queries would hand those rows to anyone.
+   * Nothing in this build writes private metadata to ontology, so once a pass
+   * finishes, the graph stays servable for the life of the agent.
+   */
+  contextGraphServingWithheld(contextGraphId: string): boolean {
+    return contextGraphId === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY && this.ontologyRelocation !== 'relocated';
   }
 
   /** The class of an ontology binding's slot this node knows without a chain read. */

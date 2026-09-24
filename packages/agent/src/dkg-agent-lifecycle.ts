@@ -49,6 +49,7 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   validateSubGraphName,
   Logger, createOperationContext, isKaPublishLifecycleDebugLoggingEnabled, isStorageACKDecline, sparqlString, escapeSparqlLiteral, isSafeIri,
+  QuietRetryableHandlerError,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -796,6 +797,34 @@ function projectPersistedJoinApprovals(
     }
   }
   return newestApprovalByContextGraph;
+}
+
+/**
+ * The answer to a remote query of a graph `withheld` names: an error the
+ * caller can retry, without reaching the query engine. `undefined` for any
+ * other request, malformed ones included, which the query handler answers.
+ */
+function withheldRemoteQueryResponse(
+  data: Uint8Array,
+  withheld: (contextGraphId: string) => boolean,
+): Uint8Array | undefined {
+  let request: unknown;
+  try {
+    request = JSON.parse(new TextDecoder().decode(data));
+  } catch {
+    return undefined;
+  }
+  if (typeof request !== 'object' || request === null) return undefined;
+  const { contextGraphId, operationId } = request as Partial<Record<keyof QueryRequest, unknown>>;
+  if (typeof contextGraphId !== 'string' || !withheld(contextGraphId)) return undefined;
+  const response: QueryResponse = {
+    operationId: typeof operationId === 'string' ? operationId : '',
+    status: 'ERROR',
+    truncated: false,
+    resultCount: 0,
+    error: `Context graph '${contextGraphId}' is not served yet; retry later`,
+  };
+  return new TextEncoder().encode(JSON.stringify(response));
 }
 
 function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
@@ -2271,6 +2300,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // hold need a chain read; that pass runs once start completes and before
     // every store discovery pass. This pass is on the startup path, so it has
     // a time budget; candidates it doesn't reach are left to those passes.
+    // Until one of them reaches every candidate (this one included), ontology
+    // may still hold private rows, so peers are not served it.
     try {
       await this.relocatePrivateContextGraphMetadata({
         classifyOnChain: false,
@@ -2280,6 +2311,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.log.warn(
         ctx,
         `Failed to relocate private context graph metadata out of the ontology graph: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (this.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)) {
+      this.log.warn(
+        ctx,
+        'Not serving the ontology graph to peers until the context graph metadata relocation reaches every candidate',
       );
     }
 
@@ -2520,6 +2557,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // receiver-side dedup + envelope unwrap happen transparently.
     // QueryHandler's contract is unchanged.
     this.messenger.register(PROTOCOL_QUERY_REMOTE, async (data, peerId) => {
+      // A graph held back from sync is not queried either, for an operator
+      // whose queryAccess opens it (see contextGraphServingWithheld).
+      if (this.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)) {
+        const withheld = withheldRemoteQueryResponse(data, (id) => this.contextGraphServingWithheld(id));
+        if (withheld) return withheld;
+      }
       const peerIdObj = {
         toString: () => peerId,
         toBytes: () => new Uint8Array(),
@@ -3480,6 +3523,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // reversible at runtime (no restart).
       shouldWithholdDurableMeta: (contextGraphId) =>
         shouldWithholdAgentsDurableMeta(contextGraphId, process.env.DKG_SERVE_AGENTS_META),
+      servingWithheld: (contextGraphId) => this.contextGraphServingWithheld(contextGraphId),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
       logDebug: (ctx, message) => this.log.debug(ctx, message),
       snapshotBudget: snapshotPolicy.budget,
@@ -4354,6 +4398,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } catch {
       // Malformed peer bytes → deny (mirrors the legacy lane's parse-fail path).
       return encodeChangelogResponse({ kind: 'denied' });
+    }
+    // A graph held back from the legacy lane is held back here too. The
+    // requester falls back to that lane, which refuses it the same way, and
+    // retries on a later round.
+    if (this.contextGraphServingWithheld(request.contextGraphId)) {
+      throw new QuietRetryableHandlerError(`"${request.contextGraphId}" is not served yet`);
     }
     // Same per-CG gate as PROTOCOL_SYNC: public CGs are open (returns true),
     // private CGs verify the signed digest — a bare (unsigned) changelog request
