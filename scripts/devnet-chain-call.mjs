@@ -52,7 +52,12 @@ let ethers;
   }
   ethers = loaded.ethers || loaded;
 }
-const RPC = process.env.RPC_URL || 'http://127.0.0.1:8545';
+// RPC_URL, else this devnet's RPC (DEVNET_RPC, HARDHAT_PORT, or what
+// devnet.sh recorded) — never a blind default another devnet may own.
+const { resolveDevnetRpc, assertDevnetChain } = await import(
+  path.join(REPO_ROOT, 'devnet/_bootstrap/devnet-chain.mjs')
+);
+const RPC = process.env.RPC_URL || resolveDevnetRpc(process.env, path.join(REPO_ROOT, '.devnet'));
 const CONTRACTS_JSON =
   process.env.CONTRACTS_JSON ||
   path.join(REPO_ROOT, 'packages/evm-module/deployments/localhost_contracts.json');
@@ -148,6 +153,8 @@ async function main() {
   const iface = new ethers.Interface(abi);
   const fragment = resolveFragment(iface, abi, method, args, explicitSig);
 
+  // A signed call changes chain state: refuse any chain this devnet did not deploy.
+  if (key) await assertDevnetChain(RPC, { devnetDir: path.join(REPO_ROOT, '.devnet') });
   const signerOrProvider = key ? new ethers.Wallet(key, provider) : provider;
   const c = new ethers.Contract(addr, abi, signerOrProvider);
 

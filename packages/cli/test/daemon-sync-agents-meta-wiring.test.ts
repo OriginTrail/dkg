@@ -219,6 +219,76 @@ describe('runDaemonInner wires sync and authority index options into DKGAgent.cr
     expect(logs).not.toContain(skippedDefaultPrefix);
   });
 
+  describe('network file relays as snapshot trust for another chain', () => {
+    const networkHub = '0xC056e67Da4F51377Ad1B01f50F655fFdcCD809F6';
+    function networkFileWithChain(chainId: string) {
+      return {
+        networkName: 'DKG V10 Base Testnet',
+        genesisId: 'base-testnet',
+        genesisVersion: 1,
+        relays: [networkFileRelay],
+        defaultNodeRole: 'edge',
+        chain: { type: 'evm', rpcUrl: 'https://sepolia.base.org', hubAddress: networkHub, chainId },
+      };
+    }
+
+    it('withholds them from an edge on a local chain (the devnet shape)', async () => {
+      mocks.loadNetworkConfig.mockResolvedValue(networkFileWithChain('base:84532'));
+      mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [operationalWallet] });
+      const localRelay = '/ip4/127.0.0.1/tcp/10001/p2p/12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
+      const createArg = await captureCreateArg({
+        nodeRole: 'edge',
+        relay: localRelay,
+        chain: {
+          type: 'evm',
+          rpcUrl: 'http://127.0.0.1:8545',
+          hubAddress: '0x5FbDB2315678afecb367f032d93F642f64180aa3',
+          chainId: 'evm:31337',
+        },
+      });
+      expect(createArg.relayPeers).toEqual([localRelay]);
+      expect(createArg.networkRelays).toEqual([]);
+      expect(createArg.authorityIndex).toBeUndefined();
+      const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+      expect(logs).toContain(
+        '[info] [authority-index] DKG V10 Base Testnet relays are not used as snapshot trust: '
+        + "chain evm:31337 is not the network file's chain base:84532",
+      );
+      expect(logs).toContain(`${skippedDefaultPrefix}no network relay is available to seed from; using local history`);
+      expect(logs).toContain(localHistoryStartupLine);
+      expect(logs).not.toContain('source=network-relays');
+    });
+
+    it('withholds them when only the Hub differs', async () => {
+      mocks.loadNetworkConfig.mockResolvedValue(networkFileWithChain('evm:100'));
+      mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [operationalWallet] });
+      const createArg = await captureCreateArg({ nodeRole: 'edge' });
+      expect(createArg.networkRelays).toEqual([]);
+      const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+      expect(logs).toContain(
+        `Hub 0x1234567890123456789012345678901234567890 is not the network file's Hub ${networkHub}`,
+      );
+    });
+
+    it("keeps them for a node on the network file's own chain, whatever the Hub's letter case", async () => {
+      mocks.loadNetworkConfig.mockResolvedValue(networkFileWithChain('evm:100'));
+      mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [operationalWallet] });
+      const createArg = await captureCreateArg({
+        nodeRole: 'edge',
+        chain: {
+          type: 'evm',
+          rpcUrl: 'https://private-rpc.example',
+          hubAddress: networkHub.toLowerCase(),
+          chainId: 'evm:100',
+        },
+      });
+      expect(createArg.networkRelays).toEqual([networkFileRelay]);
+      const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+      expect(logs).toContain('source=network-relays');
+      expect(logs).not.toContain('are not used as snapshot trust');
+    });
+  });
+
   describe('transport-level network peer isolation', () => {
     const originalIsolationEnv = process.env.DKG_NETWORK_PEER_ISOLATION_ENABLED;
     afterEach(() => {

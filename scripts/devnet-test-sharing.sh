@@ -29,6 +29,15 @@ fi
 
 PASS=0; FAIL=0; WARN=0
 DEVNET_TMPDIR="${TMPDIR:-/tmp}"
+# Node N's API port is API_PORT_BASE + N - 1, as scripts/devnet.sh lays it out;
+# never assume the default base, which another devnet may own.
+# shellcheck source=devnet-layout.sh
+source "$SCRIPT_DIR/devnet-layout.sh"
+NODE1_PORT=$((API_PORT_BASE)); NODE1_API="http://127.0.0.1:$NODE1_PORT"
+NODE2_PORT=$((API_PORT_BASE + 1)); NODE2_API="http://127.0.0.1:$NODE2_PORT"
+NODE3_PORT=$((API_PORT_BASE + 2)); NODE3_API="http://127.0.0.1:$NODE3_PORT"
+NODE4_PORT=$((API_PORT_BASE + 3)); NODE4_API="http://127.0.0.1:$NODE4_PORT"
+NODE5_PORT=$((API_PORT_BASE + 4)); NODE5_API="http://127.0.0.1:$NODE5_PORT"
 
 c() {
   curl -sS --max-time 30 --connect-timeout 5 \
@@ -38,7 +47,7 @@ c() {
 # Adapter for devnet-publish-helpers.sh (node-numbered API calls).
 api_call() {
   local node="$1" method="$2" path="$3" data="${4:-}"
-  local port=$((9200 + node))
+  local port=$((API_PORT_BASE - 1 + node))
   if [ -n "$data" ]; then
     c -X "$method" "http://127.0.0.1:${port}${path}" -d "$data"
   else
@@ -158,11 +167,11 @@ echo "  Test CG: $CG_ID"
 echo ""
 
 # ── Discover node addresses ──────────────────────────────────────
-N1_ADDR=$(get_self_address 9201)
-N2_ADDR=$(get_self_address 9202)
-N3_ADDR=$(get_self_address 9203)
-N4_ADDR=$(get_self_address 9204)
-N1_PEER=$(get_self_peer_id 9201)
+N1_ADDR=$(get_self_address $NODE1_PORT)
+N2_ADDR=$(get_self_address $NODE2_PORT)
+N3_ADDR=$(get_self_address $NODE3_PORT)
+N4_ADDR=$(get_self_address $NODE4_PORT)
+N1_PEER=$(get_self_peer_id $NODE1_PORT)
 echo "  Node 1: $N1_ADDR (peer: $N1_PEER)"
 echo "  Node 2: $N2_ADDR"
 echo "  Node 3: $N3_ADDR"
@@ -174,7 +183,7 @@ echo "=== SECTION 1: Private Project Creation ==="
 echo ""
 
 echo "--- 1a: Create private project on Node 1 ---"
-CREATE=$(c -X POST "http://127.0.0.1:9201/api/context-graph/create" \
+CREATE=$(c -X POST "${NODE1_API}/api/context-graph/create" \
   -d "{\"id\":\"$CG_ID\",\"name\":\"Sharing Test\",\"description\":\"WM isolation and sharing test\",\"private\":true}")
 CREATE_OK=$(json_get "$CREATE" created)
 check "Private project created" "$CREATE_OK" "$CG_ID"
@@ -201,16 +210,16 @@ IMPORT1=$(curl -sS --max-time 30 --connect-timeout 5 \
   -H "Authorization: Bearer $AUTH" \
   -F "file=@${TMPMD};type=text/markdown" \
   -F "contextGraphId=$CG_ID" \
-  "http://127.0.0.1:9201/api/knowledge-assets/doc-alpha/wm/import-file" 2>&1)
+  "${NODE1_API}/api/knowledge-assets/doc-alpha/wm/import-file" 2>&1)
 rm -f "$TMPMD"
 IMPORT1_URI=$(json_get "$IMPORT1" assertionUri)
 IMPORT1_CT=$(json_get "$IMPORT1" extraction.tripleCount)
 [[ "$IMPORT1_URI" != "__NONE__" ]] && ok "Imported doc-alpha ($IMPORT1_CT triples)" || fail "Import failed: ${IMPORT1:0:200}"
 
 echo "--- 1c: Create a second WM assertion via API ---"
-c -X POST "http://127.0.0.1:9201/api/knowledge-assets" \
+c -X POST "${NODE1_API}/api/knowledge-assets" \
   -d "{\"contextGraphId\":\"$CG_ID\",\"name\":\"draft-beta\"}" > /dev/null
-c -X POST "http://127.0.0.1:9201/api/knowledge-assets/draft-beta/wm/write" \
+c -X POST "${NODE1_API}/api/knowledge-assets/draft-beta/wm/write" \
   -d "{\"contextGraphId\":\"$CG_ID\",\"quads\":[
     $(ql 'urn:sharing:beta1' 'http://schema.org/name' 'Beta Entity'),
     $(q 'urn:sharing:beta1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing'),
@@ -221,10 +230,10 @@ ok "Created draft-beta assertion with 4 quads"
 
 echo "--- 1d: Verify Node 1 has WM data locally ---"
 sleep 1
-N1_ASSERT_CT=$(c "http://127.0.0.1:9201/api/knowledge-assets/draft-beta/wm/quads?contextGraphId=$CG_ID" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("quads",d.get("result",[]))))' 2>/dev/null)
+N1_ASSERT_CT=$(c "${NODE1_API}/api/knowledge-assets/draft-beta/wm/quads?contextGraphId=$CG_ID" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("quads",d.get("result",[]))))' 2>/dev/null)
 [[ "$N1_ASSERT_CT" -ge 4 ]] && ok "Node 1 has $N1_ASSERT_CT quads in WM" || fail "Node 1 WM assertion empty ($N1_ASSERT_CT)"
 
-N1_GRAPHS=$(c -X POST "http://127.0.0.1:9201/api/query" \
+N1_GRAPHS=$(c -X POST "${NODE1_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?g (COUNT(*) AS ?cnt) WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\")) } GROUP BY ?g\"}")
 N1_GRAPH_CT=$(safe_bindings_count "$N1_GRAPHS")
 echo "  Node 1 has $N1_GRAPH_CT graphs for this CG"
@@ -235,10 +244,10 @@ echo "=== SECTION 2: Join Request Flow (Node 2) ==="
 echo ""
 
 echo "--- 2a: Node 2 subscribes (should be denied — not on allowlist) ---"
-c -X POST "http://127.0.0.1:9202/api/context-graph/subscribe" \
+c -X POST "${NODE2_API}/api/context-graph/subscribe" \
   -d "{\"contextGraphId\":\"$CG_ID\"}" > /dev/null
 sleep 5
-CATCHUP_ST=$(poll_catchup 9202 "$CG_ID" 10)
+CATCHUP_ST=$(poll_catchup $NODE2_PORT "$CG_ID" 10)
 # The curator (Node 1) is up, so an unauthorized subscribe is expected to reach
 # an explicit `denied` terminal state. A bare `timeout` is ambiguous — it can
 # also mean a wedged/unresponsive node — so it is only accepted alongside a
@@ -246,7 +255,7 @@ CATCHUP_ST=$(poll_catchup 9202 "$CG_ID" 10)
 # assertion-data graphs (same invariant asserted post-approval in §3a). A
 # `completed` outcome means the sync actually served data and is the leak this
 # check exists to catch, so it must fail regardless.
-N2_PREJOIN_ASSERT=$(c -X POST "http://127.0.0.1:9202/api/query" \
+N2_PREJOIN_ASSERT=$(c -X POST "${NODE2_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\") && CONTAINS(STR(?g), \\\"/assertion/\\\")) }\"}")
 N2_PREJOIN_CT=$(safe_bindings_count "$N2_PREJOIN_ASSERT")
 case "$CATCHUP_ST" in
@@ -269,11 +278,11 @@ case "$CATCHUP_ST" in
 esac
 
 echo "--- 2b: Node 2 sends signed join request ---"
-SIGN=$(c -X POST "http://127.0.0.1:9202/api/context-graph/$CG_ID/sign-join" -d "{\"curatorPeerId\":\"$N1_PEER\"}")
+SIGN=$(c -X POST "${NODE2_API}/api/context-graph/$CG_ID/sign-join" -d "{\"curatorPeerId\":\"$N1_PEER\"}")
 # /request-join expects the signed delegation + curatorPeerId — splice the curator peer-id
 # into the response body before forwarding so the receiver can authenticate the decision.
 SUBMIT_BODY=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); d['curatorPeerId']='$N1_PEER'; print(json.dumps(d))" "$SIGN")
-SUBMIT=$(c -X POST "http://127.0.0.1:9202/api/context-graph/$CG_ID/request-join" -d "$SUBMIT_BODY")
+SUBMIT=$(c -X POST "${NODE2_API}/api/context-graph/$CG_ID/request-join" -d "$SUBMIT_BODY")
 SUBMIT_OK=$(json_get "$SUBMIT" ok)
 SUBMIT_DEL=$(json_get "$SUBMIT" delivered)
 check "Join request submitted" "$SUBMIT_OK" "true"
@@ -281,19 +290,19 @@ check "Join request submitted" "$SUBMIT_OK" "true"
 
 echo "--- 2c: Node 1 sees the pending request ---"
 sleep 2
-REQUESTS=$(c "http://127.0.0.1:9201/api/context-graph/$CG_ID/join-requests")
+REQUESTS=$(c "${NODE1_API}/api/context-graph/$CG_ID/join-requests")
 REQ_CT=$(echo "$REQUESTS" | python3 -c 'import sys,json;print(len(json.load(sys.stdin).get("requests",[])))' 2>/dev/null)
 [[ "$REQ_CT" -ge 1 ]] && ok "Node 1 has $REQ_CT pending request(s)" || fail "No pending requests on Node 1"
 
 echo "--- 2d: Node 1 approves the request ---"
-APPROVE=$(c -X POST "http://127.0.0.1:9201/api/context-graph/$CG_ID/approve-join" \
+APPROVE=$(c -X POST "${NODE1_API}/api/context-graph/$CG_ID/approve-join" \
   -d "{\"agentAddress\":\"$N2_ADDR\"}")
 APPROVE_OK=$(json_get "$APPROVE" ok)
 check "Join request approved" "$APPROVE_OK" "true"
 
 echo "--- 2e: Node 2 auto-subscribes after approval ---"
 sleep 8
-N2_GRAPHS=$(c -X POST "http://127.0.0.1:9202/api/query" \
+N2_GRAPHS=$(c -X POST "${NODE2_API}/api/query" \
   -d "{\"sparql\":\"SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\")) }\"}")
 N2_GRAPH_CT=$(safe_bindings_count "$N2_GRAPHS")
 [[ "$N2_GRAPH_CT" -ge 1 ]] && ok "Node 2 has $N2_GRAPH_CT graph(s) after approval" || fail "Node 2 has no graphs after approval"
@@ -304,38 +313,38 @@ echo "=== SECTION 3: WM Isolation — Node 2 Must NOT See WM Data ==="
 echo ""
 
 echo "--- 3a: Node 2 has NO assertion data graphs ---"
-N2_ASSERT_GRAPHS=$(c -X POST "http://127.0.0.1:9202/api/query" \
+N2_ASSERT_GRAPHS=$(c -X POST "${NODE2_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\") && CONTAINS(STR(?g), \\\"/assertion/\\\")) }\"}")
 N2_ASSERT_CT=$(safe_bindings_count "$N2_ASSERT_GRAPHS")
 check "Node 2 has 0 assertion data graphs" "$N2_ASSERT_CT" "0"
 
 echo "--- 3b: Node 2 has NO lifecycle entities (memoryLayer/state) ---"
 META_GRAPH="did:dkg:context-graph:${CG_ID}/_meta"
-N2_LIFECYCLE=$(c -X POST "http://127.0.0.1:9202/api/query" \
+N2_LIFECYCLE=$(c -X POST "${NODE2_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/memoryLayer> ?ml } }\"}")
 N2_LC_CT=$(safe_bindings_count "$N2_LIFECYCLE")
 check "Node 2 has 0 lifecycle entities" "$N2_LC_CT" "0"
 
 echo "--- 3c: Node 2 has NO event entities (prov:Activity) ---"
-N2_EVENTS=$(c -X POST "http://127.0.0.1:9202/api/query" \
+N2_EVENTS=$(c -X POST "${NODE2_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s a <http://www.w3.org/ns/prov#Activity> . ?s a ?dkgType . FILTER(STRSTARTS(STR(?dkgType), \\\"http://dkg.io/ontology/Assertion\\\")) } }\"}")
 N2_EV_CT=$(safe_bindings_count "$N2_EVENTS")
 check "Node 2 has 0 assertion event entities" "$N2_EV_CT" "0"
 
 echo "--- 3d: Node 2 has NO import metadata (sourceFileHash, extractionMethod) ---"
-N2_IMPORT_META=$(c -X POST "http://127.0.0.1:9202/api/query" \
+N2_IMPORT_META=$(c -X POST "${NODE2_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/sourceFileHash> ?h } }\"}")
 N2_IM_CT=$(safe_bindings_count "$N2_IMPORT_META")
 check "Node 2 has 0 import metadata subjects" "$N2_IM_CT" "0"
 
 echo "--- 3e: Node 2 WM view shows 0 assertion facts ---"
-N2_WM_FACTS=$(c -X POST "http://127.0.0.1:9202/api/query" \
+N2_WM_FACTS=$(c -X POST "${NODE2_API}/api/query" \
   -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), \\\"did:dkg:context-graph:$CG_ID/\\\") && !STRENDS(STR(?g), \\\"/_meta\\\") && !CONTAINS(STR(?g), \\\"/_private\\\") && !CONTAINS(STR(?g), \\\"/_shared_memory\\\")) }\",\"contextGraphId\":\"$CG_ID\"}")
 N2_WM_CT=$(count_integer "$N2_WM_FACTS")
 check "Node 2 WM view has 0 assertion facts" "$N2_WM_CT" "0"
 
 echo "--- 3f: Node 2 _meta only has CG-level subjects ---"
-N2_META_SUBJECTS=$(c -X POST "http://127.0.0.1:9202/api/query" \
+N2_META_SUBJECTS=$(c -X POST "${NODE2_API}/api/query" \
   -d "{\"sparql\":\"SELECT DISTINCT ?s WHERE { GRAPH <$META_GRAPH> { ?s ?p ?o } } ORDER BY ?s\"}")
 N2_SUBJ_LIST=$(echo "$N2_META_SUBJECTS" | python3 -c '
 import sys,json
@@ -355,14 +364,14 @@ echo "=== SECTION 4: Promote to SWM — Data Should Now Sync ==="
 echo ""
 
 echo "--- 4a: Promote draft-beta assertion to SWM on Node 1 ---"
-PROMOTE1=$(c -X POST "http://127.0.0.1:9201/api/knowledge-assets/draft-beta/swm/share" \
+PROMOTE1=$(c -X POST "${NODE1_API}/api/knowledge-assets/draft-beta/swm/share" \
   -d "{\"contextGraphId\":\"$CG_ID\"}")
 PROMOTE1_CT=$(json_get "$PROMOTE1" promotedCount)
 [[ "$PROMOTE1_CT" != "__NONE__" && "$PROMOTE1_CT" != "0" ]] && ok "draft-beta promoted ($PROMOTE1_CT quads)" || fail "Promote failed: $PROMOTE1"
 
 echo "--- 4b: Verify SWM data on Node 1 ---"
 sleep 2
-N1_SWM=$(c -X POST "http://127.0.0.1:9201/api/query" \
+N1_SWM=$(c -X POST "${NODE1_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?name WHERE { <urn:sharing:beta1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}")
 N1_SWM_CT=$(safe_bindings_count "$N1_SWM")
 [[ "$N1_SWM_CT" -ge 1 ]] && ok "Node 1 has promoted data in SWM" || fail "Node 1 SWM empty after promote"
@@ -370,7 +379,7 @@ N1_SWM_CT=$(safe_bindings_count "$N1_SWM")
 echo "--- 4c: Wait for gossip + verify SWM data on Node 2 ---"
 SWM_SYNCED=false
 for i in $(seq 1 15); do
-  N2_SWM=$(c -X POST "http://127.0.0.1:9202/api/query" \
+  N2_SWM=$(c -X POST "${NODE2_API}/api/query" \
     -d "{\"sparql\":\"SELECT ?name WHERE { <urn:sharing:beta1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}")
   N2_SWM_CT=$(safe_bindings_count "$N2_SWM")
   if [[ "$N2_SWM_CT" -ge 1 ]]; then
@@ -384,14 +393,14 @@ $SWM_SYNCED || fail "Node 2 did not receive SWM data after 15s"
 
 echo "--- 4d: Verify both entities synced ---"
 if $SWM_SYNCED; then
-  N2_BETA2=$(c -X POST "http://127.0.0.1:9202/api/query" \
+  N2_BETA2=$(c -X POST "${NODE2_API}/api/query" \
     -d "{\"sparql\":\"SELECT ?name WHERE { <urn:sharing:beta2> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}")
   N2_BETA2_CT=$(safe_bindings_count "$N2_BETA2")
   [[ "$N2_BETA2_CT" -ge 1 ]] && ok "Node 2 has both promoted entities" || fail "Node 2 missing beta2 entity"
 fi
 
 echo "--- 4e: doc-alpha (still in WM) must NOT appear on Node 2 ---"
-N2_ALPHA=$(c -X POST "http://127.0.0.1:9202/api/query" \
+N2_ALPHA=$(c -X POST "${NODE2_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"doc-alpha\\\")) }\"}")
 N2_ALPHA_CT=$(safe_bindings_count "$N2_ALPHA")
 check "doc-alpha (WM) not visible on Node 2" "$N2_ALPHA_CT" "0"
@@ -402,10 +411,10 @@ echo "=== SECTION 5: Late Joiner (Node 4) — Joins After Promotion ==="
 echo ""
 
 echo "--- 5a: Node 4 subscribes (should be denied or timeout — not on allowlist) ---"
-c -X POST "http://127.0.0.1:9204/api/context-graph/subscribe" \
+c -X POST "${NODE4_API}/api/context-graph/subscribe" \
   -d "{\"contextGraphId\":\"$CG_ID\"}" > /dev/null
 sleep 5
-N4_CATCHUP=$(poll_catchup 9204 "$CG_ID" 10)
+N4_CATCHUP=$(poll_catchup $NODE4_PORT "$CG_ID" 10)
 if [[ "$N4_CATCHUP" == "denied" || "$N4_CATCHUP" == "timeout" ]]; then
   ok "Node 4 initial sync blocked ($N4_CATCHUP)"
 else
@@ -413,15 +422,15 @@ else
 fi
 
 echo "--- 5b: Node 4 sends signed join request ---"
-N4_SIGN=$(c -X POST "http://127.0.0.1:9204/api/context-graph/$CG_ID/sign-join" -d "{\"curatorPeerId\":\"$N1_PEER\"}")
+N4_SIGN=$(c -X POST "${NODE4_API}/api/context-graph/$CG_ID/sign-join" -d "{\"curatorPeerId\":\"$N1_PEER\"}")
 N4_SUBMIT_BODY=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); d['curatorPeerId']='$N1_PEER'; print(json.dumps(d))" "$N4_SIGN")
-N4_SUBMIT=$(c -X POST "http://127.0.0.1:9204/api/context-graph/$CG_ID/request-join" -d "$N4_SUBMIT_BODY")
+N4_SUBMIT=$(c -X POST "${NODE4_API}/api/context-graph/$CG_ID/request-join" -d "$N4_SUBMIT_BODY")
 N4_SUB_OK=$(json_get "$N4_SUBMIT" ok)
 check "Node 4 join request submitted" "$N4_SUB_OK" "true"
 
 echo "--- 5c: Node 1 approves Node 4 ---"
 sleep 2
-c -X POST "http://127.0.0.1:9201/api/context-graph/$CG_ID/approve-join" \
+c -X POST "${NODE1_API}/api/context-graph/$CG_ID/approve-join" \
   -d "{\"agentAddress\":\"$N4_ADDR\"}" > /dev/null
 ok "Node 4 join request approved"
 
@@ -429,13 +438,13 @@ echo "--- 5d: Wait for Node 4 auto-subscribe + sync ---"
 sleep 10
 
 echo "--- 5e: Node 4 has NO WM assertion data ---"
-N4_ASSERT_GRAPHS=$(c -X POST "http://127.0.0.1:9204/api/query" \
+N4_ASSERT_GRAPHS=$(c -X POST "${NODE4_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\") && CONTAINS(STR(?g), \\\"/assertion/\\\")) }\"}")
 N4_AG_CT=$(safe_bindings_count "$N4_ASSERT_GRAPHS")
 check "Node 4 (late joiner) has 0 assertion data graphs" "$N4_AG_CT" "0"
 
 echo "--- 5f: Node 4 has NO WM lifecycle/event metadata ---"
-N4_LIFECYCLE=$(c -X POST "http://127.0.0.1:9204/api/query" \
+N4_LIFECYCLE=$(c -X POST "${NODE4_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/state> \\\"created\\\" } }\"}")
 N4_LC_CT=$(safe_bindings_count "$N4_LIFECYCLE")
 check "Node 4 has 0 WM lifecycle entities" "$N4_LC_CT" "0"
@@ -443,7 +452,7 @@ check "Node 4 has 0 WM lifecycle entities" "$N4_LC_CT" "0"
 echo "--- 5g: Node 4 DOES have SWM data (promoted before join) ---"
 N4_SWM_SYNCED=false
 for i in $(seq 1 10); do
-  N4_SWM=$(c -X POST "http://127.0.0.1:9204/api/query" \
+  N4_SWM=$(c -X POST "${NODE4_API}/api/query" \
     -d "{\"sparql\":\"SELECT ?name WHERE { <urn:sharing:beta1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}")
   N4_SWM_CT=$(safe_bindings_count "$N4_SWM")
   if [[ "$N4_SWM_CT" -ge 1 ]]; then
@@ -456,7 +465,7 @@ done
 $N4_SWM_SYNCED || fail "Node 4 did not receive SWM data (late joiner sync broken)"
 
 echo "--- 5h: Node 4 _meta has only CG-level + non-WM subjects ---"
-N4_META_SUBJ=$(c -X POST "http://127.0.0.1:9204/api/query" \
+N4_META_SUBJ=$(c -X POST "${NODE4_API}/api/query" \
   -d "{\"sparql\":\"SELECT DISTINCT ?s WHERE { GRAPH <$META_GRAPH> { ?s ?p ?o } }\"}")
 N4_LEAKED=$(echo "$N4_META_SUBJ" | python3 -c '
 import sys,json
@@ -470,7 +479,7 @@ except: print("ERR")
 ' 2>/dev/null)
 # The late joiner should see promoted assertion lifecycle (memoryLayer=SWM)
 # but NOT the WM-only doc-alpha lifecycle
-N4_WM_LC=$(c -X POST "http://127.0.0.1:9204/api/query" \
+N4_WM_LC=$(c -X POST "${NODE4_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/memoryLayer> \\\"WM\\\" } }\"}")
 N4_WM_LC_CT=$(safe_bindings_count "$N4_WM_LC")
 check "Node 4 has 0 WM-layer lifecycle entities" "$N4_WM_LC_CT" "0"
@@ -481,9 +490,9 @@ echo "=== SECTION 6: Multi-Participant WM Isolation ==="
 echo ""
 
 echo "--- 6a: Node 2 creates its own WM assertion in the shared project ---"
-c -X POST "http://127.0.0.1:9202/api/knowledge-assets" \
+c -X POST "${NODE2_API}/api/knowledge-assets" \
   -d "{\"contextGraphId\":\"$CG_ID\",\"name\":\"n2-private-draft\"}" > /dev/null
-c -X POST "http://127.0.0.1:9202/api/knowledge-assets/n2-private-draft/wm/write" \
+c -X POST "${NODE2_API}/api/knowledge-assets/n2-private-draft/wm/write" \
   -d "{\"contextGraphId\":\"$CG_ID\",\"quads\":[
     $(ql 'urn:sharing:n2secret' 'http://schema.org/name' 'Node2 Secret Data'),
     $(q 'urn:sharing:n2secret' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing')
@@ -492,31 +501,31 @@ ok "Node 2 created private WM assertion"
 
 echo "--- 6b: Node 2 can query its own WM data ---"
 sleep 1
-N2_OWN=$(c "http://127.0.0.1:9202/api/knowledge-assets/n2-private-draft/wm/quads?contextGraphId=$CG_ID")
+N2_OWN=$(c "${NODE2_API}/api/knowledge-assets/n2-private-draft/wm/quads?contextGraphId=$CG_ID")
 N2_OWN_CT=$(echo "$N2_OWN" | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len(d.get("quads",d.get("result",[]))))' 2>/dev/null || echo "0")
 [[ "$N2_OWN_CT" -ge 2 ]] && ok "Node 2 sees its own WM data ($N2_OWN_CT quads)" || fail "Node 2 can't see own WM data"
 
 echo "--- 6c: Node 1 does NOT see Node 2's WM data ---"
 sleep 3
-N1_N2SECRET=$(c -X POST "http://127.0.0.1:9201/api/query" \
+N1_N2SECRET=$(c -X POST "${NODE1_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?name WHERE { <urn:sharing:n2secret> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG_ID\",\"includeSharedMemory\":true}")
 N1_N2S_CT=$(safe_bindings_count "$N1_N2SECRET")
 check "Node 1 cannot see Node 2's WM data" "$N1_N2S_CT" "0"
 
 echo "--- 6d: Node 4 does NOT see Node 2's WM data ---"
-N4_N2SECRET=$(c -X POST "http://127.0.0.1:9204/api/query" \
+N4_N2SECRET=$(c -X POST "${NODE4_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?name WHERE { <urn:sharing:n2secret> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG_ID\",\"includeSharedMemory\":true}")
 N4_N2S_CT=$(safe_bindings_count "$N4_N2SECRET")
 check "Node 4 cannot see Node 2's WM data" "$N4_N2S_CT" "0"
 
 echo "--- 6e: Node 2 promotes its assertion — should gossip to all ---"
-PROMOTE_N2=$(c -X POST "http://127.0.0.1:9202/api/knowledge-assets/n2-private-draft/swm/share" \
+PROMOTE_N2=$(c -X POST "${NODE2_API}/api/knowledge-assets/n2-private-draft/swm/share" \
   -d "{\"contextGraphId\":\"$CG_ID\"}")
 PROMOTE_N2_CT=$(json_get "$PROMOTE_N2" promotedCount)
 [[ "$PROMOTE_N2_CT" != "__NONE__" && "$PROMOTE_N2_CT" != "0" ]] && ok "Node 2 promoted ($PROMOTE_N2_CT quads)" || fail "Node 2 promote failed"
 
 echo "--- 6f: Wait for gossip + verify all participants see Node 2's SWM data ---"
-for port_label in "9201:Node1" "9204:Node4"; do
+for port_label in "$NODE1_PORT:Node1" "$NODE4_PORT:Node4"; do
   port="${port_label%%:*}"
   label="${port_label##*:}"
   FOUND_N2=false
@@ -540,13 +549,13 @@ echo "=== SECTION 7: Non-Participant Exclusion ==="
 echo ""
 
 echo "--- 7a: Node 3 (not invited) should have no project data ---"
-N3_GRAPHS=$(c -X POST "http://127.0.0.1:9203/api/query" \
+N3_GRAPHS=$(c -X POST "${NODE3_API}/api/query" \
   -d "{\"sparql\":\"SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG_ID\\\")) }\"}")
 N3_GRAPH_CT=$(safe_bindings_count "$N3_GRAPHS")
 check "Node 3 (not invited) has 0 project graphs" "$N3_GRAPH_CT" "0"
 
 echo "--- 7b: Node 3 cannot query project SWM ---"
-N3_SWM=$(c -X POST "http://127.0.0.1:9203/api/query" \
+N3_SWM=$(c -X POST "${NODE3_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?name WHERE { <urn:sharing:beta1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}")
 N3_SWM_CT=$(safe_bindings_count "$N3_SWM")
 check "Node 3 has 0 SWM results" "$N3_SWM_CT" "0"
@@ -557,7 +566,7 @@ echo "=== SECTION 8: Second Promotion — Incremental Sync ==="
 echo ""
 
 echo "--- 8a: Promote doc-alpha from WM to SWM on Node 1 ---"
-PROMOTE_DOC=$(c -X POST "http://127.0.0.1:9201/api/knowledge-assets/doc-alpha/swm/share" \
+PROMOTE_DOC=$(c -X POST "${NODE1_API}/api/knowledge-assets/doc-alpha/swm/share" \
   -d "{\"contextGraphId\":\"$CG_ID\"}")
 PROMOTE_DOC_CT=$(json_get "$PROMOTE_DOC" promotedCount)
 if [[ "$PROMOTE_DOC_CT" != "__NONE__" && "$PROMOTE_DOC_CT" != "0" && "$PROMOTE_DOC_CT" != "__ERR__" ]]; then
@@ -565,7 +574,7 @@ if [[ "$PROMOTE_DOC_CT" != "__NONE__" && "$PROMOTE_DOC_CT" != "0" && "$PROMOTE_D
 else
   # import-file may auto-promote during extraction — check SWM directly
   sleep 2
-  DOC_IN_SWM=$(c -X POST "http://127.0.0.1:9201/api/query" \
+  DOC_IN_SWM=$(c -X POST "${NODE1_API}/api/query" \
     -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}")
   DOC_SWM_CT=$(count_integer "$DOC_IN_SWM")
   if [[ "$DOC_SWM_CT" -ge 3 ]]; then
@@ -578,7 +587,7 @@ fi
 echo "--- 8b: Verify doc-alpha now visible on Node 2 via SWM ---"
 DOC_SYNCED=false
 for i in $(seq 1 15); do
-  N2_DOC=$(c -X POST "http://127.0.0.1:9202/api/query" \
+  N2_DOC=$(c -X POST "${NODE2_API}/api/query" \
     -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}")
   N2_DOC_CT=$(count_integer "$N2_DOC")
   if [[ "$N2_DOC_CT" -ge 3 ]]; then
@@ -593,7 +602,7 @@ $DOC_SYNCED || fail "doc-alpha not synced to Node 2 after promotion"
 echo "--- 8c: Verify doc-alpha now visible on Node 4 (late joiner) ---"
 N4_DOC_SYNCED=false
 for i in $(seq 1 10); do
-  N4_DOC=$(c -X POST "http://127.0.0.1:9204/api/query" \
+  N4_DOC=$(c -X POST "${NODE4_API}/api/query" \
     -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}")
   N4_DOC_CT=$(count_integer "$N4_DOC")
   if [[ "$N4_DOC_CT" -ge 3 ]]; then
@@ -606,7 +615,7 @@ done
 $N4_DOC_SYNCED || warn "doc-alpha not yet on Node 4 ($N4_DOC_CT entities)"
 
 echo "--- 8d: Node 3 (not invited) still sees nothing ---"
-N3_DOC=$(c -X POST "http://127.0.0.1:9203/api/query" \
+N3_DOC=$(c -X POST "${NODE3_API}/api/query" \
   -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"shared-working-memory\"}")
 N3_DOC_CT=$(count_integer "$N3_DOC")
 check "Node 3 still has 0 SWM entities" "$N3_DOC_CT" "0"
@@ -617,7 +626,7 @@ echo "=== SECTION 9: Lifecycle Metadata Correctness ==="
 echo ""
 
 echo "--- 9a: Promoted assertion lifecycle shows SWM layer on Node 1 ---"
-N1_PROMOTED_LC=$(c -X POST "http://127.0.0.1:9201/api/query" \
+N1_PROMOTED_LC=$(c -X POST "${NODE1_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?s ?ml WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/memoryLayer> ?ml . ?s <http://dkg.io/ontology/assertionName> \\\"draft-beta\\\" } }\"}")
 N1_PLC_ML=$(echo "$N1_PROMOTED_LC" | python3 -c '
 import sys,json
@@ -632,7 +641,7 @@ check "draft-beta lifecycle shows SWM layer" "$N1_PLC_ML" "SWM"
 echo "--- 9b: Promoted assertion lifecycle synced to Node 2 ---"
 N2_PLC_FOUND=false
 for i in $(seq 1 10); do
-  N2_PLC=$(c -X POST "http://127.0.0.1:9202/api/query" \
+  N2_PLC=$(c -X POST "${NODE2_API}/api/query" \
     -d "{\"sparql\":\"SELECT ?ml WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/memoryLayer> ?ml . ?s <http://dkg.io/ontology/assertionName> \\\"draft-beta\\\" } }\"}")
   N2_PLC_CT=$(safe_bindings_count "$N2_PLC")
   if [[ "$N2_PLC_CT" -ge 1 ]]; then
@@ -646,7 +655,7 @@ $N2_PLC_FOUND || warn "Node 2 missing promoted lifecycle — may not sync lifecy
 
 echo "--- 9c: WM-only doc-alpha lifecycle NOT leaked before its promotion (check Node 4 snapshot) ---"
 # After section 8, doc-alpha is now SWM, so check specifically for WM-tagged entries
-N4_WM_ONLY=$(c -X POST "http://127.0.0.1:9204/api/query" \
+N4_WM_ONLY=$(c -X POST "${NODE4_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <$META_GRAPH> { ?s <http://dkg.io/ontology/memoryLayer> \\\"WM\\\" } }\"}")
 N4_WM_ONLY_CT=$(safe_bindings_count "$N4_WM_ONLY")
 check "Node 4 has 0 WM-tagged lifecycle entries" "$N4_WM_ONLY_CT" "0"
@@ -657,9 +666,9 @@ echo "=== SECTION 10: New WM After Promotion — Still Private ==="
 echo ""
 
 echo "--- 10a: Create a new WM assertion on Node 1 (post-promotion) ---"
-c -X POST "http://127.0.0.1:9201/api/knowledge-assets" \
+c -X POST "${NODE1_API}/api/knowledge-assets" \
   -d "{\"contextGraphId\":\"$CG_ID\",\"name\":\"post-promo-draft\"}" > /dev/null
-c -X POST "http://127.0.0.1:9201/api/knowledge-assets/post-promo-draft/wm/write" \
+c -X POST "${NODE1_API}/api/knowledge-assets/post-promo-draft/wm/write" \
   -d "{\"contextGraphId\":\"$CG_ID\",\"quads\":[
     $(ql 'urn:sharing:postpromo' 'http://schema.org/name' 'Post-Promotion Secret'),
     $(q 'urn:sharing:postpromo' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing')
@@ -668,7 +677,7 @@ ok "Created post-promo-draft assertion"
 
 echo "--- 10b: Verify new WM data stays private after background sync ---"
 sleep 5
-for port_label in "9202:Node2" "9204:Node4"; do
+for port_label in "$NODE2_PORT:Node2" "$NODE4_PORT:Node4"; do
   port="${port_label%%:*}"
   label="${port_label##*:}"
   PEER_PP=$(c -X POST "http://127.0.0.1:$port/api/query" \
@@ -678,7 +687,7 @@ for port_label in "9202:Node2" "9204:Node4"; do
 done
 
 echo "--- 10c: No new assertion metadata leaked to peers ---"
-for port_label in "9202:Node2" "9204:Node4"; do
+for port_label in "$NODE2_PORT:Node2" "$NODE4_PORT:Node4"; do
   port="${port_label%%:*}"
   label="${port_label##*:}"
   PEER_META=$(c -X POST "http://127.0.0.1:$port/api/query" \
@@ -693,7 +702,7 @@ echo "=== SECTION 11: Summary Cross-Check ==="
 echo ""
 
 echo "--- 11a: Final graph counts per node ---"
-for port_label in "9201:Node1(creator)" "9202:Node2(invited)" "9204:Node4(late)" "9203:Node3(excluded)"; do
+for port_label in "$NODE1_PORT:Node1(creator)" "$NODE2_PORT:Node2(invited)" "$NODE4_PORT:Node4(late)" "$NODE3_PORT:Node3(excluded)"; do
   port="${port_label%%:*}"
   label="${port_label##*:}"
   FINAL=$(c -X POST "http://127.0.0.1:$port/api/query" \
@@ -710,9 +719,9 @@ for port_label in "9201:Node1(creator)" "9202:Node2(invited)" "9204:Node4(late)"
 done
 
 # Cleanup
-c -X POST "http://127.0.0.1:9201/api/knowledge-assets/post-promo-draft/wm/discard" \
+c -X POST "${NODE1_API}/api/knowledge-assets/post-promo-draft/wm/discard" \
   -d "{\"contextGraphId\":\"$CG_ID\"}" > /dev/null 2>&1
-c -X POST "http://127.0.0.1:9202/api/knowledge-assets/n2-private-draft/wm/discard" \
+c -X POST "${NODE2_API}/api/knowledge-assets/n2-private-draft/wm/discard" \
   -d "{\"contextGraphId\":\"$CG_ID\"}" > /dev/null 2>&1
 
 #------------------------------------------------------------
@@ -721,19 +730,19 @@ echo "=== SECTION 12: WM SPARQL Default Graph Isolation ==="
 echo ""
 
 echo "--- 12a: wmSparql default graph should not return system triples on participant ---"
-N2_DEFAULT=$(c -X POST "http://127.0.0.1:9202/api/query" \
+N2_DEFAULT=$(c -X POST "${NODE2_API}/api/query" \
   -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), \\\"did:dkg:context-graph:$CG_ID/\\\") && !STRENDS(STR(?g), \\\"/_meta\\\") && !CONTAINS(STR(?g), \\\"/_private\\\") && !CONTAINS(STR(?g), \\\"/_shared_memory\\\") && !CONTAINS(STR(?g), \\\"/_verifiable_memory\\\") && !CONTAINS(STR(?g), \\\"/_rules\\\")) }\",\"contextGraphId\":\"$CG_ID\"}")
 N2_DEF_CT=$(count_integer "$N2_DEFAULT")
 check "Node 2 WM named-graph-only query returns 0 non-SWM triples" "$N2_DEF_CT" "0"
 
 echo "--- 12b: Non-participant wmSparql returns 0 triples (no system leak) ---"
-N3_DEFAULT=$(c -X POST "http://127.0.0.1:9203/api/query" \
+N3_DEFAULT=$(c -X POST "${NODE3_API}/api/query" \
   -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), \\\"did:dkg:context-graph:$CG_ID/\\\") && !STRENDS(STR(?g), \\\"/_meta\\\") && !CONTAINS(STR(?g), \\\"/_private\\\") && !CONTAINS(STR(?g), \\\"/_shared_memory\\\") && !CONTAINS(STR(?g), \\\"/_verifiable_memory\\\") && !CONTAINS(STR(?g), \\\"/_rules\\\")) }\",\"contextGraphId\":\"$CG_ID\"}")
 N3_DEF_CT=$(count_integer "$N3_DEFAULT")
 check "Node 3 (excluded) WM named-graph-only query returns 0" "$N3_DEF_CT" "0"
 
 echo "--- 12c: System triples (did:dkg:network:*) excluded from WM entity count ---"
-N3_SYSTEM=$(c -X POST "http://127.0.0.1:9203/api/query" \
+N3_SYSTEM=$(c -X POST "${NODE3_API}/api/query" \
   -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { GRAPH ?g { ?s ?p ?o } FILTER(STRSTARTS(STR(?g), \\\"did:dkg:context-graph:$CG_ID/\\\")) }\",\"contextGraphId\":\"$CG_ID\"}")
 N3_SYS_CT=$(count_integer "$N3_SYSTEM")
 check "Node 3 has 0 named-graph triples scoped to this CG" "$N3_SYS_CT" "0"
@@ -743,20 +752,20 @@ echo ""
 echo "=== SECTION 13: Second Join Flow — Node 4 Full Cycle ==="
 echo ""
 
-N5_ADDR=$(get_self_address 9205)
+N5_ADDR=$(get_self_address $NODE5_PORT)
 echo "  Node 5: $N5_ADDR"
 
 echo "--- 13a: Create a second private project on Node 1 ---"
 CG2_ID="join-flow-test-$(date +%s)"
-CREATE2=$(c -X POST "http://127.0.0.1:9201/api/context-graph/create" \
+CREATE2=$(c -X POST "${NODE1_API}/api/context-graph/create" \
   -d "{\"id\":\"$CG2_ID\",\"name\":\"Join Flow Test\",\"private\":true}")
 CREATE2_OK=$(json_get "$CREATE2" created)
 check "Second private project created" "$CREATE2_OK" "$CG2_ID"
 
 echo "--- 13b: Import WM data on Node 1 ---"
-c -X POST "http://127.0.0.1:9201/api/knowledge-assets" \
+c -X POST "${NODE1_API}/api/knowledge-assets" \
   -d "{\"contextGraphId\":\"$CG2_ID\",\"name\":\"wm-secret\"}" > /dev/null
-c -X POST "http://127.0.0.1:9201/api/knowledge-assets/wm-secret/wm/write" \
+c -X POST "${NODE1_API}/api/knowledge-assets/wm-secret/wm/write" \
   -d "{\"contextGraphId\":\"$CG2_ID\",\"quads\":[
     $(ql 'urn:join-flow:secret1' 'http://schema.org/name' 'Secret Data'),
     $(q 'urn:join-flow:secret1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing')
@@ -764,7 +773,7 @@ c -X POST "http://127.0.0.1:9201/api/knowledge-assets/wm-secret/wm/write" \
 ok "WM data written to join-flow project"
 
 echo "--- 13c: Promote some data to SWM on Node 1 ---"
-c -X POST "http://127.0.0.1:9201/api/knowledge-assets" \
+c -X POST "${NODE1_API}/api/knowledge-assets" \
   -d "{\"contextGraphId\":\"$CG2_ID\",\"name\":\"swm-shared\",\"finalize\":true,\"alsoShareSwm\":true,\"quads\":[
     $(ql 'urn:join-flow:shared1' 'http://schema.org/name' 'Shared Data'),
     $(q 'urn:join-flow:shared1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing')
@@ -773,10 +782,10 @@ sleep 1
 ok "SWM data written to join-flow project"
 
 echo "--- 13d: Node 4 subscribes — should be denied ---"
-c -X POST "http://127.0.0.1:9204/api/context-graph/subscribe" \
+c -X POST "${NODE4_API}/api/context-graph/subscribe" \
   -d "{\"contextGraphId\":\"$CG2_ID\"}" > /dev/null
 sleep 3
-N4_STATUS=$(c "http://127.0.0.1:9204/api/sync/catchup-status?contextGraphId=$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')")
+N4_STATUS=$(c "${NODE4_API}/api/sync/catchup-status?contextGraphId=$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')")
 N4_ST=$(json_get "$N4_STATUS" status)
 N4_ERR=$(json_get "$N4_STATUS" error)
 if [[ "$N4_ST" == "denied" || "$N4_ERR" == *"denied"* ]]; then
@@ -790,15 +799,15 @@ else
 fi
 
 echo "--- 13e: Node 4 signs + submits join request ---"
-N4_SIGN=$(c -X POST "http://127.0.0.1:9204/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/sign-join" -d "{\"curatorPeerId\":\"$N1_PEER\"}")
+N4_SIGN=$(c -X POST "${NODE4_API}/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/sign-join" -d "{\"curatorPeerId\":\"$N1_PEER\"}")
 N4_SUBMIT_BODY=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); d['curatorPeerId']='$N1_PEER'; print(json.dumps(d))" "$N4_SIGN")
-N4_SUBMIT=$(c -X POST "http://127.0.0.1:9204/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/request-join" -d "$N4_SUBMIT_BODY")
+N4_SUBMIT=$(c -X POST "${NODE4_API}/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/request-join" -d "$N4_SUBMIT_BODY")
 N4_SUBMIT_OK=$(json_get "$N4_SUBMIT" ok)
 check "Node 4 join request submitted" "$N4_SUBMIT_OK" "true"
 
 echo "--- 13f: Node 1 sees pending request from Node 4 ---"
 sleep 2
-N1_REQS=$(c "http://127.0.0.1:9201/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/join-requests")
+N1_REQS=$(c "${NODE1_API}/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/join-requests")
 N1_REQ_ADDR=$(echo "$N1_REQS" | python3 -c '
 import sys,json
 d=json.load(sys.stdin)
@@ -811,7 +820,7 @@ echo "$N1_REQ_ADDR" | grep -qi "$(echo "$N4_ADDR" | tr '[:upper:]' '[:lower:]')"
   || fail "Node 1 missing Node 4's request (found: $N1_REQ_ADDR)"
 
 echo "--- 13g: Notification created on curator (Node 1) ---"
-N1_NOTIFS=$(c "http://127.0.0.1:9201/api/notifications?limit=5")
+N1_NOTIFS=$(c "${NODE1_API}/api/notifications?limit=5")
 N1_JOIN_NOTIF=$(echo "$N1_NOTIFS" | python3 -c '
 import sys,json
 d=json.load(sys.stdin)
@@ -833,7 +842,7 @@ else:
 check "Join-request notification created on Node 1" "$N1_JOIN_NOTIF" "found"
 
 echo "--- 13h: Node 1 approves Node 4 ---"
-N4_APPROVE=$(c -X POST "http://127.0.0.1:9201/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/approve-join" \
+N4_APPROVE=$(c -X POST "${NODE1_API}/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/approve-join" \
   -d "{\"agentAddress\":\"$N4_ADDR\"}")
 N4_APP_OK=$(json_get "$N4_APPROVE" ok)
 check "Node 4 join request approved" "$N4_APP_OK" "true"
@@ -841,7 +850,7 @@ check "Node 4 join request approved" "$N4_APP_OK" "true"
 echo "--- 13i: Node 4 auto-subscribes and receives SWM data ---"
 N4_SWM_OK=false
 for i in $(seq 1 20); do
-  N4_SWM=$(c -X POST "http://127.0.0.1:9204/api/query" \
+  N4_SWM=$(c -X POST "${NODE4_API}/api/query" \
     -d "{\"sparql\":\"SELECT ?name WHERE { <urn:join-flow:shared1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG2_ID\",\"view\":\"shared-working-memory\"}")
   N4_SWM_CT=$(safe_bindings_count "$N4_SWM")
   if [[ "$N4_SWM_CT" -ge 1 ]]; then
@@ -854,34 +863,34 @@ done
 $N4_SWM_OK || fail "Node 4 did not receive SWM data after approval"
 
 echo "--- 13j: Node 4 has NO WM data (wm-secret stays private) ---"
-N4_SECRET=$(c -X POST "http://127.0.0.1:9204/api/query" \
+N4_SECRET=$(c -X POST "${NODE4_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?name WHERE { <urn:join-flow:secret1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG2_ID\",\"includeSharedMemory\":true}")
 N4_SEC_CT=$(safe_bindings_count "$N4_SECRET")
 check "Node 4 cannot see WM secret data" "$N4_SEC_CT" "0"
 
 echo "--- 13k: Node 4 has NO WM lifecycle metadata ---"
-N4_WM_META=$(c -X POST "http://127.0.0.1:9204/api/query" \
+N4_WM_META=$(c -X POST "${NODE4_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <did:dkg:context-graph:$CG2_ID/_meta> { ?s <http://dkg.io/ontology/memoryLayer> \\\"WM\\\" } }\"}")
 N4_WMM_CT=$(safe_bindings_count "$N4_WM_META")
 check "Node 4 has 0 WM-layer lifecycle entries" "$N4_WMM_CT" "0"
 
 echo "--- 13l: Node 5 sends join request + gets approved ---"
-c -X POST "http://127.0.0.1:9205/api/context-graph/subscribe" \
+c -X POST "${NODE5_API}/api/context-graph/subscribe" \
   -d "{\"contextGraphId\":\"$CG2_ID\"}" > /dev/null
 sleep 3
-N5_SIGN=$(c -X POST "http://127.0.0.1:9205/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/sign-join" -d "{\"curatorPeerId\":\"$N1_PEER\"}")
+N5_SIGN=$(c -X POST "${NODE5_API}/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/sign-join" -d "{\"curatorPeerId\":\"$N1_PEER\"}")
 N5_SUBMIT_BODY=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); d['curatorPeerId']='$N1_PEER'; print(json.dumps(d))" "$N5_SIGN")
-N5_SUBMIT=$(c -X POST "http://127.0.0.1:9205/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/request-join" -d "$N5_SUBMIT_BODY")
+N5_SUBMIT=$(c -X POST "${NODE5_API}/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/request-join" -d "$N5_SUBMIT_BODY")
 check "Node 5 join request submitted" "$(json_get "$N5_SUBMIT" ok)" "true"
 sleep 2
-c -X POST "http://127.0.0.1:9201/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/approve-join" \
+c -X POST "${NODE1_API}/api/context-graph/$(python3 -c 'import urllib.parse;print(urllib.parse.quote("'"$CG2_ID"'",safe=""))')/approve-join" \
   -d "{\"agentAddress\":\"$N5_ADDR\"}" > /dev/null
 ok "Node 5 join approved"
 
 echo "--- 13m: Node 5 receives SWM but not WM ---"
 N5_SWM_OK=false
 for i in $(seq 1 25); do
-  N5_SWM=$(c -X POST "http://127.0.0.1:9205/api/query" \
+  N5_SWM=$(c -X POST "${NODE5_API}/api/query" \
     -d "{\"sparql\":\"SELECT ?name WHERE { <urn:join-flow:shared1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG2_ID\",\"view\":\"shared-working-memory\"}")
   N5_SWM_CT=$(safe_bindings_count "$N5_SWM")
   if [[ "$N5_SWM_CT" -ge 1 ]]; then
@@ -893,19 +902,19 @@ for i in $(seq 1 25); do
 done
 $N5_SWM_OK || warn "Node 5 (edge) did not receive SWM data after 25s — edge sync may be slower"
 
-N5_SECRET=$(c -X POST "http://127.0.0.1:9205/api/query" \
+N5_SECRET=$(c -X POST "${NODE5_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?name WHERE { <urn:join-flow:secret1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG2_ID\",\"includeSharedMemory\":true}")
 N5_SEC_CT=$(safe_bindings_count "$N5_SECRET")
 check "Node 5 cannot see WM secret data" "$N5_SEC_CT" "0"
 
 echo "--- 13n: Node 3 (never requested) still excluded ---"
-N3_CG2=$(c -X POST "http://127.0.0.1:9203/api/query" \
+N3_CG2=$(c -X POST "${NODE3_API}/api/query" \
   -d "{\"sparql\":\"SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } FILTER(CONTAINS(STR(?g), \\\"$CG2_ID\\\")) }\"}")
 N3_CG2_CT=$(safe_bindings_count "$N3_CG2")
 check "Node 3 has 0 graphs for join-flow project" "$N3_CG2_CT" "0"
 
 # Cleanup
-c -X POST "http://127.0.0.1:9201/api/knowledge-assets/wm-secret/wm/discard" \
+c -X POST "${NODE1_API}/api/knowledge-assets/wm-secret/wm/discard" \
   -d "{\"contextGraphId\":\"$CG2_ID\"}" > /dev/null 2>&1
 
 #------------------------------------------------------------
@@ -915,7 +924,7 @@ echo ""
 
 echo "--- 14a: Create project for promote test ---"
 CG3_ID="promote-test-$(date +%s)"
-CREATE3=$(c -X POST "http://127.0.0.1:9201/api/context-graph/create" \
+CREATE3=$(c -X POST "${NODE1_API}/api/context-graph/create" \
   -d "{\"id\":\"$CG3_ID\",\"name\":\"Promote Test\"}")
 check "Promote test project created" "$(json_get "$CREATE3" created)" "$CG3_ID"
 
@@ -931,7 +940,7 @@ IMPORT_PROMO=$(curl -sS --max-time 30 --connect-timeout 5 \
   -H "Authorization: Bearer $AUTH" \
   -F "file=@${TMPMD2};type=text/markdown" \
   -F "contextGraphId=$CG3_ID" \
-  "http://127.0.0.1:9201/api/knowledge-assets/promo-doc/wm/import-file" 2>&1)
+  "${NODE1_API}/api/knowledge-assets/promo-doc/wm/import-file" 2>&1)
 rm -f "$TMPMD2"
 IMPORT_PROMO_URI=$(json_get "$IMPORT_PROMO" assertionUri)
 [[ "$IMPORT_PROMO_URI" != "__NONE__" && "$IMPORT_PROMO_URI" != "__ERR__" ]] \
@@ -945,7 +954,7 @@ echo "$IMPORT_PROMO_URI" | grep -qi "$N1_ADDR" \
 
 echo "--- 14d: Promote import-file assertion to SWM ---"
 sleep 1
-PROMO_RESULT=$(c -X POST "http://127.0.0.1:9201/api/knowledge-assets/promo-doc/swm/share" \
+PROMO_RESULT=$(c -X POST "${NODE1_API}/api/knowledge-assets/promo-doc/swm/share" \
   -d "{\"contextGraphId\":\"$CG3_ID\"}")
 PROMO_CT=$(json_get "$PROMO_RESULT" promotedCount)
 [[ "$PROMO_CT" != "__NONE__" && "$PROMO_CT" != "0" && "$PROMO_CT" != "__ERR__" ]] \
@@ -954,20 +963,20 @@ PROMO_CT=$(json_get "$PROMO_RESULT" promotedCount)
 
 echo "--- 14e: Verify promoted data exists in SWM ---"
 sleep 1
-N1_PROMO_SWM=$(c -X POST "http://127.0.0.1:9201/api/query" \
+N1_PROMO_SWM=$(c -X POST "${NODE1_API}/api/query" \
   -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"shared-working-memory\"}")
 PROMO_SWM_CT=$(count_integer "$N1_PROMO_SWM")
 [[ "$PROMO_SWM_CT" -ge 1 ]] && ok "Promoted data visible in SWM ($PROMO_SWM_CT entities)" || fail "SWM empty after promote ($PROMO_SWM_CT)"
 
 echo "--- 14f: Also create + write + promote an API assertion (same project) ---"
-c -X POST "http://127.0.0.1:9201/api/knowledge-assets" \
+c -X POST "${NODE1_API}/api/knowledge-assets" \
   -d "{\"contextGraphId\":\"$CG3_ID\",\"name\":\"api-draft\"}" > /dev/null
-c -X POST "http://127.0.0.1:9201/api/knowledge-assets/api-draft/wm/write" \
+c -X POST "${NODE1_API}/api/knowledge-assets/api-draft/wm/write" \
   -d "{\"contextGraphId\":\"$CG3_ID\",\"quads\":[
     $(ql 'urn:promote-test:api1' 'http://schema.org/name' 'API Written Entity'),
     $(q 'urn:promote-test:api1' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing')
   ]}" > /dev/null
-PROMO_API=$(c -X POST "http://127.0.0.1:9201/api/knowledge-assets/api-draft/swm/share" \
+PROMO_API=$(c -X POST "${NODE1_API}/api/knowledge-assets/api-draft/swm/share" \
   -d "{\"contextGraphId\":\"$CG3_ID\"}")
 PROMO_API_CT=$(json_get "$PROMO_API" promotedCount)
 [[ "$PROMO_API_CT" != "__NONE__" && "$PROMO_API_CT" != "0" ]] \
@@ -976,17 +985,17 @@ PROMO_API_CT=$(json_get "$PROMO_API" promotedCount)
 
 echo "--- 14g: Promote on node 2 also works (different wallet) ---"
 CG4_ID="promote-n2-$(date +%s)"
-c -X POST "http://127.0.0.1:9202/api/context-graph/create" \
+c -X POST "${NODE2_API}/api/context-graph/create" \
   -d "{\"id\":\"$CG4_ID\",\"name\":\"Node2 Promote Test\"}" > /dev/null
-c -X POST "http://127.0.0.1:9202/api/knowledge-assets" \
+c -X POST "${NODE2_API}/api/knowledge-assets" \
   -d "{\"contextGraphId\":\"$CG4_ID\",\"name\":\"n2-draft\"}" > /dev/null
-c -X POST "http://127.0.0.1:9202/api/knowledge-assets/n2-draft/wm/write" \
+c -X POST "${NODE2_API}/api/knowledge-assets/n2-draft/wm/write" \
   -d "{\"contextGraphId\":\"$CG4_ID\",\"quads\":[
     $(ql 'urn:promote-n2:item' 'http://schema.org/name' 'Node2 Entity'),
     $(q 'urn:promote-n2:item' 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' 'http://schema.org/Thing')
   ]}" > /dev/null
 sleep 1
-PROMO_N2=$(c -X POST "http://127.0.0.1:9202/api/knowledge-assets/n2-draft/swm/share" \
+PROMO_N2=$(c -X POST "${NODE2_API}/api/knowledge-assets/n2-draft/swm/share" \
   -d "{\"contextGraphId\":\"$CG4_ID\"}")
 PROMO_N2_CT=$(json_get "$PROMO_N2" promotedCount)
 [[ "$PROMO_N2_CT" != "__NONE__" && "$PROMO_N2_CT" != "0" ]] \
@@ -999,7 +1008,7 @@ echo "=== SECTION 15: Publish SWM → Verifiable Memory (VM) ==="
 echo ""
 
 echo "--- 15pre: Register promote-test project on-chain ---"
-REG_CG3=$(c -X POST "http://127.0.0.1:9201/api/context-graph/register" \
+REG_CG3=$(c -X POST "${NODE1_API}/api/context-graph/register" \
   -d "{\"id\":\"$CG3_ID\"}")
 REG_CG3_OK=$(json_get "$REG_CG3" registered)
 if [[ "$REG_CG3_OK" == "$CG3_ID" ]]; then
@@ -1015,9 +1024,9 @@ fi
 sleep 3
 
 echo "--- 15a: Publish named KAs to VM on Node 1 (promote-test project) ---"
-PUBLISH_DOC=$(c -X POST "http://127.0.0.1:9201/api/knowledge-assets/promo-doc/vm/publish" \
+PUBLISH_DOC=$(c -X POST "${NODE1_API}/api/knowledge-assets/promo-doc/vm/publish" \
   -d "{\"contextGraphId\":\"$CG3_ID\",\"options\":{\"clearAfter\":false}}")
-PUBLISH_API=$(c -X POST "http://127.0.0.1:9201/api/knowledge-assets/api-draft/vm/publish" \
+PUBLISH_API=$(c -X POST "${NODE1_API}/api/knowledge-assets/api-draft/vm/publish" \
   -d "{\"contextGraphId\":\"$CG3_ID\",\"options\":{\"clearAfter\":false}}")
 PUB_STATUS=$(json_get "$PUBLISH_API" status)
 PUB_KCID=$(json_get "$PUBLISH_API" kaId)
@@ -1032,13 +1041,13 @@ fi
 
 echo "--- 15b: Verify VM data on Node 1 ---"
 sleep 3
-N1_VM=$(c -X POST "http://127.0.0.1:9201/api/query" \
+N1_VM=$(c -X POST "${NODE1_API}/api/query" \
   -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}")
 N1_VM_CT=$(count_integer "$N1_VM")
 [[ "$N1_VM_CT" -ge 1 ]] && ok "Node 1 has $N1_VM_CT entities in VM" || warn "Node 1 VM query is empty immediately after publish"
 
 echo "--- 15c: Verify specific entities in VM ---"
-N1_VM_API=$(c -X POST "http://127.0.0.1:9201/api/query" \
+N1_VM_API=$(c -X POST "${NODE1_API}/api/query" \
   -d "{\"sparql\":\"SELECT ?name WHERE { <urn:promote-test:api1> <http://schema.org/name> ?name }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}")
 N1_VM_API_CT=$(safe_bindings_count "$N1_VM_API")
 [[ "$N1_VM_API_CT" -ge 1 ]] && ok "API entity visible in VM" || warn "API entity not in VM ($N1_VM_API_CT) — may not have been in SWM"
@@ -1048,7 +1057,7 @@ echo "--- 15d: VM data syncs to Node 2 ---"
 # (VM is published on-chain and available to all nodes)
 N2_VM_SYNCED=false
 for i in $(seq 1 20); do
-  N2_VM=$(c -X POST "http://127.0.0.1:9202/api/query" \
+  N2_VM=$(c -X POST "${NODE2_API}/api/query" \
     -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}")
   N2_VM_CT=$(count_integer "$N2_VM")
   if [[ "$N2_VM_CT" -ge 1 ]]; then
@@ -1063,7 +1072,7 @@ $N2_VM_SYNCED || warn "Node 2 missing VM data after 20s — VM sync may need mor
 echo "--- 15e: Node 3 also has VM data (VM is public/on-chain) ---"
 N3_VM_SYNCED=false
 for i in $(seq 1 20); do
-  N3_VM=$(c -X POST "http://127.0.0.1:9203/api/query" \
+  N3_VM=$(c -X POST "${NODE3_API}/api/query" \
     -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}")
   N3_VM_CT=$(count_integer "$N3_VM")
   if [[ "$N3_VM_CT" -ge 1 ]]; then
@@ -1076,7 +1085,7 @@ done
 $N3_VM_SYNCED || warn "Node 3 missing VM data after 20s — VM sync may need more time"
 
 echo "--- 15f: SWM still has data (clearAfter=false) ---"
-N1_SWM_AFTER=$(c -X POST "http://127.0.0.1:9201/api/query" \
+N1_SWM_AFTER=$(c -X POST "${NODE1_API}/api/query" \
   -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"shared-working-memory\"}")
 SWM_AFTER_CT=$(count_integer "$N1_SWM_AFTER")
 [[ "$SWM_AFTER_CT" -ge 1 ]] && ok "SWM retained after publish ($SWM_AFTER_CT entities)" || warn "SWM cleared despite clearAfter=false"
@@ -1087,7 +1096,7 @@ echo "=== SECTION 16: Publish from Private Project (CG1) ==="
 echo ""
 
 echo "--- 16pre: Register CG1 on-chain ---"
-REG_CG1=$(c -X POST "http://127.0.0.1:9201/api/context-graph/register" \
+REG_CG1=$(c -X POST "${NODE1_API}/api/context-graph/register" \
   -d "{\"id\":\"$CG_ID\"}")
 REG_CG1_OK=$(json_get "$REG_CG1" registered)
 if [[ "$REG_CG1_OK" == "$CG_ID" ]]; then
@@ -1103,9 +1112,9 @@ fi
 sleep 3
 
 echo "--- 16a: Publish CG1 named KAs to VM on Node 1 ---"
-PUB_CG1_BETA=$(c -X POST "http://127.0.0.1:9201/api/knowledge-assets/draft-beta/vm/publish" \
+PUB_CG1_BETA=$(c -X POST "${NODE1_API}/api/knowledge-assets/draft-beta/vm/publish" \
   -d "{\"contextGraphId\":\"$CG_ID\",\"options\":{\"clearAfter\":false}}")
-PUB_CG1_DOC=$(c -X POST "http://127.0.0.1:9201/api/knowledge-assets/doc-alpha/vm/publish" \
+PUB_CG1_DOC=$(c -X POST "${NODE1_API}/api/knowledge-assets/doc-alpha/vm/publish" \
   -d "{\"contextGraphId\":\"$CG_ID\",\"options\":{\"clearAfter\":false}}")
 PUB_CG1_STATUS=$(json_get "$PUB_CG1_BETA" status)
 PUB_CG1_DOC_STATUS=$(json_get "$PUB_CG1_DOC" status)
@@ -1119,7 +1128,7 @@ echo "--- 16b: Verify VM data on Node 1 for private CG ---"
 echo "--- 16b: Node 2 (participant) sees VM data ---"
 N2_CG1_VM_OK=false
 for i in $(seq 1 20); do
-  N2_CG1_VM=$(c -X POST "http://127.0.0.1:9202/api/query" \
+  N2_CG1_VM=$(c -X POST "${NODE2_API}/api/query" \
     -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}")
   N2_CG1_VM_CT=$(count_integer "$N2_CG1_VM")
   if [[ "$N2_CG1_VM_CT" -ge 1 ]]; then
@@ -1134,7 +1143,7 @@ $N2_CG1_VM_OK || warn "Node 2 missing VM data for CG1 after 20s"
 echo "--- 16c: Node 4 (late joiner) sees VM data ---"
 N4_CG1_VM_OK=false
 for i in $(seq 1 20); do
-  N4_CG1_VM=$(c -X POST "http://127.0.0.1:9204/api/query" \
+  N4_CG1_VM=$(c -X POST "${NODE4_API}/api/query" \
     -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}")
   N4_CG1_VM_CT=$(count_integer "$N4_CG1_VM")
   if [[ "$N4_CG1_VM_CT" -ge 1 ]]; then
@@ -1149,7 +1158,7 @@ $N4_CG1_VM_OK || warn "Node 4 missing VM data for CG1 after 20s"
 echo "--- 16d: Node 3 (excluded from private CG) still gets VM (on-chain is public) ---"
 N3_CG1_VM_OK=false
 for i in $(seq 1 20); do
-  N3_CG1_VM=$(c -X POST "http://127.0.0.1:9203/api/query" \
+  N3_CG1_VM=$(c -X POST "${NODE3_API}/api/query" \
     -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG_ID\",\"view\":\"verifiable-memory\"}")
   N3_CG1_VM_CT=$(count_integer "$N3_CG1_VM")
   if [[ "$N3_CG1_VM_CT" -ge 1 ]]; then
@@ -1162,7 +1171,7 @@ done
 $N3_CG1_VM_OK || warn "Node 3 missing VM for CG1 — VM gossip may be slower for private CGs"
 
 echo "--- 16e: WM data still private after publish ---"
-for port_label in "9202:Node2" "9204:Node4" "9203:Node3"; do
+for port_label in "$NODE2_PORT:Node2" "$NODE4_PORT:Node4" "$NODE3_PORT:Node3"; do
   port="${port_label%%:*}"
   label="${port_label##*:}"
   PEER_WM=$(c -X POST "http://127.0.0.1:$port/api/query" \
@@ -1173,15 +1182,15 @@ done
 
 echo "--- 16f: Publish with clearAfter=true, then verify SWM is empty ---"
 CLEAR_NAME="clear-after-smoke"
-c -X POST "http://127.0.0.1:9201/api/knowledge-assets" \
+c -X POST "${NODE1_API}/api/knowledge-assets" \
   -d "{\"contextGraphId\":\"$CG3_ID\",\"name\":\"$CLEAR_NAME\",\"quads\":[
     $(ql 'urn:promote-test:clear-after' 'http://schema.org/name' 'Clear After Smoke')
   ],\"finalize\":true,\"alsoShareSwm\":true}" > /dev/null
-PUB_CLEAR=$(c -X POST "http://127.0.0.1:9201/api/knowledge-assets/$CLEAR_NAME/vm/publish" \
+PUB_CLEAR=$(c -X POST "${NODE1_API}/api/knowledge-assets/$CLEAR_NAME/vm/publish" \
   -d "{\"contextGraphId\":\"$CG3_ID\",\"options\":{\"clearAfter\":true}}")
 PUB_CLEAR_STATUS=$(json_get "$PUB_CLEAR" status)
 sleep 2
-N1_SWM_CLEARED=$(c -X POST "http://127.0.0.1:9201/api/query" \
+N1_SWM_CLEARED=$(c -X POST "${NODE1_API}/api/query" \
   -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"shared-working-memory\"}")
 SWM_CLEARED_CT=$(count_integer "$N1_SWM_CLEARED")
 if [[ "$SWM_CLEARED_CT" == "0" ]]; then
@@ -1193,7 +1202,7 @@ fi
 echo "--- 16g: VM still has data even after SWM cleared ---"
 VM_STILL_CT=0
 for _ in $(seq 1 30); do
-  N1_VM_STILL=$(c -X POST "http://127.0.0.1:9201/api/query" \
+  N1_VM_STILL=$(c -X POST "${NODE1_API}/api/query" \
     -d "{\"sparql\":\"SELECT (COUNT(*) AS ?cnt) WHERE { ?s ?p ?o }\",\"contextGraphId\":\"$CG3_ID\",\"view\":\"verifiable-memory\"}")
   VM_STILL_CT=$(count_integer "$N1_VM_STILL")
   [ "$VM_STILL_CT" -ge 1 ] && break
@@ -1202,11 +1211,11 @@ done
 [[ "$VM_STILL_CT" -ge 1 ]] && ok "VM data persists after SWM clear ($VM_STILL_CT entities)" || fail "VM data lost after SWM clear"
 
 # Cleanup
-c -X POST "http://127.0.0.1:9201/api/knowledge-assets/promo-doc/wm/discard" \
+c -X POST "${NODE1_API}/api/knowledge-assets/promo-doc/wm/discard" \
   -d "{\"contextGraphId\":\"$CG3_ID\"}" > /dev/null 2>&1
-c -X POST "http://127.0.0.1:9201/api/knowledge-assets/api-draft/wm/discard" \
+c -X POST "${NODE1_API}/api/knowledge-assets/api-draft/wm/discard" \
   -d "{\"contextGraphId\":\"$CG3_ID\"}" > /dev/null 2>&1
-c -X POST "http://127.0.0.1:9202/api/knowledge-assets/n2-draft/wm/discard" \
+c -X POST "${NODE2_API}/api/knowledge-assets/n2-draft/wm/discard" \
   -d "{\"contextGraphId\":\"$CG4_ID\"}" > /dev/null 2>&1
 
 #------------------------------------------------------------

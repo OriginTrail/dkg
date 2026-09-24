@@ -59,11 +59,12 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers } from 'ethers';
+import { DEVNET_RPC, assertDevnetChain } from '../_bootstrap/devnet-chain.mjs';
 import { runKaPublishLifecycle } from '../_bootstrap/harness';
 
 // ───────────────────────────── constants ─────────────────────────────────
 const REPO_ROOT = resolve(__dirname, '../..');
-const RPC = 'http://127.0.0.1:8545';
+const RPC = DEVNET_RPC;
 const DEVNET_DIR = join(REPO_ROOT, '.devnet');
 const HARDHAT_DEPLOYER_KEY =
   '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -422,6 +423,8 @@ async function detectDevnet(maxNodes = 6): Promise<DevnetState | null> {
     contractsJson.contracts?.Hub?.evmAddress ?? contractsJson.Hub;
   if (!hubAddress) return null;
 
+  // Refuse to touch a chain this devnet did not deploy (another devnet's port).
+  await assertDevnetChain(RPC);
   const provider = new ethers.JsonRpcProvider(RPC, {
     chainId: 31337,
     name: 'localhost',

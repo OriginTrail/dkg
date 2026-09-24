@@ -718,6 +718,44 @@ export function extractPeerIdsFromMultiaddrs(addrs: readonly string[] | undefine
   return out;
 }
 
+/**
+ * The network file's relays an edge without `authorityIndex` seeds its
+ * authority index from (`DKGAgentConfig.networkRelays`). They vouch only for
+ * their own network's chain, so a node whose effective chain id or Hub differs
+ * from the one the network file declares — a local devnet or a private
+ * deployment resolved against the testnet file — gets none, rather than
+ * dialling another network's cores for a snapshot of a chain they do not
+ * index. `relay: "none"` gets none either.
+ */
+export function resolveAuthoritySeedNetworkRelays(input: {
+  relay: string | undefined;
+  networkRelays: readonly string[] | undefined;
+  networkChain: { chainId?: string; hubAddress?: string } | undefined;
+  chain: { chainId?: string; hubAddress?: string } | undefined;
+}): { relays: string[]; withheldReason?: string } {
+  if (input.relay === 'none') return { relays: [] };
+  const relays = [...(input.networkRelays ?? [])];
+  const { networkChain, chain } = input;
+  if (relays.length === 0 || !networkChain || !chain) return { relays };
+  if (networkChain.chainId && chain.chainId && networkChain.chainId !== chain.chainId) {
+    return {
+      relays: [],
+      withheldReason: `chain ${chain.chainId} is not the network file's chain ${networkChain.chainId}`,
+    };
+  }
+  if (
+    networkChain.hubAddress
+    && chain.hubAddress
+    && networkChain.hubAddress.toLowerCase() !== chain.hubAddress.toLowerCase()
+  ) {
+    return {
+      relays: [],
+      withheldReason: `Hub ${chain.hubAddress} is not the network file's Hub ${networkChain.hubAddress}`,
+    };
+  }
+  return { relays };
+}
+
 export function resolveACKCandidatePeerIds(input: {
   usingNetworkRelays: boolean;
   networkRelays: readonly string[] | undefined;
@@ -1759,6 +1797,18 @@ async function runDaemonInnerWithStartupOwnership(
     usingNetworkRelays = true;
     log(`Using relay(s) from network config (${network.networkName})`);
   }
+  const authoritySeedRelays = resolveAuthoritySeedNetworkRelays({
+    relay: config.relay,
+    networkRelays: network?.relays,
+    networkChain: network?.chain,
+    chain: chainBase,
+  });
+  if (authoritySeedRelays.withheldReason !== undefined) {
+    log(
+      `[info] [authority-index] ${network?.networkName ?? selectedNetworkConfig} relays are not used as snapshot trust: `
+      + `${authoritySeedRelays.withheldReason}`,
+    );
+  }
   const preferredACKPeerIds = resolveACKCandidatePeerIds({
     usingNetworkRelays,
     networkRelays: network?.relays,
@@ -1972,8 +2022,9 @@ async function runDaemonInnerWithStartupOwnership(
     relayPeers,
     // Only the network file's relays seed an edge without `authorityIndex`:
     // `relayPeers` may carry operator transport relays, which never become
-    // snapshot trust, and `relay: "none"` means no relay is contacted at all.
-    networkRelays: config.relay === "none" ? [] : network?.relays ?? [],
+    // snapshot trust, `relay: "none"` means no relay is contacted at all, and
+    // a node on another chain than the network file's gets none.
+    networkRelays: authoritySeedRelays.relays,
     otherNetworkRelays: otherNetworkRelays.relays,
     networkPeerIsolation: networkPeerIsolationEnabled,
     preferredACKPeerIds: preferredACKPeerIds.length > 0 ? preferredACKPeerIds : undefined,

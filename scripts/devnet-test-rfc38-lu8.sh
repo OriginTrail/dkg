@@ -28,10 +28,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=devnet-publish-helpers.sh
 source "$SCRIPT_DIR/devnet-publish-helpers.sh"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
-API_PORT_BASE=9201
+# shellcheck source=devnet-layout.sh
+source "$SCRIPT_DIR/devnet-layout.sh"
 CURATOR_NODE=5
 MEMBER_NODE=6
-EVM_RPC="http://127.0.0.1:8545"
+EVM_RPC="$DEVNET_RPC_URL"
 
 log()  { echo "[lu8-validate] $*"; }
 warn() { echo "[lu8-validate] WARN: $*" >&2; }

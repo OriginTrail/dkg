@@ -46,22 +46,15 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync, rmSync } from 'node
 import { join, resolve } from 'node:path';
 import * as http from 'node:http';
 import { ethers } from 'ethers';
+import { DEVNET_RPC, assertDevnetChain } from '../_bootstrap/devnet-chain.mjs';
 import { runKaPublishLifecycle } from '../_bootstrap/harness';
 
 // ───────────────────────────── constants ─────────────────────────────────
 const REPO_ROOT = resolve(__dirname, '../..');
 const DEVNET_DIR = join(REPO_ROOT, '.devnet');
-/** RPC is read from node1's config (devnet.sh wires it from HARDHAT_PORT), so a
- *  non-default Hardhat port works without editing the test. */
-function detectRpc(): string {
-  if (process.env.DEVNET_RPC) return process.env.DEVNET_RPC;
-  try {
-    const cfg = JSON.parse(readFileSync(join(DEVNET_DIR, 'node1', 'config.json'), 'utf8'));
-    if (cfg?.chain?.rpcUrl) return cfg.chain.rpcUrl;
-  } catch { /* fall through */ }
-  return 'http://127.0.0.1:8545';
-}
-const RPC = detectRpc();
+/** This devnet's Hardhat RPC: DEVNET_RPC, HARDHAT_PORT, or what devnet.sh recorded
+ *  (see devnet/_bootstrap/devnet-chain.mjs), so a non-default port works as-is. */
+const RPC = DEVNET_RPC;
 const DEVNET_SH = join(REPO_ROOT, 'scripts/devnet.sh');
 const CONTEXT_GRAPH = 'devnet-test';
 const CORE_NODES = [1, 2, 3, 4];
@@ -388,9 +381,11 @@ beforeAll(async () => {
     throw new Error(`${DEVNET_DIR} missing — run \`./scripts/devnet.sh clean && ./scripts/devnet.sh start 6\` first.`);
   }
   // Hardhat must be reachable.
+  // Refuse to touch a chain this devnet did not deploy (another devnet's port).
+  await assertDevnetChain(RPC);
   const provider = new ethers.JsonRpcProvider(RPC, { chainId: 31337, name: 'localhost' });
   const chainId = await provider.send('eth_chainId', []);
-  expect(chainId, 'devnet hardhat not reachable on :8545').toBeTruthy();
+  expect(chainId, `devnet hardhat not reachable on ${RPC}`).toBeTruthy();
 
   nodes = {};
   for (let i = 1; i <= 6; i++) nodes[i] = readNodeConfig(i);

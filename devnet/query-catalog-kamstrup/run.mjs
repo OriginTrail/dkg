@@ -6,7 +6,18 @@ import { pathToFileURL } from 'node:url';
 
 const repoRoot = resolve(import.meta.dirname, '../..');
 const kamstrupRoot = resolve(process.env.KAMSTRUP_ROOT ?? resolve(repoRoot, '../kamstrup-dkg'));
-const daemonUrl = (process.env.DKG_API_URL ?? 'http://127.0.0.1:9201').replace(/\/$/, '');
+// Default to this devnet's node1 (the token below is node1's too), on whatever
+// API port devnet.sh gave it.
+async function node1ApiUrl() {
+  try {
+    const cfg = JSON.parse(await readFile(resolve(repoRoot, '.devnet/node1/config.json'), 'utf8'));
+    if (Number.isInteger(cfg.apiPort)) return `http://127.0.0.1:${cfg.apiPort}`;
+  } catch {
+    // no devnet config here: fall back to the default layout
+  }
+  return 'http://127.0.0.1:9201';
+}
+const daemonUrl = (process.env.DKG_API_URL ?? await node1ApiUrl()).replace(/\/$/, '');
 const tokenFile = resolve(process.env.DKG_AUTH_TOKEN_FILE ?? resolve(repoRoot, '.devnet/node1/auth.token'));
 const contextGraphId = process.env.DKG_KAMSTRUP_CONTEXT_GRAPH_ID ?? 'kamstrup-manufacturing';
 const outputFile = resolve(

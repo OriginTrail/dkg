@@ -61,11 +61,11 @@ import { readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import * as http from 'node:http';
 import { ethers } from 'ethers';
+import { DEVNET_RPC, assertDevnetChain } from '../_bootstrap/devnet-chain.mjs';
 
 // ───────────────────────────── constants ─────────────────────────────────
 const REPO_ROOT = resolve(__dirname, '../..');
-const RPC = 'http://127.0.0.1:8545';
-const HUB = '0x5FbDB2315678afecb367f032d93F642f64180aa3';
+const RPC = DEVNET_RPC;
 const DEVNET_DIR = join(REPO_ROOT, '.devnet');
 const CONTEXT_GRAPH = 'devnet-test';
 const FINDINGS_PATH = join(__dirname, 'FINDINGS.local.md');
@@ -317,8 +317,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 // ───────────────────────────── beforeAll ─────────────────────────────────
 beforeAll(async () => {
+  // Refuse to touch a chain this devnet did not deploy (another devnet's port).
+  const { hubAddress } = await assertDevnetChain(RPC);
   const provider = new ethers.JsonRpcProvider(RPC);
-  const hub = new ethers.Contract(HUB, HUB_ABI, provider);
+  const hub = new ethers.Contract(hubAddress, HUB_ABI, provider);
 
   const [nftAddr, cssAddr, stakingAddr, profileWriteAddr, profileStorageAddr, paramsAddr, chronosAddr, rsAddr, esAddr, tokenAddr] =
     await Promise.all([

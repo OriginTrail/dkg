@@ -65,14 +65,20 @@ import {
 } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ethers } from 'ethers';
+import { DEVNET_RPC, assertDevnetChain } from '../_bootstrap/devnet-chain.mjs';
 import { runKaPublishLifecycle } from '../_bootstrap/harness.js';
 
 const REPO_ROOT = resolve(__dirname, '../..');
-const RPC = 'http://127.0.0.1:8545';
+const RPC = DEVNET_RPC;
 const DEVNET_DIR = join(REPO_ROOT, '.devnet');
 const HARDHAT_DEPLOYER_KEY =
   '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
-const RS_TIMEOUT_S = Number(process.env.RS_TIMEOUT ?? 90);
+// Seconds phase 1 waits for a core to submit a proof. A challenge is fixed
+// for a whole proof period (100 blocks, ~100 s at devnet.sh's 1 s block
+// interval), so a node challenged on a KC it cannot prove yet only gets a new
+// one at the next period. The default covers two periods; a loaded machine
+// needed more than the old 90 s.
+const RS_TIMEOUT_S = Number(process.env.RS_TIMEOUT ?? 240);
 
 interface DevnetNode {
   num: number;
@@ -351,6 +357,8 @@ async function detectDevnet(): Promise<DevnetState | null> {
     return null;
   }
 
+  // Refuse to touch a chain this devnet did not deploy (another devnet's port).
+  await assertDevnetChain(RPC);
   const provider = new ethers.JsonRpcProvider(RPC, {
     chainId: 31337,
     name: 'localhost',
@@ -689,7 +697,11 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
         Authorization: `Bearer ${node.authToken}`,
       });
 
-      // Preflight: every core node must have RS enabled.
+      // Preflight: every core node must have RS enabled. Record how many
+      // proofs each has submitted so far: after bootstrap the provers are
+      // already proving older KCs, and an earlier proof says nothing about the
+      // node's current challenge.
+      const baselineSubmitted: Record<number, number> = {};
       for (let n = 1; n <= 4; n++) {
         const node = s.nodes[n]!;
         const res = await fetch(
@@ -701,12 +713,16 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
             `node${n} /api/random-sampling/status failed: ${res.status}`,
           );
         }
-        const status = (await res.json()) as { enabled?: boolean };
+        const status = (await res.json()) as {
+          enabled?: boolean;
+          loop?: { submittedCount?: number };
+        };
         if (!status.enabled) {
           throw new Error(
             `node${n} prover disabled — identity registration may still be pending. Status: ${JSON.stringify(status)}`,
           );
         }
+        baselineSubmitted[n] = status.loop?.submittedCount ?? 0;
       }
 
       // Publish the first (and only) KC from node1 so the prover on that
@@ -725,7 +741,7 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
       );
 
       console.log(
-        `phase 1 (RS): polling 4 core nodes for first submitted proof (timeout ${RS_TIMEOUT_S}s, prover ticks every 5s)...`,
+        `phase 1 (RS): polling 4 core nodes for a new solved proof (timeout ${RS_TIMEOUT_S}s, prover ticks every 5s, baselines=${JSON.stringify(baselineSubmitted)})...`,
       );
       let success: {
         node: number;
@@ -733,7 +749,8 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
         txHash: string;
       } | null = null;
       const lastOutcomeKinds: Record<number, string> = {};
-      for (let attempt = 0; attempt < RS_TIMEOUT_S; attempt++) {
+      const rsDeadline = Date.now() + RS_TIMEOUT_S * 1000;
+      for (let attempt = 0; Date.now() < rsDeadline; attempt++) {
         for (let n = 1; n <= 4; n++) {
           const node = s.nodes[n]!;
           try {
@@ -752,13 +769,21 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
             };
             const submitted = status.loop?.submittedCount ?? 0;
             lastOutcomeKinds[n] = status.loop?.lastOutcome?.kind ?? '?';
-            if (submitted > 0) {
-              success = {
-                node: n,
-                identityId: BigInt(status.identityId ?? '0'),
-                txHash: status.loop?.lastSubmittedTxHash ?? '',
-              };
-              break;
+            // A proof submitted during this test, and the node's current
+            // challenge solved on chain. If a new proof period began between
+            // the two reads, keep polling: the node proves the new challenge
+            // within the same deadline.
+            if (submitted > baselineSubmitted[n]!) {
+              const identityId = BigInt(status.identityId ?? '0');
+              const challenge = await s.rss.getNodeChallenge(identityId);
+              if (challenge[6] === true) {
+                success = {
+                  node: n,
+                  identityId,
+                  txHash: status.loop?.lastSubmittedTxHash ?? '',
+                };
+                break;
+              }
             }
           } catch {
             // node may be momentarily unreachable; keep polling.
@@ -766,8 +791,9 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
         }
         if (success) break;
         if (attempt > 0 && attempt % 15 === 0) {
+          const waitedS = RS_TIMEOUT_S - Math.round((rsDeadline - Date.now()) / 1000);
           console.log(
-            `phase 1 (RS) [t+${attempt}s]: still waiting; outcomes=${JSON.stringify(lastOutcomeKinds)}`,
+            `phase 1 (RS) [t+${waitedS}s]: still waiting; outcomes=${JSON.stringify(lastOutcomeKinds)}`,
           );
         }
         await new Promise((r) => setTimeout(r, 1000));
@@ -787,7 +813,7 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
           }
         }
         throw new Error(
-          `no core node submitted a proof within ${RS_TIMEOUT_S}s`,
+          `no core node submitted a new solved proof within ${RS_TIMEOUT_S}s (baselines=${JSON.stringify(baselineSubmitted)})`,
         );
       }
       console.log(
@@ -814,7 +840,8 @@ describe('V10 chain — combined end-to-end devnet validation', () => {
         `phase 1 (RS): on-chain score=${score} (informational; 0 on fresh devnet is benign)`,
       );
     },
-    240_000,
+    // The node1 publish before the poll, then the poll window itself.
+    (RS_TIMEOUT_S + 150) * 1000,
   );
 
   // =========================================================================

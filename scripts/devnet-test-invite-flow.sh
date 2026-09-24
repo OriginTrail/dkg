@@ -3,9 +3,9 @@
 # End-to-end test of the curated context-graph invite & acceptance flow.
 #
 # Drives 3 devnet nodes over HTTP:
-#   N1 (port 9201) — curator, creates a private (curated) CG
-#   N2 (port 9202) — invitee, allowlisted after approval; should join successfully
-#   N3 (port 9203) — invitee, never allowlisted; should be cleanly denied
+#   N1 (API_PORT_BASE, default 9201) — curator, creates a private (curated) CG
+#   N2 (API_PORT_BASE + 1) — invitee, allowlisted after approval; should join successfully
+#   N3 (API_PORT_BASE + 2) — invitee, never allowlisted; should be cleanly denied
 #
 # Focuses strictly on the invite/acceptance surface. Assumes the devnet
 # was started by `./scripts/devnet.sh start 5`.
@@ -42,9 +42,11 @@ else
 fi
 
 CG_ID="invite-test-$(date +%s)"
-N1=http://127.0.0.1:9201
-N2=http://127.0.0.1:9202
-N3=http://127.0.0.1:9203
+# shellcheck source=devnet-layout.sh
+source "$SCRIPT_DIR/devnet-layout.sh"
+N1="http://127.0.0.1:$API_PORT_BASE"
+N2="http://127.0.0.1:$((API_PORT_BASE + 1))"
+N3="http://127.0.0.1:$((API_PORT_BASE + 2))"
 
 # Filled in by `identify` below.
 N1_ADDR=""

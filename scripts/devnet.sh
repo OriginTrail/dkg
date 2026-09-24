@@ -18,7 +18,11 @@
 #
 # Environment:
 #   DEVNET_DIR    Base directory for devnet data (default: .devnet)
-#   HARDHAT_PORT  Hardhat node port (default: 8545)
+#   HARDHAT_PORT  Hardhat node port (default: the port of a loopback DEVNET_RPC,
+#                 else 8545). `start` records the port layout in
+#                 $DEVNET_DIR/ports.env and later commands reuse it unless the
+#                 environment overrides it.
+#   DEVNET_RPC    RPC the devnet suites use; must name HARDHAT_PORT when both are set
 #   DEVNET_BLAZEGRAPH_PORT
 #                 Host port for the devnet Blazegraph container (default: 9999)
 #   DEVNET_OXIGRAPH_SERVER_PORT_5 / DEVNET_OXIGRAPH_SERVER_PORT_6
@@ -45,7 +49,12 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
-HARDHAT_PORT="${HARDHAT_PORT:-8545}"
+
+# Port layout (HARDHAT_PORT, API_PORT_BASE, ...): the environment, a loopback
+# DEVNET_RPC's port, the layout `start` recorded in $DEVNET_DIR/ports.env, then
+# the defaults. See scripts/devnet-layout.sh for why.
+# shellcheck source=devnet-layout.sh
+source "$(dirname "${BASH_SOURCE[0]}")/devnet-layout.sh"
 NUM_NODES="${2:-6}"
 NUM_CORE_NODES="${NUM_CORE_NODES:-4}"
 API_PORT_BASE="${API_PORT_BASE:-9201}"
@@ -192,14 +201,71 @@ refresh_hardhat_pidfile() {
   return 1
 }
 
+# PIDs listening on HARDHAT_PORT (empty when free or lsof is missing).
+hardhat_port_listener_pids() {
+  command -v lsof >/dev/null 2>&1 || return 0
+  lsof -nP -iTCP:"$HARDHAT_PORT" -sTCP:LISTEN -t 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ *$//' || true
+}
+
+# Does any JSON-RPC endpoint answer on HARDHAT_PORT? The fallback probe when
+# lsof is not installed.
+hardhat_port_answers() {
+  curl -s --max-time 2 "http://127.0.0.1:$HARDHAT_PORT" \
+    -X POST -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' 2>/dev/null | grep -q '"result"'
+}
+
+# Record which chain this devnet deployed so suites and scripts can refuse any
+# other one (devnet/_bootstrap/devnet-chain.mjs): the RPC, and the genesis block
+# hash, whose timestamp is this Hardhat node's start time. The Hub address
+# alone cannot tell two devnets apart — every fresh deploy puts it at the same
+# deterministic address.
+record_hardhat_chain_identity() {
+  mkdir -p "$DEVNET_DIR/hardhat"
+  local genesis_hash
+  genesis_hash=$(curl -s --max-time 5 "http://127.0.0.1:$HARDHAT_PORT" \
+    -X POST -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x0",false],"id":1}' 2>/dev/null \
+    | grep -o '"hash":"0x[0-9a-fA-F]\{64\}"' | head -1 | grep -o '0x[0-9a-fA-F]\{64\}' || true)
+  if [ -z "$genesis_hash" ]; then
+    log "ERROR: could not read the genesis block from http://127.0.0.1:$HARDHAT_PORT"
+    return 1
+  fi
+  echo "http://127.0.0.1:$HARDHAT_PORT" > "$DEVNET_DIR/hardhat/rpc_url"
+  echo "$genesis_hash" > "$DEVNET_DIR/hardhat/genesis_hash"
+  log "Hardhat chain identity recorded (genesis $genesis_hash)"
+}
+
 start_hardhat() {
   local pidfile="$DEVNET_DIR/hardhat.pid"
   local existing_pid
 
   existing_pid=$(refresh_hardhat_pidfile || true)
   if [ -n "$existing_pid" ]; then
+    # The pidfile can outlive a HARDHAT_PORT change: only reuse a node that
+    # actually owns this port, or every later step talks to someone else.
+    local listeners
+    listeners=$(hardhat_port_listener_pids)
+    if command -v lsof >/dev/null 2>&1 && ! echo " $listeners " | grep -q " $existing_pid "; then
+      log "ERROR: this devnet's Hardhat (PID $existing_pid) does not own port $HARDHAT_PORT (listeners: ${listeners:-none})."
+      log "       Stop it first (./scripts/devnet.sh stop), or start with the HARDHAT_PORT it runs on."
+      exit 1
+    fi
     log "Hardhat node already running (PID $existing_pid)"
+    [ -f "$DEVNET_DIR/hardhat/genesis_hash" ] || record_hardhat_chain_identity || exit 1
     return 0
+  fi
+
+  # Never adopt a chain this script did not start: with another devnet (or any
+  # other node) on HARDHAT_PORT, the readiness probe below would succeed against
+  # it and the deploy would write to that chain.
+  local foreign
+  foreign=$(hardhat_port_listener_pids)
+  if [ -n "$(echo "$foreign" | tr -d ' ')" ] || hardhat_port_answers; then
+    log "ERROR: port $HARDHAT_PORT is already in use${foreign:+ by PID(s) $foreign}, and not by this devnet's Hardhat."
+    log "       Another devnet? Pick free ports, e.g. HARDHAT_PORT=8547 API_PORT_BASE=9401 LIBP2P_PORT_BASE=10401"
+    log "       DEVNET_DOCKER_NAME_PREFIX=devnet2 (plus DEVNET_BLAZEGRAPH_PORT / DEVNET_OXIGRAPH_SERVER_PORT_5/6)."
+    exit 1
   fi
 
   log "Starting Hardhat node on port $HARDHAT_PORT..."
@@ -210,7 +276,7 @@ start_hardhat() {
   # Remove stale deployment artifacts + marker so the fresh chain starts clean
   rm -f "$REPO_ROOT/packages/evm-module/deployments/hardhat_contracts.json"
   rm -f "$REPO_ROOT/packages/evm-module/deployments/localhost_contracts.json"
-  rm -f "$DEVNET_DIR/hardhat/deployed"
+  rm -f "$DEVNET_DIR/hardhat/deployed" "$DEVNET_DIR/hardhat/genesis_hash" "$DEVNET_DIR/hardhat/rpc_url"
 
   # Focused smoke check for the devnet config itself: compile with it DIRECTLY
   # before booting anything. A typo in the config, a base-config shape drift
@@ -265,13 +331,20 @@ start_hardhat() {
   echo "$hh_pid" > "$pidfile"
   log "Hardhat node started (PID $hh_pid)"
 
-  # Wait for it to be ready
+  # Wait for it to be ready. The node must still be OUR process: if it died
+  # (say, it lost a race for the port), whatever answers is not our chain.
   for i in $(seq 1 30); do
+    if ! kill -0 "$hh_pid" 2>/dev/null; then
+      log "ERROR: Hardhat node (PID $hh_pid) exited during startup -- see $DEVNET_DIR/hardhat/node.log"
+      rm -f "$pidfile"
+      return 1
+    fi
     if curl -s "http://127.0.0.1:$HARDHAT_PORT" \
          -X POST -H "Content-Type: application/json" \
          -d '{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":1}' \
          > /dev/null 2>&1; then
       log "Hardhat node ready"
+      record_hardhat_chain_identity || return 1
       enable_hardhat_interval_mining
       return 0
     fi
@@ -1339,6 +1412,9 @@ cmd_start() {
   # (all-current) layout.
   prepare_layout_versions
   start_hardhat
+  # Record the layout only once Hardhat is known to be ours on HARDHAT_PORT, so
+  # a refused start never rewrites the layout of the devnet already running.
+  write_devnet_layout
   deploy_contracts
   start_blazegraph
   start_oxigraph_servers
