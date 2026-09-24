@@ -1521,14 +1521,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     // claims (see context-graph-claim-proof.ts), and a subject can carry any
     // number of them, so ask only for the ones this chain proves: no other
     // claim can then push the proven one out of the answer. With none proven
-    // the store is still read, so a failing store fails closed instead of
-    // reading as an unregistered graph; nothing it returns can be proven then.
-    const provenIds = this.provenOnChainIdsFor(contextGraphId);
+    // the list is empty and matches nothing, but the store is still read, so
+    // a failing store fails closed instead of reading as an unregistered graph.
     const result = await this.store.query(
-      contextGraphOnChainIdBindingQuery(
-        contextGraphId,
-        provenIds.length === 0 ? {} : { onChainIds: provenIds },
-      ),
+      contextGraphOnChainIdBindingQuery(contextGraphId, { onChainIds: this.provenOnChainIdsFor(contextGraphId) }),
       {
         signal: options.signal,
         source: options.source ?? 'agent.contextGraph.onChainId',

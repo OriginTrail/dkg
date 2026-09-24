@@ -6,6 +6,7 @@ import { Rfc64SwmRecoveryRuntimeV1 } from
 import { Rfc64BackgroundWorkDispatcherV1 } from
   '../src/rfc64/background-work-dispatcher-v1.js';
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
+import { SlotFactsIndex } from '../src/context-graph-claim-proof.js';
 import { contextGraphNameCommitmentOf } from '../src/context-graph-name-candidate.js';
 import { Rfc64AuthorityReadCoordinatorV1 } from
   '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
@@ -128,7 +129,7 @@ export function selectedFixture(resolved: bigint | null = 42n) {
     rfc64SwmRecoveryRuntimeV1,
     // What this node read from its own chain, per on-chain id. Empty unless a
     // scenario proves a slot (see `proveOnChainSlot`).
-    onChainContextGraphFacts: new Map<string, { nameHash: string | null }>(),
+    onChainContextGraphFacts: new SlotFactsIndex<{ nameHash: string | null }>(),
     subscribedContextGraphs: new Map([[LOCAL_ID, subscription]]),
     localContextGraphProvenance: {
       created: new Set<string>(),

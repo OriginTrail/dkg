@@ -178,6 +178,7 @@ import {
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { prepareAssertionPromote } from './internal/promote/assertion-promote-precommit.js';
 import { isCanonicalAuthoritativeContextGraphId } from './context-graph-binding-state.js';
+import { NO_NAME_COMMITMENT } from './context-graph-claim-proof.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -2279,9 +2280,13 @@ export class DKGAgent extends DKGAgentBase {
     // subscription moves to the cleartext id. Recording it below first would
     // let the canonical setter retire the hash-keyed row and drop the
     // subscription with it.
-    for (const { id } of discoveredEntries.values()) {
-      await this.adoptWantedContextGraphNamePlaceholder(id);
-    }
+    // Adoptions are independent: each targets its own name hash, is
+    // serialized per hash, and never throws.
+    await mapWithConcurrency(
+      [...discoveredEntries.values()],
+      DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_CONCURRENCY,
+      ({ id }) => this.adoptWantedContextGraphNamePlaceholder(id),
+    );
 
     // Recording and the temporary Core auto-subscribe bridge are synchronous.
     // Defer only this narrow producer burst so every discovered row enters one
@@ -2542,9 +2547,12 @@ export class DKGAgent extends DKGAgentBase {
     const ctx = options.ctx ?? createOperationContext('system');
     const fresh = options.source !== 'checkpoint';
     const { contextGraphId, accessPolicy } = observation;
-    const nameHash = typeof observation.nameHash === 'string' && observation.nameHash.length > 0
+    const observedNameHash = typeof observation.nameHash === 'string' && observation.nameHash.length > 0
       ? observation.nameHash.toLowerCase()
       : null;
+    // bytes32(0) is a curator's opt-out: the slot commits no name. Enumeration
+    // already reads it as null; the live event forwards the raw zero word.
+    const nameHash = observedNameHash === NO_NAME_COMMITMENT ? null : observedNameHash;
     const publishPolicy = observation.publishPolicy ?? null;
     const incoming: OnChainContextGraphFacts = {
       onChainId: contextGraphId,

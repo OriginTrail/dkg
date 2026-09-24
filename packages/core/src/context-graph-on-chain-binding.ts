@@ -26,7 +26,8 @@ export type OntologyBindingSlotClass = 'curated' | 'public' | 'inactive' | 'unkn
  *
  * `onChainIds` restricts the answer to those ids, in each graph before the
  * ontology copy is preferred, so other values in either graph can never hide
- * an allowed one. An empty list matches nothing.
+ * an allowed one. An empty list matches nothing, but the query still reads
+ * the store.
  */
 export function contextGraphOnChainIdBindingQuery(
   contextGraphId: string,
@@ -35,10 +36,13 @@ export function contextGraphOnChainIdBindingQuery(
   const subject = contextGraphDataUri(contextGraphId);
   const ontologyGraph = contextGraphDataUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
   const metaGraph = contextGraphMetaUri(contextGraphId);
-  const allowed = options.onChainIds === undefined
-    ? undefined
-    : options.onChainIds.map((onChainId) => sparqlString(onChainId)).join(', ');
-  const only = (variable: string) => (allowed === undefined ? '' : ` FILTER(STR(?${variable}) IN (${allowed}))`);
+  const allowed = options.onChainIds;
+  // `IN ()` is valid SPARQL 1.1, but `false` says "nothing" on every backend.
+  const only = (variable: string) => {
+    if (allowed === undefined) return '';
+    if (allowed.length === 0) return ' FILTER(false)';
+    return ` FILTER(STR(?${variable}) IN (${allowed.map((onChainId) => sparqlString(onChainId)).join(', ')}))`;
+  };
   return `SELECT ?id WHERE {
     OPTIONAL { GRAPH <${ontologyGraph}> { <${subject}> <${CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE}> ?ontologyId }${only('ontologyId')} }
     OPTIONAL { GRAPH <${metaGraph}> { <${subject}> <${CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE}> ?metaId }${only('metaId')} }

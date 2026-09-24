@@ -446,7 +446,6 @@ import {
   toContextGraphListOnChainFacts,
   type OnChainContextGraphFacts,
 } from './context-graph-storage-discovery.js';
-import { proveOnChainIdClaim } from './context-graph-claim-proof.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
@@ -516,7 +515,6 @@ interface ContextGraphListChainView {
   readonly subscribedContextGraphs?: ReadonlyMap<string, { onChainHash?: string }>;
   readonly wireIdToLocalCgId?: ReadonlyMap<string, string>;
   readonly onChainContextGraphFacts?: ReadonlyMap<string, OnChainContextGraphFacts>;
-  isWireIdKeyedSubscription?(localId: string): boolean;
 }
 
 function contextGraphListChainView(agent: DKGAgent): ContextGraphListChainView {
@@ -525,9 +523,10 @@ function contextGraphListChainView(agent: DKGAgent): ContextGraphListChainView {
 
 /**
  * The on-chain id a list row may show from the metadata projection: the
- * claimed id when this chain proves it, otherwise undefined. The projection
- * copies `OnChainId` from the shared ontology graph, which holds every
- * network's claims (context-graph-claim-proof.ts). Both listings use this.
+ * claimed id when this chain proves it (`provenOnChainContextGraphClaim`),
+ * otherwise undefined. The projection copies `OnChainId` from the shared
+ * ontology graph, which holds every network's claims. Both listings use
+ * this; a row with no projected id asks the agent nothing.
  */
 function provenProjectedOnChainId(
   agent: DKGAgent,
@@ -535,13 +534,7 @@ function provenProjectedOnChainId(
   claimedOnChainId: string | undefined,
 ): string | undefined {
   if (claimedOnChainId === undefined) return undefined;
-  const view = contextGraphListChainView(agent);
-  return proveOnChainIdClaim(
-    contextGraphId,
-    claimedOnChainId,
-    view.onChainContextGraphFacts?.get(claimedOnChainId)?.nameHash,
-    (localId) => view.isWireIdKeyedSubscription?.(localId) ?? false,
-  )?.onChainId;
+  return agent.provenOnChainContextGraphClaim(contextGraphId, claimedOnChainId)?.onChainId;
 }
 
 /**

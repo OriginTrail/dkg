@@ -424,7 +424,13 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
    */
   async adoptWantedContextGraphNamePlaceholder(this: DKGAgent, contextGraphId: string): Promise<boolean> {
     if (this.subscribedContextGraphs.has(contextGraphId)) return false;
-    const target = this.contextGraphNameTargetFor(this.contextGraphNameCommitment(contextGraphId));
+    let nameHash: string;
+    try {
+      nameHash = this.contextGraphNameCommitment(contextGraphId);
+    } catch {
+      return false; // not valid UTF-16, so it names no graph
+    }
+    const target = this.contextGraphNameTargetFor(nameHash);
     if (target === null) return false;
     const placeholder = this.subscribedContextGraphs.get(target.nameHash);
     if (placeholder?.subscribed !== true && placeholder?.coreHosted !== true) return false;

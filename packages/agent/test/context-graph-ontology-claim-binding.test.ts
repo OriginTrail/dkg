@@ -23,6 +23,8 @@ import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
   contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
+  contextGraphOnChainIdBindingQuery,
 } from '@origintrail-official/dkg-core';
 import { MOCK_DEFAULT_SIGNER, MockChainAdapter } from '@origintrail-official/dkg-chain';
 
@@ -31,6 +33,7 @@ import {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionStore,
 } from '../src/index.js';
+import { createCursorState } from '../src/reconcile-cursor.js';
 
 const keccak = (id: string) => ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
 
@@ -542,13 +545,16 @@ describe('ontology Context Graph claims on a node that synced the ontology graph
 
     await expect(agent.adoptWantedContextGraphNamePlaceholder(REAL_ID)).resolves.toBe(false);
     await expect(agent.adoptWantedContextGraphNamePlaceholder('baseball')).resolves.toBe(false);
+    // An id that is not valid UTF-16 names no graph; the pass runs these concurrently.
+    await expect(agent.adoptWantedContextGraphNamePlaceholder('bad-\uD800')).resolves.toBe(false);
   });
 
   it('clears bindings an earlier version persisted from refuted claims, and keeps the proven ones', async () => {
     const hostedClaim = 'hosted-claim-33';
     const { store, records } = memorySubscriptionStore([
-      // What a Core persisted after binding every claim (#1611 bridge).
-      { id: 'baseball', subscribed: true, synced: false, onChainId: '33', syncScoped: false },
+      // What a Core persisted after binding every claim (#1611 bridge),
+      // with reconcile progress made against #33.
+      { id: 'baseball', subscribed: true, synced: false, onChainId: '33', syncScoped: false, lastReconciledOrdinal: 37 },
       { id: 'pr68-open-test', subscribed: true, synced: false, onChainId: '33', syncScoped: false },
       { id: hostedClaim, subscribed: false, synced: false, onChainId: '33', coreHosted: true, syncScoped: false },
       // The graph #33 names, bound without its hash.
@@ -557,7 +563,9 @@ describe('ontology Context Graph claims on a node that synced the ontology graph
       { id: '33', subscribed: true, synced: false, onChainId: '33', syncScoped: false },
     ]);
     const agent = await startAgent(await baseShapedChain(), 'core', store);
-    expect(row(agent, 'baseball')?.onChainId).toBe('33');
+    const { reconcileCursors } = agent as unknown as { reconcileCursors: Map<string, unknown> };
+    reconcileCursors.set('baseball', createCursorState(37));
+    expect(row(agent, 'baseball')).toMatchObject({ onChainId: '33', lastReconciledOrdinal: 37 });
 
     await agent.discoverContextGraphsFromStorage();
 
@@ -565,12 +573,82 @@ describe('ontology Context Graph claims on a node that synced the ontology graph
       expect(row(agent, id)?.onChainId, id).toBeUndefined();
       expect(records.get(id)?.onChainId, id).toBeUndefined();
     }
+    // #33's ordinals count the graph #33 names: none of that progress survives.
+    expect(row(agent, 'baseball')?.lastReconciledOrdinal ?? 0).toBe(0);
+    expect(records.get('baseball')?.lastReconciledOrdinal ?? 0).toBe(0);
+    expect(reconcileCursors.has('baseball')).toBe(false);
     expect(row(agent, hostedClaim)).toMatchObject({ coreHosted: true });
     expect(row(agent, REAL_ID)).toMatchObject({ subscribed: true, onChainId: '33', onChainHash: NAME_HASH });
     expect(row(agent, '33')).toMatchObject({ onChainId: '33' });
     // Hosting and proof repair resolve #33 to the graph it names.
     expect(agent.resolveLocalCgIdByOnChainId(33n)).toBe(REAL_ID);
     expect(await rfc64IdentityOutcome(agent, REAL_ID)).toBe('accepted');
+  });
+
+  it('leaves a binding alone when the live event reports a slot that commits no name', async () => {
+    const agent = await startAgent(await baseShapedChain());
+    agent.setContextGraphSubscription('legacy-graph', {
+      subscribed: true,
+      synced: false,
+      onChainId: '35',
+      lastReconciledOrdinal: 5,
+    });
+    const info = vi.spyOn((agent as unknown as { log: { info: (...args: unknown[]) => void } }).log, 'info');
+
+    // An opted-out slot's ContextGraphCreated event carries bytes32(0), where
+    // enumeration reads no hash at all. It proves and refutes nothing.
+    agent.applyOnChainContextGraphObservation(
+      { contextGraphId: '35', nameHash: ethers.ZeroHash, accessPolicy: 0, publishPolicy: 0, blockNumber: 900 },
+      { source: 'event' },
+    );
+
+    expect(row(agent, 'legacy-graph')).toMatchObject({ subscribed: true, onChainId: '35', lastReconciledOrdinal: 5 });
+    expect(row(agent, 'legacy-graph')?.onChainHash).toBeUndefined();
+    expect(row(agent, ethers.ZeroHash)).toBeUndefined();
+    expect(info.mock.calls.some(([, message]) => String(message).startsWith('Cleared on-chain id'))).toBe(false);
+  });
+
+  it('reads a graph\'s own `_meta` binding past another network\'s ontology claim for it', async () => {
+    const agent = await startAgent(await baseShapedChain());
+    // What enumeration records for #34, without the placeholder row that
+    // would answer the read before the durable binding is consulted.
+    const facts = (agent as unknown as { onChainContextGraphFacts: Map<string, unknown> }).onChainContextGraphFacts;
+    facts.set('34', {
+      onChainId: '34',
+      nameHash: keccak(PRIVATE_34),
+      owner: null,
+      accessPolicy: 1,
+      publishPolicy: 0,
+      publishAuthority: null,
+      createdAt: null,
+      active: true,
+      observedAtBlock: 1,
+    });
+    const subject = contextGraphDataGraphUri(PRIVATE_34);
+    const onChainId = (graph: string, id: string) => ({
+      subject,
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+      object: `"${id}"`,
+      graph,
+    });
+    await agent.store.insert([
+      // Curated #34 keeps its binding in its own `_meta`; the shared ontology
+      // holds a Gnosis claim for the same id.
+      onChainId(contextGraphMetaGraphUri(PRIVATE_34), '34'),
+      onChainId(contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY), '91'),
+    ]);
+
+    await expect(agent.resolveContextGraphOnChainIdBinding(PRIVATE_34))
+      .resolves.toEqual({ onChainId: '34', provenance: 'ontology' });
+    // An empty allow-list matches nothing, whatever the store holds.
+    const bindingsOf = async (query: string) => {
+      const result = await agent.store.query(query);
+      return result.type === 'bindings' ? result.bindings : null;
+    };
+    await expect(bindingsOf(contextGraphOnChainIdBindingQuery(PRIVATE_34, { onChainIds: [] }))).resolves.toEqual([]);
+    // Unrestricted, the ontology copy wins: the claim the filter must see past.
+    await expect(bindingsOf(contextGraphOnChainIdBindingQuery(PRIVATE_34)))
+      .resolves.toEqual([{ id: expect.stringContaining('91') }]);
   });
 
   it('answers the ontology on-chain id read only for a claim this chain proves', async () => {
