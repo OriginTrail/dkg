@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import {
-  access, chmod, chown, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile,
-  type FileHandle,
+  access, chmod, chown, lstat, mkdir, mkdtemp, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink,
+  writeFile, type FileHandle,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -13,6 +13,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   return {
     ...actual,
     open: vi.fn(actual.open),
+    readlink: vi.fn(actual.readlink),
     realpath: vi.fn(actual.realpath),
     rename: vi.fn(actual.rename),
     stat: vi.fn(actual.stat),
@@ -73,7 +74,7 @@ describe('replaceFileDurably', () => {
   });
 
   afterEach(async () => {
-    for (const mocked of [open, realpath, rename, stat]) vi.mocked(mocked).mockReset();
+    for (const mocked of [open, readlink, realpath, rename, stat]) vi.mocked(mocked).mockReset();
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -282,6 +283,25 @@ describe('replaceFileDurably', () => {
     vi.mocked(realpath).mockRejectedValueOnce(fsError('ELOOP'));
 
     await expect(replaceFileDurably(target, 'new')).rejects.toMatchObject({ code: 'ELOOP' });
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  it('fails as writeFile would when the directory does not exist', async () => {
+    await expect(replaceFileDurably(join(dir, 'missing', 'config.json'), 'new')).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(await readdir(dir)).toEqual([]);
+  });
+
+  it('propagates a failure to resolve a missing file other than a missing directory or link', async () => {
+    const missing = join(dir, 'missing.json');
+    // The directory cannot be resolved.
+    vi.mocked(realpath)
+      .mockRejectedValueOnce(fsError('ENOENT'))
+      .mockRejectedValueOnce(fsError('EACCES'));
+    await expect(replaceFileDurably(missing, 'new')).rejects.toMatchObject({ code: 'EACCES' });
+
+    // The entry cannot be read as a link.
+    vi.mocked(readlink).mockRejectedValueOnce(fsError('EIO'));
+    await expect(replaceFileDurably(missing, 'new')).rejects.toMatchObject({ code: 'EIO' });
     expect(await readdir(dir)).toEqual([]);
   });
 

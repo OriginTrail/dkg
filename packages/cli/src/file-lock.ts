@@ -204,9 +204,11 @@ async function releaseLock(lockPath: string, token: string): Promise<void> {
  * Decide whether to retry at once (the lock is gone, or was stale and has been
  * removed) or to wait. Several waiters can find the same stale lock: only the
  * one holding the reaper lock removes it, and only after finding it still
- * stale, so no waiter can delete a lock that another has just taken. A lock
- * that disappears while it is being inspected was released, and is retried
- * without deleting anything.
+ * stale, so no waiter can delete a lock that another waiter has just taken. A
+ * lock that disappears while it is being inspected was released, and is
+ * retried without deleting anything. A holder stalled past its lease can still
+ * release its own lock between that check and the removal; a lock taken in
+ * that gap is then removed, and its holder's pre-commit check fails.
  */
 async function reapStaleLock(lockPath: string, staleMs: number): Promise<boolean> {
   const state = await inspectLock(lockPath, staleMs);
