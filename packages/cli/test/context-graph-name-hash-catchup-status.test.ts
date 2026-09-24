@@ -1,13 +1,13 @@
 /**
- * `GET /api/sync/catchup-status?contextGraphId=<name hash>` through the real
- * subscribe and query routes, a real agent, and a mock chain holding a
- * private Context Graph (on-chain accessPolicy 1) whose roster lists one of
- * the two agents this node hosts.
+ * `GET /api/sync/catchup-status?contextGraphId=<name hash>` and `?jobId=<id>`
+ * through the real subscribe and query routes, a real agent, and a mock chain
+ * holding a private Context Graph (on-chain accessPolicy 1) whose roster lists
+ * one of the two agents this node hosts.
  *
  * Once this node resolves the graph's on-chain name hash to its cleartext id,
  * the job the name hash finds names that id. The node operator and an agent
  * the subscribe route would admit see the job; any other token gets the
- * answer for a name hash with no job.
+ * answer for a name hash with no job, or for a job id this node never issued.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
@@ -131,17 +131,18 @@ async function startRoute(
     return { status: response.status, body: await response.json() as any };
   };
   /** The response as a client receives it: status, headers (all but `Date`) and raw body. */
-  const catchupStatus = async (contextGraphId: string) => {
-    const response = await fetch(
-      `${base}/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`,
-    );
+  const getCatchupStatus = async (query: string) => {
+    const response = await fetch(`${base}/api/sync/catchup-status?${query}`);
     return {
       status: response.status,
       headers: [...response.headers].filter(([name]) => name !== 'date'),
       text: await response.text(),
     };
   };
-  return { subscribe, catchupStatus };
+  const catchupStatus = (contextGraphId: string) =>
+    getCatchupStatus(`contextGraphId=${encodeURIComponent(contextGraphId)}`);
+  const catchupStatusByJobId = (jobId: string) => getCatchupStatus(`jobId=${encodeURIComponent(jobId)}`);
+  return { subscribe, catchupStatus, catchupStatusByJobId };
 }
 
 /**
@@ -275,5 +276,106 @@ describe('catch-up status looked up by a resolved name hash', () => {
     // Once the read completes again, the admitted agent sees the job again.
     admission.mockRestore();
     expect((await node.member.catchupStatus(NAME_HASH)).status).toBe(200);
+  }, 60_000);
+});
+
+/**
+ * The answer `caller` gets for a job id this node never issued, of the same
+ * length as `jobId` and with `jobId` in its place: what a refusal must match.
+ */
+async function unknownJobAnswer(
+  caller: { catchupStatusByJobId: (jobId: string) => Promise<{ status: number; headers: string[][]; text: string }> },
+  jobId: string,
+) {
+  const unknownJobId = 'z'.repeat(jobId.length);
+  const unknown = await caller.catchupStatusByJobId(unknownJobId);
+  expect(unknown.status).toBe(404);
+  return { ...unknown, text: unknown.text.replace(unknownJobId, jobId) };
+}
+
+describe('catch-up status looked up by job id', () => {
+  it('shows a job that continued under the cleartext id to the operator and an admitted agent only', async () => {
+    const node = await nodeWithNameHashJob({ resolveDuringCatchup: true });
+    const admission = vi.spyOn(node.agent, 'resolveContextGraphSubscriptionBootstrapAuthority');
+
+    // The job id finds what the name hash finds, with no admission read for the operator.
+    const shown = await node.operator.catchupStatusByJobId(node.jobId);
+    expect(shown.status).toBe(200);
+    expect(JSON.parse(shown.text)).toMatchObject({
+      jobId: node.jobId,
+      contextGraphId: NAME_HASH,
+      resolvedContextGraphId: CLEARTEXT,
+      identity: { state: 'resolved', nameHash: NAME_HASH, contextGraphId: CLEARTEXT },
+    });
+    expect(shown).toEqual(await node.operator.catchupStatus(NAME_HASH));
+    expect(admission).not.toHaveBeenCalled();
+
+    // Any other token holding the job id gets the answer for an id this node never issued.
+    const refused = await node.outsider.catchupStatusByJobId(node.jobId);
+    expect(refused).toEqual(await unknownJobAnswer(node.outsider, node.jobId));
+    expect(refused.text).not.toContain(CLEARTEXT);
+    expect(admission).toHaveBeenLastCalledWith(CLEARTEXT, {
+      callerAgentAddress: OUTSIDER,
+      allowSubscriptionFallback: false,
+    });
+
+    expect(await node.member.catchupStatusByJobId(node.jobId)).toEqual(shown);
+    expect(admission).toHaveBeenLastCalledWith(CLEARTEXT, {
+      callerAgentAddress: MEMBER,
+      allowSubscriptionFallback: false,
+    });
+  }, 60_000);
+
+  it('shows the job to every caller until the hash resolves, then applies the same rule', async () => {
+    const node = await nodeWithNameHashJob({ resolveDuringCatchup: false });
+    const admission = vi.spyOn(node.agent, 'resolveContextGraphSubscriptionBootstrapAuthority');
+
+    // Unresolved, the job names nothing beyond the hash: every caller sees it, with no admission read.
+    const unresolved = await node.operator.catchupStatusByJobId(node.jobId);
+    expect(unresolved.status).toBe(200);
+    expect(JSON.parse(unresolved.text)).toMatchObject({
+      jobId: node.jobId,
+      contextGraphId: NAME_HASH,
+      identity: { state: 'name-hash-only-private', nameHash: NAME_HASH },
+    });
+    expect(await node.member.catchupStatusByJobId(node.jobId)).toEqual(unresolved);
+    expect(await node.outsider.catchupStatusByJobId(node.jobId)).toEqual(unresolved);
+    expect(admission).not.toHaveBeenCalled();
+
+    // Resolved, the identity note names the cleartext id, so the outsider no longer sees the job.
+    expect(await node.adopt()).toBe(true);
+    const shown = await node.operator.catchupStatusByJobId(node.jobId);
+    expect(shown.status).toBe(200);
+    const body = JSON.parse(shown.text);
+    expect(body).not.toHaveProperty('resolvedContextGraphId');
+    expect(body.identity).toMatchObject({ state: 'resolved', contextGraphId: CLEARTEXT });
+    expect(await node.member.catchupStatusByJobId(node.jobId)).toEqual(shown);
+
+    const refused = await node.outsider.catchupStatusByJobId(node.jobId);
+    expect(refused).toEqual(await unknownJobAnswer(node.outsider, node.jobId));
+    expect(refused.text).not.toContain(CLEARTEXT);
+  }, 60_000);
+
+  it('answers as for an unknown job id when the admission read cannot complete', async () => {
+    const node = await nodeWithNameHashJob({ resolveDuringCatchup: true });
+    const noJob = await unknownJobAnswer(node.member, node.jobId);
+    const admission = vi.spyOn(node.agent, 'resolveContextGraphSubscriptionBootstrapAuthority');
+
+    admission.mockResolvedValueOnce({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason: 'chain-name-binding-unavailable',
+      metadataBootstrap: 'eligible',
+    });
+    expect(await node.member.catchupStatusByJobId(node.jobId)).toEqual(noJob);
+    admission.mockRejectedValueOnce(new Error('authority read failed'));
+    expect(await node.member.catchupStatusByJobId(node.jobId)).toEqual(noJob);
+
+    // The operator reads nothing, so an outage does not change its answer.
+    admission.mockRejectedValue(new Error('authority read failed'));
+    expect((await node.operator.catchupStatusByJobId(node.jobId)).status).toBe(200);
+
+    admission.mockRestore();
+    expect((await node.member.catchupStatusByJobId(node.jobId)).status).toBe(200);
   }, 60_000);
 });
