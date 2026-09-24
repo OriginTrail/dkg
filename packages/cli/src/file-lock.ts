@@ -306,8 +306,11 @@ function guardTimeoutMs(staleMs: number): number {
  * Take the guard, returning its token, or undefined once `deadline` passes.
  * A guard is taken over only when its holder has died, or, recorded in
  * another pid namespace where that cannot be checked, once it is as old as a
- * lapsed lease. Clearing a guard whose holder died is not itself serialized,
- * but it needs a holder to die inside a step that takes microseconds.
+ * lapsed lease. Where the filesystem has no hard links, a guard is created
+ * before its record is written, and one still without it after
+ * LOCK_WRITE_GRACE_MS counts as abandoned even if its holder is only stalled.
+ * Clearing a guard whose holder died is not itself serialized, but it needs a
+ * holder to die inside a step that takes microseconds.
  */
 async function acquireGuard(lockPath: string, staleMs: number, deadline: number): Promise<string | undefined> {
   const path = guardPath(lockPath);
@@ -354,9 +357,11 @@ async function clearStaleGuard(path: string, staleMs: number): Promise<boolean> 
 
 /**
  * Whether the holder recorded in a lock or guard file still holds it. Both are
- * given up when their holder is gone. A lock is also given up once its lease
- * lapses; a guard, never taken from a live holder, only when it was recorded
- * in another pid namespace (whose pids cannot be checked) and is that old.
+ * given up when their holder is gone, or when they still lack a record after
+ * LOCK_WRITE_GRACE_MS. A lock is also given up once its lease lapses; a guard
+ * with a record, never taken from a live holder in this pid namespace, only
+ * when it was recorded in another one (whose pids cannot be checked) and is
+ * that old.
  */
 async function inspectHolder(path: string, staleMs: number, kind: 'lock' | 'guard'): Promise<LockState> {
   let raw: string;
