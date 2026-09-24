@@ -1,4 +1,5 @@
 import {
+  isAbsoluteRfc3987IriV1,
   parseRdfLiteralLexicalTerm,
 } from '@origintrail-official/dkg-rdf-utils';
 
@@ -25,7 +26,6 @@ import {
   hashTripleV10,
   tripleContentV10,
 } from './crypto/canonicalize.js';
-import { isAbsoluteRfc3987IriV1 } from './absolute-rfc3987-iri.js';
 import {
   assertCanonicalDigest,
   parseCanonicalDecimalU64,

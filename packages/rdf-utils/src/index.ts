@@ -1,3 +1,5 @@
+export { isAbsoluteRfc3987IriV1 } from './absolute-rfc3987-iri.js';
+
 /** N-Triples ECHAR short forms, keyed by the raw character. */
 const RDF_LITERAL_SHORT_ESCAPES: Readonly<Record<string, string>> = Object.freeze({
   '\b': '\\b',
