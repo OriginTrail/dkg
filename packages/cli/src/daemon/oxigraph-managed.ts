@@ -44,6 +44,7 @@ import {
   normalizeOxigraphMemoryLimits,
   type OxigraphMemoryLimits,
 } from './oxigraph-launch-strategy.js';
+import { createOxigraphStoreOwnership } from './oxigraph-orphan.js';
 
 /** Config value that opts a node into the daemon-managed local server. */
 export const MANAGED_OXIGRAPH_BACKEND = 'oxigraph-server';
@@ -407,7 +408,12 @@ export async function startManagedOxigraph(
   const handle = await startOxigraphServer({
     binaryPath: binary.path,
     location: plan.location,
-    knownBinaryDirs: [cacheDir, ...(pathBinary ? [dirname(pathBinary)] : [])],
+    storeOwnership: createOxigraphStoreOwnership({
+      location: plan.location,
+      binaryPath: binary.path,
+      knownBinaryDirs: [cacheDir, ...(pathBinary ? [dirname(pathBinary)] : [])],
+      log,
+    }),
     port: plan.port,
     log,
     readyTimeoutMs: opts.readyTimeoutMs ?? plan.readyTimeoutMs,

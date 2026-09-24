@@ -13,7 +13,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, statSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -34,12 +34,12 @@ import {
   type OxigraphOwnerRecordV1,
 } from '../src/daemon/oxigraph-orphan.js';
 import {
-  procDescribeProcess,
+  procInspectProcess,
   procProcessStart,
   processStartProbe,
-  psDescribeProcess,
+  psInspectProcess,
   psProcessStart,
-  type ProcessDescriber,
+  type ProcessInspector,
   type ProcessStartProbe,
 } from '../src/daemon/process-probe.js';
 import {
@@ -83,11 +83,11 @@ function hostLockHolderProbes(): Array<[string, (lockPath: string) => Promise<nu
   return probes;
 }
 
-/** Every process-description probe this host can run, not only its default. */
-function hostProcessProbes(): Array<[string, ProcessDescriber]> {
-  const probes: Array<[string, ProcessDescriber]> = [];
-  if (hostHas('ps')) probes.push(['ps', psDescribeProcess]);
-  if (hostHasProcfs) probes.push(['procfs', procDescribeProcess]);
+/** Every process-inspection probe this host can run, not only its default. */
+function hostProcessProbes(): Array<[string, ProcessInspector]> {
+  const probes: Array<[string, ProcessInspector]> = [];
+  if (hostHas('ps')) probes.push(['ps', psInspectProcess]);
+  if (hostHasProcfs) probes.push(['procfs', procInspectProcess]);
   return probes;
 }
 
@@ -265,18 +265,56 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
         readyTimeoutMs: 10_000,
         readyIntervalMs: 50,
         log: (line) => lines.push(line),
-        io: {
-          recordOwner: async (input) => {
-            if (input.oxigraphPid === undefined) return;
+        storeOwnership: {
+          releaseOrphans: async () => [],
+          recordLaunch: async ({ launcherPid, oxigraphPid }) => {
+            if (oxigraphPid === undefined) return;
             // The verified Oxigraph dies during the ready-time write, and its
             // watchdog exits with it before the write completes.
-            process.kill(input.oxigraphPid, 'SIGKILL');
-            await waitForCondition(() => pidIsGone(input.launcherPid), 5_000);
+            process.kill(oxigraphPid, 'SIGKILL');
+            await waitForCondition(() => pidIsGone(launcherPid), 5_000);
           },
         },
       })).rejects.toThrow(/exited during startup/);
       expect(lines.join('\n')).not.toMatch(/Oxigraph server ready/);
     } finally {
+      await rm(location, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('releases orphans before every spawn and records each launch at spawn and at readiness', async () => {
+    const port = await freePort();
+    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-sequence-'));
+    const events: string[] = [];
+    const handle = await startOxigraphServer({
+      binaryPath: lockingStandin.binaryPath,
+      location,
+      port,
+      readyTimeoutMs: 10_000,
+      readyIntervalMs: 50,
+      restartBackoffBaseMs: 50,
+      restartBackoffMaxMs: 50,
+      log: () => {},
+      storeOwnership: {
+        releaseOrphans: async () => { events.push('release'); return []; },
+        recordLaunch: async ({ launcherPid, oxigraphPid }) => {
+          events.push(oxigraphPid === undefined ? `spawned:${launcherPid}` : `ready:${launcherPid}:${oxigraphPid}`);
+        },
+      },
+    });
+    try {
+      const first = await fetchPid(port);
+      process.kill(first, 'SIGKILL');
+      expect(await waitForCondition(() => events.length >= 6, 20_000)).toBe(true);
+      const second = await fetchPid(port);
+      const [launch1, launch2] = [events[1].split(':')[1], events[4].split(':')[1]];
+      expect(events).toEqual([
+        'release', `spawned:${launch1}`, `ready:${launch1}:${first}`,
+        'release', `spawned:${launch2}`, `ready:${launch2}:${second}`,
+      ]);
+      expect(launch2).not.toBe(launch1);
+    } finally {
+      await handle.stop();
       await rm(location, { recursive: true, force: true });
     }
   }, 30_000);
@@ -396,7 +434,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
 
   function processTable(
     entries: Record<number, Omit<FakeProcess, 'alive'>>,
-    hooks: { onDescribe?: (pid: number, table: Map<number, FakeProcess>) => void } = {},
+    hooks: { onInspect?: (pid: number, table: Map<number, FakeProcess>) => void } = {},
   ) {
     const table = new Map<number, FakeProcess>(
       Object.entries(entries).map(([pid, entry]) => [Number(pid), { ...entry, alive: true }]),
@@ -406,17 +444,23 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     const io: OrphanedOxigraphIo = {
       listLockHolders: vi.fn(async () =>
         [...table].filter(([, entry]) => entry.alive && entry.holdsLock).map(([pid]) => pid)),
-      describeProcess: async (pid) => {
+      inspectProcess: async (pid) => {
         const entry = table.get(pid);
-        const description = entry?.alive
-          ? { ppid: entry.ppid, argv: entry.displayOnly ? null : entry.argv, command: entry.argv.join(' ') }
+        const instance = entry?.alive
+          ? {
+              pid,
+              start: entry.start ?? `t${pid}`,
+              ppid: entry.ppid,
+              argv: entry.displayOnly ? null : entry.argv,
+              command: entry.argv.join(' '),
+            }
           : null;
-        hooks.onDescribe?.(pid, table);
-        return description;
+        hooks.onInspect?.(pid, table);
+        return instance;
       },
-      processStart: async (pid) => {
+      isSameInstance: async ({ pid, start }) => {
         const entry = table.get(pid);
-        return entry?.alive ? entry.start ?? `t${pid}` : null;
+        return entry?.alive === true && (entry.start ?? `t${pid}`) === start;
       },
       signal: (pid, signal) => {
         signals.push([pid, signal]);
@@ -630,6 +674,23 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
       expect(log).toContain('stopping orphaned Oxigraph pid 4100 (its recorded daemon pid 4000 has exited)');
     });
 
+    it('stops a pre-ready Oxigraph under a systemd scope, where the watchdog sits between launcher and Oxigraph', async () => {
+      await writeRecord({ oxigraph: undefined });
+      const { table, signals, io } = processTable({
+        // systemd-run (the recorded launcher) -> watchdog -> Oxigraph.
+        4099: { ppid: 1, argv: ['systemd-run', '--user', '--scope', '--', 'node', 'oxigraph-parent-watchdog.js', '4000'], holdsLock: false },
+        4100: { ppid: 4099, argv: ['node', 'oxigraph-parent-watchdog.js', '4000'], holdsLock: false },
+        4101: { ppid: 4100, argv: serve(location), holdsLock: true },
+      });
+
+      const { signalled, log } = await run(io);
+      expect(signalled).toEqual([4101]);
+      expect(signals).toEqual([[4101, 'SIGTERM']]);
+      expect(table.get(4099)!.alive).toBe(true);
+      expect(table.get(4100)!.alive).toBe(true);
+      expect(log).toContain('stopping orphaned Oxigraph pid 4101 (its recorded daemon pid 4000 has exited)');
+    });
+
     it.each([
       ['its parent only reuses the recorded launcher PID', {
         4099: { ppid: 1, argv: ['/bin/bash'], holdsLock: false, start: 'later' },
@@ -665,9 +726,9 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     const { table, signals, io } = processTable({
       4100: { ppid: 1, argv: serve(location), holdsLock: true },
     }, {
-      // The orphan exits right after it is described, and an unrelated
+      // The orphan exits right after it is inspected, and an unrelated
       // process of the same user receives its PID.
-      onDescribe: (pid, processes) => {
+      onInspect: (pid, processes) => {
         if (pid !== 4100) return;
         processes.set(4100, { ppid: 1, argv: ['/usr/bin/vim'], holdsLock: false, start: 'recycled', alive: true });
       },
@@ -799,8 +860,8 @@ describe('stopOrphanedOxigraph (real processes)', () => {
   it('describes an exited process as gone with every probe on this host', async () => {
     const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
     await once(exited, 'exit');
-    for (const [name, describeProcess] of hostProcessProbes()) {
-      expect(await describeProcess(exited.pid!), name).toBeNull();
+    for (const [name, inspectProcess] of hostProcessProbes()) {
+      expect(await inspectProcess(exited.pid!), name).toBeNull();
     }
     for (const [name, processStart] of hostStartProbes()) {
       expect(await processStart(exited.pid!), name).toBeNull();
@@ -817,6 +878,9 @@ describe('stopOrphanedOxigraph (real processes)', () => {
         expect(start, name).toMatch(/\S/);
         expect(await processStart(launcher.pid!), name).toBe(start);
         expect(await processStart(process.pid), name).not.toBeNull();
+        // Identities recorded with one probe are compared with the other.
+        const inspect = name === 'ps' ? psInspectProcess : procInspectProcess;
+        expect((await inspect(launcher.pid!))?.start, name).toBe(start);
       }
       await recordOxigraphOwner({
         location,
@@ -837,6 +901,25 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       });
     } finally {
       launcher.kill('SIGKILL');
+      await rm(location, { recursive: true, force: true });
+    }
+  });
+
+  it('leaves no temporary file behind when the owner record cannot be written', async () => {
+    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-record-fail-'));
+    const lines: string[] = [];
+    try {
+      // A directory in the record's place makes the atomic rename fail.
+      await mkdir(join(location, OXIGRAPH_OWNER_RECORD, 'blocker'), { recursive: true });
+      await recordOxigraphOwner({
+        location,
+        binaryPath: '/opt/oxigraph',
+        launcherPid: process.pid,
+        log: (line) => lines.push(line),
+      });
+      expect(lines.join('\n')).toContain('could not record the store owner');
+      expect((await readdir(location)).sort()).toEqual([OXIGRAPH_OWNER_RECORD]);
+    } finally {
       await rm(location, { recursive: true, force: true });
     }
   });
@@ -951,8 +1034,10 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       }
       // The stand-in is a `#!/usr/bin/env node` script.
       const argv = ['node', lockingStandin.binaryPath, ...oxigraphStoreArgs(location), '--bind', `127.0.0.1:${port}`];
-      for (const [name, describeProcess] of processProbes) {
-        expect(await describeProcess(owned.pid!), name).toEqual({
+      for (const [name, inspectProcess] of processProbes) {
+        expect(await inspectProcess(owned.pid!), name).toEqual({
+          pid: owned.pid,
+          start: expect.stringMatching(/\S/),
           ppid: process.pid,
           // `/proc` keeps argv exact; `ps` shows only the joined text.
           argv: name === 'procfs' ? argv : null,

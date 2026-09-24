@@ -15,6 +15,16 @@ on:
       - 'packages/cli/test/oxigraph-parent-watchdog.test.ts'
       - 'packages/cli/test/oxigraph-server.test.ts'
       - 'packages/cli/test/fixtures/oxigraph-*.ts'
+      - 'packages/cli/src/daemon/fs-utils.ts'
+      - 'packages/agent/src/map-with-concurrency.ts'
+      # Inputs that decide installation, build output and test discovery.
+      - 'pnpm-lock.yaml'
+      - 'packages/cli/package.json'
+      - 'packages/agent/package.json'
+      - 'packages/cli/vitest.unit.config.ts'
+      - 'scripts/build-runtime-packages.mjs'
+      - 'scripts/lib/runtime-build-plan.mjs'
+      - 'scripts/lib/run-build-command.mjs'
       - '.github/workflows/oxigraph-lifecycle-native.yml'
   workflow_dispatch:
 

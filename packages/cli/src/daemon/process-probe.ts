@@ -14,7 +14,11 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
-export interface ProcessDescription {
+/** One observation of a running process, taken from a single read. */
+export interface ProcessInstance {
+  pid: number;
+  /** Start-time token; with the PID it names this process across PID reuse. */
+  start: string;
   ppid: number;
   /**
    * The exact argv where the platform exposes it (`/proc`), or null where
@@ -26,7 +30,8 @@ export interface ProcessDescription {
 }
 
 export type ProcessTreeWalker = (rootPid: number) => Promise<Set<number>>;
-export type ProcessDescriber = (pid: number) => Promise<ProcessDescription | null>;
+/** Null when the process has exited. */
+export type ProcessInspector = (pid: number) => Promise<ProcessInstance | null>;
 /**
  * An opaque start-time token, or null when the process is gone. With the PID
  * it names one process, so a recycled PID does not match a recorded one.
@@ -60,24 +65,6 @@ export async function procHasFdTarget(
     if (target !== null && matches(target)) return true;
   }
   return false;
-}
-
-/** `task` over `items` with at most `limit` running at once; results keep input order. */
-export async function mapWithConcurrency<T, R>(
-  items: readonly T[],
-  limit: number,
-  task: (item: T) => Promise<R>,
-): Promise<R[]> {
-  const results: R[] = [];
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    while (next < items.length) {
-      const index = next++;
-      results[index] = await task(items[index]);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
-  return results;
 }
 
 export const linuxProcessTree: ProcessTreeWalker = async (rootPid) => {
@@ -131,28 +118,43 @@ export const psProcessTree: ProcessTreeWalker = async (rootPid) => {
   return pids;
 };
 
-export const procDescribeProcess: ProcessDescriber = async (pid) => {
+// `ps` prints lstart as five fields in the C locale: `Wed Sep  3 23:14:58 2026`.
+const PS_ENV = { ...process.env, LC_ALL: 'C' };
+const normalizeLstart = (lstart: string): string => lstart.trim().split(/\s+/).join(' ');
+
+/** `/proc/<pid>/stat` after `(comm)`, which may itself contain spaces and parens. */
+async function procStatFields(pid: number): Promise<string[]> {
+  const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
+  return stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+}
+
+// Fields after `(comm)`: state is field 3, ppid field 4, starttime field 22
+// (clock ticks since boot). A zombie has exited even though its entry remains.
+export const procInspectProcess: ProcessInspector = async (pid) => {
   try {
-    // `pid (comm) state ppid …`; comm may itself contain spaces and parens.
-    const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
-    const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
+    const fields = await procStatFields(pid);
+    const ppid = Number(fields[1]);
+    const start = fields[19];
+    if (fields[0] === 'Z' || !Number.isInteger(ppid) || !start) return null;
     const argv = (await readFile(`/proc/${pid}/cmdline`, 'utf8')).split('\0');
     if (argv.at(-1) === '') argv.pop();
-    return Number.isInteger(ppid) ? { ppid, argv, command: argv.join(' ') } : null;
+    return { pid, start, ppid, argv, command: argv.join(' ') };
   } catch {
     return null;
   }
 };
 
-export const psDescribeProcess: ProcessDescriber = async (pid) => {
+export const psInspectProcess: ProcessInspector = async (pid) => {
   try {
     const { stdout } = await execFileAsync(
       'ps',
-      ['-ww', '-o', 'ppid=,command=', '-p', String(pid)],
-      { timeout: 2_000 },
+      ['-ww', '-o', 'ppid=,lstart=,command=', '-p', String(pid)],
+      { timeout: 2_000, env: PS_ENV },
     );
-    const match = /^\s*(\d+)\s+(.*)$/s.exec(stdout.trimEnd());
-    return match ? { ppid: Number(match[1]), argv: null, command: match[2] } : null;
+    const match = /^\s*(\d+)\s+(\S+\s+\S+\s+\S+\s+\S+\s+\S+)\s+(.*)$/s.exec(stdout.trimEnd());
+    return match
+      ? { pid, start: normalizeLstart(match[2]), ppid: Number(match[1]), argv: null, command: match[3] }
+      : null;
   } catch {
     return null;
   }
@@ -160,10 +162,7 @@ export const psDescribeProcess: ProcessDescriber = async (pid) => {
 
 export const procProcessStart: ProcessStartProbe = async (pid) => {
   try {
-    // After `(comm)`: state is field 3 and starttime field 22 (clock ticks
-    // since boot). A zombie has exited even though its entry remains.
-    const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
-    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    const fields = await procStatFields(pid);
     return fields[0] === 'Z' ? null : fields[19] ?? null;
   } catch {
     return null;
@@ -172,8 +171,12 @@ export const procProcessStart: ProcessStartProbe = async (pid) => {
 
 export const psProcessStart: ProcessStartProbe = async (pid) => {
   try {
-    const { stdout } = await execFileAsync('ps', ['-o', 'lstart=', '-p', String(pid)], { timeout: 2_000 });
-    return stdout.trim() || null;
+    const { stdout } = await execFileAsync(
+      'ps',
+      ['-o', 'lstart=', '-p', String(pid)],
+      { timeout: 2_000, env: PS_ENV },
+    );
+    return normalizeLstart(stdout) || null;
   } catch {
     return null;
   }
@@ -183,8 +186,8 @@ export function processTreeWalker(platform: NodeJS.Platform): ProcessTreeWalker 
   return platform === 'linux' ? linuxProcessTree : psProcessTree;
 }
 
-export function processDescriber(platform: NodeJS.Platform): ProcessDescriber {
-  return platform === 'linux' ? procDescribeProcess : psDescribeProcess;
+export function processInspector(platform: NodeJS.Platform): ProcessInspector {
+  return platform === 'linux' ? procInspectProcess : psInspectProcess;
 }
 
 export function processStartProbe(platform: NodeJS.Platform): ProcessStartProbe {

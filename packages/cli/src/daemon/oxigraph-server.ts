@@ -50,9 +50,9 @@ import {
 import { invalidateExternalStoreQuadsCache } from './store-quads-cache.js';
 import { OXIGRAPH_STOP_GRACE_MS } from './oxigraph-parent-watchdog.js';
 import {
+  createOxigraphStoreOwnership,
   oxigraphStoreArgs,
-  recordOxigraphOwner,
-  stopOrphanedOxigraph,
+  type OxigraphStoreOwnership,
 } from './oxigraph-orphan.js';
 import {
   readCgroupOomSnapshot,
@@ -79,8 +79,6 @@ export interface OxigraphServerIo {
   readCgroupOomSnapshot: (pid: number) => CgroupOomSnapshot | null;
   /** Best-effort exit-time re-read of oom_kill from a captured cgroup dir. */
   readCgroupOomKill: (dir: string) => number | null;
-  /** Persist the store's owner record. Injectable so tests can race a child exit against it. */
-  recordOwner: typeof recordOxigraphOwner;
 }
 
 export interface StartOxigraphServerOptions {
@@ -119,11 +117,10 @@ export interface StartOxigraphServerOptions {
   /** Runtime platform. Injectable so command construction is portable in tests. */
   platform?: NodeJS.Platform;
   /**
-   * Other directories whose `oxigraph*` executables belong to this node (the
-   * managed binary cache, the PATH binary's directory), so an orphan launched
-   * from one by an earlier release is still recognised.
+   * Reclaims the store from orphaned Oxigraph processes before each spawn and
+   * records each launch. Defaults to one that knows only `binaryPath`.
    */
-  knownBinaryDirs?: readonly string[];
+  storeOwnership?: OxigraphStoreOwnership;
   io?: Partial<OxigraphServerIo>;
 }
 
@@ -193,12 +190,16 @@ export async function startOxigraphServer(
     findListenOwnerPid: ioOverrides.findListenOwnerPid ?? findListenOwnerPid,
     readCgroupOomSnapshot: ioOverrides.readCgroupOomSnapshot ?? readCgroupOomSnapshot,
     readCgroupOomKill: ioOverrides.readCgroupOomKill ?? readCgroupOomKill,
-    recordOwner: ioOverrides.recordOwner ?? recordOxigraphOwner,
   };
   const markStoreDown = (): void => {
     invalidateExternalStoreQuadsCache();
   };
   const log = opts.log ?? (() => {});
+  const storeOwnership = opts.storeOwnership ?? createOxigraphStoreOwnership({
+    location: opts.location,
+    binaryPath: opts.binaryPath,
+    log,
+  });
   const host = opts.host ?? DEFAULT_HOST;
   const { port } = opts;
   const bind = `${host}:${port}`;
@@ -402,12 +403,7 @@ export async function startOxigraphServer(
   const prepareSpawn = async (
     kind: 'boot' | 'restart',
   ): Promise<{ timeoutMs: number; walBytes: number }> => {
-    await stopOrphanedOxigraph({
-      binaryPath: opts.binaryPath,
-      location: opts.location,
-      knownBinaryDirs: opts.knownBinaryDirs,
-      log,
-    });
+    await storeOwnership.releaseOrphans();
     const ready = nextReadyTimeout();
     if (ready.walBytes > 0) {
       log(kind === 'boot'
@@ -425,13 +421,7 @@ export async function startOxigraphServer(
   const recordLaunch = (c: ChildProcess, listenerPid?: number): Promise<void> =>
     c.pid === undefined
       ? Promise.resolve()
-      : io.recordOwner({
-          location: opts.location,
-          binaryPath: opts.binaryPath,
-          launcherPid: c.pid,
-          oxigraphPid: listenerPid,
-          log,
-        });
+      : storeOwnership.recordLaunch({ launcherPid: c.pid, oxigraphPid: listenerPid });
 
   type StoreOpenOutcome =
     | { outcome: 'ready'; probes: number }

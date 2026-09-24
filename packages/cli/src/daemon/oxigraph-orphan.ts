@@ -19,8 +19,9 @@
  *   - the recorded daemon or launcher has exited and the holder is the
  *     recorded Oxigraph (same PID and start time), whatever process adopted
  *     it (PID 1, a subreaper, a stopped watchdog), or, for a launch killed
- *     before it was ready, a child of the recorded launcher that runs this
- *     node's Oxigraph for this store; or
+ *     before it was ready, a descendant of the recorded launcher (direct, or
+ *     through a systemd scope) that runs this node's Oxigraph for this store;
+ *     or
  *   - it runs this node's Oxigraph for this store (the recorded or current
  *     binary, or another `oxigraph*` executable in a known binary directory),
  *     no live recorded owner exists, and its parent is gone: it was
@@ -30,20 +31,25 @@
  * alone. Any holder left running is reported with its parent. A holder is
  * signalled only while it is still the process instance that was judged
  * (same PID and start time). The LOCK file itself is never modified.
+ *
+ * `createOxigraphStoreOwnership` bundles the reclaim and the record for one
+ * store, so the managed server only asks it to release orphans before each
+ * spawn and to record each launch.
  */
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { readFile, realpath, rename, writeFile } from 'node:fs/promises';
+import { readFile, realpath, rename, unlink, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { mapWithConcurrency } from '@origintrail-official/dkg-agent/map-with-concurrency';
+import { writeFileAtomicWith } from './fs-utils.js';
 import { OXIGRAPH_STOP_GRACE_MS } from './oxigraph-parent-watchdog.js';
 import {
-  mapWithConcurrency,
   procHasFdTarget,
   procPids,
-  processDescriber,
+  processInspector,
   processStartProbe,
-  type ProcessDescription,
+  type ProcessInstance,
 } from './process-probe.js';
 
 const execFileAsync = promisify(execFile);
@@ -76,10 +82,10 @@ export type OxigraphOwnerRecordRead =
 export interface OrphanedOxigraphIo {
   /** PIDs that have the lock file open. */
   listLockHolders(lockPath: string): Promise<number[]>;
-  /** Null when the process has exited. */
-  describeProcess(pid: number): Promise<ProcessDescription | null>;
-  /** Start-time token; null when the process has exited. */
-  processStart(pid: number): Promise<string | null>;
+  /** One observation of a process; null when it has exited. */
+  inspectProcess(pid: number): Promise<ProcessInstance | null>;
+  /** Whether `identity` still names a running process (same PID and start time). */
+  isSameInstance(identity: ProcessIdentity): Promise<boolean>;
   signal(pid: number, signal: NodeJS.Signals): void;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -132,15 +138,17 @@ export async function procLockHolders(lockPath: string): Promise<number[]> {
   const holds = await mapWithConcurrency(
     pids,
     PROC_SCAN_CONCURRENCY,
-    (pid) => procHasFdTarget(pid, (fdTarget) => fdTarget === target),
+    (pid: number) => procHasFdTarget(pid, (fdTarget) => fdTarget === target),
   );
   return pids.filter((_, index) => holds[index]);
 }
 
+const processStart = processStartProbe(process.platform);
+
 const defaultIo: OrphanedOxigraphIo = {
   listLockHolders: process.platform === 'linux' ? procLockHolders : lsofLockHolders,
-  describeProcess: processDescriber(process.platform),
-  processStart: processStartProbe(process.platform),
+  inspectProcess: processInspector(process.platform),
+  isSameInstance: async (identity) => (await processStart(identity.pid)) === identity.start,
   signal: (pid, signal) => { process.kill(pid, signal); },
   sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
   now: () => Date.now(),
@@ -172,7 +180,7 @@ export interface OxigraphBinaries {
  * whitespace; otherwise the answer is `ambiguous`.
  */
 export function matchManagedOxigraphStore(
-  holder: Pick<ProcessDescription, 'argv' | 'command'>,
+  holder: Pick<ProcessInstance, 'argv' | 'command'>,
   location: string,
   binaries: OxigraphBinaries,
 ): 'match' | 'no-match' | 'ambiguous' {
@@ -245,7 +253,7 @@ export async function recordOxigraphOwner(input: {
 }): Promise<void> {
   if (process.platform === 'win32') return;
   const identify = async (pid: number): Promise<ProcessIdentity | null> => {
-    const start = await defaultIo.processStart(pid);
+    const start = await processStart(pid);
     return start === null ? null : { pid, start };
   };
   try {
@@ -262,10 +270,11 @@ export async function recordOxigraphOwner(input: {
       ...(oxigraph ? { oxigraph } : {}),
       binaryPath: input.binaryPath,
     };
-    const path = ownerRecordPath(input.location);
-    const pending = `${path}.${process.pid}.tmp`;
-    await writeFile(pending, `${JSON.stringify(record)}\n`, 'utf8');
-    await rename(pending, path);
+    await writeFileAtomicWith(
+      { writeFile, rename, unlink },
+      ownerRecordPath(input.location),
+      `${JSON.stringify(record)}\n`,
+    );
   } catch (error) {
     input.log(
       `[oxigraph] could not record the store owner: ` +
@@ -320,21 +329,37 @@ function describeLeave(reason: LeaveReason): string {
   }
 }
 
-async function identityAlive(io: OrphanedOxigraphIo, identity: ProcessIdentity): Promise<boolean> {
-  return (await io.processStart(identity.pid)) === identity.start;
-}
-
 async function readOwnership(io: OrphanedOxigraphIo, read: OxigraphOwnerRecordRead): Promise<Ownership> {
   if (read.kind === 'absent') return { kind: 'unrecorded' };
   if (read.kind === 'invalid') return { kind: 'invalid-record' };
   const { record } = read;
-  if (!(await identityAlive(io, record.daemon))) {
+  if (!(await io.isSameInstance(record.daemon))) {
     return { kind: 'owner-gone', record, gone: { role: 'daemon', pid: record.daemon.pid } };
   }
-  if (!(await identityAlive(io, record.launcher))) {
+  if (!(await io.isSameInstance(record.launcher))) {
     return { kind: 'owner-gone', record, gone: { role: 'launcher', pid: record.launcher.pid } };
   }
   return { kind: 'owners-live', record };
+}
+
+// Levels between a launcher and Oxigraph: the watchdog, or systemd-run then
+// the watchdog; setpriv and its shell exec into Oxigraph in place.
+const MAX_LAUNCHER_DEPTH = 4;
+
+/** Whether `ancestor` (same PID and start time) is among `holder`'s ancestors. */
+async function descendsFrom(
+  io: OrphanedOxigraphIo,
+  holder: ProcessInstance,
+  ancestor: ProcessIdentity,
+): Promise<boolean> {
+  let ppid = holder.ppid;
+  for (let depth = 0; depth < MAX_LAUNCHER_DEPTH && ppid > 1; depth++) {
+    const parent = await io.inspectProcess(ppid);
+    if (!parent) return false;
+    if (parent.pid === ancestor.pid) return parent.start === ancestor.start;
+    ppid = parent.ppid;
+  }
+  return false;
 }
 
 interface ReclaimContext {
@@ -345,7 +370,7 @@ interface ReclaimContext {
 }
 
 async function classifyHolder(
-  holder: ProcessDescription & ProcessIdentity,
+  holder: ProcessInstance,
   ctx: ReclaimContext,
 ): Promise<HolderDecision> {
   const { ownership, io } = ctx;
@@ -360,8 +385,8 @@ async function classifyHolder(
     };
   }
   const recordedOxigraph = ownership.kind === 'owner-gone' ? ownership.record.oxigraph : undefined;
-  if (ownership.kind === 'owner-gone'
-    && recordedOxigraph?.pid === holder.pid && recordedOxigraph.start === holder.start) {
+  if (ownership.kind === 'owner-gone' && recordedOxigraph !== undefined
+    && recordedOxigraph.pid === holder.pid && recordedOxigraph.start === holder.start) {
     return { action: 'stop', reason: { kind: 'owner-gone', ...ownership.gone } };
   }
   const match = matchManagedOxigraphStore(holder, ctx.location, ctx.binaries);
@@ -369,12 +394,11 @@ async function classifyHolder(
   if (match === 'no-match') return { action: 'leave', reason: { kind: 'not-this-store' } };
   // A launch killed before it was ready: its watchdog is alive but cannot
   // act (frozen, wedged), and the daemon that recorded it is gone.
-  if (ownership.kind === 'owner-gone' && holder.ppid === ownership.record.launcher.pid
-    && await identityAlive(io, ownership.record.launcher)) {
+  if (ownership.kind === 'owner-gone' && await descendsFrom(io, holder, ownership.record.launcher)) {
     return { action: 'stop', reason: { kind: 'owner-gone', ...ownership.gone } };
   }
   if (holder.ppid === 1) return { action: 'stop', reason: { kind: 'reparented-to-init' } };
-  const parent = await io.describeProcess(holder.ppid);
+  const parent = await io.inspectProcess(holder.ppid);
   if (!parent) return { action: 'stop', reason: { kind: 'parent-exited', ppid: holder.ppid } };
   return {
     action: 'leave',
@@ -433,15 +457,13 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
     }
     for (const pid of holders) {
       if (pid === process.pid) continue;
-      const start = await io.processStart(pid);
-      if (start === null) continue;
-      const instance = `${pid}:${start}`;
+      const holder = await io.inspectProcess(pid);
+      if (!holder) continue;
+      const instance = `${pid}:${holder.start}`;
       if (leftRunning.has(instance)) continue;
       const state = signalled.get(instance);
       if (!state) {
-        const holder = await io.describeProcess(pid);
-        if (!holder) continue;
-        const decision = await classifyHolder({ ...holder, pid, start }, ctx);
+        const decision = await classifyHolder(holder, ctx);
         if (decision.action === 'leave') {
           leftRunning.add(instance);
           opts.log(
@@ -457,7 +479,7 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
       }
       // Signal only the instance that was judged: a PID recycled since then
       // has another start time.
-      if ((await io.processStart(pid)) !== start) continue;
+      if (!(await io.isSameInstance(holder))) continue;
       try {
         if (!state) {
           io.signal(pid, 'SIGTERM');
@@ -490,4 +512,30 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
     }
     await io.sleep(pollIntervalMs);
   }
+}
+
+/** Who may use one managed store: reclaim before each spawn, record each launch. */
+export interface OxigraphStoreOwnership {
+  /** Stop orphaned Oxigraph processes holding the store lock; returns the PIDs signalled. */
+  releaseOrphans(): Promise<number[]>;
+  /** Record a launch at spawn, then again with Oxigraph's PID once it is verified ready. */
+  recordLaunch(launch: { launcherPid: number; oxigraphPid?: number }): Promise<void>;
+}
+
+export function createOxigraphStoreOwnership(opts: {
+  location: string;
+  binaryPath: string;
+  knownBinaryDirs?: readonly string[];
+  log: (message: string) => void;
+}): OxigraphStoreOwnership {
+  return {
+    releaseOrphans: () => stopOrphanedOxigraph(opts),
+    recordLaunch: ({ launcherPid, oxigraphPid }) => recordOxigraphOwner({
+      location: opts.location,
+      binaryPath: opts.binaryPath,
+      launcherPid,
+      oxigraphPid,
+      log: opts.log,
+    }),
+  };
 }
