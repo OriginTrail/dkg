@@ -28,9 +28,9 @@ let agentToken: string;
 
 // node:http, not fetch: undici may drop a custom Host header, and this test
 // depends on the Host reaching the daemon exactly as set.
-function getUi(port: number, host: string): Promise<{ status: number; body: string }> {
+function getUi(port: number, host: string, extra: Record<string, string> = {}): Promise<{ status: number; body: string }> {
   return new Promise((resolve, reject) => {
-    const req = request({ host: '127.0.0.1', port, path: '/ui', headers: { host } }, (res) => {
+    const req = request({ host: '127.0.0.1', port, path: '/ui', headers: { host, ...extra } }, (res) => {
       const chunks: Buffer[] = [];
       res.on('data', (chunk: Buffer) => chunks.push(chunk));
       res.on('end', () => resolve({ status: res.statusCode ?? 0, body: Buffer.concat(chunks).toString('utf8') }));
@@ -85,6 +85,11 @@ describe('node-admin scope on a live daemon (mock chain)', () => {
     expect(foreignHost.status).toBe(200);
     expect(foreignHost.body).not.toContain('__DKG_TOKEN__');
     expect(foreignHost.body).not.toContain(operatorToken);
+
+    // A proxy that announces itself makes the request non-local.
+    const proxied = await getUi(port, `localhost:${port}`, { 'x-forwarded-for': '203.0.113.7' });
+    expect(proxied.status).toBe(200);
+    expect(proxied.body).not.toContain('__DKG_TOKEN__');
   });
 
   it('refuses node-wide changes and node log reads to an agent-scoped token', async () => {

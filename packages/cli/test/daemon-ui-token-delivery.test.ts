@@ -74,10 +74,10 @@ describe('nodeOperatorToken', () => {
 });
 
 describe('nodeUiTokenForRequest', () => {
-  function fakeReq(remoteAddress: string | undefined, host: string | undefined) {
+  function fakeReq(remoteAddress: string | undefined, host: string | undefined, extra: Record<string, string> = {}) {
     return {
       socket: { remoteAddress },
-      headers: host === undefined ? {} : { host },
+      headers: { ...(host === undefined ? {} : { host }), ...extra },
     } as unknown as IncomingMessage;
   }
   const opts = { authEnabled: true, validTokens: VALID_TOKENS, resolveAgentByToken };
@@ -106,6 +106,17 @@ describe('nodeUiTokenForRequest', () => {
     [undefined, 'localhost:9200'],
   ])('withholds the token from %s with Host %s', (remoteAddress, host) => {
     expect(nodeUiTokenForRequest(fakeReq(remoteAddress, host), opts)).toBeUndefined();
+  });
+
+  it.each([
+    ['forwarded', 'for=203.0.113.7'],
+    ['x-forwarded-for', '203.0.113.7'],
+    ['x-forwarded-host', 'node.example'],
+    ['x-forwarded-proto', 'https'],
+    ['x-real-ip', '203.0.113.7'],
+    ['via', '1.1 proxy'],
+  ])('withholds the token from a loopback request forwarded by a proxy (%s)', (header, value) => {
+    expect(nodeUiTokenForRequest(fakeReq('127.0.0.1', 'localhost:9200', { [header]: value }), opts)).toBeUndefined();
   });
 
   it('withholds the token when daemon auth is disabled', () => {
@@ -140,9 +151,9 @@ describe('dashboard shell behind the token decision (real HTTP)', () => {
   });
 
   // node:http, not fetch: the Host header must reach the server exactly as set.
-  function get(path: string, host: string): Promise<{ status: number; body: string; acao: unknown }> {
+  function get(path: string, host: string, extra: Record<string, string> = {}): Promise<{ status: number; body: string; acao: unknown }> {
     return new Promise((resolve, reject) => {
-      const req = request({ host: '127.0.0.1', port, path, headers: { host } }, (res) => {
+      const req = request({ host: '127.0.0.1', port, path, headers: { host, ...extra } }, (res) => {
         const chunks: Buffer[] = [];
         res.on('data', (chunk: Buffer) => chunks.push(chunk));
         res.on('end', () => resolve({
@@ -161,6 +172,13 @@ describe('dashboard shell behind the token decision (real HTTP)', () => {
     expect(res.status).toBe(200);
     expect(res.body).toContain('<script>window.__DKG_TOKEN__="operator-token"</script>');
     expect(res.acao).toBeUndefined();
+  });
+
+  it('serves the shell without the token to a loopback request forwarded by a proxy', async () => {
+    const res = await get('/ui', `localhost:${port}`, { 'x-forwarded-for': '203.0.113.7' });
+    expect(res.status).toBe(200);
+    expect(res.body).toContain('<title>DKG</title>');
+    expect(res.body).not.toContain('__DKG_TOKEN__');
   });
 
   it.each(['/ui', '/ui/', '/ui/settings'])('serves %s without the token to a loopback caller with a foreign Host', async (path) => {
