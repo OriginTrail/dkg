@@ -20,7 +20,7 @@ import {
   checkForNewCommitWithStatus,
   performUpdateWithStatus,
 } from './auto-update.js';
-import type { UpdateHoldoffGate } from './auto-update-jitter.js';
+import { describeUpdateHold, type UpdateHoldoffGate } from './auto-update-jitter.js';
 import type { LastUpdateCheck } from './state.js';
 import type { ResolvedAutoUpdateConfig } from '../config.js';
 
@@ -66,6 +66,8 @@ export interface NpmUpdateRunCheckDeps {
  * `/api/status` is current even when auto-apply is off); when a gate is present
  * and an update is available, routes the apply through it — including the
  * post-hold-off revalidation that skips a version withdrawn during the wait.
+ * A poll that finds nothing to apply (up to date, or no channel target) drops
+ * the gate's persisted rollout deadline.
  */
 export function createNpmUpdateRunCheck(deps: NpmUpdateRunCheckDeps): () => Promise<void> {
   return async () => {
@@ -83,16 +85,18 @@ export function createNpmUpdateRunCheck(deps: NpmUpdateRunCheckDeps): () => Prom
           `Auto-update (npm): WARNING — channel "${npmStatus.channel}" has no acceptable target (tag missing or rejected by allowPrerelease); node will not update until it is published.`,
         );
     }
-    if (npmStatus.status !== 'available') return;
     if (!deps.gate) return; // version check only — no auto-apply when polling disabled
+    if (npmStatus.status === 'up-to-date' || npmStatus.status === 'no-target') {
+      await deps.gate.clearHold();
+      return;
+    }
+    if (npmStatus.status !== 'available') return;
     const detectedVersion = npmStatus.version;
 
     await deps.gate.run<string>({
-      onHold: (holdMs) =>
-        deps.log(
-          `Auto-update (npm): version ${detectedVersion} available; ` +
-            `holding ${Math.round(holdMs / 1000)}s before applying (rollout jitter — spreads fleet restarts).`,
-        ),
+      detectedTarget: detectedVersion,
+      onHold: (holdMs, resumed) =>
+        deps.log(`Auto-update (npm): version ${detectedVersion} available; ${describeUpdateHold(holdMs, resumed)}`),
       shutdownMessage:
         'Auto-update (npm): hold-off aborted — daemon shutting down; deferring to next boot.',
       supersededMessage:
@@ -126,7 +130,8 @@ export interface GitUpdateRunCheckDeps {
  * Build the git-mode polling `runCheck`. Detects the remote ref tip, refreshes
  * `lastUpdateCheck`, and on an available commit routes the apply through the
  * gate — re-resolving the ref AFTER the hold-off so the CURRENT tip is applied,
- * not the commit captured before the (possibly long) wait.
+ * not the commit captured before the (possibly long) wait. A poll that finds the
+ * node up to date drops the gate's persisted rollout deadline.
  */
 export function createGitUpdateRunCheck(deps: GitUpdateRunCheckDeps): () => Promise<void> {
   return async () => {
@@ -142,14 +147,18 @@ export function createGitUpdateRunCheck(deps: GitUpdateRunCheckDeps): () => Prom
     deps.lastUpdateCheck.latestVersion = '';
     deps.lastUpdateCheck.latestCommit = gitStatus.commit ?? '';
 
+    if (gitStatus.status === 'up-to-date') {
+      await deps.gate.clearHold();
+      return;
+    }
     if (gitStatus.status !== 'available' || !gitStatus.commit) return;
     const detectedCommit = gitStatus.commit;
 
     await deps.gate.run<string>({
-      onHold: (holdMs) =>
+      detectedTarget: detectedCommit,
+      onHold: (holdMs, resumed) =>
         deps.log(
-          `Auto-update (git): new commit ${detectedCommit.slice(0, 8)} available; ` +
-            `holding ${Math.round(holdMs / 1000)}s before applying (rollout jitter — spreads fleet restarts).`,
+          `Auto-update (git): new commit ${detectedCommit.slice(0, 8)} available; ${describeUpdateHold(holdMs, resumed)}`,
         ),
       shutdownMessage:
         'Auto-update (git): hold-off aborted — daemon shutting down; deferring to next boot.',

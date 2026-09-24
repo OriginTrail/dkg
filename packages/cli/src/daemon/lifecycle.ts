@@ -377,7 +377,12 @@ import {
   releaseUpdateLock,
 } from './auto-update.js';
 import { formatAutoUpdateTagVerificationWarning, isValidRef, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
-import { resolveUpdateJitterMs, createUpdateHoldoffGate } from './auto-update-jitter.js';
+import {
+  resolveUpdateJitterMs,
+  createUpdateHoldoffGate,
+  createFileUpdateHoldoffStore,
+  UPDATE_HOLDOFF_FILE,
+} from './auto-update-jitter.js';
 import { createGitUpdateRunCheck, createNpmUpdateRunCheck } from './auto-update-runner.js';
 import {
   chainResetWipe,
@@ -2730,11 +2735,14 @@ async function runDaemonInnerWithStartupOwnership(
       // available commit and applying it, so a release never restarts the whole
       // fleet in one window (the 2026-07-10 bootstrap-storm trigger). The gate is
       // created ONCE here so its single-flight guard holds across polling ticks.
+      // The per-commit deadline is persisted under the DKG home so a restart
+      // mid-hold resumes it instead of drawing a fresh hold.
       const gate = createUpdateHoldoffGate({
         jitterMs: resolveUpdateJitterMs(au.updateJitterMinutes, au.checkIntervalMinutes),
         isShuttingDown: () => shuttingDown,
         setUpdating: (updating) => { daemonState.isUpdating = updating; },
         log,
+        store: createFileUpdateHoldoffStore(join(dkgDir(), UPDATE_HOLDOFF_FILE)),
       });
       const runCheck = createGitUpdateRunCheck({
         gate,
@@ -2767,13 +2775,15 @@ async function runDaemonInnerWithStartupOwnership(
     // Rollout jitter (same rationale as the git path): stagger the fleet's
     // restarts by holding off a per-node random delay before applying. The gate
     // is null in version-check-only mode (au disabled) — detect + record only.
-    // Created ONCE so single-flight holds across polling ticks.
+    // Created ONCE so single-flight holds across polling ticks. The per-version
+    // deadline is persisted like the git path's, so a restart mid-hold resumes it.
     const gate = au
       ? createUpdateHoldoffGate({
           jitterMs: resolveUpdateJitterMs(au.updateJitterMinutes, au.checkIntervalMinutes),
           isShuttingDown: () => shuttingDown,
           setUpdating: (updating) => { daemonState.isUpdating = updating; },
           log,
+          store: createFileUpdateHoldoffStore(join(dkgDir(), UPDATE_HOLDOFF_FILE)),
         })
       : null;
     const runCheck = createNpmUpdateRunCheck({

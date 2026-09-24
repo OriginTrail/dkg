@@ -1,11 +1,21 @@
 import { describe, it, expect, vi } from 'vitest';
+import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   resolveUpdateJitterMs,
   pickUpdateHoldoffMs,
   awaitUpdateHoldoff,
   createUpdateHoldoffGate,
+  createFileUpdateHoldoffStore,
+  describeUpdateHold,
+  parseUpdateHoldoffRecord,
+  MAX_HOLDOFF_OVERDUE_MS,
+  UPDATE_HOLDOFF_FILE,
   UPDATE_JITTER_ENV,
+  type UpdateHoldoffFs,
   type UpdateHoldoffGateConfig,
+  type UpdateHoldoffRecord,
   type UpdateHoldoffStep,
 } from '../src/daemon/auto-update-jitter.js';
 
@@ -88,7 +98,7 @@ describe('awaitUpdateHoldoff', () => {
     expect(decision).toBe('proceed');
     expect(sleep).toHaveBeenCalledOnce();
     expect(sleep).toHaveBeenCalledWith(300_000);
-    expect(onHold).toHaveBeenCalledWith(300_000);
+    expect(onHold).toHaveBeenCalledWith(300_000, false);
   });
 
   it('aborts when the daemon began shutting down DURING the hold-off', async () => {
@@ -145,6 +155,7 @@ describe('createUpdateHoldoffGate (the shared rollout gate)', () => {
       sleep,
     };
     const step: UpdateHoldoffStep<string> = {
+      detectedTarget: 'v-detected',
       onHold: () => calls.push('onHold'),
       revalidate,
       apply,
@@ -232,5 +243,376 @@ describe('createUpdateHoldoffGate (the shared rollout gate)', () => {
     const { gate, step, calls } = harness({ jitterMs: 0 });
     await gate.run(step);
     expect(calls).toEqual(['revalidate', 'setUpdating:true', 'apply:v-fresh', 'setUpdating:false']);
+  });
+});
+
+describe('describeUpdateHold', () => {
+  it('words a fresh hold, a resumed hold and an already-passed deadline', () => {
+    expect(describeUpdateHold(1_155_000, false))
+      .toBe('holding 1155s before applying (rollout jitter — spreads fleet restarts).');
+    expect(describeUpdateHold(75_000, true))
+      .toBe('resuming the rollout hold-off carried over from before a restart — 75s left before applying.');
+    expect(describeUpdateHold(0, true))
+      .toBe('rollout hold-off deadline carried over from before a restart has passed — applying now.');
+  });
+});
+
+// --- Persisted rollout deadline -------------------------------------------
+//
+// Incident this guards (2026-09-24): a git-mode node with a 30-min jitter window
+// drew a 1155s hold, but its supervisor restarted the worker every 6-20 min.
+// Each restart aborted the hold and each boot drew a fresh one, so the node
+// never applied the fix. The deadline is now persisted per target, and a boot
+// resumes whatever is left of it.
+
+function enoent(path: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(`ENOENT: no such file or directory, open '${path}'`), { code: 'ENOENT' });
+}
+
+/** In-memory fs seam for the file-backed store. It outlives any single gate,
+ *  like the DKG home outlives a daemon process. */
+function memoryFs() {
+  const files = new Map<string, string>();
+  const fs: UpdateHoldoffFs = {
+    readFile: async (path) => {
+      const data = files.get(path);
+      if (data === undefined) throw enoent(path);
+      return data;
+    },
+    writeFile: async (path, data) => { files.set(path, data); },
+    rename: async (from, to) => {
+      const data = files.get(from);
+      if (data === undefined) throw enoent(from);
+      files.delete(from);
+      files.set(to, data);
+    },
+    unlink: async (path) => {
+      if (!files.delete(path)) throw enoent(path);
+    },
+  };
+  return { files, fs };
+}
+
+const RECORD_PATH = `/dkg-home/${UPDATE_HOLDOFF_FILE}`;
+const WINDOW_MS = 30 * 60_000;
+
+/**
+ * One node: a DKG home (in-memory fs) and a wall clock that survive restarts.
+ * `boot()` models a fresh daemon process: a new gate over the same home, with
+ * its own shutdown flag. `killAfterMs` makes the supervisor restart the worker
+ * that far into any longer hold.
+ */
+function persistentNode(opts: { jitterMs?: number; fs?: UpdateHoldoffFs; persist?: boolean } = {}) {
+  const mem = memoryFs();
+  const clock = { t: 1_790_000_000_000 };
+  const store = createFileUpdateHoldoffStore(RECORD_PATH, opts.fs ?? mem.fs);
+  const logs: string[] = [];
+
+  function record(): UpdateHoldoffRecord | null {
+    const raw = mem.files.get(RECORD_PATH);
+    return raw === undefined ? null : parseUpdateHoldoffRecord(raw);
+  }
+
+  function boot(b: { rng?: () => number; killAfterMs?: number; sleep?: (ms: number) => Promise<void> } = {}) {
+    let shuttingDown = false;
+    const rng = vi.fn(b.rng ?? (() => 0.5));
+    const sleeps: number[] = [];
+    const holds: Array<[number, boolean]> = [];
+    const setUpdating = vi.fn();
+    const sleep = vi.fn(b.sleep ?? (async (ms: number) => {
+      sleeps.push(ms);
+      if (b.killAfterMs !== undefined && ms > b.killAfterMs) {
+        clock.t += b.killAfterMs;
+        shuttingDown = true;
+        return;
+      }
+      clock.t += ms;
+    }));
+    const gate = createUpdateHoldoffGate({
+      jitterMs: opts.jitterMs ?? WINDOW_MS,
+      isShuttingDown: () => shuttingDown,
+      setUpdating,
+      log: (m) => logs.push(m),
+      store: opts.persist === false ? null : store,
+      rng,
+      now: () => clock.t,
+      sleep,
+    });
+    const apply = vi.fn(async (_target: string) => {});
+    const run = (target: string, overrides: Partial<UpdateHoldoffStep<string>> = {}) =>
+      gate.run<string>({
+        detectedTarget: target,
+        onHold: (ms, resumed) => { holds.push([ms, resumed]); },
+        revalidate: async () => target,
+        apply,
+        shutdownMessage: 'SHUTDOWN',
+        supersededMessage: 'SUPERSEDED',
+        ...overrides,
+      });
+    return { gate, run, apply, rng, sleep, sleeps, holds, setUpdating, shutDown: () => { shuttingDown = true; } };
+  }
+
+  return { mem, clock, store, logs, record, boot };
+}
+
+describe('createUpdateHoldoffGate — persisted rollout deadline', () => {
+  it('a restart mid-hold resumes with the remaining time, not a fresh draw', async () => {
+    const node = persistentNode();
+    const detectedAt = node.clock.t;
+
+    const first = node.boot({ rng: () => 0.5, killAfterMs: 6 * 60_000 });
+    await first.run('c1');
+    expect(first.holds).toEqual([[900_000, false]]);
+    expect(first.apply).not.toHaveBeenCalled();
+    expect(node.logs).toEqual(['SHUTDOWN']);
+    expect(node.record()).toEqual({ target: 'c1', deadlineEpochMs: detectedAt + 900_000 });
+
+    const second = node.boot({ rng: () => 0.99 });
+    await second.run('c1');
+    expect(second.rng, 'the deadline is drawn once per target').not.toHaveBeenCalled();
+    expect(second.sleeps).toEqual([540_000]);
+    expect(second.holds).toEqual([[540_000, true]]);
+    expect(second.apply).toHaveBeenCalledWith('c1');
+    expect(node.clock.t - detectedAt).toBe(900_000);
+    expect(node.record(), 'settled once the apply returned').toBeNull();
+  });
+
+  it('a node restarted every 6 minutes still applies at the deadline drawn on first detection', async () => {
+    const draw = () => 1155 / 1800; // the incident: 1155s of a 30-min window
+    const drawnMs = pickUpdateHoldoffMs(WINDOW_MS, draw);
+    const restartEveryMs = 6 * 60_000;
+
+    const node = persistentNode();
+    const detectedAt = node.clock.t;
+    const rngCalls: number[] = [];
+    let boots = 0;
+    for (; boots < 10; boots++) {
+      const b = node.boot({ rng: () => { rngCalls.push(boots); return draw(); }, killAfterMs: restartEveryMs });
+      await b.run('c1');
+      if (b.apply.mock.calls.length > 0) break;
+    }
+    expect(boots, 'applied on the 4th boot (3 restarts mid-hold)').toBe(3);
+    expect(rngCalls).toEqual([0]);
+    expect(node.clock.t - detectedAt).toBe(drawnMs);
+
+    // Without persistence (the old behaviour) the same node never gets there.
+    const legacy = persistentNode({ persist: false });
+    for (let i = 0; i < 10; i++) {
+      const b = legacy.boot({ rng: draw, killAfterMs: restartEveryMs });
+      await b.run('c1');
+      expect(b.apply).not.toHaveBeenCalled();
+    }
+  });
+
+  it('an expired deadline applies immediately', async () => {
+    const node = persistentNode();
+    await node.store.write({ target: 'c1', deadlineEpochMs: node.clock.t - 60_000 });
+
+    const b = node.boot();
+    await b.run('c1');
+    expect(b.rng).not.toHaveBeenCalled();
+    expect(b.sleep).not.toHaveBeenCalled();
+    expect(b.holds).toEqual([[0, true]]);
+    expect(b.apply).toHaveBeenCalledWith('c1');
+  });
+
+  it('a changed target redraws and replaces the record', async () => {
+    const node = persistentNode();
+    await node.store.write({ target: 'c1', deadlineEpochMs: node.clock.t + 60_000 });
+    const start = node.clock.t;
+
+    const b = node.boot({ rng: () => 0.25, killAfterMs: 0 }); // stop inside the hold to inspect the record
+    await b.run('c2');
+    expect(b.rng).toHaveBeenCalledOnce();
+    expect(b.holds).toEqual([[450_000, false]]);
+    expect(node.record()).toEqual({ target: 'c2', deadlineEpochMs: start + 450_000 });
+  });
+
+  it.each([
+    ['truncated JSON', '{"target":"c1","deadl'],
+    ['wrong field types', JSON.stringify({ target: 42, deadlineEpochMs: 'soon' })],
+    ['empty target', JSON.stringify({ target: '', deadlineEpochMs: 1 })],
+    ['JSON null', 'null'],
+  ])('a corrupt record (%s) falls back to a fresh draw without throwing', async (_label, raw) => {
+    const node = persistentNode();
+    node.mem.files.set(RECORD_PATH, raw);
+    const start = node.clock.t;
+
+    const b = node.boot({ rng: () => 0.5, killAfterMs: 0 });
+    await expect(b.run('c1')).resolves.toBeUndefined();
+    expect(b.rng).toHaveBeenCalledOnce();
+    expect(b.holds).toEqual([[900_000, false]]);
+    expect(node.logs.some((m) => m.includes('ignoring unreadable rollout hold-off record'))).toBe(true);
+    expect(node.record(), 'replaced by a well-formed record').toEqual({ target: 'c1', deadlineEpochMs: start + 900_000 });
+  });
+
+  it('an unreadable, unwritable home still holds and applies (in memory) without throwing', async () => {
+    const mem = memoryFs();
+    const brokenFs: UpdateHoldoffFs = {
+      ...mem.fs,
+      readFile: async () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); },
+      writeFile: async () => { throw Object.assign(new Error('EROFS: read-only file system'), { code: 'EROFS' }); },
+    };
+    const node = persistentNode({ fs: brokenFs });
+
+    const b = node.boot({ rng: () => 0.5 });
+    await expect(b.run('c1')).resolves.toBeUndefined();
+    expect(b.sleeps).toEqual([900_000]);
+    expect(b.apply).toHaveBeenCalledWith('c1');
+    expect(node.logs.some((m) => m.includes('EACCES'))).toBe(true);
+    expect(node.logs.some((m) => m.includes('could not persist the rollout hold-off deadline'))).toBe(true);
+  });
+
+  it('shutdown during the hold aborts cleanly and keeps the record for the next boot', async () => {
+    const node = persistentNode();
+    const revalidate = vi.fn(async () => 'c1' as string | null);
+
+    const b = node.boot({ killAfterMs: 60_000 });
+    await b.run('c1', { revalidate });
+    expect(revalidate).not.toHaveBeenCalled();
+    expect(b.apply).not.toHaveBeenCalled();
+    expect(b.setUpdating).not.toHaveBeenCalled();
+    expect(node.logs).toEqual(['SHUTDOWN']);
+    expect(node.record()?.target).toBe('c1');
+  });
+
+  it('a restart during the apply keeps the record, so the next boot retries without a new hold', async () => {
+    const node = persistentNode();
+    const first = node.boot();
+    // The apply is cut short by the restart (supervisor kill mid-build, or the
+    // supervised restart after a successful install).
+    await first.run('c1', { apply: async () => { first.shutDown(); } });
+    expect(node.record()?.target).toBe('c1');
+
+    const second = node.boot();
+    await second.run('c1');
+    expect(second.rng).not.toHaveBeenCalled();
+    expect(second.sleep).not.toHaveBeenCalled();
+    expect(second.apply).toHaveBeenCalledWith('c1');
+  });
+
+  it('drops the record when an apply returns without restarting (failed build), so the next detection redraws', async () => {
+    const node = persistentNode();
+    const b = node.boot();
+    await expect(b.run('c1', { apply: async () => { throw new Error('build failed'); } })).rejects.toThrow('build failed');
+    expect(node.record()).toBeNull();
+  });
+
+  it('drops the record when the target is withdrawn or caught up during the hold (revalidate -> null)', async () => {
+    const node = persistentNode();
+    const b = node.boot();
+    await b.run('c1', { revalidate: async () => null });
+    expect(node.logs).toEqual(['SUPERSEDED']);
+    expect(b.apply).not.toHaveBeenCalled();
+    expect(node.record()).toBeNull();
+  });
+
+  it('records a newer target found by revalidate as already due, so a restart mid-apply retries it at once', async () => {
+    const node = persistentNode();
+    const first = node.boot();
+    let duringApply: UpdateHoldoffRecord | null = null;
+    await first.run('c1', {
+      revalidate: async () => 'c2',
+      apply: async () => { duringApply = node.record(); first.shutDown(); },
+    });
+    expect(duringApply).toEqual({ target: 'c2', deadlineEpochMs: node.clock.t });
+
+    const second = node.boot();
+    await second.run('c2');
+    expect(second.rng).not.toHaveBeenCalled();
+    expect(second.sleep).not.toHaveBeenCalled();
+    expect(second.apply).toHaveBeenCalledWith('c2');
+  });
+
+  it('redraws when the persisted deadline lies beyond the current window (window lowered, or clock moved back)', async () => {
+    const node = persistentNode({ jitterMs: 5 * 60_000 });
+    await node.store.write({ target: 'c1', deadlineEpochMs: node.clock.t + 20 * 60_000 });
+
+    const b = node.boot({ rng: () => 0.5, killAfterMs: 0 });
+    await b.run('c1');
+    expect(b.rng).toHaveBeenCalledOnce();
+    expect(b.holds).toEqual([[150_000, false]]);
+  });
+
+  it('honours a deadline up to MAX_HOLDOFF_OVERDUE_MS overdue and redraws an older one', async () => {
+    const atCap = persistentNode();
+    await atCap.store.write({ target: 'c1', deadlineEpochMs: atCap.clock.t - MAX_HOLDOFF_OVERDUE_MS });
+    const onTime = atCap.boot();
+    await onTime.run('c1');
+    expect(onTime.holds).toEqual([[0, true]]);
+    expect(onTime.apply).toHaveBeenCalledOnce();
+
+    const stale = persistentNode();
+    await stale.store.write({ target: 'c1', deadlineEpochMs: stale.clock.t - MAX_HOLDOFF_OVERDUE_MS - 1 });
+    const redrawn = stale.boot({ rng: () => 0.5, killAfterMs: 0 });
+    await redrawn.run('c1');
+    expect(redrawn.rng).toHaveBeenCalledOnce();
+    expect(redrawn.holds).toEqual([[900_000, false]]);
+  });
+
+  it('clearHold drops the record, except while an in-flight run owns it', async () => {
+    const node = persistentNode();
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const b = node.boot({ sleep: () => held });
+
+    const running = b.run('c1');
+    await vi.waitFor(() => expect(node.record()?.target).toBe('c1'));
+    await b.gate.clearHold();
+    expect(node.record()?.target, 'the in-flight run owns the record').toBe('c1');
+    release();
+    await running;
+    expect(node.record()).toBeNull();
+
+    await node.store.write({ target: 'c9', deadlineEpochMs: node.clock.t });
+    await b.gate.clearHold();
+    expect(node.record()).toBeNull();
+    await expect(b.gate.clearHold(), 'idempotent when there is no record').resolves.toBeUndefined();
+  });
+
+  it('writes no record when jitter is disabled', async () => {
+    const node = persistentNode({ jitterMs: 0 });
+    const b = node.boot();
+    await b.run('c1', { revalidate: async () => 'c2' });
+    expect(b.apply).toHaveBeenCalledWith('c2');
+    expect(node.mem.files.size).toBe(0);
+  });
+});
+
+describe('createFileUpdateHoldoffStore', () => {
+  it('round-trips a record through the real filesystem and leaves no temp file behind', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-update-holdoff-'));
+    try {
+      const store = createFileUpdateHoldoffStore(join(dir, UPDATE_HOLDOFF_FILE));
+      expect(await store.read()).toBeNull();
+      await store.write({ target: 'abc123', deadlineEpochMs: 1_000 });
+      await store.write({ target: 'def456', deadlineEpochMs: 2_000 });
+      expect(await store.read()).toEqual({ target: 'def456', deadlineEpochMs: 2_000 });
+      expect(await readdir(dir)).toEqual([UPDATE_HOLDOFF_FILE]);
+      await store.clear();
+      await store.clear();
+      expect(await store.read()).toBeNull();
+      expect(await readdir(dir)).toEqual([]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('throws on a malformed record so the gate can log it, and returns null only when absent', async () => {
+    const mem = memoryFs();
+    const store = createFileUpdateHoldoffStore(RECORD_PATH, mem.fs);
+    expect(await store.read()).toBeNull();
+    mem.files.set(RECORD_PATH, '{"target":');
+    await expect(store.read()).rejects.toThrow();
+  });
+
+  it('removes the temp file and surfaces the error when the rename fails', async () => {
+    const mem = memoryFs();
+    const store = createFileUpdateHoldoffStore(RECORD_PATH, {
+      ...mem.fs,
+      rename: async () => { throw new Error('EXDEV: cross-device link not permitted'); },
+    });
+    await expect(store.write({ target: 'c1', deadlineEpochMs: 1 })).rejects.toThrow('EXDEV');
+    expect([...mem.files.keys()]).toEqual([]);
   });
 });
