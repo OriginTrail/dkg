@@ -7,8 +7,10 @@ import { CI_LANES, PRIMARY_LANE_JOBS, planCi } from '../ci-delta.mjs';
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 // The trusted CI controller commit that the workflows' four trusted checkouts
-// pin. It must already be on protected testnet-canary or main history; a
-// rotation changes it here and in those four `ref:` lines, nowhere else.
+// pin; a rotation changes it here and in those four `ref:` lines, nowhere
+// else. It must already be on protected testnet-canary or main history. PR CI
+// does not check that: the rotation PR shows the ancestry evidence, and the
+// scheduled inspect-ci-policy report flags a pin that is not.
 export const TRUSTED_CI_CONTROLLER_SHA = '4aca346d4818eb63e661c6028a4e2c1cbea2bd92';
 export const NON_SOLIDITY_LANES = CI_LANES.filter((lane) => lane !== 'contracts');
 // The jobs selected lanes run: each lane's own job, and the Windows lifecycle

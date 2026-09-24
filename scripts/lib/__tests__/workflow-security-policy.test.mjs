@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import {
   GitHubApiError,
@@ -25,9 +24,8 @@ import {
   rulesetIdsRequiringDetails,
   TESTNET_CANARY_ROLLOUT_POLICY,
 } from '../../ci/validate-delta-rollout-ruleset.mjs';
-import { TRUSTED_CI_CONTROLLER_SHA } from './ci-plan-fixtures.mjs';
+import { REPO_ROOT, TRUSTED_CI_CONTROLLER_SHA } from './ci-plan-fixtures.mjs';
 
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 
 function rulesetDetail(id, overrides = {}) {
   return {
@@ -198,7 +196,7 @@ test('controller validation rejects missing, inconsistent, fake, and over-broad 
   );
 });
 
-test('repository workflows expose one canonical protected-history controller pin', () => {
+test('repository workflows expose one canonical controller pin', () => {
   const result = validateTrustedControllerPins([
     {
       sourceName: 'ci.yml',
