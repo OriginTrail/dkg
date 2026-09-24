@@ -60,10 +60,13 @@ export function nodeUiTokenForRequest(
   if (!isLoopbackClientIp(req.socket?.remoteAddress ?? '')) return undefined;
   if (!hostIsLocal(req.headers.host)) return undefined;
   if (forwardedByProxy(req.headers)) return undefined;
-  // TODO: a same-host reverse proxy that forwards a loopback Host and adds none
-  // of those headers (e.g. nginx's default `proxy_set_header Host $proxy_host`
-  // without X-Forwarded-For) cannot be told apart from a direct local caller.
-  // Operators who front the dashboard that way need authentication in front of
-  // the proxy, or an opt-in trusted-proxy setting, which does not exist yet.
+  // TODO: two opt-in settings do not exist yet. An allowlist of extra Host
+  // names would let an operator on the node host use another name for it and
+  // still be signed in automatically. A trusted-proxy setting would cover a
+  // same-host reverse proxy that forwards a loopback Host and adds none of those
+  // headers (e.g. nginx's default `proxy_set_header Host $proxy_host` without
+  // X-Forwarded-For), which cannot be told apart from a direct local caller;
+  // operators who front the dashboard that way need authentication in front of
+  // the proxy until then.
   return nodeOperatorToken(opts.validTokens, opts.resolveAgentByToken);
 }
