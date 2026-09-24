@@ -68,6 +68,11 @@ describe('nodeOperatorToken', () => {
     expect(nodeOperatorToken(['config-token', 'file-token'], resolveAgentByToken)).toBe('config-token');
   });
 
+  it('skips an empty entry that a legacy agent without a token leaves in the set', () => {
+    expect(nodeOperatorToken(['', 'operator-token'], resolveAgentByToken)).toBe('operator-token');
+    expect(nodeOperatorToken(['', 'agent-token-1'], resolveAgentByToken)).toBeUndefined();
+  });
+
   it('returns undefined when only agent tokens are loaded', () => {
     expect(nodeOperatorToken(['agent-token-1', 'agent-token-2'], resolveAgentByToken)).toBeUndefined();
   });

@@ -7,13 +7,15 @@ import { hostIsLocal, isLoopbackClientIp } from './http-utils.js';
  * The first node-operator token in the set, i.e. one that no local agent owns.
  * Agent tokens share the set and can precede it once the token file is
  * reloaded, so the order of the set alone does not identify the operator.
+ * Empty entries are skipped: a legacy agent recovered without a token adds one,
+ * and no agent claims it.
  */
 export function nodeOperatorToken(
   validTokens: Iterable<string>,
   resolveAgentByToken: (token: string) => string | undefined,
 ): string | undefined {
   for (const token of validTokens) {
-    if (!resolveAgentByToken(token)) return token;
+    if (token && !resolveAgentByToken(token)) return token;
   }
   return undefined;
 }
