@@ -2090,6 +2090,38 @@ describe('SparqlHttpStore RDF term formatting', () => {
       observed.restore();
     }
   });
+
+  it('scopes each statement write to the graphs its plan names', async () => {
+    const g1 = 'http://ex.org/g1';
+    const g2 = 'http://ex.org/g2';
+    const other = 'http://ex.org/other';
+    const generations: number[][] = [];
+    await captureSparql(async (store) => {
+      const snapshot = () => generations.push([g1, g2, other].map((graph) => store.getWriteRevision(graph).generation));
+      snapshot();
+      await store.insert([
+        { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"1"', graph: g1 },
+        { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"2"', graph: g2 },
+      ]);
+      snapshot();
+      await store.dropGraph(g1);
+      snapshot();
+      await store.deleteByPattern({ predicate: 'http://ex.org/p' });
+      snapshot();
+    });
+    const [initial, afterInsert, afterDrop, afterPatternDelete] = generations;
+    // The insert plan's scope is both of its graphs, and only those.
+    expect(afterInsert[0]).toBeGreaterThan(initial[0]);
+    expect(afterInsert[1]).toBeGreaterThan(initial[1]);
+    expect(afterInsert[2]).toBe(initial[2]);
+    // dropGraph writes its one graph.
+    expect(afterDrop[0]).toBeGreaterThan(afterInsert[0]);
+    expect(afterDrop.slice(1)).toEqual(afterInsert.slice(1));
+    // A pattern delete without a graph may write any graph.
+    for (const [index, generation] of afterPatternDelete.entries()) {
+      expect(generation).toBeGreaterThan(afterDrop[index]);
+    }
+  });
 });
 
 const liveQueryUrl = process.env.SPARQL_HTTP_TEST_QUERY_URL;

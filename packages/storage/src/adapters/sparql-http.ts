@@ -71,7 +71,11 @@ import {
   raceStoreWorkAgainstAbort,
 } from '../abortable-store-work-lifecycle.js';
 import { parseNQuadsTextTolerant } from '../nquads-text.js';
-import { sparqlStatements } from './sparql-statements.js';
+import {
+  sparqlStatements,
+  type SparqlQueryPlan,
+  type SparqlUpdatePlan,
+} from './sparql-statements.js';
 import {
   isStoreOperationTimeoutError,
   StoreOperationTimeoutError,
@@ -670,16 +674,7 @@ export class SparqlHttpStore implements TripleStore {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'SparqlHttpStore.insert',
     });
-    const update = statements.insertData(quads);
-    await this.runRemoteGraphMutation({
-      scope: { kind: 'graphs', graphs: [...new Set(quads.map((q) => q.graph || ''))] },
-      update,
-      options: {
-        ...options,
-        source: options?.source ?? 'sparql-http.insert',
-      },
-      operation: 'insert',
-    });
+    await this.runUpdatePlan(statements.insertData(quads), options);
   }
 
   async delete(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
@@ -691,17 +686,9 @@ export class SparqlHttpStore implements TripleStore {
     // blank-node quads with `DELETE { … } WHERE { … }` (blank nodes rewritten
     // to variables) — the only spec-legal way to target existing blank-node
     // structure over the SPARQL protocol. See the helper for details.
-    const update = statements.deleteData(quads);
-    if (!update) return;
-    await this.runRemoteGraphMutation({
-      scope: { kind: 'graphs', graphs: [...new Set(quads.map((q) => q.graph || ''))] },
-      update,
-      options: {
-        ...options,
-        source: options?.source ?? 'sparql-http.delete',
-      },
-      operation: 'delete',
-    });
+    const plan = statements.deleteData(quads);
+    if (!plan) return;
+    await this.runUpdatePlan(plan, options);
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>, options?: QueryOptions): Promise<number> {
@@ -729,19 +716,7 @@ export class SparqlHttpStore implements TripleStore {
     pattern: Partial<DKGQuad>,
     options?: QueryOptions,
   ): Promise<void> {
-    const graphUri = pattern.graph;
-    const update = statements.deleteByPattern(pattern);
-    await this.runRemoteGraphMutation({
-      scope: graphUri
-        ? { kind: 'graphs', graphs: [graphUri] }
-        : { kind: 'all' },
-      update,
-      options: {
-        ...options,
-        source: options?.source ?? 'sparql-http.deleteByPattern',
-      },
-      operation: 'deleteByPattern',
-    });
+    await this.runUpdatePlan(statements.deleteByPattern(pattern), options);
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
@@ -749,16 +724,7 @@ export class SparqlHttpStore implements TripleStore {
       ...options,
       source: options?.source ?? 'sparql-http.deleteBySubjectPrefix.countBefore',
     });
-    const update = statements.deleteBySubjectPrefix(graphUri, prefix);
-    await this.runRemoteGraphMutation({
-      scope: { kind: 'graphs', graphs: [graphUri] },
-      update,
-      options: {
-        ...options,
-        source: options?.source ?? 'sparql-http.deleteBySubjectPrefix',
-      },
-      operation: 'deleteBySubjectPrefix',
-    });
+    await this.runUpdatePlan(statements.deleteBySubjectPrefix(graphUri, prefix), options);
     const after = await this.countQuads(graphUri, {
       ...options,
       source: options?.source ?? 'sparql-http.deleteBySubjectPrefix.countAfter',
@@ -933,6 +899,25 @@ export class SparqlHttpStore implements TripleStore {
    * timeout classification, and optional staging cleanup as one operation.
    * There is no callback a caller can omit while still sending an update.
    */
+  /** Send a statement plan under its own operation and write scope. */
+  private runUpdatePlan(plan: SparqlUpdatePlan, options?: QueryOptions): Promise<void> {
+    return this.runRemoteGraphMutation({
+      scope: plan.scope,
+      update: plan.update,
+      options: { ...options, source: options?.source ?? `sparql-http.${plan.operation}` },
+      operation: plan.operation,
+    });
+  }
+
+  /** Run a statement plan's query under its own operation. */
+  private runQueryPlan(plan: SparqlQueryPlan, options?: QueryOptions): Promise<QueryResult> {
+    return this.queryWithOperation(
+      plan.sparql,
+      { ...options, source: options?.source ?? `sparql-http.${plan.operation}` },
+      plan.operation,
+    );
+  }
+
   private async runRemoteGraphMutation(opts: {
     scope: GraphWriteScope;
     update: string;
@@ -1118,11 +1103,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
-    const r = await this.queryWithOperation(
-      statements.hasGraph(graphUri),
-      { ...options, source: options?.source ?? 'sparql-http.hasGraph' },
-      'hasGraph',
-    );
+    const r = await this.runQueryPlan(statements.hasGraph(graphUri), options);
     return r.type === 'boolean' && r.value;
   }
 
@@ -1131,16 +1112,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
-    const update = statements.dropGraph(graphUri);
-    await this.runRemoteGraphMutation({
-      scope: { kind: 'graphs', graphs: [graphUri] },
-      update,
-      options: {
-        ...options,
-        source: options?.source ?? 'sparql-http.dropGraph',
-      },
-      operation: 'dropGraph',
-    });
+    await this.runUpdatePlan(statements.dropGraph(graphUri), options);
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {
@@ -1205,15 +1177,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
-    const sparql = statements.countQuads(graphUri);
-    const r = await this.queryWithOperation(
-      sparql,
-      {
-        ...options,
-        source: options?.source ?? 'sparql-http.countQuads',
-      },
-      'countQuads',
-    );
+    const r = await this.runQueryPlan(statements.countQuads(graphUri), options);
     if (r.type === 'bindings' && r.bindings.length > 0) {
       const c = String(r.bindings[0].c ?? '');
       const stripped = c.replace(/^"|"$/g, '');

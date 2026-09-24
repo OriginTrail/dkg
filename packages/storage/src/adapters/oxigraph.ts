@@ -381,9 +381,10 @@ export class OxigraphStore implements TripleStore {
   }
 
   async dropGraph(graphUri: string): Promise<void> {
-    this.store.update(statements.dropGraph(graphUri));
+    const plan = statements.dropGraph(graphUri);
+    this.store.update(plan.update);
     this.scheduleFlush();
-    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
+    this.writeGen.recordWrite(plan.scope);
   }
 
   async replaceGraph(graphUri: string, quads: DKGQuad[]): Promise<void> {
@@ -535,11 +536,12 @@ export class OxigraphStore implements TripleStore {
     graphUri: string,
     prefix: string,
   ): Promise<number> {
+    const plan = statements.deleteBySubjectPrefix(graphUri, prefix);
     const before = this.store.size;
-    this.store.update(statements.deleteBySubjectPrefix(graphUri, prefix));
+    this.store.update(plan.update);
     const removed = before - this.store.size;
     if (removed > 0) this.scheduleFlush();
-    this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
+    this.writeGen.recordWrite(plan.scope);
     return removed;
   }
 

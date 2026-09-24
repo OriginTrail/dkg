@@ -42,7 +42,11 @@ import {
   type Rfc64AuthorCommitCasResultV1,
 } from '../rfc64-author-commit-cas.js';
 import { quadToNQuad } from '../bounded-rdf.js';
-import { sparqlStatements } from './sparql-statements.js';
+import {
+  sparqlStatements,
+  type SparqlQueryPlan,
+  type SparqlUpdatePlan,
+} from './sparql-statements.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
@@ -367,12 +371,9 @@ export class BlazegraphStore implements TripleStore {
     // Blazegraph is SPARQL 1.1, so blank nodes are illegal in `DELETE DATA`
     // (same constraint as Oxigraph). Reuse the shared blank-node-safe builder
     // so blank-node quads are removed via `DELETE { … } WHERE { … }`.
-    const update = statements.deleteData(quads);
-    if (!update) return;
-    await this.sparqlUpdate(update, {
-      ...options,
-      source: options?.source ?? 'blazegraph.delete',
-    }, 'delete');
+    const plan = statements.deleteData(quads);
+    if (!plan) return;
+    await this.runUpdatePlan(plan, options);
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>, options?: QueryOptions): Promise<number> {
@@ -399,11 +400,7 @@ export class BlazegraphStore implements TripleStore {
     pattern: Partial<DKGQuad>,
     options?: QueryOptions,
   ): Promise<void> {
-    await this.sparqlUpdate(
-      statements.deleteByPattern(pattern),
-      { ...options, source: options?.source ?? 'blazegraph.deleteByPattern' },
-      'deleteByPattern',
-    );
+    await this.runUpdatePlan(statements.deleteByPattern(pattern), options);
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
@@ -411,11 +408,7 @@ export class BlazegraphStore implements TripleStore {
       ...options,
       source: options?.source ?? 'blazegraph.deleteBySubjectPrefix.countBefore',
     });
-    await this.sparqlUpdate(
-      statements.deleteBySubjectPrefix(graphUri, prefix),
-      { ...options, source: options?.source ?? 'blazegraph.deleteBySubjectPrefix' },
-      'deleteBySubjectPrefix',
-    );
+    await this.runUpdatePlan(statements.deleteBySubjectPrefix(graphUri, prefix), options);
     const after = await this.countQuads(graphUri, {
       ...options,
       source: options?.source ?? 'blazegraph.deleteBySubjectPrefix.countAfter',
@@ -681,11 +674,7 @@ export class BlazegraphStore implements TripleStore {
   // -------------------------------------------------------------------
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
-    const r = await this.queryWithOperation(
-      statements.hasGraph(graphUri),
-      { ...options, source: options?.source ?? 'blazegraph.hasGraph' },
-      'hasGraph',
-    );
+    const r = await this.runQueryPlan(statements.hasGraph(graphUri), options);
     return r.type === 'boolean' && r.value;
   }
 
@@ -694,11 +683,7 @@ export class BlazegraphStore implements TripleStore {
   }
 
   async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
-    await this.sparqlUpdate(
-      statements.dropGraph(graphUri),
-      { ...options, source: options?.source ?? 'blazegraph.dropGraph' },
-      'dropGraph',
-    );
+    await this.runUpdatePlan(statements.dropGraph(graphUri), options);
   }
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
@@ -718,15 +703,7 @@ export class BlazegraphStore implements TripleStore {
   // -------------------------------------------------------------------
 
   async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
-    const sparql = statements.countQuads(graphUri);
-    const r = await this.queryWithOperation(
-      sparql,
-      {
-        ...options,
-        source: options?.source ?? 'blazegraph.countQuads',
-      },
-      'countQuads',
-    );
+    const r = await this.runQueryPlan(statements.countQuads(graphUri), options);
     if (r.type === 'bindings' && r.bindings.length > 0) {
       const cell = r.bindings[0].c ?? '';
       const digits = cell.match(/\d+/)?.[0];
@@ -746,6 +723,27 @@ export class BlazegraphStore implements TripleStore {
   // -------------------------------------------------------------------
   // Internal helpers
   // -------------------------------------------------------------------
+
+  /**
+   * Send a statement plan under its own operation. Blazegraph keeps no
+   * write-scope bookkeeping, so the plan's scope is not needed here.
+   */
+  private runUpdatePlan(plan: SparqlUpdatePlan, options?: QueryOptions): Promise<void> {
+    return this.sparqlUpdate(
+      plan.update,
+      { ...options, source: options?.source ?? `blazegraph.${plan.operation}` },
+      plan.operation,
+    );
+  }
+
+  /** Run a statement plan's query under its own operation. */
+  private runQueryPlan(plan: SparqlQueryPlan, options?: QueryOptions): Promise<QueryResult> {
+    return this.queryWithOperation(
+      plan.sparql,
+      { ...options, source: options?.source ?? `blazegraph.${plan.operation}` },
+      plan.operation,
+    );
+  }
 
   private async sparqlUpdate(
     update: string,
