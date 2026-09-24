@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import type { Quad } from './triple-store.js';
-import { formatObject, formatResource, unwrapIri } from './sparql-terms.js';
+import { formatSparqlTerm, unwrapIri } from './sparql-terms.js';
 
 /** Never expose these operation-internal graphs through graph enumeration. */
 export const ATOMIC_GRAPH_REPLACE_STAGING_PREFIX =
@@ -45,7 +45,7 @@ export function buildAtomicGraphReplaceUpdate(
 
   const stagingGraph = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}`;
   const triples = quads
-    .map((quad) => `    ${formatResource(quad.subject, 'subject')} <${assertSafeIri(unwrapIri(quad.predicate))}> ${formatObject(quad.object)} .`)
+    .map((quad) => `    ${formatSparqlTerm(quad.subject, { position: 'subject' })} <${assertSafeIri(unwrapIri(quad.predicate))}> ${formatSparqlTerm(quad.object, { position: 'object' })} .`)
     .join('\n');
   const cleanup = `DROP SILENT GRAPH <${stagingGraph}>`;
   return {
@@ -139,7 +139,7 @@ export function isAtomicGraphReplaceStagingGraph(graphUri: string): boolean {
  * immutable request record) must do that as its own separate write — the delete
  * scope and the insert scope are the same single subject, so the name never
  * diverges from the behaviour. Quads must be blank-node free; object terms are
- * validated/escaped through the same `formatObject` path as
+ * validated/escaped through the same `formatSparqlTerm` path as
  * `buildAtomicGraphReplaceUpdate`, so callers pass already-serialized RDF terms
  * rather than hand-escaping literals.
  */
@@ -214,7 +214,7 @@ export function assertSubjectReplacementPayload(
 
 export function formatGraphBlock(graphUri: string, quads: readonly Quad[]): string {
   const triples = quads
-    .map((quad) => `    ${formatResource(quad.subject, 'subject')} <${assertSafeIri(unwrapIri(quad.predicate))}> ${formatObject(quad.object)} .`)
+    .map((quad) => `    ${formatSparqlTerm(quad.subject, { position: 'subject' })} <${assertSafeIri(unwrapIri(quad.predicate))}> ${formatSparqlTerm(quad.object, { position: 'object' })} .`)
     .join('\n');
   return `  GRAPH <${graphUri}> {\n${triples}\n  }`;
 }

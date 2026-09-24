@@ -71,7 +71,7 @@ import {
   raceStoreWorkAgainstAbort,
 } from '../abortable-store-work-lifecycle.js';
 import { parseNQuadsTextTolerant } from '../nquads-text.js';
-import { sparqlIriPrefix, sparqlIriTerm, sparqlRdfTerm } from '../sparql-terms.js';
+import { sparqlIriPrefix, sparqlIriTerm, sparqlRdfTerm } from './sparql-term-policy.js';
 import { buildBlankNodeSafeDelete } from './blank-node-safe-delete.js';
 import {
   isStoreOperationTimeoutError,

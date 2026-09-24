@@ -43,7 +43,7 @@ import {
   type Rfc64AuthorCommitCasResultV1,
 } from '../rfc64-author-commit-cas.js';
 import { quadToNQuad } from '../bounded-rdf.js';
-import { sparqlIriPrefix, sparqlIriTerm, sparqlRdfTerm } from '../sparql-terms.js';
+import { sparqlIriPrefix, sparqlIriTerm, sparqlRdfTerm } from './sparql-term-policy.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';

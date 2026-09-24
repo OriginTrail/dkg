@@ -3,7 +3,7 @@
  * blazegraph), which both remove quads with a SPARQL UPDATE.
  */
 import type { Quad as DKGQuad } from '../triple-store.js';
-import { sparqlIriTerm, sparqlRdfTerm, type SparqlTermSite } from '../sparql-terms.js';
+import { sparqlIriTerm, sparqlRdfTerm, type SparqlTermSite } from './sparql-term-policy.js';
 
 /** True when an N-Quads term string denotes an RDF blank node (`_:label`). */
 export function isBlankNodeTerm(term: string): boolean {
@@ -75,7 +75,7 @@ function connectedBlankNodeComponents(quads: DKGQuad[]): DKGQuad[][] {
  * real IRI, so the match is precise. Two byte-for-byte isomorphic anchored
  * components are indistinguishable in RDF and both delete — which is correct.
  *
- * `adapter` labels invalid-term observations (see sparql-terms.ts).
+ * `adapter` labels invalid-term observations (see sparql-term-policy.ts).
  */
 export function buildBlankNodeSafeDelete(
   quads: DKGQuad[],

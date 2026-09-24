@@ -34,7 +34,7 @@ import {
   type Rfc64AuthorCommitCasUpdateV1,
 } from '../rfc64-author-commit-cas.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
-import { sparqlIriPrefix, sparqlIriTerm } from '../sparql-terms.js';
+import { sparqlIriPrefix, sparqlIriTerm } from './sparql-term-policy.js';
 import {
   assertQuadLiteralsMutf8Safe,
   classifySparqlOperation,

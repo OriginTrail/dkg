@@ -11,7 +11,7 @@ export interface InvalidSparqlTermCount {
 }
 
 /**
- * Capture what sparql-terms' observe mode reports: every counter point and
+ * Capture what the adapters' term policy reports: every counter point and
  * every warn line. Without a registered meter provider all counters share one
  * no-op instance, so points are told apart by their `enforcement` label.
  */

@@ -8,7 +8,7 @@ import {
   formatGraphBlock,
   isAtomicGraphReplaceStagingGraph,
 } from './atomic-graph-replace.js';
-import { formatObject, unwrapIri } from './sparql-terms.js';
+import { formatSparqlTerm, unwrapIri } from './sparql-terms.js';
 import {
   decodeRfc64AuthorCommitPlanV1,
   finalizeRfc64AuthorCommitPlanV1,
@@ -960,7 +960,7 @@ function formatControlObject(value: string, label: string): string {
   if (value.startsWith('_:')) {
     throw new Error(`RFC-64 author commit ${label} cannot be a blank node`);
   }
-  return formatObject(value);
+  return formatSparqlTerm(value, { position: 'object' });
 }
 
 function assertNonInternalGraph(value: string, label: string): string {
