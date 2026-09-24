@@ -241,6 +241,13 @@ All notable changes to the DKG V10 node are documented here. The format is based
   reason, with VM-promotion declines under `CORE_VM_PROMOTION_UNAVAILABLE` and
   `CORE_VM_PROMOTION_DISABLED`), the number of core-hosted graphs and the last
   audit.
+- **`GET /api/status` reports main-thread stalls**: a new `eventLoopDelay`
+  block gives the event-loop delay over the last complete 60-second window
+  (`p50Ms`, `p99Ms`, `maxMs` and `windowMs`, in milliseconds; the three delays
+  are `null` before the first sample), sampled every 20 ms. When a window's
+  longest stall reaches 2 seconds the daemon logs one
+  `[warn] Event loop blocked: ...` line, at most once every 10 minutes, and
+  the next warning counts the windows it skipped.
 
 ## [10.0.18] - 2026-09-22
 

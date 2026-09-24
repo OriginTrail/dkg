@@ -816,6 +816,10 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         max: admission.max,
         rejectedTotal: admission.rejectedTotal,
       },
+      // Main-thread stalls over the last complete window (p50/p99/max ms).
+      // A max in the seconds means every route, stream and timer waited that
+      // long; the daemon log carries a rate-limited warning for it.
+      eventLoopDelay: ctx.eventLoopDelay?.snapshot() ?? null,
       // Public status carries state only. Detailed lane timings and operation
       // summaries stay behind the node-admin diagnostics route.
       backpressure: {

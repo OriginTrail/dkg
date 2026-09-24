@@ -281,6 +281,10 @@ import {
   runProducerQuiescentTeardown,
 } from './teardown.js';
 import {
+  startEventLoopDelayMonitor,
+  type EventLoopDelayView,
+} from './event-loop-delay-monitor.js';
+import {
   closeDaemonHttpServer,
   createDaemonDetachedResponseRegistry,
   createDaemonSseRegistry,
@@ -3145,6 +3149,13 @@ async function runDaemonInnerWithStartupOwnership(
 
   await telemetryRuntime.startConfiguredBestEffort();
   backpressureMonitor.start();
+  // Main-thread stall gauge: `/api/status` → `eventLoopDelay`, plus one
+  // rate-limited warning line when a window's max passes 2 s.
+  const eventLoopDelayMonitor = startEventLoopDelayMonitor({ log });
+  // Route/plugin code gets the reading only, never `stop()`.
+  const eventLoopDelayView: EventLoopDelayView = Object.freeze({
+    snapshot: () => eventLoopDelayMonitor.snapshot(),
+  });
 
   const PRUNE_INTERVAL_MS = 6 * 60 * 60_000; // 6 hours
   const pruneRuntimeState = async (): Promise<void> => {
@@ -3874,6 +3885,7 @@ async function runDaemonInnerWithStartupOwnership(
         apiPortRef,
         routePlugins,
         admission: admissionStats,
+        eventLoopDelay: eventLoopDelayView,
         localLlm,
         routeRpcTransport: daemonRpcRuntime?.routeTransport,
         emitMemoryGraphChanged,
@@ -3984,6 +3996,7 @@ async function runDaemonInnerWithStartupOwnership(
         });
         logVolumePruner.stop();
         backpressureMonitor.stop();
+        eventLoopDelayMonitor.stop();
         rateLimiter.destroy();
         metricsCollector?.stop();
         natStatusWatcherStop?.();
