@@ -114,10 +114,11 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   from `origin` back to a day before the pin's commit date, and a failed
   fetch fails the step. A test in `ci-controller.test.mjs` then fails unless
   the pinned SHA is an ancestor of one of those branches, and logs which
-  one. A rotation to a commit that only a pull request contains therefore
-  fails that PR's CI. The check runs in the candidate's own build job, so it
-  catches a mistaken rotation but cannot stop a PR that also edits the check.
-  Review of workflow and test changes still matters, and the scheduled report
+  one, so a rotation to a commit that only a pull request branch contains
+  fails that PR's CI. The check runs under the controller it checks, which
+  decides whether the build job runs and whether a failure fails the gate:
+  it catches a mistaken rotation, but not a malicious pin or a PR that edits
+  the check. Review of rotations still matters, and the scheduled report
   below remains the independent provenance check.
 - `CONTROLLER_POLICY_FILES` in `scripts/ci/trusted-controller-pins.mjs` is the
   single manifest for the narrow controller boundary. The semantic workflow
