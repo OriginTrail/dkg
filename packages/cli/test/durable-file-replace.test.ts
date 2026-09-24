@@ -372,9 +372,7 @@ describe('replaceFileDurably', () => {
     await replaceFileDurably(target, 'posix', { platform: 'linux' });
     const temp = events[0]?.slice('sync '.length) ?? '';
     expect(temp).toMatch(TEMP_FILE);
-    // A Windows host cannot open the directory to flush it; the linux path still tries.
-    const directorySync = process.platform === 'win32' ? [] : [`sync ${basename(dir)}`];
-    expect(events).toEqual([`sync ${temp}`, `rename ${temp} -> config.json`, ...directorySync]);
+    expect(events).toEqual([`sync ${temp}`, `rename ${temp} -> config.json`, `sync ${basename(dir)}`]);
     expect(await readFile(target, 'utf-8')).toBe('posix');
 
     events.length = 0;
