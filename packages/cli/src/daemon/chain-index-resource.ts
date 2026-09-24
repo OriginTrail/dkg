@@ -12,16 +12,17 @@ export interface DaemonChainIndexResource {
   /** Only the owning agent adapter receives this capability. */
   readonly capability: ChainIndexCapability;
   /** Shared by failed startup, fatal prerequisites, and normal shutdown. */
-  close(beforeDatabaseClose?: () => Promise<void>): Promise<void>;
+  close(): Promise<void>;
 }
 
 /** Startup may close the shared DB only while it can account for every user. */
 export function createStartupChainIndexCloseGuard() {
   let phase: { kind: 'before-agent' } | { kind: 'agent'; stop: () => Promise<void> }
-    | { kind: 'daemon-consumers' } = { kind: 'before-agent' };
+    | { kind: 'daemon-consumers' } | { kind: 'drained' } = { kind: 'before-agent' };
   return {
     agentCreated: (stop: () => Promise<void>) => { phase = { kind: 'agent', stop }; },
     daemonConsumersStarted: () => { phase = { kind: 'daemon-consumers' }; },
+    dependenciesDrained: () => { phase = { kind: 'drained' }; },
     beforeDatabaseClose: async () => {
       if (phase.kind === 'daemon-consumers') {
         throw new Error('Startup failed after daemon consumers started; shared database requires full producer teardown');
@@ -51,10 +52,13 @@ export function createDaemonChainIndexResource(
   dashboard: DashboardDB,
   options: {
     log: (message: string) => void;
+    /** Fixed dependency barrier; failure keeps the shared database alive. */
+    beforeDatabaseClose: () => Promise<void>;
     createReader?: (path: string, store: SqliteChainEventLogStore,
       options: ChainIndexReadWorkerOptions) => ReaderResource;
   },
 ): DaemonChainIndexResource {
+  const beforeDatabaseClose = options.beforeDatabaseClose;
   const store = new SqliteChainEventLogStore(dashboard);
   let lastWarningAt = 0;
   let reader: ReaderResource;
@@ -81,12 +85,12 @@ export function createDaemonChainIndexResource(
   let closing: Promise<void> | undefined;
   return Object.freeze({
     capability,
-    close: (beforeDatabaseClose?: () => Promise<void>) => {
+    close: () => {
       // Concurrent paths share the same retirement. If retiring the reader
       // fails, keep its database alive rather than closing beneath active work.
       closing ??= Promise.resolve().then(async () => {
         await reader.close();
-        await beforeDatabaseClose?.();
+        await beforeDatabaseClose();
         dashboard.close();
       });
       return closing;

@@ -3,6 +3,8 @@ import { dhtProtocolForNetwork } from '../src/constants.js';
 
 const mocks = vi.hoisted(() => ({
   kadOptions: [] as any[],
+  coordinatedPingFactory: vi.fn(),
+  coordinatedPing: vi.fn(),
   createLibp2p: vi.fn(async (options: any) => ({
     peerId: { toString: () => 'mock-peer' },
     peerStore: { merge: vi.fn() },
@@ -27,6 +29,10 @@ vi.mock('libp2p', () => ({
   createLibp2p: mocks.createLibp2p,
 }));
 
+vi.mock('../src/coordinated-ping.js', () => ({
+  coordinatedPing: mocks.coordinatedPing.mockImplementation(() => mocks.coordinatedPingFactory),
+}));
+
 const ACTIVE_RELAY_PEER = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const FOREIGN_RELAY_PEER = '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw';
 const REMOTE_PEER = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
@@ -35,6 +41,7 @@ describe('DKGNode DHT network identity wiring', () => {
   afterEach(() => {
     mocks.kadOptions.length = 0;
     mocks.createLibp2p.mockClear();
+    mocks.coordinatedPing.mockClear();
   });
 
   it('passes the network-scoped DHT protocol into kadDHT during start', async () => {
@@ -78,7 +85,8 @@ describe('DKGNode DHT network identity wiring', () => {
     expect(mocks.createLibp2p).toHaveBeenCalledOnce();
     const options = mocks.createLibp2p.mock.calls[0][0];
     expect(options.connectionMonitor).toEqual({ enabled: false });
-    expect(options.services.ping).toEqual(expect.any(Function));
+    expect(mocks.coordinatedPing).toHaveBeenCalledOnce();
+    expect(options.services.ping).toBe(mocks.coordinatedPingFactory);
     const denyDialMultiaddr = options.connectionGater?.denyDialMultiaddr;
     expect(denyDialMultiaddr).toEqual(expect.any(Function));
     expect(

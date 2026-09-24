@@ -1242,21 +1242,9 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const knowledgeAssetsFromLog = await this.knowledgeAssetsFromLogFor(cgs);
     let loggedKaId: bigint | undefined;
     if (knowledgeAssetsFromLog !== undefined && index >= 0n) {
-      const { readModel } = knowledgeAssetsFromLog;
-      if (readModel.readContextGraphKaAt !== undefined) {
-        loggedKaId = (await readModel.readContextGraphKaAt(
-          contextGraphId, index, { view: 'latest' },
-        ))?.kaId;
-      } else {
-        // Compatibility for SDK read models without the scalar port. A
-        // worker refusal must go to the chain, never materialize a full list.
-        const logged = await readModel.readContextGraphKaList(
-          contextGraphId, { view: 'latest' },
-        );
-        if (logged !== undefined && index < BigInt(logged.kaIds.length)) {
-          loggedKaId = logged.kaIds[Number(index)];
-        }
-      }
+      loggedKaId = (await knowledgeAssetsFromLog.readModel.readContextGraphKaAt(
+        contextGraphId, index, { view: 'latest' },
+      ))?.kaId;
     }
     // Position IS the ordinal — the on-chain list only ever appends. An index
     // the log does not hold is NOT an out-of-range answer to invent: the chain

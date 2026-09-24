@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Interface } from 'ethers';
 import { DashboardDB, SqliteChainEventLogStore } from '@origintrail-official/dkg-node-ui';
-import type { ChainEventLogRow } from '@origintrail-official/dkg-chain';
+import type { ChainEventLogRow } from '@origintrail-official/dkg-chain/internal/chain-index-worker';
 import type {
   ChainIndexReadRequest, ChainIndexReadResponse, ChainIndexReadWorkerMessage,
 } from '../src/daemon/worker/chain-index-read-worker-protocol.js';
@@ -46,7 +46,17 @@ class TestPort extends EventEmitter {
         if ('type' in message || message.id !== request.id) return;
         clearTimeout(timer);
         this.off('outbound', receive);
-        resolve(message);
+        try {
+          expect(message.method).toBe(request.method);
+          if (message.reason === 'served') {
+            expect(message.result).toBeDefined();
+            expect(message.fence).toBeDefined();
+          } else {
+            expect(message.result).toBeUndefined();
+            expect(message.fence).toBeUndefined();
+          }
+          resolve(message);
+        } catch (error) { reject(error); }
       };
       const timer = setTimeout(() => {
         this.off('outbound', receive);
@@ -137,12 +147,12 @@ describe('actual chain-index worker entry over a message port and real SQLite', 
       reason: 'served', result: { contextGraphId: 7n, kaIds: [1n, 2n], throughBlockNumber: 10 } });
     await expect(port.send(request({ method: 'ordinal', key: 7n, index: 1n }))).resolves.toMatchObject({
       reason: 'served', result: { kaId: 2n, asOfBlockNumber: 10 } });
-    await expect(port.send(request({ method: 'ordinal', key: 7n }))).resolves.toMatchObject({ reason: 'proof-miss' });
+    await expect(port.send(request({ method: 'ordinal', key: 7n, index: -1n }))).resolves.toMatchObject({ reason: 'proof-miss' });
     expect(await store.load(scope)).toEqual(before);
     expect(db.db.prepare('SELECT COUNT(*) AS n FROM chain_events').get()).toEqual(count);
     port.close();
     // The closed read-only connection refuses; the independent writer remains usable.
-    await expect(port.send(request())).resolves.toMatchObject({ reason: 'read-error', result: undefined });
+    await expect(port.send(request())).resolves.toMatchObject({ reason: 'read-error' });
     expect(await store.load(scope)).toEqual(before);
   });
 
@@ -154,7 +164,7 @@ describe('actual chain-index worker entry over a message port and real SQLite', 
     await expect(port.send(request({ options: { ownWrite: { blockNumber: 10, blockHash: hash(10) } } })))
       .resolves.toMatchObject({ reason: 'served', result: { contextGraphId: 7n } });
     await expect(port.send(request({ options: { ownWrite: { blockNumber: 10, blockHash: hash(99) } } })))
-      .resolves.toMatchObject({ reason: 'proof-miss', result: undefined });
+      .resolves.toMatchObject({ reason: 'proof-miss' });
     await expect(port.send(request({ options: { ownWrite: { blockNumber: 12, blockHash: hash(12) } } })))
       .resolves.toMatchObject({ reason: 'proof-miss', rowsRead: 0 });
   });
@@ -167,7 +177,7 @@ describe('actual chain-index worker entry over a message port and real SQLite', 
     await expect(port.send(request({ key: -1n }))).resolves.toMatchObject({ reason: 'proof-miss', rowsRead: 0 });
     const invalidAbi = request();
     invalidAbi.model = { ...invalidAbi.model, contextGraphStorageAbi: 'invalid JSON' };
-    await expect(port.send(invalidAbi)).resolves.toMatchObject({ reason: 'read-error', result: undefined });
+    await expect(port.send(invalidAbi)).resolves.toMatchObject({ reason: 'read-error' });
     await expect(port.send(request())).resolves.toMatchObject({ reason: 'served' });
   });
 
@@ -197,7 +207,7 @@ describe('actual chain-index worker entry over a message port and real SQLite', 
   it('refuses a large compatibility list while serving a scalar ordinal from the same graph', async () => {
     const { port, request } = await fixture([creation(), ...registrations(1_025)]);
     await expect(port.send(request({ method: 'list', key: 7n }))).resolves.toMatchObject({
-      reason: 'proof-miss', rowsRead: 1_026, result: undefined });
+      reason: 'proof-miss', rowsRead: 1_026 });
     await expect(port.send(request({ method: 'ordinal', key: 7n, index: 1_024n }))).resolves.toMatchObject({
       reason: 'served', result: { kaId: 1_025n } });
   });
@@ -220,7 +230,7 @@ describe('actual chain-index worker entry over a message port and real SQLite', 
         else clock += 2_000;
       });
     });
-    await expect(port.send(bulk)).resolves.toMatchObject({ reason: 'timeout', result: undefined });
+    await expect(port.send(bulk)).resolves.toMatchObject({ reason: 'timeout' });
     expect(checkpoints).toEqual([128]);
     // A cancel for a completed/unknown request is harmless, and the live entry
     // serves the next request without any worker replacement or reset.

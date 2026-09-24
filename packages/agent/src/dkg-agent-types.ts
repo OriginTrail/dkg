@@ -63,8 +63,7 @@ import type {
 import type {
   ApprovalPolicy,
   ChainAdapter,
-  ChainEventLogStore,
-  ChainIndexCapability,
+  ChainIndexConfig,
   ContextGraphAuthorityHistoryStore,
   ContextGraphAuthorityIndexStore,
   ContextGraphRegistryScanCursorStore,
@@ -1389,7 +1388,9 @@ export type FinalizationRecoveryStoreFactory = (
   dataDir: string,
 ) => Promise<FinalizationRecoveryStore>;
 
-export interface DKGAgentConfig {
+export type DKGAgentConfig = DKGAgentBaseConfig & ChainIndexConfig;
+
+interface DKGAgentBaseConfig {
   name: string;
   /**
    * Construction seam for the durable finalization inbox. Embedders and tests
@@ -1905,15 +1906,6 @@ export interface DKGAgentConfig {
   localContextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
   /** Process-owned durable contract-wide Context Graph authority index. */
   localContextGraphAuthorityIndexStore?: ContextGraphAuthorityIndexStore;
-  /**
-   * Durable backing for the node's ONE chain log. Giving it to the agent is
-   * what starts the single background tick: the agent's own chain adapter owns
-   * it, and every other adapter in the process reads the same log rather than
-   * opening a scanner of its own.
-   */
-  chainIndex?: ChainIndexCapability;
-  /** @deprecated Store-only SDK compatibility; use chainIndex: { store } for new callers. */
-  chainEventLogStore?: ChainEventLogStore;
   /** Opt in to trusted core bootstrap and a bounded chain tail on edges. */
   authorityIndex?: AuthorityIndexConfig;
   /**
@@ -1977,7 +1969,7 @@ export interface DKGAgentACKTransportOptions {
 
 export type ResolvedDKGAgentConfig =
   Omit<
-    DKGAgentConfig,
+    DKGAgentBaseConfig,
     | 'storageAckTiming'
     | 'ackHandlerDeadlineMs'
     | 'ackSendTimeoutMs'
@@ -1993,7 +1985,7 @@ export type ResolvedDKGAgentConfig =
     | 'rfc64PublicCatalogBootstrap'
     | 'rfc64CatalogDeploymentProfile'
     | 'contextGraphSubscriptionRehydrationEnabled'
-  > & {
+  > & ChainIndexConfig & {
     contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
     syncReconcilerTiming: SyncReconcilerTiming;

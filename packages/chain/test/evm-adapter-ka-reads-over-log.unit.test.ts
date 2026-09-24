@@ -343,6 +343,34 @@ describe('knowledge-asset views over the one log', () => {
     expect(calls).toEqual(answer ? [] : ['cgStorage.getContextGraphKaAt']);
   });
 
+  it('normalizes a legacy list-only attachment once and uses its scalar port for ordinal reads', async () => {
+    class LegacyReadModel implements KnowledgeAssetReadModel {
+      readonly #kaIds = [4242n, 4343n];
+      async readContextGraphForKa() { return undefined; }
+      async readContextGraphKaList(contextGraphId: bigint) {
+        return { contextGraphId, kaIds: this.#kaIds, throughBlockNumber: COVERED_THROUGH };
+      }
+    }
+    const legacy = new LegacyReadModel();
+    const readList = vi.spyOn(legacy, 'readContextGraphKaList');
+    const { adapter, calls, live } = makeAdapter({ store: populated(), knowledgeAssets: legacy });
+    const attached = adapter.chainEventLog;
+    expect(attached?.knowledgeAssets).not.toBe(legacy);
+    expect(attached?.knowledgeAssets?.readContextGraphKaAt).toBeTypeOf('function');
+    expect(await adapter.getContextGraphKCAt(7n, 1n)).toBe(4343n);
+    expect(await adapter.getContextGraphKCAt(7n, 0n)).toBe(4242n);
+    expect(adapter.chainEventLog).toBe(attached);
+    expect(readList.mock.calls).toEqual([[7n, { view: 'latest' }], [7n, { view: 'latest' }]]);
+    expect(calls).toEqual([]);
+
+    // Missing legacy ordinals retain the chain's authoritative answer/revert,
+    // including an index that cannot safely be converted to a JS number.
+    live.set('cgStorage.getContextGraphKaAt', 9003n);
+    expect(await adapter.getContextGraphKCAt(7n, 2n)).toBe(9003n);
+    expect(await adapter.getContextGraphKCAt(7n, 2n ** 80n)).toBe(9003n);
+    expect(calls).toEqual(['cgStorage.getContextGraphKaAt', 'cgStorage.getContextGraphKaAt']);
+  });
+
   it('passes KA read cancellation through to the injected model', async () => {
     const controller = new AbortController();
     const cancelled = new Error('caller cancelled');

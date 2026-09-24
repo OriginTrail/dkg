@@ -15,7 +15,7 @@ describe('DKGAgent chain cursor wiring', () => {
     agent = undefined;
   });
 
-  it('passes EVM chainConfig fields into the constructed adapter', async () => {
+  it.each(['capability', 'legacy store'] as const)('passes EVM chainConfig and %s ownership into the constructed adapter', async (ownership) => {
     const registryCursorStore = {
       load: vi.fn(async () => undefined),
       save: vi.fn(async () => {}),
@@ -60,7 +60,9 @@ describe('DKGAgent chain cursor wiring', () => {
       contextGraphRegistryScanCursorStore: registryCursorStore,
       localContextGraphAuthorityHistoryStore: authorityHistoryStore,
       localContextGraphAuthorityIndexStore: authorityIndexStore,
-      chainIndex: { store: chainEventLogStore, readModelFactory: chainEventLogReadModelFactory },
+      ...(ownership === 'capability'
+        ? { chainIndex: { store: chainEventLogStore, readModelFactory: chainEventLogReadModelFactory } }
+        : { chainEventLogStore }),
     });
 
     expect((agent as any).chain.contextGraphRegistryScanCursor?.input?.store).toBe(registryCursorStore);
@@ -86,7 +88,7 @@ describe('DKGAgent chain cursor wiring', () => {
     });
     await owner.starting;
     expect(receivedCapability.store).toBe(chainEventLogStore);
-    expect(receivedCapability.readModelFactory).toBe(chainEventLogReadModelFactory);
+    expect(receivedCapability.readModelFactory).toBe(ownership === 'capability' ? chainEventLogReadModelFactory : undefined);
     expect(runtime.start).toHaveBeenCalledOnce();
     expect((agent as any).chain.indexTickMs).toBe(12_000);
   });

@@ -1,8 +1,8 @@
+import type { ChainEventLogState } from '@origintrail-official/dkg-chain/internal/chain-index-worker';
 import { EventEmitter } from 'node:events';
 import type { Worker } from 'node:worker_threads';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
-  ChainEventLogState,
   KnowledgeAssetReadModelFactoryOptions,
 } from '@origintrail-official/dkg-chain';
 import {
@@ -63,13 +63,17 @@ class FakeWorker extends EventEmitter {
   }
 
   reply(request: ChainIndexReadRequest, patch: Partial<ChainIndexReadResponse> = {}): void {
-    this.emit('message', {
-      id: request.id,
-      result: BINDING,
+    const common = {
+      id: request.id, reason: 'served' as const, rowsRead: 1, readMs: 1, decodeMs: 1,
       fence: { revision: 1, lineage: 'lineage-1', topicSetVersion: 'topics-1' },
-      reason: 'served', rowsRead: 1, readMs: 1, decodeMs: 1,
-      ...patch,
-    } satisfies ChainIndexReadResponse);
+    };
+    const response: ChainIndexReadResponse = request.method === 'binding'
+      ? { ...common, method: 'binding', result: BINDING }
+      : request.method === 'ordinal'
+        ? { ...common, method: 'ordinal', result: { kaId: 42n, asOfBlockNumber: 100 } }
+        : { ...common, method: 'list', result: { contextGraphId: request.key, kaIds: [42n], throughBlockNumber: 100 } };
+    // Patches also exercise deliberately malformed messages at the IPC boundary.
+    this.emit('message', { ...response, ...patch });
   }
 }
 
@@ -183,7 +187,7 @@ describe('chain-index read worker client', () => {
     expect(f.worker().messages.filter((message) => message.type === 'cancel'))
       .toEqual([{ type: 'cancel', id: activeRequest.id }]);
     expect(f.worker().reads.map((request) => request.key)).toEqual([42n]);
-    f.worker().reply(activeRequest, { result: undefined, reason: 'cancelled' });
+    f.worker().reply(activeRequest, { result: undefined, reason: 'timeout' });
     await Promise.resolve();
     expect(f.worker().reads.map((request) => request.key)).toEqual([42n, 43n]);
     f.worker().reply(f.worker().reads[1]!);
@@ -217,7 +221,7 @@ describe('chain-index read worker client', () => {
     await expect(f.model.readContextGraphForKa(42n)).resolves.toBeUndefined();
     await expect(f.model.readContextGraphForKa(43n)).resolves.toBeUndefined();
     expect(f.worker().reads).toHaveLength(1);
-    f.worker().reply(request, { result: undefined, reason: 'cancelled' });
+    f.worker().reply(request, { result: undefined, reason: 'timeout' });
     const next = f.model.readContextGraphForKa(42n);
     expect(f.worker().reads[1]!.id).not.toBe(request.id);
     f.worker().reply(f.worker().reads[1]!);
@@ -505,6 +509,24 @@ describe('chain-index read worker client', () => {
     await expect(unavailable).resolves.toBeUndefined();
     expect(f.onDiagnostic.mock.calls.map(([event]) => event.reason))
       .toEqual(['retired-revision', 'store-unavailable']);
+  });
+
+  it('refuses a served reply for another operation before reading the cursor', async () => {
+    const f = fixture();
+    const binding = f.model.readContextGraphForKa(42n);
+    const response: ChainIndexReadResponse = {
+      id: f.worker().reads[0]!.id, method: 'ordinal', reason: 'served',
+      result: { kaId: 42n, asOfBlockNumber: 100 },
+      fence: { revision: 1, lineage: 'lineage-1', topicSetVersion: 'topics-1' },
+      rowsRead: 1, readMs: 1, decodeMs: 1,
+    };
+    f.worker().emit('message', response);
+    await expect(binding).resolves.toBeUndefined();
+    expect(f.load).not.toHaveBeenCalled();
+    expect(f.onDiagnostic).toHaveBeenCalledWith(expect.objectContaining({ reason: 'invalid-response' }));
+    const list = f.model.readContextGraphKaList(7n);
+    f.worker().reply(f.worker().reads[1]!);
+    await expect(list).resolves.toEqual({ contextGraphId: 7n, kaIds: [42n], throughBlockNumber: 100 });
   });
 
   it('refuses a delivered result after its deadline even before the timer callback runs', async () => {

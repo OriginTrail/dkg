@@ -1311,7 +1311,7 @@ async function runDaemonInnerWithStartupOwnership(
       // graph bootstrap, or readiness migration rejected. It owns a separate
       // SQLite handle; its owner closes that reader before the shared DB,
       // even when graceful shutdown was never wired.
-      await startupChainIndexResource?.close(startupChainIndexGuard.beforeDatabaseClose);
+      await startupChainIndexResource?.close();
     } finally {
       detachDaemonLogTee();
       await daemonLogFileWriter.shutdown();
@@ -1846,7 +1846,9 @@ async function runDaemonInnerWithStartupOwnership(
   const dashDb = new DashboardDB({ dataDir: dkgDir() });
   // One process-owned log/reader capability; only the agent adapter owns its
   // tick. Wallet adapters borrow the published binding instead.
-  const chainIndexResource = createDaemonChainIndexResource(dashDb, { log });
+  const chainIndexResource = createDaemonChainIndexResource(dashDb, {
+    log, beforeDatabaseClose: startupChainIndexGuard.beforeDatabaseClose,
+  });
   startupChainIndexResource = chainIndexResource;
   const snapshotPageIndexStore = new SqliteSnapshotPageIndexStore(dashDb);
   const publicSnapshotStore = createPublicSnapshotStore(
@@ -2529,7 +2531,7 @@ async function runDaemonInnerWithStartupOwnership(
             natStatusWatcherStop?.();
             resetNatStatus();
             try {
-              await chainIndexResource.close(() => agent.stop());
+              await chainIndexResource.close();
             } catch (err: any) {
               log(`Core prereq fatal DB close error: ${err?.message ?? String(err)}`);
             }
@@ -4060,7 +4062,10 @@ async function runDaemonInnerWithStartupOwnership(
         const backingStoresClosed = await closeDaemonBackingStoresAfterTeardown(teardown, {
           retryAgentStop: () => agent.stop(),
           stopManagedOxigraph: () => managedOxigraph?.stop() ?? Promise.resolve(),
-          closeDashboardDb: chainIndexResource.close,
+          closeDashboardDb: () => {
+            startupChainIndexGuard.dependenciesDrained();
+            return chainIndexResource.close();
+          },
           log,
         });
         if (backingStoresClosed) log("Stopped.");

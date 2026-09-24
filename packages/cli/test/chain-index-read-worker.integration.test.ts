@@ -5,7 +5,8 @@ import { join } from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { Interface } from 'ethers';
 import { DashboardDB, SqliteChainEventLogStore } from '@origintrail-official/dkg-node-ui';
-import type { ChainEventLogStore, ChainEventLogState, ChainEventLogRow } from '@origintrail-official/dkg-chain';
+import type { ChainEventLogStore } from '@origintrail-official/dkg-chain';
+import type { ChainEventLogState, ChainEventLogRow } from '@origintrail-official/dkg-chain/internal/chain-index-worker';
 import { ChainIndexReadWorker, type ChainIndexReadDiagnostic } from '../src/daemon/worker/chain-index-read-worker.js';
 import type {
   ChainIndexReadRequest, ChainIndexReadResponse, ChainIndexReadWorkerMessage,

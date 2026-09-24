@@ -164,6 +164,20 @@ function model(
 const SEEDED_FETCHED_AT_MS = 1_700_000_000_000;
 
 describe('canonical snapshot evaluation agrees with inline capture', () => {
+  it.each([
+    { name: 'missing held hash', held: undefined, served: false },
+    { name: 'mismatched held hash', held: hash(99), served: false },
+    { name: 'matching held hash', held: hash(50), served: true },
+  ])('plans before evidence is available, then verifies $name during evaluation', async ({ held, served }) => {
+    const store = seeded({ rows: [registration(50, 7n, 4242n)] });
+    const plan = planKnowledgeAssetSnapshotRead({ state: (await store.load(SCOPE))!,
+      contextGraphStorageAddress: CG_STORAGE, read: { kind: 'binding', args: { kaId: 4242n } },
+      options: { ownWrite: { blockNumber: 50, blockHash: hash(50) } } });
+    expect(plan).toBeDefined();
+    const snapshot = createKnowledgeAssetReadSnapshot(plan!, await store.readEvents(SCOPE, plan!.query), held);
+    const result = await evaluateKnowledgeAssetSnapshot(snapshot, registry());
+    expect(result).toEqual(served ? { kind: 'bound', contextGraphId: 7n, asOfBlockNumber: 100 } : undefined);
+  });
   const bound = { kind: 'bound' as const, contextGraphId: 7n, asOfBlockNumber: 100 };
   const list = { contextGraphId: 7n, kaIds: [4242n, 8888n], throughBlockNumber: 100 };
   const cases: Array<{
@@ -171,38 +185,38 @@ describe('canonical snapshot evaluation agrees with inline capture', () => {
     options?: KnowledgeAssetReadOptions; now?: number; fork?: boolean;
     expected: KnowledgeAssetSnapshotResult | undefined;
   }> = [
-    { name: 'settled binding', read: { kind: 'binding', kaId: 4242n }, expected: bound },
-    { name: 'missing binding', read: { kind: 'binding', kaId: 99n }, expected: undefined },
-    { name: 'full list', read: { kind: 'list', contextGraphId: 7n }, expected: list },
-    { name: 'scalar ordinal', read: { kind: 'ordinal', contextGraphId: 7n, index: 1n },
+    { name: 'settled binding', read: { kind: 'binding', args: { kaId: 4242n } }, expected: bound },
+    { name: 'missing binding', read: { kind: 'binding', args: { kaId: 99n } }, expected: undefined },
+    { name: 'full list', read: { kind: 'list', args: { contextGraphId: 7n } }, expected: list },
+    { name: 'scalar ordinal', read: { kind: 'ordinal', args: { contextGraphId: 7n, index: 1n } },
       expected: { kaId: 8888n, asOfBlockNumber: 100 } },
-    { name: 'unknown ordinal', read: { kind: 'ordinal', contextGraphId: 7n, index: 2n }, expected: undefined },
-    { name: 'finalized ignores tail', read: { kind: 'binding', kaId: 9999n }, expected: undefined },
-    { name: 'latest includes tail', read: { kind: 'binding', kaId: 9999n }, options: { view: 'latest' },
+    { name: 'unknown ordinal', read: { kind: 'ordinal', args: { contextGraphId: 7n, index: 2n } }, expected: undefined },
+    { name: 'finalized ignores tail', read: { kind: 'binding', args: { kaId: 9999n } }, expected: undefined },
+    { name: 'latest includes tail', read: { kind: 'binding', args: { kaId: 9999n } }, options: { view: 'latest' },
       expected: { ...bound, asOfBlockNumber: 105 } },
-    { name: 'latest ordinal', read: { kind: 'ordinal', contextGraphId: 7n, index: 2n }, options: { view: 'latest' },
+    { name: 'latest ordinal', read: { kind: 'ordinal', args: { contextGraphId: 7n, index: 2n } }, options: { view: 'latest' },
       expected: { kaId: 9999n, asOfBlockNumber: 105 } },
-    { name: 'partial positive binding', read: { kind: 'binding', kaId: 4242n },
+    { name: 'partial positive binding', read: { kind: 'binding', args: { kaId: 4242n } },
       seed: { cgCoverage: { coveredFromBlock: 45 } }, expected: bound },
-    { name: 'partial ordinal refused', read: { kind: 'ordinal', contextGraphId: 7n, index: 0n },
+    { name: 'partial ordinal refused', read: { kind: 'ordinal', args: { contextGraphId: 7n, index: 0n } },
       seed: { cgCoverage: { coveredFromBlock: 45 } }, expected: undefined },
-    { name: 'unknown creation refused', read: { kind: 'list', contextGraphId: 7n },
+    { name: 'unknown creation refused', read: { kind: 'list', args: { contextGraphId: 7n } },
       seed: { rows: [registration(50, 7n, 4242n)] }, expected: undefined },
-    { name: 'empty created graph', read: { kind: 'list', contextGraphId: 7n },
+    { name: 'empty created graph', read: { kind: 'list', args: { contextGraphId: 7n } },
       seed: { rows: [creation(40, 7n)] }, expected: { ...list, kaIds: [] } },
-    { name: 'matching own write', read: { kind: 'binding', kaId: 4242n },
+    { name: 'matching own write', read: { kind: 'binding', args: { kaId: 4242n } },
       options: { ownWrite: { blockNumber: 50, blockHash: hash(50) } }, expected: bound },
-    { name: 'mismatching own write', read: { kind: 'binding', kaId: 4242n },
+    { name: 'mismatching own write', read: { kind: 'binding', args: { kaId: 4242n } },
       options: { ownWrite: { blockNumber: 50, blockHash: hash(99) } }, expected: undefined },
-    { name: 'ordinal own-write mismatch', read: { kind: 'ordinal', contextGraphId: 7n, index: 0n },
+    { name: 'ordinal own-write mismatch', read: { kind: 'ordinal', args: { contextGraphId: 7n, index: 0n } },
       options: { ownWrite: { blockNumber: 50, blockHash: hash(99) } }, expected: undefined },
-    { name: 'own write ahead of horizon', read: { kind: 'binding', kaId: 4242n },
+    { name: 'own write ahead of horizon', read: { kind: 'binding', args: { kaId: 4242n } },
       options: { ownWrite: { blockNumber: 140, blockHash: hash(140) } }, expected: undefined },
-    { name: 'stale head', read: { kind: 'binding', kaId: 4242n }, now: SEEDED_FETCHED_AT_MS + 18_001,
+    { name: 'stale head', read: { kind: 'binding', args: { kaId: 4242n } }, now: SEEDED_FETCHED_AT_MS + 18_001,
       expected: undefined },
-    { name: 'backwards clock', read: { kind: 'binding', kaId: 4242n }, now: SEEDED_FETCHED_AT_MS - 1,
+    { name: 'backwards clock', read: { kind: 'binding', args: { kaId: 4242n } }, now: SEEDED_FETCHED_AT_MS - 1,
       expected: undefined },
-    { name: 'held fork suspicion', read: { kind: 'binding', kaId: 4242n }, fork: true, expected: undefined },
+    { name: 'held fork suspicion', read: { kind: 'binding', args: { kaId: 4242n } }, fork: true, expected: undefined },
   ];
   it.each(cases)('$name', async ({ read, seed, options, now: clock, fork, expected }) => {
     const rows = [creation(40, 7n), registration(50, 7n, 4242n), registration(60, 7n, 8888n),
@@ -211,9 +225,9 @@ describe('canonical snapshot evaluation agrees with inline capture', () => {
     if (fork) store.seed(SCOPE, { ...(await store.load(SCOPE))!, suspectedForkBlockNumber: 99 }, rows);
     const now = () => clock ?? SEEDED_FETCHED_AT_MS;
     const inline = model(store, { maxHeadAgeMs: 18_000, now });
-    const inlineResult = read.kind === 'binding' ? await inline.readContextGraphForKa(read.kaId, options)
-      : read.kind === 'list' ? await inline.readContextGraphKaList(read.contextGraphId, options)
-        : await inline.readContextGraphKaAt!(read.contextGraphId, read.index, options);
+    const inlineResult = read.kind === 'binding' ? await inline.readContextGraphForKa(read.args.kaId, options)
+      : read.kind === 'list' ? await inline.readContextGraphKaList(read.args.contextGraphId, options)
+        : await inline.readContextGraphKaAt!(read.args.contextGraphId, read.args.index, options);
     const state = (await store.load(SCOPE))!;
     const plan = planKnowledgeAssetSnapshotRead({ state, read, options,
       contextGraphStorageAddress: CG_STORAGE, maxHeadAgeMs: 18_000, nowMs: now() });
@@ -230,7 +244,7 @@ describe('canonical snapshot evaluation agrees with inline capture', () => {
     const store = seeded({ rows: [creation(40, 7n), ...Array.from({ length: 300 }, (_, n) =>
       registration(50, 7n, BigInt(n), { logIndex: n }))] });
     const plan = planKnowledgeAssetSnapshotRead({ state: (await store.load(SCOPE))!,
-      contextGraphStorageAddress: CG_STORAGE, read: { kind: 'list', contextGraphId: 7n } })!;
+      contextGraphStorageAddress: CG_STORAGE, read: { kind: 'list', args: { contextGraphId: 7n } } })!;
     const rows = await store.readEvents(SCOPE, plan.query);
     const snapshot = createKnowledgeAssetReadSnapshot(plan, rows);
     expect(snapshot.rows[0]).not.toBe(rows[0]);

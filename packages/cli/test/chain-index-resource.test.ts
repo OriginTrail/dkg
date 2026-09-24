@@ -26,14 +26,20 @@ describe('process-owned chain-index resource', () => {
     return db;
   }
 
-  it('binds the reader to the exact store and retires it once before closing the shared DB', async () => {
+  it('shares a fixed reader and dependency drain across concurrent close requests', async () => {
     const db = database();
     const closeDb = vi.spyOn(db, 'close');
     let retire!: () => void;
     const gate = new Promise<void>((resolve) => { retire = resolve; });
     const reader = { close: vi.fn(() => gate), createReadModel: vi.fn() };
     const createReader = vi.fn(() => reader);
-    const resource = createDaemonChainIndexResource(db, { log: () => {}, createReader });
+    let drained!: () => void;
+    const dependencyGate = new Promise<void>((resolve) => { drained = resolve; });
+    const drain = vi.fn(() => dependencyGate);
+    const options = { log: () => {}, beforeDatabaseClose: drain, createReader };
+    const resource = createDaemonChainIndexResource(db, options);
+    // Ownership is fixed at construction, even if the caller mutates its options.
+    options.beforeDatabaseClose = vi.fn(async () => {});
     expect(createReader.mock.calls[0]).toEqual([
       join(db.dataDir, 'node-ui.db'), resource.capability.store,
       { onDiagnostic: expect.any(Function) },
@@ -48,7 +54,13 @@ describe('process-owned chain-index resource', () => {
     expect(closeDb).not.toHaveBeenCalled();
     expect(db.db.open).toBe(true);
     retire();
+    await vi.waitUntil(() => drain.mock.calls.length === 1);
+    expect(resource.close()).toBe(first);
+    expect(closeDb).not.toHaveBeenCalled();
+    expect(options.beforeDatabaseClose).not.toHaveBeenCalled();
+    drained();
     await first;
+    expect(drain).toHaveBeenCalledOnce();
     expect(resource.close()).toBe(first);
     expect(closeDb).toHaveBeenCalledOnce();
     expect(db.db.open).toBe(false);
@@ -58,7 +70,7 @@ describe('process-owned chain-index resource', () => {
     const db = database();
     const failure = new Error('reader still active');
     const reader = { close: vi.fn(async () => { throw failure; }), createReadModel: vi.fn() };
-    const resource = createDaemonChainIndexResource(db, { log: () => {}, createReader: () => reader });
+    const resource = createDaemonChainIndexResource(db, { log: () => {}, beforeDatabaseClose: async () => {}, createReader: () => reader });
     await expect(resource.close()).rejects.toBe(failure);
     await expect(resource.close()).rejects.toBe(failure);
     expect(reader.close).toHaveBeenCalledOnce();
@@ -82,12 +94,12 @@ describe('process-owned chain-index resource', () => {
     const actualClose = db.close.bind(db);
     vi.spyOn(db, 'close').mockImplementation(() => { events.push('database'); actualClose(); });
     const resource = createDaemonChainIndexResource(db, {
-      log: () => {},
+      log: () => {}, beforeDatabaseClose: guard.beforeDatabaseClose,
       createReader: () => ({ createReadModel: vi.fn(), close: async () => { events.push('reader'); } }),
     });
     const bootFailure = new Error('boot failed after agent started');
     const failure = rethrowAfterStartupCleanup(bootFailure,
-      () => resource.close(guard.beforeDatabaseClose)).catch((error: unknown) => error);
+      () => resource.close()).catch((error: unknown) => error);
     await stopStarted;
     expect(events).toEqual(['reader', 'agent-stopping']);
     expect(db.db.open).toBe(true);
@@ -106,10 +118,10 @@ describe('process-owned chain-index resource', () => {
     guard.agentCreated(stop);
     if (reason === 'later daemon consumers') guard.daemonConsumersStarted();
     const reader = { createReadModel: vi.fn(), close: vi.fn(async () => {}) };
-    const resource = createDaemonChainIndexResource(db, { log: () => {}, createReader: () => reader });
+    const resource = createDaemonChainIndexResource(db, { log: () => {}, beforeDatabaseClose: guard.beforeDatabaseClose, createReader: () => reader });
     const bootFailure = new Error('original late startup error');
     const error = await rethrowAfterStartupCleanup(bootFailure,
-      () => resource.close(guard.beforeDatabaseClose)).catch((failure: unknown) => failure);
+      () => resource.close()).catch((failure: unknown) => failure);
     expect(error).toBeInstanceOf(AggregateError);
     expect((error as AggregateError).cause).toBe(bootFailure);
     expect((error as AggregateError).errors[0]).toBe(bootFailure);
@@ -122,10 +134,12 @@ describe('process-owned chain-index resource', () => {
   it('uses the same owner during normal backing-store teardown', async () => {
     const db = database();
     const events: string[] = [];
+    const guard = createStartupChainIndexCloseGuard();
+    guard.daemonConsumersStarted();
     const actualClose = db.close.bind(db);
     vi.spyOn(db, 'close').mockImplementation(() => { events.push('database'); actualClose(); });
     const resource = createDaemonChainIndexResource(db, {
-      log: () => {},
+      log: () => {}, beforeDatabaseClose: guard.beforeDatabaseClose,
       createReader: () => ({
         createReadModel: vi.fn(), close: async () => { events.push('reader'); },
       }),
@@ -133,7 +147,10 @@ describe('process-owned chain-index resource', () => {
     await closeDaemonBackingStoresAfterTeardown({ failures: [], dependencyQuarantined: false }, {
       retryAgentStop: async () => {},
       stopManagedOxigraph: async () => { events.push('managed-store'); },
-      closeDashboardDb: resource.close,
+      closeDashboardDb: () => {
+        guard.dependenciesDrained();
+        return resource.close();
+      },
       log: () => {},
     });
     expect(events).toEqual(['managed-store', 'reader', 'database']);
@@ -144,7 +161,7 @@ describe('process-owned chain-index resource', () => {
   it('closes the database if constructing its reader fails', () => {
     const db = database();
     expect(() => createDaemonChainIndexResource(db, {
-      log: () => {}, createReader: () => { throw new Error('reader construction failed'); },
+      log: () => {}, beforeDatabaseClose: async () => {}, createReader: () => { throw new Error('reader construction failed'); },
     })).toThrow('reader construction failed');
     expect(db.db.open).toBe(false);
   });

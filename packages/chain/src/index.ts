@@ -309,16 +309,8 @@ export {
 } from './random-sampling-availability.js';
 
 /** Store contract supplied by the daemon to the one-log runtime. */
-export type {
-  ChainEventLogQuery,
-  ChainEventLogRow,
-  ChainEventLogState,
-  ChainEventLogStore,
-} from './chain-index/chain-event-log.js';
-export { chainEventLogStateReadRefusal } from './chain-index/chain-event-log.js';
-export { ChainEventDecoderRegistry } from './chain-index/chain-event-decoders.js';
+export type { ChainEventLogStore } from './chain-index/chain-event-log.js';
 export {
-  createKnowledgeAssetReadModel,
   type ContextGraphForKaAnswer,
   type KnowledgeAssetReadModel,
   type KnowledgeAssetReadModelFactory,
@@ -349,15 +341,4 @@ export {
   type EvmChainIndexRuntimeOptions,
 } from './evm-chain-index-runtime.js';
 
-export {
-  planKnowledgeAssetSnapshotRead,
-  createKnowledgeAssetReadSnapshot,
-  evaluateKnowledgeAssetSnapshot,
-  type KnowledgeAssetSnapshotRead,
-  type KnowledgeAssetSnapshotResult,
-  type KnowledgeAssetSnapshotPlan,
-  type KnowledgeAssetReadSnapshot,
-  type KnowledgeAssetSnapshotEvaluationOptions,
-} from './chain-index/knowledge-asset-read-model-snapshot.js';
-
-export { resolveChainIndexCapability, type ChainIndexCapability } from './chain-index-capability.js';
+export { resolveChainIndexCapability, type ChainIndexCapability, type ChainIndexConfig } from './chain-index-capability.js';

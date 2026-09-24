@@ -115,7 +115,7 @@ import {
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 import { prepareRfc64LateLegacySwmBoundaryV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
-import { resolveChainIndexCapability, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { resolveChainIndexCapability, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainIndexConfig, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -654,8 +654,8 @@ function throwStorageAckTimingConflict(): never {
 
 type StorageAckNormalizedDKGAgentConfig = Omit<
   DKGAgentConfig,
-  'storageAckTiming' | 'ackHandlerDeadlineMs' | 'ackSendTimeoutMs'
-> & Pick<ResolvedDKGAgentConfig, 'storageAckTiming'>;
+  'storageAckTiming' | 'ackHandlerDeadlineMs' | 'ackSendTimeoutMs' | keyof ChainIndexConfig
+> & ChainIndexConfig & Pick<ResolvedDKGAgentConfig, 'storageAckTiming'>;
 
 function normalizeStorageAckConfig(config: DKGAgentConfig): StorageAckNormalizedDKGAgentConfig {
   const hasStorageAckTiming = config.storageAckTiming !== undefined && config.storageAckTiming !== null;
@@ -721,6 +721,7 @@ function constructConfiguredChainAdapter(
     return { chain, operationalKeys };
   }
   if (config.chainConfig && operationalKeys?.length) {
+    const chainIndex = resolveChainIndexCapability(config);
     const evmConfigBase = {
       rpcUrl: config.chainConfig.rpcUrl,
       rpcUrls: config.chainConfig.rpcUrls,
@@ -742,15 +743,17 @@ function constructConfiguredChainAdapter(
       contextGraphRegistryScanCursorStore: config.contextGraphRegistryScanCursorStore,
       localContextGraphAuthorityHistoryStore: config.localContextGraphAuthorityHistoryStore,
       localContextGraphAuthorityIndexStore: config.localContextGraphAuthorityIndexStore,
-      // THE one log. Only this adapter is given the store, so only this
-      // adapter owns a tick; every other adapter in the process reads the
-      // binding it publishes.
-      chainIndex: resolveChainIndexCapability(config),
       contextGraphAuthorityIndexBootstrap,
+      ...(config.chainConfig.adminPrivateKey
+        ? { adminPrivateKey: config.chainConfig.adminPrivateKey }
+        : { allowNoAdminSigner: true }),
     };
-    const chain = config.chainConfig.adminPrivateKey
-      ? new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey })
-      : new EVMChainAdapter({ ...evmConfigBase, allowNoAdminSigner: true });
+    // Only this adapter gets the owning capability. Keep the two valid input
+    // shapes distinct so TypeScript cannot flatten them into optional ownership.
+    const evmConfig: EVMAdapterConfig = chainIndex === undefined
+      ? evmConfigBase
+      : { ...evmConfigBase, chainIndex };
+    const chain = new EVMChainAdapter(evmConfig);
     return { chain, operationalKeys };
   }
   return { chain: new NoChainAdapter(), operationalKeys };

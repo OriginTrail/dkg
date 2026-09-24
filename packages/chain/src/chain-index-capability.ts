@@ -9,11 +9,19 @@ export interface ChainIndexCapability {
   readonly readModelFactory?: KnowledgeAssetReadModelFactory;
 }
 
+/** Exactly one owning capability, its legacy store-only input, or no owner. */
+export type ChainIndexConfig = { readonly chainEventLogReadModelFactory?: never } & (
+  | { readonly chainIndex: ChainIndexCapability; readonly chainEventLogStore?: never }
+  | {
+    readonly chainIndex?: never;
+    /** @deprecated Use chainIndex: { store } for new callers. */
+    readonly chainEventLogStore: ChainEventLogStore;
+  }
+  | { readonly chainIndex?: never; readonly chainEventLogStore?: never }
+);
+
 /** Normalize the store-only SDK input once, before passing the capability on. */
-export function resolveChainIndexCapability(config: {
-  readonly chainIndex?: ChainIndexCapability;
-  readonly chainEventLogStore?: ChainEventLogStore;
-}): ChainIndexCapability | undefined {
+export function resolveChainIndexCapability(config: ChainIndexConfig): ChainIndexCapability | undefined {
   if ('chainEventLogReadModelFactory' in config) {
     throw new TypeError('A custom chain-index reader must be supplied with its store in chainIndex');
   }

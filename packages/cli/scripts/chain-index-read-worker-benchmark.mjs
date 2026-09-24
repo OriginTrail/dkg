@@ -298,8 +298,12 @@ const report = {
   builtArtifactSha256: Object.fromEntries([
     '../dist/daemon/worker/chain-index-read-worker.js',
     '../dist/daemon/worker/chain-index-read-worker-entry.js',
+    '../dist/daemon/worker/chain-index-read-worker-protocol.js',
     '../../node-ui/dist/chain-event-log-store.js',
     '../../chain/dist/chain-index/knowledge-asset-read-model.js',
+    '../../chain/dist/chain-index/knowledge-asset-read-model-snapshot.js',
+    '../../chain/dist/chain-index/knowledge-asset-read-contract.js',
+    '../../chain/dist/internal/chain-index-worker.js',
   ].map((path) => [path, createHash('sha256').update(readFileSync(new URL(path, import.meta.url))).digest('hex')])),
   configuration: { counts, samples, coldSamples, workerTimeoutMs: 1500, workerHeapMb: 256,
     captureSha256: capturePath ? createHash('sha256').update(readFileSync(capturePath)).digest('hex') : undefined },

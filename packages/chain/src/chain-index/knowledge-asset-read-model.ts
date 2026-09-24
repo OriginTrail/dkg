@@ -33,6 +33,7 @@ import {
   type KnowledgeAssetSnapshotRead,
   type KnowledgeAssetSnapshotResult,
 } from './knowledge-asset-read-model-snapshot.js';
+import type { KnowledgeAssetReadKind } from './knowledge-asset-read-contract.js';
 
 /**
  * Which horizon a read folds over.
@@ -145,10 +146,10 @@ export function createKnowledgeAssetReadModel(
   const { scope, store, registry, maxHeadAgeMs } = options;
   const now = options.now ?? (() => Date.now());
 
-  async function read(
-    request: KnowledgeAssetSnapshotRead,
+  async function read<K extends KnowledgeAssetReadKind>(
+    request: KnowledgeAssetSnapshotRead<K>,
     readOptions: KnowledgeAssetReadOptions = {},
-  ): Promise<KnowledgeAssetSnapshotResult | undefined> {
+  ): Promise<KnowledgeAssetSnapshotResult<K> | undefined> {
     readOptions.signal?.throwIfAborted();
     const state = await store.load(scope);
     if (state === undefined) return undefined;
@@ -174,11 +175,10 @@ export function createKnowledgeAssetReadModel(
 
   return Object.freeze({
     readContextGraphForKa: (kaId: bigint, readOptions?: KnowledgeAssetReadOptions) =>
-      read({ kind: 'binding', kaId }, readOptions) as Promise<ContextGraphForKaAnswer | undefined>,
+      read<'binding'>({ kind: 'binding', args: { kaId } }, readOptions),
     readContextGraphKaList: (contextGraphId: bigint, readOptions?: KnowledgeAssetReadOptions) =>
-      read({ kind: 'list', contextGraphId }, readOptions) as Promise<ContextGraphKaList | undefined>,
+      read<'list'>({ kind: 'list', args: { contextGraphId } }, readOptions),
     readContextGraphKaAt: (contextGraphId: bigint, index: bigint, readOptions?: KnowledgeAssetReadOptions) =>
-      read({ kind: 'ordinal', contextGraphId, index }, readOptions) as
-        Promise<Readonly<{ kaId: bigint; asOfBlockNumber: number }> | undefined>,
+      read<'ordinal'>({ kind: 'ordinal', args: { contextGraphId, index } }, readOptions),
   });
 }

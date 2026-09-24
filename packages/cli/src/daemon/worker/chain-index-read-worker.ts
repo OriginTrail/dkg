@@ -1,9 +1,7 @@
 import type { Worker } from 'node:worker_threads';
-import { chainEventLogStateReadRefusal } from '@origintrail-official/dkg-chain';
+import { chainEventLogStateReadRefusal } from '@origintrail-official/dkg-chain/internal/chain-index-worker';
 import type {
   ChainEventLogStore,
-  ContextGraphForKaAnswer,
-  ContextGraphKaList,
   KnowledgeAssetReadModel,
   KnowledgeAssetReadModelFactoryOptions,
   KnowledgeAssetReadOptions,
@@ -12,7 +10,7 @@ import type {
   ChainIndexReadMethod,
   ChainIndexReadRequest,
   ChainIndexReadResponse,
-  ChainIndexReadResult,
+  ChainIndexReadInput,
 } from './chain-index-read-worker-protocol.js';
 import { ChainIndexReadWorkerOwner } from './chain-index-read-worker-owner.js';
 
@@ -27,7 +25,7 @@ export interface ChainIndexReadDiagnostic {
 }
 
 interface ReadWaiter {
-  resolve: (value: ChainIndexReadResult | undefined) => void;
+  resolve: (value: ChainIndexReadResponse | undefined) => void;
   reject: (error: unknown) => void;
   detach: () => void;
 }
@@ -94,24 +92,30 @@ export class ChainIndexReadWorker {
     // A new binding never coalesces with work from a retired adapter generation.
     const generation = ++this.nextModelId;
     const binding = { ...model };
-    const request = (method: ChainIndexReadMethod, key: bigint, readOptions: KnowledgeAssetReadOptions = {}, index?: bigint) =>
-      this.read(generation, binding, method, key, readOptions, index);
+    const request = (input: ChainIndexReadInput, readOptions: KnowledgeAssetReadOptions = {}) =>
+      this.read(generation, binding, input, readOptions);
     return {
-      readContextGraphForKa: (id, options) => request('binding', id, options) as Promise<ContextGraphForKaAnswer | undefined>,
-      readContextGraphKaAt: (id, index, options) => request('ordinal', id, options, index) as
-        Promise<Readonly<{ kaId: bigint; asOfBlockNumber: number }> | undefined>,
-      readContextGraphKaList: (id, options) => request('list', id, options) as Promise<ContextGraphKaList | undefined>,
+      readContextGraphForKa: async (id, options) => {
+        const response = await request({ method: 'binding', key: id }, options);
+        return response?.method === 'binding' && response.reason === 'served' ? response.result : undefined;
+      },
+      readContextGraphKaAt: async (id, index, options) => {
+        const response = await request({ method: 'ordinal', key: id, index }, options);
+        return response?.method === 'ordinal' && response.reason === 'served' ? response.result : undefined;
+      },
+      readContextGraphKaList: async (id, options) => {
+        const response = await request({ method: 'list', key: id }, options);
+        return response?.method === 'list' && response.reason === 'served' ? response.result : undefined;
+      },
     };
   };
 
   private read(
     generation: number,
     model: KnowledgeAssetReadModelFactoryOptions,
-    method: ChainIndexReadMethod,
-    key: bigint,
+    input: ChainIndexReadInput,
     options: KnowledgeAssetReadOptions,
-    index?: bigint,
-  ): Promise<ChainIndexReadResult | undefined> {
+  ): Promise<ChainIndexReadResponse | undefined> {
     if (options.signal?.aborted) return Promise.reject(options.signal.reason ?? new Error('Chain-index read aborted'));
     if (!this.owner.acceptsReads()) return Promise.resolve(undefined);
     // Bound callers as well as distinct jobs: a stalled shared read must not
@@ -119,7 +123,7 @@ export class ChainIndexReadWorker {
     let callers = 0;
     for (const read of this.reads.values()) callers += read.waiters.size;
     if (callers >= this.maxPending) return Promise.resolve(undefined);
-    const jobKey = JSON.stringify([generation, method, key.toString(), index?.toString(),
+    const jobKey = JSON.stringify([generation, input.method, input.key.toString(), input.index?.toString(),
       options.view ?? 'finalized', options.ownWrite?.blockNumber, options.ownWrite?.blockHash]);
     let read = this.equivalent.get(jobKey);
     if (read === undefined) {
@@ -131,7 +135,7 @@ export class ChainIndexReadWorker {
         createdAt,
         state: { phase: 'queued' },
         request: {
-          type: 'read', id, model, method, key, index,
+          ...input, type: 'read', id, model,
           options: { view: options.view, ownWrite: options.ownWrite && { ...options.ownWrite } },
           deadlineAt: createdAt + this.timeoutMs,
         },
@@ -225,7 +229,11 @@ export class ChainIndexReadWorker {
       this.settleObservers(read, undefined, 'timeout', response);
       return;
     }
-    if (response.result !== undefined) {
+    if (response.method !== read.request.method || (response.reason === 'served' && response.result === undefined)) {
+      this.settleObservers(read, undefined, 'invalid-response', response);
+      return;
+    }
+    if (response.reason === 'served') {
       try {
         const state = await this.store.load(read.request.model.scope);
         const nowMs = Date.now();
@@ -249,12 +257,12 @@ export class ChainIndexReadWorker {
         return;
       }
     }
-    this.settleObservers(read, response.result, response.reason ?? 'served', response);
+    this.settleObservers(read, response, response.reason, response);
   }
 
   private settleObservers(
     read: PhysicalRead,
-    result: ChainIndexReadResult | undefined,
+    answer: ChainIndexReadResponse | undefined,
     reason: string,
     response?: ChainIndexReadResponse,
   ): void {
@@ -272,7 +280,7 @@ export class ChainIndexReadWorker {
     }
     for (const waiter of read.waiters) {
       waiter.detach();
-      waiter.resolve(result);
+      waiter.resolve(answer);
     }
     read.waiters.clear();
     try {

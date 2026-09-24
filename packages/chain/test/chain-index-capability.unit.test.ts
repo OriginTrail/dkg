@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveChainIndexCapability, type ChainIndexCapability } from '../src/chain-index-capability.js';
+import { resolveChainIndexCapability, type ChainIndexCapability, type ChainIndexConfig } from '../src/chain-index-capability.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
 
 describe('chain-index capability admission', () => {
@@ -13,7 +13,7 @@ describe('chain-index capability admission', () => {
 
   it('rejects competing owners and reader-only JavaScript configurations', () => {
     const store = new MemoryChainEventLogStore();
-    expect(() => resolveChainIndexCapability({ chainIndex: { store }, chainEventLogStore: store }))
+    expect(() => resolveChainIndexCapability({ chainIndex: { store }, chainEventLogStore: store } as unknown as ChainIndexConfig))
       .toThrow('not both');
     expect(() => resolveChainIndexCapability({ chainIndex: {} as ChainIndexCapability }))
       .toThrow('requires its process-owned store');

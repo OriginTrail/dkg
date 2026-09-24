@@ -4,6 +4,14 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./internal/chain-index-worker": {
+      "types": "./dist/internal/chain-index-worker.d.ts",
+      "default": "./dist/internal/chain-index-worker.js"
+    },
+    "./*": "./*"
+  },
   "scripts": {
     "build": "tsc && pnpm run test:types",
     "test": "vitest run",

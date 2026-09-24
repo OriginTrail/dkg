@@ -12,7 +12,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 
-import { createEvmChainIndexRuntime } from '../src/evm-chain-index-runtime.js';
+import { createEvmChainIndexRuntime, type EvmChainIndexRuntimeOptions } from '../src/evm-chain-index-runtime.js';
 import { RPC_LOG_SCAN_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import { RpcFailoverClient } from '../src/rpc-failover-client.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
@@ -131,6 +131,7 @@ function harness(options?: {
    */
   failoverClient?: boolean;
   chainEventLogReadModelFactory?: KnowledgeAssetReadModelFactory;
+  legacyStoreInput?: boolean;
 }): Harness {
   const headNumber = options?.headNumber ?? 1_000;
   const logs = options?.logs ?? [];
@@ -185,7 +186,9 @@ function harness(options?: {
     : undefined;
   const runtime = createEvmChainIndexRuntime({
     scope: RUNTIME_SCOPE,
-    chainIndex: { store, readModelFactory: options?.chainEventLogReadModelFactory },
+    ...(options?.legacyStoreInput
+      ? { store }
+      : { chainIndex: { store, readModelFactory: options?.chainEventLogReadModelFactory } }),
     intervalMs: options?.intervalMs ?? 6_000,
     reorgHoldbackBlocks: options?.reorgHoldbackBlocks ?? 5,
     backfillPageBlocks: 100,
@@ -253,10 +256,27 @@ function harness(options?: {
 }
 
 describe('createEvmChainIndexRuntime', () => {
+  it('rejects ambiguous or missing owners from untyped runtime callers', () => {
+    const store = new MemoryChainEventLogStore();
+    expect(() => createEvmChainIndexRuntime({ store, chainIndex: { store } } as unknown as EvmChainIndexRuntimeOptions))
+      .toThrow('not both');
+    expect(() => createEvmChainIndexRuntime({} as EvmChainIndexRuntimeOptions))
+      .toThrow('requires its store');
+  });
+
+  it('preserves the exported legacy store-only construction API', async () => {
+    const h = harness({ legacyStoreInput: true });
+    expect(h.runtime.binding.knowledgeAssets).toBeDefined();
+    await h.runtime.tick.runOnce(new AbortController().signal);
+    expect(await h.store.load(RUNTIME_SCOPE)).toBeDefined();
+    await h.runtime.stop();
+  });
+
   it('uses the injected KA reader with serializable deployment and freshness options', async () => {
     const readModel = {
       readContextGraphForKa: vi.fn(async () => undefined),
       readContextGraphKaList: vi.fn(async () => undefined),
+      readContextGraphKaAt: vi.fn(async () => undefined),
     };
     const factory = vi.fn<KnowledgeAssetReadModelFactory>(() => readModel);
     const { runtime, store } = harness({ chainEventLogReadModelFactory: factory });
@@ -274,6 +294,23 @@ describe('createEvmChainIndexRuntime', () => {
     await expect(runtime.binding.knowledgeAssets!.readContextGraphForKa(42n))
       .resolves.toBeUndefined();
     expect(readEvents).not.toHaveBeenCalled();
+  });
+
+  it('normalizes a legacy list-only factory result once for scalar ordinal reads', async () => {
+    const readList = vi.fn(async () => ({
+      contextGraphId: 7n, kaIds: [42n, 43n], throughBlockNumber: 900,
+    }));
+    const model = { readContextGraphForKa: vi.fn(async () => undefined), readContextGraphKaList: readList };
+    const factory = vi.fn<KnowledgeAssetReadModelFactory>(() => model);
+    const { runtime } = harness({ chainEventLogReadModelFactory: factory });
+    const normalized = runtime.binding.knowledgeAssets!;
+    expect(normalized).not.toBe(model);
+    await expect(normalized.readContextGraphKaAt(7n, 0n, { view: 'latest' }))
+      .resolves.toEqual({ kaId: 42n, asOfBlockNumber: 900 });
+    expect(readList).toHaveBeenCalledExactlyOnceWith(7n, { view: 'latest' });
+    expect(runtime.binding.knowledgeAssets).toBe(normalized);
+    expect(factory).toHaveBeenCalledOnce();
+    await runtime.stop();
   });
 
   it('does not substitute an inline reader when the injected factory fails', () => {
