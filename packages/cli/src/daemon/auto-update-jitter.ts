@@ -13,20 +13,15 @@
  * a staggered rollout that spreads the fleet's restarts across the jitter
  * window so only a few nodes bootstrap at any moment.
  *
- * The hold-off DEADLINE is persisted per target (see {@link UpdateHoldoffStore}),
+ * The hold-off DEADLINE is persisted per target (see {@link UpdateHoldoffStore};
+ * the file-backed store lives in `auto-update-holdoff-store.ts`),
  * so a node that restarts during its hold resumes the remaining wait instead of
  * drawing a fresh one. Without that, a node restarting more often than its hold
  * never reached the deadline: every boot redrew a hold in [0, jitter) and the
  * restart aborted it again, so the update was never applied.
  *
- * Deterministic (rng, clock and fs injectable) so it is unit-tested without the daemon.
+ * Deterministic (rng, clock and store injectable) so it is unit-tested without the daemon.
  */
-import {
-  readFile as fsReadFile,
-  rename as fsRename,
-  unlink as fsUnlink,
-  writeFile as fsWriteFile,
-} from 'node:fs/promises';
 
 export const UPDATE_JITTER_ENV = 'DKG_UPDATE_JITTER_MINUTES';
 
@@ -85,9 +80,6 @@ function unrefSleep(ms: number): Promise<void> {
   });
 }
 
-/** File under the DKG home (next to `releases/`) that holds the persisted deadline. */
-export const UPDATE_HOLDOFF_FILE = '.update-holdoff.json';
-
 /**
  * A persisted deadline this far in the past is stale and redrawn rather than
  * honoured. Such a record means the node stopped polling for a day (auto-update
@@ -113,81 +105,15 @@ export interface UpdateHoldoffStore {
   clear(): Promise<void>;
 }
 
-/** The fs calls the file-backed store makes. Injectable for tests. */
-export interface UpdateHoldoffFs {
-  readFile(path: string, encoding: 'utf-8'): Promise<string>;
-  writeFile(path: string, data: string): Promise<void>;
-  rename(from: string, to: string): Promise<void>;
-  unlink(path: string): Promise<void>;
-}
-
-const nodeHoldoffFs: UpdateHoldoffFs = {
-  readFile: (path, encoding) => fsReadFile(path, encoding),
-  writeFile: (path, data) => fsWriteFile(path, data),
-  rename: fsRename,
-  unlink: fsUnlink,
-};
-
-function isEnoent(err: unknown): boolean {
-  return (err as NodeJS.ErrnoException | null)?.code === 'ENOENT';
+/** A durable hold-off: the deadline for `target` is kept in `store`. */
+export interface UpdateHoldoffPersistence {
+  /** Identity of the detected target (commit SHA / npm version). */
+  target: string;
+  store: UpdateHoldoffStore;
 }
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-/** Parse a persisted record, throwing on anything that is not a well-formed one. */
-export function parseUpdateHoldoffRecord(raw: string): UpdateHoldoffRecord {
-  const parsed: unknown = JSON.parse(raw);
-  const rec = parsed as Partial<UpdateHoldoffRecord> | null;
-  if (
-    !rec || typeof rec !== 'object'
-    || typeof rec.target !== 'string' || rec.target.length === 0
-    || typeof rec.deadlineEpochMs !== 'number' || !Number.isFinite(rec.deadlineEpochMs)
-  ) {
-    throw new Error('malformed rollout hold-off record');
-  }
-  return { target: rec.target, deadlineEpochMs: rec.deadlineEpochMs };
-}
-
-/**
- * JSON-file store for the rollout deadline. Writes go to a temp sibling and are
- * renamed into place, so a crash mid-write never leaves a torn record. The gate
- * is single-flight, so there is only ever one writer per DKG home.
- */
-export function createFileUpdateHoldoffStore(
-  path: string,
-  fs: UpdateHoldoffFs = nodeHoldoffFs,
-): UpdateHoldoffStore {
-  return {
-    async read() {
-      let raw: string;
-      try {
-        raw = await fs.readFile(path, 'utf-8');
-      } catch (err) {
-        if (isEnoent(err)) return null;
-        throw err;
-      }
-      return parseUpdateHoldoffRecord(raw);
-    },
-    async write(record) {
-      const tmp = `${path}.tmp`;
-      await fs.writeFile(tmp, `${JSON.stringify(record)}\n`);
-      try {
-        await fs.rename(tmp, path);
-      } catch (err) {
-        await fs.unlink(tmp).catch(() => { /* best-effort cleanup */ });
-        throw err;
-      }
-    },
-    async clear() {
-      try {
-        await fs.unlink(path);
-      } catch (err) {
-        if (!isEnoent(err)) throw err;
-      }
-    },
-  };
 }
 
 /** Persist a deadline. A failure is logged, never thrown: the hold still runs in memory. */
@@ -214,10 +140,9 @@ export interface AwaitUpdateHoldoffDeps {
    *  over from before a restart — lets the caller emit a mode-specific log
    *  line. `resumed` is true when the deadline came from the persisted record. */
   onHold?: (holdMs: number, resumed: boolean) => void;
-  /** Identity of the detected target (commit SHA / npm version). Together with
-   *  `store` it keys the persisted deadline; without both the hold is not persisted. */
-  target?: string;
-  store?: UpdateHoldoffStore | null;
+  /** Omitted: the hold lives in memory and a restart redraws it. Present: the
+   *  deadline is drawn once per target and resumed across restarts. */
+  persistence?: UpdateHoldoffPersistence;
   /** Reports store failures, which never block the hold-off. */
   log?: (msg: string) => void;
   /** Injectable for deterministic tests. */
@@ -229,22 +154,22 @@ export interface AwaitUpdateHoldoffDeps {
 }
 
 /**
- * How long to hold before applying `deps.target`. With a store, the deadline is
- * drawn ONCE per target per node and persisted, so a restart mid-hold resumes
- * the remaining time (0 once the deadline has passed) instead of redrawing.
+ * How long to hold before applying. With `persistence`, the deadline is drawn
+ * ONCE per target per node and persisted, so a restart mid-hold resumes the
+ * remaining time (0 once the deadline has passed) instead of redrawing.
  * A fresh draw replaces the record when the target changed, the record is
  * unreadable, or the deadline lies outside [now - MAX_HOLDOFF_OVERDUE_MS,
  * now + jitterMs] (stale, the window was lowered, or the clock went back).
  * Store failures are logged and fall back to an in-memory hold; they never throw.
  */
 async function resolveUpdateHoldoff(
-  deps: Pick<AwaitUpdateHoldoffDeps, 'jitterMs' | 'target' | 'store' | 'log' | 'rng' | 'now'>,
+  deps: Pick<AwaitUpdateHoldoffDeps, 'jitterMs' | 'persistence' | 'log' | 'rng' | 'now'>,
 ): Promise<{ holdMs: number; resumed: boolean }> {
   const rng = deps.rng ?? Math.random;
   if (!(deps.jitterMs > 0)) return { holdMs: 0, resumed: false };
-  const { store, target } = deps;
-  if (!store || target === undefined) return { holdMs: pickUpdateHoldoffMs(deps.jitterMs, rng), resumed: false };
+  if (!deps.persistence) return { holdMs: pickUpdateHoldoffMs(deps.jitterMs, rng), resumed: false };
 
+  const { target, store } = deps.persistence;
   const now = (deps.now ?? Date.now)();
   let record: UpdateHoldoffRecord | null = null;
   try {
@@ -269,7 +194,7 @@ async function resolveUpdateHoldoff(
  * applying the update. Returns `'proceed'` after the (possibly zero) hold-off,
  * or `'abort-shutdown'` if the daemon began shutting down during the wait — in
  * which case the caller must NOT apply. The update is re-detected on next boot,
- * which resumes the persisted deadline when a store is configured.
+ * which resumes the persisted deadline when `persistence` is configured.
  *
  * The ordering (resolve → optional log → sleep → re-check shutdown) is the exact
  * sequence both auto-update paths depend on; extracting it here makes the
@@ -303,8 +228,9 @@ export interface UpdateHoldoffGateConfig {
   /** Toggle the daemon's user-visible "is updating" flag. */
   setUpdating: (updating: boolean) => void;
   log: (msg: string) => void;
-  /** Persists the per-target deadline across restarts (see createFileUpdateHoldoffStore).
-   *  Omitted or null: the hold lives in memory only and a restart redraws it. */
+  /** Persists the per-target deadline across restarts (see createFileUpdateHoldoffStore
+   *  in auto-update-holdoff-store.ts). Omitted or null: the hold lives in memory
+   *  only and a restart redraws it. */
   store?: UpdateHoldoffStore | null;
   /** Injectable for deterministic tests. */
   rng?: () => number;
@@ -342,7 +268,8 @@ export interface UpdateHoldoffGate {
   run<T extends string>(step: UpdateHoldoffStep<T>): Promise<void>;
   /** Drop the persisted deadline because the poll found nothing to apply (node
    *  caught up, or the target was withdrawn). A no-op while a run is in flight:
-   *  that run owns the record and settles it itself. */
+   *  that run owns the record and settles it itself. Serialized with the runs'
+   *  store calls, so it can never delete a deadline a later run wrote. */
   clearHold(): Promise<void>;
 }
 
@@ -372,13 +299,27 @@ export interface UpdateHoldoffGate {
 export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): UpdateHoldoffGate {
   // Owned here so single-flight holds across ticks — do NOT recreate per tick.
   let pending = false;
-  const store = config.store ?? null;
   const now = config.now ?? Date.now;
 
-  async function forget(): Promise<void> {
-    if (!store) return;
+  // Every store call goes through one queue. clearHold() checks `pending` when
+  // its turn comes, so a clear issued before a run started either completes
+  // before that run reads the record or sees the run and skips.
+  let storeQueue: Promise<void> = Promise.resolve();
+  function serialized<R>(op: () => Promise<R>): Promise<R> {
+    const result = storeQueue.then(op);
+    storeQueue = result.then(() => undefined, () => undefined);
+    return result;
+  }
+  const rawStore = config.store ?? null;
+  const store: UpdateHoldoffStore | null = rawStore && {
+    read: () => serialized(() => rawStore.read()),
+    write: (record) => serialized(() => rawStore.write(record)),
+    clear: () => serialized(() => rawStore.clear()),
+  };
+
+  async function forget(op: () => Promise<void>): Promise<void> {
     try {
-      await store.clear();
+      await op();
     } catch (err) {
       config.log(`Auto-update: could not remove the rollout hold-off record (${errorMessage(err)}).`);
     }
@@ -393,8 +334,7 @@ export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): Update
           jitterMs: config.jitterMs,
           isShuttingDown: config.isShuttingDown,
           onHold: step.onHold,
-          target: step.detectedTarget,
-          store,
+          persistence: store ? { target: step.detectedTarget, store } : undefined,
           log: config.log,
           rng: config.rng,
           now,
@@ -414,7 +354,7 @@ export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): Update
         }
         if (target === null || target === undefined) {
           config.log(step.supersededMessage);
-          await forget();
+          if (store) await forget(store.clear);
           return;
         }
         // A newer target replaced the detected one during the wait. This node has
@@ -429,15 +369,18 @@ export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): Update
           await step.apply(target);
         } finally {
           config.setUpdating(false);
-          if (!config.isShuttingDown()) await forget();
+          if (store && !config.isShuttingDown()) await forget(store.clear);
         }
       } finally {
         pending = false;
       }
     },
     async clearHold(): Promise<void> {
-      if (pending) return;
-      await forget();
+      if (!rawStore) return;
+      await forget(() => serialized(async () => {
+        if (pending) return; // the in-flight run owns the record
+        await rawStore.clear();
+      }));
     },
   };
 }

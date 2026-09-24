@@ -9,8 +9,10 @@
  * The mode differences (which check, which installer, log wording) live here;
  * the cross-cutting rollout state machine (single-flight, hold-off, shutdown
  * abort, isUpdating) is owned by the {@link UpdateHoldoffGate}. Lifecycle wires
- * these into setInterval and provides the gate + a restart callback.
+ * these into setInterval and provides the gate (built by
+ * {@link createDaemonUpdateHoldoffGate}) + a restart callback.
  */
+import { join } from 'node:path';
 import {
   checkForNpmVersionUpdate,
   deriveUpdateCheckState,
@@ -20,7 +22,14 @@ import {
   checkForNewCommitWithStatus,
   performUpdateWithStatus,
 } from './auto-update.js';
-import { describeUpdateHold, type UpdateHoldoffGate } from './auto-update-jitter.js';
+import {
+  createUpdateHoldoffGate,
+  describeUpdateHold,
+  resolveUpdateJitterMs,
+  type UpdateHoldoffGate,
+  type UpdateHoldoffGateConfig,
+} from './auto-update-jitter.js';
+import { createFileUpdateHoldoffStore, UPDATE_HOLDOFF_FILE } from './auto-update-holdoff-store.js';
 import type { LastUpdateCheck } from './state.js';
 import type { ResolvedAutoUpdateConfig } from '../config.js';
 
@@ -47,6 +56,37 @@ export async function resolveCurrentGitTarget(
 ): Promise<string | null> {
   const status = await checkForNewCommitWithStatus(au, log);
   return status.status === 'available' && status.commit ? status.commit : null;
+}
+
+export interface DaemonUpdateHoldoffGateDeps {
+  au: Pick<ResolvedAutoUpdateConfig, 'updateJitterMinutes' | 'checkIntervalMinutes'>;
+  /** The DKG home; the rollout deadline is kept in `<dkgHome>/.update-holdoff.json`. */
+  dkgHome: string;
+  isShuttingDown: () => boolean;
+  /** Toggle the daemon's user-visible "is updating" flag. */
+  setUpdating: (updating: boolean) => void;
+  log: (msg: string) => void;
+}
+
+/**
+ * The rollout gate both daemon auto-update modes (git and npm) use: the jitter
+ * window from config/env, and the deadline persisted under the DKG home so a
+ * restart mid-hold resumes it. Lifecycle builds its gates only through this
+ * function, so neither mode can lose the persistence on its own. `seams` is for
+ * tests (deterministic rng, clock and sleep).
+ */
+export function createDaemonUpdateHoldoffGate(
+  deps: DaemonUpdateHoldoffGateDeps,
+  seams: Pick<UpdateHoldoffGateConfig, 'rng' | 'now' | 'sleep'> = {},
+): UpdateHoldoffGate {
+  return createUpdateHoldoffGate({
+    jitterMs: resolveUpdateJitterMs(deps.au.updateJitterMinutes, deps.au.checkIntervalMinutes),
+    isShuttingDown: deps.isShuttingDown,
+    setUpdating: deps.setUpdating,
+    log: deps.log,
+    store: createFileUpdateHoldoffStore(join(deps.dkgHome, UPDATE_HOLDOFF_FILE)),
+    ...seams,
+  });
 }
 
 export interface NpmUpdateRunCheckDeps {

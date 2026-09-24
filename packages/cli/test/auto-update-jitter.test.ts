@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -7,17 +8,20 @@ import {
   pickUpdateHoldoffMs,
   awaitUpdateHoldoff,
   createUpdateHoldoffGate,
-  createFileUpdateHoldoffStore,
   describeUpdateHold,
-  parseUpdateHoldoffRecord,
   MAX_HOLDOFF_OVERDUE_MS,
-  UPDATE_HOLDOFF_FILE,
   UPDATE_JITTER_ENV,
-  type UpdateHoldoffFs,
   type UpdateHoldoffGateConfig,
   type UpdateHoldoffRecord,
   type UpdateHoldoffStep,
 } from '../src/daemon/auto-update-jitter.js';
+import {
+  createFileUpdateHoldoffStore,
+  parseUpdateHoldoffRecord,
+  UPDATE_HOLDOFF_FILE,
+  type UpdateHoldoffFs,
+} from '../src/daemon/auto-update-holdoff-store.js';
+import { createDaemonUpdateHoldoffGate } from '../src/daemon/auto-update-runner.js';
 
 describe('resolveUpdateJitterMs', () => {
   it('uses the configured minutes when set', () => {
@@ -116,6 +120,31 @@ describe('awaitUpdateHoldoff', () => {
     });
     expect(sleep).toHaveBeenCalledOnce();
     expect(decision).toBe('abort-shutdown');
+  });
+
+  it('with persistence, resumes the stored deadline for the same target instead of drawing', async () => {
+    const store = {
+      read: vi.fn(async (): Promise<UpdateHoldoffRecord | null> => ({ target: 'c1', deadlineEpochMs: 1_000 + 120_000 })),
+      write: vi.fn(async (_record: UpdateHoldoffRecord) => {}),
+      clear: vi.fn(async () => {}),
+    };
+    const rng = vi.fn(() => 0.5);
+    const sleep = vi.fn(async () => {});
+    const onHold = vi.fn();
+    const decision = await awaitUpdateHoldoff({
+      jitterMs: 600_000,
+      isShuttingDown: () => false,
+      onHold,
+      sleep,
+      rng,
+      now: () => 1_000,
+      persistence: { target: 'c1', store },
+    });
+    expect(decision).toBe('proceed');
+    expect(rng).not.toHaveBeenCalled();
+    expect(sleep).toHaveBeenCalledWith(120_000);
+    expect(onHold).toHaveBeenCalledWith(120_000, true);
+    expect(store.write).not.toHaveBeenCalled();
   });
 
   it('aborts even with jitter disabled if already shutting down (never applies during shutdown)', async () => {
@@ -302,10 +331,14 @@ const WINDOW_MS = 30 * 60_000;
  * its own shutdown flag. `killAfterMs` makes the supervisor restart the worker
  * that far into any longer hold.
  */
-function persistentNode(opts: { jitterMs?: number; fs?: UpdateHoldoffFs; persist?: boolean } = {}) {
+function persistentNode(opts: {
+  jitterMs?: number;
+  wrapFs?: (fs: UpdateHoldoffFs) => UpdateHoldoffFs;
+  persist?: boolean;
+} = {}) {
   const mem = memoryFs();
   const clock = { t: 1_790_000_000_000 };
-  const store = createFileUpdateHoldoffStore(RECORD_PATH, opts.fs ?? mem.fs);
+  const store = createFileUpdateHoldoffStore(RECORD_PATH, opts.wrapFs ? opts.wrapFs(mem.fs) : mem.fs);
   const logs: string[] = [];
 
   function record(): UpdateHoldoffRecord | null {
@@ -447,13 +480,13 @@ describe('createUpdateHoldoffGate — persisted rollout deadline', () => {
   });
 
   it('an unreadable, unwritable home still holds and applies (in memory) without throwing', async () => {
-    const mem = memoryFs();
-    const brokenFs: UpdateHoldoffFs = {
-      ...mem.fs,
-      readFile: async () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); },
-      writeFile: async () => { throw Object.assign(new Error('EROFS: read-only file system'), { code: 'EROFS' }); },
-    };
-    const node = persistentNode({ fs: brokenFs });
+    const node = persistentNode({
+      wrapFs: (fs) => ({
+        ...fs,
+        readFile: async () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); },
+        writeFile: async () => { throw Object.assign(new Error('EROFS: read-only file system'), { code: 'EROFS' }); },
+      }),
+    });
 
     const b = node.boot({ rng: () => 0.5 });
     await expect(b.run('c1')).resolves.toBeUndefined();
@@ -570,6 +603,51 @@ describe('createUpdateHoldoffGate — persisted rollout deadline', () => {
     await expect(b.gate.clearHold(), 'idempotent when there is no record').resolves.toBeUndefined();
   });
 
+  it('a clearHold that starts before a run cannot delete the deadline that run writes', async () => {
+    // clearHold's unlink stalls until released. Without serialization the run
+    // reads the old record, writes its own, and the stalled unlink then deletes
+    // it, so a restart during the hold would draw a fresh hold again.
+    let unlinkEntered!: () => void;
+    const entered = new Promise<void>((r) => { unlinkEntered = r; });
+    let releaseUnlink!: () => void;
+    const unlinkReleased = new Promise<void>((r) => { releaseUnlink = r; });
+    const node = persistentNode({
+      wrapFs: (fs) => ({
+        ...fs,
+        unlink: async (path) => {
+          unlinkEntered();
+          await unlinkReleased;
+          return fs.unlink(path);
+        },
+      }),
+    });
+    await node.store.write({ target: 'c-old', deadlineEpochMs: node.clock.t });
+    let releaseHold!: () => void;
+    const held = new Promise<void>((r) => { releaseHold = r; });
+    const first = node.boot({ sleep: () => held });
+
+    const clearing = first.gate.clearHold();
+    await entered; // the clear is in flight
+    const running = first.run('c1');
+    // Let the run get as far as it can (the in-memory fs is all microtasks)
+    // before the stalled unlink completes.
+    await new Promise<void>((r) => { setImmediate(r); });
+    releaseUnlink();
+    await clearing;
+    await vi.waitFor(() => expect(node.record()?.target).toBe('c1'));
+    expect(node.record()).toEqual({ target: 'c1', deadlineEpochMs: node.clock.t + 900_000 });
+
+    // The daemon restarts during that hold: the next boot resumes c1's deadline.
+    const second = node.boot({ rng: () => 0.99 });
+    await second.run('c1');
+    expect(second.rng).not.toHaveBeenCalled();
+    expect(second.holds).toEqual([[900_000, true]]);
+    expect(second.apply).toHaveBeenCalledWith('c1');
+
+    releaseHold();
+    await running;
+  });
+
   it('writes no record when jitter is disabled', async () => {
     const node = persistentNode({ jitterMs: 0 });
     const b = node.boot();
@@ -614,5 +692,73 @@ describe('createFileUpdateHoldoffStore', () => {
     });
     await expect(store.write({ target: 'c1', deadlineEpochMs: 1 })).rejects.toThrow('EXDEV');
     expect([...mem.files.keys()]).toEqual([]);
+  });
+});
+
+describe('createDaemonUpdateHoldoffGate (the gate lifecycle.ts builds for git and npm modes)', () => {
+  it('keeps the deadline in <DKG home>/.update-holdoff.json, so the next boot resumes it', async () => {
+    vi.stubEnv(UPDATE_JITTER_ENV, undefined);
+    const home = await mkdtemp(join(tmpdir(), 'dkg-home-holdoff-'));
+    const clock = { t: 1_790_000_000_000 };
+    const au = { updateJitterMinutes: 30, checkIntervalMinutes: 3 };
+    function boot(rng: () => number, killAfterMs?: number) {
+      let shuttingDown = false;
+      const sleeps: number[] = [];
+      const gate = createDaemonUpdateHoldoffGate(
+        { au, dkgHome: home, isShuttingDown: () => shuttingDown, setUpdating: () => {}, log: () => {} },
+        {
+          rng,
+          now: () => clock.t,
+          sleep: async (ms) => {
+            sleeps.push(ms);
+            if (killAfterMs !== undefined && ms > killAfterMs) {
+              clock.t += killAfterMs;
+              shuttingDown = true;
+              return;
+            }
+            clock.t += ms;
+          },
+        },
+      );
+      const apply = vi.fn(async (_target: string) => {});
+      const run = () => gate.run<string>({
+        detectedTarget: 'c1',
+        onHold: () => {},
+        revalidate: async () => 'c1',
+        apply,
+        shutdownMessage: 'SHUTDOWN',
+        supersededMessage: 'SUPERSEDED',
+      });
+      return { run, apply, sleeps };
+    }
+
+    try {
+      const detectedAt = clock.t;
+      const first = boot(() => 0.5, 6 * 60_000);
+      await first.run();
+      expect(first.apply).not.toHaveBeenCalled();
+      const raw = await readFile(join(home, UPDATE_HOLDOFF_FILE), 'utf-8');
+      expect(parseUpdateHoldoffRecord(raw)).toEqual({ target: 'c1', deadlineEpochMs: detectedAt + 900_000 });
+
+      const rng = vi.fn(() => 0.99);
+      const second = boot(rng);
+      await second.run();
+      expect(rng).not.toHaveBeenCalled();
+      expect(second.sleeps).toEqual([540_000]);
+      expect(second.apply).toHaveBeenCalledWith('c1');
+      expect(await readdir(home)).toEqual([]);
+    } finally {
+      vi.unstubAllEnvs();
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it('is how lifecycle.ts builds both auto-update gates (git and npm), rooted at the DKG home', () => {
+    // runDaemonInner cannot be driven to its auto-update section in a unit test,
+    // so guard the call sites: a gate built any other way would lose the
+    // persisted deadline and bring back the restart starvation.
+    const src = readFileSync(new URL('../src/daemon/lifecycle.ts', import.meta.url), 'utf-8');
+    expect(src).not.toMatch(/\bcreateUpdateHoldoffGate\s*\(/);
+    expect(src.match(/\bcreateDaemonUpdateHoldoffGate\(\{[^}]*dkgHome: dkgDir\(\)/g)).toHaveLength(2);
   });
 });

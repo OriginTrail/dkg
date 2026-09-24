@@ -378,12 +378,10 @@ import {
 } from './auto-update.js';
 import { formatAutoUpdateTagVerificationWarning, isValidRef, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
 import {
-  resolveUpdateJitterMs,
-  createUpdateHoldoffGate,
-  createFileUpdateHoldoffStore,
-  UPDATE_HOLDOFF_FILE,
-} from './auto-update-jitter.js';
-import { createGitUpdateRunCheck, createNpmUpdateRunCheck } from './auto-update-runner.js';
+  createDaemonUpdateHoldoffGate,
+  createGitUpdateRunCheck,
+  createNpmUpdateRunCheck,
+} from './auto-update-runner.js';
 import {
   chainResetWipe,
   detectBackendSwitch,
@@ -2737,12 +2735,12 @@ async function runDaemonInnerWithStartupOwnership(
       // created ONCE here so its single-flight guard holds across polling ticks.
       // The per-commit deadline is persisted under the DKG home so a restart
       // mid-hold resumes it instead of drawing a fresh hold.
-      const gate = createUpdateHoldoffGate({
-        jitterMs: resolveUpdateJitterMs(au.updateJitterMinutes, au.checkIntervalMinutes),
+      const gate = createDaemonUpdateHoldoffGate({
+        au,
+        dkgHome: dkgDir(),
         isShuttingDown: () => shuttingDown,
         setUpdating: (updating) => { daemonState.isUpdating = updating; },
         log,
-        store: createFileUpdateHoldoffStore(join(dkgDir(), UPDATE_HOLDOFF_FILE)),
       });
       const runCheck = createGitUpdateRunCheck({
         gate,
@@ -2778,12 +2776,12 @@ async function runDaemonInnerWithStartupOwnership(
     // Created ONCE so single-flight holds across polling ticks. The per-version
     // deadline is persisted like the git path's, so a restart mid-hold resumes it.
     const gate = au
-      ? createUpdateHoldoffGate({
-          jitterMs: resolveUpdateJitterMs(au.updateJitterMinutes, au.checkIntervalMinutes),
+      ? createDaemonUpdateHoldoffGate({
+          au,
+          dkgHome: dkgDir(),
           isShuttingDown: () => shuttingDown,
           setUpdating: (updating) => { daemonState.isUpdating = updating; },
           log,
-          store: createFileUpdateHoldoffStore(join(dkgDir(), UPDATE_HOLDOFF_FILE)),
         })
       : null;
     const runCheck = createNpmUpdateRunCheck({
