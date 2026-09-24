@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import { QueryHandler } from '../src/query-handler.js';
@@ -552,6 +552,33 @@ describe('QueryHandler', () => {
       });
     });
 
+    it('ENTITY_BY_UAL resolving into a withheld CG gets a retryable error naming only the UAL', async () => {
+      let resolverCalls = 0;
+      const handler = new QueryHandler(
+        fakeEngine(PUBLIC_CG),
+        { defaultPolicy: 'deny' },
+        {
+          isContextGraphPublic: async () => {
+            resolverCalls++;
+            return true;
+          },
+          servingWithheld: (cg) => cg === PUBLIC_CG,
+        },
+      );
+
+      const response = await handler.handle(
+        makeRequest({ lookupType: 'ENTITY_BY_UAL', contextGraphId: undefined, ual: 'did:dkg:ual:ka-6' }),
+        'peer-1',
+      );
+      expect(response).toMatchObject({
+        operationId: 'test-op-1',
+        status: 'ERROR',
+        error: "Knowledge asset 'did:dkg:ual:ka-6' is not served yet; retry later",
+      });
+      expect(response.ntriples).toBeUndefined();
+      expect(resolverCalls).toBe(0);
+    });
+
     it('ENTITY_BY_UAL fast-deny is preserved when no resolver is wired and nothing is public', async () => {
       const handler = new QueryHandler(fakeEngine(PUBLIC_CG), { defaultPolicy: 'deny' });
 
@@ -561,6 +588,83 @@ describe('QueryHandler', () => {
       );
       expect(response.status).toBe('ACCESS_DENIED');
       expect(response.error).toContain('No context graphs are queryable');
+    });
+  });
+
+  describe('graphs withheld from peers', () => {
+    const OTHER_CG = 'other-contextGraph';
+    const lookups: Array<Partial<QueryRequest>> = [
+      { lookupType: 'ENTITY_TRIPLES', entityUri: ENTITY_A },
+      { lookupType: 'ENTITIES_BY_TYPE', rdfType: SCHEMA_PERSON },
+      { lookupType: 'SPARQL_QUERY', sparql: `SELECT ?name WHERE { ?s <${SCHEMA_NAME}> ?name }` },
+    ];
+
+    it('answers every lookup of a withheld graph with a retryable error, without reading it or the chain', async () => {
+      let withheld = true;
+      let resolverCalls = 0;
+      const handler = new QueryHandler(
+        engine,
+        { defaultPolicy: 'deny', contextGraphs: { [OTHER_CG]: { policy: 'public', sparqlEnabled: true } } },
+        {
+          isContextGraphPublic: async () => {
+            resolverCalls++;
+            return true;
+          },
+          servingWithheld: (cg) => withheld && cg === CONTEXT_GRAPH,
+        },
+      );
+      const query = vi.spyOn(engine, 'query');
+
+      for (const lookup of lookups) {
+        const response = await handler.handle(makeRequest(lookup), 'peer-1');
+        expect(response).toMatchObject({
+          operationId: 'test-op-1',
+          status: 'ERROR',
+          error: `Context graph '${CONTEXT_GRAPH}' is not served yet; retry later`,
+        });
+        expect(JSON.stringify(response)).not.toMatch(/alice/i);
+      }
+      expect(query).not.toHaveBeenCalled();
+      expect(resolverCalls).toBe(0);
+      // Another graph is served as usual.
+      for (const lookup of lookups) {
+        await expect(handler.handle(makeRequest({ ...lookup, contextGraphId: OTHER_CG }), 'peer-1'))
+          .resolves.toMatchObject({ status: 'OK' });
+      }
+
+      withheld = false;
+      for (const lookup of lookups) {
+        const response = await handler.handle(makeRequest(lookup), 'peer-1');
+        expect(response.status).toBe('OK');
+        expect(JSON.stringify(response)).toMatch(/alice/i);
+      }
+    });
+
+    it('refuses a graph id that is not a string, which would otherwise read as a withheld graph', async () => {
+      const handler = new QueryHandler(
+        engine,
+        // An entry keyed by the id and a public default: the lookalikes below
+        // would pass either one.
+        { defaultPolicy: 'public', contextGraphs: { [CONTEXT_GRAPH]: { policy: 'public', sparqlEnabled: true } } },
+        { servingWithheld: (cg) => cg === CONTEXT_GRAPH },
+      );
+      const query = vi.spyOn(engine, 'query');
+
+      for (const contextGraphId of [[CONTEXT_GRAPH], [[CONTEXT_GRAPH]], 42, {}, true]) {
+        for (const lookup of [...lookups, { lookupType: 'ENTITY_BY_UAL' as const, ual: 'did:dkg:ual:ka-1' }]) {
+          const response = await handler.handle(
+            makeRequest({ ...lookup, contextGraphId: contextGraphId as unknown as string }),
+            'peer-1',
+          );
+          expect(response).toMatchObject({
+            operationId: 'test-op-1',
+            status: 'ERROR',
+            error: 'Invalid request: contextGraphId must be a string',
+          });
+          expect(JSON.stringify(response)).not.toMatch(/alice/i);
+        }
+      }
+      expect(query).not.toHaveBeenCalled();
     });
   });
 
