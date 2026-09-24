@@ -91,40 +91,50 @@ export async function updateHomeConfigFile(home: string, patch: DkgConfigFilePat
   return withFileLock(homeConfigPaths(home).lock, async () => {
     const source = await readHomeConfigSource(home) ?? { ...homeConfigSources(home)[0], text: '', raw: {} };
     const config = configFileObject(source.raw, source.path);
-    const before = JSON.stringify(config, null, 2);
+    const before = toJsonData(config);
     // A caller outside the type system can still pass an async patch.
     const result: unknown = patch(config);
     if (isThenable(result)) {
       Promise.resolve(result).catch(() => {});
       throw new TypeError('A config file patch must be synchronous');
     }
-    const after = JSON.stringify(config, null, 2);
-    if (after === before) return { path: source.path, changed: false };
-    // Compare through JSON in both formats so YAML persists exactly what JSON
-    // would: undefined keys are dropped instead of failing the dump.
+    const after = toJsonData(config);
+    if (isDeepStrictEqual(before, after)) return { path: source.path, changed: false };
     const content = source.format === 'yaml'
-      ? patchYamlText(source.text, JSON.parse(before), JSON.parse(after))
-      : `${after}\n`;
+      ? patchYamlText(source.text, before, after)
+      : `${JSON.stringify(after, null, 2)}\n`;
     await replaceFileDurably(source.path, content);
     return { path: source.path, changed: true };
   }, { timeoutMs: CONFIG_LOCK_TIMEOUT_MS, label: 'config' });
 }
 
 /**
+ * The data both formats persist, and the form both are compared in: what JSON
+ * keeps of a value (undefined keys dropped, dates as ISO strings).
+ */
+function toJsonData(value: unknown): unknown {
+  return JSON.parse(JSON.stringify(value));
+}
+
+/**
  * Apply the difference between the parsed and the patched config to the YAML
  * text itself, so comments, blank lines and untouched keys keep their layout.
- * A change the document cannot take in place, such as one reached through an
- * alias, falls back to writing the whole config.
+ * The document is edited under YAML 1.1 rules so that new strings which js-yaml
+ * would read as another type (timestamps, yes/no) are quoted. If the edit
+ * cannot be made in place (through an alias) or does not read back as the
+ * patched config, the whole config is written instead.
  */
 function patchYamlText(text: string, before: unknown, after: unknown): string {
-  const doc = parseDocument(text);
   try {
+    const doc = parseDocument(text, { version: '1.1' });
     if (doc.errors.length > 0) throw doc.errors[0];
     applyYamlChanges(doc, [], before, after);
-    return doc.toString({ lineWidth: 0 });
+    const edited = doc.toString({ lineWidth: 0 });
+    if (isDeepStrictEqual(toJsonData(jsYaml.load(edited)), after)) return edited;
   } catch {
-    return jsYaml.dump(after, { noRefs: true, lineWidth: -1 });
+    // Fall back to writing the whole config below.
   }
+  return jsYaml.dump(after, { noRefs: true, lineWidth: -1 });
 }
 
 function applyYamlChanges(doc: Document, path: string[], before: unknown, after: unknown): void {

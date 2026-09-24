@@ -223,6 +223,31 @@ describe('DkgHomeFiles.updateConfigFile', () => {
         .toEqual({ base: { level: 'info' }, logging: { level: 'debug' } });
     });
 
+    // js-yaml, which loadConfig reads with, turns a plain 2026-09-24T10:00:00Z
+    // into a Date, so the strings a patch writes must come back as strings.
+    it('writes strings into YAML so that loadConfig reads them back as strings', async () => {
+      await writeFile(files.configYamlPath, '# operator notes\nname: yaml-node\n');
+      const record = { id: 'hermes', connectedAt: '2026-09-24T10:00:00.000Z', since: '2024-01-01', mode: 'yes' };
+
+      await files.updateConfigFile((config) => {
+        config.localAgentIntegrations = { hermes: record };
+      });
+
+      expect((await files.loadConfig()).localAgentIntegrations?.hermes).toEqual(record);
+      expect(await readFile(files.configYamlPath, 'utf-8')).toContain('# operator notes');
+    });
+
+    it('rewrites a YAML config whole when an in-place edit would not read back as the patch', async () => {
+      // Deleting a key a merge key supplies leaves it in place in the document.
+      await writeFile(files.configYamlPath, 'defaults: &defaults\n  level: info\nlogging:\n  <<: *defaults\n  format: json\n');
+
+      await files.updateConfigFile((config) => {
+        delete (config as Record<string, any>).logging.level;
+      });
+
+      expect((await files.loadConfig()).logging).toEqual({ format: 'json' });
+    });
+
     it('writes nothing for a patch that changes nothing, so YAML comments survive', async () => {
       const original = '# operator notes\nname: yaml-node # inline\n';
       await writeFile(files.configYamlPath, original);
