@@ -207,6 +207,26 @@ describe('withFileLock', () => {
     expect(await readdir(dir)).toEqual([]);
   });
 
+  it('waits for an existing lock where the filesystem has no hard links', async () => {
+    vi.mocked(link).mockRejectedValue(fsError('EPERM'));
+    const holder = liveHolder();
+    await writeFile(lockPath, holder);
+
+    await expect(withFileLock(lockPath, async () => {}, { timeoutMs: 100 })).rejects.toThrow(/Timed out/);
+    expect(await readFile(lockPath, 'utf-8')).toBe(holder);
+  });
+
+  it('propagates a failure to create the lock directly other than an existing one', async () => {
+    vi.mocked(link).mockRejectedValue(fsError('ENOTSUP'));
+    vi.mocked(open).mockImplementation(async (...args: Parameters<typeof open>) => {
+      if (args[0] === lockPath) throw fsError('EACCES');
+      return actualFs.open(...args);
+    });
+
+    await expect(withFileLock(lockPath, async () => {})).rejects.toMatchObject({ code: 'EACCES' });
+    expect(await readdir(dir)).toEqual([]);
+  });
+
   it('propagates a failure to place the lock other than an existing one or missing hard links', async () => {
     vi.mocked(link).mockRejectedValueOnce(fsError('EIO'));
 
@@ -368,6 +388,30 @@ describe('withFileLock', () => {
 
       expect(await readFile(target, 'utf-8')).toBe('new');
       expect((await readdir(dir)).sort()).toEqual(['data.json', 'resource.lock']);
+    });
+
+    it('refuses to commit when it cannot read the lock to check it still holds it', async () => {
+      await withFileLock(lockPath, async (lock) => {
+        vi.mocked(readFile).mockImplementation(async (...args: Parameters<typeof readFile>) => {
+          if (args[0] === lockPath) throw fsError('EIO');
+          return actualFs.readFile(...args);
+        });
+        const publish = vi.fn(async () => {});
+        await expect(lock.commit(publish)).rejects.toMatchObject({ code: 'EIO' });
+        expect(publish).not.toHaveBeenCalled();
+        vi.mocked(readFile).mockReset();
+      });
+
+      expect(await readdir(dir)).toEqual([]);
+    });
+
+    it('waits, instead of spinning, on a stale guard it cannot remove', async () => {
+      await writeFile(lockPath, staleLock());
+      await mkdir(guardPath);
+      await backdate(guardPath, 10_000);
+
+      await expect(withFileLock(lockPath, async () => {}, { timeoutMs: 150 })).rejects.toThrow(/Timed out/);
+      expect(existsSync(lockPath)).toBe(true);
     });
 
     it('gives up committing while the guard stays taken', async () => {
