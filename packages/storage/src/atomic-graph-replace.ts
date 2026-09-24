@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import type { Quad } from './triple-store.js';
-import { formatSparqlTerm, unwrapIri } from './sparql-terms.js';
+import { formatSparqlTerm } from './sparql-terms.js';
 
 /** Never expose these operation-internal graphs through graph enumeration. */
 export const ATOMIC_GRAPH_REPLACE_STAGING_PREFIX =
@@ -44,16 +44,13 @@ export function buildAtomicGraphReplaceUpdate(
   }
 
   const stagingGraph = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}`;
-  const triples = quads
-    .map((quad) => `    ${formatSparqlTerm(quad.subject, { position: 'subject' })} <${assertSafeIri(unwrapIri(quad.predicate))}> ${formatSparqlTerm(quad.object, { position: 'object' })} .`)
-    .join('\n');
   const cleanup = `DROP SILENT GRAPH <${stagingGraph}>`;
   return {
     stagingGraph,
     cleanup,
     update:
       `${cleanup};\n` +
-      `INSERT DATA {\n  GRAPH <${stagingGraph}> {\n${triples}\n  }\n};\n` +
+      `INSERT DATA {\n${formatGraphBlock(stagingGraph, quads)}\n};\n` +
       // The final MOVE must NOT be SILENT: if the staging graph is missing the
       // commit did not happen, and SILENT would report that as success while
       // the stale target content survives.
@@ -212,9 +209,17 @@ export function assertSubjectReplacementPayload(
   }
 }
 
+/**
+ * One `GRAPH` block of an atomic update. `graphUri` must already be a safe
+ * bare IRI; every term of every quad goes through {@link formatSparqlTerm}.
+ */
 export function formatGraphBlock(graphUri: string, quads: readonly Quad[]): string {
-  const triples = quads
-    .map((quad) => `    ${formatSparqlTerm(quad.subject, { position: 'subject' })} <${assertSafeIri(unwrapIri(quad.predicate))}> ${formatSparqlTerm(quad.object, { position: 'object' })} .`)
-    .join('\n');
+  const triples = quads.map((quad) => `    ${formatTriple(quad)}`).join('\n');
   return `  GRAPH <${graphUri}> {\n${triples}\n  }`;
+}
+
+function formatTriple(quad: Quad): string {
+  return `${formatSparqlTerm(quad.subject, { position: 'subject' })} ` +
+    `${formatSparqlTerm(quad.predicate, { position: 'predicate' })} ` +
+    `${formatSparqlTerm(quad.object, { position: 'object' })} .`;
 }

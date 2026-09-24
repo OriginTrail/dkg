@@ -18,6 +18,7 @@ import {
   type QueryOptions,
   type TripleStore,
 } from '../src/index.js';
+import { formatGraphBlock } from '../src/atomic-graph-replace.js';
 
 const TARGET = 'did:dkg:context-graph:atomic/_shared_memory/0xabc/7';
 const OTHER = 'urn:test:unrelated';
@@ -357,5 +358,30 @@ describe('atomic named-graph replacement', () => {
       object: '"v"',
       graph: TARGET,
     }])).toThrow(/canonical skolem IRIs/i);
+  });
+
+  it('renders every triple, predicate included, through the one term serializer', () => {
+    const quads: Quad[] = [
+      { subject: '<urn:s>', predicate: '<urn:p>', object: '"v"@en', graph: TARGET },
+      { subject: 'urn:s', predicate: 'urn:q', object: '"42"^^http://www.w3.org/2001/XMLSchema#integer', graph: TARGET },
+    ];
+    const block = formatGraphBlock('urn:staging', quads);
+    expect(block).toBe(
+      '  GRAPH <urn:staging> {\n' +
+      '    <urn:s> <urn:p> "v"@en .\n' +
+      '    <urn:s> <urn:q> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n' +
+      '  }',
+    );
+    // The graph replacement stages exactly that block.
+    const { update, stagingGraph } = buildAtomicGraphReplaceUpdate(TARGET, quads);
+    expect(update).toContain(`INSERT DATA {\n${formatGraphBlock(stagingGraph!, quads)}\n};\n`);
+
+    // A predicate is an IRI: neither a blank node nor a literal reaches the store.
+    expect(() => formatGraphBlock('urn:staging', [{ ...quads[0], predicate: '_:p' }]))
+      .toThrow(/predicate cannot be a blank node/);
+    expect(() => formatGraphBlock('urn:staging', [{ ...quads[0], predicate: '"p"' }]))
+      .toThrow(/predicate must be an IRI/);
+    expect(() => formatGraphBlock('urn:staging', [{ ...quads[0], predicate: 'urn:p q' }]))
+      .toThrow(/^Unsafe or empty IRI value/);
   });
 });
