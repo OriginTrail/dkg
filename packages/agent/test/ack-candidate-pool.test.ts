@@ -213,6 +213,33 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     expect(probe).toHaveBeenCalledWith(CORE[3], PROTOCOL_STORAGE_ACK);
   });
 
+  it('limits live capability probes to four concurrent and 32 total', async () => {
+    const unknown = Array.from({ length: 40 }, (_, i) => `unknown-${i}`);
+    const a = await buildAgent({ confirmedCores: [], connected: unknown });
+    a.getPeerProtocols = async () => ['/dkg/10.0.0/sync'];
+    let active = 0;
+    let peak = 0;
+    const probe = vi.fn(async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      active--;
+      return false;
+    });
+    a.router = { probeProtocol: probe };
+    a.networkAdmissionCoordinator = {
+      enabled: false,
+      isAcceptedPeer: () => true,
+      verifiedSameNetworkPeerIds: () => new Set(),
+      preflightPeerAdmission: async (peerIds) => ({ checked: [...peerIds].length, admitted: 0, unresolved: 0 }),
+    };
+
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([]);
+    expect(probe).toHaveBeenCalledTimes(32);
+    expect(peak).toBe(4);
+    expect(active).toBe(0);
+  });
+
   it('ackCandidatePeerIds remains an allowlist for callers that intentionally restrict candidacy', async () => {
     const a = await buildAgent({
       confirmedCores: [CORE[0], 'untrusted-peer'],

@@ -13,6 +13,7 @@ import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
+import type { StorageACKProtocol } from './p2p/storage-ack-protocols.js';
 import {
   openRfc64PersistenceV1,
   type Rfc64PersistenceV1,
@@ -1237,7 +1238,7 @@ export class DKGAgentBase {
   protected storageAckLedgerReadyFlight: Promise<boolean> | null = null;
   /** One registered endpoint serves both remote streams and local ACK requests. */
   protected storageAckEndpoint: {
-    dispatch(protocol: string, data: Uint8Array, peerId: string): Promise<Uint8Array>;
+    dispatch(protocol: StorageACKProtocol, data: Uint8Array, peerId: string): Promise<Uint8Array>;
   } | null = null;
   protected get storageAckHandlerRegistered(): boolean {
     return this.storageAckEndpoint !== null;

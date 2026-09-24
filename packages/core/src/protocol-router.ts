@@ -2,6 +2,7 @@ import type { Stream } from '@libp2p/interface';
 import type { StreamHandler as DKGStreamHandler } from './types.js';
 import type { DKGNode } from './node.js';
 import type { PeerResolver } from './network/peer-resolver.js';
+import { LibP2PNetwork } from './network/libp2p-network.js';
 import {
   MessageStreamPool,
   POOLED_MESSAGE_PROTOCOL,
@@ -229,6 +230,7 @@ export class QuietRetryableHandlerError extends Error {
 
 export class ProtocolRouter {
   private readonly node: DKGNode;
+  private readonly network: LibP2PNetwork;
   private readonly peerResolver?: PeerResolver;
   private readonly isPeerAccepted?: ProtocolRouterOptions['isPeerAccepted'];
   private readonly isPeerKnownRejected?: ProtocolRouterOptions['isPeerKnownRejected'];
@@ -275,6 +277,7 @@ export class ProtocolRouter {
 
   constructor(node: DKGNode, options?: ProtocolRouterOptions) {
     this.node = node;
+    this.network = new LibP2PNetwork(node);
     this.peerResolver = options?.peerResolver;
     this.isPeerAccepted = options?.isPeerAccepted;
     this.isPeerKnownRejected = options?.isPeerKnownRejected;
@@ -670,11 +673,7 @@ export class ProtocolRouter {
       // connected peers this probe targets, its live-connection step is fast;
       // it also primes a route if the connection closes during admission.
       await this.peerResolver?.resolve(peerIdStr, { signal, perStepTimeoutMs: timeoutMs });
-      const { peerIdFromString } = await import('@libp2p/peer-id');
-      const stream = await this.node.libp2p.dialProtocol(peerIdFromString(peerIdStr), protocolId, {
-        runOnLimitedConnection: true,
-        signal,
-      });
+      const stream = await this.network.dialProtocol(peerIdStr, protocolId, { signal, timeoutMs });
       try {
         stream.abort(new Error('protocol capability probe complete'));
       } catch {
@@ -1094,10 +1093,7 @@ export class ProtocolRouter {
           stream = fastStream;
         } else {
           attemptedNormalDial = true;
-          stream = await libp2p.dialProtocol(peerId, protocolId, {
-            runOnLimitedConnection: true,
-            signal: attemptSignal,
-          });
+          stream = await this.network.dialProtocol(peerIdStr, protocolId, { signal: attemptSignal });
         }
         const dialDurationMs = Date.now() - dialStartedAt;
 

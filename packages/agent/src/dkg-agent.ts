@@ -1,5 +1,6 @@
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
 import { reconcileACKCapabilities } from './p2p/ack-capability.js';
+import { isStorageACKProtocol } from './p2p/storage-ack-protocols.js';
 import { randomUUID } from 'node:crypto';
 import { createAuthorityIndexBootstrap } from './authority-index-bootstrap.js';
 import { planAuthorityIndexBootstrap } from './authority-index-config.js';
@@ -3119,8 +3120,7 @@ export class DKGAgent extends DKGAgentBase {
       connectedPeers,
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
       selfPeerId: this.peerId,
-      knownCorePeerIds: roundKnownCorePeerIds,
-      requireConfirmedCore: true,
+      eligiblePeerIds: roundKnownCorePeerIds,
     };
     const requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
     const selfCount = this.config.nodeRole === 'core' && this.storageAckHandlerRegistered ? 1 : 0;
@@ -3220,7 +3220,7 @@ export class DKGAgent extends DKGAgentBase {
         : undefined,
       knownCorePeerIds: capabilitySnapshot?.knownCorePeerIds ?? this.knownCorePeerIds,
       knownCorePeerIdsV2: capabilitySnapshot?.knownCorePeerIdsV2 ?? this.knownCorePeerIdsV2,
-      requireConfirmedCore: true,
+      eligiblePeerIds: capabilitySnapshot?.knownCorePeerIds ?? this.knownCorePeerIds,
       requiredACKs,
       protocol,
     });
@@ -3289,6 +3289,7 @@ export class DKGAgent extends DKGAgentBase {
     });
     return async (peerId: string, protocol: string, data: Uint8Array) => {
       if (peerId === this.peerId) {
+        if (!isStorageACKProtocol(protocol)) throw new Error(`Unsupported StorageACK protocol: ${protocol}`);
         const local = this.storageAckEndpoint;
         if (!local || this.config.nodeRole !== 'core') {
           throw new Error('Local StorageACK handler is not registered');

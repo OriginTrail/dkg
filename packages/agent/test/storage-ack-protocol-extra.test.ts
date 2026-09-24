@@ -18,7 +18,8 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
+import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2 } from '@origintrail-official/dkg-core';
+import { STORAGE_ACK_PROTOCOLS } from '../src/p2p/storage-ack-protocols.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_SRC = resolve(__dirname, '..', 'src');
@@ -41,7 +42,7 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
     expect(PROTOCOL_STORAGE_ACK_V2).toBe('/dkg/10.0.2/storage-ack');
   });
 
-  it('agent source registers storage-ack V1 and V2 on the messenger substrate', () => {
+  it('registers every publish and update ACK protocol from the shared registry', () => {
     // The DKGAgent god class was split into per-subsystem mixin holders, so
     // the boot-time wiring (incl. this registration) now lives in a sibling
     // file (`dkg-agent-lifecycle.ts`) rather than `dkg-agent.ts`. Scan the
@@ -49,8 +50,13 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
     const lifecycle = readFileSync(join(AGENT_SRC, 'dkg-agent-lifecycle.ts'), 'utf8');
     // Both IDs must enter the one registered endpoint through Messenger,
     // which supplies envelope decoding and receiver-side deduplication.
-    expect(lifecycle).toMatch(/const storageACKProtocols = \[\s*PROTOCOL_STORAGE_ACK,\s*PROTOCOL_STORAGE_ACK_V2,/);
-    expect(lifecycle).toMatch(/for \(const protocol of storageACKProtocols\) \{\s*this\.messenger\.register\(protocol,/);
+    expect(STORAGE_ACK_PROTOCOLS).toEqual([
+      [PROTOCOL_STORAGE_ACK, 'publish'],
+      [PROTOCOL_STORAGE_ACK_V2, 'publish'],
+      [PROTOCOL_STORAGE_UPDATE_ACK, 'update'],
+      [PROTOCOL_STORAGE_UPDATE_ACK_V2, 'update'],
+    ]);
+    expect(lifecycle).toMatch(/for \(const \[protocol\] of STORAGE_ACK_PROTOCOLS\) \{\s*this\.messenger\.register\(protocol,/);
   });
 
   it('agent wires core-side StorageACK decline logging', () => {

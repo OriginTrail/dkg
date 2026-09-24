@@ -153,7 +153,7 @@ async function* walkSourceFiles(dir) {
 //   - the `Network` interface declaration of the method (network.ts)
 //   - the `LibP2PNetwork` impl: definition + the actual libp2p call
 //   - `ProtocolRouter.send` and its negotiation-only capability probe:
-//     both consult the resolver before dialing
+//     both use the Network transport after resolver admission
 const ALLOWLIST = new Map([
   [
     'packages/core/src/network/network.ts',
@@ -173,7 +173,7 @@ const ALLOWLIST = new Map([
     'packages/core/src/protocol-router.ts',
     {
       expectedHits: 2,
-      justification: 'ProtocolRouter.send and the admission-gated, payload-free capability probe both consult PeerResolver before dialing (RFC 07 PR-3)',
+      justification: 'ProtocolRouter.send and the admission-gated, payload-free capability probe both use LibP2PNetwork after PeerResolver (RFC 07 PR-3)',
     },
   ],
   [

@@ -20,12 +20,13 @@ import { createHash } from 'node:crypto';
 import { setTimeout as waitForPeerEventTurn } from 'node:timers/promises';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
 import { reconcileACKCapabilities } from './p2p/ack-capability.js';
+import { STORAGE_ACK_PROTOCOLS, storageACKProtocolKind, type StorageACKProtocol } from './p2p/storage-ack-protocols.js';
 import { syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_NETWORK_IDENTITY,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
@@ -2752,12 +2753,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (effectiveRole === 'core') {
       if (ackSignerCandidates.length > 0) {
         let storageACKFailoverInFlight = false;
-        const storageACKProtocols = [
-          PROTOCOL_STORAGE_ACK,
-          PROTOCOL_STORAGE_ACK_V2,
-          PROTOCOL_STORAGE_UPDATE_ACK,
-          PROTOCOL_STORAGE_UPDATE_ACK_V2,
-        ];
         const attemptStorageACKRegistration = async (
           attemptCtx: OperationContext,
           options: { repairWallets?: boolean; allowChainReresolution?: boolean } = {},
@@ -2951,7 +2946,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 // in the substrate's wrapper which delegates to
                 // router.register under the hood (see Messenger.register
                 // implementation), so router.unregister still removes it.
-                for (const protocol of storageACKProtocols) this.router.unregister(protocol);
+                for (const [protocol] of STORAGE_ACK_PROTOCOLS) this.router.unregister(protocol);
                 this.log.warn(
                   attemptCtx,
                   `Unregistered V10 StorageACK handler: signer ${ackSignerWallet.address} ` +
@@ -3061,19 +3056,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // messenger.register handles envelope decode + receiver
             // dedup; ackHandler's signature stays the same.
             const endpoint = {
-              dispatch: (protocol: string, data: Uint8Array, peerIdStr: string): Promise<Uint8Array> => {
+              dispatch: (protocol: StorageACKProtocol, data: Uint8Array, peerIdStr: string): Promise<Uint8Array> => {
                 const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-                if (protocol === PROTOCOL_STORAGE_ACK || protocol === PROTOCOL_STORAGE_ACK_V2) {
-                  return ackHandler.handler(data, peerId);
-                }
-                if (protocol === PROTOCOL_STORAGE_UPDATE_ACK || protocol === PROTOCOL_STORAGE_UPDATE_ACK_V2) {
-                  return ackHandler.updateHandler(data, peerId);
-                }
-                throw new Error(`Unsupported StorageACK protocol: ${protocol}`);
+                return storageACKProtocolKind(protocol) === 'publish'
+                  ? ackHandler.handler(data, peerId)
+                  : ackHandler.updateHandler(data, peerId);
               },
             };
             try {
-              for (const protocol of storageACKProtocols) {
+              for (const [protocol] of STORAGE_ACK_PROTOCOLS) {
                 this.messenger.register(protocol, (data, peerIdStr) => {
                   if (this.storageAckEndpoint !== endpoint) {
                     throw new Error('StorageACK handler is not registered');
@@ -3082,7 +3073,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 });
               }
             } catch (error) {
-              for (const protocol of storageACKProtocols) this.router.unregister(protocol);
+              for (const [protocol] of STORAGE_ACK_PROTOCOLS) this.router.unregister(protocol);
               throw error;
             }
             this.storageAckEndpoint = endpoint;

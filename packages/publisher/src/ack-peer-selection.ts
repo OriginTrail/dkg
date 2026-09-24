@@ -10,8 +10,8 @@ export interface ACKCandidatePeerSelectionInput {
   verifiedSameNetworkPeerIds?: ReadonlySet<string>;
   knownCorePeerIds?: ReadonlySet<string>;
   knownCorePeerIdsV2?: ReadonlySet<string>;
-  /** Require live-confirmed core capability before a peer can receive an ACK request. */
-  requireConfirmedCore?: boolean;
+  /** When supplied, only these capability-confirmed peers may receive an ACK request. */
+  eligiblePeerIds?: ReadonlySet<string>;
   requiredACKs: number;
   protocol?: string;
   selfPeerId?: string;
@@ -46,7 +46,7 @@ function normalizePeerIdSet(ids: readonly string[] | undefined): Set<string> {
 export function selectACKCandidateUniverse(input: Pick<
   ACKCandidatePeerSelectionInput,
   'connectedPeers' | 'ackCandidatePeerIds' | 'selfPeerId'
-  | 'knownCorePeerIds' | 'requireConfirmedCore'
+  | 'eligiblePeerIds'
 >): string[] {
   const connected = [...new Set(input.connectedPeers)]
     .filter((id) => id !== input.selfPeerId);
@@ -54,8 +54,8 @@ export function selectACKCandidateUniverse(input: Pick<
   const allowlisted = allowlistedACKPeers.size > 0
     ? connected.filter((id) => allowlistedACKPeers.has(id))
     : connected;
-  return input.requireConfirmedCore
-    ? allowlisted.filter((id) => input.knownCorePeerIds?.has(id))
+  return input.eligiblePeerIds
+    ? allowlisted.filter((id) => input.eligiblePeerIds!.has(id))
     : allowlisted;
 }
 
@@ -119,7 +119,7 @@ function diagnosticForPeer(input: {
   protocol?: string;
   knownCorePeerIds?: ReadonlySet<string>;
   knownCorePeerIdsV2?: ReadonlySet<string>;
-  requireConfirmedCore?: boolean;
+  eligiblePeerIds?: ReadonlySet<string>;
 }): ACKCandidatePeerDiagnostic {
   const protocolMatch = input.protocol === PROTOCOL_STORAGE_ACK_V2
     ? (input.knownCorePeerIdsV2?.has(input.peerId) ?? false)
@@ -129,7 +129,7 @@ function diagnosticForPeer(input: {
   const selected = input.selected.has(input.peerId);
   let reason = selected ? 'selected' : 'not-selected';
   if (!input.allowlisted) reason = 'not-allowlisted';
-  else if (input.requireConfirmedCore && !input.knownCorePeerIds?.has(input.peerId)) reason = 'not-core-capable';
+  else if (input.eligiblePeerIds && !input.eligiblePeerIds.has(input.peerId)) reason = 'not-core-capable';
   else if (!protocolMatch && input.protocol === PROTOCOL_STORAGE_ACK_V2) reason = selected ? 'selected-protocol-fallback' : 'protocol-fallback';
   return {
     peerId: input.peerId,
@@ -176,7 +176,7 @@ export function selectACKCandidatePeersWithDiagnostics(
     protocol: input.protocol,
     knownCorePeerIds: input.knownCorePeerIds,
     knownCorePeerIdsV2: input.knownCorePeerIdsV2,
-    requireConfirmedCore: input.requireConfirmedCore,
+    eligiblePeerIds: input.eligiblePeerIds,
   }));
 
   return { peers, diagnostics };

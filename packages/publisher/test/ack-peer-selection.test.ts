@@ -21,7 +21,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
       connectedPeers: ['edge', 'core-v1', 'core-v2'],
       knownCorePeerIds: new Set(['core-v1', 'core-v2']),
       knownCorePeerIdsV2: new Set(['core-v2']),
-      requireConfirmedCore: true,
+      eligiblePeerIds: new Set(['core-v1', 'core-v2']),
       protocol: PROTOCOL_STORAGE_ACK_V2,
       requiredACKs: 2,
     };

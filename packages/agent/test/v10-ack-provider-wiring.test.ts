@@ -68,6 +68,7 @@ import {
   skolemizeKnowledgeAssetParts,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/index.js';
+import { Messenger } from '../src/p2p/messenger.js';
 
 /**
  * Capture every `ACKCollector` constructor call so each test can
@@ -992,6 +993,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     await expect(send(internals.peerId, PROTOCOL_STORAGE_ACK_V2, request)).resolves.toEqual(new Uint8Array([1]));
     await expect(send(internals.peerId, PROTOCOL_STORAGE_UPDATE_ACK, request)).resolves.toEqual(new Uint8Array([2]));
     await expect(send(internals.peerId, PROTOCOL_STORAGE_UPDATE_ACK_V2, request)).resolves.toEqual(new Uint8Array([2]));
+    await expect(send(internals.peerId, '/dkg/test/unsupported-ack', request)).rejects.toThrow(/Unsupported StorageACK protocol/);
     expect(publish).toHaveBeenCalledTimes(2);
     expect(update).toHaveBeenCalledTimes(2);
     expect(remoteSend).not.toHaveBeenCalled();
@@ -1054,6 +1056,54 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     await agent.stop();
     expect(internals.storageAckEndpoint).toBeNull();
     agent = undefined;
+  });
+
+  it('rolls back partial ACK registration and restores all routes on retry', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 42n);
+    const protocols = [
+      PROTOCOL_STORAGE_ACK,
+      PROTOCOL_STORAGE_ACK_V2,
+      PROTOCOL_STORAGE_UPDATE_ACK,
+      PROTOCOL_STORAGE_UPDATE_ACK_V2,
+    ];
+    const originalRegister = Messenger.prototype.register;
+    let ackRegistrations = 0;
+    vi.spyOn(Messenger.prototype, 'register').mockImplementation(function (protocol, handler, options) {
+      if (protocols.includes(protocol) && ++ackRegistrations === 3) {
+        throw new Error('injected third ACK registration failure');
+      }
+      return originalRegister.call(this, protocol, handler, options);
+    });
+
+    agent = await DKGAgent.create({
+      name: 'ACKRegistrationRollbackTest',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+      storageAckRegistrationRetryMs: 1_000,
+    });
+    await agent.start();
+    const internals = agent as unknown as ProviderInternals;
+    const routerHandlers = (internals.router as { handlers: Map<string, unknown> }).handlers;
+    expect(ackRegistrations).toBe(3);
+    expect(internals.storageAckEndpoint).toBeNull();
+    expect(internals.getACKCandidatePeers()).not.toContain(internals.peerId);
+    expect(protocols.every((protocol) => !routerHandlers.has(protocol))).toBe(true);
+
+    await expect.poll(() => internals.storageAckHandlerRegistered, { timeout: 5_000 }).toBe(true);
+    expect(internals.getACKCandidatePeers()).toContain(internals.peerId);
+    expect(protocols.every((protocol) => routerHandlers.has(protocol))).toBe(true);
+    const send = internals.createACKTransportFactory()().sendP2P;
+    const request = new Uint8Array([4, 5]);
+    const responses = await Promise.all(protocols.map((protocol) => send(internals.peerId, protocol, request)));
+    expect(responses).toEqual([
+      new Uint8Array([1]), new Uint8Array([1]), new Uint8Array([2]), new Uint8Array([2]),
+    ]);
   });
 
   it('delegates StorageACK curation config to the named target-policy resolver', async () => {
