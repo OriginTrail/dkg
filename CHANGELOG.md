@@ -32,10 +32,14 @@ All notable changes to the DKG V10 node are documented here. The format is based
   and permissions, and a symlinked config is written through its link, even
   when the link's target does not exist yet. When the
   writing process may not give the file its owner (a config belonging to
-  another user), the file is rewritten in place instead, as before, without
-  the crash guarantee. An ACL set on the file itself is kept only in that
-  case. A YAML config stays YAML, and a write edits it in place, so comments
-  and every key the write does not change keep their layout. The
+  another user), or the file's directory refuses a new file or a rename (a
+  config linked into a directory another account owns), the file is
+  rewritten in place instead, as before, without the crash guarantee. An ACL
+  set on the file itself is kept only in that case. A YAML config stays YAML,
+  and a write edits it in place, so comments and every key the write does
+  not change keep their layout; a change the edit cannot make in place (one
+  through an alias or a merge key) rewrites the whole file, without its
+  comments. The
   `dkg openclaw`, `dkg hermes` and `dkg mcp` setup commands still write
   `config.json` the old way.
 - **Cores promote the data they acknowledge to Verifiable Memory again**: since

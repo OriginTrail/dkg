@@ -13,8 +13,10 @@ const MAX_SYMLINK_HOPS = 40;
 
 /**
  * How new content reached the file: renamed into place, which a crash cannot
- * leave half done, or rewritten in place, which keeps an owner this process
- * could not give a new file, but which a crash can leave incomplete.
+ * leave half done, or rewritten in place, which a crash can leave incomplete.
+ * A file is rewritten in place when it cannot be replaced: this process may
+ * not give a new file its owner, or its directory refuses a new file or the
+ * rename.
  */
 export type ReplaceStrategy = 'rename' | 'in-place';
 
