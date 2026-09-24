@@ -13,6 +13,7 @@ const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 describe('formatSparqlTerm, the one serializer', () => {
   it.each<[string, SparqlTermContext, string, string]>([
     ['a graph name', { position: 'graph' }, 'urn:g', '<urn:g>'],
+    ['an angle-bracketed graph name', { position: 'graph' }, '<urn:g>', '<urn:g>'],
     ['a bare subject', { position: 'subject' }, 'urn:s', '<urn:s>'],
     ['an angle-bracketed subject', { position: 'subject' }, '<urn:s>', '<urn:s>'],
     ['a subject blank node where allowed', { position: 'subject', blankNodes: 'allow' }, '_:b0', '_:b0'],
@@ -26,12 +27,11 @@ describe('formatSparqlTerm, the one serializer', () => {
   });
 
   it.each<[string, SparqlTermContext, string, SparqlTermKind]>([
-    ['an angle-bracketed graph name', { position: 'graph' }, '<urn:g>', 'iri'],
-    ['a blank-node graph name', { position: 'graph', blankNodes: 'allow' }, '_:g', 'blank-node'],
+    ['a blank-node graph name', { position: 'graph' }, '_:g', 'blank-node'],
     ['a literal graph name', { position: 'graph' }, '"g"', 'literal'],
     ['a blank-node subject by default', { position: 'subject' }, '_:b0', 'blank-node'],
     ['a literal subject', { position: 'subject', blankNodes: 'allow' }, '"s"', 'literal'],
-    ['a blank-node predicate, even where blank nodes are allowed', { position: 'predicate', blankNodes: 'allow' }, '_:p', 'blank-node'],
+    ['a blank-node predicate', { position: 'predicate' }, '_:p', 'blank-node'],
     ['a literal predicate', { position: 'predicate' }, '"p"', 'literal'],
     ['a blank-node object by default', { position: 'object' }, '_:b0', 'blank-node'],
     ['an invalid blank-node label', { position: 'object', blankNodes: 'allow' }, '_:a b', 'blank-node'],
@@ -57,7 +57,7 @@ describe('formatSparqlTerm, the one serializer', () => {
     expect(() => formatSparqlTerm('_:b0', { position: 'object' })).toThrow(/cannot be a blank node/);
     expect(() => formatSparqlTerm('_:a b', { position: 'subject', blankNodes: 'allow' })).toThrow(/Invalid blank node label/);
     expect(() => formatSparqlTerm('"x"', { position: 'subject', blankNodes: 'allow' })).toThrow(/must be an IRI/);
-    expect(() => formatSparqlTerm('<urn:g>', { position: 'graph' })).toThrow(/Unsafe or empty IRI/);
+    expect(() => formatSparqlTerm('urn:g>', { position: 'graph' })).toThrow(/Unsafe or empty IRI/);
   });
 });
 

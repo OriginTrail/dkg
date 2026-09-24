@@ -35,6 +35,9 @@ function legacyEscapeString(s: string): string {
 
 const SITE: SparqlTermSite = { adapter: 'sparql-http', operation: 'insert' };
 
+// The same entry points under the reject policy: the hard-reject path.
+const REJECT = createSparqlTermPolicy('reject');
+
 // The entry points the adapters' statement builders call.
 const {
   iriTerm: sparqlIriTerm,
@@ -136,7 +139,7 @@ interface MalformedCase {
   name: string;
   /** The adapter entry point (observe mode). */
   render: (site: SparqlTermSite) => string;
-  /** The strict formatter behind it (the hard-reject path). */
+  /** The same entry point under the reject policy (the hard-reject path). */
   strict: () => string;
   term: string;
   legacy: string;
@@ -146,7 +149,7 @@ interface MalformedCase {
 
 const iri = (term: string, position: SparqlTermPosition): Omit<MalformedCase, 'name'> => ({
   render: (site) => sparqlIriTerm(term, position, site),
-  strict: () => formatSparqlTerm(term, { position }),
+  strict: () => REJECT.iriTerm(term, position, SITE),
   term,
   legacy: `<${legacyEscapeUri(term)}>`,
   position,
@@ -158,7 +161,7 @@ const rdf = (
   blankNodes: 'allow' | 'reject',
 ): Omit<MalformedCase, 'name'> => ({
   render: (site) => sparqlRdfTerm(term, position, site, blankNodes),
-  strict: () => formatSparqlTerm(term, { position, blankNodes }),
+  strict: () => REJECT.rdfTerm(term, position, SITE, blankNodes),
   term,
   legacy: legacyFormatTerm(term),
   position,
@@ -258,7 +261,22 @@ describe('malformed terms are logged and counted, then sent in the pre-validatio
   });
 });
 
-describe('the strict serializer behind each adapter entry point', () => {
+describe('the storage graph-name rule', () => {
+  it('keeps graph names bare at the storage boundary, although the core grammar accepts <…>', () => {
+    const observed = observeInvalidSparqlTerms();
+    expect(formatSparqlTerm('<urn:g>', { position: 'graph' })).toBe('<urn:g>');
+    expect(() => REJECT.iriTerm('<urn:g>', 'graph', SITE)).toThrow(SparqlTermValidationError);
+    // Observe mode renders it as before, and the subject position still takes <…>.
+    expect(sparqlIriTerm('<urn:g>', 'graph', SITE)).toBe('<urn:g>');
+    expect(sparqlIriTerm('<urn:s>', 'subject', SITE)).toBe('<urn:s>');
+    expect(observed.counted.map(({ position, kind, enforcement }) => [position, kind, enforcement])).toEqual([
+      ['graph', 'iri', 'reject'],
+      ['graph', 'iri', 'observe'],
+    ]);
+  });
+});
+
+describe('the reject policy behind each adapter entry point', () => {
   it.each(MALFORMED)('$name throws', ({ strict }) => {
     expect(strict).toThrow(SparqlTermValidationError);
   });

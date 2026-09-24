@@ -16,6 +16,7 @@ import {
   formatSparqlTerm,
   getMetrics,
   SparqlTermValidationError,
+  unwrapIri,
   type SparqlTermKind,
   type SparqlTermPosition,
 } from '@origintrail-official/dkg-core';
@@ -102,6 +103,11 @@ export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): Spar
     enforcement,
     iriTerm(term, position, site) {
       try {
+        // Adapters key write scopes and revisions on the raw graph string, so a
+        // graph name must be bare here, although the grammar allows `<…>`.
+        if (position === 'graph' && unwrapIri(term) !== term) {
+          throw new SparqlTermValidationError('A storage graph name must be a bare IRI', 'iri');
+        }
         return formatSparqlTerm(term, { position });
       } catch (error) {
         return onInvalidTerm(error, term, position, site, legacyStrippedIri);

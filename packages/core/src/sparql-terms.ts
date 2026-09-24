@@ -31,17 +31,18 @@ export type SparqlTermPosition = 'graph' | 'subject' | 'predicate' | 'object';
 export type SparqlTermKind = 'iri' | 'literal' | 'blank-node';
 
 /**
- * Where a term goes. Only an object can be a literal. Only a subject or object
- * can be a blank node, and only where the statement allows one
- * (`blankNodes: 'allow'`, as in INSERT DATA; DELETE DATA and match patterns
- * cannot hold one). A graph name must be a bare IRI, because adapters key write
- * bookkeeping on the raw string; the other positions may be angle-bracketed.
+ * Where a term goes. An IRI may be bare or angle-bracketed in any position.
+ * Only an object can be a literal. Only a subject or object can be a blank
+ * node, and only where the statement allows one (`blankNodes: 'allow'`, as in
+ * INSERT DATA; DELETE DATA and match patterns cannot hold one).
  */
-export interface SparqlTermContext {
-  readonly position: SparqlTermPosition;
-  /** Defaults to `'reject'`. */
-  readonly blankNodes?: 'allow' | 'reject';
-}
+export type SparqlTermContext =
+  | { readonly position: 'graph' | 'predicate' }
+  | {
+    readonly position: 'subject' | 'object';
+    /** Defaults to `'reject'`. */
+    readonly blankNodes?: 'allow' | 'reject';
+  };
 
 /** A term the SPARQL grammar does not accept in its position. */
 export class SparqlTermValidationError extends Error {
@@ -86,7 +87,8 @@ export function unwrapIri(term: string): string {
 export function formatSparqlTerm(term: string, context: SparqlTermContext): string {
   const { position } = context;
   if (term.startsWith('_:')) {
-    const allowed = context.blankNodes === 'allow' && (position === 'subject' || position === 'object');
+    const allowed = (context.position === 'subject' || context.position === 'object')
+      && context.blankNodes === 'allow';
     if (!allowed) {
       throw new SparqlTermValidationError(
         `SPARQL ${position} cannot be a blank node here`,
@@ -109,7 +111,7 @@ export function formatSparqlTerm(term: string, context: SparqlTermContext): stri
     validated('literal', () => assertSafeRdfTerm(literal));
     return literal;
   }
-  const iri = position === 'graph' ? term : unwrapIri(term);
+  const iri = unwrapIri(term);
   return validated('iri', () => sparqlIri(iri));
 }
 
