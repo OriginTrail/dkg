@@ -1,5 +1,5 @@
 // The home config file: which file is the source of truth, how it is read,
-// and how a patch is written back to it in the same format. It is read with
+// and how edits are written back to it in the same format. It is read with
 // js-yaml, as loadConfig always has been; a YAML file is edited in place with
 // the yaml package, which keeps comments and layout.
 
@@ -13,31 +13,56 @@ import { hasErrorCode } from '@origintrail-official/dkg-core';
 import type { DkgConfig } from './config.js';
 import { withFileLock } from './file-lock.js';
 
-/** Keys older releases wrote that the config type no longer declares; they are only ever removed. */
-type LegacyConfigKey = 'openclawAdapter' | 'openclawChannel';
+/** What the config file holds: the config, and keys older releases wrote that are now only ever removed. */
+export type DkgConfigFile = DkgConfig & { openclawAdapter?: unknown; openclawChannel?: unknown };
 
-/** A top-level key of the config file. */
-export type DkgConfigFileKey = keyof DkgConfig | LegacyConfigKey;
+type ConfigKey = keyof DkgConfigFile & string;
 
-/**
- * A key a config update owns, or the path to one nested under it, such as
- * `['telemetry', 'enabled']` or `['localAgentIntegrations', 'hermes']`.
- */
-export type DkgConfigKeyPath<K extends DkgConfigFileKey = DkgConfigFileKey> = K | readonly [K, ...string[]];
+/** The keys under a config key that holds an object (not an array or a scalar). */
+type NestedConfigKey<K extends ConfigKey> = NonNullable<DkgConfigFile[K]> extends readonly unknown[]
+  ? never
+  : NonNullable<DkgConfigFile[K]> extends object ? keyof NonNullable<DkgConfigFile[K]> & string : never;
 
 /**
- * A change to the persisted home config. It receives the file's own object
- * (no defaults merged in), typed down to the top-level keys its update owns,
- * and may change only what the update owns: anything else it changes makes
- * the update fail. Copying a whole in-memory config back would overwrite what
- * another process wrote since that copy was loaded. It runs while the config
- * lock is held, so it must be synchronous; the `undefined` return type makes
- * TypeScript reject an async patch.
+ * Where a config edit applies: a top-level key, or a key one level below it,
+ * such as `['telemetry', 'enabled']` or `['localAgentIntegrations', id]`.
  */
-export type DkgConfigFilePatch<K extends DkgConfigFileKey = DkgConfigFileKey> =
-  (config: Pick<Partial<DkgConfig>, Extract<K, keyof DkgConfig>>) => undefined;
+export type DkgConfigPath = {
+  [K in ConfigKey]: [NestedConfigKey<K>] extends [never] ? readonly [K] : readonly [K] | readonly [K, NestedConfigKey<K>];
+}[ConfigKey];
 
-/** Where a config update was written, and whether the patch changed anything. */
+/** The type of the value at a config path. */
+export type DkgConfigValue<P extends DkgConfigPath> =
+  P extends readonly [infer K extends ConfigKey, infer N extends string]
+    ? N extends keyof NonNullable<DkgConfigFile[K]> ? NonNullable<NonNullable<DkgConfigFile[K]>[N]> : never
+    : P extends readonly [infer K extends ConfigKey] ? NonNullable<DkgConfigFile[K]> : never;
+
+/** One edit of the config file: the value at `path` becomes what `update` returns for it. */
+export interface DkgConfigEdit {
+  readonly path: DkgConfigPath;
+  readonly update: (current: unknown) => unknown;
+}
+
+/**
+ * An edit that sets the value at `path` to what `update` returns for the
+ * current one, removing it when that is undefined. The update is given only
+ * that value, so an edit cannot change anything beside it, and a stale copy
+ * of the config has nowhere to be written back. It runs under the config
+ * lock, on the file as it is then, so it must be synchronous.
+ */
+export function configEdit<const P extends DkgConfigPath>(
+  path: P,
+  update: (current: DkgConfigValue<P> | undefined) => DkgConfigValue<P> | undefined,
+): DkgConfigEdit {
+  return { path, update: update as (current: unknown) => unknown };
+}
+
+/** Edits that set each key of `values`, removing the ones set to undefined. */
+export function configValues(values: Partial<DkgConfig>): DkgConfigEdit[] {
+  return Object.entries(values).map(([key, value]) => ({ path: [key] as unknown as DkgConfigPath, update: () => value }));
+}
+
+/** Where a config update was written, and whether its edits changed anything. */
 export interface DkgConfigFileUpdate {
   path: string;
   changed: boolean;
@@ -95,22 +120,16 @@ export function readHomeConfigSourceSync(home: string): { path: string; raw: unk
 }
 
 /**
- * Apply `patch` under a lock the daemon and CLI share: re-read the file that
- * is the source of truth, patch its object, and replace the file atomically
- * in the same format. The update owns the keys in `owns`, and fails, writing
- * nothing, if the patch changes anything else. A patch that changes nothing
- * writes nothing, and a writer that lost the lock while it worked writes
- * nothing either.
+ * Apply `edits`, together, under a lock the daemon and CLI share: re-read the
+ * file that is the source of truth, edit its object, and replace the file
+ * atomically in the same format. Edits that change nothing write nothing, and
+ * a writer that lost the lock while it worked writes nothing either.
  */
-export async function updateHomeConfigFile<const K extends DkgConfigFileKey>(
-  home: string,
-  owns: readonly DkgConfigKeyPath<K>[],
-  patch: DkgConfigFilePatch<K>,
-): Promise<DkgConfigFileUpdate> {
+export async function updateHomeConfigFile(home: string, edits: readonly DkgConfigEdit[]): Promise<DkgConfigFileUpdate> {
   await mkdir(home, { recursive: true });
   return withFileLock(homeConfigPaths(home).lock, async (lock) => {
     const source = await readHomeConfigSource(home) ?? { ...homeConfigSources(home)[0], text: '', raw: {} };
-    const { before, after, changed } = applyConfigFilePatch(configFileObject(source.raw, source.path), owns, patch);
+    const { before, after, changed } = applyConfigEdits(configFileObject(source.raw, source.path), edits);
     if (!changed) return { path: source.path, changed: false };
     const content = source.format === 'yaml'
       ? patchYamlText(source.text, before, after)
@@ -120,70 +139,50 @@ export async function updateHomeConfigFile<const K extends DkgConfigFileKey>(
   }, { timeoutMs: CONFIG_LOCK_TIMEOUT_MS, label: 'config' });
 }
 
-/** The config file's data before and after a patch, as both formats persist it. */
-export interface DkgConfigFilePatchResult {
+/** The config file's data before and after its edits, as both formats persist it. */
+export interface DkgConfigFileChange {
   before: unknown;
   after: unknown;
   changed: boolean;
 }
 
 /**
- * Apply `patch` to a config file's object, in place, and return the data
- * before and after it. Throws if the patch is async or changes anything the
- * update does not own; the object may then be partly patched, and is not
- * to be written.
+ * Apply `edits` to a config file's object, in place and in order, and return
+ * the data before and after them. Each edit changes only the value at its
+ * path; a key above a nested path that holds no object gets one. Throws if an
+ * update throws or is async; the object may then be partly edited, and is
+ * not to be written.
  */
-export function applyConfigFilePatch<const K extends DkgConfigFileKey>(
-  config: Partial<DkgConfig>,
-  owns: readonly DkgConfigKeyPath<K>[],
-  patch: DkgConfigFilePatch<K>,
-): DkgConfigFilePatchResult {
+export function applyConfigEdits(config: Record<string, unknown>, edits: readonly DkgConfigEdit[]): DkgConfigFileChange {
   const before = toJsonData(config);
-  // A caller outside the type system can still pass an async patch.
-  const result: unknown = patch(config);
-  if (isThenable(result)) {
-    Promise.resolve(result).catch(() => {});
-    throw new TypeError('A config file patch must be synchronous');
+  for (const { path, update } of edits) {
+    const [key, nested] = path as readonly [string, string?];
+    if (nested === undefined) {
+      setOrRemove(config, key, runUpdate(update, config[key]));
+      continue;
+    }
+    const parent = config[key];
+    const next = runUpdate(update, isJsonObject(parent) ? parent[nested] : undefined);
+    if (isJsonObject(parent)) setOrRemove(parent, nested, next);
+    else if (next !== undefined) config[key] = { [nested]: next };
   }
   const after = toJsonData(config);
-  const ownedPaths = owns.map((path): readonly string[] => (typeof path === 'string' ? [path] : path));
-  const unowned = findUnownedChange(before, after, ownedPaths);
-  if (unowned) {
-    throw new Error(
-      `A config update changed ${unowned.join('.')}, which it does not own `
-      + `(it owns ${ownedPaths.map((path) => path.join('.')).join(', ')}); nothing was written`,
-    );
-  }
   return { before, after, changed: !isDeepStrictEqual(before, after) };
 }
 
-/**
- * The path of a change the patch made outside every owned path, or undefined
- * when there is none. A key on the way to an owned path must stay an object,
- * holding the same keys as before apart from owned ones; it may be created,
- * or replace a value that was not an object, to hold them.
- */
-function findUnownedChange(
-  before: unknown,
-  after: unknown,
-  owned: readonly (readonly string[])[],
-  path: readonly string[] = [],
-): readonly string[] | undefined {
-  if (isDeepStrictEqual(before, after)) return undefined;
-  if (owned.some((ownedPath) => startsWith(path, ownedPath))) return undefined;
-  if (!owned.some((ownedPath) => startsWith(ownedPath, path))) return path;
-  if (after !== undefined && !isJsonObject(after)) return path;
-  const was = isJsonObject(before) ? before : {};
-  const now = after ?? {};
-  for (const key of new Set([...Object.keys(was), ...Object.keys(now)])) {
-    const change = findUnownedChange(was[key], now[key], owned, [...path, key]);
-    if (change) return change;
+function runUpdate(update: (current: unknown) => unknown, current: unknown): unknown {
+  const next = update(current);
+  // A caller outside the type system can still pass an async update.
+  if (isThenable(next)) {
+    Promise.resolve(next).catch(() => {});
+    throw new TypeError('A config edit must be synchronous');
   }
-  return undefined;
+  return next;
 }
 
-function startsWith(path: readonly string[], prefix: readonly string[]): boolean {
-  return prefix.length <= path.length && prefix.every((segment, i) => segment === path[i]);
+function setOrRemove(object: Record<string, unknown>, key: string, value: unknown): void {
+  if (value === undefined) delete object[key];
+  else object[key] = value;
 }
 
 /**
@@ -195,12 +194,12 @@ function toJsonData(value: unknown): unknown {
 }
 
 /**
- * Apply the difference between the parsed and the patched config to the YAML
+ * Apply the difference between the parsed and the edited config to the YAML
  * text itself, so comments, blank lines and untouched keys keep their layout.
  * The document is edited under YAML 1.1 rules so that new strings which js-yaml
  * would read as another type (timestamps, yes/no) are quoted. If the edit
  * cannot be made in place (through an alias) or does not read back as the
- * patched config, the whole config is written instead.
+ * edited config, the whole config is written instead.
  */
 function patchYamlText(text: string, before: unknown, after: unknown): string {
   try {
@@ -233,12 +232,12 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
 }
 
 /** An empty config file holds an empty config; anything but an object is refused. */
-function configFileObject(raw: unknown, path: string): Partial<DkgConfig> {
+function configFileObject(raw: unknown, path: string): Record<string, unknown> {
   if (raw === undefined || raw === null) return {};
-  if (typeof raw !== 'object' || Array.isArray(raw)) {
+  if (!isJsonObject(raw)) {
     throw new Error(`${path} does not contain a config object; refusing to update it`);
   }
-  return raw as Partial<DkgConfig>;
+  return raw;
 }
 
 function isThenable(value: unknown): value is PromiseLike<unknown> {

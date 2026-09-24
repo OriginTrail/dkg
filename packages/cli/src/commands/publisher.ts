@@ -20,13 +20,13 @@ import {
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
-  loadConfig, updateConfigFile, configExists, configPath,
+  loadConfig, updateConfigFile, configEdit, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
   releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo,
-  resolveContextGraphs, resolveNetworkDefaultContextGraphs,
+  resolveNetworkDefaultContextGraphs,
   readNodeRoleFromConfigSync,
   type AutoUpdateConfig,
 } from '../config.js';
@@ -183,9 +183,7 @@ publisherCmd
       // the GH#2270 retry knobs (autoRetryEnabled, retryJitterRatio,
       // retryBackoffBaseMs/MaxMs), which a wholesale replace would erase on the
       // next `dkg publisher enable`. Mirrors `publisher disable` below.
-      await updateConfigFile(['publisher'], (config) => {
-        config.publisher = { ...(config.publisher ?? {}), ...runtime };
-      });
+      await updateConfigFile([configEdit(['publisher'], (publisher) => ({ ...publisher, ...runtime }))]);
       console.log('Async publisher enabled');
     } catch (err) {
       console.error(toErrorMessage(err));
@@ -198,9 +196,7 @@ publisherCmd
   .description('Disable async publisher runtime')
   .action(async () => {
     try {
-      await updateConfigFile(['publisher'], (config) => {
-        config.publisher = { ...(config.publisher ?? {}), enabled: false };
-      });
+      await updateConfigFile([configEdit(['publisher'], (publisher) => ({ ...publisher, enabled: false }))]);
       console.log('Async publisher disabled');
     } catch (err) {
       console.error(toErrorMessage(err));

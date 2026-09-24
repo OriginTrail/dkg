@@ -13,6 +13,8 @@ import {
   removePid,
   removeApiPort,
   updateConfigFile,
+  configEdit,
+  configValues,
   type DkgConfig,
   writePid,
   writeApiPort,
@@ -699,9 +701,9 @@ describe('dkgDir', () => {
   });
 });
 
-/** Write `config` into the selected home's (empty) config file through the production writer, owning its keys. */
+/** Write `config` into the selected home's (empty) config file through the production writer. */
 async function writeConfig(config: Partial<DkgConfig>): Promise<void> {
-  await updateConfigFile(Object.keys(config) as (keyof DkgConfig)[], (file) => { Object.assign(file, config); });
+  await updateConfigFile(configValues(config));
 }
 
 describe('localAgentIntegrations config round-trip', () => {
@@ -732,7 +734,7 @@ describe('localAgentIntegrations config round-trip', () => {
     await writeApiPort(9444);
     await files.writePid(111);
     await files.writeApiPort(9333);
-    await files.updateConfigFile(['name'], (config) => { config.name = 'home-a'; });
+    await files.updateConfigFile([configEdit(['name'], () => 'home-a')]);
     expect(files.configExists()).toBe(true);
     expect((await files.loadConfig()).name).toBe('home-a');
     expect(files.readConfigSync()).toMatchObject({ name: 'home-a' });

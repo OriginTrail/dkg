@@ -14,8 +14,8 @@ vi.mock('../src/config.js', async (importOriginal) => ({
 
 import { ApiClient } from '../src/api-client.js';
 import { registerContextGraphCommand } from '../src/commands/context-graph.js';
-import type { DkgConfigFilePatch, DkgConfigKeyPath } from '../src/config.js';
-import { applyConfigFilePatch } from '../src/home-config-file.js';
+import type { DkgConfigEdit } from '../src/config.js';
+import { applyConfigEdits } from '../src/home-config-file.js';
 
 const ID = '0x64529c023d853371228923b4fda5fb22f929bf51/research';
 
@@ -30,9 +30,9 @@ describe('dkg context-graph create --save', () => {
   beforeEach(() => {
     configMocks.file = { name: 'node', contextGraphs: ['existing'] };
     configMocks.updateConfigFile.mockReset();
-    // The real patch step, so a change outside the command's own keys fails.
-    configMocks.updateConfigFile.mockImplementation(async (owns: readonly DkgConfigKeyPath[], patch: DkgConfigFilePatch) => {
-      applyConfigFilePatch(configMocks.file, owns, patch);
+    // The real edit step, applied to the stand-in file.
+    configMocks.updateConfigFile.mockImplementation(async (edits: readonly DkgConfigEdit[]) => {
+      applyConfigEdits(configMocks.file, edits);
     });
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(ApiClient, 'connect').mockResolvedValue({

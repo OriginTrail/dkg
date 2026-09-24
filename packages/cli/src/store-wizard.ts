@@ -19,9 +19,7 @@ import {
   checkExternalStoreReachable,
   formatHealthCheckFailure,
 } from './daemon/store-health-check.js';
-import {
-  updateConfigFile, type DkgConfigFilePatch, type DkgConfigFileUpdate, type DkgConfigKeyPath,
-} from './config.js';
+import { configEdit, updateConfigFile, type DkgConfigEdit, type DkgConfigFileUpdate } from './config.js';
 import {
   isDockerAvailable as defaultIsDockerAvailable,
   provisionBlazegraphDocker as defaultProvisionBlazegraphDocker,
@@ -401,10 +399,7 @@ export interface ApplyStoreFlagsOptions {
   storeFlag?: string;
   storeUrlFlag?: string;
   /** Mock for tests; defaults to the real `updateConfigFile` from config.ts. */
-  updateConfigFile?: (
-    owns: readonly DkgConfigKeyPath<'store'>[],
-    patch: DkgConfigFilePatch<'store'>,
-  ) => Promise<Pick<DkgConfigFileUpdate, 'changed'>>;
+  updateConfigFile?: (edits: readonly DkgConfigEdit[]) => Promise<Pick<DkgConfigFileUpdate, 'changed'>>;
   /** Mock for tests; defaults to `globalThis.fetch` via the probe helper. */
   fetch?: typeof globalThis.fetch;
   log?: (msg: string) => void;
@@ -440,9 +435,7 @@ export async function applyStoreFlagsToConfig(
     backend === 'oxigraph-worker' ||
     backend === 'oxigraph-persistent'
   ) {
-    const { changed } = await update(['store'], (config) => {
-      delete config.store;
-    });
+    const { changed } = await update([configEdit(['store'], () => undefined)]);
     if (changed) log(`  Removed existing store block (--store ${backend} → local default).`);
     return;
   }
@@ -450,16 +443,13 @@ export async function applyStoreFlagsToConfig(
   // Daemon-managed local Oxigraph server: no URL to validate (the daemon
   // brings it up at boot). Write the block and return.
   if (backend === 'oxigraph-server') {
-    await update(['store'], (config) => {
+    await update([configEdit(['store'], (store) => ({
+      backend: 'oxigraph-server',
       // Preserve any existing managed-server overrides (port/location/cacheDir)
       // that planManagedOxigraph reads at boot — re-running setup with
       // `--store oxigraph-server` must not silently reset them to defaults.
-      const prevOptions =
-        config.store?.backend === 'oxigraph-server' && config.store.options
-          ? config.store.options
-          : {};
-      config.store = { backend: 'oxigraph-server', options: prevOptions };
-    });
+      options: store?.backend === 'oxigraph-server' && store.options ? store.options : {},
+    }))]);
     log('  Store configured: oxigraph-server (daemon-managed local server).');
     return;
   }
@@ -485,8 +475,6 @@ export async function applyStoreFlagsToConfig(
     throw new Error(`store URL validation failed:\n${formatHealthCheckFailure(health)}`);
   }
 
-  await update(['store'], (config) => {
-    config.store = externalStoreBlock(backend, url, false);
-  });
+  await update([configEdit(['store'], () => externalStoreBlock(backend, url, false))]);
   log(`  Store configured: ${backend} (${url}) — verified reachable.`);
 }

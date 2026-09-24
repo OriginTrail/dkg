@@ -16,8 +16,8 @@ vi.mock('../src/config.js', async (importOriginal) => ({
 
 import { ApiClient } from '../src/api-client.js';
 import { registerKnowledgeCommands } from '../src/commands/knowledge.js';
-import type { DkgConfigFilePatch, DkgConfigKeyPath } from '../src/config.js';
-import { applyConfigFilePatch } from '../src/home-config-file.js';
+import type { DkgConfigEdit } from '../src/config.js';
+import { applyConfigEdits } from '../src/home-config-file.js';
 
 function commandProgram(): Command {
   const program = new Command().name('dkg');
@@ -33,9 +33,9 @@ describe('knowledge subscribe CLI sync lifetime', () => {
     logLines.length = 0;
     configMocks.file = { name: 'node', contextGraphs: [] };
     configMocks.updateConfigFile.mockReset();
-    // The real patch step, so a change outside the command's own keys fails.
-    configMocks.updateConfigFile.mockImplementation(async (owns: readonly DkgConfigKeyPath[], patch: DkgConfigFilePatch) => {
-      applyConfigFilePatch(configMocks.file, owns, patch);
+    // The real edit step, applied to the stand-in file.
+    configMocks.updateConfigFile.mockImplementation(async (edits: readonly DkgConfigEdit[]) => {
+      applyConfigEdits(configMocks.file, edits);
     });
     configMocks.resolveContextGraphs.mockClear();
     vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {

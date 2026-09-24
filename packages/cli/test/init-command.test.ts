@@ -3,15 +3,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DkgConfig, DkgConfigFilePatch, DkgConfigFileUpdate, DkgConfigKeyPath } from '../src/config.js';
-import { applyConfigFilePatch } from '../src/home-config-file.js';
+import type { DkgConfig, DkgConfigEdit, DkgConfigFileUpdate } from '../src/config.js';
+import { applyConfigEdits } from '../src/home-config-file.js';
 
 const mocks = vi.hoisted(() => ({
   home: '',
   answers: {} as Record<string, string>,
   questions: [] as string[],
   loadConfig: vi.fn(),
-  updateConfigFile: vi.fn<(owns: readonly DkgConfigKeyPath[], patch: DkgConfigFilePatch) => Promise<DkgConfigFileUpdate>>(),
+  updateConfigFile: vi.fn<(edits: readonly DkgConfigEdit[]) => Promise<DkgConfigFileUpdate>>(),
   // The config file each patch is applied to; defaults to what loadConfig returned.
   fileAtWrite: undefined as Partial<DkgConfig> | undefined,
   // The file updateConfigFile reports as written; defaults to config.json.
@@ -75,10 +75,10 @@ describe('init wizard chain persistence', () => {
     mocks.fileAtWrite = undefined;
     mocks.sourcePath = undefined;
     mocks.written = [];
-    mocks.updateConfigFile.mockImplementation(async (owns, patch) => {
-      const file = structuredClone(mocks.fileAtWrite ?? await mocks.loadConfig()) as Partial<DkgConfig>;
-      // The real patch step, so a change outside the wizard's own keys fails.
-      applyConfigFilePatch(file, owns, patch);
+    mocks.updateConfigFile.mockImplementation(async (edits) => {
+      const file = structuredClone(mocks.fileAtWrite ?? await mocks.loadConfig()) as Record<string, unknown>;
+      // The real edit step, applied to the stand-in file.
+      applyConfigEdits(file, edits);
       mocks.written.push(file);
       return { path: mocks.sourcePath ?? join(mocks.home, 'config.json'), changed: true };
     });

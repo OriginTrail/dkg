@@ -19,13 +19,13 @@ import {
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
-  updateConfigFile, configExists, configPath,
+  updateConfigFile, configEdit, configExists, configPath,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig,
   releasesDir, activeSlot, swapSlot,
   slotEntryPoint, isStandaloneInstall, repoDir, isDkgMonorepo,
-  resolveContextGraphs, resolveNetworkDefaultContextGraphs,
+  resolveNetworkDefaultContextGraphs,
   readNodeRoleFromConfigSync,
   type AutoUpdateConfig,
 } from '../config.js';
@@ -377,8 +377,8 @@ program
 
       if (opts.save) {
         const notes: string[] = [];
-        await updateConfigFile(['contextGraphs'], (config) => {
-          const cgs = new Set(resolveContextGraphs(config));
+        await updateConfigFile([configEdit(['contextGraphs'], (graphs) => {
+          const cgs = new Set(graphs);
           // Save a stable identity (the verified cleartext id, or the name hash
           // the daemon re-resolves at start), never the on-chain number. Only
           // the entry spelled exactly as just typed is replaced: another
@@ -397,8 +397,8 @@ program
             }
           }
           cgs.add(subscribedId);
-          config.contextGraphs = [...cgs];
-        });
+          return [...cgs];
+        })]);
         for (const note of notes) console.log(note);
         console.log(`Saved ${subscribedId} to config (will auto-subscribe on restart).`);
       }

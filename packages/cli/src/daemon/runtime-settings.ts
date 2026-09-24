@@ -1,11 +1,11 @@
 // The daemon's runtime settings. Each one applies its change to the running
-// node and persists only the config keys it owns, so a concurrent CLI edit to
-// any other key survives. The persisted value is read from the in-memory
-// config when the write runs, so overlapping changes leave the file matching
-// the latest one.
+// node and persists only the config values it edits, so a concurrent CLI
+// edit to any other key survives. The persisted value is read from the
+// in-memory config when the write runs, so overlapping changes leave the file
+// matching the latest one.
 
 import type { LlmSettingsCallbacks } from '@origintrail-official/dkg-node-ui';
-import { updateConfigFile, type DkgConfig, type LlmConfig } from '../config.js';
+import { configEdit, updateConfigFile, type DkgConfig, type LlmConfig } from '../config.js';
 import { createTelemetryRuntime, type TelemetryRuntime } from './telemetry-runtime.js';
 
 /** The telemetry runtime, persisting only the master gate; other telemetry settings stay as they are on disk. */
@@ -15,9 +15,7 @@ export function createDaemonTelemetryRuntime(
   return createTelemetryRuntime({
     ...opts,
     persist: async (config) => {
-      await updateConfigFile([['telemetry', 'enabled']], (onDisk) => {
-        onDisk.telemetry = { ...onDisk.telemetry, enabled: config.telemetry?.enabled ?? false };
-      });
+      await updateConfigFile([configEdit(['telemetry', 'enabled'], () => config.telemetry?.enabled ?? false)]);
     },
   });
 }
@@ -41,10 +39,7 @@ export function createLlmSettings(opts: {
         memoryManager.updateConfig({ apiKey: '' });
         log('LLM config cleared via settings');
       }
-      await updateConfigFile(['llm'], (onDisk) => {
-        if (config.llm) onDisk.llm = config.llm;
-        else delete onDisk.llm;
-      });
+      await updateConfigFile([configEdit(['llm'], () => config.llm)]);
     },
   };
 }
@@ -57,8 +52,8 @@ export async function applySharedMemoryTtl(
   node.config.sharedMemoryTtlMs = ttlMs;
   node.config.workspaceTtlMs = ttlMs;
   node.agent.setSharedMemoryTtlMs(ttlMs);
-  await updateConfigFile(['sharedMemoryTtlMs', 'workspaceTtlMs'], (onDisk) => {
-    onDisk.sharedMemoryTtlMs = node.config.sharedMemoryTtlMs;
-    onDisk.workspaceTtlMs = node.config.workspaceTtlMs;
-  });
+  await updateConfigFile([
+    configEdit(['sharedMemoryTtlMs'], () => node.config.sharedMemoryTtlMs),
+    configEdit(['workspaceTtlMs'], () => node.config.workspaceTtlMs),
+  ]);
 }

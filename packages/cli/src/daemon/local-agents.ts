@@ -18,9 +18,9 @@ import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   loadConfig,
   updateConfigFile,
+  configEdit,
   dkgDir,
   type DkgConfig,
-  type DkgConfigKeyPath,
   type LocalAgentIntegrationCapabilities,
   type LocalAgentIntegrationConfig,
   type LocalAgentIntegrationManifest,
@@ -459,14 +459,12 @@ export function updateLocalAgentIntegration(
 export async function persistLocalAgentIntegration(config: DkgConfig, id: string): Promise<void> {
   const normalizedId = normalizeIntegrationId(id);
   if (!getStoredLocalAgentIntegrations(config)[normalizedId]) return;
-  const owns: DkgConfigKeyPath[] = normalizedId === 'openclaw'
-    ? [['localAgentIntegrations', normalizedId], 'openclawAdapter', 'openclawChannel']
-    : [['localAgentIntegrations', normalizedId]];
-  await updateConfigFile(owns, (onDisk) => {
-    const record = getStoredLocalAgentIntegrations(config)[normalizedId];
-    onDisk.localAgentIntegrations = { ...onDisk.localAgentIntegrations, [normalizedId]: record };
-    if (normalizedId === 'openclaw') pruneLegacyOpenClawConfig(onDisk);
-  });
+  await updateConfigFile([
+    configEdit(['localAgentIntegrations', normalizedId], () => getStoredLocalAgentIntegrations(config)[normalizedId]),
+    ...(normalizedId === 'openclaw'
+      ? [configEdit(['openclawAdapter'], () => undefined), configEdit(['openclawChannel'], () => undefined)]
+      : []),
+  ]);
 }
 
 export function hasConfiguredLocalAgentChat(config: DkgConfig, id: string): boolean {

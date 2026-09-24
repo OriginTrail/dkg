@@ -23,7 +23,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import yaml from 'js-yaml';
 import {
-  loadConfig, updateConfigFile, configExists,
+  loadConfig, updateConfigFile, configEdit, configValues, configExists,
   readPid, readApiPort, isProcessRunning, dkgDir, logPath, ensureDkgDir, removeApiPort,
   apiPortPath,
   loadNetworkConfig, loadProjectConfig, resolveAutoUpdateConfig, resolveAutoUpdateSource, resolveChainConfig, resolveKnownNetworkConfigName, resolveNetworkConfigName, validateNetworkConfigReadiness,
@@ -517,9 +517,9 @@ program
 
     rl.close();
 
-    // The wizard owns exactly these keys, and auth.enabled; the update refuses
-    // to change any other. Every other key in the file, even one the daemon
-    // wrote while the prompts were open, is left as it is.
+    // The wizard writes exactly these keys, and auth.enabled. Every other key
+    // in the file, even one the daemon wrote while the prompts were open, is
+    // left as it is.
     const answers = {
       name: name || 'dkg-node',
       // Persist the selected network explicitly (see resolveSetupNetworkName)
@@ -545,16 +545,10 @@ program
       // blazegraph back to oxigraph actually applies.
       store: storeBlock ?? undefined,
     };
-    const { path: savedPath } = await updateConfigFile(
-      [
-        'name', 'networkConfig', 'relay', 'apiPort', 'nodeRole', 'contextGraphs', 'autoUpdate', 'chain', 'store',
-        ['auth', 'enabled'],
-      ],
-      (onDisk) => {
-        Object.assign(onDisk, answers);
-        onDisk.auth = { ...onDisk.auth, enabled: enableAuth };
-      },
-    );
+    const { path: savedPath } = await updateConfigFile([
+      ...configValues(answers),
+      configEdit(['auth', 'enabled'], () => enableAuth),
+    ]);
     const config = { ...existing, ...answers };
 
     // Generate wallets eagerly so they're available for faucet funding

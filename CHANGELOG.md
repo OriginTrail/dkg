@@ -25,10 +25,12 @@ All notable changes to the DKG V10 node are documented here. The format is based
   configured through `config.yaml`, the first write created a `config.json`
   that took precedence, so later edits to the YAML no longer applied. Writes
   now take a lock shared by the daemon and the CLI, re-read the file, change
-  only the keys that command or setting declares it owns (anything else fails
-  the write), and replace the file atomically in its own format. The file
-  keeps its owner, group and permissions, and a symlinked config is written
-  through its link, even when the link's target does not exist yet. When the
+  only the values that command or setting edits (each edit is given only the
+  value it replaces), and replace the file atomically in its own format. A
+  write that stalled for a minute and lost the lock fails instead of
+  overwriting the write that took it over. The file keeps its owner, group
+  and permissions, and a symlinked config is written through its link, even
+  when the link's target does not exist yet. When the
   writing process may not give the file its owner (a config belonging to
   another user), the file is rewritten in place instead, as before, without
   the crash guarantee. An ACL set on the file itself is kept only in that
