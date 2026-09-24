@@ -3543,6 +3543,9 @@ export class DKGPublisher implements Publisher {
         );
       } catch (err) {
         // RC11 / PR1+PR3: no self-signed ACK fallback. ACK collection
+        // (A publishing Core's own StorageACK through its local endpoint is
+        // different: it is one verified signature of the Core quorum, not a
+        // fallback.)
         // failure is a publish failure — propagate the underlying
         // ACKProvider error verbatim so callers (and the daemon log)
         // see the real cause (RPC pre-flight, quorum unmet, transport,
