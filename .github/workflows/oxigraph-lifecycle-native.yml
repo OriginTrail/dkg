@@ -9,8 +9,9 @@ on:
     paths:
       - 'packages/cli/src/daemon/oxigraph-*.ts'
       - 'packages/cli/src/daemon/process-probe.ts'
+      - 'packages/cli/src/daemon/oxigraph-store-launch.ts'
       - 'packages/cli/src/own-module-path.ts'
-      - 'packages/cli/test/oxigraph-orphan.test.ts'
+      - 'packages/cli/test/oxigraph-orphan-*.test.ts'
       - 'packages/cli/test/oxigraph-listen-port.test.ts'
       - 'packages/cli/test/oxigraph-parent-watchdog.test.ts'
       - 'packages/cli/test/oxigraph-server.test.ts'
@@ -56,7 +57,9 @@ jobs:
       - name: Run the real-process Oxigraph lifecycle tests
         run: >-
           pnpm --dir packages/cli exec vitest run --config vitest.unit.config.ts
-          test/oxigraph-orphan.test.ts
+          test/oxigraph-orphan-lifecycle.test.ts
+          test/oxigraph-orphan-policy.test.ts
+          test/oxigraph-orphan-native.test.ts
           test/oxigraph-listen-port.test.ts
           test/oxigraph-parent-watchdog.test.ts
           test/oxigraph-server.test.ts

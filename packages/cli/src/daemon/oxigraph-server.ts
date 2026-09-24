@@ -49,7 +49,7 @@ import {
 } from './oxigraph-launch-strategy.js';
 import { invalidateExternalStoreQuadsCache } from './store-quads-cache.js';
 import { OXIGRAPH_STOP_GRACE_MS } from './oxigraph-parent-watchdog.js';
-import { oxigraphStoreArgs, type OxigraphStoreOwnership } from './oxigraph-orphan.js';
+import { oxigraphStoreArgs, type OxigraphStoreOwnership } from './oxigraph-store-launch.js';
 import {
   readCgroupOomSnapshot,
   readCgroupOomKill,

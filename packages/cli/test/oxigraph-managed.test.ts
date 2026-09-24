@@ -663,6 +663,56 @@ require('node:http').createServer((_req, res) => res.end('orphan')).listen(Numbe
     }
   });
 
+  it('reclaims an earlier release\'s orphan that runs an oxigraph* beside the PATH binary while the bundled binary launches', async () => {
+    // STABLE cache, as in the real-download test: the launch binary is the
+    // pinned release, outside the PATH directory, so only the forwarded PATH
+    // directory identifies the orphan's binary as this node's.
+    const cacheDir = join(tmpdir(), 'dkg-test-oxigraph-cache');
+    await mkdir(cacheDir, { recursive: true });
+    const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
+    const port = await freePort();
+    const location = join(dataDir, 'oxigraph-data');
+    await mkdir(location, { recursive: true });
+    const pathSibling = join(systemOxigraphDir!, 'oxigraph-legacy');
+    await writeFile(pathSibling, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+require('node:fs').openSync(require('node:path').join(args[args.indexOf('--location') + 1], 'LOCK'), 'a');
+const [host, port] = args[args.indexOf('--bind') + 1].split(':');
+require('node:http').createServer((_req, res) => res.end('orphan')).listen(Number(port), host);
+`);
+    await chmod(pathSibling, 0o755);
+    const orphanPid = await spawnOrphan(pathSibling, [
+      'serve', '--location', location, '--bind', `127.0.0.1:${port}`,
+    ]);
+    const lines: string[] = [];
+    let result: Awaited<ReturnType<typeof startManagedOxigraph>> = null;
+    try {
+      expect(await waitForCondition(async () => {
+        try { return (await fetch(`http://127.0.0.1:${port}/`)).ok; } catch { return false; }
+      })).toBe(true);
+      result = await startManagedOxigraph({
+        config: { store: { backend: MANAGED_OXIGRAPH_BACKEND, options: { port, cacheDir } } },
+        dataDir,
+        log: (line) => lines.push(line),
+        readyTimeoutMs: 30_000,
+      });
+      expect(lines.join('\n')).toContain(
+        `stopping orphaned Oxigraph pid ${orphanPid} (it was reparented to PID 1)`,
+      );
+      const answer = await fetch(String(result!.storeConfig.options.queryEndpoint), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/sparql-query', Accept: 'application/sparql-results+json' },
+        body: 'ASK { ?s ?p ?o }',
+      });
+      expect(answer.ok).toBe(true);
+    } finally {
+      await result?.handle.stop();
+      try { process.kill(orphanPid, 'SIGKILL'); } catch { /* already gone */ }
+      await rm(pathSibling, { force: true });
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   it('wires query and construct timeouts to recovery while filtering mutations', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
     const port = await freePort();

@@ -43,6 +43,7 @@ import { promisify } from 'node:util';
 import { mapWithConcurrency } from '@origintrail-official/dkg-agent/map-with-concurrency';
 import { writeFileAtomicWith } from './fs-utils.js';
 import { OXIGRAPH_STOP_GRACE_MS } from './oxigraph-parent-watchdog.js';
+import { oxigraphStoreArgs, type OxigraphStoreOwnership } from './oxigraph-store-launch.js';
 import {
   procHasFdTarget,
   procPids,
@@ -152,15 +153,6 @@ const defaultIo: OrphanedOxigraphIo = {
   sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
   now: () => Date.now(),
 };
-
-/**
- * The leading `oxigraph` arguments that open `location`. The managed server
- * launches with them and the reclaim recognises a holder by them, so the two
- * cannot drift apart.
- */
-export function oxigraphStoreArgs(location: string): string[] {
-  return ['serve', '--location', location];
-}
 
 /** Executables that count as this node's Oxigraph. */
 export interface OxigraphBinaries {
@@ -511,19 +503,6 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
     }
     await io.sleep(pollIntervalMs);
   }
-}
-
-/**
- * The store-ownership steps of each managed Oxigraph launch, called in order.
- * Built where the binary catalog is known (the managed layer).
- */
-export interface OxigraphStoreOwnership {
-  /** Stop orphaned Oxigraph processes that hold the store lock. */
-  beforeSpawn(): Promise<void>;
-  /** Record the new launch as the store's owner. */
-  spawned(launch: { launcherPid: number }): Promise<void>;
-  /** Add the verified Oxigraph to the owner record. */
-  ready(launch: { launcherPid: number; oxigraphPid: number }): Promise<void>;
 }
 
 export function createOxigraphStoreOwnership(opts: {
