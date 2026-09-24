@@ -63,6 +63,7 @@ export {
 export {
   createKnowledgeAssetReadModel,
   type ContextGraphForKaAnswer,
+  type ContextGraphKaAtAnswer,
   type KnowledgeAssetOwnWrite,
   type KnowledgeAssetReadModel,
   type KnowledgeAssetReadModelOptions,

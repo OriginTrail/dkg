@@ -300,10 +300,12 @@ describe('knowledge-asset views over the one log', () => {
         return { kind: 'bound', contextGraphId: 7n, asOfBlockNumber: SETTLED };
       },
       async readContextGraphKaList() { return undefined; },
+      async readContextGraphKaAt() { return undefined; },
     };
     const currentReadModel: KnowledgeAssetReadModel = {
       async readContextGraphForKa() { return undefined; },
       async readContextGraphKaList() { return undefined; },
+      async readContextGraphKaAt() { return undefined; },
     };
     const { adapter, calls, live, replaceKnowledgeAssets } = makeAdapter({
       store: populated(),
@@ -327,19 +329,17 @@ describe('knowledge-asset views over the one log', () => {
     const mayFinish = new Promise<void>((resolve) => { release = resolve; });
     const oldReadModel: KnowledgeAssetReadModel = {
       async readContextGraphForKa() { return undefined; },
-      async readContextGraphKaList() {
+      async readContextGraphKaList() { return undefined; },
+      async readContextGraphKaAt() {
         started();
         await mayFinish;
-        return {
-          contextGraphId: 7n,
-          kaIds: [4242n],
-          throughBlockNumber: COVERED_THROUGH,
-        };
+        return { kaId: 4242n, asOfBlockNumber: COVERED_THROUGH };
       },
     };
     const currentReadModel: KnowledgeAssetReadModel = {
       async readContextGraphForKa() { return undefined; },
       async readContextGraphKaList() { return undefined; },
+      async readContextGraphKaAt() { return undefined; },
     };
     const { adapter, calls, live, replaceKnowledgeAssets } = makeAdapter({
       store: populated(),
@@ -354,6 +354,45 @@ describe('knowledge-asset views over the one log', () => {
 
     expect(await pending).toBe(9003n);
     expect(calls).toEqual(['cgStorage.getContextGraphKaAt']);
+  });
+
+  it('asks the read model for ONE ordinal, never for the whole list', async () => {
+    const asked: unknown[][] = [];
+    const readModel: KnowledgeAssetReadModel = {
+      async readContextGraphForKa() { return undefined; },
+      async readContextGraphKaList() { throw new Error('the list must not be read'); },
+      async readContextGraphKaAt(...args) {
+        asked.push(args);
+        return { kaId: 4343n, asOfBlockNumber: COVERED_THROUGH };
+      },
+    };
+    const { adapter, calls } = makeAdapter({ store: populated(), knowledgeAssets: readModel });
+
+    expect(await adapter.getContextGraphKCAt(7n, 1n)).toBe(4343n);
+    expect(asked).toEqual([[7n, 1n, { view: 'latest' }]]);
+    expect(calls).toEqual([]);
+  });
+
+  it('walks every ordinal of a large graph from one fold, with no eth_call', async () => {
+    const rows = [creation(40, 7n)];
+    for (let index = 0; index < 1_500; index += 1) {
+      rows.push(registration(50 + Math.floor(index / 30), 7n, 10_000n + BigInt(index), index % 30));
+    }
+    const store = seeded(rows);
+    let registrationReads = 0;
+    const readEvents = store.readEvents.bind(store);
+    store.readEvents = async (scope, query) => {
+      if (query.topic1 !== undefined && query.topic2 === undefined
+        && query.topic0?.length === 1) registrationReads += 1;
+      return readEvents(scope, query);
+    };
+    const { adapter, calls } = makeAdapter({ store });
+
+    for (let index = 0; index < 1_500; index += 1) {
+      expect(await adapter.getContextGraphKCAt(7n, BigInt(index))).toBe(10_000n + BigInt(index));
+    }
+    expect(registrationReads).toBe(1);
+    expect(calls).toEqual([]);
   });
 
   it('includes the UNSETTLED tail, because the call it replaces is unpinned', async () => {
