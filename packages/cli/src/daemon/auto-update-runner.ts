@@ -6,13 +6,13 @@
  * target after the wait, and apply only the still-current one — is a focused,
  * testable unit rather than a closure buried in the 3.5k-line lifecycle file.
  *
- * The mode differences (which check, which installer, log wording) live here;
- * the cross-cutting rollout state machine (single-flight, hold-off, shutdown
- * abort, isUpdating) is owned by the {@link UpdateHoldoffGate}. Lifecycle starts
- * polling through {@link startGitUpdatePolling} / {@link startNpmUpdatePolling},
- * which build the persisted gate, the runCheck and its timers.
+ * The mode differences (which check, which installer, log wording) live here.
+ * Each check result is mapped onto the gate's mode-neutral
+ * {@link UpdateCheckOutcome}; the cross-cutting rollout state machine
+ * (single-flight, hold-off, persisted deadline, shutdown abort, isUpdating) is
+ * owned by the {@link UpdateHoldoffGate}. `auto-update-polling.ts` builds the
+ * daemon's gate, these runChecks and their timers.
  */
-import { join } from 'node:path';
 import {
   checkForNpmVersionUpdate,
   deriveUpdateCheckState,
@@ -21,76 +21,54 @@ import {
   getCurrentCliVersion,
   checkForNewCommitWithStatus,
   performUpdateWithStatus,
+  type CommitCheckStatus,
+  type NpmVersionStatus,
 } from './auto-update.js';
 import {
-  createUpdateHoldoffGate,
   describeUpdateHold,
-  resolveUpdateJitterMs,
+  type UpdateCheckOutcome,
   type UpdateHoldoffGate,
-  type UpdateHoldoffGateConfig,
 } from './auto-update-jitter.js';
-import { createFileUpdateHoldoffStore, UPDATE_HOLDOFF_FILE } from './auto-update-holdoff-store.js';
 import type { LastUpdateCheck } from './state.js';
 import type { ResolvedAutoUpdateConfig } from '../config.js';
 
+/** An npm version check as a gate outcome. `no-target` is definitive: the
+ *  channel has nothing to install until a release is published to it. */
+export function npmCheckOutcome(status: NpmVersionStatus): UpdateCheckOutcome {
+  switch (status.status) {
+    case 'available': return { status: 'available', target: status.version };
+    case 'up-to-date':
+    case 'no-target': return { status: 'none' };
+    case 'error': return { status: 'failed' };
+  }
+}
+
+/** A git ref check as a gate outcome. */
+export function gitCheckOutcome(status: CommitCheckStatus): UpdateCheckOutcome {
+  if (status.status === 'up-to-date') return { status: 'none' };
+  if (status.status === 'available' && status.commit) return { status: 'available', target: status.commit };
+  return { status: 'failed' };
+}
+
 /**
- * Re-resolve the CURRENT npm channel target after the hold-off, mapping to the
- * version to apply or null when there is nothing to apply now (withdrawn /
- * rolled back / caught up). Throws when the registry check itself failed, so
- * the gate keeps the rollout deadline instead of treating the failure as "no
- * target". Private to the runner — an adapter over the already-public
- * `checkForNpmVersionUpdate`, not part of the daemon's API.
+ * Re-check the npm channel target after the hold-off. Private to the runner — an
+ * adapter over the already-public `checkForNpmVersionUpdate`, not part of the
+ * daemon's API.
  */
 export async function resolveCurrentNpmTarget(
   log: (msg: string) => void,
   allowPrerelease: boolean,
   channel?: string,
-): Promise<string | null> {
-  const status = await checkForNpmVersionUpdate(log, allowPrerelease, channel);
-  if (status.status === 'error') throw new Error('npm registry check failed');
-  return status.status === 'available' ? status.version : null;
+): Promise<UpdateCheckOutcome> {
+  return npmCheckOutcome(await checkForNpmVersionUpdate(log, allowPrerelease, channel));
 }
 
-/** Git counterpart to {@link resolveCurrentNpmTarget}: the current ref tip, or
- *  null when it no longer points ahead of the running commit. Throws when the
- *  ref check itself failed. Runner-private. */
+/** Git counterpart to {@link resolveCurrentNpmTarget}: re-check the ref tip. Runner-private. */
 export async function resolveCurrentGitTarget(
   au: ResolvedAutoUpdateConfig,
   log: (msg: string) => void,
-): Promise<string | null> {
-  const status = await checkForNewCommitWithStatus(au, log);
-  if (status.status === 'error') throw new Error('git ref check failed');
-  return status.status === 'available' && status.commit ? status.commit : null;
-}
-
-export interface DaemonUpdateHoldoffGateDeps {
-  au: Pick<ResolvedAutoUpdateConfig, 'updateJitterMinutes' | 'checkIntervalMinutes'>;
-  /** The DKG home; the rollout deadline is kept in `<dkgHome>/.update-holdoff.json`. */
-  dkgHome: string;
-  isShuttingDown: () => boolean;
-  /** Toggle the daemon's user-visible "is updating" flag. */
-  setUpdating: (updating: boolean) => void;
-  log: (msg: string) => void;
-}
-
-/**
- * The rollout gate both daemon auto-update modes (git and npm) use: the jitter
- * window from config/env, and the deadline persisted under the DKG home so a
- * restart mid-hold resumes it. The polling helpers below build their gates only
- * through this function. `seams` is for tests (deterministic rng, clock and sleep).
- */
-export function createDaemonUpdateHoldoffGate(
-  deps: DaemonUpdateHoldoffGateDeps,
-  seams: Pick<UpdateHoldoffGateConfig, 'rng' | 'now' | 'sleep'> = {},
-): UpdateHoldoffGate {
-  return createUpdateHoldoffGate({
-    jitterMs: resolveUpdateJitterMs(deps.au.updateJitterMinutes, deps.au.checkIntervalMinutes),
-    isShuttingDown: deps.isShuttingDown,
-    setUpdating: deps.setUpdating,
-    log: deps.log,
-    store: createFileUpdateHoldoffStore(join(deps.dkgHome, UPDATE_HOLDOFF_FILE)),
-    ...seams,
-  });
+): Promise<UpdateCheckOutcome> {
+  return gitCheckOutcome(await checkForNewCommitWithStatus(au, log));
 }
 
 export interface NpmUpdateRunCheckDeps {
@@ -107,11 +85,9 @@ export interface NpmUpdateRunCheckDeps {
 
 /**
  * Build the npm-mode polling `runCheck`. Always refreshes `lastUpdateCheck` (so
- * `/api/status` is current even when auto-apply is off); when a gate is present
- * and an update is available, routes the apply through it — including the
- * post-hold-off revalidation that skips a version withdrawn during the wait.
- * A poll that finds nothing to apply (up to date, or no channel target) drops
- * the gate's persisted rollout deadline.
+ * `/api/status` is current even when auto-apply is off); when a gate is present,
+ * hands it the check's outcome — including the post-hold-off re-check that skips
+ * a version withdrawn during the wait.
  */
 export function createNpmUpdateRunCheck(deps: NpmUpdateRunCheckDeps): () => Promise<void> {
   return async () => {
@@ -130,21 +106,16 @@ export function createNpmUpdateRunCheck(deps: NpmUpdateRunCheckDeps): () => Prom
         );
     }
     if (!deps.gate) return; // version check only — no auto-apply when polling disabled
-    if (npmStatus.status === 'up-to-date' || npmStatus.status === 'no-target') {
-      await deps.gate.clearHold();
-      return;
-    }
-    if (npmStatus.status !== 'available') return;
-    const detectedVersion = npmStatus.version;
 
-    await deps.gate.run<string>({
-      detectedTarget: detectedVersion,
-      onHold: (holdMs, resumed) =>
-        deps.log(`Auto-update (npm): version ${detectedVersion} available; ${describeUpdateHold(holdMs, resumed)}`),
+    await deps.gate.poll(npmCheckOutcome(npmStatus), {
+      onHold: (version, holdMs, resumed) =>
+        deps.log(`Auto-update (npm): version ${version} available; ${describeUpdateHold(holdMs, resumed)}`),
       shutdownMessage:
         'Auto-update (npm): hold-off aborted — daemon shutting down; deferring to next boot.',
       supersededMessage:
         'Auto-update (npm): target superseded during hold-off (version withdrawn or node caught up); skipping — next poll re-evaluates.',
+      recheckFailedMessage:
+        'Auto-update (npm): re-check after the hold-off failed; not applying — the rollout deadline is kept and the next poll retries.',
       // Re-resolve the channel target AFTER the hold-off so a version withdrawn /
       // rolled back during the wait is not installed; a newer one is applied.
       revalidate: () => resolveCurrentNpmTarget(deps.log, deps.allowPrerelease, deps.channel),
@@ -172,10 +143,9 @@ export interface GitUpdateRunCheckDeps {
 
 /**
  * Build the git-mode polling `runCheck`. Detects the remote ref tip, refreshes
- * `lastUpdateCheck`, and on an available commit routes the apply through the
- * gate — re-resolving the ref AFTER the hold-off so the CURRENT tip is applied,
- * not the commit captured before the (possibly long) wait. A poll that finds the
- * node up to date drops the gate's persisted rollout deadline.
+ * `lastUpdateCheck`, and hands the outcome to the gate — which re-resolves the
+ * ref AFTER the hold-off so the CURRENT tip is applied, not the commit captured
+ * before the (possibly long) wait.
  */
 export function createGitUpdateRunCheck(deps: GitUpdateRunCheckDeps): () => Promise<void> {
   return async () => {
@@ -191,23 +161,17 @@ export function createGitUpdateRunCheck(deps: GitUpdateRunCheckDeps): () => Prom
     deps.lastUpdateCheck.latestVersion = '';
     deps.lastUpdateCheck.latestCommit = gitStatus.commit ?? '';
 
-    if (gitStatus.status === 'up-to-date') {
-      await deps.gate.clearHold();
-      return;
-    }
-    if (gitStatus.status !== 'available' || !gitStatus.commit) return;
-    const detectedCommit = gitStatus.commit;
-
-    await deps.gate.run<string>({
-      detectedTarget: detectedCommit,
-      onHold: (holdMs, resumed) =>
+    await deps.gate.poll(gitCheckOutcome(gitStatus), {
+      onHold: (commit, holdMs, resumed) =>
         deps.log(
-          `Auto-update (git): new commit ${detectedCommit.slice(0, 8)} available; ${describeUpdateHold(holdMs, resumed)}`,
+          `Auto-update (git): new commit ${commit.slice(0, 8)} available; ${describeUpdateHold(holdMs, resumed)}`,
         ),
       shutdownMessage:
         'Auto-update (git): hold-off aborted — daemon shutting down; deferring to next boot.',
       supersededMessage:
         'Auto-update (git): target superseded during hold-off (ref moved or node caught up); skipping — next poll re-evaluates.',
+      recheckFailedMessage:
+        'Auto-update (git): re-check after the hold-off failed; not applying — the rollout deadline is kept and the next poll retries.',
       revalidate: () => resolveCurrentGitTarget(deps.au, deps.log),
       apply: async (commit) => {
         const updateStatus = await performUpdateWithStatus(deps.au, deps.log, {
@@ -226,91 +190,4 @@ export function createGitUpdateRunCheck(deps: GitUpdateRunCheckDeps): () => Prom
       },
     });
   };
-}
-
-/** Delay before the first update check after boot. */
-const FIRST_UPDATE_CHECK_DELAY_MS = 15_000;
-
-/** The timers polling is scheduled on. Injectable for tests. */
-export interface UpdatePollingTimers {
-  setTimeout(fn: () => unknown, ms: number): unknown;
-  setInterval(fn: () => unknown, ms: number): ReturnType<typeof setInterval>;
-}
-
-const globalTimers: UpdatePollingTimers = {
-  setTimeout: (fn, ms) => setTimeout(fn, ms),
-  setInterval: (fn, ms) => setInterval(fn, ms),
-};
-
-/** What the daemon hands both polling helpers. */
-export interface DaemonUpdatePollingDeps {
-  /** The DKG home; the rollout deadline is kept in `<dkgHome>/.update-holdoff.json`. */
-  dkgHome: string;
-  isShuttingDown: () => boolean;
-  setUpdating: (updating: boolean) => void;
-  log: (msg: string) => void;
-  lastUpdateCheck: LastUpdateCheck;
-  /** Trigger the supervised restart after a successful install. */
-  onRestart: () => Promise<void>;
-  /** Test seams. */
-  timers?: UpdatePollingTimers;
-  gateSeams?: Pick<UpdateHoldoffGateConfig, 'rng' | 'now' | 'sleep'>;
-}
-
-function schedulePolling(
-  runCheck: () => Promise<void>,
-  intervalMs: number,
-  timers: UpdatePollingTimers = globalTimers,
-): ReturnType<typeof setInterval> {
-  timers.setTimeout(runCheck, FIRST_UPDATE_CHECK_DELAY_MS);
-  return timers.setInterval(runCheck, intervalMs);
-}
-
-/**
- * Start git-mode auto-update polling: one persisted rollout gate (created once,
- * so single-flight holds across ticks) behind a runCheck that fires shortly
- * after boot and then every `checkIntervalMinutes`. Returns the interval handle
- * for shutdown.
- */
-export function startGitUpdatePolling(
-  au: ResolvedAutoUpdateConfig,
-  deps: DaemonUpdatePollingDeps,
-): ReturnType<typeof setInterval> {
-  const gate = createDaemonUpdateHoldoffGate({ ...deps, au }, deps.gateSeams);
-  const runCheck = createGitUpdateRunCheck({
-    gate,
-    log: deps.log,
-    lastUpdateCheck: deps.lastUpdateCheck,
-    au,
-    onRestart: deps.onRestart,
-  });
-  return schedulePolling(runCheck, au.checkIntervalMinutes * 60_000, deps.timers);
-}
-
-export interface NpmUpdatePollingOptions {
-  /** null: auto-apply disabled. The poll still checks and records the latest
-   *  version, but there is no gate and nothing is installed. */
-  au: ResolvedAutoUpdateConfig | null;
-  checkIntervalMinutes: number;
-  allowPrerelease: boolean;
-  channel?: string;
-  nodeRole: 'edge' | 'core';
-}
-
-/** npm-mode counterpart to {@link startGitUpdatePolling}. */
-export function startNpmUpdatePolling(
-  opts: NpmUpdatePollingOptions,
-  deps: DaemonUpdatePollingDeps,
-): ReturnType<typeof setInterval> {
-  const gate = opts.au ? createDaemonUpdateHoldoffGate({ ...deps, au: opts.au }, deps.gateSeams) : null;
-  const runCheck = createNpmUpdateRunCheck({
-    gate,
-    log: deps.log,
-    lastUpdateCheck: deps.lastUpdateCheck,
-    allowPrerelease: opts.allowPrerelease,
-    channel: opts.channel,
-    nodeRole: opts.nodeRole,
-    onRestart: deps.onRestart,
-  });
-  return schedulePolling(runCheck, opts.checkIntervalMinutes * 60_000, deps.timers);
 }

@@ -362,7 +362,6 @@ import {
 import {
   normalizeRepo,
   isValidRepoSpec,
-  repoToFetchUrl,
   githubRepoForApi,
   resolveRemoteCommitSha,
   type PendingUpdateState,
@@ -376,12 +375,8 @@ import {
   acquireUpdateLock,
   releaseUpdateLock,
 } from './auto-update.js';
-import { formatAutoUpdateTagVerificationWarning, isValidRef, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
-import {
-  startGitUpdatePolling,
-  startNpmUpdatePolling,
-  type DaemonUpdatePollingDeps,
-} from './auto-update-runner.js';
+import { isValidRef } from '../auto-update-ref.js';
+import { startDaemonUpdatePolling } from './auto-update-polling.js';
 import {
   chainResetWipe,
   detectBackendSwitch,
@@ -2694,84 +2689,31 @@ async function runDaemonInnerWithStartupOwnership(
   }, PING_INTERVAL_MS);
   if (pingTimer.unref) pingTimer.unref();
 
-  // Version check + auto-update.
-  // The resolver merges repo/branch/interval field-by-field across
-  // ~/.dkg/config.json → network/<env>.json → project.json, so defaults
-  // in the shipped configs take effect even when the local config
-  // omits the field (the common case after `dkg init` with default answers).
-  let updateInterval: ReturnType<typeof setInterval> | null = null;
+  // Version check + auto-update. Each mode's gate holds off a per-node random
+  // delay between detecting an update and applying it, so a release never
+  // restarts the whole fleet in one window (the 2026-07-10 bootstrap-storm
+  // trigger); the deadline is persisted under the DKG home, so a restart
+  // mid-hold resumes it instead of drawing a fresh hold.
   const au = resolveAutoUpdateConfig(config, network);
   const configuredAutoUpdateSource = au?.source ?? resolveAutoUpdateSource(config, network);
   const standalone = resolveStandaloneInstall(configuredAutoUpdateSource);
-  const pollingMode = resolveAutoUpdatePollingMode(configuredAutoUpdateSource, standalone);
-  // Rollout jitter: each mode's gate holds off a per-node random delay between
-  // detecting an update and applying it, so a release never restarts the whole
-  // fleet in one window (the 2026-07-10 bootstrap-storm trigger). The deadline
-  // is persisted under the DKG home, so a restart mid-hold resumes it instead of
-  // drawing a fresh hold.
-  const updatePollingDeps: DaemonUpdatePollingDeps = {
-    dkgHome: dkgDir(),
-    isShuttingDown: () => shuttingDown,
-    setUpdating: (updating) => { daemonState.isUpdating = updating; },
-    log,
-    lastUpdateCheck: daemonState.lastUpdateCheck,
-    onRestart: () => shutdown(DAEMON_EXIT_CODE_RESTART),
-  };
-
-  if (pollingMode === "git" && au) {
-    let watchedRef = "";
-    let watchedRepo = "";
-    let watchedRefPlan: ReturnType<typeof resolveAutoUpdateGitRefPlan> | null = null;
-    try {
-      watchedRefPlan = resolveAutoUpdateGitRefPlan(au);
-      watchedRef = watchedRefPlan.ref;
-      watchedRepo = repoToFetchUrl(au.repo);
-    } catch (err: any) {
-      log(
-        `Auto-update (git): invalid config — ${err?.message ?? String(err)}. ` +
-          "Git polling disabled until config is fixed and the daemon is restarted.",
-      );
-    }
-
-    if (watchedRef && watchedRepo) {
-      log(
-        `Auto-update (git): enabled source="git"; watching repo="${watchedRepo}" ref="${watchedRef}" ` +
-          `(every ${au.checkIntervalMinutes}min). NPM/dist-tag updates remain recommended; git mode is advanced/experimental.`,
-      );
-      const verificationWarning = watchedRefPlan ? formatAutoUpdateTagVerificationWarning(watchedRefPlan) : null;
-      if (verificationWarning) log(verificationWarning);
-
-      updateInterval = startGitUpdatePolling(au, updatePollingDeps);
-    }
-  } else if (pollingMode === "git") {
-    log("Auto-update (git): disabled — autoUpdate.enabled is false.");
-  } else if (pollingMode === "npm") {
-    const checkIntervalMinutes = au?.checkIntervalMinutes ?? 30;
-    // Even in version-check-only mode (au is null because auto-apply is
-    // disabled) the policy used for the check must reflect the operator's
-    // shipped intent, and must mirror resolveAutoUpdateConfig's precedence:
-    // local config BEFORE network default. A disabled node with a local
-    // channel / allowPrerelease pin must observe its own cohort, not the
-    // network's.
-    const allowPre = au?.allowPrerelease ?? config.autoUpdate?.allowPrerelease ?? network?.autoUpdate?.allowPrerelease ?? true;
-    const channel = au?.channel ?? config.autoUpdate?.channel ?? network?.autoUpdate?.channel;
-
-    log(
-      `Auto-update (npm): ${au ? "enabled" : "disabled — version check only"}${channel ? ` channel="${channel}"` : ""} (every ${checkIntervalMinutes}min)`,
-    );
-
-    // With auto-apply disabled (au null) there is no gate: detect + record only.
-    updateInterval = startNpmUpdatePolling(
-      { au, checkIntervalMinutes, allowPrerelease: allowPre, channel, nodeRole: config.nodeRole ?? "edge" },
-      updatePollingDeps,
-    );
-  } else if (au?.enabled) {
-    // Monorepo dev daemon with auto-update enabled in config — log
-    // once at boot so contributors understand why polling is silent.
-    log(
-      "Auto-update: skipped — monorepo checkout detected. Use `git pull && pnpm install && pnpm build` to update.",
-    );
-  }
+  const updateInterval = startDaemonUpdatePolling(
+    {
+      pollingMode: resolveAutoUpdatePollingMode(configuredAutoUpdateSource, standalone),
+      au,
+      localAutoUpdate: config.autoUpdate,
+      networkAutoUpdate: network?.autoUpdate,
+      nodeRole: config.nodeRole ?? "edge",
+    },
+    {
+      dkgHome: dkgDir(),
+      isShuttingDown: () => shuttingDown,
+      setUpdating: (updating) => { daemonState.isUpdating = updating; },
+      log,
+      lastUpdateCheck: daemonState.lastUpdateCheck,
+      onRestart: () => shutdown(DAEMON_EXIT_CODE_RESTART),
+    },
+  );
 
   // --- Dashboard DB + Metrics ---
 

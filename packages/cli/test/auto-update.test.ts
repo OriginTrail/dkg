@@ -204,15 +204,8 @@ import {
   resolveAutoUpdateGitRef,
   resolveAutoUpdateGitRefPlan,
 } from '../src/daemon.js';
-import { createUpdateHoldoffGate, UPDATE_JITTER_ENV, type UpdateHoldoffRecord } from '../src/daemon/auto-update-jitter.js';
-import {
-  createNpmUpdateRunCheck,
-  createGitUpdateRunCheck,
-  startGitUpdatePolling,
-  startNpmUpdatePolling,
-  type DaemonUpdatePollingDeps,
-  type UpdatePollingTimers,
-} from '../src/daemon/auto-update-runner.js';
+import { createUpdateHoldoffGate, type UpdateHoldoffRecord } from '../src/daemon/auto-update-jitter.js';
+import { createNpmUpdateRunCheck, createGitUpdateRunCheck } from '../src/daemon/auto-update-runner.js';
 import type { LastUpdateCheck } from '../src/daemon/state.js';
 
 const AU: AutoUpdateConfig = {
@@ -2365,30 +2358,30 @@ describe('resolveCurrentNpmTarget (post-hold-off revalidation)', () => {
     const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
     currentVersion('9.0.0');
     fetchImpl = async () => makeRegistryResponse({ latest: '9.1.0' });
-    expect(await resolveCurrentNpmTarget(() => {}, false)).toBe('9.1.0');
+    expect(await resolveCurrentNpmTarget(() => {}, false)).toEqual({ status: 'available', target: '9.1.0' });
   });
 
-  it('returns null when the target was withdrawn / rolled back during the hold-off (now up-to-date)', async () => {
+  it('returns none when the target was withdrawn / rolled back during the hold-off (now up-to-date)', async () => {
     const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
     currentVersion('9.0.0');
     // 9.1.0 pulled; latest rolled back to what the node already runs.
     fetchImpl = async () => makeRegistryResponse({ latest: '9.0.0' });
-    expect(await resolveCurrentNpmTarget(() => {}, false)).toBeNull();
+    expect(await resolveCurrentNpmTarget(() => {}, false)).toEqual({ status: 'none' });
   });
 
-  it('returns null when a pinned channel no longer has an acceptable target', async () => {
+  it('returns none when a pinned channel no longer has an acceptable target', async () => {
     const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
     currentVersion('9.0.0');
     // The 'mainnet' dist-tag is absent -> no-target -> nothing to apply.
     fetchImpl = async () => makeRegistryResponse({ latest: '9.1.0' });
-    expect(await resolveCurrentNpmTarget(() => {}, false, 'mainnet')).toBeNull();
+    expect(await resolveCurrentNpmTarget(() => {}, false, 'mainnet')).toEqual({ status: 'none' });
   });
 
-  it('throws when the registry check itself failed, so the gate keeps the rollout deadline', async () => {
+  it('returns failed when the registry check itself failed, so the gate keeps the rollout deadline', async () => {
     const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
     currentVersion('9.0.0');
     fetchImpl = async () => ({ ok: false, status: 503, json: async () => ({}) }) as any;
-    await expect(resolveCurrentNpmTarget(() => {}, false)).rejects.toThrow('npm registry check failed');
+    expect(await resolveCurrentNpmTarget(() => {}, false)).toEqual({ status: 'failed' });
   });
 });
 
@@ -2408,21 +2401,21 @@ describe('resolveCurrentGitTarget (post-hold-off revalidation)', () => {
     const { resolveCurrentGitTarget } = await import('../src/daemon/auto-update-runner.js');
     readFileImpl = async () => 'aaa1111'; // current commit
     remoteSha('bbb2222');
-    expect(await resolveCurrentGitTarget(gitAu, () => {})).toBe('bbb2222');
+    expect(await resolveCurrentGitTarget(gitAu, () => {})).toEqual({ status: 'available', target: 'bbb2222' });
   });
 
-  it('returns null when the ref moved back to the running commit during the hold-off', async () => {
+  it('returns none when the ref moved back to the running commit during the hold-off', async () => {
     const { resolveCurrentGitTarget } = await import('../src/daemon/auto-update-runner.js');
     readFileImpl = async () => 'aaa1111';
     remoteSha('aaa1111'); // remote == current -> up-to-date -> nothing to apply
-    expect(await resolveCurrentGitTarget(gitAu, () => {})).toBeNull();
+    expect(await resolveCurrentGitTarget(gitAu, () => {})).toEqual({ status: 'none' });
   });
 
-  it('throws when the ref check itself failed, so the gate keeps the rollout deadline', async () => {
+  it('returns failed when the ref check itself failed, so the gate keeps the rollout deadline', async () => {
     const { resolveCurrentGitTarget } = await import('../src/daemon/auto-update-runner.js');
     readFileImpl = async () => 'aaa1111';
     execFileImpl = async () => { throw new Error('ls-remote: network unreachable'); };
-    await expect(resolveCurrentGitTarget(gitAu, () => {})).rejects.toThrow('git ref check failed');
+    expect(await resolveCurrentGitTarget(gitAu, () => {})).toEqual({ status: 'failed' });
   });
 });
 
@@ -2458,6 +2451,32 @@ function dueDeadlineGate(record: UpdateHoldoffRecord, logs: string[]) {
     sleep,
   });
   return { gate, store, rng, sleep };
+}
+/** A gate over an in-memory record for `detected` (already due) whose store
+ *  signals a restart while it writes a record for any other target. */
+function refreshedTargetGate(detected: string) {
+  let shuttingDown = false;
+  let current: UpdateHoldoffRecord | null = { target: detected, deadlineEpochMs: 500 };
+  const store = {
+    get record() { return current; },
+    read: async () => current,
+    write: async (r: UpdateHoldoffRecord) => {
+      current = r;
+      if (r.target !== detected) shuttingDown = true;
+    },
+    clear: async () => { current = null; },
+  };
+  const gate = createUpdateHoldoffGate({
+    jitterMs: 600_000,
+    isShuttingDown: () => shuttingDown,
+    setUpdating: () => {},
+    log: () => {},
+    store,
+    rng: () => 0.5,
+    now: () => 1_000,
+    sleep: async () => {},
+  });
+  return { gate, store };
 }
 /** A gate with a spy store and a 10-min window whose hold ends in shutdown (a
  *  restart mid-hold): a run records its deadline but never reaches the installer. */
@@ -2611,6 +2630,20 @@ describe('createNpmUpdateRunCheck (end-to-end polling wiring)', () => {
     expect(rng, 'no new hold drawn').not.toHaveBeenCalled();
     expect(sleep).not.toHaveBeenCalled();
   });
+
+  it('records a newer version found by the re-check as due, and keeps it when a restart comes first', async () => {
+    currentVersion('9.0.0');
+    registrySequence({ latest: '9.1.0' }, { latest: '9.2.0' }); // detect 9.1.0, re-check finds 9.2.0
+    const { gate, store } = refreshedTargetGate('9.1.0');
+    const runCheck = createNpmUpdateRunCheck({
+      gate, log: () => {},
+      lastUpdateCheck: freshLastCheck(), allowPrerelease: false, nodeRole: 'core', onRestart: async () => {},
+    });
+
+    await runCheck();
+    expect(store.record).toEqual({ target: '9.2.0', deadlineEpochMs: 1_000 });
+    expect(mkdirCalls.length, 'shutdown began: installer never entered').toBe(0);
+  });
 });
 
 describe('createGitUpdateRunCheck (end-to-end polling wiring)', () => {
@@ -2711,94 +2744,17 @@ describe('createGitUpdateRunCheck (end-to-end polling wiring)', () => {
     expect(rng, 'no new hold drawn').not.toHaveBeenCalled();
     expect(sleep).not.toHaveBeenCalled();
   });
-});
 
-// The auto-update setup lifecycle.ts runs for each mode: a persisted gate rooted
-// at the DKG home, one runCheck, a first check 15 s after boot, then the interval.
-describe('startGitUpdatePolling / startNpmUpdatePolling (daemon auto-update setup)', () => {
-  const HOME = '/tmp/dkg-home-polling';
-  const HOLDOFF_FILE = `${HOME}/.update-holdoff.json`;
-  const gitAu = { ...AU, repo: 'git@github.com:owner/repo.git', sshKeyPath: '/tmp/key', checkIntervalMinutes: 3, updateJitterMinutes: 30 } as any;
+  it('records a newer commit found by the re-check as due, and keeps it when a restart comes first', async () => {
+    readFileImpl = async () => 'aaa1111';
+    remoteSequence('bbb2222', 'ccc3333'); // detect bbb2222, re-check finds ccc3333
+    const { gate, store } = refreshedTargetGate('bbb2222');
+    const runCheck = createGitUpdateRunCheck({
+      gate, log: () => {}, lastUpdateCheck: freshLastCheck(), au: gitAu, onRestart: async () => {},
+    });
 
-  function pollingHarness() {
-    const scheduled: Array<{ kind: 'timeout' | 'interval'; ms: number; fn: () => unknown }> = [];
-    const timers: UpdatePollingTimers = {
-      setTimeout: (fn, ms) => { scheduled.push({ kind: 'timeout', ms, fn }); return undefined; },
-      setInterval: (fn, ms) => { scheduled.push({ kind: 'interval', ms, fn }); return undefined as any; },
-    };
-    let shuttingDown = false;
-    const lastUpdateCheck = freshLastCheck();
-    const deps: DaemonUpdatePollingDeps = {
-      dkgHome: HOME,
-      isShuttingDown: () => shuttingDown,
-      setUpdating: () => {},
-      log: () => {},
-      lastUpdateCheck,
-      onRestart: async () => {},
-      timers,
-      // The hold ends in a restart, so a tick persists its deadline and stops.
-      gateSeams: { rng: () => 0.5, now: () => 1_000, sleep: async () => { shuttingDown = true; } },
-    };
-    const holdoffWrites = () => writeFileCalls
-      .filter(([path]) => String(path).startsWith(`${HOLDOFF_FILE}.tmp`))
-      .map(([, data]) => JSON.parse(String(data)));
-    return { scheduled, deps, lastUpdateCheck, holdoffWrites };
-  }
-
-  beforeEach(() => {
-    resetMocks();
-    installMocks();
-    vi.stubEnv(UPDATE_JITTER_ENV, undefined);
-    readFileImpl = async (path: any) => {
-      if (String(path) === HOLDOFF_FILE) throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
-      if (String(path).endsWith('.current-version')) return '9.0.0';
-      return 'aaa1111'; // current commit
-    };
-  });
-  afterEach(() => { restoreIo(); vi.unstubAllEnvs(); });
-
-  it('git: both scheduled checks share one gate that persists the deadline under the DKG home', async () => {
-    execFileImpl = async (file: string, args: string[]) =>
-      file === 'git' && args[0] === 'ls-remote'
-        ? { stdout: 'bbb2222\trefs/heads/main\n', stderr: '' }
-        : { stdout: '', stderr: '' };
-    const { scheduled, deps, holdoffWrites } = pollingHarness();
-
-    startGitUpdatePolling(gitAu, deps);
-    expect(scheduled.map(({ kind, ms }) => [kind, ms])).toEqual([['timeout', 15_000], ['interval', 3 * 60_000]]);
-    expect(scheduled[0].fn, 'one runCheck (one gate) for both timers').toBe(scheduled[1].fn);
-
-    await scheduled[0].fn();
-    expect(holdoffWrites()).toEqual([{ target: 'bbb2222', deadlineEpochMs: 1_000 + 900_000 }]);
-    expect(openSyncCalls.length, 'the hold ended in a restart: updater never entered').toBe(0);
-  });
-
-  it('npm: both scheduled checks share one gate that persists the deadline under the DKG home', async () => {
-    fetchImpl = async () => ({ ok: true, json: async () => ({ 'dist-tags': { latest: '9.1.0' } }) }) as any;
-    const { scheduled, deps, holdoffWrites } = pollingHarness();
-
-    startNpmUpdatePolling(
-      { au: gitAu, checkIntervalMinutes: 3, allowPrerelease: false, nodeRole: 'core' },
-      deps,
-    );
-    expect(scheduled.map(({ kind, ms }) => [kind, ms])).toEqual([['timeout', 15_000], ['interval', 3 * 60_000]]);
-    expect(scheduled[0].fn).toBe(scheduled[1].fn);
-
-    await scheduled[0].fn();
-    expect(holdoffWrites()).toEqual([{ target: '9.1.0', deadlineEpochMs: 1_000 + 900_000 }]);
-    expect(mkdirCalls.length, 'the hold ended in a restart: installer never entered').toBe(0);
-  });
-
-  it('npm with auto-apply disabled: checks and records the version, but has no gate and writes no deadline', async () => {
-    fetchImpl = async () => ({ ok: true, json: async () => ({ 'dist-tags': { latest: '9.1.0' } }) }) as any;
-    const { scheduled, deps, lastUpdateCheck, holdoffWrites } = pollingHarness();
-
-    startNpmUpdatePolling({ au: null, checkIntervalMinutes: 30, allowPrerelease: false, nodeRole: 'core' }, deps);
-    expect(scheduled.map(({ kind, ms }) => [kind, ms])).toEqual([['timeout', 15_000], ['interval', 30 * 60_000]]);
-
-    await scheduled[0].fn();
-    expect(lastUpdateCheck.latestVersion).toBe('9.1.0');
-    expect(holdoffWrites()).toEqual([]);
-    expect(mkdirCalls.length).toBe(0);
+    await runCheck();
+    expect(store.record).toEqual({ target: 'ccc3333', deadlineEpochMs: 1_000 });
+    expect(openSyncCalls.length, 'shutdown began: updater never entered').toBe(0);
   });
 });
