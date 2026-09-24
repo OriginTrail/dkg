@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -149,6 +149,94 @@ describe('SqliteChainEventLogStore', () => {
       topic1: [GRAPH_TOPIC],
     })).resolves.toEqual([10]);
     await expect(matchingBlocks({ ...range, topic1: [OTHER_TOPIC] })).resolves.toEqual([]);
+  });
+
+  it('filters persisted rows by topic2 exactly, in block and log order', async () => {
+    const { store } = createStore();
+    const KA = `0x${'05'.repeat(32)}`;
+    const OTHER_KA = `0x${'06'.repeat(32)}`;
+    await store.commit(SCOPE, undefined, commit(10, 12, [
+      { ...row(12, 1, false), topics: [TOPIC, GRAPH_TOPIC, KA] },
+      { ...row(9, 0, true), topics: [TOPIC, OTHER_GRAPH_TOPIC, KA] },
+      { ...row(9, 1, true), topics: [TOPIC, GRAPH_TOPIC, OTHER_KA] },
+      { ...row(10, 0, true), address: OTHER_ADDRESS, topics: [TOPIC, GRAPH_TOPIC, KA] },
+      // Same topic2 word under another signature, and a log with no topic2.
+      { ...row(11, 0, false), topics: [OTHER_TOPIC, GRAPH_TOPIC, KA] },
+      { ...row(11, 1, false), topics: [TOPIC, GRAPH_TOPIC] },
+    ]));
+
+    const positions = async (query: Parameters<typeof store.readEvents>[1]) => (
+      (await store.readEvents(SCOPE, query)).map((entry) => `${entry.blockNumber}:${entry.logIndex}`)
+    );
+    const range = { fromBlockNumber: 0, throughBlockNumber: 20 };
+
+    await expect(positions({ ...range, topic2: [KA] }))
+      .resolves.toEqual(['9:0', '10:0', '11:0', '12:1']);
+    // The point-read shape: one address, one topic0, one topic2.
+    await expect(positions({ ...range, addresses: [ADDRESS], topic0: [TOPIC], topic2: [KA] }))
+      .resolves.toEqual(['9:0', '12:1']);
+    await expect(positions({ ...range, addresses: [ADDRESS], topic0: [TOPIC], topic2: [OTHER_KA] }))
+      .resolves.toEqual(['9:1']);
+    await expect(positions({
+      fromBlockNumber: 10,
+      throughBlockNumber: 20,
+      addresses: [ADDRESS],
+      topic0: [TOPIC],
+      topic2: [KA],
+    })).resolves.toEqual(['12:1']);
+    await expect(positions({ ...range, topic2: [KA, OTHER_KA], topic1: [GRAPH_TOPIC] }))
+      .resolves.toEqual(['9:1', '10:0', '11:0', '12:1']);
+    await expect(positions({ ...range, topic2: [`0x${'07'.repeat(32)}`] })).resolves.toEqual([]);
+    // The full row comes back, topics in their real arity.
+    const [held] = await store.readEvents(SCOPE, {
+      ...range, addresses: [ADDRESS], topic0: [TOPIC], topic2: [OTHER_KA],
+    });
+    expect(held).toEqual({ ...row(9, 1, true), topics: [TOPIC, GRAPH_TOPIC, OTHER_KA] });
+  });
+
+  it('answers the KA point read from its index rather than the block range', async () => {
+    const { db, store } = createStore();
+    const KA = `0x${'05'.repeat(32)}`;
+    await store.commit(SCOPE, undefined, commit(10, 12, [
+      { ...row(10, 0, true), topics: [TOPIC, GRAPH_TOPIC, KA] },
+    ]));
+    const prepared: string[] = [];
+    const prepare = db.db.prepare.bind(db.db);
+    const spy = vi.spyOn(db.db, 'prepare').mockImplementation(((sql: string) => {
+      prepared.push(sql);
+      return prepare(sql);
+    }) as typeof db.db.prepare);
+    const query = {
+      fromBlockNumber: 0, throughBlockNumber: 20, addresses: [ADDRESS], topic0: [TOPIC], topic2: [KA],
+    };
+    try {
+      await expect(store.readEvents(SCOPE, query)).resolves.toHaveLength(1);
+    } finally {
+      spy.mockRestore();
+    }
+    const sql = prepared.find((text) => text.includes('FROM chain_events'));
+    expect(sql).toContain('INDEXED BY idx_chain_events_scope_address_ka');
+    const plan = db.db.prepare(`EXPLAIN QUERY PLAN ${sql}`)
+      .all(SCOPE, 0, 20, ADDRESS, TOPIC, KA) as Array<{ detail: string }>;
+    expect(plan.map((step) => step.detail).join('\n'))
+      .toMatch(/USING INDEX idx_chain_events_scope_address_ka \(scope=\? AND address=\? AND topic0=\? AND topic2=\?/);
+  });
+
+  it('still serves topic2 reads, unpinned, when the index is missing', async () => {
+    // A database written by a newer schema is opened without migrating, so
+    // the store must not assume the index: INDEXED BY on a missing index is
+    // a query error, not a slow plan.
+    const { db } = createStore();
+    db.db.exec('DROP INDEX idx_chain_events_scope_address_ka');
+    const store = new SqliteChainEventLogStore(db);
+    const KA = `0x${'05'.repeat(32)}`;
+    await store.commit(SCOPE, undefined, commit(10, 12, [
+      { ...row(10, 0, true), topics: [TOPIC, GRAPH_TOPIC, KA] },
+      { ...row(10, 1, true), topics: [TOPIC, GRAPH_TOPIC, OTHER_TOPIC] },
+    ]));
+    await expect(store.readEvents(SCOPE, {
+      fromBlockNumber: 0, throughBlockNumber: 20, addresses: [ADDRESS], topic0: [TOPIC], topic2: [KA],
+    })).resolves.toHaveLength(1);
   });
 
   it('loses the CAS when another writer advanced the cursor first', async () => {

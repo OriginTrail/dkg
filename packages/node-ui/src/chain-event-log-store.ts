@@ -82,6 +82,7 @@ export interface SqliteChainEventLogQuery {
   readonly addresses?: readonly string[];
   readonly topic0?: readonly string[];
   readonly topic1?: readonly string[];
+  readonly topic2?: readonly string[];
 }
 
 interface CursorRow {
@@ -141,11 +142,24 @@ function normalizeReplacedRange(
   return range.throughBlockNumber < range.fromBlockNumber ? undefined : range;
 }
 
+/** Pinned by the KA point read; created by `DashboardDB`'s chain-log schema. */
+const KA_POINT_READ_INDEX = 'idx_chain_events_scope_address_ka';
+
 export class SqliteChainEventLogStore {
   private readonly db: Database.Database;
+  /**
+   * `INDEXED BY` turns a missing index into a query ERROR, not a slower plan.
+   * `DashboardDB` creates it on every open it migrates, but a database written
+   * by a NEWER schema is opened without migrating at all, so the hint is only
+   * used once the index is known to be there.
+   */
+  private readonly kaPointReadIndexed: boolean;
 
   constructor(dashboard: DashboardDB) {
     this.db = dashboard.db;
+    this.kaPointReadIndexed = this.db.prepare(`
+      SELECT 1 AS present FROM sqlite_master WHERE type = 'index' AND name = ?
+    `).get(KA_POINT_READ_INDEX) !== undefined;
   }
 
   async load(scope: string): Promise<SqliteChainEventLogState | undefined> {
@@ -331,15 +345,27 @@ export class SqliteChainEventLogStore {
       ['address', query.addresses],
       ['topic0', query.topic0],
       ['topic1', query.topic1],
+      ['topic2', query.topic2],
     ] as const) {
       if (values === undefined || values.length === 0) continue;
       clauses.push(`${column} IN (${placeholders(values.length)})`);
       parameters.push(...values);
     }
+    // The KA point read (`kaToContextGraph`). Without ANALYZE statistics the
+    // planner picks the primary key's block range, which also satisfies the
+    // ORDER BY, and walks every registration in the window: the synchronous
+    // main-thread stall this index exists to remove. Pin the index for exactly
+    // the shape it answers with four equalities (approach from PR #2784).
+    const indexHint = this.kaPointReadIndexed
+      && query.addresses?.length === 1
+      && query.topic0?.length === 1
+      && query.topic2?.length === 1
+      ? ` INDEXED BY ${KA_POINT_READ_INDEX}`
+      : '';
     const rows = this.db.prepare(`
       SELECT block_number, log_index, block_hash, tx_hash, address,
              topic0, topic1, topic2, topic3, data, settled
-        FROM chain_events
+        FROM chain_events${indexHint}
        WHERE ${clauses.join(' AND ')}
        ORDER BY block_number, log_index
     `).all(...parameters) as EventRow[];

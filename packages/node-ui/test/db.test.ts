@@ -961,6 +961,75 @@ describe('DashboardDB — V15 migration: drop FTS5 logs index', () => {
   });
 });
 
+describe('DashboardDB — chain log KA point-read index', () => {
+  const KA_INDEX = 'idx_chain_events_scope_address_ka';
+
+  function kaIndexColumns(handle: Database.Database): string[] {
+    return (handle.pragma(`index_info(${KA_INDEX})`) as Array<{ name: string }>)
+      .map((column) => column.name);
+  }
+
+  function kaIndexCount(handle: Database.Database): number {
+    return (handle.prepare(`
+      SELECT COUNT(*) AS c FROM sqlite_master WHERE type = 'index' AND name = ?
+    `).get(KA_INDEX) as { c: number }).c;
+  }
+
+  it('creates the index on a fresh database', () => {
+    expect(kaIndexColumns(db.db))
+      .toEqual(['scope', 'address', 'topic0', 'topic2', 'block_number', 'log_index']);
+  });
+
+  it('adds the index to a current-version database that predates it, keeping its rows', () => {
+    // Exactly what a node-ui.db written by a V38 binary without this index
+    // looks like: same user_version, chain log populated, index absent.
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+    const raw = new Database(dbPath);
+    raw.exec(`DROP INDEX ${KA_INDEX}`);
+    raw.prepare(`
+      INSERT INTO chain_events (
+        scope, block_number, log_index, block_hash, tx_hash, address,
+        topic0, topic1, topic2, topic3, data, settled
+      ) VALUES ('scope', 7, 0, '0xb', '0xt', '0xa', '0x0', '0x1', '0x2', NULL, '0x', 1)
+    `).run();
+    expect(raw.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(kaIndexCount(raw)).toBe(0);
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(kaIndexColumns(db.db))
+      .toEqual(['scope', 'address', 'topic0', 'topic2', 'block_number', 'log_index']);
+    expect((db.db.prepare('SELECT COUNT(*) AS c FROM chain_events').get() as { c: number }).c)
+      .toBe(1);
+
+    // Idempotent: every later open re-runs the same statement.
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    expect(kaIndexCount(db.db)).toBe(1);
+  });
+
+  it('creates the index when a pre-chain-log database is upgraded', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.close();
+    const raw = new Database(dbPath);
+    raw.exec(`
+      DROP TABLE chain_index_cursor;
+      DROP TABLE chain_events;
+      DROP TABLE chain_index_coverage;
+    `);
+    raw.pragma('user_version = 37');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(kaIndexCount(db.db)).toBe(1);
+  });
+});
+
 describe('DashboardDB — V27 join-approval ledger migration', () => {
   it('repairs a missing audit-cap trigger on a current-version database', () => {
     const dbPath = join(dir, 'node-ui.db');
