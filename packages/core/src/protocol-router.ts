@@ -666,6 +666,10 @@ export class ProtocolRouter {
     const signal = composeAbortSignals(deadline, this.node.stopSignal) ?? deadline;
     try {
       await this.requirePeerAccepted(peerIdStr, protocolId, 'outbound', { signal, timeoutMs });
+      // Match send()'s resolver contract before opening a stream. For the
+      // connected peers this probe targets, its live-connection step is fast;
+      // it also primes a route if the connection closes during admission.
+      await this.peerResolver?.resolve(peerIdStr, { signal, perStepTimeoutMs: timeoutMs });
       const { peerIdFromString } = await import('@libp2p/peer-id');
       const stream = await this.node.libp2p.dialProtocol(peerIdFromString(peerIdStr), protocolId, {
         runOnLimitedConnection: true,

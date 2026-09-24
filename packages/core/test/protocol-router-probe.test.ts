@@ -10,13 +10,18 @@ describe('ProtocolRouter.probeProtocol', () => {
     const send = vi.fn();
     const dialProtocol = vi.fn(async () => ({ abort, send }));
     const isPeerAccepted = vi.fn(async () => true);
+    const resolve = vi.fn(async () => []);
     const router = new ProtocolRouter({
       libp2p: { dialProtocol },
       stopSignal: new AbortController().signal,
-    } as unknown as ConstructorParameters<typeof ProtocolRouter>[0], { isPeerAccepted });
+    } as unknown as ConstructorParameters<typeof ProtocolRouter>[0], {
+      isPeerAccepted,
+      peerResolver: { resolve } as unknown as NonNullable<ConstructorParameters<typeof ProtocolRouter>[1]>['peerResolver'],
+    });
 
     expect(await router.probeProtocol(PEER_ID, ACK_PROTOCOL)).toBe(true);
     expect(isPeerAccepted).toHaveBeenCalledWith(PEER_ID, ACK_PROTOCOL, 'outbound', expect.any(Object));
+    expect(resolve).toHaveBeenCalledWith(PEER_ID, expect.objectContaining({ signal: expect.any(AbortSignal) }));
     expect(dialProtocol).toHaveBeenCalledWith(expect.any(Object), ACK_PROTOCOL, expect.any(Object));
     expect(abort).toHaveBeenCalledOnce();
     expect(send).not.toHaveBeenCalled();
