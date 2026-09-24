@@ -78,6 +78,7 @@ import { ACKCapabilityRegistry } from '../src/p2p/ack-capability.js';
 const capturedAckCollectorDeps: unknown[] = [];
 const capturedStorageACKHandlerConfigs: unknown[] = [];
 const capturedStorageACKHandlerCalls: Array<{ kind: 'publish' | 'update'; data: Uint8Array; peerId: string }> = [];
+const capturedStorageACKHandlerSignals: Array<AbortSignal | undefined> = [];
 const capturedPublishCollectParams: unknown[] = [];
 const capturedUpdateCollectParams: unknown[] = [];
 let publishCollectHook: (() => Promise<{ acks: [] }>) | undefined;
@@ -114,12 +115,14 @@ vi.mock('@origintrail-official/dkg-publisher', async () => {
       constructor(_store: unknown, config: unknown) {
         capturedStorageACKHandlerConfigs.push(config);
       }
-      async handler(data: Uint8Array, peer: { toString(): string }): Promise<Uint8Array> {
+      async handler(data: Uint8Array, peer: { toString(): string }, signal?: AbortSignal): Promise<Uint8Array> {
         capturedStorageACKHandlerCalls.push({ kind: 'publish', data, peerId: peer.toString() });
+        capturedStorageACKHandlerSignals.push(signal);
         return new Uint8Array([1]);
       }
-      async updateHandler(data: Uint8Array, peer: { toString(): string }): Promise<Uint8Array> {
+      async updateHandler(data: Uint8Array, peer: { toString(): string }, signal?: AbortSignal): Promise<Uint8Array> {
         capturedStorageACKHandlerCalls.push({ kind: 'update', data, peerId: peer.toString() });
+        capturedStorageACKHandlerSignals.push(signal);
         return new Uint8Array([2]);
       }
     },
@@ -255,6 +258,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     capturedAckCollectorDeps.length = 0;
     capturedStorageACKHandlerConfigs.length = 0;
     capturedStorageACKHandlerCalls.length = 0;
+    capturedStorageACKHandlerSignals.length = 0;
     capturedPublishCollectParams.length = 0;
     capturedUpdateCollectParams.length = 0;
     publishCollectHook = undefined;
@@ -1093,6 +1097,8 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       { kind: 'update', data: request, peerId: localPeerId },
       { kind: 'update', data: request, peerId: localPeerId },
     ]);
+    expect(capturedStorageACKHandlerSignals).toHaveLength(4);
+    expect(capturedStorageACKHandlerSignals.every((signal) => signal instanceof AbortSignal)).toBe(true);
     const handlerConfig = capturedStorageACKHandlerConfigs.at(-1) as StorageACKHandlerConfigCapture;
     expect(handlerConfig.onSignerUnregistered).toBeTypeOf('function');
     const staleRemoteHandler = remoteHandlers[0]!;
