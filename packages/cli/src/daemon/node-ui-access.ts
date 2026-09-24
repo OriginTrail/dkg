@@ -20,17 +20,24 @@ export function nodeOperatorToken(
   return undefined;
 }
 
-// Headers a proxy adds when it forwards a request. A browser talking to the
-// daemon directly never sends them, so a request carrying any of them came
-// through a proxy and is not a direct local one.
-const PROXY_FORWARDING_HEADERS = [
+// Headers a proxy adds when it forwards a request: every `X-Forwarded-*`
+// header plus these. A browser talking to the daemon directly never sends
+// them, so a request carrying any of them came through a proxy and is not a
+// direct local one.
+const PROXY_FORWARDING_HEADERS = new Set([
   'forwarded',
-  'x-forwarded-for',
-  'x-forwarded-host',
-  'x-forwarded-proto',
   'x-real-ip',
+  'x-client-ip',
+  'true-client-ip',
+  'cf-connecting-ip',
   'via',
-] as const;
+]);
+
+function forwardedByProxy(headers: IncomingMessage['headers']): boolean {
+  return Object.keys(headers).some(
+    (name) => name.startsWith('x-forwarded-') || PROXY_FORWARDING_HEADERS.has(name),
+  );
+}
 
 /**
  * The token to embed in the dashboard shell for this request, if any. The
@@ -52,7 +59,7 @@ export function nodeUiTokenForRequest(
   if (!opts.authEnabled) return undefined;
   if (!isLoopbackClientIp(req.socket?.remoteAddress ?? '')) return undefined;
   if (!hostIsLocal(req.headers.host)) return undefined;
-  if (PROXY_FORWARDING_HEADERS.some((name) => req.headers[name] !== undefined)) return undefined;
+  if (forwardedByProxy(req.headers)) return undefined;
   // TODO: a same-host reverse proxy that forwards a loopback Host and adds none
   // of those headers (e.g. nginx's default `proxy_set_header Host $proxy_host`
   // without X-Forwarded-For) cannot be told apart from a direct local caller.

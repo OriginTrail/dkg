@@ -118,7 +118,13 @@ describe('nodeUiTokenForRequest', () => {
     ['x-forwarded-for', '203.0.113.7'],
     ['x-forwarded-host', 'node.example'],
     ['x-forwarded-proto', 'https'],
+    ['x-forwarded-port', '443'],
+    ['x-forwarded-server', 'proxy.example'],
+    ['x-forwarded-prefix', '/dkg'],
     ['x-real-ip', '203.0.113.7'],
+    ['x-client-ip', '203.0.113.7'],
+    ['true-client-ip', '203.0.113.7'],
+    ['cf-connecting-ip', '203.0.113.7'],
     ['via', '1.1 proxy'],
   ])('withholds the token from a loopback request forwarded by a proxy (%s)', (header, value) => {
     expect(nodeUiTokenForRequest(fakeReq('127.0.0.1', 'localhost:9200', { [header]: value }), opts)).toBeUndefined();
@@ -179,8 +185,13 @@ describe('dashboard shell behind the token decision (real HTTP)', () => {
     expect(res.acao).toBeUndefined();
   });
 
-  it('serves the shell without the token to a loopback request forwarded by a proxy', async () => {
-    const res = await get('/ui', `localhost:${port}`, { 'x-forwarded-for': '203.0.113.7' });
+  // Sent with mixed-case names: Node lowercases header names on arrival.
+  it.each([
+    ['X-Forwarded-For', '203.0.113.7'],
+    ['X-Forwarded-Port', '443'],
+    ['X-Forwarded-Prefix', '/dkg'],
+  ])('serves the shell without the token to a loopback request forwarded by a proxy (%s)', async (header, value) => {
+    const res = await get('/ui', `localhost:${port}`, { [header]: value });
     expect(res.status).toBe(200);
     expect(res.body).toContain('<title>DKG</title>');
     expect(res.body).not.toContain('__DKG_TOKEN__');

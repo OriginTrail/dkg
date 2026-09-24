@@ -87,9 +87,11 @@ describe('node-admin scope on a live daemon (mock chain)', () => {
     expect(foreignHost.body).not.toContain(operatorToken);
 
     // A proxy that announces itself makes the request non-local.
-    const proxied = await getUi(port, `localhost:${port}`, { 'x-forwarded-for': '203.0.113.7' });
-    expect(proxied.status).toBe(200);
-    expect(proxied.body).not.toContain('__DKG_TOKEN__');
+    for (const forwarded of [{ 'X-Forwarded-For': '203.0.113.7' }, { 'X-Forwarded-Port': '443' }]) {
+      const proxied = await getUi(port, `localhost:${port}`, forwarded);
+      expect(proxied.status).toBe(200);
+      expect(proxied.body).not.toContain('__DKG_TOKEN__');
+    }
   });
 
   it('refuses node-wide changes and node log reads to an agent-scoped token', async () => {
