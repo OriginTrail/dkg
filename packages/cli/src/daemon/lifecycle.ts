@@ -162,6 +162,7 @@ import {
   gitCommandArgs,
   isStandaloneInstall,
   resolveAutoUpdateSource,
+  resolveUpdatePreferences,
   slotEntryPoint,
   CLI_NPM_PACKAGE,
   exitOnStoreConfigErrors,
@@ -2701,8 +2702,7 @@ async function runDaemonInnerWithStartupOwnership(
     {
       pollingMode: resolveAutoUpdatePollingMode(configuredAutoUpdateSource, standalone),
       au,
-      localAutoUpdate: config.autoUpdate,
-      networkAutoUpdate: network?.autoUpdate,
+      preferences: resolveUpdatePreferences(config, network),
       nodeRole: config.nodeRole ?? "edge",
     },
     {

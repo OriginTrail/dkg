@@ -204,7 +204,7 @@ import {
   resolveAutoUpdateGitRef,
   resolveAutoUpdateGitRefPlan,
 } from '../src/daemon.js';
-import { createUpdateHoldoffGate, type UpdateHoldoffRecord } from '../src/daemon/auto-update-jitter.js';
+import { createUpdateHoldoffGate } from '../src/daemon/auto-update-jitter.js';
 import { createNpmUpdateRunCheck, createGitUpdateRunCheck } from '../src/daemon/auto-update-runner.js';
 import type { LastUpdateCheck } from '../src/daemon/state.js';
 
@@ -2376,13 +2376,6 @@ describe('resolveCurrentNpmTarget (post-hold-off revalidation)', () => {
     fetchImpl = async () => makeRegistryResponse({ latest: '9.1.0' });
     expect(await resolveCurrentNpmTarget(() => {}, false, 'mainnet')).toEqual({ status: 'none' });
   });
-
-  it('returns failed when the registry check itself failed, so the gate keeps the rollout deadline', async () => {
-    const { resolveCurrentNpmTarget } = await import('../src/daemon/auto-update-runner.js');
-    currentVersion('9.0.0');
-    fetchImpl = async () => ({ ok: false, status: 503, json: async () => ({}) }) as any;
-    expect(await resolveCurrentNpmTarget(() => {}, false)).toEqual({ status: 'failed' });
-  });
 });
 
 describe('resolveCurrentGitTarget (post-hold-off revalidation)', () => {
@@ -2410,13 +2403,6 @@ describe('resolveCurrentGitTarget (post-hold-off revalidation)', () => {
     remoteSha('aaa1111'); // remote == current -> up-to-date -> nothing to apply
     expect(await resolveCurrentGitTarget(gitAu, () => {})).toEqual({ status: 'none' });
   });
-
-  it('returns failed when the ref check itself failed, so the gate keeps the rollout deadline', async () => {
-    const { resolveCurrentGitTarget } = await import('../src/daemon/auto-update-runner.js');
-    readFileImpl = async () => 'aaa1111';
-    execFileImpl = async () => { throw new Error('ls-remote: network unreachable'); };
-    expect(await resolveCurrentGitTarget(gitAu, () => {})).toEqual({ status: 'failed' });
-  });
 });
 
 // End-to-end polling wiring: prove the REAL npm/git runChecks route through the
@@ -2429,77 +2415,6 @@ function freshLastCheck(): LastUpdateCheck {
 function noJitterGate(log: (m: string) => void) {
   return createUpdateHoldoffGate({ jitterMs: 0, isShuttingDown: () => false, setUpdating: () => {}, log });
 }
-/** An in-memory record store, and a gate over it whose deadline is already due. */
-function dueDeadlineGate(record: UpdateHoldoffRecord, logs: string[]) {
-  let current: UpdateHoldoffRecord | null = record;
-  const store = {
-    get record() { return current; },
-    read: async () => current,
-    write: async (r: UpdateHoldoffRecord) => { current = r; },
-    clear: async () => { current = null; },
-  };
-  const rng = vi.fn(() => 0.5);
-  const sleep = vi.fn(async () => {});
-  const gate = createUpdateHoldoffGate({
-    jitterMs: 600_000,
-    isShuttingDown: () => false,
-    setUpdating: () => {},
-    log: (m) => logs.push(m),
-    store,
-    rng,
-    now: () => 1_000,
-    sleep,
-  });
-  return { gate, store, rng, sleep };
-}
-/** A gate over an in-memory record for `detected` (already due) whose store
- *  signals a restart while it writes a record for any other target. */
-function refreshedTargetGate(detected: string) {
-  let shuttingDown = false;
-  let current: UpdateHoldoffRecord | null = { target: detected, deadlineEpochMs: 500 };
-  const store = {
-    get record() { return current; },
-    read: async () => current,
-    write: async (r: UpdateHoldoffRecord) => {
-      current = r;
-      if (r.target !== detected) shuttingDown = true;
-    },
-    clear: async () => { current = null; },
-  };
-  const gate = createUpdateHoldoffGate({
-    jitterMs: 600_000,
-    isShuttingDown: () => shuttingDown,
-    setUpdating: () => {},
-    log: () => {},
-    store,
-    rng: () => 0.5,
-    now: () => 1_000,
-    sleep: async () => {},
-  });
-  return { gate, store };
-}
-/** A gate with a spy store and a 10-min window whose hold ends in shutdown (a
- *  restart mid-hold): a run records its deadline but never reaches the installer. */
-function persistingGate() {
-  let shuttingDown = false;
-  const store = {
-    read: vi.fn(async (): Promise<UpdateHoldoffRecord | null> => null),
-    write: vi.fn(async (_record: UpdateHoldoffRecord) => {}),
-    clear: vi.fn(async () => {}),
-  };
-  const gate = createUpdateHoldoffGate({
-    jitterMs: 600_000,
-    isShuttingDown: () => shuttingDown,
-    setUpdating: () => {},
-    log: () => {},
-    store,
-    rng: () => 0.5,
-    now: () => 1_000,
-    sleep: async () => { shuttingDown = true; },
-  });
-  return { gate, store };
-}
-
 describe('createNpmUpdateRunCheck (end-to-end polling wiring)', () => {
   function currentVersion(v: string) {
     readFileImpl = async (path: any) => {
@@ -2527,9 +2442,9 @@ describe('createNpmUpdateRunCheck (end-to-end polling wiring)', () => {
     const lastUpdateCheck = freshLastCheck();
     const onRestart = vi.fn(async () => {});
     const runCheck = createNpmUpdateRunCheck({
-      gate: noJitterGate((m) => logs.push(m)),
       log: (m) => logs.push(m),
-      lastUpdateCheck, allowPrerelease: false, nodeRole: 'core', onRestart,
+      lastUpdateCheck, allowPrerelease: false,
+      autoApply: { gate: noJitterGate((m) => logs.push(m)), nodeRole: 'core', onRestart },
     });
 
     await runCheck();
@@ -2544,8 +2459,8 @@ describe('createNpmUpdateRunCheck (end-to-end polling wiring)', () => {
     currentVersion('9.0.0');
     registrySequence({ latest: '9.1.0' }); // available on both detect and revalidate
     const runCheck = createNpmUpdateRunCheck({
-      gate: noJitterGate(() => {}), log: () => {},
-      lastUpdateCheck: freshLastCheck(), allowPrerelease: false, nodeRole: 'core', onRestart: async () => {},
+      log: () => {}, lastUpdateCheck: freshLastCheck(), allowPrerelease: false,
+      autoApply: { gate: noJitterGate(() => {}), nodeRole: 'core', onRestart: async () => {} },
     });
 
     // The installer may error under the shallow IO mocks; we only assert it was ENTERED.
@@ -2558,91 +2473,13 @@ describe('createNpmUpdateRunCheck (end-to-end polling wiring)', () => {
     registrySequence({ latest: '9.1.0' });
     const lastUpdateCheck = freshLastCheck();
     const runCheck = createNpmUpdateRunCheck({
-      gate: null, log: () => {},
-      lastUpdateCheck, allowPrerelease: false, nodeRole: 'core', onRestart: async () => {},
+      log: () => {}, lastUpdateCheck, allowPrerelease: false, autoApply: null,
     });
 
     await runCheck();
     expect(mkdirCalls.length).toBe(0);
     expect(lastUpdateCheck.latestVersion).toBe('9.1.0');
     expect(lastUpdateCheck.upToDate).toBe(false);
-  });
-
-  it('keys the persisted rollout deadline by the detected version and keeps it across a restart mid-hold', async () => {
-    currentVersion('9.0.0');
-    registrySequence({ latest: '9.1.0' });
-    const { gate, store } = persistingGate();
-    const runCheck = createNpmUpdateRunCheck({
-      gate, log: () => {},
-      lastUpdateCheck: freshLastCheck(), allowPrerelease: false, nodeRole: 'core', onRestart: async () => {},
-    });
-
-    await runCheck();
-    expect(store.write).toHaveBeenCalledWith({ target: '9.1.0', deadlineEpochMs: 1_000 + 300_000 });
-    expect(store.clear).not.toHaveBeenCalled();
-    expect(mkdirCalls.length, 'hold ended in shutdown: installer never entered').toBe(0);
-  });
-
-  it('drops the persisted rollout deadline when the node is up to date or the channel has no target, not on a registry error', async () => {
-    currentVersion('9.1.0');
-    const { gate, store } = persistingGate();
-    const runCheck = (channel?: string) => createNpmUpdateRunCheck({
-      gate, log: () => {},
-      lastUpdateCheck: freshLastCheck(), allowPrerelease: false, channel, nodeRole: 'core', onRestart: async () => {},
-    });
-
-    registrySequence({ latest: '9.1.0' });
-    await runCheck()();
-    expect(store.clear, 'up to date').toHaveBeenCalledTimes(1);
-
-    await runCheck('beta')(); // no "beta" dist-tag
-    expect(store.clear, 'no channel target').toHaveBeenCalledTimes(2);
-
-    fetchImpl = async () => ({ ok: false, status: 503, json: async () => ({}) }) as any;
-    await runCheck()();
-    expect(store.clear, 'a registry error is transient: keep the deadline').toHaveBeenCalledTimes(2);
-    expect(store.write).not.toHaveBeenCalled();
-  });
-
-  it('a failed re-check keeps an expired deadline, and the next successful poll installs without a new hold', async () => {
-    currentVersion('9.0.0');
-    let fetches = 0;
-    fetchImpl = async () => {
-      fetches += 1;
-      if (fetches === 2) return { ok: false, status: 503, json: async () => ({}) } as any; // the re-check
-      return { ok: true, json: async () => ({ 'dist-tags': { latest: '9.1.0' } }) } as any;
-    };
-    const logs: string[] = [];
-    const { gate, store, rng, sleep } = dueDeadlineGate({ target: '9.1.0', deadlineEpochMs: 500 }, logs);
-    const runCheck = createNpmUpdateRunCheck({
-      gate, log: (m) => logs.push(m),
-      lastUpdateCheck: freshLastCheck(), allowPrerelease: false, nodeRole: 'core', onRestart: async () => {},
-    });
-
-    await runCheck();
-    expect(mkdirCalls.length, 'nothing installed on a failed re-check').toBe(0);
-    expect(store.record).toEqual({ target: '9.1.0', deadlineEpochMs: 500 });
-    expect(logs.some((m) => m.includes('re-check after the hold-off failed'))).toBe(true);
-
-    // The installer may error under the shallow IO mocks; we only assert it was ENTERED.
-    await runCheck().catch(() => {});
-    expect(mkdirCalls.length, 'installer entered on the next poll').toBeGreaterThan(0);
-    expect(rng, 'no new hold drawn').not.toHaveBeenCalled();
-    expect(sleep).not.toHaveBeenCalled();
-  });
-
-  it('records a newer version found by the re-check as due, and keeps it when a restart comes first', async () => {
-    currentVersion('9.0.0');
-    registrySequence({ latest: '9.1.0' }, { latest: '9.2.0' }); // detect 9.1.0, re-check finds 9.2.0
-    const { gate, store } = refreshedTargetGate('9.1.0');
-    const runCheck = createNpmUpdateRunCheck({
-      gate, log: () => {},
-      lastUpdateCheck: freshLastCheck(), allowPrerelease: false, nodeRole: 'core', onRestart: async () => {},
-    });
-
-    await runCheck();
-    expect(store.record).toEqual({ target: '9.2.0', deadlineEpochMs: 1_000 });
-    expect(mkdirCalls.length, 'shutdown began: installer never entered').toBe(0);
   });
 });
 
@@ -2684,77 +2521,5 @@ describe('createGitUpdateRunCheck (end-to-end polling wiring)', () => {
     expect(onRestart).not.toHaveBeenCalled();
     expect(logs.some((m) => m.includes('superseded'))).toBe(true);
     expect(lastUpdateCheck.latestCommit).toBe('bbb2222'); // detect recorded the then-available tip
-  });
-
-  it('keys the persisted rollout deadline by the detected commit and keeps it across a restart mid-hold', async () => {
-    readFileImpl = async () => 'aaa1111';
-    remoteSequence('bbb2222');
-    const { gate, store } = persistingGate();
-    const runCheck = createGitUpdateRunCheck({
-      gate, log: () => {}, lastUpdateCheck: freshLastCheck(), au: gitAu, onRestart: async () => {},
-    });
-
-    await runCheck();
-    expect(store.write).toHaveBeenCalledWith({ target: 'bbb2222', deadlineEpochMs: 1_000 + 300_000 });
-    expect(store.clear).not.toHaveBeenCalled();
-    expect(openSyncCalls.length, 'hold ended in shutdown: updater never entered').toBe(0);
-  });
-
-  it('drops the persisted rollout deadline when the node is up to date, not when the check fails', async () => {
-    readFileImpl = async () => 'aaa1111';
-    remoteSequence('aaa1111');
-    const { gate, store } = persistingGate();
-    const runCheck = createGitUpdateRunCheck({
-      gate, log: () => {}, lastUpdateCheck: freshLastCheck(), au: gitAu, onRestart: async () => {},
-    });
-
-    await runCheck();
-    expect(store.clear, 'up to date').toHaveBeenCalledTimes(1);
-
-    execFileImpl = async () => { throw new Error('ls-remote: network unreachable'); };
-    await runCheck();
-    expect(store.clear, 'a failed check is transient: keep the deadline').toHaveBeenCalledTimes(1);
-    expect(store.write).not.toHaveBeenCalled();
-  });
-
-  it('a failed re-check keeps an expired deadline, and the next successful poll applies without a new hold', async () => {
-    readFileImpl = async () => 'aaa1111';
-    let lsRemotes = 0;
-    execFileImpl = async (file: string, args: string[]) => {
-      if (file === 'git' && args[0] === 'ls-remote') {
-        lsRemotes += 1;
-        if (lsRemotes === 2) throw new Error('network unreachable'); // the re-check
-        return { stdout: 'bbb2222\trefs/heads/main\n', stderr: '' };
-      }
-      return { stdout: '', stderr: '' };
-    };
-    const logs: string[] = [];
-    const { gate, store, rng, sleep } = dueDeadlineGate({ target: 'bbb2222', deadlineEpochMs: 500 }, logs);
-    const runCheck = createGitUpdateRunCheck({
-      gate, log: (m) => logs.push(m), lastUpdateCheck: freshLastCheck(), au: gitAu, onRestart: async () => {},
-    });
-
-    await runCheck();
-    expect(openSyncCalls.length, 'nothing applied on a failed re-check').toBe(0);
-    expect(store.record).toEqual({ target: 'bbb2222', deadlineEpochMs: 500 });
-    expect(logs.some((m) => m.includes('re-check after the hold-off failed'))).toBe(true);
-
-    await runCheck().catch(() => {});
-    expect(openSyncCalls.length, 'updater entered on the next poll').toBeGreaterThan(0);
-    expect(rng, 'no new hold drawn').not.toHaveBeenCalled();
-    expect(sleep).not.toHaveBeenCalled();
-  });
-
-  it('records a newer commit found by the re-check as due, and keeps it when a restart comes first', async () => {
-    readFileImpl = async () => 'aaa1111';
-    remoteSequence('bbb2222', 'ccc3333'); // detect bbb2222, re-check finds ccc3333
-    const { gate, store } = refreshedTargetGate('bbb2222');
-    const runCheck = createGitUpdateRunCheck({
-      gate, log: () => {}, lastUpdateCheck: freshLastCheck(), au: gitAu, onRestart: async () => {},
-    });
-
-    await runCheck();
-    expect(store.record).toEqual({ target: 'ccc3333', deadlineEpochMs: 1_000 });
-    expect(openSyncCalls.length, 'shutdown began: updater never entered').toBe(0);
   });
 });

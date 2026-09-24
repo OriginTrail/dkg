@@ -8,7 +8,6 @@ import {
   UPDATE_JITTER_ENV,
   type UpdateCheckOutcome,
   type UpdateHoldoffGateConfig,
-  type UpdateHoldoffRecord,
   type UpdateHoldoffStep,
 } from '../src/daemon/auto-update-jitter.js';
 
@@ -111,29 +110,22 @@ describe('awaitUpdateHoldoff', () => {
     expect(decision).toBe('abort-shutdown');
   });
 
-  it('with persistence, resumes the stored deadline for the same target instead of drawing', async () => {
-    const store = {
-      read: vi.fn(async (): Promise<UpdateHoldoffRecord | null> => ({ target: 'c1', deadlineEpochMs: 1_000 + 120_000 })),
-      write: vi.fn(async (_record: UpdateHoldoffRecord) => {}),
-      clear: vi.fn(async () => {}),
-    };
+  it('waits a hold the caller already resolved (a resumed deadline) without drawing one', async () => {
     const rng = vi.fn(() => 0.5);
     const sleep = vi.fn(async () => {});
     const onHold = vi.fn();
     const decision = await awaitUpdateHoldoff({
       jitterMs: 600_000,
       isShuttingDown: () => false,
+      hold: { holdMs: 120_000, resumed: true },
       onHold,
       sleep,
       rng,
-      now: () => 1_000,
-      persistence: { target: 'c1', store },
     });
     expect(decision).toBe('proceed');
     expect(rng).not.toHaveBeenCalled();
     expect(sleep).toHaveBeenCalledWith(120_000);
     expect(onHold).toHaveBeenCalledWith(120_000, true);
-    expect(store.write).not.toHaveBeenCalled();
   });
 
   it('aborts even with jitter disabled if already shutting down (never applies during shutdown)', async () => {
@@ -149,7 +141,7 @@ describe('awaitUpdateHoldoff', () => {
 });
 
 describe('createUpdateHoldoffGate (the shared rollout gate)', () => {
-  const DETECTED: UpdateCheckOutcome<string> = { status: 'available', target: 'v-detected' };
+  const detected = (rollout: UpdateHoldoffStep<string>) => ({ status: 'available' as const, target: 'v-detected', rollout });
   const FRESH: UpdateCheckOutcome<string> = { status: 'available', target: 'v-fresh' };
 
   // Typed harness — the deps keep the real UpdateHoldoffGateConfig / Step types
@@ -188,7 +180,7 @@ describe('createUpdateHoldoffGate (the shared rollout gate)', () => {
 
   it('runs the gate in order and applies the REVALIDATED target (not the detected one)', async () => {
     const { gate, step, calls, apply } = harness();
-    await gate.poll(DETECTED, step);
+    await gate.poll(detected(step));
     expect(calls).toEqual([
       'onHold', 'sleep', 'revalidate', 'setUpdating:true', 'apply:v-fresh', 'setUpdating:false',
     ]);
@@ -203,10 +195,10 @@ describe('createUpdateHoldoffGate (the shared rollout gate)', () => {
     const apply = vi.fn(async () => {});
     const { gate, step } = harness({ sleep: () => held, revalidate, apply });
 
-    const first = gate.poll(DETECTED, step); // enters, sets pending, awaits the un-resolved hold-off
+    const first = gate.poll(detected(step)); // enters, sets pending, awaits the un-resolved hold-off
     await Promise.resolve();
     // Second concurrent tick while the first rollout is mid-hold-off:
-    await gate.poll(DETECTED, step);
+    await gate.poll(detected(step));
     expect(revalidate, 'second tick must not start a second rollout').not.toHaveBeenCalled();
     expect(apply).not.toHaveBeenCalled();
 
@@ -218,7 +210,7 @@ describe('createUpdateHoldoffGate (the shared rollout gate)', () => {
 
   it('does NOT apply a target withdrawn during the hold-off (re-check -> none)', async () => {
     const { gate, step, apply, setUpdating, log } = harness({ revalidate: async () => ({ status: 'none' }) });
-    await gate.poll(DETECTED, step);
+    await gate.poll(detected(step));
     expect(apply).not.toHaveBeenCalled();
     expect(setUpdating).not.toHaveBeenCalledWith(true);
     expect(log).toHaveBeenCalledWith('SUPERSEDED');
@@ -230,7 +222,7 @@ describe('createUpdateHoldoffGate (the shared rollout gate)', () => {
       isShuttingDown: () => sd,
       sleep: async () => { sd = true; },
     });
-    await gate.poll(DETECTED, step);
+    await gate.poll(detected(step));
     expect(revalidate).not.toHaveBeenCalled();
     expect(apply).not.toHaveBeenCalled();
     expect(log).toHaveBeenCalledWith('SHUTDOWN');
@@ -244,7 +236,7 @@ describe('createUpdateHoldoffGate (the shared rollout gate)', () => {
       isShuttingDown: () => sd,
       revalidate: async () => { sd = true; return FRESH; },
     });
-    await gate.poll(DETECTED, step);
+    await gate.poll(detected(step));
     expect(apply).not.toHaveBeenCalled();
     expect(setUpdating).not.toHaveBeenCalledWith(true);
     expect(log).toHaveBeenCalledWith('SHUTDOWN');
@@ -252,32 +244,32 @@ describe('createUpdateHoldoffGate (the shared rollout gate)', () => {
 
   it('clears isUpdating (and recovers single-flight) even if apply throws', async () => {
     const { gate, step, setUpdating } = harness({ apply: async () => { throw new Error('boom'); } });
-    await expect(gate.poll(DETECTED, step)).rejects.toThrow('boom');
+    await expect(gate.poll(detected(step))).rejects.toThrow('boom');
     expect(setUpdating).toHaveBeenLastCalledWith(false);
     // pending was cleared in finally, so the gate is usable again:
     const ok = vi.fn(async () => {});
-    await gate.poll(DETECTED, { ...step, apply: ok });
+    await gate.poll(detected({ ...step, apply: ok }));
     expect(ok).toHaveBeenCalledOnce();
   });
 
   it('does NOT apply when the re-check itself failed', async () => {
     const { gate, step, apply, setUpdating, log } = harness({ revalidate: async () => ({ status: 'failed' }) });
-    await gate.poll(DETECTED, step);
+    await gate.poll(detected(step));
     expect(apply).not.toHaveBeenCalled();
     expect(setUpdating).not.toHaveBeenCalledWith(true);
     expect(log).toHaveBeenCalledWith('RECHECK_FAILED');
   });
 
   it('does nothing for a none or failed poll outcome without a store', async () => {
-    const { gate, step, calls } = harness();
-    await gate.poll({ status: 'none' }, step);
-    await gate.poll({ status: 'failed' }, step);
+    const { gate, calls } = harness();
+    await gate.poll({ status: 'none' });
+    await gate.poll({ status: 'failed' });
     expect(calls).toEqual([]);
   });
 
   it('applies with no hold-off log/sleep when jitter is disabled', async () => {
     const { gate, step, calls } = harness({ jitterMs: 0 });
-    await gate.poll(DETECTED, step);
+    await gate.poll(detected(step));
     expect(calls).toEqual(['revalidate', 'setUpdating:true', 'apply:v-fresh', 'setUpdating:false']);
   });
 });

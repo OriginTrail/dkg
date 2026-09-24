@@ -28,6 +28,8 @@ import {
   describeUpdateHold,
   type UpdateCheckOutcome,
   type UpdateHoldoffGate,
+  type UpdateHoldoffPoll,
+  type UpdateHoldoffStep,
 } from './auto-update-jitter.js';
 import type { LastUpdateCheck } from './state.js';
 import type { ResolvedAutoUpdateConfig } from '../config.js';
@@ -41,6 +43,11 @@ export function npmCheckOutcome(status: NpmVersionStatus): UpdateCheckOutcome {
     case 'no-target': return { status: 'none' };
     case 'error': return { status: 'failed' };
   }
+}
+
+/** Hand the gate a poll: only an available target carries the rollout step. */
+function toGatePoll(outcome: UpdateCheckOutcome, rollout: () => UpdateHoldoffStep): UpdateHoldoffPoll {
+  return outcome.status === 'available' ? { ...outcome, rollout: rollout() } : outcome;
 }
 
 /** A git ref check as a gate outcome. */
@@ -71,23 +78,28 @@ export async function resolveCurrentGitTarget(
   return gitCheckOutcome(await checkForNewCommitWithStatus(au, log));
 }
 
-export interface NpmUpdateRunCheckDeps {
-  /** null = version-check-only (auto-apply disabled): detect + record, never apply. */
-  gate: UpdateHoldoffGate | null;
-  log: (msg: string) => void;
-  lastUpdateCheck: LastUpdateCheck;
-  allowPrerelease: boolean;
-  channel?: string;
+/** What npm mode needs to install an available version. */
+export interface NpmAutoApply {
+  gate: UpdateHoldoffGate;
   nodeRole: 'edge' | 'core';
   /** Trigger the supervised restart after a successful install. */
   onRestart: () => Promise<void>;
 }
 
+export interface NpmUpdateRunCheckDeps {
+  log: (msg: string) => void;
+  lastUpdateCheck: LastUpdateCheck;
+  allowPrerelease: boolean;
+  channel?: string;
+  /** null = version-check-only (auto-apply disabled): detect + record, never apply. */
+  autoApply: NpmAutoApply | null;
+}
+
 /**
  * Build the npm-mode polling `runCheck`. Always refreshes `lastUpdateCheck` (so
- * `/api/status` is current even when auto-apply is off); when a gate is present,
- * hands it the check's outcome — including the post-hold-off re-check that skips
- * a version withdrawn during the wait.
+ * `/api/status` is current even when auto-apply is off); with auto-apply, hands
+ * the check's outcome to the gate — including the post-hold-off re-check that
+ * skips a version withdrawn during the wait.
  */
 export function createNpmUpdateRunCheck(deps: NpmUpdateRunCheckDeps): () => Promise<void> {
   return async () => {
@@ -105,9 +117,10 @@ export function createNpmUpdateRunCheck(deps: NpmUpdateRunCheckDeps): () => Prom
           `Auto-update (npm): WARNING — channel "${npmStatus.channel}" has no acceptable target (tag missing or rejected by allowPrerelease); node will not update until it is published.`,
         );
     }
-    if (!deps.gate) return; // version check only — no auto-apply when polling disabled
+    const { autoApply } = deps;
+    if (!autoApply) return; // version check only — no auto-apply when polling disabled
 
-    await deps.gate.poll(npmCheckOutcome(npmStatus), {
+    await autoApply.gate.poll(toGatePoll(npmCheckOutcome(npmStatus), () => ({
       onHold: (version, holdMs, resumed) =>
         deps.log(`Auto-update (npm): version ${version} available; ${describeUpdateHold(holdMs, resumed)}`),
       shutdownMessage:
@@ -121,15 +134,15 @@ export function createNpmUpdateRunCheck(deps: NpmUpdateRunCheckDeps): () => Prom
       revalidate: () => resolveCurrentNpmTarget(deps.log, deps.allowPrerelease, deps.channel),
       apply: async (version) => {
         // OT-RFC-41 Bundle B1b: Edge → npm install -g, Core → slot install.
-        const status = deps.nodeRole === 'edge'
+        const status = autoApply.nodeRole === 'edge'
           ? await performNpmUpdateEdge(version, getCurrentCliVersion(), deps.log)
           : await performNpmUpdate(version, deps.log);
         if (status === 'updated') {
           deps.log('Auto-update: update activated; exiting for supervised restart.');
-          await deps.onRestart();
+          await autoApply.onRestart();
         }
       },
-    });
+    })));
   };
 }
 
@@ -161,7 +174,7 @@ export function createGitUpdateRunCheck(deps: GitUpdateRunCheckDeps): () => Prom
     deps.lastUpdateCheck.latestVersion = '';
     deps.lastUpdateCheck.latestCommit = gitStatus.commit ?? '';
 
-    await deps.gate.poll(gitCheckOutcome(gitStatus), {
+    await deps.gate.poll(toGatePoll(gitCheckOutcome(gitStatus), () => ({
       onHold: (commit, holdMs, resumed) =>
         deps.log(
           `Auto-update (git): new commit ${commit.slice(0, 8)} available; ${describeUpdateHold(holdMs, resumed)}`,
@@ -188,6 +201,6 @@ export function createGitUpdateRunCheck(deps: GitUpdateRunCheckDeps): () => Prom
         }
         deps.log('Auto-update (git): update failed.');
       },
-    });
+    })));
   };
 }

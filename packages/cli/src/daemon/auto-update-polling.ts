@@ -10,7 +10,7 @@
  */
 import { join } from 'node:path';
 import { formatAutoUpdateTagVerificationWarning, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
-import type { ResolvedAutoUpdateConfig } from '../config.js';
+import type { ResolvedAutoUpdateConfig, ResolvedUpdatePreferences } from '../config.js';
 import { repoToFetchUrl } from './auto-update.js';
 import { createFileUpdateHoldoffStore, UPDATE_HOLDOFF_FILE } from './auto-update-holdoff-store.js';
 import {
@@ -111,45 +111,55 @@ export function startGitUpdatePolling(
   return schedulePolling(runCheck, au.checkIntervalMinutes * 60_000, deps.timers);
 }
 
-export interface NpmUpdatePollingOptions {
-  /** null: auto-apply disabled. The poll still checks and records the latest
-   *  version, but there is no gate and nothing is installed. */
-  au: ResolvedAutoUpdateConfig | null;
-  checkIntervalMinutes: number;
-  allowPrerelease: boolean;
-  channel?: string;
-  nodeRole: 'edge' | 'core';
-}
+/** Poll interval when auto-update is disabled and npm mode only checks versions. */
+export const CHECK_ONLY_INTERVAL_MINUTES = 30;
+
+export type NpmUpdatePollingOptions =
+  /** Auto-apply: interval, channel and prerelease policy all come from `au`. */
+  | { mode: 'auto-apply'; au: ResolvedAutoUpdateConfig; nodeRole: 'edge' | 'core' }
+  /** Auto-update disabled: check and record the latest version on the given
+   *  policy every CHECK_ONLY_INTERVAL_MINUTES; no gate, nothing is installed. */
+  | { mode: 'check-only'; policy: ResolvedUpdatePreferences };
 
 /** npm-mode counterpart to {@link startGitUpdatePolling}. */
 export function startNpmUpdatePolling(
   opts: NpmUpdatePollingOptions,
   deps: DaemonUpdatePollingDeps,
 ): ReturnType<typeof setInterval> {
-  const gate = opts.au ? createDaemonUpdateHoldoffGate({ ...deps, au: opts.au }, deps.gateSeams) : null;
+  const common = { log: deps.log, lastUpdateCheck: deps.lastUpdateCheck };
+  if (opts.mode === 'check-only') {
+    const runCheck = createNpmUpdateRunCheck({
+      ...common,
+      allowPrerelease: opts.policy.allowPrerelease,
+      channel: opts.policy.channel,
+      autoApply: null,
+    });
+    return schedulePolling(runCheck, CHECK_ONLY_INTERVAL_MINUTES * 60_000, deps.timers);
+  }
+  const { au } = opts;
   const runCheck = createNpmUpdateRunCheck({
-    gate,
-    log: deps.log,
-    lastUpdateCheck: deps.lastUpdateCheck,
-    allowPrerelease: opts.allowPrerelease,
-    channel: opts.channel,
-    nodeRole: opts.nodeRole,
-    onRestart: deps.onRestart,
+    ...common,
+    allowPrerelease: au.allowPrerelease ?? true,
+    channel: au.channel,
+    autoApply: {
+      gate: createDaemonUpdateHoldoffGate({ ...deps, au }, deps.gateSeams),
+      nodeRole: opts.nodeRole,
+      onRestart: deps.onRestart,
+    },
   });
-  return schedulePolling(runCheck, opts.checkIntervalMinutes * 60_000, deps.timers);
+  return schedulePolling(runCheck, au.checkIntervalMinutes * 60_000, deps.timers);
 }
-
-type AutoUpdatePolicy = { allowPrerelease?: boolean; channel?: string };
 
 /** What lifecycle resolved about auto-update for this daemon. */
 export interface DaemonUpdatePollingSelection {
   pollingMode: AutoUpdatePollingMode;
   /** Resolved auto-update config; null when auto-update is disabled. */
   au: ResolvedAutoUpdateConfig | null;
-  /** The local (`~/.dkg/config.json`) and network `autoUpdate` settings. They
-   *  set the npm check policy when auto-apply is disabled (`au` null). */
-  localAutoUpdate?: AutoUpdatePolicy;
-  networkAutoUpdate?: AutoUpdatePolicy;
+  /** From `resolveUpdatePreferences`: the npm check policy when auto-apply is
+   *  disabled (`au` null). It follows the operator's local config before the
+   *  network default, so a disabled node with a local channel / allowPrerelease
+   *  pin observes its own cohort. */
+  preferences: ResolvedUpdatePreferences;
   nodeRole: 'edge' | 'core';
 }
 
@@ -207,24 +217,15 @@ export function startDaemonUpdatePolling(
   }
 
   if (pollingMode === 'npm') {
-    const checkIntervalMinutes = au?.checkIntervalMinutes ?? 30;
-    // Even in version-check-only mode (au is null because auto-apply is
-    // disabled) the policy used for the check must reflect the operator's
-    // shipped intent, and must mirror resolveAutoUpdateConfig's precedence:
-    // local config BEFORE network default. A disabled node with a local
-    // channel / allowPrerelease pin must observe its own cohort, not the
-    // network's.
-    const allowPrerelease = au?.allowPrerelease
-      ?? selection.localAutoUpdate?.allowPrerelease
-      ?? selection.networkAutoUpdate?.allowPrerelease
-      ?? true;
-    const channel = au?.channel ?? selection.localAutoUpdate?.channel ?? selection.networkAutoUpdate?.channel;
-
+    const options: NpmUpdatePollingOptions = au
+      ? { mode: 'auto-apply', au, nodeRole: selection.nodeRole }
+      : { mode: 'check-only', policy: selection.preferences };
+    const channel = au ? au.channel : selection.preferences.channel;
+    const everyMinutes = au ? au.checkIntervalMinutes : CHECK_ONLY_INTERVAL_MINUTES;
     log(
-      `Auto-update (npm): ${au ? 'enabled' : 'disabled — version check only'}${channel ? ` channel="${channel}"` : ''} (every ${checkIntervalMinutes}min)`,
+      `Auto-update (npm): ${au ? 'enabled' : 'disabled — version check only'}${channel ? ` channel="${channel}"` : ''} (every ${everyMinutes}min)`,
     );
-    // With auto-apply disabled (au null) there is no gate: detect + record only.
-    return starters.npm({ au, checkIntervalMinutes, allowPrerelease, channel, nodeRole: selection.nodeRole }, deps);
+    return starters.npm(options, deps);
   }
 
   if (au?.enabled) {

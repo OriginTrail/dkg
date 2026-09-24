@@ -105,28 +105,8 @@ export interface UpdateHoldoffStore {
   clear(): Promise<void>;
 }
 
-/** A durable hold-off: the deadline for `target` is kept in `store`. */
-export interface UpdateHoldoffPersistence {
-  /** Identity of the detected target (commit SHA / npm version). */
-  target: string;
-  store: UpdateHoldoffStore;
-}
-
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-/** Persist a deadline. A failure is logged, never thrown: the hold still runs in memory. */
-async function persistHoldoffRecord(
-  store: UpdateHoldoffStore,
-  record: UpdateHoldoffRecord,
-  log: ((msg: string) => void) | undefined,
-): Promise<void> {
-  try {
-    await store.write(record);
-  } catch (err) {
-    log?.(`Auto-update: could not persist the rollout hold-off deadline (${errorMessage(err)}); a restart will draw a new one.`);
-  }
 }
 
 export type UpdateHoldoffDecision = 'proceed' | 'abort-shutdown';
@@ -136,76 +116,101 @@ export interface AwaitUpdateHoldoffDeps {
   jitterMs: number;
   /** True once the daemon has begun shutting down. */
   isShuttingDown: () => boolean;
+  /** A hold the caller already resolved (the gate resumes persisted deadlines).
+   *  Omitted: one is drawn from `jitterMs` / `rng`. */
+  hold?: { holdMs: number; resumed: boolean };
   /** Invoked once before the wait, when the hold is non-zero or was carried
-   *  over from before a restart — lets the caller emit a mode-specific log
-   *  line. `resumed` is true when the deadline came from the persisted record. */
+   *  over from before a restart — lets the caller emit a mode-specific log line. */
   onHold?: (holdMs: number, resumed: boolean) => void;
-  /** Omitted: the hold lives in memory and a restart redraws it. Present: the
-   *  deadline is drawn once per target and resumed across restarts. */
-  persistence?: UpdateHoldoffPersistence;
-  /** Reports store failures, which never block the hold-off. */
-  log?: (msg: string) => void;
   /** Injectable for deterministic tests. */
   rng?: () => number;
-  /** Injectable for deterministic tests (default: Date.now). */
-  now?: () => number;
   /** Injectable for deterministic tests (default: an unref'd setTimeout). */
   sleep?: (ms: number) => Promise<void>;
-}
-
-/**
- * How long to hold before applying. With `persistence`, the deadline is drawn
- * ONCE per target per node and persisted, so a restart mid-hold resumes the
- * remaining time (0 once the deadline has passed) instead of redrawing.
- * A fresh draw replaces the record when the target changed, the record is
- * unreadable, or the deadline lies outside [now - MAX_HOLDOFF_OVERDUE_MS,
- * now + jitterMs] (stale, the window was lowered, or the clock went back).
- * Store failures are logged and fall back to an in-memory hold; they never throw.
- */
-async function resolveUpdateHoldoff(
-  deps: Pick<AwaitUpdateHoldoffDeps, 'jitterMs' | 'persistence' | 'log' | 'rng' | 'now'>,
-): Promise<{ holdMs: number; resumed: boolean }> {
-  const rng = deps.rng ?? Math.random;
-  if (!(deps.jitterMs > 0)) return { holdMs: 0, resumed: false };
-  if (!deps.persistence) return { holdMs: pickUpdateHoldoffMs(deps.jitterMs, rng), resumed: false };
-
-  const { target, store } = deps.persistence;
-  const now = (deps.now ?? Date.now)();
-  let record: UpdateHoldoffRecord | null = null;
-  try {
-    record = await store.read();
-  } catch (err) {
-    deps.log?.(`Auto-update: ignoring unreadable rollout hold-off record (${errorMessage(err)}); drawing a fresh hold-off.`);
-  }
-  if (record && record.target === target) {
-    const remainingMs = record.deadlineEpochMs - now;
-    if (remainingMs <= deps.jitterMs && remainingMs >= -MAX_HOLDOFF_OVERDUE_MS) {
-      return { holdMs: Math.max(0, Math.ceil(remainingMs)), resumed: true };
-    }
-  }
-
-  const holdMs = pickUpdateHoldoffMs(deps.jitterMs, rng);
-  await persistHoldoffRecord(store, { target, deadlineEpochMs: now + holdMs }, deps.log);
-  return { holdMs, resumed: false };
 }
 
 /**
  * Wait out the per-node rollout hold-off, then report whether to proceed with
  * applying the update. Returns `'proceed'` after the (possibly zero) hold-off,
  * or `'abort-shutdown'` if the daemon began shutting down during the wait — in
- * which case the caller must NOT apply. The update is re-detected on next boot,
- * which resumes the persisted deadline when `persistence` is configured.
+ * which case the caller must NOT apply (the update is re-detected on next boot).
+ * Only waits: persisting the deadline is the gate's job.
  *
- * The ordering (resolve → optional log → sleep → re-check shutdown) is the exact
+ * The ordering (hold → optional log → sleep → re-check shutdown) is the exact
  * sequence both auto-update paths depend on; extracting it here makes the
  * shutdown-bail unit-testable rather than only eyeballed in the daemon loop.
  */
 export async function awaitUpdateHoldoff(deps: AwaitUpdateHoldoffDeps): Promise<UpdateHoldoffDecision> {
-  const { holdMs, resumed } = await resolveUpdateHoldoff(deps);
+  const { holdMs, resumed } = deps.hold
+    ?? { holdMs: pickUpdateHoldoffMs(deps.jitterMs, deps.rng ?? Math.random), resumed: false };
   if (holdMs > 0 || resumed) deps.onHold?.(holdMs, resumed);
   if (holdMs <= 0) return deps.isShuttingDown() ? 'abort-shutdown' : 'proceed';
   await (deps.sleep ?? unrefSleep)(holdMs);
   return deps.isShuttingDown() ? 'abort-shutdown' : 'proceed';
+}
+
+/**
+ * The persisted rollout deadline. The one owner of every store transition:
+ * resume or draw (begin), retarget (markDue) and clear. Store failures are
+ * logged and never thrown; the hold then simply lives in memory.
+ */
+interface HoldoffDeadline {
+  /**
+   * The hold for `target`. The deadline is drawn ONCE per target per node and
+   * persisted, so a restart mid-hold resumes the remaining time (0 once the
+   * deadline has passed) instead of redrawing. A fresh draw replaces the record
+   * when the target changed, the record is unreadable, or the deadline lies
+   * outside [now - MAX_HOLDOFF_OVERDUE_MS, now + jitterMs] (stale, the window
+   * was lowered, or the clock went back). No record is written with jitter off.
+   */
+  begin(target: string): Promise<{ holdMs: number; resumed: boolean }>;
+  /** Record `target` as already due (a newer target found by the re-check). */
+  markDue(target: string): Promise<void>;
+  clear(): Promise<void>;
+}
+
+function createHoldoffDeadline(
+  store: UpdateHoldoffStore,
+  opts: { jitterMs: number; log: (msg: string) => void; rng: () => number; now: () => number },
+): HoldoffDeadline {
+  async function write(record: UpdateHoldoffRecord): Promise<void> {
+    try {
+      await store.write(record);
+    } catch (err) {
+      opts.log(`Auto-update: could not persist the rollout hold-off deadline (${errorMessage(err)}); a restart will draw a new one.`);
+    }
+  }
+
+  return {
+    async begin(target) {
+      if (!(opts.jitterMs > 0)) return { holdMs: 0, resumed: false };
+      const now = opts.now();
+      let record: UpdateHoldoffRecord | null = null;
+      try {
+        record = await store.read();
+      } catch (err) {
+        opts.log(`Auto-update: ignoring unreadable rollout hold-off record (${errorMessage(err)}); drawing a fresh hold-off.`);
+      }
+      if (record && record.target === target) {
+        const remainingMs = record.deadlineEpochMs - now;
+        if (remainingMs <= opts.jitterMs && remainingMs >= -MAX_HOLDOFF_OVERDUE_MS) {
+          return { holdMs: Math.max(0, Math.ceil(remainingMs)), resumed: true };
+        }
+      }
+      const holdMs = pickUpdateHoldoffMs(opts.jitterMs, opts.rng);
+      await write({ target, deadlineEpochMs: now + holdMs });
+      return { holdMs, resumed: false };
+    },
+    async markDue(target) {
+      if (opts.jitterMs > 0) await write({ target, deadlineEpochMs: opts.now() });
+    },
+    async clear() {
+      try {
+        await store.clear();
+      } catch (err) {
+        opts.log(`Auto-update: could not remove the rollout hold-off record (${errorMessage(err)}).`);
+      }
+    },
+  };
 }
 
 /**
@@ -240,8 +245,8 @@ export interface UpdateHoldoffGateConfig {
 
 /**
  * What one update check found, in mode-neutral terms. The runners map their
- * native git/npm statuses onto this; the gate alone decides what each outcome
- * means for the persisted deadline.
+ * native git/npm statuses onto this, for the poll and for the re-check after
+ * the hold-off; the gate alone decides what each outcome does to the deadline.
  */
 export type UpdateCheckOutcome<T extends string = string> =
   | { status: 'available'; target: T }
@@ -250,7 +255,7 @@ export type UpdateCheckOutcome<T extends string = string> =
   /** The check itself failed (network, registry): says nothing about the target. */
   | { status: 'failed' };
 
-/** Per-poll, mode-specific behaviour injected into the gate. */
+/** How to roll out one detected target: mode-specific behaviour injected into the gate. */
 export interface UpdateHoldoffStep<T extends string = string> {
   /** Emit the mode-specific "holding Ns before applying" line for the detected
    *  target; `resumed` is true when the deadline was carried over from before a restart. */
@@ -273,6 +278,12 @@ export interface UpdateHoldoffStep<T extends string = string> {
   recheckFailedMessage: string;
 }
 
+/** One poll's outcome as the gate takes it: only `available` carries a rollout. */
+export type UpdateHoldoffPoll<T extends string = string> =
+  | { status: 'available'; target: T; rollout: UpdateHoldoffStep<T> }
+  | { status: 'none' }
+  | { status: 'failed' };
+
 export interface UpdateHoldoffGate {
   /**
    * Feed one poll's outcome into the rollout state machine. Single-flight across
@@ -281,15 +292,15 @@ export interface UpdateHoldoffGate {
    *   none      -> drop the persisted deadline
    *   failed    -> nothing; the deadline is kept
    */
-  poll<T extends string>(outcome: UpdateCheckOutcome<T>, step: UpdateHoldoffStep<T>): Promise<void>;
+  poll<T extends string>(input: UpdateHoldoffPoll<T>): Promise<void>;
 }
 
 /**
  * The single auto-update rollout gate shared by the git and npm daemon paths.
  * A factory so it OWNS its single-flight state (the `pending` flag) instead of
  * making callers allocate and thread a mutable object — create it ONCE, at the
- * daemon scope, and call `.poll(outcome, step)` on every polling tick. An
- * `available` outcome runs one rollout:
+ * daemon scope, and call `.poll(input)` on every polling tick. An `available`
+ * poll runs one rollout:
  *
  *   single-flight guard -> hold-off (jitter, deadline persisted per target)
  *     -> abort if shutting down (record kept: next boot resumes it)
@@ -315,27 +326,23 @@ export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): Update
   // Owned here so single-flight holds across ticks — do NOT recreate per tick.
   // It covers both transitions of the record: a rollout and a clear.
   let pending = false;
-  const store = config.store ?? null;
-  const now = config.now ?? Date.now;
-
-  async function forget(): Promise<void> {
-    if (!store) return;
-    try {
-      await store.clear();
-    } catch (err) {
-      config.log(`Auto-update: could not remove the rollout hold-off record (${errorMessage(err)}).`);
-    }
-  }
+  const rng = config.rng ?? Math.random;
+  const deadline = config.store
+    ? createHoldoffDeadline(config.store, {
+        jitterMs: config.jitterMs,
+        log: config.log,
+        rng,
+        now: config.now ?? Date.now,
+      })
+    : null;
 
   async function rollout<T extends string>(detected: T, step: UpdateHoldoffStep<T>): Promise<void> {
     const decision = await awaitUpdateHoldoff({
       jitterMs: config.jitterMs,
       isShuttingDown: config.isShuttingDown,
+      hold: deadline ? await deadline.begin(detected) : undefined,
       onHold: (holdMs, resumed) => step.onHold(detected, holdMs, resumed),
-      persistence: store ? { target: detected, store } : undefined,
-      log: config.log,
-      rng: config.rng,
-      now,
+      rng,
       sleep: config.sleep,
     });
     if (decision === 'abort-shutdown') {
@@ -354,16 +361,14 @@ export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): Update
     }
     if (recheck.status === 'none') {
       config.log(step.supersededMessage);
-      await forget();
+      await deadline?.clear();
       return;
     }
     const target = recheck.target;
     // A newer target replaced the detected one during the wait. This node has
     // served its hold, so record the new target as already due: a restart
     // during its apply then retries at once instead of drawing a new hold.
-    if (store && target !== detected && config.jitterMs > 0) {
-      await persistHoldoffRecord(store, { target, deadlineEpochMs: now() }, config.log);
-    }
+    if (target !== detected) await deadline?.markDue(target);
     // Last shutdown check: nothing async may run between it and the apply.
     if (config.isShuttingDown()) {
       config.log(step.shutdownMessage);
@@ -375,18 +380,18 @@ export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): Update
       await step.apply(target);
     } finally {
       config.setUpdating(false);
-      if (!config.isShuttingDown()) await forget();
+      if (!config.isShuttingDown()) await deadline?.clear();
     }
   }
 
   return {
-    async poll<T extends string>(outcome: UpdateCheckOutcome<T>, step: UpdateHoldoffStep<T>): Promise<void> {
-      if (outcome.status === 'failed') return; // says nothing: keep the deadline
+    async poll<T extends string>(input: UpdateHoldoffPoll<T>): Promise<void> {
+      if (input.status === 'failed') return; // says nothing: keep the deadline
       if (pending) return; // an earlier poll still owns the record
       pending = true;
       try {
-        if (outcome.status === 'none') await forget();
-        else await rollout(outcome.target, step);
+        if (input.status === 'none') await deadline?.clear();
+        else await rollout(input.target, input.rollout);
       } finally {
         pending = false;
       }

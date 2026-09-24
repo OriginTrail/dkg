@@ -99,6 +99,7 @@ export default defineConfig({
           'test/auto-update-holdoff-gate.test.ts',
           'test/auto-update-holdoff-store.test.ts',
           'test/auto-update-polling.test.ts',
+          'test/auto-update-runner.test.ts',
           'test/auto-update-workspace-clean.test.ts',
           'test/maintenance-update-gate.test.ts',
           'test/node-runtime-preflight.test.ts',

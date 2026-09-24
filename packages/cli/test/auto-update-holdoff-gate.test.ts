@@ -75,7 +75,7 @@ function persistentNode(opts: {
       sleep,
     });
     const apply = vi.fn(async (_target: string) => {});
-    const step = (target: string, overrides: Partial<UpdateHoldoffStep<string>>): UpdateHoldoffStep<string> => ({
+    const rollout = (target: string, overrides: Partial<UpdateHoldoffStep<string>>): UpdateHoldoffStep<string> => ({
       onHold: (_target, ms, resumed) => { holds.push([ms, resumed]); },
       revalidate: async () => available(target),
       apply,
@@ -86,11 +86,11 @@ function persistentNode(opts: {
     });
     /** A poll that detected `target`. */
     const run = (target: string, overrides: Partial<UpdateHoldoffStep<string>> = {}) =>
-      gate.poll(available(target), step(target, overrides));
+      gate.poll({ status: 'available', target, rollout: rollout(target, overrides) });
     /** A poll that found nothing to apply (up to date / withdrawn). */
-    const pollNone = () => gate.poll({ status: 'none' }, step('', {}));
+    const pollNone = () => gate.poll({ status: 'none' });
     /** A poll whose check itself failed. */
-    const pollFailed = () => gate.poll({ status: 'failed' }, step('', {}));
+    const pollFailed = () => gate.poll({ status: 'failed' });
     return { run, pollNone, pollFailed, apply, rng, sleep, sleeps, holds, setUpdating, shutDown: () => { shuttingDown = true; } };
   }
 

@@ -68,13 +68,17 @@ describe('createDaemonUpdateHoldoffGate', () => {
         },
       );
       const apply = vi.fn(async (_target: string) => {});
-      const run = () => gate.poll({ status: 'available', target: 'c1' }, {
-        onHold: () => {},
-        revalidate: async () => ({ status: 'available', target: 'c1' }),
-        apply,
-        shutdownMessage: 'SHUTDOWN',
-        supersededMessage: 'SUPERSEDED',
-        recheckFailedMessage: 'RECHECK_FAILED',
+      const run = () => gate.poll({
+        status: 'available',
+        target: 'c1',
+        rollout: {
+          onHold: () => {},
+          revalidate: async () => ({ status: 'available', target: 'c1' }),
+          apply,
+          shutdownMessage: 'SHUTDOWN',
+          supersededMessage: 'SUPERSEDED',
+          recheckFailedMessage: 'RECHECK_FAILED',
+        },
       });
       return { run, apply, sleeps };
     }
@@ -147,10 +151,10 @@ describe('startGitUpdatePolling / startNpmUpdatePolling', () => {
     expect(await readRecord(home)).toEqual({ target: 'bbb2222', deadlineEpochMs: 1_000 + 900_000 });
   });
 
-  it('npm: both scheduled checks share one gate that persists the deadline under the DKG home', async () => {
+  it('npm auto-apply: interval and policy come from the config; both checks share one persisted gate', async () => {
     const { scheduled, deps } = pollingHarness();
 
-    startNpmUpdatePolling({ au: GIT_AU, checkIntervalMinutes: 3, allowPrerelease: false, nodeRole: 'core' }, deps);
+    startNpmUpdatePolling({ mode: 'auto-apply', au: GIT_AU, nodeRole: 'core' }, deps);
     expect(scheduled.map(({ kind, ms }) => [kind, ms])).toEqual([['timeout', 15_000], ['interval', 3 * 60_000]]);
     expect(scheduled[0].fn).toBe(scheduled[1].fn);
 
@@ -161,7 +165,7 @@ describe('startGitUpdatePolling / startNpmUpdatePolling', () => {
   it('npm with auto-apply disabled: checks and records the version, but has no gate and writes no deadline', async () => {
     const { scheduled, deps } = pollingHarness();
 
-    startNpmUpdatePolling({ au: null, checkIntervalMinutes: 30, allowPrerelease: false, nodeRole: 'core' }, deps);
+    startNpmUpdatePolling({ mode: 'check-only', policy: { allowPrerelease: false } }, deps);
     expect(scheduled.map(({ kind, ms }) => [kind, ms])).toEqual([['timeout', 15_000], ['interval', 30 * 60_000]]);
 
     await scheduled[0].fn();
@@ -171,6 +175,8 @@ describe('startGitUpdatePolling / startNpmUpdatePolling', () => {
 });
 
 // The lifecycle-to-polling boundary: which mode starts, with which inputs.
+const PREFS = { allowPrerelease: true };
+
 describe('startDaemonUpdatePolling', () => {
   function harness() {
     const logs: string[] = [];
@@ -193,7 +199,7 @@ describe('startDaemonUpdatePolling', () => {
 
   it('git mode: starts git polling with the daemon deps and returns its interval', () => {
     const { logs, handle, starters, deps } = harness();
-    const result = startDaemonUpdatePolling({ pollingMode: 'git', au: GIT_AU, nodeRole: 'core' }, deps, starters);
+    const result = startDaemonUpdatePolling({ pollingMode: 'git', au: GIT_AU, preferences: PREFS, nodeRole: 'core' }, deps, starters);
     expect(result).toBe(handle);
     expect(starters.git).toHaveBeenCalledWith(GIT_AU, deps);
     expect(starters.git.mock.calls[0][1].dkgHome).toBe(home);
@@ -203,58 +209,44 @@ describe('startDaemonUpdatePolling', () => {
 
   it('git mode with auto-update disabled, or an invalid repo: logs and starts nothing', () => {
     const { logs, starters, deps } = harness();
-    expect(startDaemonUpdatePolling({ pollingMode: 'git', au: null, nodeRole: 'core' }, deps, starters)).toBeNull();
+    expect(startDaemonUpdatePolling({ pollingMode: 'git', au: null, preferences: PREFS, nodeRole: 'core' }, deps, starters)).toBeNull();
     expect(logs).toContain('Auto-update (git): disabled — autoUpdate.enabled is false.');
 
     const badRepo = { ...GIT_AU, repo: 'not a repo spec' } as ResolvedAutoUpdateConfig;
-    expect(startDaemonUpdatePolling({ pollingMode: 'git', au: badRepo, nodeRole: 'core' }, deps, starters)).toBeNull();
+    expect(startDaemonUpdatePolling({ pollingMode: 'git', au: badRepo, preferences: PREFS, nodeRole: 'core' }, deps, starters)).toBeNull();
     expect(logs.some((m) => m.startsWith('Auto-update (git): invalid config'))).toBe(true);
     expect(starters.git).not.toHaveBeenCalled();
     expect(starters.npm).not.toHaveBeenCalled();
   });
 
-  it('npm mode with auto-apply: starts npm polling with the resolved config and its policy', () => {
-    const { handle, starters, deps } = harness();
+  it('npm mode with auto-apply: starts auto-apply polling from the resolved config alone', () => {
+    const { logs, handle, starters, deps } = harness();
     const au = { ...GIT_AU, channel: 'beta', allowPrerelease: true } as ResolvedAutoUpdateConfig;
     const result = startDaemonUpdatePolling(
-      { pollingMode: 'npm', au, localAutoUpdate: { channel: 'ignored' }, nodeRole: 'core' },
+      { pollingMode: 'npm', au, preferences: { allowPrerelease: false, channel: 'ignored' }, nodeRole: 'core' },
       deps,
       starters,
     );
     expect(result).toBe(handle);
-    expect(starters.npm).toHaveBeenCalledWith(
-      { au, checkIntervalMinutes: 3, allowPrerelease: true, channel: 'beta', nodeRole: 'core' },
-      deps,
-    );
+    expect(starters.npm).toHaveBeenCalledWith({ mode: 'auto-apply', au, nodeRole: 'core' }, deps);
     expect(starters.git).not.toHaveBeenCalled();
+    expect(logs).toContain('Auto-update (npm): enabled channel="beta" (every 3min)');
   });
 
-  it('npm mode, version check only: starts npm polling without a config, local policy before network', () => {
+  it('npm mode, version check only: starts check-only polling on the resolved preferences', () => {
     const { logs, handle, starters, deps } = harness();
-    const result = startDaemonUpdatePolling(
-      {
-        pollingMode: 'npm',
-        au: null,
-        localAutoUpdate: { channel: 'beta' },
-        networkAutoUpdate: { channel: 'latest', allowPrerelease: false },
-        nodeRole: 'edge',
-      },
-      deps,
-      starters,
-    );
+    const preferences = { allowPrerelease: false, channel: 'beta' };
+    const result = startDaemonUpdatePolling({ pollingMode: 'npm', au: null, preferences, nodeRole: 'edge' }, deps, starters);
     expect(result).toBe(handle);
-    expect(starters.npm).toHaveBeenCalledWith(
-      { au: null, checkIntervalMinutes: 30, allowPrerelease: false, channel: 'beta', nodeRole: 'edge' },
-      deps,
-    );
+    expect(starters.npm).toHaveBeenCalledWith({ mode: 'check-only', policy: preferences }, deps);
     expect(logs).toContain('Auto-update (npm): disabled — version check only channel="beta" (every 30min)');
   });
 
   it('monorepo: starts nothing, and says so when auto-update is enabled', () => {
     const { logs, starters, deps } = harness();
-    expect(startDaemonUpdatePolling({ pollingMode: 'monorepo', au: null, nodeRole: 'core' }, deps, starters)).toBeNull();
+    expect(startDaemonUpdatePolling({ pollingMode: 'monorepo', au: null, preferences: PREFS, nodeRole: 'core' }, deps, starters)).toBeNull();
     expect(logs).toEqual([]);
-    expect(startDaemonUpdatePolling({ pollingMode: 'monorepo', au: GIT_AU, nodeRole: 'core' }, deps, starters)).toBeNull();
+    expect(startDaemonUpdatePolling({ pollingMode: 'monorepo', au: GIT_AU, preferences: PREFS, nodeRole: 'core' }, deps, starters)).toBeNull();
     expect(logs.some((m) => m.startsWith('Auto-update: skipped — monorepo checkout detected'))).toBe(true);
     expect(starters.git).not.toHaveBeenCalled();
     expect(starters.npm).not.toHaveBeenCalled();
