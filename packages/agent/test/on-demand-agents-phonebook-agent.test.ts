@@ -9,7 +9,7 @@
  * points that predate it (subscribe, VM batch recovery, rehydration), so they
  * fail on a build without it.
  */
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { generateKeyPair } from '@libp2p/crypto/keys';
 import { peerIdFromPrivateKey } from '@libp2p/peer-id';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
@@ -641,5 +641,111 @@ describe('on-demand agents phonebook across stop()', () => {
       release();
       await agent.stop().catch(() => undefined);
     }
+  }, 30_000);
+});
+
+describe('on-demand agents phonebook on a started node', () => {
+  // The cases above force the enable gate on. These start a real node, so the
+  // gate, the startup restore that triggers it, and the dependencies' local
+  // reads (owner wallet, subscription, phonebook, access policy) are all real.
+  // Only the network edges are replaced: connected peers, admission and the
+  // `agents` transfer (which inserts the publisher's real profile quads).
+  const envKeys = [
+    'DKG_ON_DEMAND_AGENTS_PHONEBOOK',
+    'DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT',
+    'DKG_DURABLE_SYNC_ENABLED',
+  ] as const;
+  const savedEnv = new Map<string, string | undefined>();
+  const started: DKGAgent[] = [];
+
+  beforeEach(() => {
+    for (const key of envKeys) {
+      savedEnv.set(key, process.env[key]);
+      delete process.env[key];
+    }
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await Promise.all(started.splice(0).map((agent) => agent.stop().catch(() => undefined)));
+    for (const key of envKeys) {
+      const value = savedEnv.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    savedEnv.clear();
+  });
+
+  async function startWithSavedPublicSubscription(name: string, nodeRole?: 'core' | 'edge') {
+    const agent = await DKGAgent.create({
+      name,
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+      randomSamplingUseWorkerThread: false,
+      ...(nodeRole ? { nodeRole } : {}),
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [{
+          id: CG,
+          subscribed: true,
+          synced: false,
+          sharedMemorySynced: false,
+          metaSynced: false,
+          onChainId: '1',
+          syncScoped: true,
+        }],
+        save: async () => undefined,
+        delete: async () => undefined,
+      },
+    });
+    started.push(agent);
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority').mockResolvedValue({
+      outcome: 'allowed',
+      source: 'registered-chain',
+      reason: 'chain-public',
+      metadataBootstrap: 'eligible',
+      onChainId: 1n,
+    });
+    vi.spyOn(agent, 'resolveRegisteredContextGraphAuthority').mockResolvedValue({ kind: 'public', onChainId: 1n });
+    // Relay dials from the catch-up priming walk are a network edge too.
+    vi.spyOn(agent, 'primeCatchupConnections').mockResolvedValue(undefined);
+    const request = vi.spyOn(agent, 'requestOnDemandAgentsPhonebook');
+    const syncAgentsFromPeer = vi.fn(async () => {
+      const quads = publisherProfileQuads();
+      await agent.store.insert(quads);
+      return { fetchedTriples: quads.length, insertedTriples: quads.length, complete: true };
+    });
+    const onCuratorsResolved = vi.fn();
+    const realDeps = DKGAgent.prototype.createOnDemandAgentsPhonebookDeps;
+    vi.spyOn(agent, 'createOnDemandAgentsPhonebookDeps').mockImplementation(() => ({
+      ...realDeps.call(agent),
+      listConnectedPeers: () => [{ peerId: CORE, core: true }],
+      preparePeer: async () => true,
+      syncAgentsFromPeer,
+      onCuratorsResolved,
+    }));
+
+    await agent.start();
+    return { agent, request, syncAgentsFromPeer, onCuratorsResolved };
+  }
+
+  it('an Edge restoring a saved public subscription at start fetches the phonebook through the real gate', async () => {
+    const edge = await startWithSavedPublicSubscription('PhonebookStartedEdge');
+
+    expect(edge.agent.getSubscribedContextGraphs().get(CG)?.subscribed).toBe(true);
+    expect(edge.request).toHaveBeenCalledWith(CG, 'subscribe');
+    await vi.waitFor(() => expect(edge.onCuratorsResolved).toHaveBeenCalledWith([CG]), { timeout: 10_000 });
+    expect(edge.syncAgentsFromPeer).toHaveBeenCalledTimes(1);
+  }, 30_000);
+
+  it('a Core, which already syncs the phonebook on connect, does not fetch it on demand', async () => {
+    const core = await startWithSavedPublicSubscription('PhonebookStartedCore', 'core');
+
+    // The same restore asked, and the real gate declined.
+    expect(core.agent.getSubscribedContextGraphs().get(CG)?.subscribed).toBe(true);
+    expect(core.request).toHaveBeenCalledWith(CG, 'subscribe');
+    await core.agent.onDemandAgentsPhonebook().whenIdle();
+    expect(core.syncAgentsFromPeer).not.toHaveBeenCalled();
+    expect(core.onCuratorsResolved).not.toHaveBeenCalled();
+    expect(core.agent.onDemandAgentsPhonebookEnabled()).toBe(false);
   }, 30_000);
 });
