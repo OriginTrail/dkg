@@ -6446,10 +6446,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             );
           }
           if (verifiedOnChainId && subscription && subscription.onChainId === undefined) {
-            await this.persistContextGraphSubscriptionStrict(
+            // An on-demand subscription binds in memory only; durable rows are
+            // saved before the binding becomes visible.
+            await this.persistContextGraphSyncStateStrict(
               asset.contextGraphId,
               { ...subscription, onChainId: verifiedOnChainId, lastReconciledOrdinal: 0 },
-              undefined,
+              'on-chain id binding',
               isBindingCurrent,
             );
             assertCurrent();
@@ -9747,6 +9749,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       });
   }
 
+  /**
+   * Strict write of a row that must be durable. Throws when the projection
+   * would keep member intent process-local, so it suits persisted-row
+   * activation, not the sync path of a live on-demand subscription (see
+   * {@link persistContextGraphSyncStateStrict}).
+   */
   async persistContextGraphSubscriptionStrict(
     this: DKGAgent,
     contextGraphId: string,
@@ -9765,10 +9773,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /**
-   * One strict subscription persistence protocol shared by joins and registry
-   * discovery. It owns snapshot capture, generation validation, per-graph
-   * serialization, and the store-first write. Callers select only whether an
-   * intentionally process-local on-demand member projection is acceptable.
+   * One strict subscription persistence protocol shared by joins, registry
+   * discovery, and sync-owned binding and cursor progress. It owns snapshot
+   * capture, generation validation, per-graph serialization, and the
+   * store-first write. Callers select only whether an intentionally
+   * process-local on-demand member projection is acceptable.
    */
   async persistContextGraphSubscriptionProjectionStrict(
     this: DKGAgent,
@@ -9778,7 +9787,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncScoped?: boolean;
       isCurrent?: () => boolean;
       requireDurableMemberIntent: boolean;
-      operation: 'join approval' | 'chain discovery';
+      operation: 'join approval' | 'chain discovery' | 'on-chain id binding' | 'VM reconcile cursor';
     },
   ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
@@ -9793,7 +9802,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const sub = input.subscription ?? expectedLiveSub;
     if (!sub?.subscribed && !sub?.coreHosted) {
       throw new Error(
-        `Cannot persist context graph "${input.contextGraphId}": active subscription or host state is missing`,
+        `Cannot persist context graph "${input.contextGraphId}" (${input.operation}): active subscription or host state is missing`,
       );
     }
     const persistence = projectContextGraphSubscriptionPersistence({
@@ -9827,7 +9836,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         )
       ) {
         throw asSyncFetchAbortError(new Error(
-          `Context graph "${input.contextGraphId}" changed before its strict subscription snapshot was persisted`,
+          `Context graph "${input.contextGraphId}" changed before its strict subscription snapshot (${input.operation}) was persisted`,
         ));
       }
       await store.save(record);
@@ -9851,6 +9860,32 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
       requireDurableMemberIntent: false,
       operation: 'chain discovery',
+    });
+  }
+
+  /**
+   * Sync-owned durability boundary for a live subscription's on-chain id
+   * binding and VM reconcile cursor. Like chain discovery, sync keeps the
+   * canonical projection instead of demanding durable member intent: an
+   * on-demand member subscription is process-local, so nothing is written and
+   * the caller advances only its in-memory state; a Core hosting obligation
+   * still saves its host-only row; an always-on subscription is saved before
+   * the caller exposes the new state. Demanding member intent here stalled
+   * every `dkg subscribe` without `--save` at its first cursor advance.
+   */
+  async persistContextGraphSyncStateStrict(
+    this: DKGAgent,
+    contextGraphId: string,
+    subscription: ContextGraphSub,
+    operation: 'on-chain id binding' | 'VM reconcile cursor',
+    isCurrent: () => boolean,
+  ): Promise<void> {
+    await this.persistContextGraphSubscriptionProjectionStrict({
+      contextGraphId,
+      subscription,
+      isCurrent,
+      requireDurableMemberIntent: false,
+      operation,
     });
   }
 
