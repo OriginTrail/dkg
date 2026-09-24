@@ -358,12 +358,60 @@ describe('replaceFileDurably', () => {
     expect(rename).toHaveBeenCalledTimes(1);
   });
 
-  it('does not retry the same failure on other platforms', async () => {
+  // Elsewhere EPERM means the file may not be replaced in this directory (a
+  // sticky one), though it may be written: no retry, and an in-place rewrite.
+  it('does not retry the same failure on other platforms, and rewrites the file in place', async () => {
     await writeFile(target, 'old');
     vi.mocked(rename).mockRejectedValueOnce(fsError('EPERM'));
 
-    await expect(replaceFileDurably(target, 'new', { platform: 'linux' })).rejects.toMatchObject({ code: 'EPERM' });
+    expect(await replaceFileDurably(target, 'new', { platform: 'linux' })).toBe('in-place');
     expect(rename).toHaveBeenCalledTimes(1);
+    expect(await readFile(target, 'utf-8')).toBe('new');
+    expect(await readdir(dir)).toEqual(['config.json']);
+  });
+
+  // A config linked into a directory another account owns: the file is
+  // writable, but its directory takes no temp file, so atomic replacement is
+  // out of reach and the file is written in place, as writeFile would.
+  it('rewrites in place a writable file behind a link into a directory it may not add to', async () => {
+    // Windows ignores a directory's mode, and root is not held to it.
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const managed = join(dir, 'managed');
+    await mkdir(managed);
+    await writeFile(join(managed, 'config.json'), 'old');
+    await symlink(join(managed, 'config.json'), target);
+    await chmod(managed, 0o555);
+    try {
+      expect(await replaceFileDurably(target, 'new')).toBe('in-place');
+
+      expect(await readFile(join(managed, 'config.json'), 'utf-8')).toBe('new');
+      expect((await lstat(target)).isSymbolicLink()).toBe(true);
+      expect(await readdir(managed)).toEqual(['config.json']);
+    } finally {
+      await chmod(managed, 0o755);
+    }
+  });
+
+  it('rewrites in place when the directory refuses the temp file, and only then', async () => {
+    await writeFile(target, 'old');
+    const refuseTempFile = (code: string) => vi.mocked(open).mockImplementation(async (...args: Parameters<typeof open>) => {
+      if (/^\..+\.\d+\.[0-9a-f-]+\.tmp$/.test(basename(String(args[0])))) throw fsError(code);
+      return actualFs.open(...args);
+    });
+
+    refuseTempFile('EACCES');
+    expect(await replaceFileDurably(target, 'new')).toBe('in-place');
+    expect(await readFile(target, 'utf-8')).toBe('new');
+
+    // Any other failure propagates: rewriting in place after, say, a full disk could truncate the file.
+    refuseTempFile('ENOSPC');
+    await expect(replaceFileDurably(target, 'newer')).rejects.toMatchObject({ code: 'ENOSPC' });
+    expect(await readFile(target, 'utf-8')).toBe('new');
+
+    // With no file to rewrite, a refused temp file is a refused write.
+    refuseTempFile('EACCES');
+    await expect(replaceFileDurably(join(dir, 'fresh.json'), 'new')).rejects.toMatchObject({ code: 'EACCES' });
+    expect(await readdir(dir)).toEqual(['config.json']);
   });
 
   it('syncs the new content before the rename and the directory after it, except on Windows', async () => {

@@ -46,8 +46,11 @@ export interface DurableReplaceOptions {
  * on the file itself cannot be read from Node and is not carried over. When
  * this process may not give the temp file the original's owner or group (it
  * belongs to another user), the file is rewritten in place instead, keeping
- * its owner and ACL at the cost of the crash guarantee. The strategy used is
- * returned, so a caller can tell when that guarantee did not apply.
+ * its owner and ACL at the cost of the crash guarantee. So is a file this
+ * process may write in a directory it may not add to or rename within (a
+ * config linked into a directory another account owns), as `writeFile`
+ * would have written it. The strategy used is returned, so a caller can tell
+ * when the crash guarantee did not apply.
  *
  * A file that is not writable is refused, as `writeFile` would refuse it. A
  * symlink is followed as `writeFile` follows it: the file behind it is
@@ -111,7 +114,9 @@ async function resolveWriteTarget(path: string): Promise<string> {
 /**
  * Write the content to a temp file with the original's owner, group and mode,
  * and rename it over the target. Returns false, having changed nothing, when
- * the temp file cannot be given the original's owner and group.
+ * the original exists and cannot be replaced this way: the temp file cannot
+ * be given its owner and group, or the directory refuses the temp file or
+ * the rename (EACCES, EPERM). Any other failure propagates.
  */
 async function replaceByRename(
   target: string,
@@ -124,8 +129,15 @@ async function replaceByRename(
   const temporary = join(directory, `.${basename(target)}.${process.pid}.${randomUUID()}.tmp`);
   const mode = options.mode ?? (original ? original.mode & 0o7777 : undefined);
   let renamed = false;
+  let refused = false;
   try {
-    const handle = await open(temporary, 'wx', mode === undefined ? 0o666 : 0o600);
+    let handle: FileHandle;
+    try {
+      handle = await open(temporary, 'wx', mode === undefined ? 0o666 : 0o600);
+    } catch (error) {
+      if (original && isPermissionError(error)) return false;
+      throw error;
+    }
     try {
       if (original && !await takeOwnership(handle, original)) return false;
       await handle.writeFile(content, 'utf-8');
@@ -136,9 +148,17 @@ async function replaceByRename(
       await handle.close();
     }
     await commit(options, async () => {
-      await renameWithRetry(temporary, target, platform);
-      renamed = true;
+      try {
+        await renameWithRetry(temporary, target, platform);
+        renamed = true;
+      } catch (error) {
+        // Windows uses these codes for a busy file, retried above; elsewhere
+        // they mean the file may not be replaced here (a sticky directory).
+        if (!original || platform === 'win32' || !isPermissionError(error)) throw error;
+        refused = true;
+      }
     });
+    if (refused) return false;
   } finally {
     if (!renamed) await unlink(temporary).catch(() => {});
   }
@@ -146,6 +166,10 @@ async function replaceByRename(
   // cannot be flushed still holds a complete old or new file after power loss.
   await fsyncDirectory(directory, platform).catch(() => {});
   return true;
+}
+
+function isPermissionError(error: unknown): boolean {
+  return hasErrorCode(error, 'EACCES') || hasErrorCode(error, 'EPERM');
 }
 
 /**
@@ -170,7 +194,7 @@ async function takeOwnership(handle: FileHandle, original: Stats): Promise<boole
 /**
  * Overwrite the file itself, keeping everything the replacement could not:
  * its owner, group and ACL. A crash part-way through can leave it incomplete,
- * so this is only for a file whose owner the replacement could not keep.
+ * so this is only for a file the replacement could not replace.
  */
 async function rewriteInPlace(target: string, content: string, options: DurableReplaceOptions): Promise<void> {
   const handle = await open(target, 'r+');

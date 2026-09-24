@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
-import { chmod, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdtemp, open, readFile, readdir, rename, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -326,6 +326,27 @@ describe('DkgHomeFiles.updateConfigFile', () => {
 
     expect(await readJson()).toEqual({ name: 'renamed' });
     expect((await actualFs.stat(files.configPath)).ino).toBe(ino);
+  });
+
+  // A config linked into a directory another account owns: the home, where
+  // the lock lives, is writable, and so is the config, but not its directory.
+  it('rewrites in place a config linked into a directory it may not add to', async () => {
+    // Windows ignores a directory's mode, and root is not held to it.
+    if (process.platform === 'win32' || process.getuid?.() === 0) return;
+    const managed = await mkdtemp(join(tmpdir(), 'dkg-config-managed-'));
+    await writeFile(join(managed, 'config.json'), JSON.stringify({ name: 'node' }));
+    await symlink(join(managed, 'config.json'), files.configPath);
+    await chmod(managed, 0o555);
+    try {
+      expect(await files.updateConfigFile([configEdit(['name'], () => 'renamed')]))
+        .toEqual({ path: files.configPath, changed: true, strategy: 'in-place' });
+
+      expect(JSON.parse(await readFile(join(managed, 'config.json'), 'utf-8'))).toEqual({ name: 'renamed' });
+      expect((await lstat(files.configPath)).isSymbolicLink()).toBe(true);
+    } finally {
+      await chmod(managed, 0o755);
+      await rm(managed, { recursive: true, force: true });
+    }
   });
 
   it('keeps the permission bits of the config file', async () => {
