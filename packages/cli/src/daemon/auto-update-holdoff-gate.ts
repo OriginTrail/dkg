@@ -4,8 +4,17 @@
  * {@link UpdateHoldoffDeadline} policy), the re-check after the hold, shutdown
  * aborts, the isUpdating flag and the apply.
  */
-import { awaitUpdateHoldoff } from './auto-update-jitter.js';
 import type { UpdateHoldoffDeadline } from './auto-update-holdoff-deadline.js';
+
+/**
+ * A hold-off sleep whose timer is `unref`'d, so a pending rollout hold-off never
+ * keeps the daemon process alive / blocks its exit during shutdown.
+ */
+function unrefSleep(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, ms).unref();
+  });
+}
 
 /**
  * What one update check found, in mode-neutral terms. The runners map their
@@ -76,7 +85,8 @@ export interface UpdateHoldoffGate {
  * an earlier one is still being handled, or once shutdown has begun. An
  * `available` poll runs one rollout:
  *
- *   single-flight guard -> hold-off (the deadline policy's hold)
+ *   single-flight guard -> hold (the deadline policy's) -> log it if it is
+ *     non-zero or resumed -> sleep it if non-zero
  *     -> abort if shutting down (deadline kept: next boot resumes it)
  *     -> RE-CHECK -> abort if shutting down (the re-check is async)
  *     -> re-check failed: stop, deadline kept
@@ -104,13 +114,11 @@ export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): Update
   const { deadline } = config;
 
   async function rollout<T extends string>(detected: T, step: UpdateHoldoffStep<T>): Promise<void> {
-    const hold = await deadline.begin(detected);
-    const decision = await awaitUpdateHoldoff(hold, {
-      isShuttingDown: config.isShuttingDown,
-      onHold: (holdMs, resumed) => step.onHold(detected, holdMs, resumed),
-      sleep: config.sleep,
-    });
-    if (decision === 'abort-shutdown') {
+    const { holdMs, resumed } = await deadline.begin(detected);
+    if (holdMs > 0 || resumed) step.onHold(detected, holdMs, resumed);
+    if (holdMs > 0) await (config.sleep ?? unrefSleep)(holdMs);
+    // Checked after the wait, not before: shutdown usually arrives during it.
+    if (config.isShuttingDown()) {
       config.log(step.shutdownMessage);
       return;
     }

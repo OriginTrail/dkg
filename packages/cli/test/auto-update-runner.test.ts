@@ -1,4 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// The installers are replaced (the checks stay real), so a test sees which
+// installer an apply reaches and nothing is built or installed.
+const installers = vi.hoisted(() => ({
+  npmCore: vi.fn(async (_version: string, _log: (msg: string) => void) => 'failed' as const),
+  npmEdge: vi.fn(async (_version: string, _current: string | null, _log: (msg: string) => void) => 'failed' as const),
+  git: vi.fn(async (..._args: unknown[]) => 'failed' as const),
+}));
+vi.mock('../src/daemon/auto-update.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/daemon/auto-update.js')>()),
+  performNpmUpdate: installers.npmCore,
+  performNpmUpdateEdge: installers.npmEdge,
+  performUpdateWithStatus: installers.git,
+}));
 import type { ResolvedAutoUpdateConfig } from '../src/config.js';
 import { _autoUpdateIo } from '../src/daemon/manifest.js';
 import { createPersistedHoldoffDeadline, type UpdateHoldoffRecord } from '../src/daemon/auto-update-holdoff-deadline.js';
@@ -14,9 +28,7 @@ import type { LastUpdateCheck } from '../src/daemon/state.js';
 
 // How the git and npm runChecks drive the persisted rollout deadline through
 // the gate, for every outcome of the poll and of the re-check after the hold.
-// Only the check-level I/O is stubbed. The installers are stopped at their
-// first step: `mkdir` of the releases dir rejects, so the update lock is never
-// taken, and a recorded `mkdir` means the installer was entered.
+// Only the check-level I/O is stubbed, and the installers are mocked (above).
 
 const GIT_AU = {
   enabled: true,
@@ -35,7 +47,6 @@ const io = {
   remote: [] as string[],
   /** Successive registry answers; the last one repeats. */
   registry: [] as RegistryReply[],
-  installerEntered: 0,
 };
 
 function next<T>(queue: T[]): T {
@@ -47,7 +58,7 @@ beforeEach(() => {
   io.currentVersion = '9.0.0';
   io.remote = ['bbb2222'];
   io.registry = [{ latest: '9.1.0' }];
-  io.installerEntered = 0;
+  for (const installer of Object.values(installers)) installer.mockClear();
   vi.spyOn(_autoUpdateIo, 'readFile').mockImplementation((async (path: any) => {
     if (String(path).endsWith('.current-commit')) return io.currentCommit;
     if (String(path).endsWith('.current-version')) return io.currentVersion;
@@ -66,10 +77,6 @@ beforeEach(() => {
     return reply === 'error'
       ? { ok: false, status: 503, json: async () => ({}) }
       : { ok: true, json: async () => ({ 'dist-tags': reply }) };
-  }) as any);
-  vi.spyOn(_autoUpdateIo, 'mkdir').mockImplementation((async () => {
-    io.installerEntered += 1;
-    throw Object.assign(new Error('EACCES: stopped by the test'), { code: 'EACCES' });
   }) as any);
 });
 afterEach(() => { vi.restoreAllMocks(); });
@@ -138,13 +145,13 @@ describe('re-check adapters', () => {
 });
 
 describe('createNpmUpdateRunCheck — persisted rollout deadline', () => {
-  function npmRunCheck(fixture: ReturnType<typeof gateFixture>, channel?: string) {
+  function npmRunCheck(fixture: ReturnType<typeof gateFixture>, channel?: string, nodeRole: 'edge' | 'core' = 'core') {
     return createNpmUpdateRunCheck({
       log: (m) => fixture.logs.push(m),
       lastUpdateCheck: freshLastCheck(),
       allowPrerelease: false,
       channel,
-      autoApply: { gate: fixture.gate, nodeRole: 'core', onRestart: async () => {} },
+      autoApply: { gate: fixture.gate, nodeRole, onRestart: async () => {} },
     });
   }
 
@@ -153,7 +160,7 @@ describe('createNpmUpdateRunCheck — persisted rollout deadline', () => {
     await npmRunCheck(fixture)();
     expect(fixture.store.record).toEqual({ target: '9.1.0', deadlineEpochMs: 1_000 + 300_000 });
     expect(fixture.store.clear).not.toHaveBeenCalled();
-    expect(io.installerEntered, 'hold ended in shutdown: installer never entered').toBe(0);
+    expect(installers.npmCore, 'hold ended in shutdown: installer never entered').not.toHaveBeenCalled();
   });
 
   it('drops the deadline when the node is up to date or the channel has no target, not on a registry error', async () => {
@@ -179,14 +186,25 @@ describe('createNpmUpdateRunCheck — persisted rollout deadline', () => {
     const fixture = gateFixture({ record: { target: '9.1.0', deadlineEpochMs: 500 } });
 
     await npmRunCheck(fixture)();
-    expect(io.installerEntered, 'nothing installed on a failed re-check').toBe(0);
+    expect(installers.npmCore, 'nothing installed on a failed re-check').not.toHaveBeenCalled();
     expect(fixture.store.record).toEqual({ target: '9.1.0', deadlineEpochMs: 500 });
     expect(fixture.logs.some((m) => m.includes('re-check after the hold-off failed'))).toBe(true);
 
     await npmRunCheck(fixture)();
-    expect(io.installerEntered, 'installer entered on the next poll').toBe(1);
+    expect(installers.npmCore, 'installer entered on the next poll').toHaveBeenCalledWith('9.1.0', expect.any(Function));
     expect(fixture.rng, 'no new hold drawn').not.toHaveBeenCalled();
     expect(fixture.sleep).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { nodeRole: 'edge' as const, installer: 'npmEdge' as const, other: 'npmCore' as const },
+    { nodeRole: 'core' as const, installer: 'npmCore' as const, other: 'npmEdge' as const },
+  ])('nodeRole $nodeRole installs through $installer, never $other', async ({ nodeRole, installer, other }) => {
+    const fixture = gateFixture({ record: { target: '9.1.0', deadlineEpochMs: 500 } }); // due
+    await npmRunCheck(fixture, undefined, nodeRole)();
+    expect(installers[installer]).toHaveBeenCalledOnce();
+    expect(installers[installer].mock.calls[0][0]).toBe('9.1.0');
+    expect(installers[other]).not.toHaveBeenCalled();
   });
 
   it('records a newer version found by the re-check as due, and keeps it when a restart comes first', async () => {
@@ -195,7 +213,7 @@ describe('createNpmUpdateRunCheck — persisted rollout deadline', () => {
 
     await npmRunCheck(fixture)();
     expect(fixture.store.record).toEqual({ target: '9.2.0', deadlineEpochMs: 1_000 });
-    expect(io.installerEntered, 'shutdown began: installer never entered').toBe(0);
+    expect(installers.npmCore, 'shutdown began: installer never entered').not.toHaveBeenCalled();
   });
 });
 
@@ -215,7 +233,7 @@ describe('createGitUpdateRunCheck — persisted rollout deadline', () => {
     await gitRunCheck(fixture)();
     expect(fixture.store.record).toEqual({ target: 'bbb2222', deadlineEpochMs: 1_000 + 300_000 });
     expect(fixture.store.clear).not.toHaveBeenCalled();
-    expect(io.installerEntered, 'hold ended in shutdown: updater never entered').toBe(0);
+    expect(installers.git, 'hold ended in shutdown: updater never entered').not.toHaveBeenCalled();
   });
 
   it('drops the deadline when the node is up to date, not when the check fails', async () => {
@@ -238,12 +256,12 @@ describe('createGitUpdateRunCheck — persisted rollout deadline', () => {
     const fixture = gateFixture({ record: { target: 'bbb2222', deadlineEpochMs: 500 } });
 
     await gitRunCheck(fixture)();
-    expect(io.installerEntered, 'nothing applied on a failed re-check').toBe(0);
+    expect(installers.git, 'nothing applied on a failed re-check').not.toHaveBeenCalled();
     expect(fixture.store.record).toEqual({ target: 'bbb2222', deadlineEpochMs: 500 });
     expect(fixture.logs.some((m) => m.includes('re-check after the hold-off failed'))).toBe(true);
 
     await gitRunCheck(fixture)();
-    expect(io.installerEntered, 'updater entered on the next poll').toBe(1);
+    expect(installers.git, 'updater entered on the next poll').toHaveBeenCalledWith(GIT_AU, expect.any(Function), { expectedCommit: 'bbb2222' });
     expect(fixture.rng, 'no new hold drawn').not.toHaveBeenCalled();
     expect(fixture.sleep).not.toHaveBeenCalled();
   });
@@ -254,6 +272,6 @@ describe('createGitUpdateRunCheck — persisted rollout deadline', () => {
 
     await gitRunCheck(fixture)();
     expect(fixture.store.record).toEqual({ target: 'ccc3333', deadlineEpochMs: 1_000 });
-    expect(io.installerEntered, 'shutdown began: updater never entered').toBe(0);
+    expect(installers.git, 'shutdown began: updater never entered').not.toHaveBeenCalled();
   });
 });

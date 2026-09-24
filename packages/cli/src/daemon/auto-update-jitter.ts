@@ -13,12 +13,12 @@
  * a staggered rollout that spreads the fleet's restarts across the jitter
  * window so only a few nodes bootstrap at any moment.
  *
- * This module is the pure part: the jitter window, the random draw and the wait.
- * The per-target deadline policy (persisted across restarts) lives in
- * `auto-update-holdoff-deadline.ts`, and the rollout state machine in
- * `auto-update-holdoff-gate.ts`.
+ * This module is the pure part: the jitter window and the random draw. The
+ * per-target deadline policy (persisted across restarts) lives in
+ * `auto-update-holdoff-deadline.ts`, and the rollout state machine, including
+ * the wait, in `auto-update-holdoff-gate.ts`.
  *
- * Deterministic (rng and sleep injectable) so it is unit-tested without the daemon.
+ * Deterministic (rng injectable) so it is unit-tested without the daemon.
  */
 
 export const UPDATE_JITTER_ENV = 'DKG_UPDATE_JITTER_MINUTES';
@@ -66,52 +66,4 @@ export function pickUpdateHoldoffMs(jitterMs: number, rng: () => number = Math.r
   const r = rng();
   const safe = Number.isFinite(r) && r >= 0 && r < 1 ? r : 0;
   return Math.floor(safe * jitterMs);
-}
-
-/**
- * A hold-off sleep whose timer is `unref`'d, so a pending rollout hold-off never
- * keeps the daemon process alive / blocks its exit during shutdown.
- */
-function unrefSleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms).unref();
-  });
-}
-
-export type UpdateHoldoffDecision = 'proceed' | 'abort-shutdown';
-
-/** A resolved hold: how long to wait, and whether it was carried over from before a restart. */
-export interface UpdateHold {
-  holdMs: number;
-  resumed: boolean;
-}
-
-export interface AwaitUpdateHoldoffDeps {
-  /** True once the daemon has begun shutting down. */
-  isShuttingDown: () => boolean;
-  /** Invoked once before the wait, when the hold is non-zero or was carried
-   *  over from before a restart — lets the caller emit a mode-specific log line. */
-  onHold?: (holdMs: number, resumed: boolean) => void;
-  /** Injectable for deterministic tests (default: an unref'd setTimeout). */
-  sleep?: (ms: number) => Promise<void>;
-}
-
-/**
- * Wait out a resolved rollout hold-off, then report whether to proceed with
- * applying the update. Returns `'proceed'` after the (possibly zero) hold-off,
- * or `'abort-shutdown'` if the daemon began shutting down during the wait — in
- * which case the caller must NOT apply.
- *
- * The ordering (optional log → sleep → re-check shutdown) is the exact sequence
- * both auto-update paths depend on; extracting it here makes the shutdown-bail
- * unit-testable rather than only eyeballed in the daemon loop.
- */
-export async function awaitUpdateHoldoff(
-  hold: UpdateHold,
-  deps: AwaitUpdateHoldoffDeps,
-): Promise<UpdateHoldoffDecision> {
-  if (hold.holdMs > 0 || hold.resumed) deps.onHold?.(hold.holdMs, hold.resumed);
-  if (hold.holdMs <= 0) return deps.isShuttingDown() ? 'abort-shutdown' : 'proceed';
-  await (deps.sleep ?? unrefSleep)(hold.holdMs);
-  return deps.isShuttingDown() ? 'abort-shutdown' : 'proceed';
 }

@@ -11,7 +11,13 @@
  * aborted it again, so the update was never applied. The volatile policy draws
  * every time and keeps nothing; it exists for callers that explicitly want that.
  */
-import { pickUpdateHoldoffMs, type UpdateHold } from './auto-update-jitter.js';
+import { pickUpdateHoldoffMs } from './auto-update-jitter.js';
+
+/** A resolved hold: how long to wait, and whether it was carried over from before a restart. */
+export interface UpdateHold {
+  holdMs: number;
+  resumed: boolean;
+}
 
 /**
  * A persisted deadline this far in the past is stale and redrawn rather than

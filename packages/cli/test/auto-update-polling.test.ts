@@ -1,4 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// The installers are replaced (the checks stay real): a test sees which one an
+// apply reaches, and nothing is built or installed.
+const installers = vi.hoisted(() => ({
+  npmCore: vi.fn(async (..._args: unknown[]) => 'failed' as const),
+  npmEdge: vi.fn(async (..._args: unknown[]) => 'failed' as const),
+}));
+vi.mock('../src/daemon/auto-update.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/daemon/auto-update.js')>()),
+  performNpmUpdate: installers.npmCore,
+  performNpmUpdateEdge: installers.npmEdge,
+}));
 import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -181,6 +193,23 @@ describe('startGitUpdatePolling / startNpmUpdatePolling', () => {
     expect(await readdir(home)).toEqual([]);
   });
 
+  it('npm auto-apply with no node role configured installs through the edge (global npm) installer', async () => {
+    installers.npmCore.mockClear();
+    installers.npmEdge.mockClear();
+    const { scheduled, deps } = pollingHarness();
+    const mode = resolveDaemonUpdateMode(
+      { autoUpdate: { enabled: true, source: 'npm', repo: GIT_AU.repo, branch: 'main', checkIntervalMinutes: 3 } } as any,
+      null,
+    );
+    expect(mode).toMatchObject({ mode: 'npm-auto-apply', nodeRole: 'edge' });
+
+    startDaemonUpdatePolling(mode, { ...deps, gateSeams: { rng: () => 0.5, now: () => 1_000, sleep: async () => {} } });
+    await scheduled[0].fn();
+    expect(installers.npmEdge).toHaveBeenCalledOnce();
+    expect(installers.npmEdge.mock.calls[0][0]).toBe('9.1.0');
+    expect(installers.npmCore).not.toHaveBeenCalled();
+  });
+
   it('stop() before the first check cancels it: no check runs and no deadline is written', async () => {
     const { deps } = pollingHarness();
     vi.useFakeTimers();
@@ -288,6 +317,12 @@ describe('resolveDaemonUpdateMode', () => {
       config: { autoUpdate: { enabled: true, source: 'npm', repo: GIT_AU.repo, branch: 'main' }, nodeRole: 'core' },
       network: null,
       expected: { mode: 'npm-auto-apply', au: expect.objectContaining({ enabled: true, source: 'npm' }), nodeRole: 'core' },
+    },
+    {
+      name: 'npm source, auto-update enabled, no node role: auto-apply as an edge node (the default)',
+      config: { autoUpdate: { enabled: true, source: 'npm', repo: GIT_AU.repo, branch: 'main' } },
+      network: null,
+      expected: { mode: 'npm-auto-apply', au: expect.objectContaining({ enabled: true, source: 'npm' }), nodeRole: 'edge' },
     },
     {
       name: 'git source, auto-update enabled: git with the merged config',

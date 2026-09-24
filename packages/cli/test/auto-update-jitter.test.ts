@@ -1,8 +1,7 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import {
   resolveUpdateJitterMs,
   pickUpdateHoldoffMs,
-  awaitUpdateHoldoff,
   UPDATE_JITTER_ENV,
 } from '../src/daemon/auto-update-jitter.js';
 
@@ -54,68 +53,5 @@ describe('pickUpdateHoldoffMs', () => {
     expect(pickUpdateHoldoffMs(600_000, () => Number.NaN)).toBe(0);
     expect(pickUpdateHoldoffMs(600_000, () => 1)).toBe(0);
     expect(pickUpdateHoldoffMs(600_000, () => -0.5)).toBe(0);
-  });
-});
-
-describe('awaitUpdateHoldoff', () => {
-  it('proceeds immediately without sleeping or logging on a zero hold', async () => {
-    const sleep = vi.fn(async () => {});
-    const onHold = vi.fn();
-    const decision = await awaitUpdateHoldoff({ holdMs: 0, resumed: false }, {
-      isShuttingDown: () => false,
-      onHold,
-      sleep,
-    });
-    expect(decision).toBe('proceed');
-    expect(sleep).not.toHaveBeenCalled();
-    expect(onHold).not.toHaveBeenCalled();
-  });
-
-  it('sleeps the hold and reports it via onHold, then proceeds', async () => {
-    const sleep = vi.fn(async () => {});
-    const onHold = vi.fn();
-    const decision = await awaitUpdateHoldoff({ holdMs: 300_000, resumed: false }, {
-      isShuttingDown: () => false,
-      onHold,
-      sleep,
-    });
-    expect(decision).toBe('proceed');
-    expect(sleep).toHaveBeenCalledOnce();
-    expect(sleep).toHaveBeenCalledWith(300_000);
-    expect(onHold).toHaveBeenCalledWith(300_000, false);
-  });
-
-  it('reports a resumed hold, including one that has already run out', async () => {
-    const onHold = vi.fn();
-    const sleep = vi.fn(async () => {});
-    await awaitUpdateHoldoff({ holdMs: 120_000, resumed: true }, { isShuttingDown: () => false, onHold, sleep });
-    await awaitUpdateHoldoff({ holdMs: 0, resumed: true }, { isShuttingDown: () => false, onHold, sleep });
-    expect(onHold.mock.calls).toEqual([[120_000, true], [0, true]]);
-    expect(sleep.mock.calls).toEqual([[120_000]]);
-  });
-
-  it('aborts when the daemon began shutting down DURING the hold-off', async () => {
-    let shuttingDown = false;
-    // Flip the flag while the (fake) sleep is "in flight" — the shutdown bail
-    // must be evaluated AFTER the wait, not before.
-    const sleep = vi.fn(async () => {
-      shuttingDown = true;
-    });
-    const decision = await awaitUpdateHoldoff({ holdMs: 300_000, resumed: false }, {
-      isShuttingDown: () => shuttingDown,
-      sleep,
-    });
-    expect(sleep).toHaveBeenCalledOnce();
-    expect(decision).toBe('abort-shutdown');
-  });
-
-  it('aborts on a zero hold if already shutting down (never applies during shutdown)', async () => {
-    const sleep = vi.fn(async () => {});
-    const decision = await awaitUpdateHoldoff({ holdMs: 0, resumed: false }, {
-      isShuttingDown: () => true,
-      sleep,
-    });
-    expect(decision).toBe('abort-shutdown');
-    expect(sleep).not.toHaveBeenCalled();
   });
 });
