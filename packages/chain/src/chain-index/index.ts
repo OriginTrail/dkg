@@ -18,6 +18,7 @@ export {
   normalizeChainEventLogBlockNumber,
   normalizeChainEventLogHash,
   type ChainEventLogCommit,
+  type ChainEventLogCountQuery,
   type ChainEventLogCoverage,
   type ChainEventLogCursor,
   type ChainEventLogHead,

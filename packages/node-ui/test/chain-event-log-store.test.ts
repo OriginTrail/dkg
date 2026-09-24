@@ -239,6 +239,117 @@ describe('SqliteChainEventLogStore', () => {
     })).resolves.toHaveLength(1);
   });
 
+  /** The rows of two graphs and a KA, settled and tail, at two addresses. */
+  async function seedGraphs(store: SqliteChainEventLogStore): Promise<void> {
+    const KA = `0x${'05'.repeat(32)}`;
+    await store.commit(SCOPE, undefined, commit(10, 14, [
+      { ...row(3, 0, true), topics: [OTHER_TOPIC, GRAPH_TOPIC] },
+      { ...row(4, 0, true), topics: [TOPIC, GRAPH_TOPIC, KA] },
+      { ...row(4, 1, true), topics: [TOPIC, OTHER_GRAPH_TOPIC, KA] },
+      { ...row(6, 0, true), topics: [TOPIC, GRAPH_TOPIC, `0x${'06'.repeat(32)}`] },
+      { ...row(6, 1, true), address: OTHER_ADDRESS, topics: [TOPIC, GRAPH_TOPIC, KA] },
+      { ...row(9, 2, true), topics: [TOPIC, GRAPH_TOPIC] },
+      { ...row(11, 0, false), topics: [TOPIC, GRAPH_TOPIC, KA] },
+      { ...row(12, 3, false), topics: [OTHER_TOPIC, GRAPH_TOPIC] },
+      { ...row(13, 0, false), topics: [TOPIC, OTHER_GRAPH_TOPIC] },
+    ]));
+  }
+
+  function capturingPrepare(db: DashboardDB): { sql: string[]; restore: () => void } {
+    const sql: string[] = [];
+    const prepare = db.db.prepare.bind(db.db);
+    const spy = vi.spyOn(db.db, 'prepare').mockImplementation(((text: string) => {
+      sql.push(text);
+      return prepare(text);
+    }) as typeof db.db.prepare);
+    return { sql, restore: () => spy.mockRestore() };
+  }
+
+  it('counts exactly what readEvents returns, narrowed by settled when asked', async () => {
+    const { store } = createStore();
+    await seedGraphs(store);
+    const range = { fromBlockNumber: 0, throughBlockNumber: 20 };
+    const queries = [
+      range,
+      { ...range, addresses: [ADDRESS] },
+      { ...range, addresses: [ADDRESS], topic0: [TOPIC], topic1: [GRAPH_TOPIC] },
+      { ...range, addresses: [ADDRESS], topic0: [TOPIC, OTHER_TOPIC], topic1: [GRAPH_TOPIC] },
+      { fromBlockNumber: 5, throughBlockNumber: 11, addresses: [ADDRESS], topic0: [TOPIC], topic1: [GRAPH_TOPIC] },
+      { ...range, addresses: [ADDRESS], topic0: [TOPIC], topic2: [`0x${'05'.repeat(32)}`] },
+      { ...range, topic1: [OTHER_GRAPH_TOPIC] },
+      { ...range, addresses: [OTHER_ADDRESS], topic0: [TOPIC], topic1: [GRAPH_TOPIC] },
+      { ...range, addresses: [ADDRESS], topic0: [TOPIC], topic1: [`0x${'07'.repeat(32)}`] },
+    ];
+    for (const query of queries) {
+      const rows = await store.readEvents(SCOPE, query);
+      await expect(store.countEvents(SCOPE, query)).resolves.toBe(rows.length);
+      await expect(store.countEvents(SCOPE, { ...query, settled: true }))
+        .resolves.toBe(rows.filter((held) => held.settled).length);
+      await expect(store.countEvents(SCOPE, { ...query, settled: false }))
+        .resolves.toBe(rows.filter((held) => !held.settled).length);
+    }
+    await expect(store.countEvents(OTHER_SCOPE, range)).resolves.toBe(0);
+    // A read ignores a `settled` it was handed: callers filter the tail.
+    await expect(store.readEvents(SCOPE, { ...range, settled: true } as typeof range))
+      .resolves.toHaveLength(9);
+  });
+
+  it('reads and counts one graph from its topic index, and tail rows from the unsettled index', async () => {
+    const { db, store } = createStore();
+    await seedGraphs(store);
+    const graph = {
+      fromBlockNumber: 0, throughBlockNumber: 20, addresses: [ADDRESS], topic0: [TOPIC], topic1: [GRAPH_TOPIC],
+    };
+    const capture = capturingPrepare(db);
+    try {
+      await expect(store.readEvents(SCOPE, graph)).resolves.toHaveLength(4);
+      await expect(store.readEvents(SCOPE, { ...graph, topic0: [TOPIC, OTHER_TOPIC] }))
+        .resolves.toHaveLength(6);
+      await expect(store.countEvents(SCOPE, graph)).resolves.toBe(4);
+      await expect(store.countEvents(SCOPE, { ...graph, settled: false })).resolves.toBe(1);
+    } finally {
+      capture.restore();
+    }
+    const [read, readMany, count, tail] = capture.sql.filter((text) => text.includes('FROM chain_events'));
+    for (const text of [read, readMany, count]) {
+      expect(text).toContain('INDEXED BY idx_chain_events_scope_address_topic');
+    }
+    expect(tail).toContain('INDEXED BY idx_chain_events_scope_unsettled');
+    const plan = (text: string, ...parameters: unknown[]) => (
+      db.db.prepare(`EXPLAIN QUERY PLAN ${text}`).all(...parameters) as Array<{ detail: string }>
+    ).map((step) => step.detail).join('\n');
+    // The count never touches a table row; the read seeks the graph instead
+    // of walking the block range of every contract.
+    expect(plan(count!, SCOPE, 0, 20, ADDRESS, TOPIC, GRAPH_TOPIC))
+      .toMatch(/USING COVERING INDEX idx_chain_events_scope_address_topic \(scope=\? AND address=\? AND topic0=\? AND topic1=\?/);
+    expect(plan(read!, SCOPE, 0, 20, ADDRESS, TOPIC, GRAPH_TOPIC))
+      .toMatch(/USING INDEX idx_chain_events_scope_address_topic \(scope=\? AND address=\? AND topic0=\? AND topic1=\?/);
+    expect(plan(tail!, SCOPE, 0, 20, ADDRESS, TOPIC, GRAPH_TOPIC, 0))
+      .toMatch(/USING INDEX idx_chain_events_scope_unsettled \(scope=\? AND settled=\? AND block_number>\?/);
+  });
+
+  it('reads and counts unpinned when the indexes it would pin are missing', async () => {
+    const { db } = createStore();
+    db.db.exec(`
+      DROP INDEX idx_chain_events_scope_address_topic;
+      DROP INDEX idx_chain_events_scope_unsettled;
+    `);
+    const store = new SqliteChainEventLogStore(db);
+    await seedGraphs(store);
+    const graph = {
+      fromBlockNumber: 0, throughBlockNumber: 20, addresses: [ADDRESS], topic0: [TOPIC], topic1: [GRAPH_TOPIC],
+    };
+    const capture = capturingPrepare(db);
+    try {
+      await expect(store.readEvents(SCOPE, graph)).resolves.toHaveLength(4);
+      await expect(store.countEvents(SCOPE, graph)).resolves.toBe(4);
+      await expect(store.countEvents(SCOPE, { ...graph, settled: false })).resolves.toBe(1);
+    } finally {
+      capture.restore();
+    }
+    expect(capture.sql.filter((text) => text.includes('INDEXED BY'))).toEqual([]);
+  });
+
   it('loses the CAS when another writer advanced the cursor first', async () => {
     const { store } = createStore();
     await store.commit(SCOPE, undefined, commit(10, 12, []));

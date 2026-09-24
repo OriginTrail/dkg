@@ -85,6 +85,11 @@ export interface SqliteChainEventLogQuery {
   readonly topic2?: readonly string[];
 }
 
+/** A query counted instead of read, optionally only settled or only tail rows. */
+export interface SqliteChainEventLogCountQuery extends SqliteChainEventLogQuery {
+  readonly settled?: boolean;
+}
+
 interface CursorRow {
   revision: number;
   lineage: string;
@@ -142,24 +147,89 @@ function normalizeReplacedRange(
   return range.throughBlockNumber < range.fromBlockNumber ? undefined : range;
 }
 
-/** Pinned by the KA point read; created by `DashboardDB`'s chain-log schema. */
+// The indexes the reads below pin, all created by `DashboardDB`'s chain-log
+// schema. Without ANALYZE statistics the planner prefers the primary key's
+// block range for every one of these shapes (it also satisfies the ORDER BY)
+// and walks every row of every contract in the window, synchronously.
+
+/** `kaToContextGraph`: one address, one topic0, one topic2 (the KA id). */
 const KA_POINT_READ_INDEX = 'idx_chain_events_scope_address_ka';
+/** One graph's rows: one address, its topic0s, one topic1 (the graph id). */
+const GRAPH_READ_INDEX = 'idx_chain_events_scope_address_topic';
+/** Tail rows only (`settled = 0`): the reorg tail is a handful of blocks. */
+const TAIL_READ_INDEX = 'idx_chain_events_scope_unsettled';
+
+type EventFilter = Pick<SqliteChainEventLogCountQuery,
+  'fromBlockNumber' | 'throughBlockNumber' | 'addresses' | 'topic0' | 'topic1' | 'topic2' | 'settled'>;
 
 export class SqliteChainEventLogStore {
   private readonly db: Database.Database;
   /**
-   * `INDEXED BY` turns a missing index into a query ERROR, not a slower plan.
-   * `DashboardDB` creates it on every open it migrates, but a database written
-   * by a NEWER schema is opened without migrating at all, so the hint is only
-   * used once the index is known to be there.
+   * The pinnable indexes that exist. `INDEXED BY` turns a missing index into a
+   * query ERROR, not a slower plan. `DashboardDB` creates them on every open it
+   * migrates, but a database written by a NEWER schema is opened without
+   * migrating at all, so a hint is only used once its index is known to be
+   * there.
    */
-  private readonly kaPointReadIndexed: boolean;
+  private readonly indexes: ReadonlySet<string>;
 
   constructor(dashboard: DashboardDB) {
     this.db = dashboard.db;
-    this.kaPointReadIndexed = this.db.prepare(`
-      SELECT 1 AS present FROM sqlite_master WHERE type = 'index' AND name = ?
-    `).get(KA_POINT_READ_INDEX) !== undefined;
+    const present = this.db.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?, ?)
+    `).all(KA_POINT_READ_INDEX, GRAPH_READ_INDEX, TAIL_READ_INDEX) as Array<{ name: string }>;
+    this.indexes = new Set(present.map((index) => index.name));
+  }
+
+  /**
+   * The WHERE clause, its parameters and the index to pin for one filter.
+   *
+   * Hints are chosen for the exact shapes that have a better index than the
+   * block range, and only then:
+   *  - the KA point read (four equalities on the KA index);
+   *  - one graph's rows (the per-graph ordinal reads and counts): address,
+   *    topic0 and topic1 equalities on the topic index, index-only for a count;
+   *  - a count of tail rows, walked from the unsettled index.
+   */
+  private where(scope: string, filter: EventFilter): {
+    clauses: string[];
+    parameters: unknown[];
+    indexHint: string;
+  } {
+    const clauses = ['scope = ?', 'block_number >= ?', 'block_number <= ?'];
+    const parameters: unknown[] = [scope, filter.fromBlockNumber, filter.throughBlockNumber];
+    for (const [column, values] of [
+      ['address', filter.addresses],
+      ['topic0', filter.topic0],
+      ['topic1', filter.topic1],
+      ['topic2', filter.topic2],
+    ] as const) {
+      if (values === undefined || values.length === 0) continue;
+      clauses.push(`${column} IN (${placeholders(values.length)})`);
+      parameters.push(...values);
+    }
+    if (filter.settled !== undefined) {
+      clauses.push('settled = ?');
+      parameters.push(filter.settled ? 1 : 0);
+    }
+    const oneAddress = filter.addresses?.length === 1;
+    const topic0s = filter.topic0?.length ?? 0;
+    const topic1s = filter.topic1?.length ?? 0;
+    const topic2s = filter.topic2?.length ?? 0;
+    let index: string | undefined;
+    if (filter.settled === false) {
+      index = TAIL_READ_INDEX;
+    } else if (oneAddress && topic0s === 1 && topic2s === 1) {
+      // The KA point read (approach from PR #2784).
+      index = KA_POINT_READ_INDEX;
+    } else if (oneAddress && topic0s >= 1 && topic1s === 1 && topic2s === 0) {
+      index = GRAPH_READ_INDEX;
+    }
+    return {
+      clauses,
+      parameters,
+      indexHint: index !== undefined && this.indexes.has(index) ? ` INDEXED BY ${index}` : '',
+    };
   }
 
   async load(scope: string): Promise<SqliteChainEventLogState | undefined> {
@@ -339,29 +409,8 @@ export class SqliteChainEventLogStore {
     scope: string,
     query: SqliteChainEventLogQuery,
   ): Promise<readonly SqliteChainEventLogRow[]> {
-    const clauses = ['scope = ?', 'block_number >= ?', 'block_number <= ?'];
-    const parameters: unknown[] = [scope, query.fromBlockNumber, query.throughBlockNumber];
-    for (const [column, values] of [
-      ['address', query.addresses],
-      ['topic0', query.topic0],
-      ['topic1', query.topic1],
-      ['topic2', query.topic2],
-    ] as const) {
-      if (values === undefined || values.length === 0) continue;
-      clauses.push(`${column} IN (${placeholders(values.length)})`);
-      parameters.push(...values);
-    }
-    // The KA point read (`kaToContextGraph`). Without ANALYZE statistics the
-    // planner picks the primary key's block range, which also satisfies the
-    // ORDER BY, and walks every registration in the window: the synchronous
-    // main-thread stall this index exists to remove. Pin the index for exactly
-    // the shape it answers with four equalities (approach from PR #2784).
-    const indexHint = this.kaPointReadIndexed
-      && query.addresses?.length === 1
-      && query.topic0?.length === 1
-      && query.topic2?.length === 1
-      ? ` INDEXED BY ${KA_POINT_READ_INDEX}`
-      : '';
+    // Reads never narrow by `settled`: callers filter the tail themselves.
+    const { clauses, parameters, indexHint } = this.where(scope, { ...query, settled: undefined });
     const rows = this.db.prepare(`
       SELECT block_number, log_index, block_hash, tx_hash, address,
              topic0, topic1, topic2, topic3, data, settled
@@ -384,6 +433,20 @@ export class SqliteChainEventLogStore {
       data: row.data,
       settled: row.settled === 1,
     })));
+  }
+
+  /**
+   * `COUNT(*)` of exactly what {@link readEvents} returns for `query`, narrowed
+   * by `settled` when given, without building a row. For one graph's rows the
+   * count is index-only (~2 ms over 30k registrations); for tail rows it walks
+   * the unsettled index, i.e. the reorg tail.
+   */
+  async countEvents(scope: string, query: SqliteChainEventLogCountQuery): Promise<number> {
+    const { clauses, parameters, indexHint } = this.where(scope, query);
+    const row = this.db.prepare(`
+      SELECT COUNT(*) AS count FROM chain_events${indexHint} WHERE ${clauses.join(' AND ')}
+    `).get(...parameters) as { count: number };
+    return row.count;
   }
 
   async blockHashAt(scope: string, blockNumber: number): Promise<string | undefined> {

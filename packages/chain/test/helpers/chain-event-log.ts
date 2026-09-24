@@ -2,6 +2,7 @@
 
 import type {
   ChainEventLogCommit,
+  ChainEventLogCountQuery,
   ChainEventLogCoverage,
   ChainEventLogQuery,
   ChainEventLogRow,
@@ -28,6 +29,7 @@ export class MemoryChainEventLogStore implements ChainEventLogStore {
   readonly #scopes = new Map<string, MemoryChainEventLogScope>();
   commits = 0;
   tombstones = 0;
+  counts = 0;
 
   async load(scope: string): Promise<ChainEventLogState | undefined> {
     return this.#scopes.get(scope)?.state;
@@ -124,6 +126,14 @@ export class MemoryChainEventLogStore implements ChainEventLogStore {
         && matches(row.topics[2], query.topic2))
       .sort((left, right) => left.blockNumber - right.blockNumber
         || left.logIndex - right.logIndex);
+  }
+
+  /** Counts exactly what {@link readEvents} returns, as the SQLite `COUNT(*)` does. */
+  async countEvents(scope: string, query: ChainEventLogCountQuery): Promise<number> {
+    this.counts += 1;
+    return (await this.readEvents(scope, query))
+      .filter((row) => query.settled === undefined || row.settled === query.settled)
+      .length;
   }
 
   async blockHashAt(scope: string, blockNumber: number): Promise<string | undefined> {
