@@ -5046,8 +5046,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           // removed, and an EIP-191 head verifies from its envelope alone, so
           // an exact staged head read and verified once is reused by the
           // applied-head check instead of being re-read on every announcement.
-          readStagedCatalogHead: stagedCatalogHeads.read,
-          peekStagedCatalogHead: stagedCatalogHeads.peek,
+          stagedCatalogHeads,
         });
         const deploymentAwareReconciler: Rfc64PublicCatalogCurrentReceiverReconcilerV1 = {
           isHeadSatisfied: (announcement) => withRpcRequestContext({ requestClass: 'background' }, () => {
