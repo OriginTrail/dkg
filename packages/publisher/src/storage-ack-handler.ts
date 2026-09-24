@@ -938,15 +938,27 @@ export class StorageACKHandler {
     signal?: AbortSignal,
   ): Promise<{ ok: true; value: T } | { ok: false; decline: Uint8Array }> {
     try {
-      signal?.throwIfAborted();
-      const value = await op();
-      signal?.throwIfAborted();
+      const value = await this.runWhileLive(op, signal);
       return { ok: true, value };
     } catch (err) {
       if (isACKHandlerDeadlineAbort(err)) throw err;
       signal?.throwIfAborted();
       return { ok: false, decline: this.declineTemporarilyUnavailable(cgId, 'store unavailable', err) };
     }
+  }
+
+  /** Check both sides of an external operation so later ACK phases cannot run after cancellation. */
+  private async runWhileLive<T>(op: () => T | Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
+    const value = await op();
+    signal?.throwIfAborted();
+    return value;
+  }
+
+  /** Signing is the final irreversible ACK phase; recheck after an async signer returns. */
+  private async signDigestWhileLive(digest: Uint8Array, signal?: AbortSignal): Promise<ethers.Signature> {
+    const signed = await this.runWhileLive(() => this.config.signerWallet.signMessage(digest), signal);
+    return ethers.Signature.from(signed);
   }
 
   /**
@@ -1086,20 +1098,23 @@ export class StorageACKHandler {
     // as a transient decline (see assertPersistQuadTermsSafe).
     assertPersistQuadTermsSafe(parsed);
     const result = await this.runStoreOpOrDecline(cgId, async () => {
-      signal?.throwIfAborted();
-      await this.store.dropGraph(
+      await this.runWhileLive(() => this.store.dropGraph(
         stagingGraphUri,
         ackStoreOptions('storage-ack.persistStaging.dropGraph', signal),
-      );
-      signal?.throwIfAborted();
+      ), signal);
       const graphedQuads = parsed.map((q) => ({ ...q, graph: stagingGraphUri }));
-      await this.store.insert(graphedQuads, ackStoreOptions('storage-ack.persistStaging.insert', signal));
-      signal?.throwIfAborted();
+      await this.runWhileLive(
+        () => this.store.insert(graphedQuads, ackStoreOptions('storage-ack.persistStaging.insert', signal)),
+        signal,
+      );
       // Durability boundary: the ACK we are about to sign asserts this data is
       // stored, and a worker respawn can recover from a snapshot that predates
       // the debounced flush — so force it durable before signing. A flush
       // failure stays inside the wrapper → transient decline (never sign).
-      await this.store.flush?.(ackStoreOptions('storage-ack.persistStaging.flush', signal));
+      await this.runWhileLive(
+        () => this.store.flush?.(ackStoreOptions('storage-ack.persistStaging.flush', signal)),
+        signal,
+      );
     }, signal);
     return result.ok ? { ok: true } : result;
   }
@@ -1355,9 +1370,7 @@ export class StorageACKHandler {
     const read = this.config.readKnowledgeAssetRootCount;
     if (!read) return { count: undefined };
     try {
-      signal?.throwIfAborted();
-      const count = await read(kaUal, signal);
-      signal?.throwIfAborted();
+      const count = await this.runWhileLive(() => read(kaUal, signal), signal);
       return { count };
     } catch (err) {
       if (isACKHandlerDeadlineAbort(err)) throw err;
@@ -1553,9 +1566,7 @@ export class StorageACKHandler {
     signal?: AbortSignal,
   ): Promise<{ ok: true; quads: Quad[] } | { ok: false; decline: Uint8Array }> {
     try {
-      signal?.throwIfAborted();
-      const quads = await this.loadSWMQuads(graphUri, rootEntities, signal);
-      signal?.throwIfAborted();
+      const quads = await this.runWhileLive(() => this.loadSWMQuads(graphUri, rootEntities, signal), signal);
       return { ok: true, quads };
     } catch (err) {
       if (err instanceof StoreUnavailableError) {
@@ -1584,9 +1595,7 @@ export class StorageACKHandler {
     if (!gate) return { ok: true };
     let verdict: StorageAckVmPromotionVerdict;
     try {
-      request.signal?.throwIfAborted();
-      verdict = await gate(request);
-      request.signal?.throwIfAborted();
+      verdict = await this.runWhileLive(() => gate(request), request.signal);
     } catch (err) {
       if (isACKHandlerDeadlineAbort(err)) throw err;
       request.signal?.throwIfAborted();
@@ -1895,8 +1904,9 @@ export class StorageACKHandler {
           `before signing an ACK whose private merkleRoot they cannot recompute.`,
         );
       }
-      const curationVerdict = await this.config.isCgCurated(cgId, swmGraphIdForCuration);
-      signal?.throwIfAborted();
+      const curationVerdict = await this.runWhileLive(
+        () => this.config.isCgCurated!(cgId, swmGraphIdForCuration), signal,
+      );
       if (curationVerdict !== true) {
         throw new Error(
           `PublishIntent.isEncryptedPayload=true rejected for cg=${cgId}${swmGraphIdForCuration ? ` (swmGraph=${swmGraphIdForCuration})` : ''}: ` +
@@ -2020,25 +2030,21 @@ export class StorageACKHandler {
         false,
       );
 
-      const curatedSignerGate = await this.checkSignerRegistrationOrDecline(
-        cgId,
-        'curated StorageACK signer is not confirmed on-chain as an operational wallet',
+      const curatedSignerGate = await this.runWhileLive(
+        () => this.checkSignerRegistrationOrDecline(
+          cgId,
+          'curated StorageACK signer is not confirmed on-chain as an operational wallet',
+        ), signal,
       );
-      signal?.throwIfAborted();
       if (!curatedSignerGate.ok) return curatedSignerGate.decline;
       // No VM-promotion gate here: the core never receives curated plaintext.
       // What this ACK guarantees is the catalog commitment verified above and
       // persisted to `<cg>/_catalog` below, the artifact random sampling proves.
 
       const persistedCatalog = await this.persistCatalogOrDecline(cgId, verifiedCatalog.catalog, signal);
-      signal?.throwIfAborted();
       if (!persistedCatalog.ok) return persistedCatalog.decline;
 
-      signal?.throwIfAborted();
-      const signature = ethers.Signature.from(
-        await this.config.signerWallet.signMessage(digest),
-      );
-      signal?.throwIfAborted();
+      const signature = await this.signDigestWhileLive(digest, signal);
       const MAX_UINT64 = (1n << 64n) - 1n;
       if (this.config.nodeIdentityId > MAX_UINT64) {
         throw new Error(
@@ -2387,11 +2393,12 @@ export class StorageACKHandler {
       BigInt(intent.catalogLeafCount ?? 0),
       false,
     );
-    const signerGate = await this.checkSignerRegistrationOrDecline(
-      cgId,
-      'StorageACK signer is not confirmed on-chain as an operational wallet',
+    const signerGate = await this.runWhileLive(
+      () => this.checkSignerRegistrationOrDecline(
+        cgId,
+        'StorageACK signer is not confirmed on-chain as an operational wallet',
+      ), signal,
     );
-    signal?.throwIfAborted();
     if (!signerGate.ok) return signerGate.decline;
     // Finality gate: sign only once this core has committed to carry the KA
     // into its Verifiable Memory after the publish finalizes.
@@ -2401,19 +2408,13 @@ export class StorageACKHandler {
       operation: 'publish',
       ...(signal ? { signal } : {}),
     });
-    signal?.throwIfAborted();
     if (!promotionGate.ok) return promotionGate.decline;
     if (persistGraphCopy) {
       const persisted = await persistGraphCopy();
-      signal?.throwIfAborted();
       if (!persisted.ok) return persisted.decline;
     }
 
-    signal?.throwIfAborted();
-    const signature = ethers.Signature.from(
-      await this.config.signerWallet.signMessage(digest),
-    );
-    signal?.throwIfAborted();
+    const signature = await this.signDigestWhileLive(digest, signal);
 
     const MAX_UINT64 = (1n << 64n) - 1n;
     if (this.config.nodeIdentityId > MAX_UINT64) {
@@ -2584,8 +2585,9 @@ export class StorageACKHandler {
           'UpdateIntent.isEncryptedPayload=true rejected: this core has no curation oracle wired and cannot verify the CG access policy',
         );
       }
-      const curationVerdict = await this.config.isCgCurated(cgId, swmGraphIdForCuration);
-      signal?.throwIfAborted();
+      const curationVerdict = await this.runWhileLive(
+        () => this.config.isCgCurated!(cgId, swmGraphIdForCuration), signal,
+      );
       if (curationVerdict !== true) {
         return this.encodeDecline(
           cgId,
@@ -2914,11 +2916,12 @@ export class StorageACKHandler {
       BigInt(intent.newCatalogLeafCount ?? 0),
     );
 
-    const updateSignerGate = await this.checkSignerRegistrationOrDecline(
-      cgId,
-      'UpdateStorageACK signer is not confirmed on-chain as an operational wallet',
+    const updateSignerGate = await this.runWhileLive(
+      () => this.checkSignerRegistrationOrDecline(
+        cgId,
+        'UpdateStorageACK signer is not confirmed on-chain as an operational wallet',
+      ), signal,
     );
-    signal?.throwIfAborted();
     if (!updateSignerGate.ok) return updateSignerGate.decline;
     // Finality gate for public updates, as for publishes. A curated update's
     // guarantee is the catalog commitment verified above and persisted below.
@@ -2929,25 +2932,18 @@ export class StorageACKHandler {
         operation: 'update',
         ...(signal ? { signal } : {}),
       });
-      signal?.throwIfAborted();
       if (!updatePromotionGate.ok) return updatePromotionGate.decline;
     }
     if (verifiedUpdateCatalog) {
       const persistedCatalog = await this.persistCatalogOrDecline(cgId, verifiedUpdateCatalog, signal);
-      signal?.throwIfAborted();
       if (!persistedCatalog.ok) return persistedCatalog.decline;
     }
     if (persistUpdateCopy) {
       const persisted = await persistUpdateCopy();
-      signal?.throwIfAborted();
       if (!persisted.ok) return persisted.decline;
     }
 
-    signal?.throwIfAborted();
-    const signature = ethers.Signature.from(
-      await this.config.signerWallet.signMessage(digest),
-    );
-    signal?.throwIfAborted();
+    const signature = await this.signDigestWhileLive(digest, signal);
     const MAX_UINT64 = (1n << 64n) - 1n;
     if (this.config.nodeIdentityId > MAX_UINT64) {
       throw new Error(

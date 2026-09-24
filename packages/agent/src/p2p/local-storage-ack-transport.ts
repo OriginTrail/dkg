@@ -1,5 +1,6 @@
 import { isStorageACKProtocol } from './storage-ack-protocols.js';
 import type { StorageACKEndpoint } from './storage-ack-endpoint.js';
+import { runBoundedOperation } from '../bounded-operation.js';
 
 export class LocalStorageACKDrainTimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -25,34 +26,23 @@ export class LocalStorageACKTransport {
     if (!isStorageACKProtocol(protocol)) throw new Error(`Unsupported StorageACK protocol: ${protocol}`);
     const controller = new AbortController();
     this.controllers.add(controller);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => {
-        const error = new Error(`Local StorageACK request timed out after ${timeoutMs}ms`);
-        controller.abort(error);
-        reject(error);
-      }, Math.max(0, timeoutMs));
-      timer.unref?.();
-    });
-    const cancelled = new Promise<never>((_resolve, reject) => {
-      controller.signal.addEventListener('abort', () => {
-        reject(controller.signal.reason instanceof Error
-          ? controller.signal.reason
-          : new Error('Local StorageACK request aborted'));
-      }, { once: true });
-    });
-    const work = this.tail.then(() => {
-      controller.signal.throwIfAborted();
-      return endpoint.dispatch(protocol, data, peerId, controller.signal);
-    });
-    this.tail = work.then(() => {}, () => {}).finally(() => {
+    const predecessor = this.tail;
+    let physicalWork: Promise<Uint8Array> | undefined;
+    const result = runBoundedOperation(async (signal) => {
+      await predecessor;
+      signal.throwIfAborted();
+      physicalWork = Promise.resolve(endpoint.dispatch(protocol, data, peerId, signal));
+      return physicalWork;
+    }, { timeoutMs, label: 'Local StorageACK request', signal: controller.signal });
+    // The caller receives the deadline result, while the FIFO keeps ownership
+    // until the handler itself settles, even after timeout or shutdown abort.
+    this.tail = predecessor.then(async () => {
+      await result.catch(() => {});
+      await physicalWork?.then(() => {}, () => {});
+    }).finally(() => {
       this.controllers.delete(controller);
     });
-    try {
-      return await Promise.race([work, timeout, cancelled]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
+    return result;
   }
 
   /** Fence new sends and abort active or queued requests immediately. */

@@ -332,6 +332,46 @@ describe('runSyncOnConnect callbacks', () => {
     expect(ackCapabilities.knownCorePeerIds.has(remotePeer)).toBe(true);
   });
 
+  it('reconciles populated and empty identify lists through the legacy set context', async () => {
+    const remotePeer = freshPeerIdString();
+    const knownCorePeerIds = new Set<string>();
+    const knownCorePeerIdsV2 = new Set<string>();
+    let protocols = [PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC];
+    const context = {
+      signal: ACTIVE_SYNC_LIFETIME,
+      ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
+      remotePeer,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => protocols,
+      knownCorePeerIds,
+      knownCorePeerIdsV2,
+      getSyncContextGraphs: () => [],
+      syncFromPeer: async () => 1,
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      logInfo: noopLog,
+    };
+
+    expect(await runSyncOnConnect(context)).toBe('synced');
+    expect(knownCorePeerIds.has(remotePeer)).toBe(true);
+    expect(knownCorePeerIdsV2.has(remotePeer)).toBe(true);
+
+    protocols = [];
+    expect(await runSyncOnConnect(context)).toBe('skipped-no-sync');
+    expect(knownCorePeerIds.has(remotePeer)).toBe(true);
+    expect(knownCorePeerIdsV2.has(remotePeer)).toBe(true);
+
+    protocols = [PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC];
+    expect(await runSyncOnConnect(context)).toBe('synced');
+    expect(knownCorePeerIds.has(remotePeer)).toBe(true);
+    expect(knownCorePeerIdsV2.has(remotePeer)).toBe(false);
+
+    protocols = [PROTOCOL_SYNC];
+    expect(await runSyncOnConnect(context)).toBe('synced');
+    expect(knownCorePeerIds.has(remotePeer)).toBe(false);
+    expect(knownCorePeerIdsV2.has(remotePeer)).toBe(false);
+  });
+
   it('tracks and evicts V2 ACK capability from populated protocol lists', async () => {
     const remotePeer = freshPeerIdString();
     const ackCapabilities = new ACKCapabilityRegistry();
