@@ -13,6 +13,7 @@ import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
+import { ACKCapabilityRegistry } from './p2p/ack-capability.js';
 import type { StorageACKProtocol } from './p2p/storage-ack-protocols.js';
 import {
   openRfc64PersistenceV1,
@@ -1718,8 +1719,9 @@ export class DKGAgentBase {
    */
   protected readonly onChainParticipantAgentsCache = new Map<string, string[]>();
   protected readonly peerHealth = new Map<string, PeerHealth>();
-  protected readonly knownCorePeerIds = new Set<string>();
-  protected readonly knownCorePeerIdsV2 = new Set<string>();
+  protected readonly ackCapabilityRegistry = new ACKCapabilityRegistry();
+  protected readonly knownCorePeerIds = this.ackCapabilityRegistry.knownCorePeerIds;
+  protected readonly knownCorePeerIdsV2 = this.ackCapabilityRegistry.knownCorePeerIdsV2;
   /**
    * Last chain-reported ACK quorum (ParametersStorage
    * minimumRequiredSignatures), refreshed by the V10 ACK provider before

@@ -1,5 +1,5 @@
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
-import { reconcileACKCapabilities } from './p2p/ack-capability.js';
+import type { ACKCapabilitySnapshot } from './p2p/ack-capability.js';
 import { isStorageACKProtocol } from './p2p/storage-ack-protocols.js';
 import { randomUUID } from 'node:crypto';
 import { createAuthorityIndexBootstrap } from './authority-index-bootstrap.js';
@@ -138,8 +138,6 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
-  selectACKCandidateUniverse,
-  selectACKCandidatePeersWithDiagnostics,
   createPromotePostCommitFailure,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   // OT-RFC-43 A2/B3 — per-layer pointers + derived status helper.
@@ -3098,81 +3096,38 @@ export class DKGAgent extends DKGAgentBase {
    * Resolve admission only for connected peers that advertise the core-only
    * StorageACK protocol. Unknown peers may become eligible after identify
    * completes, but edges must never be dialled for an ACK.
-   * The coordinator owns admission, per-peer retry cooldown and bounded probe
-   * fan-out; signed same-network proof remains mandatory.
+   * The admission coordinator owns same-network proof and retry cooldown;
+   * the ACK capability registry owns the bounded discovery round.
    */
   private async getACKCandidatePeersAfterAdmission(
     protocol: string | undefined,
     ctx: OperationContext,
   ): Promise<string[]> {
     const connectedPeers = this.connectedPeerIds();
-    // Re-read local identify metadata before freezing the collector pool. A
-    // missed peer:update must not hide a connected core for the whole round.
-    await Promise.all(connectedPeers.map(async (peerId) => {
-      const protocols = await this.getPeerProtocols(peerId);
-      reconcileACKCapabilities(peerId, protocols, this.knownCorePeerIds, this.knownCorePeerIdsV2);
-    }));
-    // Admission and final selection use the same capability snapshot even if
-    // an unrelated peer:update arrives while preflight is in progress.
-    const roundKnownCorePeerIds = new Set(this.knownCorePeerIds);
-    const roundKnownCorePeerIdsV2 = new Set(this.knownCorePeerIdsV2);
-    const baseSelection = {
+    const snapshot = await this.ackCapabilityRegistry.resolveRound({
       connectedPeers,
-      ackCandidatePeerIds: this.config.ackCandidatePeerIds,
       selfPeerId: this.peerId,
-      eligiblePeerIds: roundKnownCorePeerIds,
-    };
-    const requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
-    const selfCount = this.config.nodeRole === 'core' && this.storageAckHandlerRegistered ? 1 : 0;
-    const preflight = async (peerIds: string[]): Promise<void> => {
-      const result = await this.networkAdmissionCoordinator.preflightPeerAdmission(
-        peerIds,
-        ctx,
-        { maxConcurrency: 4 },
-      );
-      if (result.checked > 0) {
-        this.log.info(
-          ctx,
-          `[ACKCollector] Admission preflight checked ${result.checked} ACK-eligible peer(s): ` +
-          `${result.admitted} newly admitted, ${result.unresolved} still excluded`,
+      ackCandidatePeerIds: this.config.ackCandidatePeerIds,
+      preferredACKPeerIds: this.config.preferredACKPeerIds,
+      requiredACKs: this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS,
+      selfCount: this.config.nodeRole === 'core' && this.storageAckHandlerRegistered ? 1 : 0,
+      getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
+      isAcceptedPeer: (peerId) => this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
+      probeProtocol: this.router
+        ? (peerId, protocolId) => this.router.probeProtocol(peerId, protocolId)
+        : undefined,
+      preflight: async (peerIds) => {
+        const result = await this.networkAdmissionCoordinator.preflightPeerAdmission(
+          peerIds, ctx, { maxConcurrency: 4 },
         );
-      }
-    };
-    const confirmed = selectACKCandidateUniverse(baseSelection);
-    await preflight(confirmed);
-    const admittedCount = (): number => confirmed.filter((peerId) =>
-      this.networkAdmissionCoordinator.isAcceptedPeer(peerId)).length;
-    if (admittedCount() + selfCount < requiredACKs && this.router) {
-      // Identify can remain stale after a core registers its handler. Probe the
-      // live protocol table, without an ACK payload, only when quorum needs it.
-      // Bound fan-out and total work so a mesh full of edges cannot stall a round.
-      const preferred = new Set(this.config.preferredACKPeerIds ?? []);
-      const unconfirmed = selectACKCandidateUniverse({
-        connectedPeers,
-        ackCandidatePeerIds: this.config.ackCandidatePeerIds,
-        selfPeerId: this.peerId,
-      })
-        .filter((peerId) => !roundKnownCorePeerIds.has(peerId))
-        .sort((a, b) => Number(preferred.has(b)) - Number(preferred.has(a)))
-        .slice(0, 32);
-      for (let offset = 0; offset < unconfirmed.length; offset += 4) {
-        const batch = unconfirmed.slice(offset, offset + 4);
-        await Promise.all(batch.map(async (peerId) => {
-          if (await this.router.probeProtocol(peerId, PROTOCOL_STORAGE_ACK)) {
-            this.knownCorePeerIds.add(peerId);
-            roundKnownCorePeerIds.add(peerId);
-          }
-        }));
-        if (selectACKCandidateUniverse(baseSelection).filter((peerId) =>
-          this.networkAdmissionCoordinator.isAcceptedPeer(peerId)).length + selfCount >= requiredACKs) break;
-      }
-    }
-    const discovered = selectACKCandidateUniverse(baseSelection).filter((peerId) => !confirmed.includes(peerId));
-    if (discovered.length > 0) await preflight(discovered);
-    return this.getACKCandidatePeers(protocol, {
-      knownCorePeerIds: roundKnownCorePeerIds,
-      knownCorePeerIdsV2: roundKnownCorePeerIdsV2,
+        if (result.checked > 0) {
+          this.log.info(ctx,
+            `[ACKCollector] Admission preflight checked ${result.checked} ACK-eligible peer(s): ` +
+            `${result.admitted} newly admitted, ${result.unresolved} still excluded`);
+        }
+      },
     });
+    return this.selectACKCandidatePeersFromSnapshot(protocol ?? PROTOCOL_STORAGE_ACK, snapshot, connectedPeers);
   }
 
   /**
@@ -3201,16 +3156,19 @@ export class DKGAgent extends DKGAgentBase {
    * not cap the pool. The collector's per-peer verification and on-chain ACK
    * validation remain authoritative.
    */
-  public getACKCandidatePeers(
-    protocol: string = PROTOCOL_STORAGE_ACK,
-    capabilitySnapshot?: {
-      knownCorePeerIds: ReadonlySet<string>;
-      knownCorePeerIdsV2: ReadonlySet<string>;
-    },
+  public getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
+    return this.selectACKCandidatePeersFromSnapshot(
+      protocol, this.ackCapabilityRegistry.snapshot(), this.connectedPeerIds(),
+    );
+  }
+
+  private selectACKCandidatePeersFromSnapshot(
+    protocol: string,
+    capabilitySnapshot: ACKCapabilitySnapshot,
+    connectedPeerIds: readonly string[],
   ): string[] {
-    const connectedPeerIds = this.connectedPeerIds();
     const requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
-    const selection = selectACKCandidatePeersWithDiagnostics({
+    const selection = this.ackCapabilityRegistry.selectCandidates({
       connectedPeers: connectedPeerIds,
       selfPeerId: this.peerId,
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
@@ -3218,12 +3176,9 @@ export class DKGAgent extends DKGAgentBase {
       verifiedSameNetworkPeerIds: this.networkAdmissionCoordinator.enabled
         ? this.networkAdmissionCoordinator.verifiedSameNetworkPeerIds()
         : undefined,
-      knownCorePeerIds: capabilitySnapshot?.knownCorePeerIds ?? this.knownCorePeerIds,
-      knownCorePeerIdsV2: capabilitySnapshot?.knownCorePeerIdsV2 ?? this.knownCorePeerIdsV2,
-      eligiblePeerIds: capabilitySnapshot?.knownCorePeerIds ?? this.knownCorePeerIds,
       requiredACKs,
       protocol,
-    });
+    }, capabilitySnapshot);
     const includeSelf = this.config.nodeRole === 'core' && this.storageAckHandlerRegistered;
     const peers = includeSelf ? [this.peerId, ...selection.peers] : selection.peers;
     const selected = selection.diagnostics

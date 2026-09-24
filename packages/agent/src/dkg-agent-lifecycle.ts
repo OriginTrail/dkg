@@ -19,7 +19,6 @@ import {
 import { createHash } from 'node:crypto';
 import { setTimeout as waitForPeerEventTurn } from 'node:timers/promises';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
-import { reconcileACKCapabilities } from './p2p/ack-capability.js';
 import { STORAGE_ACK_PROTOCOLS, storageACKProtocolKind, type StorageACKProtocol } from './p2p/storage-ack-protocols.js';
 import { syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
@@ -4515,8 +4514,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   clearNetworkRejectedPeerState(this: DKGAgent, remotePeer: string): void {
-    this.knownCorePeerIds.delete(remotePeer);
-    this.knownCorePeerIdsV2.delete(remotePeer);
+    this.ackCapabilityRegistry.forget(remotePeer);
     this.peerSyncSession.clearPeer(remotePeer);
     this.lastSyncDisconnectedAt.delete(remotePeer);
     this.selectedSwmBootstrapAdmission.clear(remotePeer);
@@ -4916,6 +4914,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
       knownCorePeerIds: this.knownCorePeerIds,
       knownCorePeerIdsV2: this.knownCorePeerIdsV2,
+      onACKProtocols: (peerId, protocols) => this.ackCapabilityRegistry.reconcile(peerId, protocols),
       getSyncContextGraphs: () => this.config.syncContextGraphs ?? [],
       getDurableSyncContextGraphs: () => automaticDurableSyncContextGraphs(
         this.config.syncContextGraphs ?? [],
@@ -5354,7 +5353,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // complete protocol list, so add-on-present is safe. Retain
     // classification on an empty identify list, but revoke it when a
     // populated update no longer advertises the core-only ACK protocol.
-    reconcileACKCapabilities(peerId, protocols, this.knownCorePeerIds, this.knownCorePeerIdsV2);
+    this.ackCapabilityRegistry.reconcile(peerId, protocols);
     if (!peerEvents.isSkippedNoSync(peerId)) return;
     if (!syncOnConnectEnabled(this.config)) return;
     if (!protocols.includes(PROTOCOL_SYNC)) return;

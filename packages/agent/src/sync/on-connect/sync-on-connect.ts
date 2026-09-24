@@ -122,6 +122,7 @@ export interface SyncOnConnectContext extends CompatiblePeerSyncContext {
   getPeerProtocols: (peerId: string) => Promise<string[]>;
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2?: Set<string>;
+  onACKProtocols?: (peerId: string, protocols: readonly string[]) => void;
   getSyncContextGraphs: () => string[];
   /** Exact durable scope for this automatic run; explicit catch-up bypasses it. */
   getDurableSyncContextGraphs?: () => string[];
@@ -397,6 +398,7 @@ async function runSessionSyncOnConnect(
     getPeerProtocols,
     knownCorePeerIds,
     knownCorePeerIdsV2 = new Set<string>(),
+    onACKProtocols,
     getSyncContextGraphs,
     getDurableSyncContextGraphs,
     ordinarySharedMemoryLane,
@@ -506,7 +508,8 @@ async function runSessionSyncOnConnect(
     const protocols = await getPeerProtocols(remotePeer);
     signal.throwIfAborted();
 
-    reconcileACKCapabilities(remotePeer, protocols, knownCorePeerIds, knownCorePeerIdsV2);
+    if (onACKProtocols) onACKProtocols(remotePeer, protocols);
+    else reconcileACKCapabilities(remotePeer, protocols, knownCorePeerIds, knownCorePeerIdsV2);
 
     const hasSync = protocols.includes(PROTOCOL_SYNC);
     if (!hasSync) {

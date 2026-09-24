@@ -105,6 +105,15 @@ function installAdmission(agent: AgentInternals, admission: NetworkAdmissionServ
   };
 }
 
+function installOpenACKAdmission(agent: AgentInternals): void {
+  agent.networkAdmissionCoordinator = {
+    enabled: false,
+    isAcceptedPeer: () => true,
+    verifiedSameNetworkPeerIds: () => new Set(),
+    preflightPeerAdmission: async (peerIds) => ({ checked: [...peerIds].length, admitted: 0, unresolved: 0 }),
+  };
+}
+
 describe('getACKCandidatePeers — core-only candidates', () => {
   it('excludes connected edges from a 3-core pool', async () => {
     const a = await buildAgent({
@@ -238,6 +247,72 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     expect(probe).toHaveBeenCalledTimes(32);
     expect(peak).toBe(4);
     expect(active).toBe(0);
+  });
+
+  it('discovers a spare core when the identified pool is exactly quorum sized', async () => {
+    const a = await buildAgent({
+      confirmedCores: CORE.slice(0, 2),
+      connected: CORE.slice(0, 3),
+      lastKnownRequiredACKs: 3,
+    });
+    a.config.nodeRole = 'core';
+    a.storageAckEndpoint = { dispatch: async () => new Uint8Array([1]) };
+    a.getPeerProtocols = async (peerId) => CORE.slice(0, 2).includes(peerId)
+      ? [PROTOCOL_STORAGE_ACK] : ['/dkg/10.0.0/sync'];
+    const probe = vi.fn(async (peerId: string) => peerId === CORE[2]);
+    a.router = { probeProtocol: probe };
+    installOpenACKAdmission(a);
+
+    const candidates = await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'));
+    expect(candidates).toEqual([a.peerId, ...CORE.slice(0, 3)]);
+    expect(probe).toHaveBeenCalledWith(CORE[2], PROTOCOL_STORAGE_ACK);
+    // If either identified core fails to ACK, the extra discovered core still
+    // leaves three potential signatures including the publishing core.
+    expect(candidates.filter((peerId) => peerId !== CORE[0])).toHaveLength(3);
+  });
+
+  it('rotates beyond the first 32 unknown peers on a later bounded round', async () => {
+    const unknown = Array.from({ length: 40 }, (_, i) => `unknown-${i}`);
+    const a = await buildAgent({ confirmedCores: [], connected: unknown, lastKnownRequiredACKs: 1 });
+    a.config.nodeRole = 'core';
+    a.storageAckEndpoint = { dispatch: async () => new Uint8Array([1]) };
+    a.getPeerProtocols = async () => ['/dkg/10.0.0/sync'];
+    const probe = vi.fn(async (peerId: string) => peerId === unknown[39]);
+    a.router = { probeProtocol: probe };
+    installOpenACKAdmission(a);
+
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([a.peerId]);
+    expect(probe).toHaveBeenCalledTimes(32);
+    expect(probe.mock.calls.map(([peerId]) => peerId)).not.toContain(unknown[39]);
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([a.peerId, unknown[39]]);
+    expect(probe.mock.calls.slice(32).map(([peerId]) => peerId)).toContain(unknown[39]);
+    expect(probe.mock.calls.length - 32).toBeLessThanOrEqual(32);
+  });
+
+  it('probes a preferred late-position core first and stops after the successful batch', async () => {
+    const unknown = Array.from({ length: 40 }, (_, i) => `unknown-${i}`);
+    const a = await buildAgent({
+      confirmedCores: [], connected: unknown, preferredACKPeerIds: [unknown[39]], lastKnownRequiredACKs: 1,
+    });
+    a.config.nodeRole = 'core';
+    a.storageAckEndpoint = { dispatch: async () => new Uint8Array([1]) };
+    a.getPeerProtocols = async () => ['/dkg/10.0.0/sync'];
+    let active = 0;
+    let peak = 0;
+    const probe = vi.fn(async (peerId: string) => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+      active--;
+      return peerId === unknown[39];
+    });
+    a.router = { probeProtocol: probe };
+    installOpenACKAdmission(a);
+
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([a.peerId, unknown[39]]);
+    expect(probe.mock.calls[0]?.[0]).toBe(unknown[39]);
+    expect(probe).toHaveBeenCalledTimes(4);
+    expect(peak).toBe(4);
   });
 
   it('ackCandidatePeerIds remains an allowlist for callers that intentionally restrict candidacy', async () => {
