@@ -11,6 +11,7 @@ import {
   ADAPTER_SPARQL_TERM_POLICY,
   createSparqlTermPolicy,
   SparqlTermRejectedError,
+  type IriTermPosition,
   type SparqlTermPolicy,
   type SparqlTermRenderer,
   type SparqlTermSite,
@@ -51,7 +52,7 @@ function asAdapter(policy: SparqlTermPolicy) {
       return { value, invalidTerms: renderer.invalidTerms };
     }).value;
   return {
-    iriTerm: (term: string, position: SparqlTermPosition, site: SparqlTermSite) =>
+    iriTerm: (term: string, position: IriTermPosition, site: SparqlTermSite) =>
       run(site, (renderer) => renderer.iri(term, position)),
     rdfTerm: (term: string, position: 'subject' | 'object', site: SparqlTermSite, blankNodes: 'allow' | 'reject') =>
       run(site, (renderer) => renderer.rdf(term, position, blankNodes)),
@@ -113,7 +114,7 @@ afterEach(() => {
 describe('well-formed terms render byte-identically to the replaced formatters', () => {
   it.each(IRIS)('IRI %s in every IRI position', (iri) => {
     const observed = observeInvalidSparqlTerms();
-    for (const position of ['graph', 'subject', 'predicate', 'object'] as const) {
+    for (const position of ['graph', 'subject', 'predicate'] as const) {
       expect(sparqlIriTerm(iri, position, SITE)).toBe(`<${legacyEscapeUri(iri)}>`);
     }
     expect(observed.counted).toEqual([]);
@@ -123,7 +124,7 @@ describe('well-formed terms render byte-identically to the replaced formatters',
   it.each(IRIS)('angle-bracketed IRI <%s> outside the graph position', (iri) => {
     const observed = observeInvalidSparqlTerms();
     const bracketed = `<${iri}>`;
-    for (const position of ['subject', 'predicate', 'object'] as const) {
+    for (const position of ['subject', 'predicate'] as const) {
       expect(sparqlIriTerm(bracketed, position, SITE)).toBe(`<${legacyEscapeUri(bracketed)}>`);
     }
     for (const position of ['subject', 'object'] as const) {
@@ -173,7 +174,7 @@ interface MalformedCase {
   kind: 'iri' | 'literal' | 'blank-node';
 }
 
-const iri = (term: string, position: SparqlTermPosition): Omit<MalformedCase, 'name'> => ({
+const iri = (term: string, position: IriTermPosition): Omit<MalformedCase, 'name'> => ({
   render: (site) => sparqlIriTerm(term, position, site),
   strict: () => REJECT.iriTerm(term, position, SITE),
   term,
@@ -397,6 +398,19 @@ describe('the enforcement policy', () => {
     expect(policy.iriPrefix('urn:', SITE)).toBe('"urn:"');
     expect(() => policy.checkBlankNodeLabel('_:b0', 'subject', SITE)).not.toThrow();
     expect(observed.counted).toHaveLength(4);
+  });
+});
+
+describe('the IRI entry point', () => {
+  it('never renders a literal, even when an untyped caller passes the object position', () => {
+    const observed = observeInvalidSparqlTerms();
+    const untypedObject = 'object' as unknown as IriTermPosition;
+    expect(() => createSparqlTermPolicy('reject').renderer(SITE).iri('"value"', untypedObject))
+      .toThrow(SparqlTermRejectedError);
+    const renderer = ADAPTER_SPARQL_TERM_POLICY.renderer(SITE);
+    expect(renderer.iri('"value"', untypedObject)).toBe('<value>');
+    expect(renderer.invalidTerms.map(({ position, kind }) => [position, kind])).toEqual([['object', 'literal']]);
+    expect(observed.counted).toEqual([]);
   });
 });
 

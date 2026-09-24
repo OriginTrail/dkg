@@ -26,6 +26,9 @@ import type { StoreOperation } from '../store-operation-outcome.js';
 /** Metric position label: a term position, or a `deleteBySubjectPrefix` prefix. */
 export type ObservedTermPosition = SparqlTermPosition | 'subject-prefix';
 
+/** The positions an adapter statement fills only with an IRI. */
+export type IriTermPosition = 'graph' | 'subject' | 'predicate';
+
 /** Where a term entered SPARQL; both fields are bounded metric labels. */
 export interface SparqlTermSite {
   readonly adapter: 'oxigraph' | 'sparql-http' | 'blazegraph';
@@ -93,7 +96,7 @@ export interface SparqlTermRenderer {
    * A graph name, predicate or match-pattern subject: an IRI, never a blank
    * node. Pre-validation form: `<iri>` with IRI-breaking characters deleted.
    */
-  iri(term: string, position: SparqlTermPosition): string;
+  iri(term: string, position: IriTermPosition): string;
   /**
    * A statement subject or object, or a match-pattern object. Pre-validation
    * form: the term as given, `<…>`-wrapped when it is a bare IRI.
@@ -153,6 +156,10 @@ export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): Spar
       return {
         iri(term, position) {
           try {
+            // Never a literal, even if an untyped caller passes the object position.
+            if (term.startsWith('"')) {
+              throw new SparqlTermValidationError(`SPARQL ${position} must be an IRI`, 'literal');
+            }
             // Adapters key write scopes and revisions on the raw graph string,
             // so a graph name must be bare here, although the grammar allows `<…>`.
             if (position === 'graph' && unwrapIri(term) !== term) {

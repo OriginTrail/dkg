@@ -3,12 +3,7 @@
  * blazegraph), which both remove quads with a SPARQL UPDATE.
  */
 import type { Quad as DKGQuad } from '../triple-store.js';
-import {
-  ADAPTER_SPARQL_TERM_POLICY,
-  type SparqlTermPolicy,
-  type SparqlTermRenderer,
-  type SparqlTermSite,
-} from './sparql-term-policy.js';
+import type { SparqlTermRenderer } from './sparql-term-policy.js';
 
 /** True when an N-Quads term string denotes an RDF blank node (`_:label`). */
 export function isBlankNodeTerm(term: string): boolean {
@@ -80,22 +75,9 @@ function connectedBlankNodeComponents(quads: DKGQuad[]): DKGQuad[][] {
  * real IRI, so the match is precise. Two byte-for-byte isomorphic anchored
  * components are indistinguishable in RDF and both delete — which is correct.
  *
- * `adapter` labels invalid terms, and `terms` decides what happens to one,
- * including a blank-node label that becomes a variable (see
- * sparql-term-policy.ts). Nothing is reported: statement builders use
- * {@link renderBlankNodeSafeDelete} and report through their plan.
- */
-export function buildBlankNodeSafeDelete(
-  quads: DKGQuad[],
-  adapter: SparqlTermSite['adapter'],
-  terms: SparqlTermPolicy = ADAPTER_SPARQL_TERM_POLICY,
-): string | null {
-  return renderBlankNodeSafeDelete(quads, terms.renderer({ adapter, operation: 'delete' }));
-}
-
-/**
- * {@link buildBlankNodeSafeDelete} with a caller's renderer, which collects the
- * invalid terms for the caller's plan.
+ * Every term is rendered by `render`, which collects the invalid ones for the
+ * caller's plan, a blank-node label that becomes a variable included. Only
+ * `sparqlStatements(...).deleteData` calls this; it owns the diagnostics.
  */
 export function renderBlankNodeSafeDelete(
   quads: DKGQuad[],

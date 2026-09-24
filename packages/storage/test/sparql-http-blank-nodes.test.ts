@@ -15,7 +15,7 @@
  * string but never parses or executes it. Invalid SPARQL therefore passed.
  *
  * THIS SUITE closes both gaps:
- *   1. Unit-asserts the SPARQL that `buildBlankNodeSafeDelete` emits.
+ *   1. Unit-asserts the SPARQL that `sparqlStatements(...).deleteData` emits.
  *   2. Executes that SPARQL through a REAL embedded Oxigraph engine — the same
  *      engine `oxigraph-server` runs — across a broad matrix of blank-node
  *      shapes, proving it parses, executes, and deletes exactly the right
@@ -28,13 +28,16 @@ import { createServer, type Server } from 'node:http';
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import oxigraph from 'oxigraph';
 import { SparqlHttpStore, type Quad } from '../src/index.js';
-import { buildBlankNodeSafeDelete, isBlankNodeTerm } from '../src/adapters/blank-node-safe-delete.js';
+import { isBlankNodeTerm } from '../src/adapters/blank-node-safe-delete.js';
 import { createSparqlTermPolicy } from '../src/adapters/sparql-term-policy.js';
 import { reportedPlan, sparqlStatements } from '../src/adapters/sparql-statements.js';
 import { SparqlTermValidationError } from '@origintrail-official/dkg-core';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 const G = 'http://example.org/graph/wm';
+
+/** The update the sparql-http adapter sends to delete exactly `quads`. */
+const deleteUpdate = (quads: Quad[]): string | null => sparqlStatements('sparql-http').deleteData(quads)?.update ?? null;
 const G2 = 'http://example.org/graph/wm2';
 const XSD_DECIMAL = 'http://www.w3.org/2001/XMLSchema#decimal';
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
@@ -170,11 +173,11 @@ const FIXTURES: Array<{ name: string; nquads: string; minQuads: number }> = [
 
 // ── 1. builder: structural assertions on the generated SPARQL ────────────────
 
-describe('buildBlankNodeSafeDelete — generated SPARQL shape', () => {
+describe('deleteData — generated SPARQL shape', () => {
   it('ground-only quads → a single DELETE DATA, no variables, no blank nodes', () => {
-    const update = buildBlankNodeSafeDelete([
+    const update = deleteUpdate([
       { subject: 'http://ex/s', predicate: 'http://ex/p', object: 'http://ex/o', graph: G },
-    ], 'sparql-http')!;
+    ])!;
     expect(update).toContain('DELETE DATA');
     expect(update).not.toContain('WHERE');
     expect(update).not.toContain('_:');
@@ -182,9 +185,9 @@ describe('buildBlankNodeSafeDelete — generated SPARQL shape', () => {
   });
 
   it('blank-node quad → DELETE … WHERE with the bnode rewritten to a variable; never DELETE DATA, never a raw _:', () => {
-    const update = buildBlankNodeSafeDelete([
+    const update = deleteUpdate([
       { subject: 'http://ex/s', predicate: 'http://ex/p', object: '_:b0', graph: G },
-    ], 'sparql-http')!;
+    ])!;
     expect(update).toContain('DELETE {');
     expect(update).toContain('WHERE {');
     expect(update).toMatch(/\?b0/);
@@ -193,40 +196,40 @@ describe('buildBlankNodeSafeDelete — generated SPARQL shape', () => {
   });
 
   it('disjoint components emit SEPARATE DELETE/WHERE statements (no cross-product)', () => {
-    const update = buildBlankNodeSafeDelete([
+    const update = deleteUpdate([
       { subject: 'http://ex/x', predicate: 'http://ex/p', object: '_:b0', graph: G },
       { subject: '_:b0', predicate: 'http://ex/v', object: '"first"', graph: G },
       { subject: 'http://ex/y', predicate: 'http://ex/p', object: '_:b1', graph: G },
       { subject: '_:b1', predicate: 'http://ex/v', object: '"second"', graph: G },
-    ], 'sparql-http')!;
+    ])!;
     const stmts = update.split(';').filter((s) => s.includes('DELETE'));
     expect(stmts.length).toBe(2);
     expect(update).not.toContain('_:');
   });
 
   it('mixed input → both a DELETE DATA block and a DELETE/WHERE block', () => {
-    const update = buildBlankNodeSafeDelete([
+    const update = deleteUpdate([
       { subject: 'http://ex/s1', predicate: 'http://ex/p', object: 'http://ex/o1', graph: G },
       { subject: 'http://ex/s3', predicate: 'http://ex/nested', object: '_:b0', graph: G },
       { subject: '_:b0', predicate: 'http://ex/v', object: '"blank"', graph: G },
-    ], 'sparql-http')!;
+    ])!;
     expect(update).toContain('DELETE DATA');
     expect(update).toContain('DELETE {');
     expect(update).not.toContain('_:');
   });
 
   it('empty input → null', () => {
-    expect(buildBlankNodeSafeDelete([], 'sparql-http')).toBeNull();
+    expect(deleteUpdate([])).toBeNull();
   });
 
   it('renders well-formed terms byte-identically to the pre-validation builder', () => {
     const observed = observeInvalidSparqlTerms();
     try {
-      const update = buildBlankNodeSafeDelete([
+      const update = deleteUpdate([
         { subject: 'http://ex/s1', predicate: 'http://ex/p', object: 'http://ex/o1', graph: G },
         { subject: 'http://ex/s3', predicate: 'http://ex/nested', object: '_:b0', graph: G },
         { subject: '_:b0', predicate: 'http://ex/v', object: '"blank"@en', graph: G },
-      ], 'sparql-http');
+      ]);
       const component = `GRAPH <${G}> {\n`
         + '    <http://ex/s3> <http://ex/nested> ?b0 .\n'
         + '    ?b0 <http://ex/v> "blank"@en .\n'
@@ -309,14 +312,14 @@ describe('control — legacy DELETE DATA with a blank node is rejected by the SP
 
 // ── 3. engine execution: generated SPARQL parses, runs, and deletes exactly ──
 
-describe('buildBlankNodeSafeDelete — executes correctly on a real Oxigraph engine', () => {
+describe('deleteData — executes correctly on a real Oxigraph engine', () => {
   for (const fx of FIXTURES) {
     it(`deletes the full graph for: ${fx.name}`, () => {
       const store = loaded(fx.nquads);
       expect(countGraph(store, G)).toBeGreaterThanOrEqual(fx.minQuads);
 
       const quads = readGraph(store, G);
-      const update = buildBlankNodeSafeDelete(quads, 'sparql-http')!;
+      const update = deleteUpdate(quads)!;
 
       // Must not throw — this is what the legacy DELETE DATA did.
       expect(() => store.update(update)).not.toThrow();
@@ -341,7 +344,7 @@ describe('buildBlankNodeSafeDelete — executes correctly on a real Oxigraph eng
         [...store.match(null, oxigraph.namedNode('http://ex/city'), oxigraph.literal('Springfield'), oxigraph.namedNode(G))]
           .some((m) => `_:${(m.subject as oxigraph.BlankNode).value}` === q.subject),
     );
-    const update = buildBlankNodeSafeDelete(aliceQuads, 'sparql-http')!;
+    const update = deleteUpdate(aliceQuads)!;
     expect(() => store.update(update)).not.toThrow();
 
     // Bob survives intact.
@@ -360,7 +363,7 @@ describe('buildBlankNodeSafeDelete — executes correctly on a real Oxigraph eng
       `_:b1 <http://ex/v> "g2" <${G2}> .`,
     ].join('\n'));
     const quads = [...readGraph(store, G), ...readGraph(store, G2)];
-    const update = buildBlankNodeSafeDelete(quads, 'sparql-http')!;
+    const update = deleteUpdate(quads)!;
     expect(() => store.update(update)).not.toThrow();
     expect(countGraph(store, G)).toBe(0);
     expect(countGraph(store, G2)).toBe(0);
@@ -379,7 +382,7 @@ describe('buildBlankNodeSafeDelete — executes correctly on a real Oxigraph eng
       object: termToStr(q.object),
       graph: G,
     }));
-    const update = buildBlankNodeSafeDelete(quads, 'sparql-http')!;
+    const update = deleteUpdate(quads)!;
     expect(() => store.update(update)).not.toThrow();
     expect(countGraph(store, G)).toBe(0);
   });
