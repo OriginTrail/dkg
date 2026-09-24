@@ -1,0 +1,61 @@
+name: Config file native writes
+
+# The home config writer and its lock depend on each platform's own rename,
+# hard-link and permission semantics (Windows refuses a rename over a file
+# another process holds open), which the Linux-hosted unit lanes can only
+# simulate. These suites run natively wherever that code changes.
+on:
+  pull_request:
+    paths:
+      - 'packages/cli/src/durable-file-replace.ts'
+      - 'packages/cli/src/file-lock.ts'
+      - 'packages/cli/src/home-config-file.ts'
+      - 'packages/cli/src/publisher-wallets.ts'
+      - 'packages/cli/test/config-file-update.test.ts'
+      - 'packages/cli/test/durable-file-replace.test.ts'
+      - 'packages/cli/test/file-lock.test.ts'
+      - 'packages/cli/test/publisher-wallets-lock.test.ts'
+      - 'packages/cli/test/fixtures/config-file-writer.fixture.ts'
+      - 'packages/cli/test/fixtures/file-lock-holder.fixture.ts'
+      - 'packages/cli/package.json'
+      - 'packages/cli/vitest.unit.config.ts'
+      - 'pnpm-lock.yaml'
+      - '.github/workflows/config-file-native.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: config-file-native-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  writes:
+    name: Config file writes (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build the workspace packages the config writer loads
+        run: node scripts/build-runtime-packages.mjs
+      - name: Run the config writer and lock suites natively
+        run: >-
+          pnpm --dir packages/cli exec vitest run --config vitest.unit.config.ts
+          test/durable-file-replace.test.ts
+          test/file-lock.test.ts
+          test/config-file-update.test.ts
+          test/publisher-wallets-lock.test.ts
