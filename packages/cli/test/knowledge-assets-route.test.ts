@@ -409,6 +409,22 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(String(sealed.body.merkleRoot)).toMatch(/^0x[0-9a-f]{8,}$/);
     });
 
+    it('returns 409 KA_WM_LIFECYCLE_REQUIRED when discarding a finalized KA', async () => {
+      await createKa(REG, 'discard-finalized');
+      await write(REG, 'discard-finalized', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
+      const finalized = await postJson(daemon, '/api/knowledge-assets/discard-finalized/wm/finalize', {
+        contextGraphId: REG,
+      });
+      expect(finalized.status).toBe(200);
+
+      const res = await postJson(daemon, '/api/knowledge-assets/discard-finalized/wm/discard', {
+        contextGraphId: REG,
+      });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('KA_WM_LIFECYCLE_REQUIRED');
+      expect(String(res.body.error)).toContain('is not an active Working Memory draft');
+    });
+
     it('rejects a malformed pre-signed attestation (bad signature.r) before finalize', async () => {
       await createKa(REG, 'att-r');
       await write(REG, 'att-r', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
