@@ -655,6 +655,34 @@ export class ProtocolRouter {
     }
   }
 
+  /**
+   * Check a peer's current protocol capability without sending an application
+   * request. Identify records can lag a handler registered after connection;
+   * multistream negotiation reflects the live handler table. A successful
+   * probe opens and immediately aborts the stream before any payload bytes.
+   */
+  async probeProtocol(peerIdStr: string, protocolId: string, timeoutMs = 3_000): Promise<boolean> {
+    const deadline = AbortSignal.timeout(timeoutMs);
+    const signal = composeAbortSignals(deadline, this.node.stopSignal) ?? deadline;
+    try {
+      await this.requirePeerAccepted(peerIdStr, protocolId, 'outbound', { signal, timeoutMs });
+      const { peerIdFromString } = await import('@libp2p/peer-id');
+      const stream = await this.node.libp2p.dialProtocol(peerIdFromString(peerIdStr), protocolId, {
+        runOnLimitedConnection: true,
+        signal,
+      });
+      try {
+        stream.abort(new Error('protocol capability probe complete'));
+      } catch {
+        // Negotiation already established capability; a closing stream may
+        // reject the abort after the remote has closed its side.
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private async sendInner(
     peerIdStr: string,
     protocolId: string,

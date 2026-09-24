@@ -10,6 +10,8 @@ export interface ACKCandidatePeerSelectionInput {
   verifiedSameNetworkPeerIds?: ReadonlySet<string>;
   knownCorePeerIds?: ReadonlySet<string>;
   knownCorePeerIdsV2?: ReadonlySet<string>;
+  /** Require live-confirmed core capability before a peer can receive an ACK request. */
+  requireConfirmedCore?: boolean;
   requiredACKs: number;
   protocol?: string;
   selfPeerId?: string;
@@ -44,13 +46,17 @@ function normalizePeerIdSet(ids: readonly string[] | undefined): Set<string> {
 export function selectACKCandidateUniverse(input: Pick<
   ACKCandidatePeerSelectionInput,
   'connectedPeers' | 'ackCandidatePeerIds' | 'selfPeerId'
+  | 'knownCorePeerIds' | 'requireConfirmedCore'
 >): string[] {
   const connected = [...new Set(input.connectedPeers)]
     .filter((id) => id !== input.selfPeerId);
   const allowlistedACKPeers = normalizePeerIdSet(input.ackCandidatePeerIds);
-  return allowlistedACKPeers.size > 0
+  const allowlisted = allowlistedACKPeers.size > 0
     ? connected.filter((id) => allowlistedACKPeers.has(id))
     : connected;
+  return input.requireConfirmedCore
+    ? allowlisted.filter((id) => input.knownCorePeerIds?.has(id))
+    : allowlisted;
 }
 
 function rankPreferredWithinTier(ids: readonly string[], preferred: ReadonlySet<string>): string[] {
@@ -113,6 +119,7 @@ function diagnosticForPeer(input: {
   protocol?: string;
   knownCorePeerIds?: ReadonlySet<string>;
   knownCorePeerIdsV2?: ReadonlySet<string>;
+  requireConfirmedCore?: boolean;
 }): ACKCandidatePeerDiagnostic {
   const protocolMatch = input.protocol === PROTOCOL_STORAGE_ACK_V2
     ? (input.knownCorePeerIdsV2?.has(input.peerId) ?? false)
@@ -122,6 +129,7 @@ function diagnosticForPeer(input: {
   const selected = input.selected.has(input.peerId);
   let reason = selected ? 'selected' : 'not-selected';
   if (!input.allowlisted) reason = 'not-allowlisted';
+  else if (input.requireConfirmedCore && !input.knownCorePeerIds?.has(input.peerId)) reason = 'not-core-capable';
   else if (!protocolMatch && input.protocol === PROTOCOL_STORAGE_ACK_V2) reason = selected ? 'selected-protocol-fallback' : 'protocol-fallback';
   return {
     peerId: input.peerId,
@@ -168,6 +176,7 @@ export function selectACKCandidatePeersWithDiagnostics(
     protocol: input.protocol,
     knownCorePeerIds: input.knownCorePeerIds,
     knownCorePeerIdsV2: input.knownCorePeerIdsV2,
+    requireConfirmedCore: input.requireConfirmedCore,
   }));
 
   return { peers, diagnostics };

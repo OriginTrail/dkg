@@ -1,4 +1,5 @@
-import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import { createOperationContext, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import { reconcileACKCapabilities } from '../../p2p/ack-capability.js';
 import {
   classifyDurableProgress,
 } from '../durable-progress.js';
@@ -505,21 +506,7 @@ async function runSessionSyncOnConnect(
     const protocols = await getPeerProtocols(remotePeer);
     signal.throwIfAborted();
 
-    if (protocols.includes(PROTOCOL_STORAGE_ACK)) {
-      knownCorePeerIds.add(remotePeer);
-    } else if (protocols.length > 0) {
-      // #1093: only de-classify on a POPULATED protocol list. An empty
-      // list means identify hasn't completed yet (the dominant race on
-      // inbound connections) — evicting a previously-confirmed core here
-      // would re-poison the ACK candidate pool that
-      // `DKGAgent.getACKCandidatePeers` builds for the publisher.
-      knownCorePeerIds.delete(remotePeer);
-    }
-    if (protocols.includes(PROTOCOL_STORAGE_ACK_V2)) {
-      knownCorePeerIdsV2.add(remotePeer);
-    } else if (protocols.length > 0) {
-      knownCorePeerIdsV2.delete(remotePeer);
-    }
+    reconcileACKCapabilities(remotePeer, protocols, knownCorePeerIds, knownCorePeerIdsV2);
 
     const hasSync = protocols.includes(PROTOCOL_SYNC);
     if (!hasSync) {

@@ -2,7 +2,7 @@
 //
 // ACK candidate selection dials only peers confirmed to advertise the
 // core-only StorageACK protocol. Unclassified connections may include edges.
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { DKGAgent, MockChainAdapter, OxigraphStore } from './agent.shared';
 import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
@@ -35,10 +35,9 @@ type AgentInternals = {
   lastKnownRequiredACKs?: number;
   getPeerProtocols(peerId: string): Promise<string[]>;
   getACKCandidatePeersAfterAdmission(protocol: string | undefined, ctx: unknown): Promise<string[]>;
-  storageAckHandlerRegistered: boolean;
-  storageAckLocalHandler: {
-    publish(data: Uint8Array): Promise<Uint8Array>;
-    update(data: Uint8Array): Promise<Uint8Array>;
+  router: { probeProtocol(peerId: string, protocol: string): Promise<boolean> } | null;
+  storageAckEndpoint: {
+    dispatch(protocol: string, data: Uint8Array, peerId: string): Promise<Uint8Array>;
   } | null;
   getACKCandidatePeers: (protocol?: string) => string[];
   handlePeerUpdateForSyncRetry: (peerId: string, protocols: readonly string[]) => void;
@@ -144,7 +143,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
   });
 
   it('refreshes identify metadata before admission and never preflights edges', async () => {
-    const a = await buildAgent({ confirmedCores: [], connected: [CORE[0], EDGE[0]] });
+    const a = await buildAgent({ confirmedCores: [EDGE[0]], connected: [CORE[0], EDGE[0]] });
     a.getPeerProtocols = async (peerId) => peerId === CORE[0]
       ? [PROTOCOL_STORAGE_ACK]
       : ['/dkg/10.0.0/sync'];
@@ -161,6 +160,57 @@ describe('getACKCandidatePeers — core-only candidates', () => {
 
     expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([CORE[0]]);
     expect(preflightPeers).toEqual([CORE[0]]);
+    expect(a.knownCorePeerIds.has(EDGE[0])).toBe(false);
+  });
+
+  it('probes a core that registered StorageACK after its cached identify record', async () => {
+    const a = await buildAgent({ confirmedCores: [], connected: [EDGE[0], CORE[0]] });
+    a.getPeerProtocols = async () => ['/dkg/10.0.0/sync'];
+    let ackHandlerRegistered = false;
+    const probe = vi.fn(async (peerId: string) => ackHandlerRegistered && peerId === CORE[0]);
+    a.router = { probeProtocol: probe };
+    let preflightPeers: string[] = [];
+    a.networkAdmissionCoordinator = {
+      enabled: false,
+      isAcceptedPeer: () => true,
+      verifiedSameNetworkPeerIds: () => new Set(),
+      preflightPeerAdmission: async (peerIds) => {
+        preflightPeers = [...peerIds];
+        return { checked: preflightPeers.length, admitted: 0, unresolved: 0 };
+      },
+    };
+
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([]);
+    ackHandlerRegistered = true; // The cached identify record stays populated and unchanged.
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([CORE[0]]);
+    expect(probe).toHaveBeenCalledWith(CORE[0], PROTOCOL_STORAGE_ACK);
+    expect(preflightPeers).toEqual([CORE[0]]);
+  });
+
+  it('still probes unknown peers when identified cores fail active-network admission', async () => {
+    const a = await buildAgent({
+      confirmedCores: CORE.slice(0, 3),
+      connected: CORE,
+      lastKnownRequiredACKs: 3,
+    });
+    a.getPeerProtocols = async (peerId) => peerId === CORE[3]
+      ? ['/dkg/10.0.0/sync']
+      : [PROTOCOL_STORAGE_ACK];
+    const probe = vi.fn(async (peerId: string) => peerId === CORE[3]);
+    a.router = { probeProtocol: probe };
+    a.networkAdmissionCoordinator = {
+      enabled: true,
+      isAcceptedPeer: (peerId) => peerId === CORE[3],
+      verifiedSameNetworkPeerIds: () => new Set([CORE[3]]),
+      preflightPeerAdmission: async (peerIds) => ({
+        checked: [...peerIds].length,
+        admitted: 0,
+        unresolved: 0,
+      }),
+    };
+
+    expect(await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'))).toEqual([CORE[3]]);
+    expect(probe).toHaveBeenCalledWith(CORE[3], PROTOCOL_STORAGE_ACK);
   });
 
   it('ackCandidatePeerIds remains an allowlist for callers that intentionally restrict candidacy', async () => {
@@ -268,10 +318,8 @@ describe('getACKCandidatePeers — core-only candidates', () => {
       connected: [...CORE.slice(0, 2), ...EDGE],
     });
     a.config.nodeRole = 'core';
-    a.storageAckHandlerRegistered = true;
-    a.storageAckLocalHandler = {
-      publish: async () => new Uint8Array([1]),
-      update: async () => new Uint8Array([2]),
+    a.storageAckEndpoint = {
+      dispatch: async () => new Uint8Array([1]),
     };
 
     expect(a.getACKCandidatePeers()).toEqual([a.peerId, ...CORE.slice(0, 2)]);
@@ -279,7 +327,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     a.config.ackCandidatePeerIds = [CORE[0]];
     expect(a.getACKCandidatePeers()).toEqual([a.peerId, CORE[0]]);
 
-    a.storageAckHandlerRegistered = false;
+    a.storageAckEndpoint = null;
     expect(a.getACKCandidatePeers()).toEqual([CORE[0]]);
   });
 

@@ -1235,13 +1235,13 @@ export class DKGAgentBase {
   /** The signed-ACK ledger is initialized and pre-ledger copies grandfathered. */
   protected storageAckLedgerReady = false;
   protected storageAckLedgerReadyFlight: Promise<boolean> | null = null;
-  /** The StorageACK protocol handler is registered (this core can answer ACKs). */
-  protected storageAckHandlerRegistered = false;
-  /** The registered core handler, also used for local ACK requests. */
-  protected storageAckLocalHandler: {
-    publish(data: Uint8Array): Promise<Uint8Array>;
-    update(data: Uint8Array): Promise<Uint8Array>;
+  /** One registered endpoint serves both remote streams and local ACK requests. */
+  protected storageAckEndpoint: {
+    dispatch(protocol: string, data: Uint8Array, peerId: string): Promise<Uint8Array>;
   } | null = null;
+  protected get storageAckHandlerRegistered(): boolean {
+    return this.storageAckEndpoint !== null;
+  }
   /** StorageACK declines per minute bucket and code, for the last hour. */
   protected readonly storageAckDeclineBuckets = new Map<number, Map<string, number>>();
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */

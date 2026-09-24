@@ -19,6 +19,7 @@ import {
 import { createHash } from 'node:crypto';
 import { setTimeout as waitForPeerEventTurn } from 'node:timers/promises';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
+import { reconcileACKCapabilities } from './p2p/ack-capability.js';
 import { syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
@@ -2750,13 +2751,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // protocol confuses peer-role detection based on protocol support.
     if (effectiveRole === 'core') {
       if (ackSignerCandidates.length > 0) {
-        let storageACKProtocolRegistered = false;
         let storageACKFailoverInFlight = false;
+        const storageACKProtocols = [
+          PROTOCOL_STORAGE_ACK,
+          PROTOCOL_STORAGE_ACK_V2,
+          PROTOCOL_STORAGE_UPDATE_ACK,
+          PROTOCOL_STORAGE_UPDATE_ACK_V2,
+        ];
         const attemptStorageACKRegistration = async (
           attemptCtx: OperationContext,
           options: { repairWallets?: boolean; allowChainReresolution?: boolean } = {},
         ): Promise<'registered' | 'retryable' | 'disabled'> => {
-          if (storageACKProtocolRegistered) return 'registered';
+          if (this.storageAckHandlerRegistered) return 'registered';
           // #894 / Codex PR #901 (round 2): background identity re-resolution.
           // If boot left the identity unresolved because of a transient chain
           // failure (RPC timeout/unreachable), re-probe the chain — but ONLY on
@@ -2940,17 +2946,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               onSignerUnregistered: () => {
                 if (storageACKFailoverInFlight) return;
                 storageACKFailoverInFlight = true;
-                storageACKProtocolRegistered = false;
-                this.storageAckHandlerRegistered = false;
-                this.storageAckLocalHandler = null;
+                this.storageAckEndpoint = null;
                 // rc.9 PR-11: messenger.register stored the handler
                 // in the substrate's wrapper which delegates to
                 // router.register under the hood (see Messenger.register
                 // implementation), so router.unregister still removes it.
-                this.router.unregister(PROTOCOL_STORAGE_ACK);
-                this.router.unregister(PROTOCOL_STORAGE_ACK_V2);
-                this.router.unregister(PROTOCOL_STORAGE_UPDATE_ACK);
-                this.router.unregister(PROTOCOL_STORAGE_UPDATE_ACK_V2);
+                for (const protocol of storageACKProtocols) this.router.unregister(protocol);
                 this.log.warn(
                   attemptCtx,
                   `Unregistered V10 StorageACK handler: signer ${ackSignerWallet.address} ` +
@@ -3059,42 +3060,32 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // substrate (wire prefix /dkg/10.0.1/storage-ack).
             // messenger.register handles envelope decode + receiver
             // dedup; ackHandler's signature stays the same.
-            this.messenger.register(PROTOCOL_STORAGE_ACK, async (data, peerIdStr) => {
-              const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-              return ackHandler.handler(data, peerId);
-            });
-            // OT-RFC-38 LU-11 / OT-RFC-39 — V2 protocol id. Same handler
-            // instance, distinct libp2p protocol. Publishers negotiate V2 for
-            // chunked ciphertext commitments and folded-private field-20
-            // commitments, so V1-only cores never receive intents whose new
-            // fields they would silently ignore. The handler dispatches on the
-            // decoded intent shape internally.
-            this.messenger.register(PROTOCOL_STORAGE_ACK_V2, async (data, peerIdStr) => {
-              const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-              return ackHandler.handler(data, peerId);
-            });
-            // V10 UPDATE StorageACK — same handler instance + config
-            // (signer, chainId, kav10Address, SWM resolver, curation
-            // oracle, signer-registration gate, provenance hook), distinct
-            // libp2p protocol. Carries an `UpdateIntent` and binds the
-            // 13-field UPDATE ACK digest. Pre-update cores never register
-            // this, so an UPDATE-aware publisher gracefully falls back
-            // (the dial fails as peer-unreachable against the quorum).
-            this.messenger.register(PROTOCOL_STORAGE_UPDATE_ACK, async (data, peerIdStr) => {
-              const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-              return ackHandler.updateHandler(data, peerId);
-            });
-            this.messenger.register(PROTOCOL_STORAGE_UPDATE_ACK_V2, async (data, peerIdStr) => {
-              const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-              return ackHandler.updateHandler(data, peerId);
-            });
-            const localPeer = { toString: () => this.peerId, toBytes: () => new Uint8Array() };
-            this.storageAckLocalHandler = {
-              publish: (data) => ackHandler.handler(data, localPeer),
-              update: (data) => ackHandler.updateHandler(data, localPeer),
+            const endpoint = {
+              dispatch: (protocol: string, data: Uint8Array, peerIdStr: string): Promise<Uint8Array> => {
+                const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
+                if (protocol === PROTOCOL_STORAGE_ACK || protocol === PROTOCOL_STORAGE_ACK_V2) {
+                  return ackHandler.handler(data, peerId);
+                }
+                if (protocol === PROTOCOL_STORAGE_UPDATE_ACK || protocol === PROTOCOL_STORAGE_UPDATE_ACK_V2) {
+                  return ackHandler.updateHandler(data, peerId);
+                }
+                throw new Error(`Unsupported StorageACK protocol: ${protocol}`);
+              },
             };
-            storageACKProtocolRegistered = true;
-            this.storageAckHandlerRegistered = true;
+            try {
+              for (const protocol of storageACKProtocols) {
+                this.messenger.register(protocol, (data, peerIdStr) => {
+                  if (this.storageAckEndpoint !== endpoint) {
+                    throw new Error('StorageACK handler is not registered');
+                  }
+                  return endpoint.dispatch(protocol, data, peerIdStr);
+                });
+              }
+            } catch (error) {
+              for (const protocol of storageACKProtocols) this.router.unregister(protocol);
+              throw error;
+            }
+            this.storageAckEndpoint = endpoint;
             this.clearStorageACKRegistrationRetry();
             this.log.info(
               attemptCtx,
@@ -3128,11 +3119,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             ? Math.max(requestedRetryMs, MIN_STORAGE_ACK_REGISTRATION_RETRY_MS)
             : STORAGE_ACK_REGISTRATION_RETRY_MS;
         const scheduleStorageACKRegistrationRetry = (options: { repairWallets?: boolean; allowChainReresolution?: boolean } = {}) => {
-          if (this.storageACKRegistrationRetryTimer || storageACKProtocolRegistered) return;
+          if (this.storageACKRegistrationRetryTimer || this.storageAckHandlerRegistered) return;
           this.log.warn(ctx, `V10 StorageACK handler registration will retry every ${storageACKRegistrationRetryMs}ms`);
           this.storageACKRegistrationRetryTimer = setTimeout(() => {
             this.storageACKRegistrationRetryTimer = null;
-            if (!this.started || storageACKProtocolRegistered || this.storageACKRegistrationRetryInFlight) return;
+            if (!this.started || this.storageAckHandlerRegistered || this.storageACKRegistrationRetryInFlight) return;
             this.storageACKRegistrationRetryInFlight = true;
             attemptStorageACKRegistration(createOperationContext('connect'), options)
               .then((result) => {
@@ -5372,19 +5363,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // complete protocol list, so add-on-present is safe. Retain
     // classification on an empty identify list, but revoke it when a
     // populated update no longer advertises the core-only ACK protocol.
-    if (protocols.includes(PROTOCOL_STORAGE_ACK)) {
-      this.knownCorePeerIds.add(peerId);
-    } else if (protocols.length > 0) {
-      this.knownCorePeerIds.delete(peerId);
-    }
-    // V2 is a strict compatibility gate for field-20 folded-private ACKs. Keep
-    // empty-list races non-destructive, but clear stale V2 membership when
-    // identify delivers a populated protocol list without the V2 ACK protocol.
-    if (protocols.includes(PROTOCOL_STORAGE_ACK_V2)) {
-      this.knownCorePeerIdsV2.add(peerId);
-    } else if (protocols.length > 0) {
-      this.knownCorePeerIdsV2.delete(peerId);
-    }
+    reconcileACKCapabilities(peerId, protocols, this.knownCorePeerIds, this.knownCorePeerIdsV2);
     if (!peerEvents.isSkippedNoSync(peerId)) return;
     if (!syncOnConnectEnabled(this.config)) return;
     if (!protocols.includes(PROTOCOL_SYNC)) return;

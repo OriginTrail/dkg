@@ -75,6 +75,7 @@ import { DKGAgent } from '../src/index.js';
  */
 const capturedAckCollectorDeps: unknown[] = [];
 const capturedStorageACKHandlerConfigs: unknown[] = [];
+const capturedStorageACKHandlerCalls: Array<{ kind: 'publish' | 'update'; data: Uint8Array; peerId: string }> = [];
 const capturedPublishCollectParams: unknown[] = [];
 const capturedUpdateCollectParams: unknown[] = [];
 let publishCollectHook: (() => Promise<{ acks: [] }>) | undefined;
@@ -111,11 +112,13 @@ vi.mock('@origintrail-official/dkg-publisher', async () => {
       constructor(_store: unknown, config: unknown) {
         capturedStorageACKHandlerConfigs.push(config);
       }
-      async handler(): Promise<Uint8Array> {
-        return new Uint8Array();
+      async handler(data: Uint8Array, peer: { toString(): string }): Promise<Uint8Array> {
+        capturedStorageACKHandlerCalls.push({ kind: 'publish', data, peerId: peer.toString() });
+        return new Uint8Array([1]);
       }
-      async updateHandler(): Promise<Uint8Array> {
-        return new Uint8Array();
+      async updateHandler(data: Uint8Array, peer: { toString(): string }): Promise<Uint8Array> {
+        capturedStorageACKHandlerCalls.push({ kind: 'update', data, peerId: peer.toString() });
+        return new Uint8Array([2]);
       }
     },
   };
@@ -136,6 +139,7 @@ interface ACKCollectorDepsCapture {
 }
 
 interface StorageACKHandlerConfigCapture {
+  onSignerUnregistered?: () => void;
   isCgCurated?: (cgId: string, swmGraphId?: string) => Promise<boolean | null>;
   ensureVmPromotion?: (request: {
     contextGraphId: string;
@@ -159,6 +163,7 @@ interface StorageACKHandlerConfigCapture {
 interface ProviderInternals {
   peerId: string;
   createV10ACKProvider(cgId: string): unknown;
+  getACKCandidatePeers(protocol?: string): string[];
   createV10UpdateACKProvider(cgId: string): unknown;
   createACKTransportFactory(options?: {
     sendTimeoutMs?: number;
@@ -197,9 +202,8 @@ interface ProviderInternals {
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2: Set<string>;
   storageAckHandlerRegistered: boolean;
-  storageAckLocalHandler: {
-    publish(data: Uint8Array): Promise<Uint8Array>;
-    update(data: Uint8Array): Promise<Uint8Array>;
+  storageAckEndpoint: {
+    dispatch(protocol: string, data: Uint8Array, peerId: string): Promise<Uint8Array>;
   } | null;
   networkAdmissionCoordinator: {
     enabled: boolean;
@@ -225,7 +229,7 @@ async function bootProviderAgent(options: Record<string, unknown> = {}): Promise
   // The guards at the top of `createV10ACKProvider` only check
   // truthiness, not type. Pass empty objects so the function reaches
   // the `new ACKCollector(...)` call site.
-  internals.router = {};
+  internals.router = { probeProtocol: async () => false };
   internals.gossip = { publish: async () => undefined };
   // Unconditionally override `node` — the real `DKGNode` getter
   // throws on access before `start()` is called, so even the
@@ -245,6 +249,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
   beforeEach(() => {
     capturedAckCollectorDeps.length = 0;
     capturedStorageACKHandlerConfigs.length = 0;
+    capturedStorageACKHandlerCalls.length = 0;
     capturedPublishCollectParams.length = 0;
     capturedUpdateCollectParams.length = 0;
     publishCollectHook = undefined;
@@ -973,10 +978,13 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     const remoteSend = vi.fn();
     internals.messenger = { sendRequestOwned: remoteSend };
     internals.config.nodeRole = 'core';
-    internals.storageAckHandlerRegistered = true;
     const publish = vi.fn(async () => new Uint8Array([1]));
     const update = vi.fn(async () => new Uint8Array([2]));
-    internals.storageAckLocalHandler = { publish, update };
+    internals.storageAckEndpoint = {
+      dispatch: (protocol, data) => protocol === PROTOCOL_STORAGE_ACK || protocol === PROTOCOL_STORAGE_ACK_V2
+        ? publish(data)
+        : update(data),
+    };
     const send = internals.createACKTransportFactory()().sendP2P;
     const request = new Uint8Array([3]);
 
@@ -988,7 +996,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     expect(update).toHaveBeenCalledTimes(2);
     expect(remoteSend).not.toHaveBeenCalled();
 
-    internals.storageAckHandlerRegistered = false;
+    internals.storageAckEndpoint = null;
     await expect(send(internals.peerId, PROTOCOL_STORAGE_ACK, request)).rejects.toThrow(/not registered/);
   });
 
@@ -1022,9 +1030,29 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     );
     const internals = agent as unknown as ProviderInternals;
     expect(internals.storageAckHandlerRegistered).toBe(true);
-    expect(internals.storageAckLocalHandler).not.toBeNull();
+    expect(internals.storageAckEndpoint).not.toBeNull();
+    const localPeerId = internals.peerId;
+    const request = new Uint8Array([3, 4]);
+    const send = internals.createACKTransportFactory()().sendP2P;
+    await expect(send(localPeerId, PROTOCOL_STORAGE_ACK, request)).resolves.toEqual(new Uint8Array([1]));
+    await expect(send(localPeerId, PROTOCOL_STORAGE_ACK_V2, request)).resolves.toEqual(new Uint8Array([1]));
+    await expect(send(localPeerId, PROTOCOL_STORAGE_UPDATE_ACK, request)).resolves.toEqual(new Uint8Array([2]));
+    await expect(send(localPeerId, PROTOCOL_STORAGE_UPDATE_ACK_V2, request)).resolves.toEqual(new Uint8Array([2]));
+    expect(capturedStorageACKHandlerCalls).toEqual([
+      { kind: 'publish', data: request, peerId: localPeerId },
+      { kind: 'publish', data: request, peerId: localPeerId },
+      { kind: 'update', data: request, peerId: localPeerId },
+      { kind: 'update', data: request, peerId: localPeerId },
+    ]);
+    const handlerConfig = capturedStorageACKHandlerConfigs.at(-1) as StorageACKHandlerConfigCapture;
+    expect(handlerConfig.onSignerUnregistered).toBeTypeOf('function');
+    handlerConfig.onSignerUnregistered?.();
+    expect(internals.storageAckEndpoint).toBeNull();
+    expect(internals.storageAckHandlerRegistered).toBe(false);
+    expect(internals.getACKCandidatePeers()).not.toContain(localPeerId);
+    await expect.poll(() => internals.storageAckHandlerRegistered).toBe(true);
     await agent.stop();
-    expect(internals.storageAckLocalHandler).toBeNull();
+    expect(internals.storageAckEndpoint).toBeNull();
     agent = undefined;
   });
 

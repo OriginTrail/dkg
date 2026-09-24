@@ -9,12 +9,27 @@ import { PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import {
   selectACKCandidatePeers,
   selectACKCandidateUniverse,
+  selectACKCandidatePeersWithDiagnostics,
 } from '../src/ack-peer-selection.js';
 
 const RELAYS = ['relay-1', 'relay-2', 'relay-3', 'relay-4'];
 const STAKED = ['staked-core-5', 'staked-core-6', 'staked-core-7'];
 
 describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () => {
+  it('uses the same core-only gate for preflight and final selection, with edge diagnostics', () => {
+    const input = {
+      connectedPeers: ['edge', 'core-v1', 'core-v2'],
+      knownCorePeerIds: new Set(['core-v1', 'core-v2']),
+      knownCorePeerIdsV2: new Set(['core-v2']),
+      requireConfirmedCore: true,
+      protocol: PROTOCOL_STORAGE_ACK_V2,
+      requiredACKs: 2,
+    };
+    expect(selectACKCandidateUniverse(input)).toEqual(['core-v1', 'core-v2']);
+    const result = selectACKCandidatePeersWithDiagnostics(input);
+    expect(result.peers).toEqual(['core-v2', 'core-v1']);
+    expect(result.diagnostics.find((entry) => entry.peerId === 'edge')?.reason).toBe('not-core-capable');
+  });
   it('exposes every connected non-self peer as the pre-admission universe by default', () => {
     expect(selectACKCandidateUniverse({
       connectedPeers: ['self', 'classified-core', 'unclassified-core', 'unclassified-core'],
