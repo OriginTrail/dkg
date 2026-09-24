@@ -3,14 +3,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Command } from 'commander';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { DkgConfig, DkgConfigFilePatch, DkgConfigFileUpdate } from '../src/config.js';
+import type { DkgConfig, DkgConfigFilePatch, DkgConfigFileUpdate, DkgConfigKeyPath } from '../src/config.js';
+import { applyConfigFilePatch } from '../src/home-config-file.js';
 
 const mocks = vi.hoisted(() => ({
   home: '',
   answers: {} as Record<string, string>,
   questions: [] as string[],
   loadConfig: vi.fn(),
-  updateConfigFile: vi.fn<(patch: DkgConfigFilePatch) => Promise<DkgConfigFileUpdate>>(),
+  updateConfigFile: vi.fn<(owns: readonly DkgConfigKeyPath[], patch: DkgConfigFilePatch) => Promise<DkgConfigFileUpdate>>(),
   // The config file each patch is applied to; defaults to what loadConfig returned.
   fileAtWrite: undefined as Partial<DkgConfig> | undefined,
   // The file updateConfigFile reports as written; defaults to config.json.
@@ -74,9 +75,10 @@ describe('init wizard chain persistence', () => {
     mocks.fileAtWrite = undefined;
     mocks.sourcePath = undefined;
     mocks.written = [];
-    mocks.updateConfigFile.mockImplementation(async (patch) => {
+    mocks.updateConfigFile.mockImplementation(async (owns, patch) => {
       const file = structuredClone(mocks.fileAtWrite ?? await mocks.loadConfig()) as Partial<DkgConfig>;
-      patch(file);
+      // The real patch step, so a change outside the wizard's own keys fails.
+      applyConfigFilePatch(file, owns, patch);
       mocks.written.push(file);
       return { path: mocks.sourcePath ?? join(mocks.home, 'config.json'), changed: true };
     });
@@ -120,6 +122,20 @@ describe('init wizard chain persistence', () => {
     expect(saved.localAgentIntegrations).toEqual({ hermes: { id: 'hermes', enabled: true } });
     expect(saved.auth).toEqual({ enabled: false, tokens: ['rotated'] });
     expect(saved.name).toBe('renamed');
+  });
+
+  // The store prompt answering "use the local default" (a null block) clears
+  // a block an earlier run wrote, so re-running init can switch back.
+  it('clears an existing store block when the operator picks the local default', async () => {
+    mocks.loadConfig.mockResolvedValue({
+      name: 'node', apiPort: 9200, networkConfig: 'testnet',
+      store: { backend: 'blazegraph', options: { url: 'http://127.0.0.1:9999/blazegraph/sparql' } },
+    });
+
+    const saved = await runInit();
+    // As persisted: the patch leaves the key undefined, which the file drops.
+    expect(JSON.parse(JSON.stringify(saved))).not.toHaveProperty('store');
+    expect(saved.name).toBe('node');
   });
 
   it('names the file it wrote, which is config.yaml for a YAML-configured node', async () => {

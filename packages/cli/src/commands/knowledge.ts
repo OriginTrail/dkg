@@ -377,7 +377,7 @@ program
 
       if (opts.save) {
         const notes: string[] = [];
-        await updateConfigFile((config) => {
+        await updateConfigFile(['contextGraphs'], (config) => {
           const cgs = new Set(resolveContextGraphs(config));
           // Save a stable identity (the verified cleartext id, or the name hash
           // the daemon re-resolves at start), never the on-chain number. Only

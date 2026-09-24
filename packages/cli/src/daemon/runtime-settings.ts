@@ -15,7 +15,7 @@ export function createDaemonTelemetryRuntime(
   return createTelemetryRuntime({
     ...opts,
     persist: async (config) => {
-      await updateConfigFile((onDisk) => {
+      await updateConfigFile([['telemetry', 'enabled']], (onDisk) => {
         onDisk.telemetry = { ...onDisk.telemetry, enabled: config.telemetry?.enabled ?? false };
       });
     },
@@ -41,7 +41,7 @@ export function createLlmSettings(opts: {
         memoryManager.updateConfig({ apiKey: '' });
         log('LLM config cleared via settings');
       }
-      await updateConfigFile((onDisk) => {
+      await updateConfigFile(['llm'], (onDisk) => {
         if (config.llm) onDisk.llm = config.llm;
         else delete onDisk.llm;
       });
@@ -57,7 +57,7 @@ export async function applySharedMemoryTtl(
   node.config.sharedMemoryTtlMs = ttlMs;
   node.config.workspaceTtlMs = ttlMs;
   node.agent.setSharedMemoryTtlMs(ttlMs);
-  await updateConfigFile((onDisk) => {
+  await updateConfigFile(['sharedMemoryTtlMs', 'workspaceTtlMs'], (onDisk) => {
     onDisk.sharedMemoryTtlMs = node.config.sharedMemoryTtlMs;
     onDisk.workspaceTtlMs = node.config.workspaceTtlMs;
   });

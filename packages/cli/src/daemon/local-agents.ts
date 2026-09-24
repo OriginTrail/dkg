@@ -20,6 +20,7 @@ import {
   updateConfigFile,
   dkgDir,
   type DkgConfig,
+  type DkgConfigKeyPath,
   type LocalAgentIntegrationCapabilities,
   type LocalAgentIntegrationConfig,
   type LocalAgentIntegrationManifest,
@@ -458,7 +459,10 @@ export function updateLocalAgentIntegration(
 export async function persistLocalAgentIntegration(config: DkgConfig, id: string): Promise<void> {
   const normalizedId = normalizeIntegrationId(id);
   if (!getStoredLocalAgentIntegrations(config)[normalizedId]) return;
-  await updateConfigFile((onDisk) => {
+  const owns: DkgConfigKeyPath[] = normalizedId === 'openclaw'
+    ? [['localAgentIntegrations', normalizedId], 'openclawAdapter', 'openclawChannel']
+    : [['localAgentIntegrations', normalizedId]];
+  await updateConfigFile(owns, (onDisk) => {
     const record = getStoredLocalAgentIntegrations(config)[normalizedId];
     onDisk.localAgentIntegrations = { ...onDisk.localAgentIntegrations, [normalizedId]: record };
     if (normalizedId === 'openclaw') pruneLegacyOpenClawConfig(onDisk);

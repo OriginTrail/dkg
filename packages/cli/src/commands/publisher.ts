@@ -183,7 +183,7 @@ publisherCmd
       // the GH#2270 retry knobs (autoRetryEnabled, retryJitterRatio,
       // retryBackoffBaseMs/MaxMs), which a wholesale replace would erase on the
       // next `dkg publisher enable`. Mirrors `publisher disable` below.
-      await updateConfigFile((config) => {
+      await updateConfigFile(['publisher'], (config) => {
         config.publisher = { ...(config.publisher ?? {}), ...runtime };
       });
       console.log('Async publisher enabled');
@@ -198,7 +198,7 @@ publisherCmd
   .description('Disable async publisher runtime')
   .action(async () => {
     try {
-      await updateConfigFile((config) => {
+      await updateConfigFile(['publisher'], (config) => {
         config.publisher = { ...(config.publisher ?? {}), enabled: false };
       });
       console.log('Async publisher disabled');

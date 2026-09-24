@@ -17,6 +17,8 @@ vi.mock('../src/config.js', async importOriginal => {
 
 const { Command } = await import('commander');
 const { registerPublisherCommand } = await import('../src/commands/publisher.js');
+const { applyConfigFilePatch } = await import('../src/home-config-file.js');
+type ConfigModule = typeof import('../src/config.js');
 
 async function runPublisherCommand(...argv: string[]): Promise<void> {
   const program = new Command();
@@ -28,8 +30,9 @@ async function runPublisherCommand(...argv: string[]): Promise<void> {
 describe('dkg publisher enable/disable config merge (#2270)', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.updateConfigFile.mockImplementation(async (patch: (config: Record<string, any>) => void) => {
-      patch(mocks.file);
+    // The real patch step, so a change outside the command's own keys fails.
+    mocks.updateConfigFile.mockImplementation(async (...[owns, patch]: Parameters<ConfigModule['updateConfigFile']>) => {
+      applyConfigFilePatch(mocks.file, owns, patch);
     });
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});

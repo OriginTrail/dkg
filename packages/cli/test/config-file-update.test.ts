@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DkgHomeFiles, type DkgConfigFilePatch } from '../src/config.js';
+import { DkgHomeFiles, type DkgConfigFileKey, type DkgConfigFilePatch } from '../src/config.js';
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
@@ -34,20 +34,21 @@ describe('DkgHomeFiles.updateConfigFile', () => {
     return JSON.parse(await readFile(files.configPath, 'utf-8'));
   }
 
-  function addKey(key: string, value: unknown): DkgConfigFilePatch {
-    return (config) => { (config as Record<string, unknown>)[key] = value; };
+  /** An update that owns `key` and sets it. */
+  function addKey(key: string, value: unknown): Parameters<DkgHomeFiles['updateConfigFile']> {
+    return [[key as DkgConfigFileKey], (config) => { (config as Record<string, unknown>)[key] = value; }];
   }
 
   it('changes only the keys a patch sets and adds no defaults', async () => {
     await writeFile(files.configPath, JSON.stringify({ name: 'node', legacyKey: { kept: true } }));
 
-    await files.updateConfigFile((config) => { config.contextGraphs = ['cg']; });
+    await files.updateConfigFile(['contextGraphs'], (config) => { config.contextGraphs = ['cg']; });
 
     expect(await readJson()).toEqual({ name: 'node', legacyKey: { kept: true }, contextGraphs: ['cg'] });
   });
 
   it('creates config.json in a home that has no config yet', async () => {
-    expect(await files.updateConfigFile((config) => { config.name = 'fresh'; }))
+    expect(await files.updateConfigFile(['name'], (config) => { config.name = 'fresh'; }))
       .toEqual({ path: files.configPath, changed: true });
 
     expect(await readJson()).toEqual({ name: 'fresh' });
@@ -59,7 +60,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
     it('keeps every patch when one process overlaps its writes', async () => {
       await writeFile(files.configPath, JSON.stringify({ name: 'node' }));
 
-      await Promise.all(Array.from({ length: 25 }, (_, i) => files.updateConfigFile(addKey(`key-${i}`, i))));
+      await Promise.all(Array.from({ length: 25 }, (_, i) => files.updateConfigFile(...addKey(`key-${i}`, i))));
 
       const written = await readJson();
       expect(written.name).toBe('node');
@@ -70,7 +71,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       await writeFile(files.configPath, JSON.stringify({ name: 'node' }));
       await writeFile(files.configLockPath, JSON.stringify({ pid: EXITED_PID, createdAt: Date.now() }));
 
-      await Promise.all(Array.from({ length: 10 }, (_, i) => files.updateConfigFile(addKey(`key-${i}`, i))));
+      await Promise.all(Array.from({ length: 10 }, (_, i) => files.updateConfigFile(...addKey(`key-${i}`, i))));
 
       const written = await readJson();
       for (let i = 0; i < 10; i += 1) expect(written[`key-${i}`]).toBe(i);
@@ -83,7 +84,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       await writeFile(files.configPath, JSON.stringify({ name: 'node' }));
       const successor = JSON.stringify({ pid: EXITED_PID, token: 'successor', createdAt: Date.now() });
 
-      await expect(files.updateConfigFile((config) => {
+      await expect(files.updateConfigFile(['name'], (config) => {
         config.name = 'stale';
         writeFileSync(files.configLockPath, successor);
       })).rejects.toThrow(`Lost the config lock: ${files.configLockPath} was taken over`);
@@ -120,7 +121,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
         for (const writer of writers) expect(existsSync(`${startFile}.${writer}.ready`)).toBe(true);
       }, { timeout: 60_000, interval: 50 });
       await writeFile(startFile, '');
-      for (let i = 0; i < count; i += 1) await files.updateConfigFile(addKey(`daemon-${i}`, i));
+      for (let i = 0; i < count; i += 1) await files.updateConfigFile(...addKey(`daemon-${i}`, i));
       await Promise.all(exits);
 
       const written = await readJson();
@@ -136,13 +137,13 @@ describe('DkgHomeFiles.updateConfigFile', () => {
     await writeFile(files.configPath, original);
     vi.mocked(rename).mockRejectedValueOnce(Object.assign(new Error('EIO: simulated'), { code: 'EIO' }));
 
-    await expect(files.updateConfigFile((config) => { config.name = 'renamed'; }))
+    await expect(files.updateConfigFile(['name'], (config) => { config.name = 'renamed'; }))
       .rejects.toMatchObject({ code: 'EIO' });
 
     expect(await readFile(files.configPath, 'utf-8')).toBe(original);
     // Neither the temp file nor the lock outlives the failed write.
     expect(await readdir(home)).toEqual(['config.json']);
-    await files.updateConfigFile((config) => { config.name = 'renamed'; });
+    await files.updateConfigFile(['name'], (config) => { config.name = 'renamed'; });
     expect(await readJson()).toEqual({ name: 'renamed', apiPort: 9200 });
   });
 
@@ -150,7 +151,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
     it('keeps a YAML-only home in YAML and never adds a shadowing config.json', async () => {
       await writeFile(files.configYamlPath, 'name: yaml-node\napiPort: 9317\n');
 
-      expect(await files.updateConfigFile((config) => { config.contextGraphs = ['cg']; }))
+      expect(await files.updateConfigFile(['contextGraphs'], (config) => { config.contextGraphs = ['cg']; }))
         .toEqual({ path: files.configYamlPath, changed: true });
 
       expect(existsSync(files.configPath)).toBe(false);
@@ -165,7 +166,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       await writeFile(files.configPath, JSON.stringify({ name: 'json-node' }));
       await writeFile(files.configYamlPath, 'name: yaml-node\n');
 
-      await files.updateConfigFile((config) => { config.apiPort = 9555; });
+      await files.updateConfigFile(['apiPort'], (config) => { config.apiPort = 9555; });
 
       expect(await readJson()).toEqual({ name: 'json-node', apiPort: 9555 });
       expect(await readFile(files.configYamlPath, 'utf-8')).toBe('name: yaml-node\n');
@@ -174,7 +175,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
     it('drops a key a YAML patch clears instead of failing to serialize it', async () => {
       await writeFile(files.configYamlPath, 'name: yaml-node\nllm:\n  apiKey: secret\n');
 
-      await files.updateConfigFile((config) => { config.llm = undefined; });
+      await files.updateConfigFile(['llm'], (config) => { config.llm = undefined; });
 
       expect(yaml.load(await readFile(files.configYamlPath, 'utf-8'))).toEqual({ name: 'yaml-node' });
     });
@@ -182,7 +183,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
     it('treats an empty config.yaml as an empty config', async () => {
       await writeFile(files.configYamlPath, '');
 
-      await files.updateConfigFile((config) => { config.name = 'from-empty'; });
+      await files.updateConfigFile(['name'], (config) => { config.name = 'from-empty'; });
 
       expect(yaml.load(await readFile(files.configYamlPath, 'utf-8'))).toEqual({ name: 'from-empty' });
       expect(existsSync(files.configPath)).toBe(false);
@@ -203,7 +204,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       ].join('\n');
       await writeFile(files.configYamlPath, original);
 
-      await files.updateConfigFile((config) => {
+      await files.updateConfigFile([['localAgentIntegrations', 'hermes'], ['chain', 'chainId'], 'llm'], (config) => {
         config.localAgentIntegrations = { hermes: { id: 'hermes', enabled: true } };
         config.chain = { ...config.chain, chainId: 'evm:100' };
         delete config.llm;
@@ -232,7 +233,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
     it('rewrites a YAML config whole when a change runs through an alias', async () => {
       await writeFile(files.configYamlPath, 'base: &base\n  level: info\nlogging: *base\n');
 
-      await files.updateConfigFile((config) => {
+      await files.updateConfigFile(['logging'], (config) => {
         (config as Record<string, any>).logging = { level: 'debug' };
       });
 
@@ -246,7 +247,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       await writeFile(files.configYamlPath, '# operator notes\nname: yaml-node\n');
       const record = { id: 'hermes', connectedAt: '2026-09-24T10:00:00.000Z', since: '2024-01-01', mode: 'yes' };
 
-      await files.updateConfigFile((config) => {
+      await files.updateConfigFile([['localAgentIntegrations', 'hermes']], (config) => {
         config.localAgentIntegrations = { hermes: record };
       });
 
@@ -258,7 +259,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       // Deleting a key a merge key supplies leaves it in place in the document.
       await writeFile(files.configYamlPath, 'defaults: &defaults\n  level: info\nlogging:\n  <<: *defaults\n  format: json\n');
 
-      await files.updateConfigFile((config) => {
+      await files.updateConfigFile([['logging', 'level']], (config) => {
         delete (config as Record<string, any>).logging.level;
       });
 
@@ -269,7 +270,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       const original = '# operator notes\nname: yaml-node # inline\n';
       await writeFile(files.configYamlPath, original);
 
-      expect(await files.updateConfigFile((config) => { config.name = 'yaml-node'; }))
+      expect(await files.updateConfigFile(['name'], (config) => { config.name = 'yaml-node'; }))
         .toEqual({ path: files.configYamlPath, changed: false });
 
       expect(await readFile(files.configYamlPath, 'utf-8')).toBe(original);
@@ -282,12 +283,60 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       await writeFile(files.configPath, JSON.stringify({ name: 'node' }));
       await chmod(files.configPath, mode);
 
-      await files.updateConfigFile((config) => { config.apiPort = mode; });
+      await files.updateConfigFile(['apiPort'], (config) => { config.apiPort = mode; });
 
       expect((await readJson()).apiPort).toBe(mode);
       // Windows keeps only a read-only flag, not POSIX permission bits.
       if (process.platform !== 'win32') expect((await stat(files.configPath)).mode & 0o777).toBe(mode);
     }
+  });
+
+  describe('owned keys', () => {
+    // Copying a whole config loaded earlier back into the file would undo
+    // whatever another process wrote since; the update owns only telemetry.
+    it('refuses a patch that writes back a stale whole config, keeping the newer value', async () => {
+      await writeFile(files.configPath, JSON.stringify({ name: 'node', apiPort: 9200 }));
+      const stale = await files.loadConfig();
+      await files.updateConfigFile(['apiPort'], (config) => { config.apiPort = 9300; });
+
+      await expect(files.updateConfigFile(['telemetry'], (file) => { Object.assign(file, stale); }))
+        .rejects.toThrow('A config update changed apiPort, which it does not own (it owns telemetry); nothing was written');
+
+      expect(await readJson()).toEqual({ name: 'node', apiPort: 9300 });
+      expect(existsSync(files.configLockPath)).toBe(false);
+    });
+
+    it('lets an update own one nested key, keeping its siblings and refusing changes to them', async () => {
+      const initial = { telemetry: { enabled: false, logs: { enabled: true } } };
+      await writeFile(files.configPath, JSON.stringify(initial));
+      const owns = [['telemetry', 'enabled']] as const;
+
+      await files.updateConfigFile(owns, (config) => { config.telemetry = { ...config.telemetry, enabled: true }; });
+      const updated = { telemetry: { enabled: true, logs: { enabled: true } } };
+      expect(await readJson()).toEqual(updated);
+
+      for (const [patch, unowned] of [
+        [(config) => { config.telemetry = { enabled: false }; }, 'telemetry.logs'],
+        [(config) => { delete config.telemetry; }, 'telemetry.logs'],
+        [(config) => { (config as Record<string, unknown>).telemetry = 'off'; }, 'telemetry'],
+      ] satisfies [DkgConfigFilePatch<'telemetry'>, string][]) {
+        await expect(files.updateConfigFile(owns, patch)).rejects.toThrow(`A config update changed ${unowned}, which`);
+      }
+      expect(await readJson()).toEqual(updated);
+    });
+
+    it('creates the parents of an owned key, replacing one that is not an object', async () => {
+      await writeFile(files.configPath, JSON.stringify({ name: 'node', telemetry: 'on' }));
+
+      await files.updateConfigFile([['telemetry', 'enabled'], ['localAgentIntegrations', 'hermes']], (config) => {
+        config.telemetry = { enabled: true };
+        config.localAgentIntegrations = { hermes: { id: 'hermes' } };
+      });
+
+      expect(await readJson()).toEqual({
+        name: 'node', telemetry: { enabled: true }, localAgentIntegrations: { hermes: { id: 'hermes' } },
+      });
+    });
   });
 
   describe('refusals', () => {
@@ -300,7 +349,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       ];
 
       for (const patch of asyncPatches) {
-        await expect(files.updateConfigFile(patch as DkgConfigFilePatch))
+        await expect(files.updateConfigFile(['name'], patch as DkgConfigFilePatch))
           .rejects.toThrow('A config file patch must be synchronous');
       }
 
@@ -314,7 +363,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
 
       // The reader and the writer agree: neither falls back to the YAML.
       await expect(files.loadConfig()).rejects.toThrow(SyntaxError);
-      await expect(files.updateConfigFile((config) => { config.name = 'x'; })).rejects.toThrow(SyntaxError);
+      await expect(files.updateConfigFile(['name'], (config) => { config.name = 'x'; })).rejects.toThrow(SyntaxError);
 
       expect(await readFile(files.configPath, 'utf-8')).toBe('{ not json');
       expect(await readFile(files.configYamlPath, 'utf-8')).toBe('name: stale-yaml\n');
@@ -323,7 +372,7 @@ describe('DkgHomeFiles.updateConfigFile', () => {
     it('refuses a config file that does not hold an object', async () => {
       await writeFile(files.configPath, '[1, 2]');
 
-      await expect(files.updateConfigFile((config) => { config.name = 'x'; }))
+      await expect(files.updateConfigFile(['name'], (config) => { config.name = 'x'; }))
         .rejects.toThrow(`${files.configPath} does not contain a config object; refusing to update it`);
 
       expect(await readFile(files.configPath, 'utf-8')).toBe('[1, 2]');

@@ -14,15 +14,29 @@ import type { DkgConfig } from './config.js';
 import { replaceFileDurably } from './durable-file-replace.js';
 import { withFileLock } from './file-lock.js';
 
+/** Keys older releases wrote that the config type no longer declares; they are only ever removed. */
+type LegacyConfigKey = 'openclawAdapter' | 'openclawChannel';
+
+/** A top-level key of the config file. */
+export type DkgConfigFileKey = keyof DkgConfig | LegacyConfigKey;
+
+/**
+ * A key a config update owns, or the path to one nested under it, such as
+ * `['telemetry', 'enabled']` or `['localAgentIntegrations', 'hermes']`.
+ */
+export type DkgConfigKeyPath<K extends DkgConfigFileKey = DkgConfigFileKey> = K | readonly [K, ...string[]];
+
 /**
  * A change to the persisted home config. It receives the file's own object
- * (no defaults merged in) and must mutate only the keys its caller owns:
- * copying a whole in-memory config back would overwrite whatever another
- * process wrote since that copy was loaded. It runs while the config lock is
- * held, so it must be synchronous; the `undefined` return type makes
+ * (no defaults merged in), typed down to the top-level keys its update owns,
+ * and may change only what the update owns: anything else it changes makes
+ * the update fail. Copying a whole in-memory config back would overwrite what
+ * another process wrote since that copy was loaded. It runs while the config
+ * lock is held, so it must be synchronous; the `undefined` return type makes
  * TypeScript reject an async patch.
  */
-export type DkgConfigFilePatch = (config: Partial<DkgConfig>) => undefined;
+export type DkgConfigFilePatch<K extends DkgConfigFileKey = DkgConfigFileKey> =
+  (config: Pick<Partial<DkgConfig>, Extract<K, keyof DkgConfig>>) => undefined;
 
 /** Where a config update was written, and whether the patch changed anything. */
 export interface DkgConfigFileUpdate {
@@ -84,29 +98,93 @@ export function readHomeConfigSourceSync(home: string): { path: string; raw: unk
 /**
  * Apply `patch` under a lock the daemon and CLI share: re-read the file that
  * is the source of truth, patch its object, and replace the file atomically
- * in the same format. A patch that changes nothing writes nothing, and a
- * writer that lost the lock while it worked writes nothing either.
+ * in the same format. The update owns the keys in `owns`, and fails, writing
+ * nothing, if the patch changes anything else. A patch that changes nothing
+ * writes nothing, and a writer that lost the lock while it worked writes
+ * nothing either.
  */
-export async function updateHomeConfigFile(home: string, patch: DkgConfigFilePatch): Promise<DkgConfigFileUpdate> {
+export async function updateHomeConfigFile<const K extends DkgConfigFileKey>(
+  home: string,
+  owns: readonly DkgConfigKeyPath<K>[],
+  patch: DkgConfigFilePatch<K>,
+): Promise<DkgConfigFileUpdate> {
   await mkdir(home, { recursive: true });
   return withFileLock(homeConfigPaths(home).lock, async (lock) => {
     const source = await readHomeConfigSource(home) ?? { ...homeConfigSources(home)[0], text: '', raw: {} };
-    const config = configFileObject(source.raw, source.path);
-    const before = toJsonData(config);
-    // A caller outside the type system can still pass an async patch.
-    const result: unknown = patch(config);
-    if (isThenable(result)) {
-      Promise.resolve(result).catch(() => {});
-      throw new TypeError('A config file patch must be synchronous');
-    }
-    const after = toJsonData(config);
-    if (isDeepStrictEqual(before, after)) return { path: source.path, changed: false };
+    const { before, after, changed } = applyConfigFilePatch(configFileObject(source.raw, source.path), owns, patch);
+    if (!changed) return { path: source.path, changed: false };
     const content = source.format === 'yaml'
       ? patchYamlText(source.text, before, after)
       : `${JSON.stringify(after, null, 2)}\n`;
     await replaceFileDurably(source.path, content, { beforeCommit: () => lock.assertHeld() });
     return { path: source.path, changed: true };
   }, { timeoutMs: CONFIG_LOCK_TIMEOUT_MS, label: 'config' });
+}
+
+/** The config file's data before and after a patch, as both formats persist it. */
+export interface DkgConfigFilePatchResult {
+  before: unknown;
+  after: unknown;
+  changed: boolean;
+}
+
+/**
+ * Apply `patch` to a config file's object, in place, and return the data
+ * before and after it. Throws if the patch is async or changes anything the
+ * update does not own; the object may then be partly patched, and is not
+ * to be written.
+ */
+export function applyConfigFilePatch<const K extends DkgConfigFileKey>(
+  config: Partial<DkgConfig>,
+  owns: readonly DkgConfigKeyPath<K>[],
+  patch: DkgConfigFilePatch<K>,
+): DkgConfigFilePatchResult {
+  const before = toJsonData(config);
+  // A caller outside the type system can still pass an async patch.
+  const result: unknown = patch(config);
+  if (isThenable(result)) {
+    Promise.resolve(result).catch(() => {});
+    throw new TypeError('A config file patch must be synchronous');
+  }
+  const after = toJsonData(config);
+  const ownedPaths = owns.map((path): readonly string[] => (typeof path === 'string' ? [path] : path));
+  const unowned = findUnownedChange(before, after, ownedPaths);
+  if (unowned) {
+    throw new Error(
+      `A config update changed ${unowned.join('.')}, which it does not own `
+      + `(it owns ${ownedPaths.map((path) => path.join('.')).join(', ')}); nothing was written`,
+    );
+  }
+  return { before, after, changed: !isDeepStrictEqual(before, after) };
+}
+
+/**
+ * The path of a change the patch made outside every owned path, or undefined
+ * when there is none. A key on the way to an owned path must stay an object,
+ * holding the same keys as before apart from owned ones; it may be created,
+ * or replace a value that was not an object, to hold them.
+ */
+function findUnownedChange(
+  before: unknown,
+  after: unknown,
+  owned: readonly (readonly string[])[],
+  path: readonly string[] = [],
+): readonly string[] | undefined {
+  if (isDeepStrictEqual(before, after)) return undefined;
+  if (owned.some((ownedPath) => startsWith(path, ownedPath))) return undefined;
+  if (!owned.some((ownedPath) => startsWith(ownedPath, path))) return path;
+  if (after !== undefined && !isJsonObject(after)) return path;
+  const was = isJsonObject(before) ? before : {};
+  const now = after ?? {};
+  for (const key of new Set([...Object.keys(was), ...Object.keys(now)])) {
+    const change = findUnownedChange(was[key], now[key], owned, [...path, key]);
+    if (change) return change;
+  }
+  return undefined;
+}
+
+function startsWith(path: readonly string[], prefix: readonly string[]): boolean {
+  return prefix.length <= path.length && prefix.every((segment, i) => segment === path[i]);
 }
 
 /**

@@ -64,8 +64,10 @@ import {
   readHomeConfigSource,
   readHomeConfigSourceSync,
   updateHomeConfigFile,
+  type DkgConfigFileKey,
   type DkgConfigFilePatch,
   type DkgConfigFileUpdate,
+  type DkgConfigKeyPath,
 } from './home-config-file.js';
 
 /**
@@ -2410,7 +2412,9 @@ export async function swapSlot(target: 'a' | 'b'): Promise<void> {
   await writeFile(join(rDir, 'active'), target);
 }
 
-export type { DkgConfigFilePatch, DkgConfigFileUpdate } from './home-config-file.js';
+export type {
+  DkgConfigFileKey, DkgConfigFilePatch, DkgConfigFileUpdate, DkgConfigKeyPath,
+} from './home-config-file.js';
 
 /** Immutable filesystem context for one selected local daemon home. */
 export class DkgHomeFiles {
@@ -2433,13 +2437,17 @@ export class DkgHomeFiles {
   }
 
   /**
-   * Apply `patch` to the home config under the lock the daemon and CLI share
-   * (see updateHomeConfigFile). The daemon and the CLI commands write the home
-   * config through here; the openclaw, hermes and mcp setup commands still
-   * write it through core's ensureDkgNodeConfig.
+   * Apply `patch`, which may change only the keys in `owns`, to the home
+   * config under the lock the daemon and CLI share (see updateHomeConfigFile).
+   * The daemon and the CLI commands write the home config through here; the
+   * openclaw, hermes and mcp setup commands still write it through core's
+   * ensureDkgNodeConfig.
    */
-  updateConfigFile(patch: DkgConfigFilePatch): Promise<DkgConfigFileUpdate> {
-    return updateHomeConfigFile(this.home, patch);
+  updateConfigFile<const K extends DkgConfigFileKey>(
+    owns: readonly DkgConfigKeyPath<K>[],
+    patch: DkgConfigFilePatch<K>,
+  ): Promise<DkgConfigFileUpdate> {
+    return updateHomeConfigFile(this.home, owns, patch);
   }
 
   readPid(): Promise<number | null> { return this.readControlNumber(this.pidPath); }
@@ -2632,7 +2640,10 @@ export function exitOnStoreConfigErrors(
   process.exit(1);
 }
 
-export async function updateConfigFile(patch: DkgConfigFilePatch): Promise<DkgConfigFileUpdate> { return new DkgHomeFiles().updateConfigFile(patch); }
+export async function updateConfigFile<const K extends DkgConfigFileKey>(
+  owns: readonly DkgConfigKeyPath<K>[],
+  patch: DkgConfigFilePatch<K>,
+): Promise<DkgConfigFileUpdate> { return new DkgHomeFiles().updateConfigFile(owns, patch); }
 export function configExists(): boolean { return new DkgHomeFiles().configExists(); }
 export async function readPid(): Promise<number | null> { return new DkgHomeFiles().readPid(); }
 export async function writePid(pid: number): Promise<void> { await new DkgHomeFiles().writePid(pid); }

@@ -27,7 +27,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import { applyStoreFlagsToConfig, promptStoreBackend } from '../src/store-wizard.js';
-import type { DkgConfig, DkgConfigFilePatch } from '../src/config.js';
+import type { DkgConfig, DkgConfigFilePatch, DkgConfigKeyPath } from '../src/config.js';
+import { applyConfigFilePatch } from '../src/home-config-file.js';
 
 function mockFetch(handler: (input: any, init?: any) => Response | Promise<Response>) {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
@@ -591,12 +592,11 @@ function newMockConfig(initial: DkgConfig): MockConfigStore {
 
 function mockConfigIO(store: MockConfigStore) {
   return {
-    // Mirrors updateConfigFile: patch the file's object and write only when
-    // the patch changed it.
-    updateConfigFile: async (patch: DkgConfigFilePatch) => {
+    // Mirrors updateConfigFile: patch the file's object, refusing a change to
+    // a key the update does not own, and write only when the patch changed it.
+    updateConfigFile: async (owns: readonly DkgConfigKeyPath<'store'>[], patch: DkgConfigFilePatch<'store'>) => {
       const next = structuredClone(store.current);
-      patch(next);
-      if (JSON.stringify(next) === JSON.stringify(store.current)) return { path: 'config.json', changed: false };
+      if (!applyConfigFilePatch(next, owns, patch).changed) return { path: 'config.json', changed: false };
       store.current = next;
       store.saved.push(structuredClone(next));
       return { path: 'config.json', changed: true };

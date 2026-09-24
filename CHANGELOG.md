@@ -25,12 +25,17 @@ All notable changes to the DKG V10 node are documented here. The format is based
   configured through `config.yaml`, the first write created a `config.json`
   that took precedence, so later edits to the YAML no longer applied. Writes
   now take a lock shared by the daemon and the CLI, re-read the file, change
-  only the keys that command or setting owns, and replace the file atomically
-  in its own format, keeping its permissions. A YAML config stays YAML, and a
-  write edits it in place, so comments and every key the write does not
-  change keep their layout. The `dkg openclaw`,
-  `dkg hermes` and `dkg mcp` setup commands still write `config.json` the old
-  way.
+  only the keys that command or setting declares it owns (anything else fails
+  the write), and replace the file atomically in its own format. The file
+  keeps its owner, group and permissions, and a symlinked config is written
+  through its link, even when the link's target does not exist yet. When the
+  writing process may not give the file its owner (a config belonging to
+  another user), the file is rewritten in place instead, as before, without
+  the crash guarantee. An ACL set on the file itself is kept only in that
+  case. A YAML config stays YAML, and a write edits it in place, so comments
+  and every key the write does not change keep their layout. The
+  `dkg openclaw`, `dkg hermes` and `dkg mcp` setup commands still write
+  `config.json` the old way.
 - **Cores promote the data they acknowledge to Verifiable Memory again**: since
   10.0.14 (#2184) `syncReconcilerEnabled` also gated chain-driven VM
   reconciliation, which the 10.0.14 upgrade notes did not mention. A Core that

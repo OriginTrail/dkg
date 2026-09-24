@@ -173,7 +173,7 @@ contextGraphCmd
       console.log(`  Run 'dkg context-graph register ${id}' to register on-chain (unlocks Verifiable Memory).`);
 
       if (opts.save) {
-        await updateConfigFile((config) => {
+        await updateConfigFile(['contextGraphs'], (config) => {
           config.contextGraphs = [...new Set([...resolveContextGraphs(config), id])];
         });
         console.log('  Saved to config (will auto-subscribe on restart).');
