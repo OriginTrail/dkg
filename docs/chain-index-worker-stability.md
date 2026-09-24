@@ -10,7 +10,11 @@ KA point reads select the registration signature and indexed KA ID (`topic2`) be
 
 The daemon owns one reader worker with a read-only SQLite connection. It captures cursor, coverage, matching rows and own-write evidence in one transaction, releases that transaction, then decodes. Inline and worker readers use the same explicit snapshot planner and evaluator in the chain package, including finality, coverage and own-write gates. The worker does not simulate a writable store or replace registry methods. The existing event-log connection remains the writer. Small responses are checked against the current revision, lineage, topic set, fork suspicion and head age before being accepted; adapter binding checks remain in place.
 
-A single `ChainIndexCapability` pairs the required store with its optional reader factory through the agent and EVM adapter. The daemon resource owns that capability and one idempotent close operation, which retires the worker before closing the database on startup failure, fatal prerequisites and normal shutdown. Database closure also requires dependent work to have stopped: failed teardown keeps the database open, while startup errors retain their original cause. Existing SDK callers may still supply the store-only option.
+A single `ChainIndexCapability` pairs the required store with its optional reader factory through the agent and EVM adapter. Configuration types accept modern ownership, legacy store-only ownership or no owner, while excluding contradictory combinations. The exported runtime factory still accepts its existing `{ store }` options. Legacy list-only readers are normalized once when a binding is created or attached, so adapters always use the scalar ordinal port. Injected factories remain attached across Hub binding rotations.
+
+The daemon resource owns that capability and one parameterless, idempotent close operation. Its dependency-drain callback is fixed at construction: concurrent callers cannot replace or omit it. Cleanup retires the worker and awaits the dependency barrier before closing the database on startup failure, fatal prerequisites and normal shutdown. Failed retirement keeps the database open, while startup errors retain their original cause.
+
+Snapshot and worker protocol types preserve the relationship between each operation, its required request fields and its result. A served response requires both its result and revision fence. Window planning is separate from own-write hash verification, which runs during evaluation. Shared snapshot implementation details are exposed to the CLI through the explicit `@origintrail-official/dkg-chain/internal/chain-index-worker` subpath instead of widening the public package root.
 
 Limits are explicit:
 
@@ -154,11 +158,13 @@ Health-caller cancellation detaches that observer without cancelling the shared 
 
 Work began from freshly fetched `origin/testnet-canary` commit `24341ba73ab1f8a6f4330e34ae905bab725f0db6`; this remained the current base during validation. Tests use local fixtures and loopback peers.
 
-The updated implementation passes 266 focused tests on Node 22.23.1: chain 110, SQLite store 27, CLI worker/lifecycle 109, core ping/diagnostics 18 and agent wiring 2. Package builds, type checks, package boundary checks and repository lint pass. Coverage includes indexed SQL selection and migration, finality, coverage, own-write hashes, replaced tails, tombstones, retired revisions and bindings, caller cancellation, queue limits, physical timeouts, worker startup/crash/recovery, startup cleanup and shutdown. Real TCP/Noise/Yamux tests reproduce and fix health/monitor and monitor/monitor collisions while also checking silent peers, delayed remote stream closure and reconnect behavior.
+The updated implementation passes 401 focused tests on Node 22.23.1: chain 137, SQLite store 27, CLI worker/lifecycle/startup 216, core ping/diagnostics 18 and agent wiring 3. Package builds, type checks, package boundary checks and repository lint pass. Coverage includes indexed SQL selection and migration, finality, coverage, own-write hashes, replaced tails, tombstones, retired revisions and bindings, caller cancellation, queue limits, physical timeouts, worker startup/crash/recovery, startup cleanup and shutdown. Real TCP/Noise/Yamux tests reproduce and fix health/monitor and monitor/monitor collisions while also checking silent peers, delayed remote stream closure and reconnect behavior.
 
 The first CI run exposed an additional diagnostics regression: metadata-only synthetic `connection:open` events have no per-connection `addEventListener`. The optional close diagnostics now check that capability before subscribing. The five affected agent suites pass locally with 218 tests and no unhandled connection errors.
 
 Review coverage adds expected-result parity between inline and explicit snapshot evaluation, worker lifecycle races, and real-worker contention with 8,000 registrations. A synchronous test barrier holds the first decode batch while point/cancellation messages are queued. Both contention tests fail when the production `await yieldTurn()` is removed, and pass after restoring it; the cancellation case proves that the same worker continues serving requests. Additional entry-module tests use the actual entry source and real SQLite with a message-port test double. They cover dispatch, deadlines, cancellation, bounded SQL and refusal behavior under Vitest coverage, which does not collect execution in the separately spawned worker. Coverage exclusions and required thresholds are unchanged.
+
+Further regressions cover the legacy public runtime and agent APIs, list-only reader normalization with preserved method receivers, injected-factory preservation across Hub rotation, fixed dependency drain across concurrent closes, and explicit planning versus own-write evidence verification. Package builds compile negative type cases for contradictory ownership, missing ordinal indices, mismatched results and incomplete served replies. A worker reply for the wrong operation is refused before cursor validation. The production node wiring test identifies the exact coordinated-ping factory; substituting stock ping makes that test fail.
 
 The repeatable benchmark is:
 
@@ -174,12 +180,12 @@ Measured on Apple M3 with five fresh-worker samples and 100 warm/mixed point sam
 
 | Runtime | History | Warm point p99 | Mixed point success | Local HTTP maximum | Event-loop maximum |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Node 22.23.1 | 35,963 captured rows | 3.13 ms | 100/100 | 4.06 ms | 11.41 ms |
-| Node 22.23.1 | 359,630 generated rows | 3.48 ms | 100/100 | 1.11 ms | 11.42 ms |
-| Node 25.2.1 | 35,963 captured rows | 1.96 ms | 100/100 | 3.92 ms | 11.58 ms |
-| Node 25.2.1 | 359,630 generated rows | 1.74 ms | 100/100 | 0.79 ms | 11.60 ms |
+| Node 22.23.1 | 35,963 captured rows | 2.94 ms | 100/100 | 3.79 ms | 12.04 ms |
+| Node 22.23.1 | 359,630 generated rows | 2.62 ms | 100/100 | 0.91 ms | 12.66 ms |
+| Node 25.2.1 | 35,963 captured rows | 2.65 ms | 100/100 | 4.30 ms | 11.94 ms |
+| Node 25.2.1 | 359,630 generated rows | 2.84 ms | 100/100 | 1.81 ms | 11.63 ms |
 
-Every point lookup selected one row. No historical arrays crossed the worker boundary; the largest response was 284 bytes. Cold reads completed within 418 ms in these runs. Concurrent oversized ordinal reads refused with `row-limit` and left point reads available; the benchmark records fallback without sending RPC. The Node 22 patch release tested here is 22.23.1, rather than the investigated production host's 22.23.0.
+Every point lookup selected one row. No historical arrays crossed the worker boundary; the largest response was 301 bytes. Cold reads completed within 408 ms in these runs. Concurrent oversized ordinal reads refused with `row-limit` and left point reads available; the benchmark records fallback without sending RPC. The Node 22 patch release tested here is 22.23.1, rather than the investigated production host's 22.23.0.
 
 On the 359,630-row local database, direct index creation took 866 ms; reopening a compact database through the real initializer took 767 ms. The added index used 78.30 MiB and the row count was unchanged. A fragmented fixture took 7.19 seconds to reopen because the existing startup free-page policy also ran `VACUUM`. Account for database size, fragmentation and available disk space when planning startup; these timings are not production measurements.
 
