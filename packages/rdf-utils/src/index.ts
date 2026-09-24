@@ -162,6 +162,33 @@ export function formatCanonicalRdfLiteralTerm(term: RdfLiteralTerm): string {
   return `"${escaped}"`;
 }
 
+/** The fields of an RDF/JS term (N3, Oxigraph) that its string form needs. */
+export interface RdfJsTermLike {
+  termType: string;
+  value: string;
+  language?: string;
+  datatype?: { value: string };
+}
+
+/**
+ * Render an RDF/JS term in the string form DKG quads use: a canonical literal
+ * (see {@link formatCanonicalRdfLiteralTerm}), `_:label` for a blank node, and
+ * the bare value otherwise (an IRI, or `''` for the default graph).
+ */
+export function formatCanonicalRdfTerm(term: RdfJsTermLike): string {
+  if (term.termType === 'Literal') {
+    if (term.language) {
+      return formatCanonicalRdfLiteralTerm({ kind: 'language', value: term.value, language: term.language });
+    }
+    if (term.datatype) {
+      return formatCanonicalRdfLiteralTerm({ kind: 'typed', value: term.value, datatype: term.datatype.value });
+    }
+    return formatCanonicalRdfLiteralTerm({ kind: 'plain', value: term.value });
+  }
+  if (term.termType === 'BlankNode') return `_:${term.value}`;
+  return term.value;
+}
+
 export interface DecodeRdfLiteralBodyOptions {
   /** Preserve malformed/unknown escapes instead of rejecting the body. */
   invalidEscape?: 'reject' | 'preserve';
