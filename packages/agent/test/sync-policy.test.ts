@@ -33,6 +33,15 @@ describe('sync Context Graph policy', () => {
       .toThrow(/syncContextGraphPriorities\.graph/);
   });
 
+  it('ignores Object.prototype members when looking up a Context Graph ID', () => {
+    // The sync responder looks up peer-requested graph IDs here.
+    const resolved = resolveSyncContextGraphPriorities({ 'user-a': 5 });
+    for (const contextGraphId of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) {
+      expect(contextGraphPriority(resolved, contextGraphId)).toBe(0);
+      expect(contextGraphPriority({}, contextGraphId)).toBe(0);
+    }
+  });
+
   it('uses bounded priority classes and counts configured entries only', () => {
     expect(syncPriorityClass(9)).toBe('elevated');
     expect(syncPriorityClass(0)).toBe('default');

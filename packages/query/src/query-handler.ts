@@ -212,7 +212,7 @@ export class QueryHandler {
   ): Promise<QueryNonBusyResponse | null> {
     const named = `${subject.kind.toLowerCase()} '${subject.id}'`;
     const defaultPolicy = this.config.defaultPolicy ?? 'deny';
-    const cgConfig = this.config.contextGraphs?.[contextGraphId];
+    const cgConfig = this.contextGraphPolicy(contextGraphId);
     if (!cgConfig) {
       if (defaultPolicy === 'deny') {
         // #1105: a CG whose OWN access policy is provably public (live
@@ -282,9 +282,17 @@ export class QueryHandler {
     return Object.values(cgConfigs).some(p => p.policy === 'public');
   }
 
+  /**
+   * The operator's `queryAccess.contextGraphs` entry for a CG, if it has one.
+   * The id comes from the requesting peer, so only OWN entries count: a plain
+   * `map[id]` lookup also returns Object.prototype members ("constructor",
+   * "__proto__", "toString", …), which read as an entry with no policy and
+   * skipped the default-deny branch.
+   */
   private contextGraphPolicy(contextGraphId: string | undefined): ContextGraphQueryPolicy | undefined {
-    if (!contextGraphId) return undefined;
-    return this.config.contextGraphs?.[contextGraphId];
+    const policies = this.config.contextGraphs;
+    if (!contextGraphId || !policies || !Object.hasOwn(policies, contextGraphId)) return undefined;
+    return policies[contextGraphId];
   }
 
   private checkRateLimit(peerId: string): QueryNonBusyResponse | null {

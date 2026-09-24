@@ -197,7 +197,11 @@ export function contextGraphPriority(
   priorities: Readonly<SyncContextGraphPriorityConfig> | undefined,
   contextGraphId: string,
 ): number {
-  const configured = priorities?.[contextGraphId];
+  // Own entries only: the sync responder passes peer-requested IDs, and a
+  // plain lookup returns Object.prototype members for IDs like "constructor".
+  const configured = priorities !== undefined && Object.hasOwn(priorities, contextGraphId)
+    ? priorities[contextGraphId]
+    : undefined;
   if (configured !== undefined) return configured;
   // Read-side backstop for maps that never passed through
   // resolveSyncContextGraphPriorities (a raw config object, or none at all):
