@@ -162,7 +162,7 @@ export class ChainEventLaneRunner {
       return await this.chain.getBlockNumber();
     } catch {
       if (signal?.aborted) signal.throwIfAborted();
-      // Head is optional; lanes can still scan their next bounded range.
+      // A failed head read holds every lane without a lease (see scanLane).
       return undefined;
     }
   }
@@ -180,7 +180,17 @@ export class ChainEventLaneRunner {
           lease !== undefined
           && Number.isSafeInteger(lease.throughBlockNumber)
           && lease.throughBlockNumber >= 0
-        ) return { head: lease.throughBlockNumber, lease };
+        ) {
+          if (lane.state.lastBlock <= lease.throughBlockNumber) {
+            return { head: lease.throughBlockNumber, lease };
+          }
+          // The horizon may lag the chain, so a cursor above it is only proven
+          // past the chain by the live head. Then scanLane resets it against
+          // that head; otherwise the lane waits for the horizon as before.
+          const liveHead = await readLiveHead();
+          if (liveHead != null && lane.state.lastBlock > liveHead) return { head: liveHead };
+          return { head: lease.throughBlockNumber, lease };
+        }
       } catch {
         if (signal?.aborted) signal.throwIfAborted();
         // Refusal or uncertainty restores this lane's live-head path.
@@ -349,6 +359,17 @@ export class ChainEventLaneRunner {
     const stateBefore = { ...state };
     const { head, lease } = boundary;
 
+    if (head == null && this.chain.getBlockNumber !== undefined) {
+      // A failed head read leaves the window without an upper bound. A
+      // provider that answers a future range with [] would then carry the
+      // cursor past the chain, where every later poll finds no work. Hold the
+      // cursor and back off. (An adapter with no head read at all, like the
+      // in-memory mock, keeps its bounded page scan.)
+      this.log.warn(ctx, `Poll lane ${lane.spec.name} skipped: chain head unknown, cursor held at ${state.lastBlock}`);
+      this.applyLaneSchedule(lane, { kind: 'failure', now });
+      return { lane, blockNumber: state.lastBlock, advanced: false };
+    }
+
     this.applyCursorStrategyTransition(lane, head, ctx);
 
     if (head != null && !state.headKnown) {
@@ -361,6 +382,10 @@ export class ChainEventLaneRunner {
       }
     }
 
+    // A lease horizon may lag the chain, so only a live head can prove a
+    // cursor is past it (see eventScanBoundary).
+    const reset = head != null && lease === undefined && this.resetCursorPastHead(lane, head, ctx);
+
     const fromBlock = state.lastBlock + 1;
     const upperBound = head != null
       ? Math.min(fromBlock + this.maxRange - 1, head)
@@ -368,7 +393,7 @@ export class ChainEventLaneRunner {
 
     if (fromBlock > upperBound) {
       this.applyLaneSchedule(lane, { kind: 'noWork', now });
-      return { lane, blockNumber: state.lastBlock, advanced: false };
+      return { lane, blockNumber: state.lastBlock, advanced: reset };
     }
 
     const filter: EventFilter = {
@@ -415,9 +440,34 @@ export class ChainEventLaneRunner {
     return {
       lane,
       blockNumber: state.lastBlock,
-      advanced,
+      // A reset cursor is saved even when its range then fails, so a restart
+      // does not reload the one past the chain.
+      advanced: advanced || reset,
       ...(advanced && lease !== undefined ? { lease, stateBefore } : {}),
     };
+  }
+
+  /**
+   * Pulls back a cursor that an earlier head-less scan carried past the chain.
+   * A live-tail lane reseeds as it would on a cold start; a full-history lane
+   * keeps as much progress as the head allows.
+   */
+  private resetCursorPastHead(
+    lane: ChainEventPollerLaneRuntime,
+    head: number,
+    ctx: OperationContext,
+  ): boolean {
+    const state = lane.state;
+    if (state.lastBlock <= head) return false;
+    const pastHead = state.lastBlock;
+    state.lastBlock = lane.cursorStrategy.kind === 'live-tail'
+      ? Math.max(0, head - this.liveSeedLookbackBlocks(lane.cursorStrategy))
+      : head;
+    this.log.warn(
+      ctx,
+      `Poll lane ${lane.spec.name} cursor ${pastHead} is past chain head ${head}; reset to ${state.lastBlock}`,
+    );
+    return true;
   }
 
   private async revalidateScanResults(

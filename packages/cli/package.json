@@ -58,6 +58,7 @@
     "@origintrail-official/dkg-node-ui": "workspace:*",
     "@origintrail-official/dkg-okf": "workspace:*",
     "@origintrail-official/dkg-publisher": "workspace:*",
+    "@origintrail-official/dkg-rdf-utils": "workspace:*",
     "@origintrail-official/dkg-storage": "workspace:*",
     "@toml-tools/parser": "1.0.0",
     "better-sqlite3": "12.11.1",

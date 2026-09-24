@@ -47,8 +47,12 @@ const LOGS = [createdLog(HEAD - 17_000, 7n), createdLog(HEAD - 12_500, 8n)];
 /** `KA_HIGH_WATER_PAGE_TIMEOUT_MS` in evm-adapter-base.ts: one request's deadline. */
 const PAGE_REQUEST_TIMEOUT_MS = 15_000;
 
+/**
+ * `staticNetwork` pins the adapter to chain 8453, which turns on its per-provider
+ * `eth_chainId` preflight before each page request.
+ */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function makeAdapter(providers: ethers.JsonRpcProvider[]): any {
+function makeAdapter(providers: ethers.JsonRpcProvider[], { staticNetwork = false } = {}): any {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const adapter: any = new EVMChainAdapter({
     rpcUrl: 'https://mainnet.base.org',
@@ -56,7 +60,7 @@ function makeAdapter(providers: ethers.JsonRpcProvider[]): any {
     privateKey: DEPLOYER_PK,
     hubAddress: '0x0000000000000000000000000000000000000001',
     chainId: 'base:8453',
-    staticNetwork: false,
+    staticNetwork,
   });
   for (const unused of adapter.providers as ethers.JsonRpcProvider[]) unused.destroy();
   adapter.providers = providers;
@@ -217,5 +221,53 @@ describe('queryEventLogsPage on the default Base RPC set', () => {
     expect((await next).provider).toBe(backup.provider);
     expect(primary.logRanges()).toEqual([]);
     expect(backup.logRanges()).toEqual([[lo, hi], [hi + 1, hi + 9_000]]);
+  });
+});
+
+describe('queryEventLogsPage keeps configured RPC URLs out of its error', () => {
+  it('reports an endpoint whose chainId preflight fails by host only', async () => {
+    const printers = [
+      vi.spyOn(console, 'log').mockImplementation(() => {}),
+      vi.spyOn(console, 'warn').mockImplementation(() => {}),
+    ];
+    // The preflight runs before the range reader, so ethers' own error for the
+    // gateway's page (full request URL, fake key included) reaches the page's
+    // error without passing through the reader.
+    const keyed = fakeLogRpc({
+      url: 'https://rpc.example.invalid/v2/FAKEKEY123?apikey=FAKEKEY123',
+      head: () => HEAD,
+      logs: () => LOGS,
+      refuseChainId: () => ({
+        httpStatus: 401,
+        contentType: 'text/html',
+        rawBody: '<html><body><h1>401 Unauthorized</h1></body></html>',
+      }),
+    });
+    const adapter = makeAdapter([keyed.provider], { staticNetwork: true });
+    const storage = new ethers.Contract(CG_STORAGE, cgInterface, keyed.provider);
+    const lo = HEAD - 18_000;
+    const hi = lo + 8_999;
+
+    const err = await adapter.queryEventLogsPage(
+      storage,
+      storage.filters.ContextGraphCreated(),
+      lo,
+      hi,
+      [{ provider: keyed.provider, backendHead: HEAD }],
+      new Map(),
+      'test page',
+    ).catch((e: unknown) => e);
+
+    const message = (err as Error).message;
+    expect(message).toContain(
+      `test page: no configured RPC could serve the log range [${lo}, ${hi}]: server response 401 Unauthorized`,
+    );
+    expect(message).toContain('"requestUrl": "rpc.example.invalid"');
+    const printed = printers
+      .flatMap((printer) => printer.mock.calls.map((call) => call.map(String).join(' ')))
+      .join('\n');
+    for (const text of [message, printed]) expect(text).not.toMatch(/FAKEKEY123|\/v2\/|apikey=/);
+    // The preflight refused, so the page itself was never asked for.
+    expect(keyed.requests).toEqual([{ method: 'eth_chainId' }]);
   });
 });

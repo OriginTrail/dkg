@@ -116,7 +116,7 @@ export { FinalizationHandler } from './finalization-handler.js';
 export {
   VmReconcileDispatcher,
 } from './chain-reconciler.js';
-export { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
+export { resolveSyncReconcilerEnabled, resolveVmReconcilerEnabled } from './sync/backpressure.js';
 export {
   FinalizedAuthorityColdResolutionV1,
   finalizedAuthorityColdResolutionOf,
@@ -213,10 +213,25 @@ export {
   CONTEXT_GRAPH_STORAGE_DISCOVERY_PAGE_SIZE,
   CONTEXT_GRAPH_STORAGE_REFRESH_INTERVAL_MS,
   createInMemoryContextGraphStorageDiscoveryStore,
-  type ContextGraphListOnChainFacts,
   type ContextGraphStorageDiscoveryStore,
 } from './context-graph-storage-discovery.js';
-export type { ListContextGraphsRow } from './context-graph-list-authority-enrichment.js';
+export type {
+  ContextGraphListOnChainFacts,
+  ListContextGraphsRow,
+} from './context-graph-list-authority-enrichment.js';
+export {
+  describeContextGraphOnChainIdResolution,
+  parseContextGraphOnChainIdReference,
+  refusesPrivateContextGraphByOnChainId,
+  type ContextGraphIdAsGiven,
+  type ContextGraphOnChainIdLookup,
+  type ContextGraphOnChainIdReference,
+  type ContextGraphOnChainIdRefusal,
+  type ContextGraphOnChainIdResolution,
+  type ResolveContextGraphOnChainIdOptions,
+  type ResolvedContextGraphOnChainId,
+  type RetiredNumericContextGraphSubscription,
+} from './context-graph-on-chain-reference.js';
 export type {
   ConfiguredContextGraphMetadataReconciliationDiagnostic,
   ConfiguredContextGraphMetadataReconciliationResult,

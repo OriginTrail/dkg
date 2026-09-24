@@ -9,8 +9,6 @@ import {
   '@origintrail-official/dkg-chain';
 import {
   DKG_ONTOLOGY,
-  SYSTEM_CONTEXT_GRAPHS,
-  contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
@@ -45,10 +43,12 @@ async function registrationStatus(agent: RegistrationAgent, id: string): Promise
     : undefined;
 }
 
+// The fixture graph is private, so its recovery binding lives only in its own
+// `_meta`, like the rest of its metadata.
 async function hasOnChainBinding(agent: RegistrationAgent, id: string): Promise<boolean> {
   const result = await agent.store.query(`
     ASK WHERE {
-      GRAPH <${contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)}> {
+      GRAPH <${contextGraphMetaGraphUri(id)}> {
         <did:dkg:context-graph:${id}>
           <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?onChainId
       }

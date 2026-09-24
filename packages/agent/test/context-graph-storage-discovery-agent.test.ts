@@ -1,6 +1,6 @@
 import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Logger } from '@origintrail-official/dkg-core';
+import { Logger, SUBSCRIPTION_SOURCES } from '@origintrail-official/dkg-core';
 import { MOCK_DEFAULT_SIGNER, MockChainAdapter } from '@origintrail-official/dkg-chain';
 
 import {
@@ -134,7 +134,9 @@ describe('historical Context Graph discovery through ContextGraphStorage enumera
       callerAgentAddress: ethers.Wallet.createRandom().address,
     }));
     expect(walletRows.map((row) => row.onChain!.id)).toEqual(['1', '2', '3', '5']);
-    expect(walletRows.find((row) => row.onChain!.id === '2')!.callerInvolved).toBe(false);
+    // Hash-only rows skip caller annotation on every listing path: the node
+    // holds no local allowlist or curator for a graph it knows only by hash.
+    expect(walletRows.every((row) => row.callerInvolved === undefined)).toBe(true);
     expect(chainRows(await agent.listContextGraphs()).map((row) => row.onChain!.id))
       .toEqual(['1', '2', '3', '5']);
 
@@ -239,6 +241,43 @@ describe('historical Context Graph discovery through ContextGraphStorage enumera
     expect((second as any).onChainPublishPolicyCache.get('6')).toBe(0);
   }, 90_000);
 
+  it('restores the enumerated catalog on the next pass when the boot restore failed', async () => {
+    const chain = await chainWithHistory();
+    const store = createInMemoryContextGraphStorageDiscoveryStore();
+    const first = await startAgent(chain, store, 'BeforeRestart');
+    await first.discoverContextGraphsFromStorage();
+    await first.stop();
+    agents.splice(agents.indexOf(first), 1);
+
+    // The DashboardDB is briefly locked while the node restarts.
+    let failures = 1;
+    const flaky: ContextGraphStorageDiscoveryStore = {
+      load: async () => {
+        if (failures-- > 0) throw new Error('sqlite busy');
+        return store.load();
+      },
+      save: (checkpoint) => store.save(checkpoint),
+    };
+    const reads: bigint[] = [];
+    const readRange = chain.readContextGraphStorageRange.bind(chain);
+    chain.readContextGraphStorageRange = async (options) => {
+      reads.push(options.fromId);
+      return readRange(options);
+    };
+    const second = await startAgent(chain, flaky, 'AfterRestart');
+    expect(chainRows(await second.listContextGraphs({ callerAgentAddress: null }))).toEqual([]);
+
+    // The next pass restores the saved rows before resuming at the cursor, so
+    // they are back without waiting for a refresh generation or re-reading ids.
+    await expect(second.discoverContextGraphsFromStorage()).resolves.toBe(0);
+    expect(chainRows(await second.listContextGraphs({ callerAgentAddress: null })).map((row) => row.onChain!.id))
+      .toEqual(['1', '2', '3', '5']);
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((fromId) => fromId >= 6n)).toBe(true);
+    // Restored rows stay chain-old: they seed no authorization cache.
+    expect((second as any).onChainAccessPolicyCache.has('2')).toBe(false);
+  }, 90_000);
+
   it('does not duplicate a graph the live lane saw before enumeration reached it', async () => {
     const chain = await chainWithHistory();
     const liveHash = cgHash('created-after-history');
@@ -288,8 +327,12 @@ describe('historical Context Graph discovery through ContextGraphStorage enumera
   it('refreshes mutable facts so a later deactivation shows in the list', async () => {
     const chain = await chainWithHistory();
     const agent = await startAgent(chain, createInMemoryContextGraphStorageDiscoveryStore());
-    await agent.discoverContextGraphsFromStorage();
     const nudges = vi.spyOn(agent as any, 'reconcileSwmHostModeSubscription');
+    await agent.discoverContextGraphsFromStorage();
+    // Enumeration nudges host mode for the one curated graph it first finds,
+    // by its hash-only row, exactly as the live event would have.
+    expect(nudges.mock.calls).toEqual([[HISTORY[1]!.nameHash, SUBSCRIPTION_SOURCES.CHAIN_EVENT]]);
+    nudges.mockClear();
 
     // Not due yet: the catalog is fresh as of the first pass.
     await expect(agent.refreshContextGraphsFromStorage()).resolves.toBe(0);
@@ -301,6 +344,33 @@ describe('historical Context Graph discovery through ContextGraphStorage enumera
     expect(row!.onChain!.active).toBe(false);
     // Host mode is nudged once per graph, not on every refresh.
     expect(nudges).not.toHaveBeenCalled();
+  }, 60_000);
+
+  it('keeps the publish authority a storage read saw when the same block\'s event lands after it', async () => {
+    const chain = await chainWithHistory();
+    const agent = await startAgent(chain, createInMemoryContextGraphStorageDiscoveryStore());
+    await agent.discoverContextGraphsFromStorage();
+    const onChainOf = async (id: string) => chainRows(await agent.listContextGraphs({ callerAgentAddress: null }))
+      .find((row) => row.onChain!.id === id)!.onChain!;
+    const read = await onChainOf('3');
+    expect(read).toMatchObject({
+      publishPolicy: 'curated',
+      publishAuthority: MOCK_DEFAULT_SIGNER.toLowerCase(),
+    });
+
+    // With finalityConfirmations = 0 the read anchors at the minting block, and
+    // the poller then applies (or, after a restart, replays) that block's
+    // event, which carries the publish policy but never the authority.
+    agent.applyOnChainContextGraphObservation({
+      contextGraphId: '3',
+      owner: MOCK_DEFAULT_SIGNER,
+      accessPolicy: 0,
+      publishPolicy: 0,
+      nameHash: HISTORY[2]!.nameHash,
+      observedAtBlock: read.observedAtBlock,
+    }, { source: 'event' });
+
+    expect(await onChainOf('3')).toEqual(read);
   }, 60_000);
 
   it('retires the hash-only row of a slot a reorg replaced', async () => {
@@ -316,7 +386,7 @@ describe('historical Context Graph discovery through ContextGraphStorage enumera
       contextGraphId: '1',
       accessPolicy: 0,
       nameHash: replacement,
-      blockNumber: 1,
+      observedAtBlock: 1,
     }, { source: 'event' })).toEqual({ isNew: false, changed: false });
 
     const newer = before.onChain!.observedAtBlock + 1;
@@ -326,7 +396,7 @@ describe('historical Context Graph discovery through ContextGraphStorage enumera
       accessPolicy: 0,
       publishPolicy: 1,
       nameHash: replacement,
-      blockNumber: newer,
+      observedAtBlock: newer,
       createdAt: 1_790_000_000,
       active: true,
     }, { source: 'storage' });

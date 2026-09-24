@@ -4,7 +4,7 @@
  * These tests verify the full end-to-end flows across 2+ nodes with EVMChainAdapter:
  *
  * 1. ContextGraph publish: write → replicate → collect receiver sigs → on-chain → finalization
- * 2. Context graph publish: same + collect participant sigs → publishToContextGraph
+ * 2. Legacy two-layer context graph publish (participant sigs): refused by gated receivers
  * 3. verify for already-published KCs
  * 4. Negative: insufficient receiver signatures → publish rejected
  * 5. Negative: insufficient participant signatures → context graph registration rejected
@@ -159,16 +159,17 @@ describe('E2E: ContextGraph publish with receiver signature collection', () => {
     /**
      * The new flow:
      * 1. A has data in workspace (already replicated to B and C)
-     * 2. A calls publishFromSharedMemory
+     * 2. A publishes the shared assertion (graph-scoped, as every default
+     *    publish path has been since 10.0.7)
      * 3. Publisher internally: prepares merkle root → requests receiver sigs from B, C
      * 4. B and C verify they have the data and sign (merkleRoot, publicByteSize)
      * 5. Publisher submits on-chain tx with collected receiver signatures
      * 6. On-chain: verifies publisher sig + minimumRequiredSignatures receiver sigs
      * 7. Finalization broadcast → B, C promote workspace → data graph
      */
-    const result = await nodeA.publishFromSharedMemory(
+    const result = await nodeA.publishFromFinalizedAssertion(
       CONTEXT_GRAPH,
-      'all',
+      'protocol-entity',
       { clearSharedMemoryAfter: true },
     );
 
@@ -294,9 +295,9 @@ describe('E2E: Design B — multi-entity file publishes as one KA, ACKed cross-n
   }, 25_000);
 
   it('publishes all three entities as ONE KA with cross-node ACKs (THE CANARY)', async () => {
-    const result = await nodeA.publishFromSharedMemory(
+    const result = await nodeA.publishFromFinalizedAssertion(
       MCG,
-      'all',
+      'multi-entity-file',
       { clearSharedMemoryAfter: true },
     );
 
@@ -393,22 +394,18 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
     await sleep(1500);
   }, 20_000);
 
-  it('A writes to workspace, enshrines to context graph with both sig layers', async () => {
+  it('a gated receiver refuses the legacy two-layer context-graph publish', async () => {
+    // The sub-context-graph publish with participant signatures exists only on
+    // the legacy (not graph-scoped) path. A 10.0.19 Core cannot keep a copy of
+    // such a publish that it could promote to VM, so it declines the ACK with
+    // CORE_VM_PROMOTION_DISABLED and nothing is published.
     const ctx = getSharedContext();
     await stageRootlessAssertion(nodeA, CONTEXT_GRAPH, 'context-protocol-entity', [
       { subject: ENTITY_2, predicate: 'http://schema.org/name', object: '"Context Protocol Entity"' },
     ]);
     await sleep(5000);
 
-    /**
-     * The context graph publish flow:
-     * 1. Prepare data + compute merkle root
-     * 2. Collect receiver signatures from core nodes (B) — they sign (merkleRoot, publicByteSize)
-     * 3. Collect participant signatures — they sign (contextGraphId, merkleRoot)
-     * 4. Submit atomic publishToContextGraph on-chain with both sets of signatures
-     * 5. Broadcast finalization to peers
-     */
-    const result = await nodeA.publishFromSharedMemory(
+    const outcome = await nodeA.publishFromSharedMemory(
       CONTEXT_GRAPH,
       'all',
       {
@@ -420,31 +417,21 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
           vs: new Uint8Array(32),
         }],
       },
+    ).then(
+      (result) => ({ status: result.status, error: '' }),
+      (err: unknown) => ({ status: 'rejected', error: err instanceof Error ? err.message : String(err) }),
     );
 
-    expect(result.status).toBe('confirmed');
-    expect(result.ual).toBeDefined();
-
-    // A has data in context graph data graph
+    expect(outcome.status).not.toBe('confirmed');
+    expect(outcome.error).toContain('CORE_VM_PROMOTION_DISABLED');
     const ctxDataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}`;
-    const aData = await nodeA.query(
-      `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_2}> <http://schema.org/name> ?name } }`,
-    );
-    expect(aData.bindings.length).toBe(1);
-  }, 40_000);
-
-  it('B receives finalization and promotes to context graph', async () => {
-    const ctxDataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}`;
-
-    const bBindings = await pollUntil(
-      () => nodeB.query(
+    for (const node of [nodeA, nodeB]) {
+      const data = await node.query(
         `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_2}> <http://schema.org/name> ?name } }`,
-      ),
-      (b) => b.length > 0,
-      20_000,
-    );
-    expect(bBindings.length).toBe(1);
-  }, 30_000);
+      );
+      expect(data.bindings.length).toBe(0);
+    }
+  }, 40_000);
 
   it('context graph data is NOT in contextGraph data graph', async () => {
     const aContextGraphData = await nodeA.query(

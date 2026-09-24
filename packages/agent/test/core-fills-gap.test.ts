@@ -66,7 +66,7 @@ import { VmRecoveryProviderPolicy } from '../src/vm-recovery-provider-policy.js'
 interface AgentInternals {
   createContextGraph(opts: { id: string; name: string; description?: string; private?: boolean; callerAgentAddress?: string }): Promise<void>;
   registerContextGraph(id: string, opts?: { callerAgentAddress?: string }): Promise<{ onChainId: string; txHash?: string }>;
-  recordCoreHostedPublicCg(cgId: string, swmGraphId?: string): Promise<void>;
+  recordCoreHostedPublicCg(cgId: string, swmGraphId?: string): Promise<string>;
   reconcileChainOrdinal(
     localCgId: string,
     onChainCgId: bigint,
@@ -487,10 +487,12 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
 
   it('stops accepting and drains core-host recordings deterministically', async () => {
     const internals = await boot();
-    let startedAfterClose = false;
+    const getContextGraphAccessPolicy = recorder(async () => 0);
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
     (internals as any).coreHostRecordingsClosed = true;
-    (internals as any).trackCoreHostRecording(async () => { startedAfterClose = true; });
-    expect(startedAfterClose).toBe(false);
+    await expect(internals.recordCoreHostedPublicCg('47')).resolves.toBe('closed');
+    expect(getContextGraphAccessPolicy.calls).toHaveLength(0);
+    expect(internals.subscribedContextGraphs.has('47')).toBe(false);
 
     (internals as any).coreHostRecordingsClosed = false;
     const recordings = (internals as any).coreHostRecordings as Set<Promise<void>>;
@@ -646,9 +648,15 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     it('keeps the placeholder when the hint is not the committed name', async () => {
       const internals = await bootWithPlaceholder();
 
-      await internals.recordCoreHostedPublicCg('7', 'somebody-elses-name');
+      // Rows are keyed by the namespace holding the ACK copy; a namespace that
+      // is not the graph's committed name is refused (the StorageACK gate
+      // declines such a request before any copy exists), and the placeholder
+      // is left for name resolution to adopt.
+      await expect(internals.recordCoreHostedPublicCg('7', 'somebody-elses-name'))
+        .resolves.toBe('namespace-conflict');
 
-      expect(internals.subscribedContextGraphs.get(nameHash)).toMatchObject({ coreHosted: true, onChainId: '7' });
+      expect(internals.subscribedContextGraphs.get(nameHash)).toMatchObject({ onChainId: '7' });
+      expect(internals.subscribedContextGraphs.get(nameHash)?.coreHosted).toBeUndefined();
       expect(internals.subscribedContextGraphs.has('somebody-elses-name')).toBe(false);
     });
   });
@@ -730,7 +738,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
       subscribed: false, syncMode: 'always-on', onChainId: '1', coreHosted: true,
     });
 
-    await internals.recordCoreHostedPublicCg('1');
+    await internals.recordCoreHostedPublicCg('1', 'devnet-test');
 
     expect(isContextGraphActiveOnChain.calls).toEqual([]);
     expect(getContextGraphAccessPolicy.calls).toEqual([]);
@@ -751,9 +759,10 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
 
   it('still reads chain when a core-hosted row is bound to a DIFFERENT on-chain id', async () => {
     // The early-out is keyed on the on-chain id, not just the local row: a
-    // local id re-created under a new chain graph is a first observation.
+    // local id re-created under a new chain graph (the old one deactivated)
+    // is a first observation.
     const internals = await boot();
-    const isContextGraphActiveOnChain = recorder(async () => true);
+    const isContextGraphActiveOnChain = recorder(async (id: bigint) => id !== 5n);
     const getContextGraphAccessPolicy = recorder(async () => 0);
     internals.chain.isContextGraphActiveOnChain = isContextGraphActiveOnChain;
     internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
@@ -761,13 +770,32 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
       subscribed: false, onChainId: '5', coreHosted: true, lastReconciledOrdinal: 3,
     });
 
-    await internals.recordCoreHostedPublicCg('9', 'devnet-test');
+    await expect(internals.recordCoreHostedPublicCg('9', 'devnet-test')).resolves.toBe('recorded');
 
-    expect(isContextGraphActiveOnChain.calls).toEqual([[9n]]);
+    expect(isContextGraphActiveOnChain.calls).toEqual([[9n], [5n]]);
     expect(getContextGraphAccessPolicy.calls).toEqual([[9n]]);
     const sub = internals.subscribedContextGraphs.get('devnet-test');
     expect(sub!.onChainId).toBe('9');
     expect(sub!.lastReconciledOrdinal).toBe(0);
+  });
+
+  it('keeps a host-only namespace on its graph while that graph is still live on chain', async () => {
+    // One namespace reconciles one graph: taking it over for graph 9 would
+    // strand the copies graph 5 still owes there.
+    const internals = await boot();
+    internals.chain.isContextGraphActiveOnChain = async () => true;
+    internals.chain.getContextGraphAccessPolicy = async () => 0;
+    internals.subscribedContextGraphs.set('devnet-test', {
+      subscribed: false, onChainId: '5', coreHosted: true, lastReconciledOrdinal: 3,
+    });
+
+    await expect(internals.recordCoreHostedPublicCg('9', 'devnet-test'))
+      .resolves.toBe('namespace-conflict');
+
+    expect(internals.subscribedContextGraphs.get('devnet-test')).toMatchObject({
+      onChainId: '5', lastReconciledOrdinal: 3,
+    });
+    expect(saved).toHaveLength(0);
   });
 
   it('never rebinds a core-hosted row to a DEACTIVATED on-chain id', async () => {
@@ -806,7 +834,9 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(setContextGraphSubscription.calls).toHaveLength(1);
   });
 
-  it('keys the host row under a local mapping that appears while the chain reads are in flight', async () => {
+  it('keys the host row under the ACK copy namespace even when another local row maps the graph', async () => {
+    // The reconciler reads heads and writes VM metadata only in its row's own
+    // namespace, so the row must be the namespace the copy was written to.
     const internals = await boot();
     let resolvePolicy!: (value: number) => void;
     internals.chain.getContextGraphAccessPolicy = () => new Promise<number>((resolve) => {
@@ -819,8 +849,11 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     resolvePolicy(0);
     await recording;
 
-    expect(internals.subscribedContextGraphs.get('local-name')?.coreHosted).toBe(true);
-    expect(internals.subscribedContextGraphs.get('publisher-hint')).toBeUndefined();
+    expect(internals.subscribedContextGraphs.get('publisher-hint')).toMatchObject({
+      coreHosted: true,
+      onChainId: '13',
+    });
+    expect(internals.subscribedContextGraphs.get('local-name')?.coreHosted).toBeUndefined();
   });
 
   it('preserves a pre-existing member subscription while adding coreHosted', async () => {
@@ -836,7 +869,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(sub!.lastReconciledOrdinal).toBe(3);  // watermark preserved
   });
 
-  it('resets the reconcile watermark when an existing local id rebinds to a NEW on-chain id', async () => {
+  it('resets the reconcile watermark when a host-only local id rebinds to a NEW on-chain id', async () => {
     // Regression: a hosted public CG re-created/rebound under the same local id
     // must drop its stale `lastReconciledOrdinal`. The watermark counts
     // contiguous KAs promoted for the OLD chain graph; reusing it would make
@@ -845,9 +878,10 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     // (which zeroes the watermark on an id change) rather than a bare overwrite.
     const internals = await boot();
     internals.chain.getContextGraphAccessPolicy = async () => 0; // public
-    // Existing local row bound to on-chain id 5 with reconcile progress.
+    internals.chain.isContextGraphActiveOnChain = async (id) => id !== 5n; // 5 was retired
+    // Existing host-only row bound to on-chain id 5 with reconcile progress.
     internals.subscribedContextGraphs.set('devnet-test', {
-      subscribed: true, onChainId: '5', lastReconciledOrdinal: 3,
+      subscribed: false, coreHosted: true, onChainId: '5', lastReconciledOrdinal: 3,
     });
     const storageAddr = await internals.chain.getDKGKnowledgeAssetsAddress();
     const ual = buildKnowledgeAssetUal(internals.chain.chainId, storageAddr, 777n);
@@ -860,11 +894,44 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     await internals.recordCoreHostedPublicCg('9', 'devnet-test');
 
     const sub = internals.subscribedContextGraphs.get('devnet-test');
-    expect(sub!.subscribed).toBe(true);            // membership preserved
     expect(sub!.coreHosted).toBe(true);
     expect(sub!.onChainId).toBe('9');              // rebound to the new graph
     expect(sub!.lastReconciledOrdinal).toBe(0);    // stale watermark dropped
     expect(((internals as any).recentReconciledUals as { has(key: string): boolean }).has(recentKey)).toBe(false);
+  });
+
+  it('never rebinds a member subscription from an ACK, and waits for an unbound one', async () => {
+    const internals = await boot();
+    internals.chain.getContextGraphAccessPolicy = async () => 0;
+    internals.subscribedContextGraphs.set('member-graph', {
+      subscribed: true, onChainId: '5', lastReconciledOrdinal: 3,
+    });
+    internals.subscribedContextGraphs.set('unbound-member', { subscribed: true });
+
+    await expect(internals.recordCoreHostedPublicCg('9', 'member-graph'))
+      .resolves.toBe('namespace-conflict');
+    await expect(internals.recordCoreHostedPublicCg('9', 'unbound-member'))
+      .resolves.toBe('binding-pending');
+
+    expect(internals.subscribedContextGraphs.get('member-graph')).toMatchObject({
+      subscribed: true, onChainId: '5', lastReconciledOrdinal: 3,
+    });
+    expect(internals.subscribedContextGraphs.get('member-graph')?.coreHosted).toBeUndefined();
+    expect(internals.subscribedContextGraphs.get('unbound-member')?.onChainId).toBeUndefined();
+    expect(saved).toHaveLength(0);
+  });
+
+  it('leaves a dormant persisted subscription row alone', async () => {
+    // Writing a fresh host-only row over a dormant member row would erase its
+    // member intent and reconcile watermark in the store.
+    const internals = await boot();
+    internals.chain.getContextGraphAccessPolicy = async () => 0;
+    (internals as any).contextGraphSubscriptionDormancyById.set('dormant-graph', 'activationCap');
+
+    await expect(internals.recordCoreHostedPublicCg('9', 'dormant-graph')).resolves.toBe('dormant');
+
+    expect(internals.subscribedContextGraphs.has('dormant-graph')).toBe(false);
+    expect(saved).toHaveLength(0);
   });
 
   it('reclaims binding generations when subscription records are deleted', async () => {

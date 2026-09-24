@@ -15,8 +15,9 @@
  * and the chain facts of every id below it, saved atomically after each page
  * has been applied. That pairing is what makes a restart resume from the
  * cursor: discovered rows are process-local, so boot re-stages them from the
- * saved facts without any chain read, and only ids at or above the cursor are
- * read again.
+ * saved facts without any chain read (or, when boot could not read the store,
+ * the next pass does before reading on), and only ids at or above the cursor
+ * are read again.
  *
  * A second, independent frontier re-reads `[1, cursor)` at most once per
  * `minimumIntervalMs` so the mutable facts (active flag, owner, publish
@@ -80,6 +81,9 @@ export interface ContextGraphStorageDiscoveryApplyResult {
   readonly changed: boolean;
 }
 
+/** Where an applied record came from: a chain read, or the durable checkpoint. */
+export type ContextGraphStorageDiscoveryRecordOrigin = 'read' | 'checkpoint';
+
 export interface ContextGraphStorageDiscoveryOptions {
   readonly store: ContextGraphStorageDiscoveryStore;
   readonly readRange: (
@@ -87,9 +91,14 @@ export interface ContextGraphStorageDiscoveryOptions {
     maxIds: number,
     signal?: AbortSignal,
   ) => Promise<ContextGraphStorageRange>;
-  /** Apply one freshly read record through the node's shared discovery path. */
+  /**
+   * Apply one record through the node's shared discovery path: `'read'` for a
+   * record a pass just read from chain, `'checkpoint'` for one restored from
+   * the durable checkpoint.
+   */
   readonly apply: (
     record: ContextGraphStorageDiscoveryRecord,
+    origin: ContextGraphStorageDiscoveryRecordOrigin,
   ) => ContextGraphStorageDiscoveryApplyResult | Promise<ContextGraphStorageDiscoveryApplyResult>;
   readonly log?: (message: string) => void;
   readonly pageSize?: number;
@@ -111,6 +120,11 @@ export interface ContextGraphStorageDiscoveryPassResult {
   readonly nextId: bigint;
   /** `getLatestContextGraphId()` at the last anchor read in this pass. */
   readonly latestId?: bigint;
+  /**
+   * Checkpoint records this call restored before the pass, because no earlier
+   * restore had succeeded (see {@link ContextGraphStorageDiscovery.restore}).
+   */
+  readonly restored: number;
 }
 
 interface CheckpointV1 {
@@ -136,6 +150,8 @@ export class ContextGraphStorageDiscovery {
   private tail: Promise<unknown> = Promise.resolve();
   private readonly pageSize: number;
   private readonly now: () => number;
+  /** The checkpoint's records have been applied in this process. */
+  private restored = false;
 
   constructor(private readonly options: ContextGraphStorageDiscoveryOptions) {
     const pageSize = options.pageSize ?? CONTEXT_GRAPH_STORAGE_DISCOVERY_PAGE_SIZE;
@@ -147,12 +163,18 @@ export class ContextGraphStorageDiscovery {
   }
 
   /**
-   * Every record saved below the durable cursor, for boot hydration. Reads the
-   * store only; never the chain.
+   * Apply every record saved below the durable cursor, as `'checkpoint'`, once
+   * per process. Reads the store only; never the chain. Returns the number of
+   * records this call applied, 0 once an earlier call succeeded.
+   *
+   * The cursor stops discovery from re-reading the ids below it, so these
+   * records are the only way their graphs come back after a restart. Every
+   * discovery and refresh pass therefore restores first: a restore that
+   * failed at boot (a store briefly unreadable) is retried by the next pass
+   * rather than leaving those graphs unlisted until a refresh generation.
    */
-  async loadRecords(): Promise<readonly ContextGraphStorageDiscoveryRecord[]> {
-    const checkpoint = await this.load();
-    return [...checkpoint.entries.values()];
+  restore(): Promise<number> {
+    return this.serialize(() => this.restoreOnce());
   }
 
   /** The durable cursor: the next id discovery will read. */
@@ -183,12 +205,23 @@ export class ContextGraphStorageDiscovery {
     return next;
   }
 
+  private async restoreOnce(): Promise<number> {
+    if (this.restored) return 0;
+    const checkpoint = await this.load();
+    for (const record of checkpoint.entries.values()) {
+      await this.options.apply(record, 'checkpoint');
+    }
+    this.restored = true;
+    return checkpoint.entries.size;
+  }
+
   private async runDiscover(options: {
     idBudget?: number;
     signal?: AbortSignal;
   }): Promise<ContextGraphStorageDiscoveryPassResult> {
     const { signal } = options;
     let remaining = normalizeBudget(options.idBudget);
+    const restored = await this.restoreOnce();
     let checkpoint = await this.load();
     let discovered = 0;
     let changed = 0;
@@ -245,6 +278,7 @@ export class ContextGraphStorageDiscovery {
       due: true,
       nextId: checkpoint.nextId,
       ...(latestId === undefined ? {} : { latestId }),
+      restored,
     });
   }
 
@@ -256,6 +290,7 @@ export class ContextGraphStorageDiscovery {
     const { signal } = options;
     let remaining = normalizeBudget(options.idBudget);
     const minimumIntervalMs = options.minimumIntervalMs ?? CONTEXT_GRAPH_STORAGE_REFRESH_INTERVAL_MS;
+    const restored = await this.restoreOnce();
     let checkpoint = await this.load();
     const notDue = (): ContextGraphStorageDiscoveryPassResult => Object.freeze({
       discovered: 0,
@@ -264,6 +299,7 @@ export class ContextGraphStorageDiscovery {
       complete: false,
       due: false,
       nextId: checkpoint.nextId,
+      restored,
     });
     if (checkpoint.nextId <= 1n) return notDue();
     if (checkpoint.refreshNextId === null) {
@@ -331,6 +367,7 @@ export class ContextGraphStorageDiscovery {
       due: true,
       nextId: checkpoint.nextId,
       ...(latestId === undefined ? {} : { latestId }),
+      restored,
     });
   }
 
@@ -344,7 +381,7 @@ export class ContextGraphStorageDiscovery {
     for (const entry of range.entries) {
       signal?.throwIfAborted();
       const record = Object.freeze({ ...entry, observedAtBlock: range.anchorBlockNumber });
-      const result = await this.options.apply(record);
+      const result = await this.options.apply(record, 'read');
       if (result.isNew) discovered += 1;
       if (result.changed) changed += 1;
       records.push(record);
@@ -537,7 +574,7 @@ function compareDecimalIds(a: string, b: string): number {
  * One chain observation of a Context Graph, as the shared discovery path takes
  * it. The live `ContextGraphCreated` event carries owner, policies and name
  * hash; a ContextGraphStorage read adds the creation time, active flag and
- * publish authority.
+ * publish authority. A ContextGraphStorageDiscoveryRecord is one as it stands.
  */
 export interface OnChainContextGraphObservation {
   /** Positive decimal ContextGraphStorage id. */
@@ -545,15 +582,41 @@ export interface OnChainContextGraphObservation {
   readonly owner?: string | null;
   readonly accessPolicy: number;
   readonly publishPolicy?: number | null;
+  /**
+   * Storage reads only: null when the read found no authority. Omitted when
+   * the observation did not read it, which keeps any authority read before.
+   */
   readonly publishAuthority?: string | null;
   /** Curator-committed name hash, or null when the curator opted out. */
   readonly nameHash: string | null;
   /** Event block, or the anchor block of the storage read. */
-  readonly blockNumber: number;
+  readonly observedAtBlock: number;
   /** Unix seconds (storage reads only). */
   readonly createdAt?: number;
   /** Storage reads only. */
   readonly active?: boolean;
+}
+
+/**
+ * One ContextGraphStorage entry as an observation at the block it was read
+ * at, for the on-demand read of a single id. Enumeration and checkpoint
+ * records already carry `observedAtBlock` and are applied as they are.
+ */
+export function contextGraphStorageObservation(
+  entry: ContextGraphStorageEntry,
+  blockNumber: number,
+): OnChainContextGraphObservation {
+  return {
+    contextGraphId: entry.contextGraphId,
+    owner: entry.owner,
+    accessPolicy: entry.accessPolicy,
+    publishPolicy: entry.publishPolicy,
+    publishAuthority: entry.publishAuthority,
+    nameHash: entry.nameHash,
+    observedAtBlock: blockNumber,
+    createdAt: entry.createdAt,
+    active: entry.active,
+  };
 }
 
 /**
@@ -578,6 +641,43 @@ export interface OnChainContextGraphFacts {
 }
 
 /**
+ * The facts one observation carries, before they are merged. Identical to
+ * OnChainContextGraphFacts except for `publishAuthority`: `undefined` when the
+ * observation did not read it (the live `ContextGraphCreated` event carries the
+ * publish policy, never the authority), as opposed to `null`, a read that found
+ * none.
+ */
+export type ObservedOnChainContextGraphFacts = Omit<OnChainContextGraphFacts, 'publishAuthority'> & {
+  readonly publishAuthority: string | null | undefined;
+};
+
+/**
+ * Normalize one observation into facts: lowercase addresses and hash, an empty
+ * name hash as an opt-out, and null for every field the observation does not
+ * carry. An authority counts as read only alongside its publish policy.
+ */
+export function onChainContextGraphFactsFromObservation(
+  observation: OnChainContextGraphObservation,
+): ObservedOnChainContextGraphFacts {
+  const publishPolicy = observation.publishPolicy ?? null;
+  return {
+    onChainId: observation.contextGraphId,
+    nameHash: typeof observation.nameHash === 'string' && observation.nameHash.length > 0
+      ? observation.nameHash.toLowerCase()
+      : null,
+    owner: observation.owner ? observation.owner.toLowerCase() : null,
+    accessPolicy: Number.isSafeInteger(observation.accessPolicy) ? observation.accessPolicy : null,
+    publishPolicy,
+    publishAuthority: publishPolicy === null || observation.publishAuthority === undefined
+      ? undefined
+      : observation.publishAuthority?.toLowerCase() ?? null,
+    createdAt: observation.createdAt ?? null,
+    active: observation.active ?? null,
+    observedAtBlock: observation.observedAtBlock,
+  };
+}
+
+/**
  * Merge one observation into the facts already known. The newer observation
  * (by block) wins field by field; a field it does not carry keeps the older
  * value. `nameHash`, `accessPolicy` and `createdAt` are write-once on chain,
@@ -586,30 +686,54 @@ export interface OnChainContextGraphFacts {
  */
 export function mergeOnChainContextGraphFacts(
   current: OnChainContextGraphFacts | undefined,
-  incoming: OnChainContextGraphFacts,
+  incoming: ObservedOnChainContextGraphFacts,
 ): OnChainContextGraphFacts {
-  if (current === undefined) return Object.freeze({ ...incoming });
-  const [older, newer] = current.observedAtBlock <= incoming.observedAtBlock
-    ? [current, incoming]
-    : [incoming, current];
-  if (onChainContextGraphIdentityDiffers(older, newer)) return Object.freeze({ ...newer });
+  if (current === undefined) return settledOnChainContextGraphFacts(incoming);
+  const [older, newer]: readonly [ObservedOnChainContextGraphFacts, ObservedOnChainContextGraphFacts] =
+    current.observedAtBlock <= incoming.observedAtBlock ? [current, incoming] : [incoming, current];
+  if (onChainContextGraphIdentityDiffers(older, newer)) return settledOnChainContextGraphFacts(newer);
   return Object.freeze({
     onChainId: newer.onChainId,
     nameHash: newer.nameHash ?? older.nameHash,
     owner: newer.owner ?? older.owner,
     accessPolicy: newer.accessPolicy ?? older.accessPolicy,
     publishPolicy: newer.publishPolicy ?? older.publishPolicy,
-    publishAuthority: newer.publishPolicy !== null ? newer.publishAuthority : older.publishAuthority,
+    publishAuthority: mergedPublishAuthority(older, newer),
     createdAt: newer.createdAt ?? older.createdAt,
     active: newer.active ?? older.active,
     observedAtBlock: newer.observedAtBlock,
   });
 }
 
+/**
+ * The newer observation's authority when it read one alongside its policy,
+ * including a read that found none (a curated graph turned open). Otherwise
+ * the older reading stands, unless the newer observation reports a different
+ * publish policy: an authority read under another policy says nothing about
+ * this one.
+ */
+function mergedPublishAuthority(
+  older: ObservedOnChainContextGraphFacts,
+  newer: ObservedOnChainContextGraphFacts,
+): string | null {
+  if (newer.publishAuthority !== undefined && newer.publishPolicy !== null) {
+    return newer.publishAuthority;
+  }
+  if (newer.publishPolicy !== null && newer.publishPolicy !== older.publishPolicy) return null;
+  return older.publishAuthority ?? null;
+}
+
+/** Facts as the node keeps them: an authority not read yet is null. */
+function settledOnChainContextGraphFacts(
+  facts: ObservedOnChainContextGraphFacts,
+): OnChainContextGraphFacts {
+  return Object.freeze({ ...facts, publishAuthority: facts.publishAuthority ?? null });
+}
+
 /** True when two observations of one id disagree on a write-once field. */
 export function onChainContextGraphIdentityDiffers(
-  a: OnChainContextGraphFacts,
-  b: OnChainContextGraphFacts,
+  a: ObservedOnChainContextGraphFacts,
+  b: ObservedOnChainContextGraphFacts,
 ): boolean {
   const differs = <T>(x: T | null, y: T | null) => x !== null && y !== null && x !== y;
   return differs(a.nameHash, b.nameHash)
@@ -629,49 +753,4 @@ export function sameOnChainContextGraphFacts(
     && a.publishAuthority === b.publishAuthority
     && a.createdAt === b.createdAt
     && a.active === b.active;
-}
-
-// ----- List projection (additive `onChain` field of /api/context-graph/list rows) -----
-
-/**
- * Chain-public facts attached to a `listContextGraphs` row. Every field is
- * public on chain, including for private graphs; nothing here comes from the
- * local store, so it never reveals a private graph's cleartext name.
- */
-export interface ContextGraphListOnChainFacts {
-  /** Positive decimal ContextGraphStorage id. */
-  readonly id: string;
-  /** From the write-once on-chain access policy: 0 = public, 1 = private. */
-  readonly access: 'public' | 'private' | 'unknown';
-  /** 0 = curated (only the publish authority may publish), 1 = open; null until observed. */
-  readonly publishPolicy: 'curated' | 'open' | 'unknown' | null;
-  readonly publishAuthority: string | null;
-  /** Current ERC-721 owner (the creator unless ownership was transferred); null until observed. */
-  readonly owner: string | null;
-  /** ISO-8601 creation time from the on-chain timestamp; null until enumerated. */
-  readonly createdAt: string | null;
-  /** On-chain active flag; `false` once deactivated; null until enumerated. */
-  readonly active: boolean | null;
-  /** Curator-committed name hash; null when the curator opted out. */
-  readonly nameHash: string | null;
-  /** Block of the newest observation behind these facts. */
-  readonly observedAtBlock: number;
-}
-
-export function toContextGraphListOnChainFacts(
-  facts: OnChainContextGraphFacts,
-): ContextGraphListOnChainFacts {
-  return Object.freeze({
-    id: facts.onChainId,
-    access: facts.accessPolicy === 0 ? 'public' : facts.accessPolicy === 1 ? 'private' : 'unknown',
-    publishPolicy: facts.publishPolicy === null
-      ? null
-      : facts.publishPolicy === 0 ? 'curated' : facts.publishPolicy === 1 ? 'open' : 'unknown',
-    publishAuthority: facts.publishAuthority,
-    owner: facts.owner,
-    createdAt: facts.createdAt === null ? null : new Date(facts.createdAt * 1_000).toISOString(),
-    active: facts.active,
-    nameHash: facts.nameHash,
-    observedAtBlock: facts.observedAtBlock,
-  });
 }
