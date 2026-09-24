@@ -9,6 +9,7 @@ import {
   DEFAULT_DAEMON_LOG_MAX_BYTES,
 } from '../src/daemon/log-rotation.js';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
+import { ChainIndexReadWorker } from '../src/daemon/worker/chain-index-read-worker.js';
 
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
@@ -407,5 +408,74 @@ describe('daemon startup network validation', () => {
       hubAddress: '0x2234567890123456789012345678901234567890',
     }));
     closeDashboardDbFromAgentCreateArg(createArg);
+  });
+
+  it('awaits reader shutdown when boot fails after a chain-index read starts the worker', async () => {
+    tempHome = await mkdtemp(join(tmpdir(), 'dkg-reader-startup-cleanup-'));
+    originalDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = tempHome;
+    stdoutWrite = process.stdout.write;
+    stderrWrite = process.stderr.write;
+    uncaughtExceptionListeners = process.listeners('uncaughtException') as NodeJS.UncaughtExceptionListener[];
+    unhandledRejectionListeners = process.listeners('unhandledRejection') as NodeJS.UnhandledRejectionListener[];
+
+    mocks.loadNetworkConfig.mockResolvedValue({
+      networkName: 'Local EVM', genesisId: 'gnosis-mainnet', genesisVersion: 1,
+      relays: [], defaultNodeRole: 'edge',
+    });
+    mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [] });
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const modelOptions = {
+      scope: 'startup-cleanup-test',
+      contextGraphStorageAddress: '0x1234567890123456789012345678901234567890',
+      contextGraphStorageAbi: '[]', maxHeadAgeMs: 15_000,
+    };
+    mocks.agentCreate.mockImplementation(async (createArg) => {
+      // The empty local log refuses this read, but it opens the real worker's
+      // read-only SQLite connection before the simulated startup failure.
+      await createArg.chainEventLogReadModelFactory(modelOptions).readContextGraphForKa(42n);
+      throw new Error('boot failed after reader started');
+    });
+
+    let releaseClose!: () => void;
+    let closeStarted!: () => void;
+    const closeGate = new Promise<void>((resolve) => { releaseClose = resolve; });
+    const closing = new Promise<void>((resolve) => { closeStarted = resolve; });
+    const actualClose = ChainIndexReadWorker.prototype.close;
+    const close = vi.spyOn(ChainIndexReadWorker.prototype, 'close')
+      .mockImplementation(async function (this: ChainIndexReadWorker) {
+        closeStarted();
+        await closeGate;
+        await actualClose.call(this);
+      });
+    let settled = false;
+    const startup = runDaemonInner(true, {
+      name: 'reader-startup-cleanup-test', networkConfig: 'local-evm', listenPort: 0, nodeRole: 'edge',
+      chain: { type: 'evm', rpcUrl: 'https://private-rpc.example',
+        hubAddress: modelOptions.contextGraphStorageAddress, chainId: 'evm:31337' },
+    } as any, Date.now(), resolveShutdownPolicy(undefined)).then(
+      () => { settled = true; return undefined; },
+      (error: unknown) => { settled = true; return error; },
+    );
+    try {
+      await Promise.race([
+        closing,
+        startup.then(() => { throw new Error('Boot settled before reader cleanup started'); }),
+      ]);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(close).toHaveBeenCalledOnce();
+      expect(settled).toBe(false);
+      releaseClose();
+      expect(await startup).toMatchObject({ message: 'boot failed after reader started' });
+      const reader = close.mock.contexts[0] as ChainIndexReadWorker;
+      await expect(reader.createReadModel(modelOptions).readContextGraphForKa(43n))
+        .resolves.toBeUndefined();
+    } finally {
+      releaseClose();
+      await startup;
+      const reader = close.mock.contexts[0] as ChainIndexReadWorker | undefined;
+      if (reader) await actualClose.call(reader);
+      closeDashboardDbFromAgentCreateArg(mocks.agentCreate.mock.calls[0]?.[0]);
+    }
   });
 });

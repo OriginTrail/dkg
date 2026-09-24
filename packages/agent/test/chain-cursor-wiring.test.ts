@@ -39,6 +39,10 @@ describe('DKGAgent chain cursor wiring', () => {
       readEvents: vi.fn(async () => []),
       blockHashAt: vi.fn(async () => undefined),
     };
+    const chainEventLogReadModelFactory = vi.fn(() => ({
+      async readContextGraphForKa() { return undefined; },
+      async readContextGraphKaList() { return undefined; },
+    }));
 
     agent = await DKGAgent.create({
       name: 'RegistryCursorWiring',
@@ -57,6 +61,7 @@ describe('DKGAgent chain cursor wiring', () => {
       localContextGraphAuthorityHistoryStore: authorityHistoryStore,
       localContextGraphAuthorityIndexStore: authorityIndexStore,
       chainEventLogStore,
+      chainEventLogReadModelFactory,
     });
 
     expect((agent as any).chain.contextGraphRegistryScanCursor?.input?.store).toBe(registryCursorStore);
@@ -65,6 +70,7 @@ describe('DKGAgent chain cursor wiring', () => {
     expect((agent as any).chain.minPublisherNativeWei).toBe(123n);
     expect((agent as any).chain.minPublisherTracWei).toBe(456n);
     expect((agent as any).chain.receiptTimeoutMs).toBe(1_200_000);
+    expect((agent as any).chain.chainEventLogReadModelFactory).toBe(chainEventLogReadModelFactory);
     expect((agent as any).chain.contextGraphAuthorityIndex?.projectionTickMs).toBe(12_000);
     // The adapter delegates ownership of the durable store to the extracted
     // runtime owner. Exercise that boundary instead of asserting the removed

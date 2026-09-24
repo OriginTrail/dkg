@@ -746,6 +746,7 @@ function constructConfiguredChainAdapter(
       // adapter owns a tick; every other adapter in the process reads the
       // binding it publishes.
       chainEventLogStore: config.chainEventLogStore,
+      chainEventLogReadModelFactory: config.chainEventLogReadModelFactory,
       contextGraphAuthorityIndexBootstrap,
     };
     const chain = config.chainConfig.adminPrivateKey

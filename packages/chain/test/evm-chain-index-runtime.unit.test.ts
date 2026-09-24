@@ -16,6 +16,7 @@ import { createEvmChainIndexRuntime } from '../src/evm-chain-index-runtime.js';
 import { RPC_LOG_SCAN_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import { RpcFailoverClient } from '../src/rpc-failover-client.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
+import type { KnowledgeAssetReadModelFactory } from '../src/chain-index/knowledge-asset-read-model.js';
 
 const HUB_ADDRESS = '0x00000000000000000000000000000000000000a1';
 const CG_STORAGE_ADDRESS = '0x00000000000000000000000000000000000000b2';
@@ -129,6 +130,7 @@ function harness(options?: {
    * read's policy deadline applies as it does in production.
    */
   failoverClient?: boolean;
+  chainEventLogReadModelFactory?: KnowledgeAssetReadModelFactory;
 }): Harness {
   const headNumber = options?.headNumber ?? 1_000;
   const logs = options?.logs ?? [];
@@ -184,6 +186,7 @@ function harness(options?: {
   const runtime = createEvmChainIndexRuntime({
     scope: RUNTIME_SCOPE,
     store,
+    chainEventLogReadModelFactory: options?.chainEventLogReadModelFactory,
     intervalMs: options?.intervalMs ?? 6_000,
     reorgHoldbackBlocks: options?.reorgHoldbackBlocks ?? 5,
     backfillPageBlocks: 100,
@@ -251,6 +254,36 @@ function harness(options?: {
 }
 
 describe('createEvmChainIndexRuntime', () => {
+  it('uses the injected KA reader with serializable deployment and freshness options', async () => {
+    const readModel = {
+      readContextGraphForKa: vi.fn(async () => undefined),
+      readContextGraphKaList: vi.fn(async () => undefined),
+    };
+    const factory = vi.fn<KnowledgeAssetReadModelFactory>(() => readModel);
+    const { runtime, store } = harness({ chainEventLogReadModelFactory: factory });
+    const readEvents = vi.spyOn(store, 'readEvents');
+
+    expect(factory).toHaveBeenCalledExactlyOnceWith({
+      scope: RUNTIME_SCOPE,
+      contextGraphStorageAddress: CG_STORAGE_ADDRESS,
+      contextGraphStorageAbi: cgInterface.formatJson(),
+      maxHeadAgeMs: 18_000,
+    });
+    expect(JSON.parse(JSON.stringify(factory.mock.calls[0]![0])))
+      .toEqual(factory.mock.calls[0]![0]);
+    expect(runtime.binding.knowledgeAssets).toBe(readModel);
+    await expect(runtime.binding.knowledgeAssets!.readContextGraphForKa(42n))
+      .resolves.toBeUndefined();
+    expect(readEvents).not.toHaveBeenCalled();
+  });
+
+  it('does not substitute an inline reader when the injected factory fails', () => {
+    const unavailable = new Error('worker unavailable');
+    expect(() => harness({
+      chainEventLogReadModelFactory: () => { throw unavailable; },
+    })).toThrow(unavailable);
+  });
+
   it('wires the production idle budget to the anchor ceiling at large T', async () => {
     // T=150s: Hub liveness accepts 450s, while the authority anchor caps at
     // 300s. One third of the binding 300s bound is held as static headroom,

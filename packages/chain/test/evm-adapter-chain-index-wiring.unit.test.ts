@@ -201,6 +201,34 @@ function stubInitBoundary(adapter: EVMChainAdapter) {
 }
 
 describe('EVMChainAdapter chain index wiring', () => {
+  it('passes the injected KA reader factory through runtime construction', async () => {
+    const readModel = {
+      async readContextGraphForKa() { return undefined; },
+      async readContextGraphKaList() { return undefined; },
+    };
+    const factory = vi.fn(() => readModel);
+    const adapter = new EVMChainAdapter({
+      ...config(new MemoryChainEventLogStore()),
+      indexTickMs: 60_000,
+      chainEventLogReadModelFactory: factory,
+    });
+    const { internals } = stubInitBoundary(adapter);
+    try {
+      await internals.init();
+      await vi.waitUntil(() => adapter.chainEventLog !== undefined, { timeout: 2_000 });
+
+      expect(adapter.chainEventLog!.knowledgeAssets).toBe(readModel);
+      expect(factory).toHaveBeenCalledExactlyOnceWith({
+        scope: oneLogScope(adapter),
+        contextGraphStorageAddress: RETIRED_CG_STORAGE,
+        contextGraphStorageAbi: new ethers.Interface(loadAbi('ContextGraphStorage')).formatJson(),
+        maxHeadAgeMs: 180_000,
+      });
+    } finally {
+      await adapter.destroy();
+    }
+  });
+
   it('activates every one-log reader through the real init entry point', async () => {
     const store = new MemoryChainEventLogStore();
     const adapter = new EVMChainAdapter({ ...config(store), indexTickMs: 60_000 });

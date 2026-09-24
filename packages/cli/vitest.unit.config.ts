@@ -133,6 +133,9 @@ export default defineConfig({
           // including preserving a known transaction hash on endpoint exhaustion.
           'test/chain-rpc-transport-status.test.ts',
           'test/async-promote-worker.test.ts',
+          'test/chain-index-read-worker.test.ts',
+          'test/chain-index-read-worker.integration.test.ts',
+          'test/daemon-startup-validation.test.ts',
           'test/async-promote-error-classification.test.ts',
           'test/async-promote-publisher-recovery.test.ts',
           'test/async-promote-bookkeeping-recovery.test.ts',

@@ -89,6 +89,7 @@ import type {
   ChainEventLogBinding,
   ChainEventLogBindingSource,
 } from './chain-event-log-binding.js';
+import type { KnowledgeAssetReadModelFactory } from './chain-index/index.js';
 import {
   createEvmChainIndexRuntime,
   type EvmChainIndexContract,
@@ -952,6 +953,7 @@ export class EVMChainAdapterBase {
    */
   private readonly chainIndexOwner: EvmChainIndexRuntimeOwner;
   private readonly chainEventLogBindingSource: ChainEventLogBindingSource | undefined;
+  private readonly chainEventLogReadModelFactory: KnowledgeAssetReadModelFactory | undefined;
 
   /** Durable identity of the one-log runtime this adapter is allowed to read. */
   private get chainEventLogScope(): string {
@@ -1333,6 +1335,7 @@ export class EVMChainAdapterBase {
       throw new TypeError('An EVM adapter cannot own and borrow the one-log runtime at the same time');
     }
     this.chainEventLogBindingSource = config.chainEventLogBindingSource;
+    this.chainEventLogReadModelFactory = config.chainEventLogReadModelFactory;
     this.rpcUrls = resolveRpcUrls(config.rpcUrl, config.rpcUrls);
     this.receiptTimeoutMs = resolveReceiptTimeoutMs(config.receiptTimeoutMs);
     this.signerTxSerializer = new SignerTxSerializer({
@@ -4954,6 +4957,7 @@ export class EVMChainAdapterBase {
         // would strand every existing node's cursor and re-walk history.
         scope: this.chainEventLogScope,
         store,
+        chainEventLogReadModelFactory: this.chainEventLogReadModelFactory,
         intervalMs: resolveContextGraphAuthorityIndexTickMs(this.indexTickMs),
         // The depth the Context Graph registry scan already treats as
         // reorg-safe. Reusing it keeps ONE definition of "settled" on this

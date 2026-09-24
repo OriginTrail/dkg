@@ -53,6 +53,7 @@ import {
   type ChainIndexRunnerOptions,
   type ChainIndexTickResult,
   type HubBinding,
+  type KnowledgeAssetReadModelFactory,
 } from './chain-index/index.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
@@ -88,6 +89,8 @@ export type EvmChainIndexReadProvider = <T>(
 export interface EvmChainIndexRuntimeOptions {
   readonly scope: string;
   readonly store: ChainEventLogStore;
+  /** When supplied, all KA reads use this implementation, including when it refuses a read. */
+  readonly chainEventLogReadModelFactory?: KnowledgeAssetReadModelFactory;
   /** `chain.indexTickMs` (T). One pass per T; every staleness bound is T. */
   readonly intervalMs: number;
   /** Blocks held back from the settled prefix; the reorg tail. */
@@ -707,18 +710,28 @@ export function createEvmChainIndexRuntime(
   // coverage that was never about it.
   if (contextGraphStorageAddress !== undefined) {
     binding.contextGraphStorageAddress = contextGraphStorageAddress;
-    binding.knowledgeAssets = createKnowledgeAssetReadModel({
-      scope: options.scope,
-      store: options.store,
-      registry,
-      contextGraphStorageAddress,
-      // The authority anchor's bound exactly — `min(max(3T, 15s), 5m)`,
-      // ceiling included, because these reads answer the same catalog traffic
-      // from the same stored rows and there is no reason for one to outlive the
-      // other. Every reader of a frozen tick degrades to the chain.
-      maxHeadAgeMs: chainIndexAuthorityAnchorMaxAgeMs(options.intervalMs),
-      now,
-    });
+    const maxHeadAgeMs = chainIndexAuthorityAnchorMaxAgeMs(options.intervalMs);
+    // An injected reader owns the complete read path. In particular, worker
+    // unavailability must never revive the synchronous decoder on this thread.
+    binding.knowledgeAssets = options.chainEventLogReadModelFactory !== undefined
+      ? options.chainEventLogReadModelFactory({
+        scope: options.scope,
+        contextGraphStorageAddress,
+        contextGraphStorageAbi: options.contextGraphStorage!.contractInterface.formatJson(),
+        maxHeadAgeMs,
+      })
+      : createKnowledgeAssetReadModel({
+        scope: options.scope,
+        store: options.store,
+        registry,
+        contextGraphStorageAddress,
+        // The authority anchor's bound exactly — `min(max(3T, 15s), 5m)`,
+        // ceiling included, because these reads answer the same catalog traffic
+        // from the same stored rows and there is no reason for one to outlive the
+        // other. Every reader of a frozen tick degrades to the chain.
+        maxHeadAgeMs,
+        now,
+      });
   }
   if (options.knowledgeAssetStorage !== undefined) {
     binding.knowledgeAssetStorageAddress = options.knowledgeAssetStorage.address;

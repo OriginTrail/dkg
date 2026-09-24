@@ -1207,7 +1207,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const knowledgeAssetsFromLog = await this.knowledgeAssetsFromLogFor(cgs);
     const logged = await knowledgeAssetsFromLog?.readModel.readContextGraphForKa(
       kaId,
-      { view: 'latest' },
+      { view: 'latest', signal: options.signal },
     );
     if (logged !== undefined
       && knowledgeAssetsFromLog !== undefined
@@ -1240,20 +1240,32 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     await this.init();
     const cgs = this.requireContextGraphStorage();
     const knowledgeAssetsFromLog = await this.knowledgeAssetsFromLogFor(cgs);
-    const logged = await knowledgeAssetsFromLog?.readModel.readContextGraphKaList(
-      contextGraphId,
-      { view: 'latest' },
-    );
+    let loggedKaId: bigint | undefined;
+    if (knowledgeAssetsFromLog !== undefined && index >= 0n) {
+      const { readModel } = knowledgeAssetsFromLog;
+      if (readModel.readContextGraphKaAt !== undefined) {
+        loggedKaId = (await readModel.readContextGraphKaAt(
+          contextGraphId, index, { view: 'latest' },
+        ))?.kaId;
+      } else {
+        // Compatibility for SDK read models without the scalar port. A
+        // worker refusal must go to the chain, never materialize a full list.
+        const logged = await readModel.readContextGraphKaList(
+          contextGraphId, { view: 'latest' },
+        );
+        if (logged !== undefined && index < BigInt(logged.kaIds.length)) {
+          loggedKaId = logged.kaIds[Number(index)];
+        }
+      }
+    }
     // Position IS the ordinal — the on-chain list only ever appends. An index
     // the log does not hold is NOT an out-of-range answer to invent: the chain
     // reverts on one, and callers read that revert, so the call below must be
     // the thing that produces it.
-    if (logged !== undefined
+    if (loggedKaId !== undefined
       && knowledgeAssetsFromLog !== undefined
-      && this.chainEventLogBindingIsCurrent(knowledgeAssetsFromLog.binding)
-      && index >= 0n
-      && index < BigInt(logged.kaIds.length)) {
-      return logged.kaIds[Number(index)]!;
+      && this.chainEventLogBindingIsCurrent(knowledgeAssetsFromLog.binding)) {
+      return loggedKaId;
     }
     const kaId: bigint = await this.readContract(
       cgs, 'cgStorage.getContextGraphKaAt', 'getContextGraphKaAt', contextGraphId, index,

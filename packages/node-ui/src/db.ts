@@ -401,6 +401,8 @@ export class DashboardDB {
       ) WITHOUT ROWID;
       CREATE INDEX IF NOT EXISTS idx_chain_events_scope_address_topic
         ON chain_events(scope, address, topic0, topic1, block_number, log_index);
+      CREATE INDEX IF NOT EXISTS idx_chain_events_scope_address_ka
+        ON chain_events(scope, address, topic0, topic2, block_number, log_index);
       CREATE INDEX IF NOT EXISTS idx_chain_events_scope_unsettled
         ON chain_events(scope, settled);
       CREATE TABLE IF NOT EXISTS chain_index_coverage (

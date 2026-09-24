@@ -118,6 +118,7 @@ import {
   SqliteKaNumberStore,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
+import { ChainIndexReadWorker } from './worker/chain-index-read-worker.js';
 import {
   loadConfig,
   assertAuthorityIndexConfigPlacement,
@@ -1295,6 +1296,7 @@ async function runDaemonInnerWithStartupOwnership(
 
   let startupUncaughtExceptionHandler: NodeJS.UncaughtExceptionListener | undefined;
   let startupUnhandledRejectionHandler: NodeJS.UnhandledRejectionListener | undefined;
+  let closeStartupChainIndexReader: (() => Promise<void>) | undefined;
   registerStartupFailureCleanup(async () => {
     // The graceful shutdown handlers are registered only after startup succeeds. A rejection
     // before that boundary must still retire the writer it started; otherwise queued appends can
@@ -1305,8 +1307,15 @@ async function runDaemonInnerWithStartupOwnership(
     if (startupUnhandledRejectionHandler) {
       process.removeListener("unhandledRejection", startupUnhandledRejectionHandler);
     }
-    detachDaemonLogTee();
-    await daemonLogFileWriter.shutdown();
+    try {
+      // Boot-time chain reads may have opened the reader before agent.start,
+      // graph bootstrap, or readiness migration rejected. It owns a separate
+      // SQLite handle and must retire even before graceful shutdown is wired.
+      await closeStartupChainIndexReader?.();
+    } finally {
+      detachDaemonLogTee();
+      await daemonLogFileWriter.shutdown();
+    }
   });
 
   function log(msg: string) {
@@ -1929,6 +1938,23 @@ async function runDaemonInnerWithStartupOwnership(
   // late-bound binding getter below — never this store — because a second store
   // would be a second scanner, which is what this log exists to delete.
   const chainEventLogStore = new SqliteChainEventLogStore(dashDb);
+  let lastChainIndexReadWarning = 0;
+  const chainIndexReadWorker = new ChainIndexReadWorker(
+    join(dashDb.dataDir, 'node-ui.db'),
+    chainEventLogStore,
+    {
+      onDiagnostic: (event) => {
+        if (event.durationMs < 250 && (event.reason === 'served' || event.reason === 'proof-miss')) return;
+        const now = Date.now();
+        if (now - lastChainIndexReadWarning < 30_000) return;
+        lastChainIndexReadWarning = now;
+        log(`[chain-index-read] method=${event.method} result=${event.reason} `
+          + `duration_ms=${event.durationMs} queue_ms=${event.queueMs} rows=${event.rowsRead} `
+          + `read_ms=${Math.round(event.readMs)} decode_ms=${Math.round(event.decodeMs)}`);
+      },
+    },
+  );
+  closeStartupChainIndexReader = () => chainIndexReadWorker.close();
 
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
@@ -2060,6 +2086,7 @@ async function runDaemonInnerWithStartupOwnership(
     localContextGraphAuthorityHistoryStore,
     localContextGraphAuthorityIndexStore,
     chainEventLogStore,
+    chainEventLogReadModelFactory: chainIndexReadWorker.createReadModel,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,
@@ -2524,6 +2551,7 @@ async function runDaemonInnerWithStartupOwnership(
             await agent.stop().catch((err: any) =>
               log(`Core prereq fatal-stop error: ${err?.message ?? String(err)}`),
             );
+            await chainIndexReadWorker.close();
             try {
               dashDb.close();
             } catch (err: any) {
@@ -4052,7 +4080,10 @@ async function runDaemonInnerWithStartupOwnership(
         const backingStoresClosed = await closeDaemonBackingStoresAfterTeardown(teardown, {
           retryAgentStop: () => agent.stop(),
           stopManagedOxigraph: () => managedOxigraph?.stop() ?? Promise.resolve(),
-          closeDashboardDb: () => dashDb.close(),
+          closeDashboardDb: async () => {
+            await chainIndexReadWorker.close();
+            dashDb.close();
+          },
           log,
         });
         if (backingStoresClosed) log("Stopped.");

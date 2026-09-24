@@ -1210,6 +1210,24 @@ describe('A24 — a failing step never strands the steps after it', () => {
     expect(closeDashboardDb).toHaveBeenCalledOnce();
   });
 
+  it('waits for the asynchronous reader shutdown before reporting backing stores closed', async () => {
+    let retire!: () => void;
+    const retired = new Promise<void>((resolve) => { retire = resolve; });
+    let done = false;
+    const closing = closeDaemonBackingStoresAfterTeardown({ failures: [], dependencyQuarantined: false }, {
+      retryAgentStop: async () => undefined,
+      stopManagedOxigraph: async () => undefined,
+      closeDashboardDb: () => retired,
+      log: () => undefined,
+    }).then(() => { done = true; });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(done).toBe(false);
+    retire();
+    await closing;
+    expect(done).toBe(true);
+  });
+
   it('keeps a permanent retirement quarantine pending through the hard shutdown deadline', async () => {
     const outcome = {
       failures: [{

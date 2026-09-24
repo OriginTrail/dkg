@@ -20,6 +20,7 @@
  *   N-1 is not equivalent to the unpinned `eth_call` these paths replace.
  */
 
+import { id } from 'ethers';
 import type { RawContextGraphAuthorityIndexEvent } from
   '../context-graph-authority-index-reducer.js';
 import {
@@ -65,6 +66,8 @@ export interface KnowledgeAssetOwnWrite {
 export interface KnowledgeAssetReadOptions {
   readonly view?: KnowledgeAssetReadView;
   readonly ownWrite?: KnowledgeAssetOwnWrite;
+  /** Cancellation for implementations that schedule reads asynchronously. */
+  readonly signal?: AbortSignal;
 }
 
 /** A `kaToContextGraph` answer the log is willing to stand behind. */
@@ -115,7 +118,25 @@ export interface KnowledgeAssetReadModel {
     contextGraphId: bigint,
     options?: KnowledgeAssetReadOptions,
   ): Promise<ContextGraphKaList | undefined>;
+  /** Optional scalar path so worker callers need not copy a complete KA list. */
+  readContextGraphKaAt?(
+    contextGraphId: bigint,
+    index: bigint,
+    options?: KnowledgeAssetReadOptions,
+  ): Promise<Readonly<{ kaId: bigint; asOfBlockNumber: number }> | undefined>;
 }
+
+/** Serializable binding supplied to a composition-root read-model factory. */
+export interface KnowledgeAssetReadModelFactoryOptions {
+  readonly scope: string;
+  readonly contextGraphStorageAddress: string;
+  readonly contextGraphStorageAbi: string;
+  readonly maxHeadAgeMs: number;
+}
+
+export type KnowledgeAssetReadModelFactory = (
+  options: KnowledgeAssetReadModelFactoryOptions,
+) => KnowledgeAssetReadModel;
 
 interface ResolvedWindow {
   readonly fromBlockNumber: number;
@@ -123,6 +144,9 @@ interface ResolvedWindow {
   /** Coverage reaches the chain horizon this view claims to answer at. */
   readonly caughtUp: boolean;
 }
+
+const KA_REGISTRATION_TOPIC = id('KnowledgeAssetRegisteredToContextGraph(uint256,uint256)');
+const UINT256_LIMIT = 1n << 256n;
 
 /**
  * The graph id as it sits in `topic1`.
@@ -223,28 +247,12 @@ export function createKnowledgeAssetReadModel(
     });
   }
 
-  async function foldRegistrations(
-    window: ResolvedWindow,
-    view: KnowledgeAssetReadView,
-    topic1?: readonly string[],
-  ): Promise<ReturnType<typeof reduceContextGraphKaRegistrations>> {
-    const rows = await store.readEvents(scope, {
-      fromBlockNumber: window.fromBlockNumber,
-      throughBlockNumber: window.throughBlockNumber,
-      addresses: [contextGraphStorageAddress],
-      ...(topic1 === undefined ? {} : { topic1 }),
-    });
-    const horizonRows = view === 'finalized' ? rows.filter((row) => row.settled) : rows;
-    return reduceContextGraphKaRegistrations(
-      registry.decodeContextGraphKaRegistrations(horizonRows),
-    );
-  }
-
   return Object.freeze({
     async readContextGraphForKa(
       kaId: bigint,
       readOptions: KnowledgeAssetReadOptions = {},
     ): Promise<ContextGraphForKaAnswer | undefined> {
+      if (kaId < 0n || kaId >= UINT256_LIMIT) return undefined;
       const view = readOptions.view ?? 'finalized';
       const window = await resolveWindow(
         'context-graph-ka',
@@ -254,12 +262,25 @@ export function createKnowledgeAssetReadModel(
         undefined,
       );
       if (window === undefined) return undefined;
-      const fold = await foldRegistrations(window, view);
-      const bound = fold.contextGraphByKa.get(kaId.toString());
-      if (bound !== undefined) {
+      // The registration ABI indexes kaId in topic2. Select it in the store,
+      // before decoding: folding every registration for a point lookup blocks
+      // the event loop for seconds on a core's retained event history.
+      const rows = await store.readEvents(scope, {
+        fromBlockNumber: window.fromBlockNumber,
+        throughBlockNumber: window.throughBlockNumber,
+        addresses: [contextGraphStorageAddress],
+        topic0: [KA_REGISTRATION_TOPIC],
+        topic2: [`0x${kaId.toString(16).padStart(64, '0')}`],
+      });
+      const horizonRows = view === 'finalized' ? rows.filter((row) => row.settled) : rows;
+      // Retain the decoder as the identity boundary instead of trusting that
+      // every implementation of the raw-log port applied the filter correctly.
+      const registration = registry.decodeContextGraphKaRegistrations(horizonRows)
+        .find((event) => event.kaId === kaId);
+      if (registration !== undefined) {
         return Object.freeze({
           kind: 'bound' as const,
-          contextGraphId: bound,
+          contextGraphId: registration.contextGraphId,
           asOfBlockNumber: window.throughBlockNumber,
         });
       }

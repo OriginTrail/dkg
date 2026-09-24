@@ -11,7 +11,7 @@
  */
 
 import { ethers } from 'ethers';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { ChainEventDecoderRegistry } from '../src/chain-index/chain-event-decoders.js';
 import {
@@ -318,6 +318,91 @@ describe('knowledge-asset views over the one log', () => {
 
     expect(await pending).toBe(11n);
     expect(calls).toEqual(['cgStorage.kaToContextGraph']);
+  });
+
+  it.each([true, false])('uses the scalar ordinal port without requesting a list (answer=%s)', async (answer) => {
+    const readContextGraphKaAt = vi.fn(async () => answer
+      ? { kaId: 4242n, asOfBlockNumber: COVERED_THROUGH }
+      : undefined);
+    const readContextGraphKaList = vi.fn(async () => {
+      throw new Error('the scalar port must not fall back to full-list decoding');
+    });
+    const { adapter, calls, live } = makeAdapter({
+      store: populated(),
+      knowledgeAssets: {
+        async readContextGraphForKa() { return undefined; },
+        readContextGraphKaAt,
+        readContextGraphKaList,
+      },
+    });
+    live.set('cgStorage.getContextGraphKaAt', 9003n);
+
+    expect(await adapter.getContextGraphKCAt(7n, 1n)).toBe(answer ? 4242n : 9003n);
+    expect(readContextGraphKaAt).toHaveBeenCalledExactlyOnceWith(7n, 1n, { view: 'latest' });
+    expect(readContextGraphKaList).not.toHaveBeenCalled();
+    expect(calls).toEqual(answer ? [] : ['cgStorage.getContextGraphKaAt']);
+  });
+
+  it('passes KA read cancellation through to the injected model', async () => {
+    const controller = new AbortController();
+    const cancelled = new Error('caller cancelled');
+    let started!: () => void;
+    const didStart = new Promise<void>((resolve) => { started = resolve; });
+    const readContextGraphForKa = vi.fn<KnowledgeAssetReadModel['readContextGraphForKa']>(
+      async (_kaId, options) => {
+        started();
+        return new Promise((_resolve, reject) => {
+          options!.signal!.addEventListener('abort', () => reject(options!.signal!.reason), { once: true });
+        });
+      },
+    );
+    const { adapter, calls } = makeAdapter({
+      store: populated(),
+      knowledgeAssets: {
+        readContextGraphForKa,
+        async readContextGraphKaList() { return undefined; },
+      },
+    });
+
+    const pending = adapter.getKAContextGraphId(4242n, { signal: controller.signal });
+    await didStart;
+    controller.abort(cancelled);
+
+    await expect(pending).rejects.toBe(cancelled);
+    expect(readContextGraphForKa).toHaveBeenCalledExactlyOnceWith(4242n, {
+      view: 'latest', signal: controller.signal,
+    });
+    expect(calls).toEqual([]);
+  });
+
+  it('discards a scalar ordinal completed by a retired binding', async () => {
+    let release!: () => void;
+    let started!: () => void;
+    const didStart = new Promise<void>((resolve) => { started = resolve; });
+    const mayFinish = new Promise<void>((resolve) => { release = resolve; });
+    const { adapter, calls, live, replaceKnowledgeAssets } = makeAdapter({
+      store: populated(),
+      knowledgeAssets: {
+        async readContextGraphForKa() { return undefined; },
+        async readContextGraphKaList() { throw new Error('unexpected list read'); },
+        async readContextGraphKaAt() {
+          started();
+          await mayFinish;
+          return { kaId: 4242n, asOfBlockNumber: COVERED_THROUGH };
+        },
+      },
+    });
+    live.set('cgStorage.getContextGraphKaAt', 9003n);
+    const pending = adapter.getContextGraphKCAt(7n, 0n);
+    await didStart;
+    replaceKnowledgeAssets({
+      async readContextGraphForKa() { return undefined; },
+      async readContextGraphKaList() { return undefined; },
+    });
+    release();
+
+    expect(await pending).toBe(9003n);
+    expect(calls).toEqual(['cgStorage.getContextGraphKaAt']);
   });
 
   it('discards a context-graph ordinal completed by a retired binding', async () => {

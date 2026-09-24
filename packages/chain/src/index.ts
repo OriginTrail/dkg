@@ -309,7 +309,23 @@ export {
 } from './random-sampling-availability.js';
 
 /** Store contract supplied by the daemon to the one-log runtime. */
-export type { ChainEventLogStore } from './chain-index/chain-event-log.js';
+export type {
+  ChainEventLogQuery,
+  ChainEventLogRow,
+  ChainEventLogState,
+  ChainEventLogStore,
+} from './chain-index/chain-event-log.js';
+export { chainEventLogStateReadRefusal } from './chain-index/chain-event-log.js';
+export { ChainEventDecoderRegistry } from './chain-index/chain-event-decoders.js';
+export {
+  createKnowledgeAssetReadModel,
+  type ContextGraphForKaAnswer,
+  type KnowledgeAssetReadModel,
+  type KnowledgeAssetReadModelFactory,
+  type KnowledgeAssetReadModelFactoryOptions,
+  type KnowledgeAssetReadOptions,
+} from './chain-index/knowledge-asset-read-model.js';
+export type { ContextGraphKaList } from './chain-index/knowledge-asset-reducer.js';
 
 /**
  * How the process hands that log DOWN to each adapter. There is one log per

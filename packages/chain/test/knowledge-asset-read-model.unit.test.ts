@@ -10,7 +10,7 @@
  */
 
 import { ethers } from 'ethers';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   ChainEventDecoderRegistry,
@@ -214,6 +214,69 @@ describe('knowledge asset read model — kaToContextGraph', () => {
     });
   });
 
+  it('decodes only the requested KA even when thousands of other registrations are retained', async () => {
+    const kaId = (1n << 200n) + 4242n;
+    const target = registration(50, 7n, kaId, { logIndex: 4_000 });
+    const store = seeded({
+      rows: [
+        ...Array.from({ length: 4_000 }, (_, index) => (
+          registration(50, 8n, BigInt(index), { logIndex: index })
+        )),
+        target,
+        creation(40, 7n),
+      ],
+    });
+    const decoder = registry();
+    const decode = vi.spyOn(decoder, 'decodeContextGraphKaRegistrations');
+    const readEvents = vi.spyOn(store, 'readEvents');
+    const view = createKnowledgeAssetReadModel({
+      scope: SCOPE, store, registry: decoder, contextGraphStorageAddress: CG_STORAGE,
+    });
+
+    await expect(view.readContextGraphForKa(kaId)).resolves.toEqual({
+      kind: 'bound', contextGraphId: 7n, asOfBlockNumber: 100,
+    });
+    expect(readEvents).toHaveBeenCalledExactlyOnceWith(SCOPE, {
+      fromBlockNumber: CG_FLOOR,
+      throughBlockNumber: 100,
+      addresses: [CG_STORAGE],
+      topic0: [target.topics[0]],
+      topic2: [target.topics[2]],
+    });
+    expect(decode).toHaveBeenCalledExactlyOnceWith([target]);
+  });
+
+  it('checks the decoded KA identity when a store returns an unrelated registration', async () => {
+    const store = seeded();
+    vi.spyOn(store, 'readEvents').mockResolvedValue([registration(50, 7n, 1111n)]);
+
+    await expect(model(store).readContextGraphForKa(4242n)).resolves.toBeUndefined();
+  });
+
+  it('keeps the first registration in log order when a KA row was replayed', async () => {
+    const store = seeded({ rows: [
+      registration(60, 8n, 4242n),
+      registration(50, 7n, 4242n),
+    ] });
+    await expect(model(store).readContextGraphForKa(4242n)).resolves.toMatchObject({
+      kind: 'bound', contextGraphId: 7n,
+    });
+  });
+
+  it.each([0n, (1n << 256n) - 1n])('encodes the complete uint256 topic for KA %s', async (kaId) => {
+    const store = seeded({ rows: [registration(50, 7n, kaId)] });
+    await expect(model(store).readContextGraphForKa(kaId)).resolves.toMatchObject({
+      kind: 'bound', contextGraphId: 7n,
+    });
+  });
+
+  it.each([-1n, 1n << 256n])('refuses an out-of-range KA %s without reading history', async (kaId) => {
+    const store = seeded();
+    const readEvents = vi.spyOn(store, 'readEvents');
+    await expect(model(store).readContextGraphForKa(kaId)).resolves.toBeUndefined();
+    expect(readEvents).not.toHaveBeenCalled();
+  });
+
   it('refuses a ZERO answer while coverage is incomplete', async () => {
     // The backfill has not reached the contract's deploy block, so a
     // registration could still be hiding below `coveredFromBlock`. Serving 0
@@ -282,7 +345,7 @@ describe('knowledge asset read model — kaToContextGraph', () => {
 
   it('holds the barrier until the log passes the own write', async () => {
     const store = seeded({ rows: [registration(50, 7n, 4242n)] });
-    await expect(model(store).readContextGraphForKa(9999n, {
+    await expect(model(store).readContextGraphForKa(4242n, {
       ownWrite: { blockNumber: 140, blockHash: hash(140) },
     })).resolves.toBeUndefined();
   });
@@ -292,7 +355,7 @@ describe('knowledge asset read model — kaToContextGraph', () => {
     // the one the receipt names, so this node's write is not in the history the
     // log folded. A block-number-only barrier would have dropped here.
     const store = seeded({ rows: [registration(50, 7n, 4242n)] });
-    await expect(model(store).readContextGraphForKa(9999n, {
+    await expect(model(store).readContextGraphForKa(4242n, {
       ownWrite: { blockNumber: 50, blockHash: hash(0xfe) },
     })).resolves.toBeUndefined();
   });

@@ -82,6 +82,7 @@ export interface SqliteChainEventLogQuery {
   readonly addresses?: readonly string[];
   readonly topic0?: readonly string[];
   readonly topic1?: readonly string[];
+  readonly topic2?: readonly string[];
 }
 
 interface CursorRow {
@@ -144,7 +145,7 @@ function normalizeReplacedRange(
 export class SqliteChainEventLogStore {
   private readonly db: Database.Database;
 
-  constructor(dashboard: DashboardDB) {
+  constructor(dashboard: Pick<DashboardDB, 'db'>) {
     this.db = dashboard.db;
   }
 
@@ -325,24 +326,58 @@ export class SqliteChainEventLogStore {
     scope: string,
     query: SqliteChainEventLogQuery,
   ): Promise<readonly SqliteChainEventLogRow[]> {
+    return this.decodeEventRows(this.readRawEvents(scope, query));
+  }
+
+  /** Refuse oversized snapshots; a truncated history is never a complete list. */
+  async readEventsBounded(
+    scope: string,
+    query: SqliteChainEventLogQuery,
+    maxRows: number,
+  ): Promise<readonly SqliteChainEventLogRow[] | undefined> {
+    if (!Number.isSafeInteger(maxRows) || maxRows < 1 || maxRows >= Number.MAX_SAFE_INTEGER) {
+      throw new Error('Chain event log maximum row count must be a positive safe integer below MAX_SAFE_INTEGER');
+    }
+    // Bound allocation inside SQLite's native .all(), before any row objects
+    // cross into JS. Reading everything and slicing afterwards can OOM Node.
+    const rows = this.readRawEvents(scope, query, maxRows + 1);
+    return rows.length > maxRows ? undefined : this.decodeEventRows(rows);
+  }
+
+  private readRawEvents(
+    scope: string,
+    query: SqliteChainEventLogQuery,
+    limit?: number,
+  ): EventRow[] {
+    // Without ANALYZE, SQLite can prefer the ordered primary-key block range
+    // and scan every registration. A KA point read must select its topic
+    // first even on a newly migrated database with no planner statistics.
+    const indexHint = query.addresses?.length === 1 && query.topic0?.length === 1
+      && query.topic2?.length === 1 ? ' INDEXED BY idx_chain_events_scope_address_ka' : '';
     const clauses = ['scope = ?', 'block_number >= ?', 'block_number <= ?'];
     const parameters: unknown[] = [scope, query.fromBlockNumber, query.throughBlockNumber];
     for (const [column, values] of [
       ['address', query.addresses],
       ['topic0', query.topic0],
       ['topic1', query.topic1],
+      ['topic2', query.topic2],
     ] as const) {
       if (values === undefined || values.length === 0) continue;
       clauses.push(`${column} IN (${placeholders(values.length)})`);
       parameters.push(...values);
     }
-    const rows = this.db.prepare(`
+    if (limit !== undefined) parameters.push(limit);
+    return this.db.prepare(`
       SELECT block_number, log_index, block_hash, tx_hash, address,
              topic0, topic1, topic2, topic3, data, settled
-        FROM chain_events
+        FROM chain_events${indexHint}
        WHERE ${clauses.join(' AND ')}
        ORDER BY block_number, log_index
+       ${limit === undefined ? '' : 'LIMIT ?'}
     `).all(...parameters) as EventRow[];
+  }
+
+  private decodeEventRows(rows: readonly EventRow[]): readonly SqliteChainEventLogRow[] {
     return Object.freeze(rows.map((row) => Object.freeze({
       blockNumber: row.block_number,
       blockHash: row.block_hash,

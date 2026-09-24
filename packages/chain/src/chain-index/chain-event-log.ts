@@ -229,6 +229,8 @@ export interface ChainEventLogQuery {
   readonly topic0?: readonly string[];
   /** Indexed arg 1 — the per-graph backfill filter the KA read model needs. */
   readonly topic1?: readonly string[];
+  /** Indexed arg 2 — the exact KA filter for registration point lookups. */
+  readonly topic2?: readonly string[];
 }
 
 /**
