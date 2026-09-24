@@ -29,6 +29,8 @@ import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import oxigraph from 'oxigraph';
 import { SparqlHttpStore, type Quad } from '../src/index.js';
 import { buildBlankNodeSafeDelete, isBlankNodeTerm } from '../src/adapters/blank-node-safe-delete.js';
+import { createSparqlTermPolicy } from '../src/adapters/sparql-term-policy.js';
+import { SparqlTermValidationError } from '../src/sparql-terms.js';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 const G = 'http://example.org/graph/wm';
@@ -258,6 +260,29 @@ describe('buildBlankNodeSafeDelete — generated SPARQL shape', () => {
         expect.stringContaining('sparql-http.delete: invalid iri in SPARQL predicate position (13 chars, fingerprint '),
       ]);
       expect(observed.warnings[0]).not.toContain('http://ex/p|q');
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('checks each blank-node label it rewrites to a variable, under the enforcement policy', () => {
+    const quads = [
+      { subject: '_:bad label', predicate: 'http://ex/p', object: '"x"', graph: G },
+      { subject: '_:bad label', predicate: 'http://ex/q', object: '_:b1', graph: G },
+    ];
+    const observed = observeInvalidSparqlTerms();
+    try {
+      // Observe mode: the malformed label is counted once, and its variable is
+      // still shared, as before.
+      const update = buildBlankNodeSafeDelete(quads, 'sparql-http')!;
+      expect(update).toContain('?b0 <http://ex/p> "x" .\n    ?b0 <http://ex/q> ?b1 .');
+      const label = { value: 1, adapter: 'sparql-http', operation: 'delete', position: 'subject', kind: 'blank-node' };
+      expect(observed.counted).toEqual([{ ...label, enforcement: 'observe' }]);
+
+      // Reject mode: the same delete throws before any SPARQL is built.
+      expect(() => buildBlankNodeSafeDelete(quads, 'sparql-http', createSparqlTermPolicy('reject')))
+        .toThrow(SparqlTermValidationError);
+      expect(observed.counted.slice(1)).toEqual([{ ...label, enforcement: 'reject' }]);
     } finally {
       observed.restore();
     }

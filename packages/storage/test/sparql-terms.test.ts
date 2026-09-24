@@ -10,6 +10,8 @@ import {
   type SparqlTermPosition,
 } from '../src/sparql-terms.js';
 import {
+  ADAPTER_SPARQL_TERM_POLICY,
+  createSparqlTermPolicy,
   sparqlIriPrefix,
   sparqlIriTerm,
   sparqlRdfTerm,
@@ -339,6 +341,63 @@ describe('subject prefixes', () => {
     expect(store.size).toBe(1);
     store.update(update('urn:ke'));
     expect(store.size).toBe(0);
+  });
+});
+
+describe('the enforcement policy', () => {
+  const invalid = (enforcement: 'observe' | 'reject', position: string, kind: string) => ({
+    value: 1, adapter: 'sparql-http', operation: 'insert', position, kind, enforcement,
+  });
+
+  it('runs the adapters in observe mode', () => {
+    expect(ADAPTER_SPARQL_TERM_POLICY.enforcement).toBe('observe');
+  });
+
+  it('observe mode sends the pre-validation form and reports observe', () => {
+    const observed = observeInvalidSparqlTerms();
+    const policy = createSparqlTermPolicy('observe');
+    expect(policy.iriTerm('urn:a^b', 'graph', SITE)).toBe('<urn:ab>');
+    expect(observed.counted).toEqual([invalid('observe', 'graph', 'iri')]);
+    expect(observed.warnings).toEqual([expect.stringContaining('(observe mode)')]);
+  });
+
+  it('reject mode throws without quoting the term, and reports reject', () => {
+    const observed = observeInvalidSparqlTerms();
+    const policy = createSparqlTermPolicy('reject');
+    const secret = '"apiKey=sk-secret\n"';
+    let error: unknown;
+    try {
+      policy.rdfTerm(secret, 'object', SITE, 'allow');
+    } catch (caught) {
+      error = caught;
+    }
+
+    expect(error).toBeInstanceOf(SparqlTermValidationError);
+    expect((error as SparqlTermValidationError).kind).toBe('literal');
+    expect((error as Error).message).toMatch(
+      /^sparql-http\.insert: invalid literal in SPARQL object position \(19 chars, fingerprint [0-9a-f]{12}\)$/,
+    );
+    // The validator's own error quotes the term, so it is not kept as the cause.
+    expect((error as Error).cause).toBeUndefined();
+    expect(observed.counted).toEqual([invalid('reject', 'object', 'literal')]);
+    expect(observed.warnings).toEqual([expect.stringContaining('(reject mode)')]);
+    expect(observed.warnings[0]).not.toContain('sk-secret');
+  });
+
+  it('reject mode throws from every entry point and passes well-formed terms', () => {
+    const observed = observeInvalidSparqlTerms();
+    const policy = createSparqlTermPolicy('reject');
+    expect(() => policy.iriTerm('urn:a b', 'graph', SITE)).toThrow(SparqlTermValidationError);
+    expect(() => policy.rdfTerm('_:b0', 'object', SITE, 'reject')).toThrow(SparqlTermValidationError);
+    expect(() => policy.iriPrefix('urn:a\nb', SITE)).toThrow(SparqlTermValidationError);
+    expect(() => policy.checkBlankNodeLabel('_:a b', 'subject', SITE)).toThrow(SparqlTermValidationError);
+    expect(observed.counted.map(({ enforcement }) => enforcement)).toEqual(['reject', 'reject', 'reject', 'reject']);
+
+    expect(policy.iriTerm('urn:g', 'graph', SITE)).toBe('<urn:g>');
+    expect(policy.rdfTerm('"v"', 'object', SITE, 'reject')).toBe('"v"');
+    expect(policy.iriPrefix('urn:', SITE)).toBe('"urn:"');
+    expect(() => policy.checkBlankNodeLabel('_:b0', 'subject', SITE)).not.toThrow();
+    expect(observed.counted).toHaveLength(4);
   });
 });
 

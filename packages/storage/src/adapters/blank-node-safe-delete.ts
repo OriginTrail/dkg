@@ -3,7 +3,11 @@
  * blazegraph), which both remove quads with a SPARQL UPDATE.
  */
 import type { Quad as DKGQuad } from '../triple-store.js';
-import { sparqlIriTerm, sparqlRdfTerm, type SparqlTermSite } from './sparql-term-policy.js';
+import {
+  ADAPTER_SPARQL_TERM_POLICY,
+  type SparqlTermPolicy,
+  type SparqlTermSite,
+} from './sparql-term-policy.js';
 
 /** True when an N-Quads term string denotes an RDF blank node (`_:label`). */
 export function isBlankNodeTerm(term: string): boolean {
@@ -75,11 +79,14 @@ function connectedBlankNodeComponents(quads: DKGQuad[]): DKGQuad[][] {
  * real IRI, so the match is precise. Two byte-for-byte isomorphic anchored
  * components are indistinguishable in RDF and both delete — which is correct.
  *
- * `adapter` labels invalid-term observations (see sparql-term-policy.ts).
+ * `adapter` labels invalid-term observations, and `terms` decides what happens
+ * to an invalid term, including a blank-node label that becomes a variable
+ * (see sparql-term-policy.ts).
  */
 export function buildBlankNodeSafeDelete(
   quads: DKGQuad[],
   adapter: SparqlTermSite['adapter'],
+  terms: SparqlTermPolicy = ADAPTER_SPARQL_TERM_POLICY,
 ): string | null {
   if (quads.length === 0) return null;
   const site: SparqlTermSite = { adapter, operation: 'delete' };
@@ -95,8 +102,8 @@ export function buildBlankNodeSafeDelete(
 
   if (ground.length > 0) {
     const body = ground.map((q) => {
-      const g = q.graph ? `GRAPH ${sparqlIriTerm(q.graph, 'graph', site)} ` : '';
-      return `${g}{ ${sparqlRdfTerm(q.subject, 'subject', site, 'reject')} ${sparqlIriTerm(q.predicate, 'predicate', site)} ${sparqlRdfTerm(q.object, 'object', site, 'reject')} . }`;
+      const g = q.graph ? `GRAPH ${terms.iriTerm(q.graph, 'graph', site)} ` : '';
+      return `${g}{ ${terms.rdfTerm(q.subject, 'subject', site, 'reject')} ${terms.iriTerm(q.predicate, 'predicate', site)} ${terms.rdfTerm(q.object, 'object', site, 'reject')} . }`;
     }).join('\n');
     statements.push(`DELETE DATA {\n${body}\n}`);
   }
@@ -114,16 +121,22 @@ export function buildBlankNodeSafeDelete(
       for (const component of connectedBlankNodeComponents(list)) {
         const vars = new Map<string, string>();
         const render = (t: string, position: 'subject' | 'object'): string => {
-          if (!isBlankNodeTerm(t)) return sparqlRdfTerm(t, position, site, 'reject');
+          if (!isBlankNodeTerm(t)) return terms.rdfTerm(t, position, site, 'reject');
           let v = vars.get(t);
-          if (!v) { v = `?b${vars.size}`; vars.set(t, v); }
+          if (!v) {
+            // The label is never sent, but a malformed one is still an invalid
+            // term: check it once, before it becomes a variable.
+            terms.checkBlankNodeLabel(t, position, site);
+            v = `?b${vars.size}`;
+            vars.set(t, v);
+          }
           return v;
         };
         const triples = component
-          .map((q) => `${render(q.subject, 'subject')} ${sparqlIriTerm(q.predicate, 'predicate', site)} ${render(q.object, 'object')} .`)
+          .map((q) => `${render(q.subject, 'subject')} ${terms.iriTerm(q.predicate, 'predicate', site)} ${render(q.object, 'object')} .`)
           .join('\n    ');
         const inner = graph
-          ? `GRAPH ${sparqlIriTerm(graph, 'graph', site)} {\n    ${triples}\n  }`
+          ? `GRAPH ${terms.iriTerm(graph, 'graph', site)} {\n    ${triples}\n  }`
           : triples;
         statements.push(`DELETE { ${inner} } WHERE { ${inner} }`);
       }
