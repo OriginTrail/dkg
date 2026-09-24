@@ -32,6 +32,9 @@ overrides:
   ws@>=8.0.0 <8.20.1: 8.20.1
 
 patchedDependencies:
+  '@libp2p/yamux@8.0.1':
+    hash: b38505a7ffe3b88d005da3e1446492a1a679b579080f08937106d809ee9d683e
+    path: patches/@libp2p__yamux@8.0.1.patch
   hardhat@2.28.6:
     hash: 0d296aadcb2c28c2040ee89cecb4d10311c66f2e64ca77faf8151dbc4822dff9
     path: patches/hardhat@2.28.6.patch
@@ -836,7 +839,7 @@ importers:
         version: 10.1.13(bufferutil@4.1.0)(utf-8-validate@5.0.10)
       '@libp2p/yamux':
         specifier: ^8.0.1
-        version: 8.0.1
+        version: 8.0.1(patch_hash=b38505a7ffe3b88d005da3e1446492a1a679b579080f08937106d809ee9d683e)
       '@multiformats/multiaddr':
         specifier: ^13.0.3
         version: 13.0.3
@@ -9378,7 +9381,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@libp2p/yamux@8.0.1':
+  '@libp2p/yamux@8.0.1(patch_hash=b38505a7ffe3b88d005da3e1446492a1a679b579080f08937106d809ee9d683e)':
     dependencies:
       '@libp2p/interface': 3.2.2
       '@libp2p/utils': 7.1.0
