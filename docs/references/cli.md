@@ -164,3 +164,36 @@ This cleanup clears every non-system, non-`coreHosted` user subscription,
 including legitimate subscriptions. It preserves `agents`, `ontology`, hosted
 core state, and the graph's VM/SWM data. Re-add wanted user subscriptions
 explicitly after cleanup.
+
+## Client request timeouts
+
+The CLI and the MCP server (`dkg mcp serve`) give each daemon request a
+deadline by route class:
+
+| Class | Requests | Default |
+| --- | --- | --- |
+| Read | every `GET` not listed below | 30 s |
+| List read | `GET /api/context-graph/list`, `/api/sub-graph/list`, `/api/pca`, `/api/publisher/jobs` | 60 s, and never less than the read deadline |
+| Long | every `POST`, `PUT` and `DELETE` | 240 s, and never less than the read deadline |
+
+The CLI's `dkg verify` waits for its signature collection window plus 30 s
+instead. A Knowledge Asset publish, share, file import, or a create that also
+shares or publishes, that gets no answer in time is reported as outcome
+unknown, not as failed: the daemon keeps working after the client stops
+waiting, so check `dkg ka history` (MCP: `dkg_knowledge_asset_history`) before
+retrying. Any other request that times out fails with a `TimeoutError`.
+
+On a slow node or store, override the read and long deadlines, in
+milliseconds, with environment variables (for the MCP server, in the MCP
+client's `env` block):
+
+```bash
+export DKG_API_READ_TIMEOUT_MS=60000    # every GET; the list reads also get at least this
+export DKG_API_LONG_TIMEOUT_MS=280000   # every POST, PUT and DELETE
+```
+
+Each must be a whole number from 1 to 2147483647; any other value is
+rejected, before a request is sent, with an error naming the variable. Unset
+or empty keeps the default. Node's `fetch` stops waiting for response headers
+after 300 s on its own, so a deadline above 300 s does not keep a request open
+longer.
