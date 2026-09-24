@@ -50,13 +50,16 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
     const lifecycle = readFileSync(join(AGENT_SRC, 'dkg-agent-lifecycle.ts'), 'utf8');
     // Both IDs must enter the one registered endpoint through Messenger,
     // which supplies envelope decoding and receiver-side deduplication.
+    const endpoint = readFileSync(join(AGENT_SRC, 'p2p', 'storage-ack-endpoint.ts'), 'utf8');
     expect(STORAGE_ACK_PROTOCOLS).toEqual([
       [PROTOCOL_STORAGE_ACK, 'publish'],
       [PROTOCOL_STORAGE_ACK_V2, 'publish'],
       [PROTOCOL_STORAGE_UPDATE_ACK, 'update'],
       [PROTOCOL_STORAGE_UPDATE_ACK_V2, 'update'],
     ]);
-    expect(lifecycle).toMatch(/this\.messenger\.registerGroup\(\s*STORAGE_ACK_PROTOCOLS\.map\(/);
+    expect(lifecycle).toMatch(/this\.storageAckEndpoint\s*=\s*registerStorageACKEndpoint\(/);
+    expect(lifecycle).toMatch(/registerGroup:\s*\(entries\)\s*=>\s*this\.messenger\.registerGroup\(entries\)/);
+    expect(endpoint).toMatch(/ports\.registerGroup\(STORAGE_ACK_PROTOCOLS\.map\(/);
   });
 
   it('agent wires core-side StorageACK decline logging', () => {
