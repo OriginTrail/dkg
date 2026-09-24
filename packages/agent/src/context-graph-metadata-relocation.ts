@@ -270,10 +270,12 @@ export async function relocatePrivateContextGraphMetadata(
     } else {
       deletedForeign += 1;
     }
-    await deleteByPatternWithoutCount(store, { graph: ontologyGraph, subject: safeSubject });
+    // The subject's own rows go last: they are how a later pass finds its
+    // activities if this one stops in between.
     for (const activity of activities) {
       await deleteByPatternWithoutCount(store, { graph: ontologyGraph, subject: activity });
     }
+    await deleteByPatternWithoutCount(store, { graph: ontologyGraph, subject: safeSubject });
   }
 
   if (movedToMeta.length > 0 || deletedForeign > 0) {
