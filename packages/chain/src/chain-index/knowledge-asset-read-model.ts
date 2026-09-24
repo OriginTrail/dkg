@@ -31,6 +31,15 @@
  * revision only the rows past the graph's settled prefix are re-read and folded;
  * the prefix itself is re-proven first (see `buildGraphOrdinals`), and anything
  * the proof cannot cover folds the graph from scratch, exactly as before.
+ *
+ * A TOMBSTONE ENDS EVERY CACHED FOLD
+ * A tombstone exists to repair the log, so nothing folded before one may be
+ * reused after it — and the store state alone cannot say one happened: a scope
+ * re-initialized on the same chain has the same lineage, and its revision is
+ * just another step of the same token. Each entry therefore records the scope's
+ * process-local tombstone generation ({@link chainEventLogTombstoneGeneration})
+ * and is dropped the moment the generation moves, or the moment the settled
+ * cursor falls below the entry's settled prefix (which only a rebuild does).
  */
 
 import type { RawContextGraphAuthorityIndexEvent } from
@@ -47,6 +56,7 @@ import {
   type ChainEventLogState,
   type ChainEventLogStore,
 } from './chain-event-log.js';
+import { chainEventLogTombstoneGeneration } from './chain-event-log-tombstones.js';
 import type { ChainEventDecoderRegistry } from './chain-event-decoders.js';
 import {
   reduceContextGraphKaRegistrations,
@@ -215,12 +225,14 @@ const ORDINAL_CACHE_MAX_ENTRIES = 64;
 /**
  * A folded run of the graph's registrations that is settled end to end: every
  * registration row of the graph from its creation block through
- * `throughBlockNumber` was settled when it was folded.
+ * `throughBlockNumber` was settled when it was folded, and so was the cursor.
  *
  * That is the only part of a fold that can be reused at a later revision.
  * Settled rows are never rewritten and never deleted short of a tombstone, so
- * the run can only change by GAINING rows (which the count below catches) or by
- * the whole log being rebuilt (which the boundary rows catch).
+ * between tombstones the run can only change by GAINING rows, which the count
+ * below catches. A tombstone ends the run outright (`GraphOrdinals.tombstoneGeneration`);
+ * the boundary rows are a second, independent check that the log is still the
+ * one the run was folded from.
  */
 interface SettledPrefix {
   /** The run's last block; it holds at least one registration of the graph. */
@@ -236,6 +248,11 @@ interface SettledPrefix {
 /** One graph's list under one view, folded at `revision`. Mutated only by its single builder. */
 interface GraphOrdinals {
   revision: number;
+  /**
+   * The scope's tombstone generation read BEFORE the state this was folded at
+   * was loaded. Never served nor extended under any other generation.
+   */
+  tombstoneGeneration: number;
   lineage: string;
   topicSetVersion: string;
   createdBlockNumber: number;
@@ -267,9 +284,17 @@ function sameRows(left: readonly ChainEventLogRow[], right: readonly ChainEventL
 /**
  * The last block at or below which every row is settled, and that holds a row.
  * Rows must be in (block, logIndex) order.
+ *
+ * A row the store flags settled ABOVE the cursor's settled block counts as tail
+ * here (the tick never writes one): the run must end at or below the cursor, so
+ * that a settled cursor below the run's end can only mean a rebuilt log.
  */
-function settledThroughBlock(rows: readonly ChainEventLogRow[]): number | undefined {
-  const firstTail = rows.find((row) => !row.settled)?.blockNumber ?? Number.POSITIVE_INFINITY;
+function settledThroughBlock(
+  rows: readonly ChainEventLogRow[],
+  settledBlockNumber: number,
+): number | undefined {
+  const firstTail = rows.find((row) => !row.settled || row.blockNumber > settledBlockNumber)
+    ?.blockNumber ?? Number.POSITIVE_INFINITY;
   let through: number | undefined;
   for (const row of rows) {
     // Settled rows that share a block with the first tail row do not count:
@@ -396,6 +421,23 @@ export function createKnowledgeAssetReadModel(
   }
 
   /**
+   * Whether `entry` may still be served or extended at `state`, read AFTER
+   * `state` was loaded.
+   *
+   * No, once this process has tombstoned the scope since the entry was built:
+   * the tick bumps the generation after the tombstone commits and before it
+   * can re-initialize the scope, so a re-initialized state is only ever loaded
+   * under the new generation. No, too, once the settled cursor is below the
+   * entry's settled run: the tick never moves it down, so that is a rebuilt
+   * log whatever the generation says.
+   */
+  function survivesRepairs(entry: GraphOrdinals, state: ChainEventLogState): boolean {
+    return entry.tombstoneGeneration === chainEventLogTombstoneGeneration(scope)
+      && (entry.prefix === undefined
+        || entry.prefix.throughBlockNumber <= state.cursor.settledBlockNumber);
+  }
+
+  /**
    * The graph's ordinal list under `readOptions.view`, handed to `project`
    * synchronously, or `undefined` for "ask the chain".
    *
@@ -419,8 +461,17 @@ export function createKnowledgeAssetReadModel(
     // burst of reads at a new revision folds the graph once. Bounded, because
     // each look can meet a newer revision; running out is a live read.
     for (let attempt = 0; attempt < 3; attempt += 1) {
+      // BEFORE the load: whatever this attempt folds is from a state loaded
+      // under this generation or a later one, never an earlier one.
+      const generation = chainEventLogTombstoneGeneration(scope);
       const state = await store.load(scope);
       if (state === undefined) return undefined;
+      // A build in flight may still hold a dropped entry as its base. It
+      // re-checks the generation itself before extending anything, and what it
+      // caches carries the generation its own attempt started under, which
+      // this check drops again if a tombstone has passed since.
+      const cached = ordinalCache.get(key);
+      if (cached !== undefined && !survivesRepairs(cached, state)) ordinalCache.delete(key);
       // `ContextGraphCreated` and `KnowledgeAssetRegisteredToContextGraph` both
       // sit on `ContextGraphStorage` and both carry the graph id as their FIRST
       // indexed argument; the creation row says where ordinal 0 is.
@@ -431,7 +482,8 @@ export function createKnowledgeAssetReadModel(
       if (!(await ownWriteHashHolds(readOptions.ownWrite))) return undefined;
 
       const held = ordinalCache.get(key);
-      if (held !== undefined && held.revision === state.cursor.revision) {
+      if (held !== undefined && held.revision === state.cursor.revision
+        && survivesRepairs(held, state)) {
         // Same revision, same rows: the creation row, both windows and the fold
         // are what they were when this was built. Only the per-call gates (the
         // head's age, the own write) can differ, and they were just re-run.
@@ -450,7 +502,9 @@ export function createKnowledgeAssetReadModel(
         await inFlight.catch(() => undefined);
         continue;
       }
-      const build = buildGraphOrdinals(state, creationWindow, contextGraphId, view, readOptions, key);
+      const build = buildGraphOrdinals(
+        state, generation, creationWindow, contextGraphId, view, readOptions, key,
+      );
       building.set(key, build);
       try {
         const built = await build;
@@ -472,6 +526,7 @@ export function createKnowledgeAssetReadModel(
    */
   async function buildGraphOrdinals(
     state: ChainEventLogState,
+    generation: number,
     creationWindow: ResolvedWindow,
     contextGraphId: bigint,
     view: KnowledgeAssetReadView,
@@ -526,6 +581,7 @@ export function createKnowledgeAssetReadModel(
     if (kaTopic0.length === 0) {
       return {
         revision: state.cursor.revision,
+        tombstoneGeneration: generation,
         lineage: state.cursor.lineage,
         topicSetVersion: state.cursor.topicSetVersion,
         createdBlockNumber,
@@ -552,13 +608,19 @@ export function createKnowledgeAssetReadModel(
     ));
     const countEvents = store.countEvents?.bind(store);
 
-    // Try to extend the cached fold instead of re-reading the whole graph. The
-    // lineage, topic-set and creation-block comparisons are shortcuts, not part
-    // of the proof below (which alone implies them): they skip it when the log
-    // says outright that it is not the log the fold was made from.
+    // Try to extend the cached fold instead of re-reading the whole graph.
+    // Never across a tombstone: the generation must be the one this attempt
+    // started under, and still be current now that `state` is loaded (a
+    // re-initialized scope is only ever loaded after the tick's bump), and the
+    // settled cursor must not have fallen below the run. The lineage,
+    // topic-set and creation-block comparisons are shortcuts, not part of the
+    // proof below: they skip it when the log says outright that it is not the
+    // log the fold was made from.
     const base = ordinalCache.get(key);
     const reusable = base?.prefix !== undefined
       && countEvents !== undefined
+      && base.tombstoneGeneration === generation
+      && survivesRepairs(base, state)
       && base.lineage === state.cursor.lineage
       && base.topicSetVersion === state.cursor.topicSetVersion
       && base.createdBlockNumber === createdBlockNumber
@@ -569,12 +631,14 @@ export function createKnowledgeAssetReadModel(
     if (reusable !== undefined && countEvents !== undefined) {
       // THE PROOF that the settled run is still exactly what was folded:
       //  - no tail row inside it, and no more rows than were folded. Settled
-      //    rows are never rewritten or deleted short of a tombstone, so with no
-      //    tombstone in between, an equal count means the same rows;
+      //    rows are never rewritten or deleted short of a tombstone, and the
+      //    generation check above ruled one out, so an equal count means the
+      //    same rows;
       //  - its last block still holds the same rows under the same block hash.
-      //    After a tombstone the log is re-fetched; the same hash at that block
-      //    is the same chain through it, whose registrations there coverage
-      //    says the log holds again, and the count says it holds nothing else.
+      //    Not needed for the proof once no tombstone intervened; kept as an
+      //    independent check that this is the log the run was folded from.
+      //    (It is NOT enough on its own across a tombstone: a rebuilt log can
+      //    differ below the boundary block and still hold as many rows.)
       const run = registrations(createdBlockNumber, reusable.throughBlockNumber);
       if (await countEvents(scope, run) === reusable.rowCount
         && await countEvents(scope, { ...run, settled: false }) === 0
@@ -592,7 +656,7 @@ export function createKnowledgeAssetReadModel(
 
     // The new settled run: the old one, plus whatever settled rows lead the
     // rows just read, up to (not into) the first block that holds a tail row.
-    const runThrough = settledThroughBlock(rows);
+    const runThrough = settledThroughBlock(rows, state.cursor.settledBlockNumber);
     const runRows = runThrough === undefined
       ? []
       : rows.filter((row) => row.blockNumber <= runThrough);
@@ -618,6 +682,7 @@ export function createKnowledgeAssetReadModel(
     } else {
       entry = {
         revision: state.cursor.revision,
+        tombstoneGeneration: generation,
         lineage: state.cursor.lineage,
         topicSetVersion: state.cursor.topicSetVersion,
         createdBlockNumber,
@@ -639,6 +704,7 @@ export function createKnowledgeAssetReadModel(
       if (runThrough !== undefined && event.blockNumber <= runThrough) runKaCount = entry.kaIds.length;
     }
     entry.revision = state.cursor.revision;
+    entry.tombstoneGeneration = generation;
     entry.lineage = state.cursor.lineage;
     entry.topicSetVersion = state.cursor.topicSetVersion;
     entry.createdBlockNumber = createdBlockNumber;

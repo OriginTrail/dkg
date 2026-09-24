@@ -11,6 +11,13 @@
  * tombstones with same-chain and forked rebuilds, replayed registrations,
  * settled rows appearing inside an already folded range, and tail rows below
  * the settled cursor, and compares after every step.
+ *
+ * Tombstones come in two kinds. A SIGNALLED one goes through
+ * `tombstoneChainEventLogScope`, as the tick's does, and advances the scope's
+ * process-local generation. An UNSIGNALLED one calls the store directly: a
+ * rebuild the model was never told about, which production does not produce,
+ * kept so that the store-side proof (count, tail, boundary rows) is still held
+ * to exactness on everything the simulator can rebuild.
  */
 
 import { ethers } from 'ethers';
@@ -35,6 +42,10 @@ import {
   type ChainEventLogRow,
   type ChainEventLogStore,
 } from '../src/chain-index/chain-event-log.js';
+import {
+  chainEventLogTombstoneGeneration,
+  tombstoneChainEventLogScope,
+} from '../src/chain-index/chain-event-log-tombstones.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
 
@@ -157,8 +168,12 @@ function recording(inner: MemoryChainEventLogStore, options: { withCount?: boole
   const counts: ChainEventLogCountQuery[] = [];
   let registrationRowsRead = 0;
   let beforeRead: (() => Promise<void>) | undefined;
+  let beforeLoad: (() => Promise<void>) | undefined;
   const store: ChainEventLogStore = {
-    load: (scope) => inner.load(scope),
+    async load(scope) {
+      await beforeLoad?.();
+      return inner.load(scope);
+    },
     commit: (scope, revision, commit) => inner.commit(scope, revision, commit),
     tombstone: (scope, revision) => inner.tombstone(scope, revision),
     blockHashAt: (scope, blockNumber) => inner.blockHashAt(scope, blockNumber),
@@ -184,6 +199,7 @@ function recording(inner: MemoryChainEventLogStore, options: { withCount?: boole
     counts,
     rowsRead: () => registrationRowsRead,
     onRegistrationRead(hook: (() => Promise<void>) | undefined) { beforeRead = hook; },
+    onLoad(hook: (() => Promise<void>) | undefined) { beforeLoad = hook; },
   };
 }
 
@@ -376,9 +392,16 @@ class SimulatedLog {
     });
   }
 
-  /** A deep reorg or a chain reset: everything dropped, the chain maybe forked below the settled cursor. */
-  async tombstoneAndRebuild(forkBelowSettled: boolean): Promise<void> {
-    expect(await this.store.tombstone(SCOPE, await this.revision())).toBeDefined();
+  /**
+   * A deep reorg or a chain reset: everything dropped, the chain maybe forked
+   * below the settled cursor. `signalled` is the tick's path (the generation
+   * moves); otherwise the model is not told.
+   */
+  async tombstoneAndRebuild(forkBelowSettled: boolean, signalled: boolean): Promise<void> {
+    const revision = await this.revision();
+    expect(signalled
+      ? await tombstoneChainEventLogScope(this.store, SCOPE, revision)
+      : await this.store.tombstone(SCOPE, revision)).toBeDefined();
     if (forkBelowSettled) {
       this.fork += 1;
       const forkPoint = DEPLOY + 1 + Math.floor(this.random() * (this.settled - DEPLOY));
@@ -436,7 +459,9 @@ const VIEWS = ['latest', 'finalized'] as const;
 
 describe('knowledge asset read model — ordinal cache', () => {
   it('answers every ordinal exactly as the per-call fold, across randomized commit histories', async () => {
-    const stats = { served: 0, refused: 0, duplicates: 0, extensions: 0, fullReads: 0, tombstones: 0 };
+    const stats = {
+      served: 0, refused: 0, duplicates: 0, extensions: 0, fullReads: 0, signalled: 0, unsignalled: 0,
+    };
     for (let seed = 1; seed <= 40; seed += 1) {
       // Graph 9 is created late enough to sit in the tail for a while; 10 is
       // never created; 11 gets registrations but no creation row.
@@ -460,8 +485,9 @@ describe('knowledge asset read model — ordinal cache', () => {
         else if (roll === 'tail-row-below-settled') await log.tailRowBelowSettled();
         else if (roll === 'topic-set' && log.chance(0.3)) await log.changeTopicSet();
         else if (roll === 'tombstone' && log.chance(0.4)) {
-          stats.tombstones += 1;
-          await log.tombstoneAndRebuild(log.chance(0.5));
+          const signalled = log.chance(0.5);
+          stats[signalled ? 'signalled' : 'unsignalled'] += 1;
+          await log.tombstoneAndRebuild(log.chance(0.5), signalled);
         }
 
         for (const view of VIEWS) {
@@ -509,7 +535,8 @@ describe('knowledge asset read model — ordinal cache', () => {
     expect(stats.served).toBeGreaterThan(3_000);
     expect(stats.refused).toBeGreaterThan(1_000);
     expect(stats.duplicates).toBeGreaterThan(1_000);
-    expect(stats.tombstones).toBeGreaterThan(10);
+    expect(stats.signalled).toBeGreaterThan(10);
+    expect(stats.unsignalled).toBeGreaterThan(10);
     expect(stats.fullReads).toBeGreaterThan(100);
     expect(stats.extensions).toBeGreaterThan(stats.fullReads * 3);
   }, 120_000);
@@ -566,8 +593,18 @@ describe('knowledge asset read model — ordinal cache proofs', () => {
       commit: async (commit: Parameters<MemoryChainEventLogStore['commit']>[2]) => {
         expect(await inner.commit(SCOPE, await revision(), commit)).toBeDefined();
       },
-      rebuild: async (rebuilt: readonly ChainEventLogRow[]) => {
-        expect(await inner.tombstone(SCOPE, await revision())).toBeDefined();
+      /**
+       * Tombstone and re-initialize on the same lineage. `signalled: false`
+       * calls the store directly, so the model is not told about it.
+       */
+      rebuild: async (
+        rebuilt: readonly ChainEventLogRow[],
+        options: { signalled: boolean },
+      ) => {
+        const expectedRevision = await revision();
+        expect(options.signalled
+          ? await tombstoneChainEventLogScope(inner, SCOPE, expectedRevision)
+          : await inner.tombstone(SCOPE, expectedRevision)).toBeDefined();
         expect(await inner.commit(SCOPE, undefined, {
           cursor: cursorAt(SETTLED, HEAD),
           rows: [...rebuilt],
@@ -640,11 +677,12 @@ describe('knowledge asset read model — ordinal cache proofs', () => {
     const log = await seededLog(history(HEAD));
     await expectReference(log, 'finalized');
     // Tombstoned and rebuilt: the same number of registrations through the
-    // same boundary block, but blocks from 61 on are another chain's.
+    // same boundary block, but blocks from 61 on are another chain's. Not
+    // signalled, so this is the boundary rows' block hash catching it alone.
     await log.rebuild(history(HEAD, {
       fork: (block) => (block > 60 ? 1 : 0),
       kaBase: (block) => (block > 60 ? 9_000n : 1_000n) + BigInt(block),
-    }));
+    }), { signalled: false });
     const expected = await expectReference(log, 'finalized');
     expect(expected.kaIds.at(-1)).toBe(9_000n + BigInt(SETTLED));
     expect(log.fullReads()).toBe(2);
@@ -655,13 +693,121 @@ describe('knowledge asset read model — ordinal cache proofs', () => {
     await expectReference(log, 'finalized');
     // The same chain, the same rows and the same boundary block, but the
     // rebuilt log holds blocks 40-50 as tail: the finalized fold drops them.
+    // Not signalled, so this is the tail count catching it alone.
     await log.rebuild(history(HEAD).map((row) => (
       row.blockNumber >= 40 && row.blockNumber <= 50 ? { ...row, settled: false } : row
-    )));
+    )), { signalled: false });
     const expected = await expectReference(log, 'finalized');
     expect(expected.kaIds).not.toContain(1_045n);
     expect(log.fullReads()).toBe(2);
     await expectReference(log, 'latest');
+  });
+
+  it('never extends a fold across a tombstone, over a same-count rebuild of the same chain', async () => {
+    const log = await seededLog(history(HEAD));
+    await expectReference(log, 'finalized');
+    await expectReference(log, 'latest');
+    const generation = chainEventLogTombstoneGeneration(SCOPE);
+    // The repair a tombstone exists for: the rebuilt log is the same chain
+    // (the lineage and every block hash unchanged) and holds as many
+    // registrations with the same boundary block, but the one at block 40 is
+    // not the one the old log held. Count, tail and boundary rows all agree.
+    const repaired = (block: number) => (block === 40 ? 9_000n : 1_000n) + BigInt(block);
+    await log.rebuild(history(HEAD, { kaBase: repaired }), { signalled: true });
+    expect(chainEventLogTombstoneGeneration(SCOPE)).toBe(generation + 1);
+
+    const finalized = await expectReference(log, 'finalized');
+    expect(finalized.kaIds[20]).toBe(9_040n);
+    await expect(log.readModel.readContextGraphKaAt(7n, 20n, { view: 'finalized' }))
+      .resolves.toEqual({ kaId: 9_040n, asOfBlockNumber: SETTLED });
+    expect((await expectReference(log, 'latest')).kaIds[20]).toBe(9_040n);
+    // Both views folded from scratch; nothing was proven against the old run.
+    expect(log.fullReads()).toBe(4);
+    // The re-folded entries extend again at the next revision.
+    await log.commit({ cursor: cursorAt(SETTLED, HEAD), rows: [], coverage: [] });
+    await expectReference(log, 'finalized');
+    await expectReference(log, 'latest');
+    expect(log.fullReads()).toBe(4);
+  });
+
+  it('never extends a fold across a tombstone that lands between the generation read and the load', async () => {
+    const log = await seededLog(history(HEAD));
+    await expectReference(log, 'latest');
+    // The attempt reads the generation, then the tombstone, its bump and the
+    // re-initialization all land before its load returns: the state it loads
+    // is the rebuilt log, so the entry must be judged by the generation as it
+    // is AFTER the load, not by the one the attempt started under.
+    let rebuilt = false;
+    log.recorded.onLoad(async () => {
+      if (rebuilt) return;
+      rebuilt = true;
+      await log.rebuild(history(HEAD, {
+        kaBase: (block) => (block === 40 ? 9_000n : 1_000n) + BigInt(block),
+      }), { signalled: true });
+    });
+    await expect(log.readModel.readContextGraphKaAt(7n, 20n, { view: 'latest' }))
+      .resolves.toEqual({ kaId: 9_040n, asOfBlockNumber: HEAD });
+    log.recorded.onLoad(undefined);
+    expect(log.fullReads()).toBe(2);
+    // Stamped with the generation the attempt started under, which is already
+    // gone: the next read re-folds once more rather than trusting it.
+    await expectReference(log, 'latest');
+    expect(log.fullReads()).toBe(3);
+  });
+
+  it('drops a fold when the settled cursor falls below its settled run', async () => {
+    const log = await seededLog(history(HEAD));
+    await expectReference(log, 'latest');
+    const counts = log.recorded.counts.length;
+    // No tombstone this process issued, yet the settled cursor is now below
+    // the run the fold holds (block 100). The tick never moves it down, so
+    // this can only be a rebuilt log, and the entry goes before any proof.
+    await log.commit({ cursor: cursorAt(60, HEAD), rows: [], coverage: [] });
+    await expectReference(log, 'latest');
+    expect(log.fullReads()).toBe(2);
+    expect(log.recorded.counts).toHaveLength(counts);
+    // The rows above block 60 are still flagged settled, but the new run stops
+    // at the cursor, so the next revision extends it instead of dropping it.
+    await log.commit({ cursor: cursorAt(60, HEAD), rows: [], coverage: [] });
+    await expectReference(log, 'latest');
+    expect(log.fullReads()).toBe(2);
+    expect(log.recorded.counts).toHaveLength(counts + 2);
+  });
+
+  it('keeps extending across revisions with no tombstone on its own scope', async () => {
+    const log = await seededLog(history(HEAD));
+    await expectReference(log, 'latest');
+    // A tombstone this process issued on ANOTHER scope moves that scope's
+    // generation only.
+    const otherScope = `${SCOPE}:other`;
+    expect(await log.inner.commit(otherScope, undefined, {
+      cursor: cursorAt(SETTLED, HEAD), rows: [], coverage: coverageThrough(HEAD),
+    })).toBeDefined();
+    const generation = chainEventLogTombstoneGeneration(SCOPE);
+    const otherGeneration = chainEventLogTombstoneGeneration(otherScope);
+    expect(await tombstoneChainEventLogScope(
+      log.inner, otherScope, (await log.inner.load(otherScope))!.cursor.revision,
+    )).toBeDefined();
+    expect(chainEventLogTombstoneGeneration(otherScope)).toBe(otherGeneration + 1);
+    expect(chainEventLogTombstoneGeneration(SCOPE)).toBe(generation);
+    // A lost CAS drops nothing, so it moves nothing.
+    expect(await tombstoneChainEventLogScope(log.inner, SCOPE, 999)).toBeUndefined();
+    expect(chainEventLogTombstoneGeneration(SCOPE)).toBe(generation);
+
+    await log.commit({ cursor: cursorAt(SETTLED, HEAD), rows: [], coverage: [] });
+    const counts = log.recorded.counts.length;
+    const reads = log.recorded.reads.length;
+    await expectReference(log, 'latest');
+    // The fast path: the run proven by two counts and its boundary block, and
+    // only the rows past it re-read. No full fold.
+    expect(log.fullReads()).toBe(1);
+    expect(log.recorded.counts).toHaveLength(counts + 2);
+    expect(log.recorded.reads.slice(reads).map((query) => query.fromBlockNumber))
+      .toEqual([SETTLED, SETTLED + 1]);
+    // And at the same revision, no store read at all.
+    await log.readModel.readContextGraphKaAt(7n, 0n, { view: 'latest' });
+    expect(log.recorded.counts).toHaveLength(counts + 2);
+    expect(log.recorded.reads).toHaveLength(reads + 2);
   });
 
   it('re-folds when a tail row lands below the settled run', async () => {

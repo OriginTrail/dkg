@@ -31,6 +31,11 @@ export {
 } from './chain-event-log.js';
 
 export {
+  chainEventLogTombstoneGeneration,
+  tombstoneChainEventLogScope,
+} from './chain-event-log-tombstones.js';
+
+export {
   CHAIN_EVENT_LOG_FAMILIES,
   ChainEventDecoderRegistry,
   HUB_ROTATION_EVENT_NAMES,
