@@ -88,7 +88,8 @@ describe('createDaemonUpdateHoldoffGate', () => {
         },
       );
       const apply = vi.fn(async (_target: string) => {});
-      const poll = gate.bindRollout<string>({
+      const run = gate.bindRollout<string>({
+        check: async () => ({ status: 'available', target: 'c1' }),
         onHold: () => {},
         revalidate: async () => ({ status: 'available', target: 'c1' }),
         apply,
@@ -96,7 +97,6 @@ describe('createDaemonUpdateHoldoffGate', () => {
         supersededMessage: 'SUPERSEDED',
         recheckFailedMessage: 'RECHECK_FAILED',
       });
-      const run = () => poll({ status: 'available', target: 'c1' });
       return { run, apply, sleeps };
     }
 

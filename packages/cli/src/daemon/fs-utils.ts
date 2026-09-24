@@ -7,8 +7,10 @@ import { _autoUpdateIo } from './manifest.js';
 /** The fs calls `writeFileAtomic` makes. Defaults to the daemon's `_autoUpdateIo`. */
 export interface AtomicWriteIo {
   writeFile(path: string, data: string): Promise<unknown>;
-  rename?(from: string, to: string): Promise<unknown>;
-  unlink?(path: string): Promise<unknown>;
+  /** Replaces `path` with the temp file: the step that makes the write atomic. */
+  rename(from: string, to: string): Promise<unknown>;
+  /** Removes the temp file when the rename fails (best effort). */
+  unlink(path: string): Promise<unknown>;
 }
 
 /**
@@ -24,30 +26,18 @@ export interface AtomicWriteIo {
  * does not truncate atomically. Reading that 80-char value then never
  * matched any remote SHA, sending the auto-updater into a permanent
  * "update available" loop that never converged.
- *
- * Falls back to a non-atomic write if `rename` is not available on the IO
- * surface (older test stubs); production always has it.
  */
 export async function writeFileAtomic(
   path: string,
   data: string,
   io: AtomicWriteIo = _autoUpdateIo,
 ): Promise<void> {
-  const { writeFile, rename, unlink } = io;
-  if (typeof rename !== 'function') {
-    // Older test stubs may not provide `rename`. Production fs/promises
-    // always does, so this branch only matters in unit tests with partial
-    // IO surfaces. Falling back to a direct write keeps the helper usable
-    // (without atomicity) instead of throwing TypeError on destructure.
-    await writeFile(path, data);
-    return;
-  }
   const tmp = `${path}.tmp.${process.pid}.${Date.now().toString(36)}`;
-  await writeFile(tmp, data);
+  await io.writeFile(tmp, data);
   try {
-    await rename(tmp, path);
+    await io.rename(tmp, path);
   } catch (err) {
-    try { await unlink?.(tmp); } catch { /* best-effort cleanup */ }
+    try { await io.unlink(tmp); } catch { /* best-effort cleanup */ }
     throw err;
   }
 }

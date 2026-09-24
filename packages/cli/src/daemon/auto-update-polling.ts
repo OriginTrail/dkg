@@ -117,10 +117,9 @@ export interface UpdatePolling {
 
 /**
  * Run `runCheck` shortly after boot, then `intervalMs` after each check
- * finishes. This is the single flight: a check (the poll, its hold-off, the
- * re-check and the apply) always finishes before the next one is scheduled, so
- * two checks never race on the persisted deadline. A failed check is logged and
- * polling goes on.
+ * finishes (the check, its hold-off, the re-check and the apply), so ticks
+ * never pile up behind a long hold. The gate itself also runs one flight at a
+ * time. A failed check is logged and polling goes on.
  */
 function schedulePolling(
   runCheck: () => Promise<void>,

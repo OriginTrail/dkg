@@ -1,8 +1,8 @@
 /**
- * The auto-update rollout gate shared by the git and npm daemon paths: single
- * flight across polling ticks, the per-node hold-off (through a required
- * {@link UpdateHoldoffDeadline} policy), the re-check after the hold, shutdown
- * aborts, the isUpdating flag and the apply.
+ * The auto-update rollout gate shared by the git and npm daemon paths. It runs
+ * the whole update flight — check, per-node hold-off (through a required
+ * {@link UpdateHoldoffDeadline} policy), re-check, apply — one at a time, with
+ * shutdown aborts and the isUpdating flag.
  */
 import type { UpdateHoldoffDeadline } from './auto-update-holdoff-deadline.js';
 
@@ -28,8 +28,10 @@ export type UpdateCheckOutcome<T extends string = string> =
   /** The check itself failed (network, registry): says nothing about the target. */
   | { status: 'failed' };
 
-/** How one update mode rolls out a detected target. Bound once per mode. */
+/** One update mode's checks and install. Bound to the gate once per mode. */
 export interface UpdateHoldoffStep<T extends string = string> {
+  /** The update check that starts each flight (records the daemon's status too). */
+  check: () => Promise<UpdateCheckOutcome<T>>;
   /** Emit the mode-specific "holding Ns before applying" line for the detected
    *  target; `resumed` is true when the deadline was carried over from before a restart. */
   onHold: (target: T, holdMs: number, resumed: boolean) => void;
@@ -65,24 +67,26 @@ export interface UpdateHoldoffGateConfig {
 }
 
 /**
- * Feed one poll's outcome into the rollout state machine:
+ * Run one update flight: check, then by the outcome
  *   available -> hold off, re-check, apply
  *   none      -> drop the deadline
  *   failed    -> nothing; the deadline is kept
+ * A call made while a flight is running joins that flight (same promise), so
+ * two flights never run at once.
  */
-export type UpdatePoller<T extends string = string> = (outcome: UpdateCheckOutcome<T>) => Promise<void>;
+export type UpdateFlight = () => Promise<void>;
 
 export interface UpdateHoldoffGate {
-  /** Bind a mode's rollout step once; poll every tick through the result.
-   *  Polls must not overlap: the daemon's scheduler starts a check only after
-   *  the previous one, including its hold-off and apply, has finished. */
-  bindRollout<T extends string>(rollout: UpdateHoldoffStep<T>): UpdatePoller<T>;
+  /** Bind a mode's step once; run a flight on every polling tick. All flights
+   *  of one gate share its deadline and never overlap. */
+  bindRollout<T extends string>(rollout: UpdateHoldoffStep<T>): UpdateFlight;
 }
 
 /**
- * The single auto-update rollout gate — create it ONCE, at the daemon scope.
- * Polls are serialized by the caller (see UpdateHoldoffGate.bindRollout). A
- * poll is a no-op once shutdown has begun. An `available` poll runs one rollout:
+ * The single auto-update rollout gate — create it ONCE, at the daemon scope. It
+ * runs one flight at a time (check → outcome → hold → re-check → apply); a call
+ * made meanwhile joins the running flight. Nothing starts once shutdown has
+ * begun, and a failed check keeps the deadline. An `available` check runs:
  *
  *   hold (the deadline policy's) -> log it if it is non-zero or resumed
  *     -> sleep it if non-zero
@@ -108,6 +112,8 @@ export interface UpdateHoldoffGate {
  */
 export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): UpdateHoldoffGate {
   const { deadline } = config;
+  // The flight in progress, shared by every bound step: the single flight.
+  let inFlight: Promise<void> | null = null;
 
   async function rollout<T extends string>(detected: T, step: UpdateHoldoffStep<T>): Promise<void> {
     const { holdMs, resumed } = await deadline.begin(detected);
@@ -154,12 +160,20 @@ export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): Update
   }
 
   return {
-    bindRollout<T extends string>(step: UpdateHoldoffStep<T>): UpdatePoller<T> {
-      return async (outcome) => {
+    bindRollout<T extends string>(step: UpdateHoldoffStep<T>): UpdateFlight {
+      async function flight(): Promise<void> {
+        if (config.isShuttingDown()) return; // nothing starts once shutdown began
+        const outcome = await step.check();
         if (outcome.status === 'failed') return; // says nothing: keep the deadline
-        if (config.isShuttingDown()) return; // no new transitions once shutdown began
+        if (config.isShuttingDown()) return;
         if (outcome.status === 'none') await deadline.clear();
         else await rollout(outcome.target, step);
+      }
+      return () => {
+        if (!inFlight) {
+          inFlight = flight().finally(() => { inFlight = null; });
+        }
+        return inFlight;
       };
     },
   };

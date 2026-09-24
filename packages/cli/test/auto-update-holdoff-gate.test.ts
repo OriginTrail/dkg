@@ -48,7 +48,11 @@ describe('createUpdateHoldoffGate (the shared rollout gate)', () => {
       log,
       sleep,
     };
+    // Each poll sets what the flight's check returns, then runs a flight.
+    let nextOutcome: UpdateCheckOutcome<string> = DETECTED;
+    const check = vi.fn(async () => nextOutcome);
     const step: UpdateHoldoffStep<string> = {
+      check,
       onHold: () => { calls.push('onHold'); },
       revalidate,
       apply,
@@ -57,7 +61,12 @@ describe('createUpdateHoldoffGate (the shared rollout gate)', () => {
       recheckFailedMessage: 'RECHECK_FAILED',
     };
     const gate = createUpdateHoldoffGate(config);
-    return { gate, poll: gate.bindRollout(step), step, calls, log, setUpdating, sleep, revalidate, apply };
+    const flight = gate.bindRollout(step);
+    const poll = (outcome: UpdateCheckOutcome<string>) => {
+      nextOutcome = outcome;
+      return flight();
+    };
+    return { gate, poll, step, check, calls, log, setUpdating, sleep, revalidate, apply };
   }
 
   it('runs the gate in order and applies the REVALIDATED target (not the detected one)', async () => {
@@ -67,6 +76,24 @@ describe('createUpdateHoldoffGate (the shared rollout gate)', () => {
       'onHold', 'sleep', 'revalidate', 'setUpdating:true', 'apply:v-fresh', 'setUpdating:false',
     ]);
     expect(apply).toHaveBeenCalledWith('v-fresh');
+  });
+
+  it('runs one flight at a time: a call during a flight joins it, so nothing runs twice', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((r) => { release = r; });
+    const { poll, check, revalidate, apply } = harness({ sleep: () => held });
+
+    const first = poll(DETECTED);
+    const second = poll(DETECTED); // e.g. a caller without the daemon's scheduler
+    expect(second, 'joins the running flight').toBe(first);
+    release();
+    await Promise.all([first, second]);
+    expect(check).toHaveBeenCalledOnce();
+    expect(revalidate).toHaveBeenCalledOnce();
+    expect(apply).toHaveBeenCalledOnce();
+
+    await poll(DETECTED); // once it has finished, the next call runs a new flight
+    expect(check).toHaveBeenCalledTimes(2);
   });
 
   it('does NOT apply a target withdrawn during the hold-off (re-check -> none)', async () => {
@@ -108,7 +135,7 @@ describe('createUpdateHoldoffGate (the shared rollout gate)', () => {
     await expect(poll(DETECTED)).rejects.toThrow('boom');
     expect(setUpdating).toHaveBeenLastCalledWith(false);
     const ok = vi.fn(async () => {});
-    await gate.bindRollout({ ...step, apply: ok })(DETECTED);
+    await gate.bindRollout({ ...step, apply: ok })();
     expect(ok).toHaveBeenCalledOnce();
   });
 
@@ -197,7 +224,9 @@ function persistentNode(opts: {
     // re-check confirms the detected target; a run can override that or the apply.
     let detected = '';
     let overrides: Pick<Partial<UpdateHoldoffStep<string>>, 'revalidate' | 'apply'> = {};
-    const poll = gate.bindRollout<string>({
+    let nextOutcome: UpdateCheckOutcome<string> = { status: 'none' };
+    const flight = gate.bindRollout<string>({
+      check: async () => nextOutcome,
       onHold: (_target, ms, resumed) => { holds.push([ms, resumed]); },
       revalidate: () => (overrides.revalidate ?? (async () => available(detected)))(),
       apply: (target) => (overrides.apply ?? apply)(target),
@@ -205,6 +234,10 @@ function persistentNode(opts: {
       supersededMessage: 'SUPERSEDED',
       recheckFailedMessage: 'RECHECK_FAILED',
     });
+    const poll = (outcome: UpdateCheckOutcome<string>) => {
+      nextOutcome = outcome;
+      return flight();
+    };
     /** A poll that detected `target`. */
     const run = (target: string, runOverrides: typeof overrides = {}) => {
       detected = target;
@@ -544,6 +577,16 @@ describe('createUpdateHoldoffGate — persisted rollout deadline', () => {
     expect(b.rng).not.toHaveBeenCalled();
     expect(b.apply).not.toHaveBeenCalled();
     expect(node.record()).toBeNull();
+  });
+
+  it('two concurrent polls make one deadline transition and one apply', async () => {
+    const node = persistentNode();
+    const b = node.boot({ rng: () => 0.5 });
+    await Promise.all([b.run('c1'), b.run('c1')]);
+    expect(b.rng, 'one deadline drawn').toHaveBeenCalledOnce();
+    expect(b.holds).toEqual([[900_000, false]]);
+    expect(b.apply).toHaveBeenCalledOnce();
+    expect(node.record(), 'and cleared once, after the apply').toBeNull();
   });
 
   it('writes no record when jitter is disabled', async () => {

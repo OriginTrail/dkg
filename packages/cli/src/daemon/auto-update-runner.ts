@@ -103,8 +103,31 @@ export interface NpmUpdateRunCheckDeps {
  * skips a version withdrawn during the wait.
  */
 export function createNpmUpdateRunCheck(deps: NpmUpdateRunCheckDeps): () => Promise<void> {
+  const check = async (): Promise<UpdateCheckOutcome> => {
+    const npmStatus = await checkForNpmVersionUpdate(deps.log, deps.allowPrerelease, deps.channel);
+    const derived = deriveUpdateCheckState(npmStatus);
+    if (derived) {
+      deps.lastUpdateCheck.checkedAt = Date.now();
+      deps.lastUpdateCheck.upToDate = derived.upToDate;
+      deps.lastUpdateCheck.channelTargetMissing = derived.channelTargetMissing;
+      // Always write (including '') so a prior "available" version does not
+      // linger after the target disappears or the node catches up.
+      deps.lastUpdateCheck.latestVersion = derived.latestVersion;
+      if (npmStatus.status === 'no-target')
+        deps.log(
+          `Auto-update (npm): WARNING — channel "${npmStatus.channel}" has no acceptable target (tag missing or rejected by allowPrerelease); node will not update until it is published.`,
+        );
+    }
+    return npmCheckOutcome(npmStatus);
+  };
+
   const { autoApply } = deps;
-  const poll = autoApply?.gate.bindRollout<string>({
+  if (!autoApply) {
+    // Version check only — no auto-apply when polling disabled.
+    return async () => { await check(); };
+  }
+  return autoApply.gate.bindRollout<string>({
+    check,
     onHold: (version, holdMs, resumed) =>
       deps.log(`Auto-update (npm): version ${version} available; ${describeUpdateHold(holdMs, resumed)}`),
     shutdownMessage:
@@ -127,25 +150,6 @@ export function createNpmUpdateRunCheck(deps: NpmUpdateRunCheckDeps): () => Prom
       }
     },
   });
-
-  return async () => {
-    const npmStatus = await checkForNpmVersionUpdate(deps.log, deps.allowPrerelease, deps.channel);
-    const derived = deriveUpdateCheckState(npmStatus);
-    if (derived) {
-      deps.lastUpdateCheck.checkedAt = Date.now();
-      deps.lastUpdateCheck.upToDate = derived.upToDate;
-      deps.lastUpdateCheck.channelTargetMissing = derived.channelTargetMissing;
-      // Always write (including '') so a prior "available" version does not
-      // linger after the target disappears or the node catches up.
-      deps.lastUpdateCheck.latestVersion = derived.latestVersion;
-      if (npmStatus.status === 'no-target')
-        deps.log(
-          `Auto-update (npm): WARNING — channel "${npmStatus.channel}" has no acceptable target (tag missing or rejected by allowPrerelease); node will not update until it is published.`,
-        );
-    }
-    if (!poll) return; // version check only — no auto-apply when polling disabled
-    await poll(npmCheckOutcome(npmStatus));
-  };
 }
 
 export interface GitUpdateRunCheckDeps {
@@ -163,7 +167,23 @@ export interface GitUpdateRunCheckDeps {
  * before the (possibly long) wait.
  */
 export function createGitUpdateRunCheck(deps: GitUpdateRunCheckDeps): () => Promise<void> {
-  const poll = deps.gate.bindRollout<string>({
+  const check = async (): Promise<UpdateCheckOutcome> => {
+    const gitStatus = await checkForNewCommitWithStatus(deps.au, deps.log);
+    if (gitStatus.status === 'error') {
+      deps.log('Auto-update (git): update check failed.');
+      return { status: 'failed' };
+    }
+
+    deps.lastUpdateCheck.checkedAt = Date.now();
+    deps.lastUpdateCheck.upToDate = gitStatus.status === 'up-to-date';
+    deps.lastUpdateCheck.channelTargetMissing = false;
+    deps.lastUpdateCheck.latestVersion = '';
+    deps.lastUpdateCheck.latestCommit = gitStatus.commit ?? '';
+    return gitCheckOutcome(gitStatus);
+  };
+
+  return deps.gate.bindRollout<string>({
+    check,
     onHold: (commit, holdMs, resumed) =>
       deps.log(
         `Auto-update (git): new commit ${commit.slice(0, 8)} available; ${describeUpdateHold(holdMs, resumed)}`,
@@ -191,20 +211,4 @@ export function createGitUpdateRunCheck(deps: GitUpdateRunCheckDeps): () => Prom
       deps.log('Auto-update (git): update failed.');
     },
   });
-
-  return async () => {
-    const gitStatus = await checkForNewCommitWithStatus(deps.au, deps.log);
-    if (gitStatus.status === 'error') {
-      deps.log('Auto-update (git): update check failed.');
-      return;
-    }
-
-    deps.lastUpdateCheck.checkedAt = Date.now();
-    deps.lastUpdateCheck.upToDate = gitStatus.status === 'up-to-date';
-    deps.lastUpdateCheck.channelTargetMissing = false;
-    deps.lastUpdateCheck.latestVersion = '';
-    deps.lastUpdateCheck.latestCommit = gitStatus.commit ?? '';
-
-    await poll(gitCheckOutcome(gitStatus));
-  };
 }
