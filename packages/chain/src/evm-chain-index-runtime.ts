@@ -53,7 +53,7 @@ import {
   type HubBinding,
 } from './chain-index/index.js';
 import { resolveChainIndexCapability, type ChainIndexCapability } from './chain-index-capability.js';
-import { normalizeKnowledgeAssetReadModel } from './chain-index/normalize-knowledge-asset-read-model.js';
+import { isScalarKnowledgeAssetReadModel } from './chain-index/normalize-knowledge-asset-read-model.js';
 import type { NormalizedChainEventLogBinding } from './normalized-chain-event-log-binding.js';
 import type { ChainEventLogStore } from './chain-index/chain-event-log.js';
 import {
@@ -87,14 +87,20 @@ export type EvmChainIndexReadProvider = <T>(
   opts?: ReadOpts,
 ) => Promise<T>;
 
-export type EvmChainIndexRuntimeOptions = EvmChainIndexRuntimeCommonOptions & (
-  | { readonly chainIndex: ChainIndexCapability; readonly store?: never }
-  | {
-    readonly chainIndex?: never;
-    /** @deprecated Use chainIndex: { store } for new callers. */
-    readonly store: ChainEventLogStore;
-  }
-);
+/** Legacy SDK construction options remain extendable with a required store. */
+export interface EvmChainIndexRuntimeOptions extends EvmChainIndexRuntimeCommonOptions {
+  /** @deprecated Use the capability input for new callers. */
+  readonly store: ChainEventLogStore;
+  readonly chainIndex?: never;
+}
+
+/** Capability construction input for the process-owned log and reader. */
+export interface EvmChainIndexCapabilityOptions extends EvmChainIndexRuntimeCommonOptions {
+  readonly chainIndex: ChainIndexCapability;
+  readonly store?: never;
+}
+
+export type EvmChainIndexRuntimeInput = EvmChainIndexRuntimeOptions | EvmChainIndexCapabilityOptions;
 
 interface EvmChainIndexRuntimeCommonOptions {
   readonly scope: string;
@@ -326,7 +332,7 @@ function chainIndexAuthorityAnchorMaxAgeMs(intervalMs: number): number {
  * existed.
  */
 export function createEvmChainIndexRuntime(
-  input: EvmChainIndexRuntimeOptions,
+  input: EvmChainIndexRuntimeInput,
 ): EvmChainIndexRuntime {
   if (input.chainIndex !== undefined && input.store !== undefined) {
     throw new TypeError('Supply chainIndex or the legacy store, not both');
@@ -728,7 +734,7 @@ export function createEvmChainIndexRuntime(
     const maxHeadAgeMs = chainIndexAuthorityAnchorMaxAgeMs(options.intervalMs);
     // An injected reader owns the complete read path. In particular, worker
     // unavailability must never revive the synchronous decoder on this thread.
-    binding.knowledgeAssets = normalizeKnowledgeAssetReadModel(options.chainIndex.readModelFactory !== undefined
+    const knowledgeAssets = options.chainIndex.readModelFactory !== undefined
       ? options.chainIndex.readModelFactory({
         scope: options.scope,
         contextGraphStorageAddress,
@@ -746,7 +752,13 @@ export function createEvmChainIndexRuntime(
         // other. Every reader of a frozen tick degrades to the chain.
         maxHeadAgeMs,
         now,
-      }));
+      });
+    // Modern factories own the full read path. Invalid JavaScript providers
+    // must fail construction rather than acquire a main-thread list replay.
+    if (!isScalarKnowledgeAssetReadModel(knowledgeAssets)) {
+      throw new Error('Chain-index read model factory must implement readContextGraphKaAt');
+    }
+    binding.knowledgeAssets = knowledgeAssets;
   }
   if (options.knowledgeAssetStorage !== undefined) {
     binding.knowledgeAssetStorageAddress = options.knowledgeAssetStorage.address;

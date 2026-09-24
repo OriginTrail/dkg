@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MockChainAdapter,
 } from '@origintrail-official/dkg-chain';
-import { DKGAgent } from '../src/index.js';
+import { DKGAgent, type DKGAgentConfig } from '../src/index.js';
 
 const OPERATIONAL_KEY =
   '0x59c6995e998f97a5a0044966f0945388c9e82d88a3fdf0e0c7b33e0d2d2d8b2f';
@@ -42,6 +42,7 @@ describe('DKGAgent chain cursor wiring', () => {
     const chainEventLogReadModelFactory = vi.fn(() => ({
       async readContextGraphForKa() { return undefined; },
       async readContextGraphKaList() { return undefined; },
+      async readContextGraphKaAt() { return undefined; },
     }));
 
     agent = await DKGAgent.create({
@@ -91,6 +92,30 @@ describe('DKGAgent chain cursor wiring', () => {
     expect(receivedCapability.readModelFactory).toBe(ownership === 'capability' ? chainEventLogReadModelFactory : undefined);
     expect(runtime.start).toHaveBeenCalledOnce();
     expect((agent as any).chain.indexTickMs).toBe(12_000);
+  });
+
+  it.each(['evm', 'custom', 'none'] as const)('rejects contradictory ownership with the %s adapter selection', async (adapterKind) => {
+    const store = {
+      load: vi.fn(async () => undefined),
+      commit: vi.fn(async () => 1),
+      tombstone: vi.fn(async () => 2),
+      readEvents: vi.fn(async () => []),
+      blockHashAt: vi.fn(async () => undefined),
+    };
+    const config: DKGAgentConfig = {
+      name: 'ConflictingChainOwners',
+      listenPort: 0,
+      ...(adapterKind === 'evm' ? { chainConfig: {
+        rpcUrl: 'http://127.0.0.1:59998',
+        hubAddress: '0x0000000000000000000000000000000000000001',
+        operationalKeys: [OPERATIONAL_KEY],
+        chainId: 'evm:31337',
+      } } : {}),
+      ...(adapterKind === 'custom' ? { chainAdapter: new MockChainAdapter('mock:31337') } : {}),
+      chainIndex: { store },
+      chainEventLogStore: store,
+    };
+    await expect(DKGAgent.create(config)).rejects.toThrow('not both');
   });
 
   it('passes the chain-event lane cursor store into the poller on start', async () => {

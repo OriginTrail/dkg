@@ -23,12 +23,9 @@ export function normalizeChainEventLogBinding(
   binding: ChainEventLogBinding | undefined,
 ): NormalizedChainEventLogBinding | undefined {
   if (binding === undefined) return undefined;
+  if (isNormalizedBinding(binding)) return binding;
   const existing = normalizedBindings.get(binding);
   if (existing !== undefined) return existing;
-  if (isNormalizedBinding(binding)) {
-    normalizedBindings.set(binding, binding);
-    return binding;
-  }
   const normalized = Object.freeze({
     // Read the interface explicitly: SDK bindings may expose these values
     // through prototype getters, which an object spread would silently drop.

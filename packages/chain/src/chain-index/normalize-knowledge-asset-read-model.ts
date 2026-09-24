@@ -1,16 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { KnowledgeAssetReadModel } from './knowledge-asset-read-model.js';
-
-/** Internal readers always have a scalar ordinal port, including legacy SDK inputs. */
-export type ScalarKnowledgeAssetReadModel = KnowledgeAssetReadModel & Required<
-  Pick<KnowledgeAssetReadModel, 'readContextGraphKaAt'>
->;
+import type { KnowledgeAssetReadModel, ScalarKnowledgeAssetReadModel } from './knowledge-asset-read-model.js';
+export type { ScalarKnowledgeAssetReadModel } from './knowledge-asset-read-model.js';
 
 export function isScalarKnowledgeAssetReadModel(
   model: KnowledgeAssetReadModel,
 ): model is ScalarKnowledgeAssetReadModel {
-  return typeof model.readContextGraphKaAt === 'function';
+  return typeof model?.readContextGraphKaAt === 'function';
 }
 
 /** Adapt compatibility once at binding creation, never after a scalar refusal. */

@@ -2,7 +2,7 @@ import type { Worker } from 'node:worker_threads';
 import { chainEventLogStateReadRefusal } from '@origintrail-official/dkg-chain/internal/chain-index-worker';
 import type {
   ChainEventLogStore,
-  KnowledgeAssetReadModel,
+  ScalarKnowledgeAssetReadModel,
   KnowledgeAssetReadModelFactoryOptions,
   KnowledgeAssetReadOptions,
 } from '@origintrail-official/dkg-chain';
@@ -88,7 +88,7 @@ export class ChainIndexReadWorker {
     });
   }
 
-  createReadModel = (model: KnowledgeAssetReadModelFactoryOptions): KnowledgeAssetReadModel => {
+  createReadModel = (model: KnowledgeAssetReadModelFactoryOptions): ScalarKnowledgeAssetReadModel => {
     // A new binding never coalesces with work from a retired adapter generation.
     const generation = ++this.nextModelId;
     const binding = { ...model };

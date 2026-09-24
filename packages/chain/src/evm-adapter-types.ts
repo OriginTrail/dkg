@@ -10,13 +10,11 @@ import type { ApprovalPolicy, ContextGraphRegistryScanCursorStore } from './chai
 import type { ContextGraphAuthorityHistoryStore } from './context-graph-authority-history.js';
 import type { ContextGraphAuthorityIndexStore } from './context-graph-authority-index-checkpoint.js';
 import type { ContextGraphAuthorityIndexBootstrap } from './context-graph-authority-index-snapshot.js';
-import type { ChainIndexConfig } from './chain-index-capability.js';
+import type { ChainIndexCompatibilityConfig, ChainIndexConfig } from './chain-index-capability.js';
 import type { ChainEventLogBindingSource } from './chain-event-log-binding.js';
 import type { RpcRequestAdmission } from './rpc-request-transport.js';
 
-export type EVMAdapterBaseConfig = EVMAdapterCommonConfig & ChainIndexConfig;
-
-interface EVMAdapterCommonConfig {
+export interface EVMAdapterBaseConfig extends ChainIndexCompatibilityConfig {
   rpcUrl: string;
   rpcUrls?: string[];
   /** Process-shared transport budget injected by the daemon composition root. */
@@ -178,7 +176,7 @@ interface EVMAdapterCommonConfig {
   minPublisherTracWei?: bigint;
 }
 
-export type EVMAdapterConfig = EVMAdapterBaseConfig & {
+export interface EVMAdapterConfig extends EVMAdapterBaseConfig {
   /** Admin wallet key used for profile/key-management transactions. */
   adminPrivateKey?: string;
   /**
@@ -187,7 +185,10 @@ export type EVMAdapterConfig = EVMAdapterBaseConfig & {
    * publish/read-only usage; admin-only operations fail when invoked.
    */
   allowNoAdminSigner?: boolean;
-};
+}
+
+/** Opt-in compile-time ownership checks; the compatibility interface remains extendable. */
+export type StrictEVMAdapterConfig = EVMAdapterConfig & ChainIndexConfig;
 
 export interface ContractCache {
   hub: Contract;

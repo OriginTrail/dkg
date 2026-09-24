@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { resolveChainIndexCapability, type ChainIndexCapability, type ChainIndexConfig } from '../src/chain-index-capability.js';
+import { resolveChainIndexCapability, type ChainIndexCapability } from '../src/chain-index-capability.js';
+import { EVMChainAdapter, type EVMAdapterConfig } from '../src/index.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
 
 describe('chain-index capability admission', () => {
@@ -11,9 +12,21 @@ describe('chain-index capability admission', () => {
     expect(resolveChainIndexCapability({})).toBeUndefined();
   });
 
+  it('rejects contradictory ownership through the extendable public adapter config', () => {
+    const store = new MemoryChainEventLogStore();
+    const config: EVMAdapterConfig = {
+      rpcUrl: 'http://127.0.0.1:59998',
+      privateKey: `0x${'11'.repeat(32)}`,
+      hubAddress: `0x${'22'.repeat(20)}`,
+      chainIndex: { store },
+      chainEventLogStore: store,
+    };
+    expect(() => new EVMChainAdapter(config)).toThrow('not both');
+  });
+
   it('rejects competing owners and reader-only JavaScript configurations', () => {
     const store = new MemoryChainEventLogStore();
-    expect(() => resolveChainIndexCapability({ chainIndex: { store }, chainEventLogStore: store } as unknown as ChainIndexConfig))
+    expect(() => resolveChainIndexCapability({ chainIndex: { store }, chainEventLogStore: store }))
       .toThrow('not both');
     expect(() => resolveChainIndexCapability({ chainIndex: {} as ChainIndexCapability }))
       .toThrow('requires its process-owned store');

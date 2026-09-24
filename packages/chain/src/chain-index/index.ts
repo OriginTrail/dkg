@@ -64,6 +64,7 @@ export {
   type ContextGraphForKaAnswer,
   type KnowledgeAssetOwnWrite,
   type KnowledgeAssetReadModel,
+  type ScalarKnowledgeAssetReadModel,
   type KnowledgeAssetReadModelFactory,
   type KnowledgeAssetReadModelFactoryOptions,
   type KnowledgeAssetReadModelOptions,

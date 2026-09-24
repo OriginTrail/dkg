@@ -115,8 +115,17 @@ export interface KnowledgeAssetReadModel {
     contextGraphId: bigint,
     options?: KnowledgeAssetReadOptions,
   ): Promise<ContextGraphKaList | undefined>;
-  /** Optional scalar path so worker callers need not copy a complete KA list. */
+  /** Optional only for legacy readers supplied through an explicit binding. */
   readContextGraphKaAt?(
+    contextGraphId: bigint,
+    index: bigint,
+    options?: KnowledgeAssetReadOptions,
+  ): Promise<Readonly<{ kaId: bigint; asOfBlockNumber: number }> | undefined>;
+}
+
+/** Owned readers must provide scalar ordinals without compatibility list replay. */
+export interface ScalarKnowledgeAssetReadModel extends KnowledgeAssetReadModel {
+  readContextGraphKaAt(
     contextGraphId: bigint,
     index: bigint,
     options?: KnowledgeAssetReadOptions,
@@ -133,12 +142,12 @@ export interface KnowledgeAssetReadModelFactoryOptions {
 
 export type KnowledgeAssetReadModelFactory = (
   options: KnowledgeAssetReadModelFactoryOptions,
-) => KnowledgeAssetReadModel;
+) => ScalarKnowledgeAssetReadModel;
 
 /** Capture through the store port, then use the same evaluator as the worker. */
 export function createKnowledgeAssetReadModel(
   options: KnowledgeAssetReadModelOptions,
-): KnowledgeAssetReadModel {
+): ScalarKnowledgeAssetReadModel {
   const address = normalizeChainEventLogAddress(options.contextGraphStorageAddress);
   if (address === undefined) {
     throw new Error('Knowledge asset read model ContextGraphStorage address is invalid');

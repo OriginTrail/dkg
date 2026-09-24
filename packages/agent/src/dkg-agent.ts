@@ -115,7 +115,7 @@ import {
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 import { prepareRfc64LateLegacySwmBoundaryV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
-import { resolveChainIndexCapability, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainIndexConfig, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { resolveChainIndexCapability, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -407,6 +407,7 @@ import {
   type DurableSyncResult,
   type SharedMemorySyncResult,
   type DKGAgentConfig,
+  type StrictDKGAgentConfig,
   type Rfc64CatalogAccessPolicyAuthorityConfigV1,
   type Rfc64CatalogBootstrapConfigV1,
   type Rfc64CatalogBootstrapPolicyV1,
@@ -575,6 +576,7 @@ export type {
   SharedMemorySyncDiagnostics,
   CatchupSyncDiagnostics,
   DKGAgentConfig,
+  StrictDKGAgentConfig,
   Rfc64CatalogAccessPolicyAuthorityConfigV1,
   Rfc64CatalogBootstrapConfigV1,
   Rfc64CatalogBootstrapPolicyV1,
@@ -654,8 +656,8 @@ function throwStorageAckTimingConflict(): never {
 
 type StorageAckNormalizedDKGAgentConfig = Omit<
   DKGAgentConfig,
-  'storageAckTiming' | 'ackHandlerDeadlineMs' | 'ackSendTimeoutMs' | keyof ChainIndexConfig
-> & ChainIndexConfig & Pick<ResolvedDKGAgentConfig, 'storageAckTiming'>;
+  'storageAckTiming' | 'ackHandlerDeadlineMs' | 'ackSendTimeoutMs'
+> & Pick<ResolvedDKGAgentConfig, 'storageAckTiming'>;
 
 function normalizeStorageAckConfig(config: DKGAgentConfig): StorageAckNormalizedDKGAgentConfig {
   const hasStorageAckTiming = config.storageAckTiming !== undefined && config.storageAckTiming !== null;
@@ -712,6 +714,7 @@ function constructConfiguredChainAdapter(
   config: StorageAckNormalizedDKGAgentConfig,
   contextGraphAuthorityIndexBootstrap?: EVMAdapterConfig['contextGraphAuthorityIndexBootstrap'],
 ): Readonly<{ chain: ChainAdapter; operationalKeys: string[] | undefined }> {
+  const chainIndex = resolveChainIndexCapability(config);
   let operationalKeys = config.chainConfig?.operationalKeys;
   if (config.chainAdapter) {
     const chain = config.chainAdapter;
@@ -721,7 +724,6 @@ function constructConfiguredChainAdapter(
     return { chain, operationalKeys };
   }
   if (config.chainConfig && operationalKeys?.length) {
-    const chainIndex = resolveChainIndexCapability(config);
     const evmConfigBase = {
       rpcUrl: config.chainConfig.rpcUrl,
       rpcUrls: config.chainConfig.rpcUrls,
@@ -748,12 +750,8 @@ function constructConfiguredChainAdapter(
         ? { adminPrivateKey: config.chainConfig.adminPrivateKey }
         : { allowNoAdminSigner: true }),
     };
-    // Only this adapter gets the owning capability. Keep the two valid input
-    // shapes distinct so TypeScript cannot flatten them into optional ownership.
-    const evmConfig: EVMAdapterConfig = chainIndex === undefined
-      ? evmConfigBase
-      : { ...evmConfigBase, chainIndex };
-    const chain = new EVMChainAdapter(evmConfig);
+    // Only this adapter gets the normalized owning capability.
+    const chain = new EVMChainAdapter({ ...evmConfigBase, chainIndex });
     return { chain, operationalKeys };
   }
   return { chain: new NoChainAdapter(), operationalKeys };

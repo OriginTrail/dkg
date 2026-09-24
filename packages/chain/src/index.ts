@@ -231,6 +231,7 @@ export type { MockChainAdapterOptions } from './mock-adapter.js';
 export {
   EVMChainAdapter,
   type EVMAdapterConfig,
+  type StrictEVMAdapterConfig,
   decodeEvmError,
   enrichEvmError,
   classifyRpcRetryDisposition,
@@ -313,6 +314,7 @@ export type { ChainEventLogStore } from './chain-index/chain-event-log.js';
 export {
   type ContextGraphForKaAnswer,
   type KnowledgeAssetReadModel,
+  type ScalarKnowledgeAssetReadModel,
   type KnowledgeAssetReadModelFactory,
   type KnowledgeAssetReadModelFactoryOptions,
   type KnowledgeAssetReadOptions,
@@ -339,6 +341,8 @@ export {
   type EvmChainIndexContract,
   type EvmChainIndexRuntime,
   type EvmChainIndexRuntimeOptions,
+  type EvmChainIndexCapabilityOptions,
+  type EvmChainIndexRuntimeInput,
 } from './evm-chain-index-runtime.js';
 
-export { resolveChainIndexCapability, type ChainIndexCapability, type ChainIndexConfig } from './chain-index-capability.js';
+export { resolveChainIndexCapability, type ChainIndexCapability, type ChainIndexCompatibilityConfig, type ChainIndexConfig } from './chain-index-capability.js';

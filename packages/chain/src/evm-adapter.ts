@@ -51,7 +51,7 @@ export {
   effectivePublishAllowance,
   V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE,
 } from './evm-adapter-allowance.js';
-export type { EVMAdapterConfig } from './evm-adapter-types.js';
+export type { EVMAdapterConfig, StrictEVMAdapterConfig } from './evm-adapter-types.js';
 
 /**
  * EVM chain adapter implementing the V9 ChainAdapter interface.

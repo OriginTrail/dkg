@@ -293,24 +293,24 @@ describe('createEvmChainIndexRuntime', () => {
     expect(runtime.binding.knowledgeAssets).toBe(readModel);
     await expect(runtime.binding.knowledgeAssets!.readContextGraphForKa(42n))
       .resolves.toBeUndefined();
+    await expect(runtime.binding.knowledgeAssets!.readContextGraphKaAt(7n, 0n))
+      .resolves.toBeUndefined();
+    expect(readModel.readContextGraphKaAt).toHaveBeenCalledExactlyOnceWith(7n, 0n);
+    expect(readModel.readContextGraphKaList).not.toHaveBeenCalled();
     expect(readEvents).not.toHaveBeenCalled();
   });
 
-  it('normalizes a legacy list-only factory result once for scalar ordinal reads', async () => {
+  it('rejects a list-only JavaScript factory instead of installing a compatibility replay', () => {
     const readList = vi.fn(async () => ({
       contextGraphId: 7n, kaIds: [42n, 43n], throughBlockNumber: 900,
     }));
     const model = { readContextGraphForKa: vi.fn(async () => undefined), readContextGraphKaList: readList };
-    const factory = vi.fn<KnowledgeAssetReadModelFactory>(() => model);
-    const { runtime } = harness({ chainEventLogReadModelFactory: factory });
-    const normalized = runtime.binding.knowledgeAssets!;
-    expect(normalized).not.toBe(model);
-    await expect(normalized.readContextGraphKaAt(7n, 0n, { view: 'latest' }))
-      .resolves.toEqual({ kaId: 42n, asOfBlockNumber: 900 });
-    expect(readList).toHaveBeenCalledExactlyOnceWith(7n, { view: 'latest' });
-    expect(runtime.binding.knowledgeAssets).toBe(normalized);
+    // Simulate an untyped JavaScript caller violating the modern factory contract.
+    const factory = vi.fn(() => model);
+    expect(() => harness({ chainEventLogReadModelFactory: factory as unknown as KnowledgeAssetReadModelFactory }))
+      .toThrow('Chain-index read model factory must implement readContextGraphKaAt');
     expect(factory).toHaveBeenCalledOnce();
-    await runtime.stop();
+    expect(readList).not.toHaveBeenCalled();
   });
 
   it('does not substitute an inline reader when the injected factory fails', () => {

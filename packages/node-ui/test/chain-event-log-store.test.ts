@@ -2,8 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import { DashboardDB } from '../src/db.js';
 import {
+  SqliteChainEventLogReader,
   SqliteChainEventLogStore,
   type SqliteChainEventLogCommit,
   type SqliteChainEventLogRow,
@@ -105,6 +107,75 @@ describe('SqliteChainEventLogStore', () => {
       coveredThroughBlock: 12,
       floorBlock: 1,
     }]);
+  });
+
+  it('serves the same state, indexed rows and hashes through a separate read-only handle', async () => {
+    const { db, store, dataDir } = createStore();
+    const kaTopic = hash(0x05);
+    const selected = [
+      { ...row(10, 0, true), topics: [TOPIC, GRAPH_TOPIC, kaTopic] },
+      { ...row(11, 0, false), topics: [TOPIC, GRAPH_TOPIC, kaTopic] },
+    ];
+    await store.commit(SCOPE, undefined, {
+      ...commit(10, 12, [...selected, { ...row(12, 0, false), address: OTHER_ADDRESS }]),
+      suspectedForkBlockNumber: 9,
+    });
+    await store.commit(OTHER_SCOPE, undefined, commit(10, 12, [row(10, 0, true)]));
+    const handle = new Database(join(dataDir, 'node-ui.db'), { readonly: true, fileMustExist: true });
+    handle.pragma('query_only = ON');
+    const reader = new SqliteChainEventLogReader(handle);
+    const query = {
+      fromBlockNumber: 1, throughBlockNumber: 12,
+      addresses: [ADDRESS], topic0: [TOPIC], topic1: [GRAPH_TOPIC], topic2: [kaTopic],
+    };
+    try {
+      expect(handle.readonly).toBe(true);
+      expect(reader).not.toHaveProperty('commit');
+      expect(reader).not.toHaveProperty('tombstone');
+      expect(await reader.load(SCOPE)).toEqual(await store.load(SCOPE));
+      await expect(reader.load('unknown-scope')).resolves.toBeUndefined();
+      expect(await reader.readEvents(SCOPE, query)).toEqual(await store.readEvents(SCOPE, query));
+      await expect(reader.readEventsBounded(SCOPE, query, 2)).resolves.toEqual(selected);
+      await expect(reader.readEventsBounded(SCOPE, query, 1)).resolves.toBeUndefined();
+      await expect(reader.readEventsBounded(OTHER_SCOPE, query, 2)).resolves.toEqual([]);
+      for (const block of [10, 11, 12, 99]) {
+        expect(await reader.blockHashAt(SCOPE, block)).toBe(await store.blockHashAt(SCOPE, block));
+      }
+      // A read-only connection sees later durable invalidation without ever
+      // gaining the writer's commit/tombstone capability.
+      await store.tombstone(SCOPE, 1);
+      await expect(reader.load(SCOPE)).resolves.toBeUndefined();
+      await expect(reader.readEventsBounded(SCOPE, query, 2)).resolves.toEqual([]);
+      await expect(reader.blockHashAt(SCOPE, 10)).resolves.toBeUndefined();
+    } finally {
+      handle.close();
+      db.close();
+    }
+  });
+
+  it('holds one caller-owned read snapshot across a concurrent writer commit', async () => {
+    const { db, store, dataDir } = createStore();
+    const first = row(11, 0, false, '0xfirst');
+    const replacement = row(11, 1, false, '0xreplacement');
+    await store.commit(SCOPE, undefined, commit(10, 12, [first]));
+    const handle = new Database(join(dataDir, 'node-ui.db'), { readonly: true, fileMustExist: true });
+    handle.pragma('query_only = ON');
+    const reader = new SqliteChainEventLogReader(handle);
+    const query = { fromBlockNumber: 1, throughBlockNumber: 12 };
+    try {
+      handle.exec('BEGIN');
+      expect((await reader.load(SCOPE))?.cursor.revision).toBe(1);
+      await store.commit(SCOPE, 1, commit(10, 12, [replacement]));
+      expect((await reader.load(SCOPE))?.cursor.revision).toBe(1);
+      await expect(reader.readEventsBounded(SCOPE, query, 1)).resolves.toEqual([first]);
+      handle.exec('ROLLBACK');
+      expect((await reader.load(SCOPE))?.cursor.revision).toBe(2);
+      await expect(reader.readEventsBounded(SCOPE, query, 1)).resolves.toEqual([replacement]);
+    } finally {
+      if (handle.inTransaction) handle.exec('ROLLBACK');
+      handle.close();
+      db.close();
+    }
   });
 
   it('replaces the whole tail but writes a settled row exactly once', async () => {

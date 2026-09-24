@@ -63,6 +63,7 @@ import type {
 import type {
   ApprovalPolicy,
   ChainAdapter,
+  ChainIndexCompatibilityConfig,
   ChainIndexConfig,
   ContextGraphAuthorityHistoryStore,
   ContextGraphAuthorityIndexStore,
@@ -1388,9 +1389,7 @@ export type FinalizationRecoveryStoreFactory = (
   dataDir: string,
 ) => Promise<FinalizationRecoveryStore>;
 
-export type DKGAgentConfig = DKGAgentBaseConfig & ChainIndexConfig;
-
-interface DKGAgentBaseConfig {
+export interface DKGAgentConfig extends ChainIndexCompatibilityConfig {
   name: string;
   /**
    * Construction seam for the durable finalization inbox. Embedders and tests
@@ -1967,9 +1966,12 @@ export interface DKGAgentACKTransportOptions {
   log?: (message: string) => void;
 }
 
+/** Opt-in compile-time ownership checks; DKGAgentConfig remains extendable. */
+export type StrictDKGAgentConfig = DKGAgentConfig & ChainIndexConfig;
+
 export type ResolvedDKGAgentConfig =
   Omit<
-    DKGAgentBaseConfig,
+    DKGAgentConfig,
     | 'storageAckTiming'
     | 'ackHandlerDeadlineMs'
     | 'ackSendTimeoutMs'
@@ -1985,7 +1987,7 @@ export type ResolvedDKGAgentConfig =
     | 'rfc64PublicCatalogBootstrap'
     | 'rfc64CatalogDeploymentProfile'
     | 'contextGraphSubscriptionRehydrationEnabled'
-  > & ChainIndexConfig & {
+  > & {
     contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
     syncReconcilerTiming: SyncReconcilerTiming;

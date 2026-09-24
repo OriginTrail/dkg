@@ -260,6 +260,44 @@ describe('canonical snapshot evaluation agrees with inline capture', () => {
 });
 
 describe('knowledge asset read model — the tick is still running', () => {
+  describe.each(['binding', 'ordinal'] as const)('inline %s capture fencing', (kind) => {
+    it.each(['revision', 'lineage', 'topicSetVersion'] as const)(
+      'refuses captured rows after an interleaved %s change', async (changedField) => {
+        const rows = [creation(40, 7n), registration(50, 7n, 4242n)];
+        const store = seeded({ rows });
+        const before = (await store.load(SCOPE))!;
+        const readRows = store.readEvents.bind(store);
+        let captured!: () => void;
+        let resume!: () => void;
+        const capturedRows = new Promise<void>((resolve) => { captured = resolve; });
+        const resumed = new Promise<void>((resolve) => { resume = resolve; });
+        vi.spyOn(store, 'readEvents').mockImplementationOnce(async (scope, query) => {
+          const selected = await readRows(scope, query);
+          expect(selected.length).toBeGreaterThan(0);
+          captured();
+          await resumed;
+          return selected;
+        });
+        const reader = model(store);
+        const pending = kind === 'binding'
+          ? reader.readContextGraphForKa(4242n)
+          : reader.readContextGraphKaAt(7n, 0n);
+        await capturedRows;
+        // Simulate the store committing another generation after the initial
+        // cursor and matching rows were captured, but before the final load.
+        store.seed(SCOPE, {
+          ...before,
+          cursor: { ...before.cursor,
+            ...(changedField === 'revision' ? { revision: before.cursor.revision + 1 }
+              : changedField === 'lineage' ? { lineage: hash(0x02) } : { topicSetVersion: 'v2' }),
+          },
+        }, rows);
+        resume();
+        await expect(pending).resolves.toBeUndefined();
+      },
+    );
+  });
+
   it('refuses EVERY read once the tick head read is older than the bound', async () => {
     // Nothing about coverage changed: a chain on which nothing happened and a
     // tick that stopped committing leave exactly the same stored range, and

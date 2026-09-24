@@ -11,7 +11,7 @@ import {
   type KnowledgeAssetSnapshotRead,
   type ChainEventLogRow,
 } from '@origintrail-official/dkg-chain/internal/chain-index-worker';
-import { SqliteChainEventLogStore } from '@origintrail-official/dkg-node-ui';
+import { SqliteChainEventLogReader } from '@origintrail-official/dkg-node-ui';
 import type {
   ChainIndexReadMessage,
   ChainIndexReadRequest,
@@ -24,7 +24,7 @@ if (parentPort === null) throw new Error('Chain-index reader requires a worker')
 const port = parentPort;
 const db = new Database(workerData.dbPath, { readonly: true, fileMustExist: true, timeout: 50 });
 db.pragma('query_only = ON');
-const store = new SqliteChainEventLogStore({ db });
+const store = new SqliteChainEventLogReader(db);
 const active = new Map<number, AbortController>();
 // Bound native SQLite allocation before .all() constructs JS rows. A worker
 // heap limit alone cannot safely contain an OOM inside a native addon.
