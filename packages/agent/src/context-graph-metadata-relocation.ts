@@ -29,6 +29,9 @@
  *
  * A graph with a public definition in ontology is never a candidate, so the
  * common case costs one store query and no chain read.
+ *
+ * A pass given a `signal` starts no candidate once it has aborted and leaves
+ * the rest to a later pass, which finds them again.
  */
 
 import {
@@ -54,6 +57,13 @@ const SYSTEM_IDS = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
 /** Chain classifications one pass may start; the rest wait for the next pass. */
 export const METADATA_RELOCATION_MAX_CHAIN_CLASSIFICATIONS = 16;
 
+/**
+ * Wall-clock budget (ms) for the pass that runs before the node serves sync
+ * and its API opens. Candidates still waiting when it is spent are left to
+ * the pass that runs once start completes and to store discovery passes.
+ */
+export const METADATA_RELOCATION_STARTUP_BUDGET_MS = 30_000;
+
 export interface ContextGraphMetadataRelocationDependencies {
   readonly store: TripleStore;
   /**
@@ -74,6 +84,11 @@ export interface ContextGraphMetadataRelocationDependencies {
   readonly knownSlotClass?: (onChainId: string) => OntologyBindingSlotClass | undefined;
   /** Defaults to {@link METADATA_RELOCATION_MAX_CHAIN_CLASSIFICATIONS}. */
   readonly maxChainClassifications?: number;
+  /**
+   * Once aborted, no further candidate is started; the one in progress
+   * finishes. The rest are counted in `deferred`.
+   */
+  readonly signal?: AbortSignal;
 }
 
 export interface ContextGraphMetadataRelocationResult {
@@ -83,6 +98,8 @@ export interface ContextGraphMetadataRelocationResult {
   readonly deletedForeign: number;
   /** Graphs kept because a binding's slot wasn't proven public or curated this pass. */
   readonly unclassified: number;
+  /** Candidates not examined because the pass's signal aborted first. */
+  readonly deferred: number;
 }
 
 export interface OntologyRow {
@@ -233,7 +250,11 @@ export async function relocatePrivateContextGraphMetadata(
   let deletedForeign = 0;
   let unclassified = 0;
 
-  for (const [subject, candidate] of await candidates(store, ontologyGraph)) {
+  const pending = await candidates(store, ontologyGraph);
+  let examined = 0;
+  for (const [subject, candidate] of pending) {
+    if (deps.signal?.aborted) break;
+    examined += 1;
     const contextGraphId = subject.slice(CONTEXT_GRAPH_URI_PREFIX.length);
     if (!contextGraphId || SYSTEM_IDS.has(contextGraphId)) continue;
     const safeSubject = safeIriOrNull(subject);
@@ -279,7 +300,7 @@ export async function relocatePrivateContextGraphMetadata(
   if (movedToMeta.length > 0 || deletedForeign > 0) {
     await store.flush?.();
   }
-  return { movedToMeta, deletedForeign, unclassified };
+  return { movedToMeta, deletedForeign, unclassified, deferred: pending.size - examined };
 }
 
 async function copyMissingFactsToMeta(

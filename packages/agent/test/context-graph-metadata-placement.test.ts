@@ -25,6 +25,7 @@ import {
 import { deleteByPatternWithoutCount, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import {
+  METADATA_RELOCATION_STARTUP_BUDGET_MS,
   localRelocationVerdict,
   relocatePrivateContextGraphMetadata,
   slotRelocationVerdict,
@@ -481,7 +482,7 @@ describe('relocating curated and private metadata that earlier builds left in on
 
     const result = await agent.relocatePrivateContextGraphMetadata();
 
-    expect(result).toEqual({ movedToMeta: [], deletedForeign: 3, unclassified: 0 });
+    expect(result).toEqual({ movedToMeta: [], deletedForeign: 3, unclassified: 0, deferred: 0 });
     expect(await ontologyRowsAbout(agent, '0xabc/foreign-curated')).toEqual([]);
     expect(await ontologyRowsAbout(agent, '0xabc/foreign-renamed')).toEqual([]);
     expect(await ontologyRowsAbout(agent, '0xabc/foreign-private')).toEqual([]);
@@ -502,14 +503,14 @@ describe('relocating curated and private metadata that earlier builds left in on
       localAccessPolicy: async () => null,
       classifyOnChainSlot: async () => { throw new Error('rpc down'); },
     });
-    expect(unknown).toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 1 });
+    expect(unknown).toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 1, deferred: 0 });
     await expect(lookupBinding(store, '0xabc/unknown-policy')).resolves.toBe('5');
 
     const withoutChain = await relocatePrivateContextGraphMetadata({
       store,
       localAccessPolicy: async () => null,
     });
-    expect(withoutChain).toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 0 });
+    expect(withoutChain).toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 0, deferred: 0 });
 
     const later = await relocatePrivateContextGraphMetadata({
       store,
@@ -529,7 +530,7 @@ describe('relocating curated and private metadata that earlier builds left in on
       localAccessPolicy: async () => null,
       classifyOnChainSlot: async () => 'inactive',
     });
-    expect(notLive).toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 1 });
+    expect(notLive).toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 1, deferred: 0 });
     await expect(lookupBinding(store, '0xabc/not-live')).resolves.toBe('77');
 
     const curated = await relocatePrivateContextGraphMetadata({
@@ -537,7 +538,7 @@ describe('relocating curated and private metadata that earlier builds left in on
       localAccessPolicy: async () => null,
       classifyOnChainSlot: async () => 'curated',
     });
-    expect(curated).toEqual({ movedToMeta: [], deletedForeign: 1, unclassified: 0 });
+    expect(curated).toEqual({ movedToMeta: [], deletedForeign: 1, unclassified: 0, deferred: 0 });
     await expect(lookupBinding(store, '0xabc/not-live')).resolves.toBeUndefined();
   });
 
@@ -560,7 +561,7 @@ describe('relocating curated and private metadata that earlier builds left in on
     });
 
     expect(classify.mock.calls).toEqual([['320']]);
-    expect(result).toEqual({ movedToMeta: [], deletedForeign: 1, unclassified: 1 });
+    expect(result).toEqual({ movedToMeta: [], deletedForeign: 1, unclassified: 1, deferred: 0 });
     await expect(lookupBinding(store, '0xabc/new-curated')).resolves.toBeUndefined();
     await expect(lookupBinding(store, '0xabc/known-not-live')).resolves.toBe('310');
     await expect(lookupBinding(store, '0xabc/known-public-0')).resolves.toBe('300');
@@ -574,7 +575,7 @@ describe('relocating curated and private metadata that earlier builds left in on
     const liveness = vi.spyOn(chain, 'isContextGraphActiveOnChain').mockResolvedValueOnce(false);
 
     await expect(agent.relocatePrivateContextGraphMetadata())
-      .resolves.toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 1 });
+      .resolves.toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 1, deferred: 0 });
     await expect(lookupBinding(agent.store, id)).resolves.toBe(slot);
 
     // The not-live answer is reused for a while rather than read every pass...
@@ -586,7 +587,7 @@ describe('relocating curated and private metadata that earlier builds left in on
     try {
       vi.setSystemTime(Date.now() + ONTOLOGY_BINDING_SLOT_RECHECK_MS + 1);
       await expect(agent.relocatePrivateContextGraphMetadata())
-        .resolves.toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 0 });
+        .resolves.toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 0, deferred: 0 });
     } finally {
       vi.useRealTimers();
     }
@@ -603,7 +604,7 @@ describe('relocating curated and private metadata that earlier builds left in on
     vi.spyOn(chain, 'isContextGraphActiveOnChain').mockResolvedValue(false);
 
     await expect(agent.relocatePrivateContextGraphMetadata())
-      .resolves.toEqual({ movedToMeta: [], deletedForeign: 1, unclassified: 0 });
+      .resolves.toEqual({ movedToMeta: [], deletedForeign: 1, unclassified: 0, deferred: 0 });
     await expect(lookupBinding(agent.store, id)).resolves.toBeUndefined();
   });
 
@@ -673,7 +674,7 @@ describe('relocating curated and private metadata that earlier builds left in on
 
     const result = await agent.relocatePrivateContextGraphMetadata();
 
-    expect(result).toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 0 });
+    expect(result).toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 0, deferred: 0 });
     await expect(lookupBinding(agent.store, id)).resolves.toBe('21');
     expect(await ontologyRowsAbout(agent, id)).toEqual([`${ON_CHAIN_ID} "21"`]);
     expect(policyReads).not.toHaveBeenCalled();
@@ -689,9 +690,124 @@ describe('relocating curated and private metadata that earlier builds left in on
 
     const result = await agent.relocatePrivateContextGraphMetadata();
 
-    expect(result).toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 0 });
+    expect(result).toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 0, deferred: 0 });
     expect(await ontologyRowsAbout(agent, id)).toEqual(before);
     expect(await ontologyRowsAbout(agent, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)).toEqual(systemBefore);
+  });
+});
+
+/** `store`, running `onDelete` with a running count before each pattern delete. */
+function withDeleteHook(store: TripleStore, onDelete: (deletes: number) => void): TripleStore {
+  let deletes = 0;
+  return new Proxy(store, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target) as unknown;
+      if (typeof value !== 'function') return value;
+      if (property !== 'deleteByPattern' && property !== 'deleteByPatternWithoutCount') {
+        return value.bind(target);
+      }
+      return (...args: unknown[]) => {
+        deletes += 1;
+        onDelete(deletes);
+        return value.apply(target, args);
+      };
+    },
+  });
+}
+
+describe('relocation passes with a time budget', () => {
+  it('starts no candidate once its signal aborts, and a later pass finishes the rest', async () => {
+    const { agent } = await createAgent('relocate-budget');
+    const ids = Array.from({ length: 5 }, (_, index) => `0xabc/renamed-${index}`);
+    await agent.store.insert(ids.map((id) => (
+      ontologyQuad(contextGraphDataGraphUri(id), DKG_ONTOLOGY.SCHEMA_NAME, '"Renamed"')
+    )));
+    const budget = new AbortController();
+
+    // The budget runs out while the second candidate's rows are being removed.
+    const bounded = await relocatePrivateContextGraphMetadata({
+      store: withDeleteHook(agent.store, (deletes) => { if (deletes === 2) budget.abort(); }),
+      localAccessPolicy: async () => null,
+      signal: budget.signal,
+    });
+
+    expect(bounded).toEqual({ movedToMeta: [], deletedForeign: 2, unclassified: 0, deferred: 3 });
+    const left = await Promise.all(ids.map((id) => ontologyRowsAbout(agent, id)));
+    expect(left.filter((rows) => rows.length > 0)).toHaveLength(3);
+
+    const later = await relocatePrivateContextGraphMetadata({
+      store: agent.store,
+      localAccessPolicy: async () => null,
+    });
+
+    expect(later).toEqual({ movedToMeta: [], deletedForeign: 3, unclassified: 0, deferred: 0 });
+    for (const id of ids) expect(await ontologyRowsAbout(agent, id)).toEqual([]);
+  });
+
+  it('logs what a spent budget left, and the next store discovery pass relocates it', async () => {
+    const { agent, chain } = await createAgent('relocate-deferred', { nodeRole: 'core' });
+    const curated = '0xabc/deferred-curated';
+    const renamed = '0xabc/deferred-renamed';
+    await agent.store.insert([
+      bindingQuad(curated, await createOnChain(chain, 1)),
+      ontologyQuad(contextGraphDataGraphUri(renamed), DKG_ONTOLOGY.SCHEMA_NAME, '"Renamed"'),
+    ]);
+    const info = vi.spyOn((agent as unknown as { log: { info: (...args: unknown[]) => void } }).log, 'info');
+
+    await expect(agent.relocatePrivateContextGraphMetadata({ classifyOnChain: false, signal: AbortSignal.abort() }))
+      .resolves.toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 0, deferred: 2 });
+    expect(info.mock.calls.map(([, message]) => message))
+      .toContain('Context graph metadata relocation stopped early: 2 candidate(s) left for a later pass');
+    expect(await ontologyRowsAbout(agent, renamed)).toEqual([`${DKG_ONTOLOGY.SCHEMA_NAME} "Renamed"`]);
+
+    await agent.discoverContextGraphsFromStore();
+
+    expect(await ontologyRowsAbout(agent, curated)).toEqual([]);
+    expect(await ontologyRowsAbout(agent, renamed)).toEqual([]);
+    expect(agent.subscribedContextGraphs.get(curated)).toBeUndefined();
+  });
+
+  it('changes nothing for a candidate set it finishes within budget', async () => {
+    const held = '0xabc/budget-held';
+    const seed: Quad[] = [
+      bindingQuad(held, '41', contextGraphMetaGraphUri(held)),
+      bindingQuad(held, '41'),
+      ontologyQuad(contextGraphDataGraphUri(held), DKG_ONTOLOGY.SCHEMA_NAME, '"Held"'),
+      ontologyQuad(contextGraphDataGraphUri('0xabc/budget-renamed'), DKG_ONTOLOGY.SCHEMA_NAME, '"Renamed"'),
+      ontologyQuad(contextGraphDataGraphUri('0xabc/budget-open'), DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
+      bindingQuad('0xabc/budget-open', '42'),
+      bindingQuad('0xabc/budget-bare', '43'),
+    ];
+    const contents = async (store: TripleStore): Promise<string[]> => {
+      const result = await store.query(`
+        SELECT ?g ?s ?p ?o WHERE {
+          GRAPH ?g { ?s ?p ?o }
+          FILTER(?g IN (<${ONTOLOGY_GRAPH}>, <${contextGraphMetaGraphUri(held)}>))
+        }
+      `);
+      return result.type === 'bindings'
+        ? result.bindings.map((row) => `${row['g']} ${row['s']} ${row['p']} ${row['o']}`).sort()
+        : [];
+    };
+    const budgeted = (await createAgent('relocate-budget-small')).agent;
+    const unbudgeted = (await createAgent('relocate-unbudgeted-small')).agent;
+    await budgeted.store.insert(seed);
+    await unbudgeted.store.insert(seed);
+    const localAccessPolicy = async (contextGraphId: string) => (contextGraphId === held ? 'private' as const : null);
+
+    const withBudget = await relocatePrivateContextGraphMetadata({
+      store: budgeted.store,
+      localAccessPolicy,
+      signal: AbortSignal.timeout(METADATA_RELOCATION_STARTUP_BUDGET_MS),
+    });
+    const without = await relocatePrivateContextGraphMetadata({ store: unbudgeted.store, localAccessPolicy });
+
+    expect(withBudget).toEqual({ movedToMeta: [held], deletedForeign: 1, unclassified: 0, deferred: 0 });
+    expect(withBudget).toEqual(without);
+    expect(await contents(budgeted.store)).toEqual(await contents(unbudgeted.store));
+    expect(await ontologyRowsAbout(budgeted, held)).toEqual([]);
+    expect(await ontologyRowsAbout(budgeted, '0xabc/budget-bare')).toEqual([`${ON_CHAIN_ID} "43"`]);
+    expect(await ontologyRowsAbout(budgeted, '0xabc/budget-open')).toHaveLength(2);
   });
 });
 
@@ -908,7 +1024,7 @@ describe('ontology gossip bindings', () => {
     );
     await expect(lookupBinding(agent.store, id)).resolves.toBe('1');
     await expect(agent.relocatePrivateContextGraphMetadata())
-      .resolves.toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 1 });
+      .resolves.toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 1, deferred: 0 });
 
     // Neither read may leave a default "public" answer behind for StorageACK
     // curation checks once the curated slot becomes visible...
@@ -917,7 +1033,7 @@ describe('ontology gossip bindings', () => {
 
     // ...and the binding goes once the slot is known to be curated.
     await expect(agent.relocatePrivateContextGraphMetadata())
-      .resolves.toEqual({ movedToMeta: [], deletedForeign: 1, unclassified: 0 });
+      .resolves.toEqual({ movedToMeta: [], deletedForeign: 1, unclassified: 0, deferred: 0 });
     await expect(lookupBinding(agent.store, id)).resolves.toBeUndefined();
   });
 
@@ -971,7 +1087,7 @@ describe('ontology gossip bindings', () => {
     );
     await expect(lookupBinding(agent.store, id)).resolves.toBe('7');
     await expect(agent.relocatePrivateContextGraphMetadata())
-      .resolves.toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 1 });
+      .resolves.toEqual({ movedToMeta: [], deletedForeign: 0, unclassified: 1, deferred: 0 });
   });
 
   it('classifies at most a few bindings per message and drops the rest', async () => {
@@ -1055,7 +1171,8 @@ describe('relocation at startup', () => {
     try {
       await agent.start();
 
-      expect(relocate).toHaveBeenCalledWith({ classifyOnChain: false });
+      expect(relocate).toHaveBeenCalledWith({ classifyOnChain: false, signal: expect.any(AbortSignal) });
+      await expect(relocate.mock.results[0]!.value).resolves.toMatchObject({ movedToMeta: [id], deferred: 0 });
       expect(await ontologyRowsAbout(agent, id)).toEqual([]);
       expect(await metaOnChainId(agent, id)).toBe('31');
     } finally {

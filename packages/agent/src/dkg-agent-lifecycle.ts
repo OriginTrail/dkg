@@ -186,6 +186,7 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { repairCreatorPublicMetaProjections } from './context-graph-public-meta-repair.js';
+import { METADATA_RELOCATION_STARTUP_BUDGET_MS } from './context-graph-metadata-relocation.js';
 import {
   startRandomSamplingExactRepair,
   type RandomSamplingExactRepairDependencies,
@@ -2268,9 +2269,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Move what earlier builds left in ontology, using local metadata only,
     // before sync serving starts. Bare bindings of graphs this node doesn't
     // hold need a chain read; that pass runs once start completes and before
-    // every store discovery pass.
+    // every store discovery pass. This pass is on the startup path, so it has
+    // a time budget; candidates it doesn't reach are left to those passes.
     try {
-      await this.relocatePrivateContextGraphMetadata({ classifyOnChain: false });
+      await this.relocatePrivateContextGraphMetadata({
+        classifyOnChain: false,
+        signal: AbortSignal.timeout(METADATA_RELOCATION_STARTUP_BUDGET_MS),
+      });
     } catch (err) {
       this.log.warn(
         ctx,

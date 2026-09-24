@@ -2031,10 +2031,11 @@ export class DKGAgent extends DKGAgentBase {
    * `context-graph-metadata-relocation.ts`). Every store discovery pass runs
    * this first, so discovery only acts on ontology rows that belong there.
    * Without `classifyOnChain`, bare bindings of graphs this node doesn't hold
-   * are left for a later pass (no chain reads).
+   * are left for a later pass (no chain reads). Once `signal` aborts, the
+   * remaining candidates are also left for a later pass.
    */
   async relocatePrivateContextGraphMetadata(
-    options: { classifyOnChain?: boolean } = {},
+    options: { classifyOnChain?: boolean; signal?: AbortSignal } = {},
   ): Promise<ContextGraphMetadataRelocationResult> {
     const result = await relocatePrivateContextGraphMetadata({
       store: this.store,
@@ -2048,6 +2049,7 @@ export class DKGAgent extends DKGAgentBase {
           classifyOnChainSlot: (onChainId: string) => this.classifyOntologyBindingSlot(onChainId),
           knownSlotClass: (onChainId: string) => this.knownOntologyBindingSlotClass(onChainId),
         }),
+      ...(options.signal ? { signal: options.signal } : {}),
     });
     if (result.movedToMeta.length > 0 || result.deletedForeign > 0) {
       this.invalidateListContextGraphsCache();
@@ -2058,6 +2060,12 @@ export class DKGAgent extends DKGAgentBase {
         createOperationContext('system'),
         `Relocated private context graph metadata out of the ontology graph: ` +
           `${result.movedToMeta.length} moved to their own _meta, ${result.deletedForeign} removed`,
+      );
+    }
+    if (result.deferred > 0) {
+      this.log.info(
+        createOperationContext('system'),
+        `Context graph metadata relocation stopped early: ${result.deferred} candidate(s) left for a later pass`,
       );
     }
     return result;
