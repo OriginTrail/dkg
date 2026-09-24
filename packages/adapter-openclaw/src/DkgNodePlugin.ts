@@ -29,6 +29,7 @@ import {
 import {
   DkgDaemonClient,
   DkgDaemonHttpError,
+  DkgDaemonOutcomeUnknownError,
   normalizeContextGraphId,
   type LocalAgentIntegrationRecord,
   type LocalAgentIntegrationTransport,
@@ -2441,6 +2442,11 @@ export class DkgNodePlugin {
   }
 
   private daemonError(err: any): OpenClawToolResult {
+    // A long mutation that timed out after reaching the daemon may still land, and
+    // a blind retry can 409 against it: report the unknown outcome, not a failure.
+    if (err instanceof DkgDaemonOutcomeUnknownError) {
+      return this.json({ outcomeUnknown: true, warning: err.message });
+    }
     const msg = err.message ?? String(err);
     if (msg.includes('fetch failed') || msg.includes('ECONNREFUSED')) {
       return this.error(

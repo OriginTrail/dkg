@@ -94,6 +94,8 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
   assertRdfLiteralMutf8Safe,
+  contextGraphOnChainIdBindingQuery,
+  contextGraphMetadataHomeGraph,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityProjectionServedEvidence, type ContextGraphAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -735,7 +737,29 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     signal?: AbortSignal,
   ): Promise<string | undefined> {
     const direct = this.resolveLocalCgIdByOnChainId(onChainContextGraphId);
-    if (direct) return direct;
+    const getNameHash = this.chain.getContextGraphNameHash;
+    let committedNameHash: string | null | undefined;
+    if (direct) {
+      if (typeof getNameHash !== 'function') return direct;
+      committedNameHash = await raceContextGraphBindingAgainstAbort(
+        getNameHash.call(
+          this.chain,
+          onChainContextGraphId,
+          signal ? { signal } : undefined,
+        ),
+        signal,
+      );
+      // An opt-out graph has no on-chain name commitment. Keep the existing
+      // numeric subscription binding for that legacy case; a committed slot
+      // must match the current name hash before it can direct proof repair.
+      if (committedNameHash === null) return direct;
+      if (committedNameHash && /^0x[0-9a-fA-F]{64}$/.test(committedNameHash)
+        && localContextGraphIdMatchesCommittedNameHash(
+          direct,
+          committedNameHash,
+          (candidate) => this.isWireIdKeyedSubscription(candidate),
+        )) return direct;
+    }
 
     const cacheKey = onChainContextGraphId.toString();
     const isSubscribed = (localCgId: string) =>
@@ -750,10 +774,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       this.contextGraphBindingState.rememberChainAttestedResolutionMiss(cacheKey);
       return undefined;
     };
-    const getNameHash = this.chain.getContextGraphNameHash;
     if (typeof getNameHash !== 'function') return rememberMiss();
 
-    const committedNameHash = await raceContextGraphBindingAgainstAbort(
+    committedNameHash ??= await raceContextGraphBindingAgainstAbort(
       getNameHash.call(
         this.chain,
         onChainContextGraphId,
@@ -785,7 +808,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             FILTER(STR(?onChainId) = ${sparqlString(cacheKey)})
           }
         }
-        LIMIT 2
+        LIMIT 256
       `, {
         signal,
         source: 'agent.contextGraph.resolveChainAttestedBinding.durableIndex',
@@ -1488,10 +1511,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     );
     if (currentBinding !== undefined) return currentBinding;
 
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
+    // The durable RDF binding: ontology for a public graph, the graph's own
+    // `_meta` for a curated one (reported with the same provenance).
     const result = await this.store.query(
-      `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?id } } LIMIT 1`,
+      contextGraphOnChainIdBindingQuery(contextGraphId),
       {
         signal: options.signal,
         source: options.source ?? 'agent.contextGraph.onChainId',
@@ -1629,10 +1652,17 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
      * index, which is never taken from a projection served as `stale-cache`.
      */
     publishPolicyMaxCacheAgeMs?: number;
+    /**
+     * Caller deadline for the chain lookups: the on-chain id resolution (which
+     * can fall back to a reverse name-hash scan) and the finalized snapshot
+     * read. An aborted lookup leaves its field unknown.
+     */
+    signal?: AbortSignal;
   }): Promise<{
     accessPolicy?: number;
     publishPolicy?: number;
   }> {
+    const signal = options?.signal;
     // Keep the explicitly-created local-first state off the registry lookup
     // path. The registration guard below used to run only after the cache
     // re-key step had already called `getContextGraphOnChainId()` (twice on a
@@ -1687,7 +1717,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
 
     if (accessPolicy === undefined || publishPolicy === undefined) {
       onChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId
-        ?? (await this.getContextGraphOnChainId(contextGraphId).catch(() => null))
+        ?? (await this.getContextGraphOnChainId(contextGraphId, { signal }).catch(() => null))
         ?? undefined;
       if (onChainId && onChainId !== contextGraphId) {
         if (accessPolicy === undefined) accessPolicy = this.onChainAccessPolicyCache.get(onChainId);
@@ -1731,7 +1761,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       if (!registeredViaStatus) {
         if (onChainId === undefined) {
           onChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId
-            ?? (await this.getContextGraphOnChainId(contextGraphId).catch(() => null))
+            ?? (await this.getContextGraphOnChainId(contextGraphId, { signal }).catch(() => null))
             ?? undefined;
         }
         if (onChainId) {
@@ -1780,7 +1810,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     ) {
       if (onChainId === undefined) {
         onChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId
-          ?? (await this.getContextGraphOnChainId(contextGraphId).catch(() => null))
+          ?? (await this.getContextGraphOnChainId(contextGraphId, { signal }).catch(() => null))
           ?? undefined;
       }
       let numericId: bigint | undefined;
@@ -1813,7 +1843,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           ?.readContextGraphAuthorityIndexSnapshots !== undefined
           && typeof this.readFinalizedContextGraphAuthoritySnapshotV1 === 'function'
           ? (id: bigint, readOptions: { label: string }) => (
-              this.readFinalizedContextGraphAuthoritySnapshotV1(id, readOptions)
+              this.readFinalizedContextGraphAuthoritySnapshotV1(id, { ...readOptions, signal })
             )
           : undefined;
         const finalizedPolicy = await readFinalizedContextGraphPolicyV1(
@@ -2218,14 +2248,13 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const gm = new GraphManager(this.store);
     gm.assertNewContextGraphId(opts.id);
     const contextGraphUri = contextGraphDataGraphUri(opts.id);
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const cgMetaGraph = contextGraphMetaGraphUri(opts.id);
     const now = new Date().toISOString();
 
     // Curated CGs write definition triples to _meta so they stay invisible
     // to other nodes that sync ONTOLOGY. Open CGs go to ONTOLOGY for
     // network-wide discovery.
-    const defGraph = opts.curated ? cgMetaGraph : ontologyGraph;
+    const defGraph = contextGraphMetadataHomeGraph(opts.id, { curated: opts.curated === true });
 
     // No creator/curator triples here — bootstrap is a subscriber-style
     // path. Ownership is established only when a node explicitly calls

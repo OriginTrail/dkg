@@ -132,7 +132,9 @@ class PriorityLaneStore implements TripleStore {
       if (options?.priority === 'ack') {
         this.ackQueries += 1;
         if (this.options.hangAck) return new Promise<QueryResult>(() => {});
-        return { type: 'quads', quads: swmQuads };
+        // SWM loads are CONSTRUCTs; the head and ledger reads find nothing.
+        if (/^\s*CONSTRUCT/i.test(_sparql)) return { type: 'quads', quads: swmQuads };
+        return { type: 'bindings', bindings: [] };
       }
       return { type: 'bindings', bindings: [] };
     }, options?.signal);
@@ -330,10 +332,10 @@ describe('StorageACKHandler priority store lane', () => {
       'storage-ack.persistGraphScoped.flush',
     ]);
     expect(store.writeCalls.every((call) => call.priority === 'ack')).toBe(true);
-    const abortableSignals = store.writeCalls.slice(0, 2).map((call) => call.signal);
-    expect(abortableSignals.every((signal) => signal instanceof AbortSignal)).toBe(true);
-    expect(new Set(abortableSignals).size).toBe(1);
-    expect(store.writeCalls.slice(2).every((call) => call.signal === undefined)).toBe(true);
+    // Only the first write may still be abandoned at the ACK deadline; once
+    // the operation rows are deleted, the re-insert and head commit finish.
+    expect(store.writeCalls[0]?.signal).toBeInstanceOf(AbortSignal);
+    expect(store.writeCalls.slice(1).every((call) => call.signal === undefined)).toBe(true);
   });
 
   it('finishes the workspace-head commit tail after the ACK deadline fires', async () => {

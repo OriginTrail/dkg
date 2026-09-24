@@ -14,7 +14,7 @@ import type {
   UpdateOptions,
 } from '../triple-store.js';
 import {
-  formatCanonicalRdfLiteralTerm,
+  formatCanonicalRdfTerm,
   parseRdfLiteralTerm,
 } from '@origintrail-official/dkg-rdf-utils';
 import { registerTripleStoreAdapter } from '../triple-store.js';
@@ -682,26 +682,7 @@ function fromOxQuad(oxq: OxQuad): DKGQuad {
 }
 
 function termToString(t: OxTerm): string {
-  if (t.termType === 'Literal') {
-    const lit = t as oxigraph.Literal;
-    if (lit.language) {
-      return formatCanonicalRdfLiteralTerm({
-        kind: 'language',
-        value: lit.value,
-        language: lit.language,
-      });
-    }
-    if (lit.datatype) {
-      return formatCanonicalRdfLiteralTerm({
-        kind: 'typed',
-        value: lit.value,
-        datatype: lit.datatype.value,
-      });
-    }
-    return formatCanonicalRdfLiteralTerm({ kind: 'plain', value: lit.value });
-  }
-  if (t.termType === 'BlankNode') return `_:${t.value}`;
-  return t.value;
+  return formatCanonicalRdfTerm(t);
 }
 
 registerTripleStoreAdapter('oxigraph', async () => new OxigraphStore());

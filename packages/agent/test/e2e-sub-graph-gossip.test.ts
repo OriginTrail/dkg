@@ -170,7 +170,7 @@ describe('Sub-graph gossip replication (2 nodes)', () => {
   }, 25_000);
 
   it('publish sub-graph SWM → finalization → B promotes to data graph', async () => {
-    const result = await nodeA.publishFromSharedMemory(CG_ID, 'all', {
+    const result = await nodeA.publishFromFinalizedAssertion(CG_ID, 'research-draft', {
       subGraphName: SG_RESEARCH,
     });
 

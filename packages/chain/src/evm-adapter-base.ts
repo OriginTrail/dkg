@@ -58,7 +58,7 @@ import {
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
-import { rpcHost } from './rpc-failover-log.js';
+import { hostOnlyRpcText, rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
 } from './chain-rpc-transport-error.js';
@@ -83,6 +83,7 @@ import {
 } from './keyed-ttl-single-flight-cache.js';
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
+import type { PublisherConvictionPlanReader } from './publisher-plan.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import type {
   ChainEventLogBinding,
@@ -2852,6 +2853,16 @@ export class EVMChainAdapterBase {
   }
 
   /**
+   * Optional typed PCA planning capability consumed by publish planning. The
+   * base owns the direct-spend default and the conviction mixin is its only
+   * override, so adapter assemblies without that mixin safely stay
+   * direct-spend.
+   */
+  protected publisherConvictionPlanReader(): PublisherConvictionPlanReader | undefined {
+    return undefined;
+  }
+
+  /**
    * Best-effort native (+ TRAC) balance read for one operational wallet,
    * per-metric cached for `PUBLISHER_FUNDING_CACHE_TTL_MS`. A read failure /
    * timeout yields `null` for that metric (callers fail open). `forceRefresh`
@@ -3665,9 +3676,11 @@ export class EVMChainAdapterBase {
         metrics.chainRpcDuration.record(Date.now() - startedAt, {
           rpc_method: 'eth_getLogs', chain_id: this.chainId,
         });
+        // Host-only: the last error can be ethers' own (the chainId preflight
+        // runs outside the range reader), which quotes the full request URL.
         throw new Error(
           `${label}: no configured RPC could serve the log range [${lo}, ${hi}]` +
-            `${pageError ? `: ${errorMessage(pageError)}` : ''}.`,
+            `${pageError ? `: ${hostOnlyRpcText(errorMessage(pageError))}` : ''}.`,
           pageError ? { cause: pageError } : undefined,
         );
       },

@@ -1069,6 +1069,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
     // the same confirmed chain event and repair/retire the fixture first.
     const agent = await createAgent('QueuedAsyncVmRecoveryBot', {
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Recovery E2E' });
     await agent.registerContextGraph(CG_ID);
@@ -3072,6 +3073,7 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
       nodeRole: 'core',
       syncOnConnectEnabled: false,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       agentProfileHeartbeatMs: 0,
     });
     agents.push(nodeA);
@@ -3083,6 +3085,7 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
       nodeRole: 'core',
       syncOnConnectEnabled: false,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       agentProfileHeartbeatMs: 0,
     });
     agents.push(nodeB);
@@ -3248,8 +3251,9 @@ describe('WM → SWM gossip → VM (2 nodes)', () => {
     });
     expect(bSwm[0]?.['section']).toMatch(/^urn:dkg:ka-skolem:c14n\d+$/);
 
-    // Step 4: A publishes from SWM → chain
-    const pubResult = await nodeA.publishFromSharedMemory(CG_ID, 'all');
+    // Step 4: A publishes the shared assertion → chain (graph-scoped; a
+    // 10.0.19 receiver refuses legacy, not graph-scoped, ACK requests)
+    const pubResult = await nodeA.publishFromFinalizedAssertion(CG_ID, assertionName);
     expect(pubResult.status).toBe('confirmed');
 
     // Step 5: B receives finalization and exposes the same document/entity

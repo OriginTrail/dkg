@@ -48,6 +48,22 @@ function unproductiveRound() {
   };
 }
 
+type AuthorityDecision = {
+  outcome: 'allowed' | 'denied' | 'unavailable';
+  source: 'registered-chain';
+  reason: string;
+  onChainId?: bigint;
+  metadataBootstrap: 'eligible';
+};
+
+const ALLOWED: AuthorityDecision = {
+  outcome: 'allowed',
+  source: 'registered-chain',
+  reason: 'test-public',
+  onChainId: 33n,
+  metadataBootstrap: 'eligible',
+};
+
 interface NameHashAgentOptions {
   /** What the bounded pre-resolution returns. */
   resolveNow?: () => Promise<string | null>;
@@ -55,6 +71,8 @@ interface NameHashAgentOptions {
   isResolved?: () => boolean;
   /** The node's subscription rows (empty unless a case needs them). */
   subscriptions?: Map<string, { subscribed: boolean; synced: boolean; coreHosted?: boolean }>;
+  /** The subscribe-path read authority for a graph (allowed unless a case says otherwise). */
+  authority?: (contextGraphId: string) => Promise<AuthorityDecision>;
 }
 
 function nameHashAgent(options: NameHashAgentOptions = {}) {
@@ -62,6 +80,7 @@ function nameHashAgent(options: NameHashAgentOptions = {}) {
   const subscriptions = options.subscriptions ?? new Map();
   const calls = {
     authority: [] as string[],
+    authorityOptions: [] as unknown[],
     subscribe: [] as string[],
     unsubscribe: [] as string[],
     graphSync: [] as string[],
@@ -69,15 +88,10 @@ function nameHashAgent(options: NameHashAgentOptions = {}) {
   };
   const agent = {
     calls,
-    resolveContextGraphSubscriptionBootstrapAuthority: async (contextGraphId: string) => {
+    resolveContextGraphSubscriptionBootstrapAuthority: async (contextGraphId: string, opts?: unknown) => {
       calls.authority.push(contextGraphId);
-      return {
-        outcome: 'allowed' as const,
-        source: 'registered-chain' as const,
-        reason: 'test-public',
-        onChainId: 33n,
-        metadataBootstrap: 'eligible' as const,
-      };
+      calls.authorityOptions.push(opts);
+      return options.authority ? options.authority(contextGraphId) : ALLOWED;
     },
     resolveContextGraphIdAlias: (id: string) => (id === NAME_HASH && isResolved() ? CLEARTEXT : null),
     contextGraphNameTargetFor: (id: string) => (
@@ -126,7 +140,13 @@ afterEach(async () => {
   }
 });
 
-async function startRoute(agent: ReturnType<typeof nameHashAgent>) {
+const OPERATOR_ADDRESS = '0x0000000000000000000000000000000000000001';
+const OTHER_AGENT_ADDRESS = '0x00000000000000000000000000000000000000a2';
+
+async function startRoute(
+  agent: ReturnType<typeof nameHashAgent>,
+  authentication = requestAuthentication({ kind: 'nodeOperator' }),
+) {
   const catchupTracker = { jobs: new Map<string, any>(), latestByContextGraph: new Map<string, string>() };
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -138,8 +158,8 @@ async function startRoute(agent: ReturnType<typeof nameHashAgent>) {
       extractionRegistry: {}, fileStore: {}, extractionStatus: new Map(), assertionImportLocks: new Map(),
       vectorStore: {}, embeddingProvider: null, validTokens: new Set(), apiHost: '127.0.0.1',
       apiPortRef: { value: 0 }, routePlugins: [], url, path: url.pathname,
-      requestAgentAddress: '0x0000000000000000000000000000000000000001',
-      authentication: requestAuthentication({ kind: 'nodeOperator' }),
+      requestAgentAddress: OPERATOR_ADDRESS,
+      authentication,
     } as any;
     await handleContextGraphRoutes(routeContext);
     if (!res.writableEnded) await handleQueryRoutes(routeContext);
@@ -307,6 +327,110 @@ describe('managing a subscription made by name hash', () => {
     });
     expect(agent.calls.unsubscribe).toEqual([CLEARTEXT]);
     expect(subscriptions.get(CLEARTEXT)).toMatchObject({ subscribed: false });
+    // The node operator can already list every subscription: no read check.
+    expect(agent.calls.authority).toEqual([]);
+  });
+
+  it('lets an agent-scoped token follow the hash only to a graph the subscribe route would admit it to', async () => {
+    const subscriptions = new Map([[CLEARTEXT, { subscribed: true, synced: true }]]);
+    const agent = nameHashAgent({ isResolved: () => true, subscriptions });
+    const route = await startRoute(agent, requestAuthentication({ kind: 'agent', agentAddress: OTHER_AGENT_ADDRESS }));
+
+    const { status, body } = await route.unsubscribe(NAME_HASH);
+    expect(status).toBe(200);
+    expect(body).toEqual({
+      unsubscribed: CLEARTEXT,
+      requestedContextGraphId: NAME_HASH,
+      subscribed: false,
+      coreHosted: false,
+    });
+    // The subscribe route's check, for the caller's own agent and the resolved id.
+    expect(agent.calls.authority).toEqual([CLEARTEXT]);
+    expect(agent.calls.authorityOptions).toEqual([
+      { callerAgentAddress: OTHER_AGENT_ADDRESS, allowSubscriptionFallback: false },
+    ]);
+    expect(agent.calls.unsubscribe).toEqual([CLEARTEXT]);
+  });
+
+  it('answers an agent-scoped token that may not read the graph as for a hash that keys nothing', async () => {
+    const subscriptions = new Map([[CLEARTEXT, { subscribed: true, synced: true }]]);
+    const agent = nameHashAgent({
+      isResolved: () => true,
+      subscriptions,
+      authority: async () => ({ ...ALLOWED, outcome: 'denied', reason: 'not-a-member', onChainId: undefined }),
+    });
+    const route = await startRoute(agent, requestAuthentication({ kind: 'agent', agentAddress: OTHER_AGENT_ADDRESS }));
+
+    const response = await route.unsubscribe(NAME_HASH);
+    expect(response).toEqual({
+      status: 200,
+      body: { unsubscribed: NAME_HASH, subscribed: false, coreHosted: false },
+    });
+    // Neither named nor stopped: the private graph's cleartext id stays unrevealed.
+    expect(JSON.stringify(response.body)).not.toContain(CLEARTEXT);
+    expect(agent.calls.authority).toEqual([CLEARTEXT]);
+    expect(agent.calls.unsubscribe).toEqual([NAME_HASH]);
+    expect(subscriptions.get(CLEARTEXT)).toMatchObject({ subscribed: true });
+  });
+
+  it('answers a retryable 503, not a success it did not perform, when the admission read cannot complete', async () => {
+    const outages: Array<[string, () => Promise<AuthorityDecision>]> = [
+      ['unavailable', async () => ({ ...ALLOWED, outcome: 'unavailable', reason: 'rpc-down', onChainId: undefined })],
+      ['a throw', async () => { throw new Error('authority read failed'); }],
+    ];
+    for (const [label, outage] of outages) {
+      const subscriptions = new Map([[CLEARTEXT, { subscribed: true, synced: true }]]);
+      const agent = nameHashAgent({ isResolved: () => true, subscriptions, authority: outage });
+      const route = await startRoute(agent, requestAuthentication({ kind: 'agent', agentAddress: OTHER_AGENT_ADDRESS }));
+
+      const response = await route.unsubscribe(NAME_HASH);
+      expect(response, label).toEqual({
+        status: 503,
+        body: {
+          error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
+          code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+          retryable: true,
+        },
+      });
+      expect(JSON.stringify(response.body), label).not.toContain(CLEARTEXT);
+      // Nothing was stopped, and nothing claims it was.
+      expect(agent.calls.unsubscribe, label).toEqual([]);
+      expect(subscriptions.get(CLEARTEXT), label).toMatchObject({ subscribed: true });
+    }
+  });
+
+  it('admits and refuses a caller exactly as subscribe does, through the same admission read', async () => {
+    daemonState.catchupRunner = {
+      run: async () => unproductiveRound(),
+      close: async () => undefined,
+    } as any;
+    // Subscribe answers a refusal with 403; unsubscribe answers it as for an
+    // id that keys no row (200), so a refused caller learns nothing. An
+    // outage is a retryable 503 on both.
+    const decisions: Array<[string, () => Promise<AuthorityDecision>, number, number]> = [
+      ['allowed', async () => ALLOWED, 200, 200],
+      ['denied', async () => ({ ...ALLOWED, outcome: 'denied', reason: 'not-a-member', onChainId: undefined }), 403, 200],
+      ['unavailable', async () => ({ ...ALLOWED, outcome: 'unavailable', reason: 'rpc-down', onChainId: undefined }), 503, 503],
+      ['a throw', async () => { throw new Error('authority read failed'); }, 503, 503],
+    ];
+    for (const [label, decision, subscribeStatus, unsubscribeStatus] of decisions) {
+      const subscriptions = new Map([[CLEARTEXT, { subscribed: true, synced: true }]]);
+      const agent = nameHashAgent({ isResolved: () => true, subscriptions, authority: decision });
+      const route = await startRoute(agent, requestAuthentication({ kind: 'agent', agentAddress: OTHER_AGENT_ADDRESS }));
+
+      const subscribed = await route.subscribe(NAME_HASH);
+      const unsubscribed = await route.unsubscribe(NAME_HASH);
+      expect(subscribed.status, label).toBe(subscribeStatus);
+      expect(unsubscribed.status, label).toBe(unsubscribeStatus);
+      // Unsubscribe follows the hash exactly when subscribe admitted the caller.
+      expect(unsubscribed.body.unsubscribed === CLEARTEXT, label).toBe(subscribed.status === 200);
+      // One admission read each, for the same graph, caller and options.
+      expect(agent.calls.authority, label).toEqual([CLEARTEXT, CLEARTEXT]);
+      expect(agent.calls.authorityOptions, label).toEqual([
+        { callerAgentAddress: OTHER_AGENT_ADDRESS, allowSubscriptionFallback: false },
+        { callerAgentAddress: OTHER_AGENT_ADDRESS, allowSubscriptionFallback: false },
+      ]);
+    }
   });
 
   it('unsubscribes a hash-only row and an ordinary id as given', async () => {
@@ -322,6 +446,8 @@ describe('managing a subscription made by name hash', () => {
       expect(body).toEqual({ unsubscribed: id, subscribed: false, coreHosted: false });
     }
     expect(agent.calls.unsubscribe).toEqual([NAME_HASH, 'acme-other']);
+    // No alias was followed, so there was nothing to authorize.
+    expect(agent.calls.authority).toEqual([]);
   });
 
   it('lists what a hash-only subscription is waiting for, and nothing extra for ordinary rows', async () => {
@@ -367,5 +493,37 @@ describe('public /api/status identity summary', () => {
       getSubscribedContextGraphs: () => new Map([[CLEARTEXT, { subscribed: true }]]),
       describeContextGraphIdentity: () => null,
     } as never)).toEqual({ nameHashOnly: 0 });
+  });
+
+  it('counts subscriptions blocked by a conflicting binding apart, and never promises a peer for them', () => {
+    const conflicted = ['0x' + '33'.repeat(32), '0x' + '44'.repeat(32)];
+    const summaryFor = (ids: string[]) => summarizeContextGraphIdentityStatus({
+      getSubscribedContextGraphs: () => new Map(ids.map((id) => [id, { subscribed: true }])),
+      describeContextGraphIdentity: (id: string) => ({
+        state: 'name-hash-only',
+        ...(conflicted.includes(id) ? { bindingConflict: true } : {}),
+        message: 'x',
+      }),
+    } as never);
+
+    const blockedOnly = summaryFor([conflicted[0]!]);
+    expect(blockedOnly).toEqual({
+      nameHashOnly: 1,
+      bindingConflicts: 1,
+      message: '1 subscribed Context Graph is known only by the on-chain name hash and blocked by a conflicting '
+        + 'binding: the cleartext id is already bound to a different on-chain Context Graph on this node '
+        + '(details: GET /api/context-graph/subscriptions).',
+    });
+    expect(blockedOnly.message).not.toContain('waiting for a peer');
+
+    const mixed = summaryFor([NAME_HASH, ...conflicted]);
+    expect(mixed).toMatchObject({ nameHashOnly: 3, bindingConflicts: 2 });
+    expect(mixed.message).toBe(
+      '1 subscribed Context Graph is known only by the on-chain name hash and cannot sync yet; waiting for a peer '
+        + 'to reveal the cleartext id, or subscribe with the cleartext id. 2 subscribed Context Graphs are known '
+        + 'only by the on-chain name hash and blocked by a conflicting binding: the cleartext id is already bound '
+        + 'to a different on-chain Context Graph on this node (details: GET /api/context-graph/subscriptions).',
+    );
+    expect(mixed.message).not.toContain('0x');
   });
 });

@@ -1216,12 +1216,21 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(internals.subscribedContextGraphs.size).toBe(0);
   });
 
-  it('keeps every VM reconcile entry point dormant when syncReconcilerEnabled is false', async () => {
+  it('keeps VM reconciliation armed when only the periodic peer-sync reconciler is off', async () => {
+    agent = await DKGAgent.create({
+      name: 'PeerSyncOffVmOn',
+      chainAdapter: new MockChainAdapter(),
+      syncReconcilerEnabled: false,
+    });
+    expect((agent as any).vmReconcileEnabled()).toBe(true);
+  });
+
+  it('keeps every VM reconcile entry point dormant when vmReconcilerEnabled is false', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({
       name: 'Rfc64SelectedVmDisabled',
       chainAdapter: chain,
-      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     stubNode(agent);
     const internals = agent as unknown as AgentInternals;

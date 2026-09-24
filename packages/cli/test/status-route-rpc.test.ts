@@ -1342,38 +1342,88 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
 });
 
 describe('/api/status effective sync lifecycle switches', () => {
+  async function withSwitchEnv<T>(
+    env: { sync?: string; vm?: string },
+    run: () => Promise<T>,
+  ): Promise<T> {
+    const previousSync = process.env.DKG_SYNC_RECONCILER_ENABLED;
+    const previousVm = process.env.DKG_VM_RECONCILER_ENABLED;
+    const restore = (name: string, value: string | undefined) => {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    };
+    restore('DKG_SYNC_RECONCILER_ENABLED', env.sync);
+    restore('DKG_VM_RECONCILER_ENABLED', env.vm);
+    try {
+      return await run();
+    } finally {
+      restore('DKG_SYNC_RECONCILER_ENABLED', previousSync);
+      restore('DKG_VM_RECONCILER_ENABLED', previousVm);
+    }
+  }
+
   it('surfaces the configured reconciler switch', async () => {
-    const response = await requestStatusWithAgent(
+    const response = await withSwitchEnv({}, () => requestStatusWithAgent(
       {},
       { syncReconcilerEnabled: false },
-    );
+    ));
 
     expect(response.status).toBe(200);
+    // Peer sync off no longer implies VM reconcile off.
     expect(response.body.syncLifecycle).toEqual({
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: true,
     });
   });
 
   it('surfaces the environment override that runtime actually honors', async () => {
-    const previous = process.env.DKG_SYNC_RECONCILER_ENABLED;
-    process.env.DKG_SYNC_RECONCILER_ENABLED = 'true';
-    try {
-      const response = await requestStatusWithAgent(
-        {},
-        { syncReconcilerEnabled: false },
-      );
+    const response = await withSwitchEnv({ sync: 'true' }, () => requestStatusWithAgent(
+      {},
+      { syncReconcilerEnabled: false },
+    ));
 
-      expect(response.status).toBe(200);
-      expect(response.body.syncLifecycle).toEqual({
-        syncReconcilerEnabled: true,
-      });
-    } finally {
-      if (previous === undefined) {
-        delete process.env.DKG_SYNC_RECONCILER_ENABLED;
-      } else {
-        process.env.DKG_SYNC_RECONCILER_ENABLED = previous;
-      }
-    }
+    expect(response.status).toBe(200);
+    expect(response.body.syncLifecycle).toEqual({
+      syncReconcilerEnabled: true,
+      vmReconcilerEnabled: true,
+    });
+  });
+
+  it('surfaces the VM reconciler switch with config and environment precedence', async () => {
+    const configured = await withSwitchEnv({}, () => requestStatusWithAgent(
+      {},
+      { vmReconcilerEnabled: false },
+    ));
+    expect(configured.body.syncLifecycle).toEqual({
+      syncReconcilerEnabled: true,
+      vmReconcilerEnabled: false,
+    });
+
+    const overridden = await withSwitchEnv({ vm: 'on' }, () => requestStatusWithAgent(
+      {},
+      { vmReconcilerEnabled: false },
+    ));
+    expect(overridden.body.syncLifecycle.vmReconcilerEnabled).toBe(true);
+  });
+
+  it('reports the agent VM promotion state and omits it for agents without it', async () => {
+    const vmPromotion = {
+      vmReconcilerEnabled: false,
+      vmReconcileActive: false,
+      unavailableReason: 'switched off (vmReconcilerEnabled=false or DKG_VM_RECONCILER_ENABLED)',
+      runtimeReady: true,
+      storageAckGate: 'declining',
+      storageAckHandler: 'registered',
+      coreHostedGraphs: 0,
+      storageAckDeclinesLastHour: { CORE_VM_PROMOTION_DISABLED: 3 },
+      audit: { lastRunAt: null, ledgerReady: false, stalledOnChain: 0 },
+    };
+    const reported = await requestStatusWithAgent({ getVmPromotionStatus: () => vmPromotion });
+    expect(reported.body.vmPromotion).toEqual(vmPromotion);
+
+    const legacy = await requestStatusWithAgent({});
+    expect(legacy.status).toBe(200);
+    expect(legacy.body).not.toHaveProperty('vmPromotion');
   });
 });
 
