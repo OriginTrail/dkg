@@ -18,14 +18,6 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Known issues
 
-- **An edge can fail to publish into a public Context Graph that another
-  node registered**, with `Context graph "<id>" is not registered on-chain`,
-  although `dkg context-graph list` shows the graph's on-chain id. The edge
-  learns the id from the chain, but the publish check looks for a
-  registration record that an edge receives only from the registering node's
-  one-time announcement. Publishing into a graph the node registered itself
-  is not affected, and neither is publishing from a Core. 10.0.18 behaves the
-  same. A fix is in review.
 - **An on-demand subscription can stay partly synced**: after
   `dkg subscribe <id>` without `--save` (the CLI default since 10.0.13), the
   VM reconciler fails to save the subscription's cursor on every sweep and
@@ -43,6 +35,16 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Fixed
 
+- **An Edge can publish to Verifiable Memory in a public Context Graph that
+  another node registered**: the publish check looked for the graph's
+  registration only in the node's own store, and an Edge never receives that
+  record for another node's graph (the registering node announces it once,
+  and Edges do not sync the `ontology` system graph). Such a publish failed
+  with `Context graph "<id>" is not registered on-chain` although
+  `dkg context-graph list` showed the graph's on-chain id; 10.0.18 did the
+  same. The check now also accepts the on-chain id the node resolved from the
+  chain, which the publish transaction targets anyway. A graph the chain does
+  not know still fails with the same error.
 - **Less CPU per connecting peer for RFC-64 catalog replay**: every new
   connection replays each catalog-eligible graph's heads to the peer, and every
   replay re-read and re-verified every applied head on the node. A Core with
