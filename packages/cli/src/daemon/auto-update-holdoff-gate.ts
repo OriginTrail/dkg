@@ -73,7 +73,8 @@ export interface UpdateHoldoffGate {
  * The single auto-update rollout gate. A factory so it OWNS its single-flight
  * state (the `pending` flag) instead of making callers allocate and thread a
  * mutable object — create it ONCE, at the daemon scope. A poll is a no-op while
- * an earlier one is still being handled. An `available` poll runs one rollout:
+ * an earlier one is still being handled, or once shutdown has begun. An
+ * `available` poll runs one rollout:
  *
  *   single-flight guard -> hold-off (the deadline policy's hold)
  *     -> abort if shutting down (deadline kept: next boot resumes it)
@@ -152,6 +153,7 @@ export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): Update
     bindRollout<T extends string>(step: UpdateHoldoffStep<T>): UpdatePoller<T> {
       return async (outcome) => {
         if (outcome.status === 'failed') return; // says nothing: keep the deadline
+        if (config.isShuttingDown()) return; // no new transitions once shutdown began
         if (pending) return; // an earlier poll still owns the deadline
         pending = true;
         try {

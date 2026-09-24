@@ -2,12 +2,13 @@
  * Daemon auto-update polling setup.
  *
  * Lifecycle calls {@link startDaemonAutoUpdate} once with the daemon's config
- * and runtime, and stops it on shutdown. That resolves the update mode and
- * policy, then {@link startDaemonUpdatePolling} picks the mode, logs it, and
- * starts polling: one rollout gate per daemon, with its deadline persisted
- * under the DKG home (so a restart mid-hold resumes it), behind one runCheck
- * that fires shortly after boot and then on the interval. Everything here is
- * injectable, so the lifecycle-to-polling boundary is unit-tested.
+ * and runtime, and stops it on shutdown. {@link resolveDaemonUpdateMode} turns
+ * the config into one of the daemon's startup states, and
+ * {@link startDaemonUpdatePolling} logs that state and starts its polling: one
+ * rollout gate per daemon, with its deadline persisted under the DKG home (so a
+ * restart mid-hold resumes it), behind one runCheck that fires shortly after
+ * boot and then on the interval. Everything here is injectable, so the
+ * lifecycle-to-polling boundary is unit-tested.
  */
 import { join } from 'node:path';
 import { formatAutoUpdateTagVerificationWarning, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
@@ -31,7 +32,6 @@ import { DAEMON_EXIT_CODE_RESTART } from './manifest.js';
 import {
   resolveAutoUpdatePollingMode,
   resolveStandaloneInstall,
-  type AutoUpdatePollingMode,
   type LastUpdateCheck,
 } from './state.js';
 
@@ -83,12 +83,16 @@ const FIRST_UPDATE_CHECK_DELAY_MS = 15_000;
 /** The timers polling is scheduled on. Injectable for tests. */
 export interface UpdatePollingTimers {
   setTimeout(fn: () => unknown, ms: number): unknown;
-  setInterval(fn: () => unknown, ms: number): ReturnType<typeof setInterval>;
+  clearTimeout(handle: unknown): void;
+  setInterval(fn: () => unknown, ms: number): unknown;
+  clearInterval(handle: unknown): void;
 }
 
 const globalTimers: UpdatePollingTimers = {
   setTimeout: (fn, ms) => setTimeout(fn, ms),
+  clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
   setInterval: (fn, ms) => setInterval(fn, ms),
+  clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
 };
 
 /** What the daemon hands both polling helpers. */
@@ -106,25 +110,39 @@ export interface DaemonUpdatePollingDeps {
   gateSeams?: UpdateGateSeams;
 }
 
+/** Running auto-update polling. `stop()` cancels the startup check and the interval. */
+export interface UpdatePolling {
+  stop(): void;
+}
+
 function schedulePolling(
   runCheck: () => Promise<void>,
   intervalMs: number,
   timers: UpdatePollingTimers = globalTimers,
-): ReturnType<typeof setInterval> {
-  timers.setTimeout(runCheck, FIRST_UPDATE_CHECK_DELAY_MS);
-  return timers.setInterval(runCheck, intervalMs);
+): UpdatePolling {
+  let stopped = false;
+  // A timer callback already queued when stop() runs must not start a check either.
+  const tick = () => (stopped ? undefined : runCheck());
+  const first = timers.setTimeout(tick, FIRST_UPDATE_CHECK_DELAY_MS);
+  const every = timers.setInterval(tick, intervalMs);
+  return {
+    stop() {
+      stopped = true;
+      timers.clearTimeout(first);
+      timers.clearInterval(every);
+    },
+  };
 }
 
 /**
  * Start git-mode auto-update polling: one persisted rollout gate (created once,
  * so single-flight holds across ticks) behind a runCheck that fires shortly
- * after boot and then every `checkIntervalMinutes`. Returns the interval handle
- * for shutdown.
+ * after boot and then every `checkIntervalMinutes`.
  */
 export function startGitUpdatePolling(
   au: ResolvedAutoUpdateConfig,
   deps: DaemonUpdatePollingDeps,
-): ReturnType<typeof setInterval> {
+): UpdatePolling {
   const gate = createDaemonUpdateHoldoffGate({ ...deps, au }, deps.gateSeams);
   const runCheck = createGitUpdateRunCheck({
     gate,
@@ -141,18 +159,18 @@ export const CHECK_ONLY_INTERVAL_MINUTES = 30;
 
 export type NpmUpdatePollingOptions =
   /** Auto-apply: interval, channel and prerelease policy all come from `au`. */
-  | { mode: 'auto-apply'; au: ResolvedAutoUpdateConfig; nodeRole: 'edge' | 'core' }
+  | { mode: 'npm-auto-apply'; au: ResolvedAutoUpdateConfig; nodeRole: 'edge' | 'core' }
   /** Auto-update disabled: check and record the latest version on the given
    *  policy every CHECK_ONLY_INTERVAL_MINUTES; no gate, nothing is installed. */
-  | { mode: 'check-only'; policy: ResolvedUpdatePreferences };
+  | { mode: 'npm-check-only'; policy: ResolvedUpdatePreferences };
 
 /** npm-mode counterpart to {@link startGitUpdatePolling}. */
 export function startNpmUpdatePolling(
   opts: NpmUpdatePollingOptions,
   deps: DaemonUpdatePollingDeps,
-): ReturnType<typeof setInterval> {
+): UpdatePolling {
   const common = { log: deps.log, lastUpdateCheck: deps.lastUpdateCheck };
-  if (opts.mode === 'check-only') {
+  if (opts.mode === 'npm-check-only') {
     const runCheck = createNpmUpdateRunCheck({
       ...common,
       allowPrerelease: opts.policy.allowPrerelease,
@@ -175,20 +193,40 @@ export function startNpmUpdatePolling(
   return schedulePolling(runCheck, au.checkIntervalMinutes * 60_000, deps.timers);
 }
 
-/** What lifecycle resolved about auto-update for this daemon. */
-export interface DaemonUpdatePollingSelection {
-  pollingMode: AutoUpdatePollingMode;
-  /** Resolved auto-update config; null when auto-update is disabled. */
-  au: ResolvedAutoUpdateConfig | null;
-  /** From `resolveUpdatePreferences`: the npm check policy when auto-apply is
-   *  disabled (`au` null). It follows the operator's local config before the
-   *  network default, so a disabled node with a local channel / allowPrerelease
-   *  pin observes its own cohort. */
-  preferences: ResolvedUpdatePreferences;
-  nodeRole: 'edge' | 'core';
+/** The daemon's auto-update startup state, as resolved from its config. */
+export type DaemonUpdateMode =
+  | { mode: 'git'; au: ResolvedAutoUpdateConfig }
+  | { mode: 'git-disabled' }
+  | NpmUpdatePollingOptions
+  /** A monorepo checkout never polls; it only says so when auto-update is enabled. */
+  | { mode: 'monorepo'; autoUpdateEnabled: boolean };
+
+/**
+ * Resolve the daemon's auto-update state from its config, merged field by field
+ * across ~/.dkg/config.json → network/<env>.json → project.json. With auto-apply
+ * disabled, npm mode still checks versions, on the operator's local policy
+ * before the network default, so a disabled node with a local channel /
+ * allowPrerelease pin observes its own cohort.
+ */
+export function resolveDaemonUpdateMode(
+  config: Pick<DkgConfig, 'autoUpdate' | 'nodeRole'>,
+  network: Pick<NetworkConfig, 'autoUpdate'> | null | undefined,
+): DaemonUpdateMode {
+  const au = resolveAutoUpdateConfig(config, network);
+  const source = au?.source ?? resolveAutoUpdateSource(config, network);
+  switch (resolveAutoUpdatePollingMode(source, resolveStandaloneInstall(source))) {
+    case 'git':
+      return au ? { mode: 'git', au } : { mode: 'git-disabled' };
+    case 'npm':
+      return au
+        ? { mode: 'npm-auto-apply', au, nodeRole: config.nodeRole ?? 'edge' }
+        : { mode: 'npm-check-only', policy: resolveUpdatePreferences(config, network) };
+    case 'monorepo':
+      return { mode: 'monorepo', autoUpdateEnabled: au !== null };
+  }
 }
 
-/** The per-mode starters. Injectable so tests can observe the selection. */
+/** The per-mode starters. Injectable so tests can observe the dispatch. */
 export interface UpdatePollingStarters {
   git: typeof startGitUpdatePolling;
   npm: typeof startNpmUpdatePolling;
@@ -197,68 +235,66 @@ export interface UpdatePollingStarters {
 const defaultStarters: UpdatePollingStarters = { git: startGitUpdatePolling, npm: startNpmUpdatePolling };
 
 /**
- * Pick the auto-update mode for this daemon, log it, and start polling. Returns
- * the interval handle (cleared on shutdown), or null when nothing polls.
- * The resolver merges repo/branch/interval field-by-field across
- * ~/.dkg/config.json → network/<env>.json → project.json, so `au` already
- * carries the shipped defaults.
+ * Log the daemon's auto-update mode and start polling for it. Returns the
+ * running polling, or null when nothing polls.
  */
 export function startDaemonUpdatePolling(
-  selection: DaemonUpdatePollingSelection,
+  state: DaemonUpdateMode,
   deps: DaemonUpdatePollingDeps,
   starters: UpdatePollingStarters = defaultStarters,
-): ReturnType<typeof setInterval> | null {
-  const { pollingMode, au } = selection;
+): UpdatePolling | null {
   const { log } = deps;
+  switch (state.mode) {
+    case 'git': {
+      const { au } = state;
+      let watchedRef = '';
+      let watchedRepo = '';
+      let watchedRefPlan: ReturnType<typeof resolveAutoUpdateGitRefPlan> | null = null;
+      try {
+        watchedRefPlan = resolveAutoUpdateGitRefPlan(au);
+        watchedRef = watchedRefPlan.ref;
+        watchedRepo = repoToFetchUrl(au.repo);
+      } catch (err: any) {
+        log(
+          `Auto-update (git): invalid config — ${err?.message ?? String(err)}. ` +
+            'Git polling disabled until config is fixed and the daemon is restarted.',
+        );
+      }
+      if (!watchedRef || !watchedRepo) return null;
 
-  if (pollingMode === 'git' && au) {
-    let watchedRef = '';
-    let watchedRepo = '';
-    let watchedRefPlan: ReturnType<typeof resolveAutoUpdateGitRefPlan> | null = null;
-    try {
-      watchedRefPlan = resolveAutoUpdateGitRefPlan(au);
-      watchedRef = watchedRefPlan.ref;
-      watchedRepo = repoToFetchUrl(au.repo);
-    } catch (err: any) {
       log(
-        `Auto-update (git): invalid config — ${err?.message ?? String(err)}. ` +
-          'Git polling disabled until config is fixed and the daemon is restarted.',
+        `Auto-update (git): enabled source="git"; watching repo="${watchedRepo}" ref="${watchedRef}" ` +
+          `(every ${au.checkIntervalMinutes}min). NPM/dist-tag updates remain recommended; git mode is advanced/experimental.`,
       );
+      const verificationWarning = watchedRefPlan ? formatAutoUpdateTagVerificationWarning(watchedRefPlan) : null;
+      if (verificationWarning) log(verificationWarning);
+      return starters.git(au, deps);
     }
-    if (!watchedRef || !watchedRepo) return null;
-
-    log(
-      `Auto-update (git): enabled source="git"; watching repo="${watchedRepo}" ref="${watchedRef}" ` +
-        `(every ${au.checkIntervalMinutes}min). NPM/dist-tag updates remain recommended; git mode is advanced/experimental.`,
-    );
-    const verificationWarning = watchedRefPlan ? formatAutoUpdateTagVerificationWarning(watchedRefPlan) : null;
-    if (verificationWarning) log(verificationWarning);
-    return starters.git(au, deps);
+    case 'git-disabled':
+      log('Auto-update (git): disabled — autoUpdate.enabled is false.');
+      return null;
+    case 'npm-auto-apply':
+      log(
+        `Auto-update (npm): enabled${state.au.channel ? ` channel="${state.au.channel}"` : ''} (every ${state.au.checkIntervalMinutes}min)`,
+      );
+      return starters.npm(state, deps);
+    case 'npm-check-only':
+      log(
+        `Auto-update (npm): disabled — version check only${state.policy.channel ? ` channel="${state.policy.channel}"` : ''} (every ${CHECK_ONLY_INTERVAL_MINUTES}min)`,
+      );
+      return starters.npm(state, deps);
+    case 'monorepo':
+      // Monorepo dev daemon with auto-update enabled in config — log
+      // once at boot so contributors understand why polling is silent.
+      if (state.autoUpdateEnabled) {
+        log('Auto-update: skipped — monorepo checkout detected. Use `git pull && pnpm install && pnpm build` to update.');
+      }
+      return null;
+    default: {
+      const unhandled: never = state;
+      return unhandled;
+    }
   }
-
-  if (pollingMode === 'git') {
-    log('Auto-update (git): disabled — autoUpdate.enabled is false.');
-    return null;
-  }
-
-  if (pollingMode === 'npm') {
-    const options: NpmUpdatePollingOptions = au
-      ? { mode: 'auto-apply', au, nodeRole: selection.nodeRole }
-      : { mode: 'check-only', policy: selection.preferences };
-    const channel = au ? au.channel : selection.preferences.channel;
-    const everyMinutes = au ? au.checkIntervalMinutes : CHECK_ONLY_INTERVAL_MINUTES;
-    log(
-      `Auto-update (npm): ${au ? 'enabled' : 'disabled — version check only'}${channel ? ` channel="${channel}"` : ''} (every ${everyMinutes}min)`,
-    );
-    return starters.npm(options, deps);
-  }
-
-  if (au?.enabled) {
-    // Monorepo dev daemon with auto-update enabled in config — log
-    // once at boot so contributors understand why polling is silent.
-    log('Auto-update: skipped — monorepo checkout detected. Use `git pull && pnpm install && pnpm build` to update.');
-  }
-  return null;
 }
 
 /** What the daemon hands {@link startDaemonAutoUpdate}. */
@@ -274,37 +310,25 @@ export interface DaemonAutoUpdateContext {
 }
 
 /**
- * The daemon's auto-update handoff: resolve the mode and policy from the
- * daemon's config (merged field by field across ~/.dkg/config.json →
- * network/<env>.json → project.json), start polling with the deadline under the
- * DKG home, and return `stop()` for shutdown. `start` is injectable for tests.
+ * The daemon's auto-update handoff: resolve its mode from the config, start
+ * polling with the deadline under the DKG home, and return the polling so
+ * shutdown can stop it. `start` is injectable for tests.
  */
 export function startDaemonAutoUpdate(
   daemon: DaemonAutoUpdateContext,
   start: typeof startDaemonUpdatePolling = startDaemonUpdatePolling,
-): { stop(): void } {
-  const { config, network } = daemon;
-  const au = resolveAutoUpdateConfig(config, network);
-  const source = au?.source ?? resolveAutoUpdateSource(config, network);
-  const interval = start(
-    {
-      pollingMode: resolveAutoUpdatePollingMode(source, resolveStandaloneInstall(source)),
-      au,
-      preferences: resolveUpdatePreferences(config, network),
-      nodeRole: config.nodeRole ?? 'edge',
-    },
-    {
-      dkgHome: dkgDir(),
-      isShuttingDown: daemon.isShuttingDown,
-      setUpdating: daemon.setUpdating,
-      log: daemon.log,
-      lastUpdateCheck: daemon.lastUpdateCheck,
-      onRestart: () => daemon.shutdown(DAEMON_EXIT_CODE_RESTART),
-    },
-  );
+): UpdatePolling {
+  const polling = start(resolveDaemonUpdateMode(daemon.config, daemon.network), {
+    dkgHome: dkgDir(),
+    isShuttingDown: daemon.isShuttingDown,
+    setUpdating: daemon.setUpdating,
+    log: daemon.log,
+    lastUpdateCheck: daemon.lastUpdateCheck,
+    onRestart: () => daemon.shutdown(DAEMON_EXIT_CODE_RESTART),
+  });
   return {
     stop() {
-      if (interval) clearInterval(interval);
+      polling?.stop();
     },
   };
 }

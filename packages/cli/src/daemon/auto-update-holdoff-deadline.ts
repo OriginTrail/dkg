@@ -56,7 +56,7 @@ export interface PersistedHoldoffDeadlineOptions {
   store: UpdateHoldoffStore;
   /** Resolved jitter window in ms (from `resolveUpdateJitterMs`); 0 disables. */
   jitterMs: number;
-  /** Reports store failures, which are never thrown: the hold then lives in memory. */
+  /** Reports store failures, which are never thrown (see createPersistedHoldoffDeadline). */
   log: (msg: string) => void;
   /** Injectable for deterministic tests. */
   rng?: () => number;
@@ -69,13 +69,22 @@ export interface PersistedHoldoffDeadlineOptions {
  * when the target changed, the record is unreadable, or the deadline lies
  * outside [now - MAX_HOLDOFF_OVERDUE_MS, now + jitterMs] (stale, the window was
  * lowered, or the clock went back). With jitter off it holds 0 and writes nothing.
+ *
+ * The store only carries the deadline across restarts. Within one process the
+ * latest transition is also kept in memory and is authoritative: the store is
+ * read only until this process has made a transition. So a failed write does
+ * not make the next poll redraw, and a failed clear does not bring a stale
+ * deadline back. Store failures are logged, never thrown.
  */
 export function createPersistedHoldoffDeadline(opts: PersistedHoldoffDeadlineOptions): UpdateHoldoffDeadline {
   const { store, jitterMs, log } = opts;
   const rng = opts.rng ?? Math.random;
   const now = opts.now ?? Date.now;
+  // This process's latest transition; `undefined` until it has made one.
+  let latest: UpdateHoldoffRecord | null | undefined;
 
   async function write(record: UpdateHoldoffRecord): Promise<void> {
+    latest = record;
     try {
       await store.write(record);
     } catch (err) {
@@ -83,19 +92,25 @@ export function createPersistedHoldoffDeadline(opts: PersistedHoldoffDeadlineOpt
     }
   }
 
+  async function current(): Promise<UpdateHoldoffRecord | null> {
+    if (latest !== undefined) return latest;
+    try {
+      return await store.read();
+    } catch (err) {
+      log(`Auto-update: ignoring unreadable rollout hold-off record (${errorMessage(err)}); drawing a fresh hold-off.`);
+      return null;
+    }
+  }
+
   return {
     async begin(target) {
       if (!(jitterMs > 0)) return { holdMs: 0, resumed: false };
       const at = now();
-      let record: UpdateHoldoffRecord | null = null;
-      try {
-        record = await store.read();
-      } catch (err) {
-        log(`Auto-update: ignoring unreadable rollout hold-off record (${errorMessage(err)}); drawing a fresh hold-off.`);
-      }
+      const record = await current();
       if (record && record.target === target) {
         const remainingMs = record.deadlineEpochMs - at;
         if (remainingMs <= jitterMs && remainingMs >= -MAX_HOLDOFF_OVERDUE_MS) {
+          latest = record;
           return { holdMs: Math.max(0, Math.ceil(remainingMs)), resumed: true };
         }
       }
@@ -107,6 +122,7 @@ export function createPersistedHoldoffDeadline(opts: PersistedHoldoffDeadlineOpt
       if (jitterMs > 0) await write({ target, deadlineEpochMs: now() });
     },
     async clear() {
+      latest = null;
       try {
         await store.clear();
       } catch (err) {

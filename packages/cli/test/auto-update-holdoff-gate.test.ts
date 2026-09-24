@@ -577,6 +577,53 @@ describe('createUpdateHoldoffGate — persisted rollout deadline', () => {
     expect(b.apply).toHaveBeenCalledTimes(2);
   });
 
+  it('a failed write keeps the deadline in memory: after a failed re-check the next poll resumes it', async () => {
+    const node = persistentNode({
+      wrapFs: (fs) => ({
+        ...fs,
+        writeFile: async () => { throw Object.assign(new Error('EROFS: read-only file system'), { code: 'EROFS' }); },
+      }),
+    });
+    const b = node.boot({ rng: () => 0.5 });
+
+    await b.run('c1', { revalidate: async () => ({ status: 'failed' }) });
+    expect(node.record(), 'nothing reached the disk').toBeNull();
+
+    await b.run('c1');
+    expect(b.rng, 'drawn once, on first detection').toHaveBeenCalledOnce();
+    expect(b.holds).toEqual([[900_000, false], [0, true]]);
+    expect(b.apply).toHaveBeenCalledWith('c1');
+  });
+
+  it('a failed clear does not bring the stale deadline back within the same process', async () => {
+    const node = persistentNode({
+      wrapFs: (fs) => ({
+        ...fs,
+        unlink: async () => { throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' }); },
+      }),
+    });
+    await node.store.write({ target: 'c1', deadlineEpochMs: node.clock.t - 60_000 }); // due
+    const b = node.boot({ rng: () => 0.5 });
+
+    await b.run('c1'); // resumes the due deadline, applies, then fails to remove it
+    expect(b.apply).toHaveBeenCalledOnce();
+    expect(node.record()?.target, 'still on disk').toBe('c1');
+
+    await b.run('c1'); // e.g. the build failed and the target is detected again
+    expect(b.rng, 'a fresh hold, not the stale due deadline').toHaveBeenCalledOnce();
+    expect(b.holds).toEqual([[0, true], [900_000, false]]);
+  });
+
+  it('a poll after shutdown began writes no deadline and starts nothing', async () => {
+    const node = persistentNode();
+    const b = node.boot();
+    b.shutDown();
+    await b.run('c1');
+    expect(b.rng).not.toHaveBeenCalled();
+    expect(b.apply).not.toHaveBeenCalled();
+    expect(node.record()).toBeNull();
+  });
+
   it('writes no record when jitter is disabled', async () => {
     const node = persistentNode({ jitterMs: 0 });
     const b = node.boot();
