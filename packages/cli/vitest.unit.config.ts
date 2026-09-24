@@ -75,6 +75,14 @@ export default defineConfig({
           // Subscribing by an on-chain name hash (Base #33): route, catch-up
           // text and the public status summary. Pure handler, no hardhat.
           'test/context-graph-name-hash-subscribe-route.test.ts',
+          // Catch-up status by a resolved name hash: who sees the job. Real
+          // agent and mock chain, no hardhat.
+          'test/context-graph-name-hash-catchup-status.test.ts',
+          // Subscribing by on-chain numeric id (`dkg subscribe 32` / `#32`):
+          // the real route over a real agent and a mock chain. No hardhat.
+          'test/context-graph-on-chain-id-subscribe.test.ts',
+          'test/context-graph-on-chain-id-startup.test.ts',
+          'test/context-graph-on-chain-id-helpers.test.ts',
           'test/context-graph-readiness-swm-shortfall.test.ts',
           'test/context-graph-readiness-migration.test.ts',
           // R9 — PCA advisory wire derivation (pure) + CLI register-agent output

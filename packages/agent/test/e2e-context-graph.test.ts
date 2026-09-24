@@ -3,9 +3,11 @@
  *
  * 1. Create a context graph on-chain
  * 2. Write data to workspace → replicate via GossipSub
- * 3. Enshrine from workspace with contextGraphId
- * 4. Finalization message propagates → peer verifies on-chain → promotes to context graph URIs
- * 5. Verify data lives in context graph data/meta graphs (not contextGraph data graph)
+ * 3. The legacy (not graph-scoped) publish into the `<cg>/context/<id>`
+ *    partition, with or without the same-graph root dual-write, is refused by
+ *    a 10.0.19 Core: it cannot keep a copy of such a publish that it could
+ *    promote to VM, so it declines the StorageACK (CORE_VM_PROMOTION_DISABLED)
+ * 4. The same assertion publishes graph-scoped: B ACKs it and promotes it
  *
  * Uses a shared EVMChainAdapter so both nodes see the same on-chain events,
  * allowing B to verify A's publish transaction during finalization.
@@ -30,7 +32,6 @@ const DKGAgent = {
 
 const CONTEXT_GRAPH = 'context-graph-e2e';
 const ENTITY_CTX_1 = 'urn:ctxgraph:entity:1';
-const ENTITY_CTX_2 = 'urn:ctxgraph:entity:2';
 
 function sleep(ms: number) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -43,6 +44,16 @@ async function readPhysicalPlacement(node: DKGAgent, sparql: string): Promise<Se
     throw new Error(`Physical placement SELECT returned ${result.type} instead of bindings`);
   }
   return result;
+}
+
+/** Run a legacy publish and report how it ended, without throwing. */
+async function legacyPublishOutcome(
+  publish: Promise<{ status: string }>,
+): Promise<{ status: string; error: string }> {
+  return publish.then(
+    (result) => ({ status: result.status, error: '' }),
+    (err: unknown) => ({ status: 'rejected', error: err instanceof Error ? err.message : String(err) }),
+  );
 }
 
 async function stageRootlessAssertion(
@@ -164,168 +175,48 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
     expect(bWorkspace.bindings[0]['name']).toBe('"Context Graph Entity"');
   }, 25_000);
 
-  it('A enshrines to context graph; A has data in context graph URI', async () => {
-    const result = await nodeA.publishFromSharedMemory(
+  it('a gated receiver refuses the legacy publish into the context graph partition', async () => {
+    const outcome = await legacyPublishOutcome(nodeA.publishFromSharedMemory(
       CONTEXT_GRAPH,
       'all',
       { subContextGraphId: contextGraphId, clearSharedMemoryAfter: true },
-    );
+    ));
 
-    expect(result.status).toBe('confirmed');
-    expect(result.ual).toBeDefined();
-
+    expect(outcome.status).not.toBe('confirmed');
+    expect(outcome.error).toContain('CORE_VM_PROMOTION_DISABLED');
     const ctxDataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}`;
-
-    const aData = await readPhysicalPlacement(nodeA,
-      `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_CTX_1}> <http://schema.org/name> ?name } }`,
-    );
-    expect(aData.bindings.length).toBe(1);
-    expect(aData.bindings[0]['name']).toBe('"Context Graph Entity"');
-
-    // NOT in contextGraph data graph
-    const aContextGraphData = await nodeA.query(
-      `SELECT ?name WHERE { <${ENTITY_CTX_1}> <http://schema.org/name> ?name }`,
-      CONTEXT_GRAPH,
-    );
-    expect(aContextGraphData.bindings.length).toBe(0);
+    for (const node of [nodeA, nodeB]) {
+      const data = await readPhysicalPlacement(node,
+        `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_CTX_1}> <http://schema.org/name> ?name } }`,
+      );
+      expect(data.bindings.length).toBe(0);
+    }
   }, 30_000);
 
-  it('B receives finalization and promotes to context graph', async () => {
-    const ctxDataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}`;
-    const ctxMetaGraph = `${ctxDataGraph}/_meta`;
+  it('the same assertion publishes graph-scoped; B ACKs it and promotes it to VM', async () => {
+    const result = await nodeA.publishFromFinalizedAssertion(
+      CONTEXT_GRAPH,
+      'context-entity-1',
+      { clearSharedMemoryAfter: true },
+    );
+    expect(result.status).toBe('confirmed');
+    expect(result.ual).toBeDefined();
 
     const deadline = Date.now() + 20_000;
     let bData: SelectResult = { type: 'bindings', bindings: [] };
     while (Date.now() < deadline) {
-      const [data, metadata] = await Promise.all([
-        readPhysicalPlacement(nodeB,
-          `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_CTX_1}> <http://schema.org/name> ?name } }`,
-        ),
-        readPhysicalPlacement(nodeB,
-          `SELECT ?status WHERE { GRAPH <${ctxMetaGraph}> { ?kc <http://dkg.io/ontology/status> ?status } }`,
-        ),
-      ]);
-      bData = data;
-      if (
-        bData.bindings.length > 0
-        && metadata.bindings.some((row) => row['status'] === '"confirmed"')
-      ) break;
+      bData = await nodeB.query(
+        `SELECT ?name WHERE { <${ENTITY_CTX_1}> <http://schema.org/name> ?name }`,
+        CONTEXT_GRAPH,
+      );
+      if (bData.bindings.length > 0) break;
       await sleep(500);
     }
-
     expect(bData.bindings.length).toBe(1);
     expect(bData.bindings[0]['name']).toBe('"Context Graph Entity"');
-  }, 30_000);
+  }, 40_000);
 
-  it('B has confirmed metadata in context graph meta', async () => {
-    const ctxMetaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}/_meta`;
-
-    const metaResult = await readPhysicalPlacement(nodeB,
-      `SELECT ?status WHERE { GRAPH <${ctxMetaGraph}> { ?kc <http://dkg.io/ontology/status> ?status } }`,
-    );
-
-    const statuses = metaResult.bindings.map((b: any) => String(b['status']));
-    expect(statuses.some(s => s === '"confirmed"')).toBe(true);
-  }, 10_000);
-
-  it('B contextGraph data graph does NOT contain context graph data (remap/explicit-subCG flow)', async () => {
-    // This test exercises the explicit-`subContextGraphId` publish flow
-    // (line ~115 above), which is the REMAP-style path on the publisher:
-    // `dkg-publisher.ts` ~line 1393 deletes the root copy of the
-    // canonical quads on purpose, leaving them only in the per-cgId
-    // partition `<cg>/context/<ctxGraphId>`. PR #779's recipient
-    // dual-write (which fixes the v10-rc-validation §5 same-graph
-    // gossip-replication regression) is correctly gated on the
-    // wire-level `keepRootCopyOnLabel` flag and MUST NOT fire here, so
-    // B's root stays empty, mirroring A's deliberate remap behaviour.
-    // The pure same-graph dual-write parity is covered separately by
-    // `scripts/v10-rc-validation.sh` §5 against a 6-node devnet.
-    const contextGraphData = await nodeB.query(
-      `SELECT ?name WHERE { <${ENTITY_CTX_1}> <http://schema.org/name> ?name }`,
-      CONTEXT_GRAPH,
-    );
-    expect(contextGraphData.bindings.length).toBe(0);
-  }, 5_000);
-
-  it('B workspace is cleaned up after promotion', async () => {
-    const wsResult = await nodeB.query(
-      `SELECT ?name WHERE { <${ENTITY_CTX_1}> <http://schema.org/name> ?name }`,
-      { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
-    );
-    expect(wsResult.bindings.length).toBe(0);
-  }, 5_000);
-
-  it('second enshrine to same context graph accumulates data', async () => {
-    await stageRootlessAssertion(nodeA, CONTEXT_GRAPH, 'context-entity-2', [
-      { subject: ENTITY_CTX_2, predicate: 'http://schema.org/name', object: '"Second Context Entity"' },
-    ]);
-
-    // Wait for workspace replication
-    const wsDeadline = Date.now() + 10_000;
-    while (Date.now() < wsDeadline) {
-      const ws = await nodeB.query(
-        `SELECT ?name WHERE { <${ENTITY_CTX_2}> <http://schema.org/name> ?name }`,
-        { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
-      );
-      if (ws.bindings.length > 0) break;
-      await sleep(500);
-    }
-
-    const result = await nodeA.publishFromSharedMemory(
-      CONTEXT_GRAPH,
-      'all',
-      { subContextGraphId: contextGraphId, clearSharedMemoryAfter: true },
-    );
-    expect(result.status).toBe('confirmed');
-
-    const ctxDataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}`;
-
-    // Both entities in context graph on A
-    const data = await readPhysicalPlacement(nodeA,
-      `SELECT ?s ?name WHERE { GRAPH <${ctxDataGraph}> { ?s <http://schema.org/name> ?name } }`,
-    );
-    const names = data.bindings.map((b: any) => String(b['name']));
-    expect(names.some((n: string) => n.includes('Context Graph Entity'))).toBe(true);
-    expect(names.some((n: string) => n.includes('Second Context Entity'))).toBe(true);
-
-    // A's workspace cleaned
-    const ws = await nodeA.query(
-      `SELECT ?name WHERE { <${ENTITY_CTX_2}> <http://schema.org/name> ?name }`,
-      { contextGraphId: CONTEXT_GRAPH, graphSuffix: '_shared_memory' },
-    );
-    expect(ws.bindings.length).toBe(0);
-
-    // Poll until B promotes
-    const deadline = Date.now() + 20_000;
-    let bData: any;
-    while (Date.now() < deadline) {
-      bData = await readPhysicalPlacement(nodeB,
-        `SELECT ?s ?name WHERE { GRAPH <${ctxDataGraph}> { ?s <http://schema.org/name> ?name } }`,
-      );
-      if (bData.bindings.length >= 2) break;
-      await sleep(500);
-    }
-    const bNames = bData.bindings.map((b: any) => String(b['name']));
-    expect(bNames.some((n: string) => n.includes('Context Graph Entity'))).toBe(true);
-    expect(bNames.some((n: string) => n.includes('Second Context Entity'))).toBe(true);
-  }, 60_000);
-
-  // PR #779 — codex r3 follow-up. The describe block above only
-  // exercises the explicit-`subContextGraphId` (remap) path, which is
-  // the keepRootCopyOnLabel=false branch. Codex flagged that automated
-  // CI was missing coverage of the OPPOSITE path: a same-graph publish
-  // (no subContextGraphId) where the publisher dual-writes the
-  // canonical quads + confirmed `_meta` to BOTH the root `<cg>` graph
-  // and the per-cgId `<cg>/context/<id>` partition, and recipients
-  // mirror that dual-write so label-scoped queries on replicas
-  // converge. Pin that path here.
-  //
-  // Use a fresh label so this block exercises the same-graph branch,
-  // while the tests above continue to exercise the explicit
-  // `subContextGraphId` remap branch. Both registrations use the
-  // production `registerContextGraph(id)` API so their public label is
-  // cryptographically bound to the on-chain name hash.
-  describe('same-graph publish (keepRootCopyOnLabel=true) — recipient mirrors publisher root dual-write', () => {
+  describe('same-graph publish (keepRootCopyOnLabel=true)', () => {
     const SAMEG_LABEL = 'context-graph-e2e-sameg';
     const ENTITY_SAMEG = 'urn:ctxgraph:entity:sameg';
     let samegOnChainId: string;
@@ -339,29 +230,12 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
       });
       samegOnChainId = String(reg.onChainId);
       expect(Number(samegOnChainId)).toBeGreaterThan(0);
-
-      // Both nodes need to know the on-chain id so B's
-      // `resolveContextGraphOnChainId` resolves locally. The same-graph
-      // dual-write fallback path (used when older publishers don't
-      // emit `keepRootCopyOnLabel`) reads this resolution; on B the
-      // newer publisher A emits the wire bit explicitly, but priming
-      // B's ontology mirrors how production replicas come up. Use the
-      // explicit `seedContextGraphOnChainId` override on B's store.
-      await (nodeB as any).store.insert([
-        {
-          subject: `did:dkg:context-graph:${SAMEG_LABEL}`,
-          predicate: 'https://dkg.network/ontology#ContextGraphOnChainId',
-          object: `"${samegOnChainId}"`,
-          graph: 'did:dkg:context-graph:ontology',
-        },
-      ]);
-
       await bindAndSubscribePublicContextGraph(nodeA, SAMEG_LABEL, samegOnChainId);
       await bindAndSubscribePublicContextGraph(nodeB, SAMEG_LABEL, samegOnChainId);
       await sleep(1500);
     }, 30_000);
 
-    it('A same-graph publish; B sees data in BOTH root <cg> and per-cgId partition', async () => {
+    it('a gated receiver refuses the legacy same-graph dual-write publish', async () => {
       await stageRootlessAssertion(nodeA, SAMEG_LABEL, 'same-graph-entity', [
         { subject: ENTITY_SAMEG, predicate: 'http://schema.org/name', object: '"Same-Graph Entity"' },
       ]);
@@ -375,88 +249,19 @@ describe('E2E: context graph publish + finalization (shared chain)', () => {
         await sleep(500);
       }
 
-      // No `subContextGraphId` → same-graph publish: publisher
-      // dual-writes canonical quads to BOTH `<cg>` and
-      // `<cg>/context/<id>` and emits `keepRootCopyOnLabel=true` on
-      // the wire so the recipient mirrors the dual-write.
-      const result = await nodeA.publishFromSharedMemory(
+      const outcome = await legacyPublishOutcome(nodeA.publishFromSharedMemory(
         SAMEG_LABEL,
         'all',
         { clearSharedMemoryAfter: true },
-      );
-      expect(result.status).toBe('confirmed');
+      ));
 
+      expect(outcome.status).not.toBe('confirmed');
+      expect(outcome.error).toContain('CORE_VM_PROMOTION_DISABLED');
       const ctxDataGraph = `did:dkg:context-graph:${SAMEG_LABEL}/context/${samegOnChainId}`;
-      const rootDataGraph = `did:dkg:context-graph:${SAMEG_LABEL}`;
-      const rootMeta = `${rootDataGraph}/_meta`;
-      const perCgIdMeta = `${ctxDataGraph}/_meta`;
-
-      // Wait for every physical copy required by recipient finalization.
-      // Data can arrive before confirmed metadata; do not use chain-query
-      // latency as an implicit wait for the remaining copies.
-      const deadline = Date.now() + 25_000;
-      let bRootStoredData: SelectResult = { type: 'bindings', bindings: [] };
-      let bPerCgIdData: SelectResult = { type: 'bindings', bindings: [] };
-      let rootMetaSelect: SelectResult = { type: 'bindings', bindings: [] };
-      let perCgIdMetaSelect: SelectResult = { type: 'bindings', bindings: [] };
-      while (Date.now() < deadline) {
-        [bRootStoredData, bPerCgIdData, rootMetaSelect, perCgIdMetaSelect] = await Promise.all([
-          readPhysicalPlacement(nodeB,
-            `SELECT ?name WHERE { GRAPH <${rootDataGraph}> { <${ENTITY_SAMEG}> <http://schema.org/name> ?name } }`,
-          ),
-          readPhysicalPlacement(nodeB,
-            `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_SAMEG}> <http://schema.org/name> ?name } }`,
-          ),
-          readPhysicalPlacement(nodeB,
-            `SELECT ?status WHERE { GRAPH <${rootMeta}> { <${result.ual}> <http://dkg.io/ontology/status> ?status } }`,
-          ),
-          readPhysicalPlacement(nodeB,
-            `SELECT ?status WHERE { GRAPH <${perCgIdMeta}> { <${result.ual}> <http://dkg.io/ontology/status> ?status } }`,
-          ),
-        ]);
-        if (
-          bRootStoredData.bindings.some((row) => row['name'] === '"Same-Graph Entity"')
-          && bPerCgIdData.bindings.some((row) => row['name'] === '"Same-Graph Entity"')
-          && rootMetaSelect.bindings.some((row) => row['status'] === '"confirmed"')
-          && perCgIdMetaSelect.bindings.some((row) => row['status'] === '"confirmed"')
-        ) break;
-        await sleep(500);
-      }
-      // Per-cgId partition copy MUST be present (the legacy
-      // single-write path was always landing here even before PR #779).
-      expect(bPerCgIdData.bindings.length).toBe(1);
-      expect(bPerCgIdData.bindings[0]['name']).toBe('"Same-Graph Entity"');
-
-      // Prove the exact root copy independently of query routing, which can
-      // include additional same-CG partitions for a label-scoped request.
-      expect(bRootStoredData.bindings.length).toBe(1);
-      expect(bRootStoredData.bindings[0]['name']).toBe('"Same-Graph Entity"');
-
-      // Root <cg> copy is the PR #779 fix: label-scoped query on B (no
-      // graphSuffix, no per-cgId hint) MUST resolve too. This catches
-      // regressions in any of: wire-flag emission, decoder presence
-      // semantics, or the recipient same-graph dual-write branch.
-      const bRootData = await nodeB.query(
-        `SELECT ?name WHERE { <${ENTITY_SAMEG}> <http://schema.org/name> ?name }`,
-        SAMEG_LABEL,
+      const bPerCgIdData = await readPhysicalPlacement(nodeB,
+        `SELECT ?name WHERE { GRAPH <${ctxDataGraph}> { <${ENTITY_SAMEG}> <http://schema.org/name> ?name } }`,
       );
-      expect(
-        bRootData.bindings.length,
-        'PR #779: same-graph publish recipient MUST mirror publisher root dual-write so label-scoped queries find the data on replicas',
-      ).toBe(1);
-      expect(bRootData.bindings[0]['name']).toBe('"Same-Graph Entity"');
-
-      // Confirmed `_meta` MUST also exist on BOTH root and per-cgId
-      // meta graphs so label-only status / UAL / authoredBy lookups
-      // converge between publisher and replicas. This is the meta
-      // dual-write addition that landed alongside the data dual-write.
-      const rootStatuses = rootMetaSelect.bindings.map((b) => String(b['status']));
-      expect(
-        rootStatuses.some((s: string) => s === '"confirmed"'),
-        'PR #779: same-graph publish recipient MUST dual-write confirmed _meta to ROOT meta graph too',
-      ).toBe(true);
-      const perCgStatuses = perCgIdMetaSelect.bindings.map((b) => String(b['status']));
-      expect(perCgStatuses.some((s: string) => s === '"confirmed"')).toBe(true);
-    }, 90_000);
+      expect(bPerCgIdData.bindings.length).toBe(0);
+    }, 60_000);
   });
 });

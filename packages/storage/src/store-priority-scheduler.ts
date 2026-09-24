@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { performance } from 'node:perf_hooks';
 import { availableParallelism } from 'node:os';
 import {
@@ -19,6 +20,23 @@ import {
   type StoreOperation,
   type StoreOperationOutcomeTagged,
 } from './store-operation-outcome.js';
+
+const defaultStoreWorkPriority = new AsyncLocalStorage<StoreWorkPriority>();
+
+/**
+ * Run `fn` with a default admission lane for store work that names none.
+ * Explicit per-call priorities still win. Long background walks use this so
+ * every store call they make stays out of the normal lane without threading
+ * a priority through each helper.
+ */
+export function withDefaultStoreWorkPriority<T>(priority: StoreWorkPriority, fn: () => T): T {
+  return defaultStoreWorkPriority.run(priority, fn);
+}
+
+/** The ambient default lane in effect here, if a caller set one. */
+export function activeDefaultStoreWorkPriority(): StoreWorkPriority | undefined {
+  return defaultStoreWorkPriority.getStore();
+}
 
 export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
   ackInflight: number;
@@ -437,7 +455,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     signal?: AbortSignal,
     metadata?: StoreSchedulerOperationMetadata,
   ): Promise<T> {
-    const normalizedPriority = priority ?? 'normal';
+    const normalizedPriority = priority ?? defaultStoreWorkPriority.getStore() ?? 'normal';
     if (signal?.aborted) {
       const reason = signal.reason;
       throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));

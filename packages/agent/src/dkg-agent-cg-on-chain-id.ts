@@ -1,0 +1,349 @@
+// SPDX-License-Identifier: Apache-2.0
+
+/**
+ * Resolution of a Context Graph's on-chain numeric id (`32`, `#32`) to the row
+ * this node keeps for that graph. See context-graph-on-chain-reference.ts for
+ * why the number itself must never become a subscription key.
+ *
+ * The facts come from ContextGraphStorage: historical discovery's staged rows
+ * (and its checkpoint), or, for a graph discovery has not reached yet, one
+ * bounded on-demand read applied through the same observation path. The
+ * result is the adopted cleartext row or the hash-keyed row, which the
+ * name-hash subscription path then resolves and verifies.
+ */
+
+import type { ContextGraphStorageRange } from '@origintrail-official/dkg-chain';
+import { createOperationContext } from '@origintrail-official/dkg-core';
+
+import { isBoundedOperationTimeoutError, runBoundedOperation } from './bounded-operation.js';
+import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
+import {
+  contextGraphNameCommitmentOf,
+  normalizeContextGraphNameHash,
+  verifyContextGraphNameCandidate,
+} from './context-graph-name-candidate.js';
+import {
+  parseContextGraphOnChainIdReference,
+  type ContextGraphIdAsGiven,
+  type ContextGraphOnChainIdLookup,
+  type ContextGraphOnChainIdReference,
+  type ContextGraphOnChainIdResolution,
+  type ResolveContextGraphOnChainIdOptions,
+  type RetiredNumericContextGraphSubscription,
+} from './context-graph-on-chain-reference.js';
+import { contextGraphStorageObservation } from './context-graph-storage-discovery.js';
+import { DKGAgentBase } from './dkg-agent-base.js';
+import type { DKGAgent } from './dkg-agent.js';
+import type { ContextGraphSub } from './dkg-agent-types.js';
+
+const AS_GIVEN: ContextGraphIdAsGiven = Object.freeze({ kind: 'as-given' });
+
+type OnDemandStorageRead =
+  | { readonly kind: 'entry' }
+  | { readonly kind: 'absent'; readonly latestId: string }
+  | { readonly kind: 'unavailable'; readonly detail: string }
+  | { readonly kind: 'unsupported' };
+
+/** In-flight ContextGraphStorage reads per agent, one per on-chain id. */
+const onChainIdReadFlights = new WeakMap<object, Map<string, Promise<OnDemandStorageRead>>>();
+
+function onChainIdReadFlightsOf(agent: object): Map<string, Promise<OnDemandStorageRead>> {
+  let flights = onChainIdReadFlights.get(agent);
+  if (flights === undefined) {
+    flights = new Map();
+    onChainIdReadFlights.set(agent, flights);
+  }
+  return flights;
+}
+
+/**
+ * The chain proves the graph at on-chain id N is not named "N": slot N
+ * commits a name hash, and it is not keccak256 of the digits.
+ */
+function slotCommitsAnotherName(onChainId: string, nameHash: string | null): nameHash is string {
+  return nameHash !== null && contextGraphNameCommitmentOf(onChainId) !== nameHash;
+}
+
+export class ContextGraphOnChainIdMethods extends DKGAgentBase {
+  /**
+   * What an id names among the rows this node already keeps. Local state
+   * only: no chain read, no staging, no retirement, so unsubscribe and status
+   * lookups can use it freely. Owns the parse, like the resolver below.
+   */
+  lookupContextGraphOnChainIdReference(this: DKGAgent, reference: unknown): ContextGraphOnChainIdLookup {
+    const parsed = parseContextGraphOnChainIdReference(reference);
+    if (parsed === null) return AS_GIVEN;
+    const { onChainId } = parsed;
+    // A bare number is only a name on a node without a chain, and a
+    // subscription keyed by it wins. `#` never keys a row.
+    if (!parsed.explicit && (this.chain.chainId === 'none' || this.subscribedContextGraphs.has(onChainId))) {
+      return AS_GIVEN;
+    }
+    const held = this.heldContextGraphForOnChainId(onChainId);
+    return held === null ? { kind: 'not-held', onChainId } : { kind: 'held', onChainId, ...held };
+  }
+
+  /**
+   * The row this node keeps for on-chain Context Graph `onChainId`: the row
+   * the reverse name-hash index holds for the slot's committed name hash,
+   * when that row is bound to the id and is either the hash-keyed row or its
+   * verified cleartext. Chain facts name the hash. Without them (a restart
+   * before discovery reached the id; an on-demand read is never
+   * checkpointed), each row bound to the id vouches with its own durable
+   * commitment instead.
+   */
+  heldContextGraphForOnChainId(
+    this: DKGAgent,
+    onChainId: string,
+  ): { contextGraphId: string; nameHash: string } | null {
+    const committed = normalizeContextGraphNameHash(this.onChainContextGraphFacts.get(onChainId)?.nameHash);
+    if (committed !== null) return this.heldContextGraphForNameHash(onChainId, committed);
+    for (const [contextGraphId, row] of this.subscribedContextGraphs) {
+      if (row.onChainId !== onChainId) continue;
+      const nameHash = normalizeContextGraphNameHash(row.onChainHash) ?? contextGraphNameCommitmentOf(contextGraphId);
+      const held = this.heldContextGraphForNameHash(onChainId, nameHash);
+      if (held?.contextGraphId === contextGraphId) return held;
+    }
+    return null;
+  }
+
+  heldContextGraphForNameHash(
+    this: DKGAgent,
+    onChainId: string,
+    nameHash: string,
+  ): { contextGraphId: string; nameHash: string } | null {
+    const contextGraphId = this.wireIdToLocalCgId.get(nameHash);
+    if (contextGraphId === undefined) return null;
+    if (this.subscribedContextGraphs.get(contextGraphId)?.onChainId !== onChainId) return null;
+    const verified = contextGraphId === nameHash
+      || verifyContextGraphNameCandidate(contextGraphId, nameHash) === contextGraphId;
+    return verified ? { contextGraphId, nameHash } : null;
+  }
+
+  /**
+   * Resolve the id of a subscription request. An on-chain id (`32`, `#32`)
+   * resolves to the row this node keeps for its graph; anything else is used
+   * as given. Owns the parse, and never throws: a failure while resolving an
+   * on-chain id is reported as `unavailable`.
+   *
+   * A bare number that keys an existing subscription is used as given
+   * (direct keys win), unless the chain proves that subscription is a numeric
+   * alias: bound to slot N while slot N commits a name hash other than
+   * keccak256("N"). Such a row, left by the subscribe path before this fix,
+   * can only ever sync nothing; it is retired here and reported, so callers
+   * can carry its member intent over to the resolved row.
+   *
+   * Beyond staging the graph's row the way discovery does and retiring a
+   * proven numeric alias, this creates no subscription.
+   */
+  async resolveContextGraphOnChainIdReference(
+    this: DKGAgent,
+    reference: unknown,
+    options: ResolveContextGraphOnChainIdOptions = {},
+  ): Promise<ContextGraphOnChainIdResolution> {
+    const parsed = parseContextGraphOnChainIdReference(reference);
+    if (parsed === null) return AS_GIVEN;
+    try {
+      return await this.resolveContextGraphOnChainId(parsed, options);
+    } catch (error) {
+      return {
+        kind: 'unavailable',
+        onChainId: parsed.onChainId,
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  async resolveContextGraphOnChainId(
+    this: DKGAgent,
+    parsed: ContextGraphOnChainIdReference,
+    options: ResolveContextGraphOnChainIdOptions,
+  ): Promise<ContextGraphOnChainIdResolution> {
+    const { onChainId } = parsed;
+    // Without a chain there are no on-chain ids: a bare number is just a name.
+    if (this.chain.chainId === 'none') return parsed.explicit ? { kind: 'unsupported', onChainId } : AS_GIVEN;
+    // `#` is not a Context Graph id character: only a bare number can key a row.
+    const literalRow = () => (parsed.explicit ? undefined : this.subscribedContextGraphs.get(onChainId));
+
+    // Discovery's facts answer offline. The live `ContextGraphCreated` event
+    // alone does not say whether the graph is still active, so read then too.
+    const known = this.onChainContextGraphFacts.get(onChainId);
+    if (known === undefined || known.active === null) {
+      const read = await this.readContextGraphStorageIdOnDemand(onChainId, options);
+      if (read.kind !== 'entry' && known === undefined) {
+        // What the chain could not say, it cannot overrule.
+        if (literalRow() !== undefined) return AS_GIVEN;
+        if (read.kind === 'absent') return { kind: 'not-found', onChainId, latestId: read.latestId };
+        if (read.kind === 'unsupported') return { kind: 'unsupported', onChainId };
+        return { kind: 'unavailable', onChainId, detail: read.detail };
+      }
+    }
+    const facts = this.onChainContextGraphFacts.get(onChainId);
+    const nameHash = normalizeContextGraphNameHash(facts?.nameHash);
+    const literal = literalRow();
+    if (literal !== undefined && !this.isNumericContextGraphAlias(onChainId, literal, nameHash)) return AS_GIVEN;
+    const retired = this.retireNumericContextGraphAlias(onChainId, nameHash);
+
+    if (nameHash === null) return { kind: 'no-name-hash', onChainId };
+    if (facts?.active === false) return { kind: 'inactive', onChainId };
+    let local = this.heldContextGraphForNameHash(onChainId, nameHash);
+    if (local === null && !this.wireIdToLocalCgId.has(nameHash)) {
+      // The staged row is gone (retired or pruned since): stage it again, the
+      // same way discovery does.
+      this.stageOnChainContextGraphBindingFromNameHash(nameHash, onChainId);
+      local = this.heldContextGraphForNameHash(onChainId, nameHash);
+    }
+    if (local === null) {
+      // Another on-chain id commits the same name hash and holds the row.
+      return {
+        kind: 'unavailable',
+        onChainId,
+        detail: `its name hash ${nameHash.slice(0, 18)}… is bound to another on-chain id on this node`,
+      };
+    }
+    // A private graph resolves like any other; whether it may be subscribed
+    // by its on-chain id is refusesPrivateContextGraphByOnChainId's decision.
+    return {
+      kind: 'resolved',
+      onChainId,
+      nameHash,
+      contextGraphId: local.contextGraphId,
+      private: facts?.accessPolicy === 1,
+      ...(retired === null ? {} : { retiredNumericSubscription: retired }),
+    };
+  }
+
+  /**
+   * A subscription keyed by the bare number `onChainId` and bound to that
+   * same on-chain id, whose slot commits a name hash that is not keccak256 of
+   * the number. The chain proves the graph it is bound to is not called "N",
+   * so every read under "N" misses. A Core-hosted row is left alone.
+   */
+  isNumericContextGraphAlias(
+    this: DKGAgent,
+    onChainId: string,
+    subscription: ContextGraphSub,
+    nameHash: string | null,
+  ): boolean {
+    return slotCommitsAnotherName(onChainId, nameHash)
+      && subscription.onChainId === onChainId
+      && subscription.coreHosted !== true
+      && normalizeContextGraphNameHash(subscription.onChainHash) !== nameHash;
+  }
+
+  /**
+   * Drop a proven numeric alias: its gossip topics, sync scope, durable row
+   * and reverse-index entry. Also drops the bare number from the sync scope,
+   * where `--save` (config.contextGraphs) may have put it without a row.
+   * Returns the member intent the alias carried, or null when no row was
+   * retired.
+   */
+  retireNumericContextGraphAlias(
+    this: DKGAgent,
+    onChainId: string,
+    nameHash: string | null,
+  ): RetiredNumericContextGraphSubscription | null {
+    if (!slotCommitsAnotherName(onChainId, nameHash)) return null;
+    const subscription = this.subscribedContextGraphs.get(onChainId);
+    if (subscription !== undefined && !this.isNumericContextGraphAlias(onChainId, subscription, nameHash)) {
+      return null;
+    }
+    const scope = this.config.syncContextGraphs ?? [];
+    if (scope.includes(onChainId)) {
+      this.config.syncContextGraphs = scope.filter((contextGraphId) => contextGraphId !== onChainId);
+    }
+    if (subscription === undefined) return null;
+    this.unsubscribeFromContextGraph(onChainId, { persist: true });
+    this.deleteContextGraphSubscription(onChainId);
+    const wireId = this.contextGraphNameCommitment(onChainId);
+    if (this.wireIdToLocalCgId.get(wireId) === onChainId) this.wireIdToLocalCgId.delete(wireId);
+    this.log.info(
+      createOperationContext('system'),
+      `Retired subscription "${onChainId}": on-chain Context Graph #${onChainId} commits name hash `
+      + `${nameHash.slice(0, 18)}…, not the name "${onChainId}", so that subscription could never sync`,
+    );
+    return {
+      contextGraphId: onChainId,
+      subscribed: subscription.subscribed === true,
+      syncMode: subscription.syncMode ?? 'always-on',
+    };
+  }
+
+  /**
+   * Wait for one ContextGraphStorage id to be read, for as long as the caller
+   * may wait: `requestTimeoutMs` by default, the cold-resolution budget for
+   * `wait: 'background'`, and never past the caller's signal. The read itself
+   * runs detached (see readContextGraphStorageIdDetached), one per id at a
+   * time, so a caller that stops waiting leaves it to finish and record the
+   * graph for the next call.
+   */
+  async readContextGraphStorageIdOnDemand(
+    this: DKGAgent,
+    onChainId: string,
+    options: ResolveContextGraphOnChainIdOptions = {},
+  ): Promise<OnDemandStorageRead> {
+    if (typeof this.chain.readContextGraphStorageRange !== 'function') return { kind: 'unsupported' };
+    const flights = onChainIdReadFlightsOf(this);
+    let flight = flights.get(onChainId);
+    if (flight === undefined) {
+      const started: Promise<OnDemandStorageRead> = this.readContextGraphStorageIdDetached(onChainId)
+        .finally(() => {
+          if (flights.get(onChainId) === started) flights.delete(onChainId);
+        });
+      flights.set(onChainId, started);
+      flight = started;
+    }
+    const budgets = chainAuthorityReadBudgetsOf(this);
+    const waitMs = options.wait === 'background' ? budgets.coldResolutionTimeoutMs : budgets.requestTimeoutMs;
+    const pending = flight;
+    try {
+      return await runBoundedOperation(() => pending, {
+        label: `ContextGraphStorage read of #${onChainId}`,
+        timeoutMs: waitMs,
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (error) {
+      return {
+        kind: 'unavailable',
+        detail: isBoundedOperationTimeoutError(error)
+          ? `no answer within ${waitMs} ms; the read continues, so a retry may find it`
+          : error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /**
+   * Read one ContextGraphStorage id with historical discovery's primitive and
+   * apply it through the same observation path, so the graph gets exactly the
+   * row and facts a discovery pass would give it. Bounded by the
+   * cold-resolution budget, like the detached finalized-authority flight
+   * whose waiters are bounded separately. Never rejects.
+   */
+  async readContextGraphStorageIdDetached(this: DKGAgent, onChainId: string): Promise<OnDemandStorageRead> {
+    const read = this.chain.readContextGraphStorageRange!;
+    try {
+      const range: ContextGraphStorageRange = await runBoundedOperation(
+        (readSignal) => read.call(this.chain, { fromId: BigInt(onChainId), maxIds: 1, signal: readSignal }),
+        {
+          label: `readContextGraphStorageRange(#${onChainId})`,
+          timeoutMs: chainAuthorityReadBudgetsOf(this).coldResolutionTimeoutMs,
+        },
+      );
+      const entry = range.entries.find((candidate) => candidate.contextGraphId === onChainId);
+      if (entry === undefined) {
+        // Ids are sequential and never burned: above the latest id the graph
+        // does not exist; at or below it the serving backend is behind.
+        return range.latestId < BigInt(onChainId)
+          ? { kind: 'absent', latestId: range.latestId.toString(10) }
+          : { kind: 'unavailable', detail: `id ${onChainId} is not readable yet at block ${range.anchorBlockNumber}` };
+      }
+      this.applyOnChainContextGraphObservation(
+        contextGraphStorageObservation(entry, range.anchorBlockNumber),
+        { source: 'storage' },
+      );
+      return { kind: 'entry' };
+    } catch (error) {
+      return { kind: 'unavailable', detail: error instanceof Error ? error.message : String(error) };
+    }
+  }
+}

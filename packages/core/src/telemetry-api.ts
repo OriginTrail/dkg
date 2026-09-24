@@ -256,6 +256,12 @@ export interface DkgMetrics {
   finalizationRecoveryAdmissionTotal: Counter;
   /** durable finalization envelopes waiting for live-inbox capacity */
   finalizationRecoveryDeferredEntries: Gauge;
+  /** sampled StorageACK copies registered on chain but not in this core's VM past the stall threshold (last audit) */
+  vmPromotionStalledAcks: Gauge;
+  /** context graphs the ACK promotion audit recorded as core-hosted (backfill) */
+  vmPromotionBackfillRecordedTotal: Counter;
+  /** VM reconcile passes the ACK promotion watchdog re-triggered for stalled graphs */
+  vmPromotionRetriesTotal: Counter;
   /** process-local sync inflight sample */
   syncGlobalInflight: Histogram;
   /** ms; lane and priority_class are bounded sync scheduler enums */
@@ -493,6 +499,18 @@ function buildMetrics(): DkgMetrics {
     finalizationRecoveryDeferredEntries: meter.createGauge(
       'dkg.finalization_recovery.deferred_entries',
       { description: 'Durable finalization envelopes waiting for live-inbox capacity' },
+    ),
+    vmPromotionStalledAcks: meter.createGauge(
+      'dkg.vm_promotion.stalled_acks',
+      { description: 'Sampled StorageACK copies registered on chain but not in VM past the stall threshold' },
+    ),
+    vmPromotionBackfillRecordedTotal: meter.createCounter(
+      'dkg.vm_promotion.backfill_recorded_total',
+      { description: 'Context graphs the ACK promotion audit recorded as core-hosted' },
+    ),
+    vmPromotionRetriesTotal: meter.createCounter(
+      'dkg.vm_promotion.retries_total',
+      { description: 'VM reconcile passes re-triggered for graphs with stalled StorageACK copies' },
     ),
     syncGlobalInflight: meter.createHistogram('dkg.sync.global_inflight', {
       description: 'Sampled process-local sync inflight count',

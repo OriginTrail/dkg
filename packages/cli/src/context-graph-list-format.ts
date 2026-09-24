@@ -148,7 +148,8 @@ export function formatContextGraphListTable(rows: readonly ContextGraphListRowVi
   if (hashOnly > 0) {
     lines.push(
       `  ${hashOnly} known only by on-chain name hash (Name ${NONE}). A public one can be `
-      + 'subscribed by its ID (`dkg subscribe <ID>`); the node then resolves and verifies its name.',
+      + 'subscribed by its ID or its on-chain number (`dkg subscribe <ID>` or `dkg subscribe <n>`); '
+      + 'the node then resolves and verifies its name.',
     );
   }
   return lines;
