@@ -70,6 +70,13 @@ export interface QueryHandlerDeps {
    * "not public" by the resolver (fail closed).
    */
   isContextGraphPublic?: (contextGraphId: string) => Promise<boolean>;
+  /**
+   * Return `true` while `contextGraphId` must not be served to peers yet
+   * (production: `ontology` until the agent's metadata relocation finishes).
+   * A lookup of it, or of a UAL that resolves into it, then gets an ERROR
+   * the requester can retry instead of results.
+   */
+  servingWithheld?: (contextGraphId: string) => boolean;
 }
 
 export class QueryHandler {
@@ -116,6 +123,12 @@ export class QueryHandler {
 
     // Resolve context graph (ENTITY_BY_UAL doesn't need it upfront)
     const contextGraphId = request.contextGraphId;
+    // The id keys queryAccess entries and scopes the lookup, both of which
+    // convert it to a string, so a non-string such as `["ontology"]` would be
+    // read as `ontology` there while comparing unequal to it everywhere else.
+    if (contextGraphId !== undefined && contextGraphId !== null && typeof contextGraphId !== 'string') {
+      return errorResponse(opId, 'ERROR', 'Invalid request: contextGraphId must be a string');
+    }
     if (request.lookupType !== 'ENTITY_BY_UAL' && !contextGraphId) {
       return errorResponse(opId, 'ERROR', 'Invalid request: contextGraphId is required for this lookup type');
     }
@@ -210,6 +223,10 @@ export class QueryHandler {
     // requester actually asked for when the graph is a local detail.
     subject: AccessDenialSubject = { kind: 'Context graph', id: contextGraphId },
   ): Promise<QueryNonBusyResponse | null> {
+    // Before the access policy, which may read the chain.
+    if (this.deps.servingWithheld?.(contextGraphId)) {
+      return errorResponse('', 'ERROR', `${subject.kind} '${subject.id}' is not served yet; retry later`);
+    }
     const named = `${subject.kind.toLowerCase()} '${subject.id}'`;
     const defaultPolicy = this.config.defaultPolicy ?? 'deny';
     const cgConfig = this.config.contextGraphs?.[contextGraphId];

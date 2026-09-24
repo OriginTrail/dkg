@@ -1408,17 +1408,32 @@ describe('relocation at startup', () => {
       }
       return pages.join('\n');
     };
-    const queryNames = async (contextGraphId: string): Promise<{ status: string; error?: string; bindings?: string }> => (
+    type RemoteQueryResponse = { status: string; error?: string; bindings?: string; entityUris?: string[]; ntriples?: string };
+    const remoteQuery = async (request: Record<string, unknown>): Promise<RemoteQueryResponse> => (
       JSON.parse(new TextDecoder().decode(await internals.messenger.handlers.get(PROTOCOL_QUERY_REMOTE)!(
-        new TextEncoder().encode(JSON.stringify({
-          operationId: 'names',
-          lookupType: 'SPARQL_QUERY',
-          contextGraphId,
-          sparql: `SELECT ?name WHERE { ?graph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }`,
-        })),
+        new TextEncoder().encode(JSON.stringify({ operationId: 'remote', ...request })),
         peer,
       )))
     );
+    const queryNames = (contextGraphId: string): Promise<RemoteQueryResponse> => remoteQuery({
+      lookupType: 'SPARQL_QUERY',
+      contextGraphId,
+      sparql: `SELECT ?name WHERE { ?graph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }`,
+    });
+    // Each lookup a remote query can make of ontology, and what it would
+    // return about the private graph.
+    const ontologyLookups = [
+      { lookupType: 'SPARQL_QUERY', sparql: `SELECT ?graph ?name WHERE { ?graph <${DKG_ONTOLOGY.SCHEMA_NAME}> ?name }` },
+      { lookupType: 'ENTITIES_BY_TYPE', rdfType: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH },
+      { lookupType: 'ENTITY_TRIPLES', entityUri: subject },
+    ];
+    // JSON values that a lookup keyed or scoped by string would read as
+    // `ontology`.
+    const ontologyIdLookalikes = [[SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], [[SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]]];
+    const expectNothingPrivate = (response: RemoteQueryResponse): void => {
+      expect(JSON.stringify(response)).not.toContain(privateId);
+      expect(JSON.stringify(response)).not.toContain('Private Plans');
+    };
 
     try {
       await agent.start();
@@ -1443,6 +1458,16 @@ describe('relocation at startup', () => {
         status: 'ERROR',
         error: "Context graph 'ontology' is not served yet; retry later",
       });
+      for (const lookup of ontologyLookups) {
+        const response = await remoteQuery({ contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, ...lookup });
+        expect(response).toMatchObject({ status: 'ERROR', error: "Context graph 'ontology' is not served yet; retry later" });
+        // Nor under a graph id that is not a string but reads as `ontology`.
+        for (const contextGraphId of ontologyIdLookalikes) {
+          const lookalike = await remoteQuery({ contextGraphId, ...lookup });
+          expect(lookalike).toMatchObject({ status: 'ERROR', error: 'Invalid request: contextGraphId must be a string' });
+          expectNothingPrivate(lookalike);
+        }
+      }
       // Other graphs are served as usual.
       await expect(syncAll(SYSTEM_CONTEXT_GRAPHS.AGENTS)).resolves.toEqual(expect.any(String));
 
@@ -1459,6 +1484,13 @@ describe('relocation at startup', () => {
       expect(names.status).toBe('OK');
       expect(names.bindings).toContain('Open Data');
       expect(names.bindings).not.toContain('Private Plans');
+      for (const lookup of ontologyLookups) {
+        const response = await remoteQuery({ contextGraphId: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, ...lookup });
+        expect(response.status).toBe('OK');
+        expectNothingPrivate(response);
+      }
+      await expect(remoteQuery({ contextGraphId: [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY], ...ontologyLookups[0] }))
+        .resolves.toMatchObject({ status: 'ERROR', error: 'Invalid request: contextGraphId must be a string' });
     } finally {
       release();
       await agent.stop().catch(() => {});

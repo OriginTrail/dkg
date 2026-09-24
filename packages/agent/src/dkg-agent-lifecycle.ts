@@ -799,34 +799,6 @@ function projectPersistedJoinApprovals(
   return newestApprovalByContextGraph;
 }
 
-/**
- * The answer to a remote query of a graph `withheld` names: an error the
- * caller can retry, without reaching the query engine. `undefined` for any
- * other request, malformed ones included, which the query handler answers.
- */
-function withheldRemoteQueryResponse(
-  data: Uint8Array,
-  withheld: (contextGraphId: string) => boolean,
-): Uint8Array | undefined {
-  let request: unknown;
-  try {
-    request = JSON.parse(new TextDecoder().decode(data));
-  } catch {
-    return undefined;
-  }
-  if (typeof request !== 'object' || request === null) return undefined;
-  const { contextGraphId, operationId } = request as Partial<Record<keyof QueryRequest, unknown>>;
-  if (typeof contextGraphId !== 'string' || !withheld(contextGraphId)) return undefined;
-  const response: QueryResponse = {
-    operationId: typeof operationId === 'string' ? operationId : '',
-    status: 'ERROR',
-    truncated: false,
-    resultCount: 0,
-    error: `Context graph '${contextGraphId}' is not served yet; retry later`,
-  };
-  return new TextEncoder().encode(JSON.stringify(response));
-}
-
 function resolveAgentSyncGlobalBackpressure(config: ResolvedDKGAgentConfig) {
   // `trackSyncContextGraph()` mutates this list when an Edge explicitly
   // subscribes or starts a foreground catch-up. Those operator-selected graphs
@@ -2550,6 +2522,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           CG_AUTH_RPC_SITES.remoteQuery,
           () => this.isContextGraphPublicOnChain(contextGraphId, createOperationContext('query')),
         ),
+      // A graph held back from sync is not queried either, for an operator
+      // whose queryAccess opens it (see contextGraphServingWithheld). The
+      // handler applies this to the id its access policy and lookups use,
+      // once it has checked that id is a string.
+      servingWithheld: (contextGraphId: string) => this.contextGraphServingWithheld(contextGraphId),
     });
     // rc.9 PR-9: PROTOCOL_QUERY_REMOTE migrated onto the Universal
     // Messenger substrate. Wire prefix bumped to /dkg/10.0.1/* (hard
@@ -2557,12 +2534,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // receiver-side dedup + envelope unwrap happen transparently.
     // QueryHandler's contract is unchanged.
     this.messenger.register(PROTOCOL_QUERY_REMOTE, async (data, peerId) => {
-      // A graph held back from sync is not queried either, for an operator
-      // whose queryAccess opens it (see contextGraphServingWithheld).
-      if (this.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)) {
-        const withheld = withheldRemoteQueryResponse(data, (id) => this.contextGraphServingWithheld(id));
-        if (withheld) return withheld;
-      }
       const peerIdObj = {
         toString: () => peerId,
         toBytes: () => new Uint8Array(),
