@@ -271,7 +271,7 @@ export class OxigraphStore implements TripleStore {
     }
     // The N-Quads load bypasses the SPARQL builders; it rejects a relative or
     // RFC 3987-invalid IRI, failing the whole batch.
-    statements.checkIris('insert', quads);
+    statements.checkIris.insert(quads);
     const nquads = `${quadsToNQuads(quads)}\n`;
     this.store.load(nquads, { format: 'application/n-quads' });
     this.scheduleFlush();
@@ -401,7 +401,7 @@ export class OxigraphStore implements TripleStore {
       });
     }
     const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
-    statements.checkIris('replaceGraph', quads);
+    statements.checkIris.replaceGraph(graphUri, quads);
     try {
       this.store.update(plan.update);
     } catch (error) {
@@ -438,7 +438,13 @@ export class OxigraphStore implements TripleStore {
       metadataSubject,
       metadataQuads,
     );
-    statements.checkIris('replaceGraphAndSubject', [...graphQuads, ...metadataQuads]);
+    statements.checkIris.replaceGraphAndSubject(
+      graphUri,
+      graphQuads,
+      metaGraphUri,
+      metadataSubject,
+      metadataQuads,
+    );
     try {
       this.store.update(plan.update);
     } catch (error) {
@@ -469,7 +475,7 @@ export class OxigraphStore implements TripleStore {
     // subject transiently empty. No staging graph / cleanup: a failed request
     // rolls the whole thing back.
     const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
-    statements.checkIris('replaceSubject', quads);
+    statements.checkIris.replaceSubject(graphUri, subject, quads);
     this.store.update(update);
     this.scheduleFlush();
     this.writeGen.recordWrite({ kind: 'graphs', graphs: [graphUri] });
@@ -506,7 +512,7 @@ export class OxigraphStore implements TripleStore {
         label: 'OxigraphStore.rfc64AuthorCommitCasV1',
       });
     }
-    statements.checkIris('rfc64AuthorCommitCasV1', plan.semanticQuads);
+    statements.checkIris.rfc64AuthorCommitCasV1(plan);
     return executeRfc64AuthorCommitCasV1({
       executeUpdate: () => this.store.update(plan.update),
       readReceipt: () => this.store.query(plan.receiptAsk),

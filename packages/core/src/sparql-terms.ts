@@ -29,15 +29,7 @@ import {
 
 export type SparqlTermPosition = 'graph' | 'subject' | 'predicate' | 'object';
 
-/**
- * What is wrong with a term. {@link formatSparqlTerm} reports only `iri`,
- * `literal` and `blank-node`: the SPARQL grammar accepts a relative IRI, which
- * an endpoint resolves against its own base. The storage adapters' term policy
- * adds the rule that every IRI, a literal's datatype included, is an absolute
- * RFC 3987 IRI: one without a scheme fails as `relative-iri`, one with a scheme
- * as `rfc3987-iri`.
- */
-export type SparqlTermKind = 'iri' | 'literal' | 'blank-node' | 'relative-iri' | 'rfc3987-iri';
+export type SparqlTermKind = 'iri' | 'literal' | 'blank-node';
 
 /**
  * Where a term goes. An IRI may be bare or angle-bracketed in any position.

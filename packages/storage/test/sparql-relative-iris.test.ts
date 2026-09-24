@@ -15,9 +15,17 @@ import {
   UnsupportedTripleStoreCapabilityError,
   type TripleStore,
 } from '../src/index.js';
-import { buildAtomicGraphReplaceUpdate } from '../src/atomic-graph-replace.js';
 import {
+  ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
+  buildAtomicGraphReplaceUpdate,
+} from '../src/atomic-graph-replace.js';
+import { buildRfc64AuthorCommitCasUpdateV1 } from '../src/rfc64-author-commit-cas.js';
+import {
+  AUTHOR,
   authorCommitInput,
+  HEAD_GRAPH,
+  legacyAuthorCommitInput,
+  P_HEAD,
   P_VALUE,
   PROJECTION_GRAPH,
   quad,
@@ -140,6 +148,87 @@ describe('each adapter write counts a relative datatype once, under its own oper
       await store.close();
     }
     expect(observed.counted).toEqual([counted('oxigraph', operation)]);
+  });
+});
+
+describe('each adapter write counts the terms it names outside its quads', () => {
+  const ADAPTERS: Array<[string, () => TripleStore, boolean]> = [
+    ['sparql-http', () => new SparqlHttpStore({
+      queryEndpoint: 'http://terms.test/query',
+      updateEndpoint: 'http://terms.test/update',
+      consistencyProfile: 'atomic-readback',
+    }), true],
+    ['blazegraph', () => new BlazegraphStore('http://blaze.test/sparql'), true],
+    // Embedded Oxigraph has no base IRI to resolve against, so the write then fails.
+    ['oxigraph', () => new OxigraphStore(), false],
+  ];
+
+  async function run(create: () => TripleStore, succeeds: boolean, write: (store: TripleStore) => Promise<unknown>) {
+    stubSparqlEndpoint();
+    const store = create();
+    try {
+      if (succeeds) await write(store);
+      else await expect(write(store)).rejects.toThrow(/IRI parsing failed/);
+    } finally {
+      await store.close();
+    }
+  }
+
+  it.each(ADAPTERS)('%s: an empty replaceGraph of a relative graph', async (adapter, create, succeeds) => {
+    const observed = observeInvalidSparqlTerms();
+    await run(create, succeeds, (store) => store.replaceGraph!('rel-g', []));
+    expect(observed.counted).toEqual([{
+      value: 1, adapter, operation: 'replaceGraph', position: 'graph', kind: 'relative-iri', enforcement: 'observe',
+    }]);
+  });
+
+  it.each(ADAPTERS)('%s: a relative guard value of an RFC-64 author commit', async (adapter, create, succeeds) => {
+    const observed = observeInvalidSparqlTerms();
+    const input = authorCommitInput();
+    // Only the current-head guard names `rel-old-head`: as its value and in its predecessor row.
+    await run(create, succeeds, (store) => store.rfc64AuthorCommitCasV1!(authorCommitInput({
+      currentHead: {
+        ...input.currentHead,
+        expectedObject: 'rel-old-head',
+        expectedQuads: [quad(AUTHOR, P_HEAD, 'rel-old-head', HEAD_GRAPH)],
+      },
+    })));
+    expect(observed.counted).toEqual(Array(2).fill({
+      value: 1,
+      adapter,
+      operation: 'rfc64AuthorCommitCasV1',
+      position: 'object',
+      kind: 'relative-iri',
+      enforcement: 'observe',
+    }));
+  });
+
+  it.each([
+    ['semantic', authorCommitInput()],
+    ['legacy', legacyAuthorCommitInput()],
+  ] as const)('the %s RFC-64 update interpolates no IRI outside its semantic quads and control terms', (_name, input) => {
+    const plan = buildRfc64AuthorCommitCasUpdateV1(input);
+    const irisOf = (term: string): string[] => {
+      if (term.startsWith('_:')) return [];
+      if (term.startsWith('"')) return [...term.matchAll(/\^\^<([^>]+)>$/g)].map(([, datatype]) => datatype!);
+      return [term.startsWith('<') ? term.slice(1, -1) : term];
+    };
+    const checked = new Set([
+      ...plan.semanticQuads.flatMap((q) => [q.subject, q.predicate, q.object, q.graph].flatMap(irisOf)),
+      ...plan.controlTerms.flatMap(({ term }) => irisOf(term)),
+    ]);
+    const interpolated = [...plan.update.matchAll(/<([^<>\s]+)>/g)].map(([, iri]) => iri!);
+    const unchecked = interpolated.filter((iri) =>
+      !checked.has(iri)
+      && !iri.startsWith(ATOMIC_GRAPH_REPLACE_STAGING_PREFIX)
+      && iri !== 'urn:dkg:sync:authorCommitApplied'
+      && iri !== 'http://www.w3.org/2001/XMLSchema#boolean');
+    expect(interpolated.length).toBeGreaterThan(0);
+    expect(unchecked).toEqual([]);
+    // Each referenced graph is a control term once.
+    const graphTerms = plan.controlTerms.filter(({ position }) => position === 'graph').map(({ term }) => term);
+    expect(new Set(graphTerms).size).toBe(graphTerms.length);
+    expect(graphTerms).toContain(HEAD_GRAPH);
   });
 });
 

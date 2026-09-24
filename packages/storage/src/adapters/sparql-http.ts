@@ -768,7 +768,7 @@ export class SparqlHttpStore implements TripleStore {
       label: 'SparqlHttpStore.replaceGraph',
     });
     const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
-    statements.checkIris('replaceGraph', quads);
+    statements.checkIris.replaceGraph(graphUri, quads);
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri] },
       update: plan.update,
@@ -809,7 +809,13 @@ export class SparqlHttpStore implements TripleStore {
       metadataSubject,
       metadataQuads,
     );
-    statements.checkIris('replaceGraphAndSubject', [...graphQuads, ...metadataQuads]);
+    statements.checkIris.replaceGraphAndSubject(
+      graphUri,
+      graphQuads,
+      metaGraphUri,
+      metadataSubject,
+      metadataQuads,
+    );
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri, metaGraphUri] },
       update: plan.update,
@@ -840,7 +846,7 @@ export class SparqlHttpStore implements TripleStore {
       label: 'SparqlHttpStore.replaceSubject',
     });
     const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
-    statements.checkIris('replaceSubject', quads);
+    statements.checkIris.replaceSubject(graphUri, subject, quads);
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri] },
       update,
@@ -865,7 +871,7 @@ export class SparqlHttpStore implements TripleStore {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'SparqlHttpStore.rfc64AuthorCommitCasV1',
     });
-    statements.checkIris('rfc64AuthorCommitCasV1', plan.semanticQuads);
+    statements.checkIris.rfc64AuthorCommitCasV1(plan);
     return executeRfc64AuthorCommitCasV1({
       executeUpdate: () => this.runRemoteGraphMutation({
         // The transactional request always mutates private receipt/staging

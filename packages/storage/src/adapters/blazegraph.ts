@@ -342,7 +342,7 @@ export class BlazegraphStore implements TripleStore {
     if (quads.length === 0) return;
     // The N-Quads body bypasses the SPARQL builders. Blazegraph rejects a
     // relative IRI here but stores an RFC 3987-invalid one verbatim.
-    statements.checkIris('insert', quads);
+    statements.checkIris.insert(quads);
     await this.runStoreWork('insert', {
       ...options,
       source: options?.source ?? 'blazegraph.insert',
@@ -445,7 +445,7 @@ export class BlazegraphStore implements TripleStore {
       label: 'BlazegraphStore.replaceGraph',
     });
     const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
-    statements.checkIris('replaceGraph', quads);
+    statements.checkIris.replaceGraph(graphUri, quads);
     try {
       await this.sparqlUpdate(
         plan.update,
@@ -483,7 +483,13 @@ export class BlazegraphStore implements TripleStore {
       metadataSubject,
       metadataQuads,
     );
-    statements.checkIris('replaceGraphAndSubject', [...graphQuads, ...metadataQuads]);
+    statements.checkIris.replaceGraphAndSubject(
+      graphUri,
+      graphQuads,
+      metaGraphUri,
+      metadataSubject,
+      metadataQuads,
+    );
     try {
       await this.sparqlUpdate(
         plan.update,
@@ -514,7 +520,7 @@ export class BlazegraphStore implements TripleStore {
     // transaction, so the subject is replaced atomically. No staging/cleanup: a
     // failed request commits nothing.
     const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
-    statements.checkIris('replaceSubject', quads);
+    statements.checkIris.replaceSubject(graphUri, subject, quads);
     await this.sparqlUpdate(
       update,
       { ...options, source: options?.source ?? 'blazegraph.replaceSubject' },
@@ -532,7 +538,7 @@ export class BlazegraphStore implements TripleStore {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'BlazegraphStore.rfc64AuthorCommitCasV1',
     });
-    statements.checkIris('rfc64AuthorCommitCasV1', plan.semanticQuads);
+    statements.checkIris.rfc64AuthorCommitCasV1(plan);
     return executeRfc64AuthorCommitCasV1({
       executeUpdate: () => this.sparqlUpdate(
         plan.update,

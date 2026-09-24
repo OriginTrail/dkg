@@ -12,9 +12,11 @@
  * before the adapter admits or dispatches anything. In reject mode the term
  * is reported, then the error is thrown. The same holds for
  * {@link SparqlStatements.checkIris}, which checks the IRIs of the writes
- * whose terms these builders do not render.
+ * whose terms these builders do not render, one method per write.
  */
+import type { SparqlTermPosition } from '@origintrail-official/dkg-core';
 import type { GraphWriteScope } from '../graph-write-gen.js';
+import type { Rfc64AuthorCommitCasUpdateV1 } from '../rfc64-author-commit-cas.js';
 import type { Quad } from '../triple-store.js';
 import { renderBlankNodeSafeDelete } from './blank-node-safe-delete.js';
 import { reportInvalidSparqlTerm } from './sparql-term-observer.js';
@@ -26,13 +28,28 @@ import {
 } from './sparql-term-policy.js';
 
 export type SparqlQueryOperation = 'hasGraph' | 'countQuads';
-/** A write whose terms no builder here renders: atomic replace, RFC-64 commit, N-Quads insert. */
-export type QuadIriCheckOperation =
-  | 'insert'
-  | 'replaceGraph'
-  | 'replaceGraphAndSubject'
-  | 'replaceSubject'
-  | 'rfc64AuthorCommitCasV1';
+/**
+ * The absolute-IRI check for each write whose terms no builder here renders:
+ * an N-Quads insert, or an atomic-replace or RFC-64 update, whose own builder
+ * checks the rest of the syntax. Each takes the write's own arguments, labels
+ * its own operation, and checks every IRI the write carries, a literal's
+ * datatype included. It builds nothing, so the write is unchanged.
+ */
+export interface WriteIriChecks {
+  insert(quads: readonly Quad[]): void;
+  replaceGraph(graphUri: string, quads: readonly Quad[]): void;
+  replaceGraphAndSubject(
+    graphUri: string,
+    graphQuads: readonly Quad[],
+    metaGraphUri: string,
+    metadataSubject: string,
+    metadataQuads: readonly Quad[],
+  ): void;
+  replaceSubject(graphUri: string, subject: string, quads: readonly Quad[]): void;
+  rfc64AuthorCommitCasV1(
+    plan: Pick<Rfc64AuthorCommitCasUpdateV1, 'semanticQuads' | 'controlTerms'>,
+  ): void;
+}
 export type SparqlUpdateOperation =
   | 'insert'
   | 'delete'
@@ -74,13 +91,10 @@ export interface SparqlStatements {
   /** Count the quads in `graph`, or in the default graph and every named graph. */
   countQuads(graph?: string): SparqlQueryPlan<'countQuads'>;
   /**
-   * Check the IRIs of `quads`, a literal's datatype included, against the
-   * storage absolute-IRI rule, for a write whose terms none of these builders
-   * render: an atomic-replace or RFC-64 update, whose builder checks the rest
-   * of the syntax itself, or an N-Quads load. Builds nothing, so the write is
-   * unchanged. Call it once per write, after its own builder has succeeded.
+   * The absolute-IRI check for a write these builders do not render. Call the
+   * one matching the write, once, after its own builder has succeeded.
    */
-  checkIris(operation: QuadIriCheckOperation, quads: readonly Quad[]): void;
+  readonly checkIris: WriteIriChecks;
 }
 
 type SparqlUpdateBody = Omit<SparqlUpdatePlan, 'operation'>;
@@ -120,6 +134,31 @@ export function sparqlStatements(
     return { operation, ...render(renderer(operation)) };
   }
   const graphs = (...graphUris: string[]): GraphWriteScope => ({ kind: 'graphs', graphs: graphUris });
+
+  /**
+   * Check a write's standalone terms, then each quad's subject, predicate and
+   * object, then each distinct graph once, as `insertData` renders a graph
+   * once per block.
+   */
+  function checkIris(
+    operation: keyof WriteIriChecks,
+    quads: readonly Quad[],
+    standalone: readonly Readonly<{ term: string; position: SparqlTermPosition }>[] = [],
+  ): void {
+    const render = renderer(operation);
+    const graphUris = new Set<string>();
+    for (const { term, position } of standalone) {
+      if (position === 'graph') graphUris.add(term);
+      else render.checkIri(term, position);
+    }
+    for (const q of quads) {
+      render.checkIri(q.subject, 'subject');
+      render.checkIri(q.predicate, 'predicate');
+      render.checkIri(q.object, 'object');
+      if (q.graph) graphUris.add(q.graph);
+    }
+    for (const graphUri of graphUris) render.checkIri(graphUri, 'graph');
+  }
 
   return {
     insertData(quads) {
@@ -204,14 +243,23 @@ export function sparqlStatements(
       }));
     },
 
-    checkIris(operation, quads) {
-      const render = renderer(operation);
-      for (const q of quads) {
-        render.checkIri(q.subject, 'subject');
-        render.checkIri(q.predicate, 'predicate');
-        render.checkIri(q.object, 'object');
-        if (q.graph) render.checkIri(q.graph, 'graph');
-      }
+    checkIris: {
+      insert: (quads) => checkIris('insert', quads),
+      replaceGraph: (graphUri, quads) =>
+        checkIris('replaceGraph', quads, [{ term: graphUri, position: 'graph' }]),
+      replaceGraphAndSubject: (graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads) =>
+        checkIris('replaceGraphAndSubject', [...graphQuads, ...metadataQuads], [
+          { term: graphUri, position: 'graph' },
+          { term: metaGraphUri, position: 'graph' },
+          { term: metadataSubject, position: 'subject' },
+        ]),
+      replaceSubject: (graphUri, subject, quads) =>
+        checkIris('replaceSubject', quads, [
+          { term: graphUri, position: 'graph' },
+          { term: subject, position: 'subject' },
+        ]),
+      rfc64AuthorCommitCasV1: (plan) =>
+        checkIris('rfc64AuthorCommitCasV1', plan.semanticQuads, plan.controlTerms),
     },
   };
 }

@@ -38,6 +38,14 @@ import type { StoreOperation } from '../store-operation-outcome.js';
  */
 export type ObservedTermPosition = SparqlTermPosition | 'datatype' | 'subject-prefix';
 
+/**
+ * Metric kind label: the kind of term core's grammar rejected, or the storage
+ * absolute-IRI rule broken by a term the grammar accepted: `relative-iri` (no
+ * scheme) or `rfc3987-iri` (a scheme, but not RFC 3987). See
+ * {@link absoluteIriFailure}.
+ */
+export type ObservedTermKind = SparqlTermKind | 'relative-iri' | 'rfc3987-iri';
+
 /** The positions an adapter statement fills only with an IRI. */
 export type IriTermPosition = 'graph' | 'subject' | 'predicate';
 
@@ -69,7 +77,7 @@ export type SparqlTermEnforcement = 'observe' | 'reject';
 export interface InvalidSparqlTerm {
   readonly site: SparqlTermSite;
   readonly position: ObservedTermPosition;
-  readonly kind: SparqlTermKind;
+  readonly kind: ObservedTermKind;
   readonly enforcement: SparqlTermEnforcement;
   readonly length: number;
   readonly fingerprint: string;
@@ -123,8 +131,18 @@ export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): Spar
   return {
     enforcement,
     renderer(site, onInvalidTerm) {
-      /** Tell the observer about an invalid term and, in reject mode, throw. */
-      function invalid(kind: SparqlTermKind, term: string, position: ObservedTermPosition): void {
+      /**
+       * Tell the observer about an invalid term and, in reject mode, throw.
+       * The error keeps core's term kinds: `termKind` is the kind of term that
+       * failed, which for an absolute-IRI failure is the IRI, or the literal
+       * whose datatype it is.
+       */
+      function invalid(
+        kind: ObservedTermKind,
+        termKind: SparqlTermKind,
+        term: string,
+        position: ObservedTermPosition,
+      ): void {
         const invalidTerm: InvalidSparqlTerm = {
           site,
           position,
@@ -139,7 +157,7 @@ export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): Spar
           throw new SparqlTermValidationError(
             `${site.adapter}.${site.operation}: invalid ${kind} in SPARQL ${position} ` +
               `position (${describeInvalidTerm(invalidTerm)})`,
-            kind,
+            termKind,
           );
         }
       }
@@ -157,7 +175,7 @@ export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): Spar
         legacy: (term: string) => string,
       ): string {
         if (!(error instanceof SparqlTermValidationError)) throw error;
-        invalid(error.kind, term, position);
+        invalid(error.kind, error.kind, term, position);
         return legacy(term);
       }
 
@@ -166,7 +184,7 @@ export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): Spar
         const named = namedIri(term, position);
         if (named === null) return;
         const kind = absoluteIriFailure(named.iri);
-        if (kind !== null) invalid(kind, term, named.position);
+        if (kind !== null) invalid(kind, named.termKind, term, named.position);
       }
 
       return {
@@ -244,19 +262,22 @@ function absoluteIriFailure(iri: string): 'relative-iri' | 'rfc3987-iri' | null 
 }
 
 /**
- * The IRI a term names, and where: the term itself, bare or bracketed, or a
- * typed literal's datatype. A blank node, or any other literal, names none.
+ * The IRI a term names, where, and the kind of term holding it: the term
+ * itself, bare or bracketed, or a typed literal's datatype. A blank node, or
+ * any other literal, names none.
  */
 function namedIri(
   term: string,
   position: SparqlTermPosition,
-): { iri: string; position: ObservedTermPosition } | null {
+): { iri: string; position: ObservedTermPosition; termKind: SparqlTermKind } | null {
   if (term.startsWith('_:')) return null;
   if (term.startsWith('"')) {
     const suffix = parseRdfLiteralLexicalTerm(term)?.suffix;
-    return suffix?.kind === 'datatype' ? { iri: suffix.datatype, position: 'datatype' } : null;
+    return suffix?.kind === 'datatype'
+      ? { iri: suffix.datatype, position: 'datatype', termKind: 'literal' }
+      : null;
   }
-  return { iri: unwrapIri(term), position };
+  return { iri: unwrapIri(term), position, termKind: 'iri' };
 }
 
 // A fingerprint keyed per process lets an operator match repeats in one

@@ -189,13 +189,8 @@ describe('sparqlStatements', () => {
 });
 
 describe('the absolute-IRI rule', () => {
-  const QUAD_IRI_CHECK_OPERATIONS = [
-    'insert',
-    'replaceGraph',
-    'replaceGraphAndSubject',
-    'replaceSubject',
-    'rfc64AuthorCommitCasV1',
-  ] as const;
+  const META = 'http://ex.org/meta';
+  const S = 'http://ex.org/s';
 
   it('builds a statement holding relative and RFC 3987-invalid IRIs byte for byte as before', () => {
     const observed = observeInvalidSparqlTerms();
@@ -220,19 +215,22 @@ describe('the absolute-IRI rule', () => {
     }
   });
 
-  it.each(ADAPTERS)('checkIris reports %s writes under their own operation, and builds nothing', (adapter) => {
+  it.each(ADAPTERS)('checkIris labels each %s write with its own operation, and builds nothing', (adapter) => {
     const observed = observeInvalidSparqlTerms();
     try {
-      const statements = sparqlStatements(adapter);
+      const { checkIris } = sparqlStatements(adapter);
       const quads = [
-        { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"42"^^integer', graph: G },
-        { subject: '_:b0', predicate: 'http://ex.org/p', object: 'rel-o', graph: '' },
-        { subject: '<http://ex.org/s>', predicate: 'http://ex.org/p', object: '"v"@en', graph: G },
+        { subject: S, predicate: 'http://ex.org/p', object: '"42"^^integer', graph: G },
+        { subject: '_:b0', predicate: 'http://ex.org/p', object: 'rel-o', graph: G },
+        { subject: `<${S}>`, predicate: 'http://ex.org/p', object: '"v"@en', graph: G },
       ];
-      for (const operation of QUAD_IRI_CHECK_OPERATIONS) {
-        expect(statements.checkIris(operation, quads)).toBeUndefined();
-      }
-      expect(observed.counted).toEqual(QUAD_IRI_CHECK_OPERATIONS.flatMap((operation) => [
+      expect(checkIris.insert(quads)).toBeUndefined();
+      expect(checkIris.replaceGraph(G, quads)).toBeUndefined();
+      expect(checkIris.replaceGraphAndSubject(G, quads, META, S, [])).toBeUndefined();
+      expect(checkIris.replaceSubject(G, S, quads)).toBeUndefined();
+      expect(checkIris.rfc64AuthorCommitCasV1({ semanticQuads: quads, controlTerms: [] })).toBeUndefined();
+      const operations = ['insert', 'replaceGraph', 'replaceGraphAndSubject', 'replaceSubject', 'rfc64AuthorCommitCasV1'];
+      expect(observed.counted).toEqual(operations.flatMap((operation) => [
         { value: 1, adapter, operation, position: 'datatype', kind: 'relative-iri', enforcement: 'observe' },
         { value: 1, adapter, operation, position: 'object', kind: 'relative-iri', enforcement: 'observe' },
       ]));
@@ -241,27 +239,73 @@ describe('the absolute-IRI rule', () => {
     }
   });
 
-  it('checkIris checks every position and throws under the reject policy', () => {
+  it('checkIris checks the terms a write names outside its quads', () => {
     const observed = observeInvalidSparqlTerms();
     try {
-      sparqlStatements('oxigraph').checkIris('replaceGraph', [
-        { subject: 'rel-s', predicate: 'rel-p', object: 'http://ex.org/o', graph: 'http://ex.org:bad/g' },
+      const { checkIris } = sparqlStatements('sparql-http');
+      // An empty replace still sends `DROP SILENT GRAPH <rel-g>` or a DELETE for its target.
+      checkIris.replaceGraph('rel-g', []);
+      checkIris.replaceSubject('http://ex.org:bad/g', 'rel-s', []);
+      checkIris.replaceGraphAndSubject(G, [], 'rel-meta', 'rel-subject', []);
+      checkIris.rfc64AuthorCommitCasV1({
+        semanticQuads: [],
+        controlTerms: [
+          { term: 'rel-guard-graph', position: 'graph' },
+          { term: 'rel-guard-predicate', position: 'predicate' },
+          { term: '"1"^^<rel-datatype>', position: 'object' },
+          { term: S, position: 'subject' },
+        ],
+      });
+      // Standalone terms first, then the write's quads, then each distinct graph.
+      expect(observed.counted.map((point) => [point.operation, point.position, point.kind])).toEqual([
+        ['replaceGraph', 'graph', 'relative-iri'],
+        ['replaceSubject', 'subject', 'relative-iri'],
+        ['replaceSubject', 'graph', 'rfc3987-iri'],
+        ['replaceGraphAndSubject', 'subject', 'relative-iri'],
+        ['replaceGraphAndSubject', 'graph', 'relative-iri'],
+        ['rfc64AuthorCommitCasV1', 'predicate', 'relative-iri'],
+        ['rfc64AuthorCommitCasV1', 'datatype', 'relative-iri'],
+        ['rfc64AuthorCommitCasV1', 'graph', 'relative-iri'],
+      ]);
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('checkIris checks each position of a quad, and each distinct graph once per write', () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const inRelativeGraph = (object: string) => ({ subject: 'rel-s', predicate: 'rel-p', object, graph: 'rel-g' });
+      sparqlStatements('oxigraph').checkIris.replaceGraph('rel-g', [
+        inRelativeGraph('http://ex.org/o'),
+        inRelativeGraph('"v"'),
       ]);
       expect(observed.counted.map((point) => [point.position, point.kind])).toEqual([
         ['subject', 'relative-iri'],
         ['predicate', 'relative-iri'],
-        ['graph', 'rfc3987-iri'],
+        ['subject', 'relative-iri'],
+        ['predicate', 'relative-iri'],
+        ['graph', 'relative-iri'],
       ]);
+    } finally {
+      observed.restore();
+    }
+  });
 
-      const strict = sparqlStatements('oxigraph', createSparqlTermPolicy('reject'));
-      expect(() => strict.checkIris('insert', [
-        { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"42"^^<integer>', graph: G },
+  it('checkIris throws under the reject policy, and passes absolute IRIs', () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const { checkIris } = sparqlStatements('oxigraph', createSparqlTermPolicy('reject'));
+      expect(() => checkIris.insert([
+        { subject: S, predicate: 'http://ex.org/p', object: '"42"^^<integer>', graph: G },
       ])).toThrow(SparqlTermValidationError);
-      expect(() => strict.checkIris('insert', [
-        { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"42"^^<urn:dt>', graph: '' },
+      expect(() => checkIris.replaceGraph('rel-g', [])).toThrow(SparqlTermValidationError);
+      expect(() => checkIris.insert([
+        { subject: S, predicate: 'http://ex.org/p', object: '"42"^^<urn:dt>', graph: '' },
       ])).not.toThrow();
-      expect(observed.counted.slice(3).map((point) => [point.operation, point.enforcement])).toEqual([
+      expect(observed.counted.map((point) => [point.operation, point.enforcement])).toEqual([
         ['insert', 'reject'],
+        ['replaceGraph', 'reject'],
       ]);
     } finally {
       observed.restore();

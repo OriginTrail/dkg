@@ -368,7 +368,7 @@ describe('IRIs that are not absolute RFC 3987 IRIs are counted, then sent exactl
     expect(warning).not.toContain(term);
   });
 
-  it.each(NON_ABSOLUTE_IRIS)('$name throws under the reject policy', ({ strict, kind }) => {
+  it.each(NON_ABSOLUTE_IRIS)('$name throws under the reject policy', ({ strict, term, kind }) => {
     const observed = observeInvalidSparqlTerms();
     let error: unknown;
     try {
@@ -377,7 +377,9 @@ describe('IRIs that are not absolute RFC 3987 IRIs are counted, then sent exactl
       error = caught;
     }
     expect(error).toBeInstanceOf(SparqlTermValidationError);
-    expect((error as SparqlTermValidationError).kind).toBe(kind);
+    // The error keeps core's term kinds; the storage rule's kind is in the message and the count.
+    expect((error as SparqlTermValidationError).kind).toBe(term.startsWith('"') ? 'literal' : 'iri');
+    expect((error as Error).message).toContain(`invalid ${kind} in SPARQL`);
     expect(observed.counted.map(({ kind: counted, enforcement }) => [counted, enforcement])).toEqual([[kind, 'reject']]);
   });
 
@@ -452,8 +454,20 @@ describe('checkIri, the absolute-IRI rule alone', () => {
     expect(() => renderer.checkIri('"42"^^integer', 'object')).toThrow(
       /^sparql-http\.insert: invalid relative-iri in SPARQL datatype position \(13 chars, fingerprint [0-9a-f]{12}\)$/,
     );
+    let error: unknown;
+    try {
+      renderer.checkIri('http://ex.org/%zz', 'graph');
+    } catch (caught) {
+      error = caught;
+    }
+    // Core's kind for the failing term; the rule's kind stays in storage.
+    expect(error).toBeInstanceOf(SparqlTermValidationError);
+    expect((error as SparqlTermValidationError).kind).toBe('iri');
     expect(() => renderer.checkIri('urn:ok', 'object')).not.toThrow();
-    expect(seen.map(({ kind, enforcement }) => [kind, enforcement])).toEqual([['relative-iri', 'reject']]);
+    expect(seen.map(({ kind, enforcement }) => [kind, enforcement])).toEqual([
+      ['relative-iri', 'reject'],
+      ['rfc3987-iri', 'reject'],
+    ]);
   });
 });
 
