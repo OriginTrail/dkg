@@ -16,7 +16,12 @@ const execFileAsync = promisify(execFile);
 
 export interface ProcessDescription {
   ppid: number;
-  /** argv joined by single spaces. */
+  /**
+   * The exact argv where the platform exposes it (`/proc`), or null where
+   * only display text is available (`ps`, which joins argv with spaces).
+   */
+  argv: readonly string[] | null;
+  /** argv joined by single spaces, for logs. */
   command: string;
 }
 
@@ -35,20 +40,44 @@ export async function procPids(): Promise<number[]> {
     .filter((pid) => Number.isInteger(pid) && pid > 0);
 }
 
-/** Targets of a process's open descriptors (Linux); empty when unreadable. */
-export async function procFdTargets(pid: number): Promise<string[]> {
+/**
+ * Whether one of a process's open descriptors points at a target `matches`
+ * accepts (Linux). Stops at the first match; a process that exits or cannot
+ * be read has none.
+ */
+export async function procHasFdTarget(
+  pid: number,
+  matches: (target: string) => boolean,
+): Promise<boolean> {
   let fds: string[];
   try {
     fds = await readdir(`/proc/${pid}/fd`);
   } catch {
-    return [];
+    return false;
   }
-  const targets: string[] = [];
   for (const fd of fds) {
     const target = await readlink(`/proc/${pid}/fd/${fd}`).catch(() => null);
-    if (target !== null) targets.push(target);
+    if (target !== null && matches(target)) return true;
   }
-  return targets;
+  return false;
+}
+
+/** `task` over `items` with at most `limit` running at once; results keep input order. */
+export async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  task: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const index = next++;
+      results[index] = await task(items[index]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
+  return results;
 }
 
 export const linuxProcessTree: ProcessTreeWalker = async (rootPid) => {
@@ -109,7 +138,7 @@ export const procDescribeProcess: ProcessDescriber = async (pid) => {
     const ppid = Number(stat.slice(stat.lastIndexOf(')') + 2).split(' ')[1]);
     const argv = (await readFile(`/proc/${pid}/cmdline`, 'utf8')).split('\0');
     if (argv.at(-1) === '') argv.pop();
-    return Number.isInteger(ppid) ? { ppid, command: argv.join(' ') } : null;
+    return Number.isInteger(ppid) ? { ppid, argv, command: argv.join(' ') } : null;
   } catch {
     return null;
   }
@@ -123,7 +152,7 @@ export const psDescribeProcess: ProcessDescriber = async (pid) => {
       { timeout: 2_000 },
     );
     const match = /^\s*(\d+)\s+(.*)$/s.exec(stdout.trimEnd());
-    return match ? { ppid: Number(match[1]), command: match[2] } : null;
+    return match ? { ppid: Number(match[1]), argv: null, command: match[2] } : null;
   } catch {
     return null;
   }

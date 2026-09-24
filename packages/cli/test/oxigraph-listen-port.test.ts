@@ -5,6 +5,8 @@ import { existsSync } from 'node:fs';
 import { findListenOwnerPid, procNetLocalPortHex } from '../src/daemon/oxigraph-listen-port.js';
 import {
   linuxProcessTree,
+  mapWithConcurrency,
+  procHasFdTarget,
   processTreeWalker,
   psProcessTree,
   type ProcessTreeWalker,
@@ -79,5 +81,37 @@ describe('processTreeWalker', () => {
     expect(processTreeWalker('linux')).toBe(linuxProcessTree);
     expect(processTreeWalker('darwin')).toBe(psProcessTree);
     expect(processTreeWalker('freebsd')).toBe(psProcessTree);
+  });
+});
+
+describe('mapWithConcurrency', () => {
+  it('keeps at most the limit in flight and returns results in input order', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const results = await mapWithConcurrency(Array.from({ length: 40 }, (_, index) => index), 4, async (item) => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, (item % 3) * 2));
+      inFlight -= 1;
+      return item * 2;
+    });
+    expect(peak).toBe(4);
+    expect(results).toEqual(Array.from({ length: 40 }, (_, index) => index * 2));
+    await expect(mapWithConcurrency([], 4, async () => 1)).resolves.toEqual([]);
+  });
+});
+
+describe('procHasFdTarget', () => {
+  it('stops at the first matching descriptor and treats an unreadable process as holding none', async () => {
+    if (!existsSync('/proc/self/fd')) {
+      // Without /proc every process reads as holding nothing.
+      await expect(procHasFdTarget(process.pid, () => true)).resolves.toBe(false);
+      return;
+    }
+    let seen = 0;
+    await expect(procHasFdTarget(process.pid, () => { seen += 1; return true; })).resolves.toBe(true);
+    expect(seen).toBe(1);
+    await expect(procHasFdTarget(process.pid, () => false)).resolves.toBe(false);
+    await expect(procHasFdTarget(2 ** 22 + 7, () => true)).resolves.toBe(false);
   });
 });

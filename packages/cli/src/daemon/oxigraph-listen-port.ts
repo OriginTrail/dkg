@@ -17,7 +17,7 @@ import { readFile } from 'node:fs/promises';
 import type { ChildProcess } from 'node:child_process';
 import { promisify } from 'node:util';
 import {
-  procFdTargets,
+  procHasFdTarget,
   processTreeWalker,
   type ProcessTreeWalker,
 } from './process-probe.js';
@@ -109,7 +109,7 @@ async function procfsListenOwnerPid(pids: ReadonlySet<number>, port: number): Pr
 
     const socketNeedle = `socket:[${listenInode}]`;
     for (const pid of pids) {
-      if ((await procFdTargets(pid)).some((target) => target.includes(socketNeedle))) return pid;
+      if (await procHasFdTarget(pid, (target) => target.includes(socketNeedle))) return pid;
     }
     return null;
   } catch {

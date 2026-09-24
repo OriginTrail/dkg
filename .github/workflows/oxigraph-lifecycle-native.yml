@@ -1,0 +1,52 @@
+name: Oxigraph lifecycle on macOS
+
+# The CLI test lanes run on Linux, where Oxigraph's listener, lock holders and
+# process identities come from /proc. macOS nodes find them through ps and
+# lsof instead, so the real-process lifecycle tests also run there whenever
+# that code changes.
+on:
+  pull_request:
+    paths:
+      - 'packages/cli/src/daemon/oxigraph-*.ts'
+      - 'packages/cli/src/daemon/process-probe.ts'
+      - 'packages/cli/src/own-module-path.ts'
+      - 'packages/cli/test/oxigraph-orphan.test.ts'
+      - 'packages/cli/test/oxigraph-listen-port.test.ts'
+      - 'packages/cli/test/oxigraph-parent-watchdog.test.ts'
+      - 'packages/cli/test/oxigraph-server.test.ts'
+      - 'packages/cli/test/fixtures/oxigraph-*.ts'
+      - '.github/workflows/oxigraph-lifecycle-native.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: oxigraph-lifecycle-native-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lifecycle:
+    name: Oxigraph lifecycle (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Build runtime packages
+        run: node scripts/build-runtime-packages.mjs
+      - name: Run the real-process Oxigraph lifecycle tests
+        run: >-
+          pnpm --dir packages/cli exec vitest run --config vitest.unit.config.ts
+          test/oxigraph-orphan.test.ts
+          test/oxigraph-listen-port.test.ts
+          test/oxigraph-parent-watchdog.test.ts
+          test/oxigraph-server.test.ts

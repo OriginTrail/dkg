@@ -79,6 +79,8 @@ export interface OxigraphServerIo {
   readCgroupOomSnapshot: (pid: number) => CgroupOomSnapshot | null;
   /** Best-effort exit-time re-read of oom_kill from a captured cgroup dir. */
   readCgroupOomKill: (dir: string) => number | null;
+  /** Persist the store's owner record. Injectable so tests can race a child exit against it. */
+  recordOwner: typeof recordOxigraphOwner;
 }
 
 export interface StartOxigraphServerOptions {
@@ -191,6 +193,7 @@ export async function startOxigraphServer(
     findListenOwnerPid: ioOverrides.findListenOwnerPid ?? findListenOwnerPid,
     readCgroupOomSnapshot: ioOverrides.readCgroupOomSnapshot ?? readCgroupOomSnapshot,
     readCgroupOomKill: ioOverrides.readCgroupOomKill ?? readCgroupOomKill,
+    recordOwner: ioOverrides.recordOwner ?? recordOxigraphOwner,
   };
   const markStoreDown = (): void => {
     invalidateExternalStoreQuadsCache();
@@ -422,7 +425,7 @@ export async function startOxigraphServer(
   const recordLaunch = (c: ChildProcess, listenerPid?: number): Promise<void> =>
     c.pid === undefined
       ? Promise.resolve()
-      : recordOxigraphOwner({
+      : io.recordOwner({
           location: opts.location,
           binaryPath: opts.binaryPath,
           launcherPid: c.pid,
@@ -473,6 +476,12 @@ export async function startOxigraphServer(
         // just died on EADDRINUSE.
         if (!childAlive(c)) return { outcome: 'child-died' };
         captureOomSnapshotForListener(c, listenerPid);
+        // Record before declaring ready, then look again: a child that exits
+        // during the write is a failed open, not a ready server whose exit
+        // handler has already started recovery.
+        await recordLaunch(c, listenerPid);
+        if (attempt.superseded?.()) return { outcome: 'superseded' };
+        if (!childAlive(c)) return { outcome: 'child-died' };
         // Keep the actual listener PID, not the watchdog or systemd-run
         // wrapper, so timeout recovery terminates Oxigraph itself.
         lifecycle = { phase: 'ready', child: c, listenerPid, generation: attempt.generation };
@@ -481,7 +490,6 @@ export async function startOxigraphServer(
         // cached as unreachable; drop it now that the child is healthy, or
         // /api/status keeps reporting the store as unreachable.
         invalidateExternalStoreQuadsCache();
-        await recordLaunch(c, listenerPid);
         return { outcome: 'ready', probes };
       }
       await sleep(readyIntervalMs);
@@ -707,6 +715,8 @@ export async function startOxigraphServer(
   await recordLaunch(initialChild);
   const opened = await awaitStoreOpen(initialChild, bootReady, {
     generation: lifecycle.generation,
+    // Only an exit-time kill (process.exit) moves boot out of `starting`.
+    superseded: () => lifecycle.phase !== 'starting' || lifecycle.child !== initialChild,
     progress: (elapsedS, allowedS) =>
       `[oxigraph] still opening: ${elapsedS}s elapsed of ${allowedS}s allowed ` +
       `(${formatWalBytes(bootReady.walBytes)} of write-ahead log).`,
