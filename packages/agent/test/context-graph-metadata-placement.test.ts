@@ -715,7 +715,12 @@ function withDeleteHook(store: TripleStore, onDelete: (deletes: number) => void)
   });
 }
 
-describe('relocation passes with a time budget', () => {
+async function graphsHolding(store: TripleStore, subject: string): Promise<string[]> {
+  const result = await store.query(`SELECT DISTINCT ?g WHERE { GRAPH ?g { <${subject}> ?p ?o } }`);
+  return result.type === 'bindings' ? result.bindings.map((row) => row['g']!).sort() : [];
+}
+
+describe('bounded and interrupted relocation passes', () => {
   it('starts no candidate once its signal aborts, and a later pass finishes the rest', async () => {
     const { agent } = await createAgent('relocate-budget');
     const ids = Array.from({ length: 5 }, (_, index) => `0xabc/renamed-${index}`);
@@ -808,6 +813,40 @@ describe('relocation passes with a time budget', () => {
     expect(await ontologyRowsAbout(budgeted, held)).toEqual([]);
     expect(await ontologyRowsAbout(budgeted, '0xabc/budget-bare')).toEqual([`${ON_CHAIN_ID} "43"`]);
     expect(await ontologyRowsAbout(budgeted, '0xabc/budget-open')).toHaveLength(2);
+  });
+
+  it('finds a removed graph’s provenance again after a pass stops between its deletes', async () => {
+    const id = '0xabc/interrupted';
+    const { agent } = await createAgent('relocate-interrupted');
+    const subject = contextGraphDataGraphUri(id);
+    const metaGraph = contextGraphMetaGraphUri(id);
+    const activity = `did:dkg:activity:create-context-graph:${id}:1`;
+    await agent.store.insert([
+      // Held here: the graph's own `_meta` already names its curator.
+      { subject, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: 'did:dkg:agent:0xcurator', graph: metaGraph },
+      ontologyQuad(subject, DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
+      ontologyQuad(subject, DKG_ONTOLOGY.SCHEMA_NAME, '"Notes"'),
+      ontologyQuad(subject, DKG_ONTOLOGY.DKG_ACCESS_POLICY, '"private"'),
+      ontologyQuad(subject, DKG_ONTOLOGY.PROV_GENERATED_BY, activity),
+      ontologyQuad(activity, DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.PROV_ACTIVITY),
+      ontologyQuad(activity, DKG_ONTOLOGY.PROV_ENDED_AT_TIME, '"2026-01-01T00:00:00.000Z"'),
+    ]);
+    const localAccessPolicy = async () => 'private' as const;
+
+    // The process stops right after the pass's first delete.
+    await expect(relocatePrivateContextGraphMetadata({
+      store: withDeleteHook(agent.store, (deletes) => {
+        if (deletes === 2) throw new Error('process stopped');
+      }),
+      localAccessPolicy,
+    })).rejects.toThrow('process stopped');
+    expect(await ontologyRowsAbout(agent, id)).not.toEqual([]);
+
+    const retry = await relocatePrivateContextGraphMetadata({ store: agent.store, localAccessPolicy });
+
+    expect(retry).toEqual({ movedToMeta: [id], deletedForeign: 0, unclassified: 0, deferred: 0 });
+    expect(await graphsHolding(agent.store, subject)).toEqual([metaGraph]);
+    expect(await graphsHolding(agent.store, activity)).toEqual([metaGraph]);
   });
 });
 
