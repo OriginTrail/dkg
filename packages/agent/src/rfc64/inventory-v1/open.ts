@@ -493,6 +493,13 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     return this.#candidate.listAppliedCatalogHeadsV1();
   }
 
+  readAppliedCatalogHeadsRevisionV1(): number {
+    this.requireOpen();
+    // A quarantine rebuild swaps in a new candidate, which draws a revision
+    // no earlier candidate reported.
+    return this.#candidate.readAppliedCatalogHeadsRevisionV1();
+  }
+
   isStagedCatalogHeadV1(
     catalogScopeDigest: Digest32V1,
     authorAddress: EvmAddressV1,

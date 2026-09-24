@@ -73,6 +73,13 @@ const PENDING_UPDATE_MIN_AGE_MS = 60_000;
  * version (a rollback) may have signed ACKs meanwhile: grandfather that window.
  */
 const STORAGE_ACK_LEDGER_REGRANDFATHER_GAP_MS = 60 * 60_000;
+/**
+ * Every ledger update below writes only the ledger graph. Naming it keeps a
+ * graph-set index current with one bounded probe; an undeclared update makes
+ * the next graph listing rescan the whole store.
+ */
+const STORAGE_ACK_LEDGER_TOUCHED_GRAPHS: readonly string[] =
+  Object.freeze([STORAGE_ACK_LEDGER_GRAPH]);
 /** Per-asset promotions requested by declined update ACKs that run at once. */
 const PRIOR_VERSION_PROMOTION_CONCURRENCY = 8;
 /** Further requests queue (single-flight per asset); beyond this they are left to the lanes. */
@@ -396,7 +403,11 @@ export class VmPromotionMethods extends DKGAgentBase {
         const through = instant(row?.['through']);
         const lastSeen = instant(row?.['seen']) ?? through;
         const now = new Date();
-        const options = { source: 'agent.storageAckLedger.grandfather', priority: 'background' as const };
+        const options = {
+          source: 'agent.storageAckLedger.grandfather',
+          priority: 'background' as const,
+          touchedGraphs: STORAGE_ACK_LEDGER_TOUCHED_GRAPHS,
+        };
         let since: string | undefined | null = null;
         if (through === undefined) {
           since = undefined;
@@ -559,7 +570,11 @@ export class VmPromotionMethods extends DKGAgentBase {
       if (ledgerReady) {
         await this.store.update?.(
           storageAckLedgerMarkUpdate(STORAGE_ACK_LEDGER_GRAPH, LEDGER.seenAt, new Date()),
-          { source: 'agent.storageAckLedger.seen', priority: 'background' },
+          {
+            source: 'agent.storageAckLedger.seen',
+            priority: 'background',
+            touchedGraphs: STORAGE_ACK_LEDGER_TOUCHED_GRAPHS,
+          },
         );
       }
       const metrics = getMetrics();
@@ -594,6 +609,7 @@ export class VmPromotionMethods extends DKGAgentBase {
       await this.store.update(storageAckLedgerOrphansDeleteUpdate(), {
         source: 'agent.storageAckLedger.orphans',
         priority: 'background',
+        touchedGraphs: STORAGE_ACK_LEDGER_TOUCHED_GRAPHS,
       });
       return 0;
     }
@@ -1112,6 +1128,7 @@ export class VmPromotionMethods extends DKGAgentBase {
     if (typeof this.store.update === 'function') {
       await this.store.update(storageAckLedgerMarkUpdate(operationSubject, predicate, new Date(at)), {
         source: 'agent.storageAckLedger.mark',
+        touchedGraphs: STORAGE_ACK_LEDGER_TOUCHED_GRAPHS,
       });
       return;
     }
