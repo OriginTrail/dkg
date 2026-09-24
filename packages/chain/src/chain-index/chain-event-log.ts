@@ -229,6 +229,14 @@ export interface ChainEventLogQuery {
   readonly topic0?: readonly string[];
   /** Indexed arg 1 — the per-graph backfill filter the KA read model needs. */
   readonly topic1?: readonly string[];
+  /**
+   * Indexed arg 2 — the per-KA filter behind the `kaToContextGraph` point read.
+   *
+   * A NARROWING hint only: every reader that passes it must still decode and
+   * fold what comes back, so a store that ignored it would be slower, never
+   * wrong.
+   */
+  readonly topic2?: readonly string[];
 }
 
 /**

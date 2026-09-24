@@ -157,6 +157,18 @@ All notable changes to the DKG V10 node are documented here. The format is based
   fails a graph closed, needing a fresh catch-up, when either runs out. A
   finalized authority read whose caller gives up now leaves the shared
   authority-read queue instead of holding it.
+- **Looking up a Knowledge Asset's Context Graph no longer blocks the node
+  for seconds**: since 10.0.17 the node answers this lookup from its chain
+  event log, and each lookup read and decoded every Knowledge Asset
+  registration of the ContextGraphStorage contract on the main thread (about
+  36,000 rows on a mainnet Core, 2 to 3 seconds per call). Finalization,
+  Random Sampling repair, sync and VM promotion all make this lookup, so Cores
+  stalled for 8 to 11 seconds after finalizations and repairs, and the VM
+  promotion backfill made it once per acknowledged copy. The lookup now reads
+  only that Knowledge Asset's registration rows through a new index on the
+  chain log table, and returns the same answers as before. The daemon adds
+  the index to `node-ui.db` on the first start after the upgrade (a one-time
+  build over the existing rows).
 
 ### Changed
 

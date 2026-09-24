@@ -269,6 +269,24 @@ export class ChainEventDecoderRegistry {
     });
   }
 
+  /**
+   * The topic0s ONE family claims at ONE address, sorted; empty when nothing
+   * is registered there.
+   *
+   * A reader that pre-filters the log by topic0 must take the set from here,
+   * the same table {@link ChainEventDecoderRegistry.decodeContextGraphKaRegistrations}
+   * dispatches on, so a row the filter lets through is exactly a row the
+   * decoder would have claimed from an unfiltered read.
+   */
+  topic0For(family: ChainEventLogFamily, address: string): readonly string[] {
+    const normalized = normalizeChainEventLogAddress(address);
+    if (normalized === undefined) return Object.freeze([]);
+    return Object.freeze((this.#byAddress.get(normalized) ?? [])
+      .filter((source) => source.family === family)
+      .flatMap((source) => source.topic0)
+      .sort());
+  }
+
   addressesFor(family: ChainEventLogFamily): readonly string[] {
     return Object.freeze([...this.#byAddress.values()]
       .flat()

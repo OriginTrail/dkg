@@ -29,6 +29,7 @@ import {
   normalizeChainEventLogAddress,
   normalizeChainEventLogBlockNumber,
   normalizeChainEventLogHash,
+  type ChainEventLogQuery,
   type ChainEventLogStore,
 } from './chain-event-log.js';
 import type { ChainEventDecoderRegistry } from './chain-event-decoders.js';
@@ -135,6 +136,21 @@ function contextGraphIdTopic(contextGraphId: bigint): string {
   return `0x${contextGraphId.toString(16).padStart(64, '0')}`;
 }
 
+const UINT256_LIMIT = 1n << 256n;
+
+/**
+ * The KA id as it sits in `topic2` of `KnowledgeAssetRegisteredToContextGraph`
+ * (`uint256 indexed contextGraphId, uint256 indexed kaId`), in the same
+ * lowercase, zero-padded encoding as {@link contextGraphIdTopic}.
+ *
+ * `undefined` for an id no uint256 topic can carry: no registration can name
+ * it, so the unfiltered fold could never have bound it either.
+ */
+function kaIdTopic(kaId: bigint): string | undefined {
+  if (kaId < 0n || kaId >= UINT256_LIMIT) return undefined;
+  return `0x${kaId.toString(16).padStart(64, '0')}`;
+}
+
 /** The block a graph was created at, from the log's own `ContextGraphCreated`. */
 function creationBlockOf(
   events: readonly RawContextGraphAuthorityIndexEvent[],
@@ -226,13 +242,13 @@ export function createKnowledgeAssetReadModel(
   async function foldRegistrations(
     window: ResolvedWindow,
     view: KnowledgeAssetReadView,
-    topic1?: readonly string[],
+    topics: Pick<ChainEventLogQuery, 'topic0' | 'topic1' | 'topic2'> = {},
   ): Promise<ReturnType<typeof reduceContextGraphKaRegistrations>> {
     const rows = await store.readEvents(scope, {
       fromBlockNumber: window.fromBlockNumber,
       throughBlockNumber: window.throughBlockNumber,
       addresses: [contextGraphStorageAddress],
-      ...(topic1 === undefined ? {} : { topic1 }),
+      ...topics,
     });
     const horizonRows = view === 'finalized' ? rows.filter((row) => row.settled) : rows;
     return reduceContextGraphKaRegistrations(
@@ -246,6 +262,29 @@ export function createKnowledgeAssetReadModel(
       readOptions: KnowledgeAssetReadOptions = {},
     ): Promise<ContextGraphForKaAnswer | undefined> {
       const view = readOptions.view ?? 'finalized';
+      // A POINT read, not a fold of the whole family (index and query shape
+      // from PR #2784). The registration carries the KA id as its SECOND
+      // indexed argument, so `(address, topic0, topic2)` selects exactly the
+      // rows that can bind this KA; the store answers it from
+      // `idx_chain_events_scope_address_ka` instead of handing tens of
+      // thousands of rows to a synchronous read, a map and an ABI decode on
+      // the main thread for every lookup.
+      //
+      // The answer is the full fold's answer. `reduceContextGraphKaRegistrations`
+      // keys both its first-wins dedup and `contextGraphByKa` by kaId alone, so
+      // another KA's rows cannot change this KA's entry, and the filtered rows
+      // arrive in the same (block, logIndex) order. The filter only NARROWS:
+      // the decoder still derives the kaId from the row and the lookup below
+      // still compares it, so a store that ignored `topic2` would be slow,
+      // never wrong, and one whose stored encoding disagreed would come back
+      // empty, which is `undefined` — the live read.
+      const topic2 = kaIdTopic(kaId);
+      // topic0 comes from the decoder's own dispatch table. Empty means the
+      // family is not registered at this address, where the unfiltered fold
+      // decoded nothing and so bound nothing; it must never reach the store as
+      // `topic0: []`, which reads as "no topic0 filter at all".
+      const topic0 = registry.topic0For('context-graph-ka', contextGraphStorageAddress);
+      if (topic2 === undefined || topic0.length === 0) return undefined;
       const window = await resolveWindow(
         'context-graph-ka',
         contextGraphStorageAddress,
@@ -254,7 +293,7 @@ export function createKnowledgeAssetReadModel(
         undefined,
       );
       if (window === undefined) return undefined;
-      const fold = await foldRegistrations(window, view);
+      const fold = await foldRegistrations(window, view, { topic0, topic2: [topic2] });
       const bound = fold.contextGraphByKa.get(kaId.toString());
       if (bound !== undefined) {
         return Object.freeze({
