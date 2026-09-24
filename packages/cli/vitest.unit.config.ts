@@ -134,6 +134,7 @@ export default defineConfig({
           'test/chain-rpc-transport-status.test.ts',
           'test/async-promote-worker.test.ts',
           'test/chain-index-read-worker.test.ts',
+          'test/chain-index-read-worker-entry.test.ts',
           'test/chain-index-read-worker.integration.test.ts',
           'test/chain-index-resource.test.ts',
           'test/daemon-startup-validation.test.ts',

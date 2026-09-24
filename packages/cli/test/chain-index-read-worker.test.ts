@@ -356,6 +356,69 @@ describe('chain-index read worker client', () => {
     await expect(recovered).resolves.toEqual(BINDING);
   });
 
+  it('retires a worker after an IPC dispatch failure, settles pending callers, and recovers after cooldown', async () => {
+    const f = fixture({}, false);
+    const first = f.model.readContextGraphForKa(42n);
+    const queued = f.model.readContextGraphForKa(43n);
+    const oldWorker = f.worker();
+    oldWorker.postMessage.mockImplementationOnce(() => { throw new Error('IPC channel closed'); });
+    oldWorker.ready();
+
+    await expect(Promise.all([first, queued])).resolves.toEqual([undefined, undefined]);
+    expect(oldWorker.reads).toEqual([]);
+    expect(oldWorker.terminate).toHaveBeenCalledOnce();
+    expect(f.load).not.toHaveBeenCalled();
+    expect(f.onDiagnostic.mock.calls.map(([event]) => event.reason))
+      .toEqual(['worker-unavailable', 'worker-unavailable']);
+    await expect(f.model.readContextGraphForKa(44n)).resolves.toBeUndefined();
+    expect(f.workerFactory).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(1_001);
+    const recovered = f.model.readContextGraphForKa(42n);
+    expect(f.workerFactory).toHaveBeenCalledTimes(2);
+    f.worker().ready();
+    f.worker().reply(f.worker().reads[0]!);
+    await expect(recovered).resolves.toEqual(BINDING);
+    expect(oldWorker.terminate).toHaveBeenCalledOnce();
+  });
+
+  it('ignores forged queued replies and duplicate replies while validating a completed read', async () => {
+    const f = fixture();
+    let release!: (value: ChainEventLogState) => void;
+    f.load.mockReturnValueOnce(new Promise((resolve) => { release = resolve; }));
+    const firstSettled = vi.fn();
+    const queuedSettled = vi.fn();
+    const first = f.model.readContextGraphForKa(42n).then(firstSettled);
+    const queued = f.model.readContextGraphForKa(43n).then(queuedSettled);
+    const activeRequest = f.worker().reads[0]!;
+
+    // This id exists locally, but its read has never been dispatched. An IPC
+    // reply cannot bypass admission or turn unperformed work into an answer.
+    f.worker().reply(activeRequest, { id: activeRequest.id + 1 });
+    await Promise.resolve();
+    expect(f.worker().reads).toHaveLength(1);
+    expect(f.load).not.toHaveBeenCalled();
+    expect(queuedSettled).not.toHaveBeenCalled();
+
+    f.worker().reply(activeRequest);
+    expect(f.load).toHaveBeenCalledOnce();
+    // The real reply is waiting on its cursor fence. A duplicate miss must
+    // neither finish that caller early nor replace the pending valid result.
+    f.worker().reply(activeRequest, { result: undefined, fence: undefined });
+    await Promise.resolve();
+    expect(firstSettled).not.toHaveBeenCalled();
+    expect(f.load).toHaveBeenCalledOnce();
+    expect(f.worker().reads.map((request) => request.key)).toEqual([42n, 43n]);
+    const nextBinding = { ...BINDING, contextGraphId: 8n };
+    f.worker().reply(f.worker().reads[1]!, { result: nextBinding });
+    await queued;
+    expect(queuedSettled).toHaveBeenCalledExactlyOnceWith(nextBinding);
+    release(state());
+    await first;
+    expect(firstSettled).toHaveBeenCalledExactlyOnceWith(BINDING);
+    expect(f.onDiagnostic).toHaveBeenCalledTimes(2);
+  });
+
   it('refuses reads while worker construction fails and can retry after cooldown', async () => {
     const f = fixture();
     f.workerFactory.mockImplementationOnce(() => { throw new Error('cannot start thread'); });
