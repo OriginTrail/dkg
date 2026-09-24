@@ -3,10 +3,11 @@
  * renders for a term that fails {@link formatSparqlTerm}. The term syntax
  * itself is core's (`@origintrail-official/dkg-core`, `sparql-terms.ts`).
  *
- * Rendering has no side effects. A term that fails validation becomes an
- * {@link InvalidSparqlTerm} on the statement being built. The adapters'
- * statement factory (`sparqlStatements` in `sparql-statements.ts`) reports it
- * (`sparql-term-observer.ts`) as it hands the plan to the adapter. The adapters use
+ * A renderer tells the observer it was created with about every term that
+ * fails validation, as an {@link InvalidSparqlTerm}, the moment it renders
+ * one. The adapters' statement factory (`sparqlStatements` in
+ * `sparql-statements.ts`) passes the reporter in `sparql-term-observer.ts`; the
+ * deprecated compatibility helpers pass none. The adapters use
  * {@link ADAPTER_SPARQL_TERM_POLICY}, currently in observe mode: a failing
  * term is rendered exactly as before validation existed. Until the
  * hard-reject flip, that still means stripping characters from a malformed
@@ -44,16 +45,15 @@ export interface SparqlTermSite {
  *   that no well-formed write trips the validators before they start
  *   rejecting. Whether the statement is then sent is up to the adapter: an
  *   aborted or refused operation never dispatches it.
- * - `reject`: throw a {@link SparqlTermRejectedError}, so the statement is
- *   never built.
+ * - `reject`: throw a {@link SparqlTermValidationError} whose message gives only
+ *   the term's metadata, so the statement is never built.
  */
 export type SparqlTermEnforcement = 'observe' | 'reject';
 
 /**
- * A term that failed validation, carried by the statement plan until the
- * adapter reports it. It never holds the term itself, which is untrusted data
- * that may be private content or a secret: only its length and a keyed
- * fingerprint.
+ * A term that failed validation, as a renderer hands it to its observer. It
+ * never holds the term itself, which is untrusted data that may be private
+ * content or a secret: only its length and a keyed fingerprint.
  */
 export interface InvalidSparqlTerm {
   readonly site: SparqlTermSite;
@@ -69,27 +69,12 @@ export function describeInvalidTerm(invalidTerm: InvalidSparqlTerm): string {
   return `${invalidTerm.length} chars, fingerprint ${invalidTerm.fingerprint}`;
 }
 
-/**
- * What reject mode throws. Its message carries only the diagnostic's metadata,
- * and it has no `cause`, because the validator's own message quotes the term.
- */
-export class SparqlTermRejectedError extends SparqlTermValidationError {
-  readonly invalidTerm: InvalidSparqlTerm;
-
-  constructor(invalidTerm: InvalidSparqlTerm) {
-    super(
-      `${invalidTerm.site.adapter}.${invalidTerm.site.operation}: invalid ${invalidTerm.kind} ` +
-        `in SPARQL ${invalidTerm.position} position (${describeInvalidTerm(invalidTerm)})`,
-      invalidTerm.kind,
-    );
-    this.name = 'SparqlTermRejectedError';
-    this.invalidTerm = invalidTerm;
-  }
-}
+/** Receives each term that fails validation, the moment a renderer renders it. */
+export type InvalidSparqlTermObserver = (invalidTerm: InvalidSparqlTerm) => void;
 
 /**
- * Renders the terms of one statement built at one site, and collects those
- * that fail validation. It never reports them itself.
+ * Renders the terms of one statement built at one site, telling its observer
+ * about every term that fails validation.
  */
 export interface SparqlTermRenderer {
   /**
@@ -107,28 +92,25 @@ export interface SparqlTermRenderer {
    * that escapes only `\` and `"`.
    */
   prefix(prefix: string): string;
-  /** The terms that failed validation so far, in rendering order. */
-  readonly invalidTerms: readonly InvalidSparqlTerm[];
 }
 
 export interface SparqlTermPolicy {
   readonly enforcement: SparqlTermEnforcement;
-  /** A renderer for one statement built at `site`. */
-  renderer(site: SparqlTermSite): SparqlTermRenderer;
+  /** A renderer for one statement built at `site`, reporting invalid terms to `onInvalidTerm`. */
+  renderer(site: SparqlTermSite, onInvalidTerm: InvalidSparqlTermObserver): SparqlTermRenderer;
 }
 
 export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): SparqlTermPolicy {
   return {
     enforcement,
-    renderer(site) {
-      const invalidTerms: InvalidSparqlTerm[] = [];
-
+    renderer(site, onInvalidTerm) {
       /**
-       * A term failed validation. Any error other than a
+       * A term failed validation: tell the observer, then render its
+       * pre-validation form or, in reject mode, throw. Any error other than a
        * {@link SparqlTermValidationError} is a bug, not a bad term, and
        * propagates.
        */
-      function onInvalidTerm(
+      function invalid(
         error: unknown,
         term: string,
         position: ObservedTermPosition,
@@ -143,8 +125,15 @@ export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): Spar
           length: term.length,
           fingerprint: invalidTermFingerprint(term),
         };
-        if (enforcement === 'reject') throw new SparqlTermRejectedError(invalidTerm);
-        invalidTerms.push(invalidTerm);
+        onInvalidTerm(invalidTerm);
+        if (enforcement === 'reject') {
+          // A fresh error, without `cause`: the validator's message quotes the term.
+          throw new SparqlTermValidationError(
+            `${site.adapter}.${site.operation}: invalid ${invalidTerm.kind} in SPARQL ${position} ` +
+              `position (${describeInvalidTerm(invalidTerm)})`,
+            invalidTerm.kind,
+          );
+        }
         return legacy(term);
       }
 
@@ -162,25 +151,22 @@ export function createSparqlTermPolicy(enforcement: SparqlTermEnforcement): Spar
             }
             return formatSparqlTerm(term, { position });
           } catch (error) {
-            return onInvalidTerm(error, term, position, legacyStrippedIri);
+            return invalid(error, term, position, legacyStrippedIri);
           }
         },
         rdf(term, position, blankNodes) {
           try {
             return formatSparqlTerm(term, { position, blankNodes });
           } catch (error) {
-            return onInvalidTerm(error, term, position, legacyRdfTerm);
+            return invalid(error, term, position, legacyRdfTerm);
           }
         },
         prefix(prefix) {
           try {
             return formatIriPrefix(prefix);
           } catch (error) {
-            return onInvalidTerm(error, prefix, 'subject-prefix', legacyStringLiteral);
+            return invalid(error, prefix, 'subject-prefix', legacyStringLiteral);
           }
-        },
-        get invalidTerms() {
-          return [...invalidTerms];
         },
       };
     },

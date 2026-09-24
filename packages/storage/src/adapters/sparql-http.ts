@@ -1354,8 +1354,9 @@ export { isBlankNodeTerm } from './blank-node-safe-delete.js';
  * never counted invalid terms.
  */
 export function buildBlankNodeSafeDelete(quads: DKGQuad[]): string | null {
+  const ignoreInvalidTerms = (): void => {};
   return renderBlankNodeSafeDelete(
     quads,
-    ADAPTER_SPARQL_TERM_POLICY.renderer({ adapter: 'sparql-http', operation: 'delete' }),
+    ADAPTER_SPARQL_TERM_POLICY.renderer({ adapter: 'sparql-http', operation: 'delete' }, ignoreInvalidTerms),
   );
 }

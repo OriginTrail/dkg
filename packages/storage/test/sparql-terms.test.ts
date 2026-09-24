@@ -10,13 +10,13 @@ import {
 import {
   ADAPTER_SPARQL_TERM_POLICY,
   createSparqlTermPolicy,
-  SparqlTermRejectedError,
+  type InvalidSparqlTerm,
   type IriTermPosition,
   type SparqlTermPolicy,
   type SparqlTermRenderer,
   type SparqlTermSite,
 } from '../src/adapters/sparql-term-policy.js';
-import { reportInvalidSparqlTerms } from '../src/adapters/sparql-term-observer.js';
+import { reportInvalidSparqlTerm } from '../src/adapters/sparql-term-observer.js';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 // Frozen copies of the adapter formatters sparql-terms replaced. They are the
@@ -41,23 +41,12 @@ function legacyEscapeString(s: string): string {
 const SITE: SparqlTermSite = { adapter: 'sparql-http', operation: 'insert' };
 
 /**
- * One term at a time, the way the adapters' statement factory handles a
- * statement: render it for the site, then report the invalid terms, or a
- * reject-mode rejection, once.
+ * One term at a time, the way the adapters' statement factory renders a
+ * statement: with a renderer that reports each invalid term.
  */
 function asAdapter(policy: SparqlTermPolicy) {
-  const run = <T>(site: SparqlTermSite, render: (renderer: SparqlTermRenderer) => T): T => {
-    const renderer = policy.renderer(site);
-    let value: T;
-    try {
-      value = render(renderer);
-    } catch (error) {
-      if (error instanceof SparqlTermRejectedError) reportInvalidSparqlTerms([error.invalidTerm]);
-      throw error;
-    }
-    reportInvalidSparqlTerms(renderer.invalidTerms);
-    return value;
-  };
+  const run = <T>(site: SparqlTermSite, render: (renderer: SparqlTermRenderer) => T): T =>
+    render(policy.renderer(site, reportInvalidSparqlTerm));
   return {
     iriTerm: (term: string, position: IriTermPosition, site: SparqlTermSite) =>
       run(site, (renderer) => renderer.iri(term, position)),
@@ -410,25 +399,31 @@ describe('the IRI entry point', () => {
   it('never renders a literal, even when an untyped caller passes the object position', () => {
     const observed = observeInvalidSparqlTerms();
     const untypedObject = 'object' as unknown as IriTermPosition;
-    expect(() => createSparqlTermPolicy('reject').renderer(SITE).iri('"value"', untypedObject))
-      .toThrow(SparqlTermRejectedError);
-    const renderer = ADAPTER_SPARQL_TERM_POLICY.renderer(SITE);
-    expect(renderer.iri('"value"', untypedObject)).toBe('<value>');
-    expect(renderer.invalidTerms.map(({ position, kind }) => [position, kind])).toEqual([['object', 'literal']]);
+    const seen: InvalidSparqlTerm[] = [];
+    const collect = (invalidTerm: InvalidSparqlTerm) => seen.push(invalidTerm);
+    expect(() => createSparqlTermPolicy('reject').renderer(SITE, collect).iri('"value"', untypedObject))
+      .toThrow(SparqlTermValidationError);
+    expect(ADAPTER_SPARQL_TERM_POLICY.renderer(SITE, collect).iri('"value"', untypedObject)).toBe('<value>');
+    expect(seen.map(({ position, kind, enforcement }) => [position, kind, enforcement])).toEqual([
+      ['object', 'literal', 'reject'],
+      ['object', 'literal', 'observe'],
+    ]);
     expect(observed.counted).toEqual([]);
   });
 });
 
 describe('rendering and reporting', () => {
-  it('renders without side effects, keeping only metadata about an invalid term', () => {
+  it('hands each invalid term to its observer, as metadata only', () => {
     const observed = observeInvalidSparqlTerms();
-    const renderer = ADAPTER_SPARQL_TERM_POLICY.renderer(SITE);
+    const seen: InvalidSparqlTerm[] = [];
+    const renderer = ADAPTER_SPARQL_TERM_POLICY.renderer(SITE, (invalidTerm) => seen.push(invalidTerm));
     const secret = '"apiKey=sk-secret\n"';
 
     expect(renderer.rdf(secret, 'object', 'allow')).toBe(secret);
+    // Only the observer hears about it: nothing is counted or logged unless it reports.
     expect(observed.counted).toEqual([]);
     expect(observed.warnings).toEqual([]);
-    expect(renderer.invalidTerms).toEqual([{
+    expect(seen).toEqual([{
       site: SITE,
       position: 'object',
       kind: 'literal',
@@ -436,32 +431,30 @@ describe('rendering and reporting', () => {
       length: secret.length,
       fingerprint: expect.stringMatching(/^[0-9a-f]{12}$/),
     }]);
-    expect(JSON.stringify(renderer.invalidTerms)).not.toContain('sk-secret');
+    expect(JSON.stringify(seen)).not.toContain('sk-secret');
   });
 
-  it('counts each reported invalid term exactly once', () => {
+  it('reports each invalid term exactly once, as it is rendered', () => {
     const observed = observeInvalidSparqlTerms();
-    const renderer = ADAPTER_SPARQL_TERM_POLICY.renderer(SITE);
+    const renderer = ADAPTER_SPARQL_TERM_POLICY.renderer(SITE, reportInvalidSparqlTerm);
     renderer.iri('urn:a b', 'graph');
+    expect(observed.counted.map(({ position }) => position)).toEqual(['graph']);
     renderer.iri('urn:c^d', 'predicate');
-    expect(observed.counted).toEqual([]);
-    reportInvalidSparqlTerms(renderer.invalidTerms);
     expect(observed.counted.map(({ position }) => position)).toEqual(['graph', 'predicate']);
   });
 
-  it('throws in reject mode without reporting, carrying the diagnostic to report', () => {
+  it('reports a reject-mode failure once, then throws an error without the term', () => {
     const observed = observeInvalidSparqlTerms();
-    const renderer = createSparqlTermPolicy('reject').renderer(SITE);
+    const renderer = createSparqlTermPolicy('reject').renderer(SITE, reportInvalidSparqlTerm);
     let error: unknown;
     try {
       renderer.iri('urn:a b', 'graph');
     } catch (caught) {
       error = caught;
     }
-    expect(error).toBeInstanceOf(SparqlTermRejectedError);
-    expect(observed.counted).toEqual([]);
-
-    reportInvalidSparqlTerms([(error as SparqlTermRejectedError).invalidTerm]);
+    expect(error).toBeInstanceOf(SparqlTermValidationError);
+    expect((error as Error).cause).toBeUndefined();
+    expect((error as Error).message).not.toContain('urn:a b');
     expect(observed.counted.map(({ enforcement }) => enforcement)).toEqual(['reject']);
   });
 });
@@ -479,10 +472,9 @@ describe('the observe policy', () => {
       },
     } as unknown as string;
     for (const policy of [ADAPTER_SPARQL_TERM_POLICY, createSparqlTermPolicy('reject')]) {
-      const renderer = policy.renderer(SITE);
+      const renderer = policy.renderer(SITE, reportInvalidSparqlTerm);
       expect(() => renderer.iri(validatorBug, 'graph')).toThrow(RangeError);
       expect(() => renderer.prefix(validatorBug)).toThrow(RangeError);
-      expect(renderer.invalidTerms).toEqual([]);
     }
     expect(observed.counted).toEqual([]);
     expect(observed.warnings).toEqual([]);

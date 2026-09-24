@@ -1,8 +1,8 @@
 /**
- * Reports the invalid SPARQL terms that statement plans carry. This is the
- * only code that touches the counter, the warning log and its once-a-minute
- * throttle. The adapters' statement factory (`sparqlStatements` in
- * `sparql-statements.ts`) reports each plan's terms as it builds the plan.
+ * Reports invalid SPARQL terms. This is the only code that touches the
+ * counter, the warning log and its once-a-minute throttle. The adapters'
+ * statement factory (`sparqlStatements` in `sparql-statements.ts`) hands
+ * {@link reportInvalidSparqlTerm} to every renderer it creates.
  */
 import { getMetrics } from '@origintrail-official/dkg-core';
 import { describeInvalidTerm, type InvalidSparqlTerm } from './sparql-term-policy.js';
@@ -11,15 +11,11 @@ const INVALID_TERM_WARN_INTERVAL_MS = 60_000;
 const lastInvalidTermWarnAt = new Map<string, number>();
 
 /**
- * Count every invalid term under its enforcement mode, and warn at most once a
+ * Count an invalid term under its enforcement mode, and warn at most once a
  * minute per site, label and mode. The warning gives the term's length and
  * fingerprint, never the term.
  */
-export function reportInvalidSparqlTerms(invalidTerms: readonly InvalidSparqlTerm[]): void {
-  for (const invalidTerm of invalidTerms) reportInvalidSparqlTerm(invalidTerm);
-}
-
-function reportInvalidSparqlTerm(invalidTerm: InvalidSparqlTerm): void {
+export function reportInvalidSparqlTerm(invalidTerm: InvalidSparqlTerm): void {
   const { site, position, kind, enforcement } = invalidTerm;
   try {
     getMetrics().storeSparqlInvalidTermsTotal.add(1, {

@@ -5,7 +5,8 @@ import {
   type SparqlStatements,
   type SparqlUpdatePlan,
 } from '../src/adapters/sparql-statements.js';
-import { createSparqlTermPolicy, SparqlTermRejectedError } from '../src/adapters/sparql-term-policy.js';
+import { SparqlTermValidationError } from '@origintrail-official/dkg-core';
+import { createSparqlTermPolicy } from '../src/adapters/sparql-term-policy.js';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 const ADAPTERS = ['oxigraph', 'sparql-http', 'blazegraph'] as const;
@@ -172,10 +173,10 @@ describe('sparqlStatements', () => {
     const observed = observeInvalidSparqlTerms();
     try {
       const statements = sparqlStatements('sparql-http', createSparqlTermPolicy('reject'));
-      expect(() => statements.dropGraph('http://ex.org/g^x')).toThrow(SparqlTermRejectedError);
+      expect(() => statements.dropGraph('http://ex.org/g^x')).toThrow(SparqlTermValidationError);
       expect(() => statements.deleteData([
         { subject: '_:bad label', predicate: 'http://ex.org/p', object: '"v"', graph: G },
-      ])).toThrow(SparqlTermRejectedError);
+      ])).toThrow(SparqlTermValidationError);
       expect(statements.dropGraph(G).update).toBe('DROP SILENT GRAPH <http://ex.org/g>');
       expect(observed.counted.map((point) => [point.operation, point.enforcement])).toEqual([
         ['dropGraph', 'reject'],

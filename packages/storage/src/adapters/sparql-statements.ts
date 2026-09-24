@@ -7,18 +7,17 @@
  * builds the statement.
  *
  * Reporting is an invariant: {@link sparqlStatements} is the only statement
- * factory, and every builder reports the invalid terms it rendered
- * (`sparql-term-observer.ts`) exactly once, before the adapter admits or
- * dispatches anything. A term rejected in reject mode is reported the same way
- * before the error propagates.
+ * factory, and every renderer it creates reports each invalid term
+ * (`sparql-term-observer.ts`) the moment it renders it: exactly once, and
+ * before the adapter admits or dispatches anything. In reject mode the term
+ * is reported, then the error is thrown.
  */
 import type { GraphWriteScope } from '../graph-write-gen.js';
 import type { Quad } from '../triple-store.js';
 import { renderBlankNodeSafeDelete } from './blank-node-safe-delete.js';
-import { reportInvalidSparqlTerms } from './sparql-term-observer.js';
+import { reportInvalidSparqlTerm } from './sparql-term-observer.js';
 import {
   ADAPTER_SPARQL_TERM_POLICY,
-  SparqlTermRejectedError,
   type SparqlTermPolicy,
   type SparqlTermRenderer,
   type SparqlTermSite,
@@ -75,22 +74,9 @@ export function sparqlStatements(
   adapter: SparqlTermSite['adapter'],
   terms: SparqlTermPolicy = ADAPTER_SPARQL_TERM_POLICY,
 ): SparqlStatements {
-  /**
-   * Render one statement's body at `operation`, then report its invalid terms:
-   * the one reporting boundary.
-   */
-  function reported<B>(operation: SparqlTermSite['operation'], render: (renderer: SparqlTermRenderer) => B): B {
-    const renderer = terms.renderer({ adapter, operation });
-    let body: B;
-    try {
-      body = render(renderer);
-    } catch (error) {
-      if (error instanceof SparqlTermRejectedError) reportInvalidSparqlTerms([error.invalidTerm]);
-      throw error;
-    }
-    reportInvalidSparqlTerms(renderer.invalidTerms);
-    return body;
-  }
+  /** A renderer for one statement at `operation` that reports each invalid term. */
+  const renderer = (operation: SparqlTermSite['operation']): SparqlTermRenderer =>
+    terms.renderer({ adapter, operation }, reportInvalidSparqlTerm);
 
   // The plan's operation comes from the same value that labelled its terms,
   // so the two cannot diverge.
@@ -106,7 +92,7 @@ export function sparqlStatements(
     operation: O,
     render: (renderer: SparqlTermRenderer) => SparqlUpdateBody | null,
   ): SparqlUpdatePlan<O> | null {
-    const body = reported(operation, render);
+    const body = render(renderer(operation));
     return body === null ? null : { operation, ...body };
   }
 
@@ -114,7 +100,7 @@ export function sparqlStatements(
     operation: O,
     render: (renderer: SparqlTermRenderer) => SparqlQueryBody,
   ): SparqlQueryPlan<O> {
-    return { operation, ...reported(operation, render) };
+    return { operation, ...render(renderer(operation)) };
   }
   const graphs = (...graphUris: string[]): GraphWriteScope => ({ kind: 'graphs', graphs: graphUris });
 
