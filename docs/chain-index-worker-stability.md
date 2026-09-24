@@ -1,8 +1,8 @@
 # Chain-index reads and connection stability
 
-Status: implemented and validated locally. No production node was changed or restarted.
+Status: the operator deployed commit `636450151199c7b82c50417a40ac67a27ad414e7` to EG Luigi on 24 September 2026. The subsequent ping-cleanup fix described below is not yet deployed.
 
-The fix addresses two independently reproduced mechanisms: a KA-to-graph lookup replaying all retained registrations on the main thread, and overlapping libp2p health/monitor probes exceeding the one-stream ping limit. It does not establish the cause of the original overload or prove long-term production recovery.
+The fix addresses three independently reproduced mechanisms: a KA-to-graph lookup replaying all retained registrations on the main thread, overlapping libp2p health/monitor probes exceeding the one-stream ping limit, and a valid ping reply followed by delayed stream closure incorrectly aborting the connection. It does not establish the cause of the original overload or prove long-term production recovery.
 
 ## Implementation
 
@@ -129,14 +129,21 @@ sequenceDiagram
     C->>R: Send random challenge
     M->>P: Probe the same connection
     P->>P: Join compatible pending physical probe
-    Note over P,C: Compatible callers and monitor ticks join<br/>Incompatible stream options wait for remote FIN<br/>Outbound protocol stream limit stays at one
-    alt Correct echo and clean stream closure
+    Note over P,C: Compatible callers and monitor ticks join<br/>Incompatible stream options wait for FIN or reset<br/>Outbound protocol stream limit stays at one
+    alt Correct echo
         R-->>C: Echo challenge
         C-->>P: Received bytes
-        P->>P: Validate echo and update RTT
+        P->>P: Validate echo; finish adaptive liveness measurement
         P->>C: Close local stream side
-        R-->>C: Remote FIN closes the stream
-        C-->>P: Close event
+        alt Remote FIN within separate 5-second cleanup deadline
+            R-->>C: Remote FIN closes the stream
+            C-->>P: Close event releases protocol slot
+        else Cleanup deadline or stream-close error
+            P->>C: Reset only the ping stream
+            C-->>P: Reset releases protocol slot
+            P->>P: Log phase=cleanup, pongReceived=true
+            Note over C,R: Connection remains open
+        end
         P-->>H: RTT
         P-->>M: Liveness success
     else Peer does not support ping
@@ -144,7 +151,7 @@ sequenceDiagram
         C-->>P: UnsupportedProtocolError
         P-->>H: Negotiation-based RTT estimate
         P-->>M: Peer responsiveness established
-    else Bad echo, I/O failure or adaptive deadline
+    else Bad echo, I/O failure or adaptive deadline before valid pong
         P->>C: Abort stream and abort connection if still open
         C-->>P: Close event with supplied cause
         P-->>H: Probe failure
@@ -152,11 +159,15 @@ sequenceDiagram
     end
 ```
 
-Compatible callers share one probe; caller stream options that differ wait for the active probe to finish. Stream-opening progress is delivered to each observer, including callers that join later. Refusing a caller-excluded limited connection does not abort the connection. Health-caller cancellation detaches that observer without cancelling the shared probe. Service shutdown cancels and drains probes without using the ordinary failure path to abort connections. The standard inbound ping responder remains installed. Only the independent built-in monitor is disabled; the replacement monitor still checks liveness every 10 seconds with the existing adaptive timeout behavior.
+Compatible callers share one probe; caller stream options that differ wait for the active probe to finish. Stream-opening progress is delivered to each observer, including callers that join later. Refusing a caller-excluded limited connection does not abort the connection. Health-caller cancellation detaches that observer without cancelling the shared probe. Service shutdown cancels and drains probes, including post-pong cleanup, without using the ordinary failure path to abort connections. A connection closing during cleanup rejects the probe instead of returning stale success. The standard inbound ping responder remains installed. Only the independent built-in monitor is disabled; the replacement monitor still checks liveness every 10 seconds with the existing adaptive timeout behavior.
+
+The adaptive 5–60-second deadline covers opening the stream and validating the echo. Its measurement ends immediately on a valid pong, so slow FIN handling cannot inflate the next liveness deadline. Cleanup has a separate fixed five-second budget and retains the coordinator's slot until FIN or stream reset. A cleanup-only failure preserves liveness; a silent peer or invalid echo still triggers connection teardown. Production diagnostics report connection/peer, phase (`open-stream`, `echo`, `cleanup`), action, deadline, elapsed time, whether a pong arrived, and bounded error details.
 
 ## Validation
 
 Work began from freshly fetched `origin/testnet-canary` commit `24341ba73ab1f8a6f4330e34ae905bab725f0db6`; this remained the current base during validation. Tests use local fixtures and loopback peers.
+
+The subsequent cleanup fix passed 34 focused core ping, coordinator, close-diagnostic and node-wiring tests on Node 22.23.1, plus the core build/type checks and repository lint. The freshly fetched canary remained at the same base. New real TCP/Noise/Yamux cases cover FIN arriving after the echo deadline, missing FIN with stream reset and subsequent queued probes, a throwing diagnostics sink, shutdown during cleanup and connection closure during cleanup. Existing silent-peer and bad-echo cases still require connection teardown. This validates the local failure mode, not its frequency on Luigi or production recovery.
 
 The updated implementation has 431 passing focused tests on Node 22.23.1: chain 150, SQLite store 29, CLI worker/lifecycle/startup 217, core ping/diagnostics 29 and agent wiring 6. This review round reran all 402 affected chain/CLI/core/agent cases; the SQLite implementation is unchanged from its passing 29-test run. Package builds, type checks, package boundary checks and repository lint pass. Coverage includes indexed SQL selection and migration, finality, coverage, own-write hashes, replaced tails, tombstones, retired revisions and bindings, caller cancellation, queue limits, physical timeouts, worker startup/crash/recovery, startup cleanup and shutdown. Real TCP/Noise/Yamux tests reproduce and fix health/monitor and monitor/monitor collisions while also checking silent peers, delayed remote stream closure and reconnect behavior.
 
@@ -197,7 +208,9 @@ Release matching CLI, core, chain, agent and node-ui package versions. Before pr
 
 Confirm the available ACK quorum before restarting any core. With four Base cores and three required remote ACKs, taking one node down can prevent quorum even during a sequential rollout. Plan spare eligible capacity or an explicit maintenance window. Rollback is the previous package set; the additional SQLite index is compatible with the old reader.
 
-A one-node production pilot is useful after staging, with EG Luigi the most informative candidate from the investigation because it exhibited the repeated stalls. This is a proposed rollout, not a deployment instruction or a claim that current fleet health has been rechecked:
+The first EG Luigi pilot used commit `63645015`. A read-only check at 18:46 UTC on 24 September 2026 found 45 minutes of uptime, zero restarts, 20 peers and a reachable store, with StorageACK still registered. Timeout-triggered local connection closures and background store delays remained; the check did not establish fresh end-to-end publish/ACK success. The delayed-FIN defect was then reproduced locally with a correct echo, yielding the same generic local `TimeoutError`. The old diagnostics cannot establish that this was the phase responsible for Luigi's closures.
+
+The cleanup fix requires another explicit deployment; the infrastructure pilot remains pinned to the earlier commit. For the next pilot:
 
 1. Finish CI/review and staging publish, repair and reconnect validation with the packaged build. Exercise unsolved Random Sampling retries and observe at least two complete proof periods with active publishing.
 2. Recheck live eligible ACK identities, peer reachability, disk headroom and node health. Arrange spare eligible capacity or a maintenance window if the restart would remove quorum. Capture the old package versions and a baseline on Luigi plus one unchanged comparison node.

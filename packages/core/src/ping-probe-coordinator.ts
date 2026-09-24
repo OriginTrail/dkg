@@ -80,8 +80,9 @@ export class PingProbeCoordinator {
     if (queue.length >= MAX_PENDING_PROBES) throw new Error('Too many queued ping probes');
     const prior = queue.at(-1)?.work;
     const flight: Flight = { key, monitor: false, progress: new Map(), observers: new Set(), work: Promise.resolve(0) };
-    // The previous flight includes remote FIN. Rejections also release the
-    // queue so a caller's limited-connection policy cannot strand the monitor.
+    // The previous flight includes remote FIN or a bounded stream reset.
+    // Rejections also release the queue so a caller's limited-connection
+    // policy cannot strand the monitor.
     flight.work = Promise.resolve(prior).catch(() => {}).then(() => {
       if (!flight.monitor && flight.observers.size === 0) {
         throw new DOMException('Queued ping has no observers', 'AbortError');

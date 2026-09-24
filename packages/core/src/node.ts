@@ -830,7 +830,9 @@ export class DKGNode {
 
     const services: Record<string, any> = {
       identify: identify(),
-      ping: coordinatedPing(),
+      ping: coordinatedPing({
+        onDiagnostic: (diagnostic) => console.warn(`[${new Date().toISOString()}] Ping probe failure: ${JSON.stringify(diagnostic)}`),
+      }),
       dht: kadDHT(buildKadDHTOptions(
         this.config,
         dhtProtocolForNetwork(

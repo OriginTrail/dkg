@@ -24,7 +24,7 @@ describe('shared connection ping', () => {
     await Promise.all(nodes.splice(0).map((node) => node.stop()));
   });
 
-  async function pair(timeoutMs = 1_000, intervalMs = 25, stockResponder = false) {
+  async function pair(timeoutMs = 1_000, intervalMs = 25, stockResponder = false, options: Parameters<typeof coordinatedPing>[0] = {}) {
     const remote = await createLibp2p({
       addresses: { listen: ['/ip4/127.0.0.1/tcp/0'] },
       transports: [tcp()], connectionEncrypters: [noise()], streamMuxers: [yamux()],
@@ -34,7 +34,7 @@ describe('shared connection ping', () => {
     const local = await createLibp2p({
       addresses: { listen: ['/ip4/127.0.0.1/tcp/0'] },
       transports: [tcp()], connectionEncrypters: [noise()], streamMuxers: [yamux()],
-      services: { ping: coordinatedPing({ intervalMs, minTimeoutMs: timeoutMs, maxTimeoutMs: timeoutMs }) },
+      services: { ping: coordinatedPing({ intervalMs, minTimeoutMs: timeoutMs, maxTimeoutMs: timeoutMs, ...options }) },
       connectionMonitor: { enabled: false },
     });
     nodes.push(local);
@@ -57,6 +57,24 @@ describe('shared connection ping', () => {
     }
     const connection = await local.dial(remote.getMultiaddrs());
     return { local, remote, connection, gate, entered, receivedStreams: () => receivedStreams };
+  }
+
+  async function holdFirstFin(remote: Libp2p) {
+    const fin = deferred();
+    const localClosed = deferred();
+    releases.push(fin.resolve);
+    let streams = 0;
+    await remote.unhandle(PING_PROTOCOL);
+    await remote.handle(PING_PROTOCOL, async (stream) => {
+      const first = ++streams === 1;
+      for await (const data of stream) stream.send(data);
+      if (first) {
+        localClosed.resolve();
+        await fin.promise;
+      }
+      if (stream.status === 'open') await stream.close();
+    }, { maxInboundStreams: 2, maxOutboundStreams: 1 });
+    return { fin, localClosed, streams: () => streams };
   }
 
   it('shares a slow health probe with other callers and multiple monitor ticks under the one-stream limit', async () => {
@@ -122,6 +140,59 @@ describe('shared connection ping', () => {
     expect(times.every((time) => time >= 0)).toBe(true);
   });
 
+  it('uses a fresh cleanup deadline after a valid pong and keeps the slot until FIN', async () => {
+    const diagnostic = vi.fn();
+    const { local, remote, connection } = await pair(300, 25, false, { cleanupTimeoutMs: 1_500, onDiagnostic: diagnostic });
+    const { fin, localClosed, streams } = await holdFirstFin(remote);
+    const first = local.services.ping.ping(remote.peerId);
+    await localClosed.promise;
+    const second = local.services.ping.ping(remote.peerId, { runOnLimitedConnection: false });
+    // The liveness deadline has expired, but a pong was already validated.
+    // Repeated monitor ticks must still share the flight awaiting FIN.
+    await pause(350);
+    expect(connection.status).toBe('open');
+    expect(streams()).toBe(1);
+    expect(connection.streams.filter((stream) => stream.protocol === PING_PROTOCOL && stream.direction === 'outbound')).toHaveLength(1);
+    expect(diagnostic).not.toHaveBeenCalled();
+    fin.resolve();
+    expect((await Promise.all([first, second])).every((rtt) => rtt >= 0)).toBe(true);
+    expect(connection.status).toBe('open');
+    expect(diagnostic).not.toHaveBeenCalled();
+  });
+
+  it('resets only a ping stream with a missing FIN, then admits the next queued probe', async () => {
+    const diagnostic = vi.fn();
+    const { local, remote, connection } = await pair(1_000, 60_000, false, { cleanupTimeoutMs: 150, onDiagnostic: diagnostic });
+    const { localClosed, streams } = await holdFirstFin(remote);
+    const first = local.services.ping.ping(remote.peerId);
+    await localClosed.promise;
+    const shared = local.services.ping.ping(remote.peerId);
+    const queued = local.services.ping.ping(remote.peerId, { runOnLimitedConnection: false });
+    const [rtt, sharedRtt, queuedRtt] = await Promise.all([first, shared, queued]);
+    expect(rtt).toBe(sharedRtt);
+    expect(queuedRtt).toBeGreaterThanOrEqual(0);
+    expect(streams()).toBe(2);
+    expect(connection.status).toBe('open');
+    expect(connection.streams.filter((stream) => stream.protocol === PING_PROTOCOL && stream.direction === 'outbound')).toHaveLength(0);
+    expect(diagnostic).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      connectionId: connection.id, phase: 'cleanup', action: 'reset-stream',
+      pongReceived: true, timeoutMs: 150, error: 'TimeoutError',
+    }));
+    // Subsequent probes and both directions remain usable on this connection.
+    expect(await local.services.ping.ping(remote.peerId)).toBeGreaterThanOrEqual(0);
+    expect(await remote.services.ping.ping(local.peerId)).toBeGreaterThanOrEqual(0);
+    expect(local.getConnections(remote.peerId)[0].id).toBe(connection.id);
+  });
+
+  it('does not let a failing diagnostics sink tear down a live connection after cleanup timeout', async () => {
+    const { local, remote, connection } = await pair(1_000, 60_000, false, {
+      cleanupTimeoutMs: 50, onDiagnostic: () => { throw new Error('diagnostics failed'); },
+    });
+    await holdFirstFin(remote);
+    expect(await local.services.ping.ping(remote.peerId)).toBeGreaterThanOrEqual(0);
+    expect(connection.status).toBe('open');
+  });
+
   it('conforms to the stock responder and releases its physical stream before returning', async () => {
     const { local, remote, connection } = await pair(1_000, 60_000, true);
     const elapsed = await pingConnection(connection, { signal: AbortSignal.timeout(1_000), runOnLimitedConnection: true });
@@ -166,13 +237,17 @@ describe('shared connection ping', () => {
   });
 
   it('aborts a genuinely silent connection within the shared probe deadline', async () => {
-    const { local, remote, connection } = await pair(150);
+    const diagnostic = vi.fn();
+    const { local, remote, connection } = await pair(150, 25, false, { onDiagnostic: diagnostic });
     const started = Date.now();
     const result = local.services.ping.ping(remote.peerId).catch((error: Error) => error);
     const outcome = await result;
     expect(outcome).toBeInstanceOf(Error);
     expect(Date.now() - started).toBeLessThan(1_000);
     expect(connection.status).not.toBe('open');
+    expect(diagnostic).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      phase: 'echo', action: 'abort-connection', pongReceived: false, error: 'TimeoutError',
+    }));
   });
 
   it('cancels one health observer without cancelling another observer or the monitor', async () => {
@@ -217,6 +292,35 @@ describe('shared connection ping', () => {
     expect(replacement.id).not.toBe(connection.id);
     expect(await local.services.ping.ping(remote.peerId)).toBeGreaterThanOrEqual(0);
     expect(replacement.status).toBe('open');
+  });
+
+  it('cancels and drains a post-pong cleanup promptly when the service stops', async () => {
+    const diagnostic = vi.fn();
+    const { local, remote, connection } = await pair(1_000, 60_000, false, { cleanupTimeoutMs: 60_000, onDiagnostic: diagnostic });
+    const { localClosed } = await holdFirstFin(remote);
+    const pending = local.services.ping.ping(remote.peerId).catch((error: Error) => error);
+    await localClosed.promise;
+    const queued = local.services.ping.ping(remote.peerId, { runOnLimitedConnection: false }).catch((error: Error) => error);
+    const abort = vi.spyOn(connection, 'abort');
+    const started = Date.now();
+    await local.services.ping.stop();
+    expect(await pending).toBeInstanceOf(Error);
+    expect(await queued).toBeInstanceOf(Error);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(abort).not.toHaveBeenCalled();
+    expect(connection.status).toBe('open');
+    expect(diagnostic).not.toHaveBeenCalled();
+  });
+
+  it('rejects a connection closed during post-pong cleanup without returning stale success', async () => {
+    const diagnostic = vi.fn();
+    const { local, remote, connection } = await pair(1_000, 60_000, false, { cleanupTimeoutMs: 60_000, onDiagnostic: diagnostic });
+    const { localClosed } = await holdFirstFin(remote);
+    const pending = local.services.ping.ping(remote.peerId).catch((error: Error) => error);
+    await localClosed.promise;
+    connection.abort(new Error('connection replaced during cleanup'));
+    expect(await pending).toMatchObject({ name: 'ConnectionClosedError' });
+    expect(diagnostic).not.toHaveBeenCalled();
   });
 
   it('treats an unsupported ping protocol as evidence that the connection responds', async () => {

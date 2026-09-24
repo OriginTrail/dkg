@@ -13,7 +13,7 @@ import {
 import { ping, type Ping, type PingComponents } from '@libp2p/ping';
 import { AdaptiveTimeout } from '@libp2p/utils';
 import { setMaxListeners } from 'node:events';
-import { pingConnection } from './ping-transport.js';
+import { DEFAULT_PING_CLEANUP_TIMEOUT_MS, pingConnection } from './ping-transport.js';
 import { PingProbeCoordinator } from './ping-probe-coordinator.js';
 
 interface Components extends PingComponents {
@@ -25,6 +25,20 @@ interface Options {
   intervalMs?: number;
   minTimeoutMs?: number;
   maxTimeoutMs?: number;
+  cleanupTimeoutMs?: number;
+  onDiagnostic?: (diagnostic: PingDiagnostic) => void;
+}
+
+interface PingDiagnostic {
+  peerId: string;
+  connectionId: string;
+  phase: 'open-stream' | 'echo' | 'cleanup';
+  action: 'abort-connection' | 'reset-stream';
+  pongReceived: boolean;
+  timeoutMs: number;
+  elapsedMs: number;
+  error: string;
+  message: string;
 }
 
 interface CoordinatedPing extends Ping, Startable {
@@ -39,9 +53,13 @@ interface CoordinatedPing extends Ping, Startable {
  * abort a healthy connection. Install this service with connectionMonitor.enabled
  * false: it replaces that monitor with the same interval and adaptive deadlines,
  * while sharing compatible health probes and serializing different stream
- * policies until the previous probe's remote FIN releases the protocol slot.
+ * policies until the previous probe's FIN or reset releases the protocol slot.
  */
 export function coordinatedPing(options: Options = {}): (components: Components) => CoordinatedPing {
+  const cleanupTimeoutMs = options.cleanupTimeoutMs ?? DEFAULT_PING_CLEANUP_TIMEOUT_MS;
+  if (!Number.isSafeInteger(cleanupTimeoutMs) || cleanupTimeoutMs <= 0) {
+    throw new RangeError('Ping cleanup timeout must be a positive integer');
+  }
   return (components) => {
     const responder = ping()(components) as Ping & Startable;
     const log = components.logger.forComponent('dkg:connection-monitor');
@@ -62,11 +80,50 @@ export function coordinatedPing(options: Options = {}): (components: Components)
       const closed = new AbortController();
       const onClose = () => closed.abort(new ConnectionClosedError('Connection closed during ping'));
       connection.addEventListener('close', onClose, { once: true });
-      const signal = timeout.getTimeoutSignal({ signal: AbortSignal.any([stop, closed.signal]) });
+      const lifecycle = AbortSignal.any([stop, closed.signal]);
+      const signal = timeout.getTimeoutSignal({ signal: lifecycle });
       const startedAt = Date.now();
+      let phase: PingDiagnostic['phase'] = 'open-stream';
+      let phaseStartedAt = performance.now();
+      let pongReceived = false;
+      let measurementFinished = false;
+      const finishMeasurement = () => {
+        if (measurementFinished) return;
+        measurementFinished = true;
+        timeout.cleanUp(signal);
+      };
+      const diagnose = (error: Error, action: PingDiagnostic['action']) => {
+        const diagnostic: PingDiagnostic = {
+          peerId: connection.remotePeer.toString(), connectionId: connection.id,
+          phase, action, pongReceived,
+          timeoutMs: phase === 'cleanup' ? cleanupTimeoutMs : signal.timeout,
+          elapsedMs: Math.round(performance.now() - phaseStartedAt),
+          error: error.name.slice(0, 80), message: error.message.slice(0, 240),
+        };
+        log.error('ping phase=%s action=%s - %e', phase, action, error);
+        try { options.onDiagnostic?.(diagnostic); } catch { /* Diagnostics cannot change connection liveness. */ }
+      };
       try {
         if (connection.status !== 'open') throw new ConnectionClosedError();
-        connection.rtt = await pingConnection(connection, { ...streamOptions, signal });
+        connection.rtt = await pingConnection(connection, {
+          ...streamOptions, signal,
+          onProgress: (event) => {
+            if (event.type === 'connection:opened-stream') {
+              phase = 'echo';
+              phaseStartedAt = performance.now();
+            }
+            streamOptions.onProgress?.(event);
+          },
+        }, {
+          signal: lifecycle, timeoutMs: cleanupTimeoutMs,
+          onPong: () => {
+            pongReceived = true;
+            finishMeasurement();
+            phase = 'cleanup';
+            phaseStartedAt = performance.now();
+          },
+          onFailure: (error) => diagnose(error, 'reset-stream'),
+        });
         return connection.rtt;
       } catch (cause) {
         const error = cause instanceof Error ? cause : new Error(String(cause));
@@ -76,14 +133,14 @@ export function coordinatedPing(options: Options = {}): (components: Components)
           return connection.rtt;
         }
         // Refusing a caller-excluded relay is not a failed liveness probe.
-        if (error.name !== 'LimitedConnectionError' && !stop.aborted && connection.status === 'open') {
-          log.error('aborting connection after failed shared ping - %e', error);
+        if (!pongReceived && error.name !== 'LimitedConnectionError' && !stop.aborted && connection.status === 'open') {
+          diagnose(error, 'abort-connection');
           connection.abort(error);
         }
         throw error;
       } finally {
         connection.removeEventListener('close', onClose);
-        timeout.cleanUp(signal);
+        finishMeasurement();
       }
     };
 
