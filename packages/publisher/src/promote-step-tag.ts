@@ -25,6 +25,40 @@
  */
 
 const PROMOTE_STEP_TAG_PREFIX = '[promote:';
+const PROMOTE_STEP_TAG = /^\[promote:([^\]]*)\]\s*/;
+
+export const PROMOTE_STAGES = [
+  'ensureSubGraphRegistered',
+  'assertGraphScopedLifecycleWritable',
+  'knowledgeAssetPrivateQuads',
+  'assertionScopedQuads',
+  'assertTrustedCatalogTriplesAllowed',
+  'encodeWorkspaceGossipPayload',
+] as const;
+
+export type PromoteStage = (typeof PROMOTE_STAGES)[number];
+export type NormalizedPromoteTag = {
+  stage: PromoteStage | 'unknown';
+  message: string;
+};
+
+const PROMOTE_STAGE_SET: ReadonlySet<string> = new Set(PROMOTE_STAGES);
+
+/**
+ * Remove the wire-format tag and expose only a publisher-owned stage or the
+ * privacy-safe `unknown` fallback. Unknown and malformed tags are never
+ * reflected into the diagnostic stage value.
+ */
+export function normalizePromoteTag(message: string): NormalizedPromoteTag {
+  const match = PROMOTE_STEP_TAG.exec(message);
+  const candidate = match?.[1];
+  return {
+    stage: candidate !== undefined && PROMOTE_STAGE_SET.has(candidate)
+      ? candidate as PromoteStage
+      : 'unknown',
+    message: match === null ? message : message.slice(match[0].length),
+  };
+}
 
 /**
  * Return `err` re-labelled with the promote step that produced it. Idempotent:
@@ -32,7 +66,7 @@ const PROMOTE_STEP_TAG_PREFIX = '[promote:';
  * step) is returned untouched, so nesting a tagged op inside another tagged op
  * keeps the deepest label rather than stacking prefixes.
  */
-export function tagPromoteError(step: string, err: unknown): unknown {
+export function tagPromoteError(step: PromoteStage, err: unknown): unknown {
   const prefix = `[promote:${step}]`;
   if (err !== null && typeof err === 'object') {
     const e = err as { message?: unknown; name?: unknown; code?: unknown };
@@ -64,7 +98,7 @@ export function tagPromoteError(step: string, err: unknown): unknown {
  * {@link tagPromoteError}. Resolved values pass through unchanged. The `op` is
  * a thunk so it is invoked inside the try — a synchronous throw is tagged too.
  */
-export async function tagPromoteStep<T>(step: string, op: () => Promise<T>): Promise<T> {
+export async function tagPromoteStep<T>(step: PromoteStage, op: () => Promise<T>): Promise<T> {
   try {
     return await op();
   } catch (err) {

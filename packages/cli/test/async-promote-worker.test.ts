@@ -16,6 +16,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
+  PROMOTE_STAGES,
   TripleStoreAsyncPromoteQueue,
   type AsyncPromoteQueue,
   type PromoteJob,
@@ -113,6 +114,34 @@ describe('classifyPromoteError', () => {
     // when tagged — stripping removes only the injected prefix, never real tokens.
     expect(classifyPromoteError(new Error('[promote:assertionScopedQuads] Promoted assertion too large for gossip (limit 4 MB)')))
       .toEqual({ classification: 'cap_exceeded', retryable: false });
+  });
+
+  it('#2314 — recognizes every publisher-owned canonical diagnostic stage', async () => {
+    for (const stage of PROMOTE_STAGES) {
+      const logs: string[] = [];
+      const queue = {
+        recordCommitMarker: async () => {},
+        fail: async () => ({ state: 'failed' }),
+        getStatus: async () => ({ state: 'failed' }),
+      } as unknown as AsyncPromoteQueue;
+      await runPromoteJob({
+        job: {
+          jobId: `job-${stage}`,
+          request: {},
+          claimToken: 'claim',
+          attempt: { count: 1, maxRetries: 1 },
+        } as PromoteJob,
+        queue,
+        workerId: 'worker-test',
+        runPromote: async () => {
+          throw new Error(`[promote:${stage}] fatal failure`);
+        },
+        now: () => 0,
+        heartbeatIntervalMs: 0,
+        log: (message) => logs.push(message),
+      });
+      expect(promoteFailureDiagnostics(logs)[0]?.['stage']).toBe(stage);
+    }
   });
 
   it('classifies timeout errors as transient', () => {

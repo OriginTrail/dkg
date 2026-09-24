@@ -1,4 +1,10 @@
 export * from './publisher.js';
+export {
+  PROMOTE_STAGES,
+  normalizePromoteTag,
+  type PromoteStage,
+  type NormalizedPromoteTag,
+} from './promote-step-tag.js';
 export { skolemize, isBlankNode, isSkolemizedUri, rootEntityFromSkolemized } from './skolemize.js';
 export { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 export {
