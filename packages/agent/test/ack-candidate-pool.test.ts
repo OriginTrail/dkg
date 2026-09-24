@@ -497,12 +497,13 @@ describe('getACKCandidatePeers — core-only candidates', () => {
 
   it('rotates through preferred peers beyond the first per-round probe budget', async () => {
     const preferred = Array.from({ length: 40 }, (_, index) => `preferred-${index}`);
+    const other = Array.from({ length: 8 }, (_, index) => `other-${index}`);
     const registry = new ACKCapabilityRegistry();
     const coordinator = new ACKCandidateDiscoveryCoordinator(registry);
     const probe = vi.fn(async (peerId: string) => peerId === preferred[39]
       ? 'supported' as const : 'unsupported' as const);
     const ports = {
-      connectedPeers: preferred,
+      connectedPeers: [...preferred, ...other],
       preferredACKPeerIds: preferred,
       localCandidate: { peerId: 'local-core', available: false },
       requiredACKs: 1,
@@ -517,8 +518,12 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     await coordinator.resolveRound(ports);
     expect(probe).toHaveBeenCalledTimes(32);
     expect(probe.mock.calls.map(([peerId]) => peerId)).not.toContain(preferred[39]);
+    expect(probe.mock.calls.slice(0, 32).map(([peerId]) => peerId)).toEqual([
+      ...preferred.slice(0, 24), ...other,
+    ]);
     const secondRound = await coordinator.resolveRound(ports);
     expect(probe.mock.calls.slice(32).map(([peerId]) => peerId)).toContain(preferred[39]);
+    expect(probe.mock.calls.length - 32).toBeLessThanOrEqual(32);
     expect(secondRound.peers).toEqual([preferred[39]]);
   });
 
