@@ -331,6 +331,14 @@ async function resolveSystemOxigraphOnPath(
   return null;
 }
 
+/** The operator-installed `oxigraph` on PATH, or null. */
+export function findOxigraphOnPath(
+  platform: NodeJS.Platform = process.platform,
+  io: Partial<OxigraphBinaryIo> = {},
+): Promise<string | null> {
+  return resolveSystemOxigraphOnPath({ ...defaultIo(), ...io }, platform);
+}
+
 /**
  * Resolve the executable plus the version metadata required for launch
  * capabilities. Pinned assets carry their pinned version; PATH fallbacks are

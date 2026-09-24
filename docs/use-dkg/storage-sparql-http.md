@@ -125,13 +125,14 @@ On Linux hosts using systemd, `memoryMaxMiB` runs managed Oxigraph in a dedicate
 
 The scoped watchdog requires util-linux `setpriv` with `--pdeathsig` support on Linux. It installs a kernel parent-death signal so abrupt watchdog death also terminates Oxigraph and releases its database lock. After daemon loss or a forwarded shutdown signal, a child that ignores graceful termination is killed after five seconds. Missing `setpriv` fails startup instead of launching an unprotected database.
 
-Without memory limits, managed Oxigraph on Linux and macOS runs under the same parent watchdog, in the daemon's own cgroup and without the `setpriv` requirement. When the supervisor kills an unresponsive daemon worker, which cannot stop its children itself, the watchdog stops Oxigraph within about a second and the respawned worker can open the store. On Windows, Oxigraph is still launched directly. Before each Oxigraph start, the daemon also stops an orphan left by an earlier worker (for example, from a release before this watchdog), when that process meets all of these conditions:
+Without memory limits, managed Oxigraph on Linux and macOS runs under the same parent watchdog, in the daemon's own cgroup and without the `setpriv` requirement. When the supervisor kills an unresponsive daemon worker, which cannot stop its children itself, the watchdog stops Oxigraph within about a second and the respawned worker can open the store. On Windows, Oxigraph is still launched directly.
 
-- It holds `<location>/LOCK`.
-- It runs this node's Oxigraph as `serve --location <location>`: the current binary, or another `oxigraph*` executable in the same directory, such as one pinned by an earlier release.
-- No live daemon owns it: it was reparented to PID 1, or its parent is a watchdog of this store whose daemon has exited.
+Once Oxigraph is ready, the daemon records who owns the store in `dkg-oxigraph-owner.json` in the store directory: the daemon, the process it launched, and Oxigraph, each identified by PID and process start time, plus the binary it launched. Before each Oxigraph start, the daemon stops a process that holds `<location>/LOCK` only in these cases:
 
-Any other process holding the lock is logged with its parent's command and left running. When the node runs under a subreaper, such as a `systemctl --user` service, an orphan from an earlier release is adopted by the subreaper instead of PID 1; stop it by hand. Orphans from this release are stopped by the watchdog. The daemon never removes or rewrites lock files, and never adopts an older Oxigraph process.
+- It is the Oxigraph named in that record, and the recorded daemon or launcher has exited, whichever process adopted it afterwards (PID 1, a subreaper such as a `systemctl --user` manager, or a watchdog that cannot act).
+- It runs this node's Oxigraph as `serve --location <location>` (the recorded or current binary, or another `oxigraph*` executable in the managed binary cache, the current binary's directory, or the directory of the `oxigraph` on PATH), no live recorded owner exists, and its parent is gone: it was reparented to PID 1 or its parent has exited. This covers orphans from releases before the owner record.
+
+While the recorded daemon and launcher both run, no holder is touched. Any other process holding the lock is logged with its parent's command and left running. An orphan from an earlier release that a subreaper adopted cannot be told apart from a process with a live owner, so stop it by hand. The daemon never removes or rewrites the LOCK file, and never adopts an older Oxigraph process.
 
 Size the daemon service and Oxigraph scope independently, while keeping their combined maxima within host capacity. For example, an 8 GiB node can reserve 3 GiB for managed Oxigraph and place a separate finite 4 GiB cap on the DKG service, leaving roughly 1 GiB for the OS. These options are deliberately opt-in and are not supported on non-systemd platforms.
 

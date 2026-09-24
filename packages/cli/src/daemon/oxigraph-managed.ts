@@ -22,7 +22,7 @@
  * uses `DROP ALL` (the local RocksDB is owned end-to-end by this daemon),
  * matching the Blazegraph-Docker provisioner's contract.
  */
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   createManagedOxigraphRuntimeStoreConfigV1,
   DEFAULT_SPARQL_HTTP_TIMEOUT_MS,
@@ -30,6 +30,7 @@ import {
   type TripleStoreConfig,
 } from '@origintrail-official/dkg-storage';
 import {
+  findOxigraphOnPath,
   OXIGRAPH_VERSION,
   resolveOxigraphBinary,
   type OxigraphBinaryIo,
@@ -400,9 +401,13 @@ export async function startManagedOxigraph(
   );
   if (plan === null) return null;
 
+  // An orphan from an earlier release may run a binary from the cache or
+  // from PATH, whichever that release resolved.
+  const pathBinary = await findOxigraphOnPath(opts.platform, opts.binaryIo).catch(() => null);
   const handle = await startOxigraphServer({
     binaryPath: binary.path,
     location: plan.location,
+    knownBinaryDirs: [cacheDir, ...(pathBinary ? [dirname(pathBinary)] : [])],
     port: plan.port,
     log,
     readyTimeoutMs: opts.readyTimeoutMs ?? plan.readyTimeoutMs,

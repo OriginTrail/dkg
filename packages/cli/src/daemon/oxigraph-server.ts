@@ -48,7 +48,11 @@ import {
   type OxigraphMemoryLimits,
 } from './oxigraph-launch-strategy.js';
 import { invalidateExternalStoreQuadsCache } from './store-quads-cache.js';
-import { stopOrphanedOxigraph } from './oxigraph-orphan.js';
+import {
+  oxigraphStoreArgs,
+  recordOxigraphOwner,
+  stopOrphanedOxigraph,
+} from './oxigraph-orphan.js';
 import {
   readCgroupOomSnapshot,
   readCgroupOomKill,
@@ -111,6 +115,12 @@ export interface StartOxigraphServerOptions {
   memoryLimits?: OxigraphMemoryLimits;
   /** Runtime platform. Injectable so command construction is portable in tests. */
   platform?: NodeJS.Platform;
+  /**
+   * Other directories whose `oxigraph*` executables belong to this node (the
+   * managed binary cache, the PATH binary's directory), so an orphan launched
+   * from one by an earlier release is still recognised.
+   */
+  knownBinaryDirs?: readonly string[];
   io?: Partial<OxigraphServerIo>;
 }
 
@@ -253,7 +263,7 @@ export async function startOxigraphServer(
     && candidate.signalCode === null;
 
   const spawnChild = (): ChildProcess => {
-    const args = ['serve', '--location', opts.location, '--bind', bind];
+    const args = [...oxigraphStoreArgs(opts.location), '--bind', bind];
     if (queryTimeoutS !== undefined) args.push('--timeout-s', String(queryTimeoutS));
     const spawnSpec = launchStrategy.nextSpawnSpec(opts.binaryPath, args);
     const c = io.spawn(
@@ -393,7 +403,12 @@ export async function startOxigraphServer(
   const prepareSpawn = async (
     kind: 'boot' | 'restart',
   ): Promise<{ timeoutMs: number; walBytes: number }> => {
-    await stopOrphanedOxigraph({ binaryPath: opts.binaryPath, location: opts.location, log });
+    await stopOrphanedOxigraph({
+      binaryPath: opts.binaryPath,
+      location: opts.location,
+      knownBinaryDirs: opts.knownBinaryDirs,
+      log,
+    });
     const ready = nextReadyTimeout();
     if (ready.walBytes > 0) {
       log(kind === 'boot'
@@ -404,6 +419,19 @@ export async function startOxigraphServer(
     }
     return ready;
   };
+
+  // Written only for a child verified to own the listener, so the record
+  // always names a launch that opened this store.
+  const recordOwner = (c: ChildProcess, listenerPid: number): Promise<void> =>
+    c.pid === undefined
+      ? Promise.resolve()
+      : recordOxigraphOwner({
+          location: opts.location,
+          binaryPath: opts.binaryPath,
+          launcherPid: c.pid,
+          oxigraphPid: listenerPid,
+          log,
+        });
 
   // Respawn and re-validate ownership after a steady-state crash. Mirrors
   // the startup ownership guard: `ready` is restored ONLY once the child WE
@@ -467,6 +495,7 @@ export async function startOxigraphServer(
         // is cached as unreachable; drop it now that the child is healthy, or
         // /api/status keeps reporting the recovered store as unreachable.
         invalidateExternalStoreQuadsCache();
+        await recordOwner(candidate, verifiedListenerPid);
         log(`[oxigraph] server restarted and healthy on ${bind}.`);
         return;
       }
@@ -696,6 +725,7 @@ export async function startOxigraphServer(
           listenerPid: verifiedListenerPid,
           generation: lifecycle.generation,
         };
+        await recordOwner(initialChild, verifiedListenerPid);
         log(`Oxigraph server ready on ${bind} after ${attempt} probe(s).`);
         return {
           host,

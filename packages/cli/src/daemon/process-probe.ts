@@ -22,6 +22,11 @@ export interface ProcessDescription {
 
 export type ProcessTreeWalker = (rootPid: number) => Promise<Set<number>>;
 export type ProcessDescriber = (pid: number) => Promise<ProcessDescription | null>;
+/**
+ * An opaque start-time token, or null when the process is gone. With the PID
+ * it names one process, so a recycled PID does not match a recorded one.
+ */
+export type ProcessStartProbe = (pid: number) => Promise<string | null>;
 
 /** Every PID visible in `/proc` (Linux). */
 export async function procPids(): Promise<number[]> {
@@ -124,10 +129,35 @@ export const psDescribeProcess: ProcessDescriber = async (pid) => {
   }
 };
 
+export const procProcessStart: ProcessStartProbe = async (pid) => {
+  try {
+    // After `(comm)`: state is field 3 and starttime field 22 (clock ticks
+    // since boot). A zombie has exited even though its entry remains.
+    const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
+    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    return fields[0] === 'Z' ? null : fields[19] ?? null;
+  } catch {
+    return null;
+  }
+};
+
+export const psProcessStart: ProcessStartProbe = async (pid) => {
+  try {
+    const { stdout } = await execFileAsync('ps', ['-o', 'lstart=', '-p', String(pid)], { timeout: 2_000 });
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+};
+
 export function processTreeWalker(platform: NodeJS.Platform): ProcessTreeWalker {
   return platform === 'linux' ? linuxProcessTree : psProcessTree;
 }
 
 export function processDescriber(platform: NodeJS.Platform): ProcessDescriber {
   return platform === 'linux' ? procDescribeProcess : psDescribeProcess;
+}
+
+export function processStartProbe(platform: NodeJS.Platform): ProcessStartProbe {
+  return platform === 'linux' ? procProcessStart : psProcessStart;
 }

@@ -9,7 +9,7 @@
  * ("While lock file … Resource temporarily unavailable") until the
  * supervisor gave up.
  */
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { execFileSync, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, statSync } from 'node:fs';
@@ -19,18 +19,26 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { findListenOwnerPid } from '../src/daemon/oxigraph-listen-port.js';
+import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import {
   lsofLockHolders,
+  OXIGRAPH_OWNER_RECORD,
+  oxigraphStoreArgs,
   procLockHolders,
+  readOxigraphOwnerRecord,
+  recordOxigraphOwner,
   runsManagedOxigraphStore,
   stopOrphanedOxigraph,
-  watchedDaemonPid,
   type OrphanedOxigraphIo,
+  type OxigraphOwnerRecord,
 } from '../src/daemon/oxigraph-orphan.js';
 import {
   procDescribeProcess,
+  procProcessStart,
   psDescribeProcess,
+  psProcessStart,
   type ProcessDescriber,
+  type ProcessStartProbe,
 } from '../src/daemon/process-probe.js';
 import {
   createOxigraphStandinFixture,
@@ -77,6 +85,14 @@ function hostProcessProbes(): Array<[string, ProcessDescriber]> {
   const probes: Array<[string, ProcessDescriber]> = [];
   if (hostHas('ps')) probes.push(['ps', psDescribeProcess]);
   if (hostHasProcfs) probes.push(['procfs', procDescribeProcess]);
+  return probes;
+}
+
+/** Every process start-time probe this host can run, not only its default. */
+function hostStartProbes(): Array<[string, ProcessStartProbe]> {
+  const probes: Array<[string, ProcessStartProbe]> = [];
+  if (hostHas('ps')) probes.push(['ps', psProcessStart]);
+  if (hostHasProcfs) probes.push(['procfs', procProcessStart]);
   return probes;
 }
 
@@ -177,31 +193,76 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
     }
   }, 60_000);
 
-  it('lets a worker respawned at once open the store while the old watchdog is still polling', async () => {
+  it('reclaims a replacement worker\'s store from an orphan whose watchdog cannot act', async () => {
     const port = await freePort();
     const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-respawn-'));
     let first: WorkerProcess | undefined;
     let second: WorkerProcess | undefined;
     let firstListenerPid: number | undefined;
+    let stoppedWatchdog: number | null = null;
     try {
       first = await startWorker(port, location);
       firstListenerPid = await fetchPid(port);
+      // Freeze the old watchdog so it cannot stop Oxigraph on its next poll:
+      // only the replacement's reclaim can then free the store.
+      stoppedWatchdog = parentPid(firstListenerPid);
+      expect(stoppedWatchdog).not.toBeNull();
+      process.kill(stoppedWatchdog!, 'SIGSTOP');
       const exited = once(first.child, 'exit');
       first.child.kill('SIGKILL');
       await exited;
 
-      // No wait for the old Oxigraph: a replacement that dies on the held
-      // lock would spend one of the supervisor's five crash restarts.
       second = await startWorker(port, location);
       expect(await fetchPid(port)).not.toBe(firstListenerPid);
-      expect(pidIsGone(firstListenerPid)).toBe(true);
+      expect(second.stderr()).toContain(
+        `stopping orphaned Oxigraph pid ${firstListenerPid} (its recorded daemon pid ${first.child.pid} has exited)`,
+      );
     } finally {
       if (second) await stopWorker(second);
       if (first) first.child.kill('SIGKILL');
+      killIfAlive(stoppedWatchdog ?? undefined);
       killIfAlive(firstListenerPid);
       await rm(location, { recursive: true, force: true });
     }
   }, 60_000);
+
+  it('reclaims its own Oxigraph on restart when only the watchdog it launched is killed', async () => {
+    const port = await freePort();
+    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-restart-'));
+    const lines: string[] = [];
+    let listenerPid: number | undefined;
+    const handle = await startOxigraphServer({
+      binaryPath: lockingStandin.binaryPath,
+      location,
+      port,
+      readyTimeoutMs: 10_000,
+      readyIntervalMs: 50,
+      restartBackoffBaseMs: 50,
+      restartBackoffMaxMs: 50,
+      log: (line) => lines.push(line),
+    });
+    try {
+      listenerPid = await fetchPid(port);
+      const watchdog = parentPid(listenerPid);
+      expect(watchdog).not.toBeNull();
+      expect(watchdog).not.toBe(process.pid);
+      // Oxigraph keeps running, adopted by init, with the lock and the port.
+      process.kill(watchdog!, 'SIGKILL');
+
+      expect(await waitForCondition(async () => {
+        const pid = await fetchPid(port).catch(() => undefined);
+        return pid !== undefined && pid !== listenerPid && !handle.getRecoveryState().recovering;
+      }, 20_000)).toBe(true);
+      expect(pidIsGone(listenerPid)).toBe(true);
+      expect(lines.join('\n')).toContain(
+        `stopping orphaned Oxigraph pid ${listenerPid} (its recorded launcher pid ${watchdog} has exited)`,
+      );
+    } finally {
+      await handle.stop();
+      killIfAlive(listenerPid);
+      await rm(location, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it('kills Oxigraph with its watchdog when a respawn misses its ready deadline', async () => {
     const port = await freePort();
@@ -257,12 +318,12 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
   const binaryPath = '/home/dkg/.dkg/oxigraph/oxigraph-v0.5.8';
   let location: string;
 
-  beforeAll(async () => {
+  beforeEach(async () => {
     location = await mkdtemp(join(tmpdir(), 'oxi-orphan-table-'));
     await writeFile(join(location, 'LOCK'), '');
   });
 
-  afterAll(async () => {
+  afterEach(async () => {
     await rm(location, { recursive: true, force: true });
   });
 
@@ -270,6 +331,8 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     ppid: number;
     command: string;
     holdsLock: boolean;
+    /** Start-time token; defaults to `t<pid>`. */
+    start?: string;
     ignoresTerm?: boolean;
     alive: boolean;
   }
@@ -287,7 +350,10 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
         const entry = table.get(pid);
         return entry?.alive ? { ppid: entry.ppid, command: entry.command } : null;
       },
-      isProcessAlive: (pid) => table.get(pid)?.alive ?? false,
+      processStart: async (pid) => {
+        const entry = table.get(pid);
+        return entry?.alive ? entry.start ?? `t${pid}` : null;
+      },
       signal: (pid, signal) => {
         signals.push([pid, signal]);
         const entry = table.get(pid);
@@ -301,98 +367,198 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
   }
 
   const serve = (store: string, binary = binaryPath) =>
-    `${binary} serve --location ${store} --bind 127.0.0.1:7901`;
-  const directWatchdog = (daemonPid: number, store: string) =>
-    `/usr/bin/node /opt/dkg/dist/daemon/oxigraph-parent-watchdog.js --direct ${daemonPid} ${serve(store)}`;
-
-  it('stops an orphan of this store with SIGTERM and returns once the lock is free', async () => {
-    const { table, signals, io } = processTable({
-      4100: { ppid: 1, command: serve(location), holdsLock: true },
-    });
+    `${binary} ${oxigraphStoreArgs(store).join(' ')} --bind 127.0.0.1:7901`;
+  const identity = (pid: number) => ({ pid, start: `t${pid}` });
+  const writeRecord = async (record: Partial<OxigraphOwnerRecord> = {}) => {
+    await writeFile(join(location, OXIGRAPH_OWNER_RECORD), JSON.stringify({
+      daemon: identity(4000),
+      launcher: identity(4099),
+      oxigraph: identity(4100),
+      binaryPath,
+      ...record,
+    }));
+  };
+  const run = async (io: OrphanedOxigraphIo, extra: { knownBinaryDirs?: string[] } = {}) => {
     const lines: string[] = [];
+    const signalled = await stopOrphanedOxigraph({
+      binaryPath, location, log: (line) => lines.push(line), io, ...extra,
+    });
+    return { signalled, log: lines.join('\n') };
+  };
 
-    await expect(stopOrphanedOxigraph({ binaryPath, location, log: (line) => lines.push(line), io }))
-      .resolves.toEqual([4100]);
-    expect(signals).toEqual([[4100, 'SIGTERM']]);
-    expect(table.get(4100)!.alive).toBe(false);
-    expect(lines.join('\n')).toMatch(/stopping orphaned Oxigraph pid 4100/);
-    expect(lines.join('\n')).toMatch(/released by the orphaned Oxigraph/);
+  describe('without an owner record (an orphan from an earlier release)', () => {
+    it('stops an orphan adopted by PID 1 with SIGTERM and returns once the lock is free', async () => {
+      const { table, signals, io } = processTable({
+        4100: { ppid: 1, command: serve(location), holdsLock: true },
+      });
+
+      const { signalled, log } = await run(io);
+      expect(signalled).toEqual([4100]);
+      expect(signals).toEqual([[4100, 'SIGTERM']]);
+      expect(table.get(4100)!.alive).toBe(false);
+      expect(log).toMatch(/stopping orphaned Oxigraph pid 4100 \(it was reparented to PID 1\)/);
+      expect(log).toMatch(/released by the orphaned Oxigraph/);
+    });
+
+    it('escalates to SIGKILL once the stop grace expires', async () => {
+      const { signals, io } = processTable({
+        4100: { ppid: 1, command: serve(location), holdsLock: true, ignoresTerm: true },
+      });
+
+      await stopOrphanedOxigraph({
+        binaryPath, location, log: () => {}, io, stopGraceMs: 500, pollIntervalMs: 100,
+      });
+      expect(signals).toEqual([[4100, 'SIGTERM'], [4100, 'SIGKILL']]);
+    });
+
+    it.each([
+      ['the binary an earlier release pinned beside the current one', '/home/dkg/.dkg/oxigraph/oxigraph-v0.5.7'],
+      ['the PATH binary, from a known binary directory', '/usr/local/bin/oxigraph'],
+    ])('stops an orphan that runs %s', async (_label, binary) => {
+      const { signals, io } = processTable({
+        4100: { ppid: 1, command: serve(location, binary), holdsLock: true },
+      });
+
+      const { signalled } = await run(io, { knownBinaryDirs: ['/usr/local/bin'] });
+      expect(signalled).toEqual([4100]);
+      expect(signals).toEqual([[4100, 'SIGTERM']]);
+    });
+
+    it.each([
+      ['a live daemon worker', 'node /opt/dkg/dist/cli.js daemon-worker'],
+      ['an operator shell', '/bin/bash'],
+      // Without a record a subreaper cannot be told from a live owner; the
+      // log names it so an operator can decide.
+      ['a subreaper', '/lib/systemd/systemd --user'],
+    ])('leaves this store\'s Oxigraph running while its parent is %s', async (_label, parentCommand) => {
+      const { table, signals, io } = processTable({
+        4099: { ppid: 1, command: parentCommand, holdsLock: false },
+        4100: { ppid: 4099, command: serve(location), holdsLock: true },
+      });
+
+      const { signalled, log } = await run(io);
+      expect(signalled).toEqual([]);
+      expect(signals).toEqual([]);
+      expect(table.get(4100)!.alive).toBe(true);
+      expect(log).toContain(
+        `held by pid 4100 (parent 4099): ${serve(location)}. Leaving it running: ` +
+          `there is no owner record, and its parent pid 4099 is still running: ${parentCommand}.`,
+      );
+    });
+
+    it('falls back to the PID 1 rule when the owner record is unreadable', async () => {
+      await writeFile(join(location, OXIGRAPH_OWNER_RECORD), '{"daemon": 4000');
+      const { signals, io } = processTable({
+        4099: { ppid: 1, command: '/lib/systemd/systemd --user', holdsLock: false },
+        4100: { ppid: 4099, command: serve(location), holdsLock: true },
+      });
+
+      const { signalled } = await run(io);
+      expect(signalled).toEqual([]);
+      expect(signals).toEqual([]);
+    });
   });
 
-  it('escalates to SIGKILL once the stop grace expires', async () => {
-    const { signals, io } = processTable({
-      4100: { ppid: 1, command: serve(location), holdsLock: true, ignoresTerm: true },
+  describe('with an owner record', () => {
+    it('leaves every holder running while the recorded daemon and launcher both run', async () => {
+      await writeRecord();
+      const { table, signals, io } = processTable({
+        4000: { ppid: 1, command: 'node /opt/dkg/dist/cli.js daemon-worker', holdsLock: false },
+        4099: { ppid: 4000, command: 'node oxigraph-parent-watchdog.js --direct 4000', holdsLock: false },
+        4100: { ppid: 1, command: serve(location), holdsLock: true },
+      });
+
+      const { signalled, log } = await run(io);
+      expect(signalled).toEqual([]);
+      expect(signals).toEqual([]);
+      expect(table.get(4100)!.alive).toBe(true);
+      expect(log).toMatch(/Leaving it running: this store's recorded daemon pid 4000 and launcher pid 4099 are still running/);
     });
 
-    await stopOrphanedOxigraph({
-      binaryPath, location, log: () => {}, io, stopGraceMs: 500, pollIntervalMs: 100,
+    it.each([
+      // The worker was SIGKILLed and a subreaper, not PID 1, adopted Oxigraph.
+      ['its daemon exited and a subreaper adopted it', {
+        900: { ppid: 1, command: '/lib/systemd/systemd --user', holdsLock: false },
+        4099: { ppid: 900, command: 'node oxigraph-parent-watchdog.js --direct 4000', holdsLock: false },
+        4100: { ppid: 900, command: serve(location), holdsLock: true },
+      }, 'its recorded daemon pid 4000 has exited'],
+      // The daemon runs on but its watchdog was killed on its own.
+      ['its launcher was killed while the daemon runs on', {
+        4000: { ppid: 1, command: 'node /opt/dkg/dist/cli.js daemon-worker', holdsLock: false },
+        4100: { ppid: 1, command: serve(location), holdsLock: true },
+      }, 'its recorded launcher pid 4099 has exited'],
+      // A respawned worker reused the dead daemon's PID; the start time differs.
+      ['the recorded daemon PID now names another process', {
+        4000: { ppid: 1, command: 'node /opt/dkg/dist/cli.js daemon-worker', holdsLock: false, start: 'later' },
+        4099: { ppid: 1, command: 'node oxigraph-parent-watchdog.js --direct 4000', holdsLock: false },
+        4100: { ppid: 4099, command: serve(location), holdsLock: true },
+      }, 'its recorded daemon pid 4000 has exited'],
+    ] as const)('stops this store\'s Oxigraph once %s', async (_label, entries, because) => {
+      await writeRecord();
+      const { signals, io } = processTable(entries);
+
+      const { signalled, log } = await run(io);
+      expect(signalled).toEqual([4100]);
+      expect(signals).toEqual([[4100, 'SIGTERM']]);
+      expect(log).toContain(`stopping orphaned Oxigraph pid 4100 (${because})`);
     });
-    expect(signals).toEqual([[4100, 'SIGTERM'], [4100, 'SIGKILL']]);
-  });
 
-  it('stops an orphan that still runs the binary an earlier release pinned', async () => {
-    const { signals, io } = processTable({
-      4100: { ppid: 1, command: serve(location, '/home/dkg/.dkg/oxigraph/oxigraph-v0.5.7'), holdsLock: true },
+    it('stops an orphan launched from the binary the record names after the node moved to another', async () => {
+      // Not the recorded Oxigraph (a launch killed before it was recorded),
+      // but it runs the recorded binary for this store and init adopted it.
+      await writeRecord({ binaryPath: '/usr/local/bin/oxigraph', oxigraph: identity(4555) });
+      const { signals, io } = processTable({
+        4100: { ppid: 1, command: serve(location, '/usr/local/bin/oxigraph'), holdsLock: true },
+      });
+
+      const { signalled } = await run(io);
+      expect(signalled).toEqual([4100]);
+      expect(signals).toEqual([[4100, 'SIGTERM']]);
     });
 
-    await expect(stopOrphanedOxigraph({ binaryPath, location, log: () => {}, io }))
-      .resolves.toEqual([4100]);
-    expect(signals).toEqual([[4100, 'SIGTERM']]);
-  });
+    it('stops the recorded Oxigraph by identity even when its command line is unrecognised', async () => {
+      await writeRecord();
+      const { signals, io } = processTable({
+        4100: { ppid: 900, command: 'oxigraph-renamed serve --location elsewhere', holdsLock: true },
+      });
 
-  it('stops this store\'s Oxigraph at once when its watchdog\'s daemon has exited', async () => {
-    // A worker respawned within the watchdog's one-second poll: the old
-    // daemon (4000) is gone, so its watchdog (4099) is about to stop it anyway.
-    const { signals, io } = processTable({
-      4099: { ppid: 1, command: directWatchdog(4000, location), holdsLock: false },
-      4100: { ppid: 4099, command: serve(location), holdsLock: true },
+      const { signalled } = await run(io);
+      expect(signalled).toEqual([4100]);
+      expect(signals).toEqual([[4100, 'SIGTERM']]);
     });
 
-    await expect(stopOrphanedOxigraph({ binaryPath, location, log: () => {}, io }))
-      .resolves.toEqual([4100]);
-    expect(signals).toEqual([[4100, 'SIGTERM']]);
-  });
+    it('leaves an unrecorded holder with a live parent running even when the recorded owner exited', async () => {
+      await writeRecord();
+      const { table, signals, io } = processTable({
+        4099: { ppid: 1, command: '/bin/bash', holdsLock: false },
+        4200: { ppid: 4099, command: serve(location), holdsLock: true },
+      });
 
-  it('leaves this store\'s Oxigraph running while its watchdog\'s daemon is alive', async () => {
-    const { table, signals, io } = processTable({
-      4000: { ppid: 1, command: 'node /opt/dkg/dist/cli.js daemon-worker', holdsLock: false },
-      4099: { ppid: 4000, command: directWatchdog(4000, location), holdsLock: false },
-      4100: { ppid: 4099, command: serve(location), holdsLock: true },
+      const { signalled, log } = await run(io);
+      expect(signalled).toEqual([]);
+      expect(signals).toEqual([]);
+      expect(table.get(4200)!.alive).toBe(true);
+      expect(log).toContain(
+        'Leaving it running: it is not the Oxigraph recorded for this store, ' +
+          'and its parent pid 4099 is still running: /bin/bash.',
+      );
     });
-    const lines: string[] = [];
 
-    await expect(stopOrphanedOxigraph({ binaryPath, location, log: (line) => lines.push(line), io }))
-      .resolves.toEqual([]);
-    expect(signals).toEqual([]);
-    expect(table.get(4100)!.alive).toBe(true);
-    expect(lines.join('\n')).toMatch(/Leaving it running: its watchdog pid 4099 still serves live daemon pid 4000/);
+    it('does not stop a foreign holder whose PID the record names but whose start time differs', async () => {
+      await writeRecord();
+      const { signals, io } = processTable({
+        4100: { ppid: 1, command: `/usr/bin/backup ${location}`, holdsLock: true, start: 'later' },
+      });
+
+      const { signalled, log } = await run(io);
+      expect(signalled).toEqual([]);
+      expect(signals).toEqual([]);
+      expect(log).toMatch(/Leaving it running: it is not this node's Oxigraph serving this store/);
+    });
   });
 
   it.each([
-    ['a live daemon worker', 'node /opt/dkg/dist/cli.js daemon-worker'],
-    ['an operator shell', '/bin/bash'],
-    // A subreaper adopts orphans instead of PID 1; the log names it so an
-    // operator can tell it from a live owner.
-    ['a subreaper', '/lib/systemd/systemd --user'],
-  ])('leaves this store\'s Oxigraph running while its parent is %s', async (_label, parentCommand) => {
-    const { table, signals, io } = processTable({
-      4099: { ppid: 1, command: parentCommand, holdsLock: false },
-      4100: { ppid: 4099, command: serve(location), holdsLock: true },
-    });
-    const lines: string[] = [];
-
-    await expect(stopOrphanedOxigraph({ binaryPath, location, log: (line) => lines.push(line), io }))
-      .resolves.toEqual([]);
-    expect(signals).toEqual([]);
-    expect(table.get(4100)!.alive).toBe(true);
-    expect(lines.join('\n')).toContain(
-      `held by pid 4100 (parent 4099): ${serve(location)}. ` +
-        `Leaving it running: its parent pid 4099 is still running: ${parentCommand}.`,
-    );
-  });
-
-  it.each([
-    ['a binary outside this node\'s binary directory', serve(location, '/usr/local/bin/oxigraph')],
+    ['a binary outside this node\'s binary directories', serve(location, '/opt/other/oxigraph')],
     ['another executable in this node\'s binary directory', serve(location, '/home/dkg/.dkg/oxigraph/rocksdb-tool')],
     ['another store whose path extends this one', serve(`${location}-2`)],
     ['a non-serve command on this binary', `${binaryPath} dump --location ${location}`],
@@ -401,13 +567,12 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     const { table, signals, io } = processTable({
       4100: { ppid: 1, command, holdsLock: true },
     });
-    const lines: string[] = [];
 
-    await expect(stopOrphanedOxigraph({ binaryPath, location, log: (line) => lines.push(line), io }))
-      .resolves.toEqual([]);
+    const { signalled, log } = await run(io);
+    expect(signalled).toEqual([]);
     expect(signals).toEqual([]);
     expect(table.get(4100)!.alive).toBe(true);
-    expect(lines.join('\n')).toMatch(/Leaving it running: it is not this node's Oxigraph serving this store/);
+    expect(log).toMatch(/Leaving it running: it is not this node's Oxigraph serving this store/);
   });
 
   it('stops only the orphan when a foreign process also holds the lock', async () => {
@@ -417,8 +582,8 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
       4300: { ppid: 1, command: serve(location), holdsLock: false },
     });
 
-    await expect(stopOrphanedOxigraph({ binaryPath, location, log: () => {}, io }))
-      .resolves.toEqual([4100]);
+    const { signalled } = await run(io);
+    expect(signalled).toEqual([4100]);
     expect(signals).toEqual([[4100, 'SIGTERM']]);
   });
 
@@ -452,30 +617,34 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     }
   });
 
-  it('matches this node\'s serve command for this store, including through a #! interpreter', () => {
-    expect(runsManagedOxigraphStore(serve('/data/ox'), binaryPath, '/data/ox')).toBe(true);
-    expect(runsManagedOxigraphStore(`node ${serve('/data/ox')}`, binaryPath, '/data/ox')).toBe(true);
-    expect(runsManagedOxigraphStore(`${binaryPath} serve --location /data/ox`, binaryPath, '/data/ox')).toBe(true);
-    expect(runsManagedOxigraphStore(serve('/data/ox', `${binaryPath}-old`), binaryPath, '/data/ox')).toBe(true);
-    expect(runsManagedOxigraphStore(serve('/data/ox2'), binaryPath, '/data/ox')).toBe(false);
-    expect(runsManagedOxigraphStore(serve('/data/ox', '/opt/other/oxigraph-v0.5.8'), binaryPath, '/data/ox')).toBe(false);
-    // A PATH binary: only that exact executable, or an `oxigraph*` beside it.
-    expect(runsManagedOxigraphStore(serve('/data/ox', '/usr/bin/oxigraph'), '/usr/bin/oxigraph', '/data/ox')).toBe(true);
-    expect(runsManagedOxigraphStore(serve('/data/ox', '/usr/bin/python3'), '/usr/bin/oxigraph', '/data/ox')).toBe(false);
+  it('recognises the exact Oxigraph argv that the direct and scoped launches build', () => {
+    const serveArgs = [...oxigraphStoreArgs('/data/ox'), '--bind', '127.0.0.1:7878'];
+    for (const memoryLimits of [undefined, { maxMiB: 3072 }]) {
+      const spec = createOxigraphLaunchStrategy({
+        memoryLimits,
+        platform: 'linux',
+        parentPid: 42,
+        uid: 1000,
+        nodeExecutable: '/opt/node',
+        watchdogPath: '/opt/oxigraph-watchdog.js',
+      }).nextSpawnSpec(binaryPath, serveArgs);
+      // The argv the watchdog execs for Oxigraph: the binary and its arguments.
+      const oxigraphArgv = spec.args.slice(spec.args.indexOf(binaryPath));
+      expect(runsManagedOxigraphStore(oxigraphArgv.join(' '), '/data/ox', [binaryPath])).toBe(true);
+    }
   });
 
-  it('reads the daemon PID from a direct, scoped or source-run watchdog of this store only', () => {
-    const tail = serve('/data/ox');
-    expect(watchedDaemonPid(directWatchdog(4000, '/data/ox'), binaryPath, '/data/ox')).toBe(4000);
-    expect(watchedDaemonPid(`/usr/bin/node /opt/dkg/dist/daemon/oxigraph-parent-watchdog.js 4001 ${tail}`, binaryPath, '/data/ox'))
-      .toBe(4001);
-    expect(watchedDaemonPid(
-      `node --import file:///repo/node_modules/tsx/dist/loader.mjs /repo/src/daemon/oxigraph-parent-watchdog.ts --direct 4002 ${tail}`,
-      binaryPath,
-      '/data/ox',
-    )).toBe(4002);
-    expect(watchedDaemonPid(directWatchdog(4000, '/data/other'), binaryPath, '/data/ox')).toBeNull();
-    expect(watchedDaemonPid(`node /opt/dkg/dist/cli.js daemon-worker ${tail}`, binaryPath, '/data/ox')).toBeNull();
+  it('matches this store\'s arguments from known binaries only, including through a #! interpreter', () => {
+    expect(runsManagedOxigraphStore(serve('/data/ox'), '/data/ox', [binaryPath])).toBe(true);
+    expect(runsManagedOxigraphStore(`node ${serve('/data/ox')}`, '/data/ox', [binaryPath])).toBe(true);
+    expect(runsManagedOxigraphStore(`${binaryPath} serve --location /data/ox`, '/data/ox', [binaryPath])).toBe(true);
+    expect(runsManagedOxigraphStore(serve('/data/ox', `${binaryPath}-old`), '/data/ox', [binaryPath])).toBe(true);
+    expect(runsManagedOxigraphStore(serve('/data/ox2'), '/data/ox', [binaryPath])).toBe(false);
+    expect(runsManagedOxigraphStore(serve('/data/ox', '/opt/other/oxigraph-v0.5.8'), '/data/ox', [binaryPath])).toBe(false);
+    expect(runsManagedOxigraphStore(
+      serve('/data/ox', '/opt/other/oxigraph-v0.5.8'), '/data/ox', [binaryPath], ['/opt/other'],
+    )).toBe(true);
+    expect(runsManagedOxigraphStore(serve('/data/ox', '/usr/bin/python3'), '/data/ox', ['/usr/bin/oxigraph'])).toBe(false);
   });
 });
 
@@ -485,6 +654,40 @@ describe('stopOrphanedOxigraph (real processes)', () => {
     await once(exited, 'exit');
     for (const [name, describeProcess] of hostProcessProbes()) {
       expect(await describeProcess(exited.pid!), name).toBeNull();
+    }
+    for (const [name, processStart] of hostStartProbes()) {
+      expect(await processStart(exited.pid!), name).toBeNull();
+    }
+  });
+
+  it('records the owner of a ready store with a stable start time from every probe on this host', async () => {
+    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-record-'));
+    const launcher = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    try {
+      expect(hostStartProbes().length).toBeGreaterThan(0);
+      for (const [name, processStart] of hostStartProbes()) {
+        const start = await processStart(launcher.pid!);
+        expect(start, name).toMatch(/\S/);
+        expect(await processStart(launcher.pid!), name).toBe(start);
+        expect(await processStart(process.pid), name).not.toBeNull();
+      }
+      await recordOxigraphOwner({
+        location,
+        binaryPath: '/opt/oxigraph',
+        launcherPid: launcher.pid!,
+        oxigraphPid: launcher.pid!,
+        log: () => {},
+      });
+      const record = await readOxigraphOwnerRecord(location);
+      expect(record).toMatchObject({
+        binaryPath: '/opt/oxigraph',
+        daemon: { pid: process.pid },
+        launcher: { pid: launcher.pid },
+        oxigraph: { pid: launcher.pid },
+      });
+    } finally {
+      launcher.kill('SIGKILL');
+      await rm(location, { recursive: true, force: true });
     }
   });
 
@@ -497,7 +700,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
     try {
       // What an earlier release left behind after its worker was SIGKILLed.
       orphanPid = await spawnOrphan(lockingStandin.binaryPath, [
-        'serve', '--location', location, '--bind', `127.0.0.1:${port}`,
+        ...oxigraphStoreArgs(location), '--bind', `127.0.0.1:${port}`,
       ]);
       expect(await waitForCondition(() => portAnswers(port))).toBe(true);
       expect(parentPid(orphanPid), 'fixture orphan was not adopted by init').toBe(1);
@@ -526,50 +729,53 @@ describe('stopOrphanedOxigraph (real processes)', () => {
     }
   }, 30_000);
 
-  it('stops this store\'s Oxigraph when its watchdog\'s daemon has exited, before the watchdog does', async () => {
+  it('stops a recorded Oxigraph whose daemon has exited even though a live process adopted it', async () => {
     const port = await freePort();
-    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-watchdog-'));
-    // A watchdog-shaped parent whose daemon is gone but that never polls, so
-    // only the reclaim can stop the database it launched.
+    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-adopted-'));
+    // A live parent that is neither PID 1 nor a watchdog, like a subreaper.
+    const adopter = spawn(process.execPath, [
+      '-e',
+      "require('node:child_process').spawn(process.argv[1], process.argv.slice(2), { stdio: 'ignore' }); setInterval(() => {}, 60_000);",
+      lockingStandin.binaryPath, ...oxigraphStoreArgs(location), '--bind', `127.0.0.1:${port}`,
+    ], { stdio: 'ignore' });
     const deadDaemon = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
     await once(deadDaemon, 'exit');
-    const watchdogScript = join(location, 'oxigraph-parent-watchdog.js');
-    await writeFile(
-      watchdogScript,
-      "require('node:child_process').spawn(process.argv[4], process.argv.slice(5), { stdio: 'ignore' });\n"
-        + 'setInterval(() => {}, 60_000);\n',
-    );
-    const watchdog = spawn(process.execPath, [
-      watchdogScript, '--direct', String(deadDaemon.pid),
-      lockingStandin.binaryPath, 'serve', '--location', location, '--bind', `127.0.0.1:${port}`,
-    ], { stdio: 'ignore' });
     let databasePid: number | undefined;
     const lines: string[] = [];
     try {
       expect(await waitForCondition(() => portAnswers(port))).toBe(true);
       databasePid = await fetchPid(port);
-      expect(parentPid(databasePid)).toBe(watchdog.pid);
+      expect(parentPid(databasePid)).toBe(adopter.pid);
+      const [, start] = hostStartProbes()[0]!;
+      await writeFile(join(location, OXIGRAPH_OWNER_RECORD), JSON.stringify({
+        daemon: { pid: deadDaemon.pid, start: 'exited' },
+        launcher: { pid: adopter.pid, start: await start(adopter.pid!) },
+        oxigraph: { pid: databasePid, start: await start(databasePid) },
+        binaryPath: lockingStandin.binaryPath,
+      }));
 
       await expect(stopOrphanedOxigraph({
         binaryPath: lockingStandin.binaryPath,
         location,
         log: (line) => lines.push(line),
       })).resolves.toEqual([databasePid]);
-      expect(pidIsGone(databasePid) || parentPid(databasePid) === null).toBe(true);
-      expect(lines.join('\n')).toMatch(new RegExp(`stopping orphaned Oxigraph pid ${databasePid}`));
+      expect(await waitForCondition(async () => !(await portAnswers(port)))).toBe(true);
+      expect(lines.join('\n')).toContain(
+        `stopping orphaned Oxigraph pid ${databasePid} (its recorded daemon pid ${deadDaemon.pid} has exited)`,
+      );
     } finally {
-      watchdog.kill('SIGKILL');
+      adopter.kill('SIGKILL');
       killIfAlive(databasePid);
       await rm(location, { recursive: true, force: true });
     }
   }, 30_000);
 
-  it('leaves a lock holder with a live parent running', async () => {
+  it('leaves a lock holder with a live parent running when there is no owner record', async () => {
     const port = await freePort();
     const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-owned-'));
     // Owned by this test process, as another daemon's Oxigraph would be.
     const owned = spawn(lockingStandin.binaryPath, [
-      'serve', '--location', location, '--bind', `127.0.0.1:${port}`,
+      ...oxigraphStoreArgs(location), '--bind', `127.0.0.1:${port}`,
     ], { stdio: 'ignore' });
     const lines: string[] = [];
     try {

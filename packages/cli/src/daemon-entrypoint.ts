@@ -16,15 +16,21 @@ export interface DaemonNodeCommand {
 }
 
 /**
- * Absolute path to THIS CLI's own entrypoint module. A built install runs
- * `cli.js`, while source execution (tsx / ts-node) runs `cli.ts`.
+ * One of this CLI's own modules, given the URL of its built `.js`: that file
+ * in a built install, the `.ts` beside it in a source checkout (tsx /
+ * ts-node), or null when neither exists.
  */
+function ownModulePath(builtModule: URL): { path: string; source: boolean } | null {
+  const built = fileURLToPath(builtModule);
+  if (existsSync(built)) return { path: built, source: false };
+  const source = built.replace(/\.js$/, '.ts');
+  return existsSync(source) ? { path: source, source: true } : null;
+}
+
+/** Absolute path to THIS CLI's own entrypoint module. */
 function cliEntryPointPath(): string {
-  const builtEntry = fileURLToPath(new URL('./cli.js', import.meta.url));
-  if (existsSync(builtEntry)) return builtEntry;
-  const sourceEntry = fileURLToPath(new URL('./cli.ts', import.meta.url));
-  if (existsSync(sourceEntry)) return sourceEntry;
-  return builtEntry;
+  const builtEntry = new URL('./cli.js', import.meta.url);
+  return ownModulePath(builtEntry)?.path ?? fileURLToPath(builtEntry);
 }
 
 /**
@@ -37,11 +43,11 @@ function cliEntryPointPath(): string {
  * it, and a test runner's flags carry no TypeScript loader.
  */
 export function resolveHelperModuleNodeArgs(builtModule: URL): string[] {
-  const built = fileURLToPath(builtModule);
-  if (existsSync(built)) return [built];
-  const source = built.replace(/\.js$/, '.ts');
-  if (existsSync(source)) return ['--import', import.meta.resolve('tsx'), source];
-  return [built];
+  const helper = ownModulePath(builtModule);
+  if (!helper) {
+    throw new Error(`CLI helper module not found: ${fileURLToPath(builtModule)} (or its .ts source)`);
+  }
+  return helper.source ? ['--import', import.meta.resolve('tsx'), helper.path] : [helper.path];
 }
 
 /**
