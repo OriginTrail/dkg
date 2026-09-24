@@ -10,6 +10,10 @@
  * directly. The adapters reach it through the rollout policy in
  * `adapters/sparql-term-policy.ts`, which decides what happens to a term that
  * fails and how that is observed.
+ *
+ * This module owns position rules and rendering only. RDF lexical recognition
+ * comes from shared validators: the literal split and blank-node labels from
+ * `@origintrail-official/dkg-rdf-utils`, IRI and literal safety from core.
  */
 import {
   assertSafeIri,
@@ -17,6 +21,10 @@ import {
   sparqlIri,
   sparqlString,
 } from '@origintrail-official/dkg-core';
+import {
+  isRdfBlankNodeLabel,
+  parseRdfLiteralLexicalTerm,
+} from '@origintrail-official/dkg-rdf-utils';
 
 export type SparqlTermPosition = 'graph' | 'subject' | 'predicate' | 'object';
 
@@ -45,20 +53,6 @@ export class SparqlTermValidationError extends Error {
     this.kind = kind;
   }
 }
-
-const BARE_DATATYPE_LITERAL = /^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/;
-
-// SPARQL 1.1 BLANK_NODE_LABEL, which N-Quads shares.
-const PN_CHARS_BASE =
-  'A-Za-z\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF' +
-  '\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF' +
-  '\\uFDF0-\\uFFFD\\u{10000}-\\u{EFFFF}';
-const PN_CHARS_U = `${PN_CHARS_BASE}_`;
-const PN_CHARS = `${PN_CHARS_U}\\-0-9\\u00B7\\u0300-\\u036F\\u203F-\\u2040`;
-const BLANK_NODE_LABEL = new RegExp(
-  `^_:[${PN_CHARS_U}0-9](?:[${PN_CHARS}.]*[${PN_CHARS}])?$`,
-  'u',
-);
 
 /**
  * Run one core validator. A throw from it is a validation failure of `kind`
@@ -99,7 +93,7 @@ export function formatSparqlTerm(term: string, context: SparqlTermContext): stri
         'blank-node',
       );
     }
-    if (!BLANK_NODE_LABEL.test(term)) {
+    if (!isRdfBlankNodeLabel(term.slice(2))) {
       throw new SparqlTermValidationError(
         `Invalid blank node label in SPARQL ${position}`,
         'blank-node',
@@ -119,11 +113,12 @@ export function formatSparqlTerm(term: string, context: SparqlTermContext): stri
   return validated('iri', () => sparqlIri(iri));
 }
 
+/** Bracket a legacy bare datatype (`"v"^^http://…`), as N-Quads and SPARQL require. */
 function normalizeLiteralDatatype(term: string): string {
-  const bareDatatype = term.match(BARE_DATATYPE_LITERAL);
-  if (!bareDatatype) return term;
-  const datatype = unwrapIri(bareDatatype[2]);
-  return `${bareDatatype[1]}^^${validated('literal', () => sparqlIri(datatype))}`;
+  const lexical = parseRdfLiteralLexicalTerm(term);
+  if (lexical?.suffix.kind !== 'datatype' || lexical.suffix.syntax !== 'bare') return term;
+  const { datatype } = lexical.suffix;
+  return `"${lexical.body}"^^${validated('literal', () => sparqlIri(datatype))}`;
 }
 
 /**

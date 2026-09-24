@@ -1,4 +1,4 @@
-import { formatCanonicalRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
+import { formatCanonicalRdfLiteralTerm, isRdfBlankNodeLabel } from '@origintrail-official/dkg-rdf-utils';
 import { isSafeIri } from '@origintrail-official/dkg-core';
 import {
   isOrdinaryDataRecord,
@@ -26,8 +26,6 @@ type AdapterSparqlJsonTerm =
   | { type: 'bnode'; value: string }
   | SparqlJsonLiteralTerm;
 
-const SPARQL_JSON_BLANK_NODE_LABEL =
-  /^[\p{L}\p{Nl}_0-9][\p{L}\p{Nl}\p{M}\p{Nd}_.\-\u00B7\u203F-\u2040]*$/u;
 const SPARQL_JSON_LANGUAGE_TAG = /^[A-Za-z]+(?:-[A-Za-z0-9]+)*$/u;
 const MAX_CACHED_IRI_VARIABLES = 128;
 const MAX_CACHED_IRI_LENGTH = 1024;
@@ -307,10 +305,7 @@ function snapshotTerm(input: unknown, rowIndex: number, variable: string, reader
   }
   if (type === 'bnode') {
     reader.exact(term, ['type', 'value'], label, malformed);
-    if (
-      !SPARQL_JSON_BLANK_NODE_LABEL.test(value)
-      || value.endsWith('.')
-    ) {
+    if (!isRdfBlankNodeLabel(value)) {
       malformed(`${label} blank-node value must be an RDF blank-node label`);
     }
     return { type, value };

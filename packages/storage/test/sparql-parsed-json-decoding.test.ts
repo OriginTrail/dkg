@@ -21,6 +21,7 @@ describe('privately parsed JSON SELECT decoding', () => {
   it.each([
     { type: 'uri', value: 'urn:test:value' },
     { type: 'bnode', value: 'node' },
+    { type: 'bnode', value: 'x·y.z' },
     { type: 'literal', value: 'quotes " and slash \\ and \n' },
     { type: 'literal', value: 'bonjour', 'xml:lang': 'fr' },
     { type: 'typed-literal', value: '42', datatype: 'urn:test:number' },
@@ -34,6 +35,8 @@ describe('privately parsed JSON SELECT decoding', () => {
     null, [], { type: 'uri' }, { value: 'x' }, { type: 'uri', value: 1 },
     { type: 'uri', value: 'relative' }, { type: 'uri', value: 'urn:x', extra: true },
     { type: 'uri', value: 'urn:bad>' }, { type: 'bnode', value: 'bad.' },
+    // Outside PN_CHARS_BASE: the shared BLANK_NODE_LABEL grammar, not a Unicode-category approximation.
+    { type: 'bnode', value: 'ª' },
     { type: 'unsupported', value: 'x' }, { type: 'typed-literal', value: '42' },
     { type: 'literal', value: 'x', datatype: 'relative' },
     { type: 'literal', value: 'x', 'xml:lang': 'not valid' },

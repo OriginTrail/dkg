@@ -299,3 +299,5 @@ export function normalizeRdfObject(value: unknown): string {
   const raw = String(value ?? '');
   return isRdfTerm(raw) ? raw : `"${escapeRdfLiteral(raw)}"`;
 }
+
+export { isRdfBlankNodeLabel } from './blank-node-label.js';
