@@ -595,10 +595,10 @@ function mockConfigIO(store: MockConfigStore) {
     // Mirrors updateConfigFile: edit the file's object, and write only when
     // the edits changed it.
     updateConfigFile: async (edits: readonly DkgConfigEdit[]) => {
-      const next = structuredClone(store.current) as DkgConfig & Record<string, unknown>;
-      if (!applyConfigEdits(next, edits).changed) return { path: 'config.json', changed: false };
-      store.current = next;
-      store.saved.push(structuredClone(next));
+      const { after, changed } = applyConfigEdits(store.current as DkgConfig & Record<string, unknown>, edits);
+      if (!changed) return { path: 'config.json', changed: false };
+      store.current = after as unknown as DkgConfig;
+      store.saved.push(structuredClone(store.current));
       return { path: 'config.json', changed: true };
     },
   };

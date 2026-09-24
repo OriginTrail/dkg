@@ -32,7 +32,7 @@ describe('dkg publisher enable/disable config merge (#2270)', () => {
     vi.clearAllMocks();
     // The real edit step, applied to the stand-in file.
     mocks.updateConfigFile.mockImplementation(async (...[edits]: Parameters<ConfigModule['updateConfigFile']>) => {
-      applyConfigEdits(mocks.file, edits);
+      mocks.file = applyConfigEdits(mocks.file, edits).after;
     });
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});

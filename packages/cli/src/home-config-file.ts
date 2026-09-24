@@ -37,10 +37,27 @@ export type DkgConfigValue<P extends DkgConfigPath> =
     ? N extends keyof NonNullable<DkgConfigFile[K]> ? NonNullable<NonNullable<DkgConfigFile[K]>[N]> : never
     : P extends readonly [infer K extends ConfigKey] ? NonNullable<DkgConfigFile[K]> : never;
 
-/** One edit of the config file: the value at `path` becomes what `update` returns for it. */
-export interface DkgConfigEdit {
-  readonly path: DkgConfigPath;
-  readonly update: (current: unknown) => unknown;
+let makeConfigEdit: (path: readonly string[], update: (current: unknown) => unknown) => DkgConfigEdit;
+let readConfigEdit: (edit: DkgConfigEdit) => { path: readonly string[]; update: (current: unknown) => unknown };
+
+/**
+ * One edit of the config file: the value at its path becomes what its update
+ * returns for it. Only configEdit and configValues make one, so the value an
+ * update returns always has the type at its path.
+ */
+export class DkgConfigEdit {
+  static {
+    makeConfigEdit = (path, update) => new DkgConfigEdit(path, update);
+    readConfigEdit = (edit) => ({ path: edit.#path, update: edit.#update });
+  }
+
+  readonly #path: readonly string[];
+  readonly #update: (current: unknown) => unknown;
+
+  private constructor(path: readonly string[], update: (current: unknown) => unknown) {
+    this.#path = path;
+    this.#update = update;
+  }
 }
 
 /**
@@ -54,12 +71,12 @@ export function configEdit<const P extends DkgConfigPath>(
   path: P,
   update: (current: DkgConfigValue<P> | undefined) => DkgConfigValue<P> | undefined,
 ): DkgConfigEdit {
-  return { path, update: update as (current: unknown) => unknown };
+  return makeConfigEdit(path, update as (current: unknown) => unknown);
 }
 
 /** Edits that set each key of `values`, removing the ones set to undefined. */
 export function configValues(values: Partial<DkgConfig>): DkgConfigEdit[] {
-  return Object.entries(values).map(([key, value]) => ({ path: [key] as unknown as DkgConfigPath, update: () => value }));
+  return Object.entries(values).map(([key, value]) => makeConfigEdit([key], () => value));
 }
 
 /** Where a config update was written, and whether its edits changed anything. */
@@ -141,32 +158,34 @@ export async function updateHomeConfigFile(home: string, edits: readonly DkgConf
 
 /** The config file's data before and after its edits, as both formats persist it. */
 export interface DkgConfigFileChange {
-  before: unknown;
-  after: unknown;
+  before: Record<string, unknown>;
+  after: Record<string, unknown>;
   changed: boolean;
 }
 
 /**
- * Apply `edits` to a config file's object, in place and in order, and return
- * the data before and after them. Each edit changes only the value at its
- * path; a key above a nested path that holds no object gets one. Throws if an
- * update throws or is async; the object may then be partly edited, and is
- * not to be written.
+ * Apply `edits`, in order, to a copy of a config file's data, and return the
+ * data before and after them; `config` itself is never changed. Each edit
+ * changes only the value at its path, and a key above a nested path that
+ * holds no mapping gets one. Throws if an edit was not made by configEdit or
+ * configValues, or if an update throws or is async.
  */
 export function applyConfigEdits(config: Record<string, unknown>, edits: readonly DkgConfigEdit[]): DkgConfigFileChange {
-  const before = toJsonData(config);
-  for (const { path, update } of edits) {
-    const [key, nested] = path as readonly [string, string?];
+  const before = toJsonRecord(config);
+  const working = toJsonRecord(config);
+  for (const edit of edits) {
+    if (!(edit instanceof DkgConfigEdit)) throw new TypeError('A config edit must be made by configEdit or configValues');
+    const { path: [key, nested], update } = readConfigEdit(edit);
     if (nested === undefined) {
-      setOrRemove(config, key, runUpdate(update, config[key]));
+      setOwn(working, key, runUpdate(update, getOwn(working, key)));
       continue;
     }
-    const parent = config[key];
-    const next = runUpdate(update, isJsonObject(parent) ? parent[nested] : undefined);
-    if (isJsonObject(parent)) setOrRemove(parent, nested, next);
-    else if (next !== undefined) config[key] = { [nested]: next };
+    const parent = getOwn(working, key);
+    const next = runUpdate(update, isPlainRecord(parent) ? getOwn(parent, nested) : undefined);
+    if (isPlainRecord(parent)) setOwn(parent, nested, next);
+    else if (next !== undefined) setOwn(working, key, setOwn({}, nested, next));
   }
-  const after = toJsonData(config);
+  const after = toJsonRecord(working);
   return { before, after, changed: !isDeepStrictEqual(before, after) };
 }
 
@@ -180,9 +199,20 @@ function runUpdate(update: (current: unknown) => unknown, current: unknown): unk
   return next;
 }
 
-function setOrRemove(object: Record<string, unknown>, key: string, value: unknown): void {
-  if (value === undefined) delete object[key];
-  else object[key] = value;
+// Keys are read and written as own properties, so one such as `__proto__` (a
+// valid integration id) is stored like any other instead of reaching the
+// object's prototype.
+function getOwn(object: Record<string, unknown>, key: string): unknown {
+  return Object.hasOwn(object, key) ? object[key] : undefined;
+}
+
+function setOwn(object: Record<string, unknown>, key: string, value: unknown): Record<string, unknown> {
+  if (value === undefined) {
+    if (Object.hasOwn(object, key)) delete object[key];
+  } else {
+    Object.defineProperty(object, key, { value, enumerable: true, writable: true, configurable: true });
+  }
+  return object;
 }
 
 /**
@@ -191,6 +221,10 @@ function setOrRemove(object: Record<string, unknown>, key: string, value: unknow
  */
 function toJsonData(value: unknown): unknown {
   return JSON.parse(JSON.stringify(value));
+}
+
+function toJsonRecord(config: Record<string, unknown>): Record<string, unknown> {
+  return toJsonData(config) as Record<string, unknown>;
 }
 
 /**
@@ -215,7 +249,7 @@ function patchYamlText(text: string, before: unknown, after: unknown): string {
 }
 
 function applyYamlChanges(doc: Document, path: string[], before: unknown, after: unknown): void {
-  if (!isJsonObject(before) || !isJsonObject(after)) {
+  if (!isPlainRecord(before) || !isPlainRecord(after)) {
     doc.setIn(path, after);
     return;
   }
@@ -223,18 +257,25 @@ function applyYamlChanges(doc: Document, path: string[], before: unknown, after:
     if (!Object.hasOwn(after, key)) doc.deleteIn([...path, key]);
   }
   for (const [key, value] of Object.entries(after)) {
-    if (!isDeepStrictEqual(before[key], value)) applyYamlChanges(doc, [...path, key], before[key], value);
+    const was = getOwn(before, key);
+    if (!isDeepStrictEqual(was, value)) applyYamlChanges(doc, [...path, key], was, value);
   }
 }
 
-function isJsonObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+/** A mapping, as JSON or YAML parses one: not an array, and not a Date or any other object. */
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return false;
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
-/** An empty config file holds an empty config; anything but an object is refused. */
+/**
+ * An empty config file holds an empty config; anything but a mapping (a
+ * list, or a scalar such as a YAML timestamp) is refused.
+ */
 function configFileObject(raw: unknown, path: string): Record<string, unknown> {
   if (raw === undefined || raw === null) return {};
-  if (!isJsonObject(raw)) {
+  if (!isPlainRecord(raw)) {
     throw new Error(`${path} does not contain a config object; refusing to update it`);
   }
   return raw;

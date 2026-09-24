@@ -32,7 +32,7 @@ describe('dkg context-graph create --save', () => {
     configMocks.updateConfigFile.mockReset();
     // The real edit step, applied to the stand-in file.
     configMocks.updateConfigFile.mockImplementation(async (edits: readonly DkgConfigEdit[]) => {
-      applyConfigEdits(configMocks.file, edits);
+      configMocks.file = applyConfigEdits(configMocks.file, edits).after;
     });
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(ApiClient, 'connect').mockResolvedValue({

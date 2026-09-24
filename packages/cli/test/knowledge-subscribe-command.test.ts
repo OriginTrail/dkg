@@ -35,7 +35,7 @@ describe('knowledge subscribe CLI sync lifetime', () => {
     configMocks.updateConfigFile.mockReset();
     // The real edit step, applied to the stand-in file.
     configMocks.updateConfigFile.mockImplementation(async (edits: readonly DkgConfigEdit[]) => {
-      applyConfigEdits(configMocks.file, edits);
+      configMocks.file = applyConfigEdits(configMocks.file, edits).after;
     });
     configMocks.resolveContextGraphs.mockClear();
     vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {

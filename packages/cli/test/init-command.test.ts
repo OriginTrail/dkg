@@ -76,10 +76,9 @@ describe('init wizard chain persistence', () => {
     mocks.sourcePath = undefined;
     mocks.written = [];
     mocks.updateConfigFile.mockImplementation(async (edits) => {
-      const file = structuredClone(mocks.fileAtWrite ?? await mocks.loadConfig()) as Record<string, unknown>;
+      const file = (mocks.fileAtWrite ?? await mocks.loadConfig()) as Record<string, unknown>;
       // The real edit step, applied to the stand-in file.
-      applyConfigEdits(file, edits);
-      mocks.written.push(file);
+      mocks.written.push(applyConfigEdits(file, edits).after);
       return { path: mocks.sourcePath ?? join(mocks.home, 'config.json'), changed: true };
     });
     vi.spyOn(console, 'log').mockImplementation(() => {});

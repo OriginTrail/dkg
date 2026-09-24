@@ -35,3 +35,6 @@ configEdit(['llm'], async () => undefined);
 
 // @ts-expect-error configValues takes config keys only.
 configValues({ nmae: 'node' });
+
+// @ts-expect-error An edit is made by configEdit or configValues, never built by hand.
+void updateConfigFile([{ path: ['telemetry', 'enabled'], update: () => 'yes' }]);

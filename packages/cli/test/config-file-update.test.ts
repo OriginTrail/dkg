@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DkgHomeFiles, configEdit, type DkgConfigEdit } from '../src/config.js';
+import { DkgHomeFiles, configEdit, configValues, type DkgConfig, type DkgConfigEdit, type DkgConfigPath } from '../src/config.js';
+import { applyConfigEdits } from '../src/home-config-file.js';
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
@@ -36,11 +37,11 @@ describe('DkgHomeFiles.updateConfigFile', () => {
 
   /** An edit of any path, including keys the config type does not declare. */
   function edit(path: readonly string[], update: (current: unknown) => unknown): DkgConfigEdit {
-    return { path, update } as unknown as DkgConfigEdit;
+    return configEdit(path as DkgConfigPath, update as never);
   }
 
   function addKey(key: string, value: unknown): DkgConfigEdit[] {
-    return [edit([key], () => value)];
+    return configValues({ [key]: value } as Partial<DkgConfig>);
   }
 
   it('changes only the keys a patch sets and adds no defaults', async () => {
@@ -343,6 +344,45 @@ describe('DkgHomeFiles.updateConfigFile', () => {
       });
     });
 
+    it('leaves the config it is given unchanged, even when a later edit throws', () => {
+      const input = { name: 'node', contextGraphs: ['a'] };
+      const seen: unknown[] = [];
+
+      expect(() => applyConfigEdits(input, [
+        configEdit(['contextGraphs'], (graphs) => { seen.push(graphs); return [...(graphs ?? []), 'b']; }),
+        configEdit(['contextGraphs'], (graphs) => { seen.push(graphs); return [...(graphs ?? []), 'c']; }),
+        configEdit(['apiPort'], () => { throw new Error('no port'); }),
+      ])).toThrow('no port');
+
+      expect(input).toEqual({ name: 'node', contextGraphs: ['a'] });
+      expect(seen).toEqual([['a'], ['a', 'b']]);
+      expect(applyConfigEdits(input, [configEdit(['name'], () => 'renamed')])).toEqual({
+        before: { name: 'node', contextGraphs: ['a'] },
+        after: { name: 'renamed', contextGraphs: ['a'] },
+        changed: true,
+      });
+      expect(input).toEqual({ name: 'node', contextGraphs: ['a'] });
+    });
+
+    // `__proto__` is a valid integration id; assigning it would set the
+    // object's prototype instead of storing an entry.
+    it.each(['json', 'yaml'])('stores and removes an entry whose key is __proto__ like any other, in a %s home', async (format) => {
+      const initial = { localAgentIntegrations: { hermes: { id: 'hermes' } } };
+      if (format === 'json') await writeFile(files.configPath, JSON.stringify(initial));
+      else await writeFile(files.configYamlPath, yaml.dump(initial));
+
+      await files.updateConfigFile([
+        configEdit(['localAgentIntegrations', '__proto__'], () => ({ id: '__proto__', enabled: true })),
+      ]);
+      const stored = (await files.loadConfig()).localAgentIntegrations ?? {};
+      expect(Object.keys(stored)).toEqual(['hermes', '__proto__']);
+      expect(Object.getOwnPropertyDescriptor(stored, '__proto__')?.value).toEqual({ id: '__proto__', enabled: true });
+      expect(Object.getPrototypeOf(stored)).toBe(Object.prototype);
+
+      await files.updateConfigFile([configEdit(['localAgentIntegrations', '__proto__'], () => undefined)]);
+      expect(Object.keys((await files.loadConfig()).localAgentIntegrations ?? {})).toEqual(['hermes']);
+    });
+
     it('applies edits in order, together, and writes nothing when one of them throws', async () => {
       await writeFile(files.configPath, JSON.stringify({ name: 'node', contextGraphs: ['a'] }));
 
@@ -389,6 +429,33 @@ describe('DkgHomeFiles.updateConfigFile', () => {
 
       expect(await readFile(files.configPath, 'utf-8')).toBe('{ not json');
       expect(await readFile(files.configYamlPath, 'utf-8')).toBe('name: stale-yaml\n');
+    });
+
+    // js-yaml reads a bare YAML timestamp as a Date, which is not a mapping.
+    it('refuses a YAML config that holds a timestamp instead of a mapping', async () => {
+      await writeFile(files.configYamlPath, '2026-09-24\n');
+
+      await expect(files.updateConfigFile([configEdit(['name'], () => 'node')]))
+        .rejects.toThrow(`${files.configYamlPath} does not contain a config object; refusing to update it`);
+
+      expect(await readFile(files.configYamlPath, 'utf-8')).toBe('2026-09-24\n');
+    });
+
+    it('replaces a timestamp where a nested edit needs a mapping', async () => {
+      await writeFile(files.configYamlPath, 'name: node\ntelemetry: 2026-09-24\n');
+
+      await files.updateConfigFile([configEdit(['telemetry', 'enabled'], () => true)]);
+
+      expect(yaml.load(await readFile(files.configYamlPath, 'utf-8'))).toEqual({ name: 'node', telemetry: { enabled: true } });
+    });
+
+    it('refuses an edit not made by configEdit or configValues', async () => {
+      await writeFile(files.configPath, JSON.stringify({ name: 'node' }));
+
+      await expect(files.updateConfigFile([{ path: ['name'], update: () => 'hand-built' } as unknown as DkgConfigEdit]))
+        .rejects.toThrow('A config edit must be made by configEdit or configValues');
+
+      expect(await readJson()).toEqual({ name: 'node' });
     });
 
     it('refuses a config file that does not hold an object', async () => {

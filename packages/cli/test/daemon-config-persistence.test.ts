@@ -6,10 +6,11 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import yaml from 'js-yaml';
-import type { DkgConfig } from '../src/config.js';
+import { loadConfig, type DkgConfig } from '../src/config.js';
 import { registerPublisherCommand } from '../src/commands/publisher.js';
 import {
   connectLocalAgentIntegration,
+  listLocalAgentIntegrations,
   persistLocalAgentIntegration,
   updateLocalAgentIntegration,
 } from '../src/daemon/local-agents.js';
@@ -251,6 +252,29 @@ describe('daemon local agent integration writes', () => {
     const file = await readFileConfig();
     expect(file.contextGraphs).toEqual(['saved-by-cli']);
     expect(file.localAgentIntegrations['custom-agent']).toMatchObject({ id: 'custom-agent', name: 'Custom agent', enabled: true });
+  });
+
+  // `__proto__` is a valid integration id; it must reach the file as an
+  // entry of its own, beside the others, and come back after a restart.
+  it.each(['json', 'yaml'])('persists a __proto__ integration beside another one, and reloads both (%s)', async (format) => {
+    const config = bootConfig();
+    const onDisk = { name: 'node', localAgentIntegrations: { hermes: { id: 'hermes', name: 'Hermes' } } };
+    if (format === 'json') await fileEditedAfterBoot(onDisk);
+    else await writeFile(join(home, 'config.yaml'), yaml.dump(onDisk));
+    const res = jsonResponse();
+
+    await handleLocalAgentsRoutes({
+      req: jsonRequest('POST', '/api/local-agent-integrations/connect', { id: '__proto__', name: 'Proto agent' }),
+      res,
+      config,
+      path: '/api/local-agent-integrations/connect',
+    } as any);
+
+    expect(res.statusCode).toBe(200);
+    const reloaded = await loadConfig();
+    expect(Object.keys(reloaded.localAgentIntegrations ?? {})).toEqual(['hermes', '__proto__']);
+    expect(listLocalAgentIntegrations(reloaded).find((integration) => integration.id === '__proto__'))
+      .toMatchObject({ id: '__proto__', name: 'Proto agent', enabled: true });
   });
 
   it('persists the state a node-UI attach job reaches after the route has answered', async () => {
