@@ -893,12 +893,6 @@ export class SparqlHttpStore implements TripleStore {
       || this.consistencyProfile === required;
   }
 
-  /**
-   * The only dispatch path for public remote mutations. The request owns its
-   * write scope, HTTP dispatch, lifecycle transitions, graph-list invalidation,
-   * timeout classification, and optional staging cleanup as one operation.
-   * There is no callback a caller can omit while still sending an update.
-   */
   /** Send a statement plan under its own operation and write scope. */
   private runUpdatePlan(plan: SparqlUpdatePlan, options?: QueryOptions): Promise<void> {
     return this.runRemoteGraphMutation({
@@ -918,6 +912,12 @@ export class SparqlHttpStore implements TripleStore {
     );
   }
 
+  /**
+   * The only dispatch path for public remote mutations. The request owns its
+   * write scope, HTTP dispatch, lifecycle transitions, graph-list invalidation,
+   * timeout classification, and optional staging cleanup as one operation.
+   * There is no callback a caller can omit while still sending an update.
+   */
   private async runRemoteGraphMutation(opts: {
     scope: GraphWriteScope;
     update: string;
@@ -1339,3 +1339,18 @@ registerTripleStoreAdapter('sparql-http', async (opts, constructionAuthority) =>
   }
   return new SparqlHttpStore(options, constructionAuthority);
 });
+
+// Compatibility exports: `dist/adapters/sparql-http.js` is a public package
+// path, and these helpers used to live here.
+
+/** @deprecated Moved to `./blank-node-safe-delete.js`. */
+export { isBlankNodeTerm } from './blank-node-safe-delete.js';
+
+/**
+ * @deprecated The blank-node-safe delete is now `deleteData` in
+ * `./sparql-statements.js`. This keeps the former one-argument signature and
+ * returns the same update, labelled as this adapter's.
+ */
+export function buildBlankNodeSafeDelete(quads: DKGQuad[]): string | null {
+  return statements.deleteData(quads)?.update ?? null;
+}

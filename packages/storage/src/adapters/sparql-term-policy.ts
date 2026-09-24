@@ -34,9 +34,11 @@ export interface SparqlTermSite {
  * What an adapter does with a term that fails validation. Both modes count it
  * in `dkg.store.sparql_invalid_terms_total` under this value as the
  * `enforcement` label, and warn at most once a minute.
- * - `observe`: send the term in its pre-validation form, as before validation
- *   existed, so a release can confirm that no well-formed write trips the
- *   validators before they start rejecting.
+ * - `observe`: render the term in its pre-validation form, so the statement
+ *   is built exactly as before validation existed, and a release can confirm
+ *   that no well-formed write trips the validators before they start
+ *   rejecting. Whether the statement is then sent is up to the adapter: an
+ *   aborted or refused operation never dispatches it.
  * - `reject`: throw a {@link SparqlTermValidationError}, so nothing is sent.
  */
 export type SparqlTermEnforcement = 'observe' | 'reject';
@@ -51,7 +53,7 @@ export interface SparqlTermPolicy {
   iriTerm(term: string, position: SparqlTermPosition, site: SparqlTermSite): string;
   /**
    * A statement subject or object, or a match-pattern object. Pre-validation
-   * form: the term as sent, `<…>`-wrapped when it is a bare IRI.
+   * form: the term as given, `<…>`-wrapped when it is a bare IRI.
    */
   rdfTerm(
     term: string,
@@ -66,7 +68,7 @@ export interface SparqlTermPolicy {
   iriPrefix(prefix: string, site: SparqlTermSite): string;
   /**
    * A blank-node label that the caller rewrites to a query variable instead of
-   * sending. It is checked like any sent term.
+   * sending. It is checked like any rendered term.
    */
   checkBlankNodeLabel(label: string, position: 'subject' | 'object', site: SparqlTermSite): void;
 }
@@ -186,7 +188,7 @@ function recordInvalidTerm(
   lastInvalidTermWarnAt.set(key, now);
   const outcome = enforcement === 'reject'
     ? 'Rejected it (reject mode). '
-    : 'Sent it in the pre-validation form (observe mode); a later release will reject it. ';
+    : 'Rendered it in the pre-validation form (observe mode); a later release will reject it. ';
   console.warn(
     `[storage] ${site.adapter}.${site.operation}: invalid ${kind} in SPARQL ${position} ` +
       `position (${describeInvalidTerm(term)}; the value is not logged). ${outcome}` +

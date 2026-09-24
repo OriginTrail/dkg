@@ -309,7 +309,11 @@ describe('the enforcement policy', () => {
     const policy = createSparqlTermPolicy('observe');
     expect(policy.iriTerm('urn:a^b', 'graph', SITE)).toBe('<urn:ab>');
     expect(observed.counted).toEqual([invalid('observe', 'graph', 'iri')]);
-    expect(observed.warnings).toEqual([expect.stringContaining('(observe mode)')]);
+    // Rendering is all the policy knows about; the adapter may never dispatch it.
+    expect(observed.warnings).toEqual([
+      expect.stringContaining('Rendered it in the pre-validation form (observe mode)'),
+    ]);
+    expect(observed.warnings[0]).not.toMatch(/\bsent\b/i);
   });
 
   it('reject mode throws without quoting the term, and reports reject', () => {

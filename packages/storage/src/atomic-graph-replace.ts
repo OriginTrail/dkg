@@ -222,3 +222,18 @@ function formatTriple(quad: Quad): string {
     `${formatSparqlTerm(quad.predicate, { position: 'predicate' })} ` +
     `${formatSparqlTerm(quad.object, { position: 'object' })} .`;
 }
+
+// Compatibility exports: `dist/atomic-graph-replace.js` is a public package
+// path, and these formatters used to live here.
+
+/** @deprecated Use core's `unwrapIri`. */
+export { unwrapIri } from '@origintrail-official/dkg-core';
+
+/**
+ * @deprecated Use core's `formatSparqlTerm(term, { position: 'object' })`,
+ * which this delegates to. Literals and IRIs render as before; a blank node
+ * now throws instead of becoming the invalid IRI `<_:b0>`.
+ */
+export function formatObject(term: string): string {
+  return formatSparqlTerm(term, { position: 'object' });
+}
