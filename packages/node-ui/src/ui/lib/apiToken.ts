@@ -99,20 +99,25 @@ export function onApiTokenKeptInMemory(listener: () => void): () => void {
   return () => { keptInMemoryListeners.delete(listener); };
 }
 
+/** How the node answered the credential probe. */
+export type ApiTokenStatus = 'required' | 'accepted' | 'unknown';
+
 /**
- * Whether the node rejects the page's current credentials. False when the node
- * accepts them, when authentication is disabled, or when it cannot be reached
- * (the mock-mode banner covers an unreachable node).
+ * Whether the node accepts the page's current credentials: `required` on 401,
+ * `accepted` on a 2xx (including when authentication is disabled), and
+ * `unknown` for anything else — a busy, restarting or unreachable node says
+ * nothing about the credentials, so the caller should ask again later.
  */
-export async function apiTokenRequired(fetchImpl: typeof fetch = fetch): Promise<boolean> {
+export async function apiTokenStatus(fetchImpl: typeof fetch = fetch): Promise<ApiTokenStatus> {
   const token = currentApiToken();
   try {
     const res = await fetchImpl(TOKEN_PROBE_PATH, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       cache: 'no-store',
     });
-    return res.status === 401;
+    if (res.status === 401) return 'required';
+    return res.ok ? 'accepted' : 'unknown';
   } catch {
-    return false;
+    return 'unknown';
   }
 }

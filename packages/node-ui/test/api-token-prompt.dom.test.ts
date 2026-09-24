@@ -11,7 +11,7 @@ import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import {
-  apiTokenRequired,
+  apiTokenStatus,
   apiTokenSurvivesReload,
   currentApiToken,
   enteredApiToken,
@@ -133,19 +133,24 @@ describe('API token source', () => {
     expect(currentApiToken()).toBe('served-2');
   });
 
-  it('asks for a token only when the node rejects the current credentials', async () => {
+  it('classifies the probe: 401 requires a token, 2xx accepts, anything else is unknown', async () => {
     const fetchMock = probeResponds(401);
     saveEnteredApiToken('entered-6');
-    expect(await apiTokenRequired()).toBe(true);
+    expect(await apiTokenStatus()).toBe('required');
     const [path, init] = fetchMock.mock.calls[0];
     expect(path).toBe('/api/agent/identity');
     expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer entered-6');
 
     probeResponds(200);
-    expect(await apiTokenRequired()).toBe(false);
+    expect(await apiTokenStatus()).toBe('accepted');
+
+    for (const status of [429, 500, 503]) {
+      probeResponds(status);
+      expect(await apiTokenStatus(), String(status)).toBe('unknown');
+    }
 
     vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('offline'); }));
-    expect(await apiTokenRequired()).toBe(false);
+    expect(await apiTokenStatus()).toBe('unknown');
   });
 });
 
@@ -159,15 +164,22 @@ describe('ApiTokenPrompt', () => {
     container = null;
   });
 
-  async function render(reload = vi.fn()) {
+  async function render(reload = vi.fn(), probeRetryMs?: (attempt: number) => number) {
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
     await act(async () => {
-      root!.render(React.createElement(ApiTokenPrompt, { reload }));
+      root!.render(React.createElement(ApiTokenPrompt, { reload, probeRetryMs }));
     });
     await flush();
     return { container, reload };
+  }
+
+  async function settle(ready: () => boolean, timeoutMs = 2_000) {
+    const deadline = Date.now() + timeoutMs;
+    while (!ready() && Date.now() < deadline) {
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 5)); });
+    }
   }
 
   function typeToken(input: HTMLInputElement, value: string) {
@@ -229,9 +241,33 @@ describe('ApiTokenPrompt', () => {
     expect(currentApiToken()).toBe('entered-8');
     expect(authHeaders()).toEqual({ Authorization: 'Bearer entered-8' });
     const fetchMock = probeResponds(200);
-    expect(await apiTokenRequired()).toBe(false);
+    expect(await apiTokenStatus()).toBe('accepted');
     expect(new Headers(fetchMock.mock.calls[0][1]?.headers).get('Authorization')).toBe('Bearer entered-8');
     off();
+  });
+
+  it('asks again after an inconclusive probe and shows the prompt once the node answers 401', async () => {
+    const statuses = [503, 429, 401];
+    const fetchMock = vi.fn(async () => new Response('{}', { status: statuses.shift() ?? 401 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const { container } = await render(vi.fn(), () => 5);
+
+    await settle(() => container.querySelector('form') !== null);
+    expect(container.querySelector('form')).not.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('stops asking once the prompt unmounts', async () => {
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 503 }));
+    vi.stubGlobal('fetch', fetchMock);
+    await render(vi.fn(), () => 20);
+    await settle(() => fetchMock.mock.calls.length >= 2);
+
+    await act(async () => { root!.unmount(); });
+    root = null;
+    const callsAtUnmount = fetchMock.mock.calls.length;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(fetchMock).toHaveBeenCalledTimes(callsAtUnmount);
   });
 
   it('drops an entered token the node rejects and asks again', async () => {
