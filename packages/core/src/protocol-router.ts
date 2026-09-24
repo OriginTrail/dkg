@@ -19,6 +19,8 @@ export const DEFAULT_MAX_READ_BYTES = 10 * 1024 * 1024;
 /** Default timeout for send() (ms). Sync over relay may need longer; callers can pass a higher value. */
 export const DEFAULT_SEND_TIMEOUT_MS = 20_000;
 
+export type ProtocolProbeOutcome = 'supported' | 'unsupported' | 'unavailable';
+
 /**
  * Returns true if the error is recoverable (retry with backoff).
  * Exported for tests.
@@ -667,7 +669,7 @@ export class ProtocolRouter {
    * multistream negotiation reflects the live handler table. A successful
    * probe opens and immediately aborts the stream before any payload bytes.
    */
-  async probeProtocol(peerIdStr: string, protocolId: string, timeoutMs = 3_000): Promise<boolean> {
+  async probeProtocol(peerIdStr: string, protocolId: string, timeoutMs = 3_000): Promise<ProtocolProbeOutcome> {
     const deadline = AbortSignal.timeout(timeoutMs);
     const signal = composeAbortSignals(deadline, this.node.stopSignal) ?? deadline;
     try {
@@ -683,9 +685,10 @@ export class ProtocolRouter {
         // Negotiation already established capability; a closing stream may
         // reject the abort after the remote has closed its side.
       }
-      return true;
-    } catch {
-      return false;
+      return 'supported';
+    } catch (error) {
+      if (this.node.stopSignal?.aborted) throw error;
+      return isProtocolUnsupportedError(error) ? 'unsupported' : 'unavailable';
     }
   }
 

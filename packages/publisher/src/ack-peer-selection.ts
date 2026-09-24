@@ -1,4 +1,4 @@
-import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
+import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK_V2 } from '@origintrail-official/dkg-core';
 
 export type ACKCapabilitySelectionPolicy =
   | { mode: 'rank'; v1?: ReadonlySet<string>; v2?: ReadonlySet<string> }
@@ -83,7 +83,7 @@ function buildCandidateTiers(input: {
     ? input.connected.filter((id) => input.capability?.v1?.has(id))
     : [];
 
-  if (input.protocol === PROTOCOL_STORAGE_ACK_V2) {
+  if (input.protocol === PROTOCOL_STORAGE_ACK_V2 || input.protocol === PROTOCOL_STORAGE_UPDATE_ACK_V2) {
     const v2Advertised = input.capability?.v2
       ? input.connected.filter((id) => input.capability?.v2?.has(id))
       : [];
@@ -121,7 +121,7 @@ function diagnosticForPeer(input: {
   protocol?: string;
   capability?: ACKCapabilitySelectionPolicy;
 }): ACKCandidatePeerDiagnostic {
-  const protocolMatch = input.protocol === PROTOCOL_STORAGE_ACK_V2
+  const protocolMatch = input.protocol === PROTOCOL_STORAGE_ACK_V2 || input.protocol === PROTOCOL_STORAGE_UPDATE_ACK_V2
     ? (input.capability?.v2?.has(input.peerId) ?? false)
     : input.protocol === PROTOCOL_STORAGE_ACK
       ? (input.capability?.v1?.has(input.peerId) ?? false)
@@ -130,7 +130,7 @@ function diagnosticForPeer(input: {
   let reason = selected ? 'selected' : 'not-selected';
   if (!input.allowlisted) reason = 'not-allowlisted';
   else if (input.capability?.mode === 'require' && !input.capability.v1.has(input.peerId)) reason = 'not-core-capable';
-  else if (!protocolMatch && input.protocol === PROTOCOL_STORAGE_ACK_V2) reason = selected ? 'selected-protocol-fallback' : 'protocol-fallback';
+  else if (!protocolMatch && (input.protocol === PROTOCOL_STORAGE_ACK_V2 || input.protocol === PROTOCOL_STORAGE_UPDATE_ACK_V2)) reason = selected ? 'selected-protocol-fallback' : 'protocol-fallback';
   return {
     peerId: input.peerId,
     tier: input.tier,

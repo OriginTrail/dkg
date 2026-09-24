@@ -3,7 +3,7 @@
 // ACK candidate selection dials only peers confirmed to advertise the
 // core-only StorageACK protocol. Unclassified connections may include edges.
 import { describe, it, expect, vi } from 'vitest';
-import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
+import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { DKGAgent, MockChainAdapter, OxigraphStore } from './agent.shared';
 import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
@@ -35,7 +35,7 @@ type AgentInternals = {
   lastKnownRequiredACKs?: number;
   getPeerProtocols(peerId: string): Promise<string[]>;
   getACKCandidatePeersAfterAdmission(protocol: string | undefined, ctx: unknown): Promise<string[]>;
-  router: { probeProtocol(peerId: string, protocol: string): Promise<boolean> } | null;
+  router: { probeProtocol(peerId: string, protocol: string): Promise<'supported' | 'unsupported' | 'unavailable'> } | null;
   storageAckEndpoint: {
     dispatch(protocol: string, data: Uint8Array, peerId: string): Promise<Uint8Array>;
   } | null;
@@ -178,7 +178,8 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     const a = await buildAgent({ confirmedCores: [], connected: [EDGE[0], CORE[0]] });
     a.getPeerProtocols = async () => ['/dkg/10.0.0/sync'];
     let ackHandlerRegistered = false;
-    const probe = vi.fn(async (peerId: string) => ackHandlerRegistered && peerId === CORE[0]);
+    const probe = vi.fn(async (peerId: string) => ackHandlerRegistered && peerId === CORE[0]
+      ? 'supported' as const : 'unsupported' as const);
     a.router = { probeProtocol: probe };
     let preflightPeers: string[] = [];
     a.networkAdmissionCoordinator = {
@@ -207,7 +208,8 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     a.getPeerProtocols = async (peerId) => peerId === CORE[3]
       ? ['/dkg/10.0.0/sync']
       : [PROTOCOL_STORAGE_ACK];
-    const probe = vi.fn(async (peerId: string) => peerId === CORE[3]);
+    const probe = vi.fn(async (peerId: string) => peerId === CORE[3]
+      ? 'supported' as const : 'unsupported' as const);
     a.router = { probeProtocol: probe };
     a.networkAdmissionCoordinator = {
       enabled: true,
@@ -235,7 +237,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
       peak = Math.max(peak, active);
       await new Promise<void>((resolve) => queueMicrotask(resolve));
       active--;
-      return false;
+      return 'unsupported' as const;
     });
     a.router = { probeProtocol: probe };
     a.networkAdmissionCoordinator = {
@@ -261,7 +263,8 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     a.storageAckEndpoint = { dispatch: async () => new Uint8Array([1]) };
     a.getPeerProtocols = async (peerId) => CORE.slice(0, 2).includes(peerId)
       ? [PROTOCOL_STORAGE_ACK] : ['/dkg/10.0.0/sync'];
-    const probe = vi.fn(async (peerId: string) => peerId === CORE[2]);
+    const probe = vi.fn(async (peerId: string) => peerId === CORE[2]
+      ? 'supported' as const : 'unsupported' as const);
     a.router = { probeProtocol: probe };
     installOpenACKAdmission(a);
 
@@ -273,13 +276,56 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     expect(candidates.filter((peerId) => peerId !== CORE[0])).toHaveLength(3);
   });
 
+  it('discovers update-v2 cores even when base-only peers fill the nominal pool', async () => {
+    const upgraded = ['upgraded-1', 'upgraded-2'];
+    const a = await buildAgent({
+      confirmedCores: CORE.slice(0, 3),
+      connected: [...CORE.slice(0, 3), ...upgraded],
+      lastKnownRequiredACKs: 3,
+    });
+    a.config.nodeRole = 'core';
+    a.storageAckEndpoint = { dispatch: async () => new Uint8Array([1]) };
+    a.getPeerProtocols = async (peerId) => upgraded.includes(peerId)
+      ? ['/dkg/10.0.0/sync'] : [PROTOCOL_STORAGE_ACK];
+    const probe = vi.fn(async (peerId: string, protocol: string) =>
+      upgraded.includes(peerId) && (protocol === PROTOCOL_STORAGE_UPDATE_ACK_V2 || protocol === PROTOCOL_STORAGE_ACK)
+        ? 'supported' as const : 'unsupported' as const);
+    a.router = { probeProtocol: probe };
+    installOpenACKAdmission(a);
+
+    const candidates = await a.getACKCandidatePeersAfterAdmission(PROTOCOL_STORAGE_UPDATE_ACK_V2, createOperationContext('update'));
+    expect(candidates.slice(0, 3)).toEqual([a.peerId, ...upgraded]);
+    expect(candidates).toHaveLength(6);
+    for (const peerId of upgraded) {
+      expect(probe).toHaveBeenCalledWith(peerId, PROTOCOL_STORAGE_UPDATE_ACK_V2);
+      expect(probe).toHaveBeenCalledWith(peerId, PROTOCOL_STORAGE_ACK);
+    }
+  });
+
+  it('samples healthy stale-identify cores even when advertised peers meet target', async () => {
+    const advertised = ['invalid-1', 'invalid-2', 'invalid-3', 'invalid-4'];
+    const healthy = ['healthy-1', 'healthy-2', 'healthy-3'];
+    const a = await buildAgent({ confirmedCores: advertised, connected: [...advertised, ...healthy] });
+    a.getPeerProtocols = async (peerId) => advertised.includes(peerId)
+      ? [PROTOCOL_STORAGE_ACK] : ['/dkg/10.0.0/sync'];
+    const probe = vi.fn(async (peerId: string) => healthy.includes(peerId)
+      ? 'supported' as const : 'unsupported' as const);
+    a.router = { probeProtocol: probe };
+    installOpenACKAdmission(a);
+
+    const candidates = await a.getACKCandidatePeersAfterAdmission(undefined, createOperationContext('publish'));
+    expect(candidates).toEqual([...advertised, ...healthy]);
+    expect(probe).toHaveBeenCalledTimes(3);
+  });
+
   it('rotates beyond the first 32 unknown peers on a later bounded round', async () => {
     const unknown = Array.from({ length: 40 }, (_, i) => `unknown-${i}`);
     const a = await buildAgent({ confirmedCores: [], connected: unknown, lastKnownRequiredACKs: 1 });
     a.config.nodeRole = 'core';
     a.storageAckEndpoint = { dispatch: async () => new Uint8Array([1]) };
     a.getPeerProtocols = async () => ['/dkg/10.0.0/sync'];
-    const probe = vi.fn(async (peerId: string) => peerId === unknown[39]);
+    const probe = vi.fn(async (peerId: string) => peerId === unknown[39]
+      ? 'supported' as const : 'unsupported' as const);
     a.router = { probeProtocol: probe };
     installOpenACKAdmission(a);
 
@@ -306,7 +352,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
       peak = Math.max(peak, active);
       await new Promise<void>((resolve) => queueMicrotask(resolve));
       active--;
-      return peerId === unknown[39];
+      return peerId === unknown[39] ? 'supported' as const : 'unsupported' as const;
     });
     a.router = { probeProtocol: probe };
     installOpenACKAdmission(a);

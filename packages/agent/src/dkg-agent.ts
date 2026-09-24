@@ -3111,6 +3111,7 @@ export class DKGAgent extends DKGAgentBase {
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
       preferredACKPeerIds: this.config.preferredACKPeerIds,
       requiredACKs: this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS,
+      protocol: protocol ?? PROTOCOL_STORAGE_ACK,
       selfCount: this.config.nodeRole === 'core' && this.storageAckHandlerRegistered ? 1 : 0,
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
       isAcceptedPeer: (peerId) => this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
