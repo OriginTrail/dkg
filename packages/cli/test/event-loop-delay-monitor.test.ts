@@ -14,6 +14,7 @@ import {
 } from '../src/daemon/event-loop-delay-monitor.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const MS = 1e6;
 
@@ -258,6 +259,7 @@ describe('/api/status eventLoopDelay block', () => {
         nodeVersion: '0.0.0-test',
         nodeCommit: '',
         admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
+        authentication: requestAuthentication({ kind: 'anonymous' }),
         ...(eventLoopDelay === undefined ? {} : { eventLoopDelay }),
       } as unknown as RequestContext);
     });
