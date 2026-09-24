@@ -472,8 +472,13 @@ export interface DaemonStatusResponse extends StoreQuadsStatusFields, StoreReach
    */
   rfc64SelectedPublicSync?: {
     defaultEnabled: boolean;
-    /** Requested scheduling scope; runtime classification still chooses the lane. */
+    /**
+     * Requested scheduling scope; runtime classification still chooses the
+     * lane. Without a node-operator token, only its catalog-backed graphs.
+     */
     requestedContextGraphs: string[];
+    /** Size of the whole requested scope. Absent on older daemons. */
+    requestedContextGraphCount?: number;
     catalogBackedContextGraphs: string[];
   };
   /**

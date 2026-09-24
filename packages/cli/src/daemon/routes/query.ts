@@ -455,6 +455,25 @@ export async function latestCatchupJobIdFor(
   return await mayFollowOnChainIdToRow(agent, lookup, caller) ? jobId : undefined;
 }
 
+/**
+ * Whether `caller` may read `job` by its job id. The id is no proof: while the
+ * name hash a job was created under is unresolved, any caller can learn it.
+ * Once the job names a cleartext id other than the one it was created under,
+ * only a caller who may follow the hash to that id sees the job. A refusal is
+ * answered exactly as an unknown job id.
+ */
+async function mayReadCatchupJobById(
+  agent: DKGAgent,
+  job: CatchupJob,
+  caller: ContextGraphFollowCaller,
+): Promise<boolean> {
+  const cleartextId = job.resolvedContextGraphId
+    ?? agent.resolveContextGraphIdAlias?.(job.contextGraphId)
+    ?? null;
+  if (cleartextId === null || cleartextId === job.contextGraphId) return true;
+  return await admitContextGraphFollow(agent, cleartextId, caller) === 'allowed';
+}
+
 export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -1008,19 +1027,20 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       });
     }
 
+    const caller = {
+      isNodeAdmin: canAdministerNode(authentication),
+      agentAddress: actorFromRequestContext(ctx).effectiveAgentAddress,
+    };
     const jobId =
       jobIdParam ??
       (contextGraphId
-        ? await latestCatchupJobIdFor(agent, catchupTracker, contextGraphId, {
-            isNodeAdmin: canAdministerNode(authentication),
-            agentAddress: actorFromRequestContext(ctx).effectiveAgentAddress,
-          })
+        ? await latestCatchupJobIdFor(agent, catchupTracker, contextGraphId, caller)
         : undefined);
     if (!jobId) {
       return jsonResponse(res, 404, { error: "No catch-up job found" });
     }
     const job = catchupTracker.jobs.get(jobId);
-    if (!job) {
+    if (!job || (jobIdParam !== null && !await mayReadCatchupJobById(agent, job, caller))) {
       return jsonResponse(res, 404, {
         error: `Catch-up job "${jobId}" not found`,
       });

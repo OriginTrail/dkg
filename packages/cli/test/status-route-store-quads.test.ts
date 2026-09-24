@@ -11,6 +11,7 @@ import { registerLifecycleCommands } from '../src/commands/lifecycle.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 import { invalidateExternalStoreQuadsCache } from '../src/daemon/store-quads-cache.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 const DISABLED_PUBLISHER_STATE: RequestContext['publisherState'] = {
   runtime: null,
@@ -137,6 +138,7 @@ async function startStatusServer(
       nodeVersion: '0.0.0-test',
       nodeCommit: '',
       admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
+      authentication: requestAuthentication({ kind: 'anonymous' }),
     } as unknown as RequestContext);
   });
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
