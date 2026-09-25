@@ -626,7 +626,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
 
     it('derives ownership from the record and the states of the recorded processes', () => {
       expect(deriveOwnership({ kind: 'absent' }, null)).toEqual({ kind: 'unrecorded' });
-      expect(deriveOwnership({ kind: 'invalid' }, null)).toEqual({ kind: 'invalid-record' });
+      expect(deriveOwnership({ kind: 'invalid' }, null)).toEqual({ kind: 'unrecorded' });
       expect(deriveOwnership({ kind: 'unreadable', reason: 'EACCES' }, null))
         .toEqual({ kind: 'unknown', reason: 'the owner record could not be read: EACCES' });
       expect(deriveOwnership({ kind: 'v1', record }, { daemon: running, launcher: running }))

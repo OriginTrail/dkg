@@ -183,9 +183,12 @@ function normalizePositiveInteger(value: number | undefined): number | undefined
 export async function startOxigraphServer(
   opts: StartOxigraphServerOptions,
 ): Promise<OxigraphServerHandle> {
+  // One host policy for the whole launch: the launch strategy and the store
+  // ownership (reclaim, process probes, owner record) share it.
+  const platform = opts.platform ?? process.platform;
   const launchStrategy = createOxigraphLaunchStrategy({
     memoryLimits: opts.memoryLimits,
-    platform: opts.platform ?? process.platform,
+    platform,
     parentPid: process.pid,
     uid: typeof process.getuid === 'function' ? process.getuid() : -1,
   });
@@ -207,6 +210,7 @@ export async function startOxigraphServer(
   const storeOwnership = (opts.storeOwnership ?? createOxigraphStoreOwnership)({
     location: opts.location,
     binaryPath: opts.binaryPath,
+    platform,
     log,
   });
   const host = opts.host ?? DEFAULT_HOST;

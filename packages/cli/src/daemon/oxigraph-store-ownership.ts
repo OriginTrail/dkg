@@ -14,7 +14,7 @@
  */
 import type { OxigraphBinaryCatalog } from './oxigraph-binary.js';
 import { recordOxigraphLaunch, type OxigraphLaunchRecord } from './oxigraph-owner-record.js';
-import { stopOrphanedOxigraph } from './oxigraph-orphan.js';
+import { reclaimHost, stopOrphanedOxigraph } from './oxigraph-orphan.js';
 import type { OxigraphStoreOwnership } from './oxigraph-store-launch.js';
 
 /** The two store operations a launch is built from. */
@@ -32,6 +32,8 @@ export interface OxigraphStoreOwnershipSteps {
 export interface OxigraphStoreOwnershipInput {
   location: string;
   binaryPath: string;
+  /** The host the server launches on: it selects the reclaim's probes and the record. */
+  platform: NodeJS.Platform;
   log: (message: string) => void;
 }
 
@@ -48,6 +50,7 @@ export function createOxigraphStoreOwnership(
     steps?: OxigraphStoreOwnershipSteps;
   },
 ): OxigraphStoreOwnership {
+  const host = reclaimHost(opts.platform);
   const steps: OxigraphStoreOwnershipSteps = opts.steps ?? {
     reclaim: async () => {
       await stopOrphanedOxigraph({
@@ -55,12 +58,15 @@ export function createOxigraphStoreOwnership(
         binaryPath: opts.binaryPath,
         binaries: opts.binaries,
         log: opts.log,
+        io: host,
       });
     },
     recordLaunch: (launcherPid) => recordOxigraphLaunch({
       location: opts.location,
       binaryPath: opts.binaryPath,
       launcherPid,
+      platform: opts.platform,
+      inspect: host.inspectProcess,
       log: opts.log,
     }),
   };

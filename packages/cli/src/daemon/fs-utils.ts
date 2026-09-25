@@ -2,6 +2,7 @@
 // (rather than inlined in callers) so they can be reused and unit-tested
 // independently.
 
+import { writeFileAtomicWith } from './atomic-write.js';
 import { _autoUpdateIo } from './manifest.js';
 
 /**
@@ -32,27 +33,4 @@ export async function writeFileAtomic(path: string, data: string): Promise<void>
   }
   // Older stubs may also lack `unlink`; cleanup was always best-effort there.
   await writeFileAtomicWith({ writeFile, rename, unlink: unlink ?? (async () => {}) }, path, data);
-}
-
-/** The filesystem calls an atomic write needs. */
-export interface AtomicWriteIo {
-  writeFile(path: string, data: string): Promise<unknown>;
-  rename(from: string, to: string): Promise<unknown>;
-  unlink(path: string): Promise<unknown>;
-}
-
-/**
- * `writeFileAtomic` over a caller's filesystem, for bookkeeping that does not
- * belong to the auto-updater's IO surface (the managed Oxigraph owner record).
- * The temporary file is removed when the rename fails.
- */
-export async function writeFileAtomicWith(io: AtomicWriteIo, path: string, data: string): Promise<void> {
-  const tmp = `${path}.tmp.${process.pid}.${Date.now().toString(36)}`;
-  await io.writeFile(tmp, data);
-  try {
-    await io.rename(tmp, path);
-  } catch (err) {
-    try { await io.unlink(tmp); } catch { /* best-effort cleanup */ }
-    throw err;
-  }
 }

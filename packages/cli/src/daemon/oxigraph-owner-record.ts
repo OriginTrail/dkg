@@ -8,7 +8,7 @@
  */
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
-import { writeFileAtomicWith } from './fs-utils.js';
+import { writeFileAtomicWith } from './atomic-write.js';
 import { processInspector, type ProcessInspector } from './process-probe.js';
 
 export const OXIGRAPH_OWNER_RECORD = 'dkg-oxigraph-owner.json';
@@ -50,8 +50,6 @@ export type IdentityState =
   | { state: 'gone' }
   | { state: 'unknown'; reason: string };
 
-const inspectProcess = processInspector(process.platform);
-
 function ownerRecordPath(location: string): string {
   return join(resolve(location), OXIGRAPH_OWNER_RECORD);
 }
@@ -91,7 +89,7 @@ export async function readOxigraphOwnerRecord(location: string): Promise<Oxigrap
 /** Whether `identity` still names a running process (same PID and start time). */
 export async function checkIdentity(
   identity: ProcessIdentity,
-  inspect: ProcessInspector = inspectProcess,
+  inspect: ProcessInspector,
 ): Promise<IdentityState> {
   const lookup = await inspect(identity.pid);
   if (lookup.state === 'unknown') return lookup;
@@ -120,11 +118,15 @@ export async function recordOxigraphLaunch(input: {
   location: string;
   binaryPath: string;
   launcherPid: number;
+  /** The host the launch runs on: no record on Windows, and its process probe elsewhere. */
+  platform: NodeJS.Platform;
   log: (message: string) => void;
+  /** Defaults to the platform's process probe. */
   inspect?: ProcessInspector;
 }): Promise<OxigraphLaunchRecord> {
-  if (process.platform === 'win32') return { markReady: async () => {} };
-  const inspect = input.inspect ?? inspectProcess;
+  // Windows processes are not reparented, so nothing is reclaimed there.
+  if (input.platform === 'win32') return { markReady: async () => {} };
+  const inspect = input.inspect ?? processInspector(input.platform);
   const identify = async (pid: number): Promise<ProcessIdentity> => {
     const lookup = await inspect(pid);
     if (lookup.state === 'running') return { pid, start: lookup.process.start };

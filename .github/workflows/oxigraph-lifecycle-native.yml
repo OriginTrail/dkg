@@ -17,6 +17,7 @@ on:
       - 'packages/cli/test/oxigraph-server.test.ts'
       - 'packages/cli/test/fixtures/oxigraph-*.ts'
       - 'packages/cli/src/daemon/fs-utils.ts'
+      - 'packages/cli/src/daemon/atomic-write.ts'
       # Inputs that decide installation, build output and test discovery.
       - 'pnpm-lock.yaml'
       - 'packages/cli/package.json'

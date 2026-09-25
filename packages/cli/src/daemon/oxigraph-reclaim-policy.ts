@@ -71,7 +71,6 @@ export function matchManagedOxigraphStore(
  */
 export type Ownership =
   | { kind: 'unrecorded' }
-  | { kind: 'invalid-record' }
   | { kind: 'unknown'; reason: string }
   | { kind: 'owners-live'; record: OxigraphOwnerRecordV1 }
   | { kind: 'owner-gone'; record: OxigraphOwnerRecordV1; gone: { role: 'daemon' | 'launcher'; pid: number } };
@@ -93,7 +92,9 @@ export function deriveOwnership(
   states: RecordedOwnerStates | null,
 ): Ownership {
   if (read.kind === 'absent') return { kind: 'unrecorded' };
-  if (read.kind === 'invalid') return { kind: 'invalid-record' };
+  // Content that is not a v1 record says nothing about the owner (the
+  // reaper logs it); the reclaim proceeds as if there were no record.
+  if (read.kind === 'invalid') return { kind: 'unrecorded' };
   if (read.kind === 'unreadable') {
     return { kind: 'unknown', reason: `the owner record could not be read: ${read.reason}` };
   }

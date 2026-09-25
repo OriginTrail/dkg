@@ -32,6 +32,7 @@ import { fileURLToPath } from 'node:url';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { findListenOwnerPid } from '../src/daemon/oxigraph-listen-port.js';
 import { OXIGRAPH_OWNER_RECORD } from '../src/daemon/oxigraph-owner-record.js';
+import { oxigraphStoreArgs } from '../src/daemon/oxigraph-store-launch.js';
 import {
   createOxigraphStoreOwnership,
   type OxigraphStoreOwnershipInput,
@@ -43,6 +44,7 @@ import {
   freePort,
   portAnswers,
   sleep,
+  spawnOrphan,
   waitForCondition,
   type OxigraphStandinFixture,
 } from './fixtures/oxigraph-server-real-fixture.js';
@@ -238,6 +240,44 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
     } finally {
       killIfAlive(await fetchPid(port).catch(() => undefined));
       await handle.stop();
+      await rm(location, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('drives the launch and every ownership step from one injected host (Windows, on this host)', async () => {
+    const port = await freePort();
+    const orphanPort = await freePort();
+    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-host-'));
+    // A PID-1 orphan holding this store, which a Unix host would reclaim.
+    const orphan = await spawnOrphan(lockingStandin.binaryPath, [
+      ...oxigraphStoreArgs(location), '--bind', `127.0.0.1:${orphanPort}`,
+    ]);
+    const platforms: NodeJS.Platform[] = [];
+    let handle: Awaited<ReturnType<typeof startOxigraphServer>> | undefined;
+    try {
+      expect(await waitForCondition(() => portAnswers(orphanPort))).toBe(true);
+      handle = await startOxigraphServer({
+        binaryPath: lockingStandin.binaryPath,
+        location,
+        port,
+        platform: 'win32',
+        readyTimeoutMs: 10_000,
+        readyIntervalMs: 50,
+        log: () => {},
+        storeOwnership: (input) => {
+          platforms.push(input.platform);
+          return createOxigraphStoreOwnership(input);
+        },
+      });
+      expect(platforms).toEqual(['win32']);
+      // The Windows launch: Oxigraph itself, no watchdog.
+      expect(parentPid(await fetchPid(port))).toBe(process.pid);
+      // The Windows ownership: no reclaim, and no owner record.
+      expect(pidIsGone(orphan)).toBe(false);
+      await expect(readFile(join(location, OXIGRAPH_OWNER_RECORD), 'utf8')).rejects.toThrow(/ENOENT/);
+    } finally {
+      await handle?.stop();
+      killIfAlive(orphan);
       await rm(location, { recursive: true, force: true });
     }
   }, 30_000);
@@ -540,6 +580,7 @@ describe('store ownership launches', () => {
     const records: string[] = [];
     let spawns = 0;
     const ownership = createOxigraphStoreOwnership({
+      platform: process.platform,
       location: '/nonexistent/oxigraph-data',
       binaryPath: '/opt/oxigraph',
       log: () => {},
@@ -564,6 +605,7 @@ describe('store ownership launches', () => {
   it('records nothing for a launch that becomes ready after close()', async () => {
     const records: string[] = [];
     const ownership = createOxigraphStoreOwnership({
+      platform: process.platform,
       location: '/nonexistent/oxigraph-data',
       binaryPath: '/opt/oxigraph',
       log: () => {},

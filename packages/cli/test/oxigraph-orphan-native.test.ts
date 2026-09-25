@@ -98,6 +98,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
         expect(await inspectProcess(process.pid), name).toMatchObject({ state: 'running' });
       }
       const launch = await recordOxigraphLaunch({
+        platform: process.platform,
         location,
         binaryPath: '/opt/oxigraph',
         launcherPid: launcher.pid!,
@@ -146,6 +147,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
     try {
       expect(await waitForCondition(() => portAnswers(port))).toBe(true);
       const ownership = createOxigraphStoreOwnership({
+        platform: process.platform,
         location,
         binaryPath: lockingStandin.binaryPath,
         log: (line) => lines.push(line),
@@ -211,6 +213,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
     };
     try {
       const launch = await recordOxigraphLaunch({
+        platform: process.platform,
         location, binaryPath: '/opt/oxigraph', launcherPid: 4099, log: () => {}, inspect,
       });
       const atSpawn = await readOxigraphOwnerRecord(location);
@@ -235,6 +238,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       : { state: 'running', process: { pid, start: 't', ppid: 1, argv: null, command: 'node' } };
     try {
       const launch = await recordOxigraphLaunch({
+        platform: process.platform,
         location, binaryPath: '/opt/oxigraph', launcherPid: 4099, log: (line) => lines.push(line), inspect,
       });
       await launch.markReady(4100);
@@ -250,7 +254,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
     const location = join(root, 'not', 'yet', 'oxigraph-data');
     const launcher = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     try {
-      await recordOxigraphLaunch({ location, binaryPath: '/opt/oxigraph', launcherPid: launcher.pid!, log: () => {} });
+      await recordOxigraphLaunch({ platform: process.platform, location, binaryPath: '/opt/oxigraph', launcherPid: launcher.pid!, log: () => {} });
       expect(await readOxigraphOwnerRecord(location)).toMatchObject({
         kind: 'v1',
         record: { launcher: { pid: launcher.pid } },
@@ -268,6 +272,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       // A directory in the record's place makes the atomic rename fail.
       await mkdir(join(location, OXIGRAPH_OWNER_RECORD, 'blocker'), { recursive: true });
       await recordOxigraphLaunch({
+        platform: process.platform,
         location,
         binaryPath: '/opt/oxigraph',
         launcherPid: process.pid,
