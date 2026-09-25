@@ -29,14 +29,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { oxigraphStoreArgs } from '../src/daemon/oxigraph-store-launch.js';
+import { stopOrphanedOxigraph, type OrphanedOxigraphIo } from '../src/daemon/oxigraph-orphan.js';
 import {
-  matchManagedOxigraphStore,
   OXIGRAPH_OWNER_RECORD,
   OXIGRAPH_OWNER_RECORD_SCHEMA,
-  stopOrphanedOxigraph,
-  type OrphanedOxigraphIo,
   type OxigraphOwnerRecordV1,
-} from '../src/daemon/oxigraph-orphan.js';
+} from '../src/daemon/oxigraph-owner-record.js';
+import {
+  classifyHolder,
+  deriveOwnership,
+  matchManagedOxigraphStore,
+} from '../src/daemon/oxigraph-reclaim-policy.js';
 import { processTable, type FakeProcess } from './fixtures/oxigraph-process-table.js';
 
 describe('stopOrphanedOxigraph (injected process table)', () => {
@@ -300,6 +303,53 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     });
   });
 
+  describe('pure decisions from explicit observations', () => {
+    const instance = (pid: number, ppid: number, argv: string[], start = `t${pid}`) =>
+      ({ pid, start, ppid, argv, command: argv.join(' ') });
+    const binaries = { paths: [binaryPath], dirs: [] };
+    const record: OxigraphOwnerRecordV1 = {
+      schema: OXIGRAPH_OWNER_RECORD_SCHEMA,
+      daemon: identity(4000),
+      launcher: identity(4099),
+      binaryPath,
+    };
+
+    it('derives ownership from the record and which recorded processes still run', () => {
+      expect(deriveOwnership({ kind: 'absent' }, { daemon: false, launcher: false })).toEqual({ kind: 'unrecorded' });
+      expect(deriveOwnership({ kind: 'invalid' }, { daemon: false, launcher: false })).toEqual({ kind: 'invalid-record' });
+      expect(deriveOwnership({ kind: 'v1', record }, { daemon: true, launcher: true }))
+        .toEqual({ kind: 'owners-live', record });
+      expect(deriveOwnership({ kind: 'v1', record }, { daemon: false, launcher: true }))
+        .toEqual({ kind: 'owner-gone', record, gone: { role: 'daemon', pid: 4000 } });
+      expect(deriveOwnership({ kind: 'v1', record }, { daemon: true, launcher: false }))
+        .toEqual({ kind: 'owner-gone', record, gone: { role: 'launcher', pid: 4099 } });
+    });
+
+    it('stops a descendant of the recorded launcher, and leaves one whose launcher start time differs', () => {
+      const ownership = deriveOwnership({ kind: 'v1', record }, { daemon: false, launcher: true });
+      const holder = instance(4101, 4100, serve('/data/ox'));
+      const watchdog = instance(4100, 4099, ['node', 'oxigraph-parent-watchdog.js', '4000']);
+      const scope = instance(4099, 1, ['systemd-run', '--scope']);
+      expect(classifyHolder({ holder, ancestors: [watchdog, scope] }, { location: '/data/ox', ownership, binaries }))
+        .toEqual({ action: 'stop', reason: { kind: 'owner-gone', role: 'daemon', pid: 4000 } });
+      const impostor = instance(4099, 1, ['/bin/bash'], 'later');
+      expect(classifyHolder({ holder, ancestors: [watchdog, impostor] }, { location: '/data/ox', ownership, binaries }))
+        .toMatchObject({ action: 'leave', reason: { kind: 'parent-alive', ppid: 4100, recorded: true } });
+    });
+
+    it('stops a holder whose parent has exited and leaves one whose parent is alive, without a record', () => {
+      const ownership = deriveOwnership({ kind: 'absent' }, { daemon: false, launcher: false });
+      const holder = instance(4100, 4099, serve('/data/ox'));
+      expect(classifyHolder({ holder, ancestors: [] }, { location: '/data/ox', ownership, binaries }))
+        .toEqual({ action: 'stop', reason: { kind: 'parent-exited', ppid: 4099 } });
+      expect(classifyHolder({ holder, ancestors: [instance(4099, 1, ['/bin/bash'])] }, { location: '/data/ox', ownership, binaries }))
+        .toEqual({
+          action: 'leave',
+          reason: { kind: 'parent-alive', ppid: 4099, parentCommand: '/bin/bash', recorded: false },
+        });
+    });
+  });
+
   it('does not signal a PID recycled between judging the orphan and signalling it', async () => {
     const { table, signals, io } = processTable({
       4100: { ppid: 1, argv: serve(location), holdsLock: true },
@@ -318,15 +368,17 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     expect(table.get(4100)!.alive).toBe(true);
   });
 
+  // The table is built before beforeEach creates the store, so each case
+  // takes the store path.
   it.each([
-    ['a binary outside this node\'s binary directories', serve(location, '/opt/other/oxigraph')],
-    ['another executable in this node\'s binary directory', serve(location, '/home/dkg/.dkg/oxigraph/rocksdb-tool')],
-    ['another store whose path extends this one', serve(`${location}-2`)],
-    ['a non-serve command on this binary', [binaryPath, 'dump', '--location', location]],
-    ['an unrelated tool', ['sqlite3', `${location}/LOCK`]],
-  ])('leaves an orphaned lock holder running when it is %s', async (_label, argv) => {
+    ['a binary outside this node\'s binary directories', (store: string) => serve(store, '/opt/other/oxigraph')],
+    ['another executable in this node\'s binary directory', (store: string) => serve(store, '/home/dkg/.dkg/oxigraph/rocksdb-tool')],
+    ['another store whose path extends this one', (store: string) => serve(`${store}-2`)],
+    ['a non-serve command on this binary', (store: string) => [binaryPath, 'dump', '--location', store]],
+    ['an unrelated tool', (store: string) => ['sqlite3', `${store}/LOCK`]],
+  ])('leaves an orphaned lock holder running when it is %s', async (_label, argvFor) => {
     const { table, signals, io } = processTable({
-      4100: { ppid: 1, argv, holdsLock: true },
+      4100: { ppid: 1, argv: argvFor(location), holdsLock: true },
     });
 
     const { signalled, log } = await run(io);

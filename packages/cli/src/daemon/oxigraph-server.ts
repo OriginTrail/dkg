@@ -411,13 +411,19 @@ export async function startOxigraphServer(
   // reclaim can identify this launch's Oxigraph even if the daemon dies
   // before readiness.
   // A stopped server writes nothing more, and stop() waits for writes in
-  // flight, so its store directory is quiet once stop() resolves.
-  let ownershipWrites: Promise<void> = Promise.resolve();
+  // flight, so its store directory is quiet once stop() resolves. A rejected
+  // write fails the launch that awaited it (see OxigraphStoreOwnership).
+  const ownershipWrites = new Set<Promise<void>>();
   const trackOwnershipWrite = (write: () => Promise<void>): Promise<void> => {
     if (isStopping()) return Promise.resolve();
-    const pending = write().catch(() => {});
-    ownershipWrites = ownershipWrites.then(() => pending);
+    const pending = write();
+    ownershipWrites.add(pending);
+    const forget = (): void => { ownershipWrites.delete(pending); };
+    pending.then(forget, forget);
     return pending;
+  };
+  const ownershipWritesSettled = async (): Promise<void> => {
+    await Promise.allSettled(ownershipWrites);
   };
   const recordSpawned = (c: ChildProcess): Promise<void> =>
     c.pid === undefined
@@ -510,25 +516,35 @@ export async function startOxigraphServer(
     // faces a larger replay than the daemon ever measured at startup. Reusing
     // the boot value re-arms the exact ratchet: kill a healthy replaying
     // child, leave the WAL, retry, kill it again.
-    const reviveReady = await prepareSpawn('restart');
-    if (isStopping()) return;
-    const candidate = spawnChild();
-    lifecycle = { phase: 'recovering', child: candidate, reason, generation };
-    await recordSpawned(candidate);
-    const opened = await awaitStoreOpen(candidate, reviveReady, {
-      generation,
-      progress: (elapsedS, allowedS) =>
-        `[oxigraph] restart still opening: ${elapsedS}s elapsed of ${allowedS}s allowed.`,
-      superseded: () => lifecycle.phase !== 'recovering' || lifecycle.child !== candidate,
-    });
-    if (opened.outcome === 'ready') {
-      log(`[oxigraph] server restarted and healthy on ${bind}.`);
-      return;
+    let candidate: ChildProcess | null = null;
+    let failure = `respawned server did not become ready on ${bind}`;
+    try {
+      const reviveReady = await prepareSpawn('restart');
+      if (isStopping()) return;
+      const spawned = spawnChild();
+      candidate = spawned;
+      lifecycle = { phase: 'recovering', child: spawned, reason, generation };
+      await recordSpawned(spawned);
+      const opened = await awaitStoreOpen(spawned, reviveReady, {
+        generation,
+        progress: (elapsedS, allowedS) =>
+          `[oxigraph] restart still opening: ${elapsedS}s elapsed of ${allowedS}s allowed.`,
+        superseded: () => lifecycle.phase !== 'recovering' || lifecycle.child !== spawned,
+      });
+      if (opened.outcome === 'ready') {
+        log(`[oxigraph] server restarted and healthy on ${bind}.`);
+        return;
+      }
+    } catch (error) {
+      // A rejected store-ownership step fails this attempt like a child
+      // that never became ready.
+      failure = `restart attempt failed: ${error instanceof Error ? error.message : String(error)}`;
     }
+    if (isStopping()) return;
     // A respawned child that died or never answered is retried with backoff.
     if (
-      lifecycle.phase !== 'recovering'
-      || lifecycle.child !== candidate
+      candidate !== null
+      && (lifecycle.phase !== 'recovering' || lifecycle.child !== candidate)
     ) return;
     // Timed out with the child still running but unresponsive. Kill it
     // before respawning — otherwise each retry stacks another live
@@ -542,7 +558,7 @@ export async function startOxigraphServer(
       }
     }
     lifecycle = { phase: 'recovering', child: null, reason, generation };
-    scheduleRevive(`respawned server did not become ready on ${bind}`);
+    scheduleRevive(failure);
   };
 
   // Synchronous best-effort kill for process-exit handlers (which can't
@@ -656,7 +672,7 @@ export async function startOxigraphServer(
     markStoreDown();
     const c = candidate;
     if (!c || c.exitCode !== null || c.signalCode !== null) {
-      await ownershipWrites;
+      await ownershipWritesSettled();
       return;
     }
     await new Promise<void>((resolve) => {
@@ -677,7 +693,7 @@ export async function startOxigraphServer(
       }, stopGraceMs);
       killTimer.unref?.();
     });
-    await ownershipWrites;
+    await ownershipWritesSettled();
     log('[oxigraph] server stopped');
   };
 
@@ -711,15 +727,23 @@ export async function startOxigraphServer(
   // caller's own reaper remains harmless.
   process.on('exit', exitGuard);
 
-  await recordSpawned(initialChild);
-  const opened = await awaitStoreOpen(initialChild, bootReady, {
-    generation: lifecycle.generation,
-    // Only an exit-time kill (process.exit) moves boot out of `starting`.
-    superseded: () => lifecycle.phase !== 'starting' || lifecycle.child !== initialChild,
-    progress: (elapsedS, allowedS) =>
-      `[oxigraph] still opening: ${elapsedS}s elapsed of ${allowedS}s allowed ` +
-      `(${formatWalBytes(bootReady.walBytes)} of write-ahead log).`,
-  });
+  let opened: StoreOpenOutcome;
+  try {
+    await recordSpawned(initialChild);
+    opened = await awaitStoreOpen(initialChild, bootReady, {
+      generation: lifecycle.generation,
+      // Only an exit-time kill (process.exit) moves boot out of `starting`.
+      superseded: () => lifecycle.phase !== 'starting' || lifecycle.child !== initialChild,
+      progress: (elapsedS, allowedS) =>
+        `[oxigraph] still opening: ${elapsedS}s elapsed of ${allowedS}s allowed ` +
+        `(${formatWalBytes(bootReady.walBytes)} of write-ahead log).`,
+    });
+  } catch (error) {
+    // A rejected store-ownership step fails the launch: stop the child
+    // (which also releases the exit guard) and surface the error.
+    await stop();
+    throw error;
+  }
   if (opened.outcome === 'ready') {
     log(`Oxigraph server ready on ${bind} after ${opened.probes} probe(s).`);
     return {

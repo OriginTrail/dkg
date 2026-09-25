@@ -1,6 +1,6 @@
 import { createServer } from 'node:net';
 import { startOxigraphServer, type StartOxigraphServerOptions } from '../../packages/cli/dist/daemon/oxigraph-server.js';
-import { createOxigraphStoreOwnership } from '../../packages/cli/dist/daemon/oxigraph-orphan.js';
+import { createOxigraphStoreOwnership } from '../../packages/cli/dist/daemon/oxigraph-store-ownership.js';
 
 type TestOxigraphServerOptions =
   Omit<StartOxigraphServerOptions, 'port' | 'host' | 'storeOwnership'>

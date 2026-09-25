@@ -44,7 +44,7 @@ import {
   normalizeOxigraphMemoryLimits,
   type OxigraphMemoryLimits,
 } from './oxigraph-launch-strategy.js';
-import { createOxigraphStoreOwnership } from './oxigraph-orphan.js';
+import { createOxigraphStoreOwnership } from './oxigraph-store-ownership.js';
 
 /** Config value that opts a node into the daemon-managed local server. */
 export const MANAGED_OXIGRAPH_BACKEND = 'oxigraph-server';

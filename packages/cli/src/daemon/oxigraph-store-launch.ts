@@ -14,6 +14,12 @@ export function oxigraphStoreArgs(location: string): string[] {
 /**
  * The store-ownership steps of each managed Oxigraph launch, called in order.
  * Built where the binary catalog is known (the managed layer).
+ *
+ * The server awaits every step and treats a rejection as a failed launch: at
+ * boot it stops the child and rethrows; on a supervised restart it stops the
+ * child and retries with backoff. An implementation therefore handles its
+ * expected failures itself (the production owner record logs and resolves)
+ * and rejects only for defects.
  */
 export interface OxigraphStoreOwnership {
   /** Stop orphaned Oxigraph processes that hold the store lock. */

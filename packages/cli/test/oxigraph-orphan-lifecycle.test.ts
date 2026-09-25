@@ -31,7 +31,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { findListenOwnerPid } from '../src/daemon/oxigraph-listen-port.js';
-import { OXIGRAPH_OWNER_RECORD } from '../src/daemon/oxigraph-orphan.js';
+import { OXIGRAPH_OWNER_RECORD } from '../src/daemon/oxigraph-owner-record.js';
+import type { OxigraphStoreOwnership } from '../src/daemon/oxigraph-store-launch.js';
 import {
   createOxigraphStandinFixture,
   fetchPid,
@@ -128,9 +129,15 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
     }
   }, 60_000);
 
-  it('reclaims the Oxigraph of a worker killed before its store was ready, with its watchdog frozen', async () => {
+  it.each([
+    ['an existing store directory', false],
+    // A fresh node: the spawn-time record must not depend on Oxigraph
+    // creating the directory first.
+    ['a store directory that does not exist yet', true],
+  ] as const)('reclaims the Oxigraph of a worker killed before its store was ready, with its watchdog frozen, in %s', async (_label, fresh) => {
     const port = await freePort();
-    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-preready-'));
+    const root = await mkdtemp(join(tmpdir(), 'oxi-orphan-preready-'));
+    const location = fresh ? join(root, 'oxigraph-data') : root;
     // Oxigraph starts but is never verified ready, like a long WAL replay.
     const first = spawn(process.execPath, [
       '--import', 'tsx',
@@ -165,9 +172,102 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
       first.kill('SIGKILL');
       killIfAlive(frozenWatchdog ?? undefined);
       killIfAlive(listenerPid);
-      await rm(location, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
     }
   }, 60_000);
+
+  describe('store-ownership failure contract', () => {
+    const ownership = (overrides: Partial<OxigraphStoreOwnership>): OxigraphStoreOwnership => ({
+      beforeSpawn: async () => {},
+      spawned: async () => {},
+      ready: async () => {},
+      ...overrides,
+    });
+
+    it('fails boot without spawning when beforeSpawn rejects', async () => {
+      const port = await freePort();
+      const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-reject-before-'));
+      const spawned: number[] = [];
+      try {
+        await expect(startOxigraphServer({
+          binaryPath: lockingStandin.binaryPath,
+          location,
+          port,
+          readyTimeoutMs: 10_000,
+          log: () => {},
+          storeOwnership: ownership({
+            beforeSpawn: async () => { throw new Error('reclaim defect'); },
+            spawned: async ({ launcherPid }) => { spawned.push(launcherPid); },
+          }),
+        })).rejects.toThrow('reclaim defect');
+        expect(spawned).toEqual([]);
+        expect(await portAnswers(port)).toBe(false);
+      } finally {
+        await rm(location, { recursive: true, force: true });
+      }
+    }, 30_000);
+
+    it('stops the child and fails boot when a record step rejects', async () => {
+      const port = await freePort();
+      const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-reject-ready-'));
+      let launcher: number | undefined;
+      try {
+        await expect(startOxigraphServer({
+          binaryPath: lockingStandin.binaryPath,
+          location,
+          port,
+          readyTimeoutMs: 10_000,
+          readyIntervalMs: 50,
+          log: () => {},
+          storeOwnership: ownership({
+            spawned: async ({ launcherPid }) => { launcher = launcherPid; },
+            ready: async () => { throw new Error('record defect'); },
+          }),
+        })).rejects.toThrow('record defect');
+        expect(launcher).toBeDefined();
+        expect(pidIsGone(launcher!)).toBe(true);
+        expect(await waitForCondition(async () => !(await portAnswers(port)))).toBe(true);
+      } finally {
+        killIfAlive(launcher);
+        await rm(location, { recursive: true, force: true });
+      }
+    }, 30_000);
+
+    it('retries a restart whose record step rejects, and recovers once it resolves', async () => {
+      const port = await freePort();
+      const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-reject-restart-'));
+      const lines: string[] = [];
+      let launches = 0;
+      const handle = await startOxigraphServer({
+        binaryPath: lockingStandin.binaryPath,
+        location,
+        port,
+        readyTimeoutMs: 10_000,
+        readyIntervalMs: 50,
+        restartBackoffBaseMs: 50,
+        restartBackoffMaxMs: 50,
+        log: (line) => lines.push(line),
+        storeOwnership: ownership({
+          spawned: async () => {
+            launches += 1;
+            if (launches === 2) throw new Error('record defect on restart');
+          },
+        }),
+      });
+      try {
+        const first = await fetchPid(port);
+        process.kill(first, 'SIGKILL');
+        expect(await waitForCondition(async () => {
+          const pid = await fetchPid(port).catch(() => undefined);
+          return launches >= 3 && pid !== undefined && pid !== first && !handle.getRecoveryState().recovering;
+        }, 20_000)).toBe(true);
+        expect(lines.join('\n')).toContain('restart attempt failed: record defect on restart');
+      } finally {
+        await handle.stop();
+        await rm(location, { recursive: true, force: true });
+      }
+    }, 30_000);
+  });
 
   it('does not report ready when Oxigraph exits while its owner record is written', async () => {
     const port = await freePort();

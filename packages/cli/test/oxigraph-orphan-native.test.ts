@@ -33,13 +33,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { oxigraphStoreArgs } from '../src/daemon/oxigraph-store-launch.js';
+import { stopOrphanedOxigraph } from '../src/daemon/oxigraph-orphan.js';
 import {
   OXIGRAPH_OWNER_RECORD,
   OXIGRAPH_OWNER_RECORD_SCHEMA,
   readOxigraphOwnerRecord,
   recordOxigraphOwner,
-  stopOrphanedOxigraph,
-} from '../src/daemon/oxigraph-orphan.js';
+} from '../src/daemon/oxigraph-owner-record.js';
 import {
   procInspectProcess,
   processStartProbe,
@@ -120,6 +120,22 @@ describe('stopOrphanedOxigraph (real processes)', () => {
     } finally {
       launcher.kill('SIGKILL');
       await rm(location, { recursive: true, force: true });
+    }
+  });
+
+  it('creates a fresh store directory before recording its owner', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'oxi-orphan-record-fresh-'));
+    const location = join(root, 'not', 'yet', 'oxigraph-data');
+    const launcher = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    try {
+      await recordOxigraphOwner({ location, binaryPath: '/opt/oxigraph', launcherPid: launcher.pid!, log: () => {} });
+      expect(await readOxigraphOwnerRecord(location)).toMatchObject({
+        kind: 'v1',
+        record: { launcher: { pid: launcher.pid } },
+      });
+    } finally {
+      launcher.kill('SIGKILL');
+      await rm(root, { recursive: true, force: true });
     }
   });
 

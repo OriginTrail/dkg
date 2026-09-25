@@ -21,22 +21,7 @@ import { _autoUpdateIo } from './manifest.js';
  * surface (older test stubs); production always has it.
  */
 export async function writeFileAtomic(path: string, data: string): Promise<void> {
-  await writeFileAtomicWith(_autoUpdateIo, path, data);
-}
-
-/** The filesystem calls an atomic write needs. */
-export interface AtomicWriteIo {
-  writeFile(path: string, data: string): Promise<unknown>;
-  rename?: (from: string, to: string) => Promise<unknown>;
-  unlink?: (path: string) => Promise<unknown>;
-}
-
-/**
- * `writeFileAtomic` over a caller's filesystem, for bookkeeping that does not
- * belong to the auto-updater's IO surface (the managed Oxigraph owner record).
- */
-export async function writeFileAtomicWith(io: AtomicWriteIo, path: string, data: string): Promise<void> {
-  const { writeFile, rename, unlink } = io;
+  const { writeFile, rename, unlink } = _autoUpdateIo;
   if (typeof rename !== 'function') {
     // Older test stubs may not provide `rename`. Production fs/promises
     // always does, so this branch only matters in unit tests with partial
@@ -45,12 +30,29 @@ export async function writeFileAtomicWith(io: AtomicWriteIo, path: string, data:
     await writeFile(path, data);
     return;
   }
+  // Older stubs may also lack `unlink`; cleanup was always best-effort there.
+  await writeFileAtomicWith({ writeFile, rename, unlink: unlink ?? (async () => {}) }, path, data);
+}
+
+/** The filesystem calls an atomic write needs. */
+export interface AtomicWriteIo {
+  writeFile(path: string, data: string): Promise<unknown>;
+  rename(from: string, to: string): Promise<unknown>;
+  unlink(path: string): Promise<unknown>;
+}
+
+/**
+ * `writeFileAtomic` over a caller's filesystem, for bookkeeping that does not
+ * belong to the auto-updater's IO surface (the managed Oxigraph owner record).
+ * The temporary file is removed when the rename fails.
+ */
+export async function writeFileAtomicWith(io: AtomicWriteIo, path: string, data: string): Promise<void> {
   const tmp = `${path}.tmp.${process.pid}.${Date.now().toString(36)}`;
-  await writeFile(tmp, data);
+  await io.writeFile(tmp, data);
   try {
-    await rename(tmp, path);
+    await io.rename(tmp, path);
   } catch (err) {
-    try { await unlink?.(tmp); } catch { /* best-effort cleanup */ }
+    try { await io.unlink(tmp); } catch { /* best-effort cleanup */ }
     throw err;
   }
 }

@@ -1,8 +1,6 @@
 import { spawn } from 'node:child_process';
-import {
-  createOxigraphStoreOwnership,
-  type OxigraphStoreOwnership,
-} from '../../src/daemon/oxigraph-orphan.js';
+import { createOxigraphStoreOwnership } from '../../src/daemon/oxigraph-store-ownership.js';
+import type { StartOxigraphServerOptions } from '../../src/daemon/oxigraph-server.js';
 import { once } from 'node:events';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -29,7 +27,10 @@ export async function createOxigraphStandinFixture(
   const directory = await mkdtemp(join(tmpdir(), 'oxi-server-real-'));
   const binaryPath = join(directory, 'oxigraph-standin.cjs');
   const holdStoreLock = opts.holdStoreLock
-    ? `require('node:fs').openSync(require('node:path').join(process.argv[process.argv.indexOf('--location') + 1], 'LOCK'), 'a');\n`
+    ? `const storeDir = process.argv[process.argv.indexOf('--location') + 1];\n`
+      // Like RocksDB: create a missing store directory, then keep LOCK open.
+      + `require('node:fs').mkdirSync(storeDir, { recursive: true });\n`
+      + `require('node:fs').openSync(require('node:path').join(storeDir, 'LOCK'), 'a');\n`
     : '';
   await writeFile(
     binaryPath,
@@ -72,9 +73,9 @@ process.on('SIGTERM', () => {
 }
 
 /** Server options plus the store ownership that the managed layer would build. */
-export function withStoreOwnership<
-  T extends { binaryPath: string; location: string; log?: (message: string) => void },
->(opts: T): T & { storeOwnership: OxigraphStoreOwnership } {
+export function withStoreOwnership(
+  opts: Omit<StartOxigraphServerOptions, 'storeOwnership'>,
+): StartOxigraphServerOptions {
   return {
     ...opts,
     storeOwnership: createOxigraphStoreOwnership({
