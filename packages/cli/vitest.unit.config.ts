@@ -95,6 +95,11 @@ export default defineConfig({
           // paying the 2-minute hardhat-boot tax of the default config.
           'test/resolve-standalone-install.test.ts',
           'test/auto-update.test.ts',
+          'test/auto-update-jitter.test.ts',
+          'test/auto-update-holdoff-gate.test.ts',
+          'test/auto-update-holdoff-store.test.ts',
+          'test/auto-update-polling.test.ts',
+          'test/auto-update-runner.test.ts',
           'test/auto-update-workspace-clean.test.ts',
           'test/maintenance-update-gate.test.ts',
           'test/node-runtime-preflight.test.ts',
