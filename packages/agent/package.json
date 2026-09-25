@@ -163,7 +163,7 @@
     "@origintrail-official/dkg-storage": "workspace:*",
     "ethers": "^6",
     "js-yaml": "^4.1.1",
-    "jsonld": "^8.3.3"
+    "jsonld": "^9.0.0"
   },
   "devDependencies": {
     "@libp2p/crypto": "^5.1.18",
