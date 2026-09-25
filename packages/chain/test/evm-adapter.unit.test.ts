@@ -904,6 +904,59 @@ describe('EVMChainAdapter random sampling identity lookup', () => {
     expect(clearSpy.calls).toHaveLength(1);           // stale cached identityId dropped
   });
 
+  // RandomSampling 10.6.1 gates createChallenge to undelegated EOAs. A contract
+  // wallet / 7702-delegated EOA that the operator ADDED (rather than rotated to,
+  // which the runbook allows) stays in the pool and loses a proof period on every
+  // tick that selects it unless the send evicts it. Decoding depends on
+  // `ContractCallerNotAllowed` being present in packages/chain/abi/RandomSampling.json
+  // — these tests are red if that lockstep ABI refresh is missing.
+  const contractCallerNotAllowedError = (caller: string) => {
+    const iface = new Interface(['error ContractCallerNotAllowed(address caller)']);
+    const e: any = new Error('execution reverted: unknown custom error');
+    e.data = iface.encodeErrorResult('ContractCallerNotAllowed', [caller]);
+    return e;
+  };
+
+  it('sendRandomSamplingTx self-heals a ContractCallerNotAllowed revert: evicts the wallet, keeps its identity cache, retries on pool[0]', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
+    const w0 = a.signer;
+    const w1 = a.signerPool[1];
+    a.registeredOperationalAddresses.add(w1.address.toLowerCase());
+    a.nextRandomSamplingSigner = async () => w1;
+    const okReceipt = { hash: '0xok', status: 1 } as any;
+    const sendSpy = recorder(async (_c: any, _m: any, _args: any, signer: any) => {
+      if (signer.address === w1.address) throw contractCallerNotAllowedError(w1.address);
+      return okReceipt;
+    });
+    a.sendContractTransaction = sendSpy;
+    const clearSpy = recorder(() => undefined);
+    a.clearIdentityIdForAddress = clearSpy;
+
+    const result = await a.sendRandomSamplingTx({}, 'createChallenge', [], 'label');
+
+    expect(result).toBe(okReceipt);
+    expect(sendSpy.calls).toHaveLength(2);            // w1 (reverts) → retry w0
+    expect(sendSpy.calls[1][3]).toBe(w0);             // retried on the primary anchor
+    expect(a.registeredOperationalAddresses.has(w1.address.toLowerCase())).toBe(false); // evicted
+    // The wallet is still a valid operational key for publishes and submitProof —
+    // only its RS-rotation membership is revoked, so the identity cache stands.
+    expect(clearSpy.calls).toHaveLength(0);
+  });
+
+  it('translateRandomSamplingError names the EOA requirement on a ContractCallerNotAllowed revert', () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    let caught: Error | null = null;
+    try {
+      a.translateRandomSamplingError(contractCallerNotAllowedError('0x' + '5a'.repeat(20)));
+    } catch (err) {
+      caught = err as Error;
+    }
+    expect(caught).not.toBeNull();
+    expect(caught!.message).toContain('ContractCallerNotAllowed');
+    expect(caught!.message).toMatch(/undelegated EOA/);
+    expect((caught as any).revert?.name).toBe('ContractCallerNotAllowed');
+  });
+
   it('sendRandomSamplingTx does NOT retry a non-ProfileDoesntExist revert (propagates, no eviction)', async () => {
     const a: any = new EVMChainAdapter(minimalConfig({ additionalKeys: [OTHER_PK] }));
     const w1 = a.signerPool[1];
