@@ -261,7 +261,7 @@ function respondPromoteRecoveryError(
  * Map caller preconditions on WM/SWM operations to actionable 4xx responses.
  * VM publishing keeps its own mapping so chain failures remain server errors.
  */
-function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
+export function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
   if (respondPromoteRecoveryError(res, e, context)) return;
   if (e?.code === 'KA_ASSERTION_ALREADY_FINALIZED') {
     jsonResponse(res, 409, { code: e.code, error: e.message });
@@ -318,6 +318,17 @@ function respondAssertionError(res: RequestContext["res"], e: any, context?: Pro
     jsonResponse(res, 409, {
       error: e.message,
       code: "ASSERTION_EMPTY",
+    });
+    return;
+  }
+  // GH#1425 — discard is valid only for an active WM draft. A shared or
+  // published asset must keep its lifecycle metadata so it can be reopened;
+  // expose the engine's typed precondition as an actionable conflict instead
+  // of leaking it as a generic 500.
+  if (e?.code === "KA_WM_LIFECYCLE_REQUIRED") {
+    jsonResponse(res, 409, {
+      error: e.message,
+      code: "KA_WM_LIFECYCLE_REQUIRED",
     });
     return;
   }
