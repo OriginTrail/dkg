@@ -94,6 +94,14 @@ export interface Rfc64CatalogReplayRecoveryPortsV1<Target> {
   ): Promise<void>;
   targetIdentity(target: Target): string;
   parityFailed(contextGraphId: string, targets: readonly Target[]): Promise<boolean>;
+  /**
+   * Drop every promise a newer promise for the same catalog scope supersedes,
+   * keeping a same-version fork intact: that disagreement is evidence the
+   * projection must still see. It bounds a merged snapshot by live scopes
+   * instead of by version history. Optional, because the runtime cannot rank
+   * opaque targets itself; a port that omits it keeps the merged set whole.
+   */
+  pruneSupersededTargets?(targets: readonly Target[]): readonly Target[];
 }
 
 export interface Rfc64CatalogReplayRecoveryResultV1 {
@@ -225,7 +233,7 @@ class Rfc64CatalogReplayPeerWorklistV1 {
   }
 }
 
-interface ReplayProgressV1 {
+interface ReplayProgressV1<Target> {
   readonly policyDigest: string;
   readonly peerWorklist: Rfc64CatalogReplayPeerWorklistV1;
   /**
@@ -241,6 +249,18 @@ interface ReplayProgressV1 {
   active: boolean;
   /** The last full pass obtained no provider manifest at all. */
   unverified: boolean;
+  /**
+   * Bounded provider promises retained for the operational completeness
+   * projection. A complete connected-peer pass replaces the snapshot; scoped
+   * recovery can only add evidence until another complete pass supersedes it.
+   * `null` means no bounded authoritative snapshot is available.
+   *
+   * It changes only when a run settles, and only from the promise set of the
+   * run's last parity read -- the one taken after the run confirmed no joined
+   * request left a peer queued. A run that exhausts its worklist, fails, or is
+   * aborted leaves it as the last settled run left it.
+   */
+  promisedTargets: readonly Target[] | null;
   completion: Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> | null;
 }
 
@@ -250,7 +270,7 @@ interface ReplayProgressV1 {
  * status revision observed by the agent's operational projection.
  */
 export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
-  readonly #byContextGraph = new Map<string, ReplayProgressV1>();
+  readonly #byContextGraph = new Map<string, ReplayProgressV1<Target>>();
   readonly #ports: Rfc64CatalogReplayRecoveryPortsV1<Target>;
   #revision = 0;
 
@@ -277,6 +297,17 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       unresolvedPeerCount: progress.unresolvedPeers.size,
       unverified: progress.unverified,
     });
+  }
+
+  /**
+   * Last bounded provider promise set for row-completeness projection. The
+   * returned array is immutable and belongs to the same revision domain as
+   * {@link status}.
+   */
+  promisedTargets(contextGraphId: string, policyDigest: string): readonly Target[] | null {
+    const progress = this.#byContextGraph.get(contextGraphId);
+    if (progress === undefined || progress.policyDigest !== policyDigest) return null;
+    return progress.promisedTargets;
   }
 
   clear(contextGraphId: string): void {
@@ -384,12 +415,26 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
 
   async #execute(
     input: Rfc64CatalogReplayRecoveryCommandV1,
-    progress: ReplayProgressV1,
+    progress: ReplayProgressV1<Target>,
     token: number,
   ): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
     let requested = 0;
     let failed = 0;
     let providerFailures = 0;
+    /**
+     * Peers this pass queued and never heard an answer from -- a failed dial
+     * or a local precondition. Distinct from `providerFailures`, which is
+     * provider evidence only: both leave a peer's earlier promises unre-heard,
+     * which is what the settle-time snapshot-replacement decision turns on.
+     */
+    let unansweredPeers = 0;
+    /**
+     * The promise set of the last parity read, recorded only once the run has
+     * confirmed that no joined request left a peer queued. Until then a joining
+     * full pass can still hand this run its entitlement and its peers, so no
+     * earlier iteration's set may decide the snapshot.
+     */
+    let coveredPromised: readonly Target[] | null = null;
     let replayFailed = true;
     let requiresFullReplay = false;
     try {
@@ -410,6 +455,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
                 // attribute a failure to this peer nor clear the attribution an
                 // earlier provider failure recorded.
                 failed += 1;
+                unansweredPeers += 1;
                 return;
               }
               progress.unresolvedPeers.delete(peerId);
@@ -424,6 +470,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
                 if (!this.#retainPeerFailure(progress, peerId)) requiresFullReplay = true;
                 failed += 1;
                 providerFailures += 1;
+                unansweredPeers += 1;
               }
             }
           }
@@ -470,6 +517,9 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
           break;
         }
         if (progress.peerWorklist.hasPending) continue;
+        // Nothing awaits between here and the settle block, so the
+        // `requestedFullReplay` it reads is the one this set was checked under.
+        coveredPromised = promised;
         if (parityFailed) {
           failed += 1;
           requiresFullReplay = true;
@@ -504,6 +554,22 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       if (current === progress && current.token === token) {
         const wasFullPass = current.requestedFullReplay;
         current.active = false;
+        // The promise snapshot settles with the status it is read beside, under
+        // this token fence and the revision bump below. A merged set past its
+        // bound is capacity evidence, so it latches the witness and must also
+        // stop this same settle from clearing it.
+        if (
+          coveredPromised !== null
+          && requested > 0
+          && !this.#settlePromisedTargets(
+            current,
+            coveredPromised,
+            wasFullPass && unansweredPeers === 0,
+          )
+        ) {
+          requiresFullReplay = true;
+          replayFailed = true;
+        }
         // Only evidence that applied rows may be missing (parity, worklist or
         // attribution overflow) fails the Context Graph. A provider that could
         // not be replayed from stays retained for retry and is reported on its
@@ -547,6 +613,55 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   }
 
   /**
+   * Settle the retained promise snapshot from a covered run's promise set.
+   * Returns false when the merged snapshot outgrew its bound.
+   *
+   * Replacement discards every promise the run did not re-hear, so it needs
+   * more than the right to CLEAR a witness. `requestedFullReplay` only says
+   * some request QUEUED every connected peer, and clearing is deliberately
+   * tolerant of a retained provider that never answered -- replacing a
+   * promise snapshot is not, because that peer's earlier promised head can
+   * still be durable and unapplied, and dropping it reports the very zero this
+   * snapshot exists to prevent. A run that lost an answer may only ADD.
+   */
+  #settlePromisedTargets(
+    progress: ReplayProgressV1<Target>,
+    promised: readonly Target[],
+    replaces: boolean,
+  ): boolean {
+    if (promised.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1) {
+      // This run's parity read already failed on the same overflow.
+      progress.promisedTargets = null;
+      return true;
+    }
+    if (replaces || progress.promisedTargets === null) {
+      progress.promisedTargets = Object.freeze([...promised]);
+      return true;
+    }
+    const merged = new Map<string, Target>();
+    for (const target of progress.promisedTargets) {
+      merged.set(this.#ports.targetIdentity(target), target);
+    }
+    for (const target of promised) {
+      merged.set(this.#ports.targetIdentity(target), target);
+    }
+    // `targetIdentity` is exact, so each head advance a scoped pass observes
+    // adds an entry while the superseded one stays and nothing prunes it
+    // between full passes. Pruning before the bound keeps the capacity latch a
+    // statement about live scopes -- which is what the projection reads --
+    // instead of one about how often those scopes advanced.
+    const live = this.#ports.pruneSupersededTargets === undefined
+      ? [...merged.values()]
+      : this.#ports.pruneSupersededTargets([...merged.values()]);
+    if (live.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1) {
+      progress.promisedTargets = null;
+      return false;
+    }
+    progress.promisedTargets = Object.freeze([...live]);
+    return true;
+  }
+
+  /**
    * Replay evidence is process-local. A policy-digest rotation replaces the
    * entry, `clear()`/`reset()` drop it, and a restart starts empty, so both
    * `requiresFullReplay` and `unverified` evaporate at those boundaries -- as
@@ -566,7 +681,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
    * does not make unverified rows verified. Closing it needs the witness to be
    * durable, which is a persisted-record change, not a hotfix.
    */
-  #progressFor(contextGraphId: string, policyDigest: string): ReplayProgressV1 {
+  #progressFor(contextGraphId: string, policyDigest: string): ReplayProgressV1<Target> {
     let progress = this.#byContextGraph.get(contextGraphId);
     if (progress === undefined || progress.policyDigest !== policyDigest) {
       progress = {
@@ -578,6 +693,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         token: 0,
         active: false,
         unverified: false,
+        promisedTargets: null,
         completion: null,
       };
       this.#byContextGraph.set(contextGraphId, progress);
@@ -595,7 +711,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
    * it: that head stays an operational target until it is applied or fails.
    */
   #dropDisconnectedUnresolvedPeers(
-    progress: ReplayProgressV1,
+    progress: ReplayProgressV1<Target>,
     connectedPeerIds: readonly string[],
   ): boolean {
     if (progress.unresolvedPeers.size === 0) return false;
@@ -628,7 +744,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
    * fill outright.
    */
   #seedRetainedProviders(
-    progress: ReplayProgressV1,
+    progress: ReplayProgressV1<Target>,
     maxSeeds = Number.POSITIVE_INFINITY,
   ): void {
     let seeded = 0;
@@ -640,7 +756,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   }
 
   /** Retain bounded attribution; overflow survives as a full-replay witness. */
-  #retainPeerFailure(progress: ReplayProgressV1, peerId: string): boolean {
+  #retainPeerFailure(progress: ReplayProgressV1<Target>, peerId: string): boolean {
     const failures = progress.unresolvedPeers.get(peerId);
     if (failures !== undefined) {
       progress.unresolvedPeers.set(peerId, failures + 1);

@@ -15,7 +15,7 @@ import type {
   Rfc64InventoryV1OperationsV1,
 } from './inventory-v1/index.js';
 
-const RFC64_OPERATIONAL_STATUS_HEAD_READ_CONCURRENCY_V1 = 8;
+export const RFC64_OPERATIONAL_STATUS_HEAD_READ_CONCURRENCY_V1 = 8;
 
 export interface Rfc64OperationalAppliedHeadV1 {
   readonly snapshot: AppliedCatalogHeadSnapshotV1;
