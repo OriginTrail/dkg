@@ -114,8 +114,9 @@ describe('local StorageACK cancellation through the registered real handler', ()
           for (const entry of entries) routes.set(entry.protocolId, entry.handler);
           return () => routes.clear();
         },
-        publish: (data, peerId, signal) => handler.handler(data, { toString: () => peerId } as any, signal),
-        update: (data, peerId, signal) => handler.updateHandler(data, { toString: () => peerId } as any, signal),
+        trackRemoteCompletion: () => {},
+        publish: (data, peerId) => handler.remoteExecution(data, { toString: () => peerId } as any),
+        update: (data, peerId) => handler.remoteUpdateExecution(data, { toString: () => peerId } as any),
         publishLocal: (data, peerId, signal, context) => handler.localExecution(data, { toString: () => peerId } as any, signal,
           context as LocalStorageAckHeadExpectation | undefined),
         updateLocal: (data, peerId, signal, context) => handler.localUpdateExecution(data, { toString: () => peerId } as any, signal,
@@ -201,13 +202,16 @@ describe('local StorageACK cancellation through the registered real handler', ()
       let physical: Promise<Uint8Array> | undefined;
       await installStorageACKFixtureEndpoint(local, registerStorageACKEndpoint({
         registerGroup: () => () => {},
-        publish: (data, peerId, signal) => {
-          physical = handler.handler(data, { toString: () => peerId } as any, signal);
-          return physical;
+        trackRemoteCompletion: () => {},
+        publish: (data, peerId) => {
+          const execution = handler.remoteExecution(data, { toString: () => peerId } as any);
+          physical = execution.completion;
+          return execution;
         },
-        update: (data, peerId, signal) => {
-          physical = handler.updateHandler(data, { toString: () => peerId } as any, signal);
-          return physical;
+        update: (data, peerId) => {
+          const execution = handler.remoteUpdateExecution(data, { toString: () => peerId } as any);
+          physical = execution.completion;
+          return execution;
         },
         publishLocal: (data, peerId, signal, context) => {
           const execution = handler.localExecution(data, { toString: () => peerId } as any, signal,
@@ -274,11 +278,13 @@ describe('local StorageACK cancellation through the registered real handler', ()
     let physical: Promise<Uint8Array> | undefined;
     const endpoint = registerStorageACKEndpoint({
       registerGroup: () => () => {},
-      publish: (data, peerId, signal) => {
-        physical = handler.handler(data, { toString: () => peerId } as any, signal);
-        return physical;
+      trackRemoteCompletion: () => {},
+      publish: (data, peerId) => {
+        const execution = handler.remoteExecution(data, { toString: () => peerId } as any);
+        physical = execution.completion;
+        return execution;
       },
-      update: (data, peerId, signal) => handler.updateHandler(data, { toString: () => peerId } as any, signal),
+      update: (data, peerId) => handler.remoteUpdateExecution(data, { toString: () => peerId } as any),
       publishLocal: (data, peerId, signal, context) => {
         const execution = handler.localExecution(data, { toString: () => peerId } as any, signal,
           context as LocalStorageAckHeadExpectation | undefined);
@@ -308,7 +314,8 @@ describe('local StorageACK cancellation through the registered real handler', ()
     endpoint.dispose();
   });
 
-  it('holds store teardown for a graph commit that outlives the handler deadline', async () => {
+  it.each(['local', 'remote'] as const)(
+    'holds store teardown for a %s graph commit that outlives the handler deadline', async (origin) => {
     const store = new OxigraphStore();
     const close = vi.spyOn(store, 'close');
     const originalReplace = store.replaceGraph!.bind(store);
@@ -336,17 +343,31 @@ describe('local StorageACK cancellation through the registered real handler', ()
     });
     await agent.start();
     const local = agent as LocalAgent;
-    await installStorageACKFixtureEndpoint(local, registerStorageACKEndpoint({
-      registerGroup: () => () => {},
-      publish: (data, peerId) => handler.handler(data, { toString: () => peerId } as any),
-      update: (data, peerId) => handler.updateHandler(data, { toString: () => peerId } as any),
-      publishLocal: (data, peerId, signal, context) =>
-        handler.localExecution(data, { toString: () => peerId } as any, signal,
-          context as LocalStorageAckHeadExpectation | undefined),
-      updateLocal: (data, peerId, signal, context) =>
-        handler.localUpdateExecution(data, { toString: () => peerId } as any, signal,
-          context as LocalStorageAckHeadExpectation | undefined),
-    }));
+    const routes = new Map<string, (data: Uint8Array, peerId: string) => Promise<Uint8Array>>();
+    await local.storageACKRegistrationRuntime.startGeneration({
+      attempt: async (_attempt, registration) => ({
+        kind: 'registered',
+        endpoint: registerStorageACKEndpoint({
+          registerGroup: (entries) => {
+            for (const entry of entries) routes.set(entry.protocolId, entry.handler);
+            return () => routes.clear();
+          },
+          trackRemoteCompletion: (completion) => registration.trackRemoteCompletion(completion),
+          publish: (data, peerId) => handler.remoteExecution(data, { toString: () => peerId } as any),
+          update: (data, peerId) => handler.remoteUpdateExecution(data, { toString: () => peerId } as any),
+          publishLocal: (data, peerId, signal, context) =>
+            handler.localExecution(data, { toString: () => peerId } as any, signal,
+              context as LocalStorageAckHeadExpectation | undefined),
+          updateLocal: (data, peerId, signal, context) =>
+            handler.localUpdateExecution(data, { toString: () => peerId } as any, signal,
+              context as LocalStorageAckHeadExpectation | undefined),
+        }),
+      }),
+      retryDelayMs: 1_000,
+      isStarted: () => true,
+      onRetryScheduled: () => {},
+      onError: () => {},
+    });
     const ual = 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/7';
     const quads = [{ subject: 'urn:entity:late', predicate: 'urn:p:value', object: '"value"', graph: '' }];
     const graphUri = knowledgeAssetLayerGraphUri('late-local', MemoryLayer.SharedWorkingMemory,
@@ -360,7 +381,9 @@ describe('local StorageACK cancellation through the registered real handler', ()
       assertionVersion: '1', publicTripleCount: 1, privateTripleCount: 0,
       accessPolicy: 'public', allowedPeers: [],
     });
-    const send = local.createACKTransportFactory({ sendTimeoutMs: 1_000 })().sendP2P(local.peerId, PROTOCOL_STORAGE_ACK, intent);
+    const send = origin === 'local'
+      ? local.createACKTransportFactory({ sendTimeoutMs: 1_000 })().sendP2P(local.peerId, PROTOCOL_STORAGE_ACK, intent)
+      : routes.get(PROTOCOL_STORAGE_ACK)!(intent, 'remote-core');
     await Promise.race([inReplace, send.then(() => { throw new Error('ACK completed before graph replacement started'); })]);
     expect(isStorageACKDecline(decodeStorageACK(await send))).toBe(true);
     const stopping = local.stop();
@@ -371,5 +394,6 @@ describe('local StorageACK cancellation through the registered real handler', ()
     expect(close).toHaveBeenCalledOnce();
     expect(sign).not.toHaveBeenCalled();
     agent = undefined;
-  });
+    },
+  );
 });

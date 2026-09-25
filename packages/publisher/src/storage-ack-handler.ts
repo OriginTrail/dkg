@@ -1257,7 +1257,11 @@ export class StorageACKHandler {
    * Peer streams always use remote persistence semantics.
    */
   handler = (data: Uint8Array, peerId: PeerId, externalSignal?: AbortSignal): Promise<Uint8Array> =>
-    this.createPublishRequest(data, peerId, externalSignal, { kind: 'remote' }).response;
+    this.remoteExecution(data, peerId, externalSignal).response;
+
+  /** Keep the physical commit tail visible to the endpoint after a deadline reply. */
+  remoteExecution = (data: Uint8Array, peerId: PeerId, externalSignal?: AbortSignal): StorageACKExecution =>
+    this.createPublishRequest(data, peerId, externalSignal, { kind: 'remote' });
 
   /** Local dispatch carries immutable queued-head proof when a queued job owns it. */
   localHandler = (
@@ -2017,7 +2021,10 @@ export class StorageACKHandler {
    * rides the same transient-decline retry ladder.
    */
   updateHandler = (data: Uint8Array, peerId: PeerId, externalSignal?: AbortSignal): Promise<Uint8Array> =>
-    this.createUpdateRequest(data, peerId, externalSignal, { kind: 'remote' }).response;
+    this.remoteUpdateExecution(data, peerId, externalSignal).response;
+
+  remoteUpdateExecution = (data: Uint8Array, peerId: PeerId, externalSignal?: AbortSignal): StorageACKExecution =>
+    this.createUpdateRequest(data, peerId, externalSignal, { kind: 'remote' });
 
   localUpdateHandler = (
     data: Uint8Array,

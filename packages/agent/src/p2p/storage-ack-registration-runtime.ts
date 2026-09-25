@@ -39,6 +39,7 @@ export interface StorageACKRegistrationAttemptContext {
   isActive(): boolean;
   guard<T>(work: () => Promise<T>): Promise<T>;
   signerLost(): boolean;
+  trackRemoteCompletion(completion: Promise<unknown>): void;
 }
 
 export type RegistrationOutcome =
@@ -71,6 +72,7 @@ class StorageACKRegistrationSession {
   private state: RegistrationState = { kind: 'idle' };
   private plan: StorageACKRegistrationPlan | undefined;
   private readonly attempts = new Set<Promise<unknown>>();
+  private readonly remoteCompletions = new Set<Promise<void>>();
   private readonly transport = new LocalStorageACKTransport();
 
   get endpoint(): StorageACKEndpoint | null {
@@ -100,6 +102,12 @@ class StorageACKRegistrationSession {
       () => { this.attempts.delete(attempt); },
     );
     return attempt;
+  }
+
+  private trackRemoteCompletion(completion: Promise<unknown>): void {
+    const settled = completion.then(() => {}, () => {});
+    this.remoteCompletions.add(settled);
+    void settled.then(() => { this.remoteCompletions.delete(settled); });
   }
 
   /** Install only the result of this generation's guarded registration attempt. */
@@ -136,6 +144,7 @@ class StorageACKRegistrationSession {
       isActive: () => this.isCurrent(),
       guard: (work) => this.runStep(work),
       signerLost: () => lease.signerLost(),
+      trackRemoteCompletion: (completion) => this.trackRemoteCompletion(completion),
     };
     try {
       const outcome = await plan.attempt(attempt, context);
@@ -196,7 +205,25 @@ class StorageACKRegistrationSession {
   }
 
   async drainAttempts(): Promise<void> { await Promise.allSettled(this.attempts); }
-  async drainTransport(): Promise<void> { await this.transport.drain(); }
+  async drainTransport(): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.all([
+        this.transport.drain(),
+        Promise.race([
+          Promise.all(this.remoteCompletions),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('Remote StorageACK work did not retire within 5000ms; store teardown blocked')),
+              5_000,
+            );
+          }),
+        ]),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
 }
 
 /** Runtime swaps and drains self-contained registration generations. */

@@ -26,8 +26,10 @@ interface StorageACKEndpointPorts {
     protocolId: string;
     handler: (data: Uint8Array, peerId: string) => Promise<Uint8Array>;
   }[]): () => void;
-  publish(data: Uint8Array, peerId: string): Promise<Uint8Array>;
-  update(data: Uint8Array, peerId: string): Promise<Uint8Array>;
+  publish(data: Uint8Array, peerId: string): LocalStorageACKExecution;
+  update(data: Uint8Array, peerId: string): LocalStorageACKExecution;
+  /** The generation retains physical work after a deadline response. */
+  trackRemoteCompletion(completion: Promise<unknown>): void;
   publishLocal(data: Uint8Array, peerId: string, signal: AbortSignal | undefined, context?: LocalStorageAckHeadExpectation): LocalStorageACKExecution;
   updateLocal(data: Uint8Array, peerId: string, signal: AbortSignal | undefined, context?: LocalStorageAckHeadExpectation): LocalStorageACKExecution;
 }
@@ -42,8 +44,10 @@ export function registerStorageACKEndpoint(ports: StorageACKEndpointPorts): Stor
   let active = true;
   const routeRemote = (protocol: StorageACKProtocol, data: Uint8Array, peerId: string): Promise<Uint8Array> => {
     if (!active) throw new Error('StorageACK handler is not registered');
-    return storageACKProtocolKind(protocol) === 'publish'
+    const execution = storageACKProtocolKind(protocol) === 'publish'
       ? ports.publish(data, peerId) : ports.update(data, peerId);
+    ports.trackRemoteCompletion(execution.completion);
+    return execution.response;
   };
   const dispatch: StorageACKEndpoint['dispatch'] = (request) => {
     if (!active) throw new Error('StorageACK handler is not registered');

@@ -77,8 +77,15 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
         for (const entry of entries) routes.set(entry.protocolId, entry.handler);
         return () => { disposed = true; routes.clear(); };
       },
-      publish: async () => new Uint8Array([1]),
-      update: async () => new Uint8Array([2]),
+      trackRemoteCompletion: () => {},
+      publish: () => {
+        const response = Promise.resolve(new Uint8Array([1]));
+        return { response, completion: response };
+      },
+      update: () => {
+        const response = Promise.resolve(new Uint8Array([2]));
+        return { response, completion: response };
+      },
       publishLocal: () => {
         const response = Promise.resolve(new Uint8Array([1]));
         return { response, completion: response };

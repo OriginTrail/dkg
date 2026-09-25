@@ -2,14 +2,13 @@ import { createGraphKnowledgeAssetScope, assertSafeIri, assertSafeRdfTerm, conte
 import { type TripleStore, type GraphManager, type Quad, type QueryOptions, invalidateSwmMaterializationWitness, deleteByPatternWithoutCount } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import { ACKCommitSequence } from './ack-commit-sequence.js';
-import { tryReplaceGraphWithDurableRootCompanionAtomically } from './durable-root-atomic-companion.js';
+import { tryReplaceGraphWithDurableRootCompanionAtomically, type DurableRootAtomicCompanionResolver } from './durable-root-atomic-companion.js';
 import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
 import { generateKnowledgeAssetShareMetadata } from './metadata.js';
 import { storageAckOperationId, storageAckOwedCopiesByScopeQuery, STORAGE_ACK_LEDGER_PREDICATES, STORAGE_ACK_LEDGER_GRAPH, xsdDateTimeLiteral, storageAckLedgerRecordUpdate, storageAckLedgerEntryQuads, type StorageAckLedgerEntry } from './storage-ack-ledger.js';
 import { planStorageAckHeadPersistence, type StorageAckRequestContext } from './storage-ack-head-policy.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { storeKnowledgeAssetWorkspaceHead, tryResolveKnowledgeAssetWorkspaceHead, type KnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
-import type { StorageACKHandlerConfig } from './storage-ack-handler.js';
 
 /** The verified graph envelope stored by a core before it signs. */
 export type GraphScopedAckCopy = {
@@ -58,7 +57,7 @@ export interface StorageAckPriorVersionRequest {
 export interface GraphScopedACKPersistenceDependencies {
   store: TripleStore;
   graphManager: GraphManager;
-  config: StorageACKHandlerConfig;
+  config: GraphScopedACKPersistenceConfig;
   ports: {
     encodeDecline(
       cgId: string, code: StorageACKDeclineCode, message: string,
@@ -69,6 +68,16 @@ export interface GraphScopedACKPersistenceDependencies {
       Promise<{ ok: true; value: T } | { ok: false; decline: Uint8Array }>;
     isDeadlineAbort(error: unknown): boolean;
   };
+}
+
+/** Only the handler capabilities used by graph persistence. */
+export interface GraphScopedACKPersistenceConfig {
+  signerWallet: Pick<ethers.Wallet, 'signMessage'>;
+  workspaceWriteLocks?: Map<string, Promise<void>>;
+  resolveDurableRootAtomicCompanion?: DurableRootAtomicCompanionResolver;
+  onPriorVersionAwaitingPromotion?: (request: StorageAckPriorVersionRequest) => void;
+  readKnowledgeAssetRootCount?: (kaUal: string, signal?: AbortSignal) => Promise<bigint>;
+  pendingAckTxWindowMs?: number;
 }
 
 function graphACKStoreOptions(source: string, signal?: AbortSignal): QueryOptions {
@@ -104,7 +113,7 @@ export class GraphScopedACKPersistence {
 
   private get store(): TripleStore { return this.dependencies.store; }
   private get graphManager(): GraphManager { return this.dependencies.graphManager; }
-  private get config(): StorageACKHandlerConfig { return this.dependencies.config; }
+  private get config(): GraphScopedACKPersistenceConfig { return this.dependencies.config; }
 
   private runWhileLive<T>(work: () => T | Promise<T>, signal?: AbortSignal): Promise<T> {
     return this.dependencies.ports.runWhileLive(work, signal);

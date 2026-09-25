@@ -41,13 +41,14 @@ describe('StorageACK endpoint request origin', () => {
         for (const entry of entries) routes.set(entry.protocolId, entry.handler);
         return () => routes.clear();
       },
-      publish: async (_data, peerId) => {
+      trackRemoteCompletion: () => {},
+      publish: (_data, peerId) => {
         calls.push({ kind: 'publish', peerId, signal: undefined, origin: 'remote' });
-        return new Uint8Array([1]);
+        return execution(Promise.resolve(new Uint8Array([1])));
       },
-      update: async (_data, peerId) => {
+      update: (_data, peerId) => {
         calls.push({ kind: 'update', peerId, signal: undefined, origin: 'remote' });
-        return new Uint8Array([2]);
+        return execution(Promise.resolve(new Uint8Array([2])));
       },
       publishLocal: (_data, peerId, signal) => {
         calls.push({ kind: 'publish', peerId, signal, origin: 'local' });
@@ -133,8 +134,9 @@ describe('StorageACK endpoint persistence decisions', () => {
         for (const entry of entries) routes.set(entry.protocolId, entry.handler);
         return () => routes.clear();
       },
-      publish: (data, peerId) => handler.handler(data, peer(peerId)),
-      update: (data, peerId) => handler.updateHandler(data, peer(peerId)),
+      trackRemoteCompletion: () => {},
+      publish: (data, peerId) => handler.remoteExecution(data, peer(peerId)),
+      update: (data, peerId) => handler.remoteUpdateExecution(data, peer(peerId)),
       publishLocal: (data, peerId, signal, context) => handler.localExecution(data, peer(peerId), signal,
         context as LocalStorageAckHeadExpectation | undefined),
       updateLocal: (data, peerId, signal, context) => handler.localUpdateExecution(data, peer(peerId), signal,

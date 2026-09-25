@@ -2780,6 +2780,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           signerCandidates: ackSignerCandidates,
           initialIdentityId: onChainIdentityId,
           transientIdentityUnresolved: bootChainIdentityUnresolvedTransient,
+          pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS,
           isRegistered: () => this.storageAckHandlerRegistered,
           isStarted: () => this.started,
           ensureWalletsRegistered: ensureACKCandidateWalletsRegistered,

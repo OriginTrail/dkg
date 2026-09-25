@@ -2,21 +2,22 @@ import { ethers } from 'ethers';
 import {
   contextGraphSharedMemoryUri, createOperationContext,
   isKaPublishLifecycleDebugLoggingEnabled, isStorageACKDecline,
-  type Logger, type OperationContext,
+  type Logger, type OperationContext, type SubscriptionSource, type TypedEventBus,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
 import {
   StorageACKHandler, createStorageAckLifecycleObserver, withSignerRegistrationCache,
+  type DKGPublisher, type StorageACKHandlerConfig,
 } from '@origintrail-official/dkg-publisher';
-import { DKGAgentBase } from '../dkg-agent-base.js';
-import type { DKGAgent } from '../dkg-agent.js';
-import type { ResolvedDKGAgentConfig } from '../dkg-agent-types.js';
+import type { ACKSignerResolution, ResolvedDKGAgentConfig } from '../dkg-agent-types.js';
 import { BOOT_CHAIN_IDENTITY_TIMEOUT_MS, MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
   STORAGE_ACK_REGISTRATION_RETRY_MS } from '../dkg-agent-constants.js';
 import { isTransientBootChainError, raceWithBootTimeout } from '../dkg-agent-boot.js';
 import { resolveStorageAckLifecycleAssetUalFromLocalSwm } from '../storage-ack-lifecycle-identity.js';
 import { type SyncBackpressureSnapshot } from '../sync/backpressure.js';
 import { registerStorageACKEndpoint } from './storage-ack-endpoint.js';
+import type { Messenger } from './messenger.js';
 import {
   mayReresolveACKIdentity, shouldRepairACKWallets,
   type StorageACKRegistrationAttempt, type StorageACKRegistrationAttemptContext,
@@ -25,21 +26,21 @@ import {
 
 /** Startup supplies the mutable identity result and capabilities; this registrar owns ACK registration policy. */
 export interface StorageACKRegistrarPorts {
-  store: DKGAgent['store'];
-  publisher: DKGAgent['publisher'];
-  eventBus: DKGAgent['eventBus'];
-  messenger: DKGAgent['messenger'];
+  store: TripleStore;
+  publisher: Pick<DKGPublisher, 'setIdentityId'>;
+  eventBus: TypedEventBus;
+  messenger: Pick<Messenger, 'registerGroup'>;
   localPeerId(): string;
-  provisionProfileGuarded: OmitThisParameter<DKGAgent['provisionProfileGuarded']>;
-  resolveConfirmedACKSigner: OmitThisParameter<DKGAgent['resolveConfirmedACKSigner']>;
-  canonicalChunkStoreCgIdOrNull: OmitThisParameter<DKGAgent['canonicalChunkStoreCgIdOrNull']>;
-  resolveCgCurationForAck(cgId: string): ReturnType<DKGAgent['resolveCgCurationForAck']>;
-  ensureStorageAckVmPromotion: OmitThisParameter<DKGAgent['ensureStorageAckVmPromotion']>;
-  promoteStorageAckPriorVersion: OmitThisParameter<DKGAgent['promoteStorageAckPriorVersion']>;
-  readStorageAckKnowledgeAssetRootCount: OmitThisParameter<DKGAgent['readStorageAckKnowledgeAssetRootCount']>;
-  recordStorageAckDecline: OmitThisParameter<DKGAgent['recordStorageAckDecline']>;
-  gossipWireIdFor: OmitThisParameter<DKGAgent['gossipWireIdFor']>;
-  getSwmSubscriptionSource: OmitThisParameter<DKGAgent['getSwmSubscriptionSource']>;
+  provisionProfileGuarded(ctx: OperationContext): Promise<bigint>;
+  resolveConfirmedACKSigner(identityId: bigint, candidates: ethers.Wallet[], ctx: OperationContext): Promise<ACKSignerResolution>;
+  canonicalChunkStoreCgIdOrNull(rawCgId: string): string | null;
+  resolveCgCurationForAck(cgId: string): Promise<boolean | null>;
+  ensureStorageAckVmPromotion: NonNullable<StorageACKHandlerConfig['ensureVmPromotion']>;
+  promoteStorageAckPriorVersion: NonNullable<StorageACKHandlerConfig['onPriorVersionAwaitingPromotion']>;
+  readStorageAckKnowledgeAssetRootCount: NonNullable<StorageACKHandlerConfig['readKnowledgeAssetRootCount']>;
+  recordStorageAckDecline(code: string): void;
+  gossipWireIdFor(localId: string): string;
+  getSwmSubscriptionSource(...candidateIds: Array<string | undefined>): SubscriptionSource | undefined;
   prepareDurableRootAtomicCompanion: NonNullable<ConstructorParameters<typeof StorageACKHandler>[1]['resolveDurableRootAtomicCompanion']>;
   chain: ChainAdapter;
   config: ResolvedDKGAgentConfig;
@@ -49,6 +50,7 @@ export interface StorageACKRegistrarPorts {
   signerCandidates: ethers.Wallet[];
   initialIdentityId: bigint;
   transientIdentityUnresolved: boolean;
+  pendingAckTxWindowMs: number;
   isRegistered(): boolean;
   isStarted(): boolean;
   ensureWalletsRegistered(ctx: OperationContext, identityId: bigint): Promise<boolean>;
@@ -204,7 +206,7 @@ export function createStorageACKRegistrationPlan(ports: StorageACKRegistrarPorts
         onPriorVersionAwaitingPromotion: (request) => ports.promoteStorageAckPriorVersion(request),
         readKnowledgeAssetRootCount: (kaUal, signal) =>
           ports.readStorageAckKnowledgeAssetRootCount(kaUal, signal),
-        pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS,
+        pendingAckTxWindowMs: ports.pendingAckTxWindowMs,
         // Testnet dead-air fix: `isOperationalWalletRegistered` is a
         // LIVE chain read the handler runs on EVERY inbound StorageACK.
         // With the raw wiring, one degraded shared RPC made the lookup
@@ -332,13 +334,14 @@ export function createStorageACKRegistrationPlan(ports: StorageACKRegistrarPorts
       // dedup; ackHandler's signature stays the same.
       const endpoint = registerStorageACKEndpoint({
         registerGroup: (entries) => ports.messenger.registerGroup(entries),
+        trackRemoteCompletion: (completion) => registration.trackRemoteCompletion(completion),
         publish: (data, peerIdStr) => {
           const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-          return ackHandler.handler(data, peerId);
+          return ackHandler.remoteExecution(data, peerId);
         },
         update: (data, peerIdStr) => {
           const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-          return ackHandler.updateHandler(data, peerId);
+          return ackHandler.remoteUpdateExecution(data, peerId);
         },
         publishLocal: (data, peerIdStr, signal, context) => {
           const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };

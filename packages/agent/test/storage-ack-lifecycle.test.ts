@@ -39,6 +39,14 @@ vi.mock('@origintrail-official/dkg-publisher', async () => {
         capturedStorageACKHandlerSignals.push(signal);
         return new Uint8Array([2]);
       }
+      remoteExecution(data: Uint8Array, peer: { toString(): string }, signal?: AbortSignal) {
+        const response = this.handler(data, peer, signal);
+        return { response, completion: response };
+      }
+      remoteUpdateExecution(data: Uint8Array, peer: { toString(): string }, signal?: AbortSignal) {
+        const response = this.updateHandler(data, peer, signal);
+        return { response, completion: response };
+      }
       localHandler(data: Uint8Array, peer: { toString(): string }, signal?: AbortSignal): Promise<Uint8Array> {
         return this.handler(data, peer, signal);
       }

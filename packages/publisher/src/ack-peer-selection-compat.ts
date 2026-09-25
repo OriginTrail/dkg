@@ -6,12 +6,27 @@ import {
   type ACKCanonicalCandidatePeerDiagnostic,
 } from './ack-peer-selection.js';
 
-/** @deprecated Use the canonical selector with `capability`. */
-export interface ACKCandidatePeerSelectionInput extends ACKCanonicalCandidatePeerSelectionInput {
-  requiredACKs: number;
+type LegacyACKCandidatePeerSelectionInput = Omit<ACKCanonicalCandidatePeerSelectionInput, 'capability'> & {
+  capability?: never;
   knownCorePeerIds?: ReadonlySet<string>;
   knownCorePeerIdsV2?: ReadonlySet<string>;
-}
+  /** Historical parameter; selection never truncates candidates to a quorum. */
+  requiredACKs?: number;
+};
+
+type CapabilityACKCandidatePeerSelectionInput = ACKCanonicalCandidatePeerSelectionInput & {
+  knownCorePeerIds?: never;
+  knownCorePeerIdsV2?: never;
+  /** Historical parameter; selection never truncates candidates to a quorum. */
+  requiredACKs?: number;
+};
+
+/** @deprecated Use the canonical selector with `capability`. */
+export type ACKCandidatePeerSelectionInput =
+  | LegacyACKCandidatePeerSelectionInput
+  | CapabilityACKCandidatePeerSelectionInput;
+
+type WithoutRequiredACKs<T> = T extends unknown ? Omit<T, 'requiredACKs'> : never;
 
 export interface ACKCandidatePeerDiagnostic extends Omit<ACKCanonicalCandidatePeerDiagnostic, 'tier'> {
   tier: ACKCanonicalCandidatePeerDiagnostic['tier'] | 'v2Advertised';
@@ -53,12 +68,8 @@ function adaptLegacyInput(input: ACKCandidatePeerSelectionInput): {
 }
 
 /** @deprecated Use selectCanonicalACKCandidateUniverse. */
-export function selectACKCandidateUniverse(input: Pick<
-  ACKCandidatePeerSelectionInput,
-  'connectedPeers' | 'ackCandidatePeerIds' | 'selfPeerId' | 'localCandidate'
-  | 'capability' | 'knownCorePeerIds' | 'knownCorePeerIdsV2' | 'protocol'
->): string[] {
-  return selectCanonicalACKCandidateUniverse(adaptLegacyInput({ ...input, requiredACKs: 0 }).canonical);
+export function selectACKCandidateUniverse(input: WithoutRequiredACKs<ACKCandidatePeerSelectionInput>): string[] {
+  return selectCanonicalACKCandidateUniverse(adaptLegacyInput(input).canonical);
 }
 
 /** @deprecated Compatibility adapter for callers using knownCorePeerIds. */
