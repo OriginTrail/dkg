@@ -25,17 +25,20 @@ import {
   openFinalizationRecoveryDatabase,
 } from './finalization-recovery-sqlite-schema.js';
 import {
+  displaceStableFailuresWithinTransaction,
   hasFinalizationRecoveryCapacity,
   hasFinalizationRecoveryDeferredCapacity,
   pruneFinalizationRecoveryRowsWithinTransaction,
   readFinalizationRecoveryCapacity,
   readFinalizationRecoveryDeferredCapacity,
   resolveFinalizationRecoveryRetentionPolicy,
+  type FinalizationRecoveryDisplacement,
   type FinalizationRecoveryRetentionPolicy,
   type SqliteFinalizationRecoveryStoreOptions,
 } from './finalization-recovery-sqlite-policy.js';
 
 export type {
+  FinalizationRecoveryDisplacement,
   SqliteFinalizationRecoveryStoreOptions,
 } from './finalization-recovery-sqlite-policy.js';
 
@@ -128,6 +131,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
   #closePromise: Promise<void> | undefined;
   #mutationTail: Promise<void> = Promise.resolve();
   readonly #policy: FinalizationRecoveryRetentionPolicy;
+  readonly #onDisplaced: SqliteFinalizationRecoveryStoreOptions['onDisplaced'];
 
   private constructor(
     readonly databasePath: string,
@@ -135,6 +139,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     options: SqliteFinalizationRecoveryStoreOptions,
   ) {
     this.#policy = resolveFinalizationRecoveryRetentionPolicy(options);
+    this.#onDisplaced = options.onDisplaced;
   }
 
   static async open(
@@ -281,18 +286,31 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
         }
       }
       const now = this.#policy.now();
-      if (!hasFinalizationRecoveryCapacity(this.database, this.#policy, input)) {
-        if (!hasFinalizationRecoveryDeferredCapacity(this.database, this.#policy, input)) {
-          return { status: 'capacity' };
-        }
+      let displaced: FinalizationRecoveryDisplacement[] = [];
+      if (hasFinalizationRecoveryCapacity(this.database, this.#policy, input)) {
         this.transaction(() => {
-          this.insertPendingWithinTransaction(input, digest, now);
+          this.insertLiveWithinTransaction(input, digest, now);
         });
-        return { status: 'pending' };
+      } else {
+        let admitted = false;
+        this.transaction(() => {
+          const freed = this.displaceForWithinTransaction(input, now);
+          if (!freed) return;
+          displaced = freed;
+          this.insertLiveWithinTransaction(input, digest, now);
+          admitted = true;
+        });
+        if (!admitted) {
+          if (!hasFinalizationRecoveryDeferredCapacity(this.database, this.#policy, input)) {
+            return { status: 'capacity' };
+          }
+          this.transaction(() => {
+            this.insertPendingWithinTransaction(input, digest, now);
+          });
+          return { status: 'pending' };
+        }
       }
-      this.transaction(() => {
-        this.insertLiveWithinTransaction(input, digest, now);
-      });
+      this.notifyDisplaced(displaced);
       const row = this.database.prepare(
         'SELECT * FROM finalization_inbox_v1 WHERE key = ?',
       ).get(input.key);
@@ -301,12 +319,57 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     });
   }
 
+  /**
+   * Make room for `input` by displacing entries that keep failing the same
+   * way, or leave the inbox unchanged when that would not make room.
+   */
+  private displaceForWithinTransaction(
+    input: FinalizationRecoveryReceiveInput,
+    now: number,
+  ): FinalizationRecoveryDisplacement[] | undefined {
+    this.database.exec('SAVEPOINT finalization_displacement');
+    try {
+      const displaced = displaceStableFailuresWithinTransaction(
+        this.database,
+        this.#policy,
+        input,
+        now,
+      );
+      if (
+        displaced.length > 0
+        && hasFinalizationRecoveryCapacity(this.database, this.#policy, input)
+      ) {
+        this.database.exec('RELEASE finalization_displacement');
+        return displaced;
+      }
+      this.database.exec('ROLLBACK TO finalization_displacement');
+      this.database.exec('RELEASE finalization_displacement');
+      return undefined;
+    } catch (error) {
+      try {
+        this.database.exec('ROLLBACK TO finalization_displacement');
+        this.database.exec('RELEASE finalization_displacement');
+      } catch { /* the enclosing transaction rolls back */ }
+      throw error;
+    }
+  }
+
+  private notifyDisplaced(displaced: readonly FinalizationRecoveryDisplacement[]): void {
+    if (!this.#onDisplaced) return;
+    for (const displacement of displaced) {
+      try {
+        this.#onDisplaced(displacement);
+      } catch { /* an observer never fails admission */ }
+    }
+  }
+
   promotePending(limit: number): Promise<number> {
     if (this.#closed || this.#closing) return Promise.resolve(0);
     const boundedLimit = Math.max(1, Math.trunc(limit));
     return this.mutate(() => {
       if (this.#closed) return 0;
       let promoted = 0;
+      const displaced: FinalizationRecoveryDisplacement[] = [];
       this.transaction(() => {
         const now = this.#policy.now();
         this.pruneWithinTransaction(now);
@@ -327,7 +390,9 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
             continue;
           }
           if (!hasFinalizationRecoveryCapacity(this.database, this.#policy, input)) {
-            continue;
+            const freed = this.displaceForWithinTransaction(input, now);
+            if (!freed) continue;
+            displaced.push(...freed);
           }
           this.insertLiveWithinTransaction(
             input,
@@ -342,6 +407,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
           promoted += 1;
         }
       });
+      this.notifyDisplaced(displaced);
       return promoted;
     });
   }

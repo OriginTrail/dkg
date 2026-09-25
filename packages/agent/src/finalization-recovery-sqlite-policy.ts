@@ -16,6 +16,26 @@ const DEFAULT_RAW_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_TERMINAL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_TERMINAL_ENTRIES = 128;
 const DEFAULT_MAX_TERMINAL_BYTES = 16 * 1024 * 1024;
+// Matches FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD: the streak at which a
+// failure counts as stable and its retries slow to the stable-failure cadence.
+const DEFAULT_DISPLACE_AFTER_FAILURE_STREAK = 3;
+const DEFAULT_DISPLACE_MIN_AGE_MS = 5 * 60 * 1000;
+// A local copy that cannot be prepared for the finalization. The chain-promote
+// sweep and durable sync repair such an asset without the inbox entry.
+const DEFAULT_DISPLACEABLE_FAILURE_SIGNATURES = Object.freeze(['workspace-unavailable']);
+const MAX_DISPLACEMENTS_PER_ADMISSION = 8;
+
+/** A live entry rejected to make room for another finalization. */
+export interface FinalizationRecoveryDisplacement {
+  readonly key: string;
+  readonly ual: string;
+  readonly contextGraphId: string;
+  readonly failureSignature: string;
+  readonly failureStreak: number;
+  readonly lastError: string | null;
+  readonly admittedKey: string;
+  readonly admittedUal: string;
+}
 
 export interface SqliteFinalizationRecoveryStoreOptions {
   maxEntries?: number;
@@ -31,6 +51,14 @@ export interface SqliteFinalizationRecoveryStoreOptions {
   terminalTtlMs?: number;
   maxTerminalEntries?: number;
   maxTerminalBytes?: number;
+  /** Consecutive identical failures after which a live entry may be displaced. */
+  displaceAfterFailureStreak?: number;
+  /** Minimum age of a live entry before it may be displaced. */
+  displaceMinAgeMs?: number;
+  /** Failure signatures whose entries may be displaced. */
+  displaceableFailureSignatures?: readonly string[];
+  /** Called after a live entry has been displaced to admit another. */
+  onDisplaced?: (displacement: FinalizationRecoveryDisplacement) => void;
   now?: () => number;
 }
 
@@ -48,6 +76,9 @@ export interface FinalizationRecoveryRetentionPolicy {
   terminalTtlMs: number;
   maxTerminalEntries: number;
   maxTerminalBytes: number;
+  displaceAfterFailureStreak: number;
+  displaceMinAgeMs: number;
+  displaceableFailureSignatures: readonly string[];
   now: () => number;
 }
 
@@ -103,8 +134,114 @@ export function resolveFinalizationRecoveryRetentionPolicy(
       options.maxTerminalBytes,
       DEFAULT_MAX_TERMINAL_BYTES,
     ),
+    displaceAfterFailureStreak: positiveInteger(
+      options.displaceAfterFailureStreak,
+      DEFAULT_DISPLACE_AFTER_FAILURE_STREAK,
+    ),
+    displaceMinAgeMs: Number.isSafeInteger(options.displaceMinAgeMs)
+      && (options.displaceMinAgeMs ?? -1) >= 0
+      ? options.displaceMinAgeMs!
+      : DEFAULT_DISPLACE_MIN_AGE_MS,
+    displaceableFailureSignatures: Object.freeze([
+      ...(options.displaceableFailureSignatures ?? DEFAULT_DISPLACEABLE_FAILURE_SIGNATURES),
+    ]),
     now: options.now ?? Date.now,
   };
+}
+
+/**
+ * Free live capacity for `input` by rejecting entries that keep failing the
+ * same way.
+ *
+ * A live entry whose local copy cannot be prepared keeps its slot for the
+ * whole retry window, and its retries keep it clear of the raw TTL. Enough of
+ * them fill a publisher's or a Context Graph's quota, and every later
+ * finalization from that publisher is parked behind them. When `input` finds
+ * no capacity, this rejects the oldest RECEIVED entry that has failed with a
+ * displaceable signature at least `displaceAfterFailureStreak` times in a row
+ * and is at least `displaceMinAgeMs` old, preferring one from the same peer,
+ * then from the same Context Graph. The asset is left to chain reconciliation.
+ * Verified, reorged and still-retrying entries are never displaced, and every
+ * cap still applies. Returns the displaced entries in order; the caller checks
+ * capacity again.
+ */
+export function displaceStableFailuresWithinTransaction(
+  database: DatabaseSync,
+  policy: FinalizationRecoveryRetentionPolicy,
+  input: FinalizationRecoveryReceiveInput,
+  now: number,
+  replacingKey?: string,
+): FinalizationRecoveryDisplacement[] {
+  const displaced: FinalizationRecoveryDisplacement[] = [];
+  const signatures = policy.displaceableFailureSignatures;
+  if (signatures.length === 0) return displaced;
+  const placeholders = signatures.map(() => '?').join(', ');
+  const candidates = (scope: string) => database.prepare(`
+    SELECT key, ual, context_graph_id, failure_signature, failure_streak, last_error
+    FROM finalization_inbox_v1
+    WHERE state = 'RECEIVED'
+      AND publisher_upgrade_pending = 0
+      AND failure_streak >= ?
+      AND failure_signature IN (${placeholders})
+      AND created_at <= ?
+      AND key != ?
+      ${scope}
+    ORDER BY (source_peer_id IS ?) DESC, (context_graph_id = ?) DESC, created_at ASC, key ASC
+    LIMIT 1
+  `);
+  const reject = database.prepare(`
+    UPDATE finalization_inbox_v1
+    SET state = 'REJECTED',
+        publisher_upgrade_pending = 0,
+        failure_signature = NULL,
+        failure_streak = 0,
+        last_error = ?,
+        next_attempt_at = NULL,
+        updated_at = ?
+    WHERE key = ? AND state = 'RECEIVED'
+  `);
+  while (displaced.length < MAX_DISPLACEMENTS_PER_ADMISSION) {
+    const shortfall = finalizationRecoveryCapacityShortfall(database, policy, input, replacingKey);
+    if (shortfall === undefined) break;
+    // Only an entry that counts against the exhausted limit frees it.
+    const scoped = shortfall === 'peer'
+      ? { clause: 'AND source_peer_id = ?', values: [input.sourcePeerId ?? null] }
+      : shortfall === 'context-graph'
+        ? { clause: 'AND context_graph_id = ?', values: [input.contextGraphId] }
+        : { clause: '', values: [] };
+    const row = candidates(scoped.clause).get(
+      policy.displaceAfterFailureStreak,
+      ...signatures,
+      now - policy.displaceMinAgeMs,
+      input.key,
+      ...scoped.values,
+      input.sourcePeerId ?? null,
+      input.contextGraphId,
+    ) as {
+      key: string;
+      ual: string;
+      context_graph_id: string;
+      failure_signature: string;
+      failure_streak: number;
+      last_error: string | null;
+    } | undefined;
+    if (!row) break;
+    const reason = `displaced to admit ${input.ual} after ${row.failure_streak} `
+      + `consecutive ${row.failure_signature} failures`
+      + (row.last_error ? `: ${row.last_error}` : '');
+    if (reject.run(reason, now, row.key).changes === 0) break;
+    displaced.push({
+      key: row.key,
+      ual: row.ual,
+      contextGraphId: row.context_graph_id,
+      failureSignature: row.failure_signature,
+      failureStreak: Number(row.failure_streak),
+      lastError: row.last_error,
+      admittedKey: input.key,
+      admittedUal: input.ual,
+    });
+  }
+  return displaced;
 }
 
 export function pruneFinalizationRecoveryRowsWithinTransaction(
@@ -189,12 +326,14 @@ export function readFinalizationRecoveryDeferredCapacity(
   };
 }
 
-export function hasFinalizationRecoveryCapacity(
+type FinalizationRecoveryCapacityShortfall = 'total' | 'context-graph' | 'peer';
+
+function finalizationRecoveryCapacityShortfall(
   database: DatabaseSync,
   policy: FinalizationRecoveryRetentionPolicy,
   input: FinalizationRecoveryReceiveInput,
   replacingKey?: string,
-): boolean {
+): FinalizationRecoveryCapacityShortfall | undefined {
   const live = database.prepare(`
     SELECT COUNT(*) AS count, COALESCE(SUM(length(raw_envelope)), 0) AS bytes
     FROM finalization_inbox_v1
@@ -204,22 +343,31 @@ export function hasFinalizationRecoveryCapacity(
   if (
     Number(live?.count ?? 0) >= policy.maxEntries
     || Number(live?.bytes ?? 0) + input.rawMessage.byteLength > policy.maxTotalBytes
-  ) return false;
+  ) return 'total';
   const graphCount = database.prepare(`
     SELECT COUNT(*) AS count FROM finalization_inbox_v1
     WHERE (state IN ('RECEIVED','VERIFIED','REORGED') OR publisher_upgrade_pending = 1)
       AND context_graph_id = ? AND (? IS NULL OR key != ?)
   `).get(input.contextGraphId, replacingKey ?? null, replacingKey ?? null);
-  if (Number(graphCount?.count ?? 0) >= policy.maxPerContextGraph) return false;
+  if (Number(graphCount?.count ?? 0) >= policy.maxPerContextGraph) return 'context-graph';
   if (input.sourcePeerId) {
     const peerCount = database.prepare(`
       SELECT COUNT(*) AS count FROM finalization_inbox_v1
       WHERE (state IN ('RECEIVED','VERIFIED','REORGED') OR publisher_upgrade_pending = 1)
         AND source_peer_id = ? AND (? IS NULL OR key != ?)
     `).get(input.sourcePeerId, replacingKey ?? null, replacingKey ?? null);
-    if (Number(peerCount?.count ?? 0) >= policy.maxPerPeer) return false;
+    if (Number(peerCount?.count ?? 0) >= policy.maxPerPeer) return 'peer';
   }
-  return true;
+  return undefined;
+}
+
+export function hasFinalizationRecoveryCapacity(
+  database: DatabaseSync,
+  policy: FinalizationRecoveryRetentionPolicy,
+  input: FinalizationRecoveryReceiveInput,
+  replacingKey?: string,
+): boolean {
+  return finalizationRecoveryCapacityShortfall(database, policy, input, replacingKey) === undefined;
 }
 
 export function readFinalizationRecoveryCapacity(
