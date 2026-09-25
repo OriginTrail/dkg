@@ -36,6 +36,18 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Fixed
 
+- **One damaged shared-memory head no longer stops Verifiable Memory
+  promotion for a whole Context Graph**: a node could end up with a Knowledge
+  Asset's graph-scoped SWM head missing its share-operation id, for example
+  when a sync round rewrote the head right after finalization had promoted the
+  asset and retired its SWM copy. Chain reconcile handled that asset from its
+  verified VM copy, but the follow-up SWM cleanup read the head again, failed on
+  it, and failed the whole Context Graph's VM reconcile on every sweep. Every
+  later asset in that graph then stayed in Shared Working Memory on that node.
+  10.0.18 had the same failure. The cleanup now removes such a head when it
+  names no share operation and no newer version than the confirmed VM copy. Any
+  other corrupt head is kept and reported with a warning, and no longer blocks
+  the rest of the graph.
 - **An Edge can publish to Verifiable Memory in a public Context Graph that
   another node registered**: the publish check looked for the graph's
   registration only in the node's own store, and an Edge never receives that
