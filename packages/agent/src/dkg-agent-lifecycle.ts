@@ -383,7 +383,7 @@ import {
 } from './sync/responder/sync-handler.js';
 import {
   runSelectedSharedMemoryRetry,
-  runSyncOnConnect,
+  runRegistrySyncOnConnect,
   SyncOnConnectPostSyncError,
   type SyncOnConnectOutcome,
   type SyncOnConnectPeerOutcome,
@@ -4863,7 +4863,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           : new Set<string>(),
       )
     );
-    return runSyncOnConnect({
+    return runRegistrySyncOnConnect({
       remotePeer,
       syncingPeers: session,
       signal,
