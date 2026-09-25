@@ -96,7 +96,9 @@ async function buildAgent(opts: {
       getConnections: () => opts.connected.map(connection),
     },
   };
-  for (const id of opts.confirmedCores) internals.peerCapabilityRegistry.observe(id, { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK] });
+  for (const id of opts.confirmedCores) internals.peerCapabilityRegistry.observe(id, {
+    source: 'identify-snapshot', protocols: [PROTOCOL_STORAGE_ACK],
+  });
   internals.lastKnownRequiredACKs = opts.lastKnownRequiredACKs;
   return internals;
 }
@@ -135,6 +137,10 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     registry.observe(CORE[0], { source: 'peer-update', protocols: [PROTOCOL_SYNC] });
     expect(registry.supportsCore(CORE[0])).toBe(false);
     expect(registry.supports(CORE[0], PROTOCOL_STORAGE_ACK_V2)).toBe(false);
+    registry.observe(CORE[0], {
+      source: 'identify-snapshot', protocols: [PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2],
+    });
+    expect(registry.supportsCore(CORE[0])).toBe(false);
     expect(snapshot.has(CORE[0])).toBe(true);
   });
 
@@ -185,6 +191,8 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     });
 
     expect(a.peerCapabilityRegistry.supportsCore(CORE[0])).toBe(true);
+    expect((a.peerCapabilityRegistry.supportsCore(CORE[0]) && a.peerCapabilityRegistry.supports(CORE[0], PROTOCOL_STORAGE_ACK_V2))).toBe(true);
+    a.handlePeerUpdateForSyncRetry(CORE[0], [PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC]);
     expect((a.peerCapabilityRegistry.supportsCore(CORE[0]) && a.peerCapabilityRegistry.supports(CORE[0], PROTOCOL_STORAGE_ACK_V2))).toBe(false);
     expect(a.getACKCandidatePeers()).toEqual([CORE[0]]);
     a.peerCapabilityRegistry.observe(CORE[1], { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK_V2] });

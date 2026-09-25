@@ -7,8 +7,13 @@ export type PeerCapabilityObservation =
   | { readonly source: 'negotiation'; readonly protocol: string };
 
 interface PeerCapabilityEvidence {
-  advertised: Set<string>;
+  identified: Set<string>;
+  updated: Set<string> | null;
   negotiated: Set<string>;
+}
+
+function supports(record: PeerCapabilityEvidence, protocol: string): boolean {
+  return (record.updated ?? record.identified).has(protocol) || record.negotiated.has(protocol);
 }
 
 function applyObservation(record: PeerCapabilityEvidence, observation: PeerCapabilityObservation): void {
@@ -18,16 +23,20 @@ function applyObservation(record: PeerCapabilityEvidence, observation: PeerCapab
   }
   // An empty identify or peer:update contains no authoritative protocol list.
   if (observation.protocols.length === 0) return;
-  // A live peer:update supersedes probes made against an older handler set.
-  if (observation.source === 'peer-update') record.negotiated.clear();
-  // Cached identify may lag a successful live negotiation, which it retains.
-  record.advertised = new Set(observation.protocols);
+  if (observation.source === 'peer-update') {
+    // A live event is authoritative until disconnect or another event.
+    record.updated = new Set(observation.protocols);
+    record.negotiated.clear();
+  } else {
+    // A cached identify snapshot cannot undo a newer live update or probe.
+    record.identified = new Set(observation.protocols);
+  }
 }
 
 function protocolPeers(peers: ReadonlyMap<string, PeerCapabilityEvidence>, protocol: string): ReadonlySet<string> {
   const result = new Set<string>();
   for (const [peerId, record] of peers) {
-    if (record.advertised.has(protocol) || record.negotiated.has(protocol)) result.add(peerId);
+    if (supports(record, protocol)) result.add(peerId);
   }
   return result;
 }
@@ -38,20 +47,21 @@ export class PeerCapabilityRound {
 
   constructor(private readonly registry: PeerCapabilityRegistry, source: ReadonlyMap<string, PeerCapabilityEvidence>) {
     this.peers = new Map([...source].map(([peerId, record]) => [peerId, {
-      advertised: new Set(record.advertised),
+      identified: new Set(record.identified),
+      updated: record.updated ? new Set(record.updated) : null,
       negotiated: new Set(record.negotiated),
     }]));
   }
 
   supports(peerId: string, protocol: string): boolean {
     const record = this.peers.get(peerId);
-    return record !== undefined && (record.advertised.has(protocol) || record.negotiated.has(protocol));
+    return record !== undefined && supports(record, protocol);
   }
 
   observe(peerId: string, observation: Extract<PeerCapabilityObservation, { source: 'negotiation' }>): void {
     let record = this.peers.get(peerId);
     if (!record) {
-      record = { advertised: new Set(), negotiated: new Set() };
+      record = { identified: new Set(), updated: null, negotiated: new Set() };
       this.peers.set(peerId, record);
     }
     applyObservation(record, observation);
@@ -70,7 +80,7 @@ export class PeerCapabilityRegistry {
     if (observation.source !== 'negotiation' && observation.protocols.length === 0) return;
     let record = this.peers.get(peerId);
     if (!record) {
-      record = { advertised: new Set(), negotiated: new Set() };
+      record = { identified: new Set(), updated: null, negotiated: new Set() };
       this.peers.set(peerId, record);
     }
     applyObservation(record, observation);
@@ -80,7 +90,7 @@ export class PeerCapabilityRegistry {
 
   supports(peerId: string, protocol: string): boolean {
     const record = this.peers.get(peerId);
-    return record !== undefined && (record.advertised.has(protocol) || record.negotiated.has(protocol));
+    return record !== undefined && supports(record, protocol);
   }
 
   supportsCore(peerId: string): boolean { return this.supports(peerId, PROTOCOL_STORAGE_ACK); }
