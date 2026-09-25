@@ -141,6 +141,24 @@ interface VerifiedAuthorCatalogDirectoryPathStateV1 {
   readonly descriptor: Readonly<AuthorCatalogBucketDescriptorV1>;
 }
 
+type NormalizedAuthorCatalogDirectoryPathNode =
+  | {
+      readonly kind: 'branch';
+      readonly envelope: SignedAuthorCatalogDirectoryNodeEnvelopeV1;
+      readonly payload: AuthorCatalogDirectoryNodeV1;
+      readonly level: bigint;
+      readonly firstBucketId: bigint;
+      readonly entries: readonly AuthorCatalogChildDescriptorV1[];
+    }
+  | {
+      readonly kind: 'leaf';
+      readonly envelope: SignedAuthorCatalogDirectoryNodeEnvelopeV1;
+      readonly payload: AuthorCatalogDirectoryNodeV1;
+      readonly level: 0n;
+      readonly firstBucketId: bigint;
+      readonly entries: readonly AuthorCatalogBucketDescriptorV1[];
+    };
+
 const VERIFIED_AUTHOR_CATALOG_DIRECTORY_PATHS_V1 = new WeakMap<
   object,
   VerifiedAuthorCatalogDirectoryPathStateV1
@@ -174,6 +192,39 @@ export function assertAuthorCatalogDirectoryNodeScopeBindingV1(
       'directory node era does not match the contextual catalog scope',
     );
   }
+}
+
+/** Validate once and retain the level-specific entry model for path traversal. */
+function normalizeAuthorCatalogDirectoryPathNode(
+  value: unknown,
+  scope: AuthorCatalogScopeV1,
+): NormalizedAuthorCatalogDirectoryPathNode {
+  assertSignedAuthorCatalogDirectoryNodeEnvelopeV1(value as SignedControlEnvelopeV1, scope.bucketCount);
+  const envelope = value as SignedAuthorCatalogDirectoryNodeEnvelopeV1;
+  assertAuthorCatalogDirectoryNodeScopeBindingV1(envelope.payload, scope);
+  const payload = envelope.payload;
+  const level = BigInt(payload.level);
+  const firstBucketId = BigInt(payload.firstBucketId);
+  if (level === 0n) {
+    const entries: AuthorCatalogBucketDescriptorV1[] = [];
+    for (let index = 0; index < payload.entries.length; index += 1) {
+      const entry = payload.entries[index];
+      if (!('bucketDigest' in entry)) {
+        fail('catalog-directory-path', `leaf entry ${index} is not a bucket descriptor`);
+      }
+      entries[index] = entry;
+    }
+    return { kind: 'leaf', envelope, payload, level: 0n, firstBucketId, entries };
+  }
+  const entries: AuthorCatalogChildDescriptorV1[] = [];
+  for (let index = 0; index < payload.entries.length; index += 1) {
+    const entry = payload.entries[index];
+    if (!('childDigest' in entry)) {
+      fail('catalog-directory-path', `branch entry ${index} is not a child descriptor`);
+    }
+    entries[index] = entry;
+  }
+  return { kind: 'branch', envelope, payload, level, firstBucketId, entries };
 }
 
 export function canonicalizeAuthorCatalogDirectoryNodePayloadBytesV1(
@@ -319,45 +370,43 @@ export function verifyAuthorCatalogDirectoryPathV1(
     );
   }
 
-  const unvalidatedEnvelopes = path as SignedControlEnvelopeV1[];
-  const envelopes: SignedAuthorCatalogDirectoryNodeEnvelopeV1[] = new Array(
-    unvalidatedEnvelopes.length,
-  );
+  const nodes: NormalizedAuthorCatalogDirectoryPathNode[] = [];
   const seenDigests = new Set<string>();
-  for (let pathIndex = 0; pathIndex < unvalidatedEnvelopes.length; pathIndex += 1) {
-    const envelope = unvalidatedEnvelopes[pathIndex];
-    assertSignedAuthorCatalogDirectoryNodeEnvelopeV1(envelope, scope.bucketCount);
-    assertAuthorCatalogDirectoryNodeScopeBindingV1(envelope.payload, scope);
-    envelopes[pathIndex] = envelope;
+  for (let pathIndex = 0; pathIndex < path.length; pathIndex += 1) {
+    const node = normalizeAuthorCatalogDirectoryPathNode(path[pathIndex], scope);
+    nodes[pathIndex] = node;
     const expectedLevel = expectedHeight - BigInt(pathIndex);
-    if (envelope.payload.level !== expectedLevel.toString()) {
+    if (node.level !== expectedLevel) {
       fail(
         'catalog-directory-path',
         `directory path node ${pathIndex} must have level ${expectedLevel}`,
       );
     }
-    if (seenDigests.has(envelope.objectDigest)) {
+    if (seenDigests.has(node.envelope.objectDigest)) {
       fail('catalog-directory-path', 'directory path must not repeat an object digest');
     }
-    seenDigests.add(envelope.objectDigest);
+    seenDigests.add(node.envelope.objectDigest);
   }
 
-  const root = envelopes[0];
-  if (root.objectDigest !== head.directoryRootDigest) {
+  const root = nodes[0];
+  if (root.envelope.objectDigest !== head.directoryRootDigest) {
     fail('catalog-directory-path', 'root objectDigest does not match directoryRootDigest');
   }
-  if (root.payload.firstBucketId !== '0') {
+  if (root.firstBucketId !== 0n) {
     fail('catalog-directory-path', 'root directory node must start at bucket zero');
   }
   if (sumEntryRows(root.payload.entries) !== BigInt(head.totalRows)) {
     fail('catalog-directory-path', 'root rowCount sum does not match head totalRows');
   }
 
-  for (let pathIndex = 0; pathIndex + 1 < envelopes.length; pathIndex += 1) {
-    const current = envelopes[pathIndex].payload;
-    const next = envelopes[pathIndex + 1];
-    const level = BigInt(current.level);
-    const currentFirst = BigInt(current.firstBucketId);
+  for (let pathIndex = 0; pathIndex + 1 < nodes.length; pathIndex += 1) {
+    const current = nodes[pathIndex];
+    const next = nodes[pathIndex + 1];
+    if (current.kind !== 'branch') {
+      fail('catalog-directory-path', 'leaf directory node cannot precede another path node');
+    }
+    const level = current.level;
+    const currentFirst = current.firstBucketId;
     const childWidth = directoryPower(level);
     if (bucketId < currentFirst) {
       fail('catalog-directory-path', 'selected bucket precedes the current node range');
@@ -366,11 +415,11 @@ export function verifyAuthorCatalogDirectoryPathV1(
     if (selectedIndex >= BigInt(current.entries.length)) {
       fail('catalog-directory-path', 'selected bucket is outside the current node range');
     }
-    const selected = current.entries[Number(selectedIndex)] as AuthorCatalogChildDescriptorV1;
-    if (selected.childDigest !== next.objectDigest) {
+    const selected = current.entries[Number(selectedIndex)];
+    if (selected.childDigest !== next.envelope.objectDigest) {
       fail('catalog-directory-path', 'selected childDigest does not match the next path node');
     }
-    if (selected.firstBucketId !== next.payload.firstBucketId) {
+    if (selected.firstBucketId !== next.firstBucketId.toString()) {
       fail('catalog-directory-path', 'selected child range does not match the next path node');
     }
     const nextPayloadBytes = canonicalizeAuthorCatalogDirectoryNodePayloadBytesV1(
@@ -385,8 +434,11 @@ export function verifyAuthorCatalogDirectoryPathV1(
     }
   }
 
-  const leaf = envelopes[envelopes.length - 1].payload;
-  const leafFirst = BigInt(leaf.firstBucketId);
+  const leaf = nodes[nodes.length - 1];
+  if (leaf.kind !== 'leaf') {
+    fail('catalog-directory-path', 'directory path must terminate at a leaf node');
+  }
+  const leafFirst = leaf.firstBucketId;
   if (bucketId < leafFirst) {
     fail('catalog-directory-path', 'selected bucket precedes the leaf node range');
   }
@@ -394,7 +446,7 @@ export function verifyAuthorCatalogDirectoryPathV1(
   if (selectedLeafIndex >= BigInt(leaf.entries.length)) {
     fail('catalog-directory-path', 'selected bucket is outside the leaf node range');
   }
-  const descriptor = leaf.entries[Number(selectedLeafIndex)] as AuthorCatalogBucketDescriptorV1;
+  const descriptor = leaf.entries[Number(selectedLeafIndex)];
   if (descriptor.bucketId !== selectedBucketId) {
     fail('catalog-directory-path', 'selected leaf descriptor does not match selectedBucketId');
   }

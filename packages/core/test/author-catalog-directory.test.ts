@@ -584,7 +584,7 @@ describe('author catalog selected directory paths', () => {
       .toThrow(/catalog-directory-path/);
   });
 
-  it('never consumes poisoned inherited iterators on entries or paths', () => {
+  it('never consumes poisoned inherited array methods on entries or paths', () => {
     const entries = [...EMPTY_NODE.entries];
     const node = { ...EMPTY_NODE, entries };
     const signed = signedEnvelope(node, '1');
@@ -593,25 +593,51 @@ describe('author catalog selected directory paths', () => {
       ...EMPTY_HEAD.payload,
       directoryRootDigest: signed.objectDigest,
     });
+    const fixture = twoLevelFixture(300n);
+    const poisoned = new Set<unknown>([
+      entries,
+      path,
+      fixture.path,
+      fixture.root.payload.entries,
+      fixture.leaf.payload.entries,
+    ]);
     const originalIterator = Array.prototype[Symbol.iterator];
+    const originalMap = Array.prototype.map;
     Object.defineProperty(Array.prototype, Symbol.iterator, {
       configurable: true,
       writable: true,
       value(this: unknown[]) {
-        if (this === entries || this === path) {
+        if (poisoned.has(this)) {
           throw new Error('poisoned directory iterator was consumed');
         }
         return originalIterator.call(this);
       },
     });
+    Object.defineProperty(Array.prototype, 'map', {
+      configurable: true,
+      writable: true,
+      value(this: unknown[], callback: never, thisArg?: never) {
+        if (poisoned.has(this)) {
+          throw new Error('poisoned directory map was consumed');
+        }
+        return originalMap.call(this, callback, thisArg);
+      },
+    });
     try {
       expect(() => assertAuthorCatalogDirectoryNodeV1(node, '1')).not.toThrow();
       expect(() => verifyAuthorCatalogDirectoryPathV1(head, path, '0')).not.toThrow();
+      expect(() => verifyAuthorCatalogDirectoryPathV1(fixture.head, fixture.path, '300'))
+        .not.toThrow();
     } finally {
       Object.defineProperty(Array.prototype, Symbol.iterator, {
         configurable: true,
         writable: true,
         value: originalIterator,
+      });
+      Object.defineProperty(Array.prototype, 'map', {
+        configurable: true,
+        writable: true,
+        value: originalMap,
       });
     }
   });
