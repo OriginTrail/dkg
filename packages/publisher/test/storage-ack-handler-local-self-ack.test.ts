@@ -18,7 +18,7 @@ import { StorageACKHandler } from '../src/storage-ack-handler.js';
 import type { LocalStorageAckHeadExpectation } from '../src/storage-ack-handler.js';
 import { computeFlatKCMerkleLeafCountV10, computeFlatKCRootV10 } from '../src/merkle.js';
 import { resolveKnowledgeAssetWorkspaceHead } from '../src/workspace-resolution.js';
-import { workspaceOperationSubject } from '../src/workspace-metadata-subjects.js';
+import { workspaceKnowledgeAssetHeadSubject, workspaceOperationSubject } from '../src/workspace-metadata-subjects.js';
 import {
   STORAGE_ACK_LEDGER_GRAPH,
   STORAGE_ACK_LEDGER_PREDICATES as LEDGER,
@@ -250,6 +250,38 @@ describe('StorageACK local self-ACK keeps the publisher SWM head (#2796)', () =>
     const copy = ackCopyOperationId(2, content('v2'));
     expect(await hasOperationRows(h, copy)).toBe(true);
     expect(await ledgerOperations(h)).toEqual([workspaceOperationSubject(SWM_GRAPH_ID, copy)]);
+  });
+
+  it('preserves a queued operation that is a non-selected equivalent head alias', async () => {
+    const h = await harness();
+    await h.publisher.stageKnowledgeAssetSharedWorkingMemoryV1(
+      shareInput(1, 'queued-publish-share', content('v1')),
+    );
+    await h.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+      ...shareInput(1, 'replacement-share', content('v1')),
+      timestamp: new Date('2026-09-24T12:01:00.000Z'),
+    });
+    // SWM sync union-inserts the older, still-valid operation ID on the head.
+    await h.store.insert([{
+      subject: workspaceKnowledgeAssetHeadSubject(UAL),
+      predicate: `${DKG}shareOperationId`,
+      object: JSON.stringify('queued-publish-share'),
+      graph: new GraphManager(h.store).sharedMemoryMetaUri(SWM_GRAPH_ID),
+    }]);
+    const before = await readHead(h);
+    expect(before.shareOperationId).toBe('replacement-share');
+    expect(before.operationAliases.map((alias) => alias.shareOperationId)).toContain('queued-publish-share');
+
+    const ack = decodeStorageACK(await h.handler.localHandler(
+      publishIntent(content('v1')),
+      { toString: () => PUBLISHER_PEER },
+      undefined,
+      expectedHead(1, 'queued-publish-share'),
+    ));
+
+    expect(isStorageACKDecline(ack)).toBe(false);
+    expect(await readHead(h)).toEqual(before);
+    expect(h.signMessage).toHaveBeenCalledOnce();
   });
 
   it.each([

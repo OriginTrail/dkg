@@ -2866,7 +2866,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               return { kind: 'disabled' };
             }
 
-            const registrationOwner = {};
+            const registrationLease = storageACKRegistrationSession.createLease();
             const ackHandler = new StorageACKHandler(this.store, {
               nodeRole: effectiveRole,
               nodeIdentityId: onChainIdentityId,
@@ -2942,7 +2942,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 },
               ),
               onSignerUnregistered: () => {
-                if (!storageACKRegistrationSession.signerLost(registrationOwner)) return;
+                if (!registrationLease.signerLost()) return;
                 this.log.warn(
                   attemptCtx,
                   `Unregistered V10 StorageACK handler: signer ${ackSignerWallet.address} ` +
@@ -3054,7 +3054,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               attemptCtx,
               `Registered V10 StorageACK handler (identity=${onChainIdentityId}, signer=${ackSignerWallet.address})`,
             );
-            return { kind: 'registered', endpoint, owner: registrationOwner };
+            return { kind: 'registered', endpoint, lease: registrationLease };
           } else if (bootChainIdentityUnresolvedTransient) {
             // #894 / Codex PR #901: identity is still 0n only because the
             // chain was unreachable at boot and the re-resolution above hasn't

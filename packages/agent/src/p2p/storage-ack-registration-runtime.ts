@@ -9,8 +9,12 @@ export type StorageACKRegistrationOptions = {
 };
 
 type RegistrationPhase = 'initial' | 'retry' | 'failover';
+export interface StorageACKRegistrationLease {
+  signerLost(): boolean;
+}
+
 export type RegistrationOutcome =
-  | { readonly kind: 'registered'; readonly endpoint: StorageACKEndpoint; readonly owner?: object }
+  | { readonly kind: 'registered'; readonly endpoint: StorageACKEndpoint; readonly lease: StorageACKRegistrationLease }
   | { readonly kind: 'retryable' }
   | { readonly kind: 'disabled' };
 
@@ -22,28 +26,40 @@ export interface StorageACKRegistrationPlan {
   onError: (phase: RegistrationPhase, error: unknown) => void;
 }
 
+type RegistrationState =
+  | { readonly kind: 'idle' }
+  | { readonly kind: 'registering'; readonly phase: RegistrationPhase }
+  | { readonly kind: 'waiting-retry'; readonly timer: ReturnType<typeof setTimeout> }
+  | { readonly kind: 'registered'; readonly endpoint: StorageACKEndpoint; readonly lease: StorageACKRegistrationLease }
+  | { readonly kind: 'retired' };
+
 class RetiredRegistrationSession extends Error {}
 
-/** One session owns its endpoint, retry timer, failover, and in-flight attempts. */
+/** A generation owns the registration state, endpoint, and its local transport. */
 export class StorageACKRegistrationSession {
-  private active = true;
+  private state: RegistrationState = { kind: 'idle' };
   private plan: StorageACKRegistrationPlan | undefined;
-  private currentEndpoint: StorageACKEndpoint | null = null;
-  private currentOwner: object | null = null;
-  private retryTimer: ReturnType<typeof setTimeout> | null = null;
-  private retryInFlight = false;
-  private failoverInFlight = false;
   private readonly attempts = new Set<Promise<unknown>>();
+  private readonly transport = new LocalStorageACKTransport();
 
-  get endpoint(): StorageACKEndpoint | null { return this.currentEndpoint; }
-  isCurrent(): boolean { return this.active; }
+  get endpoint(): StorageACKEndpoint | null {
+    return this.state.kind === 'registered' ? this.state.endpoint : null;
+  }
+  isCurrent(): boolean { return this.state.kind !== 'retired'; }
 
   /** Fence both sides of each asynchronous registration step. */
   async runStep<T>(work: () => Promise<T>): Promise<T> {
-    if (!this.active) throw new RetiredRegistrationSession();
+    if (!this.isCurrent()) throw new RetiredRegistrationSession();
     const value = await work();
-    if (!this.active) throw new RetiredRegistrationSession();
+    if (!this.isCurrent()) throw new RetiredRegistrationSession();
     return value;
+  }
+
+  createLease(): StorageACKRegistrationLease {
+    const lease: StorageACKRegistrationLease = {
+      signerLost: () => this.signerLost(lease),
+    };
+    return lease;
   }
 
   private track<T>(attempt: Promise<T>): Promise<T> {
@@ -55,51 +71,48 @@ export class StorageACKRegistrationSession {
     return attempt;
   }
 
-  private clearRetry(): void {
-    if (!this.retryTimer) return;
-    clearTimeout(this.retryTimer);
-    this.retryTimer = null;
-  }
-
-  /** Fixture installation; production attempts install from their result. */
-  install(endpoint: StorageACKEndpoint, owner: object = endpoint): boolean {
-    if (!this.active || this.currentEndpoint !== null) {
+  /** Direct fixture installation; production installs the attempt result. */
+  install(endpoint: StorageACKEndpoint, lease = this.createLease()): boolean {
+    if (this.state.kind === 'retired' || this.state.kind === 'registered') {
       endpoint.dispose();
       return false;
     }
-    this.currentEndpoint = endpoint;
-    this.currentOwner = owner;
-    this.clearRetry();
+    if (this.state.kind === 'waiting-retry') clearTimeout(this.state.timer);
+    this.state = { kind: 'registered', endpoint, lease };
     return true;
   }
 
   private scheduleRetry(options: StorageACKRegistrationOptions): void {
-    if (!this.plan || !this.active || this.retryTimer || this.currentEndpoint) return;
     const plan = this.plan;
-    this.retryTimer = setTimeout(() => {
-      this.retryTimer = null;
-      if (!this.active || !plan.isStarted() || this.currentEndpoint || this.retryInFlight) return;
-      this.retryInFlight = true;
-      void this.track(Promise.resolve().then(() => this.runAttempt(options, 'retry'))).finally(() => {
-        this.retryInFlight = false;
-      });
+    if (!plan || this.state.kind !== 'registering') return;
+    const timer = setTimeout(() => {
+      if (this.state.kind !== 'waiting-retry' || this.state.timer !== timer) return;
+      this.state = { kind: 'idle' };
+      if (!plan.isStarted()) return;
+      void this.track(Promise.resolve().then(() => this.runAttempt(options, 'retry')));
     }, plan.retryDelayMs);
-    this.retryTimer.unref?.();
+    timer.unref?.();
+    this.state = { kind: 'waiting-retry', timer };
     plan.onRetryScheduled();
   }
 
   private async runAttempt(options: StorageACKRegistrationOptions, phase: RegistrationPhase): Promise<void> {
     const plan = this.plan;
-    if (!plan || !this.active) return;
+    if (!plan || this.state.kind === 'retired' || this.state.kind === 'registered') return;
+    this.state = { kind: 'registering', phase };
     try {
       const outcome = await plan.attempt(options, phase);
       if (outcome.kind === 'registered') {
-        this.install(outcome.endpoint, outcome.owner);
-      } else if (outcome.kind === 'retryable' && this.active) {
-        this.scheduleRetry(phase === 'initial' ? { allowChainReresolution: true } : options);
+        this.install(outcome.endpoint, outcome.lease);
+      } else if (this.state.kind === 'registering' && this.state.phase === phase) {
+        if (outcome.kind === 'retryable') {
+          this.scheduleRetry(phase === 'initial' ? { allowChainReresolution: true } : options);
+        } else {
+          this.state = { kind: 'idle' };
+        }
       }
     } catch (error) {
-      if (error instanceof RetiredRegistrationSession || !this.active) return;
+      if (error instanceof RetiredRegistrationSession || this.state.kind !== 'registering' || this.state.phase !== phase) return;
       plan.onError(phase, error);
       this.scheduleRetry(phase === 'initial' ? { allowChainReresolution: true } : options);
     }
@@ -107,44 +120,55 @@ export class StorageACKRegistrationSession {
 
   start(plan: StorageACKRegistrationPlan): Promise<void> {
     if (this.plan) throw new Error('StorageACK registration session already started');
-    if (!this.active) throw new Error('StorageACK registration session retired');
+    if (!this.isCurrent()) throw new Error('StorageACK registration session retired');
     this.plan = plan;
     return this.track(this.runAttempt({}, 'initial'));
   }
 
-  signerLost(owner: object): boolean {
-    if (!this.plan || !this.active || this.currentOwner !== owner || !this.currentEndpoint || this.failoverInFlight) return false;
-    this.failoverInFlight = true;
-    const endpoint = this.currentEndpoint;
-    this.currentEndpoint = null;
-    this.currentOwner = null;
+  private signerLost(lease: StorageACKRegistrationLease): boolean {
+    if (!this.plan || this.state.kind !== 'registered' || this.state.lease !== lease) return false;
+    const endpoint = this.state.endpoint;
+    this.state = { kind: 'registering', phase: 'failover' };
     endpoint.dispose();
-    void this.track(Promise.resolve().then(() => this.runAttempt({ repairWallets: false }, 'failover'))).finally(() => {
-      this.failoverInFlight = false;
-    });
+    void this.track(Promise.resolve().then(() => this.runAttempt({ repairWallets: false }, 'failover')));
     return true;
   }
 
-  stopRetry(): void { this.clearRetry(); }
-
-  retire(): void {
-    if (!this.active) return;
-    this.active = false;
-    this.clearRetry();
-    this.currentEndpoint?.dispose();
-    this.currentEndpoint = null;
-    this.currentOwner = null;
+  stopRetry(): void {
+    if (this.state.kind !== 'waiting-retry') return;
+    clearTimeout(this.state.timer);
+    this.state = { kind: 'idle' };
   }
 
-  async drain(): Promise<void> { await Promise.allSettled(this.attempts); }
+  retire(): void {
+    if (this.state.kind === 'retired') return;
+    if (this.state.kind === 'waiting-retry') clearTimeout(this.state.timer);
+    if (this.state.kind === 'registered') this.state.endpoint.dispose();
+    this.state = { kind: 'retired' };
+    this.transport.close();
+  }
+
+  sendLocal(
+    peerId: string,
+    protocol: StorageACKProtocol,
+    data: Uint8Array,
+    timeoutMs: number,
+    expectedHead?: LocalStorageAckHeadExpectation,
+  ): Promise<Uint8Array> {
+    if (this.state.kind === 'retired') throw new Error('Local StorageACK transport is closed for a retired agent lifetime');
+    const endpoint = this.endpoint;
+    if (!endpoint) throw new Error('Local StorageACK handler is not registered');
+    return this.transport.send(endpoint, peerId, protocol, data, timeoutMs, expectedHead);
+  }
+
+  async drainAttempts(): Promise<void> { await Promise.allSettled(this.attempts); }
+  async drainTransport(): Promise<void> { await this.transport.drain(); }
 }
 
-/** Runtime swaps registration sessions and owns local transport generations. */
+/** Runtime swaps and drains self-contained registration generations. */
 export class StorageACKRegistrationRuntime {
   private currentSession: StorageACKRegistrationSession | null = null;
   private readonly retiredSessions = new Set<StorageACKRegistrationSession>();
-  private readonly retiredTransports = new Set<LocalStorageACKTransport>();
-  private localTransport = new LocalStorageACKTransport();
 
   get endpoint(): StorageACKEndpoint | null { return this.currentSession?.endpoint ?? null; }
   get registered(): boolean { return this.endpoint !== null; }
@@ -154,45 +178,38 @@ export class StorageACKRegistrationRuntime {
       this.currentSession.retire();
       this.retiredSessions.add(this.currentSession);
     }
-    this.localTransport.close();
-    this.retiredTransports.add(this.localTransport);
-    this.localTransport = new LocalStorageACKTransport();
     this.currentSession = new StorageACKRegistrationSession();
     return this.currentSession;
   }
 
   clearRetry(): void { this.currentSession?.stopRetry(); }
 
-  /** A sender captures its transport lifetime so old factories stay closed after restart. */
+  /** A sender captures its generation so stale factories cannot use a replacement endpoint. */
   createLocalSender(): (
     peerId: string, protocol: StorageACKProtocol, data: Uint8Array, timeoutMs: number,
     expectedHead?: LocalStorageAckHeadExpectation,
   ) => Promise<Uint8Array> {
-    const transport = this.localTransport;
     const session = this.currentSession;
     return (peerId, protocol, data, timeoutMs, expectedHead) => {
-      if (transport !== this.localTransport || session !== this.currentSession || !session?.isCurrent()) {
+      if (!session || session !== this.currentSession || !session.isCurrent()) {
         throw new Error('Local StorageACK transport is closed for a retired agent lifetime');
       }
-      const endpoint = session.endpoint;
-      if (!endpoint) throw new Error('Local StorageACK handler is not registered');
-      return transport.send(endpoint, peerId, protocol, data, timeoutMs, expectedHead);
+      return session.sendLocal(peerId, protocol, data, timeoutMs, expectedHead);
     };
   }
 
-  /** Fence all ACK work immediately, then join physical work before store teardown. */
+  /** Fence new work, join registration attempts, then join physical handler work. */
   async closeAndDrain(): Promise<void> {
     if (this.currentSession) {
       this.currentSession.retire();
       this.retiredSessions.add(this.currentSession);
       this.currentSession = null;
     }
-    this.localTransport.close();
     const sessions = [...this.retiredSessions];
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       await Promise.race([
-        Promise.all(sessions.map((session) => session.drain())),
+        Promise.all(sessions.map((session) => session.drainAttempts())),
         new Promise<never>((_resolve, reject) => {
           timer = setTimeout(
             () => reject(new Error('StorageACK registration did not retire within 5000ms; teardown blocked')),
@@ -203,11 +220,7 @@ export class StorageACKRegistrationRuntime {
     } finally {
       if (timer) clearTimeout(timer);
     }
+    await Promise.all(sessions.map((session) => session.drainTransport()));
     this.retiredSessions.clear();
-    await Promise.all([
-      this.localTransport.drain(),
-      ...[...this.retiredTransports].map((transport) => transport.drain()),
-    ]);
-    this.retiredTransports.clear();
   }
 }

@@ -77,6 +77,12 @@ import {
   type StorageAckLedgerEntry,
 } from './storage-ack-ledger.js';
 import { workspaceOperationSubject } from './workspace-metadata-subjects.js';
+import {
+  planStorageAckHeadPersistence,
+  type LocalStorageAckHeadExpectation,
+  type StorageAckRequestContext,
+} from './storage-ack-head-policy.js';
+export type { LocalStorageAckHeadExpectation, StorageAckRequestContext } from './storage-ack-head-policy.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
 import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
@@ -287,23 +293,6 @@ export interface StorageAckDecision {
 }
 
 export type StorageAckDecisionObserver = (decision: StorageAckDecision) => void | Promise<void>;
-
-/**
- * Who sent a StorageACK request. `local` is this core's own request: a
- * publishing core ACKing its own publish or update through its registered endpoint.
- */
-export interface LocalStorageAckHeadExpectation {
-  readonly shareOperationId: string;
-  readonly publisherPeerId: string;
-  readonly kaUal: string;
-  readonly assertionVersion: string;
-  readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList';
-  readonly allowedPeers: readonly string[];
-}
-
-export type StorageAckRequestContext =
-  | { readonly kind: 'remote' }
-  | { readonly kind: 'local'; readonly expectedHead?: LocalStorageAckHeadExpectation };
 
 /**
  * The complete persistence decision, resolved under the per-KA workspace lock.
@@ -1462,11 +1451,6 @@ export class StorageACKHandler {
       subGraphName: input.subGraphName,
       queryOptions: ackStoreOptions('storage-ack.persistGraphScoped.headCheck', input.signal),
     });
-    if (resolution.status === 'missing') {
-      return input.context.kind === 'local' && input.context.expectedHead
-        ? this.declineStaleLocalHead(input.cgId)
-        : replace;
-    }
     if (resolution.status === 'corrupt') {
       // The gossip path defers the same way: the sync lane repairs the head.
       return {
@@ -1479,37 +1463,25 @@ export class StorageACKHandler {
         ),
       };
     }
-    const head = resolution.head;
-    if (input.context.kind === 'local' && input.context.expectedHead) {
-      const expected = input.context.expectedHead;
-      const peers = (values: readonly string[]) => [...new Set(values.map((value) => value.trim()).filter(Boolean))].sort();
-      if (
-        expected.kaUal !== input.scope.ual
-        || expected.assertionVersion !== input.scope.assertionVersion
-        || expected.publisherPeerId !== input.publisherPeerId
-        || head.publisherPeerId !== expected.publisherPeerId
-        || head.shareOperationId !== expected.shareOperationId
-        || head.access.kind !== 'persisted'
-        || head.access.accessPolicy !== expected.accessPolicy
-        || JSON.stringify(peers(head.access.allowedPeers)) !== JSON.stringify(peers(expected.allowedPeers))
-      ) return this.declineStaleLocalHead(input.cgId);
+    const head = resolution.status === 'resolved' ? resolution.head : undefined;
+    const policy = planStorageAckHeadPersistence({
+      context: input.context,
+      head,
+      kaUal: input.scope.ual,
+      assertionVersion: input.scope.assertionVersion,
+      publisherPeerId: input.publisherPeerId,
+      publicDigest: input.publicDigest,
+      publicTripleCount: input.publicTripleCount,
+      privateTripleCount: input.privateTripleCount,
+      privateMerkleRoot: input.privateMerkleRoot,
+    });
+    if (policy.kind === 'decline-stale-local-head') return this.declineStaleLocalHead(input.cgId);
+    if (policy.kind === 'preserve-head' || policy.kind === 'replace-head') {
+      return { kind: policy.kind, supersede: [] };
     }
+    if (!head) throw new Error('StorageACK head policy requested conflict check without a head');
     const incomingVersion = BigInt(input.scope.assertionVersion);
     const currentVersion = BigInt(head.assertionVersion);
-    const sameContent =
-      incomingVersion === currentVersion
-      && head.publicQuadsDigest === input.publicDigest
-      && head.publicTripleCount === input.publicTripleCount
-      && head.privateTripleCount === input.privateTripleCount
-      && head.privateMerkleRoot?.toLowerCase() === input.privateMerkleRoot;
-    if (input.context.kind === 'local' && input.context.expectedHead && !sameContent) {
-      return this.declineStaleLocalHead(input.cgId);
-    }
-    if (sameContent) {
-      return input.context.kind === 'local' && input.context.expectedHead
-        ? { kind: 'preserve-head', supersede: [] }
-        : replace;
-    }
     const owedRows = await this.owedHeadOperations(input.swmGraphId, head, input.signal);
     if (owedRows.length === 0) return replace;
     const owed = owedRows.map((row) => row.op);

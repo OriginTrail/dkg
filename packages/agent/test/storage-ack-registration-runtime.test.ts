@@ -23,7 +23,7 @@ describe('StorageACK registration session', () => {
       attempt: async () => {
         entered();
         await gate;
-        return { kind: 'registered', endpoint: staleEndpoint } as const;
+        return { kind: 'registered', endpoint: staleEndpoint, lease: session.createLease() } as const;
       },
       retryDelayMs: 1_000,
       isStarted: () => true,
@@ -80,16 +80,18 @@ describe('StorageACK registration session', () => {
     const session = runtime.begin();
     const first = endpoint();
     const replacement = endpoint();
+    const firstLease = session.createLease();
+    const replacementLease = session.createLease();
     const attempt = vi.fn(async (options: { repairWallets?: boolean }, phase: string) => {
       if (phase === 'initial') {
-        return { kind: 'registered', endpoint: first } as const;
+        return { kind: 'registered', endpoint: first, lease: firstLease } as const;
       }
       expect(options.repairWallets).toBe(false);
       if (phase === 'failover') throw new Error('chain temporarily unavailable');
       if (attempt.mock.calls.filter(([, callPhase]) => callPhase === 'retry').length === 1) {
         return { kind: 'retryable' } as const;
       }
-      return { kind: 'registered', endpoint: replacement } as const;
+      return { kind: 'registered', endpoint: replacement, lease: replacementLease } as const;
     });
     const onError = vi.fn();
     const onRetryScheduled = vi.fn();
@@ -101,8 +103,8 @@ describe('StorageACK registration session', () => {
       onRetryScheduled,
     });
     expect(runtime.endpoint).toBe(first);
-    expect(session.signerLost(first)).toBe(true);
-    expect(session.signerLost(first)).toBe(false);
+    expect(firstLease.signerLost()).toBe(true);
+    expect(firstLease.signerLost()).toBe(false);
     await Promise.resolve();
     await Promise.resolve();
     expect(first.dispose).toHaveBeenCalledOnce();
