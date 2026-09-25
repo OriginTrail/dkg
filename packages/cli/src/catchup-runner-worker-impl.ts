@@ -27,14 +27,16 @@ import {
 import {
   addCatchupPlaneEvidence,
   catchupPeerPlaneEvidence,
-  catchupPeerResponded,
-  catchupPeerSucceeded,
   catchupPlaneCompletedWithoutFailure,
   catchupPlaneProvenByAuthorityHostedEmpty,
   catchupPlaneProvenByData,
   catchupPlaneProvenBySelectedScope,
-  type CatchupJobResult,
   type CatchupPlaneCompletionEvidence,
+} from './catchup-proof.js';
+import {
+  catchupPeerResponded,
+  catchupPeerSucceeded,
+  type CatchupJobResult,
   type CatchupRunRequest,
 } from './catchup-runner.js';
 

@@ -107,6 +107,7 @@ export default defineConfig({
           'test/nat-status.test.ts',
           'test/core-prereq-check.test.ts',
           'test/random-sampling-status.test.ts',
+          'test/catchup-proof.test.ts',
           'test/catchup-runner.test.ts',
           'test/catchup-runner-worker-impl.test.ts',
           'test/catchup-runner-worker-lifecycle.test.ts',
