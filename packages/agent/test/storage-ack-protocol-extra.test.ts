@@ -18,8 +18,7 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2 } from '@origintrail-official/dkg-core';
-import { STORAGE_ACK_PROTOCOLS } from '../src/p2p/storage-ack-protocols.js';
+import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2, STORAGE_ACK_PROTOCOLS } from '@origintrail-official/dkg-core';
 import { registerStorageACKEndpoint } from '../src/p2p/storage-ack-endpoint.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -58,11 +57,10 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
       [PROTOCOL_STORAGE_UPDATE_ACK, 'update'],
       [PROTOCOL_STORAGE_UPDATE_ACK_V2, 'update'],
     ]);
-    // Registration is staged locally and published only after its generation
-    // is still current, so shutdown cannot expose a stale endpoint.
+    // Registration is staged locally and installed by its lifecycle owner
+    // only while the generation is still current.
     expect(lifecycle).toMatch(/const endpoint\s*=\s*registerStorageACKEndpoint\(/);
-    expect(lifecycle).toMatch(/if \(!registrationIsCurrent\(\)\)\s*\{\s*endpoint\.dispose\(\);/);
-    expect(lifecycle).toMatch(/this\.storageAckEndpoint\s*=\s*endpoint;/);
+    expect(lifecycle).toMatch(/storageACKRegistrationRuntime\.installIfCurrent\(storageACKRegistrationGeneration, endpoint\)/);
     expect(lifecycle).toMatch(/registerGroup:\s*\(entries\)\s*=>\s*this\.messenger\.registerGroup\(entries\)/);
     expect(endpoint).toMatch(/ports\.registerGroup\(STORAGE_ACK_PROTOCOLS\.map\(/);
   });

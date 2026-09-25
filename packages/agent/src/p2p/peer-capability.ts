@@ -45,7 +45,11 @@ function protocolPeers(peers: ReadonlyMap<string, PeerCapabilityEvidence>, proto
 export class PeerCapabilityRound {
   private readonly peers: Map<string, PeerCapabilityEvidence>;
 
-  constructor(private readonly registry: PeerCapabilityRegistry, source: ReadonlyMap<string, PeerCapabilityEvidence>) {
+  constructor(
+    private readonly registry: PeerCapabilityRegistry,
+    source: ReadonlyMap<string, PeerCapabilityEvidence>,
+    private readonly generations: ReadonlyMap<string, number>,
+  ) {
     this.peers = new Map([...source].map(([peerId, record]) => [peerId, {
       identified: new Set(record.identified),
       updated: record.updated ? new Set(record.updated) : null,
@@ -65,7 +69,7 @@ export class PeerCapabilityRound {
       this.peers.set(peerId, record);
     }
     applyObservation(record, observation);
-    this.registry.observe(peerId, observation);
+    this.registry.observeIfGeneration(peerId, observation, this.generations.get(peerId) ?? 0);
   }
 
   snapshotCorePeerIds(): ReadonlySet<string> { return this.snapshotProtocolPeers(PROTOCOL_STORAGE_ACK); }
@@ -75,6 +79,7 @@ export class PeerCapabilityRound {
 /** One canonical owner of advertised and negotiated P2P protocol evidence. */
 export class PeerCapabilityRegistry {
   private readonly peers = new Map<string, PeerCapabilityEvidence>();
+  private readonly generations = new Map<string, number>();
 
   observe(peerId: string, observation: PeerCapabilityObservation): void {
     if (observation.source !== 'negotiation' && observation.protocols.length === 0) return;
@@ -86,7 +91,18 @@ export class PeerCapabilityRegistry {
     applyObservation(record, observation);
   }
 
-  forget(peerId: string): void { this.peers.delete(peerId); }
+  generation(peerId: string): number { return this.generations.get(peerId) ?? 0; }
+
+  observeIfGeneration(peerId: string, observation: PeerCapabilityObservation, generation: number): boolean {
+    if (this.generation(peerId) !== generation) return false;
+    this.observe(peerId, observation);
+    return true;
+  }
+
+  forget(peerId: string): void {
+    this.peers.delete(peerId);
+    this.generations.set(peerId, this.generation(peerId) + 1);
+  }
 
   supports(peerId: string, protocol: string): boolean {
     const record = this.peers.get(peerId);
@@ -96,5 +112,5 @@ export class PeerCapabilityRegistry {
   supportsCore(peerId: string): boolean { return this.supports(peerId, PROTOCOL_STORAGE_ACK); }
   snapshotCorePeerIds(): ReadonlySet<string> { return this.snapshotProtocolPeers(PROTOCOL_STORAGE_ACK); }
   snapshotProtocolPeers(protocol: string): ReadonlySet<string> { return protocolPeers(this.peers, protocol); }
-  beginRound(): PeerCapabilityRound { return new PeerCapabilityRound(this, this.peers); }
+  beginRound(): PeerCapabilityRound { return new PeerCapabilityRound(this, this.peers, new Map(this.generations)); }
 }

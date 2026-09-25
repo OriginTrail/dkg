@@ -12,6 +12,7 @@ import {
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
   PROTOCOL_STORAGE_ACK,
+  isStorageACKProtocol, type StorageACKProtocol,
   PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2,
   PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
@@ -2675,9 +2676,9 @@ export class DKGAgent extends DKGAgentBase {
 
   async stop(): Promise<void> {
     if (!this.started) return;
-    // Fence background signer/chain registration before shutdown awaits.
-    this.storageACKRegistrationGeneration++;
-    this.localStorageACKTransport.close();
+    // Fence ACK routes, retries, and self sends before shutdown awaits.
+    const storageACKDrain = this.storageACKRegistrationRuntime.closeAndDrain();
+    void storageACKDrain.catch(() => {});
     this.peerSyncSession.close();
     // Cancelling a waiter alone does not retire the shared physical scan.
     // Detached cold authority flights are aborted here too: after stop() no
@@ -2887,30 +2888,9 @@ export class DKGAgent extends DKGAgentBase {
     // rc.9 PR-10: joinApprovalRetryTimer + joinApprovalRetryQueue
     // deleted; substrate outbox owns retry state and drains itself
     // via the messengerOutboxTimer cleared just above.
-    this.clearStorageACKRegistrationRetry();
-    this.storageAckEndpoint?.dispose();
-    this.storageAckEndpoint = null;
-    const registrationAttempts = [...this.storageACKRegistrationAttempts];
-    if (registrationAttempts.length > 0) {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      try {
-        await Promise.race([
-          Promise.allSettled(registrationAttempts),
-          new Promise<never>((_resolve, reject) => {
-            timer = setTimeout(
-              () => reject(new Error('StorageACK registration did not retire within 5000ms; teardown blocked')),
-              5_000,
-            );
-          }),
-        ]);
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
-    }
-    this.storageACKRegistrationRetryInFlight = false;
     // A timed-out or shutdown-aborted self ACK retains ownership until its
     // physical handler work retires. Never close the store underneath it.
-    await this.localStorageACKTransport.drain();
+    await storageACKDrain;
     // The owner joins both an installed prover and any in-flight WAL/handle
     // creation. A timeout retains ownership and blocks store/network teardown.
     await this.randomSamplingRuntime?.stop();
@@ -3128,6 +3108,9 @@ export class DKGAgent extends DKGAgentBase {
   ): Promise<string[]> {
     const connectedPeers = this.connectedPeerIds();
     const requestedProtocol = protocol ?? PROTOCOL_STORAGE_ACK;
+    if (!isStorageACKProtocol(requestedProtocol)) {
+      throw new Error(`Unsupported StorageACK protocol: ${requestedProtocol}`);
+    }
     const requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
     const selection = await this.ackCandidateDiscovery.resolveRound({
       connectedPeers,
@@ -3185,6 +3168,7 @@ export class DKGAgent extends DKGAgentBase {
    * validation remain authoritative.
    */
   public getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
+    if (!isStorageACKProtocol(protocol)) throw new Error(`Unsupported StorageACK protocol: ${protocol}`);
     const requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
     const selection = this.ackCandidateDiscovery.selectCandidates({
       connectedPeers: this.connectedPeerIds(),
@@ -3209,7 +3193,7 @@ export class DKGAgent extends DKGAgentBase {
 
   private logACKCandidatePlan(
     selection: ACKCandidatePeerSelectionResult,
-    protocol: string,
+    protocol: StorageACKProtocol,
     requiredACKs: number,
   ): string[] {
     const selected = selection.diagnostics
@@ -3273,14 +3257,14 @@ export class DKGAgent extends DKGAgentBase {
       messenger: this.messenger,
       timeoutMs,
     });
-    const localTransport = this.localStorageACKTransport;
+    const sendLocal = this.storageACKRegistrationRuntime.createLocalSender();
     return async (peerId: string, protocol: string, data: Uint8Array) => {
       if (peerId === this.peerId) {
-        const local = this.storageAckEndpoint;
-        if (!local || !this.localACKCandidate().available) {
+        if (!this.localACKCandidate().available) {
           throw new Error('Local StorageACK handler is not registered');
         }
-        return localTransport.send(local, this.peerId, protocol, data, timeoutMs);
+        if (!isStorageACKProtocol(protocol)) throw new Error(`Unsupported StorageACK protocol: ${protocol}`);
+        return sendLocal(this.peerId, protocol, data, timeoutMs);
       }
       if (!this.networkAdmissionCoordinator.isAcceptedPeer(peerId)) {
         throw new Error(`peer ${peerId.slice(-8)} is not admitted for active-network ACK collection`);

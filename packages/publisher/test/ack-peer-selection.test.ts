@@ -17,6 +17,13 @@ const RELAYS = ['relay-1', 'relay-2', 'relay-3', 'relay-4'];
 const STAKED = ['staked-core-5', 'staked-core-6', 'staked-core-7'];
 
 describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () => {
+  it('rejects unknown wire protocols at the exported selector boundary', () => {
+    expect(() => selectACKCandidatePeers({
+      connectedPeers: ['core-1'], requiredACKs: 1,
+      protocol: '/dkg/test/unknown' as ACKCandidatePeerSelectionInput['protocol'],
+    })).toThrow(/Unsupported StorageACK protocol/);
+  });
+
   it('plans a local core with remote protocol tiers and one diagnostic model', () => {
     const input: ACKCandidatePeerSelectionInput = {
       connectedPeers: ['self', 'edge', 'base-core', 'v2-core'],

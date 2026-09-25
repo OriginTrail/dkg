@@ -1,5 +1,4 @@
-import { PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
-import { STORAGE_ACK_PROTOCOLS, isStorageACKProtocol, type StorageACKProtocol } from './storage-ack-protocols.js';
+import { PROTOCOL_STORAGE_ACK, STORAGE_ACK_PROTOCOLS, isStorageACKProtocol, type StorageACKProtocol } from '@origintrail-official/dkg-core';
 import { PeerCapabilityRegistry, type PeerCapabilityRound } from './peer-capability.js';
 import {
   selectACKCandidateUniverse,
@@ -37,7 +36,7 @@ export interface ACKRoundPorts {
   ackCandidatePeerIds?: readonly string[];
   preferredACKPeerIds?: readonly string[];
   requiredACKs: number;
-  protocol: string;
+  protocol: StorageACKProtocol;
   localCandidate: LocalACKCandidate;
   verifiedSameNetworkPeerIds(): ReadonlySet<string> | undefined;
   getPeerProtocols(peerId: string): Promise<string[]>;
@@ -111,7 +110,7 @@ export class ACKCandidateDiscoveryCoordinator {
     localCandidate: LocalACKCandidate,
     snapshot: ACKCapabilitySnapshot = snapshotACK(this.registry.beginRound()),
   ): ACKCandidatePeerSelectionResult {
-    const requestedProtocolPeers = input.protocol && input.protocol !== PROTOCOL_STORAGE_ACK && isStorageACKProtocol(input.protocol)
+    const requestedProtocolPeers = input.protocol && input.protocol !== PROTOCOL_STORAGE_ACK
       ? snapshot.supportByProtocol.get(input.protocol)
       : undefined;
     return selectACKCandidatePeersWithDiagnostics({
@@ -125,9 +124,9 @@ export class ACKCandidateDiscoveryCoordinator {
     if (!isStorageACKProtocol(ports.protocol)) throw new Error(`Unsupported ACK protocol: ${ports.protocol}`);
     const requestedProtocol = ports.protocol;
     await Promise.all(ports.connectedPeers.map(async (peerId) => {
-      this.registry.observe(peerId, {
-        source: 'identify-snapshot', protocols: await ports.getPeerProtocols(peerId),
-      });
+      const generation = this.registry.generation(peerId);
+      const protocols = await ports.getPeerProtocols(peerId);
+      this.registry.observeIfGeneration(peerId, { source: 'identify-snapshot', protocols }, generation);
     }));
     // Keep preflight and final selection on this round's snapshot even if
     // peer:update changes the registry while the round is in progress.

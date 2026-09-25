@@ -124,6 +124,13 @@ function installOpenACKAdmission(agent: AgentInternals): void {
 }
 
 describe('getACKCandidatePeers — core-only candidates', () => {
+  it('rejects an unknown ACK protocol at both public candidate boundaries', async () => {
+    const a = await buildAgent({ confirmedCores: [CORE[0]], connected: [CORE[0]] });
+    expect(() => a.getACKCandidatePeers('/dkg/test/unknown')).toThrow(/Unsupported StorageACK protocol/);
+    await expect(a.getACKCandidatePeersAfterAdmission('/dkg/test/unknown', createOperationContext('publish')))
+      .rejects.toThrow(/Unsupported StorageACK protocol/);
+  });
+
   it('uses the shared peer role for catch-up ordering after role changes', async () => {
     const a = await buildAgent({ confirmedCores: [], connected: [EDGE[0], CORE[0]] });
     const ordered = () => a.selectCatchupPeers([peer(EDGE[0]), peer(CORE[0])]).map(String);

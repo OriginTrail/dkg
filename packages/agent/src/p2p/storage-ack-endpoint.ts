@@ -1,4 +1,4 @@
-import { STORAGE_ACK_PROTOCOLS, storageACKProtocolKind, type StorageACKProtocol } from './storage-ack-protocols.js';
+import { STORAGE_ACK_PROTOCOLS, storageACKProtocolKind, type StorageACKProtocol } from '@origintrail-official/dkg-core';
 
 export interface StorageACKEndpoint {
   dispatch(protocol: StorageACKProtocol, data: Uint8Array, peerId: string, signal?: AbortSignal): Promise<Uint8Array>;

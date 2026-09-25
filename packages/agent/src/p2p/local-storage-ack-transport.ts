@@ -1,4 +1,4 @@
-import { isStorageACKProtocol } from './storage-ack-protocols.js';
+import { isStorageACKProtocol } from '@origintrail-official/dkg-core';
 import type { StorageACKEndpoint } from './storage-ack-endpoint.js';
 import { runBoundedOperation } from '../bounded-operation.js';
 

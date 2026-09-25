@@ -16,7 +16,7 @@ import { PeerSyncSession } from './sync/peer-sync-session.js';
 import { PeerCapabilityRegistry } from './p2p/peer-capability.js';
 import { ACKCandidateDiscoveryCoordinator } from './p2p/ack-candidate-discovery.js';
 import type { StorageACKEndpoint } from './p2p/storage-ack-endpoint.js';
-import { LocalStorageACKTransport } from './p2p/local-storage-ack-transport.js';
+import { StorageACKRegistrationRuntime } from './p2p/storage-ack-registration-runtime.js';
 import {
   openRfc64PersistenceV1,
   type Rfc64PersistenceV1,
@@ -1239,10 +1239,16 @@ export class DKGAgentBase {
   /** The signed-ACK ledger is initialized and pre-ledger copies grandfathered. */
   protected storageAckLedgerReady = false;
   protected storageAckLedgerReadyFlight: Promise<boolean> | null = null;
-  /** One registered endpoint serves both remote streams and local ACK requests. */
-  protected storageAckEndpoint: StorageACKEndpoint | null = null;
+  protected readonly storageACKRegistrationRuntime = new StorageACKRegistrationRuntime();
+  /** Compatibility boundary for focused transport fixtures. */
+  protected get storageAckEndpoint(): StorageACKEndpoint | null {
+    return this.storageACKRegistrationRuntime.endpoint;
+  }
+  protected set storageAckEndpoint(endpoint: StorageACKEndpoint | null) {
+    this.storageACKRegistrationRuntime.replaceEndpointForTest(endpoint);
+  }
   protected get storageAckHandlerRegistered(): boolean {
-    return this.storageAckEndpoint !== null;
+    return this.storageACKRegistrationRuntime.registered;
   }
   /** StorageACK declines per minute bucket and code, for the last hour. */
   protected readonly storageAckDeclineBuckets = new Map<number, Map<string, number>>();
@@ -1324,10 +1330,6 @@ export class DKGAgentBase {
    */
   protected messengerOutboxTimer: ReturnType<typeof setInterval> | null = null;
   protected randomSamplingRuntime: RandomSamplingRuntime | null = null;
-  protected storageACKRegistrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  protected storageACKRegistrationRetryInFlight = false;
-  protected storageACKRegistrationGeneration = 0;
-  protected readonly storageACKRegistrationAttempts = new Set<Promise<unknown>>();
   // #894 / Codex PR #901 round-3 :1685: `ensureProfile()` is a mutating
   // multi-tx flow (createProfile + stake) that can legitimately outlast the
   // boot read-timeout. Guards against the boot path AND the StorageACK retry
@@ -1723,7 +1725,6 @@ export class DKGAgentBase {
   protected readonly peerHealth = new Map<string, PeerHealth>();
   protected readonly peerCapabilityRegistry = new PeerCapabilityRegistry();
   protected readonly ackCandidateDiscovery = new ACKCandidateDiscoveryCoordinator(this.peerCapabilityRegistry);
-  protected localStorageACKTransport = new LocalStorageACKTransport();
   /**
    * Last chain-reported ACK quorum (ParametersStorage
    * minimumRequiredSignatures), refreshed by the V10 ACK provider before

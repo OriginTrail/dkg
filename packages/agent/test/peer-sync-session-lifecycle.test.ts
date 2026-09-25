@@ -6,7 +6,7 @@ import {
   InMemoryPeerSyncLease,
   runSyncOnConnect,
   runSelectedSharedMemoryRetry,
-  type SyncOnConnectContext,
+  type SyncOnConnectInput,
 } from '../src/sync/on-connect/sync-on-connect.js';
 import { createPeerEventFixture, deferred, flushMicrotasks } from './_helpers/peer-event-lifecycle.js';
 
@@ -34,7 +34,7 @@ describe('peer sync session lifecycle', () => {
     const ordinary = vi.fn(transfer);
     const log = vi.fn();
     const account = vi.fn();
-    const context: SyncOnConnectContext = {
+    const context: SyncOnConnectInput = {
       signal: controller.signal, remotePeer: 'peer', syncingPeers,
       getPeerProtocols: async () => [PROTOCOL_SYNC], peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => phase === 'discovered' && discovered ? ['initial', 'new'] : ['initial'],

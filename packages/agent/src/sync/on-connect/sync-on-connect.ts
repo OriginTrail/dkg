@@ -155,15 +155,23 @@ interface SyncOnConnectBaseContext extends CompatiblePeerSyncContext {
 
 type PeerCapabilitySink = Pick<PeerCapabilityRegistry, 'observe'>;
 
-/** Extendable public context; registry ownership takes priority when supplied. */
+/** Extendable canonical context with one capability owner. */
 export interface SyncOnConnectContext extends SyncOnConnectBaseContext {
-  peerCapabilities?: PeerCapabilitySink;
-  /** Legacy callers may still supply mutable core-role sets. */
-  knownCorePeerIds?: Set<string>;
+  peerCapabilities: PeerCapabilitySink;
+  knownCorePeerIds?: never;
+  knownCorePeerIdsV2?: never;
+}
+
+/** Legacy set-shaped integrations are adapted once at the public boundary. */
+export interface LegacySyncOnConnectContext extends SyncOnConnectBaseContext {
+  peerCapabilities?: never;
+  knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2?: Set<string>;
 }
 
-function peerCapabilitySink(context: SyncOnConnectContext): PeerCapabilitySink {
+export type SyncOnConnectInput = SyncOnConnectContext | LegacySyncOnConnectContext;
+
+function peerCapabilitySink(context: SyncOnConnectInput): PeerCapabilitySink {
   if (context.peerCapabilities) return context.peerCapabilities;
   const { knownCorePeerIds, knownCorePeerIdsV2 } = context;
   if (!knownCorePeerIds) throw new TypeError('Sync-on-connect requires peerCapabilities or knownCorePeerIds');
@@ -186,10 +194,10 @@ function peerCapabilitySink(context: SyncOnConnectContext): PeerCapabilitySink {
 }
 
 /** Every continuation inside an admitted session has an explicit lifetime and lease owner. */
-export type SessionSyncOnConnectContext = SyncOnConnectContext & SessionPeerSyncContext;
+export type SessionSyncOnConnectContext = SyncOnConnectInput & SessionPeerSyncContext;
 
 /**
- * Narrow RFC-64 retry boundary. Unlike {@link SyncOnConnectContext}, this
+ * Narrow RFC-64 retry boundary. Unlike {@link SyncOnConnectInput}, this
  * shape cannot express durable, discovery, or ordinary shared-memory work, so
  * a selected retry cannot fall through when the broad on-connect workflow is
  * changed later.
@@ -413,7 +421,7 @@ async function runSessionSelectedSharedMemoryRetry(
 }
 
 export async function runSyncOnConnect(
-  context: SyncOnConnectContext,
+  context: SyncOnConnectInput,
 ): Promise<SyncOnConnectOutcome> {
   return runSessionSyncOnConnect(context, admitPeerSyncContext(context), peerCapabilitySink(context));
 }

@@ -1,4 +1,4 @@
-import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK_V2 } from '@origintrail-official/dkg-core';
+import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK_V2, isStorageACKProtocol, type StorageACKProtocol } from '@origintrail-official/dkg-core';
 
 export type ACKCapabilitySelectionPolicy =
   | { mode: 'rank'; corePeers?: ReadonlySet<string>; requestedProtocolPeers?: ReadonlySet<string> }
@@ -21,7 +21,7 @@ export interface ACKCandidatePeerSelectionInput {
   /** @deprecated Use capability instead. Retained for existing selector callers. */
   knownCorePeerIdsV2?: ReadonlySet<string>;
   requiredACKs: number;
-  protocol?: string;
+  protocol?: StorageACKProtocol;
   selfPeerId?: string;
 }
 
@@ -56,6 +56,9 @@ function normalizeCapability(input: Pick<ACKCandidatePeerSelectionInput,
     capability?: ACKCapabilitySelectionPolicy;
     requestedTier: 'requestedProtocol' | 'v2Advertised';
   } {
+  if (input.protocol !== undefined && !isStorageACKProtocol(input.protocol)) {
+    throw new Error(`Unsupported StorageACK protocol: ${input.protocol}`);
+  }
   if (input.capability && (input.knownCorePeerIds || input.knownCorePeerIdsV2)) {
     throw new TypeError('Use either capability or legacy knownCorePeerIds fields');
   }
@@ -158,7 +161,7 @@ function diagnosticForPeer(input: {
   tier: ACKCandidateTierName;
   preferred: ReadonlySet<string>;
   allowlisted: boolean;
-  protocol?: string;
+  protocol?: StorageACKProtocol;
   capability?: ACKCapabilitySelectionPolicy;
   corePeers?: ReadonlySet<string>;
   requestedProtocolPeers?: ReadonlySet<string>;
