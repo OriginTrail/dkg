@@ -720,7 +720,7 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     connected.delete(libp2p.peerId.toString());
     const coordinator = this.networkAdmissionCoordinator;
     const peers = [...connected].filter((peerId) => coordinator === undefined || !coordinator.isRejectedPeer(peerId));
-    const isCore = (peerId: string) => this.knownCorePeerIds?.has(peerId) === true;
+    const isCore = (peerId: string) => this.peerCapabilityRegistry?.supportsCore(peerId) === true;
     return peers.sort((a, b) => (Number(isCore(b)) - Number(isCore(a))) || (a < b ? -1 : a > b ? 1 : 0));
   }
 

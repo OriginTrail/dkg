@@ -4695,7 +4695,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           const peerId = peer.toString();
           return {
             peerId,
-            core: this.knownCorePeerIds.has(peerId),
+            core: this.peerCapabilityRegistry.supportsCore(peerId),
           };
         }),
       });
@@ -7600,9 +7600,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Contact reliable Core hosts first. This serial loop still reaches
     // every candidate, but Cores first means faster time-to-first-data
     // and a better resume-seqno baseline before any flaky edge is tried.
-    const candidates = orderCatchupPeers(rawCandidates, undefined, false, this.knownCorePeerIds)
+    const candidates = orderCatchupPeers(rawCandidates, undefined, false, this.peerCapabilityRegistry.snapshotCorePeerIds())
       .map((p) => p.toString());
-    const coreCount = candidates.filter((id) => this.knownCorePeerIds.has(id)).length;
+    const coreCount = candidates.filter((id) => this.peerCapabilityRegistry.supportsCore(id)).length;
     this.log.info(
       ctx,
       `host-catchup peer order for "${contextGraphId}": cores=${coreCount} total=${candidates.length}`,

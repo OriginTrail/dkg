@@ -740,7 +740,7 @@ export function orderACKCandidatePeerIds(input: {
   return selectACKCandidatePeers({
     connectedPeers: input.connectedPeerIds,
     selfPeerId: input.selfPeerId,
-    knownCorePeerIds: input.knownCorePeerIds,
+    capability: { mode: 'rank', corePeers: input.knownCorePeerIds },
     preferredACKPeerIds: input.preferredACKPeerIds,
     verifiedSameNetworkPeerIds: input.verifiedSameNetworkPeerIds,
     requiredACKs: Number.MAX_SAFE_INTEGER,

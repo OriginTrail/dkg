@@ -170,13 +170,20 @@ export {
   type ACKTransportFactory,
 } from './ack-transport.js';
 export {
+  selectCanonicalACKCandidateUniverse,
+  selectCanonicalACKCandidatePeersWithDiagnostics,
+  type ACKCanonicalCandidatePeerSelectionInput,
+  type ACKCanonicalCandidatePeerDiagnostic,
+  type ACKCanonicalCandidatePeerSelectionResult,
+} from './ack-peer-selection.js';
+export {
   selectACKCandidatePeers,
   selectACKCandidateUniverse,
   selectACKCandidatePeersWithDiagnostics,
   type ACKCandidatePeerSelectionInput,
   type ACKCandidatePeerDiagnostic,
   type ACKCandidatePeerSelectionResult,
-} from './ack-peer-selection.js';
+} from './ack-peer-selection-compat.js';
 export {
   ACKProviderError,
   RpcPreconditionError,
@@ -196,6 +203,8 @@ export {
   type StorageAckDecisionObserver,
   type StorageACKHandlerConfig,
   type StorageAckPriorVersionRequest,
+  type StorageAckRequestContext,
+  type LocalStorageAckHeadExpectation,
   type StorageAckVmPromotionRequest,
   type StorageAckVmPromotionVerdict,
 } from './storage-ack-handler.js';
