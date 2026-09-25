@@ -36,6 +36,28 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ### Fixed
 
+- **Cores read the chain far less while catching up on VM promotion**: the
+  periodic chain-promote sweep read each Knowledge Asset's merkle root and
+  publisher from the chain before checking what the node held locally. It paid
+  those reads for assets the Core holds nowhere (which it can't promote) and for
+  assets already confirmed in Verifiable Memory, on every visit and again after
+  each restart. On Cores with a large backlog that pinned background RPC at the
+  budget cap. The sweep now checks local state first. An asset held nowhere
+  locally is queued for exact recovery without chain reads, and an asset already
+  confirmed in VM settles without chain reads. Only local copies whose outcome
+  depends on the chain root read it. Updates are still promoted through
+  finalization and the pending-update lane, as before. A sweep pass that fails
+  now keeps the progress it made, so the retry doesn't re-verify the same
+  assets.
+- **A request that never left the node's RPC queue is no longer counted as a
+  provider failure**: the per-request deadline also covered time spent waiting
+  in the node's own RPC request governor. When it expired there, the request
+  was marked as a provider timeout, the provider was marked failed, and the node
+  failed over to the next provider behind the same queue, often until every
+  provider was "exhausted". Such a request now fails locally as retry-later
+  (`RPC_REQUEST_GOVERNOR_QUEUE_FULL`). Providers, failover counts and the RFC-64
+  authority circuit breaker are unaffected by it. A request that was actually
+  sent still times out and fails over as before.
 - **One damaged shared-memory head no longer stops Verifiable Memory
   promotion for a whole Context Graph**: a node could end up with a Knowledge
   Asset's graph-scoped SWM head missing its share-operation id, for example
