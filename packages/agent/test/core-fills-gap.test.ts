@@ -35,7 +35,10 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   };
   return Object.assign(fn, { calls });
 }
-import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
+import {
+  KnowledgeAssetWorkspaceHeadCorruptError,
+  computeFlatKCRootV10,
+} from '@origintrail-official/dkg-publisher';
 import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
@@ -1149,6 +1152,62 @@ describe('Phase D - VM reconcile damping', () => {
       kaId,
       ual: buildKnowledgeAssetUal(internals.chain.chainId, authorAddress, kaNumber),
     });
+  });
+
+  it('keeps a corrupt SWM head on one KA from failing the whole graph reconcile', async () => {
+    const captured: ReplicationEvent[] = [];
+    agent = await DKGAgent.create({
+      name: 'VmReconcileCorruptHead',
+      chainAdapter: new MockChainAdapter(),
+      onReplicationEvent: (event) => { captured.push(event); },
+    });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'corrupt-head-graph';
+    const onChainCgId = 173n;
+    internals.subscribedContextGraphs.set(localCgId, {
+      subscribed: false,
+      coreHosted: true,
+      onChainId: onChainCgId.toString(),
+      lastReconciledOrdinal: 0,
+    });
+    const corruptKaId = 9173n;
+    const healthyKaId = 9174n;
+    registerUnmatchedKC(internals.chain, corruptKaId, onChainCgId);
+    registerUnmatchedKC(internals.chain, healthyKaId, onChainCgId);
+    const reconcile = recorder(async (input: { kaId: bigint; ual: string }) => {
+      if (input.kaId === corruptKaId) {
+        throw new KnowledgeAssetWorkspaceHeadCorruptError(
+          `Corrupt graph-scoped SWM head for ${input.ual}: incomplete head or operation metadata`,
+        );
+      }
+      return 'promoted' as const;
+    });
+    (internals as any).getOrCreateFinalizationHandler = () => ({
+      handleChainReconciledKC: reconcile,
+    });
+
+    const result = await internals.runVmReconcileForCg(localCgId, 'manual');
+
+    // The healthy ordinal still completes; only the corrupt one stays behind
+    // the watermark for the next sweep.
+    expect(result).toMatchObject({
+      status: 'progress',
+      headOrdinal: 2,
+      watermarkAfter: 0,
+      reconciledOrdinals: 1,
+      unresolvedOrdinals: 1,
+    });
+    expect(reconcile.calls.map(([input]) => input.kaId).sort()).toEqual([corruptKaId, healthyKaId]);
+    expect(captured).toContainEqual(expect.objectContaining({
+      action: 'defer',
+      kaId: corruptKaId.toString(),
+      detail: 'corrupt-swm-head',
+    }));
+    expect(captured).toContainEqual(expect.objectContaining({
+      action: 'promote',
+      kaId: healthyKaId.toString(),
+    }));
   });
 
   it('reuses a successful version snapshot only within the same finalized block', async () => {
