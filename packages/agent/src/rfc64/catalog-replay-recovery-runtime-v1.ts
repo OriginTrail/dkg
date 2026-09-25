@@ -5,6 +5,7 @@ import {
   snapshotRfc64PublicCatalogAnnouncementPeersV1,
 } from './catalog-peers-v1.js';
 import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from './catalog-limits-v1.js';
+import { RFC64_RECEIVER_MAX_ADMISSION_DEFERRAL_WINDOW_MS_V1 } from './public-catalog-receiver-v1.js';
 
 const MAX_UNRESOLVED_PEERS_V1 = 64;
 /**
@@ -87,11 +88,26 @@ export interface Rfc64CatalogReplayRecoveryPortsV1<Target> {
    * Named for its scope on purpose: a node-wide wait satisfies the same
    * signature, and wiring one in would let any other graph's work hold this
    * graph's pass (and its replay-active flag) open again.
+   *
+   * The wait is BOUNDED by the caller (see `idleDrainBudgetMs`): this pass runs
+   * inside the single-flight authority refresh, so parking here forever also
+   * withholds every admission queued behind that refresh.
    */
   whenReceiverIdleForContextGraph(
     contextGraphId: string,
     signal?: AbortSignal,
   ): Promise<void>;
+  /**
+   * Resolve after `ms`, for the idle-drain budget. Optional: omitted, a real
+   * unref'd timer is used, so the budget always applies. Injected so tests
+   * exercise it deterministically instead of by elapsed time.
+   */
+  sleep?(ms: number): Promise<void>;
+  /**
+   * Report a spent idle-drain budget. Without it the pass fails closed
+   * silently and an operator sees the full replay without its cause.
+   */
+  warn?(message: string): void;
   targetIdentity(target: Target): string;
   parityFailed(contextGraphId: string, targets: readonly Target[]): Promise<boolean>;
   /**
@@ -103,6 +119,29 @@ export interface Rfc64CatalogReplayRecoveryPortsV1<Target> {
    */
   pruneSupersededTargets?(targets: readonly Target[]): readonly Target[];
 }
+
+/**
+ * How long one pass waits for this graph's admitted announcements to drain.
+ *
+ * A drain that never completes used to hang the pass forever. That wait is not
+ * self-contained: `requestRfc64CatalogHeadReplaysFromConnectedPeersV1` is
+ * awaited inside the single-flight RFC-64 authority refresh, so a parked pass
+ * also holds every admission queued behind that refresh — including the
+ * finalized-private catalog placement a confirmed VM publish waits on. One
+ * stuck graph therefore stalled unrelated publishes indefinitely.
+ *
+ * Exceeding the budget is treated exactly like an exhausted worklist: the pass
+ * did NOT observe parity, so it reports failure and demands a full replay. It
+ * never reports parity it has not seen.
+ *
+ * DERIVED, never a bare number: at exactly the receiver's maximum admission
+ * deferral window this budget is a tie, and one lawfully-deferring task — a
+ * task waiting on the process-wide finalized chain-read lane, which under a
+ * contended RPC budget is the expected state — defeats it every single time.
+ * Keeping the factor here means the two cannot silently drift apart.
+ */
+export const RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1 =
+  RFC64_RECEIVER_MAX_ADMISSION_DEFERRAL_WINDOW_MS_V1 * 2;
 
 export interface Rfc64CatalogReplayRecoveryResultV1 {
   readonly requested: number;
@@ -437,6 +476,10 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     let coveredPromised: readonly Target[] | null = null;
     let replayFailed = true;
     let requiresFullReplay = false;
+    // A spent idle-drain budget is NOT evidence that rows are missing, so it
+    // must not set `requiresFullReplay`. It is also not corroboration, so it
+    // must not let a full pass CLEAR a witness. It sits between the two.
+    let drainUnobserved = false;
     try {
       input.signal?.throwIfAborted();
       const manifests: Target[][] = [];
@@ -483,15 +526,33 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         // The announcements admitted above still take their turn behind other
         // graphs' tasks for the receiver's shared slots.
         input.signal?.throwIfAborted();
-        if (input.signal === undefined) {
-          await this.#ports.whenReceiverIdleForContextGraph(input.contextGraphId);
-        } else {
-          await this.#ports.whenReceiverIdleForContextGraph(
-            input.contextGraphId,
-            input.signal,
-          );
-        }
+        const drained = await this.#drainedWithinBudget(input.contextGraphId, input.signal);
         input.signal?.throwIfAborted();
+        if (!drained) {
+          // Budget spent without observing the drain. This says only that
+          // parity was NOT OBSERVED; it is not evidence that the retained
+          // heads are wrong.
+          //
+          // Demanding a full replay here is a positive feedback loop, measured
+          // on the devnet: the budget expires, every retained head is
+          // re-announced at once, the receiver cannot go idle within the next
+          // budget, and it expires again. Worse, `requiresFullReplay` is what
+          // the status projection turns into `catalog-replay-incomplete` and
+          // thence `phase: 'blocked'`, which is a HARDER verdict than "not yet
+          // verified" and is exactly what the receiver reported.
+          //
+          // So: no full replay, no `failed`. The worklist is retained and the
+          // next pass re-arms. The corroboration contract still holds — this
+          // pass may not CLEAR a witness, because it observed nothing.
+          this.#ports.warn?.(
+            `RFC-64 catalog replay drain for ${input.contextGraphId} exceeded ` +
+            `${RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1}ms; reporting the pass as ` +
+            'UNVERIFIED and retaining its worklist. Parity was not observed; the retained ' +
+            'heads are not presumed wrong, and no full replay is demanded.',
+          );
+          drainUnobserved = true;
+          break;
+        }
         if (progress.peerWorklist.exhausted) {
           requiresFullReplay = true;
           failed += 1;
@@ -575,7 +636,10 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         // not be replayed from stays retained for retry and is reported on its
         // own; it says nothing about this node's applied state.
         if (requiresFullReplay) current.requiresFullReplay = true;
-        if (!replayFailed && wasFullPass) current.requiresFullReplay = false;
+        // `drainUnobserved` vetoes the CLEAR without raising a failure: the
+        // pass ended without seeing this graph's admissions drain, so whatever
+        // witness was standing must keep standing.
+        if (!replayFailed && !drainUnobserved && wasFullPass) current.requiresFullReplay = false;
         current.requestedFullReplay = false;
         // SET side of the corroboration contract computed above: a full pass
         // that reached no provider at all settles as uncorroborated, never as
@@ -603,7 +667,11 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         // coverage plus zero corroboration is MORE reason to report unverified,
         // not less. The two directions are opposites and must not share a flag.
         const wasConnectedPeerPass = input.kind === 'full-connected-peers';
-        if (requested > 0) current.unverified = false;
+        // A pass whose drain was never observed has not corroborated this
+        // node's applied rows, whatever individual providers answered, so it
+        // may not clear the uncorroborated witness either.
+        if (requested > 0 && !drainUnobserved) current.unverified = false;
+        else if (drainUnobserved) current.unverified = true;
         else if (wasConnectedPeerPass && providerFailures > 0) current.unverified = true;
         current.completion = null;
         current.peerWorklist.settleOverflow();
@@ -753,6 +821,33 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       if (failures >= MAX_RETAINED_REPLAY_RETRIES_V1) continue;
       if (progress.peerWorklist.seedBounded(peerId)) seeded += 1;
     }
+  }
+
+  /**
+   * Wait for this graph's admitted announcements to drain, bounded by
+   * `RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1`. Returns `false` when the
+   * budget is spent first, so the caller fails the pass closed rather than
+   * holding the authority-refresh single flight open forever. An abort of
+   * `signal` still rejects the wait, as it did before the budget.
+   */
+  async #drainedWithinBudget(contextGraphId: string, signal?: AbortSignal): Promise<boolean> {
+    // Always bounded, whether or not a `sleep` port is injected: a missed
+    // wiring must not silently restore the unbounded park this replaced.
+    const sleep = this.#ports.sleep ?? ((ms: number) => new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      (timer as unknown as { unref?: () => void }).unref?.();
+    }));
+    let timedOut = false;
+    const budget = sleep(RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1).then(() => {
+      timedOut = true;
+    });
+    await Promise.race([
+      signal === undefined
+        ? this.#ports.whenReceiverIdleForContextGraph(contextGraphId)
+        : this.#ports.whenReceiverIdleForContextGraph(contextGraphId, signal),
+      budget,
+    ]);
+    return !timedOut;
   }
 
   /** Retain bounded attribution; overflow survives as a full-replay witness. */
