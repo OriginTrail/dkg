@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { describe, expect, it, vi } from 'vitest';
-import { PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
+import { PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { NetworkAdmissionCoordinator } from '../src/p2p/network-admission-coordinator.js';
 import { DKGAgent } from '../src/index.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
@@ -189,6 +189,25 @@ describe('DKGAgent peer lifecycle integration', () => {
       await stopping;
       f.dispatchUpdate();
       expect(update).not.toHaveBeenCalled();
+    } finally { await f.close(); }
+  });
+
+  it('retains core evidence across one close, then evicts it on the last close', async () => {
+    const f = await createPeerEventFixture();
+    try {
+      f.dispatchUpdate([PROTOCOL_STORAGE_ACK]);
+      expect(f.state.knownCorePeerIds.has(f.peerId)).toBe(true);
+      const peers = vi.spyOn(f.agent.node.libp2p, 'getPeers');
+      f.dispatchClose();
+      expect(f.state.knownCorePeerIds.has(f.peerId)).toBe(true);
+      peers.mockReturnValue([]);
+      f.dispatchClose();
+      expect(f.state.knownCorePeerIds.has(f.peerId)).toBe(false);
+      f.dispatchUpdate([PROTOCOL_STORAGE_ACK]);
+      expect(f.state.knownCorePeerIds.has(f.peerId)).toBe(false);
+      peers.mockReturnValue([f.peer]);
+      f.dispatchUpdate([PROTOCOL_SYNC]);
+      expect(f.agent.getACKCandidatePeers()).not.toContain(f.peerId);
     } finally { await f.close(); }
   });
 

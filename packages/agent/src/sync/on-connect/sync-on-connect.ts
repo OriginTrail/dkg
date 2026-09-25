@@ -155,21 +155,24 @@ interface SyncOnConnectBaseContext extends CompatiblePeerSyncContext {
 
 type PeerCapabilitySink = Pick<PeerCapabilityRegistry, 'observe'>;
 
-/** Extendable canonical context with one capability owner. */
+/** Extendable legacy context retained for existing integrations. */
 export interface SyncOnConnectContext extends SyncOnConnectBaseContext {
-  peerCapabilities: PeerCapabilitySink;
-  knownCorePeerIds?: never;
-  knownCorePeerIdsV2?: never;
-}
-
-/** Legacy set-shaped integrations are adapted once at the public boundary. */
-export interface LegacySyncOnConnectContext extends SyncOnConnectBaseContext {
   peerCapabilities?: never;
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2?: Set<string>;
 }
 
-export type SyncOnConnectInput = SyncOnConnectContext | LegacySyncOnConnectContext;
+/** Extendable registry-backed form for new integrations. */
+export interface RegistrySyncOnConnectContext extends SyncOnConnectBaseContext {
+  peerCapabilities: PeerCapabilitySink;
+  knownCorePeerIds?: never;
+  knownCorePeerIdsV2?: never;
+}
+
+/** Alias retained for callers that adopted the explicit legacy name. */
+export interface LegacySyncOnConnectContext extends SyncOnConnectContext {}
+
+export type SyncOnConnectInput = SyncOnConnectContext | RegistrySyncOnConnectContext;
 
 function peerCapabilitySink(context: SyncOnConnectInput): PeerCapabilitySink {
   if (context.peerCapabilities) return context.peerCapabilities;

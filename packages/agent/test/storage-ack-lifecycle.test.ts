@@ -425,6 +425,55 @@ describe('StorageACK endpoint and local dispatch lifecycle', () => {
       .resolves.toEqual(new Uint8Array([1]));
   });
 
+  it('joins the first signer lookup when stop races initial ACK registration', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 42n);
+    agent = await DKGAgent.create({
+      name: 'ACKInitialRegistrationShutdownFenceTest',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+    });
+    const internals = agent as unknown as ProviderInternals;
+    const originalResolve = agent.resolveConfirmedACKSigner.bind(agent);
+    let entered!: () => void;
+    let release!: () => void;
+    const insideLookup = new Promise<void>((resolve) => { entered = resolve; });
+    const lookupGate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(agent, 'resolveConfirmedACKSigner').mockImplementation(async (...args) => {
+      entered();
+      await lookupGate;
+      return originalResolve(...args);
+    });
+
+    const starting = agent.start();
+    await insideLookup;
+    expect(internals.storageAckEndpoint).toBeNull();
+    let stopped = false;
+    const stopping = agent.stop().finally(() => { stopped = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(stopped).toBe(false);
+    release();
+    const [, stopOutcome] = await Promise.allSettled([starting, stopping]);
+    expect(stopOutcome.status).toBe('fulfilled');
+    expect(stopped).toBe(true);
+    expect(internals.storageAckEndpoint).toBeNull();
+    expect(internals.storageAckHandlerRegistered).toBe(false);
+    const protocols = [
+      PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2,
+      PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2,
+    ];
+    const routerHandlers = (internals.router as { handlers: Map<string, unknown> }).handlers;
+    const messengerHandlers = (internals.messenger as { handlers: Map<string, unknown> }).handlers;
+    expect(protocols.every((protocol) => !routerHandlers.has(protocol))).toBe(true);
+    expect(protocols.every((protocol) => !messengerHandlers.has(protocol))).toBe(true);
+    agent = null;
+  });
+
   it('rolls back partial ACK registration and restores all routes on retry', async () => {
     const primary = ethers.Wallet.createRandom();
     const ackSigner = ethers.Wallet.createRandom();

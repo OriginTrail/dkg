@@ -1314,6 +1314,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
       await agent.start();
 
       const remotePeer = freshPeerIdString();
+      vi.spyOn(agent.node.libp2p, 'getPeers').mockReturnValue([peerIdFromString(remotePeer)]);
       let admitted = false;
       const ensureAdmitted = recorder(async (peerId: string) => {
         admitted = true;
@@ -1366,6 +1367,7 @@ describe('DKGAgent sync retry — event-driven via peer:update', () => {
     try {
       await agent.start();
       const remotePeer = freshPeerIdString();
+      vi.spyOn(agent.node.libp2p, 'getPeers').mockReturnValue([peerIdFromString(remotePeer)]);
       allowAllNetworkAdmission(agent);
       syncState(agent).markSkipped(remotePeer);
       (agent as any).isPeerConnectedForSyncBackoff = () => true;

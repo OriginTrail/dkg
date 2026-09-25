@@ -7,17 +7,20 @@ import {
   runSyncOnConnect,
   runSelectedSharedMemoryRetry,
   type SyncOnConnectContext as PublicSyncOnConnectContext,
-  type LegacySyncOnConnectContext,
+  type RegistrySyncOnConnectContext,
   type SyncOnConnectInput,
 } from '@origintrail-official/dkg-agent/dist/sync/on-connect/sync-on-connect.js';
 
-declare const legacyContext: Omit<LegacySyncOnConnectContext, 'signal' | 'syncingPeers'> & { syncingPeers: Set<string> };
+declare const legacyContext: Omit<PublicSyncOnConnectContext, 'signal' | 'syncingPeers'> & { syncingPeers: Set<string> };
 const publicContext: SyncOnConnectInput = legacyContext;
 void runSyncOnConnect(publicContext);
 interface ExtendedSyncContext extends PublicSyncOnConnectContext { traceId: string }
 declare const extendedContext: ExtendedSyncContext;
 void runSyncOnConnect(extendedContext);
-declare const missingCapability: Omit<PublicSyncOnConnectContext, 'peerCapabilities'>;
+interface ExtendedRegistrySyncContext extends RegistrySyncOnConnectContext { traceId: string }
+declare const registryContext: ExtendedRegistrySyncContext;
+void runSyncOnConnect(registryContext);
+declare const missingCapability: Omit<PublicSyncOnConnectContext, 'knownCorePeerIds'>;
 // @ts-expect-error neither capability representation is present
 void runSyncOnConnect(missingCapability);
 const mixedContext = { ...legacyContext, peerCapabilities: { observe() {} } };

@@ -2113,7 +2113,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     if (this.started) return;
-    const storageACKRegistrationGeneration = this.storageACKRegistrationRuntime.begin();
+    const storageACKRegistrationSession = this.storageACKRegistrationRuntime.begin();
     this.chain.contextGraphAuthorityIndexSnapshots?.open();
     // Validate and capture the substrate before persistence/network startup.
     // Caller changes during awaits cannot introduce a late configuration error.
@@ -2753,9 +2753,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // protocol confuses peer-role detection based on protocol support.
     if (effectiveRole === 'core') {
       if (ackSignerCandidates.length > 0) {
-        const registrationIsCurrent = () => this.storageACKRegistrationRuntime.isCurrent(storageACKRegistrationGeneration);
-        const trackRegistration = <T>(attempt: Promise<T>): Promise<T> =>
-          this.storageACKRegistrationRuntime.track(attempt);
+        const registrationIsCurrent = () => storageACKRegistrationSession.isCurrent();
         const attemptStorageACKRegistration = async (
           attemptCtx: OperationContext,
           options: { repairWallets?: boolean; allowChainReresolution?: boolean } = {},
@@ -2949,26 +2947,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 },
               ),
               onSignerUnregistered: () => {
-                if (!ownedEndpoint || !this.storageACKRegistrationRuntime.handleSignerLoss(
-                  storageACKRegistrationGeneration,
-                  ownedEndpoint,
-                  async () => {
-                    try {
-                      const result = await attemptStorageACKRegistration(
-                        createOperationContext('connect'),
-                        { repairWallets: false },
-                      );
-                      if (result === 'retryable') scheduleStorageACKRegistrationRetry({ repairWallets: false });
-                    } catch (err) {
-                      this.log.warn(
-                        attemptCtx,
-                        `V10 StorageACK signer failover failed: ` +
-                        `${err instanceof Error ? err.message : String(err)}`,
-                      );
-                      scheduleStorageACKRegistrationRetry({ repairWallets: false });
-                    }
-                  },
-                )) return;
+                if (!ownedEndpoint || !storageACKRegistrationSession.signerLost(ownedEndpoint)) return;
                 this.log.warn(
                   attemptCtx,
                   `Unregistered V10 StorageACK handler: signer ${ackSignerWallet.address} ` +
@@ -3068,7 +3047,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 return ackHandler.updateHandler(data, peerId, signal);
               },
             });
-            if (!this.storageACKRegistrationRuntime.installIfCurrent(storageACKRegistrationGeneration, endpoint)) return 'disabled';
+            if (!storageACKRegistrationSession.install(endpoint)) return 'disabled';
             ownedEndpoint = endpoint;
             this.log.info(
               attemptCtx,
@@ -3101,40 +3080,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           typeof requestedRetryMs === 'number' && Number.isFinite(requestedRetryMs)
             ? Math.max(requestedRetryMs, MIN_STORAGE_ACK_REGISTRATION_RETRY_MS)
             : STORAGE_ACK_REGISTRATION_RETRY_MS;
-        const scheduleStorageACKRegistrationRetry = (options: { repairWallets?: boolean; allowChainReresolution?: boolean } = {}) => {
-          const scheduled = this.storageACKRegistrationRuntime.scheduleRetry(
-            storageACKRegistrationGeneration,
-            storageACKRegistrationRetryMs,
-            () => this.started,
-            async () => {
-              try {
-                const result = await attemptStorageACKRegistration(createOperationContext('connect'), options);
-                if (result === 'retryable') scheduleStorageACKRegistrationRetry(options);
-              } catch (err) {
-                this.log.warn(
-                  ctx,
-                  `V10 StorageACK handler registration retry failed: ` +
-                  `${err instanceof Error ? err.message : String(err)}`,
-                );
-                scheduleStorageACKRegistrationRetry(options);
-              }
-            },
-          );
-          if (scheduled) this.log.warn(ctx, `V10 StorageACK handler registration will retry every ${storageACKRegistrationRetryMs}ms`);
-        };
-
-        try {
-          // The first attempt is awaited by `start()`, so it must NOT do a
-          // blocking chain re-probe (Codex :1752). It returns 'retryable'
-          // immediately for a transient-0n identity; the scheduled retry then
-          // runs the background re-resolution (+ ensureProfile for a brand-new
-          // core node) with `allowChainReresolution: true`.
-          const result = await trackRegistration(attemptStorageACKRegistration(ctx));
-          if (result === 'retryable') scheduleStorageACKRegistrationRetry({ allowChainReresolution: true });
-        } catch (err) {
-          this.log.warn(ctx, `Skipping V10 StorageACK handler: ${err instanceof Error ? err.message : String(err)}`);
-          scheduleStorageACKRegistrationRetry({ allowChainReresolution: true });
-        }
+        // The first attempt is awaited by start(). The session schedules chain
+        // re-resolution in the background only after a retryable initial result.
+        await storageACKRegistrationSession.start({
+          attempt: (options, phase) => attemptStorageACKRegistration(
+            phase === 'initial' ? ctx : createOperationContext('connect'), options,
+          ),
+          retryDelayMs: storageACKRegistrationRetryMs,
+          isStarted: () => this.started,
+          onRetryScheduled: () => this.log.warn(
+            ctx, `V10 StorageACK handler registration will retry every ${storageACKRegistrationRetryMs}ms`,
+          ),
+          onError: (phase, err) => {
+            const label = phase === 'initial'
+              ? 'Skipping V10 StorageACK handler'
+              : phase === 'failover'
+                ? 'V10 StorageACK signer failover failed'
+                : 'V10 StorageACK handler registration retry failed';
+            this.log.warn(ctx, `${label}: ${err instanceof Error ? err.message : String(err)}`);
+          },
+        });
       } else if (typeof this.chain.signACKDigest === 'function') {
         this.log.info(ctx, `V10 StorageACK: adapter has signACKDigest but no extractable key — handler registration deferred until callback signing is supported`);
       }

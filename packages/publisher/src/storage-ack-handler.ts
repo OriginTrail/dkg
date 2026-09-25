@@ -84,6 +84,25 @@ import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
 
+/** Guards every cancellable external phase; a started commit tail must finish atomically. */
+class ACKExecutionContext {
+  constructor(private readonly signal?: AbortSignal) {}
+
+  checkpoint(): void { this.signal?.throwIfAborted(); }
+
+  async run<T>(op: () => T | Promise<T>): Promise<T> {
+    this.checkpoint();
+    const value = await op();
+    this.checkpoint();
+    return value;
+  }
+
+  async commitTail<T>(op: () => Promise<T>): Promise<T> {
+    this.checkpoint();
+    return op();
+  }
+}
+
 /** Canonical positive decimal that is representable by an EVM uint256 slot. */
 function isCanonicalAuthoritativeContextGraphId(value: unknown): value is string {
   return typeof value === 'string'
@@ -949,10 +968,7 @@ export class StorageACKHandler {
 
   /** Check both sides of an external operation so later ACK phases cannot run after cancellation. */
   private async runWhileLive<T>(op: () => T | Promise<T>, signal?: AbortSignal): Promise<T> {
-    signal?.throwIfAborted();
-    const value = await op();
-    signal?.throwIfAborted();
-    return value;
+    return new ACKExecutionContext(signal).run(op);
   }
 
   /** Signing is the final irreversible ACK phase; recheck after an async signer returns. */
@@ -1209,7 +1225,8 @@ export class StorageACKHandler {
     });
 
     const persist = async () => this.runStoreOpOrDecline(cgId, async (): Promise<Uint8Array | undefined> => {
-      const verdict = await this.checkAckCopyAgainstHead({
+      const execution = new ACKExecutionContext(signal);
+      const verdict = await execution.run(() => this.checkAckCopyAgainstHead({
         cgId,
         swmGraphId,
         scope: graphPublish.scope,
@@ -1219,8 +1236,7 @@ export class StorageACKHandler {
         privateTripleCount: graphPublish.privateTripleCount,
         privateMerkleRoot: incomingPrivateRoot,
         signal,
-      });
-      signal?.throwIfAborted();
+      }));
       if ('decline' in verdict) return verdict.decline;
       const companion = graphPublish.subGraphName === undefined
         ? this.config.resolveDurableRootAtomicCompanion?.(Object.freeze({
@@ -1231,15 +1247,13 @@ export class StorageACKHandler {
           }))
         : undefined;
       if (replaceGraph || companion !== undefined) {
-        signal?.throwIfAborted();
-        const replaced = await tryReplaceGraphWithDurableRootCompanionAtomically(
+        const replaced = await execution.run(() => tryReplaceGraphWithDurableRootCompanionAtomically(
           this.store,
           swmGraphUri,
           normalized,
           companion,
           ackStoreOptions('storage-ack.persistGraphScoped.replaceGraph', signal),
-        );
-        signal?.throwIfAborted();
+        ));
         if (!replaced) {
           throw Object.assign(
             new Error('Graph-scoped StorageACK requires atomic TripleStore.replaceGraph support'),
@@ -1250,48 +1264,48 @@ export class StorageACKHandler {
         // gate, so the witness must be dropped explicitly. The head write and
         // two other store calls follow, any of which can throw and leave content
         // ahead of the head.
-        await invalidateSwmMaterializationWitness(
+        await execution.run(() => invalidateSwmMaterializationWitness(
           this.store,
           swmGraphUri,
           ackStoreOptions('storage-ack.persistGraphScoped.witnessInvalidate', signal),
-        ).catch(() => {});
-        signal?.throwIfAborted();
+        ).catch(() => {}));
       }
-      signal?.throwIfAborted();
-      await deleteByPatternWithoutCount(
-        this.store,
-        { graph: metaGraph, subject: operationSubject },
-        ackStoreOptions('storage-ack.persistGraphScoped.deleteOperationMeta', signal),
-      );
-      // Once the operation rows are deleted the re-insert must finish, or a
-      // re-ACK would leave the head pointing at missing rows: no deadline here.
-      await this.store.insert(
-        metadata,
-        ackStoreOptions('storage-ack.persistGraphScoped.insertOperationMeta'),
-      );
-      // The current-head pointer is a delete/insert pair. Once that commit tail
-      // starts it must finish (including flush), even if the ACK deadline has
-      // already returned a decline; aborting between the two loses the last
-      // complete pointer. It remains isolated in the reserved ACK lane.
-      await storeKnowledgeAssetWorkspaceHead({
-        store: this.store,
-        graphManager: this.graphManager,
-        contextGraphId: swmGraphId,
-        kaUal: graphPublish.scope.ual,
-        assertionVersion: graphPublish.scope.assertionVersion,
-        shareOperationId: operationId,
-        subGraphName: graphPublish.subGraphName,
-        queryOptions: ackStoreOptions('storage-ack.persistGraphScoped.workspaceHead'),
+      await execution.commitTail(async () => {
+        await deleteByPatternWithoutCount(
+          this.store,
+          { graph: metaGraph, subject: operationSubject },
+          ackStoreOptions('storage-ack.persistGraphScoped.deleteOperationMeta'),
+        );
+        // Once the operation rows are deleted the re-insert must finish, or a
+        // re-ACK would leave the head pointing at missing rows: no deadline here.
+        await this.store.insert(
+          metadata,
+          ackStoreOptions('storage-ack.persistGraphScoped.insertOperationMeta'),
+        );
+        // The current-head pointer is a delete/insert pair. Once that commit tail
+        // starts it must finish (including flush), even if the ACK deadline has
+        // already returned a decline; aborting between the two loses the last
+        // complete pointer. It remains isolated in the reserved ACK lane.
+        await storeKnowledgeAssetWorkspaceHead({
+          store: this.store,
+          graphManager: this.graphManager,
+          contextGraphId: swmGraphId,
+          kaUal: graphPublish.scope.ual,
+          assertionVersion: graphPublish.scope.assertionVersion,
+          shareOperationId: operationId,
+          subGraphName: graphPublish.subGraphName,
+          queryOptions: ackStoreOptions('storage-ack.persistGraphScoped.workspaceHead'),
+        });
+        await this.supersedeLedgerOperations(verdict.supersede);
+        // Record the signature-to-be under the same lock, so a request that
+        // takes the lock next already sees this copy as owed. Only the
+        // signature follows; like the head write, this is not tied to the
+        // ACK deadline once started.
+        if (recordLedger) await this.recordSignedAck(ledgerEntry());
+        await this.store.flush?.(
+          ackStoreOptions('storage-ack.persistGraphScoped.flush'),
+        );
       });
-      await this.supersedeLedgerOperations(verdict.supersede);
-      // Record the signature-to-be under the same lock, so a request that
-      // takes the lock next already sees this copy as owed. Only the
-      // signature follows; like the head write, this is not tied to the
-      // ACK deadline once started.
-      if (recordLedger) await this.recordSignedAck(ledgerEntry());
-      await this.store.flush?.(
-        ackStoreOptions('storage-ack.persistGraphScoped.flush'),
-      );
       return undefined;
     }, signal);
     const result = this.config.workspaceWriteLocks

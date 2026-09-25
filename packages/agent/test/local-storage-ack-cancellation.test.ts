@@ -16,6 +16,7 @@ import type { QueryOptions, Quad, TripleStore } from '@origintrail-official/dkg-
 import { DKGAgent, MockChainAdapter, OxigraphStore } from './agent.shared';
 import { registerStorageACKEndpoint, type StorageACKEndpoint } from '../src/p2p/storage-ack-endpoint.js';
 import { LocalStorageACKDrainTimeoutError, LocalStorageACKTransport } from '../src/p2p/local-storage-ack-transport.js';
+import { StorageACKRegistrationRuntime } from '../src/p2p/storage-ack-registration-runtime.js';
 
 const graph = 'did:dkg:context-graph:42/_shared_memory';
 const quads: Quad[] = [
@@ -26,7 +27,7 @@ const quads: Quad[] = [
 type LocalAgent = DKGAgent & {
   peerId: string;
   storageAckEndpoint: StorageACKEndpoint | null;
-  localStorageACKTransport: LocalStorageACKTransport;
+  storageACKRegistrationRuntime: StorageACKRegistrationRuntime;
   createACKTransportFactory(options: { sendTimeoutMs: number }): () => {
     sendP2P(peerId: string, protocol: string, data: Uint8Array): Promise<Uint8Array>;
   };
@@ -219,7 +220,7 @@ describe('local StorageACK cancellation through the registered real handler', ()
       await rejectedSend;
       release(true);
       await expect(physical).rejects.toThrow();
-      await local.localStorageACKTransport.drain();
+      await local.storageACKRegistrationRuntime.closeAndDrain();
       expect(insert).toHaveBeenCalledTimes(insertsAtGate);
       expect(sign).not.toHaveBeenCalled();
     });

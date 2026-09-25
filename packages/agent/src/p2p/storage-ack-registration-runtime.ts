@@ -2,7 +2,30 @@ import type { StorageACKProtocol } from '@origintrail-official/dkg-core';
 import { LocalStorageACKTransport } from './local-storage-ack-transport.js';
 import type { StorageACKEndpoint } from './storage-ack-endpoint.js';
 
-/** Owns the ACK endpoint, retry work, failover, and local sends for one agent. */
+export type StorageACKRegistrationOptions = {
+  repairWallets?: boolean;
+  allowChainReresolution?: boolean;
+};
+
+type RegistrationOutcome = 'registered' | 'retryable' | 'disabled';
+type RegistrationPhase = 'initial' | 'retry' | 'failover';
+
+export interface StorageACKRegistrationPlan {
+  attempt: (options: StorageACKRegistrationOptions, phase: RegistrationPhase) => Promise<RegistrationOutcome>;
+  retryDelayMs: number;
+  isStarted: () => boolean;
+  onRetryScheduled: () => void;
+  onError: (phase: RegistrationPhase, error: unknown) => void;
+}
+
+export interface StorageACKRegistrationSession {
+  isCurrent(): boolean;
+  install(endpoint: StorageACKEndpoint): boolean;
+  signerLost(owner: StorageACKEndpoint): boolean;
+  start(plan: StorageACKRegistrationPlan): Promise<void>;
+}
+
+/** Owns the ACK registration state machine and local transport for one agent. */
 export class StorageACKRegistrationRuntime {
   private generation = 0;
   private currentEndpoint: StorageACKEndpoint | null = null;
@@ -15,58 +38,75 @@ export class StorageACKRegistrationRuntime {
   get endpoint(): StorageACKEndpoint | null { return this.currentEndpoint; }
   get registered(): boolean { return this.currentEndpoint !== null; }
 
-  begin(): number {
-    this.generation++;
+  /** A session fences every attempt and owns initial, retry, and signer-loss transitions. */
+  begin(): StorageACKRegistrationSession {
+    const generation = ++this.generation;
     this.localTransport = new LocalStorageACKTransport();
-    return this.generation;
-  }
-
-  isCurrent(generation: number): boolean { return this.generation === generation; }
-
-  track<T>(attempt: Promise<T>): Promise<T> {
-    this.attempts.add(attempt);
-    void attempt.then(
-      () => { this.attempts.delete(attempt); },
-      () => { this.attempts.delete(attempt); },
-    );
-    return attempt;
-  }
-
-  installIfCurrent(generation: number, endpoint: StorageACKEndpoint): boolean {
-    if (!this.isCurrent(generation) || this.currentEndpoint !== null) {
-      endpoint.dispose();
-      return false;
-    }
-    this.currentEndpoint = endpoint;
-    this.clearRetry();
-    return true;
-  }
-
-  handleSignerLoss(generation: number, owner: StorageACKEndpoint, retry: () => Promise<void>): boolean {
-    if (!this.isCurrent(generation) || this.currentEndpoint !== owner || this.failoverInFlight) return false;
-    this.failoverInFlight = true;
-    this.currentEndpoint = null;
-    owner.dispose();
-    void this.track(Promise.resolve().then(retry)).then(
-      () => { this.failoverInFlight = false; },
-      () => { this.failoverInFlight = false; },
-    );
-    return true;
-  }
-
-  scheduleRetry(generation: number, delayMs: number, isStarted: () => boolean, retry: () => Promise<void>): boolean {
-    if (!this.isCurrent(generation) || this.retryTimer || this.registered) return false;
-    this.retryTimer = setTimeout(() => {
-      this.retryTimer = null;
-      if (!this.isCurrent(generation) || !isStarted() || this.registered || this.retryInFlight) return;
-      this.retryInFlight = true;
-      void this.track(Promise.resolve().then(retry)).then(
-        () => { this.retryInFlight = false; },
-        () => { this.retryInFlight = false; },
+    let plan: StorageACKRegistrationPlan | undefined;
+    const isCurrent = () => this.generation === generation;
+    const track = <T>(attempt: Promise<T>): Promise<T> => {
+      this.attempts.add(attempt);
+      void attempt.then(
+        () => { this.attempts.delete(attempt); },
+        () => { this.attempts.delete(attempt); },
       );
-    }, delayMs);
-    this.retryTimer.unref?.();
-    return true;
+      return attempt;
+    };
+    const scheduleRetry = (options: StorageACKRegistrationOptions): void => {
+      if (!plan || !isCurrent() || this.retryTimer || this.registered) return;
+      const activePlan = plan;
+      this.retryTimer = setTimeout(() => {
+        this.retryTimer = null;
+        if (!isCurrent() || !activePlan.isStarted() || this.registered || this.retryInFlight) return;
+        this.retryInFlight = true;
+        void track(Promise.resolve().then(() => runAttempt(options, 'retry'))).then(
+          () => { this.retryInFlight = false; },
+          () => { this.retryInFlight = false; },
+        );
+      }, activePlan.retryDelayMs);
+      this.retryTimer.unref?.();
+      activePlan.onRetryScheduled();
+    };
+    const runAttempt = async (options: StorageACKRegistrationOptions, phase: RegistrationPhase): Promise<void> => {
+      if (!plan || !isCurrent()) return;
+      try {
+        const result = await plan.attempt(options, phase);
+        if (result === 'retryable') {
+          scheduleRetry(phase === 'initial' ? { allowChainReresolution: true } : options);
+        }
+      } catch (error) {
+        plan.onError(phase, error);
+        scheduleRetry(phase === 'initial' ? { allowChainReresolution: true } : options);
+      }
+    };
+    return {
+      isCurrent,
+      install: (endpoint) => {
+        if (!isCurrent() || this.currentEndpoint !== null) {
+          endpoint.dispose();
+          return false;
+        }
+        this.currentEndpoint = endpoint;
+        this.clearRetry();
+        return true;
+      },
+      signerLost: (owner) => {
+        if (!plan || !isCurrent() || this.currentEndpoint !== owner || this.failoverInFlight) return false;
+        this.failoverInFlight = true;
+        this.currentEndpoint = null;
+        owner.dispose();
+        void track(Promise.resolve().then(() => runAttempt({ repairWallets: false }, 'failover'))).then(
+          () => { this.failoverInFlight = false; },
+          () => { this.failoverInFlight = false; },
+        );
+        return true;
+      },
+      start: (registrationPlan) => {
+        if (plan) throw new Error('StorageACK registration session already started');
+        plan = registrationPlan;
+        return track(runAttempt({}, 'initial'));
+      },
+    };
   }
 
   clearRetry(): void {
@@ -87,7 +127,7 @@ export class StorageACKRegistrationRuntime {
     };
   }
 
-  /** Test compatibility for focused transport fixtures. Production installs through installIfCurrent. */
+  /** Test compatibility for focused transport fixtures. Production installs through the session. */
   replaceEndpointForTest(endpoint: StorageACKEndpoint | null): void {
     this.currentEndpoint = endpoint;
   }
@@ -117,6 +157,7 @@ export class StorageACKRegistrationRuntime {
       }
     }
     this.retryInFlight = false;
+    this.failoverInFlight = false;
     await this.localTransport.drain();
   }
 }

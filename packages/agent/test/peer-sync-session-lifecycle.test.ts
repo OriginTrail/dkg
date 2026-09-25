@@ -124,6 +124,7 @@ describe('peer sync session lifecycle', () => {
     const gate = deferred<void>();
     let now = 1_000;
     try {
+      vi.spyOn(f.agent.node.libp2p, 'getPeers').mockReturnValue([]);
       vi.spyOn(Date, 'now').mockImplementation(() => now);
       f.dispatchClose();
       expect(f.state.disconnectTimestamp(f.peerId)).toBe(1_000);
@@ -205,6 +206,7 @@ describe('peer sync session lifecycle', () => {
   it('clears freshness and cooldown state for a peer absent from the stop-time connection list', async () => {
     const f = await createPeerEventFixture();
     try {
+      vi.spyOn(f.agent.node.libp2p, 'getPeers').mockReturnValue([]);
       const now = Date.now();
       f.state.session.recordFreshness(f.peerId, {
         successfulAt: now,

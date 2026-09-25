@@ -35,6 +35,8 @@ export async function createPeerEventFixture() {
   const transport = agent.node.libp2p;
   const peer = peerIdFromString('12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M');
   const peerId = peer.toString();
+  // peer:update events in this fixture come from a live connection.
+  vi.spyOn(transport, 'getPeers').mockReturnValue([peer]);
   const session = new PeerSyncSessionTestDriver(() => state.peerSyncSession);
   return {
     agent, peer, peerId,
