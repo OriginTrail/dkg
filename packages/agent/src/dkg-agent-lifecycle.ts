@@ -516,6 +516,46 @@ const DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS = 64;
 const REHYDRATE_THROTTLE_BATCH = 8;
 /** Retry interval for a persisted-subscription activation that is waiting for a slot. */
 const REHYDRATION_ROLLING_RETRY_MS = 30_000;
+/**
+ * How long startup rehydration waits on persisted rows' read authority before
+ * leaving the rest to background authority recovery (#2815). Override via
+ * `DKGAgentConfig.contextGraphSubscriptionRehydrationAuthorityBudgetMs` (0
+ * removes the budget).
+ */
+const DEFAULT_REHYDRATION_STARTUP_AUTHORITY_BUDGET_MS = 10_000;
+/** Longest delay a Node timer honours; a longer one fires after 1 ms. */
+const MAX_REHYDRATION_AUTHORITY_BUDGET_MS = 2_147_483_647;
+/** Stands in for an authority decision the startup budget stopped waiting for. */
+const REHYDRATION_AUTHORITY_DEFERRED = Symbol('rehydration-authority-deferred');
+
+interface RehydrationAuthorityBudget {
+  /** Whether the budget is spent. A budget of 0 is never spent. */
+  spent(): boolean;
+  /** `decision`, or the deferral marker when the budget is spent first. */
+  race<T>(decision: Promise<T>): Promise<T | typeof REHYDRATION_AUTHORITY_DEFERRED>;
+  dispose(): void;
+}
+
+function startRehydrationAuthorityBudget(budgetMs: number): RehydrationAuthorityBudget {
+  if (budgetMs === 0) {
+    return { spent: () => false, race: (decision) => decision, dispose: () => {} };
+  }
+  let spent = false;
+  let expire: () => void = () => {};
+  const expired = new Promise<typeof REHYDRATION_AUTHORITY_DEFERRED>((resolve) => {
+    expire = () => resolve(REHYDRATION_AUTHORITY_DEFERRED);
+  });
+  const timer = setTimeout(() => {
+    spent = true;
+    expire();
+  }, budgetMs);
+  timer.unref?.();
+  return {
+    spent: () => spent,
+    race: (decision) => Promise.race([decision, expired]),
+    dispose: () => clearTimeout(timer),
+  };
+}
 
 function rehydratedSubscriptionReachedSafeState(
   subscription: Pick<ContextGraphSub, 'synced' | 'metaSynced' | 'pendingMeta'>,
@@ -10222,6 +10262,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.contextGraphSubscriptionRehydrationPendingIds.clear();
     if (!store) return;
     const ctx = createOperationContext('init');
+    let authorityBudget: RehydrationAuthorityBudget | undefined;
     try {
       // System context graphs (AGENTS/ONTOLOGY) are auto-subscribed separately
       // by start(); their persisted rows must NOT be rehydrated here too. Re-
@@ -10362,6 +10403,31 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       dormancyById.clear();
       const activatedRows: ContextGraphSubscriptionRecord[] = [];
       let activatedUserRows = 0;
+      // #2815: every row's authority may need a chain read, and start() (with
+      // the daemon API behind it) waits for this loop. Past the budget, a row
+      // without a durable join approval is left dormant as
+      // `authorityUnavailable` unread; background authority recovery resolves
+      // it after start and activates it only once it resolves as allowed.
+      const configuredAuthorityBudgetMs = this.config.contextGraphSubscriptionRehydrationAuthorityBudgetMs;
+      let authorityBudgetMs = DEFAULT_REHYDRATION_STARTUP_AUTHORITY_BUDGET_MS;
+      if (configuredAuthorityBudgetMs != null) {
+        if (
+          Number.isSafeInteger(configuredAuthorityBudgetMs)
+          && configuredAuthorityBudgetMs >= 0
+          && configuredAuthorityBudgetMs <= MAX_REHYDRATION_AUTHORITY_BUDGET_MS
+        ) {
+          authorityBudgetMs = configuredAuthorityBudgetMs;
+        } else {
+          this.log.warn(
+            ctx,
+            `Ignoring invalid contextGraphSubscriptionRehydrationAuthorityBudgetMs=${configuredAuthorityBudgetMs} ` +
+              `(must be a whole number of milliseconds from 0 to ${MAX_REHYDRATION_AUTHORITY_BUDGET_MS}); ` +
+              `using default ${DEFAULT_REHYDRATION_STARTUP_AUTHORITY_BUDGET_MS}.`,
+          );
+        }
+      }
+      const deferredIds: string[] = [];
+      authorityBudget = startRehydrationAuthorityBudget(authorityBudgetMs);
       for (let i = 0; i < toActivate.length; i++) {
         const row = toActivate[i];
         // The cap limits successful non-hosted activations, not candidates.
@@ -10380,6 +10446,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ? this.localApprovedAgentByCG.get(row.id)
           : undefined;
         const hasJoinApproval = approvedAgentAddress !== undefined;
+        // A join-approved row keeps the synchronous path: only it can restore
+        // the restricted pending-metadata bootstrap, which background
+        // authority recovery does not offer.
+        if (!hasJoinApproval && authorityBudget.spent()) {
+          dormancyById.set(row.id, 'authorityUnavailable');
+          deferredIds.push(row.id);
+          continue;
+        }
         // A crash between a historical false-ready sync and the approval
         // reset could leave all three persisted bits true. The durable
         // join-approved marker identifies a private bootstrap, so prove both
@@ -10403,7 +10477,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // in-memory state needed for one authenticated metadata fetch. That
         // restricted path cannot activate data lanes until this same authority
         // resolver subsequently returns `allowed`.
-        const readAuthority = await this.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
+        const authorityRead = this.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
           allowSubscriptionFallback: false,
           signal: AbortSignal.timeout(chainAuthorityReadBudgetsOf(this).requestTimeoutMs),
           durableSubscriptionBinding: {
@@ -10417,6 +10491,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           reason: 'unexpected-authority-error',
           metadataBootstrap: 'eligible' as const,
         }));
+        // A read the budget stops waiting for ends on its own request
+        // timeout; its late answer is ignored and activates nothing.
+        const readAuthority = hasJoinApproval
+          ? await authorityRead
+          : await authorityBudget.race(authorityRead);
+        if (readAuthority === REHYDRATION_AUTHORITY_DEFERRED) {
+          dormancyById.set(row.id, 'authorityUnavailable');
+          deferredIds.push(row.id);
+          continue;
+        }
         // A stale approval cannot override an explicit current membership
         // denial. The authority resolver supplies a typed bootstrap policy so
         // lifecycle code never infers security semantics from diagnostic text.
@@ -10552,14 +10636,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           `${dormancy.dormantReasons.authorityDenied.length} context-graph subscription(s) left dormant because current read authority denied this node.`,
         );
       }
-      if (dormancy.dormantReasons.authorityUnavailable.length > 0) {
+      const unavailableAtStartup = dormancy.dormantReasons.authorityUnavailable.length - deferredIds.length;
+      if (unavailableAtStartup > 0) {
         this.log.warn(
           ctx,
-          `${dormancy.dormantReasons.authorityUnavailable.length} context-graph subscription(s) left dormant because current read authority was unavailable; retry after restoring the authority source.`,
+          `${unavailableAtStartup} context-graph subscription(s) left dormant because current read authority was unavailable; retry after restoring the authority source.`,
+        );
+      }
+      if (deferredIds.length > 0) {
+        this.log.warn(
+          ctx,
+          `Stopped waiting on read authority for ${deferredIds.length} persisted context-graph subscription(s) ` +
+            `after the ${authorityBudgetMs} ms startup budget. They stay dormant until background authority ` +
+            `recovery resolves them as allowed.`,
         );
       }
     } catch (err) {
       this.log.warn(ctx, `Failed to rehydrate persisted context-graph subscriptions: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      authorityBudget?.dispose();
     }
   }
 
