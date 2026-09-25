@@ -124,6 +124,7 @@ import {
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
   readMaterializedVersion, shouldApplyMaterialization, withMaterializationLock,
+  isKnowledgeAssetWorkspaceHeadCorruptError,
   type MaterializedVersion,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
@@ -240,7 +241,7 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE, type ChainReconciledKCOutcome } from './finalization-handler.js';
 import {
   reconcileContextGraph,
   VmReconcileSchedulingRuntime,
@@ -6890,12 +6891,39 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
     };
 
+    // The sweep fails its whole pass on the first ordinal that throws. A
+    // corrupt SWM head is one KA's local damage: report it and leave only this
+    // ordinal pending, so the rest of the graph keeps reconciling.
+    const reconcileKnowledgeAsset = async (): Promise<ChainReconciledKCOutcome | undefined> => {
+      try {
+        return await fh.handleChainReconciledKC(reconcileInput, ctx);
+      } catch (err) {
+        if (!isKnowledgeAssetWorkspaceHeadCorruptError(err)) throw err;
+        this.log.warn(
+          ctx,
+          `Phase B: corrupt graph-scoped SWM head for ${ual} (ordinal ${ordinal} of cg ${onChainCgId}); `
+            + `leaving it for the next sweep: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        this.emitReplication({
+          contextGraphId: localCgId,
+          onChainCgId: onChainCgId.toString(),
+          action: 'defer',
+          ordinal,
+          kaId: kaId.toString(),
+          ual,
+          detail: 'corrupt-swm-head',
+        });
+        return undefined;
+      }
+    };
+
     let swmState: VmReconcileSwmCandidateState | undefined;
     let activeFetchRan = false;
     let activeFetchHadUsableResponse = false;
     const cleanMissPeerIds = new Set<string>();
     if (!(await targetMayMaterialize())) return { status: 'skip' };
-    let outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
+    let outcome = await reconcileKnowledgeAsset();
+    if (outcome === undefined) return { status: 'pending' };
     if (outcome === 'no-swm' || outcome === 'verified-vm-metadata-pending') {
       if (options.deferActiveFetch) {
         this.emitReplication({
@@ -6995,7 +7023,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
             break;
           }
           if (!(await targetMayMaterialize())) return { status: 'skip' };
-          outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
+          outcome = await reconcileKnowledgeAsset();
+          if (outcome === undefined) return { status: 'pending' };
         }
         if (outcome === 'no-swm') {
           swmState = await this.collectVmReconcileSwmCandidateState(localCgId);

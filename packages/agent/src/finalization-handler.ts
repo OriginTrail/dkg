@@ -59,6 +59,7 @@ import {
   withMaterializationLock,
   workspacePublicQuadsDigest,
   KnowledgeAssetWorkspaceHeadCorruptError,
+  isKnowledgeAssetWorkspaceHeadCorruptError,
   resolveKnowledgeAssetWorkspaceHead,
   type MaterializedVersion,
   type KnowledgeAssetWorkspaceHead,
@@ -1560,7 +1561,21 @@ export class FinalizationHandler {
         assertionVersion: BigInt(resolution.envelope.assertionVersion),
         ...(input.subGraphName ? { subGraphName: input.subGraphName } : {}),
       });
-      await retire(candidate, ctx);
+      try {
+        await retire(candidate, ctx);
+      } catch (err) {
+        // Retirement re-reads the head under the SWM lock. A corrupt head it
+        // cannot prove stale is this KA's own damage, and retrying the ordinal
+        // cannot repair it: keep the head and the verified VM result, so one
+        // KA never fails the caller's whole sweep. Every other cleanup failure
+        // still propagates.
+        if (!isKnowledgeAssetWorkspaceHeadCorruptError(err)) throw err;
+        this.log.warn(
+          ctx,
+          `Chain-reconcile: kept corrupt graph-scoped SWM head for ${input.ual}; `
+            + `its SWM twin was not retired: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
     this.log.info(
       ctx,
