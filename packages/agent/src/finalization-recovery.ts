@@ -1513,6 +1513,30 @@ export class FinalizationRecovery<
     );
   }
 
+  /**
+   * Whether {@link replayMatching} could have any entry to replay for this KA,
+   * answered without its chain reads. `true` whenever the inbox cannot be read,
+   * so a caller skipping chain work on `false` never hides a replayable entry.
+   */
+  async mayReplayForKnowledgeAsset(
+    input: Omit<FinalizationRecoveryReplayInput, 'merkleRoot' | 'onChainCgId'>,
+  ): Promise<boolean> {
+    const store = this.getStore();
+    // The same gate as `matchingEntries`: without these reads no entry replays.
+    if (
+      !store
+      || !this.chain
+      || !this.chain.getLatestMerkleRoot
+      || !this.chain.getMerkleRootCount
+      || !this.chain.getKAContextGraphId
+    ) return false;
+    try {
+      return (await store.listForKnowledgeAsset(input)).length > 0;
+    } catch {
+      return true;
+    }
+  }
+
   async matchingEntries(input: FinalizationRecoveryReplayInput): Promise<FinalizationRecoveryEntry[]> {
     const store = this.getStore();
     if (!store) return [];
