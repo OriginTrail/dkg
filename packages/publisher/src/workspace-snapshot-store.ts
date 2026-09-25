@@ -12,6 +12,7 @@ import type { Dirent } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { formatCanonicalRdfLiteralTerm, parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { withSnapshotSource, readSnapshotSource, readSnapshotFileIdentity, sameSnapshotSource, sameSnapshotFileIdentity, snapshotPath, SnapshotSourceChangedError, type OpenedSnapshotSource, type SnapshotFileSource, type SnapshotFileIdentity, type SnapshotFileReader } from './workspace-snapshot-source.js';
 import { BoundedLruCache } from '@origintrail-official/dkg-core';
 
@@ -970,9 +971,24 @@ export function serializeWorkspacePublicSnapshotQuads(quads: readonly Quad[]): s
   return serializeWorkspacePublicSnapshotWithIndex(quads).payload;
 }
 
+const LITERAL_UCHAR_ESCAPE = /\\[uU]/;
+
+/**
+ * A literal reaches the digest either in its N-Triples wire form, where
+ * `parseSimpleNQuads` keeps `\u`/`\U` escapes (`"Women’s"`), or as the
+ * store returns it (`"Women’s"`). Both are the same term, so an escaped
+ * literal is decoded to the canonical form first. Every other term is hashed
+ * exactly as before, which keeps existing digests stable.
+ */
+function digestObjectTerm(object: string): string {
+  if (!object.startsWith('"') || !LITERAL_UCHAR_ESCAPE.test(object)) return object;
+  const literal = parseRdfLiteralTerm(object);
+  return literal ? formatCanonicalRdfLiteralTerm(literal) : object;
+}
+
 export function workspacePublicQuadsDigest(quads: readonly Quad[]): string {
   const canonical = quads
-    .map((quad) => JSON.stringify([quad.subject, quad.predicate, quad.object, '']))
+    .map((quad) => JSON.stringify([quad.subject, quad.predicate, digestObjectTerm(quad.object), '']))
     .sort((a, b) => a.localeCompare(b));
   const hash = createHash('sha256');
   hash.update('[');
