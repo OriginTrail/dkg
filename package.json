@@ -185,7 +185,8 @@
       "ws@>=8.0.0 <8.20.1": "8.20.1"
     },
     "patchedDependencies": {
-      "hardhat@2.28.6": "patches/hardhat@2.28.6.patch"
+      "hardhat@2.28.6": "patches/hardhat@2.28.6.patch",
+      "@libp2p/yamux@8.0.1": "patches/@libp2p__yamux@8.0.1.patch"
     }
   }
 }
