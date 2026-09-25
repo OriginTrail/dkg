@@ -17,6 +17,7 @@ import { DKGAgent, MockChainAdapter, OxigraphStore } from './agent.shared';
 import { registerStorageACKEndpoint, type StorageACKEndpoint } from '../src/p2p/storage-ack-endpoint.js';
 import { LocalStorageACKDrainTimeoutError, LocalStorageACKTransport } from '../src/p2p/local-storage-ack-transport.js';
 import { StorageACKRegistrationRuntime } from '../src/p2p/storage-ack-registration-runtime.js';
+import { installStorageACKFixtureEndpoint } from './_helpers/storage-ack-endpoint-fixture.js';
 
 const graph = 'did:dkg:context-graph:42/_shared_memory';
 const quads: Quad[] = [
@@ -26,7 +27,6 @@ const quads: Quad[] = [
 
 type LocalAgent = DKGAgent & {
   peerId: string;
-  storageAckEndpoint: StorageACKEndpoint | null;
   storageACKRegistrationRuntime: StorageACKRegistrationRuntime;
   createACKTransportFactory(options: { sendTimeoutMs: number }): () => {
     sendP2P(peerId: string, protocol: string, data: Uint8Array): Promise<Uint8Array>;
@@ -100,14 +100,14 @@ describe('local StorageACK cancellation through the registered real handler', ()
       const local = agent as LocalAgent;
       (local as unknown as { node: { peerId: string } }).node = { peerId: 'local-core' };
       const routes = new Map<string, (data: Uint8Array, peerId: string) => Promise<Uint8Array>>();
-      local.storageAckEndpoint = registerStorageACKEndpoint({
+      installStorageACKFixtureEndpoint(local, registerStorageACKEndpoint({
         registerGroup: (entries) => {
           for (const entry of entries) routes.set(entry.protocolId, entry.handler);
           return () => routes.clear();
         },
         publish: (data, peerId, signal) => handler.handler(data, { toString: () => peerId } as any, signal),
         update: (data, peerId, signal) => handler.updateHandler(data, { toString: () => peerId } as any, signal),
-      });
+      }));
       expect(routes.has(PROTOCOL_STORAGE_ACK)).toBe(true);
       expect(routes.has(PROTOCOL_STORAGE_UPDATE_ACK)).toBe(true);
       const root = computeFlatKCRootV10(quads, []);
@@ -186,7 +186,7 @@ describe('local StorageACK cancellation through the registered real handler', ()
       const local = agent as LocalAgent;
       (local as unknown as { node: { peerId: string } }).node = { peerId: 'local-core' };
       let physical: Promise<Uint8Array> | undefined;
-      local.storageAckEndpoint = registerStorageACKEndpoint({
+      installStorageACKFixtureEndpoint(local, registerStorageACKEndpoint({
         registerGroup: () => () => {},
         publish: (data, peerId, signal) => {
           physical = handler.handler(data, { toString: () => peerId } as any, signal);
@@ -196,7 +196,7 @@ describe('local StorageACK cancellation through the registered real handler', ()
           physical = handler.updateHandler(data, { toString: () => peerId } as any, signal);
           return physical;
         },
-      });
+      }));
       const root = computeFlatKCRootV10(quads, []);
       const leafCount = computeFlatKCMerkleLeafCountV10(quads, []);
       const data = kind === 'publish'

@@ -8,6 +8,8 @@ import {
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import { Messenger } from '../src/p2p/messenger.js';
+import { StorageACKRegistrationRuntime } from '../src/p2p/storage-ack-registration-runtime.js';
+import { installStorageACKFixtureEndpoint, clearStorageACKFixtureEndpoint } from './_helpers/storage-ack-endpoint-fixture.js';
 
 const capturedStorageACKHandlerConfigs: unknown[] = [];
 const capturedStorageACKHandlerCalls: Array<{ kind: 'publish' | 'update'; data: Uint8Array; peerId: string }> = [];
@@ -99,11 +101,11 @@ describe('StorageACK endpoint and local dispatch lifecycle', () => {
     internals.config.nodeRole = 'core';
     const publish = vi.fn(async () => new Uint8Array([1]));
     const update = vi.fn(async () => new Uint8Array([2]));
-    internals.storageAckEndpoint = {
+    installStorageACKFixtureEndpoint(agent, {
       dispatch: (protocol, data) => protocol === PROTOCOL_STORAGE_ACK || protocol === PROTOCOL_STORAGE_ACK_V2
         ? publish(data)
         : update(data),
-    };
+    });
     const send = internals.createACKTransportFactory()().sendP2P;
     const request = new Uint8Array([3]);
 
@@ -116,7 +118,7 @@ describe('StorageACK endpoint and local dispatch lifecycle', () => {
     expect(update).toHaveBeenCalledTimes(2);
     expect(remoteSend).not.toHaveBeenCalled();
 
-    internals.storageAckEndpoint = null;
+    await clearStorageACKFixtureEndpoint(agent);
     await expect(send(internals.peerId, PROTOCOL_STORAGE_ACK, request)).rejects.toThrow(/not registered/);
   });
 
@@ -128,7 +130,7 @@ describe('StorageACK endpoint and local dispatch lifecycle', () => {
     let observedSignal: AbortSignal | undefined;
     let lateMutation = false;
     let dispatchCalls = 0;
-    internals.storageAckEndpoint = {
+    installStorageACKFixtureEndpoint(agent, {
       dispatch: async (_protocol, _data, _peerId, signal) => {
         dispatchCalls++;
         observedSignal = signal;
@@ -136,7 +138,7 @@ describe('StorageACK endpoint and local dispatch lifecycle', () => {
         if (!signal?.aborted) lateMutation = true;
         return new Uint8Array([1]);
       },
-    };
+    });
     const send = internals.createACKTransportFactory({ sendTimeoutMs: 10 })().sendP2P;
     await expect(send(internals.peerId, PROTOCOL_STORAGE_ACK, new Uint8Array([3])))
       .rejects.toThrow(/timed out after 10ms/);
@@ -365,6 +367,35 @@ describe('StorageACK endpoint and local dispatch lifecycle', () => {
       .rejects.toThrow(/transport is closed/);
     expect(capturedStorageACKHandlerCalls.filter(({ kind }) => kind === 'publish')).toHaveLength(2);
     expect(capturedStorageACKHandlerCalls.filter(({ kind }) => kind === 'update')).toHaveLength(2);
+  });
+
+  it('fences a sender created before the first start so it cannot escape shutdown ownership', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 42n);
+    agent = await DKGAgent.create({
+      name: 'ACKPrestartSenderFenceTest',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+    });
+    const internals = agent as unknown as ProviderInternals;
+    // The public factory reads the not-yet-started node peer ID, so capture
+    // its underlying local sender before start to exercise the lifetime fence.
+    const prestartSend = (agent as unknown as {
+      storageACKRegistrationRuntime: StorageACKRegistrationRuntime;
+    }).storageACKRegistrationRuntime.createLocalSender();
+    await agent.start();
+    expect(internals.storageAckHandlerRegistered).toBe(true);
+    expect(() => prestartSend(internals.peerId, PROTOCOL_STORAGE_ACK, new Uint8Array([1]), 1_000))
+      .toThrow(/transport is closed/);
+    expect(capturedStorageACKHandlerCalls).toHaveLength(0);
+    const currentSend = internals.createACKTransportFactory()().sendP2P;
+    await expect(currentSend(internals.peerId, PROTOCOL_STORAGE_ACK, new Uint8Array([1])))
+      .resolves.toEqual(new Uint8Array([1]));
   });
 
   it('joins a paused signer failover without resurrecting ACK routes during stop', async () => {

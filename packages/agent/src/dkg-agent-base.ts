@@ -1240,12 +1240,8 @@ export class DKGAgentBase {
   protected storageAckLedgerReady = false;
   protected storageAckLedgerReadyFlight: Promise<boolean> | null = null;
   protected readonly storageACKRegistrationRuntime = new StorageACKRegistrationRuntime();
-  /** Compatibility boundary for focused transport fixtures. */
   protected get storageAckEndpoint(): StorageACKEndpoint | null {
     return this.storageACKRegistrationRuntime.endpoint;
-  }
-  protected set storageAckEndpoint(endpoint: StorageACKEndpoint | null) {
-    this.storageACKRegistrationRuntime.replaceEndpointForTest(endpoint);
   }
   protected get storageAckHandlerRegistered(): boolean {
     return this.storageACKRegistrationRuntime.registered;

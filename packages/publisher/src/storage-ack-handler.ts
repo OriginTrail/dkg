@@ -84,25 +84,6 @@ import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
 
-/** Guards cancellable external phases and the entry to an atomic metadata commit. */
-class ACKExecutionContext {
-  constructor(private readonly signal?: AbortSignal) {}
-
-  checkpoint(): void { this.signal?.throwIfAborted(); }
-
-  async run<T>(op: () => T | Promise<T>): Promise<T> {
-    this.checkpoint();
-    const value = await op();
-    this.checkpoint();
-    return value;
-  }
-
-  async commitTail<T>(op: () => Promise<T>): Promise<T> {
-    this.checkpoint();
-    return op();
-  }
-}
-
 /** Canonical positive decimal that is representable by an EVM uint256 slot. */
 function isCanonicalAuthoritativeContextGraphId(value: unknown): value is string {
   return typeof value === 'string'
@@ -968,7 +949,16 @@ export class StorageACKHandler {
 
   /** Check both sides of an external operation so later ACK phases cannot run after cancellation. */
   private async runWhileLive<T>(op: () => T | Promise<T>, signal?: AbortSignal): Promise<T> {
-    return new ACKExecutionContext(signal).run(op);
+    signal?.throwIfAborted();
+    const value = await op();
+    signal?.throwIfAborted();
+    return value;
+  }
+
+  /** Enter the metadata/head commit only while live; after entry it must finish. */
+  private async runCommitTail<T>(op: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
+    return op();
   }
 
   /** Signing is the final irreversible ACK phase; recheck after an async signer returns. */
@@ -1225,8 +1215,7 @@ export class StorageACKHandler {
     });
 
     const persist = async () => this.runStoreOpOrDecline(cgId, async (): Promise<Uint8Array | undefined> => {
-      const execution = new ACKExecutionContext(signal);
-      const verdict = await execution.run(() => this.checkAckCopyAgainstHead({
+      const verdict = await this.runWhileLive(() => this.checkAckCopyAgainstHead({
         cgId,
         swmGraphId,
         scope: graphPublish.scope,
@@ -1236,7 +1225,7 @@ export class StorageACKHandler {
         privateTripleCount: graphPublish.privateTripleCount,
         privateMerkleRoot: incomingPrivateRoot,
         signal,
-      }));
+      }), signal);
       if ('decline' in verdict) return verdict.decline;
       const companion = graphPublish.subGraphName === undefined
         ? this.config.resolveDurableRootAtomicCompanion?.(Object.freeze({
@@ -1247,13 +1236,13 @@ export class StorageACKHandler {
           }))
         : undefined;
       if (replaceGraph || companion !== undefined) {
-        const replaced = await execution.run(() => tryReplaceGraphWithDurableRootCompanionAtomically(
+        const replaced = await this.runWhileLive(() => tryReplaceGraphWithDurableRootCompanionAtomically(
           this.store,
           swmGraphUri,
           normalized,
           companion,
           ackStoreOptions('storage-ack.persistGraphScoped.replaceGraph', signal),
-        ));
+        ), signal);
         if (!replaced) {
           throw Object.assign(
             new Error('Graph-scoped StorageACK requires atomic TripleStore.replaceGraph support'),
@@ -1264,13 +1253,13 @@ export class StorageACKHandler {
         // gate, so the witness must be dropped explicitly. The head write and
         // two other store calls follow, any of which can throw and leave content
         // ahead of the head.
-        await execution.run(() => invalidateSwmMaterializationWitness(
+        await this.runWhileLive(() => invalidateSwmMaterializationWitness(
           this.store,
           swmGraphUri,
           ackStoreOptions('storage-ack.persistGraphScoped.witnessInvalidate', signal),
-        ).catch(() => {}));
+        ).catch(() => {}), signal);
       }
-      await execution.commitTail(async () => {
+      await this.runCommitTail(async () => {
         await deleteByPatternWithoutCount(
           this.store,
           { graph: metaGraph, subject: operationSubject },
@@ -1305,7 +1294,7 @@ export class StorageACKHandler {
         await this.store.flush?.(
           ackStoreOptions('storage-ack.persistGraphScoped.flush'),
         );
-      });
+      }, signal);
       return undefined;
     }, signal);
     const result = this.config.workspaceWriteLocks

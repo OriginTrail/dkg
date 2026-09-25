@@ -12,6 +12,7 @@ import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import { ACKCandidateDiscoveryCoordinator } from '../src/p2p/ack-candidate-discovery.js';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { InMemoryPeerSyncLease, runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
+import { installStorageACKFixtureEndpoint, clearStorageACKFixtureEndpoint } from './_helpers/storage-ack-endpoint-fixture.js';
 
 type AgentInternals = {
   node: {
@@ -355,7 +356,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
       lastKnownRequiredACKs: 3,
     });
     a.config.nodeRole = 'core';
-    a.storageAckEndpoint = { dispatch: async () => new Uint8Array([1]) };
+    installStorageACKFixtureEndpoint(a, { dispatch: async () => new Uint8Array([1]) });
     a.getPeerProtocols = async (peerId) => CORE.slice(0, 2).includes(peerId)
       ? [PROTOCOL_STORAGE_ACK] : ['/dkg/10.0.0/sync'];
     const probe = vi.fn(async (peerId: string) => peerId === CORE[2]
@@ -379,7 +380,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
       lastKnownRequiredACKs: 3,
     });
     a.config.nodeRole = 'core';
-    a.storageAckEndpoint = { dispatch: async () => new Uint8Array([1]) };
+    installStorageACKFixtureEndpoint(a, { dispatch: async () => new Uint8Array([1]) });
     a.getPeerProtocols = async (peerId) => upgraded.includes(peerId)
       ? ['/dkg/10.0.0/sync'] : [PROTOCOL_STORAGE_ACK];
     const probe = vi.fn(async (peerId: string, protocol: string) =>
@@ -445,7 +446,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     const unknown = Array.from({ length: 40 }, (_, i) => `unknown-${i}`);
     const a = await buildAgent({ confirmedCores: [], connected: unknown, lastKnownRequiredACKs: 1 });
     a.config.nodeRole = 'core';
-    a.storageAckEndpoint = { dispatch: async () => new Uint8Array([1]) };
+    installStorageACKFixtureEndpoint(a, { dispatch: async () => new Uint8Array([1]) });
     a.getPeerProtocols = async () => ['/dkg/10.0.0/sync'];
     const probe = vi.fn(async (peerId: string) => peerId === unknown[39]
       ? 'supported' as const : 'unsupported' as const);
@@ -466,7 +467,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
       confirmedCores: [], connected: unknown, preferredACKPeerIds: [unknown[39]], lastKnownRequiredACKs: 1,
     });
     a.config.nodeRole = 'core';
-    a.storageAckEndpoint = { dispatch: async () => new Uint8Array([1]) };
+    installStorageACKFixtureEndpoint(a, { dispatch: async () => new Uint8Array([1]) });
     a.getPeerProtocols = async () => ['/dkg/10.0.0/sync'];
     let active = 0;
     let peak = 0;
@@ -592,16 +593,16 @@ describe('getACKCandidatePeers — core-only candidates', () => {
       connected: [...CORE.slice(0, 2), ...EDGE],
     });
     a.config.nodeRole = 'core';
-    a.storageAckEndpoint = {
+    installStorageACKFixtureEndpoint(a, {
       dispatch: async () => new Uint8Array([1]),
-    };
+    });
 
     expect(a.getACKCandidatePeers()).toEqual([a.peerId, ...CORE.slice(0, 2)]);
     expect(a.getACKCandidatePeers(PROTOCOL_STORAGE_ACK_V2)).toEqual([a.peerId, ...CORE.slice(0, 2)]);
     a.config.ackCandidatePeerIds = [CORE[0]];
     expect(a.getACKCandidatePeers()).toEqual([a.peerId, CORE[0]]);
 
-    a.storageAckEndpoint = null;
+    await clearStorageACKFixtureEndpoint(a);
     expect(a.getACKCandidatePeers()).toEqual([CORE[0]]);
   });
 

@@ -33,6 +33,7 @@ export class StorageACKRegistrationRuntime {
   private retryInFlight = false;
   private failoverInFlight = false;
   private readonly attempts = new Set<Promise<unknown>>();
+  private readonly retiredTransports = new Set<LocalStorageACKTransport>();
   private localTransport = new LocalStorageACKTransport();
 
   get endpoint(): StorageACKEndpoint | null { return this.currentEndpoint; }
@@ -41,6 +42,11 @@ export class StorageACKRegistrationRuntime {
   /** A session fences every attempt and owns initial, retry, and signer-loss transitions. */
   begin(): StorageACKRegistrationSession {
     const generation = ++this.generation;
+    this.clearRetry();
+    this.currentEndpoint?.dispose();
+    this.currentEndpoint = null;
+    this.localTransport.close();
+    this.retiredTransports.add(this.localTransport);
     this.localTransport = new LocalStorageACKTransport();
     let plan: StorageACKRegistrationPlan | undefined;
     const isCurrent = () => this.generation === generation;
@@ -120,16 +126,13 @@ export class StorageACKRegistrationRuntime {
     peerId: string, protocol: StorageACKProtocol, data: Uint8Array, timeoutMs: number,
   ) => Promise<Uint8Array> {
     const transport = this.localTransport;
+    const generation = this.generation;
     return (peerId, protocol, data, timeoutMs) => {
+      if (generation !== this.generation) throw new Error('Local StorageACK transport is closed for a retired agent lifetime');
       const endpoint = this.currentEndpoint;
       if (!endpoint) throw new Error('Local StorageACK handler is not registered');
       return transport.send(endpoint, peerId, protocol, data, timeoutMs);
     };
-  }
-
-  /** Test compatibility for focused transport fixtures. Production installs through the session. */
-  replaceEndpointForTest(endpoint: StorageACKEndpoint | null): void {
-    this.currentEndpoint = endpoint;
   }
 
   /** Fence all ACK work immediately, then join physical work before store teardown. */
@@ -158,6 +161,10 @@ export class StorageACKRegistrationRuntime {
     }
     this.retryInFlight = false;
     this.failoverInFlight = false;
-    await this.localTransport.drain();
+    await Promise.all([
+      this.localTransport.drain(),
+      ...[...this.retiredTransports].map((transport) => transport.drain()),
+    ]);
+    this.retiredTransports.clear();
   }
 }
