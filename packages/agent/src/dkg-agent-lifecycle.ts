@@ -4524,7 +4524,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   clearNetworkRejectedPeerState(this: DKGAgent, remotePeer: string): void {
-    this.ackCapabilityRegistry.forget(remotePeer);
+    this.peerCapabilityRegistry.forget(remotePeer);
     this.peerSyncSession.clearPeer(remotePeer);
     this.lastSyncDisconnectedAt.delete(remotePeer);
     this.selectedSwmBootstrapAdmission.clear(remotePeer);
@@ -4922,7 +4922,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncingPeers: session,
       signal,
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
-      ackCapabilities: this.ackCapabilityRegistry,
+      peerCapabilities: this.peerCapabilityRegistry,
       getSyncContextGraphs: () => this.config.syncContextGraphs ?? [],
       getDurableSyncContextGraphs: () => automaticDurableSyncContextGraphs(
         this.config.syncContextGraphs ?? [],
@@ -5356,12 +5356,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // #1093: keep the confirmed-core set fresh from `peer:update` too.
     // `runSyncOnConnect` reads the protocol list exactly once, racing
     // identify — a core peer whose identify completed late was never
-    // re-classified, leaving `knownCorePeerIds` permanently partial and
+    // re-classified, leaving core-role evidence permanently partial and
     // the ACK candidate pool capped below quorum. Identify delivers the
     // complete protocol list, so add-on-present is safe. Retain
     // classification on an empty identify list, but revoke it when a
     // populated update no longer advertises the core-only ACK protocol.
-    this.ackCapabilityRegistry.reconcile(peerId, protocols);
+    this.peerCapabilityRegistry.observe(peerId, { source: 'peer-update', protocols: protocols });
     if (!peerEvents.isSkippedNoSync(peerId)) return;
     if (!syncOnConnectEnabled(this.config)) return;
     if (!protocols.includes(PROTOCOL_SYNC)) return;

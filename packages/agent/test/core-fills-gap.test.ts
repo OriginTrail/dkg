@@ -1893,7 +1893,7 @@ describe('Phase D - VM reconcile damping', () => {
     expect(expensiveScans).toBeGreaterThan(0);
 
     expensiveScans = 0;
-    (internals as any).ackCapabilityRegistry.reconcile('peer-reclassified', [PROTOCOL_STORAGE_ACK]);
+    (internals as any).peerCapabilityRegistry.observe('peer-reclassified', { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK] });
 
     await expect(internals.reconcileChainOrdinal('56', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     // Fetch re-ran for the reclassified peer (sweep entry not reused); the

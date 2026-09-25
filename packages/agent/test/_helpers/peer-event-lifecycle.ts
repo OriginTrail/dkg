@@ -4,6 +4,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { PROTOCOL_SYNC, type OperationContext } from '@origintrail-official/dkg-core';
 import type { PeerSyncSession } from '../../src/sync/peer-sync-session.js';
 import { DKGAgent } from '../../src/index.js';
+import type { PeerCapabilityRegistry } from '../../src/p2p/peer-capability.js';
 import { PeerSyncSessionTestDriver } from './peer-sync-session-driver.js';
 
 export function deferred<T>() {
@@ -19,7 +20,7 @@ export async function flushMicrotasks(): Promise<void> {
 
 // Expose protected state once. All workflow spies use DKGAgent's real signatures.
 interface PeerEventState {
-  knownCorePeerIds: ReadonlySet<string>;
+  peerCapabilityRegistry: PeerCapabilityRegistry;
   peerSyncSession: PeerSyncSession;
   lastSyncDisconnectedAt: Map<string, number>;
   log: { warn(ctx: OperationContext, message: string): void };
@@ -40,7 +41,7 @@ export async function createPeerEventFixture() {
     get state() {
       return {
         session,
-        knownCorePeerIds: state.knownCorePeerIds,
+        knownCorePeerIds: state.peerCapabilityRegistry.snapshotCorePeerIds(),
         disconnectTimestamp: (id: string) => state.lastSyncDisconnectedAt.get(id),
         log: state.log,
       };

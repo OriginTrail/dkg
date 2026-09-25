@@ -1,5 +1,5 @@
 import type { PeerSyncSession } from '../src/sync/peer-sync-session.js';
-import type { ACKCapabilityRegistry } from '../src/p2p/ack-capability.js';
+import type { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import { vi } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -292,8 +292,7 @@ export interface SelectedProviderSelectionAgent {
   networkAdmissionCoordinator: { isAcceptedPeer: (peerId: string) => boolean };
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2: Set<string>;
-  ackCapabilityRegistry: ACKCapabilityRegistry;
-  peerCapabilityRegistry: ACKCapabilityRegistry;
+  peerCapabilityRegistry: PeerCapabilityRegistry;
   selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
   rfc64SwmRecoveryCoordinatorV1: {
     admitSelectedPublic: (peerId: string, contextGraphIds: readonly string[]) => boolean;

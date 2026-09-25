@@ -1,6 +1,6 @@
 import { PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
-import { isStorageACKProtocol, type StorageACKProtocol } from './storage-ack-protocols.js';
-import { PeerCapabilityRegistry, type PeerCapabilitySnapshot } from './peer-capability.js';
+import { STORAGE_ACK_PROTOCOLS, isStorageACKProtocol, type StorageACKProtocol } from './storage-ack-protocols.js';
+import { PeerCapabilityRegistry, type PeerCapabilityRound } from './peer-capability.js';
 import {
   selectACKCandidateUniverse,
   selectACKCandidatePeersWithDiagnostics,
@@ -11,6 +11,25 @@ import {
 export interface LocalACKCandidate {
   peerId: string;
   available: boolean;
+}
+
+interface ACKCapabilitySnapshot {
+  corePeerIds: ReadonlySet<string>;
+  supportByProtocol: ReadonlyMap<StorageACKProtocol, ReadonlySet<string>>;
+}
+
+/** ACK policy is a projection of generic protocol evidence, not registry state. */
+function snapshotACK(round: PeerCapabilityRound): ACKCapabilitySnapshot {
+  const corePeerIds = round.snapshotCorePeerIds();
+  return {
+    corePeerIds,
+    supportByProtocol: new Map(STORAGE_ACK_PROTOCOLS.map(([protocol]) => [
+      protocol,
+      protocol === PROTOCOL_STORAGE_ACK
+        ? corePeerIds
+        : new Set([...round.snapshotProtocolPeers(protocol)].filter((peerId) => corePeerIds.has(peerId))),
+    ])),
+  };
 }
 
 export interface ACKRoundPorts {
@@ -44,7 +63,7 @@ interface ACKRoundCandidatePlan {
 /** One round universe, partitioned from a single capability snapshot. */
 function planRoundCandidates(input: {
   raw: readonly string[];
-  snapshot: PeerCapabilitySnapshot;
+  snapshot: ACKCapabilitySnapshot;
   protocol: StorageACKProtocol;
   accepted: ReadonlySet<string>;
   localAvailable: boolean;
@@ -90,7 +109,7 @@ export class ACKCandidateDiscoveryCoordinator {
   selectCandidates(
     input: Omit<ACKCandidatePeerSelectionInput, 'capability' | 'selfPeerId' | 'localCandidate'>,
     localCandidate: LocalACKCandidate,
-    snapshot: PeerCapabilitySnapshot = this.registry.snapshot(),
+    snapshot: ACKCapabilitySnapshot = snapshotACK(this.registry.beginRound()),
   ): ACKCandidatePeerSelectionResult {
     const requestedProtocolPeers = input.protocol && input.protocol !== PROTOCOL_STORAGE_ACK && isStorageACKProtocol(input.protocol)
       ? snapshot.supportByProtocol.get(input.protocol)
@@ -106,7 +125,9 @@ export class ACKCandidateDiscoveryCoordinator {
     if (!isStorageACKProtocol(ports.protocol)) throw new Error(`Unsupported ACK protocol: ${ports.protocol}`);
     const requestedProtocol = ports.protocol;
     await Promise.all(ports.connectedPeers.map(async (peerId) => {
-      this.registry.observeIdentify(peerId, await ports.getPeerProtocols(peerId));
+      this.registry.observe(peerId, {
+        source: 'identify-snapshot', protocols: await ports.getPeerProtocols(peerId),
+      });
     }));
     // Keep preflight and final selection on this round's snapshot even if
     // peer:update changes the registry while the round is in progress.
@@ -118,7 +139,7 @@ export class ACKCandidateDiscoveryCoordinator {
     }));
     const plan = (): ACKRoundCandidatePlan => planRoundCandidates({
       raw,
-      snapshot: round.snapshot(),
+      snapshot: snapshotACK(round),
       protocol: requestedProtocol,
       accepted: new Set(raw.filter((peerId) => ports.isAcceptedPeer(peerId))),
       localAvailable: ports.localCandidate.available,
@@ -148,9 +169,9 @@ export class ACKCandidateDiscoveryCoordinator {
           if (!round.supports(peerId, PROTOCOL_STORAGE_ACK)) {
             if (requestedProtocol !== PROTOCOL_STORAGE_ACK &&
                 await ports.probeProtocol!(peerId, PROTOCOL_STORAGE_ACK) !== 'supported') return null;
-            round.observeNegotiated(peerId, PROTOCOL_STORAGE_ACK);
+            round.observe(peerId, { source: 'negotiation', protocol: PROTOCOL_STORAGE_ACK });
           }
-          round.observeNegotiated(peerId, requestedProtocol);
+          round.observe(peerId, { source: 'negotiation', protocol: requestedProtocol });
           return peerId;
         }))).filter((peerId): peerId is string => peerId !== null);
         this.preferredProbeCursor += batch.filter((peerId) => preferredIds.has(peerId)).length;
@@ -169,6 +190,6 @@ export class ACKCandidateDiscoveryCoordinator {
       verifiedSameNetworkPeerIds: ports.verifiedSameNetworkPeerIds(),
       requiredACKs: ports.requiredACKs,
       protocol: requestedProtocol,
-    }, ports.localCandidate, round.snapshot());
+    }, ports.localCandidate, snapshotACK(round));
   }
 }

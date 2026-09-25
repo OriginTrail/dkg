@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ACKCapabilityRegistry } from '../src/p2p/ack-capability.js';
+import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import {
   runSyncOnConnect,
@@ -18,7 +18,7 @@ function fixture(kind: 'ordinary' | 'selected', syncingPeers: Set<string> | Peer
   const context = {
     remotePeer: 'legacy-peer', syncingPeers,
     getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
-    ackCapabilities: new ACKCapabilityRegistry(),
+    peerCapabilities: new PeerCapabilityRegistry(),
     getSyncContextGraphs: () => ['legacy-cg'],
     getDurableSyncContextGraphs: () => ['legacy-cg'],
     syncFromPeer: transfer,
@@ -61,7 +61,7 @@ describe.each(['ordinary', 'selected'] as const)('published %s on-connect compat
       remotePeer = f.context.remotePeer;
       syncingPeers = f.context.syncingPeers;
       signal = ownership === 'modern' ? new AbortController().signal : undefined;
-      ackCapabilities = f.context.ackCapabilities;
+      peerCapabilities = f.context.peerCapabilities;
       #accountingCalls = 0;
       get accountingCalls() { return this.#accountingCalls; }
       getPeerProtocols() { return f.context.getPeerProtocols(); }

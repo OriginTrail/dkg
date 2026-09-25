@@ -1,6 +1,6 @@
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { describe, expect, it, vi } from 'vitest';
-import { ACKCapabilityRegistry } from '../src/p2p/ack-capability.js';
+import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { classifySharedMemoryFreshness } from '../src/sync/shared-memory-freshness.js';
@@ -378,8 +378,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       peerSyncSession: activeSessionWithoutJobs(),
       knownCorePeerIds: new Set<string>(),
       knownCorePeerIdsV2: new Set<string>(),
-      ackCapabilityRegistry: new ACKCapabilityRegistry(),
-      peerCapabilityRegistry: new ACKCapabilityRegistry(),
+      peerCapabilityRegistry: new PeerCapabilityRegistry(),
       applySyncOnConnectAccounting:
         LifecycleSyncMethods.prototype.applySyncOnConnectAccounting,
       selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
@@ -485,8 +484,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       peerSyncSession: activeSessionWithoutJobs(),
       knownCorePeerIds: new Set<string>(),
       knownCorePeerIdsV2: new Set<string>(),
-      ackCapabilityRegistry: new ACKCapabilityRegistry(),
-      peerCapabilityRegistry: new ACKCapabilityRegistry(),
+      peerCapabilityRegistry: new PeerCapabilityRegistry(),
       applySyncOnConnectAccounting:
         LifecycleSyncMethods.prototype.applySyncOnConnectAccounting,
       selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
-import { ACKCapabilityRegistry } from '../src/p2p/ack-capability.js';
+import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import {
   InMemoryPeerSyncLease,
   runSyncOnConnect,
@@ -36,7 +36,7 @@ describe('peer sync session lifecycle', () => {
     const account = vi.fn();
     const context: SyncOnConnectContext = {
       signal: controller.signal, remotePeer: 'peer', syncingPeers,
-      getPeerProtocols: async () => [PROTOCOL_SYNC], ackCapabilities: new ACKCapabilityRegistry(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC], peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => phase === 'discovered' && discovered ? ['initial', 'new'] : ['initial'],
       getDurableSyncContextGraphs: () => ['initial'], syncFromPeer: sync,
       refreshMetaSyncedFlags: refresh, discoverContextGraphsFromStore: discover,

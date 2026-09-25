@@ -19,7 +19,7 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import type { DKGAgent } from '../src/dkg-agent.js';
-import { ACKCapabilityRegistry } from '../src/p2p/ack-capability.js';
+import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import {
   RFC64_UNREGISTERED_AUTHORITY_COMPAT_NEGATIVE_TTL_MS_V1,
   RFC64_UNREGISTERED_AUTHORITY_RESERVED_NON_CORE_PEERS_V1,
@@ -113,10 +113,9 @@ function createFetchAgent(options: FakeAgentOptions = {}) {
     configurable: true,
   });
   Reflect.set(agent, 'node', options.libp2p === undefined ? undefined : { libp2p: options.libp2p });
-  const ackCapabilities = new ACKCapabilityRegistry();
-  for (const peerId of corePeerIds) ackCapabilities.reconcile(peerId, [PROTOCOL_STORAGE_ACK]);
-  Reflect.set(agent, 'ackCapabilityRegistry', ackCapabilities);
-  Reflect.set(agent, 'peerCapabilityRegistry', ackCapabilities);
+  const peerCapabilities = new PeerCapabilityRegistry();
+  for (const peerId of corePeerIds) peerCapabilities.observe(peerId, { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK] });
+  Reflect.set(agent, 'peerCapabilityRegistry', peerCapabilities);
   if (options.completeProviders !== undefined) {
     const completeProviders = options.completeProviders;
     Reflect.set(agent, 'rfc64SwmRecoveryRuntimeV1', {
@@ -462,11 +461,11 @@ describe('Rfc64SeedFetchMethods replica peer selection', () => {
     const { agent } = createFetchAgent({
       libp2p: libp2pWith({ self: 'peer-self', peers: ['peer-edge', 'peer-promoted'] }),
     });
-    const capabilities = Reflect.get(agent, 'peerCapabilityRegistry') as ACKCapabilityRegistry;
+    const capabilities = Reflect.get(agent, 'peerCapabilityRegistry') as PeerCapabilityRegistry;
     expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1()).toEqual(['peer-edge', 'peer-promoted']);
-    capabilities.reconcile('peer-promoted', [PROTOCOL_STORAGE_ACK]);
+    capabilities.observe('peer-promoted', { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK] });
     expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1()).toEqual(['peer-promoted', 'peer-edge']);
-    capabilities.reconcile('peer-promoted', ['/dkg/10.0.0/sync']);
+    capabilities.observe('peer-promoted', { source: 'peer-update', protocols: ['/dkg/10.0.0/sync'] });
     expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1()).toEqual(['peer-edge', 'peer-promoted']);
   });
 

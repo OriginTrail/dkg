@@ -1076,7 +1076,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         allowAllNetworkAdmission(agent);
         agent.subscribeToContextGraph('runtime-contextGraph');
         (agent as any).preferredSyncPeers.set('runtime-contextGraph', 'peer-preferred');
-        (agent as any).ackCapabilityRegistry.reconcile('peer-core', [PROTOCOL_STORAGE_ACK]);
+        (agent as any).peerCapabilityRegistry.observe('peer-core', { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK] });
 
         const peerEdge = { toString: () => 'peer-edge' };
         const peerCore = { toString: () => 'peer-core' };
@@ -1356,7 +1356,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           peerRotationKey: 'runtime-contextGraph',
         });
 
-        (agent as any).ackCapabilityRegistry.reconcile('peer-core-new', [PROTOCOL_STORAGE_ACK]);
+        (agent as any).peerCapabilityRegistry.observe('peer-core-new', { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK] });
         connections = [
           { remotePeer: peerEdgeA } as any,
           { remotePeer: peerCore } as any,

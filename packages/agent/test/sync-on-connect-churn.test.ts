@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ACKCapabilityRegistry } from '../src/p2p/ack-capability.js';
+import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import { PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS, SYNC_RECONNECT_FLAP_GRACE_MS } from '../src/dkg-agent-constants.js';
 import {
@@ -36,7 +36,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [configuredGraph],
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags,
@@ -62,7 +62,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['selected-cg'],
       getDurableSyncContextGraphs: () => ['selected-cg'],
       syncFromPeer,
@@ -87,7 +87,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       getDurableSyncContextGraphs: () => [],
       syncFromPeer,
@@ -707,7 +707,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['cg-a'],
       syncFromPeer: async () => emptyDetailedSync({
         insertedTriples: 3,
@@ -757,7 +757,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['cg-a'],
       syncFromPeer: async () => emptyDetailedSync({
         failedPeers: 1,
@@ -794,7 +794,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['unreachable-cg', 'denied-cg'],
       syncFromPeer: async () => emptyDetailedSync({
         failedPeers: 1,
@@ -850,7 +850,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => contextGraphs,
       syncFromPeer,
       refreshMetaSyncedFlags,
@@ -888,7 +888,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['unauthorized-cg'],
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,
@@ -913,7 +913,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['eligible-cg'],
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,
@@ -935,7 +935,7 @@ describe('sync-on-connect churn gates', () => {
       remotePeer: PEER_A,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['eligible-cg'],
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,

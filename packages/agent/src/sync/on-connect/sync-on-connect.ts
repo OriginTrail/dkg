@@ -153,19 +153,23 @@ interface SyncOnConnectBaseContext extends CompatiblePeerSyncContext {
   onSyncAccounting?: (peerId: string, outcome: SyncOnConnectPeerOutcome) => void;
 }
 
-type ACKCapabilitySink = Pick<PeerCapabilityRegistry, 'reconcile'>;
+type PeerCapabilitySink = Pick<PeerCapabilityRegistry, 'observe'>;
 
 /** The public legacy set form remains supported, but it cannot compete with the registry port. */
 export type SyncOnConnectContext = SyncOnConnectBaseContext & (
-  | { ackCapabilities: ACKCapabilitySink; knownCorePeerIds?: never; knownCorePeerIdsV2?: never }
-  | { ackCapabilities?: never; knownCorePeerIds: Set<string>; knownCorePeerIdsV2?: Set<string> }
+  | { peerCapabilities: PeerCapabilitySink; knownCorePeerIds?: never; knownCorePeerIdsV2?: never }
+  | { peerCapabilities?: never; knownCorePeerIds: Set<string>; knownCorePeerIdsV2?: Set<string> }
 );
 
-function ackCapabilitySink(context: SyncOnConnectContext): ACKCapabilitySink {
-  if (context.ackCapabilities) return context.ackCapabilities;
+function peerCapabilitySink(context: SyncOnConnectContext): PeerCapabilitySink {
+  if (context.peerCapabilities) return context.peerCapabilities;
   const { knownCorePeerIds, knownCorePeerIdsV2 } = context;
   return {
-    reconcile(peerId, protocols) {
+    observe(peerId, observation) {
+      // Legacy sets cannot retain evidence provenance; keep their historical
+      // populated-list behavior while the registry uses the typed source.
+      if (observation.source === 'negotiation') return;
+      const { protocols } = observation;
       if (protocols.length === 0) return;
       if (protocols.includes(PROTOCOL_STORAGE_ACK)) knownCorePeerIds.add(peerId);
       else knownCorePeerIds.delete(peerId);
@@ -408,13 +412,13 @@ async function runSessionSelectedSharedMemoryRetry(
 export async function runSyncOnConnect(
   context: SyncOnConnectContext,
 ): Promise<SyncOnConnectOutcome> {
-  return runSessionSyncOnConnect(context, admitPeerSyncContext(context), ackCapabilitySink(context));
+  return runSessionSyncOnConnect(context, admitPeerSyncContext(context), peerCapabilitySink(context));
 }
 
 async function runSessionSyncOnConnect(
   context: SyncOnConnectBaseContext,
   { signal, syncingPeers }: SessionPeerSyncContext,
-  ackCapabilities: ACKCapabilitySink,
+  peerCapabilities: PeerCapabilitySink,
 ): Promise<SyncOnConnectOutcome> {
   const {
     remotePeer,
@@ -528,7 +532,7 @@ async function runSessionSyncOnConnect(
     const protocols = await getPeerProtocols(remotePeer);
     signal.throwIfAborted();
 
-    ackCapabilities.reconcile(remotePeer, protocols);
+    peerCapabilities.observe(remotePeer, { source: 'identify-snapshot', protocols });
 
     const hasSync = protocols.includes(PROTOCOL_SYNC);
     if (!hasSync) {

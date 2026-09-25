@@ -69,7 +69,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/index.js';
 import { Messenger } from '../src/p2p/messenger.js';
-import { ACKCapabilityRegistry } from '../src/p2p/ack-capability.js';
+import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 
 /**
  * Capture every `ACKCollector` constructor call so each test can
@@ -207,9 +207,7 @@ interface ProviderInternals {
       getConnections?(): Array<{ remotePeer: { toString(): string } }>;
     };
   };
-  knownCorePeerIds: ReadonlySet<string>;
-  knownCorePeerIdsV2: ReadonlySet<string>;
-  ackCapabilityRegistry: ACKCapabilityRegistry;
+  peerCapabilityRegistry: PeerCapabilityRegistry;
   storageAckHandlerRegistered: boolean;
   storageAckEndpoint: {
     dispatch(protocol: string, data: Uint8Array, peerId: string, signal?: AbortSignal): Promise<Uint8Array>;
@@ -479,8 +477,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
       'new-v2-core',
       'rejected-peer',
       'retryable-probe-failure',
-    ]) internals.ackCapabilityRegistry.reconcile(peerId,
-      peerId === 'new-v2-core' ? [PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2] : [PROTOCOL_STORAGE_ACK]);
+    ]) internals.peerCapabilityRegistry.observe(peerId, { source: 'peer-update', protocols: peerId === 'new-v2-core' ? [PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2] : [PROTOCOL_STORAGE_ACK] });
     internals.node = {
       libp2p: {
         getPeers: () => [
@@ -550,7 +547,7 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     };
     internals.config.ackCandidatePeerIds = ['allow-a', 'allow-b', 'disconnected-allowlisted'];
     for (const peerId of ['allow-a', 'allow-b', 'outside-allowlist']) {
-      internals.ackCapabilityRegistry.reconcile(peerId, [PROTOCOL_STORAGE_ACK]);
+      internals.peerCapabilityRegistry.observe(peerId, { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK] });
     }
     internals.node = {
       libp2p: {

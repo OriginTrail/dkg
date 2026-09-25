@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { DKGAgent } from '../src/index.js';
-import { ACKCapabilityRegistry } from '../src/p2p/ack-capability.js';
+import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_ACCESS, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { peerIdFromString } from '@libp2p/peer-id';
@@ -147,7 +147,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => { throw busy; },
@@ -172,7 +172,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['ordinary'],
       getDurableSyncContextGraphs: () => ['ordinary'],
       ordinarySharedMemoryLane: {
@@ -213,7 +213,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['first'],
       syncFromPeer: async () => ({
         insertedTriples: 1,
@@ -254,7 +254,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['first', 'second'],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -285,7 +285,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['first', 'second'],
       syncFromPeer: async () => ({
         insertedTriples: 1,
@@ -312,7 +312,7 @@ describe('runSyncOnConnect callbacks', () => {
 
   it('reconciles ACK capabilities through the required registry port', async () => {
     const remotePeer = freshPeerIdString();
-    const ackCapabilities = new ACKCapabilityRegistry();
+    const peerCapabilities = new PeerCapabilityRegistry();
 
     const outcome = await runSyncOnConnect({
       signal: ACTIVE_SYNC_LIFETIME,
@@ -320,7 +320,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC],
-      ackCapabilities,
+      peerCapabilities,
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => 1,
       refreshMetaSyncedFlags: async () => {},
@@ -329,7 +329,7 @@ describe('runSyncOnConnect callbacks', () => {
     });
 
     expect(outcome).toBe('synced');
-    expect(ackCapabilities.supportsCore(remotePeer)).toBe(true);
+    expect(peerCapabilities.supportsCore(remotePeer)).toBe(true);
   });
 
   it('reconciles populated and empty identify lists through the legacy set context', async () => {
@@ -372,10 +372,11 @@ describe('runSyncOnConnect callbacks', () => {
     expect(knownCorePeerIdsV2.has(remotePeer)).toBe(false);
   });
 
-  it('tracks and evicts V2 ACK capability from populated protocol lists', async () => {
+  it('retains negotiated V2 through stale identify and revokes it on peer:update', async () => {
     const remotePeer = freshPeerIdString();
-    const ackCapabilities = new ACKCapabilityRegistry();
-    ackCapabilities.reconcile(remotePeer, [PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2]);
+    const peerCapabilities = new PeerCapabilityRegistry();
+    peerCapabilities.observe(remotePeer, { source: 'negotiation', protocol: PROTOCOL_STORAGE_ACK });
+    peerCapabilities.observe(remotePeer, { source: 'negotiation', protocol: PROTOCOL_STORAGE_ACK_V2 });
 
     const emptyIdentifyOutcome = await runSyncOnConnect({
       signal: ACTIVE_SYNC_LIFETIME,
@@ -383,7 +384,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [],
-      ackCapabilities,
+      peerCapabilities,
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => {},
@@ -392,7 +393,7 @@ describe('runSyncOnConnect callbacks', () => {
     });
 
     expect(emptyIdentifyOutcome).toBe('skipped-no-sync');
-    expect(ackCapabilities.supports(remotePeer, PROTOCOL_STORAGE_ACK_V2)).toBe(true);
+    expect(peerCapabilities.supports(remotePeer, PROTOCOL_STORAGE_ACK_V2)).toBe(true);
 
     const v1OnlyOutcome = await runSyncOnConnect({
       signal: ACTIVE_SYNC_LIFETIME,
@@ -400,7 +401,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC],
-      ackCapabilities,
+      peerCapabilities,
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => 1,
       refreshMetaSyncedFlags: async () => {},
@@ -409,8 +410,12 @@ describe('runSyncOnConnect callbacks', () => {
     });
 
     expect(v1OnlyOutcome).toBe('synced');
-    expect(ackCapabilities.supportsCore(remotePeer)).toBe(true);
-    expect(ackCapabilities.supports(remotePeer, PROTOCOL_STORAGE_ACK_V2)).toBe(false);
+    expect(peerCapabilities.supportsCore(remotePeer)).toBe(true);
+    expect(peerCapabilities.supports(remotePeer, PROTOCOL_STORAGE_ACK_V2)).toBe(true);
+    peerCapabilities.observe(remotePeer, {
+      source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC],
+    });
+    expect(peerCapabilities.supports(remotePeer, PROTOCOL_STORAGE_ACK_V2)).toBe(false);
   });
 
   it('fires onPeerSkippedNoSync when the peer does not advertise PROTOCOL_SYNC', async () => {
@@ -425,7 +430,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => ['/ipfs/id/1.0.0', '/meshsub/1.1.0'],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer,
       refreshMetaSyncedFlags: async () => {},
@@ -456,7 +461,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => 7,
       refreshMetaSyncedFlags: async () => {},
@@ -485,7 +490,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -524,7 +529,7 @@ describe('runSyncOnConnect callbacks', () => {
         remotePeer,
         syncingPeers: new InMemoryPeerSyncLease(),
         getPeerProtocols: async () => [PROTOCOL_SYNC],
-        ackCapabilities: new ACKCapabilityRegistry(),
+        peerCapabilities: new PeerCapabilityRegistry(),
         getSyncContextGraphs: () => ['integrity-rejected-cg'],
         syncFromPeer: async () => ({
           insertedTriples: 3,
@@ -566,7 +571,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['cg-clean-empty'],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -601,7 +606,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['cg-clean-then-timeout'],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -636,7 +641,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -673,7 +678,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['cg-timeout'],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -707,7 +712,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -741,7 +746,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         insertedTriples: 3,
@@ -776,7 +781,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         insertedTriples: 3,
@@ -813,7 +818,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         insertedTriples: 1,
@@ -863,7 +868,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         insertedTriples: 1,
@@ -913,7 +918,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         complete: false,
@@ -981,7 +986,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => contextGraphs,
       syncFromPeer,
       refreshMetaSyncedFlags: async () => {},
@@ -1027,7 +1032,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer: async () => ({
         insertedTriples: 1,
@@ -1074,7 +1079,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['cg-metadata-only'],
       syncFromPeer: async () => ({
         insertedTriples: 1,
@@ -1112,7 +1117,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['cg-shared-meta-only'],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -1148,7 +1153,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['cg-shared-phase-failure'],
       syncFromPeer: async () => ({
         insertedTriples: 0,
@@ -1181,7 +1186,7 @@ describe('runSyncOnConnect callbacks', () => {
         remotePeer,
         syncingPeers,
         getPeerProtocols: async () => [PROTOCOL_SYNC],
-        ackCapabilities: new ACKCapabilityRegistry(),
+        peerCapabilities: new PeerCapabilityRegistry(),
         getSyncContextGraphs: () => [],
         syncFromPeer: async () => 7,
         refreshMetaSyncedFlags: async () => {},
@@ -1224,7 +1229,7 @@ describe('runSyncOnConnect callbacks', () => {
         remotePeer,
         syncingPeers: new InMemoryPeerSyncLease(),
         getPeerProtocols: async () => [PROTOCOL_SYNC],
-        ackCapabilities: new ACKCapabilityRegistry(),
+        peerCapabilities: new PeerCapabilityRegistry(),
         getSyncContextGraphs: () => contextGraphs,
         syncFromPeer,
         refreshMetaSyncedFlags: async () => {},
@@ -1257,7 +1262,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers: new InMemoryPeerSyncLease(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => ['devnet-test'],
       syncFromPeer,
       refreshMetaSyncedFlags: async () => {},
@@ -1285,7 +1290,7 @@ describe('runSyncOnConnect callbacks', () => {
       remotePeer,
       syncingPeers,
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      ackCapabilities: new ACKCapabilityRegistry(),
+      peerCapabilities: new PeerCapabilityRegistry(),
       getSyncContextGraphs: () => [],
       syncFromPeer,
       refreshMetaSyncedFlags: async () => {},
