@@ -127,7 +127,7 @@ export class AgentsPhonebookMethods extends DKGAgentBase {
         for (const connection of this.node.libp2p.getConnections()) {
           const peerId = connection.remotePeer.toString();
           if (peerId === this.peerId || peers.has(peerId)) continue;
-          peers.set(peerId, { peerId, core: this.knownCorePeerIds.has(peerId) });
+          peers.set(peerId, { peerId, core: this.peerCapabilityRegistry?.supportsCore(peerId) === true });
         }
         return [...peers.values()];
       },

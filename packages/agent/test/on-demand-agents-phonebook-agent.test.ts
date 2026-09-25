@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { generateKeyPair } from '@libp2p/crypto/keys';
 import { peerIdFromPrivateKey } from '@libp2p/peer-id';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
 import type { DurableSyncResult } from '../src/dkg-agent-types.js';
 import { DKGAgent } from '../src/index.js';
@@ -124,7 +124,7 @@ async function createFreshEdge(name: string, options: {
       getPeers: () => [],
     },
   };
-  internals.knownCorePeerIds.add(CORE);
+  internals.peerCapabilityRegistry.observe(CORE, { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK] });
   // A relay-circuit dial that succeeds adds the connection.
   const ensurePeerConnected = vi.fn(async (peerId: string) => {
     if (!connected.includes(peerId)) connected.push(peerId);
@@ -223,7 +223,7 @@ describe('on-demand agents phonebook on a fresh Edge', () => {
     // A connected Core that sorts first, so without the gate it would be asked.
     const rejected = '12D3KooWAckSigningCoreAAA';
     edge.connected.unshift(rejected);
-    edge.internals.knownCorePeerIds.add(rejected);
+    edge.internals.peerCapabilityRegistry.observe(rejected, { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK] });
     const checked: string[] = [];
     edge.internals[gate] = async (peer: string | { toString(): string }) => {
       const peerId = peer.toString();
