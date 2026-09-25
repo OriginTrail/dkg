@@ -30,6 +30,7 @@ import {
   slotRelocationVerdict,
 } from '../src/context-graph-metadata-relocation.js';
 import { replaceContextGraphMetadataFact } from '../src/context-graph-metadata-fact.js';
+import { contextGraphNameCommitmentOf } from '../src/context-graph-name-candidate.js';
 import {
   ONTOLOGY_BINDING_SLOT_RECHECK_MS,
   ONTOLOGY_BINDING_SLOTS_MAX,
@@ -225,13 +226,36 @@ function bindingQuad(contextGraphId: string, onChainId: string, graph = ONTOLOGY
   };
 }
 
-async function createOnChain(chain: MockChainAdapter, accessPolicy: 0 | 1): Promise<string> {
+async function createOnChain(
+  chain: MockChainAdapter,
+  accessPolicy: 0 | 1,
+  /** The graph whose name the slot commits; none when omitted. */
+  contextGraphId?: string,
+): Promise<string> {
   const created = await chain.createOnChainContextGraph({
     accessPolicy,
     publishPolicy: 1,
     participantAgents: [],
+    ...(contextGraphId === undefined ? {} : { nameHash: contextGraphNameCommitmentOf(contextGraphId) }),
   });
   return created.contextGraphId.toString();
+}
+
+/**
+ * What a node that already enumerated the chain restores from its discovery
+ * checkpoint: slot `onChainId` commits `contextGraphId`'s name. An on-chain id
+ * binding in the store counts only for a slot proven this way.
+ */
+function restoreProvenSlot(agent: TestAgent, onChainId: string, contextGraphId: string): void {
+  agent.applyOnChainContextGraphObservation({
+    contextGraphId: onChainId,
+    owner: '0x1111111111111111111111111111111111111111',
+    accessPolicy: 0,
+    publishPolicy: 1,
+    nameHash: contextGraphNameCommitmentOf(contextGraphId),
+    blockNumber: 1,
+    active: true,
+  }, { source: 'checkpoint' });
 }
 
 async function lookupBinding(store: TripleStore, contextGraphId: string): Promise<string | undefined> {
@@ -367,6 +391,8 @@ describe('durable on-chain id binding lookup', () => {
       callerAgentAddress: ownerAddress,
     });
     const { onChainId } = await agent.registerContextGraph(id, { callerAgentAddress: ownerAddress });
+    // What a running node reads from its chain: the slot commits this id.
+    await agent.discoverContextGraphsFromStorage();
     agent.subscribedContextGraphs.delete(id);
 
     await expect(agent.resolveContextGraphOnChainIdBinding(id))
@@ -733,7 +759,8 @@ describe('store discovery on a Core with a bare on-chain binding', () => {
   it('activates a public graph from a bare binding once the chain proves its slot public', async () => {
     const id = '0x1111111111111111111111111111111111111111/binding-first';
     const { agent, chain } = await createAgent('core-binding-first', { nodeRole: 'core' });
-    const slot = await createOnChain(chain, 0);
+    const slot = await createOnChain(chain, 0, id);
+    await agent.discoverContextGraphsFromStorage();
     await agent.store.insert([bindingQuad(id, slot)]);
 
     await agent.discoverContextGraphsFromStore();
@@ -786,6 +813,8 @@ describe('store discovery of an on-chain id binding kept in _meta', () => {
       callerAgentAddress: ownerAddress,
     });
     const { onChainId } = await agent.registerContextGraph(id, { callerAgentAddress: ownerAddress });
+    // What a running node reads from its chain: the slot commits this id.
+    await agent.discoverContextGraphsFromStorage();
     agent.subscribedContextGraphs.delete(id);
 
     await agent.discoverContextGraphsFromStore();
@@ -796,6 +825,7 @@ describe('store discovery of an on-chain id binding kept in _meta', () => {
   it('catalogues a bare binding that chain discovery left in a graph’s _meta', async () => {
     const id = '0x1111111111111111111111111111111111111111/curator-restored';
     const { agent } = await createAgent('discovery-meta-bare');
+    restoreProvenSlot(agent, '904', id);
     await agent.store.insert([
       bindingQuad(id, '904', contextGraphMetaGraphUri(id)),
       // A binding about the graph in some other graph's `_meta` is not its own.
@@ -812,6 +842,9 @@ describe('store discovery of an on-chain id binding kept in _meta', () => {
   it('prefers the ontology copy when both graphs hold a binding', async () => {
     const id = '0x1111111111111111111111111111111111111111/both-copies';
     const { agent } = await createAgent('discovery-both-copies');
+    // Both copies name a slot this chain proves for the id.
+    restoreProvenSlot(agent, '31', id);
+    restoreProvenSlot(agent, '32', id);
     await agent.store.insert([
       ontologyQuad(contextGraphDataGraphUri(id), DKG_ONTOLOGY.RDF_TYPE, DKG_ONTOLOGY.DKG_CONTEXT_GRAPH),
       bindingQuad(id, '31'),

@@ -2134,10 +2134,12 @@ export class DKGAgent extends DKGAgentBase {
       id: string;
       name: string;
       source: 'ontology' | 'meta';
-      onChainId?: string;
+      /** The on-chain id binding this chain proves, if any. */
+      binding?: { onChainId: string; onChainHash: string };
       /** False when only a bare on-chain id binding was found. */
       hasDefinition: boolean;
     }>();
+    let unprovenClaims = 0;
 
     const collectEntries = (
       rows: Record<string, string>[],
@@ -2152,18 +2154,24 @@ export class DKGAgent extends DKGAgentBase {
 
         const existing = discoveredEntries.get(id);
         const rowName = row['name'] ? stripLiteral(row['name']) : undefined;
-        const candidateOnChainId = row['onChainId']
+        // An `OnChainId` row is a claim, not a binding: the ontology graph is
+        // shared by every network and deployment, and one Base edge held three
+        // definitions claiming #33. Keep only a claim this chain proves, with
+        // the name hash it proves, so the row is bound exactly as a chain lane
+        // would bind it.
+        const claimedOnChainId = row['onChainId']
           ? stripLiteral(row['onChainId'])
           : undefined;
-        const rowOnChainId = isCanonicalAuthoritativeContextGraphId(candidateOnChainId)
-          ? candidateOnChainId
-          : undefined;
+        const proven = claimedOnChainId === undefined
+          ? null
+          : this.provenOnChainContextGraphClaim(id, claimedOnChainId);
+        if (claimedOnChainId !== undefined && proven === null) unprovenClaims++;
         const ontologyWins = existing?.source === 'meta' && source === 'ontology';
         discoveredEntries.set(id, {
           id,
           name: rowName ?? existing?.name ?? id,
           source: !existing || ontologyWins ? source : existing.source,
-          onChainId: rowOnChainId ?? existing?.onChainId,
+          binding: proven ?? existing?.binding,
           hasDefinition: definition || existing?.hasDefinition === true,
         });
       }
@@ -2235,7 +2243,11 @@ export class DKGAgent extends DKGAgentBase {
       collectEntries(metaResult.bindings as Record<string, string>[], 'meta', true);
     }
 
-    this.log.debug(ctx, `Discovery scan found ${discoveredEntries.size} CG(s) in store`);
+    this.log.debug(
+      ctx,
+      `Discovery scan found ${discoveredEntries.size} CG(s) in store`
+        + `${unprovenClaims > 0 ? `; ignored ${unprovenClaims} on-chain id claim(s) this chain does not prove` : ''}`,
+    );
 
     // Private classification is needed only to restore the SWM scope of an
     // already-active member. Newly catalogued rows do not need a per-row store
@@ -2252,19 +2264,33 @@ export class DKGAgent extends DKGAgentBase {
     );
     const curatedById = new Map(curatedResults);
 
+    // A definition for a graph this node wants but holds only by its name hash
+    // (`dkg subscribe <hash>`, or a Core's hosted row) is that graph's verified
+    // cleartext id. Adopt it as the name-hash resolver would, so the
+    // subscription moves to the cleartext id. Recording it below first would
+    // let the canonical setter retire the hash-keyed row and drop the
+    // subscription with it.
+    // Adoptions are independent: each targets its own name hash, is
+    // serialized per hash, and never throws.
+    await mapWithConcurrency(
+      [...discoveredEntries.values()],
+      DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_CONCURRENCY,
+      ({ id }) => this.adoptWantedContextGraphNamePlaceholder(id),
+    );
+
     // Recording and the temporary Core auto-subscribe bridge are synchronous.
     // Defer only this narrow producer burst so every discovered row enters one
     // immutable finalized responsibility batch regardless of scan duration.
     const releaseResponsibilityBatch =
       this.beginRfc64ScheduledCatalogResponsibilityBatchV1();
     try {
-      for (const { id, name, source, onChainId, hasDefinition } of discoveredEntries.values()) {
+      for (const { id, name, source, binding, hasDefinition } of discoveredEntries.values()) {
         const existing = this.subscribedContextGraphs.get(id);
         if (existing) {
           // Enrich an existing active/hosted record and persist the binding. The
           // central recorder deliberately does not reactivate an existing
           // unsubscribed row, preserving explicit unsubscribe semantics.
-          this.recordDiscoveredContextGraph(id, { name, onChainId });
+          this.recordDiscoveredContextGraph(id, { name, ...binding });
           const current = this.subscribedContextGraphs.get(id) ?? existing;
           // A restart re-seeds `subscribedContextGraphs` from persisted state but
           // does NOT re-add the CG to the SWM-sync scope (`config.syncContextGraphs`,
@@ -2292,8 +2318,13 @@ export class DKGAgent extends DKGAgentBase {
           !hasDefinition
           && (this.config.nodeRole ?? 'edge') === 'core'
           // Only verdicts the relocation above already reached count, so
-          // this pass stays within its chain read budget.
-          && await this.contextGraphAccessPolicyState(id, { declared: false, onChainId, readChain: false }) !== 'public'
+          // this pass stays within its chain read budget. An unproven claim
+          // names no slot, so it proves nothing public either.
+          && await this.contextGraphAccessPolicyState(id, {
+            declared: false,
+            ...(binding === undefined ? {} : { onChainId: binding.onChainId }),
+            readChain: false,
+          }) !== 'public'
         ) {
           // A bare binding carries no access policy of its own. Activating
           // it before the chain proves its slot public would host and
@@ -2325,7 +2356,7 @@ export class DKGAgent extends DKGAgentBase {
 
         const recorded = this.recordDiscoveredContextGraph(
           id,
-          { name, onChainId },
+          { name, ...binding },
           {
             // A persisted row left dormant during restart must not be
             // reactivated when the same definition is found in Oxigraph

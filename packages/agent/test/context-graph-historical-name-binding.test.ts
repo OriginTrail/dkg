@@ -5,6 +5,7 @@ import {
   LOCAL_ID,
   NAME_HASH,
   getOnChainId,
+  proveOnChainSlot,
   selectedFixture,
 } from './context-graph-registration-binding.fixture.js';
 
@@ -218,6 +219,8 @@ describe('cold current-state Context Graph name binding', () => {
       type: 'bindings',
       bindings: [{ id: '"7"' }],
     });
+    // The fallback holds only for a slot this node's chain proves.
+    proveOnChainSlot(fixture, '7');
     await expect(getOnChainId(fixture, LOCAL_ID)).resolves.toBe('7');
   });
 

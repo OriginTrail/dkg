@@ -24,6 +24,29 @@ describe('context graph on-chain id binding query', () => {
     expect(query).toMatch(/\} LIMIT 1$/);
   });
 
+  it('restricts each graph to the allowed ids before preferring the ontology copy', () => {
+    const query = contextGraphOnChainIdBindingQuery('team-a', { onChainIds: ['33', '7'] });
+
+    expect(query).toContain(
+      `OPTIONAL { GRAPH <did:dkg:context-graph:ontology> { <did:dkg:context-graph:team-a> <${PREDICATE}> ?ontologyId }`
+      + ' FILTER(STR(?ontologyId) IN ("33", "7")) }',
+    );
+    expect(query).toContain(
+      `OPTIONAL { GRAPH <did:dkg:context-graph:team-a/_meta> { <did:dkg:context-graph:team-a> <${PREDICATE}> ?metaId }`
+      + ' FILTER(STR(?metaId) IN ("33", "7")) }',
+    );
+    expect(query).toContain('BIND(COALESCE(?ontologyId, ?metaId) AS ?id)');
+    // No list, no filter. An empty list matches nothing, in a form every
+    // backend accepts, and still reads both graphs.
+    const all = contextGraphOnChainIdBindingQuery('team-a', {});
+    expect(all).not.toContain('FILTER(STR(');
+    expect(all).not.toContain('FILTER(false)');
+    const none = contextGraphOnChainIdBindingQuery('team-a', { onChainIds: [] });
+    expect(none).not.toContain('IN (');
+    expect(none.match(/\} FILTER\(false\) \}/g)).toHaveLength(2);
+    expect(none).toContain('BIND(COALESCE(?ontologyId, ?metaId) AS ?id)');
+  });
+
   it('names only the requested graph', () => {
     const query = contextGraphOnChainIdBindingQuery('team-b');
     const graphs = [...query.matchAll(/GRAPH <([^>]+)>/g)].map((match) => match[1]);
