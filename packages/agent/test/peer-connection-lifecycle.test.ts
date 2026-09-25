@@ -1,6 +1,7 @@
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/index.js';
+import { NetworkAdmissionProbeError } from '../src/p2p/network-admission-coordinator.js';
 import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/catalog-rollout-authority-v1.js';
 import { syncOpenedPeerConnection } from '../src/sync/peer-connection.js';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
@@ -334,6 +335,37 @@ describe('peer connection lifecycle', () => {
       enrichmentGate.resolve();
       senderKeyGate.resolve();
       await f.close();
+    }
+  });
+
+  it('does not duplicate a retryable admission-probe warning on connection open', async () => {
+    const session = activeSessionWithoutJobs();
+    const replay = replayReservation();
+    const remotePeer = '12D3KooWProbeWarningDedupPeer';
+    const log = { info: vi.fn(), warn: vi.fn() };
+    const ports = {
+      localPeerId: '12D3KooWlocal',
+      prepareCatalogReplay: vi.fn(() => replay.value),
+      ensureAdmitted: vi.fn(async () => {
+        throw new NetworkAdmissionProbeError(remotePeer, 'timeout');
+      }),
+      enrichPeerStore: vi.fn(async () => undefined),
+      drainPendingSenderKey: vi.fn(async () => 0),
+      queueSync: vi.fn(() => true),
+    };
+
+    try {
+      await syncOpenedPeerConnection({
+        ports,
+        session,
+        ctx: createOperationContext('sync'),
+        log,
+      }, { direction: 'inbound', remotePeer: { toString: () => remotePeer } });
+
+      expect(replay.reject).toHaveBeenCalledOnce();
+      expect(log.warn).not.toHaveBeenCalled();
+    } finally {
+      session.close();
     }
   });
 });
