@@ -47,6 +47,16 @@ import type {
 import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
 import type { PublicQueryResult } from '@origintrail-official/dkg-core';
 
+/**
+ * The route or path without its query string. A plain `indexOf` keeps this
+ * linear on any input (the previous `/\?.*$/` replace is flagged by CodeQL as
+ * polynomial on strings with many `?`).
+ */
+function withoutQuery(route: string): string {
+  const query = route.indexOf('?');
+  return query === -1 ? route : route.slice(0, query);
+}
+
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 export type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contract.js';
 
@@ -2561,7 +2571,7 @@ export class ApiClient {
   ): Promise<T> {
     const timeoutMs = deadline.timeoutMs ?? (method !== 'GET'
       ? this.longTimeoutMs
-      : API_LIST_READ_PATHS.has(path.replace(/\?.*$/, ''))
+      : API_LIST_READ_PATHS.has(withoutQuery(path))
         ? this.listReadTimeoutMs
         : this.readTimeoutMs);
     const signal = AbortSignal.timeout(timeoutMs);

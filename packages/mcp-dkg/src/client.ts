@@ -20,6 +20,16 @@ import type {
   QueryCatalogWriteQuad,
 } from '@origintrail-official/dkg-core/query-catalog';
 
+/**
+ * The route or path without its query string. A plain `indexOf` keeps this
+ * linear on any input (the previous `/\?.*$/` replace is flagged by CodeQL as
+ * polynomial on strings with many `?`).
+ */
+function withoutQuery(route: string): string {
+  const query = route.indexOf('?');
+  return query === -1 ? route : route.slice(0, query);
+}
+
 export type { AgentListFilters, AgentListPageOptions } from '@origintrail-official/dkg-core';
 
 export interface SparqlBinding {
@@ -561,7 +571,7 @@ export class DkgClient {
   ): Promise<T> {
     const timeoutMs = method !== 'GET'
       ? this.longTimeoutMs
-      : DKG_LIST_READ_ROUTES.has(route.replace(/\?.*$/, ''))
+      : DKG_LIST_READ_ROUTES.has(withoutQuery(route))
         ? this.listReadTimeoutMs
         : this.readTimeoutMs;
     const signal = AbortSignal.timeout(timeoutMs);
