@@ -9,7 +9,14 @@ import { parse } from 'yaml';
 import { EVM_SCOPES, MANIFEST_READER_ENV, NODE_TEST_ARTIFACT_LANES, githubOutputsForPlan } from '../ci-delta.mjs';
 import { PRIMARY_LANE_JOBS } from '../ci-results.mjs';
 import { CONTROLLER_POLICY_FILES, validateTrustedControllerPins } from '../../ci/trusted-controller-pins.mjs';
-import { fetchPinnedController, pinnedControllerRef } from '../../ci/fetch-trusted-controller.mjs';
+import {
+  PROTECTED_BRANCHES,
+  PROTECTED_HISTORY_MARGIN_SECONDS,
+  fetchPinnedController,
+  fetchProtectedHistory,
+  pinnedControllerRef,
+  protectedBranchContaining,
+} from '../../ci/fetch-trusted-controller.mjs';
 import {
   NON_SOLIDITY_LANES,
   REPO_ROOT,
@@ -216,14 +223,104 @@ test('the build job fetches the pinned controller through the canonical pin vali
   // The pinned-parser check below reads the pinned controller from git
   // history. The build job's shallow checkout fetches it by the ref the pin
   // validator derives, so workflow layout cannot change which ref it fetches.
+  // A complete clone fetches it without a depth limit, since one would make
+  // the clone shallow.
   assert.equal(pinnedControllerRef(), TRUSTED_CI_CONTROLLER_SHA);
-  const calls = [];
-  fetchPinnedController({ run: (...call) => calls.push(call) });
-  assert.deepEqual(calls, [['git', ['fetch', '--no-tags', '--depth=1', 'origin', TRUSTED_CI_CONTROLLER_SHA], { stdio: 'inherit' }]]);
+  const fetches = (isShallowOutput) => {
+    const calls = [];
+    fetchPinnedController({
+      run: (command, args, options) => (
+        args[0] === 'rev-parse' ? isShallowOutput : calls.push([command, args, options])
+      ),
+    });
+    return calls;
+  };
+  assert.deepEqual(fetches('true\n'), [['git', ['fetch', '--no-tags', '--depth=1', 'origin', TRUSTED_CI_CONTROLLER_SHA], { stdio: 'inherit' }]]);
+  assert.deepEqual(fetches('false\n'), [['git', ['fetch', '--no-tags', 'origin', TRUSTED_CI_CONTROLLER_SHA], { stdio: 'inherit' }]]);
   const { steps } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')).jobs.build;
   const fetch = steps.findIndex(({ run = '' }) => run.trim() === 'node scripts/ci/fetch-trusted-controller.mjs');
   const scriptTests = steps.findIndex(({ run = '' }) => run.includes('pnpm run test:scripts'));
   assert.ok(fetch !== -1 && fetch < scriptTests, 'the fetch runs before the repository-script tests');
+});
+
+test('the build job fetches protected history back past the pin, deepening only recent tips', () => {
+  // The provenance test below needs each protected branch's history back to
+  // the pin. A shallow checkout fetches each tip, then deepens to a day
+  // before the pin's commit date only the branches whose tip is that recent:
+  // an older tip cannot contain the pin, and deepening it would download its
+  // whole history. A complete clone fetches without a depth limit.
+  assert.deepEqual([...PROTECTED_BRANCHES].sort(), ['main', 'testnet-canary']);
+  const pinDate = 1_790_000_000;
+  const since = pinDate - PROTECTED_HISTORY_MARGIN_SECONDS;
+  const plan = (tipDates, shallow = true) => {
+    const dates = { [TRUSTED_CI_CONTROLLER_SHA]: pinDate };
+    for (const [branch, date] of Object.entries(tipDates)) dates[`refs/remotes/origin/${branch}`] = date;
+    const fetches = [];
+    fetchProtectedHistory({
+      ref: TRUSTED_CI_CONTROLLER_SHA,
+      shallow,
+      run: (command, args, options) => {
+        if (args[0] !== 'fetch') return `${dates[args.at(-1)]}\n`;
+        assert.deepEqual([command, options], ['git', { stdio: 'inherit' }]);
+        fetches.push(args.join(' '));
+      },
+    });
+    return fetches;
+  };
+  const main = '+refs/heads/main:refs/remotes/origin/main';
+  const canary = '+refs/heads/testnet-canary:refs/remotes/origin/testnet-canary';
+  const tips = `fetch --no-tags --depth=1 origin ${main} ${canary}`;
+  assert.deepEqual(plan({ main: since, 'testnet-canary': pinDate }), [
+    tips,
+    `fetch --no-tags --shallow-since=${since} origin ${main} ${canary}`,
+  ]);
+  assert.deepEqual(plan({ main: since - 1, 'testnet-canary': pinDate }), [
+    tips,
+    `fetch --no-tags --shallow-since=${since} origin ${canary}`,
+  ], 'a tip older than the margin stays at depth 1');
+  assert.deepEqual(plan({ main: since - 1, 'testnet-canary': since - 1 }), [tips]);
+  assert.deepEqual(plan({}, false), [`fetch --no-tags origin ${main} ${canary}`], 'a complete clone stays complete');
+
+  // A fetch that fails fails the build step instead of leaving the check to
+  // run against whatever history is there.
+  assert.throws(() => fetchProtectedHistory({
+    ref: TRUSTED_CI_CONTROLLER_SHA,
+    shallow: true,
+    run: (command, args) => {
+      if (args[0] === 'fetch') throw new Error('fetch failed');
+      return `${pinDate}\n`;
+    },
+  }), /fetch failed/);
+});
+
+test('the pinned controller is already on protected branch history', (t) => {
+  // The workflows run the planner and aggregate gates from the pin, so it must
+  // be reviewed history: an ancestor of protected testnet-canary or main. The
+  // build job fetches both from origin before this suite runs; a branch that
+  // is missing here counts as not containing the pin.
+  const branch = protectedBranchContaining(TRUSTED_CI_CONTROLLER_SHA, { cwd: REPO_ROOT });
+  assert.ok(
+    branch,
+    `pinned controller ${TRUSTED_CI_CONTROLLER_SHA} is not on origin/testnet-canary or origin/main history. `
+      + 'Pin only a commit already merged there (docs/ci-delta-policy.md). If it is, fetch them first: '
+      + 'git fetch origin testnet-canary main, or in a shallow checkout node scripts/ci/fetch-trusted-controller.mjs',
+  );
+  t.diagnostic(`pinned controller ${TRUSTED_CI_CONTROLLER_SHA} is on origin/${branch}`);
+
+  // The same check rejects a commit that exists but neither branch contains:
+  // one made on top of that branch's tip, as a pull request's own commits
+  // are (so swapped --is-ancestor arguments fail too). A missing commit fails
+  // closed.
+  const probe = execFileSync('git', [
+    '-C', REPO_ROOT, '-c', 'user.name=ci', '-c', 'user.email=ci@example.invalid',
+    'commit-tree', 'HEAD^{tree}', '-p', `refs/remotes/origin/${branch}`, '-m', 'probe', '--no-gpg-sign',
+  ], {
+    encoding: 'utf8',
+    // Fixed dates make the probe the same object on every run.
+    env: { ...process.env, GIT_AUTHOR_DATE: '1700000000 +0000', GIT_COMMITTER_DATE: '1700000000 +0000' },
+  }).trim();
+  assert.equal(protectedBranchContaining(probe, { cwd: REPO_ROOT }), undefined);
+  assert.equal(protectedBranchContaining('0'.repeat(40), { cwd: REPO_ROOT }), undefined);
 });
 
 test('the controller fetch script can be imported without a script path', () => {

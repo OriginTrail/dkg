@@ -298,7 +298,10 @@ jobs:
 
       # The controller wiring test checks this workflow's planner flags against
       # the pinned controller's parser, which a depth-1 checkout does not hold.
-      - name: Fetch the pinned CI controller revision
+      # The provenance test requires the pin to be on protected testnet-canary
+      # or main history, so this also fetches those branches back to a day
+      # before the pin's commit date. A failed fetch fails this step.
+      - name: Fetch the pinned CI controller and protected branch history
         run: node scripts/ci/fetch-trusted-controller.mjs
       - name: Test repository scripts
         run: pnpm run test:scripts
