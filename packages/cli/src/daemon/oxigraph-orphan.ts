@@ -23,11 +23,6 @@ import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import {
-  oxigraphBinaryCatalog,
-  withOxigraphBinary,
-  type OxigraphBinaryCatalog,
-} from './oxigraph-binary.js';
-import {
   checkIdentity,
   readOxigraphOwnerRecord,
   type IdentityState,
@@ -41,11 +36,16 @@ import {
   describeLeave,
   describeStop,
   MAX_LAUNCHER_DEPTH,
+  oxigraphBinaryCatalog,
+  withOxigraphBinary,
   type HolderObservation,
+  type OxigraphBinaryCatalog,
 } from './oxigraph-reclaim-policy.js';
 import {
+  bootIdReader,
   procPidsWithFdTarget,
   processInspector,
+  type BootIdReader,
   type ProcessInstance,
   type ProcessLookup,
 } from './process-probe.js';
@@ -63,6 +63,8 @@ export interface OrphanedOxigraphIo {
   /** PIDs that have the lock file open. */
   listLockHolders(lockPath: string): Promise<number[]>;
   readOwnerRecord(location: string): Promise<OxigraphOwnerRecordRead>;
+  /** This boot's identifier, which an owner record must carry to be matched. */
+  bootId: BootIdReader;
   /** One observation of a process: running, confirmed gone, or unreadable. */
   inspectProcess(pid: number): Promise<ProcessLookup>;
   signal(pid: number, signal: NodeJS.Signals): void;
@@ -146,6 +148,7 @@ export function reclaimHost(platform: NodeJS.Platform): OrphanedOxigraphIo {
     lockExists: async (lockPath) => existsSync(lockPath),
     listLockHolders: platform === 'linux' ? procLockHolders : lsofLockHolders,
     readOwnerRecord: readOxigraphOwnerRecord,
+    bootId: bootIdReader(platform),
     inspectProcess,
     signal: (pid, signal) => { process.kill(pid, signal); },
     sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
@@ -203,11 +206,17 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
     opts.log(`[oxigraph] ignoring a malformed owner record for ${lockPath}.`);
   }
   const record = recordRead.kind === 'v1' ? recordRead.record : null;
+  const currentBoot = record ? await io.bootId() : null;
+  // Identities only mean something within the boot they were taken in.
+  const sameBoot = record !== null && currentBoot !== null && record.boot === currentBoot;
+  if (record && currentBoot !== null && !sameBoot) {
+    opts.log(`[oxigraph] ignoring an owner record for ${lockPath} from an earlier boot.`);
+  }
   const catalog = opts.binaries ?? oxigraphBinaryCatalog(opts.binaryPath);
   const binaries = record ? withOxigraphBinary(catalog, record.binaryPath) : catalog;
-  const ownership = deriveOwnership(recordRead, record
+  const ownership = deriveOwnership(recordRead, sameBoot
     ? { daemon: await identityState(record.daemon), launcher: await identityState(record.launcher) }
-    : null);
+    : null, currentBoot);
   const attempts = new Map<number, Attempt>();
   const signalled = new Set<number>();
 

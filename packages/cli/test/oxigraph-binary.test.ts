@@ -27,9 +27,7 @@ import { mkdtemp, readFile, rm, stat, writeFile, chmod, access } from 'node:fs/p
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  isCatalogedOxigraph,
-  oxigraphBinaryCatalog,
-  oxigraphReclaimCatalog,
+  findOxigraphOnPath,
   resolveOxigraphBinary,
   resolveOxigraphAsset,
   OXIGRAPH_ASSETS,
@@ -261,65 +259,17 @@ describe('PATH fallback (real directories, real executables)', () => {
     }
   });
 
-  it('catalogs the cache and the PATH binary\'s directory beside a bundled binary, skipping a decoy', async () => {
-    const cacheDir = await freshCache();
+  it('finds the executable oxigraph on PATH, skipping a non-executable decoy, and null without one', async () => {
     const emptyDir = await mkdtemp(join(tmpdir(), 'oxi-path-empty-'));
     try {
-      const cached = join(cacheDir, 'oxi-real-bin');
-      const bundled = { path: cached, source: 'bundled' as const, version: OXIGRAPH_VERSION };
-      const opts = { cacheDir, platform: 'linux' as const };
-      // An orphan from an earlier release may run an earlier pinned binary
-      // from the cache, or the operator's binary on PATH.
       process.env.PATH = `${pathDirA}:${pathDirB}`;
-      const catalog = await oxigraphReclaimCatalog(bundled, opts);
-      expect(catalog).toEqual({ paths: [cached], dirs: [cacheDir, pathDirB] });
-      expect(isCatalogedOxigraph(catalog, join(cacheDir, 'oxigraph-v0.5.7'))).toBe(true);
-      expect(isCatalogedOxigraph(catalog, join(pathDirB, 'oxigraph'))).toBe(true);
-      // The decoy is not executable, so its directory is not catalogued.
-      expect(isCatalogedOxigraph(catalog, join(pathDirA, 'oxigraph'))).toBe(false);
-      expect(isCatalogedOxigraph(catalog, join(cacheDir, 'rocksdb-tool'))).toBe(false);
+      await expect(findOxigraphOnPath('linux')).resolves.toBe(join(pathDirB, 'oxigraph'));
       process.env.PATH = `${pathDirA}:${emptyDir}`;
-      await expect(oxigraphReclaimCatalog(bundled, opts)).resolves.toEqual({ paths: [cached], dirs: [cacheDir] });
+      await expect(findOxigraphOnPath('linux')).resolves.toBeNull();
     } finally {
       process.env.PATH = prevPath;
-      await rm(cacheDir, { recursive: true, force: true });
       await rm(emptyDir, { recursive: true, force: true });
     }
-  });
-
-  it('catalogs every resolver source so the reclaim recognises its binaries', async () => {
-    const cacheDir = await freshCache();
-    const emptyDir = await mkdtemp(join(tmpdir(), 'oxi-path-empty-'));
-    try {
-      // A bundled binary, downloaded or found in the cache.
-      await writeFile(join(cacheDir, 'oxi-real-bin'), bytes);
-      process.env.PATH = emptyDir;
-      const bundled = await resolveOxigraphBinary({ cacheDir, asset: assetFor('/ok', 'oxi-real-bin'), log: () => {} });
-      // A system binary on PATH, as a musl host resolves it.
-      process.env.PATH = `${pathDirA}:${pathDirB}`;
-      const system = await resolveOxigraphBinary({
-        cacheDir, platform: 'linux', arch: 'x64', io: { stat: statOnMuslHost }, log: () => {},
-      });
-      expect([bundled.source, system.source]).toEqual(['bundled', 'system']);
-      for (const selected of [bundled, system]) {
-        const catalog = await oxigraphReclaimCatalog(selected, { cacheDir, platform: 'linux' });
-        // The selected binary itself, and an earlier pinned version in the cache.
-        expect(isCatalogedOxigraph(catalog, selected.path), selected.source).toBe(true);
-        expect(isCatalogedOxigraph(catalog, join(cacheDir, 'oxigraph-v0.5.7')), selected.source).toBe(true);
-      }
-      // The PATH binary a system resolution selected needs no second PATH scan.
-      expect(await oxigraphReclaimCatalog(system, { cacheDir, platform: 'linux' }))
-        .toEqual({ paths: [join(pathDirB, 'oxigraph')], dirs: [cacheDir, pathDirB] });
-    } finally {
-      process.env.PATH = prevPath;
-      await rm(cacheDir, { recursive: true, force: true });
-      await rm(emptyDir, { recursive: true, force: true });
-    }
-  });
-
-  it('catalogs one binary and its directory for callers without a resolver', () => {
-    expect(oxigraphBinaryCatalog('/opt/dkg/oxigraph/oxigraph-v0.5.8'))
-      .toEqual({ paths: ['/opt/dkg/oxigraph/oxigraph-v0.5.8'], dirs: ['/opt/dkg/oxigraph'] });
   });
 
   it('on musl Linux with NO oxigraph on PATH, throws the musl-specific actionable error', async () => {

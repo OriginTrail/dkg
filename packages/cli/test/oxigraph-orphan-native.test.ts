@@ -23,6 +23,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { statSync } from 'node:fs';
 import {
+  chmod,
   mkdir,
   mkdtemp,
   readdir,
@@ -34,7 +35,8 @@ import { join } from 'node:path';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { oxigraphStoreArgs } from '../src/daemon/oxigraph-store-launch.js';
 import { lsofLockHolderLister, stopOrphanedOxigraph } from '../src/daemon/oxigraph-orphan.js';
-import { createOxigraphStoreOwnership } from '../src/daemon/oxigraph-store-ownership.js';
+import { isCatalogedOxigraph } from '../src/daemon/oxigraph-reclaim-policy.js';
+import { createOxigraphStoreOwnership, oxigraphReclaimCatalog } from '../src/daemon/oxigraph-store-ownership.js';
 import {
   checkIdentity,
   OXIGRAPH_OWNER_RECORD,
@@ -43,6 +45,7 @@ import {
   recordOxigraphLaunch,
 } from '../src/daemon/oxigraph-owner-record.js';
 import {
+  bootIdReader,
   procProcessInspector,
   processInspector,
   psProcessInspector,
@@ -121,6 +124,20 @@ describe('stopOrphanedOxigraph (real processes)', () => {
     }
   });
 
+  it('reads a stable identifier of this boot, and none when the host offers none', async () => {
+    const readBoot = bootIdReader(process.platform);
+    const boot = await readBoot();
+    expect(boot).toMatch(/\S/);
+    expect(await readBoot()).toBe(boot);
+    // Linux reads procfs; macOS and other BSDs ask sysctl. A failure is null.
+    const unreadable = Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    expect(await bootIdReader('linux', { read: async () => { throw unreadable; } })()).toBeNull();
+    expect(await bootIdReader('darwin', { run: async () => { throw unreadable; } })()).toBeNull();
+    expect(await bootIdReader('linux', { read: async () => 'd2b6…-boot\n' })()).toBe('d2b6…-boot');
+    expect(await bootIdReader('freebsd', { run: async () => ({ stdout: '{ sec = 1, usec = 2 }\n' }) })())
+      .toBe('{ sec = 1, usec = 2 }');
+  });
+
   it('checks a recorded identity as running, gone or unknown, never taking a failed read for an exit', async () => {
     const identity = { pid: 4000, start: 't1' };
     const reads = (lookup: ProcessLookup) => async () => lookup;
@@ -184,6 +201,37 @@ describe('stopOrphanedOxigraph (real processes)', () => {
     }
   }, 30_000);
 
+  it('catalogs every resolver source: the selected binary, the managed cache and the PATH binary\'s directory', async () => {
+    const cacheDir = await mkdtemp(join(tmpdir(), 'oxi-reclaim-cache-'));
+    const decoyDir = await mkdtemp(join(tmpdir(), 'oxi-reclaim-decoy-'));
+    const pathDir = await mkdtemp(join(tmpdir(), 'oxi-reclaim-path-'));
+    const previousPath = process.env.PATH;
+    try {
+      await writeFile(join(decoyDir, 'oxigraph'), '#!/bin/sh\n'); // not executable
+      await writeFile(join(pathDir, 'oxigraph'), '#!/bin/sh\nexit 0\n');
+      await chmod(join(pathDir, 'oxigraph'), 0o755);
+      process.env.PATH = `${decoyDir}:${pathDir}`;
+      const opts = { cacheDir, platform: process.platform };
+      const bundled = { path: join(cacheDir, 'oxigraph-v0.5.8'), source: 'bundled', version: '0.5.8' } as const;
+      const system = { path: join(pathDir, 'oxigraph'), source: 'system', version: '0.6.0' } as const;
+      for (const selected of [bundled, system]) {
+        const catalog = await oxigraphReclaimCatalog(selected, opts);
+        expect(catalog, selected.source).toEqual({ paths: [selected.path], dirs: [cacheDir, pathDir] });
+        // An orphan from an earlier release may run an earlier pinned binary
+        // from the cache, or the operator's binary on PATH; not the decoy.
+        expect(isCatalogedOxigraph(catalog, join(cacheDir, 'oxigraph-v0.5.7')), selected.source).toBe(true);
+        expect(isCatalogedOxigraph(catalog, join(pathDir, 'oxigraph')), selected.source).toBe(true);
+        expect(isCatalogedOxigraph(catalog, join(decoyDir, 'oxigraph')), selected.source).toBe(false);
+      }
+      // Without an oxigraph on PATH, only the cache is catalogued.
+      process.env.PATH = decoyDir;
+      await expect(oxigraphReclaimCatalog(bundled, opts)).resolves.toEqual({ paths: [bundled.path], dirs: [cacheDir] });
+    } finally {
+      process.env.PATH = previousPath;
+      for (const dir of [cacheDir, decoyDir, pathDir]) await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('tells a missing owner record from a malformed and an unreadable one', async () => {
     const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-record-read-'));
     try {
@@ -215,6 +263,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       const launch = await recordOxigraphLaunch({
         platform: process.platform,
         location, binaryPath: '/opt/oxigraph', launcherPid: 4099, log: () => {}, inspect,
+        bootId: async () => 'boot-1',
       });
       const atSpawn = await readOxigraphOwnerRecord(location);
       await launch.markReady(4100);
@@ -222,6 +271,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       if (atSpawn.kind !== 'v1' || atReady.kind !== 'v1') throw new Error('no owner record');
       expect(atSpawn.record.oxigraph).toBeUndefined();
       // The daemon and launcher identities captured at spawn, plus Oxigraph.
+      expect(atSpawn.record.boot).toBe('boot-1');
       expect(atReady.record).toEqual({ ...atSpawn.record, oxigraph: { pid: 4100, start: expect.any(String) } });
       // Each process was read once: the daemon and launcher at spawn, Oxigraph when ready.
       expect(reads.sort((a, b) => a - b)).toEqual([4099, 4100, process.pid].sort((a, b) => a - b));
@@ -240,6 +290,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       const launch = await recordOxigraphLaunch({
         platform: process.platform,
         location, binaryPath: '/opt/oxigraph', launcherPid: 4099, log: (line) => lines.push(line), inspect,
+        bootId: async () => 'boot-1',
       });
       await launch.markReady(4100);
       expect(await readOxigraphOwnerRecord(location)).toEqual({ kind: 'absent' });
@@ -348,6 +399,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       };
       await writeFile(join(location, OXIGRAPH_OWNER_RECORD), JSON.stringify({
         schema: OXIGRAPH_OWNER_RECORD_SCHEMA,
+        boot: await bootIdReader(process.platform)(),
         daemon: { pid: deadDaemon.pid, start: 'exited' },
         launcher: { pid: adopter.pid, start: await start(adopter.pid!) },
         oxigraph: { pid: databasePid, start: await start(databasePid) },

@@ -51,7 +51,7 @@ import {
   stat,
   writeFile,
 } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { join } from 'node:path';
 
 /** Pinned Oxigraph release. Bump deliberately (re-pin checksums below). */
 export const OXIGRAPH_VERSION = '0.5.8';
@@ -247,36 +247,6 @@ function defaultIo(): OxigraphBinaryIo {
   };
 }
 
-/**
- * The executables that count as this node's Oxigraph when the orphan reclaim
- * judges a lock holder: the exact `paths`, and any `oxigraph*` executable in
- * `dirs`. `oxigraphReclaimCatalog` builds it beside the resolver, so the
- * places a node can take Oxigraph from and the binaries the reclaim
- * recognises are defined in one module.
- */
-export interface OxigraphBinaryCatalog {
-  readonly paths: readonly string[];
-  readonly dirs: readonly string[];
-}
-
-/** A catalog of one binary and the other `oxigraph*` executables beside it. */
-export function oxigraphBinaryCatalog(path: string): OxigraphBinaryCatalog {
-  return { paths: [path], dirs: [dirname(path)] };
-}
-
-/** `catalog` plus one more binary and its directory (a recorded binary, say). */
-export function withOxigraphBinary(catalog: OxigraphBinaryCatalog, path: string): OxigraphBinaryCatalog {
-  return { paths: [...catalog.paths, path], dirs: [...catalog.dirs, dirname(path)] };
-}
-
-/** Whether `executable` is one of the catalog's Oxigraph binaries. */
-export function isCatalogedOxigraph(catalog: OxigraphBinaryCatalog, executable: string): boolean {
-  if (catalog.paths.includes(executable)) return true;
-  if (!/^oxigraph[^/]*$/.test(basename(executable))) return false;
-  const dir = resolve(dirname(executable));
-  return catalog.dirs.some((known) => resolve(known) === dir);
-}
-
 export interface ResolvedOxigraphBinary {
   path: string;
   source: 'bundled' | 'system';
@@ -359,6 +329,17 @@ async function resolveSystemOxigraphOnPath(
     }
   }
   return null;
+}
+
+/**
+ * The operator-installed `oxigraph` on PATH, or null: the same lookup the
+ * resolver falls back to, for callers that need to know where it is.
+ */
+export function findOxigraphOnPath(
+  platform: NodeJS.Platform = process.platform,
+  io: Partial<OxigraphBinaryIo> = {},
+): Promise<string | null> {
+  return resolveSystemOxigraphOnPath({ ...defaultIo(), ...io }, platform);
 }
 
 /**
@@ -456,23 +437,4 @@ export async function resolveOxigraphBinary(
   await io.rename(tmp, target);
   log(`Oxigraph ${OXIGRAPH_VERSION} binary verified and installed at ${target}`);
   return { path: target, source: 'bundled', version: OXIGRAPH_VERSION };
-}
-
-/**
- * What the orphan reclaim recognises as this node's Oxigraph, beside the
- * binary the resolver selected: earlier pinned versions in the managed cache,
- * and the binaries beside the `oxigraph` on PATH. An orphan from an earlier
- * release may run whichever of these that release resolved. Built by the
- * managed layer for the reclaim, apart from resolution, which never needs the
- * PATH binary once a pinned binary is selected.
- */
-export async function oxigraphReclaimCatalog(
-  selected: ResolvedOxigraphBinary,
-  opts: { cacheDir: string; platform?: NodeJS.Platform; io?: Partial<OxigraphBinaryIo> },
-): Promise<OxigraphBinaryCatalog> {
-  const pathBinary = selected.source === 'system'
-    ? selected.path
-    : await resolveSystemOxigraphOnPath({ ...defaultIo(), ...opts.io }, opts.platform ?? process.platform);
-  const dirs = [opts.cacheDir, dirname(selected.path), ...(pathBinary ? [dirname(pathBinary)] : [])];
-  return { paths: [selected.path], dirs: [...new Set(dirs)] };
 }

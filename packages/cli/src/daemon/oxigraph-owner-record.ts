@@ -9,7 +9,12 @@
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { writeFileAtomicWith } from './atomic-write.js';
-import { processInspector, type ProcessInspector } from './process-probe.js';
+import {
+  bootIdReader,
+  processInspector,
+  type BootIdReader,
+  type ProcessInspector,
+} from './process-probe.js';
 
 export const OXIGRAPH_OWNER_RECORD = 'dkg-oxigraph-owner.json';
 export const OXIGRAPH_OWNER_RECORD_SCHEMA = 'dkg-oxigraph-owner/v1';
@@ -22,6 +27,11 @@ export interface ProcessIdentity {
 
 export interface OxigraphOwnerRecordV1 {
   schema: typeof OXIGRAPH_OWNER_RECORD_SCHEMA;
+  /**
+   * The boot the identities below were taken in: a PID and start time name a
+   * process only within one boot.
+   */
+  boot: string;
   daemon: ProcessIdentity;
   /** The spawned child: the parent watchdog, or Oxigraph itself. */
   launcher: ProcessIdentity;
@@ -63,6 +73,7 @@ function isIdentity(value: unknown): value is ProcessIdentity {
 function decodeOwnerRecord(value: unknown): OxigraphOwnerRecordV1 | null {
   const record = value as Partial<OxigraphOwnerRecordV1> | null;
   return record?.schema === OXIGRAPH_OWNER_RECORD_SCHEMA
+    && typeof record.boot === 'string' && record.boot.length > 0
     && isIdentity(record.daemon) && isIdentity(record.launcher)
     && (record.oxigraph === undefined || isIdentity(record.oxigraph))
     && typeof record.binaryPath === 'string'
@@ -123,10 +134,13 @@ export async function recordOxigraphLaunch(input: {
   log: (message: string) => void;
   /** Defaults to the platform's process probe. */
   inspect?: ProcessInspector;
+  /** Defaults to the platform's boot identifier. */
+  bootId?: BootIdReader;
 }): Promise<OxigraphLaunchRecord> {
   // Windows processes are not reparented, so nothing is reclaimed there.
   if (input.platform === 'win32') return { markReady: async () => {} };
   const inspect = input.inspect ?? processInspector(input.platform);
+  const readBootId = input.bootId ?? bootIdReader(input.platform);
   const identify = async (pid: number): Promise<ProcessIdentity> => {
     const lookup = await inspect(pid);
     if (lookup.state === 'running') return { pid, start: lookup.process.start };
@@ -148,8 +162,13 @@ export async function recordOxigraphLaunch(input: {
   };
   let launch: OxigraphOwnerRecordV1 | null = null;
   try {
-    const [daemon, launcher] = await Promise.all([identify(process.pid), identify(input.launcherPid)]);
-    launch = { schema: OXIGRAPH_OWNER_RECORD_SCHEMA, daemon, launcher, binaryPath: input.binaryPath };
+    const [boot, daemon, launcher] = await Promise.all([
+      readBootId(),
+      identify(process.pid),
+      identify(input.launcherPid),
+    ]);
+    if (boot === null) throw new Error('could not read this host\'s boot identifier');
+    launch = { schema: OXIGRAPH_OWNER_RECORD_SCHEMA, boot, daemon, launcher, binaryPath: input.binaryPath };
   } catch (error) {
     logRecordFailure(input.log, error);
   }

@@ -31,7 +31,7 @@ export type ListenOwnerResolver = (
  */
 export interface OxigraphLaunchHandle {
   readonly child: ChildProcess;
-  /** Whether the child still runs: not exited, and never failed to spawn. */
+  /** Whether the child still runs: not exited, and not a failed spawn. */
   alive(): boolean;
   /**
    * Signal the child and whatever it launched: its whole process group where
@@ -85,13 +85,17 @@ function launcher(mode: LaunchMode): OxigraphLaunchStrategy['launch'] {
       ...(mode.processGroup ? { detached: true } : {}),
       ...(environment ? { env: { ...process.env, ...environment } } : {}),
     });
-    // An `error` event means the process never ran (ENOENT, EACCES) or could
-    // not be signalled, so `exitCode`/`signalCode` alone would call it alive.
-    let failed = false;
-    child.on('error', () => { failed = true; });
+    // An `error` from a child that never got a PID is a failed spawn (ENOENT,
+    // EACCES): it never ran, though `exitCode`/`signalCode` stay null. An
+    // `error` after that is a signal that could not be delivered, which says
+    // nothing about whether the child still runs.
+    let spawnFailed = false;
+    child.on('error', () => {
+      if (child.pid === undefined) spawnFailed = true;
+    });
     let watchdogSawOom = false;
     let oomSnapshot: CgroupOomSnapshot | undefined;
-    const alive = (): boolean => !failed && child.exitCode === null && child.signalCode === null;
+    const alive = (): boolean => !spawnFailed && child.exitCode === null && child.signalCode === null;
     return {
       child,
       alive,

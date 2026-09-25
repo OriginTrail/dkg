@@ -31,11 +31,10 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   OXIGRAPH_VERSION,
-  oxigraphReclaimCatalog,
   resolveOxigraphBinary,
   type OxigraphBinaryIo,
 } from './oxigraph-binary.js';
-import { createOxigraphStoreOwnership } from './oxigraph-store-ownership.js';
+import { createOxigraphStoreOwnership, oxigraphReclaimCatalog } from './oxigraph-store-ownership.js';
 import {
   startOxigraphServer,
   type OxigraphServerHandle,

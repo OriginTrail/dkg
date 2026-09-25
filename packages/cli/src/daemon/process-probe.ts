@@ -224,6 +224,41 @@ export function psProcessInspector(run: PsRunner = runPs): ProcessInspector {
 
 export const psInspectProcess: ProcessInspector = psProcessInspector();
 
+/** An identifier of the current boot, or null when the host offers none. */
+export type BootIdReader = () => Promise<string | null>;
+
+/** Runs `sysctl` with these arguments; rejects like `execFile`. */
+export type SysctlRunner = (args: readonly string[]) => Promise<{ stdout: string }>;
+
+const runSysctl = (platform: NodeJS.Platform): SysctlRunner => (args) =>
+  // launchd and service managers do not always put /usr/sbin on PATH.
+  execFileAsync(platform === 'darwin' ? '/usr/sbin/sysctl' : 'sysctl', [...args], { timeout: 2_000 });
+
+/**
+ * The current boot's identifier, which scopes a recorded PID and start time
+ * to the boot it was taken in: after a reboot, both can recur for another
+ * process. Linux: `/proc/sys/kernel/random/boot_id`; macOS:
+ * `kern.bootsessionuuid`; other BSDs: `kern.boottime`. Null when it cannot be
+ * read.
+ */
+export function bootIdReader(
+  platform: NodeJS.Platform,
+  io: { read?: ProcReader; run?: SysctlRunner } = {},
+): BootIdReader {
+  const read = io.read ?? ((path: string) => readFile(path, 'utf8'));
+  const run = io.run ?? runSysctl(platform);
+  const readId = platform === 'linux'
+    ? () => read('/proc/sys/kernel/random/boot_id')
+    : async () => (await run(['-n', platform === 'darwin' ? 'kern.bootsessionuuid' : 'kern.boottime'])).stdout;
+  return async () => {
+    try {
+      return (await readId()).trim() || null;
+    } catch {
+      return null;
+    }
+  };
+}
+
 export function processTreeWalker(platform: NodeJS.Platform): ProcessTreeWalker {
   return platform === 'linux' ? linuxProcessTree : psProcessTree;
 }

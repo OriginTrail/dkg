@@ -29,7 +29,6 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import type { OxigraphBinaryCatalog } from '../src/daemon/oxigraph-binary.js';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { oxigraphStoreArgs } from '../src/daemon/oxigraph-store-launch.js';
 import {
@@ -47,7 +46,11 @@ import {
 import {
   classifyHolder,
   deriveOwnership,
+  isCatalogedOxigraph,
   matchManagedOxigraphStore,
+  oxigraphBinaryCatalog,
+  withOxigraphBinary,
+  type OxigraphBinaryCatalog,
 } from '../src/daemon/oxigraph-reclaim-policy.js';
 import { processTable, type FakeProcess } from './fixtures/oxigraph-process-table.js';
 
@@ -73,6 +76,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
   const writeRecord = async (record: Partial<OxigraphOwnerRecordV1> = {}) => {
     await writeFile(join(location, OXIGRAPH_OWNER_RECORD), JSON.stringify({
       schema: OXIGRAPH_OWNER_RECORD_SCHEMA,
+      boot: 'boot-1',
       daemon: identity(4000),
       launcher: identity(4099),
       oxigraph: identity(4100),
@@ -189,6 +193,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
       kind: 'v1',
       record: {
         schema: OXIGRAPH_OWNER_RECORD_SCHEMA,
+        boot: 'boot-1',
         daemon: identity(4000),
         launcher: identity(4099),
         oxigraph: identity(4100),
@@ -269,6 +274,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
           platform: 'darwin',
           lockExists: async () => true,
           readOwnerRecord: async () => recorded,
+          bootId: async () => 'boot-1',
           listLockHolders: async () => [4100],
           inspectProcess,
           signal: (pid, name) => { signals.push([pid, name]); },
@@ -462,6 +468,48 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
   });
 
   describe('with an owner record', () => {
+    it('does not match identities from a record written before a reboot', async () => {
+      // After the reboot the recorded Oxigraph's PID and start token recur,
+      // for a process this node does not own, with a live parent.
+      await writeRecord({ boot: 'boot-0' });
+      const { table, signals, io } = processTable({
+        900: { ppid: 1, argv: ['/lib/systemd/systemd', '--user'], holdsLock: false },
+        4100: { ppid: 900, argv: ['/usr/bin/backup', location], holdsLock: true },
+      });
+
+      const { signalled, log } = await run(io);
+      expect(signalled).toEqual([]);
+      expect(signals).toEqual([]);
+      expect(table.get(4100)!.alive).toBe(true);
+      expect(log).toContain(`ignoring an owner record for ${location}/LOCK from an earlier boot`);
+      expect(log).toMatch(/Leaving it running: it is not this node's Oxigraph serving this store/);
+    });
+
+    it('falls back to the command and parent rules for a record from an earlier boot', async () => {
+      await writeRecord({ boot: 'boot-0' });
+      const { signals, io } = processTable({
+        4100: { ppid: 1, argv: serve(location), holdsLock: true },
+      });
+
+      const { signalled, log } = await run(io);
+      expect(signalled).toEqual([4100]);
+      expect(signals).toEqual([[4100, 'SIGTERM']]);
+      expect(log).toContain('stopping orphaned Oxigraph pid 4100 (it was reparented to PID 1)');
+    });
+
+    it('leaves every holder running when this host\'s boot cannot be read', async () => {
+      await writeRecord();
+      const { table, signals, io } = processTable({
+        4100: { ppid: 1, argv: serve(location), holdsLock: true },
+      });
+
+      const { signalled, log } = await run({ ...io, bootId: async () => null });
+      expect(signalled).toEqual([]);
+      expect(signals).toEqual([]);
+      expect(table.get(4100)!.alive).toBe(true);
+      expect(log).toContain('could not read this host\'s boot identifier to match the owner record');
+    });
+
     it('leaves every holder running while the recorded daemon and launcher both run', async () => {
       await writeRecord();
       const { table, signals, io } = processTable({
@@ -614,6 +662,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     const binaries = { paths: [binaryPath], dirs: [] };
     const record: OxigraphOwnerRecordV1 = {
       schema: OXIGRAPH_OWNER_RECORD_SCHEMA,
+      boot: 'boot-1',
       daemon: identity(4000),
       launcher: identity(4099),
       binaryPath,
@@ -625,29 +674,35 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     const complete = { state: 'complete' } as const;
 
     it('derives ownership from the record and the states of the recorded processes', () => {
-      expect(deriveOwnership({ kind: 'absent' }, null)).toEqual({ kind: 'unrecorded' });
-      expect(deriveOwnership({ kind: 'invalid' }, null)).toEqual({ kind: 'unrecorded' });
-      expect(deriveOwnership({ kind: 'unreadable', reason: 'EACCES' }, null))
+      expect(deriveOwnership({ kind: 'absent' }, null, 'boot-1')).toEqual({ kind: 'unrecorded' });
+      expect(deriveOwnership({ kind: 'invalid' }, null, 'boot-1')).toEqual({ kind: 'unrecorded' });
+      expect(deriveOwnership({ kind: 'unreadable', reason: 'EACCES' }, null, 'boot-1'))
         .toEqual({ kind: 'unknown', reason: 'the owner record could not be read: EACCES' });
-      expect(deriveOwnership({ kind: 'v1', record }, { daemon: running, launcher: running }))
+      expect(deriveOwnership({ kind: 'v1', record }, { daemon: running, launcher: running }, 'boot-1'))
         .toEqual({ kind: 'owners-live', record });
-      expect(deriveOwnership({ kind: 'v1', record }, { daemon: gone, launcher: running }))
+      expect(deriveOwnership({ kind: 'v1', record }, { daemon: gone, launcher: running }, 'boot-1'))
         .toEqual({ kind: 'owner-gone', record, gone: { role: 'daemon', pid: 4000 } });
-      expect(deriveOwnership({ kind: 'v1', record }, { daemon: running, launcher: gone }))
+      expect(deriveOwnership({ kind: 'v1', record }, { daemon: running, launcher: gone }, 'boot-1'))
         .toEqual({ kind: 'owner-gone', record, gone: { role: 'launcher', pid: 4099 } });
       // One confirmed exit is enough; otherwise an unreadable owner is unknown.
-      expect(deriveOwnership({ kind: 'v1', record }, { daemon: unknown, launcher: gone }))
+      expect(deriveOwnership({ kind: 'v1', record }, { daemon: unknown, launcher: gone }, 'boot-1'))
         .toEqual({ kind: 'owner-gone', record, gone: { role: 'launcher', pid: 4099 } });
-      expect(deriveOwnership({ kind: 'v1', record }, { daemon: running, launcher: unknown })).toEqual({
+      expect(deriveOwnership({ kind: 'v1', record }, { daemon: running, launcher: unknown }, 'boot-1')).toEqual({
         kind: 'unknown',
         reason: 'could not tell whether the recorded launcher pid 4099 is still running: ps timed out',
       });
-      expect(deriveOwnership({ kind: 'v1', record }, null))
+      expect(deriveOwnership({ kind: 'v1', record }, null, 'boot-1'))
         .toEqual({ kind: 'unknown', reason: 'the recorded owners were not checked' });
+      // A record from an earlier boot names nothing now; one that cannot be
+      // matched to this boot proves nothing.
+      expect(deriveOwnership({ kind: 'v1', record }, { daemon: running, launcher: running }, 'boot-2'))
+        .toEqual({ kind: 'unrecorded' });
+      expect(deriveOwnership({ kind: 'v1', record }, { daemon: gone, launcher: gone }, null))
+        .toMatchObject({ kind: 'unknown' });
     });
 
     it('leaves every holder while ownership is unknown, even one adopted by PID 1', () => {
-      const ownership = deriveOwnership({ kind: 'unreadable', reason: 'EIO' }, null);
+      const ownership = deriveOwnership({ kind: 'unreadable', reason: 'EIO' }, null, 'boot-1');
       expect(classifyHolder(
         { holder: instance(4100, 1, serve('/data/ox')), ancestors: [], ancestryEnd: complete },
         { location: '/data/ox', ownership, binaries },
@@ -658,7 +713,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     });
 
     it('stops a descendant of the recorded launcher, and leaves one whose launcher start time differs', () => {
-      const ownership = deriveOwnership({ kind: 'v1', record }, { daemon: gone, launcher: running });
+      const ownership = deriveOwnership({ kind: 'v1', record }, { daemon: gone, launcher: running }, 'boot-1');
       const holder = instance(4101, 4100, serve('/data/ox'));
       const watchdog = instance(4100, 4099, ['node', 'oxigraph-parent-watchdog.js', '4000']);
       const scope = instance(4099, 1, ['systemd-run', '--scope']);
@@ -674,7 +729,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     });
 
     it('stops a holder only when its parent has confirmedly exited, without a record', () => {
-      const ownership = deriveOwnership({ kind: 'absent' }, null);
+      const ownership = deriveOwnership({ kind: 'absent' }, null, 'boot-1');
       const holder = instance(4100, 4099, serve('/data/ox'));
       const ctx = { location: '/data/ox', ownership, binaries };
       expect(classifyHolder({ holder, ancestors: [], ancestryEnd: gone }, ctx))
@@ -793,6 +848,20 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
         { argv, command: argv.join(' ') }, '/data/ox', { paths: [binaryPath], dirs: [] },
       )).toBe('match');
     }
+  });
+
+  it('recognises a catalogued binary by exact path or as an oxigraph* beside a catalogued directory', () => {
+    const catalog = withOxigraphBinary(oxigraphBinaryCatalog('/opt/dkg/oxigraph/oxigraph-v0.5.8'), '/usr/local/bin/oxigraph');
+    expect(catalog).toEqual({
+      paths: ['/opt/dkg/oxigraph/oxigraph-v0.5.8', '/usr/local/bin/oxigraph'],
+      dirs: ['/opt/dkg/oxigraph', '/usr/local/bin'],
+    });
+    expect(isCatalogedOxigraph(catalog, '/opt/dkg/oxigraph/oxigraph-v0.5.7')).toBe(true);
+    expect(isCatalogedOxigraph(catalog, '/usr/local/bin/oxigraph-server')).toBe(true);
+    expect(isCatalogedOxigraph(catalog, '/opt/dkg/oxigraph/../oxigraph/oxigraph-v0.5.6')).toBe(true);
+    // Another program in a catalogued directory, or an oxigraph* elsewhere.
+    expect(isCatalogedOxigraph(catalog, '/opt/dkg/oxigraph/rocksdb-tool')).toBe(false);
+    expect(isCatalogedOxigraph(catalog, '/tmp/oxigraph')).toBe(false);
   });
 
   it('compares exact argv token by token, including paths with spaces', () => {

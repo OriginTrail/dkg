@@ -653,6 +653,7 @@ export async function startOxigraphServer(
         if (settled) return;
         settled = true;
         clearTimeout(killTimer);
+        clearTimeout(giveUpTimer);
         resolve();
       };
       candidate.child.once('exit', done);
@@ -663,10 +664,19 @@ export async function startOxigraphServer(
           candidate.terminate('SIGKILL');
         }
       }, stopGraceMs);
+      // A child that cannot be signalled must not hang shutdown: after a
+      // second grace period, report it and stop waiting.
+      const giveUpTimer = setTimeout(() => {
+        if (candidate.alive()) {
+          log(`[oxigraph] server pid ${candidate.child.pid} did not exit ${2 * stopGraceMs}ms after SIGTERM; not waiting any longer`);
+        }
+        done();
+      }, 2 * stopGraceMs);
       killTimer.unref?.();
+      giveUpTimer.unref?.();
     });
     await ownershipClosed;
-    log('[oxigraph] server stopped');
+    if (!candidate.alive()) log('[oxigraph] server stopped');
   };
 
   log(

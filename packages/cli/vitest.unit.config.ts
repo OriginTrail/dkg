@@ -209,6 +209,7 @@ export default defineConfig({
           'test/oxigraph-binary.test.ts',
           'test/oxigraph-listen-port.test.ts',
           'test/oxigraph-server.test.ts',
+          'test/oxigraph-launch-strategy.test.ts',
           'test/oxigraph-parent-watchdog.test.ts',
           'test/oxigraph-orphan-lifecycle.test.ts',
           'test/oxigraph-orphan-policy.test.ts',

@@ -12,9 +12,15 @@
  * rejection would therefore be a defect, which the server treats as a failed
  * launch.
  */
-import type { OxigraphBinaryCatalog } from './oxigraph-binary.js';
+import { dirname } from 'node:path';
+import {
+  findOxigraphOnPath,
+  type OxigraphBinaryIo,
+  type ResolvedOxigraphBinary,
+} from './oxigraph-binary.js';
 import { recordOxigraphLaunch, type OxigraphLaunchRecord } from './oxigraph-owner-record.js';
 import { reclaimHost, stopOrphanedOxigraph } from './oxigraph-orphan.js';
+import type { OxigraphBinaryCatalog } from './oxigraph-reclaim-policy.js';
 import type { OxigraphStoreOwnership } from './oxigraph-store-launch.js';
 
 /** The two store operations a launch is built from. */
@@ -67,6 +73,7 @@ export function createOxigraphStoreOwnership(
       launcherPid,
       platform: opts.platform,
       inspect: host.inspectProcess,
+      bootId: host.bootId,
       log: opts.log,
     }),
   };
@@ -100,4 +107,23 @@ export function createOxigraphStoreOwnership(
       await Promise.allSettled(writes);
     },
   };
+}
+
+/**
+ * What the reclaim recognises as this node's Oxigraph, beside the binary the
+ * resolver selected: earlier pinned versions in the managed cache, and the
+ * binaries beside the `oxigraph` on PATH. An orphan from an earlier release
+ * may run whichever of these that release resolved. The managed layer builds
+ * it for the store ownership; resolution itself never needs the PATH binary
+ * once a pinned binary is selected.
+ */
+export async function oxigraphReclaimCatalog(
+  selected: ResolvedOxigraphBinary,
+  opts: { cacheDir: string; platform?: NodeJS.Platform; io?: Partial<OxigraphBinaryIo> },
+): Promise<OxigraphBinaryCatalog> {
+  const pathBinary = selected.source === 'system'
+    ? selected.path
+    : await findOxigraphOnPath(opts.platform, opts.io);
+  const dirs = [opts.cacheDir, dirname(selected.path), ...(pathBinary ? [dirname(pathBinary)] : [])];
+  return { paths: [selected.path], dirs: [...new Set(dirs)] };
 }

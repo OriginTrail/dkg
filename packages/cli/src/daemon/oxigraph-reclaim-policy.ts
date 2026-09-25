@@ -21,8 +21,7 @@
  * when a probe cannot tell whether a recorded owner or the holder's parent
  * still runs: only a confirmed exit counts as gone.
  */
-import { basename } from 'node:path';
-import { isCatalogedOxigraph, type OxigraphBinaryCatalog } from './oxigraph-binary.js';
+import { basename, dirname, resolve } from 'node:path';
 import type {
   IdentityState,
   OxigraphOwnerRecordRead,
@@ -30,6 +29,35 @@ import type {
 } from './oxigraph-owner-record.js';
 import { oxigraphStoreArgs } from './oxigraph-store-launch.js';
 import type { ProcessInstance } from './process-probe.js';
+
+/**
+ * The executables that count as this node's Oxigraph when the reclaim judges
+ * a lock holder: the exact `paths`, and any `oxigraph*` executable in `dirs`.
+ * The store ownership builds it (`oxigraphReclaimCatalog`) from the binary
+ * the resolver selected.
+ */
+export interface OxigraphBinaryCatalog {
+  readonly paths: readonly string[];
+  readonly dirs: readonly string[];
+}
+
+/** A catalog of one binary and the other `oxigraph*` executables beside it. */
+export function oxigraphBinaryCatalog(path: string): OxigraphBinaryCatalog {
+  return { paths: [path], dirs: [dirname(path)] };
+}
+
+/** `catalog` plus one more binary and its directory (a recorded binary, say). */
+export function withOxigraphBinary(catalog: OxigraphBinaryCatalog, path: string): OxigraphBinaryCatalog {
+  return { paths: [...catalog.paths, path], dirs: [...catalog.dirs, dirname(path)] };
+}
+
+/** Whether `executable` is one of the catalog's Oxigraph binaries. */
+export function isCatalogedOxigraph(catalog: OxigraphBinaryCatalog, executable: string): boolean {
+  if (catalog.paths.includes(executable)) return true;
+  if (!/^oxigraph[^/]*$/.test(basename(executable))) return false;
+  const dir = resolve(dirname(executable));
+  return catalog.dirs.some((known) => resolve(known) === dir);
+}
 
 // Interpreters a catalogued Oxigraph script may run under (`#!`): the
 // interpreter is the executable, and the script is its first argument.
@@ -82,14 +110,19 @@ export interface RecordedOwnerStates {
 }
 
 /**
- * Ownership from the record and the states of its daemon and launcher. One
- * confirmed exit is enough to call the owner gone; otherwise an owner whose
- * state could not be read makes the ownership unknown. A malformed record is
- * ignored, as if there were none; an unreadable one is not.
+ * Ownership from the record, the states of its daemon and launcher, and the
+ * current boot (null when it could not be read). One confirmed exit is enough
+ * to call the owner gone; otherwise an owner whose state could not be read
+ * makes the ownership unknown. A malformed record is ignored, as if there
+ * were none; an unreadable one is not. A record from an earlier boot is
+ * ignored too: its PIDs and start times may name unrelated processes now, so
+ * only the command and parent rules apply. When the current boot cannot be
+ * read, a record cannot be matched to it, and the ownership is unknown.
  */
 export function deriveOwnership(
   read: OxigraphOwnerRecordRead,
   states: RecordedOwnerStates | null,
+  currentBoot: string | null,
 ): Ownership {
   if (read.kind === 'absent') return { kind: 'unrecorded' };
   // Content that is not a v1 record says nothing about the owner (the
@@ -99,6 +132,10 @@ export function deriveOwnership(
     return { kind: 'unknown', reason: `the owner record could not be read: ${read.reason}` };
   }
   const { record } = read;
+  if (currentBoot === null) {
+    return { kind: 'unknown', reason: 'could not read this host\'s boot identifier to match the owner record' };
+  }
+  if (record.boot !== currentBoot) return { kind: 'unrecorded' };
   if (!states) return { kind: 'unknown', reason: 'the recorded owners were not checked' };
   for (const role of ['daemon', 'launcher'] as const) {
     if (states[role].state === 'gone') {

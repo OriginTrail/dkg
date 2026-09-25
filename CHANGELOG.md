@@ -15,7 +15,7 @@ All notable changes to the DKG V10 node are documented here. The format is based
   gave up. Oxigraph now runs under the parent watchdog on Linux and macOS
   whether or not memory limits are set, and the daemon's stop and restart
   signals reach it through the watchdog's process group. The daemon records
-  each launch's owner (PID and start time) in the store directory when it
+  each launch's owner (PID, start time and boot) in the store directory when it
   starts Oxigraph. Before each Oxigraph start, it stops the recorded
   Oxigraph, or a child of the recorded launcher if the store never became
   ready, once the recorded daemon or launcher has exited, whatever process

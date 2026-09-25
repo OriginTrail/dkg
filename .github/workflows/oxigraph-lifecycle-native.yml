@@ -15,6 +15,7 @@ on:
       - 'packages/cli/test/oxigraph-listen-port.test.ts'
       - 'packages/cli/test/oxigraph-parent-watchdog.test.ts'
       - 'packages/cli/test/oxigraph-server.test.ts'
+      - 'packages/cli/test/oxigraph-launch-strategy.test.ts'
       - 'packages/cli/test/fixtures/oxigraph-*.ts'
       - 'packages/cli/src/daemon/fs-utils.ts'
       - 'packages/cli/src/daemon/atomic-write.ts'
@@ -62,3 +63,4 @@ jobs:
           test/oxigraph-listen-port.test.ts
           test/oxigraph-parent-watchdog.test.ts
           test/oxigraph-server.test.ts
+          test/oxigraph-launch-strategy.test.ts

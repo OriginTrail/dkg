@@ -60,6 +60,9 @@ export function processTable(
       if (!entry?.alive) throw Object.assign(new Error('kill ESRCH'), { code: 'ESRCH' });
       if (signal === 'SIGKILL' || !entry.ignoresTerm) entry.alive = false;
     },
+    // The host's current boot; test records carry it unless they model a
+    // record from before a reboot.
+    bootId: async () => 'boot-1',
     sleep: async (ms) => { clock += ms; },
     now: () => clock,
   };
