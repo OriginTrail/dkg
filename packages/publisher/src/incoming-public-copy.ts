@@ -16,8 +16,8 @@ import type { Quad } from '@origintrail-official/dkg-storage';
  * received copy becomes the node's own, after the copy has been checked as
  * received: the StorageACK, SWM share and gossip publish receivers. A check of
  * a hash against bytes as given (a peer's advertised digest, a stored
- * snapshot) must not call it. `test/incoming-public-copy-boundary.test.ts`
- * pins the callers.
+ * snapshot) must not call it. `scripts/lib/incoming-copy-boundary.mjs`
+ * pins the callers, and `pnpm lint` enforces it.
  */
 export function acceptIncomingPublicQuads<T extends Quad>(quads: readonly T[]): T[] {
   return quads.map((quad) => {
