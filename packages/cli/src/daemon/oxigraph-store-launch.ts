@@ -27,23 +27,23 @@ export interface OxigraphStoreOwnership {
   /**
    * Stop orphaned Oxigraph processes that hold the store lock, then run
    * `spawn` and record the launch it returns as the store's owner. Resolves
-   * to the recorded launch, or to null without spawning once `close()` or
-   * `release()` has been called. A launch that cannot be recorded is killed
-   * through its handle before the launch rejects, so a spawned launch is
-   * either handed back or stopped.
+   * to the recorded launch, or to null without spawning once `close()` has
+   * been called. It rejects without spawning, and without touching the owner
+   * record, when the reclaim leaves the store possibly held by this node's
+   * Oxigraph. A launch that cannot be recorded is killed through its handle
+   * before the launch rejects, so a spawned launch is either handed back or
+   * stopped.
    */
   launch(spawn: () => OxigraphLaunchHandle): Promise<OxigraphStoreLaunch | null>;
   /**
-   * Refuse further launches and records. Resolves once no owner-record write
-   * is in flight, so the store directory is quiet afterwards.
+   * Refuse further launches and records, and wait for a reclaim or owner
+   * record in flight. If the last launch's wrapper had already exited when
+   * `close()` was called (the watchdog killed on its own, while its
+   * Oxigraph may still run), reclaim the store once more, by recorded
+   * identity, unless the reclaim in flight found it free. Resolves once all
+   * of that is done, so the store is quiet. Idempotent.
    */
   close(): Promise<void>;
-  /**
-   * `close()`, then stop what an exited launch left behind: reclaim the store
-   * the way a launch would, by recorded identity. For a server that stops
-   * after its launch's wrapper exited, while its Oxigraph may still run.
-   */
-  release(): Promise<void>;
 }
 
 /** One launch that `OxigraphStoreOwnership.launch` spawned and recorded. */

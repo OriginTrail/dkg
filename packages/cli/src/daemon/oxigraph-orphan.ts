@@ -178,8 +178,12 @@ const sameInstance = (a: InstanceName, b: InstanceName): boolean =>
  * under the same PID is a recycled PID and is judged afresh.
  */
 export type Attempt =
-  /** Judged and left running, or its signal was refused; `instance` null: it could not be inspected. */
-  | { kind: 'left'; instance: InstanceName | null }
+  /**
+   * Judged and left running, or its signal was refused; `instance` null: it
+   * could not be inspected. `blocks`: why it may still be this node's
+   * Oxigraph holding the store, or null when it is not.
+   */
+  | { kind: 'left'; instance: InstanceName | null; blocks: string | null }
   /** SIGTERM sent at `termAt`; SIGKILL follows once the stop grace has passed. */
   | { kind: 'term-sent'; instance: InstanceName; termAt: number }
   | { kind: 'kill-sent'; instance: InstanceName };
@@ -255,22 +259,36 @@ async function observeHolder(io: OrphanedOxigraphIo, holder: ProcessInstance): P
   return { holder, ancestors, ancestryEnd: { state: 'complete' } };
 }
 
+/** What one reclaim did, and whether the store is free for a new launch. */
+export interface ReclaimResult {
+  /** PIDs that were signalled. */
+  signalled: number[];
+  /**
+   * Why the store may still be held by this node's Oxigraph (a holder left
+   * running that could be it, holders that could not be listed, an orphan
+   * not confirmed gone), or null when it is free: every holder was stopped
+   * or is not this node's Oxigraph for this store.
+   */
+  held: string | null;
+}
+
 /**
  * Terminate orphaned Oxigraph processes that hold this store's lock and wait
- * until they release it. Returns the PIDs that were signalled. Never throws;
- * when a holder cannot be stopped, the next spawn fails with Oxigraph's own
- * lock error, preceded by a log line naming the holder and its parent.
+ * until they release it. Never throws. A caller must not launch over a store
+ * that is still `held`: the launch would fail on the lock, and replacing the
+ * owner record would lose the identity that lets a later reclaim stop the
+ * holder.
  */
-export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): Promise<number[]> {
+export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): Promise<ReclaimResult> {
   // Defaults for the effective platform, then the caller's parts. Identity
   // checks read the same process table as every other observation.
   const io: OrphanedOxigraphIo = { ...reclaimHost(opts.io?.platform ?? process.platform), ...opts.io };
   const identityState = (identity: ProcessIdentity): Promise<IdentityState> =>
     checkIdentity(identity, io.inspectProcess);
   // Windows processes are not reparented, so an orphan cannot be told apart.
-  if (io.platform === 'win32') return [];
+  if (io.platform === 'win32') return { signalled: [], held: null };
   const lockPath = resolve(opts.location, 'LOCK');
-  if (!(await io.lockExists(lockPath))) return [];
+  if (!(await io.lockExists(lockPath))) return { signalled: [], held: null };
   const stopGraceMs = opts.stopGraceMs ?? OXIGRAPH_STOP_GRACE_MS;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
@@ -298,7 +316,7 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
     try {
       io.signal(pid, signal);
     } catch (error) {
-      attempts.set(pid, { kind: 'left', instance: next.instance });
+      attempts.set(pid, { kind: 'left', instance: next.instance, blocks: 'its signal was refused' });
       opts.log(
         `[oxigraph] could not signal orphaned Oxigraph pid ${pid}: ` +
           `${error instanceof Error ? error.message : String(error)}`,
@@ -318,7 +336,13 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
       { location: opts.location, ownership, binaries },
     );
     if (decision.action === 'leave') {
-      attempts.set(pid, { kind: 'left', instance: instanceOf(holder) });
+      attempts.set(pid, {
+        kind: 'left',
+        instance: instanceOf(holder),
+        // Only a holder that is not this node's Oxigraph for this store (a
+        // backup tool reading LOCK, say) leaves the store free to launch on.
+        blocks: decision.reason.kind === 'not-this-store' ? null : describeLeave(decision.reason),
+      });
       opts.log(
         `[oxigraph] ${lockPath} is held by pid ${pid} (parent ${holder.ppid}): ` +
           `${holder.command.slice(0, 300)}. Leaving it running: ${describeLeave(decision.reason)}.`,
@@ -331,7 +355,7 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
       return false;
     }
     if (confirmation.kind === 'leave-unconfirmed') {
-      attempts.set(pid, { kind: 'left', instance: instanceOf(holder) });
+      attempts.set(pid, { kind: 'left', instance: instanceOf(holder), blocks: 'it could not be confirmed' });
       opts.log(
         `[oxigraph] could not confirm that pid ${pid} is still the orphaned Oxigraph ` +
           `holding ${lockPath} (${confirmation.reason}). Leaving it running.`,
@@ -360,7 +384,7 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
       case 'keep':
         return next.awaited;
       case 'leave-unreadable':
-        attempts.set(pid, { kind: 'left', instance: null });
+        attempts.set(pid, { kind: 'left', instance: null, blocks: 'it could not be inspected' });
         opts.log(
           `[oxigraph] ${lockPath} is held by pid ${pid}, which could not be inspected ` +
             `(${next.reason}). Leaving it running.`,
@@ -374,6 +398,8 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
     }
   };
 
+  // The holders the last successful scan listed; null until one succeeds.
+  let lastListed: Set<number> | null = null;
   for (;;) {
     // Null when the holders cannot be listed: unknown, never "released".
     let holders: number[] | null = null;
@@ -383,6 +409,7 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
       // Judged from the signalled instances alone this round.
     }
     const listed = new Set((holders ?? []).filter((pid) => pid !== process.pid));
+    if (holders !== null) lastListed = listed;
     const awaited: number[] = [];
     for (const pid of listed) {
       if (await step(pid, true)) awaited.push(pid);
@@ -395,19 +422,27 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
       if (await step(pid, false)) awaited.push(pid);
     }
     if (awaited.length === 0) {
-      if (signalled.size > 0) {
-        opts.log(`[oxigraph] ${lockPath} released by the orphaned Oxigraph.`);
-      } else if (holders === null) {
-        opts.log(`[oxigraph] could not list the processes holding ${lockPath}; leaving the outcome to the spawn.`);
+      if (lastListed === null) {
+        opts.log(`[oxigraph] could not list the processes holding ${lockPath}.`);
+        return { signalled: [...signalled], held: `the processes holding ${lockPath} could not be listed` };
       }
-      return [...signalled];
+      if (signalled.size > 0) opts.log(`[oxigraph] ${lockPath} released by the orphaned Oxigraph.`);
+      // Holders left running as of the last scan that listed them.
+      const blocking = [...lastListed].flatMap((pid) => {
+        const attempt = attempts.get(pid);
+        return attempt?.kind === 'left' && attempt.blocks !== null ? [`pid ${pid}: ${attempt.blocks}`] : [];
+      });
+      return { signalled: [...signalled], held: blocking.length > 0 ? blocking.join('; ') : null };
     }
     if (io.now() >= deadline) {
       opts.log(
         `[oxigraph] orphaned Oxigraph pid ${awaited.join(', ')} was not confirmed gone ` +
-          `${timeoutMs}ms after the reclaim began; starting anyway.`,
+          `${timeoutMs}ms after the reclaim began.`,
       );
-      return [...signalled];
+      return {
+        signalled: [...signalled],
+        held: `orphaned Oxigraph pid ${awaited.join(', ')} was not confirmed gone`,
+      };
     }
     await io.sleep(pollIntervalMs);
   }

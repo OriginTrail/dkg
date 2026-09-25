@@ -11,18 +11,18 @@
  *     before it was ready, a descendant of the recorded launcher (direct, or
  *     through a systemd scope) that runs this node's Oxigraph for this store;
  *     or
- *   - it runs this node's Oxigraph for this store (the recorded or current
- *     binary, or another `oxigraph*` executable in a known binary directory),
- *     no live recorded owner exists, and its parent is gone: it was
- *     reparented to PID 1 or its parent has exited. This covers an orphan
- *     from an earlier release, which has no record.
+ *   - it runs this node's Oxigraph for this store (the recorded binary, the
+ *     current binary or the `oxigraph` on PATH, or a pinned `oxigraph-vX.Y.Z`
+ *     in the managed binary cache), no live recorded owner exists, and its
+ *     parent is gone: it was reparented to PID 1 or its parent has exited.
+ *     This covers an orphan from an earlier release, which has no record.
  * While the recorded daemon and launcher both still run, every holder is left
  * alone. So is every holder when the record exists but cannot be read, or
  * when a probe cannot tell whether a recorded owner or the holder's parent
  * still runs: only a confirmed exit counts as gone.
  */
 import { basename, dirname, resolve } from 'node:path';
-import type { OxigraphBinaryLocations } from './oxigraph-binary.js';
+import { isPinnedOxigraphFile, type OxigraphBinaryLocations } from './oxigraph-binary.js';
 import type {
   IdentityState,
   OxigraphOwnerRecordRead,
@@ -31,26 +31,29 @@ import type {
 import { oxigraphStoreArgs } from './oxigraph-store-launch.js';
 import type { ProcessInstance } from './process-probe.js';
 
-// The binaries this module judges holders against are the places the binary
-// module reports (`OxigraphBinaryLocations`: exact paths, and directories
-// whose `oxigraph*` executables count); the rules for matching them are here.
+// Holders are judged against the binaries the binary module reports
+// (`OxigraphBinaryLocations`): exact binaries, and pinned releases in the
+// managed cache by that module's naming rule. Nothing else counts.
 
-/** A catalog of one binary and the other `oxigraph*` executables beside it. */
+/**
+ * Exactly one binary, for a caller without resolved binary locations: no
+ * directory is taken for the managed cache unless the binary module says so.
+ */
 export function oxigraphBinaryCatalog(path: string): OxigraphBinaryLocations {
-  return { paths: [path], dirs: [dirname(path)] };
+  return { exact: [path], cacheDir: null };
 }
 
-/** `catalog` plus one more binary and its directory (a recorded binary, say). */
+/** `catalog` plus one more exact binary (a recorded binary, say). */
 export function withOxigraphBinary(catalog: OxigraphBinaryLocations, path: string): OxigraphBinaryLocations {
-  return { paths: [...catalog.paths, path], dirs: [...catalog.dirs, dirname(path)] };
+  return { ...catalog, exact: [...catalog.exact, path] };
 }
 
 /** Whether `executable` is one of the catalog's Oxigraph binaries. */
 export function isCatalogedOxigraph(catalog: OxigraphBinaryLocations, executable: string): boolean {
-  if (catalog.paths.includes(executable)) return true;
-  if (!/^oxigraph[^/]*$/.test(basename(executable))) return false;
-  const dir = resolve(dirname(executable));
-  return catalog.dirs.some((known) => resolve(known) === dir);
+  if (catalog.exact.includes(executable)) return true;
+  return catalog.cacheDir !== null
+    && resolve(dirname(executable)) === resolve(catalog.cacheDir)
+    && isPinnedOxigraphFile(basename(executable));
 }
 
 // Interpreters a catalogued Oxigraph script may run under (`#!`): the
@@ -74,7 +77,7 @@ export function matchManagedOxigraphStore(
 ): 'match' | 'no-match' | 'ambiguous' {
   let tokens = holder.argv;
   if (tokens === null) {
-    if ([location, ...binaries.paths, ...binaries.dirs].some((value) => /\s/.test(value))) {
+    if ([location, ...binaries.exact, binaries.cacheDir ?? ''].some((value) => /\s/.test(value))) {
       return 'ambiguous';
     }
     tokens = holder.command.split(' ');

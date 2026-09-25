@@ -51,7 +51,7 @@ import {
   stat,
   writeFile,
 } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 
 /** Pinned Oxigraph release. Bump deliberately (re-pin checksums below). */
 export const OXIGRAPH_VERSION = '0.5.8';
@@ -429,17 +429,27 @@ export async function resolveOxigraphBinary(
 }
 
 /**
- * Where this node's Oxigraph binaries can be, beside the one the resolver
- * selected: the managed cache (earlier pinned versions) and the directory of
- * the `oxigraph` on PATH, the same places resolution takes a binary from. It
- * lists places only; the orphan reclaim decides which executables in them
- * count as this node's Oxigraph.
+ * The Oxigraph binaries this node runs or ran, as the orphan reclaim may
+ * recognise them: exact binaries, and pinned release files in the managed
+ * cache, the same sources resolution takes a binary from. Nothing else in
+ * those directories counts.
  */
 export interface OxigraphBinaryLocations {
-  /** Exact binaries: the one resolution selected. */
-  readonly paths: readonly string[];
-  /** Directories this node takes Oxigraph binaries from. */
-  readonly dirs: readonly string[];
+  /** Exact binaries: the one resolution selected, and the operator's `oxigraph` on PATH. */
+  readonly exact: readonly string[];
+  /**
+   * The managed cache, where a file counts only as a pinned release
+   * (`isPinnedOxigraphFile`): the versions earlier releases downloaded.
+   */
+  readonly cacheDir: string | null;
+}
+
+/**
+ * Whether `fileName` is a pinned Oxigraph release as the managed cache names
+ * them (`oxigraph-v<version>`, `.exe` on Windows).
+ */
+export function isPinnedOxigraphFile(fileName: string): boolean {
+  return /^oxigraph-v\d+\.\d+\.\d+(?:\.exe)?$/.test(fileName);
 }
 
 /**
@@ -454,6 +464,8 @@ export async function oxigraphBinaryLocations(
   const pathBinary = selected.source === 'system'
     ? selected.path
     : await resolveSystemOxigraphOnPath({ ...defaultIo(), ...opts.io }, opts.platform ?? process.platform);
-  const dirs = [opts.cacheDir, dirname(selected.path), ...(pathBinary ? [dirname(pathBinary)] : [])];
-  return { paths: [selected.path], dirs: [...new Set(dirs)] };
+  return {
+    exact: [...new Set([selected.path, ...(pathBinary ? [pathBinary] : [])])],
+    cacheDir: opts.cacheDir,
+  };
 }

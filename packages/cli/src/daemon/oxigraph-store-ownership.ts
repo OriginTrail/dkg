@@ -15,12 +15,17 @@
 import type { OxigraphBinaryLocations } from './oxigraph-binary.js';
 import { recordOxigraphLaunch, type OxigraphLaunchRecord } from './oxigraph-owner-record.js';
 import { reclaimHost, stopOrphanedOxigraph } from './oxigraph-orphan.js';
+import type { OxigraphLaunchHandle } from './oxigraph-launch-strategy.js';
 import type { OxigraphStoreOwnership } from './oxigraph-store-launch.js';
 
 /** The two store operations a launch is built from. */
 export interface OxigraphStoreOwnershipSteps {
-  /** Stop orphaned Oxigraph processes that hold the store lock. */
-  reclaim(): Promise<void>;
+  /**
+   * Stop orphaned Oxigraph processes that hold the store lock. `held` is why
+   * the store may still be held by this node's Oxigraph, or null when it is
+   * free for a new launch.
+   */
+  reclaim(): Promise<{ held: string | null }>;
   /**
    * Record a spawned launch as the store's owner; the returned record adds
    * the verified Oxigraph once the launch is ready. Null when there can be
@@ -41,9 +46,14 @@ export interface OxigraphStoreOwnershipInput {
 /**
  * The store ownership for one server start. `binaries` is what the reclaim
  * recognises as this node's Oxigraph (the resolved binary's
- * `oxigraphBinaryLocations`), defaulting to `binaryPath` alone. `steps` replaces both the reclaim and the
- * owner record at once (tests only), so a caller never runs one of the
- * production steps by leaving it out.
+ * `oxigraphBinaryLocations`), defaulting to `binaryPath` alone. `steps`
+ * replaces both the reclaim and the owner record at once (tests only), so a
+ * caller never runs one of the production steps by leaving it out.
+ *
+ * It serialises its own lifecycle: a launch's reclaim and record writes are
+ * tracked, `close()` waits for them, and after closing it runs at most one
+ * more reclaim, when the last launch's wrapper had already exited and no
+ * reclaim since has found the store free.
  */
 export function createOxigraphStoreOwnership(
   opts: OxigraphStoreOwnershipInput & {
@@ -53,15 +63,13 @@ export function createOxigraphStoreOwnership(
 ): OxigraphStoreOwnership {
   const host = reclaimHost(opts.platform);
   const steps: OxigraphStoreOwnershipSteps = opts.steps ?? {
-    reclaim: async () => {
-      await stopOrphanedOxigraph({
-        location: opts.location,
-        binaryPath: opts.binaryPath,
-        binaries: opts.binaries,
-        log: opts.log,
-        io: host,
-      });
-    },
+    reclaim: () => stopOrphanedOxigraph({
+      location: opts.location,
+      binaryPath: opts.binaryPath,
+      binaries: opts.binaries,
+      log: opts.log,
+      io: host,
+    }),
     recordLaunch: (launcherPid) => recordOxigraphLaunch({
       location: opts.location,
       binaryPath: opts.binaryPath,
@@ -73,23 +81,36 @@ export function createOxigraphStoreOwnership(
     }),
   };
   let closed = false;
-  // Owner-record writes in flight, which close() waits for.
-  const writes = new Set<Promise<unknown>>();
-  const track = <T>(write: Promise<T>): Promise<T> => {
-    writes.add(write);
-    const forget = (): void => { writes.delete(write); };
-    write.then(forget, forget);
-    return write;
-  };
-  const close = async (): Promise<void> => {
-    closed = true;
-    await Promise.allSettled(writes);
+  let closing: Promise<void> | null = null;
+  // The last launch spawned, until a reclaim that began after its wrapper
+  // exited finds the store free: close() reclaims once more for it.
+  let lastLaunch: OxigraphLaunchHandle | null = null;
+  // Reclaims and owner-record writes in flight, which close() waits for.
+  const inFlight = new Set<Promise<unknown>>();
+  const track = <T>(work: Promise<T>): Promise<T> => {
+    inFlight.add(work);
+    const forget = (): void => { inFlight.delete(work); };
+    work.then(forget, forget);
+    return work;
   };
   return {
     async launch(spawn) {
-      await steps.reclaim();
       if (closed) return null;
+      const exited = lastLaunch !== null && !lastLaunch.alive() ? lastLaunch : null;
+      const { held } = await track(steps.reclaim());
+      // This reclaim covered a launch whose wrapper had already exited.
+      if (held === null && exited !== null && lastLaunch === exited) lastLaunch = null;
+      if (closed) return null;
+      if (held !== null) {
+        // Spawning over it would fail on the lock, and recording the new
+        // launch would replace the owner record that lets a later reclaim
+        // stop the holder. Leave both for a later attempt.
+        throw new Error(
+          `${opts.location}/LOCK may still be held by this node's Oxigraph (${held}); not starting another over it`,
+        );
+      }
       const oxigraph = spawn();
+      lastLaunch = oxigraph;
       const launcherPid = oxigraph.child.pid;
       // Recorded at spawn, so the reclaim can identify this launch's
       // Oxigraph even if the daemon dies before it is ready. A launch that
@@ -114,10 +135,18 @@ export function createOxigraphStoreOwnership(
         },
       };
     },
-    close,
-    async release() {
-      await close();
-      await steps.reclaim();
+    close() {
+      if (closing) return closing;
+      closed = true;
+      // Decided now, before the caller stops a live launch: a wrapper that
+      // already exited on its own may have left its Oxigraph running.
+      const stranded = lastLaunch !== null && !lastLaunch.alive() ? lastLaunch : null;
+      closing = (async () => {
+        await Promise.allSettled(inFlight);
+        // Unless a reclaim in flight has covered it since.
+        if (stranded !== null && lastLaunch === stranded) await steps.reclaim().catch(() => undefined);
+      })();
+      return closing;
     },
   };
 }

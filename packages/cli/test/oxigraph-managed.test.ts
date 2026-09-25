@@ -45,6 +45,11 @@ if (args.includes('--version')) {
   console.log('Oxigraph 0.6.0');
   process.exit(0);
 }
+// Hold the store's LOCK open, as Oxigraph does, when a test asks for it.
+const locationIdx = args.indexOf('--location');
+if (process.env.OXIGRAPH_STANDIN_HOLD_LOCK === '1' && locationIdx >= 0) {
+  require('node:fs').openSync(require('node:path').join(args[locationIdx + 1], 'LOCK'), 'a');
+}
 const bindIdx = args.indexOf('--bind');
 if (bindIdx < 0 || !args[bindIdx + 1]) {
   console.error('missing --bind');
@@ -663,27 +668,25 @@ require('node:http').createServer((_req, res) => res.end('orphan')).listen(Numbe
     }
   });
 
-  it('reclaims an earlier release\'s orphan that runs an oxigraph* beside the PATH binary while the bundled binary launches', async () => {
+  it('reclaims an earlier release\'s orphan that runs the oxigraph on PATH while the bundled binary launches', async () => {
     // STABLE cache, as in the real-download test: the launch binary is the
-    // pinned release, outside the PATH directory, so only the forwarded PATH
-    // directory identifies the orphan's binary as this node's.
+    // pinned release, so only the forwarded PATH binary identifies the
+    // orphan's binary as this node's.
     const cacheDir = join(tmpdir(), 'dkg-test-oxigraph-cache');
     await mkdir(cacheDir, { recursive: true });
     const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-'));
     const port = await freePort();
     const location = join(dataDir, 'oxigraph-data');
     await mkdir(location, { recursive: true });
-    const pathSibling = join(systemOxigraphDir!, 'oxigraph-legacy');
-    await writeFile(pathSibling, `#!/usr/bin/env node
-const args = process.argv.slice(2);
-require('node:fs').openSync(require('node:path').join(args[args.indexOf('--location') + 1], 'LOCK'), 'a');
-const [host, port] = args[args.indexOf('--bind') + 1].split(':');
-require('node:http').createServer((_req, res) => res.end('orphan')).listen(Number(port), host);
-`);
-    await chmod(pathSibling, 0o755);
-    const orphanPid = await spawnOrphan(pathSibling, [
-      'serve', '--location', location, '--bind', `127.0.0.1:${port}`,
-    ]);
+    process.env.OXIGRAPH_STANDIN_HOLD_LOCK = '1';
+    let orphanPid: number;
+    try {
+      orphanPid = await spawnOrphan(join(systemOxigraphDir!, 'oxigraph'), [
+        'serve', '--location', location, '--bind', `127.0.0.1:${port}`,
+      ]);
+    } finally {
+      delete process.env.OXIGRAPH_STANDIN_HOLD_LOCK;
+    }
     const lines: string[] = [];
     let result: Awaited<ReturnType<typeof startManagedOxigraph>> = null;
     try {
@@ -708,7 +711,6 @@ require('node:http').createServer((_req, res) => res.end('orphan')).listen(Numbe
     } finally {
       await result?.handle.stop();
       try { process.kill(orphanPid, 'SIGKILL'); } catch { /* already gone */ }
-      await rm(pathSibling, { force: true });
       await rm(dataDir, { recursive: true, force: true });
     }
   }, 60_000);

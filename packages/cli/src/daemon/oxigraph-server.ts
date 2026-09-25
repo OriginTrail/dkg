@@ -641,23 +641,16 @@ export async function startOxigraphServer(
     process.removeListener('exit', exitGuard);
     if (lifecycle.phase === 'stopping') return;
     const candidate = lifecycle.oxigraph;
-    // A launch whose wrapper exited on its own (the watchdog killed alone,
-    // during the first start or before a pending restart) can leave its
-    // Oxigraph running, holding the port and LOCK. Stopping must reclaim it
-    // too; with no launch spawned yet there is nothing to reclaim.
-    const strandedLaunch = !childAlive(candidate) && (
-      lifecycle.phase === 'recovering'
-      || (lifecycle.phase === 'starting' && candidate !== null)
-    );
     lifecycle = {
       phase: 'stopping',
       oxigraph: candidate,
       generation: lifecycle.generation,
     };
-    // No further launches or owner records; resolves once the writes in
-    // flight finish (and, after a stranded launch, once the store is
-    // reclaimed), so the store directory is quiet when stop() resolves.
-    const ownershipClosed = strandedLaunch ? storeOwnership.release() : storeOwnership.close();
+    // No further launches or owner records. Resolves once a reclaim or
+    // record in flight finishes, and, when the last launch's wrapper had
+    // already exited on its own, once its possibly surviving Oxigraph is
+    // reclaimed; so the store is quiet when stop() resolves.
+    const ownershipClosed = storeOwnership.close();
     markStoreDown();
     if (!childAlive(candidate)) {
       await ownershipClosed;

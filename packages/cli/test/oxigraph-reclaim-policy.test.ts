@@ -33,7 +33,7 @@ describe('the orphan reclaim policy', () => {
   describe('pure decisions from explicit observations', () => {
     const instance = (pid: number, ppid: number, argv: string[], start = `t${pid}`) =>
       ({ pid, start, ppid, argv, command: argv.join(' ') });
-    const binaries = { paths: [binaryPath], dirs: [] };
+    const binaries = { exact: [binaryPath], cacheDir: null };
     const record: OxigraphOwnerRecordV1 = {
       schema: OXIGRAPH_OWNER_RECORD_SCHEMA,
       boot: 'boot-1',
@@ -136,27 +136,39 @@ describe('the orphan reclaim policy', () => {
       // The argv the watchdog execs for Oxigraph: the binary and its arguments.
       const argv = launched.slice(launched.indexOf(binaryPath));
       expect(matchManagedOxigraphStore(
-        { argv, command: argv.join(' ') }, '/data/ox', { paths: [binaryPath], dirs: [] },
+        { argv, command: argv.join(' ') }, '/data/ox', { exact: [binaryPath], cacheDir: null },
       )).toBe('match');
     }
   });
 
-  it('recognises a catalogued binary by exact path or as an oxigraph* beside a catalogued directory', () => {
-    const catalog = withOxigraphBinary(oxigraphBinaryCatalog('/opt/dkg/oxigraph/oxigraph-v0.5.8'), '/usr/local/bin/oxigraph');
+  it('recognises an exact binary, or a pinned release in the managed cache, and nothing beside them', () => {
+    const catalog = withOxigraphBinary(
+      { exact: ['/opt/dkg/oxigraph/oxigraph-v0.5.8'], cacheDir: '/opt/dkg/oxigraph' },
+      '/usr/local/bin/oxigraph',
+    );
     expect(catalog).toEqual({
-      paths: ['/opt/dkg/oxigraph/oxigraph-v0.5.8', '/usr/local/bin/oxigraph'],
-      dirs: ['/opt/dkg/oxigraph', '/usr/local/bin'],
+      exact: ['/opt/dkg/oxigraph/oxigraph-v0.5.8', '/usr/local/bin/oxigraph'],
+      cacheDir: '/opt/dkg/oxigraph',
     });
+    expect(isCatalogedOxigraph(catalog, '/usr/local/bin/oxigraph')).toBe(true);
     expect(isCatalogedOxigraph(catalog, '/opt/dkg/oxigraph/oxigraph-v0.5.7')).toBe(true);
-    expect(isCatalogedOxigraph(catalog, '/usr/local/bin/oxigraph-server')).toBe(true);
     expect(isCatalogedOxigraph(catalog, '/opt/dkg/oxigraph/../oxigraph/oxigraph-v0.5.6')).toBe(true);
-    // Another program in a catalogued directory, or an oxigraph* elsewhere.
+    // Other oxigraph* tools beside an exact binary or in the cache, another
+    // program in the cache, a pinned name outside it, an oxigraph elsewhere.
+    expect(isCatalogedOxigraph(catalog, '/usr/local/bin/oxigraph-server')).toBe(false);
+    expect(isCatalogedOxigraph(catalog, '/usr/local/bin/oxigraph-backup')).toBe(false);
+    expect(isCatalogedOxigraph(catalog, '/usr/local/bin/oxigraph-v0.5.7')).toBe(false);
+    expect(isCatalogedOxigraph(catalog, '/opt/dkg/oxigraph/oxigraph-server')).toBe(false);
     expect(isCatalogedOxigraph(catalog, '/opt/dkg/oxigraph/rocksdb-tool')).toBe(false);
     expect(isCatalogedOxigraph(catalog, '/tmp/oxigraph')).toBe(false);
+    // Without resolved locations, the one binary alone.
+    const single = oxigraphBinaryCatalog('/opt/dkg/oxigraph/oxigraph-v0.5.8');
+    expect(single).toEqual({ exact: ['/opt/dkg/oxigraph/oxigraph-v0.5.8'], cacheDir: null });
+    expect(isCatalogedOxigraph(single, '/opt/dkg/oxigraph/oxigraph-v0.5.7')).toBe(false);
   });
 
   it('compares exact argv token by token, including paths with spaces', () => {
-    const binaries = { paths: ['/opt/oxigraph'], dirs: ['/opt'] };
+    const binaries = { exact: ['/opt/oxigraph'], cacheDir: '/opt' };
     const exact = (argv: string[]) => ({ argv, command: argv.join(' ') });
     expect(matchManagedOxigraphStore(exact(['/opt/oxigraph', 'serve', '--location', '/data/store name']), '/data/store name', binaries)).toBe('match');
     // Flattened, these two are the same text; as argv they differ.
@@ -174,10 +186,11 @@ describe('the orphan reclaim policy', () => {
 
   it('matches display-only text only when neither the store nor a binary path has whitespace', () => {
     const display = (command: string) => ({ argv: null, command });
-    const binaries = { paths: ['/opt/oxigraph'], dirs: ['/opt'] };
+    const binaries = { exact: ['/opt/oxigraph'], cacheDir: '/opt' };
     expect(matchManagedOxigraphStore(display('/opt/oxigraph serve --location /data/ox --bind 127.0.0.1:7878'), '/data/ox', binaries)).toBe('match');
     expect(matchManagedOxigraphStore(display('/opt/oxigraph serve --location /data/ox2'), '/data/ox', binaries)).toBe('no-match');
     expect(matchManagedOxigraphStore(display('/opt/oxigraph serve --location /data/store name'), '/data/store name', binaries)).toBe('ambiguous');
-    expect(matchManagedOxigraphStore(display('/my apps/oxigraph serve --location /data/ox'), '/data/ox', { paths: ['/my apps/oxigraph'], dirs: [] })).toBe('ambiguous');
+    expect(matchManagedOxigraphStore(display('/my apps/oxigraph serve --location /data/ox'), '/data/ox', { exact: ['/my apps/oxigraph'], cacheDir: null })).toBe('ambiguous');
+    expect(matchManagedOxigraphStore(display('/opt/oxigraph serve --location /data/ox'), '/data/ox', { exact: ['/opt/oxigraph'], cacheDir: '/my cache' })).toBe('ambiguous');
   });
 });

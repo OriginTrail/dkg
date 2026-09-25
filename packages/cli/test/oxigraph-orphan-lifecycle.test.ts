@@ -31,7 +31,8 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { findListenOwnerPid } from '../src/daemon/oxigraph-listen-port.js';
-import { OXIGRAPH_OWNER_RECORD } from '../src/daemon/oxigraph-owner-record.js';
+import { OXIGRAPH_OWNER_RECORD, recordOxigraphLaunch } from '../src/daemon/oxigraph-owner-record.js';
+import { reclaimHost, stopOrphanedOxigraph } from '../src/daemon/oxigraph-orphan.js';
 import { oxigraphStoreArgs } from '../src/daemon/oxigraph-store-launch.js';
 import {
   createOxigraphStoreOwnership,
@@ -183,6 +184,90 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
     }
   }, 60_000);
 
+  it('keeps the owner record of an orphan it could not look for, so a later start still reclaims it', async () => {
+    const port = await freePort();
+    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-held-'));
+    let first: WorkerProcess | undefined;
+    let second: WorkerProcess | undefined;
+    let listenerPid: number | undefined;
+    let frozenWatchdog: number | null = null;
+    try {
+      // Launch A's worker dies with A's watchdog frozen: A's Oxigraph keeps
+      // LOCK under a live parent that is not PID 1, and only A's owner record
+      // identifies it.
+      first = await startWorker(lockingStandin.binaryPath, port, location);
+      listenerPid = await fetchPid(port);
+      frozenWatchdog = parentPid(listenerPid);
+      expect(frozenWatchdog).not.toBeNull();
+      process.kill(frozenWatchdog!, 'SIGSTOP');
+      const exited = once(first.child, 'exit');
+      first.child.kill('SIGKILL');
+      await exited;
+      const recordPath = join(location, OXIGRAPH_OWNER_RECORD);
+      const recordOfA = await readFile(recordPath, 'utf8');
+
+      // The next start runs the production steps, but cannot list the lock
+      // holders (an lsof timeout).
+      let spawns = 0;
+      const countingSpawn = ((...args: Parameters<typeof spawn>) => {
+        spawns += 1;
+        return spawn(...args);
+      }) as typeof spawn;
+      await expect(startOxigraphServer({
+        binaryPath: lockingStandin.binaryPath,
+        location,
+        port,
+        readyTimeoutMs: 10_000,
+        log: () => {},
+        io: { spawn: countingSpawn },
+        storeOwnership: (input) => {
+          const host = reclaimHost(input.platform);
+          return createOxigraphStoreOwnership({
+            ...input,
+            steps: {
+              reclaim: () => stopOrphanedOxigraph({
+                location: input.location,
+                binaryPath: input.binaryPath,
+                log: input.log,
+                io: { ...host, listLockHolders: async () => { throw new Error('lsof timed out'); } },
+              }),
+              recordLaunch: (launcherPid) => recordOxigraphLaunch({
+                location: input.location,
+                binaryPath: input.binaryPath,
+                launcherPid,
+                platform: input.platform,
+                inspect: host.inspectProcess,
+                bootId: host.bootId,
+                log: input.log,
+              }),
+            },
+          });
+        },
+      })).rejects.toThrow(
+        `${location}/LOCK may still be held by this node's Oxigraph ` +
+          `(the processes holding ${location}/LOCK could not be listed); not starting another over it`,
+      );
+      // Nothing was started over A, and A's record is untouched.
+      expect(spawns).toBe(0);
+      expect(await readFile(recordPath, 'utf8')).toBe(recordOfA);
+      expect(pidIsGone(listenerPid)).toBe(false);
+
+      // The start after it (the supervisor's next worker) can look, and
+      // stops A by its record.
+      second = await startWorker(lockingStandin.binaryPath, port, location);
+      expect(await fetchPid(port)).not.toBe(listenerPid);
+      expect(second.stderr()).toContain(
+        `stopping orphaned Oxigraph pid ${listenerPid} (its recorded daemon pid ${first.child.pid} has exited)`,
+      );
+    } finally {
+      if (second) await stopWorker(second);
+      if (first) first.child.kill('SIGKILL');
+      killIfAlive(frozenWatchdog ?? undefined);
+      killIfAlive(listenerPid);
+      await rm(location, { recursive: true, force: true });
+    }
+  }, 60_000);
+
   // The production store ownership with both of its steps replaced (no real
   // reclaim or record runs), to force the outcome under test or observe the
   // order: `spawned` for the record at spawn, `ready` for its extension.
@@ -193,7 +278,10 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
   }) => (input: OxigraphStoreOwnershipInput) => createOxigraphStoreOwnership({
     ...input,
     steps: {
-      reclaim: hooks.reclaim ?? (async () => {}),
+      reclaim: async () => {
+        await hooks.reclaim?.();
+        return { held: null };
+      },
       recordLaunch: async (launcherPid) => {
         await hooks.spawned?.(launcherPid);
         return { markReady: async (oxigraphPid) => { await hooks.ready?.(launcherPid, oxigraphPid); } };
@@ -201,11 +289,13 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
     },
   });
 
-  it('does not spawn a restart whose reclaim is still running when stop() is called', async () => {
+  it('waits for a restart\'s reclaim when stop() is called during it, and neither spawns nor reclaims again', async () => {
     const port = await freePort();
     const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-stop-reclaim-'));
     let spawns = 0;
     let reclaims = 0;
+    let running = 0;
+    let mostAtOnce = 0;
     let releaseReclaim: (() => void) | undefined;
     const countingSpawn = ((...args: Parameters<typeof spawn>) => {
       spawns += 1;
@@ -224,8 +314,14 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
       storeOwnership: ownershipWith({
         reclaim: async () => {
           reclaims += 1;
-          // The restart's reclaim blocks until the test releases it.
-          if (reclaims === 2) await new Promise<void>((resolve) => { releaseReclaim = resolve; });
+          running += 1;
+          mostAtOnce = Math.max(mostAtOnce, running);
+          try {
+            // The restart's reclaim blocks until the test releases it.
+            if (reclaims === 2) await new Promise<void>((resolve) => { releaseReclaim = resolve; });
+          } finally {
+            running -= 1;
+          }
         },
       }),
     });
@@ -233,9 +329,17 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
       expect(spawns).toBe(1);
       process.kill(await fetchPid(port), 'SIGKILL');
       expect(await waitForCondition(() => releaseReclaim !== undefined, 10_000)).toBe(true);
-      await handle.stop();
+      let stopped = false;
+      const stopping = handle.stop().then(() => { stopped = true; });
+      await sleep(300);
+      expect(stopped, 'stop() resolved while the restart was still reclaiming the store').toBe(false);
       releaseReclaim!();
-      await sleep(500);
+      await stopping;
+      // The restart's reclaim ran after the dead launch's wrapper exited, so
+      // it covered that launch: no second reclaim, and none alongside it.
+      expect(reclaims).toBe(2);
+      expect(mostAtOnce).toBe(1);
+      await sleep(300);
       expect(spawns).toBe(1);
       expect(await portAnswers(port)).toBe(false);
     } finally {
@@ -642,15 +746,19 @@ describe('store ownership launches', () => {
   const notSpawnable = (): OxigraphLaunchHandle => {
     throw new Error('spawned after close()');
   };
-  // A launch handle that only notes the signals it is sent.
+  // A launch handle that notes the signals it is sent; `exit` makes its
+  // wrapper exit on its own.
   const handleFor = (pid: number) => {
     const signals: NodeJS.Signals[] = [];
+    let alive = true;
     const oxigraph = {
       child: { pid } as ChildProcess,
+      alive: () => alive,
       terminate: (signal: NodeJS.Signals) => { signals.push(signal); },
     } as unknown as OxigraphLaunchHandle;
-    return { oxigraph, signals };
+    return { oxigraph, signals, exit: () => { alive = false; } };
   };
+  const storeFree = async () => ({ held: null });
   // A launch recorder that notes each write it would make.
   const recording = (records: string[]): OxigraphStoreOwnershipSteps['recordLaunch'] => async (launcherPid) => {
     records.push(`spawned:${launcherPid}`);
@@ -664,12 +772,12 @@ describe('store ownership launches', () => {
     steps,
   });
 
-  it('neither spawns nor records once closed while the reclaim is still running', async () => {
+  it('neither spawns nor records once closed while the reclaim is still running, and close() waits for it', async () => {
     let releaseReclaim!: () => void;
     const records: string[] = [];
     let spawns = 0;
     const ownership = ownershipWithSteps({
-      reclaim: () => new Promise<void>((resolve) => { releaseReclaim = resolve; }),
+      reclaim: () => new Promise((resolve) => { releaseReclaim = () => resolve({ held: null }); }),
       recordLaunch: recording(records),
     });
 
@@ -677,17 +785,41 @@ describe('store ownership launches', () => {
       spawns += 1;
       return notSpawnable();
     });
-    await ownership.close();
+    let closed = false;
+    const closing = ownership.close().then(() => { closed = true; });
+    await sleep(50);
+    expect(closed).toBe(false);
     releaseReclaim();
+    await closing;
 
     await expect(launched).resolves.toBeNull();
     expect(spawns).toBe(0);
     expect(records).toEqual([]);
   });
 
+  it('refuses to spawn or record over a store the reclaim leaves possibly held', async () => {
+    const records: string[] = [];
+    let spawns = 0;
+    const ownership = ownershipWithSteps({
+      reclaim: async () => ({ held: 'pid 4100: it could not be inspected' }),
+      recordLaunch: recording(records),
+    });
+
+    await expect(ownership.launch(() => {
+      spawns += 1;
+      return notSpawnable();
+    })).rejects.toThrow(
+      '/nonexistent/oxigraph-data/LOCK may still be held by this node\'s Oxigraph ' +
+        '(pid 4100: it could not be inspected); not starting another over it',
+    );
+    expect(spawns).toBe(0);
+    // The previous owner record stays: nothing replaced it.
+    expect(records).toEqual([]);
+  });
+
   it('records nothing for a launch that becomes ready after close()', async () => {
     const records: string[] = [];
-    const ownership = ownershipWithSteps({ reclaim: async () => {}, recordLaunch: recording(records) });
+    const ownership = ownershipWithSteps({ reclaim: storeFree, recordLaunch: recording(records) });
     const { oxigraph } = handleFor(4099);
     const launch = await ownership.launch(() => oxigraph);
     expect(launch?.oxigraph).toBe(oxigraph);
@@ -701,7 +833,7 @@ describe('store ownership launches', () => {
 
   it('kills what it spawned through the launch handle when recording the launch rejects, then rejects', async () => {
     const ownership = ownershipWithSteps({
-      reclaim: async () => {},
+      reclaim: storeFree,
       recordLaunch: async () => { throw new Error('record defect'); },
     });
     const { oxigraph, signals } = handleFor(4099);
@@ -709,14 +841,75 @@ describe('store ownership launches', () => {
     expect(signals).toEqual(['SIGKILL']);
   });
 
-  it('release() closes, then reclaims the store, and refuses later launches', async () => {
+  it('reclaims once more on close() when the last launch\'s wrapper had already exited, and only once', async () => {
     const events: string[] = [];
     const ownership = ownershipWithSteps({
-      reclaim: async () => { events.push('reclaim'); },
+      reclaim: async () => { events.push('reclaim'); return { held: null }; },
       recordLaunch: recording(events),
     });
-    await ownership.release();
-    expect(events).toEqual(['reclaim']);
+    const { oxigraph, exit } = handleFor(4099);
+    await ownership.launch(() => oxigraph);
+    // The watchdog was killed on its own; its Oxigraph may still run.
+    exit();
+
+    const closing = ownership.close();
+    expect(ownership.close()).toBe(closing);
+    await closing;
+    await ownership.close();
     await expect(ownership.launch(notSpawnable)).resolves.toBeNull();
+    expect(events).toEqual(['reclaim', 'spawned:4099', 'reclaim']);
+  });
+
+  it('does not reclaim on close() for a launch still running when it is called', async () => {
+    const events: string[] = [];
+    const ownership = ownershipWithSteps({
+      reclaim: async () => { events.push('reclaim'); return { held: null }; },
+      recordLaunch: recording(events),
+    });
+    const { oxigraph, exit } = handleFor(4099);
+    await ownership.launch(() => oxigraph);
+
+    const closing = ownership.close();
+    // The caller stops the live launch after closing.
+    exit();
+    await closing;
+    expect(events).toEqual(['reclaim', 'spawned:4099']);
+  });
+
+  it('does not repeat on close() a reclaim in flight that began after the last wrapper exited', async () => {
+    let reclaims = 0;
+    let running = 0;
+    let mostAtOnce = 0;
+    let releaseReclaim: (() => void) | undefined;
+    const ownership = ownershipWithSteps({
+      reclaim: async () => {
+        reclaims += 1;
+        running += 1;
+        mostAtOnce = Math.max(mostAtOnce, running);
+        try {
+          if (reclaims === 2) await new Promise<void>((resolve) => { releaseReclaim = resolve; });
+        } finally {
+          running -= 1;
+        }
+        return { held: null };
+      },
+      recordLaunch: recording([]),
+    });
+    const { oxigraph, exit } = handleFor(4099);
+    await ownership.launch(() => oxigraph);
+    exit();
+    // A restart, whose reclaim is still running when the owner closes.
+    const restart = ownership.launch(notSpawnable);
+    expect(releaseReclaim).toBeDefined();
+
+    let closed = false;
+    const closing = ownership.close().then(() => { closed = true; });
+    await sleep(50);
+    expect(closed).toBe(false);
+    releaseReclaim!();
+    await closing;
+    await expect(restart).resolves.toBeNull();
+    expect(reclaims).toBe(2);
+    expect(mostAtOnce).toBe(1);
   });
 });

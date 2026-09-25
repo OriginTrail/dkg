@@ -176,6 +176,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
         launcher = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
         return {
           child: launcher,
+          alive: () => launcher!.exitCode === null && launcher!.signalCode === null,
           terminate: (signal: NodeJS.Signals) => { launcher!.kill(signal); },
         } as unknown as OxigraphLaunchHandle;
       });
@@ -206,7 +207,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
     }
   }, 30_000);
 
-  it('recognises binaries from every resolver source: the selected binary, the managed cache and the PATH binary\'s directory', async () => {
+  it('recognises the binaries every resolver source gives: the selected one, the oxigraph on PATH and pinned releases in the cache', async () => {
     const cacheDir = await mkdtemp(join(tmpdir(), 'oxi-reclaim-cache-'));
     const decoyDir = await mkdtemp(join(tmpdir(), 'oxi-reclaim-decoy-'));
     const pathDir = await mkdtemp(join(tmpdir(), 'oxi-reclaim-path-'));
@@ -221,16 +222,22 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       const system = { path: join(pathDir, 'oxigraph'), source: 'system', version: '0.6.0' } as const;
       for (const selected of [bundled, system]) {
         const catalog = await oxigraphBinaryLocations(selected, opts);
-        expect(catalog, selected.source).toEqual({ paths: [selected.path], dirs: [cacheDir, pathDir] });
+        expect(catalog, selected.source).toEqual({
+          exact: [...new Set([selected.path, join(pathDir, 'oxigraph')])],
+          cacheDir,
+        });
         // An orphan from an earlier release may run an earlier pinned binary
         // from the cache, or the operator's binary on PATH; not the decoy.
         expect(isCatalogedOxigraph(catalog, join(cacheDir, 'oxigraph-v0.5.7')), selected.source).toBe(true);
         expect(isCatalogedOxigraph(catalog, join(pathDir, 'oxigraph')), selected.source).toBe(true);
         expect(isCatalogedOxigraph(catalog, join(decoyDir, 'oxigraph')), selected.source).toBe(false);
+        // Nothing else beside them: other oxigraph* tools are not this node's Oxigraph.
+        expect(isCatalogedOxigraph(catalog, join(pathDir, 'oxigraph-backup')), selected.source).toBe(false);
+        expect(isCatalogedOxigraph(catalog, join(cacheDir, 'oxigraph-server')), selected.source).toBe(false);
       }
-      // Without an oxigraph on PATH, only the cache is catalogued.
+      // Without an oxigraph on PATH, only the selected binary is exact.
       process.env.PATH = decoyDir;
-      await expect(oxigraphBinaryLocations(bundled, opts)).resolves.toEqual({ paths: [bundled.path], dirs: [cacheDir] });
+      await expect(oxigraphBinaryLocations(bundled, opts)).resolves.toEqual({ exact: [bundled.path], cacheDir });
     } finally {
       process.env.PATH = previousPath;
       for (const dir of [cacheDir, decoyDir, pathDir]) await rm(dir, { recursive: true, force: true });
@@ -447,7 +454,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
         binaryPath: lockingStandin.binaryPath,
         location,
         log: (line) => lines.push(line),
-      })).resolves.toEqual([databasePid]);
+      })).resolves.toEqual({ signalled: [databasePid], held: null });
       expect(await waitForCondition(async () => !(await portAnswers(port)))).toBe(true);
       expect(lines.join('\n')).toContain(
         `stopping orphaned Oxigraph pid ${databasePid} (its recorded daemon pid ${deadDaemon.pid} has exited)`,
@@ -474,7 +481,11 @@ describe('stopOrphanedOxigraph (real processes)', () => {
         binaryPath: lockingStandin.binaryPath,
         location,
         log: (line) => lines.push(line),
-      })).resolves.toEqual([]);
+      })).resolves.toEqual({
+        signalled: [],
+        // It may be this node's Oxigraph: the store is not free to launch on.
+        held: expect.stringMatching(new RegExp(`^pid ${owned.pid}: there is no owner record`)),
+      });
       expect(owned.exitCode).toBeNull();
       expect(owned.signalCode).toBeNull();
 
