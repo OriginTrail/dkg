@@ -670,8 +670,9 @@ export class ProtocolRouter {
    * probe opens and immediately aborts the stream before any payload bytes.
    */
   async probeProtocol(peerIdStr: string, protocolId: string, timeoutMs = 3_000): Promise<ProtocolProbeOutcome> {
-    const deadline = AbortSignal.timeout(timeoutMs);
-    const signal = composeAbortSignals(deadline, this.node.stopSignal) ?? deadline;
+    const abortScope = new OutboundAbortScope();
+    const deadline = abortScope.deadline(timeoutMs);
+    const signal = abortScope.compose(deadline, this.node.stopSignal) ?? deadline;
     try {
       await this.requirePeerAccepted(peerIdStr, protocolId, 'outbound', { signal, timeoutMs });
       // Match send()'s resolver contract before opening a stream. For the
@@ -689,6 +690,8 @@ export class ProtocolRouter {
     } catch (error) {
       if (this.node.stopSignal?.aborted) throw error;
       return isProtocolUnsupportedError(error) ? 'unsupported' : 'unavailable';
+    } finally {
+      abortScope.release();
     }
   }
 
@@ -697,6 +700,23 @@ export class ProtocolRouter {
     protocolId: string,
     data: Uint8Array,
     timeoutMsOrOpts: number | SendOptions = DEFAULT_SEND_TIMEOUT_MS,
+  ): Promise<Uint8Array> {
+    // When the send settles, nothing of it stays attached to the caller's
+    // signal or node.stopSignal (#2812).
+    const abortScope = new OutboundAbortScope();
+    try {
+      return await this.sendInnerScoped(peerIdStr, protocolId, data, timeoutMsOrOpts, abortScope);
+    } finally {
+      abortScope.release();
+    }
+  }
+
+  private async sendInnerScoped(
+    peerIdStr: string,
+    protocolId: string,
+    data: Uint8Array,
+    timeoutMsOrOpts: number | SendOptions,
+    abortScope: OutboundAbortScope,
   ): Promise<Uint8Array> {
     const opts: SendOptions =
       typeof timeoutMsOrOpts === 'number' ? { timeoutMs: timeoutMsOrOpts } : timeoutMsOrOpts;
@@ -709,10 +729,10 @@ export class ProtocolRouter {
     }
     const maxReadBytes = resolveSendMaxReadBytes(opts.maxReadBytes, this.maxReadBytes);
     const overallStartedAt = Date.now();
-    const overallDeadline = AbortSignal.timeout(timeoutMs);
+    const overallDeadline = abortScope.deadline(timeoutMs);
     const stopSignal = this.node.stopSignal;
-    const budgetSignal = composeAbortSignals(overallDeadline, opts.signal) ?? overallDeadline;
-    const overallSignal = composeAbortSignals(budgetSignal, stopSignal) ?? budgetSignal;
+    const budgetSignal = abortScope.compose(overallDeadline, opts.signal) ?? overallDeadline;
+    const overallSignal = abortScope.compose(budgetSignal, stopSignal) ?? budgetSignal;
     if (overallSignal.aborted) throw asAbortError(overallSignal.reason);
     await this.requirePeerAccepted(peerIdStr, protocolId, 'outbound', {
       signal: overallSignal,
@@ -937,8 +957,8 @@ export class ProtocolRouter {
         lastErr = new Error('send timeout elapsed');
         throw lastErr;
       }
-      const attemptDeadline = AbortSignal.timeout(remaining);
-      const attemptSignal = composeAbortSignals(attemptDeadline, overallSignal) ?? attemptDeadline;
+      const attemptDeadline = abortScope.deadline(remaining);
+      const attemptSignal = abortScope.compose(attemptDeadline, overallSignal) ?? attemptDeadline;
       if (attemptSignal.aborted) throw asAbortError(attemptSignal.reason);
       // Track which connection (if any) the fast path picked this
       // attempt so the catch block can blacklist it on failure
@@ -1073,7 +1093,7 @@ export class ProtocolRouter {
             if (!peerConnected?.signal.aborted) {
               await this.peerResolver
                 .resolve(peerIdStr, {
-                  signal: composeAbortSignals(attemptSignal, peerConnected?.signal) ?? attemptSignal,
+                  signal: abortScope.compose(attemptSignal, peerConnected?.signal) ?? attemptSignal,
                   perStepTimeoutMs: remaining,
                 })
                 .catch(() => undefined);
@@ -1154,7 +1174,10 @@ export class ProtocolRouter {
         // during the backoff, we throw immediately rather than
         // continuing into another attempt that's already over budget.
         await new Promise<void>((resolve, reject) => {
-          const t = setTimeout(resolve, backoff);
+          const t = setTimeout(() => {
+            overallSignal.removeEventListener('abort', onAbort);
+            resolve();
+          }, backoff);
           const onAbort = (): void => {
             clearTimeout(t);
             if (stopSignal?.aborted) {
@@ -1757,6 +1780,11 @@ export async function readAllWithSignal(
  * Uses Node's `AbortSignal.any` when available (Node 20.3+, current
  * production target). Falls back to a manual composer for older Node
  * — keeps tests / older sandboxes working.
+ *
+ * Not for per-request use against a long-lived signal: when an input is an
+ * `AbortSignal.timeout` signal, Node keeps the result, and its entry on the
+ * other input, alive until that input is collected (#2812). The router's
+ * own send paths use a disposable scope instead.
  */
 export function composeAbortSignals(
   primary: AbortSignal | undefined,
@@ -1791,6 +1819,83 @@ export function composeAbortSignals(
     secondary.addEventListener('abort', forwardSecondary, { once: true });
   }
   return combined.signal;
+}
+
+/** Largest delay `setTimeout` honours; longer ones fire after 1 ms. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+/**
+ * Derives one outbound request's abort signals from longer-lived ones (the
+ * caller's signal and `node.stopSignal`) without leaving anything attached to
+ * them once the request settles.
+ *
+ * Built from plain timers and listeners rather than `AbortSignal.timeout` and
+ * `AbortSignal.any` (#2812). Node keeps a composite that has an
+ * `AbortSignal.timeout` input strongly reachable, and listed as a dependant
+ * of each source, until an abort listener is added and removed or every
+ * source is collected. With `node.stopSignal` as a source that is the life of
+ * the process, and Node's cleanup of every collected composite walks the
+ * source's whole dependant set on the main thread, so per-send composites
+ * made that cost grow with the send rate and the node's uptime.
+ *
+ * `release()` only detaches from signals the scope did not create. The
+ * scope's own signals keep their timing: a deadline still fires when it is
+ * due and aborts every signal composed from it, as `AbortSignal.timeout` did,
+ * so work still bound to them after the request settles (a multi-path loser
+ * still opening its stream) stops at the deadline, not earlier.
+ */
+class OutboundAbortScope {
+  readonly #own = new WeakSet<AbortSignal>();
+  readonly #detachers: Array<() => void> = [];
+
+  /** Aborts with a `TimeoutError` after `ms`, like `AbortSignal.timeout`. */
+  deadline(ms: number): AbortSignal {
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      controller.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+    }, Math.min(Math.max(0, ms), MAX_TIMER_DELAY_MS));
+    timer.unref?.();
+    this.#own.add(controller.signal);
+    return controller.signal;
+  }
+
+  /**
+   * Aborts when either input aborts, with that input's reason. After
+   * `release()` it no longer follows an input the scope did not create.
+   */
+  compose(primary: AbortSignal | undefined, secondary: AbortSignal | undefined): AbortSignal | undefined {
+    if (!primary || !secondary || primary === secondary) return primary ?? secondary;
+    const combined = new AbortController();
+    this.#own.add(combined.signal);
+    if (primary.aborted) {
+      combined.abort(primary.reason);
+      return combined.signal;
+    }
+    if (secondary.aborted) {
+      combined.abort(secondary.reason);
+      return combined.signal;
+    }
+    const inputs = [primary, secondary];
+    const listeners = inputs.map((input) => (): void => {
+      if (!combined.signal.aborted) combined.abort(input.reason);
+      detach();
+    });
+    const detach = (): void => {
+      inputs.forEach((input, i) => input.removeEventListener('abort', listeners[i]!));
+    };
+    inputs.forEach((input, i) => {
+      input.addEventListener('abort', listeners[i]!, { once: true });
+      if (!this.#own.has(input)) {
+        this.#detachers.push(() => input.removeEventListener('abort', listeners[i]!));
+      }
+    });
+    return combined.signal;
+  }
+
+  /** Detaches from every signal the scope did not create. Idempotent. */
+  release(): void {
+    for (const detach of this.#detachers.splice(0)) detach();
+  }
 }
 
 function composeAbortSignalsScoped(

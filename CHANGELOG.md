@@ -2,6 +2,23 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Peer-to-peer sends no longer pile up main-thread work over a node's
+  uptime** (#2812): each send tied its deadline and cancellation signals to
+  the node's lifetime signal with `AbortSignal.any`. Node kept every such link
+  that had a timeout input until the node stopped, and walked all remaining
+  links each time it collected one, on the main thread. A node's pauses
+  therefore grew with its send rate and uptime: a testnet Edge serving RFC-64
+  catalog replays paused for up to 56 s at a time, long enough for its managed
+  Oxigraph to be restarted over missed query deadlines. A send or protocol
+  probe now builds its deadlines and cancellation from plain timers and
+  listeners and detaches from the node's and the caller's signals when it
+  settles; its own deadlines keep their timing. A retried send also removes
+  the abort listener its backoff added.
+
 ## [10.0.19] - 2026-09-25
 
 ### Upgrading from 10.0.18
