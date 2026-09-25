@@ -14,6 +14,17 @@ All notable changes to the DKG V10 node are documented here. The format is based
   safe IRI` (or `datatype must be an absolute safe IRI`), while CONSTRUCT
   returned the same quads. The decoder now accepts a bare `scheme:` IRI and
   checks every other value exactly as before.
+- **The daemon no longer cuts local-agent chat turns off after 5 minutes**:
+  its Hermes, OpenClaw and Prime Agent chat forwards gave up after 300 s,
+  because Node's `fetch` stops waiting for a response then, whatever the
+  forward's own deadline, and the agent bridges answer a non-streaming turn
+  only when it finishes. A longer turn was reported as "bridge unreachable"
+  or as a generic bridge error, a streamed turn that went quiet for 5 minutes
+  ended with a bare `terminated` error, and with a gateway configured the
+  daemon re-sent the already dispatched turn to it. Forwards now wait for
+  their documented 15-minute window (Prime Agent's 60-minute backstop
+  included), and a transport timeout is reported as the structured response
+  timeout without re-sending the turn.
 
 ## [10.0.19] - 2026-09-25
 
