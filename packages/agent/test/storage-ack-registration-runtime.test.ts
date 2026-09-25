@@ -10,6 +10,46 @@ function endpoint(): StorageACKEndpoint & { dispose: ReturnType<typeof vi.fn> } 
 afterEach(() => vi.useRealTimers());
 
 describe('StorageACK registration session', () => {
+  it('blocks teardown after a non-cooperative registration exceeds the drain deadline', async () => {
+    vi.useFakeTimers();
+    const runtime = new StorageACKRegistrationRuntime();
+    const session = runtime.begin();
+    const staleEndpoint = endpoint();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let entered!: () => void;
+    const inside = new Promise<void>((resolve) => { entered = resolve; });
+    const starting = session.start({
+      attempt: async () => {
+        entered();
+        await gate;
+        expect(session.install(staleEndpoint)).toBe(false);
+        return 'registered';
+      },
+      retryDelayMs: 1_000,
+      isStarted: () => true,
+      onError: vi.fn(),
+      onRetryScheduled: vi.fn(),
+    });
+    await inside;
+    let finished = false;
+    const drained = runtime.closeAndDrain().then(
+      () => { finished = true; return undefined; },
+      (error: unknown) => { finished = true; return error; },
+    );
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(finished).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    const drainError = await drained;
+    expect(drainError).toBeInstanceOf(Error);
+    expect((drainError as Error).message).toMatch(/teardown blocked/);
+    expect(runtime.endpoint).toBeNull();
+    release();
+    await starting;
+    expect(staleEndpoint.dispose).toHaveBeenCalledOnce();
+    expect(runtime.endpoint).toBeNull();
+  });
+
   it('fences an old sender and drains its non-cooperative work after a new session begins', async () => {
     const runtime = new StorageACKRegistrationRuntime();
     const firstSession = runtime.begin();
