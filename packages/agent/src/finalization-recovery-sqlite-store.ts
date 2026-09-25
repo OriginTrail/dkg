@@ -25,20 +25,24 @@ import {
   openFinalizationRecoveryDatabase,
 } from './finalization-recovery-sqlite-schema.js';
 import {
-  displaceStableFailuresWithinTransaction,
+  admitByParkingStableFailuresWithinTransaction,
+  type FinalizationRecoveryDisplacement,
+} from './finalization-recovery-sqlite-displacement.js';
+import {
   hasFinalizationRecoveryCapacity,
   hasFinalizationRecoveryDeferredCapacity,
   pruneFinalizationRecoveryRowsWithinTransaction,
   readFinalizationRecoveryCapacity,
   readFinalizationRecoveryDeferredCapacity,
   resolveFinalizationRecoveryRetentionPolicy,
-  type FinalizationRecoveryDisplacement,
   type FinalizationRecoveryRetentionPolicy,
   type SqliteFinalizationRecoveryStoreOptions,
 } from './finalization-recovery-sqlite-policy.js';
 
 export type {
   FinalizationRecoveryDisplacement,
+} from './finalization-recovery-sqlite-displacement.js';
+export type {
   SqliteFinalizationRecoveryStoreOptions,
 } from './finalization-recovery-sqlite-policy.js';
 
@@ -294,9 +298,14 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
       } else {
         let admitted = false;
         this.transaction(() => {
-          const freed = this.displaceForWithinTransaction(input, now);
-          if (!freed) return;
-          displaced = freed;
+          const parked = admitByParkingStableFailuresWithinTransaction(
+            this.database,
+            this.#policy,
+            input,
+            now,
+          );
+          if (!parked) return;
+          displaced = parked;
           this.insertLiveWithinTransaction(input, digest, now);
           admitted = true;
         });
@@ -319,41 +328,6 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     });
   }
 
-  /**
-   * Make room for `input` by displacing entries that keep failing the same
-   * way, or leave the inbox unchanged when that would not make room.
-   */
-  private displaceForWithinTransaction(
-    input: FinalizationRecoveryReceiveInput,
-    now: number,
-  ): FinalizationRecoveryDisplacement[] | undefined {
-    this.database.exec('SAVEPOINT finalization_displacement');
-    try {
-      const displaced = displaceStableFailuresWithinTransaction(
-        this.database,
-        this.#policy,
-        input,
-        now,
-      );
-      if (
-        displaced.length > 0
-        && hasFinalizationRecoveryCapacity(this.database, this.#policy, input)
-      ) {
-        this.database.exec('RELEASE finalization_displacement');
-        return displaced;
-      }
-      this.database.exec('ROLLBACK TO finalization_displacement');
-      this.database.exec('RELEASE finalization_displacement');
-      return undefined;
-    } catch (error) {
-      try {
-        this.database.exec('ROLLBACK TO finalization_displacement');
-        this.database.exec('RELEASE finalization_displacement');
-      } catch { /* the enclosing transaction rolls back */ }
-      throw error;
-    }
-  }
-
   private notifyDisplaced(displaced: readonly FinalizationRecoveryDisplacement[]): void {
     if (!this.#onDisplaced) return;
     for (const displacement of displaced) {
@@ -369,7 +343,6 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     return this.mutate(() => {
       if (this.#closed) return 0;
       let promoted = 0;
-      const displaced: FinalizationRecoveryDisplacement[] = [];
       this.transaction(() => {
         const now = this.#policy.now();
         this.pruneWithinTransaction(now);
@@ -389,10 +362,10 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
             ).run(row.key);
             continue;
           }
+          // Parked entries, including ones parked to make room, only take
+          // free capacity: they never displace another entry.
           if (!hasFinalizationRecoveryCapacity(this.database, this.#policy, input)) {
-            const freed = this.displaceForWithinTransaction(input, now);
-            if (!freed) continue;
-            displaced.push(...freed);
+            continue;
           }
           this.insertLiveWithinTransaction(
             input,
@@ -407,7 +380,6 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
           promoted += 1;
         }
       });
-      this.notifyDisplaced(displaced);
       return promoted;
     });
   }

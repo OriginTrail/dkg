@@ -2015,10 +2015,9 @@ export class DKGAgentBase {
       : await openSqliteFinalizationRecoveryStore(this.config.dataDir, {
           onDisplaced: (displaced) => this.log.warn(
             createOperationContext('system'),
-            `Finalization recovery released ${displaced.ual} after `
+            `Finalization recovery parked ${displaced.ual} after `
               + `${displaced.failureStreak} consecutive ${displaced.failureSignature} `
-              + `failures to admit ${displaced.admittedUal}; chain reconciliation `
-              + 'promotes it instead',
+              + `failures to admit ${displaced.admittedUal}; it is retried when the inbox has room`,
           ),
         });
     this.finalizationRuntime.attachRecoveryStore(store);

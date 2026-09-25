@@ -1,6 +1,9 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type {
-  FinalizationRecoveryReceiveInput,
+import type { FinalizationRecoveryDisplacement } from './finalization-recovery-sqlite-displacement.js';
+import {
+  FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD,
+  type FinalizationRecoveryFailureCode,
+  type FinalizationRecoveryReceiveInput,
 } from './finalization-recovery-store.js';
 
 const DEFAULT_MAX_ENTRIES = 128;
@@ -16,26 +19,10 @@ const DEFAULT_RAW_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_TERMINAL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_TERMINAL_ENTRIES = 128;
 const DEFAULT_MAX_TERMINAL_BYTES = 16 * 1024 * 1024;
-// Matches FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD: the streak at which a
-// failure counts as stable and its retries slow to the stable-failure cadence.
-const DEFAULT_DISPLACE_AFTER_FAILURE_STREAK = 3;
 const DEFAULT_DISPLACE_MIN_AGE_MS = 5 * 60 * 1000;
-// A local copy that cannot be prepared for the finalization. The chain-promote
-// sweep and durable sync repair such an asset without the inbox entry.
-const DEFAULT_DISPLACEABLE_FAILURE_SIGNATURES = Object.freeze(['workspace-unavailable']);
-const MAX_DISPLACEMENTS_PER_ADMISSION = 8;
-
-/** A live entry rejected to make room for another finalization. */
-export interface FinalizationRecoveryDisplacement {
-  readonly key: string;
-  readonly ual: string;
-  readonly contextGraphId: string;
-  readonly failureSignature: string;
-  readonly failureStreak: number;
-  readonly lastError: string | null;
-  readonly admittedKey: string;
-  readonly admittedUal: string;
-}
+// The local copy could not be prepared for the finalization.
+const DEFAULT_DISPLACEABLE_FAILURE_SIGNATURES: readonly FinalizationRecoveryFailureCode[] =
+  Object.freeze(['workspace-unavailable']);
 
 export interface SqliteFinalizationRecoveryStoreOptions {
   maxEntries?: number;
@@ -55,9 +42,9 @@ export interface SqliteFinalizationRecoveryStoreOptions {
   displaceAfterFailureStreak?: number;
   /** Minimum age of a live entry before it may be displaced. */
   displaceMinAgeMs?: number;
-  /** Failure signatures whose entries may be displaced. */
-  displaceableFailureSignatures?: readonly string[];
-  /** Called after a live entry has been displaced to admit another. */
+  /** Failure signatures whose entries may be displaced; empty disables displacement. */
+  displaceableFailureSignatures?: readonly FinalizationRecoveryFailureCode[];
+  /** Called after a live entry has been parked to admit a new finalization. */
   onDisplaced?: (displacement: FinalizationRecoveryDisplacement) => void;
   now?: () => number;
 }
@@ -78,7 +65,7 @@ export interface FinalizationRecoveryRetentionPolicy {
   maxTerminalBytes: number;
   displaceAfterFailureStreak: number;
   displaceMinAgeMs: number;
-  displaceableFailureSignatures: readonly string[];
+  displaceableFailureSignatures: readonly FinalizationRecoveryFailureCode[];
   now: () => number;
 }
 
@@ -136,7 +123,7 @@ export function resolveFinalizationRecoveryRetentionPolicy(
     ),
     displaceAfterFailureStreak: positiveInteger(
       options.displaceAfterFailureStreak,
-      DEFAULT_DISPLACE_AFTER_FAILURE_STREAK,
+      FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD,
     ),
     displaceMinAgeMs: Number.isSafeInteger(options.displaceMinAgeMs)
       && (options.displaceMinAgeMs ?? -1) >= 0
@@ -147,101 +134,6 @@ export function resolveFinalizationRecoveryRetentionPolicy(
     ]),
     now: options.now ?? Date.now,
   };
-}
-
-/**
- * Free live capacity for `input` by rejecting entries that keep failing the
- * same way.
- *
- * A live entry whose local copy cannot be prepared keeps its slot for the
- * whole retry window, and its retries keep it clear of the raw TTL. Enough of
- * them fill a publisher's or a Context Graph's quota, and every later
- * finalization from that publisher is parked behind them. When `input` finds
- * no capacity, this rejects the oldest RECEIVED entry that has failed with a
- * displaceable signature at least `displaceAfterFailureStreak` times in a row
- * and is at least `displaceMinAgeMs` old, preferring one from the same peer,
- * then from the same Context Graph. The asset is left to chain reconciliation.
- * Verified, reorged and still-retrying entries are never displaced, and every
- * cap still applies. Returns the displaced entries in order; the caller checks
- * capacity again.
- */
-export function displaceStableFailuresWithinTransaction(
-  database: DatabaseSync,
-  policy: FinalizationRecoveryRetentionPolicy,
-  input: FinalizationRecoveryReceiveInput,
-  now: number,
-  replacingKey?: string,
-): FinalizationRecoveryDisplacement[] {
-  const displaced: FinalizationRecoveryDisplacement[] = [];
-  const signatures = policy.displaceableFailureSignatures;
-  if (signatures.length === 0) return displaced;
-  const placeholders = signatures.map(() => '?').join(', ');
-  const candidates = (scope: string) => database.prepare(`
-    SELECT key, ual, context_graph_id, failure_signature, failure_streak, last_error
-    FROM finalization_inbox_v1
-    WHERE state = 'RECEIVED'
-      AND publisher_upgrade_pending = 0
-      AND failure_streak >= ?
-      AND failure_signature IN (${placeholders})
-      AND created_at <= ?
-      AND key != ?
-      ${scope}
-    ORDER BY (source_peer_id IS ?) DESC, (context_graph_id = ?) DESC, created_at ASC, key ASC
-    LIMIT 1
-  `);
-  const reject = database.prepare(`
-    UPDATE finalization_inbox_v1
-    SET state = 'REJECTED',
-        publisher_upgrade_pending = 0,
-        failure_signature = NULL,
-        failure_streak = 0,
-        last_error = ?,
-        next_attempt_at = NULL,
-        updated_at = ?
-    WHERE key = ? AND state = 'RECEIVED'
-  `);
-  while (displaced.length < MAX_DISPLACEMENTS_PER_ADMISSION) {
-    const shortfall = finalizationRecoveryCapacityShortfall(database, policy, input, replacingKey);
-    if (shortfall === undefined) break;
-    // Only an entry that counts against the exhausted limit frees it.
-    const scoped = shortfall === 'peer'
-      ? { clause: 'AND source_peer_id = ?', values: [input.sourcePeerId ?? null] }
-      : shortfall === 'context-graph'
-        ? { clause: 'AND context_graph_id = ?', values: [input.contextGraphId] }
-        : { clause: '', values: [] };
-    const row = candidates(scoped.clause).get(
-      policy.displaceAfterFailureStreak,
-      ...signatures,
-      now - policy.displaceMinAgeMs,
-      input.key,
-      ...scoped.values,
-      input.sourcePeerId ?? null,
-      input.contextGraphId,
-    ) as {
-      key: string;
-      ual: string;
-      context_graph_id: string;
-      failure_signature: string;
-      failure_streak: number;
-      last_error: string | null;
-    } | undefined;
-    if (!row) break;
-    const reason = `displaced to admit ${input.ual} after ${row.failure_streak} `
-      + `consecutive ${row.failure_signature} failures`
-      + (row.last_error ? `: ${row.last_error}` : '');
-    if (reject.run(reason, now, row.key).changes === 0) break;
-    displaced.push({
-      key: row.key,
-      ual: row.ual,
-      contextGraphId: row.context_graph_id,
-      failureSignature: row.failure_signature,
-      failureStreak: Number(row.failure_streak),
-      lastError: row.last_error,
-      admittedKey: input.key,
-      admittedUal: input.ual,
-    });
-  }
-  return displaced;
 }
 
 export function pruneFinalizationRecoveryRowsWithinTransaction(
@@ -284,7 +176,9 @@ export function pruneFinalizationRecoveryRowsWithinTransaction(
 export function hasFinalizationRecoveryDeferredCapacity(
   database: DatabaseSync,
   policy: FinalizationRecoveryRetentionPolicy,
-  input: FinalizationRecoveryReceiveInput,
+  input: Pick<FinalizationRecoveryReceiveInput, 'contextGraphId' | 'sourcePeerId'> & {
+    readonly rawMessage: { readonly byteLength: number };
+  },
 ): boolean {
   const total = database.prepare(`
     SELECT COUNT(*) AS count, COALESCE(SUM(length(raw_envelope)), 0) AS bytes
@@ -326,9 +220,10 @@ export function readFinalizationRecoveryDeferredCapacity(
   };
 }
 
-type FinalizationRecoveryCapacityShortfall = 'total' | 'context-graph' | 'peer';
+export type FinalizationRecoveryCapacityShortfall = 'total' | 'context-graph' | 'peer';
 
-function finalizationRecoveryCapacityShortfall(
+/** The first live-inbox limit `input` would exceed, if any. */
+export function finalizationRecoveryCapacityShortfall(
   database: DatabaseSync,
   policy: FinalizationRecoveryRetentionPolicy,
   input: FinalizationRecoveryReceiveInput,
