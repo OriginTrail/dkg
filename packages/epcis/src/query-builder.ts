@@ -1,4 +1,11 @@
-import { EPCIS_DECLARED_EVENT_TYPE, EPCIS_TYPE_PREFIX, resolveEpcisQueryEventType } from './epcis-vocabulary.js';
+import {
+  EPCIS_DECLARED_EVENT_TYPE,
+  EPCIS_CURRENT_PREFIX,
+  EPCIS_NAMESPACES,
+  EPCIS_STANDARD_EVENT_TYPES,
+  EPCIS_TYPE_PREFIX,
+  resolveEpcisQueryEventType,
+} from './epcis-vocabulary.js';
 import {
   contextGraphDataUri,
   contextGraphMetaUri,
@@ -21,6 +28,7 @@ export class EpcisQueryInputError extends Error {
 
 const PREFIXES = `
 PREFIX epcis: <${EPCIS_TYPE_PREFIX}>
+PREFIX epcisCurrent: <${EPCIS_CURRENT_PREFIX}>
 PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
 PREFIX dkg: <http://dkg.io/ontology/>
 `;
@@ -57,6 +65,13 @@ export function normalizeBizStep(value: string): string {
 
 function extensionLocalNameFilter(predicateVariable: string, localName: string): string {
   return `FILTER(REPLACE(STR(?${predicateVariable}), "^.*[/#]", "") = "${localName}")`;
+}
+
+/** VALUES keeps vocabulary alternatives out of Blazegraph's nested UNION path. */
+function epcisPropertyPattern(property: string, object: string, purpose = 'value'): string {
+  const predicate = `?_epcis_${property}_${purpose}`;
+  return `{ VALUES ${predicate} { epcis:${property} epcisCurrent:${property} }
+      ?event ${predicate} ${object} . }`;
 }
 
 /**
@@ -113,15 +128,34 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
     { field: 'eventTimeZoneOffset', required: externalEventType },
   ] as const;
   for (const { field, required } of timingFields) {
-    const binding = `?event epcis:${field} ?${field} .`;
+    const binding = epcisPropertyPattern(field, `?${field}`);
     if (required) sharedRequiredPatterns.push(binding);
-    else optionalClauses.push(`OPTIONAL { ${binding} }`);
+    else optionalClauses.push(`OPTIONAL ${binding}`);
   }
 
-  // Declared captures include every accepted namespace. Only unmarked legacy
-  // RDF retains the GS1 namespace boundary.
+  // Declared captures include every accepted namespace. A document's
+  // `eventList` is the positive discriminator for unmarked JSON-LD events;
+  // finalized standard direct-RDF event roots are identified by publication
+  // metadata. Keep this filter inside each GRAPH block so the event-list
+  // lookup uses the same named graph as the event row.
+  let noFilterEventPattern: string | undefined;
+  let privateNoFilterEventPattern: string | undefined;
   if (!eventTypeIri) {
-    filterClauses.push(`FILTER(BOUND(?_declaredEventType) || STRSTARTS(STR(?eventType), "${EPCIS_TYPE_PREFIX}"))`);
+    const standardTypes = EPCIS_NAMESPACES
+      .flatMap((prefix) => EPCIS_STANDARD_EVENT_TYPES.map((type) => sparqlIri(`${prefix}${type}`)))
+      .join(', ');
+    noFilterEventPattern = `FILTER(BOUND(?_declaredEventType)
+      || EXISTS { ?_eventList (epcis:eventList|epcisCurrent:eventList) ?event }
+      || (?eventType IN (${standardTypes})
+        && EXISTS { GRAPH <${metaGraph}> { ?_rootPublication dkg:rootEntity ?event . } }))`;
+    privateNoFilterEventPattern = partition === 'swm'
+      ? `FILTER(BOUND(?_declaredEventType)
+        || EXISTS { ?_eventList (epcis:eventList|epcisCurrent:eventList) ?event }
+        || (?eventType IN (${standardTypes})
+          && (EXISTS { GRAPH <${metaGraph}> { ?_rootPublication dkg:rootEntity ?event . } }
+            || EXISTS { VALUES ?_privateEventEvidencePred { epcis:eventTime epcisCurrent:eventTime }
+              ?event ?_privateEventEvidencePred ?_privateEventEvidence . })))`
+      : noFilterEventPattern;
   }
 
   // eventID filter — matches the RDF subject (the event's @id / rootEntity)
@@ -131,7 +165,10 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
 
   // eventType filter — narrow to a specific EPCIS event type
   if (eventTypeIri) {
-    filterClauses.push(`FILTER(?eventType = ${sparqlIri(eventTypeIri)})`);
+    const eventTypeIris = eventType?.kind === 'standard'
+      ? EPCIS_NAMESPACES.map((prefix) => `${prefix}${eventType.name}`)
+      : [eventTypeIri];
+    filterClauses.push(`FILTER(?eventType IN (${eventTypeIris.map(sparqlIri).join(', ')}))`);
   }
 
   // EPC filter — match epcList OR childEPCs per Section 8.2.7.1.
@@ -142,97 +179,101 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   // the two predicate variables never collide when both are set.
   if (params.epc) {
     const epcValue = escapeSparql(params.epc);
-    sharedRequiredPatterns.push(`{ VALUES ?_epcPred { epcis:epcList epcis:childEPCs }
-      ?event ?_epcPred "${epcValue}" . }`);
+    sharedRequiredPatterns.push(`{ VALUES ?_epcPred { epcis:epcList epcisCurrent:epcList epcis:childEPCs epcisCurrent:childEPCs }
+      ?event ?_epcPred ?_epcValue . FILTER(STR(?_epcValue) = "${epcValue}") }`);
   }
 
   // anyEPC — match across all 5 EPC fields (same VALUES approach,
   // own variable name to avoid collision with the epc filter above)
   if (params.anyEPC) {
     const epcValue = escapeSparql(params.anyEPC);
-    sharedRequiredPatterns.push(`{ VALUES ?_anyEpcPred { epcis:epcList epcis:childEPCs epcis:parentID epcis:inputEPCList epcis:outputEPCList }
-      ?event ?_anyEpcPred "${epcValue}" . }`);
+    sharedRequiredPatterns.push(`{ VALUES ?_anyEpcPred { epcis:epcList epcisCurrent:epcList epcis:childEPCs epcisCurrent:childEPCs epcis:parentID epcisCurrent:parentID epcis:inputEPCList epcisCurrent:inputEPCList epcis:outputEPCList epcisCurrent:outputEPCList }
+      ?event ?_anyEpcPred ?_anyEpcValue . FILTER(STR(?_anyEpcValue) = "${epcValue}") }`);
   }
-  optionalClauses.push('OPTIONAL { ?event epcis:epcList ?epc . }');
+  optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('epcList', '?epc')}`);
 
   // Parent ID filter (AggregationEvent)
   if (params.parentID) {
-    sharedRequiredPatterns.push(`?event epcis:parentID "${escapeSparql(params.parentID)}" .`);
+    sharedRequiredPatterns.push(epcisPropertyPattern('parentID', '?_parentIDMatch', 'filter'));
+    filterClauses.push(`FILTER(STR(?_parentIDMatch) = "${escapeSparql(params.parentID)}")`);
   }
 
   // Child EPCs filter (AggregationEvent)
   if (params.childEPC) {
-    sharedRequiredPatterns.push(`?event epcis:childEPCs "${escapeSparql(params.childEPC)}" .`);
+    sharedRequiredPatterns.push(epcisPropertyPattern('childEPCs', '?_childEPCMatch', 'filter'));
+    filterClauses.push(`FILTER(STR(?_childEPCMatch) = "${escapeSparql(params.childEPC)}")`);
   }
 
   // Input EPCs filter (TransformationEvent)
   if (params.inputEPC) {
-    sharedRequiredPatterns.push(`?event epcis:inputEPCList "${escapeSparql(params.inputEPC)}" .`);
+    sharedRequiredPatterns.push(epcisPropertyPattern('inputEPCList', '?_inputEPCMatch', 'filter'));
+    filterClauses.push(`FILTER(STR(?_inputEPCMatch) = "${escapeSparql(params.inputEPC)}")`);
   }
 
   // Output EPCs filter (TransformationEvent)
   if (params.outputEPC) {
-    sharedRequiredPatterns.push(`?event epcis:outputEPCList "${escapeSparql(params.outputEPC)}" .`);
+    sharedRequiredPatterns.push(epcisPropertyPattern('outputEPCList', '?_outputEPCMatch', 'filter'));
+    filterClauses.push(`FILTER(STR(?_outputEPCMatch) = "${escapeSparql(params.outputEPC)}")`);
   }
 
   // BizStep filter
   if (params.bizStep) {
     const bizStepUri = normalizeBizStep(params.bizStep);
-    sharedRequiredPatterns.push('?event epcis:bizStep ?bizStep .');
+    sharedRequiredPatterns.push(epcisPropertyPattern('bizStep', '?bizStep'));
     filterClauses.push(`FILTER(STR(?bizStep) = "${escapeSparql(bizStepUri)}")`);
   } else {
-    optionalClauses.push('OPTIONAL { ?event epcis:bizStep ?bizStep . }');
+    optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('bizStep', '?bizStep')}`);
   }
 
   // BizLocation filter — JSON-LD stores bizLocation as a URI node, match with angle brackets.
   // Also bind ?bizLocation so it appears in SELECT results for toEpcisEvent.
   if (params.bizLocation) {
-    sharedRequiredPatterns.push(`?event epcis:bizLocation <${escapeSparql(params.bizLocation)}> .`);
-    optionalClauses.push('OPTIONAL { ?event epcis:bizLocation ?bizLocation . }');
+    sharedRequiredPatterns.push(epcisPropertyPattern('bizLocation', `<${escapeSparql(params.bizLocation)}>`));
+    optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('bizLocation', '?bizLocation')}`);
   } else {
-    optionalClauses.push('OPTIONAL { ?event epcis:bizLocation ?bizLocation . }');
+    optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('bizLocation', '?bizLocation')}`);
   }
 
   // Time range filters use the eventTime binding established above.
   if (params.from && params.to) {
     filterClauses.push(
-      `FILTER(xsd:dateTime(?eventTime) >= xsd:dateTime("${escapeSparql(params.from)}") && xsd:dateTime(?eventTime) < xsd:dateTime("${escapeSparql(params.to)}"))`,
+      `FILTER(xsd:dateTime(STR(?eventTime)) >= xsd:dateTime("${escapeSparql(params.from)}") && xsd:dateTime(STR(?eventTime)) < xsd:dateTime("${escapeSparql(params.to)}"))`,
     );
   } else if (params.from) {
-    filterClauses.push(`FILTER(xsd:dateTime(?eventTime) >= xsd:dateTime("${escapeSparql(params.from)}"))`);
+    filterClauses.push(`FILTER(xsd:dateTime(STR(?eventTime)) >= xsd:dateTime("${escapeSparql(params.from)}"))`);
   } else if (params.to) {
-    filterClauses.push(`FILTER(xsd:dateTime(?eventTime) < xsd:dateTime("${escapeSparql(params.to)}"))`);
+    filterClauses.push(`FILTER(xsd:dateTime(STR(?eventTime)) < xsd:dateTime("${escapeSparql(params.to)}"))`);
   }
 
   // Action filter — required when filtered, OPTIONAL otherwise
   if (params.action) {
-    sharedRequiredPatterns.push('?event epcis:action ?action .');
+    sharedRequiredPatterns.push(epcisPropertyPattern('action', '?action'));
     filterClauses.push(`FILTER(STR(?action) = "${escapeSparql(params.action)}")`);
   } else {
-    optionalClauses.push('OPTIONAL { ?event epcis:action ?action . }');
+    optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('action', '?action')}`);
   }
 
   // Disposition filter — required when filtered, OPTIONAL otherwise
   if (params.disposition) {
     const dispUri = normalizeGs1Vocabulary('Disp', params.disposition);
-    sharedRequiredPatterns.push('?event epcis:disposition ?disposition .');
+    sharedRequiredPatterns.push(epcisPropertyPattern('disposition', '?disposition'));
     filterClauses.push(`FILTER(STR(?disposition) = "${escapeSparql(dispUri)}")`);
   } else {
-    optionalClauses.push('OPTIONAL { ?event epcis:disposition ?disposition . }');
+    optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('disposition', '?disposition')}`);
   }
 
   // ReadPoint filter — JSON-LD stores readPoint as a URI node, match with angle brackets.
   // Also bind ?readPoint so it appears in SELECT results for toEpcisEvent.
   if (params.readPoint) {
-    sharedRequiredPatterns.push(`?event epcis:readPoint <${escapeSparql(params.readPoint)}> .`);
-    optionalClauses.push('OPTIONAL { ?event epcis:readPoint ?readPoint . }');
+    sharedRequiredPatterns.push(epcisPropertyPattern('readPoint', `<${escapeSparql(params.readPoint)}>`));
+    optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('readPoint', '?readPoint')}`);
   } else {
-    optionalClauses.push('OPTIONAL { ?event epcis:readPoint ?readPoint . }');
+    optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('readPoint', '?readPoint')}`);
   }
-  optionalClauses.push('OPTIONAL { ?event epcis:parentID ?parentID . }');
-  optionalClauses.push('OPTIONAL { ?event epcis:childEPCs ?childEPCs . }');
-  optionalClauses.push('OPTIONAL { ?event epcis:inputEPCList ?inputEPCList . }');
-  optionalClauses.push('OPTIONAL { ?event epcis:outputEPCList ?outputEPCList . }');
+  optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('parentID', '?parentID')}`);
+  optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('childEPCs', '?childEPCs')}`);
+  optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('inputEPCList', '?inputEPCList')}`);
+  optionalClauses.push(`OPTIONAL ${epcisPropertyPattern('outputEPCList', '?outputEPCList')}`);
 
   // Extension identifiers carried as JSON-LD triples. Match by predicate local
   // name so project-specific ontologies stay outside the generic DKG EPCIS API.
@@ -260,23 +301,31 @@ export function buildEpcisQuery(params: EpcisQueryParams, contextGraphId: string
   if (!Number.isSafeInteger(offset) || offset > 10_000) {
     throw new EpcisQueryInputError('offset must be a safe integer no greater than 10000');
   }
-  const graphBody = [
+  const graphBody = (eventPattern: string | undefined) => [
     ...sharedRequiredPatterns,
+    ...(eventPattern ? [eventPattern] : []),
     ...optionalClauses,
   ].join('\n      ');
+  const publicGraphBody = graphBody(noFilterEventPattern);
+  // Private SWM payloads are readable before finalization and can contain
+  // legacy standard event roots without a finalized publication metadata
+  // record. The private anchor on the public graph already gates this branch;
+  // require an EPCIS event-time predicate as the additional positive shape
+  // evidence so document and vocabulary resources remain excluded.
+  const privateGraphBody = graphBody(privateNoFilterEventPattern);
 
   // sparql-scan-allow: R3 -- Exact CG graphs, LIMIT <=1000 and checked OFFSET <=10000 bound each request.
   return `${PREFIXES}
 SELECT ?event ?eventType ?eventTime ?eventTimeZoneOffset ?bizStep ?bizLocation ?disposition ?readPoint ?action ?parentID ?configurationId ?shipmentId ?ual
-  (GROUP_CONCAT(DISTINCT ?epc; SEPARATOR=", ") AS ?epcList)
-  (GROUP_CONCAT(DISTINCT ?childEPCs; SEPARATOR=", ") AS ?childEPCList)
-  (GROUP_CONCAT(DISTINCT ?inputEPCList; SEPARATOR=", ") AS ?inputEPCs)
-  (GROUP_CONCAT(DISTINCT ?outputEPCList; SEPARATOR=", ") AS ?outputEPCs)
+  (GROUP_CONCAT(DISTINCT STR(?epc); SEPARATOR=", ") AS ?epcList)
+  (GROUP_CONCAT(DISTINCT STR(?childEPCs); SEPARATOR=", ") AS ?childEPCList)
+  (GROUP_CONCAT(DISTINCT STR(?inputEPCList); SEPARATOR=", ") AS ?inputEPCs)
+  (GROUP_CONCAT(DISTINCT STR(?outputEPCList); SEPARATOR=", ") AS ?outputEPCs)
 WHERE {
   {
     GRAPH <${publicGraph}> {
       ?event a ?eventType .
-      ${graphBody}
+      ${publicGraphBody}
     }
   }
   union
@@ -286,7 +335,7 @@ WHERE {
     }
     GRAPH <${privateGraph}> {
       ?event a ?eventType .
-      ${graphBody}
+      ${privateGraphBody}
     }
   }
   ${filterClauses.join('\n  ')}
@@ -299,7 +348,7 @@ WHERE {
   }
 }
 GROUP BY ?event ?eventType ?eventTime ?eventTimeZoneOffset ?bizStep ?bizLocation ?disposition ?readPoint ?action ?parentID ?configurationId ?shipmentId ?ual
-ORDER BY DESC(?eventTime) ?event
+ORDER BY DESC(xsd:dateTime(STR(?eventTime))) ?event
 LIMIT ${limit}
 OFFSET ${offset}`;
 }
