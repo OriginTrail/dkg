@@ -26,7 +26,8 @@ import {
   writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import type { OxigraphBinaryCatalog } from '../src/daemon/oxigraph-binary.js';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { oxigraphStoreArgs } from '../src/daemon/oxigraph-store-launch.js';
 import { stopOrphanedOxigraph, type OrphanedOxigraphIo } from '../src/daemon/oxigraph-orphan.js';
@@ -71,7 +72,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
       ...record,
     }));
   };
-  const run = async (io: OrphanedOxigraphIo, extra: { knownBinaryDirs?: string[] } = {}) => {
+  const run = async (io: OrphanedOxigraphIo, extra: { binaries?: OxigraphBinaryCatalog } = {}) => {
     const lines: string[] = [];
     const signalled = await stopOrphanedOxigraph({
       binaryPath, location, log: (line) => lines.push(line), io, ...extra,
@@ -112,7 +113,9 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
         4100: { ppid: 1, argv: serve(location, binary), holdsLock: true },
       });
 
-      const { signalled } = await run(io, { knownBinaryDirs: ['/usr/local/bin'] });
+      const { signalled } = await run(io, {
+        binaries: { paths: [binaryPath], dirs: [dirname(binaryPath), '/usr/local/bin'] },
+      });
       expect(signalled).toEqual([4100]);
       expect(signals).toEqual([[4100, 'SIGTERM']]);
     });
@@ -139,7 +142,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
       );
     });
 
-    it('falls back to the PID 1 rule for an unreadable or unversioned owner record', async () => {
+    it('falls back to the PID 1 rule for a malformed or unversioned owner record', async () => {
       for (const content of ['{"daemon": 4000', JSON.stringify({ daemon: identity(4000), launcher: identity(4099), binaryPath })]) {
         await writeFile(join(location, OXIGRAPH_OWNER_RECORD), content);
         const { signals, io } = processTable({
@@ -150,9 +153,123 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
         const { signalled, log } = await run(io);
         expect(signalled).toEqual([]);
         expect(signals).toEqual([]);
-        expect(log).toContain('ignoring an unreadable owner record');
+        expect(log).toContain('ignoring a malformed owner record');
         expect(log).toContain('there is no owner record');
       }
+    });
+
+    it('leaves every holder running when the owner record exists but cannot be read', async () => {
+      // A directory where the record belongs: reading it fails with EISDIR,
+      // whoever runs the test.
+      await mkdir(join(location, OXIGRAPH_OWNER_RECORD));
+      const { table, signals, io } = processTable({
+        // Without a record, the PID 1 rule would stop this holder.
+        4100: { ppid: 1, argv: serve(location), holdsLock: true },
+      });
+
+      const { signalled, log } = await run(io);
+      expect(signalled).toEqual([]);
+      expect(signals).toEqual([]);
+      expect(table.get(4100)!.alive).toBe(true);
+      expect(log).toMatch(/Leaving it running: its owner could not be determined \(the owner record could not be read: .*EISDIR/);
+    });
+  });
+
+  describe('when a process cannot be read (a ps timeout, a /proc error)', () => {
+    it('does not take a recorded daemon it cannot read for one that exited', async () => {
+      await writeRecord();
+      const { table, signals, io } = processTable({
+        4000: { ppid: 1, argv: daemonWorker, holdsLock: false, unreadable: true },
+        4099: { ppid: 4000, argv: directWatchdog(4000), holdsLock: false },
+        4100: { ppid: 1, argv: serve(location), holdsLock: true },
+      });
+
+      const { signalled, log } = await run(io);
+      expect(signalled).toEqual([]);
+      expect(signals).toEqual([]);
+      expect(table.get(4100)!.alive).toBe(true);
+      expect(log).toContain(
+        'its owner could not be determined (could not tell whether the recorded daemon pid 4000 ' +
+          'is still running: ps timed out)',
+      );
+    });
+
+    it('still stops the recorded Oxigraph when one recorded owner has confirmedly exited', async () => {
+      await writeRecord();
+      const { signals, io } = processTable({
+        4000: { ppid: 1, argv: daemonWorker, holdsLock: false, unreadable: true },
+        4100: { ppid: 1, argv: serve(location), holdsLock: true },
+      });
+
+      const { signalled, log } = await run(io);
+      expect(signalled).toEqual([4100]);
+      expect(signals).toEqual([[4100, 'SIGTERM']]);
+      expect(log).toContain('stopping orphaned Oxigraph pid 4100 (its recorded launcher pid 4099 has exited)');
+    });
+
+    it('does not take a parent it cannot read for one that exited', async () => {
+      const { table, signals, io } = processTable({
+        4099: { ppid: 1, argv: daemonWorker, holdsLock: false, unreadable: true },
+        4100: { ppid: 4099, argv: serve(location), holdsLock: true },
+      });
+
+      const { signalled, log } = await run(io);
+      expect(signalled).toEqual([]);
+      expect(signals).toEqual([]);
+      expect(table.get(4100)!.alive).toBe(true);
+      expect(log).toContain(
+        'Leaving it running: could not tell whether its parent pid 4099 is still running (ps timed out).',
+      );
+    });
+
+    it('leaves a lock holder it cannot inspect running', async () => {
+      const { table, signals, io } = processTable({
+        4100: { ppid: 1, argv: serve(location), holdsLock: true, unreadable: true },
+      });
+
+      const { signalled, log } = await run(io);
+      expect(signalled).toEqual([]);
+      expect(signals).toEqual([]);
+      expect(table.get(4100)!.alive).toBe(true);
+      expect(log).toContain('is held by pid 4100, which could not be inspected (ps timed out). Leaving it running.');
+    });
+
+    it('does not signal an orphan whose identity cannot be confirmed right before SIGTERM', async () => {
+      const { table, signals, io } = processTable({
+        4100: { ppid: 1, argv: serve(location), holdsLock: true },
+      }, {
+        // Readable when judged, unreadable when re-checked before the signal.
+        onInspect: (pid, processes) => {
+          if (pid === 4100) processes.get(4100)!.unreadable = true;
+        },
+      });
+
+      const { signalled, log } = await run(io);
+      expect(signalled).toEqual([]);
+      expect(signals).toEqual([]);
+      expect(table.get(4100)!.alive).toBe(true);
+      expect(log).toContain('could not confirm that pid 4100 is still the orphaned Oxigraph');
+      expect(log).not.toContain('stopping orphaned Oxigraph pid 4100');
+    });
+
+    it('does not escalate to SIGKILL while a signalled orphan cannot be read', async () => {
+      const { table, signals, io } = processTable({
+        4100: { ppid: 1, argv: serve(location), holdsLock: true, ignoresTerm: true },
+      });
+      const signal = io.signal;
+      io.signal = (pid, name) => {
+        signal(pid, name);
+        table.get(4100)!.unreadable = true;
+      };
+
+      const lines: string[] = [];
+      await stopOrphanedOxigraph({
+        binaryPath, location, log: (line) => lines.push(line), io,
+        stopGraceMs: 500, pollIntervalMs: 100, timeoutMs: 2_000,
+      });
+      expect(signals).toEqual([[4100, 'SIGTERM']]);
+      expect(lines.join('\n')).toMatch(/orphaned Oxigraph pid 4100 still holds .* after 2000ms; starting anyway/);
+      expect(lines.join('\n')).not.toMatch(/released by the orphaned Oxigraph/);
     });
   });
 
@@ -314,35 +431,69 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
       binaryPath,
     };
 
-    it('derives ownership from the record and which recorded processes still run', () => {
-      expect(deriveOwnership({ kind: 'absent' }, { daemon: false, launcher: false })).toEqual({ kind: 'unrecorded' });
-      expect(deriveOwnership({ kind: 'invalid' }, { daemon: false, launcher: false })).toEqual({ kind: 'invalid-record' });
-      expect(deriveOwnership({ kind: 'v1', record }, { daemon: true, launcher: true }))
+    const running = { state: 'running' } as const;
+    const gone = { state: 'gone' } as const;
+    const unknown = { state: 'unknown', reason: 'ps timed out' } as const;
+    const complete = { state: 'complete' } as const;
+
+    it('derives ownership from the record and the states of the recorded processes', () => {
+      expect(deriveOwnership({ kind: 'absent' }, null)).toEqual({ kind: 'unrecorded' });
+      expect(deriveOwnership({ kind: 'invalid' }, null)).toEqual({ kind: 'invalid-record' });
+      expect(deriveOwnership({ kind: 'unreadable', reason: 'EACCES' }, null))
+        .toEqual({ kind: 'unknown', reason: 'the owner record could not be read: EACCES' });
+      expect(deriveOwnership({ kind: 'v1', record }, { daemon: running, launcher: running }))
         .toEqual({ kind: 'owners-live', record });
-      expect(deriveOwnership({ kind: 'v1', record }, { daemon: false, launcher: true }))
+      expect(deriveOwnership({ kind: 'v1', record }, { daemon: gone, launcher: running }))
         .toEqual({ kind: 'owner-gone', record, gone: { role: 'daemon', pid: 4000 } });
-      expect(deriveOwnership({ kind: 'v1', record }, { daemon: true, launcher: false }))
+      expect(deriveOwnership({ kind: 'v1', record }, { daemon: running, launcher: gone }))
         .toEqual({ kind: 'owner-gone', record, gone: { role: 'launcher', pid: 4099 } });
+      // One confirmed exit is enough; otherwise an unreadable owner is unknown.
+      expect(deriveOwnership({ kind: 'v1', record }, { daemon: unknown, launcher: gone }))
+        .toEqual({ kind: 'owner-gone', record, gone: { role: 'launcher', pid: 4099 } });
+      expect(deriveOwnership({ kind: 'v1', record }, { daemon: running, launcher: unknown })).toEqual({
+        kind: 'unknown',
+        reason: 'could not tell whether the recorded launcher pid 4099 is still running: ps timed out',
+      });
+      expect(deriveOwnership({ kind: 'v1', record }, null))
+        .toEqual({ kind: 'unknown', reason: 'the recorded owners were not checked' });
+    });
+
+    it('leaves every holder while ownership is unknown, even one adopted by PID 1', () => {
+      const ownership = deriveOwnership({ kind: 'unreadable', reason: 'EIO' }, null);
+      expect(classifyHolder(
+        { holder: instance(4100, 1, serve('/data/ox')), ancestors: [], ancestryEnd: complete },
+        { location: '/data/ox', ownership, binaries },
+      )).toEqual({
+        action: 'leave',
+        reason: { kind: 'ownership-unknown', reason: 'the owner record could not be read: EIO' },
+      });
     });
 
     it('stops a descendant of the recorded launcher, and leaves one whose launcher start time differs', () => {
-      const ownership = deriveOwnership({ kind: 'v1', record }, { daemon: false, launcher: true });
+      const ownership = deriveOwnership({ kind: 'v1', record }, { daemon: gone, launcher: running });
       const holder = instance(4101, 4100, serve('/data/ox'));
       const watchdog = instance(4100, 4099, ['node', 'oxigraph-parent-watchdog.js', '4000']);
       const scope = instance(4099, 1, ['systemd-run', '--scope']);
-      expect(classifyHolder({ holder, ancestors: [watchdog, scope] }, { location: '/data/ox', ownership, binaries }))
-        .toEqual({ action: 'stop', reason: { kind: 'owner-gone', role: 'daemon', pid: 4000 } });
+      expect(classifyHolder(
+        { holder, ancestors: [watchdog, scope], ancestryEnd: complete },
+        { location: '/data/ox', ownership, binaries },
+      )).toEqual({ action: 'stop', reason: { kind: 'owner-gone', role: 'daemon', pid: 4000 } });
       const impostor = instance(4099, 1, ['/bin/bash'], 'later');
-      expect(classifyHolder({ holder, ancestors: [watchdog, impostor] }, { location: '/data/ox', ownership, binaries }))
-        .toMatchObject({ action: 'leave', reason: { kind: 'parent-alive', ppid: 4100, recorded: true } });
+      expect(classifyHolder(
+        { holder, ancestors: [watchdog, impostor], ancestryEnd: complete },
+        { location: '/data/ox', ownership, binaries },
+      )).toMatchObject({ action: 'leave', reason: { kind: 'parent-alive', ppid: 4100, recorded: true } });
     });
 
-    it('stops a holder whose parent has exited and leaves one whose parent is alive, without a record', () => {
-      const ownership = deriveOwnership({ kind: 'absent' }, { daemon: false, launcher: false });
+    it('stops a holder only when its parent has confirmedly exited, without a record', () => {
+      const ownership = deriveOwnership({ kind: 'absent' }, null);
       const holder = instance(4100, 4099, serve('/data/ox'));
-      expect(classifyHolder({ holder, ancestors: [] }, { location: '/data/ox', ownership, binaries }))
+      const ctx = { location: '/data/ox', ownership, binaries };
+      expect(classifyHolder({ holder, ancestors: [], ancestryEnd: gone }, ctx))
         .toEqual({ action: 'stop', reason: { kind: 'parent-exited', ppid: 4099 } });
-      expect(classifyHolder({ holder, ancestors: [instance(4099, 1, ['/bin/bash'])] }, { location: '/data/ox', ownership, binaries }))
+      expect(classifyHolder({ holder, ancestors: [], ancestryEnd: unknown }, ctx))
+        .toEqual({ action: 'leave', reason: { kind: 'parent-unknown', ppid: 4099, reason: 'ps timed out' } });
+      expect(classifyHolder({ holder, ancestors: [instance(4099, 1, ['/bin/bash'])], ancestryEnd: complete }, ctx))
         .toEqual({
           action: 'leave',
           reason: { kind: 'parent-alive', ppid: 4099, parentCommand: '/bin/bash', recorded: false },

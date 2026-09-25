@@ -20,9 +20,10 @@ All notable changes to the DKG V10 node are documented here. The format is based
   Oxigraph, or a child of the recorded launcher if the store never became
   ready, once the recorded daemon or launcher has exited, whatever process
   adopted it. It also stops an orphan from an earlier release that runs this
-  node's Oxigraph for this store and was reparented to PID 1. Any other lock
-  holder is logged and left running, and the lock file itself is never
-  touched.
+  node's Oxigraph for this store and was reparented to PID 1. Only a
+  confirmed exit counts: a holder whose owner, parent or record cannot be
+  read is left running. Any other lock holder is logged and left running,
+  and the lock file itself is never touched.
 
 ## [10.0.19] - 2026-09-25
 

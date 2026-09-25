@@ -1,5 +1,6 @@
 import { vi } from 'vitest';
 import type { OrphanedOxigraphIo } from '../../src/daemon/oxigraph-orphan.js';
+import type { ProcessLookup } from '../../src/daemon/process-probe.js';
 
 /**
  * An injected process table for the orphan reclaim: processes with argv,
@@ -15,6 +16,8 @@ export interface FakeProcess {
   /** Start-time token; defaults to `t<pid>`. */
   start?: string;
   ignoresTerm?: boolean;
+  /** Every read of this process fails (a `ps` timeout, say) until cleared. */
+  unreadable?: boolean;
   alive: boolean;
 }
 
@@ -32,21 +35,29 @@ export function processTable(
       [...table].filter(([, entry]) => entry.alive && entry.holdsLock).map(([pid]) => pid)),
     inspectProcess: async (pid) => {
       const entry = table.get(pid);
-      const instance = entry?.alive
-        ? {
-            pid,
-            start: entry.start ?? `t${pid}`,
-            ppid: entry.ppid,
-            argv: entry.displayOnly ? null : entry.argv,
-            command: entry.argv.join(' '),
-          }
-        : null;
+      const lookup: ProcessLookup = entry?.unreadable
+        ? { state: 'unknown', reason: 'ps timed out' }
+        : entry?.alive
+          ? {
+              state: 'running',
+              process: {
+                pid,
+                start: entry.start ?? `t${pid}`,
+                ppid: entry.ppid,
+                argv: entry.displayOnly ? null : entry.argv,
+                command: entry.argv.join(' '),
+              },
+            }
+          : { state: 'gone' };
       hooks.onInspect?.(pid, table);
-      return instance;
+      return lookup;
     },
-    isSameInstance: async ({ pid, start }) => {
+    checkIdentity: async ({ pid, start }) => {
       const entry = table.get(pid);
-      return entry?.alive === true && (entry.start ?? `t${pid}`) === start;
+      if (entry?.unreadable) return { state: 'unknown', reason: 'ps timed out' };
+      return entry?.alive === true && (entry.start ?? `t${pid}`) === start
+        ? { state: 'running' }
+        : { state: 'gone' };
     },
     signal: (pid, signal) => {
       signals.push([pid, signal]);

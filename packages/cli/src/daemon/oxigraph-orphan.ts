@@ -14,17 +14,24 @@
  * its ancestors, asks the pure policy (`oxigraph-reclaim-policy.ts`) whether
  * to stop it, and runs the TERM → KILL escalation. A holder is signalled only
  * while it is still the process instance that was judged (same PID and start
- * time). The LOCK file itself is never modified.
+ * time). A process that cannot be read is never taken to have exited: the
+ * holder concerned is left running. The LOCK file itself is never modified.
  */
 import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { promisify } from 'node:util';
 import { mapWithConcurrency } from '@origintrail-official/dkg-agent/map-with-concurrency';
 import {
-  identityIsRunning,
+  oxigraphBinaryCatalog,
+  withOxigraphBinary,
+  type OxigraphBinaryCatalog,
+} from './oxigraph-binary.js';
+import {
+  checkIdentity,
   readOxigraphOwnerRecord,
+  type IdentityState,
   type ProcessIdentity,
 } from './oxigraph-owner-record.js';
 import { OXIGRAPH_STOP_GRACE_MS } from './oxigraph-parent-watchdog.js';
@@ -34,13 +41,14 @@ import {
   describeLeave,
   describeStop,
   MAX_LAUNCHER_DEPTH,
-  type OxigraphBinaries,
+  type HolderObservation,
 } from './oxigraph-reclaim-policy.js';
 import {
   procHasFdTarget,
   procPids,
   processInspector,
   type ProcessInstance,
+  type ProcessLookup,
 } from './process-probe.js';
 
 const execFileAsync = promisify(execFile);
@@ -48,10 +56,10 @@ const execFileAsync = promisify(execFile);
 export interface OrphanedOxigraphIo {
   /** PIDs that have the lock file open. */
   listLockHolders(lockPath: string): Promise<number[]>;
-  /** One observation of a process; null when it has exited. */
-  inspectProcess(pid: number): Promise<ProcessInstance | null>;
+  /** One observation of a process: running, confirmed gone, or unreadable. */
+  inspectProcess(pid: number): Promise<ProcessLookup>;
   /** Whether `identity` still names a running process (same PID and start time). */
-  isSameInstance(identity: ProcessIdentity): Promise<boolean>;
+  checkIdentity(identity: ProcessIdentity): Promise<IdentityState>;
   signal(pid: number, signal: NodeJS.Signals): void;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -61,11 +69,11 @@ export interface StopOrphanedOxigraphOptions {
   binaryPath: string;
   location: string;
   /**
-   * Directories whose `oxigraph*` executables are this node's too, for an
-   * orphan from before the owner record: the managed binary cache and the
-   * directory of the `oxigraph` on PATH.
+   * The binaries that count as this node's Oxigraph, from
+   * `resolveOxigraphBinary`; defaults to `binaryPath` and its directory. The
+   * recorded binary is added from the owner record.
    */
-  knownBinaryDirs?: readonly string[];
+  binaries?: OxigraphBinaryCatalog;
   log: (message: string) => void;
   /** SIGTERM → SIGKILL escalation; defaults to the shared Oxigraph stop grace. */
   stopGraceMs?: number;
@@ -112,23 +120,23 @@ export async function procLockHolders(lockPath: string): Promise<number[]> {
 const defaultIo: OrphanedOxigraphIo = {
   listLockHolders: process.platform === 'linux' ? procLockHolders : lsofLockHolders,
   inspectProcess: processInspector(process.platform),
-  isSameInstance: identityIsRunning,
+  checkIdentity: (identity) => checkIdentity(identity),
   signal: (pid, signal) => { process.kill(pid, signal); },
   sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
   now: () => Date.now(),
 };
 
-/** The holder's ancestors, nearest first, as the policy expects them. */
-async function observeAncestors(io: OrphanedOxigraphIo, holder: ProcessInstance): Promise<ProcessInstance[]> {
+/** The holder and its ancestors, nearest first, as the policy expects them. */
+async function observeHolder(io: OrphanedOxigraphIo, holder: ProcessInstance): Promise<HolderObservation> {
   const ancestors: ProcessInstance[] = [];
   let ppid = holder.ppid;
   while (ancestors.length < MAX_LAUNCHER_DEPTH && ppid > 1) {
     const parent = await io.inspectProcess(ppid);
-    if (!parent) break;
-    ancestors.push(parent);
-    ppid = parent.ppid;
+    if (parent.state !== 'running') return { holder, ancestors, ancestryEnd: parent };
+    ancestors.push(parent.process);
+    ppid = parent.process.ppid;
   }
-  return ancestors;
+  return { holder, ancestors, ancestryEnd: { state: 'complete' } };
 }
 
 /**
@@ -149,22 +157,23 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
   const deadline = io.now() + timeoutMs;
   const recordRead = await readOxigraphOwnerRecord(opts.location);
   if (recordRead.kind === 'invalid') {
-    opts.log(`[oxigraph] ignoring an unreadable owner record for ${lockPath}.`);
+    opts.log(`[oxigraph] ignoring a malformed owner record for ${lockPath}.`);
   }
   const record = recordRead.kind === 'v1' ? recordRead.record : null;
-  const binaryPaths = [opts.binaryPath, ...(record ? [record.binaryPath] : [])];
-  const binaries: OxigraphBinaries = {
-    paths: binaryPaths,
-    dirs: [...binaryPaths.map((path) => dirname(path)), ...(opts.knownBinaryDirs ?? [])],
-  };
-  const ownership = deriveOwnership(recordRead, {
-    daemon: record !== null && await io.isSameInstance(record.daemon),
-    launcher: record !== null && await io.isSameInstance(record.launcher),
-  });
+  const catalog = opts.binaries ?? oxigraphBinaryCatalog(opts.binaryPath);
+  const binaries = record ? withOxigraphBinary(catalog, record.binaryPath) : catalog;
+  const ownership = deriveOwnership(recordRead, record
+    ? { daemon: await io.checkIdentity(record.daemon), launcher: await io.checkIdentity(record.launcher) }
+    : null);
   // Keyed by PID and start time, so a recycled PID is judged afresh.
   const signalled = new Map<string, { pid: number; termAt: number; killed: boolean }>();
   // Holders already reported as left running, or that refused a signal.
   const leftRunning = new Set<string>();
+  const leave = (key: string, message: string): void => {
+    if (leftRunning.has(key)) return;
+    leftRunning.add(key);
+    opts.log(message);
+  };
 
   for (;;) {
     const orphans: number[] = [];
@@ -176,34 +185,64 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
     }
     for (const pid of holders) {
       if (pid === process.pid) continue;
-      const holder = await io.inspectProcess(pid);
-      if (!holder) continue;
+      const lookup = await io.inspectProcess(pid);
+      if (lookup.state === 'gone') continue;
+      if (lookup.state === 'unknown') {
+        // Already signalled: keep waiting for it, but do not escalate blind.
+        if ([...signalled.values()].some((entry) => entry.pid === pid)) {
+          orphans.push(pid);
+          continue;
+        }
+        leave(
+          `${pid}:?`,
+          `[oxigraph] ${lockPath} is held by pid ${pid}, which could not be inspected ` +
+            `(${lookup.reason}). Leaving it running.`,
+        );
+        continue;
+      }
+      const holder = lookup.process;
       const instance = `${pid}:${holder.start}`;
       if (leftRunning.has(instance)) continue;
       const state = signalled.get(instance);
+      let stopReason = '';
       if (!state) {
         const decision = classifyHolder(
-          { holder, ancestors: await observeAncestors(io, holder) },
+          await observeHolder(io, holder),
           { location: opts.location, ownership, binaries },
         );
         if (decision.action === 'leave') {
-          leftRunning.add(instance);
-          opts.log(
+          leave(
+            instance,
             `[oxigraph] ${lockPath} is held by pid ${pid} (parent ${holder.ppid}): ` +
               `${holder.command.slice(0, 300)}. Leaving it running: ${describeLeave(decision.reason)}.`,
           );
           continue;
         }
-        opts.log(
-          `[oxigraph] stopping orphaned Oxigraph pid ${pid} (${describeStop(decision.reason)}); ` +
-            `it still holds ${lockPath}.`,
-        );
+        stopReason = describeStop(decision.reason);
       }
       // Signal only the instance that was judged: a PID recycled since then
       // has another start time.
-      if (!(await io.isSameInstance(holder))) continue;
+      const current = await io.checkIdentity(holder);
+      if (current.state === 'gone') continue;
+      if (current.state === 'unknown') {
+        // Already signalled: keep waiting for it, but do not escalate blind.
+        if (state) {
+          orphans.push(pid);
+          continue;
+        }
+        leave(
+          instance,
+          `[oxigraph] could not confirm that pid ${pid} is still the orphaned Oxigraph ` +
+            `holding ${lockPath} (${current.reason}). Leaving it running.`,
+        );
+        continue;
+      }
       try {
         if (!state) {
+          opts.log(
+            `[oxigraph] stopping orphaned Oxigraph pid ${pid} (${stopReason}); ` +
+              `it still holds ${lockPath}.`,
+          );
           io.signal(pid, 'SIGTERM');
           signalled.set(instance, { pid, termAt: io.now(), killed: false });
         } else if (!state.killed && io.now() - state.termAt >= stopGraceMs) {

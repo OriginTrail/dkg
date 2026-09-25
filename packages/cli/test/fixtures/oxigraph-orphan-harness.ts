@@ -5,11 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { lsofLockHolders, procLockHolders } from '../../src/daemon/oxigraph-orphan.js';
 import {
   procInspectProcess,
-  procProcessStart,
   psInspectProcess,
-  psProcessStart,
   type ProcessInspector,
-  type ProcessStartProbe,
 } from '../../src/daemon/process-probe.js';
 
 // Real-process helpers shared by the orphaned-Oxigraph test files.
@@ -40,14 +37,6 @@ export function hostProcessProbes(): Array<[string, ProcessInspector]> {
   const probes: Array<[string, ProcessInspector]> = [];
   if (hostHas('ps')) probes.push(['ps', psInspectProcess]);
   if (hostHasProcfs) probes.push(['procfs', procInspectProcess]);
-  return probes;
-}
-
-/** Every process start-time probe this host can run, not only its default. */
-export function hostStartProbes(): Array<[string, ProcessStartProbe]> {
-  const probes: Array<[string, ProcessStartProbe]> = [];
-  if (hostHas('ps')) probes.push(['ps', psProcessStart]);
-  if (hostHasProcfs) probes.push(['procfs', procProcessStart]);
   return probes;
 }
 

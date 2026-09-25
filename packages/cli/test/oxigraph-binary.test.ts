@@ -27,7 +27,8 @@ import { mkdtemp, readFile, rm, stat, writeFile, chmod, access } from 'node:fs/p
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  findOxigraphOnPath,
+  isCatalogedOxigraph,
+  oxigraphBinaryCatalog,
   resolveOxigraphBinary,
   resolveOxigraphAsset,
   OXIGRAPH_ASSETS,
@@ -111,7 +112,7 @@ describe('resolveOxigraphBinary (real server + real filesystem)', () => {
     const before = hits;
     try {
       const binary = await resolveOxigraphBinary({ cacheDir, asset: assetFor('/ok', 'oxi-real-bin'), log: () => {} });
-      expect(binary).toEqual({
+      expect(binary).toMatchObject({
         path: join(cacheDir, 'oxi-real-bin'),
         source: 'bundled',
         version: OXIGRAPH_VERSION,
@@ -131,7 +132,7 @@ describe('resolveOxigraphBinary (real server + real filesystem)', () => {
       await writeFile(join(cacheDir, 'oxi-real-bin'), bytes);
       const before = hits;
       const binary = await resolveOxigraphBinary({ cacheDir, asset: assetFor('/ok', 'oxi-real-bin'), log: () => {} });
-      expect(binary).toEqual({
+      expect(binary).toMatchObject({
         path: join(cacheDir, 'oxi-real-bin'),
         source: 'bundled',
         version: OXIGRAPH_VERSION,
@@ -230,6 +231,7 @@ describe('PATH fallback (real directories, real executables)', () => {
         path: join(pathDirB, 'oxigraph'),
         source: 'system',
         version: '0.6.0',
+        catalog: { paths: [join(pathDirB, 'oxigraph')], dirs: [cacheDir, pathDirB] },
       });
       expect(hits - before).toBe(0);
     } finally {
@@ -248,7 +250,7 @@ describe('PATH fallback (real directories, real executables)', () => {
         arch: 'x64',
         io: { stat: statOnMuslHost },
         log: () => {},
-      })).resolves.toEqual({
+      })).resolves.toMatchObject({
         path: join(pathDirB, 'oxigraph'),
         source: 'system',
         version: '0.6.0',
@@ -259,17 +261,37 @@ describe('PATH fallback (real directories, real executables)', () => {
     }
   });
 
-  it('finds the executable oxigraph on PATH, skipping a non-executable decoy, and null without one', async () => {
+  it('catalogs the cache and the PATH binary\'s directory beside a bundled binary, skipping a decoy', async () => {
+    const cacheDir = await freshCache();
     const emptyDir = await mkdtemp(join(tmpdir(), 'oxi-path-empty-'));
     try {
+      await writeFile(join(cacheDir, 'oxi-real-bin'), bytes);
+      const bundled = { cacheDir, platform: 'linux' as const, asset: assetFor('/ok', 'oxi-real-bin'), log: () => {} };
+      const cached = join(cacheDir, 'oxi-real-bin');
+      // An orphan from an earlier release may run an earlier pinned binary
+      // from the cache, or the operator's binary on PATH.
       process.env.PATH = `${pathDirA}:${pathDirB}`;
-      await expect(findOxigraphOnPath('linux')).resolves.toBe(join(pathDirB, 'oxigraph'));
+      const { catalog } = await resolveOxigraphBinary(bundled);
+      expect(catalog).toEqual({ paths: [cached], dirs: [cacheDir, pathDirB] });
+      expect(isCatalogedOxigraph(catalog, join(cacheDir, 'oxigraph-v0.5.7'))).toBe(true);
+      expect(isCatalogedOxigraph(catalog, join(pathDirB, 'oxigraph'))).toBe(true);
+      // The decoy is not executable, so its directory is not catalogued.
+      expect(isCatalogedOxigraph(catalog, join(pathDirA, 'oxigraph'))).toBe(false);
+      expect(isCatalogedOxigraph(catalog, join(cacheDir, 'rocksdb-tool'))).toBe(false);
       process.env.PATH = `${pathDirA}:${emptyDir}`;
-      await expect(findOxigraphOnPath('linux')).resolves.toBeNull();
+      await expect(resolveOxigraphBinary(bundled)).resolves.toMatchObject({
+        catalog: { paths: [cached], dirs: [cacheDir] },
+      });
     } finally {
       process.env.PATH = prevPath;
+      await rm(cacheDir, { recursive: true, force: true });
       await rm(emptyDir, { recursive: true, force: true });
     }
+  });
+
+  it('catalogs one binary and its directory for callers without a resolver', () => {
+    expect(oxigraphBinaryCatalog('/opt/dkg/oxigraph/oxigraph-v0.5.8'))
+      .toEqual({ paths: ['/opt/dkg/oxigraph/oxigraph-v0.5.8'], dirs: ['/opt/dkg/oxigraph'] });
   });
 
   it('on musl Linux with NO oxigraph on PATH, throws the musl-specific actionable error', async () => {

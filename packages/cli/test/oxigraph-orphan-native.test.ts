@@ -35,16 +35,13 @@ import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { oxigraphStoreArgs } from '../src/daemon/oxigraph-store-launch.js';
 import { stopOrphanedOxigraph } from '../src/daemon/oxigraph-orphan.js';
 import {
+  checkIdentity,
   OXIGRAPH_OWNER_RECORD,
   OXIGRAPH_OWNER_RECORD_SCHEMA,
   readOxigraphOwnerRecord,
   recordOxigraphOwner,
 } from '../src/daemon/oxigraph-owner-record.js';
-import {
-  procInspectProcess,
-  processStartProbe,
-  psInspectProcess,
-} from '../src/daemon/process-probe.js';
+import { processInspector, type ProcessLookup } from '../src/daemon/process-probe.js';
 import {
   createOxigraphStandinFixture,
   fetchPid,
@@ -58,7 +55,6 @@ import {
 import {
   hostLockHolderProbes,
   hostProcessProbes,
-  hostStartProbes,
   killIfAlive,
   parentPid,
   pidIsGone,
@@ -79,10 +75,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
     const exited = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
     await once(exited, 'exit');
     for (const [name, inspectProcess] of hostProcessProbes()) {
-      expect(await inspectProcess(exited.pid!), name).toBeNull();
-    }
-    for (const [name, processStart] of hostStartProbes()) {
-      expect(await processStart(exited.pid!), name).toBeNull();
+      expect(await inspectProcess(exited.pid!), name).toEqual({ state: 'gone' });
     }
   });
 
@@ -90,15 +83,13 @@ describe('stopOrphanedOxigraph (real processes)', () => {
     const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-record-'));
     const launcher = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     try {
-      expect(hostStartProbes().length).toBeGreaterThan(0);
-      for (const [name, processStart] of hostStartProbes()) {
-        const start = await processStart(launcher.pid!);
-        expect(start, name).toMatch(/\S/);
-        expect(await processStart(launcher.pid!), name).toBe(start);
-        expect(await processStart(process.pid), name).not.toBeNull();
-        // Identities recorded with one probe are compared with the other.
-        const inspect = name === 'ps' ? psInspectProcess : procInspectProcess;
-        expect((await inspect(launcher.pid!))?.start, name).toBe(start);
+      expect(hostProcessProbes().length).toBeGreaterThan(0);
+      for (const [name, inspectProcess] of hostProcessProbes()) {
+        const first = await inspectProcess(launcher.pid!);
+        expect(first, name).toMatchObject({ state: 'running', process: { start: expect.stringMatching(/\S/) } });
+        // The same process reads with the same start time every time.
+        expect(await inspectProcess(launcher.pid!), name).toEqual(first);
+        expect(await inspectProcess(process.pid), name).toMatchObject({ state: 'running' });
       }
       await recordOxigraphOwner({
         location,
@@ -119,6 +110,38 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       });
     } finally {
       launcher.kill('SIGKILL');
+      await rm(location, { recursive: true, force: true });
+    }
+  });
+
+  it('checks a recorded identity as running, gone or unknown, never taking a failed read for an exit', async () => {
+    const identity = { pid: 4000, start: 't1' };
+    const reads = (lookup: ProcessLookup) => async () => lookup;
+    const as = (start: string): ProcessLookup =>
+      ({ state: 'running', process: { pid: 4000, start, ppid: 1, argv: null, command: 'node' } });
+    expect(await checkIdentity(identity, reads(as('t1')))).toEqual({ state: 'running' });
+    // The PID now names another process.
+    expect(await checkIdentity(identity, reads(as('t2')))).toEqual({ state: 'gone' });
+    expect(await checkIdentity(identity, reads({ state: 'gone' }))).toEqual({ state: 'gone' });
+    expect(await checkIdentity(identity, reads({ state: 'unknown', reason: 'ps: timed out' })))
+      .toEqual({ state: 'unknown', reason: 'ps: timed out' });
+  });
+
+  it('tells a missing owner record from a malformed and an unreadable one', async () => {
+    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-record-read-'));
+    try {
+      expect(await readOxigraphOwnerRecord(location)).toEqual({ kind: 'absent' });
+      await writeFile(join(location, OXIGRAPH_OWNER_RECORD), '{"schema": ');
+      expect(await readOxigraphOwnerRecord(location)).toEqual({ kind: 'invalid' });
+      // A directory where the record belongs fails to read (EISDIR) for any
+      // user, root included, unlike a permission bit.
+      await rm(join(location, OXIGRAPH_OWNER_RECORD));
+      await mkdir(join(location, OXIGRAPH_OWNER_RECORD));
+      expect(await readOxigraphOwnerRecord(location)).toEqual({
+        kind: 'unreadable',
+        reason: expect.stringContaining('EISDIR'),
+      });
+    } finally {
       await rm(location, { recursive: true, force: true });
     }
   });
@@ -214,7 +237,11 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       databasePid = await fetchPid(port);
       expect(parentPid(databasePid)).toBe(adopter.pid);
       // The same probe the reclaim reads identities with on this platform.
-      const start = processStartProbe(process.platform);
+      const inspect = processInspector(process.platform);
+      const start = async (pid: number): Promise<string | undefined> => {
+        const lookup = await inspect(pid);
+        return lookup.state === 'running' ? lookup.process.start : undefined;
+      };
       await writeFile(join(location, OXIGRAPH_OWNER_RECORD), JSON.stringify({
         schema: OXIGRAPH_OWNER_RECORD_SCHEMA,
         daemon: { pid: deadDaemon.pid, start: 'exited' },
@@ -270,12 +297,15 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       const argv = ['node', lockingStandin.binaryPath, ...oxigraphStoreArgs(location), '--bind', `127.0.0.1:${port}`];
       for (const [name, inspectProcess] of processProbes) {
         expect(await inspectProcess(owned.pid!), name).toEqual({
-          pid: owned.pid,
-          start: expect.stringMatching(/\S/),
-          ppid: process.pid,
-          // `/proc` keeps argv exact; `ps` shows only the joined text.
-          argv: name === 'procfs' ? argv : null,
-          command: argv.join(' '),
+          state: 'running',
+          process: {
+            pid: owned.pid,
+            start: expect.stringMatching(/\S/),
+            ppid: process.pid,
+            // `/proc` keeps argv exact; `ps` shows only the joined text.
+            argv: name === 'procfs' ? argv : null,
+            command: argv.join(' '),
+          },
         });
       }
       expect(lines.join('\n')).toMatch(

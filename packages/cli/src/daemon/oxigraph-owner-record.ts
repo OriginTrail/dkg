@@ -9,7 +9,7 @@
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { writeFileAtomicWith } from './fs-utils.js';
-import { processStartProbe } from './process-probe.js';
+import { processInspector, type ProcessInspector } from './process-probe.js';
 
 export const OXIGRAPH_OWNER_RECORD = 'dkg-oxigraph-owner.json';
 export const OXIGRAPH_OWNER_RECORD_SCHEMA = 'dkg-oxigraph-owner/v1';
@@ -30,13 +30,27 @@ export interface OxigraphOwnerRecordV1 {
   binaryPath: string;
 }
 
-/** What the store directory says about its owner. */
+/**
+ * What the store directory says about its owner: no record, content that is
+ * not a v1 record, a record that exists but could not be read, or a record.
+ */
 export type OxigraphOwnerRecordRead =
   | { kind: 'absent' }
   | { kind: 'invalid' }
+  | { kind: 'unreadable'; reason: string }
   | { kind: 'v1'; record: OxigraphOwnerRecordV1 };
 
-const processStart = processStartProbe(process.platform);
+/**
+ * Whether a recorded process instance still runs. A PID that now names
+ * another process (another start time) is `gone`; a failed read is
+ * `unknown`, never `gone`.
+ */
+export type IdentityState =
+  | { state: 'running' }
+  | { state: 'gone' }
+  | { state: 'unknown'; reason: string };
+
+const inspectProcess = processInspector(process.platform);
 
 function ownerRecordPath(location: string): string {
   return join(resolve(location), OXIGRAPH_OWNER_RECORD);
@@ -62,8 +76,9 @@ export async function readOxigraphOwnerRecord(location: string): Promise<Oxigrap
   let text: string;
   try {
     text = await readFile(ownerRecordPath(location), 'utf8');
-  } catch {
-    return { kind: 'absent' };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { kind: 'absent' };
+    return { kind: 'unreadable', reason: error instanceof Error ? error.message : String(error) };
   }
   try {
     const record = decodeOwnerRecord(JSON.parse(text));
@@ -74,8 +89,15 @@ export async function readOxigraphOwnerRecord(location: string): Promise<Oxigrap
 }
 
 /** Whether `identity` still names a running process (same PID and start time). */
-export async function identityIsRunning(identity: ProcessIdentity): Promise<boolean> {
-  return (await processStart(identity.pid)) === identity.start;
+export async function checkIdentity(
+  identity: ProcessIdentity,
+  inspect: ProcessInspector = inspectProcess,
+): Promise<IdentityState> {
+  const lookup = await inspect(identity.pid);
+  if (lookup.state === 'unknown') return lookup;
+  return lookup.state === 'running' && lookup.process.start === identity.start
+    ? { state: 'running' }
+    : { state: 'gone' };
 }
 
 /**
@@ -93,9 +115,12 @@ export async function recordOxigraphOwner(input: {
   log: (message: string) => void;
 }): Promise<void> {
   if (process.platform === 'win32') return;
-  const identify = async (pid: number): Promise<ProcessIdentity | null> => {
-    const start = await processStart(pid);
-    return start === null ? null : { pid, start };
+  const identify = async (pid: number): Promise<ProcessIdentity> => {
+    const lookup = await inspectProcess(pid);
+    if (lookup.state === 'running') return { pid, start: lookup.process.start };
+    throw new Error(lookup.state === 'gone'
+      ? `pid ${pid} has exited`
+      : `could not read pid ${pid}: ${lookup.reason}`);
   };
   try {
     const [daemon, launcher, oxigraph] = await Promise.all([
@@ -103,7 +128,6 @@ export async function recordOxigraphOwner(input: {
       identify(input.launcherPid),
       input.oxigraphPid === undefined ? undefined : identify(input.oxigraphPid),
     ]);
-    if (!daemon || !launcher || oxigraph === null) return;
     const record: OxigraphOwnerRecordV1 = {
       schema: OXIGRAPH_OWNER_RECORD_SCHEMA,
       daemon,

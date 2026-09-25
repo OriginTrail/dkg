@@ -17,20 +17,18 @@
  *     reparented to PID 1 or its parent has exited. This covers an orphan
  *     from an earlier release, which has no record.
  * While the recorded daemon and launcher both still run, every holder is left
- * alone.
+ * alone. So is every holder when the record exists but cannot be read, or
+ * when a probe cannot tell whether a recorded owner or the holder's parent
+ * still runs: only a confirmed exit counts as gone.
  */
-import { basename, dirname, resolve } from 'node:path';
-import type { OxigraphOwnerRecordRead, OxigraphOwnerRecordV1 } from './oxigraph-owner-record.js';
+import { isCatalogedOxigraph, type OxigraphBinaryCatalog } from './oxigraph-binary.js';
+import type {
+  IdentityState,
+  OxigraphOwnerRecordRead,
+  OxigraphOwnerRecordV1,
+} from './oxigraph-owner-record.js';
 import { oxigraphStoreArgs } from './oxigraph-store-launch.js';
 import type { ProcessInstance } from './process-probe.js';
-
-/** Executables that count as this node's Oxigraph. */
-export interface OxigraphBinaries {
-  /** Exact executable paths. */
-  paths: readonly string[];
-  /** Directories whose `oxigraph*` executables count too. */
-  dirs: readonly string[];
-}
 
 /**
  * Whether a process runs a known Oxigraph binary with this store's
@@ -43,7 +41,7 @@ export interface OxigraphBinaries {
 export function matchManagedOxigraphStore(
   holder: Pick<ProcessInstance, 'argv' | 'command'>,
   location: string,
-  binaries: OxigraphBinaries,
+  binaries: OxigraphBinaryCatalog,
 ): 'match' | 'no-match' | 'ambiguous' {
   let tokens = holder.argv;
   if (tokens === null) {
@@ -52,37 +50,63 @@ export function matchManagedOxigraphStore(
     }
     tokens = holder.command.split(' ');
   }
-  const dirs = binaries.dirs.map((dir) => resolve(dir));
-  const knownBinary = (token: string): boolean =>
-    binaries.paths.includes(token)
-    || (/^oxigraph[^/]*$/.test(basename(token)) && dirs.includes(resolve(dirname(token))));
   const storeArgs = oxigraphStoreArgs(location);
   for (let at = 0; at + storeArgs.length < tokens.length; at++) {
-    if (knownBinary(tokens[at]) && storeArgs.every((arg, offset) => tokens![at + 1 + offset] === arg)) {
+    if (isCatalogedOxigraph(binaries, tokens[at]) && storeArgs.every((arg, offset) => tokens![at + 1 + offset] === arg)) {
       return 'match';
     }
   }
   return 'no-match';
 }
 
-/** Who owns the store now. */
+/**
+ * Who owns the store now. `unknown` (a record that could not be read, or a
+ * recorded owner whose state could not be read) leaves every holder running.
+ */
 export type Ownership =
   | { kind: 'unrecorded' }
   | { kind: 'invalid-record' }
+  | { kind: 'unknown'; reason: string }
   | { kind: 'owners-live'; record: OxigraphOwnerRecordV1 }
   | { kind: 'owner-gone'; record: OxigraphOwnerRecordV1; gone: { role: 'daemon' | 'launcher'; pid: number } };
 
-/** Ownership from the record and whether its daemon and launcher still run. */
+/** Whether the recorded daemon and launcher still run; checked for a v1 record only. */
+export interface RecordedOwnerStates {
+  daemon: IdentityState;
+  launcher: IdentityState;
+}
+
+/**
+ * Ownership from the record and the states of its daemon and launcher. One
+ * confirmed exit is enough to call the owner gone; otherwise an owner whose
+ * state could not be read makes the ownership unknown. A malformed record is
+ * ignored, as if there were none; an unreadable one is not.
+ */
 export function deriveOwnership(
   read: OxigraphOwnerRecordRead,
-  running: { daemon: boolean; launcher: boolean },
+  states: RecordedOwnerStates | null,
 ): Ownership {
   if (read.kind === 'absent') return { kind: 'unrecorded' };
   if (read.kind === 'invalid') return { kind: 'invalid-record' };
+  if (read.kind === 'unreadable') {
+    return { kind: 'unknown', reason: `the owner record could not be read: ${read.reason}` };
+  }
   const { record } = read;
-  if (!running.daemon) return { kind: 'owner-gone', record, gone: { role: 'daemon', pid: record.daemon.pid } };
-  if (!running.launcher) {
-    return { kind: 'owner-gone', record, gone: { role: 'launcher', pid: record.launcher.pid } };
+  if (!states) return { kind: 'unknown', reason: 'the recorded owners were not checked' };
+  for (const role of ['daemon', 'launcher'] as const) {
+    if (states[role].state === 'gone') {
+      return { kind: 'owner-gone', record, gone: { role, pid: record[role].pid } };
+    }
+  }
+  for (const role of ['daemon', 'launcher'] as const) {
+    const state = states[role];
+    if (state.state === 'unknown') {
+      return {
+        kind: 'unknown',
+        reason: `could not tell whether the recorded ${role} pid ${record[role].pid} ` +
+          `is still running: ${state.reason}`,
+      };
+    }
   }
   return { kind: 'owners-live', record };
 }
@@ -94,6 +118,8 @@ export type StopReason =
 
 export type LeaveReason =
   | { kind: 'owners-live'; daemonPid: number; launcherPid: number }
+  | { kind: 'ownership-unknown'; reason: string }
+  | { kind: 'parent-unknown'; ppid: number; reason: string }
   | { kind: 'not-this-store' }
   | { kind: 'argv-ambiguous' }
   | { kind: 'parent-alive'; ppid: number; parentCommand: string; recorded: boolean };
@@ -115,6 +141,10 @@ export function describeLeave(reason: LeaveReason): string {
     case 'owners-live':
       return `this store's recorded daemon pid ${reason.daemonPid} and launcher pid ` +
         `${reason.launcherPid} are still running`;
+    case 'ownership-unknown':
+      return `its owner could not be determined (${reason.reason})`;
+    case 'parent-unknown':
+      return `could not tell whether its parent pid ${reason.ppid} is still running (${reason.reason})`;
     case 'not-this-store':
       return `it is not this node's Oxigraph serving this store`;
     case 'argv-ambiguous':
@@ -135,14 +165,20 @@ export interface HolderObservation {
   holder: ProcessInstance;
   /**
    * The holder's parent, its parent and so on, up to MAX_LAUNCHER_DEPTH,
-   * stopping before PID 1 or at a process that has exited.
+   * stopping before PID 1.
    */
   ancestors: readonly ProcessInstance[];
+  /**
+   * Why the walk stopped: it reached PID 1 or MAX_LAUNCHER_DEPTH
+   * (`complete`), the next ancestor has exited (`gone`), or the next
+   * ancestor could not be read (`unknown`).
+   */
+  ancestryEnd: { state: 'complete' } | { state: 'gone' } | { state: 'unknown'; reason: string };
 }
 
 export function classifyHolder(
-  { holder, ancestors }: HolderObservation,
-  ctx: { location: string; ownership: Ownership; binaries: OxigraphBinaries },
+  { holder, ancestors, ancestryEnd }: HolderObservation,
+  ctx: { location: string; ownership: Ownership; binaries: OxigraphBinaryCatalog },
 ): HolderDecision {
   const { ownership } = ctx;
   if (ownership.kind === 'owners-live') {
@@ -154,6 +190,9 @@ export function classifyHolder(
         launcherPid: ownership.record.launcher.pid,
       },
     };
+  }
+  if (ownership.kind === 'unknown') {
+    return { action: 'leave', reason: { kind: 'ownership-unknown', reason: ownership.reason } };
   }
   const recordedOxigraph = ownership.kind === 'owner-gone' ? ownership.record.oxigraph : undefined;
   if (ownership.kind === 'owner-gone' && recordedOxigraph !== undefined
@@ -174,8 +213,20 @@ export function classifyHolder(
   }
   if (holder.ppid === 1) return { action: 'stop', reason: { kind: 'reparented-to-init' } };
   const parent = ancestors[0];
-  if (parent?.pid !== holder.ppid) {
-    return { action: 'stop', reason: { kind: 'parent-exited', ppid: holder.ppid } };
+  if (parent === undefined) {
+    // Only a confirmed exit of the parent frees the holder; a parent that
+    // could not be read may still own it.
+    if (ancestryEnd.state === 'gone') {
+      return { action: 'stop', reason: { kind: 'parent-exited', ppid: holder.ppid } };
+    }
+    return {
+      action: 'leave',
+      reason: {
+        kind: 'parent-unknown',
+        ppid: holder.ppid,
+        reason: ancestryEnd.state === 'unknown' ? ancestryEnd.reason : 'it was not observed',
+      },
+    };
   }
   return {
     action: 'leave',
