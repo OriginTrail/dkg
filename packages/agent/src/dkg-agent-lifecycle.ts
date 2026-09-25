@@ -3038,13 +3038,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // dedup; ackHandler's signature stays the same.
             const endpoint = registerStorageACKEndpoint({
               registerGroup: (entries) => this.messenger.registerGroup(entries),
-              publish: (data, peerIdStr, signal) => {
+              publish: (data, peerIdStr, signal, origin) => {
                 const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-                return ackHandler.handler(data, peerId, signal);
+                return ackHandler.handler(data, peerId, signal, origin);
               },
-              update: (data, peerIdStr, signal) => {
+              update: (data, peerIdStr, signal, origin) => {
                 const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-                return ackHandler.updateHandler(data, peerId, signal);
+                return ackHandler.updateHandler(data, peerId, signal, origin);
               },
             });
             if (!storageACKRegistrationSession.install(endpoint)) return 'disabled';
