@@ -16,6 +16,7 @@ import type { OxigraphBinaryLocations } from './oxigraph-binary.js';
 import { recordOxigraphLaunch, type OxigraphLaunchRecord } from './oxigraph-owner-record.js';
 import { reclaimHost, stopOrphanedOxigraph } from './oxigraph-orphan.js';
 import type { OxigraphLaunchHandle } from './oxigraph-launch-strategy.js';
+import type { StoreHold } from './oxigraph-reclaim-policy.js';
 import type { OxigraphStoreOwnership } from './oxigraph-store-launch.js';
 
 /** The two store operations a launch is built from. */
@@ -25,7 +26,7 @@ export interface OxigraphStoreOwnershipSteps {
    * the store may still be held by this node's Oxigraph, or null when it is
    * free for a new launch.
    */
-  reclaim(): Promise<{ held: string | null }>;
+  reclaim(): Promise<{ held: StoreHold | null }>;
   /**
    * Record a spawned launch as the store's owner; the returned record adds
    * the verified Oxigraph once the launch is ready. Null when there can be
@@ -95,20 +96,16 @@ export function createOxigraphStoreOwnership(
   };
   return {
     async launch(spawn) {
-      if (closed) return null;
+      if (closed) return { kind: 'closed' };
       const exited = lastLaunch !== null && !lastLaunch.alive() ? lastLaunch : null;
       const { held } = await track(steps.reclaim());
       // This reclaim covered a launch whose wrapper had already exited.
       if (held === null && exited !== null && lastLaunch === exited) lastLaunch = null;
-      if (closed) return null;
-      if (held !== null) {
-        // Spawning over it would fail on the lock, and recording the new
-        // launch would replace the owner record that lets a later reclaim
-        // stop the holder. Leave both for a later attempt.
-        throw new Error(
-          `${opts.location}/LOCK may still be held by this node's Oxigraph (${held}); not starting another over it`,
-        );
-      }
+      if (closed) return { kind: 'closed' };
+      // Spawning over it would fail on the lock, and recording the new launch
+      // would replace the owner record that lets a later reclaim stop the
+      // holder. Leave both for a later attempt.
+      if (held !== null) return { kind: 'blocked', hold: held };
       const oxigraph = spawn();
       lastLaunch = oxigraph;
       const launcherPid = oxigraph.child.pid;
@@ -125,13 +122,16 @@ export function createOxigraphStoreOwnership(
         }
       }
       return {
-        oxigraph,
-        // Without a record (Windows, or a launch that could not be
-        // identified) there is nothing to extend: the reclaim then relies on
-        // the unrecorded rules.
-        ready: async (oxigraphPid) => {
-          if (record === null || closed) return;
-          await track(record.markReady(oxigraphPid));
+        kind: 'launched',
+        launch: {
+          oxigraph,
+          // Without a record (Windows, or a launch that could not be
+          // identified) there is nothing to extend: the reclaim then relies
+          // on the unrecorded rules.
+          ready: async (oxigraphPid) => {
+            if (record === null || closed) return;
+            await track(record.markReady(oxigraphPid));
+          },
         },
       };
     },

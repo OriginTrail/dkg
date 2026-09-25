@@ -171,7 +171,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
         binaryPath: lockingStandin.binaryPath,
         log: (line) => lines.push(line),
       });
-      const launch = await ownership.launch(() => {
+      const outcome = await ownership.launch(() => {
         linesAtSpawn = lines.length;
         launcher = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
         return {
@@ -185,6 +185,8 @@ describe('stopOrphanedOxigraph (real processes)', () => {
         `stopping orphaned Oxigraph pid ${orphan} (it was reparented to PID 1)`,
       );
       expect(lines.slice(0, linesAtSpawn).join('\n')).toContain('released by the orphaned Oxigraph');
+      expect(outcome.kind).toBe('launched');
+      const launch = outcome.kind === 'launched' ? outcome.launch : undefined;
       expect(launch?.oxigraph.child).toBe(launcher);
       // Recorded at spawn, without an Oxigraph yet ...
       const atSpawn = await readOxigraphOwnerRecord(location);
@@ -484,7 +486,13 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       })).resolves.toEqual({
         signalled: [],
         // It may be this node's Oxigraph: the store is not free to launch on.
-        held: expect.stringMatching(new RegExp(`^pid ${owned.pid}: there is no owner record`)),
+        held: {
+          kind: 'holders-left',
+          holders: [{
+            pid: owned.pid,
+            block: { kind: 'left', reason: expect.objectContaining({ kind: 'parent-alive', ppid: process.pid, recorded: false }) },
+          }],
+        },
       });
       expect(owned.exitCode).toBeNull();
       expect(owned.signalCode).toBeNull();

@@ -39,7 +39,7 @@ export interface OxigraphLaunchHandle {
    * process-group id is never signalled after it could have been reused.
    */
   terminate(signal: NodeJS.Signals): void;
-  /** The PID that owns the listen socket, checked as this launch mode allows. */
+  /** The PID that owns the listen socket, checked as far as this launch allows. */
   resolveListenerPid(port: number, host: string, resolver: ListenOwnerResolver): Promise<number | null>;
   /** Note one line of stderr: the scoped watchdog reports an OOM kill there. */
   observeStderr(text: string): void;
@@ -53,8 +53,13 @@ export interface OxigraphLaunchHandle {
   }): boolean;
 }
 
+/**
+ * How this host launches Oxigraph. There are three launches, told apart only
+ * by what they do: on Windows the binary itself (listener ownership by the
+ * child only); elsewhere the parent watchdog leading its own process group,
+ * either unscoped or inside a systemd scope when memory limits are set.
+ */
 export interface OxigraphLaunchStrategy {
-  readonly mode: 'direct' | 'systemd-scope';
   /** Spawn Oxigraph through `spawnProcess` and return that launch's handle. */
   launch(
     spawnProcess: typeof spawn,
@@ -65,7 +70,7 @@ export interface OxigraphLaunchStrategy {
   logSummary(): string | null;
 }
 
-interface LaunchMode {
+interface LaunchPlan {
   build(binaryPath: string, binaryArgs: string[]): OxigraphLaunchCommand;
   /**
    * Lead a new process group, which `terminate` signals: it reaches Oxigraph
@@ -77,12 +82,12 @@ interface LaunchMode {
   watchdogReportsOom: boolean;
 }
 
-function launcher(mode: LaunchMode): OxigraphLaunchStrategy['launch'] {
+function launcher(plan: LaunchPlan): OxigraphLaunchStrategy['launch'] {
   return (spawnProcess, binaryPath, binaryArgs, stdio) => {
-    const { command, args, environment } = mode.build(binaryPath, binaryArgs);
+    const { command, args, environment } = plan.build(binaryPath, binaryArgs);
     const child = spawnProcess(command, args, {
       stdio,
-      ...(mode.processGroup ? { detached: true } : {}),
+      ...(plan.processGroup ? { detached: true } : {}),
       ...(environment ? { env: { ...process.env, ...environment } } : {}),
     });
     // An `error` from a child that never got a PID is a failed spawn (ENOENT,
@@ -101,7 +106,7 @@ function launcher(mode: LaunchMode): OxigraphLaunchStrategy['launch'] {
       alive,
       terminate(signal) {
         if (!alive()) return;
-        if (mode.processGroup && child.pid !== undefined) {
+        if (plan.processGroup && child.pid !== undefined) {
           try {
             process.kill(-child.pid, signal);
             return;
@@ -111,9 +116,9 @@ function launcher(mode: LaunchMode): OxigraphLaunchStrategy['launch'] {
         }
         child.kill(signal);
       },
-      resolveListenerPid: (port, host, resolver) => resolver(child, port, host, mode.listenerOwnership),
+      resolveListenerPid: (port, host, resolver) => resolver(child, port, host, plan.listenerOwnership),
       observeStderr(text) {
-        if (mode.watchdogReportsOom && text.includes(OXIGRAPH_WATCHDOG_OOM_MARKER)) watchdogSawOom = true;
+        if (plan.watchdogReportsOom && text.includes(OXIGRAPH_WATCHDOG_OOM_MARKER)) watchdogSawOom = true;
       },
       captureOomSnapshot(listenerPid, read) {
         oomSnapshot ??= read(listenerPid) ?? undefined;
@@ -143,7 +148,6 @@ export function createOxigraphLaunchStrategy(opts: {
   // has no process tree), so it keeps launching the binary itself.
   if (!opts.memoryLimits && opts.platform === 'win32') {
     return {
-      mode: 'direct',
       launch: launcher({
         build: (binaryPath, binaryArgs) => ({ command: binaryPath, args: binaryArgs }),
         processGroup: false,
@@ -165,7 +169,6 @@ export function createOxigraphLaunchStrategy(opts: {
     // to init and keep `<location>/LOCK`, and every respawned worker would
     // fail to open the store.
     return {
-      mode: 'direct',
       launch: launcher({
         build: (binaryPath, binaryArgs) => ({
           command: nodeExecutable,
@@ -195,7 +198,6 @@ export function createOxigraphLaunchStrategy(opts: {
   let generation = 0;
 
   return {
-    mode: 'systemd-scope',
     // `systemd-run --scope` execs the watchdog in place, and setpriv's
     // parent-death signal stops Oxigraph with it. The launch still leads its
     // own process group, so a signal reaches every process it started

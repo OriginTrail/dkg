@@ -33,6 +33,7 @@ import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { findListenOwnerPid } from '../src/daemon/oxigraph-listen-port.js';
 import { OXIGRAPH_OWNER_RECORD, recordOxigraphLaunch } from '../src/daemon/oxigraph-owner-record.js';
 import { reclaimHost, stopOrphanedOxigraph } from '../src/daemon/oxigraph-orphan.js';
+import type { StoreHold } from '../src/daemon/oxigraph-reclaim-policy.js';
 import { oxigraphStoreArgs } from '../src/daemon/oxigraph-store-launch.js';
 import {
   createOxigraphStoreOwnership,
@@ -245,7 +246,7 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
         },
       })).rejects.toThrow(
         `${location}/LOCK may still be held by this node's Oxigraph ` +
-          `(the processes holding ${location}/LOCK could not be listed); not starting another over it`,
+          '(its lock holders could not be listed); not starting another over it',
       );
       // Nothing was started over A, and A's record is untouched.
       expect(spawns).toBe(0);
@@ -272,16 +273,13 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
   // reclaim or record runs), to force the outcome under test or observe the
   // order: `spawned` for the record at spawn, `ready` for its extension.
   const ownershipWith = (hooks: {
-    reclaim?: () => Promise<void>;
+    reclaim?: () => Promise<StoreHold | null | void>;
     spawned?: (launcherPid: number) => Promise<void>;
     ready?: (launcherPid: number, oxigraphPid: number) => Promise<void>;
   }) => (input: OxigraphStoreOwnershipInput) => createOxigraphStoreOwnership({
     ...input,
     steps: {
-      reclaim: async () => {
-        await hooks.reclaim?.();
-        return { held: null };
-      },
+      reclaim: async () => ({ held: (await hooks.reclaim?.()) ?? null }),
       recordLaunch: async (launcherPid) => {
         await hooks.spawned?.(launcherPid);
         return { markReady: async (oxigraphPid) => { await hooks.ready?.(launcherPid, oxigraphPid); } };
@@ -407,6 +405,76 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
         expect(recorded).toEqual([]);
         expect(await portAnswers(port)).toBe(false);
       } finally {
+        await rm(location, { recursive: true, force: true });
+      }
+    }, 30_000);
+
+    it('fails boot without spawning or recording when the store may still be held', async () => {
+      const port = await freePort();
+      const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-held-boot-'));
+      const recorded: number[] = [];
+      try {
+        await expect(startOxigraphServer({
+          binaryPath: lockingStandin.binaryPath,
+          location,
+          port,
+          readyTimeoutMs: 10_000,
+          log: () => {},
+          storeOwnership: ownershipWith({
+            reclaim: async () => ({ kind: 'not-confirmed-gone', pids: [4100] }),
+            spawned: async (launcherPid) => { recorded.push(launcherPid); },
+          }),
+        })).rejects.toThrow(
+          `${location}/LOCK may still be held by this node's Oxigraph ` +
+            '(orphaned Oxigraph pid 4100 was not confirmed gone); not starting another over it',
+        );
+        expect(recorded).toEqual([]);
+        expect(await portAnswers(port)).toBe(false);
+      } finally {
+        await rm(location, { recursive: true, force: true });
+      }
+    }, 30_000);
+
+    it('defers a restart while the store may still be held, and recovers once it is free', async () => {
+      const port = await freePort();
+      const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-held-restart-'));
+      const lines: string[] = [];
+      let reclaims = 0;
+      const spawned: number[] = [];
+      const handle = await startOxigraphServer({
+        binaryPath: lockingStandin.binaryPath,
+        location,
+        port,
+        readyTimeoutMs: 10_000,
+        readyIntervalMs: 50,
+        restartBackoffBaseMs: 50,
+        restartBackoffMaxMs: 50,
+        log: (line) => lines.push(line),
+        storeOwnership: ownershipWith({
+          // Boot finds the store free; the first two restarts find it held.
+          reclaim: async () => {
+            reclaims += 1;
+            return reclaims === 2 || reclaims === 3 ? { kind: 'holders-unlisted' } : null;
+          },
+          spawned: async (launcherPid) => { spawned.push(launcherPid); },
+        }),
+      });
+      try {
+        const first = await fetchPid(port);
+        process.kill(first, 'SIGKILL');
+        expect(await waitForCondition(async () => {
+          const pid = await fetchPid(port).catch(() => undefined);
+          return pid !== undefined && pid !== first && !handle.getRecoveryState().recovering;
+        }, 20_000)).toBe(true);
+        // Nothing was spawned while the store was held: boot, then the restart that found it free.
+        expect(reclaims).toBe(4);
+        expect(spawned).toHaveLength(2);
+        expect(lines.join('\n')).toContain(
+          `restart deferred: ${location}/LOCK may still be held by this node's Oxigraph ` +
+            '(its lock holders could not be listed)',
+        );
+      } finally {
+        await handle.stop();
         await rm(location, { recursive: true, force: true });
       }
     }, 30_000);
@@ -792,26 +860,27 @@ describe('store ownership launches', () => {
     releaseReclaim();
     await closing;
 
-    await expect(launched).resolves.toBeNull();
+    await expect(launched).resolves.toEqual({ kind: 'closed' });
     expect(spawns).toBe(0);
     expect(records).toEqual([]);
   });
 
-  it('refuses to spawn or record over a store the reclaim leaves possibly held', async () => {
+  it('is blocked, spawning and recording nothing, over a store the reclaim leaves possibly held', async () => {
     const records: string[] = [];
     let spawns = 0;
+    const hold: StoreHold = {
+      kind: 'holders-left',
+      holders: [{ pid: 4100, block: { kind: 'uninspectable', reason: 'ps timed out' } }],
+    };
     const ownership = ownershipWithSteps({
-      reclaim: async () => ({ held: 'pid 4100: it could not be inspected' }),
+      reclaim: async () => ({ held: hold }),
       recordLaunch: recording(records),
     });
 
     await expect(ownership.launch(() => {
       spawns += 1;
       return notSpawnable();
-    })).rejects.toThrow(
-      '/nonexistent/oxigraph-data/LOCK may still be held by this node\'s Oxigraph ' +
-        '(pid 4100: it could not be inspected); not starting another over it',
-    );
+    })).resolves.toEqual({ kind: 'blocked', hold });
     expect(spawns).toBe(0);
     // The previous owner record stays: nothing replaced it.
     expect(records).toEqual([]);
@@ -821,14 +890,24 @@ describe('store ownership launches', () => {
     const records: string[] = [];
     const ownership = ownershipWithSteps({ reclaim: storeFree, recordLaunch: recording(records) });
     const { oxigraph } = handleFor(4099);
-    const launch = await ownership.launch(() => oxigraph);
-    expect(launch?.oxigraph).toBe(oxigraph);
+    const outcome = await ownership.launch(() => oxigraph);
+    expect(outcome).toEqual({ kind: 'launched', launch: { oxigraph, ready: expect.any(Function) } });
     expect(records).toEqual(['spawned:4099']);
 
     await ownership.close();
-    await launch!.ready(4100);
+    if (outcome.kind === 'launched') await outcome.launch.ready(4100);
     expect(records).toEqual(['spawned:4099']);
-    await expect(ownership.launch(notSpawnable)).resolves.toBeNull();
+    await expect(ownership.launch(notSpawnable)).resolves.toEqual({ kind: 'closed' });
+  });
+
+  it('rejects, spawning nothing, when the reclaim itself rejects', async () => {
+    const records: string[] = [];
+    const ownership = ownershipWithSteps({
+      reclaim: async () => { throw new Error('reclaim defect'); },
+      recordLaunch: recording(records),
+    });
+    await expect(ownership.launch(notSpawnable)).rejects.toThrow('reclaim defect');
+    expect(records).toEqual([]);
   });
 
   it('kills what it spawned through the launch handle when recording the launch rejects, then rejects', async () => {
@@ -856,7 +935,7 @@ describe('store ownership launches', () => {
     expect(ownership.close()).toBe(closing);
     await closing;
     await ownership.close();
-    await expect(ownership.launch(notSpawnable)).resolves.toBeNull();
+    await expect(ownership.launch(notSpawnable)).resolves.toEqual({ kind: 'closed' });
     expect(events).toEqual(['reclaim', 'spawned:4099', 'reclaim']);
   });
 
@@ -908,7 +987,7 @@ describe('store ownership launches', () => {
     expect(closed).toBe(false);
     releaseReclaim!();
     await closing;
-    await expect(restart).resolves.toBeNull();
+    await expect(restart).resolves.toEqual({ kind: 'closed' });
     expect(reclaims).toBe(2);
     expect(mostAtOnce).toBe(1);
   });

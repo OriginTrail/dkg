@@ -18,7 +18,9 @@ import {
 import {
   classifyHolder,
   deriveOwnership,
+  describeStoreHold,
   isCatalogedOxigraph,
+  leaveBlock,
   matchManagedOxigraphStore,
   oxigraphBinaryCatalog,
   withOxigraphBinary,
@@ -116,6 +118,29 @@ describe('the orphan reclaim policy', () => {
           reason: { kind: 'parent-alive', ppid: 4099, parentCommand: '/bin/bash', recorded: false },
         });
     });
+  });
+
+  it('describes why a store may still be held, at the logging boundary', () => {
+    expect(describeStoreHold({ kind: 'holders-unlisted' })).toBe('its lock holders could not be listed');
+    expect(describeStoreHold({ kind: 'not-confirmed-gone', pids: [4100, 4200] }))
+      .toBe('orphaned Oxigraph pid 4100, 4200 was not confirmed gone');
+    expect(describeStoreHold({
+      kind: 'holders-left',
+      holders: [
+        { pid: 4100, block: { kind: 'left', reason: { kind: 'owners-live', daemonPid: 4000, launcherPid: 4099 } } },
+        { pid: 4200, block: { kind: 'signal-refused' } },
+        { pid: 4300, block: { kind: 'unconfirmed', reason: 'ps timed out' } },
+        { pid: 4400, block: { kind: 'uninspectable', reason: 'EIO' } },
+      ],
+    })).toBe(
+      'pid 4100: this store\'s recorded daemon pid 4000 and launcher pid 4099 are still running; ' +
+        'pid 4200: its signal was refused; ' +
+        'pid 4300: it could not be re-checked before its signal (ps timed out); ' +
+        'pid 4400: it could not be inspected (EIO)',
+    );
+    // Only a holder that is not this node's Oxigraph for this store leaves it free.
+    expect(leaveBlock({ kind: 'not-this-store' })).toBeNull();
+    expect(leaveBlock({ kind: 'argv-ambiguous' })).toEqual({ kind: 'left', reason: { kind: 'argv-ambiguous' } });
   });
 
   it('recognises the exact Oxigraph argv that the direct and scoped launches build', () => {

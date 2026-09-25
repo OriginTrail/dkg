@@ -43,7 +43,6 @@ describe('Oxigraph launch strategies', () => {
         nodeExecutable: '/opt/node',
         watchdogPath: '/opt/oxigraph-watchdog.js',
       });
-      expect(strategy.mode).toBe('direct');
       const { calls, spawnProcess } = recordingSpawn();
       const oxigraph = strategy.launch(spawnProcess, '/opt/oxigraph', ['serve'], 'ignore');
       expect(calls).toEqual([{

@@ -147,9 +147,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
           `there is no owner record, and its parent pid 4099 is still running: ${parentArgv.join(' ')}.`,
       );
       // It may be this node's Oxigraph, so the store is not free to launch on.
-      expect(held).toBe(
-        `pid 4100: there is no owner record, and its parent pid 4099 is still running: ${parentArgv.join(' ')}`,
-      );
+      expect(held).toEqual({ kind: 'holders-left', holders: [{ pid: 4100, block: { kind: 'left', reason: { kind: 'parent-alive', ppid: 4099, parentCommand: parentArgv.join(' '), recorded: false } } }] });
     });
 
     it('falls back to the PID 1 rule for a malformed or unversioned owner record', async () => {
@@ -182,7 +180,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
       expect(signals).toEqual([]);
       expect(table.get(4100)!.alive).toBe(true);
       expect(log).toMatch(/Leaving it running: its owner could not be determined \(the owner record could not be read: .*EISDIR/);
-      expect(held).toMatch(/^pid 4100: its owner could not be determined \(the owner record could not be read: .*EISDIR/);
+      expect(held).toEqual({ kind: 'holders-left', holders: [{ pid: 4100, block: { kind: 'left', reason: { kind: 'ownership-unknown', reason: expect.stringMatching(/^the owner record could not be read: .*EISDIR/) } } }] });
     });
   });
 
@@ -256,7 +254,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
       expect(signalled).toEqual([]);
       expect(signals).toEqual([]);
       expect(lines.join('\n')).toContain(`could not list the processes holding ${store}/LOCK`);
-      expect(held).toBe(`the processes holding ${store}/LOCK could not be listed`);
+      expect(held).toEqual({ kind: 'holders-unlisted' });
     });
 
     it('does not signal when the real ps classifier cannot read the holder', async () => {
@@ -284,7 +282,10 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
         },
       });
       expect(signalled).toEqual([]);
-      expect(held).toBe('pid 4100: it could not be inspected');
+      expect(held).toEqual({
+        kind: 'holders-left',
+        holders: [{ pid: 4100, block: { kind: 'uninspectable', reason: 'ps: Command failed: ps' } }],
+      });
       expect(signals).toEqual([]);
       expect(lines.join('\n')).toContain('is held by pid 4100, which could not be inspected (ps: Command failed: ps)');
     });
@@ -358,7 +359,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
       const { signalled, held } = await reap(io);
       expect(signalled).toEqual([4100]);
       expect(signals).toEqual([[4100, 'SIGTERM'], [4100, 'SIGKILL']]);
-      expect(held).toBe('pid 4200: there is no owner record, and its parent pid 4098 is still running: /bin/bash');
+      expect(held).toEqual({ kind: 'holders-left', holders: [{ pid: 4200, block: { kind: 'left', reason: { kind: 'parent-alive', ppid: 4098, parentCommand: '/bin/bash', recorded: false } } }] });
     });
 
     it('does not signal a recycled PID while it waits for an orphan that left the holder list', async () => {
@@ -388,7 +389,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
 
       const { signalled, held, log } = await reap(io);
       expect(signalled).toEqual([]);
-      expect(held).toBe(`the processes holding ${location}/LOCK could not be listed`);
+      expect(held).toEqual({ kind: 'holders-unlisted' });
       expect(signals).toEqual([]);
       expect(log).toContain('could not list the processes holding');
       expect(log).not.toContain('released');
@@ -449,7 +450,10 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
 
       const { signalled, held, log } = await run(io);
       expect(signalled).toEqual([]);
-      expect(held).toBe('pid 4100: it could not be inspected');
+      expect(held).toEqual({
+        kind: 'holders-left',
+        holders: [{ pid: 4100, block: { kind: 'uninspectable', reason: 'ps timed out' } }],
+      });
       expect(signals).toEqual([]);
       expect(table.get(4100)!.alive).toBe(true);
       expect(log).toContain('is held by pid 4100, which could not be inspected (ps timed out). Leaving it running.');
@@ -467,7 +471,10 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
 
       const { signalled, held, log } = await run(io);
       expect(signalled).toEqual([]);
-      expect(held).toBe('pid 4100: it could not be confirmed');
+      expect(held).toEqual({
+        kind: 'holders-left',
+        holders: [{ pid: 4100, block: { kind: 'unconfirmed', reason: 'ps timed out' } }],
+      });
       expect(signals).toEqual([]);
       expect(table.get(4100)!.alive).toBe(true);
       expect(log).toContain('could not confirm that pid 4100 is still the orphaned Oxigraph');
@@ -490,7 +497,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
         stopGraceMs: 500, pollIntervalMs: 100, timeoutMs: 2_000,
       });
       expect(signals).toEqual([[4100, 'SIGTERM']]);
-      expect(held).toBe('orphaned Oxigraph pid 4100 was not confirmed gone');
+      expect(held).toEqual({ kind: 'not-confirmed-gone', pids: [4100] });
       expect(lines.join('\n')).toContain('orphaned Oxigraph pid 4100 was not confirmed gone 2000ms after the reclaim began.');
       expect(lines.join('\n')).not.toMatch(/released by the orphaned Oxigraph/);
     });
@@ -554,7 +561,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
       expect(signals).toEqual([]);
       expect(table.get(4100)!.alive).toBe(true);
       expect(log).toMatch(/Leaving it running: this store's recorded daemon pid 4000 and launcher pid 4099 are still running/);
-      expect(held).toBe('pid 4100: this store\'s recorded daemon pid 4000 and launcher pid 4099 are still running');
+      expect(held).toEqual({ kind: 'holders-left', holders: [{ pid: 4100, block: { kind: 'left', reason: { kind: 'owners-live', daemonPid: 4000, launcherPid: 4099 } } }] });
     });
 
     // Each case takes the store path: the table is built before beforeEach
@@ -810,7 +817,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     await expect(stopOrphanedOxigraph({
       binaryPath, location, log: (line) => lines.push(line), io,
       stopGraceMs: 500, timeoutMs: 2_000, pollIntervalMs: 100,
-    })).resolves.toEqual({ signalled: [4100], held: 'orphaned Oxigraph pid 4100 was not confirmed gone' });
+    })).resolves.toEqual({ signalled: [4100], held: { kind: 'not-confirmed-gone', pids: [4100] } });
     expect(signals).toEqual([[4100, 'SIGTERM'], [4100, 'SIGKILL']]);
     expect(lines.join('\n')).toContain('pid 4100 was not confirmed gone 2000ms after the reclaim began.');
   });
@@ -839,7 +846,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     await expect(stopOrphanedOxigraph({ binaryPath, location: spaced, log: (line) => lines.push(line), io }))
       .resolves.toEqual({
         signalled: [],
-        held: expect.stringMatching(/^pid 4100: this platform shows no exact argv/),
+        held: { kind: 'holders-left', holders: [{ pid: 4100, block: { kind: 'left', reason: { kind: 'argv-ambiguous' } } }] },
       });
     expect(signals).toEqual([]);
     expect(lines.join('\n')).toContain('its command line cannot be matched reliably');

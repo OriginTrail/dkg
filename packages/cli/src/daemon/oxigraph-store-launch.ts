@@ -6,6 +6,7 @@
  * the same arguments, so the two cannot drift apart.
  */
 import type { OxigraphLaunchHandle } from './oxigraph-launch-strategy.js';
+import type { StoreHold } from './oxigraph-reclaim-policy.js';
 
 /** The leading `oxigraph` arguments that open `location`. */
 export function oxigraphStoreArgs(location: string): string[] {
@@ -17,24 +18,23 @@ export function oxigraphStoreArgs(location: string): string[] {
  * reclaim the store, spawn, and record who owns it. The server builds one
  * (`createOxigraphStoreOwnership`) for each start, and its `stop()` closes it.
  *
- * The server treats a rejection as a failed launch: at boot it stops the
- * child and rethrows; on a supervised restart it stops the child and retries
- * with backoff. An implementation therefore handles its expected failures
- * itself (the production owner record logs and resolves) and rejects only
- * for defects.
+ * Every expected result of a launch is an `OxigraphStoreLaunchOutcome`. A
+ * rejection is a defect in one of its steps (the production owner record
+ * logs its own write failures and resolves). The server fails that launch
+ * like one that never became ready: at boot it stops the child and rethrows;
+ * on a supervised restart it stops the child and retries with backoff.
  */
 export interface OxigraphStoreOwnership {
   /**
    * Stop orphaned Oxigraph processes that hold the store lock, then run
-   * `spawn` and record the launch it returns as the store's owner. Resolves
-   * to the recorded launch, or to null without spawning once `close()` has
-   * been called. It rejects without spawning, and without touching the owner
-   * record, when the reclaim leaves the store possibly held by this node's
-   * Oxigraph. A launch that cannot be recorded is killed through its handle
-   * before the launch rejects, so a spawned launch is either handed back or
-   * stopped.
+   * `spawn` and record the launch it returns as the store's owner. Spawns
+   * nothing once `close()` has been called, or when the reclaim leaves the
+   * store possibly held by this node's Oxigraph (then the owner record is
+   * left as it is, too). A launch that cannot be recorded is killed through
+   * its handle before the launch rejects, so a spawned launch is either
+   * handed back or stopped.
    */
-  launch(spawn: () => OxigraphLaunchHandle): Promise<OxigraphStoreLaunch | null>;
+  launch(spawn: () => OxigraphLaunchHandle): Promise<OxigraphStoreLaunchOutcome>;
   /**
    * Refuse further launches and records, and wait for a reclaim or owner
    * record in flight. If the last launch's wrapper had already exited when
@@ -45,6 +45,15 @@ export interface OxigraphStoreOwnership {
    */
   close(): Promise<void>;
 }
+
+/** What `OxigraphStoreOwnership.launch` did. */
+export type OxigraphStoreLaunchOutcome =
+  /** Spawned and recorded. */
+  | { kind: 'launched'; launch: OxigraphStoreLaunch }
+  /** Nothing spawned: `close()` was called first. */
+  | { kind: 'closed' }
+  /** Nothing spawned or recorded: the store may still be held by this node's Oxigraph. */
+  | { kind: 'blocked'; hold: StoreHold };
 
 /** One launch that `OxigraphStoreOwnership.launch` spawned and recorded. */
 export interface OxigraphStoreLaunch {

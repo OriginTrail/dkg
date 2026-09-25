@@ -197,6 +197,54 @@ export function describeLeave(reason: LeaveReason): string {
   }
 }
 
+/**
+ * Why a holder the reaper left running may still be this node's Oxigraph
+ * holding the store: judged and left for another reason than not being it,
+ * its signal refused, or it could not be re-checked or inspected.
+ */
+export type HolderBlock =
+  | { kind: 'left'; reason: Exclude<LeaveReason, { kind: 'not-this-store' }> }
+  | { kind: 'signal-refused' }
+  | { kind: 'unconfirmed'; reason: string }
+  | { kind: 'uninspectable'; reason: string };
+
+/**
+ * Why the store may still be held by this node's Oxigraph after a reclaim.
+ * Nothing may be launched over it: the launch would fail on the lock, and
+ * recording it would replace the owner record a later reclaim needs.
+ */
+export type StoreHold =
+  | { kind: 'holders-unlisted' }
+  | { kind: 'holders-left'; holders: ReadonlyArray<{ pid: number; block: HolderBlock }> }
+  | { kind: 'not-confirmed-gone'; pids: readonly number[] };
+
+/**
+ * What a holder left for `reason` means for a launch: only one that is not
+ * this node's Oxigraph for this store (a backup tool reading LOCK, say)
+ * leaves the store free.
+ */
+export function leaveBlock(reason: LeaveReason): HolderBlock | null {
+  return reason.kind === 'not-this-store' ? null : { kind: 'left', reason };
+}
+
+export function describeHolderBlock(block: HolderBlock): string {
+  switch (block.kind) {
+    case 'left': return describeLeave(block.reason);
+    case 'signal-refused': return 'its signal was refused';
+    case 'unconfirmed': return `it could not be re-checked before its signal (${block.reason})`;
+    case 'uninspectable': return `it could not be inspected (${block.reason})`;
+  }
+}
+
+export function describeStoreHold(hold: StoreHold): string {
+  switch (hold.kind) {
+    case 'holders-unlisted': return 'its lock holders could not be listed';
+    case 'holders-left':
+      return hold.holders.map(({ pid, block }) => `pid ${pid}: ${describeHolderBlock(block)}`).join('; ');
+    case 'not-confirmed-gone': return `orphaned Oxigraph pid ${hold.pids.join(', ')} was not confirmed gone`;
+  }
+}
+
 // Levels between a recorded launcher and Oxigraph. The launcher is the
 // watchdog (`systemd-run --scope` execs it in place), and setpriv and its
 // shell exec into Oxigraph in place, so Oxigraph is its child; the rest is
