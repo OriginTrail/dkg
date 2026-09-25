@@ -34,6 +34,7 @@ import { findListenOwnerPid } from '../src/daemon/oxigraph-listen-port.js';
 import { OXIGRAPH_OWNER_RECORD } from '../src/daemon/oxigraph-owner-record.js';
 import {
   createOxigraphStoreOwnership,
+  type OxigraphStoreOwnershipInput,
   type OxigraphStoreOwnershipSteps,
 } from '../src/daemon/oxigraph-store-ownership.js';
 import {
@@ -179,10 +180,14 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
     }
   }, 60_000);
 
-  // The server's store ownership with its reclaim and record steps replaced,
-  // to force the outcome under test or observe the order.
+  // The production store ownership with both of its steps replaced (no real
+  // reclaim or record runs), to force the outcome under test or observe the
+  // order.
   const ownershipSteps = (steps: Partial<OxigraphStoreOwnershipSteps>) => ({
-    storeOwnershipSteps: { reclaim: async () => {}, record: async () => {}, ...steps },
+    createStoreOwnership: (input: OxigraphStoreOwnershipInput) => createOxigraphStoreOwnership({
+      ...input,
+      steps: { reclaim: async () => {}, record: async () => {}, ...steps },
+    }),
   });
 
   it('does not spawn a restart whose reclaim is still running when stop() is called', async () => {

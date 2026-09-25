@@ -1,5 +1,5 @@
 import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError, type OxigraphMemoryLimits } from '../oxigraph-memory-limits.js';
-import type { ChildProcess } from 'node:child_process';
+import type { ChildProcess, spawn, StdioOptions } from 'node:child_process';
 import { resolveHelperModuleNodeArgs } from '../own-module-path.js';
 import type { CgroupOomSnapshot } from './oxigraph-memory.js';
 import {
@@ -9,16 +9,11 @@ import {
 
 export { normalizeOxigraphMemoryLimits, type OxigraphMemoryLimits } from '../oxigraph-memory-limits.js';
 
-export interface OxigraphSpawnSpec {
+/** What one launch runs, before `launch` adds the spawn options it relies on. */
+interface OxigraphLaunchCommand {
   command: string;
   args: string[];
   environment?: NodeJS.ProcessEnv;
-  /**
-   * Lead a new process group, so the daemon's own signals reach the wrapper
-   * and Oxigraph together. A SIGKILL sent to the wrapper alone cannot be
-   * forwarded and would leave Oxigraph running.
-   */
-  processGroup?: boolean;
 }
 
 export type ListenOwnerResolver = (
@@ -30,7 +25,17 @@ export type ListenOwnerResolver = (
 
 export interface OxigraphLaunchStrategy {
   readonly mode: 'direct' | 'systemd-scope';
-  nextSpawnSpec(binaryPath: string, binaryArgs: string[]): OxigraphSpawnSpec;
+  /**
+   * Spawn Oxigraph through `spawnProcess` with the options `terminate`
+   * relies on: the direct watchdog leads its own process group, so the
+   * daemon's signals reach the watchdog and Oxigraph together.
+   */
+  launch(
+    spawnProcess: typeof spawn,
+    binaryPath: string,
+    binaryArgs: string[],
+    stdio: StdioOptions,
+  ): ChildProcess;
   resolveListenerPid(
     child: ChildProcess,
     port: number,
@@ -47,8 +52,9 @@ export interface OxigraphLaunchStrategy {
   }): boolean;
   logSummary(): string | null;
   /**
-   * Signal a spawned child and whatever it launched. Call it only while the
-   * child has not exited, so a process-group id cannot have been reused.
+   * Signal a child that `launch` returned, and whatever it launched. Call it
+   * only while the child has not exited, so a process-group id cannot have
+   * been reused. Any other child is signalled alone.
    */
   terminate(child: ChildProcess, signal: NodeJS.Signals): void;
 }
@@ -66,19 +72,38 @@ function signalChild(child: ChildProcess, signal: NodeJS.Signals): void {
   child.kill(signal);
 }
 
-// The direct watchdog leads its own process group (`processGroup`). A signal
-// to the group reaches Oxigraph even when the watchdog cannot forward it:
-// SIGKILL sent to the watchdog alone would leave Oxigraph running.
-function signalProcessGroup(child: ChildProcess, signal: NodeJS.Signals): void {
-  if (child.pid !== undefined) {
-    try {
-      process.kill(-child.pid, signal);
-      return;
-    } catch {
-      // Fall back to the wrapper alone.
-    }
-  }
-  child.kill(signal);
+// One owner for spawning and signalling. With `processGroup`, each child is
+// spawned leading its own process group and remembered, and `terminate`
+// signals that group: it reaches Oxigraph even when the wrapper cannot
+// forward the signal, as with SIGKILL sent to the watchdog alone.
+function launcher(
+  build: (binaryPath: string, binaryArgs: string[]) => OxigraphLaunchCommand,
+  processGroup: boolean,
+): Pick<OxigraphLaunchStrategy, 'launch' | 'terminate'> {
+  const groupLeaders = new WeakSet<ChildProcess>();
+  return {
+    launch(spawnProcess, binaryPath, binaryArgs, stdio) {
+      const { command, args, environment } = build(binaryPath, binaryArgs);
+      const child = spawnProcess(command, args, {
+        stdio,
+        ...(processGroup ? { detached: true } : {}),
+        ...(environment ? { env: { ...process.env, ...environment } } : {}),
+      });
+      if (processGroup) groupLeaders.add(child);
+      return child;
+    },
+    terminate(child, signal) {
+      if (groupLeaders.has(child) && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, signal);
+          return;
+        } catch {
+          // Fall back to the wrapper alone.
+        }
+      }
+      signalChild(child, signal);
+    },
+  };
 }
 
 export function createOxigraphLaunchStrategy(opts: {
@@ -100,9 +125,8 @@ export function createOxigraphLaunchStrategy(opts: {
   if (!opts.memoryLimits && opts.platform === 'win32') {
     return {
       ...direct,
-      nextSpawnSpec: (binaryPath, binaryArgs) => ({ command: binaryPath, args: binaryArgs }),
+      ...launcher((binaryPath, binaryArgs) => ({ command: binaryPath, args: binaryArgs }), false),
       resolveListenerPid: (child, port, host, resolver) => resolver(child, port, host, 'child-only'),
-      terminate: signalChild,
     };
   }
 
@@ -118,17 +142,15 @@ export function createOxigraphLaunchStrategy(opts: {
     // fail to open the store.
     return {
       ...direct,
-      nextSpawnSpec: (binaryPath, binaryArgs) => ({
+      ...launcher((binaryPath, binaryArgs) => ({
         command: nodeExecutable,
         args: [
           ...watchdogNodeArgs,
           OXIGRAPH_WATCHDOG_DIRECT_FLAG, String(opts.parentPid),
           binaryPath, ...binaryArgs,
         ],
-        processGroup: true,
-      }),
+      }), true),
       resolveListenerPid: (child, port, host, resolver) => resolver(child, port, host, 'process-tree'),
-      terminate: signalProcessGroup,
     };
   }
 
@@ -144,7 +166,9 @@ export function createOxigraphLaunchStrategy(opts: {
 
   return {
     mode: 'systemd-scope',
-    nextSpawnSpec(binaryPath, binaryArgs) {
+    // setpriv's parent-death signal stops Oxigraph with its watchdog, so the
+    // scope's child is signalled alone.
+    ...launcher((binaryPath, binaryArgs) => {
       generation += 1;
       const unit = `dkg-oxigraph-${opts.parentPid}-${generation}`;
       return {
@@ -162,7 +186,7 @@ export function createOxigraphLaunchStrategy(opts: {
           DBUS_SESSION_BUS_ADDRESS: `unix:path=${runtimeDir}/bus`,
         },
       };
-    },
+    }, false),
     resolveListenerPid: (child, port, host, resolver) => resolver(child, port, host, 'process-tree'),
     observeStderr(child, text) {
       if (text.includes(OXIGRAPH_WATCHDOG_OOM_MARKER)) watchdogOomChildren.add(child);
@@ -173,7 +197,5 @@ export function createOxigraphLaunchStrategy(opts: {
     logSummary: () =>
       `Starting Oxigraph in an isolated systemd user scope ` +
       `(MemoryHigh=${limits.highMiB ?? 'unset'}MiB, MemoryMax=${limits.maxMiB}MiB).`,
-    // setpriv's parent-death signal stops Oxigraph with its watchdog.
-    terminate: signalChild,
   };
 }

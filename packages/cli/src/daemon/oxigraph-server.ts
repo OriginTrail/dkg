@@ -50,10 +50,14 @@ import {
 import { invalidateExternalStoreQuadsCache } from './store-quads-cache.js';
 import { OXIGRAPH_STOP_GRACE_MS } from './oxigraph-parent-watchdog.js';
 import type { OxigraphBinaryCatalog } from './oxigraph-binary.js';
-import { oxigraphStoreArgs, type OxigraphStoreLaunch } from './oxigraph-store-launch.js';
+import {
+  oxigraphStoreArgs,
+  type OxigraphStoreLaunch,
+  type OxigraphStoreOwnership,
+} from './oxigraph-store-launch.js';
 import {
   createOxigraphStoreOwnership,
-  type OxigraphStoreOwnershipSteps,
+  type OxigraphStoreOwnershipInput,
 } from './oxigraph-store-ownership.js';
 import {
   readCgroupOomSnapshot,
@@ -81,11 +85,11 @@ export interface OxigraphServerIo {
   /** Best-effort exit-time re-read of oom_kill from a captured cgroup dir. */
   readCgroupOomKill: (dir: string) => number | null;
   /**
-   * Replace the store reclaim or the owner-record write of each launch, to
-   * force a failure or observe the order in lifecycle tests. Unset steps are
-   * the orphan reclaim and the owner record for this store.
+   * Build the store ownership for this start: the orphan reclaim before each
+   * spawn and the owner record of each launch. Lifecycle tests supply a
+   * complete one to force a failure or observe the order.
    */
-  storeOwnershipSteps: Partial<OxigraphStoreOwnershipSteps>;
+  createStoreOwnership: (input: OxigraphStoreOwnershipInput) => OxigraphStoreOwnership;
 }
 
 export interface StartOxigraphServerOptions {
@@ -198,7 +202,7 @@ export async function startOxigraphServer(
     findListenOwnerPid: ioOverrides.findListenOwnerPid ?? findListenOwnerPid,
     readCgroupOomSnapshot: ioOverrides.readCgroupOomSnapshot ?? readCgroupOomSnapshot,
     readCgroupOomKill: ioOverrides.readCgroupOomKill ?? readCgroupOomKill,
-    storeOwnershipSteps: ioOverrides.storeOwnershipSteps ?? {},
+    createStoreOwnership: ioOverrides.createStoreOwnership ?? createOxigraphStoreOwnership,
   };
   const markStoreDown = (): void => {
     invalidateExternalStoreQuadsCache();
@@ -206,12 +210,11 @@ export async function startOxigraphServer(
   const log = opts.log ?? (() => {});
   // Reclaims the store before each spawn and records each launch; stop()
   // closes it.
-  const storeOwnership = createOxigraphStoreOwnership({
+  const storeOwnership = io.createStoreOwnership({
     location: opts.location,
     binaryPath: opts.binaryPath,
     binaries: opts.binaries,
     log,
-    steps: io.storeOwnershipSteps,
   });
   const host = opts.host ?? DEFAULT_HOST;
   const { port } = opts;
@@ -278,18 +281,7 @@ export async function startOxigraphServer(
   const spawnChild = (): ChildProcess => {
     const args = [...oxigraphStoreArgs(opts.location), '--bind', bind];
     if (queryTimeoutS !== undefined) args.push('--timeout-s', String(queryTimeoutS));
-    const spawnSpec = launchStrategy.nextSpawnSpec(opts.binaryPath, args);
-    const c = io.spawn(
-      spawnSpec.command,
-      spawnSpec.args,
-      {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        ...(spawnSpec.processGroup ? { detached: true } : {}),
-        ...(spawnSpec.environment
-          ? { env: { ...process.env, ...spawnSpec.environment } }
-          : {}),
-      },
-    );
+    const c = launchStrategy.launch(io.spawn, opts.binaryPath, args, ['ignore', 'pipe', 'pipe']);
     // Without this listener Node throws the `error` event as an uncaught
     // exception, killing the daemon. Route it through the normal
     // startup/revive failure path instead (the binary couldn't be executed).

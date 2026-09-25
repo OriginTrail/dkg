@@ -100,7 +100,17 @@ function startOpts(port: number, extra: Record<string, unknown> = {}) {
   } as { binaryPath: string; location: string; port: number } & Record<string, unknown>;
 }
 
-describe('buildOxigraphSpawnSpec', () => {
+// A spawn that records what a launch strategy asks for and starts nothing.
+function recordingSpawn() {
+  const calls: Array<{ command: string; args: readonly string[]; options: Parameters<typeof spawn>[2] }> = [];
+  const spawnProcess = ((command: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => {
+    calls.push({ command, args, options });
+    return { pid: 4242, kill: () => true } as unknown as import('node:child_process').ChildProcess;
+  }) as typeof spawn;
+  return { calls, spawnProcess };
+}
+
+describe('Oxigraph launch strategies', () => {
   it.each(['linux', 'darwin'] as const)(
     'ties an unscoped Oxigraph to the daemon through the direct parent watchdog on %s',
     async (platform) => {
@@ -112,11 +122,14 @@ describe('buildOxigraphSpawnSpec', () => {
         watchdogPath: '/opt/oxigraph-watchdog.js',
       });
       expect(strategy.mode).toBe('direct');
-      expect(strategy.nextSpawnSpec('/opt/oxigraph', ['serve'])).toEqual({
+      const { calls, spawnProcess } = recordingSpawn();
+      strategy.launch(spawnProcess, '/opt/oxigraph', ['serve'], 'ignore');
+      expect(calls).toEqual([{
         command: '/opt/node',
         args: ['/opt/oxigraph-watchdog.js', '--direct', '42', '/opt/oxigraph', 'serve'],
-        processGroup: true,
-      });
+        // The watchdog leads its own process group, which `terminate` signals.
+        options: { stdio: 'ignore', detached: true },
+      }]);
       const resolver = vi.fn(async () => 4242);
       const child = {} as import('node:child_process').ChildProcess;
       await expect(strategy.resolveListenerPid(child, 7878, '127.0.0.1', resolver)).resolves.toBe(4242);
@@ -126,11 +139,17 @@ describe('buildOxigraphSpawnSpec', () => {
 
   it('signals the direct watchdog\'s whole process group, so a SIGKILL also reaches Oxigraph', async () => {
     const strategy = createOxigraphLaunchStrategy({ platform: process.platform, parentPid: 42, uid: 1000 });
-    // A wrapper that leads its own group and launches a long-lived child.
-    const wrapper = spawn(process.execPath, [
-      '-e',
-      "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); console.log(c.pid); setInterval(() => {}, 1000);",
-    ], { stdio: ['ignore', 'pipe', 'ignore'], detached: true });
+    // Launched through the strategy, with the spawn options it chooses, as a
+    // wrapper that launches a long-lived child in place of the watchdog.
+    const wrapper = strategy.launch(
+      ((_command: string, _args: readonly string[], options: Parameters<typeof spawn>[2]) => spawn(process.execPath, [
+        '-e',
+        "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }); console.log(c.pid); setInterval(() => {}, 1000);",
+      ], options)) as typeof spawn,
+      '/opt/oxigraph',
+      ['serve'],
+      ['ignore', 'pipe', 'ignore'],
+    );
     const [chunk] = await once(wrapper.stdout!, 'data');
     const grandchild = Number(String(chunk).trim());
     try {
@@ -153,7 +172,20 @@ describe('buildOxigraphSpawnSpec', () => {
   ])('signals only the spawned child on %s', (_label, options) => {
     const strategy = createOxigraphLaunchStrategy(options);
     const kill = vi.fn(() => true);
-    strategy.terminate({ pid: 4242, kill } as unknown as import('node:child_process').ChildProcess, 'SIGTERM');
+    const child = strategy.launch(
+      (() => ({ pid: 4242, kill }) as unknown as import('node:child_process').ChildProcess) as unknown as typeof spawn,
+      '/opt/oxigraph',
+      ['serve'],
+      'ignore',
+    );
+    strategy.terminate(child, 'SIGTERM');
+    expect(kill).toHaveBeenCalledWith('SIGTERM');
+  });
+
+  it('signals a child it did not launch alone, even in direct mode', () => {
+    const strategy = createOxigraphLaunchStrategy({ platform: 'linux', parentPid: 42, uid: 1000 });
+    const kill = vi.fn(() => true);
+    strategy.terminate({ pid: 2 ** 22 + 9, kill } as unknown as import('node:child_process').ChildProcess, 'SIGTERM');
     expect(kill).toHaveBeenCalledWith('SIGTERM');
   });
 
@@ -163,8 +195,9 @@ describe('buildOxigraphSpawnSpec', () => {
       parentPid: 42,
       uid: -1,
     });
-    expect(strategy.nextSpawnSpec('C:\\oxigraph.exe', ['serve']))
-      .toEqual({ command: 'C:\\oxigraph.exe', args: ['serve'] });
+    const { calls, spawnProcess } = recordingSpawn();
+    strategy.launch(spawnProcess, 'C:\\oxigraph.exe', ['serve'], 'ignore');
+    expect(calls).toEqual([{ command: 'C:\\oxigraph.exe', args: ['serve'], options: { stdio: 'ignore' } }]);
     const resolver = vi.fn(async () => 4242);
     const child = {} as import('node:child_process').ChildProcess;
     await strategy.resolveListenerPid(child, 7878, '127.0.0.1', resolver);
@@ -180,18 +213,21 @@ describe('buildOxigraphSpawnSpec', () => {
       nodeExecutable: '/opt/node',
       watchdogPath: '/opt/oxigraph-watchdog.js',
     });
-    strategy.nextSpawnSpec('/opt/oxigraph', ['serve']);
-    strategy.nextSpawnSpec('/opt/oxigraph', ['serve']);
-    const spec = strategy.nextSpawnSpec(
-      '/opt/oxigraph',
-      ['serve', '--bind', '127.0.0.1:7878'],
-    );
+    const { calls, spawnProcess } = recordingSpawn();
+    strategy.launch(spawnProcess, '/opt/oxigraph', ['serve'], 'ignore');
+    strategy.launch(spawnProcess, '/opt/oxigraph', ['serve'], 'ignore');
+    strategy.launch(spawnProcess, '/opt/oxigraph', ['serve', '--bind', '127.0.0.1:7878'], 'ignore');
+    const spec = calls[2];
 
     expect(spec.command).toBe('systemd-run');
-    expect(spec.environment).toEqual({
-      XDG_RUNTIME_DIR: '/run/user/1000',
-      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+    expect(spec.options).toMatchObject({
+      stdio: 'ignore',
+      env: {
+        XDG_RUNTIME_DIR: '/run/user/1000',
+        DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+      },
     });
+    expect(spec.options).not.toHaveProperty('detached');
     expect(spec.args.slice(0, 8)).toEqual([
       '--user', '--scope', '--collect', '--quiet',
       '--unit=dkg-oxigraph-42-3',

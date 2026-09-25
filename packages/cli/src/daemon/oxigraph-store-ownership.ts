@@ -17,7 +17,7 @@ import { recordOxigraphOwner } from './oxigraph-owner-record.js';
 import { stopOrphanedOxigraph } from './oxigraph-orphan.js';
 import type { OxigraphStoreOwnership } from './oxigraph-store-launch.js';
 
-/** The two store operations a launch is built from; replaceable in tests. */
+/** The two store operations a launch is built from. */
 export interface OxigraphStoreOwnershipSteps {
   /** Stop orphaned Oxigraph processes that hold the store lock. */
   reclaim(): Promise<void>;
@@ -25,15 +25,24 @@ export interface OxigraphStoreOwnershipSteps {
   record(launch: { launcherPid: number; oxigraphPid?: number }): Promise<void>;
 }
 
-export function createOxigraphStoreOwnership(opts: {
+/** What a store ownership needs to know about the store it launches against. */
+export interface OxigraphStoreOwnershipInput {
   location: string;
   binaryPath: string;
-  /** From `resolveOxigraphBinary`; defaults to `binaryPath` alone. */
+  /** What the reclaim recognises as this node's Oxigraph; defaults to `binaryPath` alone. */
   binaries?: OxigraphBinaryCatalog;
   log: (message: string) => void;
-  steps?: Partial<OxigraphStoreOwnershipSteps>;
-}): OxigraphStoreOwnership {
-  const steps: OxigraphStoreOwnershipSteps = {
+}
+
+/**
+ * The store ownership for one server start. `steps` replaces both the reclaim
+ * and the owner record at once (tests only), so a caller never runs one of
+ * the production steps by leaving it out.
+ */
+export function createOxigraphStoreOwnership(
+  opts: OxigraphStoreOwnershipInput & { steps?: OxigraphStoreOwnershipSteps },
+): OxigraphStoreOwnership {
+  const steps: OxigraphStoreOwnershipSteps = opts.steps ?? {
     reclaim: async () => {
       await stopOrphanedOxigraph({
         location: opts.location,
@@ -48,7 +57,6 @@ export function createOxigraphStoreOwnership(opts: {
       ...launch,
       log: opts.log,
     }),
-    ...opts.steps,
   };
   let closed = false;
   const writes = new Set<Promise<void>>();

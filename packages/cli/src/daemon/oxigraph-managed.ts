@@ -31,6 +31,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   OXIGRAPH_VERSION,
+  oxigraphReclaimCatalog,
   resolveOxigraphBinary,
   type OxigraphBinaryIo,
 } from './oxigraph-binary.js';
@@ -403,7 +404,12 @@ export async function startManagedOxigraph(
   const handle = await startOxigraphServer({
     binaryPath: binary.path,
     location: plan.location,
-    binaries: binary.catalog,
+    binaries: await oxigraphReclaimCatalog({
+      selectedPath: binary.path,
+      cacheDir,
+      platform: opts.platform,
+      io: opts.binaryIo,
+    }),
     port: plan.port,
     log,
     readyTimeoutMs: opts.readyTimeoutMs ?? plan.readyTimeoutMs,

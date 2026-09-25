@@ -250,9 +250,9 @@ function defaultIo(): OxigraphBinaryIo {
 /**
  * The executables that count as this node's Oxigraph when the orphan reclaim
  * judges a lock holder: the exact `paths`, and any `oxigraph*` executable in
- * `dirs`. `resolveOxigraphBinary` builds it with the binary it selects, so
- * the sources a node can launch Oxigraph from and the binaries the reclaim
- * recognises are defined in one place.
+ * `dirs`. `oxigraphReclaimCatalog` builds it beside the resolver, so the
+ * places a node can take Oxigraph from and the binaries the reclaim
+ * recognises are defined in one module.
  */
 export interface OxigraphBinaryCatalog {
   readonly paths: readonly string[];
@@ -281,13 +281,6 @@ export interface ResolvedOxigraphBinary {
   path: string;
   source: 'bundled' | 'system';
   version: string;
-  /**
-   * What the orphan reclaim recognises as this node's Oxigraph: the selected
-   * binary, earlier pinned versions in the managed cache, and the binaries
-   * beside the `oxigraph` on PATH. An orphan from an earlier release may run
-   * whichever of these that release resolved.
-   */
-  catalog: OxigraphBinaryCatalog;
 }
 
 export interface ResolveOxigraphBinaryOptions {
@@ -380,14 +373,6 @@ export async function resolveOxigraphBinary(
   const io = { ...defaultIo(), ...opts.io };
   const log = opts.log ?? (() => {});
   const platform = opts.platform ?? process.platform;
-  const selected = async (
-    binary: Omit<ResolvedOxigraphBinary, 'catalog'>,
-    onPath?: string | null,
-  ): Promise<ResolvedOxigraphBinary> => {
-    const pathBinary = onPath !== undefined ? onPath : await resolveSystemOxigraphOnPath(io, platform);
-    const dirs = [opts.cacheDir, dirname(binary.path), ...(pathBinary ? [dirname(pathBinary)] : [])];
-    return { ...binary, catalog: { paths: [binary.path], dirs: [...new Set(dirs)] } };
-  };
 
   // On Linux+musl the pinned (glibc) asset would download but not run, so a
   // system `oxigraph` on PATH is the only thing that works here. Detect and
@@ -398,7 +383,7 @@ export async function resolveOxigraphBinary(
     if (sys) {
       const version = await io.probeVersion(sys, opts.versionProbeTimeoutMs);
       log(`musl libc detected; using system Oxigraph ${version} binary on PATH: ${sys}`);
-      return selected({ path: sys, source: 'system', version }, sys);
+      return { path: sys, source: 'system', version };
     }
     throw new Error(
       `No glibc-compatible prebuilt Oxigraph ${OXIGRAPH_VERSION} for this musl host. ` +
@@ -417,7 +402,7 @@ export async function resolveOxigraphBinary(
     if (sys) {
       const version = await io.probeVersion(sys, opts.versionProbeTimeoutMs);
       log(`No pinned Oxigraph binary for this platform; using system Oxigraph ${version} on PATH: ${sys}`);
-      return selected({ path: sys, source: 'system', version }, sys);
+      return { path: sys, source: 'system', version };
     }
     throw assetErr;
   }
@@ -430,7 +415,7 @@ export async function resolveOxigraphBinary(
     const existing = await io.readFile(target);
     if (sha256Hex(existing as Uint8Array) === resolved.sha256) {
       log(`Oxigraph ${OXIGRAPH_VERSION} binary cached at ${target}`);
-      return selected({ path: target, source: 'bundled', version: OXIGRAPH_VERSION });
+      return { path: target, source: 'bundled', version: OXIGRAPH_VERSION };
     }
     log(`Cached Oxigraph binary at ${target} failed checksum — re-downloading.`);
   } catch {
@@ -470,5 +455,27 @@ export async function resolveOxigraphBinary(
   await io.rm(target, { force: true }).catch(() => {});
   await io.rename(tmp, target);
   log(`Oxigraph ${OXIGRAPH_VERSION} binary verified and installed at ${target}`);
-  return selected({ path: target, source: 'bundled', version: OXIGRAPH_VERSION });
+  return { path: target, source: 'bundled', version: OXIGRAPH_VERSION };
+}
+
+/**
+ * What the orphan reclaim recognises as this node's Oxigraph, beside the
+ * binary the resolver selected: earlier pinned versions in the managed cache,
+ * and the binaries beside the `oxigraph` on PATH. An orphan from an earlier
+ * release may run whichever of these that release resolved. Built by the
+ * managed layer for the reclaim, apart from resolution, which never needs the
+ * PATH binary once a pinned binary is selected.
+ */
+export async function oxigraphReclaimCatalog(opts: {
+  selectedPath: string;
+  cacheDir: string;
+  platform?: NodeJS.Platform;
+  io?: Partial<OxigraphBinaryIo>;
+}): Promise<OxigraphBinaryCatalog> {
+  const pathBinary = await resolveSystemOxigraphOnPath(
+    { ...defaultIo(), ...opts.io },
+    opts.platform ?? process.platform,
+  );
+  const dirs = [opts.cacheDir, dirname(opts.selectedPath), ...(pathBinary ? [dirname(pathBinary)] : [])];
+  return { paths: [opts.selectedPath], dirs: [...new Set(dirs)] };
 }

@@ -34,6 +34,7 @@ import { join } from 'node:path';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { oxigraphStoreArgs } from '../src/daemon/oxigraph-store-launch.js';
 import { stopOrphanedOxigraph } from '../src/daemon/oxigraph-orphan.js';
+import { createOxigraphStoreOwnership } from '../src/daemon/oxigraph-store-ownership.js';
 import {
   checkIdentity,
   OXIGRAPH_OWNER_RECORD,
@@ -125,6 +126,55 @@ describe('stopOrphanedOxigraph (real processes)', () => {
     expect(await checkIdentity(identity, reads({ state: 'unknown', reason: 'ps: timed out' })))
       .toEqual({ state: 'unknown', reason: 'ps: timed out' });
   });
+
+  it('the production store ownership reclaims before it spawns, then records the launch and its ready Oxigraph', async () => {
+    const port = await freePort();
+    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-ownership-'));
+    // An earlier release's orphan, adopted by init, still holding the store.
+    const orphan = await spawnOrphan(lockingStandin.binaryPath, [
+      ...oxigraphStoreArgs(location), '--bind', `127.0.0.1:${port}`,
+    ]);
+    const lines: string[] = [];
+    let launcher: ReturnType<typeof spawn> | undefined;
+    let linesAtSpawn = -1;
+    try {
+      expect(await waitForCondition(() => portAnswers(port))).toBe(true);
+      const ownership = createOxigraphStoreOwnership({
+        location,
+        binaryPath: lockingStandin.binaryPath,
+        log: (line) => lines.push(line),
+      });
+      const launch = await ownership.launch(() => {
+        linesAtSpawn = lines.length;
+        launcher = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+        return launcher;
+      });
+      // The reclaim finished before the spawn.
+      expect(lines.slice(0, linesAtSpawn).join('\n')).toContain(
+        `stopping orphaned Oxigraph pid ${orphan} (it was reparented to PID 1)`,
+      );
+      expect(lines.slice(0, linesAtSpawn).join('\n')).toContain('released by the orphaned Oxigraph');
+      expect(launch?.child).toBe(launcher);
+      // Recorded at spawn, without an Oxigraph yet ...
+      const atSpawn = await readOxigraphOwnerRecord(location);
+      expect(atSpawn).toMatchObject({
+        kind: 'v1',
+        record: { daemon: { pid: process.pid }, launcher: { pid: launcher!.pid } },
+      });
+      expect(atSpawn.kind === 'v1' && atSpawn.record.oxigraph).toBeUndefined();
+      // ... and with the verified Oxigraph once ready.
+      await launch!.ready(launcher!.pid!);
+      expect(await readOxigraphOwnerRecord(location)).toMatchObject({
+        kind: 'v1',
+        record: { launcher: { pid: launcher!.pid }, oxigraph: { pid: launcher!.pid } },
+      });
+      await ownership.close();
+    } finally {
+      launcher?.kill('SIGKILL');
+      killIfAlive(orphan);
+      await rm(location, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it('tells a missing owner record from a malformed and an unreadable one', async () => {
     const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-record-read-'));

@@ -19,6 +19,7 @@ import {
   expect,
   it,
 } from 'vitest';
+import type { ChildProcess, spawn } from 'node:child_process';
 import {
   mkdir,
   mkdtemp,
@@ -665,16 +666,20 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
   it('recognises the exact Oxigraph argv that the direct and scoped launches build', () => {
     const serveArgs = [...oxigraphStoreArgs('/data/ox'), '--bind', '127.0.0.1:7878'];
     for (const memoryLimits of [undefined, { maxMiB: 3072 }]) {
-      const spec = createOxigraphLaunchStrategy({
+      let launched: readonly string[] = [];
+      createOxigraphLaunchStrategy({
         memoryLimits,
         platform: 'linux',
         parentPid: 42,
         uid: 1000,
         nodeExecutable: '/opt/node',
         watchdogPath: '/opt/oxigraph-watchdog.js',
-      }).nextSpawnSpec(binaryPath, serveArgs);
+      }).launch(((_command: string, args: readonly string[]) => {
+        launched = args;
+        return { pid: 4242 } as ChildProcess;
+      }) as unknown as typeof spawn, binaryPath, serveArgs, 'ignore');
       // The argv the watchdog execs for Oxigraph: the binary and its arguments.
-      const argv = spec.args.slice(spec.args.indexOf(binaryPath));
+      const argv = launched.slice(launched.indexOf(binaryPath));
       expect(matchManagedOxigraphStore(
         { argv, command: argv.join(' ') }, '/data/ox', { paths: [binaryPath], dirs: [] },
       )).toBe('match');

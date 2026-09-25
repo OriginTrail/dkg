@@ -29,6 +29,7 @@ import { join } from 'node:path';
 import {
   isCatalogedOxigraph,
   oxigraphBinaryCatalog,
+  oxigraphReclaimCatalog,
   resolveOxigraphBinary,
   resolveOxigraphAsset,
   OXIGRAPH_ASSETS,
@@ -112,7 +113,7 @@ describe('resolveOxigraphBinary (real server + real filesystem)', () => {
     const before = hits;
     try {
       const binary = await resolveOxigraphBinary({ cacheDir, asset: assetFor('/ok', 'oxi-real-bin'), log: () => {} });
-      expect(binary).toMatchObject({
+      expect(binary).toEqual({
         path: join(cacheDir, 'oxi-real-bin'),
         source: 'bundled',
         version: OXIGRAPH_VERSION,
@@ -132,7 +133,7 @@ describe('resolveOxigraphBinary (real server + real filesystem)', () => {
       await writeFile(join(cacheDir, 'oxi-real-bin'), bytes);
       const before = hits;
       const binary = await resolveOxigraphBinary({ cacheDir, asset: assetFor('/ok', 'oxi-real-bin'), log: () => {} });
-      expect(binary).toMatchObject({
+      expect(binary).toEqual({
         path: join(cacheDir, 'oxi-real-bin'),
         source: 'bundled',
         version: OXIGRAPH_VERSION,
@@ -231,7 +232,6 @@ describe('PATH fallback (real directories, real executables)', () => {
         path: join(pathDirB, 'oxigraph'),
         source: 'system',
         version: '0.6.0',
-        catalog: { paths: [join(pathDirB, 'oxigraph')], dirs: [cacheDir, pathDirB] },
       });
       expect(hits - before).toBe(0);
     } finally {
@@ -250,7 +250,7 @@ describe('PATH fallback (real directories, real executables)', () => {
         arch: 'x64',
         io: { stat: statOnMuslHost },
         log: () => {},
-      })).resolves.toMatchObject({
+      })).resolves.toEqual({
         path: join(pathDirB, 'oxigraph'),
         source: 'system',
         version: '0.6.0',
@@ -261,17 +261,16 @@ describe('PATH fallback (real directories, real executables)', () => {
     }
   });
 
-  it('catalogs the cache and the PATH binary\'s directory beside a bundled binary, skipping a decoy', async () => {
+  it('catalogs the cache and the PATH binary\'s directory beside the selected binary, skipping a decoy', async () => {
     const cacheDir = await freshCache();
     const emptyDir = await mkdtemp(join(tmpdir(), 'oxi-path-empty-'));
     try {
-      await writeFile(join(cacheDir, 'oxi-real-bin'), bytes);
-      const bundled = { cacheDir, platform: 'linux' as const, asset: assetFor('/ok', 'oxi-real-bin'), log: () => {} };
       const cached = join(cacheDir, 'oxi-real-bin');
+      const bundled = { selectedPath: cached, cacheDir, platform: 'linux' as const };
       // An orphan from an earlier release may run an earlier pinned binary
       // from the cache, or the operator's binary on PATH.
       process.env.PATH = `${pathDirA}:${pathDirB}`;
-      const { catalog } = await resolveOxigraphBinary(bundled);
+      const catalog = await oxigraphReclaimCatalog(bundled);
       expect(catalog).toEqual({ paths: [cached], dirs: [cacheDir, pathDirB] });
       expect(isCatalogedOxigraph(catalog, join(cacheDir, 'oxigraph-v0.5.7'))).toBe(true);
       expect(isCatalogedOxigraph(catalog, join(pathDirB, 'oxigraph'))).toBe(true);
@@ -279,9 +278,11 @@ describe('PATH fallback (real directories, real executables)', () => {
       expect(isCatalogedOxigraph(catalog, join(pathDirA, 'oxigraph'))).toBe(false);
       expect(isCatalogedOxigraph(catalog, join(cacheDir, 'rocksdb-tool'))).toBe(false);
       process.env.PATH = `${pathDirA}:${emptyDir}`;
-      await expect(resolveOxigraphBinary(bundled)).resolves.toMatchObject({
-        catalog: { paths: [cached], dirs: [cacheDir] },
-      });
+      await expect(oxigraphReclaimCatalog(bundled)).resolves.toEqual({ paths: [cached], dirs: [cacheDir] });
+      // A system binary selected from PATH: its own directory, once.
+      process.env.PATH = `${pathDirA}:${pathDirB}`;
+      await expect(oxigraphReclaimCatalog({ ...bundled, selectedPath: join(pathDirB, 'oxigraph') }))
+        .resolves.toEqual({ paths: [join(pathDirB, 'oxigraph')], dirs: [cacheDir, pathDirB] });
     } finally {
       process.env.PATH = prevPath;
       await rm(cacheDir, { recursive: true, force: true });
