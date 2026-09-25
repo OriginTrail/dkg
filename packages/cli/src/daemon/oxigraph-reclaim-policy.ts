@@ -234,14 +234,18 @@ export function classifyHolder(
   if (ownership.kind === 'unknown') {
     return { action: 'leave', reason: { kind: 'ownership-unknown', reason: ownership.reason } };
   }
+  const match = matchManagedOxigraphStore(holder, ctx.location, ctx.binaries);
+  if (match === 'ambiguous') return { action: 'leave', reason: { kind: 'argv-ambiguous' } };
+  if (match === 'no-match') return { action: 'leave', reason: { kind: 'not-this-store' } };
+  // The recorded Oxigraph, whatever adopted it. Its PID and start time are
+  // not proof on their own: a start time repeats within its resolution (a
+  // second for `ps`), so the command must be this node's Oxigraph for this
+  // store as well.
   const recordedOxigraph = ownership.kind === 'owner-gone' ? ownership.record.oxigraph : undefined;
   if (ownership.kind === 'owner-gone' && recordedOxigraph !== undefined
     && recordedOxigraph.pid === holder.pid && recordedOxigraph.start === holder.start) {
     return { action: 'stop', reason: { kind: 'owner-gone', ...ownership.gone } };
   }
-  const match = matchManagedOxigraphStore(holder, ctx.location, ctx.binaries);
-  if (match === 'ambiguous') return { action: 'leave', reason: { kind: 'argv-ambiguous' } };
-  if (match === 'no-match') return { action: 'leave', reason: { kind: 'not-this-store' } };
   // A launch killed before it was ready: its watchdog is alive but cannot
   // act (frozen, wedged), and the daemon that recorded it is gone.
   if (ownership.kind === 'owner-gone') {

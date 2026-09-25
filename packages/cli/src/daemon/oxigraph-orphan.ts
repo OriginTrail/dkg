@@ -157,16 +157,32 @@ export function reclaimHost(platform: NodeJS.Platform): OrphanedOxigraphIo {
 }
 
 /**
+ * A process instance under one PID: its start time and command line. The
+ * start time alone can repeat within its resolution (a second for `ps`), so
+ * a PID reused that fast is still told apart by its command.
+ */
+export interface InstanceName {
+  start: string;
+  command: string;
+}
+
+const instanceOf = (process: ProcessInstance): InstanceName =>
+  ({ start: process.start, command: process.command });
+
+const sameInstance = (a: InstanceName, b: InstanceName): boolean =>
+  a.start === b.start && a.command === b.command;
+
+/**
  * What the reaper has done about the process instance holding the lock under
- * one PID. `start` names the instance: a holder with another start time under
- * the same PID is a recycled PID and is judged afresh.
+ * one PID. `instance` names it: a holder with another start time or command
+ * under the same PID is a recycled PID and is judged afresh.
  */
 export type Attempt =
-  /** Judged and left running, or its signal was refused; `start` null: it could not be inspected. */
-  | { kind: 'left'; start: string | null }
+  /** Judged and left running, or its signal was refused; `instance` null: it could not be inspected. */
+  | { kind: 'left'; instance: InstanceName | null }
   /** SIGTERM sent at `termAt`; SIGKILL follows once the stop grace has passed. */
-  | { kind: 'term-sent'; start: string; termAt: number }
-  | { kind: 'kill-sent'; start: string };
+  | { kind: 'term-sent'; instance: InstanceName; termAt: number }
+  | { kind: 'kill-sent'; instance: InstanceName };
 
 /** What the reaper does next about one PID, after one read of it. */
 export type AttemptStep =
@@ -179,7 +195,7 @@ export type AttemptStep =
   /** An unjudged holder that could not be read: report it and leave it. */
   | { kind: 'leave-unreadable'; reason: string }
   /** The stop grace has passed since SIGTERM: send SIGKILL. */
-  | { kind: 'escalate'; start: string };
+  | { kind: 'escalate'; instance: InstanceName };
 
 /**
  * The transition for one PID from its attempt (if any) and one read of it.
@@ -199,14 +215,14 @@ export function advanceAttempt(
     return { kind: 'keep', awaited: attempt.kind !== 'left' };
   }
   const holder = read.process;
-  if (attempt === undefined || attempt.start !== holder.start) {
+  if (attempt === undefined || attempt.instance === null || !sameInstance(attempt.instance, holder)) {
     // A new process under this PID: judged if it holds the lock; otherwise
     // the instance this attempt named has exited.
     return at.listed ? { kind: 'judge', holder } : { kind: 'forget' };
   }
   if (attempt.kind === 'left') return { kind: 'keep', awaited: false };
   if (attempt.kind === 'term-sent' && at.now - attempt.termAt >= at.stopGraceMs) {
-    return { kind: 'escalate', start: attempt.start };
+    return { kind: 'escalate', instance: attempt.instance };
   }
   return { kind: 'keep', awaited: true };
 }
@@ -219,10 +235,10 @@ export type StopConfirmation =
   /** It could not be read: leave it rather than signal a process that may have changed. */
   | { kind: 'leave-unconfirmed'; reason: string };
 
-/** Signal only the instance that was judged: a PID recycled since then has another start time. */
+/** Signal only the instance that was judged: a PID recycled since then has another start time or command. */
 export function confirmStop(holder: ProcessInstance, reread: ProcessLookup): StopConfirmation {
   if (reread.state === 'unknown') return { kind: 'leave-unconfirmed', reason: reread.reason };
-  if (reread.state === 'gone' || reread.process.start !== holder.start) return { kind: 'forget' };
+  if (reread.state === 'gone' || !sameInstance(reread.process, holder)) return { kind: 'forget' };
   return { kind: 'signal' };
 }
 
@@ -282,7 +298,7 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
     try {
       io.signal(pid, signal);
     } catch (error) {
-      attempts.set(pid, { kind: 'left', start: next.start });
+      attempts.set(pid, { kind: 'left', instance: next.instance });
       opts.log(
         `[oxigraph] could not signal orphaned Oxigraph pid ${pid}: ` +
           `${error instanceof Error ? error.message : String(error)}`,
@@ -302,7 +318,7 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
       { location: opts.location, ownership, binaries },
     );
     if (decision.action === 'leave') {
-      attempts.set(pid, { kind: 'left', start: holder.start });
+      attempts.set(pid, { kind: 'left', instance: instanceOf(holder) });
       opts.log(
         `[oxigraph] ${lockPath} is held by pid ${pid} (parent ${holder.ppid}): ` +
           `${holder.command.slice(0, 300)}. Leaving it running: ${describeLeave(decision.reason)}.`,
@@ -315,7 +331,7 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
       return false;
     }
     if (confirmation.kind === 'leave-unconfirmed') {
-      attempts.set(pid, { kind: 'left', start: holder.start });
+      attempts.set(pid, { kind: 'left', instance: instanceOf(holder) });
       opts.log(
         `[oxigraph] could not confirm that pid ${pid} is still the orphaned Oxigraph ` +
           `holding ${lockPath} (${confirmation.reason}). Leaving it running.`,
@@ -326,7 +342,7 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
       `[oxigraph] stopping orphaned Oxigraph pid ${pid} (${describeStop(decision.reason)}); ` +
         `it still holds ${lockPath}.`,
     );
-    return send(pid, 'SIGTERM', { kind: 'term-sent', start: holder.start, termAt: io.now() });
+    return send(pid, 'SIGTERM', { kind: 'term-sent', instance: instanceOf(holder), termAt: io.now() });
   };
 
   // One read of `pid`, one transition, and its effect. Resolves to whether
@@ -344,7 +360,7 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
       case 'keep':
         return next.awaited;
       case 'leave-unreadable':
-        attempts.set(pid, { kind: 'left', start: null });
+        attempts.set(pid, { kind: 'left', instance: null });
         opts.log(
           `[oxigraph] ${lockPath} is held by pid ${pid}, which could not be inspected ` +
             `(${next.reason}). Leaving it running.`,
@@ -352,7 +368,7 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
         return false;
       case 'escalate':
         opts.log(`[oxigraph] orphaned Oxigraph pid ${pid} did not exit on SIGTERM; sending SIGKILL.`);
-        return send(pid, 'SIGKILL', { kind: 'kill-sent', start: next.start });
+        return send(pid, 'SIGKILL', { kind: 'kill-sent', instance: next.instance });
       case 'judge':
         return judge(pid, next.holder);
     }

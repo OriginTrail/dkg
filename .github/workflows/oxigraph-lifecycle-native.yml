@@ -16,6 +16,7 @@ on:
       - 'packages/cli/test/oxigraph-parent-watchdog.test.ts'
       - 'packages/cli/test/oxigraph-server.test.ts'
       - 'packages/cli/test/oxigraph-launch-strategy.test.ts'
+      - 'packages/cli/test/oxigraph-reclaim-policy.test.ts'
       - 'packages/cli/test/fixtures/oxigraph-*.ts'
       - 'packages/cli/src/daemon/fs-utils.ts'
       - 'packages/cli/src/daemon/atomic-write.ts'
@@ -59,6 +60,7 @@ jobs:
           pnpm --dir packages/cli exec vitest run --config vitest.unit.config.ts
           test/oxigraph-orphan-lifecycle.test.ts
           test/oxigraph-orphan-policy.test.ts
+          test/oxigraph-reclaim-policy.test.ts
           test/oxigraph-orphan-native.test.ts
           test/oxigraph-listen-port.test.ts
           test/oxigraph-parent-watchdog.test.ts
