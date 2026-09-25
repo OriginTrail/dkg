@@ -27,6 +27,7 @@ import {
   invalidateSwmMaterializationWitness,
   readSwmMaterializationWitness,
   writeSwmMaterializationWitness,
+  asGraphWriteRevisionSource,
 } from '@origintrail-official/dkg-storage';
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import { operationIdentityKey } from '../graph-scoped-swm-recovery.js';
@@ -34,6 +35,19 @@ import { isDecodableWorkspaceOperationRows } from '@origintrail-official/dkg-pub
 
 const DKG = 'http://dkg.io/ontology/';
 const RDF_TYPE_IRI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+
+/**
+ * A successful full graph validation remains reusable only for this short
+ * window. The write-generation check catches local mutations; the TTL is the
+ * backstop for stores that can be changed by another process.
+ */
+const MATERIALIZATION_MEMO_TTL_MS = 30_000;
+const MATERIALIZATION_MEMO_MAX_ENTRIES = 1024;
+
+interface MaterializationMemoEntry {
+  generation: number;
+  expiresAt: number;
+}
 
 /**
  * GH#2273 preservation validators — each names ONE invariant of the
@@ -306,6 +320,73 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     if (!raw) return true;
     return raw !== '0' && raw.toLowerCase() !== 'false';
   })();
+
+  // The durable witness remains the compatibility path for stores without a
+  // write-revision capability. Stores that expose a stable generation can use
+  // this bounded process-local memo to skip both COUNT and CONSTRUCT on an
+  // unchanged descriptor. The short TTL limits the stale-read window when a
+  // second process can mutate the same backing store.
+  const graphWriteRevision = asGraphWriteRevisionSource(deps.store);
+  // A durable witness can seed the in-process memo only when the revision
+  // source observes every writer. With process-local coverage, another
+  // process can replace equal-count content without changing our generation;
+  // every memo miss (including TTL expiry and LRU eviction) must therefore
+  // re-bind the content digest with CONSTRUCT before the memo is refreshed.
+  const witnessCanSeedMemo = graphWriteRevision?.writeRevisionCoverage !== 'process-local';
+  const materializationMemo = new Map<string, MaterializationMemoEntry>();
+  const readWriteRevision = (assertionGraph: string) => {
+    try {
+      return graphWriteRevision?.getWriteRevision(assertionGraph) ?? null;
+    } catch {
+      // A capability failure is an optimisation miss, never a materialization
+      // failure. Fall back to the existing count + digest validation.
+      return null;
+    }
+  };
+  const memoKey = (descriptor: GraphScopedSwmRecoveryDescriptor): string => JSON.stringify([
+    descriptor.assertionGraph,
+    descriptor.publicQuadsDigest,
+    descriptor.publicQuadsCount,
+  ]);
+  const forgetMemo = (assertionGraph: string): void => {
+    for (const key of materializationMemo.keys()) {
+      if (key.startsWith(`[${JSON.stringify(assertionGraph)},`)) {
+        materializationMemo.delete(key);
+      }
+    }
+  };
+  const rememberMemo = (
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+    revision: { generation: number; stable: boolean } | null,
+  ): void => {
+    if (!revision?.stable) return;
+    const key = memoKey(descriptor);
+    materializationMemo.delete(key);
+    materializationMemo.set(key, {
+      generation: revision.generation,
+      expiresAt: Date.now() + MATERIALIZATION_MEMO_TTL_MS,
+    });
+    while (materializationMemo.size > MATERIALIZATION_MEMO_MAX_ENTRIES) {
+      const oldest = materializationMemo.keys().next().value;
+      if (oldest === undefined) break;
+      materializationMemo.delete(oldest);
+    }
+  };
+  const readMemo = (descriptor: GraphScopedSwmRecoveryDescriptor): boolean => {
+    if (!graphWriteRevision) return false;
+    const revision = readWriteRevision(descriptor.assertionGraph);
+    if (!revision?.stable) return false;
+    const key = memoKey(descriptor);
+    const entry = materializationMemo.get(key);
+    if (!entry || entry.expiresAt <= Date.now() || entry.generation !== revision.generation) {
+      if (entry) materializationMemo.delete(key);
+      return false;
+    }
+    // Map insertion order is the LRU order.
+    materializationMemo.delete(key);
+    materializationMemo.set(key, entry);
+    return true;
+  };
 
   /**
    * The ONE discovery of which operation subjects a head references AND this
@@ -638,6 +719,10 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     isGraphAssetMaterialized: async (descriptor) => {
       const expected = descriptor.publicQuadsCount;
       if (!Number.isSafeInteger(expected) || expected < 0) return false;
+      const validationRevision = readWriteRevision(descriptor.assertionGraph);
+      // Empty projections have a second control-plane health check below;
+      // keep that check on every call instead of memoizing only the graph row.
+      if (expected > 0 && readMemo(descriptor)) return true;
       // 1) Count gate: exact-IRI scope, so bounded — and cheap enough to run
       // every round. Strictly equal: a short graph is a partial write and must
       // be replaced, not treated as already materialized.
@@ -665,6 +750,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       // which is not worth trading self-healing for. Do not reorder these.
       if (
         witnessUsable
+        && witnessCanSeedMemo
         && await readSwmMaterializationWitness(
           deps.store,
           descriptor.assertionGraph,
@@ -672,6 +758,15 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.witnessAsk' },
         )
       ) {
+        const currentRevision = readWriteRevision(descriptor.assertionGraph);
+        if (
+          expected > 0
+          && validationRevision?.stable
+          && currentRevision?.stable
+          && validationRevision.generation === currentRevision.generation
+        ) {
+          rememberMemo(descriptor, currentRevision);
+        }
         return true;
       }
       // 2) Content binding: a matching count does not prove the stored graph
@@ -690,6 +785,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       if (contentResult.type !== 'quads') return false;
       const stored = contentResult.quads.map((quad) => ({ ...quad, graph: '' }));
       const matches = workspacePublicQuadsDigest(stored) === descriptor.publicQuadsDigest;
+      const currentRevision = readWriteRevision(descriptor.assertionGraph);
       if (matches && witnessUsable) {
         // Written HERE — from the branch that just computed the digest over
         // this node's own store content and matched it — and nowhere else.
@@ -707,6 +803,15 @@ export function createSharedMemorySnapshotMaterializer(deps: {
 
           { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.witnessWrite' },
         ).catch(() => false);
+      }
+      if (
+        matches
+        && expected > 0
+        && validationRevision?.stable
+        && currentRevision?.stable
+        && validationRevision.generation === currentRevision.generation
+      ) {
+        rememberMemo(descriptor, currentRevision);
       }
       return matches;
     },
@@ -774,6 +879,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         priority: 'background',
         source: 'agent.sharedMemorySync.materializeSnapshot.witnessInvalidate',
       }).catch(() => {});
+      forgetMemo(graphUri);
       deps.invalidateListContextGraphsCache();
     },
 
