@@ -358,6 +358,14 @@ export const PATH_TRIGGERS = Object.freeze([
     evmScopes: [],
     reason: 'the chain RPC-site census asserts their authority call sites',
   },
+  {
+    // packages/publisher/test/incoming-public-copy-boundary.test.ts pins every
+    // source file that takes a received copy in through the store-form rewrite.
+    patterns: [/^packages\/agent\/src\/gossip-publish-handler\.ts$/],
+    lanes: ['tornado_publisher'],
+    evmScopes: [],
+    reason: 'the publisher incoming-copy boundary test pins the agent gossip publish handler',
+  },
 ]);
 
 // Repository areas outside the package workspaces, in first-match order. An
