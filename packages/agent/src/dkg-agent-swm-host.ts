@@ -3541,21 +3541,38 @@ export class SwmHostModeMethods extends DKGAgentBase {
         scanOrdinal: target.cursor.scanOrdinal,
       };
       let pendingWatermark: number | undefined;
-      const result = await reconcileContextGraph(
-        this.createVmReconcileDeps(
+      let result: VmReconcileEngineResult;
+      try {
+        result = await reconcileContextGraph(
+          this.createVmReconcileDeps(
+            localCgId,
+            lifecycleGeneration,
+            target,
+            lifecycleSignal,
+            {
+              identityCursor: target.cursor,
+              persistWatermark: (_lcg, watermark) => { pendingWatermark = watermark; },
+            },
+          ),
+          workingCursor,
           localCgId,
-          lifecycleGeneration,
-          target,
-          lifecycleSignal,
-          {
-            identityCursor: target.cursor,
-            persistWatermark: (_lcg, watermark) => { pendingWatermark = watermark; },
-          },
-        ),
-        workingCursor,
-        localCgId,
-        target.onChainCgId,
-      );
+          target.onChainCgId,
+        );
+      } catch (err) {
+        // A rejected pass keeps what it proved (see `reconcileContextGraph`):
+        // its held completions and scan position move to the live cursor, so
+        // the retry neither re-verifies settled ordinals nor restarts the
+        // slice. The watermark and its persistence stay with a successful pass.
+        if (isTargetCurrent()) {
+          for (const [heldOrdinal, observedBlock] of workingCursor.ahead) {
+            if (heldOrdinal >= target.cursor.watermark && !target.cursor.ahead.has(heldOrdinal)) {
+              target.cursor.ahead.set(heldOrdinal, observedBlock);
+            }
+          }
+          target.cursor.scanOrdinal = Math.max(target.cursor.watermark, workingCursor.scanOrdinal);
+        }
+        throw err;
+      }
       if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
       if (result.reconciled > 0 || pendingWatermark !== undefined) {
         await this.store.flush?.({

@@ -6714,4 +6714,58 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       5: 'promote:',
     });
   });
+
+  it('keeps settled ordinals and the scan position when one ordinal keeps throwing', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillThrowingOrdinal', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'throwing-ordinal';
+    internals.subscribedContextGraphs.set(localCgId, {
+      subscribed: false,
+      coreHosted: true,
+      onChainId: '331',
+      lastReconciledOrdinal: 0,
+    });
+    for (let ordinal = 0; ordinal < 12; ordinal += 1) {
+      chain.__registerKC({
+        kaId: BigInt(33_100 + ordinal),
+        contextGraphId: 331n,
+        merkleRootHex: `0x${(33_100 + ordinal).toString(16).padStart(64, '0')}`,
+        chunks: [],
+      });
+    }
+    const failingKaId = 33_103n;
+    const visits = new Map<number, number>();
+    (internals as any).getOrCreateFinalizationHandler = () => ({
+      handleChainReconciledKC: async (input: { kaId: bigint }) => {
+        const ordinal = Number(input.kaId - 33_100n);
+        visits.set(ordinal, (visits.get(ordinal) ?? 0) + 1);
+        if (input.kaId === failingKaId) throw new Error('store deadline exceeded');
+        return 'already-confirmed' as const;
+      },
+    });
+
+    const outcomes: string[] = [];
+    for (let pass = 0; pass < 3; pass += 1) {
+      await internals.executeVmReconcileForCg(localCgId, 'periodic').then(
+        (result) => { outcomes.push(`ok:${result.watermarkAfter}`); },
+        (error: Error) => { outcomes.push(`failed:${error.message}`); },
+      );
+    }
+
+    // Before: every pass restarted at the failing slice and re-read its
+    // settled siblings, and ordinals past that slice were never reached.
+    expect(outcomes).toEqual([
+      'failed:store deadline exceeded',
+      'ok:3',
+      'failed:store deadline exceeded',
+    ]);
+    expect([...visits.keys()].sort((a, b) => a - b)).toEqual(
+      Array.from({ length: 12 }, (_, ordinal) => ordinal),
+    );
+    for (const [ordinal, count] of visits) {
+      expect({ ordinal, count }).toEqual({ ordinal, count: ordinal === 3 ? 2 : 1 });
+    }
+  });
 });
