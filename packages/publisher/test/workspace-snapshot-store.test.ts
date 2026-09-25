@@ -14,7 +14,9 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { formatCanonicalRdfLiteralTerm, parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { describe, expect, it, vi } from 'vitest';
+import { parseSimpleNQuads } from '../src/publish-handler.js';
 import {
   FileWorkspacePublicSnapshotStore,
   SnapshotStorageCapacityError,
@@ -203,6 +205,42 @@ describe('workspacePublicQuadsDigest compatibility', () => {
     stringify.mockRestore();
 
     expect(serializationCount).toBe(quads.length);
+  });
+});
+
+describe('workspacePublicQuadsDigest escaped literals', () => {
+  it.each([
+    { name: '\\u', escaped: '"Women\\u2019s Europeans"', decoded: '"Women’s Europeans"' },
+    { name: '\\U', escaped: '"rocket \\U0001F680"', decoded: '"rocket 🚀"' },
+    { name: 'language-tagged', escaped: '"caf\\u00E9"@fr', decoded: '"café"@fr' },
+    { name: 'typed', escaped: '"caf\\u00E9"^^<urn:datatype:text>', decoded: '"café"^^<urn:datatype:text>' },
+  ])('treats a $name-escaped literal and its decoded form as the same term', ({ escaped, decoded }) => {
+    expect(workspacePublicQuadsDigest([digestQuad('urn:s', undefined, escaped)]))
+      .toBe(workspacePublicQuadsDigest([digestQuad('urn:s', undefined, decoded)]));
+  });
+
+  it('gives a copy parsed from wire N-Quads the digest of the same copy read back from the store', () => {
+    // The StorageACK and SWM gossip paths parse the publisher's N-Quads with
+    // parseSimpleNQuads, which keeps escapes; the store returns decoded,
+    // canonical literals. The finalization check recomputes the digest from
+    // the store, so both forms must hash the same.
+    const parsed = parseSimpleNQuads([
+      '<urn:article> <http://schema.org/headline> "Women\\u2019s Europeans \\u2013 Zagreb" .',
+      '<urn:article> <http://schema.org/datePublished> "2026-08-16"^^<http://www.w3.org/2001/XMLSchema#date> .',
+    ].join('\n'));
+    const stored = parsed.map((quad) => {
+      const literal = parseRdfLiteralTerm(quad.object);
+      return { ...quad, object: literal ? formatCanonicalRdfLiteralTerm(literal) : quad.object };
+    });
+
+    expect(parsed[0]!.object).toBe('"Women\\u2019s Europeans \\u2013 Zagreb"');
+    expect(stored[0]!.object).toBe('"Women’s Europeans – Zagreb"');
+    expect(workspacePublicQuadsDigest(parsed)).toBe(workspacePublicQuadsDigest(stored));
+  });
+
+  it('keeps the old digest for an escaped backslash followed by u', () => {
+    const quads = [digestQuad('urn:s', undefined, '"C:\\\\users"')];
+    expect(workspacePublicQuadsDigest(quads)).toBe(oldWorkspacePublicQuadsDigest(quads));
   });
 });
 
