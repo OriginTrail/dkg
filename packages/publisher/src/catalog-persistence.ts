@@ -44,22 +44,27 @@ WHERE { GRAPH ${sparqlIri(catalogGraph)} {
     [catalogGraph],
     catalogStoreOptions('update', signal),
   );
+  // A deadline may fire while a store adapter is committing a write without
+  // honoring AbortSignal. Once that first write begins, finish the remaining
+  // delete/insert/flush sequence before the caller reports the timeout.
+  let mutationStarted = usedTargetedUpdate;
 
   if (!usedTargetedUpdate) {
     for (const subject of catalogSubjects) {
       await deleteByPatternWithoutCount(
         store,
         { graph: catalogGraph, subject },
-        catalogStoreOptions('deleteByPattern', signal),
+        catalogStoreOptions('deleteByPattern', mutationStarted ? undefined : signal),
       );
+      mutationStarted = true;
     }
   }
 
   await store.insert(
     parsedCatalog.map((quad) => ({ ...quad, graph: catalogGraph })),
-    catalogStoreOptions('insert', signal),
+    catalogStoreOptions('insert', mutationStarted ? undefined : signal),
   );
   // The ACK asserts this data is stored. Force any debounced persistence
   // boundary before the caller signs it.
-  await store.flush?.(catalogStoreOptions('flush', signal));
+  await store.flush?.(catalogStoreOptions('flush'));
 }

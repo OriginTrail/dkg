@@ -1105,7 +1105,10 @@ export class StorageACKHandler {
     assertPersistQuadTermsSafe(catalog.quads);
     const result = await this.runStoreOpOrDecline(
       cgId,
-      () => replaceCatalogQuads(this.store, catalog.graph, catalog.quads, signal),
+      () => this.runCommitTail(
+        () => replaceCatalogQuads(this.store, catalog.graph, catalog.quads, signal),
+        signal,
+      ),
       signal,
     );
     return result.ok ? { ok: true } : result;
