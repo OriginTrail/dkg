@@ -28,10 +28,14 @@ export interface OxigraphStoreOwnership {
    * Stop orphaned Oxigraph processes that hold the store lock, then run
    * `spawn` and record the child it returns as the store's owner. Resolves
    * to what `spawn` returned, with the ready-time record, or to null without
-   * spawning once `close()` has been called. The caller keeps what it
-   * spawned from inside `spawn`, so it can stop it if a later step rejects.
+   * spawning once `close()` has been called. What was spawned is never lost:
+   * if recording it rejects, `abandon` receives it before the launch
+   * rejects, and otherwise the launch hands it back.
    */
-  launch<T extends { child: ChildProcess }>(spawn: () => T): Promise<OxigraphStoreLaunch<T> | null>;
+  launch<T extends { child: ChildProcess }>(
+    spawn: () => T,
+    abandon: (spawned: T) => void,
+  ): Promise<OxigraphStoreLaunch<T> | null>;
   /**
    * Refuse further launches and records. Resolves once no owner-record write
    * is in flight, so the store directory is quiet afterwards.

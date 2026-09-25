@@ -32,8 +32,11 @@ import { dirname, join } from 'node:path';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { oxigraphStoreArgs } from '../src/daemon/oxigraph-store-launch.js';
 import {
+  advanceAttempt,
+  confirmStop,
   lsofLockHolderLister,
   stopOrphanedOxigraph,
+  type Attempt,
   type OrphanedOxigraphIo,
 } from '../src/daemon/oxigraph-orphan.js';
 import { psProcessInspector } from '../src/daemon/process-probe.js';
@@ -653,6 +656,41 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
       expect(signalled).toEqual([]);
       expect(signals).toEqual([]);
       expect(log).toMatch(/Leaving it running: it is not this node's Oxigraph serving this store/);
+    });
+  });
+
+  describe('the reaper\'s transitions for one PID, from one read of it', () => {
+    const holder = { pid: 4100, start: 't1', ppid: 1, argv: null, command: 'oxigraph serve' };
+    const running = (start = 't1') => ({ state: 'running' as const, process: { ...holder, start } });
+    const gone = { state: 'gone' } as const;
+    const unreadable = { state: 'unknown', reason: 'ps timed out' } as const;
+    const at = (now: number, listed = true) => ({ now, stopGraceMs: 500, listed });
+    const termSent: Attempt = { kind: 'term-sent', start: 't1', termAt: 1_000 };
+    const killSent: Attempt = { kind: 'kill-sent', start: 't1' };
+    const left: Attempt = { kind: 'left', start: 't1' };
+
+    it.each([
+      ['a new listed holder is judged', undefined, running(), at(0), { kind: 'judge', holder }],
+      ['a new unlisted process is not the lock holder', undefined, running(), at(0, false), { kind: 'forget' }],
+      ['an unreadable new holder is left and reported', undefined, unreadable, at(0), { kind: 'leave-unreadable', reason: 'ps timed out' }],
+      ['an exited PID is forgotten', termSent, gone, at(1_100), { kind: 'forget' }],
+      ['a holder left running stays left', left, running(), at(0), { kind: 'keep', awaited: false }],
+      ['a signalled holder is awaited within the grace', termSent, running(), at(1_499), { kind: 'keep', awaited: true }],
+      ['a signalled holder is escalated once the grace has passed', termSent, running(), at(1_500), { kind: 'escalate', start: 't1' }],
+      ['a SIGKILLed holder is awaited', killSent, running(), at(9_000), { kind: 'keep', awaited: true }],
+      ['a signalled holder that cannot be read is awaited, not escalated', termSent, unreadable, at(9_000), { kind: 'keep', awaited: true }],
+      ['a signalled holder that left the lock is still awaited', termSent, running(), at(1_100, false), { kind: 'keep', awaited: true }],
+      ['a recycled PID holding the lock is judged afresh', termSent, running('t2'), at(1_100), { kind: 'judge', holder: { ...holder, start: 't2' } }],
+      ['a recycled PID off the lock means the signalled instance exited', termSent, running('t2'), at(1_100, false), { kind: 'forget' }],
+    ] as const)('%s', (_label, attempt, read, when, expected) => {
+      expect(advanceAttempt(attempt, read, when)).toEqual(expected);
+    });
+
+    it('confirms a stop only for the instance that was judged', () => {
+      expect(confirmStop(holder, running())).toEqual({ kind: 'signal' });
+      expect(confirmStop(holder, running('t2'))).toEqual({ kind: 'forget' });
+      expect(confirmStop(holder, gone)).toEqual({ kind: 'forget' });
+      expect(confirmStop(holder, unreadable)).toEqual({ kind: 'leave-unconfirmed', reason: 'ps timed out' });
     });
   });
 

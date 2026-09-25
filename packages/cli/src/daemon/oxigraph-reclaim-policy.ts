@@ -33,8 +33,8 @@ import type { ProcessInstance } from './process-probe.js';
 /**
  * The executables that count as this node's Oxigraph when the reclaim judges
  * a lock holder: the exact `paths`, and any `oxigraph*` executable in `dirs`.
- * The store ownership builds it (`oxigraphReclaimCatalog`) from the binary
- * the resolver selected.
+ * The managed layer passes the binary locations the resolver reports
+ * (`oxigraphBinaryLocations`); the matching rules live here.
  */
 export interface OxigraphBinaryCatalog {
   readonly paths: readonly string[];

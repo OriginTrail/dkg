@@ -392,20 +392,24 @@ export async function startOxigraphServer(
   // frees the store lock (a worker or watchdog that died without stopping its
   // Oxigraph leaves it holding LOCK), spawns, and records the launch. The
   // spawned launch becomes the lifecycle's current one as soon as it exists,
-  // so a launch that fails in a later step still leaves it where the failure
-  // paths stop it.
+  // so stop() reaches it while it is being recorded; one that cannot be
+  // recorded is abandoned (killed) before the launch rejects.
   type Spawned = { child: ChildProcess; oxigraph: OxigraphLaunchHandle; ready: ReadyBudget };
   const launchOxigraph = (
     kind: 'boot' | 'restart',
     current:
       | { phase: 'starting'; generation: number }
       | { phase: 'recovering'; reason: string; generation: number },
-  ): Promise<OxigraphStoreLaunch<Spawned> | null> => storeOwnership.launch(() => {
-    const ready = sizeReadyBudget(kind);
-    const oxigraph = spawnChild();
-    lifecycle = { ...current, oxigraph };
-    return { child: oxigraph.child, oxigraph, ready };
-  });
+  ): Promise<OxigraphStoreLaunch<Spawned> | null> => storeOwnership.launch(
+    () => {
+      const ready = sizeReadyBudget(kind);
+      const oxigraph = spawnChild();
+      lifecycle = { ...current, oxigraph };
+      return { child: oxigraph.child, oxigraph, ready };
+    },
+    // The launch could not be recorded: stop it before the failure surfaces.
+    ({ oxigraph }) => { oxigraph.terminate('SIGKILL'); },
+  );
 
   type StoreOpenOutcome =
     | { outcome: 'ready'; listenerPid: number; probes: number }

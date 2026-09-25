@@ -161,12 +161,70 @@ export function reclaimHost(platform: NodeJS.Platform): OrphanedOxigraphIo {
  * one PID. `start` names the instance: a holder with another start time under
  * the same PID is a recycled PID and is judged afresh.
  */
-type Attempt =
+export type Attempt =
   /** Judged and left running, or its signal was refused; `start` null: it could not be inspected. */
   | { kind: 'left'; start: string | null }
   /** SIGTERM sent at `termAt`; SIGKILL follows once the stop grace has passed. */
   | { kind: 'term-sent'; start: string; termAt: number }
   | { kind: 'kill-sent'; start: string };
+
+/** What the reaper does next about one PID, after one read of it. */
+export type AttemptStep =
+  /** The instance exited (or the PID now names a process off the lock): forget it. */
+  | { kind: 'forget' }
+  /** Nothing changes: a holder left running, or a signalled one still awaited. */
+  | { kind: 'keep'; awaited: boolean }
+  /** A process instance not judged yet: classify it, then `confirmStop`. */
+  | { kind: 'judge'; holder: ProcessInstance }
+  /** An unjudged holder that could not be read: report it and leave it. */
+  | { kind: 'leave-unreadable'; reason: string }
+  /** The stop grace has passed since SIGTERM: send SIGKILL. */
+  | { kind: 'escalate'; start: string };
+
+/**
+ * The transition for one PID from its attempt (if any) and one read of it.
+ * `listed`: whether the PID is among the current lock holders. A signalled
+ * holder is awaited until it is confirmed gone, listed or not (an orphan can
+ * close LOCK before it exits, and a holder scan can fail); a read that fails
+ * keeps it awaited but never escalates it.
+ */
+export function advanceAttempt(
+  attempt: Attempt | undefined,
+  read: ProcessLookup,
+  at: { now: number; stopGraceMs: number; listed: boolean },
+): AttemptStep {
+  if (read.state === 'gone') return { kind: 'forget' };
+  if (read.state === 'unknown') {
+    if (attempt === undefined) return { kind: 'leave-unreadable', reason: read.reason };
+    return { kind: 'keep', awaited: attempt.kind !== 'left' };
+  }
+  const holder = read.process;
+  if (attempt === undefined || attempt.start !== holder.start) {
+    // A new process under this PID: judged if it holds the lock; otherwise
+    // the instance this attempt named has exited.
+    return at.listed ? { kind: 'judge', holder } : { kind: 'forget' };
+  }
+  if (attempt.kind === 'left') return { kind: 'keep', awaited: false };
+  if (attempt.kind === 'term-sent' && at.now - attempt.termAt >= at.stopGraceMs) {
+    return { kind: 'escalate', start: attempt.start };
+  }
+  return { kind: 'keep', awaited: true };
+}
+
+/** Whether a holder judged for stopping may be signalled, from a read taken right before. */
+export type StopConfirmation =
+  | { kind: 'signal' }
+  /** It exited, or its PID was recycled, since it was judged. */
+  | { kind: 'forget' }
+  /** It could not be read: leave it rather than signal a process that may have changed. */
+  | { kind: 'leave-unconfirmed'; reason: string };
+
+/** Signal only the instance that was judged: a PID recycled since then has another start time. */
+export function confirmStop(holder: ProcessInstance, reread: ProcessLookup): StopConfirmation {
+  if (reread.state === 'unknown') return { kind: 'leave-unconfirmed', reason: reread.reason };
+  if (reread.state === 'gone' || reread.process.start !== holder.start) return { kind: 'forget' };
+  return { kind: 'signal' };
+}
 
 /** The holder and its ancestors, nearest first, as the policy expects them. */
 async function observeHolder(io: OrphanedOxigraphIo, holder: ProcessInstance): Promise<HolderObservation> {
@@ -220,105 +278,84 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
   const attempts = new Map<number, Attempt>();
   const signalled = new Set<number>();
 
-  // Settle a holder as left running, and say why. Always false: nothing to await.
-  const leave = (pid: number, start: string | null, message: string): false => {
-    attempts.set(pid, { kind: 'left', start });
-    opts.log(message);
-    return false;
-  };
   const send = (pid: number, signal: NodeJS.Signals, next: Exclude<Attempt, { kind: 'left' }>): boolean => {
     try {
       io.signal(pid, signal);
     } catch (error) {
-      return leave(
-        pid,
-        next.start,
+      attempts.set(pid, { kind: 'left', start: next.start });
+      opts.log(
         `[oxigraph] could not signal orphaned Oxigraph pid ${pid}: ` +
           `${error instanceof Error ? error.message : String(error)}`,
       );
+      return false;
     }
     signalled.add(pid);
     attempts.set(pid, next);
     return true;
   };
 
-  // Advance a signalled instance, whether or not it still shows as a lock
-  // holder: an orphan can close LOCK before it exits, and a holder scan can
-  // fail. It stays awaited until its PID and start time are confirmed gone.
-  const advanceSignalled = async (
-    pid: number,
-    attempt: Exclude<Attempt, { kind: 'left' }>,
-  ): Promise<boolean> => {
-    const identity = await identityState({ pid, start: attempt.start });
-    if (identity.state === 'gone') {
+  // Classify a new holder instance and, if it is to be stopped, confirm it
+  // with a second read before SIGTERM. Resolves to whether it is awaited.
+  const judge = async (pid: number, holder: ProcessInstance): Promise<boolean> => {
+    const decision = classifyHolder(
+      await observeHolder(io, holder),
+      { location: opts.location, ownership, binaries },
+    );
+    if (decision.action === 'leave') {
+      attempts.set(pid, { kind: 'left', start: holder.start });
+      opts.log(
+        `[oxigraph] ${lockPath} is held by pid ${pid} (parent ${holder.ppid}): ` +
+          `${holder.command.slice(0, 300)}. Leaving it running: ${describeLeave(decision.reason)}.`,
+      );
+      return false;
+    }
+    const confirmation = confirmStop(holder, await io.inspectProcess(pid));
+    if (confirmation.kind === 'forget') {
       attempts.delete(pid);
       return false;
     }
-    // Not confirmed as the signalled instance: keep waiting, do not escalate.
-    if (identity.state === 'unknown') return true;
-    if (attempt.kind === 'term-sent' && io.now() - attempt.termAt >= stopGraceMs) {
-      opts.log(`[oxigraph] orphaned Oxigraph pid ${pid} did not exit on SIGTERM; sending SIGKILL.`);
-      return send(pid, 'SIGKILL', { kind: 'kill-sent', start: attempt.start });
+    if (confirmation.kind === 'leave-unconfirmed') {
+      attempts.set(pid, { kind: 'left', start: holder.start });
+      opts.log(
+        `[oxigraph] could not confirm that pid ${pid} is still the orphaned Oxigraph ` +
+          `holding ${lockPath} (${confirmation.reason}). Leaving it running.`,
+      );
+      return false;
     }
-    return true;
+    opts.log(
+      `[oxigraph] stopping orphaned Oxigraph pid ${pid} (${describeStop(decision.reason)}); ` +
+        `it still holds ${lockPath}.`,
+    );
+    return send(pid, 'SIGTERM', { kind: 'term-sent', start: holder.start, termAt: io.now() });
   };
 
-  // Observe one listed lock holder and advance its attempt. Resolves to
-  // whether it is still awaited: signalled and not yet confirmed gone.
-  const advance = async (pid: number): Promise<boolean> => {
-    const attempt = attempts.get(pid);
-    const lookup = await io.inspectProcess(pid);
-    if (lookup.state === 'gone') {
-      attempts.delete(pid);
-      return false;
-    }
-    if (lookup.state === 'unknown') {
-      if (attempt?.kind === 'left') return false;
-      // A signalled holder is still awaited, but never escalated blind.
-      if (attempt !== undefined) return advanceSignalled(pid, attempt);
-      return leave(
-        pid,
-        null,
-        `[oxigraph] ${lockPath} is held by pid ${pid}, which could not be inspected ` +
-          `(${lookup.reason}). Leaving it running.`,
-      );
-    }
-    const holder = lookup.process;
-    // Another start time: the PID was recycled, so this is a new instance.
-    const current = attempt?.start === holder.start ? attempt : undefined;
-    if (current?.kind === 'left') return false;
-    if (current === undefined) {
-      const decision = classifyHolder(
-        await observeHolder(io, holder),
-        { location: opts.location, ownership, binaries },
-      );
-      if (decision.action === 'leave') {
-        return leave(
-          pid,
-          holder.start,
-          `[oxigraph] ${lockPath} is held by pid ${pid} (parent ${holder.ppid}): ` +
-            `${holder.command.slice(0, 300)}. Leaving it running: ${describeLeave(decision.reason)}.`,
+  // One read of `pid`, one transition, and its effect. Resolves to whether
+  // the PID is still awaited.
+  const step = async (pid: number, listed: boolean): Promise<boolean> => {
+    const next = advanceAttempt(attempts.get(pid), await io.inspectProcess(pid), {
+      now: io.now(),
+      stopGraceMs,
+      listed,
+    });
+    switch (next.kind) {
+      case 'forget':
+        attempts.delete(pid);
+        return false;
+      case 'keep':
+        return next.awaited;
+      case 'leave-unreadable':
+        attempts.set(pid, { kind: 'left', start: null });
+        opts.log(
+          `[oxigraph] ${lockPath} is held by pid ${pid}, which could not be inspected ` +
+            `(${next.reason}). Leaving it running.`,
         );
-      }
-      // Signal only the instance that was judged: a PID recycled since then
-      // has another start time.
-      const identity = await identityState(holder);
-      if (identity.state === 'gone') return false;
-      if (identity.state === 'unknown') {
-        return leave(
-          pid,
-          holder.start,
-          `[oxigraph] could not confirm that pid ${pid} is still the orphaned Oxigraph ` +
-            `holding ${lockPath} (${identity.reason}). Leaving it running.`,
-        );
-      }
-      opts.log(
-        `[oxigraph] stopping orphaned Oxigraph pid ${pid} (${describeStop(decision.reason)}); ` +
-          `it still holds ${lockPath}.`,
-      );
-      return send(pid, 'SIGTERM', { kind: 'term-sent', start: holder.start, termAt: io.now() });
+        return false;
+      case 'escalate':
+        opts.log(`[oxigraph] orphaned Oxigraph pid ${pid} did not exit on SIGTERM; sending SIGKILL.`);
+        return send(pid, 'SIGKILL', { kind: 'kill-sent', start: next.start });
+      case 'judge':
+        return judge(pid, next.holder);
     }
-    return advanceSignalled(pid, current);
   };
 
   for (;;) {
@@ -329,17 +366,19 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
     } catch {
       // Judged from the signalled instances alone this round.
     }
-    const awaited = new Set<number>();
-    for (const pid of holders ?? []) {
-      if (pid !== process.pid && await advance(pid)) awaited.add(pid);
+    const listed = new Set((holders ?? []).filter((pid) => pid !== process.pid));
+    const awaited: number[] = [];
+    for (const pid of listed) {
+      if (await step(pid, true)) awaited.push(pid);
     }
-    // Advancing an attempt only updates or deletes its own entry, which Map
-    // iteration tolerates.
-    for (const [pid, attempt] of attempts) {
-      if (attempt.kind === 'left' || awaited.has(pid)) continue;
-      if (await advanceSignalled(pid, attempt)) awaited.add(pid);
+    // Signalled instances that no longer show as holders: one read each.
+    const unlisted = [...attempts]
+      .filter(([pid, attempt]) => attempt.kind !== 'left' && !listed.has(pid))
+      .map(([pid]) => pid);
+    for (const pid of unlisted) {
+      if (await step(pid, false)) awaited.push(pid);
     }
-    if (awaited.size === 0) {
+    if (awaited.length === 0) {
       if (signalled.size > 0) {
         opts.log(`[oxigraph] ${lockPath} released by the orphaned Oxigraph.`);
       } else if (holders === null) {
@@ -349,7 +388,7 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
     }
     if (io.now() >= deadline) {
       opts.log(
-        `[oxigraph] orphaned Oxigraph pid ${[...awaited].join(', ')} was not confirmed gone ` +
+        `[oxigraph] orphaned Oxigraph pid ${awaited.join(', ')} was not confirmed gone ` +
           `${timeoutMs}ms after the reclaim began; starting anyway.`,
       );
       return [...signalled];

@@ -36,7 +36,8 @@ import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { oxigraphStoreArgs } from '../src/daemon/oxigraph-store-launch.js';
 import { lsofLockHolderLister, stopOrphanedOxigraph } from '../src/daemon/oxigraph-orphan.js';
 import { isCatalogedOxigraph } from '../src/daemon/oxigraph-reclaim-policy.js';
-import { createOxigraphStoreOwnership, oxigraphReclaimCatalog } from '../src/daemon/oxigraph-store-ownership.js';
+import { oxigraphBinaryLocations } from '../src/daemon/oxigraph-binary.js';
+import { createOxigraphStoreOwnership } from '../src/daemon/oxigraph-store-ownership.js';
 import {
   checkIdentity,
   OXIGRAPH_OWNER_RECORD,
@@ -173,7 +174,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
         linesAtSpawn = lines.length;
         launcher = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
         return { child: launcher };
-      });
+      }, ({ child }) => { child.kill('SIGKILL'); });
       // The reclaim finished before the spawn.
       expect(lines.slice(0, linesAtSpawn).join('\n')).toContain(
         `stopping orphaned Oxigraph pid ${orphan} (it was reparented to PID 1)`,
@@ -201,7 +202,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
     }
   }, 30_000);
 
-  it('catalogs every resolver source: the selected binary, the managed cache and the PATH binary\'s directory', async () => {
+  it('recognises binaries from every resolver source: the selected binary, the managed cache and the PATH binary\'s directory', async () => {
     const cacheDir = await mkdtemp(join(tmpdir(), 'oxi-reclaim-cache-'));
     const decoyDir = await mkdtemp(join(tmpdir(), 'oxi-reclaim-decoy-'));
     const pathDir = await mkdtemp(join(tmpdir(), 'oxi-reclaim-path-'));
@@ -215,7 +216,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       const bundled = { path: join(cacheDir, 'oxigraph-v0.5.8'), source: 'bundled', version: '0.5.8' } as const;
       const system = { path: join(pathDir, 'oxigraph'), source: 'system', version: '0.6.0' } as const;
       for (const selected of [bundled, system]) {
-        const catalog = await oxigraphReclaimCatalog(selected, opts);
+        const catalog = await oxigraphBinaryLocations(selected, opts);
         expect(catalog, selected.source).toEqual({ paths: [selected.path], dirs: [cacheDir, pathDir] });
         // An orphan from an earlier release may run an earlier pinned binary
         // from the cache, or the operator's binary on PATH; not the decoy.
@@ -225,7 +226,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       }
       // Without an oxigraph on PATH, only the cache is catalogued.
       process.env.PATH = decoyDir;
-      await expect(oxigraphReclaimCatalog(bundled, opts)).resolves.toEqual({ paths: [bundled.path], dirs: [cacheDir] });
+      await expect(oxigraphBinaryLocations(bundled, opts)).resolves.toEqual({ paths: [bundled.path], dirs: [cacheDir] });
     } finally {
       process.env.PATH = previousPath;
       for (const dir of [cacheDir, decoyDir, pathDir]) await rm(dir, { recursive: true, force: true });

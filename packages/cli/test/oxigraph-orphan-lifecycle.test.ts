@@ -569,6 +569,8 @@ describe('store ownership launches', () => {
   const notSpawnable = (): ChildProcess => {
     throw new Error('spawned after close()');
   };
+  // Launches in these tests are never rolled back unless a test says so.
+  const keep = (): void => { throw new Error('abandoned a launch unexpectedly'); };
   // A launch recorder that notes each write it would make.
   const recording = (records: string[]): OxigraphStoreOwnershipSteps['recordLaunch'] => async (launcherPid) => {
     records.push(`spawned:${launcherPid}`);
@@ -593,7 +595,7 @@ describe('store ownership launches', () => {
     const launched = ownership.launch(() => {
       spawns += 1;
       return { child: notSpawnable() };
-    });
+    }, keep);
     await ownership.close();
     releaseReclaim();
 
@@ -611,12 +613,31 @@ describe('store ownership launches', () => {
       log: () => {},
       steps: { reclaim: async () => {}, recordLaunch: recording(records) },
     });
-    const launch = await ownership.launch(() => ({ child: { pid: 4099 } as ChildProcess }));
+    const launch = await ownership.launch(() => ({ child: { pid: 4099 } as ChildProcess }), keep);
     expect(records).toEqual(['spawned:4099']);
 
     await ownership.close();
     await launch!.ready(4100);
     expect(records).toEqual(['spawned:4099']);
-    await expect(ownership.launch(() => ({ child: notSpawnable() }))).resolves.toBeNull();
+    await expect(ownership.launch(() => ({ child: notSpawnable() }), keep)).resolves.toBeNull();
+  });
+
+  it('abandons what it spawned when recording the launch rejects, then rejects', async () => {
+    const abandoned: number[] = [];
+    const ownership = createOxigraphStoreOwnership({
+      platform: process.platform,
+      location: '/nonexistent/oxigraph-data',
+      binaryPath: '/opt/oxigraph',
+      log: () => {},
+      steps: {
+        reclaim: async () => {},
+        recordLaunch: async () => { throw new Error('record defect'); },
+      },
+    });
+    await expect(ownership.launch(
+      () => ({ child: { pid: 4099 } as ChildProcess, id: 'launch-1' }),
+      (spawned) => { abandoned.push(spawned.child.pid!); },
+    )).rejects.toThrow('record defect');
+    expect(abandoned).toEqual([4099]);
   });
 });

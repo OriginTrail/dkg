@@ -27,7 +27,7 @@ import { mkdtemp, readFile, rm, stat, writeFile, chmod, access } from 'node:fs/p
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
-  findOxigraphOnPath,
+  oxigraphBinaryLocations,
   resolveOxigraphBinary,
   resolveOxigraphAsset,
   OXIGRAPH_ASSETS,
@@ -259,15 +259,24 @@ describe('PATH fallback (real directories, real executables)', () => {
     }
   });
 
-  it('finds the executable oxigraph on PATH, skipping a non-executable decoy, and null without one', async () => {
+  it('reports where this node takes Oxigraph from: the selected binary, the cache and the PATH binary\'s directory', async () => {
+    const cacheDir = await freshCache();
     const emptyDir = await mkdtemp(join(tmpdir(), 'oxi-path-empty-'));
     try {
+      const bundled = { path: join(cacheDir, 'oxigraph-v0.5.8'), source: 'bundled' as const, version: '0.5.8' };
+      const system = { path: join(pathDirB, 'oxigraph'), source: 'system' as const, version: '0.6.0' };
+      const opts = { cacheDir, platform: 'linux' as const };
+      // The executable oxigraph on PATH, not the non-executable decoy before it.
       process.env.PATH = `${pathDirA}:${pathDirB}`;
-      await expect(findOxigraphOnPath('linux')).resolves.toBe(join(pathDirB, 'oxigraph'));
-      process.env.PATH = `${pathDirA}:${emptyDir}`;
-      await expect(findOxigraphOnPath('linux')).resolves.toBeNull();
+      await expect(oxigraphBinaryLocations(bundled, opts)).resolves.toEqual({ paths: [bundled.path], dirs: [cacheDir, pathDirB] });
+      // A PATH binary resolution selected needs no second lookup.
+      process.env.PATH = emptyDir;
+      await expect(oxigraphBinaryLocations(system, opts)).resolves.toEqual({ paths: [system.path], dirs: [cacheDir, pathDirB] });
+      // No oxigraph on PATH: the cache only.
+      await expect(oxigraphBinaryLocations(bundled, opts)).resolves.toEqual({ paths: [bundled.path], dirs: [cacheDir] });
     } finally {
       process.env.PATH = prevPath;
+      await rm(cacheDir, { recursive: true, force: true });
       await rm(emptyDir, { recursive: true, force: true });
     }
   });

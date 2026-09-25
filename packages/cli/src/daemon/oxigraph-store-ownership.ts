@@ -12,12 +12,6 @@
  * rejection would therefore be a defect, which the server treats as a failed
  * launch.
  */
-import { dirname } from 'node:path';
-import {
-  findOxigraphOnPath,
-  type OxigraphBinaryIo,
-  type ResolvedOxigraphBinary,
-} from './oxigraph-binary.js';
 import { recordOxigraphLaunch, type OxigraphLaunchRecord } from './oxigraph-owner-record.js';
 import { reclaimHost, stopOrphanedOxigraph } from './oxigraph-orphan.js';
 import type { OxigraphBinaryCatalog } from './oxigraph-reclaim-policy.js';
@@ -45,8 +39,8 @@ export interface OxigraphStoreOwnershipInput {
 
 /**
  * The store ownership for one server start. `binaries` is what the reclaim
- * recognises as this node's Oxigraph (from `oxigraphReclaimCatalog`),
- * defaulting to `binaryPath` alone. `steps` replaces both the reclaim and the
+ * recognises as this node's Oxigraph (the resolved binary's
+ * `oxigraphBinaryLocations`), defaulting to `binaryPath` alone. `steps` replaces both the reclaim and the
  * owner record at once (tests only), so a caller never runs one of the
  * production steps by leaving it out.
  */
@@ -87,14 +81,23 @@ export function createOxigraphStoreOwnership(
     return write;
   };
   return {
-    async launch(spawn) {
+    async launch(spawn, abandon) {
       await steps.reclaim();
       if (closed) return null;
       const spawned = spawn();
       const launcherPid = spawned.child.pid;
       // Recorded at spawn, so the reclaim can identify this launch's
-      // Oxigraph even if the daemon dies before it is ready.
-      const record = launcherPid === undefined ? null : await track(steps.recordLaunch(launcherPid));
+      // Oxigraph even if the daemon dies before it is ready. A launch that
+      // cannot be recorded is rolled back before the failure surfaces.
+      let record: OxigraphLaunchRecord | null = null;
+      if (launcherPid !== undefined) {
+        try {
+          record = await track(steps.recordLaunch(launcherPid));
+        } catch (error) {
+          abandon(spawned);
+          throw error;
+        }
+      }
       return {
         spawned,
         ready: async (oxigraphPid) => {
@@ -107,23 +110,4 @@ export function createOxigraphStoreOwnership(
       await Promise.allSettled(writes);
     },
   };
-}
-
-/**
- * What the reclaim recognises as this node's Oxigraph, beside the binary the
- * resolver selected: earlier pinned versions in the managed cache, and the
- * binaries beside the `oxigraph` on PATH. An orphan from an earlier release
- * may run whichever of these that release resolved. The managed layer builds
- * it for the store ownership; resolution itself never needs the PATH binary
- * once a pinned binary is selected.
- */
-export async function oxigraphReclaimCatalog(
-  selected: ResolvedOxigraphBinary,
-  opts: { cacheDir: string; platform?: NodeJS.Platform; io?: Partial<OxigraphBinaryIo> },
-): Promise<OxigraphBinaryCatalog> {
-  const pathBinary = selected.source === 'system'
-    ? selected.path
-    : await findOxigraphOnPath(opts.platform, opts.io);
-  const dirs = [opts.cacheDir, dirname(selected.path), ...(pathBinary ? [dirname(pathBinary)] : [])];
-  return { paths: [selected.path], dirs: [...new Set(dirs)] };
 }

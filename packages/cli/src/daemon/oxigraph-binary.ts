@@ -51,7 +51,7 @@ import {
   stat,
   writeFile,
 } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 /** Pinned Oxigraph release. Bump deliberately (re-pin checksums below). */
 export const OXIGRAPH_VERSION = '0.5.8';
@@ -332,17 +332,6 @@ async function resolveSystemOxigraphOnPath(
 }
 
 /**
- * The operator-installed `oxigraph` on PATH, or null: the same lookup the
- * resolver falls back to, for callers that need to know where it is.
- */
-export function findOxigraphOnPath(
-  platform: NodeJS.Platform = process.platform,
-  io: Partial<OxigraphBinaryIo> = {},
-): Promise<string | null> {
-  return resolveSystemOxigraphOnPath({ ...defaultIo(), ...io }, platform);
-}
-
-/**
  * Resolve the executable plus the version metadata required for launch
  * capabilities. Pinned assets carry their pinned version; PATH fallbacks are
  * probed before they may be launched. Cached/downloaded assets are checksum
@@ -437,4 +426,34 @@ export async function resolveOxigraphBinary(
   await io.rename(tmp, target);
   log(`Oxigraph ${OXIGRAPH_VERSION} binary verified and installed at ${target}`);
   return { path: target, source: 'bundled', version: OXIGRAPH_VERSION };
+}
+
+/**
+ * Where this node's Oxigraph binaries can be, beside the one the resolver
+ * selected: the managed cache (earlier pinned versions) and the directory of
+ * the `oxigraph` on PATH, the same places resolution takes a binary from. It
+ * lists places only; the orphan reclaim decides which executables in them
+ * count as this node's Oxigraph.
+ */
+export interface OxigraphBinaryLocations {
+  /** Exact binaries: the one resolution selected. */
+  readonly paths: readonly string[];
+  /** Directories this node takes Oxigraph binaries from. */
+  readonly dirs: readonly string[];
+}
+
+/**
+ * The locations for a resolved binary. An orphan from an earlier release may
+ * run whichever binary that release resolved. The PATH lookup is skipped
+ * when resolution already selected the PATH binary.
+ */
+export async function oxigraphBinaryLocations(
+  selected: ResolvedOxigraphBinary,
+  opts: { cacheDir: string; platform?: NodeJS.Platform; io?: Partial<OxigraphBinaryIo> },
+): Promise<OxigraphBinaryLocations> {
+  const pathBinary = selected.source === 'system'
+    ? selected.path
+    : await resolveSystemOxigraphOnPath({ ...defaultIo(), ...opts.io }, opts.platform ?? process.platform);
+  const dirs = [opts.cacheDir, dirname(selected.path), ...(pathBinary ? [dirname(pathBinary)] : [])];
+  return { paths: [selected.path], dirs: [...new Set(dirs)] };
 }
