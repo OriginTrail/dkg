@@ -38,7 +38,6 @@ import {
   type OxigraphStoreOwnershipInput,
   type OxigraphStoreOwnershipSteps,
 } from '../src/daemon/oxigraph-store-ownership.js';
-import type { OxigraphLaunchAttempt } from '../src/daemon/oxigraph-store-launch.js';
 import type { OxigraphLaunchHandle } from '../src/daemon/oxigraph-launch-strategy.js';
 import {
   createOxigraphStandinFixture,
@@ -479,6 +478,40 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
     }
   }, 30_000);
 
+  it('reclaims the Oxigraph of a first launch whose watchdog dies before the store is ready', async () => {
+    const port = await freePort();
+    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-boot-stranded-'));
+    const lines: string[] = [];
+    let listenerPid: number | undefined;
+    // The store is never verified ready (like a long WAL replay), so the
+    // watchdog dies while the first start is still opening it.
+    const started = startOxigraphServer({
+      binaryPath: lockingStandin.binaryPath,
+      location,
+      port,
+      readyTimeoutMs: 20_000,
+      readyIntervalMs: 50,
+      log: (line) => lines.push(line),
+      io: { findListenOwnerPid: async () => null },
+    });
+    try {
+      expect(await waitForCondition(() => portAnswers(port), 10_000)).toBe(true);
+      listenerPid = await fetchPid(port);
+      const watchdog = parentPid(listenerPid);
+      expect(watchdog).not.toBeNull();
+      process.kill(watchdog!, 'SIGKILL');
+
+      await expect(started).rejects.toThrow(/exited during startup/);
+      expect(await waitForCondition(() => pidIsGone(listenerPid!), 5_000)).toBe(true);
+      expect(await portAnswers(port)).toBe(false);
+      expect(lines.join('\n')).toContain(`stopping orphaned Oxigraph pid ${listenerPid} (`);
+    } finally {
+      killIfAlive(listenerPid);
+      await started.catch(() => {});
+      await rm(location, { recursive: true, force: true });
+    }
+  }, 40_000);
+
   it('reclaims the Oxigraph of a watchdog killed on its own when the server stops before restarting', async () => {
     const port = await freePort();
     const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-stop-stranded-'));
@@ -606,17 +639,17 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
 });
 
 describe('store ownership launches', () => {
-  const notSpawnable = (): OxigraphLaunchAttempt => {
+  const notSpawnable = (): OxigraphLaunchHandle => {
     throw new Error('spawned after close()');
   };
-  // A launch attempt whose handle only notes the signals it is sent.
-  const attemptFor = (pid: number) => {
+  // A launch handle that only notes the signals it is sent.
+  const handleFor = (pid: number) => {
     const signals: NodeJS.Signals[] = [];
     const oxigraph = {
       child: { pid } as ChildProcess,
       terminate: (signal: NodeJS.Signals) => { signals.push(signal); },
     } as unknown as OxigraphLaunchHandle;
-    return { attempt: { oxigraph, readyBudget: { timeoutMs: 1_000, walBytes: 0 } }, signals };
+    return { oxigraph, signals };
   };
   // A launch recorder that notes each write it would make.
   const recording = (records: string[]): OxigraphStoreOwnershipSteps['recordLaunch'] => async (launcherPid) => {
@@ -655,9 +688,9 @@ describe('store ownership launches', () => {
   it('records nothing for a launch that becomes ready after close()', async () => {
     const records: string[] = [];
     const ownership = ownershipWithSteps({ reclaim: async () => {}, recordLaunch: recording(records) });
-    const { attempt } = attemptFor(4099);
-    const launch = await ownership.launch(() => attempt);
-    expect(launch?.attempt).toBe(attempt);
+    const { oxigraph } = handleFor(4099);
+    const launch = await ownership.launch(() => oxigraph);
+    expect(launch?.oxigraph).toBe(oxigraph);
     expect(records).toEqual(['spawned:4099']);
 
     await ownership.close();
@@ -671,8 +704,8 @@ describe('store ownership launches', () => {
       reclaim: async () => {},
       recordLaunch: async () => { throw new Error('record defect'); },
     });
-    const { attempt, signals } = attemptFor(4099);
-    await expect(ownership.launch(() => attempt)).rejects.toThrow('record defect');
+    const { oxigraph, signals } = handleFor(4099);
+    await expect(ownership.launch(() => oxigraph)).rejects.toThrow('record defect');
     expect(signals).toEqual(['SIGKILL']);
   });
 

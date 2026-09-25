@@ -32,7 +32,7 @@ export interface OxigraphStoreOwnership {
    * through its handle before the launch rejects, so a spawned launch is
    * either handed back or stopped.
    */
-  launch(spawn: () => OxigraphLaunchAttempt): Promise<OxigraphStoreLaunch | null>;
+  launch(spawn: () => OxigraphLaunchHandle): Promise<OxigraphStoreLaunch | null>;
   /**
    * Refuse further launches and records. Resolves once no owner-record write
    * is in flight, so the store directory is quiet afterwards.
@@ -46,15 +46,9 @@ export interface OxigraphStoreOwnership {
   release(): Promise<void>;
 }
 
-/** One spawn: the launch handle and the ready budget it was sized with. */
-export interface OxigraphLaunchAttempt {
-  readonly oxigraph: OxigraphLaunchHandle;
-  readonly readyBudget: { timeoutMs: number; walBytes: number };
-}
-
 /** One launch that `OxigraphStoreOwnership.launch` spawned and recorded. */
 export interface OxigraphStoreLaunch {
-  readonly attempt: OxigraphLaunchAttempt;
+  readonly oxigraph: OxigraphLaunchHandle;
   /** Record `oxigraphPid`, the launch's verified listener, as the store's Oxigraph. */
   ready(oxigraphPid: number): Promise<void>;
 }

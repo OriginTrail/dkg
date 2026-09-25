@@ -109,7 +109,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
         launcherPid: launcher.pid!,
         log: () => {},
       });
-      await launch.markReady(launcher.pid!);
+      await launch!.markReady(launcher.pid!);
       expect(await readOxigraphOwnerRecord(location)).toMatchObject({
         kind: 'v1',
         record: {
@@ -174,18 +174,17 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       const launch = await ownership.launch(() => {
         linesAtSpawn = lines.length;
         launcher = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
-        const oxigraph = {
+        return {
           child: launcher,
           terminate: (signal: NodeJS.Signals) => { launcher!.kill(signal); },
         } as unknown as OxigraphLaunchHandle;
-        return { oxigraph, readyBudget: { timeoutMs: 1_000, walBytes: 0 } };
       });
       // The reclaim finished before the spawn.
       expect(lines.slice(0, linesAtSpawn).join('\n')).toContain(
         `stopping orphaned Oxigraph pid ${orphan} (it was reparented to PID 1)`,
       );
       expect(lines.slice(0, linesAtSpawn).join('\n')).toContain('released by the orphaned Oxigraph');
-      expect(launch?.attempt.oxigraph.child).toBe(launcher);
+      expect(launch?.oxigraph.child).toBe(launcher);
       // Recorded at spawn, without an Oxigraph yet ...
       const atSpawn = await readOxigraphOwnerRecord(location);
       expect(atSpawn).toMatchObject({
@@ -272,7 +271,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
         bootId: async () => 'boot-1',
       });
       const atSpawn = await readOxigraphOwnerRecord(location);
-      await launch.markReady(4100);
+      await launch!.markReady(4100);
       const atReady = await readOxigraphOwnerRecord(location);
       if (atSpawn.kind !== 'v1' || atReady.kind !== 'v1') throw new Error('no owner record');
       expect(atSpawn.record.oxigraph).toBeUndefined();
@@ -325,9 +324,14 @@ describe('stopOrphanedOxigraph (real processes)', () => {
         location, binaryPath: '/opt/oxigraph', launcherPid: 4099, log: (line) => lines.push(line), inspect,
         bootId: async () => 'boot-1',
       });
-      await launch.markReady(4100);
+      // No record to extend: the explicit unavailable result.
+      expect(launch).toBeNull();
       expect(await readOxigraphOwnerRecord(location)).toEqual({ kind: 'absent' });
       expect(lines).toEqual(['[oxigraph] could not record the store owner: could not read pid 4099: ps timed out']);
+      // Windows keeps no record at all.
+      await expect(recordOxigraphLaunch({
+        platform: 'win32', location, binaryPath: '/opt/oxigraph', launcherPid: 4099, log: () => {},
+      })).resolves.toBeNull();
     } finally {
       await rm(location, { recursive: true, force: true });
     }

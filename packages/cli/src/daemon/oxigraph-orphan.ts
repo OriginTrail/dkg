@@ -22,6 +22,7 @@ import { existsSync } from 'node:fs';
 import { realpath } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { promisify } from 'node:util';
+import type { OxigraphBinaryLocations } from './oxigraph-binary.js';
 import {
   checkIdentity,
   readOxigraphOwnerRecord,
@@ -39,7 +40,6 @@ import {
   oxigraphBinaryCatalog,
   withOxigraphBinary,
   type HolderObservation,
-  type OxigraphBinaryCatalog,
 } from './oxigraph-reclaim-policy.js';
 import {
   bootIdReader,
@@ -80,7 +80,7 @@ export interface StopOrphanedOxigraphOptions {
    * `resolveOxigraphBinary`; defaults to `binaryPath` and its directory. The
    * recorded binary is added from the owner record.
    */
-  binaries?: OxigraphBinaryCatalog;
+  binaries?: OxigraphBinaryLocations;
   log: (message: string) => void;
   /** SIGTERM → SIGKILL escalation; defaults to the shared Oxigraph stop grace. */
   stopGraceMs?: number;

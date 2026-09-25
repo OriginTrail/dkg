@@ -22,6 +22,7 @@
  * still runs: only a confirmed exit counts as gone.
  */
 import { basename, dirname, resolve } from 'node:path';
+import type { OxigraphBinaryLocations } from './oxigraph-binary.js';
 import type {
   IdentityState,
   OxigraphOwnerRecordRead,
@@ -30,29 +31,22 @@ import type {
 import { oxigraphStoreArgs } from './oxigraph-store-launch.js';
 import type { ProcessInstance } from './process-probe.js';
 
-/**
- * The executables that count as this node's Oxigraph when the reclaim judges
- * a lock holder: the exact `paths`, and any `oxigraph*` executable in `dirs`.
- * The managed layer passes the binary locations the resolver reports
- * (`oxigraphBinaryLocations`); the matching rules live here.
- */
-export interface OxigraphBinaryCatalog {
-  readonly paths: readonly string[];
-  readonly dirs: readonly string[];
-}
+// The binaries this module judges holders against are the places the binary
+// module reports (`OxigraphBinaryLocations`: exact paths, and directories
+// whose `oxigraph*` executables count); the rules for matching them are here.
 
 /** A catalog of one binary and the other `oxigraph*` executables beside it. */
-export function oxigraphBinaryCatalog(path: string): OxigraphBinaryCatalog {
+export function oxigraphBinaryCatalog(path: string): OxigraphBinaryLocations {
   return { paths: [path], dirs: [dirname(path)] };
 }
 
 /** `catalog` plus one more binary and its directory (a recorded binary, say). */
-export function withOxigraphBinary(catalog: OxigraphBinaryCatalog, path: string): OxigraphBinaryCatalog {
+export function withOxigraphBinary(catalog: OxigraphBinaryLocations, path: string): OxigraphBinaryLocations {
   return { paths: [...catalog.paths, path], dirs: [...catalog.dirs, dirname(path)] };
 }
 
 /** Whether `executable` is one of the catalog's Oxigraph binaries. */
-export function isCatalogedOxigraph(catalog: OxigraphBinaryCatalog, executable: string): boolean {
+export function isCatalogedOxigraph(catalog: OxigraphBinaryLocations, executable: string): boolean {
   if (catalog.paths.includes(executable)) return true;
   if (!/^oxigraph[^/]*$/.test(basename(executable))) return false;
   const dir = resolve(dirname(executable));
@@ -76,7 +70,7 @@ const SCRIPT_INTERPRETERS = new Set(['node', 'nodejs', 'sh', 'bash', 'dash']);
 export function matchManagedOxigraphStore(
   holder: Pick<ProcessInstance, 'argv' | 'command'>,
   location: string,
-  binaries: OxigraphBinaryCatalog,
+  binaries: OxigraphBinaryLocations,
 ): 'match' | 'no-match' | 'ambiguous' {
   let tokens = holder.argv;
   if (tokens === null) {
@@ -224,7 +218,7 @@ export interface HolderObservation {
 
 export function classifyHolder(
   { holder, ancestors, ancestryEnd }: HolderObservation,
-  ctx: { location: string; ownership: Ownership; binaries: OxigraphBinaryCatalog },
+  ctx: { location: string; ownership: Ownership; binaries: OxigraphBinaryLocations },
 ): HolderDecision {
   const { ownership } = ctx;
   if (ownership.kind === 'owners-live') {

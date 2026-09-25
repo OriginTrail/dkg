@@ -12,9 +12,9 @@
  * rejection would therefore be a defect, which the server treats as a failed
  * launch.
  */
+import type { OxigraphBinaryLocations } from './oxigraph-binary.js';
 import { recordOxigraphLaunch, type OxigraphLaunchRecord } from './oxigraph-owner-record.js';
 import { reclaimHost, stopOrphanedOxigraph } from './oxigraph-orphan.js';
-import type { OxigraphBinaryCatalog } from './oxigraph-reclaim-policy.js';
 import type { OxigraphStoreOwnership } from './oxigraph-store-launch.js';
 
 /** The two store operations a launch is built from. */
@@ -23,9 +23,10 @@ export interface OxigraphStoreOwnershipSteps {
   reclaim(): Promise<void>;
   /**
    * Record a spawned launch as the store's owner; the returned record adds
-   * the verified Oxigraph once the launch is ready.
+   * the verified Oxigraph once the launch is ready. Null when there can be
+   * no record for it (Windows, or a launch that could not be identified).
    */
-  recordLaunch(launcherPid: number): Promise<OxigraphLaunchRecord>;
+  recordLaunch(launcherPid: number): Promise<OxigraphLaunchRecord | null>;
 }
 
 /** What the server tells a store ownership about the store it launches. */
@@ -46,7 +47,7 @@ export interface OxigraphStoreOwnershipInput {
  */
 export function createOxigraphStoreOwnership(
   opts: OxigraphStoreOwnershipInput & {
-    binaries?: OxigraphBinaryCatalog;
+    binaries?: OxigraphBinaryLocations;
     steps?: OxigraphStoreOwnershipSteps;
   },
 ): OxigraphStoreOwnership {
@@ -88,8 +89,8 @@ export function createOxigraphStoreOwnership(
     async launch(spawn) {
       await steps.reclaim();
       if (closed) return null;
-      const attempt = spawn();
-      const launcherPid = attempt.oxigraph.child.pid;
+      const oxigraph = spawn();
+      const launcherPid = oxigraph.child.pid;
       // Recorded at spawn, so the reclaim can identify this launch's
       // Oxigraph even if the daemon dies before it is ready. A launch that
       // cannot be recorded is killed before the failure surfaces.
@@ -98,14 +99,18 @@ export function createOxigraphStoreOwnership(
         try {
           record = await track(steps.recordLaunch(launcherPid));
         } catch (error) {
-          attempt.oxigraph.terminate('SIGKILL');
+          oxigraph.terminate('SIGKILL');
           throw error;
         }
       }
       return {
-        attempt,
+        oxigraph,
+        // Without a record (Windows, or a launch that could not be
+        // identified) there is nothing to extend: the reclaim then relies on
+        // the unrecorded rules.
         ready: async (oxigraphPid) => {
-          if (record && !closed) await track(record.markReady(oxigraphPid));
+          if (record === null || closed) return;
+          await track(record.markReady(oxigraphPid));
         },
       };
     },

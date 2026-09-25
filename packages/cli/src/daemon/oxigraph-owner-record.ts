@@ -124,8 +124,8 @@ export interface OxigraphLaunchRecord {
  * store directory is created first, since a fresh store's directory may not
  * exist until Oxigraph opens it. Best-effort: a failed write is logged and
  * resolves, because without a record the reclaim falls back to the PID 1
- * rule; when the launch itself could not be identified, `markReady` writes
- * nothing.
+ * rule. Resolves to null when there can be no record for this launch: on
+ * Windows, or when the launch could not be identified (logged).
  */
 export async function recordOxigraphLaunch(input: {
   location: string;
@@ -138,9 +138,9 @@ export async function recordOxigraphLaunch(input: {
   inspect?: ProcessInspector;
   /** Defaults to the platform's boot identifier. */
   bootId?: BootIdReader;
-}): Promise<OxigraphLaunchRecord> {
+}): Promise<OxigraphLaunchRecord | null> {
   // Windows processes are not reparented, so nothing is reclaimed there.
-  if (input.platform === 'win32') return { markReady: async () => {} };
+  if (input.platform === 'win32') return null;
   const inspect = input.inspect ?? processInspector(input.platform);
   const readBootId = input.bootId ?? bootIdReader(input.platform);
   const identify = async (pid: number): Promise<ProcessIdentity> => {
@@ -169,7 +169,7 @@ export async function recordOxigraphLaunch(input: {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') logRecordFailure(input.log, error);
   }
-  let launch: OxigraphOwnerRecordV1 | null = null;
+  let launch: OxigraphOwnerRecordV1;
   try {
     const [boot, daemon, launcher] = await Promise.all([
       readBootId(),
@@ -180,11 +180,11 @@ export async function recordOxigraphLaunch(input: {
     launch = { schema: OXIGRAPH_OWNER_RECORD_SCHEMA, boot, daemon, launcher, binaryPath: input.binaryPath };
   } catch (error) {
     logRecordFailure(input.log, error);
+    return null;
   }
-  if (launch) await write(launch);
+  await write(launch);
   return {
     markReady: async (oxigraphPid) => {
-      if (!launch) return;
       let oxigraph: ProcessIdentity;
       try {
         oxigraph = await identify(oxigraphPid);

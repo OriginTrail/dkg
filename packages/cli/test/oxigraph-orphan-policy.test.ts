@@ -29,6 +29,7 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import type { OxigraphBinaryLocations } from '../src/daemon/oxigraph-binary.js';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { oxigraphStoreArgs } from '../src/daemon/oxigraph-store-launch.js';
 import {
@@ -53,7 +54,6 @@ import {
   matchManagedOxigraphStore,
   oxigraphBinaryCatalog,
   withOxigraphBinary,
-  type OxigraphBinaryCatalog,
 } from '../src/daemon/oxigraph-reclaim-policy.js';
 import { processTable, type FakeProcess } from './fixtures/oxigraph-process-table.js';
 
@@ -87,7 +87,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
       ...record,
     }));
   };
-  const run = async (io: Partial<OrphanedOxigraphIo>, extra: { binaries?: OxigraphBinaryCatalog } = {}) => {
+  const run = async (io: Partial<OrphanedOxigraphIo>, extra: { binaries?: OxigraphBinaryLocations } = {}) => {
     const lines: string[] = [];
     const signalled = await stopOrphanedOxigraph({
       binaryPath, location, log: (line) => lines.push(line), io, ...extra,
