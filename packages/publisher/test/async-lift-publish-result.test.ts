@@ -158,6 +158,40 @@ describe('async lift publish result mapping', () => {
     expect(failure.resolution).toBe('reset_to_accepted');
   });
 
+  it('keeps broadcast failure precedence explicit when markers overlap', () => {
+    const authorFailure = mapPublishExceptionToLiftJobFailure({
+      error: Object.assign(
+        new Error('cannot re-sign UpdateAuthorAttestation: no operational wallet has enough funds'),
+        { code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' },
+      ),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:precedence-author',
+    });
+    expect(authorFailure.code).toBe('authority_forbidden');
+
+    const walletFailure = mapPublishExceptionToLiftJobFailure({
+      error: Object.assign(
+        new Error('No operational wallet has enough funds; QuorumUnmetError(collected=0/3, dialled=0)'),
+        { code: 'NO_FUNDED_PUBLISHER_WALLET' },
+      ),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:precedence-wallet',
+    });
+    expect(walletFailure.code).toBe('insufficient_funds');
+
+    const quorumFailure = mapPublishExceptionToLiftJobFailure({
+      error: new QuorumUnmetError({
+        collected: 0,
+        required: 3,
+        dialled: 0,
+        legacyMessage: 'insufficient funds while collecting ACKs',
+      }),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:precedence-quorum',
+    });
+    expect(quorumFailure.code).toBe('quorum_unmet');
+  });
+
   it('drops submit-timeout metadata from a quorum failure with legacy timeout text', () => {
     const failure = mapPublishExceptionToLiftJobFailure({
       error: new QuorumUnmetError({
