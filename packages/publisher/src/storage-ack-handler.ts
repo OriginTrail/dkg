@@ -84,7 +84,7 @@ import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
 
-/** Guards every cancellable external phase; a started commit tail must finish atomically. */
+/** Guards cancellable external phases and the entry to an atomic metadata commit. */
 class ACKExecutionContext {
   constructor(private readonly signal?: AbortSignal) {}
 
@@ -1274,7 +1274,7 @@ export class StorageACKHandler {
         await deleteByPatternWithoutCount(
           this.store,
           { graph: metaGraph, subject: operationSubject },
-          ackStoreOptions('storage-ack.persistGraphScoped.deleteOperationMeta'),
+          ackStoreOptions('storage-ack.persistGraphScoped.deleteOperationMeta', signal),
         );
         // Once the operation rows are deleted the re-insert must finish, or a
         // re-ACK would leave the head pointing at missing rows: no deadline here.
