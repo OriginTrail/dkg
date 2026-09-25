@@ -13,6 +13,7 @@ import { fetchPinnedController, pinnedControllerRef } from '../../ci/fetch-trust
 import {
   NON_SOLIDITY_LANES,
   REPO_ROOT,
+  TRUSTED_CI_CONTROLLER_SHA,
   gateNeeds,
   selectedLanes,
   succeeded,
@@ -23,10 +24,9 @@ import { importSpecifiers } from './load-graph.mjs';
 // The trusted controller: the plan-ci/assert-ci-results CLIs, their pinned
 // sparse checkout, and how the workflows wire planner outputs to jobs.
 
-// This SHA is already reachable from the protected default branch. Candidate
-// changes may update workflow wiring, but the planner and aggregate gates must
-// continue to execute only reviewed policy from this immutable controller.
-const TRUSTED_CI_CONTROLLER_SHA = 'a53dde2192b2c8f7e30c64543b83cf26773a1f89';
+// Candidate changes may update workflow wiring, but the planner and aggregate
+// gates must keep executing only reviewed policy from the immutable controller
+// at TRUSTED_CI_CONTROLLER_SHA.
 
 test('plan-ci compares modified workspace manifests through git blobs', (t) => {
   const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'dkg-ci-manifest-'));
