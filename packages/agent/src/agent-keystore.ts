@@ -92,7 +92,7 @@ export function agentFromPreservedKeystore(
   name: string,
   framework: string | undefined,
   entry: KeystoreEntry,
-): AgentKeyRecord {
+): { record: AgentKeyRecord; migrated: boolean } {
   const invalid = () => new Error('Preserved default-agent keystore is invalid');
   try {
     const operational = new ethers.Wallet(operationalPrivateKey);
@@ -125,7 +125,12 @@ export function agentFromPreservedKeystore(
     } else {
       refreshDefaultEncryptionKeyView(record);
     }
-    if (record.workspaceEncryptionKeys.length === 0) throw invalid();
+    let migrated = false;
+    if (record.workspaceEncryptionKeys.length === 0) {
+      if (entry.encryptionKeyAlgorithm || entry.publicEncryptionKey
+        || entry.privateEncryptionKey || entry.encryptionKeyProof) throw invalid();
+      migrated = ensureWorkspaceEncryptionKey(record);
+    }
     let activePrivateKeys = 0;
     for (const key of record.workspaceEncryptionKeys) {
       if (!key || typeof key !== 'object'
@@ -138,7 +143,7 @@ export function agentFromPreservedKeystore(
         )) throw invalid();
       const publicBytes = decodeWorkspaceEncryptionKey(key.publicEncryptionKey);
       if (key.encryptionKeyId !== workspaceAgentEncryptionKeyId(record.agentAddress, publicBytes)) throw invalid();
-      if (!key.revokedAt) {
+      if (key.privateEncryptionKey !== undefined) {
         if (typeof key.privateEncryptionKey !== 'string') throw invalid();
         const privateBytes = decodeWorkspaceEncryptionKey(key.privateEncryptionKey);
         const derived = generateWorkspaceRecipientEncryptionKey(
@@ -146,14 +151,14 @@ export function agentFromPreservedKeystore(
           () => privateBytes,
         );
         if (encodeWorkspaceEncryptionKey(derived.publicKeyBytes!) !== key.publicEncryptionKey) throw invalid();
-        activePrivateKeys++;
+        if (!key.revokedAt) activePrivateKeys++;
       }
     }
     if (activePrivateKeys === 0) throw invalid();
     for (const field of ['encryptionKeyAlgorithm', 'publicEncryptionKey', 'privateEncryptionKey', 'encryptionKeyProof'] as const) {
       if (entry[field] !== undefined && entry[field] !== record[field]) throw invalid();
     }
-    return record;
+    return { record, migrated };
   } catch {
     throw invalid();
   }

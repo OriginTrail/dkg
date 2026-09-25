@@ -1407,16 +1407,17 @@ export class AgentRegistryMethods extends DKGAgentBase {
     if (!entry && Object.keys(preserved).length > 0) {
       throw new Error('Preserved default-agent keystore does not match operational wallet');
     }
-    const record = entry
+    const restored = entry
       ? agentFromPreservedKeystore(opKey, this.config.name ?? 'owner', this.config.framework, entry)
-      : agentFromPrivateKey(opKey, this.config.name ?? 'owner', this.config.framework);
+      : undefined;
+    const record = restored?.record ?? agentFromPrivateKey(opKey, this.config.name ?? 'owner', this.config.framework);
 
     this.localAgents.set(record.agentAddress, record);
     this.agentTokenIndex.set(record.authToken, record.agentAddress);
     this.defaultAgentAddress = record.agentAddress;
     await this.persistAgentToStore(record);
     await this.markDefaultAgent(record.agentAddress);
-    if (!entry) await this.saveToKeystore(record);
+    if (!entry || restored?.migrated) await this.saveToKeystore(record);
 
     const ctx = createOperationContext('system');
     this.log.info(ctx, `Auto-registered default agent "${record.name}" → ${record.agentAddress}`);

@@ -5,7 +5,10 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { DKGAgent, agentFromPrivateKey } from '../src/index.js';
+import {
+  DKGAgent, agentFromPrivateKey, appendCustodialWorkspaceEncryptionKey,
+  revokeCustodialWorkspaceEncryptionKey,
+} from '../src/index.js';
 
 const dirs: string[] = [];
 afterEach(async () => {
@@ -23,6 +26,10 @@ async function coldAgent(privateKey: string, dataDir: string): Promise<DKGAgent>
       operationalKeys: [privateKey],
     },
   });
+}
+
+function digest(value: string | Buffer): string {
+  return createHash('sha256').update(value).digest('hex');
 }
 
 describe('cold default-agent registration with an existing keystore', () => {
@@ -54,6 +61,157 @@ describe('cold default-agent registration with an existing keystore', () => {
     expect(registered.authToken).toBe(original.authToken);
     expect(registered.workspaceEncryptionKeys).toEqual(original.workspaceEncryptionKeys);
   });
+
+  it('upgrades an auth-token/private-key-only legacy entry without changing its identity', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-legacy-agent-'));
+    dirs.push(dir);
+    const wallet = ethers.Wallet.createRandom();
+    const original = agentFromPrivateKey(wallet.privateKey, 'preserved-owner');
+    const path = join(dir, 'agent-keystore.json');
+    await writeFile(path, JSON.stringify({
+      [wallet.address.toLowerCase()]: {
+        authToken: original.authToken,
+        privateKey: wallet.privateKey,
+      },
+    }));
+    const agent = await coldAgent(wallet.privateKey, dir);
+    const persist = vi.spyOn(agent, 'persistAgentToStore');
+
+    await agent.autoRegisterDefaultAgent();
+
+    const registered = (agent as any).localAgents.get(wallet.address);
+    const upgraded = JSON.parse(await readFile(path, 'utf8'))[wallet.address.toLowerCase()];
+    expect(registered.agentAddress).toBe(wallet.address);
+    expect(registered.authToken).toBe(original.authToken);
+    expect(upgraded.authToken).toBe(original.authToken);
+    expect(upgraded.workspaceEncryptionKeys).toHaveLength(1);
+    expect(upgraded.workspaceEncryptionKeys[0].privateEncryptionKey).toBeTruthy();
+    expect(persist).toHaveBeenCalledOnce();
+  });
+
+  it('restores a v1 singular workspace key without replacing it', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-v1-agent-'));
+    dirs.push(dir);
+    const wallet = ethers.Wallet.createRandom();
+    const original = agentFromPrivateKey(wallet.privateKey, 'preserved-owner');
+    const path = join(dir, 'agent-keystore.json');
+    const before = JSON.stringify({
+      [wallet.address.toLowerCase()]: {
+        authToken: original.authToken,
+        privateKey: wallet.privateKey,
+        encryptionKeyAlgorithm: original.encryptionKeyAlgorithm,
+        publicEncryptionKey: original.publicEncryptionKey,
+        privateEncryptionKey: original.privateEncryptionKey,
+        encryptionKeyProof: original.encryptionKeyProof,
+      },
+    });
+    await writeFile(path, before);
+    const agent = await coldAgent(wallet.privateKey, dir);
+
+    await agent.autoRegisterDefaultAgent();
+
+    const registered = (agent as any).localAgents.get(wallet.address);
+    expect(registered.authToken).toBe(original.authToken);
+    expect(registered.workspaceEncryptionKeys[0].publicEncryptionKey)
+      .toBe(original.publicEncryptionKey);
+    expect(registered.workspaceEncryptionKeys[0].privateEncryptionKey)
+      .toBe(original.privateEncryptionKey);
+    expect(digest(await readFile(path))).toBe(digest(before));
+  });
+
+  it('restores mixed public-only and owned active keys when one key is locally owned', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-mixed-agent-'));
+    dirs.push(dir);
+    const wallet = ethers.Wallet.createRandom();
+    const original = agentFromPrivateKey(wallet.privateKey, 'preserved-owner');
+    const owned = agentFromPrivateKey(wallet.privateKey, 'second-key');
+    const path = join(dir, 'agent-keystore.json');
+    const before = JSON.stringify({
+      [wallet.address.toLowerCase()]: {
+        authToken: original.authToken,
+        privateKey: wallet.privateKey,
+        workspaceEncryptionKeys: [
+          { ...original.workspaceEncryptionKeys[0], privateEncryptionKey: undefined },
+          owned.workspaceEncryptionKeys[0],
+        ],
+      },
+    });
+    await writeFile(path, before);
+    const agent = await coldAgent(wallet.privateKey, dir);
+
+    await agent.autoRegisterDefaultAgent();
+
+    const registered = (agent as any).localAgents.get(wallet.address);
+    expect(registered.authToken).toBe(original.authToken);
+    expect(registered.workspaceEncryptionKeys).toHaveLength(2);
+    expect(registered.workspaceEncryptionKeys[0].privateEncryptionKey).toBeUndefined();
+    expect(registered.workspaceEncryptionKeys[1].privateEncryptionKey)
+      .toBe(owned.workspaceEncryptionKeys[0].privateEncryptionKey);
+    expect(digest(await readFile(path))).toBe(digest(before));
+  });
+
+  it('restores a rotated key while retaining a revoked historical key', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'dkg-rotated-agent-'));
+    dirs.push(dir);
+    const wallet = ethers.Wallet.createRandom();
+    const original = agentFromPrivateKey(wallet.privateKey, 'preserved-owner');
+    const oldId = original.workspaceEncryptionKeys[0].encryptionKeyId;
+    appendCustodialWorkspaceEncryptionKey(original);
+    revokeCustodialWorkspaceEncryptionKey(original, oldId);
+    const path = join(dir, 'agent-keystore.json');
+    const before = JSON.stringify({
+      [wallet.address.toLowerCase()]: {
+        authToken: original.authToken,
+        privateKey: wallet.privateKey,
+        workspaceEncryptionKeys: original.workspaceEncryptionKeys,
+        encryptionKeyAlgorithm: original.encryptionKeyAlgorithm,
+        publicEncryptionKey: original.publicEncryptionKey,
+        privateEncryptionKey: original.privateEncryptionKey,
+        encryptionKeyProof: original.encryptionKeyProof,
+      },
+    });
+    await writeFile(path, before);
+    const agent = await coldAgent(wallet.privateKey, dir);
+
+    await agent.autoRegisterDefaultAgent();
+
+    const registered = (agent as any).localAgents.get(wallet.address);
+    expect(registered.workspaceEncryptionKeys).toEqual(original.workspaceEncryptionKeys);
+    expect(registered.authToken).toBe(original.authToken);
+    expect(digest(await readFile(path))).toBe(digest(before));
+  });
+
+  it.each(['private encryption key', 'wallet proof'])(
+    'rejects a structurally complete keystore with a mismatched %s before RDF writes',
+    async (field) => {
+      const dir = await mkdtemp(join(tmpdir(), 'dkg-tampered-agent-'));
+      dirs.push(dir);
+      const wallet = ethers.Wallet.createRandom();
+      const original = agentFromPrivateKey(wallet.privateKey, 'preserved-owner');
+      const other = agentFromPrivateKey(wallet.privateKey, 'other-key');
+      const active = { ...original.workspaceEncryptionKeys[0] };
+      if (field === 'private encryption key') {
+        active.privateEncryptionKey = other.workspaceEncryptionKeys[0].privateEncryptionKey;
+      } else {
+        active.encryptionKeyProof = other.workspaceEncryptionKeys[0].encryptionKeyProof;
+      }
+      const path = join(dir, 'agent-keystore.json');
+      const before = JSON.stringify({
+        [wallet.address.toLowerCase()]: {
+          authToken: original.authToken,
+          privateKey: wallet.privateKey,
+          workspaceEncryptionKeys: [active],
+        },
+      });
+      await writeFile(path, before);
+      const agent = await coldAgent(wallet.privateKey, dir);
+      const persist = vi.spyOn(agent, 'persistAgentToStore');
+
+      await expect(agent.autoRegisterDefaultAgent()).rejects.toThrow('keystore is invalid');
+      expect(persist).not.toHaveBeenCalled();
+      expect(digest(await readFile(path))).toBe(digest(before));
+    },
+  );
 
   it('refuses an unrelated wallet keystore before writing an agent record', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'dkg-wrong-agent-'));
