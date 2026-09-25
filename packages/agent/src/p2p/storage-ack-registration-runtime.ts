@@ -102,7 +102,7 @@ class StorageACKRegistrationSession {
     return attempt;
   }
 
-  /** Direct fixture installation; production installs the attempt result. */
+  /** Install only the result of this generation's guarded registration attempt. */
   install(endpoint: StorageACKEndpoint, lease: StorageACKRegistrationLease): boolean {
     if (this.state.kind === 'retired' || this.state.kind === 'registered') {
       endpoint.dispose();
@@ -227,12 +227,6 @@ export class StorageACKRegistrationRuntime {
   /** Start and own a complete registration generation. */
   startGeneration(plan: StorageACKRegistrationPlan): Promise<void> {
     return this.begin().start(plan);
-  }
-
-  /** Test fixtures exercise the same ownership and drain path as production. */
-  installFixtureEndpoint(endpoint: StorageACKEndpoint): boolean {
-    const session = this.begin();
-    return session.install(endpoint, { signerLost: () => false });
   }
 
   clearRetry(): void { this.currentSession?.stopRetry(); }

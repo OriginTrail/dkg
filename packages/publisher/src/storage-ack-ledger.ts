@@ -15,6 +15,7 @@
  */
 
 import { ethers } from 'ethers';
+import { assertSafeIri } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 export const STORAGE_ACK_LEDGER_GRAPH = 'urn:dkg:node:storage-ack-ledger';
@@ -169,6 +170,30 @@ export function storageAckOwedOperationsQuery(operationSubjects: readonly string
   return `SELECT ?op ?signedAt ?absentSeen WHERE { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
     VALUES ?op { ${values} }
     ?op <${p.signedAt}> ?signedAt .
+    OPTIONAL { ?op <${p.absentSeenAt}> ?absentSeen }
+    FILTER NOT EXISTS { ?op <${p.unregisteredAt}> ?unregistered }
+    FILTER NOT EXISTS { ?op <${p.supersededAt}> ?superseded }
+  } }`;
+}
+
+/**
+ * Find every outstanding signed copy of this exact workspace scope. A local
+ * self-ACK keeps the queued share as the visible head, so its signed copy's
+ * operation subject is intentionally absent from the head aliases.
+ */
+export function storageAckOwedCopiesByScopeQuery(input: {
+  namespace: string;
+  metaGraph: string;
+  kaUal: string;
+  assertionVersion: string | number | bigint;
+}): string {
+  const p = STORAGE_ACK_LEDGER_PREDICATES;
+  return `SELECT ?op ?signedAt ?absentSeen WHERE { GRAPH <${STORAGE_ACK_LEDGER_GRAPH}> {
+    ?op <${p.namespace}> ${lit(input.namespace)} ;
+        <${p.metaGraph}> <${assertSafeIri(input.metaGraph)}> ;
+        <${p.kaUal}> <${assertSafeIri(input.kaUal)}> ;
+        <${p.assertionVersion}> "${BigInt(input.assertionVersion)}"^^<${XSD}integer> ;
+        <${p.signedAt}> ?signedAt .
     OPTIONAL { ?op <${p.absentSeenAt}> ?absentSeen }
     FILTER NOT EXISTS { ?op <${p.unregisteredAt}> ?unregistered }
     FILTER NOT EXISTS { ?op <${p.supersededAt}> ?superseded }

@@ -61,7 +61,16 @@ describe('StorageACK registration session', () => {
     let release!: () => void;
     const inside = new Promise<void>((resolve) => { entered = resolve; });
     const work = new Promise<Uint8Array>((resolve) => { release = () => resolve(new Uint8Array([1])); });
-    runtime.installFixtureEndpoint({ dispatch: () => { entered(); return { response: work, completion: work }; }, dispose: vi.fn() });
+    await runtime.startGeneration({
+      attempt: async () => ({
+        kind: 'registered',
+        endpoint: { dispatch: () => { entered(); return { response: work, completion: work }; }, dispose: vi.fn() },
+      }),
+      retryDelayMs: 1_000,
+      isStarted: () => true,
+      onError: vi.fn(),
+      onRetryScheduled: vi.fn(),
+    });
     const oldSend = runtime.createLocalSender();
     const localWork = (endpoint: StorageACKEndpoint, signal: AbortSignal) => endpoint.dispatch({
         protocol: PROTOCOL_STORAGE_ACK, data: new Uint8Array([1]), peerId: 'self', signal,

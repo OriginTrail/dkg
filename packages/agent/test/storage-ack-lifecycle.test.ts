@@ -117,7 +117,7 @@ describe('StorageACK endpoint and local dispatch lifecycle', () => {
     internals.config.nodeRole = 'core';
     const publish = vi.fn(async () => new Uint8Array([1]));
     const update = vi.fn(async () => new Uint8Array([2]));
-    installStorageACKFixtureEndpoint(agent, {
+    await installStorageACKFixtureEndpoint(agent, {
       dispatch: ({ protocol, data }) => {
         const response = protocol === PROTOCOL_STORAGE_ACK || protocol === PROTOCOL_STORAGE_ACK_V2
           ? publish(data) : update(data);
@@ -148,7 +148,7 @@ describe('StorageACK endpoint and local dispatch lifecycle', () => {
     let observedSignal: AbortSignal | undefined;
     let lateMutation = false;
     let dispatchCalls = 0;
-    installStorageACKFixtureEndpoint(agent, {
+    await installStorageACKFixtureEndpoint(agent, {
       dispatch: ({ signal }) => {
         const response = (async () => {
           dispatchCalls++;

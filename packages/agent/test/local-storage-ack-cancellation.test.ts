@@ -109,7 +109,7 @@ describe('local StorageACK cancellation through the registered real handler', ()
       const local = agent as LocalAgent;
       (local as unknown as { node: { peerId: string } }).node = { peerId: 'local-core' };
       const routes = new Map<string, (data: Uint8Array, peerId: string) => Promise<Uint8Array>>();
-      installStorageACKFixtureEndpoint(local, registerStorageACKEndpoint({
+      await installStorageACKFixtureEndpoint(local, registerStorageACKEndpoint({
         registerGroup: (entries) => {
           for (const entry of entries) routes.set(entry.protocolId, entry.handler);
           return () => routes.clear();
@@ -199,7 +199,7 @@ describe('local StorageACK cancellation through the registered real handler', ()
       const local = agent as LocalAgent;
       (local as unknown as { node: { peerId: string } }).node = { peerId: 'local-core' };
       let physical: Promise<Uint8Array> | undefined;
-      installStorageACKFixtureEndpoint(local, registerStorageACKEndpoint({
+      await installStorageACKFixtureEndpoint(local, registerStorageACKEndpoint({
         registerGroup: () => () => {},
         publish: (data, peerId, signal) => {
           physical = handler.handler(data, { toString: () => peerId } as any, signal);
@@ -336,7 +336,7 @@ describe('local StorageACK cancellation through the registered real handler', ()
     });
     await agent.start();
     const local = agent as LocalAgent;
-    installStorageACKFixtureEndpoint(local, registerStorageACKEndpoint({
+    await installStorageACKFixtureEndpoint(local, registerStorageACKEndpoint({
       registerGroup: () => () => {},
       publish: (data, peerId) => handler.handler(data, { toString: () => peerId } as any),
       update: (data, peerId) => handler.updateHandler(data, { toString: () => peerId } as any),

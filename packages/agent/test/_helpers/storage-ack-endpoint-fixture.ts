@@ -6,16 +6,20 @@ function registrationRuntime(agent: unknown): StorageACKRegistrationRuntime {
 }
 
 /** Install through the runtime so fixtures obey endpoint ownership. */
-export function installStorageACKFixtureEndpoint(
+export async function installStorageACKFixtureEndpoint(
   agent: unknown,
   endpoint: StorageACKEndpoint | Pick<StorageACKEndpoint, 'dispatch'>,
-): void {
+): Promise<void> {
   const ownedEndpoint: StorageACKEndpoint = 'dispose' in endpoint
     ? endpoint as StorageACKEndpoint
     : { dispatch: endpoint.dispatch, dispose() {} };
-  if (!registrationRuntime(agent).installFixtureEndpoint(ownedEndpoint)) {
-    throw new Error('Fixture StorageACK endpoint could not be installed');
-  }
+  await registrationRuntime(agent).startGeneration({
+    attempt: async () => ({ kind: 'registered', endpoint: ownedEndpoint }),
+    retryDelayMs: 1_000,
+    isStarted: () => true,
+    onRetryScheduled: () => { throw new Error('Fixture StorageACK registration unexpectedly retried'); },
+    onError: (_phase, error) => { throw error; },
+  });
 }
 
 export async function clearStorageACKFixtureEndpoint(agent: unknown): Promise<void> {

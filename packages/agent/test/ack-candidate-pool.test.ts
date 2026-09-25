@@ -356,7 +356,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
       lastKnownRequiredACKs: 3,
     });
     a.config.nodeRole = 'core';
-    installStorageACKFixtureEndpoint(a, { dispatch: async () => new Uint8Array([1]) });
+    await installStorageACKFixtureEndpoint(a, { dispatch: async () => new Uint8Array([1]) });
     a.getPeerProtocols = async (peerId) => CORE.slice(0, 2).includes(peerId)
       ? [PROTOCOL_STORAGE_ACK] : ['/dkg/10.0.0/sync'];
     const probe = vi.fn(async (peerId: string) => peerId === CORE[2]
@@ -380,7 +380,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
       lastKnownRequiredACKs: 3,
     });
     a.config.nodeRole = 'core';
-    installStorageACKFixtureEndpoint(a, { dispatch: async () => new Uint8Array([1]) });
+    await installStorageACKFixtureEndpoint(a, { dispatch: async () => new Uint8Array([1]) });
     a.getPeerProtocols = async (peerId) => upgraded.includes(peerId)
       ? ['/dkg/10.0.0/sync'] : [PROTOCOL_STORAGE_ACK];
     const probe = vi.fn(async (peerId: string, protocol: string) =>
@@ -446,7 +446,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
     const unknown = Array.from({ length: 40 }, (_, i) => `unknown-${i}`);
     const a = await buildAgent({ confirmedCores: [], connected: unknown, lastKnownRequiredACKs: 1 });
     a.config.nodeRole = 'core';
-    installStorageACKFixtureEndpoint(a, { dispatch: async () => new Uint8Array([1]) });
+    await installStorageACKFixtureEndpoint(a, { dispatch: async () => new Uint8Array([1]) });
     a.getPeerProtocols = async () => ['/dkg/10.0.0/sync'];
     const probe = vi.fn(async (peerId: string) => peerId === unknown[39]
       ? 'supported' as const : 'unsupported' as const);
@@ -467,7 +467,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
       confirmedCores: [], connected: unknown, preferredACKPeerIds: [unknown[39]], lastKnownRequiredACKs: 1,
     });
     a.config.nodeRole = 'core';
-    installStorageACKFixtureEndpoint(a, { dispatch: async () => new Uint8Array([1]) });
+    await installStorageACKFixtureEndpoint(a, { dispatch: async () => new Uint8Array([1]) });
     a.getPeerProtocols = async () => ['/dkg/10.0.0/sync'];
     let active = 0;
     let peak = 0;
@@ -593,7 +593,7 @@ describe('getACKCandidatePeers — core-only candidates', () => {
       connected: [...CORE.slice(0, 2), ...EDGE],
     });
     a.config.nodeRole = 'core';
-    installStorageACKFixtureEndpoint(a, {
+    await installStorageACKFixtureEndpoint(a, {
       dispatch: async () => new Uint8Array([1]),
     });
 

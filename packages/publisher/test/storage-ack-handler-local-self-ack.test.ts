@@ -222,6 +222,35 @@ describe('StorageACK local self-ACK keeps the publisher SWM head (#2796)', () =>
     expect(await ledgerOperations(h)).toEqual([workspaceOperationSubject(SWM_GRAPH_ID, copy)]);
   });
 
+  it('retains a signed local copy when a different same-version ACK arrives before promotion', async () => {
+    const h = await harness();
+    await h.publisher.stageKnowledgeAssetSharedWorkingMemoryV1(
+      shareInput(1, 'queued-publish-share', content('v1')),
+    );
+    const local = decodeStorageACK(await h.handler.localHandler(
+      publishIntent(content('v1')),
+      { toString: () => PUBLISHER_PEER },
+      undefined,
+      expectedHead(1, 'queued-publish-share'),
+    ));
+    expect(isStorageACKDecline(local)).toBe(false);
+    const before = await readHead(h);
+    expect(before.shareOperationIds).toEqual(['queued-publish-share']);
+
+    const conflicting = decodeStorageACK(await h.handler.handler(
+      publishIntent(content('conflicting-v1')),
+      { toString: () => REMOTE_PEER },
+    ));
+
+    expect(isStorageACKDecline(conflicting)).toBe(true);
+    expect(h.signMessage).toHaveBeenCalledOnce();
+    expect(await readHead(h)).toEqual(before);
+    expect(await swmValues(h, 1)).toEqual(['"v1"']);
+    expect(await ledgerOperations(h)).toEqual([
+      workspaceOperationSubject(SWM_GRAPH_ID, ackCopyOperationId(1, content('v1'))),
+    ]);
+  });
+
   it('keeps a queued update share and its access envelope, so the same job re-validates it', async () => {
     const h = await harness();
     const queued = shareInput(2, 'queued-update-share', content('v2'));

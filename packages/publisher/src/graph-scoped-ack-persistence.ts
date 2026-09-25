@@ -5,11 +5,10 @@ import { ACKCommitSequence } from './ack-commit-sequence.js';
 import { tryReplaceGraphWithDurableRootCompanionAtomically } from './durable-root-atomic-companion.js';
 import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
 import { generateKnowledgeAssetShareMetadata } from './metadata.js';
-import { storageAckOperationId, storageAckOwedOperationsQuery, STORAGE_ACK_LEDGER_PREDICATES, STORAGE_ACK_LEDGER_GRAPH, xsdDateTimeLiteral, storageAckLedgerRecordUpdate, storageAckLedgerEntryQuads, type StorageAckLedgerEntry } from './storage-ack-ledger.js';
+import { storageAckOperationId, storageAckOwedCopiesByScopeQuery, STORAGE_ACK_LEDGER_PREDICATES, STORAGE_ACK_LEDGER_GRAPH, xsdDateTimeLiteral, storageAckLedgerRecordUpdate, storageAckLedgerEntryQuads, type StorageAckLedgerEntry } from './storage-ack-ledger.js';
 import { planStorageAckHeadPersistence, type StorageAckRequestContext } from './storage-ack-head-policy.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { storeKnowledgeAssetWorkspaceHead, tryResolveKnowledgeAssetWorkspaceHead, type KnowledgeAssetWorkspaceHead } from './workspace-resolution.js';
-import { workspaceOperationSubject } from './workspace-metadata-subjects.js';
 import type { StorageACKHandlerConfig } from './storage-ack-handler.js';
 
 /** The verified graph envelope stored by a core before it signs. */
@@ -321,21 +320,23 @@ export class GraphScopedACKPersistence {
   }
 
   /**
-   * The share operations behind a head that this core signed and still owes
-   * (ledgered, neither chain-absent nor superseded). Only such a copy can hold
-   * the head against another request; any other head is replaceable.
+   * Signed copies this core still owes for the head's workspace scope. The
+   * local self-ACK may preserve a different queued operation as the head, so
+   * head aliases alone cannot identify every outstanding signed copy.
    */
   private async owedHeadOperations(
     swmGraphId: string,
     head: KnowledgeAssetWorkspaceHead,
+    subGraphName?: string,
     signal?: AbortSignal,
   ): Promise<Array<{ op: string; signedAtMs: number; absentSeen: boolean }>> {
-    const operations = [...new Set(head.operationAliases.map(
-      (alias) => workspaceOperationSubject(swmGraphId, alias.shareOperationId),
-    ))];
-    if (operations.length === 0) return [];
     const result = await this.store.query(
-      storageAckOwedOperationsQuery(operations),
+      storageAckOwedCopiesByScopeQuery({
+        namespace: swmGraphId,
+        metaGraph: this.graphManager.sharedMemoryMetaUri(swmGraphId, subGraphName),
+        kaUal: head.kaUal,
+        assertionVersion: head.assertionVersion,
+      }),
       graphACKStoreOptions('storage-ack.persistGraphScoped.owedHead', signal),
     );
     if (result.type !== 'bindings') return [];
@@ -465,7 +466,7 @@ export class GraphScopedACKPersistence {
     if (!head) throw new Error('StorageACK head policy requested conflict check without a head');
     const incomingVersion = BigInt(input.scope.assertionVersion);
     const currentVersion = BigInt(head.assertionVersion);
-    const owedRows = await this.owedHeadOperations(input.swmGraphId, head, input.signal);
+    const owedRows = await this.owedHeadOperations(input.swmGraphId, head, input.subGraphName, input.signal);
     if (owedRows.length === 0) return replace;
     const owed = owedRows.map((row) => row.op);
     if (incomingVersion < currentVersion) {
