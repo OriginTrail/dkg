@@ -93,22 +93,45 @@ export interface StopOrphanedOxigraphOptions {
 const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_POLL_INTERVAL_MS = 100;
 
+// `lsof -t` output: one PID per line; anything else is not a holder list.
 function parsePids(stdout: string): number[] {
-  return stdout
-    .split('\n')
-    .map((line) => Number(line.trim()))
-    .filter((pid) => Number.isInteger(pid) && pid > 0);
+  const lines = stdout.split('\n').map((line) => line.trim()).filter(Boolean);
+  const pids = lines.map(Number);
+  if (pids.some((pid) => !Number.isInteger(pid) || pid <= 0)) {
+    throw new Error(`lsof: unexpected output: ${stdout.slice(0, 200)}`);
+  }
+  return pids;
 }
 
-export async function lsofLockHolders(lockPath: string): Promise<number[]> {
-  try {
-    const { stdout } = await execFileAsync('lsof', ['-t', '-w', lockPath], { timeout: 5_000 });
+/** Runs `lsof` with these arguments; rejects like `execFile` (`code`, `killed`, `stdout`, `stderr`). */
+export type LsofRunner = (args: readonly string[]) => Promise<{ stdout: string }>;
+
+const runLsof: LsofRunner = (args) => execFileAsync('lsof', [...args], { timeout: 5_000 });
+
+/**
+ * The processes holding a file, from `lsof -t`. It exits 1 with no output
+ * when no process has the file open, which is the one failure read as "no
+ * holders". Anything else (a timeout, a missing `lsof`, a message on stderr,
+ * output that is not a PID list) rejects, so the reclaim treats the holders
+ * as unknown rather than absent.
+ */
+export function lsofLockHolderLister(run: LsofRunner = runLsof): (lockPath: string) => Promise<number[]> {
+  return async (lockPath) => {
+    let stdout: string;
+    try {
+      ({ stdout } = await run(['-t', '-w', lockPath]));
+    } catch (error) {
+      const failed = error as { code?: unknown; signal?: unknown; stdout?: unknown; stderr?: unknown; killed?: boolean };
+      const noHolder = failed.code === 1 && failed.killed !== true && failed.signal == null
+        && String(failed.stdout ?? '').trim() === '' && String(failed.stderr ?? '').trim() === '';
+      if (noHolder) return [];
+      throw error;
+    }
     return parsePids(stdout);
-  } catch (error) {
-    // lsof exits 1 when no process has the file open.
-    return parsePids(String((error as { stdout?: unknown }).stdout ?? ''));
-  }
+  };
 }
+
+export const lsofLockHolders = lsofLockHolderLister();
 
 /** Linux: match open descriptors directly; `lsof` is often missing there. */
 export async function procLockHolders(lockPath: string): Promise<number[]> {

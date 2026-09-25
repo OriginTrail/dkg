@@ -23,86 +23,107 @@ export type ListenOwnerResolver = (
   ownership?: 'child-only' | 'process-tree',
 ) => Promise<number | null>;
 
+/**
+ * One Oxigraph launch: its child process, and everything that depends on how
+ * it was launched. Termination, listener ownership and OOM attribution are
+ * captured per launch, so they cannot be applied with another launch's
+ * semantics.
+ */
+export interface OxigraphLaunchHandle {
+  readonly child: ChildProcess;
+  /** Whether the child still runs: not exited, and never failed to spawn. */
+  alive(): boolean;
+  /**
+   * Signal the child and whatever it launched: its whole process group where
+   * the launch leads one. Does nothing once the child has exited, so a
+   * process-group id is never signalled after it could have been reused.
+   */
+  terminate(signal: NodeJS.Signals): void;
+  /** The PID that owns the listen socket, checked as this launch mode allows. */
+  resolveListenerPid(port: number, host: string, resolver: ListenOwnerResolver): Promise<number | null>;
+  /** Note one line of stderr: the scoped watchdog reports an OOM kill there. */
+  observeStderr(text: string): void;
+  /** Take the listener's cgroup OOM counter once, as evidence for `classifyOomExit`. */
+  captureOomSnapshot(listenerPid: number, read: (pid: number) => CgroupOomSnapshot | null): void;
+  /** Whether the child's exit was an OOM kill. */
+  classifyOomExit(exit: {
+    code: number | null;
+    signal: NodeJS.Signals | null;
+    readOomKill: (dir: string) => number | null;
+  }): boolean;
+}
+
 export interface OxigraphLaunchStrategy {
   readonly mode: 'direct' | 'systemd-scope';
-  /**
-   * Spawn Oxigraph through `spawnProcess` with the options `terminate`
-   * relies on: the direct watchdog leads its own process group, so the
-   * daemon's signals reach the watchdog and Oxigraph together.
-   */
+  /** Spawn Oxigraph through `spawnProcess` and return that launch's handle. */
   launch(
     spawnProcess: typeof spawn,
     binaryPath: string,
     binaryArgs: string[],
     stdio: StdioOptions,
-  ): ChildProcess;
-  resolveListenerPid(
-    child: ChildProcess,
-    port: number,
-    host: string,
-    resolver: ListenOwnerResolver,
-  ): Promise<number | null>;
-  observeStderr(child: ChildProcess, text: string): void;
-  classifyOomExit(input: {
-    child: ChildProcess;
-    code: number | null;
-    signal: NodeJS.Signals | null;
-    snapshot?: CgroupOomSnapshot;
-    readOomKill: (dir: string) => number | null;
-  }): boolean;
+  ): OxigraphLaunchHandle;
   logSummary(): string | null;
+}
+
+interface LaunchMode {
+  build(binaryPath: string, binaryArgs: string[]): OxigraphLaunchCommand;
   /**
-   * Signal a child that `launch` returned, and whatever it launched. Call it
-   * only while the child has not exited, so a process-group id cannot have
-   * been reused. Any other child is signalled alone.
+   * Lead a new process group, which `terminate` signals: it reaches Oxigraph
+   * even when the wrapper cannot forward the signal, as with SIGKILL.
    */
-  terminate(child: ChildProcess, signal: NodeJS.Signals): void;
+  processGroup: boolean;
+  listenerOwnership: 'child-only' | 'process-tree';
+  /** The scoped watchdog prints OXIGRAPH_WATCHDOG_OOM_MARKER on an OOM kill. */
+  watchdogReportsOom: boolean;
 }
 
-function cgroupEvidenceIncremented(
-  input: Parameters<OxigraphLaunchStrategy['classifyOomExit']>[0],
-): boolean {
-  const sigkillCompatibleExit = input.signal === 'SIGKILL' || input.code === 137;
-  if (!sigkillCompatibleExit || !input.snapshot) return false;
-  const oomKillNow = input.readOomKill(input.snapshot.dir);
-  return typeof oomKillNow === 'number' && oomKillNow > input.snapshot.oomKill;
-}
-
-function signalChild(child: ChildProcess, signal: NodeJS.Signals): void {
-  child.kill(signal);
-}
-
-// One owner for spawning and signalling. With `processGroup`, each child is
-// spawned leading its own process group and remembered, and `terminate`
-// signals that group: it reaches Oxigraph even when the wrapper cannot
-// forward the signal, as with SIGKILL sent to the watchdog alone.
-function launcher(
-  build: (binaryPath: string, binaryArgs: string[]) => OxigraphLaunchCommand,
-  processGroup: boolean,
-): Pick<OxigraphLaunchStrategy, 'launch' | 'terminate'> {
-  const groupLeaders = new WeakSet<ChildProcess>();
-  return {
-    launch(spawnProcess, binaryPath, binaryArgs, stdio) {
-      const { command, args, environment } = build(binaryPath, binaryArgs);
-      const child = spawnProcess(command, args, {
-        stdio,
-        ...(processGroup ? { detached: true } : {}),
-        ...(environment ? { env: { ...process.env, ...environment } } : {}),
-      });
-      if (processGroup) groupLeaders.add(child);
-      return child;
-    },
-    terminate(child, signal) {
-      if (groupLeaders.has(child) && child.pid !== undefined) {
-        try {
-          process.kill(-child.pid, signal);
-          return;
-        } catch {
-          // Fall back to the wrapper alone.
+function launcher(mode: LaunchMode): OxigraphLaunchStrategy['launch'] {
+  return (spawnProcess, binaryPath, binaryArgs, stdio) => {
+    const { command, args, environment } = mode.build(binaryPath, binaryArgs);
+    const child = spawnProcess(command, args, {
+      stdio,
+      ...(mode.processGroup ? { detached: true } : {}),
+      ...(environment ? { env: { ...process.env, ...environment } } : {}),
+    });
+    // An `error` event means the process never ran (ENOENT, EACCES) or could
+    // not be signalled, so `exitCode`/`signalCode` alone would call it alive.
+    let failed = false;
+    child.on('error', () => { failed = true; });
+    let watchdogSawOom = false;
+    let oomSnapshot: CgroupOomSnapshot | undefined;
+    const alive = (): boolean => !failed && child.exitCode === null && child.signalCode === null;
+    return {
+      child,
+      alive,
+      terminate(signal) {
+        if (!alive()) return;
+        if (mode.processGroup && child.pid !== undefined) {
+          try {
+            process.kill(-child.pid, signal);
+            return;
+          } catch {
+            // Fall back to the wrapper alone.
+          }
         }
-      }
-      signalChild(child, signal);
-    },
+        child.kill(signal);
+      },
+      resolveListenerPid: (port, host, resolver) => resolver(child, port, host, mode.listenerOwnership),
+      observeStderr(text) {
+        if (mode.watchdogReportsOom && text.includes(OXIGRAPH_WATCHDOG_OOM_MARKER)) watchdogSawOom = true;
+      },
+      captureOomSnapshot(listenerPid, read) {
+        oomSnapshot ??= read(listenerPid) ?? undefined;
+      },
+      // `oom_kill` is cgroup-scoped, not per-PID, so an increment is only
+      // supporting evidence for a SIGKILL-compatible exit.
+      classifyOomExit({ code, signal, readOomKill }) {
+        if (watchdogSawOom) return true;
+        const sigkillCompatibleExit = signal === 'SIGKILL' || code === 137;
+        if (!sigkillCompatibleExit || !oomSnapshot) return false;
+        const oomKillNow = readOomKill(oomSnapshot.dir);
+        return typeof oomKillNow === 'number' && oomKillNow > oomSnapshot.oomKill;
+      },
+    };
   };
 }
 
@@ -114,19 +135,18 @@ export function createOxigraphLaunchStrategy(opts: {
   nodeExecutable?: string;
   watchdogPath?: string;
 }): OxigraphLaunchStrategy {
-  const direct = {
-    mode: 'direct',
-    observeStderr: () => {},
-    classifyOomExit: cgroupEvidenceIncremented,
-    logSummary: () => null,
-  } as const;
   // Windows resolves listener ownership for the direct child only (netstat
   // has no process tree), so it keeps launching the binary itself.
   if (!opts.memoryLimits && opts.platform === 'win32') {
     return {
-      ...direct,
-      ...launcher((binaryPath, binaryArgs) => ({ command: binaryPath, args: binaryArgs }), false),
-      resolveListenerPid: (child, port, host, resolver) => resolver(child, port, host, 'child-only'),
+      mode: 'direct',
+      launch: launcher({
+        build: (binaryPath, binaryArgs) => ({ command: binaryPath, args: binaryArgs }),
+        processGroup: false,
+        listenerOwnership: 'child-only',
+        watchdogReportsOom: false,
+      }),
+      logSummary: () => null,
     };
   }
 
@@ -141,16 +161,23 @@ export function createOxigraphLaunchStrategy(opts: {
     // to init and keep `<location>/LOCK`, and every respawned worker would
     // fail to open the store.
     return {
-      ...direct,
-      ...launcher((binaryPath, binaryArgs) => ({
-        command: nodeExecutable,
-        args: [
-          ...watchdogNodeArgs,
-          OXIGRAPH_WATCHDOG_DIRECT_FLAG, String(opts.parentPid),
-          binaryPath, ...binaryArgs,
-        ],
-      }), true),
-      resolveListenerPid: (child, port, host, resolver) => resolver(child, port, host, 'process-tree'),
+      mode: 'direct',
+      launch: launcher({
+        build: (binaryPath, binaryArgs) => ({
+          command: nodeExecutable,
+          args: [
+            ...watchdogNodeArgs,
+            OXIGRAPH_WATCHDOG_DIRECT_FLAG, String(opts.parentPid),
+            binaryPath, ...binaryArgs,
+          ],
+        }),
+        processGroup: true,
+        listenerOwnership: 'process-tree',
+        // A direct watchdog passes an OOM SIGKILL on as exit 137, which the
+        // cgroup evidence classifies.
+        watchdogReportsOom: false,
+      }),
+      logSummary: () => null,
     };
   }
 
@@ -161,7 +188,6 @@ export function createOxigraphLaunchStrategy(opts: {
     throw new Error('Managed Oxigraph memory limits require a numeric service user id');
   }
   const runtimeDir = `/run/user/${opts.uid}`;
-  const watchdogOomChildren = new WeakSet<ChildProcess>();
   let generation = 0;
 
   return {
@@ -170,32 +196,30 @@ export function createOxigraphLaunchStrategy(opts: {
     // parent-death signal stops Oxigraph with it. The launch still leads its
     // own process group, so a signal reaches every process it started
     // without depending on either.
-    ...launcher((binaryPath, binaryArgs) => {
-      generation += 1;
-      const unit = `dkg-oxigraph-${opts.parentPid}-${generation}`;
-      return {
-        command: 'systemd-run',
-        args: [
-          '--user', '--scope', '--collect', '--quiet',
-          `--unit=${unit}`,
-          ...(limits.highMiB === undefined ? [] : [`--property=MemoryHigh=${limits.highMiB}M`]),
-          `--property=MemoryMax=${limits.maxMiB}M`,
-          '--property=MemorySwapMax=0',
-          '--', nodeExecutable, ...watchdogNodeArgs, String(opts.parentPid), binaryPath, ...binaryArgs,
-        ],
-        environment: {
-          XDG_RUNTIME_DIR: runtimeDir,
-          DBUS_SESSION_BUS_ADDRESS: `unix:path=${runtimeDir}/bus`,
-        },
-      };
-    }, true),
-    resolveListenerPid: (child, port, host, resolver) => resolver(child, port, host, 'process-tree'),
-    observeStderr(child, text) {
-      if (text.includes(OXIGRAPH_WATCHDOG_OOM_MARKER)) watchdogOomChildren.add(child);
-    },
-    classifyOomExit(input) {
-      return watchdogOomChildren.has(input.child) || cgroupEvidenceIncremented(input);
-    },
+    launch: launcher({
+      build: (binaryPath, binaryArgs) => {
+        generation += 1;
+        const unit = `dkg-oxigraph-${opts.parentPid}-${generation}`;
+        return {
+          command: 'systemd-run',
+          args: [
+            '--user', '--scope', '--collect', '--quiet',
+            `--unit=${unit}`,
+            ...(limits.highMiB === undefined ? [] : [`--property=MemoryHigh=${limits.highMiB}M`]),
+            `--property=MemoryMax=${limits.maxMiB}M`,
+            '--property=MemorySwapMax=0',
+            '--', nodeExecutable, ...watchdogNodeArgs, String(opts.parentPid), binaryPath, ...binaryArgs,
+          ],
+          environment: {
+            XDG_RUNTIME_DIR: runtimeDir,
+            DBUS_SESSION_BUS_ADDRESS: `unix:path=${runtimeDir}/bus`,
+          },
+        };
+      },
+      processGroup: true,
+      listenerOwnership: 'process-tree',
+      watchdogReportsOom: true,
+    }),
     logSummary: () =>
       `Starting Oxigraph in an isolated systemd user scope ` +
       `(MemoryHigh=${limits.highMiB ?? 'unset'}MiB, MemoryMax=${limits.maxMiB}MiB).`,

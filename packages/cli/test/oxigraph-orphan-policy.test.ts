@@ -20,6 +20,7 @@ import {
   it,
 } from 'vitest';
 import type { ChildProcess, spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import {
   mkdir,
   mkdtemp,
@@ -31,7 +32,11 @@ import { dirname, join } from 'node:path';
 import type { OxigraphBinaryCatalog } from '../src/daemon/oxigraph-binary.js';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { oxigraphStoreArgs } from '../src/daemon/oxigraph-store-launch.js';
-import { stopOrphanedOxigraph, type OrphanedOxigraphIo } from '../src/daemon/oxigraph-orphan.js';
+import {
+  lsofLockHolderLister,
+  stopOrphanedOxigraph,
+  type OrphanedOxigraphIo,
+} from '../src/daemon/oxigraph-orphan.js';
 import { psProcessInspector } from '../src/daemon/process-probe.js';
 import {
   checkIdentity,
@@ -223,6 +228,30 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
         // Windows is skipped outright; elsewhere the missing lock file ends it.
         io: { platform, lockExists: async () => false, listLockHolders },
       })).resolves.toEqual([]);
+    });
+
+    it('takes an lsof timeout for unknown holders, not for none, and signals nothing', async () => {
+      const { signals, io } = processTable({
+        4100: { ppid: 1, argv: serve(store), holdsLock: true },
+      });
+      const lines: string[] = [];
+      const signalled = await stopOrphanedOxigraph({
+        binaryPath,
+        location: store,
+        log: (line) => lines.push(line),
+        io: {
+          ...io,
+          platform: 'darwin',
+          lockExists: async () => true,
+          readOwnerRecord: async () => ({ kind: 'absent' }),
+          listLockHolders: lsofLockHolderLister(async () => {
+            throw Object.assign(new Error('Command failed: lsof'), { code: null, killed: true, signal: 'SIGTERM' });
+          }),
+        },
+      });
+      expect(signalled).toEqual([]);
+      expect(signals).toEqual([]);
+      expect(lines.join('\n')).toContain(`could not list the processes holding ${store}/LOCK`);
     });
 
     it('does not signal when the real ps classifier cannot read the holder', async () => {
@@ -758,7 +787,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
         watchdogPath: '/opt/oxigraph-watchdog.js',
       }).launch(((_command: string, args: readonly string[]) => {
         launched = args;
-        return { pid: 4242 } as ChildProcess;
+        return Object.assign(new EventEmitter(), { pid: 4242, exitCode: null, signalCode: null }) as unknown as ChildProcess;
       }) as unknown as typeof spawn, binaryPath, serveArgs, 'ignore');
       // The argv the watchdog execs for Oxigraph: the binary and its arguments.
       const argv = launched.slice(launched.indexOf(binaryPath));

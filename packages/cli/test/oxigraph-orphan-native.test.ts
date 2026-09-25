@@ -33,7 +33,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { oxigraphStoreArgs } from '../src/daemon/oxigraph-store-launch.js';
-import { stopOrphanedOxigraph } from '../src/daemon/oxigraph-orphan.js';
+import { lsofLockHolderLister, stopOrphanedOxigraph } from '../src/daemon/oxigraph-orphan.js';
 import { createOxigraphStoreOwnership } from '../src/daemon/oxigraph-store-ownership.js';
 import {
   checkIdentity,
@@ -417,8 +417,29 @@ describe('stopOrphanedOxigraph (real processes)', () => {
   }, 30_000);
 });
 
-describe('process probe classification (injected ps and /proc)', () => {
+describe('process probe classification (injected ps, lsof and /proc)', () => {
   const psFailure = (props: Record<string, unknown>) => Object.assign(new Error('Command failed: ps'), props);
+
+  it.each([
+    ['a timeout', { code: null, killed: true, signal: 'SIGTERM', stdout: '', stderr: '' }],
+    ['exit 1 from a process killed on its timeout', { code: 1, killed: true, signal: null, stdout: '', stderr: '' }],
+    ['a missing lsof', { code: 'ENOENT' }],
+    ['an error on stderr', { code: 1, killed: false, signal: null, stdout: '', stderr: 'lsof: status error on LOCK' }],
+  ] as const)('lsof: %s rejects rather than reading as no holders', async (_label, props) => {
+    const list = lsofLockHolderLister(async () => { throw psFailure(props); });
+    await expect(list('/data/ox/LOCK')).rejects.toThrow();
+  });
+
+  it('lsof: a clean exit 1 is no holders, a PID list is the holders, and other output rejects', async () => {
+    const noHolder = lsofLockHolderLister(async () => {
+      throw psFailure({ code: 1, killed: false, signal: null, stdout: '', stderr: '' });
+    });
+    await expect(noHolder('/data/ox/LOCK')).resolves.toEqual([]);
+    await expect(lsofLockHolderLister(async () => ({ stdout: '4100\n4200\n' }))('/data/ox/LOCK'))
+      .resolves.toEqual([4100, 4200]);
+    await expect(lsofLockHolderLister(async () => ({ stdout: 'p4100\n' }))('/data/ox/LOCK'))
+      .rejects.toThrow(/unexpected output/);
+  });
 
   it.each([
     ['a clean exit 1 with no output (no such process)', { code: 1, killed: false, signal: null, stdout: '', stderr: '' }, 'gone'],
