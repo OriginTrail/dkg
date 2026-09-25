@@ -387,23 +387,21 @@ export async function startOxigraphServer(
   // Every spawn, boot and restart alike, is one store-ownership launch: it
   // frees the store lock (a worker or watchdog that died without stopping its
   // Oxigraph leaves it holding LOCK), spawns, and records the launch. The
-  // launch reaches `adopt` as soon as it exists, so the caller's failure path
-  // stops it even when a later step of the launch rejects.
-  const launchChild = async (
+  // spawned launch becomes the lifecycle's current one as soon as it exists,
+  // so a launch that fails in a later step still leaves it where the failure
+  // paths stop it.
+  type Spawned = { child: ChildProcess; oxigraph: OxigraphLaunchHandle; ready: ReadyBudget };
+  const launchOxigraph = (
     kind: 'boot' | 'restart',
-    adopt: (oxigraph: OxigraphLaunchHandle) => void,
-  ): Promise<{ oxigraph: OxigraphLaunchHandle; owned: OxigraphStoreLaunch; ready: ReadyBudget } | null> => {
-    let ready: ReadyBudget = { timeoutMs: 0, walBytes: 0 };
-    const spawned: { oxigraph?: OxigraphLaunchHandle } = {};
-    const owned = await storeOwnership.launch(() => {
-      ready = sizeReadyBudget(kind);
-      const oxigraph = spawnChild();
-      spawned.oxigraph = oxigraph;
-      adopt(oxigraph);
-      return oxigraph.child;
-    });
-    return owned === null ? null : { oxigraph: spawned.oxigraph!, owned, ready };
-  };
+    current:
+      | { phase: 'starting'; generation: number }
+      | { phase: 'recovering'; reason: string; generation: number },
+  ): Promise<OxigraphStoreLaunch<Spawned> | null> => storeOwnership.launch(() => {
+    const ready = sizeReadyBudget(kind);
+    const oxigraph = spawnChild();
+    lifecycle = { ...current, oxigraph };
+    return { child: oxigraph.child, oxigraph, ready };
+  });
 
   type StoreOpenOutcome =
     | { outcome: 'ready'; listenerPid: number; probes: number }
@@ -414,14 +412,13 @@ export async function startOxigraphServer(
   // lifecycle state: boot and restart share it, and commit or fail the
   // launch themselves.
   const awaitStoreOpen = async (
-    oxigraph: OxigraphLaunchHandle,
-    owned: OxigraphStoreLaunch,
-    ready: ReadyBudget,
+    launch: OxigraphStoreLaunch<Spawned>,
     attempt: {
       progress: (elapsedS: number, allowedS: number) => string;
       superseded?: () => boolean;
     },
   ): Promise<StoreOpenOutcome> => {
+    const { oxigraph, ready } = launch.spawned;
     const startedAt = Date.now();
     let lastProgressLog = startedAt;
     let probes = 0;
@@ -452,7 +449,7 @@ export async function startOxigraphServer(
         // Record before declaring ready, then look again: a child that exits
         // during the write is a failed open, not a ready server whose exit
         // handler has already started recovery.
-        await owned.ready(listenerPid);
+        await launch.ready(listenerPid);
         if (attempt.superseded?.()) return { outcome: 'superseded' };
         if (!oxigraph.alive()) return { outcome: 'child-died' };
         return { outcome: 'ready', listenerPid, probes };
@@ -494,17 +491,13 @@ export async function startOxigraphServer(
     // faces a larger replay than the daemon ever measured at startup. Reusing
     // the boot value re-arms the exact ratchet: kill a healthy replaying
     // child, leave the WAL, retry, kill it again.
-    const attempt: { candidate: OxigraphLaunchHandle | null } = { candidate: null };
     let failure = `respawned server did not become ready on ${bind}`;
     try {
-      const launched = await launchChild('restart', (oxigraph) => {
-        attempt.candidate = oxigraph;
-        lifecycle = { phase: 'recovering', oxigraph, reason, generation };
-      });
+      const launch = await launchOxigraph('restart', { phase: 'recovering', reason, generation });
       // stop() closed the store ownership while it reclaimed the store.
-      if (launched === null) return;
-      const { oxigraph } = launched;
-      const opened = await awaitStoreOpen(oxigraph, launched.owned, launched.ready, {
+      if (launch === null) return;
+      const { oxigraph } = launch.spawned;
+      const opened = await awaitStoreOpen(launch, {
         progress: (elapsedS, allowedS) =>
           `[oxigraph] restart still opening: ${elapsedS}s elapsed of ${allowedS}s allowed.`,
         superseded: () => lifecycle.phase !== 'recovering' || lifecycle.oxigraph !== oxigraph,
@@ -519,13 +512,10 @@ export async function startOxigraphServer(
       // that never became ready.
       failure = `restart attempt failed: ${error instanceof Error ? error.message : String(error)}`;
     }
-    if (isStopping()) return;
-    const { candidate } = attempt;
+    if (isStopping() || lifecycle.phase !== 'recovering') return;
     // A respawned child that died or never answered is retried with backoff.
-    if (
-      candidate !== null
-      && (lifecycle.phase !== 'recovering' || lifecycle.oxigraph !== candidate)
-    ) return;
+    // This attempt's launch, if it got that far, is the current one.
+    const candidate = lifecycle.oxigraph;
     // Timed out with the child still running but unresponsive. Kill it
     // before respawning — otherwise each retry stacks another live
     // `oxigraph serve`, and they fight over the port (self-inflicted
@@ -702,14 +692,12 @@ export async function startOxigraphServer(
   let opened: StoreOpenOutcome;
   try {
     const generation = lifecycle.generation;
-    const launched = await launchChild('boot', (oxigraph) => {
-      lifecycle = { phase: 'starting', oxigraph, generation };
-    });
+    const launch = await launchOxigraph('boot', { phase: 'starting', generation });
     // Only killSync (process exit) closes the store ownership during boot.
-    if (launched === null) throw new Error('Oxigraph server start was interrupted by process exit');
-    bootReady = launched.ready;
-    const { oxigraph } = launched;
-    opened = await awaitStoreOpen(oxigraph, launched.owned, bootReady, {
+    if (launch === null) throw new Error('Oxigraph server start was interrupted by process exit');
+    bootReady = launch.spawned.ready;
+    const { oxigraph } = launch.spawned;
+    opened = await awaitStoreOpen(launch, {
       // Only an exit-time kill (process.exit) moves boot out of `starting`.
       superseded: () => lifecycle.phase !== 'starting' || lifecycle.oxigraph !== oxigraph,
       progress: (elapsedS, allowedS) =>

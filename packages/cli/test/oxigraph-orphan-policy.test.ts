@@ -39,7 +39,6 @@ import {
 } from '../src/daemon/oxigraph-orphan.js';
 import { psProcessInspector } from '../src/daemon/process-probe.js';
 import {
-  checkIdentity,
   OXIGRAPH_OWNER_RECORD,
   OXIGRAPH_OWNER_RECORD_SCHEMA,
   type OxigraphOwnerRecordRead,
@@ -272,7 +271,6 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
           readOwnerRecord: async () => recorded,
           listLockHolders: async () => [4100],
           inspectProcess,
-          checkIdentity: (id) => checkIdentity(id, inspectProcess),
           signal: (pid, name) => { signals.push([pid, name]); },
           sleep: async () => {},
           now: () => 0,

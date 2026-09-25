@@ -31,6 +31,7 @@ export function processTable(
   );
   let clock = 0;
   const signals: Array<[number, NodeJS.Signals]> = [];
+  // Only process inspection: the reclaim derives identity checks from it.
   const io: Omit<OrphanedOxigraphIo, 'platform' | 'lockExists' | 'readOwnerRecord'> = {
     listLockHolders: vi.fn(async () =>
       [...table].filter(([, entry]) => entry.alive && entry.holdsLock).map(([pid]) => pid)),
@@ -52,13 +53,6 @@ export function processTable(
           : { state: 'gone' };
       hooks.onInspect?.(pid, table);
       return lookup;
-    },
-    checkIdentity: async ({ pid, start }) => {
-      const entry = table.get(pid);
-      if (entry?.unreadable) return { state: 'unknown', reason: 'ps timed out' };
-      return entry?.alive === true && (entry.start ?? `t${pid}`) === start
-        ? { state: 'running' }
-        : { state: 'gone' };
     },
     signal: (pid, signal) => {
       signals.push([pid, signal]);

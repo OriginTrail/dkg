@@ -153,14 +153,14 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       const launch = await ownership.launch(() => {
         linesAtSpawn = lines.length;
         launcher = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
-        return launcher;
+        return { child: launcher };
       });
       // The reclaim finished before the spawn.
       expect(lines.slice(0, linesAtSpawn).join('\n')).toContain(
         `stopping orphaned Oxigraph pid ${orphan} (it was reparented to PID 1)`,
       );
       expect(lines.slice(0, linesAtSpawn).join('\n')).toContain('released by the orphaned Oxigraph');
-      expect(launch?.child).toBe(launcher);
+      expect(launch?.spawned.child).toBe(launcher);
       // Recorded at spawn, without an Oxigraph yet ...
       const atSpawn = await readOxigraphOwnerRecord(location);
       expect(atSpawn).toMatchObject({

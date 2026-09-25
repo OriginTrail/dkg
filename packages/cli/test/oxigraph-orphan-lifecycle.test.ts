@@ -551,7 +551,7 @@ describe('store ownership launches', () => {
 
     const launched = ownership.launch(() => {
       spawns += 1;
-      return notSpawnable();
+      return { child: notSpawnable() };
     });
     await ownership.close();
     releaseReclaim();
@@ -569,12 +569,12 @@ describe('store ownership launches', () => {
       log: () => {},
       steps: { reclaim: async () => {}, recordLaunch: recording(records) },
     });
-    const launch = await ownership.launch(() => ({ pid: 4099 }) as ChildProcess);
+    const launch = await ownership.launch(() => ({ child: { pid: 4099 } as ChildProcess }));
     expect(records).toEqual(['spawned:4099']);
 
     await ownership.close();
     await launch!.ready(4100);
     expect(records).toEqual(['spawned:4099']);
-    await expect(ownership.launch(notSpawnable)).resolves.toBeNull();
+    await expect(ownership.launch(() => ({ child: notSpawnable() }))).resolves.toBeNull();
   });
 });

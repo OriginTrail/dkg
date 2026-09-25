@@ -146,14 +146,10 @@ describe('Oxigraph launch strategies', () => {
     },
   );
 
-  it.each([
-    ['the direct watchdog', { platform: process.platform, parentPid: 42, uid: 1000 }],
-    // A pre-ready scoped launch killed on its ready deadline.
-    ['a systemd scope', { platform: 'linux' as const, parentPid: 42, uid: 1000, memoryLimits: { maxMiB: 3072 } }],
-  ])('signals the whole process group of %s, so a SIGKILL also reaches Oxigraph', async (_label, options) => {
-    const strategy = createOxigraphLaunchStrategy(options);
-    // Launched through the strategy, with the spawn options it chooses, as a
-    // wrapper that launches a long-lived child in place of the watchdog.
+  // Launches through `strategy`, with the spawn options it chooses, a wrapper
+  // that starts a long-lived child in place of the watchdog, SIGKILLs the
+  // launch through its handle, and reports whether that child died too.
+  const groupKillReachesDescendant = async (strategy: ReturnType<typeof createOxigraphLaunchStrategy>) => {
     const oxigraph = strategy.launch(
       ((_command: string, _args: readonly string[], options: Parameters<typeof spawn>[2]) => spawn(process.execPath, [
         '-e',
@@ -164,18 +160,35 @@ describe('Oxigraph launch strategies', () => {
       ['ignore', 'pipe', 'ignore'],
     );
     const [chunk] = await once(oxigraph.child.stdout!, 'data');
-    const grandchild = Number(String(chunk).trim());
+    const descendant = Number(String(chunk).trim());
     try {
       const exited = once(oxigraph.child, 'exit');
       oxigraph.terminate('SIGKILL');
       await exited;
       expect(oxigraph.alive()).toBe(false);
-      expect(await waitForCondition(() => {
-        try { process.kill(grandchild, 0); return false; } catch { return true; }
-      })).toBe(true);
+      return await waitForCondition(() => {
+        try { process.kill(descendant, 0); return false; } catch { return true; }
+      });
     } finally {
-      try { process.kill(grandchild, 'SIGKILL'); } catch { /* already gone */ }
+      try { process.kill(descendant, 'SIGKILL'); } catch { /* already gone */ }
     }
+  };
+
+  it('signals the direct watchdog\'s whole process group, so a SIGKILL also reaches Oxigraph', async () => {
+    const strategy = createOxigraphLaunchStrategy({ platform: process.platform, parentPid: 42, uid: 1000 });
+    expect(await groupKillReachesDescendant(strategy)).toBe(true);
+  });
+
+  // The launch's half only: `systemd-run` is replaced by the stand-in, so
+  // this does not prove what systemd does. `systemd-run --scope` execs its
+  // command in place without changing the process group, and the watchdog
+  // starts Oxigraph without a new group, so they stay in the one signalled
+  // here; no test in this suite runs a real user scope.
+  it('launches a scope leading its own process group and signals that group through the handle', async () => {
+    const strategy = createOxigraphLaunchStrategy({
+      platform: 'linux', parentPid: 42, uid: 1000, memoryLimits: { maxMiB: 3072 },
+    });
+    expect(await groupKillReachesDescendant(strategy)).toBe(true);
   });
 
   it('signals only the spawned child on Windows', () => {

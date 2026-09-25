@@ -65,8 +65,6 @@ export interface OrphanedOxigraphIo {
   readOwnerRecord(location: string): Promise<OxigraphOwnerRecordRead>;
   /** One observation of a process: running, confirmed gone, or unreadable. */
   inspectProcess(pid: number): Promise<ProcessLookup>;
-  /** Whether `identity` still names a running process (same PID and start time). */
-  checkIdentity(identity: ProcessIdentity): Promise<IdentityState>;
   signal(pid: number, signal: NodeJS.Signals): void;
   sleep(ms: number): Promise<void>;
   now(): number;
@@ -149,7 +147,6 @@ export function reclaimHost(platform: NodeJS.Platform): OrphanedOxigraphIo {
     listLockHolders: platform === 'linux' ? procLockHolders : lsofLockHolders,
     readOwnerRecord: readOxigraphOwnerRecord,
     inspectProcess,
-    checkIdentity: (identity) => checkIdentity(identity, inspectProcess),
     signal: (pid, signal) => { process.kill(pid, signal); },
     sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
     now: () => Date.now(),
@@ -188,7 +185,11 @@ async function observeHolder(io: OrphanedOxigraphIo, holder: ProcessInstance): P
  * lock error, preceded by a log line naming the holder and its parent.
  */
 export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): Promise<number[]> {
-  const io: OrphanedOxigraphIo = { ...reclaimHost(process.platform), ...opts.io };
+  // Defaults for the effective platform, then the caller's parts. Identity
+  // checks read the same process table as every other observation.
+  const io: OrphanedOxigraphIo = { ...reclaimHost(opts.io?.platform ?? process.platform), ...opts.io };
+  const identityState = (identity: ProcessIdentity): Promise<IdentityState> =>
+    checkIdentity(identity, io.inspectProcess);
   // Windows processes are not reparented, so an orphan cannot be told apart.
   if (io.platform === 'win32') return [];
   const lockPath = resolve(opts.location, 'LOCK');
@@ -205,7 +206,7 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
   const catalog = opts.binaries ?? oxigraphBinaryCatalog(opts.binaryPath);
   const binaries = record ? withOxigraphBinary(catalog, record.binaryPath) : catalog;
   const ownership = deriveOwnership(recordRead, record
-    ? { daemon: await io.checkIdentity(record.daemon), launcher: await io.checkIdentity(record.launcher) }
+    ? { daemon: await identityState(record.daemon), launcher: await identityState(record.launcher) }
     : null);
   const attempts = new Map<number, Attempt>();
   const signalled = new Set<number>();
@@ -239,7 +240,7 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
     pid: number,
     attempt: Exclude<Attempt, { kind: 'left' }>,
   ): Promise<boolean> => {
-    const identity = await io.checkIdentity({ pid, start: attempt.start });
+    const identity = await identityState({ pid, start: attempt.start });
     if (identity.state === 'gone') {
       attempts.delete(pid);
       return false;
@@ -292,7 +293,7 @@ export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): P
       }
       // Signal only the instance that was judged: a PID recycled since then
       // has another start time.
-      const identity = await io.checkIdentity(holder);
+      const identity = await identityState(holder);
       if (identity.state === 'gone') return false;
       if (identity.state === 'unknown') {
         return leave(

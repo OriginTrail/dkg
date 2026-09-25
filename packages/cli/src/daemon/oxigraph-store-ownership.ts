@@ -74,15 +74,16 @@ export function createOxigraphStoreOwnership(
     return write;
   };
   return {
-    launch: async (spawn) => {
+    async launch(spawn) {
       await steps.reclaim();
       if (closed) return null;
-      const child = spawn();
+      const spawned = spawn();
+      const launcherPid = spawned.child.pid;
       // Recorded at spawn, so the reclaim can identify this launch's
       // Oxigraph even if the daemon dies before it is ready.
-      const record = child.pid === undefined ? null : await track(steps.recordLaunch(child.pid));
+      const record = launcherPid === undefined ? null : await track(steps.recordLaunch(launcherPid));
       return {
-        child,
+        spawned,
         ready: async (oxigraphPid) => {
           if (record && !closed) await track(record.markReady(oxigraphPid));
         },
