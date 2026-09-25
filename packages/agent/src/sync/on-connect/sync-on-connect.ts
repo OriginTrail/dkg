@@ -155,15 +155,18 @@ interface SyncOnConnectBaseContext extends CompatiblePeerSyncContext {
 
 type PeerCapabilitySink = Pick<PeerCapabilityRegistry, 'observe'>;
 
-/** The public legacy set form remains supported, but it cannot compete with the registry port. */
-export type SyncOnConnectContext = SyncOnConnectBaseContext & (
-  | { peerCapabilities: PeerCapabilitySink; knownCorePeerIds?: never; knownCorePeerIdsV2?: never }
-  | { peerCapabilities?: never; knownCorePeerIds: Set<string>; knownCorePeerIdsV2?: Set<string> }
-);
+/** Extendable public context; registry ownership takes priority when supplied. */
+export interface SyncOnConnectContext extends SyncOnConnectBaseContext {
+  peerCapabilities?: PeerCapabilitySink;
+  /** Legacy callers may still supply mutable core-role sets. */
+  knownCorePeerIds?: Set<string>;
+  knownCorePeerIdsV2?: Set<string>;
+}
 
 function peerCapabilitySink(context: SyncOnConnectContext): PeerCapabilitySink {
   if (context.peerCapabilities) return context.peerCapabilities;
   const { knownCorePeerIds, knownCorePeerIdsV2 } = context;
+  if (!knownCorePeerIds) throw new TypeError('Sync-on-connect requires peerCapabilities or knownCorePeerIds');
   return {
     observe(peerId, observation) {
       // Legacy sets cannot retain evidence provenance; keep their historical

@@ -9,13 +9,15 @@ import {
   type SyncOnConnectContext as PublicSyncOnConnectContext,
 } from '@origintrail-official/dkg-agent/dist/sync/on-connect/sync-on-connect.js';
 
-type LegacySyncContext = Extract<PublicSyncOnConnectContext, { knownCorePeerIds: Set<string> }>;
+type LegacySyncContext = PublicSyncOnConnectContext & { knownCorePeerIds: Set<string> };
 declare const legacyContext: Omit<LegacySyncContext, 'signal' | 'syncingPeers'> & { syncingPeers: Set<string> };
 const publicContext: PublicSyncOnConnectContext = legacyContext;
 void runSyncOnConnect(publicContext);
-// @ts-expect-error registry and legacy set ownership must not be mixed
+interface ExtendedSyncContext extends PublicSyncOnConnectContext { traceId: string }
+declare const extendedContext: ExtendedSyncContext;
+void runSyncOnConnect(extendedContext);
 const mixedContext: PublicSyncOnConnectContext = { ...legacyContext, peerCapabilities: { observe() {} } };
-void mixedContext;
+void runSyncOnConnect(mixedContext);
 declare const legacySelectedContext: Omit<Parameters<typeof runSelectedSharedMemoryRetry>[0], 'signal' | 'syncingPeers'> & { syncingPeers: Set<string> };
 void runSelectedSharedMemoryRetry(legacySelectedContext);
 
