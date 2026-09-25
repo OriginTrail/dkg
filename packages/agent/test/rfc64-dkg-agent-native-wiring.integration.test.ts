@@ -95,6 +95,7 @@ import {
   type Rfc64CatalogActivationInputV1,
   type Rfc64PublicCatalogActivationInputV1,
 } from '../src/rfc64/public-catalog-activation-config-v1.js';
+import { createAppliedCatalogHeadsSnapshotV1 } from '../src/rfc64/inventory-v1/index.js';
 import { Rfc64BoundedPublicRootCatalogNativeReconcilerV1 } from
   '../src/rfc64/public-catalog-native-reconciler-v1.js';
 import { readRfc64LegacySwmBoundaryCountV1 } from
@@ -937,8 +938,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const persistence = (author as any).rfc64PersistenceV1;
     const [appliedHead] = persistence.inventory.listAppliedCatalogHeadsV1();
     expect(appliedHead).toBeDefined();
-    const inventoryRead = vi.fn(() => (
-      Object.freeze(Array.from({ length: 18 }, () => appliedHead))
+    const inventoryRead = vi.fn(() => createAppliedCatalogHeadsSnapshotV1(
+      Array.from({ length: 18 }, () => appliedHead),
     ));
     const originalRead = persistence.controlObjects.getVerifiedObjectByDigest
       .bind(persistence.controlObjects);
@@ -966,7 +967,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       rootPath: persistence.rootPath,
       inventory: Object.freeze({
         ...persistence.inventory,
-        listAppliedCatalogHeadsV1: inventoryRead,
+        readAppliedCatalogHeadsSnapshotV1: inventoryRead,
       }),
       swmAuthorInventory: persistence.swmAuthorInventory,
       finalizedPrivatePlacementRepairs: persistence.finalizedPrivatePlacementRepairs,

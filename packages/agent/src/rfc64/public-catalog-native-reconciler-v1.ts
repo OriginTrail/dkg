@@ -69,13 +69,29 @@ export type Rfc64BoundedPublicRootCatalogStagedHeadPeekV1 = (
 ) => Rfc64BoundedPublicRootCatalogStagedHeadV1 | null;
 
 /**
+ * One source of staged heads for both satisfaction checks: `read` for the
+ * full check and `peek` for its synchronous counterpart, two views of the
+ * same heads (see {@link createRfc64VerifiedStagedCatalogHeadMemoV1}).
+ */
+export interface Rfc64BoundedPublicRootCatalogStagedHeadsV1 {
+  readonly read: Rfc64BoundedPublicRootCatalogStagedHeadReaderV1;
+  /**
+   * Read-free lookup of a staged head `read` already returned for the exact
+   * announced digests. Only `isHeadKnownSatisfied` uses it; without it that
+   * check proves no head that needs a staged head.
+   */
+  readonly peek?: Rfc64BoundedPublicRootCatalogStagedHeadPeekV1;
+}
+
+/**
  * Staged heads kept by the memo below. Each one is an envelope the reader
  * already returned, so the bound caps memory at a few MiB while still covering
  * every applied head of a heavily replicated core.
  */
 export const RFC64_VERIFIED_STAGED_CATALOG_HEAD_MEMO_MAX_ENTRIES_V1 = 4_096;
 
-export interface Rfc64VerifiedStagedCatalogHeadMemoV1 {
+export interface Rfc64VerifiedStagedCatalogHeadMemoV1
+  extends Rfc64BoundedPublicRootCatalogStagedHeadsV1 {
   /**
    * Read through the memo. A remembered head is returned without a read; a
    * miss reads, and remembers the result only when it is a head for exactly
@@ -150,18 +166,10 @@ export interface Rfc64BoundedPublicRootCatalogNativeReconcilerOptionsV1 {
   /** Resolve the locally trusted deployment tuple; never copy it from the wire. */
   readonly resolveDeployment: Rfc64BoundedPublicRootCatalogDeploymentResolverV1;
   /**
-   * Read the exact verified signature variant staged by the native receiver.
+   * The exact verified signature variants staged by the native receiver.
    * Optional only for Gate-1 compatibility; a multi-row lane must provide it.
    */
-  readonly readStagedCatalogHead?: Rfc64BoundedPublicRootCatalogStagedHeadReaderV1;
-  /**
-   * Read-free lookup of a staged head `readStagedCatalogHead` already returned
-   * for the exact announced digests (see
-   * {@link createRfc64VerifiedStagedCatalogHeadMemoV1}). Only
-   * `isHeadKnownSatisfied` uses it; without it that check proves no head that
-   * needs a staged head.
-   */
-  readonly peekStagedCatalogHead?: Rfc64BoundedPublicRootCatalogStagedHeadPeekV1;
+  readonly stagedCatalogHeads?: Rfc64BoundedPublicRootCatalogStagedHeadsV1;
   /**
    * Force an exact durable replay through the native receiver's precommit.
    * Private finalized catalogs use this to recheck the accepted policy/roster
@@ -183,12 +191,14 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
       || typeof options?.resolveTrustedCatalogScope !== 'function'
       || typeof options?.resolveDeployment !== 'function'
       || (
-        options?.readStagedCatalogHead !== undefined
-        && typeof options.readStagedCatalogHead !== 'function'
-      )
-      || (
-        options?.peekStagedCatalogHead !== undefined
-        && typeof options.peekStagedCatalogHead !== 'function'
+        options?.stagedCatalogHeads !== undefined
+        && (
+          typeof options.stagedCatalogHeads?.read !== 'function'
+          || (
+            options.stagedCatalogHeads.peek !== undefined
+            && typeof options.stagedCatalogHeads.peek !== 'function'
+          )
+        )
       )
       || (
         options?.requiresAppliedHeadPrecommit !== undefined
@@ -229,14 +239,15 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
     try {
       const applied = this.readAppliedHeadForSatisfaction(announcement);
       if (typeof applied === 'boolean') return applied;
+      const stagedCatalogHeads = this.options.stagedCatalogHeads;
       let expectedInventoryRowCount: CountV1 | null;
-      if (this.options.readStagedCatalogHead === undefined) {
+      if (stagedCatalogHeads === undefined) {
         expectedInventoryRowCount = gate1ExpectedInventoryRowCountV1(
           announcement,
           applied.current.inventoryRowCount,
         );
       } else {
-        const staged = this.options.peekStagedCatalogHead?.(announcement) ?? null;
+        const staged = stagedCatalogHeads.peek?.(announcement) ?? null;
         if (staged === null) return false;
         expectedInventoryRowCount = stagedHeadExpectedInventoryRowCountV1(
           announcement,
@@ -304,10 +315,11 @@ export class Rfc64BoundedPublicRootCatalogNativeReconcilerV1
     trustedCatalogScope: Readonly<AuthorCatalogScopeV1>,
     durableInventoryRowCount: CountV1,
   ): Promise<CountV1 | null> {
-    if (this.options.readStagedCatalogHead === undefined) {
+    const stagedCatalogHeads = this.options.stagedCatalogHeads;
+    if (stagedCatalogHeads === undefined) {
       return gate1ExpectedInventoryRowCountV1(announcement, durableInventoryRowCount);
     }
-    const staged = await this.options.readStagedCatalogHead(announcement);
+    const staged = await stagedCatalogHeads.read(announcement);
     if (staged === null) return null;
     return stagedHeadExpectedInventoryRowCountV1(announcement, trustedCatalogScope, staged);
   }

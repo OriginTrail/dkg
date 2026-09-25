@@ -1807,6 +1807,8 @@ describe('ApiClient per-route timeout classes', () => {
       await client.registerContextGraph('cg');
     };
 
+    // The shared policy's own tests (packages/core) cover its values, floors
+    // and validation; these check the client routes every request through it.
     it('gives the graph, PCA and publisher-job lists 60 s, other reads 30 s and writes 240 s', async () => {
       vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '');
       vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', '');
@@ -1814,36 +1816,22 @@ describe('ApiClient per-route timeout classes', () => {
       expect(deadlines).toEqual([60_000, 60_000, 60_000, 30_000, 30_000, 240_000]);
     });
 
-    it('takes the read and long deadlines from the environment', async () => {
+    it('takes the deadlines from the environment unless explicit options win', async () => {
       vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '45000');
       vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', ' 600000 ');
       await readAll(new ApiClient(PORT, 'test-token'));
       expect(deadlines).toEqual([60_000, 60_000, 60_000, 45_000, 45_000, 600_000]);
-    });
-
-    it('never gives a list less than the read deadline, nor a write less than either', async () => {
-      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '90000');
-      vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', '5000');
-      await readAll(new ApiClient(PORT, 'test-token'));
-      expect(deadlines).toEqual([90_000, 90_000, 90_000, 90_000, 90_000, 90_000]);
-    });
-
-    it('lets explicit client options win over the environment', async () => {
-      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '45000');
-      vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', '600000');
+      deadlines.length = 0;
       await readAll(new ApiClient(PORT, 'test-token', { readTimeoutMs: 20, longTimeoutMs: 1_000 }));
       expect(deadlines).toEqual([60_000, 60_000, 60_000, 20, 20, 1_000]);
     });
 
-    it.each(['0', '-1', '1.5', '30s', '1e4', '0x10', '2147483648'])(
-      'rejects %j as a timeout override',
-      (value) => {
-        vi.stubEnv('DKG_API_READ_TIMEOUT_MS', value);
-        expect(() => new ApiClient(PORT, 'test-token')).toThrow(/DKG_API_READ_TIMEOUT_MS must be a whole number of milliseconds/);
-        vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '');
-        vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', value);
-        expect(() => new ApiClient(PORT, 'test-token')).toThrow(/DKG_API_LONG_TIMEOUT_MS must be a whole number of milliseconds/);
-      },
-    );
+    it('refuses to construct with an invalid timeout override', () => {
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '30s');
+      expect(() => new ApiClient(PORT, 'test-token')).toThrow(/DKG_API_READ_TIMEOUT_MS must be a whole number of milliseconds/);
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '');
+      vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', '0');
+      expect(() => new ApiClient(PORT, 'test-token')).toThrow(/DKG_API_LONG_TIMEOUT_MS must be a whole number of milliseconds/);
+    });
   });
 });

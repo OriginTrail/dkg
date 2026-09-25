@@ -14,7 +14,10 @@ import {
   rfc64CatalogMutationScopeKeyV1,
   type Rfc64CatalogMutationCoordinatorV1,
 } from './catalog-mutation-runtime-v1.js';
-import type { AppliedCatalogHeadSnapshotV1 } from './inventory-v1/index.js';
+import type {
+  AppliedCatalogHeadsSnapshotV1,
+  AppliedCatalogHeadsTokenV1,
+} from './inventory-v1/index.js';
 
 export interface Rfc64CatalogReplayHeadV1 {
   readonly head: SignedAuthorCatalogHeadEnvelopeV1;
@@ -29,13 +32,7 @@ export type Rfc64CatalogReplaySelectionV1 = Readonly<{
 }>;
 
 export interface Rfc64CatalogReplaySnapshotStorageV1 {
-  listAppliedCatalogHeadsV1(): readonly AppliedCatalogHeadSnapshotV1[];
-  /**
-   * The inventory's applied-head revision (see
-   * `readAppliedCatalogHeadsRevisionV1`). With it, the listing is reused while
-   * the revision is unchanged; without it every read lists.
-   */
-  readAppliedCatalogHeadsRevisionV1?(): number;
+  readAppliedCatalogHeadsSnapshotV1(): AppliedCatalogHeadsSnapshotV1;
   readVerifiedCatalogHeadV1(
     objectDigest: Digest32V1,
   ): Promise<SignedControlEnvelopeV1 | null>;
@@ -44,22 +41,6 @@ export interface Rfc64CatalogReplaySnapshotStorageV1 {
 interface WithRfc64CatalogReplaySnapshotInputV1<T> {
   readonly selection: Rfc64CatalogReplaySelectionV1;
   operation(entries: readonly Rfc64CatalogReplayHeadV1[]): Promise<T>;
-}
-
-function rfc64CatalogReplayInventoryFingerprintV1(
-  snapshots: readonly AppliedCatalogHeadSnapshotV1[],
-): string {
-  return snapshots
-    .map((snapshot) => [
-      snapshot.catalogScopeDigest,
-      snapshot.authorAddress,
-      snapshot.currentCatalogHeadDigest,
-      snapshot.appliedInventoryDigest,
-      snapshot.catalogVersion,
-      snapshot.inventoryRowCount,
-    ].join(':'))
-    .sort()
-    .join('\n');
 }
 
 function rfc64CatalogReplayScopeKeyV1(
@@ -95,13 +76,8 @@ function rfc64CatalogReplayMutationScopesV1(
 export class Rfc64CatalogReplaySnapshotRuntimeV1 {
   readonly #storage: Rfc64CatalogReplaySnapshotStorageV1;
   readonly #mutationCoordinator: Rfc64CatalogMutationCoordinatorV1;
-  #indexFingerprint: string | null = null;
+  #indexToken: AppliedCatalogHeadsTokenV1 | null = null;
   #indexByScope: ReadonlyMap<string, readonly Rfc64CatalogReplayHeadV1[]> = new Map();
-  #listed: Readonly<{
-    revision: number;
-    snapshots: readonly AppliedCatalogHeadSnapshotV1[];
-    fingerprint: string;
-  }> | null = null;
 
   constructor(
     storage: Rfc64CatalogReplaySnapshotStorageV1,
@@ -115,18 +91,18 @@ export class Rfc64CatalogReplaySnapshotRuntimeV1 {
     input: Readonly<WithRfc64CatalogReplaySnapshotInputV1<T>>,
   ): Promise<T> {
     if (input.selection.kind === 'all') {
-      const inventoryFingerprint = this.#readInventory().fingerprint;
+      const inventoryToken = this.#readInventoryToken();
       const entries = Object.freeze([
         ...(await this.#readIndex()).values(),
       ].flat());
       return this.#mutationCoordinator.runMany(
         rfc64CatalogReplayMutationScopesV1(entries),
         async () => {
-          if (this.#readInventory().fingerprint !== inventoryFingerprint) {
+          if (this.#readInventoryToken() !== inventoryToken) {
             throw new Error('RFC-64 durable catalog inventory changed before replay snapshot');
           }
           const result = await input.operation(entries);
-          if (this.#readInventory().fingerprint !== inventoryFingerprint) {
+          if (this.#readInventoryToken() !== inventoryToken) {
             throw new Error('RFC-64 durable catalog inventory changed during replay');
           }
           return result;
@@ -164,31 +140,16 @@ export class Rfc64CatalogReplaySnapshotRuntimeV1 {
     });
   }
 
-  /**
-   * The applied-head listing and its fingerprint. Listed again only when the
-   * inventory revision moved (or is not reported): an unchanged revision
-   * means the table still equals the listing taken under it.
-   */
-  #readInventory(): Readonly<{
-    snapshots: readonly AppliedCatalogHeadSnapshotV1[];
-    fingerprint: string;
-  }> {
-    const revision = this.#storage.readAppliedCatalogHeadsRevisionV1?.();
-    if (revision !== undefined && this.#listed?.revision === revision) return this.#listed;
-    const snapshots = this.#storage.listAppliedCatalogHeadsV1();
-    const fingerprint = rfc64CatalogReplayInventoryFingerprintV1(snapshots);
-    this.#listed = revision === undefined
-      ? null
-      : Object.freeze({ revision, snapshots, fingerprint });
-    return Object.freeze({ snapshots, fingerprint });
+  #readInventoryToken(): AppliedCatalogHeadsTokenV1 {
+    return this.#storage.readAppliedCatalogHeadsSnapshotV1().token;
   }
 
   async #readIndex(): Promise<ReadonlyMap<string, readonly Rfc64CatalogReplayHeadV1[]>> {
-    const { snapshots, fingerprint } = this.#readInventory();
-    if (this.#indexFingerprint === fingerprint) return this.#indexByScope;
+    const { token, heads } = this.#storage.readAppliedCatalogHeadsSnapshotV1();
+    if (this.#indexToken === token) return this.#indexByScope;
 
     const index = new Map<string, Rfc64CatalogReplayHeadV1[]>();
-    for (const applied of snapshots) {
+    for (const applied of heads) {
       const head = await this.#storage.readVerifiedCatalogHeadV1(
         applied.currentCatalogHeadDigest,
       ).catch(() => null);
@@ -218,7 +179,7 @@ export class Rfc64CatalogReplaySnapshotRuntimeV1 {
         });
       }
     }
-    this.#indexFingerprint = fingerprint;
+    this.#indexToken = token;
     this.#indexByScope = new Map([...index].map(([key, entries]) => [
       key,
       Object.freeze(entries),
