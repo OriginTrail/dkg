@@ -10037,6 +10037,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           `Activated persisted context-graph subscription "${contextGraphId}" after authority recovery`,
         );
       },
+      capped: (contextGraphId) => {
+        this.contextGraphSubscriptionRehydrationPendingIds.add(contextGraphId);
+        this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
+      },
     });
   }
 
@@ -10499,6 +10503,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
       }
       const deferredIds: string[] = [];
+      let deferredUserRows = 0;
+      // Past the budget, a user row goes to background authority recovery only
+      // while the activation cap still has room for it; beyond that it waits
+      // for rolling activation unread, as a row beyond the cap always has.
+      // Hosted rows are exempt from the cap and always go to recovery.
+      const leaveUnresolved = (row: ContextGraphSubscriptionRecord): void => {
+        if (!row.coreHosted && cap > 0 && activatedUserRows + deferredUserRows >= cap) {
+          dormancyById.set(row.id, 'activationCap');
+          this.contextGraphSubscriptionRehydrationPendingIds.add(row.id);
+          return;
+        }
+        if (!row.coreHosted) deferredUserRows += 1;
+        dormancyById.set(row.id, 'authorityUnavailable');
+        deferredIds.push(row.id);
+      };
       authorityBudget = startRehydrationAuthorityBudget(authorityBudgetMs);
       for (let i = 0; i < toActivate.length; i++) {
         const row = toActivate[i];
@@ -10522,8 +10541,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // the restricted pending-metadata bootstrap, which background
         // authority recovery does not offer.
         if (!hasJoinApproval && authorityBudget.spent()) {
-          dormancyById.set(row.id, 'authorityUnavailable');
-          deferredIds.push(row.id);
+          leaveUnresolved(row);
           continue;
         }
         // A crash between a historical false-ready sync and the approval
@@ -10569,8 +10587,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ? await authorityRead
           : await authorityBudget.race(authorityRead);
         if (readAuthority === REHYDRATION_AUTHORITY_DEFERRED) {
-          dormancyById.set(row.id, 'authorityUnavailable');
-          deferredIds.push(row.id);
+          leaveUnresolved(row);
           continue;
         }
         // A stale approval cannot override an explicit current membership

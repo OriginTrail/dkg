@@ -79,7 +79,9 @@ All notable changes to the DKG V10 node are documented here. The format is based
   then stays inactive and is checked in the background after start, and it
   is activated only once its authority resolves as allowed, exactly as
   before; a graph the chain reports unknown is not checked again until the
-  next start. Until its check runs, such a subscription is listed under
+  next start. Subscriptions beyond the activation cap
+  (`maxRehydratedContextGraphSubscriptions`) still wait for rolling
+  activation. Until its check runs, such a subscription is listed under
   `rehydration.dormantReasons.authorityUnavailable` in
   `GET /api/context-graph/subscriptions`. A subscription with a durable join
   approval is still checked during startup. Embedders can change the budget
