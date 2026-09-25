@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import { currentApiToken } from '../lib/apiToken.js';
+import { authHeaders } from '../http.js';
+import { isEventStreamContentType, readEventStream, type EventStreamMessage } from '../lib/eventStream.js';
 
 export type MemoryGraphLayer = 'wm' | 'swm' | 'vm';
 
@@ -33,8 +34,22 @@ export interface NodeEvent {
 
 type Listener = (event: NodeEvent) => void;
 
+// Keyed by every NodeEventType, so a type added to the union must be added here.
+const NODE_EVENT_TYPES: Record<NodeEventType, true> = {
+  join_request: true,
+  join_approved: true,
+  join_rejected: true,
+  project_synced: true,
+  memory_graph_changed: true,
+  notification: true,
+  connected: true,
+};
+const EVENTS_PATH = '/api/events';
+const RECONNECT_DELAY_MS = 3000;
+
 const listeners = new Set<Listener>();
-let source: EventSource | null = null;
+// The open stream's controller; aborting it closes the stream.
+let connection: AbortController | null = null;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 export const MEMORY_GRAPH_REFRESH_DEBOUNCE_MS = 350;
 
@@ -63,43 +78,55 @@ export function isMemoryGraphEventRelevant(
   return layers.some(layer => eventLayers.includes(layer));
 }
 
+function isNodeEventType(type: string): type is NodeEventType {
+  return Object.prototype.hasOwnProperty.call(NODE_EVENT_TYPES, type);
+}
+
+// Only the node's named events reach listeners; any other event is ignored.
+function dispatch({ type, data: payload }: EventStreamMessage) {
+  if (!isNodeEventType(type)) return;
+  let data: Record<string, unknown> = {};
+  try { data = JSON.parse(payload); } catch { /* empty payload is fine */ }
+  const event: NodeEvent = { type, data };
+  for (const fn of listeners) {
+    try { fn(event); } catch { /* never crash listeners */ }
+  }
+}
+
+// One connection to the node's event stream. The API token is sent only in
+// the Authorization header. Settles when the stream ends, fails or is aborted.
+async function streamNodeEvents(signal: AbortSignal): Promise<void> {
+  const res = await fetch(EVENTS_PATH, {
+    headers: { Accept: 'text/event-stream', ...authHeaders() },
+    cache: 'no-store',
+    signal,
+  });
+  if (!res.ok || !res.body || !isEventStreamContentType(res.headers.get('content-type'))) return;
+  await readEventStream(res.body, dispatch);
+}
+
 function connect() {
-  if (source) return;
+  if (connection) return;
+  const current = new AbortController();
+  connection = current;
 
-  const token = currentApiToken();
-  const url = token ? `/api/events?token=${encodeURIComponent(token)}` : '/api/events';
-  source = new EventSource(url);
-
-  const handleEvent = (type: NodeEventType) => (e: MessageEvent) => {
-    let data: Record<string, unknown> = {};
-    try { data = JSON.parse(e.data); } catch { /* empty payload is fine */ }
-    const event: NodeEvent = { type, data };
-    for (const fn of listeners) {
-      try { fn(event); } catch { /* never crash listeners */ }
-    }
-  };
-
-  source.addEventListener('join_request', handleEvent('join_request'));
-  source.addEventListener('join_approved', handleEvent('join_approved'));
-  source.addEventListener('join_rejected', handleEvent('join_rejected'));
-  source.addEventListener('project_synced', handleEvent('project_synced'));
-  source.addEventListener('memory_graph_changed', handleEvent('memory_graph_changed'));
-  source.addEventListener('notification', handleEvent('notification'));
-  source.addEventListener('connected', handleEvent('connected'));
-
-  source.onerror = () => {
-    source?.close();
-    source = null;
+  // Runs when this stream settles. Once aborted it is no longer the current
+  // connection (a newer one may be); otherwise try again later while anyone
+  // is listening.
+  const closed = () => {
+    if (connection !== current) return;
+    connection = null;
     if (listeners.size > 0) {
-      reconnectTimer = setTimeout(connect, 3000);
+      reconnectTimer = setTimeout(connect, RECONNECT_DELAY_MS);
     }
   };
+  void streamNodeEvents(current.signal).then(closed, closed);
 }
 
 function disconnect() {
   if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-  source?.close();
-  source = null;
+  connection?.abort();
+  connection = null;
 }
 
 function subscribe(fn: Listener): () => void {

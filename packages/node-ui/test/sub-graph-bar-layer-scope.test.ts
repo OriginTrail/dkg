@@ -25,8 +25,8 @@ vi.mock('../src/ui/api.js', () => ({ fetchSubGraphs: fetchSubGraphsMock }));
 // the component actually takes.
 vi.mock('../src/ui/api-wrapper.js', () => ({ api: { fetchSubGraphs: fetchSubGraphsMock } }));
 
-// Mock the live-update channel so the bar doesn't try to open an
-// EventSource — happy-dom doesn't ship one.
+// Mock the live-update channel so the bar doesn't open the node's
+// event stream.
 vi.mock('../src/ui/hooks/useNodeEvents.js', () => ({
   useMemoryGraphEvents: () => {},
 }));

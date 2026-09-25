@@ -3,6 +3,7 @@
 import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
+import { stubNodeEventStream } from './helpers/fake-event-stream.js';
 
 // Mock the api surface JoinProjectModal pulls in so the modal renders
 // without a live daemon. Most calls are happy-path stubs; the test
@@ -58,15 +59,7 @@ describe('JoinProjectModal — BUG-017 a11y dismiss wiring', () => {
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     document.body.innerHTML = '';
     vi.clearAllMocks();
-    (globalThis as any).EventSource = class {
-      constructor(_url: string) {}
-      addEventListener() {}
-      removeEventListener() {}
-      close() {}
-      onopen = null;
-      onmessage = null;
-      onerror = null;
-    };
+    stubNodeEventStream();
     fetchContextGraphsMock.mockResolvedValue({ contextGraphs: [] });
     fetchCurrentAgentMock.mockResolvedValue({
       agentAddress: '0x00000000000000000000000000000000000000a1',
@@ -83,6 +76,7 @@ describe('JoinProjectModal — BUG-017 a11y dismiss wiring', () => {
       act(() => { root.unmount(); });
       container.remove();
     }
+    vi.unstubAllGlobals();
   });
 
   it('renders nothing when open=false (modal is unmounted, no aria-hidden ghost on the page)', async () => {
