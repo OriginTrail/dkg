@@ -2,7 +2,7 @@ import type { Connection, DialProtocolOptions, NewStreamOptions } from '@libp2p/
 
 type StreamProgress = Parameters<NonNullable<NewStreamOptions['onProgress']>>[0];
 type StreamPolicy = Pick<NewStreamOptions, 'runOnLimitedConnection' | 'negotiateFully' | 'maxOutboundStreams'>;
-type ExecuteProbe = (connection: Connection, options: Omit<NewStreamOptions, 'signal'>) => Promise<number>;
+type ExecuteProbe = (connection: Connection, options: NewStreamOptions & { signal: AbortSignal }) => Promise<number>;
 const MAX_PENDING_PROBES = 64;
 const MAX_PENDING_OBSERVERS = 64;
 
@@ -16,6 +16,7 @@ interface Flight {
   key: string;
   work: Promise<number>;
   monitor: boolean;
+  controller: AbortController;
   progress: Map<StreamProgress['type'], StreamProgress>;
   observers: Set<Observer>;
 }
@@ -26,10 +27,17 @@ export class PingProbeCoordinator {
 
   constructor(private readonly execute: ExecuteProbe) {}
 
-  async monitor(connection: Connection): Promise<number> {
+  async monitor(connection: Connection): Promise<number | undefined> {
     const flight = this.flight(connection, {});
     flight.monitor = true;
-    return flight.work;
+    try {
+      return await flight.work;
+    } catch (error) {
+      // Negotiation proves connection liveness, but is not a successful ping.
+      // Explicit observers retain the stock API's UnsupportedProtocolError.
+      if (error instanceof Error && error.name === 'UnsupportedProtocolError') return;
+      throw error;
+    }
   }
 
   ping(connection: Connection, options: DialProtocolOptions): Promise<number> {
@@ -40,6 +48,7 @@ export class PingProbeCoordinator {
     return new Promise<number>((resolve, reject) => {
       const abort = () => {
         observer.detach();
+        this.cancelIfUnobserved(flight, options.signal?.reason);
         reject(options.signal?.reason);
       };
       const observer: Observer = {
@@ -75,20 +84,27 @@ export class PingProbeCoordinator {
     };
     const key = `${policy.runOnLimitedConnection}:${policy.negotiateFully}:${policy.maxOutboundStreams ?? 'default'}`;
     const queue = this.pending.get(connection) ?? [];
-    const existing = queue.find((flight) => flight.key === key);
+    // An orphaned flight still owns its stream until it settles. New owners
+    // queue behind its cleanup instead of adopting already-cancelled work.
+    const existing = queue.find((flight) => flight.key === key && !flight.controller.signal.aborted);
     if (existing !== undefined) return existing;
     if (queue.length >= MAX_PENDING_PROBES) throw new Error('Too many queued ping probes');
     const prior = queue.at(-1)?.work;
-    const flight: Flight = { key, monitor: false, progress: new Map(), observers: new Set(), work: Promise.resolve(0) };
+    const flight: Flight = {
+      key, monitor: false, controller: new AbortController(),
+      progress: new Map(), observers: new Set(), work: Promise.resolve(0),
+    };
     // The previous flight includes remote FIN or a bounded stream reset.
     // Rejections also release the queue so a caller's limited-connection
     // policy cannot strand the monitor.
     flight.work = Promise.resolve(prior).catch(() => {}).then(() => {
+      flight.controller.signal.throwIfAborted();
       if (!flight.monitor && flight.observers.size === 0) {
         throw new DOMException('Queued ping has no observers', 'AbortError');
       }
       return this.execute(connection, {
         ...policy,
+        signal: flight.controller.signal,
         onProgress: (event) => {
           // libp2p emits opening/opened. Retain at most those two snapshots,
           // even if a transport repeats progress, and bound observer fanout.
@@ -110,6 +126,10 @@ export class PingProbeCoordinator {
     return flight;
   }
 
+  private cancelIfUnobserved(flight: Flight, reason: unknown): void {
+    if (!flight.monitor && flight.observers.size === 0) flight.controller.abort(reason);
+  }
+
   private deliver(flight: Flight, observer: Observer, event: StreamProgress): void {
     if (!flight.observers.has(observer)) return;
     try {
@@ -117,6 +137,7 @@ export class PingProbeCoordinator {
     } catch (error) {
       // A caller callback cannot abort a physical probe used by other callers.
       observer.detach();
+      this.cancelIfUnobserved(flight, error);
       observer.reject(error);
     }
   }

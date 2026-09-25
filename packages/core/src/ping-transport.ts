@@ -2,6 +2,7 @@ import { randomBytes } from '@libp2p/crypto';
 import { ConnectionClosedError, ProtocolError, type Connection, type NewStreamOptions, type Stream } from '@libp2p/interface';
 import { PING_PROTOCOL } from '@libp2p/ping';
 import { byteStream } from '@libp2p/utils';
+import { pingAbortScope } from './ping-abort-scope.js';
 
 export const DEFAULT_PING_CLEANUP_TIMEOUT_MS = 5_000;
 
@@ -80,9 +81,8 @@ export async function pingConnection(
     const deadline = new AbortController();
     const timer = setTimeout(() => deadline.abort(new DOMException('Ping stream cleanup timed out', 'TimeoutError')), cleanupTimeoutMs);
     timer.unref?.();
-    const signal = cleanup.signal === undefined
-      ? deadline.signal
-      : AbortSignal.any([cleanup.signal, deadline.signal]);
+    const scope = pingAbortScope(cleanup.signal, deadline.signal);
+    const signal = scope.signal;
     try {
       const closed = waitForClose(stream, signal);
       await Promise.all([stream.close({ signal }), closed]);
@@ -94,6 +94,7 @@ export async function pingConnection(
       if (!cleanup.signal?.aborted) cleanup.onFailure?.(error);
     } finally {
       clearTimeout(timer);
+      scope.dispose();
     }
     // Do not report success if the service stopped or the connection closed
     // during cleanup; neither event should be misreported as a failed pong.

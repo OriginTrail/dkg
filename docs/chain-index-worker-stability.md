@@ -1,6 +1,6 @@
 # Chain-index reads and connection stability
 
-Status: the operator deployed commit `636450151199c7b82c50417a40ac67a27ad414e7` to EG Luigi on 24 September 2026. The subsequent ping-cleanup fix described below is not yet deployed.
+Status: implementation notes for PR #2784. Deployment status must be verified from each node's running commit.
 
 The fix addresses three independently reproduced mechanisms: a KA-to-graph lookup replaying all retained registrations on the main thread, overlapping libp2p health/monitor probes exceeding the one-stream ping limit, and a valid ping reply followed by delayed stream closure incorrectly aborting the connection. It does not establish the cause of the original overload or prove long-term production recovery.
 
@@ -28,7 +28,17 @@ The worker process owner represents idle, starting, ready, retiring, cooling and
 
 Misses, incomplete coverage, oversized graphs, stale answers, overload and worker failure use the existing RPC fallback. They cannot revive a full-history main-thread replay. Large graphs therefore still incur RPC calls for ordinal reads. The SDK's non-worker path also benefits from the indexed point lookup.
 
-The ping service now coordinates periodic liveness probes and explicit health calls per connection. It replaces the independent built-in monitor using the supported configuration option, retaining the standard inbound responder, 10-second interval, adaptive deadlines, echo validation and dead-peer teardown. A small transport primitive isolates the outbound ping implementation and its required remote-FIN extension. The coordinator honors caller stream options, shares compatible probes, serializes incompatible probes, and delivers stream progress to each observer. A probe holds its outbound slot until the remote stream closes. Cancelling one observer does not cancel the shared probe. Connection close logs preserve the supplied initiator and bounded, escaped error details.
+The ping service now coordinates periodic liveness probes and explicit health calls per connection. It replaces the independent built-in monitor using the supported configuration option, retaining the standard inbound responder, 10-second interval, adaptive deadlines, echo validation and connection teardown on probe failure. A small transport primitive isolates the outbound ping implementation and its required remote-FIN extension. The coordinator honors caller stream options, shares compatible probes, serializes incompatible probes, and delivers stream progress to each observer. A probe holds its outbound slot until remote FIN or a stream reset completes. Connection close logs preserve the supplied initiator and bounded, escaped error details.
+
+### Ping ownership and API compatibility
+
+An explicit ping rejects with `UnsupportedProtocolError` when negotiation finds no ping protocol. The periodic monitor accepts that negotiation as evidence of responsiveness, even when sharing the same physical probe. No RTT is invented or written to the connection without a verified pong.
+
+Each physical probe has its own cancellation controller. Cancelling the last explicit observer cancels the probe only if the monitor has not adopted it; another explicit observer or monitor owner keeps the work alive. An orphaned probe resets its stream without aborting the connection. New callers wait for that cancelled probe to release the protocol slot instead of adopting its cancelled work. A throwing progress observer follows the same ownership rule.
+
+Probe and cleanup cancellation use explicitly disposed parent listeners, including the service-lifetime signal. Completed probes remove those listeners; cancellation does not train the adaptive timeout as a peer-latency failure. Regression coverage includes repeated scope disposal, unsupported negotiation, cancellation before pong and during cleanup, shared ownership, physical-queue saturation/recovery, and adaptive deadlines with distinct minimum/maximum bounds.
+
+These fixes do not change the existing monitor interval or timeout bounds. Pre-pong timeouts can still reflect remote overload or network delay; they do not prove a process is dead. Production rollout and long-uptime results remain separate from local validation.
 
 ## Sequence diagrams
 
@@ -149,7 +159,7 @@ sequenceDiagram
     else Peer does not support ping
         R-->>C: Protocol negotiation refusal
         C-->>P: UnsupportedProtocolError
-        P-->>H: Negotiation-based RTT estimate
+        P-->>H: Reject UnsupportedProtocolError (no RTT)
         P-->>M: Peer responsiveness established
     else Bad echo, I/O failure or adaptive deadline before valid pong
         P->>C: Abort stream and abort connection if still open
@@ -159,11 +169,13 @@ sequenceDiagram
     end
 ```
 
-Compatible callers share one probe; caller stream options that differ wait for the active probe to finish. Stream-opening progress is delivered to each observer, including callers that join later. Refusing a caller-excluded limited connection does not abort the connection. Health-caller cancellation detaches that observer without cancelling the shared probe. Service shutdown cancels and drains probes, including post-pong cleanup, without using the ordinary failure path to abort connections. A connection closing during cleanup rejects the probe instead of returning stale success. The standard inbound ping responder remains installed. Only the independent built-in monitor is disabled; the replacement monitor still checks liveness every 10 seconds with the existing adaptive timeout behavior.
+Compatible callers share one probe; caller stream options that differ wait for the active probe to finish. Stream-opening progress is delivered to each observer, including callers that join later. Refusing a caller-excluded limited connection does not abort the connection. Health-caller cancellation detaches that observer; the probe continues only while another caller or the monitor owns it. Otherwise its stream is cancelled and reset without aborting the connection. Service shutdown cancels and drains probes, including post-pong cleanup, without using the ordinary failure path to abort connections. A connection closing during cleanup rejects the probe instead of returning stale success. The standard inbound ping responder remains installed. Only the independent built-in monitor is disabled; the replacement monitor still checks liveness every 10 seconds with the existing adaptive timeout behavior.
 
 The adaptive 5–60-second deadline covers opening the stream and validating the echo. Its measurement ends immediately on a valid pong, so slow FIN handling cannot inflate the next liveness deadline. Cleanup has a separate fixed five-second budget and retains the coordinator's slot until FIN or stream reset. A cleanup-only failure preserves liveness; a silent peer or invalid echo still triggers connection teardown. Production diagnostics report connection/peer, phase (`open-stream`, `echo`, `cleanup`), action, deadline, elapsed time, whether a pong arrived, and bounded error details.
 
 ## Validation
+
+The 25 September ping review follow-up passes all 39 focused ping cases and the full core suite (2,182 tests across 144 files) on Node 22.23.0. Core build/type checks, repository lint and the dial-protocol boundary audit pass. Before the fixes, the new regressions reproduced the unsupported-protocol false success and the orphaned ping timeout closing the connection. This validates the local ping changes; it is not a release rebase or a production soak.
 
 Work began from freshly fetched `origin/testnet-canary` commit `24341ba73ab1f8a6f4330e34ae905bab725f0db6`; this remained the current base during validation. Tests use local fixtures and loopback peers.
 

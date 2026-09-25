@@ -1,15 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { Connection, NewStreamOptions, Stream } from '@libp2p/interface';
+import { UnsupportedProtocolError, type Connection, type NewStreamOptions, type Stream } from '@libp2p/interface';
 import { PingProbeCoordinator } from '../src/ping-probe-coordinator.js';
 
 function harness() {
   const connection = {} as Connection;
   const runs: Array<{
-    options: Omit<NewStreamOptions, 'signal'>;
+    options: NewStreamOptions & { signal: AbortSignal };
     resolve: (rtt: number) => void;
     reject: (error: Error) => void;
   }> = [];
-  const execute = vi.fn((_connection: Connection, options: Omit<NewStreamOptions, 'signal'>) => new Promise<number>((resolve, reject) => {
+  const execute = vi.fn((_connection: Connection, options: NewStreamOptions & { signal: AbortSignal }) => new Promise<number>((resolve, reject) => {
     runs.push({ options, resolve, reject });
   }));
   const coordinator = new PingProbeCoordinator(execute);
@@ -94,11 +94,93 @@ describe('ping probe coordination', () => {
     const remaining = coordinator.ping(connection, {});
     await started(1);
     controller.abort(new Error('only this caller'));
+    expect(runs[0].options.signal.aborted).toBe(false);
     runs[0].options.onProgress?.({ type: 'connection:open-stream', detail: { connection, protocols: [] } });
     runs[0].resolve(5);
     expect(await cancelled).toMatchObject({ message: 'only this caller' });
     expect(await remaining).toBe(5);
     expect(progress).not.toHaveBeenCalled();
+  });
+
+  it('rejects unsupported explicit pings while a monitor sharing the negotiation accepts liveness', async () => {
+    const { coordinator, connection, runs, execute, started } = harness();
+    const explicit = coordinator.ping(connection, {}).catch((error) => error);
+    const monitored = coordinator.monitor(connection);
+    await started(1);
+    const unsupported = new UnsupportedProtocolError('Peer does not support ping');
+    runs[0].reject(unsupported);
+    expect(await explicit).toBe(unsupported);
+    await expect(monitored).resolves.toBeUndefined();
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+
+  it('cancels orphaned physical work and queues fresh ownership until it releases the stream', async () => {
+    const { coordinator, connection, runs, started } = harness();
+    const controller = new AbortController();
+    const cancelled = coordinator.ping(connection, { signal: controller.signal }).catch((error) => error);
+    await started(1);
+    const reason = new Error('sole observer cancelled');
+    controller.abort(reason);
+    expect(await cancelled).toBe(reason);
+    expect(runs[0].options.signal.aborted).toBe(true);
+    expect(runs[0].options.signal.reason).toBe(reason);
+    // An aborted flight must not be adopted, but still owns the protocol slot
+    // until its physical transport acknowledges cancellation.
+    const next = coordinator.ping(connection, {});
+    const monitor = coordinator.monitor(connection);
+    await Promise.resolve();
+    expect(runs).toHaveLength(1);
+    runs[0].reject(reason);
+    await started(2);
+    expect(runs[1].options.signal.aborted).toBe(false);
+    runs[1].resolve(7);
+    expect(await next).toBe(7);
+    await expect(monitor).resolves.toBe(7);
+    await coordinator.drain();
+  });
+
+  it('retains a monitor-owned probe after its last explicit observer cancels', async () => {
+    const { coordinator, connection, runs, started } = harness();
+    const controller = new AbortController();
+    const cancelled = coordinator.ping(connection, { signal: controller.signal }).catch((error) => error);
+    await started(1);
+    const monitor = coordinator.monitor(connection);
+    controller.abort(new Error('caller cancelled'));
+    expect(await cancelled).toMatchObject({ message: 'caller cancelled' });
+    expect(runs[0].options.signal.aborted).toBe(false);
+    runs[0].resolve(5);
+    await expect(monitor).resolves.toBe(5);
+  });
+
+  it('cancels physical work when its last progress observer throws', async () => {
+    const { coordinator, connection, runs, started } = harness();
+    const reason = new Error('progress observer failed');
+    const failed = coordinator.ping(connection, { onProgress: () => { throw reason; } }).catch((error) => error);
+    await started(1);
+    runs[0].options.onProgress?.({ type: 'connection:open-stream', detail: { connection, protocols: [] } });
+    expect(await failed).toBe(reason);
+    expect(runs[0].options.signal.aborted).toBe(true);
+    runs[0].reject(reason);
+    await coordinator.drain();
+  });
+
+  it('bounds incompatible physical flights independently of observers and recovers after draining', async () => {
+    const { coordinator, connection, runs, started } = harness();
+    const monitor = coordinator.monitor(connection);
+    const callers = Array.from({ length: 63 }, (_, index) => coordinator.ping(connection, { maxOutboundStreams: index + 1 }));
+    expect(() => coordinator.ping(connection, { maxOutboundStreams: 64 })).toThrow('Too many queued ping probes');
+    const joined = coordinator.monitor(connection);
+    for (let index = 0; index < 64; index++) {
+      await started(index + 1);
+      runs[index].resolve(index);
+    }
+    expect(await Promise.all(callers)).toEqual(Array.from({ length: 63 }, (_, index) => index + 1));
+    await Promise.all([monitor, joined]);
+    await coordinator.drain();
+    const next = coordinator.ping(connection, { maxOutboundStreams: 64 });
+    await started(65);
+    runs[64].resolve(65);
+    expect(await next).toBe(65);
   });
 
   it('delivers progress once when an observer adds another caller during fanout', async () => {

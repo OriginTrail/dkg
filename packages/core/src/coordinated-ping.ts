@@ -15,6 +15,7 @@ import { AdaptiveTimeout } from '@libp2p/utils';
 import { setMaxListeners } from 'node:events';
 import { DEFAULT_PING_CLEANUP_TIMEOUT_MS, pingConnection } from './ping-transport.js';
 import { PingProbeCoordinator } from './ping-probe-coordinator.js';
+import { pingAbortScope } from './ping-abort-scope.js';
 
 interface Components extends PingComponents {
   logger: ComponentLogger;
@@ -74,23 +75,25 @@ export function coordinatedPing(options: Options = {}): (components: Components)
     let timer: ReturnType<typeof setInterval> | undefined;
 
     const measure = async (
-      connection: Connection, stop: AbortSignal, streamOptions: Omit<NewStreamOptions, 'signal'>,
+      connection: Connection, stop: AbortSignal, streamOptions: NewStreamOptions & { signal: AbortSignal },
     ): Promise<number> => {
       stop.throwIfAborted();
+      streamOptions.signal.throwIfAborted();
       const closed = new AbortController();
       const onClose = () => closed.abort(new ConnectionClosedError('Connection closed during ping'));
       connection.addEventListener('close', onClose, { once: true });
-      const lifecycle = AbortSignal.any([stop, closed.signal]);
-      const signal = timeout.getTimeoutSignal({ signal: lifecycle });
-      const startedAt = Date.now();
+      const lifecycle = pingAbortScope(stop, closed.signal, streamOptions.signal);
+      const signal = timeout.getTimeoutSignal({ signal: lifecycle.signal });
       let phase: PingDiagnostic['phase'] = 'open-stream';
       let phaseStartedAt = performance.now();
       let pongReceived = false;
       let measurementFinished = false;
-      const finishMeasurement = () => {
+      const finishMeasurement = (recordLatency = !lifecycle.signal.aborted) => {
         if (measurementFinished) return;
         measurementFinished = true;
-        timeout.cleanUp(signal);
+        // Caller/service cancellation is not a peer latency observation.
+        if (!recordLatency) signal.clear();
+        else timeout.cleanUp(signal);
       };
       const diagnose = (error: Error, action: PingDiagnostic['action']) => {
         const diagnostic: PingDiagnostic = {
@@ -115,7 +118,7 @@ export function coordinatedPing(options: Options = {}): (components: Components)
             streamOptions.onProgress?.(event);
           },
         }, {
-          signal: lifecycle, timeoutMs: cleanupTimeoutMs,
+          signal: lifecycle.signal, timeoutMs: cleanupTimeoutMs,
           onPong: () => {
             pongReceived = true;
             finishMeasurement();
@@ -127,13 +130,15 @@ export function coordinatedPing(options: Options = {}): (components: Components)
         return connection.rtt;
       } catch (cause) {
         const error = cause instanceof Error ? cause : new Error(String(cause));
-        if (error.name === 'UnsupportedProtocolError') {
-          // Protocol negotiation itself proves liveness, as in libp2p's monitor.
-          connection.rtt = (Date.now() - startedAt) / 2;
-          return connection.rtt;
-        }
-        // Refusing a caller-excluded relay is not a failed liveness probe.
-        if (!pongReceived && error.name !== 'LimitedConnectionError' && !stop.aborted && connection.status === 'open') {
+        if (error.name === 'UnsupportedProtocolError') finishMeasurement(false);
+        // Unsupported negotiation is mapped to liveness only by the monitor;
+        // an explicit ping must reject. Neither it, a caller-excluded relay,
+        // nor cancelled ownership is evidence to abort the connection.
+        if (!pongReceived && error.name !== 'LimitedConnectionError'
+          && error.name !== 'UnsupportedProtocolError' && !lifecycle.signal.aborted && connection.status === 'open') {
+          // Record the probe failure before our own connection.abort triggers
+          // the close signal; that teardown is not caller cancellation.
+          finishMeasurement();
           diagnose(error, 'abort-connection');
           connection.abort(error);
         }
@@ -141,6 +146,7 @@ export function coordinatedPing(options: Options = {}): (components: Components)
       } finally {
         connection.removeEventListener('close', onClose);
         finishMeasurement();
+        lifecycle.dispose();
       }
     };
 
