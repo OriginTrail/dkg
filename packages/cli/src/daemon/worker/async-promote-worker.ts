@@ -78,6 +78,31 @@ export interface PromoteMemoryGraphChangedEvent {
  */
 export type PromoteWorkerLogger = (message: string) => void | Promise<void>;
 
+/** Internal logger shape: normalization makes every worker call fire-and-forget. */
+export type PromoteWorkerSyncLogger = (message: string) => void;
+
+const defaultPromoteWorkerLogger: PromoteWorkerLogger = (message) => {
+  console.warn(`[promote-worker] ${message}`);
+};
+
+/**
+ * Normalize a public logger once at the worker boundary. The worker's internal
+ * paths can then emit diagnostics without each call having to know whether the
+ * configured sink is synchronous, asynchronous, or hostile.
+ */
+export function normalizePromoteWorkerLogger(
+  configured: PromoteWorkerLogger | undefined,
+): PromoteWorkerSyncLogger {
+  const sink = configured ?? defaultPromoteWorkerLogger;
+  return (message: string): void => {
+    try {
+      void Promise.resolve(sink(message)).catch(() => {});
+    } catch {
+      // Logging must never delay or alter queue state transitions.
+    }
+  };
+}
+
 export interface PromoteWorkerConfig {
   /** The host DKG agent — provides the queue + the sync `promote` call. */
   agent: DKGAgent;
@@ -169,12 +194,8 @@ export interface PromoteWorkerCounters {
   postCommitExhausted: number;
 }
 
-function bestEffortLog(log: PromoteWorkerLogger, message: string): void {
-  try {
-    void Promise.resolve(log(message)).catch(() => {});
-  } catch {
-    // Logging must never delay or alter queue state transitions.
-  }
+function bestEffortLog(log: PromoteWorkerSyncLogger, message: string): void {
+  log(message);
 }
 
 /**
@@ -275,9 +296,10 @@ export async function runPromoteJob(
     bookkeepingRetryBudgetMs = 10 * 60 * 1000,
     sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)),
     shutdownSignal,
-    log,
+    log: configuredLog,
     emitMemoryGraphChanged,
   } = args;
+  const log = normalizePromoteWorkerLogger(configuredLog);
   if (!job.lease) {
     throw new Error(`runPromoteJob requires a job with an active lease (jobId=${job.jobId})`);
   }
@@ -523,8 +545,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
   const shutdownTimeoutMs = config.shutdownTimeoutMs ?? 30_000;
   const postCommitRecoveryIntervalMs = Math.max(0, config.postCommitRecoveryIntervalMs ?? 30_000);
   const now = config.now ?? (() => Date.now());
-  const log: PromoteWorkerLogger =
-    config.log ?? ((msg: string) => console.warn(`[promote-worker] ${msg}`));
+  const log = normalizePromoteWorkerLogger(config.log);
   const workerIdPrefix = config.workerIdPrefix ?? `daemon-${process.pid}`;
   const slots: WorkerSlot[] = Array.from({ length: concurrency }, (_, i) => ({
     workerId: `${workerIdPrefix}-slot-${i}`,

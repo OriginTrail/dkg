@@ -136,6 +136,8 @@ export default defineConfig({
           // including preserving a known transaction hash on endpoint exhaustion.
           'test/chain-rpc-transport-status.test.ts',
           'test/async-promote-worker.test.ts',
+          // #2315 — privacy-bounded diagnostics and hostile logger isolation.
+          'test/async-promote-worker-diagnostics.test.ts',
           'test/async-promote-error-classification.test.ts',
           'test/async-promote-publisher-recovery.test.ts',
           'test/async-promote-bookkeeping-recovery.test.ts',
