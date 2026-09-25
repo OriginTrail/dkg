@@ -1873,3 +1873,166 @@ describe('Context Graph subscription authority retry', () => {
     expect(agent.getSubscribedContextGraphs().has(coldContextGraphId)).toBe(false);
   }, 15_000);
 });
+
+describe('Context Graph subscription rehydration startup authority budget (#2815)', () => {
+  let agent: DKGAgent | null = null;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (agent) await agent.stop().catch(() => undefined);
+    agent = null;
+  });
+
+  const persistedRow = (id: string, onChainId: string) => ({
+    id,
+    subscribed: true,
+    synced: true,
+    sharedMemorySynced: true,
+    metaSynced: true,
+    syncScoped: true,
+    onChainId,
+  });
+  const storeOf = (rows: Map<string, any>) => ({
+    loadAll: async () => [...rows.values()],
+    load: async (id: string) => rows.get(id) ?? null,
+    save: async (row: any) => { rows.set(row.id, row); },
+    delete: async (id: string) => { rows.delete(id); },
+  });
+  const allowed = (onChainId: string) => ({
+    outcome: 'allowed',
+    source: 'registered-chain',
+    reason: 'open-context-graph',
+    metadataBootstrap: 'eligible',
+    onChainId: BigInt(onChainId),
+  } as const);
+
+  it('finishes starting at the budget and activates the unresolved rows from background recovery', async () => {
+    const rows = new Map<string, any>([
+      ['a-quick', persistedRow('a-quick', '11')],
+      ['b-unanswered', persistedRow('b-unanswered', '12')],
+      ['c-unread', persistedRow('c-unread', '13')],
+    ]);
+    agent = await DKGAgent.create({
+      name: 'RehydrationStartupAuthorityBudget',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: storeOf(rows),
+      contextGraphSubscriptionRehydrationEnabled: true,
+      contextGraphSubscriptionRehydrationAuthorityBudgetMs: 200,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+    });
+    const startupReads: string[] = [];
+    let starting = true;
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
+      .mockImplementation(async (contextGraphId) => {
+        if (starting) {
+          startupReads.push(contextGraphId);
+          // Without the budget this read would hold start() forever.
+          if (contextGraphId === 'b-unanswered') return new Promise(() => {});
+        }
+        return allowed(rows.get(contextGraphId).onChainId);
+      });
+
+    await agent.start();
+    starting = false;
+
+    // The row after the spent budget is never read during startup.
+    expect(startupReads).toEqual(['a-quick', 'b-unanswered']);
+    expect(agent.getSubscribedContextGraphs().get('a-quick')).toMatchObject({ subscribed: true });
+    expect(agent.getSubscribedContextGraphs().has('b-unanswered')).toBe(false);
+    expect(agent.getSubscribedContextGraphs().has('c-unread')).toBe(false);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 1,
+      dormantReasons: { authorityUnavailable: ['b-unanswered', 'c-unread'] },
+    });
+
+    // Background recovery reads both again and activates them only as allowed.
+    await vi.waitFor(() => {
+      expect(agent!.getSubscribedContextGraphs().get('b-unanswered')).toMatchObject({
+        subscribed: true,
+        onChainId: '12',
+      });
+      expect(agent!.getSubscribedContextGraphs().get('c-unread')).toMatchObject({
+        subscribed: true,
+        onChainId: '13',
+      });
+    }, { timeout: 10_000, interval: 50 });
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      dormant: 0,
+      dormantReasons: { authorityUnavailable: [] },
+    });
+  }, 20_000);
+
+  it('waits for every row during startup when the budget is 0', async () => {
+    const rows = new Map<string, any>([['a-slow', persistedRow('a-slow', '21')]]);
+    agent = await DKGAgent.create({
+      name: 'RehydrationStartupAuthorityBudgetOff',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: storeOf(rows),
+      contextGraphSubscriptionRehydrationEnabled: true,
+      contextGraphSubscriptionRehydrationAuthorityBudgetMs: 0,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+    });
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
+      .mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return allowed('21');
+      });
+
+    await agent.start();
+
+    expect(agent.getSubscribedContextGraphs().get('a-slow')).toMatchObject({
+      subscribed: true,
+      onChainId: '21',
+    });
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 1,
+      dormant: 0,
+    });
+  }, 20_000);
+
+  it('still waits for a join-approved row past the budget and defers the rows after it unread', async () => {
+    const rows = new Map<string, any>();
+    agent = await DKGAgent.create({
+      name: 'RehydrationStartupAuthorityBudgetApproval',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: storeOf(rows),
+      contextGraphSubscriptionRehydrationEnabled: true,
+      contextGraphSubscriptionRehydrationAuthorityBudgetMs: 100,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+    });
+    await agent.start();
+    rows.set('a-approved', persistedRow('a-approved', '31'));
+    rows.set('b-after-budget', persistedRow('b-after-budget', '32'));
+    // A durable join approval keeps the restricted pending-metadata bootstrap,
+    // which only the synchronous startup path can restore.
+    (agent as any).localApprovedAgentByCG.set('a-approved', '0x00000000000000000000000000000000000000aa');
+    const reads: string[] = [];
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
+      .mockImplementation(async (contextGraphId) => {
+        reads.push(contextGraphId);
+        if (contextGraphId === 'a-approved') {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          return {
+            outcome: 'denied',
+            source: 'registered-chain',
+            reason: 'not-a-member',
+            metadataBootstrap: 'forbidden',
+          } as const;
+        }
+        return allowed('32');
+      });
+
+    await agent.rehydrateContextGraphSubscriptions(null);
+
+    expect(reads).toEqual(['a-approved']);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      dormantReasons: {
+        authorityDenied: ['a-approved'],
+        authorityUnavailable: ['b-after-budget'],
+      },
+    });
+  }, 20_000);
+});
