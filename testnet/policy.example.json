@@ -1,0 +1,33 @@
+{
+  "$comment": "OT-RFC-61 §8 S3: immutable operator safety policy. Scenarios may only TIGHTEN these. 'hardMax' is the loosest any scenario/operator override may ever go. A missing watch signal fails closed (trip fires).",
+  "schemaVersion": 1,
+  "trips": {
+    "memoryPsiSomeAvg10": { "default": 0.4, "hardMax": 0.6, "sustainSec": 60 },
+    "memoryCurrentVsHighFraction": { "default": 0.95, "hardMax": 0.98 },
+    "oomKillDelta": { "default": 0, "hardMax": 0 },
+    "coreUnreachableFromBaseline": { "default": 1, "hardMax": 1 },
+    "acceptQueueRecvQAtBacklog": { "default": true, "hardMax": true, "consecutiveProbeFailures": 3 },
+    "diskFreeFloorBytes": { "default": 16106127360, "hardMax": 10737418240 },
+    "diskFreeFloorFraction": { "default": 0.2, "hardMax": 0.1 },
+    "admissionShedWindowSec": { "default": 60, "hardMax": 60 },
+    "admissionShedFractionOfAttempts": { "default": 0.5, "hardMax": 0.7 },
+    "rpcExhaustionDeltaPerRun": { "default": 100, "hardMax": 500 }
+  },
+  "quiesce": {
+    "flatCounterConfirmSec": 20,
+    "edgeShutdownTimeoutSec": 60
+  },
+  "safetyAbort": {
+    "cooldownMin": 60
+  },
+  "permanentData": {
+    "$comment": "S7 cumulative allocation across ALL harness VM writes. Operator-owned.",
+    "lifetimeBudgetBytes": 268435456,
+    "rollingWindowDays": 7,
+    "rollingBudgetBytes": 67108864
+  },
+  "faucet": {
+    "maxTopUpsPerRun": 1,
+    "perWalletPer24h": 1
+  }
+}

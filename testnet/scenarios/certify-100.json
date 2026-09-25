@@ -1,0 +1,31 @@
+{
+  "$comment": "Scenario #1 — the OT-RFC-59 certification workload, frozen (RFC-61 §10 Phase 0 exit gate). 2 waves x (25 public + 25 private) single-triple KAs at concurrency 2, control fixtures every 10th, byte-exact readback per wave, 600 s soak, gate battery.",
+  "schemaVersion": 1,
+  "scenario": "certify-100",
+  "lanes": ["public", "private"],
+  "cg": { "public": "reuse:loadtest-public", "private": "reuse:loadtest-private" },
+  "workload": {
+    "op": "publish",
+    "waves": 2,
+    "perWave": { "public": 25, "private": 25 },
+    "entityShape": "single-triple",
+    "controlFixtureEvery": 10,
+    "concurrency": 2,
+    "arrival": "closed-loop"
+  },
+  "measure": ["share.duration", "publish.duration", "vm.finalization"],
+  "readback": { "where": "driver", "byteExact": true, "chunkSize": 25 },
+  "soakSeconds": 600,
+  "gates": {
+    "successRate": { "overall": 0.95, "perLane": 0.96, "minSamples": { "overall": 100, "perLane": 50 } },
+    "publishP95Ms": 60000,
+    "controlFixtures": { "mustFinalize": true, "mustReadBack": true },
+    "uniqueUals": true,
+    "fleet": {
+      "coreRestarts": 0,
+      "oomKillDelta": 0,
+      "gatedSignatures": 0,
+      "memoryPeakFraction": 0.9
+    }
+  }
+}

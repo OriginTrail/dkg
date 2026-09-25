@@ -1,0 +1,79 @@
+{
+  "$comment": "OT-RFC-61 §9.2 forbidden-signature ledger. Patterns are POSIX-ERE-compatible regex sources applied PER LINE against the LOWERCASED journal text (journalctl -o cat) — identically by the remote awk pass and the local JS counter (lib/fleet.mjs signatureCountsFromText). Patterns must not contain single quotes or forward slashes (they are embedded in a single-quoted remote awk program) and must avoid awk-hostile syntax (no lookaround, no {n,m} intervals, no \\b). Dispositions: gated = any occurrence fails a binding goal; recorded = reported, never gated. The ledger is versioned against node releases: a wording change that silences a class is ledger breakage (scored INCONCLUSIVE), not zero occurrences. Classes ported from the OT-RFC-59 harness 12-class awk program.",
+  "version": 1,
+  "appliesTo": "ot-node v10 canary journals (Base-Sepolia testnet fleet), journalctl -o cat",
+  "classes": [
+    {
+      "id": "listgraphs_timeout",
+      "disposition": "gated",
+      "pattern": "listgraphs.*(timed out|timeout error|timeouterror|deadline exceeded)|(timed out|timeout error|timeouterror|deadline exceeded).*listgraphs",
+      "description": "listGraphs store scan timed out or exceeded a deadline — the O(store) responder-livelock family behind the 2026-06/07 sync storms (rfc59 class listgraphs_timeouts)."
+    },
+    {
+      "id": "sync_timeout",
+      "disposition": "gated",
+      "pattern": "sync.*(timed out|timeout error|timeouterror|deadline exceeded)|(timed out|timeout error|timeouterror|deadline exceeded).*sync",
+      "description": "A sync/catch-up operation timed out or exceeded its deadline (rfc59 class sync_timeouts)."
+    },
+    {
+      "id": "scheduler_saturation",
+      "disposition": "gated",
+      "pattern": "store_scheduler_busy|queue_wait_timeout|queue_full",
+      "description": "Store scheduler/queue saturation markers: store_scheduler_busy, queue_wait_timeout, queue_full (rfc59 class scheduler_busy)."
+    },
+    {
+      "id": "quorum_terminal_failure",
+      "disposition": "gated",
+      "pattern": "quorum.*(terminal|exhausted|failed permanently|job failed|impossible|no longer reachable)|quorumunmeterror|storage_ack_timeout",
+      "description": "A publish/replication quorum failed terminally (exhausted, impossible, QuorumUnmetError) or a storage ACK timed out (rfc59 class terminal_quorum_failures)."
+    },
+    {
+      "id": "oom_sigkill",
+      "disposition": "gated",
+      "pattern": "oom_kill|oom-kill|oom killer|out of memory|oxigraph.*sigkill|sigkill.*oxigraph",
+      "description": "cgroup OOM kill events, kernel OOM verdicts surfaced by systemd, or the oxigraph store worker dying by SIGKILL (rfc59 class oom_signals)."
+    },
+    {
+      "id": "duplicate_publish",
+      "disposition": "gated",
+      "pattern": "duplicate.*(publish|transaction)|(publish|transaction).*duplicate",
+      "description": "Duplicate publish or duplicate transaction detected — idempotency regression (rfc59 class duplicate_publishes)."
+    },
+    {
+      "id": "forced_redial",
+      "disposition": "recorded",
+      "pattern": "forced redial|forced-redial",
+      "description": "Peer connection forced redial — churn indicator, expected at low rates on a live testnet; reported but never gated (rfc59 class forced_redials)."
+    },
+    {
+      "id": "rpc_throttle",
+      "disposition": "recorded",
+      "pattern": "(^|[^0-9])429([^0-9]|$)|full-pool thrott|too many requests",
+      "description": "Chain RPC throttling: HTTP 429, too-many-requests, or full-pool throttling engaged — provider-side pressure, recorded for context (rfc59 class rpc_throttles)."
+    },
+    {
+      "id": "accept_queue_marker",
+      "disposition": "recorded",
+      "pattern": "accept[ _-]?queue|listen backlog|syn flood",
+      "description": "Accept-queue / listen-backlog wedge markers. Corroboration only per S3: the 2026-07 wedge incident produced no distinctive log line; authoritative detection is the §9.1 socket capture (ss Recv-Q vs backlog) plus the out-of-band TCP connect probe."
+    },
+    {
+      "id": "ostore_scan_storm",
+      "disposition": "recorded",
+      "pattern": "max\\(.seq\\)|changelog\\.headseq|deletebypattern\\.count(before|after)",
+      "description": "O(store) scan-storm markers: changelog MAX(?seq) head recomputation and deleteByPattern catalog count scans (rfc59 classes changelog_max_seq_reads + catalog_count_scans, folded)."
+    },
+    {
+      "id": "store_deadline_timeout",
+      "disposition": "recorded",
+      "pattern": "store.*deadline.*(exceeded|timed out)",
+      "description": "A store operation exceeded its deadline — early scheduler-pressure indicator, recorded ahead of full saturation (rfc59 class store_deadline_timeouts)."
+    },
+    {
+      "id": "probe_query_timeout",
+      "disposition": "recorded",
+      "pattern": "(querybytes[^0-9]*71|71-byte).*(timed out|timeout error|timeouterror|deadline exceeded)|(timed out|timeout error|timeouterror|deadline exceeded).*(querybytes[^0-9]*71|71-byte)",
+      "description": "The tiny fixed-size (71-byte) probe query timed out — the store scheduler cannot serve even trivial reads (rfc59 class query71_timeouts, legacy incident probe kept for continuity)."
+    }
+  ]
+}

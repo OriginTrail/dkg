@@ -1,0 +1,5 @@
+{
+  "$comment": "Scenario manifest — drift-guarded: test/manifest-drift.test.mjs asserts this list == files in scenarios/. Add a scenario file without listing it here (or vice versa) and the suite fails.",
+  "schemaVersion": 1,
+  "scenarios": ["certify-100"]
+}
