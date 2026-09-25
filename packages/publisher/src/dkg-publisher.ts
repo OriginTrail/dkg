@@ -2301,7 +2301,20 @@ export class DKGPublisher implements Publisher {
     // Skip for mock/none chains (unit tests) — only enforce on real chains.
     // Also skip when publishContextGraphId is set (remap flow) — the source
     // CG may be unregistered while the target CG is already on-chain.
-    if (this.chain.chainId !== 'none' && !this.chain.chainId.startsWith('mock') && !options?.publishContextGraphId) {
+    // And skip when the caller resolved the on-chain id itself: the chain tx
+    // below targets that id, and the agent supplies one only from its
+    // authoritative chain binding, a live chain lookup or the durable binding
+    // read here — the same test the queued VM-publish path applies. A node
+    // can hold only the chain binding: an edge learns a public graph's id from
+    // the ContextGraphCreated event, syncs no `ontology` graph, and never sees
+    // the one-shot registration gossip if it missed it or joined later.
+    const resolvedOnChainContextGraphId = options?.onChainContextGraphId?.trim();
+    if (
+      this.chain.chainId !== 'none'
+      && !this.chain.chainId.startsWith('mock')
+      && !options?.publishContextGraphId
+      && !resolvedOnChainContextGraphId
+    ) {
       const cgMetaUri = contextGraphMetaUri(contextGraphId);
       const cgDataUri = contextGraphDataUri(contextGraphId);
 
@@ -3543,6 +3556,9 @@ export class DKGPublisher implements Publisher {
         );
       } catch (err) {
         // RC11 / PR1+PR3: no self-signed ACK fallback. ACK collection
+        // (A publishing Core's own StorageACK through its local endpoint is
+        // different: it is one verified signature of the Core quorum, not a
+        // fallback.)
         // failure is a publish failure — propagate the underlying
         // ACKProvider error verbatim so callers (and the daemon log)
         // see the real cause (RPC pre-flight, quorum unmet, transport,

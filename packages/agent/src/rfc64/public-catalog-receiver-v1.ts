@@ -72,6 +72,13 @@ export interface Rfc64PublicCatalogCurrentReceiverReconcilerV1
    * strictly supersedes it. Equal-version conflicts are never deduplicated.
    */
   isHeadSatisfied: Rfc64PublicCatalogHeadSatisfactionCheckV1;
+  /**
+   * Optional synchronous, I/O-free form of {@link isHeadSatisfied}: `true`
+   * only when that check would resolve `true` right now; `false` whenever it
+   * cannot tell cheaply. Never throws. An announcement for a head this proves
+   * satisfied needs no receiver or pull work.
+   */
+  isHeadKnownSatisfied?(announcement: Rfc64PublicCatalogHeadAnnouncementV1): boolean;
 }
 
 /** Constructor compatibility for implementations compiled against the V1 name. */
@@ -521,6 +528,16 @@ export class Rfc64PublicCatalogReceiverV1 {
     remotePeerId: string,
   ): void {
     this.scheduleMany([{ announcement, remotePeerId }]);
+  }
+
+  /**
+   * True while this receiver admits work and holds no queued, deferred, or
+   * running ambient task for this exact head: scheduling it now could only
+   * start a new task, never add a provider or a fresh hint to existing work.
+   */
+  hasNoPendingTaskForHead(announcement: Rfc64PublicCatalogHeadAnnouncementV1): boolean {
+    return !this.#closed
+      && this.#tasks.pending(rfc64ReceiverHeadKeyV1(announcement)) === undefined;
   }
 
   /** Atomically retain all discovered providers before the first fetch starts. */

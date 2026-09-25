@@ -13,6 +13,10 @@ import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
+import { PeerCapabilityRegistry } from './p2p/peer-capability.js';
+import { ACKCandidateDiscoveryCoordinator } from './p2p/ack-candidate-discovery.js';
+import type { StorageACKEndpoint } from './p2p/storage-ack-endpoint.js';
+import { StorageACKRegistrationRuntime } from './p2p/storage-ack-registration-runtime.js';
 import {
   openRfc64PersistenceV1,
   type Rfc64PersistenceV1,
@@ -54,7 +58,7 @@ import type { Rfc64SwmRecoveryRuntimeV1 } from
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
@@ -1235,8 +1239,13 @@ export class DKGAgentBase {
   /** The signed-ACK ledger is initialized and pre-ledger copies grandfathered. */
   protected storageAckLedgerReady = false;
   protected storageAckLedgerReadyFlight: Promise<boolean> | null = null;
-  /** The StorageACK protocol handler is registered (this core can answer ACKs). */
-  protected storageAckHandlerRegistered = false;
+  protected readonly storageACKRegistrationRuntime = new StorageACKRegistrationRuntime();
+  protected get storageAckEndpoint(): StorageACKEndpoint | null {
+    return this.storageACKRegistrationRuntime.endpoint;
+  }
+  protected get storageAckHandlerRegistered(): boolean {
+    return this.storageACKRegistrationRuntime.registered;
+  }
   /** StorageACK declines per minute bucket and code, for the last hour. */
   protected readonly storageAckDeclineBuckets = new Map<number, Map<string, number>>();
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
@@ -1317,8 +1326,6 @@ export class DKGAgentBase {
    */
   protected messengerOutboxTimer: ReturnType<typeof setInterval> | null = null;
   protected randomSamplingRuntime: RandomSamplingRuntime | null = null;
-  protected storageACKRegistrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  protected storageACKRegistrationRetryInFlight = false;
   // #894 / Codex PR #901 round-3 :1685: `ensureProfile()` is a mutating
   // multi-tx flow (createProfile + stake) that can legitimately outlast the
   // boot read-timeout. Guards against the boot path AND the StorageACK retry
@@ -1712,8 +1719,8 @@ export class DKGAgentBase {
    */
   protected readonly onChainParticipantAgentsCache = new Map<string, string[]>();
   protected readonly peerHealth = new Map<string, PeerHealth>();
-  protected readonly knownCorePeerIds = new Set<string>();
-  protected readonly knownCorePeerIdsV2 = new Set<string>();
+  protected readonly peerCapabilityRegistry = new PeerCapabilityRegistry();
+  protected readonly ackCandidateDiscovery = new ACKCandidateDiscoveryCoordinator(this.peerCapabilityRegistry);
   /**
    * Last chain-reported ACK quorum (ParametersStorage
    * minimumRequiredSignatures), refreshed by the V10 ACK provider before

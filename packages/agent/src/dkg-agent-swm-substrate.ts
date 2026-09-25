@@ -1926,6 +1926,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
                   candidate.ual,
                 );
               },
+              onTornHeadRemoved: (message, ctx) => this.log.warn(ctx, message),
             }),
           reconcileConfirmedGraphScopedSwmTwin: async (evidence, ctx) => {
             const retirement = await reconcileFinalizedSwmTwinFromCatalogProjection({

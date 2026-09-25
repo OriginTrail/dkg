@@ -30,6 +30,7 @@ import {
   loadSharedMemorySliceWithKaBoundFallback,
   asGraphWriteRevisionSource,
   resolveGraphScopedOrLegacyMetadata,
+  resolveSharedMemoryScopeGraphs,
   tryReplaceGraphAtomically,
   tryReplaceGraphAndSubjectAtomically,
   StoreSchedulerBusyError,
@@ -59,6 +60,7 @@ import {
   withMaterializationLock,
   workspacePublicQuadsDigest,
   KnowledgeAssetWorkspaceHeadCorruptError,
+  isKnowledgeAssetWorkspaceHeadCorruptError,
   resolveKnowledgeAssetWorkspaceHead,
   type MaterializedVersion,
   type KnowledgeAssetWorkspaceHead,
@@ -109,7 +111,10 @@ import {
   type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
 import { recoverReceiptBackedGraphScopedEvidence } from './receipt-backed-graph-scoped-evidence.js';
-import { resolveConfirmedGraphScopedVm } from './confirmed-graph-scoped-vm-resolver.js';
+import {
+  resolveConfirmedGraphScopedVm,
+  resolveLocallyConfirmedGraphScopedVm,
+} from './confirmed-graph-scoped-vm-resolver.js';
 import {
   verifyExactGraphContent,
   type ExactGraphContentVerification,
@@ -399,6 +404,27 @@ export type ChainReconciledKCOutcome =
   | 'stale-target'
   | 'verified-vm-metadata-pending';
 
+/** The part of an ordinary chain reconcile input that is known before any chain root read. */
+export type ChainReconcileLocalCandidateInput = Pick<
+  ChainReconciledKCInput,
+  'contextGraphId' | 'onChainCgId' | 'ual' | 'kaId' | 'batchId' | 'subGraphName'
+>;
+
+/**
+ * What an ordinary chain reconcile could find locally for one KA, decided
+ * without a chain read (see `classifyChainReconcileLocalCandidate`).
+ *  - `none`: the store holds nothing for this KA, so `handleChainReconciledKC`
+ *    answers `no-swm` whatever the chain root is.
+ *  - `confirmed-vm`: a confirmed VM copy and nothing else that could promote.
+ *  - `present`: anything else; the outcome depends on the chain root.
+ */
+export type ChainReconcileLocalCandidate =
+  | { readonly kind: 'none' }
+  | { readonly kind: 'confirmed-vm'; readonly layout: 'graph-scoped' | 'legacy' }
+  | { readonly kind: 'present' };
+
+const LOCAL_CANDIDATE_PRESENT: ChainReconcileLocalCandidate = Object.freeze({ kind: 'present' });
+
 interface ExactChainReconcileDecision {
   outcome: ChainReconciledKCOutcome;
   legacyEligible: boolean;
@@ -461,6 +487,11 @@ export class FinalizationHandler {
   // no local write has touched the CG since the scan. LRU, in-memory only —
   // a restart clears it (fail-open).
   private readonly negativeSnapshotMemo = new Map<string, NegativeSnapshotMemoEntry>();
+  /** Legacy WorkspaceOperation presence per (cg, namespace), gated the same way. */
+  private readonly legacySwmOperationsMemo = new Map<
+    string,
+    { writeGen: number; recordedAt: number; present: boolean }
+  >();
   /** Equivalent finalization/reconcile reads share one promise until it settles. */
   private readonly scanSingleFlights = new Map<string, Promise<unknown>>();
   private readonly recoveryWorker: FinalizationRecoveryWorker;
@@ -1560,7 +1591,21 @@ export class FinalizationHandler {
         assertionVersion: BigInt(resolution.envelope.assertionVersion),
         ...(input.subGraphName ? { subGraphName: input.subGraphName } : {}),
       });
-      await retire(candidate, ctx);
+      try {
+        await retire(candidate, ctx);
+      } catch (err) {
+        // Retirement re-reads the head under the SWM lock. A corrupt head it
+        // cannot prove stale is this KA's own damage, and retrying the ordinal
+        // cannot repair it: keep the head and the verified VM result, so one
+        // KA never fails the caller's whole sweep. Every other cleanup failure
+        // still propagates.
+        if (!isKnowledgeAssetWorkspaceHeadCorruptError(err)) throw err;
+        this.log.warn(
+          ctx,
+          `Chain-reconcile: kept corrupt graph-scoped SWM head for ${input.ual}; `
+            + `its SWM twin was not retired: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
     }
     this.log.info(
       ctx,
@@ -3274,10 +3319,12 @@ export class FinalizationHandler {
    * A named assertion stores its namespace in the root metadata graph, so this
    * stays exact and does not enumerate workspace operations or subgraphs.
    */
-  private async resolveExactChainReconcileInput(
-    input: ChainReconciledKCInput,
+  private async resolveExactChainReconcileInput<
+    T extends Pick<ChainReconciledKCInput, 'contextGraphId' | 'ual' | 'subGraphName'>,
+  >(
+    input: T,
     ctx: OperationContext,
-  ): Promise<ChainReconciledKCInput | null> {
+  ): Promise<T | null> {
     if (input.subGraphName !== undefined) return input;
     try {
       const rootMetaGraph = contextGraphMetaUri(input.contextGraphId);
@@ -3525,6 +3572,187 @@ export class FinalizationHandler {
       `Chain-reconcile: promoted SWM snapshot to VM for ${ual} (ka=${kaId}, cg=${onChainCgId})`,
     );
     return 'promoted';
+  }
+
+  /**
+   * Decide from local state alone whether an ordinary chain reconcile of one
+   * KA (no trusted evidence, no pinned assertion version) can depend on the
+   * chain root. This walks {@link handleChainReconciledKC} in the same order
+   * with the same helpers, and answers `present` wherever that path would need
+   * the root or the publisher, or meets a rare state it handles on its own
+   * (steps 1 and 4 keep their chain-backed diagnostics):
+   *
+   *  1. exact namespace resolution (the same resolver); ambiguous metadata;
+   *  2. recovery-inbox entries for the KA, whose replay reads chain state;
+   *  3. graph-scoped state: a workspace head, corrupt or not, is verified
+   *     against the root. Without a head, a confirmed envelope whose stored
+   *     content still verifies against its own recorded root is
+   *     `confirmed-vm`, unless an orphaned SWM twin is left to retire;
+   *  4. graph-scoped metadata without a head or confirmed copy;
+   *  5. the legacy confirmed marker, which that path answers
+   *     `already-confirmed` without reading the root;
+   *  6. legacy workspace operations, the root-matched scan: with none in the
+   *     namespaces it searches, nothing local can match any root, so `none`.
+   *
+   * `confirmed-vm` trusts the root the local copy was confirmed at; a newer
+   * on-chain version is not looked for here. The ordinal walk never revisits a
+   * settled ordinal, so an update already reaches VM through finalization
+   * gossip, the StorageACK pending-update lane, or, when its SWM head is local,
+   * the chain-backed path this method routes it to (`present`).
+   *
+   * Any read failure answers `present`, keeping the caller on its chain path.
+   */
+  async classifyChainReconcileLocalCandidate(
+    input: ChainReconcileLocalCandidateInput,
+    ctx: OperationContext,
+  ): Promise<ChainReconcileLocalCandidate> {
+    try {
+      return await this.classifyChainReconcileLocalCandidateOrThrow(input, ctx);
+    } catch {
+      return LOCAL_CANDIDATE_PRESENT;
+    }
+  }
+
+  private async classifyChainReconcileLocalCandidateOrThrow(
+    rawInput: ChainReconcileLocalCandidateInput,
+    ctx: OperationContext,
+  ): Promise<ChainReconcileLocalCandidate> {
+    const input = await this.resolveExactChainReconcileInput(rawInput, ctx);
+    if (!input) return LOCAL_CANDIDATE_PRESENT;
+    const { contextGraphId, onChainCgId, ual, kaId, batchId, subGraphName } = input;
+    if (await this.recovery.mayReplayForKnowledgeAsset({
+      chainId: this.chain?.chainId ?? 'none',
+      contextGraphId,
+      ual,
+      kaId: kaId.toString(),
+    })) {
+      return LOCAL_CANDIDATE_PRESENT;
+    }
+
+    let graphScopedUal = true;
+    try {
+      createGraphKnowledgeAssetScope(ual, 1);
+    } catch {
+      graphScopedUal = false;
+    }
+    if (graphScopedUal) {
+      // A corrupt head throws here and answers `present`: the chain-backed
+      // path owns its containment.
+      const head = await resolveKnowledgeAssetWorkspaceHead({
+        store: this.store,
+        graphManager: new GraphManager(this.store),
+        contextGraphId,
+        kaUal: ual,
+        subGraphName,
+      });
+      if (head) return LOCAL_CANDIDATE_PRESENT;
+      const confirmed = await resolveLocallyConfirmedGraphScopedVm(this.store, {
+        contextGraphId,
+        ual,
+        kaId,
+        batchId,
+        ...(subGraphName ? { subGraphName } : {}),
+      });
+      if (confirmed.status === 'invalid') return LOCAL_CANDIDATE_PRESENT;
+      if (confirmed.status === 'verified') {
+        return await this.hasOrphanedGraphScopedSwmTwin(contextGraphId, confirmed.scope, subGraphName)
+          ? LOCAL_CANDIDATE_PRESENT
+          : { kind: 'confirmed-vm', layout: 'graph-scoped' };
+      }
+    }
+    if (await this.hasGraphScopedMetadata(contextGraphId, ual)) return LOCAL_CANDIDATE_PRESENT;
+
+    const rootMetaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+    const targetMetaGraph = onChainCgId.length > 0
+      ? contextGraphMetaUri(contextGraphId, onChainCgId)
+      : rootMetaGraph;
+    if (await this.isAlreadyConfirmed(ual, targetMetaGraph, rootMetaGraph)) {
+      return { kind: 'confirmed-vm', layout: 'legacy' };
+    }
+    return await this.hasLegacySwmOperations(contextGraphId, subGraphName)
+      ? LOCAL_CANDIDATE_PRESENT
+      : { kind: 'none' };
+  }
+
+  /**
+   * Whether the headless-VM retirement in the chain-backed path would find an
+   * SWM twin: the per-KA shared-memory graphs it drops, in its namespace.
+   */
+  private async hasOrphanedGraphScopedSwmTwin(
+    contextGraphId: string,
+    scope: ReturnType<typeof createGraphKnowledgeAssetScope>,
+    subGraphName: string | undefined,
+  ): Promise<boolean> {
+    // Without the retirement hook the chain-backed path retires nothing either.
+    if (this.retireConfirmedGraphScopedSwmTwinIfOrphaned === undefined) return false;
+    const graphs = await resolveSharedMemoryScopeGraphs(
+      this.store,
+      new GraphManager(this.store).sharedMemoryUri(contextGraphId, subGraphName),
+      {
+        kind: 'named-lifecycle',
+        identity: { agentAddress: scope.agentAddress, kaNumber: BigInt(scope.kaNumber) },
+      },
+    );
+    const result = await this.store.query(
+      `ASK { ${graphs.map((graph) => `{ GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o } }`).join(' UNION ')} }`,
+      { source: 'agent.finalization.localCandidate.swmTwin' },
+    );
+    return result.type !== 'boolean' || result.value;
+  }
+
+  /**
+   * Whether the root-matched legacy scan (`findSwmSnapshotForMerkleRoot`) has
+   * any WorkspaceOperation to look at: the given namespace, or the root and
+   * every listed sub-graph when none is known. Memoized per CG write
+   * generation, like that scan's negative memo, so a quiet graph answers from
+   * memory for the whole sweep.
+   */
+  private async hasLegacySwmOperations(
+    contextGraphId: string,
+    subGraphName: string | undefined,
+  ): Promise<boolean> {
+    const memoKey = `${contextGraphId}\0${subGraphName ?? ''}`;
+    const revision = this.graphWriteGen?.getWriteRevision(`${contextGraphDataUri(contextGraphId)}/`);
+    if (revision?.stable) {
+      const memo = this.legacySwmOperationsMemo.get(memoKey);
+      if (
+        memo
+        && memo.writeGen === revision.generation
+        && Date.now() - memo.recordedAt < vmReconcileNegativeTtlMs()
+      ) {
+        return memo.present;
+      }
+    }
+    const graphManager = new GraphManager(this.store);
+    const metaGraphs = subGraphName
+      ? [graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName)]
+      : [
+          contextGraphWorkspaceMetaGraphUri(contextGraphId),
+          ...(await graphManager.listSubGraphs(contextGraphId))
+            .map((name) => graphManager.sharedMemoryMetaUri(contextGraphId, name)),
+        ];
+    const result = await this.store.query(
+      `ASK { ${metaGraphs
+        .map((graph) => `{ GRAPH <${assertSafeIri(graph)}> { ?op <${DKG_NS}rootEntity> ?root } }`)
+        .join(' UNION ')} }`,
+      { source: 'agent.finalization.localCandidate.legacySwmOperations' },
+    );
+    const present = result.type !== 'boolean' || result.value;
+    if (revision?.stable) {
+      // Recorded at the pre-probe generation: a racing write flips the gate.
+      this.legacySwmOperationsMemo.delete(memoKey);
+      this.legacySwmOperationsMemo.set(memoKey, {
+        writeGen: revision.generation,
+        recordedAt: Date.now(),
+        present,
+      });
+      while (this.legacySwmOperationsMemo.size > VM_RECONCILE_NEGATIVE_MEMO_MAX_ENTRIES) {
+        const oldest = this.legacySwmOperationsMemo.keys().next().value;
+        if (oldest === undefined) break;
+        this.legacySwmOperationsMemo.delete(oldest);
+      }
+    }
+    return present;
   }
 
   private async verifyChainCgBinding(kaId: bigint, onChainCgId: string, ctx: OperationContext): Promise<boolean> {

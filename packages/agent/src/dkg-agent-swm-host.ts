@@ -124,6 +124,7 @@ import {
   type WorkspaceSenderKeyEncryptInput,
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
   readMaterializedVersion, shouldApplyMaterialization, withMaterializationLock,
+  isKnowledgeAssetWorkspaceHeadCorruptError,
   type MaterializedVersion,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
@@ -240,7 +241,12 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import {
+  FinalizationHandler,
+  KEEP_ROOT_COPY_PREDICATE,
+  type ChainReconcileLocalCandidate,
+  type ChainReconciledKCOutcome,
+} from './finalization-handler.js';
 import {
   reconcileContextGraph,
   VmReconcileSchedulingRuntime,
@@ -630,6 +636,14 @@ const VM_EXACT_MICROBATCH_LIMITS = Object.freeze({
   // Hard exact-selector cap, evaluated with the executor's real encoder.
   maxSelectorBytes: 16 * 1024,
 });
+
+/**
+ * Recovery-target root of an ordinal whose KA the node holds nowhere locally:
+ * the sweep queues it without reading the chain root. Exact recovery fetches
+ * by UAL, so the root only keys the target's rotation record, and every visit
+ * that still finds nothing local presents the same key.
+ */
+const VM_RECONCILE_UNREAD_MERKLE_ROOT = '';
 
 interface VmRecoveryPreparedEntry {
   readonly index: number;
@@ -3527,21 +3541,38 @@ export class SwmHostModeMethods extends DKGAgentBase {
         scanOrdinal: target.cursor.scanOrdinal,
       };
       let pendingWatermark: number | undefined;
-      const result = await reconcileContextGraph(
-        this.createVmReconcileDeps(
+      let result: VmReconcileEngineResult;
+      try {
+        result = await reconcileContextGraph(
+          this.createVmReconcileDeps(
+            localCgId,
+            lifecycleGeneration,
+            target,
+            lifecycleSignal,
+            {
+              identityCursor: target.cursor,
+              persistWatermark: (_lcg, watermark) => { pendingWatermark = watermark; },
+            },
+          ),
+          workingCursor,
           localCgId,
-          lifecycleGeneration,
-          target,
-          lifecycleSignal,
-          {
-            identityCursor: target.cursor,
-            persistWatermark: (_lcg, watermark) => { pendingWatermark = watermark; },
-          },
-        ),
-        workingCursor,
-        localCgId,
-        target.onChainCgId,
-      );
+          target.onChainCgId,
+        );
+      } catch (err) {
+        // A rejected pass keeps what it proved (see `reconcileContextGraph`):
+        // its held completions and scan position move to the live cursor, so
+        // the retry neither re-verifies settled ordinals nor restarts the
+        // slice. The watermark and its persistence stay with a successful pass.
+        if (isTargetCurrent()) {
+          for (const [heldOrdinal, observedBlock] of workingCursor.ahead) {
+            if (heldOrdinal >= target.cursor.watermark && !target.cursor.ahead.has(heldOrdinal)) {
+              target.cursor.ahead.set(heldOrdinal, observedBlock);
+            }
+          }
+          target.cursor.scanOrdinal = Math.max(target.cursor.watermark, workingCursor.scanOrdinal);
+        }
+        throw err;
+      }
       if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
       if (result.reconciled > 0 || pendingWatermark !== undefined) {
         await this.store.flush?.({
@@ -4695,7 +4726,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           const peerId = peer.toString();
           return {
             peerId,
-            core: this.knownCorePeerIds.has(peerId),
+            core: this.peerCapabilityRegistry.supportsCore(peerId),
           };
         }),
       });
@@ -6765,6 +6796,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * same-finalized-block shortcut; a new block always reads again. `headBlock`
    * remains the independent cursor observation for the reorg-depth gate. See
    * {@link OrdinalOutcome} for the status contract.
+   *
+   * Local first: before any root, publisher or version read, the handler
+   * classifies what the store holds for the KA. A confirmed VM copy with
+   * nothing else to promote settles as `already`, and in the deferred mode an
+   * asset held nowhere locally goes straight to the exact-recovery queue, both
+   * without chain reads. Only local state whose outcome depends on the root
+   * takes the chain-backed path below.
    */
   async reconcileChainOrdinal(this: DKGAgent,
     localCgId: string,
@@ -6781,19 +6819,95 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return { status: 'skip' };
     }
 
+    const unresolvable = (err: unknown): OrdinalOutcome => {
+      // RPC lag / unknown kaId — leave for the next sweep.
+      this.log.info(ctx, `Phase B: ordinal ${ordinal} of cg ${onChainCgId} not resolvable yet: ${err instanceof Error ? err.message : String(err)}`);
+      return { status: 'pending' };
+    };
     let kaId: bigint;
-    let merkleRoot: Uint8Array;
-    let publisherAddress: string;
-    let finalizedSlotBlock: number | undefined;
+    let storageAddr: string | undefined;
     let ual: string;
-    let cacheKey = '';
     try {
       kaId = await this.chain.getContextGraphKCAt!(onChainCgId, BigInt(ordinal));
-      const storageAddr = this.chain.getDKGKnowledgeAssetsAddress
+      storageAddr = this.chain.getDKGKnowledgeAssetsAddress
         ? await this.chain.getDKGKnowledgeAssetsAddress()
         : undefined;
       if (!storageAddr) return { status: 'skip' };
       ual = buildReconciledKnowledgeAssetUal(this.chain.chainId, storageAddr, kaId);
+    } catch (err) {
+      return unresolvable(err);
+    }
+
+    const fh = this.getOrCreateFinalizationHandler();
+    // A core that holds only its StorageACK copy of a sub-graph KA has no
+    // lifecycle or VM metadata naming the sub-graph; its ledger does.
+    const ledgerSubGraphName = await this.storageAckLedgerSubGraphName(localCgId, ual);
+    const targetMayMaterialize = async (): Promise<boolean> => {
+      if (options.isTargetCurrent && !options.isTargetCurrent()) return false;
+      if (!options.revalidateTarget) return true;
+      try {
+        return await options.revalidateTarget();
+      } catch {
+        return false;
+      }
+    };
+
+    // Handlers without the classifier (older hosts, narrow test doubles) keep
+    // the chain-backed path for every ordinal.
+    const localCandidate: ChainReconcileLocalCandidate =
+      typeof fh.classifyChainReconcileLocalCandidate === 'function'
+        ? await fh.classifyChainReconcileLocalCandidate({
+          contextGraphId: localCgId,
+          onChainCgId: onChainCgId.toString(),
+          ual,
+          kaId,
+          batchId: kaId,
+          ...(ledgerSubGraphName ? { subGraphName: ledgerSubGraphName } : {}),
+        }, ctx)
+        : { kind: 'present' };
+    if (localCandidate.kind === 'confirmed-vm') {
+      // Trusted at the root the copy was confirmed at; see the classifier for
+      // how an update to it still reaches VM.
+      if (!(await targetMayMaterialize())) return { status: 'skip' };
+      this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
+      this.emitReplication({
+        contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
+        action: 'already', ordinal, kaId: kaId.toString(), ual, detail: 'local-vm',
+      });
+      return { status: 'already', blockNumber: headBlock ?? 0 };
+    }
+    if (localCandidate.kind === 'none' && options.deferActiveFetch) {
+      // Nothing local can match any root, so the chain-backed path could only
+      // answer `no-swm`. Queue the same exact-recovery target it would; the
+      // recovery batch keeps its rotation backoff, cooldown and peer gating.
+      // The inline mode keys its negative cache by the root and keeps reading it.
+      if (!(await targetMayMaterialize())) return { status: 'skip' };
+      this.emitReplication({
+        contextGraphId: localCgId, onChainCgId: onChainCgId.toString(),
+        action: 'defer', ordinal, kaId: kaId.toString(), ual, detail: 'no-local-copy',
+      });
+      return {
+        status: 'pending',
+        recovery: {
+          localCgId,
+          onChainCgId: onChainCgId.toString(),
+          ordinal,
+          ual,
+          merkleRoot: VM_RECONCILE_UNREAD_MERKLE_ROOT,
+          kaId: kaId.toString(),
+          reason: 'no-swm',
+        },
+      };
+    }
+    if (options.isTargetCurrent && !options.isTargetCurrent()) {
+      return { status: 'skip' };
+    }
+
+    let merkleRoot: Uint8Array;
+    let publisherAddress: string;
+    let finalizedSlotBlock: number | undefined;
+    let cacheKey = '';
+    try {
       finalizedSlotBlock = this.vmReconcileFinalizedBlockAtHead(headBlock);
       if (finalizedSlotBlock !== undefined) {
         const finalizedSlotKey = this.vmReconcileFinalizedSlotKey(
@@ -6855,18 +6969,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
         ? await this.chain.getLatestMerkleRootPublisher(kaId)
         : '') ?? '';
     } catch (err) {
-      // RPC lag / unknown kaId — leave for the next sweep.
-      this.log.info(ctx, `Phase B: ordinal ${ordinal} of cg ${onChainCgId} not resolvable yet: ${err instanceof Error ? err.message : String(err)}`);
-      return { status: 'pending' };
+      return unresolvable(err);
     }
 
     if (options.isTargetCurrent && !options.isTargetCurrent()) {
       return { status: 'skip' };
     }
-    const fh = this.getOrCreateFinalizationHandler();
-    // A core that holds only its StorageACK copy of a sub-graph KA has no
-    // lifecycle or VM metadata naming the sub-graph; its ledger does.
-    const ledgerSubGraphName = await this.storageAckLedgerSubGraphName(localCgId, ual);
     const reconcileInput = {
       contextGraphId: localCgId,
       onChainCgId: onChainCgId.toString(),
@@ -6880,13 +6988,29 @@ export class SwmHostModeMethods extends DKGAgentBase {
       ...(ledgerSubGraphName ? { subGraphName: ledgerSubGraphName } : {}),
     };
 
-    const targetMayMaterialize = async (): Promise<boolean> => {
-      if (options.isTargetCurrent && !options.isTargetCurrent()) return false;
-      if (!options.revalidateTarget) return true;
+    // The sweep fails its whole pass on the first ordinal that throws. A
+    // corrupt SWM head is one KA's local damage: report it and leave only this
+    // ordinal pending, so the rest of the graph keeps reconciling.
+    const reconcileKnowledgeAsset = async (): Promise<ChainReconciledKCOutcome | undefined> => {
       try {
-        return await options.revalidateTarget();
-      } catch {
-        return false;
+        return await fh.handleChainReconciledKC(reconcileInput, ctx);
+      } catch (err) {
+        if (!isKnowledgeAssetWorkspaceHeadCorruptError(err)) throw err;
+        this.log.warn(
+          ctx,
+          `Phase B: corrupt graph-scoped SWM head for ${ual} (ordinal ${ordinal} of cg ${onChainCgId}); `
+            + `leaving it for the next sweep: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        this.emitReplication({
+          contextGraphId: localCgId,
+          onChainCgId: onChainCgId.toString(),
+          action: 'defer',
+          ordinal,
+          kaId: kaId.toString(),
+          ual,
+          detail: 'corrupt-swm-head',
+        });
+        return undefined;
       }
     };
 
@@ -6895,7 +7019,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let activeFetchHadUsableResponse = false;
     const cleanMissPeerIds = new Set<string>();
     if (!(await targetMayMaterialize())) return { status: 'skip' };
-    let outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
+    let outcome = await reconcileKnowledgeAsset();
+    if (outcome === undefined) return { status: 'pending' };
     if (outcome === 'no-swm' || outcome === 'verified-vm-metadata-pending') {
       if (options.deferActiveFetch) {
         this.emitReplication({
@@ -6995,7 +7120,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
             break;
           }
           if (!(await targetMayMaterialize())) return { status: 'skip' };
-          outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
+          outcome = await reconcileKnowledgeAsset();
+          if (outcome === undefined) return { status: 'pending' };
         }
         if (outcome === 'no-swm') {
           swmState = await this.collectVmReconcileSwmCandidateState(localCgId);
@@ -7600,9 +7726,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Contact reliable Core hosts first. This serial loop still reaches
     // every candidate, but Cores first means faster time-to-first-data
     // and a better resume-seqno baseline before any flaky edge is tried.
-    const candidates = orderCatchupPeers(rawCandidates, undefined, false, this.knownCorePeerIds)
+    const candidates = orderCatchupPeers(rawCandidates, undefined, false, this.peerCapabilityRegistry.snapshotCorePeerIds())
       .map((p) => p.toString());
-    const coreCount = candidates.filter((id) => this.knownCorePeerIds.has(id)).length;
+    const coreCount = candidates.filter((id) => this.peerCapabilityRegistry.supportsCore(id)).length;
     this.log.info(
       ctx,
       `host-catchup peer order for "${contextGraphId}": cores=${coreCount} total=${candidates.length}`,

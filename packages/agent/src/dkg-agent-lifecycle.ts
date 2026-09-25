@@ -19,17 +19,17 @@ import {
 import { createHash } from 'node:crypto';
 import { setTimeout as waitForPeerEventTurn } from 'node:timers/promises';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
+import { createStorageACKRegistrationPlan } from './p2p/storage-ack-registrar.js';
 import { syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_NETWORK_IDENTITY,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
-  contextGraphSharedMemoryUri,
   contextGraphVerifiableMemoryUri, contextGraphVerifiableMemoryMetaUri,
   contextGraphMetaUri, assertionLifecycleUri, contextGraphAssertionUri,
   deriveCuratorDidFromCgId,
@@ -48,7 +48,7 @@ import {
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   validateSubGraphName,
-  Logger, createOperationContext, isKaPublishLifecycleDebugLoggingEnabled, isStorageACKDecline, sparqlString, escapeSparqlLiteral, isSafeIri,
+  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -150,7 +150,7 @@ import {
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
-  ACKCollector, StorageACKHandler, createStorageAckLifecycleObserver, withSignerRegistrationCache,
+  ACKCollector,
   VerifyCollector, VerifyProposalHandler, buildVerificationMetadata,
   resolveWorkspaceAgentRecipients,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity, isReservedSubject, computePrivateRootV10 as computePrivateRoot,
@@ -286,6 +286,7 @@ import {
 } from './swm/ciphertext-chunk-catchup.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
+import { connectedPeerIds as liveConnectedPeerIds } from './p2p/connected-peer-ids.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import {
   deleteSyncPageCheckpoint,
@@ -381,7 +382,7 @@ import {
 } from './sync/responder/sync-handler.js';
 import {
   runSelectedSharedMemoryRetry,
-  runSyncOnConnect,
+  runRegistrySyncOnConnect,
   SyncOnConnectPostSyncError,
   type SyncOnConnectOutcome,
   type SyncOnConnectPeerOutcome,
@@ -500,7 +501,6 @@ import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
-import { resolveStorageAckLifecycleAssetUalFromLocalSwm } from './storage-ack-lifecycle-identity.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 /**
@@ -592,7 +592,6 @@ import {
   SYNC_BACKOFF_BASE_MS,
   SYNC_BACKOFF_MAX_MS,
   SYNC_BACKOFF_JITTER,
-  STORAGE_ACK_REGISTRATION_RETRY_MS,
   JOIN_APPROVAL_RETRY_TICK_MS,
   MESSAGE_OUTBOX_TICK_MS,
   AGENT_PROFILE_HEARTBEAT_MS,
@@ -604,7 +603,6 @@ import {
   WARM_CORE_DIAL_TIMEOUT_MS,
   CIPHERTEXT_CHUNK_SIZE_BYTES,
   BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
-  MIN_STORAGE_ACK_REGISTRATION_RETRY_MS,
   TIMEOUT_SENTINEL,
   ON_CHAIN_PUBLISH_POLICY_CACHE_TTL_MS,
   SWM_SENDER_KEY_PENDING_DRAIN_LOG_CTX,
@@ -2112,6 +2110,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     if (this.started) return;
+    this.storageACKRegistrationRuntime.retireCurrentGeneration();
     this.chain.contextGraphAuthorityIndexSnapshots?.open();
     // Validate and capture the substrate before persistence/network startup.
     // Caller changes during awaits cannot introduce a late configuration error.
@@ -2406,6 +2405,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       log: this.log,
     });
     this.router = new ProtocolRouter(this.node, {
+      network,
       peerResolver,
       // Both admission phases — the probing full check and the cached-verdict
       // pre-read gate — installed as one policy from one coordinator; see
@@ -2628,20 +2628,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let bootChainIdentityUnresolvedTransient = false;
     const ensureACKCandidateWalletsRegistered = async (
       attemptCtx: OperationContext,
+      identityId: bigint,
     ): Promise<boolean> => {
-      if (onChainIdentityId <= 0n || typeof this.chain.ensureOperationalWalletsRegistered !== 'function') {
+      if (identityId <= 0n || typeof this.chain.ensureOperationalWalletsRegistered !== 'function') {
         return true;
       }
       try {
         const registration = await this.chain.ensureOperationalWalletsRegistered({
-          identityId: onChainIdentityId,
+          identityId,
           additionalAddresses: ackSignerCandidates.map((wallet) => wallet.address),
         });
         if (registration.registered.length > 0) {
           this.log.info(
             attemptCtx,
             `Registered ${registration.registered.length} operational wallet(s) on-chain for ` +
-            `identityId=${onChainIdentityId}`,
+            `identityId=${identityId}`,
           );
         }
         if (registration.taken.length > 0) {
@@ -2734,7 +2735,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
       if (onChainIdentityId > 0n) {
         if (effectiveRole === 'core') {
-          await ensureACKCandidateWalletsRegistered(ctx);
+          await ensureACKCandidateWalletsRegistered(ctx, onChainIdentityId);
         }
 
         this.publisher.setIdentityId(onChainIdentityId);
@@ -2750,415 +2751,41 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // protocol confuses peer-role detection based on protocol support.
     if (effectiveRole === 'core') {
       if (ackSignerCandidates.length > 0) {
-        let storageACKProtocolRegistered = false;
-        let storageACKFailoverInFlight = false;
-        const attemptStorageACKRegistration = async (
-          attemptCtx: OperationContext,
-          options: { repairWallets?: boolean; allowChainReresolution?: boolean } = {},
-        ): Promise<'registered' | 'retryable' | 'disabled'> => {
-          if (storageACKProtocolRegistered) return 'registered';
-          // #894 / Codex PR #901 (round 2): background identity re-resolution.
-          // If boot left the identity unresolved because of a transient chain
-          // failure (RPC timeout/unreachable), re-probe the chain — but ONLY on
-          // the scheduled retry path (`allowChainReresolution`), never on the
-          // first attempt awaited by `start()`. The boot path already spent its
-          // chain-timeout budget resolving identity; doing another bounded
-          // chain probe here would stack a third ~20s wait onto `start()` and
-          // blow the 45s readiness ceiling this fix exists to protect (Codex
-          // :1752). On the first attempt we return 'retryable' immediately and
-          // let the unref'd retry timer do the (background) re-resolution.
-          //
-          // We do NOT re-probe on a settled 0n (the flag stays false), so an
-          // intentional no-identity node doesn't spin the chain pointlessly.
-          if (
-            onChainIdentityId === 0n
-            && bootChainIdentityUnresolvedTransient
-            && options.allowChainReresolution === true
-          ) {
-            try {
-              let reresolved = await raceWithBootTimeout(
-                this.chain.getIdentityId(),
-                BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
-                'StorageACK identity re-resolution',
-              );
-              // Codex :1757: a brand-new core node may have hit the transient
-              // failure BEFORE `ensureProfile()` ever ran, so it has no profile
-              // to find. Re-probing `getIdentityId()` alone would return 0n
-              // forever and the node would never provision. Once the chain is
-              // reachable again, create the profile (core only) — mirroring the
-              // boot-time provisioning path. Codex round-3 :1685: provision via
-              // the guarded, un-raced helper so the mutating createProfile+stake
-              // tx runs to completion and is never double-submitted alongside a
-              // boot-path (or concurrent-retry) provisioning still in flight.
-              if (reresolved === 0n && effectiveRole === 'core') {
-                this.log.info(attemptCtx, `No on-chain identity after transient boot outage — creating profile and staking...`);
-                reresolved = await this.provisionProfileGuarded(attemptCtx);
-              }
-              if (reresolved > 0n) {
-                onChainIdentityId = reresolved;
-                bootChainIdentityUnresolvedTransient = false;
-                this.publisher.setIdentityId(onChainIdentityId);
-                this.log.info(
-                  attemptCtx,
-                  `Recovered on-chain identity=${onChainIdentityId} for StorageACK after a transient boot-time chain failure`,
-                );
-              }
-            } catch (err) {
-              // Codex PR #901 round-4 :1838: mirror the boot-path :1714 gate on
-              // the retry path. If the chain came back but provisioning then
-              // failed DETERMINISTICALLY (insufficient funds / revert / admin),
-              // keeping the transient flag set would re-run `ensureProfile()`
-              // every interval forever. Reclassify: permanent → clear the flag
-              // so the terminal branch below returns 'disabled' (surface once,
-              // stop scheduling); transient → keep retrying.
-              if (!isTransientBootChainError(err)) {
-                bootChainIdentityUnresolvedTransient = false;
-                this.log.warn(
-                  attemptCtx,
-                  `V10 StorageACK identity provisioning failed permanently — disabling (no further retries): ` +
-                  `${err instanceof Error ? err.message : String(err)}`,
-                );
-              } else {
-                this.log.warn(
-                  attemptCtx,
-                  `StorageACK identity re-resolution failed (chain still unreachable?), will retry: ` +
-                  `${err instanceof Error ? err.message : String(err)}`,
-                );
-              }
-            }
-          }
-          if (onChainIdentityId > 0n) {
-            const registrationSucceeded = options.repairWallets === false
-              ? true
-              : await ensureACKCandidateWalletsRegistered(attemptCtx);
-            const signerResolution = await this.resolveConfirmedACKSigner(
-              onChainIdentityId,
-              ackSignerCandidates,
-              attemptCtx,
-            );
-            const ackSignerWallet = signerResolution.wallet;
-            if (!ackSignerWallet) {
-              return (registrationSucceeded && !signerResolution.retryable) ? 'disabled' : 'retryable';
-            }
-
-            // The V10 ACK digest includes a (chainid, kav10Address) H5 prefix
-            // per KnowledgeAssetsV10.sol:362-373. Resolve both from the chain
-            // adapter BEFORE constructing the handler so the handler can sign
-            // digests that actually verify on-chain. The handler itself has
-            // no provider-backed dependency, so both values are passed in at
-            // construction.
-            const chainIdForHandler = typeof this.chain.getEvmChainId === 'function'
-              ? await this.chain.getEvmChainId()
-              : undefined;
-            const kav10AddressForHandler = typeof this.chain.getKnowledgeAssetsLifecycleAddress === 'function'
-              ? await this.chain.getKnowledgeAssetsLifecycleAddress()
-              : undefined;
-            if (chainIdForHandler === undefined || kav10AddressForHandler === undefined) {
-              this.log.warn(
-                attemptCtx,
-                `Skipping V10 StorageACK handler: chain adapter does not expose ` +
-                `getEvmChainId() + getKnowledgeAssetsLifecycleAddress(); handler cannot build the ` +
-                `H5-prefixed ACK digest that KnowledgeAssetsV10 verifies on-chain`,
-              );
-              return 'disabled';
-            }
-
-            const ackHandler = new StorageACKHandler(this.store, {
-              nodeRole: effectiveRole,
-              nodeIdentityId: onChainIdentityId,
-              signerWallet: ackSignerWallet,
-              contextGraphSharedMemoryUri,
-              chainId: chainIdForHandler,
-              kav10Address: kav10AddressForHandler,
-              workspaceWriteLocks: this.writeLocks,
-              resolveDurableRootAtomicCompanion: (input) => {
-                if (this.config.dataDir === undefined) return;
-                return prepareRfc64LateLegacySwmBoundaryV1(
-                  this,
-                  input.contextGraphId,
-                  input.kaUal,
-                  input.shareOperationId,
-                  input.assertionVersion,
-                );
-              },
-              ackHandlerDeadlineMs: this.config.storageAckTiming.handlerDeadlineMs,
-              // Codex review (round 2) on PR #727: must NOT collapse to a
-              // plain `gossipWireIdFor` because `PublishIntent.swmGraphId`
-              // may be absent on a chunked V2 intent (the handler then
-              // falls back to the numeric `cgId`). Pass through
-              // `canonicalChunkStoreCgIdOrNull` so numeric ids resolve via
-              // the local on-chain map, and unknown shapes return null →
-              // handler widens to wildcard `GRAPH ?g` instead of pinning
-              // to a fabricated keccak-of-decimal-string.
-              normalizeContextGraphIdForChunkStore: (rawCgId: string) =>
-                this.canonicalChunkStoreCgIdOrNull(rawCgId),
-              isCgCurated: (cgId: string) => this.resolveCgCurationForAck(cgId, ctx),
-              // StorageACK finality gate: a public ACK is signed only after
-              // this core durably commits to promote the KA into its VM.
-              ensureVmPromotion: (request) => this.ensureStorageAckVmPromotion(request),
-              // An update ACK waiting on the version it replaces: promote
-              // that version now so the publisher's retry is signed.
-              onPriorVersionAwaitingPromotion: (request) => this.promoteStorageAckPriorVersion(request),
-              readKnowledgeAssetRootCount: (kaUal, signal) =>
-                this.readStorageAckKnowledgeAssetRootCount(kaUal, signal),
-              pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS,
-              // Testnet dead-air fix: `isOperationalWalletRegistered` is a
-              // LIVE chain read the handler runs on EVERY inbound StorageACK.
-              // With the raw wiring, one degraded shared RPC made the lookup
-              // throw on every ACK on every core simultaneously — the whole
-              // network stopped ACKing at once (the 21-attempts-all-
-              // no_response incident). The cache wrapper serves the last
-              // good verdict for 30s (no RPC per ACK in steady state) and
-              // keeps serving it up to 5 min through an RPC outage;
-              // registration changes are operator-driven and rare, so that
-              // staleness window is safe. Both verdicts are cached — a
-              // known-unregistered signer shouldn't hammer the RPC either.
-              // The closure state lives (and dies) with this handler
-              // registration attempt, so a signer failover / re-register
-              // always starts from a fresh cache.
-              isSignerRegistered: withSignerRegistrationCache(
-                async () => {
-                  const isOperationalWalletRegistered = this.chain.isOperationalWalletRegistered;
-                  if (typeof isOperationalWalletRegistered !== 'function') return false;
-                  return isOperationalWalletRegistered.call(
-                    this.chain,
-                    onChainIdentityId,
-                    ackSignerWallet.address,
-                  );
-                },
-                {
-                  onServedStale: (err, staleValue) => {
-                    this.log.debug?.(
-                      attemptCtx,
-                      `V10 StorageACK signer registration lookup failed; serving cached ` +
-                      `verdict=${staleValue} for ${ackSignerWallet.address}: ` +
-                      `${err instanceof Error ? err.message : String(err)}`,
-                    );
-                  },
-                },
-              ),
-              onSignerUnregistered: () => {
-                if (storageACKFailoverInFlight) return;
-                storageACKFailoverInFlight = true;
-                storageACKProtocolRegistered = false;
-                this.storageAckHandlerRegistered = false;
-                // rc.9 PR-11: messenger.register stored the handler
-                // in the substrate's wrapper which delegates to
-                // router.register under the hood (see Messenger.register
-                // implementation), so router.unregister still removes it.
-                this.router.unregister(PROTOCOL_STORAGE_ACK);
-                this.router.unregister(PROTOCOL_STORAGE_ACK_V2);
-                this.router.unregister(PROTOCOL_STORAGE_UPDATE_ACK);
-                this.router.unregister(PROTOCOL_STORAGE_UPDATE_ACK_V2);
-                this.log.warn(
-                  attemptCtx,
-                  `Unregistered V10 StorageACK handler: signer ${ackSignerWallet.address} ` +
-                  `is no longer confirmed on-chain for identity=${onChainIdentityId}`,
-                );
-                attemptStorageACKRegistration(
-                  createOperationContext('connect'),
-                  { repairWallets: false },
-                )
-                  .then((result) => {
-                    if (result === 'retryable') {
-                      scheduleStorageACKRegistrationRetry({ repairWallets: false });
-                    }
-                  })
-                  .catch((err: unknown) => {
-                    this.log.warn(
-                      attemptCtx,
-                      `V10 StorageACK signer failover failed: ` +
-                      `${err instanceof Error ? err.message : String(err)}`,
-                    );
-                    scheduleStorageACKRegistrationRetry({ repairWallets: false });
-                  })
-                  .finally(() => {
-                    storageACKFailoverInFlight = false;
-                  });
-              },
-              onSignerRegistrationLookupFailed: (err) => {
-                this.log.warn(
-                  attemptCtx,
-                  `V10 StorageACK signer registration lookup failed for ${ackSignerWallet.address}; ` +
-                  `keeping handler active: ${err instanceof Error ? err.message : String(err)}`,
-                );
-              },
-              onDecline: (details) => {
-                this.recordStorageAckDecline(details.code);
-                const syncPressure = getSyncBackpressureSnapshot(resolveAgentSyncGlobalBackpressure(this.config));
-                const syncPressureLabel =
-                  `syncGlobalInflight=${syncPressure.inflight} ` +
-                  `syncGlobalQueued=${syncPressure.queued} ` +
-                  `syncGlobalLimit=${syncPressure.limit ?? 'unbounded'} ` +
-                  `syncGlobalQueueLimit=${syncPressure.queueLimit ?? 'unbounded'} ` +
-                  `syncQueuedElevated=${syncPressure.queuedByPriorityClass.elevated} ` +
-                  `syncQueuedDefault=${syncPressure.queuedByPriorityClass.default} ` +
-                  `syncQueuedDeprioritized=${syncPressure.queuedByPriorityClass.deprioritized} ` +
-                  `syncOldestQueuedAgeMs=${syncPressure.oldestQueuedAgeMs}`;
-                this.log.warn(
-                  attemptCtx,
-                  `V10 StorageACK declined: code=${details.code} ` +
-                  `cg=${details.contextGraphId} reason=${details.message} ${syncPressureLabel}`,
-                );
-              },
-              onStorageAckDecision: createStorageAckLifecycleObserver({
-                logger: this.log,
-                localPeerId: () => this.peerId,
-                localNodeIdentityId: () => onChainIdentityId,
-                shouldObserve: (decision) =>
-                  isKaPublishLifecycleDebugLoggingEnabled() || isStorageACKDecline(decision.ack),
-                detailForDecision: (decision) =>
-                  isStorageACKDecline(decision.ack) ? 'summary' : 'debug',
-                resolveAssetUalForPublishIntent: ({ intent }) =>
-                  resolveStorageAckLifecycleAssetUalFromLocalSwm({
-                    store: this.store,
-                    chain: this.chain,
-                    intent,
-                  }),
-              }),
-              // PR5 ACK-provenance — bind to the agent's host-mode
-              // bookkeeping so every signed ACK carries which of the
-              // four LU-6 Phase B discovery paths brought this CG's
-              // hosting state up. Resolver tries each candidate id
-              // because the two consulted maps are keyed differently:
-              // `sharedMemoryGossipRegistered` (member-mode) uses the
-              // CALLER-supplied cleartext id verbatim, while
-              // `swmHostModeSubscribed` (host-mode) is canonical-keyed
-              // by the wire-form hash (see `getSwmSubscriptionSource`
-              // and `canonicalSwmHostModeKey`).
-              //
-              // PR5 (review fix #1) + PR-B Codex #672 review
-              // `id=3302086589`: `getSwmSubscriptionSource` now
-              // canonicalises each candidate internally before the
-              // host-mode lookup, so on the host-only paths a single
-              // pass through any of the four shapes (numeric / cleartext
-              // / pre-canonical / hash) lands. We still hand it both
-              // the cleartext and the pre-computed wire forms so the
-              // MEMBER-mode `has(id)` check (which keys by cleartext)
-              // gets the cleartext candidate without the canonicaliser
-              // having to round-trip it. Variadic + internal `seen` Set
-              // dedups, so over-passing is cheap and order-independent.
-              getSubscriptionSourceForCg: (cgId, swmGraphId) => {
-                // Phase D core-hosted recording is no longer started here: the
-                // `ensureVmPromotion` finality gate records it durably BEFORE
-                // a public ACK is signed.
-                const wireFromCgId = cgId ? this.gossipWireIdFor(cgId) : undefined;
-                const wireFromSwmGraphId = swmGraphId && swmGraphId !== cgId
-                  ? this.gossipWireIdFor(swmGraphId)
-                  : undefined;
-                return this.getSwmSubscriptionSource(
-                  cgId,
-                  swmGraphId,
-                  wireFromCgId,
-                  wireFromSwmGraphId,
-                );
-              },
-            }, this.eventBus);
-            // rc.9 PR-11: migrated onto the Universal Messenger
-            // substrate (wire prefix /dkg/10.0.1/storage-ack).
-            // messenger.register handles envelope decode + receiver
-            // dedup; ackHandler's signature stays the same.
-            this.messenger.register(PROTOCOL_STORAGE_ACK, async (data, peerIdStr) => {
-              const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-              return ackHandler.handler(data, peerId);
-            });
-            // OT-RFC-38 LU-11 / OT-RFC-39 — V2 protocol id. Same handler
-            // instance, distinct libp2p protocol. Publishers negotiate V2 for
-            // chunked ciphertext commitments and folded-private field-20
-            // commitments, so V1-only cores never receive intents whose new
-            // fields they would silently ignore. The handler dispatches on the
-            // decoded intent shape internally.
-            this.messenger.register(PROTOCOL_STORAGE_ACK_V2, async (data, peerIdStr) => {
-              const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-              return ackHandler.handler(data, peerId);
-            });
-            // V10 UPDATE StorageACK — same handler instance + config
-            // (signer, chainId, kav10Address, SWM resolver, curation
-            // oracle, signer-registration gate, provenance hook), distinct
-            // libp2p protocol. Carries an `UpdateIntent` and binds the
-            // 13-field UPDATE ACK digest. Pre-update cores never register
-            // this, so an UPDATE-aware publisher gracefully falls back
-            // (the dial fails as peer-unreachable against the quorum).
-            this.messenger.register(PROTOCOL_STORAGE_UPDATE_ACK, async (data, peerIdStr) => {
-              const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-              return ackHandler.updateHandler(data, peerId);
-            });
-            this.messenger.register(PROTOCOL_STORAGE_UPDATE_ACK_V2, async (data, peerIdStr) => {
-              const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-              return ackHandler.updateHandler(data, peerId);
-            });
-            storageACKProtocolRegistered = true;
-            this.storageAckHandlerRegistered = true;
-            this.clearStorageACKRegistrationRetry();
-            this.log.info(
-              attemptCtx,
-              `Registered V10 StorageACK handler (identity=${onChainIdentityId}, signer=${ackSignerWallet.address})`,
-            );
-            return 'registered';
-          } else if (bootChainIdentityUnresolvedTransient) {
-            // #894 / Codex PR #901: identity is still 0n only because the
-            // chain was unreachable at boot and the re-resolution above hasn't
-            // recovered it yet. This is recoverable, so report 'retryable' —
-            // the scheduled retry keeps re-probing and registers ACK once the
-            // RPC returns, instead of leaving a core node permanently
-            // un-advertised until restart.
-            this.log.warn(attemptCtx, `Deferring V10 StorageACK handler registration — on-chain identity not yet resolved (transient chain outage at boot); will retry`);
-            return 'retryable';
-          } else {
-            this.log.warn(attemptCtx, `Skipping V10 StorageACK handler registration — identity not yet provisioned`);
-            return 'disabled';
-          }
-          return 'disabled';
-        };
-
-        // Codex PR #901 round-4 :2106: `storageAckRegistrationRetryMs` is a
-        // public config field fed straight into `setTimeout`. Clamp it to a
-        // sane floor so a 0 / negative / NaN value can't collapse the retry into
-        // a tight loop that hammers the RPC and floods the log while the node is
-        // unhealthy. A non-finite or too-small value falls back to the floor.
-        const requestedRetryMs = this.config.storageAckRegistrationRetryMs;
-        const storageACKRegistrationRetryMs =
-          typeof requestedRetryMs === 'number' && Number.isFinite(requestedRetryMs)
-            ? Math.max(requestedRetryMs, MIN_STORAGE_ACK_REGISTRATION_RETRY_MS)
-            : STORAGE_ACK_REGISTRATION_RETRY_MS;
-        const scheduleStorageACKRegistrationRetry = (options: { repairWallets?: boolean; allowChainReresolution?: boolean } = {}) => {
-          if (this.storageACKRegistrationRetryTimer || storageACKProtocolRegistered) return;
-          this.log.warn(ctx, `V10 StorageACK handler registration will retry every ${storageACKRegistrationRetryMs}ms`);
-          this.storageACKRegistrationRetryTimer = setTimeout(() => {
-            this.storageACKRegistrationRetryTimer = null;
-            if (!this.started || storageACKProtocolRegistered || this.storageACKRegistrationRetryInFlight) return;
-            this.storageACKRegistrationRetryInFlight = true;
-            attemptStorageACKRegistration(createOperationContext('connect'), options)
-              .then((result) => {
-                if (result === 'retryable') scheduleStorageACKRegistrationRetry(options);
-              })
-              .catch((err: unknown) => {
-                this.log.warn(
-                  ctx,
-                  `V10 StorageACK handler registration retry failed: ` +
-                  `${err instanceof Error ? err.message : String(err)}`,
-                );
-                scheduleStorageACKRegistrationRetry(options);
-              })
-              .finally(() => {
-                this.storageACKRegistrationRetryInFlight = false;
-              });
-          }, storageACKRegistrationRetryMs);
-          if (this.storageACKRegistrationRetryTimer.unref) this.storageACKRegistrationRetryTimer.unref();
-        };
-
-        try {
-          // The first attempt is awaited by `start()`, so it must NOT do a
-          // blocking chain re-probe (Codex :1752). It returns 'retryable'
-          // immediately for a transient-0n identity; the scheduled retry then
-          // runs the background re-resolution (+ ensureProfile for a brand-new
-          // core node) with `allowChainReresolution: true`.
-          const result = await attemptStorageACKRegistration(ctx);
-          if (result === 'retryable') scheduleStorageACKRegistrationRetry({ allowChainReresolution: true });
-        } catch (err) {
-          this.log.warn(ctx, `Skipping V10 StorageACK handler: ${err instanceof Error ? err.message : String(err)}`);
-          scheduleStorageACKRegistrationRetry({ allowChainReresolution: true });
-        }
+        await this.storageACKRegistrationRuntime.startGeneration(createStorageACKRegistrationPlan({
+          store: this.store,
+          publisher: this.publisher,
+          eventBus: this.eventBus,
+          messenger: this.messenger,
+          localPeerId: () => this.peerId,
+          provisionProfileGuarded: (attemptCtx) => this.provisionProfileGuarded(attemptCtx),
+          resolveConfirmedACKSigner: (identityId, candidates, attemptCtx) =>
+            this.resolveConfirmedACKSigner(identityId, candidates, attemptCtx),
+          canonicalChunkStoreCgIdOrNull: (id) => this.canonicalChunkStoreCgIdOrNull(id),
+          resolveCgCurationForAck: (id) => this.resolveCgCurationForAck(id, ctx),
+          ensureStorageAckVmPromotion: (request) => this.ensureStorageAckVmPromotion(request),
+          promoteStorageAckPriorVersion: (request) => this.promoteStorageAckPriorVersion(request),
+          readStorageAckKnowledgeAssetRootCount: (kaUal, signal) =>
+            this.readStorageAckKnowledgeAssetRootCount(kaUal, signal),
+          recordStorageAckDecline: (code) => this.recordStorageAckDecline(code),
+          gossipWireIdFor: (id) => this.gossipWireIdFor(id),
+          getSwmSubscriptionSource: (...ids) => this.getSwmSubscriptionSource(...ids),
+          prepareDurableRootAtomicCompanion: (input) => prepareRfc64LateLegacySwmBoundaryV1(
+            this, input.contextGraphId, input.kaUal, input.shareOperationId, input.assertionVersion,
+          ),
+          chain: this.chain,
+          config: this.config,
+          log: this.log,
+          writeLocks: this.writeLocks,
+          bootCtx: ctx,
+          signerCandidates: ackSignerCandidates,
+          initialIdentityId: onChainIdentityId,
+          transientIdentityUnresolved: bootChainIdentityUnresolvedTransient,
+          pendingAckTxWindowMs: DKGAgentBase.STORAGE_ACK_PENDING_TX_WINDOW_MS,
+          isRegistered: () => this.storageAckHandlerRegistered,
+          isStarted: () => this.started,
+          ensureWalletsRegistered: ensureACKCandidateWalletsRegistered,
+          syncPressureSnapshot: () => getSyncBackpressureSnapshot(resolveAgentSyncGlobalBackpressure(this.config)),
+        }));
       } else if (typeof this.chain.signACKDigest === 'function') {
         this.log.info(ctx, `V10 StorageACK: adapter has signACKDigest but no extractable key — handler registration deferred until callback signing is supported`);
       }
@@ -4025,6 +3652,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         .getPeers()
         .some((p) => p.toString() === remotePeer);
       if (stillConnected) return;
+      this.peerCapabilityRegistry.forget(remotePeer);
       this.closeRfc64CatalogConnectionReplaySessionV1(remotePeer);
       peerEvents.forgetSkippedNoSync(remotePeer);
       this.lastSyncDisconnectedAt.set(remotePeer, Date.now());
@@ -4515,9 +4143,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   clearStorageACKRegistrationRetry(this: DKGAgent): void {
-    if (!this.storageACKRegistrationRetryTimer) return;
-    clearTimeout(this.storageACKRegistrationRetryTimer);
-    this.storageACKRegistrationRetryTimer = null;
+    this.storageACKRegistrationRuntime.clearRetry();
   }
 
   syncOnConnectDisconnectBoundary(this: DKGAgent, remotePeer: string, now = Date.now()): number {
@@ -4527,8 +4153,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   clearNetworkRejectedPeerState(this: DKGAgent, remotePeer: string): void {
-    this.knownCorePeerIds.delete(remotePeer);
-    this.knownCorePeerIdsV2.delete(remotePeer);
+    this.peerCapabilityRegistry.forget(remotePeer);
     this.peerSyncSession.clearPeer(remotePeer);
     this.lastSyncDisconnectedAt.delete(remotePeer);
     this.selectedSwmBootstrapAdmission.clear(remotePeer);
@@ -4921,13 +4546,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           : new Set<string>(),
       )
     );
-    return runSyncOnConnect({
+    return runRegistrySyncOnConnect({
       remotePeer,
       syncingPeers: session,
       signal,
       getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
-      knownCorePeerIds: this.knownCorePeerIds,
-      knownCorePeerIdsV2: this.knownCorePeerIdsV2,
+      peerCapabilities: this.peerCapabilityRegistry,
       getSyncContextGraphs: () => this.config.syncContextGraphs ?? [],
       getDurableSyncContextGraphs: () => automaticDurableSyncContextGraphs(
         this.config.syncContextGraphs ?? [],
@@ -4944,7 +4568,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // territory. An Edge that was pinned as the complete SWM source must
         // not start a duplicate durable pull before its useful SWM transfer;
         // unrelated Edge peers should do neither plane in the automatic sweep.
-        return completeSwmProviders.length === 0 || this.knownCorePeerIds.has(remotePeer);
+        return completeSwmProviders.length === 0 || this.peerCapabilityRegistry.supportsCore(remotePeer);
       }),
       syncFromPeer: async (peerId, contextGraphIds) => {
         const requestedContextGraphIds = contextGraphIds
@@ -5358,25 +4982,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const peerEvents = this.peerSyncSession;
     if (!peerEvents.checkpoint()) return;
     if (peerId === this.node.libp2p.peerId.toString()) return;
+    if (!liveConnectedPeerIds(this.node.libp2p).has(peerId)) return;
     // #1093: keep the confirmed-core set fresh from `peer:update` too.
     // `runSyncOnConnect` reads the protocol list exactly once, racing
     // identify — a core peer whose identify completed late was never
-    // re-classified, leaving `knownCorePeerIds` permanently partial and
+    // re-classified, leaving core-role evidence permanently partial and
     // the ACK candidate pool capped below quorum. Identify delivers the
-    // complete protocol list, so add-on-present is always safe; we only
-    // add (never delete) here because some `peer:update` events fire
-    // with a not-yet-populated list and must not evict a known core.
-    if (protocols.includes(PROTOCOL_STORAGE_ACK)) {
-      this.knownCorePeerIds.add(peerId);
-    }
-    // V2 is a strict compatibility gate for field-20 folded-private ACKs. Keep
-    // empty-list races non-destructive, but clear stale V2 membership when
-    // identify delivers a populated protocol list without the V2 ACK protocol.
-    if (protocols.includes(PROTOCOL_STORAGE_ACK_V2)) {
-      this.knownCorePeerIdsV2.add(peerId);
-    } else if (protocols.length > 0) {
-      this.knownCorePeerIdsV2.delete(peerId);
-    }
+    // complete protocol list, so add-on-present is safe. Retain
+    // classification on an empty identify list, but revoke it when a
+    // populated update no longer advertises the core-only ACK protocol.
+    this.peerCapabilityRegistry.observe(peerId, { source: 'peer-update', protocols: protocols });
     if (!peerEvents.isSkippedNoSync(peerId)) return;
     if (!syncOnConnectEnabled(this.config)) return;
     if (!protocols.includes(PROTOCOL_SYNC)) return;
@@ -8063,7 +7678,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const peerPriorityRanks = new Map<string, number>();
       for (const peer of orderedPeers) {
         const peerId = peer.toString();
-        const rank = peerId === preferredPeerId ? 2 : this.knownCorePeerIds.has(peerId) ? 1 : 0;
+        const rank = peerId === preferredPeerId ? 2 : this.peerCapabilityRegistry.supportsCore(peerId) ? 1 : 0;
         if (rank > 0) peerPriorityRanks.set(peerId, rank);
       }
       const graphOwnerSelectsRecoveryPeer = sourceOverride === 'vm-recovery'
@@ -8071,7 +7686,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const peers = graphOwnerSelectsRecoveryPeer
         ? orderedPeers
         : this.selectCatchupPeerWindow(orderedPeers, { ...options, peerPriorityRanks });
-      const coreCount = orderedPeers.filter((p) => this.knownCorePeerIds.has(p.toString())).length;
+      const coreCount = orderedPeers.filter((p) => this.peerCapabilityRegistry.supportsCore(p.toString())).length;
       this.log.info(
         ctx,
         `catchup peer order for "${contextGraphId}": preferred=${preferredPeerId ?? 'none'} cores=${coreCount} total=${orderedPeers.length} selected=${peers.length}`
@@ -8941,7 +8556,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     preferredPeerId?: string,
     privateOnly = false,
   ): Array<{ toString(): string }> {
-    return orderCatchupPeers(peers, preferredPeerId, privateOnly, this.knownCorePeerIds);
+    return orderCatchupPeers(peers, preferredPeerId, privateOnly, this.peerCapabilityRegistry.snapshotCorePeerIds());
   }
 
   /**

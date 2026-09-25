@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-agent",
-  "version": "10.0.18",
+  "version": "10.0.19",
   "type": "module",
   "engines": {
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
@@ -51,6 +51,7 @@
     "./dist/rfc64/catalog-replay-generation-v1.js": null,
     "./dist/rfc64/catalog-replay-recovery-runtime-v1.js": null,
     "./dist/rfc64/catalog-replay-snapshot-runtime-v1.js": null,
+    "./dist/rfc64/catalog-operational-applied-heads-v1.js": null,
     "./dist/rfc64/catalog-runtime-v1.js": null,
     "./dist/rfc64/background-work-dispatcher-v1.js": null,
     "./dist/rfc64/supervisor-status-v1.js": null,

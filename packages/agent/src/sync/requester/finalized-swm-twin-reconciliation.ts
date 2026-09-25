@@ -9,14 +9,18 @@ import {
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import {
+  KnowledgeAssetWorkspaceHeadCorruptError,
   computeFlatKCRootV10,
   resolvePublishedKnowledgeAssetWorkspaceHead,
   swmKaWriteLockKey,
   withKeyedLocks,
+  workspaceKnowledgeAssetHeadSubject,
   workspacePublicQuadsDigest,
+  type PublishedKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
 import {
   GraphManager,
+  deleteByPatternWithoutCount,
   invalidateSwmMaterializationWitness,
   type Quad,
   type TripleStore,
@@ -83,6 +87,8 @@ export function createRetireConfirmedGraphScopedSwmTwinIfOrphaned(params: {
   readonly store: TripleStore;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly retire: RetireConfirmedGraphScopedSwmTwinIfOrphaned;
+  /** Reports a torn head removed because the confirmed VM copy supersedes it. */
+  readonly onTornHeadRemoved?: (message: string, ctx: OperationContext) => void;
 }): RetireConfirmedGraphScopedSwmTwinIfOrphaned {
   const graphManager = new GraphManager(params.store);
   return async (candidate, ctx) => {
@@ -92,19 +98,81 @@ export function createRetireConfirmedGraphScopedSwmTwinIfOrphaned(params: {
       candidate.ual,
     );
     await withKeyedLocks(params.writeLocks, [lockKey], async () => {
-      const currentHead = await resolvePublishedKnowledgeAssetWorkspaceHead({
-        store: params.store,
-        graphManager,
-        contextGraphId: candidate.contextGraphId,
-        kaUal: candidate.ual,
-        subGraphName: candidate.subGraphName,
-      });
+      let currentHead: PublishedKnowledgeAssetWorkspaceHead | undefined;
+      try {
+        currentHead = await resolvePublishedKnowledgeAssetWorkspaceHead({
+          store: params.store,
+          graphManager,
+          contextGraphId: candidate.contextGraphId,
+          kaUal: candidate.ual,
+          subGraphName: candidate.subGraphName,
+        });
+      } catch (error) {
+        if (!(error instanceof KnowledgeAssetWorkspaceHeadCorruptError)) throw error;
+        // A torn head that the verified VM copy supersedes is residue, not a
+        // live SWM asset: remove it and retire the twin like a headless one.
+        // Any other corrupt head stays in place for the caller to report.
+        const removedVersion = await deleteSupersededTornHead(params.store, candidate);
+        if (removedVersion === undefined) throw error;
+        params.onTornHeadRemoved?.(
+          `Removed torn graph-scoped SWM head for ${candidate.ual} (head version `
+            + `${removedVersion}, no share operation) superseded by confirmed VM version `
+            + `${candidate.assertionVersion}`,
+          ctx,
+        );
+      }
       // Any current mutable head owns the stable per-KA SWM graph. Preserve it
       // regardless of version; the verified VM copy remains independently safe.
       if (currentHead !== undefined) return;
       await params.retire(candidate, ctx);
     });
   };
+}
+
+/**
+ * Delete a torn SWM head the confirmed VM copy supersedes and return its
+ * version, or `undefined` when the head is not provably that residue. Torn:
+ * the head names no share operation, so no reader can resolve it and it owns
+ * nothing. Superseded: it certifies exactly one assertion version, no newer
+ * than the verified VM copy, so no unpublished SWM work can hide behind it.
+ * The caller must hold the per-KA SWM write lock.
+ */
+async function deleteSupersededTornHead(
+  store: TripleStore,
+  candidate: Readonly<ConfirmedGraphScopedSwmOrphanCandidate>,
+): Promise<bigint | undefined> {
+  const metaGraph = contextGraphSharedMemoryMetaUri(
+    candidate.contextGraphId,
+    candidate.subGraphName?.trim() || undefined,
+  );
+  const headSubject = workspaceKnowledgeAssetHeadSubject(candidate.ual);
+  const rows = await store.query(
+    `SELECT ?p ?o WHERE { GRAPH <${assertSafeIri(metaGraph)}> { `
+    + `<${assertSafeIri(headSubject)}> ?p ?o } }`,
+    { priority: 'background', source: 'agent.durableSync.finalizedSwmTwin.readTornHead' },
+  );
+  if (rows.type !== 'bindings' || rows.bindings.length === 0) return undefined;
+  const versions = new Set<bigint>();
+  for (const row of rows.bindings) {
+    if (row['p'] === `${DKG}shareOperationId`) return undefined;
+    if (row['p'] !== `${DKG}assertionVersion`) continue;
+    const version = parseInteger(row['o']);
+    if (version === null) return undefined;
+    versions.add(version);
+  }
+  const [version] = versions;
+  if (
+    versions.size !== 1
+    || version === undefined
+    || version < 1n
+    || version > candidate.assertionVersion
+  ) return undefined;
+  await deleteByPatternWithoutCount(
+    store,
+    { graph: metaGraph, subject: headSubject },
+    { priority: 'background', source: 'agent.durableSync.finalizedSwmTwin.deleteTornHead' },
+  );
+  return version;
 }
 
 /**

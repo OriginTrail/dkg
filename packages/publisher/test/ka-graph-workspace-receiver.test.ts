@@ -178,13 +178,17 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
     });
   });
 
-  it('defers a newer share while the head is a signed StorageACK copy not yet in VM', async () => {
+  it.each([
+    ['head points at the signed copy', 'rootless-op-1'],
+    ['head preserves the queued share', 'storage-ack-signed-copy'],
+  ])('defers a newer share while %s and the copy is not yet in VM', async (_case, signedOperationId) => {
     const store = new OxigraphStore();
     const handler = new SharedMemoryHandler(store, new TypedEventBus());
     expect((await handler.handle(v2Request(), PEER_ID)).applied).toBe(true);
-    // This node signed a StorageACK over the v1 copy that is now the head.
+    // A local self-ACK keeps the queued head but records a different signed
+    // copy in the ledger; both shapes must retain the copy until promotion.
     await store.insert(storageAckLedgerEntryQuads({
-      operationSubject: workspaceOperationSubject(CONTEXT_GRAPH, 'rootless-op-1'),
+      operationSubject: workspaceOperationSubject(CONTEXT_GRAPH, signedOperationId),
       namespace: CONTEXT_GRAPH,
       metaGraph: new GraphManager(store).sharedMemoryMetaUri(CONTEXT_GRAPH),
       contextGraphId: '42',

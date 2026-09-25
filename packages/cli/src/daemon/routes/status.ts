@@ -129,7 +129,7 @@ import { buildRelayStatusBlock } from '../relay-status-block.js';
 import { fetchAllEntries, resolveRegistryConfig } from '../../integrations/registry-client.js';
 import type { IntegrationEntry, TrustTier } from '../../integrations/schema.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { loadTokens, httpAuthGuard, extractBearerToken, canAdministerNode } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -344,7 +344,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import { actorFromRequestContext, type RequestContext } from './context.js';
 
 // In-process cache for the dkg-integrations registry. Sidebar polls
 // open/close and 60s refresh would otherwise hit GitHub on every tick;
@@ -495,6 +495,7 @@ function projectRfc64SelectedPublicSyncStatus(
   agent: DKGAgent,
   networkDefaultContextGraphs: readonly string[],
   catalogBackedContextGraphs: readonly string[],
+  isNodeAdmin: boolean,
 ) {
   // This is the effective requested sync scope, not proof that every listed
   // graph is public. Runtime classification still decides whether a graph uses
@@ -503,10 +504,18 @@ function projectRfc64SelectedPublicSyncStatus(
     ...agent.getSyncContextGraphIds(),
     ...networkDefaultContextGraphs,
   ])];
+  const catalogBacked = new Set(catalogBackedContextGraphs);
+  // `/api/status` is unauthenticated, and the scope names private graphs and
+  // the cleartext ids of adopted name hashes. A caller without node-admin
+  // authority sees only the selected public catalog graphs, which this
+  // response already lists, and a count of the whole scope.
   return {
     defaultEnabled: true,
-    requestedContextGraphs,
-    catalogBackedContextGraphs: [...new Set(catalogBackedContextGraphs)],
+    requestedContextGraphs: isNodeAdmin
+      ? requestedContextGraphs
+      : requestedContextGraphs.filter((contextGraphId) => catalogBacked.has(contextGraphId)),
+    requestedContextGraphCount: requestedContextGraphs.length,
+    catalogBackedContextGraphs: [...catalogBacked],
   };
 }
 
@@ -734,6 +743,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       agent,
       resolveNetworkDefaultContextGraphs(network),
       rfc64PublicCatalogActivation.selectedContextGraphs,
+      canAdministerNode(actorFromRequestContext(ctx).authentication),
     );
     const unavailableFinalizationRecovery = (reason: string) => ({
       available: false,
@@ -816,6 +826,10 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         max: admission.max,
         rejectedTotal: admission.rejectedTotal,
       },
+      // Main-thread stalls over the last complete window (p50/p99/max ms).
+      // A max in the seconds means every route, stream and timer waited that
+      // long; the daemon log carries a rate-limited warning for it.
+      eventLoopDelay: ctx.eventLoopDelay?.snapshot() ?? null,
       // Public status carries state only. Detailed lane timings and operation
       // summaries stay behind the node-admin diagnostics route.
       backpressure: {
