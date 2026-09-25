@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { StorageACKRegistrationRuntime } from '../src/p2p/storage-ack-registration-runtime.js';
+import {
+  StorageACKRegistrationRuntime,
+  shouldRepairACKWallets,
+  type StorageACKRegistrationAttempt,
+} from '../src/p2p/storage-ack-registration-runtime.js';
 import type { StorageACKEndpoint } from '../src/p2p/storage-ack-endpoint.js';
 import { PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
 
@@ -84,15 +88,16 @@ describe('StorageACK registration session', () => {
     const first = endpoint();
     const replacement = endpoint();
     let firstSignerLost!: () => boolean;
-    const attempt = vi.fn(async (options: { repairWallets?: boolean }, phase: string,
+    const attempt = vi.fn(async (command: StorageACKRegistrationAttempt,
       context: { signerLost(): boolean }) => {
+      const phase = command.kind;
       if (phase === 'initial') {
         firstSignerLost = context.signerLost;
         return { kind: 'registered', endpoint: first } as const;
       }
-      expect(options.repairWallets).toBe(false);
+      expect(shouldRepairACKWallets(command)).toBe(false);
       if (phase === 'failover') throw new Error('chain temporarily unavailable');
-      if (attempt.mock.calls.filter(([, callPhase]) => callPhase === 'retry').length === 1) {
+      if (attempt.mock.calls.filter(([call]) => call.kind === 'retry-failover').length === 1) {
         return { kind: 'retryable' } as const;
       }
       return { kind: 'registered', endpoint: replacement } as const;
@@ -121,7 +126,8 @@ describe('StorageACK registration session', () => {
     expect(onRetryScheduled).toHaveBeenCalledTimes(2);
     await vi.advanceTimersByTimeAsync(1_000);
     expect(runtime.endpoint).toBe(replacement);
-    expect(attempt.mock.calls.map(([, phase]) => phase)).toEqual(['initial', 'failover', 'retry', 'retry']);
+    expect(attempt.mock.calls.map(([call]) => call.kind))
+      .toEqual(['initial', 'failover', 'retry-failover', 'retry-failover']);
     expect(replacement.dispose).not.toHaveBeenCalled();
     await runtime.closeAndDrain();
     expect(replacement.dispose).toHaveBeenCalledOnce();

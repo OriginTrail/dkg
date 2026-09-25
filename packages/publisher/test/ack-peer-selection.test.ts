@@ -96,7 +96,6 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
         requestedProtocolPeers: new Set(['v2-core']),
       },
       protocol: PROTOCOL_STORAGE_ACK_V2,
-      requiredACKs: 2,
     })).toEqual(canonical);
   });
 

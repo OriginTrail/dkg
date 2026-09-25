@@ -1,5 +1,5 @@
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
-import type { ACKCandidatePeerSelectionResult } from '@origintrail-official/dkg-publisher';
+import type { ACKCanonicalCandidatePeerSelectionResult } from '@origintrail-official/dkg-publisher';
 import { randomUUID } from 'node:crypto';
 import { createAuthorityIndexBootstrap } from './authority-index-bootstrap.js';
 import { planAuthorityIndexBootstrap } from './authority-index-config.js';
@@ -3173,7 +3173,6 @@ export class DKGAgent extends DKGAgentBase {
       verifiedSameNetworkPeerIds: this.networkAdmissionCoordinator.enabled
         ? this.networkAdmissionCoordinator.verifiedSameNetworkPeerIds()
         : undefined,
-      requiredACKs,
       protocol,
     }, this.localACKCandidate());
     return this.logACKCandidatePlan(selection, protocol, requiredACKs);
@@ -3188,7 +3187,7 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   private logACKCandidatePlan(
-    selection: ACKCandidatePeerSelectionResult,
+    selection: ACKCanonicalCandidatePeerSelectionResult,
     protocol: StorageACKProtocol,
     requiredACKs: number,
   ): string[] {

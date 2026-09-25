@@ -6,12 +6,30 @@ export type RegisteredLocalACKWork = (
   signal: AbortSignal,
 ) => LocalStorageACKExecution;
 
-export type StorageACKRegistrationOptions = {
-  repairWallets?: boolean;
-  allowChainReresolution?: boolean;
-};
+export type StorageACKRegistrationAttempt =
+  | { readonly kind: 'initial' }
+  | { readonly kind: 'retry-initial' }
+  | { readonly kind: 'failover' }
+  | { readonly kind: 'retry-failover' };
+
+export function mayReresolveACKIdentity(attempt: StorageACKRegistrationAttempt): boolean {
+  return attempt.kind === 'retry-initial';
+}
+
+export function shouldRepairACKWallets(attempt: StorageACKRegistrationAttempt): boolean {
+  return attempt.kind === 'initial' || attempt.kind === 'retry-initial';
+}
 
 type RegistrationPhase = 'initial' | 'retry' | 'failover';
+function phaseOf(attempt: StorageACKRegistrationAttempt): RegistrationPhase {
+  return attempt.kind === 'initial' ? 'initial' : attempt.kind === 'failover' ? 'failover' : 'retry';
+}
+
+function retryAfter(attempt: StorageACKRegistrationAttempt): StorageACKRegistrationAttempt {
+  return attempt.kind === 'initial' || attempt.kind === 'retry-initial'
+    ? { kind: 'retry-initial' }
+    : { kind: 'retry-failover' };
+}
 interface StorageACKRegistrationLease {
   signerLost(): boolean;
 }
@@ -30,8 +48,7 @@ export type RegistrationOutcome =
 
 export interface StorageACKRegistrationPlan {
   attempt: (
-    options: StorageACKRegistrationOptions,
-    phase: RegistrationPhase,
+    attempt: StorageACKRegistrationAttempt,
     context: StorageACKRegistrationAttemptContext,
   ) => Promise<RegistrationOutcome>;
   retryDelayMs: number;
@@ -42,7 +59,7 @@ export interface StorageACKRegistrationPlan {
 
 type RegistrationState =
   | { readonly kind: 'idle' }
-  | { readonly kind: 'registering'; readonly phase: RegistrationPhase }
+  | { readonly kind: 'registering'; readonly attempt: StorageACKRegistrationAttempt }
   | { readonly kind: 'waiting-retry'; readonly timer: ReturnType<typeof setTimeout> }
   | { readonly kind: 'registered'; readonly endpoint: StorageACKEndpoint; readonly lease: StorageACKRegistrationLease }
   | { readonly kind: 'retired' };
@@ -96,24 +113,24 @@ class StorageACKRegistrationSession {
     return true;
   }
 
-  private scheduleRetry(options: StorageACKRegistrationOptions): void {
+  private scheduleRetry(attempt: StorageACKRegistrationAttempt): void {
     const plan = this.plan;
     if (!plan || this.state.kind !== 'registering') return;
     const timer = setTimeout(() => {
       if (this.state.kind !== 'waiting-retry' || this.state.timer !== timer) return;
       this.state = { kind: 'idle' };
       if (!plan.isStarted()) return;
-      void this.track(Promise.resolve().then(() => this.runAttempt(options, 'retry')));
+      void this.track(Promise.resolve().then(() => this.runAttempt(retryAfter(attempt))));
     }, plan.retryDelayMs);
     timer.unref?.();
     this.state = { kind: 'waiting-retry', timer };
     plan.onRetryScheduled();
   }
 
-  private async runAttempt(options: StorageACKRegistrationOptions, phase: RegistrationPhase): Promise<void> {
+  private async runAttempt(attempt: StorageACKRegistrationAttempt): Promise<void> {
     const plan = this.plan;
     if (!plan || this.state.kind === 'retired' || this.state.kind === 'registered') return;
-    this.state = { kind: 'registering', phase };
+    this.state = { kind: 'registering', attempt };
     const lease = this.createLease();
     const context: StorageACKRegistrationAttemptContext = {
       isActive: () => this.isCurrent(),
@@ -121,20 +138,20 @@ class StorageACKRegistrationSession {
       signerLost: () => lease.signerLost(),
     };
     try {
-      const outcome = await plan.attempt(options, phase, context);
+      const outcome = await plan.attempt(attempt, context);
       if (outcome.kind === 'registered') {
         this.install(outcome.endpoint, lease);
-      } else if (this.state.kind === 'registering' && this.state.phase === phase) {
+      } else if (this.state.kind === 'registering' && this.state.attempt === attempt) {
         if (outcome.kind === 'retryable') {
-          this.scheduleRetry(phase === 'initial' ? { allowChainReresolution: true } : options);
+          this.scheduleRetry(attempt);
         } else {
           this.state = { kind: 'idle' };
         }
       }
     } catch (error) {
-      if (error instanceof RetiredRegistrationSession || this.state.kind !== 'registering' || this.state.phase !== phase) return;
-      plan.onError(phase, error);
-      this.scheduleRetry(phase === 'initial' ? { allowChainReresolution: true } : options);
+      if (error instanceof RetiredRegistrationSession || this.state.kind !== 'registering' || this.state.attempt !== attempt) return;
+      plan.onError(phaseOf(attempt), error);
+      this.scheduleRetry(attempt);
     }
   }
 
@@ -142,15 +159,15 @@ class StorageACKRegistrationSession {
     if (this.plan) throw new Error('StorageACK registration session already started');
     if (!this.isCurrent()) throw new Error('StorageACK registration session retired');
     this.plan = plan;
-    return this.track(this.runAttempt({}, 'initial'));
+    return this.track(this.runAttempt({ kind: 'initial' }));
   }
 
   private signerLost(lease: StorageACKRegistrationLease): boolean {
     if (!this.plan || this.state.kind !== 'registered' || this.state.lease !== lease) return false;
     const endpoint = this.state.endpoint;
-    this.state = { kind: 'registering', phase: 'failover' };
+    this.state = { kind: 'registering', attempt: { kind: 'failover' } };
     endpoint.dispose();
-    void this.track(Promise.resolve().then(() => this.runAttempt({ repairWallets: false }, 'failover')));
+    void this.track(Promise.resolve().then(() => this.runAttempt({ kind: 'failover' })));
     return true;
   }
 

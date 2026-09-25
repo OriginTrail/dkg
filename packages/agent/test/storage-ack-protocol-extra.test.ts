@@ -60,9 +60,9 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
     // Registration is staged locally and installed by its lifecycle owner
     // only while the generation is still current.
     expect(lifecycle).toMatch(/const endpoint\s*=\s*registerStorageACKEndpoint\(/);
-    expect(lifecycle).toMatch(/return \{ kind: 'registered', endpoint, lease: registrationLease \}/);
+    expect(lifecycle).toMatch(/return \{ kind: 'registered', endpoint \}/);
     expect(readFileSync(join(AGENT_SRC, 'p2p', 'storage-ack-registration-runtime.ts'), 'utf8'))
-      .toMatch(/this\.state = \{ kind: 'registered', endpoint, lease \}/);
+      .toMatch(/this\.install\(outcome\.endpoint, lease\)/);
     expect(lifecycle).toMatch(/registerGroup:\s*\(entries\)\s*=>\s*this\.messenger\.registerGroup\(entries\)/);
     expect(endpoint).toMatch(/ports\.registerGroup\(STORAGE_ACK_PROTOCOLS\.map\(/);
   });

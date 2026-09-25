@@ -8,6 +8,7 @@ import {
 
 /** @deprecated Use the canonical selector with `capability`. */
 export interface ACKCandidatePeerSelectionInput extends ACKCanonicalCandidatePeerSelectionInput {
+  requiredACKs: number;
   knownCorePeerIds?: ReadonlySet<string>;
   knownCorePeerIdsV2?: ReadonlySet<string>;
 }
@@ -31,15 +32,20 @@ function adaptLegacyInput(input: ACKCandidatePeerSelectionInput): {
   if (input.capability && (input.knownCorePeerIds || input.knownCorePeerIdsV2)) {
     throw new TypeError('Use either capability or legacy knownCorePeerIds fields');
   }
-  if (input.capability) return { canonical: input, legacyV2Tier: false };
+  const {
+    knownCorePeerIds: _knownCorePeerIds,
+    knownCorePeerIdsV2: _knownCorePeerIdsV2,
+    requiredACKs: _requiredACKs,
+    ...rest
+  } = input;
+  if (input.capability) return { canonical: rest, legacyV2Tier: false };
   if (!input.knownCorePeerIds && !input.knownCorePeerIdsV2) {
-    return { canonical: input, legacyV2Tier: false };
+    return { canonical: rest, legacyV2Tier: false };
   }
   const requestedProtocolPeers = input.protocol === PROTOCOL_STORAGE_ACK_V2
     || input.protocol === PROTOCOL_STORAGE_UPDATE_ACK_V2
     ? input.knownCorePeerIdsV2 ?? new Set<string>()
     : undefined;
-  const { knownCorePeerIds: _knownCorePeerIds, knownCorePeerIdsV2: _knownCorePeerIdsV2, ...rest } = input;
   return {
     canonical: { ...rest, capability: { mode: 'rank', corePeers: input.knownCorePeerIds, requestedProtocolPeers } },
     legacyV2Tier: requestedProtocolPeers !== undefined,

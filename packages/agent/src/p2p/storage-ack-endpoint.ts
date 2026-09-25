@@ -1,12 +1,13 @@
 import { STORAGE_ACK_PROTOCOLS, storageACKProtocolKind, type StorageACKProtocol } from '@origintrail-official/dkg-core';
+import type { LocalStorageAckHeadExpectation } from '@origintrail-official/dkg-publisher';
 
 export interface LocalStorageACKDispatch {
   protocol: StorageACKProtocol;
   data: Uint8Array;
   peerId: string;
   signal?: AbortSignal;
-  /** Opaque local request context, interpreted only by the agent's handler adapter. */
-  context?: unknown;
+  /** The queued publisher head this local ACK is allowed to preserve. */
+  context?: LocalStorageAckHeadExpectation;
 }
 
 export interface LocalStorageACKExecution {
@@ -27,8 +28,8 @@ interface StorageACKEndpointPorts {
   }[]): () => void;
   publish(data: Uint8Array, peerId: string): Promise<Uint8Array>;
   update(data: Uint8Array, peerId: string): Promise<Uint8Array>;
-  publishLocal(data: Uint8Array, peerId: string, signal: AbortSignal | undefined, context?: unknown): LocalStorageACKExecution;
-  updateLocal(data: Uint8Array, peerId: string, signal: AbortSignal | undefined, context?: unknown): LocalStorageACKExecution;
+  publishLocal(data: Uint8Array, peerId: string, signal: AbortSignal | undefined, context?: LocalStorageAckHeadExpectation): LocalStorageACKExecution;
+  updateLocal(data: Uint8Array, peerId: string, signal: AbortSignal | undefined, context?: LocalStorageAckHeadExpectation): LocalStorageACKExecution;
 }
 
 /**

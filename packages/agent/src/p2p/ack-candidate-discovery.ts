@@ -4,7 +4,7 @@ import {
   selectCanonicalACKCandidateUniverse,
   selectCanonicalACKCandidatePeersWithDiagnostics,
   type ACKCanonicalCandidatePeerSelectionInput,
-  type ACKCandidatePeerSelectionResult,
+  type ACKCanonicalCandidatePeerSelectionResult,
 } from '@origintrail-official/dkg-publisher';
 
 export interface LocalACKCandidate {
@@ -109,7 +109,7 @@ export class ACKCandidateDiscoveryCoordinator {
     input: Omit<ACKCanonicalCandidatePeerSelectionInput, 'capability' | 'selfPeerId' | 'localCandidate'>,
     localCandidate: LocalACKCandidate,
     snapshot: ACKCapabilitySnapshot = snapshotACK(this.registry.beginRound()),
-  ): ACKCandidatePeerSelectionResult {
+  ): ACKCanonicalCandidatePeerSelectionResult {
     const requestedProtocolPeers = input.protocol && input.protocol !== PROTOCOL_STORAGE_ACK
       ? snapshot.supportByProtocol.get(input.protocol)
       : undefined;
@@ -120,7 +120,7 @@ export class ACKCandidateDiscoveryCoordinator {
     });
   }
 
-  async resolveRound(ports: ACKRoundPorts): Promise<ACKCandidatePeerSelectionResult> {
+  async resolveRound(ports: ACKRoundPorts): Promise<ACKCanonicalCandidatePeerSelectionResult> {
     if (!isStorageACKProtocol(ports.protocol)) throw new Error(`Unsupported ACK protocol: ${ports.protocol}`);
     const requestedProtocol = ports.protocol;
     await Promise.all(ports.connectedPeers.map(async (peerId) => {
@@ -187,7 +187,6 @@ export class ACKCandidateDiscoveryCoordinator {
       ackCandidatePeerIds: ports.ackCandidatePeerIds,
       preferredACKPeerIds: ports.preferredACKPeerIds,
       verifiedSameNetworkPeerIds: ports.verifiedSameNetworkPeerIds(),
-      requiredACKs: ports.requiredACKs,
       protocol: requestedProtocol,
     }, ports.localCandidate, snapshotACK(round));
   }

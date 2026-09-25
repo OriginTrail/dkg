@@ -16,7 +16,6 @@ export interface ACKCanonicalCandidatePeerSelectionInput {
   verifiedSameNetworkPeerIds?: ReadonlySet<string>;
   /** One capability snapshot drives eligibility, ordering, and diagnostics. */
   capability?: ACKCapabilitySelectionPolicy;
-  requiredACKs: number;
   protocol?: StorageACKProtocol;
   selfPeerId?: string;
 }

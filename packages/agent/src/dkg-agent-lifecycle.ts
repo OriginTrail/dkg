@@ -20,6 +20,13 @@ import { createHash } from 'node:crypto';
 import { setTimeout as waitForPeerEventTurn } from 'node:timers/promises';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
 import { registerStorageACKEndpoint } from './p2p/storage-ack-endpoint.js';
+import {
+  mayReresolveACKIdentity,
+  shouldRepairACKWallets,
+  type StorageACKRegistrationAttempt,
+  type StorageACKRegistrationAttemptContext,
+  type RegistrationOutcome,
+} from './p2p/storage-ack-registration-runtime.js';
 import { syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
@@ -176,7 +183,6 @@ import {
   STORAGE_ACK_LEDGER_GRAPH,
   swmKaWriteLockKey,
   withKeyedLocks,
-  type LocalStorageAckHeadExpectation,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -2757,9 +2763,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (ackSignerCandidates.length > 0) {
         const attemptStorageACKRegistration = async (
           attemptCtx: OperationContext,
-          options: { repairWallets?: boolean; allowChainReresolution?: boolean },
-          registration: import('./p2p/storage-ack-registration-runtime.js').StorageACKRegistrationAttemptContext,
-        ): Promise<import('./p2p/storage-ack-registration-runtime.js').RegistrationOutcome> => {
+          attempt: StorageACKRegistrationAttempt,
+          registration: StorageACKRegistrationAttemptContext,
+        ): Promise<RegistrationOutcome> => {
           if (!registration.isActive()) return { kind: 'disabled' };
           if (this.storageAckHandlerRegistered) return { kind: 'disabled' };
           // #894 / Codex PR #901 (round 2): background identity re-resolution.
@@ -2778,7 +2784,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           if (
             onChainIdentityId === 0n
             && bootChainIdentityUnresolvedTransient
-            && options.allowChainReresolution === true
+            && mayReresolveACKIdentity(attempt)
           ) {
             try {
               let reresolved = await registration.guard(() => raceWithBootTimeout(
@@ -2834,7 +2840,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             }
           }
           if (onChainIdentityId > 0n) {
-            const registrationSucceeded = options.repairWallets === false
+            const registrationSucceeded = !shouldRepairACKWallets(attempt)
               ? true
               : await registration.guard(() => ensureACKCandidateWalletsRegistered(attemptCtx));
             const signerResolution = await registration.guard(() => this.resolveConfirmedACKSigner(
@@ -3045,13 +3051,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               },
               publishLocal: (data, peerIdStr, signal, context) => {
                 const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-                return ackHandler.localExecution(data, peerId, signal,
-                  context as LocalStorageAckHeadExpectation | undefined);
+                return ackHandler.localExecution(data, peerId, signal, context);
               },
               updateLocal: (data, peerIdStr, signal, context) => {
                 const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-                return ackHandler.localUpdateExecution(data, peerId, signal,
-                  context as LocalStorageAckHeadExpectation | undefined);
+                return ackHandler.localUpdateExecution(data, peerId, signal, context);
               },
             });
             this.log.info(
@@ -3087,8 +3091,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // The first attempt is awaited by start(). The session schedules chain
         // re-resolution in the background only after a retryable initial result.
         await this.storageACKRegistrationRuntime.startGeneration({
-          attempt: (options, phase, registration) => attemptStorageACKRegistration(
-            phase === 'initial' ? ctx : createOperationContext('connect'), options, registration,
+          attempt: (attempt, registration) => attemptStorageACKRegistration(
+            attempt.kind === 'initial' ? ctx : createOperationContext('connect'), attempt, registration,
           ),
           retryDelayMs: storageACKRegistrationRetryMs,
           isStarted: () => this.started,
