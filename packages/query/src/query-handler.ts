@@ -33,6 +33,12 @@ const STORE_BUSY_RETRY_AFTER_MS = 1_000;
 const PUBLIC_CG_CACHE_TTL_MS = 60_000;
 const PUBLIC_CG_CACHE_MAX_ENTRIES = 1000;
 
+/** What an access denial names. */
+interface AccessDenialSubject {
+  readonly kind: 'Context graph' | 'Knowledge asset';
+  readonly id: string;
+}
+
 interface RateBucket {
   count: number;
   resetAt: number;
@@ -200,9 +206,13 @@ export class QueryHandler {
     lookupType: LookupType,
     contextGraphId: string,
     peerId: string,
+    // What a denial names: the context graph by default, or what the
+    // requester actually asked for when the graph is a local detail.
+    subject: AccessDenialSubject = { kind: 'Context graph', id: contextGraphId },
   ): Promise<QueryNonBusyResponse | null> {
+    const named = `${subject.kind.toLowerCase()} '${subject.id}'`;
     const defaultPolicy = this.config.defaultPolicy ?? 'deny';
-    const cgConfig = this.config.contextGraphs?.[contextGraphId];
+    const cgConfig = this.contextGraphPolicy(contextGraphId);
     if (!cgConfig) {
       if (defaultPolicy === 'deny') {
         // #1105: a CG whose OWN access policy is provably public (live
@@ -212,7 +222,7 @@ export class QueryHandler {
         // per-CG queryAccess entries (handled below) still take
         // precedence, so operators can deny or allowlist a public CG.
         if (await this.resolvePublicContextGraph(contextGraphId)) return null;
-        return errorResponse('', 'ACCESS_DENIED', `Context graph '${contextGraphId}' is not queryable`);
+        return errorResponse('', 'ACCESS_DENIED', `${subject.kind} '${subject.id}' is not queryable`);
       }
       // defaultPolicy is 'public' — allow with default lookup types
       return null;
@@ -220,7 +230,7 @@ export class QueryHandler {
 
     // Check peer access
     if (cgConfig.policy === 'deny') {
-      return errorResponse('', 'ACCESS_DENIED', `Context graph '${contextGraphId}' is not queryable`);
+      return errorResponse('', 'ACCESS_DENIED', `${subject.kind} '${subject.id}' is not queryable`);
     }
     if (cgConfig.policy === 'allowList') {
       if (!cgConfig.allowedPeers?.includes(peerId)) {
@@ -231,13 +241,13 @@ export class QueryHandler {
     // Check lookup type
     if (cgConfig.allowedLookupTypes?.length) {
       if (!cgConfig.allowedLookupTypes.includes(lookupType)) {
-        return errorResponse('', 'UNSUPPORTED_LOOKUP', `Lookup type '${lookupType}' is not allowed for context graph '${contextGraphId}'`);
+        return errorResponse('', 'UNSUPPORTED_LOOKUP', `Lookup type '${lookupType}' is not allowed for ${named}`);
       }
     }
 
     // Check SPARQL specifically
     if (lookupType === 'SPARQL_QUERY' && !cgConfig.sparqlEnabled) {
-      return errorResponse('', 'UNSUPPORTED_LOOKUP', `SPARQL queries are not enabled for context graph '${contextGraphId}'`);
+      return errorResponse('', 'UNSUPPORTED_LOOKUP', `SPARQL queries are not enabled for ${named}`);
     }
 
     return null;
@@ -272,9 +282,17 @@ export class QueryHandler {
     return Object.values(cgConfigs).some(p => p.policy === 'public');
   }
 
+  /**
+   * The operator's `queryAccess.contextGraphs` entry for a CG, if it has one.
+   * The id comes from the requesting peer, so only OWN entries count: a plain
+   * `map[id]` lookup also returns Object.prototype members ("constructor",
+   * "__proto__", "toString", …), which read as an entry with no policy and
+   * skipped the default-deny branch.
+   */
   private contextGraphPolicy(contextGraphId: string | undefined): ContextGraphQueryPolicy | undefined {
-    if (!contextGraphId) return undefined;
-    return this.config.contextGraphs?.[contextGraphId];
+    const policies = this.config.contextGraphs;
+    if (!contextGraphId || !policies || !Object.hasOwn(policies, contextGraphId)) return undefined;
+    return policies[contextGraphId];
   }
 
   private checkRateLimit(peerId: string): QueryNonBusyResponse | null {
@@ -319,7 +337,14 @@ export class QueryHandler {
     // evaluation entirely: they were denied for on-chain-public CGs on
     // default configs, yet allowed THROUGH explicitly denied CGs whenever
     // any other public CG existed on the node.
-    const denied = await this.checkContextGraphAccess('ENTITY_BY_UAL', resolved.contextGraphId, peerId);
+    // A denial names the UAL the requester sent. The graph it resolved to is
+    // local detail the requester didn't name, and may be private.
+    const denied = await this.checkContextGraphAccess(
+      'ENTITY_BY_UAL',
+      resolved.contextGraphId,
+      peerId,
+      { kind: 'Knowledge asset', id: ual },
+    );
     if (denied) return { ...denied, operationId: opId };
     const ntriples = quadsToNQuads(
       resolved.quads.map((quad) => ({ ...quad, graph: '' })),

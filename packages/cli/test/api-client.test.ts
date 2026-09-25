@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ApiClient } from '../src/api-client.js';
+import { ApiClient, DaemonOutcomeUnknownError } from '../src/api-client.js';
 import type { KnowledgeAssetFinalizedPublishOptions } from '../src/api-client.js';
 
 const PORT = 8899;
@@ -1651,5 +1651,199 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
       clearSharedMemoryAfter: false,
       pricingPolicy: 'full-content',
     });
+  });
+});
+
+// Real, small deadlines: a 20 ms read class and a 1 s long class. The stub daemon
+// answers after `latencyMs` unless the request's signal aborts first, in which case
+// it rejects with the abort reason, as fetch does.
+describe('ApiClient per-route timeout classes', () => {
+  const originalFetch = globalThis.fetch;
+  const quads = [{ subject: 's', predicate: 'p', object: 'o' }];
+  let tempDir: string;
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'api-client-timeouts-'));
+  });
+
+  afterEach(async () => {
+    globalThis.fetch = originalFetch;
+    await rm(tempDir, { recursive: true, force: true });
+  });
+
+  const slowDaemon = (latencyMs: number, status = 200, body: unknown = { kaId: '7', status: 'confirmed' }) => {
+    globalThis.fetch = ((_url: string | URL | Request, init?: RequestInit) => new Promise<Response>((resolve, reject) => {
+      const timer = setTimeout(() => resolve(new Response(JSON.stringify(body), { status })), latencyMs);
+      init?.signal?.addEventListener('abort', () => {
+        clearTimeout(timer);
+        reject(init.signal!.reason);
+      }, { once: true });
+    })) as typeof fetch;
+  };
+  const timed = (longTimeoutMs = 1_000) =>
+    new ApiClient(PORT, 'test-token', { readTimeoutMs: 20, longTimeoutMs });
+
+  it('a publish that outlasts the read timeout is not reported as failed', async () => {
+    slowDaemon(80);
+    await expect(timed().knowledgeAssetPublish('cg', 'asset')).resolves.toEqual({ kaId: '7', status: 'confirmed' });
+  });
+
+  it('a GET read with the same latency still times out (control)', async () => {
+    slowDaemon(80);
+    await expect(timed().getKnowledgeAsset('cg', 'asset')).rejects.toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('share, import-file, a sharing create and other writes take the long class', async () => {
+    slowDaemon(80);
+    const client = timed();
+    const filePath = join(tempDir, 'doc.md');
+    await writeFile(filePath, '# doc');
+    await expect(client.knowledgeAssetShare('cg', 'asset')).resolves.toBeDefined();
+    await expect(client.promoteAssertion('asset', { contextGraphId: 'cg' })).resolves.toBeDefined();
+    await expect(client.importAssertionFile('asset', { filePath, contextGraphId: 'cg' })).resolves.toBeDefined();
+    await expect(client.createKnowledgeAsset('cg', 'asset', { quads, alsoShareSwm: true })).resolves.toBeDefined();
+    // Chain-bound writes such as registration must not inherit the read deadline.
+    await expect(client.registerContextGraph('cg')).resolves.toBeDefined();
+  });
+
+  it('a long mutation past its deadline reports outcome unknown, pointing at ka history', async () => {
+    slowDaemon(400);
+    const err = await timed(100).knowledgeAssetPublish('cg', 'asset', { subGraphName: 'sg' })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonOutcomeUnknownError);
+    expect(err).toMatchObject({ code: 'OUTCOME_UNKNOWN', method: 'POST', path: '/api/knowledge-assets/asset/vm/publish' });
+    expect((err as Error).message).toContain('dkg ka history asset --context-graph-id cg --sub-graph-name sg');
+  });
+
+  it('other writes past the long deadline keep the plain timeout error', async () => {
+    slowDaemon(400);
+    // A create that neither shares nor publishes has nothing long in flight.
+    const err = await timed(100).createKnowledgeAsset('cg', 'asset', { quads }).catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(DaemonOutcomeUnknownError);
+    expect(err).toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('a daemon answer on a long mutation keeps its HTTP error', async () => {
+    slowDaemon(0, 409, { code: 'VM_PUBLISH_PRECONDITION', error: 'not shared' });
+    const err = await timed().knowledgeAssetPublish('cg', 'asset').catch((e: unknown) => e);
+    expect(err).not.toBeInstanceOf(DaemonOutcomeUnknownError);
+    expect(err).toMatchObject({ httpStatus: 409, message: 'not shared' });
+  });
+
+  it.each([
+    ['headers', 'fetch failed', 'UND_ERR_HEADERS_TIMEOUT'],
+    ['body', 'terminated', 'UND_ERR_BODY_TIMEOUT'],
+  ])("treats Node fetch's own %s timeout on a long mutation as outcome unknown", async (_phase, message, code) => {
+    // Node's fetch (undici) stops waiting on its own after 300 s without headers or
+    // body progress; that surfaces as a TypeError whose cause carries the undici code.
+    const undiciTimeout = Object.assign(new TypeError(message), { cause: { code } });
+    globalThis.fetch = (async () => { throw undiciTimeout; }) as typeof fetch;
+    await expect(timed().knowledgeAssetPublish('cg', 'asset')).rejects.toBeInstanceOf(DaemonOutcomeUnknownError);
+    // Outside the long mutations it stays the raw transport error.
+    await expect(timed().getKnowledgeAsset('cg', 'asset')).rejects.toBe(undiciTimeout);
+  });
+
+  it('passes a hostile transport error on a long mutation through untouched', async () => {
+    const hostileCause = new Proxy({}, { get: () => { throw new Error('hostile getter'); } });
+    const transportError = Object.assign(new TypeError('unclassified transport error'), { cause: hostileCause });
+    globalThis.fetch = (async () => { throw transportError; }) as typeof fetch;
+    await expect(timed().knowledgeAssetPublish('cg', 'asset')).rejects.toBe(transportError);
+  });
+
+  it('gives /api/verify its own collection window plus a margin', async () => {
+    slowDaemon(150);
+    // 150 ms outlasts the 100 ms long class; the request-carried window covers it.
+    await expect(timed(100).verify({
+      contextGraphId: 'cg',
+      verifiableMemoryId: 'vm-1',
+      batchId: '1',
+      timeoutMs: 1_000,
+    })).resolves.toBeDefined();
+  });
+
+  it('bounds the EPCIS by-path read with the read deadline', async () => {
+    slowDaemon(80);
+    await expect(timed().queryEpcisEventsByPath('/api/epcis/events')).rejects.toMatchObject({ name: 'TimeoutError' });
+  });
+
+  it('keeps an EPCIS by-path error answer as an HTTP error', async () => {
+    slowDaemon(0, 404, { error: 'no such page' });
+    await expect(timed().queryEpcisEventsByPath('/api/epcis/events?page=9'))
+      .rejects.toMatchObject({ httpStatus: 404, message: 'no such page' });
+  });
+
+  it('a list read that outlasts the read timeout is not cut short', async () => {
+    slowDaemon(80, 200, { contextGraphs: [], accounts: [], jobs: [] });
+    const client = timed();
+    await expect(client.listContextGraphs()).resolves.toBeDefined();
+    await expect(client.listPcas()).resolves.toBeDefined();
+    await expect(client.publisherJobs('queued')).resolves.toBeDefined();
+  });
+
+  describe('deadline values', () => {
+    let deadlines: number[];
+
+    beforeEach(() => {
+      deadlines = [];
+      const timeout = AbortSignal.timeout.bind(AbortSignal);
+      vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+        deadlines.push(ms);
+        return timeout(ms);
+      });
+      slowDaemon(0);
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.unstubAllEnvs();
+    });
+
+    const readAll = async (client: ApiClient) => {
+      await client.listContextGraphs();
+      await client.listPcas();
+      await client.publisherJobs('queued');
+      await client.getPcaInfo('1');
+      await client.getKnowledgeAsset('cg', 'asset');
+      await client.registerContextGraph('cg');
+    };
+
+    it('gives the graph, PCA and publisher-job lists 60 s, other reads 30 s and writes 240 s', async () => {
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '');
+      vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', '');
+      await readAll(new ApiClient(PORT, 'test-token'));
+      expect(deadlines).toEqual([60_000, 60_000, 60_000, 30_000, 30_000, 240_000]);
+    });
+
+    it('takes the read and long deadlines from the environment', async () => {
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '45000');
+      vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', ' 600000 ');
+      await readAll(new ApiClient(PORT, 'test-token'));
+      expect(deadlines).toEqual([60_000, 60_000, 60_000, 45_000, 45_000, 600_000]);
+    });
+
+    it('never gives a list less than the read deadline, nor a write less than either', async () => {
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '90000');
+      vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', '5000');
+      await readAll(new ApiClient(PORT, 'test-token'));
+      expect(deadlines).toEqual([90_000, 90_000, 90_000, 90_000, 90_000, 90_000]);
+    });
+
+    it('lets explicit client options win over the environment', async () => {
+      vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '45000');
+      vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', '600000');
+      await readAll(new ApiClient(PORT, 'test-token', { readTimeoutMs: 20, longTimeoutMs: 1_000 }));
+      expect(deadlines).toEqual([60_000, 60_000, 60_000, 20, 20, 1_000]);
+    });
+
+    it.each(['0', '-1', '1.5', '30s', '1e4', '0x10', '2147483648'])(
+      'rejects %j as a timeout override',
+      (value) => {
+        vi.stubEnv('DKG_API_READ_TIMEOUT_MS', value);
+        expect(() => new ApiClient(PORT, 'test-token')).toThrow(/DKG_API_READ_TIMEOUT_MS must be a whole number of milliseconds/);
+        vi.stubEnv('DKG_API_READ_TIMEOUT_MS', '');
+        vi.stubEnv('DKG_API_LONG_TIMEOUT_MS', value);
+        expect(() => new ApiClient(PORT, 'test-token')).toThrow(/DKG_API_LONG_TIMEOUT_MS must be a whole number of milliseconds/);
+      },
+    );
   });
 });

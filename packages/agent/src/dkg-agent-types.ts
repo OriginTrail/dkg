@@ -1487,9 +1487,17 @@ export interface DKGAgentConfig {
    * Relay multiaddrs declared by the OTHER DKG networks bundled with this
    * build (the daemon derives them from network/*.json). With a network
    * identity the node refuses to dial these peers, store their addresses or
-   * accept their connections; `relayPeers` always win.
+   * accept their connections. `relayPeers` win over this static list only: a
+   * `relayPeers` entry that fails the network-identity proof is refused like
+   * any other peer (`DKGNodeConfig.otherNetworkRelays`).
    */
   otherNetworkRelays?: readonly string[];
+  /**
+   * Transport-level network peer isolation (`DKGNodeConfig.networkPeerIsolation`).
+   * Default true; false is the operator kill switch, leaving other networks'
+   * peers to network admission alone.
+   */
+  networkPeerIsolation?: boolean;
   /** Legacy ACK candidate allowlist. When set, unlisted connected peers are not dialed for ACKs. */
   ackCandidatePeerIds?: string[];
   /**
@@ -1532,8 +1540,19 @@ export interface DKGAgentConfig {
   importedArtifactByteStore?: ImportedArtifactByteStore;
   /** When false, peer-connect sync skips SWM catch-up and relies on gossip for new SWM writes. */
   syncSharedMemoryOnConnect?: boolean;
-  /** Emergency switch for the periodic sync reconciler. Env DKG_SYNC_RECONCILER_ENABLED wins. */
+  /**
+   * Emergency switch for the periodic peer-sync reconciler only. Env
+   * DKG_SYNC_RECONCILER_ENABLED wins. It does not affect chain-driven VM
+   * reconciliation, which has its own `vmReconcilerEnabled` switch.
+   */
   syncReconcilerEnabled?: boolean;
+  /**
+   * Switch for chain-driven VM reconciliation (core-hosted recording, the
+   * KA-registered nudge and the VM reconcile sweep). Env
+   * DKG_VM_RECONCILER_ENABLED wins; default on. A core with it off declines
+   * every StorageACK, because it could not promote the ACKed data to VM.
+   */
+  vmReconcilerEnabled?: boolean;
   /** Period between automatic sync-reconciler passes. Default: 5 minutes. */
   syncReconcilerIntervalMs?: number;
   /** Age after which a peer is eligible for automatic sync retry. Default: 10 minutes. */

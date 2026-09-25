@@ -51,7 +51,8 @@ function harness(overrides: Partial<{
       state.adopted.push({ contextGraphId, source });
       return true;
     },
-    log: { info: () => undefined, debug: () => undefined },
+    isRefusalCurrent: () => true,
+    log: { info: () => undefined, debug: () => undefined, warn: () => undefined },
   };
   return state;
 }
@@ -212,12 +213,244 @@ describe('ContextGraphNameResolver', () => {
     expect(state.adopted).toHaveLength(1);
   });
 
-  it('stays pending, with a retry scheduled, when adoption was declined and the row still wants an id', async () => {
-    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT }, adopt: false });
-    const entry = await resolverFor(state).resolveNow(TARGET);
-    expect(entry).toMatchObject({ state: 'pending', lastOutcome: 'not-found', attempts: 1 });
-    expect(entry?.state === 'pending' ? entry.nextAttemptAt : undefined).toBeTypeOf('number');
+  it('records a declined adoption for a row that still wants an id, and does not re-attempt it while the refusal holds', async () => {
+    vi.useFakeTimers();
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    let adoptCalls = 0;
+    // The row stays current: the adopter refuses the id itself (a binding conflict).
+    state.deps.adopt = async () => {
+      adoptCalls += 1;
+      return false;
+    };
+    let refusalChecks = 0;
+    state.deps.isRefusalCurrent = () => {
+      refusalChecks += 1;
+      return true;
+    };
+    const resolver = resolverFor(state, { retryBaseMs: 1_000, retryMaxMs: 1_000, peerAskTtlMs: 0 });
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toEqual({
+      state: 'declined',
+      nameHash: NAME_HASH,
+      onChainId: '33',
+      contextGraphId: CLEARTEXT,
+      source: 'peer-protocol',
+      declinedAt: expect.any(Number),
+      nextCheckAt: expect.any(Number),
+    });
+    expect(adoptCalls).toBe(1);
+
+    // Background passes, identify updates and time only check the cause;
+    // while it holds, nothing is asked, scanned or adopted again.
+    resolver.request();
+    resolver.onPeerUpdated('holder');
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(refusalChecks).toBeGreaterThan(1);
+    expect(adoptCalls).toBe(1);
+    expect(state.asked).toEqual(['holder']);
+
+    // An explicit request (the operator subscribing again) checks once more.
+    expect(await resolver.resolveNow(TARGET)).toMatchObject({ state: 'declined', contextGraphId: CLEARTEXT });
+    expect(adoptCalls).toBe(2);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(adoptCalls).toBe(2);
     expect(state.adopted).toEqual([]);
+  });
+
+  it('records a decline reached through a pulled ontology graph, and does not re-attempt it while the refusal holds', async () => {
+    vi.useFakeTimers();
+    const state = harness({
+      peers: ['old-core'],
+      protocols: { 'old-core': false },
+      ontology: { 'old-core': new Map([[NAME_HASH, CLEARTEXT]]) },
+    });
+    let adoptCalls = 0;
+    state.deps.adopt = async () => {
+      adoptCalls += 1;
+      return false;
+    };
+    const resolver = resolverFor(state, {
+      retryBaseMs: 1_000,
+      retryMaxMs: 1_000,
+      ontologyPullCooldownMs: 0,
+      ontologyPullFailureCooldownMs: 0,
+    });
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({
+      state: 'declined',
+      contextGraphId: CLEARTEXT,
+      source: 'peer-ontology',
+    });
+
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(state.pulled).toEqual(['old-core']);
+    expect(adoptCalls).toBe(1);
+  });
+
+  it('re-attempts a declined id in the background once the refusal no longer holds, with no request', async () => {
+    vi.useFakeTimers();
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    let conflict = true;
+    const adopt = state.deps.adopt;
+    state.deps.adopt = async (target, contextGraphId, source) => (
+      conflict ? false : adopt(target, contextGraphId, source)
+    );
+    state.deps.isRefusalCurrent = () => conflict;
+    const resolver = resolverFor(state, { retryMaxMs: 1_000, peerAskTtlMs: 0 });
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'declined' });
+
+    // The conflicting row's binding is cleared elsewhere (a binding refresh,
+    // an operator delete). No request, no peer update: the next check sees it.
+    conflict = false;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'resolved', contextGraphId: CLEARTEXT });
+    expect(state.adopted).toEqual([{ contextGraphId: CLEARTEXT, source: 'peer-protocol' }]);
+  });
+
+  it('adopts the id a decline already verified once the refusal clears, with its source gone', async () => {
+    vi.useFakeTimers();
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    let conflict = true;
+    const adopt = state.deps.adopt;
+    state.deps.adopt = async (target, contextGraphId, source) => (
+      conflict ? false : adopt(target, contextGraphId, source)
+    );
+    state.deps.isRefusalCurrent = () => conflict;
+    const resolver = resolverFor(state, { retryMaxMs: 1_000, peerAskTtlMs: 0 });
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'declined', source: 'peer-protocol' });
+
+    // The revealing peer disconnects, this node's store has no definition,
+    // and the conflicting binding is freed.
+    state.deps.listPeers = () => [];
+    state.deps.findLocalCandidates = async () => [];
+    conflict = false;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({
+      state: 'resolved',
+      contextGraphId: CLEARTEXT,
+      source: 'peer-protocol',
+    });
+    expect(state.adopted).toEqual([{ contextGraphId: CLEARTEXT, source: 'peer-protocol' }]);
+    expect(state.asked).toEqual(['holder']);
+  });
+
+  it('keeps a decline and its verified id when re-adopting it throws, and retries it on the next check', async () => {
+    vi.useFakeTimers();
+    const warn: string[] = [];
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    state.deps.log = { ...state.deps.log, warn: (message) => { warn.push(message); } };
+    let conflict = true;
+    let failWrite = true;
+    const adopt = state.deps.adopt;
+    state.deps.adopt = async (target, contextGraphId, source) => {
+      if (conflict) return false;
+      if (failWrite) {
+        failWrite = false;
+        throw new Error('store write failed');
+      }
+      return adopt(target, contextGraphId, source);
+    };
+    state.deps.isRefusalCurrent = () => conflict;
+    const resolver = resolverFor(state, { retryMaxMs: 1_000, peerAskTtlMs: 0 });
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'declined' });
+
+    // The conflict clears, the revealing peer is gone, no local definition.
+    conflict = false;
+    state.deps.listPeers = () => [];
+    state.deps.findLocalCandidates = async () => [];
+    await vi.advanceTimersByTimeAsync(1_000);
+    // The write failed: still declined, the verified id and source kept.
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({
+      state: 'declined',
+      contextGraphId: CLEARTEXT,
+      source: 'peer-protocol',
+    });
+    expect(warn).toEqual([
+      `Context Graph ${NAME_HASH.slice(0, 18)}… adopting its verified cleartext id failed; `
+        + 'keeping it for the next check: Error: store write failed',
+    ]);
+
+    // The next check adopts the kept id, with no peer and no store definition.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'resolved', contextGraphId: CLEARTEXT });
+    expect(state.adopted).toEqual([{ contextGraphId: CLEARTEXT, source: 'peer-protocol' }]);
+    expect(state.asked).toEqual(['holder']);
+  });
+
+  it('keeps a decline when the refusal check throws, and reports it once', async () => {
+    vi.useFakeTimers();
+    const warn: string[] = [];
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    state.deps.log = { ...state.deps.log, warn: (message) => { warn.push(message); } };
+    let adoptCalls = 0;
+    state.deps.adopt = async () => {
+      adoptCalls += 1;
+      return false;
+    };
+    const resolver = resolverFor(state, { retryMaxMs: 1_000, peerAskTtlMs: 0 });
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'declined' });
+
+    state.deps.isRefusalCurrent = () => { throw new TypeError('rows.get is not a function'); };
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(5_000);
+    // Fail closed: still declined, never re-attempted, and said once.
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'declined', contextGraphId: CLEARTEXT });
+    expect(adoptCalls).toBe(1);
+    expect(state.asked).toEqual(['holder']);
+    expect(warn).toEqual([
+      `Context Graph ${NAME_HASH.slice(0, 18)}… refusal check failed; keeping the refusal: `
+        + 'TypeError: rows.get is not a function',
+    ]);
+  });
+
+  it('adopts on an explicit request once a declined id is accepted, with no background pass', async () => {
+    vi.useFakeTimers();
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    let conflict = true;
+    const adopt = state.deps.adopt;
+    state.deps.adopt = async (target, contextGraphId, source) => (
+      conflict ? false : adopt(target, contextGraphId, source)
+    );
+    const resolver = resolverFor(state);
+    expect(await resolver.resolveNow(TARGET)).toMatchObject({ state: 'declined' });
+
+    conflict = false; // the operator removed the conflicting row
+    const entry = await resolver.resolveNow(TARGET);
+    expect(entry).toMatchObject({ state: 'resolved', contextGraphId: CLEARTEXT, source: 'peer-protocol' });
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'resolved', contextGraphId: CLEARTEXT });
+    expect(state.adopted).toEqual([{ contextGraphId: CLEARTEXT, source: 'peer-protocol' }]);
+    // No timer was advanced: the explicit request alone did it.
+  });
+
+  it('scopes a refusal to the binding it refused: a row re-bound to another slot is tried again', async () => {
+    vi.useFakeTimers();
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    const adopt = state.deps.adopt;
+    // The cleartext row belongs to on-chain 99, so a placeholder bound to 33 is refused.
+    state.deps.adopt = async (target, contextGraphId, source) => (
+      target.onChainId === '99' ? adopt(target, contextGraphId, source) : false
+    );
+    const resolver = resolverFor(state, { peerAskTtlMs: 0 });
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'declined', onChainId: '33' });
+
+    // The placeholder is re-bound to 99; an ordinary background pass resolves it.
+    state.targets = [{ nameHash: NAME_HASH, onChainId: '99' }];
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'resolved', onChainId: '99', contextGraphId: CLEARTEXT });
   });
 
   it('records nothing when adoption was declined because the row went away', async () => {
@@ -394,11 +627,11 @@ describe('ContextGraphNameResolver: background passes', () => {
         }
         return listTargets();
       },
-      log: { info: () => undefined, debug: (message) => { debug.push(message); } },
+      log: { ...state.deps.log, warn: (message) => { debug.push(message); } },
     };
     const resolver = resolverFor(state);
     resolver.request();
-    await waitFor(() => debug.some((line) => line.includes('name resolution pass failed: subscription table busy')));
+    await waitFor(() => debug.includes('Context Graph name resolution pass failed: Error: subscription table busy'));
     expect(resolver.entryFor(NAME_HASH)).toBeUndefined();
     resolver.request();
     await waitFor(() => resolver.entryFor(NAME_HASH)?.state === 'resolved');
@@ -407,6 +640,7 @@ describe('ContextGraphNameResolver: background passes', () => {
   it('keeps retrying in the background after an attempt throws', async () => {
     vi.useFakeTimers();
     const debug: string[] = [];
+    const warn: string[] = [];
     const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
     let adoptCalls = 0;
     state.deps = {
@@ -418,19 +652,112 @@ describe('ContextGraphNameResolver: background passes', () => {
         state.adopted.push({ contextGraphId, source });
         return true;
       },
-      log: { info: () => undefined, debug: (message) => { debug.push(message); } },
+      log: { info: () => undefined, debug: (message) => { debug.push(message); }, warn: (message) => { warn.push(message); } },
     };
     const resolver = resolverFor(state, { retryBaseMs: 1_000, peerAskTtlMs: 0 });
     resolver.request();
     await vi.advanceTimersByTimeAsync(0);
     expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'pending', lastOutcome: 'attempt-failed', attempts: 1 });
-    expect(debug.some((line) => line.includes('name resolution attempt failed: gossip layer restarting'))).toBe(true);
+    expect(warn).toEqual([
+      `Context Graph ${NAME_HASH.slice(0, 18)}… name resolution attempt failed (retrying with backoff): `
+        + 'Error: gossip layer restarting',
+    ]);
+    expect(debug.some((line) => line.includes('attempt failed'))).toBe(false);
     expect(state.adopted).toEqual([]);
 
     // No request(), no peer update: the retry schedule alone gets it done.
     await vi.advanceTimersByTimeAsync(1_000);
     expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'resolved', contextGraphId: CLEARTEXT });
     expect(state.adopted).toEqual([{ contextGraphId: CLEARTEXT, source: 'peer-protocol' }]);
+  });
+
+  it('reports every failed attempt at warn at most once per interval, whatever it threw, and keeps retrying', async () => {
+    vi.useFakeTimers();
+    const debug: string[] = [];
+    const warn: string[] = [];
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    // A defect thrown as a plain Error, a routine parse failure, a non-Error
+    // value: none is singled out by its class, and none is swallowed.
+    const failures: unknown[] = [
+      new Error('promoteRow missing'),
+      new SyntaxError('Unexpected token < in JSON'),
+      new RangeError('Invalid array length'),
+      'boom',
+    ];
+    let adoptCalls = 0;
+    state.deps = {
+      ...state.deps,
+      adopt: async (_target, contextGraphId, source) => {
+        const failure = failures[adoptCalls];
+        adoptCalls += 1;
+        if (failure !== undefined) throw failure;
+        state.adopted.push({ contextGraphId, source });
+        return true;
+      },
+      log: { info: () => undefined, debug: (message) => { debug.push(message); }, warn: (message) => { warn.push(message); } },
+    };
+    const failed = (detail: string) => `Context Graph ${NAME_HASH.slice(0, 18)}… name resolution attempt failed `
+      + `(retrying with backoff): ${detail}`;
+    const resolver = resolverFor(state, {
+      retryBaseMs: 1_000,
+      retryMaxMs: 1_000,
+      peerAskTtlMs: 0,
+      failureWarnIntervalMs: 2_500,
+    });
+    resolver.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'pending', lastOutcome: 'attempt-failed', attempts: 1 });
+    expect(warn).toEqual([failed('Error: promoteRow missing')]);
+
+    // Within the interval, repeats go to debug: still logged, not flooding warn.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'pending', lastOutcome: 'attempt-failed', attempts: 3 });
+    expect(warn).toHaveLength(1);
+    expect(debug.filter((line) => line.includes('attempt failed'))).toEqual([
+      failed('SyntaxError: Unexpected token < in JSON'),
+      failed('RangeError: Invalid array length'),
+    ]);
+
+    // Past the interval it is at warn again, and a thrown non-Error keeps its value.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(warn).toEqual([failed('Error: promoteRow missing'), failed('boom')]);
+
+    // It stayed on the retry schedule throughout.
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(resolver.entryFor(NAME_HASH)).toMatchObject({ state: 'resolved', contextGraphId: CLEARTEXT });
+  });
+
+  it('guards every row check the same way: a throw warns and keeps the hash on the retry schedule', async () => {
+    const warn: string[] = [];
+    const state = harness({ peers: ['holder'], protocols: { holder: true }, answers: { holder: CLEARTEXT } });
+    state.deps.log = { ...state.deps.log, warn: (message) => { warn.push(message); } };
+    state.deps.isTargetCurrent = () => { throw new TypeError('rows.get is not a function'); };
+    // The adoption fails too, so the retry decision itself needs the row check.
+    state.deps.adopt = async () => { throw new Error('gossip layer restarting'); };
+    const entry = await resolverFor(state).resolveNow(TARGET);
+    expect(entry).toMatchObject({ state: 'pending', lastOutcome: 'attempt-failed', attempts: 1 });
+    expect(entry?.state === 'pending' ? entry.nextAttemptAt : undefined).toBeTypeOf('number');
+    expect(state.asked).toEqual(['holder']);
+    // Each kind of failure is reported once; the repeats of the row check went to debug.
+    expect(warn).toEqual([
+      `Context Graph ${NAME_HASH.slice(0, 18)}… row check failed; treating the row as still wanting `
+        + 'a cleartext id: TypeError: rows.get is not a function',
+      `Context Graph ${NAME_HASH.slice(0, 18)}… name resolution attempt failed (retrying with backoff): `
+        + 'Error: gossip layer restarting',
+    ]);
+  });
+
+  it('logs a failed pass at warn with its error class', async () => {
+    const warn: string[] = [];
+    const state = harness();
+    state.deps = {
+      ...state.deps,
+      listTargets: () => { throw new TypeError('rows is not iterable'); },
+      log: { ...state.deps.log, warn: (message) => { warn.push(message); } },
+    };
+    resolverFor(state).request();
+    await waitFor(() => warn.length > 0);
+    expect(warn).toEqual(['Context Graph name resolution pass failed: TypeError: rows is not iterable']);
   });
 
   it('does not schedule a retry for an attempt cut short by shutdown', async () => {

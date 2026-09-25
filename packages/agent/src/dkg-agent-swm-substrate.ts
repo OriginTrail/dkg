@@ -1103,6 +1103,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           hasConfirmedMetaState: (id) => this.hasConfirmedMetaState(id),
           getCgMeta: (id) => this.getCgMeta(id),
           getContextGraphOnChainId: (id) => this.getContextGraphOnChainId(id),
+          classifyOnChainSlot: (onChainId) => this.classifyOntologyBindingSlot(onChainId),
           markCgMetaDirtyFromQuads: (quads) => { this.contextGraphMetaProjection.markDirtyFromQuads(quads); },
           persistContextGraphSubscription: (id) => this.persistContextGraphSubscriptionState(id),
         },
@@ -1925,6 +1926,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
                   candidate.ual,
                 );
               },
+              onTornHeadRemoved: (message, ctx) => this.log.warn(ctx, message),
             }),
           reconcileConfirmedGraphScopedSwmTwin: async (evidence, ctx) => {
             const retirement = await reconcileFinalizedSwmTwinFromCatalogProjection({

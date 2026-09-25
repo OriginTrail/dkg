@@ -279,26 +279,6 @@ export async function resolveNameToPeerId(
   return match?.peerId ?? null;
 }
 
-/**
- * GH #306 / #787 — shape guard for the WRITE routes (wm/write,
- * shared-memory/write). The `graph` term is OPTIONAL here: those routes
- * legitimately accept `{subject,predicate,object}`
- * and fill the graph internally. Without this guard, a string-shaped quad
- * (e.g. an N-Quad line `"<s> <p> <o> ."`) slips past a bare `Array.isArray`
- * check and crashes the agent write path with a TypeError → HTTP 500 instead
- * of an actionable 4xx.
- */
-export function isWritableQuad(value: unknown): boolean {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const v = value as Record<string, unknown>;
-  return (
-    typeof v.subject === "string" &&
-    typeof v.predicate === "string" &&
-    typeof v.object === "string" &&
-    (v.graph === undefined || typeof v.graph === "string")
-  );
-}
-
 export function validateWritableQuadLiteralSizes(
   label: string,
   quads: Array<{ subject: string; predicate: string; object: string; graph?: string }>,
@@ -312,28 +292,6 @@ export function validateWritableQuadLiteralSizes(
     }
     throw err;
   }
-}
-
-/**
- * GH #306 / #787 (follow-up) — validate each quad's `object` term is either a
- * quoted RDF literal (`"…"`) or an absolute IRI. Shared by lifecycle write
- * routes and other quad-accepting validation paths: the shape guard
- * ({@link isWritableQuad}) only checks that fields
- * are strings, so an object that is neither a literal nor an IRI (e.g. a bare
- * word `hello` or a number `123`) slips past them and crashes the RDF parser
- * with an uncaught "No scheme found in an absolute IRI" → HTTP 500 instead of an
- * actionable 400.
- */
-export function validateQuadObjectTerms(
-  label: string,
-  quads: ReadonlyArray<{ object: string }>,
-): string | null {
-  const badIndex = quads.findIndex((q) => {
-    const object = q.object.trim();
-    return !object.startsWith('"') && !isSafeIri(object);
-  });
-  if (badIndex === -1) return null;
-  return `Invalid "${label}[${badIndex}].object": RDF object must be a quoted literal term or absolute IRI`;
 }
 
 /**

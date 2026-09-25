@@ -35,13 +35,22 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   };
   return Object.assign(fn, { calls });
 }
-import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
+import {
+  KnowledgeAssetWorkspaceHeadCorruptError,
+  computeFlatKCRootV10,
+  storeKnowledgeAssetOperationPublicQuads,
+  storeKnowledgeAssetWorkspaceHead,
+} from '@origintrail-official/dkg-publisher';
 import {
   DKG_ONTOLOGY,
+  MemoryLayer,
+  PROTOCOL_STORAGE_ACK,
   SYSTEM_CONTEXT_GRAPHS,
   contextGraphDataGraphUri,
   contextGraphWorkspaceGraphUri,
   contextGraphWorkspaceMetaGraphUri,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
 import type {
@@ -66,7 +75,7 @@ import { VmRecoveryProviderPolicy } from '../src/vm-recovery-provider-policy.js'
 interface AgentInternals {
   createContextGraph(opts: { id: string; name: string; description?: string; private?: boolean; callerAgentAddress?: string }): Promise<void>;
   registerContextGraph(id: string, opts?: { callerAgentAddress?: string }): Promise<{ onChainId: string; txHash?: string }>;
-  recordCoreHostedPublicCg(cgId: string, swmGraphId?: string): Promise<void>;
+  recordCoreHostedPublicCg(cgId: string, swmGraphId?: string): Promise<string>;
   reconcileChainOrdinal(
     localCgId: string,
     onChainCgId: bigint,
@@ -487,10 +496,12 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
 
   it('stops accepting and drains core-host recordings deterministically', async () => {
     const internals = await boot();
-    let startedAfterClose = false;
+    const getContextGraphAccessPolicy = recorder(async () => 0);
+    internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
     (internals as any).coreHostRecordingsClosed = true;
-    (internals as any).trackCoreHostRecording(async () => { startedAfterClose = true; });
-    expect(startedAfterClose).toBe(false);
+    await expect(internals.recordCoreHostedPublicCg('47')).resolves.toBe('closed');
+    expect(getContextGraphAccessPolicy.calls).toHaveLength(0);
+    expect(internals.subscribedContextGraphs.has('47')).toBe(false);
 
     (internals as any).coreHostRecordingsClosed = false;
     const recordings = (internals as any).coreHostRecordings as Set<Promise<void>>;
@@ -646,9 +657,15 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     it('keeps the placeholder when the hint is not the committed name', async () => {
       const internals = await bootWithPlaceholder();
 
-      await internals.recordCoreHostedPublicCg('7', 'somebody-elses-name');
+      // Rows are keyed by the namespace holding the ACK copy; a namespace that
+      // is not the graph's committed name is refused (the StorageACK gate
+      // declines such a request before any copy exists), and the placeholder
+      // is left for name resolution to adopt.
+      await expect(internals.recordCoreHostedPublicCg('7', 'somebody-elses-name'))
+        .resolves.toBe('namespace-conflict');
 
-      expect(internals.subscribedContextGraphs.get(nameHash)).toMatchObject({ coreHosted: true, onChainId: '7' });
+      expect(internals.subscribedContextGraphs.get(nameHash)).toMatchObject({ onChainId: '7' });
+      expect(internals.subscribedContextGraphs.get(nameHash)?.coreHosted).toBeUndefined();
       expect(internals.subscribedContextGraphs.has('somebody-elses-name')).toBe(false);
     });
   });
@@ -730,7 +747,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
       subscribed: false, syncMode: 'always-on', onChainId: '1', coreHosted: true,
     });
 
-    await internals.recordCoreHostedPublicCg('1');
+    await internals.recordCoreHostedPublicCg('1', 'devnet-test');
 
     expect(isContextGraphActiveOnChain.calls).toEqual([]);
     expect(getContextGraphAccessPolicy.calls).toEqual([]);
@@ -751,9 +768,10 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
 
   it('still reads chain when a core-hosted row is bound to a DIFFERENT on-chain id', async () => {
     // The early-out is keyed on the on-chain id, not just the local row: a
-    // local id re-created under a new chain graph is a first observation.
+    // local id re-created under a new chain graph (the old one deactivated)
+    // is a first observation.
     const internals = await boot();
-    const isContextGraphActiveOnChain = recorder(async () => true);
+    const isContextGraphActiveOnChain = recorder(async (id: bigint) => id !== 5n);
     const getContextGraphAccessPolicy = recorder(async () => 0);
     internals.chain.isContextGraphActiveOnChain = isContextGraphActiveOnChain;
     internals.chain.getContextGraphAccessPolicy = getContextGraphAccessPolicy;
@@ -761,13 +779,32 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
       subscribed: false, onChainId: '5', coreHosted: true, lastReconciledOrdinal: 3,
     });
 
-    await internals.recordCoreHostedPublicCg('9', 'devnet-test');
+    await expect(internals.recordCoreHostedPublicCg('9', 'devnet-test')).resolves.toBe('recorded');
 
-    expect(isContextGraphActiveOnChain.calls).toEqual([[9n]]);
+    expect(isContextGraphActiveOnChain.calls).toEqual([[9n], [5n]]);
     expect(getContextGraphAccessPolicy.calls).toEqual([[9n]]);
     const sub = internals.subscribedContextGraphs.get('devnet-test');
     expect(sub!.onChainId).toBe('9');
     expect(sub!.lastReconciledOrdinal).toBe(0);
+  });
+
+  it('keeps a host-only namespace on its graph while that graph is still live on chain', async () => {
+    // One namespace reconciles one graph: taking it over for graph 9 would
+    // strand the copies graph 5 still owes there.
+    const internals = await boot();
+    internals.chain.isContextGraphActiveOnChain = async () => true;
+    internals.chain.getContextGraphAccessPolicy = async () => 0;
+    internals.subscribedContextGraphs.set('devnet-test', {
+      subscribed: false, onChainId: '5', coreHosted: true, lastReconciledOrdinal: 3,
+    });
+
+    await expect(internals.recordCoreHostedPublicCg('9', 'devnet-test'))
+      .resolves.toBe('namespace-conflict');
+
+    expect(internals.subscribedContextGraphs.get('devnet-test')).toMatchObject({
+      onChainId: '5', lastReconciledOrdinal: 3,
+    });
+    expect(saved).toHaveLength(0);
   });
 
   it('never rebinds a core-hosted row to a DEACTIVATED on-chain id', async () => {
@@ -806,7 +843,9 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(setContextGraphSubscription.calls).toHaveLength(1);
   });
 
-  it('keys the host row under a local mapping that appears while the chain reads are in flight', async () => {
+  it('keys the host row under the ACK copy namespace even when another local row maps the graph', async () => {
+    // The reconciler reads heads and writes VM metadata only in its row's own
+    // namespace, so the row must be the namespace the copy was written to.
     const internals = await boot();
     let resolvePolicy!: (value: number) => void;
     internals.chain.getContextGraphAccessPolicy = () => new Promise<number>((resolve) => {
@@ -819,8 +858,11 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     resolvePolicy(0);
     await recording;
 
-    expect(internals.subscribedContextGraphs.get('local-name')?.coreHosted).toBe(true);
-    expect(internals.subscribedContextGraphs.get('publisher-hint')).toBeUndefined();
+    expect(internals.subscribedContextGraphs.get('publisher-hint')).toMatchObject({
+      coreHosted: true,
+      onChainId: '13',
+    });
+    expect(internals.subscribedContextGraphs.get('local-name')?.coreHosted).toBeUndefined();
   });
 
   it('preserves a pre-existing member subscription while adding coreHosted', async () => {
@@ -836,7 +878,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     expect(sub!.lastReconciledOrdinal).toBe(3);  // watermark preserved
   });
 
-  it('resets the reconcile watermark when an existing local id rebinds to a NEW on-chain id', async () => {
+  it('resets the reconcile watermark when a host-only local id rebinds to a NEW on-chain id', async () => {
     // Regression: a hosted public CG re-created/rebound under the same local id
     // must drop its stale `lastReconciledOrdinal`. The watermark counts
     // contiguous KAs promoted for the OLD chain graph; reusing it would make
@@ -845,9 +887,10 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     // (which zeroes the watermark on an id change) rather than a bare overwrite.
     const internals = await boot();
     internals.chain.getContextGraphAccessPolicy = async () => 0; // public
-    // Existing local row bound to on-chain id 5 with reconcile progress.
+    internals.chain.isContextGraphActiveOnChain = async (id) => id !== 5n; // 5 was retired
+    // Existing host-only row bound to on-chain id 5 with reconcile progress.
     internals.subscribedContextGraphs.set('devnet-test', {
-      subscribed: true, onChainId: '5', lastReconciledOrdinal: 3,
+      subscribed: false, coreHosted: true, onChainId: '5', lastReconciledOrdinal: 3,
     });
     const storageAddr = await internals.chain.getDKGKnowledgeAssetsAddress();
     const ual = buildKnowledgeAssetUal(internals.chain.chainId, storageAddr, 777n);
@@ -860,11 +903,44 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     await internals.recordCoreHostedPublicCg('9', 'devnet-test');
 
     const sub = internals.subscribedContextGraphs.get('devnet-test');
-    expect(sub!.subscribed).toBe(true);            // membership preserved
     expect(sub!.coreHosted).toBe(true);
     expect(sub!.onChainId).toBe('9');              // rebound to the new graph
     expect(sub!.lastReconciledOrdinal).toBe(0);    // stale watermark dropped
     expect(((internals as any).recentReconciledUals as { has(key: string): boolean }).has(recentKey)).toBe(false);
+  });
+
+  it('never rebinds a member subscription from an ACK, and waits for an unbound one', async () => {
+    const internals = await boot();
+    internals.chain.getContextGraphAccessPolicy = async () => 0;
+    internals.subscribedContextGraphs.set('member-graph', {
+      subscribed: true, onChainId: '5', lastReconciledOrdinal: 3,
+    });
+    internals.subscribedContextGraphs.set('unbound-member', { subscribed: true });
+
+    await expect(internals.recordCoreHostedPublicCg('9', 'member-graph'))
+      .resolves.toBe('namespace-conflict');
+    await expect(internals.recordCoreHostedPublicCg('9', 'unbound-member'))
+      .resolves.toBe('binding-pending');
+
+    expect(internals.subscribedContextGraphs.get('member-graph')).toMatchObject({
+      subscribed: true, onChainId: '5', lastReconciledOrdinal: 3,
+    });
+    expect(internals.subscribedContextGraphs.get('member-graph')?.coreHosted).toBeUndefined();
+    expect(internals.subscribedContextGraphs.get('unbound-member')?.onChainId).toBeUndefined();
+    expect(saved).toHaveLength(0);
+  });
+
+  it('leaves a dormant persisted subscription row alone', async () => {
+    // Writing a fresh host-only row over a dormant member row would erase its
+    // member intent and reconcile watermark in the store.
+    const internals = await boot();
+    internals.chain.getContextGraphAccessPolicy = async () => 0;
+    (internals as any).contextGraphSubscriptionDormancyById.set('dormant-graph', 'activationCap');
+
+    await expect(internals.recordCoreHostedPublicCg('9', 'dormant-graph')).resolves.toBe('dormant');
+
+    expect(internals.subscribedContextGraphs.has('dormant-graph')).toBe(false);
+    expect(saved).toHaveLength(0);
   });
 
   it('reclaims binding generations when subscription records are deleted', async () => {
@@ -1082,6 +1158,62 @@ describe('Phase D - VM reconcile damping', () => {
       kaId,
       ual: buildKnowledgeAssetUal(internals.chain.chainId, authorAddress, kaNumber),
     });
+  });
+
+  it('keeps a corrupt SWM head on one KA from failing the whole graph reconcile', async () => {
+    const captured: ReplicationEvent[] = [];
+    agent = await DKGAgent.create({
+      name: 'VmReconcileCorruptHead',
+      chainAdapter: new MockChainAdapter(),
+      onReplicationEvent: (event) => { captured.push(event); },
+    });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'corrupt-head-graph';
+    const onChainCgId = 173n;
+    internals.subscribedContextGraphs.set(localCgId, {
+      subscribed: false,
+      coreHosted: true,
+      onChainId: onChainCgId.toString(),
+      lastReconciledOrdinal: 0,
+    });
+    const corruptKaId = 9173n;
+    const healthyKaId = 9174n;
+    registerUnmatchedKC(internals.chain, corruptKaId, onChainCgId);
+    registerUnmatchedKC(internals.chain, healthyKaId, onChainCgId);
+    const reconcile = recorder(async (input: { kaId: bigint; ual: string }) => {
+      if (input.kaId === corruptKaId) {
+        throw new KnowledgeAssetWorkspaceHeadCorruptError(
+          `Corrupt graph-scoped SWM head for ${input.ual}: incomplete head or operation metadata`,
+        );
+      }
+      return 'promoted' as const;
+    });
+    (internals as any).getOrCreateFinalizationHandler = () => ({
+      handleChainReconciledKC: reconcile,
+    });
+
+    const result = await internals.runVmReconcileForCg(localCgId, 'manual');
+
+    // The healthy ordinal still completes; only the corrupt one stays behind
+    // the watermark for the next sweep.
+    expect(result).toMatchObject({
+      status: 'progress',
+      headOrdinal: 2,
+      watermarkAfter: 0,
+      reconciledOrdinals: 1,
+      unresolvedOrdinals: 1,
+    });
+    expect(reconcile.calls.map(([input]) => input.kaId).sort()).toEqual([corruptKaId, healthyKaId]);
+    expect(captured).toContainEqual(expect.objectContaining({
+      action: 'defer',
+      kaId: corruptKaId.toString(),
+      detail: 'corrupt-swm-head',
+    }));
+    expect(captured).toContainEqual(expect.objectContaining({
+      action: 'promote',
+      kaId: healthyKaId.toString(),
+    }));
   });
 
   it('reuses a successful version snapshot only within the same finalized block', async () => {
@@ -1349,6 +1481,152 @@ describe('Phase D - VM reconcile damping', () => {
       expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(false);
     },
   );
+
+  describe('local first: chain reads only where local state can promote', () => {
+    function countRootReads(chain: MockChainAdapter) {
+      const getLatestMerkleRoot = recorder(chain.getLatestMerkleRoot.bind(chain));
+      const getLatestMerkleRootPublisher = recorder(chain.getLatestMerkleRootPublisher.bind(chain));
+      chain.getLatestMerkleRoot = getLatestMerkleRoot;
+      chain.getLatestMerkleRootPublisher = getLatestMerkleRootPublisher;
+      return { getLatestMerkleRoot, getLatestMerkleRootPublisher };
+    }
+
+    it('queues a KA held nowhere locally for exact recovery without reading its root or publisher', async () => {
+      const captured: ReplicationEvent[] = [];
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({
+        name: 'VmReconcileNoLocalCopy',
+        chainAdapter: chain,
+        onReplicationEvent: (event) => { captured.push(event); },
+      });
+      stubNode(agent);
+      const internals = agent as unknown as AgentInternals;
+      registerUnmatchedKC(chain, 9301n, 301n);
+      const reads = countRootReads(chain);
+      const ual = buildKnowledgeAssetUal(chain.chainId, await chain.getDKGKnowledgeAssetsAddress(), 9301n);
+
+      const outcome = await internals.reconcileChainOrdinal('301', 301n, 0, 100, { deferActiveFetch: true });
+
+      expect(outcome).toEqual({
+        status: 'pending',
+        recovery: {
+          localCgId: '301',
+          onChainCgId: '301',
+          ordinal: 0,
+          ual,
+          merkleRoot: '',
+          kaId: '9301',
+          reason: 'no-swm',
+        },
+      });
+      expect(reads.getLatestMerkleRoot.calls).toHaveLength(0);
+      expect(reads.getLatestMerkleRootPublisher.calls).toHaveLength(0);
+      expect(captured).toContainEqual(expect.objectContaining({
+        action: 'defer',
+        ordinal: 0,
+        detail: 'no-local-copy',
+      }));
+    });
+
+    it('keeps an ordinal held nowhere locally deferred across sweeps with zero root reads', async () => {
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({ name: 'VmReconcileNoLocalCopySweep', chainAdapter: chain });
+      stubNode(agent);
+      const internals = agent as unknown as AgentInternals;
+      internals.subscribedContextGraphs.set('302', {
+        subscribed: false,
+        coreHosted: true,
+        onChainId: '302',
+        lastReconciledOrdinal: 0,
+      });
+      registerUnmatchedKC(chain, 9302n, 302n);
+      const reads = countRootReads(chain);
+      const recoveryTargets: OrdinalRecoveryTarget[][] = [];
+      internals.recoverVmReconcileBatch = async (_lcg, _ocg, targets) => {
+        recoveryTargets.push([...targets]);
+        return {
+          outcomes: new Map(),
+          attemptedOrdinals: [],
+          continuationOrdinal: undefined,
+          hasImmediateRecoveryWork: false,
+        };
+      };
+
+      for (let sweep = 0; sweep < 3; sweep += 1) {
+        await expect(internals.runVmReconcileForCg('302', 'manual')).resolves.toMatchObject({
+          status: 'pending',
+          watermarkAfter: 0,
+          unresolvedOrdinals: 1,
+        });
+      }
+
+      expect(reads.getLatestMerkleRoot.calls).toHaveLength(0);
+      expect(reads.getLatestMerkleRootPublisher.calls).toHaveLength(0);
+      expect(recoveryTargets).toHaveLength(3);
+      expect(recoveryTargets.flat().map((target) => [target.ordinal, target.reason]))
+        .toEqual([[0, 'no-swm'], [0, 'no-swm'], [0, 'no-swm']]);
+    });
+
+    it('reads the chain for a local SWM copy, then settles the promoted KA locally', async () => {
+      const captured: ReplicationEvent[] = [];
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({
+        name: 'VmReconcileLocalCopy',
+        chainAdapter: chain,
+        onReplicationEvent: (event) => { captured.push(event); },
+      });
+      stubNode(agent);
+      const internals = agent as unknown as AgentInternals;
+      const root = await seedSwmSnapshot(internals.store, '303', 'urn:fact:local-copy', 'Local copy');
+      registerUnmatchedKC(chain, 9303n, 303n, bytesToHex(root));
+      const reads = countRootReads(chain);
+
+      await expect(internals.reconcileChainOrdinal('303', 303n, 0, 100, { deferActiveFetch: true }))
+        .resolves.toEqual({ status: 'reconciled', blockNumber: 100 });
+      expect(reads.getLatestMerkleRoot.calls).toHaveLength(1);
+      expect(reads.getLatestMerkleRootPublisher.calls).toHaveLength(1);
+      const vmGraph = 'did:dkg:context-graph:303/context/303';
+      await expect(internals.store.query(
+        `ASK { GRAPH <${vmGraph}> { <urn:fact:local-copy> <http://schema.org/name> "Local copy" } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+
+      // A later visit (a new sweep cycle, or any restart) finds the confirmed
+      // copy and settles it exactly as before, without another chain read.
+      const target = {
+        ...vmRecoveryTarget('303', 0, '9303'),
+        onChainCgId: '303',
+      };
+      const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
+      (internals as any).prepareVmReconcileRotationTarget(target, ['12D3KooWSettledPeer'], 100);
+      await expect(internals.reconcileChainOrdinal('303', 303n, 0, 101, { deferActiveFetch: true }))
+        .resolves.toEqual({ status: 'already', blockNumber: 101 });
+      expect(reads.getLatestMerkleRoot.calls).toHaveLength(1);
+      expect(reads.getLatestMerkleRootPublisher.calls).toHaveLength(1);
+      expect((internals as any).vmReconcileRotationState.has(slotKey)).toBe(false);
+      expect(captured).toContainEqual(expect.objectContaining({
+        action: 'already',
+        ordinal: 0,
+        detail: 'local-vm',
+      }));
+    });
+
+    it('keeps the chain path for a KA held nowhere locally while its graph has legacy SWM', async () => {
+      const chain = new MockChainAdapter();
+      agent = await DKGAgent.create({ name: 'VmReconcileLegacyNamespace', chainAdapter: chain });
+      stubNode(agent);
+      const internals = agent as unknown as AgentInternals;
+      // An unrelated entity-share operation: the root-matched legacy scan
+      // cannot rule it out for this KA without the chain root.
+      await seedSwmSnapshot(internals.store, '304', 'urn:fact:unrelated', 'Unrelated share');
+      registerUnmatchedKC(chain, 9304n, 304n);
+      const reads = countRootReads(chain);
+
+      await expect(internals.reconcileChainOrdinal('304', 304n, 0, 100, { deferActiveFetch: true }))
+        .resolves.toMatchObject({ status: 'pending', recovery: { reason: 'no-swm' } });
+      expect(reads.getLatestMerkleRoot.calls).toHaveLength(1);
+      expect(reads.getLatestMerkleRootPublisher.calls).toHaveLength(1);
+    });
+  });
 
   it('negative-caches a missing SWM snapshot and skips the expensive scan plus active fetch during backoff', async () => {
     const internals = await boot();
@@ -1825,7 +2103,7 @@ describe('Phase D - VM reconcile damping', () => {
     expect(expensiveScans).toBeGreaterThan(0);
 
     expensiveScans = 0;
-    (internals as any).knownCorePeerIds.add('peer-reclassified');
+    (internals as any).peerCapabilityRegistry.observe('peer-reclassified', { source: 'peer-update', protocols: [PROTOCOL_STORAGE_ACK] });
 
     await expect(internals.reconcileChainOrdinal('56', onChainCgId, 0, undefined)).resolves.toEqual({ status: 'pending' });
     // Fetch re-ran for the reclassified peer (sweep entry not reused); the
@@ -6304,5 +6582,190 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     };
 
     await expect(internals.runVmReconcileForCg('500')).rejects.toBe(failure);
+  });
+
+  it('reads the chain only for the promotable ordinals of a mixed graph', async () => {
+    const author = '0x9277a1a194fcadbb60d8df0c472e7909ead50e33';
+    const captured: ReplicationEvent[] = [];
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'CoreFillMixedGraph',
+      chainAdapter: chain,
+      onReplicationEvent: (event) => { captured.push(event); },
+    });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const { contextGraphId } = await chain.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+    });
+    const localCgId = contextGraphId.toString();
+    internals.subscribedContextGraphs.set(localCgId, {
+      subscribed: false,
+      coreHosted: true,
+      onChainId: localCgId,
+      lastReconciledOrdinal: 0,
+    });
+    chain.getLatestMerkleRootAuthor = async () => author;
+    const graphManager = new GraphManager(internals.store);
+    const kinds = ['deferred', 'already', 'promotable', 'already', 'deferred', 'promotable'] as const;
+    const assets = kinds.map((kind, ordinal) => {
+      const kaNumber = BigInt(ordinal + 1);
+      const kaId = packKnowledgeAssetIdFromIdentity({ agentAddress: author, kaNumber });
+      const entity = `urn:mixed:${ordinal}`;
+      const root = computeFlatKCRootV10(
+        [{ subject: entity, predicate: 'http://schema.org/name', object: `"${kind}"`, graph: '' }],
+        [],
+      );
+      chain.__registerKC({
+        kaId,
+        contextGraphId: BigInt(localCgId),
+        merkleRootHex: ethers.hexlify(root),
+        chunks: [],
+      });
+      return { ordinal, kind, kaId, kaNumber, entity };
+    });
+    const stageSharedMemory = async (asset: typeof assets[number]): Promise<void> => {
+      const scope = createGraphKnowledgeAssetScope(
+        buildKnowledgeAssetUal(chain.chainId, author, asset.kaNumber),
+        '1',
+      );
+      const swmGraph = knowledgeAssetLayerGraphUri(localCgId, MemoryLayer.SharedWorkingMemory, scope);
+      const quads = [{
+        subject: asset.entity,
+        predicate: 'http://schema.org/name',
+        object: `"${asset.kind}"`,
+        graph: swmGraph,
+      }];
+      await internals.store.insert(quads);
+      await storeKnowledgeAssetOperationPublicQuads({
+        store: internals.store,
+        graphManager,
+        contextGraphId: localCgId,
+        shareOperationId: `mixed-share-${asset.ordinal}`,
+        kaUal: scope.ual,
+        assertionVersion: scope.assertionVersion,
+        quads,
+        privateTripleCount: 0,
+        publisherPeerId: '12D3KooWMixedPublisher',
+      });
+      await storeKnowledgeAssetWorkspaceHead({
+        store: internals.store,
+        graphManager,
+        contextGraphId: localCgId,
+        shareOperationId: `mixed-share-${asset.ordinal}`,
+        kaUal: scope.ual,
+        assertionVersion: scope.assertionVersion,
+      });
+    };
+    const recoveryTargets: OrdinalRecoveryTarget[] = [];
+    internals.recoverVmReconcileBatch = async (_lcg, _ocg, targets) => {
+      recoveryTargets.push(...targets);
+      return {
+        outcomes: new Map(),
+        attemptedOrdinals: [],
+        continuationOrdinal: undefined,
+        hasImmediateRecoveryWork: false,
+      };
+    };
+
+    // Promote the 'already' assets through the real path, then forget the
+    // process-local cursor the way a restart does.
+    for (const asset of assets) if (asset.kind === 'already') await stageSharedMemory(asset);
+    await internals.executeVmReconcileForCg(localCgId, 'periodic');
+    (internals as any).reconcileCursors.delete(localCgId);
+    for (const asset of assets) if (asset.kind === 'promotable') await stageSharedMemory(asset);
+    const kindByKaId = new Map(assets.map((asset) => [asset.kaId, asset.kind]));
+    const getLatestMerkleRoot = recorder(chain.getLatestMerkleRoot.bind(chain));
+    const getLatestMerkleRootPublisher = recorder(chain.getLatestMerkleRootPublisher.bind(chain));
+    chain.getLatestMerkleRoot = getLatestMerkleRoot;
+    chain.getLatestMerkleRootPublisher = getLatestMerkleRootPublisher;
+    recoveryTargets.length = 0;
+    captured.length = 0;
+
+    const result = await internals.executeVmReconcileForCg(localCgId, 'periodic');
+
+    expect(result).toMatchObject({
+      headOrdinal: 6,
+      watermarkAfter: 0,
+      reconciledOrdinals: 4,
+      unresolvedOrdinals: 2,
+    });
+    const readKinds = (calls: Array<[bigint, ...unknown[]]>) =>
+      [...new Set(calls.map(([kaId]) => kindByKaId.get(kaId)))];
+    expect(readKinds(getLatestMerkleRoot.calls as Array<[bigint]>)).toEqual(['promotable']);
+    expect(readKinds(getLatestMerkleRootPublisher.calls as Array<[bigint]>)).toEqual(['promotable']);
+    for (const asset of assets.filter((candidate) => candidate.kind !== 'deferred')) {
+      await expect(internals.store.query(
+        `ASK { GRAPH ?vm { <${asset.entity}> ?p ?o } FILTER(CONTAINS(STR(?vm), "_verifiable_memory")) }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+    }
+    expect(recoveryTargets.map((target) => [target.ordinal, target.reason, target.merkleRoot]))
+      .toEqual([[0, 'no-swm', ''], [4, 'no-swm', '']]);
+    const actionsByOrdinal = new Map(captured
+      .filter((event) => event.ordinal !== undefined)
+      .map((event) => [event.ordinal!, `${event.action}:${event.detail ?? ''}`]));
+    expect(Object.fromEntries(actionsByOrdinal)).toEqual({
+      0: 'defer:no-local-copy',
+      1: 'already:local-vm',
+      2: 'promote:',
+      3: 'already:local-vm',
+      4: 'defer:no-local-copy',
+      5: 'promote:',
+    });
+  });
+
+  it('keeps settled ordinals and the scan position when one ordinal keeps throwing', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'CoreFillThrowingOrdinal', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const localCgId = 'throwing-ordinal';
+    internals.subscribedContextGraphs.set(localCgId, {
+      subscribed: false,
+      coreHosted: true,
+      onChainId: '331',
+      lastReconciledOrdinal: 0,
+    });
+    for (let ordinal = 0; ordinal < 12; ordinal += 1) {
+      chain.__registerKC({
+        kaId: BigInt(33_100 + ordinal),
+        contextGraphId: 331n,
+        merkleRootHex: `0x${(33_100 + ordinal).toString(16).padStart(64, '0')}`,
+        chunks: [],
+      });
+    }
+    const failingKaId = 33_103n;
+    const visits = new Map<number, number>();
+    (internals as any).getOrCreateFinalizationHandler = () => ({
+      handleChainReconciledKC: async (input: { kaId: bigint }) => {
+        const ordinal = Number(input.kaId - 33_100n);
+        visits.set(ordinal, (visits.get(ordinal) ?? 0) + 1);
+        if (input.kaId === failingKaId) throw new Error('store deadline exceeded');
+        return 'already-confirmed' as const;
+      },
+    });
+
+    const outcomes: string[] = [];
+    for (let pass = 0; pass < 3; pass += 1) {
+      await internals.executeVmReconcileForCg(localCgId, 'periodic').then(
+        (result) => { outcomes.push(`ok:${result.watermarkAfter}`); },
+        (error: Error) => { outcomes.push(`failed:${error.message}`); },
+      );
+    }
+
+    // Before: every pass restarted at the failing slice and re-read its
+    // settled siblings, and ordinals past that slice were never reached.
+    expect(outcomes).toEqual([
+      'failed:store deadline exceeded',
+      'ok:3',
+      'failed:store deadline exceeded',
+    ]);
+    expect([...visits.keys()].sort((a, b) => a - b)).toEqual(
+      Array.from({ length: 12 }, (_, ordinal) => ordinal),
+    );
+    for (const [ordinal, count] of visits) {
+      expect({ ordinal, count }).toEqual({ ordinal, count: ordinal === 3 ? 2 : 1 });
+    }
   });
 });

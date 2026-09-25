@@ -13,6 +13,10 @@ import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
+import { PeerCapabilityRegistry } from './p2p/peer-capability.js';
+import { ACKCandidateDiscoveryCoordinator } from './p2p/ack-candidate-discovery.js';
+import type { StorageACKEndpoint } from './p2p/storage-ack-endpoint.js';
+import { StorageACKRegistrationRuntime } from './p2p/storage-ack-registration-runtime.js';
 import {
   openRfc64PersistenceV1,
   type Rfc64PersistenceV1,
@@ -54,7 +58,7 @@ import type { Rfc64SwmRecoveryRuntimeV1 } from
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
-  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
+  PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE, PROTOCOL_STORAGE_ACK, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
@@ -439,6 +443,7 @@ import { ContextGraphMetaProjection } from './context-graph-meta-projection.js';
 import { ContextGraphJoinAdmissionLockManager } from './context-graph-join-admission-lock.js';
 import { ContextGraphMembershipMutationStore } from './context-graph-membership-mutation.js';
 import { LocalContextGraphProvenance } from './local-context-graph-provenance.js';
+import { createVmPromotionAuditStatus, type VmPromotionAuditStatus } from './vm-promotion-audit.js';
 import type {
   ContextGraphStorageDiscovery,
   OnChainContextGraphFacts,
@@ -969,6 +974,53 @@ export class DKGAgentBase {
 
   /** Maximum expired SWM operations selected in one cleanup batch. */
   static readonly SWM_CLEANUP_BATCH_SIZE = 250;
+  /**
+   * Hard ceiling on how long the SWM TTL cleanup keeps a StorageACK copy
+   * whose Knowledge Asset never reached this core's VM (default 90 days,
+   * three mainnet epochs). The ACK promotion audit expires such a copy sooner
+   * once the chain proves the KA was never registered; this bound covers
+   * copies it has not proven yet. ACK signatures carry no chain deadline.
+   */
+  static readonly STORAGE_ACK_RETENTION_MAX_MS = readPositiveSafeIntegerEnv(
+    'DKG_STORAGE_ACK_RETENTION_MAX_MS',
+    90 * 24 * 60 * 60_000,
+  );
+  /** Period of the ACK promotion audit (core-hosted backfill + watchdog). */
+  static readonly VM_PROMOTION_AUDIT_INTERVAL_MS = readPositiveSafeIntegerEnv(
+    'DKG_VM_PROMOTION_AUDIT_INTERVAL_MS',
+    15 * 60_000,
+  );
+  /**
+   * A signed ACK copy this young may still land (quorum round plus inclusion),
+   * so a same-version request with different content cannot replace it yet.
+   */
+  static readonly STORAGE_ACK_PENDING_TX_WINDOW_MS = readPositiveSafeIntegerEnv(
+    'DKG_STORAGE_ACK_PENDING_TX_WINDOW_MS',
+    5 * 60_000,
+  );
+  /** An ACKed KA not in VM this long after its ACK is reported as stalled. */
+  static readonly VM_PROMOTION_STALL_THRESHOLD_MS = readPositiveSafeIntegerEnv(
+    'DKG_VM_PROMOTION_STALL_THRESHOLD_MS',
+    30 * 60_000,
+  );
+  /** Graphs one audit pass may record as core-hosted (bounded RPC). */
+  static readonly VM_PROMOTION_AUDIT_MAX_RECORDS = 32;
+  /**
+   * Per-KA chain registration reads one audit pass may spend. The pass stops
+   * at the first copy it has no budget for and the next pass resumes there,
+   * so the keyset rotation reaches every copy.
+   */
+  static readonly VM_PROMOTION_AUDIT_MAX_CHAIN_CHECKS = 32;
+  /** Ledgered copies one audit pass examines (local reads only), keyset paged. */
+  static readonly VM_PROMOTION_AUDIT_PAGE_SIZE = 1_000;
+  /** Ledger namespaces one backfill pass pages through. */
+  static readonly VM_PROMOTION_BACKFILL_PAGE_SIZE = 256;
+  /** Per-asset VM reconciles one audit pass may run for landed copies. */
+  static readonly VM_PROMOTION_AUDIT_MAX_RECONCILES = 16;
+  /** Ledgered update copies one pending-update run pages through (keyset). */
+  static readonly VM_PROMOTION_UPDATE_PAGE_SIZE = 64;
+  /** Pending-update lane: chain reads and per-asset reconciles per run. */
+  static readonly VM_PROMOTION_UPDATE_MAX_CHECKS = 8;
 
   /**
    * Phase B — chain-driven VM reconciliation sweep cadence. The periodic sweep
@@ -1138,15 +1190,64 @@ export class DKGAgentBase {
       snapshot: KnowledgeAssetVersionSnapshot;
     }>();
   /**
-   * In-flight core-hosted recordings launched from the synchronous StorageACK
-   * pre-sign hook. Tracked so rejections are logged and graceful stop() can
-   * flush the host-only `coreHosted` flag before teardown.
+   * In-flight core-hosted recordings awaited by the StorageACK finality gate
+   * and the ACK promotion audit. Tracked so graceful stop() can flush the
+   * host-only `coreHosted` flag before teardown.
    */
   protected readonly coreHostRecordings = new Set<Promise<void>>();
   /** Stop-time gate: once true, ACK hooks must not start new core-host writes. */
   protected coreHostRecordingsClosed = false;
   /** Monotonic guard: continuations from abandoned drain generations must not persist after restart. */
   protected coreHostRecordingGeneration = 0;
+  /**
+   * `<localCgId>\0<onChainId>` keys whose core-hosted row this process has
+   * written through the strict subscription-store path. The StorageACK
+   * finality gate pays that write once per graph, not once per ACK.
+   */
+  protected readonly coreHostedDurableRecords = new Set<string>();
+  /** One in-flight finality-gate recording per graph, shared by concurrent ACKs. */
+  protected readonly storageAckVmPromotionFlights = new Map<string, Promise<unknown>>();
+  /** Per-asset promotions requested by declined update ACKs, one per asset. */
+  protected readonly storageAckPriorVersionFlights = new Map<string, Promise<unknown>>();
+  /** Such promotions waiting for a slot. */
+  protected readonly storageAckPriorVersionQueue = new Map<string, {
+    candidate: import('./vm-promotion-audit.js').StorageAckLedgerCandidate;
+    onChainId: string;
+  }>();
+  /** `<namespace>\0<onChainId>` pairs whose ACK namespace binding this process verified. */
+  protected readonly storageAckNamespaceBindings = new Set<string>();
+  /** When the gate first declined a namespace for a dormant subscription row. */
+  protected readonly storageAckDormantSince = new Map<string, number>();
+  /** Core ACK promotion audit (core-hosted backfill + promotion watchdog). */
+  protected vmPromotionAuditStartupTimer: ReturnType<typeof setTimeout> | null = null;
+  protected vmPromotionAuditTimer: ReturnType<typeof setInterval> | null = null;
+  protected vmPromotionAuditInFlight: Promise<void> | null = null;
+  protected readonly vmPromotionAuditStatus: VmPromotionAuditStatus = createVmPromotionAuditStatus();
+  /** Discovered namespaces whose backfill concluded (recorded or ineligible) in this process. */
+  protected readonly vmPromotionBackfillSettled = new Set<string>();
+  /** Namespaces whose backfill failed, backing off so they cannot hold every pass's slots. */
+  protected readonly vmPromotionBackfillBackoff = new Map<string, { failures: number; nextAttemptAt: number }>();
+  /** Keyset cursors: the backfill pages ledger namespaces, the audit ledger copies. */
+  protected vmPromotionBackfillCursor = '';
+  protected vmPromotionAuditCursor = '';
+  protected vmPromotionUpdateCursor = '';
+  /** Pending-update promotion (fast lane, VM sweep cadence). */
+  protected vmPromotionUpdateTimer: ReturnType<typeof setInterval> | null = null;
+  protected vmPromotionUpdateInFlight: Promise<void> | null = null;
+  /** Per ACK-copy backoff for the pending-update lane. */
+  protected readonly vmPromotionUpdateBackoff = new Map<string, { failures: number; nextAttemptAt: number }>();
+  /** The signed-ACK ledger is initialized and pre-ledger copies grandfathered. */
+  protected storageAckLedgerReady = false;
+  protected storageAckLedgerReadyFlight: Promise<boolean> | null = null;
+  protected readonly storageACKRegistrationRuntime = new StorageACKRegistrationRuntime();
+  protected get storageAckEndpoint(): StorageACKEndpoint | null {
+    return this.storageACKRegistrationRuntime.endpoint;
+  }
+  protected get storageAckHandlerRegistered(): boolean {
+    return this.storageACKRegistrationRuntime.registered;
+  }
+  /** StorageACK declines per minute bucket and code, for the last hour. */
+  protected readonly storageAckDeclineBuckets = new Map<number, Map<string, number>>();
   /** Phase D/A4 — per-UAL retry damping after a chain ordinal has no matching local SWM snapshot. */
   protected readonly vmReconcileNegativeCache = new Map<
     string,
@@ -1225,8 +1326,6 @@ export class DKGAgentBase {
    */
   protected messengerOutboxTimer: ReturnType<typeof setInterval> | null = null;
   protected randomSamplingRuntime: RandomSamplingRuntime | null = null;
-  protected storageACKRegistrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
-  protected storageACKRegistrationRetryInFlight = false;
   // #894 / Codex PR #901 round-3 :1685: `ensureProfile()` is a mutating
   // multi-tx flow (createProfile + stake) that can legitimately outlast the
   // boot read-timeout. Guards against the boot path AND the StorageACK retry
@@ -1620,8 +1719,8 @@ export class DKGAgentBase {
    */
   protected readonly onChainParticipantAgentsCache = new Map<string, string[]>();
   protected readonly peerHealth = new Map<string, PeerHealth>();
-  protected readonly knownCorePeerIds = new Set<string>();
-  protected readonly knownCorePeerIdsV2 = new Set<string>();
+  protected readonly peerCapabilityRegistry = new PeerCapabilityRegistry();
+  protected readonly ackCandidateDiscovery = new ACKCandidateDiscoveryCoordinator(this.peerCapabilityRegistry);
   /**
    * Last chain-reported ACK quorum (ParametersStorage
    * minimumRequiredSignatures), refreshed by the V10 ACK provider before

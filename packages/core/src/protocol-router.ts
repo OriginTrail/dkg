@@ -2,6 +2,8 @@ import type { Stream } from '@libp2p/interface';
 import type { StreamHandler as DKGStreamHandler } from './types.js';
 import type { DKGNode } from './node.js';
 import type { PeerResolver } from './network/peer-resolver.js';
+import type { Network } from './network/network.js';
+import { LibP2PNetwork } from './network/libp2p-network.js';
 import {
   MessageStreamPool,
   POOLED_MESSAGE_PROTOCOL,
@@ -16,6 +18,8 @@ export const DEFAULT_MAX_READ_BYTES = 10 * 1024 * 1024;
 
 /** Default timeout for send() (ms). Sync over relay may need longer; callers can pass a higher value. */
 export const DEFAULT_SEND_TIMEOUT_MS = 20_000;
+
+export type ProtocolProbeOutcome = 'supported' | 'unsupported' | 'unavailable';
 
 /**
  * Returns true if the error is recoverable (retry with backoff).
@@ -127,6 +131,8 @@ export interface AdmissionCheckOptions {
 
 export interface ProtocolRouterOptions {
   maxReadBytes?: number;
+  /** Shared outbound transport, normally the same instance used by PeerResolver. */
+  network?: Network;
   /**
    * RFC 07 §3.2 — when present, `send()` consults the resolver before
    * dialing so the libp2p peerStore is primed with whatever multiaddrs
@@ -229,6 +235,7 @@ export class QuietRetryableHandlerError extends Error {
 
 export class ProtocolRouter {
   private readonly node: DKGNode;
+  private readonly network: Network;
   private readonly peerResolver?: PeerResolver;
   private readonly isPeerAccepted?: ProtocolRouterOptions['isPeerAccepted'];
   private readonly isPeerKnownRejected?: ProtocolRouterOptions['isPeerKnownRejected'];
@@ -275,6 +282,7 @@ export class ProtocolRouter {
 
   constructor(node: DKGNode, options?: ProtocolRouterOptions) {
     this.node = node;
+    this.network = options?.network ?? new LibP2PNetwork(node);
     this.peerResolver = options?.peerResolver;
     this.isPeerAccepted = options?.isPeerAccepted;
     this.isPeerKnownRejected = options?.isPeerKnownRejected;
@@ -652,6 +660,35 @@ export class ProtocolRouter {
       throw err;
     } finally {
       m.protocolSendDuration.record(Date.now() - startedAt, { protocol_id: protocolId });
+    }
+  }
+
+  /**
+   * Check a peer's current protocol capability without sending an application
+   * request. Identify records can lag a handler registered after connection;
+   * multistream negotiation reflects the live handler table. A successful
+   * probe opens and immediately aborts the stream before any payload bytes.
+   */
+  async probeProtocol(peerIdStr: string, protocolId: string, timeoutMs = 3_000): Promise<ProtocolProbeOutcome> {
+    const deadline = AbortSignal.timeout(timeoutMs);
+    const signal = composeAbortSignals(deadline, this.node.stopSignal) ?? deadline;
+    try {
+      await this.requirePeerAccepted(peerIdStr, protocolId, 'outbound', { signal, timeoutMs });
+      // Match send()'s resolver contract before opening a stream. For the
+      // connected peers this probe targets, its live-connection step is fast;
+      // it also primes a route if the connection closes during admission.
+      await this.peerResolver?.resolve(peerIdStr, { signal, perStepTimeoutMs: timeoutMs });
+      const stream = await this.network.dialProtocol(peerIdStr, protocolId, { signal, timeoutMs });
+      try {
+        stream.abort(new Error('protocol capability probe complete'));
+      } catch {
+        // Negotiation already established capability; a closing stream may
+        // reject the abort after the remote has closed its side.
+      }
+      return 'supported';
+    } catch (error) {
+      if (this.node.stopSignal?.aborted) throw error;
+      return isProtocolUnsupportedError(error) ? 'unsupported' : 'unavailable';
     }
   }
 
@@ -1062,10 +1099,7 @@ export class ProtocolRouter {
           stream = fastStream;
         } else {
           attemptedNormalDial = true;
-          stream = await libp2p.dialProtocol(peerId, protocolId, {
-            runOnLimitedConnection: true,
-            signal: attemptSignal,
-          });
+          stream = await this.network.dialProtocol(peerIdStr, protocolId, { signal: attemptSignal });
         }
         const dialDurationMs = Date.now() - dialStartedAt;
 

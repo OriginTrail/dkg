@@ -62,7 +62,9 @@ describe.each(cases)('$name HTTP cancellation conformance', ({ create }) => {
       });
     }) as typeof fetch;
 
-    const store = create();
+    // This test asserts admission ordering, not a 5 ms deadline. Give the
+    // immediate successful retry enough time on a loaded CI runner.
+    const store = create(500);
     await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toBeDefined();
     expect(active).toBe(0);
 

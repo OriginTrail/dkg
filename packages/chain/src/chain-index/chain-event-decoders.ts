@@ -172,11 +172,13 @@ export class ChainEventDecoderRegistry {
     if (fragment === null) {
       throw new Error('ContextGraphStorage ABI is missing KnowledgeAssetRegisteredToContextGraph');
     }
+    const topic0 = fragment.topicHash.toLowerCase();
+    const canonical = hasCanonicalRegistrationShape(fragment) ? topic0 : undefined;
     return this.#register<ContextGraphKaRegistration>({
       family: 'context-graph-ka',
       address,
-      topic0: [fragment.topicHash.toLowerCase()],
-      decode: (row) => decodeContextGraphKaRegistration(contractInterface, row),
+      topic0: [topic0],
+      decode: (row) => decodeContextGraphKaRegistration(contractInterface, row, canonical),
     });
   }
 
@@ -267,6 +269,24 @@ export class ChainEventDecoderRegistry {
       addresses: Object.freeze([...addresses].sort()),
       topic0: Object.freeze([...topic0].sort()),
     });
+  }
+
+  /**
+   * The topic0s ONE family claims at ONE address, sorted; empty when nothing
+   * is registered there.
+   *
+   * A reader that pre-filters the log by topic0 must take the set from here,
+   * the same table {@link ChainEventDecoderRegistry.decodeContextGraphKaRegistrations}
+   * dispatches on, so a row the filter lets through is exactly a row the
+   * decoder would have claimed from an unfiltered read.
+   */
+  topic0For(family: ChainEventLogFamily, address: string): readonly string[] {
+    const normalized = normalizeChainEventLogAddress(address);
+    if (normalized === undefined) return Object.freeze([]);
+    return Object.freeze((this.#byAddress.get(normalized) ?? [])
+      .filter((source) => source.family === family)
+      .flatMap((source) => source.topic0)
+      .sort());
   }
 
   addressesFor(family: ChainEventLogFamily): readonly string[] {
@@ -366,10 +386,53 @@ function positionOf(row: ChainEventLogRow): ChainEventLogPosition {
   };
 }
 
+const CANONICAL_TOPIC = /^0x[0-9a-f]{64}$/;
+
+/**
+ * `KnowledgeAssetRegisteredToContextGraph(uint256 indexed contextGraphId,
+ * uint256 indexed kaId)`, non-anonymous, exactly as the ABI this package ships.
+ *
+ * Only then is the fast decode below the same function as `parseLog`: an
+ * indexed uint256 IS its 32-byte topic word, read big-endian and unsigned. Any
+ * other shape (a renamed, reordered or re-typed ABI) keeps the ethers decode.
+ */
+function hasCanonicalRegistrationShape(fragment: ethers.EventFragment): boolean {
+  const [contextGraphId, kaId, ...rest] = fragment.inputs;
+  return !fragment.anonymous
+    && rest.length === 0
+    && contextGraphId?.name === 'contextGraphId'
+    && contextGraphId.type === 'uint256'
+    && contextGraphId.indexed === true
+    && kaId?.name === 'kaId'
+    && kaId.type === 'uint256'
+    && kaId.indexed === true;
+}
+
 function decodeContextGraphKaRegistration(
   contractInterface: ethers.Interface,
   row: ChainEventLogRow,
+  canonicalTopic0: string | undefined,
 ): ContextGraphKaRegistration {
+  // The fast path, for the row the tick actually stores: three lowercase
+  // 32-byte topics under this event's own topic0 and no data. `parseLog` on it
+  // resolves the fragment by hashing the signature of every event in the ABI
+  // (~150 us a row, 4.5 s for a 30k-registration graph); what it returns for
+  // this shape is the two topic words as unsigned integers, which is all this
+  // does. Anything else, malformed rows included, takes `parseLog` and gets its
+  // answer or its error, as before.
+  const [topic0, contextGraphTopic, kaTopic] = row.topics;
+  if (canonicalTopic0 !== undefined
+    && row.topics.length === 3
+    && topic0 === canonicalTopic0
+    && row.data === '0x'
+    && CANONICAL_TOPIC.test(contextGraphTopic!)
+    && CANONICAL_TOPIC.test(kaTopic!)) {
+    return Object.freeze({
+      ...positionOf(row),
+      contextGraphId: BigInt(contextGraphTopic!),
+      kaId: BigInt(kaTopic!),
+    });
+  }
   const parsed = contractInterface.parseLog({ topics: [...row.topics], data: row.data });
   if (parsed === null) {
     throw new Error('KnowledgeAssetRegisteredToContextGraph could not be decoded');

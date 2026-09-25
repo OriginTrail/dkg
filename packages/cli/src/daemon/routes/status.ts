@@ -66,6 +66,7 @@ import {
   DKGAgent,
   loadOpWallets,
   resolveSyncReconcilerEnabled,
+  resolveVmReconcilerEnabled,
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
@@ -128,7 +129,7 @@ import { buildRelayStatusBlock } from '../relay-status-block.js';
 import { fetchAllEntries, resolveRegistryConfig } from '../../integrations/registry-client.js';
 import type { IntegrationEntry, TrustTier } from '../../integrations/schema.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { loadTokens, httpAuthGuard, extractBearerToken, canAdministerNode } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -344,8 +345,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
-import { actorFromRequestContext } from './context.js';
+import { actorFromRequestContext, type RequestContext } from './context.js';
 
 // In-process cache for the dkg-integrations registry. Sidebar polls
 // open/close and 60s refresh would otherwise hit GitHub on every tick;
@@ -496,6 +496,7 @@ function projectRfc64SelectedPublicSyncStatus(
   agent: DKGAgent,
   networkDefaultContextGraphs: readonly string[],
   catalogBackedContextGraphs: readonly string[],
+  isNodeAdmin: boolean,
 ) {
   // This is the effective requested sync scope, not proof that every listed
   // graph is public. Runtime classification still decides whether a graph uses
@@ -504,10 +505,18 @@ function projectRfc64SelectedPublicSyncStatus(
     ...agent.getSyncContextGraphIds(),
     ...networkDefaultContextGraphs,
   ])];
+  const catalogBacked = new Set(catalogBackedContextGraphs);
+  // `/api/status` is unauthenticated, and the scope names private graphs and
+  // the cleartext ids of adopted name hashes. A caller without node-admin
+  // authority sees only the selected public catalog graphs, which this
+  // response already lists, and a count of the whole scope.
   return {
     defaultEnabled: true,
-    requestedContextGraphs,
-    catalogBackedContextGraphs: [...new Set(catalogBackedContextGraphs)],
+    requestedContextGraphs: isNodeAdmin
+      ? requestedContextGraphs
+      : requestedContextGraphs.filter((contextGraphId) => catalogBacked.has(contextGraphId)),
+    requestedContextGraphCount: requestedContextGraphs.length,
+    catalogBackedContextGraphs: [...catalogBacked],
   };
 }
 
@@ -515,22 +524,38 @@ function projectRfc64SelectedPublicSyncStatus(
  * Aggregate-only view of subscriptions this node knows only by their on-chain
  * name hash. `/api/status` is unauthenticated, so it never names the affected
  * graphs; the admin-only `GET /api/context-graph/subscriptions` has the rows.
+ * Those blocked by a conflicting binding are counted apart: no peer can
+ * unblock them, so "waiting for a peer" would be wrong advice.
  */
 export function summarizeContextGraphIdentityStatus(
   agent: DKGAgent,
-): { nameHashOnly: number; message?: string } {
+): { nameHashOnly: number; bindingConflicts?: number; message?: string } {
   let nameHashOnly = 0;
+  let bindingConflicts = 0;
   for (const [contextGraphId, subscription] of agent.getSubscribedContextGraphs?.() ?? []) {
     if (subscription?.subscribed !== true) continue;
-    const state = agent.describeContextGraphIdentity?.(contextGraphId)?.state;
-    if (state === 'name-hash-only' || state === 'name-hash-only-private') nameHashOnly += 1;
+    const identity = agent.describeContextGraphIdentity?.(contextGraphId);
+    if (identity?.state !== 'name-hash-only' && identity?.state !== 'name-hash-only-private') continue;
+    nameHashOnly += 1;
+    if (identity.bindingConflict === true) bindingConflicts += 1;
   }
   if (nameHashOnly === 0) return { nameHashOnly };
+  const graphs = (count: number) => `${count} subscribed Context Graph${count === 1 ? ' is' : 's are'} known only by `
+    + 'the on-chain name hash';
+  const waiting = nameHashOnly - bindingConflicts;
+  const parts: string[] = [];
+  if (waiting > 0) {
+    parts.push(`${graphs(waiting)} and cannot sync yet; waiting for a peer to reveal the cleartext id, `
+      + 'or subscribe with the cleartext id');
+  }
+  if (bindingConflicts > 0) {
+    parts.push(`${graphs(bindingConflicts)} and blocked by a conflicting binding: the cleartext id is already `
+      + 'bound to a different on-chain Context Graph on this node');
+  }
   return {
     nameHashOnly,
-    message: `${nameHashOnly} subscribed Context Graph${nameHashOnly === 1 ? ' is' : 's are'} known only by `
-      + 'the on-chain name hash and cannot sync yet; waiting for a peer to reveal the cleartext id, '
-      + 'or subscribe with the cleartext id (details: GET /api/context-graph/subscriptions).',
+    ...(bindingConflicts > 0 ? { bindingConflicts } : {}),
+    message: `${parts.join('. ')} (details: GET /api/context-graph/subscriptions).`,
   };
 }
 
@@ -724,6 +749,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       agent,
       resolveNetworkDefaultContextGraphs(network),
       rfc64PublicCatalogActivation.selectedContextGraphs,
+      canAdministerNode(actorFromRequestContext(ctx).authentication),
     );
     const unavailableFinalizationRecovery = (reason: string) => ({
       available: false,
@@ -806,6 +832,10 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         max: admission.max,
         rejectedTotal: admission.rejectedTotal,
       },
+      // Main-thread stalls over the last complete window (p50/p99/max ms).
+      // A max in the seconds means every route, stream and timer waited that
+      // long; the daemon log carries a rate-limited warning for it.
+      eventLoopDelay: ctx.eventLoopDelay?.snapshot() ?? null,
       // Public status carries state only. Detailed lane timings and operation
       // summaries stay behind the node-admin diagnostics route.
       backpressure: {
@@ -818,13 +848,24 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       },
       // The certification harness must be able to distinguish an operator
       // setting from the switch the agent actually honors. This projection
-      // deliberately uses the same resolver as both runtime reconcile gates,
-      // including environment-variable precedence.
+      // deliberately uses the same resolvers as the runtime gates (periodic
+      // peer sync and chain-driven VM reconcile respectively), including
+      // environment-variable precedence.
       syncLifecycle: {
         syncReconcilerEnabled: resolveSyncReconcilerEnabled(
           config.syncReconcilerEnabled,
         ),
+        vmReconcilerEnabled: resolveVmReconcilerEnabled(
+          config.vmReconcilerEnabled,
+        ),
       },
+      // Effective VM promotion on this node: whether chain-driven VM
+      // reconcile can run (switch AND chain capability), a core's StorageACK
+      // finality gate and handler state, its declines per code over the last
+      // hour, and the last ACK promotion audit result.
+      vmPromotion: typeof agent.getVmPromotionStatus === 'function'
+        ? agent.getVmPromotionStatus()
+        : undefined,
       connectedPeers: uniquePeers.size,
       connections: {
         total: allConns.length,

@@ -35,6 +35,68 @@ export async function fetchWithTimeout(input: string, init: RequestInit = {}, ti
   }
 }
 
+/**
+ * Deadline for the long synchronous Knowledge Asset mutations (`vm/publish`,
+ * `swm/share`, `wm/import-file`). `vm/publish` holds the request open for the
+ * publisher's storage-ACK window (`ACK_TIMEOUT_MS`, 120 s, in
+ * packages/publisher/src/ack-collector.ts) plus chain confirmation. It matches
+ * the other daemon clients and stays under five minutes, where some browsers
+ * stop waiting for a response on their own.
+ */
+export const LONG_MUTATION_TIMEOUT_MS = 240_000;
+
+/**
+ * A long mutation got no response before its deadline. The node keeps working
+ * after the page stops waiting, so the operation may still complete: show the
+ * outcome as unknown, not as a failure.
+ */
+export class OutcomeUnknownError extends Error {
+  readonly outcomeUnknown = true;
+  constructor(message: string) {
+    super(message);
+    this.name = 'OutcomeUnknownError';
+  }
+}
+
+/**
+ * Run a long mutation's request under {@link LONG_MUTATION_TIMEOUT_MS}. The
+ * deadline covers the response body; a daemon error answer maps to `HttpError`
+ * like `post`, and the deadline's own expiry to {@link OutcomeUnknownError}. A
+ * plain timer (not `AbortSignal.timeout`) keeps it drivable by fake timers.
+ */
+export async function requestLongMutation<T>(
+  path: string,
+  init: RequestInit,
+  outcomeUnknownMessage: string,
+): Promise<T> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LONG_MUTATION_TIMEOUT_MS);
+  try {
+    const res = await fetch(`${BASE}${path}`, { ...init, signal: controller.signal });
+    if (!res.ok) {
+      const errBody = await res.json().catch(() => ({}));
+      const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
+      throw new HttpError(res.status, msg, errBody);
+    }
+    return (await res.json()) as T;
+  } catch (error) {
+    if (controller.signal.aborted && !(error instanceof HttpError)) {
+      throw new OutcomeUnknownError(outcomeUnknownMessage);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export function postLongMutation<T>(path: string, body: unknown, outcomeUnknownMessage: string): Promise<T> {
+  return requestLongMutation<T>(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+  }, outcomeUnknownMessage);
+}
+
 export async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { headers: authHeaders() });
   if (!res.ok) {

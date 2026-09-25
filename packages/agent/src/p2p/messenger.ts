@@ -947,6 +947,37 @@ export class Messenger {
     }
   }
 
+  /** Remove a handler registered through Messenger from both owned tables. */
+  unregister(protocolId: string): void {
+    this.handlers.delete(protocolId);
+    this.router.unregister(protocolId);
+  }
+
+  /** Register a protocol family atomically and return its disposal handle. */
+  registerGroup(
+    entries: readonly { protocolId: string; handler: ReliableHandler; options?: MessengerRegisterOptions }[],
+  ): () => void {
+    const ids = new Set<string>();
+    for (const { protocolId } of entries) {
+      if (ids.has(protocolId) || this.handlers.has(protocolId)) {
+        throw new Error(`Messenger protocol already registered: ${protocolId}`);
+      }
+      ids.add(protocolId);
+    }
+    const dispose = (): void => {
+      for (const { protocolId, handler } of entries) {
+        if (this.handlers.get(protocolId) === handler) this.unregister(protocolId);
+      }
+    };
+    try {
+      for (const { protocolId, handler, options } of entries) this.register(protocolId, handler, options);
+    } catch (error) {
+      dispose();
+      throw error;
+    }
+    return dispose;
+  }
+
   /**
    * Periodic-tick retry loop. The lifecycle.ts wiring (PR-3) calls
    * this every ~5s. For each outbox entry whose `nextAttemptAt`

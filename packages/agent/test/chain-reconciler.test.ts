@@ -816,6 +816,70 @@ describe('reconcileContextGraph — sweep', () => {
     expect(completed).toEqual([1]);
     expect(state.watermark).toBe(0);
   });
+
+  it('keeps what a rejected pass proved: its completions and the scan past what it dispatched', async () => {
+    const attempts: number[][] = [];
+    const { deps, persisted } = makeDeps({
+      getKCCount: async () => 8,
+      maxOrdinalsPerPass: 4,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempts[attempts.length - 1]!.push(ordinal);
+        if (ordinal === 1) throw new Error('ordinal 1 exploded');
+        return { status: 'already', blockNumber: 0 };
+      },
+    });
+    const state = createCursorState(0);
+    const pass = async () => {
+      attempts.push([]);
+      return reconcileContextGraph(deps, state, 'cg', 1n).then(
+        (result) => `ok:${result.watermark}`,
+        (error: Error) => `failed:${error.message}`,
+      );
+    };
+
+    const outcomes = [await pass(), await pass(), await pass(), await pass()];
+
+    expect(outcomes).toEqual([
+      'failed:ordinal 1 exploded',
+      'ok:1',
+      'ok:1',
+      'failed:ordinal 1 exploded',
+    ]);
+    // The settled ordinal 0 is never re-read; the throwing ordinal is retried
+    // with the next cycle like any other gap instead of pinning its slice.
+    expect(attempts).toEqual([[0, 1], [2, 3, 4, 5], [6, 7], [1]]);
+    expect(state.watermark).toBe(1);
+    expect([...state.ahead.keys()].sort((a, b) => a - b)).toEqual([2, 3, 4, 5, 6, 7]);
+    expect(persisted).toEqual([{ cg: 'cg', watermark: 1 }]);
+  });
+
+  it('keeps worker completions when batch recovery rejects under the same binding', async () => {
+    let current = true;
+    let flipBindingDuringRecovery = false;
+    const { deps } = makeDeps({
+      getKCCount: async () => 3,
+      isTargetCurrent: async () => current,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => ordinal === 1
+        ? { status: 'pending', recovery: recoveryTarget(1) }
+        : { status: 'reconciled', blockNumber: 0 },
+      recoverPendingOrdinals: async () => {
+        if (flipBindingDuringRecovery) current = false;
+        throw new Error('recovery transport failed');
+      },
+    });
+
+    const kept = createCursorState(0);
+    await expect(reconcileContextGraph(deps, kept, 'cg', 1n)).rejects.toThrow('recovery transport failed');
+    expect([...kept.ahead.keys()]).toEqual([0, 2]);
+    expect(kept.watermark).toBe(0);
+    expect(kept.scanOrdinal).toBe(3);
+
+    flipBindingDuringRecovery = true;
+    const discarded = createCursorState(0);
+    await expect(reconcileContextGraph(deps, discarded, 'cg', 1n)).rejects.toThrow('recovery transport failed');
+    expect(discarded.ahead.size).toBe(0);
+    expect(discarded.scanOrdinal).toBe(0);
+  });
 });
 
 describe('VmReconcileDispatcher scheduling', () => {

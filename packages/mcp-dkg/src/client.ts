@@ -122,6 +122,59 @@ export interface DkgClientOptions {
   config: DkgConfig;
   /** Optional fetch implementation (mostly here for tests). */
   fetcher?: typeof fetch;
+  /** Deadline in ms for GET reads (default `DKG_API_READ_TIMEOUT_MS`, else 30 000). */
+  readTimeoutMs?: number;
+  /**
+   * Deadline in ms for every POST/PUT/DELETE, including the long Knowledge Asset
+   * mutations (default `DKG_API_LONG_TIMEOUT_MS`, else 240 000; never below
+   * `readTimeoutMs`).
+   */
+  longTimeoutMs?: number;
+}
+
+/** Deadline for GET reads, which answer from local daemon state. */
+export const DKG_READ_TIMEOUT_MS = 30_000;
+
+/**
+ * Deadline for the GET lists in {@link DKG_LIST_READ_ROUTES}, which walk every
+ * context graph, sub-graph, PCA or publisher job (the PCA list reads each
+ * account from the chain). It matches the node UI's graph-list deadline and
+ * never falls below the read deadline.
+ */
+export const DKG_LIST_READ_TIMEOUT_MS = 60_000;
+const DKG_LIST_READ_ROUTES: ReadonlySet<string> = new Set([
+  '/api/context-graph/list',
+  '/api/sub-graph/list',
+  '/api/pca',
+  '/api/publisher/jobs',
+]);
+
+/**
+ * Deadline for every other request: several wait on peers or the chain.
+ * `vm/publish` holds the request open for the publisher's storage-ACK window
+ * (`ACK_TIMEOUT_MS`, 120 s, in packages/publisher/src/ack-collector.ts) plus
+ * chain confirmation, and context-graph registration waits for its transaction.
+ * It stays under the 300 s Node's fetch waits on its own, so this deadline, and
+ * a long mutation's outcome-unknown report, comes first.
+ */
+export const DKG_LONG_TIMEOUT_MS = 240_000;
+
+/** Environment overrides, in ms, for the read and long deadlines. */
+export const DKG_READ_TIMEOUT_ENV = 'DKG_API_READ_TIMEOUT_MS';
+export const DKG_LONG_TIMEOUT_ENV = 'DKG_API_LONG_TIMEOUT_MS';
+
+/** Longest deadline a Node timer honours; a longer one fires after 1 ms. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
+/** A deadline override from the environment; unset or empty means none. */
+function timeoutFromEnv(name: string): number | undefined {
+  const raw = process.env[name]?.trim();
+  if (raw === undefined || raw === '') return undefined;
+  const value = Number(raw);
+  if (!/^\d+$/.test(raw) || value < 1 || value > MAX_TIMEOUT_MS) {
+    throw new Error(`${name} must be a whole number of milliseconds from 1 to ${MAX_TIMEOUT_MS}, got "${raw}"`);
+  }
+  return value;
 }
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
@@ -396,47 +449,130 @@ export class DkgHttpError extends Error {
   }
 }
 
+/**
+ * A long Knowledge Asset mutation reached the daemon but no response arrived
+ * before the client deadline. The daemon does not abort the operation when the
+ * client disconnects, so it may still complete, and a blind retry can 409
+ * against it. Tools surface this as "outcome unknown", not as a failure.
+ */
+export class DkgOutcomeUnknownError extends Error {
+  readonly code = 'OUTCOME_UNKNOWN';
+  readonly method: string;
+  readonly route: string;
+  readonly timeoutMs: number;
+  constructor(method: string, route: string, timeoutMs: number) {
+    super(
+      `${method} ${route} did not respond within ${Math.round(timeoutMs / 1000)}s; outcome unknown. ` +
+      'The daemon keeps working after the client disconnects, so the operation may still complete. ' +
+      'Check dkg_knowledge_asset_history before retrying.',
+    );
+    this.name = 'DkgOutcomeUnknownError';
+    this.method = method;
+    this.route = route;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
+type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE';
+
+/**
+ * Node's fetch (undici) stops waiting on its own after 300 s without response
+ * headers or body progress, rejecting with `fetch failed` / `terminated` and an
+ * `UND_ERR_HEADERS_TIMEOUT` / `UND_ERR_BODY_TIMEOUT` cause: the same unanswered
+ * request as the client deadline expiring.
+ */
+function isDispatcherTimeout(err: unknown): boolean {
+  try {
+    const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code;
+    return code === 'UND_ERR_HEADERS_TIMEOUT' || code === 'UND_ERR_BODY_TIMEOUT';
+  } catch {
+    return false;
+  }
+}
+
 export class DkgClient {
   private readonly api: string;
   private readonly token: string;
   private readonly fetcher: typeof fetch;
+  private readonly readTimeoutMs: number;
+  private readonly listReadTimeoutMs: number;
+  private readonly longTimeoutMs: number;
 
   constructor(opts: DkgClientOptions) {
     this.api = opts.config.api.replace(/\/$/, '');
     this.token = opts.config.token;
     this.fetcher = opts.fetcher ?? globalThis.fetch;
+    this.readTimeoutMs = opts.readTimeoutMs ?? timeoutFromEnv(DKG_READ_TIMEOUT_ENV) ?? DKG_READ_TIMEOUT_MS;
+    this.listReadTimeoutMs = Math.max(DKG_LIST_READ_TIMEOUT_MS, this.readTimeoutMs);
+    this.longTimeoutMs = Math.max(
+      opts.longTimeoutMs ?? timeoutFromEnv(DKG_LONG_TIMEOUT_ENV) ?? DKG_LONG_TIMEOUT_MS,
+      this.readTimeoutMs,
+    );
   }
 
   private async request<T = unknown>(
-    method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+    method: HttpMethod,
     route: string,
     body?: unknown,
+    opts: { longMutation?: boolean } = {},
   ): Promise<T> {
     const headers: Record<string, string> = {};
     if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
     if (body !== undefined) headers['Content-Type'] = 'application/json';
 
-    const res = await this.fetcher(`${this.api}${route}`, {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined,
+    return this.withDeadline(method, route, opts.longMutation === true, async (signal) => {
+      const res = await this.fetcher(`${this.api}${route}`, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal,
+      });
+      const text = await res.text();
+      let parsed: unknown = undefined;
+      if (text) {
+        try { parsed = JSON.parse(text); } catch { parsed = { raw: text }; }
+      }
+      if (!res.ok) {
+        const detail = typeof parsed === 'object' && parsed && 'error' in parsed
+          ? (parsed as { error: unknown }).error
+          : parsed;
+        throw new DkgHttpError(
+          res.status,
+          parsed,
+          `${method} ${route} → ${res.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`,
+        );
+      }
+      return parsed as T;
     });
-    const text = await res.text();
-    let parsed: unknown = undefined;
-    if (text) {
-      try { parsed = JSON.parse(text); } catch { parsed = { raw: text }; }
+  }
+
+  /**
+   * Run one daemon round-trip under its deadline: GET reads take the read
+   * class (the list class for {@link DKG_LIST_READ_ROUTES}), every other method
+   * the long class. The deadline also covers reading the body. A long Knowledge
+   * Asset mutation that times out reports {@link DkgOutcomeUnknownError}; other
+   * timeouts keep fetch's TimeoutError.
+   */
+  private async withDeadline<T>(
+    method: HttpMethod,
+    route: string,
+    longMutation: boolean,
+    run: (signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    const timeoutMs = method !== 'GET'
+      ? this.longTimeoutMs
+      : DKG_LIST_READ_ROUTES.has(route.replace(/\?.*$/, ''))
+        ? this.listReadTimeoutMs
+        : this.readTimeoutMs;
+    const signal = AbortSignal.timeout(timeoutMs);
+    try {
+      return await run(signal);
+    } catch (err) {
+      if (longMutation && !(err instanceof DkgHttpError) && (signal.aborted || isDispatcherTimeout(err))) {
+        throw new DkgOutcomeUnknownError(method, route, timeoutMs);
+      }
+      throw err;
     }
-    if (!res.ok) {
-      const detail = typeof parsed === 'object' && parsed && 'error' in parsed
-        ? (parsed as { error: unknown }).error
-        : parsed;
-      throw new DkgHttpError(
-        res.status,
-        parsed,
-        `${method} ${route} → ${res.status}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`,
-      );
-    }
-    return parsed as T;
   }
 
   // ── Listing endpoints ──────────────────────────────────────────
@@ -991,25 +1127,26 @@ export class DkgClient {
 
     const headers: Record<string, string> = { Accept: 'application/json' };
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
-    const res = await this.fetcher(
-      `${this.api}/api/knowledge-assets/${encodeURIComponent(args.assertionName)}/wm/import-file`,
-      {
+    const route = `/api/knowledge-assets/${encodeURIComponent(args.assertionName)}/wm/import-file`;
+    return this.withDeadline('POST', route, true, async (signal) => {
+      const res = await this.fetcher(`${this.api}${route}`, {
         method: 'POST',
         headers,
         body: form,
-      },
-    );
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      let parsed: unknown = text;
-      try { parsed = JSON.parse(text); } catch { /* leave as raw text */ }
-      throw new DkgHttpError(
-        res.status,
-        parsed,
-        `POST /api/knowledge-assets/${args.assertionName}/wm/import-file → ${res.status}: ${text}`,
-      );
-    }
-    return res.json() as Promise<Record<string, unknown>>;
+        signal,
+      });
+      if (!res.ok) {
+        const text = await res.text().catch(() => '');
+        let parsed: unknown = text;
+        try { parsed = JSON.parse(text); } catch { /* leave as raw text */ }
+        throw new DkgHttpError(
+          res.status,
+          parsed,
+          `POST /api/knowledge-assets/${args.assertionName}/wm/import-file → ${res.status}: ${text}`,
+        );
+      }
+      return (await res.json()) as Record<string, unknown>;
+    });
   }
 
   /**
@@ -1276,7 +1413,11 @@ export class DkgClient {
       // body shape (mirrors the cli ApiClient). `true`/`false` pass through.
       body.alsoPublishVm = createAlsoPublishVmPayload(args.alsoPublishVm);
     }
-    return this.request<Record<string, unknown>>('POST', '/api/knowledge-assets', body);
+    // Judged on the final body: the share default above runs the share inside
+    // this same request.
+    const longMutation = body.alsoShareSwm === true
+      || (body.alsoPublishVm !== undefined && body.alsoPublishVm !== false);
+    return this.request<Record<string, unknown>>('POST', '/api/knowledge-assets', body, { longMutation });
   }
 
   /** GET a KA's per-layer lifecycle state by name. */
@@ -1436,6 +1577,7 @@ export class DkgClient {
       'POST',
       `/api/knowledge-assets/${encodeURIComponent(args.name)}/swm/share`,
       body,
+      { longMutation: true },
     );
   }
 
@@ -1455,6 +1597,7 @@ export class DkgClient {
       'POST',
       `/api/knowledge-assets/${encodeURIComponent(args.name)}/vm/publish`,
       body,
+      { longMutation: true },
     );
   }
 }
