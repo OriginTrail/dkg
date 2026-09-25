@@ -1,4 +1,4 @@
-import type { ACKCandidatePeerSelectionInput } from '../../src/ack-peer-selection.js';
+import type { ACKCandidatePeerSelectionInput } from '../../src/ack-peer-selection-compat.js';
 
 const rankedOnly: ACKCandidatePeerSelectionInput = {
   connectedPeers: ['core', 'edge'],

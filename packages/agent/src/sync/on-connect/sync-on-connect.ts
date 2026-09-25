@@ -1,5 +1,7 @@
-import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import { createOperationContext, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
 import type { PeerCapabilityRegistry } from '../../p2p/peer-capability.js';
+import { peerCapabilitySink, type SyncOnConnectInput } from './sync-on-connect-compat.js';
+export type { SyncOnConnectContext, LegacySyncOnConnectContext, SyncOnConnectInput } from './sync-on-connect-compat.js';
 import {
   classifyDurableProgress,
 } from '../durable-progress.js';
@@ -117,7 +119,7 @@ function admitPeerSyncContext(context: CompatiblePeerSyncContext): SessionPeerSy
   };
 }
 
-interface SyncOnConnectBaseContext extends CompatiblePeerSyncContext {
+export interface SyncOnConnectBaseContext extends CompatiblePeerSyncContext {
   remotePeer: string;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
   getSyncContextGraphs: () => string[];
@@ -153,51 +155,15 @@ interface SyncOnConnectBaseContext extends CompatiblePeerSyncContext {
   onSyncAccounting?: (peerId: string, outcome: SyncOnConnectPeerOutcome) => void;
 }
 
-type PeerCapabilitySink = Pick<PeerCapabilityRegistry, 'observe'>;
+export type PeerCapabilitySink = Pick<PeerCapabilityRegistry, 'observe'>;
 
-/** Extendable legacy context retained for existing integrations. */
-export interface SyncOnConnectContext extends SyncOnConnectBaseContext {
-  peerCapabilities?: never;
-  knownCorePeerIds: Set<string>;
-  knownCorePeerIdsV2?: Set<string>;
-}
-
-/** Extendable registry-backed form for new integrations. */
+/** The canonical workflow receives one registry-backed capability owner. */
 export interface RegistrySyncOnConnectContext extends SyncOnConnectBaseContext {
   peerCapabilities: PeerCapabilitySink;
-  knownCorePeerIds?: never;
-  knownCorePeerIdsV2?: never;
-}
-
-/** Alias retained for callers that adopted the explicit legacy name. */
-export interface LegacySyncOnConnectContext extends SyncOnConnectContext {}
-
-export type SyncOnConnectInput = SyncOnConnectContext | RegistrySyncOnConnectContext;
-
-function peerCapabilitySink(context: SyncOnConnectInput): PeerCapabilitySink {
-  if (context.peerCapabilities) return context.peerCapabilities;
-  const { knownCorePeerIds, knownCorePeerIdsV2 } = context;
-  if (!knownCorePeerIds) throw new TypeError('Sync-on-connect requires peerCapabilities or knownCorePeerIds');
-  return {
-    observe(peerId, observation) {
-      // Legacy sets cannot retain evidence provenance; keep their historical
-      // populated-list behavior while the registry uses the typed source.
-      if (observation.source === 'negotiation') return;
-      const { protocols } = observation;
-      if (protocols.length === 0) return;
-      if (protocols.includes(PROTOCOL_STORAGE_ACK)) knownCorePeerIds.add(peerId);
-      else knownCorePeerIds.delete(peerId);
-      if (protocols.includes(PROTOCOL_STORAGE_ACK) && protocols.includes(PROTOCOL_STORAGE_ACK_V2)) {
-        knownCorePeerIdsV2?.add(peerId);
-      } else {
-        knownCorePeerIdsV2?.delete(peerId);
-      }
-    },
-  };
 }
 
 /** Every continuation inside an admitted session has an explicit lifetime and lease owner. */
-export type SessionSyncOnConnectContext = SyncOnConnectInput & SessionPeerSyncContext;
+export type SessionSyncOnConnectContext = RegistrySyncOnConnectContext & SessionPeerSyncContext;
 
 /**
  * Narrow RFC-64 retry boundary. Unlike {@link SyncOnConnectInput}, this
@@ -423,6 +389,13 @@ async function runSessionSelectedSharedMemoryRetry(
   }
 }
 
+export async function runRegistrySyncOnConnect(
+  context: RegistrySyncOnConnectContext,
+): Promise<SyncOnConnectOutcome> {
+  return runSessionSyncOnConnect(context, admitPeerSyncContext(context), context.peerCapabilities);
+}
+
+/** Public compatibility entry point; legacy capability translation is isolated. */
 export async function runSyncOnConnect(
   context: SyncOnConnectInput,
 ): Promise<SyncOnConnectOutcome> {

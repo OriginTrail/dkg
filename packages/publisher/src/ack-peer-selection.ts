@@ -1,4 +1,4 @@
-import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK_V2, isStorageACKProtocol, type StorageACKProtocol } from '@origintrail-official/dkg-core';
+import { PROTOCOL_STORAGE_ACK, isStorageACKProtocol, type StorageACKProtocol } from '@origintrail-official/dkg-core';
 
 export type ACKCapabilitySelectionPolicy =
   | { mode: 'rank'; corePeers?: ReadonlySet<string>; requestedProtocolPeers?: ReadonlySet<string> }
@@ -21,20 +21,14 @@ export interface ACKCanonicalCandidatePeerSelectionInput {
   selfPeerId?: string;
 }
 
-/** @deprecated Use the canonical selector with `capability`. */
-export interface ACKCandidatePeerSelectionInput extends ACKCanonicalCandidatePeerSelectionInput {
-  knownCorePeerIds?: ReadonlySet<string>;
-  knownCorePeerIdsV2?: ReadonlySet<string>;
-}
-
-type ACKCandidateTierName = 'requestedProtocol' | 'v2Advertised' | 'confirmedCore' | 'rest';
+type ACKCandidateTierName = 'requestedProtocol' | 'confirmedCore' | 'rest';
 
 interface ACKCandidateTier {
   name: ACKCandidateTierName;
   peers: string[];
 }
 
-export interface ACKCandidatePeerDiagnostic {
+export interface ACKCanonicalCandidatePeerDiagnostic {
   peerId: string;
   tier: ACKCandidateTierName;
   preferred: boolean;
@@ -44,38 +38,13 @@ export interface ACKCandidatePeerDiagnostic {
   reason: string;
 }
 
-export interface ACKCandidatePeerSelectionResult {
+export interface ACKCanonicalCandidatePeerSelectionResult {
   peers: string[];
-  diagnostics: ACKCandidatePeerDiagnostic[];
+  diagnostics: ACKCanonicalCandidatePeerDiagnostic[];
 }
 
 function normalizePeerIdSet(ids: readonly string[] | undefined): Set<string> {
   return new Set((ids ?? []).map((id) => id.trim()).filter((id) => id.length > 0));
-}
-
-function adaptLegacyInput(input: ACKCandidatePeerSelectionInput): {
-  canonical: ACKCanonicalCandidatePeerSelectionInput;
-  legacyV2Tier: boolean;
-} {
-  if (input.protocol !== undefined && !isStorageACKProtocol(input.protocol)) {
-    throw new Error(`Unsupported StorageACK protocol: ${input.protocol}`);
-  }
-  if (input.capability && (input.knownCorePeerIds || input.knownCorePeerIdsV2)) {
-    throw new TypeError('Use either capability or legacy knownCorePeerIds fields');
-  }
-  if (input.capability) return { canonical: input, legacyV2Tier: false };
-  if (!input.knownCorePeerIds && !input.knownCorePeerIdsV2) {
-    return { canonical: input, legacyV2Tier: false };
-  }
-  const requestedProtocolPeers = input.protocol === PROTOCOL_STORAGE_ACK_V2
-    || input.protocol === PROTOCOL_STORAGE_UPDATE_ACK_V2
-    ? input.knownCorePeerIdsV2 ?? new Set<string>()
-    : undefined;
-  const { knownCorePeerIds: _knownCorePeerIds, knownCorePeerIdsV2: _knownCorePeerIdsV2, ...rest } = input;
-  return {
-    canonical: { ...rest, capability: { mode: 'rank', corePeers: input.knownCorePeerIds, requestedProtocolPeers } },
-    legacyV2Tier: requestedProtocolPeers !== undefined,
-  };
 }
 
 export function selectCanonicalACKCandidateUniverse(input: Pick<
@@ -88,17 +57,8 @@ export function selectCanonicalACKCandidateUniverse(input: Pick<
   return candidateUniverse(input, input.capability);
 }
 
-/** @deprecated Use selectCanonicalACKCandidateUniverse. */
-export function selectACKCandidateUniverse(input: Pick<
-  ACKCandidatePeerSelectionInput,
-  'connectedPeers' | 'ackCandidatePeerIds' | 'selfPeerId' | 'localCandidate'
-  | 'capability' | 'knownCorePeerIds' | 'knownCorePeerIdsV2' | 'protocol'
->): string[] {
-  return selectCanonicalACKCandidateUniverse(adaptLegacyInput({ ...input, requiredACKs: 0 }).canonical);
-}
-
 function candidateUniverse(input: Pick<
-  ACKCandidatePeerSelectionInput,
+  ACKCanonicalCandidatePeerSelectionInput,
   'connectedPeers' | 'ackCandidatePeerIds' | 'selfPeerId' | 'localCandidate'
 >, capability: ACKCapabilitySelectionPolicy | undefined): string[] {
   const selfPeerId = input.localCandidate?.peerId ?? input.selfPeerId;
@@ -173,7 +133,7 @@ function diagnosticForPeer(input: {
   capability?: ACKCapabilitySelectionPolicy;
   corePeers?: ReadonlySet<string>;
   requestedProtocolPeers?: ReadonlySet<string>;
-}): ACKCandidatePeerDiagnostic {
+}): ACKCanonicalCandidatePeerDiagnostic {
   const protocolMatch = input.requestedProtocolPeers
     ? input.requestedProtocolPeers.has(input.peerId)
     : input.protocol === PROTOCOL_STORAGE_ACK
@@ -197,7 +157,7 @@ function diagnosticForPeer(input: {
 
 export function selectCanonicalACKCandidatePeersWithDiagnostics(
   input: ACKCanonicalCandidatePeerSelectionInput,
-): ACKCandidatePeerSelectionResult {
+): ACKCanonicalCandidatePeerSelectionResult {
   if (input.protocol !== undefined && !isStorageACKProtocol(input.protocol)) {
     throw new Error(`Unsupported StorageACK protocol: ${input.protocol}`);
   }
@@ -238,7 +198,7 @@ export function selectCanonicalACKCandidatePeersWithDiagnostics(
 
   const local = input.localCandidate;
   if (!local) return { peers: remotePeers, diagnostics: remoteDiagnostics };
-  const localDiagnostic: ACKCandidatePeerDiagnostic = {
+  const localDiagnostic: ACKCanonicalCandidatePeerDiagnostic = {
     peerId: local.peerId,
     tier: 'confirmedCore',
     preferred: false,
@@ -251,23 +211,4 @@ export function selectCanonicalACKCandidatePeersWithDiagnostics(
     peers: local.available ? [local.peerId, ...remotePeers] : remotePeers,
     diagnostics: [localDiagnostic, ...remoteDiagnostics],
   };
-}
-
-/** @deprecated Compatibility adapter for callers using knownCorePeerIds. */
-export function selectACKCandidatePeersWithDiagnostics(
-  input: ACKCandidatePeerSelectionInput,
-): ACKCandidatePeerSelectionResult {
-  const { canonical, legacyV2Tier } = adaptLegacyInput(input);
-  const result = selectCanonicalACKCandidatePeersWithDiagnostics(canonical);
-  if (!legacyV2Tier) return result;
-  return {
-    peers: result.peers,
-    diagnostics: result.diagnostics.map((diagnostic) => diagnostic.tier === 'requestedProtocol'
-      ? { ...diagnostic, tier: 'v2Advertised' }
-      : diagnostic),
-  };
-}
-
-export function selectACKCandidatePeers(input: ACKCandidatePeerSelectionInput): string[] {
-  return selectACKCandidatePeersWithDiagnostics(input).peers;
 }

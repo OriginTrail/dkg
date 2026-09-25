@@ -10,9 +10,9 @@ import {
   selectACKCandidatePeers,
   selectACKCandidateUniverse,
   selectACKCandidatePeersWithDiagnostics,
-  selectCanonicalACKCandidatePeersWithDiagnostics,
   type ACKCandidatePeerSelectionInput,
-} from '../src/ack-peer-selection.js';
+} from '../src/ack-peer-selection-compat.js';
+import { selectCanonicalACKCandidatePeersWithDiagnostics } from '../src/ack-peer-selection.js';
 
 const RELAYS = ['relay-1', 'relay-2', 'relay-3', 'relay-4'];
 const STAKED = ['staked-core-5', 'staked-core-6', 'staked-core-7'];
