@@ -137,4 +137,29 @@ describe('ACKCandidateDiscoveryCoordinator', () => {
     expect(secondRound.peers).toEqual([preferred[39]]);
   });
 
+  it('backfills unused other-peer reservations with preferred probes', async () => {
+    const preferred = Array.from({ length: 40 }, (_, index) => `preferred-${index}`);
+    const other = ['other-0'];
+    const probe = vi.fn(async (peerId: string) => peerId === preferred[25]
+      ? 'supported' as const : 'unsupported' as const);
+    const coordinator = new ACKCandidateDiscoveryCoordinator(new PeerCapabilityRegistry());
+
+    const result = await coordinator.resolveRound({
+      connectedPeers: [...preferred, ...other],
+      preferredACKPeerIds: preferred,
+      localCandidate: { peerId: 'local-core', available: false },
+      requiredACKs: 1,
+      protocol: PROTOCOL_STORAGE_ACK,
+      verifiedSameNetworkPeerIds: () => undefined,
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      preflight: async () => {},
+      isAcceptedPeer: () => true,
+      probeProtocol: probe,
+    });
+
+    expect(probe).toHaveBeenCalledTimes(32);
+    expect(probe.mock.calls.map(([peerId]) => peerId)).toEqual([...preferred.slice(0, 31), ...other]);
+    expect(result.peers).toEqual([preferred[25]]);
+  });
+
 });

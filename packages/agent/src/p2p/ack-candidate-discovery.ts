@@ -92,7 +92,7 @@ function scheduleProbeWindow(input: {
   // the total at 32 protocol probes. Base rounds may probe 32 peers.
   const peerLimit = input.protocol === PROTOCOL_STORAGE_ACK ? 32 : 16;
   const preferredBudget = other.length > 0 && preferred.length >= peerLimit
-    ? peerLimit - 8 : peerLimit;
+    ? peerLimit - Math.min(8, other.length) : peerLimit;
   return [
     ...rotated(preferred, input.preferredCursor).slice(0, preferredBudget),
     ...rotated(other, input.otherCursor).slice(0, peerLimit - Math.min(preferred.length, preferredBudget)),

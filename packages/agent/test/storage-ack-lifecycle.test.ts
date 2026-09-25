@@ -13,6 +13,7 @@ const capturedStorageACKHandlerConfigs: unknown[] = [];
 const capturedStorageACKHandlerCalls: Array<{ kind: 'publish' | 'update'; data: Uint8Array; peerId: string }> = [];
 const capturedStorageACKHandlerSignals: Array<AbortSignal | undefined> = [];
 let localACKHandlerWorkHook: ((signal?: AbortSignal) => Promise<void>) | undefined;
+let remoteACKHandlerWorkHook: ((config: StorageACKHandlerConfigCapture) => Promise<void>) | undefined;
 
 vi.mock('@origintrail-official/dkg-publisher', async () => {
   const actual = await vi.importActual<typeof import('@origintrail-official/dkg-publisher')>(
@@ -21,13 +22,14 @@ vi.mock('@origintrail-official/dkg-publisher', async () => {
   return {
     ...actual,
     StorageACKHandler: class CapturingStorageACKHandler {
-      constructor(_store: unknown, config: unknown) {
+      constructor(_store: unknown, private readonly config: StorageACKHandlerConfigCapture) {
         capturedStorageACKHandlerConfigs.push(config);
       }
       async handler(data: Uint8Array, peer: { toString(): string }, signal?: AbortSignal): Promise<Uint8Array> {
         capturedStorageACKHandlerCalls.push({ kind: 'publish', data, peerId: peer.toString() });
         capturedStorageACKHandlerSignals.push(signal);
         await localACKHandlerWorkHook?.(signal);
+        await remoteACKHandlerWorkHook?.(this.config);
         return new Uint8Array([1]);
       }
       async updateHandler(data: Uint8Array, peer: { toString(): string }, signal?: AbortSignal): Promise<Uint8Array> {
@@ -79,6 +81,7 @@ describe('StorageACK endpoint and local dispatch lifecycle', () => {
     capturedStorageACKHandlerCalls.length = 0;
     capturedStorageACKHandlerSignals.length = 0;
     localACKHandlerWorkHook = undefined;
+    remoteACKHandlerWorkHook = undefined;
   });
 
   afterEach(async () => {
@@ -208,6 +211,72 @@ describe('StorageACK endpoint and local dispatch lifecycle', () => {
     await agent.stop();
     expect(internals.storageAckEndpoint).toBeNull();
     agent = undefined;
+  });
+
+  it('ignores a stale signer callback after a replacement endpoint is registered', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 42n);
+    const remoteHandlers: Array<(data: Uint8Array, peerId: string) => Promise<Uint8Array>> = [];
+    const originalRegister = Messenger.prototype.register;
+    vi.spyOn(Messenger.prototype, 'register').mockImplementation(function (protocol, handler, options) {
+      if (protocol === PROTOCOL_STORAGE_ACK) remoteHandlers.push(handler);
+      return originalRegister.call(this, protocol, handler, options);
+    });
+
+    agent = await DKGAgent.create({
+      name: 'ACKStaleSignerCallbackTest',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+    });
+    await agent.start();
+    const internals = agent as unknown as ProviderInternals;
+    expect(remoteHandlers).toHaveLength(1);
+
+    let firstEntered!: () => void;
+    let secondEntered!: () => void;
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const firstInside = new Promise<void>((resolve) => { firstEntered = resolve; });
+    const secondInside = new Promise<void>((resolve) => { secondEntered = resolve; });
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const secondGate = new Promise<void>((resolve) => { releaseSecond = resolve; });
+    let calls = 0;
+    remoteACKHandlerWorkHook = async (config) => {
+      const call = ++calls;
+      if (call === 1) {
+        firstEntered();
+        await firstGate;
+      } else if (call === 2) {
+        secondEntered();
+        await secondGate;
+      }
+      config.onSignerUnregistered?.();
+    };
+
+    const oldHandler = remoteHandlers[0]!;
+    const firstRequest = oldHandler(new Uint8Array([1]), 'remote-1');
+    const secondRequest = oldHandler(new Uint8Array([2]), 'remote-2');
+    await Promise.all([firstInside, secondInside]);
+    releaseFirst();
+    await firstRequest;
+    await expect.poll(() => remoteHandlers.length).toBe(2);
+    const replacement = internals.storageAckEndpoint;
+    expect(replacement).not.toBeNull();
+    expect(internals.storageAckHandlerRegistered).toBe(true);
+
+    releaseSecond();
+    await secondRequest;
+    expect(internals.storageAckEndpoint).toBe(replacement);
+    expect(internals.storageAckHandlerRegistered).toBe(true);
+    expect(remoteHandlers).toHaveLength(2);
+    remoteACKHandlerWorkHook = undefined;
+    await expect(remoteHandlers[1]!(new Uint8Array([3]), 'remote-3'))
+      .resolves.toEqual(new Uint8Array([1]));
   });
 
   it('aborts and drains a running local handler before closing the store on stop', async () => {

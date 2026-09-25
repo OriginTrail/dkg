@@ -2882,6 +2882,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               return 'disabled';
             }
 
+            let ownedEndpoint: ReturnType<typeof registerStorageACKEndpoint> | null = null;
             const ackHandler = new StorageACKHandler(this.store, {
               nodeRole: effectiveRole,
               nodeIdentityId: onChainIdentityId,
@@ -2957,7 +2958,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 },
               ),
               onSignerUnregistered: () => {
-                if (!registrationIsCurrent() || storageACKFailoverInFlight) return;
+                if (!registrationIsCurrent() || !ownedEndpoint ||
+                    this.storageAckEndpoint !== ownedEndpoint || storageACKFailoverInFlight) return;
                 storageACKFailoverInFlight = true;
                 const staleEndpoint = this.storageAckEndpoint;
                 this.storageAckEndpoint = null;
@@ -3085,6 +3087,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               endpoint.dispose();
               return 'disabled';
             }
+            ownedEndpoint = endpoint;
             this.storageAckEndpoint = endpoint;
             this.clearStorageACKRegistrationRetry();
             this.log.info(
