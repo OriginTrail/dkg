@@ -175,6 +175,87 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     });
   });
 
+  describe('after SIGTERM, until the signalled orphan is confirmed gone', () => {
+    const reap = async (io: OrphanedOxigraphIo) => {
+      const lines: string[] = [];
+      const signalled = await stopOrphanedOxigraph({
+        binaryPath, location, log: (line) => lines.push(line), io,
+        stopGraceMs: 500, pollIntervalMs: 100, timeoutMs: 5_000,
+      });
+      return { signalled, log: lines.join('\n') };
+    };
+
+    it('keeps waiting, and escalates, for an orphan that closed LOCK but still runs', async () => {
+      const { table, signals, io } = processTable({
+        4100: { ppid: 1, argv: serve(location), holdsLock: true, ignoresTerm: true },
+      });
+      const signal = io.signal;
+      io.signal = (pid, name) => {
+        signal(pid, name);
+        // Shutting down: LOCK is closed, the process is not gone yet.
+        table.get(4100)!.holdsLock = false;
+      };
+
+      const { signalled, log } = await reap(io);
+      expect(signalled).toEqual([4100]);
+      expect(signals).toEqual([[4100, 'SIGTERM'], [4100, 'SIGKILL']]);
+      expect(table.get(4100)!.alive).toBe(false);
+      expect(log).toContain('did not exit on SIGTERM; sending SIGKILL');
+      expect(log.indexOf('released by the orphaned Oxigraph')).toBeGreaterThan(log.indexOf('sending SIGKILL'));
+    });
+
+    it('does not take a failed holder scan for a release', async () => {
+      const { table, signals, io } = processTable({
+        4100: { ppid: 1, argv: serve(location), holdsLock: true, ignoresTerm: true },
+      });
+      const list = io.listLockHolders;
+      let scans = 0;
+      io.listLockHolders = async (lockPath) => {
+        scans += 1;
+        if (scans > 1) throw new Error('lsof timed out');
+        return list(lockPath);
+      };
+
+      const { signalled, log } = await reap(io);
+      expect(signalled).toEqual([4100]);
+      expect(signals).toEqual([[4100, 'SIGTERM'], [4100, 'SIGKILL']]);
+      expect(table.get(4100)!.alive).toBe(false);
+      expect(log).toContain('released by the orphaned Oxigraph');
+    });
+
+    it('does not signal a recycled PID while it waits for an orphan that left the holder list', async () => {
+      const { table, signals, io } = processTable({
+        4100: { ppid: 1, argv: serve(location), holdsLock: true, ignoresTerm: true },
+      });
+      const signal = io.signal;
+      io.signal = (pid, name) => {
+        signal(pid, name);
+        // The orphan exits after SIGTERM after all, and an unrelated process
+        // receives its PID.
+        table.set(4100, { ppid: 1, argv: ['/usr/bin/vim'], holdsLock: false, start: 'recycled', alive: true });
+      };
+
+      const { signalled, log } = await reap(io);
+      expect(signalled).toEqual([4100]);
+      expect(signals).toEqual([[4100, 'SIGTERM']]);
+      expect(table.get(4100)!.alive).toBe(true);
+      expect(log).toContain('released by the orphaned Oxigraph');
+    });
+
+    it('leaves the outcome to the spawn when the holders cannot be listed at all', async () => {
+      const { signals, io } = processTable({
+        4100: { ppid: 1, argv: serve(location), holdsLock: true },
+      });
+      io.listLockHolders = async () => { throw new Error('lsof timed out'); };
+
+      const { signalled, log } = await reap(io);
+      expect(signalled).toEqual([]);
+      expect(signals).toEqual([]);
+      expect(log).toContain('could not list the processes holding');
+      expect(log).not.toContain('released');
+    });
+  });
+
   describe('when a process cannot be read (a ps timeout, a /proc error)', () => {
     it('does not take a recorded daemon it cannot read for one that exited', async () => {
       await writeRecord();
@@ -268,7 +349,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
         stopGraceMs: 500, pollIntervalMs: 100, timeoutMs: 2_000,
       });
       expect(signals).toEqual([[4100, 'SIGTERM']]);
-      expect(lines.join('\n')).toMatch(/orphaned Oxigraph pid 4100 still holds .* after 2000ms; starting anyway/);
+      expect(lines.join('\n')).toMatch(/orphaned Oxigraph pid 4100 was not confirmed gone 2000ms after the reclaim began; starting anyway/);
       expect(lines.join('\n')).not.toMatch(/released by the orphaned Oxigraph/);
     });
   });
@@ -566,7 +647,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
       stopGraceMs: 500, timeoutMs: 2_000, pollIntervalMs: 100,
     })).resolves.toEqual([4100]);
     expect(signals).toEqual([[4100, 'SIGTERM'], [4100, 'SIGKILL']]);
-    expect(lines.join('\n')).toMatch(/pid 4100 still holds .* after 2000ms; starting anyway/);
+    expect(lines.join('\n')).toMatch(/pid 4100 was not confirmed gone 2000ms after the reclaim began; starting anyway/);
   });
 
   it('does not look for holders when the store has no LOCK file yet', async () => {
