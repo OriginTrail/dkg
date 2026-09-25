@@ -371,7 +371,7 @@ describe('RPC request transport', () => {
     }
   });
 
-  it('does not dispatch failover attempts after their admission deadlines expire', async () => {
+  it('neither dispatches nor fails over after an attempt\'s admission deadline expires', async () => {
     const primary = await startLoopbackRpc();
     const backup = await startLoopbackRpc();
     servers.push(primary, backup);
@@ -390,10 +390,14 @@ describe('RPC request transport', () => {
     }));
     adapters.push(adapter);
 
-    await expect(adapter.getBlockNumber()).rejects.toBeTruthy();
+    // The attempt never left the shared local queue, so the backup is not
+    // tried: it would only wait behind the same governor.
+    await expect(adapter.getBlockNumber()).rejects.toMatchObject({
+      code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+    });
     expect(governor.snapshot()).toMatchObject({
       foregroundQueued: 0,
-      cancelled: 2,
+      cancelled: 1,
     });
     // The first abandoned waiter would receive the 10-second refill here if
     // the attempt timeout had merely raced it instead of aborting admission.
