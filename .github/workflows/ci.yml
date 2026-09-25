@@ -641,7 +641,7 @@ jobs:
   # existing unit config. Both sets come from Vitest discovery, are disjoint,
   # and together cover the full package suite. JUnit weights include every
   # measured file; unknown files receive a conservative 60s estimate. The last
-  # unit shard reserves time for the rollout/Gate 1 evidence steps below.
+  # unit shard reserves time for the RFC-64 evidence sidecar steps below.
   # See scripts/ci/plan-agent-shards.mjs and scripts/ci/timings/README.md.
   # ------------------------------------------------------------------
   tornado-agent:
@@ -676,11 +676,16 @@ jobs:
       - uses: ./.github/actions/restore-evm-node-test-artifacts
       - name: "Agent tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
+      # Gate 0's unit tests also run here because the Windows inventory leg
+      # skips their POSIX symlink and 0600 cases.
+      - name: "RFC-64 Gate 0 lifecycle harness unit tests (POSIX)"
+        if: matrix.sidecars
+        run: pnpm test:gate0:rfc64-persistence-lifecycle:unit
       - name: "RFC-64 rollout transition certificate (Oxigraph)"
-        if: matrix.gate1
+        if: matrix.sidecars
         run: node --import tsx --test devnet/rfc64-gate1-public-open/rollout-store-fixture.test.ts devnet/rfc64-gate1-public-open/rollout-transition.test.ts
       - name: "RFC-64 Gate 1 live evidence generate and verify (Oxigraph)"
-        if: matrix.gate1
+        if: matrix.sidecars
         run: pnpm test:gate1:rfc64-public-open-harness
       - name: Upload Vitest JUnit report
         if: always()
