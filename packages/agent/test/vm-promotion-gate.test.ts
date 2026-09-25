@@ -58,9 +58,12 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import {
   GraphManager,
+  GraphSetIndexStore,
+  OxigraphStore,
   activeDefaultStoreWorkPriority,
   type Quad,
   type TripleStore,
+  type UpdateOptions,
 } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
@@ -1556,6 +1559,59 @@ describe('core VM-promotion guarantees', () => {
         expect(await ledgerHas(internals.store, copy.op, LEDGER.registeredAt)).toBe(true);
       } finally {
         (internals.store as any).update = update;
+      }
+    });
+
+    it('names the ledger graph on every ledger update, so the graph-set index never rescans for them', async () => {
+      let scans = 0;
+      const counted = new Proxy(new OxigraphStore(), {
+        get(target, prop, receiver) {
+          const value = Reflect.get(target, prop, receiver);
+          if (typeof value !== 'function') return value;
+          if (prop === 'listGraphs' || prop === 'listGraphsSorted') {
+            return (...args: unknown[]) => {
+              scans += 1;
+              return value.apply(target, args);
+            };
+          }
+          return value.bind(target);
+        },
+      }) as TripleStore;
+      const indexed = new GraphSetIndexStore(counted, { revalidateMs: 100_000, now: () => 1_000 });
+      const ledgerUpdates: Array<{ sparql: string; options?: UpdateOptions }> = [];
+      const update = indexed.update.bind(indexed);
+      indexed.update = async (sparql: string, options?: UpdateOptions) => {
+        if (sparql.includes(STORAGE_ACK_LEDGER_GRAPH)) ledgerUpdates.push({ sparql, options });
+        await update(sparql, options);
+      };
+      const internals = await boot({ store: indexed, sharedMemoryTtlMs: 60_000 }) as Internals & Record<string, any>;
+      const preLedger = await seedCopy(indexed, { namespace: 'indexed-cg', n: 130, ageMs: HOUR, ledger: 'none' });
+      const gone = await seedCopy(indexed, { namespace: 'indexed-cg', n: 131, ageMs: 0 });
+      await indexed.deleteByPattern({ graph: gone.metaGraph, subject: gone.op });
+      await indexed.listGraphs();
+      const scansBefore = scans;
+
+      await expect(internals.ensureStorageAckLedgerReady()).resolves.toBe(true);
+      await expect(internals.pruneStorageAckLedgerOrphans()).resolves.toBe(0);
+      await internals.markStorageAckLedger(preLedger.op, LEDGER.absentSeenAt, Date.now());
+
+      expect(await ledgerHas(indexed, preLedger.op, LEDGER.grandfathered)).toBe(true);
+      expect(await ledgerHas(indexed, preLedger.op, LEDGER.absentSeenAt)).toBe(true);
+      expect(await count(indexed, STORAGE_ACK_LEDGER_GRAPH, gone.op)).toBe(0);
+      expect(await indexed.listGraphs()).toContain(STORAGE_ACK_LEDGER_GRAPH);
+      expect(scans).toBe(scansBefore);
+
+      // The audit's own "seen" mark goes through the same declaration.
+      await internals.runVmPromotionAudit();
+      const sources = ledgerUpdates.map(({ options }) => options?.source);
+      expect(new Set(sources)).toEqual(new Set([
+        'agent.storageAckLedger.grandfather',
+        'agent.storageAckLedger.orphans',
+        'agent.storageAckLedger.mark',
+        'agent.storageAckLedger.seen',
+      ]));
+      for (const { options } of ledgerUpdates) {
+        expect(options?.touchedGraphs).toEqual([STORAGE_ACK_LEDGER_GRAPH]);
       }
     });
 

@@ -345,6 +345,16 @@ export interface Rfc64InventoryV1CandidateApi
     authorAddress: EvmAddressV1,
   ): AppliedCatalogHeadSnapshotV1 | null;
   listAppliedCatalogHeadsV1(): readonly AppliedCatalogHeadSnapshotV1[];
+  /**
+   * In-process revision of the applied-head rows. It changes on every call
+   * that may write them (compare-and-swap, delete, and their indeterminate
+   * COMMIT resolve/retry paths, however each ends) and on every low-level
+   * reopen, and two inventory instances never share a value. While it is
+   * unchanged, a listing taken under it still equals the table: the inventory
+   * lease gives this process the only writer, and every write goes through
+   * these methods.
+   */
+  readAppliedCatalogHeadsRevisionV1(): number;
   isStagedCatalogHeadV1(
     catalogScopeDigest: Digest32V1,
     authorAddress: EvmAddressV1,
@@ -375,6 +385,7 @@ export type Rfc64InventoryV1OperationsV1 = Pick<
   | 'deleteCandidateBucket'
   | 'readAppliedCatalogHeadV1'
   | 'listAppliedCatalogHeadsV1'
+  | 'readAppliedCatalogHeadsRevisionV1'
   | 'isStagedCatalogHeadV1'
   | 'deleteAppliedCatalogHeadV1'
   | 'deleteAppliedCatalogHeadsV1'
@@ -419,6 +430,9 @@ export function createRfc64InventoryOperationsViewV1(
     deleteCandidateBucket: fence(inventory.deleteCandidateBucket.bind(inventory)),
     readAppliedCatalogHeadV1: fence(inventory.readAppliedCatalogHeadV1.bind(inventory)),
     listAppliedCatalogHeadsV1: fence(inventory.listAppliedCatalogHeadsV1.bind(inventory)),
+    readAppliedCatalogHeadsRevisionV1: fence(
+      inventory.readAppliedCatalogHeadsRevisionV1.bind(inventory),
+    ),
     isStagedCatalogHeadV1: fence(inventory.isStagedCatalogHeadV1.bind(inventory)),
     deleteAppliedCatalogHeadV1: fence(inventory.deleteAppliedCatalogHeadV1.bind(inventory)),
     deleteAppliedCatalogHeadsV1: fence(inventory.deleteAppliedCatalogHeadsV1.bind(inventory)),
@@ -622,6 +636,17 @@ type TraversalRecordV1 = RowsTraversalRecordV1 | DiffTraversalRecordV1;
 type SqlRowV1 = Record<string, unknown>;
 type SqlParametersV1 = Record<string, SQLInputValue>;
 
+/**
+ * Process-wide source of applied-head revisions. Every inventory instance
+ * draws from it, so a revision never names two instances' rows.
+ */
+let lastAppliedCatalogHeadsRevisionV1 = 0;
+
+function nextAppliedCatalogHeadsRevisionV1(): number {
+  lastAppliedCatalogHeadsRevisionV1 += 1;
+  return lastAppliedCatalogHeadsRevisionV1;
+}
+
 /** @internal Wired into the owned SQLite foundation; not a standalone database API. */
 export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
   readonly #sessions = new WeakMap<object, SessionRecordV1>();
@@ -635,6 +660,7 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
   #available = true;
   #closed = false;
   #activeWriteDeadline: number | null = null;
+  #appliedCatalogHeadsRevision = nextAppliedCatalogHeadsRevisionV1();
 
   constructor(
     private database: DatabaseSync,
@@ -712,6 +738,11 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     });
   }
 
+  readAppliedCatalogHeadsRevisionV1(): number {
+    this.assertOpen();
+    return this.#appliedCatalogHeadsRevision;
+  }
+
   isStagedCatalogHeadV1(
     catalogScopeDigest: Digest32V1,
     authorAddress: EvmAddressV1,
@@ -745,17 +776,21 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
       key: encodeAppliedHeadKey(input.catalogScopeDigest, input.authorAddress),
       expected: encodeAppliedDigest(input.expectedCurrentCatalogHeadDigest, 'expected current head'),
     })));
-    this.writeTransaction('delete applied catalog heads', () => {
-      for (const current of captured) this.deleteAppliedHeadInOpenTransaction(current);
-    }, {
-      resolve: () => captured.every(({ key }) => this.readAppliedHead(key) === null)
-        ? 'committed'
-        : 'not-committed',
-      retry: () => {
+    try {
+      this.writeTransaction('delete applied catalog heads', () => {
         for (const current of captured) this.deleteAppliedHeadInOpenTransaction(current);
-      },
-      resolvedCommittedResult: () => undefined,
-    });
+      }, {
+        resolve: () => captured.every(({ key }) => this.readAppliedHead(key) === null)
+          ? 'committed'
+          : 'not-committed',
+        retry: () => {
+          for (const current of captured) this.deleteAppliedHeadInOpenTransaction(current);
+        },
+        resolvedCommittedResult: () => undefined,
+      });
+    } finally {
+      this.#appliedCatalogHeadsRevision = nextAppliedCatalogHeadsRevisionV1();
+    }
   }
 
   private deleteAppliedHeadInOpenTransaction(currentInput: Readonly<{
@@ -816,6 +851,8 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     } catch (cause) {
       if (cause instanceof InventoryV1CandidateError) throw cause;
       throw databaseError('failed to compare-and-swap applied catalog head', cause);
+    } finally {
+      this.#appliedCatalogHeadsRevision = nextAppliedCatalogHeadsRevisionV1();
     }
   }
 
@@ -2508,6 +2545,8 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
       );
     }
     this.invalidateTraversals();
+    // A new low-level handle: nothing listed through the old one is reused.
+    this.#appliedCatalogHeadsRevision = nextAppliedCatalogHeadsRevisionV1();
     const previous = this.database;
     // Mark unavailable before invoking external lifecycle code. No exception,
     // identity return, malformed handle, or failed verification can leave this

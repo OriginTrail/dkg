@@ -2304,7 +2304,17 @@ export class PublishMethods extends DKGAgentBase {
       // back to the cleartext `contextGraphId` only when the on-chain id
       // could not be resolved (the provider re-resolves the digest cgId from
       // the adapter regardless, so the digest TARGET stays chain-truth).
-      const v10UpdateACKProvider = this.createV10UpdateACKProvider(updateOnChainId ?? contextGraphId);
+      const v10UpdateACKProvider = this.createV10UpdateACKProvider(
+        updateOnChainId ?? contextGraphId,
+        queuedOperation ? {
+          shareOperationId: queuedOperation.shareOperationId,
+          publisherPeerId: queuedOperation.publisherPeerId,
+          kaUal: updateScope.ual,
+          assertionVersion: updateScope.assertionVersion,
+          accessPolicy: opts?.accessPolicy ?? 'ownerOnly',
+          allowedPeers: opts?.allowedPeers ?? [],
+        } : undefined,
+      );
 
       // OT-RFC-49 / WS-D — curated-UPDATE discrimination + floor re-projection.
       // A1: resolve the single-blob curated AEAD hook the SAME way the publish
@@ -5684,7 +5694,14 @@ export class PublishMethods extends DKGAgentBase {
         // construction.
         ...executionHooks,
         skipContextGraphEnsure: true,
-        v10ACKProvider: publishOptions.v10ACKProvider ?? this.createV10ACKProvider(request.contextGraphId),
+        v10ACKProvider: publishOptions.v10ACKProvider ?? this.createV10ACKProvider(request.contextGraphId, {
+          shareOperationId: request.shareOperationId,
+          publisherPeerId: publishOptions.publisherPeerId ?? this.peerId,
+          kaUal: request.kaUal,
+          assertionVersion: request.assertionVersion,
+          accessPolicy: request.accessPolicy ?? 'ownerOnly',
+          allowedPeers: request.allowedPeers ?? [],
+        }),
         publishEpochs: request.publishEpochs ?? publishOptions.publishEpochs,
         pricingPolicy: operationPlan.pricingPolicy,
         publisherNodeIdentityIdOverride: request.publisherNodeIdentityIdOverride !== undefined

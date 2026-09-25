@@ -56,6 +56,7 @@ import { sanitizeRfc64CatalogShadowExecutionStatusV1 } from
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { startLiveDaemon, stopLiveDaemon, authHeaders, type LiveDaemon } from './helpers/live-daemon.js';
 import { rfc64PublicCatalogPolicy } from './helpers/rfc64-public-catalog.js';
+import { requestAuthentication } from './_helpers/request-authentication.js';
 
 // A port nothing listens on — connecting to it is a REAL refused connection.
 const DEAD_RPC = 'http://127.0.0.1:9';
@@ -192,6 +193,8 @@ async function requestStatusWithAgent(
   rfc64PublicCatalogOverride?: RequestContext['rfc64PublicCatalog'],
   routeRpcTransport?: DaemonRouteRpcTransport,
   opWalletsOverride: RequestContext['opWallets'] = { wallets: [] },
+  // The node operator, unless a test names another caller.
+  authentication = requestAuthentication({ kind: 'nodeOperator' }),
 ): Promise<{ status: number; body: any }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -235,6 +238,7 @@ async function requestStatusWithAgent(
       admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
       routeRpcTransport,
       opWallets: opWalletsOverride,
+      authentication,
     } as unknown as RequestContext);
   });
 
@@ -1615,6 +1619,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
     expect(response.body.rfc64SelectedPublicSync).toEqual({
       defaultEnabled: true,
       requestedContextGraphs: ['explicit-public-cg'],
+      requestedContextGraphCount: 1,
       catalogBackedContextGraphs: [],
     });
   });
@@ -1631,6 +1636,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
     expect(response.body.rfc64SelectedPublicSync).toEqual({
       defaultEnabled: true,
       requestedContextGraphs: ['explicit-public-cg', 'private-network-default-cg'],
+      requestedContextGraphCount: 2,
       catalogBackedContextGraphs: [],
     });
   });
@@ -1731,6 +1737,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
     expect(response.body.rfc64SelectedPublicSync).toEqual({
       defaultEnabled: true,
       requestedContextGraphs: ['selected-public-cg'],
+      requestedContextGraphCount: 1,
       catalogBackedContextGraphs: ['selected-public-cg'],
     });
   });
@@ -1765,6 +1772,66 @@ describe('/api/status RFC-64 selected-public activation', () => {
       completeSwmProviders: [],
       bootstrap,
     });
+  });
+});
+
+describe('/api/status RFC-64 requested scope by caller', () => {
+  // The live scope holds a public catalog graph, a private graph and the
+  // cleartext id an adopted name hash resolved to; the network adds a default.
+  const requestScopeAs = (authentication: ReturnType<typeof requestAuthentication>) => requestStatusWithAgent(
+    { getSyncContextGraphIds: () => ['selected-public-cg', 'acme-private-cg', 'acme-adopted-cg'] },
+    {
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: { acceptedPublicPolicies: [rfc64PublicCatalogPolicy('selected-public-cg')] },
+      },
+    },
+    '/api/status',
+    { defaultContextGraphs: ['network-default-cg'] } as never,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    authentication,
+  );
+  const wholeScope = ['selected-public-cg', 'acme-private-cg', 'acme-adopted-cg', 'network-default-cg'];
+
+  it('names the whole scope to the node operator, and to every caller when auth is off', async () => {
+    for (const authentication of [
+      requestAuthentication({ kind: 'nodeOperator' }),
+      requestAuthentication({ kind: 'nodeOperator', mode: 'public' }),
+      requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
+    ]) {
+      const response = await requestScopeAs(authentication);
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64SelectedPublicSync).toEqual({
+        defaultEnabled: true,
+        requestedContextGraphs: wholeScope,
+        requestedContextGraphCount: 4,
+        catalogBackedContextGraphs: ['selected-public-cg'],
+      });
+    }
+  });
+
+  it('names only the selected public catalog graphs to any other caller, with the whole count', async () => {
+    for (const authentication of [
+      requestAuthentication({ kind: 'anonymous' }),
+      requestAuthentication({ kind: 'anonymous', presentedToken: 'not-a-valid-token' }),
+      requestAuthentication({ kind: 'agent', agentAddress: `0x${'44'.repeat(20)}`, mode: 'public' }),
+    ]) {
+      const response = await requestScopeAs(authentication);
+      expect(response.status).toBe(200);
+      expect(response.body.rfc64SelectedPublicSync).toEqual({
+        defaultEnabled: true,
+        requestedContextGraphs: ['selected-public-cg'],
+        requestedContextGraphCount: 4,
+        catalogBackedContextGraphs: ['selected-public-cg'],
+      });
+      // The public catalog already lists that graph; nothing names the rest.
+      expect(response.body.rfc64PublicCatalog.selectedContextGraphs).toEqual(['selected-public-cg']);
+      const text = JSON.stringify(response.body);
+      for (const hidden of wholeScope.slice(1)) expect(text).not.toContain(hidden);
+    }
   });
 });
 
@@ -1807,6 +1874,7 @@ describe('/api/status selected overlay details', () => {
         // handleRequest; stubbed here because this hand-built ctx drives the full
         // /api/status body, which now surfaces the admission block.
         admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
+        authentication: requestAuthentication({ kind: 'anonymous' }),
       } as unknown as RequestContext);
     });
 
@@ -1875,6 +1943,7 @@ describe('/api/status selected overlay details', () => {
           nodeVersion: '0.0.0-test',
           nodeCommit: '',
           admission: { inFlight: 0, max: 0, rejectedTotal: 0 },
+          authentication: requestAuthentication({ kind: 'anonymous' }),
         } as unknown as RequestContext);
       });
       await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));

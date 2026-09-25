@@ -2,20 +2,140 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [10.0.19] - 2026-09-25
 
 ### Upgrading from 10.0.18
 
 | Change | Impact | Action |
 | --- | --- | --- |
+| Knowledge Asset write routes answer 400 for a malformed term | `POST /api/knowledge-assets` and `POST /api/knowledge-assets/{name}/wm/write` now reject relative or RFC 3987-invalid IRIs, unquoted or malformed literals and a graph that is not a bare absolute IRI. Before, such a write failed with a store error or stored the triple under a different term than the caller sent. | Send absolute IRIs, blank nodes and well-formed quoted literals. Check agents, scripts and MCP tools that build terms by string concatenation, and treat a 400 from these routes as a client error to fix, not a transient one. |
+| A publishing Core counts its own StorageACK toward the Core quorum | The publishing Core stores and verifies its copy through the same handler as remote Cores before signing. With the mainnet minimum of three distinct Core identities, a Core publish needs its own ACK plus two remote Core ACKs; an Edge publish still needs three remote Core ACKs. Edge peers cannot serve StorageACKs and are excluded from ACK collection | Upgrade Cores one at a time and check that each registers the StorageACK handler. Monitor ACK quorum and decline logs during the canary rollout |
 | Chain-driven VM reconciliation has its own switch, `vmReconcilerEnabled` (env `DKG_VM_RECONCILER_ENABLED`, default on) | `syncReconcilerEnabled: false` / `DKG_SYNC_RECONCILER_ENABLED=0` now only stops the periodic peer-sync reconciler. A Core that set it resumes promoting acknowledged public data to Verifiable Memory on upgrade | None to restore promotion. Keep `syncReconcilerEnabled` as it is if you still want the peer-sync reconciler off. Do not set `vmReconcilerEnabled: false` on a Core |
 | **Cores with VM reconcile disabled will decline all storage ACKs** for public Context Graphs | A Core signs a public StorageACK (publish or update) only when the data is guaranteed to reach its Verifiable Memory. With VM reconciliation off it declines every one with `CORE_VM_PROMOTION_DISABLED`, which publishers treat as final for that Core. While it cannot commit yet (starting up, chain or store unavailable, an older version of the asset still awaiting promotion) it declines with `CORE_TEMPORARILY_UNAVAILABLE` and a message starting `VM promotion unavailable:`, which every deployed publisher, 10.0.18 included, retries. Curated catalog ACKs are unaffected | After the upgrade check `GET /api/status`: `vmPromotion.storageAckGate` is `"ready"` and `vmPromotion.storageAckHandler` is `"registered"`; `vmPromotion.storageAckDeclinesLastHour` counts declines per reason. The startup log warns when a Core cannot promote to VM |
 | Cores decline legacy (not graph-scoped) public ACK requests | A Core cannot keep a copy of a legacy root-entity publish that it could later promote, so it declines those requests with `CORE_VM_PROMOTION_DISABLED`. Every default publish and update path (API, CLI, MCP, adapters) has sent graph-scoped requests since 10.0.7. Still legacy: raw-lift jobs queued before 10.0.7 or restored with the legacy raw-lift import, and `publishFromSharedMemory` called without `contentScopeVersion`. These can no longer collect ACKs from upgraded Cores | Run publishers on 10.0.7 or later. Finish or discard legacy raw-lift jobs before the Cores upgrade, and publish that data again through the current publish API |
-| Graphs acknowledged while VM reconcile was off are backfilled | From 1 to 6 minutes after start, then every 15 minutes, the Core records the public graphs holding the StorageACK copies it signed as core-hosted, at most 32 per pass. The reconciler then walks each graph's chain registrations and promotes the Knowledge Assets the chain registered to it, including ones this Core never held and fetches from peers. On a Core that ran with the peer-sync reconciler off, this can be a large catch-up. Copies of publishes that never landed are not promoted; they expire as described under Fixed | Before upgrading, check that subscription rehydration is enabled and `/api/status` lists no dormant core-hosted rows (a dormant row's graph is declined). Upgrade Cores one at a time, and start the next only when the previous one reports `vmPromotion.audit.backfillPending` 0 and `staleUnpromotedCopies` near 0 (watch the `ACK promotion audit` log line). The catch-up runs in the background RPC class and store lane; `DKG_VM_RECONCILE_CONCURRENCY` (graphs at once, default 2) and `DKG_VM_RECONCILE_ORDINAL_CONCURRENCY` (registrations per graph at once, default 5) throttle it further |
-| Mode-only `replenishing` approval configs use a relative ceiling | When `chain.approvalPolicy.mode` is `replenishing` and neither sizing field is set, the implicit ceiling changes from a flat 1000 TRAC to 20 times the triggering publish cost. This can lower or raise the standing allowance depending on publish cost; startup emits a warning for this exact legacy shape | Set `targetAllowance: '1000000000000000000000'` to retain the former flat 1000 TRAC ceiling, or set `targetAllowanceMultiple` explicitly to adopt relative sizing |
+| Graphs acknowledged while VM reconcile was off are backfilled | From 1 to 6 minutes after start, then every 15 minutes, the Core records the public graphs holding the StorageACK copies it signed as core-hosted, at most 32 per pass. The reconciler then walks each graph's chain registrations and promotes the Knowledge Assets the chain registered to it, including ones this Core never held and fetches from peers. On a Core that ran with the peer-sync reconciler off, this can be a large catch-up. Copies of publishes that never landed are not promoted; they expire as described under Fixed | Before upgrading, check with the node-operator token that `GET /api/context-graph/subscriptions` reports subscription rehydration enabled and no dormant core-hosted rows under `rehydration.dormantReasons` (a dormant row's graph is declined). Upgrade Cores one at a time, and start the next only when the previous one reports `vmPromotion.audit.backfillPending` 0 and `staleUnpromotedCopies` near 0 (watch the `ACK promotion audit` log line). The catch-up runs in the background RPC class and store lane; `DKG_VM_RECONCILE_CONCURRENCY` (graphs at once, default 2) and `DKG_VM_RECONCILE_ORDINAL_CONCURRENCY` (registrations per graph at once, default 5) throttle it further |
+| Mode-only `replenishing` approval configs use a relative ceiling | When `chain.approvalPolicy.mode` is `replenishing` and neither sizing field is set, the implicit ceiling changes from a flat 1000 TRAC to 20 times the triggering publish cost. The same ceiling sizes the Context Graph registration deposit approval: when a registration reverts for too low an allowance, the node now approves the ContextGraphs contract for 20 times the on-chain registration deposit, where it approved 1000 TRAC (or the deposit, when larger). This can lower or raise the standing allowance depending on publish cost and the deposit; startup emits a warning for this exact legacy shape | Set `targetAllowance: '1000000000000000000000'` to retain the former flat 1000 TRAC ceiling for publishes and the registration deposit (a larger deposit is still approved in full), or set `targetAllowanceMultiple` explicitly to adopt relative sizing |
+| Curated and local-only Context Graph metadata leaves `ontology`, which a rollback to 10.0.18 does not undo | On start, and before each store discovery pass, a node moves the on-chain id binding, definition and name of each curated or `private: true` graph that earlier builds wrote to the shared `ontology` graph into the graph's own `_meta`, and no longer writes or gossips a curated graph's binding to `ontology`. Such rows for graphs the node does not hold are deleted, a bare binding only once the chain proves its slot curated. The VM publish registration guard of 10.0.18 reads a binding from `ontology` only: it passes a graph whose `_meta` records it as `registered`, as the registering node's does, or that has an `ontology` binding. So on a node rolled back to 10.0.18 after running 10.0.19, publishing into a curated graph with an open publish policy that the node did not register can fail the guard with `CG_NOT_REGISTERED` (`... is not registered on-chain`). Nothing on 10.0.18 restores the row: its chain discovery writes a curated binding only on the graph's curator, registration refuses a registered graph, and upgraded peers no longer carry the row, so only ontology sync from a peer still on 10.0.18 can bring it back | Do not roll back a node that publishes into curated graphs it did not register. The error's advice to run `dkg context-graph register` does not help there. If one was rolled back, upgrade it to 10.0.19 again: the binding is still in the graph's `_meta`, which 10.0.19 reads, so publishing resumes after the restart without a resync |
+
+### Known issues
+
+- **An on-demand subscription can stay partly synced**: after
+  `dkg subscribe <id>` without `--save` (the CLI default since 10.0.13), the
+  VM reconciler fails to save the subscription's cursor on every sweep and
+  logs `Cannot acknowledge join approval ... durable subscription intent or
+  host state is missing`, so Knowledge Assets the initial fetch missed are
+  never fetched. Subscribe with `--save` to avoid it. A Core that hosts a
+  graph that is also subscribed on demand is affected the same way. A fix is
+  in review.
+- **A node that holds the shared `ontology` system graph can bind on-chain id
+  claims its own chain does not confirm**: `dkg context-graph list` can show
+  one on-chain id under several graph names, and subscribing to a public
+  Context Graph by its name hash can create a row keyed by the hash, whose
+  Verifiable Memory fetches then come back empty. Subscribing by the graph's
+  cleartext id avoids the name-hash path. A fix is in review.
 
 ### Fixed
 
+- **Cores read the chain far less while catching up on VM promotion**: the
+  periodic chain-promote sweep read each Knowledge Asset's merkle root and
+  publisher from the chain before checking what the node held locally. It paid
+  those reads for assets the Core holds nowhere (which it can't promote) and for
+  assets already confirmed in Verifiable Memory, on every visit and again after
+  each restart. On Cores with a large backlog that pinned background RPC at the
+  budget cap. The sweep now checks local state first. An asset held nowhere
+  locally is queued for exact recovery without chain reads, and an asset already
+  confirmed in VM settles without chain reads. Only local copies whose outcome
+  depends on the chain root read it. Updates are still promoted through
+  finalization and the pending-update lane, as before. A sweep pass that fails
+  now keeps the progress it made, so the retry doesn't re-verify the same
+  assets.
+- **A request that never left the node's RPC queue is no longer counted as a
+  provider failure**: the per-request deadline also covered time spent waiting
+  in the node's own RPC request governor. When it expired there, the request
+  was marked as a provider timeout, the provider was marked failed, and the node
+  failed over to the next provider behind the same queue, often until every
+  provider was "exhausted". Such a request now fails locally as retry-later
+  (`RPC_REQUEST_GOVERNOR_QUEUE_FULL`). Providers, failover counts and the RFC-64
+  authority circuit breaker are unaffected by it. A request that was actually
+  sent still times out and fails over as before.
+- **One damaged shared-memory head no longer stops Verifiable Memory
+  promotion for a whole Context Graph**: a node could end up with a Knowledge
+  Asset's graph-scoped SWM head missing its share-operation id, for example
+  when a sync round rewrote the head right after finalization had promoted the
+  asset and retired its SWM copy. Chain reconcile handled that asset from its
+  verified VM copy, but the follow-up SWM cleanup read the head again, failed on
+  it, and failed the whole Context Graph's VM reconcile on every sweep. Every
+  later asset in that graph then stayed in Shared Working Memory on that node.
+  10.0.18 had the same failure. The cleanup now removes such a head when it
+  names no share operation and no newer version than the confirmed VM copy. Any
+  other corrupt head is kept and reported with a warning, and no longer blocks
+  the rest of the graph.
+- **An Edge can publish to Verifiable Memory in a public Context Graph that
+  another node registered**: the publish check looked for the graph's
+  registration only in the node's own store, and an Edge never receives that
+  record for another node's graph (the registering node announces it once,
+  and Edges do not sync the `ontology` system graph). Such a publish failed
+  with `Context graph "<id>" is not registered on-chain` although
+  `dkg context-graph list` showed the graph's on-chain id; 10.0.18 did the
+  same. The check now also accepts the on-chain id the node resolved from the
+  chain, which the publish transaction targets anyway. A graph the chain does
+  not know still fails with the same error.
+- **Less CPU per connecting peer for RFC-64 catalog replay**: every new
+  connection replays each catalog-eligible graph's heads to the peer, and every
+  replay re-read and re-verified every applied head on the node. A Core with
+  many graphs spent close to 20 s of main-thread CPU per connecting peer. The
+  node now reuses verified applied heads while the applied-head inventory is
+  unchanged, answers a re-announced head that is already applied without
+  reading or verifying it again or scheduling a receiver task, and names the
+  StorageACK ledger graph on ledger updates so graph-set indexes skip a rescan.
+  In a benchmark with 60 graphs of 2,000 heads each, CPU per connecting peer
+  fell from 18.7 s to 2.35 s. The replay loop itself (replays that come back
+  incomplete and repeat on every reconnect) is not changed; keep the RFC-64
+  kill switch on where it is set.
+- **Subscriptions for a Context Graph the chain reports unknown are no longer
+  retried every 30 seconds**: the deferred subscription authority recovery
+  re-read the chain for every dormant row whose stored on-chain id does not
+  exist or is not active, and never stopped. A Core carrying such rows made
+  thousands of `getContextGraph` calls an hour. That answer is now final for
+  the running process; the row stays on disk and is checked again at the next
+  start. Timeouts and failed reads are still retried.
+- **Remote queries no longer pass the per-graph access check with a graph id
+  named like a built-in object property**: the query handler looked up a
+  peer-chosen Context Graph id in `queryAccess.contextGraphs` with a plain
+  property lookup, so ids such as `constructor`, `toString` or `valueOf`
+  matched an inherited object member instead of nothing. On a node with
+  `defaultPolicy: 'deny'` and a `contextGraphs` map, entity lookups into a
+  local graph with such a name skipped both the default deny and the
+  public-graph check; under `defaultPolicy: 'public'` the same ids were
+  wrongly refused SPARQL. Only the map's own keys count now, and the sync
+  responder's per-graph priority lookup gets the same rule. Nodes without a
+  `contextGraphs` map were not affected.
+- **Knowledge Asset write routes answer 400 for a malformed term**:
+  `POST /api/knowledge-assets` and
+  `POST /api/knowledge-assets/{name}/wm/write` passed subject and predicate
+  terms to the store unchecked, and the create route checked no terms at all.
+  A malformed IRI either failed the write with a store error or, for
+  characters the store strips such as `^`, stored the triple under a different
+  predicate than the caller sent. Both routes now check every term, exactly as
+  sent, against one rule:
+  - the subject must be an absolute IRI or a blank node;
+  - the predicate must be an absolute IRI;
+  - the object must be a well-formed quoted literal, an absolute IRI or a blank
+    node;
+  - a supplied `graph` must be a bare absolute IRI.
+
+  IRIs, including datatypes and the graph, are checked against RFC 3987, as
+  the store's own IRI parser does: `a:` is accepted, while a malformed percent
+  escape, authority or port gets a 400 instead of a store error.
+  Angle-bracketed IRIs count as IRIs, and whitespace-padded terms are
+  rejected. A literal must be complete: an unterminated one, or one carrying a
+  raw line break, is rejected. Such a literal could previously add statements
+  of its own to the draft. A typed literal needs an absolute datatype IRI:
+  `"42"^^<integer>` used to be stored with its datatype resolved against the
+  managed Oxigraph's own URL. Raw control characters other than line breaks are
+  still accepted, as N-Quads and SPARQL allow them. `wm/write` now also
+  accepts blank-node and angle-bracketed objects, as create and the store
+  already did.
 - **Cores promote the data they acknowledge to Verifiable Memory again**: since
   10.0.14 (#2184) `syncReconcilerEnabled` also gated chain-driven VM
   reconciliation, which the 10.0.14 upgrade notes did not mention. A Core that
@@ -157,9 +277,68 @@ All notable changes to the DKG V10 node are documented here. The format is based
   fails a graph closed, needing a fresh catch-up, when either runs out. A
   finalized authority read whose caller gives up now leaves the shared
   authority-read queue instead of holding it.
+- **Catch-up status and the sync scope in public node status no longer name
+  private Context Graphs to other callers**: `GET /api/sync/catchup-status`
+  answers a lookup by `jobId`, by a name hash, or by an on-chain id reference
+  (`contextGraphId=32` or `#32`, also new in this release) only for callers
+  who may follow the graph. Once the name hash a job was created under
+  resolves to a cleartext id, only the node operator and an agent the
+  subscribe route would admit to that graph see the job; any other token gets
+  the answer for an unknown job. `GET /api/status`, which needs
+  no token, lists in `rfc64SelectedPublicSync.requestedContextGraphs` only the
+  graphs also in `catalogBackedContextGraphs`, and reports the size of the
+  whole scope as `requestedContextGraphCount`; a request with the
+  node-operator token still gets the whole list.
+- **Looking up a Knowledge Asset's Context Graph no longer blocks the node
+  for seconds**: since 10.0.17 the node answers this lookup from its chain
+  event log, and each lookup read and decoded every Knowledge Asset
+  registration of the ContextGraphStorage contract on the main thread (about
+  36,000 rows on a mainnet Core, 2 to 3 seconds per call). Finalization,
+  Random Sampling repair, sync and VM promotion all make this lookup, so Cores
+  stalled for 8 to 11 seconds after finalizations and repairs, and the VM
+  promotion backfill made it once per acknowledged copy. The lookup now reads
+  only that Knowledge Asset's registration rows through a new index on the
+  chain log table, and returns the same answers as before. The daemon adds
+  the index to `node-ui.db` on the first start after the upgrade (a one-time
+  build over the existing rows, about a quarter of a second per 100,000
+  stored chain events). The index takes about 300 bytes of disk per stored
+  chain event (about 30 MB per 100,000) and makes the occasional `VACUUM` of
+  `node-ui.db` about 40% slower. If the build fails, for example on a full
+  disk, the node logs a warning, starts without the index (the lookup is then
+  slower but still correct) and retries on the next start.
+- **Walking a Context Graph's registrations no longer reads the whole graph
+  for every step**: VM reconciliation reads a graph's Knowledge Asset
+  registrations one position at a time, and since 10.0.17 each read was
+  answered by reading and decoding every registration of that graph from the
+  chain event log on the main thread. On the largest mainnet graph (about
+  29,500 registrations) that took about 4 seconds per position, so walking
+  200 positions blocked the node for about 13 minutes. The node now keeps
+  each graph's list of registrations in memory and, when the chain log
+  changes, reads only the registrations added since, after checking that the
+  part it already holds has not changed (anything it cannot confirm is read
+  again in full). The same walk now takes well under a second, and reading
+  a whole graph from scratch takes under 0.2 seconds. Answers are unchanged.
 
 ### Changed
 
+- **Daemon clients give each request a deadline by route, and a long Knowledge
+  Asset mutation that times out reports an unknown outcome** (#2768): the CLI
+  and the MCP server waited on every daemon request until Node's `fetch` gave
+  up after 300 s, while the OpenClaw adapter cut every request, publishes
+  included, at 30 s and the Hermes adapter at 5 or 10 s. The CLI, the MCP
+  server and both adapters now wait 30 s for a read and 240 s for a long
+  Knowledge Asset mutation (`vm/publish`, `swm/share`, `wm/import-file`, or a
+  create that also shares or publishes), and the node UI waits 240 s for the
+  long mutations. The CLI and the MCP server give every other write at least
+  240 s too, and the context-graph, sub-graph, PCA and publisher-job lists
+  60 s, as the node UI already did for its graph lists. A long mutation that
+  gets no answer in time is reported as outcome unknown, not as failed: the
+  daemon keeps working after the client stops waiting, so the operation may
+  still complete and a blind retry can conflict with it. Check the Knowledge
+  Asset's history (`dkg ka history`, `dkg_knowledge_asset_history`) before
+  retrying. `DKG_API_READ_TIMEOUT_MS` and `DKG_API_LONG_TIMEOUT_MS` override
+  the CLI and MCP read and long deadlines, in milliseconds (see
+  `docs/references/cli.md`).
 - **The StorageACK is a finality gate**: a Core signs a public StorageACK only
   when the acknowledged data is guaranteed to reach its Verifiable Memory. It
   verifies the data, checks that its chain-driven VM reconciliation is enabled
@@ -177,8 +356,10 @@ All notable changes to the DKG V10 node are documented here. The format is based
   yet (the creator of a freshly registered graph). A namespace that reconciles a different live graph is never
   rewritten by an ACK. A namespace whose persisted subscription row is dormant
   is declined transiently for up to 10 minutes while the dormancy can clear
-  (authority retry, activation slot), then finally; with subscription
-  rehydration disabled it is declined finally at once.
+  (authority retry, activation slot), then finally. It is declined finally
+  at once when subscription rehydration is disabled, or when the chain
+  reports the row's on-chain id as missing or inactive: that row is retired
+  until the next restart, which checks it again.
 - **Public update ACKs are durable too**: a Core stores the verified updated
   version as its own ACK copy with a new SWM head and ledger entry, but only
   once the version it replaces is in its VM. Until then it declines the update
@@ -229,6 +410,15 @@ All notable changes to the DKG V10 node are documented here. The format is based
   reason, with VM-promotion declines under `CORE_VM_PROMOTION_UNAVAILABLE` and
   `CORE_VM_PROMOTION_DISABLED`), the number of core-hosted graphs and the last
   audit.
+- **`GET /api/status` reports main-thread stalls**: a new `eventLoopDelay`
+  block gives the event-loop delay over the last complete 60-second window
+  (`p50Ms`, `p99Ms`, `maxMs` and `windowMs`, in milliseconds), sampled every
+  20 ms. The delays are how late each sample ran beyond that 20 ms interval,
+  so an idle node reads about 0, and they are `null` before the first sample.
+  A stall that spans two windows is counted once, in the window it ends in or
+  the next. When a window's longest stall reaches 2 seconds the daemon logs
+  one `[warn] Event loop blocked: ...` line, at most once every 10 minutes,
+  and the next warning counts the windows it skipped.
 
 ## [10.0.18] - 2026-09-22
 

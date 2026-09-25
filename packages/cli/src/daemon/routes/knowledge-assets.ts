@@ -36,20 +36,18 @@ import {
   validateEntities,
   validateOptionalSubGraphName,
   validateRequiredContextGraphId,
-  isWritableQuad,
-  validateQuadObjectTerms,
   respondIfReconcileUnavailable,
   respondIfStoreUnavailable,
   classifyStoreUnavailable,
   respondIfChainRpcTransportError,
   sanitizeRpcMessage,
-  validateWritableQuadLiteralSizes,
   normalizeContextGraphIdOrUri,
   resolveRequiredWriteContextGraphId,
   isNoFundedPublisherWalletLike,
   noFundedPublisherWalletBody,
   SMALL_BODY_BYTES,
 } from "../http-utils.js";
+import { validateWritableQuads } from "../knowledge-asset-quad-validation.js";
 import { validatePreSignedAuthorAttestation } from "./memory.js";
 import { recordAssertionActivity, recordConvictionCostCovered } from "../activity-notification.js";
 import {
@@ -1021,11 +1019,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // OT-RFC-43 §10.5.5.
     const hasQuads = Array.isArray(quads) && quads.length > 0;
     if (hasQuads) {
-      if (!quads.every(isWritableQuad)) {
-        return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
-      }
-      const literalSize = validateWritableQuadLiteralSizes("quads", quads);
-      if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
+      // Reject malformed quads and terms before any create/write mutation.
+      const invalid = validateWritableQuads("quads", quads);
+      if (invalid) return jsonResponse(res, 400, invalid);
     }
     const shouldFinalize = hasQuads && finalize !== false;
     // #1116 D5: the create ROUTE stays a primitive — create+write+seal, with
@@ -1427,17 +1423,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     if (layer === "wm") {
       if (verb === "write") {
         if (!Array.isArray(parsed.quads)) return jsonResponse(res, 400, { error: 'Missing "quads"' });
-        // GH #306 — reject string-shaped / malformed quads here (4xx) instead of
-        // letting them crash the agent write path with a TypeError (HTTP 500).
-        if (!parsed.quads.every(isWritableQuad)) {
-          return jsonResponse(res, 400, { error: '"quads" must be an array of { subject, predicate, object } objects (graph optional); string-shaped quads are not accepted' });
-        }
-        // GH #306/#787 (follow-up) — reject objects that are neither a quoted
-        // literal nor an absolute IRI before they reach (and crash) the parser.
-        const wmObjErr = validateQuadObjectTerms("quads", parsed.quads);
-        if (wmObjErr) return jsonResponse(res, 400, { error: wmObjErr });
-        const literalSize = validateWritableQuadLiteralSizes("quads", parsed.quads);
-        if (!literalSize.ok) return jsonResponse(res, 400, literalSize.body);
+        // GH #306 — reject malformed quads and terms here (4xx) instead of
+        // letting them crash the agent write path (HTTP 500).
+        const invalid = validateWritableQuads("quads", parsed.quads);
+        if (invalid) return jsonResponse(res, 400, invalid);
         // A bare write to a name that was never created used to fall through to
         // the legacy `/assertion/{addr}/{name}` graph and produce a KA that is
         // permanently 404 in the descriptor API (no `_meta` lifecycle record,

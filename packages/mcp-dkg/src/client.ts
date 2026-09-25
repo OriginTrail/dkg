@@ -122,17 +122,32 @@ export interface DkgClientOptions {
   config: DkgConfig;
   /** Optional fetch implementation (mostly here for tests). */
   fetcher?: typeof fetch;
-  /** Deadline in ms for GET reads (default 30 000). */
+  /** Deadline in ms for GET reads (default `DKG_API_READ_TIMEOUT_MS`, else 30 000). */
   readTimeoutMs?: number;
   /**
    * Deadline in ms for every POST/PUT/DELETE, including the long Knowledge Asset
-   * mutations (default 240 000, never below `readTimeoutMs`).
+   * mutations (default `DKG_API_LONG_TIMEOUT_MS`, else 240 000; never below
+   * `readTimeoutMs`).
    */
   longTimeoutMs?: number;
 }
 
 /** Deadline for GET reads, which answer from local daemon state. */
 export const DKG_READ_TIMEOUT_MS = 30_000;
+
+/**
+ * Deadline for the GET lists in {@link DKG_LIST_READ_ROUTES}, which walk every
+ * context graph, sub-graph, PCA or publisher job (the PCA list reads each
+ * account from the chain). It matches the node UI's graph-list deadline and
+ * never falls below the read deadline.
+ */
+export const DKG_LIST_READ_TIMEOUT_MS = 60_000;
+const DKG_LIST_READ_ROUTES: ReadonlySet<string> = new Set([
+  '/api/context-graph/list',
+  '/api/sub-graph/list',
+  '/api/pca',
+  '/api/publisher/jobs',
+]);
 
 /**
  * Deadline for every other request: several wait on peers or the chain.
@@ -143,6 +158,24 @@ export const DKG_READ_TIMEOUT_MS = 30_000;
  * a long mutation's outcome-unknown report, comes first.
  */
 export const DKG_LONG_TIMEOUT_MS = 240_000;
+
+/** Environment overrides, in ms, for the read and long deadlines. */
+export const DKG_READ_TIMEOUT_ENV = 'DKG_API_READ_TIMEOUT_MS';
+export const DKG_LONG_TIMEOUT_ENV = 'DKG_API_LONG_TIMEOUT_MS';
+
+/** Longest deadline a Node timer honours; a longer one fires after 1 ms. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
+/** A deadline override from the environment; unset or empty means none. */
+function timeoutFromEnv(name: string): number | undefined {
+  const raw = process.env[name]?.trim();
+  if (raw === undefined || raw === '') return undefined;
+  const value = Number(raw);
+  if (!/^\d+$/.test(raw) || value < 1 || value > MAX_TIMEOUT_MS) {
+    throw new Error(`${name} must be a whole number of milliseconds from 1 to ${MAX_TIMEOUT_MS}, got "${raw}"`);
+  }
+  return value;
+}
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 
@@ -462,14 +495,19 @@ export class DkgClient {
   private readonly token: string;
   private readonly fetcher: typeof fetch;
   private readonly readTimeoutMs: number;
+  private readonly listReadTimeoutMs: number;
   private readonly longTimeoutMs: number;
 
   constructor(opts: DkgClientOptions) {
     this.api = opts.config.api.replace(/\/$/, '');
     this.token = opts.config.token;
     this.fetcher = opts.fetcher ?? globalThis.fetch;
-    this.readTimeoutMs = opts.readTimeoutMs ?? DKG_READ_TIMEOUT_MS;
-    this.longTimeoutMs = Math.max(opts.longTimeoutMs ?? DKG_LONG_TIMEOUT_MS, this.readTimeoutMs);
+    this.readTimeoutMs = opts.readTimeoutMs ?? timeoutFromEnv(DKG_READ_TIMEOUT_ENV) ?? DKG_READ_TIMEOUT_MS;
+    this.listReadTimeoutMs = Math.max(DKG_LIST_READ_TIMEOUT_MS, this.readTimeoutMs);
+    this.longTimeoutMs = Math.max(
+      opts.longTimeoutMs ?? timeoutFromEnv(DKG_LONG_TIMEOUT_ENV) ?? DKG_LONG_TIMEOUT_MS,
+      this.readTimeoutMs,
+    );
   }
 
   private async request<T = unknown>(
@@ -510,9 +548,10 @@ export class DkgClient {
 
   /**
    * Run one daemon round-trip under its deadline: GET reads take the read
-   * class, every other method the long class. The deadline also covers reading
-   * the body. A long Knowledge Asset mutation that times out reports
-   * {@link DkgOutcomeUnknownError}; other timeouts keep fetch's TimeoutError.
+   * class (the list class for {@link DKG_LIST_READ_ROUTES}), every other method
+   * the long class. The deadline also covers reading the body. A long Knowledge
+   * Asset mutation that times out reports {@link DkgOutcomeUnknownError}; other
+   * timeouts keep fetch's TimeoutError.
    */
   private async withDeadline<T>(
     method: HttpMethod,
@@ -520,7 +559,11 @@ export class DkgClient {
     longMutation: boolean,
     run: (signal: AbortSignal) => Promise<T>,
   ): Promise<T> {
-    const timeoutMs = method === 'GET' ? this.readTimeoutMs : this.longTimeoutMs;
+    const timeoutMs = method !== 'GET'
+      ? this.longTimeoutMs
+      : DKG_LIST_READ_ROUTES.has(route.replace(/\?.*$/, ''))
+        ? this.listReadTimeoutMs
+        : this.readTimeoutMs;
     const signal = AbortSignal.timeout(timeoutMs);
     try {
       return await run(signal);

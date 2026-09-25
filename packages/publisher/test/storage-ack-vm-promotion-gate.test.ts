@@ -83,6 +83,7 @@ function harness(
     store?: OxigraphStore;
     rootCount?: (kaUal: string) => Promise<bigint>;
     locks?: Map<string, Promise<void>>;
+    deadlineMs?: number;
   } = {},
 ): Harness {
   const store = options.store ?? new OxigraphStore();
@@ -103,6 +104,7 @@ function harness(
     onPriorVersionAwaitingPromotion: (request) => { priorVersions.push({ ...request }); },
     ...(options.rootCount ? { readKnowledgeAssetRootCount: options.rootCount } : {}),
     ...(options.locks ? { workspaceWriteLocks: options.locks } : {}),
+    ...(options.deadlineMs ? { ackHandlerDeadlineMs: options.deadlineMs } : {}),
   }, new TypedEventBus());
   return { wallet, store, handler, signMessage, declines, priorVersions };
 }
@@ -240,7 +242,7 @@ async function signedPublish(h: Harness, value = 'v1'): Promise<void> {
 }
 
 describe('StorageACK VM-promotion finality gate', () => {
-  it('asks the gate first, then keeps the copy and its ledger row, and only then signs', async () => {
+  it('asks the gate first, keeps the copy, then signs before recording the ledger row', async () => {
     const requests: StorageAckVmPromotionRequest[] = [];
     let stateAtGate: { head: unknown; ledger: number } | undefined;
     let ledgerAtSign = -1;
@@ -262,7 +264,7 @@ describe('StorageACK VM-promotion finality gate', () => {
     ]);
     // Nothing is written for a request the gate may still refuse.
     expect(stateAtGate).toEqual({ head: undefined, ledger: 0 });
-    expect(ledgerAtSign).toBe(1);
+    expect(ledgerAtSign).toBe(0);
     expect(await head(h.store)).toMatchObject({ kaUal: UAL, assertionVersion: '1' });
     expect(await h.store.countQuads(layerGraph(MemoryLayer.SharedWorkingMemory, 1))).toBe(1);
     expect(await ledgerRows(h.store)).toEqual([expect.objectContaining({
@@ -419,6 +421,35 @@ describe('StorageACK VM-promotion finality gate', () => {
       expect(isStorageACKDecline(retry)).toBe(false);
       expect(await swmValues(h.store)).toEqual(['"edited-retry"']);
       expect(await supersededRows(h.store)).toEqual([firstRow!['op']]);
+    });
+
+    it('releases an overwritten obligation after a non-cooperative replacement misses its deadline', async () => {
+      const h = harness(async () => OK, { rootCount: async () => 0n, deadlineMs: 40 });
+      await signedPublish(h, 'first-attempt');
+      const [firstRow] = await ledgerRows(h.store);
+      await h.store.update!(storageAckLedgerMarkUpdate(firstRow!['op']!, LEDGER.absentSeenAt, new Date()));
+      const originalReplace = h.store.replaceGraph!.bind(h.store);
+      let entered!: () => void;
+      let release!: () => void;
+      const inReplace = new Promise<void>((resolve) => { entered = resolve; });
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      vi.spyOn(h.store, 'replaceGraph').mockImplementation(async (graph, quads) => {
+        entered();
+        await held;
+        await originalReplace(graph, quads);
+      });
+
+      const response = h.handler.handler(publishIntent('edited-retry').bytes, PEER);
+      await inReplace;
+      expect(isStorageACKDecline(decodeStorageACK(await response))).toBe(true);
+      release();
+
+      await vi.waitFor(async () => {
+        expect(await swmValues(h.store)).toEqual(['"edited-retry"']);
+        expect(await supersededRows(h.store)).toEqual([firstRow!['op']]);
+      });
+      expect(await ledgerRows(h.store)).toHaveLength(1);
+      expect(h.signMessage).toHaveBeenCalledOnce();
     });
 
     it('still refuses different content once that version landed on chain', async () => {

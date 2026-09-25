@@ -5,6 +5,7 @@ import { startProverLoop, type TickOutcome } from '@origintrail-official/dkg-ran
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { StorageACKRegistrationRuntime } from '../src/p2p/storage-ack-registration-runtime.js';
 import { RandomSamplingShutdownTimeoutError } from '../src/random-sampling-bind.js';
 import { VmReconcileSchedulingRuntime } from '../src/chain-reconciler.js';
 import { FinalizationRuntime } from '../src/finalization-runtime.js';
@@ -35,6 +36,7 @@ function syntheticShutdownAgent(): any {
   // the synthetic shutdown fixture aligned with the production lifecycle
   // owners that stop() fences before dependency teardown.
   agent.rfc64BackgroundWorkDispatcherV1 = new Rfc64BackgroundWorkDispatcherV1();
+  agent.storageACKRegistrationRuntime = new StorageACKRegistrationRuntime();
   return agent;
 }
 

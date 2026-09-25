@@ -133,6 +133,19 @@ export function createRpcTimeoutError(
 }
 
 /**
+ * An endpoint attempt whose deadline expired while its request still waited in
+ * the process-local RPC governor, before anything was sent. It carries the
+ * local-capacity code, so failover treats it like a full queue: no endpoint is
+ * blamed and none is tried next, because every endpoint shares that queue.
+ */
+export function createRpcAdmissionTimeoutError(
+  message: string,
+  opts?: { cause?: unknown },
+): ChainRpcTransportError {
+  return new ChainRpcTransportError('RPC_REQUEST_GOVERNOR_QUEUE_FULL', message, opts);
+}
+
+/**
  * True for a chain-RPC TRANSPORT failure — ONE simple structural check over the
  * chain-NAMESPACED codes (`RPC_ENDPOINTS_EXHAUSTED` / `RPC_RECEIPT_LOOKUP_FAILED`
  * / `RPC_TIMEOUT`). Every {@link ChainRpcTransportError} carries one of these, so

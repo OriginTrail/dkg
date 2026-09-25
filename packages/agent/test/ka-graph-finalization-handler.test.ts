@@ -53,6 +53,7 @@ import { createCursorState } from '../src/reconcile-cursor.js';
 import {
   createRetireConfirmedGraphScopedSwmTwinIfOrphaned,
   reconcileFinalizedSwmTwinFromCatalogProjection,
+  type RetireConfirmedGraphScopedSwmTwinIfOrphaned,
 } from
   '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 
@@ -3866,6 +3867,266 @@ describe('graph-scoped finalization handler', () => {
     expect(await store.countQuads(vmGraph)).toBe(2);
   });
 
+  describe('a torn SWM head on one confirmed KA during a graph reconcile', () => {
+    const HEALTHY_UAL = `did:dkg:otp:20430/${AUTHOR}/8`;
+    const HEALTHY_KA_ID = (BigInt(AUTHOR) << 96n) | 8n;
+    const HEAD_SUBJECT = `${UAL}#dkg-swm-head`;
+
+    /**
+     * The residue seen on a live receiver: the KA is confirmed in VM, its SWM
+     * graph was already retired, and the head kept `assertionGraph`,
+     * `assertionVersion`, `contentScopeVersion` and `kaUal` but lost
+     * `shareOperationId`. The operation subject it once named stays complete.
+     */
+    async function tearConfirmedHead(
+      swmGraph: string,
+      headVersion?: string,
+    ): Promise<void> {
+      const swmMetaGraph = graphManager.sharedMemoryMetaUri(CG);
+      await store.deleteByPattern({
+        graph: swmMetaGraph,
+        subject: HEAD_SUBJECT,
+        predicate: 'http://dkg.io/ontology/shareOperationId',
+      });
+      if (headVersion !== undefined) {
+        await store.deleteByPattern({
+          graph: swmMetaGraph,
+          subject: HEAD_SUBJECT,
+          predicate: 'http://dkg.io/ontology/assertionVersion',
+        });
+        await store.insert([{
+          graph: swmMetaGraph,
+          subject: HEAD_SUBJECT,
+          predicate: 'http://dkg.io/ontology/assertionVersion',
+          object: `"${headVersion}"^^<http://www.w3.org/2001/XMLSchema#integer>`,
+        }]);
+      }
+      await store.dropGraph(swmGraph);
+      await expect(resolveKnowledgeAssetWorkspaceHead({
+        store,
+        graphManager,
+        contextGraphId: CG,
+        kaUal: UAL,
+      })).rejects.toThrow(/incomplete head or operation metadata/);
+    }
+
+    async function headRowCount(): Promise<number> {
+      const rows = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${graphManager.sharedMemoryMetaUri(CG)}> { <${HEAD_SUBJECT}> ?p ?o } }`,
+      );
+      return rows.type === 'bindings' ? rows.bindings.length : -1;
+    }
+
+    /** A second, healthy public KA in the same graph, staged in SWM only. */
+    async function stageHealthyPublicKnowledgeAsset(): Promise<{
+      merkleRoot: Uint8Array;
+      vmGraph: string;
+    }> {
+      const scope = createGraphKnowledgeAssetScope(HEALTHY_UAL, VERSION);
+      const swmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, scope);
+      const vmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, scope);
+      const publicQuads: Quad[] = [
+        { subject: 'urn:asset:healthy', predicate: 'urn:predicate:value', object: '"healthy"', graph: swmGraph },
+      ];
+      await store.insert(publicQuads);
+      await storeKnowledgeAssetOperationPublicQuads({
+        store,
+        graphManager,
+        contextGraphId: CG,
+        shareOperationId: 'healthy-share',
+        kaUal: scope.ual,
+        assertionVersion: scope.assertionVersion,
+        quads: publicQuads,
+        privateTripleCount: 0,
+        publisherPeerId: '12D3KooWPublisher',
+      });
+      await storeKnowledgeAssetWorkspaceHead({
+        store,
+        graphManager,
+        contextGraphId: CG,
+        shareOperationId: 'healthy-share',
+        kaUal: scope.ual,
+        assertionVersion: scope.assertionVersion,
+      });
+      return {
+        merkleRoot: computeFlatKCRootV10(publicQuads.map((quad) => ({ ...quad, graph: '' })), []),
+        vmGraph,
+      };
+    }
+
+    /**
+     * Production wiring: the orphan-twin retirement callback the agent
+     * installs, and a sweep whose ordinals call `handleChainReconciledKC`
+     * without catching anything, so an escaping error fails the whole pass.
+     */
+    async function reconcileBothKnowledgeAssets(
+      message: FinalizationMessageMsg,
+      healthy: { merkleRoot: Uint8Array },
+      retire: RetireConfirmedGraphScopedSwmTwinIfOrphaned,
+      onTornHeadRemoved?: (message: string) => void,
+    ) {
+      const reconciler = new FinalizationHandler(
+        store,
+        legacyFinalizationChain(4, {
+          isContextGraphActiveOnChain: async () => true,
+          getContextGraphAccessPolicy: async () => 0,
+          getMerkleRootCount: async () => 1n,
+          getLatestMerkleRoot: async (kaId) => kaId === HEALTHY_KA_ID
+            ? healthy.merkleRoot
+            : message.kcMerkleRoot,
+          getLatestMerkleRootAuthor: async () => AUTHOR,
+        }),
+        {
+          retireConfirmedGraphScopedSwmTwinIfOrphaned:
+            createRetireConfirmedGraphScopedSwmTwinIfOrphaned({
+              store,
+              writeLocks: new Map(),
+              retire,
+              ...(onTornHeadRemoved ? { onTornHeadRemoved } : {}),
+            }),
+        },
+      );
+      const internals = reconciler as unknown as {
+        verifyChainCgBinding: () => Promise<boolean>;
+        findSwmSnapshotForMerkleRoot?: () => Promise<never>;
+      };
+      internals.verifyChainCgBinding = async () => true;
+      internals.findSwmSnapshotForMerkleRoot = async () => {
+        throw new Error('legacy root scan must not run for graph-scoped SWM');
+      };
+      const inputs = [
+        graphReconcileInput(message),
+        graphReconcileInput(message, {
+          ual: HEALTHY_UAL,
+          merkleRoot: healthy.merkleRoot,
+          kaId: HEALTHY_KA_ID,
+          batchId: HEALTHY_KA_ID,
+        }),
+      ];
+      const persistedWatermarks: number[] = [];
+      const sweep = await reconcileContextGraph({
+        getKCCount: async () => inputs.length,
+        getHeadBlock: async () => undefined,
+        reconcileOrdinal: async (_contextGraphId, _onChainCgId, ordinal) => {
+          const outcome = await reconciler.handleChainReconciledKC(
+            inputs[ordinal]!,
+            createOperationContext('system'),
+          );
+          if (outcome === 'promoted') return { status: 'reconciled', blockNumber: 123 };
+          if (outcome === 'already-confirmed' || outcome === 'stale-target') {
+            return { status: 'already', blockNumber: 123 };
+          }
+          return { status: 'pending' };
+        },
+        persistWatermark: (_contextGraphId, watermark) => {
+          persistedWatermarks.push(watermark);
+        },
+        confirmationDepth: 0,
+        log: () => {},
+      }, createCursorState(0), CG, 42n);
+      return { sweep, persistedWatermarks };
+    }
+
+    it('heals a head superseded by the confirmed VM copy and still promotes the rest of the graph', async () => {
+      const staged = await stageGraph();
+      await handler.handleFinalizationMessage(encodeFinalizationMessage(staged.message), CG);
+      expect(await store.countQuads(staged.vmGraph)).toBe(2);
+      await tearConfirmedHead(staged.swmGraph);
+      const healthy = await stageHealthyPublicKnowledgeAsset();
+      const retire = vi.fn(async (candidate: { contextGraphId: string; ual: string }) => {
+        await store.dropGraph(knowledgeAssetLayerGraphUri(
+          candidate.contextGraphId,
+          MemoryLayer.SharedWorkingMemory,
+          createGraphKnowledgeAssetScope(candidate.ual, 1),
+        ));
+      });
+
+      const removals: string[] = [];
+      const { sweep, persistedWatermarks } = await reconcileBothKnowledgeAssets(
+        staged.message,
+        healthy,
+        retire,
+        (message) => { removals.push(message); },
+      );
+
+      expect(sweep).toMatchObject({ head: 2, watermark: 2, reconciled: 2, pending: 0 });
+      expect(persistedWatermarks).toEqual([2]);
+      expect(await store.countQuads(healthy.vmGraph)).toBe(1);
+      await expect(store.query(
+        `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${HEALTHY_UAL}> `
+          + '<http://dkg.io/ontology/status> "confirmed" . } }',
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+      // The torn head is gone and the confirmed VM copy is untouched.
+      expect(await headRowCount()).toBe(0);
+      await expect(resolveKnowledgeAssetWorkspaceHead({
+        store,
+        graphManager,
+        contextGraphId: CG,
+        kaUal: UAL,
+      })).resolves.toBeUndefined();
+      expect(await store.countQuads(staged.vmGraph)).toBe(2);
+      expect(retire).toHaveBeenCalledOnce();
+      expect(retire).toHaveBeenCalledWith(
+        expect.objectContaining({ ual: UAL, assertionVersion: 1n }),
+        expect.anything(),
+      );
+      expect(removals).toEqual([
+        `Removed torn graph-scoped SWM head for ${UAL} (head version 1, no share operation) `
+          + 'superseded by confirmed VM version 1',
+      ]);
+    });
+
+    it('keeps a torn head that claims a newer assertion but still reconciles the graph', async () => {
+      const staged = await stageGraph();
+      await handler.handleFinalizationMessage(encodeFinalizationMessage(staged.message), CG);
+      await tearConfirmedHead(staged.swmGraph, '2');
+      const healthy = await stageHealthyPublicKnowledgeAsset();
+      const retire = vi.fn(async () => {});
+      const removals: string[] = [];
+
+      const { sweep } = await reconcileBothKnowledgeAssets(
+        staged.message,
+        healthy,
+        retire,
+        (message) => { removals.push(message); },
+      );
+
+      expect(sweep).toMatchObject({ head: 2, watermark: 2, reconciled: 2, pending: 0 });
+      expect(await store.countQuads(healthy.vmGraph)).toBe(1);
+      expect(await store.countQuads(staged.vmGraph)).toBe(2);
+      // Newer than the confirmed VM version: not provably stale, so it stays.
+      expect(await headRowCount()).toBe(4);
+      expect(retire).not.toHaveBeenCalled();
+      expect(removals).toEqual([]);
+    });
+
+    it('never deletes a corrupt head that still names a share operation', async () => {
+      const staged = await stageGraph();
+      await handler.handleFinalizationMessage(encodeFinalizationMessage(staged.message), CG);
+      await store.insert([{
+        graph: graphManager.sharedMemoryMetaUri(CG),
+        subject: HEAD_SUBJECT,
+        predicate: 'http://dkg.io/ontology/shareOperationId',
+        object: '"storage-ack-missing"',
+      }]);
+      await expect(resolveKnowledgeAssetWorkspaceHead({
+        store,
+        graphManager,
+        contextGraphId: CG,
+        kaUal: UAL,
+      })).rejects.toThrow(/head references a missing share operation/);
+      const healthy = await stageHealthyPublicKnowledgeAsset();
+      const retire = vi.fn(async () => {});
+
+      const { sweep } = await reconcileBothKnowledgeAssets(staged.message, healthy, retire);
+
+      expect(sweep).toMatchObject({ head: 2, watermark: 2, reconciled: 2, pending: 0 });
+      expect(await store.countQuads(healthy.vmGraph)).toBe(1);
+      expect(await headRowCount()).toBe(6);
+      expect(retire).not.toHaveBeenCalled();
+    });
+  });
+
   it('resolves an equivalent storage-ACK workspace-head alias during finalization', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     const equivalentOperationId = 'storage-ack-equivalent';
@@ -4514,5 +4775,224 @@ describe('graph-scoped finalization handler', () => {
       } }`,
     );
     expect(version).toMatchObject({ type: 'boolean', value: false });
+  });
+
+  /**
+   * The sweep asks `classifyChainReconcileLocalCandidate` before any chain
+   * read. Each case pins the classification next to what the chain-backed
+   * `handleChainReconciledKC` answers for the same local state, so the two
+   * cannot drift apart unnoticed.
+   */
+  describe('local-first classification before chain reads', () => {
+    const UNRELATED_ROOT = new Uint8Array(32).fill(0x5a);
+    const localInput = (overrides: { subGraphName?: string } = {}) => ({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      kaId: PACKED_KA_ID,
+      batchId: PACKED_KA_ID,
+      ...overrides,
+    });
+
+    function classify(
+      target: FinalizationHandler,
+      overrides: { subGraphName?: string } = {},
+    ) {
+      return target.classifyChainReconcileLocalCandidate(
+        localInput(overrides),
+        createOperationContext('system'),
+      );
+    }
+
+    function trustBinding(target: FinalizationHandler): FinalizationHandler {
+      (target as unknown as { verifyChainCgBinding: () => Promise<boolean> })
+        .verifyChainCgBinding = async () => true;
+      return target;
+    }
+
+    function reconcileAt(target: FinalizationHandler, merkleRoot: Uint8Array) {
+      return target.handleChainReconciledKC({
+        ...localInput(),
+        merkleRoot,
+        publisherAddress: PUBLISHER,
+        versionBlock: 124,
+        authorAddress: AUTHOR,
+      }, createOperationContext('system'));
+    }
+
+    /** Finalize the staged KA, then drop its mutable head (the retired steady state). */
+    async function confirmHeadless(): Promise<Awaited<ReturnType<typeof stageGraph>>> {
+      const staged = await stageGraph();
+      await handler.handleFinalizationMessage(encodeFinalizationMessage(staged.message), CG);
+      await store.deleteByPattern({
+        graph: graphManager.sharedMemoryMetaUri(CG),
+        subject: `${UAL}#dkg-swm-head`,
+      });
+      return staged;
+    }
+
+    it('answers none when nothing is held locally, where the chain path can only say no-swm', async () => {
+      trustBinding(handler);
+
+      await expect(classify(handler)).resolves.toEqual({ kind: 'none' });
+      await expect(reconcileAt(handler, UNRELATED_ROOT)).resolves.toBe('no-swm');
+    });
+
+    it('routes a staged workspace head to the chain path', async () => {
+      await stageGraph();
+
+      await expect(classify(handler)).resolves.toEqual({ kind: 'present' });
+    });
+
+    it('settles a headless confirmed copy locally, as the chain path does at its root', async () => {
+      const { message } = await confirmHeadless();
+      trustBinding(handler);
+
+      await expect(classify(handler)).resolves.toEqual({
+        kind: 'confirmed-vm',
+        layout: 'graph-scoped',
+      });
+      await expect(reconcileAt(handler, message.kcMerkleRoot)).resolves.toBe('already-confirmed');
+    });
+
+    it('leaves an orphaned SWM twin to the chain path that retires it', async () => {
+      const { message, swmGraph } = await confirmHeadless();
+      expect(await store.countQuads(swmGraph)).toBe(2);
+      const retiring = trustBinding(new FinalizationHandler(store, legacyFinalizationChain(), {
+        retireConfirmedGraphScopedSwmTwinIfOrphaned: createRetireConfirmedGraphScopedSwmTwinIfOrphaned({
+          store,
+          writeLocks: new Map(),
+          retire: async () => { await store.dropGraph(swmGraph); },
+        }),
+      }));
+
+      await expect(classify(retiring)).resolves.toEqual({ kind: 'present' });
+      await expect(reconcileAt(retiring, message.kcMerkleRoot)).resolves.toBe('already-confirmed');
+      expect(await store.countQuads(swmGraph)).toBe(0);
+      await expect(classify(retiring)).resolves.toEqual({
+        kind: 'confirmed-vm',
+        layout: 'graph-scoped',
+      });
+    });
+
+    it('keeps a confirmed copy with a newer staged assertion on the chain path so the update promotes', async () => {
+      const { message, swmGraph, vmGraph } = await stageGraph();
+      let latestRoot = message.kcMerkleRoot;
+      let rootCount = 1n;
+      const publicHandler = makePublicReconcileHandler(message, {
+        getMerkleRootCount: async () => rootCount,
+        getLatestMerkleRoot: async () => latestRoot,
+        getLatestMerkleRootAuthor: async () => AUTHOR,
+      });
+      await expect(reconcileGraphScoped(publicHandler, message)).resolves.toBe('promoted');
+
+      await stageNewerWorkspaceAssertion(swmGraph, message.privateMerkleRoot, message.privateTripleCount);
+      latestRoot = computeFlatKCRootV10([
+        { subject: 'urn:asset:newer-unpublished', predicate: 'urn:predicate:value', object: '"newer"', graph: '' },
+        { subject: 'urn:asset:newer-unpublished-two', predicate: 'urn:predicate:value', object: '"newer-two"', graph: '' },
+      ], message.privateMerkleRoot?.length ? [message.privateMerkleRoot] : []);
+      rootCount = 2n;
+
+      await expect(classify(publicHandler)).resolves.toEqual({ kind: 'present' });
+      await expect(reconcileGraphScoped(publicHandler, message, {
+        merkleRoot: latestRoot,
+        versionBlock: 124,
+      })).resolves.toBe('promoted');
+      await expect(store.query(
+        `ASK { GRAPH <${vmGraph}> { <urn:asset:newer-unpublished> ?p ?o } }`,
+      )).resolves.toMatchObject({ type: 'boolean', value: true });
+    });
+
+    it('keeps a damaged confirmed copy on the chain path', async () => {
+      const { message, vmGraph } = await confirmHeadless();
+      trustBinding(handler);
+      const vmResult = await store.query(
+        `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
+      );
+      if (vmResult.type !== 'quads') throw new Error('expected finalized VM quads');
+      await store.dropGraph(vmGraph);
+      await store.insert(vmResult.quads.map((quad, index) => index === 0
+        ? { ...quad, object: '"same-count-corruption"', graph: vmGraph }
+        : { ...quad, graph: vmGraph }));
+
+      await expect(classify(handler)).resolves.toEqual({ kind: 'present' });
+      await expect(reconcileAt(handler, message.kcMerkleRoot)).resolves.toBe('no-swm');
+    });
+
+    it('settles the legacy confirmed marker locally, as the chain path does for any root', async () => {
+      trustBinding(handler);
+      await store.insert([{
+        subject: UAL,
+        predicate: 'http://dkg.io/ontology/status',
+        object: '"confirmed"',
+        graph: `did:dkg:context-graph:${CG}/_meta`,
+      }]);
+
+      await expect(classify(handler)).resolves.toEqual({ kind: 'confirmed-vm', layout: 'legacy' });
+      await expect(reconcileAt(handler, UNRELATED_ROOT)).resolves.toBe('already-confirmed');
+    });
+
+    it('keeps legacy workspace operations on the chain path only in the namespaces the scan reads', async () => {
+      await store.insert([{
+        subject: 'urn:dkg:share:unrelated-legacy-share',
+        predicate: 'http://dkg.io/ontology/rootEntity',
+        object: 'urn:asset:unrelated-legacy-root',
+        graph: graphManager.sharedMemoryMetaUri(CG),
+      }]);
+
+      await expect(classify(handler)).resolves.toEqual({ kind: 'present' });
+      // A named namespace confines the root-matched scan to that namespace.
+      await expect(classify(handler, { subGraphName: 'elsewhere' }))
+        .resolves.toEqual({ kind: 'none' });
+    });
+
+    it('keeps a KA with a recovery-inbox entry on the chain path', async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'dkg-local-candidate-inbox-'));
+      let inbox: SqliteFinalizationRecoveryStore | undefined;
+      try {
+        const { message, swmGraph } = await stageGraph();
+        const chain = {
+          chainId: 'base:84532',
+          getLatestMerkleRoot: async () => message.kcMerkleRoot,
+          getMerkleRootCount: async () => 0n,
+          getKAContextGraphId: async () => 42n,
+          resolveCanonicalFinalizationReceipt: async () => ({ status: 'pending' as const }),
+        } as ChainAdapter;
+        inbox = await openSqliteFinalizationRecoveryStore(directory);
+        const journaled = new FinalizationHandler(store, chain, recoveryOptions(inbox));
+        const query = store.query.bind(store);
+        let busyReads = 3;
+        store.query = async (sparql, options) => {
+          if (busyReads > 0) {
+            busyReads -= 1;
+            throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'sparql-http.query');
+          }
+          return query(sparql, options);
+        };
+        await journaled.handleFinalizationMessage(
+          encodeFinalizationMessage(message),
+          CG,
+          '12D3KooWPublisher',
+        );
+        store.query = query;
+        expect(await inbox.list()).toHaveLength(1);
+        // Only the inbox entry is left locally.
+        await store.dropGraph(swmGraph);
+        await store.deleteByPattern({
+          graph: graphManager.sharedMemoryMetaUri(CG),
+          subject: `${UAL}#dkg-swm-head`,
+        });
+
+        await expect(journaled.classifyChainReconcileLocalCandidate({
+          ...localInput(),
+          batchId: message.batchId,
+        }, createOperationContext('system'))).resolves.toEqual({ kind: 'present' });
+        // The same store without that inbox holds nothing for the KA.
+        await expect(classify(handler)).resolves.toEqual({ kind: 'none' });
+      } finally {
+        await closeInbox(inbox);
+        await rm(directory, { recursive: true, force: true });
+      }
+    });
   });
 });

@@ -345,11 +345,13 @@ deploy_contracts() {
   # NEVER lower this (e.g. to 1). The devnet MUST exercise the real 3-of-N
   # StorageACK quorum so publish/consensus behaviour matches mainnet. A lower
   # value silently hides quorum bugs and produces false "publishing works"
-  # signals. A publisher collects StorageACKs from its PEERS only (it does NOT
-  # sign its own quorum), so a VM publish needs `minimumRequiredSignatures`
-  # OTHER reachable core nodes — i.e. >= minSig + 1 core nodes total (>= 4 for
-  # minSig=3). Verified empirically: with only 3 core nodes a publish aborts
-  # with "need 3 ACKs but only 2 core peers connected — quorum impossible".
+  # signals. A publisher collects StorageACKs from Core nodes only, and a
+  # publishing Core also counts its own StorageACK (it stores the copy and
+  # signs through its local endpoint; the chain requires distinct identities).
+  # So an Edge publish needs `minimumRequiredSignatures` reachable cores and a
+  # Core publish needs minSig - 1 OTHER reachable cores. The devnet runs
+  # >= minSig + 1 core nodes (4 for minSig=3), which leaves an Edge publish one
+  # spare core.
   # DO NOT CHANGE THIS VALUE. ── important ──
   local ps_addr
   ps_addr=$(node -e "

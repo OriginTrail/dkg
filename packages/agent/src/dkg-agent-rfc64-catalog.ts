@@ -80,7 +80,6 @@ export { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
   './rfc64/catalog-limits-v1.js';
 import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from
   './rfc64/catalog-limits-v1.js';
-import { mapWithConcurrency } from './map-with-concurrency.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
 import type { Rfc64CatalogShadowExecutionStatusV1 } from
   './rfc64/catalog-shadow-observability-v1.js';
@@ -129,10 +128,16 @@ import {
 } from './rfc64/catalog-synchronization-evidence-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
+  createRfc64VerifiedStagedCatalogHeadMemoV1,
   type Rfc64BoundedPublicRootCatalogNativeReceiverClientV1,
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
 } from './rfc64/public-catalog-native-reconciler-v1.js';
 import type { AppliedCatalogHeadSnapshotV1 } from './rfc64/inventory-v1/index.js';
+import {
+  loadRfc64OperationalAppliedHeadsV1,
+  rfc64CatalogTargetScopeKeyV1,
+  type Rfc64OperationalAppliedHeadV1,
+} from './rfc64/catalog-operational-applied-heads-v1.js';
 import {
   type Rfc64PublicCatalogReconciliationFailureV1,
 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
@@ -214,52 +219,6 @@ export type Rfc64OpenCatalogAuthorSignerV1 = Rfc64CatalogAuthorSignerV1;
 const RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1 =
   'https://dkg.network/ontology#rfc64RosterVersion';
 const RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1 = 10_000_000_000_000n;
-const RFC64_OPERATIONAL_STATUS_HEAD_READ_CONCURRENCY_V1 = 8;
-
-interface Rfc64OperationalAppliedHeadV1 {
-  readonly snapshot: AppliedCatalogHeadSnapshotV1;
-  readonly issuedAt: TimestampMsV1;
-  readonly contextGraphId: string;
-  readonly scopeKey: string;
-}
-
-async function loadRfc64OperationalAppliedHeadsV1(
-  persistence: Rfc64PersistenceV1,
-): Promise<readonly Readonly<Rfc64OperationalAppliedHeadV1>[]> {
-  const snapshots = persistence.inventory.listAppliedCatalogHeadsV1();
-  const loaded = await mapWithConcurrency(
-    snapshots,
-    RFC64_OPERATIONAL_STATUS_HEAD_READ_CONCURRENCY_V1,
-    async (snapshot): Promise<Readonly<Rfc64OperationalAppliedHeadV1> | null> => {
-      const stored = await persistence.controlObjects.getVerifiedObjectByDigest({
-        objectDigest: snapshot.currentCatalogHeadDigest,
-        verifyIssuerSignature: verifyControlEnvelopeIssuerSignatureV1,
-      }).catch(() => null);
-      if (stored === null) return null;
-      try {
-        assertSignedAuthorCatalogHeadEnvelopeV1(stored.envelope);
-      } catch {
-        return null;
-      }
-      const payload = stored.envelope.payload;
-      return Object.freeze({
-        snapshot,
-        issuedAt: payload.issuedAt,
-        contextGraphId: payload.contextGraphId,
-        scopeKey: rfc64CatalogTargetScopeKeyV1({
-          networkId: payload.networkId,
-          contextGraphId: payload.contextGraphId,
-          subGraphName: payload.subGraphName,
-          authorAddress: payload.authorAddress,
-          catalogEra: payload.era,
-        }),
-      });
-    },
-  );
-  return Object.freeze(loaded.filter(
-    (head): head is Readonly<Rfc64OperationalAppliedHeadV1> => head !== null,
-  ));
-}
 
 function groupRfc64OperationalAppliedHeadsV1(
   heads: readonly Readonly<Rfc64OperationalAppliedHeadV1>[],
@@ -1059,6 +1018,8 @@ function rfc64CatalogReplaySnapshotRuntimeForV1(
   const runtime = new Rfc64CatalogReplaySnapshotRuntimeV1(
     Object.freeze({
       listAppliedCatalogHeadsV1: () => persistence.inventory.listAppliedCatalogHeadsV1(),
+      readAppliedCatalogHeadsRevisionV1: () =>
+        persistence.inventory.readAppliedCatalogHeadsRevisionV1(),
       readVerifiedCatalogHeadV1: async (objectDigest: Digest32V1) => (
         await persistence.controlObjects.getVerifiedObjectByDigest({
           objectDigest,
@@ -1070,22 +1031,6 @@ function rfc64CatalogReplaySnapshotRuntimeForV1(
   );
   rfc64CatalogReplaySnapshotRuntimesV1.set(agent, Object.freeze({ persistence, runtime }));
   return runtime;
-}
-
-function rfc64CatalogTargetScopeKeyV1(input: Readonly<{
-  networkId: string;
-  contextGraphId: string;
-  subGraphName: string | null;
-  authorAddress: string;
-  catalogEra: string;
-}>): string {
-  return [
-    input.networkId,
-    input.contextGraphId,
-    input.subGraphName ?? '',
-    input.authorAddress.toLowerCase(),
-    input.catalogEra,
-  ].join('\0');
 }
 
 function rfc64CatalogTargetExactIdentityV1(
@@ -5050,28 +4995,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           Object.freeze({
             synchronizeBoundedPublicRootCatalog,
           });
-        const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
-          nativeReceiver: nativeReceiverClient,
-          inventory: persistence.inventory,
-          resolveTrustedCatalogScope: clients.resolveTrustedCatalogScope,
-          resolveDeployment,
-          requiresAppliedHeadPrecommit: (announcement) => {
-            const accepted = this.requireRfc64PublicCatalogServiceV1()
-              .acceptedPolicySnapshotForCatalogScope(
-                clients.resolveTrustedCatalogScope(announcement),
-              );
-            return accepted.policy.accessPolicy === 1
-              && accepted.policy.source.kind === 'finalized-chain'
-              // A durable head alone cannot prove that finalized VM/SWM
-              // post-commit work finished on a prior process, so restart must
-              // replay it. Within this process, however, synchronization
-              // evidence is recorded only after that lifecycle succeeds and
-              // safely closes the scheduler's check/lock race for this head.
-              && !this.rfc64PublicCatalogSynchronizationEvidenceV1.has(
-                announcement.catalogHeadObjectDigest,
-              );
-          },
-          readStagedCatalogHead: async (announcement) => {
+        const stagedCatalogHeads = createRfc64VerifiedStagedCatalogHeadMemoV1(
+          async (announcement) => {
             const stored = await persistence.controlObjects.getVerifiedObject({
               objectDigest: announcement.catalogHeadObjectDigest,
               signatureVariantDigest: announcement.signatureVariantDigest,
@@ -5096,12 +5021,48 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
               signatureVariantDigest,
             });
           },
+        );
+        const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
+          nativeReceiver: nativeReceiverClient,
+          inventory: persistence.inventory,
+          resolveTrustedCatalogScope: clients.resolveTrustedCatalogScope,
+          resolveDeployment,
+          requiresAppliedHeadPrecommit: (announcement) => {
+            const accepted = this.requireRfc64PublicCatalogServiceV1()
+              .acceptedPolicySnapshotForCatalogScope(
+                clients.resolveTrustedCatalogScope(announcement),
+              );
+            return accepted.policy.accessPolicy === 1
+              && accepted.policy.source.kind === 'finalized-chain'
+              // A durable head alone cannot prove that finalized VM/SWM
+              // post-commit work finished on a prior process, so restart must
+              // replay it. Within this process, however, synchronization
+              // evidence is recorded only after that lifecycle succeeds and
+              // safely closes the scheduler's check/lock race for this head.
+              && !this.rfc64PublicCatalogSynchronizationEvidenceV1.has(
+                announcement.catalogHeadObjectDigest,
+              );
+          },
+          // Control objects are content-addressed and never rewritten or
+          // removed, and an EIP-191 head verifies from its envelope alone, so
+          // an exact staged head read and verified once is reused by the
+          // applied-head check instead of being re-read on every announcement.
+          readStagedCatalogHead: stagedCatalogHeads.read,
+          peekStagedCatalogHead: stagedCatalogHeads.peek,
         });
         const deploymentAwareReconciler: Rfc64PublicCatalogCurrentReceiverReconcilerV1 = {
           isHeadSatisfied: (announcement) => withRpcRequestContext({ requestClass: 'background' }, () => {
             this.assertRfc64CatalogNetworkMatchesTrustedSourceV1(announcement.networkId);
             return reconciler.isHeadSatisfied(announcement);
           }),
+          isHeadKnownSatisfied: (announcement) => {
+            try {
+              this.assertRfc64CatalogNetworkMatchesTrustedSourceV1(announcement.networkId);
+            } catch {
+              return false;
+            }
+            return reconciler.isHeadKnownSatisfied?.(announcement) === true;
+          },
           reconcileHead: (remotePeerId, announcement, signal) =>
             withRpcRequestContext(
               { requestClass: 'background', signal },

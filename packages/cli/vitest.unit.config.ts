@@ -125,6 +125,9 @@ export default defineConfig({
           // on the job-level scalar), and denial counts DISTINCT peers.
           'test/catchup-runner-worker-continuation-deferral.test.ts',
           'test/relay-status-block.test.ts',
+          // `/api/status` → `eventLoopDelay`: the gauge with a fake histogram
+          // plus one real-histogram smoke test, and the route block shape.
+          'test/event-loop-delay-monitor.test.ts',
           'test/supervisor-liveness.test.ts',
           'test/promote-async-routes.test.ts',
           'test/promote-async-daemon-lifecycle.test.ts',
@@ -219,6 +222,7 @@ export default defineConfig({
           // OxigraphWorkerStore; no hardhat needed.
           'test/write-preflight-resilience.test.ts',
           'test/http-literal-size-validation.test.ts',
+          'test/http-quad-term-validation.test.ts',
           // CLI subprocess smoke with stub daemon only; no hardhat needed.
           'test/context-graph-join-policy-cli.test.ts',
           'test/context-graph-join-policy-route.test.ts',
