@@ -49,6 +49,7 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   validateSubGraphName,
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri,
+  QuietRetryableHandlerError,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -186,6 +187,7 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { repairCreatorPublicMetaProjections } from './context-graph-public-meta-repair.js';
+import { METADATA_RELOCATION_STARTUP_BUDGET_MS } from './context-graph-metadata-relocation.js';
 import {
   startRandomSamplingExactRepair,
   type RandomSamplingExactRepairDependencies,
@@ -2275,13 +2277,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Move what earlier builds left in ontology, using local metadata only,
     // before sync serving starts. Bare bindings of graphs this node doesn't
     // hold need a chain read; that pass runs once start completes and before
-    // every store discovery pass.
+    // every store discovery pass. This pass is on the startup path, so it has
+    // a time budget; candidates it doesn't reach are left to those passes.
+    // Until one of them reaches every candidate (this one included), ontology
+    // may still hold private rows, so peers are not served it.
     try {
-      await this.relocatePrivateContextGraphMetadata({ classifyOnChain: false });
+      await this.relocatePrivateContextGraphMetadata({
+        classifyOnChain: false,
+        budgetMs: METADATA_RELOCATION_STARTUP_BUDGET_MS,
+      });
     } catch (err) {
       this.log.warn(
         ctx,
         `Failed to relocate private context graph metadata out of the ontology graph: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (this.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)) {
+      this.log.warn(
+        ctx,
+        'Not serving the ontology graph to peers until the context graph metadata relocation reaches every candidate',
       );
     }
 
@@ -2516,6 +2530,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           CG_AUTH_RPC_SITES.remoteQuery,
           () => this.isContextGraphPublicOnChain(contextGraphId, createOperationContext('query')),
         ),
+      // A graph held back from sync is not queried either, for an operator
+      // whose queryAccess opens it (see contextGraphServingWithheld). The
+      // handler applies this to the id its access policy and lookups use,
+      // once it has checked that id is a string.
+      servingWithheld: (contextGraphId: string) => this.contextGraphServingWithheld(contextGraphId),
     });
     // rc.9 PR-9: PROTOCOL_QUERY_REMOTE migrated onto the Universal
     // Messenger substrate. Wire prefix bumped to /dkg/10.0.1/* (hard
@@ -3110,6 +3129,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // reversible at runtime (no restart).
       shouldWithholdDurableMeta: (contextGraphId) =>
         shouldWithholdAgentsDurableMeta(contextGraphId, process.env.DKG_SERVE_AGENTS_META),
+      servingWithheld: (contextGraphId) => this.contextGraphServingWithheld(contextGraphId),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
       logDebug: (ctx, message) => this.log.debug(ctx, message),
       snapshotBudget: snapshotPolicy.budget,
@@ -3985,6 +4005,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } catch {
       // Malformed peer bytes → deny (mirrors the legacy lane's parse-fail path).
       return encodeChangelogResponse({ kind: 'denied' });
+    }
+    // A graph held back from the legacy lane is held back here too. The
+    // requester falls back to that lane, which refuses it the same way, and
+    // retries on a later round.
+    if (this.contextGraphServingWithheld(request.contextGraphId)) {
+      throw new QuietRetryableHandlerError(`"${request.contextGraphId}" is not served yet`);
     }
     // Same per-CG gate as PROTOCOL_SYNC: public CGs are open (returns true),
     // private CGs verify the signed digest — a bare (unsigned) changelog request
