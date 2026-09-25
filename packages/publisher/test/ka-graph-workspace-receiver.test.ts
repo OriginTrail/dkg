@@ -12,6 +12,7 @@ import {
   GraphManager,
   LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
   OxigraphStore,
+  readExactGraphPaged,
   readSwmMaterializationWitness,
   writeSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
@@ -22,6 +23,7 @@ import {
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storageAckLedgerEntryQuads,
+  workspacePublicQuadsDigest,
 } from '../src/index.js';
 import { workspaceOperationSubject } from '../src/workspace-metadata-subjects.js';
 import { SharedMemoryHandler } from '../src/workspace-handler.js';
@@ -734,6 +736,43 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
       graph: metaGraph,
     }]);
     const replay = await handler.handle(inbound, PEER_ID);
+    expect(replay.applied).toBe(true);
+  });
+
+  it('records the fingerprint of the stored form for a copy with escaped text', async () => {
+    const store = new OxigraphStore();
+    const graphManager = new GraphManager(store);
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    const lines = [
+      `<urn:entity:1> <urn:predicate:value> "Women\\u2019s Europeans \\uD83D\\uDDD3 12 October" <${DATA_GRAPH}> .`,
+      `<urn:entity:1> <urn:predicate:text> "line one\\nline two\\tend" <${DATA_GRAPH}> .`,
+    ].join('\n');
+    const request = v2Request({
+      nquads: new TextEncoder().encode(lines),
+      publicTripleCount: 2,
+    });
+
+    const outcome = await handler.handle(request, PEER_ID);
+
+    expect(outcome.applied).toBe(true);
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: UAL,
+    });
+    const readBack = await readExactGraphPaged(store, swmGraph, {
+      expectedQuadCount: 2,
+      outputGraph: '',
+    });
+    expect(head?.publicQuadsDigest).toBe(workspacePublicQuadsDigest(readBack));
+    // Replaying the same escaped share matches the recorded head.
+    const replay = await handler.handle(request, PEER_ID);
     expect(replay.applied).toBe(true);
   });
 });
