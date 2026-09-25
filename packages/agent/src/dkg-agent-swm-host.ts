@@ -3161,10 +3161,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (targetOnChainId !== undefined && resolved.onChainId !== String(targetOnChainId)) return null;
     if (resolved.provenance !== 'reverse-name-hash') {
       try {
-        await this.persistContextGraphSubscriptionStrict(
+        // An on-demand subscription binds in memory only; durable rows are
+        // saved before the binding becomes visible.
+        await this.persistContextGraphSyncStateStrict(
           localCgId,
           { ...sub, onChainId: resolved.onChainId },
-          undefined,
+          'on-chain id binding',
           isSubscriptionCurrent,
         );
       } catch {
@@ -4220,10 +4222,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
       });
       return;
     }
-    await this.persistContextGraphSubscriptionStrict(
+    // Authoritative progress follows the subscription's own lifetime. A durable
+    // row (always-on member intent, or a Core's host-only obligation) is saved
+    // before the live cursor moves. An on-demand subscription writes nothing:
+    // like the subscription itself, its progress lives only in this process.
+    await this.persistContextGraphSyncStateStrict(
       localCgId,
       { ...sub, lastReconciledOrdinal: watermark },
-      undefined,
+      'VM reconcile cursor',
       isTargetCurrent,
     );
     if (!isTargetCurrent()) return;

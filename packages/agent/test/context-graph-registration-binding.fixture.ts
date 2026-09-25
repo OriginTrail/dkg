@@ -151,6 +151,7 @@ export function selectedFixture(resolved: bigint | null = 42n) {
     reconcileCursors,
     selectedVmReconcileCursors: new Map(),
     persistContextGraphSubscriptionStrict: vi.fn(async () => undefined),
+    persistContextGraphSyncStateStrict: vi.fn(async () => undefined),
     emitReplication: vi.fn(),
     forceClearVmReconcileStateForContextGraph: vi.fn((localId: string) => {
       reconcileCursors.delete(localId);

@@ -67,7 +67,12 @@ interface AgentInternals {
     sub: { subscribed: boolean; coreHosted?: boolean; onChainId?: string },
     onChainId: string,
   ): void;
-  subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string }>;
+  subscribedContextGraphs: Map<string, {
+    subscribed: boolean;
+    syncMode?: 'on-demand' | 'always-on';
+    coreHosted?: boolean;
+    onChainId?: string;
+  }>;
   vmReconcileScheduling: VmReconcileSchedulingRuntime<boolean>;
   store: TripleStore;
 }
@@ -480,6 +485,70 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(triggered).toEqual([`periodic:${LOCAL}`]);
   });
 
+  it('self-primes an on-demand subscription in memory while a saved one persists its binding', async () => {
+    const chain = new MockChainAdapter();
+    const persisted = new Map<string, ContextGraphSubscriptionRecord>();
+    agent = await DKGAgent.create({
+      name: 'SelfPrimeSubscriptionLifetime',
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...persisted.values()],
+        save: async (record) => { persisted.set(record.id, { ...record }); },
+        delete: async (contextGraphId) => { persisted.delete(contextGraphId); },
+      },
+    });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    vi.spyOn(agent, 'canReadContextGraph').mockResolvedValue(true);
+    const onDemand = 'gh1098-on-demand';
+    const saved = 'gh1098-saved';
+    const claims = [[onDemand, '4250'], [saved, '4251']] as const;
+    await internals.store.insert(claims.map(([localCgId, onChainId]) => ({
+      subject: `did:dkg:context-graph:${localCgId}`,
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+      object: `"${onChainId}"`,
+      graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+    })));
+    // Each OnChainId quad is only a claim. Record that this node's chain
+    // commits the graph's name hash at the claimed id, as enumeration would,
+    // so the claim binds even where only chain-proven claims do.
+    const slotFacts = (internals as unknown as {
+      onChainContextGraphFacts: Map<string, unknown>;
+    }).onChainContextGraphFacts;
+    for (const [localCgId, onChainId] of claims) {
+      slotFacts.set(onChainId, {
+        onChainId,
+        nameHash: ethers.keccak256(ethers.toUtf8Bytes(localCgId)).toLowerCase(),
+        owner: null,
+        accessPolicy: 0,
+        publishPolicy: 1,
+        publishAuthority: null,
+        createdAt: null,
+        active: true,
+        observedAtBlock: 1,
+      });
+    }
+    // This chain has no finalized authority index, so VM target resolution
+    // binds both unbound subscriptions through self-prime.
+    internals.subscribedContextGraphs.set(onDemand, { subscribed: true, syncMode: 'on-demand' });
+    internals.subscribedContextGraphs.set(saved, { subscribed: true, syncMode: 'always-on' });
+
+    await expect(internals.resolveVmReconcileTarget(onDemand)).resolves.toMatchObject({
+      kind: 'subscription',
+      bindingKind: 'authoritative',
+      onChainId: '4250',
+    });
+    await expect(internals.resolveVmReconcileTarget(saved)).resolves.toMatchObject({
+      kind: 'subscription',
+      bindingKind: 'authoritative',
+      onChainId: '4251',
+    });
+
+    expect(internals.subscribedContextGraphs.get(onDemand)?.onChainId).toBe('4250');
+    expect(persisted.has(onDemand)).toBe(false);
+    expect(persisted.get(saved)).toMatchObject({ id: saved, subscribed: true, onChainId: '4251' });
+  });
+
   it('does not self-prime or reconcile CG 0 from empty or malformed ontology ids', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'SelfPrimeRejectsInvalidIds', chainAdapter: chain });
@@ -826,7 +895,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     });
     (internals as any).reconcileChainOrdinal = reconcileOrdinal;
     const persistSubscription = vi.fn(async () => undefined);
-    (internals as any).persistContextGraphSubscriptionStrict = persistSubscription;
+    (internals as any).persistContextGraphSyncStateStrict = persistSubscription;
     const heal = vi.fn(async () => undefined);
     (internals as any).healStrandedScopedKCs = heal;
     const flush = vi.fn(async () => undefined);
@@ -1410,7 +1479,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       expect(candidate.onChainId).toBe('9010');
       expect(original.onChainId).toBeUndefined();
     });
-    (internals as any).persistContextGraphSubscriptionStrict = persistStrict;
+    (internals as any).persistContextGraphSyncStateStrict = persistStrict;
 
     await expect(internals.selfPrimeSubscriptionOnChainId(localCgId, original))
       .resolves.toBe('9010');
@@ -1431,7 +1500,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       onChainId: '9011',
       provenance: 'ontology',
     });
-    (internals as any).persistContextGraphSubscriptionStrict = async () => {
+    (internals as any).persistContextGraphSyncStateStrict = async () => {
       throw new Error('subscription store unavailable');
     };
 
@@ -1455,7 +1524,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     const persisted = deferred<void>();
     let markPersistStarted!: () => void;
     const persistStarted = new Promise<void>((resolve) => { markPersistStarted = resolve; });
-    (internals as any).persistContextGraphSubscriptionStrict = async () => {
+    (internals as any).persistContextGraphSyncStateStrict = async () => {
       markPersistStarted();
       await persisted.promise;
     };

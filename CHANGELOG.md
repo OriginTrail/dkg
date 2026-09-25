@@ -25,6 +25,20 @@ All notable changes to the DKG V10 node are documented here. The format is based
   their documented 15-minute window (Prime Agent's 60-minute backstop
   included), and a transport timeout is reported as the structured response
   timeout without re-sending the turn.
+- **`dkg subscribe` without `--save` no longer stops syncing a public graph
+  partway**: since 10.0.13 an on-demand subscription, the CLI default, lives
+  only in the running node process, but the chain reconciler still saved its
+  progress as a durable subscription row. Every sweep failed with `Cannot
+  acknowledge join approval for "<graph>": durable subscription intent or
+  host state is missing`, the cursor never moved past its first window, and
+  knowledge assets the initial fetch had missed were never fetched: a Base
+  mainnet node stayed at 19 of 25 until the graph was subscribed again with
+  `--save`. The reconciler now advances an on-demand subscription's cursor in
+  memory and, like the subscription itself, writes nothing durable for it.
+  Saved subscriptions persist their cursor as before. A Core that hosts a
+  graph subscribed on demand saves its host-only cursor instead of failing
+  the same way, and an on-demand subscription that is still unbound takes its
+  on-chain id in memory during sync instead of failing too.
 
 ## [10.0.19] - 2026-09-25
 
