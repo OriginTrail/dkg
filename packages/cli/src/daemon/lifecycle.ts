@@ -110,7 +110,6 @@ import {
   SqliteChangelogCursorStore,
   SqliteChangelogEraGuard,
   SqliteChainEventCursorStore,
-  SqliteChainEventLogStore,
   SqliteContextGraphAuthorityIndexStore,
   SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
@@ -118,6 +117,7 @@ import {
   SqliteKaNumberStore,
   type MetricsSource,
 } from "@origintrail-official/dkg-node-ui";
+import { createDaemonChainIndexResource, createStartupChainIndexCloseGuard, rethrowAfterStartupCleanup, type DaemonChainIndexResource } from './chain-index-resource.js';
 import {
   loadConfig,
   assertAuthorityIndexConfigPlacement,
@@ -1219,8 +1219,7 @@ export async function runDaemonInner(
       shutdownPolicy,
     );
   } catch (error) {
-    await cleanupOwnedStartupResources?.();
-    throw error;
+    await rethrowAfterStartupCleanup(error, cleanupOwnedStartupResources);
   }
 }
 
@@ -1295,6 +1294,8 @@ async function runDaemonInnerWithStartupOwnership(
 
   let startupUncaughtExceptionHandler: NodeJS.UncaughtExceptionListener | undefined;
   let startupUnhandledRejectionHandler: NodeJS.UnhandledRejectionListener | undefined;
+  let startupChainIndexResource: DaemonChainIndexResource | undefined;
+  const startupChainIndexGuard = createStartupChainIndexCloseGuard();
   registerStartupFailureCleanup(async () => {
     // The graceful shutdown handlers are registered only after startup succeeds. A rejection
     // before that boundary must still retire the writer it started; otherwise queued appends can
@@ -1305,8 +1306,16 @@ async function runDaemonInnerWithStartupOwnership(
     if (startupUnhandledRejectionHandler) {
       process.removeListener("unhandledRejection", startupUnhandledRejectionHandler);
     }
-    detachDaemonLogTee();
-    await daemonLogFileWriter.shutdown();
+    try {
+      // Boot-time chain reads may have opened the reader before agent.start,
+      // graph bootstrap, or readiness migration rejected. It owns a separate
+      // SQLite handle; its owner closes that reader before the shared DB,
+      // even when graceful shutdown was never wired.
+      await startupChainIndexResource?.close();
+    } finally {
+      detachDaemonLogTee();
+      await daemonLogFileWriter.shutdown();
+    }
   });
 
   function log(msg: string) {
@@ -1835,6 +1844,12 @@ async function runDaemonInnerWithStartupOwnership(
     : undefined;
 
   const dashDb = new DashboardDB({ dataDir: dkgDir() });
+  // One process-owned log/reader capability; only the agent adapter owns its
+  // tick. Wallet adapters borrow the published binding instead.
+  const chainIndexResource = createDaemonChainIndexResource(dashDb, {
+    log, beforeDatabaseClose: startupChainIndexGuard.beforeDatabaseClose,
+  });
+  startupChainIndexResource = chainIndexResource;
   const snapshotPageIndexStore = new SqliteSnapshotPageIndexStore(dashDb);
   const publicSnapshotStore = createPublicSnapshotStore(
     dkgDir(),
@@ -1873,7 +1888,7 @@ async function runDaemonInnerWithStartupOwnership(
           `Set core.allowDegradedRelay: true to downgrade this to a warning.`,
       );
       try {
-        dashDb.close();
+        await chainIndexResource.close();
       } catch (err: any) {
         log(`Core prereq fatal DB close error: ${err?.message ?? String(err)}`);
       }
@@ -1923,13 +1938,6 @@ async function runDaemonInnerWithStartupOwnership(
     new SqliteContextGraphAuthorityHistoryStore(dashDb);
   const localContextGraphAuthorityIndexStore =
     new SqliteContextGraphAuthorityIndexStore(dashDb);
-  // THE node's one chain log. Handed to the agent's chain adapter ONLY: that
-  // adapter builds the tick, starts it, and publishes the binding every other
-  // eligible reader consults. Per-wallet publisher adapters receive only a
-  // late-bound binding getter below — never this store — because a second store
-  // would be a second scanner, which is what this log exists to delete.
-  const chainEventLogStore = new SqliteChainEventLogStore(dashDb);
-
   // OT-RFC-43 Option-1 deterministic KA identity (B2 allocator core).
   // Durable per-author KA-number sequence backing the off-chain
   // `KaNumberAllocator`. Constructed here (alongside the other durable
@@ -2059,7 +2067,7 @@ async function runDaemonInnerWithStartupOwnership(
     contextGraphStorageDiscoveryStore,
     localContextGraphAuthorityHistoryStore,
     localContextGraphAuthorityIndexStore,
-    chainEventLogStore,
+    chainIndex: chainIndexResource.capability,
     contextGraphSubscriptionStore: {
       loadAll: async () => dashDb.listContextGraphSubscriptions().map((row) => ({
         id: row.context_graph_id,
@@ -2281,6 +2289,7 @@ async function runDaemonInnerWithStartupOwnership(
   }
   log(formatAuthorityIndexStartupLine(authorityIndexPlan));
   const agent = await DKGAgent.create(agentConfig);
+  startupChainIndexGuard.agentCreated(() => agent.stop());
 
   let publisherState: PublisherState = createInitialPublisherState(config);
   // Holds the running async-promote worker lifecycle (PR #3 of the
@@ -2521,11 +2530,8 @@ async function runDaemonInnerWithStartupOwnership(
           if (!allowDegraded) {
             natStatusWatcherStop?.();
             resetNatStatus();
-            await agent.stop().catch((err: any) =>
-              log(`Core prereq fatal-stop error: ${err?.message ?? String(err)}`),
-            );
             try {
-              dashDb.close();
+              await chainIndexResource.close();
             } catch (err: any) {
               log(`Core prereq fatal DB close error: ${err?.message ?? String(err)}`);
             }
@@ -2652,6 +2658,10 @@ async function runDaemonInnerWithStartupOwnership(
   //   - true      → ensure on-chain flag is true
   //   - false     → ensure on-chain flag is false (clears stale opt-in)
   //   - undefined → don't touch on-chain (preserve manual admin flips)
+  // From this point, independent daemon tasks can use agent/SQLite state.
+  // A failed boot must retire the reader but keep backing stores alive until
+  // the normal producer teardown proves that those tasks have stopped.
+  startupChainIndexGuard.daemonConsumersStarted();
   const relayRegistryTimer = setTimeout(() => {
     void agent
       .publishRelayRegistry({ relayCapable: config.relayCapable })
@@ -4052,7 +4062,10 @@ async function runDaemonInnerWithStartupOwnership(
         const backingStoresClosed = await closeDaemonBackingStoresAfterTeardown(teardown, {
           retryAgentStop: () => agent.stop(),
           stopManagedOxigraph: () => managedOxigraph?.stop() ?? Promise.resolve(),
-          closeDashboardDb: () => dashDb.close(),
+          closeDashboardDb: () => {
+            startupChainIndexGuard.dependenciesDrained();
+            return chainIndexResource.close();
+          },
           log,
         });
         if (backingStoresClosed) log("Stopped.");

@@ -24,6 +24,7 @@ import {
   type ContextGraphLiveAuthority,
 } from './chain-adapter.js';
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
+import { knowledgeAssetReaderForBinding } from './chain-event-log-reader.js';
 import { ContextGraphChainScanPartialError, type ChainReadOptions, type ContextGraphAuthorityReadOptions, type ContextGraphLiveAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type ContextGraphFinalizedCreation, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import {
@@ -1185,8 +1186,8 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
    */
   private async knowledgeAssetsFromLogFor(contract: Contract) {
     const binding = this.chainEventLogBinding;
-    if (binding?.knowledgeAssets === undefined
-      || binding.contextGraphStorageAddress === undefined) return undefined;
+    const readModel = knowledgeAssetReaderForBinding(binding);
+    if (readModel === undefined || binding?.contextGraphStorageAddress === undefined) return undefined;
     let currentAddress: string;
     try {
       currentAddress = (await contract.getAddress()).toLowerCase();
@@ -1197,7 +1198,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     // runtime has rebuilt. Never answer the successor from the retired proxy's
     // folded rows; an address mismatch takes the existing live eth_call below.
     return binding.contextGraphStorageAddress === currentAddress
-      ? { binding, readModel: binding.knowledgeAssets }
+      ? { binding, readModel }
       : undefined;
   }
 
@@ -1207,7 +1208,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     const knowledgeAssetsFromLog = await this.knowledgeAssetsFromLogFor(cgs);
     const logged = await knowledgeAssetsFromLog?.readModel.readContextGraphForKa(
       kaId,
-      { view: 'latest' },
+      { view: 'latest', signal: options.signal },
     );
     if (logged !== undefined
       && knowledgeAssetsFromLog !== undefined
@@ -1240,20 +1241,20 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     await this.init();
     const cgs = this.requireContextGraphStorage();
     const knowledgeAssetsFromLog = await this.knowledgeAssetsFromLogFor(cgs);
-    const logged = await knowledgeAssetsFromLog?.readModel.readContextGraphKaList(
-      contextGraphId,
-      { view: 'latest' },
-    );
+    let loggedKaId: bigint | undefined;
+    if (knowledgeAssetsFromLog !== undefined && index >= 0n) {
+      loggedKaId = (await knowledgeAssetsFromLog.readModel.readContextGraphKaAt(
+        contextGraphId, index, { view: 'latest' },
+      ))?.kaId;
+    }
     // Position IS the ordinal — the on-chain list only ever appends. An index
     // the log does not hold is NOT an out-of-range answer to invent: the chain
     // reverts on one, and callers read that revert, so the call below must be
     // the thing that produces it.
-    if (logged !== undefined
+    if (loggedKaId !== undefined
       && knowledgeAssetsFromLog !== undefined
-      && this.chainEventLogBindingIsCurrent(knowledgeAssetsFromLog.binding)
-      && index >= 0n
-      && index < BigInt(logged.kaIds.length)) {
-      return logged.kaIds[Number(index)]!;
+      && this.chainEventLogBindingIsCurrent(knowledgeAssetsFromLog.binding)) {
+      return loggedKaId;
     }
     const kaId: bigint = await this.readContract(
       cgs, 'cgStorage.getContextGraphKaAt', 'getContextGraphKaAt', contextGraphId, index,

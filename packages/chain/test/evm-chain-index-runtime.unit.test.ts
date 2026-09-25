@@ -12,10 +12,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 
-import { createEvmChainIndexRuntime } from '../src/evm-chain-index-runtime.js';
+import { createEvmChainIndexRuntime, type EvmChainIndexRuntimeOptions } from '../src/evm-chain-index-runtime.js';
 import { RPC_LOG_SCAN_TIMEOUT_MS } from '../src/evm-adapter-constants.js';
 import { RpcFailoverClient } from '../src/rpc-failover-client.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
+import type { KnowledgeAssetReadModelFactory } from '../src/chain-index/knowledge-asset-read-model.js';
 
 const HUB_ADDRESS = '0x00000000000000000000000000000000000000a1';
 const CG_STORAGE_ADDRESS = '0x00000000000000000000000000000000000000b2';
@@ -129,6 +130,8 @@ function harness(options?: {
    * read's policy deadline applies as it does in production.
    */
   failoverClient?: boolean;
+  readModelFactory?: KnowledgeAssetReadModelFactory;
+  legacyStoreInput?: boolean;
 }): Harness {
   const headNumber = options?.headNumber ?? 1_000;
   const logs = options?.logs ?? [];
@@ -183,7 +186,9 @@ function harness(options?: {
     : undefined;
   const runtime = createEvmChainIndexRuntime({
     scope: RUNTIME_SCOPE,
-    store,
+    ...(options?.legacyStoreInput
+      ? { store }
+      : { chainIndex: { store, readModelFactory: options?.readModelFactory } }),
     intervalMs: options?.intervalMs ?? 6_000,
     reorgHoldbackBlocks: options?.reorgHoldbackBlocks ?? 5,
     backfillPageBlocks: 100,
@@ -251,6 +256,70 @@ function harness(options?: {
 }
 
 describe('createEvmChainIndexRuntime', () => {
+  it('rejects ambiguous or missing owners from untyped runtime callers', () => {
+    const store = new MemoryChainEventLogStore();
+    expect(() => createEvmChainIndexRuntime({ store, chainIndex: { store } } as unknown as EvmChainIndexRuntimeOptions))
+      .toThrow('not both');
+    expect(() => createEvmChainIndexRuntime({} as EvmChainIndexRuntimeOptions))
+      .toThrow('requires its store');
+  });
+
+  it('preserves the exported legacy store-only construction API', async () => {
+    const h = harness({ legacyStoreInput: true });
+    expect(h.runtime.binding.knowledgeAssets).toBeDefined();
+    await h.runtime.tick.runOnce(new AbortController().signal);
+    expect(await h.store.load(RUNTIME_SCOPE)).toBeDefined();
+    await h.runtime.stop();
+  });
+
+  it('uses the injected KA reader with serializable deployment and freshness options', async () => {
+    const readModel = {
+      readContextGraphForKa: vi.fn(async () => undefined),
+      readContextGraphKaList: vi.fn(async () => undefined),
+      readContextGraphKaAt: vi.fn(async () => undefined),
+    };
+    const factory = vi.fn<KnowledgeAssetReadModelFactory>(() => readModel);
+    const { runtime, store } = harness({ readModelFactory: factory });
+    const readEvents = vi.spyOn(store, 'readEvents');
+
+    expect(factory).toHaveBeenCalledExactlyOnceWith({
+      scope: RUNTIME_SCOPE,
+      contextGraphStorageAddress: CG_STORAGE_ADDRESS,
+      contextGraphStorageAbi: cgInterface.formatJson(),
+      maxHeadAgeMs: 18_000,
+    });
+    expect(JSON.parse(JSON.stringify(factory.mock.calls[0]![0])))
+      .toEqual(factory.mock.calls[0]![0]);
+    expect(runtime.binding.knowledgeAssets).toBe(readModel);
+    await expect(runtime.binding.knowledgeAssets!.readContextGraphForKa(42n))
+      .resolves.toBeUndefined();
+    await expect(runtime.binding.knowledgeAssets!.readContextGraphKaAt(7n, 0n))
+      .resolves.toBeUndefined();
+    expect(readModel.readContextGraphKaAt).toHaveBeenCalledExactlyOnceWith(7n, 0n);
+    expect(readModel.readContextGraphKaList).not.toHaveBeenCalled();
+    expect(readEvents).not.toHaveBeenCalled();
+  });
+
+  it('rejects a list-only JavaScript factory instead of installing a compatibility replay', () => {
+    const readList = vi.fn(async () => ({
+      contextGraphId: 7n, kaIds: [42n, 43n], throughBlockNumber: 900,
+    }));
+    const model = { readContextGraphForKa: vi.fn(async () => undefined), readContextGraphKaList: readList };
+    // Simulate an untyped JavaScript caller violating the modern factory contract.
+    const factory = vi.fn(() => model);
+    expect(() => harness({ readModelFactory: factory as unknown as KnowledgeAssetReadModelFactory }))
+      .toThrow('Chain-index read model factory must implement readContextGraphKaAt');
+    expect(factory).toHaveBeenCalledOnce();
+    expect(readList).not.toHaveBeenCalled();
+  });
+
+  it('does not substitute an inline reader when the injected factory fails', () => {
+    const unavailable = new Error('worker unavailable');
+    expect(() => harness({
+      readModelFactory: () => { throw unavailable; },
+    })).toThrow(unavailable);
+  });
+
   it('wires the production idle budget to the anchor ceiling at large T', async () => {
     // T=150s: Hub liveness accepts 450s, while the authority anchor caps at
     // 300s. One third of the binding 300s bound is held as static headroom,

@@ -64,6 +64,9 @@ export {
   type ContextGraphForKaAnswer,
   type KnowledgeAssetOwnWrite,
   type KnowledgeAssetReadModel,
+  type ScalarKnowledgeAssetReadModel,
+  type KnowledgeAssetReadModelFactory,
+  type KnowledgeAssetReadModelFactoryOptions,
   type KnowledgeAssetReadModelOptions,
   type KnowledgeAssetReadOptions,
   type KnowledgeAssetReadView,
@@ -111,3 +114,14 @@ export {
   type ChainIndexAuthorityPageSource,
   type ChainIndexAuthorityPageSourceOptions,
 } from './chain-index-authority-page.js';
+
+export {
+  planKnowledgeAssetSnapshotRead,
+  createKnowledgeAssetReadSnapshot,
+  evaluateKnowledgeAssetSnapshot,
+  type KnowledgeAssetSnapshotRead,
+  type KnowledgeAssetSnapshotResult,
+  type KnowledgeAssetSnapshotPlan,
+  type KnowledgeAssetReadSnapshot,
+  type KnowledgeAssetSnapshotEvaluationOptions,
+} from './knowledge-asset-read-model-snapshot.js';

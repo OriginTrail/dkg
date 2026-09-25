@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MockChainAdapter,
 } from '@origintrail-official/dkg-chain';
-import { DKGAgent } from '../src/index.js';
+import { DKGAgent, type DKGAgentConfig } from '../src/index.js';
 
 const OPERATIONAL_KEY =
   '0x59c6995e998f97a5a0044966f0945388c9e82d88a3fdf0e0c7b33e0d2d2d8b2f';
@@ -15,7 +15,7 @@ describe('DKGAgent chain cursor wiring', () => {
     agent = undefined;
   });
 
-  it('passes EVM chainConfig fields into the constructed adapter', async () => {
+  it.each(['capability', 'legacy store'] as const)('passes EVM chainConfig and %s ownership into the constructed adapter', async (ownership) => {
     const registryCursorStore = {
       load: vi.fn(async () => undefined),
       save: vi.fn(async () => {}),
@@ -39,6 +39,11 @@ describe('DKGAgent chain cursor wiring', () => {
       readEvents: vi.fn(async () => []),
       blockHashAt: vi.fn(async () => undefined),
     };
+    const readModelFactory = vi.fn(() => ({
+      async readContextGraphForKa() { return undefined; },
+      async readContextGraphKaList() { return undefined; },
+      async readContextGraphKaAt() { return undefined; },
+    }));
 
     agent = await DKGAgent.create({
       name: 'RegistryCursorWiring',
@@ -56,7 +61,9 @@ describe('DKGAgent chain cursor wiring', () => {
       contextGraphRegistryScanCursorStore: registryCursorStore,
       localContextGraphAuthorityHistoryStore: authorityHistoryStore,
       localContextGraphAuthorityIndexStore: authorityIndexStore,
-      chainEventLogStore,
+      ...(ownership === 'capability'
+        ? { chainIndex: { store: chainEventLogStore, readModelFactory } }
+        : { chainEventLogStore }),
     });
 
     expect((agent as any).chain.contextGraphRegistryScanCursor?.input?.store).toBe(registryCursorStore);
@@ -69,21 +76,46 @@ describe('DKGAgent chain cursor wiring', () => {
     // The adapter delegates ownership of the durable store to the extracted
     // runtime owner. Exercise that boundary instead of asserting the removed
     // adapter implementation field.
-    let receivedStore: unknown;
+    let receivedCapability: any;
     const runtime = {
       binding: undefined,
       start: vi.fn(),
       stop: vi.fn(async () => {}),
     };
     const owner = (agent as any).chain.chainIndexOwner;
-    owner.start(async (store: unknown) => {
-      receivedStore = store;
+    owner.start(async (capability: unknown) => {
+      receivedCapability = capability;
       return runtime;
     });
     await owner.starting;
-    expect(receivedStore).toBe(chainEventLogStore);
+    expect(receivedCapability.store).toBe(chainEventLogStore);
+    expect(receivedCapability.readModelFactory).toBe(ownership === 'capability' ? readModelFactory : undefined);
     expect(runtime.start).toHaveBeenCalledOnce();
     expect((agent as any).chain.indexTickMs).toBe(12_000);
+  });
+
+  it.each(['evm', 'custom', 'none'] as const)('rejects contradictory ownership with the %s adapter selection', async (adapterKind) => {
+    const store = {
+      load: vi.fn(async () => undefined),
+      commit: vi.fn(async () => 1),
+      tombstone: vi.fn(async () => 2),
+      readEvents: vi.fn(async () => []),
+      blockHashAt: vi.fn(async () => undefined),
+    };
+    const config: DKGAgentConfig = {
+      name: 'ConflictingChainOwners',
+      listenPort: 0,
+      ...(adapterKind === 'evm' ? { chainConfig: {
+        rpcUrl: 'http://127.0.0.1:59998',
+        hubAddress: '0x0000000000000000000000000000000000000001',
+        operationalKeys: [OPERATIONAL_KEY],
+        chainId: 'evm:31337',
+      } } : {}),
+      ...(adapterKind === 'custom' ? { chainAdapter: new MockChainAdapter('mock:31337') } : {}),
+      chainIndex: { store },
+      chainEventLogStore: store,
+    };
+    await expect(DKGAgent.create(config)).rejects.toThrow('not both');
   });
 
   it('passes the chain-event lane cursor store into the poller on start', async () => {

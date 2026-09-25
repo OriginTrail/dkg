@@ -82,6 +82,7 @@ export interface SqliteChainEventLogQuery {
   readonly addresses?: readonly string[];
   readonly topic0?: readonly string[];
   readonly topic1?: readonly string[];
+  readonly topic2?: readonly string[];
 }
 
 interface CursorRow {
@@ -141,12 +142,9 @@ function normalizeReplacedRange(
   return range.throughBlockNumber < range.fromBlockNumber ? undefined : range;
 }
 
-export class SqliteChainEventLogStore {
-  private readonly db: Database.Database;
-
-  constructor(dashboard: DashboardDB) {
-    this.db = dashboard.db;
-  }
+/** Read-only SQL port. Its caller owns the handle and any snapshot transaction. */
+export class SqliteChainEventLogReader {
+  constructor(private readonly db: Database.Database) {}
 
   async load(scope: string): Promise<SqliteChainEventLogState | undefined> {
     const row = this.db.prepare(`
@@ -195,6 +193,132 @@ export class SqliteChainEventLogStore {
         ? {}
         : { suspectedForkBlockNumber: row.suspected_fork_block }),
     });
+  }
+
+  async readEvents(
+    scope: string,
+    query: SqliteChainEventLogQuery,
+  ): Promise<readonly SqliteChainEventLogRow[]> {
+    return this.decodeEventRows(this.readRawEvents(scope, query));
+  }
+
+  /** Refuse oversized snapshots; a truncated history is never a complete list. */
+  async readEventsBounded(
+    scope: string,
+    query: SqliteChainEventLogQuery,
+    maxRows: number,
+  ): Promise<readonly SqliteChainEventLogRow[] | undefined> {
+    if (!Number.isSafeInteger(maxRows) || maxRows < 1 || maxRows >= Number.MAX_SAFE_INTEGER) {
+      throw new Error('Chain event log maximum row count must be a positive safe integer below MAX_SAFE_INTEGER');
+    }
+    // Bound allocation inside SQLite's native .all(), before any row objects
+    // cross into JS. Reading everything and slicing afterwards can OOM Node.
+    const rows = this.readRawEvents(scope, query, maxRows + 1);
+    return rows.length > maxRows ? undefined : this.decodeEventRows(rows);
+  }
+
+  private readRawEvents(
+    scope: string,
+    query: SqliteChainEventLogQuery,
+    limit?: number,
+  ): EventRow[] {
+    // Without ANALYZE, SQLite can prefer the ordered primary-key block range
+    // and scan every registration. A KA point read must select its topic
+    // first even on a newly migrated database with no planner statistics.
+    const indexHint = query.addresses?.length === 1 && query.topic0?.length === 1
+      && query.topic2?.length === 1 ? ' INDEXED BY idx_chain_events_scope_address_ka' : '';
+    const clauses = ['scope = ?', 'block_number >= ?', 'block_number <= ?'];
+    const parameters: unknown[] = [scope, query.fromBlockNumber, query.throughBlockNumber];
+    for (const [column, values] of [
+      ['address', query.addresses],
+      ['topic0', query.topic0],
+      ['topic1', query.topic1],
+      ['topic2', query.topic2],
+    ] as const) {
+      if (values === undefined || values.length === 0) continue;
+      clauses.push(`${column} IN (${placeholders(values.length)})`);
+      parameters.push(...values);
+    }
+    if (limit !== undefined) parameters.push(limit);
+    return this.db.prepare(`
+      SELECT block_number, log_index, block_hash, tx_hash, address,
+             topic0, topic1, topic2, topic3, data, settled
+        FROM chain_events${indexHint}
+       WHERE ${clauses.join(' AND ')}
+       ORDER BY block_number, log_index
+       ${limit === undefined ? '' : 'LIMIT ?'}
+    `).all(...parameters) as EventRow[];
+  }
+
+  private decodeEventRows(rows: readonly EventRow[]): readonly SqliteChainEventLogRow[] {
+    return Object.freeze(rows.map((row) => Object.freeze({
+      blockNumber: row.block_number,
+      blockHash: row.block_hash,
+      logIndex: row.log_index,
+      transactionHash: row.tx_hash,
+      address: row.address,
+      // Absent topics are omitted rather than zero-filled: a decoder must see
+      // the log's real arity, not a padded one.
+      topics: Object.freeze(
+        [row.topic0, row.topic1, row.topic2, row.topic3]
+          .filter((topic): topic is string => typeof topic === 'string' && topic.length > 0),
+      ),
+      data: row.data,
+      settled: row.settled === 1,
+    })));
+  }
+
+  async blockHashAt(scope: string, blockNumber: number): Promise<string | undefined> {
+    const cursor = this.db.prepare(`
+      SELECT settled_block, settled_hash, head_block, head_hash
+        FROM chain_index_cursor
+       WHERE scope = ? AND lineage <> ?
+    `).get(scope, TOMBSTONE_LINEAGE) as Pick<
+      CursorRow, 'settled_block' | 'settled_hash' | 'head_block' | 'head_hash'
+    > | undefined;
+    if (cursor?.settled_block === blockNumber
+      && cursor.settled_hash.length > 0
+      && cursor.settled_hash !== CHAIN_EVENT_LOG_ZERO_HASH) {
+      return cursor.settled_hash;
+    }
+    if (cursor?.head_block === blockNumber) return cursor.head_hash;
+    const row = this.db.prepare(`
+      SELECT block_hash FROM chain_events
+       WHERE scope = ? AND block_number = ?
+       LIMIT 1
+    `).get(scope, blockNumber) as { block_hash: string } | undefined;
+    return row?.block_hash;
+  }
+}
+
+/** Daemon-owned writer; all reads share the same implementation as worker readers. */
+export class SqliteChainEventLogStore {
+  private readonly db: Database.Database;
+  private readonly reader: SqliteChainEventLogReader;
+
+  constructor(dashboard: DashboardDB) {
+    this.db = dashboard.db;
+    this.reader = new SqliteChainEventLogReader(dashboard.db);
+  }
+
+  load(scope: string): Promise<SqliteChainEventLogState | undefined> {
+    return this.reader.load(scope);
+  }
+
+  readEvents(scope: string, query: SqliteChainEventLogQuery): Promise<readonly SqliteChainEventLogRow[]> {
+    return this.reader.readEvents(scope, query);
+  }
+
+  readEventsBounded(
+    scope: string,
+    query: SqliteChainEventLogQuery,
+    maxRows: number,
+  ): Promise<readonly SqliteChainEventLogRow[] | undefined> {
+    return this.reader.readEventsBounded(scope, query, maxRows);
+  }
+
+  blockHashAt(scope: string, blockNumber: number): Promise<string | undefined> {
+    return this.reader.blockHashAt(scope, blockNumber);
   }
 
   async commit(
@@ -319,67 +443,6 @@ export class SqliteChainEventLogStore {
       return nextRevision;
     });
     return apply();
-  }
-
-  async readEvents(
-    scope: string,
-    query: SqliteChainEventLogQuery,
-  ): Promise<readonly SqliteChainEventLogRow[]> {
-    const clauses = ['scope = ?', 'block_number >= ?', 'block_number <= ?'];
-    const parameters: unknown[] = [scope, query.fromBlockNumber, query.throughBlockNumber];
-    for (const [column, values] of [
-      ['address', query.addresses],
-      ['topic0', query.topic0],
-      ['topic1', query.topic1],
-    ] as const) {
-      if (values === undefined || values.length === 0) continue;
-      clauses.push(`${column} IN (${placeholders(values.length)})`);
-      parameters.push(...values);
-    }
-    const rows = this.db.prepare(`
-      SELECT block_number, log_index, block_hash, tx_hash, address,
-             topic0, topic1, topic2, topic3, data, settled
-        FROM chain_events
-       WHERE ${clauses.join(' AND ')}
-       ORDER BY block_number, log_index
-    `).all(...parameters) as EventRow[];
-    return Object.freeze(rows.map((row) => Object.freeze({
-      blockNumber: row.block_number,
-      blockHash: row.block_hash,
-      logIndex: row.log_index,
-      transactionHash: row.tx_hash,
-      address: row.address,
-      // Absent topics are omitted rather than zero-filled: a decoder must see
-      // the log's real arity, not a padded one.
-      topics: Object.freeze(
-        [row.topic0, row.topic1, row.topic2, row.topic3]
-          .filter((topic): topic is string => typeof topic === 'string' && topic.length > 0),
-      ),
-      data: row.data,
-      settled: row.settled === 1,
-    })));
-  }
-
-  async blockHashAt(scope: string, blockNumber: number): Promise<string | undefined> {
-    const cursor = this.db.prepare(`
-      SELECT settled_block, settled_hash, head_block, head_hash
-        FROM chain_index_cursor
-       WHERE scope = ? AND lineage <> ?
-    `).get(scope, TOMBSTONE_LINEAGE) as Pick<
-      CursorRow, 'settled_block' | 'settled_hash' | 'head_block' | 'head_hash'
-    > | undefined;
-    if (cursor?.settled_block === blockNumber
-      && cursor.settled_hash.length > 0
-      && cursor.settled_hash !== CHAIN_EVENT_LOG_ZERO_HASH) {
-      return cursor.settled_hash;
-    }
-    if (cursor?.head_block === blockNumber) return cursor.head_hash;
-    const row = this.db.prepare(`
-      SELECT block_hash FROM chain_events
-       WHERE scope = ? AND block_number = ?
-       LIMIT 1
-    `).get(scope, blockNumber) as { block_hash: string } | undefined;
-    return row?.block_hash;
   }
 
   private writeCursor(

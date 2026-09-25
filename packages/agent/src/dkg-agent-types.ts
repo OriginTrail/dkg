@@ -63,7 +63,8 @@ import type {
 import type {
   ApprovalPolicy,
   ChainAdapter,
-  ChainEventLogStore,
+  ChainIndexCompatibilityConfig,
+  ChainIndexConfig,
   ContextGraphAuthorityHistoryStore,
   ContextGraphAuthorityIndexStore,
   ContextGraphRegistryScanCursorStore,
@@ -1388,7 +1389,7 @@ export type FinalizationRecoveryStoreFactory = (
   dataDir: string,
 ) => Promise<FinalizationRecoveryStore>;
 
-export interface DKGAgentConfig {
+export interface DKGAgentConfig extends ChainIndexCompatibilityConfig {
   name: string;
   /**
    * Construction seam for the durable finalization inbox. Embedders and tests
@@ -1904,13 +1905,6 @@ export interface DKGAgentConfig {
   localContextGraphAuthorityHistoryStore?: ContextGraphAuthorityHistoryStore;
   /** Process-owned durable contract-wide Context Graph authority index. */
   localContextGraphAuthorityIndexStore?: ContextGraphAuthorityIndexStore;
-  /**
-   * Durable backing for the node's ONE chain log. Giving it to the agent is
-   * what starts the single background tick: the agent's own chain adapter owns
-   * it, and every other adapter in the process reads the same log rather than
-   * opening a scanner of its own.
-   */
-  chainEventLogStore?: ChainEventLogStore;
   /** Opt in to trusted core bootstrap and a bounded chain tail on edges. */
   authorityIndex?: AuthorityIndexConfig;
   /**
@@ -1971,6 +1965,9 @@ export interface DKGAgentACKTransportOptions {
   sendTimeoutMs?: number;
   log?: (message: string) => void;
 }
+
+/** Opt-in compile-time ownership checks; DKGAgentConfig remains extendable. */
+export type StrictDKGAgentConfig = DKGAgentConfig & ChainIndexConfig;
 
 export type ResolvedDKGAgentConfig =
   Omit<

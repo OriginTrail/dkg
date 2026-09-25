@@ -36,7 +36,9 @@ import { kadDHT, type KadDHT } from '@libp2p/kad-dht';
 import { gossipsub, type GossipSub } from '@libp2p/gossipsub';
 import { mdns } from '@libp2p/mdns';
 import { identify } from '@libp2p/identify';
-import { ping, type Ping } from '@libp2p/ping';
+import type { Ping } from '@libp2p/ping';
+import { coordinatedPing } from './coordinated-ping.js';
+import { observeConnectionClose } from './connection-close-diagnostics.js';
 import { circuitRelayTransport } from '@libp2p/circuit-relay-v2';
 import { circuitRelayServer } from '@libp2p/circuit-relay-v2';
 import { dcutr } from '@libp2p/dcutr';
@@ -828,7 +830,9 @@ export class DKGNode {
 
     const services: Record<string, any> = {
       identify: identify(),
-      ping: ping(),
+      ping: coordinatedPing({
+        onDiagnostic: (diagnostic) => console.warn(`[${new Date().toISOString()}] Ping probe failure: ${JSON.stringify(diagnostic)}`),
+      }),
       dht: kadDHT(buildKadDHTOptions(
         this.config,
         dhtProtocolForNetwork(
@@ -1016,6 +1020,9 @@ export class DKGNode {
       streamMuxers: [yamux()],
       peerDiscovery,
       services,
+      // The ping service owns the monitor so health checks and background
+      // liveness probes share one outbound ping stream per connection.
+      connectionMonitor: { enabled: false },
       connectionGater: this.createConnectionGater(
         activeRelayNetworkPolicy?.connectionGater,
         networkPeerDialPolicy?.connectionGater,
@@ -1514,6 +1521,7 @@ export class DKGNode {
 
     node.addEventListener('connection:open', (evt) => {
       const conn = evt.detail;
+      observeConnectionClose(conn, (message) => console.log(`[${ts()}] ${message}`));
       const pid = conn.remotePeer.toString();
       const addr = conn.remoteAddr?.toString() ?? 'unknown';
       const transport: ConnectionTransport = addr.includes('/p2p-circuit') ? 'relayed' : 'direct';

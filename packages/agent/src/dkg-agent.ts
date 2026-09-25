@@ -115,7 +115,7 @@ import {
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 import { prepareRfc64LateLegacySwmBoundaryV1 } from
   './rfc64/legacy-swm-boundary-v1.js';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { resolveChainIndexCapability, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, isContextGraphChainScanPartialError, withRpcRequestContext, type EVMAdapterConfig, type ChainAdapter, type ChainEventLogBinding, type ContextGraphOnChain, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
@@ -407,6 +407,7 @@ import {
   type DurableSyncResult,
   type SharedMemorySyncResult,
   type DKGAgentConfig,
+  type StrictDKGAgentConfig,
   type Rfc64CatalogAccessPolicyAuthorityConfigV1,
   type Rfc64CatalogBootstrapConfigV1,
   type Rfc64CatalogBootstrapPolicyV1,
@@ -575,6 +576,7 @@ export type {
   SharedMemorySyncDiagnostics,
   CatchupSyncDiagnostics,
   DKGAgentConfig,
+  StrictDKGAgentConfig,
   Rfc64CatalogAccessPolicyAuthorityConfigV1,
   Rfc64CatalogBootstrapConfigV1,
   Rfc64CatalogBootstrapPolicyV1,
@@ -712,6 +714,7 @@ function constructConfiguredChainAdapter(
   config: StorageAckNormalizedDKGAgentConfig,
   contextGraphAuthorityIndexBootstrap?: EVMAdapterConfig['contextGraphAuthorityIndexBootstrap'],
 ): Readonly<{ chain: ChainAdapter; operationalKeys: string[] | undefined }> {
+  const chainIndex = resolveChainIndexCapability(config);
   let operationalKeys = config.chainConfig?.operationalKeys;
   if (config.chainAdapter) {
     const chain = config.chainAdapter;
@@ -742,15 +745,13 @@ function constructConfiguredChainAdapter(
       contextGraphRegistryScanCursorStore: config.contextGraphRegistryScanCursorStore,
       localContextGraphAuthorityHistoryStore: config.localContextGraphAuthorityHistoryStore,
       localContextGraphAuthorityIndexStore: config.localContextGraphAuthorityIndexStore,
-      // THE one log. Only this adapter is given the store, so only this
-      // adapter owns a tick; every other adapter in the process reads the
-      // binding it publishes.
-      chainEventLogStore: config.chainEventLogStore,
       contextGraphAuthorityIndexBootstrap,
+      ...(config.chainConfig.adminPrivateKey
+        ? { adminPrivateKey: config.chainConfig.adminPrivateKey }
+        : { allowNoAdminSigner: true }),
     };
-    const chain = config.chainConfig.adminPrivateKey
-      ? new EVMChainAdapter({ ...evmConfigBase, adminPrivateKey: config.chainConfig.adminPrivateKey })
-      : new EVMChainAdapter({ ...evmConfigBase, allowNoAdminSigner: true });
+    // Only this adapter gets the normalized owning capability.
+    const chain = new EVMChainAdapter({ ...evmConfigBase, chainIndex });
     return { chain, operationalKeys };
   }
   return { chain: new NoChainAdapter(), operationalKeys };

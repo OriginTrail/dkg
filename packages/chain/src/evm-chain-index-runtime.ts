@@ -27,7 +27,6 @@ import { ethers, type JsonRpcProvider } from 'ethers';
 
 import type {
   ChainEventLogAuthoritySource,
-  ChainEventLogBinding,
   ChainEventLogHubRotationWindow,
 } from './chain-event-log-binding.js';
 import {
@@ -45,7 +44,6 @@ import {
   normalizeChainEventLogAddress,
   resolveChainIndexAuthorityAnchor,
   type ChainEventLogFetchedRow,
-  type ChainEventLogStore,
   type ChainIndexAnchorResult,
   type ChainIndexAuthorityAnchor,
   type ChainIndexLogRequest,
@@ -54,6 +52,11 @@ import {
   type ChainIndexTickResult,
   type HubBinding,
 } from './chain-index/index.js';
+import { resolveChainIndexCapability, type ChainIndexCapability } from './chain-index-capability.js';
+import { isScalarKnowledgeAssetReadModel } from './chain-index/normalize-knowledge-asset-read-model.js';
+import type { ChainEventLogBinding } from './chain-event-log-binding.js';
+import type { ScalarKnowledgeAssetReadModel } from './chain-index/knowledge-asset-read-model.js';
+import type { ChainEventLogStore } from './chain-index/chain-event-log.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_INDEX_HEAD_TIMESTAMP_TOLERANCE_MS,
   CONTEXT_GRAPH_AUTHORITY_INDEX_STALE_FLOOR_MS,
@@ -85,9 +88,23 @@ export type EvmChainIndexReadProvider = <T>(
   opts?: ReadOpts,
 ) => Promise<T>;
 
-export interface EvmChainIndexRuntimeOptions {
-  readonly scope: string;
+/** Legacy SDK construction options remain extendable with a required store. */
+export interface EvmChainIndexRuntimeOptions extends EvmChainIndexRuntimeCommonOptions {
+  /** @deprecated Use the capability input for new callers. */
   readonly store: ChainEventLogStore;
+  readonly chainIndex?: never;
+}
+
+/** Capability construction input for the process-owned log and reader. */
+export interface EvmChainIndexCapabilityOptions extends EvmChainIndexRuntimeCommonOptions {
+  readonly chainIndex: ChainIndexCapability;
+  readonly store?: never;
+}
+
+export type EvmChainIndexRuntimeInput = EvmChainIndexRuntimeOptions | EvmChainIndexCapabilityOptions;
+
+interface EvmChainIndexRuntimeCommonOptions {
+  readonly scope: string;
   /** `chain.indexTickMs` (T). One pass per T; every staleness bound is T. */
   readonly intervalMs: number;
   /** Blocks held back from the settled prefix; the reorg tail. */
@@ -122,9 +139,13 @@ export interface EvmChainIndexRuntimeOptions {
   ];
 }
 
+type RuntimeChainEventLogBinding = ChainEventLogBinding & {
+  readonly knowledgeAssets?: ScalarKnowledgeAssetReadModel;
+};
+
 export interface EvmChainIndexRuntime {
   /** What eligible adapters in this process may borrow instead of the chain. */
-  readonly binding: ChainEventLogBinding;
+  readonly binding: RuntimeChainEventLogBinding;
   readonly tick: ChainIndexTick;
   start(): void;
   stop(): Promise<void>;
@@ -167,7 +188,7 @@ function chainIndexFetchedRow(log: ethers.Log): ChainEventLogFetchedRow | undefi
  * as "cannot answer" rather than "nothing happened".
  */
 function chainIndexRegistry(
-  options: EvmChainIndexRuntimeOptions,
+  options: EvmChainIndexRuntimeCommonOptions,
 ): ChainEventDecoderRegistry {
   const registry = new ChainEventDecoderRegistry();
   registry.registerHub(options.hub.address, options.hub.contractInterface);
@@ -200,7 +221,7 @@ function chainIndexRegistry(
  * {@link chainEventLogFloorKey}'s own note.
  */
 function chainIndexFloorBlocks(
-  options: EvmChainIndexRuntimeOptions,
+  options: EvmChainIndexRuntimeCommonOptions,
 ): ReadonlyMap<string, number> {
   const floors = new Map<string, number>();
   const put = (family: string, contract: EvmChainIndexContract | undefined): void => {
@@ -224,7 +245,7 @@ function chainIndexFloorBlocks(
  * keep growing over blocks the contract no longer speaks for.
  */
 function chainIndexInitialBindings(
-  options: EvmChainIndexRuntimeOptions,
+  options: EvmChainIndexRuntimeCommonOptions,
 ): readonly HubBinding[] {
   const bindings: HubBinding[] = [];
   for (const contract of [options.contextGraphStorage, options.knowledgeAssetStorage]) {
@@ -316,8 +337,16 @@ function chainIndexAuthorityAnchorMaxAgeMs(intervalMs: number): number {
  * existed.
  */
 export function createEvmChainIndexRuntime(
-  options: EvmChainIndexRuntimeOptions,
+  input: EvmChainIndexRuntimeInput,
 ): EvmChainIndexRuntime {
+  if (input.chainIndex !== undefined && input.store !== undefined) {
+    throw new TypeError('Supply chainIndex or the legacy store, not both');
+  }
+  const chainIndex = resolveChainIndexCapability(input.chainIndex === undefined
+    ? { chainEventLogStore: input.store }
+    : { chainIndex: input.chainIndex });
+  if (chainIndex === undefined) throw new TypeError('A chain-index runtime requires its store');
+  const options = { ...input, chainIndex };
   const registry = chainIndexRegistry(options);
   const eventScanTopicSetVersion = chainEventLogTopicSetVersion(registry.topicSet());
   const readTip = options.readTipProvider;
@@ -398,7 +427,7 @@ export function createEvmChainIndexRuntime(
     },
     {
       scope: options.scope,
-      store: options.store,
+      store: options.chainIndex.store,
       registry,
       deploymentBlockNumber: options.hub.deploymentBlockNumber,
       familyFloorBlocks: chainIndexFloorBlocks(options),
@@ -426,7 +455,7 @@ export function createEvmChainIndexRuntime(
 
   const subscription = createChainEventLogSubscription({
     scope: options.scope,
-    store: options.store,
+    store: options.chainIndex.store,
     registry,
   });
   const hubAddress = options.hub.address;
@@ -449,7 +478,7 @@ export function createEvmChainIndexRuntime(
     lastScannedBlock: number | undefined,
     reorgBufferBlocks: number,
   ): Promise<ChainEventLogHubRotationWindow | undefined> {
-    const state = await options.store.load(options.scope);
+    const state = await options.chainIndex.store.load(options.scope);
     if (state === undefined) return undefined;
     // The suspicion pass deliberately keeps coverage while it waits for a
     // second hash read. It also refreshes fetchedAtMs, so the age guard below
@@ -561,7 +590,7 @@ export function createEvmChainIndexRuntime(
       || identity.topic0.toLowerCase() !== event.topic0
     ) return undefined;
 
-    const state = await options.store.load(options.scope);
+    const state = await options.chainIndex.store.load(options.scope);
     if (state === undefined) return undefined;
     // A runtime can be attached before its first tick. Refuse coverage left by
     // an older decoder/topic generation until this runtime commits the topic
@@ -588,7 +617,7 @@ export function createEvmChainIndexRuntime(
     return Object.freeze({
       throughBlockNumber: horizon,
       async holds(): Promise<boolean> {
-        const current = await options.store.load(options.scope);
+        const current = await options.chainIndex.store.load(options.scope);
         if (
           current === undefined
           || current.cursor.revision !== revision
@@ -624,7 +653,7 @@ export function createEvmChainIndexRuntime(
       contractAddress: contextGraphStorageAddress,
       pageSource: createChainIndexAuthorityPageSource({
         scope: options.scope,
-        store: options.store,
+        store: options.chainIndex.store,
         registry,
         contractAddress: contextGraphStorageAddress,
         // The log knows the hash of every block that emitted an indexed event
@@ -648,7 +677,7 @@ export function createEvmChainIndexRuntime(
         requiredBlockNumber?: number;
       }>): Promise<ChainIndexAnchorResult> {
         return resolveChainIndexAuthorityAnchor({
-          state: await options.store.load(options.scope),
+          state: await options.chainIndex.store.load(options.scope),
           contractAddress: contextGraphStorageAddress,
           deploymentBlockNumber: input.deploymentBlockNumber,
           finalityConfirmations: input.finalityConfirmations,
@@ -665,7 +694,7 @@ export function createEvmChainIndexRuntime(
       },
       anchorHolds(anchor: ChainIndexAuthorityAnchor): Promise<boolean> {
         return chainIndexAuthorityAnchorHolds(
-          () => options.store.load(options.scope),
+          () => options.chainIndex.store.load(options.scope),
           anchor,
           {
             nowMs: now(),
@@ -684,7 +713,7 @@ export function createEvmChainIndexRuntime(
     });
 
   type MutableChainEventLogBinding = {
-    -readonly [Key in keyof ChainEventLogBinding]: ChainEventLogBinding[Key];
+    -readonly [Key in keyof RuntimeChainEventLogBinding]: RuntimeChainEventLogBinding[Key];
   };
   const binding: MutableChainEventLogBinding = {
     scope: options.scope,
@@ -707,18 +736,34 @@ export function createEvmChainIndexRuntime(
   // coverage that was never about it.
   if (contextGraphStorageAddress !== undefined) {
     binding.contextGraphStorageAddress = contextGraphStorageAddress;
-    binding.knowledgeAssets = createKnowledgeAssetReadModel({
-      scope: options.scope,
-      store: options.store,
-      registry,
-      contextGraphStorageAddress,
-      // The authority anchor's bound exactly — `min(max(3T, 15s), 5m)`,
-      // ceiling included, because these reads answer the same catalog traffic
-      // from the same stored rows and there is no reason for one to outlive the
-      // other. Every reader of a frozen tick degrades to the chain.
-      maxHeadAgeMs: chainIndexAuthorityAnchorMaxAgeMs(options.intervalMs),
-      now,
-    });
+    const maxHeadAgeMs = chainIndexAuthorityAnchorMaxAgeMs(options.intervalMs);
+    // An injected reader owns the complete read path. In particular, worker
+    // unavailability must never revive the synchronous decoder on this thread.
+    const knowledgeAssets = options.chainIndex.readModelFactory !== undefined
+      ? options.chainIndex.readModelFactory({
+        scope: options.scope,
+        contextGraphStorageAddress,
+        contextGraphStorageAbi: options.contextGraphStorage!.contractInterface.formatJson(),
+        maxHeadAgeMs,
+      })
+      : createKnowledgeAssetReadModel({
+        scope: options.scope,
+        store: options.chainIndex.store,
+        registry,
+        contextGraphStorageAddress,
+        // The authority anchor's bound exactly — `min(max(3T, 15s), 5m)`,
+        // ceiling included, because these reads answer the same catalog traffic
+        // from the same stored rows and there is no reason for one to outlive the
+        // other. Every reader of a frozen tick degrades to the chain.
+        maxHeadAgeMs,
+        now,
+      });
+    // Modern factories own the full read path. Invalid JavaScript providers
+    // must fail construction rather than acquire a main-thread list replay.
+    if (!isScalarKnowledgeAssetReadModel(knowledgeAssets)) {
+      throw new Error('Chain-index read model factory must implement readContextGraphKaAt');
+    }
+    binding.knowledgeAssets = knowledgeAssets;
   }
   if (options.knowledgeAssetStorage !== undefined) {
     binding.knowledgeAssetStorageAddress = options.knowledgeAssetStorage.address;

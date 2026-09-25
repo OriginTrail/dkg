@@ -10,11 +10,11 @@ import type { ApprovalPolicy, ContextGraphRegistryScanCursorStore } from './chai
 import type { ContextGraphAuthorityHistoryStore } from './context-graph-authority-history.js';
 import type { ContextGraphAuthorityIndexStore } from './context-graph-authority-index-checkpoint.js';
 import type { ContextGraphAuthorityIndexBootstrap } from './context-graph-authority-index-snapshot.js';
-import type { ChainEventLogStore } from './chain-index/index.js';
+import type { ChainIndexCompatibilityConfig, ChainIndexConfig } from './chain-index-capability.js';
 import type { ChainEventLogBindingSource } from './chain-event-log-binding.js';
 import type { RpcRequestAdmission } from './rpc-request-transport.js';
 
-export interface EVMAdapterBaseConfig {
+export interface EVMAdapterBaseConfig extends ChainIndexCompatibilityConfig {
   rpcUrl: string;
   rpcUrls?: string[];
   /** Process-shared transport budget injected by the daemon composition root. */
@@ -148,25 +148,13 @@ export interface EVMAdapterBaseConfig {
   /** Trusted core seed plus a bounded local tail; requires a local index store. */
   contextGraphAuthorityIndexBootstrap?: ContextGraphAuthorityIndexBootstrap;
   /**
-   * Durable backing for the node's ONE chain log. Supplying it is what makes
-   * an adapter OWN the tick: it builds the index runtime, starts the single
-   * background pass, and binds itself to the result.
-   *
-   * There must be exactly one such adapter per process — the daemon gives the
-   * store only to the agent's adapter (`lifecycle.ts`), never to the per-wallet
-   * publisher adapters (`publisher-runner.ts:createPublisherWalletChain`) —
-   * because a second one would be the second scanner this log exists to
-   * delete. An adapter without it keeps every pre-log path exactly as it was.
-   */
-  chainEventLogStore?: ChainEventLogStore;
-  /**
    * Late-bound read-only access to the ONE log owned by another adapter in
    * this process. Intended for publisher-wallet adapters: they borrow the
    * owning adapter's current generation without receiving its store/runtime.
    *
    * This source is authoritative over `attachChainEventLog`, including while
    * it returns `undefined` during cold start, rotation/rebuild, or shutdown.
-   * A source and `chainEventLogStore` are mutually exclusive.
+   * A source and an owning `chainIndex` capability are mutually exclusive.
    */
   chainEventLogBindingSource?: ChainEventLogBindingSource;
   /**
@@ -198,6 +186,9 @@ export interface EVMAdapterConfig extends EVMAdapterBaseConfig {
    */
   allowNoAdminSigner?: boolean;
 }
+
+/** Opt-in compile-time ownership checks; the compatibility interface remains extendable. */
+export type StrictEVMAdapterConfig = EVMAdapterConfig & ChainIndexConfig;
 
 export interface ContractCache {
   hub: Contract;

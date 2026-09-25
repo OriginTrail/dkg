@@ -201,6 +201,35 @@ function stubInitBoundary(adapter: EVMChainAdapter) {
 }
 
 describe('EVMChainAdapter chain index wiring', () => {
+  it('passes the injected KA reader factory through runtime construction', async () => {
+    const readModel = {
+      async readContextGraphForKa() { return undefined; },
+      async readContextGraphKaList() { return undefined; },
+      async readContextGraphKaAt() { return undefined; },
+    };
+    const factory = vi.fn(() => readModel);
+    const adapter = new EVMChainAdapter({
+      ...config(),
+      indexTickMs: 60_000,
+      chainIndex: { store: new MemoryChainEventLogStore(), readModelFactory: factory },
+    });
+    const { internals } = stubInitBoundary(adapter);
+    try {
+      await internals.init();
+      await vi.waitUntil(() => adapter.chainEventLog !== undefined, { timeout: 2_000 });
+
+      expect(adapter.chainEventLog!.knowledgeAssets).toBe(readModel);
+      expect(factory).toHaveBeenCalledExactlyOnceWith({
+        scope: oneLogScope(adapter),
+        contextGraphStorageAddress: RETIRED_CG_STORAGE,
+        contextGraphStorageAbi: new ethers.Interface(loadAbi('ContextGraphStorage')).formatJson(),
+        maxHeadAgeMs: 180_000,
+      });
+    } finally {
+      await adapter.destroy();
+    }
+  });
+
   it('activates every one-log reader through the real init entry point', async () => {
     const store = new MemoryChainEventLogStore();
     const adapter = new EVMChainAdapter({ ...config(store), indexTickMs: 60_000 });
@@ -708,6 +737,41 @@ describe('EVMChainAdapter chain index wiring', () => {
     await started;
     expect(adapter.chainEventLog).toBeDefined();
     adapter.destroy();
+  });
+
+  it('preserves the injected reader factory when a Hub rotation rebuilds the runtime', async () => {
+    const models = [0, 1].map(() => ({
+      async readContextGraphForKa() { return undefined; },
+      async readContextGraphKaList() { return undefined; },
+      async readContextGraphKaAt() { return undefined; },
+    }));
+    const factory = vi.fn().mockReturnValueOnce(models[0]).mockReturnValueOnce(models[1]);
+    const adapter = new EVMChainAdapter({
+      ...config(),
+      chainIndex: { store: new MemoryChainEventLogStore(), readModelFactory: factory },
+    });
+    try {
+      stubHub(adapter);
+      stubContextGraphStorage(adapter, RETIRED_CG_STORAGE);
+      startChainIndex(adapter);
+      await chainIndexOwner(adapter).starting;
+      const retired = adapter.chainEventLog;
+      expect(retired?.knowledgeAssets).toBe(models[0]);
+      expect(factory.mock.calls[0]?.[0].contextGraphStorageAddress).toBe(RETIRED_CG_STORAGE);
+
+      stubContextGraphStorage(adapter, ROTATED_CG_STORAGE);
+      dispatchHubRotation(adapter, 'ContextGraphStorage');
+      expect(adapter.chainEventLog).toBeUndefined();
+      startChainIndex(adapter);
+      await chainIndexOwner(adapter).starting;
+
+      expect(factory).toHaveBeenCalledTimes(2);
+      expect(factory.mock.calls[1]?.[0].contextGraphStorageAddress).toBe(ROTATED_CG_STORAGE);
+      expect(adapter.chainEventLog).not.toBe(retired);
+      expect(adapter.chainEventLog?.knowledgeAssets).toBe(models[1]);
+    } finally {
+      await adapter.destroy();
+    }
   });
 
   it('MOVES the binding when the Hub rotates a contract the log indexes', async () => {

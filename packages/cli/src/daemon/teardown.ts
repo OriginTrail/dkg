@@ -260,7 +260,7 @@ export async function closeDaemonBackingStoresAfterTeardown(
   deps: {
     retryAgentStop: () => Promise<void>;
     stopManagedOxigraph: () => Promise<void>;
-    closeDashboardDb: () => void;
+    closeDashboardDb: () => void | Promise<void>;
     log: (message: string) => void;
   },
 ): Promise<boolean> {
@@ -287,7 +287,7 @@ export async function closeDaemonBackingStoresAfterTeardown(
   await deps.stopManagedOxigraph().catch((error: unknown) => {
     deps.log(`Managed Oxigraph stop error: ${error instanceof Error ? error.message : String(error)}`);
   });
-  deps.closeDashboardDb();
+  await deps.closeDashboardDb();
   return true;
 }
 

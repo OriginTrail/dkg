@@ -1,9 +1,11 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import Database from 'better-sqlite3';
 import { DashboardDB } from '../src/db.js';
 import {
+  SqliteChainEventLogReader,
   SqliteChainEventLogStore,
   type SqliteChainEventLogCommit,
   type SqliteChainEventLogRow,
@@ -107,6 +109,75 @@ describe('SqliteChainEventLogStore', () => {
     }]);
   });
 
+  it('serves the same state, indexed rows and hashes through a separate read-only handle', async () => {
+    const { db, store, dataDir } = createStore();
+    const kaTopic = hash(0x05);
+    const selected = [
+      { ...row(10, 0, true), topics: [TOPIC, GRAPH_TOPIC, kaTopic] },
+      { ...row(11, 0, false), topics: [TOPIC, GRAPH_TOPIC, kaTopic] },
+    ];
+    await store.commit(SCOPE, undefined, {
+      ...commit(10, 12, [...selected, { ...row(12, 0, false), address: OTHER_ADDRESS }]),
+      suspectedForkBlockNumber: 9,
+    });
+    await store.commit(OTHER_SCOPE, undefined, commit(10, 12, [row(10, 0, true)]));
+    const handle = new Database(join(dataDir, 'node-ui.db'), { readonly: true, fileMustExist: true });
+    handle.pragma('query_only = ON');
+    const reader = new SqliteChainEventLogReader(handle);
+    const query = {
+      fromBlockNumber: 1, throughBlockNumber: 12,
+      addresses: [ADDRESS], topic0: [TOPIC], topic1: [GRAPH_TOPIC], topic2: [kaTopic],
+    };
+    try {
+      expect(handle.readonly).toBe(true);
+      expect(reader).not.toHaveProperty('commit');
+      expect(reader).not.toHaveProperty('tombstone');
+      expect(await reader.load(SCOPE)).toEqual(await store.load(SCOPE));
+      await expect(reader.load('unknown-scope')).resolves.toBeUndefined();
+      expect(await reader.readEvents(SCOPE, query)).toEqual(await store.readEvents(SCOPE, query));
+      await expect(reader.readEventsBounded(SCOPE, query, 2)).resolves.toEqual(selected);
+      await expect(reader.readEventsBounded(SCOPE, query, 1)).resolves.toBeUndefined();
+      await expect(reader.readEventsBounded(OTHER_SCOPE, query, 2)).resolves.toEqual([]);
+      for (const block of [10, 11, 12, 99]) {
+        expect(await reader.blockHashAt(SCOPE, block)).toBe(await store.blockHashAt(SCOPE, block));
+      }
+      // A read-only connection sees later durable invalidation without ever
+      // gaining the writer's commit/tombstone capability.
+      await store.tombstone(SCOPE, 1);
+      await expect(reader.load(SCOPE)).resolves.toBeUndefined();
+      await expect(reader.readEventsBounded(SCOPE, query, 2)).resolves.toEqual([]);
+      await expect(reader.blockHashAt(SCOPE, 10)).resolves.toBeUndefined();
+    } finally {
+      handle.close();
+      db.close();
+    }
+  });
+
+  it('holds one caller-owned read snapshot across a concurrent writer commit', async () => {
+    const { db, store, dataDir } = createStore();
+    const first = row(11, 0, false, '0xfirst');
+    const replacement = row(11, 1, false, '0xreplacement');
+    await store.commit(SCOPE, undefined, commit(10, 12, [first]));
+    const handle = new Database(join(dataDir, 'node-ui.db'), { readonly: true, fileMustExist: true });
+    handle.pragma('query_only = ON');
+    const reader = new SqliteChainEventLogReader(handle);
+    const query = { fromBlockNumber: 1, throughBlockNumber: 12 };
+    try {
+      handle.exec('BEGIN');
+      expect((await reader.load(SCOPE))?.cursor.revision).toBe(1);
+      await store.commit(SCOPE, 1, commit(10, 12, [replacement]));
+      expect((await reader.load(SCOPE))?.cursor.revision).toBe(1);
+      await expect(reader.readEventsBounded(SCOPE, query, 1)).resolves.toEqual([first]);
+      handle.exec('ROLLBACK');
+      expect((await reader.load(SCOPE))?.cursor.revision).toBe(2);
+      await expect(reader.readEventsBounded(SCOPE, query, 1)).resolves.toEqual([replacement]);
+    } finally {
+      if (handle.inTransaction) handle.exec('ROLLBACK');
+      handle.close();
+      db.close();
+    }
+  });
+
   it('replaces the whole tail but writes a settled row exactly once', async () => {
     const { store } = createStore();
     await store.commit(SCOPE, undefined, commit(10, 12, [
@@ -149,6 +220,152 @@ describe('SqliteChainEventLogStore', () => {
       topic1: [GRAPH_TOPIC],
     })).resolves.toEqual([10]);
     await expect(matchingBlocks({ ...range, topic1: [OTHER_TOPIC] })).resolves.toEqual([]);
+  });
+
+  it('filters KA topic2 with scope, emitter, event signature and the block window', async () => {
+    const { store } = createStore();
+    const kaTopic = hash(0x05);
+    const target = { ...row(10, 0, true), topics: [TOPIC, GRAPH_TOPIC, kaTopic] };
+    await store.commit(SCOPE, undefined, commit(10, 12, [
+      target,
+      { ...target, logIndex: 1, address: OTHER_ADDRESS },
+      { ...target, logIndex: 2, topics: [OTHER_TOPIC, GRAPH_TOPIC, kaTopic] },
+      { ...target, logIndex: 3, topics: [TOPIC, GRAPH_TOPIC, hash(0x06)] },
+      { ...target, blockNumber: 9, logIndex: 0 },
+      { ...row(12, 0, false), topics: target.topics },
+    ]));
+    await store.commit(OTHER_SCOPE, undefined, commit(10, 12, [target]));
+
+    await expect(store.readEvents(SCOPE, {
+      fromBlockNumber: 10,
+      throughBlockNumber: 11,
+      addresses: [ADDRESS],
+      topic0: [TOPIC],
+      topic2: [kaTopic],
+    })).resolves.toEqual([target]);
+    await expect(store.readEvents(SCOPE, {
+      fromBlockNumber: 0, throughBlockNumber: 20, topic2: [hash(0x07)],
+    })).resolves.toEqual([]);
+  });
+
+  it('uses the KA index for the actual point-read SQL instead of scanning the event history', async () => {
+    const { db, store } = createStore();
+    const topicFor = (value: number) => `0x${value.toString(16).padStart(64, '0')}`;
+    const rows = Array.from({ length: 2_000 }, (_, index) => ({
+      ...row(10, index, true),
+      topics: [TOPIC, GRAPH_TOPIC, topicFor(index)],
+    }));
+    await store.commit(SCOPE, undefined, commit(10, 12, rows));
+    const prepare = vi.spyOn(db.db, 'prepare');
+    const result = await store.readEvents(SCOPE, {
+      fromBlockNumber: 1,
+      throughBlockNumber: 12,
+      addresses: [ADDRESS],
+      topic0: [TOPIC],
+      topic2: [topicFor(1_500)],
+    });
+    const sql = prepare.mock.calls.find(([query]) => query.includes('FROM chain_events'))?.[0];
+    prepare.mockRestore();
+    expect(result).toEqual([rows[1_500]]);
+    expect(sql).toBeDefined();
+    const plan = db.db.prepare(`EXPLAIN QUERY PLAN ${sql!}`)
+      .all(SCOPE, 1, 12, ADDRESS, TOPIC, topicFor(1_500)) as { detail: string }[];
+    const details = plan.map(({ detail }) => detail).join('\n');
+    expect(details).toMatch(/SEARCH chain_events USING INDEX idx_chain_events_scope_address_ka/);
+    expect(details).toMatch(/topic2=\?/);
+    expect(details).not.toMatch(/SCAN chain_events|USE TEMP B-TREE/);
+  });
+
+  it('removes replaced and tombstoned registrations from the KA index', async () => {
+    const { store } = createStore();
+    const kaTopic = hash(0x05);
+    const orphan = { ...row(12, 0, false), topics: [TOPIC, GRAPH_TOPIC, kaTopic] };
+    const replacement = { ...row(12, 1, false), topics: [TOPIC, OTHER_GRAPH_TOPIC, kaTopic] };
+    const query = {
+      fromBlockNumber: 1, throughBlockNumber: 12,
+      addresses: [ADDRESS], topic0: [TOPIC], topic2: [kaTopic],
+    };
+    await store.commit(SCOPE, undefined, commit(10, 12, [orphan]));
+    await expect(store.readEvents(SCOPE, query)).resolves.toEqual([orphan]);
+    await store.commit(SCOPE, 1, commit(10, 12, [replacement]));
+    await expect(store.readEvents(SCOPE, query)).resolves.toEqual([replacement]);
+    await store.tombstone(SCOPE, 2);
+    await expect(store.readEvents(SCOPE, query)).resolves.toEqual([]);
+  });
+
+  it('returns a complete bounded result at the exact cap with the same filters and order', async () => {
+    const { store } = createStore();
+    const target = [
+      { ...row(10, 1, true), topics: [TOPIC, GRAPH_TOPIC, hash(0x05)] },
+      { ...row(10, 2, true), topics: [TOPIC, GRAPH_TOPIC, hash(0x05)] },
+    ];
+    await store.commit(SCOPE, undefined, commit(10, 12, [
+      target[1]!, target[0]!,
+      { ...row(10, 3, true), topics: [TOPIC, GRAPH_TOPIC, hash(0x06)] },
+      { ...row(10, 4, true), topics: [TOPIC, GRAPH_TOPIC, hash(0x05)], address: OTHER_ADDRESS },
+    ]));
+    const query = {
+      fromBlockNumber: 10, throughBlockNumber: 11,
+      addresses: [ADDRESS], topic0: [TOPIC], topic1: [GRAPH_TOPIC], topic2: [hash(0x05)],
+    };
+    await expect(store.readEventsBounded(SCOPE, query, 2)).resolves.toEqual(target);
+    expect(await store.readEventsBounded(SCOPE, query, 2)).toEqual(await store.readEvents(SCOPE, query));
+    await expect(store.readEventsBounded(SCOPE, { ...query, topic2: [hash(0x07)] }, 1))
+      .resolves.toEqual([]);
+    await expect(store.readEventsBounded(OTHER_SCOPE, query, 1)).resolves.toEqual([]);
+  });
+
+  it('limits native row allocation and refuses overflow instead of returning truncated history', async () => {
+    const { db, store } = createStore();
+    await store.commit(SCOPE, undefined, commit(10, 12, [
+      row(10, 0, true), row(10, 1, true), row(10, 2, true),
+    ]));
+    const prepare = vi.spyOn(db.db, 'prepare');
+    await expect(store.readEventsBounded(SCOPE, {
+      fromBlockNumber: 0, throughBlockNumber: 20,
+    }, 2)).resolves.toBeUndefined();
+    const sql = prepare.mock.calls.find(([query]) => query.includes('FROM chain_events'))?.[0];
+    prepare.mockRestore();
+    expect(sql).toMatch(/ORDER BY block_number, log_index\s+LIMIT \?/);
+    await expect(store.readEventsBounded(SCOPE, {
+      fromBlockNumber: 0, throughBlockNumber: 20,
+    }, 3)).resolves.toHaveLength(3);
+  });
+
+  it.each([0, -1, 0.5, NaN, Infinity, Number.MAX_SAFE_INTEGER])(
+    'refuses an invalid bounded row cap %s before reading the database', async (maxRows) => {
+      const { db, store } = createStore();
+      const prepare = vi.spyOn(db.db, 'prepare');
+      await expect(store.readEventsBounded(SCOPE, {
+        fromBlockNumber: 0, throughBlockNumber: 20,
+      }, maxRows)).rejects.toThrow('maximum row count');
+      expect(prepare).not.toHaveBeenCalled();
+      prepare.mockRestore();
+    },
+  );
+
+  it('adds the KA lookup index to an existing current-version database without changing rows', async () => {
+    const { db, store, dataDir } = createStore();
+    const target = { ...row(10, 0, true), topics: [TOPIC, GRAPH_TOPIC, hash(0x05)] };
+    await store.commit(SCOPE, undefined, commit(10, 12, [target]));
+    const version = db.db.pragma('user_version', { simple: true });
+    db.db.exec('DROP INDEX idx_chain_events_scope_address_ka');
+    db.close();
+
+    const reopened = new DashboardDB({ dataDir });
+    try {
+      const columns = reopened.db.prepare('PRAGMA index_info(idx_chain_events_scope_address_ka)')
+        .all() as { name: string }[];
+      expect(columns.map(({ name }) => name)).toEqual([
+        'scope', 'address', 'topic0', 'topic2', 'block_number', 'log_index',
+      ]);
+      expect(reopened.db.pragma('user_version', { simple: true })).toBe(version);
+      await expect(new SqliteChainEventLogStore(reopened).readEvents(SCOPE, {
+        fromBlockNumber: 0, throughBlockNumber: 20, topic2: [hash(0x05)],
+      })).resolves.toEqual([target]);
+    } finally {
+      reopened.close();
+    }
   });
 
   it('loses the CAS when another writer advanced the cursor first', async () => {

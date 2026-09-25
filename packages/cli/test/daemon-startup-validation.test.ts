@@ -4,11 +4,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { buildEvmDeploymentId } from '@origintrail-official/dkg-chain';
-import { SqliteContextGraphStorageDiscoveryStore } from '@origintrail-official/dkg-node-ui';
+import { DashboardDB, SqliteContextGraphStorageDiscoveryStore } from '@origintrail-official/dkg-node-ui';
+import * as corePrerequisites from '../src/daemon/core-prereq-check.js';
 import {
   DEFAULT_DAEMON_LOG_MAX_BYTES,
 } from '../src/daemon/log-rotation.js';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
+import { ChainIndexReadWorker } from '../src/daemon/worker/chain-index-read-worker.js';
 
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
@@ -40,7 +42,7 @@ function closeDashboardDbFromAgentCreateArg(createArg: any): void {
   const db =
     createArg?.chainEventCursorStore?.cursors?.db ??
     createArg?.contextGraphRegistryScanCursorStore?.cursors?.db;
-  db?.close?.();
+  if (db?.open) db.close();
 }
 
 /**
@@ -273,7 +275,51 @@ describe('daemon startup network validation', () => {
       defaultNodeRole: 'edge',
     });
     mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [] });
-    mocks.agentCreate.mockRejectedValue(new Error('after-agent-create'));
+    mocks.agentCreate.mockImplementation(async (createArg) => {
+      const authorityCheckpoint = {
+        version: 1,
+        state: { throughBlockNumber: 30 },
+        integrity: `0x${'11'.repeat(32)}`,
+      };
+      await createArg.localContextGraphAuthorityHistoryStore.save(
+        'daemon-startup-wiring',
+        authorityCheckpoint,
+      );
+      await expect(createArg.localContextGraphAuthorityHistoryStore.load('daemon-startup-wiring'))
+        .resolves.toEqual(authorityCheckpoint);
+      await createArg.localContextGraphAuthorityHistoryStore.delete('daemon-startup-wiring');
+      await expect(createArg.localContextGraphAuthorityHistoryStore.load('daemon-startup-wiring'))
+        .resolves.toBeUndefined();
+      const indexCheckpoint = {
+        version: 1,
+        cursor: { throughBlockNumber: 30 },
+        integrity: `0x${'22'.repeat(32)}`,
+      };
+      await expect(createArg.localContextGraphAuthorityIndexStore.compareAndSwap(
+        'daemon-startup-index-wiring',
+        undefined,
+        indexCheckpoint,
+      )).resolves.toBe(1);
+      await expect(createArg.localContextGraphAuthorityIndexStore.load(
+        'daemon-startup-index-wiring',
+      )).resolves.toEqual({ token: 1, value: indexCheckpoint });
+      await expect(createArg.localContextGraphAuthorityIndexStore.invalidate(
+        'daemon-startup-index-wiring',
+        1,
+      )).resolves.toBe(2);
+      await expect(createArg.localContextGraphAuthorityIndexStore.load(
+        'daemon-startup-index-wiring',
+      )).resolves.toEqual({ token: 2, value: null });
+      expect((createArg.chainEventCursorStore as any).scope).toBe(buildEvmDeploymentId({
+        chainId: 'gnosis:100',
+        hubAddress: '0x1234567890123456789012345678901234567890',
+      }));
+      await expectDeploymentScopedStorageDiscoveryStore(createArg, buildEvmDeploymentId({
+        chainId: 'gnosis:100',
+        hubAddress: '0x1234567890123456789012345678901234567890',
+      }));
+      throw new Error('after-agent-create');
+    });
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
     await expect(runDaemonInner(true, {
@@ -311,57 +357,18 @@ describe('daemon startup network validation', () => {
         compareAndSwap: expect.any(Function),
         invalidate: expect.any(Function),
       },
-      chainEventLogStore: {
-        load: expect.any(Function),
-        commit: expect.any(Function),
-        tombstone: expect.any(Function),
-        readEvents: expect.any(Function),
-        blockHashAt: expect.any(Function),
+      chainIndex: {
+        store: {
+          load: expect.any(Function),
+          commit: expect.any(Function),
+          tombstone: expect.any(Function),
+          readEvents: expect.any(Function),
+          blockHashAt: expect.any(Function),
+        },
+        readModelFactory: expect.any(Function),
       },
     });
-    const authorityCheckpoint = {
-      version: 1,
-      state: { throughBlockNumber: 30 },
-      integrity: `0x${'11'.repeat(32)}`,
-    };
-    await createArg.localContextGraphAuthorityHistoryStore.save(
-      'daemon-startup-wiring',
-      authorityCheckpoint,
-    );
-    await expect(createArg.localContextGraphAuthorityHistoryStore.load('daemon-startup-wiring'))
-      .resolves.toEqual(authorityCheckpoint);
-    await createArg.localContextGraphAuthorityHistoryStore.delete('daemon-startup-wiring');
-    await expect(createArg.localContextGraphAuthorityHistoryStore.load('daemon-startup-wiring'))
-      .resolves.toBeUndefined();
-    const indexCheckpoint = {
-      version: 1,
-      cursor: { throughBlockNumber: 30 },
-      integrity: `0x${'22'.repeat(32)}`,
-    };
-    await expect(createArg.localContextGraphAuthorityIndexStore.compareAndSwap(
-      'daemon-startup-index-wiring',
-      undefined,
-      indexCheckpoint,
-    )).resolves.toBe(1);
-    await expect(createArg.localContextGraphAuthorityIndexStore.load(
-      'daemon-startup-index-wiring',
-    )).resolves.toEqual({ token: 1, value: indexCheckpoint });
-    await expect(createArg.localContextGraphAuthorityIndexStore.invalidate(
-      'daemon-startup-index-wiring',
-      1,
-    )).resolves.toBe(2);
-    await expect(createArg.localContextGraphAuthorityIndexStore.load(
-      'daemon-startup-index-wiring',
-    )).resolves.toEqual({ token: 2, value: null });
-    expect((createArg.chainEventCursorStore as any).scope).toBe(buildEvmDeploymentId({
-      chainId: 'gnosis:100',
-      hubAddress: '0x1234567890123456789012345678901234567890',
-    }));
-    await expectDeploymentScopedStorageDiscoveryStore(createArg, buildEvmDeploymentId({
-      chainId: 'gnosis:100',
-      hubAddress: '0x1234567890123456789012345678901234567890',
-    }));
-    closeDashboardDbFromAgentCreateArg(createArg);
+    expect(createArg.chainEventCursorStore.cursors.db.open).toBe(false);
   });
 
   it('scopes chain event cursors with the EVM default chain id when chainId is omitted', async () => {
@@ -381,7 +388,13 @@ describe('daemon startup network validation', () => {
       defaultNodeRole: 'edge',
     });
     mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [] });
-    mocks.agentCreate.mockRejectedValue(new Error('after-agent-create'));
+    mocks.agentCreate.mockImplementation(async (createArg) => {
+      await expectDeploymentScopedStorageDiscoveryStore(createArg, buildEvmDeploymentId({
+        chainId: 'evm:31337',
+        hubAddress: '0x2234567890123456789012345678901234567890',
+      }));
+      throw new Error('after-agent-create');
+    });
     vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
 
     await expect(runDaemonInner(true, {
@@ -402,10 +415,121 @@ describe('daemon startup network validation', () => {
       chainId: 'evm:31337',
       hubAddress: '0x2234567890123456789012345678901234567890',
     }));
-    await expectDeploymentScopedStorageDiscoveryStore(createArg, buildEvmDeploymentId({
-      chainId: 'evm:31337',
-      hubAddress: '0x2234567890123456789012345678901234567890',
-    }));
-    closeDashboardDbFromAgentCreateArg(createArg);
+    expect(createArg.chainEventCursorStore.cursors.db.open).toBe(false);
+  });
+
+  it('reuses resource cleanup for a fatal prerequisite and its propagated startup failure', async () => {
+    tempHome = await mkdtemp(join(tmpdir(), 'dkg-fatal-resource-cleanup-'));
+    originalDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = tempHome;
+    stdoutWrite = process.stdout.write;
+    stderrWrite = process.stderr.write;
+    uncaughtExceptionListeners = process.listeners('uncaughtException') as NodeJS.UncaughtExceptionListener[];
+    unhandledRejectionListeners = process.listeners('unhandledRejection') as NodeJS.UnhandledRejectionListener[];
+    mocks.loadNetworkConfig.mockResolvedValue({
+      networkName: 'Local EVM', genesisId: 'gnosis-mainnet', genesisVersion: 1,
+      relays: [], defaultNodeRole: 'core',
+    });
+    mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [] });
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(corePrerequisites, 'checkCoreRelayPrereqs').mockReturnValue({
+      publicListenAddresses: [], nonRoutableAddresses: [], looksDegraded: true,
+      indeterminate: false, reasons: ['no public listener'],
+    });
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('fatal prerequisite exit'); });
+    const events: string[] = [];
+    const actualReaderClose = ChainIndexReadWorker.prototype.close;
+    const readerClose = vi.spyOn(ChainIndexReadWorker.prototype, 'close').mockImplementation(async function () {
+      events.push('reader');
+      await actualReaderClose.call(this);
+    });
+    const actualDbClose = DashboardDB.prototype.close;
+    const dbClose = vi.spyOn(DashboardDB.prototype, 'close').mockImplementation(function () {
+      events.push('database');
+      actualDbClose.call(this);
+    });
+    await expect(runDaemonInner(true, {
+      name: 'fatal-resource-cleanup', networkConfig: 'local-evm', listenPort: 0,
+      nodeRole: 'core', core: { allowDegradedRelay: false },
+      chain: { type: 'evm', rpcUrl: 'https://private-rpc.example',
+        hubAddress: '0x1234567890123456789012345678901234567890', chainId: 'evm:31337' },
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('fatal prerequisite exit');
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(mocks.agentCreate).not.toHaveBeenCalled();
+    expect(readerClose).toHaveBeenCalledOnce();
+    expect(dbClose).toHaveBeenCalledOnce();
+    expect(events).toEqual(['reader', 'database']);
+  });
+
+  it('awaits reader shutdown when boot fails after a chain-index read starts the worker', async () => {
+    tempHome = await mkdtemp(join(tmpdir(), 'dkg-reader-startup-cleanup-'));
+    originalDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = tempHome;
+    stdoutWrite = process.stdout.write;
+    stderrWrite = process.stderr.write;
+    uncaughtExceptionListeners = process.listeners('uncaughtException') as NodeJS.UncaughtExceptionListener[];
+    unhandledRejectionListeners = process.listeners('unhandledRejection') as NodeJS.UnhandledRejectionListener[];
+
+    mocks.loadNetworkConfig.mockResolvedValue({
+      networkName: 'Local EVM', genesisId: 'gnosis-mainnet', genesisVersion: 1,
+      relays: [], defaultNodeRole: 'edge',
+    });
+    mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [] });
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const modelOptions = {
+      scope: 'startup-cleanup-test',
+      contextGraphStorageAddress: '0x1234567890123456789012345678901234567890',
+      contextGraphStorageAbi: '[]', maxHeadAgeMs: 15_000,
+    };
+    mocks.agentCreate.mockImplementation(async (createArg) => {
+      // The empty local log refuses this read, but it opens the real worker's
+      // read-only SQLite connection before the simulated startup failure.
+      await createArg.chainIndex.readModelFactory(modelOptions).readContextGraphForKa(42n);
+      throw new Error('boot failed after reader started');
+    });
+
+    let releaseClose!: () => void;
+    let closeStarted!: () => void;
+    const closeGate = new Promise<void>((resolve) => { releaseClose = resolve; });
+    const closing = new Promise<void>((resolve) => { closeStarted = resolve; });
+    const actualClose = ChainIndexReadWorker.prototype.close;
+    const close = vi.spyOn(ChainIndexReadWorker.prototype, 'close')
+      .mockImplementation(async function (this: ChainIndexReadWorker) {
+        closeStarted();
+        await closeGate;
+        await actualClose.call(this);
+      });
+    let settled = false;
+    const startup = runDaemonInner(true, {
+      name: 'reader-startup-cleanup-test', networkConfig: 'local-evm', listenPort: 0, nodeRole: 'edge',
+      chain: { type: 'evm', rpcUrl: 'https://private-rpc.example',
+        hubAddress: modelOptions.contextGraphStorageAddress, chainId: 'evm:31337' },
+    } as any, Date.now(), resolveShutdownPolicy(undefined)).then(
+      () => { settled = true; return undefined; },
+      (error: unknown) => { settled = true; return error; },
+    );
+    try {
+      await Promise.race([
+        closing,
+        startup.then(() => { throw new Error('Boot settled before reader cleanup started'); }),
+      ]);
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(close).toHaveBeenCalledOnce();
+      const sharedDb = mocks.agentCreate.mock.calls[0]?.[0].chainEventCursorStore.cursors.db;
+      expect(sharedDb.open).toBe(true);
+      expect(settled).toBe(false);
+      releaseClose();
+      expect(await startup).toMatchObject({ message: 'boot failed after reader started' });
+      expect(sharedDb.open).toBe(false);
+      const reader = close.mock.contexts[0] as ChainIndexReadWorker;
+      await expect(reader.createReadModel(modelOptions).readContextGraphForKa(43n))
+        .resolves.toBeUndefined();
+    } finally {
+      releaseClose();
+      await startup;
+      const reader = close.mock.contexts[0] as ChainIndexReadWorker | undefined;
+      if (reader) await actualClose.call(reader);
+      closeDashboardDbFromAgentCreateArg(mocks.agentCreate.mock.calls[0]?.[0]);
+    }
   });
 });
