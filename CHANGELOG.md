@@ -2,6 +2,27 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Persisted subscriptions no longer hold a node's start for minutes**
+  (#2815): on start, a node checked the read authority of every persisted
+  Context Graph subscription on chain, one at a time, and opened its API only
+  after the last check. A mainnet Core with about 400 persisted
+  subscriptions, nearly all for graphs that do not exist on that chain, spent
+  about 226 s of a 274 s start there. Startup now waits at most 10 s for
+  these checks, hosted graphs first. A subscription it has not checked by
+  then stays inactive and is checked in the background after start, and it
+  is activated only once its authority resolves as allowed, exactly as
+  before; a graph the chain reports unknown is not checked again until the
+  next start. Until its check runs, such a subscription is listed under
+  `rehydration.dormantReasons.authorityUnavailable` in
+  `GET /api/context-graph/subscriptions`. A subscription with a durable join
+  approval is still checked during startup. Embedders can change the budget
+  with the agent option `contextGraphSubscriptionRehydrationAuthorityBudgetMs`;
+  `0` waits for every subscription, as before.
+
 ## [10.0.19] - 2026-09-25
 
 ### Upgrading from 10.0.18
