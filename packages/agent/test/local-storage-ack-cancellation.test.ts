@@ -3,6 +3,12 @@ import { ethers } from 'ethers';
 import {
   PROTOCOL_STORAGE_ACK,
   PROTOCOL_STORAGE_UPDATE_ACK,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  MemoryLayer,
+  createGraphKnowledgeAssetScope,
+  knowledgeAssetLayerGraphUri,
+  decodeStorageACK,
+  isStorageACKDecline,
   TypedEventBus,
   encodePublishIntent,
   encodeUpdateIntent,
@@ -286,5 +292,68 @@ describe('local StorageACK cancellation through the registered real handler', ()
     await transport.drain();
     expect(sign).toHaveBeenCalledOnce();
     endpoint.dispose();
+  });
+
+  it('holds store teardown for a graph commit that outlives the handler deadline', async () => {
+    const store = new OxigraphStore();
+    const close = vi.spyOn(store, 'close');
+    const originalReplace = store.replaceGraph!.bind(store);
+    let entered!: () => void;
+    let release!: () => void;
+    const inReplace = new Promise<void>((resolve) => { entered = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(store, 'replaceGraph').mockImplementation(async (graphUri, replacement) => {
+      entered();
+      await held;
+      await originalReplace(graphUri, replacement); // adapter ignores cancellation
+    });
+    const signer = ethers.Wallet.createRandom();
+    const sign = vi.spyOn(signer, 'signMessage');
+    const handler = new StorageACKHandler(store, {
+      nodeRole: 'core', nodeIdentityId: 42n, signerWallet: signer,
+      contextGraphSharedMemoryUri: (cgId) => `did:dkg:context-graph:${cgId}/_shared_memory`,
+      chainId: 31337n, kav10Address: '0x000000000000000000000000000000000000c10a',
+      isCgCurated: async () => false,
+      ensureVmPromotion: async () => ({ ok: true }),
+      ackHandlerDeadlineMs: 200,
+    }, new TypedEventBus());
+    agent = await DKGAgent.create({
+      name: 'LateLocalACKCommitDrain', store, chainAdapter: new MockChainAdapter(), nodeRole: 'core',
+    });
+    await agent.start();
+    const local = agent as LocalAgent;
+    installStorageACKFixtureEndpoint(local, registerStorageACKEndpoint({
+      registerGroup: () => () => {},
+      publish: (data, peerId) => handler.handler(data, { toString: () => peerId } as any),
+      update: (data, peerId) => handler.updateHandler(data, { toString: () => peerId } as any),
+      publishLocal: (data, peerId, signal, expectedHead, trackPhysicalWork) =>
+        handler.localHandler(data, { toString: () => peerId } as any, signal, expectedHead, trackPhysicalWork),
+      updateLocal: (data, peerId, signal, expectedHead, trackPhysicalWork) =>
+        handler.localUpdateHandler(data, { toString: () => peerId } as any, signal, expectedHead, trackPhysicalWork),
+    }));
+    const ual = 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/7';
+    const quads = [{ subject: 'urn:entity:late', predicate: 'urn:p:value', object: '"value"', graph: '' }];
+    const graphUri = knowledgeAssetLayerGraphUri('late-local', MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(ual, 1));
+    const stagingQuads = new TextEncoder().encode(`<urn:entity:late> <urn:p:value> "value" <${graphUri}> .`);
+    const intent = encodePublishIntent({
+      merkleRoot: computeFlatKCRootV10(quads, []), contextGraphId: '42', swmGraphId: 'late-local',
+      publisherPeerId: local.peerId, publicByteSize: stagingQuads.length, isPrivate: false,
+      kaCount: 1, rootEntities: [], merkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+      stagingQuads, contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION, kaUal: ual,
+      assertionVersion: '1', publicTripleCount: 1, privateTripleCount: 0,
+      accessPolicy: 'public', allowedPeers: [],
+    });
+    const send = local.createACKTransportFactory({ sendTimeoutMs: 1_000 })().sendP2P(local.peerId, PROTOCOL_STORAGE_ACK, intent);
+    await Promise.race([inReplace, send.then(() => { throw new Error('ACK completed before graph replacement started'); })]);
+    expect(isStorageACKDecline(decodeStorageACK(await send))).toBe(true);
+    const stopping = local.stop();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(close).not.toHaveBeenCalled();
+    release();
+    await stopping;
+    expect(close).toHaveBeenCalledOnce();
+    expect(sign).not.toHaveBeenCalled();
+    agent = undefined;
   });
 });

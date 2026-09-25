@@ -6,8 +6,8 @@
  * The SWM copy an ACK persists is ordinary shared-memory metadata: other
  * nodes can sync it, gossip can choose any `shareOperationId`, and a copy
  * persisted for a request that was later declined looks identical. Retention
- * and the promotion audit therefore key on this ledger, written immediately
- * before the signature and never synced (the graph is outside every
+ * and the promotion audit therefore key on this ledger, written after a
+ * successful signature and never synced (the graph is outside every
  * `did:dkg:context-graph:` family the sync lanes serve).
  *
  * Subject: the share-operation IRI of the ACK copy

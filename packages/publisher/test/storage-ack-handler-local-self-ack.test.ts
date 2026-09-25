@@ -312,7 +312,7 @@ describe('StorageACK local self-ACK keeps the publisher SWM head (#2796)', () =>
     expect(await ledgerOperations(h)).toEqual([]);
   });
 
-  it('finishes graph, metadata, head, and ledger after a non-cooperative replace commits past deadline', async () => {
+  it('finishes graph, metadata, and head without a false signed ledger after a late replace', async () => {
     const h = await harness(40);
     const originalReplace = h.store.replaceGraph.bind(h.store);
     let entered!: () => void;
@@ -337,7 +337,7 @@ describe('StorageACK local self-ACK keeps the publisher SWM head (#2796)', () =>
     const copy = ackCopyOperationId(1, content('late-commit'));
     await vi.waitFor(async () => {
       expect(await hasOperationRows(h, copy)).toBe(true);
-      expect(await ledgerOperations(h)).toEqual([workspaceOperationSubject(SWM_GRAPH_ID, copy)]);
+      expect(await ledgerOperations(h)).toEqual([]);
     });
     expect(await readHead(h)).toMatchObject({ shareOperationId: copy });
     expect(await swmValues(h, 1)).toEqual(['"late-commit"']);

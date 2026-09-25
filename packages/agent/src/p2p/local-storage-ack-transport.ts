@@ -33,8 +33,13 @@ export class LocalStorageACKTransport {
     const result = runBoundedOperation(async (signal) => {
       await predecessor;
       signal.throwIfAborted();
-      physicalWork = Promise.resolve(endpoint.dispatch(protocol, data, peerId, signal, expectedHead));
-      return physicalWork;
+      const response = Promise.resolve(endpoint.dispatch(protocol, data, peerId, signal, expectedHead, (work) => {
+        physicalWork = work;
+      }));
+      // Simple endpoints have no separate deadline. Production endpoints
+      // register the inner handler promise before returning their response.
+      physicalWork ??= response;
+      return response;
     }, { timeoutMs, label: 'Local StorageACK request', signal: controller.signal });
     // The caller receives the deadline result, while the FIFO keeps ownership
     // until the handler itself settles, even after timeout or shutdown abort.

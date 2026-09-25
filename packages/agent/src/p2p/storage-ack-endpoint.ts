@@ -3,7 +3,7 @@ import { STORAGE_ACK_PROTOCOLS, storageACKProtocolKind, type StorageACKProtocol 
 
 export interface StorageACKEndpoint {
   /** This node's own request: the publishing core ACKing itself. */
-  dispatch(protocol: StorageACKProtocol, data: Uint8Array, peerId: string, signal?: AbortSignal, expectedHead?: LocalStorageAckHeadExpectation): Promise<Uint8Array>;
+  dispatch(protocol: StorageACKProtocol, data: Uint8Array, peerId: string, signal?: AbortSignal, expectedHead?: LocalStorageAckHeadExpectation, trackPhysicalWork?: (work: Promise<Uint8Array>) => void): Promise<Uint8Array>;
   dispose(): void;
 }
 
@@ -14,8 +14,8 @@ interface StorageACKEndpointPorts {
   }[]): () => void;
   publish(data: Uint8Array, peerId: string): Promise<Uint8Array>;
   update(data: Uint8Array, peerId: string): Promise<Uint8Array>;
-  publishLocal(data: Uint8Array, peerId: string, signal: AbortSignal | undefined, expectedHead?: LocalStorageAckHeadExpectation): Promise<Uint8Array>;
-  updateLocal(data: Uint8Array, peerId: string, signal: AbortSignal | undefined, expectedHead?: LocalStorageAckHeadExpectation): Promise<Uint8Array>;
+  publishLocal(data: Uint8Array, peerId: string, signal: AbortSignal | undefined, expectedHead?: LocalStorageAckHeadExpectation, trackPhysicalWork?: (work: Promise<Uint8Array>) => void): Promise<Uint8Array>;
+  updateLocal(data: Uint8Array, peerId: string, signal: AbortSignal | undefined, expectedHead?: LocalStorageAckHeadExpectation, trackPhysicalWork?: (work: Promise<Uint8Array>) => void): Promise<Uint8Array>;
 }
 
 /**
@@ -30,15 +30,15 @@ export function registerStorageACKEndpoint(ports: StorageACKEndpointPorts): Stor
     protocol: StorageACKProtocol,
     data: Uint8Array,
     peerId: string,
-    local: false | { signal: AbortSignal | undefined; expectedHead?: LocalStorageAckHeadExpectation },
+    local: false | { signal: AbortSignal | undefined; expectedHead?: LocalStorageAckHeadExpectation; trackPhysicalWork?: (work: Promise<Uint8Array>) => void },
   ): Promise<Uint8Array> => {
     if (!active) throw new Error('StorageACK handler is not registered');
     return storageACKProtocolKind(protocol) === 'publish'
-      ? local ? ports.publishLocal(data, peerId, local.signal, local.expectedHead) : ports.publish(data, peerId)
-      : local ? ports.updateLocal(data, peerId, local.signal, local.expectedHead) : ports.update(data, peerId);
+      ? local ? ports.publishLocal(data, peerId, local.signal, local.expectedHead, local.trackPhysicalWork) : ports.publish(data, peerId)
+      : local ? ports.updateLocal(data, peerId, local.signal, local.expectedHead, local.trackPhysicalWork) : ports.update(data, peerId);
   };
-  const dispatch: StorageACKEndpoint['dispatch'] = (protocol, data, peerId, signal, expectedHead) =>
-    route(protocol, data, peerId, { signal, expectedHead });
+  const dispatch: StorageACKEndpoint['dispatch'] = (protocol, data, peerId, signal, expectedHead, trackPhysicalWork) =>
+    route(protocol, data, peerId, { signal, expectedHead, trackPhysicalWork });
   let removeRoutes: () => void;
   try {
     removeRoutes = ports.registerGroup(STORAGE_ACK_PROTOCOLS.map(([protocol]) => ({

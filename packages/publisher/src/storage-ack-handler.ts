@@ -1150,7 +1150,7 @@ export class StorageACKHandler {
    * same version, is a conflict (a peer must not be able to replace a copy
    * this core may still owe to its VM), and a newer version (an update) may
    * replace an older copy only once that older version is confirmed in this
-   * namespace's VM. Returns the ledger entry to record if the ACK is signed.
+   * namespace's VM. The signature and ledger commit stay under the same lock.
    *
    * A local self-ACK over content the head already records leaves that head
    * in place only with proof of the exact queued operation and access envelope.
@@ -1167,7 +1167,8 @@ export class StorageACKHandler {
     signal: AbortSignal | undefined,
     recordLedger: boolean,
     context: StorageAckRequestContext,
-  ): Promise<{ ok: true; ledger: StorageAckLedgerEntry } | { ok: false; decline: Uint8Array }> {
+    digest: Uint8Array,
+  ): Promise<{ ok: true; signature: ethers.Signature } | { ok: false; decline: Uint8Array }> {
     assertPersistQuadTermsSafe(parsed);
     const normalized = parsed.map((quad) => ({ ...quad, graph: swmGraphUri }));
     const operationId = storageAckOperationId(
@@ -1228,7 +1229,9 @@ export class StorageACKHandler {
       ...(graphPublish.subGraphName ? { subGraphName: graphPublish.subGraphName } : {}),
     });
 
-    const persist = async () => this.runStoreOpOrDecline(cgId, async (): Promise<Uint8Array | undefined> => {
+    const persist = async (): Promise<{ ok: true; signature: ethers.Signature } | { ok: false; decline: Uint8Array }> => {
+      let operationsToSupersede: readonly string[] = [];
+      const result = await this.runStoreOpOrDecline(cgId, async (): Promise<Uint8Array | undefined> => {
       const verdict = await this.runWhileLive(() => this.checkAckCopyAgainstHead({
         cgId,
         swmGraphId,
@@ -1243,6 +1246,7 @@ export class StorageACKHandler {
         signal,
       }), signal);
       if (verdict.kind === 'decline') return verdict.decline;
+      operationsToSupersede = verdict.supersede;
       const companion = graphPublish.subGraphName === undefined
         ? this.config.resolveDurableRootAtomicCompanion?.(Object.freeze({
             contextGraphId: swmGraphId,
@@ -1302,15 +1306,28 @@ export class StorageACKHandler {
             queryOptions: ackStoreOptions('storage-ack.persistGraphScoped.workspaceHead'),
           });
         }
-        await this.supersedeLedgerOperations(verdict.supersede);
-        // The copy and ledger still commit under the same lock before signing.
-        if (recordLedger) await this.recordSignedAck(ledgerEntry());
         await this.store.flush?.(
           ackStoreOptions('storage-ack.persistGraphScoped.flush'),
         );
       }, signal);
       return undefined;
     }, signal);
+      if (!result.ok) return result;
+      if (result.value !== undefined) return { ok: false, decline: result.value };
+      // Keep the KA lock through signing and ledger commit. A timed-out copy
+      // may finish its entered data write, but only an actual signature can
+      // create a signed-ACK ledger row or supersede an older obligation.
+      const signature = await this.signDigestWhileLive(digest, signal);
+      if (recordLedger) {
+        const ledger = await this.runStoreOpOrDecline(cgId, () => this.runCommitTail(async () => {
+          await this.supersedeLedgerOperations(operationsToSupersede);
+          await this.recordSignedAck(ledgerEntry());
+          await this.store.flush?.(ackStoreOptions('storage-ack.ledger.flush'));
+        }, signal), signal);
+        if (!ledger.ok) return ledger;
+      }
+      return { ok: true, signature };
+    };
     const result = this.config.workspaceWriteLocks
       ? await withKeyedLocks(
         this.config.workspaceWriteLocks,
@@ -1322,9 +1339,7 @@ export class StorageACKHandler {
         persist,
       )
       : await persist();
-    if (!result.ok) return result;
-    if (result.value !== undefined) return { ok: false, decline: result.value };
-    return { ok: true, ledger: ledgerEntry() };
+    return result;
   }
 
   private notifyPriorVersionAwaitingPromotion(request: StorageAckPriorVersionRequest): void {
@@ -1575,9 +1590,9 @@ export class StorageACKHandler {
   }
 
   /**
-   * Record that this core signs this ACK copy: one atomic update that keeps
-   * the row's `registeredAt` and leaves no window without a row. Called under
-   * the per-KA write lock, right before the signature.
+   * Record an ACK this core has signed: one atomic update that keeps the
+   * row's `registeredAt` and leaves no window without a row. Called under
+   * the per-KA write lock after signing succeeds.
    */
   private async recordSignedAck(entry: StorageAckLedgerEntry): Promise<void> {
     const signed = { ...entry, signedAt: new Date() };
@@ -1772,13 +1787,15 @@ export class StorageACKHandler {
     peerId: PeerId,
     externalSignal?: AbortSignal,
     expectedHead?: LocalStorageAckHeadExpectation,
-  ): Promise<Uint8Array> => this.handlePublishRequest(data, peerId, externalSignal, { kind: 'local', expectedHead });
+    trackPhysicalWork?: (work: Promise<Uint8Array>) => void,
+  ): Promise<Uint8Array> => this.handlePublishRequest(data, peerId, externalSignal, { kind: 'local', expectedHead }, trackPhysicalWork);
 
   private handlePublishRequest = async (
     data: Uint8Array,
     peerId: PeerId,
     externalSignal: AbortSignal | undefined,
     context: StorageAckRequestContext,
+    trackPhysicalWork?: (work: Promise<Uint8Array>) => void,
   ): Promise<Uint8Array> => {
     const chainIdLabel = this.config.chainId != null
       ? this.config.chainId.toString()
@@ -1800,6 +1817,7 @@ export class StorageACKHandler {
           (signal) => this.handlePublishIntent(data, peerId, signal, context),
           cgIdAttr,
           externalSignal,
+          trackPhysicalWork,
         );
         const decision = this.buildStorageAckDecision(intentPreview, result, peerId);
         await this.observeStorageAckDecision(decision);
@@ -1854,6 +1872,7 @@ export class StorageACKHandler {
     workFactory: (signal?: AbortSignal) => Promise<Uint8Array>,
     cgIdForDecline: string | undefined,
     externalSignal?: AbortSignal,
+    trackPhysicalWork?: (work: Promise<Uint8Array>) => void,
   ): Promise<Uint8Array> => {
     externalSignal?.throwIfAborted();
     const deadlineMs = this.config.ackHandlerDeadlineMs ?? DEFAULT_ACK_HANDLER_DEADLINE_MS;
@@ -1862,6 +1881,7 @@ export class StorageACKHandler {
       ? AbortSignal.any([abortController.signal, externalSignal])
       : abortController.signal;
     const work = workFactory(signal);
+    trackPhysicalWork?.(work);
     if (deadlineMs <= 0) return work;
 
     return runWithDeadline(work, deadlineMs, () => {
@@ -2142,7 +2162,7 @@ export class StorageACKHandler {
     // The graph-scoped copy is written only after every check and gate below
     // has passed, so a declined request leaves nothing behind.
     let persistGraphCopy:
-      | (() => Promise<{ ok: true; ledger: StorageAckLedgerEntry } | { ok: false; decline: Uint8Array }>)
+      | ((digest: Uint8Array) => Promise<{ ok: true; signature: ethers.Signature } | { ok: false; decline: Uint8Array }>)
       | undefined;
 
     if (intent.stagingQuads && intent.stagingQuads.length > 0) {
@@ -2226,7 +2246,7 @@ export class StorageACKHandler {
       // invariant is why we CANNOT sign anyway, so the publisher re-sends
       // once the store worker is back rather than bucketing us as no_response.
       if (graphPublish) {
-        persistGraphCopy = () => this.persistGraphScopedWorkspaceOrDecline(
+        persistGraphCopy = (digest) => this.persistGraphScopedWorkspaceOrDecline(
           cgId,
           swmGraphId,
           swmGraphUri,
@@ -2238,6 +2258,7 @@ export class StorageACKHandler {
           signal,
           this.config.ensureVmPromotion !== undefined,
           context,
+          digest,
         );
       } else {
         // Ungated embeddings only (a gated core declined legacy intents above).
@@ -2307,7 +2328,7 @@ export class StorageACKHandler {
       }
       if (graphPublish) {
         const loadedQuads = swmQuads;
-        persistGraphCopy = () => this.persistGraphScopedWorkspaceOrDecline(
+        persistGraphCopy = (digest) => this.persistGraphScopedWorkspaceOrDecline(
           cgId,
           swmGraphId,
           swmGraphUri,
@@ -2319,6 +2340,7 @@ export class StorageACKHandler {
           signal,
           this.config.ensureVmPromotion !== undefined,
           context,
+          digest,
         );
       }
     }
@@ -2472,12 +2494,14 @@ export class StorageACKHandler {
       ...(signal ? { signal } : {}),
     });
     if (!promotionGate.ok) return promotionGate.decline;
+    let signature: ethers.Signature;
     if (persistGraphCopy) {
-      const persisted = await persistGraphCopy();
+      const persisted = await persistGraphCopy(digest);
       if (!persisted.ok) return persisted.decline;
+      signature = persisted.signature;
+    } else {
+      signature = await this.signDigestWhileLive(digest, signal);
     }
-
-    const signature = await this.signDigestWhileLive(digest, signal);
 
     const MAX_UINT64 = (1n << 64n) - 1n;
     if (this.config.nodeIdentityId > MAX_UINT64) {
@@ -2533,13 +2557,15 @@ export class StorageACKHandler {
     peerId: PeerId,
     externalSignal?: AbortSignal,
     expectedHead?: LocalStorageAckHeadExpectation,
-  ): Promise<Uint8Array> => this.handleUpdateRequest(data, peerId, externalSignal, { kind: 'local', expectedHead });
+    trackPhysicalWork?: (work: Promise<Uint8Array>) => void,
+  ): Promise<Uint8Array> => this.handleUpdateRequest(data, peerId, externalSignal, { kind: 'local', expectedHead }, trackPhysicalWork);
 
   private handleUpdateRequest = async (
     data: Uint8Array,
     peerId: PeerId,
     externalSignal: AbortSignal | undefined,
     context: StorageAckRequestContext,
+    trackPhysicalWork?: (work: Promise<Uint8Array>) => void,
   ): Promise<Uint8Array> => {
     let cgIdForDecline: string | undefined;
     try {
@@ -2553,6 +2579,7 @@ export class StorageACKHandler {
       (signal) => this.handleUpdateIntent(data, peerId, signal, context),
       cgIdForDecline,
       externalSignal,
+      trackPhysicalWork,
     );
   };
 
@@ -2649,7 +2676,7 @@ export class StorageACKHandler {
     }
     // Written only after every check and gate below has passed.
     let persistUpdateCopy:
-      | (() => Promise<{ ok: true; ledger: StorageAckLedgerEntry } | { ok: false; decline: Uint8Array }>)
+      | ((digest: Uint8Array) => Promise<{ ok: true; signature: ethers.Signature } | { ok: false; decline: Uint8Array }>)
       | undefined;
     // A curated update's verified catalog, persisted only once the signer gate passed.
     let verifiedUpdateCatalog: VerifiedCuratedCatalog | undefined;
@@ -2840,7 +2867,7 @@ export class StorageACKHandler {
       const updateCopy: GraphScopedAckCopy = { ...graphUpdate, allowedPeers: [] };
       const verifiedQuads = publicQuads;
       const writeData = inlineByteLength !== undefined;
-      if (this.config.ensureVmPromotion) persistUpdateCopy = () => this.persistGraphScopedWorkspaceOrDecline(
+      if (this.config.ensureVmPromotion) persistUpdateCopy = (digest) => this.persistGraphScopedWorkspaceOrDecline(
         cgId,
         swmGraphId,
         swmGraphUri,
@@ -2852,6 +2879,7 @@ export class StorageACKHandler {
         signal,
         true,
         context,
+        digest,
       );
     } else if (intent.stagingQuads && intent.stagingQuads.length > 0) {
       if (intent.stagingQuads.length > STORAGE_ACK_MAX_STAGING_BYTES) {
@@ -3020,12 +3048,14 @@ export class StorageACKHandler {
       const persistedCatalog = await this.persistCatalogOrDecline(cgId, verifiedUpdateCatalog, signal);
       if (!persistedCatalog.ok) return persistedCatalog.decline;
     }
+    let signature: ethers.Signature;
     if (persistUpdateCopy) {
-      const persisted = await persistUpdateCopy();
+      const persisted = await persistUpdateCopy(digest);
       if (!persisted.ok) return persisted.decline;
+      signature = persisted.signature;
+    } else {
+      signature = await this.signDigestWhileLive(digest, signal);
     }
-
-    const signature = await this.signDigestWhileLive(digest, signal);
     const MAX_UINT64 = (1n << 64n) - 1n;
     if (this.config.nodeIdentityId > MAX_UINT64) {
       throw new Error(

@@ -4,7 +4,7 @@ export type ACKCapabilitySelectionPolicy =
   | { mode: 'rank'; corePeers?: ReadonlySet<string>; requestedProtocolPeers?: ReadonlySet<string> }
   | { mode: 'require'; corePeers: ReadonlySet<string>; requestedProtocolPeers?: ReadonlySet<string> };
 
-export interface ACKCandidatePeerSelectionInput {
+export interface ACKCanonicalCandidatePeerSelectionInput {
   connectedPeers: readonly string[];
   /** The publishing core is eligible only while its local ACK endpoint is registered. */
   localCandidate?: { peerId: string; available: boolean };
@@ -16,13 +16,15 @@ export interface ACKCandidatePeerSelectionInput {
   verifiedSameNetworkPeerIds?: ReadonlySet<string>;
   /** One capability snapshot drives eligibility, ordering, and diagnostics. */
   capability?: ACKCapabilitySelectionPolicy;
-  /** @deprecated Use capability instead. Retained for existing selector callers. */
-  knownCorePeerIds?: ReadonlySet<string>;
-  /** @deprecated Use capability instead. Retained for existing selector callers. */
-  knownCorePeerIdsV2?: ReadonlySet<string>;
   requiredACKs: number;
   protocol?: StorageACKProtocol;
   selfPeerId?: string;
+}
+
+/** @deprecated Use the canonical selector with `capability`. */
+export interface ACKCandidatePeerSelectionInput extends ACKCanonicalCandidatePeerSelectionInput {
+  knownCorePeerIds?: ReadonlySet<string>;
+  knownCorePeerIdsV2?: ReadonlySet<string>;
 }
 
 type ACKCandidateTierName = 'requestedProtocol' | 'v2Advertised' | 'confirmedCore' | 'rest';
@@ -51,41 +53,48 @@ function normalizePeerIdSet(ids: readonly string[] | undefined): Set<string> {
   return new Set((ids ?? []).map((id) => id.trim()).filter((id) => id.length > 0));
 }
 
-function normalizeCapability(input: Pick<ACKCandidatePeerSelectionInput,
-  'capability' | 'knownCorePeerIds' | 'knownCorePeerIdsV2' | 'protocol'>): {
-    capability?: ACKCapabilitySelectionPolicy;
-    requestedTier: 'requestedProtocol' | 'v2Advertised';
-  } {
+function adaptLegacyInput(input: ACKCandidatePeerSelectionInput): {
+  canonical: ACKCanonicalCandidatePeerSelectionInput;
+  legacyV2Tier: boolean;
+} {
   if (input.protocol !== undefined && !isStorageACKProtocol(input.protocol)) {
     throw new Error(`Unsupported StorageACK protocol: ${input.protocol}`);
   }
   if (input.capability && (input.knownCorePeerIds || input.knownCorePeerIdsV2)) {
     throw new TypeError('Use either capability or legacy knownCorePeerIds fields');
   }
-  if (input.capability) return { capability: input.capability, requestedTier: 'requestedProtocol' };
+  if (input.capability) return { canonical: input, legacyV2Tier: false };
   if (!input.knownCorePeerIds && !input.knownCorePeerIdsV2) {
-    return { requestedTier: 'requestedProtocol' };
+    return { canonical: input, legacyV2Tier: false };
   }
   const requestedProtocolPeers = input.protocol === PROTOCOL_STORAGE_ACK_V2
     || input.protocol === PROTOCOL_STORAGE_UPDATE_ACK_V2
     ? input.knownCorePeerIdsV2 ?? new Set<string>()
     : undefined;
+  const { knownCorePeerIds: _knownCorePeerIds, knownCorePeerIdsV2: _knownCorePeerIdsV2, ...rest } = input;
   return {
-    capability: {
-      mode: 'rank',
-      corePeers: input.knownCorePeerIds,
-      requestedProtocolPeers,
-    },
-    requestedTier: 'v2Advertised',
+    canonical: { ...rest, capability: { mode: 'rank', corePeers: input.knownCorePeerIds, requestedProtocolPeers } },
+    legacyV2Tier: requestedProtocolPeers !== undefined,
   };
 }
 
+export function selectCanonicalACKCandidateUniverse(input: Pick<
+  ACKCanonicalCandidatePeerSelectionInput,
+  'connectedPeers' | 'ackCandidatePeerIds' | 'selfPeerId' | 'localCandidate' | 'capability' | 'protocol'
+>): string[] {
+  if (input.protocol !== undefined && !isStorageACKProtocol(input.protocol)) {
+    throw new Error(`Unsupported StorageACK protocol: ${input.protocol}`);
+  }
+  return candidateUniverse(input, input.capability);
+}
+
+/** @deprecated Use selectCanonicalACKCandidateUniverse. */
 export function selectACKCandidateUniverse(input: Pick<
   ACKCandidatePeerSelectionInput,
   'connectedPeers' | 'ackCandidatePeerIds' | 'selfPeerId' | 'localCandidate'
   | 'capability' | 'knownCorePeerIds' | 'knownCorePeerIdsV2' | 'protocol'
 >): string[] {
-  return candidateUniverse(input, normalizeCapability(input).capability);
+  return selectCanonicalACKCandidateUniverse(adaptLegacyInput({ ...input, requiredACKs: 0 }).canonical);
 }
 
 function candidateUniverse(input: Pick<
@@ -120,7 +129,6 @@ function buildCandidateTiers(input: {
   connected: readonly string[];
   corePeers?: ReadonlySet<string>;
   requestedProtocolPeers?: ReadonlySet<string>;
-  requestedTier: 'requestedProtocol' | 'v2Advertised';
 }): ACKCandidateTier[] {
   const confirmedCore = input.corePeers
     ? input.connected.filter((id) => input.corePeers?.has(id))
@@ -134,7 +142,7 @@ function buildCandidateTiers(input: {
     const remainingConfirmedCore = confirmedCore.filter((id) => !requestedSet.has(id));
     const seen = new Set([...requested, ...remainingConfirmedCore]);
     return [
-      { name: input.requestedTier, peers: requested },
+      { name: 'requestedProtocol', peers: requested },
       { name: 'confirmedCore', peers: remainingConfirmedCore },
       { name: 'rest', peers: input.connected.filter((id) => !seen.has(id)) },
     ];
@@ -187,10 +195,13 @@ function diagnosticForPeer(input: {
   };
 }
 
-export function selectACKCandidatePeersWithDiagnostics(
-  input: ACKCandidatePeerSelectionInput,
+export function selectCanonicalACKCandidatePeersWithDiagnostics(
+  input: ACKCanonicalCandidatePeerSelectionInput,
 ): ACKCandidatePeerSelectionResult {
-  const { capability, requestedTier } = normalizeCapability(input);
+  if (input.protocol !== undefined && !isStorageACKProtocol(input.protocol)) {
+    throw new Error(`Unsupported StorageACK protocol: ${input.protocol}`);
+  }
+  const capability = input.capability;
   const selfPeerId = input.localCandidate?.peerId ?? input.selfPeerId;
   const connected = [...new Set(input.connectedPeers)]
     .filter((id) => id !== selfPeerId);
@@ -205,7 +216,6 @@ export function selectACKCandidatePeersWithDiagnostics(
     connected: eligible,
     corePeers: capability?.corePeers,
     requestedProtocolPeers: capability?.requestedProtocolPeers,
-    requestedTier,
   });
 
   const remotePeers = flattenTiers(tiers, preferredACKPeers);
@@ -240,6 +250,21 @@ export function selectACKCandidatePeersWithDiagnostics(
   return {
     peers: local.available ? [local.peerId, ...remotePeers] : remotePeers,
     diagnostics: [localDiagnostic, ...remoteDiagnostics],
+  };
+}
+
+/** @deprecated Compatibility adapter for callers using knownCorePeerIds. */
+export function selectACKCandidatePeersWithDiagnostics(
+  input: ACKCandidatePeerSelectionInput,
+): ACKCandidatePeerSelectionResult {
+  const { canonical, legacyV2Tier } = adaptLegacyInput(input);
+  const result = selectCanonicalACKCandidatePeersWithDiagnostics(canonical);
+  if (!legacyV2Tier) return result;
+  return {
+    peers: result.peers,
+    diagnostics: result.diagnostics.map((diagnostic) => diagnostic.tier === 'requestedProtocol'
+      ? { ...diagnostic, tier: 'v2Advertised' }
+      : diagnostic),
   };
 }
 

@@ -10,6 +10,7 @@ import {
   selectACKCandidatePeers,
   selectACKCandidateUniverse,
   selectACKCandidatePeersWithDiagnostics,
+  selectCanonicalACKCandidatePeersWithDiagnostics,
   type ACKCandidatePeerSelectionInput,
 } from '../src/ack-peer-selection.js';
 
@@ -87,6 +88,16 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
     });
     expect(canonical.peers).toEqual(legacy.peers);
     expect(canonical.diagnostics.find(({ peerId }) => peerId === 'v2-core')?.tier).toBe('requestedProtocol');
+    expect(selectCanonicalACKCandidatePeersWithDiagnostics({
+      connectedPeers: ['edge', 'base-core', 'v2-core'],
+      capability: {
+        mode: 'rank',
+        corePeers: new Set(['base-core', 'v2-core']),
+        requestedProtocolPeers: new Set(['v2-core']),
+      },
+      protocol: PROTOCOL_STORAGE_ACK_V2,
+      requiredACKs: 2,
+    })).toEqual(canonical);
   });
 
   it('rejects conflicting legacy and capability ownership', () => {

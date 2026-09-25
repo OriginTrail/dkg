@@ -1,9 +1,9 @@
 import { PROTOCOL_STORAGE_ACK, STORAGE_ACK_PROTOCOLS, isStorageACKProtocol, type StorageACKProtocol } from '@origintrail-official/dkg-core';
 import { PeerCapabilityRegistry, type PeerCapabilityRound } from './peer-capability.js';
 import {
-  selectACKCandidateUniverse,
-  selectACKCandidatePeersWithDiagnostics,
-  type ACKCandidatePeerSelectionInput,
+  selectCanonicalACKCandidateUniverse,
+  selectCanonicalACKCandidatePeersWithDiagnostics,
+  type ACKCanonicalCandidatePeerSelectionInput,
   type ACKCandidatePeerSelectionResult,
 } from '@origintrail-official/dkg-publisher';
 
@@ -106,14 +106,14 @@ export class ACKCandidateDiscoveryCoordinator {
   constructor(private readonly registry: PeerCapabilityRegistry) {}
 
   selectCandidates(
-    input: Omit<ACKCandidatePeerSelectionInput, 'capability' | 'selfPeerId' | 'localCandidate'>,
+    input: Omit<ACKCanonicalCandidatePeerSelectionInput, 'capability' | 'selfPeerId' | 'localCandidate'>,
     localCandidate: LocalACKCandidate,
     snapshot: ACKCapabilitySnapshot = snapshotACK(this.registry.beginRound()),
   ): ACKCandidatePeerSelectionResult {
     const requestedProtocolPeers = input.protocol && input.protocol !== PROTOCOL_STORAGE_ACK
       ? snapshot.supportByProtocol.get(input.protocol)
       : undefined;
-    return selectACKCandidatePeersWithDiagnostics({
+    return selectCanonicalACKCandidatePeersWithDiagnostics({
       ...input,
       localCandidate,
       capability: { mode: 'require', corePeers: snapshot.corePeerIds, requestedProtocolPeers },
@@ -131,7 +131,7 @@ export class ACKCandidateDiscoveryCoordinator {
     // Keep preflight and final selection on this round's snapshot even if
     // peer:update changes the registry while the round is in progress.
     const round = this.registry.beginRound();
-    const raw = Object.freeze(selectACKCandidateUniverse({
+    const raw = Object.freeze(selectCanonicalACKCandidateUniverse({
       connectedPeers: ports.connectedPeers,
       ackCandidatePeerIds: ports.ackCandidatePeerIds,
       selfPeerId: ports.localCandidate.peerId,
