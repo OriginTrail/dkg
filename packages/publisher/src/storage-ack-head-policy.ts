@@ -51,7 +51,6 @@ export function planStorageAckHeadPersistence(input: {
     if (
       expected.kaUal !== input.kaUal
       || expected.assertionVersion !== input.assertionVersion
-      || expected.publisherPeerId !== input.publisherPeerId
       || head.publisherPeerId !== expected.publisherPeerId
       || !workspaceHeadIncludesShareOperationId(head, expected.shareOperationId)
       || head.access.kind !== 'persisted'

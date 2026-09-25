@@ -252,6 +252,34 @@ describe('StorageACK local self-ACK keeps the publisher SWM head (#2796)', () =>
     expect(await ledgerOperations(h)).toEqual([workspaceOperationSubject(SWM_GRAPH_ID, copy)]);
   });
 
+  it.each(['publish', 'update'] as const)(
+    'signs a local %s ACK when the immutable head names a different publisher metadata peer',
+    async (kind) => {
+      const h = await harness();
+      const version = kind === 'publish' ? 1 : 2;
+      const quads = content(`metadata-${kind}`);
+      const shareOperationId = `queued-${kind}-metadata-override`;
+      await h.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+        ...shareInput(version, shareOperationId, quads),
+        publisherPeerId: REMOTE_PEER,
+      });
+      const before = await readHead(h);
+      expect(before.publisherPeerId).toBe(REMOTE_PEER);
+      const expected = { ...expectedHead(version, shareOperationId), publisherPeerId: REMOTE_PEER };
+
+      const ack = decodeStorageACK(await (kind === 'publish'
+        ? h.handler.localHandler(publishIntent(quads), { toString: () => PUBLISHER_PEER }, undefined, expected)
+        : h.handler.localUpdateHandler(updateIntent(quads, version), { toString: () => PUBLISHER_PEER }, undefined, expected)));
+
+      expect(isStorageACKDecline(ack)).toBe(false);
+      expect(h.signMessage).toHaveBeenCalledOnce();
+      expect(await readHead(h)).toEqual(before);
+      expect(await ledgerOperations(h)).toEqual([
+        workspaceOperationSubject(SWM_GRAPH_ID, ackCopyOperationId(version, quads)),
+      ]);
+    },
+  );
+
   it('preserves a queued operation that is a non-selected equivalent head alias', async () => {
     const h = await harness();
     await h.publisher.stageKnowledgeAssetSharedWorkingMemoryV1(
