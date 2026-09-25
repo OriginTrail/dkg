@@ -1,11 +1,8 @@
 import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK_V2 } from '@origintrail-official/dkg-core';
 
 export type ACKCapabilitySelectionPolicy =
-  | { mode: 'rank'; corePeers?: ReadonlySet<string>; requestedProtocolPeers?: ReadonlySet<string>; v1?: never; v2?: never }
-  | { mode: 'require'; corePeers: ReadonlySet<string>; requestedProtocolPeers?: ReadonlySet<string>; v1?: never; v2?: never }
-  /** @deprecated Version-shaped capability fields remain for existing callers. */
-  | { mode: 'rank'; v1?: ReadonlySet<string>; v2?: ReadonlySet<string>; corePeers?: never; requestedProtocolPeers?: never }
-  | { mode: 'require'; v1: ReadonlySet<string>; v2?: ReadonlySet<string>; corePeers?: never; requestedProtocolPeers?: never };
+  | { mode: 'rank'; corePeers?: ReadonlySet<string>; requestedProtocolPeers?: ReadonlySet<string> }
+  | { mode: 'require'; corePeers: ReadonlySet<string>; requestedProtocolPeers?: ReadonlySet<string> };
 
 export interface ACKCandidatePeerSelectionInput {
   connectedPeers: readonly string[];
@@ -54,33 +51,28 @@ function normalizePeerIdSet(ids: readonly string[] | undefined): Set<string> {
   return new Set((ids ?? []).map((id) => id.trim()).filter((id) => id.length > 0));
 }
 
-function resolveCapability(input: Pick<ACKCandidatePeerSelectionInput,
-  'capability' | 'knownCorePeerIds' | 'knownCorePeerIdsV2'>): ACKCapabilitySelectionPolicy | undefined {
+function normalizeCapability(input: Pick<ACKCandidatePeerSelectionInput,
+  'capability' | 'knownCorePeerIds' | 'knownCorePeerIdsV2' | 'protocol'>): {
+    capability?: ACKCapabilitySelectionPolicy;
+    requestedTier: 'requestedProtocol' | 'v2Advertised';
+  } {
   if (input.capability && (input.knownCorePeerIds || input.knownCorePeerIdsV2)) {
     throw new TypeError('Use either capability or legacy knownCorePeerIds fields');
   }
-  return input.capability ?? ((input.knownCorePeerIds || input.knownCorePeerIdsV2)
-    ? { mode: 'rank', v1: input.knownCorePeerIds, v2: input.knownCorePeerIdsV2 }
-    : undefined);
-}
-
-function capabilityViews(capability: ACKCapabilitySelectionPolicy | undefined, protocol?: string): {
-  corePeers?: ReadonlySet<string>;
-  requestedProtocolPeers?: ReadonlySet<string>;
-  requestedTier: 'requestedProtocol' | 'v2Advertised';
-} {
-  if (!capability) return { requestedTier: 'requestedProtocol' };
-  if (capability.corePeers !== undefined || capability.requestedProtocolPeers !== undefined) {
-    return {
-      corePeers: capability.corePeers,
-      requestedProtocolPeers: capability.requestedProtocolPeers,
-      requestedTier: 'requestedProtocol',
-    };
+  if (input.capability) return { capability: input.capability, requestedTier: 'requestedProtocol' };
+  if (!input.knownCorePeerIds && !input.knownCorePeerIdsV2) {
+    return { requestedTier: 'requestedProtocol' };
   }
+  const requestedProtocolPeers = input.protocol === PROTOCOL_STORAGE_ACK_V2
+    || input.protocol === PROTOCOL_STORAGE_UPDATE_ACK_V2
+    ? input.knownCorePeerIdsV2 ?? new Set<string>()
+    : undefined;
   return {
-    corePeers: capability.v1,
-    requestedProtocolPeers: protocol === PROTOCOL_STORAGE_ACK_V2 || protocol === PROTOCOL_STORAGE_UPDATE_ACK_V2
-      ? capability.v2 ?? new Set<string>() : undefined,
+    capability: {
+      mode: 'rank',
+      corePeers: input.knownCorePeerIds,
+      requestedProtocolPeers,
+    },
     requestedTier: 'v2Advertised',
   };
 }
@@ -88,8 +80,15 @@ function capabilityViews(capability: ACKCapabilitySelectionPolicy | undefined, p
 export function selectACKCandidateUniverse(input: Pick<
   ACKCandidatePeerSelectionInput,
   'connectedPeers' | 'ackCandidatePeerIds' | 'selfPeerId' | 'localCandidate'
-  | 'capability' | 'knownCorePeerIds' | 'knownCorePeerIdsV2'
+  | 'capability' | 'knownCorePeerIds' | 'knownCorePeerIdsV2' | 'protocol'
 >): string[] {
+  return candidateUniverse(input, normalizeCapability(input).capability);
+}
+
+function candidateUniverse(input: Pick<
+  ACKCandidatePeerSelectionInput,
+  'connectedPeers' | 'ackCandidatePeerIds' | 'selfPeerId' | 'localCandidate'
+>, capability: ACKCapabilitySelectionPolicy | undefined): string[] {
   const selfPeerId = input.localCandidate?.peerId ?? input.selfPeerId;
   const connected = [...new Set(input.connectedPeers)]
     .filter((id) => id !== selfPeerId);
@@ -97,10 +96,8 @@ export function selectACKCandidateUniverse(input: Pick<
   const allowlisted = allowlistedACKPeers.size > 0
     ? connected.filter((id) => allowlistedACKPeers.has(id))
     : connected;
-  const capability = resolveCapability(input);
-  const { corePeers } = capabilityViews(capability);
   return capability?.mode === 'require'
-    ? allowlisted.filter((id) => corePeers?.has(id))
+    ? allowlisted.filter((id) => capability.corePeers.has(id))
     : allowlisted;
 }
 
@@ -190,21 +187,22 @@ function diagnosticForPeer(input: {
 export function selectACKCandidatePeersWithDiagnostics(
   input: ACKCandidatePeerSelectionInput,
 ): ACKCandidatePeerSelectionResult {
-  const capability = resolveCapability(input);
-  const views = capabilityViews(capability, input.protocol);
+  const { capability, requestedTier } = normalizeCapability(input);
   const selfPeerId = input.localCandidate?.peerId ?? input.selfPeerId;
   const connected = [...new Set(input.connectedPeers)]
     .filter((id) => id !== selfPeerId);
   const allowlistedACKPeers = normalizePeerIdSet(input.ackCandidatePeerIds);
   const preferredACKPeers = normalizePeerIdSet(input.preferredACKPeerIds);
   const allowlistEnabled = allowlistedACKPeers.size > 0;
-  const allowlisted = selectACKCandidateUniverse(input);
+  const allowlisted = candidateUniverse(input, capability);
   const eligible = input.verifiedSameNetworkPeerIds
     ? allowlisted.filter((id) => input.verifiedSameNetworkPeerIds!.has(id))
     : allowlisted;
   const tiers = buildCandidateTiers({
     connected: eligible,
-    ...views,
+    corePeers: capability?.corePeers,
+    requestedProtocolPeers: capability?.requestedProtocolPeers,
+    requestedTier,
   });
 
   const remotePeers = flattenTiers(tiers, preferredACKPeers);
@@ -221,8 +219,8 @@ export function selectACKCandidatePeersWithDiagnostics(
       (!input.verifiedSameNetworkPeerIds || input.verifiedSameNetworkPeerIds.has(peerId)),
     protocol: input.protocol,
     capability,
-    corePeers: views.corePeers,
-    requestedProtocolPeers: views.requestedProtocolPeers,
+    corePeers: capability?.corePeers,
+    requestedProtocolPeers: capability?.requestedProtocolPeers,
   }));
 
   const local = input.localCandidate;
