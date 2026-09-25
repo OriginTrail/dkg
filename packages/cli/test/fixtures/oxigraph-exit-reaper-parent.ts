@@ -1,6 +1,5 @@
 import { writeFileSync } from 'node:fs';
 import { startOxigraphServer } from '../../src/daemon/oxigraph-server.js';
-import { withStoreOwnership } from './oxigraph-server-real-fixture.js';
 
 const [binaryPath, location, rawPort, pidFile] = process.argv.slice(2);
 if (!binaryPath || !location || !rawPort || !pidFile) {
@@ -11,14 +10,14 @@ const port = Number(rawPort);
 // Keep readiness pending after the real stand-in has bound. The supervisor's
 // exit guard is installed during this window, before startOxigraphServer has
 // returned a handle to any caller.
-void startOxigraphServer(withStoreOwnership({
+void startOxigraphServer({
   binaryPath,
   location,
   port,
   autoReadyBaseTimeoutMs: 30_000,
   readyIntervalMs: 100,
   io: { findListenOwnerPid: async () => null },
-})).catch((error: unknown) => {
+}).catch((error: unknown) => {
   console.error(error);
   process.exitCode = 1;
 });

@@ -48,7 +48,6 @@ import {
   portAnswers,
   sleep,
   waitForCondition,
-  withStoreOwnership,
   type OxigraphStandinFixture,
 } from './fixtures/oxigraph-server-real-fixture.js';
 
@@ -87,7 +86,7 @@ afterAll(async () => {
 });
 
 function startOpts(port: number, extra: Record<string, unknown> = {}) {
-  return withStoreOwnership({
+  return {
     binaryPath: standin,
     location: dir,
     port,
@@ -98,7 +97,7 @@ function startOpts(port: number, extra: Record<string, unknown> = {}) {
     restartBackoffMaxMs: 200,
     log: () => {},
     ...extra,
-  } as { binaryPath: string; location: string; port: number } & Record<string, unknown>);
+  } as { binaryPath: string; location: string; port: number } & Record<string, unknown>;
 }
 
 describe('buildOxigraphSpawnSpec', () => {
@@ -641,7 +640,7 @@ describe.skipIf(!nativeOxigraphTestBinary)(
 
       const location = await mkdtemp(join(tmpdir(), 'oxi-native-timeout-'));
       const port = await freePort();
-      const handle = await startOxigraphServer(withStoreOwnership({
+      const handle = await startOxigraphServer({
         binaryPath,
         location,
         port,
@@ -652,7 +651,7 @@ describe.skipIf(!nativeOxigraphTestBinary)(
         restartBackoffBaseMs: 100,
         restartBackoffMaxMs: 200,
         log: () => {},
-      }));
+      });
       const endpoint = `http://127.0.0.1:${port}`;
       const store = createManagedOxigraphSparqlStoreV1({
         queryEndpoint: `${endpoint}/query`,

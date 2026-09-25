@@ -49,7 +49,6 @@ import {
   portAnswers,
   spawnOrphan,
   waitForCondition,
-  withStoreOwnership,
   type OxigraphStandinFixture,
 } from './fixtures/oxigraph-server-real-fixture.js';
 import {
@@ -196,14 +195,14 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       expect(parentPid(orphanPid), 'fixture orphan was not adopted by init').toBe(1);
       const lockInode = statSync(lockPath).ino;
 
-      const handle = await startOxigraphServer(withStoreOwnership({
+      const handle = await startOxigraphServer({
         binaryPath: lockingStandin.binaryPath,
         location,
         port,
         readyTimeoutMs: 10_000,
         readyIntervalMs: 50,
         log: (line) => lines.push(line),
-      }));
+      });
       try {
         expect(pidIsGone(orphanPid)).toBe(true);
         expect(await fetchPid(port)).not.toBe(orphanPid);

@@ -3,8 +3,8 @@
  * spawn it reclaims the store from orphans (`oxigraph-orphan.ts`); after it,
  * it records the launch (`oxigraph-owner-record.ts`), and it adds the verified
  * Oxigraph once the launch is ready. It also tracks those writes, so
- * `close()` can wait for them. Built by the managed layer with the catalog of
- * the binary it resolved.
+ * `close()` can wait for them. Built by the server for each start, with the
+ * binary catalog its caller passes.
  *
  * No step rejects for an expected failure: the reclaim leaves a holder it
  * cannot stop to the spawn's own lock error, and a record that cannot be

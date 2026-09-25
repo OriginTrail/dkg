@@ -23,11 +23,6 @@
       "import": "./dist/chain-authority-read-budgets.js",
       "default": "./dist/chain-authority-read-budgets.js"
     },
-    "./map-with-concurrency": {
-      "types": "./dist/map-with-concurrency.d.ts",
-      "import": "./dist/map-with-concurrency.js",
-      "default": "./dist/map-with-concurrency.js"
-    },
     "./package.json": "./package.json",
     "./dist/internal/*": null,
     "./dist/random-sampling-runtime.js": null,

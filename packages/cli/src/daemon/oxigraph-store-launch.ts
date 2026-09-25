@@ -1,9 +1,9 @@
 /**
- * The contract between the managed Oxigraph server and whoever owns its
- * store. The server launches Oxigraph with `oxigraphStoreArgs` and hands each
- * spawn to `OxigraphStoreOwnership.launch`, which orders everything the store
- * needs around it. The orphan reclaim (`oxigraph-orphan.ts`) recognises a
- * lock holder by the same arguments, so the two cannot drift apart.
+ * How the managed Oxigraph server launches against its store. The server
+ * launches Oxigraph with `oxigraphStoreArgs` and hands each spawn to its
+ * `OxigraphStoreOwnership`, which orders everything the store needs around
+ * it. The orphan reclaim (`oxigraph-orphan.ts`) recognises a lock holder by
+ * the same arguments, so the two cannot drift apart.
  */
 import type { ChildProcess } from 'node:child_process';
 
@@ -14,9 +14,8 @@ export function oxigraphStoreArgs(location: string): string[] {
 
 /**
  * The store side of every managed Oxigraph launch, boot and restart alike:
- * reclaim the store, spawn, and record who owns it. Built where the binary
- * catalog is known (the managed layer), once per server: the server's
- * `stop()` closes it.
+ * reclaim the store, spawn, and record who owns it. The server builds one
+ * (`createOxigraphStoreOwnership`) for each start, and its `stop()` closes it.
  *
  * The server treats a rejection as a failed launch: at boot it stops the
  * child and rethrows; on a supervised restart it stops the child and retries

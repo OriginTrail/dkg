@@ -8,7 +8,6 @@ import { join } from 'node:path';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import {
   createOxigraphStandinFixture,
-  withStoreOwnership,
   fetchPid,
   freePort,
   portAnswers,
@@ -50,7 +49,7 @@ describe('startOxigraphServer WAL-aware readiness (GH#1400)', () => {
     let ownershipFrom: number | null = null;
     const withholdUntil = Date.now() + 2_000;
     const lines: string[] = [];
-    const handle = await startOxigraphServer(withStoreOwnership({
+    const handle = await startOxigraphServer({
       binaryPath: fixture.binaryPath,
       location,
       port,
@@ -66,7 +65,7 @@ describe('startOxigraphServer WAL-aware readiness (GH#1400)', () => {
           return child.pid ?? null;
         },
       },
-    }));
+    });
     try {
       expect(ownershipFrom).not.toBeNull();
       expect(lines.join('\n')).toMatch(/still opening: .*40\.0 MiB of write-ahead log/);
@@ -83,7 +82,7 @@ describe('startOxigraphServer WAL-aware readiness (GH#1400)', () => {
 
     const lines: string[] = [];
     const withholdUntil = Date.now() + 5_000;
-    await expect(startOxigraphServer(withStoreOwnership({
+    await expect(startOxigraphServer({
       binaryPath: fixture.binaryPath,
       location,
       port,
@@ -94,7 +93,7 @@ describe('startOxigraphServer WAL-aware readiness (GH#1400)', () => {
         findListenOwnerPid: async (child) =>
           (Date.now() < withholdUntil ? null : child.pid ?? null),
       },
-    }))).rejects.toThrow(/did not become ready/);
+    })).rejects.toThrow(/did not become ready/);
 
     expect(lines.join('\n')).toMatch(/below the ~\d+ms estimated to replay/);
     await rm(location, { recursive: true, force: true });
@@ -107,7 +106,7 @@ describe('startOxigraphServer WAL-aware readiness (GH#1400)', () => {
     let spawns = 0;
     const lines: string[] = [];
     const { spawn: realSpawn } = await import('node:child_process');
-    const handle = await startOxigraphServer(withStoreOwnership({
+    const handle = await startOxigraphServer({
       binaryPath: fixture.binaryPath,
       location,
       port,
@@ -125,7 +124,7 @@ describe('startOxigraphServer WAL-aware readiness (GH#1400)', () => {
         findListenOwnerPid: async (child) =>
           (Date.now() < withholdUntil ? null : child.pid ?? null),
       },
-    }));
+    });
     try {
       const pid1 = await fetchPid(port);
       expect(spawns).toBe(1);
@@ -159,7 +158,7 @@ describe('startOxigraphServer WAL-aware readiness (GH#1400)', () => {
     let spawns = 0;
     const lines: string[] = [];
     const { spawn: realSpawn } = await import('node:child_process');
-    const handle = await startOxigraphServer(withStoreOwnership({
+    const handle = await startOxigraphServer({
       binaryPath: fixture.binaryPath,
       location,
       port,
@@ -176,7 +175,7 @@ describe('startOxigraphServer WAL-aware readiness (GH#1400)', () => {
         findListenOwnerPid: async (child) =>
           (Date.now() < withholdUntil ? null : child.pid ?? null),
       },
-    }));
+    });
     try {
       const pid1 = await fetchPid(port);
       await seedWal(location, 41_943_040);
@@ -199,7 +198,7 @@ describe('startOxigraphServer WAL-aware readiness (GH#1400)', () => {
     const exitListenersBefore = process.listenerCount('exit');
     const lines: string[] = [];
     const started = Date.now();
-    await expect(startOxigraphServer(withStoreOwnership({
+    await expect(startOxigraphServer({
       binaryPath: fixture.binaryPath,
       location,
       port,
@@ -208,7 +207,7 @@ describe('startOxigraphServer WAL-aware readiness (GH#1400)', () => {
       readyIntervalMs: 100,
       progressLogIntervalMs: 100,
       io: { findListenOwnerPid: async () => null },
-    }))).rejects.toThrow(/did not become ready/);
+    })).rejects.toThrow(/did not become ready/);
     expect(process.listenerCount('exit')).toBe(exitListenersBefore);
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(lines.join('\n')).not.toMatch(/still opening:/);

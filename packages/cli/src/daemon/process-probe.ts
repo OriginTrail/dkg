@@ -47,7 +47,7 @@ const errorReason = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
 /** Every PID visible in `/proc` (Linux). */
-export async function procPids(): Promise<number[]> {
+async function procPids(): Promise<number[]> {
   return (await readdir('/proc'))
     .map(Number)
     .filter((pid) => Number.isInteger(pid) && pid > 0);
@@ -73,6 +73,29 @@ export async function procHasFdTarget(
     if (target !== null && matches(target)) return true;
   }
   return false;
+}
+
+// Processes whose descriptors a `/proc` scan reads at once.
+const PROC_FD_SCAN_CONCURRENCY = 16;
+
+/**
+ * Every process (Linux) with an open descriptor whose target `matches`
+ * accepts, reading at most PROC_FD_SCAN_CONCURRENCY processes at once so a
+ * host with thousands of processes is scanned without a burst of open
+ * directory handles.
+ */
+export async function procPidsWithFdTarget(matches: (target: string) => boolean): Promise<number[]> {
+  const pids = await procPids();
+  const holds = pids.map(() => false);
+  let next = 0;
+  const scan = async (): Promise<void> => {
+    while (next < pids.length) {
+      const index = next++;
+      holds[index] = await procHasFdTarget(pids[index], matches);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(PROC_FD_SCAN_CONCURRENCY, pids.length) }, scan));
+  return pids.filter((_, index) => holds[index]);
 }
 
 export const linuxProcessTree: ProcessTreeWalker = async (rootPid) => {

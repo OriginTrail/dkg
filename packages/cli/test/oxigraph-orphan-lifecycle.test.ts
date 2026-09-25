@@ -19,7 +19,7 @@ import {
   expect,
   it,
 } from 'vitest';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import {
   mkdtemp,
@@ -41,8 +41,8 @@ import {
   fetchPid,
   freePort,
   portAnswers,
+  sleep,
   waitForCondition,
-  withStoreOwnership,
   type OxigraphStandinFixture,
 } from './fixtures/oxigraph-server-real-fixture.js';
 import {
@@ -179,15 +179,57 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
     }
   }, 60_000);
 
-  // The production store ownership, with its reclaim or record step replaced
-  // to force the outcome under test.
-  const storeOwnership = (location: string, steps: Partial<OxigraphStoreOwnershipSteps>) =>
-    createOxigraphStoreOwnership({
-      location,
+  // The server's store ownership with its reclaim and record steps replaced,
+  // to force the outcome under test or observe the order.
+  const ownershipSteps = (steps: Partial<OxigraphStoreOwnershipSteps>) => ({
+    storeOwnershipSteps: { reclaim: async () => {}, record: async () => {}, ...steps },
+  });
+
+  it('does not spawn a restart whose reclaim is still running when stop() is called', async () => {
+    const port = await freePort();
+    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-stop-reclaim-'));
+    let spawns = 0;
+    let reclaims = 0;
+    let releaseReclaim: (() => void) | undefined;
+    const countingSpawn = ((...args: Parameters<typeof spawn>) => {
+      spawns += 1;
+      return spawn(...args);
+    }) as typeof spawn;
+    const handle = await startOxigraphServer({
       binaryPath: lockingStandin.binaryPath,
+      location,
+      port,
+      readyTimeoutMs: 10_000,
+      readyIntervalMs: 50,
+      restartBackoffBaseMs: 50,
+      restartBackoffMaxMs: 50,
       log: () => {},
-      steps: { reclaim: async () => {}, record: async () => {}, ...steps },
+      io: {
+        spawn: countingSpawn,
+        ...ownershipSteps({
+          reclaim: async () => {
+            reclaims += 1;
+            // The restart's reclaim blocks until the test releases it.
+            if (reclaims === 2) await new Promise<void>((resolve) => { releaseReclaim = resolve; });
+          },
+        }),
+      },
     });
+    try {
+      expect(spawns).toBe(1);
+      process.kill(await fetchPid(port), 'SIGKILL');
+      expect(await waitForCondition(() => releaseReclaim !== undefined, 10_000)).toBe(true);
+      await handle.stop();
+      releaseReclaim!();
+      await sleep(500);
+      expect(spawns).toBe(1);
+      expect(await portAnswers(port)).toBe(false);
+    } finally {
+      killIfAlive(await fetchPid(port).catch(() => undefined));
+      await handle.stop();
+      await rm(location, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   describe('store-ownership failure contract', () => {
     it('fails boot without spawning when the reclaim rejects', async () => {
@@ -201,7 +243,7 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
           port,
           readyTimeoutMs: 10_000,
           log: () => {},
-          storeOwnership: storeOwnership(location, {
+          io: ownershipSteps({
             reclaim: async () => { throw new Error('reclaim defect'); },
             record: async ({ launcherPid }) => { recorded.push(launcherPid); },
           }),
@@ -228,7 +270,7 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
           readyTimeoutMs: 10_000,
           readyIntervalMs: 50,
           log: () => {},
-          storeOwnership: storeOwnership(location, {
+          io: ownershipSteps({
             record: async ({ launcherPid, oxigraphPid }) => {
               launcher = launcherPid;
               if ((oxigraphPid === undefined ? 'spawned' : 'ready') === failing) {
@@ -260,7 +302,7 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
         restartBackoffBaseMs: 50,
         restartBackoffMaxMs: 50,
         log: (line) => lines.push(line),
-        storeOwnership: storeOwnership(location, {
+        io: ownershipSteps({
           record: async ({ oxigraphPid }) => {
             if (oxigraphPid !== undefined) return;
             launches += 1;
@@ -295,7 +337,7 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
         readyTimeoutMs: 10_000,
         readyIntervalMs: 50,
         log: (line) => lines.push(line),
-        storeOwnership: storeOwnership(location, {
+        io: ownershipSteps({
           record: async ({ launcherPid, oxigraphPid }) => {
             if (oxigraphPid === undefined) return;
             // The verified Oxigraph dies during the ready-time write, and its
@@ -324,7 +366,7 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
       restartBackoffBaseMs: 50,
       restartBackoffMaxMs: 50,
       log: () => {},
-      storeOwnership: storeOwnership(location, {
+      io: ownershipSteps({
         reclaim: async () => { events.push('before-spawn'); },
         record: async ({ launcherPid, oxigraphPid }) => {
           events.push(oxigraphPid === undefined ? `spawned:${launcherPid}` : `ready:${launcherPid}:${oxigraphPid}`);
@@ -363,7 +405,7 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
       restartBackoffBaseMs: 50,
       restartBackoffMaxMs: 50,
       log: () => {},
-      storeOwnership: storeOwnership(location, {
+      io: ownershipSteps({
         record: async ({ oxigraphPid }) => {
           if (oxigraphPid !== undefined) {
             events.push('ready-write');
@@ -394,7 +436,7 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
     const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-restart-'));
     const lines: string[] = [];
     let listenerPid: number | undefined;
-    const handle = await startOxigraphServer(withStoreOwnership({
+    const handle = await startOxigraphServer({
       binaryPath: lockingStandin.binaryPath,
       location,
       port,
@@ -403,7 +445,7 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
       restartBackoffBaseMs: 50,
       restartBackoffMaxMs: 50,
       log: (line) => lines.push(line),
-    }));
+    });
     try {
       listenerPid = await fetchPid(port);
       const watchdog = parentPid(listenerPid);
@@ -433,7 +475,7 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
     let withholdOwnership = false;
     const listenerPids: number[] = [];
     const lines: string[] = [];
-    const handle = await startOxigraphServer(withStoreOwnership({
+    const handle = await startOxigraphServer({
       binaryPath: lockingStandin.binaryPath,
       location,
       port,
@@ -447,7 +489,7 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
           ? null
           : await findListenOwnerPid(child, childPort, host, ownership),
       },
-    }));
+    });
     try {
       listenerPids.push(await fetchPid(port));
       withholdOwnership = true;
@@ -475,4 +517,53 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
       await rm(location, { recursive: true, force: true });
     }
   }, 30_000);
+});
+
+describe('store ownership launches', () => {
+  const notSpawnable = (): ChildProcess => {
+    throw new Error('spawned after close()');
+  };
+
+  it('neither spawns nor records once closed while the reclaim is still running', async () => {
+    let releaseReclaim!: () => void;
+    const records: Array<{ launcherPid: number; oxigraphPid?: number }> = [];
+    let spawns = 0;
+    const ownership = createOxigraphStoreOwnership({
+      location: '/nonexistent/oxigraph-data',
+      binaryPath: '/opt/oxigraph',
+      log: () => {},
+      steps: {
+        reclaim: () => new Promise<void>((resolve) => { releaseReclaim = resolve; }),
+        record: async (launch) => { records.push(launch); },
+      },
+    });
+
+    const launched = ownership.launch(() => {
+      spawns += 1;
+      return notSpawnable();
+    });
+    await ownership.close();
+    releaseReclaim();
+
+    await expect(launched).resolves.toBeNull();
+    expect(spawns).toBe(0);
+    expect(records).toEqual([]);
+  });
+
+  it('records nothing for a launch that becomes ready after close()', async () => {
+    const records: Array<{ launcherPid: number; oxigraphPid?: number }> = [];
+    const ownership = createOxigraphStoreOwnership({
+      location: '/nonexistent/oxigraph-data',
+      binaryPath: '/opt/oxigraph',
+      log: () => {},
+      steps: { reclaim: async () => {}, record: async (launch) => { records.push(launch); } },
+    });
+    const launch = await ownership.launch(() => ({ pid: 4099 }) as ChildProcess);
+    expect(records).toEqual([{ launcherPid: 4099 }]);
+
+    await ownership.close();
+    await launch!.ready(4100);
+    expect(records).toEqual([{ launcherPid: 4099 }]);
+    await expect(ownership.launch(notSpawnable)).resolves.toBeNull();
+  });
 });

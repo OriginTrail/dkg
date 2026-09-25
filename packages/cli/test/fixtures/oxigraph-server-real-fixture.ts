@@ -1,6 +1,4 @@
 import { spawn } from 'node:child_process';
-import { createOxigraphStoreOwnership } from '../../src/daemon/oxigraph-store-ownership.js';
-import type { StartOxigraphServerOptions } from '../../src/daemon/oxigraph-server.js';
 import { once } from 'node:events';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -69,20 +67,6 @@ process.on('SIGTERM', () => {
     cleanup: async () => {
       await rm(directory, { recursive: true, force: true }).catch(() => {});
     },
-  };
-}
-
-/** Server options plus the store ownership that the managed layer would build. */
-export function withStoreOwnership(
-  opts: Omit<StartOxigraphServerOptions, 'storeOwnership'>,
-): StartOxigraphServerOptions {
-  return {
-    ...opts,
-    storeOwnership: createOxigraphStoreOwnership({
-      binaryPath: opts.binaryPath,
-      location: opts.location,
-      log: opts.log ?? (() => {}),
-    }),
   };
 }
 
