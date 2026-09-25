@@ -60,6 +60,7 @@ import {
 } from './merkle.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import { replaceCatalogQuads } from './catalog-persistence.js';
+import { ACKCommitSequence } from './ack-commit-sequence.js';
 import { generateKnowledgeAssetShareMetadata } from './metadata.js';
 import {
   storeKnowledgeAssetWorkspaceHead,
@@ -968,12 +969,6 @@ export class StorageACKHandler {
     return value;
   }
 
-  /** Enter the metadata/head commit only while live; after entry it must finish. */
-  private async runCommitTail<T>(op: () => Promise<T>, signal?: AbortSignal): Promise<T> {
-    signal?.throwIfAborted();
-    return op();
-  }
-
   /** Signing is the final irreversible ACK phase; recheck after an async signer returns. */
   private async signDigestWhileLive(digest: Uint8Array, signal?: AbortSignal): Promise<ethers.Signature> {
     const signed = await this.runWhileLive(() => this.config.signerWallet.signMessage(digest), signal);
@@ -1094,10 +1089,7 @@ export class StorageACKHandler {
     assertPersistQuadTermsSafe(catalog.quads);
     const result = await this.runStoreOpOrDecline(
       cgId,
-      () => this.runCommitTail(
-        () => replaceCatalogQuads(this.store, catalog.graph, catalog.quads, signal),
-        signal,
-      ),
+      () => replaceCatalogQuads(this.store, catalog.graph, catalog.quads, signal),
       signal,
     );
     return result.ok ? { ok: true } : result;
@@ -1119,19 +1111,20 @@ export class StorageACKHandler {
     // the store wrapper so they reset the stream instead of being mislabeled
     // as a transient decline (see assertPersistQuadTermsSafe).
     assertPersistQuadTermsSafe(parsed);
-    const result = await this.runStoreOpOrDecline(cgId, () => this.runCommitTail(async () => {
-      await this.store.dropGraph(
-        stagingGraphUri,
-        ackStoreOptions('storage-ack.persistStaging.dropGraph', signal),
-      );
+    const result = await this.runStoreOpOrDecline(cgId, async () => {
+      const commit = new ACKCommitSequence(signal);
+      await commit.write('storage-ack.persistStaging.dropGraph',
+        (options) => this.store.dropGraph(stagingGraphUri, options));
       const graphedQuads = parsed.map((q) => ({ ...q, graph: stagingGraphUri }));
-      await this.store.insert(graphedQuads, ackStoreOptions('storage-ack.persistStaging.insert'));
+      await commit.write('storage-ack.persistStaging.insert',
+        (options) => this.store.insert(graphedQuads, options));
       // Durability boundary: the ACK we are about to sign asserts this data is
       // stored, and a worker respawn can recover from a snapshot that predates
       // the debounced flush — so force it durable before signing. A flush
       // failure stays inside the wrapper → transient decline (never sign).
-      await this.store.flush?.(ackStoreOptions('storage-ack.persistStaging.flush'));
-    }, signal), signal);
+      await commit.write('storage-ack.persistStaging.flush',
+        async (options) => { await this.store.flush?.(options); });
+    }, signal);
     return result.ok ? { ok: true } : result;
   }
 
@@ -1231,6 +1224,7 @@ export class StorageACKHandler {
 
     const persist = async (): Promise<{ ok: true; signature: ethers.Signature } | { ok: false; decline: Uint8Array }> => {
       let operationsToSupersede: readonly string[] = [];
+      const commit = new ACKCommitSequence(signal);
       const result = await this.runStoreOpOrDecline(cgId, async (): Promise<Uint8Array | undefined> => {
       const verdict = await this.runWhileLive(() => this.checkAckCopyAgainstHead({
         cgId,
@@ -1256,15 +1250,11 @@ export class StorageACKHandler {
           }))
         : undefined;
       const willReplace = replaceGraph || companion !== undefined;
-      await this.runCommitTail(async () => {
       if (willReplace) {
-        const replaced = await tryReplaceGraphWithDurableRootCompanionAtomically(
-          this.store,
-          swmGraphUri,
-          normalized,
-          companion,
-          ackStoreOptions('storage-ack.persistGraphScoped.replaceGraph', signal),
-        );
+        const replaced = await commit.write('storage-ack.persistGraphScoped.replaceGraph',
+          (options) => tryReplaceGraphWithDurableRootCompanionAtomically(
+            this.store, swmGraphUri, normalized, companion, options,
+          ), (applied) => applied);
         if (!replaced) {
           throw Object.assign(
             new Error('Graph-scoped StorageACK requires atomic TripleStore.replaceGraph support'),
@@ -1275,27 +1265,22 @@ export class StorageACKHandler {
         // gate, so the witness must be dropped explicitly. The head write and
         // two other store calls follow, any of which can throw and leave content
         // ahead of the head.
-        await invalidateSwmMaterializationWitness(
-          this.store,
-          swmGraphUri,
-          ackStoreOptions('storage-ack.persistGraphScoped.witnessInvalidate'),
-        ).catch(() => {});
+        await commit.write('storage-ack.persistGraphScoped.witnessInvalidate',
+          (options) => invalidateSwmMaterializationWitness(this.store, swmGraphUri, options)
+            .catch(() => {}));
       }
-        await deleteByPatternWithoutCount(
-          this.store,
-          { graph: metaGraph, subject: operationSubject },
-          ackStoreOptions('storage-ack.persistGraphScoped.deleteOperationMeta', willReplace ? undefined : signal),
-        );
+        await commit.write('storage-ack.persistGraphScoped.deleteOperationMeta',
+          (options) => deleteByPatternWithoutCount(this.store,
+            { graph: metaGraph, subject: operationSubject }, options));
         // Once the operation rows are deleted the re-insert must finish, or a
         // re-ACK would leave the head pointing at missing rows: no deadline here.
-        await this.store.insert(
-          metadata,
-          ackStoreOptions('storage-ack.persistGraphScoped.insertOperationMeta'),
-        );
+        await commit.write('storage-ack.persistGraphScoped.insertOperationMeta',
+          (options) => this.store.insert(metadata, options));
         // A local ACK of the publisher's already-current copy must preserve
         // the queued job's operation id and access envelope for its retry.
         if (verdict.kind === 'replace-head') {
-          await storeKnowledgeAssetWorkspaceHead({
+          await commit.write('storage-ack.persistGraphScoped.workspaceHead',
+            (options) => storeKnowledgeAssetWorkspaceHead({
             store: this.store,
             graphManager: this.graphManager,
             contextGraphId: swmGraphId,
@@ -1303,13 +1288,11 @@ export class StorageACKHandler {
             assertionVersion: graphPublish.scope.assertionVersion,
             shareOperationId: operationId,
             subGraphName: graphPublish.subGraphName,
-            queryOptions: ackStoreOptions('storage-ack.persistGraphScoped.workspaceHead'),
-          });
+            queryOptions: options,
+          }));
         }
-        await this.store.flush?.(
-          ackStoreOptions('storage-ack.persistGraphScoped.flush'),
-        );
-      }, signal);
+        await commit.write('storage-ack.persistGraphScoped.flush',
+          async (options) => { await this.store.flush?.(options); });
       return undefined;
     }, signal);
       if (!result.ok) return result;
@@ -1319,11 +1302,14 @@ export class StorageACKHandler {
       // create a signed-ACK ledger row or supersede an older obligation.
       const signature = await this.signDigestWhileLive(digest, signal);
       if (recordLedger) {
-        const ledger = await this.runStoreOpOrDecline(cgId, () => this.runCommitTail(async () => {
-          await this.supersedeLedgerOperations(operationsToSupersede);
-          await this.recordSignedAck(ledgerEntry());
-          await this.store.flush?.(ackStoreOptions('storage-ack.ledger.flush'));
-        }, signal), signal);
+        const ledger = await this.runStoreOpOrDecline(cgId, async () => {
+          await commit.write('storage-ack.ledger.supersede',
+            (options) => this.supersedeLedgerOperations(operationsToSupersede, options));
+          await commit.write('storage-ack.ledger.record',
+            (options) => this.recordSignedAck(ledgerEntry(), options));
+          await commit.write('storage-ack.ledger.flush',
+            async (options) => { await this.store.flush?.(options); });
+        }, signal);
         if (!ledger.ok) return ledger;
       }
       return { ok: true, signature };
@@ -1575,7 +1561,7 @@ export class StorageACKHandler {
   }
 
   /** Release ledger rows whose copy a newer write replaced (see {@link checkAckCopyAgainstHead}). */
-  private async supersedeLedgerOperations(operations: readonly string[]): Promise<void> {
+  private async supersedeLedgerOperations(operations: readonly string[], options?: QueryOptions): Promise<void> {
     if (operations.length === 0) return;
     const at = xsdDateTimeLiteral(new Date());
     await this.store.insert(
@@ -1585,7 +1571,7 @@ export class StorageACKHandler {
         object: at,
         graph: STORAGE_ACK_LEDGER_GRAPH,
       })),
-      ackStoreOptions('storage-ack.ledger.supersede'),
+      options ?? ackStoreOptions('storage-ack.ledger.supersede'),
     );
   }
 
@@ -1594,18 +1580,18 @@ export class StorageACKHandler {
    * row's `registeredAt` and leaves no window without a row. Called under
    * the per-KA write lock after signing succeeds.
    */
-  private async recordSignedAck(entry: StorageAckLedgerEntry): Promise<void> {
+  private async recordSignedAck(entry: StorageAckLedgerEntry, options?: QueryOptions): Promise<void> {
     const signed = { ...entry, signedAt: new Date() };
     if (typeof this.store.update === 'function') {
       await this.store.update(
         storageAckLedgerRecordUpdate(signed),
-        ackStoreOptions('storage-ack.ledger.record'),
+        options ?? ackStoreOptions('storage-ack.ledger.record'),
       );
       return;
     }
     await this.store.insert(
       storageAckLedgerEntryQuads(signed),
-      ackStoreOptions('storage-ack.ledger.insert'),
+      options ?? ackStoreOptions('storage-ack.ledger.insert'),
     );
   }
 

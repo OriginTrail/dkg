@@ -1,7 +1,9 @@
-import { isStorageACKProtocol } from '@origintrail-official/dkg-core';
-import type { StorageACKEndpoint } from './storage-ack-endpoint.js';
-import type { LocalStorageAckHeadExpectation } from '@origintrail-official/dkg-publisher';
 import { runBoundedOperation } from '../bounded-operation.js';
+
+export type LocalStorageACKWork = (
+  signal: AbortSignal,
+  trackPhysicalWork: (work: Promise<Uint8Array>) => void,
+) => Promise<Uint8Array>;
 
 export class LocalStorageACKDrainTimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -17,15 +19,10 @@ export class LocalStorageACKTransport {
   private closed = false;
 
   async send(
-    endpoint: StorageACKEndpoint,
-    peerId: string,
-    protocol: string,
-    data: Uint8Array,
+    work: LocalStorageACKWork,
     timeoutMs: number,
-    expectedHead?: LocalStorageAckHeadExpectation,
   ): Promise<Uint8Array> {
     if (this.closed) throw new Error('Local StorageACK transport is closed');
-    if (!isStorageACKProtocol(protocol)) throw new Error(`Unsupported StorageACK protocol: ${protocol}`);
     const controller = new AbortController();
     this.controllers.add(controller);
     const predecessor = this.tail;
@@ -33,8 +30,8 @@ export class LocalStorageACKTransport {
     const result = runBoundedOperation(async (signal) => {
       await predecessor;
       signal.throwIfAborted();
-      const response = Promise.resolve(endpoint.dispatch(protocol, data, peerId, signal, expectedHead, (work) => {
-        physicalWork = work;
+      const response = Promise.resolve(work(signal, (handlerWork) => {
+        physicalWork = handlerWork;
       }));
       // Simple endpoints have no separate deadline. Production endpoints
       // register the inner handler promise before returning their response.

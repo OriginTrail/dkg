@@ -240,7 +240,7 @@ async function signedPublish(h: Harness, value = 'v1'): Promise<void> {
 }
 
 describe('StorageACK VM-promotion finality gate', () => {
-  it('asks the gate first, then keeps the copy and its ledger row, and only then signs', async () => {
+  it('asks the gate first, keeps the copy, then signs before recording the ledger row', async () => {
     const requests: StorageAckVmPromotionRequest[] = [];
     let stateAtGate: { head: unknown; ledger: number } | undefined;
     let ledgerAtSign = -1;
@@ -262,7 +262,7 @@ describe('StorageACK VM-promotion finality gate', () => {
     ]);
     // Nothing is written for a request the gate may still refuse.
     expect(stateAtGate).toEqual({ head: undefined, ledger: 0 });
-    expect(ledgerAtSign).toBe(1);
+    expect(ledgerAtSign).toBe(0);
     expect(await head(h.store)).toMatchObject({ kaUal: UAL, assertionVersion: '1' });
     expect(await h.store.countQuads(layerGraph(MemoryLayer.SharedWorkingMemory, 1))).toBe(1);
     expect(await ledgerRows(h.store)).toEqual([expect.objectContaining({

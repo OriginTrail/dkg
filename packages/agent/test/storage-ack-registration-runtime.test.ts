@@ -58,11 +58,15 @@ describe('StorageACK registration session', () => {
     const work = new Promise<Uint8Array>((resolve) => { release = () => resolve(new Uint8Array([1])); });
     firstSession.install({ dispatch: () => { entered(); return work; }, dispose: vi.fn() });
     const oldSend = runtime.createLocalSender();
-    const first = oldSend('self', PROTOCOL_STORAGE_ACK, new Uint8Array([1]), 1_000)
+    const localWork = (endpoint: StorageACKEndpoint, signal: AbortSignal,
+      trackPhysicalWork: (work: Promise<Uint8Array>) => void) => endpoint.dispatch({
+        protocol: PROTOCOL_STORAGE_ACK, data: new Uint8Array([1]), peerId: 'self', signal, trackPhysicalWork,
+      });
+    const first = oldSend(1_000, localWork)
       .catch((error: unknown) => error);
     await inside;
     runtime.begin();
-    expect(() => oldSend('self', PROTOCOL_STORAGE_ACK, new Uint8Array([1]), 1_000))
+    expect(() => oldSend(1_000, localWork))
       .toThrow(/transport is closed/);
     let drained = false;
     const stopping = runtime.closeAndDrain().then(() => { drained = true; });

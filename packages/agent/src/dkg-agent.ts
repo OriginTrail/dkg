@@ -3266,7 +3266,9 @@ export class DKGAgent extends DKGAgentBase {
           throw new Error('Local StorageACK handler is not registered');
         }
         if (!isStorageACKProtocol(protocol)) throw new Error(`Unsupported StorageACK protocol: ${protocol}`);
-        return sendLocal(this.peerId, protocol, data, timeoutMs, expectedHead);
+        return sendLocal(timeoutMs, (endpoint, signal, trackPhysicalWork) => endpoint.dispatch({
+          protocol, data, peerId: this.peerId, signal, context: expectedHead, trackPhysicalWork,
+        }));
       }
       if (!this.networkAdmissionCoordinator.isAcceptedPeer(peerId)) {
         throw new Error(`peer ${peerId.slice(-8)} is not admitted for active-network ACK collection`);

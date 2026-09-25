@@ -62,7 +62,7 @@ interface ProviderInternals {
   gossip: unknown;
   storageAckHandlerRegistered: boolean;
   storageAckEndpoint: {
-    dispatch(protocol: string, data: Uint8Array, peerId: string, signal?: AbortSignal): Promise<Uint8Array>;
+    dispatch(request: { protocol: string; data: Uint8Array; peerId: string; signal?: AbortSignal }): Promise<Uint8Array>;
   } | null;
   createACKTransportFactory(options?: { sendTimeoutMs?: number }): () => {
     sendP2P(peerId: string, protocol: string, data: Uint8Array): Promise<Uint8Array>;
@@ -108,9 +108,8 @@ describe('StorageACK endpoint and local dispatch lifecycle', () => {
     const publish = vi.fn(async () => new Uint8Array([1]));
     const update = vi.fn(async () => new Uint8Array([2]));
     installStorageACKFixtureEndpoint(agent, {
-      dispatch: (protocol, data) => protocol === PROTOCOL_STORAGE_ACK || protocol === PROTOCOL_STORAGE_ACK_V2
-        ? publish(data)
-        : update(data),
+      dispatch: ({ protocol, data }) => protocol === PROTOCOL_STORAGE_ACK || protocol === PROTOCOL_STORAGE_ACK_V2
+        ? publish(data) : update(data),
     });
     const send = internals.createACKTransportFactory()().sendP2P;
     const request = new Uint8Array([3]);
@@ -137,7 +136,7 @@ describe('StorageACK endpoint and local dispatch lifecycle', () => {
     let lateMutation = false;
     let dispatchCalls = 0;
     installStorageACKFixtureEndpoint(agent, {
-      dispatch: async (_protocol, _data, _peerId, signal) => {
+      dispatch: async ({ signal }) => {
         dispatchCalls++;
         observedSignal = signal;
         await new Promise((resolve) => setTimeout(resolve, 45));
@@ -396,7 +395,9 @@ describe('StorageACK endpoint and local dispatch lifecycle', () => {
     }).storageACKRegistrationRuntime.createLocalSender();
     await agent.start();
     expect(internals.storageAckHandlerRegistered).toBe(true);
-    expect(() => prestartSend(internals.peerId, PROTOCOL_STORAGE_ACK, new Uint8Array([1]), 1_000))
+    expect(() => prestartSend(1_000, (endpoint, signal) => endpoint.dispatch({
+      protocol: PROTOCOL_STORAGE_ACK, data: new Uint8Array([1]), peerId: internals.peerId, signal,
+    })))
       .toThrow(/transport is closed/);
     expect(capturedStorageACKHandlerCalls).toHaveLength(0);
     const currentSend = internals.createACKTransportFactory()().sendP2P;

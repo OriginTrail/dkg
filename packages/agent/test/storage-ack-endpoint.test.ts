@@ -16,7 +16,7 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
-import { DKGPublisher, StorageACKHandler, computeFlatKCRootV10, computeFlatKCMerkleLeafCountV10, resolveKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
+import { DKGPublisher, StorageACKHandler, computeFlatKCRootV10, computeFlatKCMerkleLeafCountV10, resolveKnowledgeAssetWorkspaceHead, type LocalStorageAckHeadExpectation } from '@origintrail-official/dkg-publisher';
 import { registerStorageACKEndpoint } from '../src/p2p/storage-ack-endpoint.js';
 
 const PROTOCOLS = [
@@ -61,7 +61,7 @@ describe('StorageACK endpoint request origin', () => {
     const signal = new AbortController().signal;
 
     for (const protocol of PROTOCOLS) await routes.get(protocol)!(request, 'remote-core');
-    for (const protocol of PROTOCOLS) await endpoint.dispatch(protocol, request, 'this-core', signal);
+    for (const protocol of PROTOCOLS) await endpoint.dispatch({ protocol, data: request, peerId: 'this-core', signal });
 
     const kinds = ['publish', 'publish', 'update', 'update'] as const;
     expect(calls).toEqual([
@@ -71,7 +71,7 @@ describe('StorageACK endpoint request origin', () => {
 
     endpoint.dispose();
     expect(routes.size).toBe(0);
-    expect(() => endpoint.dispatch(PROTOCOL_STORAGE_ACK, request, 'this-core'))
+    expect(() => endpoint.dispatch({ protocol: PROTOCOL_STORAGE_ACK, data: request, peerId: 'this-core' }))
       .toThrow(/StorageACK handler is not registered/);
   });
 });
@@ -134,8 +134,10 @@ describe('StorageACK endpoint persistence decisions', () => {
       },
       publish: (data, peerId) => handler.handler(data, peer(peerId)),
       update: (data, peerId) => handler.updateHandler(data, peer(peerId)),
-      publishLocal: (data, peerId, signal, expectedHead) => handler.localHandler(data, peer(peerId), signal, expectedHead),
-      updateLocal: (data, peerId, signal, expectedHead) => handler.localUpdateHandler(data, peer(peerId), signal, expectedHead),
+      publishLocal: (data, peerId, signal, context, trackPhysicalWork) => handler.localHandler(data, peer(peerId), signal,
+        context as LocalStorageAckHeadExpectation | undefined, trackPhysicalWork),
+      updateLocal: (data, peerId, signal, context, trackPhysicalWork) => handler.localUpdateHandler(data, peer(peerId), signal,
+        context as LocalStorageAckHeadExpectation | undefined, trackPhysicalWork),
     });
     const stage = (shareOperationId: string) => publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
       contextGraphId: swmId,
@@ -171,7 +173,8 @@ describe('StorageACK endpoint persistence decisions', () => {
     const h = await setup();
     await h.stage('queued-share');
     const before = await h.head();
-    const ack = decodeStorageACK(await h.endpoint.dispatch(PROTOCOL_STORAGE_ACK, intent, publisherPeerId, undefined, h.expectedHead));
+    const ack = decodeStorageACK(await h.endpoint.dispatch({ protocol: PROTOCOL_STORAGE_ACK, data: intent,
+      peerId: publisherPeerId, context: h.expectedHead }));
     expect(isStorageACKDecline(ack)).toBe(false);
     expect(await h.head()).toEqual(before);
     h.endpoint.dispose();
@@ -182,7 +185,7 @@ describe('StorageACK endpoint persistence decisions', () => {
     await h.stage('queued-share');
     const response = source === 'remote'
       ? await h.routes.get(PROTOCOL_STORAGE_ACK)!(intent, 'remote-core')
-      : await h.endpoint.dispatch(PROTOCOL_STORAGE_ACK, intent, publisherPeerId);
+      : await h.endpoint.dispatch({ protocol: PROTOCOL_STORAGE_ACK, data: intent, peerId: publisherPeerId });
     expect(isStorageACKDecline(decodeStorageACK(response))).toBe(false);
     expect((await h.head())?.shareOperationId).toMatch(/^storage-ack-/);
     h.endpoint.dispose();
@@ -193,7 +196,8 @@ describe('StorageACK endpoint persistence decisions', () => {
     await h.stage('queued-share');
     await h.stage('replacement-share');
     const before = await h.head();
-    const ack = decodeStorageACK(await h.endpoint.dispatch(PROTOCOL_STORAGE_ACK, intent, publisherPeerId, undefined, h.expectedHead));
+    const ack = decodeStorageACK(await h.endpoint.dispatch({ protocol: PROTOCOL_STORAGE_ACK, data: intent,
+      peerId: publisherPeerId, context: h.expectedHead }));
     expect(isStorageACKDecline(ack)).toBe(true);
     expect(await h.head()).toEqual(before);
     h.endpoint.dispose();

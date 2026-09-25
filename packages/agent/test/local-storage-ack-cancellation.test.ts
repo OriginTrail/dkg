@@ -17,6 +17,7 @@ import {
   StorageACKHandler,
   computeFlatKCRootV10,
   computeFlatKCMerkleLeafCountV10,
+  type LocalStorageAckHeadExpectation,
 } from '@origintrail-official/dkg-publisher';
 import type { QueryOptions, Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent, MockChainAdapter, OxigraphStore } from './agent.shared';
@@ -53,7 +54,9 @@ describe('local StorageACK cancellation through the registered real handler', ()
       dispatch: () => { entered(); return work; },
       dispose: () => {},
     };
-    const send = transport.send(endpoint, 'self', PROTOCOL_STORAGE_ACK, new Uint8Array(), 1_000)
+    const sendWork = (signal: AbortSignal, trackPhysicalWork: (work: Promise<Uint8Array>) => void) =>
+      endpoint.dispatch({ protocol: PROTOCOL_STORAGE_ACK, data: new Uint8Array(), peerId: 'self', signal, trackPhysicalWork });
+    const send = transport.send(sendWork, 1_000)
       .then(() => undefined, (error: unknown) => error);
     await inHandler;
     transport.close();
@@ -61,7 +64,7 @@ describe('local StorageACK cancellation through the registered real handler', ()
     await expect(transport.drain(10)).rejects.toBeInstanceOf(LocalStorageACKDrainTimeoutError);
     release(new Uint8Array());
     await expect(transport.drain()).resolves.toBeUndefined();
-    await expect(transport.send(endpoint, 'self', PROTOCOL_STORAGE_ACK, new Uint8Array(), 10))
+    await expect(transport.send(sendWork, 10))
       .rejects.toThrow(/closed/);
   });
 
@@ -113,8 +116,10 @@ describe('local StorageACK cancellation through the registered real handler', ()
         },
         publish: (data, peerId, signal) => handler.handler(data, { toString: () => peerId } as any, signal),
         update: (data, peerId, signal) => handler.updateHandler(data, { toString: () => peerId } as any, signal),
-        publishLocal: (data, peerId, signal, expectedHead) => handler.localHandler(data, { toString: () => peerId } as any, signal, expectedHead),
-        updateLocal: (data, peerId, signal, expectedHead) => handler.localUpdateHandler(data, { toString: () => peerId } as any, signal, expectedHead),
+        publishLocal: (data, peerId, signal, context, trackPhysicalWork) => handler.localHandler(data, { toString: () => peerId } as any, signal,
+          context as LocalStorageAckHeadExpectation | undefined, trackPhysicalWork),
+        updateLocal: (data, peerId, signal, context, trackPhysicalWork) => handler.localUpdateHandler(data, { toString: () => peerId } as any, signal,
+          context as LocalStorageAckHeadExpectation | undefined, trackPhysicalWork),
       }));
       expect(routes.has(PROTOCOL_STORAGE_ACK)).toBe(true);
       expect(routes.has(PROTOCOL_STORAGE_UPDATE_ACK)).toBe(true);
@@ -204,12 +209,14 @@ describe('local StorageACK cancellation through the registered real handler', ()
           physical = handler.updateHandler(data, { toString: () => peerId } as any, signal);
           return physical;
         },
-        publishLocal: (data, peerId, signal, expectedHead) => {
-          physical = handler.localHandler(data, { toString: () => peerId } as any, signal, expectedHead);
+        publishLocal: (data, peerId, signal, context, trackPhysicalWork) => {
+          physical = handler.localHandler(data, { toString: () => peerId } as any, signal,
+            context as LocalStorageAckHeadExpectation | undefined, trackPhysicalWork);
           return physical;
         },
-        updateLocal: (data, peerId, signal, expectedHead) => {
-          physical = handler.localUpdateHandler(data, { toString: () => peerId } as any, signal, expectedHead);
+        updateLocal: (data, peerId, signal, context, trackPhysicalWork) => {
+          physical = handler.localUpdateHandler(data, { toString: () => peerId } as any, signal,
+            context as LocalStorageAckHeadExpectation | undefined, trackPhysicalWork);
           return physical;
         },
       }));
@@ -270,11 +277,13 @@ describe('local StorageACK cancellation through the registered real handler', ()
         return physical;
       },
       update: (data, peerId, signal) => handler.updateHandler(data, { toString: () => peerId } as any, signal),
-      publishLocal: (data, peerId, signal, expectedHead) => {
-        physical = handler.localHandler(data, { toString: () => peerId } as any, signal, expectedHead);
+      publishLocal: (data, peerId, signal, context, trackPhysicalWork) => {
+        physical = handler.localHandler(data, { toString: () => peerId } as any, signal,
+          context as LocalStorageAckHeadExpectation | undefined, trackPhysicalWork);
         return physical;
       },
-      updateLocal: (data, peerId, signal, expectedHead) => handler.localUpdateHandler(data, { toString: () => peerId } as any, signal, expectedHead),
+      updateLocal: (data, peerId, signal, context, trackPhysicalWork) => handler.localUpdateHandler(data, { toString: () => peerId } as any, signal,
+        context as LocalStorageAckHeadExpectation | undefined, trackPhysicalWork),
     });
     const data = encodePublishIntent({
       merkleRoot: computeFlatKCRootV10(quads, []), contextGraphId: '42',
@@ -283,7 +292,9 @@ describe('local StorageACK cancellation through the registered real handler', ()
       tokenAmountStr: '1000', merkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
     });
     const transport = new LocalStorageACKTransport();
-    const send = transport.send(endpoint, 'self', PROTOCOL_STORAGE_ACK, data, 40);
+    const send = transport.send((signal, trackPhysicalWork) => endpoint.dispatch({
+      protocol: PROTOCOL_STORAGE_ACK, data, peerId: 'self', signal, trackPhysicalWork,
+    }), 40);
     const rejectedSend = expect(send).rejects.toThrow(/timed out after 40ms/);
     await inSigner;
     await rejectedSend;
@@ -326,10 +337,12 @@ describe('local StorageACK cancellation through the registered real handler', ()
       registerGroup: () => () => {},
       publish: (data, peerId) => handler.handler(data, { toString: () => peerId } as any),
       update: (data, peerId) => handler.updateHandler(data, { toString: () => peerId } as any),
-      publishLocal: (data, peerId, signal, expectedHead, trackPhysicalWork) =>
-        handler.localHandler(data, { toString: () => peerId } as any, signal, expectedHead, trackPhysicalWork),
-      updateLocal: (data, peerId, signal, expectedHead, trackPhysicalWork) =>
-        handler.localUpdateHandler(data, { toString: () => peerId } as any, signal, expectedHead, trackPhysicalWork),
+      publishLocal: (data, peerId, signal, context, trackPhysicalWork) =>
+        handler.localHandler(data, { toString: () => peerId } as any, signal,
+          context as LocalStorageAckHeadExpectation | undefined, trackPhysicalWork),
+      updateLocal: (data, peerId, signal, context, trackPhysicalWork) =>
+        handler.localUpdateHandler(data, { toString: () => peerId } as any, signal,
+          context as LocalStorageAckHeadExpectation | undefined, trackPhysicalWork),
     }));
     const ual = 'did:dkg:otp:20430/0x1111111111111111111111111111111111111111/7';
     const quads = [{ subject: 'urn:entity:late', predicate: 'urn:p:value', object: '"value"', graph: '' }];

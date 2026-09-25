@@ -176,6 +176,7 @@ import {
   STORAGE_ACK_LEDGER_GRAPH,
   swmKaWriteLockKey,
   withKeyedLocks,
+  type LocalStorageAckHeadExpectation,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import { join } from 'node:path';
@@ -3041,13 +3042,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
                 return ackHandler.updateHandler(data, peerId);
               },
-              publishLocal: (data, peerIdStr, signal, expectedHead, trackPhysicalWork) => {
+              publishLocal: (data, peerIdStr, signal, context, trackPhysicalWork) => {
                 const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-                return ackHandler.localHandler(data, peerId, signal, expectedHead, trackPhysicalWork);
+                return ackHandler.localHandler(data, peerId, signal,
+                  context as LocalStorageAckHeadExpectation | undefined, trackPhysicalWork);
               },
-              updateLocal: (data, peerIdStr, signal, expectedHead, trackPhysicalWork) => {
+              updateLocal: (data, peerIdStr, signal, context, trackPhysicalWork) => {
                 const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-                return ackHandler.localUpdateHandler(data, peerId, signal, expectedHead, trackPhysicalWork);
+                return ackHandler.localUpdateHandler(data, peerId, signal,
+                  context as LocalStorageAckHeadExpectation | undefined, trackPhysicalWork);
               },
             });
             this.log.info(

@@ -1,7 +1,11 @@
-import type { StorageACKProtocol } from '@origintrail-official/dkg-core';
-import type { LocalStorageAckHeadExpectation } from '@origintrail-official/dkg-publisher';
 import { LocalStorageACKTransport } from './local-storage-ack-transport.js';
 import type { StorageACKEndpoint } from './storage-ack-endpoint.js';
+
+export type RegisteredLocalACKWork = (
+  endpoint: StorageACKEndpoint,
+  signal: AbortSignal,
+  trackPhysicalWork: (work: Promise<Uint8Array>) => void,
+) => Promise<Uint8Array>;
 
 export type StorageACKRegistrationOptions = {
   repairWallets?: boolean;
@@ -149,16 +153,14 @@ export class StorageACKRegistrationSession {
   }
 
   sendLocal(
-    peerId: string,
-    protocol: StorageACKProtocol,
-    data: Uint8Array,
     timeoutMs: number,
-    expectedHead?: LocalStorageAckHeadExpectation,
+    work: RegisteredLocalACKWork,
   ): Promise<Uint8Array> {
     if (this.state.kind === 'retired') throw new Error('Local StorageACK transport is closed for a retired agent lifetime');
     const endpoint = this.endpoint;
     if (!endpoint) throw new Error('Local StorageACK handler is not registered');
-    return this.transport.send(endpoint, peerId, protocol, data, timeoutMs, expectedHead);
+    return this.transport.send((signal, trackPhysicalWork) =>
+      work(endpoint, signal, trackPhysicalWork), timeoutMs);
   }
 
   async drainAttempts(): Promise<void> { await Promise.allSettled(this.attempts); }
@@ -185,16 +187,13 @@ export class StorageACKRegistrationRuntime {
   clearRetry(): void { this.currentSession?.stopRetry(); }
 
   /** A sender captures its generation so stale factories cannot use a replacement endpoint. */
-  createLocalSender(): (
-    peerId: string, protocol: StorageACKProtocol, data: Uint8Array, timeoutMs: number,
-    expectedHead?: LocalStorageAckHeadExpectation,
-  ) => Promise<Uint8Array> {
+  createLocalSender(): (timeoutMs: number, work: RegisteredLocalACKWork) => Promise<Uint8Array> {
     const session = this.currentSession;
-    return (peerId, protocol, data, timeoutMs, expectedHead) => {
+    return (timeoutMs, work) => {
       if (!session || session !== this.currentSession || !session.isCurrent()) {
         throw new Error('Local StorageACK transport is closed for a retired agent lifetime');
       }
-      return session.sendLocal(peerId, protocol, data, timeoutMs, expectedHead);
+      return session.sendLocal(timeoutMs, work);
     };
   }
 
