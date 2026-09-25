@@ -1173,6 +1173,38 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     agent = null;
   });
 
+  it('reopens local ACK dispatch after a same-instance core restart', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 42n);
+    agent = await DKGAgent.create({
+      name: 'LocalACKSameInstanceRestartTest',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+    });
+    const internals = agent as unknown as ProviderInternals;
+    const request = new Uint8Array([3, 4]);
+    await agent.start();
+    await expect.poll(() => internals.storageAckHandlerRegistered).toBe(true);
+    const firstSend = internals.createACKTransportFactory()().sendP2P;
+    await expect(firstSend(internals.peerId, PROTOCOL_STORAGE_ACK, request))
+      .resolves.toEqual(new Uint8Array([1]));
+
+    await agent.stop();
+    await agent.start();
+    await expect.poll(() => internals.storageAckHandlerRegistered).toBe(true);
+    const secondSend = internals.createACKTransportFactory()().sendP2P;
+    await expect(secondSend(internals.peerId, PROTOCOL_STORAGE_ACK, request))
+      .resolves.toEqual(new Uint8Array([1]));
+    await expect(firstSend(internals.peerId, PROTOCOL_STORAGE_ACK, request))
+      .rejects.toThrow(/transport is closed/);
+    expect(capturedStorageACKHandlerCalls.filter(({ kind }) => kind === 'publish')).toHaveLength(2);
+  });
+
   it('rolls back partial ACK registration and restores all routes on retry', async () => {
     const primary = ethers.Wallet.createRandom();
     const ackSigner = ethers.Wallet.createRandom();
