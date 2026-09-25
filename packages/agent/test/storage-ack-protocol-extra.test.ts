@@ -48,6 +48,7 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
     // file (`dkg-agent-lifecycle.ts`) rather than `dkg-agent.ts`. Scan the
     // whole agent `src` tree so the pin tracks the agent package, not one file.
     const lifecycle = readFileSync(join(AGENT_SRC, 'dkg-agent-lifecycle.ts'), 'utf8');
+    const registrar = readFileSync(join(AGENT_SRC, 'p2p', 'storage-ack-registrar.ts'), 'utf8');
     // Both IDs must enter the one registered endpoint through Messenger,
     // which supplies envelope decoding and receiver-side deduplication.
     const endpoint = readFileSync(join(AGENT_SRC, 'p2p', 'storage-ack-endpoint.ts'), 'utf8');
@@ -59,11 +60,12 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
     ]);
     // Registration is staged locally and installed by its lifecycle owner
     // only while the generation is still current.
-    expect(lifecycle).toMatch(/const endpoint\s*=\s*registerStorageACKEndpoint\(/);
-    expect(lifecycle).toMatch(/return \{ kind: 'registered', endpoint \}/);
+    expect(lifecycle).toMatch(/startGeneration\(createStorageACKRegistrationPlan\(/);
+    expect(registrar).toMatch(/const endpoint\s*=\s*registerStorageACKEndpoint\(/);
+    expect(registrar).toMatch(/return \{ kind: 'registered', endpoint \}/);
     expect(readFileSync(join(AGENT_SRC, 'p2p', 'storage-ack-registration-runtime.ts'), 'utf8'))
       .toMatch(/this\.install\(outcome\.endpoint, lease\)/);
-    expect(lifecycle).toMatch(/registerGroup:\s*\(entries\)\s*=>\s*this\.messenger\.registerGroup\(entries\)/);
+    expect(registrar).toMatch(/registerGroup:\s*\(entries\)\s*=>\s*ports\.messenger\.registerGroup\(entries\)/);
     expect(endpoint).toMatch(/ports\.registerGroup\(STORAGE_ACK_PROTOCOLS\.map\(/);
   });
 

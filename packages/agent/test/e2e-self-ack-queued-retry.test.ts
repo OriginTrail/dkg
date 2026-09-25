@@ -18,6 +18,7 @@ import { setMinimumRequiredSignatures } from '../../chain/test/hardhat-harness.j
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import {
   resolveKnowledgeAssetWorkspaceHead,
+  resolveKnowledgeAssetWorkspaceHeadPublicQuads,
   STORAGE_ACK_LEDGER_GRAPH,
   STORAGE_ACK_LEDGER_PREDICATES,
   TripleStoreAsyncLiftPublisher,
@@ -119,6 +120,32 @@ describe('E2E: queued VM publish retries after a round with a local self-ACK mis
     });
   }
 
+  /** Retain the queued operation while its valid publisher metadata names another peer. */
+  async function overrideQueuedPublisherMetadata(request: KnowledgeAssetVmPublishRequest): Promise<void> {
+    const head = await readPublisherHead(request);
+    expect(head).toBeDefined();
+    const snapshot = await resolveKnowledgeAssetWorkspaceHeadPublicQuads({
+      store: publisherCore.store,
+      graphManager: new GraphManager(publisherCore.store),
+      contextGraphId,
+      head: head!,
+    });
+    await publisherCore.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+      contextGraphId,
+      kaUal: request.kaUal!,
+      assertionVersion: request.assertionVersion!,
+      shareOperationId: request.shareOperationId,
+      quads: snapshot.quads,
+      privateTripleCount: request.privateTripleCount,
+      publisherPeerId: coreB.peerId,
+      accessPolicy: request.accessPolicy,
+      allowedPeers: request.allowedPeers,
+      agentAddress: request.agentAddress,
+      timestamp: new Date(),
+    });
+    expect((await readPublisherHead(request))?.publisherPeerId).toBe(coreB.peerId);
+  }
+
   /** Versions of this KA the publisher signed its own StorageACK for. */
   async function selfAckedVersions(kaUal: string): Promise<string[]> {
     const result = await publisherCore.store.query(`SELECT ?version WHERE {
@@ -179,6 +206,7 @@ describe('E2E: queued VM publish retries after a round with a local self-ACK mis
     });
     const intent = await publisherCore.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name);
     expect(intent.vmCurrentAssertion).toBeUndefined();
+    await overrideQueuedPublisherMetadata(intent);
     const queue = queuedPublishes();
     const jobId = await queue.enqueueKnowledgeAssetVmPublish(intent);
 
@@ -219,6 +247,7 @@ describe('E2E: queued VM publish retries after a round with a local self-ACK mis
     const intent = await publisherCore.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name);
     expect(intent).toMatchObject({ assertionVersion: '2', accessPolicy: 'allowList', allowedPeers });
     expect(intent.vmCurrentAssertion).toBeDefined();
+    await overrideQueuedPublisherMetadata(intent);
     const queue = queuedPublishes();
     const jobId = await queue.enqueueKnowledgeAssetVmPublish(intent);
 
