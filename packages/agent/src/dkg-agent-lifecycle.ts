@@ -288,6 +288,7 @@ import {
 } from './swm/ciphertext-chunk-catchup.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
+import { connectedPeerIds as liveConnectedPeerIds } from './p2p/connected-peer-ids.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import {
   deleteSyncPageCheckpoint,
@@ -5299,7 +5300,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const peerEvents = this.peerSyncSession;
     if (!peerEvents.checkpoint()) return;
     if (peerId === this.node.libp2p.peerId.toString()) return;
-    if (!this.node.libp2p.getPeers().some((peer) => peer.toString() === peerId)) return;
+    if (!liveConnectedPeerIds(this.node.libp2p).has(peerId)) return;
     // #1093: keep the confirmed-core set fresh from `peer:update` too.
     // `runSyncOnConnect` reads the protocol list exactly once, racing
     // identify — a core peer whose identify completed late was never

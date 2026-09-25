@@ -241,6 +241,7 @@ import {
 } from './swm/ciphertext-chunk-catchup.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
+import { connectedPeerIds as liveConnectedPeerIds } from './p2p/connected-peer-ids.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import {
   deleteSyncPageCheckpoint,
@@ -3085,15 +3086,9 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   private connectedPeerIds(): string[] {
-    const connectedPeerIds = new Set<string>();
-    for (const peer of this.node.libp2p.getPeers()) {
-      connectedPeerIds.add(peer.toString());
-    }
-    for (const connection of this.node.libp2p.getConnections()) {
-      connectedPeerIds.add(connection.remotePeer.toString());
-    }
-    connectedPeerIds.delete(this.peerId);
-    return [...connectedPeerIds];
+    const ids = liveConnectedPeerIds(this.node.libp2p);
+    ids.delete(this.peerId);
+    return [...ids];
   }
 
   /**

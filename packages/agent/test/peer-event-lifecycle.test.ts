@@ -211,6 +211,31 @@ describe('DKGAgent peer lifecycle integration', () => {
     } finally { await f.close(); }
   });
 
+  it('observes identify and retries sync for a peer visible only through a live connection', async () => {
+    const f = await createPeerEventFixture();
+    try {
+      vi.spyOn(f.agent.node.libp2p, 'getPeers').mockReturnValue([]);
+      const connections = vi.spyOn(f.agent.node.libp2p, 'getConnections').mockReturnValue(
+        [{ remotePeer: f.peer }] as unknown as ReturnType<typeof f.agent.node.libp2p.getConnections>,
+      );
+      vi.spyOn(f.agent, 'ensurePeerAdmittedForRecovery').mockResolvedValue(true);
+      vi.spyOn(f.agent, 'getSyncReconcilerProbe').mockResolvedValue(PROBE);
+      const attempt = vi.spyOn(f.agent, 'attemptSyncFromPeerWithReconcilerAccounting')
+        .mockResolvedValue('not-started');
+      f.state.session.markSkipped(f.peerId);
+
+      f.dispatchUpdate([PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC]);
+      await vi.waitFor(() => expect(attempt).toHaveBeenCalledOnce());
+      expect(f.state.knownCorePeerIds.has(f.peerId)).toBe(true);
+      expect(attempt).toHaveBeenCalledWith(f.peerId, PROBE, 'on-connect');
+
+      connections.mockReturnValue([]);
+      f.dispatchClose();
+      f.dispatchUpdate([PROTOCOL_STORAGE_ACK, PROTOCOL_SYNC]);
+      expect(f.state.knownCorePeerIds.has(f.peerId)).toBe(false);
+    } finally { await f.close(); }
+  });
+
   it.each([
     { name: 'admission', gate: 'admission', reject: false },
     { name: 'admission abort', gate: 'admission', reject: true },
