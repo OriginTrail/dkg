@@ -80,34 +80,39 @@ export function createOxigraphStoreOwnership(
     write.then(forget, forget);
     return write;
   };
+  const close = async (): Promise<void> => {
+    closed = true;
+    await Promise.allSettled(writes);
+  };
   return {
-    async launch(spawn, abandon) {
+    async launch(spawn) {
       await steps.reclaim();
       if (closed) return null;
-      const spawned = spawn();
-      const launcherPid = spawned.child.pid;
+      const attempt = spawn();
+      const launcherPid = attempt.oxigraph.child.pid;
       // Recorded at spawn, so the reclaim can identify this launch's
       // Oxigraph even if the daemon dies before it is ready. A launch that
-      // cannot be recorded is rolled back before the failure surfaces.
+      // cannot be recorded is killed before the failure surfaces.
       let record: OxigraphLaunchRecord | null = null;
       if (launcherPid !== undefined) {
         try {
           record = await track(steps.recordLaunch(launcherPid));
         } catch (error) {
-          abandon(spawned);
+          attempt.oxigraph.terminate('SIGKILL');
           throw error;
         }
       }
       return {
-        spawned,
+        attempt,
         ready: async (oxigraphPid) => {
           if (record && !closed) await track(record.markReady(oxigraphPid));
         },
       };
     },
-    close: async () => {
-      closed = true;
-      await Promise.allSettled(writes);
+    close,
+    async release() {
+      await close();
+      await steps.reclaim();
     },
   };
 }

@@ -38,6 +38,8 @@ import {
   type OxigraphStoreOwnershipInput,
   type OxigraphStoreOwnershipSteps,
 } from '../src/daemon/oxigraph-store-ownership.js';
+import type { OxigraphLaunchAttempt } from '../src/daemon/oxigraph-store-launch.js';
+import type { OxigraphLaunchHandle } from '../src/daemon/oxigraph-launch-strategy.js';
 import {
   createOxigraphStandinFixture,
   fetchPid,
@@ -477,6 +479,44 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
     }
   }, 30_000);
 
+  it('reclaims the Oxigraph of a watchdog killed on its own when the server stops before restarting', async () => {
+    const port = await freePort();
+    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-stop-stranded-'));
+    const lines: string[] = [];
+    let listenerPid: number | undefined;
+    const handle = await startOxigraphServer({
+      binaryPath: lockingStandin.binaryPath,
+      location,
+      port,
+      readyTimeoutMs: 10_000,
+      readyIntervalMs: 50,
+      // The restart would reclaim it as well; stop() comes first here.
+      restartBackoffBaseMs: 60_000,
+      restartBackoffMaxMs: 60_000,
+      log: (line) => lines.push(line),
+    });
+    try {
+      listenerPid = await fetchPid(port);
+      const watchdog = parentPid(listenerPid);
+      expect(watchdog).not.toBeNull();
+      process.kill(watchdog!, 'SIGKILL');
+      expect(await waitForCondition(() => handle.getRecoveryState().recovering, 10_000)).toBe(true);
+      // The watchdog is gone; its Oxigraph still runs and holds the store.
+      expect(pidIsGone(listenerPid)).toBe(false);
+
+      await handle.stop();
+      expect(await waitForCondition(() => pidIsGone(listenerPid!), 5_000)).toBe(true);
+      expect(await portAnswers(port)).toBe(false);
+      expect(lines.join('\n')).toContain(
+        `stopping orphaned Oxigraph pid ${listenerPid} (its recorded launcher pid ${watchdog} has exited)`,
+      );
+    } finally {
+      await handle.stop();
+      killIfAlive(listenerPid);
+      await rm(location, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it('reclaims its own Oxigraph on restart when only the watchdog it launched is killed', async () => {
     const port = await freePort();
     const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-restart-'));
@@ -566,36 +606,44 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
 });
 
 describe('store ownership launches', () => {
-  const notSpawnable = (): ChildProcess => {
+  const notSpawnable = (): OxigraphLaunchAttempt => {
     throw new Error('spawned after close()');
   };
-  // Launches in these tests are never rolled back unless a test says so.
-  const keep = (): void => { throw new Error('abandoned a launch unexpectedly'); };
+  // A launch attempt whose handle only notes the signals it is sent.
+  const attemptFor = (pid: number) => {
+    const signals: NodeJS.Signals[] = [];
+    const oxigraph = {
+      child: { pid } as ChildProcess,
+      terminate: (signal: NodeJS.Signals) => { signals.push(signal); },
+    } as unknown as OxigraphLaunchHandle;
+    return { attempt: { oxigraph, readyBudget: { timeoutMs: 1_000, walBytes: 0 } }, signals };
+  };
   // A launch recorder that notes each write it would make.
   const recording = (records: string[]): OxigraphStoreOwnershipSteps['recordLaunch'] => async (launcherPid) => {
     records.push(`spawned:${launcherPid}`);
     return { markReady: async (oxigraphPid) => { records.push(`ready:${launcherPid}:${oxigraphPid}`); } };
   };
+  const ownershipWithSteps = (steps: OxigraphStoreOwnershipSteps) => createOxigraphStoreOwnership({
+    platform: process.platform,
+    location: '/nonexistent/oxigraph-data',
+    binaryPath: '/opt/oxigraph',
+    log: () => {},
+    steps,
+  });
 
   it('neither spawns nor records once closed while the reclaim is still running', async () => {
     let releaseReclaim!: () => void;
     const records: string[] = [];
     let spawns = 0;
-    const ownership = createOxigraphStoreOwnership({
-      platform: process.platform,
-      location: '/nonexistent/oxigraph-data',
-      binaryPath: '/opt/oxigraph',
-      log: () => {},
-      steps: {
-        reclaim: () => new Promise<void>((resolve) => { releaseReclaim = resolve; }),
-        recordLaunch: recording(records),
-      },
+    const ownership = ownershipWithSteps({
+      reclaim: () => new Promise<void>((resolve) => { releaseReclaim = resolve; }),
+      recordLaunch: recording(records),
     });
 
     const launched = ownership.launch(() => {
       spawns += 1;
-      return { child: notSpawnable() };
-    }, keep);
+      return notSpawnable();
+    });
     await ownership.close();
     releaseReclaim();
 
@@ -606,38 +654,36 @@ describe('store ownership launches', () => {
 
   it('records nothing for a launch that becomes ready after close()', async () => {
     const records: string[] = [];
-    const ownership = createOxigraphStoreOwnership({
-      platform: process.platform,
-      location: '/nonexistent/oxigraph-data',
-      binaryPath: '/opt/oxigraph',
-      log: () => {},
-      steps: { reclaim: async () => {}, recordLaunch: recording(records) },
-    });
-    const launch = await ownership.launch(() => ({ child: { pid: 4099 } as ChildProcess }), keep);
+    const ownership = ownershipWithSteps({ reclaim: async () => {}, recordLaunch: recording(records) });
+    const { attempt } = attemptFor(4099);
+    const launch = await ownership.launch(() => attempt);
+    expect(launch?.attempt).toBe(attempt);
     expect(records).toEqual(['spawned:4099']);
 
     await ownership.close();
     await launch!.ready(4100);
     expect(records).toEqual(['spawned:4099']);
-    await expect(ownership.launch(() => ({ child: notSpawnable() }), keep)).resolves.toBeNull();
+    await expect(ownership.launch(notSpawnable)).resolves.toBeNull();
   });
 
-  it('abandons what it spawned when recording the launch rejects, then rejects', async () => {
-    const abandoned: number[] = [];
-    const ownership = createOxigraphStoreOwnership({
-      platform: process.platform,
-      location: '/nonexistent/oxigraph-data',
-      binaryPath: '/opt/oxigraph',
-      log: () => {},
-      steps: {
-        reclaim: async () => {},
-        recordLaunch: async () => { throw new Error('record defect'); },
-      },
+  it('kills what it spawned through the launch handle when recording the launch rejects, then rejects', async () => {
+    const ownership = ownershipWithSteps({
+      reclaim: async () => {},
+      recordLaunch: async () => { throw new Error('record defect'); },
     });
-    await expect(ownership.launch(
-      () => ({ child: { pid: 4099 } as ChildProcess, id: 'launch-1' }),
-      (spawned) => { abandoned.push(spawned.child.pid!); },
-    )).rejects.toThrow('record defect');
-    expect(abandoned).toEqual([4099]);
+    const { attempt, signals } = attemptFor(4099);
+    await expect(ownership.launch(() => attempt)).rejects.toThrow('record defect');
+    expect(signals).toEqual(['SIGKILL']);
+  });
+
+  it('release() closes, then reclaims the store, and refuses later launches', async () => {
+    const events: string[] = [];
+    const ownership = ownershipWithSteps({
+      reclaim: async () => { events.push('reclaim'); },
+      recordLaunch: recording(events),
+    });
+    await ownership.release();
+    expect(events).toEqual(['reclaim']);
+    await expect(ownership.launch(notSpawnable)).resolves.toBeNull();
   });
 });

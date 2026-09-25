@@ -37,6 +37,7 @@ import { oxigraphStoreArgs } from '../src/daemon/oxigraph-store-launch.js';
 import { lsofLockHolderLister, stopOrphanedOxigraph } from '../src/daemon/oxigraph-orphan.js';
 import { isCatalogedOxigraph } from '../src/daemon/oxigraph-reclaim-policy.js';
 import { oxigraphBinaryLocations } from '../src/daemon/oxigraph-binary.js';
+import type { OxigraphLaunchHandle } from '../src/daemon/oxigraph-launch-strategy.js';
 import { createOxigraphStoreOwnership } from '../src/daemon/oxigraph-store-ownership.js';
 import {
   checkIdentity,
@@ -173,14 +174,18 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       const launch = await ownership.launch(() => {
         linesAtSpawn = lines.length;
         launcher = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
-        return { child: launcher };
-      }, ({ child }) => { child.kill('SIGKILL'); });
+        const oxigraph = {
+          child: launcher,
+          terminate: (signal: NodeJS.Signals) => { launcher!.kill(signal); },
+        } as unknown as OxigraphLaunchHandle;
+        return { oxigraph, readyBudget: { timeoutMs: 1_000, walBytes: 0 } };
+      });
       // The reclaim finished before the spawn.
       expect(lines.slice(0, linesAtSpawn).join('\n')).toContain(
         `stopping orphaned Oxigraph pid ${orphan} (it was reparented to PID 1)`,
       );
       expect(lines.slice(0, linesAtSpawn).join('\n')).toContain('released by the orphaned Oxigraph');
-      expect(launch?.spawned.child).toBe(launcher);
+      expect(launch?.attempt.oxigraph.child).toBe(launcher);
       // Recorded at spawn, without an Oxigraph yet ...
       const atSpawn = await readOxigraphOwnerRecord(location);
       expect(atSpawn).toMatchObject({
@@ -276,6 +281,33 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       expect(atReady.record).toEqual({ ...atSpawn.record, oxigraph: { pid: 4100, start: expect.any(String) } });
       // Each process was read once: the daemon and launcher at spawn, Oxigraph when ready.
       expect(reads.sort((a, b) => a - b)).toEqual([4099, 4100, process.pid].sort((a, b) => a - b));
+    } finally {
+      await rm(location, { recursive: true, force: true });
+    }
+  });
+
+  it('removes the previous launch\'s record before recording a launch, even one it cannot identify', async () => {
+    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-record-retire-'));
+    try {
+      // Launch A's record, still valid in this boot.
+      await writeFile(join(location, OXIGRAPH_OWNER_RECORD), JSON.stringify({
+        schema: OXIGRAPH_OWNER_RECORD_SCHEMA,
+        boot: 'boot-1',
+        daemon: { pid: 4000, start: 'a' },
+        launcher: { pid: 4001, start: 'a' },
+        oxigraph: { pid: 4002, start: 'a' },
+        binaryPath: '/opt/oxigraph',
+      }));
+      expect(await readOxigraphOwnerRecord(location)).toMatchObject({ kind: 'v1' });
+      // Launch B cannot be identified, so it writes no record of its own.
+      await recordOxigraphLaunch({
+        platform: process.platform,
+        location, binaryPath: '/opt/oxigraph', launcherPid: 4099, log: () => {},
+        inspect: async () => ({ state: 'unknown', reason: 'ps timed out' }),
+        bootId: async () => 'boot-1',
+      });
+      // No record at all, rather than A's identities in force for B's launch.
+      expect(await readOxigraphOwnerRecord(location)).toEqual({ kind: 'absent' });
     } finally {
       await rm(location, { recursive: true, force: true });
     }

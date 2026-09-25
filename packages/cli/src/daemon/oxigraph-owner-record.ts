@@ -118,9 +118,11 @@ export interface OxigraphLaunchRecord {
 /**
  * Record a spawned launch as the owner of a store: this daemon, the launcher
  * and the binary, each identified once (PID and start time). `markReady`
- * rewrites the same record with the verified Oxigraph added. The store
- * directory is created first, since a fresh store's directory may not exist
- * until Oxigraph opens it. Best-effort: a failed write is logged and
+ * rewrites the same record with the verified Oxigraph added. The previous
+ * launch's record is removed first, so a launch that cannot be recorded
+ * leaves no record rather than an earlier launch's identities in force. The
+ * store directory is created first, since a fresh store's directory may not
+ * exist until Oxigraph opens it. Best-effort: a failed write is logged and
  * resolves, because without a record the reclaim falls back to the PID 1
  * rule; when the launch itself could not be identified, `markReady` writes
  * nothing.
@@ -160,6 +162,13 @@ export async function recordOxigraphLaunch(input: {
       logRecordFailure(input.log, error);
     }
   };
+  // The store's owner is this launch from now on: the earlier record must not
+  // outlive it, even if this one cannot be written.
+  try {
+    await unlink(ownerRecordPath(input.location));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') logRecordFailure(input.log, error);
+  }
   let launch: OxigraphOwnerRecordV1 | null = null;
   try {
     const [boot, daemon, launcher] = await Promise.all([
