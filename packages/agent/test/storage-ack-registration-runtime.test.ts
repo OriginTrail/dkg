@@ -4,7 +4,10 @@ import type { StorageACKEndpoint } from '../src/p2p/storage-ack-endpoint.js';
 import { PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
 
 function endpoint(): StorageACKEndpoint & { dispose: ReturnType<typeof vi.fn> } {
-  return { dispatch: vi.fn(async () => new Uint8Array([1])), dispose: vi.fn() };
+  return { dispatch: vi.fn(() => {
+    const response = Promise.resolve(new Uint8Array([1]));
+    return { response, completion: response };
+  }), dispose: vi.fn() };
 }
 
 afterEach(() => vi.useRealTimers());
@@ -56,11 +59,10 @@ describe('StorageACK registration session', () => {
     let release!: () => void;
     const inside = new Promise<void>((resolve) => { entered = resolve; });
     const work = new Promise<Uint8Array>((resolve) => { release = () => resolve(new Uint8Array([1])); });
-    firstSession.install({ dispatch: () => { entered(); return work; }, dispose: vi.fn() });
+    firstSession.install({ dispatch: () => { entered(); return { response: work, completion: work }; }, dispose: vi.fn() });
     const oldSend = runtime.createLocalSender();
-    const localWork = (endpoint: StorageACKEndpoint, signal: AbortSignal,
-      trackPhysicalWork: (work: Promise<Uint8Array>) => void) => endpoint.dispatch({
-        protocol: PROTOCOL_STORAGE_ACK, data: new Uint8Array([1]), peerId: 'self', signal, trackPhysicalWork,
+    const localWork = (endpoint: StorageACKEndpoint, signal: AbortSignal) => endpoint.dispatch({
+        protocol: PROTOCOL_STORAGE_ACK, data: new Uint8Array([1]), peerId: 'self', signal,
       });
     const first = oldSend(1_000, localWork)
       .catch((error: unknown) => error);

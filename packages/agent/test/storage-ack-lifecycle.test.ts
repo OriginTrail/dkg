@@ -42,8 +42,16 @@ vi.mock('@origintrail-official/dkg-publisher', async () => {
       localHandler(data: Uint8Array, peer: { toString(): string }, signal?: AbortSignal): Promise<Uint8Array> {
         return this.handler(data, peer, signal);
       }
+      localExecution(data: Uint8Array, peer: { toString(): string }, signal?: AbortSignal) {
+        const response = this.localHandler(data, peer, signal);
+        return { response, completion: response };
+      }
       localUpdateHandler(data: Uint8Array, peer: { toString(): string }, signal?: AbortSignal): Promise<Uint8Array> {
         return this.updateHandler(data, peer, signal);
+      }
+      localUpdateExecution(data: Uint8Array, peer: { toString(): string }, signal?: AbortSignal) {
+        const response = this.localUpdateHandler(data, peer, signal);
+        return { response, completion: response };
       }
     },
   };
@@ -62,7 +70,9 @@ interface ProviderInternals {
   gossip: unknown;
   storageAckHandlerRegistered: boolean;
   storageAckEndpoint: {
-    dispatch(request: { protocol: string; data: Uint8Array; peerId: string; signal?: AbortSignal }): Promise<Uint8Array>;
+    dispatch(request: { protocol: string; data: Uint8Array; peerId: string; signal?: AbortSignal }): {
+      response: Promise<Uint8Array>; completion: Promise<unknown>;
+    };
   } | null;
   createACKTransportFactory(options?: { sendTimeoutMs?: number }): () => {
     sendP2P(peerId: string, protocol: string, data: Uint8Array): Promise<Uint8Array>;
@@ -108,8 +118,11 @@ describe('StorageACK endpoint and local dispatch lifecycle', () => {
     const publish = vi.fn(async () => new Uint8Array([1]));
     const update = vi.fn(async () => new Uint8Array([2]));
     installStorageACKFixtureEndpoint(agent, {
-      dispatch: ({ protocol, data }) => protocol === PROTOCOL_STORAGE_ACK || protocol === PROTOCOL_STORAGE_ACK_V2
-        ? publish(data) : update(data),
+      dispatch: ({ protocol, data }) => {
+        const response = protocol === PROTOCOL_STORAGE_ACK || protocol === PROTOCOL_STORAGE_ACK_V2
+          ? publish(data) : update(data);
+        return { response, completion: response };
+      },
     });
     const send = internals.createACKTransportFactory()().sendP2P;
     const request = new Uint8Array([3]);
@@ -136,12 +149,15 @@ describe('StorageACK endpoint and local dispatch lifecycle', () => {
     let lateMutation = false;
     let dispatchCalls = 0;
     installStorageACKFixtureEndpoint(agent, {
-      dispatch: async ({ signal }) => {
-        dispatchCalls++;
-        observedSignal = signal;
-        await new Promise((resolve) => setTimeout(resolve, 45));
-        if (!signal?.aborted) lateMutation = true;
-        return new Uint8Array([1]);
+      dispatch: ({ signal }) => {
+        const response = (async () => {
+          dispatchCalls++;
+          observedSignal = signal;
+          await new Promise((resolve) => setTimeout(resolve, 45));
+          if (!signal?.aborted) lateMutation = true;
+          return new Uint8Array([1]);
+        })();
+        return { response, completion: response };
       },
     });
     const send = internals.createACKTransportFactory({ sendTimeoutMs: 10 })().sendP2P;

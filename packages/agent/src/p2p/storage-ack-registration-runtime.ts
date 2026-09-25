@@ -1,11 +1,10 @@
 import { LocalStorageACKTransport } from './local-storage-ack-transport.js';
-import type { StorageACKEndpoint } from './storage-ack-endpoint.js';
+import type { LocalStorageACKExecution, StorageACKEndpoint } from './storage-ack-endpoint.js';
 
 export type RegisteredLocalACKWork = (
   endpoint: StorageACKEndpoint,
   signal: AbortSignal,
-  trackPhysicalWork: (work: Promise<Uint8Array>) => void,
-) => Promise<Uint8Array>;
+) => LocalStorageACKExecution;
 
 export type StorageACKRegistrationOptions = {
   repairWallets?: boolean;
@@ -159,8 +158,7 @@ export class StorageACKRegistrationSession {
     if (this.state.kind === 'retired') throw new Error('Local StorageACK transport is closed for a retired agent lifetime');
     const endpoint = this.endpoint;
     if (!endpoint) throw new Error('Local StorageACK handler is not registered');
-    return this.transport.send((signal, trackPhysicalWork) =>
-      work(endpoint, signal, trackPhysicalWork), timeoutMs);
+    return this.transport.send((signal) => work(endpoint, signal), timeoutMs);
   }
 
   async drainAttempts(): Promise<void> { await Promise.allSettled(this.attempts); }

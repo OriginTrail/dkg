@@ -77,8 +77,14 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
       },
       publish: async () => new Uint8Array([1]),
       update: async () => new Uint8Array([2]),
-      publishLocal: async () => new Uint8Array([1]),
-      updateLocal: async () => new Uint8Array([2]),
+      publishLocal: () => {
+        const response = Promise.resolve(new Uint8Array([1]));
+        return { response, completion: response };
+      },
+      updateLocal: () => {
+        const response = Promise.resolve(new Uint8Array([2]));
+        return { response, completion: response };
+      },
     });
 
     expect([...routes.keys()]).toEqual(STORAGE_ACK_PROTOCOLS.map(([protocol]) => protocol));

@@ -3042,15 +3042,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
                 return ackHandler.updateHandler(data, peerId);
               },
-              publishLocal: (data, peerIdStr, signal, context, trackPhysicalWork) => {
+              publishLocal: (data, peerIdStr, signal, context) => {
                 const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-                return ackHandler.localHandler(data, peerId, signal,
-                  context as LocalStorageAckHeadExpectation | undefined, trackPhysicalWork);
+                return ackHandler.localExecution(data, peerId, signal,
+                  context as LocalStorageAckHeadExpectation | undefined);
               },
-              updateLocal: (data, peerIdStr, signal, context, trackPhysicalWork) => {
+              updateLocal: (data, peerIdStr, signal, context) => {
                 const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-                return ackHandler.localUpdateHandler(data, peerId, signal,
-                  context as LocalStorageAckHeadExpectation | undefined, trackPhysicalWork);
+                return ackHandler.localUpdateExecution(data, peerId, signal,
+                  context as LocalStorageAckHeadExpectation | undefined);
               },
             });
             this.log.info(

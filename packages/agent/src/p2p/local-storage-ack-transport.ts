@@ -1,9 +1,7 @@
 import { runBoundedOperation } from '../bounded-operation.js';
+import type { LocalStorageACKExecution } from './storage-ack-endpoint.js';
 
-export type LocalStorageACKWork = (
-  signal: AbortSignal,
-  trackPhysicalWork: (work: Promise<Uint8Array>) => void,
-) => Promise<Uint8Array>;
+export type LocalStorageACKWork = (signal: AbortSignal) => LocalStorageACKExecution;
 
 export class LocalStorageACKDrainTimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -26,23 +24,18 @@ export class LocalStorageACKTransport {
     const controller = new AbortController();
     this.controllers.add(controller);
     const predecessor = this.tail;
-    let physicalWork: Promise<Uint8Array> | undefined;
+    let execution: LocalStorageACKExecution | undefined;
     const result = runBoundedOperation(async (signal) => {
       await predecessor;
       signal.throwIfAborted();
-      const response = Promise.resolve(work(signal, (handlerWork) => {
-        physicalWork = handlerWork;
-      }));
-      // Simple endpoints have no separate deadline. Production endpoints
-      // register the inner handler promise before returning their response.
-      physicalWork ??= response;
-      return response;
+      execution = work(signal);
+      return execution.response;
     }, { timeoutMs, label: 'Local StorageACK request', signal: controller.signal });
     // The caller receives the deadline result, while the FIFO keeps ownership
     // until the handler itself settles, even after timeout or shutdown abort.
     this.tail = predecessor.then(async () => {
       await result.catch(() => {});
-      await physicalWork?.then(() => {}, () => {});
+      await execution?.completion.then(() => {}, () => {});
     }).finally(() => {
       this.controllers.delete(controller);
     });

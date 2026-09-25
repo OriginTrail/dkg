@@ -91,6 +91,12 @@ import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
 
+/** Caller-visible deadline response and the handler work it may outlive. */
+export interface StorageACKExecution {
+  response: Promise<Uint8Array>;
+  completion: Promise<Uint8Array>;
+}
+
 /** Canonical positive decimal that is representable by an EVM uint256 slot. */
 function isCanonicalAuthoritativeContextGraphId(value: unknown): value is string {
   return typeof value === 'string'
@@ -1291,6 +1297,11 @@ export class StorageACKHandler {
             queryOptions: options,
           }));
         }
+        // Releasing obligations for overwritten data belongs to the copy
+        // commit, even when a later deadline prevents the incoming ACK from
+        // being signed. New signed-ACK rows remain a post-sign operation.
+        await commit.write('storage-ack.ledger.supersede',
+          (options) => this.supersedeLedgerOperations(operationsToSupersede, options));
         await commit.write('storage-ack.persistGraphScoped.flush',
           async (options) => { await this.store.flush?.(options); });
       return undefined;
@@ -1298,13 +1309,11 @@ export class StorageACKHandler {
       if (!result.ok) return result;
       if (result.value !== undefined) return { ok: false, decline: result.value };
       // Keep the KA lock through signing and ledger commit. A timed-out copy
-      // may finish its entered data write, but only an actual signature can
-      // create a signed-ACK ledger row or supersede an older obligation.
+      // may finish its entered data write and release overwritten obligations;
+      // only an actual signature can create the incoming signed-ACK row.
       const signature = await this.signDigestWhileLive(digest, signal);
       if (recordLedger) {
         const ledger = await this.runStoreOpOrDecline(cgId, async () => {
-          await commit.write('storage-ack.ledger.supersede',
-            (options) => this.supersedeLedgerOperations(operationsToSupersede, options));
           await commit.write('storage-ack.ledger.record',
             (options) => this.recordSignedAck(ledgerEntry(), options));
           await commit.write('storage-ack.ledger.flush',
@@ -1765,7 +1774,7 @@ export class StorageACKHandler {
    * Peer streams always use remote persistence semantics.
    */
   handler = (data: Uint8Array, peerId: PeerId, externalSignal?: AbortSignal): Promise<Uint8Array> =>
-    this.handlePublishRequest(data, peerId, externalSignal, { kind: 'remote' });
+    this.createPublishRequest(data, peerId, externalSignal, { kind: 'remote' }).response;
 
   /** Local dispatch carries immutable queued-head proof when a queued job owns it. */
   localHandler = (
@@ -1773,38 +1782,41 @@ export class StorageACKHandler {
     peerId: PeerId,
     externalSignal?: AbortSignal,
     expectedHead?: LocalStorageAckHeadExpectation,
-    trackPhysicalWork?: (work: Promise<Uint8Array>) => void,
-  ): Promise<Uint8Array> => this.handlePublishRequest(data, peerId, externalSignal, { kind: 'local', expectedHead }, trackPhysicalWork);
+  ): Promise<Uint8Array> => this.localExecution(data, peerId, externalSignal, expectedHead).response;
 
-  private handlePublishRequest = async (
+  localExecution = (
+    data: Uint8Array,
+    peerId: PeerId,
+    externalSignal?: AbortSignal,
+    expectedHead?: LocalStorageAckHeadExpectation,
+  ): StorageACKExecution => this.createPublishRequest(data, peerId, externalSignal, { kind: 'local', expectedHead });
+
+  private createPublishRequest = (
     data: Uint8Array,
     peerId: PeerId,
     externalSignal: AbortSignal | undefined,
     context: StorageAckRequestContext,
-    trackPhysicalWork?: (work: Promise<Uint8Array>) => void,
-  ): Promise<Uint8Array> => {
+  ): StorageACKExecution => {
     const chainIdLabel = this.config.chainId != null
       ? this.config.chainId.toString()
       : undefined;
-    return withSpan('publisher.storage_ack_handler', async (span) => {
-      let cgIdAttr: string | undefined;
-      let intentPreview: PublishIntentMsg | undefined;
+    let cgIdAttr: string | undefined;
+    let intentPreview: PublishIntentMsg | undefined;
+    try {
+      intentPreview = decodePublishIntent(data);
+      cgIdAttr = intentPreview.contextGraphId;
+    } catch {
+      // Malformed request — handlePublishIntent will throw + reset below.
+    }
+    const execution = this.runHandlerWithDeadline(
+      (signal) => this.handlePublishIntent(data, peerId, signal, context),
+      cgIdAttr,
+      externalSignal,
+    );
+    const response = withSpan('publisher.storage_ack_handler', async (span) => {
+      if (cgIdAttr) span.setAttribute('dkg.context_graph_id', cgIdAttr);
       try {
-        // contextGraphId is cheap to read off the decoded intent for the span
-        // attribute; the full classification rides the encoded response below.
-        intentPreview = decodePublishIntent(data);
-        cgIdAttr = intentPreview.contextGraphId;
-        if (cgIdAttr) span.setAttribute('dkg.context_graph_id', cgIdAttr);
-      } catch {
-        // Malformed request — handlePublishIntent will throw + reset below.
-      }
-      try {
-        const result = await this.runHandlerWithDeadline(
-          (signal) => this.handlePublishIntent(data, peerId, signal, context),
-          cgIdAttr,
-          externalSignal,
-          trackPhysicalWork,
-        );
+        const result = await execution.response;
         const decision = this.buildStorageAckDecision(intentPreview, result, peerId);
         await this.observeStorageAckDecision(decision);
         if (isStorageACKDecline(decision.ack)) {
@@ -1837,6 +1849,7 @@ export class StorageACKHandler {
         throw err;
       }
     });
+    return { response, completion: execution.completion };
   };
 
   /**
@@ -1854,23 +1867,23 @@ export class StorageACKHandler {
    * handler resets the stream exactly as before; the deadline only converts
    * the *slow* (non-throwing) case, which previously had no in-band signal.
    */
-  private runHandlerWithDeadline = async (
+  private runHandlerWithDeadline = (
     workFactory: (signal?: AbortSignal) => Promise<Uint8Array>,
     cgIdForDecline: string | undefined,
     externalSignal?: AbortSignal,
-    trackPhysicalWork?: (work: Promise<Uint8Array>) => void,
-  ): Promise<Uint8Array> => {
-    externalSignal?.throwIfAborted();
+  ): StorageACKExecution => {
     const deadlineMs = this.config.ackHandlerDeadlineMs ?? DEFAULT_ACK_HANDLER_DEADLINE_MS;
     const abortController = new AbortController();
     const signal = externalSignal
       ? AbortSignal.any([abortController.signal, externalSignal])
       : abortController.signal;
-    const work = workFactory(signal);
-    trackPhysicalWork?.(work);
-    if (deadlineMs <= 0) return work;
+    const work = Promise.resolve().then(() => {
+      externalSignal?.throwIfAborted();
+      return workFactory(signal);
+    });
+    if (deadlineMs <= 0) return { response: work, completion: work };
 
-    return runWithDeadline(work, deadlineMs, () => {
+    const response = runWithDeadline(work, deadlineMs, () => {
       const storePressure = formatStorePressureSnapshot(this.getStorePressureSnapshot());
       const deadlineError = new ACKHandlerDeadlineAbortError(deadlineMs, storePressure);
       const decline = this.declineTemporarilyUnavailable(
@@ -1881,6 +1894,7 @@ export class StorageACKHandler {
       abortController.abort(deadlineError);
       return decline;
     });
+    return { response, completion: work };
   };
 
   /**
@@ -2536,23 +2550,28 @@ export class StorageACKHandler {
    * rides the same transient-decline retry ladder.
    */
   updateHandler = (data: Uint8Array, peerId: PeerId, externalSignal?: AbortSignal): Promise<Uint8Array> =>
-    this.handleUpdateRequest(data, peerId, externalSignal, { kind: 'remote' });
+    this.createUpdateRequest(data, peerId, externalSignal, { kind: 'remote' }).response;
 
   localUpdateHandler = (
     data: Uint8Array,
     peerId: PeerId,
     externalSignal?: AbortSignal,
     expectedHead?: LocalStorageAckHeadExpectation,
-    trackPhysicalWork?: (work: Promise<Uint8Array>) => void,
-  ): Promise<Uint8Array> => this.handleUpdateRequest(data, peerId, externalSignal, { kind: 'local', expectedHead }, trackPhysicalWork);
+  ): Promise<Uint8Array> => this.localUpdateExecution(data, peerId, externalSignal, expectedHead).response;
 
-  private handleUpdateRequest = async (
+  localUpdateExecution = (
+    data: Uint8Array,
+    peerId: PeerId,
+    externalSignal?: AbortSignal,
+    expectedHead?: LocalStorageAckHeadExpectation,
+  ): StorageACKExecution => this.createUpdateRequest(data, peerId, externalSignal, { kind: 'local', expectedHead });
+
+  private createUpdateRequest = (
     data: Uint8Array,
     peerId: PeerId,
     externalSignal: AbortSignal | undefined,
     context: StorageAckRequestContext,
-    trackPhysicalWork?: (work: Promise<Uint8Array>) => void,
-  ): Promise<Uint8Array> => {
+  ): StorageACKExecution => {
     let cgIdForDecline: string | undefined;
     try {
       // contextGraphId is cheap to read off the decoded intent for the
@@ -2565,7 +2584,6 @@ export class StorageACKHandler {
       (signal) => this.handleUpdateIntent(data, peerId, signal, context),
       cgIdForDecline,
       externalSignal,
-      trackPhysicalWork,
     );
   };
 

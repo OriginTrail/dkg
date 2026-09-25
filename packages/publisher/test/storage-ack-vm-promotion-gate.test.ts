@@ -83,6 +83,7 @@ function harness(
     store?: OxigraphStore;
     rootCount?: (kaUal: string) => Promise<bigint>;
     locks?: Map<string, Promise<void>>;
+    deadlineMs?: number;
   } = {},
 ): Harness {
   const store = options.store ?? new OxigraphStore();
@@ -103,6 +104,7 @@ function harness(
     onPriorVersionAwaitingPromotion: (request) => { priorVersions.push({ ...request }); },
     ...(options.rootCount ? { readKnowledgeAssetRootCount: options.rootCount } : {}),
     ...(options.locks ? { workspaceWriteLocks: options.locks } : {}),
+    ...(options.deadlineMs ? { ackHandlerDeadlineMs: options.deadlineMs } : {}),
   }, new TypedEventBus());
   return { wallet, store, handler, signMessage, declines, priorVersions };
 }
@@ -419,6 +421,35 @@ describe('StorageACK VM-promotion finality gate', () => {
       expect(isStorageACKDecline(retry)).toBe(false);
       expect(await swmValues(h.store)).toEqual(['"edited-retry"']);
       expect(await supersededRows(h.store)).toEqual([firstRow!['op']]);
+    });
+
+    it('releases an overwritten obligation after a non-cooperative replacement misses its deadline', async () => {
+      const h = harness(async () => OK, { rootCount: async () => 0n, deadlineMs: 40 });
+      await signedPublish(h, 'first-attempt');
+      const [firstRow] = await ledgerRows(h.store);
+      await h.store.update!(storageAckLedgerMarkUpdate(firstRow!['op']!, LEDGER.absentSeenAt, new Date()));
+      const originalReplace = h.store.replaceGraph!.bind(h.store);
+      let entered!: () => void;
+      let release!: () => void;
+      const inReplace = new Promise<void>((resolve) => { entered = resolve; });
+      const held = new Promise<void>((resolve) => { release = resolve; });
+      vi.spyOn(h.store, 'replaceGraph').mockImplementation(async (graph, quads) => {
+        entered();
+        await held;
+        await originalReplace(graph, quads);
+      });
+
+      const response = h.handler.handler(publishIntent('edited-retry').bytes, PEER);
+      await inReplace;
+      expect(isStorageACKDecline(decodeStorageACK(await response))).toBe(true);
+      release();
+
+      await vi.waitFor(async () => {
+        expect(await swmValues(h.store)).toEqual(['"edited-retry"']);
+        expect(await supersededRows(h.store)).toEqual([firstRow!['op']]);
+      });
+      expect(await ledgerRows(h.store)).toHaveLength(1);
+      expect(h.signMessage).toHaveBeenCalledOnce();
     });
 
     it('still refuses different content once that version landed on chain', async () => {
