@@ -66,9 +66,13 @@ import {
   DKGAgent,
   loadOpWallets,
   resolveSyncReconcilerEnabled,
+  resolveVmReconcilerEnabled,
 } from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
+import { parseStatusQuery, type StoreQuadsStatusFields } from '../../status-store-quads-wire.js';
+import { requestExternalStoreQuads, peekCachedExternalStoreQuads } from '../store-quads-cache.js';
+import { probeExternalStore } from '../store-reachability.js';
 import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
@@ -125,7 +129,7 @@ import { buildRelayStatusBlock } from '../relay-status-block.js';
 import { fetchAllEntries, resolveRegistryConfig } from '../../integrations/registry-client.js';
 import type { IntegrationEntry, TrustTier } from '../../integrations/schema.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
-import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
+import { loadTokens, httpAuthGuard, extractBearerToken, canAdministerNode } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
@@ -340,7 +344,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import { actorFromRequestContext, type RequestContext } from './context.js';
 
 // In-process cache for the dkg-integrations registry. Sidebar polls
 // open/close and 60s refresh would otherwise hit GitHub on every tick;
@@ -452,86 +456,6 @@ function createRouteEvmProvider(
   return routeTransport.createProvider(rpcUrl, rpcUrls);
 }
 
-// Quad-count cache for external SPARQL backends. A full-store COUNT is not a
-// liveness check: on a multi-million-row namespace it can occupy the store for
-// seconds and compete directly with sync. Normal /api/status polling therefore
-// never starts it. Operators may request a background refresh explicitly with
-// `?includeStoreQuads=true`; subsequent ordinary status calls can reuse the
-// cached value without touching the store. Cold/stale explicit callers get the
-// current snapshot while one refresh runs in the background, so status never
-// waits on the count.
-// Local backends bypass this entirely (file-bytes metric stays on the
-// metrics collector tick).
-const STORE_QUADS_CACHE_TTL_MS = 30_000;
-type StoreQuadsStatus = 'pending' | 'ready' | 'unreachable';
-interface StoreQuadsSnapshot {
-  value: number | null;
-  status: StoreQuadsStatus;
-}
-
-let storeQuadsCache: {
-  value: number | null;
-  status: Exclude<StoreQuadsStatus, 'pending'>;
-  fetchedAt: number;
-} | null = null;
-let storeQuadsInflight: Promise<void> | null = null;
-
-/** Drop cached quad counts (e.g. when the managed Oxigraph child exits). */
-export function invalidateExternalStoreQuadsCache(): void {
-  storeQuadsCache = null;
-  storeQuadsInflight = null;
-}
-
-function getCachedExternalStoreQuads(
-  agent: DKGAgent,
-  now: number,
-): StoreQuadsSnapshot {
-  if (storeQuadsCache && now - storeQuadsCache.fetchedAt < STORE_QUADS_CACHE_TTL_MS) {
-    return { value: storeQuadsCache.value, status: storeQuadsCache.status };
-  }
-
-  const currentSnapshot: StoreQuadsSnapshot = storeQuadsCache
-    ? { value: storeQuadsCache.value, status: storeQuadsCache.status }
-    : { value: null, status: 'pending' };
-  if (!storeQuadsInflight) {
-    const refresh = (async () => {
-      try {
-        const r = await agent.store.query(
-          'SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o } }',
-          { priority: 'health', source: 'daemon.status.storeQuads' },
-        );
-        let value: number | null = null;
-        if (r.type === 'bindings' && r.bindings.length > 0) {
-          const cell = r.bindings[0].c ?? '';
-          const digits = cell.match(/\d+/)?.[0];
-          value = digits ? parseInt(digits, 10) : 0;
-        }
-        storeQuadsCache = {
-          value,
-          status: value === null ? 'unreachable' : 'ready',
-          fetchedAt: Date.now(),
-        };
-      } catch {
-        // Surface "unknown" rather than a stale value; operators can
-        // distinguish unreachable from genuinely-empty via storeBackend +
-        // their network logs. Cache the null briefly to avoid hammering
-        // a flapping endpoint.
-        storeQuadsCache = { value: null, status: 'unreachable', fetchedAt: Date.now() };
-      }
-    })();
-    storeQuadsInflight = refresh;
-    void refresh.finally(() => {
-      if (storeQuadsInflight === refresh) storeQuadsInflight = null;
-    });
-  }
-  return currentSnapshot;
-}
-
-function peekCachedExternalStoreQuads(): StoreQuadsSnapshot | null {
-  if (!storeQuadsCache) return null;
-  return { value: storeQuadsCache.value, status: storeQuadsCache.status };
-}
-
 async function getRegistryCacheSnapshot(): Promise<RegistryCacheSnapshot> {
   const now = Date.now();
   if (registryCache && now - registryCache.fetchedAt < REGISTRY_CACHE_TTL_MS) {
@@ -571,6 +495,7 @@ function projectRfc64SelectedPublicSyncStatus(
   agent: DKGAgent,
   networkDefaultContextGraphs: readonly string[],
   catalogBackedContextGraphs: readonly string[],
+  isNodeAdmin: boolean,
 ) {
   // This is the effective requested sync scope, not proof that every listed
   // graph is public. Runtime classification still decides whether a graph uses
@@ -579,10 +504,57 @@ function projectRfc64SelectedPublicSyncStatus(
     ...agent.getSyncContextGraphIds(),
     ...networkDefaultContextGraphs,
   ])];
+  const catalogBacked = new Set(catalogBackedContextGraphs);
+  // `/api/status` is unauthenticated, and the scope names private graphs and
+  // the cleartext ids of adopted name hashes. A caller without node-admin
+  // authority sees only the selected public catalog graphs, which this
+  // response already lists, and a count of the whole scope.
   return {
     defaultEnabled: true,
-    requestedContextGraphs,
-    catalogBackedContextGraphs: [...new Set(catalogBackedContextGraphs)],
+    requestedContextGraphs: isNodeAdmin
+      ? requestedContextGraphs
+      : requestedContextGraphs.filter((contextGraphId) => catalogBacked.has(contextGraphId)),
+    requestedContextGraphCount: requestedContextGraphs.length,
+    catalogBackedContextGraphs: [...catalogBacked],
+  };
+}
+
+/**
+ * Aggregate-only view of subscriptions this node knows only by their on-chain
+ * name hash. `/api/status` is unauthenticated, so it never names the affected
+ * graphs; the admin-only `GET /api/context-graph/subscriptions` has the rows.
+ * Those blocked by a conflicting binding are counted apart: no peer can
+ * unblock them, so "waiting for a peer" would be wrong advice.
+ */
+export function summarizeContextGraphIdentityStatus(
+  agent: DKGAgent,
+): { nameHashOnly: number; bindingConflicts?: number; message?: string } {
+  let nameHashOnly = 0;
+  let bindingConflicts = 0;
+  for (const [contextGraphId, subscription] of agent.getSubscribedContextGraphs?.() ?? []) {
+    if (subscription?.subscribed !== true) continue;
+    const identity = agent.describeContextGraphIdentity?.(contextGraphId);
+    if (identity?.state !== 'name-hash-only' && identity?.state !== 'name-hash-only-private') continue;
+    nameHashOnly += 1;
+    if (identity.bindingConflict === true) bindingConflicts += 1;
+  }
+  if (nameHashOnly === 0) return { nameHashOnly };
+  const graphs = (count: number) => `${count} subscribed Context Graph${count === 1 ? ' is' : 's are'} known only by `
+    + 'the on-chain name hash';
+  const waiting = nameHashOnly - bindingConflicts;
+  const parts: string[] = [];
+  if (waiting > 0) {
+    parts.push(`${graphs(waiting)} and cannot sync yet; waiting for a peer to reveal the cleartext id, `
+      + 'or subscribe with the cleartext id');
+  }
+  if (bindingConflicts > 0) {
+    parts.push(`${graphs(bindingConflicts)} and blocked by a conflicting binding: the cleartext id is already `
+      + 'bound to a different on-chain Context Graph on this node');
+  }
+  return {
+    nameHashOnly,
+    ...(bindingConflicts > 0 ? { bindingConflicts } : {}),
+    message: `${parts.join('. ')} (details: GET /api/context-graph/subscriptions).`,
   };
 }
 
@@ -741,13 +713,18 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     });
     const reportsExternalStoreQuads =
       isExternalBackend(config.store?.backend) || config.store?.backend === 'oxigraph-server';
-    const includeStoreQuads = url.searchParams.get('includeStoreQuads') === 'true'
-      || url.searchParams.get('includeStoreQuads') === '1';
-    const storeQuadsSnapshot = reportsExternalStoreQuads
-      ? includeStoreQuads
-        ? getCachedExternalStoreQuads(agent, Date.now())
-        : peekCachedExternalStoreQuads()
-      : null;
+    const { includeStoreQuads, probeStore } = parseStatusQuery(url.searchParams);
+    const storeQuadsNow = Date.now();
+    // A local backend reports no count; the cache returns complete fields.
+    const storeQuadsFields: StoreQuadsStatusFields = !reportsExternalStoreQuads
+      ? { storeQuads: null }
+      : includeStoreQuads
+        ? requestExternalStoreQuads(agent, storeQuadsNow)
+        : peekCachedExternalStoreQuads(storeQuadsNow);
+    // Started now so its wait overlaps the awaits below; awaited for the reply.
+    const storeReachabilityCheck = reportsExternalStoreQuads && probeStore
+      ? probeExternalStore(agent)
+      : undefined;
     const backpressure = backpressureRegistry.capture();
     // RFC-41 §4.9 + §4.3: expose build-info + installMode for
     // doctor / agent disambiguation. loadBuildInfo() falls back to
@@ -766,6 +743,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       agent,
       resolveNetworkDefaultContextGraphs(network),
       rfc64PublicCatalogActivation.selectedContextGraphs,
+      canAdministerNode(actorFromRequestContext(ctx).authentication),
     );
     const unavailableFinalizationRecovery = (reason: string) => ({
       available: false,
@@ -789,6 +767,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         );
       }
     }
+    const storeReachability = await storeReachabilityCheck;
     return jsonResponse(res, 200, {
       name: config.name,
       version: nodeVersion,
@@ -806,7 +785,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       networkName: network?.networkName ?? null,
       storeBackend: config.store?.backend ?? "oxigraph-worker",
       // External backend visibility (RFC 120 / plan PR 1 item 3). For
-      // local backends the URL/count stay null and count status is omitted.
+      // local backends the URL/count stay null and count status/age are omitted.
       storeUrl: isExternalBackend(config.store?.backend)
         ? (() => {
             const opts = (config.store?.options ?? {}) as Record<string, unknown>;
@@ -831,8 +810,12 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // for that backend (getStoreBytes is null, there's no store.nq), and a
       // failed query here is how operators see the managed server is down
       // (e.g. after a failed revive) instead of it always looking healthy.
-      storeQuads: storeQuadsSnapshot?.value ?? null,
-      storeQuadsStatus: storeQuadsSnapshot?.status,
+      // `storeQuadsStatus` says what a null count means ('not-requested',
+      // 'pending', 'unreachable'); `storeQuadsAgeMs` is how old the cached
+      // result is, since ordinary polling never refreshes it.
+      ...storeQuadsFields,
+      // Only when requested (`probeStore`): whether the store answers right now.
+      storeReachability,
       uptimeMs: Date.now() - startedAt,
       // Concurrency admission control (PR #1209): inFlight = requests currently
       // holding a slot, max = the configured cap (0 = disabled), rejectedTotal =
@@ -843,6 +826,10 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         max: admission.max,
         rejectedTotal: admission.rejectedTotal,
       },
+      // Main-thread stalls over the last complete window (p50/p99/max ms).
+      // A max in the seconds means every route, stream and timer waited that
+      // long; the daemon log carries a rate-limited warning for it.
+      eventLoopDelay: ctx.eventLoopDelay?.snapshot() ?? null,
       // Public status carries state only. Detailed lane timings and operation
       // summaries stay behind the node-admin diagnostics route.
       backpressure: {
@@ -855,13 +842,24 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       },
       // The certification harness must be able to distinguish an operator
       // setting from the switch the agent actually honors. This projection
-      // deliberately uses the same resolver as both runtime reconcile gates,
-      // including environment-variable precedence.
+      // deliberately uses the same resolvers as the runtime gates (periodic
+      // peer sync and chain-driven VM reconcile respectively), including
+      // environment-variable precedence.
       syncLifecycle: {
         syncReconcilerEnabled: resolveSyncReconcilerEnabled(
           config.syncReconcilerEnabled,
         ),
+        vmReconcilerEnabled: resolveVmReconcilerEnabled(
+          config.vmReconcilerEnabled,
+        ),
       },
+      // Effective VM promotion on this node: whether chain-driven VM
+      // reconcile can run (switch AND chain capability), a core's StorageACK
+      // finality gate and handler state, its declines per code over the last
+      // hour, and the last ACK promotion audit result.
+      vmPromotion: typeof agent.getVmPromotionStatus === 'function'
+        ? agent.getVmPromotionStatus()
+        : undefined,
       connectedPeers: uniquePeers.size,
       connections: {
         total: allConns.length,
@@ -885,6 +883,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // public SWM scope terminal. The harness knows its generated CG is public
       // and uses this exact requested-scope projection as its no-spend preflight.
       rfc64SelectedPublicSync,
+      contextGraphIdentity: summarizeContextGraphIdentityStatus(agent),
       hasOpenClawChannel: hasConfiguredLocalAgentChat(config, 'openclaw'),
       localAgentIntegrations,
       connectedLocalAgentIds: localAgentIntegrations.filter((integration) => integration.enabled).map((integration) => integration.id),

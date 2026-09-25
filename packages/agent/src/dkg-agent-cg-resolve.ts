@@ -440,8 +440,10 @@ import {
 } from './curator-meta-refresh.js';
 import {
   enrichContextGraphListAuthorityV1,
+  toContextGraphListOnChainFacts,
   type ListContextGraphsRow,
 } from './context-graph-list-authority-enrichment.js';
+import type { OnChainContextGraphFacts } from './context-graph-storage-discovery.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
@@ -501,6 +503,87 @@ function contextGraphListRowPrivacy(accessPolicy?: string): ListContextGraphsPri
 
 function isPrivateContextGraphListRow(accessPolicy?: string): boolean {
   return contextGraphListRowPrivacy(accessPolicy) === 'private';
+}
+
+/**
+ * The agent state that tells a hash-only row apart and carries its chain
+ * facts. Listing methods pass their own maps in, so a renamed field fails to
+ * compile rather than silently changing what is listed.
+ */
+interface ContextGraphListChainState {
+  readonly subscribedContextGraphs: ReadonlyMap<string, { readonly onChainHash?: string }>;
+  readonly wireIdToLocalCgId: ReadonlyMap<string, string>;
+  readonly onChainContextGraphFacts: ReadonlyMap<string, OnChainContextGraphFacts>;
+}
+
+/**
+ * True for a row the node knows only by its on-chain name hash: the local id
+ * is the committed wire id itself, with no cleartext behind it. This is the
+ * canonical subscription setter's placeholder predicate (the row claims that
+ * exact `onChainHash` and the reverse index points at it), so a user-chosen
+ * cleartext id that merely looks like a hash never matches.
+ */
+function isWireOnlyContextGraphListRow(state: ContextGraphListChainState, contextGraphId: string): boolean {
+  if (!/^0x[0-9a-f]{64}$/.test(contextGraphId)) return false;
+  return state.subscribedContextGraphs.get(contextGraphId)?.onChainHash?.toLowerCase() === contextGraphId
+    && state.wireIdToLocalCgId.get(contextGraphId) === contextGraphId;
+}
+
+/**
+ * Set aside the rows the node knows only by their on-chain name hash. Both
+ * listing paths apply privacy and caller annotation to the local rows alone
+ * and list every wire-only row for every caller, reduced to chain-public
+ * facts by {@link annotateContextGraphListRows}.
+ */
+function partitionWireOnlyContextGraphListRows<Row extends { id: string }>(
+  rows: readonly Row[],
+  state: ContextGraphListChainState,
+): { local: Row[]; wireOnly: Row[] } {
+  const local: Row[] = [];
+  const wireOnly: Row[] = [];
+  for (const row of rows) {
+    (isWireOnlyContextGraphListRow(state, row.id) ? wireOnly : local).push(row);
+  }
+  return { local, wireOnly };
+}
+
+/**
+ * The listed rows: the visible local rows, then the wire-only rows, each with
+ * the additive `nameKnown` and `onChain` fields.
+ *
+ * `onChain` holds chain-public facts only (see ContextGraphListOnChainFacts).
+ * A wire-only row is reduced to those facts: its name stays the hash and no
+ * locally projected field survives, so listing it for every caller never
+ * reveals more than the chain already publishes, including for a private
+ * graph. A cleartext name is shown only for rows the node itself indexes under
+ * that name (created, joined, adopted after keccak verification, or a local
+ * definition whose commitment matched); it is never guessed.
+ */
+function annotateContextGraphListRows(
+  visibleLocal: readonly ListContextGraphsRow[],
+  wireOnly: readonly ListContextGraphsRow[],
+  state: ContextGraphListChainState,
+): ListContextGraphsRow[] {
+  const withChainFacts = (row: ListContextGraphsRow, nameKnown: boolean): ListContextGraphsRow => {
+    const facts = row.onChainId ? state.onChainContextGraphFacts.get(row.onChainId) : undefined;
+    return {
+      ...row,
+      nameKnown,
+      ...(facts ? { onChain: toContextGraphListOnChainFacts(facts) } : {}),
+    };
+  };
+  return [
+    ...visibleLocal.map((row) => withChainFacts(row, true)),
+    ...wireOnly.map((row) => withChainFacts({
+      id: row.id,
+      uri: row.uri,
+      name: row.id,
+      isSystem: false,
+      subscribed: row.subscribed,
+      synced: row.synced,
+      ...(row.onChainId ? { onChainId: row.onChainId } : {}),
+    }, false)),
+  ];
 }
 
 async function applyContextGraphListPrivacy(
@@ -848,10 +931,19 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       };
     });
 
-    return applyContextGraphListPrivacy(
-      this,
+    const chainState: ContextGraphListChainState = {
+      subscribedContextGraphs: this.subscribedContextGraphs,
+      wireIdToLocalCgId: this.wireIdToLocalCgId,
+      onChainContextGraphFacts: this.onChainContextGraphFacts,
+    };
+    const { local, wireOnly } = partitionWireOnlyContextGraphListRows(
       rows.filter((row): row is InternalContextGraphListRow => row !== null),
-      opts,
+      chainState,
+    );
+    return annotateContextGraphListRows(
+      await applyContextGraphListPrivacy(this, local, opts),
+      wireOnly,
+      chainState,
     );
   }
 
@@ -1621,6 +1713,19 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
        * follows from the immutable policy alone.
        */
       requireLiveRosterForPrivate?: boolean;
+      /**
+       * How fresh this authority has to be. Defaults to `'live'`.
+       *
+       * Governs only the current-state read: the one `live-current` takes,
+       * and the one a finalized `authorityReadMode` falls back to when its
+       * lane leaves the answer undecided. The finalized lanes are unaffected.
+       *
+       * `'bounded'` lets the node's own event index answer, and is only for a
+       * caller whose decision the NEXT read can correct. It must never be used
+       * where the answer issues a key, permits a plaintext downgrade, or
+       * decides whether a roster-mutating transaction is sent.
+       */
+      freshness?: 'live' | 'bounded';
     } = {},
   ): Promise<RegisteredContextGraphAuthority> {
     const registration = await this.resolveContextGraphRegistrationBinding(
@@ -1676,7 +1781,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         accessPolicyState = await this.resolveLiveOnChainAccessPolicyState(
           onChainId.toString(),
           createOperationContext('system'),
-          { signal: options.signal },
+          {
+            signal: options.signal,
+            ...(options.freshness === undefined ? {} : { freshness: options.freshness }),
+          },
         );
       } catch (err) {
         return {
@@ -2979,6 +3087,19 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       throw entry.reason;
     });
 
+    // Rows known only by their on-chain name hash skip privacy resolution and
+    // caller annotation: every caller sees them, reduced to chain-public facts.
+    const chainState: ContextGraphListChainState = {
+      subscribedContextGraphs: this.subscribedContextGraphs,
+      wireIdToLocalCgId: this.wireIdToLocalCgId,
+      onChainContextGraphFacts: this.onChainContextGraphFacts,
+    };
+    const { local: localRows, wireOnly: wireOnlyRows } = partitionWireOnlyContextGraphListRows(
+      rows,
+      chainState,
+    );
+    rows = localRows;
+
     const resolveRowPrivacy = async (row: ListContextGraphsRow): Promise<ListContextGraphsPrivacy> => {
       const explicitPrivacy = privacyByUri.get(row.uri) ?? 'unknown';
       if (explicitPrivacy !== 'unknown') return explicitPrivacy;
@@ -3012,12 +3133,16 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       // Without a caller wallet we still leave `callerInvolved` unset so the UI can use the
       // curator-vs-identity fallback for OPEN graphs.
       return {
-        rows: rows.filter((r) => {
-          const privacy = rowPrivacy(r);
-          if (privacy === 'private') return false;
-          if (privacy === 'unknown') return !scopedListing;
-          return true;
-        }),
+        rows: annotateContextGraphListRows(
+          rows.filter((r) => {
+            const privacy = rowPrivacy(r);
+            if (privacy === 'private') return false;
+            if (privacy === 'unknown') return !scopedListing;
+            return true;
+          }),
+          wireOnlyRows,
+          chainState,
+        ),
         cacheable,
       };
     }
@@ -3053,14 +3178,18 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     });
 
     return {
-      rows: annotated
-        .filter(({ row, privacy }) => {
-          if (row.callerInvolved === true) return true;
-          if (privacy === 'unknown') return false;
-          if (privacy === 'private') return false;
-          return true;
-        })
-        .map(({ row }) => row),
+      rows: annotateContextGraphListRows(
+        annotated
+          .filter(({ row, privacy }) => {
+            if (row.callerInvolved === true) return true;
+            if (privacy === 'unknown') return false;
+            if (privacy === 'private') return false;
+            return true;
+          })
+          .map(({ row }) => row),
+        wireOnlyRows,
+        chainState,
+      ),
       cacheable,
     };
   }

@@ -50,6 +50,7 @@ import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { resolveWorkspaceEncryptionRequirement } from './workspace-encryption-policy.js';
 import { computeFlatKCRootV10 } from './merkle.js';
 import { workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
+import { storageAckOwedCopiesByScopeQuery } from './storage-ack-ledger.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
@@ -870,6 +871,37 @@ export class SharedMemoryHandler {
   }
 
   /**
+   * Whether this workspace scope has a signed StorageACK copy still owed and
+   * absent from VM. A local self-ACK keeps the queued head, so its ledger
+   * operation need not appear among the head aliases.
+   */
+  private async headIsUnpromotedOwedAckCopy(
+    contextGraphId: string,
+    head: { readonly kaUal: string },
+    version: bigint,
+    subGraphName?: string,
+  ): Promise<boolean> {
+    const owed = await this.store.query(storageAckOwedCopiesByScopeQuery({
+      namespace: contextGraphId,
+      metaGraph: this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName),
+      kaUal: head.kaUal,
+      assertionVersion: version,
+    }), {
+      source: 'publisher.swm.graphScoped.owedAckCopy',
+    });
+    if (owed.type !== 'bindings' || owed.bindings.length === 0) return false;
+    const promoted = await this.store.query(
+      `ASK { GRAPH <${contextGraphMetaUri(contextGraphId)}> {
+        <${head.kaUal}> <http://dkg.io/ontology/status> "confirmed" ;
+          <http://dkg.io/ontology/assertionVersion> ?version .
+        FILTER(?version >= ${version})
+      } }`,
+      { source: 'publisher.swm.graphScoped.owedAckCopyPromoted' },
+    );
+    return !(promoted.type === 'boolean' && promoted.value);
+  }
+
+  /**
    * Enforce CAS conditions carried in a gossip message.
    * Must be called inside a write lock so no concurrent mutation can
    * interleave between the check and the subsequent write.
@@ -1606,6 +1638,18 @@ export class SharedMemoryHandler {
               `${currentHead.publisherPeerId}, not ${publisherPeerId}`;
             this.log.warn(ctx, `SWM validation rejected: ${reason}`);
             return rejectWithinLocks('validation', reason);
+          }
+          // A core replaces the StorageACK copy it signed only once that
+          // version is in its VM (or the chain moved past it, which releases
+          // the copy). Defer the newer share meanwhile, like a head repair:
+          // the sender keeps it queued and it applies once the copy is
+          // promoted.
+          if (await this.headIsUnpromotedOwedAckCopy(contextGraphId, currentHead, currentVersion, subGraphName)) {
+            const reason =
+              `OWED_STORAGE_ACK_COPY: ${contentScope.ual} version ${currentVersion} is a StorageACK ` +
+              'copy this node signed and has not promoted yet';
+            this.log.info(ctx, `SWM share deferred: ${reason}`);
+            return rejectWithinLocks('corrupt-head', reason);
           }
         }
 

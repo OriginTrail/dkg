@@ -49,6 +49,16 @@ import { normalizeContextGraphAuthorityHash } from
   './context-graph-authority-generation.js';
 import { CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER } from
   './context-graph-authority-rpc-sites.js';
+import type {
+  ContextGraphStorageRange,
+  ContextGraphStorageRangeOptions,
+} from './chain-adapter.js';
+import {
+  CONTEXT_GRAPH_STORAGE_ENUMERATION_RPC_CONSUMER,
+  isContextGraphStorageEnumerationReadRetryable,
+  isNonexistentContextGraphStorageRevert,
+  readContextGraphStorageRangeV1,
+} from './evm-context-graph-storage-enumeration.js';
 
 type ContextGraphRegistryLiveScanPlan =
   | {
@@ -739,6 +749,26 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
   ): Promise<ContextGraphLiveAuthority | null> {
     await this.init();
     const cgs = this.requireContextGraphStorage();
+    // BEFORE THE COALESCER, AND THAT IS THE WHOLE POINT.
+    //
+    // `flightKey` below carries no freshness component, so a bounded answer
+    // placed inside `run()` would be handed to every caller sharing that key —
+    // including a live one that asked precisely because its decision cannot
+    // tolerate a stale roster. The coalescer's contract, stated in its own
+    // header and in the docstring above, is that it only ever carries reads
+    // with zero staleness; that is what lets the security gates use it.
+    //
+    // So a bounded read is answered here or not at all. A miss simply falls
+    // through to the live read below, unchanged.
+    if (this.contextGraphBoundedAuthorityReadsEnabled
+      && options.freshness === 'bounded') {
+      const peeked = await this.contextGraphAuthorityIndexReader
+        ?.peekContextGraphLiveAuthority(contextGraphId, { signal: options.signal });
+      // `undefined` is "the index cannot answer", never "no such graph": the
+      // caller falls back to the chain rather than inheriting a conclusion the
+      // index never reached.
+      if (peeked !== undefined) return peeked;
+    }
     // Full lineage, never the bare numeric id: ContextGraphStorage hands out
     // sequential ids, so another deployment reuses them freely.
     const flightKey = [
@@ -1210,20 +1240,22 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     await this.init();
     const cgs = this.requireContextGraphStorage();
     const knowledgeAssetsFromLog = await this.knowledgeAssetsFromLogFor(cgs);
-    const logged = await knowledgeAssetsFromLog?.readModel.readContextGraphKaList(
+    // One ordinal, not the list: the read model answers it from its per-graph
+    // ordinal cache, so a walk over a graph's ordinals costs one fold per log
+    // revision instead of one per ordinal (scalar read from PR #2784).
+    const logged = await knowledgeAssetsFromLog?.readModel.readContextGraphKaAt(
       contextGraphId,
+      index,
       { view: 'latest' },
     );
     // Position IS the ordinal — the on-chain list only ever appends. An index
     // the log does not hold is NOT an out-of-range answer to invent: the chain
     // reverts on one, and callers read that revert, so the call below must be
-    // the thing that produces it.
+    // the thing that produces it. The read model returns `undefined` for it.
     if (logged !== undefined
       && knowledgeAssetsFromLog !== undefined
-      && this.chainEventLogBindingIsCurrent(knowledgeAssetsFromLog.binding)
-      && index >= 0n
-      && index < BigInt(logged.kaIds.length)) {
-      return logged.kaIds[Number(index)]!;
+      && this.chainEventLogBindingIsCurrent(knowledgeAssetsFromLog.binding)) {
+      return logged.kaId;
     }
     const kaId: bigint = await this.readContract(
       cgs, 'cgStorage.getContextGraphKaAt', 'getContextGraphKaAt', contextGraphId, index,
@@ -1408,6 +1440,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             fromBlock,
             toBlock,
             signal: options.signal,
+            provider,
           });
         };
         const readAuthorityHistory = () => resolveContextGraphAuthorityHistory({
@@ -1630,6 +1663,75 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     options: ChainReadOptions = {},
   ): Promise<ReadonlyMap<string, bigint | null>> {
     return this.getContextGraphNameHashResolver().resolveMany(nameHashes, options.signal);
+  }
+
+  /** See ChainAdapter.hasContextGraphNameRegistry. */
+  async hasContextGraphNameRegistry(): Promise<boolean> {
+    await this.init();
+    return this.contracts.contextGraphNameRegistry !== undefined;
+  }
+
+  /**
+   * See ChainAdapter.readContextGraphStorageRange and
+   * evm-context-graph-storage-enumeration.ts.
+   */
+  async readContextGraphStorageRange(
+    options: ContextGraphStorageRangeOptions,
+  ): Promise<ContextGraphStorageRange> {
+    await this.init();
+    options.signal?.throwIfAborted();
+    const storage = this.requireContextGraphStorage();
+    const storageAddress = (await storage.getAddress()).toLowerCase();
+    const label = CONTEXT_GRAPH_STORAGE_ENUMERATION_RPC_CONSUMER;
+    const readOptions = {
+      signal: options.signal,
+      rpcUsageConsumer: CONTEXT_GRAPH_STORAGE_ENUMERATION_RPC_CONSUMER,
+      // Background bulk reads, like the authority snapshot: the wide-scan
+      // attempt cap lets a pass queued behind the RPC governor's background
+      // startup jitter finish instead of timing out on the 4 s point-read cap.
+      policy: 'wideLogScan' as const,
+    };
+    const viewReadOptions = {
+      ...readOptions,
+      isRetryable: isContextGraphStorageEnumerationReadRetryable,
+    };
+    return readContextGraphStorageRangeV1({
+      storageAddress,
+      readAnchor: () => this.readTipProvider(
+        `${label} anchor`,
+        async (provider) => {
+          const anchor = await resolveEvmFinalityAnchorBlockV1({
+            finalityConfirmations: this.finalityConfirmations,
+            readHead: () => provider.getBlock('latest'),
+            readBlockAt: (blockNumber) => provider.getBlock(blockNumber),
+            unavailable: (detail) => new Error(
+              `Context Graph storage enumeration anchor unavailable: ${detail}`,
+            ),
+          });
+          return { number: anchor.number, hash: anchor.hash };
+        },
+        readOptions,
+      ),
+      readLatestId: (blockTag) => this.readContractWith(
+        storage,
+        `${label} getLatestContextGraphId`,
+        (c) => c.getLatestContextGraphId({ blockTag }),
+        viewReadOptions,
+      ),
+      readContextGraph: (contextGraphId, blockTag) => this.readContractWith(
+        storage,
+        `${label} getContextGraph`,
+        (c) => c.getContextGraph(contextGraphId, { blockTag }),
+        viewReadOptions,
+      ),
+      readNameHash: (contextGraphId, blockTag) => this.readContractWith(
+        storage,
+        `${label} getNameHash`,
+        (c) => c.getNameHash(contextGraphId, { blockTag }),
+        viewReadOptions,
+      ),
+      isNonexistentContextGraph: isNonexistentContextGraphStorageRevert,
+    }, options);
   }
 }
 

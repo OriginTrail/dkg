@@ -45,6 +45,7 @@ describe('RFC-64 default-on local unregistered SWM publication', () => {
       kaNumberAllocator: makeTestKaNumberAllocator(),
       syncSharedMemoryOnConnect: false,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       syncOnConnectEnabled: false,
       durableSyncEnabled: false,
       agentProfileHeartbeatMs: 0,

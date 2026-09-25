@@ -21,7 +21,9 @@ import {
   readLocallyTrustedKnowledgeAssetControls,
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
+  storageAckLedgerEntryQuads,
 } from '../src/index.js';
+import { workspaceOperationSubject } from '../src/workspace-metadata-subjects.js';
 import { SharedMemoryHandler } from '../src/workspace-handler.js';
 
 const CONTEXT_GRAPH = 'rootless-receiver';
@@ -174,6 +176,51 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
       type: 'bindings',
       bindings: [{ section, name: '"Safety"' }],
     });
+  });
+
+  it.each([
+    ['head points at the signed copy', 'rootless-op-1'],
+    ['head preserves the queued share', 'storage-ack-signed-copy'],
+  ])('defers a newer share while %s and the copy is not yet in VM', async (_case, signedOperationId) => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    expect((await handler.handle(v2Request(), PEER_ID)).applied).toBe(true);
+    // A local self-ACK keeps the queued head but records a different signed
+    // copy in the ledger; both shapes must retain the copy until promotion.
+    await store.insert(storageAckLedgerEntryQuads({
+      operationSubject: workspaceOperationSubject(CONTEXT_GRAPH, signedOperationId),
+      namespace: CONTEXT_GRAPH,
+      metaGraph: new GraphManager(store).sharedMemoryMetaUri(CONTEXT_GRAPH),
+      contextGraphId: '42',
+      kaUal: UAL,
+      assertionVersion: 1,
+      operation: 'publish',
+      signedAt: new Date(),
+    }));
+    const next = v2Request({
+      nquads: new TextEncoder().encode(nquad('urn:entity:2', 'two')),
+      shareOperationId: 'rootless-op-2',
+      assertionVersion: '2',
+    });
+
+    const deferred = await handler.handle(next, PEER_ID);
+
+    expect(deferred.applied).toBe(false);
+    if (deferred.applied) throw new Error('unreachable');
+    expect(deferred.retryable).toBe(true);
+    expect(deferred.reason).toContain('OWED_STORAGE_ACK_COPY');
+
+    // Once v1 is in VM the share applies.
+    await store.insert([
+      { subject: UAL, predicate: 'http://dkg.io/ontology/status', object: '"confirmed"', graph: `${DATA_GRAPH}/_meta` },
+      {
+        subject: UAL,
+        predicate: 'http://dkg.io/ontology/assertionVersion',
+        object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: `${DATA_GRAPH}/_meta`,
+      },
+    ]);
+    expect((await handler.handle(next, PEER_ID)).applied).toBe(true);
   });
 
   it('replaces the whole KA graph without leaving prior subjects behind', async () => {

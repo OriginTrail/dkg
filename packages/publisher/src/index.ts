@@ -170,13 +170,20 @@ export {
   type ACKTransportFactory,
 } from './ack-transport.js';
 export {
+  selectCanonicalACKCandidateUniverse,
+  selectCanonicalACKCandidatePeersWithDiagnostics,
+  type ACKCanonicalCandidatePeerSelectionInput,
+  type ACKCanonicalCandidatePeerDiagnostic,
+  type ACKCanonicalCandidatePeerSelectionResult,
+} from './ack-peer-selection.js';
+export {
   selectACKCandidatePeers,
   selectACKCandidateUniverse,
   selectACKCandidatePeersWithDiagnostics,
   type ACKCandidatePeerSelectionInput,
   type ACKCandidatePeerDiagnostic,
   type ACKCandidatePeerSelectionResult,
-} from './ack-peer-selection.js';
+} from './ack-peer-selection-compat.js';
 export {
   ACKProviderError,
   RpcPreconditionError,
@@ -195,7 +202,23 @@ export {
   type StorageAckDecision,
   type StorageAckDecisionObserver,
   type StorageACKHandlerConfig,
+  type StorageAckPriorVersionRequest,
+  type StorageAckRequestContext,
+  type LocalStorageAckHeadExpectation,
+  type StorageAckVmPromotionRequest,
+  type StorageAckVmPromotionVerdict,
 } from './storage-ack-handler.js';
+export {
+  STORAGE_ACK_LEDGER_GRAPH,
+  STORAGE_ACK_LEDGER_PREDICATES,
+  storageAckLedgerEntryQuads,
+  storageAckLedgerMarkUpdate,
+  storageAckLedgerRecordUpdate,
+  storageAckOperationId,
+  storageAckOwedOperationsQuery,
+  xsdDateTimeLiteral,
+  type StorageAckLedgerEntry,
+} from './storage-ack-ledger.js';
 export {
   createStorageAckLifecycleObserver,
   type StorageAckLifecycleObserverOptions,

@@ -21,13 +21,13 @@
 # decline, then SIGCONT and assert the cluster publishes again.
 #
 # TOPOLOGY — why the publisher defaults to an EDGE node (otReviewAgent #1517):
-# `minimumRequiredSignatures` is pinned to 3 on the devnet chain and a publisher
-# does NOT sign its own quorum (scripts/devnet.sh, "Pin minimumRequiredSignatures"
-# note). On the default `./scripts/devnet.sh start 6` layout (cores 1-4, edges
-# 5-6) a CORE publisher that pauses one other core leaves only 2 healthy peer
-# cores — quorum impossible. An EDGE publisher keeps all 4 cores as ACK
-# candidates, so pausing one leaves exactly the 3 the quorum needs (the same
-# shape devnet/ack-candidate-isolation and devnet/agent-provenance exercise).
+# `minimumRequiredSignatures` is pinned to 3 on the devnet chain (scripts/devnet.sh,
+# "Pin minimumRequiredSignatures" note). An EDGE publisher needs 3 ACKs from
+# cores; a CORE publisher also counts its own StorageACK and needs 2 from OTHER
+# cores. On the default `./scripts/devnet.sh start 6` layout (cores 1-4, edges
+# 5-6) an EDGE publisher keeps all 4 cores as ACK candidates, so pausing one
+# leaves exactly the 3 the quorum needs (the same shape
+# devnet/ack-candidate-isolation and devnet/agent-provenance exercise).
 # The script also recomputes that arithmetic against the LIVE topology and
 # SKIPs before pausing anything when it cannot hold.
 #
@@ -219,8 +219,9 @@ target_port="${port_of[$target_node]}"
 say "target core = node${target_node} (oxigraph-server on port ${target_port}); publisher = ${role_of[$PUBLISHER_NODE]} node${PUBLISHER_NODE}"
 
 # --- quorum arithmetic: enough healthy peer cores must remain -----------------
-# A publisher does not sign its own quorum, so after pausing the target the
-# publish needs MIN_SIG ACKs from OTHER healthy cores (otReviewAgent #1517).
+# After pausing the target, an Edge publisher needs MIN_SIG ACKs from OTHER
+# healthy cores (otReviewAgent #1517); a Core publisher counts its own StorageACK
+# once and needs MIN_SIG - 1 of them.
 healthy_peer_cores=0
 for n in "${node_ids[@]}"; do
   [ "$n" = "$target_node" ] && continue
@@ -228,8 +229,10 @@ for n in "${node_ids[@]}"; do
   [ "${role_of[$n]}" = "core" ] || continue
   if node_up "$n"; then healthy_peer_cores=$((healthy_peer_cores + 1)); fi
 done
-[ "$healthy_peer_cores" -ge "$MIN_SIG" ] || skip "only ${healthy_peer_cores} healthy non-target peer core(s) would remain but the publish needs ${MIN_SIG} StorageACKs (the publisher's own ACK does not count) — quorum could not form during the outage. Start './scripts/devnet.sh start 6' (4 cores + edge publisher) or add cores."
-say "quorum check: ${healthy_peer_cores} healthy peer cores remain for the ${MIN_SIG}-ACK quorum with node${target_node} paused"
+needed_peer_acks=$MIN_SIG
+[ "${role_of[$PUBLISHER_NODE]}" = "core" ] && needed_peer_acks=$((MIN_SIG - 1))
+[ "$healthy_peer_cores" -ge "$needed_peer_acks" ] || skip "only ${healthy_peer_cores} healthy non-target peer core(s) would remain but the publish needs ${needed_peer_acks} StorageACKs from other cores (a Core publisher's own ACK counts once) — quorum could not form during the outage. Start './scripts/devnet.sh start 6' (4 cores + edge publisher) or add cores."
+say "quorum check: ${healthy_peer_cores} healthy peer cores remain; the ${MIN_SIG}-ACK quorum needs ${needed_peer_acks} of them with node${target_node} paused"
 
 # --- positively identify the store process before signaling it ----------------
 node_up "$target_node" || skip "target core node${target_node} API not responding on $(node_port "$target_node") — the .devnet config may be stale; refusing to signal any process by port"

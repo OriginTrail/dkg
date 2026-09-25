@@ -333,7 +333,12 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import { actorFromRequestContext, type RequestContext } from './context.js';
+import { mayFollowOnChainIdToRow } from '../context-graph-on-chain-id-gate.js';
+import {
+  admitContextGraphFollow,
+  type ContextGraphFollowCaller,
+} from '../context-graph-subscription-admission.js';
 import {
   API_QUERY_CALLER_DISCONNECTED,
   createStoreQueryRequestLifecycle,
@@ -413,6 +418,60 @@ function parseVerifyTimeoutMs(
     };
   }
   return { value };
+}
+
+/**
+ * The latest catch-up job for a Context Graph id that `caller` may see. The
+ * id as given wins; an on-chain id (`32`, `#32`) then finds the job of the row
+ * it names, under its cleartext id or its name hash (adoption can move a job
+ * between the two). A job names its graph, so a job that names a cleartext id
+ * the caller did not give is returned only to a caller who may follow the id
+ * there: an on-chain id that finds a cleartext row, or a name hash this node
+ * resolved. A refusal returns `undefined`, which the route answers exactly as
+ * an id with no job.
+ */
+export async function latestCatchupJobIdFor(
+  agent: DKGAgent,
+  catchupTracker: CatchupTracker,
+  contextGraphId: string,
+  caller: ContextGraphFollowCaller,
+): Promise<string | undefined> {
+  const direct = catchupTracker.latestByContextGraph.get(contextGraphId);
+  if (direct !== undefined) {
+    // A job found by a resolved name hash names the cleartext id: the one it
+    // continued under, or, once the hash resolved, the one its identity note
+    // reports. A lookup by the cleartext id itself follows nothing.
+    const cleartextId = catchupTracker.jobs.get(direct)?.resolvedContextGraphId
+      ?? agent.resolveContextGraphIdAlias?.(contextGraphId)
+      ?? null;
+    if (cleartextId === null || cleartextId === contextGraphId) return direct;
+    return await admitContextGraphFollow(agent, cleartextId, caller) === 'allowed' ? direct : undefined;
+  }
+  const lookup = agent.lookupContextGraphOnChainIdReference?.(contextGraphId);
+  if (lookup?.kind !== 'held') return undefined;
+  const jobId = catchupTracker.latestByContextGraph.get(lookup.contextGraphId)
+    ?? catchupTracker.latestByContextGraph.get(lookup.nameHash);
+  if (jobId === undefined) return undefined;
+  return await mayFollowOnChainIdToRow(agent, lookup, caller) ? jobId : undefined;
+}
+
+/**
+ * Whether `caller` may read `job` by its job id. The id is no proof: while the
+ * name hash a job was created under is unresolved, any caller can learn it.
+ * Once the job names a cleartext id other than the one it was created under,
+ * only a caller who may follow the hash to that id sees the job. A refusal is
+ * answered exactly as an unknown job id.
+ */
+async function mayReadCatchupJobById(
+  agent: DKGAgent,
+  job: CatchupJob,
+  caller: ContextGraphFollowCaller,
+): Promise<boolean> {
+  const cleartextId = job.resolvedContextGraphId
+    ?? agent.resolveContextGraphIdAlias?.(job.contextGraphId)
+    ?? null;
+  if (cleartextId === null || cleartextId === job.contextGraphId) return true;
+  return await admitContextGraphFollow(agent, cleartextId, caller) === 'allowed';
 }
 
 export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
@@ -968,14 +1027,20 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       });
     }
 
+    const caller = {
+      isNodeAdmin: canAdministerNode(authentication),
+      agentAddress: actorFromRequestContext(ctx).effectiveAgentAddress,
+    };
     const jobId =
       jobIdParam ??
-      (contextGraphId ? catchupTracker.latestByContextGraph.get(contextGraphId) : undefined);
+      (contextGraphId
+        ? await latestCatchupJobIdFor(agent, catchupTracker, contextGraphId, caller)
+        : undefined);
     if (!jobId) {
       return jsonResponse(res, 404, { error: "No catch-up job found" });
     }
     const job = catchupTracker.jobs.get(jobId);
-    if (!job) {
+    if (!job || (jobIdParam !== null && !await mayReadCatchupJobById(agent, job, caller))) {
       return jsonResponse(res, 404, {
         error: `Catch-up job "${jobId}" not found`,
       });
@@ -983,7 +1048,8 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
 
     return jsonResponse(res, 200, toCatchupStatusResponse(
       job,
-      agent.getRfc64SelectedSwmGraphSyncStatus(job.contextGraphId),
+      agent.getRfc64SelectedSwmGraphSyncStatus(job.resolvedContextGraphId ?? job.contextGraphId),
+      agent.describeContextGraphIdentity?.(job.contextGraphId),
     ));
   }
 

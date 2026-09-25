@@ -236,6 +236,13 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
       if (authority.outcome === 'denied') {
         ports.dormancyById.set(contextGraphId, 'authorityDenied');
         ports.touchStatus();
+      } else if (authority.reason === 'chain-access-policy-unknown') {
+        // The chain answered: the id does not exist or is not active (a
+        // timeout or a failed read has its own reason and stays retryable).
+        // Retrying every pass only repeats that answer, so retire the row for
+        // this process like a deny. It stays durable; a restart checks it again.
+        ports.dormancyById.set(contextGraphId, 'deactivated');
+        ports.touchStatus();
       }
       continue;
     }

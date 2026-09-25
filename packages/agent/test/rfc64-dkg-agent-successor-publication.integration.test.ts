@@ -291,6 +291,7 @@ async function startAgent(name: string, dataDir: string): Promise<DKGAgent> {
     store: new OxigraphStore(),
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
+    vmReconcilerEnabled: false,
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,

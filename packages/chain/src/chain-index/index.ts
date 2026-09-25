@@ -18,6 +18,7 @@ export {
   normalizeChainEventLogBlockNumber,
   normalizeChainEventLogHash,
   type ChainEventLogCommit,
+  type ChainEventLogCountQuery,
   type ChainEventLogCoverage,
   type ChainEventLogCursor,
   type ChainEventLogHead,
@@ -28,6 +29,11 @@ export {
   type ChainEventLogStore,
   type ChainEventLogTopicSet,
 } from './chain-event-log.js';
+
+export {
+  chainEventLogTombstoneGeneration,
+  tombstoneChainEventLogScope,
+} from './chain-event-log-tombstones.js';
 
 export {
   CHAIN_EVENT_LOG_FAMILIES,
@@ -62,6 +68,7 @@ export {
 export {
   createKnowledgeAssetReadModel,
   type ContextGraphForKaAnswer,
+  type ContextGraphKaAtAnswer,
   type KnowledgeAssetOwnWrite,
   type KnowledgeAssetReadModel,
   type KnowledgeAssetReadModelOptions,

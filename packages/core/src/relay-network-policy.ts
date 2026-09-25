@@ -1,3 +1,4 @@
+import { createBoundedDenialLogger } from './bounded-denial-logger.js';
 import { parseCircuitRelayPeerIds, type RelayedConnectionGater } from './relay-path.js';
 
 export type RelayPathDirection = 'inbound' | 'outbound';
@@ -38,30 +39,20 @@ function createRelayDenialLogger(
   now: () => number,
 ): RelayDenialLogger {
   const short = (id: string): string => id.slice(-8);
-  const denialLogs = new Map<string, { lastLoggedAt: number; suppressed: number }>();
+  const logDenial = createBoundedDenialLogger({
+    log,
+    now,
+    intervalMs: RELAY_DENIAL_LOG_INTERVAL_MS,
+    cacheMax: RELAY_DENIAL_LOG_CACHE_MAX,
+  });
 
-  return ({ direction, relayPeerId, remotePeerId, addr }) => {
-    const key = `${direction}:${relayPeerId}`;
-    const timestamp = now();
-    const previous = denialLogs.get(key);
-    if (previous && timestamp - previous.lastLoggedAt < RELAY_DENIAL_LOG_INTERVAL_MS) {
-      previous.suppressed += 1;
-      return;
-    }
-    if (!previous && denialLogs.size >= RELAY_DENIAL_LOG_CACHE_MAX) {
-      const oldestKey = denialLogs.keys().next().value as string | undefined;
-      if (oldestKey !== undefined) denialLogs.delete(oldestKey);
-    }
-    const suppressed = previous?.suppressed ?? 0;
-    denialLogs.delete(key);
-    denialLogs.set(key, { lastLoggedAt: timestamp, suppressed: 0 });
-    log(
+  return ({ direction, relayPeerId, remotePeerId, addr }) => logDenial(
+    `${direction}:${relayPeerId}`,
+    () =>
       `Network isolation: denying ${direction} relayed connection ` +
       `relay=${short(relayPeerId)}${remotePeerId ? ` remote=${short(remotePeerId)}` : ''}` +
-      `${addr ? ` addr=${addr}` : ''}` +
-      `${suppressed > 0 ? ` suppressedSinceLast=${suppressed}` : ''}`,
-    );
-  };
+      `${addr ? ` addr=${addr}` : ''}`,
+  );
 }
 
 export function buildActiveRelayNetworkPolicy(

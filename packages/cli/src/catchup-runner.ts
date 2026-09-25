@@ -1154,10 +1154,18 @@ class WorkerCatchupRunner implements CatchupRunner {
         ]);
         await agent.primeCatchupConnections();
 
+        // The agent's own admission predicate, the one the in-process catch-up
+        // selects from, never a copy of it: a still-open connection to a peer
+        // that failed the network-identity proof (another DKG network's relay,
+        // say) must not become a sync peer, and filtering here also keeps it out
+        // of the prioritized curator/SWM-provider slots below. The daemon's
+        // agent is always this package's DKGAgent, so there is no fallback: an
+        // agent without the predicate fails the preparation instead of handing
+        // every live connection to selection.
+        const admittedPeers = await this.agent.listAdmittedConnectedPeers(createOperationContext('sync'));
+
         const selectedPeerIds = agent.selectCatchupPeers(
-          [...new Map(
-            agent.node.libp2p.getConnections().map((connection: any) => [connection.remotePeer.toString(), connection.remotePeer]),
-          ).values()],
+          admittedPeers,
           preferredPeerId,
           isPrivateContextGraph,
         ).map((peer: { toString(): string }) => peer.toString());

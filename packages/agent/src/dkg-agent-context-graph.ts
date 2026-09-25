@@ -70,6 +70,9 @@ import {
   ratchetSwmSenderChainKey,
   uint64ForProto,
   SWM_SENDER_KEY_SKIPPED_MESSAGE_CACHE_LIMIT,
+  CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
+  contextGraphMetadataGraphs,
+  contextGraphMetadataHomeGraph,
   type DKGNodeConfig, type OperationContext, type GetView, type AssertionDescriptor, type AssertionEvent, type AssertionState,
   type ContextGraphIdV1, type EvmAddressV1, type NetworkIdV1,
   type SwmSenderKeyMessageMsg,
@@ -132,6 +135,7 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { buildAuthoritativePublicMetaQuads } from './context-graph-public-meta-proof.js';
+import { replaceContextGraphMetadataFact } from './context-graph-metadata-fact.js';
 import {
   RFC64_UNREGISTERED_REPLICA_AUTHORITY_PREDICATE_V1,
   mintRfc64UnregisteredReplicaAuthoritySeedV1,
@@ -209,6 +213,7 @@ import {
   type CiphertextChunkCatchupResponse,
 } from './swm/ciphertext-chunk-catchup.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
+import { toLibp2pPeerId } from './p2p/peer-id.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
@@ -388,6 +393,7 @@ import type { ContextGraphJoinAdmissionLockToken } from './context-graph-join-ad
 import type { PreparedContextGraphMembershipMutation } from './context-graph-membership-mutation.js';
 import {
   commitRegisteredParticipantMutation,
+  LIVE_PARTICIPANT_MUTATION_AUTHORITY_READ,
   prepareRegisteredParticipantMutation,
   type PreparedRegisteredParticipantMutation,
 } from './registered-context-graph-participant-mutation.js';
@@ -532,10 +538,11 @@ export class ContextGraphMethods extends DKGAgentBase {
       this.log.info(ctx, `Creating context graph "${opts.id}" (P2P, no chain)`);
     }
 
-    // Curated CGs store definition triples in their own _meta graph so they
-    // are NOT discoverable via ONTOLOGY sync. Only invited/subscribed nodes
-    // will see them. Open CGs go to ONTOLOGY for network-wide discovery.
-    const defGraph = isCurated ? cgMetaGraph : ontologyGraph;
+    // Curated and private (local-only) CGs store definition triples in their
+    // own _meta graph so they are NOT discoverable via ONTOLOGY sync. Only
+    // invited/subscribed nodes will see curated definitions. Open CGs go to
+    // ONTOLOGY for network-wide discovery.
+    const defGraph = contextGraphMetadataHomeGraph(opts.id, { curated: isCurated || opts.private === true });
 
     // DKG_CREATOR records the libp2p peer ID of the hosting node — this is
     // the deterministic handle used by `resolveCuratorPeerId()` to dial the
@@ -684,9 +691,8 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     // Store peer allowlist for curated CGs (with validation)
     if (opts.allowedPeers && opts.allowedPeers.length > 0) {
-      const { peerIdFromString } = await import('@libp2p/peer-id');
       for (const peer of opts.allowedPeers) {
-        try { peerIdFromString(peer); } catch {
+        if (toLibp2pPeerId(peer) === undefined) {
           throw new Error(`Invalid peer ID in allowedPeers: "${peer}". Expected a libp2p peer ID (e.g. 12D3KooW…).`);
         }
         quads.push({
@@ -1089,7 +1095,7 @@ export class ContextGraphMethods extends DKGAgentBase {
         ? accessPolicyResult.bindings[0]?.['ap']?.replace(/^"|"$/g, '')
         : undefined;
       const isCurated = apValue === 'private';
-      const defGraph = isCurated ? cgMetaGraph : ontologyGraph;
+      const defGraph = contextGraphMetadataHomeGraph(id, { curated: isCurated });
       const creatorPeerDid = `did:dkg:agent:${this.peerId}`;
       const curatorDid = `did:dkg:agent:${curatorAddress}`;
       // Defensive: replace any stray creator/curator triples (e.g. from
@@ -1186,36 +1192,21 @@ export class ContextGraphMethods extends DKGAgentBase {
           && typeof isActive === 'function'
           && await isActive.call(this.chain, BigInt(resolvedOnChainId))
         ) {
-          await deleteByPatternWithoutCount(this.store, {
-            graph: ontologyGraph,
-            subject: contextGraphUri,
-            predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-          });
-          await deleteByPatternWithoutCount(this.store, {
-            graph: cgMetaGraph,
-            subject: contextGraphUri,
-            predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-          });
-          await this.store.insert([
-            {
-              subject: contextGraphUri,
-              predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-              object: `"${resolvedOnChainId}"`,
-              graph: ontologyGraph,
-            },
-            {
-              subject: contextGraphUri,
-              predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-              object: `"${resolvedOnChainId}"`,
-              graph: cgMetaGraph,
-            },
-            {
+          // Same placement rule as a clean registration: a curated graph's
+          // binding lives only in its `_meta`. If the local policy can't be
+          // read, treat the graph as curated.
+          const reconciledIsCurated = await this.isPrivateContextGraph(id).catch(() => true);
+          await replaceContextGraphMetadataFact(this.store, id, {
+            predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
+            object: `"${resolvedOnChainId}"`,
+            graphs: contextGraphMetadataGraphs(id, { curated: reconciledIsCurated }),
+            alsoInsert: [{
               subject: contextGraphUri,
               predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`,
               object: `"${nameHash}"`,
               graph: cgMetaGraph,
-            },
-          ]);
+            }],
+          });
           await this.store.flush?.();
           await persistRegistrationStatus('registered');
           reconciledOnChainId = resolvedOnChainId;
@@ -1327,6 +1318,9 @@ export class ContextGraphMethods extends DKGAgentBase {
         ? LOCAL_ACCESS_CURATED
         : LOCAL_ACCESS_OPEN;
     }
+    // The policy committed on chain also decides where the id binding is
+    // written: a curated graph keeps it in its own `_meta`, not ontology.
+    const isCuratedRegistration = resolvedLocalAccessPolicy === LOCAL_ACCESS_CURATED;
     if (opts?.publishPolicy !== undefined && opts.publishPolicy !== EVM_PUBLISH_CURATED && opts.publishPolicy !== EVM_PUBLISH_OPEN) {
       throw new Error('publishPolicy must be 0 (curated) or 1 (open)');
     }
@@ -1733,32 +1727,24 @@ export class ContextGraphMethods extends DKGAgentBase {
       this.log.info(ctx, `Context graph "${id}" registered on-chain: ${onChainId} (nameHash=${nameHash.slice(0, 18)}…)`);
 
       // Update _meta with registered status and the member-syncable on-chain
-      // binding.  The ontology copy remains for system-graph discovery, while
-      // the authenticated CG-local copy lets a late member learn the immutable
-      // slot from the curator's private `_meta` snapshot.  A private joiner may
-      // have missed the one-shot ontology gossip emitted below and must not be
-      // left unable to start chain-driven VM reconciliation as a result.
+      // binding. The authenticated CG-local copy lets a late member learn the
+      // immutable slot from the curator's private `_meta` snapshot. Only a
+      // public CG also gets the ontology copy for system-graph discovery,
+      // like its definition.
       // Single-valued binding guard (RS heal): the on-chain id is immutable, so
       // clear any prior value before insert — the cgId resolver / heal read this
       // and must never see a multi-valued (LIMIT-1-nondeterministic) binding.
-      await deleteByPatternWithoutCount(this.store, {
-        graph: ontologyGraph,
-        subject: contextGraphUri,
-        predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-      });
-      await deleteByPatternWithoutCount(this.store, {
-        graph: cgMetaGraph,
-        subject: contextGraphUri,
-        predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-      });
-      await this.store.insert([
-        { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph: ontologyGraph },
-        { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`, object: `"${onChainId}"`, graph: cgMetaGraph },
+      await replaceContextGraphMetadataFact(this.store, id, {
+        predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
+        object: `"${onChainId}"`,
+        graphs: contextGraphMetadataGraphs(id, { curated: isCuratedRegistration }),
         // Persist the wire-id commitment in the cg's _meta graph so a
         // restart can resume host-mode subscription on the correct
         // topic without re-reading the chain event.
-        { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`, object: `"${nameHash}"`, graph: cgMetaGraph },
-      ]);
+        alsoInsert: [
+          { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`, object: `"${nameHash}"`, graph: cgMetaGraph },
+        ],
+      });
       await this.store.flush?.();
       // Keep `pending` durable until every recovery binding above is committed.
       // A crash or store failure before this final flip therefore forces the
@@ -1814,9 +1800,11 @@ export class ContextGraphMethods extends DKGAgentBase {
 
     // Registration status is in _meta — it propagates to peers via sync, not
     // gossip, so that only the authenticated sync path can update it.
-    // Broadcast the ontology-graph OnChainId quad so peers see the link.
+    // Broadcast the ontology-graph OnChainId quad so peers see the link. A
+    // curated graph's members learn the binding from its `_meta` instead.
+    if (isCuratedRegistration) return { onChainId };
     try {
-      const onChainNquad = `<${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> "${onChainId}" <${ontologyGraph}> .`;
+      const onChainNquad = `<${contextGraphUri}> <${CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE}> "${onChainId}" <${ontologyGraph}> .`;
       const ontologyTopic = contextGraphPublishTopic(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
       const regMsg = encodePublishRequest({
         ual: `did:dkg:context-graph:${id}`,
@@ -1847,10 +1835,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     const ctx = createOperationContext('system');
 
     // Validate peer ID format (libp2p Ed25519 base58btc, e.g. 12D3KooW…)
-    try {
-      const { peerIdFromString } = await import('@libp2p/peer-id');
-      peerIdFromString(peerId);
-    } catch {
+    if (toLibp2pPeerId(peerId) === undefined) {
       throw new Error(`Invalid peer ID format: "${peerId}". Expected a libp2p peer ID (e.g. 12D3KooW…).`);
     }
 
@@ -2106,9 +2091,14 @@ export class ContextGraphMethods extends DKGAgentBase {
       contextGraphId,
       agentAddresses: candidateChainAgents,
       chain: this.chain,
+      // This roster decides whether a transaction is sent, not merely when.
+      rosterFreshness: 'live',
       resolveAuthority: () => withRpcUsageSite(
         CG_AUTH_RPC_SITES.memberAdd,
-        () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
+        () => this.resolveRegisteredContextGraphAuthority(
+          contextGraphId,
+          LIVE_PARTICIPANT_MUTATION_AUTHORITY_READ,
+        ),
       ),
     });
 
@@ -2336,9 +2326,17 @@ export class ContextGraphMethods extends DKGAgentBase {
       contextGraphId,
       agentAddresses: [normalizedAgentAddress],
       chain: this.chain,
+      // A roster behind the chain here does not delay the revocation, it
+      // cancels it: the agent is filtered out as "not present", no transaction
+      // is sent, and it stays on the chain roster while local state records a
+      // removal. See `prepareRegisteredParticipantMutation`.
+      rosterFreshness: 'live',
       resolveAuthority: () => withRpcUsageSite(
         CG_AUTH_RPC_SITES.memberRemove,
-        () => this.resolveRegisteredContextGraphAuthority(contextGraphId),
+        () => this.resolveRegisteredContextGraphAuthority(
+          contextGraphId,
+          LIVE_PARTICIPANT_MUTATION_AUTHORITY_READ,
+        ),
       ),
     });
     await commitRegisteredParticipantMutation({
@@ -2419,12 +2417,13 @@ export class ContextGraphMethods extends DKGAgentBase {
   /**
    * Rename a context graph (updates its `schema:name` display label).
    *
-   * Writes into BOTH the ONTOLOGY graph (primary source for
-   * `listContextGraphs()` on open CGs) and the CG's `_meta` graph
-   * (used as the private/curated CG definition index) so the rename is
+   * Writes into the CG's `_meta` graph (used as the private/curated CG
+   * definition index) and, for an open CG, also into the ONTOLOGY graph
+   * (primary source for `listContextGraphs()` on open CGs), so the rename is
    * durable regardless of which graph type the CG was originally created
-   * in. Previous display-name triples are wiped from both graphs first
-   * to guarantee idempotent rename (no "two names in the store").
+   * in. A private/curated CG's name stays in `_meta`, like its definition.
+   * Previous display-name triples are wiped from both graphs first to
+   * guarantee idempotent rename (no "two names in the store").
    *
    * Authorization: same as other CG mutations — only the creator can
    * rename. Enforced via `assertCallerIsOwner`.
@@ -2454,27 +2453,12 @@ export class ContextGraphMethods extends DKGAgentBase {
     }
     this.assertCallerIsOwner(owner, callerAgentAddress, 'rename context graph');
 
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
-    const schemaName = DKG_ONTOLOGY.SCHEMA_NAME;
-
-    await deleteByPatternWithoutCount(this.store, {
-      subject: contextGraphUri,
-      predicate: schemaName,
-      graph: ontologyGraph,
+    const isPrivate = await this.isPrivateContextGraph(contextGraphId);
+    await replaceContextGraphMetadataFact(this.store, contextGraphId, {
+      predicate: DKG_ONTOLOGY.SCHEMA_NAME,
+      object: `"${escapeSparqlLiteral(trimmed)}"`,
+      graphs: contextGraphMetadataGraphs(contextGraphId, { curated: isPrivate }),
     });
-    await deleteByPatternWithoutCount(this.store, {
-      subject: contextGraphUri,
-      predicate: schemaName,
-      graph: cgMetaGraph,
-    });
-
-    const escaped = `"${escapeSparqlLiteral(trimmed)}"`;
-    await this.store.insert([
-      { subject: contextGraphUri, predicate: schemaName, object: escaped, graph: ontologyGraph },
-      { subject: contextGraphUri, predicate: schemaName, object: escaped, graph: cgMetaGraph },
-    ]);
     this.invalidateListContextGraphsCache();
     this.contextGraphMetaProjection.markDirty(contextGraphId);
 

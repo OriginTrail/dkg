@@ -224,6 +224,7 @@ import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
 import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
+import { SyncTargetSupersededError } from './sync/error-tags.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
@@ -611,6 +612,30 @@ function bindOptionalChainRead<T>(
     : read.call(chain, numericId);
 }
 
+/**
+ * Bind the one-read authority WITH the caller's freshness choice.
+ *
+ * Separate from {@link bindOptionalChainRead} because only this read honours
+ * `freshness`; the point reads it falls back to are always live. That is the
+ * safe direction — a node whose adapter cannot serve the single tuple simply
+ * keeps today's behaviour rather than inheriting a bounded answer from a path
+ * that never offered one.
+ */
+function bindLiveAuthorityRead<T>(
+  chain: unknown,
+  read: ((
+    numericId: bigint,
+    options?: { signal?: AbortSignal; freshness?: 'live' | 'bounded' },
+  ) => Promise<T>) | undefined,
+  freshness: 'live' | 'bounded',
+): ((numericId: bigint, signal?: AbortSignal) => Promise<T>) | undefined {
+  if (typeof read !== 'function') return undefined;
+  return (numericId, signal) => read.call(chain, numericId, {
+    ...(signal ? { signal } : {}),
+    freshness,
+  });
+}
+
 export class WorkspaceCryptoMethods extends DKGAgentBase {
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
     const defaultAddress = this.defaultAgentAddress?.toLowerCase();
@@ -909,7 +934,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   protected async resolveLiveOnChainAccessPolicyState(this: DKGAgent,
     onChainId: string,
     opCtx?: OperationContext,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; freshness?: 'live' | 'bounded' } = {},
   ): Promise<LiveOnChainAccessPolicyState> {
     const readLiveness = this.chain.isContextGraphActiveOnChain;
     const readAccessPolicy = this.chain.getContextGraphAccessPolicy;
@@ -917,7 +942,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     return resolveLiveAccessPolicyState(
       {
         readTimeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
-        readLiveAuthority: bindOptionalChainRead(this.chain, readLiveAuthority),
+        // Defaults to live. Only a caller that has said its decision can wait
+        // for the next read is allowed to ask the index.
+        readLiveAuthority: bindLiveAuthorityRead(
+          this.chain, readLiveAuthority, options.freshness ?? 'live',
+        ),
         isContextGraphActiveOnChain: bindOptionalChainRead(this.chain, readLiveness),
         getContextGraphAccessPolicy: bindOptionalChainRead(this.chain, readAccessPolicy),
         runBoundedRead: async (start, label, signal) => {
@@ -953,7 +982,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async readLiveOnChainAccessPolicy(this: DKGAgent,
     onChainId: string,
     opCtx?: OperationContext,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; freshness?: 'live' | 'bounded' } = {},
   ): Promise<0 | 1 | null> {
     const state = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.livePolicy,
@@ -966,11 +995,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     operationContext: OperationContext,
+    signal?: AbortSignal,
   ): Promise<ActivePublicContextGraphChainProof> {
     return resolveStrictActivePublicChainProof(
       (id, resolverOperationContext) => this.resolveFinalizedOnChainAccessPolicyState(
         id,
         resolverOperationContext,
+        signal,
       ),
       contextGraphId,
       operationContext,
@@ -985,12 +1016,24 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveFinalizedOnChainAccessPolicyState(this: DKGAgent,
     contextGraphId: string,
     opCtx?: OperationContext,
+    /**
+     * Caller deadline. Once it aborts, no further chain read starts, and the
+     * finalized-index read this call queued on the shared authority
+     * coordinator is dropped from the queue, or cancelled if already running.
+     */
+    signal?: AbortSignal,
   ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
+    signal?.throwIfAborted();
+    // Retired name-hash id: answer for the graph it names (see supersedingContextGraphIdFor).
+    const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
+    if (supersedingId) {
+      return this.resolveFinalizedOnChainAccessPolicyState(supersedingId, opCtx, signal);
+    }
     const trimmed = contextGraphId.trim();
     let onChainId: string | null = null;
     let resolvedFromLocalCg = false;
     if (typeof this.getContextGraphOnChainId === 'function') {
-      onChainId = await this.getContextGraphOnChainId(contextGraphId);
+      onChainId = await this.getContextGraphOnChainId(contextGraphId, { signal });
       if (onChainId) resolvedFromLocalCg = true;
     }
     if (!onChainId && /^\d+$/.test(trimmed)) {
@@ -1017,8 +1060,11 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       return 'unknown';
     }
 
+    // The id lookup above may itself have waited on the chain.
+    signal?.throwIfAborted();
     const indexedSnapshot = await this.readRfc64BatchedFinalizedAuthoritySnapshotV1(
       onChainId,
+      signal,
     );
     if (indexedSnapshot === undefined) {
       // Preserve the exact address resolution above when a legacy adapter has
@@ -1029,9 +1075,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         contextGraphId,
         onChainId,
         opCtx,
-        { bindingMode: 'chain-attested-repair' },
+        { bindingMode: 'chain-attested-repair', signal },
       ))) return 'unknown';
-      const policy = await this.readLiveOnChainAccessPolicy(onChainId, opCtx);
+      const policy = await this.readLiveOnChainAccessPolicy(onChainId, opCtx, { signal });
       return policy === 0 || policy === 1 ? policy : 'unknown';
     }
     if (
@@ -1176,6 +1222,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       slotBindingMode?: PublicPolicySlotBindingMode;
     } = {},
   ): Promise<0 | 1 | 'unregistered' | 'unknown'> {
+    // Retired name-hash id: answer for the graph it names (see supersedingContextGraphIdFor).
+    const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
+    if (supersedingId) return this.resolveOnChainAccessPolicyState(supersedingId, opCtx, options);
     const trimmed = contextGraphId.trim();
 
     // Resolve a CANDIDATE on-chain id. Local-id resolution is authoritative
@@ -1336,6 +1385,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     opCtx?: OperationContext,
     options: { signal?: AbortSignal } = {},
   ): Promise<boolean> {
+    // Retired name-hash id: stand down, never write (see supersedingContextGraphIdFor).
+    const supersedingId = this.supersedingContextGraphIdFor?.(contextGraphId);
+    if (supersedingId) throw new SyncTargetSupersededError(contextGraphId, supersedingId);
     return this.localCgMatchesOnChainSlot(
       contextGraphId,
       onChainId,

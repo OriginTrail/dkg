@@ -619,6 +619,9 @@ importers:
         specifier: ^8.3.3
         version: 8.3.3(web-streams-polyfill@3.3.3)
     devDependencies:
+      '@libp2p/crypto':
+        specifier: ^5.1.18
+        version: 5.1.18
       '@opentelemetry/sdk-metrics':
         specifier: ^2.8.0
         version: 2.8.0(@opentelemetry/api@1.9.1)
@@ -705,6 +708,9 @@ importers:
       '@origintrail-official/dkg-publisher':
         specifier: workspace:*
         version: link:../publisher
+      '@origintrail-official/dkg-rdf-utils':
+        specifier: workspace:*
+        version: link:../rdf-utils
       '@origintrail-official/dkg-storage':
         specifier: workspace:*
         version: link:../storage

@@ -41,6 +41,7 @@ export default defineConfig({
           'test/status-route-rpc.test.ts',
           'test/backpressure-route.test.ts',
       'test/status-route-store-quads.test.ts',
+      'test/store-reachability.test.ts',
       'test/query-route-lifecycle.test.ts',
       'test/query-catalog-profile-route.test.ts',
       'test/store-unavailable-response.test.ts',
@@ -71,6 +72,17 @@ export default defineConfig({
           // terminal when authoritative metadata has been confirmed.
           'test/context-graph-subscribe-readiness.test.ts',
           'test/context-graph-catchup-readiness.test.ts',
+          // Subscribing by an on-chain name hash (Base #33): route, catch-up
+          // text and the public status summary. Pure handler, no hardhat.
+          'test/context-graph-name-hash-subscribe-route.test.ts',
+          // Catch-up status by a resolved name hash: who sees the job. Real
+          // agent and mock chain, no hardhat.
+          'test/context-graph-name-hash-catchup-status.test.ts',
+          // Subscribing by on-chain numeric id (`dkg subscribe 32` / `#32`):
+          // the real route over a real agent and a mock chain. No hardhat.
+          'test/context-graph-on-chain-id-subscribe.test.ts',
+          'test/context-graph-on-chain-id-startup.test.ts',
+          'test/context-graph-on-chain-id-helpers.test.ts',
           'test/context-graph-readiness-swm-shortfall.test.ts',
           'test/context-graph-readiness-migration.test.ts',
           // R9 — PCA advisory wire derivation (pure) + CLI register-agent output
@@ -113,6 +125,9 @@ export default defineConfig({
           // on the job-level scalar), and denial counts DISTINCT peers.
           'test/catchup-runner-worker-continuation-deferral.test.ts',
           'test/relay-status-block.test.ts',
+          // `/api/status` → `eventLoopDelay`: the gauge with a fake histogram
+          // plus one real-histogram smoke test, and the route block shape.
+          'test/event-loop-delay-monitor.test.ts',
           'test/supervisor-liveness.test.ts',
           'test/promote-async-routes.test.ts',
           'test/promote-async-daemon-lifecycle.test.ts',
@@ -207,6 +222,7 @@ export default defineConfig({
           // OxigraphWorkerStore; no hardhat needed.
           'test/write-preflight-resilience.test.ts',
           'test/http-literal-size-validation.test.ts',
+          'test/http-quad-term-validation.test.ts',
           // CLI subprocess smoke with stub daemon only; no hardhat needed.
           'test/context-graph-join-policy-cli.test.ts',
           'test/context-graph-join-policy-route.test.ts',
@@ -231,6 +247,9 @@ export default defineConfig({
           'test/daemon-prime-agent-persistence.test.ts',
           'test/daemon-sse-final-frame.test.ts',
           'test/chain-discovery-scan-mode.test.ts',
+          'test/chain-discovery-scan-storage.test.ts',
+          'test/context-graph-list-cli.test.ts',
+          'test/historical-context-graph-discovery.test.ts',
           'test/context-graph-subscriptions-route.test.ts',
           // Daemon call-site wiring guard: runDaemonInner passes the resolved
           // syncAgentsMeta into DKGAgent.create. Fully mocked (network/agent/

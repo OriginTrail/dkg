@@ -129,6 +129,19 @@ create/write, or approved join activates them:
 dkg subscribe <context-graph-id>
 ```
 
+`<context-graph-id>` may also be the on-chain id that `dkg context-graph list`
+shows in its `#` column (`dkg subscribe 32` or `dkg subscribe '#32'`). The node
+resolves it through ContextGraphStorage to the graph's name hash, or to its
+verified id when the node already knows it, and subscribes that; the number
+itself never becomes a subscription. An id that does not exist, a deactivated
+graph, a graph without a name hash, and a private graph are refused with the
+reason. `--save` stores the name hash or the verified id, not the number. A
+`#` needs quoting in most shells, and `32` alone still means the existing
+subscription literally named "32" if there is one. `POST
+/api/context-graph/unsubscribe` and `dkg context-graph catchup-status` accept
+the same on-chain ids; unsubscribing one that is not subscribed on the node
+answers 404 `CONTEXT_GRAPH_NOT_SUBSCRIBED`.
+
 Core nodes temporarily retain automatic subscription for newly discovered
 graphs because they are responsible for Storage ACK custody and the independent
 host-mode path does not yet replace every member-subscription handler. A
@@ -151,3 +164,36 @@ This cleanup clears every non-system, non-`coreHosted` user subscription,
 including legitimate subscriptions. It preserves `agents`, `ontology`, hosted
 core state, and the graph's VM/SWM data. Re-add wanted user subscriptions
 explicitly after cleanup.
+
+## Client request timeouts
+
+The CLI and the MCP server (`dkg mcp serve`) give each daemon request a
+deadline by route class:
+
+| Class | Requests | Default |
+| --- | --- | --- |
+| Read | every `GET` not listed below | 30 s |
+| List read | `GET /api/context-graph/list`, `/api/sub-graph/list`, `/api/pca`, `/api/publisher/jobs` | 60 s, and never less than the read deadline |
+| Long | every `POST`, `PUT` and `DELETE` | 240 s, and never less than the read deadline |
+
+The CLI's `dkg verify` waits for its signature collection window plus 30 s
+instead. A Knowledge Asset publish, share, file import, or a create that also
+shares or publishes, that gets no answer in time is reported as outcome
+unknown, not as failed: the daemon keeps working after the client stops
+waiting, so check `dkg ka history` (MCP: `dkg_knowledge_asset_history`) before
+retrying. Any other request that times out fails with a `TimeoutError`.
+
+On a slow node or store, override the read and long deadlines, in
+milliseconds, with environment variables (for the MCP server, in the MCP
+client's `env` block):
+
+```bash
+export DKG_API_READ_TIMEOUT_MS=60000    # every GET; the list reads also get at least this
+export DKG_API_LONG_TIMEOUT_MS=280000   # every POST, PUT and DELETE
+```
+
+Each must be a whole number from 1 to 2147483647; any other value is
+rejected, before a request is sent, with an error naming the variable. Unset
+or empty keeps the default. Node's `fetch` stops waiting for response headers
+after 300 s on its own, so a deadline above 300 s does not keep a request open
+longer.

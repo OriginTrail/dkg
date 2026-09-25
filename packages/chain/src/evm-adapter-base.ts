@@ -41,6 +41,7 @@ import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-offi
 import { loadAbi } from './evm-adapter-abi.js';
 import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { collectEvmErrorText } from './evm-error-text.js';
+import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import {
   classifyRpcRetryDisposition,
   isRpcEndpointFailoverEligible,
@@ -57,7 +58,7 @@ import {
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
-import { rpcHost } from './rpc-failover-log.js';
+import { hostOnlyRpcText, rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
 } from './chain-rpc-transport-error.js';
@@ -82,6 +83,7 @@ import {
 } from './keyed-ttl-single-flight-cache.js';
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
+import type { PublisherConvictionPlanReader } from './publisher-plan.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import type {
   ChainEventLogBinding,
@@ -343,11 +345,12 @@ const HUB_ROTATION_POLL_INTERVAL_MS = 30 * 1000;
 const HUB_ROTATION_REORG_BUFFER_BLOCKS = 50;
 
 /**
- * Per-backend timeout for a single KnowledgeAssetCreated scan page before
- * failing over to the next eligible backend — generous enough for a slow
- * archive getLogs, short enough that a hung backend can't add its stall to every
- * page (the sticky preferred-backend ordering then keeps the hung one out of the
- * front of the line for subsequent pages).
+ * Per-backend timeout for one physical eth_getLogs request of a scan page
+ * (`queryEventLogsPage`) before failing over to the next eligible backend —
+ * generous enough for a slow archive getLogs, short enough that a hung backend
+ * can't add its stall to every page (the sticky preferred-backend ordering then
+ * keeps the hung one out of the front of the line for subsequent pages). A page
+ * wider than a backend's span cap is several requests, each with this deadline.
  */
 const KA_HIGH_WATER_PAGE_TIMEOUT_MS = 15_000;
 
@@ -684,6 +687,17 @@ export class EVMChainAdapterBase {
   protected readonly rpcUsage: RpcUsageTracker;
   protected readonly receiptTimeoutMs: number;
   protected readonly finalityConfirmations: number;
+  /**
+   * `chain.boundedAuthorityReads` — may the node's own event index answer a
+   * Context Graph authority read that asked for `freshness: 'bounded'`?
+   *
+   * OFF by default, and deliberately an operator switch rather than a code
+   * path: it is the one control that can be thrown without a deploy when the
+   * index is suspected of serving a roster the chain disagrees with. It can
+   * only ever REMOVE the index from the answer — no gate is disabled by it, and
+   * every read it declines falls through to the live chain read.
+   */
+  protected readonly contextGraphBoundedAuthorityReadsEnabled: boolean;
   protected readonly receiptFinality: EvmReceiptFinalityReader;
 
   protected readonly maxFeePerGasWei?: bigint;
@@ -1327,6 +1341,10 @@ export class EVMChainAdapterBase {
       stallAfterMs: resolveTxSerializerStallAfterMs(this.receiptTimeoutMs),
     });
     this.finalityConfirmations = resolveFinalityConfirmations(config.finalityConfirmations);
+    // Strict `=== true`: an operator who has not stated an opinion, or who
+    // supplied a truthy-but-not-boolean value from a config file, gets the
+    // live read.
+    this.contextGraphBoundedAuthorityReadsEnabled = config.boundedAuthorityReads === true;
     this.maxFeePerGasWei = resolveMaxFeePerGasWei(config.maxFeePerGasWei);
     this.walletRpcUrls = Array.from(new Set(
       (config.walletRpcUrls ?? [])
@@ -2835,6 +2853,16 @@ export class EVMChainAdapterBase {
   }
 
   /**
+   * Optional typed PCA planning capability consumed by publish planning. The
+   * base owns the direct-spend default and the conviction mixin is its only
+   * override, so adapter assemblies without that mixin safely stay
+   * direct-spend.
+   */
+  protected publisherConvictionPlanReader(): PublisherConvictionPlanReader | undefined {
+    return undefined;
+  }
+
+  /**
    * Best-effort native (+ TRAC) balance read for one operational wallet,
    * per-metric cached for `PUBLISHER_FUNDING_CACHE_TTL_MS`. A read failure /
    * timeout yields `null` for that metric (callers fail open). `forceRefresh`
@@ -3612,11 +3640,20 @@ export class EVMChainAdapterBase {
             // bounded consumer scope explicitly so a large historical crawl
             // (notably the pre-10.0.4 KA high-water fallback) cannot collapse
             // into `consumer=unattributed` in raw eth_getLogs telemetry.
-            const logs = await withRpcUsageConsumer(rpcUsageConsumer, () => withRpcRequestTimeout(
-              KA_HIGH_WATER_PAGE_TIMEOUT_MS,
-              `${label} getLogs [${lo}, ${hi}]`,
-              () => contract!.queryFilter(filter as any, lo, hi),
-            ));
+            // The page is fitted to this provider's eth_getLogs span cap; a
+            // history/plan refusal is not split and falls through to the next
+            // eligible backend like any other page error.
+            const pageContract = contract;
+            const logs = await withRpcUsageConsumer(rpcUsageConsumer, () => readAdaptiveEvmLogRange({
+              provider,
+              fromBlock: lo,
+              toBlock: hi,
+              read: (rangeFrom, rangeTo) => withRpcRequestTimeout(
+                KA_HIGH_WATER_PAGE_TIMEOUT_MS,
+                `${label} getLogs [${rangeFrom}, ${rangeTo}]`,
+                () => pageContract.queryFilter(filter as any, rangeFrom, rangeTo),
+              ),
+            }));
             metrics.chainRpcTotal.add(1, {
               rpc_method: 'eth_getLogs', outcome: 'ok', retryable: false, chain_id: this.chainId,
             });
@@ -3639,9 +3676,11 @@ export class EVMChainAdapterBase {
         metrics.chainRpcDuration.record(Date.now() - startedAt, {
           rpc_method: 'eth_getLogs', chain_id: this.chainId,
         });
+        // Host-only: the last error can be ethers' own (the chainId preflight
+        // runs outside the range reader), which quotes the full request URL.
         throw new Error(
           `${label}: no configured RPC could serve the log range [${lo}, ${hi}]` +
-            `${pageError ? `: ${errorMessage(pageError)}` : ''}.`,
+            `${pageError ? `: ${hostOnlyRpcText(errorMessage(pageError))}` : ''}.`,
           pageError ? { cause: pageError } : undefined,
         );
       },

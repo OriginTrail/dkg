@@ -1,7 +1,10 @@
 export * from './types.js';
 export * from './constants.js';
+export * from './storage-ack-protocols.js';
 export * from './context-graph-storage-uri.js';
 export * from './context-graph-snapshot-uri.js';
+export * from './context-graph-on-chain-binding.js';
+export * from './context-graph-metadata-placement.js';
 export * from './agent-identity.js';
 export * from './agents-list-wire.js';
 export * from './assertion-scoped-graphs.js';
@@ -18,6 +21,7 @@ export * from './sparql-operation.js';
 export * from './code-point-order.js';
 export { BoundedLruCache } from './bounded-lru-cache.js';
 export * from './coalescing-recurring-task.js';
+export { applyMixins } from './apply-mixins.js';
 export * from './query-result.js';
 export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
@@ -169,6 +173,9 @@ export {
   isPublicLikeAddress,
   isLocalOrInternalHostname,
 } from './node.js';
+// Transport-level network isolation. `peerIdFromRelayAddress` is shared with
+// the CLI, which derives other-network relay ids from bundled network configs.
+export { peerIdFromRelayAddress } from './network-peer-dial-policy.js';
 // NOTE: `isFinitePositiveInteger`, `buildPeerStoreOverrides`, and
 // `buildKadDHTOptions` are intentionally NOT re-exported. They are
 // implementation details of `DKGNode.start()`; the wiring test in
