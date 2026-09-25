@@ -107,6 +107,8 @@ describe('local StorageACK cancellation through the registered real handler', ()
         },
         publish: (data, peerId, signal) => handler.handler(data, { toString: () => peerId } as any, signal),
         update: (data, peerId, signal) => handler.updateHandler(data, { toString: () => peerId } as any, signal),
+        publishLocal: (data, peerId, signal, expectedHead) => handler.localHandler(data, { toString: () => peerId } as any, signal, expectedHead),
+        updateLocal: (data, peerId, signal, expectedHead) => handler.localUpdateHandler(data, { toString: () => peerId } as any, signal, expectedHead),
       }));
       expect(routes.has(PROTOCOL_STORAGE_ACK)).toBe(true);
       expect(routes.has(PROTOCOL_STORAGE_UPDATE_ACK)).toBe(true);
@@ -196,6 +198,14 @@ describe('local StorageACK cancellation through the registered real handler', ()
           physical = handler.updateHandler(data, { toString: () => peerId } as any, signal);
           return physical;
         },
+        publishLocal: (data, peerId, signal, expectedHead) => {
+          physical = handler.localHandler(data, { toString: () => peerId } as any, signal, expectedHead);
+          return physical;
+        },
+        updateLocal: (data, peerId, signal, expectedHead) => {
+          physical = handler.localUpdateHandler(data, { toString: () => peerId } as any, signal, expectedHead);
+          return physical;
+        },
       }));
       const root = computeFlatKCRootV10(quads, []);
       const leafCount = computeFlatKCMerkleLeafCountV10(quads, []);
@@ -254,6 +264,11 @@ describe('local StorageACK cancellation through the registered real handler', ()
         return physical;
       },
       update: (data, peerId, signal) => handler.updateHandler(data, { toString: () => peerId } as any, signal),
+      publishLocal: (data, peerId, signal, expectedHead) => {
+        physical = handler.localHandler(data, { toString: () => peerId } as any, signal, expectedHead);
+        return physical;
+      },
+      updateLocal: (data, peerId, signal, expectedHead) => handler.localUpdateHandler(data, { toString: () => peerId } as any, signal, expectedHead),
     });
     const data = encodePublishIntent({
       merkleRoot: computeFlatKCRootV10(quads, []), contextGraphId: '42',

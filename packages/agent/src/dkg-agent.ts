@@ -145,6 +145,7 @@ import {
   WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED,
   KA_ID_PRED, RESERVED_UAL_PRED,
   type CollectedACK, type V10CoreNodeACK, type V10ACKProviderParams,
+  type LocalStorageAckHeadExpectation,
   type ACKCollectorDeps,
   type ACKTransportFactory,
   type WorkspaceAgentRecipient,
@@ -3252,6 +3253,7 @@ export class DKGAgent extends DKGAgentBase {
 
   private createACKSendP2P(
     timeoutMs = this.config.storageAckTiming.sendTimeoutMs,
+    expectedHead?: LocalStorageAckHeadExpectation,
   ): ACKCollectorDeps['sendP2P'] {
     const send = createACKSendP2P({
       messenger: this.messenger,
@@ -3264,7 +3266,7 @@ export class DKGAgent extends DKGAgentBase {
           throw new Error('Local StorageACK handler is not registered');
         }
         if (!isStorageACKProtocol(protocol)) throw new Error(`Unsupported StorageACK protocol: ${protocol}`);
-        return sendLocal(this.peerId, protocol, data, timeoutMs);
+        return sendLocal(this.peerId, protocol, data, timeoutMs, expectedHead);
       }
       if (!this.networkAdmissionCoordinator.isAcceptedPeer(peerId)) {
         throw new Error(`peer ${peerId.slice(-8)} is not admitted for active-network ACK collection`);
@@ -3279,7 +3281,7 @@ export class DKGAgent extends DKGAgentBase {
    * via direct P2P from connected core nodes. The required number of ACKs
    * is read from chain ParametersStorage.minimumRequiredSignatures().
    */
-  createV10ACKProvider(contextGraphId: string) {
+  createV10ACKProvider(contextGraphId: string, expectedHead?: LocalStorageAckHeadExpectation) {
     if (!this.router || !this.gossip) return undefined;
     // `isV10Ready()` is the authoritative V10 capability gate. Using it
     // (instead of probing for `createKnowledgeAssets`) keeps
@@ -3301,7 +3303,7 @@ export class DKGAgent extends DKGAgentBase {
       gossipPublish: async (topic: string, data: Uint8Array) => {
         await this.gossip.publish(topic, data);
       },
-      sendP2P: this.createACKSendP2P(),
+      sendP2P: this.createACKSendP2P(undefined, expectedHead),
       getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeersAfterAdmission(
         protocol,
         this.ackOperationContext(protocol),
@@ -3460,7 +3462,7 @@ export class DKGAgent extends DKGAgentBase {
    * the publisher leaves `v10UpdateACKs` undefined and the adapter falls
    * back to self-signing on a minSig=1 network.
    */
-  createV10UpdateACKProvider(_contextGraphId: string) {
+  createV10UpdateACKProvider(_contextGraphId: string, expectedHead?: LocalStorageAckHeadExpectation) {
     if (!this.router || !this.gossip) return undefined;
     if (typeof this.chain.isV10Ready !== 'function' || !this.chain.isV10Ready()) return undefined;
     if (typeof this.chain.verifyACKIdentity !== 'function') return undefined;
@@ -3471,7 +3473,7 @@ export class DKGAgent extends DKGAgentBase {
       gossipPublish: async (topic: string, data: Uint8Array) => {
         await this.gossip.publish(topic, data);
       },
-      sendP2P: this.createACKSendP2P(),
+      sendP2P: this.createACKSendP2P(undefined, expectedHead),
       getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeersAfterAdmission(
         protocol,
         this.ackOperationContext(protocol),

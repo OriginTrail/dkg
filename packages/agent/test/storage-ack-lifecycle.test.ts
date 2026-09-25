@@ -39,6 +39,12 @@ vi.mock('@origintrail-official/dkg-publisher', async () => {
         capturedStorageACKHandlerSignals.push(signal);
         return new Uint8Array([2]);
       }
+      localHandler(data: Uint8Array, peer: { toString(): string }, signal?: AbortSignal): Promise<Uint8Array> {
+        return this.handler(data, peer, signal);
+      }
+      localUpdateHandler(data: Uint8Array, peer: { toString(): string }, signal?: AbortSignal): Promise<Uint8Array> {
+        return this.updateHandler(data, peer, signal);
+      }
     },
   };
 });

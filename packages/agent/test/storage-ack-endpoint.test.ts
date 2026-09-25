@@ -5,7 +5,6 @@ import {
   PROTOCOL_STORAGE_UPDATE_ACK,
   PROTOCOL_STORAGE_UPDATE_ACK_V2,
 } from '@origintrail-official/dkg-core';
-import type { StorageAckRequestOrigin } from '@origintrail-official/dkg-publisher';
 import { registerStorageACKEndpoint } from '../src/p2p/storage-ack-endpoint.js';
 
 const PROTOCOLS = [
@@ -22,19 +21,27 @@ describe('StorageACK endpoint request origin', () => {
       kind: 'publish' | 'update';
       peerId: string;
       signal: AbortSignal | undefined;
-      origin: StorageAckRequestOrigin;
+      origin: 'remote' | 'local';
     }> = [];
     const endpoint = registerStorageACKEndpoint({
       registerGroup: (entries) => {
         for (const entry of entries) routes.set(entry.protocolId, entry.handler);
         return () => routes.clear();
       },
-      publish: async (_data, peerId, signal, origin) => {
-        calls.push({ kind: 'publish', peerId, signal, origin });
+      publish: async (_data, peerId) => {
+        calls.push({ kind: 'publish', peerId, signal: undefined, origin: 'remote' });
         return new Uint8Array([1]);
       },
-      update: async (_data, peerId, signal, origin) => {
-        calls.push({ kind: 'update', peerId, signal, origin });
+      update: async (_data, peerId) => {
+        calls.push({ kind: 'update', peerId, signal: undefined, origin: 'remote' });
+        return new Uint8Array([2]);
+      },
+      publishLocal: async (_data, peerId, signal) => {
+        calls.push({ kind: 'publish', peerId, signal, origin: 'local' });
+        return new Uint8Array([1]);
+      },
+      updateLocal: async (_data, peerId, signal) => {
+        calls.push({ kind: 'update', peerId, signal, origin: 'local' });
         return new Uint8Array([2]);
       },
     });

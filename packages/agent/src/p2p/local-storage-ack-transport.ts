@@ -1,5 +1,6 @@
 import { isStorageACKProtocol } from '@origintrail-official/dkg-core';
 import type { StorageACKEndpoint } from './storage-ack-endpoint.js';
+import type { LocalStorageAckHeadExpectation } from '@origintrail-official/dkg-publisher';
 import { runBoundedOperation } from '../bounded-operation.js';
 
 export class LocalStorageACKDrainTimeoutError extends Error {
@@ -21,6 +22,7 @@ export class LocalStorageACKTransport {
     protocol: string,
     data: Uint8Array,
     timeoutMs: number,
+    expectedHead?: LocalStorageAckHeadExpectation,
   ): Promise<Uint8Array> {
     if (this.closed) throw new Error('Local StorageACK transport is closed');
     if (!isStorageACKProtocol(protocol)) throw new Error(`Unsupported StorageACK protocol: ${protocol}`);
@@ -31,7 +33,7 @@ export class LocalStorageACKTransport {
     const result = runBoundedOperation(async (signal) => {
       await predecessor;
       signal.throwIfAborted();
-      physicalWork = Promise.resolve(endpoint.dispatch(protocol, data, peerId, signal));
+      physicalWork = Promise.resolve(endpoint.dispatch(protocol, data, peerId, signal, expectedHead));
       return physicalWork;
     }, { timeoutMs, label: 'Local StorageACK request', signal: controller.signal });
     // The caller receives the deadline result, while the FIFO keeps ownership

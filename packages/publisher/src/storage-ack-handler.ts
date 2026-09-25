@@ -290,38 +290,27 @@ export type StorageAckDecisionObserver = (decision: StorageAckDecision) => void 
 
 /**
  * Who sent a StorageACK request. `local` is this core's own request: a
- * publishing core ACKing its own publish or update through the endpoint it
- * registered for remote requests. See {@link preservesPublisherHead}.
+ * publishing core ACKing its own publish or update through its registered endpoint.
  */
-export type StorageAckRequestOrigin = 'remote' | 'local';
+export interface LocalStorageAckHeadExpectation {
+  readonly shareOperationId: string;
+  readonly publisherPeerId: string;
+  readonly kaUal: string;
+  readonly assertionVersion: string;
+  readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  readonly allowedPeers: readonly string[];
+}
+
+export type StorageAckRequestContext =
+  | { readonly kind: 'remote' }
+  | { readonly kind: 'local'; readonly expectedHead?: LocalStorageAckHeadExpectation };
 
 /**
- * How an ACK copy relates to the current SWM head: refuse it, or write it and
- * release these owed ledger rows. `headHoldsCopy` marks a head that already
- * records exactly the content being ACKed.
+ * The complete persistence decision, resolved under the per-KA workspace lock.
  */
 type AckCopyHeadVerdict =
-  | { readonly decline: Uint8Array }
-  | { readonly supersede: readonly string[]; readonly headHoldsCopy?: true };
-
-/**
- * Whether an ACK copy leaves the current SWM head as it is instead of
- * pointing it at the copy's `storage-ack-` operation.
- *
- * Only a local self-ACK does, and only when the head already records exactly
- * the content being ACKed. That head is the publisher's own in-flight share: a
- * queued publish or update re-checks its operation id and access envelope
- * before every attempt and fails for good (`PUBLISH_INTENT_STALE`) once they
- * change, so the self-ACK of a round that misses quorum must not rewrite them.
- * The copy, its operation rows and its ledger row are still written and the
- * ACK is signed. A remote request always takes the head over, as before.
- */
-function preservesPublisherHead(
-  origin: StorageAckRequestOrigin,
-  verdict: AckCopyHeadVerdict,
-): boolean {
-  return origin === 'local' && 'supersede' in verdict && verdict.headHoldsCopy === true;
-}
+  | { readonly kind: 'decline'; readonly decline: Uint8Array }
+  | { readonly kind: 'replace-head' | 'preserve-head'; readonly supersede: readonly string[] };
 
 /**
  * Validate that every term of a parsed quad is well-formed BEFORE it enters the
@@ -1138,25 +1127,19 @@ export class StorageACKHandler {
     // the store wrapper so they reset the stream instead of being mislabeled
     // as a transient decline (see assertPersistQuadTermsSafe).
     assertPersistQuadTermsSafe(parsed);
-    const result = await this.runStoreOpOrDecline(cgId, async () => {
-      await this.runWhileLive(() => this.store.dropGraph(
+    const result = await this.runStoreOpOrDecline(cgId, () => this.runCommitTail(async () => {
+      await this.store.dropGraph(
         stagingGraphUri,
         ackStoreOptions('storage-ack.persistStaging.dropGraph', signal),
-      ), signal);
-      const graphedQuads = parsed.map((q) => ({ ...q, graph: stagingGraphUri }));
-      await this.runWhileLive(
-        () => this.store.insert(graphedQuads, ackStoreOptions('storage-ack.persistStaging.insert', signal)),
-        signal,
       );
+      const graphedQuads = parsed.map((q) => ({ ...q, graph: stagingGraphUri }));
+      await this.store.insert(graphedQuads, ackStoreOptions('storage-ack.persistStaging.insert'));
       // Durability boundary: the ACK we are about to sign asserts this data is
       // stored, and a worker respawn can recover from a snapshot that predates
       // the debounced flush — so force it durable before signing. A flush
       // failure stays inside the wrapper → transient decline (never sign).
-      await this.runWhileLive(
-        () => this.store.flush?.(ackStoreOptions('storage-ack.persistStaging.flush', signal)),
-        signal,
-      );
-    }, signal);
+      await this.store.flush?.(ackStoreOptions('storage-ack.persistStaging.flush'));
+    }, signal), signal);
     return result.ok ? { ok: true } : result;
   }
 
@@ -1178,7 +1161,7 @@ export class StorageACKHandler {
    * namespace's VM. Returns the ledger entry to record if the ACK is signed.
    *
    * A local self-ACK over content the head already records leaves that head
-   * in place (see {@link preservesPublisherHead}).
+   * in place only with proof of the exact queued operation and access envelope.
    */
   private async persistGraphScopedWorkspaceOrDecline(
     cgId: string,
@@ -1189,9 +1172,9 @@ export class StorageACKHandler {
     publisherPeerId: string,
     merkleRoot: Uint8Array,
     replaceGraph: boolean,
-    signal?: AbortSignal,
-    recordLedger = false,
-    origin: StorageAckRequestOrigin = 'remote',
+    signal: AbortSignal | undefined,
+    recordLedger: boolean,
+    context: StorageAckRequestContext,
   ): Promise<{ ok: true; ledger: StorageAckLedgerEntry } | { ok: false; decline: Uint8Array }> {
     assertPersistQuadTermsSafe(parsed);
     const normalized = parsed.map((quad) => ({ ...quad, graph: swmGraphUri }));
@@ -1263,9 +1246,11 @@ export class StorageACKHandler {
         publicTripleCount: normalized.length,
         privateTripleCount: graphPublish.privateTripleCount,
         privateMerkleRoot: incomingPrivateRoot,
+        publisherPeerId,
+        context,
         signal,
       }), signal);
-      if ('decline' in verdict) return verdict.decline;
+      if (verdict.kind === 'decline') return verdict.decline;
       const companion = graphPublish.subGraphName === undefined
         ? this.config.resolveDurableRootAtomicCompanion?.(Object.freeze({
             contextGraphId: swmGraphId,
@@ -1274,14 +1259,16 @@ export class StorageACKHandler {
             shareOperationId: operationId,
           }))
         : undefined;
-      if (replaceGraph || companion !== undefined) {
-        const replaced = await this.runWhileLive(() => tryReplaceGraphWithDurableRootCompanionAtomically(
+      const willReplace = replaceGraph || companion !== undefined;
+      await this.runCommitTail(async () => {
+      if (willReplace) {
+        const replaced = await tryReplaceGraphWithDurableRootCompanionAtomically(
           this.store,
           swmGraphUri,
           normalized,
           companion,
           ackStoreOptions('storage-ack.persistGraphScoped.replaceGraph', signal),
-        ), signal);
+        );
         if (!replaced) {
           throw Object.assign(
             new Error('Graph-scoped StorageACK requires atomic TripleStore.replaceGraph support'),
@@ -1292,17 +1279,16 @@ export class StorageACKHandler {
         // gate, so the witness must be dropped explicitly. The head write and
         // two other store calls follow, any of which can throw and leave content
         // ahead of the head.
-        await this.runWhileLive(() => invalidateSwmMaterializationWitness(
+        await invalidateSwmMaterializationWitness(
           this.store,
           swmGraphUri,
-          ackStoreOptions('storage-ack.persistGraphScoped.witnessInvalidate', signal),
-        ).catch(() => {}), signal);
+          ackStoreOptions('storage-ack.persistGraphScoped.witnessInvalidate'),
+        ).catch(() => {});
       }
-      await this.runCommitTail(async () => {
         await deleteByPatternWithoutCount(
           this.store,
           { graph: metaGraph, subject: operationSubject },
-          ackStoreOptions('storage-ack.persistGraphScoped.deleteOperationMeta', signal),
+          ackStoreOptions('storage-ack.persistGraphScoped.deleteOperationMeta', willReplace ? undefined : signal),
         );
         // Once the operation rows are deleted the re-insert must finish, or a
         // re-ACK would leave the head pointing at missing rows: no deadline here.
@@ -1312,7 +1298,7 @@ export class StorageACKHandler {
         );
         // A local ACK of the publisher's already-current copy must preserve
         // the queued job's operation id and access envelope for its retry.
-        if (!preservesPublisherHead(origin, verdict)) {
+        if (verdict.kind === 'replace-head') {
           await storeKnowledgeAssetWorkspaceHead({
             store: this.store,
             graphManager: this.graphManager,
@@ -1396,6 +1382,17 @@ export class StorageACKHandler {
     return [...owed.values()];
   }
 
+  private declineStaleLocalHead(cgId: string): AckCopyHeadVerdict {
+    return {
+      kind: 'decline',
+      decline: this.encodeDecline(
+        cgId,
+        STORAGE_ACK_DECLINE_CODES.CONFLICTING_KA_ASSERTION,
+        'Local publisher workspace head changed after the publish intent was queued',
+      ),
+    };
+  }
+
   /**
    * The asset's on-chain Merkle-root count (its latest landed version), or
    * `count: undefined` when no chain view is wired. A failed read is a
@@ -1425,7 +1422,7 @@ export class StorageACKHandler {
    * the per-KA write lock before the copy is written. Returns a decline when
    * the copy must not replace the current head, and otherwise the owed ledger
    * rows the replacement supersedes. A head that already records exactly this
-   * content is always replaceable and is marked `headHoldsCopy`.
+   * content is preserved only for an exact local queued operation.
    *
    * Only a copy this core signed and still owes can hold the head: any other
    * head (a gossip draft, a synced copy, a copy already released) is replaced.
@@ -1449,9 +1446,11 @@ export class StorageACKHandler {
     publicTripleCount: number;
     privateTripleCount: number;
     privateMerkleRoot?: string;
+    publisherPeerId: string;
+    context: StorageAckRequestContext;
     signal?: AbortSignal;
   }): Promise<AckCopyHeadVerdict> {
-    const replace = { supersede: [] as readonly string[] };
+    const replace = { kind: 'replace-head' as const, supersede: [] as readonly string[] };
     const resolution = await tryResolveKnowledgeAssetWorkspaceHead({
       store: this.store,
       graphManager: this.graphManager,
@@ -1460,10 +1459,15 @@ export class StorageACKHandler {
       subGraphName: input.subGraphName,
       queryOptions: ackStoreOptions('storage-ack.persistGraphScoped.headCheck', input.signal),
     });
-    if (resolution.status === 'missing') return replace;
+    if (resolution.status === 'missing') {
+      return input.context.kind === 'local' && input.context.expectedHead
+        ? this.declineStaleLocalHead(input.cgId)
+        : replace;
+    }
     if (resolution.status === 'corrupt') {
       // The gossip path defers the same way: the sync lane repairs the head.
       return {
+        kind: 'decline',
         decline: this.encodeDecline(
           input.cgId,
           STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE,
@@ -1473,22 +1477,42 @@ export class StorageACKHandler {
       };
     }
     const head = resolution.head;
+    if (input.context.kind === 'local' && input.context.expectedHead) {
+      const expected = input.context.expectedHead;
+      const peers = (values: readonly string[]) => [...new Set(values.map((value) => value.trim()).filter(Boolean))].sort();
+      if (
+        expected.kaUal !== input.scope.ual
+        || expected.assertionVersion !== input.scope.assertionVersion
+        || expected.publisherPeerId !== input.publisherPeerId
+        || head.publisherPeerId !== expected.publisherPeerId
+        || head.shareOperationId !== expected.shareOperationId
+        || head.access.kind !== 'persisted'
+        || head.access.accessPolicy !== expected.accessPolicy
+        || JSON.stringify(peers(head.access.allowedPeers)) !== JSON.stringify(peers(expected.allowedPeers))
+      ) return this.declineStaleLocalHead(input.cgId);
+    }
     const incomingVersion = BigInt(input.scope.assertionVersion);
     const currentVersion = BigInt(head.assertionVersion);
-    if (
+    const sameContent =
       incomingVersion === currentVersion
       && head.publicQuadsDigest === input.publicDigest
       && head.publicTripleCount === input.publicTripleCount
       && head.privateTripleCount === input.privateTripleCount
-      && head.privateMerkleRoot?.toLowerCase() === input.privateMerkleRoot
-    ) {
-      return { ...replace, headHoldsCopy: true };
+      && head.privateMerkleRoot?.toLowerCase() === input.privateMerkleRoot;
+    if (input.context.kind === 'local' && input.context.expectedHead && !sameContent) {
+      return this.declineStaleLocalHead(input.cgId);
+    }
+    if (sameContent) {
+      return input.context.kind === 'local' && input.context.expectedHead
+        ? { kind: 'preserve-head', supersede: [] }
+        : replace;
     }
     const owedRows = await this.owedHeadOperations(input.swmGraphId, head, input.signal);
     if (owedRows.length === 0) return replace;
     const owed = owedRows.map((row) => row.op);
     if (incomingVersion < currentVersion) {
       return {
+        kind: 'decline',
         decline: this.encodeDecline(
           input.cgId,
           STORAGE_ACK_DECLINE_CODES.CONFLICTING_KA_ASSERTION,
@@ -1498,9 +1522,10 @@ export class StorageACKHandler {
     }
     if (incomingVersion === currentVersion) {
       const landed = await this.readRootCountOrDecline(input.cgId, input.scope.ual, input.signal);
-      if ('decline' in landed) return landed;
+      if ('decline' in landed) return { kind: 'decline', decline: landed.decline };
       if (landed.count === undefined || landed.count >= currentVersion) {
         return {
+          kind: 'decline',
           decline: this.encodeDecline(
             input.cgId,
             STORAGE_ACK_DECLINE_CODES.CONFLICTING_KA_ASSERTION,
@@ -1516,13 +1541,14 @@ export class StorageACKHandler {
       const dead = owedRows.every((row) => row.absentSeen || now - row.signedAtMs > pendingWindowMs);
       if (!dead) {
         return {
+          kind: 'decline',
           decline: this.declineVmPromotionUnavailable(
             input.cgId,
             `a copy of version ${currentVersion} this core signed may still land on chain; retry later`,
           ),
         };
       }
-      return { supersede: owed };
+      return { kind: 'replace-head', supersede: owed };
     }
     // An update replaces the per-KA SWM graph, which is not versioned. Only do
     // that once the older version is in this namespace's VM, so an update
@@ -1540,8 +1566,8 @@ export class StorageACKHandler {
     // then never be promoted as-is (promotion follows the chain's latest
     // root), so release it instead of waiting on a promotion that fails.
     const chain = await this.readRootCountOrDecline(input.cgId, input.scope.ual, input.signal);
-    if ('decline' in chain) return chain;
-    if (chain.count !== undefined && chain.count > currentVersion) return { supersede: owed };
+    if ('decline' in chain) return { kind: 'decline', decline: chain.decline };
+    if (chain.count !== undefined && chain.count > currentVersion) return { kind: 'replace-head', supersede: owed };
     this.notifyPriorVersionAwaitingPromotion({
       contextGraphId: input.cgId,
       swmGraphId: input.swmGraphId,
@@ -1550,6 +1576,7 @@ export class StorageACKHandler {
       ...(input.subGraphName ? { subGraphName: input.subGraphName } : {}),
     });
     return {
+      kind: 'decline',
       decline: this.declineVmPromotionUnavailable(
         input.cgId,
         `version ${currentVersion} of this Knowledge Asset is still awaiting promotion on this core`,
@@ -1759,14 +1786,24 @@ export class StorageACKHandler {
    * for the `ackHandlerTotal` metric; a thrown error resets the stream and
    * is auto-recorded as a span ERROR by withSpan.
    *
-   * `origin` is `local` only for this core's own request (see
-   * {@link StorageAckRequestOrigin}); every stream from a peer is `remote`.
+   * Peer streams always use remote persistence semantics.
    */
-  handler = async (
+  handler = (data: Uint8Array, peerId: PeerId, externalSignal?: AbortSignal): Promise<Uint8Array> =>
+    this.handlePublishRequest(data, peerId, externalSignal, { kind: 'remote' });
+
+  /** Local dispatch carries immutable queued-head proof when a queued job owns it. */
+  localHandler = (
     data: Uint8Array,
     peerId: PeerId,
     externalSignal?: AbortSignal,
-    origin: StorageAckRequestOrigin = 'remote',
+    expectedHead?: LocalStorageAckHeadExpectation,
+  ): Promise<Uint8Array> => this.handlePublishRequest(data, peerId, externalSignal, { kind: 'local', expectedHead });
+
+  private handlePublishRequest = async (
+    data: Uint8Array,
+    peerId: PeerId,
+    externalSignal: AbortSignal | undefined,
+    context: StorageAckRequestContext,
   ): Promise<Uint8Array> => {
     const chainIdLabel = this.config.chainId != null
       ? this.config.chainId.toString()
@@ -1785,7 +1822,7 @@ export class StorageACKHandler {
       }
       try {
         const result = await this.runHandlerWithDeadline(
-          (signal) => this.handlePublishIntent(data, peerId, signal, origin),
+          (signal) => this.handlePublishIntent(data, peerId, signal, context),
           cgIdAttr,
           externalSignal,
         );
@@ -1873,8 +1910,8 @@ export class StorageACKHandler {
   private handlePublishIntent = async (
     data: Uint8Array,
     peerId: PeerId,
-    signal?: AbortSignal,
-    origin: StorageAckRequestOrigin = 'remote',
+    signal: AbortSignal | undefined,
+    context: StorageAckRequestContext,
   ): Promise<Uint8Array> => {
     signal?.throwIfAborted();
     if (this.config.nodeRole !== 'core') {
@@ -2225,7 +2262,7 @@ export class StorageACKHandler {
           true,
           signal,
           this.config.ensureVmPromotion !== undefined,
-          origin,
+          context,
         );
       } else {
         // Ungated embeddings only (a gated core declined legacy intents above).
@@ -2306,7 +2343,7 @@ export class StorageACKHandler {
           false,
           signal,
           this.config.ensureVmPromotion !== undefined,
-          origin,
+          context,
         );
       }
     }
@@ -2511,14 +2548,23 @@ export class StorageACKHandler {
    * deadline: without it a hanging store op (SWM fallback `store.query`,
    * catalog persist) dead-airs update ACKs past the publisher's 20s
    * per-send timeout exactly as publish did, and the update collector
-   * rides the same transient-decline retry ladder. `origin` as for
-   * {@link handler}.
+   * rides the same transient-decline retry ladder.
    */
-  updateHandler = async (
+  updateHandler = (data: Uint8Array, peerId: PeerId, externalSignal?: AbortSignal): Promise<Uint8Array> =>
+    this.handleUpdateRequest(data, peerId, externalSignal, { kind: 'remote' });
+
+  localUpdateHandler = (
     data: Uint8Array,
     peerId: PeerId,
     externalSignal?: AbortSignal,
-    origin: StorageAckRequestOrigin = 'remote',
+    expectedHead?: LocalStorageAckHeadExpectation,
+  ): Promise<Uint8Array> => this.handleUpdateRequest(data, peerId, externalSignal, { kind: 'local', expectedHead });
+
+  private handleUpdateRequest = async (
+    data: Uint8Array,
+    peerId: PeerId,
+    externalSignal: AbortSignal | undefined,
+    context: StorageAckRequestContext,
   ): Promise<Uint8Array> => {
     let cgIdForDecline: string | undefined;
     try {
@@ -2529,7 +2575,7 @@ export class StorageACKHandler {
       // Malformed request — handleUpdateIntent will throw + reset below.
     }
     return this.runHandlerWithDeadline(
-      (signal) => this.handleUpdateIntent(data, peerId, signal, origin),
+      (signal) => this.handleUpdateIntent(data, peerId, signal, context),
       cgIdForDecline,
       externalSignal,
     );
@@ -2544,8 +2590,8 @@ export class StorageACKHandler {
   private handleUpdateIntent = async (
     data: Uint8Array,
     peerId: PeerId,
-    signal?: AbortSignal,
-    origin: StorageAckRequestOrigin = 'remote',
+    signal: AbortSignal | undefined,
+    context: StorageAckRequestContext,
   ): Promise<Uint8Array> => {
     signal?.throwIfAborted();
     if (this.config.nodeRole !== 'core') {
@@ -2814,7 +2860,7 @@ export class StorageACKHandler {
       // The intent carries no access envelope, so the head records the legacy
       // default (public, or owner-only when private triples are committed),
       // except on a local self-ACK, which keeps the publisher's own head and
-      // its access envelope (see preservesPublisherHead).
+      // its access envelope after the exact queued-head check.
       // An embedding without the gate keeps the pre-gate behaviour.
       const updateCopy: GraphScopedAckCopy = { ...graphUpdate, allowedPeers: [] };
       const verifiedQuads = publicQuads;
@@ -2830,7 +2876,7 @@ export class StorageACKHandler {
         writeData,
         signal,
         true,
-        origin,
+        context,
       );
     } else if (intent.stagingQuads && intent.stagingQuads.length > 0) {
       if (intent.stagingQuads.length > STORAGE_ACK_MAX_STAGING_BYTES) {

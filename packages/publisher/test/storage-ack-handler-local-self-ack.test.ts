@@ -15,6 +15,7 @@ import {
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { StorageACKHandler } from '../src/storage-ack-handler.js';
+import type { LocalStorageAckHeadExpectation } from '../src/storage-ack-handler.js';
 import { computeFlatKCMerkleLeafCountV10, computeFlatKCRootV10 } from '../src/merkle.js';
 import { resolveKnowledgeAssetWorkspaceHead } from '../src/workspace-resolution.js';
 import { workspaceOperationSubject } from '../src/workspace-metadata-subjects.js';
@@ -105,7 +106,7 @@ function updateIntent(quads: readonly Quad[], version: number): Uint8Array {
   });
 }
 
-async function harness() {
+async function harness(ackHandlerDeadlineMs?: number) {
   const store = new OxigraphStore();
   const publisher = new DKGPublisher({
     store,
@@ -124,6 +125,7 @@ async function harness() {
     kav10Address: '0x000000000000000000000000000000000000c10a',
     workspaceWriteLocks: publisher.writeLocks,
     ensureVmPromotion: async () => ({ ok: true }),
+    ackHandlerDeadlineMs,
   }, new TypedEventBus());
   return { store, publisher, handler, signMessage };
 }
@@ -144,6 +146,17 @@ function shareInput(version: number, shareOperationId: string, quads: readonly Q
     allowedPeers: ALLOWED_PEERS,
     agentAddress: AUTHOR,
     timestamp: new Date('2026-09-24T12:00:00.000Z'),
+  };
+}
+
+function expectedHead(version: number, shareOperationId: string): LocalStorageAckHeadExpectation {
+  return {
+    shareOperationId,
+    publisherPeerId: PUBLISHER_PEER,
+    kaUal: UAL,
+    assertionVersion: String(version),
+    accessPolicy: 'allowList',
+    allowedPeers: ALLOWED_PEERS,
   };
 }
 
@@ -191,11 +204,11 @@ describe('StorageACK local self-ACK keeps the publisher SWM head (#2796)', () =>
       access: { kind: 'persisted', accessPolicy: 'allowList', allowedPeers: ['reader-a', 'reader-b'] },
     });
 
-    const ack = decodeStorageACK(await h.handler.handler(
+    const ack = decodeStorageACK(await h.handler.localHandler(
       publishIntent(content('v1')),
       { toString: () => PUBLISHER_PEER },
       undefined,
-      'local',
+      expectedHead(1, 'queued-publish-share'),
     ));
 
     expect(isStorageACKDecline(ack)).toBe(false);
@@ -215,11 +228,11 @@ describe('StorageACK local self-ACK keeps the publisher SWM head (#2796)', () =>
     await h.publisher.stageKnowledgeAssetSharedWorkingMemoryV1(queued);
     const before = await readHead(h);
 
-    const ack = decodeStorageACK(await h.handler.updateHandler(
+    const ack = decodeStorageACK(await h.handler.localUpdateHandler(
       updateIntent(content('v2'), 2),
       { toString: () => PUBLISHER_PEER },
       undefined,
-      'local',
+      expectedHead(2, 'queued-update-share'),
     ));
 
     expect(isStorageACKDecline(ack)).toBe(false);
@@ -239,14 +252,72 @@ describe('StorageACK local self-ACK keeps the publisher SWM head (#2796)', () =>
     expect(await ledgerOperations(h)).toEqual([workspaceOperationSubject(SWM_GRAPH_ID, copy)]);
   });
 
+  it.each([
+    ['operation', { shareOperationId: 'replacement-share' }],
+    ['access', { accessPolicy: 'public' as const, allowedPeers: [] }],
+    ['publisher', { publisherPeerId: REMOTE_PEER }],
+  ])('declines a queued self-ACK when the same-content head changes %s', async (_name, change) => {
+    const h = await harness();
+    await h.publisher.stageKnowledgeAssetSharedWorkingMemoryV1(
+      shareInput(1, 'queued-publish-share', content('v1')),
+    );
+    await h.publisher.stageKnowledgeAssetSharedWorkingMemoryV1({
+      ...shareInput(1, 'queued-publish-share', content('v1')),
+      ...change,
+    });
+    const changedHead = await readHead(h);
+
+    const ack = decodeStorageACK(await h.handler.localHandler(
+      publishIntent(content('v1')),
+      { toString: () => PUBLISHER_PEER },
+      undefined,
+      expectedHead(1, 'queued-publish-share'),
+    ));
+
+    expect(isStorageACKDecline(ack)).toBe(true);
+    expect(h.signMessage).not.toHaveBeenCalled();
+    expect(await readHead(h)).toEqual(changedHead);
+    expect(await ledgerOperations(h)).toEqual([]);
+  });
+
+  it('finishes graph, metadata, head, and ledger after a non-cooperative replace commits past deadline', async () => {
+    const h = await harness(40);
+    const originalReplace = h.store.replaceGraph.bind(h.store);
+    let entered!: () => void;
+    let release!: () => void;
+    const inReplace = new Promise<void>((resolve) => { entered = resolve; });
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(h.store, 'replaceGraph').mockImplementation(async (graph, quads) => {
+      entered();
+      await held;
+      await originalReplace(graph, quads);
+    });
+
+    const response = h.handler.localHandler(
+      publishIntent(content('late-commit')),
+      { toString: () => PUBLISHER_PEER },
+    );
+    await inReplace;
+    const ack = decodeStorageACK(await response);
+    expect(isStorageACKDecline(ack)).toBe(true);
+    release();
+
+    const copy = ackCopyOperationId(1, content('late-commit'));
+    await vi.waitFor(async () => {
+      expect(await hasOperationRows(h, copy)).toBe(true);
+      expect(await ledgerOperations(h)).toEqual([workspaceOperationSubject(SWM_GRAPH_ID, copy)]);
+    });
+    expect(await readHead(h)).toMatchObject({ shareOperationId: copy });
+    expect(await swmValues(h, 1)).toEqual(['"late-commit"']);
+    expect(h.signMessage).not.toHaveBeenCalled();
+  });
+
   it('writes the head as before when no head holds the ACKed content', async () => {
     const h = await harness();
 
-    const ack = decodeStorageACK(await h.handler.handler(
+    const ack = decodeStorageACK(await h.handler.localHandler(
       publishIntent(content('direct')),
       { toString: () => PUBLISHER_PEER },
-      undefined,
-      'local',
     ));
 
     expect(isStorageACKDecline(ack)).toBe(false);
@@ -261,7 +332,7 @@ describe('StorageACK local self-ACK keeps the publisher SWM head (#2796)', () =>
     const before = await readHead(h);
     const intent = publishIntent(content('v1'), computeFlatKCRootV10(content('other'), []));
 
-    await expect(h.handler.handler(intent, { toString: () => PUBLISHER_PEER }, undefined, 'local'))
+    await expect(h.handler.localHandler(intent, { toString: () => PUBLISHER_PEER }, undefined, expectedHead(1, 'queued-publish-share')))
       .rejects.toThrow(/Merkle root mismatch/);
 
     expect(h.signMessage).not.toHaveBeenCalled();

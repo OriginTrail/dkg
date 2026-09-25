@@ -23,8 +23,7 @@ describe('StorageACK registration session', () => {
       attempt: async () => {
         entered();
         await gate;
-        expect(session.install(staleEndpoint)).toBe(false);
-        return 'registered';
+        return { kind: 'registered', endpoint: staleEndpoint } as const;
       },
       retryDelayMs: 1_000,
       isStarted: () => true,
@@ -83,16 +82,14 @@ describe('StorageACK registration session', () => {
     const replacement = endpoint();
     const attempt = vi.fn(async (options: { repairWallets?: boolean }, phase: string) => {
       if (phase === 'initial') {
-        expect(session.install(first)).toBe(true);
-        return 'registered' as const;
+        return { kind: 'registered', endpoint: first } as const;
       }
       expect(options.repairWallets).toBe(false);
       if (phase === 'failover') throw new Error('chain temporarily unavailable');
       if (attempt.mock.calls.filter(([, callPhase]) => callPhase === 'retry').length === 1) {
-        return 'retryable' as const;
+        return { kind: 'retryable' } as const;
       }
-      expect(session.install(replacement)).toBe(true);
-      return 'registered' as const;
+      return { kind: 'registered', endpoint: replacement } as const;
     });
     const onError = vi.fn();
     const onRetryScheduled = vi.fn();

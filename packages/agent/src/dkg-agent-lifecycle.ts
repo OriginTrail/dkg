@@ -2753,13 +2753,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // protocol confuses peer-role detection based on protocol support.
     if (effectiveRole === 'core') {
       if (ackSignerCandidates.length > 0) {
-        const registrationIsCurrent = () => storageACKRegistrationSession.isCurrent();
         const attemptStorageACKRegistration = async (
           attemptCtx: OperationContext,
           options: { repairWallets?: boolean; allowChainReresolution?: boolean } = {},
-        ): Promise<'registered' | 'retryable' | 'disabled'> => {
-          if (!registrationIsCurrent()) return 'disabled';
-          if (this.storageAckHandlerRegistered) return 'registered';
+        ): Promise<import('./p2p/storage-ack-registration-runtime.js').RegistrationOutcome> => {
+          if (!storageACKRegistrationSession.isCurrent()) return { kind: 'disabled' };
+          if (this.storageAckHandlerRegistered) return { kind: 'disabled' };
           // #894 / Codex PR #901 (round 2): background identity re-resolution.
           // If boot left the identity unresolved because of a transient chain
           // failure (RPC timeout/unreachable), re-probe the chain — but ONLY on
@@ -2779,12 +2778,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             && options.allowChainReresolution === true
           ) {
             try {
-              let reresolved = await raceWithBootTimeout(
+              let reresolved = await storageACKRegistrationSession.runStep(() => raceWithBootTimeout(
                 this.chain.getIdentityId(),
                 BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
                 'StorageACK identity re-resolution',
-              );
-              if (!registrationIsCurrent()) return 'disabled';
+              ));
               // Codex :1757: a brand-new core node may have hit the transient
               // failure BEFORE `ensureProfile()` ever ran, so it has no profile
               // to find. Re-probing `getIdentityId()` alone would return 0n
@@ -2796,8 +2794,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               // boot-path (or concurrent-retry) provisioning still in flight.
               if (reresolved === 0n && effectiveRole === 'core') {
                 this.log.info(attemptCtx, `No on-chain identity after transient boot outage — creating profile and staking...`);
-                reresolved = await this.provisionProfileGuarded(attemptCtx);
-                if (!registrationIsCurrent()) return 'disabled';
+                reresolved = await storageACKRegistrationSession.runStep(() => this.provisionProfileGuarded(attemptCtx));
               }
               if (reresolved > 0n) {
                 onChainIdentityId = reresolved;
@@ -2809,6 +2806,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 );
               }
             } catch (err) {
+              if (!storageACKRegistrationSession.isCurrent()) return { kind: 'disabled' };
               // Codex PR #901 round-4 :1838: mirror the boot-path :1714 gate on
               // the retry path. If the chain came back but provisioning then
               // failed DETERMINISTICALLY (insufficient funds / revert / admin),
@@ -2835,17 +2833,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           if (onChainIdentityId > 0n) {
             const registrationSucceeded = options.repairWallets === false
               ? true
-              : await ensureACKCandidateWalletsRegistered(attemptCtx);
-            if (!registrationIsCurrent()) return 'disabled';
-            const signerResolution = await this.resolveConfirmedACKSigner(
+              : await storageACKRegistrationSession.runStep(() => ensureACKCandidateWalletsRegistered(attemptCtx));
+            const signerResolution = await storageACKRegistrationSession.runStep(() => this.resolveConfirmedACKSigner(
               onChainIdentityId,
               ackSignerCandidates,
               attemptCtx,
-            );
+            ));
             const ackSignerWallet = signerResolution.wallet;
-            if (!registrationIsCurrent()) return 'disabled';
             if (!ackSignerWallet) {
-              return (registrationSucceeded && !signerResolution.retryable) ? 'disabled' : 'retryable';
+              return { kind: (registrationSucceeded && !signerResolution.retryable) ? 'disabled' : 'retryable' };
             }
 
             // The V10 ACK digest includes a (chainid, kav10Address) H5 prefix
@@ -2855,12 +2851,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // no provider-backed dependency, so both values are passed in at
             // construction.
             const chainIdForHandler = typeof this.chain.getEvmChainId === 'function'
-              ? await this.chain.getEvmChainId()
+              ? await storageACKRegistrationSession.runStep(() => this.chain.getEvmChainId!())
               : undefined;
             const kav10AddressForHandler = typeof this.chain.getKnowledgeAssetsLifecycleAddress === 'function'
-              ? await this.chain.getKnowledgeAssetsLifecycleAddress()
+              ? await storageACKRegistrationSession.runStep(() => this.chain.getKnowledgeAssetsLifecycleAddress!())
               : undefined;
-            if (!registrationIsCurrent()) return 'disabled';
             if (chainIdForHandler === undefined || kav10AddressForHandler === undefined) {
               this.log.warn(
                 attemptCtx,
@@ -2868,10 +2863,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 `getEvmChainId() + getKnowledgeAssetsLifecycleAddress(); handler cannot build the ` +
                 `H5-prefixed ACK digest that KnowledgeAssetsV10 verifies on-chain`,
               );
-              return 'disabled';
+              return { kind: 'disabled' };
             }
 
-            let ownedEndpoint: ReturnType<typeof registerStorageACKEndpoint> | null = null;
+            const registrationOwner = {};
             const ackHandler = new StorageACKHandler(this.store, {
               nodeRole: effectiveRole,
               nodeIdentityId: onChainIdentityId,
@@ -2947,7 +2942,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 },
               ),
               onSignerUnregistered: () => {
-                if (!ownedEndpoint || !storageACKRegistrationSession.signerLost(ownedEndpoint)) return;
+                if (!storageACKRegistrationSession.signerLost(registrationOwner)) return;
                 this.log.warn(
                   attemptCtx,
                   `Unregistered V10 StorageACK handler: signer ${ackSignerWallet.address} ` +
@@ -3038,22 +3033,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // dedup; ackHandler's signature stays the same.
             const endpoint = registerStorageACKEndpoint({
               registerGroup: (entries) => this.messenger.registerGroup(entries),
-              publish: (data, peerIdStr, signal, origin) => {
+              publish: (data, peerIdStr) => {
                 const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-                return ackHandler.handler(data, peerId, signal, origin);
+                return ackHandler.handler(data, peerId);
               },
-              update: (data, peerIdStr, signal, origin) => {
+              update: (data, peerIdStr) => {
                 const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
-                return ackHandler.updateHandler(data, peerId, signal, origin);
+                return ackHandler.updateHandler(data, peerId);
+              },
+              publishLocal: (data, peerIdStr, signal, expectedHead) => {
+                const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
+                return ackHandler.localHandler(data, peerId, signal, expectedHead);
+              },
+              updateLocal: (data, peerIdStr, signal, expectedHead) => {
+                const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
+                return ackHandler.localUpdateHandler(data, peerId, signal, expectedHead);
               },
             });
-            if (!storageACKRegistrationSession.install(endpoint)) return 'disabled';
-            ownedEndpoint = endpoint;
             this.log.info(
               attemptCtx,
               `Registered V10 StorageACK handler (identity=${onChainIdentityId}, signer=${ackSignerWallet.address})`,
             );
-            return 'registered';
+            return { kind: 'registered', endpoint, owner: registrationOwner };
           } else if (bootChainIdentityUnresolvedTransient) {
             // #894 / Codex PR #901: identity is still 0n only because the
             // chain was unreachable at boot and the re-resolution above hasn't
@@ -3062,12 +3063,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // RPC returns, instead of leaving a core node permanently
             // un-advertised until restart.
             this.log.warn(attemptCtx, `Deferring V10 StorageACK handler registration — on-chain identity not yet resolved (transient chain outage at boot); will retry`);
-            return 'retryable';
+            return { kind: 'retryable' };
           } else {
             this.log.warn(attemptCtx, `Skipping V10 StorageACK handler registration — identity not yet provisioned`);
-            return 'disabled';
+            return { kind: 'disabled' };
           }
-          return 'disabled';
         };
 
         // Codex PR #901 round-4 :2106: `storageAckRegistrationRetryMs` is a
