@@ -466,16 +466,13 @@ export async function resolveOxigraphBinary(
  * managed layer for the reclaim, apart from resolution, which never needs the
  * PATH binary once a pinned binary is selected.
  */
-export async function oxigraphReclaimCatalog(opts: {
-  selectedPath: string;
-  cacheDir: string;
-  platform?: NodeJS.Platform;
-  io?: Partial<OxigraphBinaryIo>;
-}): Promise<OxigraphBinaryCatalog> {
-  const pathBinary = await resolveSystemOxigraphOnPath(
-    { ...defaultIo(), ...opts.io },
-    opts.platform ?? process.platform,
-  );
-  const dirs = [opts.cacheDir, dirname(opts.selectedPath), ...(pathBinary ? [dirname(pathBinary)] : [])];
-  return { paths: [opts.selectedPath], dirs: [...new Set(dirs)] };
+export async function oxigraphReclaimCatalog(
+  selected: ResolvedOxigraphBinary,
+  opts: { cacheDir: string; platform?: NodeJS.Platform; io?: Partial<OxigraphBinaryIo> },
+): Promise<OxigraphBinaryCatalog> {
+  const pathBinary = selected.source === 'system'
+    ? selected.path
+    : await resolveSystemOxigraphOnPath({ ...defaultIo(), ...opts.io }, opts.platform ?? process.platform);
+  const dirs = [opts.cacheDir, dirname(selected.path), ...(pathBinary ? [dirname(pathBinary)] : [])];
+  return { paths: [selected.path], dirs: [...new Set(dirs)] };
 }

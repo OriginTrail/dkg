@@ -5,7 +5,8 @@ import type { ProcessLookup } from '../../src/daemon/process-probe.js';
 /**
  * An injected process table for the orphan reclaim: processes with argv,
  * parent, start time and whether they hold the store lock. Signals take effect
- * at once; `sleep` advances a fake clock.
+ * at once; `sleep` advances a fake clock. The lock file and owner record come
+ * from the host unless a test supplies them too.
  */
 export interface FakeProcess {
   ppid: number;
@@ -30,7 +31,7 @@ export function processTable(
   );
   let clock = 0;
   const signals: Array<[number, NodeJS.Signals]> = [];
-  const io: OrphanedOxigraphIo = {
+  const io: Omit<OrphanedOxigraphIo, 'platform' | 'lockExists' | 'readOwnerRecord'> = {
     listLockHolders: vi.fn(async () =>
       [...table].filter(([, entry]) => entry.alive && entry.holdsLock).map(([pid]) => pid)),
     inspectProcess: async (pid) => {

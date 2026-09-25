@@ -166,8 +166,10 @@ export function createOxigraphLaunchStrategy(opts: {
 
   return {
     mode: 'systemd-scope',
-    // setpriv's parent-death signal stops Oxigraph with its watchdog, so the
-    // scope's child is signalled alone.
+    // `systemd-run --scope` execs the watchdog in place, and setpriv's
+    // parent-death signal stops Oxigraph with it. The launch still leads its
+    // own process group, so a signal reaches every process it started
+    // without depending on either.
     ...launcher((binaryPath, binaryArgs) => {
       generation += 1;
       const unit = `dkg-oxigraph-${opts.parentPid}-${generation}`;
@@ -186,7 +188,7 @@ export function createOxigraphLaunchStrategy(opts: {
           DBUS_SESSION_BUS_ADDRESS: `unix:path=${runtimeDir}/bus`,
         },
       };
-    }, false),
+    }, true),
     resolveListenerPid: (child, port, host, resolver) => resolver(child, port, host, 'process-tree'),
     observeStderr(child, text) {
       if (text.includes(OXIGRAPH_WATCHDOG_OOM_MARKER)) watchdogOomChildren.add(child);

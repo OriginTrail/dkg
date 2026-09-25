@@ -137,8 +137,12 @@ describe('Oxigraph launch strategies', () => {
     },
   );
 
-  it('signals the direct watchdog\'s whole process group, so a SIGKILL also reaches Oxigraph', async () => {
-    const strategy = createOxigraphLaunchStrategy({ platform: process.platform, parentPid: 42, uid: 1000 });
+  it.each([
+    ['the direct watchdog', { platform: process.platform, parentPid: 42, uid: 1000 }],
+    // A pre-ready scoped launch killed on its ready deadline.
+    ['a systemd scope', { platform: 'linux' as const, parentPid: 42, uid: 1000, memoryLimits: { maxMiB: 3072 } }],
+  ])('signals the whole process group of %s, so a SIGKILL also reaches Oxigraph', async (_label, options) => {
+    const strategy = createOxigraphLaunchStrategy(options);
     // Launched through the strategy, with the spawn options it chooses, as a
     // wrapper that launches a long-lived child in place of the watchdog.
     const wrapper = strategy.launch(
@@ -164,13 +168,8 @@ describe('Oxigraph launch strategies', () => {
     }
   });
 
-  it.each([
-    ['Windows', { platform: 'win32' as const, parentPid: 42, uid: -1 }],
-    ['a systemd scope, whose parent-death signal stops Oxigraph', {
-      platform: 'linux' as const, parentPid: 42, uid: 1000, memoryLimits: { maxMiB: 3072 },
-    }],
-  ])('signals only the spawned child on %s', (_label, options) => {
-    const strategy = createOxigraphLaunchStrategy(options);
+  it('signals only the spawned child on Windows', () => {
+    const strategy = createOxigraphLaunchStrategy({ platform: 'win32', parentPid: 42, uid: -1 });
     const kill = vi.fn(() => true);
     const child = strategy.launch(
       (() => ({ pid: 4242, kill }) as unknown as import('node:child_process').ChildProcess) as unknown as typeof spawn,
@@ -227,7 +226,8 @@ describe('Oxigraph launch strategies', () => {
         DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
       },
     });
-    expect(spec.options).not.toHaveProperty('detached');
+    // The scope leads its own process group, which `terminate` signals.
+    expect(spec.options).toMatchObject({ detached: true });
     expect(spec.args.slice(0, 8)).toEqual([
       '--user', '--scope', '--collect', '--quiet',
       '--unit=dkg-oxigraph-42-3',

@@ -21,6 +21,7 @@
  * when a probe cannot tell whether a recorded owner or the holder's parent
  * still runs: only a confirmed exit counts as gone.
  */
+import { basename } from 'node:path';
 import { isCatalogedOxigraph, type OxigraphBinaryCatalog } from './oxigraph-binary.js';
 import type {
   IdentityState,
@@ -30,13 +31,19 @@ import type {
 import { oxigraphStoreArgs } from './oxigraph-store-launch.js';
 import type { ProcessInstance } from './process-probe.js';
 
+// Interpreters a catalogued Oxigraph script may run under (`#!`): the
+// interpreter is the executable, and the script is its first argument.
+const SCRIPT_INTERPRETERS = new Set(['node', 'nodejs', 'sh', 'bash', 'dash']);
+
 /**
  * Whether a process runs a known Oxigraph binary with this store's
- * arguments. Exact argv (from `/proc`) is compared token by token; a binary
- * started through an interpreter (`#!`) has the interpreter first. Where only
- * `ps` display text exists, argv boundaries are lost, so the text is compared
- * only when neither the store path nor a known binary path contains
- * whitespace; otherwise the answer is `ambiguous`.
+ * arguments: the binary must be the executable (argv[0]), or the script
+ * right after a known interpreter, followed by `serve --location <store>`.
+ * A catalogued path that merely appears among another program's arguments
+ * does not count. Exact argv (from `/proc`) is compared token by token.
+ * Where only `ps` display text exists, argv boundaries are lost, so the text
+ * is compared only when neither the store path nor a known binary path
+ * contains whitespace; otherwise the answer is `ambiguous`.
  */
 export function matchManagedOxigraphStore(
   holder: Pick<ProcessInstance, 'argv' | 'command'>,
@@ -50,13 +57,12 @@ export function matchManagedOxigraphStore(
     }
     tokens = holder.command.split(' ');
   }
+  const executable = SCRIPT_INTERPRETERS.has(basename(tokens[0] ?? '')) ? 1 : 0;
   const storeArgs = oxigraphStoreArgs(location);
-  for (let at = 0; at + storeArgs.length < tokens.length; at++) {
-    if (isCatalogedOxigraph(binaries, tokens[at]) && storeArgs.every((arg, offset) => tokens![at + 1 + offset] === arg)) {
-      return 'match';
-    }
-  }
-  return 'no-match';
+  const serves = tokens[executable] !== undefined
+    && isCatalogedOxigraph(binaries, tokens[executable])
+    && storeArgs.every((arg, offset) => tokens![executable + 1 + offset] === arg);
+  return serves ? 'match' : 'no-match';
 }
 
 /**
@@ -156,8 +162,10 @@ export function describeLeave(reason: LeaveReason): string {
   }
 }
 
-// Levels between a launcher and Oxigraph: the watchdog, or systemd-run then
-// the watchdog; setpriv and its shell exec into Oxigraph in place.
+// Levels between a recorded launcher and Oxigraph. The launcher is the
+// watchdog (`systemd-run --scope` execs it in place), and setpriv and its
+// shell exec into Oxigraph in place, so Oxigraph is its child; the rest is
+// headroom for a wrapper between them.
 export const MAX_LAUNCHER_DEPTH = 4;
 
 /** One lock holder as observed: the holder and its ancestors, nearest first. */

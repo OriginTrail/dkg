@@ -160,52 +160,69 @@ const procEntryGone = (error: unknown): boolean => {
   return code === 'ENOENT' || code === 'ESRCH';
 };
 
-// Fields after `(comm)`, which may itself contain spaces and parens: state
-// is field 3, ppid field 4, starttime field 22 (clock ticks since boot). A
-// zombie has exited even though its entry remains.
-export const procInspectProcess: ProcessInspector = async (pid) => {
-  try {
-    const stat = await readFile(`/proc/${pid}/stat`, 'utf8');
-    const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-    if (fields[0] === 'Z') return { state: 'gone' };
-    const ppid = Number(fields[1]);
-    const start = fields[19];
-    if (!Number.isInteger(ppid) || !start) {
-      return { state: 'unknown', reason: `unexpected /proc/${pid}/stat contents` };
-    }
-    const argv = (await readFile(`/proc/${pid}/cmdline`, 'utf8')).split('\0');
-    if (argv.at(-1) === '') argv.pop();
-    return { state: 'running', process: { pid, start, ppid, argv, command: argv.join(' ') } };
-  } catch (error) {
-    return procEntryGone(error) ? { state: 'gone' } : { state: 'unknown', reason: errorReason(error) };
-  }
-};
+/** Reads one `/proc` file as text; rejects like `fs.readFile`. */
+export type ProcReader = (path: string) => Promise<string>;
 
-// `ps -p` exits 1 with no output when no such process exists; any other
-// failure (a timeout, a missing `ps`, a message on stderr) is not proof of
-// exit.
-export const psInspectProcess: ProcessInspector = async (pid) => {
-  let stdout: string;
-  try {
-    ({ stdout } = await execFileAsync(
-      'ps',
-      ['-ww', '-o', 'ppid=,stat=,lstart=,command=', '-p', String(pid)],
-      { timeout: 2_000, env: PS_ENV },
-    ));
-  } catch (error) {
-    const failed = error as { code?: unknown; stdout?: unknown; stderr?: unknown; killed?: boolean };
-    const noSuchProcess = failed.code === 1 && failed.killed !== true
-      && String(failed.stdout ?? '').trim() === '' && String(failed.stderr ?? '').trim() === '';
-    return noSuchProcess ? { state: 'gone' } : { state: 'unknown', reason: `ps: ${errorReason(error)}` };
-  }
-  const match = /^\s*(\d+)\s+(\S+)\s+(\S+\s+\S+\s+\S+\s+\S+\s+\S+)\s+(.*)$/s.exec(stdout.trimEnd());
-  if (!match) return { state: 'unknown', reason: 'ps: unexpected output' };
-  if (match[2].startsWith('Z')) return { state: 'gone' };
-  return {
-    state: 'running',
-    process: { pid, start: normalizeLstart(match[3]), ppid: Number(match[1]), argv: null, command: match[4] },
+/**
+ * Inspect a process through `/proc` (Linux). Fields after `(comm)`, which may
+ * itself contain spaces and parens: state is field 3, ppid field 4, starttime
+ * field 22 (clock ticks since boot). A zombie has exited even though its
+ * entry remains.
+ */
+export function procProcessInspector(read: ProcReader = (path) => readFile(path, 'utf8')): ProcessInspector {
+  return async (pid) => {
+    try {
+      const stat = await read(`/proc/${pid}/stat`);
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+      if (fields[0] === 'Z') return { state: 'gone' };
+      const ppid = Number(fields[1]);
+      const start = fields[19];
+      if (!Number.isInteger(ppid) || !start) {
+        return { state: 'unknown', reason: `unexpected /proc/${pid}/stat contents` };
+      }
+      const argv = (await read(`/proc/${pid}/cmdline`)).split('\0');
+      if (argv.at(-1) === '') argv.pop();
+      return { state: 'running', process: { pid, start, ppid, argv, command: argv.join(' ') } };
+    } catch (error) {
+      return procEntryGone(error) ? { state: 'gone' } : { state: 'unknown', reason: errorReason(error) };
+    }
   };
-};
+}
+
+export const procInspectProcess: ProcessInspector = procProcessInspector();
+
+/** Runs `ps` with these arguments; rejects like `execFile` (`code`, `killed`, `stdout`, `stderr`). */
+export type PsRunner = (args: readonly string[]) => Promise<{ stdout: string }>;
+
+const runPs: PsRunner = (args) => execFileAsync('ps', [...args], { timeout: 2_000, env: PS_ENV });
+
+/**
+ * Inspect a process with one `ps` call. `ps -p` exits 1 with no output when
+ * no such process exists; any other failure (a timeout, a missing `ps`, a
+ * message on stderr, output that does not parse) is not proof of exit.
+ */
+export function psProcessInspector(run: PsRunner = runPs): ProcessInspector {
+  return async (pid) => {
+    let stdout: string;
+    try {
+      ({ stdout } = await run(['-ww', '-o', 'ppid=,stat=,lstart=,command=', '-p', String(pid)]));
+    } catch (error) {
+      const failed = error as { code?: unknown; signal?: unknown; stdout?: unknown; stderr?: unknown; killed?: boolean };
+      const noSuchProcess = failed.code === 1 && failed.killed !== true && failed.signal == null
+        && String(failed.stdout ?? '').trim() === '' && String(failed.stderr ?? '').trim() === '';
+      return noSuchProcess ? { state: 'gone' } : { state: 'unknown', reason: `ps: ${errorReason(error)}` };
+    }
+    const match = /^\s*(\d+)\s+(\S+)\s+(\S+\s+\S+\s+\S+\s+\S+\s+\S+)\s+(.*)$/s.exec(stdout.trimEnd());
+    if (!match) return { state: 'unknown', reason: 'ps: unexpected output' };
+    if (match[2].startsWith('Z')) return { state: 'gone' };
+    return {
+      state: 'running',
+      process: { pid, start: normalizeLstart(match[3]), ppid: Number(match[1]), argv: null, command: match[4] },
+    };
+  };
+}
+
+export const psInspectProcess: ProcessInspector = psProcessInspector();
 
 export function processTreeWalker(platform: NodeJS.Platform): ProcessTreeWalker {
   return platform === 'linux' ? linuxProcessTree : psProcessTree;

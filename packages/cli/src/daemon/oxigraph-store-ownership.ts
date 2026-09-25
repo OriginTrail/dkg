@@ -13,7 +13,7 @@
  * launch.
  */
 import type { OxigraphBinaryCatalog } from './oxigraph-binary.js';
-import { recordOxigraphOwner } from './oxigraph-owner-record.js';
+import { recordOxigraphLaunch, type OxigraphLaunchRecord } from './oxigraph-owner-record.js';
 import { stopOrphanedOxigraph } from './oxigraph-orphan.js';
 import type { OxigraphStoreOwnership } from './oxigraph-store-launch.js';
 
@@ -21,26 +21,32 @@ import type { OxigraphStoreOwnership } from './oxigraph-store-launch.js';
 export interface OxigraphStoreOwnershipSteps {
   /** Stop orphaned Oxigraph processes that hold the store lock. */
   reclaim(): Promise<void>;
-  /** Write the owner record for one launch. */
-  record(launch: { launcherPid: number; oxigraphPid?: number }): Promise<void>;
+  /**
+   * Record a spawned launch as the store's owner; the returned record adds
+   * the verified Oxigraph once the launch is ready.
+   */
+  recordLaunch(launcherPid: number): Promise<OxigraphLaunchRecord>;
 }
 
-/** What a store ownership needs to know about the store it launches against. */
+/** What the server tells a store ownership about the store it launches. */
 export interface OxigraphStoreOwnershipInput {
   location: string;
   binaryPath: string;
-  /** What the reclaim recognises as this node's Oxigraph; defaults to `binaryPath` alone. */
-  binaries?: OxigraphBinaryCatalog;
   log: (message: string) => void;
 }
 
 /**
- * The store ownership for one server start. `steps` replaces both the reclaim
- * and the owner record at once (tests only), so a caller never runs one of
- * the production steps by leaving it out.
+ * The store ownership for one server start. `binaries` is what the reclaim
+ * recognises as this node's Oxigraph (from `oxigraphReclaimCatalog`),
+ * defaulting to `binaryPath` alone. `steps` replaces both the reclaim and the
+ * owner record at once (tests only), so a caller never runs one of the
+ * production steps by leaving it out.
  */
 export function createOxigraphStoreOwnership(
-  opts: OxigraphStoreOwnershipInput & { steps?: OxigraphStoreOwnershipSteps },
+  opts: OxigraphStoreOwnershipInput & {
+    binaries?: OxigraphBinaryCatalog;
+    steps?: OxigraphStoreOwnershipSteps;
+  },
 ): OxigraphStoreOwnership {
   const steps: OxigraphStoreOwnershipSteps = opts.steps ?? {
     reclaim: async () => {
@@ -51,18 +57,17 @@ export function createOxigraphStoreOwnership(
         log: opts.log,
       });
     },
-    record: (launch) => recordOxigraphOwner({
+    recordLaunch: (launcherPid) => recordOxigraphLaunch({
       location: opts.location,
       binaryPath: opts.binaryPath,
-      ...launch,
+      launcherPid,
       log: opts.log,
     }),
   };
   let closed = false;
-  const writes = new Set<Promise<void>>();
-  const record = (launch: { launcherPid: number; oxigraphPid?: number }): Promise<void> => {
-    if (closed) return Promise.resolve();
-    const write = steps.record(launch);
+  // Owner-record writes in flight, which close() waits for.
+  const writes = new Set<Promise<unknown>>();
+  const track = <T>(write: Promise<T>): Promise<T> => {
     writes.add(write);
     const forget = (): void => { writes.delete(write); };
     write.then(forget, forget);
@@ -73,15 +78,14 @@ export function createOxigraphStoreOwnership(
       await steps.reclaim();
       if (closed) return null;
       const child = spawn();
-      const launcherPid = child.pid;
       // Recorded at spawn, so the reclaim can identify this launch's
       // Oxigraph even if the daemon dies before it is ready.
-      if (launcherPid !== undefined) await record({ launcherPid });
+      const record = child.pid === undefined ? null : await track(steps.recordLaunch(child.pid));
       return {
         child,
-        ready: (oxigraphPid) => launcherPid === undefined
-          ? Promise.resolve()
-          : record({ launcherPid, oxigraphPid }),
+        ready: async (oxigraphPid) => {
+          if (record && !closed) await track(record.markReady(oxigraphPid));
+        },
       };
     },
     close: async () => {

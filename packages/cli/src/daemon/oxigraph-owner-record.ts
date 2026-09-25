@@ -100,51 +100,73 @@ export async function checkIdentity(
     : { state: 'gone' };
 }
 
+/** One recorded launch. Its identities were read once, at spawn. */
+export interface OxigraphLaunchRecord {
+  /** Extend this launch's record with `oxigraphPid`, its verified listener. */
+  markReady(oxigraphPid: number): Promise<void>;
+}
+
 /**
- * Record this daemon as the owner of a store: at spawn with the launcher,
- * then again with `oxigraphPid` once that launch is verified ready. Creates
- * the store directory first, since a fresh store's directory may not exist
- * until Oxigraph opens it. Best-effort: logs a failure and resolves, because
- * without a record the reclaim falls back to the PID 1 rule.
+ * Record a spawned launch as the owner of a store: this daemon, the launcher
+ * and the binary, each identified once (PID and start time). `markReady`
+ * rewrites the same record with the verified Oxigraph added. The store
+ * directory is created first, since a fresh store's directory may not exist
+ * until Oxigraph opens it. Best-effort: a failed write is logged and
+ * resolves, because without a record the reclaim falls back to the PID 1
+ * rule; when the launch itself could not be identified, `markReady` writes
+ * nothing.
  */
-export async function recordOxigraphOwner(input: {
+export async function recordOxigraphLaunch(input: {
   location: string;
   binaryPath: string;
   launcherPid: number;
-  oxigraphPid?: number;
   log: (message: string) => void;
-}): Promise<void> {
-  if (process.platform === 'win32') return;
+  inspect?: ProcessInspector;
+}): Promise<OxigraphLaunchRecord> {
+  if (process.platform === 'win32') return { markReady: async () => {} };
+  const inspect = input.inspect ?? inspectProcess;
   const identify = async (pid: number): Promise<ProcessIdentity> => {
-    const lookup = await inspectProcess(pid);
+    const lookup = await inspect(pid);
     if (lookup.state === 'running') return { pid, start: lookup.process.start };
     throw new Error(lookup.state === 'gone'
       ? `pid ${pid} has exited`
       : `could not read pid ${pid}: ${lookup.reason}`);
   };
+  const write = async (record: OxigraphOwnerRecordV1): Promise<void> => {
+    try {
+      await mkdir(resolve(input.location), { recursive: true });
+      await writeFileAtomicWith(
+        { writeFile, rename, unlink },
+        ownerRecordPath(input.location),
+        `${JSON.stringify(record)}\n`,
+      );
+    } catch (error) {
+      logRecordFailure(input.log, error);
+    }
+  };
+  let launch: OxigraphOwnerRecordV1 | null = null;
   try {
-    const [daemon, launcher, oxigraph] = await Promise.all([
-      identify(process.pid),
-      identify(input.launcherPid),
-      input.oxigraphPid === undefined ? undefined : identify(input.oxigraphPid),
-    ]);
-    const record: OxigraphOwnerRecordV1 = {
-      schema: OXIGRAPH_OWNER_RECORD_SCHEMA,
-      daemon,
-      launcher,
-      ...(oxigraph ? { oxigraph } : {}),
-      binaryPath: input.binaryPath,
-    };
-    await mkdir(resolve(input.location), { recursive: true });
-    await writeFileAtomicWith(
-      { writeFile, rename, unlink },
-      ownerRecordPath(input.location),
-      `${JSON.stringify(record)}\n`,
-    );
+    const [daemon, launcher] = await Promise.all([identify(process.pid), identify(input.launcherPid)]);
+    launch = { schema: OXIGRAPH_OWNER_RECORD_SCHEMA, daemon, launcher, binaryPath: input.binaryPath };
   } catch (error) {
-    input.log(
-      `[oxigraph] could not record the store owner: ` +
-        `${error instanceof Error ? error.message : String(error)}`,
-    );
+    logRecordFailure(input.log, error);
   }
+  if (launch) await write(launch);
+  return {
+    markReady: async (oxigraphPid) => {
+      if (!launch) return;
+      let oxigraph: ProcessIdentity;
+      try {
+        oxigraph = await identify(oxigraphPid);
+      } catch (error) {
+        logRecordFailure(input.log, error);
+        return;
+      }
+      await write({ ...launch, oxigraph });
+    },
+  };
+}
+
+function logRecordFailure(log: (message: string) => void, error: unknown): void {
+  log(`[oxigraph] could not record the store owner: ${error instanceof Error ? error.message : String(error)}`);
 }

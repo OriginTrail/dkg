@@ -182,12 +182,20 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
 
   // The production store ownership with both of its steps replaced (no real
   // reclaim or record runs), to force the outcome under test or observe the
-  // order.
-  const ownershipSteps = (steps: Partial<OxigraphStoreOwnershipSteps>) => ({
-    createStoreOwnership: (input: OxigraphStoreOwnershipInput) => createOxigraphStoreOwnership({
-      ...input,
-      steps: { reclaim: async () => {}, record: async () => {}, ...steps },
-    }),
+  // order: `spawned` for the record at spawn, `ready` for its extension.
+  const ownershipWith = (hooks: {
+    reclaim?: () => Promise<void>;
+    spawned?: (launcherPid: number) => Promise<void>;
+    ready?: (launcherPid: number, oxigraphPid: number) => Promise<void>;
+  }) => (input: OxigraphStoreOwnershipInput) => createOxigraphStoreOwnership({
+    ...input,
+    steps: {
+      reclaim: hooks.reclaim ?? (async () => {}),
+      recordLaunch: async (launcherPid) => {
+        await hooks.spawned?.(launcherPid);
+        return { markReady: async (oxigraphPid) => { await hooks.ready?.(launcherPid, oxigraphPid); } };
+      },
+    },
   });
 
   it('does not spawn a restart whose reclaim is still running when stop() is called', async () => {
@@ -209,16 +217,14 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
       restartBackoffBaseMs: 50,
       restartBackoffMaxMs: 50,
       log: () => {},
-      io: {
-        spawn: countingSpawn,
-        ...ownershipSteps({
-          reclaim: async () => {
-            reclaims += 1;
-            // The restart's reclaim blocks until the test releases it.
-            if (reclaims === 2) await new Promise<void>((resolve) => { releaseReclaim = resolve; });
-          },
-        }),
-      },
+      io: { spawn: countingSpawn },
+      storeOwnership: ownershipWith({
+        reclaim: async () => {
+          reclaims += 1;
+          // The restart's reclaim blocks until the test releases it.
+          if (reclaims === 2) await new Promise<void>((resolve) => { releaseReclaim = resolve; });
+        },
+      }),
     });
     try {
       expect(spawns).toBe(1);
@@ -248,9 +254,9 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
           port,
           readyTimeoutMs: 10_000,
           log: () => {},
-          io: ownershipSteps({
+          storeOwnership: ownershipWith({
             reclaim: async () => { throw new Error('reclaim defect'); },
-            record: async ({ launcherPid }) => { recorded.push(launcherPid); },
+            spawned: async (launcherPid) => { recorded.push(launcherPid); },
           }),
         })).rejects.toThrow('reclaim defect');
         expect(recorded).toEqual([]);
@@ -275,12 +281,13 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
           readyTimeoutMs: 10_000,
           readyIntervalMs: 50,
           log: () => {},
-          io: ownershipSteps({
-            record: async ({ launcherPid, oxigraphPid }) => {
+          storeOwnership: ownershipWith({
+            spawned: async (launcherPid) => {
               launcher = launcherPid;
-              if ((oxigraphPid === undefined ? 'spawned' : 'ready') === failing) {
-                throw new Error('record defect');
-              }
+              if (failing === 'spawned') throw new Error('record defect');
+            },
+            ready: async () => {
+              if (failing === 'ready') throw new Error('record defect');
             },
           }),
         })).rejects.toThrow('record defect');
@@ -307,9 +314,8 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
         restartBackoffBaseMs: 50,
         restartBackoffMaxMs: 50,
         log: (line) => lines.push(line),
-        io: ownershipSteps({
-          record: async ({ oxigraphPid }) => {
-            if (oxigraphPid !== undefined) return;
+        storeOwnership: ownershipWith({
+          spawned: async () => {
             launches += 1;
             if (launches === 2) throw new Error('record defect on restart');
           },
@@ -342,9 +348,8 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
         readyTimeoutMs: 10_000,
         readyIntervalMs: 50,
         log: (line) => lines.push(line),
-        io: ownershipSteps({
-          record: async ({ launcherPid, oxigraphPid }) => {
-            if (oxigraphPid === undefined) return;
+        storeOwnership: ownershipWith({
+          ready: async (launcherPid, oxigraphPid) => {
             // The verified Oxigraph dies during the ready-time write, and its
             // watchdog exits with it before the write completes.
             process.kill(oxigraphPid, 'SIGKILL');
@@ -371,11 +376,10 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
       restartBackoffBaseMs: 50,
       restartBackoffMaxMs: 50,
       log: () => {},
-      io: ownershipSteps({
+      storeOwnership: ownershipWith({
         reclaim: async () => { events.push('before-spawn'); },
-        record: async ({ launcherPid, oxigraphPid }) => {
-          events.push(oxigraphPid === undefined ? `spawned:${launcherPid}` : `ready:${launcherPid}:${oxigraphPid}`);
-        },
+        spawned: async (launcherPid) => { events.push(`spawned:${launcherPid}`); },
+        ready: async (launcherPid, oxigraphPid) => { events.push(`ready:${launcherPid}:${oxigraphPid}`); },
       }),
     });
     try {
@@ -410,12 +414,9 @@ describe('directly launched Oxigraph under the parent watchdog', () => {
       restartBackoffBaseMs: 50,
       restartBackoffMaxMs: 50,
       log: () => {},
-      io: ownershipSteps({
-        record: async ({ oxigraphPid }) => {
-          if (oxigraphPid !== undefined) {
-            events.push('ready-write');
-            return;
-          }
+      storeOwnership: ownershipWith({
+        ready: async () => { events.push('ready-write'); },
+        spawned: async () => {
           launches += 1;
           if (launches < 2) return;
           events.push('spawned-write-started');
@@ -528,10 +529,15 @@ describe('store ownership launches', () => {
   const notSpawnable = (): ChildProcess => {
     throw new Error('spawned after close()');
   };
+  // A launch recorder that notes each write it would make.
+  const recording = (records: string[]): OxigraphStoreOwnershipSteps['recordLaunch'] => async (launcherPid) => {
+    records.push(`spawned:${launcherPid}`);
+    return { markReady: async (oxigraphPid) => { records.push(`ready:${launcherPid}:${oxigraphPid}`); } };
+  };
 
   it('neither spawns nor records once closed while the reclaim is still running', async () => {
     let releaseReclaim!: () => void;
-    const records: Array<{ launcherPid: number; oxigraphPid?: number }> = [];
+    const records: string[] = [];
     let spawns = 0;
     const ownership = createOxigraphStoreOwnership({
       location: '/nonexistent/oxigraph-data',
@@ -539,7 +545,7 @@ describe('store ownership launches', () => {
       log: () => {},
       steps: {
         reclaim: () => new Promise<void>((resolve) => { releaseReclaim = resolve; }),
-        record: async (launch) => { records.push(launch); },
+        recordLaunch: recording(records),
       },
     });
 
@@ -556,19 +562,19 @@ describe('store ownership launches', () => {
   });
 
   it('records nothing for a launch that becomes ready after close()', async () => {
-    const records: Array<{ launcherPid: number; oxigraphPid?: number }> = [];
+    const records: string[] = [];
     const ownership = createOxigraphStoreOwnership({
       location: '/nonexistent/oxigraph-data',
       binaryPath: '/opt/oxigraph',
       log: () => {},
-      steps: { reclaim: async () => {}, record: async (launch) => { records.push(launch); } },
+      steps: { reclaim: async () => {}, recordLaunch: recording(records) },
     });
     const launch = await ownership.launch(() => ({ pid: 4099 }) as ChildProcess);
-    expect(records).toEqual([{ launcherPid: 4099 }]);
+    expect(records).toEqual(['spawned:4099']);
 
     await ownership.close();
     await launch!.ready(4100);
-    expect(records).toEqual([{ launcherPid: 4099 }]);
+    expect(records).toEqual(['spawned:4099']);
     await expect(ownership.launch(notSpawnable)).resolves.toBeNull();
   });
 });

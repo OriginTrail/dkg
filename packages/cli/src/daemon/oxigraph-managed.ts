@@ -35,6 +35,7 @@ import {
   resolveOxigraphBinary,
   type OxigraphBinaryIo,
 } from './oxigraph-binary.js';
+import { createOxigraphStoreOwnership } from './oxigraph-store-ownership.js';
 import {
   startOxigraphServer,
   type OxigraphServerHandle,
@@ -401,15 +402,18 @@ export async function startManagedOxigraph(
   );
   if (plan === null) return null;
 
+  // What the orphan reclaim recognises as this node's Oxigraph: an orphan
+  // from an earlier release may run another binary this node could resolve.
+  const binaries = await oxigraphReclaimCatalog(binary, {
+    cacheDir,
+    platform: opts.platform,
+    io: opts.binaryIo,
+  });
+
   const handle = await startOxigraphServer({
     binaryPath: binary.path,
     location: plan.location,
-    binaries: await oxigraphReclaimCatalog({
-      selectedPath: binary.path,
-      cacheDir,
-      platform: opts.platform,
-      io: opts.binaryIo,
-    }),
+    storeOwnership: (input) => createOxigraphStoreOwnership({ ...input, binaries }),
     port: plan.port,
     log,
     readyTimeoutMs: opts.readyTimeoutMs ?? plan.readyTimeoutMs,

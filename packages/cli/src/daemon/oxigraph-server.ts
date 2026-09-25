@@ -49,7 +49,6 @@ import {
 } from './oxigraph-launch-strategy.js';
 import { invalidateExternalStoreQuadsCache } from './store-quads-cache.js';
 import { OXIGRAPH_STOP_GRACE_MS } from './oxigraph-parent-watchdog.js';
-import type { OxigraphBinaryCatalog } from './oxigraph-binary.js';
 import {
   oxigraphStoreArgs,
   type OxigraphStoreLaunch,
@@ -84,12 +83,6 @@ export interface OxigraphServerIo {
   readCgroupOomSnapshot: (pid: number) => CgroupOomSnapshot | null;
   /** Best-effort exit-time re-read of oom_kill from a captured cgroup dir. */
   readCgroupOomKill: (dir: string) => number | null;
-  /**
-   * Build the store ownership for this start: the orphan reclaim before each
-   * spawn and the owner record of each launch. Lifecycle tests supply a
-   * complete one to force a failure or observe the order.
-   */
-  createStoreOwnership: (input: OxigraphStoreOwnershipInput) => OxigraphStoreOwnership;
 }
 
 export interface StartOxigraphServerOptions {
@@ -128,11 +121,12 @@ export interface StartOxigraphServerOptions {
   /** Runtime platform. Injectable so command construction is portable in tests. */
   platform?: NodeJS.Platform;
   /**
-   * What the orphan reclaim before each spawn recognises as this node's
-   * Oxigraph, from `resolveOxigraphBinary`; defaults to `binaryPath` and the
-   * other `oxigraph*` executables beside it.
+   * Build the store ownership for this start: the orphan reclaim before each
+   * spawn and the owner record of each launch. The default knows only
+   * `binaryPath`; the managed layer builds one with the reclaim catalog of
+   * the binary it resolved, and lifecycle tests supply their own.
    */
-  binaries?: OxigraphBinaryCatalog;
+  storeOwnership?: (input: OxigraphStoreOwnershipInput) => OxigraphStoreOwnership;
   io?: Partial<OxigraphServerIo>;
 }
 
@@ -202,7 +196,6 @@ export async function startOxigraphServer(
     findListenOwnerPid: ioOverrides.findListenOwnerPid ?? findListenOwnerPid,
     readCgroupOomSnapshot: ioOverrides.readCgroupOomSnapshot ?? readCgroupOomSnapshot,
     readCgroupOomKill: ioOverrides.readCgroupOomKill ?? readCgroupOomKill,
-    createStoreOwnership: ioOverrides.createStoreOwnership ?? createOxigraphStoreOwnership,
   };
   const markStoreDown = (): void => {
     invalidateExternalStoreQuadsCache();
@@ -210,10 +203,9 @@ export async function startOxigraphServer(
   const log = opts.log ?? (() => {});
   // Reclaims the store before each spawn and records each launch; stop()
   // closes it.
-  const storeOwnership = io.createStoreOwnership({
+  const storeOwnership = (opts.storeOwnership ?? createOxigraphStoreOwnership)({
     location: opts.location,
     binaryPath: opts.binaryPath,
-    binaries: opts.binaries,
     log,
   });
   const host = opts.host ?? DEFAULT_HOST;

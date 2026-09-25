@@ -31,6 +31,7 @@ import {
   checkIdentity,
   readOxigraphOwnerRecord,
   type IdentityState,
+  type OxigraphOwnerRecordRead,
   type ProcessIdentity,
 } from './oxigraph-owner-record.js';
 import { OXIGRAPH_STOP_GRACE_MS } from './oxigraph-parent-watchdog.js';
@@ -51,9 +52,17 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * Everything the reclaim observes or does on this host; `reclaimHost` builds
+ * it for a platform, and tests replace any part.
+ */
 export interface OrphanedOxigraphIo {
+  /** Windows processes are not reparented, so nothing is reclaimed there. */
+  platform: NodeJS.Platform;
+  lockExists(lockPath: string): Promise<boolean>;
   /** PIDs that have the lock file open. */
   listLockHolders(lockPath: string): Promise<number[]>;
+  readOwnerRecord(location: string): Promise<OxigraphOwnerRecordRead>;
   /** One observation of a process: running, confirmed gone, or unreadable. */
   inspectProcess(pid: number): Promise<ProcessLookup>;
   /** Whether `identity` still names a running process (same PID and start time). */
@@ -108,14 +117,21 @@ export async function procLockHolders(lockPath: string): Promise<number[]> {
     .filter((pid) => pid !== process.pid);
 }
 
-const defaultIo: OrphanedOxigraphIo = {
-  listLockHolders: process.platform === 'linux' ? procLockHolders : lsofLockHolders,
-  inspectProcess: processInspector(process.platform),
-  checkIdentity: (identity) => checkIdentity(identity),
-  signal: (pid, signal) => { process.kill(pid, signal); },
-  sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
-  now: () => Date.now(),
-};
+/** The reclaim's view of a host: its lock, owner record and process probes. */
+export function reclaimHost(platform: NodeJS.Platform): OrphanedOxigraphIo {
+  const inspectProcess = processInspector(platform);
+  return {
+    platform,
+    lockExists: async (lockPath) => existsSync(lockPath),
+    listLockHolders: platform === 'linux' ? procLockHolders : lsofLockHolders,
+    readOwnerRecord: readOxigraphOwnerRecord,
+    inspectProcess,
+    checkIdentity: (identity) => checkIdentity(identity, inspectProcess),
+    signal: (pid, signal) => { process.kill(pid, signal); },
+    sleep: (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms)),
+    now: () => Date.now(),
+  };
+}
 
 /**
  * What the reaper has done about the process instance holding the lock under
@@ -149,16 +165,16 @@ async function observeHolder(io: OrphanedOxigraphIo, holder: ProcessInstance): P
  * lock error, preceded by a log line naming the holder and its parent.
  */
 export async function stopOrphanedOxigraph(opts: StopOrphanedOxigraphOptions): Promise<number[]> {
+  const io: OrphanedOxigraphIo = { ...reclaimHost(process.platform), ...opts.io };
   // Windows processes are not reparented, so an orphan cannot be told apart.
-  if (process.platform === 'win32') return [];
+  if (io.platform === 'win32') return [];
   const lockPath = resolve(opts.location, 'LOCK');
-  if (!existsSync(lockPath)) return [];
-  const io: OrphanedOxigraphIo = { ...defaultIo, ...opts.io };
+  if (!(await io.lockExists(lockPath))) return [];
   const stopGraceMs = opts.stopGraceMs ?? OXIGRAPH_STOP_GRACE_MS;
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const deadline = io.now() + timeoutMs;
-  const recordRead = await readOxigraphOwnerRecord(opts.location);
+  const recordRead = await io.readOwnerRecord(opts.location);
   if (recordRead.kind === 'invalid') {
     opts.log(`[oxigraph] ignoring a malformed owner record for ${lockPath}.`);
   }

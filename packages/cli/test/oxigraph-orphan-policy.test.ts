@@ -32,9 +32,12 @@ import type { OxigraphBinaryCatalog } from '../src/daemon/oxigraph-binary.js';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { oxigraphStoreArgs } from '../src/daemon/oxigraph-store-launch.js';
 import { stopOrphanedOxigraph, type OrphanedOxigraphIo } from '../src/daemon/oxigraph-orphan.js';
+import { psProcessInspector } from '../src/daemon/process-probe.js';
 import {
+  checkIdentity,
   OXIGRAPH_OWNER_RECORD,
   OXIGRAPH_OWNER_RECORD_SCHEMA,
+  type OxigraphOwnerRecordRead,
   type OxigraphOwnerRecordV1,
 } from '../src/daemon/oxigraph-owner-record.js';
 import {
@@ -73,7 +76,7 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
       ...record,
     }));
   };
-  const run = async (io: OrphanedOxigraphIo, extra: { binaries?: OxigraphBinaryCatalog } = {}) => {
+  const run = async (io: Partial<OrphanedOxigraphIo>, extra: { binaries?: OxigraphBinaryCatalog } = {}) => {
     const lines: string[] = [];
     const signalled = await stopOrphanedOxigraph({
       binaryPath, location, log: (line) => lines.push(line), io, ...extra,
@@ -176,8 +179,84 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     });
   });
 
+  describe('on a fully injected host (no filesystem or process-table access)', () => {
+    const store = '/nonexistent/oxigraph-data';
+    const recorded: OxigraphOwnerRecordRead = {
+      kind: 'v1',
+      record: {
+        schema: OXIGRAPH_OWNER_RECORD_SCHEMA,
+        daemon: identity(4000),
+        launcher: identity(4099),
+        oxigraph: identity(4100),
+        binaryPath,
+      },
+    };
+
+    it('runs the complete reclaim from the host\'s lock, owner record and process table', async () => {
+      const { table, signals, io } = processTable({
+        4100: { ppid: 900, argv: serve(store), holdsLock: true },
+      });
+      const lines: string[] = [];
+      const signalled = await stopOrphanedOxigraph({
+        binaryPath,
+        location: store,
+        log: (line) => lines.push(line),
+        io: {
+          ...io,
+          platform: 'linux',
+          lockExists: async (lockPath) => lockPath === `${store}/LOCK`,
+          readOwnerRecord: async () => recorded,
+        },
+      });
+      expect(signalled).toEqual([4100]);
+      expect(signals).toEqual([[4100, 'SIGTERM']]);
+      expect(table.get(4100)!.alive).toBe(false);
+      expect(lines.join('\n')).toContain('stopping orphaned Oxigraph pid 4100 (its recorded daemon pid 4000 has exited)');
+    });
+
+    it.each(['win32', 'linux'] as const)('does nothing on %s when the host says there is nothing to reclaim', async (platform) => {
+      const listLockHolders = async (): Promise<number[]> => { throw new Error('must not list holders'); };
+      await expect(stopOrphanedOxigraph({
+        binaryPath,
+        location: store,
+        log: () => {},
+        // Windows is skipped outright; elsewhere the missing lock file ends it.
+        io: { platform, lockExists: async () => false, listLockHolders },
+      })).resolves.toEqual([]);
+    });
+
+    it('does not signal when the real ps classifier cannot read the holder', async () => {
+      // `ps` killed on its timeout: exit status 1 but no output, and not an exit.
+      const timedOut = Object.assign(new Error('Command failed: ps'), {
+        code: 1, killed: true, signal: 'SIGTERM', stdout: '', stderr: '',
+      });
+      const inspectProcess = psProcessInspector(async () => { throw timedOut; });
+      const signals: Array<[number, NodeJS.Signals]> = [];
+      const lines: string[] = [];
+      const signalled = await stopOrphanedOxigraph({
+        binaryPath,
+        location: store,
+        log: (line) => lines.push(line),
+        io: {
+          platform: 'darwin',
+          lockExists: async () => true,
+          readOwnerRecord: async () => recorded,
+          listLockHolders: async () => [4100],
+          inspectProcess,
+          checkIdentity: (id) => checkIdentity(id, inspectProcess),
+          signal: (pid, name) => { signals.push([pid, name]); },
+          sleep: async () => {},
+          now: () => 0,
+        },
+      });
+      expect(signalled).toEqual([]);
+      expect(signals).toEqual([]);
+      expect(lines.join('\n')).toContain('is held by pid 4100, which could not be inspected (ps: Command failed: ps)');
+    });
+  });
+
   describe('after SIGTERM, until the signalled orphan is confirmed gone', () => {
-    const reap = async (io: OrphanedOxigraphIo) => {
+    const reap = async (io: Partial<OrphanedOxigraphIo>) => {
       const lines: string[] = [];
       const signalled = await stopOrphanedOxigraph({
         binaryPath, location, log: (line) => lines.push(line), io,
@@ -454,12 +533,12 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
       expect(log).toContain('stopping orphaned Oxigraph pid 4100 (its recorded daemon pid 4000 has exited)');
     });
 
-    it('stops a pre-ready Oxigraph under a systemd scope, where the watchdog sits between launcher and Oxigraph', async () => {
+    it('stops a pre-ready Oxigraph with a wrapper between the recorded launcher and Oxigraph', async () => {
       await writeRecord({ oxigraph: undefined });
       const { table, signals, io } = processTable({
-        // systemd-run (the recorded launcher) -> watchdog -> Oxigraph.
-        4099: { ppid: 1, argv: ['systemd-run', '--user', '--scope', '--', 'node', 'oxigraph-parent-watchdog.js', '4000'], holdsLock: false },
-        4100: { ppid: 4099, argv: ['node', 'oxigraph-parent-watchdog.js', '4000'], holdsLock: false },
+        // The recorded launcher (the watchdog) -> a wrapper -> Oxigraph.
+        4099: { ppid: 1, argv: ['node', 'oxigraph-parent-watchdog.js', '4000'], holdsLock: false },
+        4100: { ppid: 4099, argv: ['/bin/sh', '-c', 'exec "$@"'], holdsLock: false },
         4101: { ppid: 4100, argv: serve(location), holdsLock: true },
       });
 
@@ -609,6 +688,9 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     ['another store whose path extends this one', (store: string) => serve(`${store}-2`)],
     ['a non-serve command on this binary', (store: string) => [binaryPath, 'dump', '--location', store]],
     ['an unrelated tool', (store: string) => ['sqlite3', `${store}/LOCK`]],
+    // The exact Oxigraph command, but as arguments of another program.
+    ['another program with the Oxigraph command among its arguments',
+      (store: string) => ['node', '/opt/backup.js', binaryPath, 'serve', '--location', store]],
   ])('leaves an orphaned lock holder running when it is %s', async (_label, argvFor) => {
     const { table, signals, io } = processTable({
       4100: { ppid: 1, argv: argvFor(location), holdsLock: true },
@@ -693,6 +775,11 @@ describe('stopOrphanedOxigraph (injected process table)', () => {
     // Flattened, these two are the same text; as argv they differ.
     expect(matchManagedOxigraphStore(exact(['/opt/oxigraph', 'serve', '--location', '/data/store', 'name']), '/data/store name', binaries)).toBe('no-match');
     expect(matchManagedOxigraphStore(exact(['node', '/opt/oxigraph-v0.5.7', 'serve', '--location', '/data/ox']), '/data/ox', binaries)).toBe('match');
+    // A catalogued path among another program's arguments is not its executable.
+    const foreign = ['node', 'backup.js', '/opt/oxigraph-v0.5.8', 'serve', '--location', '/data/ox'];
+    expect(matchManagedOxigraphStore(exact(foreign), '/data/ox', binaries)).toBe('no-match');
+    expect(matchManagedOxigraphStore({ argv: null, command: foreign.join(' ') }, '/data/ox', binaries)).toBe('no-match');
+    expect(matchManagedOxigraphStore(exact(['/usr/bin/rsync', '/opt/oxigraph', 'serve', '--location', '/data/ox']), '/data/ox', binaries)).toBe('no-match');
     expect(matchManagedOxigraphStore(exact(['/opt/oxigraph', 'serve', '--location', '/data/ox2']), '/data/ox', binaries)).toBe('no-match');
     expect(matchManagedOxigraphStore(exact(['/opt/other/oxigraph', 'serve', '--location', '/data/ox']), '/data/ox', binaries)).toBe('no-match');
     expect(matchManagedOxigraphStore(exact(['/opt/python3', 'serve', '--location', '/data/ox']), '/data/ox', binaries)).toBe('no-match');

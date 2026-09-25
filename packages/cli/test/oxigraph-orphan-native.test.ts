@@ -40,9 +40,15 @@ import {
   OXIGRAPH_OWNER_RECORD,
   OXIGRAPH_OWNER_RECORD_SCHEMA,
   readOxigraphOwnerRecord,
-  recordOxigraphOwner,
+  recordOxigraphLaunch,
 } from '../src/daemon/oxigraph-owner-record.js';
-import { processInspector, type ProcessLookup } from '../src/daemon/process-probe.js';
+import {
+  procProcessInspector,
+  processInspector,
+  psProcessInspector,
+  type ProcessInspector,
+  type ProcessLookup,
+} from '../src/daemon/process-probe.js';
 import {
   createOxigraphStandinFixture,
   fetchPid,
@@ -91,13 +97,13 @@ describe('stopOrphanedOxigraph (real processes)', () => {
         expect(await inspectProcess(launcher.pid!), name).toEqual(first);
         expect(await inspectProcess(process.pid), name).toMatchObject({ state: 'running' });
       }
-      await recordOxigraphOwner({
+      const launch = await recordOxigraphLaunch({
         location,
         binaryPath: '/opt/oxigraph',
         launcherPid: launcher.pid!,
-        oxigraphPid: launcher.pid!,
         log: () => {},
       });
+      await launch.markReady(launcher.pid!);
       expect(await readOxigraphOwnerRecord(location)).toMatchObject({
         kind: 'v1',
         record: {
@@ -195,12 +201,56 @@ describe('stopOrphanedOxigraph (real processes)', () => {
     }
   });
 
+  it('records a launch once and extends that same record when it becomes ready', async () => {
+    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-record-launch-'));
+    const reads: number[] = [];
+    // Every read reports a new start time, so reading a process twice would show.
+    const inspect: ProcessInspector = async (pid) => {
+      reads.push(pid);
+      return { state: 'running', process: { pid, start: `read-${reads.length}`, ppid: 1, argv: null, command: 'node' } };
+    };
+    try {
+      const launch = await recordOxigraphLaunch({
+        location, binaryPath: '/opt/oxigraph', launcherPid: 4099, log: () => {}, inspect,
+      });
+      const atSpawn = await readOxigraphOwnerRecord(location);
+      await launch.markReady(4100);
+      const atReady = await readOxigraphOwnerRecord(location);
+      if (atSpawn.kind !== 'v1' || atReady.kind !== 'v1') throw new Error('no owner record');
+      expect(atSpawn.record.oxigraph).toBeUndefined();
+      // The daemon and launcher identities captured at spawn, plus Oxigraph.
+      expect(atReady.record).toEqual({ ...atSpawn.record, oxigraph: { pid: 4100, start: expect.any(String) } });
+      // Each process was read once: the daemon and launcher at spawn, Oxigraph when ready.
+      expect(reads.sort((a, b) => a - b)).toEqual([4099, 4100, process.pid].sort((a, b) => a - b));
+    } finally {
+      await rm(location, { recursive: true, force: true });
+    }
+  });
+
+  it('writes nothing for a launch it could not identify, at spawn or when ready', async () => {
+    const location = await mkdtemp(join(tmpdir(), 'oxi-orphan-record-unknown-'));
+    const lines: string[] = [];
+    const inspect: ProcessInspector = async (pid) => pid === 4099
+      ? { state: 'unknown', reason: 'ps timed out' }
+      : { state: 'running', process: { pid, start: 't', ppid: 1, argv: null, command: 'node' } };
+    try {
+      const launch = await recordOxigraphLaunch({
+        location, binaryPath: '/opt/oxigraph', launcherPid: 4099, log: (line) => lines.push(line), inspect,
+      });
+      await launch.markReady(4100);
+      expect(await readOxigraphOwnerRecord(location)).toEqual({ kind: 'absent' });
+      expect(lines).toEqual(['[oxigraph] could not record the store owner: could not read pid 4099: ps timed out']);
+    } finally {
+      await rm(location, { recursive: true, force: true });
+    }
+  });
+
   it('creates a fresh store directory before recording its owner', async () => {
     const root = await mkdtemp(join(tmpdir(), 'oxi-orphan-record-fresh-'));
     const location = join(root, 'not', 'yet', 'oxigraph-data');
     const launcher = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     try {
-      await recordOxigraphOwner({ location, binaryPath: '/opt/oxigraph', launcherPid: launcher.pid!, log: () => {} });
+      await recordOxigraphLaunch({ location, binaryPath: '/opt/oxigraph', launcherPid: launcher.pid!, log: () => {} });
       expect(await readOxigraphOwnerRecord(location)).toMatchObject({
         kind: 'v1',
         record: { launcher: { pid: launcher.pid } },
@@ -217,7 +267,7 @@ describe('stopOrphanedOxigraph (real processes)', () => {
     try {
       // A directory in the record's place makes the atomic rename fail.
       await mkdir(join(location, OXIGRAPH_OWNER_RECORD, 'blocker'), { recursive: true });
-      await recordOxigraphOwner({
+      await recordOxigraphLaunch({
         location,
         binaryPath: '/opt/oxigraph',
         launcherPid: process.pid,
@@ -365,4 +415,57 @@ describe('stopOrphanedOxigraph (real processes)', () => {
       await rm(location, { recursive: true, force: true });
     }
   }, 30_000);
+});
+
+describe('process probe classification (injected ps and /proc)', () => {
+  const psFailure = (props: Record<string, unknown>) => Object.assign(new Error('Command failed: ps'), props);
+
+  it.each([
+    ['a clean exit 1 with no output (no such process)', { code: 1, killed: false, signal: null, stdout: '', stderr: '' }, 'gone'],
+    ['a timeout', { code: null, killed: true, signal: 'SIGTERM', stdout: '', stderr: '' }, 'unknown'],
+    ['exit 1 from a process killed on its timeout', { code: 1, killed: true, signal: null, stdout: '', stderr: '' }, 'unknown'],
+    ['a missing ps', { code: 'ENOENT' }, 'unknown'],
+    ['a permission error on stderr', { code: 1, killed: false, signal: null, stdout: '', stderr: 'ps: Operation not permitted' }, 'unknown'],
+  ] as const)('ps: %s', async (_label, props, state) => {
+    const inspect = psProcessInspector(async () => { throw psFailure(props); });
+    expect(await inspect(4100)).toMatchObject({ state });
+  });
+
+  it('ps: parses a running process, takes a zombie as gone, and output it cannot parse as unknown', async () => {
+    const answering = (stdout: string) => psProcessInspector(async () => ({ stdout }));
+    expect(await answering('    1 Ss   Wed Sep  3 23:14:58 2026     /opt/oxigraph serve\n')(4100)).toEqual({
+      state: 'running',
+      process: { pid: 4100, start: 'Wed Sep 3 23:14:58 2026', ppid: 1, argv: null, command: '/opt/oxigraph serve' },
+    });
+    expect(await answering('    1 Z    Wed Sep  3 23:14:58 2026     [oxigraph]\n')(4100)).toEqual({ state: 'gone' });
+    expect(await answering('garbage\n')(4100)).toMatchObject({ state: 'unknown' });
+  });
+
+  it.each([
+    ['ENOENT', 'gone'],
+    ['ESRCH', 'gone'],
+    ['EACCES', 'unknown'],
+    ['EIO', 'unknown'],
+  ] as const)('/proc: a read failing with %s is %s', async (code, state) => {
+    const inspect = procProcessInspector(async () => { throw Object.assign(new Error(code), { code }); });
+    expect(await inspect(4100)).toMatchObject({ state });
+  });
+
+  it('/proc: parses a running process, a zombie, a malformed stat, and a process gone before its cmdline', async () => {
+    // Fields after `(comm)`: state, ppid, 17 more, then starttime.
+    const stat = (state: string) => `4100 (oxigraph (x)) ${state} 1 ${'0 '.repeat(17)}777 0`;
+    const reading = (statText: string, cmdline: string | Error) => procProcessInspector(async (path) => {
+      if (path.endsWith('/stat')) return statText;
+      if (typeof cmdline === 'string') return cmdline;
+      throw cmdline;
+    });
+    expect(await reading(stat('S'), '/opt/oxigraph\0serve\0')(4100)).toEqual({
+      state: 'running',
+      process: { pid: 4100, start: '777', ppid: 1, argv: ['/opt/oxigraph', 'serve'], command: '/opt/oxigraph serve' },
+    });
+    expect(await reading(stat('Z'), '')(4100)).toEqual({ state: 'gone' });
+    expect(await reading('4100 (x) S', '')(4100)).toMatchObject({ state: 'unknown' });
+    const exited = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    expect(await reading(stat('S'), exited)(4100)).toEqual({ state: 'gone' });
+  });
 });
