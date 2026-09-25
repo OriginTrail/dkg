@@ -14,10 +14,11 @@ All notable changes to the DKG V10 node are documented here. The format is based
   therefore grew with its send rate and uptime: a testnet Edge serving RFC-64
   catalog replays paused for up to 56 s at a time, long enough for its managed
   Oxigraph to be restarted over missed query deadlines. A send or protocol
-  probe now builds its deadlines and cancellation from plain timers and
-  listeners and detaches from the node's and the caller's signals when it
-  settles; its own deadlines keep their timing. A retried send also removes
-  the abort listener its backoff added.
+  probe now has one deadline, built from a plain timer, and follows the
+  node's and the caller's signals through listeners it removes when it
+  settles. A multi-path send cancels its losing paths as soon as the winner
+  answers, including paths still opening their stream, and a retried send
+  removes the abort listener its backoff added.
 
 ## [10.0.19] - 2026-09-25
 

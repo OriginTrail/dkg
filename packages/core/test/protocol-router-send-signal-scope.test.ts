@@ -1,7 +1,7 @@
 /**
  * #2812: a settled send() or probeProtocol() must leave nothing attached to
  * the long-lived signals it was given (node.stopSignal and the caller's
- * signal), while its own signals keep their deadline timing.
+ * signal).
  *
  * Node's `AbortSignal.any` records every composite as a dependant of each
  * source signal, and keeps a composite with an `AbortSignal.timeout` input
@@ -90,8 +90,10 @@ describe('ProtocolRouter releases per-send abort signals (#2812)', () => {
   it('leaves nothing attached after a send that retried through the backoff', async () => {
     const stop = new AbortController();
     let dials = 0;
-    const router = new ProtocolRouter(makeNode(stop.signal, async () => {
+    let requestSignal: AbortSignal | undefined;
+    const router = new ProtocolRouter(makeNode(stop.signal, async (_peer, _protocol, opts) => {
       dials += 1;
+      requestSignal = opts?.signal;
       if (dials === 1) throw new Error('stream reset');
       return respondingStream();
     }), { peerResolver });
@@ -101,6 +103,10 @@ describe('ProtocolRouter releases per-send abort signals (#2812)', () => {
     expect(response).toEqual(new Uint8Array([0xab]));
     expect(dials).toBe(2);
     expect(attachedTo(stop.signal)).toEqual({ listeners: 0, dependants: 0 });
+    // The backoff between the two attempts listened on the request signal;
+    // it removes that listener once the backoff completes.
+    expect(requestSignal).toBeDefined();
+    expect(getEventListeners(requestSignal!, 'abort')).toHaveLength(0);
   });
 
   it('still times out with a TimeoutError, then leaves nothing attached', async () => {
@@ -138,7 +144,7 @@ describe('ProtocolRouter releases per-send abort signals (#2812)', () => {
     await expect(sending).rejects.toThrow('node stopping');
   });
 
-  it('still stops a multi-path loser at the deadline, not when the send settles', async () => {
+  it('cancels a multi-path loser still opening its stream as soon as the winner settles', async () => {
     const stop = new AbortController();
     let loserSignal: AbortSignal | undefined;
     const remotePeer = { equals: (other: unknown) => String(other) === FAKE_PEER_ID, toString: () => FAKE_PEER_ID };
@@ -158,15 +164,13 @@ describe('ProtocolRouter releases per-send abort signals (#2812)', () => {
     (node.libp2p as unknown as { getConnections: () => unknown[] }).getConnections = () => [hungLoser, winner];
     const router = new ProtocolRouter(node, { peerResolver });
 
-    const response = await router.send(FAKE_PEER_ID, PROTOCOL, new Uint8Array([1]), { timeoutMs: 150, parallelPaths: 2 });
+    const response = await router.send(FAKE_PEER_ID, PROTOCOL, new Uint8Array([1]), { timeoutMs: 60_000, parallelPaths: 2 });
 
     expect(response).toEqual(new Uint8Array([0xab]));
+    // Not left to the 60 s deadline or to a node stop that can no longer reach it.
+    expect(loserSignal?.aborted).toBe(true);
+    expect((loserSignal?.reason as Error | undefined)?.message).toBe('multipath: loser path');
     expect(attachedTo(stop.signal)).toEqual({ listeners: 0, dependants: 0 });
-    // Settling detaches the send from node.stopSignal, but its own signals
-    // keep their timing: the loser is still bound to the send's deadline.
-    expect(loserSignal?.aborted).toBe(false);
-    await vi.waitFor(() => expect(loserSignal?.aborted).toBe(true), { timeout: 2_000, interval: 20 });
-    expect((loserSignal?.reason as Error | undefined)?.name).toBe('TimeoutError');
   });
 
   it('leaves nothing on node.stopSignal after a protocol probe', async () => {
