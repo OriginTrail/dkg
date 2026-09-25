@@ -64,6 +64,32 @@ describe('runCatchupPlanesWithPolicy', () => {
     expect(syncDurable).not.toHaveBeenCalled();
   });
 
+  it('runs durable after a successful selected shared-memory plane', async () => {
+    const order: string[] = [];
+    const syncSharedMemory = vi.fn(async () => {
+      order.push('shared');
+      return { deferredBackpressure: 0 };
+    });
+    const syncDurable = vi.fn(async () => {
+      order.push('durable');
+      return { deferredBackpressure: 0 };
+    });
+
+    await expect(runCatchupPlanesWithPolicy({
+      mode: 'foreground',
+      includeSharedMemory: true,
+      planeOrder: 'shared-first',
+      syncDurable,
+      syncSharedMemory,
+      retry: { maxWaitMs: 0 },
+    })).resolves.toEqual({
+      durable: { deferredBackpressure: 0 },
+      shared: { deferredBackpressure: 0 },
+      skippedPlanes: {},
+    });
+    expect(order).toEqual(['shared', 'durable']);
+  });
+
   it('derives foreground priority and source and retries durable before starting SWM', async () => {
     const order: string[] = [];
     const priorities: Array<number | undefined> = [];
@@ -131,6 +157,54 @@ describe('runCatchupPlanesWithPolicy', () => {
     expect(syncDurable).toHaveBeenCalledTimes(1);
     expect(syncSharedMemory).toHaveBeenCalledTimes(2);
   });
+
+  it.each(['durable-first', 'shared-first'] as const)(
+    'runs the trailing plane after a %s fold that SUMS the deferrals',
+    async (planeOrder) => {
+      // `CatchupPlaneRetryMerge` promises that the diagnostic fold and the retry
+      // CONTROL signal stay separate, so a fold is entitled to leave the sum of
+      // every attempt on `deferredBackpressure` — that separation is the whole
+      // reason the policy tracks the latest value itself. Re-deriving the
+      // leading plane's deferral from the RETURNED result broke that promise for
+      // this runner: a plane that deferred once and then succeeded still read as
+      // deferred, and the trailing plane was skipped as `leading-plane-deferred`
+      // with nothing refusing capacity any more.
+      const clock = virtualClock();
+      const sumDeferrals = (
+        previous: { deferredBackpressure?: number },
+        current: { deferredBackpressure?: number },
+      ) => ({
+        deferredBackpressure:
+          (previous.deferredBackpressure ?? 0) + (current.deferredBackpressure ?? 0),
+      });
+      const leading = vi.fn()
+        .mockResolvedValueOnce({ deferredBackpressure: 1 })
+        .mockResolvedValueOnce({ deferredBackpressure: 0 });
+      const trailing = vi.fn(async () => ({ deferredBackpressure: 0 }));
+      const sharedLeads = planeOrder === 'shared-first';
+
+      const result = await runCatchupPlanesWithPolicy({
+        mode: 'foreground',
+        includeSharedMemory: true,
+        planeOrder,
+        syncDurable: sharedLeads ? trailing : leading,
+        syncSharedMemory: sharedLeads ? leading : trailing,
+        mergeDurableRetryResults: sumDeferrals,
+        mergeSharedMemoryRetryResults: sumDeferrals,
+        now: clock.now,
+        wait: clock.wait,
+      });
+
+      expect(leading).toHaveBeenCalledTimes(2);
+      expect(trailing).toHaveBeenCalledTimes(1);
+      expect(result.skippedPlanes).toEqual({});
+      expect(result.durable).not.toBeNull();
+      expect(result.shared).not.toBeNull();
+      // The fold's cumulative value is returned untouched — the policy reads its
+      // own tracked control value instead of rewriting the caller's diagnostics.
+      expect((sharedLeads ? result.shared : result.durable)?.deferredBackpressure).toBe(1);
+    },
+  );
 
   it('retries a deferred plane on a wall-clock budget, not a fixed attempt count', async () => {
     // Before #2006 the budget was the fixed ladder [100, 250, 500] — exactly
@@ -429,6 +503,36 @@ describe('the removed retryDelaysMs ladder', () => {
     );
     expect(result.deferredBackpressure).toBe(1);
     expect(clock.elapsed()).toBeLessThanOrEqual(300);
+  });
+
+  it('folds retry diagnostics while using the latest deferral as the control signal', async () => {
+    type Result = {
+      insertedDataTriples: number;
+      deferredBackpressure: number;
+    };
+    let attempt = 0;
+    const result = await runCatchupPlaneWithPolicy<Result>(
+      'foreground',
+      async () => {
+        attempt += 1;
+        return {
+          insertedDataTriples: attempt,
+          deferredBackpressure: attempt === 1 ? 1 : 0,
+        };
+      },
+      {
+        retry: { maxWaitMs: 1_000 },
+        now: () => 0,
+        wait: async () => {},
+        mergeRetryResults: (previous, current) => ({
+          insertedDataTriples: previous.insertedDataTriples + current.insertedDataTriples,
+          deferredBackpressure: previous.deferredBackpressure + current.deferredBackpressure,
+        }),
+      },
+    );
+
+    expect(result).toEqual({ insertedDataTriples: 3, deferredBackpressure: 1 });
+    expect(attempt).toBe(2);
   });
 });
 

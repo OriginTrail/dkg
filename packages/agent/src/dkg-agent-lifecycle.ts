@@ -442,6 +442,7 @@ import {
   finalizeDurableSyncCompletion,
   markDurableTerminalBoundary,
   mergeDurableSyncAccumulatorInto,
+  mergeDurableSyncResults,
   mergeDurableSyncResultIntoAccumulator,
   recordDurableSyncDiagnostics,
   type DurableSyncAccumulator,
@@ -1836,6 +1837,89 @@ function mergeSharedMemorySyncResults(
 ): SharedMemorySyncResult {
   return {
     ...mergeSamePeerSharedMemoryDiagnostics(a, b),
+  };
+}
+
+type CatchupRetrySharedMemorySyncResult = SharedMemorySyncResult & {
+  /** Sum retained for diagnostics while `deferredBackpressure` stays latest-only. */
+  retryDeferredBackpressure?: number;
+  /** The latest attempt's own counters; see `catchupSharedRetryLatest`. */
+  retryLatest?: SharedMemorySyncResult;
+};
+
+type CatchupRetryDurableSyncResult = DurableSyncResult & {
+  /** Sum retained for diagnostics while `deferredBackpressure` stays latest-only. */
+  retryDeferredBackpressure?: number;
+  /** The latest attempt's own counters; see `catchupDurableRetryLatest`. */
+  retryLatest?: DurableSyncResult;
+};
+
+/**
+ * The counters a readiness/success CLASSIFICATION must see for a retried plane.
+ *
+ * The folded payload is cumulative for diagnostics, and the merge reducers sum
+ * `failedPhases`, `timedOutPhases`, `deniedPhases` and `rejectedKcs` — each of
+ * which `classifyDurableProgress` treats as a blocking failure. One attempt can
+ * carry a phase failure AND its deferral together (`markDeferred` adds the
+ * deferral onto the round's existing summary), so classifying the fold would
+ * report a peer whose retry came back clean as failed, losing the credit the
+ * pre-retry replace-latest behaviour gave it.
+ */
+function catchupSharedRetryLatest(
+  result: CatchupRetrySharedMemorySyncResult,
+): SharedMemorySyncResult {
+  return result.retryLatest ?? result;
+}
+
+/** Durable half of the same classification contract. */
+function catchupDurableRetryLatest(
+  result: CatchupRetryDurableSyncResult,
+): DurableSyncResult {
+  return result.retryLatest ?? result;
+}
+
+/**
+ * Fold a retry's diagnostics while retaining the latest attempt's counters.
+ * `deferredBackpressure` stays the latest attempt's control value and
+ * `retryLatest` carries the rest of that attempt for classification; every
+ * other numeric counter in the payload remains cumulative across attempts.
+ */
+function mergeSharedMemorySyncRetryResults(
+  a: CatchupRetrySharedMemorySyncResult,
+  b: CatchupRetrySharedMemorySyncResult,
+): CatchupRetrySharedMemorySyncResult {
+  const merged = mergeSharedMemorySyncResults(
+    {
+      ...a,
+      deferredBackpressure: a.retryDeferredBackpressure ?? a.deferredBackpressure,
+    },
+    b,
+  );
+  return {
+    ...merged,
+    deferredBackpressure: b.deferredBackpressure,
+    retryDeferredBackpressure: merged.deferredBackpressure,
+    retryLatest: catchupSharedRetryLatest(b),
+  };
+}
+
+/** Same retry contract for durable requester results. */
+function mergeDurableSyncRetryResults(
+  a: CatchupRetryDurableSyncResult,
+  b: CatchupRetryDurableSyncResult,
+): CatchupRetryDurableSyncResult {
+  const merged = mergeDurableSyncResults(
+    {
+      ...a,
+      deferredBackpressure: a.retryDeferredBackpressure ?? a.deferredBackpressure,
+    },
+    b,
+  );
+  return {
+    ...merged,
+    deferredBackpressure: b.deferredBackpressure,
+    retryDeferredBackpressure: merged.deferredBackpressure,
+    retryLatest: catchupDurableRetryLatest(b),
   };
 }
 
@@ -7939,8 +8023,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // and the result array is unchanged (input order, one entry per peer) — the
     // load is just staggered into waves.
     let results: Array<{
-      durable: DurableSyncResult;
-      shared: SharedMemorySyncResult | null;
+      durable: CatchupRetryDurableSyncResult;
+      shared: CatchupRetrySharedMemorySyncResult | null;
     }>;
     if (coordinatedRecovery && syncCapable.length > 0) {
       // The caller has already applied curator/core ordering, maxPeers windowing,
@@ -7974,7 +8058,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   [contextGraphId],
                   { ...(priority === undefined ? {} : { priority }), source },
                 ).catch(emptyShared),
-                { sourceOverride: stats?.sourceOverride },
+                {
+                  sourceOverride: stats?.sourceOverride,
+                  mergeRetryResults: mergeSharedMemorySyncRetryResults,
+                },
               )
             : null,
         }),
@@ -7990,6 +8077,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             mode,
             sourceOverride: stats?.sourceOverride,
             includeSharedMemory,
+            mergeDurableRetryResults: mergeDurableSyncRetryResults,
+            mergeSharedMemoryRetryResults: mergeSharedMemorySyncRetryResults,
             syncDurable: ({ priority, source }) => this.syncFromPeerDetailed(
               remotePeerId,
               [contextGraphId],
@@ -8019,10 +8108,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // or cleanly completed empty. Empty responses still count as a
       // legitimate host response, but a no-progress timeout must not make the
       // subscribe/VM catch-up path report a successful peer.
-      const durableProgress = classifyDurableProgress(r.durable, {
+      // Classification reads the latest ATTEMPT's counters; the folded result
+      // keeps every attempt's counters for the diagnostics projection below.
+      const durableProgress = classifyDurableProgress(catchupDurableRetryLatest(r.durable), {
         complete: r.durable.complete,
       });
-      const sharedProgress = r.shared ? classifyDurableProgress(r.shared) : null;
+      const sharedProgress = r.shared
+        ? classifyDurableProgress(catchupSharedRetryLatest(r.shared))
+        : null;
       if (sharedProgress?.completedWithoutFailure) {
         cleanSharedMemoryPeerIds.add(remotePeerId);
       }
@@ -8118,14 +8211,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       diagnostics.durable.failedPeers += r.durable.failedPeers;
       diagnostics.durable.failedPhases += r.durable.failedPhases ?? 0;
       diagnostics.durable.deferredBackpressure = (diagnostics.durable.deferredBackpressure ?? 0)
-        + (r.durable.deferredBackpressure ?? 0);
+        + (r.durable.retryDeferredBackpressure ?? r.durable.deferredBackpressure ?? 0);
       deferredBackpressure += r.durable.deferredBackpressure ?? 0;
       let peerDenied = durableProgress.denied;
       if (r.shared) {
         sharedMemorySynced += r.shared.insertedDataTriples;
         diagnostics.sharedMemory = mergeFleetSharedMemoryDiagnostics(
           diagnostics.sharedMemory,
-          r.shared,
+          {
+            ...r.shared,
+            deferredBackpressure:
+              r.shared.retryDeferredBackpressure ?? r.shared.deferredBackpressure,
+          },
         );
         deferredBackpressure += r.shared.deferredBackpressure ?? 0;
         peerDenied = peerDenied || Boolean(sharedProgress?.denied);
@@ -8135,9 +8232,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     const accumulateContinuationShared = (
       remotePeerId: string,
-      shared: SharedMemorySyncResult,
+      shared: CatchupRetrySharedMemorySyncResult,
     ): void => {
-      const progress = classifyDurableProgress(shared);
+      // Same split as the round above: classify the latest attempt, project the
+      // cumulative payload.
+      const progress = classifyDurableProgress(catchupSharedRetryLatest(shared));
       if (progress.completedWithoutFailure) {
         cleanSharedMemoryPeerIds.add(remotePeerId);
       }
@@ -8150,7 +8249,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       sharedMemorySynced += shared.insertedDataTriples;
       diagnostics.sharedMemory = mergeFleetSharedMemoryDiagnostics(
         diagnostics.sharedMemory,
-        shared,
+        {
+          ...shared,
+          deferredBackpressure:
+            shared.retryDeferredBackpressure ?? shared.deferredBackpressure,
+        },
       );
       deferredBackpressure += shared.deferredBackpressure ?? 0;
 
@@ -8216,7 +8319,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                     [contextGraphId],
                     { ...(priority === undefined ? {} : { priority }), source },
                   ).catch(emptyShared),
-                  { sourceOverride: stats?.sourceOverride },
+                  {
+                    sourceOverride: stats?.sourceOverride,
+                    mergeRetryResults: mergeSharedMemorySyncRetryResults,
+                  },
                 );
                 return { remotePeerId, shared };
               },

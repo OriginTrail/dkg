@@ -4,7 +4,9 @@ import {
   runCatchupPlaneWithPolicy,
   type CatchupPlanePolicyClock,
   type CatchupPlanePolicyOptions,
+  type CatchupPlanePolicyRunOptions,
   type CatchupPlaneResult,
+  type CatchupPlaneRetryMerge,
 } from '@origintrail-official/dkg-agent';
 // @ts-expect-error CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS is REMOVED from the
 // package root. It named the fixed [100, 250, 500] ladder, which no longer
@@ -60,10 +62,57 @@ const planes: CatchupPlanePolicyOptions<CatchupPlaneResult, CatchupPlaneResult> 
   retryDelaysMs: [10],
 };
 
+// `mergeRetryResults` is the SINGLE-plane fold option. The two-plane runner has
+// two planes and therefore two folds (`mergeDurableRetryResults` /
+// `mergeSharedMemoryRetryResults`), and it spreads its options into each plane's
+// run options before assigning `mergeRetryResults` itself — so a caller that set
+// it on the two-plane options would have it overwritten with `undefined` and
+// lose every retry diagnostic, with no diagnostic of its own. That is the same
+// silently-ignored-option shape as the removed ladder, and the name is an easy
+// mistake to make because the single-plane API takes exactly it. Pinned the same
+// two ways, for the same reason: the literal form proves nothing on its own.
+
+// Fails to compile (TS2339) if the member is dropped rather than kept `never`.
+declare const planeFoldOnPlanes: CatchupPlanePolicyOptions<
+  CatchupPlaneResult,
+  CatchupPlaneResult
+>['mergeRetryResults'];
+// …and `undefined` is the only value it can hold.
+const planeFoldIsUninhabited: undefined = planeFoldOnPlanes;
+
+declare const singlePlaneFoldOptions: {
+  mode: 'foreground';
+  includeSharedMemory: false;
+  syncDurable: () => Promise<CatchupPlaneResult>;
+  syncSharedMemory: () => Promise<CatchupPlaneResult>;
+  mergeRetryResults: (
+    previous: CatchupPlaneResult,
+    current: CatchupPlaneResult,
+  ) => CatchupPlaneResult;
+};
+// @ts-expect-error a VARIABLE carrying the single-plane fold name must not flow
+// into the two-plane options — the case excess-property checking would let by.
+const staleFold: CatchupPlanePolicyOptions<CatchupPlaneResult, CatchupPlaneResult> =
+  singlePlaneFoldOptions;
+
 // The replacements must stay importable and assignable, so this file cannot
 // pass merely because the whole surface decayed.
 const supported: CatchupPlanePolicyClock = { retry: { maxWaitMs: 5_000 } };
 const replacementBudget: number = CATCHUP_BACKPRESSURE_MAX_WAIT_MS;
+const planeFolds: CatchupPlanePolicyOptions<CatchupPlaneResult, CatchupPlaneResult> = {
+  mode: 'foreground',
+  includeSharedMemory: true,
+  syncDurable: async () => ({}),
+  syncSharedMemory: async () => ({}),
+  mergeDurableRetryResults: (previous, current) => ({
+    deferredBackpressure:
+      (previous.deferredBackpressure ?? 0) + (current.deferredBackpressure ?? 0),
+  }),
+  mergeSharedMemoryRetryResults: (_previous, current) => current,
+};
+// …and the single-plane API must keep taking the fold under its own name.
+declare const singlePlaneRunOptions: CatchupPlanePolicyRunOptions<CatchupPlaneResult>;
+const singlePlaneFold: CatchupPlaneRetryMerge<CatchupPlaneResult> = singlePlaneRunOptions;
 
 export declare const pinned: [
   typeof clock,
@@ -72,6 +121,10 @@ export declare const pinned: [
   typeof stale,
   typeof ladderIsUninhabited,
   typeof replacementBudget,
+  typeof planeFoldIsUninhabited,
+  typeof staleFold,
+  typeof planeFolds,
+  typeof singlePlaneFold,
   typeof CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS,
   typeof runSwmCatchupContinuations,
   typeof runCatchupPlaneWithPolicy,

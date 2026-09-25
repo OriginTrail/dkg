@@ -352,6 +352,23 @@ export function mergeDurableSyncResultIntoAccumulator(
   return accumulator.merge(durableSyncAccumulatorFromResult(result));
 }
 
+/**
+ * Fold repeated admission attempts for one peer into one diagnostic result.
+ * The latest attempt owns the public completion verdict; counters retain all
+ * attempts so a deferred-then-successful plane cannot under-report work.
+ */
+export function mergeDurableSyncResults(
+  previous: DurableSyncResult,
+  current: DurableSyncResult,
+): DurableSyncResult {
+  const accumulator = durableSyncAccumulatorFromResult(previous);
+  mergeDurableSyncResultIntoAccumulator(accumulator, current);
+  return {
+    ...finalizeDurableSyncCompletion(accumulator),
+    complete: current.complete,
+  };
+}
+
 /** Record typed counter deltas without exposing the accumulator's mutable state. */
 export function recordDurableSyncDiagnostics(
   accumulator: DurableSyncAccumulator,

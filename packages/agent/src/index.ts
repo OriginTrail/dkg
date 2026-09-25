@@ -551,6 +551,8 @@ export {
   type CatchupPlanePolicyClock,
   type CatchupPlanePolicyOptions,
   type CatchupPlanePolicyResult,
+  type CatchupPlanePolicyRunOptions,
+  type CatchupPlaneRetryMerge,
   type CatchupPlaneSourceOverride,
   type CatchupPlaneResult,
 } from './sync/catchup-policy.js';
@@ -587,6 +589,7 @@ export {
   classifyDurableProgress,
   createFailedPeerDurableSyncResult,
   isDurableSyncComplete,
+  mergeDurableSyncResults,
   normalizeDurableSyncResult,
   type DurableProgressClassification,
   type DurableProgressClassificationOptions,

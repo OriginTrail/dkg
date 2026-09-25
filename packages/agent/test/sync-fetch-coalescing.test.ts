@@ -1338,6 +1338,7 @@ describe('DKGAgent sync fetch coalescing', () => {
     const priorities: Array<number | undefined> = [];
     const sources: Array<string | undefined> = [];
     let durableCalls = 0;
+    let sharedCalls = 0;
 
     try {
       await agent.start();
@@ -1368,10 +1369,13 @@ describe('DKGAgent sync fetch coalescing', () => {
         _contextGraphIds: string[],
         options: { priority?: number; source?: string } | undefined,
       ) => {
+        sharedCalls += 1;
         priorities.push(options?.priority);
         sources.push(options?.source);
-        order.push('shared');
-        return cleanSharedMemorySyncResult();
+        order.push(`shared-${sharedCalls}`);
+        return sharedCalls === 1
+          ? { ...cleanSharedMemorySyncResult(), deferredBackpressure: 1 }
+          : cleanSharedMemorySyncResult();
       };
 
       const result = await (agent as any).runCatchupOverPeers(
@@ -1382,8 +1386,11 @@ describe('DKGAgent sync fetch coalescing', () => {
       );
 
       expect(result.deferredBackpressure).toBe(0);
-      expect(order).toEqual(['durable-1', 'durable-2', 'shared']);
+      expect(result.diagnostics.durable.deferredBackpressure).toBe(1);
+      expect(result.diagnostics.sharedMemory.deferredBackpressure).toBe(1);
+      expect(order).toEqual(['durable-1', 'durable-2', 'shared-1', 'shared-2']);
       expect(priorities).toEqual([
+        FOREGROUND_CATCHUP_SYNC_PRIORITY,
         FOREGROUND_CATCHUP_SYNC_PRIORITY,
         FOREGROUND_CATCHUP_SYNC_PRIORITY,
         FOREGROUND_CATCHUP_SYNC_PRIORITY,
@@ -1396,7 +1403,56 @@ describe('DKGAgent sync fetch coalescing', () => {
         'catchup-foreground',
         'catchup-foreground',
         'catchup-foreground',
+        'catchup-foreground',
       ]);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('keeps a peer clean when the deferred attempt failed a phase and the retry did not', async () => {
+    // `markDeferred` adds the deferral onto the summary the round had already
+    // accumulated, so ONE attempt can report `{failedPhases: 1,
+    // deferredBackpressure: 1}`. The retry fold sums `failedPhases`, and
+    // `classifyDurableProgress` treats any non-zero value as a blocking
+    // failure — so classifying the FOLD would report a peer whose retry came
+    // back clean as failed, dropping it from `peersSucceeded` and recording a
+    // failed SWM round. Classification must read the latest attempt; only the
+    // diagnostics projection keeps the cumulative counters.
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const remotePeer = { toString: () => PEER_A };
+    let sharedCalls = 0;
+
+    try {
+      await agent.start();
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent as any).syncFromPeerDetailed = async () => cleanDurableSyncResult();
+      (agent as any).syncSharedMemoryFromPeerDetailed = async () => {
+        sharedCalls += 1;
+        return sharedCalls === 1
+          ? {
+              ...cleanSharedMemorySyncResult(),
+              failedPhases: 1,
+              deferredBackpressure: 1,
+            }
+          : cleanSharedMemorySyncResult();
+      };
+
+      const result = await (agent as any).runCatchupOverPeers(
+        'coalesced-cg',
+        true,
+        [remotePeer],
+        { mode: 'foreground' },
+      );
+
+      expect(sharedCalls).toBe(2);
+      expect(result.peersSucceeded).toBe(1);
+      expect(result.deferredBackpressure).toBe(0);
+      // The cumulative counters are still reported — they are the observability
+      // this fold exists for; they just do not decide the peer's verdict.
+      expect(result.diagnostics.sharedMemory.failedPhases).toBe(1);
+      expect(result.diagnostics.sharedMemory.deferredBackpressure).toBe(1);
     } finally {
       await agent.stop().catch(() => {});
     }
@@ -1967,11 +2023,14 @@ describe('DKGAgent sync fetch coalescing', () => {
       };
       (agent as any).syncSharedMemoryFromPeerDetailed = async (peerId: string) => {
         sharedCalls.push(peerId);
-        const resolved = sharedCalls.length === 1 ? 2 : 3;
+        const call = sharedCalls.length;
+        const resolved = call < 3 ? 2 : 3;
         return {
           ...cleanSharedMemorySyncResult(),
-          completedPhases: 1,
-          ...(resolved < 3
+          ...(call === 2
+            ? { deferredBackpressure: 1 }
+            : { completedPhases: 1 }),
+          ...(call === 1
             ? {
               failedPhases: 1,
               localYield: true as const,
@@ -1984,11 +2043,14 @@ describe('DKGAgent sync fetch coalescing', () => {
 
       const recovery = await agent.syncVmRecoveryFromConnectedPeers('coalesced-cg', {
         includeSharedMemory: true,
+        mode: 'foreground',
       });
       const result = recovery.catchup;
 
       expect(durableCalls).toEqual([PEER_A]);
-      expect(sharedCalls).toEqual([PEER_A, PEER_A]);
+      expect(sharedCalls).toEqual([PEER_A, PEER_A, PEER_A]);
+      expect(result.deferredBackpressure).toBe(0);
+      expect(result.diagnostics.sharedMemory.deferredBackpressure).toBe(1);
       expect(result.diagnostics.sharedMemory.swmCoverage).toEqual(coverage(3));
       expect(result.diagnostics.sharedMemory.continuationPasses).toBe(1);
       expect(result.diagnostics.sharedMemory.continuationStopReason).toBe('no-capable-peers');
