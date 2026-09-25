@@ -5,7 +5,7 @@ function registrationRuntime(agent: unknown): StorageACKRegistrationRuntime {
   return (agent as { storageACKRegistrationRuntime: StorageACKRegistrationRuntime }).storageACKRegistrationRuntime;
 }
 
-/** Install through the real session so fixtures obey endpoint ownership. */
+/** Install through the runtime so fixtures obey endpoint ownership. */
 export function installStorageACKFixtureEndpoint(
   agent: unknown,
   endpoint: StorageACKEndpoint | Pick<StorageACKEndpoint, 'dispatch'>,
@@ -13,7 +13,7 @@ export function installStorageACKFixtureEndpoint(
   const ownedEndpoint: StorageACKEndpoint = 'dispose' in endpoint
     ? endpoint as StorageACKEndpoint
     : { dispatch: endpoint.dispatch, dispose() {} };
-  if (!registrationRuntime(agent).begin().install(ownedEndpoint)) {
+  if (!registrationRuntime(agent).installFixtureEndpoint(ownedEndpoint)) {
     throw new Error('Fixture StorageACK endpoint could not be installed');
   }
 }

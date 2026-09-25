@@ -12,17 +12,28 @@ export type StorageACKRegistrationOptions = {
 };
 
 type RegistrationPhase = 'initial' | 'retry' | 'failover';
-export interface StorageACKRegistrationLease {
+interface StorageACKRegistrationLease {
+  signerLost(): boolean;
+}
+
+/** An attempt can guard awaited dependencies and report loss of its own signer. */
+export interface StorageACKRegistrationAttemptContext {
+  isActive(): boolean;
+  guard<T>(work: () => Promise<T>): Promise<T>;
   signerLost(): boolean;
 }
 
 export type RegistrationOutcome =
-  | { readonly kind: 'registered'; readonly endpoint: StorageACKEndpoint; readonly lease: StorageACKRegistrationLease }
+  | { readonly kind: 'registered'; readonly endpoint: StorageACKEndpoint }
   | { readonly kind: 'retryable' }
   | { readonly kind: 'disabled' };
 
 export interface StorageACKRegistrationPlan {
-  attempt: (options: StorageACKRegistrationOptions, phase: RegistrationPhase) => Promise<RegistrationOutcome>;
+  attempt: (
+    options: StorageACKRegistrationOptions,
+    phase: RegistrationPhase,
+    context: StorageACKRegistrationAttemptContext,
+  ) => Promise<RegistrationOutcome>;
   retryDelayMs: number;
   isStarted: () => boolean;
   onRetryScheduled: () => void;
@@ -39,7 +50,7 @@ type RegistrationState =
 class RetiredRegistrationSession extends Error {}
 
 /** A generation owns the registration state, endpoint, and its local transport. */
-export class StorageACKRegistrationSession {
+class StorageACKRegistrationSession {
   private state: RegistrationState = { kind: 'idle' };
   private plan: StorageACKRegistrationPlan | undefined;
   private readonly attempts = new Set<Promise<unknown>>();
@@ -58,7 +69,7 @@ export class StorageACKRegistrationSession {
     return value;
   }
 
-  createLease(): StorageACKRegistrationLease {
+  private createLease(): StorageACKRegistrationLease {
     const lease: StorageACKRegistrationLease = {
       signerLost: () => this.signerLost(lease),
     };
@@ -75,7 +86,7 @@ export class StorageACKRegistrationSession {
   }
 
   /** Direct fixture installation; production installs the attempt result. */
-  install(endpoint: StorageACKEndpoint, lease = this.createLease()): boolean {
+  install(endpoint: StorageACKEndpoint, lease: StorageACKRegistrationLease): boolean {
     if (this.state.kind === 'retired' || this.state.kind === 'registered') {
       endpoint.dispose();
       return false;
@@ -103,10 +114,16 @@ export class StorageACKRegistrationSession {
     const plan = this.plan;
     if (!plan || this.state.kind === 'retired' || this.state.kind === 'registered') return;
     this.state = { kind: 'registering', phase };
+    const lease = this.createLease();
+    const context: StorageACKRegistrationAttemptContext = {
+      isActive: () => this.isCurrent(),
+      guard: (work) => this.runStep(work),
+      signerLost: () => lease.signerLost(),
+    };
     try {
-      const outcome = await plan.attempt(options, phase);
+      const outcome = await plan.attempt(options, phase, context);
       if (outcome.kind === 'registered') {
-        this.install(outcome.endpoint, outcome.lease);
+        this.install(outcome.endpoint, lease);
       } else if (this.state.kind === 'registering' && this.state.phase === phase) {
         if (outcome.kind === 'retryable') {
           this.scheduleRetry(phase === 'initial' ? { allowChainReresolution: true } : options);
@@ -173,13 +190,32 @@ export class StorageACKRegistrationRuntime {
   get endpoint(): StorageACKEndpoint | null { return this.currentSession?.endpoint ?? null; }
   get registered(): boolean { return this.endpoint !== null; }
 
-  begin(): StorageACKRegistrationSession {
+  private begin(): StorageACKRegistrationSession {
     if (this.currentSession) {
       this.currentSession.retire();
       this.retiredSessions.add(this.currentSession);
     }
     this.currentSession = new StorageACKRegistrationSession();
     return this.currentSession;
+  }
+
+  /** Fence a previous lifetime before the agent begins asynchronous startup. */
+  retireCurrentGeneration(): void {
+    if (!this.currentSession) return;
+    this.currentSession.retire();
+    this.retiredSessions.add(this.currentSession);
+    this.currentSession = null;
+  }
+
+  /** Start and own a complete registration generation. */
+  startGeneration(plan: StorageACKRegistrationPlan): Promise<void> {
+    return this.begin().start(plan);
+  }
+
+  /** Test fixtures exercise the same ownership and drain path as production. */
+  installFixtureEndpoint(endpoint: StorageACKEndpoint): boolean {
+    const session = this.begin();
+    return session.install(endpoint, { signerLost: () => false });
   }
 
   clearRetry(): void { this.currentSession?.stopRetry(); }

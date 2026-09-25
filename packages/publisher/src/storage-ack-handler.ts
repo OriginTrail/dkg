@@ -1,6 +1,5 @@
 import { hasValidGraphScopedContent, resolveGraphPublishAccess } from './graph-publish-envelope.js';
 import {
-  deleteByPatternWithoutCount,
   GraphManager,
   loadSelectedSharedMemoryQuads,
   type SharedMemoryReadSelection,
@@ -8,12 +7,8 @@ import {
   type Quad,
   type QueryOptions,
   type StorePressureSnapshot,
-  invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
-import {
-  tryReplaceGraphWithDurableRootCompanionAtomically,
-  type DurableRootAtomicCompanionResolver,
-} from './durable-root-atomic-companion.js';
+import type { DurableRootAtomicCompanionResolver } from './durable-root-atomic-companion.js';
 import type {
   EventBus,
   PublishIntentMsg,
@@ -61,9 +56,8 @@ import {
 import { parseSimpleNQuads } from './publish-handler.js';
 import { replaceCatalogQuads } from './catalog-persistence.js';
 import { ACKCommitSequence } from './ack-commit-sequence.js';
-import { generateKnowledgeAssetShareMetadata } from './metadata.js';
+import { GraphScopedACKPersistence, type GraphScopedACKPersistenceRequest, type GraphScopedAckCopy, type AckCopyHeadVerdict, type GraphScopedACKPersistenceResult } from './graph-scoped-ack-persistence.js';
 import {
-  storeKnowledgeAssetWorkspaceHead,
   tryResolveKnowledgeAssetWorkspaceHead,
   type KnowledgeAssetWorkspaceHead,
 } from './workspace-resolution.js';
@@ -72,7 +66,6 @@ import {
   STORAGE_ACK_LEDGER_PREDICATES,
   storageAckLedgerEntryQuads,
   storageAckLedgerRecordUpdate,
-  storageAckOperationId,
   storageAckOwedOperationsQuery,
   xsdDateTimeLiteral,
   type StorageAckLedgerEntry,
@@ -84,9 +77,7 @@ import {
   type StorageAckRequestContext,
 } from './storage-ack-head-policy.js';
 export type { LocalStorageAckHeadExpectation, StorageAckRequestContext } from './storage-ack-head-policy.js';
-import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
-import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
 import { ethers } from 'ethers';
 
 type PeerId = { toString(): string };
@@ -146,16 +137,6 @@ type GraphScopedPublishIntent = {
   accessPolicy: GraphKnowledgeAssetAccessPolicy;
   allowedPeers: string[];
   subGraphName?: string;
-};
-
-/**
- * What an ACK copy persists: a publish intent's envelope, or an update's.
- * An update intent carries no access envelope, so `accessPolicy` is absent
- * and the copy's head records the legacy default (public, or owner-only when
- * private triples are committed) with no access rows.
- */
-type GraphScopedAckCopy = Omit<GraphScopedPublishIntent, 'accessPolicy'> & {
-  accessPolicy?: GraphKnowledgeAssetAccessPolicy;
 };
 
 function resolveGraphScopedPublishIntent(
@@ -300,13 +281,6 @@ export interface StorageAckDecision {
 }
 
 export type StorageAckDecisionObserver = (decision: StorageAckDecision) => void | Promise<void>;
-
-/**
- * The complete persistence decision, resolved under the per-KA workspace lock.
- */
-type AckCopyHeadVerdict =
-  | { readonly kind: 'decline'; readonly decline: Uint8Array }
-  | { readonly kind: 'replace-head' | 'preserve-head'; readonly supersede: readonly string[] };
 
 /**
  * Validate that every term of a parsed quad is well-formed BEFORE it enters the
@@ -1134,207 +1108,24 @@ export class StorageACKHandler {
     return result.ok ? { ok: true } : result;
   }
 
-  /**
-   * Persist a verified rootless assertion as one exact SWM graph plus the
-   * constant-size workspace head needed by finalization and chain reconcile.
-   *
-   * StorageACK durability is not satisfied by the data graph alone: without
-   * the head, a core that does not subscribe to the CG's live publish topic
-   * cannot bind those triples back to the UAL after the chain event lands.
-   * The operation id binds asset identity, version, and content, so ACK retries
-   * replace the same metadata rows without aliasing identical-content KAs.
-   *
-   * Under the per-KA write lock the current head is checked first, with the
-   * SWM gossip path's rules: an older version, or different content at the
-   * same version, is a conflict (a peer must not be able to replace a copy
-   * this core may still owe to its VM), and a newer version (an update) may
-   * replace an older copy only once that older version is confirmed in this
-   * namespace's VM. The signature and ledger commit stay under the same lock.
-   *
-   * A local self-ACK over content the head already records leaves that head
-   * in place only with proof of the exact queued operation and access envelope.
-   */
-  private async persistGraphScopedWorkspaceOrDecline(
-    cgId: string,
-    swmGraphId: string,
-    swmGraphUri: string,
-    graphPublish: GraphScopedAckCopy,
-    parsed: Quad[],
-    publisherPeerId: string,
-    merkleRoot: Uint8Array,
-    replaceGraph: boolean,
-    signal: AbortSignal | undefined,
-    recordLedger: boolean,
-    context: StorageAckRequestContext,
-    digest: Uint8Array,
-  ): Promise<{ ok: true; signature: ethers.Signature } | { ok: false; decline: Uint8Array }> {
-    assertPersistQuadTermsSafe(parsed);
-    const normalized = parsed.map((quad) => ({ ...quad, graph: swmGraphUri }));
-    const operationId = storageAckOperationId(
-      graphPublish.scope.ual,
-      graphPublish.scope.assertionVersion,
-      merkleRoot,
-    );
-    const metaGraph = this.graphManager.sharedMemoryMetaUri(
-      swmGraphId,
-      graphPublish.subGraphName,
-    );
-    const publicDigest = workspacePublicQuadsDigest(
-      normalized.map((quad) => ({ ...quad, graph: '' })),
-    );
-    const metadata = generateKnowledgeAssetShareMetadata(
-      {
-        shareOperationId: operationId,
-        contextGraphId: swmGraphId,
-        kaUal: graphPublish.scope.ual,
-        assertionVersion: graphPublish.scope.assertionVersion,
-        publicTripleCount: normalized.length,
-        ...(graphPublish.privateMerkleRoot
-          ? { privateMerkleRoot: graphPublish.privateMerkleRoot }
-          : {}),
-        privateTripleCount: graphPublish.privateTripleCount,
-        publisherPeerId: publisherPeerId.trim() || 'unknown',
-        ...(graphPublish.accessPolicy === undefined
-          ? {}
-          : { accessPolicy: graphPublish.accessPolicy, allowedPeers: graphPublish.allowedPeers }),
-        agentAddress: graphPublish.scope.agentAddress,
-        subGraphName: graphPublish.subGraphName,
-        timestamp: new Date(),
+  private persistGraphScopedWorkspaceOrDecline(
+    request: GraphScopedACKPersistenceRequest,
+  ): Promise<GraphScopedACKPersistenceResult> {
+    return new GraphScopedACKPersistence({
+      store: this.store,
+      graphManager: this.graphManager,
+      config: this.config,
+      ports: {
+        assertParsed: assertPersistQuadTermsSafe,
+        checkHead: (input) => this.checkAckCopyAgainstHead(input),
+        runWhileLive: (work, activeSignal) => this.runWhileLive(work, activeSignal),
+        runStoreOpOrDecline: (graphId, work, activeSignal) =>
+          this.runStoreOpOrDecline(graphId, work, activeSignal),
+        signDigest: (value, activeSignal) => this.signDigestWhileLive(value, activeSignal),
+        supersedeLedger: (operations, options) => this.supersedeLedgerOperations(operations, options),
+        recordSignedAck: (entry, options) => this.recordSignedAck(entry, options),
       },
-      metaGraph,
-    );
-    const operationSubject = metadata[0]?.subject;
-    if (!operationSubject) {
-      throw new Error('StorageACK: graph-scoped workspace metadata is empty');
-    }
-    metadata.push({
-      subject: operationSubject,
-      predicate: 'http://dkg.io/ontology/publicQuadsDigest',
-      object: `"${publicDigest}"`,
-      graph: metaGraph,
-    });
-    const incomingPrivateRoot = graphPublish.privateMerkleRoot
-      ? ethers.hexlify(graphPublish.privateMerkleRoot).toLowerCase()
-      : undefined;
-    const ledgerEntry = (): StorageAckLedgerEntry => ({
-      operationSubject,
-      namespace: swmGraphId,
-      metaGraph,
-      contextGraphId: cgId,
-      kaUal: graphPublish.scope.ual,
-      assertionVersion: graphPublish.scope.assertionVersion,
-      operation: BigInt(graphPublish.scope.assertionVersion) > 1n ? 'update' : 'publish',
-      signedAt: new Date(),
-      ...(graphPublish.subGraphName ? { subGraphName: graphPublish.subGraphName } : {}),
-    });
-
-    const persist = async (): Promise<{ ok: true; signature: ethers.Signature } | { ok: false; decline: Uint8Array }> => {
-      let operationsToSupersede: readonly string[] = [];
-      const commit = new ACKCommitSequence(signal);
-      const result = await this.runStoreOpOrDecline(cgId, async (): Promise<Uint8Array | undefined> => {
-      const verdict = await this.runWhileLive(() => this.checkAckCopyAgainstHead({
-        cgId,
-        swmGraphId,
-        scope: graphPublish.scope,
-        subGraphName: graphPublish.subGraphName,
-        publicDigest,
-        publicTripleCount: normalized.length,
-        privateTripleCount: graphPublish.privateTripleCount,
-        privateMerkleRoot: incomingPrivateRoot,
-        publisherPeerId,
-        context,
-        signal,
-      }), signal);
-      if (verdict.kind === 'decline') return verdict.decline;
-      operationsToSupersede = verdict.supersede;
-      const companion = graphPublish.subGraphName === undefined
-        ? this.config.resolveDurableRootAtomicCompanion?.(Object.freeze({
-            contextGraphId: swmGraphId,
-            kaUal: graphPublish.scope.ual,
-            assertionVersion: graphPublish.scope.assertionVersion,
-            shareOperationId: operationId,
-          }))
-        : undefined;
-      const willReplace = replaceGraph || companion !== undefined;
-      if (willReplace) {
-        const replaced = await commit.write('storage-ack.persistGraphScoped.replaceGraph',
-          (options) => tryReplaceGraphWithDurableRootCompanionAtomically(
-            this.store, swmGraphUri, normalized, companion, options,
-          ), (applied) => applied);
-        if (!replaced) {
-          throw Object.assign(
-            new Error('Graph-scoped StorageACK requires atomic TripleStore.replaceGraph support'),
-            { code: 'SWM_ATOMIC_REPLACE_UNSUPPORTED' },
-          );
-        }
-        // #2079: a REPLACE, not a drop — invisible to the catch-up lane's count
-        // gate, so the witness must be dropped explicitly. The head write and
-        // two other store calls follow, any of which can throw and leave content
-        // ahead of the head.
-        await commit.write('storage-ack.persistGraphScoped.witnessInvalidate',
-          (options) => invalidateSwmMaterializationWitness(this.store, swmGraphUri, options)
-            .catch(() => {}));
-      }
-        await commit.write('storage-ack.persistGraphScoped.deleteOperationMeta',
-          (options) => deleteByPatternWithoutCount(this.store,
-            { graph: metaGraph, subject: operationSubject }, options));
-        // Once the operation rows are deleted the re-insert must finish, or a
-        // re-ACK would leave the head pointing at missing rows: no deadline here.
-        await commit.write('storage-ack.persistGraphScoped.insertOperationMeta',
-          (options) => this.store.insert(metadata, options));
-        // A local ACK of the publisher's already-current copy must preserve
-        // the queued job's operation id and access envelope for its retry.
-        if (verdict.kind === 'replace-head') {
-          await commit.write('storage-ack.persistGraphScoped.workspaceHead',
-            (options) => storeKnowledgeAssetWorkspaceHead({
-            store: this.store,
-            graphManager: this.graphManager,
-            contextGraphId: swmGraphId,
-            kaUal: graphPublish.scope.ual,
-            assertionVersion: graphPublish.scope.assertionVersion,
-            shareOperationId: operationId,
-            subGraphName: graphPublish.subGraphName,
-            queryOptions: options,
-          }));
-        }
-        // Releasing obligations for overwritten data belongs to the copy
-        // commit, even when a later deadline prevents the incoming ACK from
-        // being signed. New signed-ACK rows remain a post-sign operation.
-        await commit.write('storage-ack.ledger.supersede',
-          (options) => this.supersedeLedgerOperations(operationsToSupersede, options));
-        await commit.write('storage-ack.persistGraphScoped.flush',
-          async (options) => { await this.store.flush?.(options); });
-      return undefined;
-    }, signal);
-      if (!result.ok) return result;
-      if (result.value !== undefined) return { ok: false, decline: result.value };
-      // Keep the KA lock through signing and ledger commit. A timed-out copy
-      // may finish its entered data write and release overwritten obligations;
-      // only an actual signature can create the incoming signed-ACK row.
-      const signature = await this.signDigestWhileLive(digest, signal);
-      if (recordLedger) {
-        const ledger = await this.runStoreOpOrDecline(cgId, async () => {
-          await commit.write('storage-ack.ledger.record',
-            (options) => this.recordSignedAck(ledgerEntry(), options));
-          await commit.write('storage-ack.ledger.flush',
-            async (options) => { await this.store.flush?.(options); });
-        }, signal);
-        if (!ledger.ok) return ledger;
-      }
-      return { ok: true, signature };
-    };
-    const result = this.config.workspaceWriteLocks
-      ? await withKeyedLocks(
-        this.config.workspaceWriteLocks,
-        [swmKaWriteLockKey(
-          swmGraphId,
-          graphPublish.subGraphName,
-          graphPublish.scope.ual,
-        )],
-        persist,
-      )
-      : await persist();
-    return result;
+    }).execute(request);
   }
 
   private notifyPriorVersionAwaitingPromotion(request: StorageAckPriorVersionRequest): void {
@@ -2246,20 +2037,12 @@ export class StorageACKHandler {
       // invariant is why we CANNOT sign anyway, so the publisher re-sends
       // once the store worker is back rather than bucketing us as no_response.
       if (graphPublish) {
-        persistGraphCopy = (digest) => this.persistGraphScopedWorkspaceOrDecline(
-          cgId,
-          swmGraphId,
-          swmGraphUri,
-          graphPublish,
-          parsed,
-          peerId.toString(),
-          merkleRoot,
-          true,
-          signal,
-          this.config.ensureVmPromotion !== undefined,
-          context,
-          digest,
-        );
+        persistGraphCopy = (digest) => this.persistGraphScopedWorkspaceOrDecline({
+          cgId, swmGraphId, swmGraphUri, graphPublish, parsed,
+          publisherPeerId: peerId.toString(), merkleRoot, replaceGraph: true,
+          signal, recordLedger: this.config.ensureVmPromotion !== undefined,
+          context, digest,
+        });
       } else {
         // Ungated embeddings only (a gated core declined legacy intents above).
         const stagingGraphUri = `${swmGraphUri}/staging/${ethers.hexlify(merkleRoot).slice(2, 18)}`;
@@ -2328,20 +2111,12 @@ export class StorageACKHandler {
       }
       if (graphPublish) {
         const loadedQuads = swmQuads;
-        persistGraphCopy = (digest) => this.persistGraphScopedWorkspaceOrDecline(
-          cgId,
-          swmGraphId,
-          swmGraphUri,
-          graphPublish,
-          loadedQuads,
-          peerId.toString(),
-          merkleRoot,
-          false,
-          signal,
-          this.config.ensureVmPromotion !== undefined,
-          context,
-          digest,
-        );
+        persistGraphCopy = (digest) => this.persistGraphScopedWorkspaceOrDecline({
+          cgId, swmGraphId, swmGraphUri, graphPublish, parsed: loadedQuads,
+          publisherPeerId: peerId.toString(), merkleRoot, replaceGraph: false,
+          signal, recordLedger: this.config.ensureVmPromotion !== undefined,
+          context, digest,
+        });
       }
     }
 
@@ -2871,20 +2646,11 @@ export class StorageACKHandler {
       const updateCopy: GraphScopedAckCopy = { ...graphUpdate, allowedPeers: [] };
       const verifiedQuads = publicQuads;
       const writeData = inlineByteLength !== undefined;
-      if (this.config.ensureVmPromotion) persistUpdateCopy = (digest) => this.persistGraphScopedWorkspaceOrDecline(
-        cgId,
-        swmGraphId,
-        swmGraphUri,
-        updateCopy,
-        verifiedQuads,
-        peerId.toString(),
-        newMerkleRoot,
-        writeData,
-        signal,
-        true,
-        context,
-        digest,
-      );
+      if (this.config.ensureVmPromotion) persistUpdateCopy = (digest) => this.persistGraphScopedWorkspaceOrDecline({
+        cgId, swmGraphId, swmGraphUri, graphPublish: updateCopy, parsed: verifiedQuads,
+        publisherPeerId: peerId.toString(), merkleRoot: newMerkleRoot,
+        replaceGraph: writeData, signal, recordLedger: true, context, digest,
+      });
     } else if (intent.stagingQuads && intent.stagingQuads.length > 0) {
       if (intent.stagingQuads.length > STORAGE_ACK_MAX_STAGING_BYTES) {
         throw new Error(

@@ -16,17 +16,16 @@ describe('StorageACK registration session', () => {
   it('blocks teardown after a non-cooperative registration exceeds the drain deadline', async () => {
     vi.useFakeTimers();
     const runtime = new StorageACKRegistrationRuntime();
-    const session = runtime.begin();
     const staleEndpoint = endpoint();
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let entered!: () => void;
     const inside = new Promise<void>((resolve) => { entered = resolve; });
-    const starting = session.start({
+    const starting = runtime.startGeneration({
       attempt: async () => {
         entered();
         await gate;
-        return { kind: 'registered', endpoint: staleEndpoint, lease: session.createLease() } as const;
+        return { kind: 'registered', endpoint: staleEndpoint } as const;
       },
       retryDelayMs: 1_000,
       isStarted: () => true,
@@ -54,12 +53,11 @@ describe('StorageACK registration session', () => {
 
   it('fences an old sender and drains its non-cooperative work after a new session begins', async () => {
     const runtime = new StorageACKRegistrationRuntime();
-    const firstSession = runtime.begin();
     let entered!: () => void;
     let release!: () => void;
     const inside = new Promise<void>((resolve) => { entered = resolve; });
     const work = new Promise<Uint8Array>((resolve) => { release = () => resolve(new Uint8Array([1])); });
-    firstSession.install({ dispatch: () => { entered(); return { response: work, completion: work }; }, dispose: vi.fn() });
+    runtime.installFixtureEndpoint({ dispatch: () => { entered(); return { response: work, completion: work }; }, dispose: vi.fn() });
     const oldSend = runtime.createLocalSender();
     const localWork = (endpoint: StorageACKEndpoint, signal: AbortSignal) => endpoint.dispatch({
         protocol: PROTOCOL_STORAGE_ACK, data: new Uint8Array([1]), peerId: 'self', signal,
@@ -67,7 +65,7 @@ describe('StorageACK registration session', () => {
     const first = oldSend(1_000, localWork)
       .catch((error: unknown) => error);
     await inside;
-    runtime.begin();
+    runtime.retireCurrentGeneration();
     expect(() => oldSend(1_000, localWork))
       .toThrow(/transport is closed/);
     let drained = false;
@@ -83,25 +81,25 @@ describe('StorageACK registration session', () => {
   it('retries transient signer failover until one replacement owns the endpoint', async () => {
     vi.useFakeTimers();
     const runtime = new StorageACKRegistrationRuntime();
-    const session = runtime.begin();
     const first = endpoint();
     const replacement = endpoint();
-    const firstLease = session.createLease();
-    const replacementLease = session.createLease();
-    const attempt = vi.fn(async (options: { repairWallets?: boolean }, phase: string) => {
+    let firstSignerLost!: () => boolean;
+    const attempt = vi.fn(async (options: { repairWallets?: boolean }, phase: string,
+      context: { signerLost(): boolean }) => {
       if (phase === 'initial') {
-        return { kind: 'registered', endpoint: first, lease: firstLease } as const;
+        firstSignerLost = context.signerLost;
+        return { kind: 'registered', endpoint: first } as const;
       }
       expect(options.repairWallets).toBe(false);
       if (phase === 'failover') throw new Error('chain temporarily unavailable');
       if (attempt.mock.calls.filter(([, callPhase]) => callPhase === 'retry').length === 1) {
         return { kind: 'retryable' } as const;
       }
-      return { kind: 'registered', endpoint: replacement, lease: replacementLease } as const;
+      return { kind: 'registered', endpoint: replacement } as const;
     });
     const onError = vi.fn();
     const onRetryScheduled = vi.fn();
-    await session.start({
+    await runtime.startGeneration({
       attempt,
       retryDelayMs: 1_000,
       isStarted: () => true,
@@ -109,8 +107,8 @@ describe('StorageACK registration session', () => {
       onRetryScheduled,
     });
     expect(runtime.endpoint).toBe(first);
-    expect(firstLease.signerLost()).toBe(true);
-    expect(firstLease.signerLost()).toBe(false);
+    expect(firstSignerLost()).toBe(true);
+    expect(firstSignerLost()).toBe(false);
     await Promise.resolve();
     await Promise.resolve();
     expect(first.dispose).toHaveBeenCalledOnce();

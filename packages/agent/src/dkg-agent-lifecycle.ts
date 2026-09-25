@@ -2114,7 +2114,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     if (this.started) return;
-    const storageACKRegistrationSession = this.storageACKRegistrationRuntime.begin();
+    this.storageACKRegistrationRuntime.retireCurrentGeneration();
     this.chain.contextGraphAuthorityIndexSnapshots?.open();
     // Validate and capture the substrate before persistence/network startup.
     // Caller changes during awaits cannot introduce a late configuration error.
@@ -2756,9 +2756,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       if (ackSignerCandidates.length > 0) {
         const attemptStorageACKRegistration = async (
           attemptCtx: OperationContext,
-          options: { repairWallets?: boolean; allowChainReresolution?: boolean } = {},
+          options: { repairWallets?: boolean; allowChainReresolution?: boolean },
+          registration: import('./p2p/storage-ack-registration-runtime.js').StorageACKRegistrationAttemptContext,
         ): Promise<import('./p2p/storage-ack-registration-runtime.js').RegistrationOutcome> => {
-          if (!storageACKRegistrationSession.isCurrent()) return { kind: 'disabled' };
+          if (!registration.isActive()) return { kind: 'disabled' };
           if (this.storageAckHandlerRegistered) return { kind: 'disabled' };
           // #894 / Codex PR #901 (round 2): background identity re-resolution.
           // If boot left the identity unresolved because of a transient chain
@@ -2779,7 +2780,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             && options.allowChainReresolution === true
           ) {
             try {
-              let reresolved = await storageACKRegistrationSession.runStep(() => raceWithBootTimeout(
+              let reresolved = await registration.guard(() => raceWithBootTimeout(
                 this.chain.getIdentityId(),
                 BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
                 'StorageACK identity re-resolution',
@@ -2795,7 +2796,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               // boot-path (or concurrent-retry) provisioning still in flight.
               if (reresolved === 0n && effectiveRole === 'core') {
                 this.log.info(attemptCtx, `No on-chain identity after transient boot outage — creating profile and staking...`);
-                reresolved = await storageACKRegistrationSession.runStep(() => this.provisionProfileGuarded(attemptCtx));
+                reresolved = await registration.guard(() => this.provisionProfileGuarded(attemptCtx));
               }
               if (reresolved > 0n) {
                 onChainIdentityId = reresolved;
@@ -2807,7 +2808,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 );
               }
             } catch (err) {
-              if (!storageACKRegistrationSession.isCurrent()) return { kind: 'disabled' };
+              if (!registration.isActive()) return { kind: 'disabled' };
               // Codex PR #901 round-4 :1838: mirror the boot-path :1714 gate on
               // the retry path. If the chain came back but provisioning then
               // failed DETERMINISTICALLY (insufficient funds / revert / admin),
@@ -2834,8 +2835,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           if (onChainIdentityId > 0n) {
             const registrationSucceeded = options.repairWallets === false
               ? true
-              : await storageACKRegistrationSession.runStep(() => ensureACKCandidateWalletsRegistered(attemptCtx));
-            const signerResolution = await storageACKRegistrationSession.runStep(() => this.resolveConfirmedACKSigner(
+              : await registration.guard(() => ensureACKCandidateWalletsRegistered(attemptCtx));
+            const signerResolution = await registration.guard(() => this.resolveConfirmedACKSigner(
               onChainIdentityId,
               ackSignerCandidates,
               attemptCtx,
@@ -2852,10 +2853,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // no provider-backed dependency, so both values are passed in at
             // construction.
             const chainIdForHandler = typeof this.chain.getEvmChainId === 'function'
-              ? await storageACKRegistrationSession.runStep(() => this.chain.getEvmChainId!())
+              ? await registration.guard(() => this.chain.getEvmChainId!())
               : undefined;
             const kav10AddressForHandler = typeof this.chain.getKnowledgeAssetsLifecycleAddress === 'function'
-              ? await storageACKRegistrationSession.runStep(() => this.chain.getKnowledgeAssetsLifecycleAddress!())
+              ? await registration.guard(() => this.chain.getKnowledgeAssetsLifecycleAddress!())
               : undefined;
             if (chainIdForHandler === undefined || kav10AddressForHandler === undefined) {
               this.log.warn(
@@ -2867,7 +2868,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               return { kind: 'disabled' };
             }
 
-            const registrationLease = storageACKRegistrationSession.createLease();
             const ackHandler = new StorageACKHandler(this.store, {
               nodeRole: effectiveRole,
               nodeIdentityId: onChainIdentityId,
@@ -2943,7 +2943,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 },
               ),
               onSignerUnregistered: () => {
-                if (!registrationLease.signerLost()) return;
+                if (!registration.signerLost()) return;
                 this.log.warn(
                   attemptCtx,
                   `Unregistered V10 StorageACK handler: signer ${ackSignerWallet.address} ` +
@@ -3057,7 +3057,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               attemptCtx,
               `Registered V10 StorageACK handler (identity=${onChainIdentityId}, signer=${ackSignerWallet.address})`,
             );
-            return { kind: 'registered', endpoint, lease: registrationLease };
+            return { kind: 'registered', endpoint };
           } else if (bootChainIdentityUnresolvedTransient) {
             // #894 / Codex PR #901: identity is still 0n only because the
             // chain was unreachable at boot and the re-resolution above hasn't
@@ -3085,9 +3085,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             : STORAGE_ACK_REGISTRATION_RETRY_MS;
         // The first attempt is awaited by start(). The session schedules chain
         // re-resolution in the background only after a retryable initial result.
-        await storageACKRegistrationSession.start({
-          attempt: (options, phase) => attemptStorageACKRegistration(
-            phase === 'initial' ? ctx : createOperationContext('connect'), options,
+        await this.storageACKRegistrationRuntime.startGeneration({
+          attempt: (options, phase, registration) => attemptStorageACKRegistration(
+            phase === 'initial' ? ctx : createOperationContext('connect'), options, registration,
           ),
           retryDelayMs: storageACKRegistrationRetryMs,
           isStarted: () => this.started,
