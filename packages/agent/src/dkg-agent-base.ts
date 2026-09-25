@@ -1326,6 +1326,8 @@ export class DKGAgentBase {
   protected randomSamplingRuntime: RandomSamplingRuntime | null = null;
   protected storageACKRegistrationRetryTimer: ReturnType<typeof setTimeout> | null = null;
   protected storageACKRegistrationRetryInFlight = false;
+  protected storageACKRegistrationGeneration = 0;
+  protected readonly storageACKRegistrationAttempts = new Set<Promise<unknown>>();
   // #894 / Codex PR #901 round-3 :1685: `ensureProfile()` is a mutating
   // multi-tx flow (createProfile + stake) that can legitimately outlast the
   // boot read-timeout. Guards against the boot path AND the StorageACK retry

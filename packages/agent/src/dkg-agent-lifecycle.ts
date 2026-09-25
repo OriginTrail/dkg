@@ -2114,6 +2114,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     }
     if (this.started) return;
+    const storageACKRegistrationGeneration = ++this.storageACKRegistrationGeneration;
     this.localStorageACKTransport = new LocalStorageACKTransport();
     this.chain.contextGraphAuthorityIndexSnapshots?.open();
     // Validate and capture the substrate before persistence/network startup.
@@ -2755,10 +2756,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (effectiveRole === 'core') {
       if (ackSignerCandidates.length > 0) {
         let storageACKFailoverInFlight = false;
+        const registrationIsCurrent = () => this.storageACKRegistrationGeneration === storageACKRegistrationGeneration;
+        const trackRegistration = <T>(attempt: Promise<T>): Promise<T> => {
+          this.storageACKRegistrationAttempts.add(attempt);
+          void attempt.then(
+            () => { this.storageACKRegistrationAttempts.delete(attempt); },
+            () => { this.storageACKRegistrationAttempts.delete(attempt); },
+          );
+          return attempt;
+        };
         const attemptStorageACKRegistration = async (
           attemptCtx: OperationContext,
           options: { repairWallets?: boolean; allowChainReresolution?: boolean } = {},
         ): Promise<'registered' | 'retryable' | 'disabled'> => {
+          if (!registrationIsCurrent()) return 'disabled';
           if (this.storageAckHandlerRegistered) return 'registered';
           // #894 / Codex PR #901 (round 2): background identity re-resolution.
           // If boot left the identity unresolved because of a transient chain
@@ -2784,6 +2795,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 BOOT_CHAIN_IDENTITY_TIMEOUT_MS,
                 'StorageACK identity re-resolution',
               );
+              if (!registrationIsCurrent()) return 'disabled';
               // Codex :1757: a brand-new core node may have hit the transient
               // failure BEFORE `ensureProfile()` ever ran, so it has no profile
               // to find. Re-probing `getIdentityId()` alone would return 0n
@@ -2796,6 +2808,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               if (reresolved === 0n && effectiveRole === 'core') {
                 this.log.info(attemptCtx, `No on-chain identity after transient boot outage — creating profile and staking...`);
                 reresolved = await this.provisionProfileGuarded(attemptCtx);
+                if (!registrationIsCurrent()) return 'disabled';
               }
               if (reresolved > 0n) {
                 onChainIdentityId = reresolved;
@@ -2834,12 +2847,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             const registrationSucceeded = options.repairWallets === false
               ? true
               : await ensureACKCandidateWalletsRegistered(attemptCtx);
+            if (!registrationIsCurrent()) return 'disabled';
             const signerResolution = await this.resolveConfirmedACKSigner(
               onChainIdentityId,
               ackSignerCandidates,
               attemptCtx,
             );
             const ackSignerWallet = signerResolution.wallet;
+            if (!registrationIsCurrent()) return 'disabled';
             if (!ackSignerWallet) {
               return (registrationSucceeded && !signerResolution.retryable) ? 'disabled' : 'retryable';
             }
@@ -2856,6 +2871,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             const kav10AddressForHandler = typeof this.chain.getKnowledgeAssetsLifecycleAddress === 'function'
               ? await this.chain.getKnowledgeAssetsLifecycleAddress()
               : undefined;
+            if (!registrationIsCurrent()) return 'disabled';
             if (chainIdForHandler === undefined || kav10AddressForHandler === undefined) {
               this.log.warn(
                 attemptCtx,
@@ -2941,7 +2957,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 },
               ),
               onSignerUnregistered: () => {
-                if (storageACKFailoverInFlight) return;
+                if (!registrationIsCurrent() || storageACKFailoverInFlight) return;
                 storageACKFailoverInFlight = true;
                 const staleEndpoint = this.storageAckEndpoint;
                 this.storageAckEndpoint = null;
@@ -2951,10 +2967,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   `Unregistered V10 StorageACK handler: signer ${ackSignerWallet.address} ` +
                   `is no longer confirmed on-chain for identity=${onChainIdentityId}`,
                 );
-                attemptStorageACKRegistration(
+                trackRegistration(attemptStorageACKRegistration(
                   createOperationContext('connect'),
                   { repairWallets: false },
-                )
+                ))
                   .then((result) => {
                     if (result === 'retryable') {
                       scheduleStorageACKRegistrationRetry({ repairWallets: false });
@@ -3054,7 +3070,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // substrate (wire prefix /dkg/10.0.1/storage-ack).
             // messenger.register handles envelope decode + receiver
             // dedup; ackHandler's signature stays the same.
-            this.storageAckEndpoint = registerStorageACKEndpoint({
+            const endpoint = registerStorageACKEndpoint({
               registerGroup: (entries) => this.messenger.registerGroup(entries),
               publish: (data, peerIdStr, signal) => {
                 const peerId = { toString: () => peerIdStr, toBytes: () => new Uint8Array() };
@@ -3065,6 +3081,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 return ackHandler.updateHandler(data, peerId, signal);
               },
             });
+            if (!registrationIsCurrent()) {
+              endpoint.dispose();
+              return 'disabled';
+            }
+            this.storageAckEndpoint = endpoint;
             this.clearStorageACKRegistrationRetry();
             this.log.info(
               attemptCtx,
@@ -3098,13 +3119,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             ? Math.max(requestedRetryMs, MIN_STORAGE_ACK_REGISTRATION_RETRY_MS)
             : STORAGE_ACK_REGISTRATION_RETRY_MS;
         const scheduleStorageACKRegistrationRetry = (options: { repairWallets?: boolean; allowChainReresolution?: boolean } = {}) => {
-          if (this.storageACKRegistrationRetryTimer || this.storageAckHandlerRegistered) return;
+          if (!registrationIsCurrent() || this.storageACKRegistrationRetryTimer || this.storageAckHandlerRegistered) return;
           this.log.warn(ctx, `V10 StorageACK handler registration will retry every ${storageACKRegistrationRetryMs}ms`);
           this.storageACKRegistrationRetryTimer = setTimeout(() => {
             this.storageACKRegistrationRetryTimer = null;
-            if (!this.started || this.storageAckHandlerRegistered || this.storageACKRegistrationRetryInFlight) return;
+            if (!registrationIsCurrent() || !this.started || this.storageAckHandlerRegistered || this.storageACKRegistrationRetryInFlight) return;
             this.storageACKRegistrationRetryInFlight = true;
-            attemptStorageACKRegistration(createOperationContext('connect'), options)
+            trackRegistration(attemptStorageACKRegistration(createOperationContext('connect'), options))
               .then((result) => {
                 if (result === 'retryable') scheduleStorageACKRegistrationRetry(options);
               })
@@ -3129,7 +3150,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // immediately for a transient-0n identity; the scheduled retry then
           // runs the background re-resolution (+ ensureProfile for a brand-new
           // core node) with `allowChainReresolution: true`.
-          const result = await attemptStorageACKRegistration(ctx);
+          const result = await trackRegistration(attemptStorageACKRegistration(ctx));
           if (result === 'retryable') scheduleStorageACKRegistrationRetry({ allowChainReresolution: true });
         } catch (err) {
           this.log.warn(ctx, `Skipping V10 StorageACK handler: ${err instanceof Error ? err.message : String(err)}`);

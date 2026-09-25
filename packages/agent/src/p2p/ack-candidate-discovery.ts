@@ -1,5 +1,5 @@
 import { PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
-import { isStorageACKProtocol } from './storage-ack-protocols.js';
+import { isStorageACKProtocol, type StorageACKProtocol } from './storage-ack-protocols.js';
 import { ACKCapabilityRegistry, type ACKCapabilitySnapshot } from './ack-capability.js';
 import {
   selectACKCandidateUniverse,
@@ -33,6 +33,53 @@ function rotated<T>(items: readonly T[], cursor: number): T[] {
   return [...items.slice(offset), ...items.slice(0, offset)];
 }
 
+interface ACKRoundCandidatePlan {
+  readonly raw: readonly string[];
+  readonly confirmed: readonly string[];
+  readonly unconfirmed: readonly string[];
+  readonly admitted: readonly string[];
+  readonly localAvailable: boolean;
+}
+
+/** One round universe, partitioned from a single capability snapshot. */
+function planRoundCandidates(input: {
+  raw: readonly string[];
+  snapshot: ACKCapabilitySnapshot;
+  protocol: StorageACKProtocol;
+  accepted: ReadonlySet<string>;
+  localAvailable: boolean;
+}): ACKRoundCandidatePlan {
+  const supported = input.snapshot.supportByProtocol.get(input.protocol) ?? new Set<string>();
+  return {
+    raw: input.raw,
+    confirmed: input.raw.filter((peerId) => input.snapshot.corePeerIds.has(peerId)),
+    unconfirmed: input.raw.filter((peerId) => !supported.has(peerId)),
+    admitted: input.raw.filter((peerId) => supported.has(peerId) && input.accepted.has(peerId)),
+    localAvailable: input.localAvailable,
+  };
+}
+
+/** Rotate preferred and other probes while reserving slots for other peers. */
+function scheduleProbeWindow(input: {
+  unconfirmed: readonly string[];
+  preferred: ReadonlySet<string>;
+  protocol: StorageACKProtocol;
+  preferredCursor: number;
+  otherCursor: number;
+}): string[] {
+  const preferred = input.unconfirmed.filter((peerId) => input.preferred.has(peerId));
+  const other = input.unconfirmed.filter((peerId) => !input.preferred.has(peerId));
+  // A non-base probe may need a second core-role negotiation: 16 peers keep
+  // the total at 32 protocol probes. Base rounds may probe 32 peers.
+  const peerLimit = input.protocol === PROTOCOL_STORAGE_ACK ? 32 : 16;
+  const preferredBudget = other.length > 0 && preferred.length >= peerLimit
+    ? peerLimit - 8 : peerLimit;
+  return [
+    ...rotated(preferred, input.preferredCursor).slice(0, preferredBudget),
+    ...rotated(other, input.otherCursor).slice(0, peerLimit - Math.min(preferred.length, preferredBudget)),
+  ];
+}
+
 /** Bounded ACK discovery and final candidate planning for publish rounds. */
 export class ACKCandidateDiscoveryCoordinator {
   private preferredProbeCursor = 0;
@@ -64,44 +111,32 @@ export class ACKCandidateDiscoveryCoordinator {
     // Keep preflight and final selection on this round's snapshot even if
     // peer:update changes the registry while the round is in progress.
     const round = this.registry.beginRound();
-    const base = {
+    const raw = Object.freeze(selectACKCandidateUniverse({
       connectedPeers: ports.connectedPeers,
       ackCandidatePeerIds: ports.ackCandidatePeerIds,
       selfPeerId: ports.localCandidate.peerId,
-      capability: { mode: 'require' as const, corePeers: round.snapshot().corePeerIds },
-    };
-    await ports.preflight(selectACKCandidateUniverse(base));
+    }));
+    const plan = (): ACKRoundCandidatePlan => planRoundCandidates({
+      raw,
+      snapshot: round.snapshot(),
+      protocol: requestedProtocol,
+      accepted: new Set(raw.filter((peerId) => ports.isAcceptedPeer(peerId))),
+      localAvailable: ports.localCandidate.available,
+    });
+    await ports.preflight([...plan().confirmed]);
 
     // One spare beyond bare quorum lets the collector survive one candidate
     // decline or timeout without another discovery round.
     const target = ports.requiredACKs + 1;
-    const admitted = (): number => selectACKCandidateUniverse({
-      connectedPeers: ports.connectedPeers,
-      ackCandidatePeerIds: ports.ackCandidatePeerIds,
-      selfPeerId: ports.localCandidate.peerId,
-    })
-      .filter((peerId) => round.supports(peerId, requestedProtocol) && ports.isAcceptedPeer(peerId)).length +
-      Number(ports.localCandidate.available);
     if (ports.probeProtocol) {
-      const unconfirmed = selectACKCandidateUniverse({
-        connectedPeers: ports.connectedPeers,
-        ackCandidatePeerIds: ports.ackCandidatePeerIds,
-        selfPeerId: ports.localCandidate.peerId,
-      }).filter((peerId) => !round.supports(peerId, requestedProtocol));
       const preferredIds = new Set(ports.preferredACKPeerIds ?? []);
-      const preferred = unconfirmed.filter((peerId) => preferredIds.has(peerId));
-      const other = unconfirmed.filter((peerId) => !preferredIds.has(peerId));
-      // Reserve a few slots for nonpreferred peers if preferences alone exceed
-      // the per-round cap. Both groups rotate so no stable prefix can starve.
-      // A non-base probe may need a second negotiation to confirm the core
-      // role, so cap it at 16 peers to retain 32 total protocol probes.
-      const peerLimit = requestedProtocol === PROTOCOL_STORAGE_ACK ? 32 : 16;
-      const preferredBudget = other.length > 0 && preferred.length >= peerLimit
-        ? peerLimit - 8 : peerLimit;
-      const chosen = [
-        ...rotated(preferred, this.preferredProbeCursor).slice(0, preferredBudget),
-        ...rotated(other, this.otherProbeCursor).slice(0, peerLimit - Math.min(preferred.length, preferredBudget)),
-      ];
+      const chosen = scheduleProbeWindow({
+        unconfirmed: plan().unconfirmed,
+        preferred: preferredIds,
+        protocol: requestedProtocol,
+        preferredCursor: this.preferredProbeCursor,
+        otherCursor: this.otherProbeCursor,
+      });
       for (let offset = 0; offset < chosen.length; offset += 4) {
         const batch = chosen.slice(offset, offset + 4);
         // ACK preflight may bypass an automatic admission retry cooldown.
@@ -123,7 +158,8 @@ export class ACKCandidateDiscoveryCoordinator {
         if (discovered.length > 0) await ports.preflight(discovered);
         // Always sample at least one batch, even when advertised peers meet
         // target: advertisements do not prove valid independent ACK signers.
-        if (admitted() >= target) break;
+        const current = plan();
+        if (current.admitted.length + Number(current.localAvailable) >= target) break;
       }
     }
     return this.selectCandidates({

@@ -2675,6 +2675,8 @@ export class DKGAgent extends DKGAgentBase {
 
   async stop(): Promise<void> {
     if (!this.started) return;
+    // Fence background signer/chain registration before shutdown awaits.
+    this.storageACKRegistrationGeneration++;
     this.localStorageACKTransport.close();
     this.peerSyncSession.close();
     // Cancelling a waiter alone does not retire the shared physical scan.
@@ -2886,9 +2888,26 @@ export class DKGAgent extends DKGAgentBase {
     // deleted; substrate outbox owns retry state and drains itself
     // via the messengerOutboxTimer cleared just above.
     this.clearStorageACKRegistrationRetry();
-    this.storageACKRegistrationRetryInFlight = false;
     this.storageAckEndpoint?.dispose();
     this.storageAckEndpoint = null;
+    const registrationAttempts = [...this.storageACKRegistrationAttempts];
+    if (registrationAttempts.length > 0) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.allSettled(registrationAttempts),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('StorageACK registration did not retire within 5000ms; teardown blocked')),
+              5_000,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    this.storageACKRegistrationRetryInFlight = false;
     // A timed-out or shutdown-aborted self ACK retains ownership until its
     // physical handler work retires. Never close the store underneath it.
     await this.localStorageACKTransport.drain();

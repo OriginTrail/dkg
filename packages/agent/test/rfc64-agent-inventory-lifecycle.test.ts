@@ -16,6 +16,7 @@ import { ethers } from 'ethers';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { DKGAgent } from '../src/dkg-agent.js';
+import { LocalStorageACKTransport } from '../src/p2p/local-storage-ack-transport.js';
 import { ContextGraphMembershipPersistScheduler } from '../src/context-graph-membership-persist-scheduler.js';
 import { FinalizationRuntime } from '../src/finalization-runtime.js';
 import {
@@ -55,6 +56,9 @@ function syntheticAgent(dataDirectory?: string): any {
   // Production always owns an adapter, including no-chain deployments.
   agent.chain = new MockChainAdapter();
   agent.peerSyncSession = PeerSyncSession.stopped();
+  agent.localStorageACKTransport = new LocalStorageACKTransport();
+  agent.storageACKRegistrationGeneration = 0;
+  agent.storageACKRegistrationAttempts = new Set();
   agent.lastSyncDisconnectedAt = new Map();
   Object.assign(agent, {
     config: dataDirectory === undefined ? {} : { dataDir: dataDirectory },

@@ -1193,6 +1193,8 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     const firstSend = internals.createACKTransportFactory()().sendP2P;
     await expect(firstSend(internals.peerId, PROTOCOL_STORAGE_ACK, request))
       .resolves.toEqual(new Uint8Array([1]));
+    await expect(firstSend(internals.peerId, PROTOCOL_STORAGE_UPDATE_ACK, request))
+      .resolves.toEqual(new Uint8Array([2]));
 
     await agent.stop();
     await agent.start();
@@ -1200,9 +1202,70 @@ describe('DKGAgent.createV10ACKProvider — structured ACK verifier wiring (PR #
     const secondSend = internals.createACKTransportFactory()().sendP2P;
     await expect(secondSend(internals.peerId, PROTOCOL_STORAGE_ACK, request))
       .resolves.toEqual(new Uint8Array([1]));
+    await expect(secondSend(internals.peerId, PROTOCOL_STORAGE_UPDATE_ACK, request))
+      .resolves.toEqual(new Uint8Array([2]));
     await expect(firstSend(internals.peerId, PROTOCOL_STORAGE_ACK, request))
       .rejects.toThrow(/transport is closed/);
     expect(capturedStorageACKHandlerCalls.filter(({ kind }) => kind === 'publish')).toHaveLength(2);
+    expect(capturedStorageACKHandlerCalls.filter(({ kind }) => kind === 'update')).toHaveLength(2);
+  });
+
+  it('joins a paused signer failover without resurrecting ACK routes during stop', async () => {
+    const primary = ethers.Wallet.createRandom();
+    const ackSigner = ethers.Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', primary.address);
+    chain.seedIdentity(primary.address, 42n);
+    agent = await DKGAgent.create({
+      name: 'ACKRegistrationShutdownFenceTest',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      chainAdapter: chain,
+      nodeRole: 'core',
+      ackSignerKey: ackSigner.privateKey,
+    });
+    await agent.start();
+    const internals = agent as unknown as ProviderInternals;
+    const oldRouterHandlers = (internals.router as { handlers: Map<string, unknown> }).handlers;
+    const oldMessengerHandlers = (internals.messenger as { handlers: Map<string, unknown> }).handlers;
+    const originalResolve = agent.resolveConfirmedACKSigner.bind(agent);
+    let entered!: () => void;
+    let release!: () => void;
+    const insideResolution = new Promise<void>((resolve) => { entered = resolve; });
+    const resolutionGate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(agent, 'resolveConfirmedACKSigner').mockImplementation(async (...args) => {
+      entered();
+      await resolutionGate;
+      return originalResolve(...args);
+    });
+    const config = capturedStorageACKHandlerConfigs.at(-1) as StorageACKHandlerConfigCapture;
+    config.onSignerUnregistered?.();
+    await insideResolution;
+
+    let stopped = false;
+    const stopping = agent.stop().finally(() => { stopped = true; });
+    await vi.waitFor(() => expect(internals.storageAckEndpoint).toBeNull());
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(stopped).toBe(false);
+    release();
+    await stopping;
+    expect(internals.storageAckEndpoint).toBeNull();
+    expect(internals.storageAckHandlerRegistered).toBe(false);
+    const protocols = [
+      PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2,
+      PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2,
+    ];
+    expect(protocols.every((protocol) => !oldRouterHandlers.has(protocol))).toBe(true);
+    expect(protocols.every((protocol) => !oldMessengerHandlers.has(protocol))).toBe(true);
+
+    await agent.start();
+    await expect.poll(() => internals.storageAckHandlerRegistered).toBe(true);
+    const routerHandlers = (internals.router as { handlers: Map<string, unknown> }).handlers;
+    const messengerHandlers = (internals.messenger as { handlers: Map<string, unknown> }).handlers;
+    expect(protocols.every((protocol) => routerHandlers.has(protocol))).toBe(true);
+    expect(protocols.every((protocol) => messengerHandlers.has(protocol))).toBe(true);
+    const send = internals.createACKTransportFactory()().sendP2P;
+    await expect(send(internals.peerId, PROTOCOL_STORAGE_ACK, new Uint8Array([1])))
+      .resolves.toEqual(new Uint8Array([1]));
   });
 
   it('rolls back partial ACK registration and restores all routes on retry', async () => {
