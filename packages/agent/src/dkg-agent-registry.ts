@@ -225,6 +225,7 @@ import { registerSyncHandler } from './sync/responder/sync-handler.js';
 import { runSyncOnConnect } from './sync/on-connect/sync-on-connect.js';
 import {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
+  agentFromPreservedKeystore,
   ensureWorkspaceEncryptionKey,
   hashAgentToken,
   activeWorkspaceEncryptionKeys,
@@ -1379,18 +1380,43 @@ export class AgentRegistryMethods extends DKGAgentBase {
     }
     if (!opKey) return;
 
-    const record = agentFromPrivateKey(
-      opKey,
-      this.config.name ?? 'owner',
-      this.config.framework,
-    );
+    const address = new ethers.Wallet(opKey).address;
+    let preserved: Record<string, KeystoreEntry> = {};
+    const path = this.keystorePath();
+    if (path) {
+      const { readFile } = await import('node:fs/promises');
+      let raw: string | undefined;
+      try {
+        raw = await readFile(path, 'utf8');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+          throw new Error('Cannot read preserved default-agent keystore');
+        }
+      }
+      if (raw !== undefined) {
+        try {
+          const parsed: unknown = JSON.parse(raw);
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error();
+          preserved = parsed as Record<string, KeystoreEntry>;
+        } catch {
+          throw new Error('Cannot parse preserved default-agent keystore');
+        }
+      }
+    }
+    const entry = preserved[address.toLowerCase()];
+    if (!entry && Object.keys(preserved).length > 0) {
+      throw new Error('Preserved default-agent keystore does not match operational wallet');
+    }
+    const record = entry
+      ? agentFromPreservedKeystore(opKey, this.config.name ?? 'owner', this.config.framework, entry)
+      : agentFromPrivateKey(opKey, this.config.name ?? 'owner', this.config.framework);
 
     this.localAgents.set(record.agentAddress, record);
     this.agentTokenIndex.set(record.authToken, record.agentAddress);
     this.defaultAgentAddress = record.agentAddress;
     await this.persistAgentToStore(record);
     await this.markDefaultAgent(record.agentAddress);
-    await this.saveToKeystore(record);
+    if (!entry) await this.saveToKeystore(record);
 
     const ctx = createOperationContext('system');
     this.log.info(ctx, `Auto-registered default agent "${record.name}" → ${record.agentAddress}`);

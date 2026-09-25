@@ -86,6 +86,79 @@ export interface AgentKeyRecord {
   createdAt: string;
 }
 
+/** Rehydrate a custodial default agent when its RDF store was deliberately reset. */
+export function agentFromPreservedKeystore(
+  operationalPrivateKey: string,
+  name: string,
+  framework: string | undefined,
+  entry: KeystoreEntry,
+): AgentKeyRecord {
+  const invalid = () => new Error('Preserved default-agent keystore is invalid');
+  try {
+    const operational = new ethers.Wallet(operationalPrivateKey);
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+      || typeof entry.privateKey !== 'string'
+      || new ethers.Wallet(entry.privateKey).address !== operational.address
+      || typeof entry.authToken !== 'string' || entry.authToken.trim().length === 0) {
+      throw invalid();
+    }
+    if (entry.workspaceEncryptionKeys !== undefined && !Array.isArray(entry.workspaceEncryptionKeys)) {
+      throw invalid();
+    }
+    const record: AgentKeyRecord = {
+      agentAddress: operational.address,
+      publicKey: operational.signingKey.publicKey,
+      privateKey: entry.privateKey,
+      workspaceEncryptionKeys: entry.workspaceEncryptionKeys?.map((key) => ({ ...key })) ?? [],
+      name,
+      framework,
+      mode: 'custodial',
+      authToken: entry.authToken,
+      createdAt: new Date().toISOString(),
+      encryptionKeyAlgorithm: entry.encryptionKeyAlgorithm,
+      publicEncryptionKey: entry.publicEncryptionKey,
+      privateEncryptionKey: entry.privateEncryptionKey,
+      encryptionKeyProof: entry.encryptionKeyProof,
+    };
+    if (!entry.workspaceEncryptionKeys?.length) {
+      migrateLegacyWorkspaceEncryptionFields(record);
+    } else {
+      refreshDefaultEncryptionKeyView(record);
+    }
+    if (record.workspaceEncryptionKeys.length === 0) throw invalid();
+    let activePrivateKeys = 0;
+    for (const key of record.workspaceEncryptionKeys) {
+      if (!key || typeof key !== 'object'
+        || typeof key.encryptionKeyId !== 'string'
+        || typeof key.publicEncryptionKey !== 'string'
+        || typeof key.encryptionKeyProof !== 'string'
+        || !verifyWorkspaceEncryptionKeyBinding(
+          record.agentAddress, key.encryptionKeyAlgorithm,
+          key.publicEncryptionKey, key.encryptionKeyProof,
+        )) throw invalid();
+      const publicBytes = decodeWorkspaceEncryptionKey(key.publicEncryptionKey);
+      if (key.encryptionKeyId !== workspaceAgentEncryptionKeyId(record.agentAddress, publicBytes)) throw invalid();
+      if (!key.revokedAt) {
+        if (typeof key.privateEncryptionKey !== 'string') throw invalid();
+        const privateBytes = decodeWorkspaceEncryptionKey(key.privateEncryptionKey);
+        const derived = generateWorkspaceRecipientEncryptionKey(
+          `did:dkg:agent:${record.agentAddress}`, key.encryptionKeyId,
+          () => privateBytes,
+        );
+        if (encodeWorkspaceEncryptionKey(derived.publicKeyBytes!) !== key.publicEncryptionKey) throw invalid();
+        activePrivateKeys++;
+      }
+    }
+    if (activePrivateKeys === 0) throw invalid();
+    for (const field of ['encryptionKeyAlgorithm', 'publicEncryptionKey', 'privateEncryptionKey', 'encryptionKeyProof'] as const) {
+      if (entry[field] !== undefined && entry[field] !== record[field]) throw invalid();
+    }
+    return record;
+  } catch {
+    throw invalid();
+  }
+}
+
 /**
  * Generate a per-agent Bearer token.
  * Prefix `dkg_at_` makes it distinguishable from node-level tokens.
