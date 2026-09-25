@@ -13,7 +13,7 @@ import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
-import { ACKCapabilityRegistry } from './p2p/ack-capability.js';
+import { PeerCapabilityRegistry } from './p2p/peer-capability.js';
 import { ACKCandidateDiscoveryCoordinator } from './p2p/ack-candidate-discovery.js';
 import type { StorageACKEndpoint } from './p2p/storage-ack-endpoint.js';
 import { LocalStorageACKTransport } from './p2p/local-storage-ack-transport.js';
@@ -1721,14 +1721,16 @@ export class DKGAgentBase {
    */
   protected readonly onChainParticipantAgentsCache = new Map<string, string[]>();
   protected readonly peerHealth = new Map<string, PeerHealth>();
-  protected readonly ackCapabilityRegistry = new ACKCapabilityRegistry();
-  protected readonly ackCandidateDiscovery = new ACKCandidateDiscoveryCoordinator(this.ackCapabilityRegistry);
+  protected readonly peerCapabilityRegistry = new PeerCapabilityRegistry();
+  // Compatibility alias for existing ACK call sites.
+  protected readonly ackCapabilityRegistry = this.peerCapabilityRegistry;
+  protected readonly ackCandidateDiscovery = new ACKCandidateDiscoveryCoordinator(this.peerCapabilityRegistry);
   protected localStorageACKTransport = new LocalStorageACKTransport();
   protected get knownCorePeerIds(): ReadonlySet<string> {
-    return this.ackCapabilityRegistry.knownCorePeerIds;
+    return this.peerCapabilityRegistry.snapshotCorePeerIds();
   }
   protected get knownCorePeerIdsV2(): ReadonlySet<string> {
-    return this.ackCapabilityRegistry.knownCorePeerIdsV2;
+    return this.peerCapabilityRegistry.snapshotProtocolPeers(PROTOCOL_STORAGE_ACK_V2);
   }
   /**
    * Last chain-reported ACK quorum (ParametersStorage

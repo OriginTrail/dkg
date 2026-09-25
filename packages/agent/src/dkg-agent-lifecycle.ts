@@ -4939,7 +4939,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // territory. An Edge that was pinned as the complete SWM source must
         // not start a duplicate durable pull before its useful SWM transfer;
         // unrelated Edge peers should do neither plane in the automatic sweep.
-        return completeSwmProviders.length === 0 || this.knownCorePeerIds.has(remotePeer);
+        return completeSwmProviders.length === 0 || this.peerCapabilityRegistry.supportsCore(remotePeer);
       }),
       syncFromPeer: async (peerId, contextGraphIds) => {
         const requestedContextGraphIds = contextGraphIds
@@ -8048,7 +8048,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const peerPriorityRanks = new Map<string, number>();
       for (const peer of orderedPeers) {
         const peerId = peer.toString();
-        const rank = peerId === preferredPeerId ? 2 : this.knownCorePeerIds.has(peerId) ? 1 : 0;
+        const rank = peerId === preferredPeerId ? 2 : this.peerCapabilityRegistry.supportsCore(peerId) ? 1 : 0;
         if (rank > 0) peerPriorityRanks.set(peerId, rank);
       }
       const graphOwnerSelectsRecoveryPeer = sourceOverride === 'vm-recovery'
@@ -8056,7 +8056,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const peers = graphOwnerSelectsRecoveryPeer
         ? orderedPeers
         : this.selectCatchupPeerWindow(orderedPeers, { ...options, peerPriorityRanks });
-      const coreCount = orderedPeers.filter((p) => this.knownCorePeerIds.has(p.toString())).length;
+      const coreCount = orderedPeers.filter((p) => this.peerCapabilityRegistry.supportsCore(p.toString())).length;
       this.log.info(
         ctx,
         `catchup peer order for "${contextGraphId}": preferred=${preferredPeerId ?? 'none'} cores=${coreCount} total=${orderedPeers.length} selected=${peers.length}`
@@ -8926,7 +8926,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     preferredPeerId?: string,
     privateOnly = false,
   ): Array<{ toString(): string }> {
-    return orderCatchupPeers(peers, preferredPeerId, privateOnly, this.knownCorePeerIds);
+    return orderCatchupPeers(peers, preferredPeerId, privateOnly, this.peerCapabilityRegistry.snapshotCorePeerIds());
   }
 
   /**

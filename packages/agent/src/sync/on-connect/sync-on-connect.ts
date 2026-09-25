@@ -1,5 +1,5 @@
 import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
-import type { ACKCapabilityRegistry } from '../../p2p/ack-capability.js';
+import type { PeerCapabilityRegistry } from '../../p2p/peer-capability.js';
 import {
   classifyDurableProgress,
 } from '../durable-progress.js';
@@ -153,7 +153,7 @@ interface SyncOnConnectBaseContext extends CompatiblePeerSyncContext {
   onSyncAccounting?: (peerId: string, outcome: SyncOnConnectPeerOutcome) => void;
 }
 
-type ACKCapabilitySink = Pick<ACKCapabilityRegistry, 'reconcile'>;
+type ACKCapabilitySink = Pick<PeerCapabilityRegistry, 'reconcile'>;
 
 /** The public legacy set form remains supported, but it cannot compete with the registry port. */
 export type SyncOnConnectContext = SyncOnConnectBaseContext & (

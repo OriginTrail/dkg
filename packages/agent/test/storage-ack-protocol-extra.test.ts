@@ -58,7 +58,11 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
       [PROTOCOL_STORAGE_UPDATE_ACK, 'update'],
       [PROTOCOL_STORAGE_UPDATE_ACK_V2, 'update'],
     ]);
-    expect(lifecycle).toMatch(/this\.storageAckEndpoint\s*=\s*registerStorageACKEndpoint\(/);
+    // Registration is staged locally and published only after its generation
+    // is still current, so shutdown cannot expose a stale endpoint.
+    expect(lifecycle).toMatch(/const endpoint\s*=\s*registerStorageACKEndpoint\(/);
+    expect(lifecycle).toMatch(/if \(!registrationIsCurrent\(\)\)\s*\{\s*endpoint\.dispose\(\);/);
+    expect(lifecycle).toMatch(/this\.storageAckEndpoint\s*=\s*endpoint;/);
     expect(lifecycle).toMatch(/registerGroup:\s*\(entries\)\s*=>\s*this\.messenger\.registerGroup\(entries\)/);
     expect(endpoint).toMatch(/ports\.registerGroup\(STORAGE_ACK_PROTOCOLS\.map\(/);
   });

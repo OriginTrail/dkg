@@ -1,6 +1,6 @@
 import { PROTOCOL_STORAGE_ACK } from '@origintrail-official/dkg-core';
 import { isStorageACKProtocol, type StorageACKProtocol } from './storage-ack-protocols.js';
-import { ACKCapabilityRegistry, type ACKCapabilitySnapshot } from './ack-capability.js';
+import { PeerCapabilityRegistry, type PeerCapabilitySnapshot } from './peer-capability.js';
 import {
   selectACKCandidateUniverse,
   selectACKCandidatePeersWithDiagnostics,
@@ -44,7 +44,7 @@ interface ACKRoundCandidatePlan {
 /** One round universe, partitioned from a single capability snapshot. */
 function planRoundCandidates(input: {
   raw: readonly string[];
-  snapshot: ACKCapabilitySnapshot;
+  snapshot: PeerCapabilitySnapshot;
   protocol: StorageACKProtocol;
   accepted: ReadonlySet<string>;
   localAvailable: boolean;
@@ -85,12 +85,12 @@ export class ACKCandidateDiscoveryCoordinator {
   private preferredProbeCursor = 0;
   private otherProbeCursor = 0;
 
-  constructor(private readonly registry: ACKCapabilityRegistry) {}
+  constructor(private readonly registry: PeerCapabilityRegistry) {}
 
   selectCandidates(
     input: Omit<ACKCandidatePeerSelectionInput, 'capability' | 'selfPeerId' | 'localCandidate'>,
     localCandidate: LocalACKCandidate,
-    snapshot: ACKCapabilitySnapshot = this.registry.snapshot(),
+    snapshot: PeerCapabilitySnapshot = this.registry.snapshot(),
   ): ACKCandidatePeerSelectionResult {
     const requestedProtocolPeers = input.protocol && input.protocol !== PROTOCOL_STORAGE_ACK && isStorageACKProtocol(input.protocol)
       ? snapshot.supportByProtocol.get(input.protocol)

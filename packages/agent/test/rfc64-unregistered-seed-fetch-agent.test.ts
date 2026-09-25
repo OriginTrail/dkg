@@ -116,6 +116,7 @@ function createFetchAgent(options: FakeAgentOptions = {}) {
   const ackCapabilities = new ACKCapabilityRegistry();
   for (const peerId of corePeerIds) ackCapabilities.reconcile(peerId, [PROTOCOL_STORAGE_ACK]);
   Reflect.set(agent, 'ackCapabilityRegistry', ackCapabilities);
+  Reflect.set(agent, 'peerCapabilityRegistry', ackCapabilities);
   if (options.completeProviders !== undefined) {
     const completeProviders = options.completeProviders;
     Reflect.set(agent, 'rfc64SwmRecoveryRuntimeV1', {
@@ -455,6 +456,18 @@ describe('Rfc64SeedFetchMethods replica peer selection', () => {
     // edges backfill every slot the cores cannot use.
     expect(selected[0]).toBe(many.at(-1));
     expect(selected.slice(1)).toEqual(many.slice(0, CAP - 1));
+  });
+
+  it('reorders seed fetch peers when shared P2P role evidence changes', () => {
+    const { agent } = createFetchAgent({
+      libp2p: libp2pWith({ self: 'peer-self', peers: ['peer-edge', 'peer-promoted'] }),
+    });
+    const capabilities = Reflect.get(agent, 'peerCapabilityRegistry') as ACKCapabilityRegistry;
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1()).toEqual(['peer-edge', 'peer-promoted']);
+    capabilities.reconcile('peer-promoted', [PROTOCOL_STORAGE_ACK]);
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1()).toEqual(['peer-promoted', 'peer-edge']);
+    capabilities.reconcile('peer-promoted', ['/dkg/10.0.0/sync']);
+    expect(agent.resolveRfc64UnregisteredAuthoritySeedPeersV1()).toEqual(['peer-edge', 'peer-promoted']);
   });
 
   it('reserves window slots for non-core peers so a lone edge author is asked in the first window', () => {

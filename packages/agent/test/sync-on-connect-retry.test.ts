@@ -329,7 +329,7 @@ describe('runSyncOnConnect callbacks', () => {
     });
 
     expect(outcome).toBe('synced');
-    expect(ackCapabilities.knownCorePeerIds.has(remotePeer)).toBe(true);
+    expect(ackCapabilities.supportsCore(remotePeer)).toBe(true);
   });
 
   it('reconciles populated and empty identify lists through the legacy set context', async () => {
@@ -392,7 +392,7 @@ describe('runSyncOnConnect callbacks', () => {
     });
 
     expect(emptyIdentifyOutcome).toBe('skipped-no-sync');
-    expect(ackCapabilities.knownCorePeerIdsV2.has(remotePeer)).toBe(true);
+    expect(ackCapabilities.supports(remotePeer, PROTOCOL_STORAGE_ACK_V2)).toBe(true);
 
     const v1OnlyOutcome = await runSyncOnConnect({
       signal: ACTIVE_SYNC_LIFETIME,
@@ -409,8 +409,8 @@ describe('runSyncOnConnect callbacks', () => {
     });
 
     expect(v1OnlyOutcome).toBe('synced');
-    expect(ackCapabilities.knownCorePeerIds.has(remotePeer)).toBe(true);
-    expect(ackCapabilities.knownCorePeerIdsV2.has(remotePeer)).toBe(false);
+    expect(ackCapabilities.supportsCore(remotePeer)).toBe(true);
+    expect(ackCapabilities.supports(remotePeer, PROTOCOL_STORAGE_ACK_V2)).toBe(false);
   });
 
   it('fires onPeerSkippedNoSync when the peer does not advertise PROTOCOL_SYNC', async () => {

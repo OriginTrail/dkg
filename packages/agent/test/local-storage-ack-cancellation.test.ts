@@ -26,6 +26,7 @@ const quads: Quad[] = [
 type LocalAgent = DKGAgent & {
   peerId: string;
   storageAckEndpoint: StorageACKEndpoint | null;
+  localStorageACKTransport: LocalStorageACKTransport;
   createACKTransportFactory(options: { sendTimeoutMs: number }): () => {
     sendP2P(peerId: string, protocol: string, data: Uint8Array): Promise<Uint8Array>;
   };
@@ -152,4 +153,122 @@ describe('local StorageACK cancellation through the registered real handler', ()
       expect(sign).toHaveBeenCalledOnce();
     });
   }
+
+  for (const kind of ['publish', 'update'] as const) {
+    it(`retires ${kind} without signing after a non-cooperative late signer lookup times out`, async () => {
+      const store = new OxigraphStore();
+      await store.insert(quads);
+      const insert = vi.spyOn(store, 'insert');
+      const signer = ethers.Wallet.createRandom();
+      const sign = vi.spyOn(signer, 'signMessage');
+      let entered!: () => void;
+      let release!: (registered: boolean) => void;
+      const inGate = new Promise<void>((resolve) => { entered = resolve; });
+      const gate = new Promise<boolean>((resolve) => { release = resolve; });
+      const handler = new StorageACKHandler(store, {
+        nodeRole: 'core',
+        nodeIdentityId: 42n,
+        signerWallet: signer,
+        contextGraphSharedMemoryUri: () => graph,
+        chainId: 31337n,
+        kav10Address: '0x000000000000000000000000000000000000c10a',
+        isCgCurated: async () => false,
+        isSignerRegistered: () => { entered(); return gate; },
+        ackHandlerDeadlineMs: 0,
+      }, new TypedEventBus());
+      agent = await DKGAgent.create({
+        name: `LateLocalACKCancellation${kind}`,
+        store,
+        chainAdapter: new MockChainAdapter(),
+        nodeRole: 'core',
+      });
+      const local = agent as LocalAgent;
+      (local as unknown as { node: { peerId: string } }).node = { peerId: 'local-core' };
+      let physical: Promise<Uint8Array> | undefined;
+      local.storageAckEndpoint = registerStorageACKEndpoint({
+        registerGroup: () => () => {},
+        publish: (data, peerId, signal) => {
+          physical = handler.handler(data, { toString: () => peerId } as any, signal);
+          return physical;
+        },
+        update: (data, peerId, signal) => {
+          physical = handler.updateHandler(data, { toString: () => peerId } as any, signal);
+          return physical;
+        },
+      });
+      const root = computeFlatKCRootV10(quads, []);
+      const leafCount = computeFlatKCMerkleLeafCountV10(quads, []);
+      const data = kind === 'publish'
+        ? encodePublishIntent({
+            merkleRoot: root, contextGraphId: '42', publisherPeerId: 'publisher-0',
+            publicByteSize: 300, isPrivate: false, kaCount: 1,
+            rootEntities: ['urn:entity:1'], epochs: 1, tokenAmountStr: '1000',
+            merkleLeafCount: leafCount,
+          })
+        : encodeUpdateIntent({
+            kaId: '987654321', contextGraphId: '42', preUpdateMerkleRootCount: 1,
+            newMerkleRoot: root, newByteSize: 300, newTokenAmount: '1500',
+            mintAmount: 0, burnTokenIds: [], newMerkleLeafCount: leafCount,
+            publisherPeerId: 'publisher-0',
+          });
+      const protocol = kind === 'publish' ? PROTOCOL_STORAGE_ACK : PROTOCOL_STORAGE_UPDATE_ACK;
+      const send = local.createACKTransportFactory({ sendTimeoutMs: 40 })().sendP2P(local.peerId, protocol, data);
+      const rejectedSend = expect(send).rejects.toThrow(/timed out after 40ms/);
+      await inGate;
+      const insertsAtGate = insert.mock.calls.length;
+      await rejectedSend;
+      release(true);
+      await expect(physical).rejects.toThrow();
+      await local.localStorageACKTransport.drain();
+      expect(insert).toHaveBeenCalledTimes(insertsAtGate);
+      expect(sign).not.toHaveBeenCalled();
+    });
+  }
+
+  it('does not encode an ACK when a non-cooperative signer finishes after the send deadline', async () => {
+    const store = new OxigraphStore();
+    await store.insert(quads);
+    const signer = ethers.Wallet.createRandom();
+    const originalSign = signer.signMessage.bind(signer);
+    let entered!: () => void;
+    let release!: () => void;
+    const inSigner = new Promise<void>((resolve) => { entered = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const sign = vi.spyOn(signer, 'signMessage').mockImplementation(async (message) => {
+      entered();
+      await gate;
+      return originalSign(message);
+    });
+    const handler = new StorageACKHandler(store, {
+      nodeRole: 'core', nodeIdentityId: 42n, signerWallet: signer,
+      contextGraphSharedMemoryUri: () => graph, chainId: 31337n,
+      kav10Address: '0x000000000000000000000000000000000000c10a',
+      isCgCurated: async () => false, ackHandlerDeadlineMs: 0,
+    }, new TypedEventBus());
+    let physical: Promise<Uint8Array> | undefined;
+    const endpoint = registerStorageACKEndpoint({
+      registerGroup: () => () => {},
+      publish: (data, peerId, signal) => {
+        physical = handler.handler(data, { toString: () => peerId } as any, signal);
+        return physical;
+      },
+      update: (data, peerId, signal) => handler.updateHandler(data, { toString: () => peerId } as any, signal),
+    });
+    const data = encodePublishIntent({
+      merkleRoot: computeFlatKCRootV10(quads, []), contextGraphId: '42',
+      publisherPeerId: 'publisher-0', publicByteSize: 300, isPrivate: false,
+      kaCount: 1, rootEntities: ['urn:entity:1'], epochs: 1,
+      tokenAmountStr: '1000', merkleLeafCount: computeFlatKCMerkleLeafCountV10(quads, []),
+    });
+    const transport = new LocalStorageACKTransport();
+    const send = transport.send(endpoint, 'self', PROTOCOL_STORAGE_ACK, data, 40);
+    const rejectedSend = expect(send).rejects.toThrow(/timed out after 40ms/);
+    await inSigner;
+    await rejectedSend;
+    release();
+    await expect(physical).rejects.toThrow();
+    await transport.drain();
+    expect(sign).toHaveBeenCalledOnce();
+    endpoint.dispose();
+  });
 });

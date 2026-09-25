@@ -379,6 +379,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       knownCorePeerIds: new Set<string>(),
       knownCorePeerIdsV2: new Set<string>(),
       ackCapabilityRegistry: new ACKCapabilityRegistry(),
+      peerCapabilityRegistry: new ACKCapabilityRegistry(),
       applySyncOnConnectAccounting:
         LifecycleSyncMethods.prototype.applySyncOnConnectAccounting,
       selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
@@ -485,6 +486,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       knownCorePeerIds: new Set<string>(),
       knownCorePeerIdsV2: new Set<string>(),
       ackCapabilityRegistry: new ACKCapabilityRegistry(),
+      peerCapabilityRegistry: new ACKCapabilityRegistry(),
       applySyncOnConnectAccounting:
         LifecycleSyncMethods.prototype.applySyncOnConnectAccounting,
       selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),

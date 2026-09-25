@@ -28,6 +28,7 @@ type AgentInternals = {
   knownCorePeerIds: ReadonlySet<string>;
   knownCorePeerIdsV2: ReadonlySet<string>;
   ackCapabilityRegistry: ACKCapabilityRegistry;
+  peerCapabilityRegistry: ACKCapabilityRegistry;
   networkAdmission: NetworkAdmissionService;
   networkAdmissionCoordinator: {
     enabled: boolean;
@@ -48,6 +49,7 @@ type AgentInternals = {
   } | null;
   getACKCandidatePeers: (protocol?: string) => string[];
   handlePeerUpdateForSyncRetry: (peerId: string, protocols: readonly string[]) => void;
+  selectCatchupPeers: (peers: Array<{ toString(): string }>) => Array<{ toString(): string }>;
 };
 
 const CORE = ['core-1', 'core-2', 'core-3', 'core-4'];
@@ -126,15 +128,31 @@ describe('getACKCandidatePeers — core-only candidates', () => {
   it('isolates round evidence from peer updates while committing negotiated cores', () => {
     const registry = new ACKCapabilityRegistry();
     registry.reconcile(CORE[0], [PROTOCOL_STORAGE_ACK]);
+    registry.reconcile(EDGE[0], [PROTOCOL_SYNC]);
+    expect(registry.supports(EDGE[0], PROTOCOL_SYNC)).toBe(true);
+    expect(registry.supportsCore(EDGE[0])).toBe(false);
     const round = registry.beginRound();
+    const frozenCorePeers = round.snapshot().corePeerIds;
     registry.reconcile(CORE[0], [PROTOCOL_SYNC]);
     expect(round.supports(CORE[0], PROTOCOL_STORAGE_ACK)).toBe(true);
+    expect(frozenCorePeers.has(CORE[0])).toBe(true);
     expect(registry.hasCoreCapability(CORE[0])).toBe(false);
 
     round.observeNegotiated(CORE[1], PROTOCOL_STORAGE_ACK);
     round.observeNegotiated(CORE[1], PROTOCOL_STORAGE_UPDATE_ACK_V2);
     expect(round.snapshot().supportByProtocol.get(PROTOCOL_STORAGE_UPDATE_ACK_V2)?.has(CORE[1])).toBe(true);
     expect(registry.snapshot().supportByProtocol.get(PROTOCOL_STORAGE_UPDATE_ACK_V2)?.has(CORE[1])).toBe(true);
+  });
+
+  it('uses the shared peer role for catch-up ordering after role changes', async () => {
+    const a = await buildAgent({ confirmedCores: [], connected: [EDGE[0], CORE[0]] });
+    expect(a.peerCapabilityRegistry).toBe(a.ackCapabilityRegistry);
+    const ordered = () => a.selectCatchupPeers([peer(EDGE[0]), peer(CORE[0])]).map(String);
+    expect(ordered()).toEqual([EDGE[0], CORE[0]]);
+    a.handlePeerUpdateForSyncRetry(CORE[0], [PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK]);
+    expect(ordered()).toEqual([CORE[0], EDGE[0]]);
+    a.handlePeerUpdateForSyncRetry(CORE[0], [PROTOCOL_SYNC]);
+    expect(ordered()).toEqual([EDGE[0], CORE[0]]);
   });
 
   it('shares one capability state across peer updates and sync-on-connect reconciliation', async () => {

@@ -293,6 +293,7 @@ export interface SelectedProviderSelectionAgent {
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2: Set<string>;
   ackCapabilityRegistry: ACKCapabilityRegistry;
+  peerCapabilityRegistry: ACKCapabilityRegistry;
   selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
   rfc64SwmRecoveryCoordinatorV1: {
     admitSelectedPublic: (peerId: string, contextGraphIds: readonly string[]) => boolean;
