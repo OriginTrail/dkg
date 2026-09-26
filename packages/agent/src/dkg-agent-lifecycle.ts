@@ -8489,16 +8489,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // approved member; a public definition stored before the join
             // (RFC-64 bootstrap) must not end it while the curator's snapshot
             // is still stale (#2831 review).
-            let hasAuthoritativeMeta = await this.hasConfirmedMetaState(
-              contextGraphId,
-              { requireApprovedMemberProof: true },
-            ).catch(() => false);
+            let hasAuthoritativeMeta = await this.hasConfirmedApprovedMemberMetaState(contextGraphId)
+              .catch(() => false);
             if (!hasAuthoritativeMeta) {
               await this.refreshMetaFromCurator(contextGraphId, curatorMetaRefreshOptions);
-              hasAuthoritativeMeta = await this.hasConfirmedMetaState(
-                contextGraphId,
-                { requireApprovedMemberProof: true },
-              ).catch(() => false);
+              hasAuthoritativeMeta = await this.hasConfirmedApprovedMemberMetaState(contextGraphId)
+                .catch(() => false);
             }
             if (hasAuthoritativeMeta) {
               await this.refreshMetaSyncedFlags([contextGraphId]);
@@ -8607,8 +8603,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
     if (
       !refreshed
-      || !(await this.hasConfirmedMetaState(contextGraphId, { requireApprovedMemberProof: true })
-        .catch(() => false))
+      || !(await this.hasConfirmedApprovedMemberMetaState(contextGraphId).catch(() => false))
     ) {
       this.log.warn(
         ctx,
@@ -10921,8 +10916,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     options?: {
       rejectUnregisteredPlaceholder?: boolean;
-      /** Join bootstrap completion; see ConfirmContextGraphMetadataInput. */
-      requireApprovedMemberProof?: boolean;
       /**
        * Caller deadline for the chain proof. An aborted proof is `unknown`,
        * which confirms nothing, so the answer fails closed.
@@ -10942,7 +10935,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       peerId: this.peerId,
       store: this.store,
       subscriptions: this.subscribedContextGraphs,
-    }, contextGraphId, options);
+    }, contextGraphId, { rejectUnregisteredPlaceholder: options?.rejectUnregisteredPlaceholder });
+  }
+
+  /**
+   * Join bootstrap completion: the local metadata proves this node's approved
+   * member (the `approved-member` purpose of ConfirmContextGraphMetadataInput).
+   */
+  async hasConfirmedApprovedMemberMetaState(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+    return confirmContextGraphMetadataV1({
+      chain: this.chain,
+      resolveActivePublicChainProof: () => this.resolveActivePublicContextGraphChainProof(
+        contextGraphId,
+        createOperationContext('sync'),
+      ),
+      isPrivateContextGraph: (id) => this.isPrivateContextGraph(id),
+      localApprovedAgentByContextGraph: this.localApprovedAgentByCG,
+      peerId: this.peerId,
+      store: this.store,
+      subscriptions: this.subscribedContextGraphs,
+    }, contextGraphId, { purpose: 'approved-member' });
   }
 
   async hasConfirmedSharedMemoryMetaState(this: DKGAgent, contextGraphId: string): Promise<boolean> {

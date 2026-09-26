@@ -247,7 +247,7 @@ describe('private CG membership bootstrap recovery', () => {
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"public"', graph: metaGraph },
     ]);
     expect(await (agent as any).hasConfirmedMetaState(contextGraphId)).toBe(true);
-    expect(await (agent as any).hasConfirmedMetaState(contextGraphId, { requireApprovedMemberProof: true }))
+    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId))
       .toBe(false);
 
     const delegation = `did:dkg:agent-delegation:${contextGraphId}:${member}`;
@@ -257,7 +257,7 @@ describe('private CG membership bootstrap recovery', () => {
       { subject: delegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: `"${agent!.peerId}"`, graph: metaGraph },
       { subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT, object: `"${Date.now() - 60_000}"`, graph: metaGraph },
     ]);
-    expect(await (agent as any).hasConfirmedMetaState(contextGraphId, { requireApprovedMemberProof: true }))
+    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId))
       .toBe(true);
   });
 
@@ -275,7 +275,7 @@ describe('private CG membership bootstrap recovery', () => {
     expect((agent as any).localApprovedAgentByCG.has(contextGraphId)).toBe(false);
 
     expect(await (agent as any).hasConfirmedMetaState(contextGraphId)).toBe(true);
-    expect(await (agent as any).hasConfirmedMetaState(contextGraphId, { requireApprovedMemberProof: true }))
+    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId))
       .toBe(false);
   });
 
@@ -283,7 +283,6 @@ describe('private CG membership bootstrap recovery', () => {
     const contextGraphId = '0x00a9D0dcab936a418ffEbc734476C91D4027d359/public-join-stale-snapshot';
     const curatorPeerId = '12D3KooWCuratorOfPublicJoinStaleSnapshot';
     let memberProofStored = false;
-    const confirmationOptions: Array<{ requireApprovedMemberProof?: boolean } | undefined> = [];
     const agentLike = {
       localApprovedAgentByCG: new Map([[contextGraphId, '0x00000000000000000000000000000000000000a1']]),
       peerId: '12D3KooWMemberOfPublicJoinStaleSnapshot',
@@ -300,14 +299,9 @@ describe('private CG membership bootstrap recovery', () => {
         denied: false,
         sharedMemoryCompletedCleanly: true,
       })),
-      hasConfirmedMetaState: vi.fn(async (
-        _contextGraphId: string,
-        options?: { requireApprovedMemberProof?: boolean },
-      ) => {
-        confirmationOptions.push(options);
-        // The pre-join public declaration confirms ordinary reads.
-        return options?.requireApprovedMemberProof === true ? memberProofStored : true;
-      }),
+      // The pre-join public declaration confirms ordinary reads.
+      hasConfirmedMetaState: vi.fn(async () => true),
+      hasConfirmedApprovedMemberMetaState: vi.fn(async () => memberProofStored),
       refreshMetaSyncedFlags: vi.fn(async () => undefined),
       syncContextGraphFromConnectedPeers: vi.fn(async () => undefined),
       log: { info: vi.fn(), warn: vi.fn() },
@@ -321,8 +315,9 @@ describe('private CG membership bootstrap recovery', () => {
     await runBootstrap();
     expect(agentLike.refreshMetaSyncedFlags).not.toHaveBeenCalled();
     expect(agentLike.syncContextGraphFromConnectedPeers).toHaveBeenCalledTimes(1);
-    expect(confirmationOptions.length).toBeGreaterThan(0);
-    expect(confirmationOptions.every((options) => options?.requireApprovedMemberProof === true)).toBe(true);
+    // Completion is judged only by the approved-member confirmation.
+    expect(agentLike.hasConfirmedApprovedMemberMetaState).toHaveBeenCalled();
+    expect(agentLike.hasConfirmedMetaState).not.toHaveBeenCalled();
 
     // Once a refresh stores the member's delegation, the bootstrap completes.
     agentLike.refreshMetaFromCurator.mockImplementation(async () => {

@@ -8,7 +8,7 @@ import {
 
 import {
   isContextGraphAuthorityUnavailableMarker,
-  type ContextGraphAgentGateUnavailableReason,
+  isRetryableContextGraphAuthorityUnavailableReason,
 } from '../context-graph-authority/context-graph-authority.js';
 import type { DKGAgent } from '../../dkg-agent.js';
 import type { AssertionPromoteOptions } from '../../dkg-agent-types.js';
@@ -47,30 +47,17 @@ type AssertionPromotePreCommitResult = {
   publisherOptions: PublisherAssertionPromoteOptions;
 };
 
-const CONTEXT_GRAPH_AUTHORITY_PROMOTE_RETRY = {
-  'finalized-name-absence-unaccepted': true,
-  'chain-name-binding-unavailable': true,
-  // A cooldown ends on its own; the promote is worth retrying.
-  'authority-circuit-open': true,
-  'local-chain-binding-unavailable': true,
-  'local-existence-unavailable': true,
-  'chain-access-policy-unavailable': true,
-  'chain-access-policy-timeout': true,
-  'chain-access-policy-unknown': false,
-  'chain-participant-authority-unsupported': false,
-  'chain-participant-authority-unavailable': true,
-  'chain-participant-authority-invalid': false,
-  'rfc64-private-read-roster-unavailable': true,
-} as const satisfies Record<ContextGraphAgentGateUnavailableReason, boolean>;
-
-/** Retry translation belongs to these concrete agent prerequisite callbacks. */
+/**
+ * Retry translation belongs to these concrete agent prerequisite callbacks;
+ * which reasons are retryable is the shared authority classification.
+ */
 async function resolvePromoteAuthority<T>(resolve: () => Promise<T>): Promise<T> {
   try {
     return await resolve();
   } catch (error) {
     if (
       isContextGraphAuthorityUnavailableMarker(error)
-      && CONTEXT_GRAPH_AUTHORITY_PROMOTE_RETRY[error.reason]
+      && isRetryableContextGraphAuthorityUnavailableReason(error.reason)
     ) {
       throw createPromoteRetryableFailure(error);
     }

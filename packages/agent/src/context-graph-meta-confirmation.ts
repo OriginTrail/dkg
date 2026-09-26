@@ -18,19 +18,26 @@ import type { ActivePublicContextGraphChainProof } from
   './active-public-context-graph-chain-proof.js';
 import { isPublicMetaDurabilityPending } from
   './context-graph-public-meta-repair.js';
+import type { ApprovedMemberProof } from './context-graph-member-proof.js';
 
-export interface ConfirmContextGraphMetadataInput {
-  readonly rejectUnregisteredPlaceholder?: boolean;
-  /**
-   * Join bootstrap completion: only local metadata that proves this node's
-   * approved member confirms — the private definition with its member proof,
-   * or the public definition with the same proof (#2831 review). Without a
-   * local approval binding no member can be proven, so nothing confirms. A
-   * public definition alone keeps confirming ordinary reads, whose admission
-   * does not depend on membership.
-   */
-  readonly requireApprovedMemberProof?: boolean;
-}
+/**
+ * What a confirmation is for.
+ *
+ * - `read` (the default): the local metadata is authoritative for reads. A
+ *   public definition confirms on its own, because public reads never depend
+ *   on membership; `rejectUnregisteredPlaceholder` additionally demands a
+ *   chain proof before a public definition next to a local placeholder counts.
+ * - `approved-member`: join bootstrap completion (#2831 review). Only a
+ *   definition carrying this node's approved-member proof confirms: the
+ *   private definition, or the public one with the same allowlist entry and
+ *   delegation. Without a local approval binding nothing confirms.
+ */
+export type ConfirmContextGraphMetadataInput =
+  | {
+      readonly purpose?: 'read';
+      readonly rejectUnregisteredPlaceholder?: boolean;
+    }
+  | { readonly purpose: 'approved-member' };
 
 export interface ContextGraphMetadataConfirmationDependencies {
   readonly chain: ChainAdapter;
@@ -53,6 +60,19 @@ export async function confirmContextGraphMetadataV1(
   }
   if (isPublicMetaDurabilityPending(dependencies.store, contextGraphId)) {
     return false;
+  }
+
+  const memberProof = await resolveApprovedMemberProof(dependencies, contextGraphId);
+  if (input.purpose === 'approved-member') {
+    // A lifecycle race or partial rehydration can drop the binding; the
+    // pre-join definition must not then stand in for the member.
+    if (memberProof === undefined) return false;
+    return await findAuthoritativeDefinition(
+      dependencies,
+      contextGraphId,
+      { privateMemberProof: memberProof, publicMemberProof: memberProof },
+      'agent.contextGraph.confirmedMeta.approvedMember',
+    ) !== null;
   }
 
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
@@ -78,63 +98,15 @@ export async function confirmContextGraphMetadataV1(
       .catch(() => false);
   }
 
-  const approvedAgentAddress = dependencies.localApprovedAgentByContextGraph.get(contextGraphId);
-  let expectedDelegateeOpKey: string | undefined;
-  if (approvedAgentAddress) {
-    try {
-      expectedDelegateeOpKey = await inferAdapterPublisherAddress(dependencies.chain);
-    } catch {
-      // The libp2p peer binding remains sufficient when no op-key is exposed.
-    }
-  }
-  if (input.requireApprovedMemberProof === true) {
-    // A lifecycle race or partial rehydration can drop the binding; the
-    // ordinary checks below would then confirm on the pre-join definition.
-    if (!approvedAgentAddress) return false;
-    const memberProof = {
-      approvedAgentAddress,
-      expectedDelegateePeerId: dependencies.peerId,
-      expectedDelegateeOpKey,
-    };
-    for (const [query, source] of [
-      [buildAuthoritativePrivateMetaAskQuery(contextGraphId, memberProof), 'privateDefinition'],
-      [buildAuthoritativePublicMetaAskQuery(contextGraphId, memberProof), 'publicDefinition'],
-    ] as const) {
-      const result = await dependencies.store.query(query, {
-        source: `agent.contextGraph.confirmedMeta.approvedMember.${source}`,
-      });
-      if (result.type === 'boolean' && result.value === true) return true;
-    }
-    return false;
-  }
-
-  const authoritativeDefinitionResult = await dependencies.store.query(
-    buildAuthoritativePrivateMetaAskQuery(
-      contextGraphId,
-      approvedAgentAddress
-        ? {
-            approvedAgentAddress,
-            expectedDelegateePeerId: dependencies.peerId,
-            expectedDelegateeOpKey,
-          }
-        : undefined,
-    ),
-    { source: 'agent.contextGraph.confirmedMeta.privateDefinition' },
+  const authoritativeDefinition = await findAuthoritativeDefinition(
+    dependencies,
+    contextGraphId,
+    { privateMemberProof: memberProof },
+    'agent.contextGraph.confirmedMeta',
   );
+  if (authoritativeDefinition === 'private') return true;
   if (
-    authoritativeDefinitionResult.type === 'boolean'
-    && authoritativeDefinitionResult.value === true
-  ) {
-    return true;
-  }
-
-  const authoritativePublicDefinitionResult = await dependencies.store.query(
-    buildAuthoritativePublicMetaAskQuery(contextGraphId),
-    { source: 'agent.contextGraph.confirmedMeta.publicDefinition' },
-  );
-  if (
-    authoritativePublicDefinitionResult.type === 'boolean'
-    && authoritativePublicDefinitionResult.value === true
+    authoritativeDefinition === 'public'
     && (
       !hasUnregisteredPlaceholder
       || input.rejectUnregisteredPlaceholder !== true
@@ -179,4 +151,51 @@ export async function confirmContextGraphMetadataV1(
     { source: 'agent.contextGraph.confirmedMeta.ontologyDeclaration' },
   );
   return ontologyResult.type === 'boolean' && ontologyResult.value === true;
+}
+
+/** This node's approved-member proof for the graph, when it holds an approval. */
+async function resolveApprovedMemberProof(
+  dependencies: ContextGraphMetadataConfirmationDependencies,
+  contextGraphId: string,
+): Promise<ApprovedMemberProof | undefined> {
+  const approvedAgentAddress = dependencies.localApprovedAgentByContextGraph.get(contextGraphId);
+  if (!approvedAgentAddress) return undefined;
+  let expectedDelegateeOpKey: string | undefined;
+  try {
+    expectedDelegateeOpKey = await inferAdapterPublisherAddress(dependencies.chain);
+  } catch {
+    // The libp2p peer binding remains sufficient when no op-key is exposed.
+  }
+  return {
+    approvedAgentAddress,
+    expectedDelegateePeerId: dependencies.peerId,
+    expectedDelegateeOpKey,
+  };
+}
+
+/**
+ * The canonical stored-definition proofs, shared by every confirmation
+ * purpose: the complete private definition first, then the unambiguous public
+ * one, each with the member proof its caller requires. Returns the definition
+ * that matched.
+ */
+async function findAuthoritativeDefinition(
+  dependencies: ContextGraphMetadataConfirmationDependencies,
+  contextGraphId: string,
+  proofs: {
+    readonly privateMemberProof?: ApprovedMemberProof;
+    readonly publicMemberProof?: ApprovedMemberProof;
+  },
+  sourcePrefix: string,
+): Promise<'private' | 'public' | null> {
+  for (const [definition, query] of [
+    ['private', buildAuthoritativePrivateMetaAskQuery(contextGraphId, proofs.privateMemberProof)],
+    ['public', buildAuthoritativePublicMetaAskQuery(contextGraphId, proofs.publicMemberProof)],
+  ] as const) {
+    const result = await dependencies.store.query(query, {
+      source: `${sourcePrefix}.${definition}Definition`,
+    });
+    if (result.type === 'boolean' && result.value === true) return definition;
+  }
+  return null;
 }

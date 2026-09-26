@@ -15,8 +15,9 @@
  * AND consult the agent's probe; remove the oracle option from
  * `getOrCreateSharedMemoryHandler` and both assertions fail. The negative
  * cases pin the other direction (#2827 review): without a public proof — or
- * with an accepted owner-signed public snapshot for a name the live chain now
- * shows registered private — the same write is rejected and nothing is stored.
+ * with an accepted owner-signed public snapshot for a name the finalized index
+ * now shows registered private — the same write is rejected and nothing is
+ * stored.
  */
 import { describe, it, expect, afterEach } from 'vitest';
 import { ethers } from 'ethers';
@@ -53,7 +54,11 @@ interface AgentInternals {
 type ProbeOverrides = {
   isContextGraphPublicOnChain?: (cgId: string, ctx: unknown) => Promise<boolean>;
   hasAcceptedRfc64PublicUnregisteredAuthorityV1?: (cgId: string) => boolean;
-  resolveOnChainAccessPolicyState?: (cgId: string, ctx: unknown) => Promise<0 | 1 | 'unregistered' | 'unknown'>;
+  resolveRegisteredContextGraphAuthority?: (cgId: string, options: unknown) => Promise<
+    | { kind: 'unregistered' }
+    | { kind: 'public'; onChainId: bigint }
+    | { kind: 'private'; onChainId: bigint; participantAgents: string[] }
+  >;
 };
 
 let agent: DKGAgent | undefined;
@@ -146,10 +151,15 @@ describe('agent wires publicAccessPolicyOracle into SharedMemoryHandler', () => 
 
   it('rejects the plaintext write when an accepted owner-signed public snapshot is outlived by a private registration', async () => {
     // The catalog has not reconciled yet, so the old public snapshot is still
-    // accepted, but the live chain already shows the name registered private.
+    // accepted, but the finalized index already shows the name registered
+    // private: the registry's answer wins.
     const { outcome, stored } = await deliverSignedPlaintext({
       hasAcceptedRfc64PublicUnregisteredAuthorityV1: () => true,
-      resolveOnChainAccessPolicyState: async () => 1,
+      resolveRegisteredContextGraphAuthority: async () => ({
+        kind: 'private',
+        onChainId: 7n,
+        participantAgents: [],
+      }),
       isContextGraphPublicOnChain: async () => false,
     });
 

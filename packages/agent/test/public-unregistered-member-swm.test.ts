@@ -9,9 +9,9 @@
 //     and switched SWM to sender-key encryption on a public graph.
 // These tests pin the corrected decisions on the crypto side, and that they
 // stay fail-closed for accepted PRIVATE policies, for graphs without an
-// accepted policy, and for a name that was registered after the owner-signed
-// public snapshot was accepted. The curator snapshot acceptance is covered in
-// cg-resolve-refresh.test.ts.
+// accepted policy, and for a name the finalized index shows registered after
+// the owner-signed public snapshot was accepted. The curator snapshot
+// acceptance is covered in cg-resolve-refresh.test.ts.
 
 import { describe, expect, it, vi } from 'vitest';
 
@@ -23,28 +23,48 @@ const MEMBER = '0x2222222222222222222222222222222222222222';
 const STALE_MEMBER = '0x3333333333333333333333333333333333333333';
 const MEMBER_KEY = `0x${'11'.repeat(32)}`;
 
-type LiveState = 0 | 1 | 'unregistered' | 'unknown';
-
 interface RegisteredAuthorityOptions {
   allowAcceptedRfc64FinalizedAbsence?: boolean;
+  authorityReadMode?: string;
 }
 
+/** What the finalized authority index reports for the name. */
+type IndexState =
+  | { kind: 'absent' }
+  /** The creator's own graph before its registration commits. */
+  | { kind: 'local-first' }
+  | { kind: 'public' }
+  | { kind: 'private'; participantAgents: string[] }
+  | { kind: 'unavailable' };
+
 /**
- * Mirrors the registry for a node that did not create the graph: exact
- * finalized name absence is "unregistered" only when the caller accepts it.
+ * Mirrors the registry: exact finalized name absence is "unregistered" only
+ * when the caller accepts it, the creator's graph is local-first until its own
+ * registration commits, and a registration the index shows always wins.
  */
-function nonCreatorRegistry() {
+function registryOver(index: IndexState) {
   const calls: RegisteredAuthorityOptions[] = [];
-  const resolve = async (_contextGraphId: string, options: RegisteredAuthorityOptions = {}) => {
+  const resolve = vi.fn(async (_contextGraphId: string, options: RegisteredAuthorityOptions = {}) => {
     calls.push(options);
-    return options.allowAcceptedRfc64FinalizedAbsence === true
-      ? { kind: 'unregistered' as const }
-      : {
-          kind: 'unavailable' as const,
-          reason: 'finalized-name-absence-unaccepted' as const,
-          detail: 'finalized name absence has no accepted owner-signed unregistered authority',
-        };
-  };
+    switch (index.kind) {
+      case 'local-first':
+        return { kind: 'unregistered' as const };
+      case 'absent':
+        return options.allowAcceptedRfc64FinalizedAbsence === true
+          ? { kind: 'unregistered' as const }
+          : {
+              kind: 'unavailable' as const,
+              reason: 'finalized-name-absence-unaccepted' as const,
+              detail: 'finalized name absence has no accepted owner-signed unregistered authority',
+            };
+      case 'public':
+        return { kind: 'public' as const, onChainId: 7n };
+      case 'private':
+        return { kind: 'private' as const, onChainId: 7n, participantAgents: index.participantAgents };
+      case 'unavailable':
+        return { kind: 'unavailable' as const, reason: 'chain-access-policy-unavailable' as const };
+    }
+  });
   return { resolve, calls };
 }
 
@@ -52,11 +72,12 @@ function joinedMember(options: {
   acceptedUnregistered: boolean;
   acceptedPublic?: boolean;
   allowedAgents?: string[];
-  liveState?: LiveState | Error;
-  creator?: boolean;
+  index?: IndexState;
+  registryError?: Error;
   publicOnChain?: boolean;
 }) {
-  const registry = nonCreatorRegistry();
+  const registry = registryOver(options.index ?? { kind: 'absent' });
+  if (options.registryError) registry.resolve.mockRejectedValue(options.registryError);
   const store = { query: vi.fn(async () => ({ type: 'bindings' as const, bindings: [] })) };
   const memberRecord = { agentAddress: MEMBER, privateKey: MEMBER_KEY };
   const getCgMeta = vi.fn(async () => ({
@@ -64,37 +85,30 @@ function joinedMember(options: {
     participantAgents: [],
     revokedAgents: [],
   }));
-  const resolveOnChainAccessPolicyState = vi.fn(async (): Promise<LiveState> => {
-    const state = options.liveState ?? 'unregistered';
-    if (state instanceof Error) throw state;
-    return state;
-  });
   const isContextGraphPublicOnChain = vi.fn(async () => options.publicOnChain === true);
   const warn = vi.fn();
   const agent = {
     resolveContextGraphAgentGateAuthority:
       WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
-    resolveSwmAcceptedPublicPolicyState: WorkspaceCryptoMethods.prototype.resolveSwmAcceptedPublicPolicyState,
+    resolveSwmRegisteredAuthority: WorkspaceCryptoMethods.prototype.resolveSwmRegisteredAuthority,
     isContextGraphSwmPublic: WorkspaceCryptoMethods.prototype.isContextGraphSwmPublic,
     resolveRegisteredContextGraphAuthority: registry.resolve,
     // A public graph has no RFC-64 private roster.
     resolveRfc64PrivateReadRosterV1: () => undefined,
     getCgMeta,
+    getContextGraphAllowedPeers: async () => null,
     subscribedContextGraphs: new Map(),
     hasAcceptedRfc64UnregisteredAuthorityV1: () => options.acceptedUnregistered,
     hasAcceptedRfc64PublicUnregisteredAuthorityV1: () => (
       options.acceptedUnregistered && options.acceptedPublic === true
     ),
-    localContextGraphProvenance: { hasLocalCreate: () => options.creator === true },
-    isLocalFirstUnregisteredContextGraph: async () => options.creator === true,
-    resolveOnChainAccessPolicyState,
     isContextGraphPublicOnChain,
     log: { warn },
     store,
     localAgents: new Map([[MEMBER, memberRecord]]),
     getWorkspaceGossipSigningAgent: () => memberRecord,
   };
-  return { agent, registry, store, getCgMeta, resolveOnChainAccessPolicyState, isContextGraphPublicOnChain, warn };
+  return { agent, registry, store, getCgMeta, isContextGraphPublicOnChain, warn };
 }
 
 const resolveRecipients = (agent: unknown) => WorkspaceCryptoMethods.prototype
@@ -195,64 +209,51 @@ describe('SWM authority for a joined member of an unregistered graph (#2827)', (
     ]);
   });
 
-  // #2831 review: the finalized index can still report the name absent after
-  // a registration landed, so an accepted public snapshot opens these gates
-  // only while the live chain confirms the name is unregistered.
-  const staleSnapshotLiveStates: Array<[string, LiveState | Error]> = [
-    ['registered private', 1],
-    ['registered public', 0],
-    ['unknown', 'unknown'],
-    ['unreadable', new Error('rpc down')],
-  ];
+  // #2831 review: an accepted public snapshot only lets exact name absence
+  // count as unregistered. A registration the finalized index shows always
+  // wins, so a member the private roster dropped gets neither the gate nor
+  // recovery through the old allowlist.
+  it('uses the registered private roster, not the old allowlist, once the index shows a private registration', async () => {
+    const { agent, getCgMeta } = joinedMember({
+      acceptedUnregistered: true,
+      acceptedPublic: true,
+      allowedAgents: [CURATOR, STALE_MEMBER],
+      index: { kind: 'private', participantAgents: [CURATOR] },
+    });
 
-  it.each(staleSnapshotLiveStates)(
-    'denies member recovery to the old allowlist when the live name is %s',
-    async (_label, liveState) => {
-      const { agent, registry, getCgMeta } = joinedMember({
-        acceptedUnregistered: true,
-        acceptedPublic: true,
-        allowedAgents: [CURATOR, STALE_MEMBER],
-        liveState,
-      });
+    const gate = await WorkspaceCryptoMethods.prototype.getContextGraphAgentGateAddresses.call(
+      agent as never,
+      CG,
+    );
+    const recovery = await WorkspaceCryptoMethods.prototype.getMemberRecoveryGate.call(
+      agent as never,
+      CG,
+    );
 
-      const gate = await WorkspaceCryptoMethods.prototype.getMemberRecoveryGate.call(
-        agent as never,
-        CG,
-      );
+    expect(gate).toEqual([CURATOR]);
+    expect(recovery).toEqual([CURATOR]);
+    expect(getCgMeta).not.toHaveBeenCalled();
+  });
 
-      expect(gate).toBeNull();
-      expect(getCgMeta).not.toHaveBeenCalled();
-      expect(registry.calls).toEqual([
-        expect.objectContaining({ allowAcceptedRfc64FinalizedAbsence: false }),
-      ]);
-    },
-  );
+  it.each([
+    ['registered public', { kind: 'public' } as const],
+    ['unavailable', { kind: 'unavailable' } as const],
+  ])('denies member recovery through the old allowlist when the index shows the name %s', async (_label, index) => {
+    const { agent, getCgMeta } = joinedMember({
+      acceptedUnregistered: true,
+      acceptedPublic: true,
+      allowedAgents: [CURATOR, STALE_MEMBER],
+      index,
+    });
 
-  it.each(staleSnapshotLiveStates)(
-    'keeps the agent gate unavailable when the live name is %s',
-    async (_label, liveState) => {
-      const { agent, registry, getCgMeta } = joinedMember({
-        acceptedUnregistered: true,
-        acceptedPublic: true,
-        allowedAgents: [CURATOR, STALE_MEMBER],
-        liveState,
-      });
+    const recovery = await WorkspaceCryptoMethods.prototype.getMemberRecoveryGate.call(
+      agent as never,
+      CG,
+    );
 
-      const authority = await WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority.call(
-        agent as never,
-        CG,
-      );
-
-      expect(authority).toEqual(expect.objectContaining({
-        kind: 'unavailable',
-        reason: 'finalized-name-absence-unaccepted',
-      }));
-      expect(getCgMeta).not.toHaveBeenCalled();
-      expect(registry.calls).toEqual([
-        expect.objectContaining({ allowAcceptedRfc64FinalizedAbsence: false }),
-      ]);
-    },
-  );
+    expect(recovery).toBeNull();
+    expect(getCgMeta).not.toHaveBeenCalled();
+  });
 
   it('denies member recovery without an accepted owner-signed public policy, without reading local metadata', async () => {
     const { agent, registry, getCgMeta } = joinedMember({
@@ -275,11 +276,10 @@ describe('SWM authority for a joined member of an unregistered graph (#2827)', (
 
 describe('SWM encryption on an unregistered public graph (#2827)', () => {
   it('stays plaintext while the name is still unregistered, despite the join allowlist', async () => {
-    const { agent, registry, store, resolveOnChainAccessPolicyState } = joinedMember({
+    const { agent, registry, store } = joinedMember({
       acceptedUnregistered: true,
       acceptedPublic: true,
       allowedAgents: [CURATOR, MEMBER],
-      liveState: 'unregistered',
     });
 
     const resolution = await resolveRecipients(agent);
@@ -287,46 +287,58 @@ describe('SWM encryption on an unregistered public graph (#2827)', () => {
     expect(resolution).toEqual({ requiresEncryption: false, recipients: [] });
     // The store resolver treats any allowlist as a read gate; it must not run.
     expect(store.query).not.toHaveBeenCalled();
-    expect(resolveOnChainAccessPolicyState).toHaveBeenCalledTimes(1);
+    // One registered-authority read decides it; there is no second lookup.
     expect(registry.calls).toEqual([
       expect.objectContaining({ allowAcceptedRfc64FinalizedAbsence: true }),
     ]);
   });
 
-  it('lets the creator decide plaintext locally, without a chain read', async () => {
-    // A graph stays local-first until its own creator registers it; SWM must
-    // not depend on the chain meanwhile.
-    const { agent, store, resolveOnChainAccessPolicyState } = joinedMember({
+  it('keeps the creator on plaintext while its graph is local-first, whatever the accepted absence', async () => {
+    // A graph stays local-first in the registry until its own creator
+    // registers it; SWM must not depend on the chain meanwhile.
+    const { agent, store } = joinedMember({
       acceptedUnregistered: true,
       acceptedPublic: true,
-      creator: true,
-      liveState: new Error('chain unreachable'),
+      index: { kind: 'local-first' },
     });
 
     const resolution = await resolveRecipients(agent);
 
     expect(resolution).toEqual({ requiresEncryption: false, recipients: [] });
-    expect(resolveOnChainAccessPolicyState).not.toHaveBeenCalled();
     expect(store.query).not.toHaveBeenCalled();
   });
 
-  it('fails closed when the name was registered private after the public snapshot was accepted', async () => {
-    // The finalized index still reports the name absent, but the stale public
-    // snapshot no longer lets that absence count as unregistered.
-    const { agent, store, registry } = joinedMember({
+  it('keeps the store roster for a local-first graph without an accepted public policy', async () => {
+    // Only the accepted owner-signed PUBLIC policy turns an unregistered
+    // answer into plaintext; any other unregistered graph keeps the store
+    // resolver's allowlist-aware decision.
+    const { agent, store } = joinedMember({
+      acceptedUnregistered: false,
+      index: { kind: 'local-first' },
+    });
+
+    await resolveRecipients(agent);
+
+    expect(store.query).toHaveBeenCalled();
+  });
+
+  it('closes plaintext once the registry reports a private registration, for creator and member alike', async () => {
+    // #2831 review: an accepted public snapshot never outvotes a registration.
+    // The creator leaves its local-first answer inside the registry the moment
+    // its own registration commits, and then gets this same answer.
+    const { agent, registry } = joinedMember({
       acceptedUnregistered: true,
       acceptedPublic: true,
       allowedAgents: [CURATOR, MEMBER],
-      liveState: 1,
+      index: { kind: 'private', participantAgents: [CURATOR] },
     });
 
-    await expect(resolveRecipients(agent)).rejects.toMatchObject({
-      reason: 'finalized-name-absence-unaccepted',
-    });
-    expect(store.query).not.toHaveBeenCalled();
-    expect(registry.calls).toEqual([
-      expect.objectContaining({ allowAcceptedRfc64FinalizedAbsence: false }),
-    ]);
+    // Encryption to the registered roster is required: its key lookup runs
+    // (and finds no key in this fixture's store) instead of plaintext.
+    await expect(resolveRecipients(agent)).rejects.toThrow(/Missing public encryption key/);
+    await expect(WorkspaceCryptoMethods.prototype.isContextGraphSwmPublic.call(agent as never, CG))
+      .resolves.toBe(false);
+    expect(registry.resolve).toHaveBeenCalledTimes(2);
   });
 
   it('gives a stale local member no key for an accepted PRIVATE graph', async () => {
@@ -365,7 +377,7 @@ describe('SWM encryption on an unregistered public graph (#2827)', () => {
 
 describe('isContextGraphSwmPublic: one plaintext predicate for sender and receiver (#2827)', () => {
   it('is exactly the on-chain probe without an accepted owner-signed public policy', async () => {
-    const { agent, isContextGraphPublicOnChain, resolveOnChainAccessPolicyState } = joinedMember({
+    const { agent, isContextGraphPublicOnChain, registry } = joinedMember({
       acceptedUnregistered: false,
       publicOnChain: true,
     });
@@ -373,31 +385,35 @@ describe('isContextGraphSwmPublic: one plaintext predicate for sender and receiv
     await expect(WorkspaceCryptoMethods.prototype.isContextGraphSwmPublic.call(agent as never, CG))
       .resolves.toBe(true);
     expect(isContextGraphPublicOnChain).toHaveBeenCalledTimes(1);
-    expect(resolveOnChainAccessPolicyState).not.toHaveBeenCalled();
+    expect(registry.resolve).not.toHaveBeenCalled();
   });
 
-  it('answers public for a registered-public name even with an accepted owner-signed policy', async () => {
-    const { agent } = joinedMember({ acceptedUnregistered: true, acceptedPublic: true, liveState: 0 });
+  it.each([
+    ['absent', { kind: 'absent' } as const, true],
+    ['registered public', { kind: 'public' } as const, true],
+    ['registered private', { kind: 'private', participantAgents: [CURATOR] } as const, false],
+    ['unavailable', { kind: 'unavailable' } as const, false],
+  ])('with an accepted public policy, answers from the index when the name is %s', async (_label, index, expected) => {
+    const { agent, registry } = joinedMember({ acceptedUnregistered: true, acceptedPublic: true, index });
 
     await expect(WorkspaceCryptoMethods.prototype.isContextGraphSwmPublic.call(agent as never, CG))
-      .resolves.toBe(true);
+      .resolves.toBe(expected);
+    // The plaintext bit reads the finalized projection, like recipient selection.
+    expect(registry.calls).toEqual([expect.objectContaining({
+      allowAcceptedRfc64FinalizedAbsence: true,
+      authorityReadMode: 'finalized-index-or-live',
+    })]);
   });
 
-  it('lets a later private registration override the accepted public snapshot', async () => {
-    const { agent } = joinedMember({ acceptedUnregistered: true, acceptedPublic: true, liveState: 1 });
+  it('fails closed, and says so, when the registered authority read throws', async () => {
+    const { agent, warn } = joinedMember({
+      acceptedUnregistered: true,
+      acceptedPublic: true,
+      registryError: new Error('index unavailable'),
+    });
 
     await expect(WorkspaceCryptoMethods.prototype.isContextGraphSwmPublic.call(agent as never, CG))
       .resolves.toBe(false);
-  });
-
-  it('fails closed when the chain cannot confirm the name is unregistered', async () => {
-    const unknown = joinedMember({ acceptedUnregistered: true, acceptedPublic: true, liveState: 'unknown' });
-    await expect(WorkspaceCryptoMethods.prototype.isContextGraphSwmPublic.call(unknown.agent as never, CG))
-      .resolves.toBe(false);
-
-    const failing = joinedMember({ acceptedUnregistered: true, acceptedPublic: true, liveState: new Error('rpc down') });
-    await expect(WorkspaceCryptoMethods.prototype.isContextGraphSwmPublic.call(failing.agent as never, CG))
-      .resolves.toBe(false);
-    expect(failing.warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 });

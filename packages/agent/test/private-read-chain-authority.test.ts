@@ -1599,7 +1599,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     const refreshMeta = vi.spyOn(agent, 'refreshMetaFromCurator')
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(true);
-    const hasConfirmedMeta = vi.spyOn(agent, 'hasConfirmedMetaState').mockResolvedValue(true);
+    const hasConfirmedMeta = vi.spyOn(agent, 'hasConfirmedApprovedMemberMetaState').mockResolvedValue(true);
     const readAuthority = vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockResolvedValue({
       outcome: 'allowed',
       source: 'legacy-local',
@@ -1630,7 +1630,7 @@ describe('private read authorization uses the on-chain participant roster', () =
       }),
     }));
     // Recovery completes the join only on metadata that proves this member.
-    expect(hasConfirmedMeta).toHaveBeenCalledWith(contextGraphId, { requireApprovedMemberProof: true });
+    expect(hasConfirmedMeta).toHaveBeenCalledWith(contextGraphId);
     expect(readAuthority).toHaveBeenCalledWith(contextGraphId, {
       allowSubscriptionFallback: false,
     });
@@ -1675,8 +1675,8 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
 
     vi.spyOn(agent, 'refreshMetaFromCurator').mockResolvedValue(true);
-    vi.spyOn(agent, 'hasConfirmedMetaState').mockResolvedValue(true);
-    vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockResolvedValue({
+    vi.spyOn(agent, 'hasConfirmedApprovedMemberMetaState').mockResolvedValue(true);
+    const readAuthority = vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockResolvedValue({
       outcome: decision.outcome,
       source: 'registered-chain',
       reason: `test-${decision.outcome}`,
@@ -1689,6 +1689,8 @@ describe('private read authorization uses the on-chain participant roster', () =
 
     await agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
 
+    // The member proof held, so this is the post-refresh authority decision.
+    expect(readAuthority).toHaveBeenCalledTimes(1);
     expect(refreshFlags).not.toHaveBeenCalled();
     expect(subscribe).not.toHaveBeenCalled();
     expect(persistMembership).not.toHaveBeenCalled();

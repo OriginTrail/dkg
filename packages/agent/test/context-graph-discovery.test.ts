@@ -3767,6 +3767,9 @@ describe('runImmediatePostApprovalSync', () => {
       return outcome;
     };
     (a as any).hasConfirmedMetaState = async () => metaConfirmed;
+    // A refresh that succeeded stored the member proof it required, which is
+    // what join completion confirms.
+    (a as any).hasConfirmedApprovedMemberMetaState = async () => metaConfirmed;
     (a as any).refreshMetaSyncedFlags = async () => undefined;
     (a as any).runCatchupOverPeers = async (
       cg: string,
