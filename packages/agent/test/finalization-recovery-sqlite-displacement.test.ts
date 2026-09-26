@@ -6,21 +6,34 @@ import {
   type SqliteFinalizationRecoveryStoreOptions,
 } from '../src/finalization-recovery-sqlite-store.js';
 import type { FinalizationRecoveryFailureCode } from '../src/finalization-recovery-store.js';
-import { evidence, received, temporaryDirectory } from './finalization-recovery-sqlite-test-helpers.js';
+import {
+  RAW,
+  evidence,
+  received,
+  temporaryDirectory,
+} from './finalization-recovery-sqlite-test-helpers.js';
 
 const MINUTE = 60_000;
 const PUBLISHER = '12D3KooWPublisher';
 
 type Store = Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>>;
 
-function entry(index: number, overrides: { sourcePeerId?: string; contextGraphId?: string } = {}) {
+function entry(
+  index: number,
+  overrides: { sourcePeerId?: string; contextGraphId?: string; rawMessage?: Uint8Array } = {},
+) {
   return received({
     key: `entry-${index}`,
     sourcePeerId: overrides.sourcePeerId ?? PUBLISHER,
     contextGraphId: overrides.contextGraphId ?? 'graph',
     txHash: `0x${index.toString(16).padStart(2, '0').repeat(32)}`,
     ual: `did:dkg:base:84532/0x1111111111111111111111111111111111111111/${index}`,
+    rawMessage: overrides.rawMessage ?? RAW,
   });
+}
+
+function bytes(length: number): Uint8Array {
+  return Uint8Array.from({ length }, (_, index) => index + 1);
 }
 
 async function withStore(
@@ -31,7 +44,10 @@ async function withStore(
   const displaced: FinalizationRecoveryDisplacement[] = [];
   const store = await openSqliteFinalizationRecoveryStore(directory, {
     ...options,
-    onDisplaced: (displacement) => displaced.push(displacement),
+    onDisplaced: (displacement) => {
+      displaced.push(displacement);
+      options.onDisplaced?.(displacement);
+    },
   });
   try {
     await run(store, displaced);
@@ -215,6 +231,84 @@ describe('SQLite finalization recovery displacement', () => {
     });
   });
 
+  it('parks as many stable failures as the arriving envelope\'s bytes require', async () => {
+    const receivedAt = 1_000_000;
+    let now = receivedAt;
+    await withStore({ maxTotalBytes: 10, now: () => now }, async (store, displaced) => {
+      for (const index of [1, 2, 3]) {
+        await store.receive(entry(index, { rawMessage: bytes(3) }));
+        now += MINUTE;
+      }
+      for (const index of [1, 2, 3]) await fail(store, `entry-${index}`, 3);
+      now += 5 * MINUTE;
+
+      // Nine live bytes and five new ones fit under ten only after two parkings.
+      await expect(store.receive(entry(4, { rawMessage: bytes(5) })))
+        .resolves.toMatchObject({ status: 'inserted' });
+
+      expect(displaced.map(({ key, admittedKey }) => ({ key, admittedKey }))).toEqual([
+        { key: 'entry-1', admittedKey: 'entry-4' },
+        { key: 'entry-2', admittedKey: 'entry-4' },
+      ]);
+      await expect(store.get('entry-3')).resolves.toMatchObject({ state: 'RECEIVED' });
+      expect(await store.health()).toMatchObject({ deferredEntries: 2, livePayloadBytes: 8 });
+
+      await store.transition('entry-4', 0, 'SUPERSEDED');
+      await expect(store.promotePending(2)).resolves.toBe(2);
+      await expect(store.get('entry-1')).resolves.toMatchObject({ createdAt: receivedAt });
+      await expect(store.get('entry-2')).resolves.toMatchObject({ createdAt: receivedAt + MINUTE });
+    });
+  });
+
+  it.each([
+    {
+      name: 'the stable failures cannot free enough bytes',
+      stableFailures: 2,
+      healthy: 1,
+      entryBytes: 3,
+      arrivalBytes: 8,
+    },
+    {
+      name: 'freeing the bytes would park more than eight entries',
+      stableFailures: 10,
+      healthy: 0,
+      entryBytes: 1,
+      arrivalBytes: 9,
+    },
+  ] as const)('leaves the inbox unchanged when $name', async ({
+    stableFailures,
+    healthy,
+    entryBytes,
+    arrivalBytes,
+  }) => {
+    let now = 1_000_000;
+    await withStore({ maxTotalBytes: 10, now: () => now }, async (store, displaced) => {
+      const live = stableFailures + healthy;
+      for (let index = 1; index <= live; index += 1) {
+        await store.receive(entry(index, { rawMessage: bytes(entryBytes) }));
+      }
+      for (let index = 1; index <= stableFailures; index += 1) {
+        await fail(store, `entry-${index}`, 3);
+      }
+      now += 5 * MINUTE;
+
+      await expect(store.receive(entry(live + 1, { rawMessage: bytes(arrivalBytes) })))
+        .resolves.toEqual({ status: 'pending' });
+
+      expect(displaced).toEqual([]);
+      for (let index = 1; index <= live; index += 1) {
+        await expect(store.get(`entry-${index}`)).resolves.toMatchObject({
+          state: 'RECEIVED',
+          failureStreak: index <= stableFailures ? 3 : 0,
+        });
+      }
+      expect(await store.health()).toMatchObject({
+        deferredEntries: 1,
+        livePayloadBytes: live * entryBytes,
+      });
+    });
+  });
+
   it('frees a Context Graph limit only with an entry from that graph', async () => {
     let now = 1_000_000;
     await withStore({ maxPerContextGraph: 2, now: () => now }, async (store, displaced) => {
@@ -248,6 +342,25 @@ describe('SQLite finalization recovery displacement', () => {
       now += 5 * MINUTE;
 
       await expect(store.receive(entry(4, { sourcePeerId: PUBLISHER })))
+        .resolves.toMatchObject({ status: 'inserted' });
+
+      expect(displaced.map(({ key }) => key)).toEqual(['entry-2']);
+      await expect(store.get('entry-1')).resolves.toMatchObject({ state: 'RECEIVED' });
+    });
+  });
+
+  it('parks a stable failure from the arriving graph before an older one from another graph', async () => {
+    let now = 1_000_000;
+    await withStore({ maxEntries: 2, now: () => now }, async (store, displaced) => {
+      await store.receive(entry(1, { sourcePeerId: 'peer-a', contextGraphId: 'other-graph' }));
+      now += MINUTE;
+      await store.receive(entry(2, { sourcePeerId: 'peer-b', contextGraphId: 'graph' }));
+      await fail(store, 'entry-1', 3);
+      await fail(store, 'entry-2', 3);
+      now += 5 * MINUTE;
+
+      // Only the total limit is full, so either entry would make room.
+      await expect(store.receive(entry(3, { sourcePeerId: 'peer-c', contextGraphId: 'graph' })))
         .resolves.toMatchObject({ status: 'inserted' });
 
       expect(displaced.map(({ key }) => key)).toEqual(['entry-2']);
@@ -304,6 +417,31 @@ describe('SQLite finalization recovery displacement', () => {
 
       await expect(store.get('entry-1')).resolves.toMatchObject({ state: 'RECEIVED' });
       expect(displaced).toEqual([]);
+    });
+  });
+
+  it('admits and parks even when the displacement observer throws', async () => {
+    let now = 1_000_000;
+    await withStore({
+      maxPerPeer: 1,
+      now: () => now,
+      onDisplaced: () => {
+        throw new Error('logger failed');
+      },
+    }, async (store, displaced) => {
+      await store.receive(entry(1));
+      await fail(store, 'entry-1', 3);
+      now += 5 * MINUTE;
+
+      await expect(store.receive(entry(2))).resolves.toMatchObject({ status: 'inserted' });
+
+      expect(displaced.map(({ key }) => key)).toEqual(['entry-1']);
+      await expect(store.get('entry-1')).resolves.toBeUndefined();
+      await expect(store.get('entry-2')).resolves.toMatchObject({ state: 'RECEIVED' });
+      expect(await store.health()).toMatchObject({ deferredEntries: 1 });
+      await store.transition('entry-2', 0, 'SUPERSEDED');
+      await expect(store.promotePending(1)).resolves.toBe(1);
+      await expect(store.get('entry-1')).resolves.toMatchObject({ state: 'RECEIVED' });
     });
   });
 });
