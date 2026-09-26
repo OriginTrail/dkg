@@ -10,7 +10,9 @@ shared `ontology` graph that bound without proof from this node's chain. It
 also fixes a fingerprint mismatch that kept received assets with escaped
 non-ASCII text out of Verifiable Memory, a startup that could hold a node's
 API for minutes while it re-checked persisted subscriptions on chain,
-main-thread pauses that grew with a node's peer traffic and uptime, and a
+main-thread pauses that grew with a node's peer traffic and uptime, RFC-64
+catalog verification whose CPU cost grew with the square of a bucket's rows,
+a publisher's finalizations held behind its own failing inbox entries, and a
 managed Oxigraph that outlived a killed worker and held the store.
 Edges now reach holders of public graphs they are not connected to, and
 auto-update applies on nodes that restart often. **No smart-contract, ABI,
@@ -81,6 +83,20 @@ wire-protocol or deployment registry changes are required.**
   receiver), before it is persisted and fingerprinted. The fingerprint itself
   is unchanged, so stored records and peers on other versions agree as
   before.
+- **A publisher's finalizations no longer wait behind its own entries that
+  keep failing** (#2814): the finalization inbox holds at most 32 live entries
+  per publisher, 64 per Context Graph and 128 in total. An entry whose local
+  copy cannot be prepared (`workspace preparation is unavailable`) keeps its
+  slot for its whole seven-day retry window. Once a publisher had 32 of them,
+  every later finalization from that publisher went to the deferred spool,
+  including ones that would verify at once, and its Verifiable Memory
+  promotion waited for chain reconciliation. This happened in production.
+  Now a newly received finalization that finds no room parks the oldest entry
+  that counts against the full limit, has failed that way at least three
+  times in a row, and is at least five minutes old. The parked entry goes
+  back to the deferred spool with its receipt time, publisher and expiry.
+  It is admitted again when there is room. The caps and the database schema
+  are unchanged, so a node can still roll back.
 - **Persisted subscriptions no longer hold a node's start for minutes**
   (#2815): on start, a node checked the read authority of every persisted
   Context Graph subscription on chain, one at a time, and opened its API only
@@ -112,6 +128,15 @@ wire-protocol or deployment registry changes are required.**
   settles. A multi-path send cancels its losing paths as soon as the winner
   answers, including paths still opening their stream, and a retried send
   removes the abort listener its backoff added.
+- **RFC-64 catalog verification no longer grows with the square of a
+  bucket's rows** (#2812): producing, receiving or reloading a catalog
+  successor checked each row's authorship by re-verifying the bucket's whole
+  signed closure (delegation, head, directory path and bucket signature) once
+  per row. A successor of N rows cost N whole-bucket verifications, so a
+  replay that grows a catalog one asset at a time cost about N³. In a 90 s
+  CPU profile of a replay on 10.0.19, 26.5 s went there. The closure is now
+  verified once per bucket, then each row: all rows of a 256-row bucket
+  verify in 0.15 s instead of 19.4 s.
 - **A worker killed by the supervisor no longer leaves managed Oxigraph
   holding the store lock** (#2775): after five failed liveness probes the supervisor
   SIGKILLs its worker. A directly launched `oxigraph serve` (macOS, or any node
@@ -226,6 +251,14 @@ wire-protocol or deployment registry changes are required.**
   installs already resolve a fixed 8.0.x (#2793).
 - The CLI and MCP clients share one daemon request deadline policy from
   `@origintrail-official/dkg-core` (#2792).
+- A 503 for unavailable Context Graph read authority now says which
+  dependency failed (#2834). For each such refusal, the daemon logs one line
+  that names the authority source, the reason, and the dependency (`store`,
+  `chain`, `local-state` or `unknown`). The line is logged under the
+  operation ID the response returns in its `x-dkg-operation-id` header. The
+  first refusal with a given attribution in a window logs at warn, and
+  repeats log at info. Browser clients can read that header and
+  `Retry-After`.
 
 ## [10.0.19] - 2026-09-25
 
