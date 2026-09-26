@@ -636,6 +636,25 @@ wire-protocol or deployment registry changes are required.**
   one `[warn] Event loop blocked: ...` line, at most once every 10 minutes,
   and the next warning counts the windows it skipped.
 
+- **PCA agents can register open Context Graphs without liquid TRAC**
+  (#2735): the registration-deposit waiver applied only to graphs whose
+  curator is a PCA, and an open graph cannot have one, so a PCA agent paid
+  the 100 TRAC deposit from its wallet for every open graph (and could not
+  register one with no TRAC). The `ContextGraphs` facade now waives the
+  deposit for any graph without a curator PCA (open, or curated by an EOA
+  or Safe) against the PCA the signer is registered to as an agent, under
+  the same commitment floor and quota. Graphs with a curator PCA are
+  unchanged.
+
+### Deployment
+
+- **Contract source changes** (`ContextGraphs` 10.0.5, #2735); ABIs are
+  unchanged. Redeploy the facade and register it through
+  `Hub.setAndReinitializeContracts`, which must also re-initialize
+  `KnowledgeAssetsLifecycle` because it caches the facade address. No
+  storage contract is redeployed, and nodes need no action: they rebind to
+  the new facade from the Hub.
+
 ## [10.0.18] - 2026-09-22
 
 Nodes for AI agents now run leaner and get up to speed in seconds. Edge nodes

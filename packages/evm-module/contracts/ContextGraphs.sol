@@ -64,7 +64,10 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  */
 contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, ReentrancyGuard {
     string private constant _NAME = "ContextGraphs";
-    string private constant _VERSION = "10.0.4";
+    // 10.0.5 — OT-RFC-53 waiver: a CG without a curator PCA (open, or EOA/Safe
+    //          curated) is waived against the PCA its creator is a registered
+    //          agent of. No ABI change.
+    string private constant _VERSION = "10.0.5";
 
     ContextGraphStorage public contextGraphStorage;
 
@@ -88,6 +91,8 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
     ///         the CG is backed by a PCA the creator owns or is a registered
     ///         agent of. The PCA's locked commitment is the anti-spam stake;
     ///         the CG carries no own escrow and its publishing is funded by the PCA.
+    ///         `accountId` is the PCA whose quota covered the deposit: the CG's
+    ///         curator PCA, or for a CG without one, the creator's agent PCA.
     event ContextGraphRegistrationDepositWaived(
         uint256 indexed contextGraphId,
         uint256 indexed accountId,
@@ -217,12 +222,21 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
         // longer mint unlimited free CGs. A waived CG carries no escrow — the
         // same state a dormant deposit produces — so the consume path is
         // unchanged (it falls through to the PCA).
+        //
+        // Which PCA backs the CG: its curator PCA when it has one. An open CG
+        // (storage forces its accountId to 0) or an EOA/Safe-curated one has
+        // none, so the waiver falls back to the PCA the creator is a registered
+        // agent of. ContextGraphWaiverStorage never reads the CG itself, so its
+        // floor, owner/agent and quota gates apply unchanged either way.
         if (address(parametersStorage) != address(0)) {
             uint96 deposit = parametersStorage.contextGraphRegistrationDeposit();
             if (deposit > 0) {
-                if (_tryWaiveRegistrationDeposit(publishAuthorityAccountId, deposit)) {
+                uint256 waiverAccountId = publishAuthorityAccountId != 0
+                    ? publishAuthorityAccountId
+                    : _creatorPcaAccountId();
+                if (_tryWaiveRegistrationDeposit(waiverAccountId, deposit)) {
                     emit ContextGraphRegistrationDepositWaived(
-                        contextGraphId, publishAuthorityAccountId, msg.sender
+                        contextGraphId, waiverAccountId, msg.sender
                     );
                 } else {
                     _pullRegistrationDeposit(contextGraphId, deposit);
@@ -252,6 +266,22 @@ contract ContextGraphs is INamed, IVersioned, ContractStatus, IInitializable, Re
             return waived;
         } catch {
             return false;
+        }
+    }
+
+    /// @dev The PCA `msg.sender` (the CG creator) is a registered agent of, or 0
+    ///      when it has none. Waiver PCA for a CG without a curator PCA. A PCA
+    ///      OWNER is found only when its wallet is also registered as an agent:
+    ///      agent -> PCA is a unique on-chain lookup, owner -> PCA is not.
+    ///      Resolved fresh via the Hub; fails CLOSED to 0 (charge the deposit)
+    ///      on any resolution/call failure.
+    function _creatorPcaAccountId() internal view returns (uint256) {
+        address nftAddr = _tryResolveContract("DKGPublishingConvictionNFT");
+        if (nftAddr == address(0)) return 0;
+        try IDKGPublishingConvictionNFT(nftAddr).agentToAccountId(msg.sender) returns (uint256 accountId) {
+            return accountId;
+        } catch {
+            return 0;
         }
     }
 
