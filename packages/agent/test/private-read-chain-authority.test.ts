@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest';
+import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
 import {
   MockChainAdapter,
   type ChainAdapter,
@@ -1198,8 +1199,55 @@ describe('private read authorization uses the on-chain participant roster', () =
       outcome: 'unavailable',
       source: 'registered-chain',
       reason: 'local-chain-binding-unavailable',
+      // A plain error says nothing about the failing dependency (#2834).
+      dependency: 'unknown',
     });
     expect(localPolicy).not.toHaveBeenCalled();
+  });
+
+  it('attributes a timed-out local chain binding read to the store, and a registration in flight to local state (#2834)', async () => {
+    const chain = new MockChainAdapter();
+    (chain as unknown as { resolveContextGraphIdByNameHash?: unknown })
+      .resolveContextGraphIdByNameHash = undefined;
+    agent = await DKGAgent.create({
+      name: 'PrivateReadBindingStoreTimeout',
+      chainAdapter: chain,
+    });
+    for (const contextGraphId of ['store-timeout-binding', 'registering-binding']) {
+      agent.setContextGraphSubscription(contextGraphId, {
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+      }, { persist: false });
+    }
+    vi.spyOn(agent.store, 'query').mockRejectedValue(new StoreOperationTimeoutError({
+      backend: 'oxigraph-server',
+      operation: 'query',
+      outcome: 'not_started',
+      message: 'Managed Oxigraph is recovering; query was not started',
+    }));
+    vi.spyOn(agent, 'isPrivateContextGraph').mockResolvedValue(false);
+
+    await expect(agent.resolveContextGraphReadAuthority('store-timeout-binding', {
+      callerAgentAddress: MEMBER,
+      allowSubscriptionFallback: false,
+    })).resolves.toMatchObject({
+      outcome: 'unavailable',
+      reason: 'local-chain-binding-unavailable',
+      dependency: 'store',
+    });
+
+    (agent as unknown as { contextGraphRegistrationsInFlight: Set<string> })
+      .contextGraphRegistrationsInFlight.add('registering-binding');
+    await expect(agent.resolveContextGraphReadAuthority('registering-binding', {
+      callerAgentAddress: MEMBER,
+      allowSubscriptionFallback: false,
+    })).resolves.toMatchObject({
+      outcome: 'unavailable',
+      reason: 'local-chain-binding-unavailable',
+      dependency: 'local-state',
+    });
   });
 
   it.each(['empty', 'error'] as const)(

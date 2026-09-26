@@ -154,6 +154,7 @@ describe('Context Graph registration binding: strict on-chain id fallback outcom
         kind: 'unavailable',
         reason: 'local-chain-binding-unavailable',
         detail: 'oxigraph store is unreachable',
+        dependency: 'unknown',
       });
   });
 
@@ -167,6 +168,7 @@ describe('Context Graph registration binding: strict on-chain id fallback outcom
         kind: 'unavailable',
         reason: 'local-chain-binding-unavailable',
         detail: 'rpc socket closed',
+        dependency: 'unknown',
       });
   });
 
@@ -187,6 +189,7 @@ describe('Context Graph registration binding: strict on-chain id fallback outcom
         kind: 'unavailable',
         reason: 'local-chain-binding-unavailable',
         detail: `Context Graph "${LOCAL_ID}" reverse binding can no longer be revalidated`,
+        dependency: 'unknown',
       });
     // A stale candidate must not fall through to the ontology fallback.
     expect(fixture.query).not.toHaveBeenCalled();
@@ -217,6 +220,7 @@ describe('Context Graph registration binding: strict on-chain id fallback outcom
         kind: 'unavailable',
         reason: 'local-chain-binding-unavailable',
         detail: `resolveContextGraphOnChainIdBinding(${LOCAL_ID}) timed out after 1000ms`,
+        dependency: 'unknown',
       });
     } finally {
       vi.useRealTimers();

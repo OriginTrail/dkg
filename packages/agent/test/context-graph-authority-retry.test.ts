@@ -1148,7 +1148,12 @@ describe('Context Graph subscription authority retry', () => {
     });
   }, 15_000);
 
-  it('retries unavailable subscription authority again at the exact recurring boundary', async () => {
+  it.each([
+    ['answers unavailable', 'decision'],
+    // The resolver's own failure is caught at the call site and read as
+    // retryable unavailability, never as a denial (#2834).
+    ['throws', 'thrown'],
+  ] as const)('retries subscription authority that %s again at the exact recurring boundary', async (_label, failure) => {
     const contextGraphId = 'persisted-recurring-authority-retry';
     const rows = new Map<string, any>([[contextGraphId, {
       id: contextGraphId,
@@ -1173,6 +1178,7 @@ describe('Context Graph subscription authority retry', () => {
     const resolveAuthority = vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
       .mockImplementation(async (candidateId) => {
       if (candidateId === contextGraphId && !authorityAvailable) {
+        if (failure === 'thrown') throw new Error('authority read failed');
         return {
           outcome: 'unavailable',
           source: 'registered-chain',
@@ -1198,6 +1204,10 @@ describe('Context Graph subscription authority retry', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(targetAttempts()).toBe(2);
     expect(retry).toHaveBeenCalledOnce();
+    expect(agent.getSubscribedContextGraphs().get(contextGraphId)?.subscribed).not.toBe(true);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      dormantReasons: { authorityUnavailable: [contextGraphId] },
+    });
 
     await vi.advanceTimersByTimeAsync(29_999);
     expect(targetAttempts()).toBe(2);
