@@ -121,49 +121,6 @@ export function hasActiveApprovedMemberDelegation(
   return namesApprovedAgent && issuedAtIsActive && expiryIsActive && (peerMatches || keyMatches);
 }
 
-/**
- * The authenticated access policy an approved member is judged under when it
- * accepts the curator's snapshot and when it completes its join. `public` only
- * when active accepted RFC-64 authority or the registered chain proves it;
- * `unproven` admits nothing but the complete private definition, so a peer
- * cannot downgrade a private graph by serving a public definition.
- */
-export type ApprovedMemberAccessPolicy = 'public' | 'unproven';
-
-declare const approvedMemberAcceptanceBrand: unique symbol;
-
-/**
- * One approved member's proof together with the authenticated policy it is
- * judged under. The snapshot refresh and join completion both consume the same
- * value, so they cannot disagree about the member or the policy. It cannot be
- * written as a plain object literal: a `public` acceptance comes only from
- * {@link approvedMemberAcceptanceFromAuthority}, whose callers owe authenticated
- * evidence, and {@link unprovenApprovedMemberAcceptance} grants nothing beyond
- * the complete private definition.
- */
-export interface ApprovedMemberAcceptance {
-  readonly proof: ApprovedMemberProof;
-  readonly accessPolicy: ApprovedMemberAccessPolicy;
-  readonly [approvedMemberAcceptanceBrand]: true;
-}
-
-/**
- * Build an acceptance from a policy the caller derived from authenticated
- * authority (the agent's approved-member resolver). Never from peer-served
- * metadata.
- */
-export function approvedMemberAcceptanceFromAuthority(
-  proof: ApprovedMemberProof,
-  accessPolicy: ApprovedMemberAccessPolicy,
-): ApprovedMemberAcceptance {
-  return Object.freeze({ proof, accessPolicy }) as unknown as ApprovedMemberAcceptance;
-}
-
-/** An acceptance that admits only the complete private definition. */
-export function unprovenApprovedMemberAcceptance(proof: ApprovedMemberProof): ApprovedMemberAcceptance {
-  return approvedMemberAcceptanceFromAuthority(proof, 'unproven');
-}
-
 /** The store-side ASK fragment for the same proof. */
 export function renderApprovedMemberProofSparql(
   contextGraphId: string,

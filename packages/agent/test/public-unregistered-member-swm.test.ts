@@ -455,6 +455,99 @@ describe('a retained public snapshot once catalog authority stops governing tran
   });
 });
 
+describe('the catalog authority fence closing during the authority read (#2831 review)', () => {
+  // The active-policy fence is read before the registered-authority read
+  // awaits the index. If catalog authority is killed or blocked meanwhile, the
+  // accepted-absence answer must not be acted on.
+  function racingMember({ registeredPublic = false }: { registeredPublic?: boolean } = {}) {
+    let active = true;
+    const allowanceByRead: boolean[] = [];
+    let releaseFirstRead!: () => void;
+    const firstReadGate = new Promise<void>((resolve) => { releaseFirstRead = resolve; });
+    const getCgMeta = vi.fn(async () => ({
+      allowedAgents: [CURATOR, MEMBER],
+      participantAgents: [],
+      revokedAgents: [],
+    }));
+    const store = { query: vi.fn(async () => ({ type: 'bindings' as const, bindings: [] })) };
+    const agent = {
+      resolveContextGraphAgentGateAuthority:
+        WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
+      resolveSwmRegisteredAuthority: WorkspaceCryptoMethods.prototype.resolveSwmRegisteredAuthority,
+      resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
+      hasAcceptedRfc64PublicUnregisteredAuthorityV1: () => true,
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => active,
+      resolveRegisteredContextGraphAuthority: vi.fn(async (
+        _contextGraphId: string,
+        options: RegisteredAuthorityOptions = {},
+      ) => {
+        allowanceByRead.push(options.allowAcceptedRfc64FinalizedAbsence === true);
+        if (allowanceByRead.length === 1) await firstReadGate;
+        if (registeredPublic) return { kind: 'public' as const, onChainId: 7n };
+        return options.allowAcceptedRfc64FinalizedAbsence === true
+          ? { kind: 'unregistered' as const }
+          : {
+              kind: 'unavailable' as const,
+              reason: 'finalized-name-absence-unaccepted' as const,
+            };
+      }),
+      resolveRfc64PrivateReadRosterV1: () => undefined,
+      getCgMeta,
+      getContextGraphAllowedPeers: async () => null,
+      subscribedContextGraphs: new Map(),
+      isContextGraphPublicOnChain: vi.fn(async () => false),
+      log: { warn: vi.fn() },
+      store,
+    };
+    async function closeFenceDuringRead<T>(run: () => Promise<T>): Promise<T> {
+      const pending = run();
+      for (let turn = 0; turn < 50 && allowanceByRead.length === 0; turn += 1) {
+        await Promise.resolve();
+      }
+      expect(allowanceByRead).toEqual([true]);
+      active = false;
+      releaseFirstRead();
+      return pending;
+    }
+    return { agent, allowanceByRead, closeFenceDuringRead, getCgMeta, store };
+  }
+
+  it('does not choose plaintext on the stale fence', async () => {
+    const { agent, allowanceByRead, closeFenceDuringRead, store } = racingMember();
+
+    await expect(closeFenceDuringRead(() => resolveRecipients(agent))).rejects.toMatchObject({
+      reason: 'finalized-name-absence-unaccepted',
+    });
+    // The answer came from a second read without the allowance.
+    expect(allowanceByRead).toEqual([true, false]);
+    expect(store.query).not.toHaveBeenCalled();
+  });
+
+  it('does not open the agent gate or member recovery on the stale fence', async () => {
+    const gateCase = racingMember();
+    const gate = await gateCase.closeFenceDuringRead(() => WorkspaceCryptoMethods.prototype
+      .resolveContextGraphAgentGateAuthority.call(gateCase.agent as never, CG));
+    expect(gate).toEqual(expect.objectContaining({ kind: 'unavailable' }));
+    expect(gateCase.allowanceByRead).toEqual([true, false]);
+    expect(gateCase.getCgMeta).not.toHaveBeenCalled();
+
+    const recoveryCase = racingMember();
+    const recovery = await recoveryCase.closeFenceDuringRead(() => WorkspaceCryptoMethods.prototype
+      .getMemberRecoveryGate.call(recoveryCase.agent as never, CG));
+    expect(recovery).toBeNull();
+    expect(recoveryCase.allowanceByRead).toEqual([true, false]);
+    expect(recoveryCase.getCgMeta).not.toHaveBeenCalled();
+  });
+
+  it('keeps a registered public answer, which never depended on the allowance', async () => {
+    const { agent, allowanceByRead, closeFenceDuringRead } = racingMember({ registeredPublic: true });
+
+    await expect(closeFenceDuringRead(() => WorkspaceCryptoMethods.prototype
+      .resolveSwmTransportAuthority.call(agent as never, CG))).resolves.toEqual({ kind: 'plaintext' });
+    expect(allowanceByRead).toEqual([true]);
+  });
+});
+
 describe('isContextGraphSwmPublic: one plaintext predicate for sender and receiver (#2827)', () => {
   it('is exactly the on-chain probe without an accepted owner-signed public policy', async () => {
     const { agent, isContextGraphPublicOnChain, registry } = joinedMember({

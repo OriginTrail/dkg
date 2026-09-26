@@ -21,11 +21,11 @@ import {
   SYNC_TOTAL_TIMEOUT_MS,
 } from './dkg-agent-constants.js';
 import { hasAuthoritativePrivateMetaDefinition } from './context-graph-private-meta-proof.js';
+import type { ApprovedMemberProof } from './context-graph-member-proof.js';
 import {
   unprovenApprovedMemberAcceptance,
   type ApprovedMemberAcceptance,
-  type ApprovedMemberProof,
-} from './context-graph-member-proof.js';
+} from './internal/context-graph-authority/approved-member-acceptance.js';
 import {
   hasAuthoritativePublicMetaDefinition,
   hasAuthoritativePublicMetaDefinitionForApprovedMember,
@@ -521,10 +521,11 @@ async function fetchAuthoritativeMetaSnapshot(
   }
   // The proof layer owns each snapshot contract; this refresh only picks one.
   // Public subscriptions reach it without an approved member. A join-approved
-  // member of a PUBLIC graph accepts the public definition only under the
-  // authenticated public policy its caller resolved (#2827, #2831 review); an
-  // unproven policy keeps rejecting it, so a peer cannot downgrade a private
-  // graph by serving a public definition.
+  // member is judged by its acceptance (#2827, #2831 review), which admits
+  // exactly one definition: a public acceptance only the public definition,
+  // and only while its authority still holds after the fetch; an unproven one
+  // only the complete private definition. A peer can then neither downgrade a
+  // private graph nor leave a public graph stored as private.
   const approvedMember = options.approvedMember
     ?? (options.memberProof === undefined
       ? undefined
@@ -536,10 +537,12 @@ async function fetchAuthoritativeMetaSnapshot(
         contextGraphId,
         controlMetaQuads,
         approvedMember.proof,
-      );
+      )
+      && await approvedMember.stillHolds();
   // A public-only bootstrap never installs a private definition, however
   // complete: the caller's accepted policy already says the graph is public.
   const hasAuthoritativePrivateDefinition = options.requirePublicDefinition !== true
+    && approvedMember?.accessPolicy !== 'public'
     && hasAuthoritativePrivateMetaDefinition(
       contextGraphId,
       controlMetaQuads,

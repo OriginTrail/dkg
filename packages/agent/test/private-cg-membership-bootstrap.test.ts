@@ -15,9 +15,21 @@ import { agentFromPrivateKey, DKGAgent } from '../src/index.js';
 import { signAgentDelegation, type SignedAgentDelegation } from '../src/auth/agent-delegation.js';
 import { joinDelegationScope } from '../src/dkg-agent-helpers.js';
 import {
-  approvedMemberAcceptanceFromAuthority,
+  resolveApprovedMemberAcceptanceDecision,
+  unprovenApprovedMemberAcceptance,
   type ApprovedMemberAcceptance,
-} from '../src/context-graph-member-proof.js';
+} from '../src/internal/context-graph-authority/approved-member-acceptance.js';
+import { confirmContextGraphMetadataV1 } from '../src/context-graph-meta-confirmation.js';
+
+/** A public acceptance, built the only way one can be: through the resolver. */
+function publicAcceptanceFor(
+  proof: { approvedAgentAddress: string; expectedDelegateePeerId: string },
+  isPublicNow: () => boolean = () => true,
+): Promise<ApprovedMemberAcceptance> {
+  return resolveApprovedMemberAcceptanceDecision(proof, async () => (isPublicNow()
+    ? { kind: 'plaintext' as const }
+    : { kind: 'private-roster' as const, participantAgents: [] }));
+}
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 
@@ -252,7 +264,7 @@ describe('private CG membership bootstrap recovery', () => {
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"public"', graph: metaGraph },
     ]);
     const proof = { approvedAgentAddress: member, expectedDelegateePeerId: agent!.peerId };
-    const publicAcceptance = approvedMemberAcceptanceFromAuthority(proof, 'public');
+    const publicAcceptance = await publicAcceptanceFor(proof);
     expect(await (agent as any).hasConfirmedMetaState(contextGraphId)).toBe(true);
     expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId, publicAcceptance))
       .toBe(false);
@@ -271,7 +283,7 @@ describe('private CG membership bootstrap recovery', () => {
     // must not complete the join, or a peer could downgrade a private graph.
     expect(await (agent as any).hasConfirmedApprovedMemberMetaState(
       contextGraphId,
-      approvedMemberAcceptanceFromAuthority(proof, 'unproven'),
+      unprovenApprovedMemberAcceptance(proof),
     )).toBe(false);
   });
 
@@ -293,9 +305,8 @@ describe('private CG membership bootstrap recovery', () => {
       { subject: delegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: `"${agent!.peerId}"`, graph: metaGraph },
       { subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT, object: `"${Date.now() - 60_000}"`, graph: metaGraph },
     ]);
-    const acceptance = approvedMemberAcceptanceFromAuthority(
+    const acceptance = await publicAcceptanceFor(
       { approvedAgentAddress: member, expectedDelegateePeerId: agent!.peerId },
-      'public',
     );
     expect((agent as any).localApprovedAgentByCG.has(contextGraphId)).toBe(false);
 
@@ -313,13 +324,10 @@ describe('private CG membership bootstrap recovery', () => {
     const contextGraphId = '0x00a9D0dcab936a418ffEbc734476C91D4027d359/public-join-stale-snapshot';
     const curatorPeerId = '12D3KooWCuratorOfPublicJoinStaleSnapshot';
     let memberProofStored = false;
-    const acceptance = approvedMemberAcceptanceFromAuthority(
-      {
-        approvedAgentAddress: '0x00000000000000000000000000000000000000a1',
-        expectedDelegateePeerId: '12D3KooWMemberOfPublicJoinStaleSnapshot',
-      },
-      'public',
-    );
+    const acceptance = await publicAcceptanceFor({
+      approvedAgentAddress: '0x00000000000000000000000000000000000000a1',
+      expectedDelegateePeerId: '12D3KooWMemberOfPublicJoinStaleSnapshot',
+    });
     const agentLike = {
       localApprovedAgentByCG: new Map([[contextGraphId, '0x00000000000000000000000000000000000000a1']]),
       peerId: '12D3KooWMemberOfPublicJoinStaleSnapshot',
@@ -370,6 +378,60 @@ describe('private CG membership bootstrap recovery', () => {
     await runBootstrap();
     expect(agentLike.refreshMetaSyncedFlags).toHaveBeenCalledTimes(1);
     expect(agentLike.syncContextGraphFromConnectedPeers).not.toHaveBeenCalled();
+  });
+
+  describe('join completion admits exactly the definition its acceptance allows (#2831 review)', () => {
+    const contextGraphId = '0x00a9D0dcab936a418ffEbc734476C91D4027d359/join-completion-definition';
+    const member = '0x00000000000000000000000000000000000000a1';
+    const proof = { approvedAgentAddress: member, expectedDelegateePeerId: '12D3KooWJoinCompletionPeer' };
+    // Every stored-definition query answers yes; the sources show which
+    // definition the confirmation was willing to accept.
+    function confirmationWith(answer = true) {
+      const sources: string[] = [];
+      const dependencies = {
+        chain: {},
+        resolveActivePublicChainProof: async () => ({ state: 'unknown' as const }),
+        isPrivateContextGraph: async () => false,
+        localApprovedAgentByContextGraph: new Map([[contextGraphId, member]]),
+        peerId: '12D3KooWJoinCompletionPeer',
+        store: {
+          query: async (_sparql: string, options?: { source?: string }) => {
+            sources.push(options?.source ?? '');
+            return { type: 'boolean' as const, value: answer };
+          },
+        },
+        subscriptions: new Map(),
+      };
+      return {
+        sources,
+        confirm: (acceptance: ApprovedMemberAcceptance) => confirmContextGraphMetadataV1(
+          dependencies as never,
+          contextGraphId,
+          { purpose: 'approved-member', acceptance },
+        ),
+      };
+    }
+
+    it('confirms a public acceptance only from the public definition', async () => {
+      const { sources, confirm } = confirmationWith();
+      await expect(confirm(await publicAcceptanceFor(proof))).resolves.toBe(true);
+      expect(sources).toEqual(['agent.contextGraph.confirmedMeta.approvedMember.publicDefinition']);
+    });
+
+    it('confirms an unproven acceptance only from the complete private definition', async () => {
+      const { sources, confirm } = confirmationWith();
+      await expect(confirm(unprovenApprovedMemberAcceptance(proof))).resolves.toBe(true);
+      expect(sources).toEqual(['agent.contextGraph.confirmedMeta.approvedMember.privateDefinition']);
+    });
+
+    it('confirms nothing once the public authority no longer holds', async () => {
+      let publicNow = true;
+      const acceptance = await publicAcceptanceFor(proof, () => publicNow);
+      const { confirm } = confirmationWith();
+      // The name was registered private during the join's network work.
+      publicNow = false;
+      await expect(confirm(acceptance)).resolves.toBe(false);
+    });
   });
 
   describe('the approved-member acceptance a join attempt is judged with (#2831 review)', () => {

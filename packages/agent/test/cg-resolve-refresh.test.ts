@@ -2,9 +2,10 @@ import { describe, expect, it } from 'vitest';
 import { DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphMetaGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
-  approvedMemberAcceptanceFromAuthority,
+  resolveApprovedMemberAcceptanceDecision,
   unprovenApprovedMemberAcceptance,
-} from '../src/context-graph-member-proof.js';
+  type ApprovedMemberAcceptance,
+} from '../src/internal/context-graph-authority/approved-member-acceptance.js';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 import { SYNC_TOTAL_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
@@ -522,11 +523,31 @@ describe('refreshMetaFromCurator', () => {
       }];
     }
 
+    const memberProof = { approvedAgentAddress: memberAddress, expectedDelegateePeerId: 'local-peer' };
+    // A public acceptance comes only from the resolver, here over a stubbed
+    // SWM transport authority that the test can flip.
+    async function publicAcceptance(isPublicNow: () => boolean = () => true): Promise<ApprovedMemberAcceptance> {
+      const acceptance = await resolveApprovedMemberAcceptanceDecision(
+        memberProof,
+        async () => (isPublicNow()
+          ? { kind: 'plaintext' as const }
+          : { kind: 'private-roster' as const, participantAgents: [memberAddress] }),
+      );
+      expect(acceptance.accessPolicy).toBe('public');
+      return acceptance;
+    }
+
     async function refreshAfterApproval(
       snapshot: Quad[],
-      member: 'public' | 'unproven' | 'legacy-member-proof',
+      member: 'public' | 'unproven' | 'legacy-member-proof' | ApprovedMemberAcceptance,
+      duringFetch: () => void = () => undefined,
     ): Promise<{ refreshed: boolean; mutated: boolean }> {
-      const proof = { approvedAgentAddress: memberAddress, expectedDelegateePeerId: 'local-peer' };
+      const proof = memberProof;
+      const approvedMember = typeof member !== 'string'
+        ? member
+        : member === 'public'
+          ? await publicAcceptance()
+          : unprovenApprovedMemberAcceptance(proof);
       let mutated = false;
       const agent = {
         metaRefreshTimestamps: new Map<string, number>(),
@@ -538,12 +559,15 @@ describe('refreshMetaFromCurator', () => {
           },
         },
         discovery: {},
-        fetchSyncPages: async () => ({
-          quads: snapshot,
-          checkpointKey: 'public-join-snapshot',
-          resumedFromOffset: 0,
-          completed: true,
-        }),
+        fetchSyncPages: async () => {
+          duringFetch();
+          return {
+            quads: snapshot,
+            checkpointKey: 'public-join-snapshot',
+            resumedFromOffset: 0,
+            completed: true,
+          };
+        },
         store: {
           insert: async () => { mutated = true; },
           update: async () => { mutated = true; },
@@ -563,7 +587,7 @@ describe('refreshMetaFromCurator', () => {
           force: true,
           ...(member === 'legacy-member-proof'
             ? { memberProof: proof }
-            : { approvedMember: approvedMemberAcceptanceFromAuthority(proof, member) }),
+            : { approvedMember }),
         },
       );
       return { refreshed, mutated };
@@ -588,6 +612,39 @@ describe('refreshMetaFromCurator', () => {
       const result = await refreshAfterApproval(publicSnapshotWithMember({ includeMember: true }), 'legacy-member-proof');
       expect(result.refreshed).toBe(false);
       expect(result.mutated).toBe(false);
+    });
+
+    it('never installs a private definition under a public acceptance', async () => {
+      // The admitted definition must agree with the authority SWM transport
+      // uses, or the member would store private and refuse plaintext shares.
+      const privateSnapshotWithMember = [
+        ...authoritativePrivateMetaQuads(contextGraphId),
+        // The proof pins no operational key, so the peer binding decides.
+        ...activeMemberMetaQuads(
+          contextGraphId,
+          memberAddress,
+          'local-peer',
+          '0x00000000000000000000000000000000000000d1',
+          Date.now(),
+        ),
+      ];
+      const underPublic = await refreshAfterApproval(privateSnapshotWithMember, 'public');
+      expect(underPublic).toEqual({ refreshed: false, mutated: false });
+      // The same snapshot is exactly what an unproven acceptance admits.
+      const underUnproven = await refreshAfterApproval(privateSnapshotWithMember, 'unproven');
+      expect(underUnproven).toEqual({ refreshed: true, mutated: true });
+    });
+
+    it('does not install a public snapshot once the public authority stops holding during the fetch', async () => {
+      let publicNow = true;
+      const acceptance = await publicAcceptance(() => publicNow);
+      const result = await refreshAfterApproval(
+        publicSnapshotWithMember({ includeMember: true }),
+        acceptance,
+        // The name is registered private while the curator fetch is in flight.
+        () => { publicNow = false; },
+      );
+      expect(result).toEqual({ refreshed: false, mutated: false });
     });
 
     it('rejects a public snapshot that does not yet prove the approved member', async () => {
