@@ -33,14 +33,6 @@ wire-protocol or deployment registry changes are required.**
   every restart then fails with `LOCK: Resource temporarily unavailable`.
   Stop the orphaned `oxigraph serve` process for that data directory (its
   parent is PID 1), then start the node. A fix is in review (#2775).
-- **Main-thread pauses grow with a node's peer request rate** (#2812): each
-  peer-to-peer send ties its abort signals to the node's lifetime signal with
-  `AbortSignal.any`, and Node cleans those links up on the main thread at a
-  cost that grows with how many are outstanding. On a node that sends many
-  catalog replays, such as an RFC-64 catalog provider without the kill
-  switch, pauses of tens of seconds were measured, long enough for the node
-  to restart its managed Oxigraph over missed query deadlines. Present since
-  10.0.18.
 - **A peer that connects while it is still starting is not used for sync**
   (#2822): a node learns a peer's protocols when the connection opens and
   does not refresh them. A peer that had not registered its handlers yet
@@ -108,6 +100,19 @@ wire-protocol or deployment registry changes are required.**
   approval is still checked during startup. Embedders can change the budget
   with the agent option `contextGraphSubscriptionRehydrationAuthorityBudgetMs`;
   `0` waits for every subscription, as before.
+- **Peer-to-peer sends no longer pile up main-thread work over a node's
+  uptime** (#2823): each send tied its deadline and cancellation signals to
+  the node's lifetime signal with `AbortSignal.any`. Node kept every such link
+  that had a timeout input until the node stopped, and walked all remaining
+  links each time it collected one, on the main thread. A node's pauses
+  therefore grew with its send rate and uptime: a testnet Edge serving RFC-64
+  catalog replays paused for up to 123 s at a time, long enough for its managed
+  Oxigraph to be restarted over missed query deadlines. A send or protocol
+  probe now has one deadline, built from a plain timer, and follows the
+  node's and the caller's signals through listeners it removes when it
+  settles. A multi-path send cancels its losing paths as soon as the winner
+  answers, including paths still opening their stream, and a retried send
+  removes the abort listener its backoff added.
 - **An Edge subscribed to a public Context Graph finds holders that are not
   already connected to it** (#2778): an Edge keeps no `agents` phonebook by default,
   so for a wallet-scoped public graph the curator tier of VM recovery (owner
