@@ -8,8 +8,10 @@ A fast-follow to 10.0.19 that fixes both of its known issues: on-demand
 subscriptions that stopped syncing partway, and on-chain id claims in the
 shared `ontology` graph that bound without proof from this node's chain. It
 also fixes a fingerprint mismatch that kept received assets with escaped
-non-ASCII text out of Verifiable Memory, and a startup that could hold a
-node's API for minutes while it re-checked persisted subscriptions on chain.
+non-ASCII text out of Verifiable Memory, a startup that could hold a node's
+API for minutes while it re-checked persisted subscriptions on chain,
+main-thread pauses that grew with a node's peer traffic and uptime, and a
+managed Oxigraph that outlived a killed worker and held the store.
 Edges now reach holders of public graphs they are not connected to, and
 auto-update applies on nodes that restart often. **No smart-contract, ABI,
 wire-protocol or deployment registry changes are required.**
@@ -23,16 +25,13 @@ wire-protocol or deployment registry changes are required.**
 | The startup metadata relocation has a 30 s budget, and the node withholds `ontology` from peers and queries until relocation finishes (#2787) | A node with a large legacy `ontology` graph serves sync and opens its API sooner; peers see its `ontology` a little later | None |
 | The auto-update hold-off deadline is stored in `<DKG home>/.update-holdoff.json` (#2785) | A node that restarts during its rollout hold waits only for the time left instead of drawing a new hold | None. Deleting the file only makes the node draw a new hold |
 | Edges fetch the `agents` phonebook on demand (#2778) | For a public wallet-scoped graph whose owner is not in the local phonebook, an Edge fetches the phonebook once from one to three connected, network-admitted peers (Cores first), bounded to 120 s and then backed off | None. `onDemandAgentsPhonebook: false`, or `DKG_ON_DEMAND_AGENTS_PHONEBOOK=0`, turns it off |
+| Managed Oxigraph runs under the parent watchdog on Linux and macOS, also without memory limits, and the daemon records each launch's owner in the store directory (#2775) | The daemon's stop and restart signals reach Oxigraph through the watchdog's process group, so a worker the supervisor kills no longer leaves Oxigraph holding the store. On the first start after upgrading, a node stops an orphaned Oxigraph from an earlier release that runs this node's store and was reparented to PID 1 | None. A lock holder the daemon cannot attribute to this node is logged and left running; stop it by hand if the node then cannot start |
 
 ### Known issues
 
 - **RFC-64 catalog replay loop**: replays that come back incomplete repeat on
   every reconnect. Keep `rfc64Catalog.rollout.killSwitch` on wherever it is
   set.
-- **A SIGKILLed worker can leave the managed Oxigraph holding its store**:
-  every restart then fails with `LOCK: Resource temporarily unavailable`.
-  Stop the orphaned `oxigraph serve` process for that data directory (its
-  parent is PID 1), then start the node. A fix is in review (#2775).
 - **A peer that connects while it is still starting is not used for sync**
   (#2822): a node learns a peer's protocols when the connection opens and
   does not refresh them. A peer that had not registered its handlers yet
@@ -113,6 +112,26 @@ wire-protocol or deployment registry changes are required.**
   settles. A multi-path send cancels its losing paths as soon as the winner
   answers, including paths still opening their stream, and a retried send
   removes the abort listener its backoff added.
+- **A worker killed by the supervisor no longer leaves managed Oxigraph
+  holding the store lock** (#2775): after five failed liveness probes the supervisor
+  SIGKILLs its worker. A directly launched `oxigraph serve` (macOS, or any node
+  without memory limits) survived that, reparented to init, and kept
+  `oxigraph-data/LOCK`. Every respawned worker then failed with
+  `While lock file … Resource temporarily unavailable` until the supervisor
+  gave up. Oxigraph now runs under the parent watchdog on Linux and macOS
+  whether or not memory limits are set, and the daemon's stop and restart
+  signals reach it through the watchdog's process group. The daemon records
+  each launch's owner (PID, start time and boot) in the store directory when it
+  starts Oxigraph. Before each Oxigraph start, it stops the recorded
+  Oxigraph, or a child of the recorded launcher if the store never became
+  ready, once the recorded daemon or launcher has exited, whatever process
+  adopted it. It also stops an orphan from an earlier release that runs this
+  node's Oxigraph for this store and was reparented to PID 1. Only a
+  confirmed exit counts: a holder whose owner, parent or record cannot be
+  read is left running, and Oxigraph is not started over a holder that may
+  be this node's; that start fails and is retried, keeping the owner record.
+  Any other lock holder is logged and left running, and the lock file itself
+  is never touched.
 - **An Edge subscribed to a public Context Graph finds holders that are not
   already connected to it** (#2778): an Edge keeps no `agents` phonebook by default,
   so for a wallet-scoped public graph the curator tier of VM recovery (owner

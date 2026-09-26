@@ -2,6 +2,7 @@
 // (rather than inlined in callers) so they can be reused and unit-tested
 // independently.
 
+import { writeFileAtomicWith } from './atomic-write.js';
 import { _autoUpdateIo } from './manifest.js';
 
 /** The fs calls `writeFileAtomic` makes. Defaults to the daemon's `_autoUpdateIo`. */
@@ -32,12 +33,5 @@ export async function writeFileAtomic(
   data: string,
   io: AtomicWriteIo = _autoUpdateIo,
 ): Promise<void> {
-  const tmp = `${path}.tmp.${process.pid}.${Date.now().toString(36)}`;
-  await io.writeFile(tmp, data);
-  try {
-    await io.rename(tmp, path);
-  } catch (err) {
-    try { await io.unlink(tmp); } catch { /* best-effort cleanup */ }
-    throw err;
-  }
+  await writeFileAtomicWith(io, path, data);
 }
