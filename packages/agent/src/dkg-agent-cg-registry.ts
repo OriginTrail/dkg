@@ -151,6 +151,10 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
+import {
+  contextGraphReadAuthorityDependencyOf,
+  type ContextGraphReadAuthorityDependency,
+} from './context-graph-read-authority.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -427,6 +431,8 @@ export type ContextGraphRegistrationBinding =
         | 'chain-name-binding-unavailable'
         | 'authority-circuit-open';
       detail?: string;
+      /** Set where the failed lookup's own error says which dependency could not answer. */
+      dependency?: ContextGraphReadAuthorityDependency;
     };
 
 export type FinalizedContextGraphAuthorityTargetV1 =
@@ -1254,6 +1260,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             kind: 'unavailable',
             reason: 'local-chain-binding-unavailable',
             detail: err instanceof Error ? err.message : String(err),
+            dependency: contextGraphReadAuthorityDependencyOf(err),
           };
         }
       }
@@ -1464,6 +1471,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           kind: 'unavailable',
           reason: 'local-chain-binding-unavailable',
           detail: err instanceof Error ? err.message : String(err),
+          dependency: contextGraphReadAuthorityDependencyOf(err),
         };
       }
     }

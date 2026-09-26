@@ -34,15 +34,27 @@ export type ContextGraphReadAuthoritySource =
  */
 export type ContextGraphReadAuthorityDependency = 'store' | 'chain' | 'local-state' | 'unknown';
 
-export interface ContextGraphReadAuthorityDecision {
-  outcome: ContextGraphReadAuthorityOutcome;
+interface ContextGraphReadAuthorityDecisionFields {
   source: ContextGraphReadAuthoritySource;
   reason: string;
   metadataBootstrap: 'eligible' | 'forbidden';
   onChainId?: bigint;
-  /** Set when `outcome` is `unavailable`. */
-  dependency?: ContextGraphReadAuthorityDependency;
 }
+
+/** An authoritative answer: the read is allowed or denied. */
+export interface SettledContextGraphReadAuthorityDecision extends ContextGraphReadAuthorityDecisionFields {
+  outcome: 'allowed' | 'denied';
+}
+
+/** No authority source could answer; `dependency` says which one could not. */
+export interface UnavailableContextGraphReadAuthorityDecision extends ContextGraphReadAuthorityDecisionFields {
+  outcome: 'unavailable';
+  dependency: ContextGraphReadAuthorityDependency;
+}
+
+export type ContextGraphReadAuthorityDecision =
+  | SettledContextGraphReadAuthorityDecision
+  | UnavailableContextGraphReadAuthorityDecision;
 
 export const CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE =
   'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE' as const;
@@ -63,18 +75,17 @@ export class ContextGraphReadAuthorityUnavailableError extends Error {
 
   constructor(
     contextGraphId: string,
-    decision: Pick<ContextGraphReadAuthorityDecision, 'source' | 'reason' | 'dependency'>,
+    decision: Pick<UnavailableContextGraphReadAuthorityDecision, 'source' | 'reason' | 'dependency'>,
   ) {
-    const dependency = decision.dependency ?? 'unknown';
     super(
       `Context Graph read authority is unavailable for "${contextGraphId}" `
-      + `(${decision.source}/${decision.reason}/${dependency})`,
+      + `(${decision.source}/${decision.reason}/${decision.dependency})`,
     );
     this.name = 'ContextGraphReadAuthorityUnavailableError';
     this.contextGraphId = contextGraphId;
     this.source = decision.source;
     this.reason = decision.reason;
-    this.dependency = dependency;
+    this.dependency = decision.dependency;
   }
 }
 
@@ -137,12 +148,12 @@ export interface ContextGraphReadAuthorityInput {
 }
 
 const decision = (
-  outcome: ContextGraphReadAuthorityOutcome,
+  outcome: SettledContextGraphReadAuthorityDecision['outcome'],
   source: ContextGraphReadAuthoritySource,
   reason: string,
   onChainId?: bigint,
   metadataBootstrap: 'eligible' | 'forbidden' = outcome === 'denied' ? 'forbidden' : 'eligible',
-): ContextGraphReadAuthorityDecision => ({
+): SettledContextGraphReadAuthorityDecision => ({
   outcome,
   source,
   reason,
@@ -150,12 +161,24 @@ const decision = (
   ...(onChainId === undefined ? {} : { onChainId }),
 });
 
-const unavailable = (
+/** The one way to build an unavailable decision, so every one names its dependency. */
+export function unavailableContextGraphReadAuthorityDecision(
   source: ContextGraphReadAuthoritySource,
   reason: string,
   dependency: ContextGraphReadAuthorityDependency,
   onChainId?: bigint,
-): ContextGraphReadAuthorityDecision => ({ ...decision('unavailable', source, reason, onChainId), dependency });
+): UnavailableContextGraphReadAuthorityDecision {
+  return {
+    outcome: 'unavailable',
+    source,
+    reason,
+    metadataBootstrap: 'eligible',
+    ...(onChainId === undefined ? {} : { onChainId }),
+    dependency,
+  };
+}
+
+const unavailable = unavailableContextGraphReadAuthorityDecision;
 
 export async function resolveContextGraphReadAuthorityDecision(
   input: ContextGraphReadAuthorityInput,
@@ -178,7 +201,9 @@ export async function resolveContextGraphReadAuthorityDecision(
     return unavailable(
       'registered-chain',
       registeredAuthority.reason,
-      REGISTERED_AUTHORITY_UNAVAILABLE_DEPENDENCY[registeredAuthority.reason] ?? 'unknown',
+      registeredAuthority.dependency
+        ?? REGISTERED_AUTHORITY_UNAVAILABLE_DEPENDENCY[registeredAuthority.reason]
+        ?? 'unknown',
       registeredAuthority.onChainId,
     );
   }

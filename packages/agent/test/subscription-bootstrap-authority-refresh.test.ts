@@ -107,6 +107,7 @@ describe('subscription bootstrap finalized-generation refresh', () => {
       source: 'registered-chain',
       reason: 'chain-name-binding-unavailable',
       metadataBootstrap: 'eligible',
+      dependency: 'chain',
     });
     expect(decision).not.toHaveProperty('onChainId');
 
@@ -142,6 +143,7 @@ describe('subscription bootstrap finalized-generation refresh', () => {
         source: 'registered-chain',
         reason: 'chain-name-binding-unavailable',
         metadataBootstrap: 'eligible',
+        dependency: 'chain',
       });
       // A non-evidence request must never be handed to the reconciler here:
       // only the finalized-absence seed from the earlier step ran.
@@ -165,6 +167,7 @@ describe('subscription bootstrap finalized-generation refresh', () => {
       source: 'registered-chain',
       reason: 'registered-authority-error',
       metadataBootstrap: 'eligible',
+      dependency: 'unknown',
     });
     expect(decision).not.toHaveProperty('onChainId');
     expect(reconcile).toHaveBeenCalledOnce();
@@ -189,6 +192,7 @@ describe('subscription bootstrap finalized-generation refresh', () => {
       source: 'registered-chain',
       reason: 'registered-authority-error',
       metadataBootstrap: 'eligible',
+      dependency: 'unknown',
     });
     expect(refresh).toHaveBeenCalledOnce();
     // Seed reconcile, then the evidence reconcile that threw. No re-resolve.

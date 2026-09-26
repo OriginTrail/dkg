@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import type { ContextGraphReadAuthorityDependency } from './context-graph-read-authority.js';
+
 export type LiveOnChainAccessPolicyUnavailableReason =
   | 'chain-access-policy-timeout'
   | 'chain-access-policy-unknown';
@@ -8,6 +10,8 @@ export type LiveOnChainAccessPolicyUnavailable = {
   kind: 'unavailable';
   reason: LiveOnChainAccessPolicyUnavailableReason;
   detail?: string;
+  /** Set where the failed read's own error says which dependency could not answer. */
+  dependency?: ContextGraphReadAuthorityDependency;
 };
 
 export type RegisteredContextGraphAuthorityUnavailableReason =
@@ -37,6 +41,8 @@ export type RegisteredContextGraphAuthorityUnavailable =
       reason: RegisteredContextGraphAuthorityNonPolicyUnavailableReason;
       onChainId?: bigint;
       detail?: string;
+      /** Set where the failed read's own error says which dependency could not answer. */
+      dependency?: ContextGraphReadAuthorityDependency;
     };
 
 /** Stable public contract for registered Context Graph authority state. */

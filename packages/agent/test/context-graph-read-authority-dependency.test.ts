@@ -1,5 +1,5 @@
 import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
-import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
+import { StoreOperationTimeoutError, StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { describe, expect, it } from 'vitest';
 import {
   ContextGraphReadAuthorityUnavailableError,
@@ -110,6 +110,10 @@ describe('read-authority dependency attribution (#2834)', () => {
 
   it('classifies only stable store and chain codes, and survives hostile errors', () => {
     expect(contextGraphReadAuthorityDependencyOf(storeRecovering())).toBe('store');
+    expect(contextGraphReadAuthorityDependencyOf(new StoreSchedulerBusyError('queue_full', 'normal', 'query')))
+      .toBe('store');
+    expect(contextGraphReadAuthorityDependencyOf(new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'query')))
+      .toBe('store');
     expect(contextGraphReadAuthorityDependencyOf(rpcExhausted())).toBe('chain');
     expect(contextGraphReadAuthorityDependencyOf(new Error('Managed Oxigraph is recovering'))).toBe('unknown');
     expect(contextGraphReadAuthorityDependencyOf(undefined)).toBe('unknown');
@@ -127,7 +131,21 @@ describe('read-authority dependency attribution (#2834)', () => {
 
     expect(error).toMatchObject({ source: 'registered-chain', reason: 'registered-authority-error', dependency: 'store' });
     expect(error.message).toContain('(registered-chain/registered-authority-error/store)');
-    expect(new ContextGraphReadAuthorityUnavailableError('cg-2834', { source: 'legacy-local', reason: 'x' }).dependency)
-      .toBe('unknown');
+  });
+
+  it('attributes store admission shedding to the store', async () => {
+    await expect(resolveContextGraphReadAuthorityDecision(input({
+      getRegisteredAuthority: async () => { throw new StoreSchedulerBusyError('queue_full', 'normal', 'query'); },
+    }))).resolves.toMatchObject({ reason: 'registered-authority-error', dependency: 'store' });
+  });
+
+  it('prefers the dependency a registered-authority result records over its reason', async () => {
+    await expect(resolveContextGraphReadAuthorityDecision(input({
+      getRegisteredAuthority: async () => ({
+        kind: 'unavailable',
+        reason: 'local-chain-binding-unavailable',
+        dependency: 'store',
+      }),
+    }))).resolves.toMatchObject({ reason: 'local-chain-binding-unavailable', dependency: 'store' });
   });
 });

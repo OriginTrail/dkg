@@ -385,7 +385,9 @@ import type { DKGAgent } from './dkg-agent.js';
 import type { ContextGraphAuthorityReadMode } from './registered-context-graph-authority.js';
 import {
   ContextGraphReadAuthorityUnavailableError,
+  contextGraphReadAuthorityDependencyOf,
   resolveContextGraphReadAuthorityDecision,
+  unavailableContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityInput,
 } from './context-graph-read-authority.js';
@@ -928,25 +930,23 @@ export class QueryMethods extends DKGAgentBase {
             );
             const request = requests.get(contextGraphId);
             if (request?.kind !== 'finalized-evidence') {
-              return {
-                outcome: 'unavailable',
-                source: 'registered-chain',
-                reason: 'chain-name-binding-unavailable',
-                metadataBootstrap: 'eligible',
-              };
+              return unavailableContextGraphReadAuthorityDecision(
+                'registered-chain',
+                'chain-name-binding-unavailable',
+                'chain',
+              );
             }
             await this.reconcileRfc64CatalogAccessAuthorityV1(
               contextGraphId,
               signal,
               request,
             );
-          } catch {
-            return {
-              outcome: 'unavailable',
-              source: 'registered-chain',
-              reason: 'registered-authority-error',
-              metadataBootstrap: 'eligible',
-            };
+          } catch (error) {
+            return unavailableContextGraphReadAuthorityDecision(
+              'registered-chain',
+              'registered-authority-error',
+              contextGraphReadAuthorityDependencyOf(error),
+            );
           }
           return resolve();
         },
@@ -957,12 +957,11 @@ export class QueryMethods extends DKGAgentBase {
         },
       );
     } catch {
-      return {
-        outcome: 'unavailable',
-        source: 'registered-chain',
-        reason: 'chain-name-binding-unavailable',
-        metadataBootstrap: 'eligible',
-      };
+      return unavailableContextGraphReadAuthorityDecision(
+        'registered-chain',
+        'chain-name-binding-unavailable',
+        'chain',
+      );
     }
   }
 

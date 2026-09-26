@@ -29,6 +29,10 @@ import {
   isStoreOperationTimeoutError,
 } from '@origintrail-official/dkg-storage';
 import type { DkgConfig } from '../config.js';
+import {
+  createReadAuthorityDiagnostics,
+  type ContextGraphReadAuthorityAttribution,
+} from './read-authority-diagnostics.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
 
 import type { CorsAllowlist } from './state.js';
@@ -132,24 +136,7 @@ export function isContextGraphReadAuthorityUnavailable(err: unknown): boolean {
   }
 }
 
-/** Where an unavailable read authority came from, as the agent attributes it. */
-export interface ContextGraphReadAuthorityAttribution {
-  readonly source?: unknown;
-  readonly reason?: unknown;
-  readonly dependency?: unknown;
-}
-
-const readAuthorityLog = new Logger('read-authority');
-
-/** Repeats of one attribution within this window are counted, not logged. */
-const READ_AUTHORITY_LOG_INTERVAL_MS = 60_000;
-
-const readAuthorityLogWindows = new Map<string, { loggedAt: number; suppressed: number }>();
-
-/** An attribution token as the agent emits them; anything else logs as `unknown`. */
-function readAuthorityToken(value: unknown): string {
-  return typeof value === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(value) ? value : 'unknown';
-}
+const readAuthorityDiagnostics = createReadAuthorityDiagnostics();
 
 function readAuthorityField(err: unknown, key: keyof ContextGraphReadAuthorityAttribution): unknown {
   try {
@@ -160,57 +147,18 @@ function readAuthorityField(err: unknown, key: keyof ContextGraphReadAuthorityAt
 }
 
 /**
- * Logs why a Context Graph read was answered with the retryable 503 (#2834):
- * the authority source, its reason and the dependency that could not answer
- * (store, chain, local state or unknown), under the request's operation id.
- * Only these tokens are logged, never graph ids, callers or raw dependency
- * errors. Repeats of one attribution within a minute are counted and reported
- * with its next line.
+ * Uniform retryable response for an unresolvable Context Graph read authority,
+ * the one renderer every route uses. The graph id, authority source and
+ * internal reason stay out of the body; the attribution goes to the daemon log
+ * under `ctx`'s operation id (#2834), which the response carries as
+ * `x-dkg-operation-id` for correlation.
  */
-export function logContextGraphReadAuthorityUnavailable(
-  ctx: OperationContext,
-  attribution: ContextGraphReadAuthorityAttribution,
-): void {
-  const source = readAuthorityToken(attribution.source);
-  const reason = readAuthorityToken(attribution.reason);
-  const dependency = readAuthorityToken(attribution.dependency);
-  const key = `${source}/${reason}/${dependency}`;
-  const now = Date.now();
-  const window = readAuthorityLogWindows.get(key);
-  // A window that starts in the future (the clock stepped back) has expired.
-  const elapsed = window === undefined ? Number.POSITIVE_INFINITY : now - window.loggedAt;
-  if (window !== undefined && elapsed >= 0 && elapsed < READ_AUTHORITY_LOG_INTERVAL_MS) {
-    window.suppressed += 1;
-    return;
-  }
-  readAuthorityLogWindows.set(key, { loggedAt: now, suppressed: 0 });
-  const suppressed = window?.suppressed ?? 0;
-  readAuthorityLog.warn(
-    ctx,
-    `Context Graph read authority unavailable, answered 503: source=${source} reason=${reason} dependency=${dependency}`
-      + (suppressed > 0 ? ` (${suppressed} more since the last report)` : ''),
-  );
-}
-
-/**
- * Uniform retryable response for an unresolvable Context Graph read authority.
- * Shared by every route that reaches `DKGAgent.query` with a scoped
- * `contextGraphId`, so a chain/metadata outage is never reported as a 500 and
- * the graph id, authority source, and internal reason stay out of the body.
- * The attribution goes to the daemon log instead, under `ctx`'s operation id,
- * which the response carries as `x-dkg-operation-id` for correlation.
- */
-export function respondIfContextGraphReadAuthorityUnavailable(
+export function respondContextGraphReadAuthorityUnavailable(
   res: ServerResponse,
-  err: unknown,
+  attribution: ContextGraphReadAuthorityAttribution,
   ctx: OperationContext = createOperationContext('query'),
-): boolean {
-  if (!isContextGraphReadAuthorityUnavailable(err)) return false;
-  logContextGraphReadAuthorityUnavailable(ctx, {
-    source: readAuthorityField(err, 'source'),
-    reason: readAuthorityField(err, 'reason'),
-    dependency: readAuthorityField(err, 'dependency'),
-  });
+): void {
+  readAuthorityDiagnostics.record(ctx, attribution);
   jsonResponse(
     res,
     503,
@@ -222,6 +170,24 @@ export function respondIfContextGraphReadAuthorityUnavailable(
     undefined,
     { 'Retry-After': '3', 'x-dkg-operation-id': ctx.operationId },
   );
+}
+
+/**
+ * Renders the read-authority 503 for the agent's thrown marker. Shared by
+ * every route that reaches `DKGAgent.query` with a scoped `contextGraphId`, so
+ * a chain/metadata outage is never reported as a 500.
+ */
+export function respondIfContextGraphReadAuthorityUnavailable(
+  res: ServerResponse,
+  err: unknown,
+  ctx?: OperationContext,
+): boolean {
+  if (!isContextGraphReadAuthorityUnavailable(err)) return false;
+  respondContextGraphReadAuthorityUnavailable(res, {
+    source: readAuthorityField(err, 'source'),
+    reason: readAuthorityField(err, 'reason'),
+    dependency: readAuthorityField(err, 'dependency'),
+  }, ctx);
   return true;
 }
 
@@ -1751,6 +1717,8 @@ export function corsHeaders(origin?: string | null): Record<string, string> {
   const headers: Record<string, string> = {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    // Lets cross-origin clients read a 503's retry hint and its log correlation id (#2834).
+    "Access-Control-Expose-Headers": "Retry-After, x-dkg-operation-id",
   };
   if (origin !== "*") headers["Vary"] = "Origin";
   return headers;

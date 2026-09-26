@@ -80,6 +80,11 @@ export {
 } from './finalized-vm-set-v1.js';
 export * from './author-catalog-codec.js';
 export * from './author-catalog-objects.js';
+export {
+  createBoundedDenialLogger,
+  type BoundedDenialLogger,
+  type BoundedDenialLoggerOptions,
+} from './bounded-denial-logger.js';
 export * from './author-catalog-directory.js';
 export * from './swm-author-inventory-v1.js';
 export * from './rfc64-semantic-addresses-v1.js';
