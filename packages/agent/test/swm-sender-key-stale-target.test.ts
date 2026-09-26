@@ -47,6 +47,7 @@ import {
   agentFromPrivateKey,
   type AgentKeyRecord,
 } from '../src/index.js';
+import type { ContextGraphAgentGateAuthority } from '../src/internal/context-graph-authority/context-graph-authority.js';
 
 interface DKGAgentInternals {
   localAgents: Map<string, AgentKeyRecord>;
@@ -61,7 +62,7 @@ interface DKGAgentInternals {
   // Exposed for the `agentGate` mock so we don't have to spin up a
   // full context graph + membership snapshot just to drive the
   // sender-key bootstrap path.
-  getContextGraphAgentGateAddresses(contextGraphId: string): Promise<string[] | null>;
+  resolveContextGraphAgentGateAuthority(contextGraphId: string): Promise<ContextGraphAgentGateAuthority>;
   getContextGraphOnChainPolicy(contextGraphId: string): Promise<{
     accessPolicy: number | null;
     publishPolicy: number | null;
@@ -135,10 +136,10 @@ async function bootAgentForStaleTargetTest(): Promise<{
   // log-routing test we just need both addresses to look "allowed",
   // which is exactly what the bootstrap would observe in production
   // after the chain-side join completed.
-  internals.getContextGraphAgentGateAddresses = async () => [
-    senderWallet.address,
-    recipient.agentAddress,
-  ];
+  internals.resolveContextGraphAgentGateAuthority = async () => ({
+    kind: 'available',
+    agentAddresses: [senderWallet.address, recipient.agentAddress],
+  });
   internals.getContextGraphAllowedPeers = async () => null;
   return { agent, internals, recipient, senderWallet };
 }
@@ -212,7 +213,7 @@ describe('acceptSwmSenderKeyPackage: stale-target throw type', () => {
       recipientAgentAddress: recipient.agentAddress,
       recipientKeyId: activeKeyId,
     });
-    internals.getContextGraphAgentGateAddresses = async () => null;
+    internals.resolveContextGraphAgentGateAuthority = async () => ({ kind: 'ungated' });
     internals.getContextGraphOnChainPolicy = async () => ({
       accessPolicy: 1,
       publishPolicy: 0,
@@ -234,7 +235,7 @@ describe('acceptSwmSenderKeyPackage: stale-target throw type', () => {
       recipientAgentAddress: recipient.agentAddress,
       recipientKeyId: activeKeyId,
     });
-    internals.getContextGraphAgentGateAddresses = async () => null;
+    internals.resolveContextGraphAgentGateAuthority = async () => ({ kind: 'ungated' });
     internals.getContextGraphOnChainPolicy = async () => ({
       accessPolicy: null,
       publishPolicy: null,
@@ -245,6 +246,30 @@ describe('acceptSwmSenderKeyPackage: stale-target throw type', () => {
     );
     expect(ack.accepted).toBe(false);
     expect(ack.reasonCode).toBe('not-agent-gated');
+  });
+
+  it('returns a retryable pending ACK instead of sender-not-allowed when gate authority is unavailable', async () => {
+    const { internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+    const activeKeyId = recipient.workspaceEncryptionKeys[0].encryptionKeyId;
+    const pkg = await buildSignedPackage({
+      senderWallet,
+      recipientAgentAddress: recipient.agentAddress,
+      recipientKeyId: activeKeyId,
+    });
+    // #2827: a joined member of an unregistered graph resolved its gate as
+    // unavailable, which used to collapse to an empty allowlist and a
+    // terminal `sender-not-allowed` for the graph's own curator.
+    internals.resolveContextGraphAgentGateAuthority = async () => ({
+      kind: 'unavailable',
+      reason: 'finalized-name-absence-unaccepted',
+    });
+
+    const ack = decodeSwmSenderKeyPackageAck(
+      await internals.handleSwmSenderKeyPackage(encodeSwmSenderKeyPackage(pkg), FROM_PEER_ID),
+    );
+    expect(ack.accepted).toBe(false);
+    expect(ack.reasonCode).toBe('agent-gate-pending');
+    expect(ack.reason).toContain('agent gate authority is unavailable (finalized-name-absence-unaccepted)');
   });
 
   it('does NOT throw StaleSenderKeyTargetError for an active key (decrypt failure path)', async () => {

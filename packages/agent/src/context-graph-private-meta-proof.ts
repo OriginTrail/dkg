@@ -113,7 +113,13 @@ function literalEqualsIgnoreCase(value: string, expected: string): boolean {
   return value.startsWith('"') && stripLiteral(value).trim().toLowerCase() === expected;
 }
 
-function hasActiveApprovedMemberDelegation(
+/**
+ * Whether a fetched root `_meta` snapshot proves the approved member: it is in
+ * `allowedAgent`, not revoked, and holds an active delegation bound to this
+ * node's peer id or op-key. Shared by the private definition and by a public
+ * definition accepted after a join approval.
+ */
+export function hasActiveApprovedMemberDelegation(
   contextGraphId: string,
   quads: readonly Quad[],
   rawProof: AuthoritativePrivateMetaMemberProof,

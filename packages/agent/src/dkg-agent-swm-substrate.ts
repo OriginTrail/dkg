@@ -1152,12 +1152,16 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // receiver judged from local allowedAgent/participantAgent triples and
         // permanently dropped the plaintext writes the sender is supposed to
         // send on a public CG — silently breaking member->curator SWM shares on
-        // every public/curated context graph.
-        publicAccessPolicyOnChainOracle: (cgId: string) =>
-          withRpcUsageSite(
+        // every public/curated context graph. An unregistered graph has no
+        // chain policy; its accepted owner-signed public policy is the same
+        // proof the sender's recipient resolver uses for it (#2827).
+        publicAccessPolicyOnChainOracle: async (cgId: string) => (
+          this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(cgId) === true
+          || await withRpcUsageSite(
             CG_AUTH_RPC_SITES.swmPublicOracle,
             () => this.isContextGraphPublicOnChain(cgId, createOperationContext('share')),
-          ),
+          )
+        ),
         // RFC-64 catalog authority already excludes selected CGs from legacy
         // durable catch-up. Apply the same decision to live gossip/substrate
         // delivery so a partial ambient generation cannot race ahead of an

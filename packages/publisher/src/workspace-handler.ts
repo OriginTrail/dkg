@@ -319,7 +319,9 @@ export class SharedMemoryHandler {
    * and permanently dropped those plaintext writes, which silently broke every
    * member->curator SWM share on a public/curated CG.
    *
-   * Returns true ONLY on a live public proof. Absent oracle, `false`, or a
+   * Returns true ONLY on an authenticated public proof: a live on-chain public
+   * policy or, for an unregistered graph, its accepted owner-signed public
+   * policy. Absent oracle, `false`, or a
    * throw all mean "not proven public" and keep the encryption requirement —
    * the same fail-closed discipline the sender uses, so a stale mapping or an
    * RPC flake can never become a plaintext-acceptance hole.
@@ -459,8 +461,9 @@ export class SharedMemoryHandler {
         contextGraphId: string,
       ) => Promise<ContextGraphMetaOracleRecord | null>;
       /**
-       * Live on-chain public-access proof, mirroring the sender's
-       * `isContextGraphPublicOnChain`. Optional; when omitted the receiver
+       * Authenticated public-access proof (live on-chain policy, or an
+       * unregistered graph's accepted owner-signed policy), mirroring the
+       * sender's recipient resolver. Optional; when omitted the receiver
        * keeps the pre-existing (fail-closed) behaviour and requires
        * encryption for every agent-gated CG.
        * See {@link SharedMemoryHandler#publicAccessPolicyOnChainOracle}.
@@ -2395,7 +2398,9 @@ export class SharedMemoryHandler {
   }
 
   /**
-   * True only on a LIVE on-chain proof that this CG's access policy is public.
+   * True only on an authenticated proof that this CG's access policy is
+   * public (live on-chain, or an unregistered graph's accepted owner-signed
+   * policy; see the oracle's wiring in the agent).
    *
    * Fail-closed by construction: no oracle, a `false` answer, or a throw all
    * yield `false` ("not proven public"), which keeps the encryption

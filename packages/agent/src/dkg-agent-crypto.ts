@@ -697,7 +697,16 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       contextGraphId,
       getRegisteredAuthority: () => this.resolveRegisteredContextGraphAuthority(
         contextGraphId,
-        { signal: options.signal },
+        {
+          signal: options.signal,
+          // A graph this node did not create has no local-first shortcut, so
+          // its finalized name absence is only evidence of "unregistered" when
+          // the owner-signed unregistered policy was accepted, as on the read
+          // path. Without this, every SWM gate on a joined member of an
+          // unregistered graph failed closed as unavailable (#2827).
+          allowAcceptedRfc64FinalizedAbsence:
+            this.hasAcceptedRfc64UnregisteredAuthorityV1?.(contextGraphId) === true,
+        },
       ),
       resolveRfc64PrivateRoster: () => this.resolveRfc64PrivateReadRosterV1(contextGraphId),
       getLegacyMeta: () => this.getCgMeta(contextGraphId, { signal: options.signal }),
@@ -744,7 +753,12 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       CG_AUTH_RPC_SITES.recoveryGate,
       () => this.resolveRegisteredContextGraphAuthority(
         contextGraphId,
-        { signal: options.signal },
+        {
+          signal: options.signal,
+          // Same accepted-absence rule as the agent gate (#2827).
+          allowAcceptedRfc64FinalizedAbsence:
+            this.hasAcceptedRfc64UnregisteredAuthorityV1?.(contextGraphId) === true,
+        },
       ),
     );
     if (registeredAuthority.kind === 'private') return registeredAuthority.participantAgents;
@@ -1432,7 +1446,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * avoids the resolver's "Missing public encryption key" throw for an
    * allowlisted agent whose key isn't locally available — irrelevant for
    * a public CG that never encrypts. Private graphs resolve recipients from
-   * the live roster; unavailable registered authority fails closed.
+   * the live roster; unavailable registered authority fails closed. An
+   * unregistered graph whose accepted owner-signed policy is public is
+   * treated like an on-chain public one.
    */
   async resolveWorkspaceRecipientsGated(this: DKGAgent,
     input: WorkspaceAgentRecipientResolverInput,
@@ -1464,9 +1480,20 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       () => this.resolveRegisteredContextGraphAuthority(input.contextGraphId, {
         authorityReadMode: 'finalized-index-or-live',
         requireLiveRosterForPrivate: true,
+        allowAcceptedRfc64FinalizedAbsence:
+          this.hasAcceptedRfc64UnregisteredAuthorityV1?.(input.contextGraphId) === true,
       }),
     );
     if (registeredAuthority.kind === 'unregistered') {
+      // An unregistered graph whose accepted owner-signed policy is public has
+      // public-readable SWM exactly like an on-chain public graph: approving a
+      // join writes an allowlist, but that governs publish authority, not
+      // reads. The store resolver would treat the allowlist as a read gate and
+      // start a sender-key handshake that members reject (#2827). The
+      // receiver's plaintext check accepts the same policy.
+      if (this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(input.contextGraphId) === true) {
+        return { requiresEncryption: false, recipients: [] };
+      }
       return resolveWorkspaceAgentRecipients(this.store, input);
     }
     if (registeredAuthority.kind === 'public') {
@@ -2426,10 +2453,23 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       );
     }
 
-    const agentGateAddresses = await withRpcUsageSite(
+    const agentGateAuthority = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.senderKeyAccept,
-      () => this.getContextGraphAgentGateAddresses(pkg.contextGraphId),
+      () => this.resolveContextGraphAgentGateAuthority(pkg.contextGraphId),
     );
+    if (agentGateAuthority.kind === 'unavailable') {
+      // Not knowing the gate is not evidence that either endpoint is outside
+      // it. Answering `sender-not-allowed` here made a transient authority
+      // failure look like a terminal membership decision (#2827); ask the
+      // sender to retain and retry the package instead.
+      throw new SwmSenderKeySetupRejectionError(
+        'agent-gate-pending',
+        `Context graph "${pkg.contextGraphId}" agent gate authority is unavailable (${agentGateAuthority.reason})`,
+      );
+    }
+    const agentGateAddresses = agentGateAuthority.kind === 'available'
+      ? agentGateAuthority.agentAddresses
+      : null;
     if (!agentGateAddresses) {
       // A cold private member can receive Sender Key setup after the finalized
       // chain binding but before its accepted RFC-64 roster or legacy `_meta`

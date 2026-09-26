@@ -469,6 +469,128 @@ describe('refreshMetaFromCurator', () => {
     expect(targetMutated).toBe(false);
   });
 
+  describe('public graph after a join approval (#2827)', () => {
+    const contextGraphId = '0x1111111111111111111111111111111111111111/public-p2p-join';
+    const memberAddress = '0x00000000000000000000000000000000000000a1';
+    const curatorAddress = '0x00000000000000000000000000000000000000c1';
+
+    function publicSnapshotWithMember(options: { includeMember: boolean }): Quad[] {
+      const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+      const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+      const delegation = `did:dkg:agent-delegation:${contextGraphId}:${memberAddress}`;
+      const root: Quad[] = [{
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.RDF_TYPE,
+        object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+        graph: metaGraph,
+      }, {
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+        object: '"public"',
+        graph: metaGraph,
+      }, {
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        object: `"${curatorAddress}"`,
+        graph: metaGraph,
+      }];
+      if (!options.includeMember) return root;
+      return [...root, {
+        subject: contextGraphUri,
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        object: `"${memberAddress}"`,
+        graph: metaGraph,
+      }, {
+        subject: delegation,
+        predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT,
+        object: `"${memberAddress}"`,
+        graph: metaGraph,
+      }, {
+        subject: delegation,
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER,
+        object: '"local-peer"',
+        graph: metaGraph,
+      }, {
+        subject: delegation,
+        predicate: DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT,
+        object: `"${Date.now() - 60_000}"`,
+        graph: metaGraph,
+      }];
+    }
+
+    async function refreshAfterApproval(
+      snapshot: Quad[],
+      acceptedPolicy: 'public' | 'private' | null,
+    ): Promise<{ refreshed: boolean; mutated: boolean }> {
+      let mutated = false;
+      const agent = {
+        metaRefreshTimestamps: new Map<string, number>(),
+        runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
+        peerId: 'local-peer',
+        node: {
+          libp2p: {
+            getConnections: () => [{ remotePeer: { toString: () => CURATOR_PEER_ID } }],
+          },
+        },
+        discovery: {},
+        fetchSyncPages: async () => ({
+          quads: snapshot,
+          checkpointKey: 'public-join-snapshot',
+          resumedFromOffset: 0,
+          completed: true,
+        }),
+        store: {
+          insert: async () => { mutated = true; },
+          update: async () => { mutated = true; },
+          dropGraph: async () => { mutated = true; },
+        },
+        oversizeTombstoneLog: { record: noop },
+        invalidateListContextGraphsCache: noop,
+        contextGraphMetaProjection: { markDirty: noop },
+        syncCheckpoints: new Map<string, number>(),
+        log: { warn: noop, info: noop },
+        readAcceptedRfc64CatalogAccessPolicyV1: () => acceptedPolicy,
+      };
+      const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
+        agent as never,
+        contextGraphId,
+        {
+          trustedCuratorPeerId: CURATOR_PEER_ID,
+          force: true,
+          memberProof: {
+            approvedAgentAddress: memberAddress,
+            expectedDelegateePeerId: 'local-peer',
+          },
+        },
+      );
+      return { refreshed, mutated };
+    }
+
+    it('installs the curator allowlist when the accepted policy is public and the snapshot proves the member', async () => {
+      const result = await refreshAfterApproval(publicSnapshotWithMember({ includeMember: true }), 'public');
+      expect(result.refreshed).toBe(true);
+      expect(result.mutated).toBe(true);
+    });
+
+    it('keeps rejecting a public snapshot when the accepted policy is private (no downgrade)', async () => {
+      const result = await refreshAfterApproval(publicSnapshotWithMember({ includeMember: true }), 'private');
+      expect(result.refreshed).toBe(false);
+      expect(result.mutated).toBe(false);
+    });
+
+    it('keeps rejecting a public snapshot while no authenticated policy is accepted', async () => {
+      const result = await refreshAfterApproval(publicSnapshotWithMember({ includeMember: true }), null);
+      expect(result.refreshed).toBe(false);
+      expect(result.mutated).toBe(false);
+    });
+
+    it('rejects a public snapshot that does not yet prove the approved member', async () => {
+      const result = await refreshAfterApproval(publicSnapshotWithMember({ includeMember: false }), 'public');
+      expect(result.refreshed).toBe(false);
+      expect(result.mutated).toBe(false);
+    });
+  });
+
   it('uses a trusted join-approved curator directly and bypasses the auth-probe cooldown', async () => {
     const contextGraphId = 'private/trusted-curator-bootstrap';
     const metaGraph = contextGraphMetaGraphUri(contextGraphId);

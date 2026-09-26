@@ -21,6 +21,7 @@ import {
   SYNC_TOTAL_TIMEOUT_MS,
 } from './dkg-agent-constants.js';
 import {
+  hasActiveApprovedMemberDelegation,
   hasAuthoritativePrivateMetaDefinition,
   type AuthoritativePrivateMetaMemberProof,
 } from './context-graph-private-meta-proof.js';
@@ -151,6 +152,8 @@ interface CuratorMetaRefreshAgent {
   ): void;
   recordCgWireId?(localCgId: string, wireId: string | null): void;
   persistContextGraphSubscription?(contextGraphId: string): void;
+  /** Access policy of this node's accepted, authenticated RFC-64 authority. */
+  readAcceptedRfc64CatalogAccessPolicyV1?(contextGraphId: string): 'public' | 'private' | null;
 }
 
 interface CuratorMetaRefreshState {
@@ -507,11 +510,21 @@ async function fetchAuthoritativeMetaSnapshot(
     contextGraphId,
     controlMetaQuads,
   );
-  // Supplying memberProof selects the fail-closed private post-approval
-  // contract. A public-only snapshot must not satisfy that request: public
-  // subscriptions reach this refresh without a member proof.
-  const acceptsAuthoritativePublicDefinition = options.memberProof === undefined
-    && hasAuthoritativePublicDefinition;
+  // Supplying memberProof selects the fail-closed post-approval contract.
+  // Public subscriptions reach this refresh without a member proof. A join can
+  // also be approved on a PUBLIC graph, whose allowlist governs publishing
+  // rather than reads; its public snapshot satisfies the post-approval
+  // contract only when this node's accepted, authenticated policy already says
+  // public and the snapshot proves the approved member exactly as a private
+  // one must (#2827). An accepted private or unknown policy keeps rejecting it,
+  // so a peer cannot downgrade a private graph by serving a public definition.
+  const acceptsAuthoritativePublicDefinition = hasAuthoritativePublicDefinition && (
+    options.memberProof === undefined
+    || (
+      agent.readAcceptedRfc64CatalogAccessPolicyV1?.(contextGraphId) === 'public'
+      && hasActiveApprovedMemberDelegation(contextGraphId, controlMetaQuads, options.memberProof)
+    )
+  );
   // A public-only bootstrap never installs a private definition, however
   // complete: the caller's accepted policy already says the graph is public.
   const hasAuthoritativePrivateDefinition = options.requirePublicDefinition !== true
