@@ -10,6 +10,7 @@ on:
       - 'packages/chain/test/rpc-http1-dispatcher.unit.test.ts'
       - 'packages/chain/test/helpers/local-tls.ts'
       - 'packages/chain/test/helpers/chain-rpc-fetch-child.mjs'
+      - 'packages/chain/test/fixtures/localhost-tls/**'
       # Inputs that decide installation and test discovery.
       - 'pnpm-lock.yaml'
       - 'packages/chain/package.json'

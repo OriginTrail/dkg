@@ -9,12 +9,19 @@
  * HTTP/2, a path no release was tested on, and one such daemon stalled in
  * Node's native HTTP/2 write buffering until its worker was killed.
  *
- * undici 8 dispatchers take `allowH2: false` per request. So where `fetch` is
- * undici 8 or later, a chain RPC call goes through the dispatcher `fetch` would
- * use anyway, with that option added: Node's default agent, the proxy agent of
- * `NODE_USE_ENV_PROXY` / `--use-env-proxy`, or a dispatcher the application
- * installed. Proxy routing, TLS settings and interceptors stay as configured;
- * only HTTP/2 is refused. On Node 22 and 24 `fetch` runs unchanged.
+ * Where `fetch` is undici 8 or later, a chain RPC call goes through the
+ * dispatcher `fetch` would use anyway, with `allowH2: false` added to the
+ * request. undici's dispatchers for many origins honour it: an `Agent`
+ * (Node's default) uses a separate HTTP/1.1-only pool per origin, built from
+ * its own options, and a `ProxyAgent`, or the `EnvHttpProxyAgent` that
+ * `NODE_USE_ENV_PROXY` / `--use-env-proxy` installs, connects the tunnelled
+ * endpoint with HTTP/1.1 only.
+ * Proxy routing, TLS settings and interceptors stay as configured; only
+ * HTTP/2 is refused. A `Pool` or `Client` fixes its protocol when it connects
+ * and sends every request to its own origin, so one installed as the global
+ * dispatcher pins the transport of every fetch in the process, and chain RPC
+ * calls keep the protocol it was configured with. On Node 22 and 24 `fetch`
+ * runs unchanged.
  */
 
 type Dispatch = (options: Record<string, unknown>, handler: object) => boolean;

@@ -172,11 +172,7 @@ describe('chain RPC fetches against a server that offers HTTP/2 (#2828)', () => 
         const stdout = await new Promise<string>((resolve, reject) => {
           execFile(
             process.execPath,
-            [
-              fileURLToPath(new URL('./helpers/chain-rpc-fetch-child.mjs', import.meta.url)),
-              server.url,
-              new URL('../src/rpc-http1-dispatcher.ts', import.meta.url).href,
-            ],
+            [fileURLToPath(new URL('./helpers/chain-rpc-fetch-child.mjs', import.meta.url)), server.url],
             { env, timeout: 20_000 },
             (error, out, err) => (error ? reject(new Error(`${error.message}\n${err}`)) : resolve(out)),
           );
