@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { approvedMemberAcceptanceFromAuthority } from '../src/context-graph-member-proof.js';
+import {
+  ApprovedMemberAcceptance,
+  resolveApprovedMemberAcceptanceDecision,
+  unprovenApprovedMemberAcceptance,
+} from '../src/internal/context-graph-authority/approved-member-acceptance.js';
 import {
   DKG_ONTOLOGY,
   contextGraphDataGraphUri,
@@ -34,18 +38,55 @@ function authoritativePublicMetaQuads(contextGraphId: string): Quad[] {
 }
 
 describe('approved-member acceptance (#2831 review)', () => {
-  it('keeps its own frozen copy of the proof', () => {
-    const proof = {
-      approvedAgentAddress: '0x00000000000000000000000000000000000000a1',
-      expectedDelegateePeerId: '12D3KooWAcceptanceCopyPeer',
-    };
-    const acceptance = approvedMemberAcceptanceFromAuthority(proof, 'public');
+  const proof = () => ({
+    approvedAgentAddress: '0x00000000000000000000000000000000000000a1',
+    expectedDelegateePeerId: '12D3KooWAcceptanceCopyPeer',
+  });
 
-    proof.approvedAgentAddress = '0x00000000000000000000000000000000000000b2';
+  it('keeps its own frozen copy of the proof', async () => {
+    const callerProof = proof();
+    const acceptance = await resolveApprovedMemberAcceptanceDecision(
+      callerProof,
+      async () => ({ kind: 'plaintext' as const }),
+    );
 
+    callerProof.approvedAgentAddress = '0x00000000000000000000000000000000000000b2';
+
+    expect(acceptance.accessPolicy).toBe('public');
     expect(acceptance.proof.approvedAgentAddress).toBe('0x00000000000000000000000000000000000000a1');
     expect(Object.isFrozen(acceptance)).toBe(true);
     expect(Object.isFrozen(acceptance.proof)).toBe(true);
+  });
+
+  it('is public only from a plaintext transport authority, and cannot be built directly', async () => {
+    for (const transport of [
+      { kind: 'private-roster' as const, participantAgents: [] },
+      { kind: 'legacy-unregistered' as const },
+      { kind: 'unavailable' as const, reason: 'chain-access-policy-unavailable' as const },
+    ]) {
+      await expect(resolveApprovedMemberAcceptanceDecision(proof(), async () => transport))
+        .resolves.toMatchObject({ accessPolicy: 'unproven' });
+    }
+    await expect(resolveApprovedMemberAcceptanceDecision(proof(), async () => {
+      throw new Error('index unavailable');
+    })).resolves.toMatchObject({ accessPolicy: 'unproven' });
+    await expect(unprovenApprovedMemberAcceptance(proof()).stillHolds()).resolves.toBe(true);
+
+    const Unkeyed = ApprovedMemberAcceptance as unknown as new (...args: unknown[]) => unknown;
+    expect(() => new Unkeyed(Symbol('forged'), proof(), 'public', async () => true)).toThrow(TypeError);
+  });
+
+  it('reads its authority again when asked whether it still holds', async () => {
+    let publicNow = true;
+    const acceptance = await resolveApprovedMemberAcceptanceDecision(
+      proof(),
+      async () => (publicNow
+        ? { kind: 'plaintext' as const }
+        : { kind: 'private-roster' as const, participantAgents: [] }),
+    );
+    await expect(acceptance.stillHolds()).resolves.toBe(true);
+    publicNow = false;
+    await expect(acceptance.stillHolds()).resolves.toBe(false);
   });
 });
 

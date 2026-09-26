@@ -202,9 +202,9 @@ import {
   type ConfirmContextGraphMetadataInput,
 } from './context-graph-meta-confirmation.js';
 import {
-  approvedMemberAcceptanceFromAuthority,
+  resolveApprovedMemberAcceptanceDecision,
   type ApprovedMemberAcceptance,
-} from './context-graph-member-proof.js';
+} from './internal/context-graph-authority/approved-member-acceptance.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -10966,17 +10966,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // The signed join flow always binds the current libp2p peer, so an
       // adapter that cannot expose its op-key still has a usable proof.
     }
-    const transport = await this.resolveSwmTransportAuthority(
-      contextGraphId,
-      { authorityReadMode: 'finalized-index-or-live' },
-    ).catch(() => undefined);
-    return approvedMemberAcceptanceFromAuthority(
+    return resolveApprovedMemberAcceptanceDecision(
       {
         approvedAgentAddress,
         expectedDelegateePeerId: this.peerId,
         expectedDelegateeOpKey,
       },
-      transport?.kind === 'plaintext' ? 'public' : 'unproven',
+      () => this.resolveSwmTransportAuthority(
+        contextGraphId,
+        { authorityReadMode: 'finalized-index-or-live' },
+      ),
     );
   }
 

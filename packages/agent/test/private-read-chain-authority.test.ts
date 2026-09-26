@@ -7,7 +7,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/index.js';
-import { approvedMemberAcceptanceFromAuthority } from '../src/context-graph-member-proof.js';
+import { resolveApprovedMemberAcceptanceDecision } from '../src/internal/context-graph-authority/approved-member-acceptance.js';
 import {
   CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS,
   CHAIN_POLICY_READ_TIMEOUT_MS,
@@ -119,6 +119,14 @@ function installFinalizedAuthorityReader(
     whenIdle: vi.fn(async () => undefined),
   });
   return readContextGraphAuthorityIndexSnapshots;
+}
+
+/** A public acceptance, built the only way one can be: through the resolver. */
+function publicAcceptanceFor(
+  proof: { approvedAgentAddress: string; expectedDelegateePeerId: string },
+  _policy: 'public',
+) {
+  return resolveApprovedMemberAcceptanceDecision(proof, async () => ({ kind: 'plaintext' as const }));
 }
 
 describe('private read authorization uses the on-chain participant roster', () => {
@@ -1601,7 +1609,7 @@ describe('private read authorization uses the on-chain participant roster', () =
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(true);
     const hasConfirmedMeta = vi.spyOn(agent, 'hasConfirmedApprovedMemberMetaState').mockResolvedValue(true);
-    const acceptance = approvedMemberAcceptanceFromAuthority(
+    const acceptance = await publicAcceptanceFor(
       { approvedAgentAddress: local.agentAddress.toLowerCase(), expectedDelegateePeerId: '12D3KooWRestartPendingMember' },
       'public',
     );
@@ -1677,7 +1685,7 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
 
     vi.spyOn(agent, 'refreshMetaFromCurator').mockResolvedValue(true);
-    vi.spyOn(agent, 'resolveApprovedMemberAcceptance').mockResolvedValue(approvedMemberAcceptanceFromAuthority(
+    vi.spyOn(agent, 'resolveApprovedMemberAcceptance').mockResolvedValue(await publicAcceptanceFor(
       { approvedAgentAddress: local.agentAddress.toLowerCase(), expectedDelegateePeerId: '12D3KooWPreJoinPublicDefinitionMember' },
       'public',
     ));
@@ -1735,7 +1743,7 @@ describe('private read authorization uses the on-chain participant roster', () =
 
     vi.spyOn(agent, 'refreshMetaFromCurator').mockResolvedValue(true);
     vi.spyOn(agent, 'hasConfirmedApprovedMemberMetaState').mockResolvedValue(true);
-    vi.spyOn(agent, 'resolveApprovedMemberAcceptance').mockResolvedValue(approvedMemberAcceptanceFromAuthority(
+    vi.spyOn(agent, 'resolveApprovedMemberAcceptance').mockResolvedValue(await publicAcceptanceFor(
       { approvedAgentAddress: local.agentAddress.toLowerCase(), expectedDelegateePeerId: `12D3KooWPostRefresh${decision.outcome}` },
       'public',
     ));

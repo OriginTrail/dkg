@@ -121,46 +121,6 @@ export function hasActiveApprovedMemberDelegation(
   return namesApprovedAgent && issuedAtIsActive && expiryIsActive && (peerMatches || keyMatches);
 }
 
-/**
- * The authenticated access policy an approved member is judged under when it
- * accepts the curator's snapshot and when it completes its join. `public` only
- * when active accepted RFC-64 authority or the registered chain proves it;
- * `unproven` admits nothing but the complete private definition, so a peer
- * cannot downgrade a private graph by serving a public definition.
- */
-export type ApprovedMemberAccessPolicy = 'public' | 'unproven';
-
-/**
- * One approved member's proof together with the policy it is judged under.
- * The agent's resolver (resolveApprovedMemberAcceptance) builds it once per
- * join attempt from this node's approval binding and authenticated authority,
- * and the snapshot refresh and join completion both consume that same value.
- * The type does not prove where a `public` policy came from: only that
- * resolver should build one. The proof is copied and frozen, so the value
- * cannot change after it is built.
- */
-export interface ApprovedMemberAcceptance {
-  readonly proof: Readonly<ApprovedMemberProof>;
-  readonly accessPolicy: ApprovedMemberAccessPolicy;
-}
-
-/**
- * Build an acceptance from a policy the caller derived from authenticated
- * authority (the agent's approved-member resolver), never from peer-served
- * metadata. The proof is copied and frozen.
- */
-export function approvedMemberAcceptanceFromAuthority(
-  proof: ApprovedMemberProof,
-  accessPolicy: ApprovedMemberAccessPolicy,
-): ApprovedMemberAcceptance {
-  return Object.freeze({ proof: Object.freeze({ ...proof }), accessPolicy });
-}
-
-/** An acceptance that admits only the complete private definition. */
-export function unprovenApprovedMemberAcceptance(proof: ApprovedMemberProof): ApprovedMemberAcceptance {
-  return approvedMemberAcceptanceFromAuthority(proof, 'unproven');
-}
-
 /** The store-side ASK fragment for the same proof. */
 export function renderApprovedMemberProofSparql(
   contextGraphId: string,

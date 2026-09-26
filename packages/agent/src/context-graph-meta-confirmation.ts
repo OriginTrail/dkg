@@ -18,10 +18,9 @@ import type { ActivePublicContextGraphChainProof } from
   './active-public-context-graph-chain-proof.js';
 import { isPublicMetaDurabilityPending } from
   './context-graph-public-meta-repair.js';
-import type {
-  ApprovedMemberAcceptance,
-  ApprovedMemberProof,
-} from './context-graph-member-proof.js';
+import type { ApprovedMemberProof } from './context-graph-member-proof.js';
+import type { ApprovedMemberAcceptance } from
+  './internal/context-graph-authority/approved-member-acceptance.js';
 
 /**
  * What a confirmation is for.
@@ -31,12 +30,12 @@ import type {
  *   on membership; `rejectUnregisteredPlaceholder` additionally demands a
  *   chain proof before a public definition next to a local placeholder counts.
  * - `approved-member`: join bootstrap completion (#2831 review), judged with
- *   the same `acceptance` the snapshot refresh used. Only a definition
- *   carrying that member proof confirms: the private definition, or, under an
- *   authenticated `public` policy, the public one with the same allowlist
- *   entry and delegation. Stored triples never authenticate the policy
- *   themselves. Unless this node still holds the approval the acceptance
- *   names, nothing confirms.
+ *   the same `acceptance` the snapshot refresh used. Only the one definition
+ *   that acceptance admits confirms, carrying its member proof: the public
+ *   definition for a public acceptance, whose authority must still hold now,
+ *   and the complete private definition otherwise. Stored triples never
+ *   authenticate the policy themselves. Unless this node still holds the
+ *   approval the acceptance names, nothing confirms.
  */
 export type ConfirmContextGraphMetadataInput =
   | {
@@ -79,17 +78,15 @@ export async function confirmContextGraphMetadataV1(
       dependencies.localApprovedAgentByContextGraph.get(contextGraphId)?.toLowerCase()
         !== proof.approvedAgentAddress.toLowerCase()
     ) return false;
-    return await findAuthoritativeDefinition(
+    const confirmed = await findAuthoritativeDefinition(
       dependencies,
       contextGraphId,
-      [
-        { definition: 'private', memberProof: proof },
-        ...(accessPolicy === 'public'
-          ? [{ definition: 'public', memberProof: proof } as const]
-          : []),
-      ],
+      [{ definition: accessPolicy === 'public' ? 'public' : 'private', memberProof: proof }],
       'agent.contextGraph.confirmedMeta.approvedMember',
     ) !== null;
+    // Readiness is declared now, so the authority behind a public acceptance
+    // must still hold now, not only when the join attempt began.
+    return confirmed && await input.acceptance.stillHolds();
   }
 
   const memberProof = await resolveApprovedMemberProof(dependencies, contextGraphId);
