@@ -34,8 +34,8 @@ import {
   readFinalizationRecoveryCapacity,
   readFinalizationRecoveryDeferredCapacity,
   resolveFinalizationRecoveryRetentionPolicy,
+  type FinalizationRecoveryRetentionOptions,
   type FinalizationRecoveryRetentionPolicy,
-  type SqliteFinalizationRecoveryStoreOptions,
 } from './finalization-recovery-sqlite-policy.js';
 import {
   insertLiveFinalizationWithinTransaction,
@@ -47,9 +47,15 @@ import {
 export type {
   FinalizationRecoveryDisplacement,
 } from './finalization-recovery-sqlite-displacement.js';
-export type {
-  SqliteFinalizationRecoveryStoreOptions,
-} from './finalization-recovery-sqlite-policy.js';
+
+/** Observers the store calls after it commits a change; a throwing observer never undoes it. */
+export interface SqliteFinalizationRecoveryStoreObservers {
+  /** Called after a live entry has been parked to admit a new finalization. */
+  onDisplaced?: (displacement: FinalizationRecoveryDisplacement) => void;
+}
+
+export type SqliteFinalizationRecoveryStoreOptions =
+  FinalizationRecoveryRetentionOptions & SqliteFinalizationRecoveryStoreObservers;
 
 const DUE_FINALIZATION_SQL_PREDICATE = `
   (
@@ -101,7 +107,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
   #closePromise: Promise<void> | undefined;
   #mutationTail: Promise<void> = Promise.resolve();
   readonly #policy: FinalizationRecoveryRetentionPolicy;
-  readonly #onDisplaced: SqliteFinalizationRecoveryStoreOptions['onDisplaced'];
+  readonly #onDisplaced: SqliteFinalizationRecoveryStoreObservers['onDisplaced'];
 
   private constructor(
     readonly databasePath: string,

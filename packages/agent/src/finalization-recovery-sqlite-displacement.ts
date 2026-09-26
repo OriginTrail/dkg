@@ -6,7 +6,10 @@ import {
   type FinalizationRecoveryRetentionPolicy,
 } from './finalization-recovery-sqlite-policy.js';
 import { parkLiveFinalizationWithinTransaction } from './finalization-recovery-sqlite-rows.js';
-import type { FinalizationRecoveryReceiveInput } from './finalization-recovery-store.js';
+import type {
+  FinalizationRecoveryFailureCode,
+  FinalizationRecoveryReceiveInput,
+} from './finalization-recovery-store.js';
 
 const MAX_DISPLACEMENTS_PER_ADMISSION = 8;
 
@@ -15,7 +18,7 @@ export interface FinalizationRecoveryDisplacement {
   readonly key: string;
   readonly ual: string;
   readonly contextGraphId: string;
-  readonly failureSignature: string;
+  readonly failureSignature: FinalizationRecoveryFailureCode;
   readonly failureStreak: number;
   readonly lastError: string | null;
   readonly admittedKey: string;
@@ -27,7 +30,8 @@ interface DisplaceableRow {
   ual: string;
   context_graph_id: string;
   source_peer_id: string | null;
-  failure_signature: string;
+  // The candidate query admits only the policy's displaceable signatures.
+  failure_signature: FinalizationRecoveryFailureCode;
   failure_streak: number;
   last_error: string | null;
   envelope_bytes: number;

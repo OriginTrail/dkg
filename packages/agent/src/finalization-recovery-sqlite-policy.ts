@@ -1,5 +1,4 @@
 import type { DatabaseSync } from 'node:sqlite';
-import type { FinalizationRecoveryDisplacement } from './finalization-recovery-sqlite-displacement.js';
 import {
   FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD,
   type FinalizationRecoveryFailureCode,
@@ -24,7 +23,7 @@ const DEFAULT_DISPLACE_MIN_AGE_MS = 5 * 60 * 1000;
 const DEFAULT_DISPLACEABLE_FAILURE_SIGNATURES: readonly FinalizationRecoveryFailureCode[] =
   Object.freeze(['workspace-unavailable']);
 
-export interface SqliteFinalizationRecoveryStoreOptions {
+export interface FinalizationRecoveryRetentionOptions {
   maxEntries?: number;
   maxTotalBytes?: number;
   maxEnvelopeBytes?: number;
@@ -44,8 +43,6 @@ export interface SqliteFinalizationRecoveryStoreOptions {
   displaceMinAgeMs?: number;
   /** Failure signatures whose entries may be displaced; empty disables displacement. */
   displaceableFailureSignatures?: readonly FinalizationRecoveryFailureCode[];
-  /** Called after a live entry has been parked to admit a new finalization. */
-  onDisplaced?: (displacement: FinalizationRecoveryDisplacement) => void;
   now?: () => number;
 }
 
@@ -81,7 +78,7 @@ function positiveInteger(value: number | undefined, fallback: number): number {
 }
 
 export function resolveFinalizationRecoveryRetentionPolicy(
-  options: SqliteFinalizationRecoveryStoreOptions,
+  options: FinalizationRecoveryRetentionOptions,
 ): FinalizationRecoveryRetentionPolicy {
   return {
     maxEntries: positiveInteger(options.maxEntries, DEFAULT_MAX_ENTRIES),
