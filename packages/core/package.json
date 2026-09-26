@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-core",
-  "version": "10.0.19",
+  "version": "10.0.20",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -19,6 +19,11 @@
       "types": "./dist/identity-wallet-contract-interface.d.ts",
       "import": "./dist/identity-wallet-contract-interface.js",
       "default": "./dist/identity-wallet-contract-interface.js"
+    },
+    "./daemon-request-deadlines": {
+      "types": "./dist/daemon-request-deadlines.d.ts",
+      "import": "./dist/daemon-request-deadlines.js",
+      "default": "./dist/daemon-request-deadlines.js"
     },
     "./query-catalog-parameters": {
       "types": "./dist/query-catalog-parameters.d.ts",

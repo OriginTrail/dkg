@@ -96,6 +96,10 @@ jobs:
         if: matrix.evidence
         run: pnpm typecheck:gate0:rfc64-persistence-lifecycle
 
+      - name: Test Gate 0 lifecycle harness
+        if: matrix.evidence
+        run: pnpm test:gate0:rfc64-persistence-lifecycle:unit
+
       - name: Generate Gate 0 persistence evidence
         if: matrix.evidence
         timeout-minutes: 20

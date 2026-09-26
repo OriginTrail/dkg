@@ -668,12 +668,25 @@ describe('core VM-promotion guarantees', () => {
 
   describe('ACK promotion audit', () => {
     it('backfills public namespaces holding ACK copies, skips curated ones, and is idempotent', async () => {
-      const internals = await boot();
+      const internals = await boot() as Internals & Record<string, any>;
       const policy = recorder(async (id: bigint) => (id === 56n ? 1 : 0));
       internals.chain.getContextGraphAccessPolicy = policy;
       internals.chain.getKAContextGraphId = async () => 0n;
       // A grandfathered cleartext namespace (no signed target) resolves through
-      // the ontology on adapters without a finalized authority index.
+      // the ontology on adapters without a finalized authority index, as a
+      // claim this chain proves (#2777): slot 57 commits the namespace's name,
+      // as this node read it from its chain.
+      internals.onChainContextGraphFacts.set('57', {
+        onChainId: '57',
+        nameHash: nameHash('named-public'),
+        owner: null,
+        accessPolicy: 0,
+        publishPolicy: null,
+        publishAuthority: null,
+        createdAt: null,
+        active: true,
+        observedAtBlock: 1,
+      });
       await internals.store.insert([{
         subject: 'did:dkg:context-graph:named-public',
         predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
@@ -1391,14 +1404,27 @@ describe('core VM-promotion guarantees', () => {
     });
 
     it('accepts a graph without a committed name only through a local binding', async () => {
-      const internals = await boot();
+      const internals = await boot() as Internals & Record<string, any>;
+      // An ontology claim is not a local binding (#2777): the shared ontology
+      // graph carries claims from every network, and a slot that commits no
+      // name proves none of them. Nothing contradicts it either: retryable.
       await internals.store.insert([{
         subject: 'did:dkg:context-graph:locally-bound',
         predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
         object: '"60"',
         graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
       }]);
+      await expect(internals.ensureStorageAckVmPromotion({
+        contextGraphId: '60', swmGraphId: 'locally-bound', operation: 'publish',
+      })).resolves.toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE });
 
+      // This node's own subscription to the graph under that id is one.
+      internals.setContextGraphSubscription('locally-bound', {
+        syncMode: 'always-on',
+        subscribed: true,
+        synced: false,
+        onChainId: '60',
+      });
       await expect(internals.ensureStorageAckVmPromotion({
         contextGraphId: '60', swmGraphId: 'locally-bound', operation: 'publish',
       })).resolves.toEqual({ ok: true });

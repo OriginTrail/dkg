@@ -1443,11 +1443,7 @@ export class ContextGraphMethods extends DKGAgentBase {
         subject: contextGraphUri,
         predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
       });
-      const sub = this.subscribedContextGraphs.get(id);
-      if (sub) {
-        this.forceClearVmReconcileStateForContextGraph(id);
-        this.setContextGraphSubscription(id, { ...sub, onChainId: undefined, lastReconciledOrdinal: 0 });
-      }
+      this.unbindSubscriptionOnChainId(id);
     }
 
     // LU-2: edge-owned CG pattern — no `participantIdentityIds`/

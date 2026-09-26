@@ -6,6 +6,8 @@ import { Rfc64SwmRecoveryRuntimeV1 } from
 import { Rfc64BackgroundWorkDispatcherV1 } from
   '../src/rfc64/background-work-dispatcher-v1.js';
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
+import { SlotFactsIndex } from '../src/context-graph-claim-proof.js';
+import { contextGraphNameCommitmentOf } from '../src/context-graph-name-candidate.js';
 import { Rfc64AuthorityReadCoordinatorV1 } from
   '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
 export const LOCAL_ID = 'selected-public-cg';
@@ -125,6 +127,9 @@ export function selectedFixture(resolved: bigint | null = 42n) {
     chain,
     rfc64BackgroundWorkDispatcherV1: new Rfc64BackgroundWorkDispatcherV1(),
     rfc64SwmRecoveryRuntimeV1,
+    // What this node read from its own chain, per on-chain id. Empty unless a
+    // scenario proves a slot (see `proveOnChainSlot`).
+    onChainContextGraphFacts: new SlotFactsIndex<{ nameHash: string | null }>(),
     subscribedContextGraphs: new Map([[LOCAL_ID, subscription]]),
     localContextGraphProvenance: {
       created: new Set<string>(),
@@ -151,6 +156,7 @@ export function selectedFixture(resolved: bigint | null = 42n) {
     reconcileCursors,
     selectedVmReconcileCursors: new Map(),
     persistContextGraphSubscriptionStrict: vi.fn(async () => undefined),
+    persistContextGraphSyncStateStrict: vi.fn(async () => undefined),
     emitReplication: vi.fn(),
     forceClearVmReconcileStateForContextGraph: vi.fn((localId: string) => {
       reconcileCursors.delete(localId);
@@ -190,4 +196,18 @@ export function getOnChainId(
   options?: { signal?: AbortSignal },
 ): Promise<string | null> {
   return fixture.agent.getContextGraphOnChainId(requestedId, options);
+}
+
+/**
+ * Record that this node's chain commits `nameHash` at `onChainId`, as storage
+ * enumeration or the live event would. An ontology `OnChainId` claim counts
+ * only for a slot proven this way, and the proof is the real name commitment
+ * keccak256(utf8(id)), which the default commits for `LOCAL_ID`.
+ */
+export function proveOnChainSlot(
+  fixture: ReturnType<typeof selectedFixture>,
+  onChainId: string,
+  nameHash: string = contextGraphNameCommitmentOf(LOCAL_ID),
+): void {
+  fixture.agent.onChainContextGraphFacts.set(onChainId, { nameHash });
 }

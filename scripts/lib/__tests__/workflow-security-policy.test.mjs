@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
 import {
   GitHubApiError,
@@ -25,9 +24,8 @@ import {
   rulesetIdsRequiringDetails,
   TESTNET_CANARY_ROLLOUT_POLICY,
 } from '../../ci/validate-delta-rollout-ruleset.mjs';
+import { REPO_ROOT, TRUSTED_CI_CONTROLLER_SHA } from './ci-plan-fixtures.mjs';
 
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
-const CONTROLLER_SHA = 'a53dde2192b2c8f7e30c64543b83cf26773a1f89';
 
 function rulesetDetail(id, overrides = {}) {
   return {
@@ -56,7 +54,7 @@ function evaluateDeltaRules(rules, rulesets = rulesetDetailsFor(rules)) {
 }
 
 function controllerCheckout({
-  ref = CONTROLLER_SHA,
+  ref = TRUSTED_CI_CONTROLLER_SHA,
   repository = TESTNET_CANARY_ROLLOUT_POLICY.repository,
   uses = 'actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0',
   quotedPath = false,
@@ -118,7 +116,7 @@ test('controller validation models quoted and id-first YAML and ignores unrelate
       planCheckout: controllerCheckout({ quotedPath: true, idFirst: true }),
     }),
   }]);
-  assert.equal(result.ref, CONTROLLER_SHA);
+  assert.equal(result.ref, TRUSTED_CI_CONTROLLER_SHA);
   assert.equal(result.checkouts.length, 2);
 
   const reordered = validateTrustedControllerPins([{
@@ -127,7 +125,7 @@ test('controller validation models quoted and id-first YAML and ignores unrelate
       planCheckout: controllerCheckout({ controllerFiles: [...CONTROLLER_POLICY_FILES].reverse() }),
     }),
   }]);
-  assert.equal(reordered.ref, CONTROLLER_SHA, 'manifest membership must not impose file ordering');
+  assert.equal(reordered.ref, TRUSTED_CI_CONTROLLER_SHA, 'manifest membership must not impose file ordering');
 });
 
 test('controller validation rejects missing, inconsistent, fake, and over-broad checkouts', () => {
@@ -198,7 +196,7 @@ test('controller validation rejects missing, inconsistent, fake, and over-broad 
   );
 });
 
-test('repository workflows expose one canonical protected-history controller pin', () => {
+test('repository workflows expose one canonical controller pin', () => {
   const result = validateTrustedControllerPins([
     {
       sourceName: 'ci.yml',
@@ -209,7 +207,7 @@ test('repository workflows expose one canonical protected-history controller pin
       source: fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/evm-integration.yml'), 'utf8'),
     },
   ]);
-  assert.equal(result.ref, CONTROLLER_SHA);
+  assert.equal(result.ref, TRUSTED_CI_CONTROLLER_SHA);
   assert.equal(result.checkouts.length, 4);
   // The security-reviewed controller boundary, file by file.
   assert.deepEqual([...CONTROLLER_POLICY_FILES].sort(), [
@@ -582,7 +580,7 @@ test('policy report renderer owns clean, drift, safeguard, and acquisition statu
     version: 2,
     policy: TESTNET_CANARY_ROLLOUT_POLICY,
     controller: {
-      pin: CONTROLLER_SHA,
+      pin: TRUSTED_CI_CONTROLLER_SHA,
       protectedBranches: ['main', 'testnet-canary'],
       freshnessBranch: 'testnet-canary',
     },

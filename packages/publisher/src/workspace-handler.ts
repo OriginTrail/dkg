@@ -34,6 +34,7 @@ import {
 import type { EncryptedWorkspacePayloadMsg, GossipEnvelopeMsg, OperationContext, SwmSenderKeyMessageMsg, WorkspaceCASConditionMsg, WorkspacePublishRequestMsg, WorkspaceRecipientEncryptionKey } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
 import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
+import { acceptIncomingPublicQuads } from './incoming-public-copy.js';
 import { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 import {
   generateSubGraphRegistration,
@@ -1509,7 +1510,9 @@ export class SharedMemoryHandler {
         });
         onPhase?.('validate', 'end');
 
-        const normalized = quads.map((q) => ({ ...q, graph: swmGraph }));
+        // Validated as received; record and persist it in the form the store
+        // returns it in.
+        const normalized = acceptIncomingPublicQuads(quads).map((q) => ({ ...q, graph: swmGraph }));
         const publicDigest = workspacePublicQuadsDigest(
           normalized.map((quad) => ({ ...quad, graph: '' })),
         );

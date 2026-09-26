@@ -1571,6 +1571,15 @@ export interface DKGAgentConfig {
    * remains available. Env DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT wins.
    */
   syncSystemContextGraphsOnConnect?: boolean;
+  /**
+   * Fetch the `agents` phonebook once, bounded and on demand, when a public
+   * wallet-scoped Context Graph needs its owner's profile to reach holders
+   * (subscribe, saved-subscription restore, or VM recovery with an empty
+   * curator tier). Default true; inert when `agents` already syncs on every
+   * connect (see `syncSystemContextGraphsOnConnect`). Env
+   * DKG_ON_DEMAND_AGENTS_PHONEBOOK wins.
+   */
+  onDemandAgentsPhonebook?: boolean;
   /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
   durableSyncEnabled?: boolean;
   /**
@@ -1924,6 +1933,18 @@ export interface DKGAgentConfig {
    * `DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS`. `0` disables the cap.
    */
   maxRehydratedContextGraphSubscriptions?: number;
+  /**
+   * How long (ms) startup rehydration may wait on the chain for persisted
+   * subscriptions' read authority before the agent finishes starting. Rows it
+   * has not resolved by then stay dormant as `authorityUnavailable`, and the
+   * background authority recovery resolves and activates them after start, so
+   * a large backlog of persisted rows no longer holds the node's start (and
+   * its API) for minutes. Rows with a durable join approval are always
+   * resolved during startup. Default
+   * `DEFAULT_REHYDRATION_STARTUP_AUTHORITY_BUDGET_MS` (10 s). `0` removes the
+   * budget: startup resolves every row, as before.
+   */
+  contextGraphSubscriptionRehydrationAuthorityBudgetMs?: number;
   /** Durable local cache for nodes/agents known to be members of a context graph. */
   contextGraphMembershipStore?: ContextGraphMembershipStore;
   /** Durable, fail-closed per-CG curator join policy and admission audit store. */

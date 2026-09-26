@@ -2670,6 +2670,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
+   * Inverse of {@link bindSubscriptionOnChainId}: drop a local CG's on-chain
+   * id together with every piece of reconcile progress made against it. The
+   * persisted watermark and the in-memory cursor count ordinals of the graph
+   * that id named, so neither may survive the id. The canonical setter
+   * persists the unbound row.
+   */
+  unbindSubscriptionOnChainId(this: DKGAgent, localCgId: string): void {
+    const sub = this.subscribedContextGraphs.get(localCgId);
+    if (sub === undefined) return;
+    this.forceClearVmReconcileStateForContextGraph(localCgId);
+    this.setContextGraphSubscription(localCgId, { ...sub, onChainId: undefined, lastReconciledOrdinal: 0 });
+  }
+
+  /**
    * Install a reverse-derived VM candidate without promoting it to the shared
    * authoritative `onChainId` field. The candidate is process-local and every
    * VM use revalidates it against the current complete name-hash inventory.
@@ -3161,10 +3175,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (targetOnChainId !== undefined && resolved.onChainId !== String(targetOnChainId)) return null;
     if (resolved.provenance !== 'reverse-name-hash') {
       try {
-        await this.persistContextGraphSubscriptionStrict(
+        // An on-demand subscription binds in memory only; durable rows are
+        // saved before the binding becomes visible.
+        await this.persistContextGraphSyncStateStrict(
           localCgId,
           { ...sub, onChainId: resolved.onChainId },
-          undefined,
+          'on-chain id binding',
           isSubscriptionCurrent,
         );
       } catch {
@@ -4220,10 +4236,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
       });
       return;
     }
-    await this.persistContextGraphSubscriptionStrict(
+    // Authoritative progress follows the subscription's own lifetime. A durable
+    // row (always-on member intent, or a Core's host-only obligation) is saved
+    // before the live cursor moves. An on-demand subscription writes nothing:
+    // like the subscription itself, its progress lives only in this process.
+    await this.persistContextGraphSyncStateStrict(
       localCgId,
       { ...sub, lastReconciledOrdinal: watermark },
-      undefined,
+      'VM reconcile cursor',
       isTargetCurrent,
     );
     if (!isTargetCurrent()) return;
@@ -6391,9 +6411,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
       this.vmReconcileCuratorPageCursorByCg.delete(localCgId);
       this.vmReconcileCuratorPageCursorByCg.set(localCgId, legacyPagination.nextPageAfterPeerId);
     }
-    if (!curatorResolution.curatorIsLocal && curatorPeerIds.length > 0) {
-      this.vmReconcileCuratorPeersByCg.delete(localCgId);
-      this.vmReconcileCuratorPeersByCg.set(localCgId, curatorPeerIds);
+    if (!curatorResolution.curatorIsLocal) {
+      if (curatorPeerIds.length > 0) {
+        this.vmReconcileCuratorPeersByCg.delete(localCgId);
+        this.vmReconcileCuratorPeersByCg.set(localCgId, curatorPeerIds);
+      } else {
+        // Without the durable phonebook an empty curator tier usually means
+        // the owner's profile was never fetched, and this pass can only ask
+        // peers it is already connected to. One bounded phonebook fetch serves
+        // every graph; its completion re-schedules this graph's recovery.
+        this.requestOnDemandAgentsPhonebook(localCgId, 'vm-reconcile');
+      }
     }
     this.pruneVmReconcileState();
 

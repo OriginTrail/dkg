@@ -112,6 +112,14 @@ interface RegisterSyncHandlerParams {
    * caller reads `process.env` fresh per call, keeping the switch runtime-hot.
    */
   shouldWithholdDurableMeta?: (contextGraphId: string) => boolean;
+  /**
+   * Return `true` while `contextGraphId` must not be served in any phase yet
+   * (production: `ontology` until the startup metadata relocation finishes).
+   * The request is then refused like a busy responder, which requesters retry
+   * later, rather than answered with an empty page they would read as the
+   * graph's end.
+   */
+  servingWithheld?: (contextGraphId: string) => boolean;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
   /** Primarily injectable for deterministic tests; production uses the bounded defaults below. */
@@ -419,6 +427,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     parseSyncRequest,
     authorizeSyncRequest,
     shouldWithholdDurableMeta,
+    servingWithheld,
     logWarn,
     logDebug,
     snapshotBudget,
@@ -616,6 +625,12 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
 
     const prepareResponderStage = async (): Promise<PreparedResponderStage> => {
       throwIfAborted(signal);
+
+      // Checked per request, before every phase and before authorization, so
+      // no page of a withheld graph is read while the hold lasts.
+      if (servingWithheld?.(contextGraphId)) {
+        throw new SyncResponderBusyError(`sync responder busy: "${contextGraphId}" is not served yet`);
+      }
 
       // facet open-serve. The public `_catalog` subgraph (a DCAT
       // dataset record) is served to ANYONE, with NO allowlist auth, BEFORE the

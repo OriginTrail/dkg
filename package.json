@@ -1,6 +1,6 @@
 {
   "name": "dkg-v10",
-  "version": "10.0.19",
+  "version": "10.0.20",
   "private": true,
   "packageManager": "pnpm@10.28.1",
   "dkgBuild": {
@@ -31,7 +31,7 @@
     "bench:swm-triple-volume": "pnpm --filter @origintrail-official/dkg benchmark:swm-triple-volume --",
     "bench:baseline": "pnpm --filter @origintrail-official/dkg-storage build && ESBENCH_RESULT=bench/results/baseline.json ESBENCH_HTML=1 ESBENCH_HTML_FILE=bench/results/baseline.html esbench --config esbench.config.mjs",
     "bench:compare": "pnpm --filter @origintrail-official/dkg-storage build && ESBENCH_DIFF=bench/results/baseline.json ESBENCH_RESULT=bench/results/compare.json ESBENCH_HTML=1 ESBENCH_HTML_FILE=bench/results/compare.html esbench --config esbench.config.mjs",
-    "lint": "node scripts/ci/check-tracked-text-nul.mjs && node scripts/ci/check-oxlint-baseline.mjs && pnpm run lint:tests",
+    "lint": "node scripts/ci/check-tracked-text-nul.mjs && node scripts/ci/check-oxlint-baseline.mjs && node scripts/ci/check-incoming-copy-boundary.mjs && pnpm run lint:tests",
     "lint:nul": "node scripts/ci/check-tracked-text-nul.mjs",
     "lint:baseline:update": "node scripts/ci/check-oxlint-baseline.mjs --write",
     "clean": "turbo clean",
@@ -185,7 +185,8 @@
       "ws@>=8.0.0 <8.20.1": "8.20.1"
     },
     "patchedDependencies": {
-      "hardhat@2.28.6": "patches/hardhat@2.28.6.patch"
+      "hardhat@2.28.6": "patches/hardhat@2.28.6.patch",
+      "@libp2p/yamux@8.0.1": "patches/@libp2p__yamux@8.0.1.patch"
     }
   }
 }

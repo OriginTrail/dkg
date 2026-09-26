@@ -1068,6 +1068,19 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(loaded.syncSystemContextGraphsOnConnect).toBe(true);
   });
 
+  it('round-trips the on-demand agents phonebook kill switch', async () => {
+    await saveConfig({
+      name: 'test-node',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      onDemandAgentsPhonebook: false,
+    });
+
+    const loaded = await loadConfig();
+    expect(loaded.onDemandAgentsPhonebook).toBe(false);
+  });
+
   it('round-trips sync snapshot limits and Context Graph priorities', async () => {
     await saveConfig({
       name: 'test-node',

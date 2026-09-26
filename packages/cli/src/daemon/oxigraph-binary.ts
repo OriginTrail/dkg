@@ -427,3 +427,45 @@ export async function resolveOxigraphBinary(
   log(`Oxigraph ${OXIGRAPH_VERSION} binary verified and installed at ${target}`);
   return { path: target, source: 'bundled', version: OXIGRAPH_VERSION };
 }
+
+/**
+ * The Oxigraph binaries this node runs or ran, as the orphan reclaim may
+ * recognise them: exact binaries, and pinned release files in the managed
+ * cache, the same sources resolution takes a binary from. Nothing else in
+ * those directories counts.
+ */
+export interface OxigraphBinaryLocations {
+  /** Exact binaries: the one resolution selected, and the operator's `oxigraph` on PATH. */
+  readonly exact: readonly string[];
+  /**
+   * The managed cache, where a file counts only as a pinned release
+   * (`isPinnedOxigraphFile`): the versions earlier releases downloaded.
+   */
+  readonly cacheDir: string | null;
+}
+
+/**
+ * Whether `fileName` is a pinned Oxigraph release as the managed cache names
+ * them (`oxigraph-v<version>`, `.exe` on Windows).
+ */
+export function isPinnedOxigraphFile(fileName: string): boolean {
+  return /^oxigraph-v\d+\.\d+\.\d+(?:\.exe)?$/.test(fileName);
+}
+
+/**
+ * The locations for a resolved binary. An orphan from an earlier release may
+ * run whichever binary that release resolved. The PATH lookup is skipped
+ * when resolution already selected the PATH binary.
+ */
+export async function oxigraphBinaryLocations(
+  selected: ResolvedOxigraphBinary,
+  opts: { cacheDir: string; platform?: NodeJS.Platform; io?: Partial<OxigraphBinaryIo> },
+): Promise<OxigraphBinaryLocations> {
+  const pathBinary = selected.source === 'system'
+    ? selected.path
+    : await resolveSystemOxigraphOnPath({ ...defaultIo(), ...opts.io }, opts.platform ?? process.platform);
+  return {
+    exact: [...new Set([selected.path, ...(pathBinary ? [pathBinary] : [])])],
+    cacheDir: opts.cacheDir,
+  };
+}

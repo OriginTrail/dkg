@@ -29,8 +29,16 @@
  *
  * A graph with a public definition in ontology is never a candidate, so the
  * common case costs one store query and no chain read.
+ *
+ * A pass given a `budgetMs` or a `signal` starts no candidate once the budget
+ * is spent or the signal has aborted, and leaves the rest to a later pass,
+ * which finds them again. The embedded store does its work synchronously, so
+ * the pass yields to the event loop between candidates every few
+ * milliseconds; otherwise no timer could run until the pass ended, including
+ * the one behind an `AbortSignal.timeout()`.
  */
 
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import {
   DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
@@ -54,6 +62,16 @@ const SYSTEM_IDS = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
 /** Chain classifications one pass may start; the rest wait for the next pass. */
 export const METADATA_RELOCATION_MAX_CHAIN_CLASSIFICATIONS = 16;
 
+/**
+ * Wall-clock budget (ms) for the pass that runs before the node serves sync
+ * and its API opens. Candidates still waiting when it is spent are left to
+ * the pass that runs once start completes and to store discovery passes.
+ */
+export const METADATA_RELOCATION_STARTUP_BUDGET_MS = 30_000;
+
+/** Longest a pass works between candidates before it yields to the event loop. */
+export const METADATA_RELOCATION_YIELD_INTERVAL_MS = 10;
+
 export interface ContextGraphMetadataRelocationDependencies {
   readonly store: TripleStore;
   /**
@@ -74,6 +92,14 @@ export interface ContextGraphMetadataRelocationDependencies {
   readonly knownSlotClass?: (onChainId: string) => OntologyBindingSlotClass | undefined;
   /** Defaults to {@link METADATA_RELOCATION_MAX_CHAIN_CLASSIFICATIONS}. */
   readonly maxChainClassifications?: number;
+  /**
+   * Time (ms, on a monotonic clock) the pass may take from its start. Once it
+   * is spent, no further candidate is started; the one in progress finishes.
+   * The rest are counted in `deferred`.
+   */
+  readonly budgetMs?: number;
+  /** Like {@link budgetMs}: once aborted, no further candidate is started. */
+  readonly signal?: AbortSignal;
 }
 
 export interface ContextGraphMetadataRelocationResult {
@@ -83,6 +109,8 @@ export interface ContextGraphMetadataRelocationResult {
   readonly deletedForeign: number;
   /** Graphs kept because a binding's slot wasn't proven public or curated this pass. */
   readonly unclassified: number;
+  /** Candidates not examined because the pass's budget or signal ran out first. */
+  readonly deferred: number;
 }
 
 export interface OntologyRow {
@@ -207,6 +235,10 @@ export async function relocatePrivateContextGraphMetadata(
   deps: ContextGraphMetadataRelocationDependencies,
 ): Promise<ContextGraphMetadataRelocationResult> {
   const { store } = deps;
+  const deadline = deps.budgetMs === undefined ? undefined : performance.now() + deps.budgetMs;
+  const outOfTime = (): boolean => (
+    deps.signal?.aborted === true || (deadline !== undefined && performance.now() >= deadline)
+  );
   const ontologyGraph = assertSafeIri(contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY));
   const maxChainClassifications = deps.maxChainClassifications
     ?? METADATA_RELOCATION_MAX_CHAIN_CLASSIFICATIONS;
@@ -233,7 +265,18 @@ export async function relocatePrivateContextGraphMetadata(
   let deletedForeign = 0;
   let unclassified = 0;
 
-  for (const [subject, candidate] of await candidates(store, ontologyGraph)) {
+  const pending = await candidates(store, ontologyGraph);
+  let examined = 0;
+  let lastYield = performance.now();
+  for (const [subject, candidate] of pending) {
+    // Only between candidates, so a graph's copy to `_meta` and its ontology
+    // deletes are never split by the yield or the budget.
+    if (performance.now() - lastYield >= METADATA_RELOCATION_YIELD_INTERVAL_MS) {
+      await yieldToEventLoop();
+      lastYield = performance.now();
+    }
+    if (outOfTime()) break;
+    examined += 1;
     const contextGraphId = subject.slice(CONTEXT_GRAPH_URI_PREFIX.length);
     if (!contextGraphId || SYSTEM_IDS.has(contextGraphId)) continue;
     const safeSubject = safeIriOrNull(subject);
@@ -281,7 +324,7 @@ export async function relocatePrivateContextGraphMetadata(
   if (movedToMeta.length > 0 || deletedForeign > 0) {
     await store.flush?.();
   }
-  return { movedToMeta, deletedForeign, unclassified };
+  return { movedToMeta, deletedForeign, unclassified, deferred: pending.size - examined };
 }
 
 async function copyMissingFactsToMeta(

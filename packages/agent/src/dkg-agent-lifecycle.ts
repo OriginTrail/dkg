@@ -49,6 +49,7 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   validateSubGraphName,
   Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri,
+  QuietRetryableHandlerError,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -186,6 +187,7 @@ import {
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 import { repairCreatorPublicMetaProjections } from './context-graph-public-meta-repair.js';
+import { METADATA_RELOCATION_STARTUP_BUDGET_MS } from './context-graph-metadata-relocation.js';
 import {
   startRandomSamplingExactRepair,
   type RandomSamplingExactRepairDependencies,
@@ -464,7 +466,10 @@ import {
   type SyncAdmissionSource,
   type SyncSchedulerLane,
 } from './sync/policy.js';
-import { automaticDurableSyncContextGraphs } from './sync/system-context-graph-policy.js';
+import {
+  automaticDurableSyncContextGraphs,
+  systemContextGraphSyncOptionsOf,
+} from './sync/system-context-graph-policy.js';
 import {
   activeSyncAdmissionSource,
   monotonicNowMs,
@@ -516,6 +521,46 @@ const DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS = 64;
 const REHYDRATE_THROTTLE_BATCH = 8;
 /** Retry interval for a persisted-subscription activation that is waiting for a slot. */
 const REHYDRATION_ROLLING_RETRY_MS = 30_000;
+/**
+ * How long startup rehydration waits on persisted rows' read authority before
+ * leaving the rest to background authority recovery (#2815). Override via
+ * `DKGAgentConfig.contextGraphSubscriptionRehydrationAuthorityBudgetMs` (0
+ * removes the budget).
+ */
+const DEFAULT_REHYDRATION_STARTUP_AUTHORITY_BUDGET_MS = 10_000;
+/** Longest delay a Node timer honours; a longer one fires after 1 ms. */
+const MAX_REHYDRATION_AUTHORITY_BUDGET_MS = 2_147_483_647;
+/** Stands in for an authority decision the startup budget stopped waiting for. */
+const REHYDRATION_AUTHORITY_DEFERRED = Symbol('rehydration-authority-deferred');
+
+interface RehydrationAuthorityBudget {
+  /** Whether the budget is spent. A budget of 0 is never spent. */
+  spent(): boolean;
+  /** `decision`, or the deferral marker when the budget is spent first. */
+  race<T>(decision: Promise<T>): Promise<T | typeof REHYDRATION_AUTHORITY_DEFERRED>;
+  dispose(): void;
+}
+
+function startRehydrationAuthorityBudget(budgetMs: number): RehydrationAuthorityBudget {
+  if (budgetMs === 0) {
+    return { spent: () => false, race: (decision) => decision, dispose: () => {} };
+  }
+  let spent = false;
+  let expire: () => void = () => {};
+  const expired = new Promise<typeof REHYDRATION_AUTHORITY_DEFERRED>((resolve) => {
+    expire = () => resolve(REHYDRATION_AUTHORITY_DEFERRED);
+  });
+  const timer = setTimeout(() => {
+    spent = true;
+    expire();
+  }, budgetMs);
+  timer.unref?.();
+  return {
+    spent: () => spent,
+    race: (decision) => Promise.race([decision, expired]),
+    dispose: () => clearTimeout(timer),
+  };
+}
 
 function rehydratedSubscriptionReachedSafeState(
   subscription: Pick<ContextGraphSub, 'synced' | 'metaSynced' | 'pendingMeta'>,
@@ -610,6 +655,10 @@ import {
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { peekFinalizedAuthorityColdResolution } from
   './finalized-authority-cold-resolution.js';
+import {
+  AGENTS_PHONEBOOK_PRIME_MAX_DIALS,
+  peekOnDemandAgentsPhonebook,
+} from './sync/on-demand-agents-phonebook.js';
 import { raceWithBootTimeout, isTransientBootChainError } from './dkg-agent-boot.js';
 import * as diagnostics from './dkg-agent-diagnostics.js';
 import {
@@ -2131,6 +2180,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // stop() aborts detached cold authority flights; a restarted agent admits
     // new ones (the runtime is created lazily on first use otherwise).
     peekFinalizedAuthorityColdResolution(this)?.reopen();
+    peekOnDemandAgentsPhonebook(this)?.reopen();
     this.vmReconcileRuntimeReady = false;
     this.graphScopedStoreClosed = false;
     this.coreHostRecordingGeneration += 1;
@@ -2267,13 +2317,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Move what earlier builds left in ontology, using local metadata only,
     // before sync serving starts. Bare bindings of graphs this node doesn't
     // hold need a chain read; that pass runs once start completes and before
-    // every store discovery pass.
+    // every store discovery pass. This pass is on the startup path, so it has
+    // a time budget; candidates it doesn't reach are left to those passes.
+    // Until one of them reaches every candidate (this one included), ontology
+    // may still hold private rows, so peers are not served it.
     try {
-      await this.relocatePrivateContextGraphMetadata({ classifyOnChain: false });
+      await this.relocatePrivateContextGraphMetadata({
+        classifyOnChain: false,
+        budgetMs: METADATA_RELOCATION_STARTUP_BUDGET_MS,
+      });
     } catch (err) {
       this.log.warn(
         ctx,
         `Failed to relocate private context graph metadata out of the ontology graph: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (this.contextGraphServingWithheld(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY)) {
+      this.log.warn(
+        ctx,
+        'Not serving the ontology graph to peers until the context graph metadata relocation reaches every candidate',
       );
     }
 
@@ -2508,6 +2570,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           CG_AUTH_RPC_SITES.remoteQuery,
           () => this.isContextGraphPublicOnChain(contextGraphId, createOperationContext('query')),
         ),
+      // A graph held back from sync is not queried either, for an operator
+      // whose queryAccess opens it (see contextGraphServingWithheld). The
+      // handler applies this to the id its access policy and lookups use,
+      // once it has checked that id is a string.
+      servingWithheld: (contextGraphId: string) => this.contextGraphServingWithheld(contextGraphId),
     });
     // rc.9 PR-9: PROTOCOL_QUERY_REMOTE migrated onto the Universal
     // Messenger substrate. Wire prefix bumped to /dkg/10.0.1/* (hard
@@ -3102,6 +3169,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // reversible at runtime (no restart).
       shouldWithholdDurableMeta: (contextGraphId) =>
         shouldWithholdAgentsDurableMeta(contextGraphId, process.env.DKG_SERVE_AGENTS_META),
+      servingWithheld: (contextGraphId) => this.contextGraphServingWithheld(contextGraphId),
       logWarn: (ctx, message) => this.log.warn(ctx, message),
       logDebug: (ctx, message) => this.log.debug(ctx, message),
       snapshotBudget: snapshotPolicy.budget,
@@ -3978,6 +4046,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // Malformed peer bytes → deny (mirrors the legacy lane's parse-fail path).
       return encodeChangelogResponse({ kind: 'denied' });
     }
+    // A graph held back from the legacy lane is held back here too. The
+    // requester falls back to that lane, which refuses it the same way, and
+    // retries on a later round.
+    if (this.contextGraphServingWithheld(request.contextGraphId)) {
+      throw new QuietRetryableHandlerError(`"${request.contextGraphId}" is not served yet`);
+    }
     // Same per-CG gate as PROTOCOL_SYNC: public CGs are open (returns true),
     // private CGs verify the signed digest — a bare (unsigned) changelog request
     // carries no digest, so `authorizePrivateSyncRequest` denies it. Any throw on a
@@ -4555,11 +4629,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       getSyncContextGraphs: () => this.config.syncContextGraphs ?? [],
       getDurableSyncContextGraphs: () => automaticDurableSyncContextGraphs(
         this.config.syncContextGraphs ?? [],
-        {
-          nodeRole: this.config.nodeRole,
-          configValue: this.config.syncSystemContextGraphsOnConnect,
-          envValue: process.env.DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT,
-        },
+        systemContextGraphSyncOptionsOf(this.config),
       ).filter((contextGraphId) => {
         const completeSwmProviders = this.resolveRfc64CompleteSwmProviderPeerIdsV1(
           contextGraphId,
@@ -5245,12 +5315,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const getIdentityIdForAddress = this.chain.getIdentityIdForAddress?.bind(this.chain);
     const isShardingTableMember = this.chain.isShardingTableMember?.bind(this.chain);
     if (!getIdentityIdForAddress || !isShardingTableMember) return true; // gate unavailable
-    // A legacy/mixed-version core profile may not carry an operational wallet.
-    // Discovery elsewhere supports profiles without `agentAddress`, so treat
-    // its absence as "gate unavailable" (fall back to phonebook nodeRole)
-    // rather than a hard denial — otherwise the warm set can collapse to zero
-    // in a network with healthy but pre-agentAddress cores.
-    if (!agentAddress) return true; // gate unavailable for this profile
+    // Profiles are unsigned: a `nodeRole='core'` profile without an
+    // operational wallet cannot be checked against the ShardingTable, so it is
+    // as unverifiable as a failed read and is not pinned. Every profile this
+    // codebase publishes carries `agentAddress`; on Base mainnet (2026-09-23)
+    // 62 of 63 core-role profiles did, and the one that did not was pinned and
+    // then failed its dial on every tick.
+    if (!agentAddress) return false;
     try {
       const identityId = await getIdentityIdForAddress(agentAddress);
       if (identityId === 0n) return false;
@@ -6089,10 +6160,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             );
           }
           if (verifiedOnChainId && subscription && subscription.onChainId === undefined) {
-            await this.persistContextGraphSubscriptionStrict(
+            // An on-demand subscription binds in memory only; durable rows are
+            // saved before the binding becomes visible.
+            await this.persistContextGraphSyncStateStrict(
               asset.contextGraphId,
               { ...subscription, onChainId: verifiedOnChainId, lastReconciledOrdinal: 0 },
-              undefined,
+              'on-chain id binding',
               isBindingCurrent,
             );
             assertCurrent();
@@ -8300,6 +8373,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       async (peerId) => {
         await this.networkAdmissionCoordinator.ensureAdmitted(peerId, ctx);
       },
+      // An on-demand phonebook holds every relay-advertising profile; walking
+      // all of them on each catch-up is a dial storm. Nodes that sync the
+      // phonebook on every connect (and the kill switch) keep today's walk.
+      this.onDemandAgentsPhonebookEnabled()
+        ? { maxDials: AGENTS_PHONEBOOK_PRIME_MAX_DIALS }
+        : {},
     );
   }
 
@@ -9390,6 +9469,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       });
   }
 
+  /**
+   * Strict write of a row that must be durable. Throws when the projection
+   * would keep member intent process-local, so it suits persisted-row
+   * activation, not the sync path of a live on-demand subscription (see
+   * {@link persistContextGraphSyncStateStrict}).
+   */
   async persistContextGraphSubscriptionStrict(
     this: DKGAgent,
     contextGraphId: string,
@@ -9408,10 +9493,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /**
-   * One strict subscription persistence protocol shared by joins and registry
-   * discovery. It owns snapshot capture, generation validation, per-graph
-   * serialization, and the store-first write. Callers select only whether an
-   * intentionally process-local on-demand member projection is acceptable.
+   * One strict subscription persistence protocol shared by joins, registry
+   * discovery, and sync-owned binding and cursor progress. It owns snapshot
+   * capture, generation validation, per-graph serialization, and the
+   * store-first write. Callers select only whether an intentionally
+   * process-local on-demand member projection is acceptable.
    */
   async persistContextGraphSubscriptionProjectionStrict(
     this: DKGAgent,
@@ -9421,7 +9507,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncScoped?: boolean;
       isCurrent?: () => boolean;
       requireDurableMemberIntent: boolean;
-      operation: 'join approval' | 'chain discovery' | 'core hosting';
+      operation: 'join approval' | 'chain discovery' | 'core hosting' | 'on-chain id binding' | 'VM reconcile cursor';
     },
   ): Promise<void> {
     const store = this.config.contextGraphSubscriptionStore;
@@ -9436,7 +9522,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const sub = input.subscription ?? expectedLiveSub;
     if (!sub?.subscribed && !sub?.coreHosted) {
       throw new Error(
-        `Cannot persist context graph "${input.contextGraphId}": active subscription or host state is missing`,
+        `Cannot persist context graph "${input.contextGraphId}" (${input.operation}): active subscription or host state is missing`,
       );
     }
     const persistence = projectContextGraphSubscriptionPersistence({
@@ -9470,7 +9556,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         )
       ) {
         throw asSyncFetchAbortError(new Error(
-          `Context graph "${input.contextGraphId}" changed before its strict subscription snapshot was persisted`,
+          `Context graph "${input.contextGraphId}" changed before its strict subscription snapshot (${input.operation}) was persisted`,
         ));
       }
       await store.save(record);
@@ -9494,6 +9580,32 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId),
       requireDurableMemberIntent: false,
       operation: 'chain discovery',
+    });
+  }
+
+  /**
+   * Sync-owned durability boundary for a live subscription's on-chain id
+   * binding and VM reconcile cursor. Like chain discovery, sync keeps the
+   * canonical projection instead of demanding durable member intent: an
+   * on-demand member subscription is process-local, so nothing is written and
+   * the caller advances only its in-memory state; a Core hosting obligation
+   * still saves its host-only row; an always-on subscription is saved before
+   * the caller exposes the new state. Demanding member intent here stalled
+   * every `dkg subscribe` without `--save` at its first cursor advance.
+   */
+  async persistContextGraphSyncStateStrict(
+    this: DKGAgent,
+    contextGraphId: string,
+    subscription: ContextGraphSub,
+    operation: 'on-chain id binding' | 'VM reconcile cursor',
+    isCurrent: () => boolean,
+  ): Promise<void> {
+    await this.persistContextGraphSubscriptionProjectionStrict({
+      contextGraphId,
+      subscription,
+      isCurrent,
+      requireDurableMemberIntent: false,
+      operation,
     });
   }
 
@@ -9925,6 +10037,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           `Activated persisted context-graph subscription "${contextGraphId}" after authority recovery`,
         );
       },
+      capped: (contextGraphId) => {
+        this.contextGraphSubscriptionRehydrationPendingIds.add(contextGraphId);
+        this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
+      },
     });
   }
 
@@ -10222,6 +10338,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.contextGraphSubscriptionRehydrationPendingIds.clear();
     if (!store) return;
     const ctx = createOperationContext('init');
+    let authorityBudget: RehydrationAuthorityBudget | undefined;
     try {
       // System context graphs (AGENTS/ONTOLOGY) are auto-subscribed separately
       // by start(); their persisted rows must NOT be rehydrated here too. Re-
@@ -10362,6 +10479,46 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       dormancyById.clear();
       const activatedRows: ContextGraphSubscriptionRecord[] = [];
       let activatedUserRows = 0;
+      // #2815: every row's authority may need a chain read, and start() (with
+      // the daemon API behind it) waits for this loop. Past the budget, a row
+      // without a durable join approval is left dormant as
+      // `authorityUnavailable` unread; background authority recovery resolves
+      // it after start and activates it only once it resolves as allowed.
+      const configuredAuthorityBudgetMs = this.config.contextGraphSubscriptionRehydrationAuthorityBudgetMs;
+      let authorityBudgetMs = DEFAULT_REHYDRATION_STARTUP_AUTHORITY_BUDGET_MS;
+      if (configuredAuthorityBudgetMs != null) {
+        if (
+          Number.isSafeInteger(configuredAuthorityBudgetMs)
+          && configuredAuthorityBudgetMs >= 0
+          && configuredAuthorityBudgetMs <= MAX_REHYDRATION_AUTHORITY_BUDGET_MS
+        ) {
+          authorityBudgetMs = configuredAuthorityBudgetMs;
+        } else {
+          this.log.warn(
+            ctx,
+            `Ignoring invalid contextGraphSubscriptionRehydrationAuthorityBudgetMs=${configuredAuthorityBudgetMs} ` +
+              `(must be a whole number of milliseconds from 0 to ${MAX_REHYDRATION_AUTHORITY_BUDGET_MS}); ` +
+              `using default ${DEFAULT_REHYDRATION_STARTUP_AUTHORITY_BUDGET_MS}.`,
+          );
+        }
+      }
+      const deferredIds: string[] = [];
+      let deferredUserRows = 0;
+      // Past the budget, a user row goes to background authority recovery only
+      // while the activation cap still has room for it; beyond that it waits
+      // for rolling activation unread, as a row beyond the cap always has.
+      // Hosted rows are exempt from the cap and always go to recovery.
+      const leaveUnresolved = (row: ContextGraphSubscriptionRecord): void => {
+        if (!row.coreHosted && cap > 0 && activatedUserRows + deferredUserRows >= cap) {
+          dormancyById.set(row.id, 'activationCap');
+          this.contextGraphSubscriptionRehydrationPendingIds.add(row.id);
+          return;
+        }
+        if (!row.coreHosted) deferredUserRows += 1;
+        dormancyById.set(row.id, 'authorityUnavailable');
+        deferredIds.push(row.id);
+      };
+      authorityBudget = startRehydrationAuthorityBudget(authorityBudgetMs);
       for (let i = 0; i < toActivate.length; i++) {
         const row = toActivate[i];
         // The cap limits successful non-hosted activations, not candidates.
@@ -10380,6 +10537,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ? this.localApprovedAgentByCG.get(row.id)
           : undefined;
         const hasJoinApproval = approvedAgentAddress !== undefined;
+        // A join-approved row keeps the synchronous path: only it can restore
+        // the restricted pending-metadata bootstrap, which background
+        // authority recovery does not offer.
+        if (!hasJoinApproval && authorityBudget.spent()) {
+          leaveUnresolved(row);
+          continue;
+        }
         // A crash between a historical false-ready sync and the approval
         // reset could leave all three persisted bits true. The durable
         // join-approved marker identifies a private bootstrap, so prove both
@@ -10403,7 +10567,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // in-memory state needed for one authenticated metadata fetch. That
         // restricted path cannot activate data lanes until this same authority
         // resolver subsequently returns `allowed`.
-        const readAuthority = await this.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
+        const authorityRead = this.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
           allowSubscriptionFallback: false,
           signal: AbortSignal.timeout(chainAuthorityReadBudgetsOf(this).requestTimeoutMs),
           durableSubscriptionBinding: {
@@ -10417,6 +10581,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           reason: 'unexpected-authority-error',
           metadataBootstrap: 'eligible' as const,
         }));
+        // A read the budget stops waiting for ends on its own request
+        // timeout; its late answer is ignored and activates nothing.
+        const readAuthority = hasJoinApproval
+          ? await authorityRead
+          : await authorityBudget.race(authorityRead);
+        if (readAuthority === REHYDRATION_AUTHORITY_DEFERRED) {
+          leaveUnresolved(row);
+          continue;
+        }
         // A stale approval cannot override an explicit current membership
         // denial. The authority resolver supplies a typed bootstrap policy so
         // lifecycle code never infers security semantics from diagnostic text.
@@ -10552,14 +10725,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           `${dormancy.dormantReasons.authorityDenied.length} context-graph subscription(s) left dormant because current read authority denied this node.`,
         );
       }
-      if (dormancy.dormantReasons.authorityUnavailable.length > 0) {
+      const unavailableAtStartup = dormancy.dormantReasons.authorityUnavailable.length - deferredIds.length;
+      if (unavailableAtStartup > 0) {
         this.log.warn(
           ctx,
-          `${dormancy.dormantReasons.authorityUnavailable.length} context-graph subscription(s) left dormant because current read authority was unavailable; retry after restoring the authority source.`,
+          `${unavailableAtStartup} context-graph subscription(s) left dormant because current read authority was unavailable; retry after restoring the authority source.`,
+        );
+      }
+      if (deferredIds.length > 0) {
+        this.log.warn(
+          ctx,
+          `Stopped waiting on read authority for ${deferredIds.length} persisted context-graph subscription(s) ` +
+            `after the ${authorityBudgetMs} ms startup budget. They stay dormant until background authority ` +
+            `recovery resolves them as allowed.`,
         );
       }
     } catch (err) {
       this.log.warn(ctx, `Failed to rehydrate persisted context-graph subscriptions: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      authorityBudget?.dispose();
     }
   }
 
