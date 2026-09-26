@@ -418,7 +418,7 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
       validTokens: new Set<string>(),
       apiHost: '127.0.0.1', apiPortRef: { value: 0 },
       url, path: url.pathname,
-      authentication: requestAuthentication({ kind: 'anonymous' }), requestAgentAddress: '0x0',
+      authentication: requestAuthentication({ kind: 'nodeOperator' }), requestAgentAddress: '0x0',
     } as unknown as RequestContext);
     return { status: res.statusCode, body: res.body ? JSON.parse(res.body) : {} };
   }

@@ -227,6 +227,7 @@ import {
   sleep,
   deriveBlockExplorerUrl,
 } from '../http-utils.js';
+import { requireNodeAdmin } from '../node-admin-guard.js';
 import {
   normalizeRepo,
   isValidRepoSpec,
@@ -606,8 +607,10 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     return jsonResponse(res, 200, stats);
   }
 
-  // POST /api/publisher/cancel
+  // POST /api/publisher/cancel — node-admin only: it cancels any job in the
+  // node's queue by id, whichever agent submitted it.
   if (req.method === "POST" && path === "/api/publisher/cancel") {
+    if (!requireNodeAdmin(authentication, res, 'POST /api/publisher/cancel', 'cancel publisher jobs')) return;
     const parsed = await readSmallJsonObject(req, res);
     if (!parsed) return;
     const jobId = parsed.jobId as string | undefined;
@@ -616,8 +619,10 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     return jsonResponse(res, 200, { cancelled: jobId });
   }
 
-  // POST /api/publisher/retry
+  // POST /api/publisher/retry — node-admin only: with no jobId it reaccepts every
+  // failed job in the node's queue, whichever agent submitted it.
   if (req.method === "POST" && path === "/api/publisher/retry") {
+    if (!requireNodeAdmin(authentication, res, 'POST /api/publisher/retry', 'reaccept publisher jobs')) return;
     const parsed = await readSmallJsonObject(req, res);
     if (!parsed) return;
     const status = parsed.status as string | undefined;
@@ -646,8 +651,10 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     });
   }
 
-  // POST /api/publisher/clear
+  // POST /api/publisher/clear — node-admin only: it bulk-clears every job with
+  // the given status across the node's queue.
   if (req.method === "POST" && path === "/api/publisher/clear") {
+    if (!requireNodeAdmin(authentication, res, 'POST /api/publisher/clear', 'clear publisher jobs')) return;
     const parsed = await readSmallJsonObject(req, res);
     if (!parsed) return;
     const status = parsed.status as string | undefined;

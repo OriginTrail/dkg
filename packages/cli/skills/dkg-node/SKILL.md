@@ -162,7 +162,7 @@ requests without an explicit caller fall back to the node's default agent.
 TOKEN=$(cat ~/.dkg/auth.token)
 ```
 
-**Remote agents (not on the daemon host).** Register your own agent via `POST /api/agent/register` and use the returned `authToken` — see "Agent identity" below. Do not ask the user to paste `~/.dkg/auth.token` from another machine; that's the node's admin credential and should stay on the host that owns the daemon.
+**Remote agents (not on the daemon host).** Ask the node operator to register an agent for you (`POST /api/agent/register` requires the node-level admin token) and use the returned `authToken` — see "Agent identity" below. Do not ask the user to paste `~/.dkg/auth.token` from another machine; that's the node's admin credential and should stay on the host that owns the daemon.
 
 **If you get 401 or 403 on a protected route, diagnose in this order:**
 
@@ -174,7 +174,7 @@ Never guess — `GET /api/agent/identity` is free and definitive. Call it first.
 
 **Agent identity:**
 
-- `POST /api/agent/register` — register a new agent on this node.
+- `POST /api/agent/register` — register a new agent on this node. Node-admin token required.
   Body: `{ "name": "...", "framework"?: "...", "publicKey"?: "..." }`.
   Returns `{ agentAddress, authToken, mode }` where `mode` is
   `"custodial"` (node holds the key; response also carries `publicKey` +
@@ -823,9 +823,9 @@ Async publisher wallets need native gas plus PCA agent registration or TRAC for 
 | `GET`  | `/api/publisher/job?id=...` | Fetch one job's status: `{ job, retryState }` (see `retryState` below). |
 | `GET`  | `/api/publisher/job-payload?id=...` | Fetch the prepared payload for internal raw LIFT jobs, as `{ job, payload, retryState }`. Named lifecycle publish jobs return no raw payload. |
 | `GET`  | `/api/publisher/stats` | Queue statistics (running / pending / completed / failed). |
-| `POST` | `/api/publisher/cancel` | Cancel a job. Body: `{ jobId }`. |
-| `POST` | `/api/publisher/retry` | Reaccept every failed job that is safe to re-run. Body: `{ status: "failed" }`. Returns `200 { retried, blockedPendingRecovery, skipped }` — three counts that partition the failed jobs: reaccepted, left failed because a transaction may exist (awaiting chain proof or owned by recovery), and left failed with nothing to retry (terminal failure or spent retry budget). |
-| `POST` | `/api/publisher/clear` | Clear completed/failed jobs in BULK (`dkg publisher clear <status>`). Safe by default: it skips a failed job that is still held for chain proof and still owns its KA's lifecycle — deleting that record is what would let the next re-submit publish the same KA a second time. |
+| `POST` | `/api/publisher/cancel` | Cancel a job. Body: `{ jobId }`. Node-admin token required. |
+| `POST` | `/api/publisher/retry` | Reaccept every failed job that is safe to re-run. Body: `{ status: "failed" }`. Returns `200 { retried, blockedPendingRecovery, skipped }` — three counts that partition the failed jobs: reaccepted, left failed because a transaction may exist (awaiting chain proof or owned by recovery), and left failed with nothing to retry (terminal failure or spent retry budget). Node-admin token required. |
+| `POST` | `/api/publisher/clear` | Clear completed/failed jobs in BULK (`dkg publisher clear <status>`). Node-admin token required. Safe by default: it skips a failed job that is still held for chain proof and still owns its KA's lifecycle — deleting that record is what would let the next re-submit publish the same KA a second time. |
 | `POST` | `/api/publisher/clear-job` | Clear ONE terminal job by id: `{ jobId }` → `{ outcome: "cleared" \| "already_absent" }`. The deliberate override for a job bulk clear skips — you name the job and take the decision. |
 
 #### Retry behaviour and its knobs (`config.publisher`)

@@ -1,5 +1,6 @@
 import * as realApi from './api.js';
 import { mockApi } from './mocks/provider.js';
+import { currentApiToken } from './lib/apiToken.js';
 
 let useMocks: boolean | null = null;
 let detectMockModePromise: Promise<boolean> | null = null;
@@ -34,8 +35,7 @@ export function subscribeMockMode(listener: MockModeListener): () => void {
 }
 
 function authHeaders(): Record<string, string> {
-  if (typeof window === 'undefined') return {};
-  const token = (window as any).__DKG_TOKEN__;
+  const token = currentApiToken();
   if (!token) return {};
   return { Authorization: `Bearer ${token}` };
 }

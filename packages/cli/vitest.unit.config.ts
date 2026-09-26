@@ -64,6 +64,14 @@ export default defineConfig({
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
           'test/daemon-identity-wallet-routes.test.ts',
+          // The dashboard shell carries the operator token only for trusted
+          // local requests (loopback socket and loopback Host). Pure helpers
+          // plus a real HTTP server; no hardhat.
+          'test/daemon-ui-token-delivery.test.ts',
+          // Node-wide routes accept only node-admin callers. Pure route
+          // handlers plus one live daemon on the mock chain; no hardhat.
+          'test/node-admin-scope-routes.test.ts',
+          'test/daemon-operator-scope-live.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
           // daemon-http-behavior-extra so they run here (pure route handler,
           // no hardhat/daemon spawn) instead of the daemon-http lane.
