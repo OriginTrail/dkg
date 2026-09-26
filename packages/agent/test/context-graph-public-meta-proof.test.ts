@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { approvedMemberAcceptanceFromAuthority } from '../src/context-graph-member-proof.js';
 import {
   DKG_ONTOLOGY,
   contextGraphDataGraphUri,
@@ -31,6 +32,22 @@ function authoritativePublicMetaQuads(contextGraphId: string): Quad[] {
     },
   ];
 }
+
+describe('approved-member acceptance (#2831 review)', () => {
+  it('keeps its own frozen copy of the proof', () => {
+    const proof = {
+      approvedAgentAddress: '0x00000000000000000000000000000000000000a1',
+      expectedDelegateePeerId: '12D3KooWAcceptanceCopyPeer',
+    };
+    const acceptance = approvedMemberAcceptanceFromAuthority(proof, 'public');
+
+    proof.approvedAgentAddress = '0x00000000000000000000000000000000000000b2';
+
+    expect(acceptance.proof.approvedAgentAddress).toBe('0x00000000000000000000000000000000000000a1');
+    expect(Object.isFrozen(acceptance)).toBe(true);
+    expect(Object.isFrozen(acceptance.proof)).toBe(true);
+  });
+});
 
 describe('authoritative public metadata proof', () => {
   it('classifies every canonical requirement as missing when that quad is absent', () => {

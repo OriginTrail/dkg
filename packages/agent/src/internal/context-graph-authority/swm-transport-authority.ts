@@ -63,6 +63,24 @@ async function readWithActiveAcceptedPolicy(
     ...options,
     allowAcceptedRfc64FinalizedAbsence: activeAcceptedPublicPolicy,
   });
+  // An `unregistered` answer may rest on the accepted-absence allowance, which
+  // holds only while the policy still governs transport. Catalog authority can
+  // be killed, blocked or deactivated while the read awaits the index: then
+  // read again without the allowance instead of acting on the stale fence. A
+  // registered answer never depended on the allowance and stands as read.
+  if (
+    activeAcceptedPublicPolicy
+    && registered.kind === 'unregistered'
+    && !host.hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId)
+  ) {
+    return {
+      registered: await host.resolveRegisteredContextGraphAuthority(contextGraphId, {
+        ...options,
+        allowAcceptedRfc64FinalizedAbsence: false,
+      }),
+      activeAcceptedPublicPolicy: false,
+    };
+  }
   return { registered, activeAcceptedPublicPolicy };
 }
 

@@ -130,33 +130,30 @@ export function hasActiveApprovedMemberDelegation(
  */
 export type ApprovedMemberAccessPolicy = 'public' | 'unproven';
 
-declare const approvedMemberAcceptanceBrand: unique symbol;
-
 /**
- * One approved member's proof together with the authenticated policy it is
- * judged under. The snapshot refresh and join completion both consume the same
- * value, so they cannot disagree about the member or the policy. It cannot be
- * written as a plain object literal: a `public` acceptance comes only from
- * {@link approvedMemberAcceptanceFromAuthority}, whose callers owe authenticated
- * evidence, and {@link unprovenApprovedMemberAcceptance} grants nothing beyond
- * the complete private definition.
+ * One approved member's proof together with the policy it is judged under.
+ * The agent's resolver (resolveApprovedMemberAcceptance) builds it once per
+ * join attempt from this node's approval binding and authenticated authority,
+ * and the snapshot refresh and join completion both consume that same value.
+ * The type does not prove where a `public` policy came from: only that
+ * resolver should build one. The proof is copied and frozen, so the value
+ * cannot change after it is built.
  */
 export interface ApprovedMemberAcceptance {
-  readonly proof: ApprovedMemberProof;
+  readonly proof: Readonly<ApprovedMemberProof>;
   readonly accessPolicy: ApprovedMemberAccessPolicy;
-  readonly [approvedMemberAcceptanceBrand]: true;
 }
 
 /**
  * Build an acceptance from a policy the caller derived from authenticated
- * authority (the agent's approved-member resolver). Never from peer-served
- * metadata.
+ * authority (the agent's approved-member resolver), never from peer-served
+ * metadata. The proof is copied and frozen.
  */
 export function approvedMemberAcceptanceFromAuthority(
   proof: ApprovedMemberProof,
   accessPolicy: ApprovedMemberAccessPolicy,
 ): ApprovedMemberAcceptance {
-  return Object.freeze({ proof, accessPolicy }) as unknown as ApprovedMemberAcceptance;
+  return Object.freeze({ proof: Object.freeze({ ...proof }), accessPolicy });
 }
 
 /** An acceptance that admits only the complete private definition. */
