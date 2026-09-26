@@ -21,7 +21,8 @@
  * and sends every request to its own origin, so one installed as the global
  * dispatcher pins the transport of every fetch in the process, and chain RPC
  * calls keep the protocol it was configured with. On Node 22 and 24 `fetch`
- * runs unchanged.
+ * runs unchanged. On an undici this release has not been verified with,
+ * `fetch` also runs unchanged, and a warning says so once.
  */
 
 type Dispatch = (options: Record<string, unknown>, handler: object) => boolean;
@@ -30,25 +31,42 @@ interface ComposableDispatcher {
   compose(interceptor: (dispatch: Dispatch) => Dispatch): object;
 }
 
-/** Where undici 8 and later keep the dispatcher `fetch` uses by default. */
-const FETCH_GLOBAL_DISPATCHER = Symbol.for('undici.globalDispatcher.2');
+/**
+ * What each bundled undici major needs, as verified on Node 22 (undici 6),
+ * Node 24 (7) and Node 26 (8). `null`: its fetch offers HTTP/2 only when
+ * configured to, so fetch runs unchanged. A symbol: the registry key under
+ * which that undici keeps the dispatcher its fetch uses. undici copies share
+ * the key (undici 8's public getGlobalDispatcher() reads it) and bump it only
+ * on a breaking Dispatcher API change. A major missing here has not been
+ * verified: fetch runs unchanged and a warning says so.
+ */
+const FETCH_GLOBAL_DISPATCHER_KEYS: ReadonlyMap<number, symbol | null> = new Map([
+  [6, null],
+  [7, null],
+  [8, Symbol.for('undici.globalDispatcher.2')],
+]);
 
 /** HTTP/1.1-only views of the global dispatchers seen so far, so connections are reused. */
 const http1Dispatchers = new WeakMap<object, object>();
 
+const warnings = new Set<string>();
+
 const refuseHttp2 = (dispatch: Dispatch): Dispatch => (options, handler) =>
   dispatch({ ...options, allowH2: false }, handler);
 
-function fetchNegotiatesHttp2(): boolean {
-  return Number.parseInt(process.versions.undici ?? '', 10) >= 8;
+function warnOnce(reason: string): void {
+  if (warnings.has(reason)) return;
+  warnings.add(reason);
+  console.warn(`[chain] RPC calls may use HTTP/2 (#2828): ${reason}`);
 }
 
-function fetchGlobalDispatcher(): unknown {
+function fetchGlobalDispatcher(key: symbol): unknown {
   const slots = globalThis as unknown as Record<symbol, unknown>;
   // Node loads fetch's undici, which installs the default dispatcher, on the
-  // first use of fetch or one of its classes.
-  if (slots[FETCH_GLOBAL_DISPATCHER] === undefined) void globalThis.Response;
-  return slots[FETCH_GLOBAL_DISPATCHER];
+  // first use of fetch or one of its classes. Loading it here keeps even the
+  // first chain RPC call off an HTTP/2 session.
+  if (slots[key] === undefined) void globalThis.Response;
+  return slots[key];
 }
 
 function isComposable(dispatcher: unknown): dispatcher is object & ComposableDispatcher {
@@ -62,10 +80,18 @@ function isComposable(dispatcher: unknown): dispatcher is object & ComposableDis
  * HTTP/2 where `fetch` would otherwise negotiate it.
  */
 export function chainRpcFetchInit(init: RequestInit): RequestInit {
-  if (!fetchNegotiatesHttp2()) return init;
-  const active = fetchGlobalDispatcher();
-  // No dispatcher yet, or the application's own without undici's compose(): fetch runs unchanged.
-  if (!isComposable(active)) return init;
+  const version = process.versions.undici;
+  const key = FETCH_GLOBAL_DISPATCHER_KEYS.get(Number.parseInt(version ?? '', 10));
+  if (key === null) return init;
+  if (key === undefined) {
+    warnOnce(`Node's fetch is undici ${version ?? '(unknown)'}, which this release has not been verified with`);
+    return init;
+  }
+  const active = fetchGlobalDispatcher(key);
+  if (!isComposable(active)) {
+    warnOnce('the global fetch dispatcher cannot refuse it per request');
+    return init;
+  }
   let dispatcher = http1Dispatchers.get(active);
   if (!dispatcher) {
     dispatcher = active.compose(refuseHttp2);
