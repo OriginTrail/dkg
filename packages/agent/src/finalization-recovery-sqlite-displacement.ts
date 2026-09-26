@@ -5,6 +5,7 @@ import {
   hasFinalizationRecoveryDeferredCapacity,
   type FinalizationRecoveryRetentionPolicy,
 } from './finalization-recovery-sqlite-policy.js';
+import { parkLiveFinalizationWithinTransaction } from './finalization-recovery-sqlite-rows.js';
 import type { FinalizationRecoveryReceiveInput } from './finalization-recovery-store.js';
 
 const MAX_DISPLACEMENTS_PER_ADMISSION = 8;
@@ -42,9 +43,12 @@ interface DisplaceableRow {
  * `input` finds no live capacity, the oldest RECEIVED entry that counts
  * against the exhausted limit, has failed with a displaceable signature at
  * least `displaceAfterFailureStreak` times in a row and is at least
- * `displaceMinAgeMs` old moves back to the deferred spool with its original
- * receipt time. Nothing becomes terminal: the parked entry is admitted again
- * when the live inbox has room, within its original retry window.
+ * `displaceMinAgeMs` old moves back to the deferred spool. Nothing becomes
+ * terminal: the parked entry keeps its receipt time and the retention it had
+ * in the live inbox, and is admitted again when the live inbox has room.
+ * It comes back with a fresh retry state (see
+ * `parkLiveFinalizationWithinTransaction`), so it is not parked again before
+ * it has failed `displaceAfterFailureStreak` more times.
  *
  * All or nothing: when parking cannot make room for `input` (no displaceable
  * entry counts against the exhausted limit, or the deferred spool is full),
@@ -101,23 +105,6 @@ function parkStableFailures(
     ORDER BY (source_peer_id IS ?) DESC, (context_graph_id = ?) DESC, created_at ASC, key ASC
     LIMIT 1
   `);
-  // The parked row keeps its receipt time, so the deferred spool's raw TTL
-  // ends its retry window where the live inbox would have.
-  const park = database.prepare(`
-    INSERT OR IGNORE INTO finalization_pending_v2 (
-      key, chain_id, context_graph_id, source_peer_id, trusted_publisher_peer_id,
-      ual, tx_hash, assertion_version, merkle_root, ka_id, batch_id,
-      target_context_graph_id, envelope_sha256, raw_envelope, created_at, updated_at
-    )
-    SELECT key, chain_id, context_graph_id, source_peer_id, trusted_publisher_peer_id,
-           ual, tx_hash, assertion_version, merkle_root, ka_id, batch_id,
-           target_context_graph_id, envelope_sha256, raw_envelope, created_at, created_at
-    FROM finalization_inbox_v1
-    WHERE key = ? AND state = 'RECEIVED'
-  `);
-  const removeLive = database.prepare(`
-    DELETE FROM finalization_inbox_v1 WHERE key = ? AND state = 'RECEIVED'
-  `);
   const displaced: FinalizationRecoveryDisplacement[] = [];
   while (displaced.length < MAX_DISPLACEMENTS_PER_ADMISSION) {
     const shortfall = finalizationRecoveryCapacityShortfall(database, policy, input);
@@ -144,8 +131,7 @@ function parkStableFailures(
       rawMessage: { byteLength: Number(row.envelope_bytes) },
     };
     if (!hasFinalizationRecoveryDeferredCapacity(database, policy, parkedInput)) break;
-    if (park.run(row.key).changes !== 1) break;
-    removeLive.run(row.key);
+    if (!parkLiveFinalizationWithinTransaction(database, row.key)) break;
     displaced.push({
       key: row.key,
       ual: row.ual,

@@ -91,6 +91,71 @@ describe('SQLite finalization recovery displacement', () => {
     });
   });
 
+  it('keeps a parked entry exactly as long as the live inbox would have kept it', async () => {
+    const receivedAt = 1_000_000;
+    let now = receivedAt;
+    await withStore({ maxPerPeer: 1, rawTtlMs: 10 * MINUTE, now: () => now }, async (store, displaced) => {
+      await store.receive(entry(1));
+      // A live entry with the same history, from another publisher and graph.
+      await store.receive(entry(9, { sourcePeerId: 'peer-control', contextGraphId: 'control-graph' }));
+      // Retries keep both live after their receipt is older than the raw TTL.
+      now = receivedAt + 6 * MINUTE;
+      const lastRetryAt = now;
+      await fail(store, 'entry-1', 3);
+      await fail(store, 'entry-9', 3);
+      now = receivedAt + 12 * MINUTE;
+      await expect(store.receive(entry(2))).resolves.toMatchObject({ status: 'inserted' });
+      expect(displaced.map(({ key }) => key)).toEqual(['entry-1']);
+
+      // Promotion prunes first; entry-2 still holds the publisher's only slot.
+      now = lastRetryAt + 10 * MINUTE;
+      await expect(store.promotePending(1)).resolves.toBe(0);
+      expect(await store.health()).toMatchObject({ deferredEntries: 1 });
+      await expect(store.get('entry-9')).resolves.toMatchObject({ state: 'RECEIVED' });
+
+      now += 1;
+      await expect(store.promotePending(1)).resolves.toBe(0);
+      expect(await store.health()).toMatchObject({ deferredEntries: 0 });
+      await expect(store.get('entry-9')).resolves.toBeUndefined();
+    });
+  });
+
+  it('readmits a parked entry with its receipt time and publisher but a fresh retry state', async () => {
+    const receivedAt = 1_000_000;
+    let now = receivedAt;
+    await withStore({ maxPerPeer: 1, now: () => now }, async (store) => {
+      await store.receive(entry(1));
+      await store.recordTrustedPublisher('entry-1', 0, PUBLISHER);
+      await fail(store, 'entry-1', 3);
+      now += 5 * MINUTE;
+      await store.receive(entry(2));
+      await store.transition('entry-2', 0, 'SUPERSEDED');
+      await expect(store.promotePending(1)).resolves.toBe(1);
+
+      // The spool keeps no retry state, so the entry is due at once ...
+      const readmitted = await store.get('entry-1');
+      expect(readmitted).toMatchObject({
+        state: 'RECEIVED',
+        createdAt: receivedAt,
+        trustedPublisherPeerId: PUBLISHER,
+        attemptCount: 0,
+        failureStreak: 0,
+      });
+      expect(readmitted).not.toHaveProperty('failureSignature');
+      expect(readmitted).not.toHaveProperty('nextAttemptAt');
+      expect(readmitted).not.toHaveProperty('lastError');
+      expect((await store.listDue(8)).map(({ key }) => key)).toEqual(['entry-1']);
+      // ... cannot be parked again before it fails the same way again ...
+      await expect(store.receive(entry(3))).resolves.toEqual({ status: 'pending' });
+      // ... and is back on the stable-failure backoff once it has.
+      await fail(store, 'entry-1', 3);
+      await expect(store.get('entry-1')).resolves.toMatchObject({
+        failureStreak: 3,
+        nextAttemptAt: now + 6 * 60 * MINUTE,
+      });
+    });
+  });
+
   it.each([
     { name: 'is still retrying', failures: 2, code: 'workspace-unavailable', ageMs: 5 * MINUTE },
     { name: 'is younger than the minimum age', failures: 3, code: 'workspace-unavailable', ageMs: 4 * MINUTE },

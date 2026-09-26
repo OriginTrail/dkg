@@ -16,7 +16,6 @@ import {
   planFinalizationRecoveryAttempt,
 } from './finalization-recovery-store.js';
 import {
-  finalizationEnvelopeFromRow,
   finalizationEnvelopeSha256,
   finalizationRecoveryRowToEntry,
 } from './finalization-recovery-sqlite-codec.js';
@@ -38,6 +37,12 @@ import {
   type FinalizationRecoveryRetentionPolicy,
   type SqliteFinalizationRecoveryStoreOptions,
 } from './finalization-recovery-sqlite-policy.js';
+import {
+  insertLiveFinalizationWithinTransaction,
+  insertPendingFinalizationWithinTransaction,
+  pendingRowToReceiveInput,
+  type PendingFinalizationRow,
+} from './finalization-recovery-sqlite-rows.js';
 
 export type {
   FinalizationRecoveryDisplacement,
@@ -70,45 +75,6 @@ function sameFinalizationRecoveryIdentity(
     && existing.kaId === input.kaId
     && existing.batchId === input.batchId
     && existing.targetContextGraphId === input.targetContextGraphId;
-}
-
-interface PendingFinalizationRow {
-  key: string;
-  chain_id: string;
-  context_graph_id: string;
-  source_peer_id: string | null;
-  trusted_publisher_peer_id: string | null;
-  ual: string;
-  tx_hash: string;
-  assertion_version: string;
-  merkle_root: string;
-  ka_id: string;
-  batch_id: string;
-  target_context_graph_id: string | null;
-  envelope_sha256: string;
-  raw_envelope: Uint8Array;
-  created_at: number;
-  updated_at: number;
-}
-
-function pendingRowToReceiveInput(row: PendingFinalizationRow): FinalizationRecoveryReceiveInput {
-  const { raw } = finalizationEnvelopeFromRow(row as unknown as Record<string, unknown>);
-  return {
-    key: row.key,
-    chainId: row.chain_id,
-    contextGraphId: row.context_graph_id,
-    ...(row.source_peer_id ? { sourcePeerId: row.source_peer_id } : {}),
-    ual: row.ual,
-    txHash: row.tx_hash,
-    assertionVersion: row.assertion_version,
-    merkleRoot: row.merkle_root,
-    kaId: row.ka_id,
-    batchId: row.batch_id,
-    ...(row.target_context_graph_id
-      ? { targetContextGraphId: row.target_context_graph_id }
-      : {}),
-    rawMessage: new Uint8Array(raw),
-  };
 }
 
 function samePendingFinalization(
@@ -172,72 +138,6 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
     return row ? finalizationRecoveryRowToEntry(row) : undefined;
   }
 
-  private insertLiveWithinTransaction(
-    input: FinalizationRecoveryReceiveInput,
-    digest: string,
-    createdAt: number,
-    updatedAt = createdAt,
-    trustedPublisherPeerId?: string,
-  ): void {
-    this.database.prepare(`
-      INSERT INTO finalization_inbox_v1 (
-        key, state, chain_id, context_graph_id, source_peer_id,
-        trusted_publisher_peer_id, ual, tx_hash,
-        assertion_version, merkle_root, ka_id, batch_id, target_context_graph_id,
-        envelope_sha256, raw_envelope, created_at, updated_at
-      ) VALUES (?, 'RECEIVED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      input.key,
-      input.chainId,
-      input.contextGraphId,
-      input.sourcePeerId ?? null,
-      trustedPublisherPeerId ?? null,
-      input.ual,
-      input.txHash.toLowerCase(),
-      input.assertionVersion,
-      input.merkleRoot.toLowerCase(),
-      input.kaId,
-      input.batchId,
-      input.targetContextGraphId ?? null,
-      digest,
-      Buffer.from(input.rawMessage),
-      createdAt,
-      updatedAt,
-    );
-  }
-
-  private insertPendingWithinTransaction(
-    input: FinalizationRecoveryReceiveInput,
-    digest: string,
-    now: number,
-  ): void {
-    this.database.prepare(`
-      INSERT INTO finalization_pending_v2 (
-        key, chain_id, context_graph_id, source_peer_id,
-        trusted_publisher_peer_id, ual, tx_hash,
-        assertion_version, merkle_root, ka_id, batch_id, target_context_graph_id,
-        envelope_sha256, raw_envelope, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      input.key,
-      input.chainId,
-      input.contextGraphId,
-      input.sourcePeerId ?? null,
-      null,
-      input.ual,
-      input.txHash.toLowerCase(),
-      input.assertionVersion,
-      input.merkleRoot.toLowerCase(),
-      input.kaId,
-      input.batchId,
-      input.targetContextGraphId ?? null,
-      digest,
-      Buffer.from(input.rawMessage),
-      now,
-      now,
-    );
-  }
-
   receive(input: FinalizationRecoveryReceiveInput): Promise<FinalizationRecoveryReceiveResult> {
     if (this.#closed || this.#closing) return Promise.resolve({ status: 'closed' });
     return this.mutate(() => {
@@ -290,10 +190,11 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
         }
       }
       const now = this.#policy.now();
+      const times = { createdAt: now, updatedAt: now };
       let displaced: FinalizationRecoveryDisplacement[] = [];
       if (hasFinalizationRecoveryCapacity(this.database, this.#policy, input)) {
         this.transaction(() => {
-          this.insertLiveWithinTransaction(input, digest, now);
+          insertLiveFinalizationWithinTransaction(this.database, input, digest, times);
         });
       } else {
         let admitted = false;
@@ -306,7 +207,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
           );
           if (!parked) return;
           displaced = parked;
-          this.insertLiveWithinTransaction(input, digest, now);
+          insertLiveFinalizationWithinTransaction(this.database, input, digest, times);
           admitted = true;
         });
         if (!admitted) {
@@ -314,7 +215,7 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
             return { status: 'capacity' };
           }
           this.transaction(() => {
-            this.insertPendingWithinTransaction(input, digest, now);
+            insertPendingFinalizationWithinTransaction(this.database, input, digest, times);
           });
           return { status: 'pending' };
         }
@@ -363,17 +264,17 @@ export class SqliteFinalizationRecoveryStore implements FinalizationRecoveryStor
             continue;
           }
           // Parked entries, including ones parked to make room, only take
-          // free capacity: they never displace another entry.
+          // free capacity: they never displace another entry. One parked to
+          // make room comes back with a fresh retry state (see
+          // parkLiveFinalizationWithinTransaction).
           if (!hasFinalizationRecoveryCapacity(this.database, this.#policy, input)) {
             continue;
           }
-          this.insertLiveWithinTransaction(
-            input,
-            row.envelope_sha256,
-            row.created_at,
-            now,
-            row.trusted_publisher_peer_id ?? undefined,
-          );
+          insertLiveFinalizationWithinTransaction(this.database, input, row.envelope_sha256, {
+            createdAt: row.created_at,
+            updatedAt: now,
+            trustedPublisherPeerId: row.trusted_publisher_peer_id ?? undefined,
+          });
           this.database.prepare(
             'DELETE FROM finalization_pending_v2 WHERE key = ?',
           ).run(row.key);

@@ -646,6 +646,77 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
+  it('settles an entry moved to the deferred spool for a rejected arrival without chain reconciliation', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-displaced-'));
+    try {
+      let now = 1_000;
+      let workspaceReady = false;
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        maxPerPeer: 1,
+        now: () => now,
+      });
+      const materializer = recoveryMaterializer();
+      // The adapter cannot count or list Context Graph KCs, so chain
+      // reconciliation has nothing to repair the entry with.
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain(),
+        { info: () => {}, warn: () => {} },
+        {
+          ...materializer,
+          prepare: async () => workspaceReady ? materializer.prepare() : undefined,
+        },
+        { now: () => now },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+        const [entry] = await store.list();
+        expect(entry).toMatchObject({
+          state: 'RECEIVED',
+          failureSignature: 'workspace-unavailable',
+          failureStreak: attempt,
+        });
+        if (attempt < 3) now = entry!.nextAttemptAt!;
+      }
+      now += 5 * 60_000;
+
+      // A new finalization from the same publisher takes the entry's slot and
+      // then fails verification.
+      await expect(store.receive({
+        key: 'arrival',
+        chainId: 'base:84532',
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        ual: `${UAL}-arrival`,
+        txHash: `0x${'12'.repeat(32)}`,
+        assertionVersion: '1',
+        merkleRoot: `0x${'00'.repeat(32)}`,
+        kaId: '8',
+        batchId: '8',
+        targetContextGraphId: '42',
+        rawMessage: Uint8Array.from([9]),
+      })).resolves.toMatchObject({ status: 'inserted' });
+      expect(await store.health()).toMatchObject({ deferredEntries: 1 });
+      await store.transition('arrival', 0, 'REJECTED', 'canonical receipt not found');
+
+      workspaceReady = true;
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      expect(await store.list()).toEqual(expect.arrayContaining([
+        expect.objectContaining({ ual: UAL, state: 'SETTLED' }),
+      ]));
+      expect(await store.health()).toMatchObject({ deferredEntries: 0 });
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('continues a due batch after one entry throws and backs off the failed row', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-due-poison-'));
     try {
