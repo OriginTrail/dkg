@@ -71,7 +71,7 @@ export async function confirmContextGraphMetadataV1(
   }
 
   if (input.purpose === 'approved-member') {
-    const { proof, accessPolicy } = input.acceptance;
+    const { proof } = input.acceptance;
     // A lifecycle race or partial rehydration can drop or change the binding;
     // the pre-join definition must not then stand in for the member.
     if (
@@ -81,11 +81,11 @@ export async function confirmContextGraphMetadataV1(
     const confirmed = await findAuthoritativeDefinition(
       dependencies,
       contextGraphId,
-      [{ definition: accessPolicy === 'public' ? 'public' : 'private', memberProof: proof }],
+      [{ definition: input.acceptance.admittedDefinition, memberProof: proof }],
       'agent.contextGraph.confirmedMeta.approvedMember',
     ) !== null;
-    // Readiness is declared now, so the authority behind a public acceptance
-    // must still hold now, not only when the join attempt began.
+    // Readiness is declared now, so the authority behind the acceptance must
+    // still hold now, not only when the join attempt began.
     return confirmed && await input.acceptance.stillHolds();
   }
 

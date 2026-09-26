@@ -76,6 +76,22 @@ describe('approved-member acceptance (#2831 review)', () => {
     expect(() => new Unkeyed(Symbol('forged'), proof(), 'public', async () => true)).toThrow(TypeError);
   });
 
+  it('keeps an unproven acceptance only while the authority is not public', async () => {
+    let publicNow = false;
+    const acceptance = await resolveApprovedMemberAcceptanceDecision(
+      proof(),
+      async () => (publicNow
+        ? { kind: 'plaintext' as const }
+        : { kind: 'private-roster' as const, participantAgents: [] }),
+    );
+    expect(acceptance.accessPolicy).toBe('unproven');
+    expect(acceptance.admittedDefinition).toBe('private');
+    await expect(acceptance.stillHolds()).resolves.toBe(true);
+    // The graph turned public: its private definition must not commit now.
+    publicNow = true;
+    await expect(acceptance.stillHolds()).resolves.toBe(false);
+  });
+
   it('reads its authority again when asked whether it still holds', async () => {
     let publicNow = true;
     const acceptance = await resolveApprovedMemberAcceptanceDecision(

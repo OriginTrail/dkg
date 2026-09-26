@@ -169,6 +169,7 @@ import {
   type Rfc64CatalogResponsibilitySelectionV1,
 } from './rfc64/catalog-responsibility-registry-v1.js';
 import {
+  projectRfc64CatalogTransportStateV1,
   rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1,
   type Rfc64CatalogRolloutModeV1,
 } from './rfc64/catalog-rollout-authority-v1.js';
@@ -3719,15 +3720,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     contextGraphId: string,
     opts: { callerAgentAddress?: string } = {},
   ): boolean | undefined {
-    const receiverAuthority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-    if (
-      receiverAuthority.killSwitchActive
-      || receiverAuthority.mode !== 'catalog'
-    ) return undefined;
-    if (
-      !receiverAuthority.active
-      || receiverAuthority.reconciliationLane !== 'catalog-apply'
-    ) return false;
+    const transport = projectRfc64CatalogTransportStateV1(
+      this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
+    );
+    if (transport === 'legacy') return undefined;
+    if (transport === 'catalog-blocked') return false;
 
     const service = this.rfc64PublicCatalogServiceV1;
     const activeNetworkId = this.config.rfc64CatalogDeploymentProfile?.networkId
@@ -3798,11 +3795,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): boolean {
-    const receiverAuthority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-    return !receiverAuthority.killSwitchActive
-      && receiverAuthority.mode === 'catalog'
-      && receiverAuthority.active
-      && receiverAuthority.reconciliationLane === 'catalog-apply';
+    return projectRfc64CatalogTransportStateV1(
+      this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
+    ) === 'catalog-active';
   }
 
   /**

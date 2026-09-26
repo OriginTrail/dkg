@@ -424,6 +424,15 @@ describe('private CG membership bootstrap recovery', () => {
       expect(sources).toEqual(['agent.contextGraph.confirmedMeta.approvedMember.privateDefinition']);
     });
 
+    it('confirms nothing for an unproven acceptance once the graph turned public', async () => {
+      let publicNow = false;
+      const acceptance = await publicAcceptanceFor(proof, () => publicNow);
+      expect(acceptance.accessPolicy).toBe('unproven');
+      const { confirm } = confirmationWith();
+      publicNow = true;
+      await expect(confirm(acceptance)).resolves.toBe(false);
+    });
+
     it('confirms nothing once the public authority no longer holds', async () => {
       let publicNow = true;
       const acceptance = await publicAcceptanceFor(proof, () => publicNow);

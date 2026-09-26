@@ -48,6 +48,15 @@ export class ApprovedMemberAcceptance {
     Object.freeze(this);
   }
 
+  /**
+   * The one definition this acceptance admits, with its member proof: the
+   * public definition for a public acceptance, the complete private one
+   * otherwise.
+   */
+  get admittedDefinition(): 'public' | 'private' {
+    return this.accessPolicy === 'public' ? 'public' : 'private';
+  }
+
   /** Whether the authority behind this acceptance still holds right now. */
   stillHolds(): Promise<boolean> {
     return this.#holds();
@@ -55,8 +64,10 @@ export class ApprovedMemberAcceptance {
 }
 
 /**
- * An acceptance that admits only the complete private definition. It grants
- * nothing beyond that, so it always holds.
+ * An acceptance that admits only the complete private definition, for a
+ * caller with no authority reader (the deprecated `memberProof` refresh
+ * option). It keeps that option's pre-PR private-only meaning and cannot
+ * revalidate, so it always holds.
  */
 export function unprovenApprovedMemberAcceptance(
   proof: ApprovedMemberProof,
@@ -69,8 +80,14 @@ export function unprovenApprovedMemberAcceptance(
  * SWM transport authority is plaintext: registered public, or unregistered
  * under an active accepted owner-signed public policy. A retained snapshot
  * therefore never outvotes a registration the index shows. Anything else,
- * including an unreadable authority, is unproven. A public acceptance reads
- * the same authority again whenever it is asked whether it still holds.
+ * including an unreadable authority, is unproven.
+ *
+ * Either acceptance reads the same authority again whenever it is asked
+ * whether it still holds, and holds only while that authority still agrees
+ * with it: a graph that stops being public must not commit a public
+ * definition, and one that turns public must not commit a private definition
+ * its peers' plaintext would then be refused under (#2831 review). An
+ * unreadable authority keeps an unproven acceptance, the conservative one.
  */
 export async function resolveApprovedMemberAcceptanceDecision(
   proof: ApprovedMemberProof,
@@ -85,5 +102,10 @@ export async function resolveApprovedMemberAcceptanceDecision(
   };
   return await isPublicNow()
     ? new ApprovedMemberAcceptance(constructionKey, proof, 'public', isPublicNow)
-    : unprovenApprovedMemberAcceptance(proof);
+    : new ApprovedMemberAcceptance(
+      constructionKey,
+      proof,
+      'unproven',
+      async () => !(await isPublicNow()),
+    );
 }

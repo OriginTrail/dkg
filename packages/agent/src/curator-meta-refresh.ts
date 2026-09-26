@@ -532,23 +532,26 @@ async function fetchAuthoritativeMetaSnapshot(
       : unprovenApprovedMemberAcceptance(options.memberProof));
   const acceptsAuthoritativePublicDefinition = approvedMember === undefined
     ? hasAuthoritativePublicMetaDefinition(contextGraphId, controlMetaQuads)
-    : approvedMember.accessPolicy === 'public'
+    : approvedMember.admittedDefinition === 'public'
       && hasAuthoritativePublicMetaDefinitionForApprovedMember(
         contextGraphId,
         controlMetaQuads,
         approvedMember.proof,
-      )
-      && await approvedMember.stillHolds();
+      );
   // A public-only bootstrap never installs a private definition, however
   // complete: the caller's accepted policy already says the graph is public.
   const hasAuthoritativePrivateDefinition = options.requirePublicDefinition !== true
-    && approvedMember?.accessPolicy !== 'public'
+    && (approvedMember === undefined || approvedMember.admittedDefinition === 'private')
     && hasAuthoritativePrivateMetaDefinition(
       contextGraphId,
       controlMetaQuads,
       approvedMember?.proof,
     );
-  if (!acceptsAuthoritativePublicDefinition && !hasAuthoritativePrivateDefinition) {
+  // An approved member commits its definition only while the authority behind
+  // its acceptance still holds after the fetch, whichever definition it is.
+  const admitted = (acceptsAuthoritativePublicDefinition || hasAuthoritativePrivateDefinition)
+    && (approvedMember === undefined || await approvedMember.stillHolds());
+  if (!admitted) {
     agent.syncCheckpoints.delete(snapshotCheckpointKey);
     agent.syncCheckpoints.delete(result.checkpointKey);
     agent.log.warn(

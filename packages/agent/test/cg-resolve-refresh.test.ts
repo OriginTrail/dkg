@@ -647,6 +647,31 @@ describe('refreshMetaFromCurator', () => {
       expect(result).toEqual({ refreshed: false, mutated: false });
     });
 
+    it('does not install a private snapshot once the graph turns public during the fetch', async () => {
+      let publicNow = false;
+      const unproven = await resolveApprovedMemberAcceptanceDecision(
+        memberProof,
+        async () => (publicNow
+          ? { kind: 'plaintext' as const }
+          : { kind: 'unavailable' as const, reason: 'chain-access-policy-timeout' as const }),
+      );
+      expect(unproven.accessPolicy).toBe('unproven');
+      const privateSnapshotWithMember = [
+        ...authoritativePrivateMetaQuads(contextGraphId),
+        ...activeMemberMetaQuads(
+          contextGraphId,
+          memberAddress,
+          'local-peer',
+          '0x00000000000000000000000000000000000000d1',
+          Date.now(),
+        ),
+      ];
+      // The authority read timed out at first, then resolves registered public
+      // while the curator fetch is in flight.
+      const result = await refreshAfterApproval(privateSnapshotWithMember, unproven, () => { publicNow = true; });
+      expect(result).toEqual({ refreshed: false, mutated: false });
+    });
+
     it('rejects a public snapshot that does not yet prove the approved member', async () => {
       const result = await refreshAfterApproval(publicSnapshotWithMember({ includeMember: false }), 'public');
       expect(result.refreshed).toBe(false);
