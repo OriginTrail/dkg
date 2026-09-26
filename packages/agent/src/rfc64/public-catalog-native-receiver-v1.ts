@@ -996,18 +996,6 @@ export class Rfc64PublicCatalogNativeReceiverV1<
         fetchedBucket,
       });
     }
-    const targetRows = target.rows;
-    try {
-      assertRfc64PublicCatalogExactSetBundleBytesV1(
-        targetRows.map((row) => row.transfer.byteLength),
-      );
-    } catch (cause) {
-      fail(
-        'catalog-native-receiver-slice',
-        'signed catalog exact set exceeds the V1 aggregate bundle-byte ceiling',
-        cause,
-      );
-    }
     const preparedRows: Array<{
       readonly row: AuthorCatalogRowV1;
       readonly authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
@@ -1019,14 +1007,13 @@ export class Rfc64PublicCatalogNativeReceiverV1<
       readonly expectedEvidence: Rfc64PublicCatalogInventoryEvidenceRowV1;
     }> = [];
     let authorshipCapabilities: readonly VerifiedAuthorCatalogRowAuthorshipV1[] = [];
-    if (targetRows.length > 0) {
+    if (target.rows.length > 0) {
       throwIfAborted(signal);
       if (target.kind !== 'bucket') {
         fail('catalog-native-receiver-catalog', 'non-empty catalog target lost its bucket proof');
       }
       try {
-        // One bucket closure for every row instead of one per row (#2812);
-        // target.rows are the bucket's rows, in bucket order.
+        // One bucket closure for every row instead of one per row (#2812).
         authorshipCapabilities = verifyAuthorCatalogBucketRowAuthorshipsV1({
           catalogIssuerDelegation: fetchedDelegation.envelope,
           catalogIssuerDelegationSignature: fetchedDelegation.issuerSignature,
@@ -1047,11 +1034,28 @@ export class Rfc64PublicCatalogNativeReceiverV1<
         );
       }
     }
-    for (const [index, row] of targetRows.entries()) {
-      throwIfAborted(signal);
-      const authorshipCapability = authorshipCapabilities[index]!;
+    // Past authorization, rows come only from the verifier's frozen
+    // snapshots, in bucket order, each with its own capability. The
+    // transport-owned bucket is not read again, so a response mutated across
+    // the awaits below cannot put another row beside a capability.
+    const authorizedRows = authorshipCapabilities.map((authorshipCapability) => {
       const authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1 =
         readVerifiedAuthorCatalogRowAuthorshipV1(authorshipCapability);
+      return { row: authorship.row, authorship, authorshipCapability };
+    });
+    try {
+      assertRfc64PublicCatalogExactSetBundleBytesV1(
+        authorizedRows.map(({ row }) => row.transfer.byteLength),
+      );
+    } catch (cause) {
+      fail(
+        'catalog-native-receiver-slice',
+        'signed catalog exact set exceeds the V1 aggregate bundle-byte ceiling',
+        cause,
+      );
+    }
+    for (const { row, authorship, authorshipCapability } of authorizedRows) {
+      throwIfAborted(signal);
 
       const bundle = await this.fetchKaBundleWithCacheV1(
         remotePeerId,
@@ -1185,7 +1189,7 @@ export class Rfc64PublicCatalogNativeReceiverV1<
         // decision. Requiring target.previousHeadDigest here made the first
         // retry after a successful cold bootstrap fail despite exact durable
         // target state.
-        ? Object.freeze(targetRows.map((row) => Object.freeze({ ...row })))
+        ? Object.freeze(preparedRows.map(({ row }) => row))
         : await loadExactAppliedCatalogRowsForSnapshotV1(
           this.options.controlObjects,
           currentAppliedHead,

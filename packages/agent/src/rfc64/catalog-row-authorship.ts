@@ -569,35 +569,10 @@ function closeCatalogRowAuthorship(
       `row kaId ${row.kaId} high 160 bits do not equal the signed head author`,
     );
   }
-  const { shared } = closure;
   return mintVerifiedAuthorship({
-    authorCatalogAgentScopeDigest: shared.authorCatalogAgentScopeDigest,
-    authorAuthorityEvidenceDigest: shared.authorAuthorityEvidenceDigest,
-    catalogIssuerDelegationObjectDigest: shared.catalogIssuerDelegationObjectDigest,
-    catalogIssuerDelegationSignatureVariantDigest: shared.catalogIssuerDelegationSignatureVariantDigest,
-    catalogHeadObjectDigest: shared.catalogHeadObjectDigest,
-    catalogHeadSignatureVariantDigest: shared.catalogHeadSignatureVariantDigest,
-    directoryPathObjectDigests: shared.directoryPathObjectDigests,
-    directoryPathSignatureVariantDigests: shared.directoryPathSignatureVariantDigests,
-    bucketObjectDigest: shared.bucketObjectDigest,
-    bucketSignatureVariantDigest: shared.bucketSignatureVariantDigest,
-    catalogScopeDigest: shared.catalogScopeDigest,
-    catalogRowDigest: computeAuthorCatalogRowDigestV1(shared.catalogScopeDigest, row),
+    ...closure.shared,
+    catalogRowDigest: computeAuthorCatalogRowDigestV1(closure.shared.catalogScopeDigest, row),
     transferIdentityDigest: computeKaTransferIdentityDigestV1(row.transfer),
-    networkId: shared.networkId,
-    contextGraphId: shared.contextGraphId,
-    governanceChainId: shared.governanceChainId,
-    governanceContractAddress: shared.governanceContractAddress,
-    ownershipTransitionDigest: shared.ownershipTransitionDigest,
-    subGraphName: shared.subGraphName,
-    authorAddress: shared.authorAddress,
-    catalogIssuerKey: shared.catalogIssuerKey,
-    era: shared.era,
-    version: shared.version,
-    bucketId: shared.bucketId,
-    effectiveAt: shared.effectiveAt,
-    expiresAt: shared.expiresAt,
-    headIssuedAt: shared.headIssuedAt,
     row,
   });
 }
