@@ -261,6 +261,24 @@ describe('private CG membership bootstrap recovery', () => {
       .toBe(true);
   });
 
+  it('confirms nothing for join completion when the approval binding is missing (#2831 review)', async () => {
+    ({ agent } = await createAgent('PublicJoinMissingApprovalBinding'));
+    const contextGraphId = '0x00a9D0dcab936a418ffEbc734476C91D4027d359/public-join-missing-binding';
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    // Valid public metadata, but a lifecycle race left no approval binding:
+    // no member can be proven, so the pre-join definition must not stand in.
+    await (agent as any).store.insert([
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: metaGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"public"', graph: metaGraph },
+    ]);
+    expect((agent as any).localApprovedAgentByCG.has(contextGraphId)).toBe(false);
+
+    expect(await (agent as any).hasConfirmedMetaState(contextGraphId)).toBe(true);
+    expect(await (agent as any).hasConfirmedMetaState(contextGraphId, { requireApprovedMemberProof: true }))
+      .toBe(false);
+  });
+
   it('keeps the post-approval bootstrap pending while the curator snapshot does not prove the member (#2831 review)', async () => {
     const contextGraphId = '0x00a9D0dcab936a418ffEbc734476C91D4027d359/public-join-stale-snapshot';
     const curatorPeerId = '12D3KooWCuratorOfPublicJoinStaleSnapshot';

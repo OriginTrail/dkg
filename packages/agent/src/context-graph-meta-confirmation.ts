@@ -22,11 +22,12 @@ import { isPublicMetaDurabilityPending } from
 export interface ConfirmContextGraphMetadataInput {
   readonly rejectUnregisteredPlaceholder?: boolean;
   /**
-   * Join bootstrap completion: when this node holds a join approval for the
-   * graph, only local metadata that proves the approved member confirms —
-   * the private definition with its member proof, or the public definition
-   * with the same proof (#2831 review). A public definition alone keeps
-   * confirming ordinary reads, whose admission does not depend on membership.
+   * Join bootstrap completion: only local metadata that proves this node's
+   * approved member confirms — the private definition with its member proof,
+   * or the public definition with the same proof (#2831 review). Without a
+   * local approval binding no member can be proven, so nothing confirms. A
+   * public definition alone keeps confirming ordinary reads, whose admission
+   * does not depend on membership.
    */
   readonly requireApprovedMemberProof?: boolean;
 }
@@ -86,7 +87,10 @@ export async function confirmContextGraphMetadataV1(
       // The libp2p peer binding remains sufficient when no op-key is exposed.
     }
   }
-  if (input.requireApprovedMemberProof === true && approvedAgentAddress) {
+  if (input.requireApprovedMemberProof === true) {
+    // A lifecycle race or partial rehydration can drop the binding; the
+    // ordinary checks below would then confirm on the pre-join definition.
+    if (!approvedAgentAddress) return false;
     const memberProof = {
       approvedAgentAddress,
       expectedDelegateePeerId: dependencies.peerId,

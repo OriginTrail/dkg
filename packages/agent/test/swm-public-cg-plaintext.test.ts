@@ -165,7 +165,7 @@ function makeAgentLike(opts: {
     (DKGAgent.prototype as any).resolveWorkspaceAgentRecipientsForCurrentAuthority;
   // No graph here has an accepted owner-signed public policy (#2827), so the
   // SWM paths keep the on-chain behaviour these tests pin.
-  agentLike.swmAcceptedAbsenceOption = (DKGAgent.prototype as any).swmAcceptedAbsenceOption;
+  agentLike.resolveSwmAcceptedPublicPolicyState = (DKGAgent.prototype as any).resolveSwmAcceptedPublicPolicyState;
   agentLike.isContextGraphSwmPublic = (DKGAgent.prototype as any).isContextGraphSwmPublic;
   agentLike.hasAcceptedRfc64PublicUnregisteredAuthorityV1 = () => false;
   agentLike._resolveCuratedChainKeyContext = (DKGAgent.prototype as any)._resolveCuratedChainKeyContext;

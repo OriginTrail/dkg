@@ -15,7 +15,7 @@ const MEMBER_B = '0x2222222222222222222222222222222222222222';
 // SWM paths ask whether an accepted owner-signed PUBLIC policy lets finalized
 // name absence count as unregistered (#2827); none of these graphs has one.
 const noAcceptedPublicUnregisteredPolicy = {
-  swmAcceptedAbsenceOption: WorkspaceCryptoMethods.prototype.swmAcceptedAbsenceOption,
+  resolveSwmAcceptedPublicPolicyState: WorkspaceCryptoMethods.prototype.resolveSwmAcceptedPublicPolicyState,
   hasAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
 };
 

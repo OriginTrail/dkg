@@ -74,7 +74,7 @@ function joinedMember(options: {
   const agent = {
     resolveContextGraphAgentGateAuthority:
       WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
-    swmAcceptedAbsenceOption: WorkspaceCryptoMethods.prototype.swmAcceptedAbsenceOption,
+    resolveSwmAcceptedPublicPolicyState: WorkspaceCryptoMethods.prototype.resolveSwmAcceptedPublicPolicyState,
     isContextGraphSwmPublic: WorkspaceCryptoMethods.prototype.isContextGraphSwmPublic,
     resolveRegisteredContextGraphAuthority: registry.resolve,
     // A public graph has no RFC-64 private roster.
@@ -195,6 +195,65 @@ describe('SWM authority for a joined member of an unregistered graph (#2827)', (
     ]);
   });
 
+  // #2831 review: the finalized index can still report the name absent after
+  // a registration landed, so an accepted public snapshot opens these gates
+  // only while the live chain confirms the name is unregistered.
+  const staleSnapshotLiveStates: Array<[string, LiveState | Error]> = [
+    ['registered private', 1],
+    ['registered public', 0],
+    ['unknown', 'unknown'],
+    ['unreadable', new Error('rpc down')],
+  ];
+
+  it.each(staleSnapshotLiveStates)(
+    'denies member recovery to the old allowlist when the live name is %s',
+    async (_label, liveState) => {
+      const { agent, registry, getCgMeta } = joinedMember({
+        acceptedUnregistered: true,
+        acceptedPublic: true,
+        allowedAgents: [CURATOR, STALE_MEMBER],
+        liveState,
+      });
+
+      const gate = await WorkspaceCryptoMethods.prototype.getMemberRecoveryGate.call(
+        agent as never,
+        CG,
+      );
+
+      expect(gate).toBeNull();
+      expect(getCgMeta).not.toHaveBeenCalled();
+      expect(registry.calls).toEqual([
+        expect.objectContaining({ allowAcceptedRfc64FinalizedAbsence: false }),
+      ]);
+    },
+  );
+
+  it.each(staleSnapshotLiveStates)(
+    'keeps the agent gate unavailable when the live name is %s',
+    async (_label, liveState) => {
+      const { agent, registry, getCgMeta } = joinedMember({
+        acceptedUnregistered: true,
+        acceptedPublic: true,
+        allowedAgents: [CURATOR, STALE_MEMBER],
+        liveState,
+      });
+
+      const authority = await WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority.call(
+        agent as never,
+        CG,
+      );
+
+      expect(authority).toEqual(expect.objectContaining({
+        kind: 'unavailable',
+        reason: 'finalized-name-absence-unaccepted',
+      }));
+      expect(getCgMeta).not.toHaveBeenCalled();
+      expect(registry.calls).toEqual([
+        expect.objectContaining({ allowAcceptedRfc64FinalizedAbsence: false }),
+      ]);
+    },
+  );
+
   it('denies member recovery without an accepted owner-signed public policy, without reading local metadata', async () => {
     const { agent, registry, getCgMeta } = joinedMember({
       acceptedUnregistered: false,
@@ -252,7 +311,9 @@ describe('SWM encryption on an unregistered public graph (#2827)', () => {
   });
 
   it('fails closed when the name was registered private after the public snapshot was accepted', async () => {
-    const { agent, store } = joinedMember({
+    // The finalized index still reports the name absent, but the stale public
+    // snapshot no longer lets that absence count as unregistered.
+    const { agent, store, registry } = joinedMember({
       acceptedUnregistered: true,
       acceptedPublic: true,
       allowedAgents: [CURATOR, MEMBER],
@@ -260,9 +321,12 @@ describe('SWM encryption on an unregistered public graph (#2827)', () => {
     });
 
     await expect(resolveRecipients(agent)).rejects.toMatchObject({
-      reason: 'chain-access-policy-unavailable',
+      reason: 'finalized-name-absence-unaccepted',
     });
     expect(store.query).not.toHaveBeenCalled();
+    expect(registry.calls).toEqual([
+      expect.objectContaining({ allowAcceptedRfc64FinalizedAbsence: false }),
+    ]);
   });
 
   it('gives a stale local member no key for an accepted PRIVATE graph', async () => {

@@ -68,6 +68,8 @@ interface DKGAgentInternals {
     publishPolicy: number | null;
   }>;
   getContextGraphAllowedPeers(contextGraphId: string): Promise<string[] | null>;
+  // The sender-side classification of a rejection ACK's reason code.
+  isRetryableSwmSenderKeySetupAckReason(reasonCode: string | undefined): boolean;
   readonly peerId: string;
 }
 
@@ -270,6 +272,51 @@ describe('acceptSwmSenderKeyPackage: stale-target throw type', () => {
     expect(ack.accepted).toBe(false);
     expect(ack.reasonCode).toBe('agent-gate-pending');
     expect(ack.reason).toContain('agent gate authority is unavailable (finalized-name-absence-unaccepted)');
+  });
+
+  // #2831 review: only an authority failure that can heal on its own is worth
+  // a retry. The rest need a software or configuration change on this
+  // receiver, so the sender must stop instead of publishing ciphertext this
+  // receiver can never authorize.
+  async function ackForUnavailableGate(
+    reason: Extract<ContextGraphAgentGateAuthority, { kind: 'unavailable' }>['reason'],
+  ) {
+    const { internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+    const pkg = await buildSignedPackage({
+      senderWallet,
+      recipientAgentAddress: recipient.agentAddress,
+      recipientKeyId: recipient.workspaceEncryptionKeys[0].encryptionKeyId,
+    });
+    internals.resolveContextGraphAgentGateAuthority = async () => ({ kind: 'unavailable', reason });
+    const ack = decodeSwmSenderKeyPackageAck(
+      await internals.handleSwmSenderKeyPackage(encodeSwmSenderKeyPackage(pkg), FROM_PEER_ID),
+    );
+    return { ack, retryable: internals.isRetryableSwmSenderKeySetupAckReason(ack.reasonCode) };
+  }
+
+  it.each([
+    'chain-participant-authority-unsupported',
+    'chain-participant-authority-invalid',
+    'chain-access-policy-unknown',
+  ] as const)('answers a terminal agent-gate-unavailable when the gate is %s', async (reason) => {
+    const { ack, retryable } = await ackForUnavailableGate(reason);
+
+    expect(ack.accepted).toBe(false);
+    expect(ack.reasonCode).toBe('agent-gate-unavailable');
+    expect(ack.reason).toContain(`agent gate authority is unavailable (${reason})`);
+    expect(retryable).toBe(false);
+  });
+
+  it.each([
+    'authority-circuit-open',
+    'chain-participant-authority-unavailable',
+    'rfc64-private-read-roster-unavailable',
+  ] as const)('keeps a transient %s gate retryable', async (reason) => {
+    const { ack, retryable } = await ackForUnavailableGate(reason);
+
+    expect(ack.accepted).toBe(false);
+    expect(ack.reasonCode).toBe('agent-gate-pending');
+    expect(retryable).toBe(true);
   });
 
   it('does NOT throw StaleSenderKeyTargetError for an active key (decrypt failure path)', async () => {
