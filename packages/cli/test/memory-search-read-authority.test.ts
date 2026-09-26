@@ -264,6 +264,8 @@ describe('POST /api/memory/search — context-graph read authority', () => {
     expect(body.retryable).toBe(true);
     expect(body.code).toBe('CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE');
     expect(res.headers['Retry-After']).toBe('3');
+    // #2834: the attribution goes to the daemon log under this operation id.
+    expect(res.headers['x-dkg-operation-id']).toMatch(/^[0-9a-f-]{36}$/);
     // Per issue #2641 / PR #2649: an outage response must not disclose the CG
     // id, the authority source or the internal reason — otherwise the 503
     // becomes the enumeration oracle the denial path avoids.

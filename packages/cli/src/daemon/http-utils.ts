@@ -16,6 +16,7 @@ import {
   messageIndicatesNoFundedPublisherWallet,
   Logger,
   createOperationContext,
+  type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import {
@@ -131,17 +132,85 @@ export function isContextGraphReadAuthorityUnavailable(err: unknown): boolean {
   }
 }
 
+/** Where an unavailable read authority came from, as the agent attributes it. */
+export interface ContextGraphReadAuthorityAttribution {
+  readonly source?: unknown;
+  readonly reason?: unknown;
+  readonly dependency?: unknown;
+}
+
+const readAuthorityLog = new Logger('read-authority');
+
+/** Repeats of one attribution within this window are counted, not logged. */
+const READ_AUTHORITY_LOG_INTERVAL_MS = 60_000;
+
+const readAuthorityLogWindows = new Map<string, { loggedAt: number; suppressed: number }>();
+
+/** An attribution token as the agent emits them; anything else logs as `unknown`. */
+function readAuthorityToken(value: unknown): string {
+  return typeof value === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(value) ? value : 'unknown';
+}
+
+function readAuthorityField(err: unknown, key: keyof ContextGraphReadAuthorityAttribution): unknown {
+  try {
+    return Reflect.get(err as object, key);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Logs why a Context Graph read was answered with the retryable 503 (#2834):
+ * the authority source, its reason and the dependency that could not answer
+ * (store, chain, local state or unknown), under the request's operation id.
+ * Only these tokens are logged, never graph ids, callers or raw dependency
+ * errors. Repeats of one attribution within a minute are counted and reported
+ * with its next line.
+ */
+export function logContextGraphReadAuthorityUnavailable(
+  ctx: OperationContext,
+  attribution: ContextGraphReadAuthorityAttribution,
+): void {
+  const source = readAuthorityToken(attribution.source);
+  const reason = readAuthorityToken(attribution.reason);
+  const dependency = readAuthorityToken(attribution.dependency);
+  const key = `${source}/${reason}/${dependency}`;
+  const now = Date.now();
+  const window = readAuthorityLogWindows.get(key);
+  // A window that starts in the future (the clock stepped back) has expired.
+  const elapsed = window === undefined ? Number.POSITIVE_INFINITY : now - window.loggedAt;
+  if (window !== undefined && elapsed >= 0 && elapsed < READ_AUTHORITY_LOG_INTERVAL_MS) {
+    window.suppressed += 1;
+    return;
+  }
+  readAuthorityLogWindows.set(key, { loggedAt: now, suppressed: 0 });
+  const suppressed = window?.suppressed ?? 0;
+  readAuthorityLog.warn(
+    ctx,
+    `Context Graph read authority unavailable, answered 503: source=${source} reason=${reason} dependency=${dependency}`
+      + (suppressed > 0 ? ` (${suppressed} more since the last report)` : ''),
+  );
+}
+
 /**
  * Uniform retryable response for an unresolvable Context Graph read authority.
  * Shared by every route that reaches `DKGAgent.query` with a scoped
  * `contextGraphId`, so a chain/metadata outage is never reported as a 500 and
  * the graph id, authority source, and internal reason stay out of the body.
+ * The attribution goes to the daemon log instead, under `ctx`'s operation id,
+ * which the response carries as `x-dkg-operation-id` for correlation.
  */
 export function respondIfContextGraphReadAuthorityUnavailable(
   res: ServerResponse,
   err: unknown,
+  ctx: OperationContext = createOperationContext('query'),
 ): boolean {
   if (!isContextGraphReadAuthorityUnavailable(err)) return false;
+  logContextGraphReadAuthorityUnavailable(ctx, {
+    source: readAuthorityField(err, 'source'),
+    reason: readAuthorityField(err, 'reason'),
+    dependency: readAuthorityField(err, 'dependency'),
+  });
   jsonResponse(
     res,
     503,
@@ -151,7 +220,7 @@ export function respondIfContextGraphReadAuthorityUnavailable(
       retryable: true,
     },
     undefined,
-    { 'Retry-After': '3' },
+    { 'Retry-After': '3', 'x-dkg-operation-id': ctx.operationId },
   );
   return true;
 }
