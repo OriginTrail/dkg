@@ -19,7 +19,7 @@ import {
 } from './strict-current-finalized-evm-errors.js';
 import type { FinalizedAnchorV1 } from './strict-current-finalized-evm-types.js';
 import { isCanonicalLowerHexBytesV1 } from './strict-finalized-evm-bytes.js';
-import { chainRpcFetchInit } from './rpc-http1-dispatcher.js';
+import { chainRpcFetch } from './rpc-http1-dispatcher.js';
 
 interface RpcErrorEnvelopeV1 {
   readonly code: number;
@@ -43,7 +43,7 @@ export async function postStrictFinalizedJsonRpcV1(
 ): Promise<unknown> {
   let response: Response;
   try {
-    response = await fetch(endpoint, chainRpcFetchInit({
+    response = await chainRpcFetch(endpoint, {
       method: 'POST',
       headers: Object.freeze({
         accept: 'application/json',
@@ -52,7 +52,7 @@ export async function postStrictFinalizedJsonRpcV1(
       body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
       redirect: 'error',
       signal,
-    }));
+    });
   } catch (cause) {
     if (signal.aborted) throw cause;
     throw unavailable(`JSON-RPC ${method} transport failed`, cause);

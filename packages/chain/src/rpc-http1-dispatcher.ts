@@ -75,28 +75,38 @@ function isComposable(dispatcher: unknown): dispatcher is object & ComposableDis
     && typeof (dispatcher as Partial<ComposableDispatcher>).compose === 'function';
 }
 
-/**
- * `fetch` options for a chain RPC call: `init`, plus a dispatcher that refuses
- * HTTP/2 where `fetch` would otherwise negotiate it.
- */
-export function chainRpcFetchInit(init: RequestInit): RequestInit {
+/** `RequestInit` with undici's `dispatcher` extension, which the DOM typings omit. */
+type ChainRpcRequestInit = RequestInit & { dispatcher?: object };
+
+/** The dispatcher a chain RPC call passes, or undefined to leave `fetch` as it is. */
+function http1Dispatcher(): object | undefined {
   const version = process.versions.undici;
   const key = FETCH_GLOBAL_DISPATCHER_KEYS.get(Number.parseInt(version ?? '', 10));
-  if (key === null) return init;
+  if (key === null) return undefined;
   if (key === undefined) {
     warnOnce(`Node's fetch is undici ${version ?? '(unknown)'}, which this release has not been verified with`);
-    return init;
+    return undefined;
   }
   const active = fetchGlobalDispatcher(key);
   if (!isComposable(active)) {
     warnOnce('the global fetch dispatcher cannot refuse it per request');
-    return init;
+    return undefined;
   }
   let dispatcher = http1Dispatchers.get(active);
   if (!dispatcher) {
     dispatcher = active.compose(refuseHttp2);
     http1Dispatchers.set(active, dispatcher);
   }
-  // `dispatcher` is undici's extension to RequestInit; the DOM typings omit it.
-  return { ...init, dispatcher } as RequestInit;
+  return dispatcher;
+}
+
+/**
+ * The `fetch` every chain RPC call goes through: the global `fetch`, with a
+ * dispatcher that refuses HTTP/2 where `fetch` would otherwise negotiate it.
+ * A test keeps the other chain sources from calling `fetch` themselves.
+ */
+export function chainRpcFetch(input: string | URL, init: RequestInit): Promise<Response> {
+  const dispatcher = http1Dispatcher();
+  const request: ChainRpcRequestInit = dispatcher ? { ...init, dispatcher } : init;
+  return fetch(input, request);
 }

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
-import { chainRpcFetchInit } from '../src/rpc-http1-dispatcher.js';
+import { chainRpcFetch } from '../src/rpc-http1-dispatcher.js';
 import {
   startConnectProxy,
   startHttp2AndHttp1JsonRpcServer,
@@ -63,31 +63,47 @@ async function withTrustedCertificate<T>(cert: string, run: () => Promise<T>): P
   }
 }
 
-async function postRpc(url: string, init: RequestInit): Promise<unknown> {
-  const response = await fetch(url, init);
-  expect(response.status).toBe(200);
-  return response.json();
+async function readRpc(response: Promise<Response>): Promise<unknown> {
+  const settled = await response;
+  expect(settled.status).toBe(200);
+  return settled.json();
+}
+
+/** Captures the init each global fetch receives; answers every call with an empty 200. */
+function captureGlobalFetch(): ChainRpcInit[] {
+  const inits: ChainRpcInit[] = [];
+  vi.stubGlobal('fetch', async (_input: unknown, init: ChainRpcInit) => {
+    inits.push(init);
+    return new Response('{}', { status: 200 });
+  });
+  return inits;
 }
 
 /** The module with fresh once-only warning state. */
-async function freshChainRpcFetchInit(): Promise<typeof chainRpcFetchInit> {
+async function freshChainRpcFetch(): Promise<typeof chainRpcFetch> {
   vi.resetModules();
-  return (await import('../src/rpc-http1-dispatcher.js')).chainRpcFetchInit;
+  return (await import('../src/rpc-http1-dispatcher.js')).chainRpcFetch;
 }
 
-describe('chainRpcFetchInit (#2828)', () => {
+const RPC_URL = 'https://rpc.example.invalid/';
+
+describe('chainRpcFetch (#2828)', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
-  it('returns init unchanged, without a warning, where the bundled undici stays on HTTP/1.1 (Node 22 and 24)', async () => {
+  it('passes init unchanged, without a warning, where the bundled undici stays on HTTP/1.1 (Node 22 and 24)', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const fresh = await freshChainRpcFetchInit();
+    const fresh = await freshChainRpcFetch();
+    const inits = captureGlobalFetch();
     const init: RequestInit = { method: 'POST' };
 
-    await withBundledUndici('6.21.1', () => expect(fresh(init)).toBe(init));
-    await withBundledUndici('7.12.0', () => expect(fresh(init)).toBe(init));
+    await withBundledUndici('6.21.1', () => fresh(RPC_URL, init));
+    await withBundledUndici('7.12.0', () => fresh(RPC_URL, init));
 
+    expect(inits).toEqual([init, init]);
+    expect(inits[0]).toBe(init);
     expect(warn).not.toHaveBeenCalled();
   });
 
@@ -101,41 +117,49 @@ describe('chainRpcFetchInit (#2828)', () => {
         }),
       }),
     };
-    await withBundledUndici('8.0.0', () => withGlobalDispatcher(active, () => {
-      const init = chainRpcFetchInit({ method: 'POST', redirect: 'error' }) as ChainRpcInit;
+    const inits = captureGlobalFetch();
 
-      expect(init).toMatchObject({ method: 'POST', redirect: 'error' });
-      expect((chainRpcFetchInit({}) as ChainRpcInit).dispatcher).toBe(init.dispatcher);
-      init.dispatcher!.dispatch({ origin: 'https://rpc.example.invalid', path: '/' }, {});
-      expect(dispatched).toEqual([{ origin: 'https://rpc.example.invalid', path: '/', allowH2: false }]);
+    await withBundledUndici('8.0.0', () => withGlobalDispatcher(active, async () => {
+      await chainRpcFetch(RPC_URL, { method: 'POST', redirect: 'error' });
+      await chainRpcFetch(RPC_URL, {});
     }));
+
+    expect(inits[0]).toMatchObject({ method: 'POST', redirect: 'error' });
+    expect(inits[1]!.dispatcher).toBe(inits[0]!.dispatcher);
+    inits[0]!.dispatcher!.dispatch({ origin: 'https://rpc.example.invalid', path: '/' }, {});
+    expect(dispatched).toEqual([{ origin: 'https://rpc.example.invalid', path: '/', allowH2: false }]);
   });
 
-  it('leaves fetch alone, and warns once, when the undici 8 global dispatcher has no compose() or is missing', async () => {
+  it('passes init unchanged, and warns once, when the undici 8 global dispatcher has no compose() or is missing', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const fresh = await freshChainRpcFetchInit();
+    const fresh = await freshChainRpcFetch();
+    const inits = captureGlobalFetch();
     const init: RequestInit = { method: 'POST' };
 
     await withBundledUndici('8.0.0', async () => {
-      await withGlobalDispatcher({ dispatch: () => true }, () => expect(fresh(init)).toBe(init));
-      await withGlobalDispatcher(undefined, () => expect(fresh(init)).toBe(init));
+      await withGlobalDispatcher({ dispatch: () => true }, () => fresh(RPC_URL, init));
+      await withGlobalDispatcher(undefined, () => fresh(RPC_URL, init));
     });
 
+    expect(inits).toHaveLength(2);
+    expect(inits.every((received) => received === init)).toBe(true);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0]![0]).toContain('cannot refuse it per request');
   });
 
-  it('leaves fetch alone, and warns once, on an undici it has not been verified with', async () => {
+  it('passes init unchanged, and warns once, on an undici it has not been verified with', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    const fresh = await freshChainRpcFetchInit();
+    const fresh = await freshChainRpcFetch();
+    const inits = captureGlobalFetch();
     const init: RequestInit = { method: 'POST' };
     const installed = { compose: () => { throw new Error('an unverified undici must not be composed'); } };
 
-    await withBundledUndici('9.0.0', () => withGlobalDispatcher(installed, () => {
-      expect(fresh(init)).toBe(init);
-      expect(fresh(init)).toBe(init);
+    await withBundledUndici('9.0.0', () => withGlobalDispatcher(installed, async () => {
+      await fresh(RPC_URL, init);
+      await fresh(RPC_URL, init);
     }));
 
+    expect(inits.every((received) => received === init)).toBe(true);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn.mock.calls[0]![0]).toContain('undici 9.0.0, which this release has not been verified with');
   });
@@ -155,9 +179,9 @@ describe('chain RPC fetches against a server that offers HTTP/2 (#2828)', () => 
   it('stay on HTTP/1.1 where a plain fetch negotiates HTTP/2', async () => {
     server.httpVersions.length = 0;
     await withTrustedCertificate(server.cert, async () => {
-      await postRpc(server.url, { method: 'POST', body: RPC_BODY });
-      await postRpc(server.url, chainRpcFetchInit({ method: 'POST', body: RPC_BODY }));
-      await postRpc(server.url, chainRpcFetchInit({ method: 'POST', body: RPC_BODY }));
+      await readRpc(fetch(server.url, { method: 'POST', body: RPC_BODY }));
+      await readRpc(chainRpcFetch(server.url, { method: 'POST', body: RPC_BODY }));
+      await readRpc(chainRpcFetch(server.url, { method: 'POST', body: RPC_BODY }));
     });
 
     // The plain fetch shows what the running Node negotiates on its own: HTTP/2 from undici 8 (Node 26).
@@ -183,7 +207,7 @@ describe('chain RPC fetches against a server that offers HTTP/2 (#2828)', () => 
 
       try {
         await withGlobalDispatcher(installed, () =>
-          postRpc(server.url, chainRpcFetchInit({ method: 'POST', body: RPC_BODY })));
+          readRpc(chainRpcFetch(server.url, { method: 'POST', body: RPC_BODY })));
       } finally {
         await custom.close();
       }
