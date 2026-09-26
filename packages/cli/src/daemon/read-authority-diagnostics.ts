@@ -2,9 +2,9 @@ import { Logger, type OperationContext } from '@origintrail-official/dkg-core';
 
 /** Where an unavailable read authority came from, as the agent attributes it. */
 export interface ContextGraphReadAuthorityAttribution {
-  readonly source?: unknown;
-  readonly reason?: unknown;
-  readonly dependency?: unknown;
+  readonly source: string;
+  readonly reason: string;
+  readonly dependency: string;
 }
 
 export interface ReadAuthorityDiagnosticsOptions {
@@ -25,8 +25,8 @@ export interface ReadAuthorityDiagnostics {
 const ATTRIBUTION_TOKEN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 
 /** An attribution token as the agent emits them; anything else logs as `unknown`. */
-function attributionToken(value: unknown): string {
-  return typeof value === 'string' && ATTRIBUTION_TOKEN.test(value) ? value : 'unknown';
+function attributionToken(value: string): string {
+  return ATTRIBUTION_TOKEN.test(value) ? value : 'unknown';
 }
 
 /** Whether an attribution warns now, and how many repeats it held back since its last warning. */

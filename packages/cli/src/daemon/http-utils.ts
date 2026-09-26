@@ -138,12 +138,21 @@ export function isContextGraphReadAuthorityUnavailable(err: unknown): boolean {
 
 const readAuthorityDiagnostics = createReadAuthorityDiagnostics();
 
-function readAuthorityField(err: unknown, key: keyof ContextGraphReadAuthorityAttribution): unknown {
-  try {
-    return Reflect.get(err as object, key);
-  } catch {
-    return undefined;
-  }
+/**
+ * The attribution a thrown read-authority marker carries. The agent's error is
+ * recognised structurally, so each field is read defensively; a missing,
+ * non-string or throwing field becomes `unknown` here and nowhere else.
+ */
+function decodeReadAuthorityAttribution(err: unknown): ContextGraphReadAuthorityAttribution {
+  const field = (key: keyof ContextGraphReadAuthorityAttribution): string => {
+    try {
+      const value: unknown = Reflect.get(err as object, key);
+      return typeof value === 'string' ? value : 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  };
+  return { source: field('source'), reason: field('reason'), dependency: field('dependency') };
 }
 
 /**
@@ -183,11 +192,7 @@ export function respondIfContextGraphReadAuthorityUnavailable(
   ctx?: OperationContext,
 ): boolean {
   if (!isContextGraphReadAuthorityUnavailable(err)) return false;
-  respondContextGraphReadAuthorityUnavailable(res, {
-    source: readAuthorityField(err, 'source'),
-    reason: readAuthorityField(err, 'reason'),
-    dependency: readAuthorityField(err, 'dependency'),
-  }, ctx);
+  respondContextGraphReadAuthorityUnavailable(res, decodeReadAuthorityAttribution(err), ctx);
   return true;
 }
 
