@@ -149,12 +149,11 @@ import {
   isRetryableContextGraphAuthorityUnavailableReason,
   type ContextGraphAgentGateAuthority,
 } from './internal/context-graph-authority/context-graph-authority.js';
-import type {
-  ContextGraphAuthorityReadMode,
-  RegisteredContextGraphAuthority,
-} from './registered-context-graph-authority.js';
+import type { RegisteredContextGraphAuthority } from './registered-context-graph-authority.js';
 import {
-  classifySwmTransportAuthority,
+  resolveSwmRegisteredAuthorityDecision,
+  resolveSwmTransportAuthorityDecision,
+  type SwmRegisteredAuthorityReadOptions,
   type SwmTransportAuthority,
 } from './internal/context-graph-authority/swm-transport-authority.js';
 
@@ -645,13 +644,6 @@ function bindLiveAuthorityRead<T>(
   });
 }
 
-/** Registered-authority read options an SWM consumer chooses for itself. */
-interface SwmRegisteredAuthorityReadOptions {
-  signal?: AbortSignal;
-  authorityReadMode?: ContextGraphAuthorityReadMode;
-  requireLiveRosterForPrivate?: boolean;
-}
-
 export class WorkspaceCryptoMethods extends DKGAgentBase {
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
     const defaultAddress = this.defaultAgentAddress?.toLowerCase();
@@ -1124,54 +1116,27 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   }
 
   /**
-   * Registered-chain authority for every SWM consumer: the agent gate, member
-   * recovery, recipient selection and the plaintext oracle (#2827).
-   *
-   * An active accepted owner-signed PUBLIC policy lets exact finalized name
-   * absence count as unregistered, as on the read path. A joined member has no
-   * local-first shortcut, so without it every SWM check on a public P2P graph
-   * failed closed as unavailable. "Active" means the policy still governs
-   * transport: a snapshot retained after a failed refresh or a kill switch
-   * grants nothing. Everything else is the registry's canonical answer. The finalized authority index follows the head at the node's
-   * finality depth and refreshes every index tick, and it is the only
-   * registration evidence here. A registration that lands after the snapshot
-   * was accepted wins as soon as the index sees it, and absence is never
-   * inferred from a cached name-lookup miss. (The uncached lookup is a full
-   * creation-history scan on any registry past the fast-enumeration bound.)
-   * The creator's own graph stays local-first in the registry until its
-   * registration commits. An accepted PRIVATE policy grants nothing here: its
-   * roster is the accepted RFC-64 one, not the local projection an
-   * unregistered answer falls back to.
+   * Registered-chain authority for the SWM consumers that need the raw roster,
+   * the agent gate and member recovery (#2827). The policy, and why the
+   * finalized authority index is the only registration evidence, live in
+   * {@link resolveSwmRegisteredAuthorityDecision}.
    */
   resolveSwmRegisteredAuthority(this: DKGAgent,
     contextGraphId: string,
     options: SwmRegisteredAuthorityReadOptions = {},
   ): Promise<RegisteredContextGraphAuthority> {
-    return this.resolveRegisteredContextGraphAuthority(contextGraphId, {
-      ...options,
-      allowAcceptedRfc64FinalizedAbsence:
-        this.hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId),
-    });
+    return resolveSwmRegisteredAuthorityDecision(this, contextGraphId, options);
   }
 
   /**
-   * How SWM on this graph may travel, for both ends of the wire: one policy
-   * check and one registered-authority read, classified by
-   * {@link classifySwmTransportAuthority}.
+   * How SWM on this graph may travel, for both ends of the wire
+   * ({@link resolveSwmTransportAuthorityDecision}).
    */
-  async resolveSwmTransportAuthority(this: DKGAgent,
+  resolveSwmTransportAuthority(this: DKGAgent,
     contextGraphId: string,
     options: SwmRegisteredAuthorityReadOptions = {},
   ): Promise<SwmTransportAuthority> {
-    const activeAcceptedPublicPolicy =
-      this.hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId);
-    return classifySwmTransportAuthority(
-      await this.resolveRegisteredContextGraphAuthority(contextGraphId, {
-        ...options,
-        allowAcceptedRfc64FinalizedAbsence: activeAcceptedPublicPolicy,
-      }),
-      activeAcceptedPublicPolicy,
-    );
+    return resolveSwmTransportAuthorityDecision(this, contextGraphId, options);
   }
 
   /**

@@ -130,10 +130,38 @@ export function hasActiveApprovedMemberDelegation(
  */
 export type ApprovedMemberAccessPolicy = 'public' | 'unproven';
 
-/** An approved member's proof together with the policy it is judged under. */
+declare const approvedMemberAcceptanceBrand: unique symbol;
+
+/**
+ * One approved member's proof together with the authenticated policy it is
+ * judged under. The snapshot refresh and join completion both consume the same
+ * value, so they cannot disagree about the member or the policy. It cannot be
+ * written as a plain object literal: a `public` acceptance comes only from
+ * {@link approvedMemberAcceptanceFromAuthority}, whose callers owe authenticated
+ * evidence, and {@link unprovenApprovedMemberAcceptance} grants nothing beyond
+ * the complete private definition.
+ */
 export interface ApprovedMemberAcceptance {
   readonly proof: ApprovedMemberProof;
   readonly accessPolicy: ApprovedMemberAccessPolicy;
+  readonly [approvedMemberAcceptanceBrand]: true;
+}
+
+/**
+ * Build an acceptance from a policy the caller derived from authenticated
+ * authority (the agent's approved-member resolver). Never from peer-served
+ * metadata.
+ */
+export function approvedMemberAcceptanceFromAuthority(
+  proof: ApprovedMemberProof,
+  accessPolicy: ApprovedMemberAccessPolicy,
+): ApprovedMemberAcceptance {
+  return Object.freeze({ proof, accessPolicy }) as unknown as ApprovedMemberAcceptance;
+}
+
+/** An acceptance that admits only the complete private definition. */
+export function unprovenApprovedMemberAcceptance(proof: ApprovedMemberProof): ApprovedMemberAcceptance {
+  return approvedMemberAcceptanceFromAuthority(proof, 'unproven');
 }
 
 /** The store-side ASK fragment for the same proof. */

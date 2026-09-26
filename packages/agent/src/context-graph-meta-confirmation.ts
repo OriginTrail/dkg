@@ -19,7 +19,7 @@ import type { ActivePublicContextGraphChainProof } from
 import { isPublicMetaDurabilityPending } from
   './context-graph-public-meta-repair.js';
 import type {
-  ApprovedMemberAccessPolicy,
+  ApprovedMemberAcceptance,
   ApprovedMemberProof,
 } from './context-graph-member-proof.js';
 
@@ -30,12 +30,13 @@ import type {
  *   public definition confirms on its own, because public reads never depend
  *   on membership; `rejectUnregisteredPlaceholder` additionally demands a
  *   chain proof before a public definition next to a local placeholder counts.
- * - `approved-member`: join bootstrap completion (#2831 review). Only a
- *   definition carrying this node's approved-member proof confirms: the
- *   private definition, or, when `accessPolicy` is the authenticated `public`
- *   the snapshot refresh was judged under, the public one with the same
- *   allowlist entry and delegation. Stored triples never authenticate the
- *   policy themselves. Without a local approval binding nothing confirms.
+ * - `approved-member`: join bootstrap completion (#2831 review), judged with
+ *   the same `acceptance` the snapshot refresh used. Only a definition
+ *   carrying that member proof confirms: the private definition, or, under an
+ *   authenticated `public` policy, the public one with the same allowlist
+ *   entry and delegation. Stored triples never authenticate the policy
+ *   themselves. Unless this node still holds the approval the acceptance
+ *   names, nothing confirms.
  */
 export type ConfirmContextGraphMetadataInput =
   | {
@@ -44,7 +45,7 @@ export type ConfirmContextGraphMetadataInput =
     }
   | {
       readonly purpose: 'approved-member';
-      readonly accessPolicy: ApprovedMemberAccessPolicy;
+      readonly acceptance: ApprovedMemberAcceptance;
     };
 
 export interface ContextGraphMetadataConfirmationDependencies {
@@ -70,23 +71,28 @@ export async function confirmContextGraphMetadataV1(
     return false;
   }
 
-  const memberProof = await resolveApprovedMemberProof(dependencies, contextGraphId);
   if (input.purpose === 'approved-member') {
-    // A lifecycle race or partial rehydration can drop the binding; the
-    // pre-join definition must not then stand in for the member.
-    if (memberProof === undefined) return false;
+    const { proof, accessPolicy } = input.acceptance;
+    // A lifecycle race or partial rehydration can drop or change the binding;
+    // the pre-join definition must not then stand in for the member.
+    if (
+      dependencies.localApprovedAgentByContextGraph.get(contextGraphId)?.toLowerCase()
+        !== proof.approvedAgentAddress.toLowerCase()
+    ) return false;
     return await findAuthoritativeDefinition(
       dependencies,
       contextGraphId,
       [
-        { definition: 'private', memberProof },
-        ...(input.accessPolicy === 'public'
-          ? [{ definition: 'public', memberProof } as const]
+        { definition: 'private', memberProof: proof },
+        ...(accessPolicy === 'public'
+          ? [{ definition: 'public', memberProof: proof } as const]
           : []),
       ],
       'agent.contextGraph.confirmedMeta.approvedMember',
     ) !== null;
   }
+
+  const memberProof = await resolveApprovedMemberProof(dependencies, contextGraphId);
 
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
