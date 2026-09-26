@@ -14,6 +14,11 @@ import {
 import { agentFromPrivateKey, DKGAgent } from '../src/index.js';
 import { signAgentDelegation, type SignedAgentDelegation } from '../src/auth/agent-delegation.js';
 import { joinDelegationScope } from '../src/dkg-agent-helpers.js';
+import {
+  approvedMemberAcceptanceFromAuthority,
+  type ApprovedMemberAcceptance,
+} from '../src/context-graph-member-proof.js';
+import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 
 type JoinRequestHandler = (data: Uint8Array, peerId: string) => Promise<Uint8Array>;
@@ -246,8 +251,10 @@ describe('private CG membership bootstrap recovery', () => {
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: metaGraph },
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"public"', graph: metaGraph },
     ]);
+    const proof = { approvedAgentAddress: member, expectedDelegateePeerId: agent!.peerId };
+    const publicAcceptance = approvedMemberAcceptanceFromAuthority(proof, 'public');
     expect(await (agent as any).hasConfirmedMetaState(contextGraphId)).toBe(true);
-    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId, 'public'))
+    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId, publicAcceptance))
       .toBe(false);
 
     const delegation = `did:dkg:agent-delegation:${contextGraphId}:${member}`;
@@ -257,13 +264,15 @@ describe('private CG membership bootstrap recovery', () => {
       { subject: delegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: `"${agent!.peerId}"`, graph: metaGraph },
       { subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT, object: `"${Date.now() - 60_000}"`, graph: metaGraph },
     ]);
-    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId, 'public'))
+    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId, publicAcceptance))
       .toBe(true);
     // Stored triples never authenticate the policy: without an authenticated
     // public decision the same syntactically valid public member snapshot
     // must not complete the join, or a peer could downgrade a private graph.
-    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId, 'unproven'))
-      .toBe(false);
+    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(
+      contextGraphId,
+      approvedMemberAcceptanceFromAuthority(proof, 'unproven'),
+    )).toBe(false);
   });
 
   it('confirms nothing for join completion when the approval binding is missing (#2831 review)', async () => {
@@ -271,23 +280,46 @@ describe('private CG membership bootstrap recovery', () => {
     const contextGraphId = '0x00a9D0dcab936a418ffEbc734476C91D4027d359/public-join-missing-binding';
     const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
     const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-    // Valid public metadata, but a lifecycle race left no approval binding:
-    // no member can be proven, so the pre-join definition must not stand in.
+    const member = '0x00000000000000000000000000000000000000a1';
+    const delegation = `did:dkg:agent-delegation:${contextGraphId}:${member}`;
+    // A complete public definition with this member's allowlist entry and
+    // delegation, but a lifecycle race left no approval binding: the stored
+    // proof alone must not complete a join this node no longer holds.
     await (agent as any).store.insert([
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: metaGraph },
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"public"', graph: metaGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: `"${member}"`, graph: metaGraph },
+      { subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT, object: `"${member}"`, graph: metaGraph },
+      { subject: delegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: `"${agent!.peerId}"`, graph: metaGraph },
+      { subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT, object: `"${Date.now() - 60_000}"`, graph: metaGraph },
     ]);
+    const acceptance = approvedMemberAcceptanceFromAuthority(
+      { approvedAgentAddress: member, expectedDelegateePeerId: agent!.peerId },
+      'public',
+    );
     expect((agent as any).localApprovedAgentByCG.has(contextGraphId)).toBe(false);
 
     expect(await (agent as any).hasConfirmedMetaState(contextGraphId)).toBe(true);
-    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId, 'public'))
-      .toBe(false);
+    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId, acceptance)).toBe(false);
+    // A binding for another agent is no better.
+    (agent as any).localApprovedAgentByCG.set(contextGraphId, '0x00000000000000000000000000000000000000b2');
+    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId, acceptance)).toBe(false);
+    // With the binding the acceptance names, the same stored proof confirms.
+    (agent as any).localApprovedAgentByCG.set(contextGraphId, member);
+    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId, acceptance)).toBe(true);
   });
 
   it('keeps the post-approval bootstrap pending while the curator snapshot does not prove the member (#2831 review)', async () => {
     const contextGraphId = '0x00a9D0dcab936a418ffEbc734476C91D4027d359/public-join-stale-snapshot';
     const curatorPeerId = '12D3KooWCuratorOfPublicJoinStaleSnapshot';
     let memberProofStored = false;
+    const acceptance = approvedMemberAcceptanceFromAuthority(
+      {
+        approvedAgentAddress: '0x00000000000000000000000000000000000000a1',
+        expectedDelegateePeerId: '12D3KooWMemberOfPublicJoinStaleSnapshot',
+      },
+      'public',
+    );
     const agentLike = {
       localApprovedAgentByCG: new Map([[contextGraphId, '0x00000000000000000000000000000000000000a1']]),
       peerId: '12D3KooWMemberOfPublicJoinStaleSnapshot',
@@ -307,7 +339,7 @@ describe('private CG membership bootstrap recovery', () => {
       // The pre-join public declaration confirms ordinary reads.
       hasConfirmedMetaState: vi.fn(async () => true),
       hasConfirmedApprovedMemberMetaState: vi.fn(async () => memberProofStored),
-      resolveApprovedMemberAccessPolicy: vi.fn(async () => 'public' as const),
+      resolveApprovedMemberAcceptance: vi.fn(async () => acceptance),
       refreshMetaSyncedFlags: vi.fn(async () => undefined),
       syncContextGraphFromConnectedPeers: vi.fn(async () => undefined),
       log: { info: vi.fn(), warn: vi.fn() },
@@ -321,12 +353,12 @@ describe('private CG membership bootstrap recovery', () => {
     await runBootstrap();
     expect(agentLike.refreshMetaSyncedFlags).not.toHaveBeenCalled();
     expect(agentLike.syncContextGraphFromConnectedPeers).toHaveBeenCalledTimes(1);
-    // Completion is judged only by the approved-member confirmation, under the
-    // same authenticated policy the snapshot refresh was given.
-    expect(agentLike.hasConfirmedApprovedMemberMetaState).toHaveBeenCalledWith(contextGraphId, 'public');
+    // Completion is judged only by the approved-member confirmation, with the
+    // very acceptance the snapshot refresh was given.
+    expect(agentLike.hasConfirmedApprovedMemberMetaState).toHaveBeenCalledWith(contextGraphId, acceptance);
     expect(agentLike.hasConfirmedMetaState).not.toHaveBeenCalled();
     expect(agentLike.refreshMetaFromCurator).toHaveBeenCalledWith(contextGraphId, expect.objectContaining({
-      approvedMember: expect.objectContaining({ accessPolicy: 'public' }),
+      approvedMember: acceptance,
     }));
 
     // Once a refresh stores the member's delegation, the bootstrap completes.
@@ -340,45 +372,64 @@ describe('private CG membership bootstrap recovery', () => {
     expect(agentLike.syncContextGraphFromConnectedPeers).not.toHaveBeenCalled();
   });
 
-  describe('the authenticated access policy an approved member is judged under (#2831 review)', () => {
+  describe('the approved-member acceptance a join attempt is judged with (#2831 review)', () => {
     const contextGraphId = '0x00a9D0dcab936a418ffEbc734476C91D4027d359/member-access-policy';
-    function host(options: {
-      transportActive: boolean;
-      accepted: 'public' | 'private' | null;
-      chain: 'public' | 'private' | Error;
-    }) {
-      const chainProof = vi.fn(async () => {
-        if (options.chain instanceof Error) throw options.chain;
-        return { state: options.chain };
+    const member = '0x00000000000000000000000000000000000000a1';
+    function host(transport: { kind: string } | Error, approved = true) {
+      const resolveSwmTransportAuthority = vi.fn(async () => {
+        if (transport instanceof Error) throw transport;
+        return transport;
       });
       return {
-        isRfc64CatalogTransportAuthorityActiveV1: () => options.transportActive,
-        readAcceptedRfc64CatalogAccessPolicyV1: () => options.accepted,
-        resolveActivePublicContextGraphChainProof: chainProof,
-        chainProof,
+        localApprovedAgentByCG: new Map(approved ? [[contextGraphId, member]] : []),
+        peerId: '12D3KooWMemberAccessPolicyPeer',
+        chain: {},
+        resolveSwmTransportAuthority,
       };
     }
-    const resolve = (agentLike: unknown) => LifecycleSyncMethods.prototype.resolveApprovedMemberAccessPolicy
-      .call(agentLike as never, contextGraphId);
+    const resolve = (agentLike: unknown): Promise<ApprovedMemberAcceptance | undefined> =>
+      LifecycleSyncMethods.prototype.resolveApprovedMemberAcceptance.call(agentLike as never, contextGraphId);
 
-    it('is public from active accepted RFC-64 authority without reading the chain', async () => {
-      const agentLike = host({ transportActive: true, accepted: 'public', chain: 'private' });
-      await expect(resolve(agentLike)).resolves.toBe('public');
-      expect(agentLike.chainProof).not.toHaveBeenCalled();
-    });
-
-    it('is public for a registered public graph with no RFC-64 catalog snapshot', async () => {
-      await expect(resolve(host({ transportActive: true, accepted: null, chain: 'public' })))
-        .resolves.toBe('public');
+    it('is public when SWM transport is plaintext, and carries this node\'s member proof', async () => {
+      const agentLike = host({ kind: 'plaintext' });
+      const acceptance = await resolve(agentLike);
+      expect(acceptance).toMatchObject({
+        accessPolicy: 'public',
+        proof: { approvedAgentAddress: member, expectedDelegateePeerId: '12D3KooWMemberAccessPolicyPeer' },
+      });
+      expect(agentLike.resolveSwmTransportAuthority).toHaveBeenCalledWith(
+        contextGraphId,
+        { authorityReadMode: 'finalized-index-or-live' },
+      );
     });
 
     it.each([
-      ['a retained public snapshot whose catalog authority is inactive', { transportActive: false, accepted: 'public', chain: 'private' }],
-      ['an accepted private policy', { transportActive: true, accepted: 'private', chain: 'private' }],
-      ['no accepted policy and no public registration', { transportActive: true, accepted: null, chain: 'private' }],
-      ['an unreadable chain', { transportActive: true, accepted: null, chain: new Error('rpc down') }],
-    ] as const)('is unproven with %s', async (_label, options) => {
-      await expect(resolve(host(options))).resolves.toBe('unproven');
+      ['a registered private roster', { kind: 'private-roster', participantAgents: [] }],
+      ['a legacy unregistered graph', { kind: 'legacy-unregistered' }],
+      ['unavailable authority', { kind: 'unavailable', reason: 'chain-access-policy-unavailable' }],
+      ['an unreadable chain', new Error('rpc down')],
+    ] as const)('is unproven with %s', async (_label, transport) => {
+      await expect(resolve(host(transport))).resolves.toMatchObject({ accessPolicy: 'unproven' });
+    });
+
+    it('is unproven when a retained public snapshot meets a finalized private registration', async () => {
+      // The real transport resolution: the snapshot is still accepted and
+      // active, but the index already shows the name registered private.
+      const agentLike = {
+        ...host({ kind: 'plaintext' }),
+        resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
+        hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => true,
+        resolveRegisteredContextGraphAuthority: async () => ({
+          kind: 'private' as const,
+          onChainId: 7n,
+          participantAgents: [member],
+        }),
+      };
+      await expect(resolve(agentLike)).resolves.toMatchObject({ accessPolicy: 'unproven' });
+    });
+
+    it('is absent without an approval binding', async () => {
+      await expect(resolve(host({ kind: 'plaintext' }, false))).resolves.toBeUndefined();
     });
   });
 

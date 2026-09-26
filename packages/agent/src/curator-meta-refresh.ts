@@ -21,7 +21,11 @@ import {
   SYNC_TOTAL_TIMEOUT_MS,
 } from './dkg-agent-constants.js';
 import { hasAuthoritativePrivateMetaDefinition } from './context-graph-private-meta-proof.js';
-import type { ApprovedMemberAcceptance } from './context-graph-member-proof.js';
+import {
+  unprovenApprovedMemberAcceptance,
+  type ApprovedMemberAcceptance,
+  type ApprovedMemberProof,
+} from './context-graph-member-proof.js';
 import {
   hasAuthoritativePublicMetaDefinition,
   hasAuthoritativePublicMetaDefinitionForApprovedMember,
@@ -56,6 +60,13 @@ export interface CuratorMetaRefreshOptions {
    * public member snapshot is accepted only when that policy is `public`.
    */
   approvedMember?: ApprovedMemberAcceptance;
+  /**
+   * @deprecated Use `approvedMember`. Kept so an older caller keeps its
+   * member requirement: an old-style proof has no authenticated policy, so it
+   * keeps its former private-only, fail-closed meaning (an `unproven`
+   * acceptance) and never admits a public definition.
+   */
+  memberProof?: ApprovedMemberProof;
   /**
    * Accept only an unambiguous PUBLIC root definition. Set by the RFC-64
    * replica metadata bootstrap, whose accepted owner-signed policy is already
@@ -514,13 +525,17 @@ async function fetchAuthoritativeMetaSnapshot(
   // authenticated public policy its caller resolved (#2827, #2831 review); an
   // unproven policy keeps rejecting it, so a peer cannot downgrade a private
   // graph by serving a public definition.
-  const acceptsAuthoritativePublicDefinition = options.approvedMember === undefined
+  const approvedMember = options.approvedMember
+    ?? (options.memberProof === undefined
+      ? undefined
+      : unprovenApprovedMemberAcceptance(options.memberProof));
+  const acceptsAuthoritativePublicDefinition = approvedMember === undefined
     ? hasAuthoritativePublicMetaDefinition(contextGraphId, controlMetaQuads)
-    : options.approvedMember.accessPolicy === 'public'
+    : approvedMember.accessPolicy === 'public'
       && hasAuthoritativePublicMetaDefinitionForApprovedMember(
         contextGraphId,
         controlMetaQuads,
-        options.approvedMember.proof,
+        approvedMember.proof,
       );
   // A public-only bootstrap never installs a private definition, however
   // complete: the caller's accepted policy already says the graph is public.
@@ -528,7 +543,7 @@ async function fetchAuthoritativeMetaSnapshot(
     && hasAuthoritativePrivateMetaDefinition(
       contextGraphId,
       controlMetaQuads,
-      options.approvedMember?.proof,
+      approvedMember?.proof,
     );
   if (!acceptsAuthoritativePublicDefinition && !hasAuthoritativePrivateDefinition) {
     agent.syncCheckpoints.delete(snapshotCheckpointKey);

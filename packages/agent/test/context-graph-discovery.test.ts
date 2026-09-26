@@ -3773,7 +3773,9 @@ describe('runImmediatePostApprovalSync', () => {
     // A refresh that succeeded stored the member proof it required, which is
     // what join completion confirms.
     (a as any).hasConfirmedApprovedMemberMetaState = async () => metaConfirmed;
-    (a as any).resolveApprovedMemberAccessPolicy = async () => 'public';
+    // The real acceptance resolver builds the member proof; only the
+    // transport read behind its policy is stubbed.
+    (a as any).resolveSwmTransportAuthority = async () => ({ kind: 'plaintext' });
     (a as any).refreshMetaSyncedFlags = async () => undefined;
     (a as any).runCatchupOverPeers = async (
       cg: string,

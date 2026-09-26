@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphMetaGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  approvedMemberAcceptanceFromAuthority,
+  unprovenApprovedMemberAcceptance,
+} from '../src/context-graph-member-proof.js';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 import { SYNC_TOTAL_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
@@ -458,13 +462,10 @@ describe('refreshMetaFromCurator', () => {
       {
         trustedCuratorPeerId: CURATOR_PEER_ID,
         force: true,
-        approvedMember: {
-          proof: {
-            approvedAgentAddress: '0x00000000000000000000000000000000000000A1',
-            expectedDelegateePeerId: 'local-peer',
-          },
-          accessPolicy: 'unproven',
-        },
+        approvedMember: unprovenApprovedMemberAcceptance({
+          approvedAgentAddress: '0x00000000000000000000000000000000000000A1',
+          expectedDelegateePeerId: 'local-peer',
+        }),
       },
     );
 
@@ -523,8 +524,9 @@ describe('refreshMetaFromCurator', () => {
 
     async function refreshAfterApproval(
       snapshot: Quad[],
-      accessPolicy: 'public' | 'unproven',
+      member: 'public' | 'unproven' | 'legacy-member-proof',
     ): Promise<{ refreshed: boolean; mutated: boolean }> {
+      const proof = { approvedAgentAddress: memberAddress, expectedDelegateePeerId: 'local-peer' };
       let mutated = false;
       const agent = {
         metaRefreshTimestamps: new Map<string, number>(),
@@ -559,13 +561,9 @@ describe('refreshMetaFromCurator', () => {
         {
           trustedCuratorPeerId: CURATOR_PEER_ID,
           force: true,
-          approvedMember: {
-            proof: {
-              approvedAgentAddress: memberAddress,
-              expectedDelegateePeerId: 'local-peer',
-            },
-            accessPolicy,
-          },
+          ...(member === 'legacy-member-proof'
+            ? { memberProof: proof }
+            : { approvedMember: approvedMemberAcceptanceFromAuthority(proof, member) }),
         },
       );
       return { refreshed, mutated };
@@ -580,6 +578,14 @@ describe('refreshMetaFromCurator', () => {
     it('keeps rejecting a public snapshot while the policy is unproven (no downgrade)', async () => {
       // Private, unknown, or unreadable authority all arrive as `unproven`.
       const result = await refreshAfterApproval(publicSnapshotWithMember({ includeMember: true }), 'unproven');
+      expect(result.refreshed).toBe(false);
+      expect(result.mutated).toBe(false);
+    });
+
+    it('keeps the deprecated memberProof option private-only, so an old caller cannot accept a public snapshot', async () => {
+      // An old-style proof carries no authenticated policy: it must neither be
+      // ignored (that would drop the member requirement) nor admit public.
+      const result = await refreshAfterApproval(publicSnapshotWithMember({ includeMember: true }), 'legacy-member-proof');
       expect(result.refreshed).toBe(false);
       expect(result.mutated).toBe(false);
     });

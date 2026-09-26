@@ -7,6 +7,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/index.js';
+import { approvedMemberAcceptanceFromAuthority } from '../src/context-graph-member-proof.js';
 import {
   CHAIN_AUTHORITY_COLD_RESOLUTION_TIMEOUT_MS,
   CHAIN_POLICY_READ_TIMEOUT_MS,
@@ -1600,7 +1601,11 @@ describe('private read authorization uses the on-chain participant roster', () =
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(true);
     const hasConfirmedMeta = vi.spyOn(agent, 'hasConfirmedApprovedMemberMetaState').mockResolvedValue(true);
-    vi.spyOn(agent, 'resolveApprovedMemberAccessPolicy').mockResolvedValue('public');
+    const acceptance = approvedMemberAcceptanceFromAuthority(
+      { approvedAgentAddress: local.agentAddress.toLowerCase(), expectedDelegateePeerId: '12D3KooWRestartPendingMember' },
+      'public',
+    );
+    vi.spyOn(agent, 'resolveApprovedMemberAcceptance').mockResolvedValue(acceptance);
     const readAuthority = vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockResolvedValue({
       outcome: 'allowed',
       source: 'legacy-local',
@@ -1626,16 +1631,11 @@ describe('private read authorization uses the on-chain participant roster', () =
     expect(refreshMeta).toHaveBeenLastCalledWith(contextGraphId, expect.objectContaining({
       trustedCuratorPeerId: curatorPeerId,
       force: true,
-      approvedMember: {
-        proof: expect.objectContaining({
-          approvedAgentAddress: local.agentAddress.toLowerCase(),
-        }),
-        accessPolicy: 'public',
-      },
+      approvedMember: acceptance,
     }));
     // Recovery completes the join only on metadata that proves this member,
-    // under the same authenticated policy the refresh was judged under.
-    expect(hasConfirmedMeta).toHaveBeenCalledWith(contextGraphId, 'public');
+    // judged with the very acceptance the refresh used.
+    expect(hasConfirmedMeta).toHaveBeenCalledWith(contextGraphId, acceptance);
     expect(readAuthority).toHaveBeenCalledWith(contextGraphId, {
       allowSubscriptionFallback: false,
     });
@@ -1677,7 +1677,10 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
 
     vi.spyOn(agent, 'refreshMetaFromCurator').mockResolvedValue(true);
-    vi.spyOn(agent, 'resolveApprovedMemberAccessPolicy').mockResolvedValue('public');
+    vi.spyOn(agent, 'resolveApprovedMemberAcceptance').mockResolvedValue(approvedMemberAcceptanceFromAuthority(
+      { approvedAgentAddress: local.agentAddress.toLowerCase(), expectedDelegateePeerId: '12D3KooWPreJoinPublicDefinitionMember' },
+      'public',
+    ));
     // Ordinary read confirmation passes on the pre-join public definition,
     // but nothing stored proves this member.
     vi.spyOn(agent, 'hasConfirmedMetaState').mockResolvedValue(true);
@@ -1732,7 +1735,10 @@ describe('private read authorization uses the on-chain participant roster', () =
 
     vi.spyOn(agent, 'refreshMetaFromCurator').mockResolvedValue(true);
     vi.spyOn(agent, 'hasConfirmedApprovedMemberMetaState').mockResolvedValue(true);
-    vi.spyOn(agent, 'resolveApprovedMemberAccessPolicy').mockResolvedValue('public');
+    vi.spyOn(agent, 'resolveApprovedMemberAcceptance').mockResolvedValue(approvedMemberAcceptanceFromAuthority(
+      { approvedAgentAddress: local.agentAddress.toLowerCase(), expectedDelegateePeerId: `12D3KooWPostRefresh${decision.outcome}` },
+      'public',
+    ));
     const readAuthority = vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockResolvedValue({
       outcome: decision.outcome,
       source: 'registered-chain',
