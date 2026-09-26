@@ -28,7 +28,7 @@ import {
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 
 import {
-  verifyAuthorCatalogRowAuthorshipV1,
+  verifyAuthorCatalogBucketRowAuthorshipsV1,
 } from './catalog-row-authorship.js';
 import type {
   Rfc64ControlObjectOperationsV1,
@@ -293,21 +293,19 @@ export async function loadExactAppliedCatalogRowsV1(
     || canonicalizeAuthorCatalogBucketPayloadBytesV1(bucket.payload).byteLength.toString()
       !== descriptor.byteLength
   ) throw new Error('catalog bucket differs from its verified descriptor');
-  for (const row of bucket.payload.rows) {
-    verifyAuthorCatalogRowAuthorshipV1({
-      catalogIssuerDelegation: storedDelegation.envelope,
-      catalogIssuerDelegationSignature: storedDelegation.issuerSignature,
-      parentAuthorAgentEvidence: null,
-      catalogHead: head,
-      catalogHeadSignature: storedHead.issuerSignature,
-      directoryPathEnvelopes: [directory],
-      directoryPathSignatures: [storedDirectory.issuerSignature],
-      directoryPathProof,
-      catalogBucket: bucket,
-      catalogBucketSignature: storedBucket.issuerSignature,
-      targetKaId: row.kaId,
-    });
-  }
+  verifyAuthorCatalogBucketRowAuthorshipsV1({
+    catalogIssuerDelegation: storedDelegation.envelope,
+    catalogIssuerDelegationSignature: storedDelegation.issuerSignature,
+    parentAuthorAgentEvidence: null,
+    catalogHead: head,
+    catalogHeadSignature: storedHead.issuerSignature,
+    directoryPathEnvelopes: [directory],
+    directoryPathSignatures: [storedDirectory.issuerSignature],
+    directoryPathProof,
+    catalogBucket: bucket,
+    catalogBucketSignature: storedBucket.issuerSignature,
+    targetKaIds: bucket.payload.rows.map((row) => row.kaId),
+  });
   return Object.freeze(bucket.payload.rows.map((row) => Object.freeze({ ...row })));
 }
 

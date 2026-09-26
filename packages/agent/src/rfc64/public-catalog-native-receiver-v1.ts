@@ -88,6 +88,7 @@ export type { Rfc64PublicCatalogNativeCommittedHeadTokenV1 } from
 import { assertRfc64ExactIssuerSignatureProofV1 } from './catalog-transport-wire-v1-internal.js';
 import {
   readVerifiedAuthorCatalogRowAuthorshipV1,
+  verifyAuthorCatalogBucketRowAuthorshipsV1,
   verifyAuthorCatalogRowAuthorshipV1,
   type VerifiedAuthorCatalogRowAuthorshipV1,
   type VerifiedAuthorCatalogRowAuthorshipSnapshotV1,
@@ -1018,35 +1019,55 @@ export class Rfc64PublicCatalogNativeReceiverV1<
       readonly projectionBytes: Uint8Array;
       readonly expectedEvidence: Rfc64PublicCatalogInventoryEvidenceRowV1;
     }> = [];
-    for (const row of targetRows) {
+    let authorshipCapabilities: readonly VerifiedAuthorCatalogRowAuthorshipV1[] = [];
+    if (targetRows.length > 0) {
       throwIfAborted(signal);
       if (target.kind !== 'bucket') {
         fail('catalog-native-receiver-catalog', 'non-empty catalog target lost its bucket proof');
       }
-      let authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
-      let authorshipCapability: VerifiedAuthorCatalogRowAuthorshipV1;
+      const closure = {
+        catalogIssuerDelegation: fetchedDelegation.envelope,
+        catalogIssuerDelegationSignature: fetchedDelegation.issuerSignature,
+        parentAuthorAgentEvidence: null,
+        catalogHead: head,
+        catalogHeadSignature: fetchedHead.issuerSignature,
+        directoryPathEnvelopes: [directory],
+        directoryPathSignatures: [fetchedDirectory.issuerSignature],
+        directoryPathProof,
+        catalogBucket: target.bucket,
+        catalogBucketSignature: target.fetchedBucket.issuerSignature,
+      };
       try {
-        authorshipCapability = verifyAuthorCatalogRowAuthorshipV1({
-          catalogIssuerDelegation: fetchedDelegation.envelope,
-          catalogIssuerDelegationSignature: fetchedDelegation.issuerSignature,
-          parentAuthorAgentEvidence: null,
-          catalogHead: head,
-          catalogHeadSignature: fetchedHead.issuerSignature,
-          directoryPathEnvelopes: [directory],
-          directoryPathSignatures: [fetchedDirectory.issuerSignature],
-          directoryPathProof,
-          catalogBucket: target.bucket,
-          catalogBucketSignature: target.fetchedBucket.issuerSignature,
-          targetKaId: row.kaId,
+        // One bucket closure for every target row instead of one per row (#2812).
+        authorshipCapabilities = verifyAuthorCatalogBucketRowAuthorshipsV1({
+          ...closure,
+          targetKaIds: targetRows.map((row) => row.kaId),
         });
-        authorship = readVerifiedAuthorCatalogRowAuthorshipV1(authorshipCapability);
       } catch (cause) {
+        // Name the first row that fails on its own, as the per-row check did.
+        for (const row of targetRows) {
+          try {
+            verifyAuthorCatalogRowAuthorshipV1({ ...closure, targetKaId: row.kaId });
+          } catch (rowCause) {
+            fail(
+              'catalog-native-receiver-authorization',
+              `catalog row ${row.kaId} is not authorized by the exact direct-author delegation closure`,
+              rowCause,
+            );
+          }
+        }
         fail(
           'catalog-native-receiver-authorization',
-          `catalog row ${row.kaId} is not authorized by the exact direct-author delegation closure`,
+          'catalog rows are not authorized by the exact direct-author delegation closure',
           cause,
         );
       }
+    }
+    for (const [index, row] of targetRows.entries()) {
+      throwIfAborted(signal);
+      const authorshipCapability = authorshipCapabilities[index]!;
+      const authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1 =
+        readVerifiedAuthorCatalogRowAuthorshipV1(authorshipCapability);
 
       const bundle = await this.fetchKaBundleWithCacheV1(
         remotePeerId,

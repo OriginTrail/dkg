@@ -53,7 +53,7 @@ import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dk
 import { mapWithConcurrencySettled } from '../map-with-concurrency.js';
 import {
   readVerifiedAuthorCatalogRowAuthorshipV1,
-  verifyAuthorCatalogRowAuthorshipV1,
+  verifyAuthorCatalogBucketRowAuthorshipsV1,
   type AuthorAgentDelegationEvidenceV1,
   type VerifiedAuthorCatalogRowAuthorshipSnapshotV1,
 } from './catalog-row-authorship.js';
@@ -413,21 +413,21 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
           producedBucket.objectDigest,
           'catalog bucket',
         );
-        authorship = producedBucket.payload.rows.map((row) =>
-          readVerifiedAuthorCatalogRowAuthorshipV1(verifyAuthorCatalogRowAuthorshipV1({
-            catalogIssuerDelegation: authorization.catalogIssuerDelegation,
-            catalogIssuerDelegationSignature,
-            parentAuthorAgentEvidence: authorization.parentAuthorAgentEvidence,
-            catalogHead: publication.head,
-            catalogHeadSignature: headSignature,
-            directoryPathEnvelopes: publication.directoryPath,
-            directoryPathSignatures,
-            directoryPathProof,
-            catalogBucket: producedBucket,
-            catalogBucketSignature: bucketSignature,
-            targetKaId: row.kaId,
-          })),
-        );
+        // One bucket closure for all rows: per-row verification repeated the
+        // whole-bucket proof for every row, O(rows²) per successor (#2812).
+        authorship = verifyAuthorCatalogBucketRowAuthorshipsV1({
+          catalogIssuerDelegation: authorization.catalogIssuerDelegation,
+          catalogIssuerDelegationSignature,
+          parentAuthorAgentEvidence: authorization.parentAuthorAgentEvidence,
+          catalogHead: publication.head,
+          catalogHeadSignature: headSignature,
+          directoryPathEnvelopes: publication.directoryPath,
+          directoryPathSignatures,
+          directoryPathProof,
+          catalogBucket: producedBucket,
+          catalogBucketSignature: bucketSignature,
+          targetKaIds: producedBucket.payload.rows.map((row) => row.kaId),
+        }).map((capability) => readVerifiedAuthorCatalogRowAuthorshipV1(capability));
       }
     } catch (cause) {
       fail(

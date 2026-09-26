@@ -15,6 +15,7 @@ import {
   canonicalizeSignedAuthorCatalogDirectoryNodeEnvelopeBytesV1,
   canonicalizeSignedAuthorCatalogHeadEnvelopeBytesV1,
   canonicalizeSignedAuthorCatalogIssuerDelegationEnvelopeBytesV1,
+  MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1,
   catalogKeyToBucketIdV1,
   computeAuthorCatalogRowDigestV1,
   computeAuthorCatalogScopeDigestV1,
@@ -109,6 +110,12 @@ export interface VerifyAuthorCatalogRowAuthorshipInputV1 {
   readonly catalogBucket: SignedAuthorCatalogBucketEnvelopeV1;
   readonly catalogBucketSignature: VerifiedControlEnvelopeIssuerSignatureV1;
   readonly targetKaId: KaIdV1;
+}
+
+export interface VerifyAuthorCatalogBucketRowAuthorshipsInputV1
+  extends Omit<VerifyAuthorCatalogRowAuthorshipInputV1, 'targetKaId'> {
+  /** The rows to close, each of which must occur exactly once in `catalogBucket`. */
+  readonly targetKaIds: readonly KaIdV1[];
 }
 
 declare const VERIFIED_AUTHOR_CATALOG_ROW_AUTHORSHIP_BRAND_V1: unique symbol;
@@ -242,12 +249,87 @@ export function computeAuthorAgentDelegationEvidenceDigestV1(
 export function verifyAuthorCatalogRowAuthorshipV1(
   untrustedInput: VerifyAuthorCatalogRowAuthorshipInputV1,
 ): VerifiedAuthorCatalogRowAuthorshipV1 {
-  const input = snapshotTopLevelInput(untrustedInput);
-  const delegation = snapshotCatalogIssuerDelegation(input.catalogIssuerDelegation);
-  const head = snapshotCatalogHead(input.catalogHead);
-  const bucket = snapshotCatalogBucket(input.catalogBucket);
+  const input = snapshotTopLevelInput(untrustedInput, ROW_AUTHORSHIP_INPUT_KEYS);
+  const objects = snapshotCatalogObjects(input);
   const targetKaId = snapshotTargetKaId(input.targetKaId);
+  const closure = verifyCatalogBucketClosure(
+    input,
+    objects,
+    (scope) => catalogKeyToBucketIdV1(targetKaId, scope.bucketCount),
+  );
+  return closeCatalogRowAuthorship(closure, targetKaId);
+}
 
+/**
+ * Close several rows of one exact signed catalog bucket (#2812). The result
+ * equals calling verifyAuthorCatalogRowAuthorshipV1 once per target, in order,
+ * with the same fields: the same capabilities, and the same first failure.
+ * The row-independent closure (delegation, head, path, bucket signature,
+ * scope and bucket binding) is checked once instead of once per row, so N
+ * rows cost one bucket verification plus N row checks, not N bucket
+ * verifications. A target from another bucket goes through the single-row
+ * verifier, which rejects it exactly as before.
+ */
+export function verifyAuthorCatalogBucketRowAuthorshipsV1(
+  untrustedInput: VerifyAuthorCatalogBucketRowAuthorshipsInputV1,
+): readonly VerifiedAuthorCatalogRowAuthorshipV1[] {
+  const input = snapshotTopLevelInput(untrustedInput, BUCKET_AUTHORSHIPS_INPUT_KEYS);
+  const targetKaIds = snapshotTargetKaIds(input.targetKaIds);
+  if (targetKaIds.length === 0) return Object.freeze([]);
+  const objects = snapshotCatalogObjects(input);
+  const firstTargetKaId = snapshotTargetKaId(targetKaIds[0]!);
+  const closure = verifyCatalogBucketClosure(
+    input,
+    objects,
+    (scope) => catalogKeyToBucketIdV1(firstTargetKaId, scope.bucketCount),
+  );
+  return Object.freeze(targetKaIds.map((untrustedTargetKaId, index) => {
+    const targetKaId = index === 0 ? firstTargetKaId : snapshotTargetKaId(untrustedTargetKaId);
+    if (catalogKeyToBucketIdV1(targetKaId, closure.scope.bucketCount) !== closure.selectedBucketId) {
+      const { targetKaIds: _targets, ...rowInput } = input;
+      return verifyAuthorCatalogRowAuthorshipV1({ ...rowInput, targetKaId });
+    }
+    return closeCatalogRowAuthorship(closure, targetKaId);
+  }));
+}
+
+/** The signed catalog objects every row of one closure shares, as snapshotted from the input. */
+interface CatalogClosureObjectsV1 {
+  readonly delegation: ReturnType<typeof snapshotCatalogIssuerDelegation>;
+  readonly head: ReturnType<typeof snapshotCatalogHead>;
+  readonly bucket: ReturnType<typeof snapshotCatalogBucket>;
+}
+
+/** What a verified bucket closes independently of the row: all a row capability repeats. */
+interface VerifiedCatalogBucketClosureV1 {
+  readonly head: CatalogClosureObjectsV1['head'];
+  readonly scope: ReturnType<typeof deriveAuthorCatalogScopeFromHeadV1>;
+  readonly selectedBucketId: ReturnType<typeof catalogKeyToBucketIdV1>;
+  /** Each kaId of the bucket, mapped to its row, or to null when it occurs more than once. */
+  readonly rowsByKaId: ReadonlyMap<KaIdV1, AuthorCatalogRowV1 | null>;
+  readonly shared: Omit<
+    VerifiedAuthorCatalogRowAuthorshipSnapshotV1,
+    'catalogRowDigest' | 'transferIdentityDigest' | 'row'
+  >;
+}
+
+function snapshotCatalogObjects(
+  input: Pick<VerifyAuthorCatalogRowAuthorshipInputV1, 'catalogIssuerDelegation' | 'catalogHead' | 'catalogBucket'>,
+): CatalogClosureObjectsV1 {
+  return {
+    delegation: snapshotCatalogIssuerDelegation(input.catalogIssuerDelegation),
+    head: snapshotCatalogHead(input.catalogHead),
+    bucket: snapshotCatalogBucket(input.catalogBucket),
+  };
+}
+
+function verifyCatalogBucketClosure(
+  input: Omit<VerifyAuthorCatalogRowAuthorshipInputV1, 'targetKaId'>,
+  { delegation, head, bucket }: CatalogClosureObjectsV1,
+  selectBucketId: (
+    scope: ReturnType<typeof deriveAuthorCatalogScopeFromHeadV1>,
+  ) => ReturnType<typeof catalogKeyToBucketIdV1>,
+): VerifiedCatalogBucketClosureV1 {
   // A canonical head caps directoryHeight at seven, so its exact root-to-leaf
   // path contains 1..8 nodes. Preflight BOTH attacker-controlled arrays before
   // canonicalizing a single envelope or opening a signature capability. This
@@ -410,7 +492,7 @@ export function verifyAuthorCatalogRowAuthorshipV1(
 
   const scope = deriveAuthorCatalogScopeFromHeadV1(head.payload);
   const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(scope);
-  const selectedBucketId = catalogKeyToBucketIdV1(targetKaId, scope.bucketCount);
+  const selectedBucketId = selectBucketId(scope);
   const descriptor = readBoundPathDescriptor(
     input.directoryPathProof,
     head,
@@ -449,55 +531,97 @@ export function verifyAuthorCatalogRowAuthorshipV1(
     );
   }
 
-  const matchingRows = bucket.payload.rows.filter((row) => row.kaId === targetKaId);
-  if (matchingRows.length !== 1) {
+  const rowsByKaId = new Map<KaIdV1, AuthorCatalogRowV1 | null>();
+  for (const row of bucket.payload.rows) {
+    rowsByKaId.set(row.kaId, rowsByKaId.has(row.kaId) ? null : row);
+  }
+
+  return {
+    head,
+    scope,
+    selectedBucketId,
+    rowsByKaId,
+    shared: {
+      authorCatalogAgentScopeDigest,
+      authorAuthorityEvidenceDigest: evidenceDigest,
+      catalogIssuerDelegationObjectDigest: delegation.objectDigest as Digest32V1,
+      catalogIssuerDelegationSignatureVariantDigest: delegationSignature.signatureVariantDigest,
+      catalogHeadObjectDigest: head.objectDigest as Digest32V1,
+      catalogHeadSignatureVariantDigest: headSignature.signatureVariantDigest,
+      directoryPathObjectDigests: Object.freeze(
+        directoryEnvelopes.map((envelope) => envelope.objectDigest as Digest32V1),
+      ),
+      directoryPathSignatureVariantDigests: Object.freeze(
+        directorySignatures.map((signature) => signature.signatureVariantDigest),
+      ),
+      bucketObjectDigest: bucket.objectDigest as Digest32V1,
+      bucketSignatureVariantDigest: bucketSignature.signatureVariantDigest,
+      catalogScopeDigest,
+      networkId: head.payload.networkId,
+      contextGraphId: head.payload.contextGraphId,
+      governanceChainId: head.payload.governanceChainId,
+      governanceContractAddress: head.payload.governanceContractAddress,
+      ownershipTransitionDigest: head.payload.ownershipTransitionDigest,
+      subGraphName: head.payload.subGraphName,
+      authorAddress: head.payload.authorAddress,
+      catalogIssuerKey,
+      era: head.payload.era,
+      version: head.payload.version,
+      bucketId: bucket.payload.bucketId,
+      effectiveAt: delegationPayload.effectiveAt,
+      expiresAt: delegationPayload.expiresAt,
+      headIssuedAt: head.payload.issuedAt,
+    },
+  };
+}
+
+function closeCatalogRowAuthorship(
+  closure: VerifiedCatalogBucketClosureV1,
+  targetKaId: KaIdV1,
+): VerifiedAuthorCatalogRowAuthorshipV1 {
+  const matchingRow = closure.rowsByKaId.get(targetKaId);
+  if (matchingRow === undefined || matchingRow === null) {
     fail(
       'AUTHORSHIP_ROW_BINDING_MISMATCH',
       'target kaId must occur exactly once in its mathematically derived bucket',
     );
   }
-  const row = snapshotCatalogRow(matchingRows[0]);
-  if ((BigInt(row.kaId) >> 96n) !== BigInt(head.payload.authorAddress)) {
+  const row = snapshotCatalogRow(matchingRow);
+  if ((BigInt(row.kaId) >> 96n) !== BigInt(closure.head.payload.authorAddress)) {
     fail(
       'AUTHORSHIP_ROW_BINDING_MISMATCH',
       'target kaId high 160 bits do not equal the signed head author',
     );
   }
-  const catalogRowDigest = computeAuthorCatalogRowDigestV1(catalogScopeDigest, row);
-  const transferIdentityDigest = computeKaTransferIdentityDigestV1(row.transfer);
-
+  const { shared } = closure;
   return mintVerifiedAuthorship({
-    authorCatalogAgentScopeDigest,
-    authorAuthorityEvidenceDigest: evidenceDigest,
-    catalogIssuerDelegationObjectDigest: delegation.objectDigest as Digest32V1,
-    catalogIssuerDelegationSignatureVariantDigest: delegationSignature.signatureVariantDigest,
-    catalogHeadObjectDigest: head.objectDigest as Digest32V1,
-    catalogHeadSignatureVariantDigest: headSignature.signatureVariantDigest,
-    directoryPathObjectDigests: Object.freeze(
-      directoryEnvelopes.map((envelope) => envelope.objectDigest as Digest32V1),
-    ),
-    directoryPathSignatureVariantDigests: Object.freeze(
-      directorySignatures.map((signature) => signature.signatureVariantDigest),
-    ),
-    bucketObjectDigest: bucket.objectDigest as Digest32V1,
-    bucketSignatureVariantDigest: bucketSignature.signatureVariantDigest,
-    catalogScopeDigest,
-    catalogRowDigest,
-    transferIdentityDigest,
-    networkId: head.payload.networkId,
-    contextGraphId: head.payload.contextGraphId,
-    governanceChainId: head.payload.governanceChainId,
-    governanceContractAddress: head.payload.governanceContractAddress,
-    ownershipTransitionDigest: head.payload.ownershipTransitionDigest,
-    subGraphName: head.payload.subGraphName,
-    authorAddress: head.payload.authorAddress,
-    catalogIssuerKey,
-    era: head.payload.era,
-    version: head.payload.version,
-    bucketId: bucket.payload.bucketId,
-    effectiveAt: delegationPayload.effectiveAt,
-    expiresAt: delegationPayload.expiresAt,
-    headIssuedAt: head.payload.issuedAt,
+    authorCatalogAgentScopeDigest: shared.authorCatalogAgentScopeDigest,
+    authorAuthorityEvidenceDigest: shared.authorAuthorityEvidenceDigest,
+    catalogIssuerDelegationObjectDigest: shared.catalogIssuerDelegationObjectDigest,
+    catalogIssuerDelegationSignatureVariantDigest: shared.catalogIssuerDelegationSignatureVariantDigest,
+    catalogHeadObjectDigest: shared.catalogHeadObjectDigest,
+    catalogHeadSignatureVariantDigest: shared.catalogHeadSignatureVariantDigest,
+    directoryPathObjectDigests: shared.directoryPathObjectDigests,
+    directoryPathSignatureVariantDigests: shared.directoryPathSignatureVariantDigests,
+    bucketObjectDigest: shared.bucketObjectDigest,
+    bucketSignatureVariantDigest: shared.bucketSignatureVariantDigest,
+    catalogScopeDigest: shared.catalogScopeDigest,
+    catalogRowDigest: computeAuthorCatalogRowDigestV1(shared.catalogScopeDigest, row),
+    transferIdentityDigest: computeKaTransferIdentityDigestV1(row.transfer),
+    networkId: shared.networkId,
+    contextGraphId: shared.contextGraphId,
+    governanceChainId: shared.governanceChainId,
+    governanceContractAddress: shared.governanceContractAddress,
+    ownershipTransitionDigest: shared.ownershipTransitionDigest,
+    subGraphName: shared.subGraphName,
+    authorAddress: shared.authorAddress,
+    catalogIssuerKey: shared.catalogIssuerKey,
+    era: shared.era,
+    version: shared.version,
+    bucketId: shared.bucketId,
+    effectiveAt: shared.effectiveAt,
+    expiresAt: shared.expiresAt,
+    headIssuedAt: shared.headIssuedAt,
     row,
   });
 }
@@ -548,25 +672,30 @@ export function readVerifiedAuthorCatalogRowAuthorshipV1(
   return VERIFIED_AUTHOR_CATALOG_ROW_AUTHORSHIPS_V1.get(value as object)!;
 }
 
-function snapshotTopLevelInput(
-  input: VerifyAuthorCatalogRowAuthorshipInputV1,
-): VerifyAuthorCatalogRowAuthorshipInputV1 {
+const CLOSURE_INPUT_KEYS = [
+  'catalogBucket',
+  'catalogBucketSignature',
+  'catalogHead',
+  'catalogHeadSignature',
+  'catalogIssuerDelegation',
+  'catalogIssuerDelegationSignature',
+  'directoryPathEnvelopes',
+  'directoryPathProof',
+  'directoryPathSignatures',
+  'parentAuthorAgentEvidence',
+] as const;
+
+const ROW_AUTHORSHIP_INPUT_KEYS = [...CLOSURE_INPUT_KEYS, 'targetKaId'] as const;
+
+const BUCKET_AUTHORSHIPS_INPUT_KEYS = [...CLOSURE_INPUT_KEYS, 'targetKaIds'] as const;
+
+function snapshotTopLevelInput<T extends object>(
+  input: T,
+  expected: readonly string[],
+): T {
   if (!isPlainRecord(input)) {
     fail('AUTHORSHIP_INPUT_INVALID', 'authorship input must be a plain object');
   }
-  const expected = [
-    'catalogBucket',
-    'catalogBucketSignature',
-    'catalogHead',
-    'catalogHeadSignature',
-    'catalogIssuerDelegation',
-    'catalogIssuerDelegationSignature',
-    'directoryPathEnvelopes',
-    'directoryPathProof',
-    'directoryPathSignatures',
-    'parentAuthorAgentEvidence',
-    'targetKaId',
-  ];
   const actual = Reflect.ownKeys(input);
   if (actual.some((key) => typeof key !== 'string')) {
     fail('AUTHORSHIP_INPUT_INVALID', 'authorship input must not contain symbol fields');
@@ -577,7 +706,7 @@ function snapshotTopLevelInput(
   }
   const missing = expected.filter((key) => !actualStrings.includes(key));
   if (missing.length > 0) {
-    const code = missing.every((key) => key !== 'targetKaId')
+    const code = missing.every((key) => key !== 'targetKaId' && key !== 'targetKaIds')
       ? 'AUTHORSHIP_DEPENDENCY_MISSING'
       : 'AUTHORSHIP_INPUT_INVALID';
     fail(code, `authorship input is missing ${missing.join(', ')}`);
@@ -591,11 +720,27 @@ function snapshotTopLevelInput(
     snapshot[key] = descriptor.value;
   }
   for (const key of expected) {
-    if (key !== 'parentAuthorAgentEvidence' && key !== 'targetKaId' && snapshot[key] == null) {
+    if (
+      key !== 'parentAuthorAgentEvidence'
+      && key !== 'targetKaId'
+      && key !== 'targetKaIds'
+      && snapshot[key] == null
+    ) {
       fail('AUTHORSHIP_DEPENDENCY_MISSING', `authorship dependency ${key} is unavailable`);
     }
   }
-  return Object.freeze(snapshot) as unknown as VerifyAuthorCatalogRowAuthorshipInputV1;
+  return Object.freeze(snapshot) as unknown as T;
+}
+
+/** A bucket holds at most MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1 rows, so no longer target list can close. */
+function snapshotTargetKaIds(input: readonly KaIdV1[]): readonly KaIdV1[] {
+  assertOrdinaryArrayExactLength(input, 'targetKaIds', 'AUTHORSHIP_INPUT_INVALID');
+  if (input.length > MAX_AUTHOR_CATALOG_BUCKET_ROWS_V1) {
+    fail('AUTHORSHIP_INPUT_INVALID', 'targetKaIds names more rows than one catalog bucket holds');
+  }
+  return Object.freeze(
+    snapshotDenseOrdinaryArray(input, 'targetKaIds', 'AUTHORSHIP_INPUT_INVALID'),
+  ) as readonly KaIdV1[];
 }
 
 function snapshotCatalogIssuerDelegation(
