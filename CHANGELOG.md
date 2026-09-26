@@ -132,6 +132,14 @@ wire-protocol or deployment registry changes are required.**
   be this node's; that start fails and is retried, keeping the owner record.
   Any other lock holder is logged and left running, and the lock file itself
   is never touched.
+- **A daemon on Node.js 26 keeps its chain RPC calls on HTTP/1.1** (#2828):
+  Node 26 bundles undici 8, whose `fetch` negotiates HTTP/2 with any TLS
+  server that offers it. Node 22 and 24 stay on HTTP/1.1 unless asked. A
+  daemon on Node 26 therefore sent every chain JSON-RPC call over HTTP/2, a
+  path no release had been tested on, and one such daemon stalled in Node's
+  native HTTP/2 write buffering until its worker was killed. Where Node would
+  negotiate HTTP/2, chain RPC calls now use an HTTP/1.1-only connection pool.
+  Nothing changes on Node 22 and 24.
 - **An Edge subscribed to a public Context Graph finds holders that are not
   already connected to it** (#2778): an Edge keeps no `agents` phonebook by default,
   so for a wallet-scoped public graph the curator tier of VM recovery (owner

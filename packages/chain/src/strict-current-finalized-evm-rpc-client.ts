@@ -19,6 +19,7 @@ import {
 } from './strict-current-finalized-evm-errors.js';
 import type { FinalizedAnchorV1 } from './strict-current-finalized-evm-types.js';
 import { isCanonicalLowerHexBytesV1 } from './strict-finalized-evm-bytes.js';
+import { rpcFetchTransportInit } from './rpc-http1-dispatcher.js';
 
 interface RpcErrorEnvelopeV1 {
   readonly code: number;
@@ -51,7 +52,9 @@ export async function postStrictFinalizedJsonRpcV1(
       body: JSON.stringify({ jsonrpc: '2.0', id, method, params }),
       redirect: 'error',
       signal,
-    });
+      // HTTP/1.1 on every Node line; `dispatcher` is undici's RequestInit extension (#2828).
+      ...rpcFetchTransportInit(),
+    } as RequestInit);
   } catch (cause) {
     if (signal.aborted) throw cause;
     throw unavailable(`JSON-RPC ${method} transport failed`, cause);

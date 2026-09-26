@@ -24,6 +24,7 @@ import {
   withRpcUsageIssuerContext,
   type RpcUsageIssuerContext,
 } from './rpc-usage.js';
+import { rpcFetchTransportInit } from './rpc-http1-dispatcher.js';
 
 export type RpcRequestClass = 'foreground' | 'background';
 
@@ -266,7 +267,9 @@ export const cancellableRpcGetUrl: FetchGetUrlFunc = async (
       headers: request.headers,
       body: requestBody,
       signal: controller.signal,
-    });
+      // HTTP/1.1 on every Node line; `dispatcher` is undici's RequestInit extension (#2828).
+      ...rpcFetchTransportInit(),
+    } as RequestInit);
     const headers: Record<string, string> = {};
     response.headers.forEach((value, key) => { headers[key] = value; });
     const body = new Uint8Array(await response.arrayBuffer());
