@@ -18,12 +18,13 @@ import {
   type VerifiedGraphScopedFinalizationEvidence,
   type VerifiedGraphScopedFinalizationEvidencePlacement,
 } from './finalization-graph-envelope.js';
-import type {
-  FinalizationRecoveryEntry,
-  FinalizationRecoveryHealth,
-  FinalizationRecoveryFailureCode,
-  FinalizationRecoverySettledPublisherUpgradeResult,
-  FinalizationRecoveryStore,
+import {
+  FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD,
+  type FinalizationRecoveryEntry,
+  type FinalizationRecoveryHealth,
+  type FinalizationRecoveryFailureCode,
+  type FinalizationRecoverySettledPublisherUpgradeResult,
+  type FinalizationRecoveryStore,
 } from './finalization-recovery-store.js';
 import {
   FinalizationPublisherAuthorityObserver,
@@ -228,7 +229,7 @@ const SETTLED_NOT_FOUND_RETRY_LIMIT = 5;
 const DEFERRED_RETRY_BASE_MS = 1_000;
 const DEFERRED_RETRY_MAX_MS = 60_000;
 const FAILED_PUBLISHER_AUTHORITY_PROBE_MAX_ENTRIES = 4_096;
-export const FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD = 3;
+export { FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD };
 export const FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS = 6 * 60 * 60 * 1_000;
 /**
  * At the maximum retry delay this is approximately seven days of autonomous
