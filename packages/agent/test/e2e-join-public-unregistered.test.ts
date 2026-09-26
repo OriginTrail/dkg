@@ -16,7 +16,8 @@ import { describe, it, expect, afterAll, beforeAll } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
+import { makeTestKaNumberAllocator, makeTestKaNumberStore } from './_helpers/ka-allocator.js';
+import { KaNumberAllocator } from '../src/allocator.js';
 import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
 import { DKGAgent } from '../src/index.js';
 import type { ContextGraphSubscriptionRecord } from '../src/index.js';
@@ -193,9 +194,12 @@ describe('E2E: SWM after a join on a public, unregistered context graph (#2827)'
     const memberDataDir = await mkdtemp(join(tmpdir(), 'dkg-e2e-2827-member-'));
     tempDirs.push(curatorDataDir, memberDataDir);
     const memberPersistedSubscriptions = new Map<string, ContextGraphSubscriptionRecord>();
+    // The member's KA-number sequence survives its restart, as the daemon's
+    // SQLite store does: a restarted author never reissues a KA number.
+    const memberKaNumbers = makeTestKaNumberStore();
     const createMember = (chainAdapter: EVMChainAdapter) => DKGAgent.create({
       ...TEST_SNAPSHOT_CONFIG,
-      kaNumberAllocator: makeTestKaNumberAllocator(),
+      kaNumberAllocator: new KaNumberAllocator(memberKaNumbers),
       name: 'PublicMember',
       listenPort: 0,
       skills: [],
@@ -252,9 +256,13 @@ describe('E2E: SWM after a join on a public, unregistered context graph (#2827)'
       assertionName: 'curator-after-join', subject: CURATOR_ENTITY, label: 'Curator after join',
     });
 
-    // The member restarts before it has authored anything here: restarting
-    // after authoring hits a separate author-catalog projection failure
-    // (#2832), not the #2827 defects.
+    await shareAndExpectDelivery({
+      from: member, to: curator, contextGraphId,
+      assertionName: 'member-before-restart', subject: `${MEMBER_ENTITY}:before-restart`, label: 'Member before restart',
+    });
+
+    // The member restarts after it has authored (#2832): its author catalog
+    // must re-project from what it already stored.
     await member.stop();
     member = await createMember(createIndexedEVMAdapter(HARDHAT_KEYS.EXTRA1));
     agents.push(member);

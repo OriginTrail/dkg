@@ -729,8 +729,11 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       ]);
 
       try {
+        // Rehydration starts the retrying recovery loop (#2832), which runs
+        // this single attempt.
+        const recoverPendingMetadata = vi.spyOn(agent, 'recoverPendingJoinApprovalMetadata');
         const resumePendingMetadata = vi.spyOn(agent, 'resumePendingJoinApprovalMetadata')
-          .mockResolvedValue(undefined);
+          .mockResolvedValue('completed');
         await agent.start();
         expect(agent.getDefaultAgentAddress()?.toLowerCase()).toBe(localAgentAddress.toLowerCase());
 
@@ -755,6 +758,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         });
         expect((agent as any).config.syncContextGraphs ?? []).not.toContain(pendingId);
         await expect(agent.canReadContextGraph(pendingId)).resolves.toBe(false);
+        expect(recoverPendingMetadata).toHaveBeenCalledWith(pendingId, '12D3KooWRestartCurator0');
         expect(resumePendingMetadata).toHaveBeenCalledWith(
           pendingId,
           '12D3KooWRestartCurator0',
