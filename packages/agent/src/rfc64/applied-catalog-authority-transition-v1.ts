@@ -304,7 +304,6 @@ export async function loadExactAppliedCatalogRowsV1(
     directoryPathProof,
     catalogBucket: bucket,
     catalogBucketSignature: storedBucket.issuerSignature,
-    targetKaIds: bucket.payload.rows.map((row) => row.kaId),
   });
   return Object.freeze(bucket.payload.rows.map((row) => Object.freeze({ ...row })));
 }

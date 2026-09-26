@@ -89,7 +89,6 @@ import { assertRfc64ExactIssuerSignatureProofV1 } from './catalog-transport-wire
 import {
   readVerifiedAuthorCatalogRowAuthorshipV1,
   verifyAuthorCatalogBucketRowAuthorshipsV1,
-  verifyAuthorCatalogRowAuthorshipV1,
   type VerifiedAuthorCatalogRowAuthorshipV1,
   type VerifiedAuthorCatalogRowAuthorshipSnapshotV1,
 } from './catalog-row-authorship.js';
@@ -1025,40 +1024,25 @@ export class Rfc64PublicCatalogNativeReceiverV1<
       if (target.kind !== 'bucket') {
         fail('catalog-native-receiver-catalog', 'non-empty catalog target lost its bucket proof');
       }
-      const closure = {
-        catalogIssuerDelegation: fetchedDelegation.envelope,
-        catalogIssuerDelegationSignature: fetchedDelegation.issuerSignature,
-        parentAuthorAgentEvidence: null,
-        catalogHead: head,
-        catalogHeadSignature: fetchedHead.issuerSignature,
-        directoryPathEnvelopes: [directory],
-        directoryPathSignatures: [fetchedDirectory.issuerSignature],
-        directoryPathProof,
-        catalogBucket: target.bucket,
-        catalogBucketSignature: target.fetchedBucket.issuerSignature,
-      };
       try {
-        // One bucket closure for every target row instead of one per row (#2812).
+        // One bucket closure for every row instead of one per row (#2812);
+        // target.rows are the bucket's rows, in bucket order.
         authorshipCapabilities = verifyAuthorCatalogBucketRowAuthorshipsV1({
-          ...closure,
-          targetKaIds: targetRows.map((row) => row.kaId),
+          catalogIssuerDelegation: fetchedDelegation.envelope,
+          catalogIssuerDelegationSignature: fetchedDelegation.issuerSignature,
+          parentAuthorAgentEvidence: null,
+          catalogHead: head,
+          catalogHeadSignature: fetchedHead.issuerSignature,
+          directoryPathEnvelopes: [directory],
+          directoryPathSignatures: [fetchedDirectory.issuerSignature],
+          directoryPathProof,
+          catalogBucket: target.bucket,
+          catalogBucketSignature: target.fetchedBucket.issuerSignature,
         });
       } catch (cause) {
-        // Name the first row that fails on its own, as the per-row check did.
-        for (const row of targetRows) {
-          try {
-            verifyAuthorCatalogRowAuthorshipV1({ ...closure, targetKaId: row.kaId });
-          } catch (rowCause) {
-            fail(
-              'catalog-native-receiver-authorization',
-              `catalog row ${row.kaId} is not authorized by the exact direct-author delegation closure`,
-              rowCause,
-            );
-          }
-        }
         fail(
           'catalog-native-receiver-authorization',
-          'catalog rows are not authorized by the exact direct-author delegation closure',
+          'catalog bucket rows are not authorized by the exact direct-author delegation closure',
           cause,
         );
       }

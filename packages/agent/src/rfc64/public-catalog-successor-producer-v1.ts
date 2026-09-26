@@ -426,7 +426,6 @@ export class Rfc64PublicCatalogSuccessorProducerV1 {
           directoryPathProof,
           catalogBucket: producedBucket,
           catalogBucketSignature: bucketSignature,
-          targetKaIds: producedBucket.payload.rows.map((row) => row.kaId),
         }).map((capability) => readVerifiedAuthorCatalogRowAuthorshipV1(capability));
       }
     } catch (cause) {
