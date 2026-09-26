@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { ContextGraphReadAuthorityDependency } from './context-graph-read-authority.js';
+
+/**
+ * What could not answer when Context Graph authority is unavailable, for
+ * server-side diagnostics only (#2834): `store` is the local triple store or
+ * the metadata in it, `chain` is chain RPC or the finalized chain index,
+ * `local-state` is in-process registration or bootstrap state, and `unknown`
+ * is a failure whose error says neither.
+ */
+export type ContextGraphReadAuthorityDependency = 'store' | 'chain' | 'local-state' | 'unknown';
 
 export type LiveOnChainAccessPolicyUnavailableReason =
   | 'chain-access-policy-timeout'

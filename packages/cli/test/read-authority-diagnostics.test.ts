@@ -44,7 +44,7 @@ describe('read-authority 503 diagnostics (#2834)', () => {
     expect(lines.every((line) => line.message.includes(
       'source=registered-chain reason=local-existence-unavailable dependency=store',
     ))).toBe(true);
-    expect(lines[2]!.message).toContain('suppressedSinceLast=1');
+    expect(lines[2]!.message).toContain('dependency=store (1 more since the last warning)');
   });
 
   it('warns separately for each attribution', () => {
@@ -68,6 +68,16 @@ describe('read-authority 503 diagnostics (#2834)', () => {
 
     // reason-a was evicted by reason-c, so it warns again inside its window.
     expect(lines.map((line) => line.level)).toEqual(['warn', 'warn', 'warn', 'warn']);
+  });
+
+  it('starts a new window when the clock steps back', () => {
+    const { lines, diagnostics, advance } = harness();
+
+    diagnostics.record(createOperationContext('query'), STORE);
+    advance(-30_000);
+    diagnostics.record(createOperationContext('query'), STORE);
+
+    expect(lines.map((line) => line.level)).toEqual(['warn', 'warn']);
   });
 
   it('logs anything but an attribution token as unknown', () => {

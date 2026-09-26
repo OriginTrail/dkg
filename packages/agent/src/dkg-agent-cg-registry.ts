@@ -154,7 +154,7 @@ import { SyncVerifyWorker } from './sync-verify-worker.js';
 import {
   contextGraphReadAuthorityDependencyOf,
   type ContextGraphReadAuthorityDependency,
-} from './context-graph-read-authority.js';
+} from './context-graph-authority-dependency.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';

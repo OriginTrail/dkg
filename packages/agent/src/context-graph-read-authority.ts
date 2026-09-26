@@ -9,12 +9,17 @@
  * the distinction between an authoritative denial and unavailable authority.
  */
 
-import { isChainRpcTransportError } from '@origintrail-official/dkg-chain';
-import { isStoreOperationTimeoutError, isStoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
-import type {
-  RegisteredContextGraphAuthority,
-  RegisteredContextGraphAuthorityUnavailableReason,
-} from './registered-context-graph-authority.js';
+import {
+  contextGraphReadAuthorityDependencyOf,
+  registeredContextGraphAuthorityUnavailableDependency,
+  type ContextGraphReadAuthorityDependency,
+} from './context-graph-authority-dependency.js';
+import type { RegisteredContextGraphAuthority } from './registered-context-graph-authority.js';
+
+export {
+  contextGraphReadAuthorityDependencyOf,
+  type ContextGraphReadAuthorityDependency,
+} from './context-graph-authority-dependency.js';
 
 export type ContextGraphReadAuthorityOutcome = 'allowed' | 'denied' | 'unavailable';
 
@@ -24,15 +29,6 @@ export type ContextGraphReadAuthoritySource =
   | 'rfc64-private'
   | 'rfc64-public'
   | 'legacy-local';
-
-/**
- * What could not answer when authority is `unavailable`, for server-side
- * diagnostics only (#2834): `store` is the local triple store or the metadata
- * in it, `chain` is chain RPC or the finalized chain index, `local-state` is
- * in-process registration or bootstrap state, and `unknown` is a failure whose
- * error says neither.
- */
-export type ContextGraphReadAuthorityDependency = 'store' | 'chain' | 'local-state' | 'unknown';
 
 interface ContextGraphReadAuthorityDecisionFields {
   source: ContextGraphReadAuthoritySource;
@@ -87,42 +83,6 @@ export class ContextGraphReadAuthorityUnavailableError extends Error {
     this.reason = decision.reason;
     this.dependency = decision.dependency;
   }
-}
-
-/** The dependency behind each typed registered-authority failure. */
-const REGISTERED_AUTHORITY_UNAVAILABLE_DEPENDENCY: Readonly<
-  Record<RegisteredContextGraphAuthorityUnavailableReason, ContextGraphReadAuthorityDependency>
-> = {
-  'chain-access-policy-timeout': 'chain',
-  'chain-access-policy-unknown': 'chain',
-  'chain-access-policy-unavailable': 'chain',
-  'chain-name-binding-unavailable': 'chain',
-  'chain-participant-authority-unsupported': 'chain',
-  'chain-participant-authority-unavailable': 'chain',
-  'chain-participant-authority-invalid': 'chain',
-  'finalized-name-absence-unaccepted': 'chain',
-  'authority-circuit-open': 'chain',
-  'local-existence-unavailable': 'store',
-  'local-chain-binding-unavailable': 'local-state',
-};
-
-/**
- * The dependency a caught authority-source error belongs to, read from the
- * stable codes of it and its `cause` chain: store deadlines, recovery and
- * admission shedding, or chain RPC transport failures.
- */
-export function contextGraphReadAuthorityDependencyOf(error: unknown): ContextGraphReadAuthorityDependency {
-  try {
-    let current = error;
-    for (let depth = 0; depth < 4 && typeof current === 'object' && current !== null; depth += 1) {
-      if (isStoreOperationTimeoutError(current) || isStoreSchedulerBusyError(current)) return 'store';
-      if (isChainRpcTransportError(current)) return 'chain';
-      current = (current as { cause?: unknown }).cause;
-    }
-  } catch {
-    // A hostile error shape says nothing about its dependency.
-  }
-  return 'unknown';
 }
 
 export interface ContextGraphReadAuthorityInput {
@@ -201,9 +161,7 @@ export async function resolveContextGraphReadAuthorityDecision(
     return unavailable(
       'registered-chain',
       registeredAuthority.reason,
-      registeredAuthority.dependency
-        ?? REGISTERED_AUTHORITY_UNAVAILABLE_DEPENDENCY[registeredAuthority.reason]
-        ?? 'unknown',
+      registeredContextGraphAuthorityUnavailableDependency(registeredAuthority),
       registeredAuthority.onChainId,
     );
   }
