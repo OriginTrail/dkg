@@ -146,8 +146,17 @@ import {
 } from './internal/context-graph-authority/context-graph-access-policy.js';
 import {
   createContextGraphAuthorityError,
+  isRetryableContextGraphAuthorityUnavailableReason,
   type ContextGraphAgentGateAuthority,
 } from './internal/context-graph-authority/context-graph-authority.js';
+import type {
+  ContextGraphAuthorityReadMode,
+  RegisteredContextGraphAuthority,
+} from './registered-context-graph-authority.js';
+import {
+  classifySwmTransportAuthority,
+  type SwmTransportAuthority,
+} from './internal/context-graph-authority/swm-transport-authority.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -636,6 +645,13 @@ function bindLiveAuthorityRead<T>(
   });
 }
 
+/** Registered-authority read options an SWM consumer chooses for itself. */
+interface SwmRegisteredAuthorityReadOptions {
+  signal?: AbortSignal;
+  authorityReadMode?: ContextGraphAuthorityReadMode;
+  requireLiveRosterForPrivate?: boolean;
+}
+
 export class WorkspaceCryptoMethods extends DKGAgentBase {
   getWorkspaceGossipSigningAgent(this: DKGAgent): (AgentKeyRecord & { privateKey: string }) | null {
     const defaultAddress = this.defaultAgentAddress?.toLowerCase();
@@ -695,7 +711,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   ): Promise<ContextGraphAgentGateAuthority> {
     return withRpcUsageSite(CG_AUTH_RPC_SITES.gate, () => resolveContextGraphAgentGateAuthorityDecision({
       contextGraphId,
-      getRegisteredAuthority: () => this.resolveRegisteredContextGraphAuthority(
+      getRegisteredAuthority: () => this.resolveSwmRegisteredAuthority(
         contextGraphId,
         { signal: options.signal },
       ),
@@ -742,10 +758,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   ): Promise<string[] | null> {
     const registeredAuthority = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.recoveryGate,
-      () => this.resolveRegisteredContextGraphAuthority(
-        contextGraphId,
-        { signal: options.signal },
-      ),
+      () => this.resolveSwmRegisteredAuthority(contextGraphId, { signal: options.signal }),
     );
     if (registeredAuthority.kind === 'private') return registeredAuthority.participantAgents;
     if (registeredAuthority.kind !== 'unregistered') return null;
@@ -1111,6 +1124,93 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   }
 
   /**
+   * Registered-chain authority for every SWM consumer: the agent gate, member
+   * recovery, recipient selection and the plaintext oracle (#2827).
+   *
+   * An active accepted owner-signed PUBLIC policy lets exact finalized name
+   * absence count as unregistered, as on the read path. A joined member has no
+   * local-first shortcut, so without it every SWM check on a public P2P graph
+   * failed closed as unavailable. "Active" means the policy still governs
+   * transport: a snapshot retained after a failed refresh or a kill switch
+   * grants nothing. Everything else is the registry's canonical answer. The finalized authority index follows the head at the node's
+   * finality depth and refreshes every index tick, and it is the only
+   * registration evidence here. A registration that lands after the snapshot
+   * was accepted wins as soon as the index sees it, and absence is never
+   * inferred from a cached name-lookup miss. (The uncached lookup is a full
+   * creation-history scan on any registry past the fast-enumeration bound.)
+   * The creator's own graph stays local-first in the registry until its
+   * registration commits. An accepted PRIVATE policy grants nothing here: its
+   * roster is the accepted RFC-64 one, not the local projection an
+   * unregistered answer falls back to.
+   */
+  resolveSwmRegisteredAuthority(this: DKGAgent,
+    contextGraphId: string,
+    options: SwmRegisteredAuthorityReadOptions = {},
+  ): Promise<RegisteredContextGraphAuthority> {
+    return this.resolveRegisteredContextGraphAuthority(contextGraphId, {
+      ...options,
+      allowAcceptedRfc64FinalizedAbsence:
+        this.hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId),
+    });
+  }
+
+  /**
+   * How SWM on this graph may travel, for both ends of the wire: one policy
+   * check and one registered-authority read, classified by
+   * {@link classifySwmTransportAuthority}.
+   */
+  async resolveSwmTransportAuthority(this: DKGAgent,
+    contextGraphId: string,
+    options: SwmRegisteredAuthorityReadOptions = {},
+  ): Promise<SwmTransportAuthority> {
+    const activeAcceptedPublicPolicy =
+      this.hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId);
+    return classifySwmTransportAuthority(
+      await this.resolveRegisteredContextGraphAuthority(contextGraphId, {
+        ...options,
+        allowAcceptedRfc64FinalizedAbsence: activeAcceptedPublicPolicy,
+      }),
+      activeAcceptedPublicPolicy,
+    );
+  }
+
+  /**
+   * Whether SWM on this graph is public-readable, so plaintext may be both
+   * sent and accepted. One predicate for both ends of the wire: the sender's
+   * recipient resolver and the receiver's plaintext oracle.
+   *
+   * Without an active accepted owner-signed public policy it is exactly the
+   * live on-chain probe (isContextGraphPublicOnChain). With one, it is the
+   * `plaintext` transport authority of {@link resolveSwmTransportAuthority},
+   * the same answer the sender's recipient selection uses.
+   */
+  async isContextGraphSwmPublic(this: DKGAgent,
+    contextGraphId: string,
+    opCtx?: OperationContext,
+  ): Promise<boolean> {
+    if (!this.hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId)) {
+      return this.isContextGraphPublicOnChain(contextGraphId, opCtx);
+    }
+    try {
+      const transport = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.publicProbe,
+        () => this.resolveSwmTransportAuthority(
+          contextGraphId,
+          { authorityReadMode: 'finalized-index-or-live' },
+        ),
+      );
+      return transport.kind === 'plaintext';
+    } catch (err) {
+      this.log.warn(
+        opCtx ?? createOperationContext('share'),
+        `isContextGraphSwmPublic(${contextGraphId}) could not resolve registered authority — `
+        + `treating the graph as NOT public (fail-closed): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
    * True iff `contextGraphId` is DEFINITIVELY public per its on-chain
    * access policy (policy enum `0`). Gates SWM encryption: an on-chain
    * public CG is public-readable, so its shared memory must be plaintext
@@ -1432,7 +1532,9 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
    * avoids the resolver's "Missing public encryption key" throw for an
    * allowlisted agent whose key isn't locally available — irrelevant for
    * a public CG that never encrypts. Private graphs resolve recipients from
-   * the live roster; unavailable registered authority fails closed.
+   * the live roster; unavailable registered authority fails closed. An
+   * unregistered graph whose accepted owner-signed policy is public is
+   * treated like an on-chain public one.
    */
   async resolveWorkspaceRecipientsGated(this: DKGAgent,
     input: WorkspaceAgentRecipientResolverInput,
@@ -1459,25 +1561,27 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveWorkspaceAgentRecipientsForCurrentAuthority(this: DKGAgent,
     input: WorkspaceAgentRecipientResolverInput,
   ): Promise<WorkspaceAgentRecipientResolution> {
-    const registeredAuthority = await withRpcUsageSite(
+    // The receiver decides plaintext from this same transport authority
+    // (isContextGraphSwmPublic), so the two ends cannot disagree (#2827).
+    const transport = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.recipients,
-      () => this.resolveRegisteredContextGraphAuthority(input.contextGraphId, {
+      () => this.resolveSwmTransportAuthority(input.contextGraphId, {
         authorityReadMode: 'finalized-index-or-live',
         requireLiveRosterForPrivate: true,
       }),
     );
-    if (registeredAuthority.kind === 'unregistered') {
-      return resolveWorkspaceAgentRecipients(this.store, input);
-    }
-    if (registeredAuthority.kind === 'public') {
+    if (transport.kind === 'plaintext') {
       return { requiresEncryption: false, recipients: [] };
     }
-    if (registeredAuthority.kind === 'unavailable') {
-      const message =
-        `Registered context graph "${input.contextGraphId}" authority is unavailable (${registeredAuthority.reason})`;
-      throw createContextGraphAuthorityError(message, registeredAuthority);
+    if (transport.kind === 'legacy-unregistered') {
+      return resolveWorkspaceAgentRecipients(this.store, input);
     }
-    if (registeredAuthority.participantAgents.length === 0) {
+    if (transport.kind === 'unavailable') {
+      const message =
+        `Registered context graph "${input.contextGraphId}" authority is unavailable (${transport.reason})`;
+      throw createContextGraphAuthorityError(message, transport);
+    }
+    if (transport.participantAgents.length === 0) {
       throw new Error(
         `Registered context graph "${input.contextGraphId}" requires encrypted SWM gossip but its authoritative chain roster is empty or unavailable`,
       );
@@ -1492,7 +1596,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     // before the chain intersection is reached, blocking every post-revoke
     // write until the local cleanup retry succeeds.
     const recipients: WorkspaceAgentRecipient[] = [];
-    for (const agentAddress of registeredAuthority.participantAgents) {
+    for (const agentAddress of transport.participantAgents) {
       const agentRecipients = await resolveWorkspaceAgentRecipientKeys(this.store, agentAddress);
       const authorizedRecipients = allowedPeerSet === null
         ? agentRecipients
@@ -2426,10 +2530,27 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       );
     }
 
-    const agentGateAddresses = await withRpcUsageSite(
+    const agentGateAuthority = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.senderKeyAccept,
-      () => this.getContextGraphAgentGateAddresses(pkg.contextGraphId),
+      () => this.resolveContextGraphAgentGateAuthority(pkg.contextGraphId),
     );
+    if (agentGateAuthority.kind === 'unavailable') {
+      // Not knowing the gate is not evidence that either endpoint is outside
+      // it. Answering `sender-not-allowed` here made an authority failure look
+      // like a membership decision (#2827). A transient failure asks the
+      // sender to retain and retry the package; one that needs a software or
+      // configuration change is terminal, classified exactly as the promote
+      // retry is (isRetryableContextGraphAuthorityUnavailableReason).
+      throw new SwmSenderKeySetupRejectionError(
+        isRetryableContextGraphAuthorityUnavailableReason(agentGateAuthority.reason)
+          ? 'agent-gate-pending'
+          : 'agent-gate-unavailable',
+        `Context graph "${pkg.contextGraphId}" agent gate authority is unavailable (${agentGateAuthority.reason})`,
+      );
+    }
+    const agentGateAddresses = agentGateAuthority.kind === 'available'
+      ? agentGateAuthority.agentAddresses
+      : null;
     if (!agentGateAddresses) {
       // A cold private member can receive Sender Key setup after the finalized
       // chain binding but before its accepted RFC-64 roster or legacy `_meta`

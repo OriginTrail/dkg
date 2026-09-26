@@ -3748,9 +3748,12 @@ describe('runImmediatePostApprovalSync', () => {
       refreshOpts?: {
         trustedCuratorPeerId?: string;
         force?: boolean;
-        memberProof?: {
-          approvedAgentAddress: string;
-          expectedDelegateePeerId?: string;
+        approvedMember?: {
+          proof: {
+            approvedAgentAddress: string;
+            expectedDelegateePeerId?: string;
+          };
+          accessPolicy: 'public' | 'unproven';
         };
       },
     ) => {
@@ -3758,8 +3761,8 @@ describe('runImmediatePostApprovalSync', () => {
         cg,
         peer: refreshOpts?.trustedCuratorPeerId,
         force: refreshOpts?.force,
-        approvedAgentAddress: refreshOpts?.memberProof?.approvedAgentAddress,
-        expectedDelegateePeerId: refreshOpts?.memberProof?.expectedDelegateePeerId,
+        approvedAgentAddress: refreshOpts?.approvedMember?.proof.approvedAgentAddress,
+        expectedDelegateePeerId: refreshOpts?.approvedMember?.proof.expectedDelegateePeerId,
       });
       const outcome = opts.refreshMetaResults?.[calls.refreshMetaCalls.length - 1] ?? true;
       if (outcome instanceof Error) throw outcome;
@@ -3767,6 +3770,10 @@ describe('runImmediatePostApprovalSync', () => {
       return outcome;
     };
     (a as any).hasConfirmedMetaState = async () => metaConfirmed;
+    // A refresh that succeeded stored the member proof it required, which is
+    // what join completion confirms.
+    (a as any).hasConfirmedApprovedMemberMetaState = async () => metaConfirmed;
+    (a as any).resolveApprovedMemberAccessPolicy = async () => 'public';
     (a as any).refreshMetaSyncedFlags = async () => undefined;
     (a as any).runCatchupOverPeers = async (
       cg: string,

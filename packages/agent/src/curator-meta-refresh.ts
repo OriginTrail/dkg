@@ -20,11 +20,12 @@ import {
   META_REFRESH_COOLDOWN_MS,
   SYNC_TOTAL_TIMEOUT_MS,
 } from './dkg-agent-constants.js';
+import { hasAuthoritativePrivateMetaDefinition } from './context-graph-private-meta-proof.js';
+import type { ApprovedMemberAcceptance } from './context-graph-member-proof.js';
 import {
-  hasAuthoritativePrivateMetaDefinition,
-  type AuthoritativePrivateMetaMemberProof,
-} from './context-graph-private-meta-proof.js';
-import { hasAuthoritativePublicMetaDefinition } from './context-graph-public-meta-proof.js';
+  hasAuthoritativePublicMetaDefinition,
+  hasAuthoritativePublicMetaDefinitionForApprovedMember,
+} from './context-graph-public-meta-proof.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from './sync/checkpoint/state.js';
 import {
   hasSyncAdmissionSource,
@@ -49,14 +50,18 @@ export interface CuratorMetaRefreshOptions {
   trustedCuratorPeerId?: string;
   /** Bypass the normal auth-probe cooldown for an explicit recovery event. */
   force?: boolean;
-  /** Require the fetched snapshot to make this approved local member usable. */
-  memberProof?: AuthoritativePrivateMetaMemberProof;
+  /**
+   * Require the fetched snapshot to make this approved local member usable,
+   * judged under the authenticated access policy the caller resolved: a
+   * public member snapshot is accepted only when that policy is `public`.
+   */
+  approvedMember?: ApprovedMemberAcceptance;
   /**
    * Accept only an unambiguous PUBLIC root definition. Set by the RFC-64
    * replica metadata bootstrap, whose accepted owner-signed policy is already
    * known to be public: a peer-served private definition must then be
    * rejected instead of installed, so an arbitrary connected peer cannot flip
-   * the local graph private. Mutually exclusive with `memberProof`.
+   * the local graph private. Mutually exclusive with `approvedMember`.
    */
   requirePublicDefinition?: boolean;
   /**
@@ -503,22 +508,27 @@ async function fetchAuthoritativeMetaSnapshot(
     agent.syncCheckpoints.delete(result.checkpointKey);
     return undefined;
   }
-  const hasAuthoritativePublicDefinition = hasAuthoritativePublicMetaDefinition(
-    contextGraphId,
-    controlMetaQuads,
-  );
-  // Supplying memberProof selects the fail-closed private post-approval
-  // contract. A public-only snapshot must not satisfy that request: public
-  // subscriptions reach this refresh without a member proof.
-  const acceptsAuthoritativePublicDefinition = options.memberProof === undefined
-    && hasAuthoritativePublicDefinition;
+  // The proof layer owns each snapshot contract; this refresh only picks one.
+  // Public subscriptions reach it without an approved member. A join-approved
+  // member of a PUBLIC graph accepts the public definition only under the
+  // authenticated public policy its caller resolved (#2827, #2831 review); an
+  // unproven policy keeps rejecting it, so a peer cannot downgrade a private
+  // graph by serving a public definition.
+  const acceptsAuthoritativePublicDefinition = options.approvedMember === undefined
+    ? hasAuthoritativePublicMetaDefinition(contextGraphId, controlMetaQuads)
+    : options.approvedMember.accessPolicy === 'public'
+      && hasAuthoritativePublicMetaDefinitionForApprovedMember(
+        contextGraphId,
+        controlMetaQuads,
+        options.approvedMember.proof,
+      );
   // A public-only bootstrap never installs a private definition, however
   // complete: the caller's accepted policy already says the graph is public.
   const hasAuthoritativePrivateDefinition = options.requirePublicDefinition !== true
     && hasAuthoritativePrivateMetaDefinition(
       contextGraphId,
       controlMetaQuads,
-      options.memberProof,
+      options.approvedMember?.proof,
     );
   if (!acceptsAuthoritativePublicDefinition && !hasAuthoritativePrivateDefinition) {
     agent.syncCheckpoints.delete(snapshotCheckpointKey);

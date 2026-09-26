@@ -1146,17 +1146,17 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         writeLocks: this.writeLocks,
         localAgentAddresses: () => [...this.localAgents.keys()],
         contextGraphMetaOracle: (cgId: string) => this.getCgMeta(cgId),
-        // Same live on-chain predicate the SENDER uses to decide plaintext vs
-        // encrypted SWM (`resolveWorkspaceRecipientsGated`). Wiring it here
-        // keeps both sides of the wire on one authority. Without it the
-        // receiver judged from local allowedAgent/participantAgent triples and
-        // permanently dropped the plaintext writes the sender is supposed to
-        // send on a public CG — silently breaking member->curator SWM shares on
-        // every public/curated context graph.
-        publicAccessPolicyOnChainOracle: (cgId: string) =>
+        // Same predicate the SENDER uses to decide plaintext vs encrypted SWM
+        // (`resolveWorkspaceRecipientsGated`), so both sides of the wire stay
+        // on one authority. Without it the receiver judged from local
+        // allowedAgent/participantAgent triples and permanently dropped the
+        // plaintext writes the sender is supposed to send on a public CG —
+        // silently breaking member->curator SWM shares on every public/curated
+        // context graph, registered or owner-signed unregistered (#2827).
+        publicAccessPolicyOracle: (cgId: string) =>
           withRpcUsageSite(
             CG_AUTH_RPC_SITES.swmPublicOracle,
-            () => this.isContextGraphPublicOnChain(cgId, createOperationContext('share')),
+            () => this.isContextGraphSwmPublic(cgId, createOperationContext('share')),
           ),
         // RFC-64 catalog authority already excludes selected CGs from legacy
         // durable catch-up. Apply the same decision to live gossip/substrate

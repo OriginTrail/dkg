@@ -9,6 +9,7 @@ import {
   buildAuthoritativePublicMetaAskQuery,
   buildAuthoritativePublicMetaQuads,
   hasAuthoritativePublicMetaDefinition,
+  hasAuthoritativePublicMetaDefinitionForApprovedMember,
   inspectAuthoritativePublicMetaDefinition,
 } from '../src/context-graph-public-meta-proof.js';
 
@@ -128,5 +129,89 @@ describe('authoritative public metadata proof', () => {
         await store.close();
       }
     }
+  });
+
+  describe('post-approval contract of a public graph (#2827)', () => {
+    const contextGraphId = 'public/post-approval-member';
+    const member = '0x00000000000000000000000000000000000000a1';
+    const peerId = '12D3KooWPostApprovalMemberPeer';
+    const proof = { approvedAgentAddress: member, expectedDelegateePeerId: peerId, nowMs: 2_000 };
+
+    function memberQuads(overrides: { revoked?: boolean; expiresAtMs?: number; peer?: string } = {}): Quad[] {
+      const graph = contextGraphMetaGraphUri(contextGraphId);
+      const root = contextGraphDataGraphUri(contextGraphId);
+      const delegation = `did:dkg:agent-delegation:${contextGraphId}:${member}`;
+      return [
+        { subject: root, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: `"${member}"`, graph },
+        ...(overrides.revoked ? [{ subject: root, predicate: DKG_ONTOLOGY.DKG_REVOKED_AGENT, object: `"${member}"`, graph }] : []),
+        { subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT, object: `"${member}"`, graph },
+        { subject: delegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: `"${overrides.peer ?? peerId}"`, graph },
+        { subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT, object: '"1000"', graph },
+        ...(overrides.expiresAtMs === undefined ? [] : [{
+          subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_EXPIRES_AT, object: `"${overrides.expiresAtMs}"`, graph,
+        }]),
+      ];
+    }
+
+    it('accepts the public definition only together with the approved-member proof', () => {
+      const definition = authoritativePublicMetaQuads(contextGraphId);
+      expect(hasAuthoritativePublicMetaDefinitionForApprovedMember(
+        contextGraphId, [...definition, ...memberQuads()], proof,
+      )).toBe(true);
+      // The public definition alone is not the post-approval contract.
+      expect(hasAuthoritativePublicMetaDefinitionForApprovedMember(contextGraphId, definition, proof)).toBe(false);
+    });
+
+    it('rejects a revoked, expired or foreign-bound member', () => {
+      const definition = authoritativePublicMetaQuads(contextGraphId);
+      for (const [name, quads] of [
+        ['revoked', memberQuads({ revoked: true })],
+        ['expired', memberQuads({ expiresAtMs: 1_500 })],
+        ['bound to another peer', memberQuads({ peer: '12D3KooWSomebodyElse' })],
+      ] as const) {
+        expect(
+          hasAuthoritativePublicMetaDefinitionForApprovedMember(contextGraphId, [...definition, ...quads], proof),
+          name,
+        ).toBe(false);
+      }
+    });
+
+    it('keeps the post-approval snapshot check and its store query in lockstep', async () => {
+      const definition = authoritativePublicMetaQuads(contextGraphId);
+      const privateDefinition = definition.map((quad) => (
+        quad.predicate === DKG_ONTOLOGY.DKG_ACCESS_POLICY ? { ...quad, object: '"private"' } : quad
+      ));
+      const cases: Array<[string, Quad[], boolean]> = [
+        ['public definition with the member', [...definition, ...memberQuads()], true],
+        ['public definition alone', definition, false],
+        ['revoked member', [...definition, ...memberQuads({ revoked: true })], false],
+        ['expired delegation', [...definition, ...memberQuads({ expiresAtMs: 1_500 })], false],
+        ['delegation bound to another peer', [...definition, ...memberQuads({ peer: '12D3KooWSomebodyElse' })], false],
+        ['private definition with the member', [...privateDefinition, ...memberQuads()], false],
+      ];
+      for (const [name, quads, expected] of cases) {
+        const store = new OxigraphStore();
+        try {
+          await store.insert(quads);
+          const result = await store.query(buildAuthoritativePublicMetaAskQuery(contextGraphId, proof));
+          expect(result.type, name).toBe('boolean');
+          if (result.type !== 'boolean') throw new Error('expected boolean ASK result');
+          expect(result.value, name).toBe(expected);
+          expect(hasAuthoritativePublicMetaDefinitionForApprovedMember(contextGraphId, quads, proof), name)
+            .toBe(expected);
+        } finally {
+          await store.close();
+        }
+      }
+    });
+
+    it('never accepts a private definition, whatever the member proof says', () => {
+      const privateDefinition = authoritativePublicMetaQuads(contextGraphId).map((quad) => (
+        quad.predicate === DKG_ONTOLOGY.DKG_ACCESS_POLICY ? { ...quad, object: '"private"' } : quad
+      ));
+      expect(hasAuthoritativePublicMetaDefinitionForApprovedMember(
+        contextGraphId, [...privateDefinition, ...memberQuads()], proof,
+      )).toBe(false);
+    });
   });
 });
