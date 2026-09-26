@@ -157,14 +157,19 @@ const UTF8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 type Rfc64BoundedSuccessorTargetV1 =
   | Readonly<{
     kind: 'empty';
-    rows: readonly [];
   }>
   | Readonly<{
     kind: 'bucket';
-    rows: readonly AuthorCatalogRowV1[];
     bucket: SignedAuthorCatalogBucketEnvelopeV1;
     fetchedBucket: FetchedRfc64PublicCatalogObjectV1;
   }>;
+
+/** A catalog row as authorized: the verifier's frozen snapshot and its capability. */
+interface AuthorizedCatalogRowV1 {
+  readonly row: Readonly<AuthorCatalogRowV1>;
+  readonly authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1;
+  readonly authorshipCapability: VerifiedAuthorCatalogRowAuthorshipV1;
+}
 
 export interface Rfc64PublicCatalogNativeReceiverOptionsV1<
   TPostHeadExtension extends object = Rfc64PublicCatalogNativePostHeadExtensionV1,
@@ -951,7 +956,7 @@ export class Rfc64PublicCatalogNativeReceiverV1<
 
     let target: Rfc64BoundedSuccessorTargetV1;
     if (isEmptyTarget) {
-      target = Object.freeze({ kind: 'empty' as const, rows: Object.freeze([] as []) });
+      target = Object.freeze({ kind: 'empty' as const });
     } else {
       const fetchedBucket = await this.fetchCatalogObjectWithCacheV1(
         remotePeerId,
@@ -991,7 +996,6 @@ export class Rfc64PublicCatalogNativeReceiverV1<
       );
       target = Object.freeze({
         kind: 'bucket' as const,
-        rows: bucket.payload.rows,
         bucket,
         fetchedBucket,
       });
@@ -1006,12 +1010,14 @@ export class Rfc64PublicCatalogNativeReceiverV1<
       readonly projectionBytes: Uint8Array;
       readonly expectedEvidence: Rfc64PublicCatalogInventoryEvidenceRowV1;
     }> = [];
-    let authorshipCapabilities: readonly VerifiedAuthorCatalogRowAuthorshipV1[] = [];
-    if (target.rows.length > 0) {
+    // Past authorization, rows come only from the verifier's frozen
+    // snapshots, in bucket order, each with its own capability. The
+    // transport-owned bucket is not read again, so a response mutated across
+    // the awaits below cannot put another row beside a capability.
+    let authorizedRows: readonly AuthorizedCatalogRowV1[] = [];
+    if (target.kind === 'bucket') {
       throwIfAborted(signal);
-      if (target.kind !== 'bucket') {
-        fail('catalog-native-receiver-catalog', 'non-empty catalog target lost its bucket proof');
-      }
+      let authorshipCapabilities: readonly VerifiedAuthorCatalogRowAuthorshipV1[];
       try {
         // One bucket closure for every row instead of one per row (#2812).
         authorshipCapabilities = verifyAuthorCatalogBucketRowAuthorshipsV1({
@@ -1033,16 +1039,11 @@ export class Rfc64PublicCatalogNativeReceiverV1<
           cause,
         );
       }
+      authorizedRows = authorshipCapabilities.map((authorshipCapability) => {
+        const authorship = readVerifiedAuthorCatalogRowAuthorshipV1(authorshipCapability);
+        return { row: authorship.row, authorship, authorshipCapability };
+      });
     }
-    // Past authorization, rows come only from the verifier's frozen
-    // snapshots, in bucket order, each with its own capability. The
-    // transport-owned bucket is not read again, so a response mutated across
-    // the awaits below cannot put another row beside a capability.
-    const authorizedRows = authorshipCapabilities.map((authorshipCapability) => {
-      const authorship: VerifiedAuthorCatalogRowAuthorshipSnapshotV1 =
-        readVerifiedAuthorCatalogRowAuthorshipV1(authorshipCapability);
-      return { row: authorship.row, authorship, authorshipCapability };
-    });
     try {
       assertRfc64PublicCatalogExactSetBundleBytesV1(
         authorizedRows.map(({ row }) => row.transfer.byteLength),

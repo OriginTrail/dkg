@@ -28,6 +28,7 @@ import {
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 
 import {
+  readVerifiedAuthorCatalogRowAuthorshipV1,
   verifyAuthorCatalogBucketRowAuthorshipsV1,
 } from './catalog-row-authorship.js';
 import type {
@@ -293,7 +294,8 @@ export async function loadExactAppliedCatalogRowsV1(
     || canonicalizeAuthorCatalogBucketPayloadBytesV1(bucket.payload).byteLength.toString()
       !== descriptor.byteLength
   ) throw new Error('catalog bucket differs from its verified descriptor');
-  verifyAuthorCatalogBucketRowAuthorshipsV1({
+  // The authorized rows are the verifier's frozen snapshots, in bucket order.
+  const authorships = verifyAuthorCatalogBucketRowAuthorshipsV1({
     catalogIssuerDelegation: storedDelegation.envelope,
     catalogIssuerDelegationSignature: storedDelegation.issuerSignature,
     parentAuthorAgentEvidence: null,
@@ -305,7 +307,9 @@ export async function loadExactAppliedCatalogRowsV1(
     catalogBucket: bucket,
     catalogBucketSignature: storedBucket.issuerSignature,
   });
-  return Object.freeze(bucket.payload.rows.map((row) => Object.freeze({ ...row })));
+  return Object.freeze(authorships.map((authorship) => (
+    readVerifiedAuthorCatalogRowAuthorshipV1(authorship).row
+  )));
 }
 
 async function readValidatedAppliedHeadV1(input: Pick<
