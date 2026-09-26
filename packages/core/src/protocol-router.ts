@@ -4,6 +4,7 @@ import type { DKGNode } from './node.js';
 import type { PeerResolver } from './network/peer-resolver.js';
 import type { Network } from './network/network.js';
 import { LibP2PNetwork } from './network/libp2p-network.js';
+import { startRequestAbortLifecycle, type RequestAbortLifecycle } from './request-abort-lifecycle.js';
 import {
   MessageStreamPool,
   POOLED_MESSAGE_PROTOCOL,
@@ -670,8 +671,8 @@ export class ProtocolRouter {
    * probe opens and immediately aborts the stream before any payload bytes.
    */
   async probeProtocol(peerIdStr: string, protocolId: string, timeoutMs = 3_000): Promise<ProtocolProbeOutcome> {
-    const deadline = AbortSignal.timeout(timeoutMs);
-    const signal = composeAbortSignals(deadline, this.node.stopSignal) ?? deadline;
+    const lifecycle = startRequestAbortLifecycle(timeoutMs, [this.node.stopSignal]);
+    const signal = lifecycle.signal;
     try {
       await this.requirePeerAccepted(peerIdStr, protocolId, 'outbound', { signal, timeoutMs });
       // Match send()'s resolver contract before opening a stream. For the
@@ -689,6 +690,8 @@ export class ProtocolRouter {
     } catch (error) {
       if (this.node.stopSignal?.aborted) throw error;
       return isProtocolUnsupportedError(error) ? 'unsupported' : 'unavailable';
+    } finally {
+      lifecycle.release();
     }
   }
 
@@ -701,6 +704,25 @@ export class ProtocolRouter {
     const opts: SendOptions =
       typeof timeoutMsOrOpts === 'number' ? { timeoutMs: timeoutMsOrOpts } : timeoutMsOrOpts;
     const timeoutMs = opts.timeoutMs ?? DEFAULT_SEND_TIMEOUT_MS;
+    // One deadline for the whole send, following the caller's signal and
+    // node.stopSignal. Once the send settles nothing of it stays attached to
+    // either (#2812).
+    const lifecycle = startRequestAbortLifecycle(timeoutMs, [opts.signal, this.node.stopSignal]);
+    try {
+      return await this.sendWithinLifecycle(peerIdStr, protocolId, data, opts, timeoutMs, lifecycle);
+    } finally {
+      lifecycle.release();
+    }
+  }
+
+  private async sendWithinLifecycle(
+    peerIdStr: string,
+    protocolId: string,
+    data: Uint8Array,
+    opts: SendOptions,
+    timeoutMs: number,
+    lifecycle: RequestAbortLifecycle,
+  ): Promise<Uint8Array> {
     const singleUsePayload = opts.payloadReuse === 'single-use';
     const maxAttempts = singleUsePayload ? 1 : 3;
     const parallelPaths = Math.max(1, Math.floor(opts.parallelPaths ?? 1));
@@ -709,10 +731,9 @@ export class ProtocolRouter {
     }
     const maxReadBytes = resolveSendMaxReadBytes(opts.maxReadBytes, this.maxReadBytes);
     const overallStartedAt = Date.now();
-    const overallDeadline = AbortSignal.timeout(timeoutMs);
+    const overallDeadline = lifecycle.deadline;
     const stopSignal = this.node.stopSignal;
-    const budgetSignal = composeAbortSignals(overallDeadline, opts.signal) ?? overallDeadline;
-    const overallSignal = composeAbortSignals(budgetSignal, stopSignal) ?? budgetSignal;
+    const overallSignal = lifecycle.signal;
     if (overallSignal.aborted) throw asAbortError(overallSignal.reason);
     await this.requirePeerAccepted(peerIdStr, protocolId, 'outbound', {
       signal: overallSignal,
@@ -937,8 +958,9 @@ export class ProtocolRouter {
         lastErr = new Error('send timeout elapsed');
         throw lastErr;
       }
-      const attemptDeadline = AbortSignal.timeout(remaining);
-      const attemptSignal = composeAbortSignals(attemptDeadline, overallSignal) ?? attemptDeadline;
+      // The request deadline already ends where this attempt's remaining
+      // budget does, so every attempt shares the request signal.
+      const attemptSignal = overallSignal;
       if (attemptSignal.aborted) throw asAbortError(attemptSignal.reason);
       // Track which connection (if any) the fast path picked this
       // attempt so the catch block can blacklist it on failure
@@ -1069,16 +1091,18 @@ export class ProtocolRouter {
           // the fast path runs again over it. Only the resolver's signal
           // is cut short; the rest of the attempt keeps `attemptSignal`.
           const peerConnected = watchForNewPeerConnection(libp2p, peerId, consideredConnections);
+          const resolverSignal = composeAbortSignalsScoped(attemptSignal, peerConnected?.signal);
           try {
             if (!peerConnected?.signal.aborted) {
               await this.peerResolver
                 .resolve(peerIdStr, {
-                  signal: composeAbortSignals(attemptSignal, peerConnected?.signal) ?? attemptSignal,
+                  signal: resolverSignal.signal ?? attemptSignal,
                   perStepTimeoutMs: remaining,
                 })
                 .catch(() => undefined);
             }
           } finally {
+            resolverSignal.dispose();
             peerConnected?.dispose();
           }
           if (peerConnected?.signal.aborted) {
@@ -1154,7 +1178,10 @@ export class ProtocolRouter {
         // during the backoff, we throw immediately rather than
         // continuing into another attempt that's already over budget.
         await new Promise<void>((resolve, reject) => {
-          const t = setTimeout(resolve, backoff);
+          const t = setTimeout(() => {
+            overallSignal.removeEventListener('abort', onAbort);
+            resolve();
+          }, backoff);
           const onAbort = (): void => {
             clearTimeout(t);
             if (stopSignal?.aborted) {
@@ -1603,8 +1630,20 @@ export async function raceMultiPath(args: {
   const streams: Array<{ stream: import('@libp2p/interface').Stream; aborted: boolean } | null> =
     picked.map(() => null);
   let winnerIdx = -1;
+  // One controller per path, following the shared signal, so a loser is
+  // cancelled as soon as the winner settles even while it is still waiting
+  // for `newStream`, instead of running on until the shared signal aborts.
+  const pathControllers = picked.map(() => new AbortController());
+  const forwardShared = (): void => {
+    for (const controller of pathControllers) {
+      if (!controller.signal.aborted) controller.abort(signal.reason);
+    }
+  };
+  signal.addEventListener('abort', forwardShared, { once: true });
 
   const abortPath = (idx: number, reason: Error): void => {
+    const controller = pathControllers[idx]!;
+    if (!controller.signal.aborted) controller.abort(reason);
     const s = streams[idx];
     if (!s || s.aborted) return;
     s.aborted = true;
@@ -1624,9 +1663,10 @@ export async function raceMultiPath(args: {
   };
 
   const attempts = picked.map(async (conn, idx): Promise<Uint8Array> => {
+    const pathSignal = pathControllers[idx]!.signal;
     const stream = await conn.newStream(protocolId, {
       runOnLimitedConnection: true,
-      signal,
+      signal: pathSignal,
     });
     streams[idx] = { stream, aborted: false };
     if (winnerIdx !== -1 && winnerIdx !== idx) {
@@ -1642,8 +1682,8 @@ export async function raceMultiPath(args: {
       throw new Error('multipath: stream returned in closed state');
     }
     stream.send(data);
-    await stream.close({ signal });
-    return await readAllWithSignal(stream, maxReadBytes, signal);
+    await stream.close({ signal: pathSignal });
+    return await readAllWithSignal(stream, maxReadBytes, pathSignal);
   });
 
   let winnerResponse: Uint8Array | null = null;
@@ -1687,6 +1727,8 @@ export async function raceMultiPath(args: {
     }
     if (signal.aborted) throw asAbortError(signal.reason);
     return null;
+  } finally {
+    signal.removeEventListener('abort', forwardShared);
   }
 
   return { response: winnerResponse, attemptedPaths: picked.length };
@@ -1757,6 +1799,11 @@ export async function readAllWithSignal(
  * Uses Node's `AbortSignal.any` when available (Node 20.3+, current
  * production target). Falls back to a manual composer for older Node
  * — keeps tests / older sandboxes working.
+ *
+ * Not for per-request use against a long-lived signal: when an input is an
+ * `AbortSignal.timeout` signal, Node keeps the result, and its entry on the
+ * other input, alive until that input is collected (#2812). The router's
+ * own requests use `startRequestAbortLifecycle` instead.
  */
 export function composeAbortSignals(
   primary: AbortSignal | undefined,

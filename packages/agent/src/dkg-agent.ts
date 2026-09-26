@@ -459,6 +459,7 @@ import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-gra
 import { reconcileAndAllocateKaNumber } from './allocator.js';
 import { chainAuthorityReadBudgetsOf, resolveChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
 import { OntologyBindingSlotClassifier } from './ontology-binding-slot-classifier.js';
+import { peekOnDemandAgentsPhonebook } from './sync/on-demand-agents-phonebook.js';
 import { peekFinalizedAuthorityColdResolution } from
   './finalized-authority-cold-resolution.js';
 import { OwnershipMethods } from './dkg-agent-ownership.js';
@@ -527,6 +528,7 @@ import {
 import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { VmReconcileSchedulingMethods } from './dkg-agent-vm-reconcile-scheduling.js';
 import { VmPromotionMethods } from './dkg-agent-vm-promotion.js';
+import { AgentsPhonebookMethods } from './dkg-agent-agents-phonebook.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
 import { ContextGraphNameResolutionMethods } from './dkg-agent-cg-name-resolution.js';
 import { ContextGraphOnChainIdMethods } from './dkg-agent-cg-on-chain-id.js';
@@ -835,6 +837,12 @@ export function mergeRfc64CatalogBootstrapsV1(
 export class DKGAgent extends DKGAgentBase {
   /** One store discovery pass is shared by concurrent peer-connect sessions. */
   private contextGraphStoreDiscoveryInFlight?: Promise<number>;
+  /**
+   * Progress of the ontology metadata relocation (see
+   * {@link contextGraphServingWithheld}): no pass has ended yet, a pass ended
+   * without reaching every candidate, or one did.
+   */
+  private ontologyRelocation: 'pending' | 'withheld' | 'relocated' = 'pending';
   /**
    * Slots named by ontology bindings. It never writes `onChainAccessPolicyCache`,
    * which StorageACK curation checks trust, since its unproven reads can be 0.
@@ -2033,24 +2041,35 @@ export class DKGAgent extends DKGAgentBase {
    * `context-graph-metadata-relocation.ts`). Every store discovery pass runs
    * this first, so discovery only acts on ontology rows that belong there.
    * Without `classifyOnChain`, bare bindings of graphs this node doesn't hold
-   * are left for a later pass (no chain reads).
+   * are left for a later pass (no chain reads). Once `budgetMs` is spent or
+   * `signal` aborts, the remaining candidates are also left for a later pass,
+   * and {@link contextGraphServingWithheld} holds `ontology` back until a pass
+   * reaches them.
    */
   async relocatePrivateContextGraphMetadata(
-    options: { classifyOnChain?: boolean } = {},
+    options: { classifyOnChain?: boolean; budgetMs?: number; signal?: AbortSignal } = {},
   ): Promise<ContextGraphMetadataRelocationResult> {
-    const result = await relocatePrivateContextGraphMetadata({
-      store: this.store,
-      localAccessPolicy: async (contextGraphId) => {
-        if (await this.isPrivateContextGraph(contextGraphId)) return 'private';
-        return (await this.getExplicitAccessPolicy(contextGraphId)) === 'public' ? 'public' : null;
-      },
-      ...(options.classifyOnChain === false
-        ? {}
-        : {
-          classifyOnChainSlot: (onChainId: string) => this.classifyOntologyBindingSlot(onChainId),
-          knownSlotClass: (onChainId: string) => this.knownOntologyBindingSlotClass(onChainId),
-        }),
-    });
+    let result: ContextGraphMetadataRelocationResult;
+    try {
+      result = await relocatePrivateContextGraphMetadata({
+        store: this.store,
+        localAccessPolicy: async (contextGraphId) => {
+          if (await this.isPrivateContextGraph(contextGraphId)) return 'private';
+          return (await this.getExplicitAccessPolicy(contextGraphId)) === 'public' ? 'public' : null;
+        },
+        ...(options.classifyOnChain === false
+          ? {}
+          : {
+            classifyOnChainSlot: (onChainId: string) => this.classifyOntologyBindingSlot(onChainId),
+            knownSlotClass: (onChainId: string) => this.knownOntologyBindingSlotClass(onChainId),
+          }),
+        ...(options.budgetMs !== undefined ? { budgetMs: options.budgetMs } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (err) {
+      if (this.ontologyRelocation === 'pending') this.ontologyRelocation = 'withheld';
+      throw err;
+    }
     if (result.movedToMeta.length > 0 || result.deletedForeign > 0) {
       this.invalidateListContextGraphsCache();
       for (const contextGraphId of result.movedToMeta) {
@@ -2062,7 +2081,35 @@ export class DKGAgent extends DKGAgentBase {
           `${result.movedToMeta.length} moved to their own _meta, ${result.deletedForeign} removed`,
       );
     }
+    if (result.deferred > 0) {
+      this.log.info(
+        createOperationContext('system'),
+        `Context graph metadata relocation stopped early: ${result.deferred} candidate(s) left for a later pass`,
+      );
+      if (this.ontologyRelocation === 'pending') this.ontologyRelocation = 'withheld';
+    } else if (this.ontologyRelocation !== 'relocated') {
+      if (this.ontologyRelocation === 'withheld') {
+        this.log.info(
+          createOperationContext('system'),
+          'Context graph metadata relocation reached every candidate; serving the ontology graph to peers again',
+        );
+      }
+      this.ontologyRelocation = 'relocated';
+    }
     return result;
+  }
+
+  /**
+   * Whether peers asking for `contextGraphId` are to be told to retry later
+   * rather than be served it: `ontology`, until a metadata relocation pass
+   * has reached every candidate. Until then it may still hold private
+   * metadata that earlier builds wrote there, and it is a public graph, so
+   * sync, changelog sync and remote queries would hand those rows to anyone.
+   * Nothing in this build writes private metadata to ontology, so once a pass
+   * finishes, the graph stays servable for the life of the agent.
+   */
+  contextGraphServingWithheld(contextGraphId: string): boolean {
+    return contextGraphId === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY && this.ontologyRelocation !== 'relocated';
   }
 
   /** The class of an ontology binding's slot this node knows without a chain read. */
@@ -2134,10 +2181,12 @@ export class DKGAgent extends DKGAgentBase {
       id: string;
       name: string;
       source: 'ontology' | 'meta';
-      onChainId?: string;
+      /** The on-chain id binding this chain proves, if any. */
+      binding?: { onChainId: string; onChainHash: string };
       /** False when only a bare on-chain id binding was found. */
       hasDefinition: boolean;
     }>();
+    let unprovenClaims = 0;
 
     const collectEntries = (
       rows: Record<string, string>[],
@@ -2152,18 +2201,24 @@ export class DKGAgent extends DKGAgentBase {
 
         const existing = discoveredEntries.get(id);
         const rowName = row['name'] ? stripLiteral(row['name']) : undefined;
-        const candidateOnChainId = row['onChainId']
+        // An `OnChainId` row is a claim, not a binding: the ontology graph is
+        // shared by every network and deployment, and one Base edge held three
+        // definitions claiming #33. Keep only a claim this chain proves, with
+        // the name hash it proves, so the row is bound exactly as a chain lane
+        // would bind it.
+        const claimedOnChainId = row['onChainId']
           ? stripLiteral(row['onChainId'])
           : undefined;
-        const rowOnChainId = isCanonicalAuthoritativeContextGraphId(candidateOnChainId)
-          ? candidateOnChainId
-          : undefined;
+        const proven = claimedOnChainId === undefined
+          ? null
+          : this.provenOnChainContextGraphClaim(id, claimedOnChainId);
+        if (claimedOnChainId !== undefined && proven === null) unprovenClaims++;
         const ontologyWins = existing?.source === 'meta' && source === 'ontology';
         discoveredEntries.set(id, {
           id,
           name: rowName ?? existing?.name ?? id,
           source: !existing || ontologyWins ? source : existing.source,
-          onChainId: rowOnChainId ?? existing?.onChainId,
+          binding: proven ?? existing?.binding,
           hasDefinition: definition || existing?.hasDefinition === true,
         });
       }
@@ -2235,7 +2290,11 @@ export class DKGAgent extends DKGAgentBase {
       collectEntries(metaResult.bindings as Record<string, string>[], 'meta', true);
     }
 
-    this.log.debug(ctx, `Discovery scan found ${discoveredEntries.size} CG(s) in store`);
+    this.log.debug(
+      ctx,
+      `Discovery scan found ${discoveredEntries.size} CG(s) in store`
+        + `${unprovenClaims > 0 ? `; ignored ${unprovenClaims} on-chain id claim(s) this chain does not prove` : ''}`,
+    );
 
     // Private classification is needed only to restore the SWM scope of an
     // already-active member. Newly catalogued rows do not need a per-row store
@@ -2252,19 +2311,33 @@ export class DKGAgent extends DKGAgentBase {
     );
     const curatedById = new Map(curatedResults);
 
+    // A definition for a graph this node wants but holds only by its name hash
+    // (`dkg subscribe <hash>`, or a Core's hosted row) is that graph's verified
+    // cleartext id. Adopt it as the name-hash resolver would, so the
+    // subscription moves to the cleartext id. Recording it below first would
+    // let the canonical setter retire the hash-keyed row and drop the
+    // subscription with it.
+    // Adoptions are independent: each targets its own name hash, is
+    // serialized per hash, and never throws.
+    await mapWithConcurrency(
+      [...discoveredEntries.values()],
+      DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_CONCURRENCY,
+      ({ id }) => this.adoptWantedContextGraphNamePlaceholder(id),
+    );
+
     // Recording and the temporary Core auto-subscribe bridge are synchronous.
     // Defer only this narrow producer burst so every discovered row enters one
     // immutable finalized responsibility batch regardless of scan duration.
     const releaseResponsibilityBatch =
       this.beginRfc64ScheduledCatalogResponsibilityBatchV1();
     try {
-      for (const { id, name, source, onChainId, hasDefinition } of discoveredEntries.values()) {
+      for (const { id, name, source, binding, hasDefinition } of discoveredEntries.values()) {
         const existing = this.subscribedContextGraphs.get(id);
         if (existing) {
           // Enrich an existing active/hosted record and persist the binding. The
           // central recorder deliberately does not reactivate an existing
           // unsubscribed row, preserving explicit unsubscribe semantics.
-          this.recordDiscoveredContextGraph(id, { name, onChainId });
+          this.recordDiscoveredContextGraph(id, { name, ...binding });
           const current = this.subscribedContextGraphs.get(id) ?? existing;
           // A restart re-seeds `subscribedContextGraphs` from persisted state but
           // does NOT re-add the CG to the SWM-sync scope (`config.syncContextGraphs`,
@@ -2292,8 +2365,13 @@ export class DKGAgent extends DKGAgentBase {
           !hasDefinition
           && (this.config.nodeRole ?? 'edge') === 'core'
           // Only verdicts the relocation above already reached count, so
-          // this pass stays within its chain read budget.
-          && await this.contextGraphAccessPolicyState(id, { declared: false, onChainId, readChain: false }) !== 'public'
+          // this pass stays within its chain read budget. An unproven claim
+          // names no slot, so it proves nothing public either.
+          && await this.contextGraphAccessPolicyState(id, {
+            declared: false,
+            ...(binding === undefined ? {} : { onChainId: binding.onChainId }),
+            readChain: false,
+          }) !== 'public'
         ) {
           // A bare binding carries no access policy of its own. Activating
           // it before the chain proves its slot public would host and
@@ -2325,7 +2403,7 @@ export class DKGAgent extends DKGAgentBase {
 
         const recorded = this.recordDiscoveredContextGraph(
           id,
-          { name, onChainId },
+          { name, ...binding },
           {
             // A persisted row left dormant during restart must not be
             // reactivated when the same definition is found in Oxigraph
@@ -2686,6 +2764,11 @@ export class DKGAgent extends DKGAgentBase {
     // Detached cold authority flights are aborted here too: after stop() no
     // request can consume their result, and the chain reader closes below.
     peekFinalizedAuthorityColdResolution(this)?.close();
+    // Abort an on-demand phonebook fetch and its re-check timer. The aborted
+    // `agents` durable sync unwinds at its next page or commit boundary, and
+    // its drain joins the shutdown fence below, so store and network teardown
+    // (and a same-process restart's first fetch) never overlap it.
+    const onDemandPhonebookDrain = peekOnDemandAgentsPhonebook(this)?.close() ?? null;
     const authorityIndexSnapshotDrain = Promise.all([
       this.authorityIndexSnapshotRuntime?.close(),
       this.chain.contextGraphAuthorityIndexSnapshots?.close(),
@@ -2788,6 +2871,7 @@ export class DKGAgent extends DKGAgentBase {
     };
     const drains: Promise<unknown>[] = [drainPhysicalRuns(), rfc64BackgroundDrain];
     drains.push(authorityIndexSnapshotDrain);
+    if (onDemandPhonebookDrain) drains.push(onDemandPhonebookDrain);
     if (authorityRetryDrain) drains.push(authorityRetryDrain);
     if (rehydrationPromotionDrain) drains.push(rehydrationPromotionDrain);
     if (chainPollerDrain) drains.push(chainPollerDrain);
@@ -4451,5 +4535,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods {}
-applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods]);
+export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods {}
+applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods]);

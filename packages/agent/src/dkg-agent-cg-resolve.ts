@@ -517,6 +517,22 @@ interface ContextGraphListChainState {
 }
 
 /**
+ * The on-chain id a list row may show from the metadata projection: the
+ * claimed id when this chain proves it (`provenOnChainContextGraphClaim`),
+ * otherwise undefined. The projection copies `OnChainId` from the shared
+ * ontology graph, which holds every network's claims. Both listings use
+ * this; a row with no projected id asks the agent nothing.
+ */
+function provenProjectedOnChainId(
+  agent: DKGAgent,
+  contextGraphId: string,
+  claimedOnChainId: string | undefined,
+): string | undefined {
+  if (claimedOnChainId === undefined) return undefined;
+  return agent.provenOnChainContextGraphClaim(contextGraphId, claimedOnChainId)?.onChainId;
+}
+
+/**
  * True for a row the node knows only by its on-chain name hash: the local id
  * is the committed wire id itself, with no cleartext behind it. This is the
  * canonical subscription setter's placeholder predicate (the row claims that
@@ -926,7 +942,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         isSystem: meta.isSystem,
         subscribed: sub?.subscribed ?? false,
         synced: sub?.synced ?? false,
-        onChainId: sub?.onChainId ?? meta.onChainId,
+        // As in the default listing: a projected `OnChainId` is a claim.
+        onChainId: sub?.onChainId ?? provenProjectedOnChainId(this, id, meta.onChainId),
         policyKnown,
       };
     });
@@ -3028,7 +3045,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         ...(accessPolicy ? { accessPolicy } : {}),
         createdAt: meta.createdAt ?? r.createdAt,
         isSystem: meta.isSystem || r.isSystem,
-        onChainId: meta.onChainId ?? r.onChainId,
+        // The projection copies the `OnChainId` triple from the shared ontology
+        // graph, which holds every network's claims: show it only when this
+        // chain proves it, else the row's own binding.
+        onChainId: provenProjectedOnChainId(this, r.id, meta.onChainId) ?? r.onChainId,
       };
     });
     rows = projectedRows.map((entry) => {

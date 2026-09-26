@@ -5,6 +5,7 @@ import {
   LOCAL_ID,
   NAME_HASH,
   getOnChainId,
+  proveOnChainSlot,
   selectedFixture,
 } from './context-graph-registration-binding.fixture.js';
 
@@ -218,6 +219,8 @@ describe('cold current-state Context Graph name binding', () => {
       type: 'bindings',
       bindings: [{ id: '"7"' }],
     });
+    // The fallback holds only for a slot this node's chain proves.
+    proveOnChainSlot(fixture, '7');
     await expect(getOnChainId(fixture, LOCAL_ID)).resolves.toBe('7');
   });
 
@@ -325,7 +328,7 @@ describe('cold current-state Context Graph name binding', () => {
       reverseTarget,
     );
 
-    expect(reverseFixture.agent.persistContextGraphSubscriptionStrict).not.toHaveBeenCalled();
+    expect(reverseFixture.agent.persistContextGraphSyncStateStrict).not.toHaveBeenCalled();
     expect(reverseFixture.subscription.lastReconciledOrdinal).toBeUndefined();
     expect(reverseFixture.agent.emitReplication).toHaveBeenCalledWith(expect.objectContaining({
       action: 'cursor-advance',
@@ -355,10 +358,10 @@ describe('cold current-state Context Graph name binding', () => {
       authoritativeTarget,
     );
 
-    expect(authoritativeFixture.agent.persistContextGraphSubscriptionStrict).toHaveBeenCalledWith(
+    expect(authoritativeFixture.agent.persistContextGraphSyncStateStrict).toHaveBeenCalledWith(
       LOCAL_ID,
       expect.objectContaining({ onChainId: '42', lastReconciledOrdinal: 5 }),
-      undefined,
+      'VM reconcile cursor',
       expect.any(Function),
     );
     expect(authoritativeFixture.subscription.lastReconciledOrdinal).toBe(5);
@@ -373,7 +376,7 @@ describe('cold current-state Context Graph name binding', () => {
       fixture.subscription,
     )).resolves.toBe('42');
 
-    expect(fixture.agent.persistContextGraphSubscriptionStrict).not.toHaveBeenCalled();
+    expect(fixture.agent.persistContextGraphSyncStateStrict).not.toHaveBeenCalled();
     expect(fixture.subscription.onChainId).toBeUndefined();
     expect(fixture.agent.contextGraphBindingState.currentBindingFor(
       LOCAL_ID,

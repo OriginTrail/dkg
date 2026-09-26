@@ -30,6 +30,7 @@ import {
 import { rememberBounded } from './bounded-map.js';
 import { runBoundedOperation } from './bounded-operation.js';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
+import { isUnrecordedNameHashRow } from './context-graph-claim-proof.js';
 import {
   CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
   CONTEXT_GRAPH_SUBJECT_PREFIX,
@@ -383,15 +384,108 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     this: DKGAgent,
     nameHash: string,
   ): { contextGraphId: string; subscription: ContextGraphSub } | null {
+    const row = this.nameHashIndexedContextGraphRow(nameHash);
+    return row !== null
+      && row.contextGraphId !== nameHash
+      && verifyContextGraphNameCandidate(row.contextGraphId, nameHash) === row.contextGraphId
+      ? row
+      : null;
+  }
+
+  /**
+   * The row the reverse index holds for a name hash, when that row records
+   * the same hash as its `onChainHash`: the slot's placeholder keyed by the
+   * hash, or a cleartext row bound to it. Callers add their own conditions.
+   */
+  nameHashIndexedContextGraphRow(
+    this: DKGAgent,
+    nameHash: string,
+  ): { contextGraphId: string; subscription: ContextGraphSub } | null {
     const mapped = this.wireIdToLocalCgId.get(nameHash);
-    if (mapped === undefined || mapped === nameHash) return null;
+    if (mapped === undefined) return null;
     const subscription = this.subscribedContextGraphs.get(mapped);
     if (
       subscription?.onChainHash === undefined
       || this.contextGraphWireId(subscription.onChainHash) !== nameHash
-      || verifyContextGraphNameCandidate(mapped, nameHash) !== mapped
     ) return null;
     return { contextGraphId: mapped, subscription };
+  }
+
+  /**
+   * Repair a subscription keyed by a slot's committed name hash that was
+   * minted without recording that hash. Before this fix `dkg subscribe <hash>`
+   * did that whenever the hash resolved to nothing (a claim had bound the
+   * cleartext row without its hash, or no chain lane had reached the slot
+   * yet). The row's identity was then keccak256 of the hash string: it never
+   * synced, RFC-64 rejected its evidence as an invalid identity, and it
+   * survives restarts as a durable row.
+   *
+   * The chain now proves what the row is: it is bound to this slot, and the
+   * slot commits exactly the row's id. It becomes the slot's name-hash
+   * placeholder, and a cleartext row this node holds for the hash adopts it
+   * with its subscription, exactly as a resolved name would. With no
+   * cleartext known, the name resolver takes it from there. A row not bound
+   * to this slot, possibly a hash-shaped cleartext id, is never touched, and
+   * a cleartext row bound to another slot is never merged. Returns whether it
+   * repaired a row.
+   */
+  repairContextGraphNameHashSubscription(this: DKGAgent, onChainId: string, nameHash: string): boolean {
+    const hash = normalizeContextGraphNameHash(nameHash);
+    if (hash === null) return false;
+    const row = this.subscribedContextGraphs.get(hash);
+    if (row === undefined || !isUnrecordedNameHashRow(hash, row, onChainId, hash)) return false;
+    const indexed = this.wireIdToLocalCgId.get(hash);
+    const cleartext = indexed !== undefined && indexed !== hash
+      && verifyContextGraphNameCandidate(indexed, hash) === indexed
+      ? indexed
+      : null;
+    const cleartextOnChainId = cleartext === null ? undefined : this.subscribedContextGraphs.get(cleartext)?.onChainId;
+    if (cleartextOnChainId !== undefined && cleartextOnChainId !== onChainId) return false;
+
+    this.setContextGraphSubscription(hash, { ...row, onChainHash: hash });
+    this.log.info(
+      createOperationContext('system'),
+      `Context Graph subscription ${hash.slice(0, 18)}… is on-chain ${onChainId}'s name hash; `
+      + `recorded it${cleartext === null ? '' : ` and adopting "${cleartext}"`}`,
+    );
+    if (cleartext === null) {
+      this.requestContextGraphNameResolutionFor(hash);
+    } else {
+      void this.adoptVerifiedContextGraphCleartext({ nameHash: hash, onChainId }, cleartext, 'local-store')
+        .catch(() => false);
+    }
+    return true;
+  }
+
+  /**
+   * Adopt a cleartext id learned from the local store (a synced ontology
+   * definition) for the name-hash row it verifies, when the node wants that
+   * row (subscribed or hosted) and holds no row under the cleartext id yet.
+   * Adoption moves the member intent to the cleartext id and restarts sync
+   * there. Returns whether it adopted. Never throws.
+   */
+  async adoptWantedContextGraphNamePlaceholder(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+    if (this.subscribedContextGraphs.has(contextGraphId)) return false;
+    let nameHash: string;
+    try {
+      nameHash = this.contextGraphNameCommitment(contextGraphId);
+    } catch {
+      return false; // not valid UTF-16, so it names no graph
+    }
+    const target = this.contextGraphNameTargetFor(nameHash);
+    if (target === null) return false;
+    const placeholder = this.subscribedContextGraphs.get(target.nameHash);
+    if (placeholder?.subscribed !== true && placeholder?.coreHosted !== true) return false;
+    try {
+      return await this.adoptVerifiedContextGraphCleartext(target, contextGraphId, 'local-store');
+    } catch (error: unknown) {
+      this.log.debug(
+        createOperationContext('system'),
+        `Adopting "${contextGraphId}" from the local store for ${target.nameHash.slice(0, 18)}… failed: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
   }
 
   /** Remember durable aliases (called by rehydration with every persisted row). */

@@ -24,6 +24,7 @@ import {
   withRpcUsageIssuerContext,
   type RpcUsageIssuerContext,
 } from './rpc-usage.js';
+import { chainRpcFetch } from './rpc-http1-dispatcher.js';
 
 export type RpcRequestClass = 'foreground' | 'background';
 
@@ -261,7 +262,7 @@ export const cancellableRpcGetUrl: FetchGetUrlFunc = async (
       requestBody = new ArrayBuffer(request.body.length);
       new Uint8Array(requestBody).set(request.body);
     }
-    const response = await fetch(request.url, {
+    const response = await chainRpcFetch(request.url, {
       method: request.method,
       headers: request.headers,
       body: requestBody,

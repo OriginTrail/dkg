@@ -41,6 +41,7 @@ import type { Rfc64CatalogShadowObservabilityRuntimeV1 } from
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
+import { SlotFactsIndex } from './context-graph-claim-proof.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import type { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
@@ -1487,9 +1488,11 @@ export class DKGAgentBase {
   /**
    * Chain-public facts per on-chain Context Graph id (decimal), merged from the
    * live `ContextGraphCreated` tail and ContextGraphStorage enumeration. Feeds
-   * the `onChain` field of `listContextGraphs` rows; never an authority input.
+   * the `onChain` field of `listContextGraphs` rows and the proof of off-chain
+   * on-chain id claims (indexed by committed name hash for that); never an
+   * authority input on its own.
    */
-  protected readonly onChainContextGraphFacts = new Map<string, OnChainContextGraphFacts>();
+  protected readonly onChainContextGraphFacts = new SlotFactsIndex<OnChainContextGraphFacts>();
   /** Lazily built ContextGraphStorage id enumeration (historical discovery). */
   protected contextGraphStorageDiscovery?: ContextGraphStorageDiscovery | null;
   /** One-shot guard for the "ContextGraphNameRegistry is not in the Hub" notice. */
@@ -2012,7 +2015,14 @@ export class DKGAgentBase {
     if (!this.config.dataDir || this.finalizationRuntime.getRecoveryStore()) return;
     const store = this.config.finalizationRecoveryStoreFactory
       ? await this.config.finalizationRecoveryStoreFactory(this.config.dataDir)
-      : await openSqliteFinalizationRecoveryStore(this.config.dataDir);
+      : await openSqliteFinalizationRecoveryStore(this.config.dataDir, {
+          onDisplaced: (displaced) => this.log.warn(
+            createOperationContext('system'),
+            `Finalization recovery parked ${displaced.ual} after `
+              + `${displaced.failureStreak} consecutive ${displaced.failureSignature} `
+              + `failures to admit ${displaced.admittedUal}; it is retried when the inbox has room`,
+          ),
+        });
     this.finalizationRuntime.attachRecoveryStore(store);
   }
 

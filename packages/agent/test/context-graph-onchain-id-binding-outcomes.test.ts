@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   LOCAL_ID,
   NAME_HASH,
+  proveOnChainSlot,
   selectedFixture,
 } from './context-graph-registration-binding.fixture.js';
 
@@ -27,6 +28,7 @@ describe('Context Graph registration binding: strict on-chain id fallback outcom
       type: 'bindings',
       bindings: [{ id: '"77"' }],
     });
+    proveOnChainSlot(fixture, '77');
 
     await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
       .resolves.toEqual({
@@ -51,6 +53,7 @@ describe('Context Graph registration binding: strict on-chain id fallback outcom
       type: 'bindings',
       bindings: [{ id: '"9007199254740993"' }],
     });
+    proveOnChainSlot(fixture, '9007199254740993');
 
     const binding = await fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID);
 
@@ -71,6 +74,7 @@ describe('Context Graph registration binding: strict on-chain id fallback outcom
       type: 'bindings',
       bindings: [{ id: '"5"' }],
     });
+    proveOnChainSlot(fixture, '5');
 
     await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
       .resolves.toEqual({
@@ -79,6 +83,53 @@ describe('Context Graph registration binding: strict on-chain id fallback outcom
         provenance: 'ontology',
       });
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+  });
+
+  it('never projects an ontology id this chain does not prove, and takes the one it does', async () => {
+    // The ontology graph holds every network's claims. Neither an id this
+    // node has no chain facts for, nor one whose slot commits another name,
+    // binds anything.
+    for (const facts of [undefined, `0x${'cd'.repeat(32)}`]) {
+      const fixture = selectedFixture();
+      fixture.subscription.onChainId = '0';
+      fixture.query.mockResolvedValueOnce({ type: 'bindings', bindings: [{ id: '"33"' }] });
+      if (facts !== undefined) proveOnChainSlot(fixture, '33', facts);
+
+      await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
+        .resolves.toMatchObject({ kind: 'unregistered' });
+    }
+
+    // Several claims for one subject: the proven one wins whatever its order.
+    const fixture = selectedFixture();
+    fixture.subscription.onChainId = '0';
+    fixture.query.mockResolvedValueOnce({
+      type: 'bindings',
+      bindings: [{ id: '"91"' }, { id: 7 as unknown as string }, { id: '"12"' }],
+    });
+    proveOnChainSlot(fixture, '91', `0x${'cd'.repeat(32)}`);
+    proveOnChainSlot(fixture, '12');
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
+      .resolves.toEqual({ kind: 'registered', onChainId: 12n, provenance: 'ontology' });
+  });
+
+  it('stays registered however many other claims the subject carries', async () => {
+    // Claims #1..#40 from other networks, then this chain's #41. A store
+    // answers an unfiltered read with some page of them (here, the first 16);
+    // only a read that asks for the proven id is sure to see it.
+    const claims = Array.from({ length: 41 }, (_, index) => String(index + 1));
+    const fixture = selectedFixture();
+    fixture.subscription.onChainId = '0';
+    fixture.query.mockImplementation(async (sparql: string) => {
+      const filter = /IN \(([^)]*)\)/.exec(sparql)?.[1];
+      const page = filter === undefined
+        ? claims.slice(0, 16)
+        : claims.filter((id) => filter.includes(JSON.stringify(id)));
+      return { type: 'bindings', bindings: page.map((id) => ({ id: `"${id}"` })) };
+    });
+    proveOnChainSlot(fixture, '41');
+
+    await expect(fixture.agent.resolveContextGraphRegistrationBinding(LOCAL_ID))
+      .resolves.toEqual({ kind: 'registered', onChainId: 41n, provenance: 'ontology' });
   });
 
   it('keeps a genuine absence reported as unregistered rather than unavailable', async () => {

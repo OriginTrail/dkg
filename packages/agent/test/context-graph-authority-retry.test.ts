@@ -221,6 +221,7 @@ describe('Context Graph subscription authority retry', () => {
           await Promise.resolve();
         },
         warn: vi.fn(),
+        capped: vi.fn(),
         activated: (contextGraphId) => {
           status.activated += 1;
           dormancyById.delete(contextGraphId);
@@ -298,6 +299,7 @@ describe('Context Graph subscription authority retry', () => {
       }),
       activate: vi.fn(async () => undefined),
       warn: vi.fn(),
+      capped: vi.fn(),
       activated: vi.fn(),
     };
     const runPass = () => recoverDeferredContextGraphSubscriptionAuthorities(
@@ -376,6 +378,7 @@ describe('Context Graph subscription authority retry', () => {
         },
         activate: vi.fn(async () => undefined),
         warn: vi.fn(),
+        capped: vi.fn(),
         activated: vi.fn(),
       },
     );
@@ -452,6 +455,7 @@ describe('Context Graph subscription authority retry', () => {
         resolveAuthority,
         activate: vi.fn(),
         warn: vi.fn(),
+        capped: vi.fn(),
         activated: vi.fn(),
       },
     );
@@ -530,6 +534,7 @@ describe('Context Graph subscription authority retry', () => {
         resolveAuthority,
         activate: async (row) => { activated.push(row.id); },
         warn: vi.fn(),
+        capped: vi.fn(),
         activated: () => { status.activated += 1; },
       },
     );
@@ -620,6 +625,7 @@ describe('Context Graph subscription authority retry', () => {
         },
         activate,
         warn: vi.fn(),
+        capped: vi.fn(),
         activated: () => { status.activated += 1; },
       },
     );
@@ -1855,21 +1861,282 @@ describe('Context Graph subscription authority retry', () => {
         } as const;
       });
 
+    const rollingPromotion = vi.spyOn(agent, 'promoteDormantContextGraphSubscriptions');
+
     await agent.start();
     await retryStarted;
     expect(agent.getSubscribedContextGraphs().has(liveContextGraphId)).toBe(true);
     releaseRetry();
 
+    // The cap has no room for the recovered row, so recovery leaves it to
+    // rolling activation instead of activating it. Rolling activation promotes
+    // it at once: the live row is already safe and holds no activation slot.
     await vi.waitFor(() => expect(
       agent!.getContextGraphSubscriptionRehydrationStatus(),
     ).toMatchObject({
-      activated: 1,
+      activated: 2,
       dormantReasons: {
-        activationCap: [coldContextGraphId],
+        activationCap: [],
         authorityUnavailable: [],
       },
     }));
+    expect(rollingPromotion).toHaveBeenCalled();
     expect(agent.getSubscribedContextGraphs().has(liveContextGraphId)).toBe(true);
-    expect(agent.getSubscribedContextGraphs().has(coldContextGraphId)).toBe(false);
+    expect(agent.getSubscribedContextGraphs().has(coldContextGraphId)).toBe(true);
   }, 15_000);
+});
+
+describe('Context Graph subscription rehydration startup authority budget (#2815)', () => {
+  let agent: DKGAgent | null = null;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (agent) await agent.stop().catch(() => undefined);
+    agent = null;
+  });
+
+  const persistedRow = (id: string, onChainId: string) => ({
+    id,
+    subscribed: true,
+    synced: true,
+    sharedMemorySynced: true,
+    metaSynced: true,
+    syncScoped: true,
+    onChainId,
+  });
+  const storeOf = (rows: Map<string, any>) => ({
+    loadAll: async () => [...rows.values()],
+    load: async (id: string) => rows.get(id) ?? null,
+    save: async (row: any) => { rows.set(row.id, row); },
+    delete: async (id: string) => { rows.delete(id); },
+  });
+  const allowed = (onChainId: string) => ({
+    outcome: 'allowed',
+    source: 'registered-chain',
+    reason: 'open-context-graph',
+    metadataBootstrap: 'eligible',
+    onChainId: BigInt(onChainId),
+  } as const);
+
+  it('finishes starting at the budget and activates the unresolved rows from background recovery', async () => {
+    const rows = new Map<string, any>([
+      ['a-quick', persistedRow('a-quick', '11')],
+      ['b-unanswered', persistedRow('b-unanswered', '12')],
+      ['c-unread', persistedRow('c-unread', '13')],
+    ]);
+    agent = await DKGAgent.create({
+      name: 'RehydrationStartupAuthorityBudget',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: storeOf(rows),
+      contextGraphSubscriptionRehydrationEnabled: true,
+      contextGraphSubscriptionRehydrationAuthorityBudgetMs: 200,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+    });
+    const startupReads: string[] = [];
+    let starting = true;
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
+      .mockImplementation(async (contextGraphId) => {
+        if (starting) {
+          startupReads.push(contextGraphId);
+          // Without the budget this read would hold start() forever.
+          if (contextGraphId === 'b-unanswered') return new Promise(() => {});
+        }
+        return allowed(rows.get(contextGraphId).onChainId);
+      });
+
+    await agent.start();
+    starting = false;
+
+    // The row after the spent budget is never read during startup.
+    expect(startupReads).toEqual(['a-quick', 'b-unanswered']);
+    expect(agent.getSubscribedContextGraphs().get('a-quick')).toMatchObject({ subscribed: true });
+    expect(agent.getSubscribedContextGraphs().has('b-unanswered')).toBe(false);
+    expect(agent.getSubscribedContextGraphs().has('c-unread')).toBe(false);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 1,
+      dormantReasons: { authorityUnavailable: ['b-unanswered', 'c-unread'] },
+    });
+
+    // Background recovery reads both again and activates them only as allowed.
+    await vi.waitFor(() => {
+      expect(agent!.getSubscribedContextGraphs().get('b-unanswered')).toMatchObject({
+        subscribed: true,
+        onChainId: '12',
+      });
+      expect(agent!.getSubscribedContextGraphs().get('c-unread')).toMatchObject({
+        subscribed: true,
+        onChainId: '13',
+      });
+    }, { timeout: 10_000, interval: 50 });
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      dormant: 0,
+      dormantReasons: { authorityUnavailable: [] },
+    });
+  }, 20_000);
+
+  it('waits for every row during startup when the budget is 0', async () => {
+    const rows = new Map<string, any>([['a-slow', persistedRow('a-slow', '21')]]);
+    agent = await DKGAgent.create({
+      name: 'RehydrationStartupAuthorityBudgetOff',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: storeOf(rows),
+      contextGraphSubscriptionRehydrationEnabled: true,
+      contextGraphSubscriptionRehydrationAuthorityBudgetMs: 0,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+    });
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
+      .mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return allowed('21');
+      });
+
+    await agent.start();
+
+    expect(agent.getSubscribedContextGraphs().get('a-slow')).toMatchObject({
+      subscribed: true,
+      onChainId: '21',
+    });
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 1,
+      dormant: 0,
+    });
+  }, 20_000);
+
+  it('past the budget, leaves user rows beyond the cap to rolling activation unread', async () => {
+    const rows = new Map<string, any>([
+      ['a-unanswered', persistedRow('a-unanswered', '41')],
+      ['b-room-left', persistedRow('b-room-left', '42')],
+      ['c-over-cap', persistedRow('c-over-cap', '43')],
+      ['d-over-cap', persistedRow('d-over-cap', '44')],
+    ]);
+    agent = await DKGAgent.create({
+      name: 'RehydrationStartupAuthorityBudgetCap',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: storeOf(rows),
+      contextGraphSubscriptionRehydrationEnabled: true,
+      contextGraphSubscriptionRehydrationAuthorityBudgetMs: 100,
+      maxRehydratedContextGraphSubscriptions: 2,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+    });
+    const startupReads: string[] = [];
+    let starting = true;
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
+      .mockImplementation(async (contextGraphId) => {
+        if (starting) {
+          startupReads.push(contextGraphId);
+          if (contextGraphId === 'a-unanswered') return new Promise(() => {});
+        }
+        return allowed(rows.get(contextGraphId).onChainId);
+      });
+
+    await agent.start();
+    starting = false;
+
+    // The cap (2) has room for the unanswered row and one more; the rest wait
+    // for rolling activation, as rows beyond the cap always have.
+    expect(startupReads).toEqual(['a-unanswered']);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      dormantReasons: {
+        authorityUnavailable: ['a-unanswered', 'b-room-left'],
+        activationCap: ['c-over-cap', 'd-over-cap'],
+      },
+    });
+    expect([...(agent as any).contextGraphSubscriptionRehydrationPendingIds].sort())
+      .toEqual(['c-over-cap', 'd-over-cap']);
+    await vi.waitFor(() => {
+      expect(agent!.getSubscribedContextGraphs().get('a-unanswered')).toMatchObject({ subscribed: true });
+      expect(agent!.getSubscribedContextGraphs().get('b-room-left')).toMatchObject({ subscribed: true });
+    }, { timeout: 10_000, interval: 50 });
+  }, 20_000);
+
+  it('hands a row the cap has no room for to rolling activation during recovery', async () => {
+    const row = persistedRow('capped-in-recovery', '51');
+    const dormancyById = new Map<string, any>([[row.id, 'authorityUnavailable']]);
+    const status = {
+      rehydrationEnabled: true,
+      persistedTotal: 2,
+      systemExcluded: 0,
+      hostedActivated: 0,
+      hostedActivatedIds: [],
+      activated: 1,
+      activationCap: 1,
+      capDisabled: false,
+      completedAt: 1,
+      updatedAt: 1,
+    };
+    const capped = vi.fn();
+    const activate = vi.fn();
+
+    await recoverDeferredContextGraphSubscriptionAuthorities(new AbortController().signal, {
+      store: {
+        loadAll: async () => [row],
+        load: async (id) => (id === row.id ? row : null),
+        save: async () => undefined,
+        delete: async () => undefined,
+      },
+      dormancyById,
+      persistRevisions: new Map(),
+      subscriptions: new Map(),
+      getStatus: () => status,
+      isCurrent: () => true,
+      touchStatus: () => undefined,
+      clearStatus: vi.fn(),
+      resolveAuthority: async () => allowed('51'),
+      activate,
+      warn: vi.fn(),
+      activated: vi.fn(),
+      capped,
+    });
+
+    expect(activate).not.toHaveBeenCalled();
+    expect(dormancyById.get(row.id)).toBe('activationCap');
+    expect(capped).toHaveBeenCalledWith(row.id);
+  });
+
+  it('still waits for a join-approved row past the budget and defers the rows after it unread', async () => {
+    const rows = new Map<string, any>();
+    agent = await DKGAgent.create({
+      name: 'RehydrationStartupAuthorityBudgetApproval',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: storeOf(rows),
+      contextGraphSubscriptionRehydrationEnabled: true,
+      contextGraphSubscriptionRehydrationAuthorityBudgetMs: 100,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+    });
+    await agent.start();
+    rows.set('a-approved', persistedRow('a-approved', '31'));
+    rows.set('b-after-budget', persistedRow('b-after-budget', '32'));
+    // A durable join approval keeps the restricted pending-metadata bootstrap,
+    // which only the synchronous startup path can restore.
+    (agent as any).localApprovedAgentByCG.set('a-approved', '0x00000000000000000000000000000000000000aa');
+    const reads: string[] = [];
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
+      .mockImplementation(async (contextGraphId) => {
+        reads.push(contextGraphId);
+        if (contextGraphId === 'a-approved') {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          return {
+            outcome: 'denied',
+            source: 'registered-chain',
+            reason: 'not-a-member',
+            metadataBootstrap: 'forbidden',
+          } as const;
+        }
+        return allowed('32');
+      });
+
+    await agent.rehydrateContextGraphSubscriptions(null);
+
+    expect(reads).toEqual(['a-approved']);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      dormantReasons: {
+        authorityDenied: ['a-approved'],
+        authorityUnavailable: ['b-after-budget'],
+      },
+    });
+  }, 20_000);
 });

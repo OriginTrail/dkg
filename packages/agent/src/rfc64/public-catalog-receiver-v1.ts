@@ -355,14 +355,25 @@ type ReceiverTaskOutcomeV1 =
     readonly error: unknown;
   };
 
+export const RFC64_RECEIVER_ADMISSION_DEFERRAL_MS_V1 = 500;
+export const RFC64_RECEIVER_MAX_ADMISSION_DEFERRALS_V1 = 240;
+/**
+ * The longest a task may legitimately sit in admission deferral while the
+ * process-wide finalized chain-read lane is held elsewhere. Anything that waits
+ * for this receiver to go idle must allow strictly MORE than this, or a single
+ * lawfully-deferring task defeats it every time.
+ */
+export const RFC64_RECEIVER_MAX_ADMISSION_DEFERRAL_WINDOW_MS_V1 =
+  RFC64_RECEIVER_ADMISSION_DEFERRAL_MS_V1 * RFC64_RECEIVER_MAX_ADMISSION_DEFERRALS_V1;
+
 const DEFAULTS = Object.freeze({
   maxConcurrent: 4,
   maxQueue: 1024,
   maxAttempts: 3,
   maxProvidersPerHead: 8,
   retryBackoffMs: 250,
-  admissionDeferralMs: 500,
-  maxAdmissionDeferrals: 240,
+  admissionDeferralMs: RFC64_RECEIVER_ADMISSION_DEFERRAL_MS_V1,
+  maxAdmissionDeferrals: RFC64_RECEIVER_MAX_ADMISSION_DEFERRALS_V1,
 });
 
 /**

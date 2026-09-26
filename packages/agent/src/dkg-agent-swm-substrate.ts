@@ -398,15 +398,22 @@ import {
 import { rfc64ExecutionPlanAllowsLegacySyncV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
 
+/** Options for subscribing this node to one context graph. */
+export interface ContextGraphSubscribeOptions {
+  trackSyncScope?: boolean;
+  persist?: boolean;
+  deferSharedMemoryGossipSubscribe?: boolean;
+  syncMode?: 'on-demand' | 'always-on';
+  /** Authoritative numeric slot established by the admission owner. */
+  onChainId?: string;
+}
+
 export class SwmSubstrateMethods extends DKGAgentBase {
-  subscribeToContextGraph(this: DKGAgent, contextGraphId: string, options?: {
-    trackSyncScope?: boolean;
-    persist?: boolean;
-    deferSharedMemoryGossipSubscribe?: boolean;
-    syncMode?: 'on-demand' | 'always-on';
-    /** Authoritative numeric slot established by the admission owner. */
-    onChainId?: string;
-  }): ContextGraphSub {
+  subscribeToContextGraph(
+    this: DKGAgent,
+    contextGraphId: string,
+    options?: ContextGraphSubscribeOptions,
+  ): ContextGraphSub {
     // A name hash this node already resolved (and holds no row for) is the
     // verified cleartext graph: never mint a second, empty identity for it.
     const adoptedCleartextId = this.resolveContextGraphIdAlias(contextGraphId);
@@ -414,6 +421,25 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     // Subscribing the cleartext of a graph held only by its name hash moves
     // the subscription: nothing may keep running under the hash id.
     this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
+    const subscription = this.installContextGraphSubscription(contextGraphId, options);
+    // The row is installed, so the phonebook check sees the subscription it
+    // qualifies against. An Edge keeps no durable `agents` phonebook, so the
+    // curator tier of a public wallet-scoped graph cannot reach its owner's
+    // holders: ask for one bounded fetch. Startup rehydration subscribes
+    // through here too. The request is O(1) and does its checks detached.
+    this.requestOnDemandAgentsPhonebook(contextGraphId, 'subscribe');
+    return subscription;
+  }
+
+  /**
+   * Install one subscription after alias adoption: the row, its sync scope
+   * and its gossip handlers, or the RFC-64 catalog-owned equivalent.
+   */
+  protected installContextGraphSubscription(
+    this: DKGAgent,
+    contextGraphId: string,
+    options?: ContextGraphSubscribeOptions,
+  ): ContextGraphSub {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     const nextSubscription = (): ContextGraphSub => {
       const next = {

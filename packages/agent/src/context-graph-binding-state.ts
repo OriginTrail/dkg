@@ -80,24 +80,34 @@ export function isCanonicalAuthoritativeContextGraphId(
     && BigInt(value) <= ethers.MaxUint256;
 }
 
+/**
+ * The committed name hashes that name a local Context Graph id, lowercase:
+ * its commitment keccak256(utf8(id)), and for a host-wire row (keyed by its
+ * own committed hash) that hash too. None for an id that is not valid UTF-16.
+ */
+export function committedNameHashesNaming(
+  localCgId: string,
+  isWireIdKeyedSubscription: (localId: string) => boolean,
+): readonly string[] {
+  let commitment: string;
+  try {
+    commitment = ethers.keccak256(ethers.toUtf8Bytes(localCgId)).toLowerCase();
+  } catch {
+    return [];
+  }
+  return /^0x[0-9a-fA-F]{64}$/.test(localCgId) && isWireIdKeyedSubscription(localCgId)
+    ? [commitment, localCgId.toLowerCase()]
+    : [commitment];
+}
+
 /** Shared cleartext-or-host-wire identity proof for one committed name hash. */
 export function localContextGraphIdMatchesCommittedNameHash(
   localCgId: string,
   committedNameHash: string,
   isWireIdKeyedSubscription: (localId: string) => boolean,
 ): boolean {
-  const normalizedCommitment = committedNameHash.toLowerCase();
-  try {
-    if (
-      ethers.keccak256(ethers.toUtf8Bytes(localCgId)).toLowerCase()
-      === normalizedCommitment
-    ) return true;
-  } catch {
-    return false;
-  }
-  return /^0x[0-9a-fA-F]{64}$/.test(localCgId)
-    && isWireIdKeyedSubscription(localCgId)
-    && localCgId.toLowerCase() === normalizedCommitment;
+  return committedNameHashesNaming(localCgId, isWireIdKeyedSubscription)
+    .includes(committedNameHash.toLowerCase());
 }
 
 function requireCanonicalAuthoritativeContextGraphId(value: string): string {

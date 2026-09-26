@@ -44,6 +44,10 @@ import {
   pipeDurableLocalAgentTurnSseStream,
   type DurableLocalAgentTurn,
 } from '../local-agent-sse.js';
+import {
+  isUndiciResponseTimeoutError,
+  localAgentChannelFetchInit,
+} from '../local-agent-channel-fetch.js';
 import { persistDurableChatTurn } from '../chat-turn-persistence.js';
 
 type PrimeAgentPersistRouteResult = {
@@ -124,6 +128,7 @@ function isPrimeAgentTimeoutError(err: unknown): boolean {
   return (
     e?.name === 'TimeoutError'
     || e?.cause?.name === 'TimeoutError'
+    || isUndiciResponseTimeoutError(err)
     || /timeout/i.test(String(e?.message ?? err ?? ''))
   );
 }
@@ -295,7 +300,7 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
         // Backstop only: the bridge's activity-based idle timeout is the
         // authority on turn liveness (and preserves partial output in its 504);
         // this abort exists to reap a transport that hung without answering.
-        signal: AbortSignal.timeout(PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS),
+        ...localAgentChannelFetchInit(PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS),
       });
       const text = await forwardRes.text();
       if (!forwardRes.ok) {
@@ -412,7 +417,7 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
         body: JSON.stringify(buildPrimeAgentChannelBody(payload, target, requestAgentAddress)),
         // Backstop only — see the /send fetch above. An abort at the bridge's
         // own window would kill actively-streaming long turns mid-flight.
-        signal: AbortSignal.timeout(PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS),
+        ...localAgentChannelFetchInit(PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS),
       });
 
       if (!transportRes.ok || !transportRes.body) {

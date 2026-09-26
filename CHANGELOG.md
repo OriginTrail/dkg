@@ -2,6 +2,231 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [10.0.20] - 2026-09-26
+
+A fast-follow to 10.0.19 that fixes both of its known issues: on-demand
+subscriptions that stopped syncing partway, and on-chain id claims in the
+shared `ontology` graph that bound without proof from this node's chain. It
+also fixes a fingerprint mismatch that kept received assets with escaped
+non-ASCII text out of Verifiable Memory, a startup that could hold a node's
+API for minutes while it re-checked persisted subscriptions on chain,
+main-thread pauses that grew with a node's peer traffic and uptime, and a
+managed Oxigraph that outlived a killed worker and held the store.
+Edges now reach holders of public graphs they are not connected to, and
+auto-update applies on nodes that restart often. **No smart-contract, ABI,
+wire-protocol or deployment registry changes are required.**
+
+### Upgrading from 10.0.19
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| Startup waits at most 10 s on chain authority for persisted Context Graph subscriptions (#2815) | Subscriptions not checked within 10 s of start are inactive until background authority recovery checks them, usually within minutes. Until then `GET /api/context-graph/subscriptions` lists them under `rehydration.dormantReasons.authorityUnavailable`, and a Core declines StorageACKs for such a graph with the retryable `CORE_TEMPORARILY_UNAVAILABLE`. Subscriptions beyond the activation cap still wait for rolling activation | None. After a restart, `authorityUnavailable` should shrink within minutes; an entry that stays is a graph whose authority this node cannot read |
+| An on-chain id claim in the shared `ontology` graph binds only when this node's chain proves it (#2777) | `dkg context-graph list` stops showing one on-chain id under several graph names. A Core accepts StorageACKs for a graph that commits no on-chain name (bytes32(0), legacy) only through its own subscription to that graph under that id; an `ontology` claim alone is declined with the retryable `CORE_VM_PROMOTION_UNAVAILABLE` | Subscribe the Cores that must host such a legacy graph. Graphs that commit a name are unaffected |
+| The startup metadata relocation has a 30 s budget, and the node withholds `ontology` from peers and queries until relocation finishes (#2787) | A node with a large legacy `ontology` graph serves sync and opens its API sooner; peers see its `ontology` a little later | None |
+| The auto-update hold-off deadline is stored in `<DKG home>/.update-holdoff.json` (#2785) | A node that restarts during its rollout hold waits only for the time left instead of drawing a new hold | None. Deleting the file only makes the node draw a new hold |
+| Edges fetch the `agents` phonebook on demand (#2778) | For a public wallet-scoped graph whose owner is not in the local phonebook, an Edge fetches the phonebook once from one to three connected, network-admitted peers (Cores first), bounded to 120 s and then backed off | None. `onDemandAgentsPhonebook: false`, or `DKG_ON_DEMAND_AGENTS_PHONEBOOK=0`, turns it off |
+| Managed Oxigraph runs under the parent watchdog on Linux and macOS, also without memory limits, and the daemon records each launch's owner in the store directory (#2775) | The daemon's stop and restart signals reach Oxigraph through the watchdog's process group, so a worker the supervisor kills no longer leaves Oxigraph holding the store. On the first start after upgrading, a node stops an orphaned Oxigraph from an earlier release that runs this node's store and was reparented to PID 1 | None. A lock holder the daemon cannot attribute to this node is logged and left running; stop it by hand if the node then cannot start |
+
+### Known issues
+
+- **RFC-64 catalog replay loop**: replays that come back incomplete repeat on
+  every reconnect. Keep `rfc64Catalog.rollout.killSwitch` on wherever it is
+  set.
+- **A peer that connects while it is still starting is not used for sync**
+  (#2822): a node learns a peer's protocols when the connection opens and
+  does not refresh them. A peer that had not registered its handlers yet
+  counts as unable to sync for as long as that connection lasts, so sync on
+  connect, Random Sampling repair and exact Verifiable Memory fetches skip it
+  until the two nodes reconnect. Present since 10.0.10.
+
+### Fixed
+
+- **`dkg subscribe` without `--save` no longer stops syncing a public graph
+  partway** (#2782): since 10.0.13 an on-demand subscription, the CLI default, lives
+  only in the running node process, but the chain reconciler still saved its
+  progress as a durable subscription row. Every sweep failed with `Cannot
+  acknowledge join approval for "<graph>": durable subscription intent or
+  host state is missing`, the cursor never moved past its first window, and
+  knowledge assets the initial fetch had missed were never fetched: a Base
+  mainnet node stayed at 19 of 25 until the graph was subscribed again with
+  `--save`. The reconciler now advances an on-demand subscription's cursor in
+  memory and, like the subscription itself, writes nothing durable for it.
+  Saved subscriptions persist their cursor as before. A Core that hosts a
+  graph subscribed on demand saves its host-only cursor instead of failing
+  the same way, and an on-demand subscription that is still unbound takes its
+  on-chain id in memory during sync instead of failing too.
+- **On-chain id claims in the shared `ontology` graph bind only when this
+  node's chain proves them** (#2777): the `ontology` system graph is shared by
+  every network and deployment, and store discovery bound every
+  `dkg:ContextGraphOnChainId` claim in it unchecked. A Base mainnet Edge held
+  213 such rows over 91 distinct ids, while Base has 34 Context Graphs;
+  `dkg context-graph list` showed one id under several names, and subscribing
+  by a name hash could create a row keyed by the hash whose Verifiable Memory
+  fetches came back empty. A claim now binds only when the slot it names
+  commits the graph's name on this node's chain. Bindings the chain refutes are
+  cleared as each slot is observed, and a subscription keyed by a slot's name
+  hash that never recorded it is repaired. A slot that commits no name proves
+  no claim.
+- **A received copy with escaped non-ASCII text reaches Verifiable Memory
+  again on the receiving node** (#2813): a node records a fingerprint of each
+  Shared Working Memory copy it takes in, and finalization recomputes it from
+  the triple store. A copy arrives as N-Quads text whose literals can carry
+  `\uXXXX` escapes (non-ASCII text, or an emoji as a surrogate pair), while the
+  store returns them decoded, so the fingerprints differed. Such assets failed
+  finalization with `graph-scoped content does not match its durable head`,
+  although their count and Merkle root matched the chain, and reached
+  Verifiable Memory only through the slower chain-promote fallback. A
+  received copy is now rewritten to the store's form where the node takes it
+  in (StorageACK persistence, the SWM share receiver and the gossip publish
+  receiver), before it is persisted and fingerprinted. The fingerprint itself
+  is unchanged, so stored records and peers on other versions agree as
+  before.
+- **Persisted subscriptions no longer hold a node's start for minutes**
+  (#2815): on start, a node checked the read authority of every persisted
+  Context Graph subscription on chain, one at a time, and opened its API only
+  after the last check. A mainnet Core with about 400 persisted
+  subscriptions, nearly all for graphs that do not exist on that chain, spent
+  about 226 s of a 274 s start there. Startup now waits at most 10 s for
+  these checks, hosted graphs first. A subscription it has not checked by
+  then stays inactive and is checked in the background after start, and it
+  is activated only once its authority resolves as allowed, exactly as
+  before; a graph the chain reports unknown is not checked again until the
+  next start. Subscriptions beyond the activation cap
+  (`maxRehydratedContextGraphSubscriptions`) still wait for rolling
+  activation. Until its check runs, such a subscription is listed under
+  `rehydration.dormantReasons.authorityUnavailable` in
+  `GET /api/context-graph/subscriptions`. A subscription with a durable join
+  approval is still checked during startup. Embedders can change the budget
+  with the agent option `contextGraphSubscriptionRehydrationAuthorityBudgetMs`;
+  `0` waits for every subscription, as before.
+- **Peer-to-peer sends no longer pile up main-thread work over a node's
+  uptime** (#2823): each send tied its deadline and cancellation signals to
+  the node's lifetime signal with `AbortSignal.any`. Node kept every such link
+  that had a timeout input until the node stopped, and walked all remaining
+  links each time it collected one, on the main thread. A node's pauses
+  therefore grew with its send rate and uptime: a testnet Edge serving RFC-64
+  catalog replays paused for up to 123 s at a time, long enough for its managed
+  Oxigraph to be restarted over missed query deadlines. A send or protocol
+  probe now has one deadline, built from a plain timer, and follows the
+  node's and the caller's signals through listeners it removes when it
+  settles. A multi-path send cancels its losing paths as soon as the winner
+  answers, including paths still opening their stream, and a retried send
+  removes the abort listener its backoff added.
+- **A worker killed by the supervisor no longer leaves managed Oxigraph
+  holding the store lock** (#2775): after five failed liveness probes the supervisor
+  SIGKILLs its worker. A directly launched `oxigraph serve` (macOS, or any node
+  without memory limits) survived that, reparented to init, and kept
+  `oxigraph-data/LOCK`. Every respawned worker then failed with
+  `While lock file … Resource temporarily unavailable` until the supervisor
+  gave up. Oxigraph now runs under the parent watchdog on Linux and macOS
+  whether or not memory limits are set, and the daemon's stop and restart
+  signals reach it through the watchdog's process group. The daemon records
+  each launch's owner (PID, start time and boot) in the store directory when it
+  starts Oxigraph. Before each Oxigraph start, it stops the recorded
+  Oxigraph, or a child of the recorded launcher if the store never became
+  ready, once the recorded daemon or launcher has exited, whatever process
+  adopted it. It also stops an orphan from an earlier release that runs this
+  node's Oxigraph for this store and was reparented to PID 1. Only a
+  confirmed exit counts: a holder whose owner, parent or record cannot be
+  read is left running, and Oxigraph is not started over a holder that may
+  be this node's; that start fails and is retried, keeping the owner record.
+  Any other lock holder is logged and left running, and the lock file itself
+  is never touched.
+- **A daemon on Node.js 26 keeps its chain RPC calls on HTTP/1.1** (#2828):
+  Node 26 bundles undici 8, whose `fetch` negotiates HTTP/2 with any TLS
+  server that offers it. Node 22 and 24 stay on HTTP/1.1 unless asked. A
+  daemon on Node 26 therefore sent every chain JSON-RPC call over HTTP/2, a
+  path no release had been tested on, and one such daemon stalled in Node's
+  native HTTP/2 write buffering until its worker was killed. Where Node would
+  negotiate HTTP/2, chain RPC calls now ask the dispatcher `fetch` already uses
+  for HTTP/1.1, so a proxy set through `NODE_USE_ENV_PROXY` or a dispatcher the
+  operator installed still carries them. Nothing changes on Node 22 and 24.
+- **An Edge subscribed to a public Context Graph finds holders that are not
+  already connected to it** (#2778): an Edge keeps no `agents` phonebook by default,
+  so for a wallet-scoped public graph the curator tier of VM recovery (owner
+  wallet → profile → peer and relay addresses) was empty, and recovery asked
+  only peers it happened to be connected to. On Base mainnet a fresh Edge
+  stopped at 7 of 25 and 10 of 24 Knowledge Assets while the only holder was
+  the publisher's own Edge. The Edge now fetches the phonebook once, from one
+  to three connected, network-admitted peers (Cores first), when such a graph
+  is subscribed or restored at startup and its owner is not in the local
+  phonebook, or when VM recovery finds that graph's curator tier empty. One
+  fetch runs at a time within a 120-second budget. After it, fetching waits
+  30 minutes (10 after a failure or an empty answer). A graph whose owner is
+  missing from a complete Core phonebook (at least 1,000 triples, so a
+  just-started Core's empty answer does not count) stops asking for 6 hours.
+  Recovery for the graphs whose
+  owner now resolves is re-scheduled at once. Curated graphs never trigger
+  the fetch. In this mode the catch-up connection-priming walk, which dialled
+  every relay-advertising profile in the phonebook, now dials at most eight
+  new peers per walk, Cores first. With the whole phonebook present, the
+  unbounded walk made hundreds of relay dials per minute on Base mainnet.
+  A node that already syncs `agents` on every connect (Cores,
+  or `DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT=1`) skips the fetch and keeps
+  the unbounded walk. The kill switch
+  is `onDemandAgentsPhonebook: false`, or `DKG_ON_DEMAND_AGENTS_PHONEBOOK=0`,
+  which wins over config.
+- **A large legacy `ontology` graph no longer holds startup** (#2787): the
+  startup pass that moves curated and local-only graph metadata out of
+  `ontology` walked every candidate before the node served sync and opened its
+  API. It now starts no new candidate after 30 s; the passes after start and
+  before each store discovery handle the rest. Until relocation finishes, the
+  node withholds `ontology` from peers and queries.
+- **Auto-update applies on a node that restarts often** (#2785): the rollout
+  hold-off, a random delay of up to `updateJitterMinutes` between detecting an
+  update and applying it, lived in memory. A node whose worker restarted more
+  often than its hold never applied the update. The deadline is now stored per
+  target, so a restart waits only for the time left, and each node still draws
+  its own deadline once per target.
+- **One Context Graph's catalog replay can no longer hold its recovery job
+  forever** (#2672): an RFC-64 replay pass waited without a bound for the
+  graph's admitted announcements to drain. The wait is now bounded to twice
+  the receiver's admission deferral window; a pass that runs out of time
+  reports the graph as unverified and keeps its worklist, without demanding a
+  full replay. A private graph whose authenticated roster cannot be resolved
+  yet is now pending rather than blocked, so its curator keeps authoring
+  catalogs.
+- **RFC-64 status reports missing catalog rows** (#2651): `missingRowCount`
+  was always `0`, because expected rows came from the heads already applied.
+  Status now derives expected and missing rows from the newest head a provider
+  promised for each author scope, so a replica that knows a newer head exists
+  reports the gap instead of looking complete. Ambiguous evidence reports
+  null.
+- **SELECT queries return a stored IRI such as `<a:>`** (#2798): RFC 3987 allows an
+  absolute IRI with nothing after the scheme's colon, and the Oxigraph server
+  and Blazegraph backends store one. The SPARQL results decoder required a
+  character after the colon, so any SELECT that returned such an IRI, as a
+  value or as a literal's datatype, failed with `URI value must be an absolute
+  safe IRI` (or `datatype must be an absolute safe IRI`), while CONSTRUCT
+  returned the same quads. The decoder now accepts a bare `scheme:` IRI and
+  checks every other value exactly as before.
+- **The daemon no longer cuts local-agent chat turns off after 5 minutes** (#2774):
+  its Hermes, OpenClaw and Prime Agent chat forwards gave up after 300 s,
+  because Node's `fetch` stops waiting for a response then, whatever the
+  forward's own deadline, and the agent bridges answer a non-streaming turn
+  only when it finishes. A longer turn was reported as "bridge unreachable"
+  or as a generic bridge error, a streamed turn that went quiet for 5 minutes
+  ended with a bare `terminated` error, and with a gateway configured the
+  daemon re-sent the already dispatched turn to it. Forwards now wait for
+  their documented 15-minute window (Prime Agent's 60-minute backstop
+  included), and a transport timeout is reported as the structured response
+  timeout without re-sending the turn.
+- **Warm-core pinning (`DKG_WARM_CORE_CONNECTIONS=1`) no longer pins a
+  core-role profile that has no operational wallet** (#2778): profiles are unsigned,
+  and such a profile cannot be checked against the ShardingTable, so it is
+  now denied, as a failed membership read already was. When the chain cannot
+  answer at all, the phonebook role still decides.
+
+### Changed
+
+- Closed-data snapshot validation no longer copies and sorts the key lists
+  (about a quarter of CPU in a store readback profile) (#2662).
+- Workspace installs patch `@libp2p/yamux` 8.0.1 so a stream reset on a
+  closing connection no longer leaks an unhandled `StreamStateError`; npm
+  installs already resolve a fixed 8.0.x (#2793).
+- The CLI and MCP clients share one daemon request deadline policy from
+  `@origintrail-official/dkg-core` (#2792).
+
 ## [10.0.19] - 2026-09-25
 
 ### Upgrading from 10.0.18

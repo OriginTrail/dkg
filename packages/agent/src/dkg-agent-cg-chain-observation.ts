@@ -195,6 +195,21 @@ export class ContextGraphChainObservationMethods extends DKGAgentBase {
     if (!this.admitOnChainContextGraphIdentity(previous, incoming, ctx)) {
       return { isNew: false, changed: false };
     }
+    // The chain now says what this id commits: drop any binding it refutes
+    // (ontology claims bound unchecked by older versions, persisted by Cores),
+    // before it can make the id look known or answer a reverse lookup, and
+    // repair a subscription keyed by this hash that never recorded it.
+    if (incoming.nameHash !== null) {
+      const cleared = this.clearRefutedOnChainContextGraphBindings(incoming.onChainId, incoming.nameHash);
+      if (cleared.length > 0) {
+        this.log.info(
+          ctx,
+          `Cleared on-chain id ${incoming.onChainId} from ${cleared.length} Context Graph(s) whose id it does not commit: `
+            + cleared.map((id) => JSON.stringify(id.slice(0, 64))).join(', '),
+        );
+      }
+      this.repairContextGraphNameHashSubscription(incoming.onChainId, incoming.nameHash);
+    }
     const knownBefore = this.isOnChainContextGraphKnown(incoming.onChainId, previous);
     const localId = this.bindOnChainContextGraphObservation(incoming, options.source, knownBefore, ctx);
     this.seenOnChainIds.add(incoming.onChainId);
@@ -358,15 +373,19 @@ export class ContextGraphChainObservationMethods extends DKGAgentBase {
     return true;
   }
 
-  /** The local row already bound to exactly this name hash and on-chain id. */
+  /**
+   * The local row already bound to exactly this name hash and on-chain id. A
+   * row bound to the id without recording the hash (by an older path, or by
+   * the route admitting a subscribe) still goes through the setter, or the
+   * hash never resolves to it and `dkg subscribe <hash>` mints a second row.
+   */
   private onChainContextGraphBoundLocalId(
     this: DKGAgent,
     nameHash: string,
     onChainId: string,
   ): string | null {
-    const localId = this.wireIdToLocalCgId.get(this.contextGraphWireId(nameHash));
-    if (localId === undefined) return null;
-    return this.subscribedContextGraphs.get(localId)?.onChainId === onChainId ? localId : null;
+    const row = this.nameHashIndexedContextGraphRow(this.contextGraphWireId(nameHash));
+    return row?.subscription.onChainId === onChainId ? row.contextGraphId : null;
   }
 
   /**

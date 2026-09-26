@@ -13,7 +13,12 @@
  * a staggered rollout that spreads the fleet's restarts across the jitter
  * window so only a few nodes bootstrap at any moment.
  *
- * Pure + deterministic (rng injectable) so it is unit-tested without the daemon.
+ * This module is the pure part: the jitter window and the random draw. The
+ * per-target deadline policy (persisted across restarts) lives in
+ * `auto-update-holdoff-deadline.ts`, and the rollout state machine, including
+ * the wait, in `auto-update-holdoff-gate.ts`.
+ *
+ * Deterministic (rng injectable) so it is unit-tested without the daemon.
  */
 
 export const UPDATE_JITTER_ENV = 'DKG_UPDATE_JITTER_MINUTES';
@@ -61,148 +66,4 @@ export function pickUpdateHoldoffMs(jitterMs: number, rng: () => number = Math.r
   const r = rng();
   const safe = Number.isFinite(r) && r >= 0 && r < 1 ? r : 0;
   return Math.floor(safe * jitterMs);
-}
-
-/**
- * A hold-off sleep whose timer is `unref`'d, so a pending rollout hold-off never
- * keeps the daemon process alive / blocks its exit during shutdown.
- */
-function unrefSleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve) => {
-    setTimeout(resolve, ms).unref();
-  });
-}
-
-export type UpdateHoldoffDecision = 'proceed' | 'abort-shutdown';
-
-export interface AwaitUpdateHoldoffDeps {
-  /** Resolved jitter window in ms (from `resolveUpdateJitterMs`). */
-  jitterMs: number;
-  /** True once the daemon has begun shutting down. */
-  isShuttingDown: () => boolean;
-  /** Invoked once, with the chosen hold-off ms, when a non-zero wait is about
-   *  to start — lets the caller emit a mode-specific log line. */
-  onHold?: (holdMs: number) => void;
-  /** Injectable for deterministic tests. */
-  rng?: () => number;
-  /** Injectable for deterministic tests (default: an unref'd setTimeout). */
-  sleep?: (ms: number) => Promise<void>;
-}
-
-/**
- * Wait out the per-node rollout hold-off, then report whether to proceed with
- * applying the update. Returns `'proceed'` after the (possibly zero) hold-off,
- * or `'abort-shutdown'` if the daemon began shutting down during the wait — in
- * which case the caller must NOT apply (the update is re-detected on next boot).
- *
- * The ordering (pick → optional log → sleep → re-check shutdown) is the exact
- * sequence both auto-update paths depend on; extracting it here makes the
- * shutdown-bail unit-testable rather than only eyeballed in the daemon loop.
- */
-export async function awaitUpdateHoldoff(deps: AwaitUpdateHoldoffDeps): Promise<UpdateHoldoffDecision> {
-  const holdMs = pickUpdateHoldoffMs(deps.jitterMs, deps.rng ?? Math.random);
-  if (holdMs <= 0) return deps.isShuttingDown() ? 'abort-shutdown' : 'proceed';
-  deps.onHold?.(holdMs);
-  await (deps.sleep ?? unrefSleep)(holdMs);
-  return deps.isShuttingDown() ? 'abort-shutdown' : 'proceed';
-}
-
-/** Daemon-wide config for the rollout gate — stable across polling ticks. */
-export interface UpdateHoldoffGateConfig {
-  /** Resolved jitter window in ms (from resolveUpdateJitterMs). */
-  jitterMs: number;
-  /** True once the daemon has begun shutting down. */
-  isShuttingDown: () => boolean;
-  /** Toggle the daemon's user-visible "is updating" flag. */
-  setUpdating: (updating: boolean) => void;
-  log: (msg: string) => void;
-  /** Injectable for deterministic tests. */
-  rng?: () => number;
-  sleep?: (ms: number) => Promise<void>;
-}
-
-/** Per-rollout, mode-specific behaviour injected into a gate run. */
-export interface UpdateHoldoffStep<T> {
-  /** Emit the mode-specific "holding Ns before applying" line (detected target). */
-  onHold: (holdMs: number) => void;
-  /**
-   * Re-confirm — AFTER the hold-off — that there is still a target to apply, and
-   * return the CURRENT one. The jitter delay means the target detected before
-   * the wait may have been withdrawn (dist-tag rolled back, ref moved) or the
-   * node may have caught up; returning null skips the apply so a superseded /
-   * withdrawn release is never installed. A refreshed target (e.g. a newer
-   * version published during the wait) is applied in place of the stale one.
-   */
-  revalidate: () => Promise<T | null>;
-  /** Apply the revalidated target (owns its own post-apply restart/log). */
-  apply: (target: T) => Promise<void>;
-  /** Logged when the run is aborted because the daemon is shutting down. */
-  shutdownMessage: string;
-  /** Logged when revalidate() reports no current target (withdrawn / caught up). */
-  supersededMessage: string;
-}
-
-export interface UpdateHoldoffGate {
-  /** Run one rollout attempt for a detected update. Concurrent calls while a
-   *  run is in flight are no-ops (single-flight across polling ticks). */
-  run<T>(step: UpdateHoldoffStep<T>): Promise<void>;
-}
-
-/**
- * The single auto-update rollout gate shared by the git and npm daemon paths.
- * A factory so it OWNS its single-flight state (the `pending` flag) instead of
- * making callers allocate and thread a mutable object — create it ONCE, at the
- * daemon scope, and call `.run(step)` on every polling tick. Each run:
- *
- *   single-flight guard -> hold-off (jitter) -> abort if shutting down
- *     -> REVALIDATE the target -> abort if shutting down (revalidate is async)
- *     -> set isUpdating -> apply -> clear isUpdating
- *
- * The second shutdown check matters: revalidate() is a network call, so SIGTERM
- * can arrive while it runs; without the re-check the gate would start a
- * build/install after shutdown cleanup has begun.
- */
-export function createUpdateHoldoffGate(config: UpdateHoldoffGateConfig): UpdateHoldoffGate {
-  // Owned here so single-flight holds across ticks — do NOT recreate per tick.
-  let pending = false;
-  return {
-    async run<T>(step: UpdateHoldoffStep<T>): Promise<void> {
-      if (pending) return; // one rollout at a time
-      pending = true;
-      try {
-        const decision = await awaitUpdateHoldoff({
-          jitterMs: config.jitterMs,
-          isShuttingDown: config.isShuttingDown,
-          onHold: step.onHold,
-          rng: config.rng,
-          sleep: config.sleep,
-        });
-        if (decision === 'abort-shutdown') {
-          config.log(step.shutdownMessage);
-          return;
-        }
-
-        const target = await step.revalidate();
-        // revalidate() is async (a network check); shutdown may have started
-        // during it, so re-check before committing to an install/restart.
-        if (config.isShuttingDown()) {
-          config.log(step.shutdownMessage);
-          return;
-        }
-        if (target === null || target === undefined) {
-          config.log(step.supersededMessage);
-          return;
-        }
-
-        config.setUpdating(true);
-        try {
-          await step.apply(target);
-        } finally {
-          config.setUpdating(false);
-        }
-      } finally {
-        pending = false;
-      }
-    },
-  };
 }
