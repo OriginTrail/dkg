@@ -72,6 +72,13 @@ import {
 } from '../abortable-store-work-lifecycle.js';
 import { parseNQuadsTextTolerant } from '../nquads-text.js';
 import {
+  sparqlStatements,
+  type SparqlQueryPlan,
+  type SparqlUpdatePlan,
+} from './sparql-statements.js';
+import { renderBlankNodeSafeDelete } from './blank-node-safe-delete.js';
+import { ADAPTER_SPARQL_TERM_POLICY } from './sparql-term-policy.js';
+import {
   isStoreOperationTimeoutError,
   StoreOperationTimeoutError,
 } from '../store-operation-timeout.js';
@@ -100,6 +107,10 @@ import {
   ManagedReadRecoveryCoordinatorV1,
 } from
   '../managed-read-recovery-coordinator.js';
+
+/** Every SPARQL statement this adapter builds by interpolation. */
+const statements = sparqlStatements('sparql-http');
+
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
   const reason = signal.reason;
@@ -665,53 +676,19 @@ export class SparqlHttpStore implements TripleStore {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'SparqlHttpStore.insert',
     });
-    const byGraph = new Map<string, DKGQuad[]>();
-    for (const q of quads) {
-      const g = q.graph || '';
-      if (!byGraph.has(g)) byGraph.set(g, []);
-      byGraph.get(g)!.push(q);
-    }
-    const parts: string[] = [];
-    for (const [graph, list] of byGraph) {
-      const triples = list.map((q) => `${formatTerm(q.subject)} <${escapeUri(q.predicate)}> ${formatTerm(q.object)} .`).join('\n    ');
-      if (graph) {
-        parts.push(`GRAPH <${escapeUri(graph)}> {\n    ${triples}\n  }`);
-      } else {
-        parts.push(triples);
-      }
-    }
-    const update = `INSERT DATA {\n  ${parts.join('\n  ')}\n}`;
-    await this.runRemoteGraphMutation({
-      scope: { kind: 'graphs', graphs: [...byGraph.keys()] },
-      update,
-      options: {
-        ...options,
-        source: options?.source ?? 'sparql-http.insert',
-      },
-      operation: 'insert',
-    });
+    await this.runUpdatePlan(statements.insertData(quads), options);
   }
 
   async delete(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
     if (quads.length === 0) return;
     // SPARQL forbids blank nodes in `DELETE DATA` — a spec-compliant endpoint
     // (Oxigraph, Fuseki, …) rejects the whole statement with HTTP 400 if any
-    // quad's subject or object is a blank node. `buildBlankNodeSafeDelete`
-    // keeps ground quads on the fast `DELETE DATA` path and removes
+    // quad's subject or object is a blank node. The blank-node-safe builder
+    // behind `deleteData` keeps ground quads on the fast `DELETE DATA` path and removes
     // blank-node quads with `DELETE { … } WHERE { … }` (blank nodes rewritten
     // to variables) — the only spec-legal way to target existing blank-node
     // structure over the SPARQL protocol. See the helper for details.
-    const update = buildBlankNodeSafeDelete(quads);
-    if (!update) return;
-    await this.runRemoteGraphMutation({
-      scope: { kind: 'graphs', graphs: [...new Set(quads.map((q) => q.graph || ''))] },
-      update,
-      options: {
-        ...options,
-        source: options?.source ?? 'sparql-http.delete',
-      },
-      operation: 'delete',
-    });
+    await this.runUpdatePlan(statements.deleteData(quads), options);
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>, options?: QueryOptions): Promise<number> {
@@ -739,30 +716,7 @@ export class SparqlHttpStore implements TripleStore {
     pattern: Partial<DKGQuad>,
     options?: QueryOptions,
   ): Promise<void> {
-    const graphUri = pattern.graph;
-    const s = pattern.subject ? `<${escapeUri(pattern.subject)}>` : '?s';
-    const p = pattern.predicate ? `<${escapeUri(pattern.predicate)}>` : '?p';
-    const o = pattern.object ? formatTerm(pattern.object) : '?o';
-    const triple = `${s} ${p} ${o}`;
-    let update: string;
-    if (graphUri) {
-      update = `DELETE { GRAPH <${escapeUri(graphUri)}> { ${triple} } } WHERE { GRAPH <${escapeUri(graphUri)}> { ${triple} } }`;
-    } else {
-      // The DELETE template must use the `GRAPH` keyword — `{ ?g_ctx { … } }`
-      // is a syntax error that a spec-compliant endpoint rejects with HTTP 400.
-      update = `DELETE { GRAPH ?g_ctx { ${triple} } } WHERE { GRAPH ?g_ctx { ${triple} } }`;
-    }
-    await this.runRemoteGraphMutation({
-      scope: graphUri
-        ? { kind: 'graphs', graphs: [graphUri] }
-        : { kind: 'all' },
-      update,
-      options: {
-        ...options,
-        source: options?.source ?? 'sparql-http.deleteByPattern',
-      },
-      operation: 'deleteByPattern',
-    });
+    await this.runUpdatePlan(statements.deleteByPattern(pattern), options);
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
@@ -770,17 +724,7 @@ export class SparqlHttpStore implements TripleStore {
       ...options,
       source: options?.source ?? 'sparql-http.deleteBySubjectPrefix.countBefore',
     });
-    const escapedPrefix = escapeString(prefix);
-    const update = `DELETE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } } WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${escapedPrefix}")) } }`;
-    await this.runRemoteGraphMutation({
-      scope: { kind: 'graphs', graphs: [graphUri] },
-      update,
-      options: {
-        ...options,
-        source: options?.source ?? 'sparql-http.deleteBySubjectPrefix',
-      },
-      operation: 'deleteBySubjectPrefix',
-    });
+    await this.runUpdatePlan(statements.deleteBySubjectPrefix(graphUri, prefix), options);
     const after = await this.countQuads(graphUri, {
       ...options,
       source: options?.source ?? 'sparql-http.deleteBySubjectPrefix.countAfter',
@@ -824,6 +768,7 @@ export class SparqlHttpStore implements TripleStore {
       label: 'SparqlHttpStore.replaceGraph',
     });
     const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
+    statements.checkIris.replaceGraph(graphUri, quads);
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri] },
       update: plan.update,
@@ -864,6 +809,13 @@ export class SparqlHttpStore implements TripleStore {
       metadataSubject,
       metadataQuads,
     );
+    statements.checkIris.replaceGraphAndSubject(
+      graphUri,
+      graphQuads,
+      metaGraphUri,
+      metadataSubject,
+      metadataQuads,
+    );
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri, metaGraphUri] },
       update: plan.update,
@@ -894,6 +846,7 @@ export class SparqlHttpStore implements TripleStore {
       label: 'SparqlHttpStore.replaceSubject',
     });
     const update = buildAtomicSubjectReplaceUpdate(graphUri, subject, quads);
+    statements.checkIris.replaceSubject(graphUri, subject, quads);
     await this.runRemoteGraphMutation({
       scope: { kind: 'graphs', graphs: [graphUri] },
       update,
@@ -918,6 +871,7 @@ export class SparqlHttpStore implements TripleStore {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'SparqlHttpStore.rfc64AuthorCommitCasV1',
     });
+    statements.checkIris.rfc64AuthorCommitCasV1(plan);
     return executeRfc64AuthorCommitCasV1({
       executeUpdate: () => this.runRemoteGraphMutation({
         // The transactional request always mutates private receipt/staging
@@ -947,6 +901,26 @@ export class SparqlHttpStore implements TripleStore {
   ): boolean {
     return this.consistencyProfile === 'atomic-readback'
       || this.consistencyProfile === required;
+  }
+
+  /** Send a statement plan under its own operation and write scope; nothing for a null plan. */
+  private async runUpdatePlan(plan: SparqlUpdatePlan | null, options?: QueryOptions): Promise<void> {
+    if (plan === null) return;
+    await this.runRemoteGraphMutation({
+      scope: plan.scope,
+      update: plan.update,
+      options: { ...options, source: options?.source ?? `sparql-http.${plan.operation}` },
+      operation: plan.operation,
+    });
+  }
+
+  /** Run a statement plan's query under its own operation. */
+  private runQueryPlan(plan: SparqlQueryPlan, options?: QueryOptions): Promise<QueryResult> {
+    return this.queryWithOperation(
+      plan.sparql,
+      { ...options, source: options?.source ?? `sparql-http.${plan.operation}` },
+      plan.operation,
+    );
   }
 
   /**
@@ -1140,11 +1114,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
-    const r = await this.queryWithOperation(
-      `ASK { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`,
-      { ...options, source: options?.source ?? 'sparql-http.hasGraph' },
-      'hasGraph',
-    );
+    const r = await this.runQueryPlan(statements.hasGraph(graphUri), options);
     return r.type === 'boolean' && r.value;
   }
 
@@ -1153,16 +1123,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
-    const update = `DROP SILENT GRAPH <${escapeUri(graphUri)}>`;
-    await this.runRemoteGraphMutation({
-      scope: { kind: 'graphs', graphs: [graphUri] },
-      update,
-      options: {
-        ...options,
-        source: options?.source ?? 'sparql-http.dropGraph',
-      },
-      operation: 'dropGraph',
-    });
+    await this.runUpdatePlan(statements.dropGraph(graphUri), options);
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {
@@ -1227,17 +1188,7 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
-    const sparql = graphUri
-      ? `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`
-      : `SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }`;
-    const r = await this.queryWithOperation(
-      sparql,
-      {
-        ...options,
-        source: options?.source ?? 'sparql-http.countQuads',
-      },
-      'countQuads',
-    );
+    const r = await this.runQueryPlan(statements.countQuads(graphUri), options);
     if (r.type === 'bindings' && r.bindings.length > 0) {
       const c = String(r.bindings[0].c ?? '');
       const stripped = c.replace(/^"|"$/g, '');
@@ -1389,153 +1340,6 @@ function sanitizeEndpointForTelemetry(endpoint: string): string {
 }
 
 // ---------------------------------------------------------------------------
-// N-Quads / term helpers
-// ---------------------------------------------------------------------------
-
-function formatTerm(term: string): string {
-  if (term.startsWith('"')) {
-    const m = term.match(/^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/);
-    if (m) return `${m[1]}^^<${m[2]}>`;
-    return term;
-  }
-  if (term.startsWith('_:')) return term;
-  if (term.startsWith('<')) return term;
-  return `<${term}>`;
-}
-
-function escapeUri(uri: string): string {
-  return uri.replace(/[<>"{}|\\^`]/g, '');
-}
-
-function escapeString(s: string): string {
-  return s.replace(/[\\"]/g, '\\$&');
-}
-
-/** True when an N-Quads term string denotes an RDF blank node (`_:label`). */
-export function isBlankNodeTerm(term: string): boolean {
-  return typeof term === 'string' && term.startsWith('_:');
-}
-
-/**
- * Partition blank-node-bearing quads into connected components: two quads are
- * connected when they share a blank-node label (directly or transitively). A
- * union-find over the blank-node labels does the grouping.
- *
- * Each component is later deleted as ONE `DELETE … WHERE …` so its shared
- * blank-node variables join correctly and any ground terms anchor the match.
- * Disjoint components must be emitted as SEPARATE statements: a single WHERE
- * holding two independent patterns is a cross-product, so if one pattern has
- * no match the whole row is empty and NOTHING is deleted — a silent
- * data-retention bug. Splitting by component avoids that.
- */
-function connectedBlankNodeComponents(quads: DKGQuad[]): DKGQuad[][] {
-  const parent = new Map<string, string>();
-  const add = (x: string) => { if (!parent.has(x)) parent.set(x, x); };
-  const find = (x: string): string => {
-    while (parent.get(x) !== x) {
-      parent.set(x, parent.get(parent.get(x)!)!); // path halving
-      x = parent.get(x)!;
-    }
-    return x;
-  };
-  const union = (a: string, b: string) => { parent.set(find(a), find(b)); };
-
-  for (const q of quads) {
-    const labels: string[] = [];
-    if (isBlankNodeTerm(q.subject)) labels.push(q.subject);
-    if (isBlankNodeTerm(q.object)) labels.push(q.object);
-    labels.forEach(add);
-    if (labels.length === 2) union(labels[0], labels[1]);
-  }
-
-  const groups = new Map<string, DKGQuad[]>();
-  for (const q of quads) {
-    const label = isBlankNodeTerm(q.subject) ? q.subject : q.object;
-    const root = find(label);
-    let arr = groups.get(root);
-    if (!arr) { arr = []; groups.set(root, arr); }
-    arr.push(q);
-  }
-  return [...groups.values()];
-}
-
-/**
- * Build a spec-legal SPARQL Update that deletes exactly `quads`, including any
- * whose subject or object is a blank node. Returns `null` for empty input.
- *
- * Strategy:
- *  - Ground quads (no blank nodes) → a single `DELETE DATA { … }` block —
- *    exact and fast (identical to the legacy behaviour for the common case).
- *  - Blank-node quads → grouped into connected components ({@link
- *    connectedBlankNodeComponents}); each component becomes a
- *    `DELETE { … } WHERE { … }` with every blank node rewritten to a fresh
- *    query variable. This is the only spec-legal way to remove existing
- *    blank-node structure over the SPARQL protocol (`DELETE DATA` forbids
- *    blank nodes outright).
- *
- * Caveat (inherent to SPARQL): a blank node has no stable name across the
- * protocol, so a component is matched by *shape* + ground anchors, not
- * identity. A truly isolated blank-node triple with no ground anchor (e.g. a
- * lone `_:b <p> <o>`) matches every subject with that predicate/object; in
- * practice such triples are part of a larger entity component anchored by a
- * real IRI, so the match is precise. Two byte-for-byte isomorphic anchored
- * components are indistinguishable in RDF and both delete — which is correct.
- *
- * Exported for unit testing of the generated SPARQL.
- */
-export function buildBlankNodeSafeDelete(quads: DKGQuad[]): string | null {
-  if (quads.length === 0) return null;
-
-  const ground: DKGQuad[] = [];
-  const bnode: DKGQuad[] = [];
-  for (const q of quads) {
-    if (isBlankNodeTerm(q.subject) || isBlankNodeTerm(q.object)) bnode.push(q);
-    else ground.push(q);
-  }
-
-  const statements: string[] = [];
-
-  if (ground.length > 0) {
-    const body = ground.map((q) => {
-      const g = q.graph ? `GRAPH <${escapeUri(q.graph)}> ` : '';
-      return `${g}{ ${formatTerm(q.subject)} <${escapeUri(q.predicate)}> ${formatTerm(q.object)} . }`;
-    }).join('\n');
-    statements.push(`DELETE DATA {\n${body}\n}`);
-  }
-
-  if (bnode.length > 0) {
-    // Group by graph first — never join components across graphs.
-    const byGraph = new Map<string, DKGQuad[]>();
-    for (const q of bnode) {
-      const g = q.graph || '';
-      let arr = byGraph.get(g);
-      if (!arr) { arr = []; byGraph.set(g, arr); }
-      arr.push(q);
-    }
-    for (const [graph, list] of byGraph) {
-      for (const component of connectedBlankNodeComponents(list)) {
-        const vars = new Map<string, string>();
-        const render = (t: string): string => {
-          if (!isBlankNodeTerm(t)) return formatTerm(t);
-          let v = vars.get(t);
-          if (!v) { v = `?b${vars.size}`; vars.set(t, v); }
-          return v;
-        };
-        const triples = component
-          .map((q) => `${render(q.subject)} <${escapeUri(q.predicate)}> ${render(q.object)} .`)
-          .join('\n    ');
-        const inner = graph
-          ? `GRAPH <${escapeUri(graph)}> {\n    ${triples}\n  }`
-          : triples;
-        statements.push(`DELETE { ${inner} } WHERE { ${inner} }`);
-      }
-    }
-  }
-
-  return statements.join(';\n');
-}
-
-// ---------------------------------------------------------------------------
 // Adapter registration
 // ---------------------------------------------------------------------------
 
@@ -1546,3 +1350,23 @@ registerTripleStoreAdapter('sparql-http', async (opts, constructionAuthority) =>
   }
   return new SparqlHttpStore(options, constructionAuthority);
 });
+
+// Compatibility exports: `dist/adapters/sparql-http.js` is a public package
+// path, and these helpers used to live here.
+
+/** @deprecated Moved to `./blank-node-safe-delete.js`. */
+export { isBlankNodeTerm } from './blank-node-safe-delete.js';
+
+/**
+ * @deprecated The blank-node-safe delete is now `deleteData` in
+ * `./sparql-statements.js`. This keeps the former one-argument signature and
+ * returns the same update. It reports nothing, as the function it replaces
+ * never counted invalid terms.
+ */
+export function buildBlankNodeSafeDelete(quads: DKGQuad[]): string | null {
+  const ignoreInvalidTerms = (): void => {};
+  return renderBlankNodeSafeDelete(
+    quads,
+    ADAPTER_SPARQL_TERM_POLICY.renderer({ adapter: 'sparql-http', operation: 'delete' }, ignoreInvalidTerms),
+  );
+}

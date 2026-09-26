@@ -15,6 +15,7 @@ import {
   type SparqlHttpResponseErrorLike,
   type SparqlHttpSlowQueryEvent,
 } from '../src/index.js';
+import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 let server: Server;
 let queryUrl: string;
@@ -1906,6 +1907,220 @@ describe('SparqlHttpStore (test server)', () => {
         await store.close();
       }
     });
+  });
+});
+
+describe('SparqlHttpStore RDF term formatting', () => {
+  /** Run `work` against a fetch stub and return every request body, in order. */
+  async function captureSparql(work: (store: SparqlHttpStore) => Promise<unknown>): Promise<string[]> {
+    const originalFetch = globalThis.fetch;
+    const bodies: string[] = [];
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const body = String(init?.body ?? '');
+      bodies.push(body);
+      if (!String(input).endsWith('/query')) return new Response(null, { status: 204 });
+      const json = body.startsWith('ASK')
+        ? { boolean: true }
+        : { head: { vars: ['c'] }, results: { bindings: [{ c: { type: 'literal', value: '0' } }] } };
+      return new Response(JSON.stringify(json), {
+        status: 200,
+        headers: { 'Content-Type': 'application/sparql-results+json' },
+      });
+    }) as typeof fetch;
+    try {
+      await work(new SparqlHttpStore({
+        queryEndpoint: 'http://terms.test/query',
+        updateEndpoint: 'http://terms.test/update',
+      }));
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    return bodies;
+  }
+
+  it('sends byte-identical SPARQL for well-formed terms', async () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const bodies = await captureSparql(async (store) => {
+        await store.insert([
+          { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"v"@en', graph: 'http://ex.org/g' },
+          {
+            subject: '_:b0',
+            predicate: 'http://ex.org/n',
+            object: '"42"^^http://www.w3.org/2001/XMLSchema#integer',
+            graph: 'http://ex.org/g',
+          },
+          { subject: '<http://ex.org/s>', predicate: '<http://ex.org/p2>', object: 'http://ex.org/o', graph: '' },
+        ]);
+        await store.delete([
+          { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"line\\nbreak"', graph: 'http://ex.org/g' },
+        ]);
+        await store.deleteByPatternWithoutCount({
+          graph: 'http://ex.org/g',
+          subject: 'http://ex.org/s',
+          predicate: 'http://ex.org/p',
+          object: '"v"@en',
+        });
+        await store.deleteByPatternWithoutCount({ object: 'http://ex.org/o' });
+        await store.deleteBySubjectPrefix('http://ex.org/g', 'http://ex.org/q/');
+        await store.dropGraph('http://ex.org/g');
+        await store.hasGraph('http://ex.org/g');
+      });
+      expect(bodies).toEqual([
+        'INSERT DATA {\n'
+          + '  GRAPH <http://ex.org/g> {\n'
+          + '    <http://ex.org/s> <http://ex.org/p> "v"@en .\n'
+          + '    _:b0 <http://ex.org/n> "42"^^<http://www.w3.org/2001/XMLSchema#integer> .\n'
+          + '  }\n'
+          + '  <http://ex.org/s> <http://ex.org/p2> <http://ex.org/o> .\n'
+          + '}',
+        'DELETE DATA {\nGRAPH <http://ex.org/g> { <http://ex.org/s> <http://ex.org/p> "line\\nbreak" . }\n}',
+        'DELETE { GRAPH <http://ex.org/g> { <http://ex.org/s> <http://ex.org/p> "v"@en } } '
+          + 'WHERE { GRAPH <http://ex.org/g> { <http://ex.org/s> <http://ex.org/p> "v"@en } }',
+        'DELETE { GRAPH ?g_ctx { ?s ?p <http://ex.org/o> } } WHERE { GRAPH ?g_ctx { ?s ?p <http://ex.org/o> } }',
+        'SELECT (COUNT(*) AS ?c) WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }',
+        'DELETE { GRAPH <http://ex.org/g> { ?s ?p ?o } } '
+          + 'WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "http://ex.org/q/")) } }',
+        'SELECT (COUNT(*) AS ?c) WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o } }',
+        'DROP SILENT GRAPH <http://ex.org/g>',
+        'ASK { GRAPH <http://ex.org/g> { ?s ?p ?o } }',
+      ]);
+      expect(observed.counted).toEqual([]);
+      expect(observed.warnings).toEqual([]);
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('logs and counts a malformed IRI instead of silently stripping it', async () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const bodies = await captureSparql((store) => store.insert([
+        { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"v"', graph: 'http://ex.org/g^x' },
+      ]));
+      // Observe mode: the pre-validation (stripped) update is still sent.
+      expect(bodies).toEqual([
+        'INSERT DATA {\n  GRAPH <http://ex.org/gx> {\n    <http://ex.org/s> <http://ex.org/p> "v" .\n  }\n}',
+      ]);
+      expect(observed.counted).toEqual([{
+        value: 1,
+        adapter: 'sparql-http',
+        operation: 'insert',
+        position: 'graph',
+        kind: 'iri',
+        enforcement: 'observe',
+      }]);
+      expect(observed.warnings).toEqual([
+        expect.stringContaining('sparql-http.insert: invalid iri in SPARQL graph position (17 chars, fingerprint '),
+      ]);
+      expect(observed.warnings[0]).not.toContain('http://ex.org/g^x');
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('logs a blank-node pattern object, which a DELETE template cannot hold', async () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const bodies = await captureSparql((store) => store.deleteByPatternWithoutCount({
+        graph: 'http://ex.org/g',
+        object: '_:b0',
+      }));
+      expect(bodies).toEqual([
+        'DELETE { GRAPH <http://ex.org/g> { ?s ?p _:b0 } } WHERE { GRAPH <http://ex.org/g> { ?s ?p _:b0 } }',
+      ]);
+      expect(observed.counted).toEqual([expect.objectContaining({
+        operation: 'deleteByPattern',
+        position: 'object',
+        kind: 'blank-node',
+      })]);
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('counts a subject prefix no IRI can start with and sends it as before', async () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      const bodies = await captureSparql(async (store) => {
+        await store.deleteBySubjectPrefix('http://ex.org/g', 'urn:a\r\nb');
+        await store.deleteBySubjectPrefix('http://ex.org/g', 'urn:"q"');
+      });
+      // The line break stays raw, so a real endpoint still rejects the update
+      // rather than reporting that nothing matched.
+      expect(bodies[1]).toBe(
+        'DELETE { GRAPH <http://ex.org/g> { ?s ?p ?o } } '
+          + 'WHERE { GRAPH <http://ex.org/g> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "urn:a\r\nb")) } }',
+      );
+      expect(bodies[4]).toContain('FILTER(STRSTARTS(STR(?s), "urn:\\"q\\""))');
+      expect(observed.counted).toEqual(Array(2).fill({
+        value: 1,
+        adapter: 'sparql-http',
+        operation: 'deleteBySubjectPrefix',
+        position: 'subject-prefix',
+        kind: 'iri',
+        enforcement: 'observe',
+      }));
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('labels the graph term of every graph-scoped operation', async () => {
+    const observed = observeInvalidSparqlTerms();
+    try {
+      await captureSparql(async (store) => {
+        await store.hasGraph('http://g{x}');
+        await store.countQuads('http://g{x}');
+        await store.deleteBySubjectPrefix('http://g{x}', 'urn:ok/');
+        await store.dropGraph('http://g{x}');
+      });
+      const graphPoint = (operation: string) => ({
+        value: 1, adapter: 'sparql-http', operation, position: 'graph', kind: 'iri', enforcement: 'observe',
+      });
+      expect(observed.counted).toEqual([
+        graphPoint('hasGraph'),
+        graphPoint('countQuads'),
+        graphPoint('countQuads'),
+        graphPoint('deleteBySubjectPrefix'),
+        graphPoint('countQuads'),
+        graphPoint('dropGraph'),
+      ]);
+    } finally {
+      observed.restore();
+    }
+  });
+
+  it('scopes each statement write to the graphs its plan names', async () => {
+    const g1 = 'http://ex.org/g1';
+    const g2 = 'http://ex.org/g2';
+    const other = 'http://ex.org/other';
+    const generations: number[][] = [];
+    await captureSparql(async (store) => {
+      const snapshot = () => generations.push([g1, g2, other].map((graph) => store.getWriteRevision(graph).generation));
+      snapshot();
+      await store.insert([
+        { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"1"', graph: g1 },
+        { subject: 'http://ex.org/s', predicate: 'http://ex.org/p', object: '"2"', graph: g2 },
+      ]);
+      snapshot();
+      await store.dropGraph(g1);
+      snapshot();
+      await store.deleteByPattern({ predicate: 'http://ex.org/p' });
+      snapshot();
+    });
+    const [initial, afterInsert, afterDrop, afterPatternDelete] = generations;
+    // The insert plan's scope is both of its graphs, and only those.
+    expect(afterInsert[0]).toBeGreaterThan(initial[0]);
+    expect(afterInsert[1]).toBeGreaterThan(initial[1]);
+    expect(afterInsert[2]).toBe(initial[2]);
+    // dropGraph writes its one graph.
+    expect(afterDrop[0]).toBeGreaterThan(afterInsert[0]);
+    expect(afterDrop.slice(1)).toEqual(afterInsert.slice(1));
+    // A pattern delete without a graph may write any graph.
+    for (const [index, generation] of afterPatternDelete.entries()) {
+      expect(generation).toBeGreaterThan(afterDrop[index]);
+    }
   });
 });
 

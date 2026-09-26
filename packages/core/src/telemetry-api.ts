@@ -246,6 +246,16 @@ export interface DkgMetrics {
   storeCancellationCompletedTotal: Counter;
   /** scope and reason identify the bounded retry loop; attempt is capped */
   storeRetryAttemptsTotal: Counter;
+  /** adapter, operation,
+   *  position={graph|subject|predicate|object|datatype|subject-prefix},
+   *  kind={iri|literal|blank-node|relative-iri|rfc3987-iri},
+   *  enforcement={observe|reject} — malformed RDF terms reaching a storage
+   *  adapter's SPARQL builders, and relative or RFC 3987-invalid IRIs in the
+   *  quads it writes through its atomic-replace and RFC-64 builders or an
+   *  N-Quads load. `observe` = counted and logged, and the write was built
+   *  exactly as before validation existed (the pre-validation SPARQL still
+   *  strips characters from a malformed IRI). */
+  storeSparqlInvalidTermsTotal: Counter;
   /** current durable finalization entries whose retry gate is open */
   finalizationRecoveryDueEntries: Gauge;
   /** milliseconds since the oldest currently due finalization was received */
@@ -481,6 +491,9 @@ function buildMetrics(): DkgMetrics {
     }),
     storeRetryAttemptsTotal: meter.createCounter('dkg.store.retry_attempts_total', {
       description: 'Bounded expensive-work retry attempts',
+    }),
+    storeSparqlInvalidTermsTotal: meter.createCounter('dkg.store.sparql_invalid_terms_total', {
+      description: 'Malformed RDF terms reaching storage-adapter writes, by adapter, operation, position, kind and enforcement',
     }),
     finalizationRecoveryDueEntries: meter.createGauge(
       'dkg.finalization_recovery.due_entries',

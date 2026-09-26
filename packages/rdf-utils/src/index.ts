@@ -1,4 +1,5 @@
 import { isAbsoluteRfc3987IriV1 } from './absolute-rfc3987-iri.js';
+import { isRdfBlankNodeLabel } from './blank-node-label.js';
 
 export { isAbsoluteRfc3987IriV1 };
 
@@ -393,18 +394,6 @@ export function canonicalizeRdfObjectTerm(object: string): string {
   return formatCanonicalRdfLiteralTerm({ ...literal, datatype });
 }
 
-// SPARQL 1.1 BLANK_NODE_LABEL, which N-Triples and N-Quads share.
-const PN_CHARS_BASE =
-  'A-Za-z\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF' +
-  '\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF' +
-  '\\uFDF0-\\uFFFD\\u{10000}-\\u{EFFFF}';
-const PN_CHARS_U = `${PN_CHARS_BASE}_`;
-const PN_CHARS = `${PN_CHARS_U}\\-0-9\\u00B7\\u0300-\\u036F\\u203F-\\u2040`;
-const BLANK_NODE_LABEL_PATTERN = new RegExp(
-  `^_:[${PN_CHARS_U}0-9](?:[${PN_CHARS}.]*[${PN_CHARS}])?$`,
-  'u',
-);
-
 /** A term of a quad written through a DKG write route, by kind. */
 export type WritableRdfTerm =
   | { kind: 'iri'; value: string }
@@ -435,7 +424,8 @@ export function parseWritableRdfTerm(term: string): WritableRdfTerm | null {
     return { kind: 'literal', value: literal };
   }
   if (term.startsWith('_:')) {
-    return BLANK_NODE_LABEL_PATTERN.test(term) ? { kind: 'blank-node', value: term.slice(2) } : null;
+    const label = term.slice(2);
+    return isRdfBlankNodeLabel(label) ? { kind: 'blank-node', value: label } : null;
   }
   const iri = term.startsWith('<') && term.endsWith('>') ? term.slice(1, -1) : term;
   return isAbsoluteRfc3987IriV1(iri) ? { kind: 'iri', value: iri } : null;
@@ -455,3 +445,5 @@ export function normalizeRdfObject(value: unknown): string {
   const raw = String(value ?? '');
   return isRdfTerm(raw) ? raw : `"${escapeRdfLiteral(raw)}"`;
 }
+
+export { isRdfBlankNodeLabel } from './blank-node-label.js';
