@@ -138,8 +138,9 @@ wire-protocol or deployment registry changes are required.**
   daemon on Node 26 therefore sent every chain JSON-RPC call over HTTP/2, a
   path no release had been tested on, and one such daemon stalled in Node's
   native HTTP/2 write buffering until its worker was killed. Where Node would
-  negotiate HTTP/2, chain RPC calls now use an HTTP/1.1-only connection pool.
-  Nothing changes on Node 22 and 24.
+  negotiate HTTP/2, chain RPC calls now ask the dispatcher `fetch` already uses
+  for HTTP/1.1, so a proxy set through `NODE_USE_ENV_PROXY` or a dispatcher the
+  operator installed still carries them. Nothing changes on Node 22 and 24.
 - **An Edge subscribed to a public Context Graph finds holders that are not
   already connected to it** (#2778): an Edge keeps no `agents` phonebook by default,
   so for a wallet-scoped public graph the curator tier of VM recovery (owner

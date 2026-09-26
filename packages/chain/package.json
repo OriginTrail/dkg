@@ -13,10 +13,9 @@
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
-    "@origintrail-official/dkg-core": "workspace:*",
     "@origintrail-official/dkg-http-utils": "workspace:*",
-    "ethers": "^6",
-    "undici": "^7.29.1"
+    "@origintrail-official/dkg-core": "workspace:*",
+    "ethers": "^6"
   },
   "optionalDependencies": {
     "@origintrail-official/dkg-evm-module": "workspace:*"

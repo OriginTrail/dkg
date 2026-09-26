@@ -2,10 +2,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FetchRequest } from 'ethers';
 
 const HTTP1_DISPATCHER = Object.freeze({ kind: 'http1-dispatcher-sentinel' });
+const boundaryInits: RequestInit[] = [];
 
-vi.mock('../src/rpc-http1-dispatcher.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/rpc-http1-dispatcher.js')>()),
-  rpcFetchTransportInit: () => ({ dispatcher: HTTP1_DISPATCHER }),
+vi.mock('../src/rpc-http1-dispatcher.js', () => ({
+  chainRpcFetchInit: (init: RequestInit) => {
+    boundaryInits.push(init);
+    return { ...init, dispatcher: HTTP1_DISPATCHER };
+  },
 }));
 
 const { cancellableRpcGetUrl } = await import('../src/rpc-request-transport.js');
@@ -25,10 +28,11 @@ function captureFetch(result: unknown): { calls: Array<{ url: string; init: Reco
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  boundaryInits.length = 0;
 });
 
-describe('chain RPC fetches pass the HTTP/1.1 dispatcher (#2828)', () => {
-  it('the ethers RPC transport passes it on every request', async () => {
+describe('chain RPC fetches go through chainRpcFetchInit (#2828)', () => {
+  it('the ethers RPC transport does, on every request', async () => {
     const { calls } = captureFetch('0x1');
     const request = new FetchRequest('https://rpc.example.invalid/');
     request.body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_blockNumber', params: [] });
@@ -36,11 +40,14 @@ describe('chain RPC fetches pass the HTTP/1.1 dispatcher (#2828)', () => {
     const response = await cancellableRpcGetUrl(request);
 
     expect(response.statusCode).toBe(200);
+    expect(boundaryInits).toHaveLength(1);
+    expect(boundaryInits[0]).toMatchObject({ method: 'POST' });
+    expect(boundaryInits[0]!.signal).toBeInstanceOf(AbortSignal);
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.init.dispatcher).toBe(HTTP1_DISPATCHER);
+    expect(calls[0]!.init).toEqual({ ...boundaryInits[0], dispatcher: HTTP1_DISPATCHER });
   });
 
-  it('the strict finalized RPC client passes it too', async () => {
+  it('the strict finalized RPC client does too', async () => {
     const { calls } = captureFetch('0x1');
 
     await postStrictFinalizedJsonRpcV1(
@@ -52,8 +59,9 @@ describe('chain RPC fetches pass the HTTP/1.1 dispatcher (#2828)', () => {
       new AbortController().signal,
     );
 
+    expect(boundaryInits).toHaveLength(1);
+    expect(boundaryInits[0]).toMatchObject({ method: 'POST', redirect: 'error' });
     expect(calls).toHaveLength(1);
-    expect(calls[0]!.init.dispatcher).toBe(HTTP1_DISPATCHER);
-    expect(calls[0]!.init.redirect).toBe('error');
+    expect(calls[0]!.init).toEqual({ ...boundaryInits[0], dispatcher: HTTP1_DISPATCHER });
   });
 });
