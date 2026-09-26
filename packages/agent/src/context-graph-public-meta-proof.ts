@@ -11,6 +11,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import { stripLiteral } from './dkg-agent-utils.js';
 import {
   hasActiveApprovedMemberDelegation,
+  renderApprovedMemberProofSparql,
   type ApprovedMemberProof,
 } from './context-graph-member-proof.js';
 
@@ -180,18 +181,28 @@ function renderConflictingPublicPolicyPattern(contextGraphUri: string): string {
 }
 
 /** Build the store-side ASK query from the canonical public proof model. */
-export function buildAuthoritativePublicMetaAskQuery(contextGraphId: string): string {
+export function buildAuthoritativePublicMetaAskQuery(
+  contextGraphId: string,
+  memberProof?: ApprovedMemberProof,
+): string {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
   const requirements = AUTHORITATIVE_PUBLIC_META_REQUIREMENTS
     .map((requirement) => `      ${renderRequirement(contextGraphUri, requirement)}`)
     .join('\n');
-  return `ASK WHERE {
+  // With a member proof this is the stored form of the post-approval contract
+  // (hasAuthoritativePublicMetaDefinitionForApprovedMember), rendered from the
+  // same member model as the private ASK.
+  const memberRequirements = memberProof
+    ? `\n${renderApprovedMemberProofSparql(contextGraphId, contextGraphUri, memberProof)}`
+    : '';
+  const prefix = memberProof ? 'PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>\n  ' : '';
+  return `${prefix}ASK WHERE {
     GRAPH <${assertSafeIri(metaGraph)}> {
 ${requirements}
       FILTER NOT EXISTS {
 ${renderConflictingPublicPolicyPattern(contextGraphUri)}
-      }
+      }${memberRequirements}
     }
   }`;
 }

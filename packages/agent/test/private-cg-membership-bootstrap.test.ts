@@ -14,6 +14,7 @@ import {
 import { agentFromPrivateKey, DKGAgent } from '../src/index.js';
 import { signAgentDelegation, type SignedAgentDelegation } from '../src/auth/agent-delegation.js';
 import { joinDelegationScope } from '../src/dkg-agent-helpers.js';
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 
 type JoinRequestHandler = (data: Uint8Array, peerId: string) => Promise<Uint8Array>;
 
@@ -230,6 +231,90 @@ describe('private CG membership bootstrap recovery', () => {
     expect(await (agent as any).hasConfirmedMetaState(contextGraphId)).toBe(true);
     expect(await agent.isPrivateContextGraph(contextGraphId)).toBe(false);
     expect(await (agent as any).canUseSharedMemoryForContextGraph(contextGraphId)).toBe(true);
+  });
+
+  it('completes a public join bootstrap only once the approved member proof is stored (#2831 review)', async () => {
+    ({ agent } = await createAgent('PublicJoinApprovedMemberProof'));
+    const contextGraphId = '0x00a9D0dcab936a418ffEbc734476C91D4027d359/public-join-member-proof';
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const member = '0x00000000000000000000000000000000000000a1';
+    (agent as any).localApprovedAgentByCG.set(contextGraphId, member);
+    // The public declaration a member already holds from the RFC-64 bootstrap
+    // before it joins: enough for reads, not for completing the join.
+    await (agent as any).store.insert([
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: metaGraph },
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"public"', graph: metaGraph },
+    ]);
+    expect(await (agent as any).hasConfirmedMetaState(contextGraphId)).toBe(true);
+    expect(await (agent as any).hasConfirmedMetaState(contextGraphId, { requireApprovedMemberProof: true }))
+      .toBe(false);
+
+    const delegation = `did:dkg:agent-delegation:${contextGraphId}:${member}`;
+    await (agent as any).store.insert([
+      { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: `"${member}"`, graph: metaGraph },
+      { subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT, object: `"${member}"`, graph: metaGraph },
+      { subject: delegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: `"${agent!.peerId}"`, graph: metaGraph },
+      { subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT, object: `"${Date.now() - 60_000}"`, graph: metaGraph },
+    ]);
+    expect(await (agent as any).hasConfirmedMetaState(contextGraphId, { requireApprovedMemberProof: true }))
+      .toBe(true);
+  });
+
+  it('keeps the post-approval bootstrap pending while the curator snapshot does not prove the member (#2831 review)', async () => {
+    const contextGraphId = '0x00a9D0dcab936a418ffEbc734476C91D4027d359/public-join-stale-snapshot';
+    const curatorPeerId = '12D3KooWCuratorOfPublicJoinStaleSnapshot';
+    let memberProofStored = false;
+    const confirmationOptions: Array<{ requireApprovedMemberProof?: boolean } | undefined> = [];
+    const agentLike = {
+      localApprovedAgentByCG: new Map([[contextGraphId, '0x00000000000000000000000000000000000000a1']]),
+      peerId: '12D3KooWMemberOfPublicJoinStaleSnapshot',
+      chain: {},
+      networkAdmissionCoordinator: { ensureAdmitted: async () => true },
+      ensurePeerConnected: async () => undefined,
+      node: { libp2p: { getConnections: () => [{ remotePeer: { toString: () => curatorPeerId } }] } },
+      // The curator snapshot is stale: it does not list this member yet.
+      refreshMetaFromCurator: vi.fn(async () => false),
+      runCatchupOverPeers: vi.fn(async () => ({
+        dataSynced: 1,
+        sharedMemorySynced: 0,
+        peersSucceeded: 1,
+        denied: false,
+        sharedMemoryCompletedCleanly: true,
+      })),
+      hasConfirmedMetaState: vi.fn(async (
+        _contextGraphId: string,
+        options?: { requireApprovedMemberProof?: boolean },
+      ) => {
+        confirmationOptions.push(options);
+        // The pre-join public declaration confirms ordinary reads.
+        return options?.requireApprovedMemberProof === true ? memberProofStored : true;
+      }),
+      refreshMetaSyncedFlags: vi.fn(async () => undefined),
+      syncContextGraphFromConnectedPeers: vi.fn(async () => undefined),
+      log: { info: vi.fn(), warn: vi.fn() },
+    };
+    const runBootstrap = () => LifecycleSyncMethods.prototype.runImmediatePostApprovalSync.call(
+      agentLike as never,
+      contextGraphId,
+      curatorPeerId,
+    );
+
+    await runBootstrap();
+    expect(agentLike.refreshMetaSyncedFlags).not.toHaveBeenCalled();
+    expect(agentLike.syncContextGraphFromConnectedPeers).toHaveBeenCalledTimes(1);
+    expect(confirmationOptions.length).toBeGreaterThan(0);
+    expect(confirmationOptions.every((options) => options?.requireApprovedMemberProof === true)).toBe(true);
+
+    // Once a refresh stores the member's delegation, the bootstrap completes.
+    agentLike.refreshMetaFromCurator.mockImplementation(async () => {
+      memberProofStored = true;
+      return true;
+    });
+    agentLike.syncContextGraphFromConnectedPeers.mockClear();
+    await runBootstrap();
+    expect(agentLike.refreshMetaSyncedFlags).toHaveBeenCalledTimes(1);
+    expect(agentLike.syncContextGraphFromConnectedPeers).not.toHaveBeenCalled();
   });
 
   it('requires the full identity-bearing private definition before metadata is authoritative', async () => {

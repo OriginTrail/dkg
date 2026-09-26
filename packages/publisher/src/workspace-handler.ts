@@ -472,6 +472,13 @@ export class SharedMemoryHandler {
         contextGraphId: string,
       ) => Promise<boolean>;
       /**
+       * @deprecated Use `publicAccessPolicyOracle`. Kept so existing callers
+       * keep their oracle: the proof it asks for is unchanged, only broader.
+       */
+      publicAccessPolicyOnChainOracle?: (
+        contextGraphId: string,
+      ) => Promise<boolean>;
+      /**
        * Return false when another authoritative synchronization rail owns this
        * CG. The validated wire is declined permanently and is not materialized.
        */
@@ -538,7 +545,8 @@ export class SharedMemoryHandler {
     this.writeLocks = options?.writeLocks ?? new Map();
     this.localAgentAddresses = options?.localAgentAddresses;
     this.contextGraphMetaOracle = options?.contextGraphMetaOracle;
-    this.publicAccessPolicyOracle = options?.publicAccessPolicyOracle;
+    this.publicAccessPolicyOracle = options?.publicAccessPolicyOracle
+      ?? options?.publicAccessPolicyOnChainOracle;
     this.legacyApplyAllowedOracle = options?.legacyApplyAllowedOracle;
     this.resolveDurableRootAtomicCompanion =
       options?.resolveDurableRootAtomicCompanion;

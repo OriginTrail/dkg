@@ -222,4 +222,43 @@ describe('on-chain probe evaluation at the handler boundary', () => {
     expect(outcome.applied).toBe(true);
     expect(probeCalls).toBeGreaterThan(0);
   });
+
+  it('keeps honouring the deprecated publicAccessPolicyOnChainOracle option', async () => {
+    // Callers written before the rename must keep their oracle: without it an
+    // agent-gated public CG would reject exactly this plaintext write.
+    const store = new OxigraphStore();
+    let probeCalls = 0;
+    const writer = ethers.Wallet.createRandom();
+    await store.insert([{
+      subject: DATA,
+      predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+      object: `"${writer.address}"`,
+      graph: META,
+    }]);
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: new Map(),
+      localAgentAddresses: () => [writer.address],
+      publicAccessPolicyOnChainOracle: async () => { probeCalls += 1; return true; },
+    });
+
+    const payload = msg('Legacy Oracle Plaintext', 'ws-probe-legacy-oracle');
+    const timestamp = new Date().toISOString();
+    const signature = await writer.signMessage(
+      computeGossipSigningPayload(GOSSIP_TYPE_WORKSPACE_PUBLISH, CG, timestamp, payload),
+    );
+    const wire = encodeGossipEnvelope({
+      version: GOSSIP_ENVELOPE_VERSION,
+      type: GOSSIP_TYPE_WORKSPACE_PUBLISH,
+      contextGraphId: CG,
+      agentAddress: writer.address,
+      timestamp,
+      signature: ethers.getBytes(signature),
+      payload,
+    });
+
+    const outcome = await handler.handle(wire, PEER);
+
+    expect(outcome.applied, `rejected: ${outcome.reason ?? '<none>'}`).toBe(true);
+    expect(probeCalls).toBeGreaterThan(0);
+  });
 });

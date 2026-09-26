@@ -1629,7 +1629,8 @@ describe('private read authorization uses the on-chain participant roster', () =
         approvedAgentAddress: local.agentAddress.toLowerCase(),
       }),
     }));
-    expect(hasConfirmedMeta).toHaveBeenCalledWith(contextGraphId);
+    // Recovery completes the join only on metadata that proves this member.
+    expect(hasConfirmedMeta).toHaveBeenCalledWith(contextGraphId, { requireApprovedMemberProof: true });
     expect(readAuthority).toHaveBeenCalledWith(contextGraphId, {
       allowSubscriptionFallback: false,
     });

@@ -176,6 +176,35 @@ describe('authoritative public metadata proof', () => {
       }
     });
 
+    it('keeps the post-approval snapshot check and its store query in lockstep', async () => {
+      const definition = authoritativePublicMetaQuads(contextGraphId);
+      const privateDefinition = definition.map((quad) => (
+        quad.predicate === DKG_ONTOLOGY.DKG_ACCESS_POLICY ? { ...quad, object: '"private"' } : quad
+      ));
+      const cases: Array<[string, Quad[], boolean]> = [
+        ['public definition with the member', [...definition, ...memberQuads()], true],
+        ['public definition alone', definition, false],
+        ['revoked member', [...definition, ...memberQuads({ revoked: true })], false],
+        ['expired delegation', [...definition, ...memberQuads({ expiresAtMs: 1_500 })], false],
+        ['delegation bound to another peer', [...definition, ...memberQuads({ peer: '12D3KooWSomebodyElse' })], false],
+        ['private definition with the member', [...privateDefinition, ...memberQuads()], false],
+      ];
+      for (const [name, quads, expected] of cases) {
+        const store = new OxigraphStore();
+        try {
+          await store.insert(quads);
+          const result = await store.query(buildAuthoritativePublicMetaAskQuery(contextGraphId, proof));
+          expect(result.type, name).toBe('boolean');
+          if (result.type !== 'boolean') throw new Error('expected boolean ASK result');
+          expect(result.value, name).toBe(expected);
+          expect(hasAuthoritativePublicMetaDefinitionForApprovedMember(contextGraphId, quads, proof), name)
+            .toBe(expected);
+        } finally {
+          await store.close();
+        }
+      }
+    });
+
     it('never accepts a private definition, whatever the member proof says', () => {
       const privateDefinition = authoritativePublicMetaQuads(contextGraphId).map((quad) => (
         quad.predicate === DKG_ONTOLOGY.DKG_ACCESS_POLICY ? { ...quad, object: '"private"' } : quad

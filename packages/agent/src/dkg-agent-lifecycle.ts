@@ -8485,12 +8485,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // transfer into a false-ready subscription. Retry once after each
             // catchup round and require a live metadata proof before declaring
             // the curator-targeted bootstrap complete.
-            let hasAuthoritativeMeta = await this.hasConfirmedMetaState(contextGraphId)
-              .catch(() => false);
+            // The bootstrap completes only once the local metadata proves this
+            // approved member; a public definition stored before the join
+            // (RFC-64 bootstrap) must not end it while the curator's snapshot
+            // is still stale (#2831 review).
+            let hasAuthoritativeMeta = await this.hasConfirmedMetaState(
+              contextGraphId,
+              { requireApprovedMemberProof: true },
+            ).catch(() => false);
             if (!hasAuthoritativeMeta) {
               await this.refreshMetaFromCurator(contextGraphId, curatorMetaRefreshOptions);
-              hasAuthoritativeMeta = await this.hasConfirmedMetaState(contextGraphId)
-                .catch(() => false);
+              hasAuthoritativeMeta = await this.hasConfirmedMetaState(
+                contextGraphId,
+                { requireApprovedMemberProof: true },
+              ).catch(() => false);
             }
             if (hasAuthoritativeMeta) {
               await this.refreshMetaSyncedFlags([contextGraphId]);
@@ -8597,7 +8605,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
       return false;
     });
-    if (!refreshed || !(await this.hasConfirmedMetaState(contextGraphId).catch(() => false))) {
+    if (
+      !refreshed
+      || !(await this.hasConfirmedMetaState(contextGraphId, { requireApprovedMemberProof: true })
+        .catch(() => false))
+    ) {
       this.log.warn(
         ctx,
         `Pending join-approval metadata recovery for "${contextGraphId}" did not establish authoritative metadata; keeping data lanes closed`,
@@ -10909,6 +10921,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     options?: {
       rejectUnregisteredPlaceholder?: boolean;
+      /** Join bootstrap completion; see ConfirmContextGraphMetadataInput. */
+      requireApprovedMemberProof?: boolean;
       /**
        * Caller deadline for the chain proof. An aborted proof is `unknown`,
        * which confirms nothing, so the answer fails closed.
