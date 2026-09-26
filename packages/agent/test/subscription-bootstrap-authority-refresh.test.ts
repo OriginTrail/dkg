@@ -18,6 +18,8 @@
  * would let a caller bind anyway, and must stay distinguishable from each
  * other so recovery can tell an empty finalized index from a failed read.
  */
+import { ChainRpcTransportError } from '@origintrail-official/dkg-chain';
+import { StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
 import { describe, expect, it, vi } from 'vitest';
 import type { DKGAgent } from '../src/dkg-agent.js';
 import type {
@@ -107,6 +109,7 @@ describe('subscription bootstrap finalized-generation refresh', () => {
       source: 'registered-chain',
       reason: 'chain-name-binding-unavailable',
       metadataBootstrap: 'eligible',
+      dependency: 'chain',
     });
     expect(decision).not.toHaveProperty('onChainId');
 
@@ -142,6 +145,7 @@ describe('subscription bootstrap finalized-generation refresh', () => {
         source: 'registered-chain',
         reason: 'chain-name-binding-unavailable',
         metadataBootstrap: 'eligible',
+        dependency: 'chain',
       });
       // A non-evidence request must never be handed to the reconciler here:
       // only the finalized-absence seed from the earlier step ran.
@@ -165,10 +169,44 @@ describe('subscription bootstrap finalized-generation refresh', () => {
       source: 'registered-chain',
       reason: 'registered-authority-error',
       metadataBootstrap: 'eligible',
+      dependency: 'unknown',
     });
     expect(decision).not.toHaveProperty('onChainId');
     expect(reconcile).toHaveBeenCalledOnce();
     expect(registeredAuthority).toHaveBeenCalledTimes(2);
+  });
+
+  it('attributes a failed refresh or evidence reconcile to the dependency its error names (#2834)', async () => {
+    const storeFailure = createBootstrapAgent({
+      refresh: async () => {
+        throw new StoreOperationTimeoutError({
+          backend: 'oxigraph-server',
+          operation: 'query',
+          outcome: 'not_started',
+          message: 'Managed Oxigraph is recovering; query was not started',
+        });
+      },
+    });
+    await expect(resolveBootstrap(storeFailure.agent)).resolves.toMatchObject({
+      outcome: 'unavailable',
+      reason: 'registered-authority-error',
+      dependency: 'store',
+    });
+
+    const chainFailure = createBootstrapAgent({
+      refresh: async () => new Map([[CG_ID, FINALIZED_EVIDENCE_REQUEST]]),
+      reconcile: async (_contextGraphId, _signal, request) => {
+        if (request.kind === 'finalized-evidence') {
+          throw new ChainRpcTransportError('RPC_ENDPOINTS_EXHAUSTED', 'all RPC endpoints failed');
+        }
+        return null;
+      },
+    });
+    await expect(resolveBootstrap(chainFailure.agent)).resolves.toMatchObject({
+      outcome: 'unavailable',
+      reason: 'registered-authority-error',
+      dependency: 'chain',
+    });
   });
 
   it('reports an authority error when reconciling the finalized evidence throws', async () => {
@@ -189,6 +227,7 @@ describe('subscription bootstrap finalized-generation refresh', () => {
       source: 'registered-chain',
       reason: 'registered-authority-error',
       metadataBootstrap: 'eligible',
+      dependency: 'unknown',
     });
     expect(refresh).toHaveBeenCalledOnce();
     // Seed reconcile, then the evidence reconcile that threw. No re-resolve.

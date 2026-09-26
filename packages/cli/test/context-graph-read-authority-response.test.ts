@@ -1,8 +1,11 @@
 import type { ServerResponse } from 'node:http';
-import { describe, expect, it } from 'vitest';
+import { Logger, createOperationContext, type CanonicalLogRecord } from '@origintrail-official/dkg-core';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE,
+  corsHeaders,
   isContextGraphReadAuthorityUnavailable,
+  respondContextGraphReadAuthorityUnavailable,
   respondIfContextGraphReadAuthorityUnavailable,
   respondWithDaemonError,
 } from '../src/daemon/http-utils.js';
@@ -119,5 +122,114 @@ describe('respondWithDaemonError', () => {
     expect(JSON.parse(res.body ?? '{}').code)
       .toBe(CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE_CODE);
     expect(res.body).not.toContain('chain-access-policy-timeout');
+  });
+});
+
+describe('read-authority 503 attribution in the daemon log (#2834)', () => {
+  const records: CanonicalLogRecord[] = [];
+
+  beforeEach(() => {
+    records.length = 0;
+    Logger.setSink((record) => { records.push(record); });
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    Logger.setSink(null);
+    vi.restoreAllMocks();
+  });
+
+  function attributed(dependency: string, reason = 'registered-authority-error'): Error {
+    return Object.assign(authorityUnavailableError(), { source: 'registered-chain', reason, dependency });
+  }
+
+  /** The one log line written under `operationId`. */
+  function lineFor(operationId: string): CanonicalLogRecord {
+    const lines = records.filter((record) => record.operationId === operationId);
+    expect(lines).toHaveLength(1);
+    return lines[0]!;
+  }
+
+  it('answers a store failure and a chain failure identically, and tells them apart in the log', () => {
+    const storeCtx = createOperationContext('query');
+    const chainCtx = createOperationContext('query');
+    const storeRes = mockResponse();
+    const chainRes = mockResponse();
+
+    respondIfContextGraphReadAuthorityUnavailable(storeRes, attributed('store', 'response-test-a'), storeCtx);
+    respondIfContextGraphReadAuthorityUnavailable(chainRes, attributed('chain', 'response-test-a'), chainCtx);
+
+    expect(storeRes.statusCode).toBe(503);
+    expect(chainRes.statusCode).toBe(503);
+    expect(chainRes.body).toBe(storeRes.body);
+    expect(storeRes.headers['Retry-After']).toBe('3');
+    expect(chainRes.headers['Retry-After']).toBe('3');
+    expect(storeRes.headers['x-dkg-operation-id']).toBe(storeCtx.operationId);
+    expect(chainRes.headers['x-dkg-operation-id']).toBe(chainCtx.operationId);
+    expect(lineFor(storeCtx.operationId).message)
+      .toContain('source=registered-chain reason=response-test-a dependency=store');
+    expect(lineFor(chainCtx.operationId).message)
+      .toContain('source=registered-chain reason=response-test-a dependency=chain');
+    expect(records.some((record) => record.message.includes('cg-x'))).toBe(false);
+  });
+
+  it('keeps a searchable line for a repeated attribution, under the repeat\'s own operation id', () => {
+    const first = createOperationContext('query');
+    const repeat = createOperationContext('query');
+
+    respondIfContextGraphReadAuthorityUnavailable(mockResponse(), attributed('store', 'response-test-b'), first);
+    const res = mockResponse();
+    respondIfContextGraphReadAuthorityUnavailable(res, attributed('store', 'response-test-b'), repeat);
+
+    expect(lineFor(first.operationId).level).toBe('warn');
+    expect(res.headers['x-dkg-operation-id']).toBe(repeat.operationId);
+    expect(lineFor(repeat.operationId)).toMatchObject({ level: 'info' });
+    expect(lineFor(repeat.operationId).message).toContain('reason=response-test-b dependency=store');
+  });
+
+  it('logs an attribution field whose getter throws as unknown', () => {
+    const hostile = authorityUnavailableError();
+    Object.defineProperty(hostile, 'reason', { get() { throw new Error('hostile getter'); } });
+    const ctx = createOperationContext('query');
+
+    expect(respondIfContextGraphReadAuthorityUnavailable(mockResponse(), hostile, ctx)).toBe(true);
+
+    expect(lineFor(ctx.operationId).message).toContain('reason=unknown');
+  });
+
+  it('gives a response without an operation context a fresh operation id to correlate', () => {
+    const res = mockResponse();
+
+    respondWithDaemonError(res, attributed('local-state', 'response-test-c'));
+
+    const operationId = res.headers['x-dkg-operation-id']!;
+    expect(operationId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(lineFor(operationId).message).toContain('dependency=local-state');
+  });
+
+  it('renders an already-classified decision through the same response', () => {
+    const fromDecision = mockResponse();
+    const fromError = mockResponse();
+    const ctx = createOperationContext('query');
+
+    respondContextGraphReadAuthorityUnavailable(fromDecision, {
+      source: 'legacy-local', reason: 'response-test-d', dependency: 'store',
+    }, ctx);
+    respondIfContextGraphReadAuthorityUnavailable(fromError, attributed('store', 'response-test-d'));
+
+    expect(fromDecision.statusCode).toBe(503);
+    expect(fromDecision.body).toBe(fromError.body);
+    expect(fromDecision.headers['Retry-After']).toBe('3');
+    expect(fromDecision.headers['x-dkg-operation-id']).toBe(ctx.operationId);
+    expect(lineFor(ctx.operationId).message).toContain('source=legacy-local reason=response-test-d dependency=store');
+  });
+});
+
+describe('corsHeaders', () => {
+  it('lets an allowed cross-origin client read the retry hint and the operation id', () => {
+    expect(corsHeaders('https://app.example.invalid')['Access-Control-Expose-Headers'])
+      .toBe('Retry-After, x-dkg-operation-id');
+    expect(corsHeaders(null)).toEqual({});
   });
 });

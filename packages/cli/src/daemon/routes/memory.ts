@@ -240,6 +240,7 @@ import {
   sleep,
   deriveBlockExplorerUrl,
   respondIfChainRpcTransportError,
+  respondContextGraphReadAuthorityUnavailable,
 } from '../http-utils.js';
 import { handleQueryCatalogRoutes } from './query-catalog.js';
 import {
@@ -1839,13 +1840,8 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
         // `Retry-After`, and deliberately NO context-graph id, authority
         // source or internal reason in the body — those would turn an
         // outage response into the same enumeration oracle the denial path
-        // is careful about. The reason stays in the daemon log.
-        res.setHeader('Retry-After', '3');
-        return jsonResponse(res, 503, {
-          error: 'Context graph read authority is temporarily unavailable. Retry shortly.',
-          code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE',
-          retryable: true,
-        });
+        // is careful about. The attribution goes to the daemon log (#2834).
+        return respondContextGraphReadAuthorityUnavailable(res, authority);
       }
 
       // An `allowed` outcome is not automatically a CALLER-scoped allow.

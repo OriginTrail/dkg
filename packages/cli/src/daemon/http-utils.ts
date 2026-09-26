@@ -16,6 +16,7 @@ import {
   messageIndicatesNoFundedPublisherWallet,
   Logger,
   createOperationContext,
+  type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 import {
@@ -28,6 +29,10 @@ import {
   isStoreOperationTimeoutError,
 } from '@origintrail-official/dkg-storage';
 import type { DkgConfig } from '../config.js';
+import {
+  createReadAuthorityDiagnostics,
+  type ContextGraphReadAuthorityAttribution,
+} from './read-authority-diagnostics.js';
 import { enforceSignedRequestPostBody } from '../auth.js';
 
 import type { CorsAllowlist } from './state.js';
@@ -131,17 +136,38 @@ export function isContextGraphReadAuthorityUnavailable(err: unknown): boolean {
   }
 }
 
+const readAuthorityDiagnostics = createReadAuthorityDiagnostics();
+
 /**
- * Uniform retryable response for an unresolvable Context Graph read authority.
- * Shared by every route that reaches `DKGAgent.query` with a scoped
- * `contextGraphId`, so a chain/metadata outage is never reported as a 500 and
- * the graph id, authority source, and internal reason stay out of the body.
+ * The attribution a thrown read-authority marker carries. The agent's error is
+ * recognised structurally, so each field is read defensively; a missing,
+ * non-string or throwing field becomes `unknown` here and nowhere else.
  */
-export function respondIfContextGraphReadAuthorityUnavailable(
+function decodeReadAuthorityAttribution(err: unknown): ContextGraphReadAuthorityAttribution {
+  const field = (key: keyof ContextGraphReadAuthorityAttribution): string => {
+    try {
+      const value: unknown = Reflect.get(err as object, key);
+      return typeof value === 'string' ? value : 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  };
+  return { source: field('source'), reason: field('reason'), dependency: field('dependency') };
+}
+
+/**
+ * Uniform retryable response for an unresolvable Context Graph read authority,
+ * the one renderer every route uses. The graph id, authority source and
+ * internal reason stay out of the body; the attribution goes to the daemon log
+ * under `ctx`'s operation id (#2834), which the response carries as
+ * `x-dkg-operation-id` for correlation.
+ */
+export function respondContextGraphReadAuthorityUnavailable(
   res: ServerResponse,
-  err: unknown,
-): boolean {
-  if (!isContextGraphReadAuthorityUnavailable(err)) return false;
+  attribution: ContextGraphReadAuthorityAttribution,
+  ctx: OperationContext = createOperationContext('query'),
+): void {
+  readAuthorityDiagnostics.record(ctx, attribution);
   jsonResponse(
     res,
     503,
@@ -151,8 +177,22 @@ export function respondIfContextGraphReadAuthorityUnavailable(
       retryable: true,
     },
     undefined,
-    { 'Retry-After': '3' },
+    { 'Retry-After': '3', 'x-dkg-operation-id': ctx.operationId },
   );
+}
+
+/**
+ * Renders the read-authority 503 for the agent's thrown marker. Shared by
+ * every route that reaches `DKGAgent.query` with a scoped `contextGraphId`, so
+ * a chain/metadata outage is never reported as a 500.
+ */
+export function respondIfContextGraphReadAuthorityUnavailable(
+  res: ServerResponse,
+  err: unknown,
+  ctx?: OperationContext,
+): boolean {
+  if (!isContextGraphReadAuthorityUnavailable(err)) return false;
+  respondContextGraphReadAuthorityUnavailable(res, decodeReadAuthorityAttribution(err), ctx);
   return true;
 }
 
@@ -1682,6 +1722,8 @@ export function corsHeaders(origin?: string | null): Record<string, string> {
   const headers: Record<string, string> = {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    // Lets cross-origin clients read a 503's retry hint and its log correlation id (#2834).
+    "Access-Control-Expose-Headers": "Retry-After, x-dkg-operation-id",
   };
   if (origin !== "*") headers["Vary"] = "Origin";
   return headers;

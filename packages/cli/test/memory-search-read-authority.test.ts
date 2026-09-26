@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest';
+import { Logger, type CanonicalLogRecord } from '@origintrail-official/dkg-core';
+import { describe, it, expect, vi } from 'vitest';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
@@ -254,16 +255,35 @@ describe('POST /api/memory/search — context-graph read authority', () => {
       authentication: requestAuthentication({ kind: 'agent', agentAddress: '0x123' }),
       decisionFor: () => ({
         outcome: 'unavailable', source: 'registered-chain', reason: 'registered-authority-error',
+        dependency: 'chain',
       }),
     });
+    const records: CanonicalLogRecord[] = [];
+    Logger.setSink((record) => { records.push(record); });
+    const quiet = [
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true),
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true),
+    ];
 
-    await handleMemoryRoutes(ctx);
+    try {
+      await handleMemoryRoutes(ctx);
+    } finally {
+      Logger.setSink(null);
+      for (const spy of quiet) spy.mockRestore();
+    }
 
     expect(res.statusCode).toBe(503);
     const body = JSON.parse(res.body);
     expect(body.retryable).toBe(true);
     expect(body.code).toBe('CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE');
     expect(res.headers['Retry-After']).toBe('3');
+    // #2834: the attribution goes to the daemon log under this operation id.
+    const operationId = res.headers['x-dkg-operation-id'];
+    expect(operationId).toMatch(/^[0-9a-f-]{36}$/);
+    const lines = records.filter((record) => record.operationId === operationId);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.message)
+      .toContain('source=registered-chain reason=registered-authority-error dependency=chain');
     // Per issue #2641 / PR #2649: an outage response must not disclose the CG
     // id, the authority source or the internal reason — otherwise the 503
     // becomes the enumeration oracle the denial path avoids.

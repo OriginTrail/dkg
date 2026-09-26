@@ -106,6 +106,8 @@ describe('cold current-state Context Graph name binding', () => {
         kind: 'unavailable',
         reason: 'local-chain-binding-unavailable',
         detail: 'ambiguous reverse binding',
+        // A plain error names no dependency (#2834).
+        dependency: 'unknown',
       });
   });
 
