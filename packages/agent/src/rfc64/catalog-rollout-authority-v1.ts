@@ -87,6 +87,27 @@ export type Rfc64CatalogAuthorityPolicyV1 =
     authoringAllowed: true;
   }>);
 
+/**
+ * What an RFC-64 receiver policy means for SWM transport on one graph, the one
+ * projection shared-memory admission and the SWM public-policy fence both use.
+ *
+ * - `legacy`: the kill switch is on or the graph is not in catalog mode, so
+ *   legacy authority decides.
+ * - `catalog-blocked`: catalog authority owns the graph but cannot govern
+ *   transport right now (inactive, or outside the catalog-apply lane); callers
+ *   fail closed.
+ * - `catalog-active`: catalog authority governs transport.
+ */
+export type Rfc64CatalogTransportStateV1 = 'legacy' | 'catalog-blocked' | 'catalog-active';
+
+export function projectRfc64CatalogTransportStateV1(
+  policy: Pick<Rfc64CatalogAuthorityPolicyV1, 'killSwitchActive' | 'mode' | 'active' | 'reconciliationLane'>,
+): Rfc64CatalogTransportStateV1 {
+  if (policy.killSwitchActive || policy.mode !== 'catalog') return 'legacy';
+  if (!policy.active || policy.reconciliationLane !== 'catalog-apply') return 'catalog-blocked';
+  return 'catalog-active';
+}
+
 export interface Rfc64CatalogReceiverActivityV1 {
   /**
    * Edge nodes derive this value from the canonical subscription registry.

@@ -17,6 +17,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
+import { projectRfc64CatalogTransportStateV1 } from '../src/rfc64/catalog-rollout-authority-v1.js';
 
 const CG = '0x1111111111111111111111111111111111111111/public-p2p';
 const CURATOR = '0x8ba1f109551bD432803012645Ac136ddd64DBA72';
@@ -428,6 +429,19 @@ describe('a retained public snapshot once catalog authority stops governing tran
     expect(gate).toEqual(expect.objectContaining({ kind: 'unavailable' }));
     expect(recovery).toBeNull();
     expect(getCgMeta).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['catalog mode, active, catalog-apply', { killSwitchActive: false, mode: 'catalog', active: true, reconciliationLane: 'catalog-apply' }, 'catalog-active'],
+    ['the kill switch', { killSwitchActive: true, mode: 'catalog', active: true, reconciliationLane: 'catalog-apply' }, 'legacy'],
+    ['legacy mode', { killSwitchActive: false, mode: 'legacy', active: true, reconciliationLane: 'legacy' }, 'legacy'],
+    ['shadow mode', { killSwitchActive: false, mode: 'shadow', active: true, reconciliationLane: 'shadow-stage' }, 'legacy'],
+    ['an inactive catalog receiver', { killSwitchActive: false, mode: 'catalog', active: false, reconciliationLane: 'catalog-apply' }, 'catalog-blocked'],
+    ['a disabled catalog lane', { killSwitchActive: false, mode: 'catalog', active: true, reconciliationLane: 'disabled' }, 'catalog-blocked'],
+  ] as const)('projects %s to one transport state for admission and the SWM fence', (_label, policy, expected) => {
+    // Shared-memory admission maps legacy to "delegate" and blocked to "deny";
+    // the SWM public-policy fence opens only for catalog-active.
+    expect(projectRfc64CatalogTransportStateV1(policy)).toBe(expected);
   });
 
   it.each([
