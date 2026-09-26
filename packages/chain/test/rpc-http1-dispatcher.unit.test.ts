@@ -1,7 +1,4 @@
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import tls from 'node:tls';
 import { fileURLToPath } from 'node:url';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -61,6 +58,31 @@ async function withTrustedCertificate<T>(cert: string, run: () => Promise<T>): P
   } finally {
     tls.setDefaultCACertificates(defaults);
   }
+}
+
+/** Environment variables that would route a child's requests through a proxy. */
+const PROXY_ENV = ['NODE_USE_ENV_PROXY', 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy'];
+
+/**
+ * Runs one chain RPC call to `url` as the first request of a fresh Node
+ * process that trusts the test certificate, with `env` added and no other
+ * proxy settings, and returns what the child reports.
+ */
+async function runChainRpcChild(url: string, env: NodeJS.ProcessEnv): Promise<unknown> {
+  const childEnv: NodeJS.ProcessEnv = { ...process.env };
+  for (const name of PROXY_ENV) delete childEnv[name];
+  Object.assign(childEnv, env, {
+    NODE_EXTRA_CA_CERTS: fileURLToPath(new URL('./fixtures/localhost-tls/localhost-cert.pem', import.meta.url)),
+  });
+  const stdout = await new Promise<string>((resolve, reject) => {
+    execFile(
+      process.execPath,
+      [fileURLToPath(new URL('./helpers/chain-rpc-fetch-child.mjs', import.meta.url)), url],
+      { env: childEnv, timeout: 20_000 },
+      (error, out, err) => (error ? reject(new Error(error.message + '\n' + err)) : resolve(out)),
+    );
+  });
+  return JSON.parse(stdout);
 }
 
 async function readRpc(response: Promise<Response>): Promise<unknown> {
@@ -223,29 +245,30 @@ describe('chain RPC fetches against a server that offers HTTP/2 (#2828)', () => 
     async () => {
       server.httpVersions.length = 0;
       const proxy = await startConnectProxy();
-      const dir = mkdtempSync(join(tmpdir(), 'chain-rpc-env-proxy-'));
-      const certFile = join(dir, 'localhost.pem');
-      writeFileSync(certFile, server.cert);
-      const env: NodeJS.ProcessEnv = { ...process.env, NODE_USE_ENV_PROXY: '1', HTTPS_PROXY: proxy.url, NODE_EXTRA_CA_CERTS: certFile };
-      for (const name of ['https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy']) delete env[name];
 
       try {
-        const stdout = await new Promise<string>((resolve, reject) => {
-          execFile(
-            process.execPath,
-            [fileURLToPath(new URL('./helpers/chain-rpc-fetch-child.mjs', import.meta.url)), server.url],
-            { env, timeout: 20_000 },
-            (error, out, err) => (error ? reject(new Error(`${error.message}\n${err}`)) : resolve(out)),
-          );
-        });
+        const result = await runChainRpcChild(server.url, { NODE_USE_ENV_PROXY: '1', HTTPS_PROXY: proxy.url });
 
-        expect(JSON.parse(stdout)).toMatchObject({ status: 200, body: { result: '0x1' } });
+        expect(result).toMatchObject({ status: 200, body: { result: '0x1' } });
         expect(proxy.connects).toEqual([new URL(server.url).host]);
         expect(server.httpVersions).toEqual(['1.1']);
       } finally {
         await proxy.close();
-        rmSync(dir, { recursive: true, force: true });
       }
+    },
+  );
+
+  // test-disable-allow: D1 #2828 -- owner=branarakic lane=chain-rpc-node26 expires=2026-10-26 Needs undici 8 fetch; runs on Node 26 in chain-rpc-node26.yml.
+  it.runIf(RUNNING_FETCH_NEGOTIATES_HTTP2)(
+    'stay on HTTP/1.1 when a chain RPC call is the first request of a fresh process',
+    async () => {
+      server.httpVersions.length = 0;
+
+      // No proxy, and nothing in the child touches fetch or its classes before chainRpcFetch.
+      const result = await runChainRpcChild(server.url, {});
+
+      expect(result).toMatchObject({ status: 200, body: { result: '0x1' } });
+      expect(server.httpVersions).toEqual(['1.1']);
     },
   );
 });
