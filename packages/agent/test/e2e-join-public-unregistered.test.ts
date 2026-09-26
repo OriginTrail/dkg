@@ -90,22 +90,110 @@ afterAll(async () => {
   await revertSnapshot(fileSnapshot);
 });
 
-describe('E2E: SWM after a join on a public, unregistered context graph (#2827)', () => {
-  // Separate operational keys give the two nodes distinct default agents.
-  const curatorChain = createIndexedEVMAdapter(HARDHAT_KEYS.CORE_OP);
-  const memberChain = createIndexedEVMAdapter(HARDHAT_KEYS.EXTRA1);
-  let curator: DKGAgent;
-  let member: DKGAgent;
-  let contextGraphId: string;
-  let curatorAgent: string;
-  let memberAgent: string;
-  let memberDataDir: string;
-  let curatorAddr: string;
-  const tempDirs: string[] = [];
-  const memberPersistedSubscriptions = new Map<string, ContextGraphSubscriptionRecord>();
+// --- Step helpers: each names one phase and asserts its own outcome. ---
 
-  function createMember(chainAdapter: EVMChainAdapter): Promise<DKGAgent> {
-    return DKGAgent.create({
+async function createPublicP2pGraph(curator: DKGAgent, contextGraphId: string, curatorAgent: string): Promise<void> {
+  await curator.createContextGraph({
+    id: contextGraphId,
+    name: 'Public P2P join E2E',
+    description: '',
+    accessPolicy: 0,
+    callerAgentAddress: curatorAgent,
+  });
+  expect(await curator.isCuratorOf(contextGraphId)).toBe(true);
+}
+
+/** The daemon's subscribe admission: prove finalized name absence, fetch the owner-signed seed, accept it. */
+async function acceptOwnerSignedPolicy(member: DKGAgent, contextGraphId: string): Promise<void> {
+  const admission = await member.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId);
+  expect(admission.outcome, JSON.stringify(admission)).toBe('allowed');
+  member.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
+  await member.reconcileRfc64CatalogResponsibilityV1(contextGraphId);
+  const accepted = await pollUntil(
+    async () => member.hasAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId),
+    (value) => value === true,
+    60_000,
+    1_000,
+  );
+  expect(accepted, 'member accepted the owner-signed public policy').toBe(true);
+}
+
+async function joinAndApprove(input: {
+  curator: DKGAgent;
+  member: DKGAgent;
+  contextGraphId: string;
+  curatorAgent: string;
+  memberAgent: string;
+}): Promise<void> {
+  const { curator, member, contextGraphId, curatorAgent, memberAgent } = input;
+  const delegation = await member.signJoinRequest(contextGraphId);
+  const forwarded = await member.forwardJoinRequest(contextGraphId, delegation, undefined, curator.peerId);
+  expect(forwarded.delivered, `forward result: ${JSON.stringify(forwarded)}`).toBeGreaterThanOrEqual(1);
+  await pollUntil(
+    () => curator.listPendingJoinRequests(contextGraphId),
+    (rows) => rows.some((row: any) => String(row.agentAddress).toLowerCase() === memberAgent),
+  );
+  await curator.approveJoinRequest(contextGraphId, memberAgent, curatorAgent);
+  const status = await pollUntil(
+    () => member.getJoinRequestStatus(contextGraphId, memberAgent),
+    (value) => value === 'approved',
+  );
+  expect(status, 'join status on the member').toBe('approved');
+}
+
+/** The member's OWN projection is what its SWM gate reads; #2827 left it without an allowlist. */
+async function expectMemberAllowlist(member: DKGAgent, contextGraphId: string, agents: string[]): Promise<void> {
+  const allowed = await pollUntil(
+    async () => (await member.getContextGraphAllowedAgents(contextGraphId).catch(() => []))
+      .map((address) => address.toLowerCase()),
+    (addresses) => agents.every((agent) => addresses.includes(agent)),
+    60_000,
+  );
+  expect(allowed, 'member allowlist').toEqual(expect.arrayContaining(agents));
+}
+
+async function shareAndExpectDelivery(input: {
+  from: DKGAgent;
+  to: DKGAgent;
+  contextGraphId: string;
+  assertionName: string;
+  subject: string;
+  label: string;
+}): Promise<void> {
+  const { from, to, contextGraphId, assertionName, subject, label } = input;
+  await from.assertion.create(contextGraphId, assertionName);
+  await from.assertion.write(contextGraphId, assertionName, [
+    { subject, predicate: NAME, object: `"${label}"` },
+  ]);
+  await from.assertion.promote(contextGraphId, assertionName);
+  const names = await pollUntil(
+    () => sharedMemoryNames(to, contextGraphId, subject),
+    (values) => values.length > 0,
+    150_000,
+    2_000,
+  );
+  expect(names.some((name) => name.includes(label)), `${assertionName} delivered`).toBe(true);
+}
+
+describe('E2E: SWM after a join on a public, unregistered context graph (#2827)', () => {
+  const tempDirs: string[] = [];
+  const agents: DKGAgent[] = [];
+
+  afterAll(async () => {
+    for (const agent of agents) {
+      try { await agent.stop(); } catch { /* already stopped */ }
+    }
+    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  // One irreversible state machine, so one test: a failing phase stops the
+  // scenario instead of cascading into later phases on half-built state.
+  it('lets a join-approved member of a public P2P graph share SWM both ways, across a member restart', async () => {
+    const curatorDataDir = await mkdtemp(join(tmpdir(), 'dkg-e2e-2827-curator-'));
+    const memberDataDir = await mkdtemp(join(tmpdir(), 'dkg-e2e-2827-member-'));
+    tempDirs.push(curatorDataDir, memberDataDir);
+    const memberPersistedSubscriptions = new Map<string, ContextGraphSubscriptionRecord>();
+    const createMember = (chainAdapter: EVMChainAdapter) => DKGAgent.create({
       ...TEST_SNAPSHOT_CONFIG,
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'PublicMember',
@@ -121,21 +209,14 @@ describe('E2E: SWM after a join on a public, unregistered context graph (#2827)'
       },
       chainConfig: makeChainConfig(HARDHAT_KEYS.EXTRA1),
     });
-  }
 
-  afterAll(async () => {
-    try { await curator?.stop(); } catch { /* ignore */ }
-    try { await member?.stop(); } catch { /* ignore */ }
-    await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
-  });
-
-  it('boots two edge agents and connects them over libp2p', async () => {
+    // Two edges on indexed chain adapters, with distinct operational keys (so
+    // distinct default agents), connected over libp2p.
+    const curatorChain = createIndexedEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const memberChain = createIndexedEVMAdapter(HARDHAT_KEYS.EXTRA1);
     expect(curatorChain.contextGraphAuthorityIndexRevisionReader).toBeDefined();
     expect(memberChain.contextGraphAuthorityIndexRevisionReader).toBeDefined();
-    const curatorDataDir = await mkdtemp(join(tmpdir(), 'dkg-e2e-2827-curator-'));
-    memberDataDir = await mkdtemp(join(tmpdir(), 'dkg-e2e-2827-member-'));
-    tempDirs.push(curatorDataDir, memberDataDir);
-    curator = await DKGAgent.create({
+    const curator = await DKGAgent.create({
       ...TEST_SNAPSHOT_CONFIG,
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'PublicCurator',
@@ -146,134 +227,47 @@ describe('E2E: SWM after a join on a public, unregistered context graph (#2827)'
       dataDir: curatorDataDir,
       chainConfig: makeChainConfig(HARDHAT_KEYS.CORE_OP),
     });
-    member = await createMember(memberChain);
-
+    agents.push(curator);
+    let member = await createMember(memberChain);
+    agents.push(member);
     await curator.start();
     await member.start();
     await sleep(800);
-    curatorAddr = curator.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
+    const curatorAddr = curator.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
     await member.connectTo(curatorAddr);
     await sleep(1_500);
-
-    curatorAgent = curator.getDefaultAgentAddress()!.toLowerCase();
-    memberAgent = member.getDefaultAgentAddress()!.toLowerCase();
-    contextGraphId = `${curatorAgent}/public-p2p-join-e2e`;
     expect(member.node.libp2p.getPeers().length).toBeGreaterThanOrEqual(1);
+
+    const curatorAgent = curator.getDefaultAgentAddress()!.toLowerCase();
+    const memberAgent = member.getDefaultAgentAddress()!.toLowerCase();
     expect(memberAgent).not.toBe(curatorAgent);
-  }, 30_000);
+    const contextGraphId = `${curatorAgent}/public-p2p-join-e2e`;
 
-  it('the curator creates a PUBLIC graph without registering it on chain', async () => {
-    await curator.createContextGraph({
-      id: contextGraphId,
-      name: 'Public P2P join E2E',
-      description: '',
-      accessPolicy: 0,
-      callerAgentAddress: curatorAgent,
+    await createPublicP2pGraph(curator, contextGraphId, curatorAgent);
+    await acceptOwnerSignedPolicy(member, contextGraphId);
+    await joinAndApprove({ curator, member, contextGraphId, curatorAgent, memberAgent });
+    await expectMemberAllowlist(member, contextGraphId, [curatorAgent, memberAgent]);
+    await shareAndExpectDelivery({
+      from: curator, to: member, contextGraphId,
+      assertionName: 'curator-after-join', subject: CURATOR_ENTITY, label: 'Curator after join',
     });
-    expect(await curator.isCuratorOf(contextGraphId)).toBe(true);
-  }, 30_000);
 
-  it('the member subscribes and accepts the owner-signed public policy', async () => {
-    // The daemon's subscribe admission: prove finalized name absence, fetch the
-    // owner-signed seed from the connected curator and accept it.
-    const admission = await member.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId);
-    expect(admission.outcome, JSON.stringify(admission)).toBe('allowed');
-    member.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
-    await member.reconcileRfc64CatalogResponsibilityV1(contextGraphId);
-    const accepted = await pollUntil(
-      async () => member.hasAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId),
-      (value) => value === true,
-      60_000,
-      1_000,
-    );
-    expect(accepted).toBe(true);
-  }, 75_000);
-
-  it('the member joins and the curator approves', async () => {
-    const delegation = await member.signJoinRequest(contextGraphId);
-    const forwarded = await member.forwardJoinRequest(contextGraphId, delegation, undefined, curator.peerId);
-    expect(forwarded.delivered, `forward result: ${JSON.stringify(forwarded)}`).toBeGreaterThanOrEqual(1);
-    await pollUntil(
-      () => curator.listPendingJoinRequests(contextGraphId),
-      (rows) => rows.some((row: any) => String(row.agentAddress).toLowerCase() === memberAgent),
-    );
-    await curator.approveJoinRequest(contextGraphId, memberAgent, curatorAgent);
-    const status = await pollUntil(
-      () => member.getJoinRequestStatus(contextGraphId, memberAgent),
-      (value) => value === 'approved',
-    );
-    expect(status).toBe('approved');
-  }, 60_000);
-
-  it("the member installs the curator's allowlist", async () => {
-    const allowed = await pollUntil(
-      async () => (await member.getContextGraphAllowedAgents(contextGraphId).catch(() => []))
-        .map((address) => address.toLowerCase()),
-      (addresses) => addresses.includes(memberAgent) && addresses.includes(curatorAgent),
-      60_000,
-    );
-    expect(allowed).toEqual(expect.arrayContaining([curatorAgent, memberAgent]));
-  }, 75_000);
-
-  it('the curator shares after the approval and the member receives it', async () => {
-    await curator.assertion.create(contextGraphId, 'curator-after-join');
-    await curator.assertion.write(contextGraphId, 'curator-after-join', [
-      { subject: CURATOR_ENTITY, predicate: NAME, object: '"Curator after join"' },
-    ]);
-    await curator.assertion.promote(contextGraphId, 'curator-after-join');
-
-    const names = await pollUntil(
-      () => sharedMemoryNames(member, contextGraphId, CURATOR_ENTITY),
-      (values) => values.length > 0,
-      150_000,
-      2_000,
-    );
-    expect(names.some((name) => name.includes('Curator after join'))).toBe(true);
-  }, 180_000);
-
-  // The member restarts before it has authored anything here. Restarting after
-  // it authored a share hits a separate RFC-64 author-catalog projection
-  // failure on the member (tracked in its own issue), not the #2827 defects.
-  it('after a restart the member keeps its allowlist and shares in both directions', async () => {
+    // The member restarts before it has authored anything here: restarting
+    // after authoring hits a separate author-catalog projection failure
+    // (#2832), not the #2827 defects.
     await member.stop();
     member = await createMember(createIndexedEVMAdapter(HARDHAT_KEYS.EXTRA1));
+    agents.push(member);
     await member.start();
     await member.connectTo(curatorAddr);
-
-    const allowed = await pollUntil(
-      async () => (await member.getContextGraphAllowedAgents(contextGraphId).catch(() => []))
-        .map((address) => address.toLowerCase()),
-      (addresses) => addresses.includes(memberAgent) && addresses.includes(curatorAgent),
-      60_000,
-    );
-    expect(allowed).toEqual(expect.arrayContaining([curatorAgent, memberAgent]));
-
-    const memberEntity = `${MEMBER_ENTITY}:after-restart`;
-    await member.assertion.create(contextGraphId, 'member-after-restart');
-    await member.assertion.write(contextGraphId, 'member-after-restart', [
-      { subject: memberEntity, predicate: NAME, object: '"Member after restart"' },
-    ]);
-    await member.assertion.promote(contextGraphId, 'member-after-restart');
-    const onCurator = await pollUntil(
-      () => sharedMemoryNames(curator, contextGraphId, memberEntity),
-      (values) => values.length > 0,
-      150_000,
-      2_000,
-    );
-    expect(onCurator.length).toBeGreaterThan(0);
-
-    const curatorEntity = `${CURATOR_ENTITY}:after-restart`;
-    await curator.assertion.create(contextGraphId, 'curator-after-restart');
-    await curator.assertion.write(contextGraphId, 'curator-after-restart', [
-      { subject: curatorEntity, predicate: NAME, object: '"Curator after member restart"' },
-    ]);
-    await curator.assertion.promote(contextGraphId, 'curator-after-restart');
-    const onMember = await pollUntil(
-      () => sharedMemoryNames(member, contextGraphId, curatorEntity),
-      (values) => values.length > 0,
-      150_000,
-      2_000,
-    );
-    expect(onMember.length).toBeGreaterThan(0);
-  }, 420_000);
+    await expectMemberAllowlist(member, contextGraphId, [curatorAgent, memberAgent]);
+    await shareAndExpectDelivery({
+      from: member, to: curator, contextGraphId,
+      assertionName: 'member-after-restart', subject: `${MEMBER_ENTITY}:after-restart`, label: 'Member after restart',
+    });
+    await shareAndExpectDelivery({
+      from: curator, to: member, contextGraphId,
+      assertionName: 'curator-after-restart', subject: `${CURATOR_ENTITY}:after-restart`, label: 'Curator after member restart',
+    });
+  }, 900_000);
 });

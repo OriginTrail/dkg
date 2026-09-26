@@ -9,6 +9,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { stripLiteral } from './dkg-agent-utils.js';
+import {
+  hasActiveApprovedMemberDelegation,
+  type ApprovedMemberProof,
+} from './context-graph-member-proof.js';
 
 type PublicMetaObjectRequirement =
   | { kind: 'iri'; value: string }
@@ -123,6 +127,23 @@ export function hasAuthoritativePublicMetaDefinition(
 ): boolean {
   const inspection = inspectAuthoritativePublicMetaDefinition(contextGraphId, quads);
   return inspection.missing.length === 0 && !inspection.conflictingPolicy;
+}
+
+/**
+ * The post-approval contract of a PUBLIC graph: its unambiguous public
+ * definition plus the same approved-member proof a private definition must
+ * carry. A join can be approved on a public graph, whose allowlist governs
+ * publishing rather than reads (#2827). This checks the snapshot only; the
+ * caller must separately hold authenticated evidence that the graph is public,
+ * so a peer cannot downgrade a private graph by serving a public definition.
+ */
+export function hasAuthoritativePublicMetaDefinitionForApprovedMember(
+  contextGraphId: string,
+  quads: readonly Quad[],
+  memberProof: ApprovedMemberProof,
+): boolean {
+  return hasAuthoritativePublicMetaDefinition(contextGraphId, quads)
+    && hasActiveApprovedMemberDelegation(contextGraphId, quads, memberProof);
 }
 
 function renderRequirement(

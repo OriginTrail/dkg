@@ -21,11 +21,13 @@ import {
   SYNC_TOTAL_TIMEOUT_MS,
 } from './dkg-agent-constants.js';
 import {
-  hasActiveApprovedMemberDelegation,
   hasAuthoritativePrivateMetaDefinition,
   type AuthoritativePrivateMetaMemberProof,
 } from './context-graph-private-meta-proof.js';
-import { hasAuthoritativePublicMetaDefinition } from './context-graph-public-meta-proof.js';
+import {
+  hasAuthoritativePublicMetaDefinition,
+  hasAuthoritativePublicMetaDefinitionForApprovedMember,
+} from './context-graph-public-meta-proof.js';
 import { getSyncCheckpointKey, type SyncCheckpointStore } from './sync/checkpoint/state.js';
 import {
   hasSyncAdmissionSource,
@@ -506,25 +508,20 @@ async function fetchAuthoritativeMetaSnapshot(
     agent.syncCheckpoints.delete(result.checkpointKey);
     return undefined;
   }
-  const hasAuthoritativePublicDefinition = hasAuthoritativePublicMetaDefinition(
-    contextGraphId,
-    controlMetaQuads,
-  );
-  // Supplying memberProof selects the fail-closed post-approval contract.
-  // Public subscriptions reach this refresh without a member proof. A join can
-  // also be approved on a PUBLIC graph, whose allowlist governs publishing
-  // rather than reads; its public snapshot satisfies the post-approval
-  // contract only when this node's accepted, authenticated policy already says
-  // public and the snapshot proves the approved member exactly as a private
-  // one must (#2827). An accepted private or unknown policy keeps rejecting it,
-  // so a peer cannot downgrade a private graph by serving a public definition.
-  const acceptsAuthoritativePublicDefinition = hasAuthoritativePublicDefinition && (
-    options.memberProof === undefined
-    || (
-      agent.readAcceptedRfc64CatalogAccessPolicyV1?.(contextGraphId) === 'public'
-      && hasActiveApprovedMemberDelegation(contextGraphId, controlMetaQuads, options.memberProof)
-    )
-  );
+  // The proof layer owns each snapshot contract; this refresh only picks one.
+  // Public subscriptions reach it without a member proof. A join-approved
+  // member of a PUBLIC graph accepts the public definition only when this
+  // node's accepted, authenticated policy already says public (#2827); an
+  // accepted private or unknown policy keeps rejecting it, so a peer cannot
+  // downgrade a private graph by serving a public definition.
+  const acceptsAuthoritativePublicDefinition = options.memberProof === undefined
+    ? hasAuthoritativePublicMetaDefinition(contextGraphId, controlMetaQuads)
+    : agent.readAcceptedRfc64CatalogAccessPolicyV1?.(contextGraphId) === 'public'
+      && hasAuthoritativePublicMetaDefinitionForApprovedMember(
+        contextGraphId,
+        controlMetaQuads,
+        options.memberProof,
+      );
   // A public-only bootstrap never installs a private definition, however
   // complete: the caller's accepted policy already says the graph is public.
   const hasAuthoritativePrivateDefinition = options.requirePublicDefinition !== true

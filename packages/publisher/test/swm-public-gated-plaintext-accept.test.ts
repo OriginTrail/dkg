@@ -50,7 +50,7 @@ describe('SWM encryption requirement', () => {
     const publicGated = {
       hasPrivateAccessPolicy: false,
       agentGateAddresses: GATE,
-      provenPublicOnChain: true,
+      provenPublic: true,
     };
 
     it('does NOT require encryption — this is the drop the fix removes', () => {
@@ -71,7 +71,7 @@ describe('SWM encryption requirement', () => {
     const gatedUnknown = {
       hasPrivateAccessPolicy: false,
       agentGateAddresses: GATE,
-      provenPublicOnChain: false,
+      provenPublic: false,
     };
 
     it('requires encryption (fail-closed on an unproven chain state)', () => {
@@ -89,7 +89,7 @@ describe('SWM encryption requirement', () => {
       const r = resolveWorkspaceEncryptionRequirement({
         hasPrivateAccessPolicy: true,
         agentGateAddresses: GATE,
-        provenPublicOnChain: true,
+        provenPublic: true,
       });
       expect(r.requiresEncryptedPayload).toBe(true);
       expect(r.supportsEncryptedPayload).toBe(true);
@@ -99,7 +99,7 @@ describe('SWM encryption requirement', () => {
       const r = resolveWorkspaceEncryptionRequirement({
         hasPrivateAccessPolicy: true,
         agentGateAddresses: null,
-        provenPublicOnChain: false,
+        provenPublic: false,
       });
       expect(r.requiresEncryptedPayload).toBe(true);
       expect(r.supportsEncryptedPayload).toBe(true);
@@ -110,7 +110,7 @@ describe('SWM encryption requirement', () => {
     const ungated = {
       hasPrivateAccessPolicy: false,
       agentGateAddresses: null,
-      provenPublicOnChain: true,
+      provenPublic: true,
     };
 
     it('neither requires nor supports encryption', () => {
@@ -126,9 +126,9 @@ describe('SWM encryption requirement', () => {
     it('never REQUIRES encryption without also SUPPORTING it', () => {
       for (const hasPrivateAccessPolicy of [true, false]) {
         for (const agentGateAddresses of [GATE, null]) {
-          for (const provenPublicOnChain of [true, false]) {
+          for (const provenPublic of [true, false]) {
             const r = resolveWorkspaceEncryptionRequirement({
-              hasPrivateAccessPolicy, agentGateAddresses, provenPublicOnChain,
+              hasPrivateAccessPolicy, agentGateAddresses, provenPublic,
             });
             if (r.requiresEncryptedPayload) expect(r.supportsEncryptedPayload).toBe(true);
           }
@@ -141,9 +141,9 @@ describe('SWM encryption requirement', () => {
 /**
  * Probe LAZINESS at the handler boundary.
  *
- * The helper only reads `provenPublicOnChain` behind `isAgentGated`, so for an
+ * The helper only reads `provenPublic` behind `isAgentGated`, so for an
  * ungated CG the on-chain probe's answer is irrelevant — but an earlier
- * revision of the handler awaited `isContextGraphProvenPublicOnChain`
+ * revision of the handler awaited `isContextGraphProvenPublic`
  * UNCONDITIONALLY before calling the helper. That put a live chain RPC on the
  * hot path of EVERY SWM gossip receive: measured on a 6-node devnet it took
  * receive-apply from ~3ms to ~33ms, which slipped the author's next poll by a
@@ -177,7 +177,7 @@ describe('on-chain probe evaluation at the handler boundary', () => {
     let probeCalls = 0;
     const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
       sharedMemoryOwnedEntities: new Map(),
-      publicAccessPolicyOnChainOracle: async () => { probeCalls += 1; return true; },
+      publicAccessPolicyOracle: async () => { probeCalls += 1; return true; },
     });
 
     const outcome = await handler.handle(msg('Ungated Fast Path', 'ws-probe-ungated'), PEER);
@@ -199,7 +199,7 @@ describe('on-chain probe evaluation at the handler boundary', () => {
     const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
       sharedMemoryOwnedEntities: new Map(),
       localAgentAddresses: () => [writer.address],
-      publicAccessPolicyOnChainOracle: async () => { probeCalls += 1; return true; },
+      publicAccessPolicyOracle: async () => { probeCalls += 1; return true; },
     });
 
     const payload = msg('Gated Public Plaintext', 'ws-probe-gated');

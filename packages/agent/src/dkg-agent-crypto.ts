@@ -697,16 +697,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       contextGraphId,
       getRegisteredAuthority: () => this.resolveRegisteredContextGraphAuthority(
         contextGraphId,
-        {
-          signal: options.signal,
-          // A graph this node did not create has no local-first shortcut, so
-          // its finalized name absence is only evidence of "unregistered" when
-          // the owner-signed unregistered policy was accepted, as on the read
-          // path. Without this, every SWM gate on a joined member of an
-          // unregistered graph failed closed as unavailable (#2827).
-          allowAcceptedRfc64FinalizedAbsence:
-            this.hasAcceptedRfc64UnregisteredAuthorityV1?.(contextGraphId) === true,
-        },
+        { signal: options.signal, ...this.swmAcceptedAbsenceOption(contextGraphId) },
       ),
       resolveRfc64PrivateRoster: () => this.resolveRfc64PrivateReadRosterV1(contextGraphId),
       getLegacyMeta: () => this.getCgMeta(contextGraphId, { signal: options.signal }),
@@ -753,12 +744,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       CG_AUTH_RPC_SITES.recoveryGate,
       () => this.resolveRegisteredContextGraphAuthority(
         contextGraphId,
-        {
-          signal: options.signal,
-          // Same accepted-absence rule as the agent gate (#2827).
-          allowAcceptedRfc64FinalizedAbsence:
-            this.hasAcceptedRfc64UnregisteredAuthorityV1?.(contextGraphId) === true,
-        },
+        { signal: options.signal, ...this.swmAcceptedAbsenceOption(contextGraphId) },
       ),
     );
     if (registeredAuthority.kind === 'private') return registeredAuthority.participantAgents;
@@ -1125,6 +1111,65 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   }
 
   /**
+   * On SWM paths (agent gate, member recovery, recipients), exact finalized
+   * name absence counts as "unregistered" only for a graph whose accepted
+   * owner-signed policy is PUBLIC, as on the read path. A graph this node did
+   * not create has no local-first shortcut, so without this every SWM check on
+   * a joined member of a public P2P graph failed closed as unavailable
+   * (#2827). An accepted PRIVATE policy keeps failing closed here: its roster
+   * is not the legacy projection these paths would otherwise fall back to.
+   */
+  swmAcceptedAbsenceOption(this: DKGAgent, contextGraphId: string): {
+    allowAcceptedRfc64FinalizedAbsence: boolean;
+  } {
+    return {
+      allowAcceptedRfc64FinalizedAbsence: this.hasAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId),
+    };
+  }
+
+  /**
+   * Whether SWM on this graph is public-readable, so plaintext may be both
+   * sent and accepted. One predicate for both ends of the wire: the sender's
+   * recipient resolver and the receiver's plaintext oracle.
+   *
+   * - Without an accepted owner-signed public policy: exactly the live
+   *   on-chain probe (isContextGraphPublicOnChain).
+   * - With one: it only speaks while the name is still unregistered. The
+   *   creator knows that locally (its graph stays local-first until its own
+   *   registration commits, and SWM must not wait on the chain meanwhile);
+   *   any other node asks the live chain, so a registration that lands after
+   *   the snapshot was accepted wins, and a private one fails closed.
+   */
+  async isContextGraphSwmPublic(this: DKGAgent,
+    contextGraphId: string,
+    opCtx?: OperationContext,
+  ): Promise<boolean> {
+    if (!this.hasAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId)) {
+      return this.isContextGraphPublicOnChain(contextGraphId, opCtx);
+    }
+    try {
+      if (
+        this.localContextGraphProvenance.hasLocalCreate(contextGraphId)
+        && await this.isLocalFirstUnregisteredContextGraph(contextGraphId)
+      ) {
+        return true;
+      }
+      const state = await withRpcUsageSite(
+        CG_AUTH_RPC_SITES.publicProbe,
+        () => this.resolveOnChainAccessPolicyState(contextGraphId, opCtx),
+      );
+      return state === 0 || state === 'unregistered';
+    } catch (err) {
+      this.log.warn(
+        opCtx ?? createOperationContext('share'),
+        `isContextGraphSwmPublic(${contextGraphId}) could not confirm the registration state — `
+        + `treating the graph as NOT public (fail-closed): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return false;
+    }
+  }
+
+  /**
    * True iff `contextGraphId` is DEFINITIVELY public per its on-chain
    * access policy (policy enum `0`). Gates SWM encryption: an on-chain
    * public CG is public-readable, so its shared memory must be plaintext
@@ -1480,8 +1525,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       () => this.resolveRegisteredContextGraphAuthority(input.contextGraphId, {
         authorityReadMode: 'finalized-index-or-live',
         requireLiveRosterForPrivate: true,
-        allowAcceptedRfc64FinalizedAbsence:
-          this.hasAcceptedRfc64UnregisteredAuthorityV1?.(input.contextGraphId) === true,
+        ...this.swmAcceptedAbsenceOption(input.contextGraphId),
       }),
     );
     if (registeredAuthority.kind === 'unregistered') {
@@ -1489,10 +1533,23 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // public-readable SWM exactly like an on-chain public graph: approving a
       // join writes an allowlist, but that governs publish authority, not
       // reads. The store resolver would treat the allowlist as a read gate and
-      // start a sender-key handshake that members reject (#2827). The
-      // receiver's plaintext check accepts the same policy.
-      if (this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(input.contextGraphId) === true) {
-        return { requiresEncryption: false, recipients: [] };
+      // start a sender-key handshake that members reject (#2827). The receiver
+      // decides plaintext with the same predicate, isContextGraphSwmPublic.
+      if (this.hasAcceptedRfc64PublicUnregisteredAuthorityV1(input.contextGraphId)) {
+        if (await this.isContextGraphSwmPublic(input.contextGraphId)) {
+          return { requiresEncryption: false, recipients: [] };
+        }
+        // The owner-signed policy no longer describes the graph (it was
+        // registered, possibly private) or the chain could not confirm it:
+        // neither plaintext nor the legacy store roster is safe, so retry.
+        throw createContextGraphAuthorityError(
+          `Context graph "${input.contextGraphId}" has an accepted owner-signed public policy, `
+          + 'but its current registration could not be confirmed as unregistered',
+          {
+            reason: 'chain-access-policy-unavailable',
+            detail: 'owner-signed public policy without a confirmed unregistered name',
+          },
+        );
       }
       return resolveWorkspaceAgentRecipients(this.store, input);
     }
