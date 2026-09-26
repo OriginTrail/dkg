@@ -3788,6 +3788,38 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /**
+   * Whether this node's accepted RFC-64 authority may govern transport for the
+   * graph right now: the receiver-authority fence shared-memory admission uses
+   * (catalog mode, no kill switch, active, catalog-apply lane). An accepted
+   * snapshot is retained after a failed refresh or a kill switch, so a
+   * transport decision must never read the snapshot without this.
+   */
+  isRfc64CatalogTransportAuthorityActiveV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    const receiverAuthority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+    return !receiverAuthority.killSwitchActive
+      && receiverAuthority.mode === 'catalog'
+      && receiverAuthority.active
+      && receiverAuthority.reconciliationLane === 'catalog-apply';
+  }
+
+  /**
+   * {@link hasAcceptedRfc64PublicUnregisteredAuthorityV1}, but only while that
+   * authority governs transport ({@link isRfc64CatalogTransportAuthorityActiveV1}).
+   * SWM consults this one: a retained public snapshot must not keep plaintext
+   * open once catalog authority is killed, inactive, or blocked (#2831 review).
+   */
+  hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    return this.isRfc64CatalogTransportAuthorityActiveV1(contextGraphId)
+      && this.hasAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId);
+  }
+
+  /**
    * Access policy of the authority this catalog owner has already accepted for
    * the exact active network and graph, or `null` while none is accepted. The
    * snapshot only ever enters the service through

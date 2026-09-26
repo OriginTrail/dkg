@@ -16,7 +16,8 @@ const MEMBER_B = '0x2222222222222222222222222222222222222222';
 // name absence count as unregistered (#2827); none of these graphs has one.
 const noAcceptedPublicUnregisteredPolicy = {
   resolveSwmRegisteredAuthority: WorkspaceCryptoMethods.prototype.resolveSwmRegisteredAuthority,
-  hasAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+  resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
+  hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
 };
 
 describe('RFC-64 private Sender Key roster authority', () => {

@@ -121,6 +121,21 @@ export function hasActiveApprovedMemberDelegation(
   return namesApprovedAgent && issuedAtIsActive && expiryIsActive && (peerMatches || keyMatches);
 }
 
+/**
+ * The authenticated access policy an approved member is judged under when it
+ * accepts the curator's snapshot and when it completes its join. `public` only
+ * when active accepted RFC-64 authority or the registered chain proves it;
+ * `unproven` admits nothing but the complete private definition, so a peer
+ * cannot downgrade a private graph by serving a public definition.
+ */
+export type ApprovedMemberAccessPolicy = 'public' | 'unproven';
+
+/** An approved member's proof together with the policy it is judged under. */
+export interface ApprovedMemberAcceptance {
+  readonly proof: ApprovedMemberProof;
+  readonly accessPolicy: ApprovedMemberAccessPolicy;
+}
+
 /** The store-side ASK fragment for the same proof. */
 export function renderApprovedMemberProofSparql(
   contextGraphId: string,

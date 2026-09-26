@@ -1600,6 +1600,7 @@ describe('private read authorization uses the on-chain participant roster', () =
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(true);
     const hasConfirmedMeta = vi.spyOn(agent, 'hasConfirmedApprovedMemberMetaState').mockResolvedValue(true);
+    vi.spyOn(agent, 'resolveApprovedMemberAccessPolicy').mockResolvedValue('public');
     const readAuthority = vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockResolvedValue({
       outcome: 'allowed',
       source: 'legacy-local',
@@ -1625,12 +1626,16 @@ describe('private read authorization uses the on-chain participant roster', () =
     expect(refreshMeta).toHaveBeenLastCalledWith(contextGraphId, expect.objectContaining({
       trustedCuratorPeerId: curatorPeerId,
       force: true,
-      memberProof: expect.objectContaining({
-        approvedAgentAddress: local.agentAddress.toLowerCase(),
-      }),
+      approvedMember: {
+        proof: expect.objectContaining({
+          approvedAgentAddress: local.agentAddress.toLowerCase(),
+        }),
+        accessPolicy: 'public',
+      },
     }));
-    // Recovery completes the join only on metadata that proves this member.
-    expect(hasConfirmedMeta).toHaveBeenCalledWith(contextGraphId);
+    // Recovery completes the join only on metadata that proves this member,
+    // under the same authenticated policy the refresh was judged under.
+    expect(hasConfirmedMeta).toHaveBeenCalledWith(contextGraphId, 'public');
     expect(readAuthority).toHaveBeenCalledWith(contextGraphId, {
       allowSubscriptionFallback: false,
     });
@@ -1644,6 +1649,57 @@ describe('private read authorization uses the on-chain participant roster', () =
       'rehydrated-subscription',
     );
     expect(catchUp).toHaveBeenCalledWith(contextGraphId, curatorPeerId);
+  });
+
+  it('keeps every data lane closed when a refreshed snapshot proves only the pre-join public definition', async () => {
+    const contextGraphId = 'restart-pre-join-public-definition';
+    const curatorPeerId = '12D3KooWPreJoinPublicDefinitionCurator';
+    agent = await DKGAgent.create({
+      name: 'PreJoinPublicDefinitionRecovery',
+      chainAdapter: new MockChainAdapter(),
+    });
+    Object.defineProperty(agent, 'peerId', {
+      value: '12D3KooWPreJoinPublicDefinitionMember',
+      configurable: true,
+    });
+    const local = await agent.registerAgent('Pre-join public definition member');
+    (agent as unknown as { localApprovedAgentByCG: Map<string, string> })
+      .localApprovedAgentByCG.set(contextGraphId, local.agentAddress.toLowerCase());
+    (agent as unknown as {
+      subscribedContextGraphs: Map<string, Record<string, unknown>>;
+    }).subscribedContextGraphs.set(contextGraphId, {
+      subscribed: true,
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      pendingMeta: true,
+      syncMode: 'always-on',
+    });
+
+    vi.spyOn(agent, 'refreshMetaFromCurator').mockResolvedValue(true);
+    vi.spyOn(agent, 'resolveApprovedMemberAccessPolicy').mockResolvedValue('public');
+    // Ordinary read confirmation passes on the pre-join public definition,
+    // but nothing stored proves this member.
+    vi.spyOn(agent, 'hasConfirmedMetaState').mockResolvedValue(true);
+    vi.spyOn(agent, 'hasConfirmedApprovedMemberMetaState').mockResolvedValue(false);
+    const readAuthority = vi.spyOn(agent, 'resolveContextGraphReadAuthority');
+    const refreshFlags = vi.spyOn(agent, 'refreshMetaSyncedFlags');
+    const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
+    const persistMembership = vi.spyOn(agent, 'persistLocalNodeMembership');
+    const catchUp = vi.spyOn(agent, 'runImmediatePostApprovalSync').mockResolvedValue(undefined);
+
+    await agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+
+    expect(readAuthority).not.toHaveBeenCalled();
+    expect(refreshFlags).not.toHaveBeenCalled();
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(persistMembership).not.toHaveBeenCalled();
+    expect(catchUp).not.toHaveBeenCalled();
+    expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+      synced: false,
+      metaSynced: false,
+      pendingMeta: true,
+    });
   });
 
   it.each([
@@ -1676,6 +1732,7 @@ describe('private read authorization uses the on-chain participant roster', () =
 
     vi.spyOn(agent, 'refreshMetaFromCurator').mockResolvedValue(true);
     vi.spyOn(agent, 'hasConfirmedApprovedMemberMetaState').mockResolvedValue(true);
+    vi.spyOn(agent, 'resolveApprovedMemberAccessPolicy').mockResolvedValue('public');
     const readAuthority = vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockResolvedValue({
       outcome: decision.outcome,
       source: 'registered-chain',

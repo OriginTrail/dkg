@@ -458,9 +458,12 @@ describe('refreshMetaFromCurator', () => {
       {
         trustedCuratorPeerId: CURATOR_PEER_ID,
         force: true,
-        memberProof: {
-          approvedAgentAddress: '0x00000000000000000000000000000000000000A1',
-          expectedDelegateePeerId: 'local-peer',
+        approvedMember: {
+          proof: {
+            approvedAgentAddress: '0x00000000000000000000000000000000000000A1',
+            expectedDelegateePeerId: 'local-peer',
+          },
+          accessPolicy: 'unproven',
         },
       },
     );
@@ -520,7 +523,7 @@ describe('refreshMetaFromCurator', () => {
 
     async function refreshAfterApproval(
       snapshot: Quad[],
-      acceptedPolicy: 'public' | 'private' | null,
+      accessPolicy: 'public' | 'unproven',
     ): Promise<{ refreshed: boolean; mutated: boolean }> {
       let mutated = false;
       const agent = {
@@ -549,7 +552,6 @@ describe('refreshMetaFromCurator', () => {
         contextGraphMetaProjection: { markDirty: noop },
         syncCheckpoints: new Map<string, number>(),
         log: { warn: noop, info: noop },
-        readAcceptedRfc64CatalogAccessPolicyV1: () => acceptedPolicy,
       };
       const refreshed = await ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
         agent as never,
@@ -557,29 +559,27 @@ describe('refreshMetaFromCurator', () => {
         {
           trustedCuratorPeerId: CURATOR_PEER_ID,
           force: true,
-          memberProof: {
-            approvedAgentAddress: memberAddress,
-            expectedDelegateePeerId: 'local-peer',
+          approvedMember: {
+            proof: {
+              approvedAgentAddress: memberAddress,
+              expectedDelegateePeerId: 'local-peer',
+            },
+            accessPolicy,
           },
         },
       );
       return { refreshed, mutated };
     }
 
-    it('installs the curator allowlist when the accepted policy is public and the snapshot proves the member', async () => {
+    it('installs the curator allowlist when the authenticated policy is public and the snapshot proves the member', async () => {
       const result = await refreshAfterApproval(publicSnapshotWithMember({ includeMember: true }), 'public');
       expect(result.refreshed).toBe(true);
       expect(result.mutated).toBe(true);
     });
 
-    it('keeps rejecting a public snapshot when the accepted policy is private (no downgrade)', async () => {
-      const result = await refreshAfterApproval(publicSnapshotWithMember({ includeMember: true }), 'private');
-      expect(result.refreshed).toBe(false);
-      expect(result.mutated).toBe(false);
-    });
-
-    it('keeps rejecting a public snapshot while no authenticated policy is accepted', async () => {
-      const result = await refreshAfterApproval(publicSnapshotWithMember({ includeMember: true }), null);
+    it('keeps rejecting a public snapshot while the policy is unproven (no downgrade)', async () => {
+      // Private, unknown, or unreadable authority all arrive as `unproven`.
+      const result = await refreshAfterApproval(publicSnapshotWithMember({ includeMember: true }), 'unproven');
       expect(result.refreshed).toBe(false);
       expect(result.mutated).toBe(false);
     });

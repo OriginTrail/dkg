@@ -167,7 +167,8 @@ function makeAgentLike(opts: {
   // SWM paths keep the on-chain behaviour these tests pin.
   agentLike.resolveSwmRegisteredAuthority = (DKGAgent.prototype as any).resolveSwmRegisteredAuthority;
   agentLike.isContextGraphSwmPublic = (DKGAgent.prototype as any).isContextGraphSwmPublic;
-  agentLike.hasAcceptedRfc64PublicUnregisteredAuthorityV1 = () => false;
+  agentLike.resolveSwmTransportAuthority = (DKGAgent.prototype as any).resolveSwmTransportAuthority;
+  agentLike.hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1 = () => false;
   agentLike._resolveCuratedChainKeyContext = (DKGAgent.prototype as any)._resolveCuratedChainKeyContext;
   return agentLike;
 }

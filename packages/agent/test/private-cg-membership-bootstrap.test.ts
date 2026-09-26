@@ -247,7 +247,7 @@ describe('private CG membership bootstrap recovery', () => {
       { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"public"', graph: metaGraph },
     ]);
     expect(await (agent as any).hasConfirmedMetaState(contextGraphId)).toBe(true);
-    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId))
+    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId, 'public'))
       .toBe(false);
 
     const delegation = `did:dkg:agent-delegation:${contextGraphId}:${member}`;
@@ -257,8 +257,13 @@ describe('private CG membership bootstrap recovery', () => {
       { subject: delegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: `"${agent!.peerId}"`, graph: metaGraph },
       { subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_ISSUED_AT, object: `"${Date.now() - 60_000}"`, graph: metaGraph },
     ]);
-    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId))
+    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId, 'public'))
       .toBe(true);
+    // Stored triples never authenticate the policy: without an authenticated
+    // public decision the same syntactically valid public member snapshot
+    // must not complete the join, or a peer could downgrade a private graph.
+    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId, 'unproven'))
+      .toBe(false);
   });
 
   it('confirms nothing for join completion when the approval binding is missing (#2831 review)', async () => {
@@ -275,7 +280,7 @@ describe('private CG membership bootstrap recovery', () => {
     expect((agent as any).localApprovedAgentByCG.has(contextGraphId)).toBe(false);
 
     expect(await (agent as any).hasConfirmedMetaState(contextGraphId)).toBe(true);
-    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId))
+    expect(await (agent as any).hasConfirmedApprovedMemberMetaState(contextGraphId, 'public'))
       .toBe(false);
   });
 
@@ -302,6 +307,7 @@ describe('private CG membership bootstrap recovery', () => {
       // The pre-join public declaration confirms ordinary reads.
       hasConfirmedMetaState: vi.fn(async () => true),
       hasConfirmedApprovedMemberMetaState: vi.fn(async () => memberProofStored),
+      resolveApprovedMemberAccessPolicy: vi.fn(async () => 'public' as const),
       refreshMetaSyncedFlags: vi.fn(async () => undefined),
       syncContextGraphFromConnectedPeers: vi.fn(async () => undefined),
       log: { info: vi.fn(), warn: vi.fn() },
@@ -315,9 +321,13 @@ describe('private CG membership bootstrap recovery', () => {
     await runBootstrap();
     expect(agentLike.refreshMetaSyncedFlags).not.toHaveBeenCalled();
     expect(agentLike.syncContextGraphFromConnectedPeers).toHaveBeenCalledTimes(1);
-    // Completion is judged only by the approved-member confirmation.
-    expect(agentLike.hasConfirmedApprovedMemberMetaState).toHaveBeenCalled();
+    // Completion is judged only by the approved-member confirmation, under the
+    // same authenticated policy the snapshot refresh was given.
+    expect(agentLike.hasConfirmedApprovedMemberMetaState).toHaveBeenCalledWith(contextGraphId, 'public');
     expect(agentLike.hasConfirmedMetaState).not.toHaveBeenCalled();
+    expect(agentLike.refreshMetaFromCurator).toHaveBeenCalledWith(contextGraphId, expect.objectContaining({
+      approvedMember: expect.objectContaining({ accessPolicy: 'public' }),
+    }));
 
     // Once a refresh stores the member's delegation, the bootstrap completes.
     agentLike.refreshMetaFromCurator.mockImplementation(async () => {
@@ -328,6 +338,48 @@ describe('private CG membership bootstrap recovery', () => {
     await runBootstrap();
     expect(agentLike.refreshMetaSyncedFlags).toHaveBeenCalledTimes(1);
     expect(agentLike.syncContextGraphFromConnectedPeers).not.toHaveBeenCalled();
+  });
+
+  describe('the authenticated access policy an approved member is judged under (#2831 review)', () => {
+    const contextGraphId = '0x00a9D0dcab936a418ffEbc734476C91D4027d359/member-access-policy';
+    function host(options: {
+      transportActive: boolean;
+      accepted: 'public' | 'private' | null;
+      chain: 'public' | 'private' | Error;
+    }) {
+      const chainProof = vi.fn(async () => {
+        if (options.chain instanceof Error) throw options.chain;
+        return { state: options.chain };
+      });
+      return {
+        isRfc64CatalogTransportAuthorityActiveV1: () => options.transportActive,
+        readAcceptedRfc64CatalogAccessPolicyV1: () => options.accepted,
+        resolveActivePublicContextGraphChainProof: chainProof,
+        chainProof,
+      };
+    }
+    const resolve = (agentLike: unknown) => LifecycleSyncMethods.prototype.resolveApprovedMemberAccessPolicy
+      .call(agentLike as never, contextGraphId);
+
+    it('is public from active accepted RFC-64 authority without reading the chain', async () => {
+      const agentLike = host({ transportActive: true, accepted: 'public', chain: 'private' });
+      await expect(resolve(agentLike)).resolves.toBe('public');
+      expect(agentLike.chainProof).not.toHaveBeenCalled();
+    });
+
+    it('is public for a registered public graph with no RFC-64 catalog snapshot', async () => {
+      await expect(resolve(host({ transportActive: true, accepted: null, chain: 'public' })))
+        .resolves.toBe('public');
+    });
+
+    it.each([
+      ['a retained public snapshot whose catalog authority is inactive', { transportActive: false, accepted: 'public', chain: 'private' }],
+      ['an accepted private policy', { transportActive: true, accepted: 'private', chain: 'private' }],
+      ['no accepted policy and no public registration', { transportActive: true, accepted: null, chain: 'private' }],
+      ['an unreadable chain', { transportActive: true, accepted: null, chain: new Error('rpc down') }],
+    ] as const)('is unproven with %s', async (_label, options) => {
+      await expect(resolve(host(options))).resolves.toBe('unproven');
+    });
   });
 
   it('requires the full identity-bearing private definition before metadata is authoritative', async () => {

@@ -53,7 +53,7 @@ interface AgentInternals {
 
 type ProbeOverrides = {
   isContextGraphPublicOnChain?: (cgId: string, ctx: unknown) => Promise<boolean>;
-  hasAcceptedRfc64PublicUnregisteredAuthorityV1?: (cgId: string) => boolean;
+  hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1?: (cgId: string) => boolean;
   resolveRegisteredContextGraphAuthority?: (cgId: string, options: unknown) => Promise<
     | { kind: 'unregistered' }
     | { kind: 'public'; onChainId: bigint }
@@ -141,7 +141,7 @@ describe('agent wires publicAccessPolicyOracle into SharedMemoryHandler', () => 
   it('rejects the plaintext write and stores nothing when neither the chain nor an accepted owner-signed policy proves public', async () => {
     const { outcome, stored } = await deliverSignedPlaintext({
       isContextGraphPublicOnChain: async () => false,
-      hasAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
     });
 
     expect(outcome.applied).toBe(false);
@@ -154,7 +154,7 @@ describe('agent wires publicAccessPolicyOracle into SharedMemoryHandler', () => 
     // accepted, but the finalized index already shows the name registered
     // private: the registry's answer wins.
     const { outcome, stored } = await deliverSignedPlaintext({
-      hasAcceptedRfc64PublicUnregisteredAuthorityV1: () => true,
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => true,
       resolveRegisteredContextGraphAuthority: async () => ({
         kind: 'private',
         onChainId: 7n,

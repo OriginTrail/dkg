@@ -16,6 +16,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
+import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
 
 const CG = '0x1111111111111111111111111111111111111111/public-p2p';
 const CURATOR = '0x8ba1f109551bD432803012645Ac136ddd64DBA72';
@@ -75,6 +76,8 @@ function joinedMember(options: {
   index?: IndexState;
   registryError?: Error;
   publicOnChain?: boolean;
+  /** Whether RFC-64 catalog authority still governs transport (default yes). */
+  transportActive?: boolean;
 }) {
   const registry = registryOver(options.index ?? { kind: 'absent' });
   if (options.registryError) registry.resolve.mockRejectedValue(options.registryError);
@@ -91,6 +94,7 @@ function joinedMember(options: {
     resolveContextGraphAgentGateAuthority:
       WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
     resolveSwmRegisteredAuthority: WorkspaceCryptoMethods.prototype.resolveSwmRegisteredAuthority,
+    resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
     isContextGraphSwmPublic: WorkspaceCryptoMethods.prototype.isContextGraphSwmPublic,
     resolveRegisteredContextGraphAuthority: registry.resolve,
     // A public graph has no RFC-64 private roster.
@@ -99,8 +103,15 @@ function joinedMember(options: {
     getContextGraphAllowedPeers: async () => null,
     subscribedContextGraphs: new Map(),
     hasAcceptedRfc64UnregisteredAuthorityV1: () => options.acceptedUnregistered,
+    // The retained snapshot alone, and the same snapshot behind the live
+    // catalog-authority fence: SWM must consult only the fenced one.
     hasAcceptedRfc64PublicUnregisteredAuthorityV1: () => (
       options.acceptedUnregistered && options.acceptedPublic === true
+    ),
+    hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => (
+      options.acceptedUnregistered
+      && options.acceptedPublic === true
+      && options.transportActive !== false
     ),
     isContextGraphPublicOnChain,
     log: { warn },
@@ -372,6 +383,75 @@ describe('SWM encryption on an unregistered public graph (#2827)', () => {
     expect(registry.calls).toEqual([
       expect.objectContaining({ allowAcceptedRfc64FinalizedAbsence: false }),
     ]);
+  });
+});
+
+describe('a retained public snapshot once catalog authority stops governing transport (#2831 review)', () => {
+  it('stops the public shortcut for both the sender and the receiver', async () => {
+    const { agent, registry, isContextGraphPublicOnChain } = joinedMember({
+      acceptedUnregistered: true,
+      acceptedPublic: true,
+      transportActive: false,
+      allowedAgents: [CURATOR, MEMBER],
+    });
+
+    // Sender: no accepted-absence allowance, so the name absence fails closed.
+    await expect(resolveRecipients(agent)).rejects.toMatchObject({
+      reason: 'finalized-name-absence-unaccepted',
+    });
+    // Receiver: back on the plain on-chain probe, which does not say public.
+    await expect(WorkspaceCryptoMethods.prototype.isContextGraphSwmPublic.call(agent as never, CG))
+      .resolves.toBe(false);
+    expect(isContextGraphPublicOnChain).toHaveBeenCalledTimes(1);
+    expect(registry.calls).toEqual([
+      expect.objectContaining({ allowAcceptedRfc64FinalizedAbsence: false }),
+    ]);
+  });
+
+  it('denies the gate and member recovery the old allowlist', async () => {
+    const { agent, getCgMeta } = joinedMember({
+      acceptedUnregistered: true,
+      acceptedPublic: true,
+      transportActive: false,
+      allowedAgents: [CURATOR, MEMBER],
+    });
+
+    const gate = await WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority.call(
+      agent as never,
+      CG,
+    );
+    const recovery = await WorkspaceCryptoMethods.prototype.getMemberRecoveryGate.call(
+      agent as never,
+      CG,
+    );
+
+    expect(gate).toEqual(expect.objectContaining({ kind: 'unavailable' }));
+    expect(recovery).toBeNull();
+    expect(getCgMeta).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['active catalog authority', {}, true],
+    ['a kill switch', { killSwitchActive: true }, false],
+    ['legacy mode', { mode: 'legacy' }, false],
+    ['inactive authority', { active: false }, false],
+    ['a shadow-stage reconciliation lane', { reconciliationLane: 'shadow-stage' }, false],
+  ] as const)('lets the snapshot govern transport only with %s', (_label, overrides, expected) => {
+    const host = {
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({
+        killSwitchActive: false,
+        mode: 'catalog',
+        active: true,
+        reconciliationLane: 'catalog-apply',
+        ...overrides,
+      }),
+      hasAcceptedRfc64PublicUnregisteredAuthorityV1: () => true,
+      isRfc64CatalogTransportAuthorityActiveV1:
+        Rfc64CatalogMethods.prototype.isRfc64CatalogTransportAuthorityActiveV1,
+    };
+
+    expect(Rfc64CatalogMethods.prototype.hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1
+      .call(host as never, CG)).toBe(expected);
   });
 });
 

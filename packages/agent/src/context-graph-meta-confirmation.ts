@@ -18,7 +18,10 @@ import type { ActivePublicContextGraphChainProof } from
   './active-public-context-graph-chain-proof.js';
 import { isPublicMetaDurabilityPending } from
   './context-graph-public-meta-repair.js';
-import type { ApprovedMemberProof } from './context-graph-member-proof.js';
+import type {
+  ApprovedMemberAccessPolicy,
+  ApprovedMemberProof,
+} from './context-graph-member-proof.js';
 
 /**
  * What a confirmation is for.
@@ -29,15 +32,20 @@ import type { ApprovedMemberProof } from './context-graph-member-proof.js';
  *   chain proof before a public definition next to a local placeholder counts.
  * - `approved-member`: join bootstrap completion (#2831 review). Only a
  *   definition carrying this node's approved-member proof confirms: the
- *   private definition, or the public one with the same allowlist entry and
- *   delegation. Without a local approval binding nothing confirms.
+ *   private definition, or, when `accessPolicy` is the authenticated `public`
+ *   the snapshot refresh was judged under, the public one with the same
+ *   allowlist entry and delegation. Stored triples never authenticate the
+ *   policy themselves. Without a local approval binding nothing confirms.
  */
 export type ConfirmContextGraphMetadataInput =
   | {
       readonly purpose?: 'read';
       readonly rejectUnregisteredPlaceholder?: boolean;
     }
-  | { readonly purpose: 'approved-member' };
+  | {
+      readonly purpose: 'approved-member';
+      readonly accessPolicy: ApprovedMemberAccessPolicy;
+    };
 
 export interface ContextGraphMetadataConfirmationDependencies {
   readonly chain: ChainAdapter;
@@ -70,7 +78,12 @@ export async function confirmContextGraphMetadataV1(
     return await findAuthoritativeDefinition(
       dependencies,
       contextGraphId,
-      { privateMemberProof: memberProof, publicMemberProof: memberProof },
+      [
+        { definition: 'private', memberProof },
+        ...(input.accessPolicy === 'public'
+          ? [{ definition: 'public', memberProof } as const]
+          : []),
+      ],
       'agent.contextGraph.confirmedMeta.approvedMember',
     ) !== null;
   }
@@ -101,7 +114,7 @@ export async function confirmContextGraphMetadataV1(
   const authoritativeDefinition = await findAuthoritativeDefinition(
     dependencies,
     contextGraphId,
-    { privateMemberProof: memberProof },
+    [{ definition: 'private', memberProof }, { definition: 'public' }],
     'agent.contextGraph.confirmedMeta',
   );
   if (authoritativeDefinition === 'private') return true;
@@ -175,23 +188,22 @@ async function resolveApprovedMemberProof(
 
 /**
  * The canonical stored-definition proofs, shared by every confirmation
- * purpose: the complete private definition first, then the unambiguous public
- * one, each with the member proof its caller requires. Returns the definition
- * that matched.
+ * purpose. Each purpose lists the definitions it admits, in order, with the
+ * member proof each must carry. Returns the first definition that matched.
  */
 async function findAuthoritativeDefinition(
   dependencies: ContextGraphMetadataConfirmationDependencies,
   contextGraphId: string,
-  proofs: {
-    readonly privateMemberProof?: ApprovedMemberProof;
-    readonly publicMemberProof?: ApprovedMemberProof;
-  },
+  candidates: ReadonlyArray<{
+    readonly definition: 'private' | 'public';
+    readonly memberProof?: ApprovedMemberProof;
+  }>,
   sourcePrefix: string,
 ): Promise<'private' | 'public' | null> {
-  for (const [definition, query] of [
-    ['private', buildAuthoritativePrivateMetaAskQuery(contextGraphId, proofs.privateMemberProof)],
-    ['public', buildAuthoritativePublicMetaAskQuery(contextGraphId, proofs.publicMemberProof)],
-  ] as const) {
+  for (const { definition, memberProof } of candidates) {
+    const query = definition === 'private'
+      ? buildAuthoritativePrivateMetaAskQuery(contextGraphId, memberProof)
+      : buildAuthoritativePublicMetaAskQuery(contextGraphId, memberProof);
     const result = await dependencies.store.query(query, {
       source: `${sourcePrefix}.${definition}Definition`,
     });

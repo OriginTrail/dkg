@@ -20,10 +20,8 @@ import {
   META_REFRESH_COOLDOWN_MS,
   SYNC_TOTAL_TIMEOUT_MS,
 } from './dkg-agent-constants.js';
-import {
-  hasAuthoritativePrivateMetaDefinition,
-  type AuthoritativePrivateMetaMemberProof,
-} from './context-graph-private-meta-proof.js';
+import { hasAuthoritativePrivateMetaDefinition } from './context-graph-private-meta-proof.js';
+import type { ApprovedMemberAcceptance } from './context-graph-member-proof.js';
 import {
   hasAuthoritativePublicMetaDefinition,
   hasAuthoritativePublicMetaDefinitionForApprovedMember,
@@ -52,14 +50,18 @@ export interface CuratorMetaRefreshOptions {
   trustedCuratorPeerId?: string;
   /** Bypass the normal auth-probe cooldown for an explicit recovery event. */
   force?: boolean;
-  /** Require the fetched snapshot to make this approved local member usable. */
-  memberProof?: AuthoritativePrivateMetaMemberProof;
+  /**
+   * Require the fetched snapshot to make this approved local member usable,
+   * judged under the authenticated access policy the caller resolved: a
+   * public member snapshot is accepted only when that policy is `public`.
+   */
+  approvedMember?: ApprovedMemberAcceptance;
   /**
    * Accept only an unambiguous PUBLIC root definition. Set by the RFC-64
    * replica metadata bootstrap, whose accepted owner-signed policy is already
    * known to be public: a peer-served private definition must then be
    * rejected instead of installed, so an arbitrary connected peer cannot flip
-   * the local graph private. Mutually exclusive with `memberProof`.
+   * the local graph private. Mutually exclusive with `approvedMember`.
    */
   requirePublicDefinition?: boolean;
   /**
@@ -154,8 +156,6 @@ interface CuratorMetaRefreshAgent {
   ): void;
   recordCgWireId?(localCgId: string, wireId: string | null): void;
   persistContextGraphSubscription?(contextGraphId: string): void;
-  /** Access policy of this node's accepted, authenticated RFC-64 authority. */
-  readAcceptedRfc64CatalogAccessPolicyV1?(contextGraphId: string): 'public' | 'private' | null;
 }
 
 interface CuratorMetaRefreshState {
@@ -509,18 +509,18 @@ async function fetchAuthoritativeMetaSnapshot(
     return undefined;
   }
   // The proof layer owns each snapshot contract; this refresh only picks one.
-  // Public subscriptions reach it without a member proof. A join-approved
-  // member of a PUBLIC graph accepts the public definition only when this
-  // node's accepted, authenticated policy already says public (#2827); an
-  // accepted private or unknown policy keeps rejecting it, so a peer cannot
-  // downgrade a private graph by serving a public definition.
-  const acceptsAuthoritativePublicDefinition = options.memberProof === undefined
+  // Public subscriptions reach it without an approved member. A join-approved
+  // member of a PUBLIC graph accepts the public definition only under the
+  // authenticated public policy its caller resolved (#2827, #2831 review); an
+  // unproven policy keeps rejecting it, so a peer cannot downgrade a private
+  // graph by serving a public definition.
+  const acceptsAuthoritativePublicDefinition = options.approvedMember === undefined
     ? hasAuthoritativePublicMetaDefinition(contextGraphId, controlMetaQuads)
-    : agent.readAcceptedRfc64CatalogAccessPolicyV1?.(contextGraphId) === 'public'
+    : options.approvedMember.accessPolicy === 'public'
       && hasAuthoritativePublicMetaDefinitionForApprovedMember(
         contextGraphId,
         controlMetaQuads,
-        options.memberProof,
+        options.approvedMember.proof,
       );
   // A public-only bootstrap never installs a private definition, however
   // complete: the caller's accepted policy already says the graph is public.
@@ -528,7 +528,7 @@ async function fetchAuthoritativeMetaSnapshot(
     && hasAuthoritativePrivateMetaDefinition(
       contextGraphId,
       controlMetaQuads,
-      options.memberProof,
+      options.approvedMember?.proof,
     );
   if (!acceptsAuthoritativePublicDefinition && !hasAuthoritativePrivateDefinition) {
     agent.syncCheckpoints.delete(snapshotCheckpointKey);
