@@ -150,7 +150,7 @@ if [ "${SKIP_SOAK:-0}" != "1" ]; then
   SOAK_RS_SECONDS="${SOAK_RS_SECONDS:-1800}"
 
   register "libp2p-soak-short" "soak" \
-    "env DKG_HOME=$DEVNET_DIR/node1 DKG_AUTH=$AUTH API=http://127.0.0.1:$API_PORT_BASE RECIPIENT_PEER_ID=$SOAK_RECIPIENT_PEER RECIPIENT=devnet-node-2 SENDER_TAG=rc12 TOTAL_CYCLES=$SOAK_LIBP2P_CYCLES INTERVAL_S=60 $REPO_ROOT/scripts/libp2p-soak-test.sh"
+    "env DKG_HOME=$DEVNET_DIR/node1 API=http://127.0.0.1:$API_PORT_BASE RECIPIENT_API=http://127.0.0.1:$((API_PORT_BASE + 1)) RECIPIENT_AUTH_FILE=$DEVNET_DIR/node2/auth.token RECIPIENT_PEER_ID=$SOAK_RECIPIENT_PEER RECIPIENT=devnet-node-2 SENDER_TAG=rc12 TOTAL_CYCLES=$SOAK_LIBP2P_CYCLES INTERVAL_S=60 $REPO_ROOT/scripts/libp2p-soak-test.sh"
 
   # SWM soak — solo mode (PEERS_EXPECTED unset). Confirms write-tag
   # rate on local SWM survives N × 30s cycles; cross-peer delivery

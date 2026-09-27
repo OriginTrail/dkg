@@ -21,6 +21,8 @@
 # TOTAL_CYCLES, INTERVAL_S, INTERNET_PROBE_HOST, API.
 # RECIPIENT_PEER_ID is optional; when set, enables per-peer preflight
 # probe of /api/peer-info (PR #533 fields incl. getConnectionsReturnsForPeer).
+# For a one-sided gate, set RECIPIENT_API and RECIPIENT_AUTH_FILE to require
+# that node's inbox to contain each message from this exact run once.
 #
 # Usage (run from anywhere — logs always go to $DKG_HOME/soak-test-<ts>-<TAG>/):
 #   nohup caffeinate -i bash scripts/libp2p-soak-test.sh \
@@ -47,9 +49,12 @@ done
 
 RECIPIENT="${RECIPIENT:-dkg-testnet-edge}"
 RECIPIENT_PEER_ID="${RECIPIENT_PEER_ID:-}"   # optional; required for per-peer preflight diagnostics
+RECIPIENT_API="${RECIPIENT_API:-}"
+RECIPIENT_AUTH_FILE="${RECIPIENT_AUTH_FILE:-}"
 SENDER_TAG="${SENDER_TAG:-MILES}"
 TOTAL_CYCLES="${TOTAL_CYCLES:-18}"
 INTERVAL_S="${INTERVAL_S:-1200}"   # 20 min
+FINAL_WAIT_SECONDS="${FINAL_WAIT_SECONDS:-300}"
 INTERNET_PROBE_HOST="${INTERNET_PROBE_HOST:-1.1.1.1}"   # cloudflare DNS — universal, fast, no captive-portal interception
 
 # DKG_HOME defaults to ~/.dkg but operators running dev nodes (e.g. hermes
@@ -61,6 +66,11 @@ DKG_HOME="${DKG_HOME:-${HOME}/.dkg}"
 
 API="${API:-http://127.0.0.1:9200}"
 AUTH=$(grep -v '^#' "${DKG_HOME}/auth.token" | head -1)
+if [ -n "$RECIPIENT_API" ] && [ ! -f "$RECIPIENT_AUTH_FILE" ]; then
+  echo "RECIPIENT_AUTH_FILE is required with RECIPIENT_API" >&2
+  exit 2
+fi
+SOAK_RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 
 LOG_DIR="${DKG_HOME}/soak-test-$(date -u +%Y%m%d-%H%M%S)-${SENDER_TAG}"
 mkdir -p "$LOG_DIR"
@@ -75,8 +85,8 @@ send_one() {
   local seq=$1 total=$2 ts
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   local body
-  body=$(printf '{"to":"%s","text":"%s soak-test seq=%d/%d ts=%s"}' \
-    "$RECIPIENT" "$SENDER_TAG" "$seq" "$total" "$ts")
+  body=$(printf '{"to":"%s","text":"%s soak-test run=%s seq=%d/%d ts=%s"}' \
+    "$RECIPIENT" "$SENDER_TAG" "$SOAK_RUN_ID" "$seq" "$total" "$ts")
   local resp
   resp=$(curl -s --max-time 60 -X POST "$API/api/chat" \
     -H "Authorization: Bearer $AUTH" \
@@ -215,12 +225,48 @@ except Exception as e:
   log "  inbox snapshot ($label): $count"
 }
 
+# In a one-sided devnet run, the sender's inbound inbox is expected to be
+# empty. When the recipient's API is supplied, inspect that node's inbox and
+# prove every sequence from this exact run was delivered once.
+verify_recipient_inbox() {
+  [ -n "$RECIPIENT_API" ] || return 0
+  local recipient_auth resp verdict
+  recipient_auth=$(grep -v '^#' "$RECIPIENT_AUTH_FILE" | tail -1 | tr -d '\r\n')
+  [ -n "$recipient_auth" ] || { log "  recipient auth file is empty"; return 1; }
+  resp=$(curl -fsS --max-time 30 \
+    "$RECIPIENT_API/api/messages?direction=in&limit=200&order=desc" \
+    -H "Authorization: Bearer $recipient_auth") || return 1
+  verdict=$(printf '%s' "$resp" | SOAK_RUN_ID="$SOAK_RUN_ID" TOTAL_CYCLES="$TOTAL_CYCLES" python3 -c '
+import json, os, re, sys
+try:
+  body = json.load(sys.stdin)
+  messages = body["messages"]
+  if not isinstance(messages, list): raise ValueError("missing messages")
+  total = int(os.environ["TOTAL_CYCLES"])
+  run = re.escape(os.environ["SOAK_RUN_ID"])
+  pattern = re.compile(r"\bsoak-test run=" + run + r" seq=(\d+)/(\d+)\b")
+  seen = []
+  for message in messages:
+    match = pattern.search(message.get("text", ""))
+    if match and int(match.group(2)) == total: seen.append(int(match.group(1)))
+  missing = sorted(set(range(1, total + 1)) - set(seen))
+  duplicate = sorted(seq for seq in set(seen) if seen.count(seq) != 1)
+  print(f"recipient receipts={len(seen)}/{total} missing={missing} duplicate={duplicate}")
+  if missing or duplicate: sys.exit(1)
+except Exception as error:
+  print(f"recipient inbox unreadable: {error}")
+  sys.exit(1)
+') || { log "  $verdict"; return 1; }
+  log "  $verdict"
+}
+
 trap 'log "INTERRUPTED — stopping at cycle ${seq:-?}"; exit 130' INT TERM
 
 log "=== START soak-test ==="
 log "  recipient=$RECIPIENT"
 log "  recipient_peer_id=${RECIPIENT_PEER_ID:-<unset, per-peer preflight skipped>}"
 log "  sender_tag=$SENDER_TAG"
+log "  run_id=$SOAK_RUN_ID"
 log "  total_cycles=$TOTAL_CYCLES"
 log "  interval_s=$INTERVAL_S"
 log "  internet_probe=$INTERNET_PROBE_HOST"
@@ -247,10 +293,11 @@ for seq in $(seq 1 "$TOTAL_CYCLES"); do
 done
 
 log ""
-log "All cycles done. Waiting 5min for any queued/retried inbound to land..."
-sleep 300
+log "All cycles done. Waiting ${FINAL_WAIT_SECONDS}s for any queued/retried inbound to land..."
+sleep "$FINAL_WAIT_SECONDS"
 snapshot_inbox "final"
 snapshot_slo "final"
+verify_recipient_inbox || { log "FAIL: recipient did not receive every tagged message from this run"; exit 1; }
 
 log ""
 log "=== END soak-test ==="

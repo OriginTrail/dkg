@@ -398,6 +398,16 @@ PUB_STATUS=$(printf '%s' "$PUBLISH_RESP" | jq_field ".status")
 KA_ID=$(printf '%s' "$PUBLISH_RESP" | jq_field ".kaId")
 [ -z "$KA_ID" ] && KA_ID=$(printf '%s' "$PUBLISH_RESP" | jq_field ".knowledgeAssetId")
 [ -z "$KA_ID" ] && KA_ID=$(printf '%s' "$PUBLISH_RESP" | jq_field ".result.kaId")
+VM_ID=$(printf '%s' "$PUBLISH_RESP" | node -e '
+  let d=""; process.stdin.on("data", c => d += c); process.stdin.on("end", () => {
+    try {
+      const ual = JSON.parse(d).ual;
+      const match = /^did:dkg:evm:[^/]+\/(0x[0-9a-fA-F]{40})\/(\d+)$/.exec(ual);
+      if (!match) throw new Error("publish response has no owner/token UAL");
+      console.log(`${match[1].toLowerCase()}/${match[2]}`);
+    } catch (error) { console.error(error.message); process.exit(1); }
+  });
+') || fail "publish response has no valid UAL for the per-KA VM graph"
 [ "$PUB_STATUS" = "confirmed" ] || fail "publish status=$PUB_STATUS (expected confirmed): $PUBLISH_RESP"
 [ -n "$KA_ID" ] && [ "$KA_ID" != "0" ] || fail "publish returned no kaId: $PUBLISH_RESP"
 pass "curated publish confirmed: kaId=$KA_ID"
@@ -661,7 +671,7 @@ done
 # alone would satisfy an any-graph check, so these checks read only the member's
 # VM graphs. Two cases: the member online during the update, and the member
 # stopped during a second update.
-VM_GRAPH="did:dkg:context-graph:${CG_ID}/_verifiable_memory/${KA_ID}"
+VM_GRAPH="did:dkg:context-graph:${CG_ID}/_verifiable_memory/${VM_ID}"
 member_vm_count() { # <optional triple filter>
   store_count "$EDGE_MEMBER" "SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${VM_GRAPH}> { <${PRIV_SUBJ}> ?p ?o . ${1:-} } }"
 }
