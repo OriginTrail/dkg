@@ -560,6 +560,148 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.cleanPlaneCompletions?.sharedMemory.selectedScopeCompletePeers ?? 0).toBe(0);
   });
 
+  it('does not request the selected SWM lane without an accepted public policy', async () => {
+    // Public SWM only runs on the selected lane, and the agent's recovery lease
+    // refuses that lane unless an RFC-64 public policy is accepted for the graph.
+    // Asking anyway turned every peer into a "transport failure" that no peer
+    // ever caused.
+    const peerIds = ['peer-a', 'peer-b', 'peer-c'];
+    const durableCalls: string[] = [];
+    const sharedCalls: unknown[][] = [];
+
+    const result = await runWorkerCatchup({
+      contextGraphId: 'cg-public-not-accepted',
+      includeSharedMemory: true,
+      graphOwnedDurableRecovery: true,
+    }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return {
+            isPrivateContextGraph: false,
+            selectedSharedMemoryAccepted: false,
+            peerIds,
+            connectedPeers: peerIds.length,
+          };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurableRecovery':
+          durableCalls.push(args[0] as string);
+          return durableResult();
+        case 'syncSharedMemory':
+          sharedCalls.push(args);
+          // The lease refusal as the unfixed bridge relayed it.
+          throw new Error('RFC-64 SWM recovery authority was revoked for "cg-public-not-accepted"');
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect(sharedCalls).toEqual([]);
+    expect(result.diagnostics?.sharedMemory.failedPeers).toBe(0);
+    expect(result.cleanPlaneCompletions?.sharedMemory).toEqual({
+      verifiedDataPeers: 0,
+      emptyPeers: 0,
+      authorityEmptyPeers: 0,
+    });
+    expect(result.sharedMemorySynced).toBe(0);
+    // Only the durable plane is left, and the host owns it for the whole graph.
+    expect(durableCalls).toEqual(['peer-a']);
+    expect(result.peersTried).toBe(1);
+    expect(result.peersNotAttempted).toBe(2);
+    expect(result.peersResponded).toBe(1);
+  });
+
+  it('records a selected SWM lane refused by its recovery lease as not attempted, not failed', async () => {
+    // Accepted when the job was prepared, refused by the lease when the lane
+    // ran (unsubscribe, catalog refresh). The bridge reports the plane as not
+    // attempted; it must count neither as an answer nor as a transport failure.
+    const peerIds = ['peer-a', 'peer-b'];
+    const selectedFlags: unknown[] = [];
+
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-selected-lease-refused', includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              isPrivateContextGraph: false,
+              selectedSharedMemoryAccepted: true,
+              peerIds,
+              connectedPeers: peerIds.length,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory':
+            selectedFlags.push(args[4]);
+            return { kind: 'catchup-plane-not-attempted', reason: 'selected-lane-refused' };
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(selectedFlags).toEqual([true, true]);
+    expect(result.diagnostics?.sharedMemory.failedPeers).toBe(0);
+    expect(result.cleanPlaneCompletions?.sharedMemory).toEqual({
+      verifiedDataPeers: 0,
+      emptyPeers: 0,
+      authorityEmptyPeers: 0,
+    });
+    expect(result.sharedMemorySynced).toBe(0);
+    // The durable plane still answered from both peers.
+    expect(result.peersResponded).toBe(2);
+    expect(result.dataSynced).toBe(2);
+  });
+
+  it('records a catalog-authoritative durable plane as not attempted, not as an answer', async () => {
+    // Legacy durable sync drops a catalog-authoritative graph before sending
+    // anything. That local no-op is not a peer answer.
+    const peerIds = ['peer-a', 'peer-b'];
+    const durableCalls: string[] = [];
+
+    const result = await runWorkerCatchup({
+      contextGraphId: 'cg-catalog-authoritative',
+      includeSharedMemory: false,
+      graphOwnedDurableRecovery: true,
+    }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return { isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurableRecovery':
+          durableCalls.push(args[0] as string);
+          return { kind: 'catchup-plane-not-attempted', reason: 'catalog-authoritative' };
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect(durableCalls).toEqual(['peer-a']);
+    expect(result).toMatchObject({
+      peersTried: 1,
+      peersResponded: 0,
+      peersSucceeded: 0,
+      dataSynced: 0,
+      denied: false,
+    });
+    expect(result.diagnostics?.durable.failedPeers).toBe(0);
+    expect(result.cleanPlaneCompletions?.durable).toEqual({
+      verifiedDataPeers: 0,
+      verifiedPrivateOnlyPeers: 0,
+      emptyPeers: 0,
+      authorityEmptyPeers: 0,
+    });
+  });
+
   it('escalates waves and still caps in-flight peer syncs when no peer proves the plane', async () => {
     const peerIds = Array.from({ length: 20 }, (_, i) => `peer-${i}`);
     // The bound is only observable when the peer set exceeds the cap.

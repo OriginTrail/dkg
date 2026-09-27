@@ -148,6 +148,57 @@ export interface CatchupRunRequest {
   graphOwnedDurableRecovery?: boolean;
 }
 
+/**
+ * Why the host bridge did not run a requested catch-up plane.
+ *
+ * - `catalog-authoritative`: legacy durable sync drops a catalog-authoritative
+ *   graph before sending any request (`syncFromPeerDetailed`).
+ * - `selected-lane-refused`: the RFC-64 recovery lease refused (or revoked) the
+ *   selected SWM lane because no accepted public policy is active for the graph.
+ */
+export type CatchupPlaneNotAttemptedReason =
+  | 'catalog-authoritative'
+  | 'selected-lane-refused';
+
+/**
+ * A plane the host declined to run. Neither reason is an answer from the peer,
+ * so the worker records the plane as not attempted: never as a response and
+ * never as a transport failure.
+ */
+export interface CatchupPlaneNotAttempted {
+  readonly kind: 'catchup-plane-not-attempted';
+  readonly reason: CatchupPlaneNotAttemptedReason;
+}
+
+export function isCatchupPlaneNotAttempted(value: unknown): value is CatchupPlaneNotAttempted {
+  return typeof value === 'object'
+    && value !== null
+    && (value as { kind?: unknown }).kind === 'catchup-plane-not-attempted';
+}
+
+function catchupPlaneNotAttempted(
+  reason: CatchupPlaneNotAttemptedReason,
+): CatchupPlaneNotAttempted {
+  return { kind: 'catchup-plane-not-attempted', reason };
+}
+
+/**
+ * The agent's own legacy durable-sync admission: `syncFromPeerDetailed` keeps
+ * only graphs whose RFC-64 receiver authority still allows legacy sync. An
+ * agent without that resolver applies no such filter.
+ */
+function legacyDurableSyncAllowed(agent: any, contextGraphId: string): boolean {
+  return typeof agent.resolveRfc64CatalogReceiverAuthorityV1 !== 'function'
+    || Boolean(agent.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed);
+}
+
+/** `Rfc64SwmRecoveryTargetRevokedErrorV1`, thrown by a selected lane whose lease is not current. */
+function isRfc64SwmRecoveryLeaseRefusal(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && (error as { code?: unknown }).code === 'RFC64_SWM_RECOVERY_TARGET_REVOKED';
+}
+
 export interface CatchupPhaseProgress extends DurableProgressSummary {
   bytesReceived?: number;
   emptyResponses?: number;
@@ -1138,6 +1189,16 @@ class WorkerCatchupRunner implements CatchupRunner {
           && typeof agent.resolveRfc64CompleteSwmProviderPeerIdsV1 === 'function'
             ? agent.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId)
             : [];
+        // The selected SWM lane's own admission rule: its recovery lease is
+        // current only while an accepted RFC-64 public policy is active for
+        // the graph (`Rfc64SwmRecoveryRuntimeV1.acquireTargetLease`). An agent
+        // without the resolver cannot establish that.
+        const recoveryAuthority = includeSharedMemory
+          && typeof agent.resolveRfc64SwmRecoveryRuntimeAuthorityV1 === 'function'
+          ? agent.resolveRfc64SwmRecoveryRuntimeAuthorityV1(contextGraphId)
+          : undefined;
+        const selectedSharedMemoryAccepted = recoveryAuthority?.active === true
+          && recoveryAuthority.lane === 'selected-public';
         // Connection attempts only expand the candidate set. A stale curator
         // address (for example, a relayed peer returning NO_RESERVATION) must
         // not abort a public multi-peer repair before already-connected peers
@@ -1185,6 +1246,7 @@ class WorkerCatchupRunner implements CatchupRunner {
           authoritativePeerId,
           authoritativeSharedMemoryPeerIds,
           isPrivateContextGraph,
+          selectedSharedMemoryAccepted,
           peerIds,
           connectedPeers: peerIds.length,
         };
@@ -1200,6 +1262,9 @@ class WorkerCatchupRunner implements CatchupRunner {
         const [peerId, contextGraphId, priority, source] = args as [
           string, string, number | undefined, unknown,
         ];
+        if (!legacyDurableSyncAllowed(agent, contextGraphId)) {
+          return this.durableNotAttempted(contextGraphId);
+        }
         return agent.syncFromPeerDetailed(
           peerId,
           [contextGraphId],
@@ -1220,6 +1285,9 @@ class WorkerCatchupRunner implements CatchupRunner {
       }
       case 'syncDurableRecovery': {
         const [peerId, contextGraphId] = args as [string, string];
+        if (!legacyDurableSyncAllowed(agent, contextGraphId)) {
+          return this.durableNotAttempted(contextGraphId);
+        }
         const recovery = await this.agent.syncDurableRecoveryContextGraph(contextGraphId, {
           candidatePeerIds: [peerId],
           candidatesAreSyncCapable: true,
@@ -1240,18 +1308,29 @@ class WorkerCatchupRunner implements CatchupRunner {
         // closed boolean, and only literal `true` may enter the selected lane;
         // malformed structured-clone values retain ordinary behavior.
         if (selected === true) {
-          return agent.syncSelectedSharedMemoryFromPeerDetailed(
-            peerId,
-            [contextGraphId],
-            {
-              ...admission,
-              selectedSwmPriority: true,
-              requestedScope: {
-                kind: 'selected-public',
-                targets: [{ contextGraphId, lane: 'selected-public' }],
+          try {
+            return await agent.syncSelectedSharedMemoryFromPeerDetailed(
+              peerId,
+              [contextGraphId],
+              {
+                ...admission,
+                selectedSwmPriority: true,
+                requestedScope: {
+                  kind: 'selected-public',
+                  targets: [{ contextGraphId, lane: 'selected-public' }],
+                },
               },
-            },
-          );
+            );
+          } catch (error) {
+            // The lease refused the lane for this graph, which says nothing
+            // about the peer. Any other error keeps its failure semantics.
+            if (!isRfc64SwmRecoveryLeaseRefusal(error)) throw error;
+            agent.log?.debug?.(
+              createOperationContext('sync'),
+              `Catch-up for "${contextGraphId}": selected SWM lane refused by its RFC-64 recovery lease; not attempted`,
+            );
+            return catchupPlaneNotAttempted('selected-lane-refused');
+          }
         }
         return agent.syncSharedMemoryFromPeerDetailed(
           peerId,
@@ -1281,6 +1360,15 @@ class WorkerCatchupRunner implements CatchupRunner {
       default:
         throw new Error(`Unknown catch-up worker invoke method: ${method}`);
     }
+  }
+
+  /** The agent would drop this graph from legacy durable sync without a request. */
+  private durableNotAttempted(contextGraphId: string): CatchupPlaneNotAttempted {
+    (this.agent as any).log?.debug?.(
+      createOperationContext('sync'),
+      `Catch-up for "${contextGraphId}": catalog-authoritative graph, legacy durable sync not attempted`,
+    );
+    return catchupPlaneNotAttempted('catalog-authoritative');
   }
 }
 

@@ -33,8 +33,10 @@ import {
   catchupPlaneProvenByAuthorityHostedEmpty,
   catchupPlaneProvenByData,
   catchupPlaneProvenBySelectedScope,
+  isCatchupPlaneNotAttempted,
   type CatchupJobResult,
   type CatchupPlaneCompletionEvidence,
+  type CatchupPlaneNotAttempted,
   type CatchupRunRequest,
 } from './catchup-runner.js';
 
@@ -91,7 +93,21 @@ type CatchupDurableResult = DurableSyncResult & { verifiedPrivateOnlyResponses: 
  * never has to infer completion from diagnostic counters that deliberately
  * retain resolved voluntary yields.
  */
-type CatchupSharedMemoryRpcResult = SharedMemorySyncResult | SelectedSharedMemorySyncResult;
+type CatchupSharedMemoryRpcResult =
+  | SharedMemorySyncResult
+  | SelectedSharedMemorySyncResult
+  | CatchupPlaneNotAttempted;
+
+/**
+ * A plane the host declined to run, as the plane policy sees it: the policy
+ * retries on `deferredBackpressure`, and a plane that never ran has none.
+ */
+type NotAttemptedPlane = CatchupPlaneNotAttempted & { readonly deferredBackpressure?: undefined };
+
+/** A plane the host declined to run is absent from the round, like a skipped one. */
+function attemptedPlane<T>(plane: T | NotAttemptedPlane | null): T | null {
+  return plane === null || isCatchupPlaneNotAttempted(plane) ? null : plane;
+}
 
 function selectedSharedMemoryResult(
   result: CatchupSharedMemoryRpcResult | null | undefined,
@@ -156,8 +172,9 @@ function normalizeCatchupSharedMemoryResult(
 
 /**
  * One peer's sync round. A plane is `null` when the walk deliberately skipped
- * it because the authority already settled that plane — that is the ONLY
- * exceptional case, and it is distinct from a plane that ran and failed.
+ * it because the authority already settled that plane, or when the host could
+ * not run it for this graph (see `CatchupPlaneNotAttempted`). Both are distinct
+ * from a plane that ran and failed: nothing was asked of the peer.
  */
 interface PeerRound {
   peerId: string;
@@ -222,12 +239,29 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     /** Operator-pinned RFC-64 providers that each carry the complete public SWM graph. */
     authoritativeSharedMemoryPeerIds?: string[];
     isPrivateContextGraph: boolean;
+    /**
+     * Whether an accepted RFC-64 public policy is active for this graph, so the
+     * host admits the selected SWM lane (the recovery lease's own rule). The
+     * daemon host always sets it. When it is absent the lane is still
+     * requested, and the bridge reports a lease refusal as not attempted.
+     */
+    selectedSharedMemoryAccepted?: boolean;
     peerIds: string[];
     connectedPeers: number;
   }>('prepareCatchup', request.contextGraphId, request.includeSharedMemory);
   const authoritativeSharedMemoryPeerIds = new Set(
     prepared.authoritativeSharedMemoryPeerIds ?? [],
   );
+  // Public SWM is only ever requested on the selected lane, and the host
+  // refuses that lane without an accepted RFC-64 public policy. Such a plane is
+  // not attempted at all, so it can be neither a response nor a peer failure.
+  // Private SWM keeps the ordinary curator-recovery lane.
+  const sharedMemoryRequested = request.includeSharedMemory
+    && (prepared.isPrivateContextGraph || prepared.selectedSharedMemoryAccepted !== false);
+  if (request.includeSharedMemory && !sharedMemoryRequested) {
+    await logPassLine(`Catch-up for "${request.contextGraphId}": shared memory not attempted; `
+      + 'no accepted RFC-64 public policy admits the selected SWM lane');
+  }
 
   let syncCapablePeers = 0;
   // DISTINCT peers, not peer-passes. Once the walk can repeat, `+= 1` per round
@@ -331,7 +365,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         ? prepared.authoritativePeerId
         : syncCapable[0])
     : undefined;
-  const initialWalkPeers = graphOwnedDurablePeerId !== undefined && !request.includeSharedMemory
+  const initialWalkPeers = graphOwnedDurablePeerId !== undefined && !sharedMemoryRequested
     ? [graphOwnedDurablePeerId]
     : syncCapable;
 
@@ -343,7 +377,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   // are therefore gated on the corresponding authority proof.
   const authorityProven = { durable: false, sharedMemory: false };
   const authorityProvedEverything = (): boolean => authorityProven.durable
-    && (!request.includeSharedMemory || authorityProven.sharedMemory);
+    && (!sharedMemoryRequested || authorityProven.sharedMemory);
 
   /**
    * Each plane authority's own evidence, kept apart from the round total.
@@ -401,7 +435,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     if (!authorityProven.durable && authoritySettles('durable')) {
       authorityProven.durable = true;
     }
-    if (request.includeSharedMemory
+    if (sharedMemoryRequested
       && !authorityProven.sharedMemory
       && authoritySettles('sharedMemory')) {
       authorityProven.sharedMemory = true;
@@ -441,8 +475,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     peersTried.add(peerId);
     const syncDurable = (
       { priority, source }: CatchupPlaneContext,
-    ): Promise<CatchupDurableResult> =>
-      invoke<DurableSyncResult>(
+    ): Promise<CatchupDurableResult | NotAttemptedPlane> =>
+      invoke<DurableSyncResult | CatchupPlaneNotAttempted>(
         request.graphOwnedDurableRecovery ? 'syncDurableRecovery' : 'syncDurable',
         peerId,
         request.contextGraphId,
@@ -450,20 +484,23 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         source,
       )
         .catch(() => createFailedPeerDurableSyncResult())
-        .then((rawDurable) => ({
-          ...rawDurable,
-          verifiedPrivateOnlyResponses: rawDurable.verifiedPrivateOnlyResponses ?? 0,
-        }));
+        .then((rawDurable) => (isCatchupPlaneNotAttempted(rawDurable)
+          ? rawDurable
+          : {
+            ...rawDurable,
+            verifiedPrivateOnlyResponses: rawDurable.verifiedPrivateOnlyResponses ?? 0,
+          }));
     const syncSharedMemory = (
       { priority, source }: CatchupPlaneContext,
-    ): Promise<CatchupSharedMemoryPlane> => {
+    ): Promise<CatchupSharedMemoryPlane | NotAttemptedPlane> => {
       // A foreground subscribe job is already scoped to one explicit CG. For
       // public SWM, make RFC-64 selected scheduling and bounded continuation the
       // default on every candidate peer. This does NOT make every candidate an
       // authority: only a pinned complete provider may furnish the terminal
-      // whole-scope proof consumed below.
+      // whole-scope proof consumed below. `sharedMemoryRequested` already
+      // limits public SWM to graphs whose accepted policy admits this lane.
       const policy: CatchupSharedMemoryPolicy = {
-        selectedSchedulingRequested: request.includeSharedMemory
+        selectedSchedulingRequested: sharedMemoryRequested
           && !prepared.isPrivateContextGraph,
         terminalBoundaryRequired: authoritativeSharedMemoryPeerIds.has(peerId),
       };
@@ -475,7 +512,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         source,
         policy.selectedSchedulingRequested,
       )
-        .then((result) => normalizeCatchupSharedMemoryResult(result, policy))
+        .then((result) => (isCatchupPlaneNotAttempted(result)
+          ? result
+          : normalizeCatchupSharedMemoryResult(result, policy)))
         .catch(() => normalizeCatchupSharedMemoryResult(emptyShared(), policy));
     };
 
@@ -507,7 +546,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     // A policy-selected continuation peer is here precisely because its latest
     // complete manifest still names unresolved snapshots. Authority proof may
     // optimize pass 1, but it must never turn that selected retry into a no-op.
-    const needSharedMemory = request.includeSharedMemory
+    const needSharedMemory = sharedMemoryRequested
       && (pass.sharedMemoryOnly || !optimize || !authorityProven.sharedMemory)
       && (
         pass.sharedMemoryOnly
@@ -525,7 +564,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         fromDurableAuthority,
         fromSharedMemoryAuthority,
         durable: null,
-        shared,
+        shared: attemptedPlane(shared),
       };
     }
     const round = await runCatchupPlanesWithPolicy({
@@ -541,7 +580,13 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       syncDurable,
       syncSharedMemory,
     });
-    return { peerId, fromDurableAuthority, fromSharedMemoryAuthority, ...round };
+    return {
+      peerId,
+      fromDurableAuthority,
+      fromSharedMemoryAuthority,
+      durable: attemptedPlane(round.durable),
+      shared: attemptedPlane(round.shared),
+    };
   };
 
   const accumulate = (
@@ -796,7 +841,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   // This avoids module-import order becoming hidden configuration state while
   // retaining the operator kill switches.
   const passConfig = resolveSwmCatchupPassConfig();
-  if (request.includeSharedMemory) {
+  if (sharedMemoryRequested) {
     const execution = await runSwmCatchupContinuations({
       units: [{
         key: request.contextGraphId,
