@@ -750,14 +750,17 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    * declined for good, recovery skips the root scope, and a Knowledge Asset's
    * updates never reach the member.
    *
-   * While that authority is not active, a private graph this node is a member
-   * of keeps the legacy member lane. Membership is read from the node's own
-   * metadata for the graph: a join approval delivers it before the curator's
-   * first share, and it survives a restart, whereas RFC-64 responsibility
-   * needs chain reads that can lag for a long time. The lane's own checks
-   * (allowlist, envelope, sender key, the curator's authorization) still
-   * apply. Public graphs, explicitly selected or accepted graphs, and graphs
-   * whose RFC-64 authority is active keep their RFC-64 behaviour.
+   * The same holds while that authority is active on a node without private
+   * access-policy authority: the selected-private lane then delivers nothing.
+   *
+   * So unless RFC-64 can deliver private root SWM on this node, a private
+   * graph this node is a member of keeps the legacy member lane. Membership
+   * is read from the node's own metadata for the graph: a join approval
+   * delivers it before the curator's first share, and it survives a restart,
+   * whereas RFC-64 responsibility needs chain reads that can lag for a long
+   * time. The lane's own checks (allowlist, envelope, sender key, the
+   * curator's authorization) still apply. Public graphs, explicitly selected or accepted graphs, and nodes
+   * with private access-policy authority keep their RFC-64 behaviour.
    */
   async rfc64PrivateRootSwmOnLegacyLaneV1(
     this: DKGAgent,
@@ -774,10 +777,16 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === authorityContextGraphId,
       )
     ) return false;
+    // RFC-64's selected-private lane carries private root SWM only on a node
+    // configured with private access-policy authority. Elsewhere it delivers
+    // nothing, whether or not the graph's RFC-64 authority is active.
+    const transport = projectRfc64CatalogTransportStateV1(
+      this.resolveRfc64CatalogReceiverAuthorityV1(authorityContextGraphId),
+    );
+    if (transport === 'legacy') return false;
     if (
-      projectRfc64CatalogTransportStateV1(
-        this.resolveRfc64CatalogReceiverAuthorityV1(authorityContextGraphId),
-      ) !== 'catalog-blocked'
+      transport === 'catalog-active'
+      && this.config.rfc64CatalogAccessPolicyAuthority !== undefined
     ) return false;
     let meta: Awaited<ReturnType<DKGAgent['getCgMeta']>>;
     try {

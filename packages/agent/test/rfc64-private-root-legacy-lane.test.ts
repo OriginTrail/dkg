@@ -125,13 +125,36 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
     ['a node that is not a member', { meta: meta({ allowedAgents: [OTHER] }) }, false],
     ['a graph declared public', { meta: meta({ accessPolicy: 'public' }) }, false],
     ['a graph with no explicit policy', { meta: meta({ accessPolicy: undefined }) }, false],
-    ['a member whose RFC-64 authority is active', { state: 'catalog-active' }, false],
+    ['a member whose RFC-64 authority is active on a node without private authority', {
+      state: 'catalog-active',
+    }, true],
     ['a node where legacy SWM is already allowed', { legacyAllowed: true }, false],
   ] as const)('decides the lane for %s', async (_label, options, expected) => {
     const reads = stubAuthority(options as never);
     await expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(PRIVATE_CG)).resolves.toBe(expected);
     // No chain read: membership comes from the node's own metadata.
     expect(reads.transport).not.toHaveBeenCalled();
+  });
+
+  it('leaves an active RFC-64 authority to deliver on a node with private access-policy authority', async () => {
+    stubAuthority({ state: 'catalog-active' });
+    const configured = internals.config.rfc64CatalogAccessPolicyAuthority;
+    internals.config.rfc64CatalogAccessPolicyAuthority = { localAgentAddress: LOCAL } as never;
+    try {
+      await expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(PRIVATE_CG)).resolves.toBe(false);
+      expect(internals.getCgMeta).not.toHaveBeenCalled();
+    } finally {
+      internals.config.rfc64CatalogAccessPolicyAuthority = configured;
+    }
+    // A blocked authority keeps the member lane even there: nothing else delivers.
+    vi.mocked(internals.resolveRfc64CatalogReceiverAuthorityV1)
+      .mockReturnValue(receiverAuthority('catalog-blocked'));
+    internals.config.rfc64CatalogAccessPolicyAuthority = { localAgentAddress: LOCAL } as never;
+    try {
+      await expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(PRIVATE_CG)).resolves.toBe(true);
+    } finally {
+      internals.config.rfc64CatalogAccessPolicyAuthority = configured;
+    }
   });
 
   it('leaves explicitly selected and accepted RFC-64 graphs on RFC-64', async () => {
