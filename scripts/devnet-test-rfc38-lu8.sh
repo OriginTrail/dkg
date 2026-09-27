@@ -155,7 +155,7 @@ VERIFY_MISSING_QUADS=$(printf '%s\n' "$VERIFY_MISSING_QUADS_WITH_STATUS" | sed '
 log "verify-batch missing-quads response: $VERIFY_MISSING_QUADS"
 [ "$VERIFY_MISSING_QUADS_STATUS" = "400" ] || fail "verify-batch missing-quads status=$VERIFY_MISSING_QUADS_STATUS (expected 400): $VERIFY_MISSING_QUADS"
 MISSING_QUADS_ERROR=$(parse_json "$VERIFY_MISSING_QUADS" '.error')
-if printf '%s' "$MISSING_QUADS_ERROR" | grep -q 'requires explicit `quads`'; then
+if grep -q 'requires explicit `quads`' <<<"$MISSING_QUADS_ERROR"; then
   log "✓ Scenario 1: verify-batch rejects omitted quads with HTTP 400 before ambiguous reconstruction"
 else
   fail "verify-batch missing-quads response did not mention explicit quads requirement: $VERIFY_MISSING_QUADS"

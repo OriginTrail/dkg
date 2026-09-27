@@ -156,13 +156,13 @@ log "✓ chain merkleRoot (first root): $MERKLE_ROOT"
 # Public publishes MUST NOT carry the curated chain-key AEAD wrap
 EDGE_LOG=$(node_log "$CURATOR_NODE")
 RECENT=$(tail -n 500 "$EDGE_LOG")
-if printf '%s' "$RECENT" | grep -qE "LU-5: curated CG ${CG_ID//\//\\/} .* wrapping inline ACK payload"; then
+if grep -qE "LU-5: curated CG ${CG_ID//\//\\/} .* wrapping inline ACK payload" <<<"$RECENT"; then
   fail "regression: public CG triggered LU-5 chain-key AEAD wrap"
 fi
 log "✓ public CG did NOT trigger curated chain-key AEAD wrap"
 
 # Public publishes MUST NOT carry the [ciphertext] byteSize marker
-if printf '%s' "$RECENT" | grep -qE "Submitting V10 on-chain publish tx \([0-9]+ KAs, byteSize=[0-9]+ \[ciphertext\],.*kc.*$KC\b" 2>/dev/null; then
+if grep -qE "Submitting V10 on-chain publish tx \([0-9]+ KAs, byteSize=[0-9]+ \[ciphertext\],.*kc.*$KC\b" <<<"$RECENT" 2>/dev/null; then
   # Heuristic — exact KC mention is unlikely in the publisher line, so use a softer check:
   true
 fi
@@ -192,10 +192,10 @@ log "outsider catchup: inserted=$CATCH_TOTAL ${CATCH_ERR:+(swmError=$CATCH_ERR)}
 # Critical: curator MUST NOT have logged a denial line for this CG.
 sleep 1
 CURATOR_NEW=$(tail -n "+$((CURATOR_LOG_BASE + 1))" "$(node_log "$CURATOR_NODE")")
-if printf '%s' "$CURATOR_NEW" | grep -qE "Denied sync request for \"$CG_ID\""; then
+if grep -qE "Denied sync request for \"$CG_ID\"" <<<"$CURATOR_NEW"; then
   fail "regression: curator denied a public-CG anonymous catchup"
 fi
-if printf '%s' "$CURATOR_NEW" | grep -qE "Private sync auth for \"$CG_ID\".*allowed=false"; then
+if grep -qE "Private sync auth for \"$CG_ID\".*allowed=false" <<<"$CURATOR_NEW"; then
   fail "regression: curator's private-sync auth fired allowed=false for public CG"
 fi
 log "✓ curator did not deny — public CGs are served without auth"
