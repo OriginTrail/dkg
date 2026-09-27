@@ -191,16 +191,18 @@ devnet_create_shared_ka() {
       # The one-shot create sealed this named KA before its SWM promotion
       # failed. Resume only the share transition; repeating create would try
       # to write into an already sealed draft.
-      if [ "$attempt" -lt 4 ] && printf '%s' "$resp" | node -e '
+      if [ "$attempt" -lt 4 ] && printf '%s' "$resp" | RESUME_SHARE="$resume_share" node -e '
         let d=""; process.stdin.on("data", c => d += c);
         process.stdin.on("end", () => {
           try {
             const j = JSON.parse(d);
             const errors = j.errors;
-            const retryable = Array.isArray(errors) && errors.length > 0
-              && !j.error && errors.every((entry) =>
-                typeof entry?.error === "string"
-                && entry.error.includes("[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable"));
+            const transient = (value) => typeof value === "string"
+              && value.includes("[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable");
+            const retryable = process.env.RESUME_SHARE === "1"
+              ? transient(j.error)
+              : Array.isArray(errors) && errors.length > 0
+                && !j.error && errors.every((entry) => transient(entry?.error));
             process.exit(retryable ? 0 : 1);
           } catch { process.exit(1); }
         });
