@@ -10,9 +10,13 @@ shared `ontology` graph that bound without proof from this node's chain. It
 also fixes a fingerprint mismatch that kept received assets with escaped
 non-ASCII text out of Verifiable Memory, a startup that could hold a node's
 API for minutes while it re-checked persisted subscriptions on chain,
-main-thread pauses that grew with a node's peer traffic and uptime, and a
+main-thread pauses that grew with a node's peer traffic and uptime, RFC-64
+catalog verification whose CPU cost grew with the square of a bucket's rows,
+a publisher's finalizations held behind its own failing inbox entries, and a
 managed Oxigraph that outlived a killed worker and held the store.
-Edges now reach holders of public graphs they are not connected to, and
+Edges now reach holders of public graphs they are not connected to,
+members of public graphs that were never registered on chain keep Shared
+Working Memory after their join is approved, even across a restart, and
 auto-update applies on nodes that restart often. **No smart-contract, ABI,
 wire-protocol or deployment registry changes are required.**
 
@@ -26,6 +30,7 @@ wire-protocol or deployment registry changes are required.**
 | The auto-update hold-off deadline is stored in `<DKG home>/.update-holdoff.json` (#2785) | A node that restarts during its rollout hold waits only for the time left instead of drawing a new hold | None. Deleting the file only makes the node draw a new hold |
 | Edges fetch the `agents` phonebook on demand (#2778) | For a public wallet-scoped graph whose owner is not in the local phonebook, an Edge fetches the phonebook once from one to three connected, network-admitted peers (Cores first), bounded to 120 s and then backed off | None. `onDemandAgentsPhonebook: false`, or `DKG_ON_DEMAND_AGENTS_PHONEBOOK=0`, turns it off |
 | Managed Oxigraph runs under the parent watchdog on Linux and macOS, also without memory limits, and the daemon records each launch's owner in the store directory (#2775) | The daemon's stop and restart signals reach Oxigraph through the watchdog's process group, so a worker the supervisor kills no longer leaves Oxigraph holding the store. On the first start after upgrading, a node stops an orphaned Oxigraph from an earlier release that runs this node's store and was reparented to PID 1 | None. A lock holder the daemon cannot attribute to this node is logged and left running; stop it by hand if the node then cannot start |
+| A public graph that was never registered on chain keeps plaintext Shared Working Memory after a join approval (#2827) | SWM on such a graph works in both directions only when the curator and its members all run 10.0.20. A 10.0.19 member still rejects the curator's plaintext shares and cannot share itself. Sender Key setup gains the terminal reason `agent-gate-unavailable`, returned when the receiver cannot evaluate its agent gate without a software or configuration change; older senders already treat unknown reasons as terminal | Upgrade every node that takes part in such a graph |
 
 ### Known issues
 
@@ -67,6 +72,41 @@ wire-protocol or deployment registry changes are required.**
   cleared as each slot is observed, and a subscription keyed by a slot's name
   hash that never recorded it is repaired. A slot that commits no name proves
   no claim.
+- **Shared Working Memory works after a member joins a public graph that was
+  never registered on chain** (#2827): on 10.0.19, once a curator approved a
+  member into a public Context Graph created without a chain registration,
+  Shared Working Memory (SWM) failed in both directions. The curator read the
+  allowlist the approval writes as a read gate and switched its shares to
+  Sender Key encryption, which the member rejected (`sender-not-allowed`). The
+  member could not resolve SWM authority for a graph it did not create, so its
+  own shares retried until exhausted, and it never installed the curator's
+  allowlist. An external team running public peer-to-peer graphs with members
+  hit this on every share after an approval. Such a graph now keeps plaintext
+  SWM while its accepted owner-signed public policy governs it, members take
+  its authority from the node's finalized chain index, and an approved member
+  installs the curator's allowlist once the curator's snapshot proves its
+  membership, on registered public graphs too. A later on-chain registration
+  of the name wins as soon as the index shows it.
+- **A member that restarts during its join recovers instead of staying cut
+  off** (#2832): a member whose join approval is restored at startup in
+  restricted pending-metadata mode fetches the curator's metadata once before
+  it opens Shared Working Memory, Verifiable Memory and recovery for that
+  graph. If that single attempt failed, nothing retried it, and the member
+  kept every data lane for the graph closed until its next restart. This is
+  most likely right after a restart, while the node is still rebuilding its
+  finalized authority index and its RFC-64 authority reads are throttled. The
+  #2827 acceptance scenario hit this on a loaded devnet. The recovery now
+  retries with backoff (15 s, 30 s, 60 s, 120 s, then every 5 minutes) while
+  the approval is still pending, and stops once it completes, the approval is
+  gone, authority is denied, or the node stops.
+- **A node no longer scans the whole chain registry to share into a graph it
+  joined that was never registered on chain** (#2842): when it shared into a
+  Context Graph it did not create, and when it confirmed the graph's metadata
+  after joining, a node resolved the graph's on-chain id with a live scan of
+  every `ContextGraphCreated` event. For a graph that was never registered,
+  the scan covers the chain's whole history, so on a public chain a share
+  waited minutes and cost thousands of `eth_getLogs` calls. Nodes with the
+  finalized authority index now take the id from that index.
 - **A received copy with escaped non-ASCII text reaches Verifiable Memory
   again on the receiving node** (#2813): a node records a fingerprint of each
   Shared Working Memory copy it takes in, and finalization recomputes it from
@@ -81,6 +121,20 @@ wire-protocol or deployment registry changes are required.**
   receiver), before it is persisted and fingerprinted. The fingerprint itself
   is unchanged, so stored records and peers on other versions agree as
   before.
+- **A publisher's finalizations no longer wait behind its own entries that
+  keep failing** (#2814): the finalization inbox holds at most 32 live entries
+  per publisher, 64 per Context Graph and 128 in total. An entry whose local
+  copy cannot be prepared (`workspace preparation is unavailable`) keeps its
+  slot for its whole seven-day retry window. Once a publisher had 32 of them,
+  every later finalization from that publisher went to the deferred spool,
+  including ones that would verify at once, and its Verifiable Memory
+  promotion waited for chain reconciliation. This happened in production.
+  Now a newly received finalization that finds no room parks the oldest entry
+  that counts against the full limit, has failed that way at least three
+  times in a row, and is at least five minutes old. The parked entry goes
+  back to the deferred spool with its receipt time, publisher and expiry.
+  It is admitted again when there is room. The caps and the database schema
+  are unchanged, so a node can still roll back.
 - **Persisted subscriptions no longer hold a node's start for minutes**
   (#2815): on start, a node checked the read authority of every persisted
   Context Graph subscription on chain, one at a time, and opened its API only
@@ -112,6 +166,15 @@ wire-protocol or deployment registry changes are required.**
   settles. A multi-path send cancels its losing paths as soon as the winner
   answers, including paths still opening their stream, and a retried send
   removes the abort listener its backoff added.
+- **RFC-64 catalog verification no longer grows with the square of a
+  bucket's rows** (#2812): producing, receiving or reloading a catalog
+  successor checked each row's authorship by re-verifying the bucket's whole
+  signed closure (delegation, head, directory path and bucket signature) once
+  per row. A successor of N rows cost N whole-bucket verifications, so a
+  replay that grows a catalog one asset at a time cost about N³. In a 90 s
+  CPU profile of a replay on 10.0.19, 26.5 s went there. The closure is now
+  verified once per bucket, then each row: all rows of a 256-row bucket
+  verify in 0.15 s instead of 19.4 s.
 - **A worker killed by the supervisor no longer leaves managed Oxigraph
   holding the store lock** (#2775): after five failed liveness probes the supervisor
   SIGKILLs its worker. A directly launched `oxigraph serve` (macOS, or any node
@@ -226,6 +289,14 @@ wire-protocol or deployment registry changes are required.**
   installs already resolve a fixed 8.0.x (#2793).
 - The CLI and MCP clients share one daemon request deadline policy from
   `@origintrail-official/dkg-core` (#2792).
+- A 503 for unavailable Context Graph read authority now says which
+  dependency failed (#2834). For each such refusal, the daemon logs one line
+  that names the authority source, the reason, and the dependency (`store`,
+  `chain`, `local-state` or `unknown`). The line is logged under the
+  operation ID the response returns in its `x-dkg-operation-id` header. The
+  first refusal with a given attribution in a window logs at warn, and
+  repeats log at info. Browser clients can read that header and
+  `Retry-After`.
 
 ## [10.0.19] - 2026-09-25
 
