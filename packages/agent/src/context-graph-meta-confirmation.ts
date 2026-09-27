@@ -74,19 +74,21 @@ export async function confirmContextGraphMetadataV1(
     const { proof } = input.acceptance;
     // A lifecycle race or partial rehydration can drop or change the binding;
     // the pre-join definition must not then stand in for the member.
-    if (
+    const stillApproved = () => (
       dependencies.localApprovedAgentByContextGraph.get(contextGraphId)?.toLowerCase()
-        !== proof.approvedAgentAddress.toLowerCase()
-    ) return false;
+        === proof.approvedAgentAddress.toLowerCase()
+    );
+    if (!stillApproved()) return false;
     const confirmed = await findAuthoritativeDefinition(
       dependencies,
       contextGraphId,
       [{ definition: input.acceptance.admittedDefinition, memberProof: proof }],
       'agent.contextGraph.confirmedMeta.approvedMember',
     ) !== null;
-    // Readiness is declared now, so the authority behind the acceptance must
-    // still hold now, not only when the join attempt began.
-    return confirmed && await input.acceptance.stillHolds();
+    // Readiness is declared now, so the authority behind the acceptance and
+    // this node's approval must both still hold now, after the awaits: a
+    // rejection or a new join request can change the binding while they run.
+    return confirmed && await input.acceptance.stillHolds() && stillApproved();
   }
 
   const memberProof = await resolveApprovedMemberProof(dependencies, contextGraphId);

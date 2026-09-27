@@ -696,21 +696,42 @@ describe('refreshMetaFromCurator', () => {
       expect(writes).toEqual(['insert', 'dropGraph']);
     });
 
-    it('does not replace the root subject once the public authority stops holding during the replacement', async () => {
+    it('leaves the whole projection unchanged when the public authority stops holding before the subject writes', async () => {
       const store = new OxigraphStore();
       try {
         const metaGraph = contextGraphMetaGraphUri(contextGraphId);
         const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+        const delegation = `did:dkg:agent-delegation:${contextGraphId}:${memberAddress}`;
+        // The current root already allows the member, through an older
+        // delegatee than the snapshot names. A delegation written without the
+        // root would move that live authorization on its own.
+        await store.insert([
+          { subject: contextGraphUri, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: `"${memberAddress}"`, graph: metaGraph },
+          { subject: delegation, predicate: DKG_ONTOLOGY.DKG_DELEGATION_AGENT, object: `"${memberAddress}"`, graph: metaGraph },
+          { subject: delegation, predicate: DKG_ONTOLOGY.DKG_ALLOWED_DELEGATEE_PEER, object: '"old-peer"', graph: metaGraph },
+        ]);
+        const query = store.query.bind(store);
+        const readProjection = async () => {
+          const result = await query(`SELECT ?s ?p ?o WHERE { GRAPH <${metaGraph}> { ?s ?p ?o } }`);
+          return result.type === 'bindings'
+            ? result.bindings.map((row) => JSON.stringify(row)).sort()
+            : [];
+        };
+        const before = await readProjection();
+        expect(before).toHaveLength(3);
+
         let publicNow = true;
         const acceptance = await publicAcceptance(() => publicNow);
+        store.query = async (sparql, options) => {
+          // Registered private while the replacement reads the current projection.
+          if (options?.source === 'agent.metaRefresh.readLocalDelegations') publicNow = false;
+          return query(sparql, options);
+        };
         const replacedSubjects: string[] = [];
         const replaceSubject = store.replaceSubject.bind(store);
         store.replaceSubject = async (graph, subject, quads, options) => {
           replacedSubjects.push(subject);
-          const replaced = await replaceSubject(graph, subject, quads, options);
-          // Registered private once the member's delegation proof has landed.
-          if (subject !== contextGraphUri) publicNow = false;
-          return replaced;
+          return replaceSubject(graph, subject, quads, options);
         };
         const result = await refreshAfterApproval(
           publicSnapshotWithMember({ includeMember: true }),
@@ -718,11 +739,8 @@ describe('refreshMetaFromCurator', () => {
           { store },
         );
         expect(result.refreshed).toBe(false);
-        expect(replacedSubjects).toEqual([`did:dkg:agent-delegation:${contextGraphId}:${memberAddress}`]);
-        // The root subject is the activation boundary; it was never written.
-        await expect(store.query(
-          `ASK { GRAPH <${metaGraph}> { <${contextGraphUri}> ?p ?o } }`,
-        )).resolves.toEqual({ type: 'boolean', value: false });
+        expect(replacedSubjects).toEqual([]);
+        expect(await readProjection()).toEqual(before);
       } finally {
         await store.close();
       }
