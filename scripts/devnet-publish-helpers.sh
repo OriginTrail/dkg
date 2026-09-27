@@ -145,13 +145,29 @@ devnet_create_shared_ka() {
   while [ "$i" -lt "$count" ]; do
     asset=$(sed -n "$((i + 2))p" "$plan_file")
     body=$(printf '%s' "$asset" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>process.stdout.write(JSON.stringify(JSON.parse(d).body)));')
-    local attempt accepted=0
+    local attempt accepted=0 resume_share=0 share_path share_body
+    share_path=$(printf '%s' "$asset" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>process.stdout.write("/api/knowledge-assets/"+encodeURIComponent(JSON.parse(d).name)+"/swm/share"));')
+    share_body=$(printf '%s' "$body" | node -e '
+      let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{
+        const b=JSON.parse(d);
+        process.stdout.write(JSON.stringify({
+          contextGraphId:b.contextGraphId,
+          ...(b.subGraphName ? {subGraphName:b.subGraphName} : {}),
+          ...(typeof b.awaitCuratorAck === "boolean" ? {awaitCuratorAck:b.awaitCuratorAck} : {}),
+        }));
+      });
+    ')
     for attempt in 1 2 3 4; do
-      if ! resp=$(api_call "$node_id" POST /api/knowledge-assets "$body"); then
+      if [ "$resume_share" -eq 1 ]; then
+        resp=$(api_call "$node_id" POST "$share_path" "$share_body") || {
+          rm -f "$plan_file" "$responses_file" "$assets_file"
+          return 1
+        }
+      elif ! resp=$(api_call "$node_id" POST /api/knowledge-assets "$body"); then
         rm -f "$plan_file" "$responses_file" "$assets_file"
         return 1
       fi
-      if printf '%s' "$resp" | RESPONSES_FILE="$responses_file" node -e '
+      if printf '%s' "$resp" | RESPONSES_FILE="$responses_file" RESUME_SHARE="$resume_share" node -e '
       const fs = require("fs");
       let d=""; process.stdin.on("data", c => d += c);
       process.stdin.on("end", () => {
@@ -161,7 +177,8 @@ devnet_create_shared_ka() {
           if (j.swmShared !== true) process.exit(1);
           if (j.publishReady !== true) process.exit(1);
           if (typeof j.shareOperationId !== "string" || j.shareOperationId.trim().length === 0) process.exit(1);
-          if (Number(j.promotedCount || 0) <= 0) process.exit(1);
+          const promoted = Number(j.promotedCount);
+          if (!Number.isFinite(promoted) || promoted < (process.env.RESUME_SHARE === "1" ? 0 : 1)) process.exit(1);
           fs.appendFileSync(process.env.RESPONSES_FILE, JSON.stringify(j) + "\n");
         } catch {
           process.exit(1);
@@ -171,9 +188,9 @@ devnet_create_shared_ka() {
         accepted=1
         break
       fi
-      # A temporarily unavailable promote prerequisite leaves a sealed named
-      # KA that the same request can resume. Reuse its name and body; retry no
-      # other response, so a genuine publish failure still stops the sweep.
+      # The one-shot create sealed this named KA before its SWM promotion
+      # failed. Resume only the share transition; repeating create would try
+      # to write into an already sealed draft.
       if [ "$attempt" -lt 4 ] && printf '%s' "$resp" | node -e '
         let d=""; process.stdin.on("data", c => d += c);
         process.stdin.on("end", () => {
@@ -188,6 +205,7 @@ devnet_create_shared_ka() {
           } catch { process.exit(1); }
         });
       '; then
+        resume_share=1
         sleep "$((1 << (attempt - 1)))"
         continue
       fi

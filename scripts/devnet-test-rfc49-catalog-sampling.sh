@@ -661,25 +661,54 @@ done
 # alone would satisfy an any-graph check, so these checks read only the member's
 # VM graphs. Two cases: the member online during the update, and the member
 # stopped during a second update.
-member_vm_count() { # <marker>
-  store_count "$EDGE_MEMBER" "SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { <${PRIV_SUBJ}> ?p ?o . FILTER(CONTAINS(STR(?o), \"$1\")) } FILTER(STRSTARTS(STR(?g), \"did:dkg:context-graph:${CG_ID}/_verifiable_memory/\")) }"
+VM_GRAPH="did:dkg:context-graph:${CG_ID}/_verifiable_memory/${KA_ID}"
+member_vm_count() { # <optional triple filter>
+  store_count "$EDGE_MEMBER" "SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${VM_GRAPH}> { <${PRIV_SUBJ}> ?p ?o . ${1:-} } }"
 }
-wait_member_vm() { # <marker> <case label> [seconds, default 180]; tolerates a store read error while the member restarts
-  local got="" i
+member_vm_exact_version() { # <UPDATED|SECONDUPDATE>; this one KA's current VM graph only
+  local version="$1" expected_total name_fragment job_title expected_role total names emails jobs roles old_names
+  if [ "$version" = "UPDATED" ]; then
+    expected_total=4
+    name_fragment="UPDATED value"
+    job_title="Lead (added on update)"
+    expected_role=1
+  else
+    expected_total=3
+    name_fragment="SECONDUPDATE value"
+    job_title="Lead (second update)"
+    expected_role=0
+  fi
+  total=$(member_vm_count) || return 1
+  [ "$total" = "$expected_total" ] || return 1
+  names=$(member_vm_count "FILTER(?p = <http://schema.org/name> && CONTAINS(STR(?o), \"${name_fragment}\"))") || return 1
+  emails=$(member_vm_count "FILTER(?p = <http://schema.org/email> && STR(?o) = \"alice-${STAMP}@example.org\")") || return 1
+  jobs=$(member_vm_count "FILTER(?p = <http://schema.org/jobTitle> && STR(?o) = \"${job_title}\")") || return 1
+  roles=$(member_vm_count 'FILTER(?p = <http://schema.org/role>)') || return 1
+  [ "$names" = 1 ] && [ "$emails" = 1 ] && [ "$jobs" = 1 ] && [ "$roles" = "$expected_role" ] || return 1
+  if [ "$version" = "UPDATED" ]; then
+    [ "$(member_vm_count 'FILTER(?p = <http://schema.org/role> && CONTAINS(STR(?o), "UPDATED"))')" = 1 ] || return 1
+  else
+    # The first update's name and role must be gone, not merely followed by
+    # an appended second version. The exact total above also excludes any
+    # leftover baseline triples in this KA's current VM graph.
+    old_names=$(member_vm_count 'FILTER(?p = <http://schema.org/name> && CONTAINS(STR(?o), "UPDATED value"))') || return 1
+    [ "$old_names" = 0 ] || return 1
+  fi
+}
+wait_member_vm() { # <version> <case label> [seconds, default 180]; tolerates a store read error while the member restarts
+  local i
   for i in $(seq 1 $(( ${3:-180} / 3 ))); do
-    got=$(member_vm_count "$1") || got="unreadable"
-    [ "${got:-0}" -ge 1 ] 2>/dev/null && return 0
-    { [ "$i" -eq 1 ] || [ $((i % 10)) -eq 0 ]; } && log "  …member VM not on the $1 version yet after $((i*3))s ($2)"
+    member_vm_exact_version "$1" && return 0
+    { [ "$i" -eq 1 ] || [ $((i % 10)) -eq 0 ]; } && log "  …member VM is not an exact $1 replacement yet after $((i*3))s ($2)"
     sleep 3
   done
-  [ "$got" != "unreadable" ] || fail "member edge$EDGE_MEMBER: cannot read its store ($2)"
   return 1
 }
 
 log "member edge$EDGE_MEMBER was online during the update: waiting for its Verifiable Memory to hold the UPDATED payload…"
 wait_member_vm "UPDATED" "online during the update" \
   || fail "member edge$EDGE_MEMBER's Verifiable Memory did NOT converge to the UPDATED private payload while online (#2858)"
-pass "member edge$EDGE_MEMBER's Verifiable Memory holds the UPDATED private payload (online during the update)"
+pass "member edge$EDGE_MEMBER's Verifiable Memory exactly holds the UPDATED private payload (online during the update)"
 
 log "stopping member edge$EDGE_MEMBER, then a second update while it is offline…"
 MEMBER_NEEDS_RESTORE=1
@@ -732,7 +761,7 @@ fi
 # reconcile sweep, so allow more time than the online case.
 wait_member_vm "SECONDUPDATE" "offline during the update" 300 \
   || fail "member edge$EDGE_MEMBER's Verifiable Memory did NOT converge to the second update after restarting (#2858)"
-pass "member edge$EDGE_MEMBER's Verifiable Memory holds the second update's payload (offline during the update)"
+pass "member edge$EDGE_MEMBER's Verifiable Memory exactly replaced the first update's payload after restart"
 
 # ---------------------------------------------------------------------------
 echo ""

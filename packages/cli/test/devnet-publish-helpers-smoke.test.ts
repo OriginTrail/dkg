@@ -395,7 +395,7 @@ NODE
       await rm(tempDir, { recursive: true, force: true });
     }
   });
-  it('retries a temporarily unavailable share prerequisite with the same asset name', async () => {
+  it('resumes a sealed named asset through the share route after a transient prerequisite', async () => {
     const repoRoot = resolve(process.cwd(), '../..');
     const script = String.raw`
 set -euo pipefail
@@ -406,15 +406,19 @@ export DEVNET_DIR CALLS_FILE
 
 api_call() {
   local node_id="$1" method="$2" path="$3" data="$4"
-  CALL_DATA="$data" node -e '
+  CALL_DATA="$data" CALL_PATH="$path" node -e '
     const fs=require("fs"); const body=JSON.parse(process.env.CALL_DATA);
-    fs.appendFileSync(process.env.CALLS_FILE, JSON.stringify({name:body.name})+"\n");
-    const count=fs.readFileSync(process.env.CALLS_FILE,"utf8").trim().split("\n").length;
-    if (count===1) console.log(JSON.stringify({created:true,status:"wm-sealed",errors:[
-      {phase:"swm-share",error:"[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable"}
-    ]}));
-    else console.log(JSON.stringify({status:"swm-shared",swmShared:true,publishReady:true,
-      shareOperationId:"share-"+body.name,promotedCount:1}));
+    fs.appendFileSync(process.env.CALLS_FILE, JSON.stringify({path:process.env.CALL_PATH,body})+"\n");
+    if (process.env.CALL_PATH==="/api/knowledge-assets") {
+      const calls=fs.readFileSync(process.env.CALLS_FILE,"utf8").trim().split("\n").length;
+      if (calls!==1) console.log(JSON.stringify({code:"KA_ASSERTION_ALREADY_FINALIZED"}));
+      else console.log(JSON.stringify({created:true,status:"wm-sealed",errors:[
+        {phase:"swm-share",error:"[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable"}
+      ]}));
+    } else if (/^\/api\/knowledge-assets\/retry-.*\/swm\/share$/.test(process.env.CALL_PATH)) {
+      console.log(JSON.stringify({status:"swm-shared",swmShared:true,publishReady:true,
+        shareOperationId:"durable-original-share",promotedCount:0}));
+    } else throw new Error("unexpected route: "+process.env.CALL_PATH);
   '
 }
 
@@ -423,7 +427,11 @@ payload='{"contextGraphId":"cg-retry","quads":[{"subject":"urn:retry:1","predica
 response="$(devnet_create_shared_ka node-a "$payload" retry)"
 CREATE_RESPONSE="$response" node -e '
   const fs=require("fs"); const calls=fs.readFileSync(process.env.CALLS_FILE,"utf8").trim().split("\n").map(JSON.parse);
-  if (calls.length!==2 || calls[0].name!==calls[1].name) throw new Error("retry changed the asset name");
+  if (calls.length!==2 || calls[0].path!=="/api/knowledge-assets"
+    || calls[1].path!=="/api/knowledge-assets/"+calls[0].body.name+"/swm/share")
+    throw new Error("retry did not resume the sealed named asset through SWM share");
+  if (calls[1].body.contextGraphId!==calls[0].body.contextGraphId || "quads" in calls[1].body)
+    throw new Error("share replay used a create body");
   if (JSON.parse(process.env.CREATE_RESPONSE).triplesWritten!==1) throw new Error("retry did not share");
 '
 `;
