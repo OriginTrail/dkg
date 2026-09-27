@@ -32,7 +32,7 @@ import type {
 import { publisherPublishPlanByteSize } from './chain-adapter.js';
 import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import { resolveQuotedPublisherCandidatePricing } from './publisher-plan.js';
-import { errorCode, errorMessage, InsufficientPublisherFundsError, PcaFundingUnknownError } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, InsufficientPublisherFundsError } from './evm-adapter-errors.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
@@ -190,29 +190,10 @@ export class PublishMethods extends EVMChainAdapterBase {
       plans[index] = await this._publisherCandidatePlan(plan.signer, request, quote);
     }
 
-    try {
-      return await select();
-    } catch (error) {
-      if (!(error instanceof InsufficientPublisherFundsError)) throw error;
-      // A fresh strict funding scan found no viable candidate. Only a STILL
-      // unresolved planning probe on a registered, gas-funded PCA agent can
-      // prevent a terminal whole-pool shortfall verdict.
-      for (const plan of plans) {
-        if (plan.pcaProbeError === undefined) continue;
-        const funds = await this.getWalletFunding(plan.address, { forceRefresh: true });
-        if (funds.native !== null && funds.native <= this.minPublisherNativeWei) continue;
-        if (funds.trac === null || (funds.trac > this.minPublisherTracWei && funds.trac >= plan.tokenAmount)) continue;
-        try {
-          if ((await this.publisherConvictionPlanReader()?.getAccountId(plan.address) ?? 0n) > 0n) {
-            throw new PcaFundingUnknownError(errorCode(plan.pcaProbeError));
-          }
-        } catch (readError) {
-          if (readError instanceof PcaFundingUnknownError) throw readError;
-          throw new PcaFundingUnknownError(errorCode(readError));
-        }
-      }
-      throw error;
-    }
+    // This second strict scan is authoritative: rejected PCA reads already
+    // surface as unknown, while a successful false confirms a shortfall for
+    // the selected lifetime. An old planning error cannot override it.
+    return select();
   }
 
   /**

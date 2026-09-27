@@ -4861,6 +4861,35 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     expect(coverReadStrict[0]).toBe(true);
   });
 
+  it('reports confirmed non-coverage after failed PCA planning as insufficient funds', async () => {
+    const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    const failedProbe = Object.assign(new Error('PCA planning read unavailable'), { code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    const planningCoverage = recorder(async () => { throw failedProbe; });
+    (a as any).publisherConvictionPlanReader = () => ({
+      getAccountId: async () => 7n,
+      getLockDurationEpochs: async () => 12,
+      canCover: planningCoverage,
+    });
+    (a as any).getConvictionAgentAccountId = recorder(async () => 7n);
+    (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 12);
+    const fundingCoverage = recorder(async (_id: bigint, _cost: bigint, _opts?: { strict?: boolean }) => false);
+    (a as any).convictionAccountCanCover = fundingCoverage;
+    (a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
+
+    await expect(a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      billableByteSize: 100n,
+      effectiveByteSize: 100n,
+      defaultPublishEpochs: 12,
+      publisherAddress: walletA.address,
+    })).rejects.toMatchObject({ code: 'NO_FUNDED_PUBLISHER_WALLET' });
+    expect(planningCoverage.calls).toHaveLength(2);
+    expect(fundingCoverage.calls.filter(([, , opts]) => opts?.strict === true)).toHaveLength(2);
+  });
+
   it('still reports confirmed PCA non-coverage as terminal insufficient funds', async () => {
     const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     for (const wallet of [walletA, walletB]) {
