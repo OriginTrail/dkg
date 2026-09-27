@@ -105,12 +105,85 @@ hardhat_mine() {
     "http://127.0.0.1:${HARDHAT_PORT}" > /dev/null
 }
 
-# Parse a COUNT(*) result from /api/query. The binding value is a typed literal
-# like `"0"^^<http://www.w3.org/2001/XMLSchema#integer>` — take ONLY the value
+# Parse the COUNT(*) row of a SPARQL JSON answer (a store's `.results`, or the
+# daemon's `.result`). The binding value is a typed literal like
+# `"0"^^<http://www.w3.org/2001/XMLSchema#integer>` — take ONLY the value
 # before `^^` (stripping the type IRI, whose `w3`/`2001` digits would otherwise
-# corrupt the count, e.g. "0" → 0, not 32001).
+# corrupt the count, e.g. "0" → 0, not 32001). An answer without a count row
+# (an error body, a denied query) fails; it is never a 0.
 _count_from_query() {
-  node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const j=JSON.parse(d);const b=j?.result?.bindings??j?.bindings??j?.results?.bindings??[];let v=b[0]?.c?.value??b[0]?.c??"0";v=String(v).split("^^")[0].replace(/"/g,"").trim();console.log(Number.isFinite(parseInt(v,10))?parseInt(v,10):-1)}catch(e){console.log(-1)}})'
+  node -e '
+    let d = "";
+    process.stdin.on("data", c => d += c);
+    process.stdin.on("end", () => {
+      try {
+        const j = JSON.parse(d);
+        const cell = (j?.results?.bindings ?? j?.result?.bindings)?.[0]?.c;
+        const v = String((cell !== null && typeof cell === "object" ? cell.value : cell) ?? "")
+          .split("^^")[0].replace(/"/g, "").trim();
+        if (!/^\d+$/.test(v)) throw new Error("no count row");
+        console.log(Number(v));
+      } catch (e) {
+        console.error(`unreadable COUNT answer (${e.message}): ${d.slice(0, 300)}`);
+        process.exit(1);
+      }
+    });
+  '
+}
+
+# Query endpoint of node $1's backing store, from its config.json. Since v10.0.17
+# the daemon answers an unscoped /api/query only on stores with all-writer
+# consistency coverage, and a scoped query cannot see `_catalog` or the
+# ciphertext-chunk graphs, so custody is read from the store itself. In-process
+# Oxigraph has no endpoint but declares that coverage: "api" means /api/query.
+store_query_endpoint() {
+  CFG="$(node_dir "$1")/config.json" node -e '
+    let store;
+    try {
+      store = JSON.parse(require("fs").readFileSync(process.env.CFG, "utf8")).store ?? {};
+    } catch (e) {
+      console.error(`cannot read ${process.env.CFG}: ${e.message}`);
+      process.exit(1);
+    }
+    const options = store.options ?? {};
+    const endpoint = {
+      "oxigraph-server": `http://127.0.0.1:${options.port ?? 7878}/query`,
+      blazegraph: options.url ?? store.url,
+      "sparql-http": options.queryEndpoint,
+      oxigraph: "api",
+      "oxigraph-persistent": "api",
+      "oxigraph-worker": "api",
+    }[store.backend ?? "oxigraph-worker"];
+    if (!endpoint) {
+      console.error(`no query endpoint for store backend ${store.backend} in ${process.env.CFG}`);
+      process.exit(1);
+    }
+    console.log(endpoint);
+  '
+}
+
+# COUNT(*) of a SPARQL SELECT on node $1's backing store. Prints the count, or
+# fails with the reason on stderr: an HTTP error or an unreadable answer is
+# never a count of 0.
+store_count() {
+  local node="$1" sparql="$2" endpoint out code body
+  endpoint=$(store_query_endpoint "$node") || return 1
+  if [ "$endpoint" = "api" ]; then
+    body=$(api_call "$node" POST /api/query "$(SPARQL="$sparql" node -e 'console.log(JSON.stringify({ sparql: process.env.SPARQL }))')") || return 1
+  else
+    out=$(curl -sS --max-time 60 -X POST -H 'Accept: application/sparql-results+json' \
+      --data-urlencode "query=${sparql}" -w $'\n%{http_code}' "$endpoint") || {
+      echo "node $node store $endpoint is unreachable" >&2
+      return 1
+    }
+    code="${out##*$'\n'}"
+    body="${out%$'\n'*}"
+    if [ "$code" != "200" ]; then
+      echo "node $node store $endpoint answered HTTP $code: ${body:0:300}" >&2
+      return 1
+    fi
+  fi
+  printf '%s' "$body" | _count_from_query
 }
 
 # COUNT(*) of rows for THIS publish's ciphertext batch under any
@@ -121,27 +194,15 @@ _count_from_query() {
 # ciphertext count would falsely fail this suite. The LU-11 subject embeds the
 # current publish batch id (`.../<batchId>/<chunkIndex>`), which is the V10 KC
 # merkleRoot returned by wm/finalize; scope to that subject prefix.
-# NOTE: NO contextGraphId — that applies a memory-layer VIEW that breaks the
-# graph-scoped COUNT (returns the whole store). Raw SPARQL scopes correctly.
 ciphertext_count() {
-  local body batch_id
-  batch_id="${BATCH_ID:-}"
-  [ -n "$batch_id" ] || { echo "-1"; return; }
-  body=$(BATCH_ID="$batch_id" node -e '
-    const subjectPrefix = `urn:dkg:swm:v10-publish-ciphertext-chunk/${process.env.BATCH_ID}/`;
-    console.log(JSON.stringify({
-      sparql: `SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o . FILTER(STRSTARTS(STR(?g), "urn:dkg:swm:ciphertext-chunks/") && STRSTARTS(STR(?s), "${subjectPrefix}")) } }`,
-    }));
-  ')
-  api_call "$1" POST /api/query "$body" | _count_from_query
+  [ -n "${BATCH_ID:-}" ] || { echo "BATCH_ID is not set" >&2; return 1; }
+  store_count "$1" "SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { ?s ?p ?o . FILTER(STRSTARTS(STR(?g), \"urn:dkg:swm:ciphertext-chunks/\") && STRSTARTS(STR(?s), \"urn:dkg:swm:v10-publish-ciphertext-chunk/${BATCH_ID}/\")) } }"
 }
 
 # COUNT(*) of triples in the public <cg>/_catalog graph (keyed by the NUMERIC
 # on-chain CG id, e.g. did:dkg:context-graph:5/_catalog — NOT the local name).
 catalog_count() {
-  local body
-  body=$(OID="$ONCHAIN_ID" node -e 'console.log(JSON.stringify({sparql:`SELECT (COUNT(*) AS ?c) WHERE { GRAPH <did:dkg:context-graph:${process.env.OID}/_catalog> { ?s ?p ?o } }`}))')
-  api_call "$1" POST /api/query "$body" | _count_from_query
+  store_count "$1" "SELECT (COUNT(*) AS ?c) WHERE { GRAPH <did:dkg:context-graph:${ONCHAIN_ID}/_catalog> { ?s ?p ?o } }"
 }
 
 rs_submitted() {
@@ -307,18 +368,18 @@ fi
 #    members, NOT the cores. Member SWM sync lags the publish, so poll.
 # ---------------------------------------------------------------------------
 member_priv_count() {
-  api_call "$EDGE_MEMBER" POST /api/query "$(S="$PRIV_SUBJ" node -e 'console.log(JSON.stringify({sparql:`SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { <${process.env.S}> ?p ?o } }`}))')" | _count_from_query
+  store_count "$EDGE_MEMBER" "SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { <${PRIV_SUBJ}> ?p ?o } }"
 }
 MEMBER_PRIV=0
 for i in $(seq 1 45); do
-  MEMBER_PRIV=$(member_priv_count)
+  MEMBER_PRIV=$(member_priv_count) || MEMBER_PRIV="unreadable"
   [ "${MEMBER_PRIV:-0}" -ge 1 ] 2>/dev/null && break
   sleep 2
 done
 if [ "${MEMBER_PRIV:-0}" -ge 1 ] 2>/dev/null; then
   pass "member edge$EDGE_MEMBER holds the private data ($MEMBER_PRIV triple(s) for the secret subject) — private data lives member-side, off the cores"
 else
-  warn "member edge$EDGE_MEMBER did not sync the private data in-window (sync timing? — not a strip gate)"
+  warn "member edge$EDGE_MEMBER did not sync the private data in-window (last count: $MEMBER_PRIV; sync timing? — not a strip gate)"
 fi
 
 # ---------------------------------------------------------------------------
@@ -330,7 +391,10 @@ fi
 log "waiting for the public _catalog to propagate to the stripped cores (up to 3 min)…"
 for i in $(seq 1 60); do
   holders=0
-  for n in "${STRIPPED_CORES[@]}"; do c=$(catalog_count "$n"); [ "${c:-0}" -ge 1 ] 2>/dev/null && holders=$((holders+1)); done
+  for n in "${STRIPPED_CORES[@]}"; do
+    c=$(catalog_count "$n") || fail "core$n: cannot read the _catalog from its store"
+    [ "$c" -ge 1 ] && holders=$((holders+1))
+  done
   [ "$holders" -ge "${#STRIPPED_CORES[@]}" ] && { log "  catalog present on all $holders/${#STRIPPED_CORES[@]} stripped cores"; break; }
   [ "$i" -eq 1 ] || [ $((i % 10)) -eq 0 ] && log "  …catalog on $holders/${#STRIPPED_CORES[@]} cores after $((i*3))s"
   sleep 3
@@ -339,7 +403,8 @@ done
 log "checking ciphertext + catalog custody per core…"
 STRIP_OK=1
 for n in "${STRIPPED_CORES[@]}"; do
-  ct=$(ciphertext_count "$n"); cat=$(catalog_count "$n")
+  ct=$(ciphertext_count "$n") || fail "core$n: cannot read ciphertext rows from its store"
+  cat=$(catalog_count "$n") || fail "core$n: cannot read the _catalog from its store"
   log "  core$n: ciphertext_rows=$ct  catalog_triples=$cat"
   if [ "$ct" != "0" ]; then STRIP_OK=0; warn "core$n holds $ct ciphertext rows (expected 0 — STRIP LEAK)"; fi
 done
@@ -349,7 +414,8 @@ pass "all stripped cores (${STRIPPED_CORES[*]}) hold ZERO private ciphertext"
 # at least one stripped core must hold the catalog (so it can serve + prove it)
 CATALOG_HOLDERS=0
 for n in "${STRIPPED_CORES[@]}"; do
-  cat=$(catalog_count "$n"); [ "${cat:-0}" -ge 1 ] 2>/dev/null && CATALOG_HOLDERS=$((CATALOG_HOLDERS+1))
+  cat=$(catalog_count "$n") || fail "core$n: cannot read the _catalog from its store"
+  [ "$cat" -ge 1 ] && CATALOG_HOLDERS=$((CATALOG_HOLDERS+1))
 done
 [ "$CATALOG_HOLDERS" -ge 1 ] || fail "no stripped core holds the public _catalog — cannot prove it"
 pass "$CATALOG_HOLDERS/${#STRIPPED_CORES[@]} stripped cores hold the public _catalog"
@@ -360,11 +426,14 @@ pass "$CATALOG_HOLDERS/${#STRIPPED_CORES[@]} stripped cores hold the public _cat
 log "waiting for the strip-OFF baseline core $BASELINE_CORE to host-mode-ingest ciphertext…"
 BASE_CT=0
 for i in $(seq 1 30); do
-  BASE_CT=$(ciphertext_count "$BASELINE_CORE")
-  [ "${BASE_CT:-0}" -ge 1 ] 2>/dev/null && break
+  BASE_CT=$(ciphertext_count "$BASELINE_CORE") || { BASE_CT="unreadable"; break; }
+  [ "$BASE_CT" -ge 1 ] && break
   sleep 2
 done
-if [ "${BASE_CT:-0}" -ge 1 ] 2>/dev/null; then
+if [ "$BASE_CT" = "unreadable" ]; then
+  BASELINE_SUMMARY="strip-OFF core $BASELINE_CORE: store unreadable (discriminator not evaluated; non-vacuousness rests on the emitted-chunks check)"
+  warn "$BASELINE_SUMMARY"
+elif [ "$BASE_CT" -ge 1 ]; then
   BASELINE_SUMMARY="strip-OFF core $BASELINE_CORE: holds $BASE_CT ciphertext row(s) (discriminator — strip is non-vacuous)"
   pass "DISCRIMINATOR: $BASELINE_SUMMARY → the strip on cores ${STRIPPED_CORES[*]} is demonstrably effective"
 else
@@ -463,13 +532,19 @@ pass "curated update RE-COMMITTED the stable catalog floor (root non-zero, == ba
 log "waiting for the updated _catalog to (re-)propagate to the stripped cores (up to 3 min)…"
 for i in $(seq 1 60); do
   holders=0
-  for n in "${STRIPPED_CORES[@]}"; do c=$(catalog_count "$n"); [ "${c:-0}" -ge 1 ] 2>/dev/null && holders=$((holders+1)); done
+  for n in "${STRIPPED_CORES[@]}"; do
+    c=$(catalog_count "$n") || fail "core$n: cannot read the _catalog from its store"
+    [ "$c" -ge 1 ] && holders=$((holders+1))
+  done
   [ "$holders" -ge 1 ] && { log "  updated catalog present on $holders/${#STRIPPED_CORES[@]} stripped cores"; break; }
   [ "$i" -eq 1 ] || [ $((i % 10)) -eq 0 ] && log "  …updated catalog on $holders/${#STRIPPED_CORES[@]} cores after $((i*3))s"
   sleep 3
 done
 UPD_CAT_HOLDERS=0
-for n in "${STRIPPED_CORES[@]}"; do cat=$(catalog_count "$n"); [ "${cat:-0}" -ge 1 ] 2>/dev/null && UPD_CAT_HOLDERS=$((UPD_CAT_HOLDERS+1)); done
+for n in "${STRIPPED_CORES[@]}"; do
+  cat=$(catalog_count "$n") || fail "core$n: cannot read the _catalog from its store"
+  [ "$cat" -ge 1 ] && UPD_CAT_HOLDERS=$((UPD_CAT_HOLDERS+1))
+done
 [ "$UPD_CAT_HOLDERS" -ge 1 ] || fail "no stripped core re-hosts the updated public _catalog after the update"
 pass "$UPD_CAT_HOLDERS/${#STRIPPED_CORES[@]} stripped cores re-host the updated public _catalog"
 
@@ -507,11 +582,13 @@ log "restarting member edge$EDGE_MEMBER to exercise SWM converge to the UPDATED 
 for _ in $(seq 1 90); do curl -sf --max-time 1 -o /dev/null "http://127.0.0.1:$(node_port "$EDGE_MEMBER")/api/status" 2>/dev/null && break; sleep 1; done
 MEMBER_GOT_UPDATE=0
 for i in $(seq 1 40); do
-  got=$(api_call "$EDGE_MEMBER" POST /api/query "$(S="$PRIV_SUBJ" node -e 'console.log(JSON.stringify({sparql:`SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { <${process.env.S}> ?p ?o . FILTER(CONTAINS(STR(?o), "UPDATED")) } }`}))')" | _count_from_query)
+  # Tolerate a read error while the restarted member's store comes back.
+  got=$(store_count "$EDGE_MEMBER" "SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { <${PRIV_SUBJ}> ?p ?o . FILTER(CONTAINS(STR(?o), \"UPDATED\")) } }") || got="unreadable"
   [ "${got:-0}" -ge 1 ] 2>/dev/null && { MEMBER_GOT_UPDATE=1; break; }
   { [ "$i" -eq 1 ] || [ $((i % 10)) -eq 0 ]; } && log "  …member converging — still on pre-update value after $((i*3))s"
   sleep 3
 done
+[ "$got" != "unreadable" ] || fail "member edge$EDGE_MEMBER: cannot read its store after the restart"
 [ "$MEMBER_GOT_UPDATE" -ge 1 ] || fail "member edge$EDGE_MEMBER did NOT converge to the UPDATED private payload after reconnect — the curated update did not DISTRIBUTE to members (Option B regression)"
 pass "member edge$EDGE_MEMBER converged to the UPDATED private payload — the curated update DISTRIBUTES to members (producer emit + curator-held + converge-on-reconnect)"
 
