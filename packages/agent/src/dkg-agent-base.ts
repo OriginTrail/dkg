@@ -2015,7 +2015,14 @@ export class DKGAgentBase {
     if (!this.config.dataDir || this.finalizationRuntime.getRecoveryStore()) return;
     const store = this.config.finalizationRecoveryStoreFactory
       ? await this.config.finalizationRecoveryStoreFactory(this.config.dataDir)
-      : await openSqliteFinalizationRecoveryStore(this.config.dataDir);
+      : await openSqliteFinalizationRecoveryStore(this.config.dataDir, {
+          onDisplaced: (displaced) => this.log.warn(
+            createOperationContext('system'),
+            `Finalization recovery parked ${displaced.ual} after `
+              + `${displaced.failureStreak} consecutive ${displaced.failureSignature} `
+              + `failures to admit ${displaced.admittedUal}; it is retried when the inbox has room`,
+          ),
+        });
     this.finalizationRuntime.attachRecoveryStore(store);
   }
 

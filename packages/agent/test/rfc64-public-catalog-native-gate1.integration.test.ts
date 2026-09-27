@@ -62,7 +62,10 @@ import {
   type Rfc64PublicCatalogNativeCommittedHeadTokenV1,
   type Rfc64PublicCatalogNativePrecommitTransactionV1,
 } from '../src/rfc64/public-catalog-native-receiver-v1.js';
-import { readVerifiedAuthorCatalogRowAuthorshipV1 } from '../src/rfc64/catalog-row-authorship.js';
+import {
+  readVerifiedAuthorCatalogRowAuthorshipV1,
+  verifyAuthorCatalogBucketRowAuthorshipsV1,
+} from '../src/rfc64/catalog-row-authorship.js';
 import {
   acquireRfc64LegacySwmBoundaryReceiverLeaseV1,
   initializeRfc64LegacySwmBoundaryV1,
@@ -132,6 +135,22 @@ function appliedHeadLifecycleAbortingBeforeCasV1(
     afterAppliedHeadReadCount: () => afterAppliedHeadReadCount,
   });
 }
+
+// Counted pass-through: the receiver and its applied-predecessor load close
+// each catalog bucket once, however many rows it holds (#2812).
+vi.mock('../src/rfc64/catalog-row-authorship.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/rfc64/catalog-row-authorship.js')>();
+  return {
+    ...actual,
+    verifyAuthorCatalogBucketRowAuthorshipsV1: vi.fn(actual.verifyAuthorCatalogBucketRowAuthorshipsV1),
+  };
+});
+
+const bucketClosures = () => vi.mocked(verifyAuthorCatalogBucketRowAuthorshipsV1).mock.calls
+  .map(([input]) => ({
+    bucketDigest: input.catalogBucket.objectDigest,
+    rows: input.catalogBucket.payload.rows.length,
+  }));
 
 const AUTHOR_WALLET = new ethers.Wallet(`0x${'66'.repeat(32)}`);
 const AUTHOR = AUTHOR_WALLET.address.toLowerCase() as EvmAddressV1;
@@ -931,12 +950,19 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     await fixture.bootstrap();
     await fixture.synchronize();
     const observed = fixture.createCasObservedReceiver();
+    vi.mocked(verifyAuthorCatalogBucketRowAuthorshipsV1).mockClear();
 
     const evidence = await fixture.synchronizeAny(
       fixture.multiAssetAnnouncement,
       observed.receiver,
     );
     if (!('rows' in evidence)) throw new Error('two-row successor returned non-multi evidence');
+    // One closure for the two-row target bucket, one for the applied
+    // predecessor's bucket.
+    expect(bucketClosures()).toEqual([
+      { bucketDigest: fixture.multiAssetSuccessor.bucket?.objectDigest, rows: 2 },
+      { bucketDigest: fixture.successor.bucket?.objectDigest, rows: 1 },
+    ]);
     const expectedRows = [fixture.rowBundle, fixture.secondRowBundle].map((bundle) => ({
       kaId: bundle.row.kaId,
       catalogRowDigest: computeAuthorCatalogRowDigestV1(
@@ -1193,12 +1219,18 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     await fixture.synchronize();
     await fixture.synchronizeAny(fixture.multiAssetAnnouncement);
     const observed = fixture.createCasObservedReceiver();
+    vi.mocked(verifyAuthorCatalogBucketRowAuthorshipsV1).mockClear();
 
     const evidence = await fixture.synchronizeAny(
       fixture.removalAnnouncement,
       observed.receiver,
     );
     if (!('catalogRowDigest' in evidence)) throw new Error('one-row removal returned non-one-row evidence');
+    // The two-row applied predecessor is closed once, like the target.
+    expect(bucketClosures()).toEqual([
+      { bucketDigest: fixture.removalSuccessor.bucket?.objectDigest, rows: 1 },
+      { bucketDigest: fixture.multiAssetSuccessor.bucket?.objectDigest, rows: 2 },
+    ]);
     const removedSwmGraph =
       `did:dkg:context-graph:${CONTEXT_GRAPH_ID}/_shared_memory/${AUTHOR}/${SECOND_KA_NUMBER}`;
     const removedSeal = deriveCanonicalGraphScopedAuthorSealPlacementV1({
@@ -1586,6 +1618,66 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     )).rejects.toMatchObject({ code: 'catalog-native-receiver-transfer' });
     expect(fixture.receiverBundleFetch).toHaveBeenCalledTimes(2);
     expect(observed.stageVerifiedObjects).toHaveBeenCalled();
+    expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
+    expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
+      fixture.scopeDigest,
+      AUTHOR,
+    )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
+  }, 30_000);
+
+  it('fetches and stores only authorized rows when the transport mutates its bucket mid-sync', async () => {
+    const fixture = await setupLiveReceiver();
+    await fixture.bootstrap();
+    await fixture.synchronize();
+    // A custom transport may return a mutable bucket. Swap its second row for
+    // another genuine row of the same author while the first bundle is in
+    // flight: the receiver keeps to the rows it authorized (#2812).
+    const replacement = fixture.thirdRowBundle;
+    let mutableRows: AuthorCatalogRowV1[] | undefined;
+    const fetchCatalogObject: Rfc64PublicCatalogNativeTransportV1['fetchCatalogObject'] =
+      async (...args) => {
+        const fetched = await fixture.receiverObjectFetch(...args);
+        if (fetched === null || !('rows' in fetched.envelope.payload)) return fetched;
+        const envelope = structuredClone(fetched.envelope);
+        mutableRows = (envelope.payload as { rows: AuthorCatalogRowV1[] }).rows;
+        return { envelope, issuerSignature: fetched.issuerSignature };
+      };
+    const fetchKaBundle: Rfc64PublicCatalogNativeTransportV1['fetchKaBundle'] =
+      async (...args) => {
+        if (args[1].blobDigest === replacement.row.transfer.blobDigest) {
+          return replacement.bundleBytes;
+        }
+        const bundle = await fixture.receiverBundleFetch(...args);
+        if (args[1].blobDigest === fixture.rowBundle.row.transfer.blobDigest && mutableRows) {
+          mutableRows[1] = structuredClone(replacement.row);
+        }
+        return bundle;
+      };
+    const putKaBundle = vi.fn(fixture.receiverPersistence.kaBundles.putKaBundle.bind(
+      fixture.receiverPersistence.kaBundles,
+    ));
+    fixture.receiverBundleFetch.mockClear();
+    const observed = fixture.createCasObservedReceiver(
+      { fetchCatalogObject, fetchKaBundle },
+      fixture.receiverStore,
+      { putKaBundle, readKaBundleByDigest: async () => null },
+    );
+
+    // Staging re-derives the mutated bucket's digest and refuses it, so the
+    // sync then fails closed with nothing activated.
+    await expect(fixture.synchronizeAny(
+      fixture.multiAssetAnnouncement,
+      observed.receiver,
+    )).rejects.toMatchObject({ code: 'catalog-native-receiver-catalog' });
+    expect(mutableRows?.[1]?.kaId).toBe(replacement.row.kaId);
+    const authorizedBlobs = [
+      fixture.rowBundle.row.transfer.blobDigest,
+      fixture.secondRowBundle.row.transfer.blobDigest,
+    ];
+    expect(fixture.receiverBundleFetch.mock.calls.map(([, request]) => request.blobDigest))
+      .toEqual(authorizedBlobs);
+    expect(putKaBundle.mock.calls.map(([input]) => input.blobDigest)).toEqual(authorizedBlobs);
     expect(observed.compareAndSwapAppliedCatalogHeadV1).not.toHaveBeenCalled();
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
       fixture.scopeDigest,

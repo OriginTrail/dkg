@@ -801,7 +801,11 @@ import {
 } from
   './local-context-graph-provenance.js';
 import type { DKGAgent } from './dkg-agent.js';
-import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
+import {
+  contextGraphReadAuthorityDependencyOf,
+  unavailableContextGraphReadAuthorityDecision,
+  type ContextGraphReadAuthorityDecision,
+} from './context-graph-read-authority.js';
 
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 import {
@@ -10065,12 +10069,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             onChainId: row.onChainId,
             onChainHash: row.onChainHash,
           },
-        }).catch(() => ({
-          outcome: 'unavailable' as const,
-          source: 'legacy-local' as const,
-          reason: 'unexpected-authority-error',
-          metadataBootstrap: 'eligible' as const,
-        }))
+        }).catch((error: unknown) => unavailableContextGraphReadAuthorityDecision(
+          'legacy-local',
+          'unexpected-authority-error',
+          contextGraphReadAuthorityDependencyOf(error),
+        ))
       ),
       activate: async (row, onChainId, revision) => {
         await this.activatePersistedContextGraphSubscriptionRecord(row, {
@@ -10219,12 +10222,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           onChainId: row.onChainId,
           onChainHash: row.onChainHash,
         },
-      }).catch(() => ({
-        outcome: 'unavailable' as const,
-        source: 'legacy-local' as const,
-        reason: 'unexpected-authority-error',
-        metadataBootstrap: 'eligible' as const,
-      }));
+      }).catch((error: unknown) => unavailableContextGraphReadAuthorityDecision(
+        'legacy-local',
+        'unexpected-authority-error',
+        contextGraphReadAuthorityDependencyOf(error),
+      ));
       signal.throwIfAborted();
       if (!runtime.owns(signal)) return 'idle';
       if (authority.outcome !== 'allowed') {
@@ -10661,12 +10663,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             onChainId: row.onChainId,
             onChainHash: row.onChainHash,
           },
-        }).catch(() => ({
-          outcome: 'unavailable' as const,
-          source: 'legacy-local' as const,
-          reason: 'unexpected-authority-error',
-          metadataBootstrap: 'eligible' as const,
-        }));
+        }).catch((error: unknown) => unavailableContextGraphReadAuthorityDecision(
+          'legacy-local',
+          'unexpected-authority-error',
+          contextGraphReadAuthorityDependencyOf(error),
+        ));
         // A read the budget stops waiting for ends on its own request
         // timeout; its late answer is ignored and activates nothing.
         const readAuthority = hasJoinApproval
