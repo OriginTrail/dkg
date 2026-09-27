@@ -181,6 +181,11 @@ interface CuratorMetaRefreshState {
 interface AuthoritativeMetaSnapshot {
   checkpointKey: string;
   quads: Quad[];
+  /**
+   * The acceptance an approved member's snapshot was admitted under. The
+   * replacement asks it again at the root activation boundary.
+   */
+  approvedMember?: ApprovedMemberAcceptance;
 }
 
 const CURATOR_AGENT_DID_PREFIX = 'did:dkg:agent:';
@@ -547,8 +552,9 @@ async function fetchAuthoritativeMetaSnapshot(
       controlMetaQuads,
       approvedMember?.proof,
     );
-  // An approved member commits its definition only while the authority behind
-  // its acceptance still holds after the fetch, whichever definition it is.
+  // The fetch is the long await, so a member whose authority already changed
+  // stops here, before any store work. The replacement asks again at its
+  // activation boundary.
   const admitted = (acceptsAuthoritativePublicDefinition || hasAuthoritativePrivateDefinition)
     && (approvedMember === undefined || await approvedMember.stillHolds());
   if (!admitted) {
@@ -578,7 +584,11 @@ async function fetchAuthoritativeMetaSnapshot(
   const quads = options.ignoreRegistrationBinding === true
     ? stripRelayedRegistrationBindingQuads(contextGraphId, controlMetaQuads)
     : controlMetaQuads;
-  return { checkpointKey: result.checkpointKey, quads };
+  return {
+    checkpointKey: result.checkpointKey,
+    quads,
+    ...(approvedMember === undefined ? {} : { approvedMember }),
+  };
 }
 
 /**
@@ -620,12 +630,23 @@ function replaceCuratorMetaProjectionSparql(
   }`;
 }
 
+/**
+ * Install `authoritative` as the graph's curator projection. Returns false,
+ * without activating it, when the approved member's acceptance no longer holds
+ * at the activation boundary (#2831 review): registration or catalog authority
+ * can change during the store work that precedes activation.
+ */
 async function atomicallyReplaceCuratorMetaSnapshot(
   agent: CuratorMetaRefreshAgent,
   contextGraphId: string,
-  snapshot: readonly Quad[],
+  authoritative: AuthoritativeMetaSnapshot,
   ctx: OperationContext,
-): Promise<void> {
+): Promise<boolean> {
+  const snapshot = authoritative.quads;
+  const activationHolds = async (): Promise<boolean> => (
+    authoritative.approvedMember === undefined
+    || await authoritative.approvedMember.stillHolds()
+  );
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
   const delegationPrefix = `did:dkg:agent-delegation:${contextGraphId}:`;
@@ -722,6 +743,9 @@ async function atomicallyReplaceCuratorMetaSnapshot(
         await replaceSubject(subject, quads);
         existingDelegations.delete(subject);
       }
+      // A refusal here leaves exactly the state a failed root replacement
+      // leaves, which the ordering above keeps fail closed.
+      if (!(await activationHolds())) return false;
       await replaceSubject(contextGraphUri, rootReplacement);
       for (const staleSubject of [...existingDelegations].sort()) {
         await replaceSubject(staleSubject, []);
@@ -729,7 +753,7 @@ async function atomicallyReplaceCuratorMetaSnapshot(
     } finally {
       invalidateTargetProjections();
     }
-    return;
+    return true;
   }
 
   const stagingGraph = `urn:dkg:curator-meta-refresh:${randomUUID()}`;
@@ -748,6 +772,8 @@ async function atomicallyReplaceCuratorMetaSnapshot(
         `Refusing partial curator metadata replacement: staged ${staged.length}/${snapshot.length} triples`,
       );
     }
+    // The update below activates the whole projection at once.
+    if (!(await activationHolds())) return false;
 
     // A decorated store can commit its inner UPDATE and then throw while
     // appending a changelog marker. Invalidate before and after the attempt so
@@ -767,6 +793,7 @@ async function atomicallyReplaceCuratorMetaSnapshot(
     if (!replaced) {
       throw new Error('Triple store does not support atomic curator metadata replacement');
     }
+    return true;
   } finally {
     try {
       await agent.store.dropGraph(stagingGraph, { source: 'agent.metaRefresh.cleanup' });
@@ -808,7 +835,14 @@ async function executeCuratorMetaRefresh(
       ctx,
     );
     if (!snapshot) return false;
-    await atomicallyReplaceCuratorMetaSnapshot(agent, contextGraphId, snapshot.quads, ctx);
+    if (!(await atomicallyReplaceCuratorMetaSnapshot(agent, contextGraphId, snapshot, ctx))) {
+      agent.syncCheckpoints.delete(snapshot.checkpointKey);
+      agent.log.warn(
+        ctx,
+        `Rejected curator metadata snapshot for "${contextGraphId}": the approved member's authority changed before it was installed`,
+      );
+      return false;
+    }
     // The relayed snapshot carries no binding claims any more (stripped above);
     // skipping the binding step keeps the subscription row untouched even if a
     // future field slipped past the strip list. Chain bindings for such a
