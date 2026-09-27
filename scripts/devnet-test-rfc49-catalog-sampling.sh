@@ -611,30 +611,69 @@ for round in $(seq 1 12); do
 done
 [ "$RSU_OK" -eq 1 ] || fail "no core submitted a random-sampling proof against the updated catalog within the window"
 
-# ── MEMBER converges to the UPDATED private payload (OT-RFC-49 member distribution). ──
-# The curated update now DISTRIBUTES the updated payload: the producer emits the
-# LU-11 ciphertext chunk and the curator persists it (vs the OLD encrypt-then-
-# discard, which delivered NOTHING and left members permanently stale). This is
-# the NON-VACUOUS proof: unlike the catalog re-host (the floor is stable, so cores
-# already held it from publish), the member must end up holding the UPDATED value.
-# NOTE: a live gossip-push to an ALREADY-CONNECTED member is the known M2-a
-# converge race (issue #1205 — affects ALL SWM updates, not curated-update-
-# specific); the SUPPORTED catch-up is converge-on-reconnect. So restart the
-# member to exercise the converge path, then assert it holds the UPDATED value.
-log "restarting member edge$EDGE_MEMBER to exercise SWM converge to the UPDATED payload…"
+# ── MEMBER's Verifiable Memory converges to each update (#2858). ──
+# The member holds the KA's first version in VM (chain-driven exact fetch at
+# publish). An update keeps the KA id and moves its on-chain root; the member's
+# VM copy is refreshed from the chain's KnowledgeAssetUpdated event. SWM delivery
+# alone would satisfy an any-graph check, so these checks read only the member's
+# VM graphs. Two cases: the member online during the update, and the member
+# stopped during a second update.
+member_vm_count() { # <marker>
+  store_count "$EDGE_MEMBER" "SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { <${PRIV_SUBJ}> ?p ?o . FILTER(CONTAINS(STR(?o), \"$1\")) } FILTER(STRSTARTS(STR(?g), \"did:dkg:context-graph:${CG_ID}/_verifiable_memory/\")) }"
+}
+wait_member_vm() { # <marker> <case label> [seconds, default 180]; tolerates a store read error while the member restarts
+  local got="" i
+  for i in $(seq 1 $(( ${3:-180} / 3 ))); do
+    got=$(member_vm_count "$1") || got="unreadable"
+    [ "${got:-0}" -ge 1 ] 2>/dev/null && return 0
+    { [ "$i" -eq 1 ] || [ $((i % 10)) -eq 0 ]; } && log "  …member VM not on the $1 version yet after $((i*3))s ($2)"
+    sleep 3
+  done
+  [ "$got" != "unreadable" ] || fail "member edge$EDGE_MEMBER: cannot read its store ($2)"
+  return 1
+}
+
+log "member edge$EDGE_MEMBER was online during the update: waiting for its Verifiable Memory to hold the UPDATED payload…"
+wait_member_vm "UPDATED" "online during the update" \
+  || fail "member edge$EDGE_MEMBER's Verifiable Memory did NOT converge to the UPDATED private payload while online (#2858)"
+pass "member edge$EDGE_MEMBER's Verifiable Memory holds the UPDATED private payload (online during the update)"
+
+log "stopping member edge$EDGE_MEMBER, then a second update while it is offline…"
+"$REPO_ROOT/scripts/devnet.sh" stop-node "$EDGE_MEMBER" >/dev/null 2>&1 || warn "stop-node $EDGE_MEMBER returned non-zero"
+UPD2_QUADS=$(STAMP="$STAMP" PRIV_SUBJ="$PRIV_SUBJ" node -e '
+const stamp=process.env.STAMP, subj=process.env.PRIV_SUBJ;
+console.log(JSON.stringify([
+  { subject: subj, predicate: "http://schema.org/name", object: `"Alice Private ${stamp} — SECONDUPDATE value, padded out to keep the encrypted member payload chunking through the LU-11 ciphertext substrate on this devnet update"`, graph: "" },
+  { subject: subj, predicate: "http://schema.org/email", object: `"alice-${stamp}@example.org"`, graph: "" },
+  { subject: subj, predicate: "http://schema.org/jobTitle", object: "\"Lead (second update)\"", graph: "" }
+]))')
+UPD2_BODY=$(REPO_ROOT="$REPO_ROOT" DEVNET_DIR="$DEVNET_DIR" NUM_NODES="$NUM_NODES" \
+  build_update_body "$EDGE_CURATOR" "$KA_ID" "$CG_ID" "$UPD2_QUADS") \
+  || fail "could not build the second curated update body"
+UPD2_RESP=$(api_call_agent "$EDGE_CURATOR" POST /api/update "$UPD2_BODY")
+log "second POST /api/update: $UPD2_RESP"
+[ "$(printf '%s' "$UPD2_RESP" | jq_field ".status")" = "confirmed" ] \
+  || fail "second curated update did not confirm: $UPD2_RESP"
+log "starting member edge$EDGE_MEMBER again…"
 "$REPO_ROOT/scripts/devnet.sh" restart-node "$EDGE_MEMBER" >/dev/null 2>&1 || true
 for _ in $(seq 1 90); do curl -sf --max-time 1 -o /dev/null "http://127.0.0.1:$(node_port "$EDGE_MEMBER")/api/status" 2>/dev/null && break; sleep 1; done
-MEMBER_GOT_UPDATE=0
-for i in $(seq 1 40); do
-  # Tolerate a read error while the restarted member's store comes back.
-  got=$(store_count "$EDGE_MEMBER" "SELECT (COUNT(*) AS ?c) WHERE { GRAPH ?g { <${PRIV_SUBJ}> ?p ?o . FILTER(CONTAINS(STR(?o), \"UPDATED\")) } }") || got="unreadable"
-  [ "${got:-0}" -ge 1 ] 2>/dev/null && { MEMBER_GOT_UPDATE=1; break; }
-  { [ "$i" -eq 1 ] || [ $((i % 10)) -eq 0 ]; } && log "  …member converging — still on pre-update value after $((i*3))s"
-  sleep 3
-done
-[ "$got" != "unreadable" ] || fail "member edge$EDGE_MEMBER: cannot read its store after the restart"
-[ "$MEMBER_GOT_UPDATE" -ge 1 ] || fail "member edge$EDGE_MEMBER did NOT converge to the UPDATED private payload after reconnect — the curated update did not DISTRIBUTE to members (Option B regression; see #2858)"
-pass "member edge$EDGE_MEMBER converged to the UPDATED private payload — the curated update DISTRIBUTES to members (producer emit + curator-held + converge-on-reconnect)"
+# A restarted edge reconnects to the cores but does not find its curator edge
+# again on its own (#2865); dial it, as a member holding the curator's address
+# would.
+if [ -n "${CURATOR_ADDR:-}" ]; then
+  for _ in 1 2 3; do
+    CONNECT_RESP=$(api_call_agent "$EDGE_MEMBER" POST /api/connect "{\"multiaddr\":\"${CURATOR_ADDR}\"}")
+    [ "$(printf '%s' "$CONNECT_RESP" | jq_field ".connected")" = "true" ] && break
+    sleep 5
+  done
+  log "member edge$EDGE_MEMBER reconnects to the curator after restarting: $CONNECT_RESP"
+fi
+# After a restart the member recovers the curator's shared memory, which stages
+# the update; the refresh then waits its staged-version delay and the next
+# reconcile sweep, so allow more time than the online case.
+wait_member_vm "SECONDUPDATE" "offline during the update" 300 \
+  || fail "member edge$EDGE_MEMBER's Verifiable Memory did NOT converge to the second update after restarting (#2858)"
+pass "member edge$EDGE_MEMBER's Verifiable Memory holds the second update's payload (offline during the update)"
 
 # ---------------------------------------------------------------------------
 echo ""
