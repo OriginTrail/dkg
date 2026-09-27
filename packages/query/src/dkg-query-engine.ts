@@ -442,18 +442,18 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       //   - `/_meta` — curator lookup, allowedAgent list, registration
       //     status (invite-flow `assert_curator_triple_landed` probe,
       //     CG Overview UI, downstream sync code)
-      //   - `/_shared_memory_meta` — workspaceOwner / promote-time
-      //     ownership metadata (devnet-test-swm-ownership-restart
-      //     `wait_for_owner_meta` probe, ACL enforcement on replicas).
+      //   - `/_shared_memory_meta` — SWM share metadata (operation
+      //     heads, digests, storage-ACK ledger) and legacy
+      //     root-keyed workspaceOwner rows. Graph-scoped KAs (10.0.7+)
+      //     keep ownership in the per-author SWM graph instead.
       //
       // Privacy fence: a caller that explicitly narrowed routing to
       // SWM-only via `graphSuffix: '_shared_memory'` does NOT gain
       // access to the CG-level `_meta` (curator / allowedAgent /
       // registrationStatus). They asked for SWM, they get SWM
-      // (including `_shared_memory_meta` for the workspaceOwner /
-      // ownership ACL probe). All other scoped routes expose both
-      // `_meta` and `_shared_memory_meta` for the legitimate metadata
-      // reads called out above.
+      // (including `_shared_memory_meta`). All other scoped routes
+      // expose both `_meta` and `_shared_memory_meta` for the
+      // legitimate metadata reads called out above.
       //
       // Sub-graph metadata uses `contextGraphSubGraphMetaUri`
       // (`/<sub>/_meta`) — the same path the storage layer
