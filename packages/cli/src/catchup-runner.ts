@@ -15,7 +15,7 @@ import {
   type SwmSnapshotCoverage,
   type SyncPeerResolution,
 } from '@origintrail-official/dkg-agent';
-import { PROTOCOL_SYNC, createOperationContext } from '@origintrail-official/dkg-core';
+import { advertisesSyncProtocol, createOperationContext } from '@origintrail-official/dkg-core';
 
 const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
@@ -1012,7 +1012,7 @@ async function waitForSyncProtocolFromPeerProtocols(
 ): Promise<boolean> {
   for (let attempt = 0; attempt < SYNC_PROTOCOL_CHECK_ATTEMPTS; attempt += 1) {
     const protocols: string[] = await getPeerProtocols(peerId).catch((): string[] => []);
-    if (protocols.includes(PROTOCOL_SYNC)) {
+    if (advertisesSyncProtocol(protocols)) {
       return true;
     }
     if (attempt < SYNC_PROTOCOL_CHECK_ATTEMPTS - 1) {

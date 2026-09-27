@@ -26,7 +26,7 @@ import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
-  PROTOCOL_NETWORK_IDENTITY,
+  PROTOCOL_NETWORK_IDENTITY, advertisesSyncProtocol,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
@@ -5080,7 +5080,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * leaves a peer permanently in `skippedNoSyncPeers`. libp2p emits
    * `peer:update` whenever a peer record changes — most importantly when
    * identify completes and the protocol list gets populated for the
-   * first time. If the new list now contains `PROTOCOL_SYNC` and we
+   * first time. If the new list now contains either sync id and we
    * previously skipped this peer for that exact reason, fire one
    * `trySyncFromPeer` immediately.
    *
@@ -5109,7 +5109,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.peerCapabilityRegistry.observe(peerId, { source: 'peer-update', protocols: protocols });
     if (!peerEvents.isSkippedNoSync(peerId)) return;
     if (!syncOnConnectEnabled(this.config)) return;
-    if (!protocols.includes(PROTOCOL_SYNC)) return;
+    if (!advertisesSyncProtocol(protocols)) return;
     const ctx = createOperationContext('sync');
     void peerEvents.run(
       () => this.retrySyncAfterPeerUpdate(peerId, ctx, peerEvents),
@@ -5140,7 +5140,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * Periodic reconciler for sync-on-connect. Walks every currently
    * connected peer and retries `trySyncFromPeer` for any that either:
    *
-   *   - is in {@link skippedNoSyncPeers} and now advertises `PROTOCOL_SYNC`
+   *   - is in {@link skippedNoSyncPeers} and now advertises either sync id
    *     (covers the case where the `peer:update` listener missed the
    *     event for whatever reason), or
    *   - has no recent clean success or useful-progress cooldown marker, or
@@ -8804,7 +8804,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return waitForPeerProtocol(
       this.node.libp2p.peerStore as any,
       pid,
-      PROTOCOL_SYNC,
+      // Either id proves sync support (#2822; see `advertisesSyncProtocol`).
+      [PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED],
       SYNC_PROTOCOL_CHECK_ATTEMPTS,
       SYNC_PROTOCOL_CHECK_DELAY_MS,
       signal,

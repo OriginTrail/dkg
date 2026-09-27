@@ -301,4 +301,16 @@ describe('abortable recovery connection helpers', () => {
     expect(get.calls).toHaveLength(1);
     expect(peerIdFromString(peerId).equals(get.calls[0]?.[0] as never)).toBe(true);
   });
+
+  it('resolves when the peer advertises any protocol of a list', async () => {
+    const peer = { toString: () => '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6' };
+    const get = recorder(async (_peer: unknown) => ({ protocols: ['/dkg/test/sync-pooled'] }));
+
+    await expect(waitForPeerProtocol({ get }, peer, ['/dkg/test/sync', '/dkg/test/sync-pooled'], 3, 0))
+      .resolves.toBe(true);
+    expect(get.calls).toHaveLength(1);
+    await expect(waitForPeerProtocol({ get }, peer, ['/dkg/test/sync', '/dkg/test/other'], 3, 0))
+      .resolves.toBe(false);
+    expect(get.calls).toHaveLength(4);
+  });
 });
