@@ -129,6 +129,46 @@ MERKLE_ROOT=$(parse_json "$KC_RESP" '.merkleRoot')
 [ -n "$MERKLE_ROOT" ] || fail "could not resolve merkleRoot via /api/kc: $KC_RESP"
 log "✓ published txHash=$TX_HASH merkleRoot=$MERKLE_ROOT"
 
+# Since v10.0.7 an Edge does not activate a discovered public CG merely by
+# seeing its metadata. Install the curator's registered graph through the
+# replica subscription route; a foreign wallet-scoped create cannot do that.
+log "Member subscribes to the curator's registered public CG..."
+SUBSCRIBED=""
+for attempt in $(seq 1 12); do
+  SUB_RESPONSE_WITH_STATUS=$(api_call_with_status "$MEMBER_NODE" POST /api/context-graph/subscribe "$(cat <<EOF
+{ "contextGraphId": "$PUB_CG", "includeSharedMemory": true }
+EOF
+)")
+  SUB_STATUS=$(printf '%s\n' "$SUB_RESPONSE_WITH_STATUS" | tail -n 1)
+  SUB_RESPONSE=$(printf '%s\n' "$SUB_RESPONSE_WITH_STATUS" | sed '$d')
+  SUBSCRIBED=$(parse_json "$SUB_RESPONSE" '.subscribed' 2>/dev/null || true)
+  [ "$SUB_STATUS" = 200 ] && [ "$SUBSCRIBED" = "$PUB_CG" ] && break
+  case "$SUB_STATUS" in
+    429|503) log "member subscribe attempt $attempt deferred (HTTP $SUB_STATUS)" ;;
+    *) fail "member subscribe failed (HTTP $SUB_STATUS): $SUB_RESPONSE" ;;
+  esac
+  sleep 5
+done
+[ "$SUBSCRIBED" = "$PUB_CG" ] || fail "member did not subscribe to the curator graph: $SUB_RESPONSE"
+MEMBER_ACTIVE=false
+for _ in $(seq 1 30); do
+  MEMBER_ACTIVE=$(api_call "$MEMBER_NODE" GET /api/context-graph/subscriptions | \
+    CG_ID="$PUB_CG" node -e '
+      let body = "";
+      process.stdin.on("data", chunk => body += chunk);
+      process.stdin.on("end", () => {
+        try {
+          const row = JSON.parse(body).subscriptions?.find(entry => entry.contextGraphId === process.env.CG_ID);
+          console.log(row?.subscribed === true ? "true" : "false");
+        } catch { console.log("false"); }
+      });
+    ')
+  [ "$MEMBER_ACTIVE" = true ] && break
+  sleep 2
+done
+[ "$MEMBER_ACTIVE" = true ] || fail "member subscription is not locally active for $PUB_CG"
+log "✓ member has an active subscription to the curator's public CG"
+
 # Pause for gossip + chain settling
 sleep 5
 
@@ -225,7 +265,7 @@ REPORT_BODY=$(VERIFY_BAD="$VERIFY_BAD" PUB_CG="$PUB_CG" STAMP="$STAMP" node -e '
 REPORT_RESP=$(api_call "$MEMBER_NODE" POST /api/knowledge-assets/batch-rejections/report "$REPORT_BODY")
 log "report response: $REPORT_RESP"
 REPORT_GOSSIPED=$(parse_json "$REPORT_RESP" '.gossiped')
-REPORT_DIGEST=$(parse_json "$REPORT_RESP" '.record.digest')
+REPORT_DIGEST=$(parse_json "$REPORT_RESP" '.record?.digest')
 [ -n "$REPORT_DIGEST" ] || fail "no digest in report response: $REPORT_RESP"
 log "✓ Rejection record minted: digest=$REPORT_DIGEST gossiped=$REPORT_GOSSIPED"
 

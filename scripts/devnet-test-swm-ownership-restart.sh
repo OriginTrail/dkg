@@ -1,24 +1,33 @@
 #!/usr/bin/env bash
 #
-# SWM ownership restart regression.
+# SWM ownership restart regression (issue #747), graph-scoped model.
 #
-# Reproduces the Phase 0 correctness slice for issue #747 against real
-# devnet daemons:
+# Since 10.0.7 a shared Knowledge Asset lives in its author's own graph,
+# did:dkg:context-graph:<cg>/_shared_memory/<author>/<n>. Ownership is that
+# graph: no root-keyed dkg:workspaceOwner rows are written, and another author
+# sharing the same RDF subject gets its own graph instead of a skip. Against
+# real devnet daemons:
 #
-#   1. Node 1 promotes a root entity into the public devnet CG.
-#   2. Node 2 receives the SWM data plus _shared_memory_meta owner row.
+#   1. Node 1 shares a KA for <ROOT> into the public devnet CG.
+#   2. Node 2 receives it in node 1's author graph.
 #   3. Node 1 is stopped, so the original owner is offline.
-#   4. Node 2 is restarted, clearing process-local publisher ownership maps
-#      while preserving its local store and without live owner help.
-#   5. Node 2 attempts to promote the same root. Assertion-promote ownership
-#      conflicts are advisory skips (#1116): the call returns HTTP 200 with an
-#      explicit non-share outcome and must not overwrite SWM data or owner.
+#   4. Every other node is stopped too, and node 2 is restarted with no peer
+#      online: the owner copy it still holds must come from its own store,
+#      not from a sync-on-connect re-fetch.
+#   5. Node 2 shares its own KA for the same <ROOT>; the share succeeds.
+#   6. Node 1's copy is unchanged; node 2's copy is isolated in node 2's
+#      author graph; node 2's WM draft drained; no root-keyed
+#      dkg:workspaceOwner row exists.
+#
+# Node 2 stays isolated through step 6. On exit the script restarts every node
+# it stopped.
 #
 # Preconditions:
 #   ./scripts/devnet.sh clean
 #   ./scripts/devnet.sh start 6
 #
-# No bootstrap publishes are required; the script only uses the daemon HTTP API.
+# No bootstrap publishes are required; the script only uses the daemon HTTP API
+# and devnet.sh stop-node / restart-node.
 
 set -euo pipefail
 
@@ -30,7 +39,6 @@ OWNER_NODE="${OWNER_NODE:-1}"
 ATTACKER_NODE="${ATTACKER_NODE:-2}"
 TMPDIR="${TMPDIR:-/tmp}"
 
-DKG_WORKSPACE_OWNER="http://dkg.io/ontology/workspaceOwner"
 SCHEMA_NAME="http://schema.org/name"
 
 log()  { echo "[swm-own] $*"; }
@@ -126,15 +134,18 @@ parse_json() {
   "
 }
 
-binding_values() {
-  local json="$1" var="$2"
-  printf '%s' "$json" | VAR="$var" node -e '
+# Print the distinct ?value bindings of a /api/query answer whose ?g is one of
+# <author>'s SWM graphs (did:dkg:context-graph:<cg>/_shared_memory/<author>/<n>).
+# Fails on an answer without a bindings array.
+author_swm_values() {
+  local json="$1" author="$2"
+  printf '%s' "$json" | PREFIX="did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory/${author}/" node -e '
     let d = "";
     process.stdin.on("data", c => d += c);
     process.stdin.on("end", () => {
       try {
-        const j = JSON.parse(d);
-        const bindings = j?.result?.bindings ?? j?.bindings ?? [];
+        const bindings = JSON.parse(d)?.result?.bindings;
+        if (!Array.isArray(bindings)) process.exit(1);
         const unwrap = (cell) => {
           if (cell == null) return "";
           if (typeof cell === "object" && "value" in cell) return String(cell.value);
@@ -143,46 +154,15 @@ binding_values() {
           if (!m) return s;
           try { return JSON.parse("\"" + m[1] + "\""); } catch { return m[1]; }
         };
+        const values = new Set();
         for (const b of bindings) {
-          const v = unwrap(b[process.env.VAR]);
-          if (v) console.log(v);
+          const graph = unwrap(b.g).replace(/^<|>$/g, "");
+          const value = unwrap(b.value);
+          if (graph.startsWith(process.env.PREFIX) && value) values.add(value);
         }
+        for (const value of [...values].sort()) console.log(value);
       } catch {
         process.exit(1);
-      }
-    });
-  '
-}
-
-bindings_count() {
-  local json="$1"
-  printf '%s' "$json" | node -e '
-    let d = "";
-    process.stdin.on("data", c => d += c);
-    process.stdin.on("end", () => {
-      try {
-        const j = JSON.parse(d);
-        const bindings = j?.result?.bindings ?? j?.bindings ?? [];
-        console.log(Array.isArray(bindings) ? bindings.length : "PARSE_ERR");
-      } catch {
-        console.log("PARSE_ERR");
-      }
-    });
-  '
-}
-
-quads_count() {
-  local json="$1"
-  printf '%s' "$json" | node -e '
-    let d = "";
-    process.stdin.on("data", c => d += c);
-    process.stdin.on("end", () => {
-      try {
-        const j = JSON.parse(d);
-        const quads = j?.quads ?? j?.result ?? [];
-        console.log(Array.isArray(quads) ? quads.length : "PARSE_ERR");
-      } catch {
-        console.log("PARSE_ERR");
       }
     });
   '
@@ -202,53 +182,61 @@ json_write_payload() {
   '
 }
 
-json_owner_query_payload() {
-  ROOT="$1" CG="$CONTEXT_GRAPH" OWNER_PRED="$DKG_WORKSPACE_OWNER" node -e '
-    const metaGraph = `did:dkg:context-graph:${process.env.CG}/_shared_memory_meta`;
+# Root-keyed ownership rows, which graph-scoped KAs no longer write.
+json_workspace_owner_query_payload() {
+  ROOT="$1" CG="$CONTEXT_GRAPH" node -e '
+    const meta = `did:dkg:context-graph:${process.env.CG}/_shared_memory_meta`;
     console.log(JSON.stringify({
       contextGraphId: process.env.CG,
-      sparql:
-        `SELECT DISTINCT ?owner WHERE { GRAPH <${metaGraph}> { <${process.env.ROOT}> <${process.env.OWNER_PRED}> ?owner } }`,
+      sparql: `SELECT ?owner WHERE { GRAPH <${meta}> { <${process.env.ROOT}> <http://dkg.io/ontology/workspaceOwner> ?owner } }`,
     }));
   '
 }
 
-json_swm_value_query_payload() {
+# On the SWM route `GRAPH ?g` binds the CG's per-KA SWM graphs.
+json_swm_graph_query_payload() {
   ROOT="$1" CG="$CONTEXT_GRAPH" PRED="$SCHEMA_NAME" node -e '
     console.log(JSON.stringify({
       contextGraphId: process.env.CG,
       graphSuffix: "_shared_memory",
-      sparql: `SELECT DISTINCT ?value WHERE { <${process.env.ROOT}> <${process.env.PRED}> ?value }`,
+      sparql: `SELECT DISTINCT ?g ?value WHERE { GRAPH ?g { <${process.env.ROOT}> <${process.env.PRED}> ?value } }`,
     }));
   '
 }
 
+node_is_up() {
+  curl -sf --max-time 1 -o /dev/null "http://127.0.0.1:$(node_port "$1")/api/status" >/dev/null 2>&1
+}
+
 wait_for_node_down() {
-  local node="$1" port
-  port=$(node_port "$node")
+  local node="$1"
   for _ in $(seq 1 60); do
-    if ! curl -sf --max-time 1 -o /dev/null "http://127.0.0.1:${port}/api/status" >/dev/null 2>&1; then
-      return 0
-    fi
+    node_is_up "$node" || return 0
     sleep 0.5
   done
   fail "node $node did not stop within 30s"
 }
 
+# Returns non-zero after 120s instead of failing, so the EXIT trap can still
+# restart the remaining nodes.
 wait_for_node_up() {
-  local node="$1" port
-  port=$(node_port "$node")
+  local node="$1"
   for _ in $(seq 1 240); do
-    if curl -sf --max-time 1 -o /dev/null "http://127.0.0.1:${port}/api/status" >/dev/null 2>&1; then
-      return 0
-    fi
+    node_is_up "$node" && return 0
     sleep 0.5
   done
-  fail "node $node did not start within 120s"
+  return 1
 }
+
+# Nodes the EXIT trap restarts: every node this script stopped, plus the
+# replica once it was restarted without peers. They restart in ascending
+# order, as devnet.sh start does, so each dials the earlier cores again
+# (node 1 dials no one).
+RESTORE_NODES=""
 
 kill_node() {
   local node="$1"
+  RESTORE_NODES="$RESTORE_NODES $node"
   ( cd "$REPO_ROOT" && ./scripts/devnet.sh stop-node "$node" 2>&1 | sed "s/^/  [devnet] /" )
   wait_for_node_down "$node"
 }
@@ -259,14 +247,32 @@ restart_node() {
   wait_for_node_up "$node"
 }
 
-OWNER_STOPPED=0
-restart_owner_if_stopped() {
-  if [ "$OWNER_STOPPED" -eq 1 ]; then
-    log "trap: restarting owner node $OWNER_NODE so the devnet stays usable"
-    restart_node "$OWNER_NODE" || warn "trap: failed to restart owner node $OWNER_NODE"
-  fi
+restore_nodes() {
+  local node
+  for node in $(printf '%s\n' $RESTORE_NODES | sort -nu); do
+    log "trap: restarting node $node so the devnet stays usable"
+    restart_node "$node" || warn "trap: node $node did not come back within 120s"
+  done
 }
-trap restart_owner_if_stopped EXIT
+trap restore_nodes EXIT
+
+# Every running devnet node except the replica.
+other_running_nodes() {
+  local dir node
+  for dir in "$DEVNET_DIR"/node[0-9]*; do
+    node="${dir##*/node}"
+    [[ "$node" =~ ^[0-9]+$ ]] || continue
+    [ "$node" = "$ATTACKER_NODE" ] && continue
+    if node_is_up "$node"; then echo "$node"; fi
+  done
+}
+
+assert_no_connected_peers() {
+  local node="$1" status peers
+  status=$(api_call "$node" GET /api/status)
+  peers=$(parse_json "$status" '.connectedPeers')
+  [ "$peers" = "0" ] || fail "node $node is connected to '$peers' peer(s); the check needs it isolated"
+}
 
 get_peer_id() {
   local node="$1" identity
@@ -274,6 +280,9 @@ get_peer_id() {
   parse_json "$identity" '.peerId'
 }
 
+# Sets SEAL_AUTHOR to the lower-cased seal author, the <author> segment of the
+# KA's SWM graph.
+SEAL_AUTHOR=""
 assertion_create_write_finalize() {
   local node="$1" assertion="$2" root="$3" value="$4" response count payload assertion_uri merkle_root
   response=$(api_call "$node" POST /api/knowledge-assets "{\"contextGraphId\":\"$CONTEXT_GRAPH\",\"name\":\"$assertion\"}")
@@ -288,6 +297,8 @@ assertion_create_write_finalize() {
   response=$(api_call "$node" POST "/api/knowledge-assets/${assertion}/wm/finalize" "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}")
   merkle_root=$(parse_json "$response" '.merkleRoot')
   [ -n "$merkle_root" ] || fail "finalize response missing merkleRoot: $response"
+  SEAL_AUTHOR=$(parse_json "$response" '.authorAddress' | tr '[:upper:]' '[:lower:]')
+  [[ "$SEAL_AUTHOR" =~ ^0x[0-9a-f]{40}$ ]] || fail "finalize response has no EVM authorAddress: $response"
 }
 
 promote_expect_success() {
@@ -297,67 +308,57 @@ promote_expect_success() {
   [ "$count" = "1" ] || fail "expected one promoted quad for $assertion, got '$count': $response"
 }
 
-assert_cross_owner_promote_skipped() {
-  local code="$1" body="$2"
-  [ "$code" -ge 200 ] && [ "$code" -lt 300 ] || return 1
-  printf '%s' "$body" | node -e '
-    let input = "";
-    process.stdin.on("data", (chunk) => input += chunk);
-    process.stdin.on("end", () => {
-      try {
-        const result = JSON.parse(input);
-        const valid = result.swmShared === false &&
-          result.promotedCount === 0 &&
-          result.sealed === false &&
-          result.publishReady === false;
-        process.exit(valid ? 0 : 1);
-      } catch {
-        process.exit(1);
-      }
-    });
-  '
+# Wait until <author>'s SWM graphs on the node hold exactly one value for <root>.
+# Diagnostic only: the <root> values in <author>'s SWM graphs, read from the
+# node's backing store (endpoint from its config.json), bypassing the daemon's
+# read authority. Tells a lost copy apart from one the API does not serve.
+store_author_swm_values() {
+  local node="$1" root="$2" author="$3" endpoint
+  endpoint=$(CFG="$DEVNET_DIR/node$node/config.json" node -e '
+    const store = JSON.parse(require("fs").readFileSync(process.env.CFG, "utf8")).store ?? {};
+    const o = store.options ?? {};
+    const endpoint = {
+      "oxigraph-server": `http://127.0.0.1:${o.port ?? 7878}/query`,
+      blazegraph: o.url ?? store.url,
+      "sparql-http": o.queryEndpoint,
+    }[store.backend ?? ""];
+    if (!endpoint) process.exit(1);
+    console.log(endpoint);
+  ' 2>/dev/null) || { echo "<store not directly readable>"; return 0; }
+  curl -sS --max-time 20 -X POST -H 'Accept: application/sparql-results+json' \
+    --data-urlencode "query=SELECT DISTINCT ?g ?value WHERE { GRAPH ?g { <${root}> <${SCHEMA_NAME}> ?value } }" \
+    "$endpoint" 2>/dev/null \
+    | PREFIX="did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory/${author}/" node -e '
+      let d = "";
+      process.stdin.on("data", c => d += c);
+      process.stdin.on("end", () => {
+        try {
+          const values = new Set();
+          for (const b of JSON.parse(d).results.bindings) {
+            if (b.g.value.startsWith(process.env.PREFIX)) values.add(b.value.value);
+          }
+          console.log([...values].sort().join(",") || "<none>");
+        } catch { console.log("<unreadable>"); }
+      });
+    '
 }
 
-owner_values_on_node() {
-  local node="$1" root="$2" response
-  response=$(api_call "$node" POST /api/query "$(json_owner_query_payload "$root")")
-  binding_values "$response" owner
-}
-
-swm_values_on_node() {
-  local node="$1" root="$2" response
-  response=$(api_call "$node" POST /api/query "$(json_swm_value_query_payload "$root")")
-  binding_values "$response" value
-}
-
-wait_for_owner_meta() {
-  local node="$1" root="$2" expected_owner="$3" values
+wait_for_author_swm_value() {
+  local node="$1" root="$2" author="$3" expected="$4" body="" code="" values=""
   for _ in $(seq 1 90); do
-    values="$(owner_values_on_node "$node" "$root" 2>/dev/null || true)"
-    if [ "$values" = "$expected_owner" ]; then
+    api_capture "$node" POST /api/query "$(json_swm_graph_query_payload "$root")" body code
+    if [ "$code" = "200" ] && values="$(author_swm_values "$body" "$author")" && [ "$values" = "$expected" ]; then
       return 0
     fi
     sleep 1
   done
-  fail "node $node did not observe durable owner '$expected_owner' for $root; last owners='$values'"
-}
-
-wait_for_swm_value() {
-  local node="$1" root="$2" expected_value="$3" values
-  for _ in $(seq 1 90); do
-    values="$(swm_values_on_node "$node" "$root" 2>/dev/null || true)"
-    if grep -Fxq "$expected_value" <<<"$values"; then
-      return 0
-    fi
-    sleep 1
-  done
-  fail "node $node did not observe SWM value '$expected_value' for $root; last values='$values'"
+  fail "node $node did not serve exactly '$expected' for $root in the SWM graphs of $author; last values='$values' (HTTP $code: ${body:0:500}); its backing store holds: $(store_author_swm_values "$node" "$root" "$author")"
 }
 
 require_node "$OWNER_NODE"
 require_node "$ATTACKER_NODE"
-wait_for_node_up "$OWNER_NODE"
-wait_for_node_up "$ATTACKER_NODE"
+wait_for_node_up "$OWNER_NODE" || fail "node $OWNER_NODE is not up"
+wait_for_node_up "$ATTACKER_NODE" || fail "node $ATTACKER_NODE is not up"
 
 OWNER_PEER=$(get_peer_id "$OWNER_NODE")
 ATTACKER_PEER=$(get_peer_id "$ATTACKER_NODE")
@@ -377,51 +378,56 @@ log "Owner:        node $OWNER_NODE peer=$OWNER_PEER"
 log "Attacker:     node $ATTACKER_NODE peer=$ATTACKER_PEER"
 log "Root:         $ROOT"
 
-act "1. Owner promotes a root into SWM"
+act "1. Owner shares a KA for the root into SWM"
 assertion_create_write_finalize "$OWNER_NODE" "$OWNER_ASSERTION" "$ROOT" "$OWNER_VALUE"
+OWNER_AUTHOR="$SEAL_AUTHOR"
+log "owner author: $OWNER_AUTHOR"
 promote_expect_success "$OWNER_NODE" "$OWNER_ASSERTION"
-log "owner promote succeeded"
+wait_for_author_swm_value "$OWNER_NODE" "$ROOT" "$OWNER_AUTHOR" "$OWNER_VALUE"
+log "owner share succeeded into its own author graph"
 
-act "2. Replica has SWM data and durable owner metadata"
-wait_for_swm_value "$ATTACKER_NODE" "$ROOT" "$OWNER_VALUE"
-wait_for_owner_meta "$ATTACKER_NODE" "$ROOT" "$OWNER_PEER"
-log "node $ATTACKER_NODE has owner metadata before restart"
+act "2. Replica holds the owner copy in the owner author graph"
+wait_for_author_swm_value "$ATTACKER_NODE" "$ROOT" "$OWNER_AUTHOR" "$OWNER_VALUE"
+log "node $ATTACKER_NODE has the owner copy before restart"
 
-act "3. Stop owner so enforcement cannot depend on live owner gossip"
-OWNER_STOPPED=1
+act "3. Stop owner so nothing depends on live owner gossip"
 kill_node "$OWNER_NODE"
 log "owner node $OWNER_NODE is offline"
 
-act "4. Restart replica to clear process-local ownership state while owner is offline"
-restart_node "$ATTACKER_NODE"
-wait_for_swm_value "$ATTACKER_NODE" "$ROOT" "$OWNER_VALUE"
-wait_for_owner_meta "$ATTACKER_NODE" "$ROOT" "$OWNER_PEER"
-log "node $ATTACKER_NODE still has durable owner metadata after offline-owner restart"
+act "4. Isolate the replica and restart it"
+# Every other node also holds the owner copy, and node 2 syncs SWM from each
+# peer it connects to. With all of them stopped, a copy node 2 holds after the
+# restart can only come from its own store.
+for other in $(other_running_nodes); do
+  kill_node "$other"
+done
+RESTORE_NODES="$RESTORE_NODES $ATTACKER_NODE"
+restart_node "$ATTACKER_NODE" || fail "node $ATTACKER_NODE did not come back within 120s"
+assert_no_connected_peers "$ATTACKER_NODE"
+wait_for_author_swm_value "$ATTACKER_NODE" "$ROOT" "$OWNER_AUTHOR" "$OWNER_VALUE"
+assert_no_connected_peers "$ATTACKER_NODE"
+log "node $ATTACKER_NODE kept the owner copy across a restart with no peer online"
 
-act "5. Cross-owner promote must be advisory-skipped from durable local metadata"
+act "5. Second author shares the same root into its own graph"
 assertion_create_write_finalize "$ATTACKER_NODE" "$ATTACKER_ASSERTION" "$ROOT" "$ATTACKER_VALUE"
+ATTACKER_AUTHOR="$SEAL_AUTHOR"
+log "attacker author: $ATTACKER_AUTHOR"
+[ "$ATTACKER_AUTHOR" != "$OWNER_AUTHOR" ] || fail "owner and attacker share one author ($OWNER_AUTHOR); use nodes with distinct agents"
+promote_expect_success "$ATTACKER_NODE" "$ATTACKER_ASSERTION"
+log "cross-author share succeeded"
 
-PROMOTE_BODY=""
-PROMOTE_CODE=""
-api_capture "$ATTACKER_NODE" POST "/api/knowledge-assets/${ATTACKER_ASSERTION}/swm/share" "{\"contextGraphId\":\"$CONTEXT_GRAPH\"}" PROMOTE_BODY PROMOTE_CODE
-assert_cross_owner_promote_skipped "$PROMOTE_CODE" "$PROMOTE_BODY" \
-  || fail "cross-owner promote must return the advisory non-share contract (HTTP 200, swmShared=false, promotedCount=0, sealed=false, publishReady=false); got HTTP $PROMOTE_CODE: $PROMOTE_BODY"
-log "cross-owner promote returned the advisory non-share contract"
+act "6. Owner copy unchanged; attacker copy isolated in its own author graph"
+# Still isolated: no peer can repair an owner copy the share clobbered.
+wait_for_author_swm_value "$ATTACKER_NODE" "$ROOT" "$ATTACKER_AUTHOR" "$ATTACKER_VALUE"
+wait_for_author_swm_value "$ATTACKER_NODE" "$ROOT" "$OWNER_AUTHOR" "$OWNER_VALUE"
+assert_no_connected_peers "$ATTACKER_NODE"
 
-act "6. Blocked/skipped promote left WM, SWM, and ownership metadata intact"
-ASSERTION_QUERY=$(api_call "$ATTACKER_NODE" GET "/api/knowledge-assets/${ATTACKER_ASSERTION}/wm/quads?contextGraphId=$CONTEXT_GRAPH")
-ASSERTION_CT=$(quads_count "$ASSERTION_QUERY")
-[ "$ASSERTION_CT" = "1" ] || fail "attacker WM assertion should still have 1 quad after failed promote, got '$ASSERTION_CT': $ASSERTION_QUERY"
+WM_RESPONSE=$(api_call "$ATTACKER_NODE" GET "/api/knowledge-assets/${ATTACKER_ASSERTION}/wm/quads?contextGraphId=$CONTEXT_GRAPH")
+WM_COUNT=$(parse_json "$WM_RESPONSE" '.quads?.length')
+[ "$WM_COUNT" = "0" ] || fail "attacker WM draft should drain after a successful share, got '$WM_COUNT' quads: $WM_RESPONSE"
 
-VALUES_AFTER="$(swm_values_on_node "$ATTACKER_NODE" "$ROOT")"
-grep -Fxq "$OWNER_VALUE" <<<"$VALUES_AFTER" \
-  || fail "owner SWM value missing after failed promote; values='$VALUES_AFTER'"
-if grep -Fxq "$ATTACKER_VALUE" <<<"$VALUES_AFTER"; then
-  fail "attacker value leaked into SWM after failed promote; values='$VALUES_AFTER'"
-fi
+OWNER_ROWS=$(api_call "$ATTACKER_NODE" POST /api/query "$(json_workspace_owner_query_payload "$ROOT")")
+OWNER_ROW_COUNT=$(parse_json "$OWNER_ROWS" '.result?.bindings?.length')
+[ "$OWNER_ROW_COUNT" = "0" ] || fail "expected no root-keyed workspaceOwner rows for $ROOT, got '$OWNER_ROW_COUNT': $OWNER_ROWS"
 
-OWNERS_AFTER="$(owner_values_on_node "$ATTACKER_NODE" "$ROOT")"
-[ "$OWNERS_AFTER" = "$OWNER_PEER" ] \
-  || fail "owner metadata changed after failed promote; owners='$OWNERS_AFTER', expected '$OWNER_PEER'"
-
-log "PASS: durable SWM ownership prevents cross-author overwrite after restart while owner is offline"
+log "PASS: a cross-author share of the same root lands in its own author graph and leaves the offline owner's copy intact after an isolated restart"

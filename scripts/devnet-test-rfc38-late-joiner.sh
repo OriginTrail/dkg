@@ -49,7 +49,7 @@
 #       authority; non-members hit AEAD verify failure on apply.
 #     • Curator comes back online.
 #
-#   SCENARIO D — LU-6 happy path (member-with-chain-key, curator
+#   SCENARIO D — LU-6 compatibility path (member-with-chain-key, curator
 #                offline, cores serve ciphertext, member decrypts):
 #     • Curator (N5) creates a curated CG with [N5, N6] in allowlist.
 #       Both nodes pre-create the CG locally (sender-key handshake
@@ -235,20 +235,44 @@ republish_agent_profile() {
 LEGACY_HOST_CFG_BAK_DIR=""
 restore_legacy_host_custody_configs() {
   [ -n "${LEGACY_HOST_CFG_BAK_DIR:-}" ] && [ -d "$LEGACY_HOST_CFG_BAK_DIR" ] || return 0
+  local failed=0
   for node in "${LEGACY_HOST_CORES[@]}"; do
     local cfg bak
     cfg="$(node_dir "$node")/config.json"
     bak="$LEGACY_HOST_CFG_BAK_DIR/node${node}.config.json"
     [ -f "$bak" ] || continue
-    cp "$bak" "$cfg" 2>/dev/null || true
-    restart_node "$node" >/dev/null 2>&1 || true
+    if ! cp "$bak" "$cfg"; then
+      warn "could not restore core node $node config from $bak"
+      failed=1
+      continue
+    fi
+    if ! restart_node "$node" >/dev/null 2>&1; then
+      warn "core node $node did not restart after restoring its config"
+      failed=1
+    fi
   done
-  rm -rf "$LEGACY_HOST_CFG_BAK_DIR"
+  if [ "$failed" -eq 0 ]; then
+    rm -rf "$LEGACY_HOST_CFG_BAK_DIR"
+  else
+    warn "original configs retained in $LEGACY_HOST_CFG_BAK_DIR"
+  fi
+  return "$failed"
+}
+
+restore_legacy_host_custody_on_exit() {
+  local status="$1"
+  trap - EXIT INT TERM
+  if ! restore_legacy_host_custody_configs; then
+    status=1
+  fi
+  exit "$status"
 }
 
 configure_legacy_host_custody_cores() {
   LEGACY_HOST_CFG_BAK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/rfc38-lj-core-cfg-XXXXXX")"
-  trap restore_legacy_host_custody_configs EXIT INT TERM
+  trap 'restore_legacy_host_custody_on_exit $?' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   for node in "${LEGACY_HOST_CORES[@]}"; do
     local cfg bak
     cfg="$(node_dir "$node")/config.json"
@@ -260,11 +284,18 @@ configure_legacy_host_custody_cores() {
       const file = process.argv[1];
       const cfg = JSON.parse(fs.readFileSync(file, "utf8"));
       cfg.swmHostMode = Object.assign({}, cfg.swmHostMode, { enabled: true, stripCiphertext: false });
+      // LU-6 host mode is a legacy root SWM lane. The default RFC-64 catalog
+      // selection closes that lane even when ciphertext stripping is off.
+      // Exercise LU-6 under its explicit rollback mode, then restore both
+      // settings from the saved config on exit.
+      cfg.rfc64Catalog = Object.assign({}, cfg.rfc64Catalog, {
+        rollout: Object.assign({}, cfg.rfc64Catalog?.rollout, { killSwitch: true }),
+      });
       fs.writeFileSync(file, JSON.stringify(cfg, null, 2));
     ' "$cfg" || fail "could not edit core node $node config for legacy host custody"
     restart_node "$node" >/dev/null 2>&1 || fail "core node $node did not restart after enabling legacy host custody"
   done
-  log "✓ cores ${LEGACY_HOST_CORES[*]} running with swmHostMode.stripCiphertext=false for LU-6 legacy host-custody checks"
+  log "✓ cores ${LEGACY_HOST_CORES[*]} running with legacy root SWM and swmHostMode.stripCiphertext=false for LU-6 host-custody checks"
 }
 
 # Poll `/api/connections` on $node until $targetPeer is in the
