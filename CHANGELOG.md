@@ -289,14 +289,16 @@ wire-protocol or deployment registry changes are required.**
   installs already resolve a fixed 8.0.x (#2793).
 - The CLI and MCP clients share one daemon request deadline policy from
   `@origintrail-official/dkg-core` (#2792).
-- A 503 for unavailable Context Graph read authority now says which
-  dependency failed (#2834). For each such refusal, the daemon logs one line
-  that names the authority source, the reason, and the dependency (`store`,
-  `chain`, `local-state` or `unknown`). The line is logged under the
-  operation ID the response returns in its `x-dkg-operation-id` header. The
-  first refusal with a given attribution in a window logs at warn, and
-  repeats log at info. Browser clients can read that header and
-  `Retry-After`.
+- A Context Graph read that answers 503 because its read authority is
+  unavailable now says which dependency failed (#2834). This covers
+  `/api/query`, memory search, and read routes that pass the same error on.
+  For each such refusal, the daemon logs one line that names the authority
+  source, the reason, and the dependency (`store`, `chain`, `local-state` or
+  `unknown`). The line is logged under the operation ID the response returns
+  in its `x-dkg-operation-id` header. The first refusal with a given
+  attribution in a window logs at warn, and repeats log at info. Browser
+  clients can read that header and `Retry-After`. Context Graph subscribe and
+  unsubscribe refusals are not covered yet (#2843).
 
 ## [10.0.19] - 2026-09-25
 
