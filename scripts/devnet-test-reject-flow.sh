@@ -107,6 +107,26 @@ for a in d.get('agents',[]):
   done
 }
 
+# See devnet-test-invite-flow.sh for the rationale; same helper.
+catchup_refusal() {
+  python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception as e:
+    print(f'<parse-error: {e}>'); sys.exit(0)
+status = d.get('status', '')
+r = d.get('result') or {}
+data, swm = r.get('dataSynced'), r.get('sharedMemorySynced')
+if status == 'denied' or (status == 'unreachable' and data == 0 and swm == 0):
+    print(f'refused:{status}')
+else:
+    print(f'{status} (dataSynced={data}, sharedMemorySynced={swm})')
+"
+}
+
+# poll_catchup <node> <cg-id> <expect> [timeout]
+# <expect> is a terminal status, or `refused` (see catchup_refusal).
 poll_catchup() {
   local node="$1" cg_id="$2" expect="$3" timeout="${4:-90}"
   local start=$(date +%s) last_status=""
@@ -127,7 +147,16 @@ except: print('')
       note "  t=${elapsed}s status=$status"; last_status="$status"
     fi
     case "$status" in
-      done|denied|failed)
+      done|denied|failed|unreachable|deferred)
+        if [ "$expect" = "refused" ]; then
+          local verdict
+          verdict=$(echo "$resp" | catchup_refusal)
+          case "$verdict" in
+            refused:*) ok "catch-up refused: ${verdict#refused:}, nothing synced (expected)"; return 0 ;;
+          esac
+          note "response: $resp"
+          fail "catch-up=$verdict (expected denied, or unreachable with nothing synced)"; return 1
+        fi
         if [ "$status" = "$expect" ]; then ok "catch-up=$status (expected)"; return 0; fi
         fail "catch-up=$status (expected $expect)"; return 1
         ;;
@@ -156,9 +185,9 @@ resp=$(api "$N1" POST /api/context-graph/create "$body")
 created=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('created',''))")
 [ "$created" = "$CG_ID" ] && ok "CG created on N1" || { fail "create failed: $resp"; exit 1; }
 
-hr "Step 2 — N2 attempts to subscribe (expect denied)"
+hr "Step 2 — N2 attempts to subscribe (expect refused)"
 api "$N2" POST /api/subscribe "{\"contextGraphId\":\"$CG_ID\"}" > /dev/null
-poll_catchup "$N2" "$CG_ID" denied 90 || exit 1
+poll_catchup "$N2" "$CG_ID" refused 90 || exit 1
 
 hr "Step 3 — N2 signs and forwards a join request to N1"
 # PR #448: /sign-join is sign-only; forwarding lives in /request-join.
