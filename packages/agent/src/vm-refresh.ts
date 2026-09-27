@@ -27,6 +27,11 @@ export interface VmRefreshTarget {
   readonly kaId: bigint;
   /** Root the update event announced, 0x-prefixed lowercase hex. */
   readonly merkleRoot: string;
+  /**
+   * Block of the update event, when known. A chain view older than it has
+   * not seen the update, so it can never settle the target as current.
+   */
+  readonly blockNumber?: number;
 }
 
 /** A due target with the failed attempts before it. */
@@ -39,8 +44,7 @@ export interface VmRefreshDue extends VmRefreshTarget {
  *  - `current`: the local copy already holds the chain's current root.
  *  - `refreshed`: the current version was fetched and materialized.
  *  - `not-applicable`: nothing for this lane to do (no confirmed copy any
- *    more, or a newer version staged locally, whose promotion another lane
- *    owns).
+ *    more, or a chain adapter that cannot read or prove the current version).
  *  - `retry`: the chain or the network could not settle it; try again later.
  */
 export type VmRefreshOutcome = 'current' | 'refreshed' | 'not-applicable' | 'retry';
@@ -59,6 +63,8 @@ export interface VmRefreshQueueOptions {
   /** Ceiling of the retry delay. */
   readonly maxBackoffMs: number;
   readonly now?: () => number;
+  /** Told of each target dropped to stay within `maxEntries`, with the running total. */
+  readonly onEvict?: (target: VmRefreshTarget, evictedTotal: number) => void;
 }
 
 interface VmRefreshRecord {
@@ -77,25 +83,33 @@ export class VmRefreshQueue {
   readonly #baseBackoffMs: number;
   readonly #maxBackoffMs: number;
   readonly #now: () => number;
+  readonly #onEvict: ((target: VmRefreshTarget, evictedTotal: number) => void) | undefined;
+  #evictedTotal = 0;
 
   constructor(options: VmRefreshQueueOptions) {
     this.#maxEntries = Math.max(1, Math.floor(options.maxEntries));
     this.#baseBackoffMs = Math.max(0, options.baseBackoffMs);
     this.#maxBackoffMs = Math.max(this.#baseBackoffMs, options.maxBackoffMs);
     this.#now = options.now ?? (() => Date.now());
+    this.#onEvict = options.onEvict;
   }
 
   get size(): number {
     return this.#records.size;
   }
 
+  /** Targets dropped to stay within `maxEntries` since this queue was made. */
+  get evictedTotal(): number {
+    return this.#evictedTotal;
+  }
+
   /**
-   * Record a target. The same KA at the same root keeps its retry schedule, so
-   * a replayed event cannot defeat the backoff; a different root is new
-   * evidence and replaces the target, due at once. Returns whether anything
-   * new was recorded.
+   * Record a target, due after `delayMs`. The same KA at the same root keeps
+   * its retry schedule, so a replayed event cannot defeat the backoff; a
+   * different root is new evidence and replaces the target. Returns whether
+   * anything new was recorded.
    */
-  offer(target: VmRefreshTarget): boolean {
+  offer(target: VmRefreshTarget, delayMs = 0): boolean {
     const key = recordKey(target.localCgId, target.ual);
     const held = this.#records.get(key);
     if (held !== undefined && held.target.merkleRoot === target.merkleRoot) return false;
@@ -103,12 +117,14 @@ export class VmRefreshQueue {
     this.#records.set(key, {
       target: Object.freeze({ ...target }),
       failures: 0,
-      nextAttemptAt: 0,
+      nextAttemptAt: delayMs > 0 ? this.#now() + delayMs : 0,
     });
     while (this.#records.size > this.#maxEntries) {
-      const oldest = this.#records.keys().next().value;
+      const oldest = this.#records.entries().next().value;
       if (oldest === undefined) break;
-      this.#records.delete(oldest);
+      this.#records.delete(oldest[0]);
+      this.#evictedTotal += 1;
+      this.#onEvict?.(oldest[1].target, this.#evictedTotal);
     }
     return true;
   }

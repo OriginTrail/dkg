@@ -1154,6 +1154,15 @@ export class DKGAgentBase {
    * peers. An attempt past it is retried after backoff.
    */
   static readonly VM_REFRESH_ATTEMPT_TIMEOUT_MS = 10 * 60_000;
+  /**
+   * Delay before refreshing a copy whose workspace already stages a newer
+   * version. The lane that staged it (the publisher's own update, a core's
+   * StorageACK pending-update lane) promotes it within seconds of the
+   * confirmation. On a member nothing does (a curator's shared memory it
+   * recovered after a restart, for example), so the refresh takes over once
+   * this has passed; the graph's next reconcile pass starts it.
+   */
+  static readonly VM_REFRESH_STAGED_GRACE_MS = 30_000;
 
   static readonly LIST_CONTEXT_GRAPHS_CACHE_TTL_MS =
     // A full catalogue scan enriches every globally known graph and is
@@ -1312,9 +1321,19 @@ export class DKGAgentBase {
     maxEntries: DKGAgentBase.VM_REFRESH_MAX_ENTRIES,
     baseBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS,
     maxBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
+    onEvict: (target, evictedTotal) => {
+      this.log.warn(
+        createOperationContext('system'),
+        `VM refresh: dropped the target for ${target.ual} in "${target.localCgId}" to stay within `
+          + `${DKGAgentBase.VM_REFRESH_MAX_ENTRIES} held targets (${evictedTotal} dropped so far); `
+          + 'its copy waits for the next update or an asset fetch',
+      );
+    },
   });
   /** #2858 — the running refresh worker of each graph, at most one per graph. */
   protected readonly vmRefreshWorkers = new Map<string, Promise<void>>();
+  /** #2858 — update events whose holders could not be read, so none was queued. */
+  protected vmRefreshLostEvents = 0;
   /** Next stable batch index to consider when the bounded rotation cache has waiters. */
   protected readonly vmReconcileRotationAdmissionCursorByCg = new Map<string, number>();
   /** Last resolved curator peers, used to keep the capped exact-recovery roster authoritative. */

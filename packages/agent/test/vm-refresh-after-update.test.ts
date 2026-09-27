@@ -39,6 +39,7 @@ import {
   computeFlatKCRootV10,
   generateGraphKnowledgeAssetMetadata,
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
+  resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
@@ -86,7 +87,7 @@ interface RefreshInternals {
     kaId: bigint,
     merkleRoot: Uint8Array,
     ctx: ReturnType<typeof createOperationContext>,
-    signal?: AbortSignal,
+    options?: { blockNumber?: number; signal?: AbortSignal },
   ): Promise<VmRefreshTarget[]>;
   runVmRefreshesForCg(
     localCgId: string,
@@ -190,21 +191,29 @@ async function localVersion(store: TripleStore, ual: string): Promise<string | u
   return read.state === 'confirmed' ? read.envelope.assertionVersion : undefined;
 }
 
-/** Stage one version in the graph's workspace with its head, as a share or a StorageACK copy does. */
+/**
+ * Stage one version in the graph's workspace with its head, as a share or a
+ * StorageACK copy does: the chain's content of `content` when given, else a
+ * draft of its own.
+ */
 async function stageWorkspaceCopy(
   store: TripleStore,
   ual: string,
   assertionVersion: string,
   shareOperationId: string,
+  content?: KaVersion,
 ): Promise<void> {
   const graphManager = new GraphManager(store);
   const scope = createGraphKnowledgeAssetScope(ual, assertionVersion);
-  const quads = [{
-    subject: `urn:refresh:${shareOperationId}`,
-    predicate: 'http://schema.org/name',
-    object: `"${shareOperationId}"`,
-    graph: knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, scope),
-  }];
+  const graph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, scope);
+  const quads = content
+    ? contentOf(ual, content).dataQuads.map((quad) => ({ ...quad, graph }))
+    : [{
+        subject: `urn:refresh:${shareOperationId}`,
+        predicate: 'http://schema.org/name',
+        object: `"${shareOperationId}"`,
+        graph,
+      }];
   await store.insert(quads);
   await storeKnowledgeAssetOperationPublicQuads({
     store,
@@ -305,6 +314,17 @@ async function bootMember(options: {
     ual: buildKnowledgeAssetUal(chain.chainId, AUTHOR, kaNumber),
   }));
   const chainVersions = new Map<bigint, KaVersion>();
+  // The version before each KA's latest update, for a chain read that has not
+  // seen that update yet.
+  const previousVersions = new Map<bigint, KaVersion>();
+  /**
+   * What the chain double's reads see: the pinned view's block, and whether
+   * the live root read (a lagging endpoint) or the pinned view (a confirmation
+   * depth above one) still predates each KA's latest update.
+   */
+  const view = { blockNumber: 100, laggingRoot: false, laggingSnapshot: false };
+  const versionSeen = (kaId: bigint, lagging: boolean): KaVersion | undefined =>
+    (lagging ? previousVersions.get(kaId) : undefined) ?? chainVersions.get(kaId);
   for (const ka of kas) {
     const v1: KaVersion = { label: `A-${ka.kaNumber}`, assertionVersion: 1n };
     chainVersions.set(ka.kaId, v1);
@@ -325,14 +345,14 @@ async function bootMember(options: {
   });
 
   const rootReads = recorder(async (kaId: bigint) => {
-    const version = chainVersions.get(kaId);
+    const version = versionSeen(kaId, view.laggingRoot);
     const ka = kas.find((candidate) => candidate.kaId === kaId);
     if (!version || !ka) throw new Error(`unknown KA ${kaId}`);
     return contentOf(ka.ual, version).root;
   });
   chain.getLatestMerkleRoot = rootReads;
   const snapshotReads = recorder(async (kaId: bigint) => {
-    const version = chainVersions.get(kaId);
+    const version = versionSeen(kaId, view.laggingSnapshot);
     const ka = kas.find((candidate) => candidate.kaId === kaId);
     if (!version || !ka) return null;
     return {
@@ -340,7 +360,7 @@ async function bootMember(options: {
       rootCount: version.assertionVersion,
       latestAuthor: AUTHOR,
       latestPublisher: PUBLISHER,
-      blockNumber: 100,
+      blockNumber: view.blockNumber,
     };
   });
   chain.readKnowledgeAssetVersionSnapshot = snapshotReads as typeof chain.readKnowledgeAssetVersionSnapshot;
@@ -379,10 +399,22 @@ async function bootMember(options: {
   /** Move one KA's on-chain version, as a confirmed `/api/update` does. */
   const updateOnChain = (kaNumber: bigint, version: KaVersion): Uint8Array => {
     const ka = kas.find((candidate) => candidate.kaNumber === kaNumber)!;
+    previousVersions.set(ka.kaId, chainVersions.get(ka.kaId)!);
     chainVersions.set(ka.kaId, version);
     return contentOf(ka.ual, version).root;
   };
-  return { chain, internals, kas, updateOnChain, rootReads, snapshotReads, fetches, transport, connects };
+  return {
+    chain,
+    internals,
+    kas,
+    updateOnChain,
+    view,
+    rootReads,
+    snapshotReads,
+    fetches,
+    transport,
+    connects,
+  };
 }
 
 const ctx = createOperationContext('system');
@@ -421,6 +453,37 @@ describe('VmRefreshQueue', () => {
     expect(queue.due('another-graph', 10)).toEqual([]);
   });
 
+  it('reports each target it drops over capacity, with the running total', () => {
+    const evicted: Array<[string, number]> = [];
+    const queue = new VmRefreshQueue({
+      maxEntries: 1,
+      baseBackoffMs: 60_000,
+      maxBackoffMs: 600_000,
+      onEvict: (dropped, total) => evicted.push([dropped.ual, total]),
+    });
+    queue.offer(target('0x01', 'ual-1'));
+    queue.offer(target('0x02', 'ual-2'));
+    queue.offer(target('0x03', 'ual-3'));
+    expect(evicted).toEqual([['ual-1', 1], ['ual-2', 2]]);
+    expect(queue.evictedTotal).toBe(2);
+  });
+
+  it('holds a target offered with a delay until the delay has passed', () => {
+    let now = 5_000;
+    const queue = new VmRefreshQueue({
+      maxEntries: 8,
+      baseBackoffMs: 60_000,
+      maxBackoffMs: 600_000,
+      now: () => now,
+    });
+    expect(queue.offer(target('0xb2'), 30_000)).toBe(true);
+    expect(queue.snapshot()).toMatchObject([{ merkleRoot: '0xb2', failures: 0, nextAttemptAt: 35_000 }]);
+    expect(queue.due(CG, 10)).toEqual([]);
+    expect(queue.dueContextGraphIds()).toEqual([]);
+    now = 35_000;
+    expect(queue.due(CG, 10)).toEqual([{ ...target('0xb2'), failures: 0 }]);
+  });
+
   it('settles only the attempted root, doubles the retry delay to its ceiling, and drops the oldest over capacity', () => {
     let now = 0;
     const queue = new VmRefreshQueue({
@@ -451,6 +514,7 @@ describe('VmRefreshQueue', () => {
     queue.offer(target('0x02', 'ual-2'));
     queue.offer(target('0x03', 'ual-3'));
     expect(queue.snapshot().map((entry) => entry.ual)).toEqual(['ual-2', 'ual-3']);
+    expect(queue.evictedTotal).toBe(1);
     queue.clearContextGraph(CG);
     expect(queue.size).toBe(0);
   });
@@ -521,14 +585,71 @@ describe('KnowledgeAssetUpdated nudge (#2858)', () => {
     expect(fetches.calls).toEqual([]);
   });
 
-  it('leaves a newer version staged in the workspace to the lanes that promote it', async () => {
+  it('warns, with a running count, when it cannot read which graphs hold the KA', async () => {
     const { internals, kas, updateOnChain } = await bootMember();
-    // The update's StorageACK copy (or the publisher's own staged update).
+    const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    vi.spyOn(internals.store, 'query').mockRejectedValue(new Error('store busy'));
+    const warn = vi.spyOn(internals.log, 'warn');
+
+    await expect(internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx, { blockNumber: 150 }))
+      .resolves.toEqual([]);
+    await expect(internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx)).resolves.toEqual([]);
+
+    expect(logLines(warn)).toEqual([
+      `VM refresh: could not read which local graphs hold KA ${kas[0]!.kaId} for its update at block 150; `
+        + 'not queued (1 update event(s) lost so far): store busy',
+      `VM refresh: could not read which local graphs hold KA ${kas[0]!.kaId} for its update; `
+        + 'not queued (2 update event(s) lost so far): store busy',
+    ]);
+    expect(internals.vmRefreshQueue.size).toBe(0);
+  });
+
+  it('warns when a full target set drops its oldest target', async () => {
+    const { internals } = await bootMember();
+    const warn = vi.spyOn(internals.log, 'warn');
+    for (let index = 0; index <= DKGAgentBase.VM_REFRESH_MAX_ENTRIES; index += 1) {
+      internals.vmRefreshQueue.offer({
+        localCgId: CG,
+        ual: `did:dkg:mock:31337/0xabc/${index}`,
+        kaId: BigInt(index + 1),
+        merkleRoot: '0x01',
+      });
+    }
+    expect(internals.vmRefreshQueue.size).toBe(DKGAgentBase.VM_REFRESH_MAX_ENTRIES);
+    expect(logLines(warn)).toEqual([
+      `VM refresh: dropped the target for did:dkg:mock:31337/0xabc/0 in "${CG}" to stay within `
+        + `${DKGAgentBase.VM_REFRESH_MAX_ENTRIES} held targets (1 dropped so far); `
+        + 'its copy waits for the next update or an asset fetch',
+    ]);
+  });
+
+  it('gives the lane that staged a newer version a grace period before the refresh', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-27T12:00:00.000Z'));
+    const { internals, kas, updateOnChain, rootReads } = await bootMember();
+    const triggers = recorder((_localCgId: string) => undefined);
+    internals.vmReconcileScheduling = { triggerLive: triggers };
+    // The update's StorageACK copy, the publisher's own staged update, or a
+    // member's recovered copy of its curator's shared memory.
     await stageWorkspaceCopy(internals.store, kas[0]!.ual, '2', 'storage-ack-refresh-test');
     const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    const info = vi.spyOn(internals.log, 'info');
 
-    await expect(internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx)).resolves.toEqual([]);
-    expect(internals.vmRefreshQueue.size).toBe(0);
+    await expect(internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx)).resolves.toHaveLength(1);
+
+    expect(logLines(info)).toEqual([
+      `VM refresh: ${kas[0]!.ual} in "${CG}" does not hold its update's root and stages a newer `
+        + 'version; refresh queued in 30s unless that version is promoted first',
+    ]);
+    expect(internals.vmRefreshQueue.snapshot()).toEqual([expect.objectContaining({
+      merkleRoot: ethers.hexlify(rootB),
+      failures: 0,
+      nextAttemptAt: Date.now() + DKGAgentBase.VM_REFRESH_STAGED_GRACE_MS,
+    })]);
+    // Not due, so no pass is started for it.
+    expect(internals.vmRefreshQueue.hasDue(CG)).toBe(false);
+    expect(triggers.calls).toEqual([]);
+    expect(rootReads.calls).toEqual([]);
   });
 });
 
@@ -609,22 +730,66 @@ describe('VM refresh worker (#2858)', () => {
     expect(internals.vmRefreshQueue.size).toBe(0);
   });
 
-  it('leaves a target to the StorageACK lane when an ACK copy arrives after the nudge', async () => {
-    const { internals, kas, updateOnChain, fetches, rootReads } = await bootMember();
-    const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+  it('refreshes a version that stays staged past the grace, as on a restarted member', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-27T12:00:00.000Z'));
+    const { internals, kas, updateOnChain } = await bootMember();
+    const ual = kas[0]!.ual;
+    const versionB: KaVersion = { label: 'B', assertionVersion: 2n };
+    // A restarted member recovered its curator's shared memory, which holds
+    // the update itself; no lane on a member promotes it.
+    await stageWorkspaceCopy(internals.store, ual, '2', 'curator-update-b', versionB);
+    const rootB = updateOnChain(7n, versionB);
     await internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx);
-    await stageWorkspaceCopy(internals.store, kas[0]!.ual, '2', 'storage-ack-late');
-    const debug = vi.spyOn(internals.log, 'debug');
 
+    // A pass inside the grace attempts nothing.
+    await internals.runVmRefreshesForCg(CG, CG, () => true);
+    expect(await localVersion(internals.store, ual)).toBe('1');
+    expect(internals.vmRefreshQueue.size).toBe(1);
+
+    vi.setSystemTime(new Date(Date.now() + DKGAgentBase.VM_REFRESH_STAGED_GRACE_MS));
     await internals.runVmRefreshesForCg(CG, CG, () => true);
 
-    expect(logLines(debug)).toEqual([
-      `VM refresh of ${kas[0]!.ual} in "${CG}" settled as not-applicable: `
-        + 'a newer version is staged for promotion',
-    ]);
-    expect(rootReads.calls).toEqual([]);
-    expect(fetches.calls).toEqual([]);
+    expect(await localRootHex(internals.store, ual)).toBe(ethers.hexlify(rootB));
+    expect(await localVersion(internals.store, ual)).toBe('2');
     expect(internals.vmRefreshQueue.size).toBe(0);
+  });
+
+  it('refreshes to the chain version and keeps a version staged ahead of the chain', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-27T12:00:00.000Z'));
+    const { internals, kas, updateOnChain, fetches } = await bootMember();
+    const ual = kas[0]!.ual;
+    const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    // A draft of the next version, shared before it is published.
+    await stageWorkspaceCopy(internals.store, ual, '3', 'curator-draft-c');
+    await internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx);
+
+    vi.setSystemTime(new Date(Date.now() + DKGAgentBase.VM_REFRESH_STAGED_GRACE_MS));
+    await internals.runVmRefreshesForCg(CG, CG, () => true);
+
+    expect(fetches.calls).toHaveLength(1);
+    expect(await localRootHex(internals.store, ual)).toBe(ethers.hexlify(rootB));
+    expect(await localVersion(internals.store, ual)).toBe('2');
+    expect(internals.vmRefreshQueue.size).toBe(0);
+    // The draft, head and content, is untouched.
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store: internals.store,
+      graphManager: new GraphManager(internals.store),
+      contextGraphId: CG,
+      kaUal: ual,
+    });
+    expect(head?.assertionVersion).toBe('3');
+    const draftGraph = knowledgeAssetLayerGraphUri(
+      CG,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(ual, 3n),
+    );
+    const draft = await internals.store.query(
+      `SELECT ?o WHERE { GRAPH <${draftGraph}> { <urn:refresh:curator-draft-c> ?p ?o } }`,
+    );
+    expect(draft.type === 'bindings' ? draft.bindings.map((row) => row['o']) : [])
+      .toEqual(['"curator-draft-c"']);
   });
 
   it('refreshes past a workspace head left at the confirmed version', async () => {
@@ -700,6 +865,164 @@ describe('VM refresh worker (#2858)', () => {
     expect(fetches.calls.map(([peerId]) => peerId).slice(3)).toEqual(['12D3KooWRefreshPeerD']);
     expect(await localRootHex(internals.store, ual)).toBe(ethers.hexlify(rootB));
     expect(internals.vmRefreshQueue.size).toBe(0);
+  });
+
+  it('keeps the curator at the head of every retry window', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-27T12:00:00.000Z'));
+    const CURATOR = '12D3KooWRefreshCurator';
+    const others = ['A', 'B', 'C', 'D', 'E'].map((suffix) => `12D3KooWRefreshPeer${suffix}`);
+    let curatorFailures = 1;
+    // On a curated graph only the curator holds the private content; the
+    // other connected peers (cores) do not.
+    const { internals, kas, updateOnChain, fetches } = await bootMember({
+      curators: [CURATOR],
+      peers: [CURATOR, ...others],
+      holders: [CURATOR],
+      beforeFetch: async (peerId) => {
+        if (peerId === CURATOR && curatorFailures-- > 0) throw new Error('stream reset');
+      },
+    });
+    const ual = kas[0]!.ual;
+    const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    await internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx);
+
+    await internals.runVmRefreshesForCg(CG, CG, () => true);
+    expect(fetches.calls.map(([peerId]) => peerId)).toEqual([CURATOR, others[0], others[1]]);
+    expect(internals.vmRefreshQueue.size).toBe(1);
+
+    // The retry asks the curator first again, beside the next other peers.
+    vi.setSystemTime(Date.now() + 60_000);
+    await internals.runVmRefreshesForCg(CG, CG, () => true);
+    expect(fetches.calls.map(([peerId]) => peerId).slice(3)).toEqual([CURATOR]);
+    expect(await localRootHex(internals.store, ual)).toBe(ethers.hexlify(rootB));
+    expect(internals.vmRefreshQueue.size).toBe(0);
+  });
+
+  it('never settles as current from a chain read that has not seen the update', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-27T12:00:00.000Z'));
+    const { internals, kas, updateOnChain, view, fetches, rootReads, snapshotReads } = await bootMember();
+    const ual = kas[0]!.ual;
+    const rootA = await localRootHex(internals.store, ual);
+    const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    // A lagging endpoint still answers the old root, and its pinned view is
+    // below the update's block.
+    view.laggingRoot = true;
+    view.laggingSnapshot = true;
+    view.blockNumber = 140;
+    await internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx, { blockNumber: 150 });
+    const info = vi.spyOn(internals.log, 'info');
+
+    await internals.runVmRefreshesForCg(CG, CG, () => true);
+    expect(logLines(info)).toContain(
+      `VM refresh of ${ual} in "${CG}" did not complete (the chain view at block 140 is behind `
+        + "the update's block 150); retrying in 60s",
+    );
+    expect(rootReads.calls).toHaveLength(1);
+    expect(snapshotReads.calls).toHaveLength(1);
+    expect(fetches.calls).toEqual([]);
+    expect(await localRootHex(internals.store, ual)).toBe(rootA);
+    expect(internals.vmRefreshQueue.snapshot()).toEqual([
+      expect.objectContaining({ merkleRoot: ethers.hexlify(rootB), blockNumber: 150, failures: 1 }),
+    ]);
+
+    // The chain reads catch up.
+    view.laggingRoot = false;
+    view.laggingSnapshot = false;
+    view.blockNumber = 160;
+    vi.setSystemTime(Date.now() + 60_000);
+    await internals.runVmRefreshesForCg(CG, CG, () => true);
+    expect(fetches.calls).toHaveLength(1);
+    expect(await localRootHex(internals.store, ual)).toBe(ethers.hexlify(rootB));
+    expect(internals.vmRefreshQueue.size).toBe(0);
+  });
+
+  it('fetches the update when only the live root read lagged it', async () => {
+    const { internals, kas, updateOnChain, view, fetches, snapshotReads } = await bootMember();
+    const ual = kas[0]!.ual;
+    const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    // A lagging endpoint answers the old root; the pinned view has the update.
+    view.laggingRoot = true;
+    view.blockNumber = 160;
+    await internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx, { blockNumber: 150 });
+    const info = vi.spyOn(internals.log, 'info');
+
+    await internals.runVmRefreshesForCg(CG, CG, () => true);
+
+    expect(fetches.calls).toHaveLength(1);
+    // One view to settle the lagging read, one for the fetch's evidence.
+    expect(snapshotReads.calls).toHaveLength(2);
+    expect(await localRootHex(internals.store, ual)).toBe(ethers.hexlify(rootB));
+    expect(internals.vmRefreshQueue.size).toBe(0);
+    expect(logLines(info)).toContainEqual(
+      expect.stringContaining(`VM refresh: ${ual} in "${CG}" now holds the current version`),
+    );
+  });
+
+  it('fetches nothing from exact evidence pinned below the update\'s block', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-27T12:00:00.000Z'));
+    const { internals, kas, updateOnChain, view, fetches } = await bootMember();
+    const ual = kas[0]!.ual;
+    const rootA = await localRootHex(internals.store, ual);
+    const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    // The live read sees the update, but the pinned view (a confirmation depth
+    // above one) does not yet, so the fetch would find the old version.
+    view.laggingSnapshot = true;
+    view.blockNumber = 148;
+    await internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx, { blockNumber: 150 });
+    const info = vi.spyOn(internals.log, 'info');
+
+    await internals.runVmRefreshesForCg(CG, CG, () => true);
+    expect(logLines(info)).toContain(
+      `VM refresh of ${ual} in "${CG}" did not complete (the chain view of ${ual} at block 148 `
+        + 'is behind block 150); retrying in 60s',
+    );
+    expect(fetches.calls).toEqual([]);
+    expect(await localRootHex(internals.store, ual)).toBe(rootA);
+    expect(internals.vmRefreshQueue.size).toBe(1);
+
+    view.laggingSnapshot = false;
+    view.blockNumber = 151;
+    vi.setSystemTime(Date.now() + 60_000);
+    await internals.runVmRefreshesForCg(CG, CG, () => true);
+    expect(await localRootHex(internals.store, ual)).toBe(ethers.hexlify(rootB));
+    expect(internals.vmRefreshQueue.size).toBe(0);
+  });
+
+  it('settles an older event from a pinned view at or after its block', async () => {
+    const { internals, kas, updateOnChain, view, fetches, rootReads, snapshotReads } = await bootMember();
+    const ual = kas[0]!.ual;
+    const rootA = await localRootHex(internals.store, ual);
+    const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    await materialize(internals.store, ual, kas[0]!.kaId, { label: 'B', assertionVersion: 2n });
+    view.blockNumber = 200;
+
+    // A replayed event for the version this node already moved past.
+    await internals.handleKAUpdatedNudge(kas[0]!.kaId, ethers.getBytes(rootA!), ctx, { blockNumber: 120 });
+    await internals.runVmRefreshesForCg(CG, CG, () => true);
+
+    expect(rootReads.calls).toHaveLength(1);
+    expect(snapshotReads.calls).toHaveLength(1);
+    expect(fetches.calls).toEqual([]);
+    expect(await localRootHex(internals.store, ual)).toBe(ethers.hexlify(rootB));
+    expect(internals.vmRefreshQueue.size).toBe(0);
+  });
+
+  it('starts no refresh in a graph this node may no longer read', async () => {
+    const { internals, kas, updateOnChain, fetches } = await bootMember();
+    const ual = kas[0]!.ual;
+    const rootA = await localRootHex(internals.store, ual);
+    const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    await internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx);
+    // Revoked membership: the pass's read-authority gate refuses the graph.
+    agent!.canReadContextGraph = async () => false;
+
+    await expect(internals.runVmReconcileForCg(CG, 'manual')).rejects.toThrow();
+    expect(internals.vmRefreshWorkers.size).toBe(0);
+    expect(fetches.calls).toEqual([]);
+    expect(await localRootHex(internals.store, ual)).toBe(rootA);
   });
 
   it('follows an A -> B -> A history and ends on A, ignoring the late B event', async () => {
@@ -1049,6 +1372,7 @@ describe('lifecycle wiring (#2858)', () => {
 
     expect(nudges.calls).toHaveLength(1);
     expect(nudges.calls[0]!.slice(0, 2)).toEqual([42n, root]);
+    expect(nudges.calls[0]![3]).toMatchObject({ blockNumber: 9 });
 
     // The nudge decides from the subscription and the local copy alone, so a
     // held copy behind the event is queued in every mode.

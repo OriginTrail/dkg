@@ -3608,8 +3608,8 @@ export class FinalizationHandler {
    * ordinal either, so an update reaches a held copy through finalization
    * gossip, the StorageACK pending-update lane, the chain-backed path this
    * method routes a local SWM head to (`present`) while its ordinal is still
-   * walked, and, for a headless confirmed copy, the `KnowledgeAssetUpdated`
-   * refresh (`handleKAUpdatedNudge` in the agent's SWM host).
+   * walked, and, for any confirmed copy, the `KnowledgeAssetUpdated` refresh
+   * (`handleKAUpdatedNudge` in the agent's SWM host).
    *
    * Any read failure answers `present`, keeping the caller on its chain path.
    */

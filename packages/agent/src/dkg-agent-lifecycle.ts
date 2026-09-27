@@ -3016,10 +3016,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // moves its root, and the sweep never revisits a settled ordinal, so a
         // node holding only a confirmed VM copy learns of the new version here.
         // Decided from local state; a V10 KA is its own batch, so the event's
-        // batch id is the KA id.
+        // batch id is the KA id. The event's block keeps a chain read that
+        // has not seen the update from settling the refresh.
         onCollectionUpdated: this.vmReconcileEnabled()
-          ? async ({ batchId, merkleRoot, signal }) => {
-              await this.handleKAUpdatedNudge(batchId, merkleRoot, ctx, signal);
+          ? async ({ batchId, merkleRoot, blockNumber, signal }) => {
+              await this.handleKAUpdatedNudge(batchId, merkleRoot, ctx, { blockNumber, signal });
             }
           : undefined,
       });
