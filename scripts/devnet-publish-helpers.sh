@@ -400,6 +400,36 @@ const fs = require("fs"); const path = require("path");
   )
 }
 
+# POST /api/query, retrying while the daemon answers with a retryable error
+# (its 503 body when read authority or the store is briefly unavailable).
+# Prints the last answer; callers must still reject an `{"error": ...}` body.
+# Since v10.0.17 an unscoped query fails on stores without all-writer
+# consistency coverage, so callers must pass contextGraphId.
+_devnet_query_with_retry() {
+  local node="$1" body="$2"
+  local attempt=1 attempts="${DEVNET_QUERY_RETRY_ATTEMPTS:-5}" resp
+  while :; do
+    resp=$(api_call "$node" POST /api/query "$body") || return 1
+    if [ "$attempt" -ge "$attempts" ] || ! printf '%s' "$resp" | node -e '
+      let d = "";
+      process.stdin.on("data", c => d += c);
+      process.stdin.on("end", () => {
+        try {
+          const j = JSON.parse(d);
+          process.exit(j.error && j.retryable === true ? 0 : 1);
+        } catch {
+          process.exit(1);
+        }
+      });
+    '; then
+      printf '%s' "$resp"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep "${DEVNET_QUERY_RETRY_DELAY_S:-3}"
+  done
+}
+
 devnet_private_roots_for_published_root() {
   local node="$1" cg="$2" root="$3"
   local body resp
@@ -417,17 +447,18 @@ devnet_private_roots_for_published_root() {
         }
       }
     `;
-    process.stdout.write(JSON.stringify({ sparql }));
+    process.stdout.write(JSON.stringify({ sparql, contextGraphId: cg }));
   ')
-  resp=$(api_call "$node" POST /api/query "$body") || return 1
+  resp=$(_devnet_query_with_retry "$node" "$body") || return 1
   printf '%s' "$resp" | node -e '
     let d = "";
     process.stdin.on("data", c => d += c);
     process.stdin.on("end", () => {
       try {
-        const j = JSON.parse(d || "{}");
-        if (j.error) throw new Error(j.error);
-        const bindings = j?.result?.bindings ?? j?.result?.results?.bindings ?? j?.bindings ?? j?.results?.bindings ?? [];
+        const j = JSON.parse(d);
+        if (j.error) throw new Error(typeof j.error === "string" ? j.error : JSON.stringify(j.error));
+        const bindings = j?.result?.bindings ?? j?.result?.results?.bindings ?? j?.bindings ?? j?.results?.bindings;
+        if (!Array.isArray(bindings)) throw new Error(`unexpected /api/query answer: ${d.slice(0, 200)}`);
         const roots = [];
         for (const row of bindings) {
           const cell = row?.privateRoot ?? row?.root;
@@ -469,17 +500,21 @@ devnet_catalog_quads_for_published_kc() {
       }
       ORDER BY ?p ?o
     `;
-    process.stdout.write(JSON.stringify({ sparql }));
+    // `?assertionGraph` is the per-author WM, SWM or VM graph of the KA (the
+    // pointer moves with each transition); a scoped GRAPH variable binds WM
+    // and SWM partitions only with includeContextGraphPartitions.
+    process.stdout.write(JSON.stringify({ sparql, contextGraphId: cg, includeContextGraphPartitions: true }));
   ')
-  resp=$(api_call "$node" POST /api/query "$body") || return 1
+  resp=$(_devnet_query_with_retry "$node" "$body") || return 1
   printf '%s' "$resp" | CG="$cg" node -e '
     let d = "";
     process.stdin.on("data", c => d += c);
     process.stdin.on("end", () => {
       try {
-        const j = JSON.parse(d || "{}");
-        if (j.error) throw new Error(j.error);
-        const bindings = j?.result?.bindings ?? j?.result?.results?.bindings ?? j?.bindings ?? j?.results?.bindings ?? [];
+        const j = JSON.parse(d);
+        if (j.error) throw new Error(typeof j.error === "string" ? j.error : JSON.stringify(j.error));
+        const bindings = j?.result?.bindings ?? j?.result?.results?.bindings ?? j?.bindings ?? j?.results?.bindings;
+        if (!Array.isArray(bindings)) throw new Error(`unexpected /api/query answer: ${d.slice(0, 200)}`);
         const subject = `did:dkg:context-graph:${process.env.CG}`;
         const quads = [];
         for (const row of bindings) {
