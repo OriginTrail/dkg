@@ -183,7 +183,7 @@ interface AuthoritativeMetaSnapshot {
   quads: Quad[];
   /**
    * The acceptance an approved member's snapshot was admitted under. The
-   * replacement asks it again at the root activation boundary.
+   * replacement asks it again right before its first projection write.
    */
   approvedMember?: ApprovedMemberAcceptance;
 }
@@ -553,8 +553,8 @@ async function fetchAuthoritativeMetaSnapshot(
       approvedMember?.proof,
     );
   // The fetch is the long await, so a member whose authority already changed
-  // stops here, before any store work. The replacement asks again at its
-  // activation boundary.
+  // stops here, before any store work. The replacement asks again right
+  // before its first projection write.
   const admitted = (acceptsAuthoritativePublicDefinition || hasAuthoritativePrivateDefinition)
     && (approvedMember === undefined || await approvedMember.stillHolds());
   if (!admitted) {
@@ -632,9 +632,10 @@ function replaceCuratorMetaProjectionSparql(
 
 /**
  * Install `authoritative` as the graph's curator projection. Returns false,
- * without activating it, when the approved member's acceptance no longer holds
- * at the activation boundary (#2831 review): registration or catalog authority
- * can change during the store work that precedes activation.
+ * leaving the projection exactly as it was, when the approved member's
+ * acceptance no longer holds right before the projection's first write
+ * (#2831 review): registration or catalog authority can change during the
+ * store work that precedes it.
  */
 async function atomicallyReplaceCuratorMetaSnapshot(
   agent: CuratorMetaRefreshAgent,
@@ -725,6 +726,11 @@ async function atomicallyReplaceCuratorMetaSnapshot(
         )),
     );
 
+    // Each subject below is its own commit, and a delegation for an agent the
+    // current root already allows takes effect as soon as it lands. So the
+    // acceptance is asked before the first of them: a refusal must leave the
+    // projection exactly as it was, and no store API commits them together.
+    if (!(await activationHolds())) return false;
     invalidateTargetProjections();
     try {
       const replaceSubject = async (subject: string, quads: Quad[]): Promise<void> => {
@@ -743,9 +749,6 @@ async function atomicallyReplaceCuratorMetaSnapshot(
         await replaceSubject(subject, quads);
         existingDelegations.delete(subject);
       }
-      // A refusal here leaves exactly the state a failed root replacement
-      // leaves, which the ordering above keeps fail closed.
-      if (!(await activationHolds())) return false;
       await replaceSubject(contextGraphUri, rootReplacement);
       for (const staleSubject of [...existingDelegations].sort()) {
         await replaceSubject(staleSubject, []);
@@ -772,7 +775,8 @@ async function atomicallyReplaceCuratorMetaSnapshot(
         `Refusing partial curator metadata replacement: staged ${staged.length}/${snapshot.length} triples`,
       );
     }
-    // The update below activates the whole projection at once.
+    // Staged rows sit in a scratch graph until the update below activates the
+    // whole projection at once, so the acceptance is asked right before it.
     if (!(await activationHolds())) return false;
 
     // A decorated store can commit its inner UPDATE and then throw while

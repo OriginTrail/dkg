@@ -386,17 +386,22 @@ describe('private CG membership bootstrap recovery', () => {
     const proof = { approvedAgentAddress: member, expectedDelegateePeerId: '12D3KooWJoinCompletionPeer' };
     // Every stored-definition query answers yes; the sources show which
     // definition the confirmation was willing to accept.
-    function confirmationWith(answer = true) {
+    function confirmationWith(
+      answer = true,
+      duringQuery: (binding: Map<string, string>) => void = () => undefined,
+    ) {
       const sources: string[] = [];
+      const binding = new Map([[contextGraphId, member]]);
       const dependencies = {
         chain: {},
         resolveActivePublicChainProof: async () => ({ state: 'unknown' as const }),
         isPrivateContextGraph: async () => false,
-        localApprovedAgentByContextGraph: new Map([[contextGraphId, member]]),
+        localApprovedAgentByContextGraph: binding,
         peerId: '12D3KooWJoinCompletionPeer',
         store: {
           query: async (_sparql: string, options?: { source?: string }) => {
             sources.push(options?.source ?? '');
+            duringQuery(binding);
             return { type: 'boolean' as const, value: answer };
           },
         },
@@ -404,6 +409,7 @@ describe('private CG membership bootstrap recovery', () => {
       };
       return {
         sources,
+        binding,
         confirm: (acceptance: ApprovedMemberAcceptance) => confirmContextGraphMetadataV1(
           dependencies as never,
           contextGraphId,
@@ -440,6 +446,33 @@ describe('private CG membership bootstrap recovery', () => {
       // The name was registered private during the join's network work.
       publicNow = false;
       await expect(confirm(acceptance)).resolves.toBe(false);
+    });
+
+    it('reads nothing without the approval binding', async () => {
+      const { sources, binding, confirm } = confirmationWith();
+      binding.delete(contextGraphId);
+      await expect(confirm(await publicAcceptanceFor(proof))).resolves.toBe(false);
+      expect(sources).toEqual([]);
+    });
+
+    it('confirms nothing once the approval binding is withdrawn while the stored proof is read', async () => {
+      // A rejection lands while the store query is in flight.
+      const { confirm } = confirmationWith(true, (binding) => { binding.delete(contextGraphId); });
+      await expect(confirm(await publicAcceptanceFor(proof))).resolves.toBe(false);
+    });
+
+    it('confirms nothing once the approval binding moves to another agent while the authority is re-read', async () => {
+      const { binding, confirm } = confirmationWith();
+      let reads = 0;
+      const acceptance = await publicAcceptanceFor(proof, () => {
+        reads += 1;
+        // The first read resolves the acceptance. A new join request signs
+        // with another agent during the readiness re-read.
+        if (reads > 1) binding.set(contextGraphId, '0x00000000000000000000000000000000000000b2');
+        return true;
+      });
+      await expect(confirm(acceptance)).resolves.toBe(false);
+      expect(reads).toBe(2);
     });
   });
 
