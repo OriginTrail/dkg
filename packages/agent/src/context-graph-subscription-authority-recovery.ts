@@ -134,6 +134,13 @@ export interface DeferredContextGraphSubscriptionAuthorityRecoveryPorts {
   ): Promise<void>;
   warn(contextGraphId: string, error: unknown): void;
   activated(contextGraphId: string): void;
+  /**
+   * The activation cap has no room for this user row, now dormant as
+   * `activationCap`. Rolling activation takes it over, as it does a row the
+   * startup pass capped; without that hand-off the row would wait for a
+   * restart.
+   */
+  capped(contextGraphId: string): void;
 }
 
 /** Executes one fenced pass over only the authority-unavailable durable rows. */
@@ -236,6 +243,13 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
       if (authority.outcome === 'denied') {
         ports.dormancyById.set(contextGraphId, 'authorityDenied');
         ports.touchStatus();
+      } else if (authority.reason === 'chain-access-policy-unknown') {
+        // The chain answered: the id does not exist or is not active (a
+        // timeout or a failed read has its own reason and stays retryable).
+        // Retrying every pass only repeats that answer, so retire the row for
+        // this process like a deny. It stays durable; a restart checks it again.
+        ports.dormancyById.set(contextGraphId, 'deactivated');
+        ports.touchStatus();
       }
       continue;
     }
@@ -278,6 +292,7 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
       && activatedUserRows >= currentStatus.activationCap
     ) {
       ports.dormancyById.set(contextGraphId, 'activationCap');
+      ports.capped(contextGraphId);
       ports.touchStatus();
       continue;
     }

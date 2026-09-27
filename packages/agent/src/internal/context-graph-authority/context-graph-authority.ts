@@ -30,6 +30,35 @@ export const CONTEXT_GRAPH_AGENT_GATE_UNAVAILABLE_REASONS = Object.freeze([
 export type ContextGraphAgentGateUnavailableReason =
   (typeof CONTEXT_GRAPH_AGENT_GATE_UNAVAILABLE_REASONS)[number];
 
+/**
+ * Whether an unavailable authority can heal on its own, so a caller may retry.
+ * The rest need a software or configuration change: an unsupported or invalid
+ * participant authority, or an access policy the chain reports as unknown.
+ * One classification for every caller, so promote retries and the Sender Key
+ * ACK (`agent-gate-pending` versus `agent-gate-unavailable`) cannot drift.
+ */
+const CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_RETRYABLE = Object.freeze({
+  'finalized-name-absence-unaccepted': true,
+  'chain-name-binding-unavailable': true,
+  // A cooldown ends on its own.
+  'authority-circuit-open': true,
+  'local-chain-binding-unavailable': true,
+  'local-existence-unavailable': true,
+  'chain-access-policy-unavailable': true,
+  'chain-access-policy-timeout': true,
+  'chain-access-policy-unknown': false,
+  'chain-participant-authority-unsupported': false,
+  'chain-participant-authority-unavailable': true,
+  'chain-participant-authority-invalid': false,
+  'rfc64-private-read-roster-unavailable': true,
+} as const satisfies Record<ContextGraphAgentGateUnavailableReason, boolean>);
+
+export function isRetryableContextGraphAuthorityUnavailableReason(
+  reason: ContextGraphAgentGateUnavailableReason,
+): boolean {
+  return CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_RETRYABLE[reason] === true;
+}
+
 export type ContextGraphAgentGateAuthority =
   | { kind: 'ungated' }
   | { kind: 'available'; agentAddresses: string[] }

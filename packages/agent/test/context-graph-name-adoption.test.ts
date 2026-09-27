@@ -313,6 +313,167 @@ describe('adopting a verified cleartext id', () => {
   });
 });
 
+/** The agent's own resolver, driven through its real dependencies. */
+describe('a declined adoption, through the agent resolver', () => {
+  const lifetimes: AbortController[] = [];
+  afterEach(() => {
+    for (const lifetime of lifetimes.splice(0)) lifetime.abort();
+  });
+
+  /** What `start()` does for the resolver, on the booted fixture's inert networking. */
+  function startNameResolver(internals: Record<string, any>): void {
+    const lifetime = new AbortController();
+    lifetimes.push(lifetime);
+    internals.router = { register: () => undefined };
+    internals.node.libp2p.peerId = { toString: () => internals.node.peerId };
+    internals.node.libp2p.addEventListener = () => undefined;
+    internals.startContextGraphNameResolution(lifetime.signal);
+  }
+
+  /** The graph's public definition in this node's own ontology graph: the local-store source. */
+  async function seedLocalDefinition(internals: Record<string, any>): Promise<void> {
+    await internals.store.insert([{
+      graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
+      subject: `did:dkg:context-graph:${CLEARTEXT}`,
+      predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+    }]);
+  }
+
+  it('records the two-slot binding conflict as declined and never retries it in the background', async () => {
+    const internals = await boot();
+    subscribeByNameHash(internals);
+    internals.setContextGraphSubscription(CLEARTEXT, { subscribed: false, synced: false, onChainId: '99' });
+    internals.setContextGraphSubscription(NAME_HASH, { ...internals.subscribedContextGraphs.get(NAME_HASH) });
+    // The placeholder still wants a cleartext id: it is a live target.
+    expect(internals.contextGraphNameResolutionTargets()).toEqual([{ nameHash: NAME_HASH, onChainId: ON_CHAIN_ID }]);
+    await seedLocalDefinition(internals);
+    const warn = vi.spyOn(internals.log, 'warn');
+    const conflictWarnings = () => warn.mock.calls.filter(([, message]) => (
+      String(message).includes(`Not adopting "${CLEARTEXT}"`)
+    ));
+    const adopt = vi.spyOn(internals, 'adoptVerifiedContextGraphCleartext');
+    const findLocal = vi.spyOn(internals, 'findLocalContextGraphNameCandidates');
+    const passes = vi.spyOn(internals, 'contextGraphNameResolutionTargets');
+    startNameResolver(internals);
+
+    await expect(internals.resolveContextGraphNameHashNow(NAME_HASH)).resolves.toBeNull();
+    const declined = {
+      state: 'declined',
+      nameHash: NAME_HASH,
+      onChainId: ON_CHAIN_ID,
+      contextGraphId: CLEARTEXT,
+      source: 'local-store',
+    };
+    expect(internals.getContextGraphNameResolutionStatus()).toEqual([
+      { ...declined, declinedAt: expect.any(Number), nextCheckAt: expect.any(Number) },
+    ]);
+    expect(adopt).toHaveBeenCalledTimes(1);
+    await expect(adopt.mock.results[0]!.value).resolves.toBe(false);
+    expect(conflictWarnings()).toHaveLength(1);
+    expect(internals.subscribedContextGraphs.get(NAME_HASH)).toMatchObject({ onChainId: ON_CHAIN_ID, subscribed: true });
+    expect(internals.subscribedContextGraphs.get(CLEARTEXT)).toMatchObject({ onChainId: '99' });
+    // The operator is told why it cannot sync, not to wait for a peer.
+    expect(internals.describeContextGraphIdentity(NAME_HASH)).toMatchObject({
+      state: 'name-hash-only',
+      bindingConflict: true,
+      message: expect.stringContaining('already bound to a different on-chain Context Graph'),
+    });
+
+    // A background pass over the still-subscribed row leaves it alone: no
+    // local-store scan, no adoption, no repeated warning.
+    const passesBefore = passes.mock.calls.length;
+    internals.requestContextGraphNameResolutionFor(NAME_HASH);
+    await waitFor(() => passes.mock.calls.length > passesBefore);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(findLocal).toHaveBeenCalledTimes(1);
+    expect(adopt).toHaveBeenCalledTimes(1);
+    expect(conflictWarnings()).toHaveLength(1);
+
+    // Subscribing again is an explicit request, which checks once more.
+    await expect(internals.resolveContextGraphNameHashNow(NAME_HASH)).resolves.toBeNull();
+    expect(adopt).toHaveBeenCalledTimes(2);
+    expect(internals.getContextGraphNameResolutionStatus()).toEqual([expect.objectContaining(declined)]);
+
+    // The conflicting row loses its binding (a binding refresh, say): the
+    // refusal no longer holds, the note stops reporting a conflict, and an
+    // ordinary background pass adopts.
+    internals.subscribedContextGraphs.set(CLEARTEXT, {
+      ...internals.subscribedContextGraphs.get(CLEARTEXT),
+      onChainId: undefined,
+    });
+    expect(internals.describeContextGraphIdentity(NAME_HASH)).not.toHaveProperty('bindingConflict');
+    internals.requestContextGraphNameResolutionFor(NAME_HASH);
+    await waitFor(() => internals.resolveContextGraphIdAlias(NAME_HASH) === CLEARTEXT);
+    expect(adopt).toHaveBeenCalledTimes(3);
+    expect(internals.getContextGraphNameResolutionStatus()).toEqual([
+      expect.objectContaining({ state: 'resolved', nameHash: NAME_HASH, contextGraphId: CLEARTEXT }),
+    ]);
+    expect(internals.subscribedContextGraphs.get(CLEARTEXT)).toMatchObject({ onChainId: ON_CHAIN_ID, onChainHash: NAME_HASH });
+  });
+
+  it('refuses adoption and reports the refusal as current by one rule, so the two cannot drift', async () => {
+    const internals = await boot();
+    subscribeByNameHash(internals);
+    internals.setContextGraphSubscription(CLEARTEXT, { subscribed: false, synced: false, onChainId: '99' });
+    internals.setContextGraphSubscription(NAME_HASH, { ...internals.subscribedContextGraphs.get(NAME_HASH) });
+    const target = { nameHash: NAME_HASH, onChainId: ON_CHAIN_ID };
+    const rule = vi.spyOn(internals, 'contextGraphNameAdoptionRefusal');
+
+    // The real rule: the cleartext row is bound elsewhere. Both agree.
+    expect(internals.contextGraphNameAdoptionRefusal(target, CLEARTEXT)).toBe('binding-conflict');
+    expect(internals.isContextGraphNameRefusalCurrent(target, CLEARTEXT)).toBe(true);
+    await expect(internals.adoptVerifiedContextGraphCleartext(target, CLEARTEXT, 'peer-protocol')).resolves.toBe(false);
+
+    // Any change to the rule reaches both: lifted, the re-check clears and
+    // adoption goes through.
+    rule.mockReturnValue(null);
+    expect(internals.isContextGraphNameRefusalCurrent(target, CLEARTEXT)).toBe(false);
+    await expect(internals.adoptVerifiedContextGraphCleartext(target, CLEARTEXT, 'peer-protocol')).resolves.toBe(true);
+    expect(internals.resolveContextGraphIdAlias(NAME_HASH)).toBe(CLEARTEXT);
+  });
+
+  it('refuses for every reason the rule gives, and the re-check agrees', async () => {
+    const internals = await boot();
+    subscribeByNameHash(internals);
+    const target = { nameHash: NAME_HASH, onChainId: ON_CHAIN_ID };
+    // No conflicting row at all, but a (future) refusal reason from the rule.
+    vi.spyOn(internals, 'contextGraphNameAdoptionRefusal').mockReturnValue('binding-conflict');
+    expect(internals.isContextGraphNameRefusalCurrent(target, CLEARTEXT)).toBe(true);
+    await expect(internals.adoptVerifiedContextGraphCleartext(target, CLEARTEXT, 'peer-protocol')).resolves.toBe(false);
+    expect(internals.contextGraphNamePlaceholder(NAME_HASH)).not.toBeNull();
+  });
+
+  it('records nothing for the old binding when the row is re-bound while the attempt runs', async () => {
+    const internals = await boot();
+    subscribeByNameHash(internals);
+    await seedLocalDefinition(internals);
+    const findLocal = internals.findLocalContextGraphNameCandidates.bind(internals);
+    vi.spyOn(internals, 'findLocalContextGraphNameCandidates').mockImplementation(async (...args: unknown[]) => {
+      const candidates = await findLocal(...args);
+      // The placeholder moves to another on-chain slot while its candidate is read.
+      internals.subscribedContextGraphs.set(NAME_HASH, {
+        ...internals.subscribedContextGraphs.get(NAME_HASH),
+        onChainId: '34',
+      });
+      return candidates;
+    });
+    const adopt = vi.spyOn(internals, 'adoptVerifiedContextGraphCleartext');
+    const warn = vi.spyOn(internals.log, 'warn');
+    startNameResolver(internals);
+
+    await expect(internals.resolveContextGraphNameHashNow(NAME_HASH)).resolves.toBeNull();
+    expect(adopt).toHaveBeenCalledTimes(1);
+    await expect(adopt.mock.results[0]!.value).resolves.toBe(false);
+    // Neither declined nor pending for on-chain 33: the next pass sees the
+    // row as it is now (bound to 34), and nothing retries the stale target.
+    const status = internals.getContextGraphNameResolutionStatus() as Array<{ state: string; onChainId: string }>;
+    expect(status.filter((entry) => entry.state === 'declined' || entry.onChainId === ON_CHAIN_ID)).toEqual([]);
+    expect(warn.mock.calls.filter(([, message]) => String(message).includes('Not adopting'))).toEqual([]);
+    expect(internals.subscribedContextGraphs.get(NAME_HASH)).toMatchObject({ onChainId: '34', subscribed: true });
+  });
+});
+
 describe('restart with a saved name-hash subscription', () => {
   const hashRow: ContextGraphSubscriptionRecord = {
     id: NAME_HASH,

@@ -31,10 +31,7 @@ import type {
 } from './chain-adapter.js';
 import { publisherPublishPlanByteSize } from './chain-adapter.js';
 import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
-import {
-  resolveQuotedPublisherCandidatePricing,
-  type PublisherConvictionPlanReader,
-} from './publisher-plan.js';
+import { resolveQuotedPublisherCandidatePricing } from './publisher-plan.js';
 import { errorMessage } from './evm-adapter-errors.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
@@ -110,14 +107,6 @@ export class PublishMethods extends EVMChainAdapterBase {
       'getStakeWeightedAverageAsk',
     );
     return (BigInt(ask) * publicByteSize * BigInt(epochs)) / 1024n;
-  }
-
-  /**
-   * Optional typed bridge supplied by the conviction mixin in the concrete
-   * adapter assembly. Publish planning owns the policy that consumes it.
-   */
-  protected publisherConvictionPlanReader(): PublisherConvictionPlanReader | undefined {
-    return undefined;
   }
 
   private async _publisherCandidatePlan(

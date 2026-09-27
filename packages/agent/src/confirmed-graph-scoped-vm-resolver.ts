@@ -48,6 +48,27 @@ export async function resolveConfirmedGraphScopedVm(
   store: TripleStore,
   input: ConfirmedGraphScopedVmResolutionInput,
 ): Promise<ConfirmedGraphScopedVmResolution> {
+  return resolveConfirmedGraphScopedVmAgainst(store, input, input.merkleRoot);
+}
+
+/**
+ * The same recognition without a chain read: the stored content must still
+ * verify against the root its own confirmed metadata recorded. The chain-driven
+ * sweep uses this to settle an ordinal whose VM copy is already confirmed
+ * locally, trusting the root that copy was confirmed at.
+ */
+export async function resolveLocallyConfirmedGraphScopedVm(
+  store: TripleStore,
+  input: Omit<ConfirmedGraphScopedVmResolutionInput, 'merkleRoot'>,
+): Promise<ConfirmedGraphScopedVmResolution> {
+  return resolveConfirmedGraphScopedVmAgainst(store, input, undefined);
+}
+
+async function resolveConfirmedGraphScopedVmAgainst(
+  store: TripleStore,
+  input: Omit<ConfirmedGraphScopedVmResolutionInput, 'merkleRoot'>,
+  chainMerkleRoot: Uint8Array | undefined,
+): Promise<ConfirmedGraphScopedVmResolution> {
   const stored = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, {
     contextGraphId: input.contextGraphId,
     ual: input.ual,
@@ -71,7 +92,7 @@ export async function resolveConfirmedGraphScopedVm(
     || envelope.batchId !== input.batchId
     || (input.assertionVersion !== undefined
       && BigInt(envelope.assertionVersion) !== input.assertionVersion)
-    || !equalBytes(envelope.merkleRoot, input.merkleRoot)
+    || (chainMerkleRoot !== undefined && !equalBytes(envelope.merkleRoot, chainMerkleRoot))
     || input.subGraphName !== envelope.subGraphName
   ) {
     return { status: 'invalid', reason: 'identity' };
@@ -83,7 +104,7 @@ export async function resolveConfirmedGraphScopedVm(
     ...(envelope.privateMerkleRoot
       ? { privateMerkleRoot: envelope.privateMerkleRoot }
       : {}),
-    expectedMerkleRoot: input.merkleRoot,
+    expectedMerkleRoot: chainMerkleRoot ?? envelope.merkleRoot,
     source: 'agent.finalization.resolveConfirmedGraphScopedVm',
   });
   if (content.status === 'count-mismatch') {

@@ -256,6 +256,12 @@ export interface DkgMetrics {
   finalizationRecoveryAdmissionTotal: Counter;
   /** durable finalization envelopes waiting for live-inbox capacity */
   finalizationRecoveryDeferredEntries: Gauge;
+  /** sampled StorageACK copies registered on chain but not in this core's VM past the stall threshold (last audit) */
+  vmPromotionStalledAcks: Gauge;
+  /** context graphs the ACK promotion audit recorded as core-hosted (backfill) */
+  vmPromotionBackfillRecordedTotal: Counter;
+  /** VM reconcile passes the ACK promotion watchdog re-triggered for stalled graphs */
+  vmPromotionRetriesTotal: Counter;
   /** process-local sync inflight sample */
   syncGlobalInflight: Histogram;
   /** ms; lane and priority_class are bounded sync scheduler enums */
@@ -345,6 +351,11 @@ export interface DkgMetrics {
   contextGraphCatchupJobsTotal: Counter;
   /** I9 — ms; walk jobs only, monotonic clock. admission={walk}. */
   contextGraphCatchupJobDurationMs: Histogram;
+  /** On-demand `agents` phonebook fetches. trigger={subscribe|vm-reconcile},
+   *  outcome={complete|partial|empty|failed|no-peers}, curator_resolved={true|false}. */
+  agentsPhonebookFetchTotal: Counter;
+  /** ms; on-demand `agents` phonebook fetches that reached a peer. trigger, outcome. */
+  agentsPhonebookFetchDurationMs: Histogram;
 }
 
 function buildMetrics(): DkgMetrics {
@@ -494,6 +505,18 @@ function buildMetrics(): DkgMetrics {
       'dkg.finalization_recovery.deferred_entries',
       { description: 'Durable finalization envelopes waiting for live-inbox capacity' },
     ),
+    vmPromotionStalledAcks: meter.createGauge(
+      'dkg.vm_promotion.stalled_acks',
+      { description: 'Sampled StorageACK copies registered on chain but not in VM past the stall threshold' },
+    ),
+    vmPromotionBackfillRecordedTotal: meter.createCounter(
+      'dkg.vm_promotion.backfill_recorded_total',
+      { description: 'Context graphs the ACK promotion audit recorded as core-hosted' },
+    ),
+    vmPromotionRetriesTotal: meter.createCounter(
+      'dkg.vm_promotion.retries_total',
+      { description: 'VM reconcile passes re-triggered for graphs with stalled StorageACK copies' },
+    ),
     syncGlobalInflight: meter.createHistogram('dkg.sync.global_inflight', {
       description: 'Sampled process-local sync inflight count',
     }),
@@ -590,6 +613,16 @@ function buildMetrics(): DkgMetrics {
       unit: 'ms',
       description: 'Walk catch-up job wall-time, monotonic clock',
       advice: { explicitBucketBoundaries: CATCHUP_DURATION_BUCKETS },
+    }),
+    agentsPhonebookFetchTotal: meter.createCounter('dkg.sync.agents_phonebook.fetch_total', {
+      description: 'On-demand agents phonebook fetches by trigger, outcome and whether a wanted curator resolved',
+    }),
+    agentsPhonebookFetchDurationMs: meter.createHistogram('dkg.sync.agents_phonebook.fetch_duration_ms', {
+      unit: 'ms',
+      description: 'Wall time of on-demand agents phonebook fetches that reached a peer',
+      // Full fetches take tens of seconds, and one that runs into its 120 s
+      // budget ends a little after it: the 300 s bound keeps both finite.
+      advice: { explicitBucketBoundaries: SYNC_OPERATION_DURATION_BUCKETS },
     }),
   };
 }

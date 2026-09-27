@@ -20,6 +20,7 @@ export {
   SqliteContextGraphAuthorityIndexStore,
   SqliteContextGraphAuthorityHistoryStore,
   SqliteContextGraphRegistryScanCursorStore,
+  SqliteContextGraphStorageDiscoveryStore,
 } from './chain-cursor-stores.js';
 /** Durable side of the node's ONE chain log. Opaque: it interprets no topic. */
 export { SqliteChainEventLogStore } from './chain-event-log-store.js';

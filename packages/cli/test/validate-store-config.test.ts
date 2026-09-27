@@ -14,8 +14,20 @@
  * Plan: `.cursor/plans/blazegraph_v10_support_178da670.plan.md` §PR 1 item 6.
  */
 import { describe, it, expect } from 'vitest';
+import type { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { validateStoreConfig, type DkgConfig } from '../src/config.js';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
+
+// The command a launch strategy spawns, through a spawn that starts nothing.
+function launchedCommand(strategy: ReturnType<typeof createOxigraphLaunchStrategy>): string {
+  let launched = '';
+  strategy.launch(((command: string) => {
+    launched = command;
+    return Object.assign(new EventEmitter(), { pid: 4242, exitCode: null, signalCode: null });
+  }) as unknown as typeof spawn, '/opt/oxigraph', ['serve'], 'ignore');
+  return launched;
+}
 
 function mk(overrides: Partial<DkgConfig> = {}): DkgConfig {
   return {
@@ -32,13 +44,15 @@ describe('validateStoreConfig', () => {
     const launch = () => createOxigraphLaunchStrategy({ memoryLimits: { maxMiB: 1024 }, platform, parentPid: 42, uid: 1000 });
     if (platform === 'linux') {
       expect(diagnostics).toEqual([]);
-      expect(launch().mode).toBe('systemd-scope');
+      expect(launchedCommand(launch())).toBe('systemd-run');
     } else {
       expect(diagnostics).toHaveLength(1);
       expect(launch).toThrow(diagnostics[0].message);
     }
     expect(validateStoreConfig({ store: { backend: 'oxigraph-server' } }, platform)).toEqual([]);
-    expect(createOxigraphLaunchStrategy({ platform, parentPid: 42, uid: 1000 }).mode).toBe('direct');
+    // Without limits: the binary itself on Windows, the parent watchdog elsewhere.
+    expect(launchedCommand(createOxigraphLaunchStrategy({ platform, parentPid: 42, uid: 1000 })))
+      .toBe(platform === 'win32' ? '/opt/oxigraph' : process.execPath);
   });
   it('validates raw operator JSON without assuming a complete typed config', () => {
     const raw: Record<string, unknown> = {

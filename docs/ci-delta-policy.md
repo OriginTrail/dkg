@@ -108,6 +108,18 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   git fetch origin testnet-canary
   git merge-base --is-ancestor <controller-sha> origin/testnet-canary
   ```
+
+  PR CI now checks this as well. The build job's
+  `fetch-trusted-controller.mjs` step fetches `testnet-canary` and `main`
+  from `origin` back to a day before the pin's commit date, and a failed
+  fetch fails the step. A test in `ci-controller.test.mjs` then fails unless
+  the pinned SHA is an ancestor of one of those branches, and logs which
+  one, so a rotation to a commit that only a pull request branch contains
+  fails that PR's CI. The check runs under the controller it checks, which
+  decides whether the build job runs and whether a failure fails the gate:
+  it catches a mistaken rotation, but not a malicious pin or a PR that edits
+  the check. Review of rotations still matters, and the scheduled report
+  below remains the independent provenance check.
 - `CONTROLLER_POLICY_FILES` in `scripts/ci/trusted-controller-pins.mjs` is the
   single manifest for the narrow controller boundary. The semantic workflow
   validator parses every trusted checkout and rejects missing, extra, or
@@ -228,6 +240,8 @@ and test variance still affect elapsed time.
 ## Local verification
 
 ```sh
+# The pin provenance test reads both protected branches.
+git fetch origin testnet-canary main
 node --test scripts/lib/__tests__/ci-delta.test.mjs scripts/lib/__tests__/ci-delta-routing.test.mjs \
   scripts/lib/__tests__/ci-controller.test.mjs scripts/lib/__tests__/ci-results.test.mjs
 actionlint .github/workflows/ci.yml .github/workflows/evm-integration.yml

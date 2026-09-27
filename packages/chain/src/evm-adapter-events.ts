@@ -13,6 +13,9 @@ import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { ethers } from 'ethers';
 import type { EventFilter, ChainEvent } from './chain-adapter.js';
 import type { ChainEventLogFamily } from './chain-index/index.js';
+import { readAdaptiveEvmLogRange } from './evm-log-range.js';
+import { resolveCapMs } from './rpc-failover-client.js';
+import { withRpcRequestTimeout } from './rpc-request-transport.js';
 
 /** One stored row, presented to the SAME parse the live branch uses. */
 type ParsedLogLike = { topics: readonly string[]; data: string; blockNumber: number; transactionHash: string };
@@ -79,10 +82,17 @@ export class EventsMethods extends EVMChainAdapterBase {
   // =====================================================================
 
   /**
-   * A WIDE `eth_getLogs` scan with read-failover, baking in the `wideLogScan`
-   * policy so the wide-log multi-RPC timeout (`RPC_LOG_SCAN_TIMEOUT_MS`, vs the 4s
-   * point-read cap; single-RPC stays uncapped, #894) is owned HERE once, not by
-   * per-call-site discipline. Used by every `listenForEvents` branch below.
+   * A WIDE `eth_getLogs` scan with read-failover. Used by every
+   * `listenForEvents` branch below.
+   *
+   * Each provider attempt reads the range through `readAdaptiveEvmLogRange`,
+   * which fits it to that provider's eth_getLogs span cap (a 9,000-block lane
+   * page is five requests on a 2,000-block cap) and refuses history/plan
+   * limits without splitting, so the loop fails over instead. Because one
+   * attempt can now be several physical requests, the `wideLogScan` deadline
+   * (`RPC_LOG_SCAN_TIMEOUT_MS` multi-RPC, uncapped single-RPC per #894) bounds
+   * each physical request rather than the whole attempt; the attempt itself
+   * runs under `durablePagedLogScan`, like the authority-index pages.
    *
    * TIP-SENSITIVE → `skipPreferred: true` (endpoint stickiness carve-out). The
    * event-lane cursor is advanced against a head read canonical-fresh via
@@ -101,11 +111,33 @@ export class EventsMethods extends EVMChainAdapterBase {
     fromBlock: ethers.BlockTag,
     toBlock?: ethers.BlockTag,
   ): Promise<(ethers.Log | ethers.EventLog)[]> {
+    const requestTimeoutMs = resolveCapMs('wideLogScan', this.providers.length);
     return this.readContractWith(
       contract,
       label,
-      (c) => c.queryFilter(eventFilter, fromBlock, toBlock),
-      { policy: 'wideLogScan', skipPreferred: true },
+      (c) => {
+        const query = (from: ethers.BlockTag, to?: ethers.BlockTag) => (
+          requestTimeoutMs === undefined
+            ? c.queryFilter(eventFilter, from, to)
+            : withRpcRequestTimeout(
+              requestTimeoutMs,
+              `${label} getLogs [${String(from)}, ${String(to ?? 'latest')}]`,
+              () => c.queryFilter(eventFilter, from, to),
+            )
+        );
+        // An open-ended range has no span to fit; only numeric bounds adapt.
+        if (typeof fromBlock !== 'number' || typeof toBlock !== 'number') {
+          return query(fromBlock, toBlock);
+        }
+        return readAdaptiveEvmLogRange({
+          // The provider this attempt rebound `c` to: its span cap's key.
+          provider: c.runner ?? c,
+          fromBlock,
+          toBlock,
+          read: query,
+        });
+      },
+      { policy: 'durablePagedLogScan', skipPreferred: true },
     );
   }
 

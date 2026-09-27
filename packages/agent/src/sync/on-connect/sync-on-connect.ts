@@ -1,4 +1,7 @@
-import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import { createOperationContext, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
+import type { PeerCapabilityRegistry } from '../../p2p/peer-capability.js';
+import { peerCapabilitySink, type SyncOnConnectInput } from './sync-on-connect-compat.js';
+export type { SyncOnConnectContext, LegacySyncOnConnectContext, SyncOnConnectInput } from './sync-on-connect-compat.js';
 import {
   classifyDurableProgress,
 } from '../durable-progress.js';
@@ -116,11 +119,9 @@ function admitPeerSyncContext(context: CompatiblePeerSyncContext): SessionPeerSy
   };
 }
 
-export interface SyncOnConnectContext extends CompatiblePeerSyncContext {
+export interface SyncOnConnectBaseContext extends CompatiblePeerSyncContext {
   remotePeer: string;
   getPeerProtocols: (peerId: string) => Promise<string[]>;
-  knownCorePeerIds: Set<string>;
-  knownCorePeerIdsV2?: Set<string>;
   getSyncContextGraphs: () => string[];
   /** Exact durable scope for this automatic run; explicit catch-up bypasses it. */
   getDurableSyncContextGraphs?: () => string[];
@@ -154,11 +155,18 @@ export interface SyncOnConnectContext extends CompatiblePeerSyncContext {
   onSyncAccounting?: (peerId: string, outcome: SyncOnConnectPeerOutcome) => void;
 }
 
+export type PeerCapabilitySink = Pick<PeerCapabilityRegistry, 'observe'>;
+
+/** The canonical workflow receives one registry-backed capability owner. */
+export interface RegistrySyncOnConnectContext extends SyncOnConnectBaseContext {
+  peerCapabilities: PeerCapabilitySink;
+}
+
 /** Every continuation inside an admitted session has an explicit lifetime and lease owner. */
-export type SessionSyncOnConnectContext = SyncOnConnectContext & SessionPeerSyncContext;
+export type SessionSyncOnConnectContext = RegistrySyncOnConnectContext & SessionPeerSyncContext;
 
 /**
- * Narrow RFC-64 retry boundary. Unlike {@link SyncOnConnectContext}, this
+ * Narrow RFC-64 retry boundary. Unlike {@link SyncOnConnectInput}, this
  * shape cannot express durable, discovery, or ordinary shared-memory work, so
  * a selected retry cannot fall through when the broad on-connect workflow is
  * changed later.
@@ -381,21 +389,27 @@ async function runSessionSelectedSharedMemoryRetry(
   }
 }
 
-export async function runSyncOnConnect(
-  context: SyncOnConnectContext,
+export async function runRegistrySyncOnConnect(
+  context: RegistrySyncOnConnectContext,
 ): Promise<SyncOnConnectOutcome> {
-  return runSessionSyncOnConnect(context, admitPeerSyncContext(context));
+  return runSessionSyncOnConnect(context, admitPeerSyncContext(context), context.peerCapabilities);
+}
+
+/** Public compatibility entry point; legacy capability translation is isolated. */
+export async function runSyncOnConnect(
+  context: SyncOnConnectInput,
+): Promise<SyncOnConnectOutcome> {
+  return runSessionSyncOnConnect(context, admitPeerSyncContext(context), peerCapabilitySink(context));
 }
 
 async function runSessionSyncOnConnect(
-  context: SyncOnConnectContext,
+  context: SyncOnConnectBaseContext,
   { signal, syncingPeers }: SessionPeerSyncContext,
+  peerCapabilities: PeerCapabilitySink,
 ): Promise<SyncOnConnectOutcome> {
   const {
     remotePeer,
     getPeerProtocols,
-    knownCorePeerIds,
-    knownCorePeerIdsV2 = new Set<string>(),
     getSyncContextGraphs,
     getDurableSyncContextGraphs,
     ordinarySharedMemoryLane,
@@ -505,21 +519,7 @@ async function runSessionSyncOnConnect(
     const protocols = await getPeerProtocols(remotePeer);
     signal.throwIfAborted();
 
-    if (protocols.includes(PROTOCOL_STORAGE_ACK)) {
-      knownCorePeerIds.add(remotePeer);
-    } else if (protocols.length > 0) {
-      // #1093: only de-classify on a POPULATED protocol list. An empty
-      // list means identify hasn't completed yet (the dominant race on
-      // inbound connections) — evicting a previously-confirmed core here
-      // would re-poison the ACK candidate pool that
-      // `DKGAgent.getACKCandidatePeers` builds for the publisher.
-      knownCorePeerIds.delete(remotePeer);
-    }
-    if (protocols.includes(PROTOCOL_STORAGE_ACK_V2)) {
-      knownCorePeerIdsV2.add(remotePeer);
-    } else if (protocols.length > 0) {
-      knownCorePeerIdsV2.delete(remotePeer);
-    }
+    peerCapabilities.observe(remotePeer, { source: 'identify-snapshot', protocols });
 
     const hasSync = protocols.includes(PROTOCOL_SYNC);
     if (!hasSync) {

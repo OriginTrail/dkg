@@ -34,6 +34,7 @@ import {
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
+import { isRfc64TransientAuthorityRefreshFailureV1 } from '../src/dkg-agent-rfc64-catalog.js';
 import {
   computeFlatKCRootV10,
   storeKnowledgeAssetOperationPublicQuads,
@@ -5322,6 +5323,102 @@ describe('RFC-64 rollout authority integration', () => {
       .find((entry) => entry.contextGraphId === contextGraphId);
     expect(status?.authorityState).toBe('resolving');
     expect(status?.authorityState).not.toBe('blocked');
+  });
+
+  it('classifies an unresolved private roster as transient, not as a denial', () => {
+    // This decision is what keeps the curator authoring: a denial parks the
+    // graph `blocked`, closing the only root-scope SWM lane a catalog-selected
+    // graph has.
+    expect(isRfc64TransientAuthorityRefreshFailureV1('registered-private-roster-unresolved')).toBe(true);
+    expect(isRfc64TransientAuthorityRefreshFailureV1('registered-authority-unfinalized')).toBe(true);
+    // Genuine denials must still fail closed.
+    for (const denial of [
+      'registered-authority-binding-mismatch',
+      'registered-authority-adapter-unsupported',
+      'unregistered-owner-unresolved',
+      'access-policy-unresolved',
+      'catalog-service-unavailable',
+      'authority-resolution-failed',
+    ]) {
+      expect(isRfc64TransientAuthorityRefreshFailureV1(denial)).toBe(false);
+    }
+  });
+
+  /**
+   * On a PRIVATE graph the refresh additionally requires a locally verified
+   * lifecycle roster. When that roster is not resolvable YET the refresh used
+   * to throw a bare `Error`, which is classified as a denial and parks the
+   * graph as `blocked`. That closes the curator's own authoring fence — and on
+   * a catalog-selected graph the catalog lane is the ONLY delivery path for
+   * root-scope SWM (legacy apply is deliberately closed), so the curator
+   * authored zero catalog rows and an RFC-64 matrix cell converged 0/50 SWM
+   * rather than slowly. `null` means "not resolvable yet"; a genuine
+   * revocation arrives as a resolved, smaller roster and still fails closed.
+   */
+  it('treats an unresolved private roster as retryable, keeping the author\'s catalog lane open', async () => {
+    const contextGraphId = `${AUTHOR}/private-roster-author`;
+    const expectedNameHash = ethers.keccak256(
+      ethers.toUtf8Bytes(contextGraphId),
+    ).toLowerCase();
+    // The helper defaults to a PRIVATE graph, which is what this needs.
+    const indexed = {
+      ...finalizedAuthoritySnapshot(contextGraphId, [], '0'),
+      nameHash: expectedNameHash,
+    };
+    const readSnapshots = vi.fn(async () => new Map([['9', indexed]]));
+    const chainAdapter = Object.assign(new NoChainAdapter(), {
+      contextGraphAuthorityIndexRevisionReader: {
+        resolveFinalizedContextGraphIdsByNameHashes: vi.fn(async () => new Map()),
+        readContextGraphAuthorityIndexSnapshots: readSnapshots,
+        readContextGraphAuthorityIndexRevisions: vi.fn(async () => new Map()),
+        whenIdle: vi.fn(async () => undefined),
+      },
+    });
+    const author = await startAgent({
+      name: 'private-roster-author',
+      config: { chainAdapter },
+    });
+    (author as any).localContextGraphProvenance.recordLocalCreate(contextGraphId);
+    author.recordDiscoveredContextGraph(contextGraphId, {
+      name: contextGraphId,
+      onChainId: '9',
+      onChainHash: expectedNameHash,
+    });
+    author.subscribeToContextGraph(contextGraphId);
+    await author.whenRfc64CatalogResponsibilitiesIdleV1();
+    const signal = new AbortController().signal;
+
+    // A resolvable authenticated roster is a precondition of acceptance on a
+    // private graph; this fixture has no durable member state of its own.
+    const roster = vi
+      .spyOn(author as any, 'resolveRfc64VerifiedPrivateRosterV1')
+      .mockResolvedValue([AUTHOR.toLowerCase()]);
+    await expect(author.reconcileRfc64CatalogAccessAuthorityV1(contextGraphId, signal))
+      .resolves.toMatchObject({ source: 'finalized-chain' });
+    const accepted = (author as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId);
+    expect(accepted).not.toBeNull();
+
+    // The authenticated roster stops resolving locally.
+    roster.mockResolvedValue(null);
+    const request = (await author.createRfc64CatalogAuthorityRefreshRequestsV1(
+      [contextGraphId],
+      signal,
+    )).get(contextGraphId);
+    await expect(author.reconcileRfc64CatalogAccessAuthorityV1(
+      contextGraphId,
+      signal,
+      request,
+    )).rejects.toMatchObject({ code: 'registered-private-roster-unresolved' });
+    expect(roster).toHaveBeenCalled();
+
+    // The accepted lineage survives the failed refresh rather than being
+    // cleared, which is what keeps the author's catalog lane usable. (This
+    // fixture does not select the graph, so the fence projection itself is
+    // asserted by the public sibling above; what is new here is the typed,
+    // retryable classification.)
+    expect((author as any).rfc64PublicCatalogServiceV1
+      .acceptedPolicySnapshot(NETWORK_ID, contextGraphId)).toEqual(accepted);
   });
 
   it('keeps a replica fail-closed but retryable through the same finality lag (no retained seed, not parked)', async () => {

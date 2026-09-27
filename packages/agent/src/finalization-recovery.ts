@@ -18,12 +18,13 @@ import {
   type VerifiedGraphScopedFinalizationEvidence,
   type VerifiedGraphScopedFinalizationEvidencePlacement,
 } from './finalization-graph-envelope.js';
-import type {
-  FinalizationRecoveryEntry,
-  FinalizationRecoveryHealth,
-  FinalizationRecoveryFailureCode,
-  FinalizationRecoverySettledPublisherUpgradeResult,
-  FinalizationRecoveryStore,
+import {
+  FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD,
+  type FinalizationRecoveryEntry,
+  type FinalizationRecoveryHealth,
+  type FinalizationRecoveryFailureCode,
+  type FinalizationRecoverySettledPublisherUpgradeResult,
+  type FinalizationRecoveryStore,
 } from './finalization-recovery-store.js';
 import {
   FinalizationPublisherAuthorityObserver,
@@ -228,7 +229,7 @@ const SETTLED_NOT_FOUND_RETRY_LIMIT = 5;
 const DEFERRED_RETRY_BASE_MS = 1_000;
 const DEFERRED_RETRY_MAX_MS = 60_000;
 const FAILED_PUBLISHER_AUTHORITY_PROBE_MAX_ENTRIES = 4_096;
-export const FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD = 3;
+export { FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD };
 export const FINALIZATION_RECOVERY_STABLE_FAILURE_RETRY_MS = 6 * 60 * 60 * 1_000;
 /**
  * At the maximum retry delay this is approximately seven days of autonomous
@@ -1511,6 +1512,30 @@ export class FinalizationRecovery<
       'UNSUPPORTED',
       'chain adapter lacks canonical finalization receipt capability',
     );
+  }
+
+  /**
+   * Whether {@link replayMatching} could have any entry to replay for this KA,
+   * answered without its chain reads. `true` whenever the inbox cannot be read,
+   * so a caller skipping chain work on `false` never hides a replayable entry.
+   */
+  async mayReplayForKnowledgeAsset(
+    input: Omit<FinalizationRecoveryReplayInput, 'merkleRoot' | 'onChainCgId'>,
+  ): Promise<boolean> {
+    const store = this.getStore();
+    // The same gate as `matchingEntries`: without these reads no entry replays.
+    if (
+      !store
+      || !this.chain
+      || !this.chain.getLatestMerkleRoot
+      || !this.chain.getMerkleRootCount
+      || !this.chain.getKAContextGraphId
+    ) return false;
+    try {
+      return (await store.listForKnowledgeAsset(input)).length > 0;
+    } catch {
+      return true;
+    }
   }
 
   async matchingEntries(input: FinalizationRecoveryReplayInput): Promise<FinalizationRecoveryEntry[]> {

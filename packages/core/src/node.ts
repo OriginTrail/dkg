@@ -52,12 +52,9 @@ import { RelayMetricsAdapter, RELAY_V2_STOP_CODEC } from './libp2p-metrics-adapt
 import { readRelayReservations, readConnectionStreams } from './relay-internal-shapes.js';
 import { RelayFlapGuard, buildRelayFlapConnectionGater } from './relay-flap-guard.js';
 import { buildActiveRelayNetworkPolicy } from './relay-network-policy.js';
-import {
-  NetworkPeerDialPolicy,
-  peerIdFromRelayAddress,
-  type NetworkPeerConnectionGater,
-} from './network-peer-dial-policy.js';
-import { parseCircuitRelayPeerIds, type RelayedConnectionGater } from './relay-path.js';
+import { NetworkPeerDialPolicy, peerIdFromRelayAddress } from './network-peer-dial-policy.js';
+import { combineConnectionGaters, type SyncConnectionGater } from './connection-gater-combiner.js';
+import { parseCircuitRelayPeerIds } from './relay-path.js';
 import { isPublicLikeAddress } from './network/address-policy.js';
 import type { ConfiguredRelayTarget } from './network/relay-target.js';
 
@@ -420,7 +417,8 @@ export class DKGNode {
   /**
    * Transport-level network isolation for the running libp2p instance
    * (other-network relays + identity-rejected peers). Null when the node has
-   * no `networkIdentity` or is not started.
+   * no `networkIdentity`, runs with `networkPeerIsolation: false`, or is not
+   * started.
    */
   private networkPeerDialPolicy: NetworkPeerDialPolicy | null = null;
   /**
@@ -763,7 +761,9 @@ export class DKGNode {
     // (other bundled networks' relays, peers that failed the identity proof)
     // and keeps their addresses out of the peer store, so kad-dht, circuit
     // relay discovery and the reconnect queue cannot keep re-dialing them.
-    const networkPeerDialPolicy = activeNetworkRelayPeerIds
+    // `networkPeerIsolation: false` is the operator kill switch: the node then
+    // keeps exactly the pre-existing gater.
+    const networkPeerDialPolicy = activeNetworkRelayPeerIds && this.config.networkPeerIsolation !== false
       ? new NetworkPeerDialPolicy({
           selfPeerId: selfPeerIdEarly.toString(),
           configuredRelayPeerIds: activeNetworkRelayPeerIds,
@@ -771,6 +771,7 @@ export class DKGNode {
             .map((address) => peerIdFromRelayAddress(address))
             .filter((peerId): peerId is string => peerId !== undefined),
           log: (message) => console.log(`[${new Date().toISOString()}] ${message}`),
+          warn: (message) => console.warn(`[${new Date().toISOString()}] ${message}`),
         })
       : null;
 
@@ -1015,7 +1016,7 @@ export class DKGNode {
       streamMuxers: [yamux()],
       peerDiscovery,
       services,
-      connectionGater: this.createRelayConnectionGater(
+      connectionGater: this.createConnectionGater(
         activeRelayNetworkPolicy?.connectionGater,
         networkPeerDialPolicy?.connectionGater,
       ),
@@ -1483,9 +1484,9 @@ export class DKGNode {
     }
   }
 
-  private createRelayConnectionGater(
-    activeRelayGater?: RelayedConnectionGater,
-    networkPeerGater?: NetworkPeerConnectionGater,
+  private createConnectionGater(
+    activeRelayGater?: SyncConnectionGater,
+    networkPeerGater?: SyncConnectionGater,
   ): ConnectionGater {
     const ts = () => new Date().toISOString();
     // The gater hooks live in a pure builder (relay-flap-guard.ts) so the wiring
@@ -1495,26 +1496,11 @@ export class DKGNode {
       this.relayFlapGuard,
       (message) => console.warn(`[${ts()}] ${message}`),
     );
-    return {
-      denyInboundRelayedConnection: (relay, remotePeer) =>
-        activeRelayGater?.denyInboundRelayedConnection(relay, remotePeer) ||
-        flapGater.denyInboundRelayedConnection(relay, remotePeer),
-      denyDialMultiaddr: (multiaddr) =>
-        activeRelayGater?.denyDialMultiaddr(multiaddr) ||
-        networkPeerGater?.denyDialMultiaddr(multiaddr) ||
-        flapGater.denyDialMultiaddr(multiaddr),
-      // Only installed with a network identity, so a node without one keeps
-      // exactly the pre-existing gater (and libp2p's allow-all address filter).
-      ...(networkPeerGater
-        ? {
-            denyDialPeer: networkPeerGater.denyDialPeer,
-            denyInboundEncryptedConnection: networkPeerGater.denyInboundEncryptedConnection,
-            denyOutboundEncryptedConnection: networkPeerGater.denyOutboundEncryptedConnection,
-            // libp2p passes this to the peer store as a bare function reference.
-            filterMultiaddrForPeer: networkPeerGater.filterMultiaddrForPeer,
-          }
-        : {}),
-    } as ConnectionGater;
+    // Consulted in this order; the first denial wins. The network policies are
+    // absent without a network identity (or with the peer-isolation kill
+    // switch off), so such a node keeps exactly the flap guard's hooks and
+    // libp2p's defaults for the rest, including its store-every-address filter.
+    return combineConnectionGaters([activeRelayGater, networkPeerGater, flapGater]);
   }
 
   /**
@@ -1712,16 +1698,17 @@ export class DKGNode {
   }
 
   /**
-   * Refuse outbound connections to a peer that failed the network-identity
-   * proof, and stop storing its addresses, for a bounded TTL; refuse its inbound
-   * connections for the admission quarantine. Call this BEFORE closing the
-   * peer's connections: libp2p's reconnect queue reacts to the disconnect by
-   * redialing keep-alive-tagged peers. Returns false when transport isolation
-   * is inactive (not started, no `networkIdentity`) or the peer is exempt (this
-   * node or a configured relay).
+   * Refuse connections with a peer that failed the network-identity proof, in
+   * both directions, and stop storing its addresses, for `durationMs`: pass the
+   * admission quarantine just applied so the two windows cannot drift (default
+   * 5 min). Call this BEFORE closing the peer's connections: libp2p's reconnect
+   * queue reacts to the disconnect by redialing keep-alive-tagged peers.
+   * Returns false when transport isolation is inactive (not started, no
+   * `networkIdentity`, or `networkPeerIsolation: false`) or the id is this
+   * node's own or unparseable.
    */
-  denyPeerAfterNetworkMismatch(peerId: string): boolean {
-    return this.networkPeerDialPolicy?.denyAfterNetworkMismatch(peerId) ?? false;
+  denyPeerAfterNetworkMismatch(peerId: string, durationMs?: number): boolean {
+    return this.networkPeerDialPolicy?.denyAfterNetworkMismatch(peerId, durationMs) ?? false;
   }
 
   /** Lift a mismatch dial denial once the peer proved it belongs to this network. */

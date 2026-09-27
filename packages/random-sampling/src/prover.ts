@@ -354,7 +354,13 @@ export class RandomSamplingProver {
     periodStartBlock: bigint;
   }): Promise<RandomSamplingRepairMaterial> {
     const extractLocal = async (): Promise<RandomSamplingRepairMaterial> => {
-      const extracted = await extractV10KCFromStore(this.store, input.cgId, input.kaId);
+      const extracted = await extractV10KCFromStore(
+        this.store,
+        input.cgId,
+        input.kaId,
+        undefined,
+        () => this.chain.getContextGraphNameHash?.(input.cgId) ?? Promise.resolve(null),
+      );
       return {
         contents: extracted.triples.map((triple) => tripleContentV10(
           triple.subject,

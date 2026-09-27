@@ -1,9 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import { peerIdFromString } from '@libp2p/peer-id';
-import {
-  NETWORK_MISMATCH_DIAL_DENY_TTL_MS,
-  NETWORK_MISMATCH_INBOUND_REFUSAL_MS,
-} from '@origintrail-official/dkg-core';
 import { NetworkAdmissionService } from '../src/p2p/network-admission.js';
 
 const SELF_PEER_ID = '12D3KooWDCuLesNUYHGEUY5ksEsfJGbShbZ9ep2Pu7uqCNGvgwnb';
@@ -85,19 +81,27 @@ describe('NetworkAdmissionService', () => {
     expect(admission.isRejectedPeer(VERIFIED_PEER_ID)).toBe(false);
   });
 
-  it('keeps the default quarantine aligned with the transport refusal windows', () => {
-    // The node refuses a rejected peer's inbound connections exactly while this
-    // quarantine lasts (admission cannot re-verify it then), and its outbound
-    // ones for at least as long. Drift here would reopen the redial loop.
+  it('returns the cooldown it applied, for the transport refusal to mirror', () => {
+    // The node refuses a rejected peer for exactly the window returned here
+    // (the coordinator hands it over), so the two cannot drift apart.
     let now = 1_000;
-    const admission = new NetworkAdmissionService({ networkId: 'network-a', now: () => now });
+    const defaults = new NetworkAdmissionService({ networkId: 'network-a', now: () => now });
+    const configured = new NetworkAdmissionService({
+      networkId: 'network-a',
+      now: () => now,
+      quarantineCooldownMs: 90_000,
+    });
 
-    admission.quarantinePeerForCooldown(VERIFIED_PEER_ID);
-    now += NETWORK_MISMATCH_INBOUND_REFUSAL_MS - 1;
-    expect(admission.isRejectedPeer(VERIFIED_PEER_ID)).toBe(true);
+    expect(defaults.quarantinePeerForCooldown(VERIFIED_PEER_ID)).toBe(5 * 60_000);
+    expect(configured.quarantinePeerForCooldown(VERIFIED_PEER_ID)).toBe(90_000);
+    now += 90_000 - 1;
+    expect(configured.isRejectedPeer(VERIFIED_PEER_ID)).toBe(true);
     now += 1;
-    expect(admission.isRejectedPeer(VERIFIED_PEER_ID)).toBe(false);
-    expect(NETWORK_MISMATCH_DIAL_DENY_TTL_MS).toBeGreaterThanOrEqual(NETWORK_MISMATCH_INBOUND_REFUSAL_MS);
+    expect(configured.isRejectedPeer(VERIFIED_PEER_ID)).toBe(false);
+    now += 5 * 60_000 - 90_000 - 1;
+    expect(defaults.isRejectedPeer(VERIFIED_PEER_ID)).toBe(true);
+    now += 1;
+    expect(defaults.isRejectedPeer(VERIFIED_PEER_ID)).toBe(false);
   });
 
   it('enforces a real active-entry cap with deterministic oldest eviction', () => {

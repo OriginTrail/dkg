@@ -1,6 +1,6 @@
 import React, { useId, useMemo, useState, useCallback } from 'react';
 import type { ReactNode } from 'react';
-import { listAssertions, promoteAssertion, describePromoteError, publishAssertionsToVm, partialPublishWarning, type ConvictionCostCovered } from '../../../api.js';
+import { listAssertions, promoteAssertion, describePromoteError, publishAssertionsToVm, partialPublishWarning, outcomeUnknownPublishNote, type ConvictionCostCovered } from '../../../api.js';
 import type { MemoryEntity } from '../../../hooks/useMemoryEntities.js';
 import { useProjectProfileContext } from '../../../hooks/useProjectProfile.js';
 import { LAYER_CONFIG, entityMeta, layerNoun } from '../helpers.js';
@@ -272,15 +272,18 @@ export function PublishVmWidget({ count, contextGraphId, onComplete, onResult }:
         const assertions = await listAssertions(contextGraphId, 'swm');
         // Shared batch loop (api.ts publishAssertionsToVm) — uniform partial/error accounting.
         const r = await publishAssertionsToVm(contextGraphId, assertions);
+        const unknownNote = outcomeUnknownPublishNote(r);
+        const unknownTail = unknownNote ? ` — ⚠ ${unknownNote}` : '';
         if (r.published > 0) {
           const tail = r.failures.length ? ` (${r.failures.length} assertion${r.failures.length === 1 ? '' : 's'} could not be published)` : '';
           const partialTail = r.partial > 0 ? ` — ⚠ ${r.partial}: ${partialPublishWarning(r.partialError)}` : '';
           // B8 (#1365 r3) — the CONFIRMED discount aggregated across the BATCH. Absent → hidden.
           setCostCovered(r.convictionCostCovered ?? null);
-          return `Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}`;
+          return `Published ${r.published} knowledge asset${r.published !== 1 ? 's' : ''} to Verifiable Memory${tail}${partialTail}${unknownTail}`;
         }
         if (assertions.length === 0) return 'Nothing to publish — promote assertions to Shared Memory first.';
-        throw new Error(r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed');
+        if (unknownNote && r.failures.length === 0) return `⚠ ${unknownNote}`;
+        throw new Error(`${r.failures[0] ? `${r.failures[0].name}: ${r.failures[0].error}` : 'Publish failed'}${unknownTail}`);
       },
       // Publish-appropriate: the raw message (matches the old catch, which fell through
       // describePromoteError → null for publish errors). Never says "an assertion".

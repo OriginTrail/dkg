@@ -27,8 +27,10 @@ import {
   isProtocolUnsupportedError,
 } from '@origintrail-official/dkg-core';
 
+import { rememberBounded } from './bounded-map.js';
 import { runBoundedOperation } from './bounded-operation.js';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
+import { isUnrecordedNameHashRow } from './context-graph-claim-proof.js';
 import {
   CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
   CONTEXT_GRAPH_SUBJECT_PREFIX,
@@ -47,7 +49,6 @@ import {
 } from './context-graph-name-protocol.js';
 import {
   ContextGraphNameResolver,
-  rememberBounded,
   type ContextGraphNamePolicy,
   type ContextGraphNameResolutionEntry,
   type ContextGraphNameSource,
@@ -87,6 +88,8 @@ export interface ContextGraphIdentityNote {
   readonly onChainId?: string;
   /** The verified cleartext id, once resolved. */
   readonly contextGraphId?: string;
+  /** Hash-only because its cleartext id is bound to another on-chain graph here. */
+  readonly bindingConflict?: true;
   readonly message: string;
 }
 
@@ -104,6 +107,20 @@ function contextGraphNameHashOnlyPrivateMessage(nameHash: string): string {
   return `Context Graph ${shortHash(nameHash)} is private (curated) and known only by its on-chain name hash; `
     + 'peers never reveal a private graph\'s cleartext id. Ask its curator for the id and an invitation, '
     + 'then subscribe with the cleartext id.';
+}
+
+function contextGraphNameDeclinedMessage(nameHash: string): string {
+  return `Context Graph ${shortHash(nameHash)}'s verified cleartext id is already bound to a different on-chain `
+    + 'Context Graph on this node, so the two are not merged and this subscription cannot sync until that binding '
+    + 'changes (see the node log). It is retried when it does; subscribing again checks at once.';
+}
+
+/** The adopter's two-slot rule: a cleartext row bound to another on-chain id is never merged. */
+function isBoundElsewhere(
+  row: ContextGraphSub | undefined,
+  onChainId: string,
+): row is ContextGraphSub & { onChainId: string } {
+  return row?.onChainId !== undefined && row.onChainId !== onChainId;
 }
 
 function contextGraphNameResolvedMessage(nameHash: string, contextGraphId: string): string {
@@ -204,9 +221,11 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
       adopt: (target, contextGraphId, source) => (
         this.adoptVerifiedContextGraphCleartext(target, contextGraphId, source)
       ),
+      isRefusalCurrent: (target, contextGraphId) => this.isContextGraphNameRefusalCurrent(target, contextGraphId),
       log: {
         info: (message) => this.log.info(ctx, message),
         debug: (message) => this.log.debug(ctx, message),
+        warn: (message) => this.log.warn(ctx, message),
       },
     });
     state.resolver = resolver;
@@ -271,6 +290,30 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
 
   isContextGraphNameTargetCurrent(this: DKGAgent, target: ContextGraphNameTarget): boolean {
     return this.contextGraphNamePlaceholder(target.nameHash)?.subscription.onChainId === target.onChainId;
+  }
+
+  /**
+   * Why adoption refuses this verified id for a row that still wants it, or
+   * null. The one statement of the rule: the adopter enforces exactly this,
+   * and the resolver re-checks exactly this before re-attempting a decline,
+   * so the two cannot drift apart.
+   */
+  contextGraphNameAdoptionRefusal(
+    this: DKGAgent,
+    target: ContextGraphNameTarget,
+    contextGraphId: string,
+  ): 'binding-conflict' | null {
+    // Two different on-chain slots share this name commitment. Merging them
+    // would splice two graphs together.
+    return isBoundElsewhere(this.subscribedContextGraphs.get(contextGraphId), target.onChainId)
+      ? 'binding-conflict'
+      : null;
+  }
+
+  /** Would adoption still refuse this id for this row (same placeholder, same refusal)? */
+  isContextGraphNameRefusalCurrent(this: DKGAgent, target: ContextGraphNameTarget, contextGraphId: string): boolean {
+    return this.isContextGraphNameTargetCurrent(target)
+      && this.contextGraphNameAdoptionRefusal(target, contextGraphId) !== null;
   }
 
   /**
@@ -341,15 +384,108 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     this: DKGAgent,
     nameHash: string,
   ): { contextGraphId: string; subscription: ContextGraphSub } | null {
+    const row = this.nameHashIndexedContextGraphRow(nameHash);
+    return row !== null
+      && row.contextGraphId !== nameHash
+      && verifyContextGraphNameCandidate(row.contextGraphId, nameHash) === row.contextGraphId
+      ? row
+      : null;
+  }
+
+  /**
+   * The row the reverse index holds for a name hash, when that row records
+   * the same hash as its `onChainHash`: the slot's placeholder keyed by the
+   * hash, or a cleartext row bound to it. Callers add their own conditions.
+   */
+  nameHashIndexedContextGraphRow(
+    this: DKGAgent,
+    nameHash: string,
+  ): { contextGraphId: string; subscription: ContextGraphSub } | null {
     const mapped = this.wireIdToLocalCgId.get(nameHash);
-    if (mapped === undefined || mapped === nameHash) return null;
+    if (mapped === undefined) return null;
     const subscription = this.subscribedContextGraphs.get(mapped);
     if (
       subscription?.onChainHash === undefined
       || this.contextGraphWireId(subscription.onChainHash) !== nameHash
-      || verifyContextGraphNameCandidate(mapped, nameHash) !== mapped
     ) return null;
     return { contextGraphId: mapped, subscription };
+  }
+
+  /**
+   * Repair a subscription keyed by a slot's committed name hash that was
+   * minted without recording that hash. Before this fix `dkg subscribe <hash>`
+   * did that whenever the hash resolved to nothing (a claim had bound the
+   * cleartext row without its hash, or no chain lane had reached the slot
+   * yet). The row's identity was then keccak256 of the hash string: it never
+   * synced, RFC-64 rejected its evidence as an invalid identity, and it
+   * survives restarts as a durable row.
+   *
+   * The chain now proves what the row is: it is bound to this slot, and the
+   * slot commits exactly the row's id. It becomes the slot's name-hash
+   * placeholder, and a cleartext row this node holds for the hash adopts it
+   * with its subscription, exactly as a resolved name would. With no
+   * cleartext known, the name resolver takes it from there. A row not bound
+   * to this slot, possibly a hash-shaped cleartext id, is never touched, and
+   * a cleartext row bound to another slot is never merged. Returns whether it
+   * repaired a row.
+   */
+  repairContextGraphNameHashSubscription(this: DKGAgent, onChainId: string, nameHash: string): boolean {
+    const hash = normalizeContextGraphNameHash(nameHash);
+    if (hash === null) return false;
+    const row = this.subscribedContextGraphs.get(hash);
+    if (row === undefined || !isUnrecordedNameHashRow(hash, row, onChainId, hash)) return false;
+    const indexed = this.wireIdToLocalCgId.get(hash);
+    const cleartext = indexed !== undefined && indexed !== hash
+      && verifyContextGraphNameCandidate(indexed, hash) === indexed
+      ? indexed
+      : null;
+    const cleartextOnChainId = cleartext === null ? undefined : this.subscribedContextGraphs.get(cleartext)?.onChainId;
+    if (cleartextOnChainId !== undefined && cleartextOnChainId !== onChainId) return false;
+
+    this.setContextGraphSubscription(hash, { ...row, onChainHash: hash });
+    this.log.info(
+      createOperationContext('system'),
+      `Context Graph subscription ${hash.slice(0, 18)}… is on-chain ${onChainId}'s name hash; `
+      + `recorded it${cleartext === null ? '' : ` and adopting "${cleartext}"`}`,
+    );
+    if (cleartext === null) {
+      this.requestContextGraphNameResolutionFor(hash);
+    } else {
+      void this.adoptVerifiedContextGraphCleartext({ nameHash: hash, onChainId }, cleartext, 'local-store')
+        .catch(() => false);
+    }
+    return true;
+  }
+
+  /**
+   * Adopt a cleartext id learned from the local store (a synced ontology
+   * definition) for the name-hash row it verifies, when the node wants that
+   * row (subscribed or hosted) and holds no row under the cleartext id yet.
+   * Adoption moves the member intent to the cleartext id and restarts sync
+   * there. Returns whether it adopted. Never throws.
+   */
+  async adoptWantedContextGraphNamePlaceholder(this: DKGAgent, contextGraphId: string): Promise<boolean> {
+    if (this.subscribedContextGraphs.has(contextGraphId)) return false;
+    let nameHash: string;
+    try {
+      nameHash = this.contextGraphNameCommitment(contextGraphId);
+    } catch {
+      return false; // not valid UTF-16, so it names no graph
+    }
+    const target = this.contextGraphNameTargetFor(nameHash);
+    if (target === null) return false;
+    const placeholder = this.subscribedContextGraphs.get(target.nameHash);
+    if (placeholder?.subscribed !== true && placeholder?.coreHosted !== true) return false;
+    try {
+      return await this.adoptVerifiedContextGraphCleartext(target, contextGraphId, 'local-store');
+    } catch (error: unknown) {
+      this.log.debug(
+        createOperationContext('system'),
+        `Adopting "${contextGraphId}" from the local store for ${target.nameHash.slice(0, 18)}… failed: `
+        + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
   }
 
   /** Remember durable aliases (called by rehydration with every persisted row). */
@@ -414,13 +550,21 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     const onChainId = placeholder.subscription.onChainId;
     const isPrivate = entry?.state === 'private'
       || (onChainId !== undefined && this.onChainAccessPolicyCache.get(onChainId) === 1);
+    const bindingConflict = !isPrivate
+      && entry?.state === 'declined'
+      && onChainId !== undefined
+      && entry.onChainId === onChainId
+      && this.isContextGraphNameRefusalCurrent({ nameHash: placeholder.nameHash, onChainId }, entry.contextGraphId);
     return {
       state: isPrivate ? 'name-hash-only-private' : 'name-hash-only',
       nameHash: placeholder.nameHash,
       ...(onChainId === undefined ? {} : { onChainId }),
+      ...(bindingConflict ? { bindingConflict: true as const } : {}),
       message: isPrivate
         ? contextGraphNameHashOnlyPrivateMessage(placeholder.nameHash)
-        : contextGraphNameHashOnlyMessage(placeholder.nameHash),
+        : bindingConflict
+          ? contextGraphNameDeclinedMessage(placeholder.nameHash)
+          : contextGraphNameHashOnlyMessage(placeholder.nameHash),
     };
   }
 
@@ -428,7 +572,8 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
    * Bounded foreground resolution for one hash-keyed placeholder, subscribed
    * or not (the subscribe route calls this before it subscribes). Returns the
    * adopted cleartext id, or null when nothing verified arrived in time; the
-   * background resolver keeps trying either way.
+   * background resolver keeps trying either way, except after a declined
+   * adoption, which only a call like this one checks again.
    */
   async resolveContextGraphNameHashNow(
     this: DKGAgent,
@@ -489,13 +634,12 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     const hashRow = placeholder.subscription;
     if (hashRow.onChainId !== target.onChainId) return false;
     const cleartextRow = this.subscribedContextGraphs.get(contextGraphId);
-    if (cleartextRow?.onChainId !== undefined && cleartextRow.onChainId !== target.onChainId) {
-      // Two different on-chain slots share this name commitment. Merging them
-      // would splice two graphs together; leave both rows alone.
+    if (this.contextGraphNameAdoptionRefusal(target, contextGraphId) !== null) {
+      // Leave both rows alone (see contextGraphNameAdoptionRefusal).
       this.log.warn(
         ctx,
         `Not adopting "${contextGraphId}" for ${target.nameHash.slice(0, 18)}…: the cleartext row is bound to `
-        + `on-chain ${cleartextRow.onChainId}, the name-hash row to ${target.onChainId}`,
+        + `on-chain ${cleartextRow?.onChainId}, the name-hash row to ${target.onChainId}`,
       );
       return false;
     }
@@ -670,7 +814,7 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     connected.delete(libp2p.peerId.toString());
     const coordinator = this.networkAdmissionCoordinator;
     const peers = [...connected].filter((peerId) => coordinator === undefined || !coordinator.isRejectedPeer(peerId));
-    const isCore = (peerId: string) => this.knownCorePeerIds?.has(peerId) === true;
+    const isCore = (peerId: string) => this.peerCapabilityRegistry?.supportsCore(peerId) === true;
     return peers.sort((a, b) => (Number(isCore(b)) - Number(isCore(a))) || (a < b ? -1 : a > b ? 1 : 0));
   }
 

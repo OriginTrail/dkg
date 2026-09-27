@@ -171,10 +171,12 @@ export interface PublishParams {
  *   radius if the KA contract is ever compromised; most expensive gas
  *   profile because every dynamic-priced publish triggers an approve tx.
  *
- * - `replenishing` (recommended for mainnet operators) — approve a
- *   configurable target ceiling (default 1000 TRAC) and refill only when
- *   `currentAllowance` drops below `target × refillBelowFraction` (default
- *   10%). One approve per ~9 publishes' worth of TRAC, capped exposure.
+ * - `replenishing` (recommended for mainnet operators) — approve a ceiling
+ *   sized *relative to this publish's cost* (`targetAllowanceMultiple ×
+ *   publishFloor`, default 20×) and refill only when `currentAllowance`
+ *   drops below `target × refillBelowFraction` (default 10%). At the
+ *   defaults that is one approve per 19 publishes of comparable cost.
+ *   An absolute `targetAllowance`, when set, overrides the derived one.
  *
  * - `unlimited` (V9 pattern) — approve `MaxUint256` once per wallet; never
  *   approve again. Lowest gas, widest blast radius. Choose only if you
@@ -191,12 +193,36 @@ export interface ApprovalPolicy {
   /** Sizing strategy. Defaults to `'per-publish'`. */
   mode: ApprovalPolicyMode;
   /**
-   * `replenishing` only. Ceiling to approve to when topping up. Defaults
-   * to 1000 TRAC (`10n ** 21n` wei-TRAC). Always raised to at least the
-   * current publish's `tokenAmount` so the immediate publish succeeds even
-   * if the operator misconfigured `targetAllowance` too low.
+   * `replenishing` only. ABSOLUTE ceiling to approve to when topping up,
+   * in wei-TRAC. **Overrides** {@link ApprovalPolicy.targetAllowanceMultiple}
+   * when set: an operator who wrote a number meant that number, and it is
+   * the only way to bound standing exposure by an absolute TRAC figure
+   * rather than by a multiple of whatever the triggering publish cost.
+   *
+   * Unset (the default) means "derive the ceiling from this publish's cost"
+   * — see `targetAllowanceMultiple`. Always raised to at least the current
+   * publish's `tokenAmount` so the immediate publish succeeds even if the
+   * operator misconfigured `targetAllowance` too low.
    */
   targetAllowance?: bigint;
+  /**
+   * `replenishing` only. Ceiling multiplier applied to THIS publish's cost
+   * when no absolute `targetAllowance` is configured:
+   * `target = effectivePublishAllowance(tokenAmount) × multiple`.
+   * Defaults to {@link DEFAULT_REPLENISH_TARGET_MULTIPLE} (20).
+   *
+   * Relative sizing exists because a flat ceiling is simultaneously too
+   * large for a small node (blast radius) and too small for a busy one
+   * (constant re-approving) — a multiple scales with whatever the node
+   * actually publishes and needs no config change when prices move.
+   *
+   * Expected to be an integer >= 1; `resolveApprovalPolicy` in the CLI
+   * rejects anything else at startup. `computeApprovalAction` additionally
+   * normalizes a junk value back to the default rather than throwing, so a
+   * programmatic caller that bypasses config validation still gets a sane
+   * ceiling (and the publish-floor clamp keeps it publishable regardless).
+   */
+  targetAllowanceMultiple?: number;
   /**
    * `replenishing` only. Refill when `currentAllowance < target ×
    * refillBelowFraction`. Defaults to `0.1` (refill at 10% remaining).
@@ -207,7 +233,23 @@ export interface ApprovalPolicy {
 
 /** Defaults used when the daemon config omits the field. */
 export const DEFAULT_APPROVAL_POLICY: ApprovalPolicy = { mode: 'per-publish' };
+/**
+ * The historical flat `replenishing` ceiling (1000 TRAC).
+ *
+ * No longer the implicit default — an unset `targetAllowance` now derives
+ * the ceiling from the publish cost via
+ * {@link DEFAULT_REPLENISH_TARGET_MULTIPLE}. Retained as an exported
+ * constant so operators (and the docs) can still name the old absolute
+ * value when they deliberately want a fixed TRAC cap.
+ */
 export const DEFAULT_REPLENISH_TARGET_ALLOWANCE: bigint = 1000n * (10n ** 18n);
+/**
+ * Default `targetAllowanceMultiple`: approve 20× the triggering publish's
+ * cost. Paired with the 10% `DEFAULT_REFILL_BELOW_FRACTION` this yields a
+ * refill threshold of 2× the publish cost, i.e. one approve per 19
+ * publishes of comparable cost (see `computeApprovalAction`).
+ */
+export const DEFAULT_REPLENISH_TARGET_MULTIPLE: number = 20;
 export const DEFAULT_REFILL_BELOW_FRACTION: number = 0.1;
 
 /** Canonical greenfield UAL: did:dkg:{chainId}/{DKGKnowledgeAssets}/{kaId} */
@@ -805,6 +847,65 @@ export interface ContextGraphRegistryScanCursorStore {
   save(key: ContextGraphRegistryScanCursorKey, nextBlock: number): Promise<void>;
   /** Optional grouped capability for opaque, atomically replaced repair state. */
   repairAudit?: ContextGraphRegistryRepairAuditStore;
+}
+
+// ----- ContextGraphStorage id enumeration (historical Context Graph discovery) -----
+
+/**
+ * Chain-public facts for one ContextGraphStorage slot, all read at the same
+ * anchor block by {@link ChainAdapter.readContextGraphStorageRange}.
+ */
+export interface ContextGraphStorageEntry {
+  /** Positive decimal ContextGraphStorage id. */
+  readonly contextGraphId: string;
+  /**
+   * Current ERC-721 owner, lowercase. This is the creator unless the graph's
+   * ownership token was transferred after creation.
+   */
+  readonly owner: string;
+  /** `false` once the graph was deactivated on chain. Mutable. */
+  readonly active: boolean;
+  /** Creation time in unix seconds (`block.timestamp` at creation). */
+  readonly createdAt: number;
+  /** 0 = public, 1 = private (curated access). Write-once on chain. */
+  readonly accessPolicy: number;
+  /** 0 = curated (only the publish authority), 1 = open. Mutable. */
+  readonly publishPolicy: number;
+  /** Lowercase publish authority, or null for the zero address. Mutable. */
+  readonly publishAuthority: string | null;
+  /**
+   * Curator-committed name hash (lowercase bytes32), or null when the curator
+   * opted out at creation. Write-once on chain.
+   */
+  readonly nameHash: string | null;
+}
+
+export interface ContextGraphStorageRangeOptions extends ChainReadOptions {
+  /** First ContextGraphStorage id to read (>= 1). */
+  readonly fromId: bigint;
+  /** Maximum number of ids this call may read (>= 1). */
+  readonly maxIds: number;
+}
+
+/** One bounded, block-pinned slice of the ContextGraphStorage id space. */
+export interface ContextGraphStorageRange {
+  /** Lowercase ContextGraphStorage address the range was read from. */
+  readonly storageAddress: string;
+  /** The finality-anchor block every read in this range was pinned to. */
+  readonly anchorBlockNumber: number;
+  readonly anchorBlockHash: string;
+  /** `getLatestContextGraphId()` at the anchor: the highest id minted so far. */
+  readonly latestId: bigint;
+  /**
+   * Entries in ascending id order for `[fromId, nextId)`. An id the chain
+   * proves nonexistent (`ERC721NonexistentToken`) is omitted, not an error.
+   */
+  readonly entries: readonly ContextGraphStorageEntry[];
+  /**
+   * The first id this call did NOT read. Equals `fromId` when `fromId` is
+   * already above `latestId`, so a caller's cursor never moves past the chain.
+   */
+  readonly nextId: bigint;
 }
 
 // ----- On-Chain Context Graph types (ContextGraphs contract) -----
@@ -1643,6 +1744,23 @@ export interface ChainAdapter {
     scanContextGraphRegistryPages?(options: ContextGraphRegistryScanOptions): AsyncIterable<ContextGraphRegistryScanPage>;
     /** True when the adapter has a registry scan watermark for its currently bound ContextGraphNameRegistry. */
     hasContextGraphRegistryScanWatermark?(): Promise<boolean>;
+    /**
+     * Whether a ContextGraphNameRegistry is registered in the Hub. The registry
+     * is archived; when it is absent the `NameClaimed` scans above return
+     * nothing, and historical discovery relies on
+     * {@link readContextGraphStorageRange} instead.
+     */
+    hasContextGraphNameRegistry?(): Promise<boolean>;
+    /**
+     * Read ContextGraphStorage slots `[fromId, fromId + maxIds)` (capped at
+     * `getLatestContextGraphId()`) with view calls pinned to one block: the
+     * node's finality anchor (`chain.finalityConfirmations`). Ids are
+     * sequential, so this enumerates every Context Graph that exists on chain
+     * without event logs or archive state. Stateless: callers own any cursor.
+     */
+    readContextGraphStorageRange?(
+      options: ContextGraphStorageRangeOptions,
+    ): Promise<ContextGraphStorageRange>;
     /**
      * Resolve one graph's current policy and roster at a stable finalized
      * anchor. Optional for NoChain and legacy adapters; default RFC-64 callers

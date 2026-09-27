@@ -34,6 +34,7 @@ import {
   hashTripleV10,
   structuredKARootV10,
   tripleContentV10,
+  keccak256Hex,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -67,6 +68,7 @@ interface FakeChainState {
   bindingId?: string;
   /** When set, exposes the current Chronos epoch. */
   currentEpoch?: bigint;
+  contextGraphNameHash?: string;
 }
 
 type TestChain = ChainAdapter;
@@ -105,6 +107,9 @@ function makeChain(state: FakeChainState): TestChain {
   };
   if (state.blockNumber !== undefined) {
     partial.getBlockNumber = vi.fn(async () => state.blockNumber!);
+  }
+  if (state.contextGraphNameHash !== undefined) {
+    partial.getContextGraphNameHash = vi.fn(async () => state.contextGraphNameHash!);
   }
   if (state.randomSamplingReady !== undefined) {
     partial.isRandomSamplingReady = vi.fn(() => state.randomSamplingReady!);
@@ -273,6 +278,46 @@ describe('RandomSamplingProver — happy path', () => {
 
     const trail = (await wal.readAll()).map((e) => e.status);
     expect(trail).toEqual(['challenge', 'extracted', 'built', 'submitted']);
+    await prover.close();
+  });
+
+  it('submits proof from the chain-attested graph despite a stale first binding', async () => {
+    const fixture: KCFixture = {
+      cgId: 14n,
+      kaId: 7n,
+      ual: 'did:dkg:hardhat:31337/0xpub/7',
+      rootEntities: ['urn:e:1'],
+      publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
+    };
+    await store.insert([{
+      subject: 'did:dkg:context-graph:aaa-stale',
+      predicate: 'https://dkg.network/ontology#ContextGraphOnChainId',
+      object: '"14"',
+      graph: 'did:dkg:context-graph:ontology',
+    }]);
+    const { root, leafCount } = await seedKC(store, fixture);
+    const submitProof = vi.fn(async () => ({ hash: '0xproof', blockNumber: 1001, success: true }));
+    const chain = makeChain({
+      status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+      challengeForNode: null,
+      createChallenge: async () => ({
+        challenge: makeChallenge({ knowledgeAssetId: fixture.kaId }),
+        contextGraphId: fixture.cgId,
+        hash: '0xchallenge',
+        blockNumber: 1000,
+        success: true,
+      }),
+      expectedRoot: root,
+      expectedLeafCount: leafCount,
+      cgIdForKc: fixture.cgId,
+      contextGraphNameHash: keccak256Hex(new TextEncoder().encode('cg-14')),
+      submitProof,
+    });
+    const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
+
+    await expect(prover.tick()).resolves.toMatchObject({ kind: 'submitted', txHash: '0xproof' });
+    expect(chain.getContextGraphNameHash).toHaveBeenCalledWith(14n);
+    expect(submitProof).toHaveBeenCalledTimes(1);
     await prover.close();
   });
 });

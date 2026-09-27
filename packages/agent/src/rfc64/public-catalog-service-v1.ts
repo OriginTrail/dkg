@@ -462,6 +462,11 @@ export interface Rfc64PublicCatalogServiceStatsV1 {
   readonly announcedCurrentHeadPendingScopes: number;
   /** True while a bounded re-pull deadline is armed for a retained scope. */
   readonly announcedCurrentHeadRetryArmed: boolean;
+  /**
+   * Admitted announcements answered without receiver or pull work because
+   * their head was already known to be satisfied and no work was pending for it.
+   */
+  readonly announcedHeadsAlreadySatisfied: number;
 }
 
 export class Rfc64PublicCatalogServiceV1 {
@@ -486,15 +491,19 @@ export class Rfc64PublicCatalogServiceV1 {
   readonly #localPeerId: string | undefined;
   readonly #announcedCurrentHeadTargets = new Map<string, AnnouncedCurrentHeadTargetV1>();
   /**
-   * Targets a running pass has taken out of the map and not yet settled. The
-   * pass empties the map on entry, so without this a target being pulled would
-   * be recorded nowhere until its admission lands at the receiver.
+   * Targets a running pass has taken out of the map and not yet settled, by
+   * scope key; a key is present only while it holds a target. The pass
+   * empties the map on entry, so without this a target being pulled would be
+   * recorded nowhere until its admission lands at the receiver.
    */
-  readonly #announcedCurrentHeadInFlight = new Set<AnnouncedCurrentHeadTargetV1>();
+  readonly #announcedCurrentHeadInFlight = new Map<string, Set<AnnouncedCurrentHeadTargetV1>>();
   readonly #announcedCurrentHeadWatches = new Map<string, Set<AnnouncedCurrentHeadWatchV1>>();
   readonly #announcedCurrentHeadSupervisor: CoalescingRecurringTask | undefined;
   readonly #announcedCurrentHeadMaxPullAttempts: number;
   readonly #isAnnouncedHeadSatisfied: Rfc64PublicCatalogHeadSatisfactionCheckV1;
+  readonly #isAnnouncedHeadKnownSatisfied:
+    ((announcement: Rfc64PublicCatalogHeadAnnouncementV1) => boolean) | undefined;
+  #announcedHeadsAlreadySatisfied = 0;
   readonly #onAccelerationFailed:
     Rfc64PublicCatalogServiceOptionsV1['onAccelerationFailed'];
   #started = false;
@@ -537,6 +546,10 @@ export class Rfc64PublicCatalogServiceV1 {
       // Non-blocking: schedule() enqueues synchronously so the transport's ACK
       // path (which awaits this callback) is never stalled on a fetch.
       onCatalogHeadAvailable: (announcement, remotePeerId) => {
+        if (this.#isAnnouncementAlreadySatisfied(announcement)) {
+          this.#announcedHeadsAlreadySatisfied += 1;
+          return;
+        }
         this.#receiver.schedule(announcement, remotePeerId);
         this.#requestAnnouncedCurrentHeadSynchronization(announcement, remotePeerId);
       },
@@ -669,6 +682,15 @@ export class Rfc64PublicCatalogServiceV1 {
     });
     this.#isAnnouncedHeadSatisfied =
       normalizeRfc64PublicCatalogReceiverReconcilerV1(reconciler).isHeadSatisfied;
+    // Same lane rule as the wrapped `isHeadSatisfied` above: only the
+    // catalog-apply lane can ever report a head satisfied.
+    this.#isAnnouncedHeadKnownSatisfied = nativeReconciler?.isHeadKnownSatisfied === undefined
+      ? undefined
+      : (announcement) => this.#resolveContextGraphAuthority(
+        announcement.contextGraphId,
+        'receiving',
+      ).reconciliationLane === 'catalog-apply'
+        && nativeReconciler.isHeadKnownSatisfied?.(announcement) === true;
     this.#onAccelerationFailed = options.onAccelerationFailed;
     this.#announcedCurrentHeadMaxPullAttempts = rfc64ReceiverPositiveIntV1(
       options.announcedCurrentHeadRetry?.maxAttempts,
@@ -1381,8 +1403,10 @@ export class Rfc64PublicCatalogServiceV1 {
     contextGraphId: string,
   ): AnnouncedCurrentHeadTargetV1[] {
     const outstanding: AnnouncedCurrentHeadTargetV1[] = [];
-    for (const target of this.#announcedCurrentHeadInFlight) {
-      if (target.scope.contextGraphId === contextGraphId) outstanding.push(target);
+    for (const targets of this.#announcedCurrentHeadInFlight.values()) {
+      for (const target of targets) {
+        if (target.scope.contextGraphId === contextGraphId) outstanding.push(target);
+      }
     }
     for (const target of this.#announcedCurrentHeadTargets.values()) {
       if (target.pullRequested && target.scope.contextGraphId === contextGraphId) {
@@ -1418,6 +1442,7 @@ export class Rfc64PublicCatalogServiceV1 {
       nativeReceiver: this.#readNativeResourceStats(),
       announcedCurrentHeadPendingScopes: this.#announcedCurrentHeadTargets.size,
       announcedCurrentHeadRetryArmed: this.#announcedCurrentHeadSupervisor?.scheduled === true,
+      announcedHeadsAlreadySatisfied: this.#announcedHeadsAlreadySatisfied,
     });
   }
 
@@ -1425,6 +1450,48 @@ export class Rfc64PublicCatalogServiceV1 {
     return signal === undefined
       ? { timeoutMs: this.#transportTimeoutMs }
       : { timeoutMs: this.#transportTimeoutMs, signal };
+  }
+
+  /**
+   * A policy-admitted announcement needs no work when its head is already
+   * satisfied (applied, or durably superseded) and nothing is pending that the
+   * hint could join. Peers re-announce every head on each connect and again
+   * through each scoped replay, so without this every connect re-read and
+   * re-verified each applied head, queued a receiver task that could only
+   * report `already-applied`, and pulled the scope's current head from the
+   * peer only to find it satisfied.
+   *
+   * Only an announcement the full path would turn into no-op work is skipped:
+   * - the check is the reconciler's synchronous form of the same satisfaction
+   *   decision the receiver task makes, so an unapplied, newer, or
+   *   equal-version conflicting head always takes the full path;
+   * - a pending receiver task for the exact head would gain a provider or a
+   *   fresh hint, and a pending or in-flight pull for the scope would gain a
+   *   provider or an earlier re-pull, so either keeps the full path;
+   * - a closing service or closed receiver keeps the full path, which reports
+   *   the hint closed.
+   */
+  #isAnnouncementAlreadySatisfied(
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ): boolean {
+    const isKnownSatisfied = this.#isAnnouncedHeadKnownSatisfied;
+    if (isKnownSatisfied === undefined || this.#closed) return false;
+    if (!this.#receiver.hasNoPendingTaskForHead(announcement)) return false;
+    if (this.#hasAnnouncedCurrentHeadTarget(announcement)) return false;
+    try {
+      return isKnownSatisfied(announcement);
+    } catch {
+      return false;
+    }
+  }
+
+  /** A pull for this scope is waiting in the map or running in a pass. */
+  #hasAnnouncedCurrentHeadTarget(
+    announcement: Rfc64PublicCatalogHeadAnnouncementV1,
+  ): boolean {
+    const key = announcedCurrentHeadScopeKeyV1(announcement);
+    return this.#announcedCurrentHeadTargets.has(key)
+      || this.#announcedCurrentHeadInFlight.has(key);
   }
 
   /**
@@ -1490,9 +1557,11 @@ export class Rfc64PublicCatalogServiceV1 {
     this.#announcedCurrentHeadTargets.clear();
     // Same synchronous block as the clear, so a target is never recorded
     // nowhere: a per-context-graph wait finds it here until its worker settles.
-    for (const [, target] of targets) {
+    for (const [key, target] of targets) {
       target.pullRequested = false;
-      this.#announcedCurrentHeadInFlight.add(target);
+      const inFlight = this.#announcedCurrentHeadInFlight.get(key);
+      if (inFlight === undefined) this.#announcedCurrentHeadInFlight.set(key, new Set([target]));
+      else inFlight.add(target);
     }
     let retained = false;
     await mapWithConcurrency(
@@ -1559,7 +1628,10 @@ export class Rfc64PublicCatalogServiceV1 {
   }
 
   #settleAnnouncedCurrentHeadTarget(target: AnnouncedCurrentHeadTargetV1): void {
-    if (!this.#announcedCurrentHeadInFlight.delete(target)) return;
+    const key = announcedCurrentHeadScopeKeyV1(target.scope);
+    const inFlight = this.#announcedCurrentHeadInFlight.get(key);
+    if (inFlight?.delete(target) !== true) return;
+    if (inFlight.size === 0) this.#announcedCurrentHeadInFlight.delete(key);
     this.#notifyAnnouncedCurrentHeadProgress(target.scope.contextGraphId);
   }
 
@@ -1916,14 +1988,14 @@ function compareCatalogVersionsV1(left: string, right: string): -1 | 0 | 1 {
 }
 
 function announcedCurrentHeadScopeKeyV1(
-  announcement: Readonly<Rfc64PublicCatalogHeadAnnouncementV1>,
+  scope: Readonly<Rfc64PublicCatalogCurrentHeadScopeV1>,
 ): string {
   return [
-    announcement.networkId,
-    announcement.contextGraphId,
-    announcement.subGraphName ?? '',
-    announcement.authorAddress,
-    announcement.catalogEra,
+    scope.networkId,
+    scope.contextGraphId,
+    scope.subGraphName ?? '',
+    scope.authorAddress,
+    scope.catalogEra,
   ].join('\n');
 }
 

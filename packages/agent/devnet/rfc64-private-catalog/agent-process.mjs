@@ -111,6 +111,7 @@ async function createAgent(manifest, finalizedRuntime) {
     store: new OxigraphStore(join(DATA_DIR, 'oxigraph')),
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
+    vmReconcilerEnabled: false,
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,

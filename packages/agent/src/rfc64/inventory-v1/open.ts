@@ -63,6 +63,7 @@ import {
   CandidateInventoryV1,
   type AppliedCatalogHeadCasResultV1,
   type AppliedCatalogHeadSnapshotV1,
+  type AppliedCatalogHeadsSnapshotV1,
   type CandidateCatalogPrecommitResultV1,
   type CandidateBucketDiffTraversalV1,
   type CandidateBucketHeaderV1,
@@ -491,6 +492,12 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
   listAppliedCatalogHeadsV1(): readonly AppliedCatalogHeadSnapshotV1[] {
     this.requireOpen();
     return this.#candidate.listAppliedCatalogHeadsV1();
+  }
+
+  readAppliedCatalogHeadsSnapshotV1(): AppliedCatalogHeadsSnapshotV1 {
+    this.requireOpen();
+    // A quarantine rebuild swaps in a new candidate, which lists afresh.
+    return this.#candidate.readAppliedCatalogHeadsSnapshotV1();
   }
 
   isStagedCatalogHeadV1(

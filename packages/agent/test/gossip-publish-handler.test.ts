@@ -265,6 +265,73 @@ describe('GossipPublishHandler', () => {
     )).resolves.toMatchObject({ type: 'boolean', value: true });
   });
 
+  it('matches an escaped payload against a head recorded in the stored form', async () => {
+    const { store, handler } = createHandler();
+    const author = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
+    const kaNumber = 42n;
+    const packedKaId = (BigInt(author) << 96n) | kaNumber;
+    const ual = `did:dkg:base:8453/${author}/${kaNumber}`;
+    const scope = createGraphKnowledgeAssetScope(ual, 1);
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.VerifiableMemory,
+      scope,
+    );
+    const graphManager = new GraphManager(store);
+    // A StorageACK receiver records the copy in the form the store returns it in.
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      shareOperationId: 'escaped-head',
+      kaUal: ual,
+      assertionVersion: '1',
+      quads: [{
+        subject: 'urn:escaped:subject',
+        predicate: 'urn:escaped:predicate',
+        object: '"Women\u2019s \u{1F5D3} 12 October"',
+        graph: '',
+      }],
+      privateTripleCount: 0,
+      publisherPeerId: '12D3KooWPublisher',
+      accessPolicy: 'public',
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      shareOperationId: 'escaped-head',
+      kaUal: ual,
+      assertionVersion: '1',
+    });
+    // The publisher gossips the same copy with its text escaped.
+    const data = encodePublishRequest({
+      ual,
+      nquads: new TextEncoder().encode(
+        `<urn:escaped:subject> <urn:escaped:predicate> "Women\\u2019s \\uD83D\\uDDD3 12 October" <${vmGraph}> .`,
+      ),
+      contextGraphId: CONTEXT_GRAPH,
+      kas: [],
+      publisherIdentity: new Uint8Array(32),
+      publisherAddress: author,
+      startKAId: packedKaId,
+      endKAId: packedKaId,
+      chainId: 'base:8453',
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+      allowedPeers: [],
+    });
+
+    await handler.handlePublishMessage(data, CONTEXT_GRAPH, undefined, '12D3KooWPublisher');
+
+    expect(await store.countQuads(vmGraph)).toBe(1);
+  });
+
   it('uses durable owner and allow-list metadata instead of relay-supplied values', async () => {
     const { store, handler } = createHandler();
     const author = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
