@@ -149,6 +149,28 @@ export interface CatchupPlanePolicyClock {
   random?: () => number;
 }
 
+/**
+ * Optional fold for diagnostics emitted by repeated admission attempts.
+ *
+ * A retry result is both a diagnostic snapshot and a control signal: the
+ * latest `deferredBackpressure` value decides whether another attempt is
+ * needed, while a caller may want counters from every attempt. The policy
+ * keeps those concerns separate by tracking that latest control value while
+ * applying the caller's fold to the returned result.
+ *
+ * That separation holds for the two-plane runner as well: it reads the tracked
+ * value to decide whether the leading plane deferred, so a fold is free to sum
+ * `deferredBackpressure` across attempts without skipping the second plane.
+ */
+export interface CatchupPlaneRetryMerge<T extends CatchupPlaneResult> {
+  mergeRetryResults?: (previous: T, current: T) => T;
+}
+
+export type CatchupPlanePolicyRunOptions<T extends CatchupPlaneResult> =
+  CatchupPlanePolicyClock
+  & CatchupPlaneSourceOverride
+  & CatchupPlaneRetryMerge<T>;
+
 export interface CatchupPlanePolicyOptions<
   TDurable extends CatchupPlaneResult,
   TShared extends CatchupPlaneResult,
@@ -159,6 +181,24 @@ export interface CatchupPlanePolicyOptions<
   planeOrder?: 'durable-first' | 'shared-first';
   syncDurable: (context: CatchupPlaneContext) => Promise<TDurable>;
   syncSharedMemory: (context: CatchupPlaneContext) => Promise<TShared>;
+  /** Fold diagnostics across repeated durable admission attempts. */
+  mergeDurableRetryResults?: (previous: TDurable, current: TDurable) => TDurable;
+  /** Fold diagnostics across repeated shared-memory admission attempts. */
+  mergeSharedMemoryRetryResults?: (previous: TShared, current: TShared) => TShared;
+  /**
+   * The single-plane option name, which this two-plane API does NOT accept —
+   * there are two planes and therefore two folds. `runCatchupPlanesWithPolicy`
+   * spreads these options into each plane's run options and then assigns
+   * `mergeRetryResults` itself, so a caller that sets it here would have it
+   * overwritten with `undefined` and silently lose every retry diagnostic.
+   *
+   * Declared `never` rather than left absent for the same reason as
+   * `retryDelaysMs`: excess-property checking only rejects the object-literal
+   * form, and a stale options VARIABLE flowing in structurally is exactly the
+   * case that would otherwise be ignored. Pinned in
+   * `test/catchup-retry-contract.typecheck.ts`.
+   */
+  mergeRetryResults?: never;
 }
 
 export interface CatchupPlanePolicyResult<
@@ -248,8 +288,30 @@ export function nextCatchupBackpressureDelayMs(input: {
 export async function runCatchupPlaneWithPolicy<T extends CatchupPlaneResult>(
   mode: CatchupMode,
   run: (context: CatchupPlaneContext) => Promise<T>,
-  options: CatchupPlanePolicyClock & CatchupPlaneSourceOverride = {},
+  options: CatchupPlanePolicyRunOptions<T> = {},
 ): Promise<T> {
+  return (await runCatchupPlaneTracked(mode, run, options)).result;
+}
+
+/**
+ * One plane's outcome with the retry CONTROL signal kept out of the payload.
+ *
+ * A fold owns `result.deferredBackpressure` — it may legitimately leave the sum
+ * of every attempt there for diagnostics — so a caller that has to decide what
+ * to do NEXT must read `deferredBackpressure` here instead. Internal: the
+ * exported single-plane entry point keeps returning the plane result alone.
+ */
+interface CatchupPlaneOutcome<T extends CatchupPlaneResult> {
+  readonly result: T;
+  /** The LATEST attempt's deferral count, never a fold of the attempts. */
+  readonly deferredBackpressure: number;
+}
+
+async function runCatchupPlaneTracked<T extends CatchupPlaneResult>(
+  mode: CatchupMode,
+  run: (context: CatchupPlaneContext) => Promise<T>,
+  options: CatchupPlanePolicyRunOptions<T> = {},
+): Promise<CatchupPlaneOutcome<T>> {
   // `retryDelaysMs` configured the fixed [100, 250, 500] ladder that #2006 replaced
   // with a wall-clock budget. Retaining it as `?: never` makes a TypeScript caller
   // fail to compile — but a JS caller compiled against the old shape still passes it
@@ -271,7 +333,13 @@ export async function runCatchupPlaneWithPolicy<T extends CatchupPlaneResult>(
     priority: catchupPriorityForMode(mode),
     source: catchupAdmissionSource(mode, options.sourceOverride),
   };
-  if (mode !== 'foreground') return run(context);
+  if (mode !== 'foreground') {
+    const backgroundResult = await run(context);
+    return {
+      result: backgroundResult,
+      deferredBackpressure: backgroundResult.deferredBackpressure ?? 0,
+    };
+  }
 
   // `wait` and `now` are ONE seam, not two independent ones.
   //
@@ -329,15 +397,18 @@ export async function runCatchupPlaneWithPolicy<T extends CatchupPlaneResult>(
   // long the first attempt took, PLUS maxWaitMs" instead of a per-plane bound.
   const retryUntil = now() + maxWaitMs;
   let result = await run(context);
+  // A merge callback may retain cumulative diagnostics (including a summed
+  // deferral count), so keep the latest attempt's control value separately.
+  let deferredBackpressure = result.deferredBackpressure ?? 0;
   for (let attempt = 0; ; attempt += 1) {
-    if ((result.deferredBackpressure ?? 0) === 0) return result;
+    if (deferredBackpressure === 0) return { result, deferredBackpressure };
     const delayMs = nextCatchupBackpressureDelayMs({
       attempt,
       remainingMs: retryUntil - now(),
       policy: options.retry,
       random: options.random,
     });
-    if (delayMs === undefined) return result;
+    if (delayMs === undefined) return { result, deferredBackpressure };
     await wait(delayMs);
     // Re-check the deadline AFTER sleeping. `nextCatchupBackpressureDelayMs`
     // sized the delay against the budget that remained before the sleep, but a
@@ -348,8 +419,17 @@ export async function runCatchupPlaneWithPolicy<T extends CatchupPlaneResult>(
     // This declines to START an attempt; an attempt already in flight is never
     // interrupted. The deliberate collateral is that capacity clearing exactly
     // at or just after the deadline no longer gets one extra try.
-    if (now() >= retryUntil) return result;
-    result = await run(context);
+    if (now() >= retryUntil) return { result, deferredBackpressure };
+    const nextResult = await run(context);
+    if (options.mergeRetryResults === undefined) {
+      result = nextResult;
+      deferredBackpressure = nextResult.deferredBackpressure ?? 0;
+      continue;
+    }
+    // `deferredBackpressure` belongs to the latest attempt for control flow,
+    // while the merged result retains every attempt's diagnostic counters.
+    result = options.mergeRetryResults(result, nextResult);
+    deferredBackpressure = nextResult.deferredBackpressure ?? 0;
   }
 }
 
@@ -389,22 +469,36 @@ export async function runCatchupPlanesWithPolicy<
 >(
   options: CatchupPlanePolicyOptions<TDurable, TShared>,
 ): Promise<CatchupPlanePolicyResult<TDurable, TShared>> {
+  // The leading plane's deferral is read from the TRACKED control value, not
+  // from the returned result: a caller's fold owns `result.deferredBackpressure`
+  // and may legitimately leave the sum of every attempt there, which would skip
+  // the second plane as `leading-plane-deferred` for a leading plane that had
+  // deferred once and then succeeded.
   if (options.planeOrder === 'shared-first' && options.includeSharedMemory) {
-    const shared = await runCatchupPlaneWithPolicy(options.mode, options.syncSharedMemory, options);
-    if ((shared.deferredBackpressure ?? 0) > 0) {
+    const shared = await runCatchupPlaneTracked(options.mode, options.syncSharedMemory, {
+      ...options,
+      mergeRetryResults: options.mergeSharedMemoryRetryResults,
+    });
+    if (shared.deferredBackpressure > 0) {
       return {
         durable: null,
-        shared,
+        shared: shared.result,
         skippedPlanes: { durable: 'leading-plane-deferred' },
       };
     }
-    const durable = await runCatchupPlaneWithPolicy(options.mode, options.syncDurable, options);
-    return { durable, shared, skippedPlanes: {} };
+    const durable = await runCatchupPlaneWithPolicy(options.mode, options.syncDurable, {
+      ...options,
+      mergeRetryResults: options.mergeDurableRetryResults,
+    });
+    return { durable, shared: shared.result, skippedPlanes: {} };
   }
-  const durable = await runCatchupPlaneWithPolicy(options.mode, options.syncDurable, options);
-  if (!options.includeSharedMemory || (durable.deferredBackpressure ?? 0) > 0) {
+  const durable = await runCatchupPlaneTracked(options.mode, options.syncDurable, {
+    ...options,
+    mergeRetryResults: options.mergeDurableRetryResults,
+  });
+  if (!options.includeSharedMemory || durable.deferredBackpressure > 0) {
     return {
-      durable,
+      durable: durable.result,
       shared: null,
       skippedPlanes: {
         shared: options.includeSharedMemory ? 'leading-plane-deferred' : 'not-requested',
@@ -412,6 +506,9 @@ export async function runCatchupPlanesWithPolicy<
     };
   }
 
-  const shared = await runCatchupPlaneWithPolicy(options.mode, options.syncSharedMemory, options);
-  return { durable, shared, skippedPlanes: {} };
+  const shared = await runCatchupPlaneWithPolicy(options.mode, options.syncSharedMemory, {
+    ...options,
+    mergeRetryResults: options.mergeSharedMemoryRetryResults,
+  });
+  return { durable: durable.result, shared, skippedPlanes: {} };
 }

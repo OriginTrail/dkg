@@ -9,6 +9,7 @@ import {
   isDurableSyncComplete,
   markDurableTerminalBoundary,
   mergeDurableSyncAccumulatorInto,
+  mergeDurableSyncResults,
   normalizeDurableSyncResult,
   recordDurableSyncDiagnostics,
 } from '../src/sync/durable-progress.js';
@@ -185,6 +186,30 @@ describe('isDurableSyncComplete', () => {
     ['missing metadata', { dataRejectedMissingMeta: 1 }],
   ])('centralizes %s as a non-complete durable result', (_label, failure) => {
     expect(isDurableSyncComplete({ completedPhases: 1, ...failure }, true)).toBe(false);
+  });
+});
+
+describe('mergeDurableSyncResults', () => {
+  it('retains counters across a deferred retry and the latest completion verdict', () => {
+    const deferred = createIncompleteDurableSyncResult();
+    deferred.insertedTriples = 2;
+    deferred.insertedDataTriples = 2;
+    deferred.completedPhases = 1;
+    deferred.deferredBackpressure = 1;
+
+    const completed = createIncompleteDurableSyncResult();
+    completed.complete = true;
+    completed.insertedTriples = 3;
+    completed.insertedDataTriples = 3;
+    completed.completedPhases = 1;
+
+    expect(mergeDurableSyncResults(deferred, completed)).toMatchObject({
+      insertedTriples: 5,
+      insertedDataTriples: 5,
+      completedPhases: 2,
+      deferredBackpressure: 1,
+      complete: true,
+    });
   });
 });
 
