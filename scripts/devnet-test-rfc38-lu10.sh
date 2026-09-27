@@ -187,29 +187,31 @@ act "2. ANONYMOUS CATCHUP SWEEP (outsider, no membership)"
 # The outsider is a CORE NODE so it has the libp2p peer and can talk
 # to the curator without any pre-existing membership. For public CGs
 # the curator's responder MUST serve without auth.
+# The Core discovers registered public graphs from chain authority without
+# joining their member roster. Wait for the outsider's own chain-backed view;
+# a foreign wallet-scoped create would neither install nor prove that view.
+OUTSIDER_ACTIVE=false
+for _ in $(seq 1 60); do
+  OUTSIDER_ACTIVE=$(api_call "$OUTSIDER_NODE" GET /api/context-graph/list | \
+    CG_ID="$CG_ID" ON_CHAIN_ID="$ON_CHAIN_ID" node -e '
+      let body = "";
+      process.stdin.on("data", chunk => body += chunk);
+      process.stdin.on("end", () => {
+        try {
+          const graph = JSON.parse(body).contextGraphs?.find(row => row.id === process.env.CG_ID);
+          console.log(graph?.onChain?.active === true
+            && graph.onChain.id === process.env.ON_CHAIN_ID
+            && graph.accessPolicy === "public" ? "true" : "false");
+        } catch { console.log("false"); }
+      });
+    ')
+  [ "$OUTSIDER_ACTIVE" = true ] && break
+  sleep 3
+done
+[ "$OUTSIDER_ACTIVE" = true ] || fail "outsider has no active chain-backed public view of $CG_ID"
+log "✓ outsider sees the curator's active public on-chain graph without membership"
 OUTSIDER_LOG_BASE=$(wc -l < "$(node_log "$OUTSIDER_NODE")" 2>/dev/null | tr -d ' ' || echo 0)
 CURATOR_LOG_BASE=$(wc -l < "$(node_log "$CURATOR_NODE")" 2>/dev/null | tr -d ' ' || echo 0)
-
-# The catch-up route skips a CG the outsider cannot yet use for SWM, without
-# asking any peer (results: [], peersAttempted: 0), which would leave the
-# denial check below nothing to observe. Create the CG on the outsider first,
-# as LU-8 does for its member. The id is wallet-scoped, so the outsider does
-# not become its curator: curator resolution for such ids follows the
-# wallet in the id. 409 means the outsider already knows the CG. The name
-# matches the curator's, so the broadcast definition adds no second name.
-log "Outsider creates the CG locally..."
-OUTSIDER_CREATE_WITH_STATUS=$(api_call_with_status "$OUTSIDER_NODE" POST /api/context-graph/create "$(cat <<EOF
-{ "id": "$CG_ID", "name": "LU-10 public sweep ${STAMP}",
-  "accessPolicy": 0, "publishPolicy": 1 }
-EOF
-)")
-OUTSIDER_CREATE_STATUS=$(printf '%s\n' "$OUTSIDER_CREATE_WITH_STATUS" | tail -n 1)
-OUTSIDER_CREATE=$(printf '%s\n' "$OUTSIDER_CREATE_WITH_STATUS" | sed '$d')
-log "outsider-local create: HTTP $OUTSIDER_CREATE_STATUS $OUTSIDER_CREATE"
-case "$OUTSIDER_CREATE_STATUS" in
-  200|409) ;;
-  *) fail "outsider could not create the CG locally (HTTP $OUTSIDER_CREATE_STATUS): $OUTSIDER_CREATE" ;;
-esac
 
 # Prints why a catch-up response does not show a completed request to the
 # curator, or nothing when it does.
