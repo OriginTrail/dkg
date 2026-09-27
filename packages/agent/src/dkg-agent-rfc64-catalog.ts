@@ -3749,6 +3749,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     );
   }
 
+  /** Whether an accepted compatibility policy, not responsibility, owns this CG's RFC-64 authority. */
+  hasRfc64AcceptedCompatibilityAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    return this.resolveRfc64AcceptedCompatibilityAuthorityV1(contextGraphId) !== null;
+  }
+
   /** Whether the exact active network/CG authority is an accepted unregistered owner policy. */
   hasAcceptedRfc64UnregisteredAuthorityV1(
     this: DKGAgent,
