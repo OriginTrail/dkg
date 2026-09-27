@@ -75,6 +75,10 @@ export default defineConfig({
           // Subscribing by an on-chain name hash (Base #33): route, catch-up
           // text and the public status summary. Pure handler, no hardhat.
           'test/context-graph-name-hash-subscribe-route.test.ts',
+          'test/context-graph-name-adoption-crash.test.ts',
+          // Full commit /api/status reports without build-info: git in a
+          // source checkout, else <DKG home>/.current-commit. Mocked git.
+          'test/current-commit-full.test.ts',
           // Catch-up status by a resolved name hash: who sees the job. Real
           // agent and mock chain, no hardhat.
           'test/context-graph-name-hash-catchup-status.test.ts',
@@ -177,6 +181,7 @@ export default defineConfig({
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',
           'test/publisher-runtime-snapshot-store-injection.test.ts',
+          'test/publisher-runtime-chain-config.test.ts',
           'test/publisher-ka-recovery.test.ts',
           // #2270 — the runner's chain lookup reports WHICH chain fact it found
           // (pending vs proven-absent vs inconclusive), and the two-state
