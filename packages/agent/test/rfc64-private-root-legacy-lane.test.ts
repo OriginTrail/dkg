@@ -11,7 +11,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { contextGraphDataUri } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
-import { encodeRootlessWorkspaceRequest } from
+import { encodeRootlessWorkspaceRequest, rootlessSharedMemoryGraphFromWire } from
   '../../publisher/test/_helpers/rootless-workspace.js';
 
 const PRIVATE_CG = 'rfc64-private-root-legacy-lane';
@@ -42,6 +42,7 @@ interface Internals {
   getOrCreateSharedMemoryHandler(): {
     handle(data: Uint8Array, from: string): Promise<{ applied: boolean; reason?: string }>;
   };
+  store: { hasGraph(graph: string): Promise<boolean> };
 }
 
 function receiverAuthority(state: TransportState) {
@@ -144,8 +145,18 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
     await expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(PRIVATE_CG)).resolves.toBe(false);
     internals.config.rfc64CatalogExecutionPlan = defaultPlan;
 
+    const bootstrap = internals.config.rfc64CatalogBootstrap;
+    internals.config.rfc64CatalogBootstrap = {
+      acceptedPolicies: [{ policyEnvelope: { payload: { contextGraphId: PRIVATE_CG } } }],
+    } as never;
+    try {
+      await expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(PRIVATE_CG)).resolves.toBe(false);
+    } finally {
+      internals.config.rfc64CatalogBootstrap = bootstrap;
+    }
+
     vi.mocked(internals.resolveRfc64AcceptedCompatibilityAuthorityV1)
-      .mockReturnValue(receiverAuthority('catalog-active'));
+      .mockReturnValue(receiverAuthority('catalog-blocked'));
     await expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(PRIVATE_CG)).resolves.toBe(false);
     expect(internals.getCgMeta).not.toHaveBeenCalled();
   });
@@ -164,8 +175,11 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
     }
   });
 
-  it('applies a root SHARE of a member private graph instead of declining it as catalog-owned', async () => {
+  it('wires the member lane into the SHARE apply gate for root scope only', async () => {
     const handler = internals.getOrCreateSharedMemoryHandler();
+    const gate = handler as unknown as {
+      legacyApplyAllowedOracle(contextGraphId: string, subGraphName: string | null): boolean | Promise<boolean>;
+    };
     const wire = internals.contextGraphNameCommitment(PRIVATE_CG);
     internals.wireIdToLocalCgId.set(wire, PRIVATE_CG);
     const share = (index: number) => encodeRootlessWorkspaceRequest({
@@ -179,16 +193,22 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
       timestampMs: Date.now(),
     });
     try {
+      // The handler applies a signed, encrypted member share once this gate
+      // admits it (workspace-handler-private-root-legacy-lane.test.ts in the
+      // publisher); the member's own checks still run after it.
       stubAuthority({});
-      const privateOutcome = await handler.handle(share(0), PEER);
-      expect(privateOutcome.reason ?? '').not.toContain('not authoritative');
+      await expect(Promise.resolve(gate.legacyApplyAllowedOracle(wire, null))).resolves.toBe(true);
 
       vi.restoreAllMocks();
       stubAuthority({ meta: meta({ accessPolicy: 'public' }) });
-      await expect(handler.handle(share(1), PEER)).resolves.toMatchObject({
+      await expect(Promise.resolve(gate.legacyApplyAllowedOracle(wire, null))).resolves.toBe(false);
+      const publicShare = share(1);
+      await expect(handler.handle(publicShare, PEER)).resolves.toMatchObject({
         applied: false,
         reason: expect.stringContaining('not authoritative'),
       });
+      await expect(internals.store.hasGraph(rootlessSharedMemoryGraphFromWire(publicShare)))
+        .resolves.toBe(false);
     } finally {
       internals.wireIdToLocalCgId.delete(wire);
     }
