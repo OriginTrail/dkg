@@ -250,6 +250,50 @@ export class EventsMethods extends EVMChainAdapterBase {
         }
       }
 
+      // An update gives an existing KA (same id) a new latest root. Consumers
+      // use it as a refresh nudge for a copy they already hold and re-read the
+      // current root from chain before acting, so, as with the registration
+      // lane above, the `txIndex` a stored row cannot carry costs nothing.
+      // `batchId` repeats the id for the poller's collection-update callback:
+      // a V10 KA is its own batch.
+      if (eventType === 'KnowledgeAssetUpdated') {
+        const kaStorage = this.contracts.knowledgeAssetStorage;
+        // The legacy asset-storage ABI has no such event; nothing to scan.
+        if (kaStorage && kaStorage.interface.getEvent('KnowledgeAssetUpdated') !== null) {
+          const logged = await this.chainEventLogRows(
+            'knowledge-asset',
+            'knowledgeAssetStorageAddress',
+            kaStorage,
+            'KnowledgeAssetUpdated',
+            filter,
+          );
+          const logs = logged ?? await this.queryFilterWithFailover(
+            kaStorage, 'kas.queryFilter(KnowledgeAssetUpdated)',
+            kaStorage.filters.KnowledgeAssetUpdated(),
+            filter.fromBlock ?? 0, filter.toBlock,
+          );
+
+          for (const log of logs) {
+            const parsed = kaStorage.interface.parseLog({ topics: [...log.topics], data: log.data });
+            if (!parsed) continue;
+            const kaId = parsed.args.id.toString();
+            const txIndex = (log as { transactionIndex?: number }).transactionIndex;
+            yield {
+              type: 'KnowledgeAssetUpdated',
+              blockNumber: log.blockNumber,
+              data: {
+                kaId,
+                batchId: kaId,
+                merkleRoot: parsed.args.merkleRoot,
+                author: typeof parsed.args.author === 'string' ? parsed.args.author : '',
+                txHash: log.transactionHash,
+                txIndex,
+              },
+            };
+          }
+        }
+      }
+
       // V10 greenfield (DKGKnowledgeAssets) emits `KnowledgeAssetCreated`
       // plus a single ERC-721 `Transfer(0x0, owner, tokenId)` per publish
       // (tokenId == kaId == kaId; no batch mint). Legacy V8/V9

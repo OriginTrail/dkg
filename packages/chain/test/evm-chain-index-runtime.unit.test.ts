@@ -44,6 +44,16 @@ const CG_STORAGE_EVENTS = [
 
 const hubInterface = new ethers.Interface(HUB_EVENTS);
 const cgInterface = new ethers.Interface(CG_STORAGE_EVENTS);
+const KA_STORAGE_ADDRESS = '0x00000000000000000000000000000000000000d4';
+const kaInterface = new ethers.Interface([
+  'event KnowledgeAssetCreated(uint256 indexed id, address indexed author, string publishOperationId, bytes32 merkleRoot, uint88 byteSize, uint40 startEpoch, uint40 endEpoch, uint96 tokenAmount, bool isImmutable)',
+  'event KnowledgeAssetUpdated(uint256 indexed id, address indexed author, string updateOperationId, bytes32 merkleRoot, uint256 byteSize, uint96 tokenAmount)',
+]);
+const KNOWLEDGE_ASSET_UPDATED_SCAN_IDENTITY = Object.freeze({
+  eventType: 'KnowledgeAssetUpdated' as const,
+  knowledgeAssetStorageAddress: KA_STORAGE_ADDRESS,
+  topic0: kaInterface.getEvent('KnowledgeAssetUpdated')!.topicHash,
+});
 const CONTEXT_GRAPH_CREATED_SCAN_IDENTITY = Object.freeze({
   eventType: 'ContextGraphCreated' as const,
   contextGraphStorageAddress: CG_STORAGE_ADDRESS,
@@ -129,6 +139,8 @@ function harness(options?: {
    * read's policy deadline applies as it does in production.
    */
   failoverClient?: boolean;
+  /** Also index a DKGKnowledgeAssets contract (the `knowledge-asset` family). */
+  knowledgeAssetStorage?: boolean;
 }): Harness {
   const headNumber = options?.headNumber ?? 1_000;
   const logs = options?.logs ?? [];
@@ -205,6 +217,16 @@ function harness(options?: {
       // rotation of this name a MOVE off this address.
       hubBinding: { name: 'ContextGraphStorage', kind: 'assetStorage' },
     },
+    ...(options?.knowledgeAssetStorage === true
+      ? {
+          knowledgeAssetStorage: {
+            address: KA_STORAGE_ADDRESS,
+            contractInterface: kaInterface,
+            deploymentBlockNumber: options?.deploymentBlockNumber ?? 2,
+            hubBinding: { name: 'DKGKnowledgeAssets', kind: 'assetStorage' as const },
+          },
+        }
+      : {}),
     readTipProvider: async (label, read, readOptions) => {
       labels.push(label);
       if (typeof readOptions?.rpcUsageConsumer === 'string') {
@@ -516,6 +538,57 @@ describe('createEvmChainIndexRuntime', () => {
       ...CONTEXT_GRAPH_KA_SCAN_IDENTITY,
       topic0: hexWord(92),
     })).resolves.toBeUndefined();
+  });
+
+  it('lends the KnowledgeAssetUpdated lease against the DKGKnowledgeAssets coverage only', async () => {
+    const cgOnly = harness();
+    await cgOnly.runtime.tick.runOnce(new AbortController().signal);
+    // A runtime without DKGKnowledgeAssets has no family to lend.
+    await expect(cgOnly.runtime.binding.readEventScanLease!(KNOWLEDGE_ASSET_UPDATED_SCAN_IDENTITY))
+      .resolves.toBeUndefined();
+
+    const h = harness({ knowledgeAssetStorage: true });
+    await h.runtime.tick.runOnce(new AbortController().signal);
+    const requestsBefore = h.getLogs.mock.calls.length + h.heads.mock.calls.length
+      + h.blocks.mock.calls.length;
+    const lease = await h.runtime.binding.readEventScanLease!(
+      KNOWLEDGE_ASSET_UPDATED_SCAN_IDENTITY,
+    );
+    expect(lease?.throughBlockNumber).toBe(1_000);
+    await expect(lease!.holds()).resolves.toBe(true);
+    expect(
+      h.getLogs.mock.calls.length + h.heads.mock.calls.length + h.blocks.mock.calls.length,
+    ).toBe(requestsBefore);
+    // The graph-family leases are unchanged beside it.
+    await expect(h.runtime.binding.readEventScanLease!(CONTEXT_GRAPH_CREATED_SCAN_IDENTITY))
+      .resolves.toMatchObject({ throughBlockNumber: 1_000 });
+
+    // Exact address and topic, as for the graph families.
+    await expect(h.runtime.binding.readEventScanLease!({
+      ...KNOWLEDGE_ASSET_UPDATED_SCAN_IDENTITY,
+      knowledgeAssetStorageAddress: CG_STORAGE_ADDRESS,
+    })).resolves.toBeUndefined();
+    await expect(h.runtime.binding.readEventScanLease!({
+      ...KNOWLEDGE_ASSET_UPDATED_SCAN_IDENTITY,
+      topic0: kaInterface.getEvent('KnowledgeAssetCreated')!.topicHash,
+    })).resolves.toBeUndefined();
+
+    // The horizon is the knowledge-asset family's own coverage.
+    const state = (await h.store.load(RUNTIME_SCOPE))!;
+    h.store.seed(RUNTIME_SCOPE, {
+      ...state,
+      coverage: state.coverage.map((entry) => entry.family === 'knowledge-asset'
+        ? { ...entry, coveredThroughBlock: 990 }
+        : entry),
+    });
+    await expect(h.runtime.binding.readEventScanLease!(KNOWLEDGE_ASSET_UPDATED_SCAN_IDENTITY))
+      .resolves.toMatchObject({ throughBlockNumber: 990 });
+    h.store.seed(RUNTIME_SCOPE, {
+      ...state,
+      coverage: state.coverage.filter((entry) => entry.family !== 'knowledge-asset'),
+    });
+    await expect(h.runtime.binding.readEventScanLease!(KNOWLEDGE_ASSET_UPDATED_SCAN_IDENTITY))
+      .resolves.toBeUndefined();
   });
 
   it('refuses coverage committed by a different decoder topic generation', async () => {
