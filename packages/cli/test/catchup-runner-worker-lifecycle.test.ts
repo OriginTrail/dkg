@@ -553,36 +553,75 @@ describe('WorkerCatchupRunner agent bridge', () => {
     });
   });
 
-  it('admits the selected SWM lane only for an active accepted public policy', async () => {
+  it('runs the selected SWM lane only while an accepted public policy is active', async () => {
     // The same rule the agent's recovery lease applies when the lane runs.
-    const accepted = async (
-      authority: unknown,
-      includeSharedMemory = true,
-    ): Promise<unknown> => {
-      const { agent } = bridgeAgent({
+    const notAttempted = { kind: 'catchup-plane-not-attempted', reason: 'selected-lane-refused' };
+    const runsSelectedLane = async (authority: unknown): Promise<boolean> => {
+      const { agent, calls } = bridgeAgent({
         resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => authority,
       });
       const posted = await invokeThroughBridge(
         agent,
-        'prepareCatchup',
-        ['cg-lane', includeSharedMemory],
+        'syncSharedMemory',
+        ['peer-a', 'cg-lane', 2000, 'catchup-foreground', true],
       );
-      return posted.result.selectedSharedMemoryAccepted;
+      if (calls.selectedShared.length === 0) expect(posted.result).toEqual(notAttempted);
+      return calls.selectedShared.length === 1;
     };
 
-    expect(await accepted({ lane: 'selected-public', active: true })).toBe(true);
-    expect(await accepted({ lane: 'selected-public', active: false })).toBe(false);
-    expect(await accepted({ lane: 'ordinary-private', active: true })).toBe(false);
-    expect(await accepted({ lane: null, active: false })).toBe(false);
-    expect(await accepted({ lane: 'selected-public', active: true }, false)).toBe(false);
+    expect(await runsSelectedLane({ lane: 'selected-public', active: true })).toBe(true);
+    expect(await runsSelectedLane({ lane: 'selected-public', active: false })).toBe(false);
+    expect(await runsSelectedLane({ lane: 'ordinary-private', active: true })).toBe(false);
+    expect(await runsSelectedLane({ lane: null, active: false })).toBe(false);
 
-    const { agent: withoutResolver } = bridgeAgent();
-    const posted = await invokeThroughBridge(withoutResolver, 'prepareCatchup', ['cg-lane', true]);
-    expect(posted.result.selectedSharedMemoryAccepted).toBe(false);
+    // The ordinary lane (private curator recovery) never consults it.
+    const { agent: privateAgent, calls: privateCalls } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: null, active: false }),
+    });
+    await invokeThroughBridge(
+      privateAgent,
+      'syncSharedMemory',
+      ['peer-a', 'cg-private', 2000, 'catchup-foreground'],
+    );
+    expect(privateCalls.shared).toHaveLength(1);
+
+    // An agent without the resolver leaves the decision to the lease.
+    const { agent: withoutResolver, calls: withoutResolverCalls } = bridgeAgent();
+    await invokeThroughBridge(
+      withoutResolver,
+      'syncSharedMemory',
+      ['peer-a', 'cg-lane', 2000, 'catchup-foreground', true],
+    );
+    expect(withoutResolverCalls.selectedShared).toHaveLength(1);
+  });
+
+  it('decides the selected SWM lane on every call, not once per job', async () => {
+    // A first subscribe commits the graph's RFC-64 policy in the background
+    // while the job prepares, so one call can find the lane inactive and the
+    // next find it active.
+    let authority: { lane: string | null; active: boolean } = { lane: null, active: false };
+    const { agent, calls } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => authority,
+    });
+    const args = ['peer-a', 'cg-commits', 2000, 'catchup-foreground', true];
+
+    const first = await invokeThroughBridge(agent, 'syncSharedMemory', args);
+    expect(first.result).toEqual({
+      kind: 'catchup-plane-not-attempted',
+      reason: 'selected-lane-refused',
+    });
+    expect(calls.selectedShared).toHaveLength(0);
+
+    authority = { lane: 'selected-public', active: true };
+    const second = await invokeThroughBridge(agent, 'syncSharedMemory', args);
+    expect(calls.selectedShared).toHaveLength(1);
+    expect(second.result).toMatchObject({ kind: 'selected-shared-memory', scopeComplete: true });
   });
 
   it('reports a selected SWM lane refused by its recovery lease as not attempted', async () => {
+    // Active when the call started, revoked before the lane ran.
     const { agent, calls } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: 'selected-public', active: true }),
       syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
         calls.selectedShared.push(args);
         throw new Rfc64SwmRecoveryTargetRevokedErrorV1('cg-refused');
@@ -605,6 +644,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
 
   it('keeps a selected SWM transport error a failure', async () => {
     const { agent } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: 'selected-public', active: true }),
       syncSelectedSharedMemoryFromPeerDetailed: async () => {
         throw new Error('stream reset by peer');
       },

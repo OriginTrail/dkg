@@ -9,6 +9,7 @@ import { catchupReadinessResult, durableDiagnostics, sharedMemoryDiagnostics } f
 import type { CatchupJobResult } from '../src/catchup-runner.js';
 import {
   CONTEXT_GRAPH_READINESS_VERSION,
+  catchupResultHasCleanResponse,
   classifyContextGraphCatchupReadiness,
   classifyNameHashOnlyCatchup,
 } from '../src/context-graph-readiness.js';
@@ -828,6 +829,10 @@ describe('name-hash-only catch-up classification', () => {
  * public, legacy durable sync skips it as catalog-authoritative, and no RFC-64
  * public policy admits the selected SWM lane. Nothing is ever sent, so no peer
  * can deny it; the job used to end `failed` with "all reachable peers failed".
+ *
+ * The race case is an Edge's first subscribe to a public graph: the graph's
+ * RFC-64 policy commits in the background while the job prepares, so the lane
+ * has to be decided when each call runs.
  */
 describe('catch-up terminal status through the bridge and worker', () => {
   const CG = 'cg-terminal-status';
@@ -837,7 +842,10 @@ describe('catch-up terminal status through the bridge and worker', () => {
   function nodeAgent(node: {
     isPrivate: boolean;
     legacySyncAllowed: boolean;
+    /** Read on every resolver call, so a test can change it mid-job. */
     selectedLane: { lane: 'selected-public' | 'ordinary-private' | null; active: boolean };
+    /** Runs on each sync-protocol probe, i.e. after `prepareCatchup` returned. */
+    onProbe?: () => void;
     durable: () => Promise<unknown>;
     selectedSharedMemory?: () => Promise<unknown>;
     ordinarySharedMemory?: () => Promise<unknown>;
@@ -861,7 +869,10 @@ describe('catch-up terminal status through the bridge and worker', () => {
       primeCatchupConnections: async () => {},
       listAdmittedConnectedPeers: async () => PEERS.map((peerId) => ({ toString: () => peerId })),
       selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
-      waitForSyncProtocol: async () => true,
+      waitForSyncProtocol: async () => {
+        node.onProbe?.();
+        return true;
+      },
       syncDurableRecoveryContextGraph: async () => {
         calls.durable += 1;
         return { result: await node.durable() };
@@ -880,14 +891,19 @@ describe('catch-up terminal status through the bridge and worker', () => {
     return { agent: agent as unknown as DKGAgent, calls };
   }
 
-  /** As the subscribe route does when no peer answered cleanly. */
-  const classify = (result: CatchupJobResult) => classifyContextGraphCatchupReadiness({
-    result,
-    includeSharedMemory: true,
-    hasConfirmedMeta: false,
-    isPrivate: false,
-    readinessBeforeCatchup: before,
-  });
+  /**
+   * As the subscribe route does it: metadata is confirmed with the agent only
+   * once some peer answered.
+   */
+  const classify = (result: CatchupJobResult, agentConfirmsMeta = false) => (
+    classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: true,
+      hasConfirmedMeta: catchupResultHasCleanResponse(result) && agentConfirmsMeta,
+      isPrivate: false,
+      readinessBeforeCatchup: before,
+    })
+  );
 
   it('ends an outsider unreachable with the join-request hint, not failed', async () => {
     const { agent, calls } = nodeAgent({
@@ -919,6 +935,52 @@ describe('catch-up terminal status through the bridge and worker', () => {
     expect(result.diagnostics?.sharedMemory.failedPeers).toBe(0);
     // Neither plane reached the agent's sync lanes.
     expect(calls).toEqual({ durable: 0, selectedSharedMemory: 0, ordinarySharedMemory: 0 });
+  });
+
+  it('runs selected SWM when the public policy commits after the job prepared', async () => {
+    const selectedLane: { lane: 'selected-public' | null; active: boolean } = {
+      lane: null,
+      active: false,
+    };
+    const { agent, calls } = nodeAgent({
+      isPrivate: false,
+      // A catalog graph's VM plane is not served by legacy durable sync.
+      legacySyncAllowed: false,
+      selectedLane,
+      // The background responsibility pass commits the policy during the probes.
+      onProbe: () => {
+        selectedLane.lane = 'selected-public';
+        selectedLane.active = true;
+      },
+      durable: async () => createIncompleteDurableSyncResult(),
+      // Verified data inserted; the bounded job ended before the scope did.
+      selectedSharedMemory: async () => ({
+        kind: 'selected-shared-memory',
+        shared: {
+          ...emptySharedMemorySyncResult(),
+          insertedTriples: 4,
+          fetchedDataTriples: 4,
+          insertedDataTriples: 4,
+          bytesReceived: 400,
+          completedPhases: 1,
+          timedOutPhases: 1,
+        },
+        scopeComplete: false,
+      }),
+    });
+
+    const result = await runCatchupThroughBridge(agent, { contextGraphId: CG, includeSharedMemory: true });
+
+    expect(calls.selectedSharedMemory).toBe(PEERS.length);
+    expect(result.sharedMemorySynced).toBe(4 * PEERS.length);
+    expect(result.peersResponded).toBe(PEERS.length);
+    expect(result.diagnostics?.sharedMemory.failedPeers).toBe(0);
+
+    // A peer answered, so the route asks the agent; the public graph is registered.
+    const classification = classify(result, true);
+    expect(classification.jobStatus).not.toBe('unreachable');
+    expect(classification.jobStatus).toBe('partial');
+    expect(classification.error).toMatch(/^Verified data was inserted, but this bounded catch-up job ended/);
   });
 
   it('still ends failed when a reachable peer times out and the rest fail in transport', async () => {

@@ -560,37 +560,32 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.cleanPlaneCompletions?.sharedMemory.selectedScopeCompletePeers ?? 0).toBe(0);
   });
 
-  it('does not request the selected SWM lane without an accepted public policy', async () => {
-    // Public SWM only runs on the selected lane, and the agent's recovery lease
-    // refuses that lane unless an RFC-64 public policy is accepted for the graph.
-    // Asking anyway turned every peer into a "transport failure" that no peer
-    // ever caused.
+  it('keeps asking every peer for shared memory after one call was not attempted', async () => {
+    // The host decides the selected lane per call. A first subscribe commits
+    // the graph's RFC-64 policy in the background, so the lane can be refused
+    // for one peer and run for the next: a not-attempted call must neither end
+    // shared memory for the job nor count as that peer's failure.
     const peerIds = ['peer-a', 'peer-b', 'peer-c'];
-    const durableCalls: string[] = [];
-    const sharedCalls: unknown[][] = [];
+    const sharedCalls: string[] = [];
 
     const result = await runWorkerCatchup({
-      contextGraphId: 'cg-public-not-accepted',
+      contextGraphId: 'cg-lane-commits-mid-walk',
       includeSharedMemory: true,
       graphOwnedDurableRecovery: true,
     }, async (method, args) => {
       switch (method) {
         case 'prepareCatchup':
-          return {
-            isPrivateContextGraph: false,
-            selectedSharedMemoryAccepted: false,
-            peerIds,
-            connectedPeers: peerIds.length,
-          };
+          return { isPrivateContextGraph: false, peerIds, connectedPeers: peerIds.length };
         case 'waitForSyncProtocol':
           return true;
         case 'syncDurableRecovery':
-          durableCalls.push(args[0] as string);
-          return durableResult();
+          return { kind: 'catchup-plane-not-attempted', reason: 'catalog-authoritative' };
         case 'syncSharedMemory':
-          sharedCalls.push(args);
-          // The lease refusal as the unfixed bridge relayed it.
-          throw new Error('RFC-64 SWM recovery authority was revoked for "cg-public-not-accepted"');
+          sharedCalls.push(args[0] as string);
+          expect(args[4]).toBe(true);
+          return sharedCalls.length === 1
+            ? { kind: 'catchup-plane-not-attempted', reason: 'selected-lane-refused' }
+            : { kind: 'selected-shared-memory', shared: sharedResult(), scopeComplete: true };
         case 'finalizeCatchup':
           return null;
         default:
@@ -598,25 +593,20 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
       }
     });
 
-    expect(sharedCalls).toEqual([]);
+    expect([...sharedCalls].sort()).toEqual(peerIds);
+    expect(result.sharedMemorySynced).toBe(2);
+    expect(result.cleanPlaneCompletions?.sharedMemory.verifiedDataPeers).toBe(2);
     expect(result.diagnostics?.sharedMemory.failedPeers).toBe(0);
-    expect(result.cleanPlaneCompletions?.sharedMemory).toEqual({
-      verifiedDataPeers: 0,
-      emptyPeers: 0,
-      authorityEmptyPeers: 0,
-    });
-    expect(result.sharedMemorySynced).toBe(0);
-    // Only the durable plane is left, and the host owns it for the whole graph.
-    expect(durableCalls).toEqual(['peer-a']);
-    expect(result.peersTried).toBe(1);
-    expect(result.peersNotAttempted).toBe(2);
-    expect(result.peersResponded).toBe(1);
+    expect(result.peersTried).toBe(peerIds.length);
+    expect(result.peersResponded).toBe(2);
+    expect(result.dataSynced).toBe(0);
   });
 
   it('records a selected SWM lane refused by its recovery lease as not attempted, not failed', async () => {
-    // Accepted when the job was prepared, refused by the lease when the lane
-    // ran (unsubscribe, catalog refresh). The bridge reports the plane as not
-    // attempted; it must count neither as an answer nor as a transport failure.
+    // The host answers not attempted when no RFC-64 public policy is active
+    // for the graph at call time, or when the lease refuses the lane mid-call
+    // (unsubscribe, catalog refresh). Neither is an answer from the peer or a
+    // transport failure.
     const peerIds = ['peer-a', 'peer-b'];
     const selectedFlags: unknown[] = [];
 
@@ -627,7 +617,6 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
           case 'prepareCatchup':
             return {
               isPrivateContextGraph: false,
-              selectedSharedMemoryAccepted: true,
               peerIds,
               connectedPeers: peerIds.length,
             };
