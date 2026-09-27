@@ -470,6 +470,74 @@ describe('graph-scoped finalization recovery admission', () => {
     }
   });
 
+  it('keeps retrying a store-busy entry within a minute instead of parking it as stable', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-busy-transient-'));
+    try {
+      let now = 1_000;
+      let busy = true;
+      const store = await openSqliteFinalizationRecoveryStore(directory, {
+        now: () => now,
+      });
+      const throwIfBusy = () => {
+        if (busy) {
+          throw new StoreSchedulerBusyError(
+            'queue_wait_timeout',
+            'normal',
+            'finalization-recovery-worker',
+          );
+        }
+      };
+      const recovery = new FinalizationRecovery(
+        store,
+        recoveryChain(),
+        { info: () => {}, warn: () => {} },
+        {
+          ...recoveryMaterializer(),
+          // The first pass applies the received entry; later passes replay
+          // the VERIFIED one. Both meet the same busy store.
+          apply: async () => {
+            throwIfBusy();
+            return 'applied' as const;
+          },
+          replayVerified: async () => {
+            throwIfBusy();
+            return 'promoted' as const;
+          },
+        },
+      );
+      await recovery.receive({
+        rawMessage: encodeFinalizationMessage(message()),
+        contextGraphId: CONTEXT_GRAPH,
+        sourcePeerId: '12D3KooWPublisher',
+        candidate: parsedMessage(),
+      });
+
+      // Well past the stable-failure threshold: every busy pass schedules the
+      // next attempt on the bounded backoff and leaves no failure streak.
+      for (let pass = 1; pass <= 8; pass += 1) {
+        await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+        const [entry] = await store.list();
+        expect(entry).toMatchObject({
+          state: 'VERIFIED',
+          attemptCount: pass,
+          failureStreak: 0,
+          lastError: 'replay store scheduler remained busy',
+        });
+        expect(entry.failureSignature).toBeUndefined();
+        expect(entry.nextAttemptAt! - now).toBeGreaterThan(0);
+        expect(entry.nextAttemptAt! - now).toBeLessThanOrEqual(60_000);
+        now = entry.nextAttemptAt!;
+      }
+
+      busy = false;
+      await expect(recovery.processDueBatch(16)).resolves.toBe(1);
+      expect(await store.list()).toMatchObject([{ state: 'SETTLED' }]);
+      await store.close();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it('parks a stable deferred failure while chain reconciliation can still wake it', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-stable-failure-'));
     let store: Awaited<ReturnType<typeof openSqliteFinalizationRecoveryStore>> | undefined;

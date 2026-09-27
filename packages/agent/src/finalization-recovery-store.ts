@@ -179,10 +179,25 @@ export type FinalizationRecoveryFailureCode =
 /** Consecutive identical failures after which a failure counts as stable. */
 export const FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD = 3;
 
+/**
+ * Failures that clear on their own: a store scheduler that stays busy frees
+ * up once the background work in front of it drains. They retry on the
+ * ordinary bounded backoff and never count toward a stable-failure streak, so
+ * they cannot trigger the stable-failure retry delay or the streak-based
+ * rejection of a live entry.
+ */
+export const FINALIZATION_RECOVERY_TRANSIENT_FAILURE_CODES: ReadonlySet<FinalizationRecoveryFailureCode> =
+  new Set(['store-scheduler-busy']);
+
 export type FinalizationRecoveryAttemptPolicy =
   | {
       mode: 'ordinary';
       retryDelayMs?: number;
+    }
+  | {
+      /** A failure that neither extends nor resets the stable-failure streak. */
+      mode: 'transient';
+      retryDelayMs: number;
     }
   | {
       mode: 'stable-failure';
@@ -213,6 +228,23 @@ export function planFinalizationRecoveryAttempt(
   policy: FinalizationRecoveryAttemptPolicy,
   now: number,
 ): FinalizationRecoveryAttemptUpdate {
+  if (policy.mode === 'transient') {
+    // Older releases counted transient codes as stable failures; a streak of
+    // one is no evidence that a failure is stable, so it is dropped here.
+    const transientStreak = current.failureSignature !== undefined
+      && (FINALIZATION_RECOVERY_TRANSIENT_FAILURE_CODES as ReadonlySet<string>)
+        .has(current.failureSignature);
+    return {
+      attemptCount: current.attemptCount + 1,
+      lastError: lastError ?? null,
+      failureSignature: transientStreak ? null : current.failureSignature ?? null,
+      failureStreak: transientStreak ? 0 : current.failureStreak,
+      nextAttemptAt: Math.max(
+        current.nextAttemptAt ?? 0,
+        now + Math.max(0, policy.retryDelayMs),
+      ),
+    };
+  }
   const failureSignature = policy.mode === 'stable-failure'
     ? policy.failureCode
     : undefined;

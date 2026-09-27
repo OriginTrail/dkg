@@ -263,6 +263,76 @@ describe('finalization recovery attempt planner', () => {
     expect(stable).toMatchObject({ failureStreak: 3, nextAttemptAt: 2_000 });
   });
 
+  it('backs a transient failure off briefly without touching the stable-failure streak', () => {
+    const transient = planFinalizationRecoveryAttempt(
+      entry({ failureSignature: 'apply-deferred', failureStreak: 2, attemptCount: 2 }),
+      'store scheduler remained busy',
+      { mode: 'transient', retryDelayMs: 100 },
+      1_000,
+    );
+    expect(transient).toEqual({
+      attemptCount: 3,
+      lastError: 'store scheduler remained busy',
+      failureSignature: 'apply-deferred',
+      failureStreak: 2,
+      nextAttemptAt: 1_100,
+    });
+
+    // The next stable failure continues the streak the transient one left.
+    const stable = planFinalizationRecoveryAttempt(
+      entry({ ...transient, failureSignature: 'apply-deferred' }),
+      'still deferred',
+      stablePolicy,
+      1_100,
+    );
+    expect(stable).toMatchObject({ failureStreak: 3, nextAttemptAt: 11_100 });
+  });
+
+  it('never escalates repeated transient failures to the stable-failure delay', () => {
+    let current = entry();
+    let now = 1_000;
+    for (let attempt = 1; attempt <= 10; attempt += 1) {
+      const update = planFinalizationRecoveryAttempt(
+        current,
+        'store scheduler remained busy',
+        { mode: 'transient', retryDelayMs: 100 },
+        now,
+      );
+      expect(update).toMatchObject({
+        attemptCount: attempt,
+        failureSignature: null,
+        failureStreak: 0,
+        nextAttemptAt: now + 100,
+      });
+      current = entry({
+        attemptCount: update.attemptCount,
+        failureStreak: update.failureStreak,
+        nextAttemptAt: update.nextAttemptAt!,
+      });
+      now = update.nextAttemptAt!;
+    }
+  });
+
+  it('drops a streak an older release recorded for a transient code', () => {
+    expect(planFinalizationRecoveryAttempt(
+      entry({
+        failureSignature: 'store-scheduler-busy',
+        failureStreak: 3,
+        attemptCount: 3,
+        nextAttemptAt: 900,
+      }),
+      'store scheduler remained busy',
+      { mode: 'transient', retryDelayMs: 100 },
+      1_000,
+    )).toEqual({
+      attemptCount: 4,
+      lastError: 'store scheduler remained busy',
+      failureSignature: null,
+      failureStreak: 0,
+      nextAttemptAt: 1_100,
+    });
+  });
+
   it('preserves future backoff for settled retries after the live window', () => {
     expect(planFinalizationRecoveryAttempt(
       entry({ state: 'SETTLED', createdAt: 1_000 }),
