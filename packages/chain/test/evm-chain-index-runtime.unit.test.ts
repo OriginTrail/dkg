@@ -141,6 +141,8 @@ function harness(options?: {
   failoverClient?: boolean;
   /** Also index a DKGKnowledgeAssets contract (the `knowledge-asset` family). */
   knowledgeAssetStorage?: boolean;
+  /** Leave ContextGraphStorage unbound, as a Hub without one does. */
+  withoutContextGraphStorage?: boolean;
 }): Harness {
   const headNumber = options?.headNumber ?? 1_000;
   const logs = options?.logs ?? [];
@@ -208,15 +210,17 @@ function harness(options?: {
       contractInterface: hubInterface,
       deploymentBlockNumber: options?.deploymentBlockNumber ?? 1,
     },
-    contextGraphStorage: {
-      address: CG_STORAGE_ADDRESS,
-      contractInterface: cgInterface,
-      deploymentBlockNumber: options?.deploymentBlockNumber ?? 2,
-      // Exactly what the adapter passes: the registry this address was
-      // resolved through. It seeds the tick's bindings, which is what makes a
-      // rotation of this name a MOVE off this address.
-      hubBinding: { name: 'ContextGraphStorage', kind: 'assetStorage' },
-    },
+    ...(options?.withoutContextGraphStorage === true ? {} : {
+      contextGraphStorage: {
+        address: CG_STORAGE_ADDRESS,
+        contractInterface: cgInterface,
+        deploymentBlockNumber: options?.deploymentBlockNumber ?? 2,
+        // Exactly what the adapter passes: the registry this address was
+        // resolved through. It seeds the tick's bindings, which is what makes a
+        // rotation of this name a MOVE off this address.
+        hubBinding: { name: 'ContextGraphStorage', kind: 'assetStorage' as const },
+      },
+    }),
     ...(options?.knowledgeAssetStorage === true
       ? {
           knowledgeAssetStorage: {
@@ -588,6 +592,18 @@ describe('createEvmChainIndexRuntime', () => {
       coverage: state.coverage.filter((entry) => entry.family !== 'knowledge-asset'),
     });
     await expect(h.runtime.binding.readEventScanLease!(KNOWLEDGE_ASSET_UPDATED_SCAN_IDENTITY))
+      .resolves.toBeUndefined();
+  });
+
+  it('lends the KnowledgeAssetUpdated lease without a ContextGraphStorage, and only that one', async () => {
+    const h = harness({ knowledgeAssetStorage: true, withoutContextGraphStorage: true });
+    await h.runtime.tick.runOnce(new AbortController().signal);
+
+    await expect(h.runtime.binding.readEventScanLease!(KNOWLEDGE_ASSET_UPDATED_SCAN_IDENTITY))
+      .resolves.toMatchObject({ throughBlockNumber: 1_000 });
+    await expect(h.runtime.binding.readEventScanLease!(CONTEXT_GRAPH_CREATED_SCAN_IDENTITY))
+      .resolves.toBeUndefined();
+    await expect(h.runtime.binding.readEventScanLease!(CONTEXT_GRAPH_KA_SCAN_IDENTITY))
       .resolves.toBeUndefined();
   });
 
