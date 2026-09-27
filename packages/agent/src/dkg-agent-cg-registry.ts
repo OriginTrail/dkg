@@ -1731,9 +1731,8 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
      */
     publishPolicyMaxCacheAgeMs?: number;
     /**
-     * Caller deadline for the chain lookups: the on-chain id resolution (which
-     * can fall back to a reverse name-hash scan) and the finalized snapshot
-     * read. An aborted lookup leaves its field unknown.
+     * Caller deadline for the chain lookups: the on-chain id resolution and
+     * the finalized snapshot read. An aborted lookup leaves its field unknown.
      */
     signal?: AbortSignal;
   }): Promise<{
@@ -1741,6 +1740,28 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     publishPolicy?: number;
   }> {
     const signal = options?.signal;
+    // With a finalized authority index, a named graph's id comes only from the
+    // finalized registration binding. The current-state binding falls back to
+    // a live registry range scan, which a member of a graph that was never
+    // registered paid twice on every share: minutes on a public chain (#2827
+    // follow-up). A legacy adapter and a numeric id keep that binding. Either
+    // way the id is looked up at most once per call.
+    let onChainIdLookup: Promise<string | null> | undefined;
+    const resolveOnChainId = (): Promise<string | null> => {
+      onChainIdLookup ??= (async () => {
+        if (
+          this.chain?.contextGraphAuthorityIndexRevisionReader === undefined
+          || typeof this.resolveContextGraphRegistrationBinding !== 'function'
+          || isCanonicalPositiveContextGraphId(contextGraphId)
+        ) {
+          return this.getContextGraphOnChainId(contextGraphId, { signal }).catch(() => null);
+        }
+        const binding = await this.resolveContextGraphRegistrationBinding(contextGraphId, { signal })
+          .catch(() => null);
+        return binding?.kind === 'registered' ? binding.onChainId.toString() : null;
+      })();
+      return onChainIdLookup;
+    };
     // Keep the explicitly-created local-first state off the registry lookup
     // path. The registration guard below used to run only after the cache
     // re-key step had already called `getContextGraphOnChainId()` (twice on a
@@ -1795,7 +1816,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
 
     if (accessPolicy === undefined || publishPolicy === undefined) {
       onChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId
-        ?? (await this.getContextGraphOnChainId(contextGraphId, { signal }).catch(() => null))
+        ?? (await resolveOnChainId())
         ?? undefined;
       if (onChainId && onChainId !== contextGraphId) {
         if (accessPolicy === undefined) accessPolicy = this.onChainAccessPolicyCache.get(onChainId);
@@ -1839,7 +1860,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       if (!registeredViaStatus) {
         if (onChainId === undefined) {
           onChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId
-            ?? (await this.getContextGraphOnChainId(contextGraphId, { signal }).catch(() => null))
+            ?? (await resolveOnChainId())
             ?? undefined;
         }
         if (onChainId) {
@@ -1888,7 +1909,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     ) {
       if (onChainId === undefined) {
         onChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId
-          ?? (await this.getContextGraphOnChainId(contextGraphId, { signal }).catch(() => null))
+          ?? (await resolveOnChainId())
           ?? undefined;
       }
       let numericId: bigint | undefined;

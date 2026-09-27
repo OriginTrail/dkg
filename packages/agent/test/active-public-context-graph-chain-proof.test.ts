@@ -6,6 +6,7 @@ import { DKGAgent } from '../src/dkg-agent.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { Rfc64AuthorityReadCoordinatorV1 } from
   '../src/rfc64/authority-rpc-circuit-breaker-v1.js';
+import type { ContextGraphRegistrationBinding } from '../src/dkg-agent-cg-registry.js';
 import {
   memoizeActivePublicContextGraphChainProof,
   resolveActivePublicContextGraphChainProof,
@@ -14,8 +15,20 @@ import {
 
 interface ChainProofAgentFixtureInput {
   readonly chain: Record<string, unknown>;
-  readonly getContextGraphOnChainId: (contextGraphId: string) => Promise<string | null>;
+  readonly getContextGraphOnChainId: (
+    contextGraphId: string,
+    options?: { signal?: AbortSignal },
+  ) => Promise<string | null>;
   readonly contextGraphExists?: (contextGraphId: string) => Promise<boolean>;
+  /**
+   * The finalized registration binding an indexed adapter's proof takes its
+   * identity from. By default it serves `getContextGraphOnChainId`'s answer,
+   * with a miss as finalized absence.
+   */
+  readonly resolveContextGraphRegistrationBinding?: (
+    contextGraphId: string,
+    options?: { signal?: AbortSignal },
+  ) => Promise<ContextGraphRegistrationBinding>;
 }
 
 function createChainProofAgentFixture(input: ChainProofAgentFixtureInput): DKGAgent {
@@ -23,6 +36,16 @@ function createChainProofAgentFixture(input: ChainProofAgentFixtureInput): DKGAg
   Object.assign(agent, {
     chain: input.chain,
     getContextGraphOnChainId: input.getContextGraphOnChainId,
+    resolveContextGraphRegistrationBinding: input.resolveContextGraphRegistrationBinding
+      ?? (async (
+        contextGraphId: string,
+        options?: { signal?: AbortSignal },
+      ): Promise<ContextGraphRegistrationBinding> => {
+        const onChainId = await input.getContextGraphOnChainId(contextGraphId, options);
+        return onChainId === null
+          ? { kind: 'unavailable', reason: 'finalized-name-absence-unaccepted' }
+          : { kind: 'registered', onChainId: BigInt(onChainId), provenance: 'name-hash' };
+      }),
     contextGraphExists: input.contextGraphExists ?? (async () => false),
     subscribedContextGraphs: new Map(),
     wireIdToLocalCgId: new Map(),
@@ -110,6 +133,69 @@ describe('active-public Context Graph chain proof', () => {
     });
     expect(getContextGraphNameHash).toHaveBeenCalledWith(42n);
     expect(getContextGraphAccessPolicy).not.toHaveBeenCalled();
+  });
+
+  describe('indexed identity (#2827 follow-up)', () => {
+    const contextGraphId = 'indexed/member-cg';
+    const publicSnapshot = {
+      contextGraphId: '42',
+      nameHash: ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+      active: true,
+      accessPolicy: 0,
+    };
+    // The current-state lookup falls back to a live registry range scan, which
+    // for a graph that was never registered covers the chain's whole history.
+    const liveLookup = async (): Promise<string | null> => {
+      throw new Error('the live name-hash lookup must not run on an indexed adapter');
+    };
+
+    function indexedAgent(binding: ContextGraphRegistrationBinding) {
+      const readBatchedSnapshot = vi.fn(async () => publicSnapshot);
+      const registrationBinding = vi.fn(async () => binding);
+      const agent = createChainProofAgentFixture({
+        chain: { contextGraphAuthorityIndexRevisionReader: {} },
+        getContextGraphOnChainId: vi.fn(liveLookup),
+        resolveContextGraphRegistrationBinding: registrationBinding,
+      });
+      Object.assign(agent, {
+        readRfc64BatchedFinalizedAuthoritySnapshotV1: readBatchedSnapshot,
+      });
+      return { agent, readBatchedSnapshot, registrationBinding };
+    }
+
+    it('takes a registered id from the finalized registration binding', async () => {
+      const { agent, readBatchedSnapshot, registrationBinding } = indexedAgent(
+        { kind: 'registered', onChainId: 42n, provenance: 'name-hash' },
+      );
+
+      await expect(resolveStrictPublicProof(agent, contextGraphId)).resolves.toEqual({
+        state: 'public',
+      });
+      expect(registrationBinding).toHaveBeenCalledWith(contextGraphId, { signal: undefined });
+      expect(readBatchedSnapshot).toHaveBeenCalledWith('42', undefined);
+      expect((agent as any).getContextGraphOnChainId).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['finalized absence', {
+        kind: 'unavailable',
+        reason: 'finalized-name-absence-unaccepted',
+      }, { state: 'not-public', reason: 'unregistered' }],
+      ['an unregistered answer', { kind: 'unregistered' }, {
+        state: 'not-public',
+        reason: 'unregistered',
+      }],
+      ['an unanswered read', { kind: 'unavailable', reason: 'authority-circuit-open' }, {
+        state: 'unknown',
+        reason: 'unprovable',
+      }],
+    ] as const)('answers %s without the live lookup', async (_label, binding, expected) => {
+      const { agent, readBatchedSnapshot } = indexedAgent(binding);
+
+      await expect(resolveStrictPublicProof(agent, contextGraphId)).resolves.toEqual(expected);
+      expect(readBatchedSnapshot).not.toHaveBeenCalled();
+      expect((agent as any).getContextGraphOnChainId).not.toHaveBeenCalled();
+    });
   });
 
   it('reuses one finalized authority snapshot instead of point-reading identity and policy', async () => {

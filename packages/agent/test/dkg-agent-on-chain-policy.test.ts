@@ -739,4 +739,58 @@ describe('DKGAgent.getContextGraphOnChainPolicy', () => {
       { label: 'getContextGraphOnChainPolicy finalized(42)', signal },
     ]]);
   });
+
+  describe('a named graph on an indexed adapter (#2827 follow-up)', () => {
+    // The current-state id lookup falls back to a live registry range scan;
+    // a member of a graph that was never registered paid it twice per share.
+    function indexedStub(binding: unknown) {
+      const getContextGraphOnChainId = recorder(async (): Promise<string | null> => {
+        throw new Error('the live name-hash lookup must not run on an indexed adapter');
+      });
+      const resolveContextGraphRegistrationBinding = recorder(async () => binding);
+      const readFinalizedSnapshot = recorder(async () => ({ kind: 'absent' as const }));
+      const stub = Object.assign(makeStub({
+        getContextGraphOnChainId,
+        isContextGraphRegistered: recorder(async () => false),
+        chain: {
+          contextGraphAuthorityIndexRevisionReader: {
+            readContextGraphAuthorityIndexSnapshots: async () => new Map(),
+          },
+        } as ChainStub,
+      }), {
+        resolveContextGraphRegistrationBinding,
+        readFinalizedContextGraphAuthoritySnapshotV1: readFinalizedSnapshot,
+        isWireIdKeyedSubscription: () => false,
+      });
+      return { stub, getContextGraphOnChainId, resolveContextGraphRegistrationBinding, readFinalizedSnapshot };
+    }
+
+    it('reads a member graph that was never registered from the finalized binding, once', async () => {
+      const f = indexedStub({ kind: 'unavailable', reason: 'finalized-name-absence-unaccepted' });
+      const { signal } = new AbortController();
+
+      await expect(
+        (DKGAgent.prototype as any).getContextGraphOnChainPolicy.call(f.stub, 'cg-member', { signal }),
+      ).resolves.toEqual({});
+
+      expect(f.getContextGraphOnChainId.calls).toEqual([]);
+      expect(f.resolveContextGraphRegistrationBinding.calls).toEqual([['cg-member', { signal }]]);
+      expect(f.readFinalizedSnapshot.calls).toEqual([]);
+    });
+
+    it('takes a registered id from the finalized binding', async () => {
+      const f = indexedStub({ kind: 'registered', onChainId: 42n, provenance: 'name-hash' });
+      const { signal } = new AbortController();
+
+      await expect(
+        (DKGAgent.prototype as any).getContextGraphOnChainPolicy.call(f.stub, 'cg-registered', { signal }),
+      ).resolves.toEqual({});
+
+      expect(f.getContextGraphOnChainId.calls).toEqual([]);
+      expect(f.readFinalizedSnapshot.calls).toEqual([[
+        42n,
+        { label: 'getContextGraphOnChainPolicy finalized(42)', signal },
+      ]]);
+    });
+  });
 });
