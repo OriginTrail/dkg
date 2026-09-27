@@ -148,8 +148,10 @@ export {
   type EncodedWorkspaceGossipPayload,
 } from './workspace-gossip-payload.js';
 export {
+  isWorkspaceAgentEncryptionKeyMissingError,
   resolveWorkspaceAgentRecipients,
   resolveWorkspaceAgentRecipientKeys,
+  WorkspaceAgentEncryptionKeyMissingError,
   projectWorkspaceAgentRecipientFanout,
   type WorkspaceAgentRecipientFanoutSnapshot,
   type WorkspaceAgentRecipientResolution,

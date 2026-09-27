@@ -16,6 +16,7 @@ import {
   deriveCuratorDidFromCgId,
   SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
+import { resolveWorkspaceAgentRecipientKeys } from '@origintrail-official/dkg-publisher';
 import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { resolveBooleanSwitch } from './sync/backpressure.js';
 import { systemContextGraphSyncOptionsOf } from './sync/system-context-graph-policy.js';
@@ -70,6 +71,23 @@ export class AgentsPhonebookMethods extends DKGAgentBase {
   }
 
   /**
+   * Fetch the `agents` phonebook for recipient agents a private share has no
+   * key for, and wait for it (#2849). Resolves with the lower-cased wallets
+   * whose key the store holds afterwards; never throws.
+   */
+  async ensureAgentsInOnDemandPhonebook(
+    this: DKGAgent,
+    wallets: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<ReadonlySet<string>> {
+    try {
+      return await this.onDemandAgentsPhonebook().ensureWallets(wallets, signal);
+    } catch {
+      return new Set();
+    }
+  }
+
+  /**
    * Read-only public-policy check for the phonebook trigger. A wrong answer
    * costs at most one bounded fetch or one skipped fetch that the next trigger
    * corrects, so the finalized authority projection may answer, else one
@@ -119,6 +137,14 @@ export class AgentsPhonebookMethods extends DKGAgentBase {
       phonebookHasWallet: async (wallet, signal) => (
         await this.discovery.findAgentPeerPageByAddress(wallet, { limit: 1, signal })
       ).peerIds.length > 0,
+      // The same resolution a private share runs: a verified, unrevoked key.
+      recipientKeyKnown: async (wallet) => {
+        try {
+          return (await resolveWorkspaceAgentRecipientKeys(this.store, wallet)).length > 0;
+        } catch {
+          return false;
+        }
+      },
       readAccessPolicy: (contextGraphId, signal) => (
         this.readAgentsPhonebookAccessPolicy(contextGraphId, signal)
       ),

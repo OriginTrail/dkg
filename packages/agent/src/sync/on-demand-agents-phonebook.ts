@@ -40,8 +40,9 @@ import {
 /**
  * What asked for the phonebook. A closed set: it is also a metric label.
  * `subscribe` includes startup rehydration, which re-subscribes saved graphs.
+ * `share-recipient` is a private share missing a roster member's key (#2849).
  */
-export type AgentsPhonebookFetchTrigger = 'subscribe' | 'vm-reconcile';
+export type AgentsPhonebookFetchTrigger = 'subscribe' | 'vm-reconcile' | 'share-recipient';
 
 export type AgentsPhonebookAccessPolicy = 'public' | 'not-public' | 'unknown';
 
@@ -145,6 +146,11 @@ export interface OnDemandAgentsPhonebookDeps {
   isActiveSubscription(contextGraphId: string): boolean;
   /** The local phonebook maps the wallet to at least one peer. */
   phonebookHasWallet(wallet: string, signal: AbortSignal): Promise<boolean>;
+  /**
+   * The local store holds a usable authenticated encryption key for the
+   * agent. A profile alone is not enough: it can predate the agent's key.
+   */
+  recipientKeyKnown(wallet: string, signal: AbortSignal): Promise<boolean>;
   /** On-chain access policy of the graph. */
   readAccessPolicy(contextGraphId: string, signal: AbortSignal): Promise<AgentsPhonebookAccessPolicy>;
   /** Currently connected peers. Must not dial or probe. */
@@ -189,6 +195,20 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** Wait for `promise`, or stop waiting (without rejecting) once `signal` aborts. */
+async function waitUnlessAborted(promise: Promise<unknown>, signal: AbortSignal | undefined): Promise<void> {
+  if (signal === undefined) {
+    await promise.catch(() => undefined);
+    return;
+  }
+  if (signal.aborted) return;
+  await new Promise<void>((resolve) => {
+    const done = () => resolve();
+    signal.addEventListener('abort', done, { once: true });
+    promise.then(done, done).finally(() => signal.removeEventListener('abort', done));
+  });
+}
+
 function setBounded<V>(map: Map<string, V>, key: string, value: V, maxEntries: number): void {
   map.delete(key);
   map.set(key, value);
@@ -221,6 +241,8 @@ export class OnDemandAgentsPhonebookFetcher {
   #nextEligibleAt = 0;
   /** Graph -> first trigger that wanted it; drained by the next fetch. */
   readonly #wants = new Map<string, AgentsPhonebookFetchTrigger>();
+  /** Lower-cased wallets a waiting share needs; drained by the next fetch. */
+  readonly #wantedWallets = new Set<string>();
   readonly #evaluating = new Set<string>();
   readonly #evaluations = new Set<Promise<void>>();
   readonly #curatorMissUntil = new Map<string, number>();
@@ -282,6 +304,52 @@ export class OnDemandAgentsPhonebookFetcher {
     }
   }
 
+  /**
+   * Fetch the phonebook for agents a private share needs keys for (#2849), and
+   * wait for that fetch. Resolves with the lower-cased wallets whose key the
+   * local store holds afterwards. A disabled, closed or cooling-down fetcher
+   * fetches nothing and only reports, so the cost stays within the existing
+   * cooldowns. The share is judged on the keys it then finds, never on this
+   * answer alone. Never throws; aborting `signal` stops the wait, not a fetch
+   * other callers share.
+   */
+  async ensureWallets(
+    wallets: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<ReadonlySet<string>> {
+    const wanted = [...new Set(wallets.map((wallet) => wallet.toLowerCase()))];
+    const known = new Set<string>();
+    const refresh = async (): Promise<void> => {
+      for (const wallet of wanted) {
+        if (known.has(wallet)) continue;
+        const present = await this.#deps
+          .recipientKeyKnown(wallet, signal ?? this.#lifetime.signal)
+          .catch(() => false);
+        if (present) known.add(wallet);
+      }
+    };
+    try {
+      await refresh();
+      if (known.size === wanted.length || this.#closed || !this.#deps.isEnabled()) return known;
+      for (const wallet of wanted) {
+        if (known.has(wallet)) continue;
+        this.#wantedWallets.add(wallet);
+        while (this.#wantedWallets.size > this.#maxStateEntries) {
+          const oldest = this.#wantedWallets.values().next().value;
+          if (oldest === undefined) break;
+          this.#wantedWallets.delete(oldest);
+        }
+      }
+      this.#maybeStart();
+      const inFlight = this.#inFlight;
+      if (inFlight !== undefined) await waitUnlessAborted(inFlight, signal);
+      await refresh();
+    } catch {
+      // Advisory: the caller resolves keys and fails closed on its own.
+    }
+    return known;
+  }
+
   /** Resolves once no evaluation or fetch started before this call is running. */
   async whenIdle(): Promise<void> {
     while (this.#evaluations.size > 0 || this.#inFlight !== undefined) {
@@ -295,6 +363,7 @@ export class OnDemandAgentsPhonebookFetcher {
     this.#lifetime.abort(new DOMException('On-demand agents phonebook closed', 'AbortError'));
     this.#clearRecheck();
     this.#wants.clear();
+    this.#wantedWallets.clear();
     return this.whenIdle();
   }
 
@@ -344,9 +413,14 @@ export class OnDemandAgentsPhonebookFetcher {
   }
 
   #maybeStart(): void {
-    if (this.#closed || this.#inFlight !== undefined || this.#wants.size === 0) return;
+    if (
+      this.#closed
+      || this.#inFlight !== undefined
+      || (this.#wants.size === 0 && this.#wantedWallets.size === 0)
+    ) return;
     if (this.#now() < this.#nextEligibleAt) {
       this.#wants.clear();
+      this.#wantedWallets.clear();
       return;
     }
     this.#clearRecheck();
@@ -356,6 +430,8 @@ export class OnDemandAgentsPhonebookFetcher {
       })
       .finally(() => {
         if (this.#inFlight === fetch) this.#inFlight = undefined;
+        // A share that asked late already has its answer and retries itself.
+        this.#wantedWallets.clear();
         if (this.#closed || this.#wants.size === 0) return;
         // A graph that qualified after this fetch read its wanted list must
         // not stay parked there. Inside the cooldown it is dropped and asks
@@ -369,7 +445,8 @@ export class OnDemandAgentsPhonebookFetcher {
   async #fetch(): Promise<void> {
     const lifetime = this.#lifetime.signal;
     const startedAt = this.#now();
-    const trigger = this.#wants.values().next().value ?? 'vm-reconcile';
+    const trigger = this.#wants.values().next().value
+      ?? (this.#wantedWallets.size > 0 ? 'share-recipient' : 'vm-reconcile');
     const candidates = orderCoresFirst(this.#deps.listConnectedPeers(), (peer) => peer.core)
       .slice(0, this.#maxCandidates);
 
@@ -428,7 +505,10 @@ export class OnDemandAgentsPhonebookFetcher {
         // would send the same rows. An empty or near-empty "complete" answer
         // is not. Also stop once every wanted curator is in.
         if (networkPhonebook || budget.signal.aborted) break;
-        if ((await this.#unresolvedWants(budget.signal)).length === 0) break;
+        if (
+          (await this.#unresolvedWants(budget.signal)).length === 0
+          && (await this.#unresolvedWallets(budget.signal)).length === 0
+        ) break;
       }
     } finally {
       clearTimeout(budgetTimer);
@@ -438,7 +518,9 @@ export class OnDemandAgentsPhonebookFetcher {
 
     if (attemptedPeers === 0) {
       // Nothing was asked of any peer: keep the wanted graphs and re-check
-      // soon, without starting a cooldown.
+      // soon, without starting a cooldown. A waiting share has its answer
+      // already and asks again on its next attempt.
+      this.#wantedWallets.clear();
       this.#recordMetrics(trigger, 'no-peers', false, this.#now() - startedAt);
       this.#deps.logDebug(
         `On-demand agents phonebook fetch deferred: no usable connected peer `
@@ -451,7 +533,10 @@ export class OnDemandAgentsPhonebookFetcher {
     // Graphs that asked while this fetch ran are served by the same phonebook.
     const wanted = [...this.#wants.keys()];
     this.#wants.clear();
+    const wantedWallets = [...this.#wantedWallets];
+    this.#wantedWallets.clear();
     const unresolved = new Set(await this.#unresolvedWantsOf(wanted, lifetime));
+    const unresolvedWallets = await this.#unresolvedWalletsOf(wantedWallets, lifetime);
     // Closed (stop()) while checking: a closed fetcher reports nothing, meters
     // nothing and schedules no recovery for a host that is shutting down.
     if (lifetime.aborted) return;
@@ -459,7 +544,8 @@ export class OnDemandAgentsPhonebookFetcher {
     const now = this.#now();
     // `empty`: peers answered but served no rows (a just-started or lean Core);
     // like `failed`, it keeps the short cooldown so another peer is asked soon.
-    const outcome: FetchOutcome = networkPhonebook || (fetchedTriples > 0 && unresolved.size === 0)
+    const outcome: FetchOutcome = networkPhonebook
+      || (fetchedTriples > 0 && unresolved.size === 0 && unresolvedWallets.length === 0)
       ? 'complete'
       : fetchedTriples > 0 ? 'partial' : answeredEmpty ? 'empty' : 'failed';
     this.#nextEligibleAt = now + (outcome === 'failed' || outcome === 'empty'
@@ -484,9 +570,28 @@ export class OnDemandAgentsPhonebookFetcher {
         + `peers=[${peerSummaries.join(' ')}] fetched=${fetchedTriples} inserted=${insertedTriples} `
         + `durationMs=${durationMs} `
         + `curatorResolved=${resolved.length}/${wanted.length} outcome=${outcome} `
-        + `nextFetchInMs=${this.#nextEligibleAt - now}`,
+        + `nextFetchInMs=${this.#nextEligibleAt - now}`
+        + (wantedWallets.length > 0
+          ? ` recipientsResolved=${wantedWallets.length - unresolvedWallets.length}/${wantedWallets.length}`
+          : ''),
     );
     if (resolved.length > 0) this.#deps.onCuratorsResolved(resolved);
+  }
+
+  async #unresolvedWallets(signal: AbortSignal): Promise<string[]> {
+    return this.#unresolvedWalletsOf([...this.#wantedWallets], signal);
+  }
+
+  async #unresolvedWalletsOf(
+    wallets: readonly string[],
+    signal: AbortSignal,
+  ): Promise<string[]> {
+    const unresolved: string[] = [];
+    for (const wallet of wallets) {
+      const known = await this.#deps.recipientKeyKnown(wallet, signal).catch(() => false);
+      if (!known) unresolved.push(wallet);
+    }
+    return unresolved;
   }
 
   async #unresolvedWants(signal: AbortSignal): Promise<string[]> {
