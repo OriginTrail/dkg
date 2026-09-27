@@ -1625,6 +1625,139 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
   });
 
+  describe('restarted join-approval recovery retries transient failures (#2832)', () => {
+    const contextGraphId = 'restart-recovery-retry';
+    const curatorPeerId = '12D3KooWRestartRecoveryRetryCurator';
+
+    async function restrictedMember() {
+      agent = await DKGAgent.create({
+        name: 'RestartRecoveryRetry',
+        chainAdapter: new MockChainAdapter(),
+      });
+      const internals = agent as unknown as {
+        localApprovedAgentByCG: Map<string, string>;
+        subscribedContextGraphs: Map<string, Record<string, unknown>>;
+      };
+      internals.localApprovedAgentByCG.set(contextGraphId, '0x00000000000000000000000000000000000000a1');
+      internals.subscribedContextGraphs.set(contextGraphId, {
+        subscribed: true,
+        synced: false,
+        sharedMemorySynced: false,
+        metaSynced: false,
+        pendingMeta: true,
+        syncMode: 'always-on',
+      });
+      return { agent, internals };
+    }
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('tries again with backoff until the recovery completes', async () => {
+      const { agent: member } = await restrictedMember();
+      const resume = vi.spyOn(member, 'resumePendingJoinApprovalMetadata')
+        .mockResolvedValueOnce('retry')
+        .mockResolvedValueOnce('retry')
+        .mockResolvedValueOnce('completed');
+      vi.useFakeTimers();
+
+      const recovery = member.recoverPendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(resume).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(15_000);
+      expect(resume).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await recovery;
+
+      expect(resume).toHaveBeenCalledTimes(3);
+      expect(resume).toHaveBeenLastCalledWith(contextGraphId, curatorPeerId);
+    });
+
+    it('tries again after an attempt that throws', async () => {
+      const { agent: member } = await restrictedMember();
+      const resume = vi.spyOn(member, 'resumePendingJoinApprovalMetadata')
+        .mockRejectedValueOnce(new Error('temporary store fault'))
+        .mockResolvedValueOnce('completed');
+      vi.useFakeTimers();
+
+      const recovery = member.recoverPendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(resume).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(15_000);
+      await recovery;
+
+      expect(resume).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps retrying every five minutes once the backoff schedule is spent', async () => {
+      const { agent: member } = await restrictedMember();
+      const resume = vi.spyOn(member, 'resumePendingJoinApprovalMetadata');
+      for (let failure = 0; failure < 6; failure += 1) resume.mockResolvedValueOnce('retry');
+      resume.mockResolvedValueOnce('completed');
+      vi.useFakeTimers();
+
+      const recovery = member.recoverPendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(resume).toHaveBeenCalledTimes(1);
+      // Each attempt starts exactly one delay after the previous one; the
+      // last delay repeats instead of running off the end of the schedule.
+      const delays = [15_000, 30_000, 60_000, 120_000, 300_000, 300_000];
+      for (const [index, delayMs] of delays.entries()) {
+        await vi.advanceTimersByTimeAsync(delayMs - 1);
+        expect(resume).toHaveBeenCalledTimes(index + 1);
+        await vi.advanceTimersByTimeAsync(1);
+        expect(resume).toHaveBeenCalledTimes(index + 2);
+      }
+      await recovery;
+
+      expect(resume).toHaveBeenCalledTimes(7);
+    });
+
+    it('does not try again after a final outcome', async () => {
+      const { agent: member } = await restrictedMember();
+      const resume = vi.spyOn(member, 'resumePendingJoinApprovalMetadata').mockResolvedValue('stop');
+
+      await member.recoverPendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+
+      expect(resume).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops once the row is no longer a pending join approval', async () => {
+      const { agent: member, internals } = await restrictedMember();
+      const resume = vi.spyOn(member, 'resumePendingJoinApprovalMetadata').mockResolvedValue('retry');
+      vi.useFakeTimers();
+
+      const recovery = member.recoverPendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+      await vi.advanceTimersByTimeAsync(0);
+      // Another path completed the bootstrap meanwhile.
+      internals.subscribedContextGraphs.set(contextGraphId, {
+        ...internals.subscribedContextGraphs.get(contextGraphId),
+        pendingMeta: false,
+        metaSynced: true,
+      });
+      await vi.advanceTimersByTimeAsync(15_000);
+      await recovery;
+
+      expect(resume).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops when the node stops', async () => {
+      const { agent: member } = await restrictedMember();
+      const stop = new AbortController();
+      Object.defineProperty(member.node, 'stopSignal', { get: () => stop.signal, configurable: true });
+      const resume = vi.spyOn(member, 'resumePendingJoinApprovalMetadata').mockResolvedValue('retry');
+      vi.useFakeTimers();
+
+      const recovery = member.recoverPendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+      await vi.advanceTimersByTimeAsync(0);
+      stop.abort();
+      await recovery;
+
+      expect(resume).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('keeps restarted join approvals metadata-only until ordinary read authority is proven', async () => {
     const contextGraphId = 'restart-pending-join-approval';
     const curatorPeerId = '12D3KooWRestartPendingCurator';
@@ -1676,14 +1809,17 @@ describe('private read authorization uses the on-chain participant roster', () =
       .mockImplementation(() => undefined);
     const catchUp = vi.spyOn(agent, 'runImmediatePostApprovalSync').mockResolvedValue(undefined);
 
-    await agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+    // A failed fetch can succeed later (#2832).
+    await expect(agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId))
+      .resolves.toBe('retry');
     expect(readAuthority).not.toHaveBeenCalled();
     expect(refreshFlags).not.toHaveBeenCalled();
     expect(subscribe).not.toHaveBeenCalled();
     expect(persistMembership).not.toHaveBeenCalled();
     expect(catchUp).not.toHaveBeenCalled();
 
-    await agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+    await expect(agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId))
+      .resolves.toBe('completed');
     expect(refreshMeta).toHaveBeenLastCalledWith(contextGraphId, expect.objectContaining({
       trustedCuratorPeerId: curatorPeerId,
       force: true,
@@ -1705,6 +1841,66 @@ describe('private read authorization uses the on-chain participant roster', () =
       'rehydrated-subscription',
     );
     expect(catchUp).toHaveBeenCalledWith(contextGraphId, curatorPeerId);
+  });
+
+  it.each([
+    { stopsDuring: 'the authority read' as const, flagsRefreshed: false },
+    { stopsDuring: 'the readiness flag refresh' as const, flagsRefreshed: true },
+  ])('opens no data lane once the node stops during $stopsDuring', async ({ stopsDuring, flagsRefreshed }) => {
+    const contextGraphId = 'restart-recovery-during-shutdown';
+    const curatorPeerId = '12D3KooWRecoveryDuringShutdownCurator';
+    agent = await DKGAgent.create({
+      name: 'RecoveryDuringShutdown',
+      chainAdapter: new MockChainAdapter(),
+    });
+    const member = '0x00000000000000000000000000000000000000a1';
+    const internals = agent as unknown as {
+      localApprovedAgentByCG: Map<string, string>;
+      subscribedContextGraphs: Map<string, Record<string, unknown>>;
+    };
+    internals.localApprovedAgentByCG.set(contextGraphId, member);
+    internals.subscribedContextGraphs.set(contextGraphId, {
+      subscribed: true,
+      synced: false,
+      sharedMemorySynced: false,
+      metaSynced: false,
+      pendingMeta: true,
+      syncMode: 'always-on',
+    });
+    const stop = new AbortController();
+    Object.defineProperty(agent.node, 'stopSignal', { get: () => stop.signal, configurable: true });
+
+    vi.spyOn(agent, 'resolveApprovedMemberAcceptance').mockResolvedValue(await publicAcceptanceFor(
+      { approvedAgentAddress: member, expectedDelegateePeerId: '12D3KooWRecoveryDuringShutdownMember' },
+      'public',
+    ));
+    vi.spyOn(agent, 'refreshMetaFromCurator').mockResolvedValue(true);
+    vi.spyOn(agent, 'hasConfirmedApprovedMemberMetaState').mockResolvedValue(true);
+    vi.spyOn(agent, 'resolveContextGraphReadAuthority').mockImplementation(async () => {
+      if (stopsDuring === 'the authority read') stop.abort();
+      return {
+        outcome: 'allowed',
+        source: 'legacy-local',
+        reason: 'local-agent-allowlist',
+        metadataBootstrap: 'eligible',
+      };
+    });
+    const refreshFlags = vi.spyOn(agent, 'refreshMetaSyncedFlags').mockImplementation(async () => {
+      if (stopsDuring === 'the readiness flag refresh') stop.abort();
+    });
+    const subscribe = vi.spyOn(agent, 'subscribeToContextGraph').mockImplementation(
+      () => (agent as DKGAgent).getSubscribedContextGraphs().get(contextGraphId)!,
+    );
+    const persistMembership = vi.spyOn(agent, 'persistLocalNodeMembership')
+      .mockImplementation(() => undefined);
+    const catchUp = vi.spyOn(agent, 'runImmediatePostApprovalSync').mockResolvedValue(undefined);
+
+    await expect(agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId))
+      .resolves.toBe('stop');
+    expect(refreshFlags).toHaveBeenCalledTimes(flagsRefreshed ? 1 : 0);
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(persistMembership).not.toHaveBeenCalled();
+    expect(catchUp).not.toHaveBeenCalled();
   });
 
   it('keeps every data lane closed when a refreshed snapshot proves only the pre-join public definition', async () => {
@@ -1747,7 +1943,9 @@ describe('private read authorization uses the on-chain participant roster', () =
     const persistMembership = vi.spyOn(agent, 'persistLocalNodeMembership');
     const catchUp = vi.spyOn(agent, 'runImmediatePostApprovalSync').mockResolvedValue(undefined);
 
-    await agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+    // The curator may still add this member, so a later attempt can succeed.
+    await expect(agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId))
+      .resolves.toBe('retry');
 
     expect(readAuthority).not.toHaveBeenCalled();
     expect(refreshFlags).not.toHaveBeenCalled();
@@ -1806,7 +2004,9 @@ describe('private read authorization uses the on-chain participant roster', () =
     const persistMembership = vi.spyOn(agent, 'persistLocalNodeMembership');
     const catchUp = vi.spyOn(agent, 'runImmediatePostApprovalSync').mockResolvedValue(undefined);
 
-    await agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+    // Only unavailable authority is worth another attempt; a denial is final.
+    await expect(agent.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId))
+      .resolves.toBe(decision.outcome === 'unavailable' ? 'retry' : 'stop');
 
     // The member proof held, so this is the post-refresh authority decision.
     expect(readAuthority).toHaveBeenCalledTimes(1);

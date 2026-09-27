@@ -548,6 +548,40 @@ interface RehydrationAuthorityBudget {
   dispose(): void;
 }
 
+/** What one pending join-approval metadata recovery attempt concluded. */
+export type JoinApprovalMetadataRecoveryOutcome = 'completed' | 'retry' | 'stop';
+
+/**
+ * Delays between attempts of a restarted join approval's metadata recovery
+ * after a transient failure; the last one repeats while the row stays
+ * restricted. One attempt is a single curator metadata fetch.
+ */
+const JOIN_APPROVAL_METADATA_RECOVERY_RETRY_MS = Object.freeze([15_000, 30_000, 60_000, 120_000, 300_000]);
+
+/**
+ * Wait `ms` unless the node stops first; resolves whether the wait completed.
+ * The listener is removed either way, so nothing stays attached to the
+ * node-lifetime signal.
+ */
+function waitUnlessStopped(ms: number, stopSignal: AbortSignal | undefined): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (stopSignal?.aborted === true) {
+      resolve(false);
+      return;
+    }
+    const onStop = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    const timer = setTimeout(() => {
+      stopSignal?.removeEventListener('abort', onStop);
+      resolve(true);
+    }, ms);
+    (timer as ReturnType<typeof setTimeout> & { unref?: () => void }).unref?.();
+    stopSignal?.addEventListener('abort', onStop, { once: true });
+  });
+}
+
 function startRehydrationAuthorityBudget(budgetMs: number): RehydrationAuthorityBudget {
   if (budgetMs === 0) {
     return { spent: () => false, race: (decision) => decision, dispose: () => {} };
@@ -8576,14 +8610,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * authorize VM, payload, plaintext-recovery, or SWM activation. Those lanes
    * are installed only after the fetched metadata (or the registered chain
    * roster) makes the ordinary read-authority resolver return `allowed`.
+   *
+   * Reports whether a later attempt can still succeed: a failed fetch, a
+   * snapshot that does not prove this member yet, or unavailable authority is
+   * `retry`; no approval binding or denied authority is `stop`.
    */
   async resumePendingJoinApprovalMetadata(this: DKGAgent,
     contextGraphId: string,
     curatorPeerId: string,
-  ): Promise<void> {
+  ): Promise<JoinApprovalMetadataRecoveryOutcome> {
     const ctx = createOperationContext('sync');
     const acceptance = await this.resolveApprovedMemberAcceptance(contextGraphId);
-    if (!acceptance) return;
+    if (!acceptance) return 'stop';
 
     const refreshed = await this.refreshMetaFromCurator(contextGraphId, {
       trustedCuratorPeerId: curatorPeerId,
@@ -8605,7 +8643,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ctx,
         `Pending join-approval metadata recovery for "${contextGraphId}" did not establish authoritative metadata; keeping data lanes closed`,
       );
-      return;
+      return 'retry';
     }
 
     const authority = await withRpcUsageSite(
@@ -8619,18 +8657,67 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ctx,
         `Pending join-approval metadata recovery for "${contextGraphId}" completed but current read authority is ${authority.outcome}; keeping data lanes closed`,
       );
-      return;
+      // A stale approval cannot override an explicit current denial.
+      return authority.outcome === 'unavailable' ? 'retry' : 'stop';
     }
 
+    // A shutdown that began during the reads above must not clear the row's
+    // pending state or open its data lanes while the node tears down; the
+    // next start recovers the row again.
+    const stopping = () => this.node.stopSignal?.aborted === true;
+    if (stopping()) return 'stop';
     await this.refreshMetaSyncedFlags([contextGraphId]);
     const current = this.subscribedContextGraphs.get(contextGraphId);
-    if (!current?.subscribed) return;
+    if (!current?.subscribed || stopping()) return 'stop';
     this.subscribeToContextGraph(contextGraphId, {
       persist: false,
       syncMode: current.syncMode,
     });
     this.persistLocalNodeMembership(contextGraphId, 'rehydrated-subscription');
     await this.runImmediatePostApprovalSync(contextGraphId, curatorPeerId);
+    return 'completed';
+  }
+
+  /**
+   * Run the restricted pending-metadata recovery of a restarted join approval
+   * until it completes or can no longer complete (#2832). Right after a
+   * restart the node's authority reads can still be rebuilding its finalized
+   * index, so a single attempt could fail transiently and leave every data
+   * lane closed until the next restart. A `retry` outcome, or an attempt that
+   * throws, is tried again with backoff while the row is still a subscribed,
+   * join-approved, pending-metadata row; the node stopping ends the loop.
+   */
+  async recoverPendingJoinApprovalMetadata(this: DKGAgent,
+    contextGraphId: string,
+    curatorPeerId: string,
+  ): Promise<void> {
+    const stopSignal = this.node.stopSignal;
+    for (let attempt = 0; ; attempt += 1) {
+      let outcome: JoinApprovalMetadataRecoveryOutcome;
+      try {
+        outcome = await this.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+      } catch (error) {
+        // A store or network fault that escapes an attempt is as transient as
+        // a `retry`. Ending the loop on it would leave the row closed until
+        // the next restart again.
+        this.log.warn(
+          createOperationContext('sync'),
+          `Pending join-approval recovery attempt for "${contextGraphId}" failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        outcome = 'retry';
+      }
+      if (outcome !== 'retry') return;
+      const delayMs = JOIN_APPROVAL_METADATA_RECOVERY_RETRY_MS[
+        Math.min(attempt, JOIN_APPROVAL_METADATA_RECOVERY_RETRY_MS.length - 1)
+      ]!;
+      if (!(await waitUnlessStopped(delayMs, stopSignal))) return;
+      const current = this.subscribedContextGraphs.get(contextGraphId);
+      if (
+        !this.localApprovedAgentByCG.has(contextGraphId)
+        || current?.subscribed !== true
+        || current.pendingMeta !== true
+      ) return;
+    }
   }
 
   selectCatchupPeers(this: DKGAgent,
@@ -10653,7 +10740,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             `Restored persisted context-graph subscription "${row.id}" in restricted pending-metadata mode; VM, payload recovery, and SWM remain closed`,
           );
           if (curatorPeerId) {
-            void this.resumePendingJoinApprovalMetadata(row.id, curatorPeerId).catch((error) => {
+            void this.recoverPendingJoinApprovalMetadata(row.id, curatorPeerId).catch((error) => {
               this.log.warn(
                 ctx,
                 `Pending join-approval recovery for "${row.id}" stopped safely: ${error instanceof Error ? error.message : String(error)}`,
