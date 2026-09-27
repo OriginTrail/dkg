@@ -26,6 +26,7 @@ interface Internals {
   rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId: string): boolean;
   rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId: string): Promise<boolean>;
   getCgMeta(contextGraphId: string): Promise<Record<string, unknown>>;
+  getOwnCgMetaFacts(contextGraphId: string): Promise<Record<string, unknown>>;
   listLocalAgents(): Array<{ agentAddress: string }>;
   defaultAgentAddress?: string;
   resolveRfc64CatalogReceiverAuthorityV1(contextGraphId: string): unknown;
@@ -102,6 +103,7 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
     legacyAllowed?: boolean;
     state?: TransportState;
     meta?: Record<string, unknown>;
+    ownMeta?: Record<string, unknown>;
   }) {
     vi.spyOn(internals, 'rfc64LegacySwmGossipAllowedForContextGraph')
       .mockReturnValue(options.legacyAllowed ?? false);
@@ -109,6 +111,7 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
     vi.spyOn(internals, 'resolveRfc64CatalogReceiverAuthorityV1')
       .mockReturnValue(receiverAuthority(options.state ?? 'catalog-blocked'));
     vi.spyOn(internals, 'getCgMeta').mockResolvedValue(options.meta ?? meta());
+    vi.spyOn(internals, 'getOwnCgMetaFacts').mockResolvedValue(options.ownMeta ?? options.meta ?? meta());
     vi.spyOn(internals, 'listLocalAgents').mockReturnValue([{ agentAddress: LOCAL }]);
     return {
       transport: vi.spyOn(internals, 'resolveSwmTransportAuthority'),
@@ -122,6 +125,15 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
       meta: meta({ allowedAgents: [OTHER], curators: [`did:dkg:agent:${LOCAL.toUpperCase().replace('0X', '0x')}`] }),
     }, true],
     ['a revoked member', { meta: meta({ revokedAgents: [LOCAL] }) }, false],
+    // The merged projection also holds replicated ONTOLOGY and AGENTS facts;
+    // only the graph's own `_meta` decides.
+    ['a member only by merged third-party facts', {
+      meta: meta(),
+      ownMeta: meta({ allowedAgents: [OTHER] }),
+    }, false],
+    ['a node named only by an unrelated identifier ending in its address', {
+      meta: meta({ allowedAgents: [`did:other:${LOCAL}`] }),
+    }, false],
     ['a node that is not a member', { meta: meta({ allowedAgents: [OTHER] }) }, false],
     ['a graph declared public', { meta: meta({ accessPolicy: 'public' }) }, false],
     ['a graph with no explicit policy', { meta: meta({ accessPolicy: undefined }) }, false],
@@ -134,6 +146,52 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
     await expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(PRIVATE_CG)).resolves.toBe(expected);
     // No chain read: membership comes from the node's own metadata.
     expect(reads.transport).not.toHaveBeenCalled();
+  });
+
+  it('reads the graph\'s own metadata only after the cached projection shows membership', async () => {
+    stubAuthority({ meta: meta({ accessPolicy: 'public' }) });
+    await expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(PRIVATE_CG)).resolves.toBe(false);
+    expect(internals.getOwnCgMetaFacts).not.toHaveBeenCalled();
+
+    vi.restoreAllMocks();
+    stubAuthority({});
+    await expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(PRIVATE_CG)).resolves.toBe(true);
+    expect(internals.getOwnCgMetaFacts).toHaveBeenCalledWith(PRIVATE_CG);
+  });
+
+  // The membership reads await the store, and RFC-64 authority can change
+  // meanwhile; the decision must follow the authority current when they resolve.
+  it.each([
+    ['activates on a node with private access-policy authority', () => {
+      internals.config.rfc64CatalogAccessPolicyAuthority = { localAgentAddress: LOCAL } as never;
+      vi.mocked(internals.resolveRfc64CatalogReceiverAuthorityV1)
+        .mockReturnValue(receiverAuthority('catalog-active'));
+    }],
+    ['is accepted as a compatibility authority', () => {
+      vi.mocked(internals.resolveRfc64AcceptedCompatibilityAuthorityV1).mockReturnValue({});
+    }],
+    ['reopens legacy SWM for the graph', () => {
+      vi.mocked(internals.rfc64LegacySwmGossipAllowedForContextGraph).mockReturnValue(true);
+    }],
+  ] as const)('returns false when the graph\'s RFC-64 authority %s during the membership reads', async (
+    _label,
+    change,
+  ) => {
+    stubAuthority({});
+    let resolveOwnMeta!: (value: Record<string, unknown>) => void;
+    vi.mocked(internals.getOwnCgMetaFacts).mockReturnValue(new Promise((resolve) => {
+      resolveOwnMeta = resolve;
+    }));
+    const configured = internals.config.rfc64CatalogAccessPolicyAuthority;
+    try {
+      const decision = internals.rfc64PrivateRootSwmOnLegacyLaneV1(PRIVATE_CG);
+      await vi.waitFor(() => expect(internals.getOwnCgMetaFacts).toHaveBeenCalled());
+      change();
+      resolveOwnMeta(meta());
+      await expect(decision).resolves.toBe(false);
+    } finally {
+      internals.config.rfc64CatalogAccessPolicyAuthority = configured;
+    }
   });
 
   it('leaves an active RFC-64 authority to deliver on a node with private access-policy authority', async () => {
