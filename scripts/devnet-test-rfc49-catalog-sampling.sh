@@ -468,20 +468,22 @@ done
 #     data and prove the catalog stays committed + re-hosted + provable.
 #
 #   A curated UPDATE re-commits the deterministic public `_catalog` floor: the
-#   producer's update() re-injects the floor, ships it inline, the cores rebuild
-#   + REPLACE-persist `<cg>/_catalog`, and the on-chain catalog commitment is set
-#   so the update CONFIRMS (before this feature a curated update shipped a ZERO
-#   catalog root and REVERTED with CuratedCGRequiresCatalogCommitment). The
-#   catalog is the STABLE public floor — the update RE-COMMITS THE SAME ROOT, it
-#   does NOT rotate — so we assert root non-zero AND == the publish baseline.
+#   producer's update() regenerates the floor as a separate catalog commitment
+#   (since v10.0.7 it is not part of the KA payload or its Merkle root), ships
+#   it inline, the cores rebuild + REPLACE-persist `<cg>/_catalog`, and the
+#   on-chain catalog commitment is set so the update CONFIRMS (before this
+#   feature a curated update shipped a ZERO catalog root and REVERTED with
+#   CuratedCGRequiresCatalogCommitment). The catalog is the STABLE public
+#   floor — the update RE-COMMITS THE SAME ROOT, it does NOT rotate — so we
+#   assert root non-zero AND == the publish baseline.
 #
 #   Driven via POST /api/update with an owner-sealed precomputedUpdateAttestation
-#   (build_update_body --curated). Re-finalize is NOT usable: the seal is keyed
+#   (build_update_body). Re-finalize is NOT usable: the seal is keyed
 #   by the assertion URI and neither discard nor re-create clears it, so a 2nd
 #   wm/finalize of changed content hits "already finalized with a different
 #   merkleRoot". /api/update is the on-chain UPDATE primitive the daemon exposes.
 # ---------------------------------------------------------------------------
-log "── CURATED UPDATE path (POST /api/update, owner-sealed, floor re-injected) ──"
+log "── CURATED UPDATE path (POST /api/update, owner-sealed, catalog floor re-committed) ──"
 UPD_QUADS=$(STAMP="$STAMP" PRIV_SUBJ="$PRIV_SUBJ" node -e '
 const stamp=process.env.STAMP, subj=process.env.PRIV_SUBJ;
 console.log(JSON.stringify([
@@ -491,10 +493,10 @@ console.log(JSON.stringify([
   { subject: subj, predicate: "http://schema.org/jobTitle", object: "\"Lead (added on update)\"", graph: "" }
 ]))')
 
-# build_update_body resolves the KA owner key (ownerOf), injects the curated
-# `_catalog` floor (6th arg = LOCAL cg id), seals, and emits the /api/update body.
+# build_update_body resolves the KA owner key (ownerOf), seals the root the
+# daemon recomputes from UPD_QUADS, and emits the /api/update body.
 UPD_BODY=$(REPO_ROOT="$REPO_ROOT" DEVNET_DIR="$DEVNET_DIR" NUM_NODES="$NUM_NODES" \
-  build_update_body "$EDGE_CURATOR" "$KA_ID" "$CG_ID" "$UPD_QUADS" "[]" "$CG_ID") \
+  build_update_body "$EDGE_CURATOR" "$KA_ID" "$CG_ID" "$UPD_QUADS") \
   || fail "could not build curated update body (seal/owner-key resolution failed)"
 UPD_RESP=$(api_call_agent "$EDGE_CURATOR" POST /api/update "$UPD_BODY")
 log "POST /api/update: $UPD_RESP"
