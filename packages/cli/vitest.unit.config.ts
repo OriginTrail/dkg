@@ -76,6 +76,9 @@ export default defineConfig({
           // text and the public status summary. Pure handler, no hardhat.
           'test/context-graph-name-hash-subscribe-route.test.ts',
           'test/context-graph-name-adoption-crash.test.ts',
+          // Full commit /api/status reports without build-info: git in a
+          // source checkout, else <DKG home>/.current-commit. Mocked git.
+          'test/current-commit-full.test.ts',
           // Catch-up status by a resolved name hash: who sees the job. Real
           // agent and mock chain, no hardhat.
           'test/context-graph-name-hash-catchup-status.test.ts',
