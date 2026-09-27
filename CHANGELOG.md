@@ -14,7 +14,9 @@ main-thread pauses that grew with a node's peer traffic and uptime, RFC-64
 catalog verification whose CPU cost grew with the square of a bucket's rows,
 a publisher's finalizations held behind its own failing inbox entries, and a
 managed Oxigraph that outlived a killed worker and held the store.
-Edges now reach holders of public graphs they are not connected to, and
+Edges now reach holders of public graphs they are not connected to,
+members of public graphs that were never registered on chain keep Shared
+Working Memory after their join is approved, even across a restart, and
 auto-update applies on nodes that restart often. **No smart-contract, ABI,
 wire-protocol or deployment registry changes are required.**
 
@@ -28,6 +30,7 @@ wire-protocol or deployment registry changes are required.**
 | The auto-update hold-off deadline is stored in `<DKG home>/.update-holdoff.json` (#2785) | A node that restarts during its rollout hold waits only for the time left instead of drawing a new hold | None. Deleting the file only makes the node draw a new hold |
 | Edges fetch the `agents` phonebook on demand (#2778) | For a public wallet-scoped graph whose owner is not in the local phonebook, an Edge fetches the phonebook once from one to three connected, network-admitted peers (Cores first), bounded to 120 s and then backed off | None. `onDemandAgentsPhonebook: false`, or `DKG_ON_DEMAND_AGENTS_PHONEBOOK=0`, turns it off |
 | Managed Oxigraph runs under the parent watchdog on Linux and macOS, also without memory limits, and the daemon records each launch's owner in the store directory (#2775) | The daemon's stop and restart signals reach Oxigraph through the watchdog's process group, so a worker the supervisor kills no longer leaves Oxigraph holding the store. On the first start after upgrading, a node stops an orphaned Oxigraph from an earlier release that runs this node's store and was reparented to PID 1 | None. A lock holder the daemon cannot attribute to this node is logged and left running; stop it by hand if the node then cannot start |
+| A public graph that was never registered on chain keeps plaintext Shared Working Memory after a join approval (#2827) | SWM on such a graph works in both directions only when the curator and its members all run 10.0.20. A 10.0.19 member still rejects the curator's plaintext shares and cannot share itself. Sender Key setup gains the terminal reason `agent-gate-unavailable`, returned when the receiver cannot evaluate its agent gate without a software or configuration change; older senders already treat unknown reasons as terminal | Upgrade every node that takes part in such a graph |
 
 ### Known issues
 
@@ -69,6 +72,33 @@ wire-protocol or deployment registry changes are required.**
   cleared as each slot is observed, and a subscription keyed by a slot's name
   hash that never recorded it is repaired. A slot that commits no name proves
   no claim.
+- **Shared Working Memory works after a member joins a public graph that was
+  never registered on chain** (#2827): on 10.0.19, once a curator approved a
+  member into a public Context Graph created without a chain registration,
+  Shared Working Memory (SWM) failed in both directions. The curator read the
+  allowlist the approval writes as a read gate and switched its shares to
+  Sender Key encryption, which the member rejected (`sender-not-allowed`). The
+  member could not resolve SWM authority for a graph it did not create, so its
+  own shares retried until exhausted, and it never installed the curator's
+  allowlist. An external team running public peer-to-peer graphs with members
+  hit this on every share after an approval. Such a graph now keeps plaintext
+  SWM while its accepted owner-signed public policy governs it, members take
+  its authority from the node's finalized chain index, and an approved member
+  installs the curator's allowlist once the curator's snapshot proves its
+  membership, on registered public graphs too. A later on-chain registration
+  of the name wins as soon as the index shows it.
+- **A member that restarts during its join recovers instead of staying cut
+  off** (#2832): a member whose join approval is restored at startup in
+  restricted pending-metadata mode fetches the curator's metadata once before
+  it opens Shared Working Memory, Verifiable Memory and recovery for that
+  graph. If that single attempt failed, nothing retried it, and the member
+  kept every data lane for the graph closed until its next restart. This is
+  most likely right after a restart, while the node is still rebuilding its
+  finalized authority index and its RFC-64 authority reads are throttled. The
+  #2827 acceptance scenario hit this on a loaded devnet. The recovery now
+  retries with backoff (15 s, 30 s, 60 s, 120 s, then every 5 minutes) while
+  the approval is still pending, and stops once it completes, the approval is
+  gone, authority is denied, or the node stops.
 - **A received copy with escaped non-ASCII text reaches Verifiable Memory
   again on the receiving node** (#2813): a node records a fingerprint of each
   Shared Working Memory copy it takes in, and finalization recomputes it from
