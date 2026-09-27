@@ -19,9 +19,11 @@
 #   2. ANONYMOUS CATCHUP SWEEP — a non-member outsider node calls
 #      /api/shared-memory/catchup against the curator with NO
 #      authentication / membership. Public CGs MUST serve anyone;
-#      curated CGs reject the same call. We assert the curator's
-#      auth gate did not log a denial. inserted may be 0: the
-#      publisher drains a KA's SWM after VM promotion.
+#      curated CGs reject the same call. The outsider first knows
+#      the CG locally (otherwise the route skips it without asking
+#      any peer); we assert the curator's leg completed and the
+#      curator's auth gate did not log a denial. inserted may be 0:
+#      the publisher drains a KA's SWM after VM promotion.
 #
 #   3. VERIFY-BATCH SWEEP — explicit-quads verify-batch must
 #      succeed against the published merkleRoot. Tampered quads
@@ -67,6 +69,16 @@ api_call() {
   local -a curl_args=(-sS --max-time 240 -X "$method" -H "Authorization: Bearer $token" -H 'Content-Type: application/json')
   [ -n "$data" ] && curl_args+=(-d "$data")
   curl_args+=("http://127.0.0.1:${port}${path}")
+  curl "${curl_args[@]}"
+}
+
+api_call_with_status() {
+  local node="$1" method="$2" path="$3" data="${4:-}"
+  local port; port=$(node_port "$node")
+  local token; token=$(node_token "$node")
+  local -a curl_args=(-sS --max-time 240 -X "$method" -H "Authorization: Bearer $token" -H 'Content-Type: application/json')
+  [ -n "$data" ] && curl_args+=(-d "$data")
+  curl_args+=(-w $'\n%{http_code}' "http://127.0.0.1:${port}${path}")
   curl "${curl_args[@]}"
 }
 
@@ -178,19 +190,62 @@ act "2. ANONYMOUS CATCHUP SWEEP (outsider, no membership)"
 OUTSIDER_LOG_BASE=$(wc -l < "$(node_log "$OUTSIDER_NODE")" 2>/dev/null | tr -d ' ' || echo 0)
 CURATOR_LOG_BASE=$(wc -l < "$(node_log "$CURATOR_NODE")" 2>/dev/null | tr -d ' ' || echo 0)
 
+# The catch-up route skips a CG the outsider cannot yet use for SWM, without
+# asking any peer (results: [], peersAttempted: 0), which would leave the
+# denial check below nothing to observe. Create the CG on the outsider first,
+# as LU-8 does for its member. The id is wallet-scoped, so the outsider does
+# not become its curator: curator resolution for such ids follows the
+# wallet in the id. 409 means the outsider already knows the CG. The name
+# matches the curator's, so the broadcast definition adds no second name.
+log "Outsider creates the CG locally..."
+OUTSIDER_CREATE_WITH_STATUS=$(api_call_with_status "$OUTSIDER_NODE" POST /api/context-graph/create "$(cat <<EOF
+{ "id": "$CG_ID", "name": "LU-10 public sweep ${STAMP}",
+  "accessPolicy": 0, "publishPolicy": 1 }
+EOF
+)")
+OUTSIDER_CREATE_STATUS=$(printf '%s\n' "$OUTSIDER_CREATE_WITH_STATUS" | tail -n 1)
+OUTSIDER_CREATE=$(printf '%s\n' "$OUTSIDER_CREATE_WITH_STATUS" | sed '$d')
+log "outsider-local create: HTTP $OUTSIDER_CREATE_STATUS $OUTSIDER_CREATE"
+case "$OUTSIDER_CREATE_STATUS" in
+  200|409) ;;
+  *) fail "outsider could not create the CG locally (HTTP $OUTSIDER_CREATE_STATUS): $OUTSIDER_CREATE" ;;
+esac
+
+# Prints why a catch-up response does not show a completed request to the
+# curator, or nothing when it does.
+catchup_problem() {
+  CATCHUP="$1" CURATOR_PEER="$CURATOR_PEER" node -e '
+    let j;
+    try { j = JSON.parse(process.env.CATCHUP); } catch { console.log("unparseable response"); process.exit(0); }
+    if (j.error !== undefined) { console.log("error " + JSON.stringify(j.error)); process.exit(0); }
+    if (!(Number(j.peersAttempted) >= 1)) {
+      console.log("no peer attempted (peersAttempted=" + j.peersAttempted + ")");
+      process.exit(0);
+    }
+    const leg = (Array.isArray(j.results) ? j.results : []).find((r) => r?.peerId === process.env.CURATOR_PEER);
+    if (!leg) { console.log("no result for the curator peer"); process.exit(0); }
+    const legError = leg.swmError ?? (Array.isArray(leg.errors) ? leg.errors.join("; ") : undefined);
+    if (legError) console.log("curator leg failed: " + legError);
+  '
+}
+
 log "Outsider calls catchup against curator (anonymous, public CG)..."
-CATCHUP=$(api_call "$OUTSIDER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
+# A leg can fail transiently (responder busy); retry before failing.
+for attempt in 1 2 3; do
+  CATCHUP=$(api_call "$OUTSIDER_NODE" POST /api/shared-memory/catchup "$(cat <<EOF
 { "contextGraphId": "$CG_ID", "peerId": "$CURATOR_PEER" }
 EOF
 )")
-log "catchup response: $CATCHUP"
+  log "catchup response (attempt $attempt): $CATCHUP"
+  CATCH_PROBLEM=$(catchup_problem "$CATCHUP")
+  [ -n "$CATCH_PROBLEM" ] || break
+  warn "catchup attempt $attempt: $CATCH_PROBLEM"
+  sleep 5
+done
+[ -z "$CATCH_PROBLEM" ] || fail "outsider catchup did not complete a request to the curator: $CATCH_PROBLEM"
 
 CATCH_TOTAL=$(parse_json "$CATCHUP" '.totalInsertedTriples')
-# `results` is empty when no peer was attempted.
-CATCH_ERR=$(parse_json "$CATCHUP" '.results?.[0]?.swmError')
-log "outsider catchup: inserted=$CATCH_TOTAL ${CATCH_ERR:+(swmError=$CATCH_ERR)}"
-[ "$(parse_json "$CATCHUP" '.peersAttempted')" != "0" ] \
-  || warn "outsider catchup attempted no peers; the no-denial check below does not exercise the curator"
+log "outsider catchup: curator leg completed, inserted=$CATCH_TOTAL"
 
 # Critical: curator MUST NOT have logged a denial line for this CG.
 sleep 1
@@ -305,7 +360,7 @@ log "  LU-10 public-CG regression sweep: PASS"
 log "================================================================"
 log "  Public CG:      $CG_ID  (onChainId=$ON_CHAIN_ID)"
 log "  Publish:        kaId=$KC tx=$TX merkleRoot=$MERKLE_ROOT"
-log "  Anon catchup:   inserted=$CATCH_TOTAL ${CATCH_ERR:+(timed out, not denied)}"
+log "  Anon catchup:   curator served, inserted=$CATCH_TOTAL"
 log "  Verify-batch:   ok=true on correct quads, root-mismatch on tampered"
 log "  Attestation:    mint+verify both ok / wrong-leaf rejected"
 log "================================================================"
