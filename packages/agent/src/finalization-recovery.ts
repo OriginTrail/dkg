@@ -1144,7 +1144,7 @@ export class FinalizationRecovery<
         entry.state === 'SETTLED'
           ? { mode: 'ordinary', retryDelayMs: ordinaryDelay }
           : FINALIZATION_RECOVERY_TRANSIENT_FAILURE_CODES.has(failureCode)
-            ? { mode: 'transient', retryDelayMs: ordinaryDelay }
+            ? { mode: 'transient', retryDelayMs: ordinaryDelay, failureCode }
             : {
                 mode: 'stable-failure',
                 retryDelayMs: ordinaryDelay,

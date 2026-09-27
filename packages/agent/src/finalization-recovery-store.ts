@@ -195,9 +195,13 @@ export type FinalizationRecoveryAttemptPolicy =
       retryDelayMs?: number;
     }
   | {
-      /** A failure that neither extends nor resets the stable-failure streak. */
+      /**
+       * A failure that clears on its own. It neither extends nor resets
+       * another code's stable-failure streak.
+       */
       mode: 'transient';
       retryDelayMs: number;
+      failureCode: FinalizationRecoveryFailureCode;
     }
   | {
       mode: 'stable-failure';
@@ -229,20 +233,17 @@ export function planFinalizationRecoveryAttempt(
   now: number,
 ): FinalizationRecoveryAttemptUpdate {
   if (policy.mode === 'transient') {
-    // Older releases counted transient codes as stable failures; a streak of
-    // one is no evidence that a failure is stable, so it is dropped here.
-    const transientStreak = current.failureSignature !== undefined
-      && (FINALIZATION_RECOVERY_TRANSIENT_FAILURE_CODES as ReadonlySet<string>)
-        .has(current.failureSignature);
+    // Older releases counted this code as a stable failure. That streak is no
+    // evidence of a stable failure, so it is dropped here.
+    const legacyStreak = current.failureSignature === policy.failureCode;
     return {
       attemptCount: current.attemptCount + 1,
       lastError: lastError ?? null,
-      failureSignature: transientStreak ? null : current.failureSignature ?? null,
-      failureStreak: transientStreak ? 0 : current.failureStreak,
-      nextAttemptAt: Math.max(
-        current.nextAttemptAt ?? 0,
-        now + Math.max(0, policy.retryDelayMs),
-      ),
+      failureSignature: legacyStreak ? null : current.failureSignature ?? null,
+      failureStreak: legacyStreak ? 0 : current.failureStreak,
+      // This attempt ran, so a later due time left by an earlier stable
+      // failure (an entry woken early by chain reconciliation) is obsolete.
+      nextAttemptAt: now + Math.max(0, policy.retryDelayMs),
     };
   }
   const failureSignature = policy.mode === 'stable-failure'

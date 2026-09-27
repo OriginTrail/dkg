@@ -263,11 +263,17 @@ describe('finalization recovery attempt planner', () => {
     expect(stable).toMatchObject({ failureStreak: 3, nextAttemptAt: 2_000 });
   });
 
+  const transientPolicy = {
+    mode: 'transient' as const,
+    retryDelayMs: 100,
+    failureCode: 'store-scheduler-busy' as const,
+  };
+
   it('backs a transient failure off briefly without touching the stable-failure streak', () => {
     const transient = planFinalizationRecoveryAttempt(
       entry({ failureSignature: 'apply-deferred', failureStreak: 2, attemptCount: 2 }),
       'store scheduler remained busy',
-      { mode: 'transient', retryDelayMs: 100 },
+      transientPolicy,
       1_000,
     );
     expect(transient).toEqual({
@@ -295,7 +301,7 @@ describe('finalization recovery attempt planner', () => {
       const update = planFinalizationRecoveryAttempt(
         current,
         'store scheduler remained busy',
-        { mode: 'transient', retryDelayMs: 100 },
+        transientPolicy,
         now,
       );
       expect(update).toMatchObject({
@@ -313,6 +319,28 @@ describe('finalization recovery attempt planner', () => {
     }
   });
 
+  it('schedules a transient retry from now even when a stable failure parked the entry', () => {
+    // Chain reconciliation woke a parked entry early and it met a busy store:
+    // the six-hour deadline of the earlier stable failure no longer applies.
+    expect(planFinalizationRecoveryAttempt(
+      entry({
+        failureSignature: 'receipt-pending',
+        failureStreak: 3,
+        attemptCount: 3,
+        nextAttemptAt: 1_000 + 6 * 60 * 60 * 1_000,
+      }),
+      'store scheduler remained busy',
+      transientPolicy,
+      1_000,
+    )).toEqual({
+      attemptCount: 4,
+      lastError: 'store scheduler remained busy',
+      failureSignature: 'receipt-pending',
+      failureStreak: 3,
+      nextAttemptAt: 1_100,
+    });
+  });
+
   it('drops a streak an older release recorded for a transient code', () => {
     expect(planFinalizationRecoveryAttempt(
       entry({
@@ -322,7 +350,7 @@ describe('finalization recovery attempt planner', () => {
         nextAttemptAt: 900,
       }),
       'store scheduler remained busy',
-      { mode: 'transient', retryDelayMs: 100 },
+      transientPolicy,
       1_000,
     )).toEqual({
       attemptCount: 4,
