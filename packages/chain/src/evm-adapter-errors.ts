@@ -395,6 +395,17 @@ export class InsufficientPublisherFundsError extends Error {
   }
 }
 
+/** A strict publish cannot prove PCA coverage while its chain reads are unavailable. */
+export class PcaFundingUnknownError extends Error {
+  readonly code = 'PCA_FUNDING_UNKNOWN';
+  readonly readCode?: string;
+  constructor(readCode?: string) {
+    super('PCA funding verification is inconclusive; retry when chain reads recover.');
+    this.name = 'PcaFundingUnknownError';
+    this.readCode = readCode;
+  }
+}
+
 /**
  * True iff `err` is the no-funded-publisher-wallet failure — code-first, with a
  * message-marker fallback for a wrapper that dropped `.code`. Uses the same

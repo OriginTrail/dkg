@@ -23,10 +23,11 @@ import type {
 } from './chain-adapter.js';
 import type { PublisherConvictionPlanReader } from './publisher-plan.js';
 import { PcaUnavailableError } from './pca-errors.js';
-import { enrichEvmError, getPcaLogicInterface } from './evm-adapter-errors.js';
+import { enrichEvmError, errorCode, getPcaLogicInterface } from './evm-adapter-errors.js';
 import type { PcaMutationInvalidation } from './pca-read-cache.js';
 import { withRpcRequestTimeout } from './rpc-request-transport.js';
 import { RPC_READ_STALL_TIMEOUT_MS } from './evm-adapter-constants.js';
+import { isRetryableRpcError } from './evm-adapter-rpc.js';
 
 export interface RawShardingTableNode extends ArrayLike<unknown> {
   nodeId?: unknown;
@@ -58,17 +59,17 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       getAccountId: (publisherAddress) => withRpcRequestTimeout(
         RPC_READ_STALL_TIMEOUT_MS,
         'pca publish-plan account lookup',
-        () => this.getConvictionAgentAccountId(publisherAddress),
+        () => this.getConvictionAgentAccountId(publisherAddress, { strict: true }),
       ),
       getLockDurationEpochs: (accountId) => withRpcRequestTimeout(
         RPC_READ_STALL_TIMEOUT_MS,
         'pca publish-plan lock lookup',
-        () => this.getConvictionAccountLockDurationEpochs(accountId),
+        () => this.getConvictionAccountLockDurationEpochs(accountId, { strict: true }),
       ),
       canCover: (accountId, baseCost) => withRpcRequestTimeout(
         RPC_READ_STALL_TIMEOUT_MS,
         'pca publish-plan coverage probe',
-        () => this.convictionAccountCanCover(accountId, baseCost),
+        () => this.convictionAccountCanCover(accountId, baseCost, { strict: true }),
       ),
     };
   }
@@ -77,29 +78,31 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     address: string,
     requiredCostWei: bigint,
     publishEpochs?: number,
+    strictRead = false,
   ): Promise<boolean> {
     if (!this.contracts.dkgPublishingConvictionNFT) return false;
     try {
       const accountId = await withRpcRequestTimeout(
         RPC_READ_STALL_TIMEOUT_MS,
         'pca agent account lookup',
-        () => this.getConvictionAgentAccountId(address),
+        () => this.getConvictionAgentAccountId(address, { strict: strictRead }),
       );
       if (accountId <= 0n) return false;
       if (publishEpochs !== undefined) {
         const lockEpochs = await withRpcRequestTimeout(
           RPC_READ_STALL_TIMEOUT_MS,
           'pca account lock-duration probe',
-          () => this.getConvictionAccountLockDurationEpochs(accountId),
+          () => this.getConvictionAccountLockDurationEpochs(accountId, { strict: strictRead }),
         );
         if (lockEpochs !== publishEpochs) return false;
       }
       return await withRpcRequestTimeout(
         RPC_READ_STALL_TIMEOUT_MS,
         'pca account coverage probe',
-        () => this.convictionAccountCanCover(accountId, requiredCostWei > 0n ? requiredCostWei : 1n),
+        () => this.convictionAccountCanCover(accountId, requiredCostWei > 0n ? requiredCostWei : 1n, { strict: strictRead }),
       );
-    } catch {
+    } catch (error) {
+      if (strictRead && (isRetryableRpcError(error) || errorCode(error) === 'CALL_EXCEPTION')) throw error;
       return false;
     }
   }
@@ -166,7 +169,10 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
     });
   }
 
-  async getConvictionAccountLockDurationEpochs(accountId: bigint): Promise<number> {
+  async getConvictionAccountLockDurationEpochs(
+    accountId: bigint,
+    opts?: { strict?: boolean },
+  ): Promise<number> {
     await this.init();
     if (!this.contracts.dkgPublishingConvictionNFT) return 0;
     if (accountId <= 0n) return 0;
@@ -187,7 +193,7 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       const lock = tuple[5];
       return Number(lock);
     } catch (err: any) {
-      if (err?.code === 'CALL_EXCEPTION') return 0;
+      if (err?.code === 'CALL_EXCEPTION' && !opts?.strict) return 0;
       throw err;
     }
   }
@@ -216,17 +222,21 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
    * gating on real coverage of the pending cost closes that.
    *
    * Returns `false` when the NFT is not deployed, the id is non-positive,
-   * the account is missing, or the chain call reverts — callers treat the
-   * unknown case as "cannot fund", which fails safe to "do not coerce".
+   * or the account cannot cover the cost. Soft callers also treat a revert as
+   * false; strict publisher funding checks propagate failed reads as unknown.
    * `baseCost <= 0` is treated as trivially coverable.
    */
-  async convictionAccountCanCover(accountId: bigint, baseCost: bigint): Promise<boolean> {
+  async convictionAccountCanCover(
+    accountId: bigint,
+    baseCost: bigint,
+    opts?: { strict?: boolean },
+  ): Promise<boolean> {
     await this.init();
     if (!this.contracts.dkgPublishingConvictionNFT) return false;
     if (accountId <= 0n) return false;
     if (baseCost <= 0n) return true;
     try {
-      const info = await this.getPublishingConvictionAccountInfo(accountId);
+      const info = await this.getPublishingConvictionAccountInfo(accountId, { strict: opts?.strict });
       if (!info) return false;
 
       // Expiry is TIMESTAMP-based on-chain: `coverPublishingCost` reverts
@@ -258,7 +268,7 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
       );
       return BigInt(remaining) >= discountedCost;
     } catch (err: any) {
-      if (err?.code === 'CALL_EXCEPTION') return false;
+      if (err?.code === 'CALL_EXCEPTION' && !opts?.strict) return false;
       throw err;
     }
   }
@@ -386,7 +396,7 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
 
   async getPublishingConvictionAccountInfo(
     accountId: bigint,
-    opts?: { extended?: boolean },
+    opts?: { extended?: boolean; strict?: boolean },
   ): Promise<V10PublishingConvictionAccountInfo | null> {
     await this.init();
     // Undeployed NFT → capability error (503). null is reserved below
@@ -437,12 +447,12 @@ export class ConvictionMethods extends EVMChainAdapterBase implements Conviction
         }
         return info;
       } catch (err: any) {
-        if (err?.code === 'CALL_EXCEPTION') {
+        if (err?.code === 'CALL_EXCEPTION' && !opts?.strict) {
           return null;
         }
         throw err;
       }
-    });
+    }, !!opts?.strict);
   }
 
   async topUpPublishingConvictionAccount(accountId: bigint, amount: bigint): Promise<TxResult> {
