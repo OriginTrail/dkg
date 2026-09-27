@@ -255,7 +255,7 @@ MEMBER_AGENT=$(api_call "$EDGE_MEMBER"  GET /api/agent/identity | jq_field ".age
 log "curator(edge$EDGE_CURATOR)=$CURATOR_AGENT  member(edge$EDGE_MEMBER)=$MEMBER_AGENT"
 
 # ---------------------------------------------------------------------------
-# 2. Create the private CG with BOTH edges on the allowlist; member subscribes
+# 2. Create the private CG with BOTH edges on the allowlist; member joins + subscribes
 # ---------------------------------------------------------------------------
 CREATE_RESP=$(api_call_agent "$EDGE_CURATOR" POST /api/context-graph/create "$(cat <<EOF
 {
@@ -273,6 +273,30 @@ ONCHAIN_ID=$(printf '%s' "$CREATE_RESP" | jq_field ".onChainId")
 [ -n "$ONCHAIN_ID" ] || fail "create did not return onChainId (catalog graph is keyed by it)"
 log "on-chain CG id = $ONCHAIN_ID (catalog graph: did:dkg:context-graph:${ONCHAIN_ID}/_catalog)"
 [ "$(printf '%s' "$CREATE_RESP" | jq_field ".registered")" = "true" ] || warn "CG not reported registered (continuing)"
+# The member joins through the supported flow: a signed join request, which the
+# curator auto-approves for an allowlisted agent and answers with the CG
+# metadata. Allowlisting by address alone gives the member no metadata, so it
+# would refuse the CG's shared memory. Do not pre-create the CG on the member:
+# for a plain (not wallet-scoped) id that makes the member its own curator.
+CG_ENC=$(node -e 'console.log(encodeURIComponent(process.argv[1]))' "$CG_ID")
+CURATOR_PEER=$(api_call_agent "$EDGE_CURATOR" GET /api/agent/identity | jq_field ".peerId")
+[ -n "$CURATOR_PEER" ] || fail "could not read the curator peer id"
+SIGNED_JOIN=$(api_call_agent "$EDGE_MEMBER" POST "/api/context-graph/${CG_ENC}/sign-join" '{}')
+JOIN_BODY=$(SIGNED_JOIN="$SIGNED_JOIN" CURATOR_PEER="$CURATOR_PEER" node -e '
+  const signed = JSON.parse(process.env.SIGNED_JOIN);
+  if (!signed.delegation) process.exit(1);
+  console.log(JSON.stringify({ delegation: signed.delegation, curatorPeerId: process.env.CURATOR_PEER, agentName: "rfc49-member" }));
+') || fail "member sign-join returned no delegation: $SIGNED_JOIN"
+JOIN_RESP=""
+for attempt in 1 2 3 4 5 6; do
+  JOIN_RESP=$(api_call_agent "$EDGE_MEMBER" POST "/api/context-graph/${CG_ENC}/request-join" "$JOIN_BODY")
+  [ "$(printf '%s' "$JOIN_RESP" | jq_field ".delivered")" = "1" ] && break
+  log "  member join request not delivered yet (attempt $attempt): ${JOIN_RESP:0:200}"
+  sleep 5
+done
+[ "$(printf '%s' "$JOIN_RESP" | jq_field ".delivered")" = "1" ] \
+  || fail "member edge$EDGE_MEMBER's join request never reached the curator: $JOIN_RESP"
+log "member edge$EDGE_MEMBER join request: $JOIN_RESP"
 sleep 4
 api_call_agent "$EDGE_MEMBER" POST /api/subscribe "{\"contextGraphId\":\"${CG_ID}\",\"includeSharedMemory\":true}" >/dev/null 2>&1
 log "member edge$EDGE_MEMBER subscribed to ${CG_ID}"
@@ -600,7 +624,7 @@ for i in $(seq 1 40); do
   sleep 3
 done
 [ "$got" != "unreadable" ] || fail "member edge$EDGE_MEMBER: cannot read its store after the restart"
-[ "$MEMBER_GOT_UPDATE" -ge 1 ] || fail "member edge$EDGE_MEMBER did NOT converge to the UPDATED private payload after reconnect — the curated update did not DISTRIBUTE to members (Option B regression)"
+[ "$MEMBER_GOT_UPDATE" -ge 1 ] || fail "member edge$EDGE_MEMBER did NOT converge to the UPDATED private payload after reconnect — the curated update did not DISTRIBUTE to members (Option B regression; see #2858)"
 pass "member edge$EDGE_MEMBER converged to the UPDATED private payload — the curated update DISTRIBUTES to members (producer emit + curator-held + converge-on-reconnect)"
 
 # ---------------------------------------------------------------------------
