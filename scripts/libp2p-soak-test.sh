@@ -250,9 +250,10 @@ try:
     match = pattern.search(message.get("text", ""))
     if match and int(match.group(2)) == total: seen.append(int(match.group(1)))
   missing = sorted(set(range(1, total + 1)) - set(seen))
+  unexpected = sorted(set(seen) - set(range(1, total + 1)))
   duplicate = sorted(seq for seq in set(seen) if seen.count(seq) != 1)
-  print(f"recipient receipts={len(seen)}/{total} missing={missing} duplicate={duplicate}")
-  if missing or duplicate: sys.exit(1)
+  print(f"recipient receipts={len(seen)}/{total} missing={missing} duplicate={duplicate} unexpected={unexpected}")
+  if missing or duplicate or unexpected: sys.exit(1)
 except Exception as error:
   print(f"recipient inbox unreadable: {error}")
   sys.exit(1)
