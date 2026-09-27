@@ -748,31 +748,25 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    * a member's RFC-64 authority for the graph can stay blocked or resolving
    * indefinitely. Nothing then delivers the curator's root writes: they are
    * declined for good, recovery skips the root scope, and a Knowledge Asset's
-   * updates never reach the member. While that authority is not active, a
-   * graph this node holds as a verified private member keeps the legacy
-   * member lane, whose own checks (allowlist, envelope, sender key) still
+   * updates never reach the member.
+   *
+   * While that authority is not active, a private graph this node is a member
+   * of keeps the legacy member lane. Membership is read from the node's own
+   * metadata for the graph: a join approval delivers it before the curator's
+   * first share, and it survives a restart, whereas RFC-64 responsibility
+   * needs chain reads that can lag for a long time. The lane's own checks
+   * (allowlist, envelope, sender key, the curator's authorization) still
    * apply. Public graphs, explicitly selected or accepted graphs, and graphs
-   * whose RFC-64 authority is active keep their RFC-64 behaviour. Every check
-   * is an in-memory lookup: this runs on hot share and sync paths.
+   * whose RFC-64 authority is active keep their RFC-64 behaviour.
    */
-  rfc64PrivateRootSwmOnLegacyLaneV1(
+  async rfc64PrivateRootSwmOnLegacyLaneV1(
     this: DKGAgent,
     contextGraphId: string,
-  ): boolean {
+  ): Promise<boolean> {
     if (this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) return false;
     const authorityContextGraphId = this.rfc64AuthorityContextGraphIdV1(contextGraphId);
     // A wire id with no cleartext binding names no graph this node holds.
     if (/^0x[0-9a-fA-F]{64}$/.test(authorityContextGraphId)) return false;
-    let responsibilityReason: string | null;
-    try {
-      responsibilityReason = this.readRfc64CatalogResponsibilityV1(authorityContextGraphId)
-        .responsibilityReason;
-    } catch {
-      return false;
-    }
-    // Set only for a graph whose policy is private and whose membership the
-    // node's lifecycle has verified.
-    if (responsibilityReason !== 'private-membership') return false;
     if (
       this.config.rfc64CatalogExecutionPlan.selectedAuthority[authorityContextGraphId] !== undefined
       || this.hasRfc64AcceptedCompatibilityAuthorityV1(authorityContextGraphId)
@@ -780,9 +774,35 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === authorityContextGraphId,
       )
     ) return false;
-    return projectRfc64CatalogTransportStateV1(
-      this.resolveRfc64CatalogReceiverAuthorityV1(authorityContextGraphId),
-    ) === 'catalog-blocked';
+    if (
+      projectRfc64CatalogTransportStateV1(
+        this.resolveRfc64CatalogReceiverAuthorityV1(authorityContextGraphId),
+      ) !== 'catalog-blocked'
+    ) return false;
+    let meta: Awaited<ReturnType<DKGAgent['getCgMeta']>>;
+    try {
+      meta = await this.getCgMeta(authorityContextGraphId);
+    } catch {
+      return false;
+    }
+    // Only an explicit private policy counts (#865).
+    if (meta.accessPolicy?.trim().toLowerCase() !== 'private') return false;
+    const address = (value: string): string | undefined => (
+      /(0x[0-9a-fA-F]{40})$/.exec(value.trim())?.[1]?.toLowerCase()
+    );
+    const revoked = new Set(meta.revokedAgents.map(address));
+    const members = new Set(
+      [
+        ...meta.allowedAgents,
+        ...meta.participantAgents,
+        ...meta.curators,
+        ...meta.creators,
+      ].map(address).filter((member) => member !== undefined && !revoked.has(member)),
+    );
+    return [
+      this.defaultAgentAddress,
+      ...this.listLocalAgents().map(({ agentAddress }) => agentAddress),
+    ].some((local) => local !== undefined && members.has(address(local)));
   }
 
   async reconcileSharedMemoryGossipSubscription(this: DKGAgent, contextGraphId: string): Promise<void> {
@@ -1217,9 +1237,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // authenticated exact catalog head and make cold bootstrap fail closed.
         // A private graph's root scope keeps the legacy member lane while its
         // RFC-64 authority is not active (#2858).
-        legacyApplyAllowedOracle: (cgId: string, subGraphName: string | null) => (
+        legacyApplyAllowedOracle: async (cgId: string, subGraphName: string | null) => (
           this.rfc64LegacySwmApplyAllowedForScope(cgId, subGraphName)
-          || (subGraphName === null && this.rfc64PrivateRootSwmOnLegacyLaneV1(cgId))
+          || (subGraphName === null && await this.rfc64PrivateRootSwmOnLegacyLaneV1(cgId))
         ),
         resolveDurableRootAtomicCompanion: (input) => {
           if (this.config.dataDir === undefined) return;

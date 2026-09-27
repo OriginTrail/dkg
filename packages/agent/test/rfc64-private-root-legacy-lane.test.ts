@@ -18,15 +18,16 @@ const PRIVATE_CG = 'rfc64-private-root-legacy-lane';
 const PEER = '12D3KooWRfc64PrivateRootLanePeer';
 
 type TransportState = 'catalog-blocked' | 'catalog-active';
-type Responsibility = 'private-membership' | 'core-public' | 'edge-subscription' | null;
 
 interface Internals {
   config: DKGAgent['config'];
   wireIdToLocalCgId: Map<string, string>;
   contextGraphNameCommitment(contextGraphId: string): string;
   rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId: string): boolean;
-  rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId: string): boolean;
-  readRfc64CatalogResponsibilityV1(contextGraphId: string): unknown;
+  rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId: string): Promise<boolean>;
+  getCgMeta(contextGraphId: string): Promise<Record<string, unknown>>;
+  listLocalAgents(): Array<{ agentAddress: string }>;
+  defaultAgentAddress?: string;
   resolveRfc64CatalogReceiverAuthorityV1(contextGraphId: string): unknown;
   resolveRfc64AcceptedCompatibilityAuthorityV1(contextGraphId: string): unknown;
   resolveAcceptedRfc64SharedMemoryAuthorityV1(contextGraphId: string): boolean | undefined;
@@ -81,44 +82,58 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
     try { await agent.stop(); } catch { /* not started */ }
   });
 
+  const LOCAL = '0x1111111111111111111111111111111111111111';
+  const OTHER = '0x2222222222222222222222222222222222222222';
+
+  function meta(overrides: Record<string, unknown> = {}) {
+    return {
+      accessPolicy: 'private',
+      allowedAgents: [OTHER, LOCAL],
+      participantAgents: [],
+      curators: [],
+      creators: [],
+      revokedAgents: [],
+      ...overrides,
+    };
+  }
+
   function stubAuthority(options: {
     legacyAllowed?: boolean;
     state?: TransportState;
-    responsibility?: Responsibility;
+    meta?: Record<string, unknown>;
   }) {
     vi.spyOn(internals, 'rfc64LegacySwmGossipAllowedForContextGraph')
       .mockReturnValue(options.legacyAllowed ?? false);
     vi.spyOn(internals, 'resolveRfc64AcceptedCompatibilityAuthorityV1').mockReturnValue(null);
     vi.spyOn(internals, 'resolveRfc64CatalogReceiverAuthorityV1')
       .mockReturnValue(receiverAuthority(options.state ?? 'catalog-blocked'));
-    vi.spyOn(internals, 'readRfc64CatalogResponsibilityV1').mockReturnValue({
-      contextGraphId: PRIVATE_CG,
-      responsibilityReason: options.responsibility === undefined
-        ? 'private-membership'
-        : options.responsibility,
-    });
+    vi.spyOn(internals, 'getCgMeta').mockResolvedValue(options.meta ?? meta());
+    vi.spyOn(internals, 'listLocalAgents').mockReturnValue([{ agentAddress: LOCAL }]);
     return {
-      policy: vi.spyOn(internals, 'getExplicitAccessPolicy'),
       transport: vi.spyOn(internals, 'resolveSwmTransportAuthority'),
     };
   }
 
   it.each([
-    ['a verified private member whose RFC-64 authority is blocked', {}, true],
-    ['a Core holding a public graph', { responsibility: 'core-public' }, false],
-    ['an Edge subscription to a public graph', { responsibility: 'edge-subscription' }, false],
-    ['a graph the node holds no responsibility for', { responsibility: null }, false],
-    ['a private member whose RFC-64 authority is active', { state: 'catalog-active' }, false],
+    ['an allowlisted member of a private graph whose RFC-64 authority is blocked', {}, true],
+    ['a participant member', { meta: meta({ allowedAgents: [], participantAgents: [LOCAL] }) }, true],
+    ['the curator named by DID', {
+      meta: meta({ allowedAgents: [OTHER], curators: [`did:dkg:agent:${LOCAL.toUpperCase().replace('0X', '0x')}`] }),
+    }, true],
+    ['a revoked member', { meta: meta({ revokedAgents: [LOCAL] }) }, false],
+    ['a node that is not a member', { meta: meta({ allowedAgents: [OTHER] }) }, false],
+    ['a graph declared public', { meta: meta({ accessPolicy: 'public' }) }, false],
+    ['a graph with no explicit policy', { meta: meta({ accessPolicy: undefined }) }, false],
+    ['a member whose RFC-64 authority is active', { state: 'catalog-active' }, false],
     ['a node where legacy SWM is already allowed', { legacyAllowed: true }, false],
-  ] as const)('decides the lane for %s', (_label, options, expected) => {
-    const reads = stubAuthority(options);
-    expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(PRIVATE_CG)).toBe(expected);
-    // Hot share and sync paths: the decision reads neither the store nor the chain.
-    expect(reads.policy).not.toHaveBeenCalled();
+  ] as const)('decides the lane for %s', async (_label, options, expected) => {
+    const reads = stubAuthority(options as never);
+    await expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(PRIVATE_CG)).resolves.toBe(expected);
+    // No chain read: membership comes from the node's own metadata.
     expect(reads.transport).not.toHaveBeenCalled();
   });
 
-  it('leaves explicitly selected and accepted RFC-64 graphs on RFC-64', () => {
+  it('leaves explicitly selected and accepted RFC-64 graphs on RFC-64', async () => {
     stubAuthority({});
     internals.config.rfc64CatalogExecutionPlan = {
       ...defaultPlan,
@@ -126,23 +141,24 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
         [PRIVATE_CG]: receiverAuthority('catalog-blocked'),
       } as never,
     };
-    expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(PRIVATE_CG)).toBe(false);
+    await expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(PRIVATE_CG)).resolves.toBe(false);
     internals.config.rfc64CatalogExecutionPlan = defaultPlan;
 
     vi.mocked(internals.resolveRfc64AcceptedCompatibilityAuthorityV1)
       .mockReturnValue(receiverAuthority('catalog-active'));
-    expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(PRIVATE_CG)).toBe(false);
+    await expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(PRIVATE_CG)).resolves.toBe(false);
+    expect(internals.getCgMeta).not.toHaveBeenCalled();
   });
 
-  it('maps a bound wire id to its graph and refuses an unbound one', () => {
+  it('maps a bound wire id to its graph and refuses an unbound one', async () => {
     stubAuthority({});
     const wire = internals.contextGraphNameCommitment(PRIVATE_CG);
     internals.wireIdToLocalCgId.delete(wire);
-    expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(wire)).toBe(false);
+    await expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(wire)).resolves.toBe(false);
     internals.wireIdToLocalCgId.set(wire, PRIVATE_CG);
     try {
-      expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(wire)).toBe(true);
-      expect(internals.readRfc64CatalogResponsibilityV1).toHaveBeenCalledWith(PRIVATE_CG);
+      await expect(internals.rfc64PrivateRootSwmOnLegacyLaneV1(wire)).resolves.toBe(true);
+      expect(internals.getCgMeta).toHaveBeenCalledWith(PRIVATE_CG);
     } finally {
       internals.wireIdToLocalCgId.delete(wire);
     }
@@ -168,7 +184,7 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
       expect(privateOutcome.reason ?? '').not.toContain('not authoritative');
 
       vi.restoreAllMocks();
-      stubAuthority({ responsibility: 'edge-subscription' });
+      stubAuthority({ meta: meta({ accessPolicy: 'public' }) });
       await expect(handler.handle(share(1), PEER)).resolves.toMatchObject({
         applied: false,
         reason: expect.stringContaining('not authoritative'),
@@ -180,7 +196,7 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
 
   it('admits SWM for a member of a blocked private graph through the legacy checks', async () => {
     vi.spyOn(internals, 'resolveAcceptedRfc64SharedMemoryAuthorityV1').mockReturnValue(false);
-    const lane = vi.spyOn(internals, 'rfc64PrivateRootSwmOnLegacyLaneV1').mockReturnValue(true);
+    const lane = vi.spyOn(internals, 'rfc64PrivateRootSwmOnLegacyLaneV1').mockResolvedValue(true);
     vi.spyOn(internals, 'hasConfirmedSharedMemoryMetaState').mockResolvedValue(true);
     const canRead = vi.spyOn(internals, 'canReadContextGraph').mockResolvedValue(true);
     await expect(internals.canUseSharedMemoryForContextGraph(PRIVATE_CG)).resolves.toBe(true);
@@ -191,7 +207,7 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
     await expect(internals.canUseSharedMemoryForContextGraph(PRIVATE_CG)).resolves.toBe(false);
 
     // A refusal that is not a blocked private graph stands without a read.
-    lane.mockReturnValue(false);
+    lane.mockResolvedValue(false);
     canRead.mockClear();
     await expect(internals.canUseSharedMemoryForContextGraph(PRIVATE_CG)).resolves.toBe(false);
     expect(canRead).not.toHaveBeenCalled();
@@ -209,7 +225,7 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
   ])('recovers the root scope of a blocked private graph: lane=%s', async (onLane, rootScope) => {
     vi.spyOn(internals, 'resolveRfc64CatalogReceiverAuthorityV1')
       .mockReturnValue(receiverAuthority('catalog-blocked'));
-    vi.spyOn(internals, 'rfc64PrivateRootSwmOnLegacyLaneV1').mockReturnValue(onLane);
+    vi.spyOn(internals, 'rfc64PrivateRootSwmOnLegacyLaneV1').mockResolvedValue(onLane);
     const recoverPrivateTarget = vi.fn(async (_input: { includeRootScope: boolean }) => ({}));
     vi.spyOn(internals, 'createSwmTargetExecutorSessionV1')
       .mockReturnValue({ recoverPrivateTarget });

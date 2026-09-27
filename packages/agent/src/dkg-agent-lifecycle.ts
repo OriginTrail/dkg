@@ -7179,7 +7179,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return execution(emptySharedMemorySyncResult());
     }
     const recoveryExecutor = this.createSwmTargetExecutorSessionV1();
-    const recoverPrivateContextGraph = (
+    const recoverPrivateContextGraph = async (
       contextGraphId: string,
       recoveryLease?: Rfc64SwmRecoveryTargetLeaseV1,
       onRetry?: Parameters<typeof recoveryExecutor.recoverPrivateTarget>[0]['onRetry'],
@@ -7188,7 +7188,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphId,
       includeRootScope: requestedScope !== null
         || this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed
-        || this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId),
+        || await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId),
       recoveryGuard: recoveryLease,
       onRetry,
     });
@@ -7632,7 +7632,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphId,
       'swm_recovery',
       `swm-recovery:${contextGraphId}:${remotePeerId.slice(-8)}`,
-      () => this.createSwmTargetExecutorSessionV1()
+      async () => this.createSwmTargetExecutorSessionV1()
         .recoverPrivateTarget({
           remotePeerId,
           contextGraphId,
@@ -7641,7 +7641,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ).legacySyncAllowed
             // A private graph's root scope stays on the legacy member lane
             // while its RFC-64 authority is not active (#2858).
-            || this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId),
+            || await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId),
         }),
       { source: 'swm-recovery' },
     );
@@ -11095,7 +11095,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // member checks below (#2858); a refusal by an active authority stands.
     if (
       acceptedRfc64Authority === false
-      && !this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId)
+      && !(await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId))
     ) return false;
     if (!(await this.hasConfirmedSharedMemoryMetaState(contextGraphId))) {
       return false;
