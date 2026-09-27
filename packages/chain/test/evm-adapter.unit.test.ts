@@ -4890,6 +4890,41 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     expect(fundingCoverage.calls.filter(([, , opts]) => opts?.strict === true)).toHaveLength(2);
   });
 
+  it('does not call a fallback-lifetime mismatch a confirmed PCA shortfall', async () => {
+    const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    const failedProbe = Object.assign(new Error('PCA planning lock read unavailable'), { code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    let planningLockReads = 0;
+    const planningLock = recorder(async () => {
+      if (planningLockReads++ < 2) throw failedProbe;
+      return 2;
+    });
+    (a as any).publisherConvictionPlanReader = () => ({
+      getAccountId: async () => 7n,
+      getLockDurationEpochs: planningLock,
+      canCover: async () => true,
+    });
+    (a as any).getConvictionAgentAccountId = recorder(async () => 7n);
+    const strictLock = recorder(async () => 2);
+    (a as any).getConvictionAccountLockDurationEpochs = strictLock;
+    const strictCoverage = recorder(async () => true);
+    (a as any).convictionAccountCanCover = strictCoverage;
+    (a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
+
+    await expect(a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      billableByteSize: 100n,
+      effectiveByteSize: 100n,
+      defaultPublishEpochs: 12,
+      publisherAddress: walletA.address,
+    })).rejects.toMatchObject({ code: 'PCA_FUNDING_UNKNOWN' });
+    expect(planningLock.calls).toHaveLength(3);
+    expect(strictLock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(strictCoverage.calls).toHaveLength(0);
+  });
+
   it('still reports confirmed PCA non-coverage as terminal insufficient funds', async () => {
     const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     for (const wallet of [walletA, walletB]) {

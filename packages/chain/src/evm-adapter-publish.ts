@@ -32,7 +32,7 @@ import type {
 import { publisherPublishPlanByteSize } from './chain-adapter.js';
 import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import { resolveQuotedPublisherCandidatePricing } from './publisher-plan.js';
-import { errorCode, errorMessage, InsufficientPublisherFundsError } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, InsufficientPublisherFundsError, PcaFundingUnknownError } from './evm-adapter-errors.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
@@ -190,10 +190,37 @@ export class PublishMethods extends EVMChainAdapterBase {
       plans[index] = await this._publisherCandidatePlan(plan.signer, request, quote);
     }
 
-    // This second strict scan is authoritative: rejected PCA reads already
-    // surface as unknown, while a successful false confirms a shortfall for
-    // the selected lifetime. An old planning error cannot override it.
-    return select();
+    try {
+      return await select();
+    } catch (error) {
+      if (!(error instanceof InsufficientPublisherFundsError)) throw error;
+      // A strict false can be only a lifetime mismatch against direct-spend
+      // fallback pricing. It did not probe coverage at the PCA's real lock.
+      for (const plan of plans) {
+        if (plan.pcaProbeError === undefined) continue;
+        const funds = await this.getWalletFunding(plan.address, { forceRefresh: true });
+        if (funds.native !== null && funds.native <= this.minPublisherNativeWei) continue;
+        if (funds.trac === null || (funds.trac > this.minPublisherTracWei && funds.trac >= plan.tokenAmount)) continue;
+        const reader = this.publisherConvictionPlanReader();
+        if (!reader) continue;
+        let accountId: bigint;
+        let lockEpochs: number;
+        try {
+          accountId = await reader.getAccountId(plan.address);
+          if (accountId <= 0n) continue;
+          lockEpochs = await reader.getLockDurationEpochs(accountId);
+        } catch (readError) {
+          if (isRetryableRpcError(readError) || errorCode(readError) === 'CALL_EXCEPTION') {
+            throw new PcaFundingUnknownError(errorCode(readError));
+          }
+          throw readError;
+        }
+        if (lockEpochs > 0 && lockEpochs !== plan.publishEpochs) {
+          throw new PcaFundingUnknownError(errorCode(plan.pcaProbeError));
+        }
+      }
+      throw error;
+    }
   }
 
   /**

@@ -488,14 +488,21 @@ describe('EVMChainAdapter PCA read cache', () => {
   it('does not reuse a soft missing-account verdict for strict funding verification', async () => {
     const adapter = pcaReadCacheAdapter([]) as any;
     const readFailure = Object.assign(new Error('PCA contract read failed'), { code: 'CALL_EXCEPTION' });
-    adapter.readContract = recorder(async () => { throw readFailure; });
+    const softRead = deferred<unknown>();
+    const strictRead = deferred<unknown>();
+    const reads = [softRead.promise, strictRead.promise];
+    adapter.readContract = recorder(async () => reads.shift()!);
 
-    await expect(adapter.getPublishingConvictionAccountInfo(9n)).resolves.toBeNull();
-    await expect(adapter.getPublishingConvictionAccountInfo(9n, { strict: true }))
-      .rejects.toBe(readFailure);
-    await expect(adapter.convictionAccountCanCover(9n, 1n, { strict: true }))
-      .rejects.toBe(readFailure);
-    expect(adapter.readContract.calls).toHaveLength(3);
+    const soft = adapter.getPublishingConvictionAccountInfo(9n);
+    await vi.waitFor(() => expect(adapter.readContract.calls).toHaveLength(1));
+    const strict = adapter.getPublishingConvictionAccountInfo(9n, { strict: true });
+    const strictResult = expect(strict).rejects.toBe(readFailure);
+    await vi.waitFor(() => expect(adapter.readContract.calls).toHaveLength(2));
+    strictRead.reject(readFailure);
+    softRead.reject(readFailure);
+    await expect(soft).resolves.toBeNull();
+    await strictResult;
+    expect(adapter.readContract.calls).toHaveLength(2);
   });
 
   it('public top-up refreshes warmed account-info cache immediately', async () => {
