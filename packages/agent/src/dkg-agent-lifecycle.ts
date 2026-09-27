@@ -8657,9 +8657,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return authority.outcome === 'unavailable' ? 'retry' : 'stop';
     }
 
+    // A shutdown that began during the reads above must not clear the row's
+    // pending state or open its data lanes while the node tears down; the
+    // next start recovers the row again.
+    const stopping = () => this.node.stopSignal?.aborted === true;
+    if (stopping()) return 'stop';
     await this.refreshMetaSyncedFlags([contextGraphId]);
     const current = this.subscribedContextGraphs.get(contextGraphId);
-    if (!current?.subscribed) return 'stop';
+    if (!current?.subscribed || stopping()) return 'stop';
     this.subscribeToContextGraph(contextGraphId, {
       persist: false,
       syncMode: current.syncMode,
@@ -8674,9 +8679,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * until it completes or can no longer complete (#2832). Right after a
    * restart the node's authority reads can still be rebuilding its finalized
    * index, so a single attempt could fail transiently and leave every data
-   * lane closed until the next restart. A `retry` outcome is tried again with
-   * backoff while the row is still a subscribed, join-approved,
-   * pending-metadata row; the node stopping ends the loop.
+   * lane closed until the next restart. A `retry` outcome, or an attempt that
+   * throws, is tried again with backoff while the row is still a subscribed,
+   * join-approved, pending-metadata row; the node stopping ends the loop.
    */
   async recoverPendingJoinApprovalMetadata(this: DKGAgent,
     contextGraphId: string,
@@ -8684,7 +8689,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   ): Promise<void> {
     const stopSignal = this.node.stopSignal;
     for (let attempt = 0; ; attempt += 1) {
-      if (await this.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId) !== 'retry') return;
+      let outcome: JoinApprovalMetadataRecoveryOutcome;
+      try {
+        outcome = await this.resumePendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
+      } catch (error) {
+        // A store or network fault that escapes an attempt is as transient as
+        // a `retry`. Ending the loop on it would leave the row closed until
+        // the next restart again.
+        this.log.warn(
+          createOperationContext('sync'),
+          `Pending join-approval recovery attempt for "${contextGraphId}" failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        outcome = 'retry';
+      }
+      if (outcome !== 'retry') return;
       const delayMs = JOIN_APPROVAL_METADATA_RECOVERY_RETRY_MS[
         Math.min(attempt, JOIN_APPROVAL_METADATA_RECOVERY_RETRY_MS.length - 1)
       ]!;
