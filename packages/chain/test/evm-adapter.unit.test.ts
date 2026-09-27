@@ -4738,6 +4738,91 @@ describe('createKnowledgeAssets — funding-aware wallet selection', () => {
     });
   });
 
+  it('reports an exhausted PCA read as unknown instead of terminal insufficient funds', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    for (const wallet of [walletA, walletB]) {
+      nativeByAddr.set(lc(wallet.address), ONE);
+      tracByAddr.set(lc(wallet.address), 0n);
+    }
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    const exhausted = Object.assign(new Error('all PCA read endpoints unavailable'), {
+      code: 'RPC_ENDPOINTS_EXHAUSTED',
+    });
+    (a as any).getConvictionAgentAccountId = recorder(async () => 7n);
+    (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 12);
+    (a as any).convictionAccountCanCover = recorder(async () => { throw exhausted; });
+    (a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
+
+    await expect(a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      billableByteSize: 100n,
+      effectiveByteSize: 100n,
+      explicitPublishEpochs: 12,
+      defaultPublishEpochs: 12,
+    })).rejects.toMatchObject({ code: 'PCA_FUNDING_UNKNOWN', readCode: 'RPC_ENDPOINTS_EXHAUSTED' });
+  });
+
+  it('retains a transient publish-plan PCA read failure through the direct-spend fallback', async () => {
+    const { a, walletA, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    (a as any).getConvictionAgentAccountId = recorder(async () => {
+      throw Object.assign(new Error('all PCA read endpoints unavailable'), {
+        code: 'RPC_ENDPOINTS_EXHAUSTED',
+      });
+    });
+    (a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
+
+    await expect(a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      billableByteSize: 100n,
+      effectiveByteSize: 100n,
+      defaultPublishEpochs: 12,
+      publisherAddress: walletA.address,
+    })).rejects.toMatchObject({ code: 'PCA_FUNDING_UNKNOWN' });
+  });
+
+  it('still reports confirmed PCA non-coverage as terminal insufficient funds', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    for (const wallet of [walletA, walletB]) {
+      nativeByAddr.set(lc(wallet.address), ONE);
+      tracByAddr.set(lc(wallet.address), 0n);
+    }
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    (a as any).getConvictionAgentAccountId = recorder(async () => 7n);
+    (a as any).getConvictionAccountLockDurationEpochs = recorder(async () => 12);
+    (a as any).convictionAccountCanCover = recorder(async () => false);
+    (a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
+
+    await expect(a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      billableByteSize: 100n,
+      effectiveByteSize: 100n,
+      explicitPublishEpochs: 12,
+      defaultPublishEpochs: 12,
+    })).rejects.toMatchObject({ code: 'NO_FUNDED_PUBLISHER_WALLET' });
+  });
+
+  it('prefers a confirmed funded wallet over another candidate with an unknown PCA read', async () => {
+    const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
+    nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);
+    tracByAddr.set(lc(walletA.address), 0n); tracByAddr.set(lc(walletB.address), 2_000n);
+    (a as any).contracts.dkgPublishingConvictionNFT = {};
+    (a as any).getConvictionAgentAccountId = recorder(async () => {
+      throw Object.assign(new Error('PCA read unavailable'), { code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    });
+    (a as any).quoteRequiredPublishTokenAmount = recorder(async () => 1_000n);
+
+    await expect(a.resolvePublisherPublishPlan({
+      contextGraphId: CG,
+      billableByteSize: 100n,
+      effectiveByteSize: 100n,
+      explicitPublishEpochs: 12,
+      defaultPublishEpochs: 12,
+    })).resolves.toMatchObject({ publisherAddress: walletB.address });
+  });
+
   it('force-refreshes cached balances before a terminal no-funded-wallet decision', async () => {
     const { a, walletA, walletB, nativeByAddr, tracByAddr } = makeMultiWalletV10Adapter(makeAllowanceByOwner());
     nativeByAddr.set(lc(walletA.address), ONE); nativeByAddr.set(lc(walletB.address), ONE);

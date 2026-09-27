@@ -32,13 +32,18 @@ import type {
 import { publisherPublishPlanByteSize } from './chain-adapter.js';
 import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import { resolveQuotedPublisherCandidatePricing } from './publisher-plan.js';
-import { errorMessage } from './evm-adapter-errors.js';
+import { errorCode, errorMessage } from './evm-adapter-errors.js';
+import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
 import {
 } from './evm-adapter-constants.js';
 
-type PublisherCandidatePlan = PublisherPublishPlan & { signer: Wallet; address: string };
+type PublisherCandidatePlan = PublisherPublishPlan & {
+  signer: Wallet;
+  address: string;
+  pcaProbeError?: unknown;
+};
 
 /**
  * GH#2270 PR-3 r2 — does this error mean "that ERC-721 token does not exist"?
@@ -138,6 +143,12 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress: signer.address,
       publishEpochs: pricing.publishEpochs,
       tokenAmount: pricing.tokenAmount,
+      ...(diagnostics?.pcaProbeError !== undefined && (
+        isRetryableRpcError(diagnostics.pcaProbeError)
+        || errorCode(diagnostics.pcaProbeError) === 'CALL_EXCEPTION'
+      )
+        ? { pcaProbeError: diagnostics.pcaProbeError }
+        : {}),
     };
   }
 
@@ -184,6 +195,7 @@ export class PublishMethods extends EVMChainAdapterBase {
           pca: { kind: 'publish', epochs: plan.publishEpochs },
         },
         { preferIdle: false },
+        plan.pcaProbeError === undefined ? [] : [plan.pcaProbeError],
       );
       return {
         publisherAddress: plan.publisherAddress,
@@ -212,6 +224,7 @@ export class PublishMethods extends EVMChainAdapterBase {
           pca: { kind: 'publish', epochs: plan.publishEpochs },
         }),
         { preferIdle: false },
+        plans.flatMap((plan) => plan.pcaProbeError === undefined ? [] : [plan.pcaProbeError]),
       );
     });
     // Do not expose the internal Wallet carried only for cursor advancement.
