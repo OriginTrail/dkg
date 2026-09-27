@@ -294,6 +294,7 @@ import {
 } from './chain-reconciler.js';
 import type { ContextGraphReconcileResult } from './vm-reconcile-service.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
+import { VmRefreshQueue } from './vm-refresh.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
 // (durable, SQLite-backed) replaces it. We keep a minimal local
 // type alias so listPendingJoinApprovalRetries() retains its old
@@ -1117,6 +1118,19 @@ export class DKGAgentBase {
    */
   static readonly VM_RECONCILE_CONFIRMATION_DEPTH =
     Number(process.env['DKG_VM_RECONCILE_CONFIRMATION_DEPTH']) || 5;
+  /**
+   * #2858 — confirmed VM copies waiting for a refresh after a KA update, held
+   * process-wide. Each entry is one (graph, KA) pair; a flood of update events
+   * for held KAs drops the oldest hint, never a newer one.
+   */
+  static readonly VM_REFRESH_MAX_ENTRIES = 256;
+  /**
+   * Refresh attempts one reconcile pass may run for its graph. Each is a few
+   * chain reads plus one exact fetch that asks at most
+   * `VM_RECONCILE_EXACT_PEER_MAX` peers; more due targets continue in the next
+   * pass.
+   */
+  static readonly VM_REFRESH_MAX_PER_PASS = 2;
 
   static readonly LIST_CONTEXT_GRAPHS_CACHE_TTL_MS =
     // A full catalogue scan enriches every globally known graph and is
@@ -1265,6 +1279,17 @@ export class DKGAgentBase {
   protected readonly vmReconcileNegativeCacheKeysByCg = new Map<string, Set<string>>();
   /** Bounded, process-local clean-absence rotations for production VM recovery. */
   protected readonly vmReconcileRotationState = new Map<string, VmReconcileRotationRecord>();
+  /**
+   * #2858 — confirmed VM copies behind an on-chain update, queued by the
+   * `KnowledgeAssetUpdated` nudge and worked off by each graph's reconcile
+   * pass. Retries follow the recovery backoff (sweep interval, doubling, to
+   * the recovery ceiling).
+   */
+  protected readonly vmRefreshQueue = new VmRefreshQueue({
+    maxEntries: DKGAgentBase.VM_REFRESH_MAX_ENTRIES,
+    baseBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS,
+    maxBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
+  });
   /** Next stable batch index to consider when the bounded rotation cache has waiters. */
   protected readonly vmReconcileRotationAdmissionCursorByCg = new Map<string, number>();
   /** Last resolved curator peers, used to keep the capped exact-recovery roster authoritative. */

@@ -203,6 +203,8 @@ export default defineConfig({
       "test/vm-reconcile-self-prime-budget.test.ts",
       "test/vm-reconcile-sweep.test.ts",
       "test/vm-reconcile-lifecycle-timer.test.ts",
+      // #2858 — refresh of confirmed VM copies after an on-chain KA update.
+      "test/vm-refresh-after-update.test.ts",
       "test/core-fills-gap.test.ts",
       "test/vm-promotion-gate.test.ts",
       "test/vm-recovery-microbatch-planner.test.ts",

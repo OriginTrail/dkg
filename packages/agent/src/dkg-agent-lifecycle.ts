@@ -3012,6 +3012,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               await this.handleKARegisteredNudge(onChainId, kaId, ctx, signal);
             }
           : undefined,
+        // #2858 — refresh nudge for KA updates. An update keeps the KA id and
+        // moves its root, and the sweep never revisits a settled ordinal, so a
+        // node holding only a confirmed VM copy learns of the new version here.
+        // Decided from local state; a V10 KA is its own batch, so the event's
+        // batch id is the KA id.
+        onCollectionUpdated: this.vmReconcileEnabled()
+          ? async ({ batchId, merkleRoot, signal }) => {
+              await this.handleKAUpdatedNudge(batchId, merkleRoot, ctx, signal);
+            }
+          : undefined,
       });
       await this.chainPoller.start();
       this.log.info(ctx, `Chain event poller started`);

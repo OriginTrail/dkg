@@ -17,9 +17,16 @@ export interface ConfirmedGraphScopedVmResolutionInput {
   subGraphName?: string;
 }
 
+/**
+ * Why a stored confirmed copy does not answer the request. `not-current` is
+ * the one expected in normal operation: the copy is intact and names the same
+ * KA, but at another version or root than the one asked for (typically an
+ * older version after an on-chain update).
+ */
 export type ConfirmedGraphScopedVmInvalidReason =
   | 'metadata'
   | 'identity'
+  | 'not-current'
   | 'content-count'
   | 'content-merkle';
 
@@ -90,12 +97,16 @@ async function resolveConfirmedGraphScopedVmAgainst(
     scope.ual !== input.ual
     || packedKaId !== input.kaId
     || envelope.batchId !== input.batchId
-    || (input.assertionVersion !== undefined
-      && BigInt(envelope.assertionVersion) !== input.assertionVersion)
-    || (chainMerkleRoot !== undefined && !equalBytes(envelope.merkleRoot, chainMerkleRoot))
     || input.subGraphName !== envelope.subGraphName
   ) {
     return { status: 'invalid', reason: 'identity' };
+  }
+  if (
+    (input.assertionVersion !== undefined
+      && BigInt(envelope.assertionVersion) !== input.assertionVersion)
+    || (chainMerkleRoot !== undefined && !equalBytes(envelope.merkleRoot, chainMerkleRoot))
+  ) {
+    return { status: 'invalid', reason: 'not-current' };
   }
 
   const content = await verifyExactGraphContent(store, {

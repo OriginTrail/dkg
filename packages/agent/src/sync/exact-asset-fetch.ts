@@ -270,6 +270,13 @@ export async function runExactAssetFetch(
     requestedUals: readonly string[];
     peerIds?: readonly string[];
     expectedOnChainId?: string;
+    /** Peers one run may try, capped at {@link MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS}. */
+    maxPeers?: number;
+    /**
+     * Start the peer window this many candidates in (wrapping), so a caller
+     * that retries reaches past the peers an earlier run already asked.
+     */
+    peerWindowOffset?: number;
   },
   deps: ExactAssetFetchDependencies,
 ): Promise<ContextGraphAssetFetchResult> {
@@ -328,9 +335,26 @@ export async function runExactAssetFetch(
     remaining.size === 0 ? [] : await deps.resolvePeerIds()
   );
   requireCurrent(deps);
+  const maxPeers = input.maxPeers === undefined || !Number.isFinite(input.maxPeers)
+    ? MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS
+    : Math.min(MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS, Math.max(1, Math.floor(input.maxPeers)));
+  const peerWindowOffset = input.peerWindowOffset === undefined
+    || !Number.isSafeInteger(input.peerWindowOffset)
+    || input.peerWindowOffset <= 0
+    ? 0
+    : input.peerWindowOffset;
   const traversal = await runBoundedPreparedPeerTraversal({
     candidatePeerIds: candidates,
-    maxPeers: MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
+    maxPeers,
+    ...(peerWindowOffset === 0
+      ? {}
+      : {
+          selectPeerWindow: (peerIds: string[]) => {
+            if (peerIds.length === 0) return peerIds;
+            const start = peerWindowOffset % peerIds.length;
+            return [...peerIds.slice(start), ...peerIds.slice(0, start)];
+          },
+        }),
     operationLabel: 'Exact asset fetch from',
     assertCurrent: () => requireCurrent(deps),
     preparePeer: deps.preparePeer,
