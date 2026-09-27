@@ -1065,6 +1065,14 @@ export class SharedMemoryHandler {
         this.log.warn(ctx, `SWM write rejected: ${reason}`);
         return { applied: false, reason, retryable: false };
       }
+      // An LU-11 chunk envelope feeds host-mode ingest, which verifies it
+      // elsewhere. A member receives it on the same topic and has nothing to
+      // apply from it.
+      if (envelope?.type === GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED) {
+        const reason = `chunked envelope for context graph "${contextGraphId}" is for host-mode ingest`;
+        this.log.debug(ctx, `SWM write skipped: ${reason}`);
+        return { applied: false, reason, retryable: false };
+      }
 
       // Every currently supported wire shape carries its scope outside the
       // plaintext. Check it before policy work/decryption so a catalog-owned

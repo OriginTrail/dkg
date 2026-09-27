@@ -22,6 +22,7 @@ import {
   generateWorkspaceRecipientEncryptionKey,
   GOSSIP_ENVELOPE_VERSION,
   GOSSIP_TYPE_WORKSPACE_PUBLISH,
+  GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
   type WorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
 import { SharedMemoryHandler } from '../src/index.js';
@@ -130,5 +131,34 @@ describe('SharedMemoryHandler private root scope on the legacy member lane (#285
     expect(outcome.applied).toBe(applied);
     if (!applied) expect(outcome).toMatchObject({ reason: expect.stringContaining('not authoritative') });
     expect(await storedRootWrites()).toBe(applied ? 1 : 0);
+  });
+
+  it('skips a chunked host-mode envelope on the member path without applying it', async () => {
+    const member = ethers.Wallet.createRandom();
+    await store.insert([
+      { subject: DATA_GRAPH, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"private"', graph: META_GRAPH },
+      { subject: DATA_GRAPH, predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT, object: `"${member.address}"`, graph: META_GRAPH },
+    ]);
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: new Map(),
+      localAgentAddresses: () => [member.address],
+      legacyApplyAllowedOracle: () => true,
+    });
+    const chunk = encodeGossipEnvelope({
+      version: GOSSIP_ENVELOPE_VERSION,
+      type: GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      agentAddress: member.address,
+      timestamp: new Date().toISOString(),
+      signature: new Uint8Array(65),
+      payload: new Uint8Array([...new Uint8Array(32).fill(7), 1, 2, 3]),
+    });
+
+    await expect(handler.handle(chunk, CURATOR_PEER_ID)).resolves.toMatchObject({
+      applied: false,
+      retryable: false,
+      reason: expect.stringContaining('host-mode ingest'),
+    });
+    expect(await storedRootWrites()).toBe(0);
   });
 });
