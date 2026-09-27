@@ -201,10 +201,18 @@ export async function resolveWorkspaceAgentRecipients(
   }
 
   const recipients: WorkspaceAgentRecipient[] = [];
+  // Name every recipient without a key at once, so a caller can fetch them
+  // together (#2849). Any other key failure still stops here.
+  const missingKeys: string[] = [];
   for (const agentAddress of access.agentAddresses) {
-    const agentRecipients = await resolveWorkspaceAgentRecipientKeys(store, agentAddress);
-    recipients.push(...agentRecipients);
+    try {
+      recipients.push(...await resolveWorkspaceAgentRecipientKeys(store, agentAddress));
+    } catch (error) {
+      if (!isWorkspaceAgentEncryptionKeyMissingError(error)) throw error;
+      missingKeys.push(...error.agentAddresses);
+    }
   }
+  if (missingKeys.length > 0) throw new WorkspaceAgentEncryptionKeyMissingError(missingKeys);
   const [firstRecipient, ...remainingRecipients] = recipients;
   if (!firstRecipient) {
     throw new Error(`Context graph "${input.contextGraphId}" requires encrypted SWM gossip but has no valid DKG agent recipients`);
@@ -310,19 +318,34 @@ async function getWorkspaceAccessMetadata(
   return { hasPrivateAccessPolicy, agentAddresses };
 }
 
+function nonEmptyAgentAddresses(agentAddresses: readonly string[]): readonly string[] {
+  if (agentAddresses.length === 0) {
+    throw new TypeError('WorkspaceAgentEncryptionKeyMissingError needs at least one agent address');
+  }
+  return [...agentAddresses];
+}
+
 /**
- * No authenticated workspace encryption key for a recipient agent is known on
- * this node: it has neither the agent's signed join request nor its profile
- * (#2849). The message stays the historical one; callers that can fetch the
- * key read `agentAddress`.
+ * No authenticated workspace encryption key is known on this node for one or
+ * more recipient agents: it has neither their signed join requests nor their
+ * profiles (#2849). For one agent the message stays the historical one;
+ * callers that can fetch the keys read `agentAddresses`.
  */
 export class WorkspaceAgentEncryptionKeyMissingError extends Error {
+  /** The first agent without a key. */
   readonly agentAddress: string;
+  /** Every agent without a key, in recipient order. */
+  readonly agentAddresses: readonly string[];
 
-  constructor(agentAddress: string, message?: string) {
-    super(message ?? `Missing public encryption key for DKG agent ${agentAddress}`);
+  constructor(agentAddresses: readonly string[], message?: string) {
+    const [first, ...rest] = nonEmptyAgentAddresses(agentAddresses);
+    super(message ?? (
+      `Missing public encryption key for DKG agent ${first}`
+      + (rest.length > 0 ? ` (also missing for ${rest.join(', ')})` : '')
+    ));
     this.name = 'WorkspaceAgentEncryptionKeyMissingError';
-    this.agentAddress = agentAddress;
+    this.agentAddresses = nonEmptyAgentAddresses(agentAddresses);
+    this.agentAddress = this.agentAddresses[0]!;
   }
 }
 
@@ -330,12 +353,13 @@ export class WorkspaceAgentEncryptionKeyMissingError extends Error {
 export function isWorkspaceAgentEncryptionKeyMissingError(
   error: unknown,
 ): error is WorkspaceAgentEncryptionKeyMissingError {
-  return error instanceof WorkspaceAgentEncryptionKeyMissingError
-    || (
-      error instanceof Error
-      && error.name === 'WorkspaceAgentEncryptionKeyMissingError'
-      && typeof (error as { agentAddress?: unknown }).agentAddress === 'string'
-    );
+  if (error instanceof WorkspaceAgentEncryptionKeyMissingError) return true;
+  if (!(error instanceof Error) || error.name !== 'WorkspaceAgentEncryptionKeyMissingError') return false;
+  const { agentAddress, agentAddresses } = error as { agentAddress?: unknown; agentAddresses?: unknown };
+  return typeof agentAddress === 'string'
+    && Array.isArray(agentAddresses)
+    && agentAddresses.length > 0
+    && agentAddresses.every((address) => typeof address === 'string');
 }
 
 /**
@@ -392,7 +416,7 @@ export async function resolveWorkspaceAgentRecipientKeys(
   );
 
   if (result.type !== 'bindings' || result.bindings.length === 0) {
-    throw new WorkspaceAgentEncryptionKeyMissingError(checksum);
+    throw new WorkspaceAgentEncryptionKeyMissingError([checksum]);
   }
   if (
     options.requiredPeerId !== undefined

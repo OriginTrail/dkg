@@ -1,8 +1,8 @@
 /**
- * #2849: a sender that lacks a roster member's encryption key fetches the
- * `agents` phonebook for that member once, then resolves the recipients
- * again. Every member still needs a key, so a share whose key cannot be found
- * fails closed with an error that says what to do.
+ * #2849: a sender that lacks roster members' encryption keys fetches the
+ * `agents` phonebook for all of them at once, then resolves their keys again.
+ * Every member still needs a key, so a share whose keys cannot be found fails
+ * closed with an error that says what to do.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
@@ -10,6 +10,8 @@ import {
   DKG_ONTOLOGY,
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
   computeWorkspaceAgentEncryptionKeyProofPayload,
+  contextGraphDataUri,
+  contextGraphMetaUri,
   encodeWorkspaceEncryptionKey,
   generateWorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
@@ -68,6 +70,7 @@ describe('private share recipients with a missing member key (#2849)', () => {
   function sender(
     members: ethers.HDNodeWallet[],
     onFetch?: (wallets: readonly string[]) => ethers.HDNodeWallet[],
+    transportKind: 'private-roster' | 'legacy-unregistered' = 'private-roster',
   ) {
     const store = new OxigraphStore();
     stores.push(store);
@@ -82,10 +85,9 @@ describe('private share recipients with a missing member key (#2849)', () => {
     });
     Object.assign(host, {
       store,
-      resolveSwmTransportAuthority: vi.fn(async () => ({
-        kind: 'private-roster' as const,
-        participantAgents: members.map((member) => member.address),
-      })),
+      resolveSwmTransportAuthority: vi.fn(async () => (transportKind === 'private-roster'
+        ? { kind: 'private-roster' as const, participantAgents: members.map((member) => member.address) }
+        : { kind: 'legacy-unregistered' as const })),
       getContextGraphAllowedPeers: vi.fn(async () => null),
       ensureAgentsInOnDemandPhonebook,
     });
@@ -128,31 +130,97 @@ describe('private share recipients with a missing member key (#2849)', () => {
     expect(ensureAgentsInOnDemandPhonebook).toHaveBeenCalledTimes(1);
   });
 
-  it('asks once per member: a known profile without a usable key still fails closed', async () => {
+  it('fetches once: a fetch that reports the wallet but brings no usable key still fails closed', async () => {
     const member = ethers.Wallet.createRandom();
     const { host, ensureAgentsInOnDemandPhonebook } = sender([member]);
-    // The phonebook knows the wallet, but its profile carries no key.
     ensureAgentsInOnDemandPhonebook.mockImplementation(async (wallets) => new Set(wallets));
 
     await expect(resolve(host)).rejects.toThrow('join through an invite');
     expect(ensureAgentsInOnDemandPhonebook).toHaveBeenCalledTimes(1);
   });
 
-  it('asks again only for the next member that is still missing', async () => {
+  it('asks for every missing member in one fetch and reads the roster once', async () => {
     const first = ethers.Wallet.createRandom();
+    const keyed = ethers.Wallet.createRandom();
     const second = ethers.Wallet.createRandom();
-    const { host, ensureAgentsInOnDemandPhonebook } = sender(
-      [first, second],
+    const { host, store, ensureAgentsInOnDemandPhonebook } = sender(
+      [first, keyed, second],
       (wallets) => [first, second].filter((wallet) => wallets.includes(wallet.address.toLowerCase())),
     );
+    await store.insert(signedKeyQuads(keyed));
+
+    const resolution = await resolve(host);
+
+    expect(resolution.recipients).toHaveLength(3);
+    expect(ensureAgentsInOnDemandPhonebook.mock.calls.map(([wallets]) => wallets)).toEqual([
+      [first.address.toLowerCase(), second.address.toLowerCase()],
+    ]);
+    const internals = host as unknown as {
+      resolveSwmTransportAuthority: ReturnType<typeof vi.fn>;
+      getContextGraphAllowedPeers: ReturnType<typeof vi.fn>;
+    };
+    expect(internals.resolveSwmTransportAuthority).toHaveBeenCalledTimes(1);
+    expect(internals.getContextGraphAllowedPeers).toHaveBeenCalledTimes(1);
+  });
+
+  it('names every member still without a key when the fetch cannot find them', async () => {
+    const first = ethers.Wallet.createRandom();
+    const second = ethers.Wallet.createRandom();
+    const { host, ensureAgentsInOnDemandPhonebook } = sender([first, second]);
+
+    const error = await resolve(host).then(() => null, (thrown: unknown) => thrown);
+
+    expect(isWorkspaceAgentEncryptionKeyMissingError(error)).toBe(true);
+    expect((error as WorkspaceAgentEncryptionKeyMissingError).agentAddresses)
+      .toEqual([first, second].map((wallet) => ethers.getAddress(wallet.address)));
+    expect((error as Error).message).toContain('Have each member join through an invite');
+    expect(ensureAgentsInOnDemandPhonebook).toHaveBeenCalledTimes(1);
+  });
+
+  it('fetches the missing members of an unregistered graph the same way', async () => {
+    const first = ethers.Wallet.createRandom();
+    const second = ethers.Wallet.createRandom();
+    const { host, store, ensureAgentsInOnDemandPhonebook } = sender(
+      [first, second],
+      (wallets) => [first, second].filter((wallet) => wallets.includes(wallet.address.toLowerCase())),
+      'legacy-unregistered',
+    );
+    // The local gate of an unregistered graph lists its members.
+    for (const member of [first, second]) {
+      await store.insert([{
+        subject: contextGraphDataUri(CONTEXT_GRAPH_ID),
+        predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+        object: `"${member.address}"`,
+        graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+      }]);
+    }
 
     const resolution = await resolve(host);
 
     expect(resolution.recipients).toHaveLength(2);
-    expect(ensureAgentsInOnDemandPhonebook.mock.calls.map(([wallets]) => wallets)).toEqual([
-      [first.address.toLowerCase()],
-      [second.address.toLowerCase()],
-    ]);
+    // One request with both members; the local gate lists them in store order.
+    expect(ensureAgentsInOnDemandPhonebook).toHaveBeenCalledTimes(1);
+    expect([...ensureAgentsInOnDemandPhonebook.mock.calls[0]![0]].sort())
+      .toEqual([first, second].map((wallet) => wallet.address.toLowerCase()).sort());
+  });
+
+  it('counts a recipient as known to the phonebook fetcher only by a verified key', async () => {
+    const member = ethers.Wallet.createRandom();
+    const { host, store } = sender([member]);
+    const deps = host.createOnDemandAgentsPhonebookDeps();
+    const wallet = member.address.toLowerCase();
+    const signal = new AbortController().signal;
+    // An older profile maps the agent to a peer but carries no key.
+    await store.insert([{
+      subject: `did:dkg:agent:${ethers.getAddress(member.address)}`,
+      predicate: DKG_ONTOLOGY.DKG_PEER_ID,
+      object: '"12D3KooWOlderProfileWithoutKey"',
+      graph: PROFILE_GRAPH,
+    }]);
+    expect(await deps.recipientKeyKnown(wallet, signal)).toBe(false);
+
+    await store.insert(signedKeyQuads(member));
+    expect(await deps.recipientKeyKnown(wallet, signal)).toBe(true);
   });
 
   it('leaves every other recipient failure untouched', async () => {

@@ -146,6 +146,11 @@ export interface OnDemandAgentsPhonebookDeps {
   isActiveSubscription(contextGraphId: string): boolean;
   /** The local phonebook maps the wallet to at least one peer. */
   phonebookHasWallet(wallet: string, signal: AbortSignal): Promise<boolean>;
+  /**
+   * The local store holds a usable authenticated encryption key for the
+   * agent. A profile alone is not enough: it can predate the agent's key.
+   */
+  recipientKeyKnown(wallet: string, signal: AbortSignal): Promise<boolean>;
   /** On-chain access policy of the graph. */
   readAccessPolicy(contextGraphId: string, signal: AbortSignal): Promise<AgentsPhonebookAccessPolicy>;
   /** Currently connected peers. Must not dial or probe. */
@@ -301,8 +306,8 @@ export class OnDemandAgentsPhonebookFetcher {
 
   /**
    * Fetch the phonebook for agents a private share needs keys for (#2849), and
-   * wait for that fetch. Resolves with the lower-cased wallets the local
-   * phonebook knows afterwards. A disabled, closed or cooling-down fetcher
+   * wait for that fetch. Resolves with the lower-cased wallets whose key the
+   * local store holds afterwards. A disabled, closed or cooling-down fetcher
    * fetches nothing and only reports, so the cost stays within the existing
    * cooldowns. The share is judged on the keys it then finds, never on this
    * answer alone. Never throws; aborting `signal` stops the wait, not a fetch
@@ -318,7 +323,7 @@ export class OnDemandAgentsPhonebookFetcher {
       for (const wallet of wanted) {
         if (known.has(wallet)) continue;
         const present = await this.#deps
-          .phonebookHasWallet(wallet, signal ?? this.#lifetime.signal)
+          .recipientKeyKnown(wallet, signal ?? this.#lifetime.signal)
           .catch(() => false);
         if (present) known.add(wallet);
       }
@@ -583,7 +588,7 @@ export class OnDemandAgentsPhonebookFetcher {
   ): Promise<string[]> {
     const unresolved: string[] = [];
     for (const wallet of wallets) {
-      const known = await this.#deps.phonebookHasWallet(wallet, signal).catch(() => false);
+      const known = await this.#deps.recipientKeyKnown(wallet, signal).catch(() => false);
       if (!known) unresolved.push(wallet);
     }
     return unresolved;

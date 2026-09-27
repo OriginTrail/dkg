@@ -652,17 +652,20 @@ function bindLiveAuthorityRead<T>(
 
 /**
  * The recipient-key failure a sender reports once fetching cannot help: why
- * the key is unknown and what gets it here (#2849).
+ * the keys are unknown and what gets them here (#2849).
  */
 function withMemberKeyHint(
   error: WorkspaceAgentEncryptionKeyMissingError,
 ): WorkspaceAgentEncryptionKeyMissingError {
+  const { agentAddresses } = error;
+  const one = agentAddresses.length === 1;
   return new WorkspaceAgentEncryptionKeyMissingError(
-    error.agentAddress,
-    `Missing public encryption key for DKG agent ${error.agentAddress}: this node has `
-      + 'neither a join request from the agent nor its profile. Have the member join through '
-      + 'an invite, or retry once its profile has reached this node (profiles are '
-      + 're-published about every 20 minutes).',
+    agentAddresses,
+    `${new WorkspaceAgentEncryptionKeyMissingError(agentAddresses).message}: this node has neither `
+      + (one ? 'a join request from the agent nor its profile. Have the member' : 'join requests from these agents nor their profiles. Have each member')
+      + ' join through an invite, or retry once '
+      + (one ? 'its profile has' : 'their profiles have')
+      + ' reached this node (profiles are re-published about every 20 minutes).',
   );
 }
 
@@ -1567,28 +1570,29 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
   async resolveWorkspaceAgentRecipientsForCurrentAuthority(this: DKGAgent,
     input: WorkspaceAgentRecipientResolverInput,
   ): Promise<WorkspaceAgentRecipientResolution> {
-    const resolveOnce = async (): Promise<WorkspaceAgentRecipientResolution> => {
-      // The receiver decides plaintext from this same transport authority
-      // (isContextGraphSwmPublic), so the two ends cannot disagree (#2827).
-      const transport = await withRpcUsageSite(
-        CG_AUTH_RPC_SITES.recipients,
-        () => this.resolveSwmTransportAuthority(input.contextGraphId, {
-          authorityReadMode: 'finalized-index-or-live',
-          requireLiveRosterForPrivate: true,
-        }),
-      );
-      if (transport.kind === 'plaintext') {
-        return { requiresEncryption: false, recipients: [] };
-      }
-      if (transport.kind === 'legacy-unregistered') {
-        return resolveWorkspaceAgentRecipients(this.store, input);
-      }
+    // The receiver decides plaintext from this same transport authority
+    // (isContextGraphSwmPublic), so the two ends cannot disagree (#2827).
+    const transport = await withRpcUsageSite(
+      CG_AUTH_RPC_SITES.recipients,
+      () => this.resolveSwmTransportAuthority(input.contextGraphId, {
+        authorityReadMode: 'finalized-index-or-live',
+        requireLiveRosterForPrivate: true,
+      }),
+    );
+    if (transport.kind === 'plaintext') {
+      return { requiresEncryption: false, recipients: [] };
+    }
+    let resolveKeys: () => Promise<WorkspaceAgentRecipientResolution>;
+    if (transport.kind === 'legacy-unregistered') {
+      resolveKeys = () => resolveWorkspaceAgentRecipients(this.store, input);
+    } else {
       if (transport.kind === 'unavailable') {
         const message =
           `Registered context graph "${input.contextGraphId}" authority is unavailable (${transport.reason})`;
         throw createContextGraphAuthorityError(message, transport);
       }
-      if (transport.participantAgents.length === 0) {
+      const participantAgents = transport.participantAgents;
+      if (participantAgents.length === 0) {
         throw new Error(
           `Registered context graph "${input.contextGraphId}" requires encrypted SWM gossip but its authoritative chain roster is empty or unavailable`,
         );
@@ -1602,60 +1606,66 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // malformed/missing key metadata that makes the local resolver throw
       // before the chain intersection is reached, blocking every post-revoke
       // write until the local cleanup retry succeeds.
-      const recipients: WorkspaceAgentRecipient[] = [];
-      for (const agentAddress of transport.participantAgents) {
-        const agentRecipients = await resolveWorkspaceAgentRecipientKeys(this.store, agentAddress);
-        const authorizedRecipients = allowedPeerSet === null
-          ? agentRecipients
-          : agentRecipients.filter((recipient) => (
-            recipient.peerId !== undefined && allowedPeerSet.has(recipient.peerId)
-          ));
-        if (authorizedRecipients.length === 0) {
+      resolveKeys = async () => {
+        const recipients: WorkspaceAgentRecipient[] = [];
+        // Every member without a key is named at once, so one phonebook fetch
+        // can cover them all (#2849). Any other key failure still stops here.
+        const missingKeys: string[] = [];
+        for (const agentAddress of participantAgents) {
+          let agentRecipients: WorkspaceAgentRecipient[];
+          try {
+            agentRecipients = await resolveWorkspaceAgentRecipientKeys(this.store, agentAddress);
+          } catch (error) {
+            if (!isWorkspaceAgentEncryptionKeyMissingError(error)) throw error;
+            missingKeys.push(...error.agentAddresses);
+            continue;
+          }
+          const authorizedRecipients = allowedPeerSet === null
+            ? agentRecipients
+            : agentRecipients.filter((recipient) => (
+              recipient.peerId !== undefined && allowedPeerSet.has(recipient.peerId)
+            ));
+          if (authorizedRecipients.length === 0) {
+            throw new Error(
+              `Registered context graph "${input.contextGraphId}" requires encrypted SWM gossip but `
+              + `chain-authorized DKG agent ${ethers.getAddress(agentAddress)} has no recipient key `
+              + 'advertised by a peer in the context graph allowlist',
+            );
+          }
+          recipients.push(...authorizedRecipients);
+        }
+        if (missingKeys.length > 0) throw new WorkspaceAgentEncryptionKeyMissingError(missingKeys);
+        const [firstRecipient, ...remainingRecipients] = recipients;
+        if (!firstRecipient) {
           throw new Error(
-            `Registered context graph "${input.contextGraphId}" requires encrypted SWM gossip but `
-            + `chain-authorized DKG agent ${ethers.getAddress(agentAddress)} has no recipient key `
-            + 'advertised by a peer in the context graph allowlist',
+            `Registered context graph "${input.contextGraphId}" requires encrypted SWM gossip but has no chain-authorized DKG agent recipients`,
           );
         }
-        recipients.push(...authorizedRecipients);
-      }
-      const [firstRecipient, ...remainingRecipients] = recipients;
-      if (!firstRecipient) {
-        throw new Error(
-          `Registered context graph "${input.contextGraphId}" requires encrypted SWM gossip but has no chain-authorized DKG agent recipients`,
-        );
-      }
-      return {
-        requiresEncryption: true,
-        recipients: [firstRecipient, ...remainingRecipients],
+        return {
+          requiresEncryption: true,
+          recipients: [firstRecipient, ...remainingRecipients],
+        };
       };
-    };
+    }
     // A member added by address before it joined is known here only by its
-    // profile, which an Edge fetches on demand (#2849). Fetch the phonebook for
-    // each agent whose key is missing, once, then resolve again. Every member
-    // still needs a key, so a share that cannot get one stays closed.
-    const fetchedFor = new Set<string>();
-    let fetches = 0;
-    for (;;) {
-      try {
-        return await resolveOnce();
-      } catch (error) {
-        if (!isWorkspaceAgentEncryptionKeyMissingError(error)) throw error;
-        const wallet = error.agentAddress.toLowerCase();
-        // At most one fetch per roster member, and never more than a roster holds.
-        if (
-          typeof this.ensureAgentsInOnDemandPhonebook !== 'function'
-          || fetchedFor.has(wallet)
-          || fetches >= MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS
-        ) throw withMemberKeyHint(error);
-        fetchedFor.add(wallet);
-        fetches += 1;
-        const known = await this.ensureAgentsInOnDemandPhonebook(
-          [wallet],
-          AbortSignal.timeout(SWM_RECIPIENT_KEY_FETCH_WAIT_MS),
-        );
-        if (!known.has(wallet)) throw withMemberKeyHint(error);
-      }
+    // profile, which an Edge fetches on demand (#2849). One fetch asks for
+    // every member whose key is missing, then the keys are resolved once more.
+    // Every member still needs a key, so a share that cannot get one stays
+    // closed.
+    try {
+      return await resolveKeys();
+    } catch (error) {
+      if (!isWorkspaceAgentEncryptionKeyMissingError(error)) throw error;
+      if (typeof this.ensureAgentsInOnDemandPhonebook !== 'function') throw withMemberKeyHint(error);
+      await this.ensureAgentsInOnDemandPhonebook(
+        error.agentAddresses.map((address) => address.toLowerCase()),
+        AbortSignal.timeout(SWM_RECIPIENT_KEY_FETCH_WAIT_MS),
+      );
+    }
+    try {
+      return await resolveKeys();
+    } catch (error) {
+      throw isWorkspaceAgentEncryptionKeyMissingError(error) ? withMemberKeyHint(error) : error;
     }
   }
 

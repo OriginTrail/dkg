@@ -408,14 +408,57 @@ describe('resolveWorkspaceAgentRecipients', () => {
     expect(isWorkspaceAgentEncryptionKeyMissingError(error)).toBe(true);
     expect((error as WorkspaceAgentEncryptionKeyMissingError).agentAddress)
       .toBe(ethers.getAddress(wallet.address));
-    // Recognised across module copies by name and field, not by class identity.
+    expect((error as WorkspaceAgentEncryptionKeyMissingError).agentAddresses)
+      .toEqual([ethers.getAddress(wallet.address)]);
+    expect((error as Error).message)
+      .toBe(`Missing public encryption key for DKG agent ${ethers.getAddress(wallet.address)}`);
+    // Recognised across module copies by name and fields, not by class identity.
     const copy = Object.assign(new Error('copy'), {
       name: 'WorkspaceAgentEncryptionKeyMissingError',
       agentAddress: wallet.address,
+      agentAddresses: [wallet.address],
     });
     expect(isWorkspaceAgentEncryptionKeyMissingError(copy)).toBe(true);
+    expect(isWorkspaceAgentEncryptionKeyMissingError(Object.assign(new Error('copy'), {
+      name: 'WorkspaceAgentEncryptionKeyMissingError',
+      agentAddress: wallet.address,
+    }))).toBe(false);
     expect(isWorkspaceAgentEncryptionKeyMissingError(new Error('Missing public encryption key')))
       .toBe(false);
+    expect(() => new WorkspaceAgentEncryptionKeyMissingError([])).toThrow(TypeError);
+  });
+
+  it('names every recipient without a key in one typed error (#2849)', async () => {
+    const store = new OxigraphStore();
+    const first = ethers.Wallet.createRandom();
+    const keyed = ethers.Wallet.createRandom();
+    const second = ethers.Wallet.createRandom();
+    for (const wallet of [first, keyed, second]) {
+      await insertAgentGate(store, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, wallet.address);
+    }
+    await insertAgentEncryptionKey(store, keyed);
+
+    const error = await resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID })
+      .then(() => null, (thrown: unknown) => thrown);
+
+    expect(isWorkspaceAgentEncryptionKeyMissingError(error)).toBe(true);
+    const missing = [first, second].map((wallet) => ethers.getAddress(wallet.address));
+    expect([...(error as WorkspaceAgentEncryptionKeyMissingError).agentAddresses].sort())
+      .toEqual([...missing].sort());
+    expect((error as Error).message).toContain('Missing public encryption key for DKG agent ');
+    expect((error as Error).message).toContain('also missing for ');
+  });
+
+  it('still stops at a key that fails for another reason while collecting missing keys', async () => {
+    const store = new OxigraphStore();
+    const missing = ethers.Wallet.createRandom();
+    const spoofed = ethers.Wallet.createRandom();
+    await insertAgentGate(store, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, missing.address);
+    await insertAgentGate(store, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, spoofed.address);
+    await insertAgentEncryptionKey(store, spoofed, { proofWallet: ethers.Wallet.createRandom() });
+
+    await expect(resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID }))
+      .rejects.toThrow(/Spoofed or unverifiable public encryption key/);
   });
 
   it('rejects untrusted RDF-only keys without algorithm or proof', async () => {
