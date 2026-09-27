@@ -4557,6 +4557,10 @@ export class EVMChainAdapterBase {
    * original live head read. The exact contract handle, address, topics and
    * binding generation are fenced across the await so a Hub rotation or
    * runtime rebuild cannot lend a retired generation's horizon.
+   *
+   * The two ContextGraphStorage lanes are fenced on that contract;
+   * `KnowledgeAssetUpdated` on DKGKnowledgeAssets, whose rows the log indexes
+   * in its `knowledge-asset` family.
    */
   async acquireEventScanHorizonLease(
     eventTypes: readonly string[],
@@ -4566,36 +4570,41 @@ export class EVMChainAdapterBase {
       ? 'ContextGraphCreated' as const
       : eventTypes[0] === 'KnowledgeAssetRegisteredToContextGraph'
         ? 'KnowledgeAssetRegisteredToContextGraph' as const
-        : undefined;
+        : eventTypes[0] === 'KnowledgeAssetUpdated'
+          ? 'KnowledgeAssetUpdated' as const
+          : undefined;
     if (eventType === undefined) return undefined;
 
+    const currentContract = (): Contract | undefined => (
+      eventType === 'KnowledgeAssetUpdated'
+        ? this.contracts.knowledgeAssetStorage
+        : this.contracts.contextGraphStorage
+    );
     const binding = this.chainEventLogBinding;
     const readLease = binding?.readEventScanLease;
-    const contextGraphStorage = this.contracts.contextGraphStorage;
-    if (binding === undefined || readLease === undefined || contextGraphStorage === undefined) {
+    const contract = currentContract();
+    if (binding === undefined || readLease === undefined || contract === undefined) {
       return undefined;
     }
 
     let address: string;
     let topic0: string | undefined;
     try {
-      address = (await contextGraphStorage.getAddress()).toLowerCase();
-      topic0 = contextGraphStorage.interface.getEvent(eventType)?.topicHash.toLowerCase();
+      address = (await contract.getAddress()).toLowerCase();
+      topic0 = contract.interface.getEvent(eventType)?.topicHash.toLowerCase();
     } catch {
       return undefined;
     }
     if (topic0 === undefined) return undefined;
 
     try {
-      const logLease = await readLease.call(binding, {
-        eventType,
-        contextGraphStorageAddress: address,
-        topic0,
-      });
+      const logLease = await readLease.call(binding, eventType === 'KnowledgeAssetUpdated'
+        ? { eventType, knowledgeAssetStorageAddress: address, topic0 }
+        : { eventType, contextGraphStorageAddress: address, topic0 });
       if (
         logLease === undefined
         || !this.chainEventLogBindingIsCurrent(binding)
-        || this.contracts.contextGraphStorage !== contextGraphStorage
+        || currentContract() !== contract
         || !Number.isSafeInteger(logLease.throughBlockNumber)
         || logLease.throughBlockNumber < 0
       ) return undefined;
@@ -4603,14 +4612,14 @@ export class EVMChainAdapterBase {
       const contractGenerationHolds = async (): Promise<boolean> => {
         if (
           !this.chainEventLogBindingIsCurrent(binding)
-          || this.contracts.contextGraphStorage !== contextGraphStorage
+          || currentContract() !== contract
         ) return false;
         try {
-          const currentAddress = (await contextGraphStorage.getAddress()).toLowerCase();
-          const currentTopic0 = contextGraphStorage.interface
+          const currentAddress = (await contract.getAddress()).toLowerCase();
+          const currentTopic0 = contract.interface
             .getEvent(eventType)?.topicHash.toLowerCase();
           return this.chainEventLogBindingIsCurrent(binding)
-            && this.contracts.contextGraphStorage === contextGraphStorage
+            && currentContract() === contract
             && currentAddress === address
             && currentTopic0 === topic0;
         } catch {

@@ -283,6 +283,8 @@ export class VmPromotionMethods extends DKGAgentBase {
     coreHostedGraphs: number;
     storageAckDeclinesLastHour: Record<string, number>;
     audit: VmPromotionAuditStatus;
+    /** #2858 — refresh targets held after KA updates, and the lane cursor they hold. */
+    refresh: ReturnType<DKGAgent['getVmRefreshStatus']>;
   } {
     const active = this.vmReconcileEnabled();
     const runtimeReady = this.vmReconcileRuntimeReady;
@@ -305,6 +307,7 @@ export class VmPromotionMethods extends DKGAgentBase {
       coreHostedGraphs,
       storageAckDeclinesLastHour: this.storageAckDeclinesLastHour(),
       audit: { ...this.vmPromotionAuditStatus },
+      refresh: this.getVmRefreshStatus(),
     };
   }
 

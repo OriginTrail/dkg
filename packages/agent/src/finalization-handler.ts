@@ -1562,11 +1562,19 @@ export class FinalizationHandler {
     });
     if (resolution.status === 'absent') return undefined;
     if (resolution.status === 'invalid') {
-      this.log.warn(
-        ctx,
-        `Chain-reconcile: confirmed graph-scoped VM is invalid for ${input.ual} `
-          + `(${resolution.reason})`,
-      );
+      if (resolution.reason === 'not-current') {
+        // An intact copy of an earlier version: the caller fetches the current one.
+        this.log.info(
+          ctx,
+          `Chain-reconcile: confirmed graph-scoped VM for ${input.ual} is not the current version`,
+        );
+      } else {
+        this.log.warn(
+          ctx,
+          `Chain-reconcile: confirmed graph-scoped VM is invalid for ${input.ual} `
+            + `(${resolution.reason})`,
+        );
+      }
       return 'no-swm';
     }
 
@@ -3595,10 +3603,13 @@ export class FinalizationHandler {
    *     namespaces it searches, nothing local can match any root, so `none`.
    *
    * `confirmed-vm` trusts the root the local copy was confirmed at; a newer
-   * on-chain version is not looked for here. The ordinal walk never revisits a
-   * settled ordinal, so an update already reaches VM through finalization
-   * gossip, the StorageACK pending-update lane, or, when its SWM head is local,
-   * the chain-backed path this method routes it to (`present`).
+   * on-chain version is not looked for here, which keeps the walk free of
+   * chain reads for copies it already holds. The walk never revisits a settled
+   * ordinal either, so an update reaches a held copy through finalization
+   * gossip, the StorageACK pending-update lane, the chain-backed path this
+   * method routes a local SWM head to (`present`) while its ordinal is still
+   * walked, and, for any confirmed copy, the `KnowledgeAssetUpdated` refresh
+   * (`handleKAUpdatedNudge` in the agent's SWM host).
    *
    * Any read failure answers `present`, keeping the caller on its chain path.
    */

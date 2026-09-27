@@ -63,6 +63,13 @@ export interface ChainEventPollerLaneSpec {
   cursorStrategy(): ChainEventPollerLaneCursorStrategy;
   cadenceMs: number;
   dispatch(event: ChainEvent, ctx: OperationContext, signal?: AbortSignal): Promise<void>;
+  /**
+   * Highest block this lane may persist as scanned, when its dispatched events
+   * left work that is not settled yet. The lane keeps scanning past it in
+   * memory; a restart replays from it, so that work is found again. Undefined
+   * leaves the persisted cursor at the scanned block.
+   */
+  persistCeiling?(): number | undefined;
 }
 
 interface ChainEventPollerLaneRuntime {
@@ -146,9 +153,20 @@ export class ChainEventLaneRunner {
     };
 
     const scanResults: ChainEventPollerLaneScanResult[] = [];
+    // A legacy aggregate cursor refuses two leased results in one poll (see
+    // persistScanResults) and replays them both, so every later poll would
+    // repeat the same ranges. There, only one lane per poll scans under a
+    // lease; the others read the live head.
+    let leasedThisPoll = false;
     for (const lane of dueLanes) {
       signal?.throwIfAborted();
-      const boundary = await this.eventScanBoundary(lane, readLiveHead, signal);
+      const boundary = await this.eventScanBoundary(
+        lane,
+        readLiveHead,
+        signal,
+        this.cursorStore?.kind !== 'legacy' || !leasedThisPoll,
+      );
+      if (boundary.lease !== undefined) leasedThisPoll = true;
       scanResults.push(await this.scanLane(lane, boundary, now, ctx, signal));
     }
     signal?.throwIfAborted();
@@ -171,9 +189,10 @@ export class ChainEventLaneRunner {
     lane: ChainEventPollerLaneRuntime,
     readLiveHead: () => Promise<number | undefined>,
     signal?: AbortSignal,
+    allowLease = true,
   ): Promise<ChainEventLaneBoundary> {
     const acquire = this.chain.acquireEventScanHorizonLease;
-    if (acquire !== undefined) {
+    if (allowLease && acquire !== undefined) {
       try {
         const lease = await acquire.call(this.chain, lane.eventTypes);
         if (
@@ -285,8 +304,10 @@ export class ChainEventLaneRunner {
       for (const result of advancedResults) {
         signal?.throwIfAborted();
         if (!await this.scanResultLeaseHoldsForPersistence(result, now, ctx, signal)) continue;
+        const persistable = this.persistableCursor(result.lane, result.blockNumber);
+        if (persistable <= 0) continue;
         try {
-          await this.cursorStore.saveLane(result.lane.spec.name, result.blockNumber);
+          await this.cursorStore.saveLane(result.lane.spec.name, persistable);
         } catch {
           // Non-fatal - this lane will be re-scanned on restart.
         }
@@ -342,10 +363,19 @@ export class ChainEventLaneRunner {
 
     let min = Number.POSITIVE_INFINITY;
     for (const lane of activeLanes) {
-      if (lane.state.lastBlock <= 0) return 0;
-      min = Math.min(min, lane.state.lastBlock);
+      const persistable = this.persistableCursor(lane, lane.state.lastBlock);
+      if (persistable <= 0) return 0;
+      min = Math.min(min, persistable);
     }
     return Number.isFinite(min) ? min : 0;
+  }
+
+  /** The scanned block, held at the lane's persist ceiling when it has one. */
+  private persistableCursor(lane: ChainEventPollerLaneRuntime, scannedBlock: number): number {
+    const ceiling = lane.spec.persistCeiling?.();
+    return ceiling === undefined || !Number.isSafeInteger(ceiling)
+      ? scannedBlock
+      : Math.max(0, Math.min(scannedBlock, ceiling));
   }
 
   private async scanLane(
