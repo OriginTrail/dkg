@@ -15,8 +15,10 @@ import {
   workspaceAgentEncryptionKeyId,
 } from '@origintrail-official/dkg-core';
 import {
+  isWorkspaceAgentEncryptionKeyMissingError,
   projectWorkspaceAgentRecipientFanout,
   resolveWorkspaceAgentRecipients,
+  WorkspaceAgentEncryptionKeyMissingError,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
 } from '../src/index.js';
@@ -392,6 +394,28 @@ describe('resolveWorkspaceAgentRecipients', () => {
 
     await expect(resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID }))
       .rejects.toThrow(/Missing public encryption key/);
+  });
+
+  it('reports a missing recipient key as a typed error naming the agent (#2849)', async () => {
+    const store = new OxigraphStore();
+    const wallet = ethers.Wallet.createRandom();
+    await insertAgentGate(store, DKG_ONTOLOGY.DKG_ALLOWED_AGENT, wallet.address);
+
+    const error = await resolveWorkspaceAgentRecipients(store, { contextGraphId: CONTEXT_GRAPH_ID })
+      .then(() => null, (thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(WorkspaceAgentEncryptionKeyMissingError);
+    expect(isWorkspaceAgentEncryptionKeyMissingError(error)).toBe(true);
+    expect((error as WorkspaceAgentEncryptionKeyMissingError).agentAddress)
+      .toBe(ethers.getAddress(wallet.address));
+    // Recognised across module copies by name and field, not by class identity.
+    const copy = Object.assign(new Error('copy'), {
+      name: 'WorkspaceAgentEncryptionKeyMissingError',
+      agentAddress: wallet.address,
+    });
+    expect(isWorkspaceAgentEncryptionKeyMissingError(copy)).toBe(true);
+    expect(isWorkspaceAgentEncryptionKeyMissingError(new Error('Missing public encryption key')))
+      .toBe(false);
   });
 
   it('rejects untrusted RDF-only keys without algorithm or proof', async () => {

@@ -803,3 +803,118 @@ describe('on-demand agents phonebook fetch duration buckets', () => {
     expect(counts[counts.length - 1]!).toBe(0);
   });
 });
+
+describe('OnDemandAgentsPhonebookFetcher.ensureWallets (#2849)', () => {
+  const MEMBER = '0x00000000000000000000000000000000000000B1';
+  const MEMBER_2 = '0x00000000000000000000000000000000000000B2';
+  const member = MEMBER.toLowerCase();
+  const member2 = MEMBER_2.toLowerCase();
+
+  it('fetches the phonebook for a share recipient whose key is missing and reports it known', async () => {
+    const h = createHarness({ syncAddsWallets: [member] });
+
+    const known = await h.fetcher.ensureWallets([MEMBER]);
+
+    expect([...known]).toEqual([member]);
+    expect(h.syncCalls).toHaveLength(1);
+    expect(h.info.at(-1)).toContain('trigger=share-recipient');
+    expect(h.info.at(-1)).toContain('recipientsResolved=1/1');
+    // A share recipient is not a graph owner: no graph recovery is scheduled.
+    expect(h.resolvedBatches).toEqual([]);
+  });
+
+  it('does not fetch for a wallet the phonebook already knows', async () => {
+    const h = createHarness();
+    h.phonebook.add(member);
+
+    const known = await h.fetcher.ensureWallets([MEMBER]);
+
+    expect([...known]).toEqual([member]);
+    expect(h.syncCalls).toHaveLength(0);
+  });
+
+  it('fetches nothing while cooling down, disabled or closed', async () => {
+    const h = createHarness({ syncAddsWallets: [member] });
+    await h.fetcher.ensureWallets([MEMBER]);
+    expect(h.syncCalls).toHaveLength(1);
+
+    // Cooling down: a second missing recipient waits for the next window.
+    expect([...(await h.fetcher.ensureWallets([MEMBER_2]))]).toEqual([]);
+    expect(h.syncCalls).toHaveLength(1);
+
+    h.advance(AGENTS_PHONEBOOK_FETCH_COOLDOWN_MS + 1);
+    h.setEnabled(false);
+    expect([...(await h.fetcher.ensureWallets([MEMBER_2]))]).toEqual([]);
+    h.setEnabled(true);
+    await h.fetcher.close();
+    expect([...(await h.fetcher.ensureWallets([MEMBER_2]))]).toEqual([]);
+    expect(h.syncCalls).toHaveLength(1);
+  });
+
+  it('serves concurrent shares with one fetch', async () => {
+    const h = createHarness({ syncAddsWallets: [member, member2] });
+
+    const [first, second] = await Promise.all([
+      h.fetcher.ensureWallets([MEMBER]),
+      h.fetcher.ensureWallets([MEMBER_2]),
+    ]);
+
+    expect([...first]).toEqual([member]);
+    expect([...second]).toEqual([member2]);
+    expect(h.syncCalls).toHaveLength(1);
+  });
+
+  it('keeps walking peers until the wanted recipient resolves, then stops', async () => {
+    const h = createHarness({
+      peers: [
+        { peerId: EDGE, core: false },
+        { peerId: EDGE_2, core: false },
+        { peerId: EDGE_3, core: false },
+      ],
+      sync: async (peerId) => {
+        if (peerId === EDGE_2) h.phonebook.add(member);
+        return complete(40);
+      },
+    });
+
+    const known = await h.fetcher.ensureWallets([MEMBER]);
+
+    expect([...known]).toEqual([member]);
+    expect(h.syncCalls.map((call) => call.peerId)).toEqual([EDGE, EDGE_2]);
+  });
+
+  it('stops waiting at the caller signal without aborting the shared fetch', async () => {
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    const h = createHarness({
+      sync: async () => {
+        await released;
+        h.phonebook.add(member);
+        return complete(75_141);
+      },
+    });
+    const wait = new AbortController();
+
+    const early = h.fetcher.ensureWallets([MEMBER], wait.signal);
+    await vi.waitFor(() => expect(h.syncCalls).toHaveLength(1));
+    wait.abort();
+    expect([...(await early)]).toEqual([]);
+
+    // The fetch still completes and serves the next attempt from the phonebook.
+    release();
+    await h.fetcher.whenIdle();
+    expect([...(await h.fetcher.ensureWallets([MEMBER]))]).toEqual([member]);
+    expect(h.syncCalls).toHaveLength(1);
+  });
+
+  it('starts no cooldown when no peer could be asked', async () => {
+    const h = createHarness({ peers: [], syncAddsWallets: [member] });
+
+    expect([...(await h.fetcher.ensureWallets([MEMBER]))]).toEqual([]);
+    expect(h.syncCalls).toHaveLength(0);
+
+    h.peers.push({ peerId: CORE_A, core: true });
+    expect([...(await h.fetcher.ensureWallets([MEMBER]))]).toEqual([member]);
+    expect(h.syncCalls).toHaveLength(1);
+  });
+});

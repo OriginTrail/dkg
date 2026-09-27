@@ -311,6 +311,34 @@ async function getWorkspaceAccessMetadata(
 }
 
 /**
+ * No authenticated workspace encryption key for a recipient agent is known on
+ * this node: it has neither the agent's signed join request nor its profile
+ * (#2849). The message stays the historical one; callers that can fetch the
+ * key read `agentAddress`.
+ */
+export class WorkspaceAgentEncryptionKeyMissingError extends Error {
+  readonly agentAddress: string;
+
+  constructor(agentAddress: string, message?: string) {
+    super(message ?? `Missing public encryption key for DKG agent ${agentAddress}`);
+    this.name = 'WorkspaceAgentEncryptionKeyMissingError';
+    this.agentAddress = agentAddress;
+  }
+}
+
+/** Also recognises the error across duplicate module instances. */
+export function isWorkspaceAgentEncryptionKeyMissingError(
+  error: unknown,
+): error is WorkspaceAgentEncryptionKeyMissingError {
+  return error instanceof WorkspaceAgentEncryptionKeyMissingError
+    || (
+      error instanceof Error
+      && error.name === 'WorkspaceAgentEncryptionKeyMissingError'
+      && typeof (error as { agentAddress?: unknown }).agentAddress === 'string'
+    );
+}
+
+/**
  * Resolve every valid (non-revoked) workspace encryption key registered for a DKG
  * agent.
  *
@@ -364,7 +392,7 @@ export async function resolveWorkspaceAgentRecipientKeys(
   );
 
   if (result.type !== 'bindings' || result.bindings.length === 0) {
-    throw new Error(`Missing public encryption key for DKG agent ${checksum}`);
+    throw new WorkspaceAgentEncryptionKeyMissingError(checksum);
   }
   if (
     options.requiredPeerId !== undefined
@@ -452,7 +480,7 @@ export async function resolveWorkspaceAgentRecipientKeys(
     if (sawInvalidProof) {
       throw new Error(`Spoofed or unverifiable public encryption key for DKG agent ${checksum}`);
     }
-    throw new Error(`Missing public encryption key for DKG agent ${checksum}`);
+    throw new WorkspaceAgentEncryptionKeyMissingError(checksum);
   }
 
   const revokedKeyIds = await loadVerifiedRevokedKeyIds(store, checksum, [...verifiedKeys.values()]);

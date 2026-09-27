@@ -70,6 +70,23 @@ export class AgentsPhonebookMethods extends DKGAgentBase {
   }
 
   /**
+   * Fetch the `agents` phonebook for recipient agents a private share has no
+   * key for, and wait for it (#2849). Resolves with the lower-cased wallets
+   * the phonebook knows afterwards; never throws.
+   */
+  async ensureAgentsInOnDemandPhonebook(
+    this: DKGAgent,
+    wallets: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<ReadonlySet<string>> {
+    try {
+      return await this.onDemandAgentsPhonebook().ensureWallets(wallets, signal);
+    } catch {
+      return new Set();
+    }
+  }
+
+  /**
    * Read-only public-policy check for the phonebook trigger. A wrong answer
    * costs at most one bounded fetch or one skipped fetch that the next trigger
    * corrects, so the finalized authority projection may answer, else one

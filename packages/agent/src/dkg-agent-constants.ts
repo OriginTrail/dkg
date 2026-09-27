@@ -159,6 +159,12 @@ export const GOSSIP_DIAL_COOLDOWN_MS = 30_000;
 /** Per-dial-attempt timeout for reconnect-on-gossip so a stuck dial can't starve the gossip handler path. */
 export const GOSSIP_DIAL_TIMEOUT_MS = 10_000;
 /**
+ * How long a private share waits for an on-demand phonebook fetch of a roster
+ * member whose encryption key it lacks (#2849). The fetch itself keeps its own
+ * budget and serves a later share if this one stops waiting.
+ */
+export const SWM_RECIPIENT_KEY_FETCH_WAIT_MS = 30_000;
+/**
  * Cooldown for catchup-on-connection:open: suppresses duplicate catchup kicks
  * when the same peer briefly has overlapping direct + relayed connections
  * (each of which fires its own connection:open).
