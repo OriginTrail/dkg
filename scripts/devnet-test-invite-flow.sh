@@ -5,7 +5,7 @@
 # Drives 3 devnet nodes over HTTP:
 #   N1 (port 9201) — curator, creates a private (curated) CG
 #   N2 (port 9202) — invitee, allowlisted after approval; should join successfully
-#   N3 (port 9203) — invitee, never allowlisted; should be cleanly denied
+#   N3 (port 9203) — invitee, never allowlisted; its catch-up must be refused
 #
 # Focuses strictly on the invite/acceptance surface. Assumes the devnet
 # was started by `./scripts/devnet.sh start 5`.
@@ -120,6 +120,30 @@ for a in d.get('agents',[]):
   done
 }
 
+# catchup_refusal <catchup-status-json>
+# Prints `refused:<status>` when an outsider's catch-up was refused: a peer
+# denied it, or it ended `unreachable` without syncing anything. An outsider
+# holds no `_meta` and no accepted RFC-64 policy for the CG, so it may never
+# send a request a peer could deny. Otherwise prints the status and counts.
+catchup_refusal() {
+  python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception as e:
+    print(f'<parse-error: {e}>'); sys.exit(0)
+status = d.get('status', '')
+r = d.get('result') or {}
+data, swm = r.get('dataSynced'), r.get('sharedMemorySynced')
+if status == 'denied' or (status == 'unreachable' and data == 0 and swm == 0):
+    print(f'refused:{status}')
+else:
+    print(f'{status} (dataSynced={data}, sharedMemorySynced={swm})')
+"
+}
+
+# poll_catchup <node> <cg-id> <expect> [timeout]
+# <expect> is a terminal status, or `refused` (see catchup_refusal).
 poll_catchup() {
   local node="$1" cg_id="$2" expect="$3" timeout="${4:-90}"
   local start=$(date +%s) status last_status=""
@@ -139,7 +163,20 @@ poll_catchup() {
       last_status="$status"
     fi
     case "$status" in
-      done|denied|failed)
+      done|denied|failed|unreachable|deferred)
+        if [ "$expect" = "refused" ]; then
+          local verdict
+          verdict=$(echo "$resp" | catchup_refusal)
+          case "$verdict" in
+            refused:*)
+              ok "catch-up refused: status = ${verdict#refused:}, nothing synced (as expected)"
+              return 0
+              ;;
+          esac
+          note "response: $resp"
+          fail "catch-up = $verdict (expected denied, or unreachable with nothing synced)"
+          return 1
+        fi
         if [ "$status" = "$expect" ]; then
           ok "catch-up status = $status (as expected)"
           return 0
@@ -326,11 +363,11 @@ else
   fail "failed to write quads: $write_resp"
 fi
 
-hr "Step 3 — N2 attempts to subscribe before being allowlisted (expect: denied)"
+hr "Step 3 — N2 attempts to subscribe before being allowlisted (expect: refused)"
 subscribe_body="{\"contextGraphId\":\"$CG_ID\"}"
 sub_resp=$(api "$N2" POST /api/subscribe "$subscribe_body")
 note "subscribe response: $sub_resp"
-poll_catchup "$N2" "$CG_ID" denied 90 || { fail "N2 did not receive a 'denied' status"; }
+poll_catchup "$N2" "$CG_ID" refused 90 || { fail "N2's catch-up was not refused"; }
 
 hr "Step 3b — verify N2's CG list does NOT contain a phantom entry"
 n2_sees=$(list_has_cg "$N2" "$CG_ID")
@@ -475,10 +512,10 @@ else
   fail "N2 has no _meta triples for $CG_ID"
 fi
 
-hr "Step 8 — N3 (never allowlisted) tries the same CG (expect: denied + no phantom)"
+hr "Step 8 — N3 (never allowlisted) tries the same CG (expect: refused + no phantom)"
 sub3_resp=$(api "$N3" POST /api/subscribe "$subscribe_body")
 note "N3 subscribe response: $sub3_resp"
-poll_catchup "$N3" "$CG_ID" denied 90 || fail "N3 did not receive a 'denied' status"
+poll_catchup "$N3" "$CG_ID" refused 90 || fail "N3's catch-up was not refused"
 n3_sees=$(list_has_cg "$N3" "$CG_ID")
 if [ "$n3_sees" = "no" ]; then
   ok "N3's project list correctly omits the inaccessible CG"
