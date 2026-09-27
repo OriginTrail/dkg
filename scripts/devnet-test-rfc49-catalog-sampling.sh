@@ -362,6 +362,14 @@ if grep -qE 'LU-11.*emitted [1-9].*ciphertext chunk|emitted [1-9][0-9]* cipherte
 else
   warn "no LU-11 ciphertext-chunk emit line on the curator edge (publisher may have used a single-blob path; strip assertions below are then weaker)"
 fi
+# The zero ciphertext reads on the stripped cores (section 7) mean something only
+# if the same reader and filter find this batch's chunks where they exist: the
+# curator persists every chunk it emits before gossiping it.
+CURATOR_CT=$(ciphertext_count "$EDGE_CURATOR") \
+  || fail "curator edge$EDGE_CURATOR: cannot read ciphertext rows from its store"
+[ "$CURATOR_CT" -ge 1 ] \
+  || fail "curator edge$EDGE_CURATOR holds no ciphertext rows for batch $BATCH_ID; the ciphertext reader or filter would read zero on every core"
+pass "curator edge$EDGE_CURATOR holds $CURATOR_CT ciphertext row(s) for this batch — the ciphertext reader sees chunks where they exist"
 
 # ---------------------------------------------------------------------------
 # 6. Member edge holds the private data (member-side) — the data lives on the
@@ -426,18 +434,19 @@ pass "$CATALOG_HOLDERS/${#STRIPPED_CORES[@]} stripped cores hold the public _cat
 log "waiting for the strip-OFF baseline core $BASELINE_CORE to host-mode-ingest ciphertext…"
 BASE_CT=0
 for i in $(seq 1 30); do
-  BASE_CT=$(ciphertext_count "$BASELINE_CORE") || { BASE_CT="unreadable"; break; }
+  BASE_CT=$(ciphertext_count "$BASELINE_CORE") \
+    || fail "core$BASELINE_CORE: cannot read ciphertext rows from its store"
   [ "$BASE_CT" -ge 1 ] && break
   sleep 2
 done
-if [ "$BASE_CT" = "unreadable" ]; then
-  BASELINE_SUMMARY="strip-OFF core $BASELINE_CORE: store unreadable (discriminator not evaluated; non-vacuousness rests on the emitted-chunks check)"
-  warn "$BASELINE_SUMMARY"
-elif [ "$BASE_CT" -ge 1 ]; then
+if [ "$BASE_CT" -ge 1 ]; then
   BASELINE_SUMMARY="strip-OFF core $BASELINE_CORE: holds $BASE_CT ciphertext row(s) (discriminator — strip is non-vacuous)"
   pass "DISCRIMINATOR: $BASELINE_SUMMARY → the strip on cores ${STRIPPED_CORES[*]} is demonstrably effective"
 else
-  BASELINE_SUMMARY="strip-OFF core $BASELINE_CORE: 0 ciphertext (host-mode discovery did not engage in-window; non-vacuousness rests on the emitted-chunks check)"
+  # A warning, not a failure: under the default RFC-64 catalog authority, host
+  # mode does not engage for this CG on any core, so this core reads 0 too and
+  # the zero on the stripped cores is not attributable to the strip.
+  BASELINE_SUMMARY="strip-OFF core $BASELINE_CORE: 0 ciphertext (its host mode did not engage; the zero on cores ${STRIPPED_CORES[*]} is not attributable to the strip)"
   warn "$BASELINE_SUMMARY"
 fi
 
