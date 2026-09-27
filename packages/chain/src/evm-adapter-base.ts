@@ -2741,29 +2741,13 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Fail-closed counterpart used only by explicit publisher reservation. The
-   * common selector stays best-effort; this path verifies its cached choice and
-   * force-refreshes every candidate before claiming that the pool is unfunded.
-   */
-  protected async selectFundedSignerOrThrow(
-    candidates: Wallet[],
-    funding: NativeAndTracFundingMode,
-    policy: { preferIdle: boolean },
-    inconclusivePcaProbes: unknown[] = [],
-  ): Promise<Wallet> {
-    return this._selectFundedCandidateOrThrow(candidates, () => funding, policy, inconclusivePcaProbes);
-  }
-
-  /**
-   * Canonical fail-closed funded-candidate selector. Ordinary strict signer
-   * reservation and publish-plan candidates share the same cached scan, fresh
-   * terminal recheck, idle preference, diagnostics, and typed failure.
+   * Canonical fail-closed funded-candidate selector for publish plans: cached
+   * scan, fresh terminal recheck, idle preference, diagnostics, and typed failure.
    */
   protected async _selectFundedCandidateOrThrow<T extends { address: string }>(
     candidates: T[],
     fundingFor: (candidate: T) => NativeAndTracFundingMode,
     policy: { preferIdle: boolean },
-    inconclusivePcaProbes: unknown[] = [],
   ): Promise<T> {
     const initial = await this._scanCandidateFunding(candidates, fundingFor);
     if (initial.fundableIdx.length > 0) {
@@ -2778,7 +2762,7 @@ export class EVMChainAdapterBase {
       return this._preferredFundableCandidate(candidates, refreshed.fundableIdx, policy.preferIdle);
     }
 
-    const unknown = [...inconclusivePcaProbes, ...refreshed.inconclusiveReads];
+    const unknown = refreshed.inconclusiveReads;
     if (unknown.length > 0) throw new PcaFundingUnknownError(errorCode(unknown[0]));
 
     const diagnostics = candidates.map((candidate, index) => ({

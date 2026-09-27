@@ -45,6 +45,7 @@ import {
   resolveRequiredWriteContextGraphId,
   isNoFundedPublisherWalletLike,
   noFundedPublisherWalletBody,
+  respondIfPcaFundingUnknown,
   SMALL_BODY_BYTES,
 } from "../http-utils.js";
 import { validateWritableQuads } from "../knowledge-asset-quad-validation.js";
@@ -1903,6 +1904,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (isNoFundedPublisherWalletLike(e)) {
           return jsonResponse(res, 400, noFundedPublisherWalletBody(msg));
         }
+        if (respondIfPcaFundingUnknown(res, e)) return;
         // A transient chain-RPC transport failure (all endpoints exhausted /
         // receipt lookup failed / timeout) is retryable -> 503/504, matching
         // /api/context-graph/register. Keyed strictly on err.code, so an

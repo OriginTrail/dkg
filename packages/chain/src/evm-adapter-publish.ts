@@ -32,7 +32,7 @@ import type {
 import { publisherPublishPlanByteSize } from './chain-adapter.js';
 import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import { resolveQuotedPublisherCandidatePricing } from './publisher-plan.js';
-import { errorCode, errorMessage } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, InsufficientPublisherFundsError, PcaFundingUnknownError } from './evm-adapter-errors.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
@@ -152,6 +152,69 @@ export class PublishMethods extends EVMChainAdapterBase {
     };
   }
 
+  /** Reconcile an earlier pricing probe with fresh, candidate-specific evidence.
+   * A failed planning read is not itself proof that the final funding read is
+   * unknown: the wallet may have no gas, no PCA, or a recovered PCA read. */
+  private async _selectFundedPublisherPlanOrThrow(
+    plans: PublisherCandidatePlan[],
+    request: PublisherPublishPlanRequest,
+    quote: (epochs: number, purpose: 'pca' | 'direct') => Promise<bigint>,
+  ): Promise<PublisherCandidatePlan> {
+    const select = () => this._selectFundedCandidateOrThrow(
+      plans,
+      (plan) => ({
+        kind: 'native+trac',
+        nativeFloorWei: this.minPublisherNativeWei,
+        tracFloorWei: this.minPublisherTracWei,
+        requiredTracWei: plan.tokenAmount,
+        pca: { kind: 'publish', epochs: plan.publishEpochs },
+      }),
+      { preferIdle: false },
+    );
+
+    try {
+      return await select();
+    } catch (error) {
+      if (!(error instanceof InsufficientPublisherFundsError)) throw error;
+      if (!plans.some((plan) => plan.pcaProbeError !== undefined)) throw error;
+    }
+
+    // A failed lock/coverage lookup can leave a direct-spend lifetime that is
+    // wrong for a real PCA. Re-price only candidates that can still use PCA.
+    for (let index = 0; index < plans.length; index += 1) {
+      const plan = plans[index];
+      if (plan.pcaProbeError === undefined) continue;
+      const funds = await this.getWalletFunding(plan.address, { forceRefresh: true });
+      if (funds.native !== null && funds.native <= this.minPublisherNativeWei) continue;
+      if (funds.trac === null || (funds.trac > this.minPublisherTracWei && funds.trac >= plan.tokenAmount)) continue;
+      plans[index] = await this._publisherCandidatePlan(plan.signer, request, quote);
+    }
+
+    try {
+      return await select();
+    } catch (error) {
+      if (!(error instanceof InsufficientPublisherFundsError)) throw error;
+      // A fresh strict funding scan found no viable candidate. Only a STILL
+      // unresolved planning probe on a registered, gas-funded PCA agent can
+      // prevent a terminal whole-pool shortfall verdict.
+      for (const plan of plans) {
+        if (plan.pcaProbeError === undefined) continue;
+        const funds = await this.getWalletFunding(plan.address, { forceRefresh: true });
+        if (funds.native !== null && funds.native <= this.minPublisherNativeWei) continue;
+        if (funds.trac === null || (funds.trac > this.minPublisherTracWei && funds.trac >= plan.tokenAmount)) continue;
+        try {
+          if ((await this.publisherConvictionPlanReader()?.getAccountId(plan.address) ?? 0n) > 0n) {
+            throw new PcaFundingUnknownError(errorCode(plan.pcaProbeError));
+          }
+        } catch (readError) {
+          if (readError instanceof PcaFundingUnknownError) throw readError;
+          throw new PcaFundingUnknownError(errorCode(readError));
+        }
+      }
+      throw error;
+    }
+  }
+
   /**
    * Publish-owned planning state machine. It composes generic base primitives
    * for authorization, serialized cursor advancement, and strict fundability
@@ -185,22 +248,11 @@ export class PublishMethods extends EVMChainAdapterBase {
         request.publisherAddress,
       );
       const plan = await this._publisherCandidatePlan(signer, request, quote);
-      await this.selectFundedSignerOrThrow(
-        [signer],
-        {
-          kind: 'native+trac',
-          nativeFloorWei: this.minPublisherNativeWei,
-          tracFloorWei: this.minPublisherTracWei,
-          requiredTracWei: plan.tokenAmount,
-          pca: { kind: 'publish', epochs: plan.publishEpochs },
-        },
-        { preferIdle: false },
-        plan.pcaProbeError === undefined ? [] : [plan.pcaProbeError],
-      );
+      const selected = await this._selectFundedPublisherPlanOrThrow([plan], request, quote);
       return {
-        publisherAddress: plan.publisherAddress,
-        publishEpochs: plan.publishEpochs,
-        tokenAmount: plan.tokenAmount,
+        publisherAddress: selected.publisherAddress,
+        publishEpochs: selected.publishEpochs,
+        tokenAmount: selected.tokenAmount,
       };
     }
 
@@ -214,18 +266,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       for (const signer of authorized) {
         plans.push(await this._publisherCandidatePlan(signer, request, quote));
       }
-      return this._selectFundedCandidateOrThrow(
-        plans,
-        (plan) => ({
-          kind: 'native+trac',
-          nativeFloorWei: this.minPublisherNativeWei,
-          tracFloorWei: this.minPublisherTracWei,
-          requiredTracWei: plan.tokenAmount,
-          pca: { kind: 'publish', epochs: plan.publishEpochs },
-        }),
-        { preferIdle: false },
-        plans.flatMap((plan) => plan.pcaProbeError === undefined ? [] : [plan.pcaProbeError]),
-      );
+      return this._selectFundedPublisherPlanOrThrow(plans, request, quote);
     });
     // Do not expose the internal Wallet carried only for cursor advancement.
     return {

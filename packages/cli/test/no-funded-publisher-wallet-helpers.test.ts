@@ -91,6 +91,26 @@ describe('respondWithDaemonError', () => {
     expect(JSON.parse(res.body).code).toBeUndefined();
   });
 
+  it('maps a rethrown PCA funding unknown to a sanitized retryable 503', () => {
+    const res = mockRes();
+    respondWithDaemonError(res, Object.assign(new Error('private RPC endpoint failed'), {
+      code: 'PCA_FUNDING_UNKNOWN', readCode: 'RPC_ENDPOINTS_EXHAUSTED',
+    }));
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('1');
+    expect(JSON.parse(res.body)).toEqual({
+      code: 'PCA_FUNDING_UNKNOWN',
+      error: 'PCA funding verification is inconclusive; retry when chain reads recover.',
+      retryable: true,
+    });
+  });
+
+  it('does not down-classify a genuine CALL_EXCEPTION revert to retryable', () => {
+    const res = mockRes();
+    respondWithDaemonError(res, Object.assign(new Error('execution reverted'), { code: 'CALL_EXCEPTION' }));
+    expect(res.statusCode).toBe(500);
+  });
+
   it('is a no-op once the response has already been sent', () => {
     const res = mockRes();
     res.writableEnded = true;
