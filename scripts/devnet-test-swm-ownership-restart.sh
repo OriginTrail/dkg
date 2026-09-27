@@ -11,16 +11,23 @@
 #   1. Node 1 shares a KA for <ROOT> into the public devnet CG.
 #   2. Node 2 receives it in node 1's author graph.
 #   3. Node 1 is stopped, so the original owner is offline.
-#   4. Node 2 is restarted and still holds node 1's copy from its local store.
+#   4. Every other node is stopped too, and node 2 is restarted with no peer
+#      online: the owner copy it still holds must come from its own store,
+#      not from a sync-on-connect re-fetch.
 #   5. Node 2 shares its own KA for the same <ROOT>; the share succeeds.
 #   6. Node 1's copy is unchanged; node 2's copy is isolated in node 2's
-#      author graph.
+#      author graph; node 2's WM draft drained; no root-keyed
+#      dkg:workspaceOwner row exists.
+#
+# Node 2 stays isolated through step 6. On exit the script restarts every node
+# it stopped.
 #
 # Preconditions:
 #   ./scripts/devnet.sh clean
 #   ./scripts/devnet.sh start 6
 #
-# No bootstrap publishes are required; the script only uses the daemon HTTP API.
+# No bootstrap publishes are required; the script only uses the daemon HTTP API
+# and devnet.sh stop-node / restart-node.
 
 set -euo pipefail
 
@@ -175,6 +182,17 @@ json_write_payload() {
   '
 }
 
+# Root-keyed ownership rows, which graph-scoped KAs no longer write.
+json_workspace_owner_query_payload() {
+  ROOT="$1" CG="$CONTEXT_GRAPH" node -e '
+    const meta = `did:dkg:context-graph:${process.env.CG}/_shared_memory_meta`;
+    console.log(JSON.stringify({
+      contextGraphId: process.env.CG,
+      sparql: `SELECT ?owner WHERE { GRAPH <${meta}> { <${process.env.ROOT}> <http://dkg.io/ontology/workspaceOwner> ?owner } }`,
+    }));
+  '
+}
+
 # On the SWM route `GRAPH ?g` binds the CG's per-KA SWM graphs.
 json_swm_graph_query_payload() {
   ROOT="$1" CG="$CONTEXT_GRAPH" PRED="$SCHEMA_NAME" node -e '
@@ -186,32 +204,39 @@ json_swm_graph_query_payload() {
   '
 }
 
+node_is_up() {
+  curl -sf --max-time 1 -o /dev/null "http://127.0.0.1:$(node_port "$1")/api/status" >/dev/null 2>&1
+}
+
 wait_for_node_down() {
-  local node="$1" port
-  port=$(node_port "$node")
+  local node="$1"
   for _ in $(seq 1 60); do
-    if ! curl -sf --max-time 1 -o /dev/null "http://127.0.0.1:${port}/api/status" >/dev/null 2>&1; then
-      return 0
-    fi
+    node_is_up "$node" || return 0
     sleep 0.5
   done
   fail "node $node did not stop within 30s"
 }
 
+# Returns non-zero after 120s instead of failing, so the EXIT trap can still
+# restart the remaining nodes.
 wait_for_node_up() {
-  local node="$1" port
-  port=$(node_port "$node")
+  local node="$1"
   for _ in $(seq 1 240); do
-    if curl -sf --max-time 1 -o /dev/null "http://127.0.0.1:${port}/api/status" >/dev/null 2>&1; then
-      return 0
-    fi
+    node_is_up "$node" && return 0
     sleep 0.5
   done
-  fail "node $node did not start within 120s"
+  return 1
 }
+
+# Nodes the EXIT trap restarts: every node this script stopped, plus the
+# replica once it was restarted without peers. They restart in ascending
+# order, as devnet.sh start does, so each dials the earlier cores again
+# (node 1 dials no one).
+RESTORE_NODES=""
 
 kill_node() {
   local node="$1"
+  RESTORE_NODES="$RESTORE_NODES $node"
   ( cd "$REPO_ROOT" && ./scripts/devnet.sh stop-node "$node" 2>&1 | sed "s/^/  [devnet] /" )
   wait_for_node_down "$node"
 }
@@ -222,14 +247,32 @@ restart_node() {
   wait_for_node_up "$node"
 }
 
-OWNER_STOPPED=0
-restart_owner_if_stopped() {
-  if [ "$OWNER_STOPPED" -eq 1 ]; then
-    log "trap: restarting owner node $OWNER_NODE so the devnet stays usable"
-    restart_node "$OWNER_NODE" || warn "trap: failed to restart owner node $OWNER_NODE"
-  fi
+restore_nodes() {
+  local node
+  for node in $(printf '%s\n' $RESTORE_NODES | sort -nu); do
+    log "trap: restarting node $node so the devnet stays usable"
+    restart_node "$node" || warn "trap: node $node did not come back within 120s"
+  done
 }
-trap restart_owner_if_stopped EXIT
+trap restore_nodes EXIT
+
+# Every running devnet node except the replica.
+other_running_nodes() {
+  local dir node
+  for dir in "$DEVNET_DIR"/node[0-9]*; do
+    node="${dir##*/node}"
+    [[ "$node" =~ ^[0-9]+$ ]] || continue
+    [ "$node" = "$ATTACKER_NODE" ] && continue
+    if node_is_up "$node"; then echo "$node"; fi
+  done
+}
+
+assert_no_connected_peers() {
+  local node="$1" status peers
+  status=$(api_call "$node" GET /api/status)
+  peers=$(parse_json "$status" '.connectedPeers')
+  [ "$peers" = "0" ] || fail "node $node is connected to '$peers' peer(s); the check needs it isolated"
+}
 
 get_peer_id() {
   local node="$1" identity
@@ -280,8 +323,8 @@ wait_for_author_swm_value() {
 
 require_node "$OWNER_NODE"
 require_node "$ATTACKER_NODE"
-wait_for_node_up "$OWNER_NODE"
-wait_for_node_up "$ATTACKER_NODE"
+wait_for_node_up "$OWNER_NODE" || fail "node $OWNER_NODE is not up"
+wait_for_node_up "$ATTACKER_NODE" || fail "node $ATTACKER_NODE is not up"
 
 OWNER_PEER=$(get_peer_id "$OWNER_NODE")
 ATTACKER_PEER=$(get_peer_id "$ATTACKER_NODE")
@@ -314,14 +357,22 @@ wait_for_author_swm_value "$ATTACKER_NODE" "$ROOT" "$OWNER_AUTHOR" "$OWNER_VALUE
 log "node $ATTACKER_NODE has the owner copy before restart"
 
 act "3. Stop owner so nothing depends on live owner gossip"
-OWNER_STOPPED=1
 kill_node "$OWNER_NODE"
 log "owner node $OWNER_NODE is offline"
 
-act "4. Restart replica while owner is offline"
-restart_node "$ATTACKER_NODE"
+act "4. Isolate the replica and restart it"
+# Every other node also holds the owner copy, and node 2 syncs SWM from each
+# peer it connects to. With all of them stopped, a copy node 2 holds after the
+# restart can only come from its own store.
+for other in $(other_running_nodes); do
+  kill_node "$other"
+done
+RESTORE_NODES="$RESTORE_NODES $ATTACKER_NODE"
+restart_node "$ATTACKER_NODE" || fail "node $ATTACKER_NODE did not come back within 120s"
+assert_no_connected_peers "$ATTACKER_NODE"
 wait_for_author_swm_value "$ATTACKER_NODE" "$ROOT" "$OWNER_AUTHOR" "$OWNER_VALUE"
-log "node $ATTACKER_NODE still has the owner copy after offline-owner restart"
+assert_no_connected_peers "$ATTACKER_NODE"
+log "node $ATTACKER_NODE kept the owner copy across a restart with no peer online"
 
 act "5. Second author shares the same root into its own graph"
 assertion_create_write_finalize "$ATTACKER_NODE" "$ATTACKER_ASSERTION" "$ROOT" "$ATTACKER_VALUE"
@@ -332,7 +383,17 @@ promote_expect_success "$ATTACKER_NODE" "$ATTACKER_ASSERTION"
 log "cross-author share succeeded"
 
 act "6. Owner copy unchanged; attacker copy isolated in its own author graph"
+# Still isolated: no peer can repair an owner copy the share clobbered.
 wait_for_author_swm_value "$ATTACKER_NODE" "$ROOT" "$ATTACKER_AUTHOR" "$ATTACKER_VALUE"
 wait_for_author_swm_value "$ATTACKER_NODE" "$ROOT" "$OWNER_AUTHOR" "$OWNER_VALUE"
+assert_no_connected_peers "$ATTACKER_NODE"
 
-log "PASS: a cross-author share of the same root lands in its own author graph and leaves the offline owner's copy intact after restart"
+WM_RESPONSE=$(api_call "$ATTACKER_NODE" GET "/api/knowledge-assets/${ATTACKER_ASSERTION}/wm/quads?contextGraphId=$CONTEXT_GRAPH")
+WM_COUNT=$(parse_json "$WM_RESPONSE" '.quads?.length')
+[ "$WM_COUNT" = "0" ] || fail "attacker WM draft should drain after a successful share, got '$WM_COUNT' quads: $WM_RESPONSE"
+
+OWNER_ROWS=$(api_call "$ATTACKER_NODE" POST /api/query "$(json_workspace_owner_query_payload "$ROOT")")
+OWNER_ROW_COUNT=$(parse_json "$OWNER_ROWS" '.result?.bindings?.length')
+[ "$OWNER_ROW_COUNT" = "0" ] || fail "expected no root-keyed workspaceOwner rows for $ROOT, got '$OWNER_ROW_COUNT': $OWNER_ROWS"
+
+log "PASS: a cross-author share of the same root lands in its own author graph and leaves the offline owner's copy intact after an isolated restart"
