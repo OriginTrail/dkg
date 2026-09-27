@@ -309,6 +309,40 @@ promote_expect_success() {
 }
 
 # Wait until <author>'s SWM graphs on the node hold exactly one value for <root>.
+# Diagnostic only: the <root> values in <author>'s SWM graphs, read from the
+# node's backing store (endpoint from its config.json), bypassing the daemon's
+# read authority. Tells a lost copy apart from one the API does not serve.
+store_author_swm_values() {
+  local node="$1" root="$2" author="$3" endpoint
+  endpoint=$(CFG="$DEVNET_DIR/node$node/config.json" node -e '
+    const store = JSON.parse(require("fs").readFileSync(process.env.CFG, "utf8")).store ?? {};
+    const o = store.options ?? {};
+    const endpoint = {
+      "oxigraph-server": `http://127.0.0.1:${o.port ?? 7878}/query`,
+      blazegraph: o.url ?? store.url,
+      "sparql-http": o.queryEndpoint,
+    }[store.backend ?? ""];
+    if (!endpoint) process.exit(1);
+    console.log(endpoint);
+  ' 2>/dev/null) || { echo "<store not directly readable>"; return 0; }
+  curl -sS --max-time 20 -X POST -H 'Accept: application/sparql-results+json' \
+    --data-urlencode "query=SELECT DISTINCT ?g ?value WHERE { GRAPH ?g { <${root}> <${SCHEMA_NAME}> ?value } }" \
+    "$endpoint" 2>/dev/null \
+    | PREFIX="did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory/${author}/" node -e '
+      let d = "";
+      process.stdin.on("data", c => d += c);
+      process.stdin.on("end", () => {
+        try {
+          const values = new Set();
+          for (const b of JSON.parse(d).results.bindings) {
+            if (b.g.value.startsWith(process.env.PREFIX)) values.add(b.value.value);
+          }
+          console.log([...values].sort().join(",") || "<none>");
+        } catch { console.log("<unreadable>"); }
+      });
+    '
+}
+
 wait_for_author_swm_value() {
   local node="$1" root="$2" author="$3" expected="$4" body="" code="" values=""
   for _ in $(seq 1 90); do
@@ -318,7 +352,7 @@ wait_for_author_swm_value() {
     fi
     sleep 1
   done
-  fail "node $node did not hold exactly '$expected' for $root in the SWM graphs of $author; last values='$values' (HTTP $code: ${body:0:500})"
+  fail "node $node did not serve exactly '$expected' for $root in the SWM graphs of $author; last values='$values' (HTTP $code: ${body:0:500}); its backing store holds: $(store_author_swm_values "$node" "$root" "$author")"
 }
 
 require_node "$OWNER_NODE"
