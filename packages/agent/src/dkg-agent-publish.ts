@@ -2408,7 +2408,9 @@ export class PublishMethods extends DKGAgentBase {
     this.log.info(ctx, `Update complete — status=${result.status}`);
 
     onPhase?.('broadcast', 'start');
-    if (result.onChainResult && result.publicQuads) {
+    // A curated update reaches its members through the encrypted member
+    // fan-out above, so it is not broadcast on the graph's update topic.
+    if (result.onChainResult && result.publicQuads && !isCuratedUpdate) {
       try {
         const dataGraph = knowledgeAssetLayerGraphUri(
           contextGraphId,
