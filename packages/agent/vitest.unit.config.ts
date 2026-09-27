@@ -109,6 +109,8 @@ export default defineConfig({
       "test/context-graph-storage-discovery-agent.test.ts",
       "test/context-graph-on-chain-reference.test.ts",
       "test/context-graph-on-chain-id-resolution.test.ts",
+      "test/context-graph-ontology-claim-binding.test.ts",
+      "test/context-graph-claim-proof.test.ts",
       "test/vm-reconcile-peer-topology.test.ts",
       "test/swm-late-joiner-deferred-gossip.test.ts",
       "test/context-graph-metadata-placement.test.ts",
@@ -169,6 +171,8 @@ export default defineConfig({
       "test/swm-recovery-apply.test.ts",
       "test/swm-recovery.test.ts",
       "test/swm-recovery-identity-preservation.test.ts",
+      // #2083: the discoverable suffix keeps runtime/type adoption in sync.
+      "test/shared-memory-sync-ownership.typechecked.test.ts",
       "test/dkg-agent-snapshot-store-injection.test.ts",
       "test/swm-snapshot-sync.test.ts",
       "test/sync-responder-protection.test.ts",
@@ -185,6 +189,8 @@ export default defineConfig({
       "test/sync-on-connect-peer-job-runner.test.ts",
       "test/sync-on-connect-peer-scheduler.test.ts",
       "test/system-context-graph-policy.test.ts",
+      "test/on-demand-agents-phonebook.test.ts",
+      "test/on-demand-agents-phonebook-agent.test.ts",
       "test/sync-requester-bailout.test.ts",
       "test/swm-catchup-peer-selection.test.ts",
       "test/swm-curator-recovery-plan.test.ts",
@@ -257,6 +263,9 @@ export default defineConfig({
       "test/swm-public-snapshot-materialization.test.ts",
       "test/swm-public-cg-plaintext.test.ts",
       "test/swm-sender-key-stale-target.test.ts",
+      // #2827 — SWM authority and plaintext decisions for a joined member of a
+      // public, unregistered context graph.
+      "test/public-unregistered-member-swm.test.ts",
       "test/swm-snapshot-materializer.test.ts",
       "test/swm-head-identity-preservation.test.ts",
       // #2079 — the already-materialized witness: the warm-path win, the count

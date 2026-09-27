@@ -176,6 +176,9 @@ export type FinalizationRecoveryFailureCode =
   | 'settled-upgrade-deferred'
   | 'settled-reorg-deferred';
 
+/** Consecutive identical failures after which a failure counts as stable. */
+export const FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD = 3;
+
 export type FinalizationRecoveryAttemptPolicy =
   | {
       mode: 'ordinary';

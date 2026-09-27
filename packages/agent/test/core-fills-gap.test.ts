@@ -6356,7 +6356,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     });
     const durabilityOrder: string[] = [];
     internals.store.flush = async () => { durabilityOrder.push('flush'); };
-    (internals as any).persistContextGraphSubscriptionStrict = async () => {
+    (internals as any).persistContextGraphSyncStateStrict = async () => {
       durabilityOrder.push('save');
     };
 
@@ -6387,7 +6387,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const flush = vi.fn(async () => undefined);
     internals.store.flush = flush;
     const persistStrict = vi.fn(async () => undefined);
-    (internals as any).persistContextGraphSubscriptionStrict = persistStrict;
+    (internals as any).persistContextGraphSyncStateStrict = persistStrict;
 
     await expect((internals as any).executeVmReconcileForCg(localCgId, 'manual'))
       .resolves.toMatchObject({ watermarkAfter: 0, reconciledOrdinals: 1 });
@@ -6415,7 +6415,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     });
     internals.store.flush = async () => { throw new Error('triple-store flush failed'); };
     const persistStrict = vi.fn(async () => undefined);
-    (internals as any).persistContextGraphSubscriptionStrict = persistStrict;
+    (internals as any).persistContextGraphSyncStateStrict = persistStrict;
 
     await expect((internals as any).executeVmReconcileForCg(localCgId, 'manual'))
       .rejects.toThrow('triple-store flush failed');
@@ -6446,7 +6446,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     const saveStarted = new Promise<void>((resolve) => { markSaveStarted = resolve; });
     let releaseSave!: () => void;
     const saveGate = new Promise<void>((resolve) => { releaseSave = resolve; });
-    (internals as any).persistContextGraphSubscriptionStrict = async () => {
+    (internals as any).persistContextGraphSyncStateStrict = async () => {
       markSaveStarted();
       await saveGate;
     };
@@ -6767,5 +6767,247 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     for (const [ordinal, count] of visits) {
       expect({ ordinal, count }).toEqual({ ordinal, count: ordinal === 3 ? 2 : 1 });
     }
+  });
+});
+
+describe('VM reconcile cursor follows the subscription lifetime', () => {
+  // Shape of the Base mainnet stall (2026-09-24): `dkg subscribe` without
+  // `--save` got 19/25 KAs from the curator and left ordinals 6-11 for the
+  // reconciler, whose first cursor advance then failed on every sweep.
+  const HEAD = 25;
+  const MISSING = [6, 7, 8, 9, 10, 11];
+  let agent: DKGAgent | null = null;
+
+  afterEach(async () => {
+    if (agent) {
+      await agent.stop().catch(() => undefined);
+      agent = null;
+    }
+  });
+
+  function memorySubscriptionStore() {
+    const rows = new Map<string, ContextGraphSubscriptionRecord>();
+    const saves: ContextGraphSubscriptionRecord[] = [];
+    const store: ContextGraphSubscriptionStore = {
+      loadAll: async () => [...rows.values()].map((row) => ({ ...row })),
+      save: async (record) => {
+        saves.push({ ...record });
+        rows.set(record.id, { ...record });
+      },
+      delete: async (contextGraphId) => { rows.delete(contextGraphId); },
+    };
+    return { rows, saves, store };
+  }
+
+  async function boot(
+    name: string,
+    store: ContextGraphSubscriptionStore,
+    nodeRole: 'edge' | 'core' = 'edge',
+  ): Promise<AgentInternals> {
+    const chain = new MockChainAdapter();
+    chain.getContextGraphKCCount = async () => BigInt(HEAD);
+    agent = await DKGAgent.create({
+      name,
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: store,
+      nodeRole,
+    });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    (internals as any).healStrandedScopedKCs = async () => undefined;
+    return internals;
+  }
+
+  /**
+   * Every ordinal except `MISSING` is already local, and recovery fetches the
+   * rest. Returns the ordinals recovery fetched.
+   */
+  function stageStalledGraph(internals: AgentInternals): number[] {
+    const local = new Set(
+      Array.from({ length: HEAD }, (_, ordinal) => ordinal)
+        .filter((ordinal) => !MISSING.includes(ordinal)),
+    );
+    const fetched: number[] = [];
+    (internals as any).reconcileChainOrdinal = async (
+      localCgId: string,
+      _onChainCgId: bigint,
+      ordinal: number,
+    ): Promise<OrdinalOutcome> => (local.has(ordinal)
+      ? { status: 'reconciled', blockNumber: 100 }
+      : { status: 'pending', recovery: vmRecoveryTarget(localCgId, ordinal) });
+    (internals as any).recoverVmReconcileBatch = async (
+      _localCgId: string,
+      _onChainCgId: bigint,
+      targets: readonly OrdinalRecoveryTarget[],
+    ): Promise<PendingOrdinalRecoveryResult> => {
+      const outcomes = new Map<number, OrdinalOutcome>();
+      for (const { ordinal } of targets) {
+        local.add(ordinal);
+        fetched.push(ordinal);
+        outcomes.set(ordinal, { status: 'reconciled', blockNumber: 100 });
+      }
+      return {
+        outcomes,
+        attemptedOrdinals: targets.map(({ ordinal }) => ordinal),
+        continuationOrdinal: undefined,
+        hasImmediateRecoveryWork: false,
+      };
+    };
+    return fetched;
+  }
+
+  /** Run periodic passes for one graph until it reports `current`. */
+  async function sweepUntilCurrent(
+    internals: AgentInternals,
+    localCgId: string,
+  ): Promise<ContextGraphReconcileResult[]> {
+    const passes: ContextGraphReconcileResult[] = [];
+    while (passes.length < 10) {
+      const pass = await internals.executeVmReconcileForCg(localCgId, 'periodic');
+      passes.push(pass);
+      if (pass.status === 'current') return passes;
+    }
+    throw new Error(`"${localCgId}" is not current after ${passes.length} passes`);
+  }
+
+  const watermarkSteps = (passes: ContextGraphReconcileResult[]) =>
+    passes.map((pass) => [pass.watermarkBefore, pass.watermarkAfter]);
+
+  it('advances an on-demand subscription through its pending ordinals without a durable write', async () => {
+    const { rows, saves, store } = memorySubscriptionStore();
+    const internals = await boot('OnDemandCursorAdvance', store);
+    const localCgId = 'on-demand-pending';
+    const subscription = {
+      subscribed: true,
+      syncMode: 'on-demand' as const,
+      onChainId: '33',
+      lastReconciledOrdinal: 0,
+    };
+    internals.subscribedContextGraphs.set(localCgId, subscription);
+    const fetched = stageStalledGraph(internals);
+
+    const passes = await sweepUntilCurrent(internals, localCgId);
+
+    // The same three advances the live node made once `--save` unblocked it.
+    expect(watermarkSteps(passes)).toEqual([[0, 3], [3, 6], [6, HEAD]]);
+    expect([...fetched].sort((a, b) => a - b)).toEqual(MISSING);
+    expect((internals as any).reconcileCursors.get(localCgId)?.watermark).toBe(HEAD);
+    expect(subscription.lastReconciledOrdinal).toBe(HEAD);
+    expect(saves).toEqual([]);
+    expect(rows.size).toBe(0);
+  });
+
+  it('still saves each cursor advance of an always-on subscription', async () => {
+    const { rows, saves, store } = memorySubscriptionStore();
+    const internals = await boot('AlwaysOnCursorAdvance', store);
+    const localCgId = 'always-on-pending';
+    internals.subscribedContextGraphs.set(localCgId, {
+      subscribed: true,
+      syncMode: 'always-on',
+      onChainId: '34',
+      lastReconciledOrdinal: 0,
+    });
+    stageStalledGraph(internals);
+
+    const passes = await sweepUntilCurrent(internals, localCgId);
+
+    expect(watermarkSteps(passes)).toEqual([[0, 3], [3, 6], [6, HEAD]]);
+    expect(saves.map((row) => row.lastReconciledOrdinal)).toEqual([3, 6, HEAD]);
+    expect(rows.get(localCgId)).toMatchObject({
+      id: localCgId,
+      subscribed: true,
+      onChainId: '34',
+      lastReconciledOrdinal: HEAD,
+    });
+  });
+
+  it('saves a Core host-only cursor without persisting on-demand member intent', async () => {
+    const { rows, saves, store } = memorySubscriptionStore();
+    const internals = await boot('OnDemandCoreHostCursor', store, 'core');
+    const localCgId = 'on-demand-core-hosted';
+    internals.subscribedContextGraphs.set(localCgId, {
+      subscribed: true,
+      syncMode: 'on-demand',
+      coreHosted: true,
+      onChainId: '35',
+      lastReconciledOrdinal: 0,
+    });
+    stageStalledGraph(internals);
+
+    const passes = await sweepUntilCurrent(internals, localCgId);
+
+    // A Core keeps strict oldest-first order: 10-ordinal historical slices.
+    expect(watermarkSteps(passes)).toEqual([[0, 10], [10, 20], [20, HEAD]]);
+    expect(saves.map((row) => row.lastReconciledOrdinal)).toEqual([10, 20, HEAD]);
+    expect(saves.every((row) => row.subscribed === false && row.coreHosted === true)).toBe(true);
+    expect(rows.get(localCgId)).toMatchObject({
+      id: localCgId,
+      subscribed: false,
+      synced: false,
+      coreHosted: true,
+      onChainId: '35',
+      lastReconciledOrdinal: HEAD,
+    });
+  });
+
+  it('forgets on-demand progress across a restart while a saved cursor resumes', async () => {
+    const { rows, store } = memorySubscriptionStore();
+    const onDemandId = 'restart-on-demand';
+    const savedId = 'restart-always-on';
+    const internals = await boot('CursorLifetimeBeforeRestart', store);
+    internals.subscribedContextGraphs.set(onDemandId, {
+      subscribed: true,
+      syncMode: 'on-demand',
+      onChainId: '36',
+      lastReconciledOrdinal: 0,
+    });
+    internals.subscribedContextGraphs.set(savedId, {
+      subscribed: true,
+      syncMode: 'always-on',
+      onChainId: '37',
+      lastReconciledOrdinal: 0,
+    });
+    stageStalledGraph(internals);
+    await sweepUntilCurrent(internals, onDemandId);
+    await sweepUntilCurrent(internals, savedId);
+    expect([...rows.keys()]).toEqual([savedId]);
+
+    await agent!.stop();
+    agent = null;
+    const restarted = await boot('CursorLifetimeAfterRestart', store);
+    Object.assign(restarted as any, {
+      gossip: { subscribe: () => undefined, onMessage: () => undefined },
+    });
+    const authority = recorder(async (contextGraphId: string) => ({
+      outcome: 'allowed' as const,
+      source: 'registered-chain' as const,
+      reason: 'test',
+      metadataBootstrap: 'forbidden' as const,
+      onChainId: contextGraphId === savedId ? 37n : 36n,
+    }));
+    (restarted as any).resolveContextGraphSubscriptionBootstrapAuthority = authority;
+    const reconciledOrdinals = recorder(async (): Promise<OrdinalOutcome> => ({
+      status: 'reconciled',
+      blockNumber: 100,
+    }));
+    (restarted as any).reconcileChainOrdinal = reconciledOrdinals;
+
+    await agent!.rehydrateContextGraphSubscriptions(null);
+
+    expect(authority.calls.map(([contextGraphId]) => contextGraphId)).toEqual([savedId]);
+    expect(restarted.subscribedContextGraphs.has(onDemandId)).toBe(false);
+    expect((restarted as any).reconcileCursors.has(onDemandId)).toBe(false);
+    expect([...rows.keys()]).toEqual([savedId]);
+    expect(restarted.subscribedContextGraphs.get(savedId)).toMatchObject({
+      subscribed: true,
+      onChainId: '37',
+      lastReconciledOrdinal: HEAD,
+    });
+    await expect(restarted.executeVmReconcileForCg(savedId, 'periodic')).resolves.toMatchObject({
+      status: 'current',
+      watermarkBefore: HEAD,
+      watermarkAfter: HEAD,
+    });
+    expect(reconciledOrdinals.calls).toHaveLength(0);
   });
 });

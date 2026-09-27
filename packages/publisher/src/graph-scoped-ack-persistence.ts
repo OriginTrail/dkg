@@ -4,6 +4,7 @@ import { ethers } from 'ethers';
 import { ACKCommitSequence } from './ack-commit-sequence.js';
 import { tryReplaceGraphWithDurableRootCompanionAtomically, type DurableRootAtomicCompanionResolver } from './durable-root-atomic-companion.js';
 import { swmKaWriteLockKey, withKeyedLocks } from './keyed-lock.js';
+import { acceptIncomingPublicQuads } from './incoming-public-copy.js';
 import { generateKnowledgeAssetShareMetadata } from './metadata.js';
 import { storageAckOperationId, storageAckOwedCopiesByScopeQuery, STORAGE_ACK_LEDGER_PREDICATES, STORAGE_ACK_LEDGER_GRAPH, xsdDateTimeLiteral, storageAckLedgerRecordUpdate, storageAckLedgerEntryQuads, type StorageAckLedgerEntry } from './storage-ack-ledger.js';
 import { planStorageAckHeadPersistence, type StorageAckRequestContext } from './storage-ack-head-policy.js';
@@ -159,7 +160,11 @@ export class GraphScopedACKPersistence {
     const { graphPublish, parsed, merkleRoot, swmGraphUri, swmGraphId, publisherPeerId } = request;
     const { graphManager } = this.dependencies;
     assertPersistQuadTermsSafe(parsed);
-    const normalized = parsed.map((quad) => ({ ...quad, graph: swmGraphUri }));
+    // The caller has checked the copy as received (count and Merkle root).
+    // Record and persist it in the form the store returns it in.
+    const accepted = acceptIncomingPublicQuads(parsed);
+    assertPersistQuadTermsSafe(accepted);
+    const normalized = accepted.map((quad) => ({ ...quad, graph: swmGraphUri }));
     const operationId = storageAckOperationId(
       graphPublish.scope.ual, graphPublish.scope.assertionVersion, merkleRoot,
     );

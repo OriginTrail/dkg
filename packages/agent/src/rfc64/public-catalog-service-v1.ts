@@ -491,13 +491,12 @@ export class Rfc64PublicCatalogServiceV1 {
   readonly #localPeerId: string | undefined;
   readonly #announcedCurrentHeadTargets = new Map<string, AnnouncedCurrentHeadTargetV1>();
   /**
-   * Targets a running pass has taken out of the map and not yet settled. The
-   * pass empties the map on entry, so without this a target being pulled would
-   * be recorded nowhere until its admission lands at the receiver.
+   * Targets a running pass has taken out of the map and not yet settled, by
+   * scope key; a key is present only while it holds a target. The pass
+   * empties the map on entry, so without this a target being pulled would be
+   * recorded nowhere until its admission lands at the receiver.
    */
-  readonly #announcedCurrentHeadInFlight = new Set<AnnouncedCurrentHeadTargetV1>();
-  /** Scope keys of `#announcedCurrentHeadInFlight`, counted, for an O(1) scope lookup. */
-  readonly #announcedCurrentHeadInFlightScopes = new Map<string, number>();
+  readonly #announcedCurrentHeadInFlight = new Map<string, Set<AnnouncedCurrentHeadTargetV1>>();
   readonly #announcedCurrentHeadWatches = new Map<string, Set<AnnouncedCurrentHeadWatchV1>>();
   readonly #announcedCurrentHeadSupervisor: CoalescingRecurringTask | undefined;
   readonly #announcedCurrentHeadMaxPullAttempts: number;
@@ -815,7 +814,6 @@ export class Rfc64PublicCatalogServiceV1 {
     await this.#announcedCurrentHeadSupervisor?.close();
     this.#announcedCurrentHeadTargets.clear();
     this.#announcedCurrentHeadInFlight.clear();
-    this.#announcedCurrentHeadInFlightScopes.clear();
     this.#notifyAnnouncedCurrentHeadProgress();
     await this.#receiver.close();
   }
@@ -1405,8 +1403,10 @@ export class Rfc64PublicCatalogServiceV1 {
     contextGraphId: string,
   ): AnnouncedCurrentHeadTargetV1[] {
     const outstanding: AnnouncedCurrentHeadTargetV1[] = [];
-    for (const target of this.#announcedCurrentHeadInFlight) {
-      if (target.scope.contextGraphId === contextGraphId) outstanding.push(target);
+    for (const targets of this.#announcedCurrentHeadInFlight.values()) {
+      for (const target of targets) {
+        if (target.scope.contextGraphId === contextGraphId) outstanding.push(target);
+      }
     }
     for (const target of this.#announcedCurrentHeadTargets.values()) {
       if (target.pullRequested && target.scope.contextGraphId === contextGraphId) {
@@ -1491,7 +1491,7 @@ export class Rfc64PublicCatalogServiceV1 {
   ): boolean {
     const key = announcedCurrentHeadScopeKeyV1(announcement);
     return this.#announcedCurrentHeadTargets.has(key)
-      || this.#announcedCurrentHeadInFlightScopes.has(key);
+      || this.#announcedCurrentHeadInFlight.has(key);
   }
 
   /**
@@ -1559,12 +1559,9 @@ export class Rfc64PublicCatalogServiceV1 {
     // nowhere: a per-context-graph wait finds it here until its worker settles.
     for (const [key, target] of targets) {
       target.pullRequested = false;
-      if (this.#announcedCurrentHeadInFlight.has(target)) continue;
-      this.#announcedCurrentHeadInFlight.add(target);
-      this.#announcedCurrentHeadInFlightScopes.set(
-        key,
-        (this.#announcedCurrentHeadInFlightScopes.get(key) ?? 0) + 1,
-      );
+      const inFlight = this.#announcedCurrentHeadInFlight.get(key);
+      if (inFlight === undefined) this.#announcedCurrentHeadInFlight.set(key, new Set([target]));
+      else inFlight.add(target);
     }
     let retained = false;
     await mapWithConcurrency(
@@ -1631,11 +1628,10 @@ export class Rfc64PublicCatalogServiceV1 {
   }
 
   #settleAnnouncedCurrentHeadTarget(target: AnnouncedCurrentHeadTargetV1): void {
-    if (!this.#announcedCurrentHeadInFlight.delete(target)) return;
     const key = announcedCurrentHeadScopeKeyV1(target.scope);
-    const inFlight = (this.#announcedCurrentHeadInFlightScopes.get(key) ?? 1) - 1;
-    if (inFlight > 0) this.#announcedCurrentHeadInFlightScopes.set(key, inFlight);
-    else this.#announcedCurrentHeadInFlightScopes.delete(key);
+    const inFlight = this.#announcedCurrentHeadInFlight.get(key);
+    if (inFlight?.delete(target) !== true) return;
+    if (inFlight.size === 0) this.#announcedCurrentHeadInFlight.delete(key);
     this.#notifyAnnouncedCurrentHeadProgress(target.scope.contextGraphId);
   }
 

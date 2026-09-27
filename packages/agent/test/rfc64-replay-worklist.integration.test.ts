@@ -8,6 +8,7 @@ import {
 } from '../src/rfc64/public-catalog-transport-v1.js';
 import { unsignedOpenContextGraphPolicyEnvelopeV1 } from
   '../src/rfc64/open-catalog-policy-v1.js';
+import { createAppliedCatalogHeadsSnapshotV1 } from '../src/rfc64/inventory-v1/index.js';
 import {
   createRfc64RolloutAgentHarness,
   RFC64_ROLLOUT_CONTEXT_GRAPH_ID as CONTEXT_GRAPH_ID,
@@ -304,7 +305,7 @@ describe('RFC-64 replay worklist lifecycle', () => {
       ...persistence,
       inventory: Object.freeze({
         ...persistence.inventory,
-        listAppliedCatalogHeadsV1: () => {
+        readAppliedCatalogHeadsSnapshotV1: () => {
           parityReads += 1;
           if (parityReads === 1) {
             edge.markRfc64CatalogReplayPeerPendingV1(
@@ -312,7 +313,7 @@ describe('RFC-64 replay worklist lifecycle', () => {
               '12D3KooWReplayParityBoundaryPeer64',
             );
           }
-          return [];
+          return createAppliedCatalogHeadsSnapshotV1([]);
         },
       }),
     });
@@ -345,12 +346,12 @@ describe('RFC-64 replay worklist lifecycle', () => {
       ...persistence,
       inventory: Object.freeze({
         ...persistence.inventory,
-        listAppliedCatalogHeadsV1: () => {
+        readAppliedCatalogHeadsSnapshotV1: () => {
           parityReads += 1;
           if (parityReads === 1) {
             edge.markRfc64CatalogReplayPeerPendingV1(CONTEXT_GRAPH_ID, peerB);
           }
-          return [];
+          return createAppliedCatalogHeadsSnapshotV1([]);
         },
       }),
     });

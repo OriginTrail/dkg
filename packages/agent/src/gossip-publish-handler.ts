@@ -20,6 +20,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
 import {
+  acceptIncomingPublicQuads,
   computeTripleHashV10 as computeTripleHash, computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
   generateTentativeMetadata, getTentativeStatusQuad, getConfirmedStatusQuad,
   generateGraphKnowledgeAssetMetadata,
@@ -332,7 +333,9 @@ export class GossipPublishHandler {
               `(wire=${graphPublish.publicTripleCount}, parsed=${quads.length})`,
           );
         }
-        normalized = quads.map((quad) => ({ ...quad, graph: dataGraph }));
+        // Compared with this node's own head below and written to VM: take
+        // the payload in the form the store returns it in.
+        normalized = acceptIncomingPublicQuads(quads).map((quad) => ({ ...quad, graph: dataGraph }));
       } else {
         const filteredQuads = quads.filter(q => {
           const g = q.graph;

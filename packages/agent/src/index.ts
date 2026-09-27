@@ -361,8 +361,11 @@ export {
 } from './rootless-update-error.js';
 export type {
   ContextGraphReadAuthorityDecision,
+  ContextGraphReadAuthorityDependency,
   ContextGraphReadAuthorityOutcome,
   ContextGraphReadAuthoritySource,
+  SettledContextGraphReadAuthorityDecision,
+  UnavailableContextGraphReadAuthorityDecision,
 } from './context-graph-read-authority.js';
 export type {
   ContextGraphAuthorityReadMode,

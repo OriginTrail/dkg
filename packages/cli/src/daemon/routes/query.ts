@@ -728,7 +728,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
           if (!res.writableEnded) res.end();
           return;
         }
-        respondIfContextGraphReadAuthorityUnavailable(res, err);
+        respondIfContextGraphReadAuthorityUnavailable(res, err, ctx);
         tracker.fail(ctx, err);
         return;
       }

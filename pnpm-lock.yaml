@@ -32,6 +32,9 @@ overrides:
   ws@>=8.0.0 <8.20.1: 8.20.1
 
 patchedDependencies:
+  '@libp2p/yamux@8.0.1':
+    hash: b38505a7ffe3b88d005da3e1446492a1a679b579080f08937106d809ee9d683e
+    path: patches/@libp2p__yamux@8.0.1.patch
   hardhat@2.28.6:
     hash: 0d296aadcb2c28c2040ee89cecb4d10311c66f2e64ca77faf8151dbc4822dff9
     path: patches/hardhat@2.28.6.patch
@@ -741,6 +744,9 @@ importers:
       typescript:
         specifier: ^5.7
         version: 5.9.3
+      undici:
+        specifier: ^7.29.1
+        version: 7.29.1
     devDependencies:
       '@types/better-sqlite3':
         specifier: ^7
@@ -836,7 +842,7 @@ importers:
         version: 10.1.13(bufferutil@4.1.0)(utf-8-validate@5.0.10)
       '@libp2p/yamux':
         specifier: ^8.0.1
-        version: 8.0.1
+        version: 8.0.1(patch_hash=b38505a7ffe3b88d005da3e1446492a1a679b579080f08937106d809ee9d683e)
       '@multiformats/multiaddr':
         specifier: ^13.0.3
         version: 13.0.3
@@ -7495,6 +7501,10 @@ packages:
     resolution: {integrity: sha512-lVLNosgqo5EkGqh5XUDhGfsMSoO8K0BAN0TyJLvwNRSl4xWGZlCVYsAIpa/OpA3TvmnM01GWcoKmc3ZWo5wKKA==}
     engines: {node: '>=18.17'}
 
+  undici@7.29.1:
+    resolution: {integrity: sha512-RYONW2MeafgYlkVOKYKkA/Ag7BmXqgIWCa8t1m0JcxrQg9pI9lEqRhAOruOBCbAohOa/gkCF+iPi9hrgvTzu6Q==}
+    engines: {node: '>=20.18.1'}
+
   unicorn-magic@0.3.0:
     resolution: {integrity: sha512-+QBBXBCvifc56fsbuxZQ6Sic3wqqc3WWaqxs58gvJrcOuN83HGTCwz3oS5phzU9LthRNE9VrJCFCLUgHeeFnfA==}
     engines: {node: '>=18'}
@@ -9378,7 +9388,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@libp2p/yamux@8.0.1':
+  '@libp2p/yamux@8.0.1(patch_hash=b38505a7ffe3b88d005da3e1446492a1a679b579080f08937106d809ee9d683e)':
     dependencies:
       '@libp2p/interface': 3.2.2
       '@libp2p/utils': 7.1.0
@@ -14929,6 +14939,8 @@ snapshots:
   undici-types@6.21.0: {}
 
   undici@6.24.0: {}
+
+  undici@7.29.1: {}
 
   unicorn-magic@0.3.0: {}
 
