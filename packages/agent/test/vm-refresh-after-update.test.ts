@@ -10,15 +10,22 @@
  *   1. `VmRefreshQueue` — the bounded target set and its retry schedule.
  *   2. `handleKAUpdatedNudge` — the `KnowledgeAssetUpdated` nudge decides from
  *      local state alone which held copies are behind the event.
- *   3. The reconcile pass works the targets off: it reads the chain, fetches the
- *      exact current version and replaces the older copy, and never rolls a
- *      copy back for an older or superseded event.
- *   4. The chain event poller's update lane is wired to the nudge.
+ *   3. A refresh worker, started by the graph's reconcile pass and run beside
+ *      it, works the targets off: it reads the chain, fetches the exact
+ *      current version and replaces the older copy, and never rolls a copy
+ *      back for an older or superseded event. A peer that cannot be reached
+ *      costs one bounded step, and neither it nor a stuck attempt holds the
+ *      pass or drops the target.
+ *   4. The chain event poller's update lane is wired to the nudge, with or
+ *      without the RFC-64 kill switch.
  *
- * The pass runs the real exact-asset fetch (chain evidence, local inspection
+ * The worker runs the real exact-asset fetch (chain evidence, local inspection
  * through the finalization handler, re-inspection); only the peer transport is
  * replaced, by a responder that materializes the version the chain names.
  */
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
@@ -37,6 +44,8 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { GraphManager, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { resolveConfirmedGraphScopedVm } from '../src/confirmed-graph-scoped-vm-resolver.js';
 import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
 import { materializeVerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
 import type { OrdinalOutcome } from '../src/chain-reconciler.js';
@@ -70,7 +79,9 @@ interface RefreshInternals {
     lastReconciledOrdinal?: number;
   }>;
   vmRefreshQueue: VmRefreshQueue;
+  vmRefreshWorkers: Map<string, Promise<void>>;
   vmReconcileScheduling?: unknown;
+  log: Record<'debug' | 'info' | 'warn', (...args: unknown[]) => void>;
   handleKAUpdatedNudge(
     kaId: bigint,
     merkleRoot: Uint8Array,
@@ -83,6 +94,12 @@ interface RefreshInternals {
     isTargetCurrent: () => boolean,
     signal?: AbortSignal,
   ): Promise<void>;
+  startVmRefreshWorker(
+    localCgId: string,
+    onChainId: string,
+    isTargetCurrent: () => boolean,
+    signal?: AbortSignal,
+  ): Promise<void> | undefined;
   runVmReconcileForCg(
     localCgId: string,
     source?: 'live' | 'periodic' | 'manual',
@@ -211,14 +228,41 @@ async function stageWorkspaceCopy(
 }
 
 let agent: DKGAgent | null = null;
+const restores: Array<() => void | Promise<void>> = [];
 
 afterEach(async () => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
   if (agent) {
     await agent.stop().catch(() => undefined);
     agent = null;
   }
+  for (const restore of restores.splice(0)) await restore();
 });
+
+/** Shorten one of the refresh lane's time bounds for this test. */
+function overrideRefreshBound(
+  name: 'VM_REFRESH_PEER_STEP_TIMEOUT_MS' | 'VM_REFRESH_ATTEMPT_TIMEOUT_MS',
+  value: number,
+): void {
+  const original = Object.getOwnPropertyDescriptor(DKGAgentBase, name)!;
+  Object.defineProperty(DKGAgentBase, name, { ...original, value });
+  restores.push(() => {
+    Object.defineProperty(DKGAgentBase, name, original);
+  });
+}
+
+/** Let the graph's refresh worker, when one runs, finish. */
+async function refreshWorkerSettled(internals: RefreshInternals, localCgId = CG): Promise<void> {
+  await internals.vmRefreshWorkers.get(localCgId);
+}
+
+/** A step that never returns and ignores its signal, like a dial with no deadline. */
+const never = (): Promise<never> => new Promise<never>(() => undefined);
+
+function logLines(spy: { mock: { calls: unknown[][] } }): string[] {
+  return spy.mock.calls.map((call) => String(call[1]));
+}
 
 /**
  * A member node holding confirmed VM copies of KAs in graph 501, whose ordinal
@@ -232,6 +276,14 @@ async function bootMember(options: {
   peers?: readonly string[];
   /** Peers that serve the current version; every peer does when unset. */
   holders?: readonly string[];
+  /** The graph's curators, asked first; overrides the default roster. */
+  curators?: readonly string[];
+  /** Curator resolution never returns, like a registry read behind a stuck dial. */
+  curatorResolutionHangs?: boolean;
+  /** The connect step for one candidate; returns at once when unset. */
+  connect?: (peerId: string, signal: AbortSignal | undefined) => Promise<void>;
+  /** The transfer from one prepared peer; runs before the responder when set. */
+  beforeFetch?: (peerId: string) => Promise<void>;
 } = {}) {
   const kaNumbers = options.kaNumbers ?? [7n];
   const peers = options.peers ?? [PEER];
@@ -296,6 +348,7 @@ async function bootMember(options: {
 
   const transport = { peerHasCurrent: true };
   const fetches = recorder(async (peerId: string, _localCgId: string, requested: readonly string[]) => {
+    await options.beforeFetch?.(peerId);
     if (transport.peerHasCurrent && (options.holders === undefined || options.holders.includes(peerId))) {
       for (const ual of requested) {
         const ka = uals.get(ual);
@@ -305,13 +358,19 @@ async function bootMember(options: {
     }
     return { result: {}, disposition: transport.peerHasCurrent ? 'found' : 'clean-absent' };
   });
+  const connects = recorder(async (peerId: string, connectOptions: { signal?: AbortSignal } = {}) => {
+    await options.connect?.(peerId, connectOptions.signal);
+  });
   Object.assign(agent as unknown as Record<string, unknown>, {
-    resolveCuratorPeerIdsForCg: async () => ({
-      peerIds: options.peers === undefined ? [PEER] : [],
-      curatorIsLocal: false,
-      legacyTripleResolved: false,
-    }),
-    ensurePeerConnected: async () => undefined,
+    resolveCuratorPeerIdsForCg: async () => {
+      if (options.curatorResolutionHangs) await never();
+      return {
+        peerIds: options.curators ?? (options.peers === undefined ? [PEER] : []),
+        curatorIsLocal: false,
+        legacyTripleResolved: false,
+      };
+    },
+    ensurePeerConnected: connects,
     waitForSyncProtocol: async () => true,
     ensurePeerAdmittedForRecovery: async () => true,
     syncExactKnowledgeAssetsFromPeerDetailed: fetches,
@@ -323,7 +382,7 @@ async function bootMember(options: {
     chainVersions.set(ka.kaId, version);
     return contentOf(ka.ual, version).root;
   };
-  return { chain, internals, kas, updateOnChain, rootReads, snapshotReads, fetches, transport };
+  return { chain, internals, kas, updateOnChain, rootReads, snapshotReads, fetches, transport, connects };
 }
 
 const ctx = createOperationContext('system');
@@ -406,11 +465,16 @@ describe('KnowledgeAssetUpdated nudge (#2858)', () => {
     const unrelatedUal = buildKnowledgeAssetUal(chain.chainId, AUTHOR, 99n);
     await materialize(internals.store, unrelatedUal, kaIdOf(99n), { label: 'x', assertionVersion: 1n }, '777');
 
+    const debug = vi.spyOn(internals.log, 'debug');
     await expect(internals.handleKAUpdatedNudge(kaIdOf(98n), new Uint8Array(32).fill(1), ctx))
       .resolves.toEqual([]);
     await expect(internals.handleKAUpdatedNudge(kaIdOf(99n), new Uint8Array(32).fill(1), ctx))
       .resolves.toEqual([]);
 
+    expect(logLines(debug)).toEqual([
+      expect.stringMatching(/^VM refresh: no local graph holds .+; nothing to refresh$/),
+      `VM refresh: "777" holds ${unrelatedUal} but is not a VM reconcile target; not queued`,
+    ]);
     expect(internals.vmRefreshQueue.size).toBe(0);
     expect(triggers.calls).toEqual([]);
     expect(rootReads.calls).toEqual([]);
@@ -420,9 +484,13 @@ describe('KnowledgeAssetUpdated nudge (#2858)', () => {
   it('does nothing when the local copy already holds the event root', async () => {
     const { internals, kas, rootReads } = await bootMember();
     const current = await localRootHex(internals.store, kas[0]!.ual);
+    const debug = vi.spyOn(internals.log, 'debug');
 
     await expect(internals.handleKAUpdatedNudge(kas[0]!.kaId, ethers.getBytes(current!), ctx))
       .resolves.toEqual([]);
+    expect(logLines(debug)).toEqual([
+      `VM refresh: ${kas[0]!.ual} in "${CG}" not queued: the copy already holds the update root`,
+    ]);
     expect(internals.vmRefreshQueue.size).toBe(0);
     expect(rootReads.calls).toEqual([]);
   });
@@ -464,7 +532,7 @@ describe('KnowledgeAssetUpdated nudge (#2858)', () => {
   });
 });
 
-describe('VM refresh in the reconcile pass (#2858)', () => {
+describe('VM refresh worker (#2858)', () => {
   it('replaces the older copy of a settled ordinal with the current version', async () => {
     const { internals, kas, updateOnChain, fetches, rootReads } = await bootMember();
     const ual = kas[0]!.ual;
@@ -483,6 +551,7 @@ describe('VM refresh in the reconcile pass (#2858)', () => {
     await expect(internals.runVmReconcileForCg(CG, 'manual')).resolves.toMatchObject({
       watermarkAfter: 1,
     });
+    await refreshWorkerSettled(internals);
 
     expect(fetches.calls.map(([peerId, localCgId, uals]) => [peerId, localCgId, [...uals]]))
       .toEqual([[PEER, CG, [ual]]]);
@@ -528,9 +597,13 @@ describe('VM refresh in the reconcile pass (#2858)', () => {
     await internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx);
     // The StorageACK pending-update lane (or finalization gossip) lands first.
     await materialize(internals.store, ual, kas[0]!.kaId, { label: 'B', assertionVersion: 2n });
+    const debug = vi.spyOn(internals.log, 'debug');
 
     await internals.runVmRefreshesForCg(CG, CG, () => true);
 
+    expect(logLines(debug)).toEqual([
+      `VM refresh of ${ual} in "${CG}" settled as current: the copy holds the update root`,
+    ]);
     expect(rootReads.calls).toEqual([]);
     expect(fetches.calls).toEqual([]);
     expect(internals.vmRefreshQueue.size).toBe(0);
@@ -541,9 +614,14 @@ describe('VM refresh in the reconcile pass (#2858)', () => {
     const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
     await internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx);
     await stageWorkspaceCopy(internals.store, kas[0]!.ual, '2', 'storage-ack-late');
+    const debug = vi.spyOn(internals.log, 'debug');
 
     await internals.runVmRefreshesForCg(CG, CG, () => true);
 
+    expect(logLines(debug)).toEqual([
+      `VM refresh of ${kas[0]!.ual} in "${CG}" settled as not-applicable: `
+        + 'a newer version is staged for promotion',
+    ]);
     expect(rootReads.calls).toEqual([]);
     expect(fetches.calls).toEqual([]);
     expect(internals.vmRefreshQueue.size).toBe(0);
@@ -575,10 +653,15 @@ describe('VM refresh in the reconcile pass (#2858)', () => {
     const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
     transport.peerHasCurrent = false;
     await internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx);
+    const info = vi.spyOn(internals.log, 'info');
 
     await internals.runVmRefreshesForCg(CG, CG, () => true);
     expect(fetches.calls).toHaveLength(1);
     expect(await localRootHex(internals.store, ual)).toBe(rootA);
+    expect(logLines(info)).toContain(
+      `VM refresh of ${ual} in "${CG}" did not complete `
+        + '(no peer served the current version; 1 peer attempt(s)); retrying in 60s',
+    );
     expect(internals.vmRefreshQueue.snapshot()).toEqual([
       expect.objectContaining({ failures: 1, nextAttemptAt: Date.now() + 60_000 }),
     ]);
@@ -649,7 +732,7 @@ describe('VM refresh in the reconcile pass (#2858)', () => {
     expect(internals.vmRefreshQueue.size).toBe(0);
   });
 
-  it('bounds the attempts one pass makes and continues with the rest', async () => {
+  it('bounds the attempts one worker makes and hands the rest to the next pass', async () => {
     const { internals, kas, updateOnChain, fetches } = await bootMember({ kaNumbers: [7n, 8n, 9n] });
     const triggers = recorder((_localCgId: string) => undefined);
     internals.vmReconcileScheduling = { triggerLive: triggers };
@@ -659,27 +742,295 @@ describe('VM refresh in the reconcile pass (#2858)', () => {
     }
     triggers.calls.length = 0;
 
-    await internals.runVmRefreshesForCg(CG, CG, () => true);
+    const worker = internals.startVmRefreshWorker(CG, CG, () => true);
+    // One worker per graph: a second pass joins the running one.
+    expect(internals.startVmRefreshWorker(CG, CG, () => true)).toBe(worker);
+    await worker;
     expect(fetches.calls).toHaveLength(2);
     expect(internals.vmRefreshQueue.size).toBe(1);
+    expect(internals.vmRefreshWorkers.size).toBe(0);
     expect(triggers.calls).toEqual([[CG]]);
 
-    await internals.runVmRefreshesForCg(CG, CG, () => true);
+    await internals.startVmRefreshWorker(CG, CG, () => true);
     expect(fetches.calls).toHaveLength(3);
     expect(internals.vmRefreshQueue.size).toBe(0);
     expect(triggers.calls).toEqual([[CG]]);
+    // Nothing due: no worker starts.
+    expect(internals.startVmRefreshWorker(CG, CG, () => true)).toBeUndefined();
+  });
+
+  it('retries an attempt that outlives its deadline instead of dropping it', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-27T12:00:00.000Z'));
+    overrideRefreshBound('VM_REFRESH_ATTEMPT_TIMEOUT_MS', 200);
+    let transferReturns = false;
+    const { internals, kas, updateOnChain, fetches } = await bootMember({
+      beforeFetch: () => (transferReturns ? Promise.resolve() : never()),
+    });
+    const ual = kas[0]!.ual;
+    const rootA = await localRootHex(internals.store, ual);
+    const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    await internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx);
+    const triggers = recorder((_localCgId: string) => undefined);
+    internals.vmReconcileScheduling = { triggerLive: triggers };
+    const warn = vi.spyOn(internals.log, 'warn');
+
+    await internals.startVmRefreshWorker(CG, CG, () => true);
+    // Backing off, the target is not due: no pass is asked for it.
+    expect(triggers.calls).toEqual([]);
+    expect(fetches.calls).toHaveLength(1);
+    expect(await localRootHex(internals.store, ual)).toBe(rootA);
+    expect(internals.vmRefreshQueue.snapshot()).toEqual([
+      expect.objectContaining({
+        merkleRoot: ethers.hexlify(rootB),
+        failures: 1,
+        nextAttemptAt: Date.now() + 60_000,
+      }),
+    ]);
+    expect(logLines(warn)).toEqual([
+      `VM refresh of ${ual} in "${CG}" did not complete `
+        + `(VM refresh of ${ual} timed out after 200ms); retrying in 60s`,
+    ]);
+
+    transferReturns = true;
+    vi.setSystemTime(Date.now() + 60_000);
+    await internals.startVmRefreshWorker(CG, CG, () => true);
+    expect(fetches.calls).toHaveLength(2);
+    expect(await localRootHex(internals.store, ual)).toBe(ethers.hexlify(rootB));
+    expect(internals.vmRefreshQueue.size).toBe(0);
+  });
+
+  it('keeps the target untouched when its reconcile target closes mid-attempt', async () => {
+    const { internals, kas, updateOnChain, fetches, rootReads } = await bootMember();
+    const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    await internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx);
+    const triggers = recorder((_localCgId: string) => undefined);
+    internals.vmReconcileScheduling = { triggerLive: triggers };
+    // The graph is rebound, or the lifecycle closes, while the root read runs.
+    let targetCurrent = true;
+    const readRoot = internals.chain.getLatestMerkleRoot.bind(internals.chain);
+    internals.chain.getLatestMerkleRoot = async (...args: Parameters<typeof readRoot>) => {
+      targetCurrent = false;
+      return readRoot(...args);
+    };
+
+    await internals.startVmRefreshWorker(CG, CG, () => targetCurrent);
+
+    expect(rootReads.calls).toHaveLength(1);
+    expect(fetches.calls).toEqual([]);
+    // Neither settled nor backed off: a fresh pass (asked for here) retries it.
+    expect(internals.vmRefreshQueue.snapshot()).toEqual([
+      expect.objectContaining({ merkleRoot: ethers.hexlify(rootB), failures: 0, nextAttemptAt: 0 }),
+    ]);
+    expect(triggers.calls).toEqual([[CG]]);
+  });
+
+  it('asks connected peers when curator resolution does not finish in time', async () => {
+    overrideRefreshBound('VM_REFRESH_PEER_STEP_TIMEOUT_MS', 100);
+    const { internals, kas, updateOnChain, fetches } = await bootMember({
+      peers: [PEER],
+      curatorResolutionHangs: true,
+    });
+    const ual = kas[0]!.ual;
+    const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    await internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx);
+    const info = vi.spyOn(internals.log, 'info');
+
+    await internals.startVmRefreshWorker(CG, CG, () => true);
+
+    expect(fetches.calls.map(([peerId]) => peerId)).toEqual([PEER]);
+    expect(await localRootHex(internals.store, ual)).toBe(ethers.hexlify(rootB));
+    expect(logLines(info)).toContain(
+      `Exact asset fetch: Curator resolution for "${CG}" timed out after 100ms; asking connected peers`,
+    );
+  });
+
+  it('stops an attempt past its deadline at its next step', async () => {
+    overrideRefreshBound('VM_REFRESH_ATTEMPT_TIMEOUT_MS', 100);
+    let transferDone!: () => void;
+    const transfer = new Promise<void>((resolve) => { transferDone = resolve; });
+    const { internals, kas, updateOnChain, fetches } = await bootMember({
+      holders: [],
+      beforeFetch: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        transferDone();
+      },
+    });
+    const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    await internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx);
+    const finalizer = (internals as unknown as {
+      getOrCreateFinalizationHandler(): { handleExactChainReconciledKC(...args: unknown[]): Promise<unknown> };
+    }).getOrCreateFinalizationHandler();
+    const inspections = vi.spyOn(finalizer, 'handleExactChainReconciledKC');
+
+    await internals.startVmRefreshWorker(CG, CG, () => true);
+    expect(internals.vmRefreshQueue.snapshot()).toEqual([expect.objectContaining({ failures: 1 })]);
+    expect(inspections).toHaveBeenCalledTimes(1);
+
+    // The abandoned transfer returns later; the attempt does no more work.
+    await transfer;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(fetches.calls).toHaveLength(1);
+    expect(inspections).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs at most two workers and hands a freed slot to a waiting graph', async () => {
+    const { internals } = await bootMember();
+    const triggers = recorder((_localCgId: string) => undefined);
+    internals.vmReconcileScheduling = { triggerLive: triggers };
+    const gates = new Map<string, () => void>();
+    Object.assign(internals, {
+      isVmReconcileTargetSelected: (localCgId: string) => localCgId !== 'gone',
+      // Each worker holds until its gate opens, then settles its graph's target.
+      runVmRefreshesForCg: (localCgId: string) => new Promise<void>((resolve) => {
+        gates.set(localCgId, () => {
+          for (const target of internals.vmRefreshQueue.due(localCgId, 10)) {
+            internals.vmRefreshQueue.settle(target, 'refreshed');
+          }
+          resolve();
+        });
+      }),
+    });
+    const offer = (localCgId: string) => internals.vmRefreshQueue.offer({
+      localCgId,
+      ual: `urn:ual:${localCgId}`,
+      kaId: 1n,
+      merkleRoot: '0x01',
+    });
+    // A graph that has since left VM reconciliation holds the oldest target.
+    for (const localCgId of ['gone', 'g1', 'g2', 'g3']) offer(localCgId);
+
+    const first = internals.startVmRefreshWorker('g1', 'g1', () => true);
+    expect(internals.startVmRefreshWorker('g2', 'g2', () => true)).toBeDefined();
+    expect(internals.startVmRefreshWorker('g3', 'g3', () => true)).toBeUndefined();
+    expect([...internals.vmRefreshWorkers.keys()]).toEqual(['g1', 'g2']);
+
+    gates.get('g1')!();
+    await first;
+    // The freed slot goes to the waiting graph; the departed one loses its target.
+    expect(triggers.calls).toEqual([['g3']]);
+    expect(internals.vmRefreshQueue.snapshot().map((entry) => entry.localCgId)).toEqual(['g2', 'g3']);
+    expect([...internals.vmRefreshWorkers.keys()]).toEqual(['g2']);
+
+    // A worker that ends after its lifecycle closed hands nothing on.
+    const lifecycle = new AbortController();
+    const third = internals.startVmRefreshWorker('g3', 'g3', () => true, lifecycle.signal);
+    offer('g4');
+    lifecycle.abort();
+    gates.get('g3')!();
+    await third;
+    expect(triggers.calls).toEqual([['g3']]);
+    gates.get('g2')!();
+  });
+});
+
+describe('restarted member (#2858)', () => {
+  it('converges from v1 to v3 when its target is queued after the copy was classified not current', async () => {
+    overrideRefreshBound('VM_REFRESH_PEER_STEP_TIMEOUT_MS', 200);
+    const CURATOR = '12D3KooWRefreshCuratorNotConnected';
+    const CORE = '12D3KooWRefreshCoreHolder';
+    let openCoreTransfer!: () => void;
+    const coreTransfer = new Promise<void>((resolve) => { openCoreTransfer = resolve; });
+    // After a restart the refresh queue is empty (it is process-local), the
+    // persisted copy is the first version and the curator, asked first, is
+    // not connected: its dial never returns. A connected core holds the
+    // current version.
+    const { internals, kas, updateOnChain, fetches, connects } = await bootMember({
+      curators: [CURATOR],
+      peers: [CORE],
+      holders: [CORE],
+      connect: (peerId) => (peerId === CURATOR ? never() : Promise.resolve()),
+      beforeFetch: (peerId) => (peerId === CORE ? coreTransfer : Promise.resolve()),
+    });
+    const ual = kas[0]!.ual;
+    const kaId = kas[0]!.kaId;
+    const rootV1 = await localRootHex(internals.store, ual);
+    // Two updates land while the node is down.
+    const rootV2 = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    const rootV3 = updateOnChain(7n, { label: 'C', assertionVersion: 3n });
+
+    // The resolver classifies the intact first version as not current. The
+    // copy stays confirmed, so the refresh lane still acts on it.
+    await expect(resolveConfirmedGraphScopedVm(internals.store, {
+      contextGraphId: CG,
+      ual,
+      assertionVersion: 3n,
+      merkleRoot: rootV3,
+      kaId,
+      batchId: kaId,
+    })).resolves.toEqual({ status: 'invalid', reason: 'not-current' });
+    expect(await localRootHex(internals.store, ual)).toBe(rootV1);
+
+    // The update lane replays both events from its persisted cursor.
+    await internals.handleKAUpdatedNudge(kaId, rootV2, ctx);
+    await internals.handleKAUpdatedNudge(kaId, rootV3, ctx);
+    expect(internals.vmRefreshQueue.snapshot()).toEqual([
+      expect.objectContaining({ ual, merkleRoot: ethers.hexlify(rootV3), failures: 0 }),
+    ]);
+
+    const info = vi.spyOn(internals.log, 'info');
+    // The pass returns while its worker is still at work: it never waits on
+    // the curator's dial.
+    await internals.runVmReconcileForCg(CG, 'live');
+    expect(internals.vmRefreshWorkers.has(CG)).toBe(true);
+    openCoreTransfer();
+    await refreshWorkerSettled(internals);
+
+    // The unreachable curator cost one bounded step; the core served v3.
+    expect(connects.calls.map(([peerId]) => peerId)).toEqual([CURATOR, CORE]);
+    expect(fetches.calls.map(([peerId]) => peerId)).toEqual([CORE]);
+    expect(await localRootHex(internals.store, ual)).toBe(ethers.hexlify(rootV3));
+    expect(await localVersion(internals.store, ual)).toBe('3');
+    expect(internals.vmRefreshQueue.size).toBe(0);
+    expect(logLines(info)).toEqual(expect.arrayContaining([
+      `Exact asset fetch from ${CURATOR} failed: Peer preparation timed out after 200ms`,
+      expect.stringContaining(`VM refresh: ${ual} in "${CG}" now holds the current version`),
+    ]));
   });
 });
 
 describe('lifecycle wiring (#2858)', () => {
-  it('routes the poller update lane to the refresh nudge, with the batch id as the KA id', async () => {
+  it.each([
+    { mode: 'RFC-64 catalog disabled', activation: { enabled: false }, plan: undefined },
+    {
+      // Catalog mode needs persistence.
+      mode: 'RFC-64 catalog mode',
+      activation: {
+        enabled: true,
+        rollout: { killSwitch: false, defaultMode: 'catalog' as const, contextGraphModes: {} },
+      },
+      plan: { killSwitchActive: false, responsibilityDefaultMode: 'catalog' },
+    },
+    {
+      // A kill-switch member used to learn of updates from the /update topic,
+      // which curated graphs no longer send.
+      mode: 'RFC-64 kill switch active',
+      activation: {
+        enabled: true,
+        rollout: { killSwitch: true, defaultMode: 'legacy' as const, contextGraphModes: {} },
+      },
+      plan: { killSwitchActive: true },
+    },
+  ])('routes the poller update lane to the refresh nudge, which queues a held copy ($mode)', async ({
+    activation,
+    plan,
+  }) => {
+    const dataDir = plan?.responsibilityDefaultMode === 'catalog'
+      ? await mkdtemp(join(tmpdir(), 'dkg-vm-refresh-wiring-'))
+      : undefined;
+    if (dataDir) restores.push(() => rm(dataDir, { recursive: true, force: true }));
     agent = await DKGAgent.create({
       name: 'VmRefreshWiring',
       listenHost: '127.0.0.1',
       chainAdapter: new MockChainAdapter(),
-      rfc64CatalogActivation: { enabled: false },
+      rfc64CatalogActivation: activation,
+      ...(dataDir ? { dataDir } : {}),
     });
     await agent.start();
+    if (plan) {
+      expect((agent as unknown as { config: { rfc64CatalogExecutionPlan: unknown } })
+        .config.rfc64CatalogExecutionPlan).toMatchObject(plan);
+    }
     const poller = (agent as unknown as {
       chainPoller: {
         onCollectionUpdated?: (info: {
@@ -698,5 +1049,26 @@ describe('lifecycle wiring (#2858)', () => {
 
     expect(nudges.calls).toHaveLength(1);
     expect(nudges.calls[0]!.slice(0, 2)).toEqual([42n, root]);
+
+    // The nudge decides from the subscription and the local copy alone, so a
+    // held copy behind the event is queued in every mode.
+    delete (agent as unknown as { handleKAUpdatedNudge?: unknown }).handleKAUpdatedNudge;
+    const internals = agent as unknown as RefreshInternals & {
+      ensureVmReconcileScheduling(): { triggerLive(key: string): void };
+    };
+    const ual = buildKnowledgeAssetUal(internals.chain.chainId, AUTHOR, 7n);
+    const kaId = kaIdOf(7n);
+    internals.subscribedContextGraphs.set(CG, { subscribed: true, onChainId: CG, lastReconciledOrdinal: 1 });
+    await materialize(internals.store, ual, kaId, { label: 'A-7', assertionVersion: 1n });
+    const triggerLive = vi.spyOn(internals.ensureVmReconcileScheduling(), 'triggerLive')
+      .mockImplementation(() => undefined);
+    const rootB = contentOf(ual, { label: 'B-7', assertionVersion: 2n }).root;
+
+    await poller!.onCollectionUpdated!({ merkleRoot: rootB, batchId: kaId, blockNumber: 10 });
+
+    expect(internals.vmRefreshQueue.snapshot()).toEqual([
+      expect.objectContaining({ localCgId: CG, ual, kaId, merkleRoot: ethers.hexlify(rootB) }),
+    ]);
+    expect(triggerLive).toHaveBeenCalledWith(CG);
   });
 });

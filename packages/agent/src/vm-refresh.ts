@@ -7,15 +7,18 @@
  * sweep never revisits a settled ordinal, so a node whose only copy is a
  * confirmed VM copy (a member of a catalog graph, a core outside the update's
  * ACK set) has no other lane that brings the new version. The live
- * `KnowledgeAssetUpdated` nudge records one target per holding graph; the
- * graph's reconcile pass works the targets off, reading the chain before it
- * fetches anything.
+ * `KnowledgeAssetUpdated` nudge records one target per holding graph; a
+ * refresh worker the graph's reconcile pass starts works the targets off,
+ * reading the chain before it fetches anything.
  *
  * This module owns only the bounded, process-local target set and its retry
  * schedule. A target is a hint: every attempt re-derives the decision from the
  * local copy and the chain, so a stale target costs at most a chain read,
- * never a wrong version. A lost one (a restart, an eviction) leaves the copy
- * as it was until the KA's next update or an explicit asset fetch.
+ * never a wrong version. An update that lands while the node is down reaches
+ * it after the restart, replayed from the event lane's persisted cursor. A
+ * target lost to eviction, or to a restart after its event was consumed,
+ * leaves the copy as it was until the KA's next update or an explicit asset
+ * fetch.
  */
 
 export interface VmRefreshTarget {
@@ -41,6 +44,12 @@ export interface VmRefreshDue extends VmRefreshTarget {
  *  - `retry`: the chain or the network could not settle it; try again later.
  */
 export type VmRefreshOutcome = 'current' | 'refreshed' | 'not-applicable' | 'retry';
+
+/** One attempt's outcome and what decided it, for the lane's log line. */
+export interface VmRefreshAttempt {
+  readonly outcome: VmRefreshOutcome;
+  readonly detail: string;
+}
 
 export interface VmRefreshQueueOptions {
   /** Upper bound on targets held across all graphs; the oldest is dropped first. */
@@ -120,22 +129,34 @@ export class VmRefreshQueue {
     return this.due(localCgId, 1).length > 0;
   }
 
+  /** Graphs with at least one due target, in the order of their oldest one. */
+  dueContextGraphIds(): string[] {
+    const now = this.#now();
+    const out = new Set<string>();
+    for (const record of this.#records.values()) {
+      if (record.nextAttemptAt <= now) out.add(record.target.localCgId);
+    }
+    return [...out];
+  }
+
   /**
    * Settle one attempt. Only the exact target that was attempted is settled:
    * a newer root recorded while the attempt ran stays queued and due.
+   * Returns when a retried target is due again.
    */
-  settle(target: VmRefreshTarget, outcome: VmRefreshOutcome): void {
+  settle(target: VmRefreshTarget, outcome: VmRefreshOutcome): number | undefined {
     const key = recordKey(target.localCgId, target.ual);
     const held = this.#records.get(key);
-    if (held === undefined || held.target.merkleRoot !== target.merkleRoot) return;
+    if (held === undefined || held.target.merkleRoot !== target.merkleRoot) return undefined;
     if (outcome !== 'retry') {
       this.#records.delete(key);
-      return;
+      return undefined;
     }
     held.failures += 1;
     const exponent = Math.min(held.failures - 1, 16);
     held.nextAttemptAt = this.#now()
       + Math.min(this.#maxBackoffMs, this.#baseBackoffMs * 2 ** exponent);
+    return held.nextAttemptAt;
   }
 
   clearContextGraph(localCgId: string): void {

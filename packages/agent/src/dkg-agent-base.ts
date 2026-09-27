@@ -1125,12 +1125,35 @@ export class DKGAgentBase {
    */
   static readonly VM_REFRESH_MAX_ENTRIES = 256;
   /**
-   * Refresh attempts one reconcile pass may run for its graph. Each is a few
+   * Refresh attempts one refresh worker runs for its graph. Each is a few
    * chain reads plus one exact fetch that asks at most
-   * `VM_RECONCILE_EXACT_PEER_MAX` peers; more due targets continue in the next
-   * pass.
+   * `VM_RECONCILE_EXACT_PEER_MAX` peers; more due targets continue in the
+   * graph's next pass.
    */
   static readonly VM_REFRESH_MAX_PER_PASS = 2;
+  /**
+   * Refresh workers running at once across graphs. A worker runs beside its
+   * graph's reconcile pass, never inside it, so this keeps the lane within the
+   * dispatcher's own concurrency.
+   */
+  static readonly VM_REFRESH_MAX_WORKERS = 2;
+  /**
+   * Wall clock for each network step of a refresh attempt that runs before
+   * any data moves: resolving the graph's curators, and connecting, probing
+   * and admitting one candidate peer. Without it these steps follow only the
+   * VM lifecycle signal, which never fires in normal operation, and a libp2p
+   * dial given a caller signal has no deadline of its own, so one peer that
+   * cannot be reached held the whole attempt. A peer past it is skipped for
+   * the next candidate; curator resolution past it falls back to connected
+   * peers.
+   */
+  static readonly VM_REFRESH_PEER_STEP_TIMEOUT_MS = 20_000;
+  /**
+   * Backstop for one whole refresh attempt, above the per-step bounds and the
+   * durable sync's own transfer budget for up to `VM_RECONCILE_EXACT_PEER_MAX`
+   * peers. An attempt past it is retried after backoff.
+   */
+  static readonly VM_REFRESH_ATTEMPT_TIMEOUT_MS = 10 * 60_000;
 
   static readonly LIST_CONTEXT_GRAPHS_CACHE_TTL_MS =
     // A full catalogue scan enriches every globally known graph and is
@@ -1281,15 +1304,17 @@ export class DKGAgentBase {
   protected readonly vmReconcileRotationState = new Map<string, VmReconcileRotationRecord>();
   /**
    * #2858 — confirmed VM copies behind an on-chain update, queued by the
-   * `KnowledgeAssetUpdated` nudge and worked off by each graph's reconcile
-   * pass. Retries follow the recovery backoff (sweep interval, doubling, to
-   * the recovery ceiling).
+   * `KnowledgeAssetUpdated` nudge and worked off by a refresh worker each
+   * graph's reconcile pass starts. Retries follow the recovery backoff (sweep
+   * interval, doubling, to the recovery ceiling).
    */
   protected readonly vmRefreshQueue = new VmRefreshQueue({
     maxEntries: DKGAgentBase.VM_REFRESH_MAX_ENTRIES,
     baseBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS,
     maxBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
   });
+  /** #2858 — the running refresh worker of each graph, at most one per graph. */
+  protected readonly vmRefreshWorkers = new Map<string, Promise<void>>();
   /** Next stable batch index to consider when the bounded rotation cache has waiters. */
   protected readonly vmReconcileRotationAdmissionCursorByCg = new Map<string, number>();
   /** Last resolved curator peers, used to keep the capped exact-recovery roster authoritative. */
