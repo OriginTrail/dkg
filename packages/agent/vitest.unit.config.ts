@@ -263,6 +263,9 @@ export default defineConfig({
       "test/swm-public-snapshot-materialization.test.ts",
       "test/swm-public-cg-plaintext.test.ts",
       "test/swm-sender-key-stale-target.test.ts",
+      // #2827 — SWM authority and plaintext decisions for a joined member of a
+      // public, unregistered context graph.
+      "test/public-unregistered-member-swm.test.ts",
       "test/swm-snapshot-materializer.test.ts",
       "test/swm-head-identity-preservation.test.ts",
       // #2079 — the already-materialized witness: the warm-path win, the count

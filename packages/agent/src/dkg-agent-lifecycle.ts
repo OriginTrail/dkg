@@ -197,7 +197,14 @@ import {
   reconcileConfiguredContextGraphMetadataV1,
   type ConfiguredContextGraphMetadataReconciliationResult,
 } from './configured-context-graph-metadata-reconciliation.js';
-import { confirmContextGraphMetadataV1 } from './context-graph-meta-confirmation.js';
+import {
+  confirmContextGraphMetadataV1,
+  type ConfirmContextGraphMetadataInput,
+} from './context-graph-meta-confirmation.js';
+import {
+  resolveApprovedMemberAcceptanceDecision,
+  type ApprovedMemberAcceptance,
+} from './internal/context-graph-authority/approved-member-acceptance.js';
 
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
@@ -8418,27 +8425,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const ctx = createOperationContext('sync');
     const curatorShort = curatorPeerId.slice(-8);
     let curatorTargetSucceeded = false;
-    const approvedAgentAddress = this.localApprovedAgentByCG.get(contextGraphId);
-    if (!approvedAgentAddress) {
+    // One acceptance (member proof plus authenticated policy) judges both the
+    // snapshot the curator serves and the local proof that completes the join.
+    const acceptance = await this.resolveApprovedMemberAcceptance(contextGraphId);
+    if (!acceptance) {
       throw new Error(
         `Post-approval sync for "${contextGraphId}" has no approved local agent binding`,
       );
     }
-    let expectedDelegateeOpKey: string | undefined;
-    try {
-      expectedDelegateeOpKey = await inferAdapterPublisherAddress(this.chain);
-    } catch {
-      // The signed join flow always binds the current libp2p peer, so an
-      // adapter that cannot expose its op-key still has a usable proof.
-    }
     const curatorMetaRefreshOptions = {
       trustedCuratorPeerId: curatorPeerId,
       force: true,
-      memberProof: {
-        approvedAgentAddress,
-        expectedDelegateePeerId: this.peerId,
-        expectedDelegateeOpKey,
-      },
+      approvedMember: acceptance,
     } as const;
 
     // Curator-direct attempt. Any throw here (relay reservation gone,
@@ -8489,12 +8487,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             // transfer into a false-ready subscription. Retry once after each
             // catchup round and require a live metadata proof before declaring
             // the curator-targeted bootstrap complete.
-            let hasAuthoritativeMeta = await this.hasConfirmedMetaState(contextGraphId)
-              .catch(() => false);
+            // The bootstrap completes only once the local metadata proves this
+            // approved member; a public definition stored before the join
+            // (RFC-64 bootstrap) must not end it while the curator's snapshot
+            // is still stale (#2831 review).
+            let hasAuthoritativeMeta = await this.hasConfirmedApprovedMemberMetaState(
+              contextGraphId,
+              acceptance,
+            ).catch(() => false);
             if (!hasAuthoritativeMeta) {
               await this.refreshMetaFromCurator(contextGraphId, curatorMetaRefreshOptions);
-              hasAuthoritativeMeta = await this.hasConfirmedMetaState(contextGraphId)
-                .catch(() => false);
+              hasAuthoritativeMeta = await this.hasConfirmedApprovedMemberMetaState(
+                contextGraphId,
+                acceptance,
+              ).catch(() => false);
             }
             if (hasAuthoritativeMeta) {
               await this.refreshMetaSyncedFlags([contextGraphId]);
@@ -8576,24 +8582,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     curatorPeerId: string,
   ): Promise<void> {
     const ctx = createOperationContext('sync');
-    const approvedAgentAddress = this.localApprovedAgentByCG.get(contextGraphId);
-    if (!approvedAgentAddress) return;
+    const acceptance = await this.resolveApprovedMemberAcceptance(contextGraphId);
+    if (!acceptance) return;
 
-    let expectedDelegateeOpKey: string | undefined;
-    try {
-      expectedDelegateeOpKey = await inferAdapterPublisherAddress(this.chain);
-    } catch {
-      // The durable approval always binds the current libp2p peer. An adapter
-      // without an observable operational key still has a usable proof.
-    }
     const refreshed = await this.refreshMetaFromCurator(contextGraphId, {
       trustedCuratorPeerId: curatorPeerId,
       force: true,
-      memberProof: {
-        approvedAgentAddress,
-        expectedDelegateePeerId: this.peerId,
-        expectedDelegateeOpKey,
-      },
+      approvedMember: acceptance,
     }).catch((error) => {
       this.log.warn(
         ctx,
@@ -8601,7 +8596,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
       return false;
     });
-    if (!refreshed || !(await this.hasConfirmedMetaState(contextGraphId).catch(() => false))) {
+    if (
+      !refreshed
+      || !(await this.hasConfirmedApprovedMemberMetaState(contextGraphId, acceptance)
+        .catch(() => false))
+    ) {
       this.log.warn(
         ctx,
         `Pending join-approval metadata recovery for "${contextGraphId}" did not establish authoritative metadata; keeping data lanes closed`,
@@ -10908,21 +10907,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   async hasConfirmedMetaState(this: DKGAgent,
     contextGraphId: string,
-    options?: {
-      rejectUnregisteredPlaceholder?: boolean;
+    options: ConfirmContextGraphMetadataInput & {
       /**
        * Caller deadline for the chain proof. An aborted proof is `unknown`,
        * which confirms nothing, so the answer fails closed.
        */
-      signal?: AbortSignal;
-    },
+      readonly signal?: AbortSignal;
+    } = {},
   ): Promise<boolean> {
     return confirmContextGraphMetadataV1({
       chain: this.chain,
       resolveActivePublicChainProof: () => this.resolveActivePublicContextGraphChainProof(
         contextGraphId,
         createOperationContext('sync'),
-        options?.signal,
+        options.signal,
       ),
       isPrivateContextGraph: (id) => this.isPrivateContextGraph(id),
       localApprovedAgentByContextGraph: this.localApprovedAgentByCG,
@@ -10930,6 +10928,56 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       store: this.store,
       subscriptions: this.subscribedContextGraphs,
     }, contextGraphId, options);
+  }
+
+  /**
+   * Join bootstrap completion: the local metadata proves this node's approved
+   * member, judged with the same acceptance the snapshot refresh used.
+   */
+  hasConfirmedApprovedMemberMetaState(this: DKGAgent,
+    contextGraphId: string,
+    acceptance: ApprovedMemberAcceptance,
+  ): Promise<boolean> {
+    return this.hasConfirmedMetaState(contextGraphId, { purpose: 'approved-member', acceptance });
+  }
+
+  /**
+   * The one approved-member acceptance a join attempt is judged with: this
+   * node's approval binding, its libp2p peer and operational key, and the
+   * authenticated access policy (#2831 review). The curator refresh and join
+   * completion both consume this same value. `undefined` without an approval
+   * binding.
+   *
+   * The policy is `public` only when the graph's SWM transport authority is
+   * plaintext: registered public, or unregistered under an active accepted
+   * owner-signed public policy (see classifySwmTransportAuthority). A retained
+   * snapshot therefore never outvotes a registration the index shows. Private,
+   * legacy-unregistered or unavailable authority, or an unreadable chain, is
+   * `unproven`, which admits only the complete private definition.
+   */
+  async resolveApprovedMemberAcceptance(this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<ApprovedMemberAcceptance | undefined> {
+    const approvedAgentAddress = this.localApprovedAgentByCG.get(contextGraphId);
+    if (!approvedAgentAddress) return undefined;
+    let expectedDelegateeOpKey: string | undefined;
+    try {
+      expectedDelegateeOpKey = await inferAdapterPublisherAddress(this.chain);
+    } catch {
+      // The signed join flow always binds the current libp2p peer, so an
+      // adapter that cannot expose its op-key still has a usable proof.
+    }
+    return resolveApprovedMemberAcceptanceDecision(
+      {
+        approvedAgentAddress,
+        expectedDelegateePeerId: this.peerId,
+        expectedDelegateeOpKey,
+      },
+      () => this.resolveSwmTransportAuthority(
+        contextGraphId,
+        { authorityReadMode: 'finalized-index-or-live' },
+      ),
+    );
   }
 
   async hasConfirmedSharedMemoryMetaState(this: DKGAgent, contextGraphId: string): Promise<boolean> {

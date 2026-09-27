@@ -169,6 +169,7 @@ import {
   type Rfc64CatalogResponsibilitySelectionV1,
 } from './rfc64/catalog-responsibility-registry-v1.js';
 import {
+  projectRfc64CatalogTransportStateV1,
   rfc64CatalogResponsibilityOwnsAuthorityWorkloadV1,
   type Rfc64CatalogRolloutModeV1,
 } from './rfc64/catalog-rollout-authority-v1.js';
@@ -3719,15 +3720,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     contextGraphId: string,
     opts: { callerAgentAddress?: string } = {},
   ): boolean | undefined {
-    const receiverAuthority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-    if (
-      receiverAuthority.killSwitchActive
-      || receiverAuthority.mode !== 'catalog'
-    ) return undefined;
-    if (
-      !receiverAuthority.active
-      || receiverAuthority.reconciliationLane !== 'catalog-apply'
-    ) return false;
+    const transport = projectRfc64CatalogTransportStateV1(
+      this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
+    );
+    if (transport === 'legacy') return undefined;
+    if (transport === 'catalog-blocked') return false;
 
     const service = this.rfc64PublicCatalogServiceV1;
     const activeNetworkId = this.config.rfc64CatalogDeploymentProfile?.networkId
@@ -3785,6 +3782,36 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       activeNetworkId as NetworkIdV1,
       contextGraphId as ContextGraphIdV1,
     )?.policy.accessPolicy === 0;
+  }
+
+  /**
+   * Whether this node's accepted RFC-64 authority may govern transport for the
+   * graph right now: the receiver-authority fence shared-memory admission uses
+   * (catalog mode, no kill switch, active, catalog-apply lane). An accepted
+   * snapshot is retained after a failed refresh or a kill switch, so a
+   * transport decision must never read the snapshot without this.
+   */
+  isRfc64CatalogTransportAuthorityActiveV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    return projectRfc64CatalogTransportStateV1(
+      this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId),
+    ) === 'catalog-active';
+  }
+
+  /**
+   * {@link hasAcceptedRfc64PublicUnregisteredAuthorityV1}, but only while that
+   * authority governs transport ({@link isRfc64CatalogTransportAuthorityActiveV1}).
+   * SWM consults this one: a retained public snapshot must not keep plaintext
+   * open once catalog authority is killed, inactive, or blocked (#2831 review).
+   */
+  hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    return this.isRfc64CatalogTransportAuthorityActiveV1(contextGraphId)
+      && this.hasAcceptedRfc64PublicUnregisteredAuthorityV1(contextGraphId);
   }
 
   /**
