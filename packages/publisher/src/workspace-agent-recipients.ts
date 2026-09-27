@@ -480,7 +480,9 @@ export async function resolveWorkspaceAgentRecipientKeys(
     if (sawInvalidProof) {
       throw new Error(`Spoofed or unverifiable public encryption key for DKG agent ${checksum}`);
     }
-    throw new WorkspaceAgentEncryptionKeyMissingError(checksum);
+    // Fail-closed fallback: every skipped candidate above sets a flag, so
+    // this is unreachable and not a missing key a phonebook fetch could fix.
+    throw new Error(`Missing public encryption key for DKG agent ${checksum}`);
   }
 
   const revokedKeyIds = await loadVerifiedRevokedKeyIds(store, checksum, [...verifiedKeys.values()]);
