@@ -7187,7 +7187,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       remotePeerId,
       contextGraphId,
       includeRootScope: requestedScope !== null
-        || this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed,
+        || this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed
+        || this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId),
       recoveryGuard: recoveryLease,
       onRetry,
     });
@@ -7637,7 +7638,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           contextGraphId,
           includeRootScope: this.resolveRfc64CatalogReceiverAuthorityV1(
             contextGraphId,
-          ).legacySyncAllowed,
+          ).legacySyncAllowed
+            // A private graph's root scope stays on the legacy member lane
+            // while its RFC-64 authority is not active (#2858).
+            || this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId),
         }),
       { source: 'swm-recovery' },
     );
@@ -11086,7 +11090,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // The accepted snapshot is itself finalized, name-bound authority for a
     // catalog-owned graph. It replaces both the legacy registration read and
     // its metadata-bootstrap proof at this internal transport boundary.
-    if (acceptedRfc64Authority !== undefined) return acceptedRfc64Authority;
+    if (acceptedRfc64Authority === true) return true;
+    // A private graph whose RFC-64 authority is not active keeps the legacy
+    // member checks below (#2858); a refusal by an active authority stands.
+    if (
+      acceptedRfc64Authority === false
+      && !this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId)
+    ) return false;
     if (!(await this.hasConfirmedSharedMemoryMetaState(contextGraphId))) {
       return false;
     }

@@ -397,6 +397,8 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { rfc64ExecutionPlanAllowsLegacySyncV1 } from
   './rfc64/public-catalog-activation-config-v1.js';
+import { projectRfc64CatalogTransportStateV1 } from
+  './rfc64/catalog-rollout-authority-v1.js';
 
 /** Options for subscribing this node to one context graph. */
 export interface ContextGraphSubscribeOptions {
@@ -717,10 +719,18 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): boolean {
+    return this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)
+      || this.subscribedContextGraphs.get(
+        this.rfc64AuthorityContextGraphIdV1(contextGraphId),
+      )?.subscribed === true;
+  }
+
+  /** The cleartext id behind a wire id, or the id unchanged when it has none. */
+  rfc64AuthorityContextGraphIdV1(this: DKGAgent, contextGraphId: string): string {
     const wireContextGraphId = /^0x[0-9a-fA-F]{64}$/.test(contextGraphId)
       ? contextGraphId.toLowerCase()
       : null;
-    const authorityContextGraphId = wireContextGraphId === null
+    return wireContextGraphId === null
       ? contextGraphId
       : (
         this.wireIdToLocalCgId.get(wireContextGraphId)
@@ -728,8 +738,51 @@ export class SwmSubstrateMethods extends DKGAgentBase {
           .selectedAuthorityByWireId[wireContextGraphId]?.contextGraphId
         ?? wireContextGraphId
       );
-    return this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)
-      || this.subscribedContextGraphs.get(authorityContextGraphId)?.subscribed === true;
+  }
+
+  /**
+   * Whether a private graph's root-scope SWM stays on the legacy member lane
+   * (#2858). RFC-64 closed legacy root-scope apply, admission and recovery for
+   * every catalog-mode graph, so that its selected-private lane carries root
+   * SWM on its own. That lane needs private authority a node may not have, so
+   * a member's RFC-64 authority for the graph can stay blocked or resolving
+   * indefinitely. Nothing then delivers the curator's root writes: they are
+   * declined for good, recovery skips the root scope, and a Knowledge Asset's
+   * updates never reach the member. While that authority is not active, a
+   * graph this node holds as a verified private member keeps the legacy
+   * member lane, whose own checks (allowlist, envelope, sender key) still
+   * apply. Public graphs, explicitly selected or accepted graphs, and graphs
+   * whose RFC-64 authority is active keep their RFC-64 behaviour. Every check
+   * is an in-memory lookup: this runs on hot share and sync paths.
+   */
+  rfc64PrivateRootSwmOnLegacyLaneV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    if (this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) return false;
+    const authorityContextGraphId = this.rfc64AuthorityContextGraphIdV1(contextGraphId);
+    // A wire id with no cleartext binding names no graph this node holds.
+    if (/^0x[0-9a-fA-F]{64}$/.test(authorityContextGraphId)) return false;
+    let responsibilityReason: string | null;
+    try {
+      responsibilityReason = this.readRfc64CatalogResponsibilityV1(authorityContextGraphId)
+        .responsibilityReason;
+    } catch {
+      return false;
+    }
+    // Set only for a graph whose policy is private and whose membership the
+    // node's lifecycle has verified.
+    if (responsibilityReason !== 'private-membership') return false;
+    if (
+      this.config.rfc64CatalogExecutionPlan.selectedAuthority[authorityContextGraphId] !== undefined
+      || this.hasRfc64AcceptedCompatibilityAuthorityV1(authorityContextGraphId)
+      || (this.config.rfc64CatalogBootstrap?.acceptedPolicies ?? []).some(
+        ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === authorityContextGraphId,
+      )
+    ) return false;
+    return projectRfc64CatalogTransportStateV1(
+      this.resolveRfc64CatalogReceiverAuthorityV1(authorityContextGraphId),
+    ) === 'catalog-blocked';
   }
 
   async reconcileSharedMemoryGossipSubscription(this: DKGAgent, contextGraphId: string): Promise<void> {
@@ -1162,8 +1215,11 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // durable catch-up. Apply the same decision to live gossip/substrate
         // delivery so a partial ambient generation cannot race ahead of an
         // authenticated exact catalog head and make cold bootstrap fail closed.
+        // A private graph's root scope keeps the legacy member lane while its
+        // RFC-64 authority is not active (#2858).
         legacyApplyAllowedOracle: (cgId: string, subGraphName: string | null) => (
           this.rfc64LegacySwmApplyAllowedForScope(cgId, subGraphName)
+          || (subGraphName === null && this.rfc64PrivateRootSwmOnLegacyLaneV1(cgId))
         ),
         resolveDurableRootAtomicCompanion: (input) => {
           if (this.config.dataDir === undefined) return;

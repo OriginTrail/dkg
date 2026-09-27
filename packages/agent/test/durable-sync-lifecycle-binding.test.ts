@@ -617,11 +617,13 @@ describe('durable sync lifecycle chain binding', () => {
   });
 
   it.each([
-    ['catalog', false],
-    ['legacy', true],
+    ['catalog', false, false],
+    ['legacy', true, false],
+    // #2858: a blocked private graph keeps its root scope on the member lane.
+    ['catalog private-member', false, true],
   ] as const)(
     'passes includeRootScope for %s authority during standalone SWM recovery',
-    async (_mode, legacySyncAllowed) => {
+    async (_mode, legacySyncAllowed, onPrivateLane) => {
       const agentLike: any = {
         config: {},
         store: {},
@@ -643,6 +645,7 @@ describe('durable sync lifecycle chain binding', () => {
         invalidateListContextGraphsCache: vi.fn(),
         contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
         resolveRfc64CatalogReceiverAuthorityV1: vi.fn(() => ({ legacySyncAllowed })),
+        rfc64PrivateRootSwmOnLegacyLaneV1: vi.fn(() => onPrivateLane),
         runContextGraphSyncWithBackpressure: async (
           _ctx: unknown,
           _contextGraphId: string,
@@ -663,7 +666,7 @@ describe('durable sync lifecycle chain binding', () => {
 
       expect(mockedRecoverContextGraphSwm).toHaveBeenCalledTimes(1);
       expect(mockedRecoverContextGraphSwm.mock.calls[0]?.[0].includeRootScope)
-        .toBe(legacySyncAllowed);
+        .toBe(legacySyncAllowed || onPrivateLane);
     },
   );
 
