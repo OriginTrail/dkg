@@ -1120,10 +1120,18 @@ export class DKGAgentBase {
     Number(process.env['DKG_VM_RECONCILE_CONFIRMATION_DEPTH']) || 5;
   /**
    * #2858 — confirmed VM copies waiting for a refresh after a KA update, held
-   * process-wide. Each entry is one (graph, KA) pair; a flood of update events
-   * for held KAs drops the oldest hint, never a newer one.
+   * process-wide. Each entry is one (graph, KA) pair, a few hundred bytes. A
+   * full set refuses a new target, which holds the update event lane at that
+   * event until targets settle or are given up.
    */
-  static readonly VM_REFRESH_MAX_ENTRIES = 256;
+  static readonly VM_REFRESH_MAX_ENTRIES = 4096;
+  /**
+   * #2858 — age, from its first offer, at which a refresh target that never
+   * settled is given up (an unreachable holder, a graph whose pass no longer
+   * runs). It then no longer holds the event lane's persisted cursor or a
+   * slot, and its copy waits for the KA's next update or an asset fetch.
+   */
+  static readonly VM_REFRESH_MAX_AGE_MS = 24 * 60 * 60_000;
   /**
    * Refresh attempts one refresh worker runs for its graph. Each is a few
    * chain reads plus one exact fetch that asks at most
@@ -1321,19 +1329,10 @@ export class DKGAgentBase {
     maxEntries: DKGAgentBase.VM_REFRESH_MAX_ENTRIES,
     baseBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_BASE_MS,
     maxBackoffMs: DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS,
-    onEvict: (target, evictedTotal) => {
-      this.log.warn(
-        createOperationContext('system'),
-        `VM refresh: dropped the target for ${target.ual} in "${target.localCgId}" to stay within `
-          + `${DKGAgentBase.VM_REFRESH_MAX_ENTRIES} held targets (${evictedTotal} dropped so far); `
-          + 'its copy waits for the next update or an asset fetch',
-      );
-    },
+    maxAgeMs: DKGAgentBase.VM_REFRESH_MAX_AGE_MS,
   });
   /** #2858 — the running refresh worker of each graph, at most one per graph. */
   protected readonly vmRefreshWorkers = new Map<string, Promise<void>>();
-  /** #2858 — update events whose holders could not be read, so none was queued. */
-  protected vmRefreshLostEvents = 0;
   /** Next stable batch index to consider when the bounded rotation cache has waiters. */
   protected readonly vmReconcileRotationAdmissionCursorByCg = new Map<string, number>();
   /** Last resolved curator peers, used to keep the capped exact-recovery roster authoritative. */

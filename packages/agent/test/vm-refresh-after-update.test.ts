@@ -28,14 +28,23 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
-import { MockChainAdapter, buildKnowledgeAssetUal } from '@origintrail-official/dkg-chain';
+import {
+  MockChainAdapter,
+  buildKnowledgeAssetUal,
+  type ChainAdapter,
+  type ChainEvent,
+  type EventFilter,
+} from '@origintrail-official/dkg-chain';
 import {
   MemoryLayer,
+  TypedEventBus,
   createGraphKnowledgeAssetScope,
   createOperationContext,
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import {
+  ChainEventPoller,
+  PublishHandler,
   computeFlatKCRootV10,
   generateGraphKnowledgeAssetMetadata,
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
@@ -43,7 +52,7 @@ import {
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
-import { GraphManager, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { resolveConfirmedGraphScopedVm } from '../src/confirmed-graph-scoped-vm-resolver.js';
@@ -105,6 +114,7 @@ interface RefreshInternals {
     localCgId: string,
     source?: 'live' | 'periodic' | 'manual',
   ): Promise<ContextGraphReconcileResult>;
+  vmRefreshPersistCeiling(): number | undefined;
   reconcileChainOrdinal(
     localCgId: string,
     onChainCgId: bigint,
@@ -133,13 +143,17 @@ function contentOf(ual: string, version: KaVersion, localCgId = CG) {
   return { assertionGraph, dataQuads, root };
 }
 
-/** Install one confirmed version exactly as a verified durable fetch does. */
+/**
+ * Install one confirmed version exactly as a verified durable fetch does, or,
+ * given `txHash`, as the receipt-backed confirmation of that transaction.
+ */
 async function materialize(
   store: TripleStore,
   ual: string,
   kaId: bigint,
   version: KaVersion,
   localCgId = CG,
+  txHash?: string,
 ): Promise<string> {
   const { assertionGraph, dataQuads, root } = contentOf(ual, version, localCgId);
   return materializeVerifiedGraphScopedAsset({
@@ -166,13 +180,25 @@ async function materialize(
         assertionGraph,
       }, {
         status: 'confirmed',
-        confirmation: {
-          kind: 'finalized-materialization',
-          provenance: {
-            batchId: kaId,
-            materializedVersion: { blockNumber: 100, txIndex: 0 },
-          },
-        },
+        confirmation: txHash === undefined
+          ? {
+              kind: 'finalized-materialization',
+              provenance: {
+                batchId: kaId,
+                materializedVersion: { blockNumber: 100, txIndex: 0 },
+              },
+            }
+          : {
+              kind: 'transaction',
+              provenance: {
+                txHash,
+                blockNumber: 100,
+                blockTimestamp: 1_790_000_000,
+                publisherAddress: PUBLISHER,
+                batchId: kaId,
+                chainId: 'mock:31337',
+              },
+            },
       }),
     },
   });
@@ -420,76 +446,53 @@ async function bootMember(options: {
 const ctx = createOperationContext('system');
 
 describe('VmRefreshQueue', () => {
-  const target = (merkleRoot: string, ual = 'did:dkg:mock:31337/0xabc/1'): VmRefreshTarget => ({
+  const target = (
+    merkleRoot: string,
+    ual = 'did:dkg:mock:31337/0xabc/1',
+    blockNumber?: number,
+  ): VmRefreshTarget => ({
     localCgId: CG,
     ual,
     kaId: 1n,
     merkleRoot,
+    ...(blockNumber === undefined ? {} : { blockNumber }),
+  });
+  const queueAt = (clock: () => number, maxEntries = 8) => new VmRefreshQueue({
+    maxEntries,
+    baseBackoffMs: 60_000,
+    maxBackoffMs: 600_000,
+    maxAgeMs: 24 * 60 * 60_000,
+    now: clock,
   });
 
   it('keeps one target per graph and KA: a replayed root keeps its backoff, a new root is due at once', () => {
     let now = 1_000;
-    const queue = new VmRefreshQueue({
-      maxEntries: 8,
-      baseBackoffMs: 60_000,
-      maxBackoffMs: 600_000,
-      now: () => now,
-    });
-    expect(queue.offer(target('0xb2'))).toBe(true);
+    const queue = queueAt(() => now);
+    expect(queue.offer(target('0xb2'))).toBe('recorded');
     expect(queue.due(CG, 10)).toEqual([{ ...target('0xb2'), failures: 0 }]);
     queue.settle(target('0xb2'), 'retry');
     expect(queue.due(CG, 10)).toEqual([]);
 
     // The same event replayed (a lane re-scan) cannot defeat the backoff.
-    expect(queue.offer(target('0xb2'))).toBe(false);
+    expect(queue.offer(target('0xb2'))).toBe('held');
     expect(queue.due(CG, 10)).toEqual([]);
     expect(queue.snapshot()).toMatchObject([{ merkleRoot: '0xb2', failures: 1, nextAttemptAt: 61_000 }]);
 
     // A later update is new evidence: it replaces the target and is due now.
-    expect(queue.offer(target('0xc3'))).toBe(true);
+    expect(queue.offer(target('0xc3'))).toBe('recorded');
     expect(queue.size).toBe(1);
     expect(queue.due(CG, 10)).toEqual([{ ...target('0xc3'), failures: 0 }]);
     now = 61_000;
     expect(queue.due('another-graph', 10)).toEqual([]);
   });
 
-  it('reports each target it drops over capacity, with the running total', () => {
-    const evicted: Array<[string, number]> = [];
-    const queue = new VmRefreshQueue({
-      maxEntries: 1,
-      baseBackoffMs: 60_000,
-      maxBackoffMs: 600_000,
-      onEvict: (dropped, total) => evicted.push([dropped.ual, total]),
-    });
-    queue.offer(target('0x01', 'ual-1'));
-    queue.offer(target('0x02', 'ual-2'));
-    queue.offer(target('0x03', 'ual-3'));
-    expect(evicted).toEqual([['ual-1', 1], ['ual-2', 2]]);
-    expect(queue.evictedTotal).toBe(2);
-  });
-
-  it('holds a target offered with a delay until the delay has passed', () => {
-    let now = 5_000;
+  it('settles only the attempted root and doubles the retry delay to its ceiling', () => {
+    let now = 0;
     const queue = new VmRefreshQueue({
       maxEntries: 8,
       baseBackoffMs: 60_000,
-      maxBackoffMs: 600_000,
-      now: () => now,
-    });
-    expect(queue.offer(target('0xb2'), 30_000)).toBe(true);
-    expect(queue.snapshot()).toMatchObject([{ merkleRoot: '0xb2', failures: 0, nextAttemptAt: 35_000 }]);
-    expect(queue.due(CG, 10)).toEqual([]);
-    expect(queue.dueContextGraphIds()).toEqual([]);
-    now = 35_000;
-    expect(queue.due(CG, 10)).toEqual([{ ...target('0xb2'), failures: 0 }]);
-  });
-
-  it('settles only the attempted root, doubles the retry delay to its ceiling, and drops the oldest over capacity', () => {
-    let now = 0;
-    const queue = new VmRefreshQueue({
-      maxEntries: 2,
-      baseBackoffMs: 60_000,
       maxBackoffMs: 200_000,
+      maxAgeMs: 24 * 60 * 60_000,
       now: () => now,
     });
     queue.offer(target('0xb2'));
@@ -509,14 +512,61 @@ describe('VmRefreshQueue', () => {
     expect(queue.due(CG, 10)).toEqual([{ ...target('0xc3'), failures: 4 }]);
     queue.settle(target('0xc3'), 'refreshed');
     expect(queue.size).toBe(0);
+  });
 
-    queue.offer(target('0x01', 'ual-1'));
-    queue.offer(target('0x02', 'ual-2'));
-    queue.offer(target('0x03', 'ual-3'));
-    expect(queue.snapshot().map((entry) => entry.ual)).toEqual(['ual-2', 'ual-3']);
-    expect(queue.evictedTotal).toBe(1);
+  it('refuses a new KA when full, but still takes a newer root for a KA it holds', () => {
+    const queue = queueAt(() => 0, 2);
+    expect(queue.offer(target('0x01', 'ual-1'))).toBe('recorded');
+    expect(queue.offer(target('0x02', 'ual-2'))).toBe('recorded');
+    expect(queue.offer(target('0x03', 'ual-3'))).toBe('full');
+    expect(queue.offer(target('0x04', 'ual-1'))).toBe('recorded');
+    expect(queue.snapshot().map((entry) => [entry.ual, entry.merkleRoot])).toEqual([
+      ['ual-2', '0x02'],
+      ['ual-1', '0x04'],
+    ]);
+    expect(queue.refusedTotal).toBe(1);
     queue.clearContextGraph(CG);
     expect(queue.size).toBe(0);
+  });
+
+  it('names the oldest event block it holds, ignoring targets without one', () => {
+    const queue = queueAt(() => 0);
+    expect(queue.oldestBlockNumber()).toBeUndefined();
+    queue.offer(target('0x01', 'ual-1', 160));
+    queue.offer(target('0x02', 'ual-2'));
+    queue.offer(target('0x03', 'ual-3', 150));
+    expect(queue.oldestBlockNumber()).toBe(150);
+    queue.settle(target('0x03', 'ual-3', 150), 'refreshed');
+    expect(queue.oldestBlockNumber()).toBe(160);
+  });
+
+  it('gives up a target held past its maximum age, releasing its block and slot', () => {
+    let now = 0;
+    const queue = queueAt(() => now, 1);
+    queue.offer(target('0x01', 'ual-1', 150));
+    queue.settle(target('0x01', 'ual-1', 150), 'retry');
+    now = 24 * 60 * 60_000 - 1;
+    expect(queue.expire()).toEqual([]);
+    expect(queue.offer(target('0x02', 'ual-2', 170))).toBe('full');
+
+    now = 24 * 60 * 60_000;
+    expect(queue.expire()).toEqual([
+      expect.objectContaining({ ual: 'ual-1', blockNumber: 150, failures: 1, heldMs: 24 * 60 * 60_000 }),
+    ]);
+    expect(queue.givenUpTotal).toBe(1);
+    expect(queue.oldestBlockNumber()).toBeUndefined();
+    expect(queue.offer(target('0x02', 'ual-2', 170))).toBe('recorded');
+  });
+
+  it('holds a target offered with a delay until the delay has passed', () => {
+    let now = 5_000;
+    const queue = queueAt(() => now);
+    expect(queue.offer(target('0xb2'), 30_000)).toBe('recorded');
+    expect(queue.snapshot()).toMatchObject([{ merkleRoot: '0xb2', failures: 0, nextAttemptAt: 35_000 }]);
+    expect(queue.due(CG, 10)).toEqual([]);
+    expect(queue.dueContextGraphIds()).toEqual([]);
+    now = 35_000;
+    expect(queue.due(CG, 10)).toEqual([{ ...target('0xb2'), failures: 0 }]);
   });
 });
 
@@ -545,18 +595,46 @@ describe('KnowledgeAssetUpdated nudge (#2858)', () => {
     expect(snapshotReads.calls).toEqual([]);
   });
 
-  it('does nothing when the local copy already holds the event root', async () => {
+  it('does nothing when the event\'s own transaction confirmed the copy', async () => {
     const { internals, kas, rootReads } = await bootMember();
-    const current = await localRootHex(internals.store, kas[0]!.ual);
+    const ual = kas[0]!.ual;
+    const txHash = '0x' + 'ab'.repeat(32);
+    // The publisher's own update: receipt-backed by the event's transaction.
+    await materialize(internals.store, ual, kas[0]!.kaId, { label: 'B', assertionVersion: 2n }, CG, txHash);
+    const current = await localRootHex(internals.store, ual);
     const debug = vi.spyOn(internals.log, 'debug');
 
-    await expect(internals.handleKAUpdatedNudge(kas[0]!.kaId, ethers.getBytes(current!), ctx))
-      .resolves.toEqual([]);
+    await expect(internals.handleKAUpdatedNudge(
+      kas[0]!.kaId,
+      ethers.getBytes(current!),
+      ctx,
+      { blockNumber: 150, txHash: txHash.toUpperCase().replace('0X', '0x') },
+    )).resolves.toEqual([]);
     expect(logLines(debug)).toEqual([
-      `VM refresh: ${kas[0]!.ual} in "${CG}" not queued: the copy already holds the update root`,
+      `VM refresh: ${ual} in "${CG}" not queued: the copy holds this update`,
     ]);
     expect(internals.vmRefreshQueue.size).toBe(0);
     expect(rootReads.calls).toEqual([]);
+  });
+
+  it('queues a version check for a copy that already holds the event root', async () => {
+    const { internals, kas, rootReads, snapshotReads } = await bootMember();
+    const ual = kas[0]!.ual;
+    const current = await localRootHex(internals.store, ual);
+    const debug = vi.spyOn(internals.log, 'debug');
+
+    // Roots name content: the copy may be an older version with the same one.
+    await expect(internals.handleKAUpdatedNudge(
+      kas[0]!.kaId,
+      ethers.getBytes(current!),
+      ctx,
+      { blockNumber: 150, txHash: '0x' + 'cd'.repeat(32) },
+    )).resolves.toEqual([expect.objectContaining({ merkleRoot: current, checkVersion: true, blockNumber: 150 })]);
+    expect(logLines(debug)).toEqual([
+      `VM refresh: ${ual} in "${CG}" holds its update's root; version check queued`,
+    ]);
+    expect(rootReads.calls).toEqual([]);
+    expect(snapshotReads.calls).toEqual([]);
   });
 
   it('queues exactly one refresh carrying the new root for a copy behind the event', async () => {
@@ -585,42 +663,43 @@ describe('KnowledgeAssetUpdated nudge (#2858)', () => {
     expect(fetches.calls).toEqual([]);
   });
 
-  it('warns, with a running count, when it cannot read which graphs hold the KA', async () => {
+  it('fails the dispatch, so the lane holds the event, when it cannot read which graphs hold the KA', async () => {
     const { internals, kas, updateOnChain } = await bootMember();
     const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
-    vi.spyOn(internals.store, 'query').mockRejectedValue(new Error('store busy'));
-    const warn = vi.spyOn(internals.log, 'warn');
+    const query = vi.spyOn(internals.store, 'query').mockRejectedValueOnce(new Error('store busy'));
 
     await expect(internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx, { blockNumber: 150 }))
-      .resolves.toEqual([]);
-    await expect(internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx)).resolves.toEqual([]);
-
-    expect(logLines(warn)).toEqual([
-      `VM refresh: could not read which local graphs hold KA ${kas[0]!.kaId} for its update at block 150; `
-        + 'not queued (1 update event(s) lost so far): store busy',
-      `VM refresh: could not read which local graphs hold KA ${kas[0]!.kaId} for its update; `
-        + 'not queued (2 update event(s) lost so far): store busy',
-    ]);
+      .rejects.toThrow(
+        `VM refresh: could not read which local graphs hold KA ${kas[0]!.kaId} for its update at block 150: `
+          + 'store busy',
+      );
     expect(internals.vmRefreshQueue.size).toBe(0);
+
+    // The lane dispatches the event again after its backoff.
+    query.mockRestore();
+    await expect(internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx, { blockNumber: 150 }))
+      .resolves.toHaveLength(1);
   });
 
-  it('warns when a full target set drops its oldest target', async () => {
-    const { internals } = await bootMember();
-    const warn = vi.spyOn(internals.log, 'warn');
-    for (let index = 0; index <= DKGAgentBase.VM_REFRESH_MAX_ENTRIES; index += 1) {
-      internals.vmRefreshQueue.offer({
+  it('fails the dispatch, so the lane holds the event, when the target set is full', async () => {
+    const { internals, kas, updateOnChain } = await bootMember();
+    for (let index = 0; index < DKGAgentBase.VM_REFRESH_MAX_ENTRIES; index += 1) {
+      expect(internals.vmRefreshQueue.offer({
         localCgId: CG,
         ual: `did:dkg:mock:31337/0xabc/${index}`,
         kaId: BigInt(index + 1),
         merkleRoot: '0x01',
-      });
+        blockNumber: 120,
+      })).toBe('recorded');
     }
-    expect(internals.vmRefreshQueue.size).toBe(DKGAgentBase.VM_REFRESH_MAX_ENTRIES);
-    expect(logLines(warn)).toEqual([
-      `VM refresh: dropped the target for did:dkg:mock:31337/0xabc/0 in "${CG}" to stay within `
-        + `${DKGAgentBase.VM_REFRESH_MAX_ENTRIES} held targets (1 dropped so far); `
-        + 'its copy waits for the next update or an asset fetch',
-    ]);
+    const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+
+    await expect(internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx, { blockNumber: 150 }))
+      .rejects.toThrow(
+        `VM refresh: ${DKGAgentBase.VM_REFRESH_MAX_ENTRIES} targets are held, the most allowed, so the `
+          + `update at block 150 of ${kas[0]!.ual} in "${CG}" waits for some to settle`,
+      );
+    expect(internals.vmRefreshQueue.refusedTotal).toBe(1);
   });
 
   it('gives the lane that staged a newer version a grace period before the refresh', async () => {
@@ -668,7 +747,7 @@ describe('VM refresh worker (#2858)', () => {
     expect(await localRootHex(internals.store, ual)).toBe(rootA);
     expect(fetches.calls).toEqual([]);
 
-    await internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx);
+    await internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx, { blockNumber: 90 });
     await expect(internals.runVmReconcileForCg(CG, 'manual')).resolves.toMatchObject({
       watermarkAfter: 1,
     });
@@ -680,17 +759,19 @@ describe('VM refresh worker (#2858)', () => {
     expect(await localVersion(internals.store, ual)).toBe('2');
     expect(internals.vmRefreshQueue.size).toBe(0);
 
-    // Converged: the same event again is a local no-op, and the ordinal walk
-    // settles the refreshed copy from local state without a root read.
+    // Converged: the same event again (the copy was materialized after its
+    // block) is a local no-op, and the ordinal walk settles the refreshed copy
+    // from local state without a root read.
     const rootReadsBefore = rootReads.calls.length;
-    await expect(internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx)).resolves.toEqual([]);
+    await expect(internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx, { blockNumber: 90 }))
+      .resolves.toEqual([]);
     await expect(internals.reconcileChainOrdinal(CG, ON_CHAIN_CG, 0, 200, { deferActiveFetch: true }))
       .resolves.toEqual({ status: 'already', blockNumber: 200 });
     expect(rootReads.calls.length).toBe(rootReadsBefore);
     expect(fetches.calls).toHaveLength(1);
   });
 
-  it('settles an event older than the local copy with one root read, no fetch and no rollback', async () => {
+  it('settles an event older than the local copy with one root read and one pinned view, no fetch and no rollback', async () => {
     const { internals, kas, updateOnChain, fetches, rootReads, snapshotReads } = await bootMember();
     const ual = kas[0]!.ual;
     const rootA = await localRootHex(internals.store, ual);
@@ -702,9 +783,9 @@ describe('VM refresh worker (#2858)', () => {
     expect(queued).toHaveLength(1);
     await internals.runVmRefreshesForCg(CG, CG, () => true);
 
-    // The chain's current root settles it: no version evidence, no peer.
+    // The chain's current root and version settle it: no peer.
     expect(rootReads.calls).toHaveLength(1);
-    expect(snapshotReads.calls).toEqual([]);
+    expect(snapshotReads.calls).toHaveLength(1);
     expect(fetches.calls).toEqual([]);
     expect(await localRootHex(internals.store, ual)).toBe(ethers.hexlify(rootB));
     expect(await localVersion(internals.store, ual)).toBe('2');
@@ -1044,14 +1125,58 @@ describe('VM refresh worker (#2858)', () => {
     expect(await localVersion(internals.store, ual)).toBe('3');
     expect(fetches.calls).toHaveLength(2);
 
-    // The B event replayed late (a lane re-scan) moves nothing.
+    // The B event replayed late (a lane re-scan) moves nothing: one pinned
+    // view confirms the copy's root and version.
     const snapshotReadsBefore = snapshotReads.calls.length;
     await internals.handleKAUpdatedNudge(kaId, rootB, ctx);
     await internals.runVmRefreshesForCg(CG, CG, () => true);
     expect(await localRootHex(internals.store, ual)).toBe(rootA);
     expect(await localVersion(internals.store, ual)).toBe('3');
     expect(fetches.calls).toHaveLength(2);
-    expect(snapshotReads.calls).toHaveLength(snapshotReadsBefore);
+    expect(snapshotReads.calls).toHaveLength(snapshotReadsBefore + 1);
+    expect(internals.vmRefreshQueue.size).toBe(0);
+  });
+
+  it('moves a copy to the chain version when an update repeats its root', async () => {
+    const { internals, kas, updateOnChain, view, fetches } = await bootMember();
+    view.blockNumber = 200;
+    const ual = kas[0]!.ual;
+    const rootA = await localRootHex(internals.store, ual);
+    // Version 2 commits the same content, so the same root.
+    const rootA2 = updateOnChain(7n, { label: 'A-7', assertionVersion: 2n });
+    expect(ethers.hexlify(rootA2)).toBe(rootA);
+
+    await expect(internals.handleKAUpdatedNudge(kas[0]!.kaId, rootA2, ctx, { blockNumber: 150 }))
+      .resolves.toHaveLength(1);
+    await internals.runVmRefreshesForCg(CG, CG, () => true);
+
+    expect(fetches.calls).toHaveLength(1);
+    expect(await localRootHex(internals.store, ual)).toBe(rootA);
+    expect(await localVersion(internals.store, ual)).toBe('2');
+    expect(internals.vmRefreshQueue.size).toBe(0);
+  });
+
+  it('reaches the chain version of an A -> B -> A history it missed while offline', async () => {
+    const { internals, kas, updateOnChain, view, fetches } = await bootMember();
+    view.blockNumber = 200;
+    const ual = kas[0]!.ual;
+    const kaId = kas[0]!.kaId;
+    const rootA = await localRootHex(internals.store, ual);
+    const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    const rootA3 = updateOnChain(7n, { label: 'A-7', assertionVersion: 3n });
+
+    // The lane replays both events after the restart; the latest names the
+    // root the copy already has.
+    await internals.handleKAUpdatedNudge(kaId, rootB, ctx, { blockNumber: 150 });
+    await internals.handleKAUpdatedNudge(kaId, rootA3, ctx, { blockNumber: 160 });
+    expect(internals.vmRefreshQueue.snapshot()).toEqual([
+      expect.objectContaining({ merkleRoot: rootA, blockNumber: 160, checkVersion: true }),
+    ]);
+    await internals.runVmRefreshesForCg(CG, CG, () => true);
+
+    expect(fetches.calls).toHaveLength(1);
+    expect(await localRootHex(internals.store, ual)).toBe(rootA);
+    expect(await localVersion(internals.store, ual)).toBe('3');
     expect(internals.vmRefreshQueue.size).toBe(0);
   });
 
@@ -1312,6 +1437,114 @@ describe('restarted member (#2858)', () => {
   });
 });
 
+describe('restart through the update event lane (#2858)', () => {
+  it('replays an unsettled update from the persisted lane cursor and converges without a new update', async () => {
+    const { internals, kas, updateOnChain, view, transport } = await bootMember();
+    const ual = kas[0]!.ual;
+    const kaId = kas[0]!.kaId;
+    view.blockNumber = 250;
+    // No peer serves the update before the restart.
+    transport.peerHasCurrent = false;
+    const rootV2 = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    const rootV3 = updateOnChain(7n, { label: 'C', assertionVersion: 3n });
+    const updateEvent = (blockNumber: number, root: Uint8Array): ChainEvent => ({
+      type: 'KnowledgeAssetUpdated',
+      blockNumber,
+      data: {
+        kaId: kaId.toString(),
+        batchId: kaId.toString(),
+        merkleRoot: ethers.hexlify(root),
+        txHash: `0x${blockNumber.toString(16).padStart(64, '0')}`,
+      },
+    });
+    const events = [updateEvent(150, rootV2), updateEvent(160, rootV3)];
+    let head = 200;
+    const eventChain = {
+      chainId: 'mock:31337',
+      getBlockNumber: async () => head,
+      listenForEvents: async function* (filter: EventFilter): AsyncIterable<ChainEvent> {
+        for (const event of events) {
+          if (
+            filter.eventTypes.includes(event.type)
+            && event.blockNumber >= (filter.fromBlock ?? 0)
+            && event.blockNumber <= (filter.toBlock ?? Number.MAX_SAFE_INTEGER)
+          ) yield event;
+        }
+      },
+    } as unknown as ChainAdapter;
+    // The lane cursor was persisted before both updates.
+    const saved = new Map<string, number>([['collectionUpdates', 140]]);
+    const cursorPersistence = {
+      async loadLane(lane: string) { return saved.get(lane); },
+      async saveLane(lane: string, block: number) { saved.set(lane, block); },
+    };
+    let now = 0;
+    // A poller wired the way the agent wires its update lane.
+    const newPoller = () => new ChainEventPoller({
+      chain: eventChain,
+      publishHandler: new PublishHandler(new OxigraphStore(), new TypedEventBus()),
+      intervalMs: 60_000,
+      clock: () => now,
+      cursorPersistence,
+      onCollectionUpdated: async ({ batchId, merkleRoot, blockNumber, txHash, signal }) => {
+        await internals.handleKAUpdatedNudge(batchId, merkleRoot, ctx, {
+          blockNumber,
+          ...(txHash === undefined ? {} : { txHash }),
+          signal,
+        });
+      },
+      collectionUpdatesPersistCeiling: () => internals.vmRefreshPersistCeiling(),
+    });
+    const poll = (poller: ChainEventPoller) => (poller as unknown as { poll(): Promise<void> }).poll();
+
+    await poll(newPoller());
+    // One target, at the latest root; the saved cursor stays below its event.
+    expect(internals.vmRefreshQueue.snapshot()).toEqual([
+      expect.objectContaining({ merkleRoot: ethers.hexlify(rootV3), blockNumber: 160 }),
+    ]);
+    expect(saved.get('collectionUpdates')).toBe(159);
+    await internals.runVmRefreshesForCg(CG, CG, () => true);
+    expect(await localVersion(internals.store, ual)).toBe('1');
+
+    // Restart: the process-local targets are gone, the persisted cursor is not.
+    internals.vmRefreshQueue.clear();
+    transport.peerHasCurrent = true;
+    const restarted = newPoller();
+    await poll(restarted);
+    expect(internals.vmRefreshQueue.snapshot()).toEqual([
+      expect.objectContaining({ merkleRoot: ethers.hexlify(rootV3), blockNumber: 160, failures: 0 }),
+    ]);
+    await internals.runVmRefreshesForCg(CG, CG, () => true);
+    expect(await localRootHex(internals.store, ual)).toBe(ethers.hexlify(rootV3));
+    expect(await localVersion(internals.store, ual)).toBe('3');
+    expect(internals.vmRefreshQueue.size).toBe(0);
+
+    // Settled: the next scan persists the block it reached.
+    head = 210;
+    now = 60_000;
+    await poll(restarted);
+    expect(saved.get('collectionUpdates')).toBe(210);
+  });
+
+  it('stops holding the lane cursor once a target that never settles is given up', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-09-27T12:00:00.000Z'));
+    const { internals, kas, updateOnChain } = await bootMember();
+    const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    await internals.handleKAUpdatedNudge(kas[0]!.kaId, rootB, ctx, { blockNumber: 150 });
+    expect(internals.vmRefreshPersistCeiling()).toBe(149);
+
+    const warn = vi.spyOn(internals.log, 'warn');
+    vi.setSystemTime(new Date(Date.now() + DKGAgentBase.VM_REFRESH_MAX_AGE_MS));
+    expect(internals.vmRefreshPersistCeiling()).toBeUndefined();
+    expect(internals.vmRefreshQueue.size).toBe(0);
+    expect(logLines(warn)).toEqual([
+      `VM refresh: gave up on ${kas[0]!.ual} in "${CG}" after 1440 min and 0 failed attempt(s) `
+        + "(1 given up so far); its copy waits for the KA's next update or an asset fetch",
+    ]);
+  });
+});
+
 describe('lifecycle wiring (#2858)', () => {
   it.each([
     { mode: 'RFC-64 catalog disabled', activation: { enabled: false }, plan: undefined },
@@ -1360,6 +1593,7 @@ describe('lifecycle wiring (#2858)', () => {
           merkleRoot: Uint8Array;
           batchId: bigint;
           blockNumber: number;
+          txHash?: string;
         }) => Promise<void>;
       } | null;
     }).chainPoller;
@@ -1368,11 +1602,26 @@ describe('lifecycle wiring (#2858)', () => {
     const nudges = recorder(async (..._args: unknown[]): Promise<VmRefreshTarget[]> => []);
     (agent as unknown as { handleKAUpdatedNudge: typeof nudges }).handleKAUpdatedNudge = nudges;
     const root = new Uint8Array(32).fill(7);
-    await poller!.onCollectionUpdated!({ merkleRoot: root, batchId: 42n, blockNumber: 9 });
+    const txHash = `0x${'ab'.repeat(32)}`;
+    await poller!.onCollectionUpdated!({ merkleRoot: root, batchId: 42n, blockNumber: 9, txHash });
 
     expect(nudges.calls).toHaveLength(1);
     expect(nudges.calls[0]!.slice(0, 2)).toEqual([42n, root]);
-    expect(nudges.calls[0]![3]).toMatchObject({ blockNumber: 9 });
+    expect(nudges.calls[0]![3]).toMatchObject({ blockNumber: 9, txHash });
+    // The lane's saved cursor follows the held refresh targets.
+    const ceiling = (poller as unknown as {
+      collectionUpdatesPersistCeiling?: () => number | undefined;
+    }).collectionUpdatesPersistCeiling;
+    expect(ceiling?.()).toBeUndefined();
+    (agent as unknown as RefreshInternals).vmRefreshQueue.offer({
+      localCgId: CG,
+      ual: 'did:dkg:mock:31337/0xabc/1',
+      kaId: 1n,
+      merkleRoot: '0x01',
+      blockNumber: 150,
+    });
+    expect(ceiling?.()).toBe(149);
+    (agent as unknown as RefreshInternals).vmRefreshQueue.clear();
 
     // The nudge decides from the subscription and the local copy alone, so a
     // held copy behind the event is queued in every mode.

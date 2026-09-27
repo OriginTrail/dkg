@@ -3017,11 +3017,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // node holding only a confirmed VM copy learns of the new version here.
         // Decided from local state; a V10 KA is its own batch, so the event's
         // batch id is the KA id. The event's block keeps a chain read that
-        // has not seen the update from settling the refresh.
+        // has not seen the update from settling the refresh, and its
+        // transaction spares a check of the publisher's own copy. A nudge that
+        // fails holds the lane, and the lane never persists its cursor past
+        // an unsettled refresh, so a restart replays that update.
         onCollectionUpdated: this.vmReconcileEnabled()
-          ? async ({ batchId, merkleRoot, blockNumber, signal }) => {
-              await this.handleKAUpdatedNudge(batchId, merkleRoot, ctx, { blockNumber, signal });
+          ? async ({ batchId, merkleRoot, blockNumber, txHash, signal }) => {
+              await this.handleKAUpdatedNudge(batchId, merkleRoot, ctx, {
+                blockNumber,
+                ...(txHash === undefined ? {} : { txHash }),
+                signal,
+              });
             }
+          : undefined,
+        collectionUpdatesPersistCeiling: this.vmReconcileEnabled()
+          ? () => this.vmRefreshPersistCeiling()
           : undefined,
       });
       await this.chainPoller.start();

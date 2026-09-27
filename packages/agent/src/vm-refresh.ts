@@ -14,11 +14,16 @@
  * This module owns only the bounded, process-local target set and its retry
  * schedule. A target is a hint: every attempt re-derives the decision from the
  * local copy and the chain, so a stale target costs at most a chain read,
- * never a wrong version. An update that lands while the node is down reaches
- * it after the restart, replayed from the event lane's persisted cursor. A
- * target lost to eviction, or to a restart after its event was consumed,
- * leaves the copy as it was until the KA's next update or an explicit asset
- * fetch.
+ * never a wrong version.
+ *
+ * The update event is the durable record. The event lane never persists its
+ * cursor past the oldest held target's block ({@link VmRefreshQueue.oldestBlockNumber}),
+ * so after a restart it replays every event whose target was not settled, and
+ * the nudge records the target again. A full set refuses a new target, which
+ * fails the event's dispatch, so the lane holds and dispatches it again later.
+ * A target held past its maximum age is given up
+ * ({@link VmRefreshQueue.expire}): it releases its slot and the lane's cursor,
+ * and the copy waits for the KA's next update or an explicit asset fetch.
  */
 
 export interface VmRefreshTarget {
@@ -29,9 +34,17 @@ export interface VmRefreshTarget {
   readonly merkleRoot: string;
   /**
    * Block of the update event, when known. A chain view older than it has
-   * not seen the update, so it can never settle the target as current.
+   * not seen the update, so it can never settle the target as current. Only
+   * targets with a block hold the event lane's persisted cursor.
    */
   readonly blockNumber?: number;
+  /**
+   * The copy already holds the announced root. Roots name content, not
+   * versions, so an update that repeats content (or an A -> B -> A history)
+   * can leave the copy at an older version with the same root; the attempt
+   * then compares versions with the chain instead of settling on the root.
+   */
+  readonly checkVersion?: boolean;
 }
 
 /** A due target with the failed attempts before it. */
@@ -41,7 +54,7 @@ export interface VmRefreshDue extends VmRefreshTarget {
 
 /**
  * What one attempt concluded.
- *  - `current`: the local copy already holds the chain's current root.
+ *  - `current`: the local copy already holds the chain's current version.
  *  - `refreshed`: the current version was fetched and materialized.
  *  - `not-applicable`: nothing for this lane to do (no confirmed copy any
  *    more, or a chain adapter that cannot read or prove the current version).
@@ -55,20 +68,33 @@ export interface VmRefreshAttempt {
   readonly detail: string;
 }
 
+/**
+ * What an offer did: recorded a new target, kept the one already held for the
+ * same root (and its retry schedule), or refused it because the set is full.
+ */
+export type VmRefreshOfferResult = 'recorded' | 'held' | 'full';
+
+/** A target given up at its maximum age, with the failed attempts behind it. */
+export interface VmRefreshGivenUp extends VmRefreshTarget {
+  readonly failures: number;
+  readonly heldMs: number;
+}
+
 export interface VmRefreshQueueOptions {
-  /** Upper bound on targets held across all graphs; the oldest is dropped first. */
+  /** Upper bound on targets held across all graphs; a full set refuses new ones. */
   readonly maxEntries: number;
   /** Delay before the first retry; doubles per failure. */
   readonly baseBackoffMs: number;
   /** Ceiling of the retry delay. */
   readonly maxBackoffMs: number;
+  /** Age, from its first offer, at which a target that never settled is given up. */
+  readonly maxAgeMs: number;
   readonly now?: () => number;
-  /** Told of each target dropped to stay within `maxEntries`, with the running total. */
-  readonly onEvict?: (target: VmRefreshTarget, evictedTotal: number) => void;
 }
 
 interface VmRefreshRecord {
   readonly target: VmRefreshTarget;
+  readonly firstOfferedAt: number;
   failures: number;
   nextAttemptAt: number;
 }
@@ -82,51 +108,56 @@ export class VmRefreshQueue {
   readonly #maxEntries: number;
   readonly #baseBackoffMs: number;
   readonly #maxBackoffMs: number;
+  readonly #maxAgeMs: number;
   readonly #now: () => number;
-  readonly #onEvict: ((target: VmRefreshTarget, evictedTotal: number) => void) | undefined;
-  #evictedTotal = 0;
+  #refusedTotal = 0;
+  #givenUpTotal = 0;
 
   constructor(options: VmRefreshQueueOptions) {
     this.#maxEntries = Math.max(1, Math.floor(options.maxEntries));
     this.#baseBackoffMs = Math.max(0, options.baseBackoffMs);
     this.#maxBackoffMs = Math.max(this.#baseBackoffMs, options.maxBackoffMs);
+    this.#maxAgeMs = Math.max(0, options.maxAgeMs);
     this.#now = options.now ?? (() => Date.now());
-    this.#onEvict = options.onEvict;
   }
 
   get size(): number {
     return this.#records.size;
   }
 
-  /** Targets dropped to stay within `maxEntries` since this queue was made. */
-  get evictedTotal(): number {
-    return this.#evictedTotal;
+  /** Offers refused because the set was full, since this queue was made. */
+  get refusedTotal(): number {
+    return this.#refusedTotal;
+  }
+
+  /** Targets given up at their maximum age, since this queue was made. */
+  get givenUpTotal(): number {
+    return this.#givenUpTotal;
   }
 
   /**
    * Record a target, due after `delayMs`. The same KA at the same root keeps
    * its retry schedule, so a replayed event cannot defeat the backoff; a
-   * different root is new evidence and replaces the target. Returns whether
-   * anything new was recorded.
+   * different root is new evidence and replaces the target. A new KA is
+   * refused while the set is full.
    */
-  offer(target: VmRefreshTarget, delayMs = 0): boolean {
+  offer(target: VmRefreshTarget, delayMs = 0): VmRefreshOfferResult {
     const key = recordKey(target.localCgId, target.ual);
     const held = this.#records.get(key);
-    if (held !== undefined && held.target.merkleRoot === target.merkleRoot) return false;
+    if (held !== undefined && held.target.merkleRoot === target.merkleRoot) return 'held';
+    if (held === undefined && this.#records.size >= this.#maxEntries) {
+      this.#refusedTotal += 1;
+      return 'full';
+    }
     this.#records.delete(key);
+    const now = this.#now();
     this.#records.set(key, {
       target: Object.freeze({ ...target }),
+      firstOfferedAt: now,
       failures: 0,
-      nextAttemptAt: delayMs > 0 ? this.#now() + delayMs : 0,
+      nextAttemptAt: delayMs > 0 ? now + delayMs : 0,
     });
-    while (this.#records.size > this.#maxEntries) {
-      const oldest = this.#records.entries().next().value;
-      if (oldest === undefined) break;
-      this.#records.delete(oldest[0]);
-      this.#evictedTotal += 1;
-      this.#onEvict?.(oldest[1].target, this.#evictedTotal);
-    }
-    return true;
+    return 'recorded';
   }
 
   /** Due targets of one graph, oldest first, at most `limit`. */
@@ -156,6 +187,20 @@ export class VmRefreshQueue {
   }
 
   /**
+   * Lowest event block of the held targets that carry one: the event lane
+   * must replay from it after a restart. Undefined when none is held.
+   */
+  oldestBlockNumber(): number | undefined {
+    let oldest: number | undefined;
+    for (const record of this.#records.values()) {
+      const block = record.target.blockNumber;
+      if (block === undefined) continue;
+      if (oldest === undefined || block < oldest) oldest = block;
+    }
+    return oldest;
+  }
+
+  /**
    * Settle one attempt. Only the exact target that was attempted is settled:
    * a newer root recorded while the attempt ran stays queued and due.
    * Returns when a retried target is due again.
@@ -173,6 +218,24 @@ export class VmRefreshQueue {
     held.nextAttemptAt = this.#now()
       + Math.min(this.#maxBackoffMs, this.#baseBackoffMs * 2 ** exponent);
     return held.nextAttemptAt;
+  }
+
+  /**
+   * Give up every target held for `maxAgeMs` or longer since its first offer,
+   * whether it kept failing or was never attempted (a graph whose pass no
+   * longer runs). Returns the targets given up.
+   */
+  expire(): VmRefreshGivenUp[] {
+    const now = this.#now();
+    const out: VmRefreshGivenUp[] = [];
+    for (const [key, record] of this.#records) {
+      const heldMs = now - record.firstOfferedAt;
+      if (heldMs < this.#maxAgeMs) continue;
+      this.#records.delete(key);
+      this.#givenUpTotal += 1;
+      out.push(Object.freeze({ ...record.target, failures: record.failures, heldMs }));
+    }
+    return out;
   }
 
   clearContextGraph(localCgId: string): void {
