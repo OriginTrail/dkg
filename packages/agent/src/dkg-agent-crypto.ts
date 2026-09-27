@@ -408,7 +408,10 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
-import { localContextGraphIdMatchesCommittedNameHash } from './context-graph-binding-state.js';
+import {
+  isCanonicalPositiveContextGraphId,
+  localContextGraphIdMatchesCommittedNameHash,
+} from './context-graph-binding-state.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
@@ -1037,7 +1040,26 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     const trimmed = contextGraphId.trim();
     let onChainId: string | null = null;
     let resolvedFromLocalCg = false;
-    if (typeof this.getContextGraphOnChainId === 'function') {
+    if (
+      this.chain?.contextGraphAuthorityIndexRevisionReader !== undefined
+      && typeof this.resolveContextGraphRegistrationBinding === 'function'
+      && !isCanonicalPositiveContextGraphId(trimmed)
+    ) {
+      // An indexed adapter takes the identity from the finalized registration
+      // binding too, never from a live registry range scan (#2827 follow-up).
+      // Finalized absence is `unregistered`, as a scan's miss was; any other
+      // unanswered read is `unknown`.
+      const binding = await this.resolveContextGraphRegistrationBinding(contextGraphId, { signal });
+      if (binding.kind === 'registered') {
+        onChainId = binding.onChainId.toString();
+        resolvedFromLocalCg = true;
+      } else if (
+        binding.kind === 'unavailable'
+        && binding.reason !== 'finalized-name-absence-unaccepted'
+      ) {
+        return 'unknown';
+      }
+    } else if (typeof this.getContextGraphOnChainId === 'function') {
       onChainId = await this.getContextGraphOnChainId(contextGraphId, { signal });
       if (onChainId) resolvedFromLocalCg = true;
     }

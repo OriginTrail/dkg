@@ -49,6 +49,24 @@ function createIndexedEVMAdapter(privateKey: string): EVMChainAdapter {
   });
 }
 
+/**
+ * Count the live name-hash registry lookups an adapter makes. For a graph that
+ * was never registered, each one scans the chain's whole ContextGraphCreated
+ * history: minutes and thousands of eth_getLogs on a public chain. A member's
+ * join and shares must never make one (#2827 follow-up).
+ */
+function countLiveNameHashLookups(adapter: EVMChainAdapter): { readonly calls: number } {
+  const counter = { calls: 0 };
+  const lookup = adapter.resolveContextGraphIdByNameHash;
+  if (typeof lookup === 'function') {
+    adapter.resolveContextGraphIdByNameHash = (...args: Parameters<typeof lookup>) => {
+      counter.calls += 1;
+      return lookup.apply(adapter, args);
+    };
+  }
+  return counter;
+}
+
 function makeChainConfig(operationalKey: string) {
   const { rpcUrl, hubAddress } = getSharedContext();
   return {
@@ -214,6 +232,7 @@ describe('E2E: SWM after a join on a public, unregistered context graph (#2827)'
     // distinct default agents), connected over libp2p.
     const curatorChain = createIndexedEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const memberChain = createIndexedEVMAdapter(HARDHAT_KEYS.EXTRA1);
+    const memberLookups = countLiveNameHashLookups(memberChain);
     expect(curatorChain.contextGraphAuthorityIndexRevisionReader).toBeDefined();
     expect(memberChain.contextGraphAuthorityIndexRevisionReader).toBeDefined();
     const curator = await DKGAgent.create({
@@ -252,11 +271,15 @@ describe('E2E: SWM after a join on a public, unregistered context graph (#2827)'
       assertionName: 'curator-after-join', subject: CURATOR_ENTITY, label: 'Curator after join',
     });
 
+    expect(memberLookups.calls, 'live name-hash registry lookups during the join').toBe(0);
+
     // The member restarts before it has authored anything here: restarting
     // after authoring hits a separate author-catalog projection failure
     // (#2832), not the #2827 defects.
     await member.stop();
-    member = await createMember(createIndexedEVMAdapter(HARDHAT_KEYS.EXTRA1));
+    const restartedMemberChain = createIndexedEVMAdapter(HARDHAT_KEYS.EXTRA1);
+    const restartedMemberLookups = countLiveNameHashLookups(restartedMemberChain);
+    member = await createMember(restartedMemberChain);
     agents.push(member);
     await member.start();
     await member.connectTo(curatorAddr);
@@ -265,6 +288,7 @@ describe('E2E: SWM after a join on a public, unregistered context graph (#2827)'
       from: member, to: curator, contextGraphId,
       assertionName: 'member-after-restart', subject: `${MEMBER_ENTITY}:after-restart`, label: 'Member after restart',
     });
+    expect(restartedMemberLookups.calls, 'live name-hash registry lookups during the member share').toBe(0);
     await shareAndExpectDelivery({
       from: curator, to: member, contextGraphId,
       assertionName: 'curator-after-restart', subject: `${CURATOR_ENTITY}:after-restart`, label: 'Curator after member restart',
