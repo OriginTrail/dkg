@@ -99,6 +99,14 @@ wire-protocol or deployment registry changes are required.**
   retries with backoff (15 s, 30 s, 60 s, 120 s, then every 5 minutes) while
   the approval is still pending, and stops once it completes, the approval is
   gone, authority is denied, or the node stops.
+- **A node no longer scans the whole chain registry to share into a graph it
+  joined that was never registered on chain** (#2842): when it shared into a
+  Context Graph it did not create, and when it confirmed the graph's metadata
+  after joining, a node resolved the graph's on-chain id with a live scan of
+  every `ContextGraphCreated` event. For a graph that was never registered,
+  the scan covers the chain's whole history, so on a public chain a share
+  waited minutes and cost thousands of `eth_getLogs` calls. Nodes with the
+  finalized authority index now take the id from that index.
 - **A received copy with escaped non-ASCII text reaches Verifiable Memory
   again on the receiving node** (#2813): a node records a fingerprint of each
   Shared Working Memory copy it takes in, and finalization recomputes it from
