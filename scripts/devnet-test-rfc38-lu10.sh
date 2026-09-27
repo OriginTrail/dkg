@@ -19,9 +19,9 @@
 #   2. ANONYMOUS CATCHUP SWEEP — a non-member outsider node calls
 #      /api/shared-memory/catchup against the curator with NO
 #      authentication / membership. Public CGs MUST serve anyone;
-#      curated CGs reject the same call. We assert: catchup
-#      returned a 200 and inserted ≥1 triple (or, under load, at
-#      least did not error and the auth gate did not log a denial).
+#      curated CGs reject the same call. We assert the curator's
+#      auth gate did not log a denial. inserted may be 0: the
+#      publisher drains a KA's SWM after VM promotion.
 #
 #   3. VERIFY-BATCH SWEEP — explicit-quads verify-batch must
 #      succeed against the published merkleRoot. Tampered quads
@@ -186,8 +186,11 @@ EOF
 log "catchup response: $CATCHUP"
 
 CATCH_TOTAL=$(parse_json "$CATCHUP" '.totalInsertedTriples')
-CATCH_ERR=$(parse_json "$CATCHUP" '.results[0].swmError')
+# `results` is empty when no peer was attempted.
+CATCH_ERR=$(parse_json "$CATCHUP" '.results?.[0]?.swmError')
 log "outsider catchup: inserted=$CATCH_TOTAL ${CATCH_ERR:+(swmError=$CATCH_ERR)}"
+[ "$(parse_json "$CATCHUP" '.peersAttempted')" != "0" ] \
+  || warn "outsider catchup attempted no peers; the no-denial check below does not exercise the curator"
 
 # Critical: curator MUST NOT have logged a denial line for this CG.
 sleep 1

@@ -129,6 +129,17 @@ MERKLE_ROOT=$(parse_json "$KC_RESP" '.merkleRoot')
 [ -n "$MERKLE_ROOT" ] || fail "could not resolve merkleRoot via /api/kc: $KC_RESP"
 log "✓ published txHash=$TX_HASH merkleRoot=$MERKLE_ROOT"
 
+# Since v10.0.7 an edge no longer activates a discovered public CG, and the
+# batch-rejection report route (scenario 3) needs a locally known CG. Create
+# it on the member, as LU-7 does.
+log "Member creates the same CG locally..."
+CREATE_MEM_LOCAL=$(api_call "$MEMBER_NODE" POST /api/context-graph/create "$(cat <<EOF
+{ "id": "$PUB_CG", "name": "LU-8 member ${STAMP}",
+  "accessPolicy": 0, "publishPolicy": 1 }
+EOF
+)")
+log "member-local create: $CREATE_MEM_LOCAL"
+
 # Pause for gossip + chain settling
 sleep 5
 
@@ -225,7 +236,7 @@ REPORT_BODY=$(VERIFY_BAD="$VERIFY_BAD" PUB_CG="$PUB_CG" STAMP="$STAMP" node -e '
 REPORT_RESP=$(api_call "$MEMBER_NODE" POST /api/knowledge-assets/batch-rejections/report "$REPORT_BODY")
 log "report response: $REPORT_RESP"
 REPORT_GOSSIPED=$(parse_json "$REPORT_RESP" '.gossiped')
-REPORT_DIGEST=$(parse_json "$REPORT_RESP" '.record.digest')
+REPORT_DIGEST=$(parse_json "$REPORT_RESP" '.record?.digest')
 [ -n "$REPORT_DIGEST" ] || fail "no digest in report response: $REPORT_RESP"
 log "✓ Rejection record minted: digest=$REPORT_DIGEST gossiped=$REPORT_GOSSIPED"
 
