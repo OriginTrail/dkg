@@ -2408,9 +2408,9 @@ export class PublishMethods extends DKGAgentBase {
     this.log.info(ctx, `Update complete — status=${result.status}`);
 
     onPhase?.('broadcast', 'start');
-    // Members of a curated graph receive an update on the member lane: its
-    // SWM share, then a Verifiable Memory refresh driven by the chain update.
-    // The graph's update topic carries public updates only.
+    // Members of a curated graph pick up an update from the chain update
+    // event, which refreshes their Verifiable Memory from the curator. The
+    // graph's update topic carries public updates only.
     if (result.onChainResult && result.publicQuads && !isCuratedUpdate) {
       try {
         const dataGraph = knowledgeAssetLayerGraphUri(
