@@ -179,10 +179,29 @@ export type FinalizationRecoveryFailureCode =
 /** Consecutive identical failures after which a failure counts as stable. */
 export const FINALIZATION_RECOVERY_STABLE_FAILURE_THRESHOLD = 3;
 
+/**
+ * Failures that clear on their own: a store scheduler that stays busy frees
+ * up once the background work in front of it drains. They retry on the
+ * ordinary bounded backoff and never count toward a stable-failure streak, so
+ * they cannot trigger the stable-failure retry delay or the streak-based
+ * rejection of a live entry.
+ */
+export const FINALIZATION_RECOVERY_TRANSIENT_FAILURE_CODES: ReadonlySet<FinalizationRecoveryFailureCode> =
+  new Set(['store-scheduler-busy']);
+
 export type FinalizationRecoveryAttemptPolicy =
   | {
       mode: 'ordinary';
       retryDelayMs?: number;
+    }
+  | {
+      /**
+       * A failure that clears on its own. It neither extends nor resets
+       * another code's stable-failure streak.
+       */
+      mode: 'transient';
+      retryDelayMs: number;
+      failureCode: FinalizationRecoveryFailureCode;
     }
   | {
       mode: 'stable-failure';
@@ -213,6 +232,20 @@ export function planFinalizationRecoveryAttempt(
   policy: FinalizationRecoveryAttemptPolicy,
   now: number,
 ): FinalizationRecoveryAttemptUpdate {
+  if (policy.mode === 'transient') {
+    // Older releases counted this code as a stable failure. That streak is no
+    // evidence of a stable failure, so it is dropped here.
+    const legacyStreak = current.failureSignature === policy.failureCode;
+    return {
+      attemptCount: current.attemptCount + 1,
+      lastError: lastError ?? null,
+      failureSignature: legacyStreak ? null : current.failureSignature ?? null,
+      failureStreak: legacyStreak ? 0 : current.failureStreak,
+      // This attempt ran, so a later due time left by an earlier stable
+      // failure (an entry woken early by chain reconciliation) is obsolete.
+      nextAttemptAt: now + Math.max(0, policy.retryDelayMs),
+    };
+  }
   const failureSignature = policy.mode === 'stable-failure'
     ? policy.failureCode
     : undefined;
