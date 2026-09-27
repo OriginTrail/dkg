@@ -145,11 +145,13 @@ devnet_create_shared_ka() {
   while [ "$i" -lt "$count" ]; do
     asset=$(sed -n "$((i + 2))p" "$plan_file")
     body=$(printf '%s' "$asset" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>process.stdout.write(JSON.stringify(JSON.parse(d).body)));')
-    if ! resp=$(api_call "$node_id" POST /api/knowledge-assets "$body"); then
-      rm -f "$plan_file" "$responses_file" "$assets_file"
-      return 1
-    fi
-    if ! printf '%s' "$resp" | RESPONSES_FILE="$responses_file" node -e '
+    local attempt accepted=0
+    for attempt in 1 2 3 4; do
+      if ! resp=$(api_call "$node_id" POST /api/knowledge-assets "$body"); then
+        rm -f "$plan_file" "$responses_file" "$assets_file"
+        return 1
+      fi
+      if printf '%s' "$resp" | RESPONSES_FILE="$responses_file" node -e '
       const fs = require("fs");
       let d=""; process.stdin.on("data", c => d += c);
       process.stdin.on("end", () => {
@@ -166,6 +168,32 @@ devnet_create_shared_ka() {
         }
       });
     '; then
+        accepted=1
+        break
+      fi
+      # A temporarily unavailable promote prerequisite leaves a sealed named
+      # KA that the same request can resume. Reuse its name and body; retry no
+      # other response, so a genuine publish failure still stops the sweep.
+      if [ "$attempt" -lt 4 ] && printf '%s' "$resp" | node -e '
+        let d=""; process.stdin.on("data", c => d += c);
+        process.stdin.on("end", () => {
+          try {
+            const j = JSON.parse(d);
+            const errors = j.errors;
+            const retryable = Array.isArray(errors) && errors.length > 0
+              && !j.error && errors.every((entry) =>
+                typeof entry?.error === "string"
+                && entry.error.includes("[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable"));
+            process.exit(retryable ? 0 : 1);
+          } catch { process.exit(1); }
+        });
+      '; then
+        sleep "$((1 << (attempt - 1)))"
+        continue
+      fi
+      break
+    done
+    if [ "$accepted" -ne 1 ]; then
       printf 'devnet_create_shared_ka: /api/knowledge-assets did not return a publish-ready SWM share\n%s\n' "$resp" >&2
       rm -f "$plan_file" "$responses_file" "$assets_file"
       return 1

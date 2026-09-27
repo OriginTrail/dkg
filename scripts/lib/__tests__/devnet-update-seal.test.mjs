@@ -41,7 +41,7 @@ const quad = (subject, predicate, object) => ({ subject, predicate, object, grap
  * Run build_update_body with the chain replaced by stubs: ownerOf answers with
  * the owner wallet, and a JSON-RPC stub answers eth_chainId for the seal.
  */
-async function buildUpdateBody(quads, privateQuads = []) {
+async function buildUpdateBody(quads, privateQuads = [], legacyCuratedCg = '') {
   const server = createServer((request, response) => {
     let body = '';
     request.on('data', (chunk) => { body += chunk; });
@@ -73,7 +73,7 @@ async function buildUpdateBody(quads, privateQuads = []) {
     await chmod(chainCall, 0o755);
     const { stdout } = await promisify(execFile)('bash', [
       '-c',
-      'source scripts/devnet-update-helpers.sh && build_update_body 1 "$KA" "$CG" "$QUADS" "$PRIVATE_QUADS"',
+      'source scripts/devnet-update-helpers.sh && build_update_body 1 "$KA" "$CG" "$QUADS" "$PRIVATE_QUADS" "$LEGACY_CURATED_CG"',
     ], {
       cwd: REPO_ROOT,
       env: {
@@ -88,6 +88,7 @@ async function buildUpdateBody(quads, privateQuads = []) {
         CG,
         QUADS: JSON.stringify(quads),
         PRIVATE_QUADS: JSON.stringify(privateQuads),
+        LEGACY_CURATED_CG: legacyCuratedCg,
       },
     });
     return JSON.parse(stdout);
@@ -133,7 +134,9 @@ test('seals the root /api/update recomputes for a curated update payload', async
     quad('urn:rfc49:secret:1/alice', 'http://schema.org/name', '"Alice — UPDATED"'),
     quad('urn:rfc49:secret:1/alice', 'http://schema.org/jobTitle', '"Lead (added on update)"'),
   ];
-  const body = await buildUpdateBody(quads);
+  // RFC-49 used to pass the curated graph as a sixth helper argument. Keeping
+  // that invocation here catches any restoration of catalog-floor injection.
+  const body = await buildUpdateBody(quads, [], CG);
   assert.equal(body.kaId, KA_ID.toString());
   assert.equal(body.contextGraphId, CG);
   await assert.rejects(submitUpdate(body), (err) => err === SEAL_ACCEPTED);

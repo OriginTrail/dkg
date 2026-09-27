@@ -19,7 +19,7 @@
 #
 # Test phases:
 #
-#   1. Curator (N5) creates curated CG with [curator, M1=N6].
+#   1. Curator (N5) creates curated CG with [curator, M1=N6]; M1 joins.
 #      A core (N1) is told to host-mode subscribe explicitly so
 #      we can rely on it being the catchup source.
 #   2. Curator writes 20 large triples (enough that catchup
@@ -48,6 +48,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=devnet-publish-helpers.sh
 source "$SCRIPT_DIR/devnet-publish-helpers.sh"
+# shellcheck source=devnet-curated-join-helpers.sh
+source "$SCRIPT_DIR/devnet-curated-join-helpers.sh"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE=9201
 CURATOR_NODE=5
@@ -172,13 +174,34 @@ LEGACY_CORE_CFG=""
 LEGACY_CORE_CFG_BAK=""
 restore_core_host_custody_config() {
   if [ -n "${LEGACY_CORE_CFG_BAK:-}" ] && [ -f "$LEGACY_CORE_CFG_BAK" ] && [ -n "${LEGACY_CORE_CFG:-}" ]; then
-    cp "$LEGACY_CORE_CFG_BAK" "$LEGACY_CORE_CFG" 2>/dev/null || true
+    cp "$LEGACY_CORE_CFG_BAK" "$LEGACY_CORE_CFG" 2>/dev/null || return 1
     if ! restart_core_after_restore; then
       kill_core_managed_store_process
-      restart_core_after_restore || true
+      restart_core_after_restore || return 1
     fi
+    wait_for_port_open "$CORE_NODE" 90 || return 1
     rm -f "$LEGACY_CORE_CFG_BAK"
   fi
+}
+
+restore_unclean_devnet() {
+  local result=$? node i healthy
+  trap - EXIT INT TERM
+  restore_core_host_custody_config || result=1
+  for node in "$CURATOR_NODE" "$M1_NODE"; do
+    "$SCRIPT_DIR/devnet.sh" restart-node "$node" >/dev/null 2>&1 \
+      || { warn "cleanup could not restart edge $node"; result=1; }
+    healthy=0
+    for i in $(seq 1 90); do
+      if curl -sS --max-time 1 -o /dev/null "http://127.0.0.1:$(node_port "$node")/api/status" 2>/dev/null; then
+        healthy=1
+        break
+      fi
+      sleep 1
+    done
+    [ "$healthy" -eq 1 ] || { warn "cleanup could not health-check edge $node"; result=1; }
+  done
+  exit "$result"
 }
 
 restart_core_after_restore() {
@@ -191,7 +214,9 @@ configure_core_legacy_host_custody() {
   [ -f "$LEGACY_CORE_CFG" ] || fail "core config $LEGACY_CORE_CFG missing — bring up the devnet first"
   LEGACY_CORE_CFG_BAK="$(mktemp "${TMPDIR:-/tmp}/rfc38-unclean-core-cfg-XXXXXX")"
   cp "$LEGACY_CORE_CFG" "$LEGACY_CORE_CFG_BAK"
-  trap restore_core_host_custody_config EXIT INT TERM
+  trap restore_unclean_devnet EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   node -e '
     const fs = require("fs");
     const file = process.argv[1];
@@ -271,7 +296,7 @@ log "CG:      $CG_ID"
 log "Stress:  $WRITES_COUNT writes × ${WRITE_PAYLOAD_BYTES} bytes"
 
 # ===========================================================================
-act "1. Curator + M1 pre-create CG, core host-mode subscribes"
+act "1. Curator creates the CG, M1 joins, core host-mode subscribes"
 # ===========================================================================
 ALLOWED='["'"$CURATOR_AGENT"'", "'"$M1_AGENT"'"]'
 
@@ -286,11 +311,8 @@ ON_CHAIN_ID=$(parse_json "$CREATE_CUR" '.onChainId')
 [ -n "$ON_CHAIN_ID" ] || fail "create+register failed: $CREATE_CUR"
 log "✓ curated CG onChainId=$ON_CHAIN_ID"
 
-api_call "$M1_NODE" POST /api/context-graph/create "$(cat <<EOF
-{ "id": "$CG_ID", "name": "unclean ${STAMP} (M1)",
-  "accessPolicy": 1, "publishPolicy": 0, "allowedAgents": $ALLOWED }
-EOF
-)" >/dev/null || true
+devnet_join_curated_member "$M1_NODE" "$CURATOR_NODE" "$CG_ID" "$M1_AGENT" \
+  || fail "M1 did not connect, join and subscribe to the curator's CG"
 
 api_call "$CORE_NODE" POST /api/shared-memory/host-mode/subscribe "$(cat <<EOF
 { "contextGraphId": "$CG_ID" }

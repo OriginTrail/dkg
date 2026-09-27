@@ -226,13 +226,37 @@ CFG="$(node_dir "$BASELINE_CORE")/config.json"
 # suite (and leave the devnet mutated after a passing run).
 CFG_BAK="$(mktemp "${TMPDIR:-/tmp}/rfc49-cfg-XXXXXX")"
 cp "$CFG" "$CFG_BAK"
-restore_baseline_core() {
-  [ -f "$CFG_BAK" ] || return 0
-  cp "$CFG_BAK" "$CFG" 2>/dev/null || true
-  "$SCRIPT_DIR/devnet.sh" restart-node "$BASELINE_CORE" >/dev/null 2>&1 || true
-  rm -f "$CFG_BAK"
+MEMBER_NEEDS_RESTORE=0
+wait_member_up() {
+  local i
+  for i in $(seq 1 90); do
+    if curl -sS --max-time 1 -o /dev/null "http://127.0.0.1:$(node_port "$EDGE_MEMBER")/api/status" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
-trap restore_baseline_core EXIT INT TERM
+cleanup_devnet() {
+  local result=$?
+  trap - EXIT INT TERM
+  if [ "$MEMBER_NEEDS_RESTORE" -eq 1 ]; then
+    "$SCRIPT_DIR/devnet.sh" restart-node "$EDGE_MEMBER" >/dev/null 2>&1 \
+      || { warn "cleanup could not restart member edge$EDGE_MEMBER"; result=1; }
+    wait_member_up || { warn "cleanup could not health-check member edge$EDGE_MEMBER"; result=1; }
+  fi
+  if [ -f "$CFG_BAK" ]; then
+    cp "$CFG_BAK" "$CFG" 2>/dev/null \
+      || { warn "cleanup could not restore baseline core $BASELINE_CORE config"; result=1; }
+    "$SCRIPT_DIR/devnet.sh" restart-node "$BASELINE_CORE" >/dev/null 2>&1 \
+      || { warn "cleanup could not restart baseline core $BASELINE_CORE"; result=1; }
+    rm -f "$CFG_BAK"
+  fi
+  exit "$result"
+}
+trap cleanup_devnet EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 node -e '
 const fs=require("fs");const f=process.argv[1];const c=JSON.parse(fs.readFileSync(f,"utf8"));
 c.swmHostMode=Object.assign({},c.swmHostMode,{enabled:true,stripCiphertext:false});
@@ -299,15 +323,34 @@ JOIN_BODY=$(SIGNED_JOIN="$SIGNED_JOIN" CURATOR_PEER="$CURATOR_PEER" node -e '
 JOIN_RESP=""
 for attempt in 1 2 3 4; do
   JOIN_RESP=$(api_call_agent "$EDGE_MEMBER" POST "/api/context-graph/${CG_ENC}/request-join" "$JOIN_BODY")
-  [ "$(printf '%s' "$JOIN_RESP" | jq_field ".delivered")" = "1" ] && break
-  log "  member join request not delivered yet (attempt $attempt): ${JOIN_RESP:0:200}"
+  JOIN_STATUS=$(printf '%s' "$JOIN_RESP" | jq_field ".status")
+  JOIN_DELIVERED=$(printf '%s' "$JOIN_RESP" | jq_field ".delivered")
+  if { [ "$JOIN_DELIVERED" = "1" ] || [ "$JOIN_DELIVERED" = "local" ]; } \
+    && { [ "$JOIN_STATUS" = "approved" ] || [ "$JOIN_STATUS" = "already-member" ]; }; then
+    break
+  fi
+  log "  member join not approved yet (attempt $attempt): ${JOIN_RESP:0:200}"
   sleep 20
 done
-[ "$(printf '%s' "$JOIN_RESP" | jq_field ".delivered")" = "1" ] \
-  || fail "member edge$EDGE_MEMBER's join request never reached the curator: $JOIN_RESP"
+[ "$JOIN_STATUS" = "approved" ] || [ "$JOIN_STATUS" = "already-member" ] \
+  || fail "member edge$EDGE_MEMBER's join was not approved: $JOIN_RESP"
+{ [ "$JOIN_DELIVERED" = "1" ] || [ "$JOIN_DELIVERED" = "local" ]; } \
+  || fail "member edge$EDGE_MEMBER's approved join was not delivered: $JOIN_RESP"
 log "member edge$EDGE_MEMBER join request: $JOIN_RESP"
-sleep 4
-api_call_agent "$EDGE_MEMBER" POST /api/subscribe "{\"contextGraphId\":\"${CG_ID}\",\"includeSharedMemory\":true}" >/dev/null 2>&1
+# Wait for the approval notification to install the curator's own _meta on
+# the member. Delivery of the request alone is not proof of local membership.
+MEMBER_META_COUNT=0
+for i in $(seq 1 60); do
+  MEMBER_META_COUNT=$(store_count "$EDGE_MEMBER" "SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${CG_URI}/_meta> { <${CG_URI}> <https://dkg.network/ontology#allowedAgent> ?agent . FILTER(LCASE(STR(?agent)) = LCASE(\"${MEMBER_AGENT}\")) } }" 2>/dev/null) || MEMBER_META_COUNT=0
+  [ "$MEMBER_META_COUNT" -ge 1 ] && break
+  sleep 2
+done
+[ "$MEMBER_META_COUNT" -ge 1 ] \
+  || fail "member edge$EDGE_MEMBER did not receive approved _meta for ${CG_ID}"
+SUBSCRIBE_RESP=$(api_call_agent "$EDGE_MEMBER" POST /api/subscribe "{\"contextGraphId\":\"${CG_ID}\",\"includeSharedMemory\":true}") \
+  || fail "member edge$EDGE_MEMBER's subscribe request failed"
+[ "$(printf '%s' "$SUBSCRIBE_RESP" | jq_field ".subscribed")" = "$CG_ID" ] \
+  || fail "member edge$EDGE_MEMBER's subscribe was not accepted: $SUBSCRIBE_RESP"
 log "member edge$EDGE_MEMBER subscribed to ${CG_ID}"
 # Give the strip-OFF baseline core time to host-mode-discover the new curated CG
 # (via the create beacon) and subscribe to its SWM topic BEFORE the publish
@@ -639,7 +682,21 @@ wait_member_vm "UPDATED" "online during the update" \
 pass "member edge$EDGE_MEMBER's Verifiable Memory holds the UPDATED private payload (online during the update)"
 
 log "stopping member edge$EDGE_MEMBER, then a second update while it is offline…"
-"$REPO_ROOT/scripts/devnet.sh" stop-node "$EDGE_MEMBER" >/dev/null 2>&1 || warn "stop-node $EDGE_MEMBER returned non-zero"
+MEMBER_NEEDS_RESTORE=1
+"$REPO_ROOT/scripts/devnet.sh" stop-node "$EDGE_MEMBER" >/dev/null 2>&1 \
+  || fail "stop-node $EDGE_MEMBER returned non-zero"
+MEMBER_DOWN=0
+for i in $(seq 1 30); do
+  if curl -sS --max-time 1 -o /dev/null "http://127.0.0.1:$(node_port "$EDGE_MEMBER")/api/status" 2>/dev/null; then
+    MEMBER_DOWN=0
+  else
+    MEMBER_DOWN=$((MEMBER_DOWN + 1))
+    [ "$MEMBER_DOWN" -ge 2 ] && break
+  fi
+  sleep 1
+done
+[ "$MEMBER_DOWN" -ge 2 ] \
+  || fail "member edge$EDGE_MEMBER remained reachable after stop-node"
 UPD2_QUADS=$(STAMP="$STAMP" PRIV_SUBJ="$PRIV_SUBJ" node -e '
 const stamp=process.env.STAMP, subj=process.env.PRIV_SUBJ;
 console.log(JSON.stringify([
@@ -655,8 +712,10 @@ log "second POST /api/update: $UPD2_RESP"
 [ "$(printf '%s' "$UPD2_RESP" | jq_field ".status")" = "confirmed" ] \
   || fail "second curated update did not confirm: $UPD2_RESP"
 log "starting member edge$EDGE_MEMBER again…"
-"$REPO_ROOT/scripts/devnet.sh" restart-node "$EDGE_MEMBER" >/dev/null 2>&1 || true
-for _ in $(seq 1 90); do curl -sf --max-time 1 -o /dev/null "http://127.0.0.1:$(node_port "$EDGE_MEMBER")/api/status" 2>/dev/null && break; sleep 1; done
+"$REPO_ROOT/scripts/devnet.sh" restart-node "$EDGE_MEMBER" >/dev/null 2>&1 \
+  || fail "restart-node $EDGE_MEMBER returned non-zero"
+wait_member_up || fail "member edge$EDGE_MEMBER did not become healthy after restart"
+MEMBER_NEEDS_RESTORE=0
 # A restarted edge reconnects to the cores but does not find its curator edge
 # again on its own (#2865); dial it, as a member holding the curator's address
 # would.

@@ -12,7 +12,7 @@
 # Test plan:
 #
 #   1. Curator (N5) creates curated CG with allowlist
-#      [curator, M1=N6, M2=N4]. All three pre-create the CG.
+#      [curator, M1=N6, M2=N4]. Both members join through the curator.
 #   2. Curator writes 3 triples. Catchup on both members confirms
 #      they can decrypt the pre-revocation batch.
 #   3. Curator calls /api/context-graph/{id}/remove-participant for M2.
@@ -72,6 +72,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=devnet-publish-helpers.sh
 source "$SCRIPT_DIR/devnet-publish-helpers.sh"
+# shellcheck source=devnet-curated-join-helpers.sh
+source "$SCRIPT_DIR/devnet-curated-join-helpers.sh"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE=9201
 CURATOR_NODE=5
@@ -86,6 +88,28 @@ act()  { echo ""; echo "[rev] === $1 ==="; }
 node_dir()   { echo "$DEVNET_DIR/node$1"; }
 node_token() { tail -1 "$(node_dir "$1")/auth.token" 2>/dev/null | tr -d '\r\n'; }
 node_port()  { echo $((API_PORT_BASE + $1 - 1)); }
+
+restore_edges() {
+  local result=$? node i healthy
+  trap - EXIT
+  for node in "$CURATOR_NODE" "$M1_NODE"; do
+    "$SCRIPT_DIR/devnet.sh" restart-node "$node" >/dev/null 2>&1 \
+      || { warn "cleanup could not restart edge $node"; result=1; }
+    healthy=0
+    for i in $(seq 1 90); do
+      if curl -sS --max-time 1 -o /dev/null "http://127.0.0.1:$(node_port "$node")/api/status" 2>/dev/null; then
+        healthy=1
+        break
+      fi
+      sleep 1
+    done
+    [ "$healthy" -eq 1 ] || { warn "cleanup could not health-check edge $node"; result=1; }
+  done
+  exit "$result"
+}
+trap restore_edges EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 api_call() {
   local node="$1" method="$2" path="$3" data="${4:-}"
@@ -120,7 +144,7 @@ log "M2:       $M2_AGENT (node $M2_NODE) [will be revoked]"
 log "CG:       $CG_ID"
 
 # ===========================================================================
-act "1. All three parties pre-create the CG with [curator, M1, M2] allowlist"
+act "1. Curator creates the CG; M1 and M2 join through the signed approval flow"
 # ===========================================================================
 ALLOWED='["'"$CURATOR_AGENT"'", "'"$M1_AGENT"'", "'"$M2_AGENT"'"]'
 
@@ -135,28 +159,10 @@ ON_CHAIN_ID=$(parse_json "$CREATE_CUR" '.onChainId')
 [ -n "$ON_CHAIN_ID" ] || fail "create+register failed: $CREATE_CUR"
 log "✓ curated CG onChainId=$ON_CHAIN_ID"
 
-# Codex PR #621 follow-up: don't swallow EVERY error with `|| true`.
-# Capture the response and tolerate only the idempotent "already
-# exists" signal — a real failure (wrong auth, malformed body, etc.)
-# now aborts the script instead of surfacing later as an opaque
-# catchup timeout with the actual setup error lost.
-member_pre_create() {
-  local node="$1" tag="$2"
-  local resp
-  resp=$(api_call "$node" POST /api/context-graph/create "$(cat <<EOF
-{ "id": "$CG_ID", "name": "revocation ${STAMP} ($tag)",
-  "accessPolicy": 1, "publishPolicy": 0, "allowedAgents": $ALLOWED }
-EOF
-)") || true
-  case "$resp" in
-    *'"created"'*|*'"uri"'*) log "✓ $tag pre-created CG locally" ;;
-    *'already'*|*'duplicate'*|*'exists'*) log "✓ $tag CG already locally known (idempotent)" ;;
-    '') fail "$tag pre-create returned empty response — daemon unreachable?" ;;
-    *) fail "$tag pre-create FAILED with non-idempotent error: $resp" ;;
-  esac
-}
-member_pre_create "$M1_NODE" "M1"
-member_pre_create "$M2_NODE" "M2"
+devnet_join_curated_member "$M1_NODE" "$CURATOR_NODE" "$CG_ID" "$M1_AGENT" \
+  || fail "M1 did not connect, join and subscribe to the curator's CG"
+devnet_join_curated_member "$M2_NODE" "$CURATOR_NODE" "$CG_ID" "$M2_AGENT" \
+  || fail "M2 did not connect, join and subscribe to the curator's CG"
 sleep 3
 
 # ===========================================================================

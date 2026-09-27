@@ -395,4 +395,49 @@ NODE
       await rm(tempDir, { recursive: true, force: true });
     }
   });
+  it('retries a temporarily unavailable share prerequisite with the same asset name', async () => {
+    const repoRoot = resolve(process.cwd(), '../..');
+    const script = String.raw`
+set -euo pipefail
+DEVNET_DIR="$(mktemp -d)"
+trap 'rm -rf "$DEVNET_DIR"' EXIT
+CALLS_FILE="$DEVNET_DIR/calls.jsonl"
+export DEVNET_DIR CALLS_FILE
+
+api_call() {
+  local node_id="$1" method="$2" path="$3" data="$4"
+  CALL_DATA="$data" node -e '
+    const fs=require("fs"); const body=JSON.parse(process.env.CALL_DATA);
+    fs.appendFileSync(process.env.CALLS_FILE, JSON.stringify({name:body.name})+"\n");
+    const count=fs.readFileSync(process.env.CALLS_FILE,"utf8").trim().split("\n").length;
+    if (count===1) console.log(JSON.stringify({created:true,status:"wm-sealed",errors:[
+      {phase:"swm-share",error:"[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable"}
+    ]}));
+    else console.log(JSON.stringify({status:"swm-shared",swmShared:true,publishReady:true,
+      shareOperationId:"share-"+body.name,promotedCount:1}));
+  '
+}
+
+source scripts/devnet-publish-helpers.sh
+payload='{"contextGraphId":"cg-retry","quads":[{"subject":"urn:retry:1","predicate":"http://schema.org/name","object":"\"retry\""}]}'
+response="$(devnet_create_shared_ka node-a "$payload" retry)"
+CREATE_RESPONSE="$response" node -e '
+  const fs=require("fs"); const calls=fs.readFileSync(process.env.CALLS_FILE,"utf8").trim().split("\n").map(JSON.parse);
+  if (calls.length!==2 || calls[0].name!==calls[1].name) throw new Error("retry changed the asset name");
+  if (JSON.parse(process.env.CREATE_RESPONSE).triplesWritten!==1) throw new Error("retry did not share");
+'
+`;
+    const tempDir = await mkdtemp(join(tmpdir(), 'dkg-devnet-helper-retry-smoke-'));
+    const scriptPath = join(tempDir, 'smoke-retry.sh');
+    try {
+      await writeFile(scriptPath, script.replace(/\r\n/g, '\n'), 'utf8');
+      await execFileAsync('bash', [toWslPath(scriptPath)], {
+        cwd: repoRoot,
+        timeout: 30_000,
+        maxBuffer: 1024 * 1024,
+      });
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });
