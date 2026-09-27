@@ -500,8 +500,8 @@ describe('VM refresh in the reconcile pass (#2858)', () => {
     expect(fetches.calls).toHaveLength(1);
   });
 
-  it('settles an event older than the local copy without a fetch and without rolling back', async () => {
-    const { internals, kas, updateOnChain, fetches } = await bootMember();
+  it('settles an event older than the local copy with one root read, no fetch and no rollback', async () => {
+    const { internals, kas, updateOnChain, fetches, rootReads, snapshotReads } = await bootMember();
     const ual = kas[0]!.ual;
     const rootA = await localRootHex(internals.store, ual);
     const rootB = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
@@ -512,6 +512,9 @@ describe('VM refresh in the reconcile pass (#2858)', () => {
     expect(queued).toHaveLength(1);
     await internals.runVmRefreshesForCg(CG, CG, () => true);
 
+    // The chain's current root settles it: no version evidence, no peer.
+    expect(rootReads.calls).toHaveLength(1);
+    expect(snapshotReads.calls).toEqual([]);
     expect(fetches.calls).toEqual([]);
     expect(await localRootHex(internals.store, ual)).toBe(ethers.hexlify(rootB));
     expect(await localVersion(internals.store, ual)).toBe('2');
@@ -617,7 +620,7 @@ describe('VM refresh in the reconcile pass (#2858)', () => {
   });
 
   it('follows an A -> B -> A history and ends on A, ignoring the late B event', async () => {
-    const { internals, kas, updateOnChain, fetches } = await bootMember();
+    const { internals, kas, updateOnChain, fetches, snapshotReads } = await bootMember();
     const ual = kas[0]!.ual;
     const kaId = kas[0]!.kaId;
     const rootA = await localRootHex(internals.store, ual);
@@ -636,11 +639,13 @@ describe('VM refresh in the reconcile pass (#2858)', () => {
     expect(fetches.calls).toHaveLength(2);
 
     // The B event replayed late (a lane re-scan) moves nothing.
+    const snapshotReadsBefore = snapshotReads.calls.length;
     await internals.handleKAUpdatedNudge(kaId, rootB, ctx);
     await internals.runVmRefreshesForCg(CG, CG, () => true);
     expect(await localRootHex(internals.store, ual)).toBe(rootA);
     expect(await localVersion(internals.store, ual)).toBe('3');
     expect(fetches.calls).toHaveLength(2);
+    expect(snapshotReads.calls).toHaveLength(snapshotReadsBefore);
     expect(internals.vmRefreshQueue.size).toBe(0);
   });
 
