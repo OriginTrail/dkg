@@ -402,10 +402,13 @@ catalog is configured:
 `requestedContextGraphs` is the agent's live explicit scheduling scope. Entries
 are not classified as public merely by appearing there: the public-CG catch-up
 boundary applies selected scheduling, while the private-CG boundary ignores it
-and retains curator recovery. `/api/status` needs no token, so only a request
-with the node-operator token (or any request when API auth is off) gets the
-whole scope; any other request gets only the entries that are also in
-`catalogBackedContextGraphs`.
+and retains curator recovery. Each shared-memory request of a public-CG
+catch-up job checks, when it starts, that an accepted RFC-64 public policy
+admits the selected lane for that CG; if none does, that request is recorded
+as not attempted rather than as a peer failure. `/api/status` needs no token,
+so only a request with the node-operator token (or any request when API auth
+is off) gets the whole scope; any other request gets only the entries that are
+also in `catalogBackedContextGraphs`.
 `requestedContextGraphCount` is the size of the whole scope either way.
 
 ### Repair an existing public graph
