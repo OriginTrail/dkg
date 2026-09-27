@@ -537,10 +537,30 @@ describe('refreshMetaFromCurator', () => {
       return acceptance;
     }
 
+    function privateSnapshotWithMember(): Quad[] {
+      return [
+        ...authoritativePrivateMetaQuads(contextGraphId),
+        // The proof pins no operational key, so the peer binding decides.
+        ...activeMemberMetaQuads(
+          contextGraphId,
+          memberAddress,
+          'local-peer',
+          '0x00000000000000000000000000000000000000d1',
+          Date.now(),
+        ),
+      ];
+    }
+
     async function refreshAfterApproval(
       snapshot: Quad[],
       member: 'public' | 'unproven' | 'legacy-member-proof' | ApprovedMemberAcceptance,
-      duringFetch: () => void = () => undefined,
+      hooks: {
+        duringFetch?: () => void;
+        /** Sees each write of the staged replacement, in order. */
+        onStoreWrite?: (operation: 'insert' | 'update' | 'dropGraph') => void;
+        /** A real store takes the per-subject replacement path instead. */
+        store?: OxigraphStore;
+      } = {},
     ): Promise<{ refreshed: boolean; mutated: boolean }> {
       const proof = memberProof;
       const approvedMember = typeof member !== 'string'
@@ -560,7 +580,7 @@ describe('refreshMetaFromCurator', () => {
         },
         discovery: {},
         fetchSyncPages: async () => {
-          duringFetch();
+          hooks.duringFetch?.();
           return {
             quads: snapshot,
             checkpointKey: 'public-join-snapshot',
@@ -568,10 +588,10 @@ describe('refreshMetaFromCurator', () => {
             completed: true,
           };
         },
-        store: {
-          insert: async () => { mutated = true; },
-          update: async () => { mutated = true; },
-          dropGraph: async () => { mutated = true; },
+        store: hooks.store ?? {
+          insert: async () => { mutated = true; hooks.onStoreWrite?.('insert'); },
+          update: async () => { mutated = true; hooks.onStoreWrite?.('update'); },
+          dropGraph: async () => { mutated = true; hooks.onStoreWrite?.('dropGraph'); },
         },
         oversizeTombstoneLog: { record: noop },
         invalidateListContextGraphsCache: noop,
@@ -617,21 +637,10 @@ describe('refreshMetaFromCurator', () => {
     it('never installs a private definition under a public acceptance', async () => {
       // The admitted definition must agree with the authority SWM transport
       // uses, or the member would store private and refuse plaintext shares.
-      const privateSnapshotWithMember = [
-        ...authoritativePrivateMetaQuads(contextGraphId),
-        // The proof pins no operational key, so the peer binding decides.
-        ...activeMemberMetaQuads(
-          contextGraphId,
-          memberAddress,
-          'local-peer',
-          '0x00000000000000000000000000000000000000d1',
-          Date.now(),
-        ),
-      ];
-      const underPublic = await refreshAfterApproval(privateSnapshotWithMember, 'public');
+      const underPublic = await refreshAfterApproval(privateSnapshotWithMember(), 'public');
       expect(underPublic).toEqual({ refreshed: false, mutated: false });
       // The same snapshot is exactly what an unproven acceptance admits.
-      const underUnproven = await refreshAfterApproval(privateSnapshotWithMember, 'unproven');
+      const underUnproven = await refreshAfterApproval(privateSnapshotWithMember(), 'unproven');
       expect(underUnproven).toEqual({ refreshed: true, mutated: true });
     });
 
@@ -642,9 +651,81 @@ describe('refreshMetaFromCurator', () => {
         publicSnapshotWithMember({ includeMember: true }),
         acceptance,
         // The name is registered private while the curator fetch is in flight.
-        () => { publicNow = false; },
+        { duringFetch: () => { publicNow = false; } },
       );
       expect(result).toEqual({ refreshed: false, mutated: false });
+    });
+
+    it('does not activate a staged public snapshot once the public authority stops holding', async () => {
+      let publicNow = true;
+      const acceptance = await publicAcceptance(() => publicNow);
+      const writes: string[] = [];
+      const result = await refreshAfterApproval(
+        publicSnapshotWithMember({ includeMember: true }),
+        acceptance,
+        {
+          onStoreWrite: (operation) => {
+            writes.push(operation);
+            // Registered private after the snapshot was validated.
+            if (operation === 'insert') publicNow = false;
+          },
+        },
+      );
+      expect(result.refreshed).toBe(false);
+      // Staged and dropped again: the activating update never ran.
+      expect(writes).toEqual(['insert', 'dropGraph']);
+    });
+
+    it('does not activate a staged private snapshot once the graph turns public', async () => {
+      let publicNow = false;
+      const unproven = await resolveApprovedMemberAcceptanceDecision(
+        memberProof,
+        async () => (publicNow
+          ? { kind: 'plaintext' as const }
+          : { kind: 'private-roster' as const, participantAgents: [memberAddress] }),
+      );
+      expect(unproven.accessPolicy).toBe('unproven');
+      const writes: string[] = [];
+      const result = await refreshAfterApproval(privateSnapshotWithMember(), unproven, {
+        onStoreWrite: (operation) => {
+          writes.push(operation);
+          if (operation === 'insert') publicNow = true;
+        },
+      });
+      expect(result.refreshed).toBe(false);
+      expect(writes).toEqual(['insert', 'dropGraph']);
+    });
+
+    it('does not replace the root subject once the public authority stops holding during the replacement', async () => {
+      const store = new OxigraphStore();
+      try {
+        const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+        const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+        let publicNow = true;
+        const acceptance = await publicAcceptance(() => publicNow);
+        const replacedSubjects: string[] = [];
+        const replaceSubject = store.replaceSubject.bind(store);
+        store.replaceSubject = async (graph, subject, quads, options) => {
+          replacedSubjects.push(subject);
+          const replaced = await replaceSubject(graph, subject, quads, options);
+          // Registered private once the member's delegation proof has landed.
+          if (subject !== contextGraphUri) publicNow = false;
+          return replaced;
+        };
+        const result = await refreshAfterApproval(
+          publicSnapshotWithMember({ includeMember: true }),
+          acceptance,
+          { store },
+        );
+        expect(result.refreshed).toBe(false);
+        expect(replacedSubjects).toEqual([`did:dkg:agent-delegation:${contextGraphId}:${memberAddress}`]);
+        // The root subject is the activation boundary; it was never written.
+        await expect(store.query(
+          `ASK { GRAPH <${metaGraph}> { <${contextGraphUri}> ?p ?o } }`,
+        )).resolves.toEqual({ type: 'boolean', value: false });
+      } finally {
+        await store.close();
+      }
     });
 
     it('does not install a private snapshot once the graph turns public during the fetch', async () => {
@@ -656,19 +737,11 @@ describe('refreshMetaFromCurator', () => {
           : { kind: 'unavailable' as const, reason: 'chain-access-policy-timeout' as const }),
       );
       expect(unproven.accessPolicy).toBe('unproven');
-      const privateSnapshotWithMember = [
-        ...authoritativePrivateMetaQuads(contextGraphId),
-        ...activeMemberMetaQuads(
-          contextGraphId,
-          memberAddress,
-          'local-peer',
-          '0x00000000000000000000000000000000000000d1',
-          Date.now(),
-        ),
-      ];
       // The authority read timed out at first, then resolves registered public
       // while the curator fetch is in flight.
-      const result = await refreshAfterApproval(privateSnapshotWithMember, unproven, () => { publicNow = true; });
+      const result = await refreshAfterApproval(privateSnapshotWithMember(), unproven, {
+        duringFetch: () => { publicNow = true; },
+      });
       expect(result).toEqual({ refreshed: false, mutated: false });
     });
 
