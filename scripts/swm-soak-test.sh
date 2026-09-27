@@ -246,7 +246,7 @@ fi
 # depending on backend. Constrain to a portable identifier shape
 # now rather than spend hours debugging missing peers in the
 # tally after the fact.
-if ! printf '%s' "$SENDER_TAG" | grep -Eq '^[A-Za-z0-9_-]{1,32}$'; then
+if ! grep -Eq '^[A-Za-z0-9_-]{1,32}$' <<<"$SENDER_TAG"; then
   echo "ERROR: SENDER_TAG must match ^[A-Za-z0-9_-]{1,32}$ (got: '${SENDER_TAG}')." >&2
   echo "       The tag is interpolated into subject URIs of the form" >&2
   echo "         urn:swm-soak:<TAG>:<seq>" >&2

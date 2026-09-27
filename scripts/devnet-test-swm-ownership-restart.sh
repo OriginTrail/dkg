@@ -346,7 +346,7 @@ wait_for_swm_value() {
   local node="$1" root="$2" expected_value="$3" values
   for _ in $(seq 1 90); do
     values="$(swm_values_on_node "$node" "$root" 2>/dev/null || true)"
-    if printf '%s\n' "$values" | grep -Fxq "$expected_value"; then
+    if grep -Fxq "$expected_value" <<<"$values"; then
       return 0
     fi
     sleep 1
@@ -414,9 +414,9 @@ ASSERTION_CT=$(quads_count "$ASSERTION_QUERY")
 [ "$ASSERTION_CT" = "1" ] || fail "attacker WM assertion should still have 1 quad after failed promote, got '$ASSERTION_CT': $ASSERTION_QUERY"
 
 VALUES_AFTER="$(swm_values_on_node "$ATTACKER_NODE" "$ROOT")"
-printf '%s\n' "$VALUES_AFTER" | grep -Fxq "$OWNER_VALUE" \
+grep -Fxq "$OWNER_VALUE" <<<"$VALUES_AFTER" \
   || fail "owner SWM value missing after failed promote; values='$VALUES_AFTER'"
-if printf '%s\n' "$VALUES_AFTER" | grep -Fxq "$ATTACKER_VALUE"; then
+if grep -Fxq "$ATTACKER_VALUE" <<<"$VALUES_AFTER"; then
   fail "attacker value leaked into SWM after failed promote; values='$VALUES_AFTER'"
 fi
 

@@ -295,7 +295,7 @@ pass "on-chain catalog commitment set (root non-zero, leafCount=$CAT_COUNT)"
 # 5. Non-vacuousness: the publisher DID emit private ciphertext chunks
 # ---------------------------------------------------------------------------
 EDGE_NEW=$(tail -n "+$((EDGE_LOG_BASE + 1))" "$(node_log "$EDGE_CURATOR")" 2>/dev/null)
-if printf '%s' "$EDGE_NEW" | grep -qE 'LU-11.*emitted [1-9].*ciphertext chunk|emitted [1-9][0-9]* ciphertext chunk'; then
+if grep -qE 'LU-11.*emitted [1-9].*ciphertext chunk|emitted [1-9][0-9]* ciphertext chunk' <<<"$EDGE_NEW"; then
   CHUNKS=$(printf '%s' "$EDGE_NEW" | grep -oE 'emitted [0-9]+ ciphertext chunk' | grep -oE '[0-9]+' | head -1)
   pass "publisher emitted $CHUNKS private ciphertext chunk(s) — ciphertext genuinely exists"
 else
