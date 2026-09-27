@@ -591,7 +591,7 @@ export interface PeerDiagnostics {
   health: PeerHealth | null;
   /** Protocols this peer's identify-handshake advertised. */
   protocols: string[];
-  /** Convenience flag — peer speaks `PROTOCOL_SYNC`. */
+  /** Convenience flag — peer speaks `PROTOCOL_SYNC` (legacy or pooled id). */
   syncCapable: boolean;
   /**
    * Raw sync catch-up health. Sync no longer lives on the messenger

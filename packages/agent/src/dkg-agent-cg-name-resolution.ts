@@ -21,6 +21,7 @@
 import {
   DKG_ONTOLOGY,
   PROTOCOL_SYNC,
+  PROTOCOL_SYNC_POOLED,
   SYSTEM_CONTEXT_GRAPHS,
   contextGraphDataGraphUri,
   createOperationContext,
@@ -818,14 +819,15 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     return peers.sort((a, b) => (Number(isCore(b)) - Number(isCore(a))) || (a < b ? -1 : a > b ? 1 : 0));
   }
 
-  /** From the identify record: true/false, or undefined while identify is pending. */
-  async peerAdvertisesProtocol(this: DKGAgent, peerId: string, protocol: string): Promise<boolean | undefined> {
+  /** From the identify record: true/false (any id of a list), or undefined while identify is pending. */
+  async peerAdvertisesProtocol(this: DKGAgent, peerId: string, protocol: string | readonly string[]): Promise<boolean | undefined> {
     try {
       const { peerIdFromString } = await import('@libp2p/peer-id');
       const peer = await this.node.libp2p.peerStore.get(peerIdFromString(peerId));
       const protocols = peer.protocols ?? [];
       if (protocols.length === 0) return undefined;
-      return protocols.includes(protocol);
+      const wanted = typeof protocol === 'string' ? [protocol] : protocol;
+      return wanted.some((id) => protocols.includes(id));
     } catch {
       return undefined;
     }
@@ -880,8 +882,9 @@ export class ContextGraphNameResolutionMethods extends DKGAgentBase {
     signal: AbortSignal,
   ): Promise<ReadonlyMap<string, string> | null> {
     const ctx = createOperationContext('sync');
-    // Local identify record first; admission may probe the network.
-    if ((await this.peerAdvertisesProtocol(peerId, PROTOCOL_SYNC)) !== true) return null;
+    // Local identify record first; admission may probe the network. Either
+    // sync id proves support (#2822; see `advertisesSyncProtocol`).
+    if ((await this.peerAdvertisesProtocol(peerId, [PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED])) !== true) return null;
     if (!(await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'Context Graph name ontology peer', signal))) {
       return null;
     }

@@ -8,6 +8,9 @@ import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   DKG_ONTOLOGY,
+  PROTOCOL_NETWORK_IDENTITY,
+  PROTOCOL_SYNC,
+  PROTOCOL_SYNC_POOLED,
   SYSTEM_CONTEXT_GRAPHS,
   contextGraphDataGraphUri,
   createOperationContext,
@@ -985,6 +988,20 @@ describe('resolver dependencies on the agent', () => {
     await expect(internals.peerAdvertisesProtocol(PEER, PROTOCOL_CONTEXT_GRAPH_NAME)).resolves.toBeUndefined();
     records.delete(PEER);
     await expect(internals.peerAdvertisesProtocol(PEER, PROTOCOL_CONTEXT_GRAPH_NAME)).resolves.toBeUndefined();
+  });
+
+  it('pulls the ontology from a peer whose identify lists only the pooled sync id (#2822)', async () => {
+    const internals = await boot();
+    internals.node.libp2p.peerStore = {
+      get: async () => ({ protocols: [PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC_POOLED] }),
+    };
+    await expect(internals.peerAdvertisesProtocol(PEER, PROTOCOL_SYNC)).resolves.toBe(false);
+    await expect(internals.peerAdvertisesProtocol(PEER, [PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED])).resolves.toBe(true);
+    internals.ensurePeerAdmittedForRecovery = async () => true;
+    const fetch = vi.fn(async () => ({ quads: [], completed: true }));
+    internals.fetchSyncPages = fetch;
+    await expect(internals.pullPeerOntologyForContextGraphNames(PEER, [NAME_HASH], live())).resolves.toEqual(new Map());
+    expect(fetch).toHaveBeenCalledOnce();
   });
 
   it('never pulls the ontology of a peer that network admission refuses', async () => {

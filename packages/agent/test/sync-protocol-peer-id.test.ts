@@ -16,7 +16,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { generateKeyPair } from '@libp2p/crypto/keys';
 import { peerIdFromPrivateKey, peerIdFromString } from '@libp2p/peer-id';
-import { DKGNode, PROTOCOL_SYNC, tripleContentV10 } from '@origintrail-official/dkg-core';
+import { DKGNode, PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, tripleContentV10 } from '@origintrail-official/dkg-core';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { toLibp2pPeerId } from '../src/p2p/peer-id.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
@@ -91,6 +91,20 @@ describe('waitForSyncProtocol on the real libp2p peer store', () => {
     await expect(waitForSyncProtocol(peerId, peerStore)).resolves.toBe(true);
     expect(peerStore.get).toHaveBeenCalledTimes(1);
     expect(peerId.equals(peerStore.get.mock.calls[0]?.[0] as never)).toBe(true);
+  });
+
+  it('accepts a peer the store lists with only the pooled sync id (#2822)', async () => {
+    // Stale identify: the peer's later pooled pulls merged only the pooled id.
+    const pooledOnly = peerIdFromPrivateKey(await generateKeyPair('Ed25519'));
+    await node.libp2p.peerStore.merge(pooledOnly, {
+      protocols: [PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC_POOLED],
+    });
+    const peerStore = spyOnRealPeerStore();
+
+    await expect(
+      waitForSyncProtocol({ toString: () => pooledOnly.toString() }, peerStore),
+    ).resolves.toBe(true);
+    expect(peerStore.get).toHaveBeenCalledTimes(1);
   });
 
   it('returns false without throwing or querying the store for a string that is not a peer ID', async () => {

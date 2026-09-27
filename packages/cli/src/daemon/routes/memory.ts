@@ -67,7 +67,7 @@ import {
   createSwmCatchupPeerSelector,
   loadOpWallets,
 } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, advertisesSyncProtocol } from '@origintrail-official/dkg-core';
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
 import {
   DashboardDB,
@@ -669,7 +669,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
       if (!check) {
         check = Promise.resolve()
           .then(() => agent.getPeerProtocols(peerId))
-          .then((protocols) => protocols.includes(PROTOCOL_SYNC))
+          .then((protocols) => advertisesSyncProtocol(protocols))
           .catch(() => undefined);
         protocolChecks.set(peerId, check);
       }

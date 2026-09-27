@@ -11,6 +11,7 @@
 // handler wiring, not Node's (documented) 'exit'-on-terminate behaviour.
 import { describe, expect, it, vi } from 'vitest';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC_POOLED } from '@origintrail-official/dkg-core';
 
 type Listener = (...args: unknown[]) => void;
 
@@ -563,5 +564,16 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(posted.result).toBeNull();
     expect(info).toHaveBeenCalledTimes(1);
     expect(info.mock.calls[0]?.[1]).toBe('Catch-up SWM pass 2: 2 -> 3');
+  });
+
+  it('reports a peer that advertises only the pooled sync id as sync-capable (#2822)', async () => {
+    const { agent } = bridgeAgent({
+      // Stale identify: the peer's later pooled pulls merged only the pooled id.
+      getPeerProtocols: async () => [PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC_POOLED],
+    });
+
+    const posted = await invokeThroughBridge(agent, 'waitForSyncProtocol', ['peer-pooled-only']);
+
+    expect(posted).toMatchObject({ type: 'invoke-result', invokeId: 1, result: true });
   });
 });
