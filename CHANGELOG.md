@@ -2,7 +2,7 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [10.0.20] - 2026-09-26
+## [10.0.20] - 2026-09-27
 
 A fast-follow to 10.0.19 that fixes both of its known issues: on-demand
 subscriptions that stopped syncing partway, and on-chain id claims in the
