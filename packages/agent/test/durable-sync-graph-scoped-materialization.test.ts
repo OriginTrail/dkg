@@ -1647,6 +1647,56 @@ describe('durable graph-scoped KA materialization', () => {
     expect(await values(store, 'publisherPeerId')).toEqual(['"publisher-peer"']);
   });
 
+  it('replaces an incoming allow-list peer with the trusted peer on finalized replay', async () => {
+    const store = new OxigraphStore();
+    const root = ethers.getBytes(`0x${String(1).padStart(64, '0')}`);
+    const trustedMetadata: Quad[] = [
+      ['accessPolicy', '"allowList"'],
+      ['allowedPeer', '"trusted-peer"'],
+      ['publisherPeerId', '"publisher-peer"'],
+    ].map(([predicate, object]) => ({
+      subject: ual,
+      predicate: `${DKG}${predicate}`,
+      object,
+      graph: metaGraph,
+    }));
+    await replaceLocallyTrustedKnowledgeAssetControls(
+      store,
+      ual,
+      [...metadata(1), ...trustedMetadata],
+    );
+    const finalized = [
+      ...finalizedMaterializationMetadata(1, root).map((quad) =>
+        quad.predicate === `${DKG}accessPolicy`
+          ? { ...quad, object: '"allowList"' }
+          : quad,
+      ),
+      {
+        subject: ual,
+        predicate: `${DKG}allowedPeer`,
+        object: '"attacker-peer"',
+        graph: metaGraph,
+      },
+    ];
+
+    await expect(materializeVerifiedGraphScopedAsset({
+      store,
+      asset: {
+        contextGraphId,
+        ual,
+        assertionVersion: 1n,
+        assertionGraph,
+        metaGraph,
+        dataQuads: [dataQuad(1)],
+        metadataQuads: finalized,
+      },
+    })).resolves.toBe('applied');
+
+    expect(await values(store, 'accessPolicy')).toEqual(['"allowList"']);
+    expect(await values(store, 'allowedPeer')).toEqual(['"trusted-peer"']);
+    expect(await values(store, 'publisherPeerId')).toEqual(['"publisher-peer"']);
+  });
+
   it('fails closed instead of falling back past a corrupt newer local-control entry', async () => {
     const store = new OxigraphStore();
     const trustedMetadata: Quad[] = [

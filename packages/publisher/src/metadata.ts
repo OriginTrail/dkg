@@ -811,6 +811,18 @@ export async function readLocallyTrustedKnowledgeAssetControls(
     .map((quad) => ({ ...quad, subject: ual, graph: metaGraph }));
 }
 
+/** Replace peer-provided control rows with the validated local sidecar values. */
+export function overlayLocallyTrustedKnowledgeAssetControls(
+  incomingMetadata: readonly Quad[],
+  locallyTrustedControls: readonly Quad[],
+): Quad[] {
+  if (locallyTrustedControls.length === 0) return [...incomingMetadata];
+  return [
+    ...incomingMetadata.filter((quad) => !LOCAL_TRUSTED_KA_CONTROL_PREDICATES.has(quad.predicate)),
+    ...locallyTrustedControls,
+  ];
+}
+
 /**
  * Read the local-only control sidecar through the publisher-owned RDF contract.
  * Consumers receive a typed envelope instead of duplicating predicate and

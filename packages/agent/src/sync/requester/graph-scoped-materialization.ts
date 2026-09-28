@@ -11,6 +11,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   mergeSameVersionGraphKnowledgeAssetMetadataV1,
+  overlayLocallyTrustedKnowledgeAssetControls,
   readGraphKnowledgeAssetConfirmationKindV1,
   readLocallyTrustedKnowledgeAssetControls,
   withMaterializationLock,
@@ -49,11 +50,6 @@ const STATUS = 'http://dkg.io/ontology/status';
 const TRANSACTION_HASH = 'http://dkg.io/ontology/transactionHash';
 const MATERIALIZED_VERSION = 'http://dkg.io/ontology/materializedVersion';
 const PUBLISHED_AT = 'http://dkg.io/ontology/publishedAt';
-const LOCAL_CONTROL_PREDICATES = new Set([
-  'http://dkg.io/ontology/accessPolicy',
-  'http://dkg.io/ontology/allowedPeer',
-  'http://dkg.io/ontology/publisherPeerId',
-]);
 const XSD_DATE_TIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 
 export interface VerifiedGraphScopedAsset {
@@ -470,15 +466,10 @@ export async function materializeVerifiedGraphScopedAsset(params: {
       replacementMetadata,
       options,
     );
-    // A local control sidecar is the authority for these three predicates.
-    // Appending it beside peer/finalized metadata can leave both `public` and
-    // `ownerOnly` policy rows for one KA, making the next update ambiguous.
-    const committedMetadata = locallyTrustedMetadata.length === 0
-      ? replacementMetadata
-      : [
-          ...replacementMetadata.filter((quad) => !LOCAL_CONTROL_PREDICATES.has(quad.predicate)),
-          ...locallyTrustedMetadata,
-        ];
+    const committedMetadata = overlayLocallyTrustedKnowledgeAssetControls(
+      replacementMetadata,
+      locallyTrustedMetadata,
+    );
     // This is the last interruptible boundary. Once the atomic replacement is
     // dispatched, its real completion owns the materialization lock and stop()
     // must drain it rather than detaching the writer.
