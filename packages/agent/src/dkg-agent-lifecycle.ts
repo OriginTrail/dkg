@@ -1309,6 +1309,7 @@ function durableSyncSingleFlightKey(params: {
   hasSignal: boolean;
   hasCurrentFence: boolean;
   hasChallengePinnedSelection: boolean;
+  hasForcedFreshExactSession: boolean;
   exactAssetUals?: readonly string[];
   settlementSliceTimeoutMs?: number;
   priority?: number;
@@ -1321,6 +1322,7 @@ function durableSyncSingleFlightKey(params: {
     || params.hasSignal
     || params.hasCurrentFence
     || params.hasChallengePinnedSelection
+    || params.hasForcedFreshExactSession
   ) {
     return null;
   }
@@ -5843,6 +5845,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasSignal: Boolean(operationBoundary.signal),
       hasCurrentFence: Boolean(options?.isCurrent),
       hasChallengePinnedSelection: exactAssetSelection?.kind === 'challenge-pinned',
+      hasForcedFreshExactSession: options?.forceFreshExactSession === true,
       exactAssetUals,
       settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
       priority: options?.priority,
