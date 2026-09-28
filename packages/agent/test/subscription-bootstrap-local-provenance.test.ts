@@ -40,6 +40,19 @@ describe('subscription bootstrap local provenance', () => {
     });
   });
 
+  it('preserves legacy admission of a freshly loaded durable subscription on restart', async () => {
+    const agent = admissionAgent();
+
+    await expect(agent.resolveContextGraphSubscriptionBootstrapAuthority(CG_ID, {
+      allowSubscriptionFallback: false,
+      durableSubscriptionBinding: { contextGraphId: CG_ID },
+    })).resolves.toMatchObject({
+      outcome: 'allowed',
+      source: 'legacy-local',
+      reason: 'local-public',
+    });
+  });
+
   it('admits the remote graph once registered chain authority proves it public', async () => {
     const agent = admissionAgent();
     vi.spyOn(agent, 'resolveRegisteredContextGraphAuthority').mockResolvedValue({

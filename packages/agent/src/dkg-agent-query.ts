@@ -868,12 +868,14 @@ export class QueryMethods extends DKGAgentBase {
             // indexed and before its local definition arrives. During that
             // interval the legacy fallback can mistake absent local policy
             // for public. Only this node's durable local-create provenance
-            // may use legacy-local authority to install subscription intent;
-            // remote graphs must wait for registered or accepted signed
-            // authority. Later reads retry without leaving a phantom row.
+            // may use legacy-local authority to install NEW subscription
+            // intent; remote graphs must wait for registered or accepted
+            // signed authority. Restart rehydration passes a freshly loaded
+            // durable row and retains its existing compatibility policy.
             if (
               authority.outcome === 'allowed'
               && authority.source === 'legacy-local'
+              && opts.durableSubscriptionBinding === undefined
               && !this.localContextGraphProvenance.hasLocalCreate(contextGraphId)
             ) {
               return unavailableContextGraphReadAuthorityDecision(

@@ -187,9 +187,15 @@ function catchupPlaneNotAttempted(
  * only graphs whose RFC-64 receiver authority still allows legacy sync. An
  * agent without that resolver applies no such filter.
  */
-function legacyDurableSyncAllowed(agent: any, contextGraphId: string): boolean {
-  return typeof agent.resolveRfc64CatalogReceiverAuthorityV1 !== 'function'
-    || Boolean(agent.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed);
+async function legacyDurableSyncAllowed(agent: any, contextGraphId: string): Promise<boolean> {
+  if (typeof agent.resolveRfc64CatalogReceiverAuthorityV1 !== 'function'
+    || agent.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed) return true;
+  // An approved private member can use the legacy member lane for root SWM
+  // while RFC-64 has no private receiver authority. Its finalized VM must be
+  // allowed through the same member proof; otherwise catch-up permanently
+  // leaves the durable plane unverified even when the curator can serve it.
+  return typeof agent.rfc64PrivateRootSwmOnLegacyLaneV1 === 'function'
+    && await agent.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId) === true;
 }
 
 /**
@@ -1263,7 +1269,7 @@ class WorkerCatchupRunner implements CatchupRunner {
         const [peerId, contextGraphId, priority, source] = args as [
           string, string, number | undefined, unknown,
         ];
-        if (!legacyDurableSyncAllowed(agent, contextGraphId)) {
+        if (!(await legacyDurableSyncAllowed(agent, contextGraphId))) {
           return this.durableNotAttempted(contextGraphId);
         }
         return agent.syncFromPeerDetailed(
@@ -1286,7 +1292,7 @@ class WorkerCatchupRunner implements CatchupRunner {
       }
       case 'syncDurableRecovery': {
         const [peerId, contextGraphId] = args as [string, string];
-        if (!legacyDurableSyncAllowed(agent, contextGraphId)) {
+        if (!(await legacyDurableSyncAllowed(agent, contextGraphId))) {
           return this.durableNotAttempted(contextGraphId);
         }
         const recovery = await this.agent.syncDurableRecoveryContextGraph(contextGraphId, {

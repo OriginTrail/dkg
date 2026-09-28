@@ -690,6 +690,32 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(recovered.result).toEqual({ insertedTriples: 3 });
   });
 
+  it('runs both durable bridge paths for an approved private member on the legacy lane', async () => {
+    const privateMember = vi.fn(async (id: string) => id === 'cg-private-member');
+    const recoveryCalls: unknown[][] = [];
+    const { agent, calls } = bridgeAgent({
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: false }),
+      rfc64PrivateRootSwmOnLegacyLaneV1: privateMember,
+      syncDurableRecoveryContextGraph: async (...args: unknown[]) => {
+        recoveryCalls.push(args);
+        return { result: { insertedTriples: 2 } };
+      },
+    });
+
+    await invokeThroughBridge(agent, 'syncDurable', ['peer-curator', 'cg-private-member']);
+    const recovered = await invokeThroughBridge(
+      agent, 'syncDurableRecovery', ['peer-curator', 'cg-private-member'],
+    );
+    expect(calls.durable).toHaveLength(1);
+    expect(recoveryCalls).toHaveLength(1);
+    expect(recovered.result).toEqual({ insertedTriples: 2 });
+
+    const outsider = await invokeThroughBridge(agent, 'syncDurable', ['peer-curator', 'cg-outsider']);
+    expect(outsider.result).toEqual({ kind: 'catchup-plane-not-attempted', reason: 'catalog-authoritative' });
+    expect(calls.durable).toHaveLength(1);
+    expect(privateMember).toHaveBeenCalledWith('cg-outsider');
+  });
+
   it('emits worker pass diagnostics through the parent logger bridge', async () => {
     const info = vi.fn();
     const { agent } = bridgeAgent({ log: { info } });

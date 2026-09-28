@@ -5562,9 +5562,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return createIncompleteDurableSyncResult();
     }
     const requestedContextGraphCount = contextGraphIds.length;
-    contextGraphIds = contextGraphIds.filter((contextGraphId) => (
+    const legacyDurableAllowed = await Promise.all(contextGraphIds.map(async (contextGraphId) => (
       this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed
-    ));
+      || await this.rfc64PrivateRootSwmOnLegacyLaneV1?.(contextGraphId) === true
+    )));
+    contextGraphIds = contextGraphIds.filter((_, index) => legacyDurableAllowed[index]);
     if (contextGraphIds.length !== requestedContextGraphCount) {
       this.log.debug(
         ctx,
