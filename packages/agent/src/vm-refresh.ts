@@ -38,6 +38,14 @@ export interface VmRefreshTarget {
    * targets with a block hold the event lane's persisted cursor.
    */
   readonly blockNumber?: number;
+  /** Hash of the event's block, to distinguish a replacement fork. */
+  readonly blockHash?: string;
+  /** Position within the block, so two updates with the same root remain distinct. */
+  readonly logIndex?: number;
+  /** Transaction identity when a log position is unavailable or a block reorganizes. */
+  readonly txHash?: string;
+  /** Required chain-view height when an unseen event arrives behind a held one. */
+  readonly proofBlockNumber?: number;
   /**
    * The copy already holds the announced root. Roots name content, not
    * versions, so an update that repeats content (or an A -> B -> A history)
@@ -69,8 +77,8 @@ export interface VmRefreshAttempt {
 }
 
 /**
- * What an offer did: recorded a new target, kept the one already held for the
- * same root (and its retry schedule), or refused it because the set is full.
+ * What an offer did: recorded a new update, kept the already held event (and
+ * its retry schedule), or refused it because the set is full.
  */
 export type VmRefreshOfferResult = 'recorded' | 'held' | 'full';
 
@@ -95,12 +103,39 @@ export interface VmRefreshQueueOptions {
 interface VmRefreshRecord {
   readonly target: VmRefreshTarget;
   readonly firstOfferedAt: number;
+  /** Event identities superseded while this target is held. */
+  readonly seenUpdateKeys: Set<string>;
   failures: number;
   nextAttemptAt: number;
 }
 
 function recordKey(localCgId: string, ual: string): string {
   return `${localCgId}\0${ual}`;
+}
+
+function updateKey(target: VmRefreshTarget): string {
+  // Complete positions remain distinct, including across forks. Legacy
+  // adapters without a position can only coalesce the evidence they supply.
+  if (target.blockNumber === undefined) return JSON.stringify(['legacy', target.merkleRoot]);
+  if (target.logIndex !== undefined) {
+    return JSON.stringify([
+      'log', target.blockNumber, target.logIndex, target.blockHash,
+      target.txHash, target.merkleRoot,
+    ]);
+  }
+  if (target.txHash !== undefined) {
+    return JSON.stringify([
+      'transaction', target.blockNumber, target.blockHash, target.txHash, target.merkleRoot,
+    ]);
+  }
+  return JSON.stringify(['legacy-block', target.blockNumber, target.merkleRoot]);
+}
+
+function behindHeld(incoming: VmRefreshTarget, held: VmRefreshTarget): boolean {
+  if (incoming.blockNumber === undefined || held.blockNumber === undefined) return false;
+  if (incoming.blockNumber !== held.blockNumber) return incoming.blockNumber < held.blockNumber;
+  return incoming.logIndex !== undefined && held.logIndex !== undefined
+    && incoming.logIndex < held.logIndex;
 }
 
 export class VmRefreshQueue {
@@ -136,24 +171,44 @@ export class VmRefreshQueue {
   }
 
   /**
-   * Record a target, due after `delayMs`. The same KA at the same root keeps
-   * its retry schedule, so a replayed event cannot defeat the backoff; a
-   * different root is new evidence and replaces the target. A new KA is
-   * refused while the set is full.
+   * Record a target, due after `delayMs`. A replay of a held or superseded
+   * update keeps the current retry schedule. An unseen update replaces it,
+   * even at a lower position: that event could be from a replacement fork.
+   * A same-root or lower-position replacement must check the chain version.
    */
   offer(target: VmRefreshTarget, delayMs = 0): VmRefreshOfferResult {
     const key = recordKey(target.localCgId, target.ual);
     const held = this.#records.get(key);
-    if (held !== undefined && held.target.merkleRoot === target.merkleRoot) return 'held';
+    const keyOfUpdate = updateKey(target);
+    if (held !== undefined
+      && (updateKey(held.target) === keyOfUpdate || held.seenUpdateKeys.has(keyOfUpdate))) {
+      return 'held';
+    }
     if (held === undefined && this.#records.size >= this.#maxEntries) {
       this.#refusedTotal += 1;
       return 'full';
     }
+    const seenUpdateKeys = new Set(held?.seenUpdateKeys);
+    if (held !== undefined) seenUpdateKeys.add(updateKey(held.target));
+    // The queue is bounded, and so is the replay memory for a busy KA.
+    if (seenUpdateKeys.size > 128) seenUpdateKeys.delete(seenUpdateKeys.values().next().value!);
+    const behind = held !== undefined && behindHeld(target, held.target);
+    const previousProof = held?.target.proofBlockNumber ?? held?.target.blockNumber;
+    const incomingProof = target.proofBlockNumber ?? target.blockNumber;
+    const proofBlockNumber = previousProof === undefined ? incomingProof
+      : incomingProof === undefined ? previousProof
+        : Math.max(previousProof, incomingProof);
     this.#records.delete(key);
     const now = this.#now();
     this.#records.set(key, {
-      target: Object.freeze({ ...target }),
+      target: Object.freeze({
+        ...target,
+        ...(held?.target.merkleRoot === target.merkleRoot || behind ? { checkVersion: true } : {}),
+        ...(proofBlockNumber !== undefined && proofBlockNumber !== target.blockNumber
+          ? { proofBlockNumber } : {}),
+      }),
       firstOfferedAt: now,
+      seenUpdateKeys,
       failures: 0,
       nextAttemptAt: delayMs > 0 ? now + delayMs : 0,
     });
@@ -202,13 +257,13 @@ export class VmRefreshQueue {
 
   /**
    * Settle one attempt. Only the exact target that was attempted is settled:
-   * a newer root recorded while the attempt ran stays queued and due.
+   * a newer event recorded while the attempt ran stays queued and due.
    * Returns when a retried target is due again.
    */
   settle(target: VmRefreshTarget, outcome: VmRefreshOutcome): number | undefined {
     const key = recordKey(target.localCgId, target.ual);
     const held = this.#records.get(key);
-    if (held === undefined || held.target.merkleRoot !== target.merkleRoot) return undefined;
+    if (held === undefined || updateKey(held.target) !== updateKey(target)) return undefined;
     if (outcome !== 'retry') {
       this.#records.delete(key);
       return undefined;

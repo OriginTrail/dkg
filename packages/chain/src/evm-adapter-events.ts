@@ -18,7 +18,7 @@ import { resolveCapMs } from './rpc-failover-client.js';
 import { withRpcRequestTimeout } from './rpc-request-transport.js';
 
 /** One stored row, presented to the SAME parse the live branch uses. */
-type ParsedLogLike = { topics: readonly string[]; data: string; blockNumber: number; transactionHash: string };
+type ParsedLogLike = { topics: readonly string[]; data: string; blockNumber: number; blockHash: string; transactionHash: string; logIndex: number };
 
 export class EventsMethods extends EVMChainAdapterBase {
   /**
@@ -278,6 +278,8 @@ export class EventsMethods extends EVMChainAdapterBase {
             if (!parsed) continue;
             const kaId = parsed.args.id.toString();
             const txIndex = (log as { transactionIndex?: number }).transactionIndex;
+            const logIndex = 'logIndex' in log ? log.logIndex : (log as ethers.Log).index;
+            const blockHash = log.blockHash;
             yield {
               type: 'KnowledgeAssetUpdated',
               blockNumber: log.blockNumber,
@@ -288,6 +290,8 @@ export class EventsMethods extends EVMChainAdapterBase {
                 author: typeof parsed.args.author === 'string' ? parsed.args.author : '',
                 txHash: log.transactionHash,
                 txIndex,
+                ...(typeof logIndex === 'number' ? { logIndex } : {}),
+                ...(typeof blockHash === 'string' ? { blockHash } : {}),
               },
             };
           }

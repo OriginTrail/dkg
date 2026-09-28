@@ -69,10 +69,13 @@ describe('ChainEventPoller cursor persistence', () => {
     await poll();
 
     // Each event is dispatched once and the aggregate cursor reaches the head;
-    // later polls find no new blocks instead of replaying the same page.
+    // the update lane revisits its reorg window without redispatching a replay.
     expect(dispatched.sort()).toEqual(['registered', 'updated']);
     expect(cursor.saved.at(-1)).toBe(100);
-    expect(filters.filter((filter) => (filter.fromBlock ?? 0) <= 60)).toHaveLength(2);
+    expect(filters.filter((filter) => filter.eventTypes.includes('KnowledgeAssetRegisteredToContextGraph')))
+      .toHaveLength(1);
+    expect(filters.filter((filter) => filter.eventTypes.includes('KnowledgeAssetUpdated')))
+      .toHaveLength(3);
   });
 
   it('saves and restores a legacy aggregate cursor when active lanes can safely share it', async () => {

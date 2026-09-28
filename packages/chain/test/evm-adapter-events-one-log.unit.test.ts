@@ -549,6 +549,8 @@ describe('KnowledgeAssetUpdated over the one log', () => {
         author: ethers.getAddress(AUTHOR),
         txHash: hash(0xcc),
         txIndex: undefined,
+        logIndex: 0,
+        blockHash: hash(60),
       },
     }]);
     adapter.destroy();
@@ -561,8 +563,10 @@ describe('KnowledgeAssetUpdated over the one log', () => {
     );
     const liveLog = {
       blockNumber: 130,
+      blockHash: hash(130),
       transactionHash: hash(0xdd),
       transactionIndex: 3,
+      index: 8,
       topics: encoded.topics,
       data: encoded.data,
     };
@@ -580,6 +584,8 @@ describe('KnowledgeAssetUpdated over the one log', () => {
         merkleRoot: ROOT_V2,
         txHash: hash(0xdd),
         txIndex: 3,
+        logIndex: 8,
+        blockHash: hash(130),
       }),
     })]);
     adapter.destroy();

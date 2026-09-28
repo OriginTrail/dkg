@@ -49,6 +49,10 @@ export type OnCollectionUpdated = (info: {
   blockNumber: number;
   /** Transaction that committed the update, when the adapter reports it. */
   txHash?: string;
+  /** Position of the update log within its block, when available. */
+  logIndex?: number;
+  /** Fork identity of the event's block, when available. */
+  blockHash?: string;
   signal?: AbortSignal;
 }) => Promise<void>;
 
@@ -361,6 +365,9 @@ export class ChainEventPoller {
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx, signal) => this.handleCollectionUpdated(event, ctx, signal),
         persistCeiling: () => this.collectionUpdatesPersistCeiling?.(),
+        // The chain index holds back 50 blocks for reorg repair. Revisiting
+        // 64 blocks also catches replacements already passed in the live cursor.
+        replayLookbackBlocks: 64,
       },
       {
         name: 'allowListUpdates',
@@ -483,6 +490,13 @@ export class ChainEventPoller {
     const txHash = typeof data['txHash'] === 'string' && data['txHash'].length > 0
       ? data['txHash'] as string
       : undefined;
+    const logIndex = typeof data['logIndex'] === 'number'
+      && Number.isSafeInteger(data['logIndex']) && data['logIndex'] >= 0
+      ? data['logIndex']
+      : undefined;
+    const blockHash = typeof data['blockHash'] === 'string' && data['blockHash'].length > 0
+      ? data['blockHash'] as string
+      : undefined;
 
     this.log.info(ctx,
       `Chain event: KnowledgeAssetUpdated block=${event.blockNumber} batchId=${batchId}`,
@@ -496,6 +510,8 @@ export class ChainEventPoller {
       batchId,
       blockNumber: event.blockNumber,
       ...(txHash === undefined ? {} : { txHash }),
+      ...(logIndex === undefined ? {} : { logIndex }),
+      ...(blockHash === undefined ? {} : { blockHash }),
       signal,
     });
   }
