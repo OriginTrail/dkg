@@ -3424,6 +3424,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
             local.transactionHash,
             eventTxHash,
             blockNumber,
+            blockHash,
           );
         }
       } catch (err) {
@@ -3502,6 +3503,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * #2858 — whether a copy at an update's root already reflects that update:
    * the update's own transaction confirmed it, or it was materialized from a
    * chain view at or after the update's block, which already held the update.
+   * Neither fact proves fork lineage when the event carries a block hash,
+   * because the same transaction can be included on a replacement fork.
    */
   async vmRefreshCopyCoversUpdate(
     this: DKGAgent,
@@ -3510,7 +3513,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     copyTxHash: string | undefined,
     eventTxHash: string | undefined,
     eventBlock: number | undefined,
+    eventBlockHash: string | undefined,
   ): Promise<boolean> {
+    if (eventBlockHash !== undefined) return false;
     if (eventTxHash !== undefined && copyTxHash === eventTxHash) return true;
     if (eventBlock === undefined) return false;
     const materialized = await readMaterializedVersion(

@@ -70,6 +70,8 @@ export interface ChainEventPollerLaneSpec {
    * leaves the persisted cursor at the scanned block.
    */
   persistCeiling?(): number | undefined;
+  /** Revisit this many scanned blocks so replacement-fork logs are delivered. */
+  replayLookbackBlocks?: number;
 }
 
 interface ChainEventPollerLaneRuntime {
@@ -119,6 +121,7 @@ export class ChainEventLaneRunner {
   private readonly cursorStore?: LaneCursorStore;
   private readonly laneState = new Map<ChainEventPollerLane, ChainEventPollerLaneState>();
   private readonly restoredLanes = new Set<ChainEventPollerLane>();
+  private readonly replayedEvents = new Map<ChainEventPollerLane, Map<number, Set<string>>>();
 
   constructor(config: ChainEventLaneRunnerConfig) {
     this.chain = config.chain;
@@ -402,10 +405,12 @@ export class ChainEventLaneRunner {
 
     this.applyCursorStrategyTransition(lane, head, ctx);
 
+    let justSeeded = false;
     if (head != null && !state.headKnown) {
       state.headKnown = true;
       if (state.lastBlock === 0 && lane.cursorStrategy.kind === 'live-tail') {
         state.lastBlock = Math.max(0, head - this.liveSeedLookbackBlocks(lane.cursorStrategy));
+        justSeeded = true;
         this.log.info(ctx, `Seeded poller cursor near chain head: lane=${lane.spec.name} head=${head} scanning from ${state.lastBlock}`);
       } else if (state.lastBlock === 0 && lane.cursorStrategy.kind === 'full-history') {
         lane.cursorStrategy.onBackfillFromGenesis?.(ctx);
@@ -416,7 +421,12 @@ export class ChainEventLaneRunner {
     // cursor is past it (see eventScanBoundary).
     const reset = head != null && lease === undefined && this.resetCursorPastHead(lane, head, ctx);
 
-    const fromBlock = state.lastBlock + 1;
+    const lookback = lane.spec.replayLookbackBlocks ?? 0;
+    // A lagging lease cannot certify the range already passed in memory.
+    // Wait for its horizon instead of persisting that old cursor under it.
+    const fromBlock = justSeeded || (head !== undefined && head < state.lastBlock)
+      ? state.lastBlock + 1
+      : Math.max(1, state.lastBlock + 1 - lookback);
     const upperBound = head != null
       ? Math.min(fromBlock + this.maxRange - 1, head)
       : fromBlock + this.maxRange - 1;
@@ -434,6 +444,8 @@ export class ChainEventLaneRunner {
     const caughtUp = head != null && upperBound >= head;
     let advanced = false;
     let leaseExpired = false;
+    const remembered = this.replayedEvents.get(lane.spec.name) ?? new Map<number, Set<string>>();
+    const observed = new Map<number, Set<string>>();
 
     try {
       for await (const event of this.chain.listenForEvents(filter)) {
@@ -443,6 +455,18 @@ export class ChainEventLaneRunner {
           throw new Error('event scan horizon lease expired before event dispatch');
         }
         signal?.throwIfAborted();
+        const identity = lookback > 0 ? this.replayIdentity(event) : undefined;
+        if (identity !== undefined) {
+          let atBlock = observed.get(event.blockNumber);
+          if (atBlock === undefined) {
+            atBlock = new Set();
+            observed.set(event.blockNumber, atBlock);
+          }
+          const alreadySeen = remembered.get(event.blockNumber)?.has(identity)
+            || atBlock.has(identity);
+          atBlock.add(identity);
+          if (alreadySeen) continue;
+        }
         await lane.spec.dispatch(event, ctx, signal);
         signal?.throwIfAborted();
         if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
@@ -458,12 +482,26 @@ export class ChainEventLaneRunner {
         throw new Error('event scan horizon lease expired before cursor advance');
       }
       signal?.throwIfAborted();
-      state.lastBlock = upperBound;
+      state.lastBlock = Math.max(state.lastBlock, upperBound);
+      if (lookback > 0) {
+        for (const block of remembered.keys()) {
+          if (block >= fromBlock && block <= upperBound) remembered.delete(block);
+        }
+        for (const [block, identities] of observed) remembered.set(block, identities);
+        const oldestRetained = Math.max(1, state.lastBlock + 1 - lookback);
+        for (const block of remembered.keys()) {
+          if (block < oldestRetained) remembered.delete(block);
+        }
+        this.replayedEvents.set(lane.spec.name, remembered);
+      }
       advanced = true;
       this.applyLaneSchedule(lane, { kind: 'success', now, caughtUp });
     } catch (err) {
       if (signal?.aborted) signal.throwIfAborted();
-      if (leaseExpired) this.restoreLaneState(state, stateBefore);
+      if (leaseExpired) {
+        this.restoreLaneState(state, stateBefore);
+        this.replayedEvents.delete(lane.spec.name);
+      }
       this.log.error(ctx, `Poll lane ${lane.spec.name} failed: ${err instanceof Error ? err.message : String(err)}`);
       this.applyLaneSchedule(lane, { kind: 'failure', now });
     }
@@ -475,6 +513,19 @@ export class ChainEventLaneRunner {
       advanced: advanced || reset,
       ...(advanced && lease !== undefined ? { lease, stateBefore } : {}),
     };
+  }
+
+  private replayIdentity(event: ChainEvent): string {
+    const data = event.data;
+    return [
+      event.type,
+      event.blockNumber,
+      data.blockHash,
+      data.logIndex,
+      data.txHash,
+      data.batchId,
+      data.merkleRoot,
+    ].map((part) => String(part ?? '')).join('\0');
   }
 
   /**
@@ -554,6 +605,7 @@ export class ChainEventLaneRunner {
     phase: string,
   ): ChainEventPollerLaneScanResult {
     this.restoreLaneState(result.lane.state, stateBefore);
+    this.replayedEvents.delete(result.lane.spec.name);
     this.applyLaneSchedule(result.lane, { kind: 'failure', now });
     this.log.warn(
       ctx,

@@ -67,6 +67,41 @@ describe('ChainEventPoller collection updates', () => {
     expect(seen.map((info) => info.blockHash)).toEqual(['0x' + 'cd'.repeat(32)]);
   });
 
+  it('redelivers a replacement block below its in-memory cursor without restarting', async () => {
+    const oldFork: ChainEvent = {
+      type: 'KnowledgeAssetUpdated', blockNumber: 160,
+      data: { batchId: '42', merkleRoot: '0x' + '44'.repeat(32),
+        blockHash: '0xold', txHash: '0xsame', logIndex: 7 },
+    };
+    const events = [oldFork];
+    let head = 200;
+    let now = 0;
+    const { adapter, filters } = makeChain({ head: () => head, events });
+    const seen: string[] = [];
+    const poller = new ChainEventPoller({
+      chain: adapter,
+      publishHandler: makeHandler(),
+      intervalMs: 12_000,
+      clock: () => now,
+      onCollectionUpdated: async ({ blockHash }) => { seen.push(blockHash ?? ''); },
+    });
+    const poll = () => (poller as unknown as { poll(): Promise<void> }).poll();
+
+    await poll();
+    expect(seen).toEqual(['0xold']);
+    now = 12_000;
+    head = 201;
+    await poll();
+    expect(seen).toEqual(['0xold']);
+
+    events.splice(0, 1, { ...oldFork, data: { ...oldFork.data, blockHash: '0xcanonical' } });
+    now = 24_000;
+    head = 202;
+    await poll();
+    expect(seen).toEqual(['0xold', '0xcanonical']);
+    expect(filters.at(-1)).toMatchObject({ fromBlock: 138, toBlock: 202 });
+  });
+
   it('persists the cursor no higher than the ceiling of unsettled callback work', async () => {
     let head = 100;
     const { adapter } = makeChain({ head: () => head, events: [] });

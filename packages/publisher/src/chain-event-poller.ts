@@ -365,6 +365,9 @@ export class ChainEventPoller {
         cadenceMs: this.intervalMs,
         dispatch: (event, ctx, signal) => this.handleCollectionUpdated(event, ctx, signal),
         persistCeiling: () => this.collectionUpdatesPersistCeiling?.(),
+        // The chain index holds back 50 blocks for reorg repair. Revisiting
+        // 64 blocks also catches replacements already passed in the live cursor.
+        replayLookbackBlocks: 64,
       },
       {
         name: 'allowListUpdates',
