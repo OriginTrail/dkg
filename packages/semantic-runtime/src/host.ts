@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto';
 
+import type { SemanticProgramPolicy, SemanticProgramBinding } from './program-policy.js';
+
 import {
   MESSAGE_TYPE,
   decodeAbiSuccess,
@@ -36,8 +38,18 @@ import {
 
 export interface SemanticRuntimeConfig {
   enabled?: boolean;
-  /** Operator-owned policy selected locally; Programs cannot override it. */
+  /** VM policy for direct invocation. Tenant programBindings supply their own local authority. */
   operatorPolicyIri?: string;
+  /** Optional operator-owned local Program pins and LLM disclosure rules. */
+  programPolicy?: SemanticProgramPolicy;
+  /** Tenant-approved fixed query operations with invoke-only caller grants. */
+  programBindings?: SemanticProgramBinding[];
+  /** Trusted outbound routes. The authenticated local agent signs; the target authorizes. */
+  programRoutes?: Array<{
+    contextGraphId: string;
+    operationIri: string;
+    targetPeerId: string;
+  }>;
   watchdogMs?: number;
   startupTimeoutMs?: number;
   maxEvents?: number;

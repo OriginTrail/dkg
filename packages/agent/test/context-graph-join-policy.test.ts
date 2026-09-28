@@ -12,6 +12,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   DKGAgent,
+  agentFromPrivateKey,
   computeWorkspaceEncryptionKeysAttestationDigest,
   signAgentDelegation,
   type ContextGraphJoinPolicyAuditEvent,
@@ -890,6 +891,7 @@ describe('context graph open enrollment policy', () => {
     await createPrivateCg(agent, contextGraphId, owner.agentAddress);
 
     const member = ethers.Wallet.createRandom();
+    await (agent as any).persistAgentToStore(agentFromPrivateKey(member.privateKey, 'member'));
     await agent.inviteAgentToContextGraph(contextGraphId, member.address, owner.agentAddress);
     const delegateePeerId = '12D3KooWOpenEnrollmentMemberPeer';
     const delegateeOpKey = ethers.Wallet.createRandom().address;

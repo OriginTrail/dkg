@@ -98,6 +98,7 @@ export {
   type EffectTransitionRecord,
   type ExecutionRecord,
   type ExecutionStatus,
+  type ProgramConfigurationRecord,
   type PrepareEffectRecord,
   type RuntimeEventRecord,
   type SnapshotRecord,
@@ -125,3 +126,5 @@ export {
   type SemanticProjectionQuad,
   type SemanticProjectionSink,
 } from './projection.js';
+
+export type { SemanticSparqlReadGrant, SemanticProgramBinding, SemanticProgramPolicy, SemanticProgramPin, SemanticDisclosurePolicy, SemanticQueryPin, SemanticQueryOutputSchema } from './program-policy.js';

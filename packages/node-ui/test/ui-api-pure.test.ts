@@ -242,11 +242,11 @@ describe('UI API tests', () => {
     it('preserves invocation identity and distinct program and execution storage layers', async () => {
       const invocationId = '123e4567-e89b-42d3-a456-426614174000';
       const receipt = { invocationId, executionIri: `urn:sr:execution:${invocationId}`, executionLayer: 'wm', persisted: true };
-      responseOverrides.push({ match: url => url === '/api/semantic-runtime/invoke', status: 200, body: receipt });
+      responseOverrides.push({ match: url => url === '/api/programs/execute', status: 200, body: receipt });
 
       await expect(invokeSemanticProgram(contextGraphId, programIri, invocationId, 'vm', 'wm')).resolves.toEqual(receipt);
       expect(requestLog).toHaveLength(1);
-      expect(requestLog[0]).toMatchObject({ url: '/api/semantic-runtime/invoke', method: 'POST' });
+      expect(requestLog[0]).toMatchObject({ url: '/api/programs/execute', method: 'POST' });
       expect(JSON.parse(requestLog[0]!.body)).toEqual({ contextGraphId, programIri, invocationId, programLayer: 'vm', executionLayer: 'wm' });
     });
 
@@ -263,7 +263,7 @@ describe('UI API tests', () => {
 
     it('surfaces operator-policy denial without converting it to a successful receipt or retrying', async () => {
       const denial = { error: 'Execution denied by operator policy', code: 'OPERATOR_POLICY_DENY' };
-      responseOverrides.push({ match: url => url === '/api/semantic-runtime/invoke', status: 403, body: denial });
+      responseOverrides.push({ match: url => url === '/api/programs/execute', status: 403, body: denial });
 
       await expect(invokeSemanticProgram(contextGraphId, programIri, 'denied-invocation', 'vm', 'wm'))
         .rejects.toMatchObject({ status: 403, message: denial.error, body: denial });

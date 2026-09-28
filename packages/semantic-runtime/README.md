@@ -80,16 +80,16 @@ unexpected component import/export, incompatible ABI, failed Worker handshake,
 or restore mismatch fails closed. Carrier WASI imports receive deny-only stubs:
 the component receives no filesystem, network, environment, stdio, random, or
 clock authority. Its repository-owned imports are an opaque, host-created
-execution capability and four explicit typed tool interfaces.
+execution capability and five explicit typed tool interfaces.
 
 Programs are stored in the DKG as `sr:Program` resources with `sr:language`,
 `sr:version`, and `sr:source` triples. The authenticated
-`POST /api/semantic-runtime/invoke` route loads a program by IRI from the
+`POST /api/programs/execute` route loads a program by IRI from the
 explicitly selected WM, SWM, or VM view of the requested context graph, admits
 its S-expression in Wasm, and executes its logical agents there. The caller
 also explicitly selects the Execution KA's target layer. The narrow execution
 slice supports ordered `emit` forms and one typed tool request per delegate:
-`agent/investigate@1`, `dkg/query@1`, `remote-execute@1`, or `llm/safe@1`. The
+`agent/investigate@1`, `dkg/query@1`, `dkg/sparql-read@1`, `dkg/asset-create@1`, `remote-execute@1`, or `llm/safe@1`. The
 host performs only the requested operation and returns its result to the
 waiting Wasm process.
 
@@ -147,7 +147,7 @@ membership for that immediate caller before executing the replicated Program
 as its own node operator. This makes composition transitive without propagating
 the root caller's wallet authority across hops.
 
-Private Context Graph membership intentionally grants the right to request
+For direct invocation, private Context Graph membership intentionally grants the right to request
 Program execution; there is no mandatory caller-to-Program ACL. Final execution
 authority remains with the target operator: every tool requested by the
 Wasm-admitted Program must be offered by that operator, allowed by its
@@ -169,3 +169,115 @@ restart intensity, bounded mailboxes and budgets, native/Wasm kernel parity,
 Worker hang/trap recovery, durable replay, every protected-effect crash
 boundary, trusted activation, redacted projection, and the Listener Boy
 ambiguous-effect lifecycle.
+
+### Optional operator Program policy
+
+`semanticRuntime.programPolicy` adds local execution and disclosure controls independently
+of any marketplace. Install it in trusted node configuration, alongside the existing
+`operatorPolicyIri`; invocation requests and RDF Programs cannot grant themselves this policy.
+Without this option, the existing adapter selection behavior remains available.
+
+```json
+{
+  "programPolicy": {
+    "contextGraphIds": ["tenant-equipment"],
+    "programs": [
+      {
+        "programIri": "urn:program:maintenance-assessment",
+        "sourceHash": "<SHA-256 of the exact reviewed S-expression source>"
+      },
+      {
+        "programIri": "urn:program:maintenance-count",
+        "sourceHash": "<SHA-256 of the exact reviewed S-expression source>",
+        "queries": ["<reviewed SemanticQueryPin object>"]
+      }
+    ],
+    "disclosure": {
+      "policyId": "urn:policy:maintenance-summary",
+      "promptSha256s": ["<SHA-256 of the exact allowed prompt>"],
+      "programs": [{
+        "programIri": "urn:program:maintenance-count",
+        "sourceHash": "<same reviewed child source hash>",
+        "outputIndexes": [0],
+        "allowedJsonPointers": ["/result/bindings/0/count"]
+      }]
+    }
+  }
+}
+```
+
+This is a configuration template: replace the placeholders with reviewed pins and
+64-character lowercase hexadecimal hashes. The CLI helper `createSemanticQueryPin`
+constructs a pin from a decoded catalog item and a closed, bounded output schema.
+Review the query, its parameters, graph/view selection, and output schema before
+installing that pin. The adapter checks the catalog definition before querying and
+the actual query result against the schema before returning it. Omitting `queries`
+from a Program in pinned mode grants no named queries.
+
+Pinned mode registers only `dkg/query` and, when a disclosure policy is present,
+`llm/safe`. Investigator and remote-execute adapters are unavailable in this mode.
+Permitted children must be pinned and hosted locally; child invocations retain the
+original caller. Local composition rejects cycles and chains longer than eight
+Programs. Each LLM run retains the existing four-tool-call limit. The host rechecks
+caller graph access, Program declarations/source, operator policy and active runtime
+capabilities before model dispatch, child invocation and disclosure. Parent authority
+also applies to nested children. This does not cancel a provider request already sent.
+
+Disclosure rules select ordered child output positions, optionally projecting only
+named JSON scalar fields. Omitting `allowedJsonPointers` releases the entire selected
+output string. JSON objects/arrays cannot be released through a scalar pointer after
+a schema change. Only a pinned prompt and approved opaque tool descriptions are sent;
+raw child errors and child execution identifiers are excluded from model tool results.
+Returned model text remains untrusted. These controls are additional host policy;
+Wasm isolation alone does not authorize data release.
+
+Execution KAs now include `sr:orderedOutputs`, a JSON string array preserving positions
+and duplicate values alongside the existing `sr:output` triples. Reads check that both
+representations agree. Legacy records with multiple distinct outputs fail closed because
+RDF triples cannot recover their order; zero/single-value legacy records remain readable.
+Invocation reuse is bound to the caller, source, policy, graph and memory layers. Older
+journal entries without these bindings require a new invocation UUID.
+
+### Checkpointed adapter continuation
+
+The runtime journal migrates existing v1 databases to v2 by adding a bounded adapter
+checkpoint table. `writeAdapterCheckpoint` binds payloads to an existing effect digest
+and uses an expected version to reject concurrent writes. Checkpoints remain local to
+the node and may contain sensitive adapter state; no payload inspection HTTP route is
+introduced here.
+
+Adapters may explicitly implement `resume` and use `RuntimeEffectBroker.resumeUnknown`
+when they can continue from durable receipts without repeating an unresolved side effect.
+Continuation rechecks current capability, policy, expiry and adapter enablement, including
+after asynchronous checks. Continuation and reconciliation serialize per database/effect
+within one daemon process; this is not a lease for multiple processes sharing a database.
+Terminal reconciliation updates are transactional.
+
+The direct Rig LLM adapter does not implement `resume`: an interrupted model request
+still requires reconciliation/manual review and is never blindly replayed. Provider
+idempotency/status protocols, paid-call receipts, billing and seller transport belong to
+the adapter/application that supplies those guarantees.
+
+Tenant-configured invoke-only operations can load a pinned Program from a separate Context Graph while keeping the data graph private. See [tenant Program bindings](../../docs/architecture/tenant-program-bindings.md) for setup, API calls, activation and revocation. These operations derive execution authority from the trusted local binding and its explicitly approved installed adapters, without requiring VM policy or tool-offer publication. Direct invocation retains its VM policy requirements.
+
+
+`dkg/asset-create@1` is installed for tenant bindings with an explicit `assetCreation`
+grant. It accepts a JSON string containing bounded RDF triples; the host chooses
+CG, execution layer, executor identity and a deterministic asset name. VM creation
+requires confirmed publication. Retries use the durable effect/checkpoint journal;
+an unresolved publication is reconciled rather than blindly repeated. See
+[tenant Program operations](../../docs/architecture/tenant-program-bindings.md#creating-a-knowledge-asset-in-the-execution-layer)
+for configuration and a Kamstrup example. This is not arbitrary SPARQL UPDATE.
+
+`dkg/sparql-read@1` is available only with a tenant binding's explicit `sparqlRead`
+grant. It runs approved Program-source SPARQL through the existing scoped query
+engine, with a fixed CG, executor and memory layer, bounded output schema and
+limits. No query catalog entry is required. `SERVICE`, dataset overrides and
+SPARQL writes are rejected. See [raw reads and the Kamstrup example](../../docs/architecture/tenant-program-bindings.md#raw-sparql-reads-without-a-query-catalog).
+
+Program permissions and outbound routes can now be managed through the
+[Program authorization API](../../docs/architecture/program-authorization-api.md).
+Owner/operator-authenticated changes persist in SQLite and apply immediately;
+API revocation/removal overrides file defaults across restarts. Invocation keeps
+its signed-agent and invoke-only authority boundary. The API does not grant raw
+graph membership and never dispatches host effects during activation preflight.

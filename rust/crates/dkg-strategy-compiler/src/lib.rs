@@ -62,6 +62,8 @@ pub enum EffectClass {
     ModelInvocation,
     /// Invocation of a DKG Program on an explicitly named remote node.
     RemoteExecution,
+    /// Creation through the approved DKG asset lifecycle.
+    AssetCreation,
     /// Repository mutation.
     RepositoryWrite,
     /// Infrastructure mutation.
@@ -80,6 +82,7 @@ impl EffectClass {
             Self::Read => "read",
             Self::ModelInvocation => "model-invocation",
             Self::RemoteExecution => "remote-execution",
+            Self::AssetCreation => "asset-creation",
             Self::RepositoryWrite => "repository-write",
             Self::InfrastructureChange => "infrastructure-change",
             Self::Publish => "publish",
@@ -195,6 +198,17 @@ impl AdapterRegistry {
                 false,
             ),
             adapter(
+                "dkg/sparql-read",
+                1,
+                "dkg.sparql.read",
+                EffectClass::Read,
+                IdempotencyClass::ReadOnly,
+                1,
+                1,
+                None,
+                false,
+            ),
+            adapter(
                 "dkg/query",
                 1,
                 "dkg.query",
@@ -221,6 +235,17 @@ impl AdapterRegistry {
                 1,
                 "llm.invoke.safe",
                 EffectClass::ModelInvocation,
+                IdempotencyClass::ReconcileBeforeRetry,
+                1,
+                1,
+                None,
+                false,
+            ),
+            adapter(
+                "dkg/asset-create",
+                1,
+                "dkg.asset.create",
+                EffectClass::AssetCreation,
                 IdempotencyClass::ReconcileBeforeRetry,
                 1,
                 1,
@@ -920,6 +945,7 @@ fn decode_effect_class(value: &str) -> CanonicalResult<EffectClass> {
         "read" => Ok(EffectClass::Read),
         "model-invocation" => Ok(EffectClass::ModelInvocation),
         "remote-execution" => Ok(EffectClass::RemoteExecution),
+        "asset-creation" => Ok(EffectClass::AssetCreation),
         "repository-write" => Ok(EffectClass::RepositoryWrite),
         "infrastructure-change" => Ok(EffectClass::InfrastructureChange),
         "publish" => Ok(EffectClass::Publish),
@@ -2012,6 +2038,51 @@ mod tests {
         assert_eq!(
             compile(&invalid).unwrap_err()[0].code,
             DiagnosticCode::SchemaMismatch,
+        );
+    }
+
+    #[test]
+    fn raw_sparql_requires_explicit_grant_and_one_argument() {
+        let valid = envelope(
+            r#"(delegate reader (grant dkg.sparql.read) (call dkg/sparql-read@1 "ASK {}"))"#,
+        );
+        let plan = compile(&valid).unwrap();
+        assert!(plan.required_capabilities.contains("dkg.sparql.read"));
+        assert!(plan.effect_upper_bound.contains(&EffectClass::Read));
+        admit_canonical_plan(&plan.canonical_plan_cbor, &AdapterRegistry::v1()).unwrap();
+        for body in [
+            r#"(delegate reader (call dkg/sparql-read@1 "ASK {}"))"#,
+            r#"(delegate reader (grant dkg.query) (call dkg/sparql-read@1 "ASK {}"))"#,
+            r#"(delegate reader (grant dkg.sparql.read) (call dkg/sparql-read@1 "ASK {}" "vm"))"#,
+        ] {
+            assert!(compile(&envelope(body)).is_err());
+        }
+    }
+
+    #[test]
+    fn asset_creation_requires_a_grant_and_one_content_argument() {
+        let plan = compile(&envelope(
+            r#"(delegate recorder (grant dkg.asset.create) (call dkg/asset-create@1 "{}"))"#,
+        ))
+        .expect("tenant-approved creation is admitted");
+        assert!(plan.required_capabilities.contains("dkg.asset.create"));
+        assert!(
+            plan.effect_upper_bound
+                .contains(&EffectClass::AssetCreation)
+        );
+        assert!(plan.approval_requirements.is_empty());
+        admit_canonical_plan(&plan.canonical_plan_cbor, &AdapterRegistry::v1()).unwrap();
+        assert!(
+            compile(&envelope(
+                r#"(delegate recorder (call dkg/asset-create@1 "{}"))"#
+            ))
+            .is_err()
+        );
+        assert!(
+            compile(&envelope(
+                "(delegate recorder (grant dkg.asset.create) (call dkg/asset-create@1))"
+            ))
+            .is_err()
         );
     }
 

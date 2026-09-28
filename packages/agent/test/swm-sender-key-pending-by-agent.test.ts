@@ -1048,7 +1048,8 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
     expect(internals.pendingSenderKeyByAgent.size).toBe(0);
   });
 
-  it('queues a chain-proven private gate that has not materialized on the receiver yet', async () => {
+  it.each(['agent-gate-pending', 'authority-unavailable'] as const)(
+    'queues a retryable %s ACK until receiver authority is available', async (reasonCode) => {
     const boot = await bootAgent();
     agent = boot.agent;
     const internals = boot.internals;
@@ -1063,7 +1064,7 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
       response: senderKeyAck(
         false,
         'private agent gate is not materialized yet',
-        'agent-gate-pending',
+        reasonCode,
       ),
       attempts: 1,
       messageId: 'm-private-gate-pending',
@@ -1082,7 +1083,8 @@ describe('createAndDistributeSwmSenderKeyEpoch: missing-peerId soft success', ()
     const queue = internals.pendingSenderKeyByAgent.get(recipient.agentAddress.toLowerCase());
     expect(queue).toHaveLength(1);
     expect(queue![0].messageId).toMatch(/^swm-sender-key:[0-9a-f]{64}:[0-9a-f-]{36}$/);
-  });
+    },
+  );
 
   it('keeps unknown future negative ACK codes fatal', async () => {
     const boot = await bootAgent();

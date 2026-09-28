@@ -752,6 +752,9 @@ importers:
         specifier: ^7.29.1
         version: 7.29.1
     devDependencies:
+      '@origintrail-official/dkg-query':
+        specifier: workspace:*
+        version: link:../query
       '@types/better-sqlite3':
         specifier: ^7
         version: 7.6.13

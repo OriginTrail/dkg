@@ -30,7 +30,7 @@ import {
   readContextGraphQueryCatalogBindings,
   writeContextGraphQueryCatalog,
 } from '../query-catalog-service.js';
-import { authenticatedAgentAddress } from '../../auth.js';
+import { authenticatedAgentAddress, isExplicitNodeOperator } from '../../auth.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
@@ -160,7 +160,7 @@ export async function handleQueryCatalogRoutes(ctx: RequestContext): Promise<boo
     if (!validateRequiredContextGraphId(contextGraphId, res)) return true;
 
     const callerAgentAddress = authenticatedAgentAddress(authentication);
-    const isNodeAdmin = authentication.principal.kind === 'nodeOperator';
+    const isNodeAdmin = isExplicitNodeOperator(authentication);
     if (
       !isNodeAdmin
       && !(await withRpcUsageSite(

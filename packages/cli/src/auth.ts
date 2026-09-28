@@ -1,8 +1,8 @@
 /**
  * Unified authentication for DKG node interfaces (HTTP API, MCP, WebSocket, etc.).
  *
- * Uses bearer tokens stored on disk. Tokens are auto-generated on first start.
- * Any interface that needs auth calls `verifyToken(token)` against the loaded set.
+ * HTTP supports direct agent-key signatures and existing bearer credentials.
+ * Other interfaces retain their existing token authentication.
  */
 
 import { randomBytes, createHmac, timingSafeEqual, createHash } from 'node:crypto';
@@ -12,6 +12,10 @@ import { dirname } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { DkgHomeFiles } from './config.js';
+import {
+  AgentHttpAuthenticationError, authenticateAgentHttpRequest, hasAgentHttpCredentials,
+  type AgentHttpAuthOptions,
+} from './agent-http-auth.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -22,11 +26,13 @@ export interface AuthConfig {
   enabled?: boolean;
   /** Pre-configured tokens. If empty, one is auto-generated on first start. */
   tokens?: string[];
+  /** Explicit local administration role; signatures alone confer no role. */
+  operatorAgentAddresses?: string[];
 }
 
 /** HTTP identity established by the CLI daemon's authentication boundary. */
 export type RequestPrincipal =
-  | { readonly kind: 'agent'; readonly agentAddress: string }
+  | { readonly kind: 'agent'; readonly agentAddress: string; readonly nodeOperator?: boolean }
   | { readonly kind: 'nodeOperator' }
   | { readonly kind: 'anonymous' };
 
@@ -62,16 +68,22 @@ type AnonymousHttpIdentity = {
   readonly principal: Extract<RequestPrincipal, { kind: 'anonymous' }>;
 };
 
+type AgentKeyHttpIdentity = {
+  readonly credential: 'agent-key';
+  readonly acceptedToken: undefined;
+  readonly principal: Extract<RequestPrincipal, { kind: 'agent' }>;
+};
+
 /**
- * One correlated allow decision. Authenticated mode always carries an accepted credential, while
- * an absent credential can only be anonymous. Public/disabled requests may still carry a valid
+ * One correlated allow decision. Authenticated mode carries either an accepted bearer or a verified agent-key proof.
+ * An absent credential can only be anonymous. Public/disabled requests may still carry a valid
  * optional bearer, but that bearer is classified at the same boundary before this value exists.
  */
 export type AllowedHttpAuthentication = {
   readonly allowed: true;
   readonly presentedToken: string | undefined;
 } & (
-  | ({ readonly mode: 'authenticated' } & AcceptedHttpIdentity)
+  | ({ readonly mode: 'authenticated' } & (AcceptedHttpIdentity | AgentKeyHttpIdentity))
   | ({ readonly mode: 'disabled' | 'public' } & (AcceptedHttpIdentity | AnonymousHttpIdentity))
 );
 
@@ -150,7 +162,13 @@ void assertAllowedHttpAuthenticationTypeInvariants;
 
 /** Node administration is a projection of the correlated authentication decision, never state. */
 export function canAdministerNode(authentication: AllowedHttpAuthentication): boolean {
-  return authentication.mode === 'disabled' || authentication.principal.kind === 'nodeOperator';
+  return authentication.mode === 'disabled' || isExplicitNodeOperator(authentication);
+}
+
+/** Explicit authentication and role only; auth-disabled mode does not grant this capability. */
+export function isExplicitNodeOperator(authentication: AllowedHttpAuthentication): boolean {
+  return authentication.principal.kind === 'nodeOperator'
+    || (authentication.principal.kind === 'agent' && authentication.principal.nodeOperator === true);
 }
 
 /** Authenticated agent identity projection shared by every route. */
@@ -1292,7 +1310,30 @@ export async function authenticateHttpRequest(input: {
   readonly validTokens: Set<string>;
   readonly resolveAgentByToken: (token: string) => string | undefined;
   readonly corsOrigin?: string | null;
+  readonly agentKey?: AgentHttpAuthOptions;
 }): Promise<HttpAuthenticationResult> {
+  // An attempted key signature cannot downgrade to bearer, public or auth-disabled admission.
+  if (input.req.method !== 'OPTIONS' && hasAgentHttpCredentials(input.req)) {
+    try {
+      if (!input.agentKey) throw new AgentHttpAuthenticationError('AGENT_HTTP_AUTH_UNAVAILABLE', 503);
+      const identity = await authenticateAgentHttpRequest(input.req, input.agentKey);
+      return {
+        allowed: true, mode: 'authenticated', credential: 'agent-key',
+        presentedToken: undefined, acceptedToken: undefined,
+        principal: { kind: 'agent', ...identity },
+      };
+    } catch (error) {
+      const failure = error instanceof AgentHttpAuthenticationError ? error
+        : new AgentHttpAuthenticationError('AGENT_HTTP_AUTH_UNAVAILABLE', 503);
+      input.res.writeHead(failure.status, {
+        'Content-Type': 'application/json', 'WWW-Authenticate': 'DKG-Agent realm="dkg-node"',
+        ...(input.corsOrigin ? { 'Access-Control-Allow-Origin': input.corsOrigin } : {}),
+        ...(failure.status === 503 ? { 'Retry-After': '1' } : {}),
+      });
+      input.res.end(JSON.stringify({ code: failure.code, error: failure.message }));
+      return { allowed: false };
+    }
+  }
   const credential = await evaluateHttpCredential(
     input.req,
     input.res,
