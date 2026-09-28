@@ -501,8 +501,8 @@ fi
 hr "Step 7 — N2 subscribes after approval (retry bounded authority reads)"
 # The registered graph's chain roster is committed before approve-join returns,
 # but a just-started devnet may still have a cold finalized authority index.
-# Retry only the documented transient 503; do not treat a metadata-only
-# catch-up as proof of private data transfer.
+# Retry only the documented transient 503; a foreground job's zero delta
+# needs exact historical data in the member's backing store before it passes.
 subscribed=no
 for attempt in $(seq 1 30); do
   sub2_resp=$(api "$N2" POST /api/context-graph/subscribe "$subscribe_body")
@@ -524,8 +524,21 @@ for attempt in $(seq 1 90); do
   case "$catchup_status" in
     done)
       historical_synced=$(echo "$catchup_resp" | jq_field result.sharedMemorySynced)
-      [[ "$historical_synced" =~ ^[1-9][0-9]*$ ]] ||
-        fail "catch-up completed without transferring the historical SWM asset: $catchup_resp"
+      if ! [[ "$historical_synced" =~ ^[1-9][0-9]*$ ]]; then
+        # The on-connect lane can deliver SWM independently of this foreground
+        # job. Its zero delta is acceptable only after the exact pre-join
+        # subject appears below the API read-authority gate.
+        swm_background_count=0
+        for settle in $(seq 1 30); do
+          swm_background_count=$(store_subject_count 2 "$PRE_SUBJECT") ||
+            fail "cannot inspect N2's post-approval SWM store"
+          [ "$swm_background_count" -ge 1 ] && break
+          sleep 3
+        done
+        [ "$swm_background_count" -ge 1 ] ||
+          fail "catch-up completed without the historical SWM asset: $catchup_resp"
+        note "historical SWM arrived outside the foreground catch-up"
+      fi
       durable_synced=$(echo "$catchup_resp" | jq_field result.dataSynced)
       if ! [[ "$durable_synced" =~ ^[1-9][0-9]*$ ]]; then
         # A concurrent graph-level sync can deliver VM outside this foreground
