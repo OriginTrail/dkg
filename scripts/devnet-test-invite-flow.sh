@@ -5,7 +5,7 @@
 # Drives 3 devnet nodes over HTTP:
 #   N1 (port 9201) — curator, registers a private (curated) CG
 #   N2 (port 9202) — invitee, allowlisted after approval; should join successfully
-#   N3 (port 9203) — invitee, never allowlisted; its catch-up must be refused
+#   N3 (port 9203) — outsider, never allowlisted; its subscription must be refused
 #
 # Focuses strictly on the invite/acceptance surface. Assumes the devnet
 # was started by `./scripts/devnet.sh start 5`.
@@ -117,53 +117,6 @@ for a in d.get('agents',[]):
     eval "N${i}_ADDR=\"$self_addr\""
     eval "N${i}_PEER_ID=\"$self_peer\""
     ok "Node $i agent address: $self_addr (peer: $self_peer)"
-  done
-}
-
-poll_catchup() {
-  local node="$1" cg_id="$2" expect="$3" timeout="${4:-90}"
-  local start=$(date +%s) status last_status=""
-  local encoded
-  encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$cg_id',safe=''))")
-  while :; do
-    local elapsed=$(( $(date +%s) - start ))
-    if [ "$elapsed" -ge "$timeout" ]; then
-      fail "catch-up polling timed out after ${timeout}s (last status: ${last_status:-none}, expected: $expect)"
-      return 1
-    fi
-    local resp
-    resp=$(api "$node" GET "/api/sync/catchup-status?contextGraphId=$encoded" 2>/dev/null)
-    status=$(echo "$resp" | jq_field status)
-    if [ -n "$status" ] && [ "$status" != "$last_status" ]; then
-      note "  t=${elapsed}s  status=$status"
-      last_status="$status"
-    fi
-    case "$status" in
-      done|denied|failed|unreachable|deferred)
-        if [ "$expect" = "refused" ]; then
-          local verdict
-          verdict=$(echo "$resp" | catchup_refusal)
-          case "$verdict" in
-            refused:*)
-              ok "catch-up refused: status = ${verdict#refused:}, nothing synced (as expected)"
-              return 0
-              ;;
-          esac
-          note "response: $resp"
-          fail "catch-up = $verdict (expected denied, or unreachable with nothing synced)"
-          return 1
-        fi
-        if [ "$status" = "$expect" ]; then
-          ok "catch-up status = $status (as expected)"
-          return 0
-        else
-          fail "catch-up status = $status (expected $expect)"
-          note "response: $resp"
-          return 1
-        fi
-        ;;
-    esac
-    sleep 1.5
   done
 }
 
