@@ -330,6 +330,10 @@ export class InventoryV1CandidateError extends Error {
 }
 
 export interface Rfc64SwmAuthorInventoryOperationsV1 {
+  readSwmAuthorInventoryHeadDigestV1(
+    inventoryScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+  ): Digest32V1 | null;
   readSwmAuthorInventorySnapshotV1(
     inventoryScopeDigest: Digest32V1,
     authorAddress: EvmAddressV1,
@@ -498,6 +502,13 @@ export function createRfc64SwmAuthorInventoryOperationsViewV1(
   requireOwnerOpen: () => void,
 ): Rfc64SwmAuthorInventoryOperationsV1 {
   return Object.freeze({
+    readSwmAuthorInventoryHeadDigestV1: (
+      inventoryScopeDigest: Digest32V1,
+      authorAddress: EvmAddressV1,
+    ): Digest32V1 | null => {
+      requireOwnerOpen();
+      return inventory.readSwmAuthorInventoryHeadDigestV1(inventoryScopeDigest, authorAddress);
+    },
     readSwmAuthorInventorySnapshotV1: (
       inventoryScopeDigest: Digest32V1,
       authorAddress: EvmAddressV1,
@@ -897,6 +908,18 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     } finally {
       this.#appliedCatalogHeadsSnapshot = null;
     }
+  }
+
+  readSwmAuthorInventoryHeadDigestV1(
+    inventoryScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+  ): Digest32V1 | null {
+    this.assertOpen();
+    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const key = encodeSwmAuthorInventoryKeyV1(
+      inventoryScopeDigest, authorAddress, swmAuthorInventoryErrorV1,
+    );
+    return this.readTransaction(() => persistence.readHeadDigest(key));
   }
 
   readSwmAuthorInventorySnapshotV1(
