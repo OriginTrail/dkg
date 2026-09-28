@@ -848,21 +848,42 @@ export class QueryMethods extends DKGAgentBase {
       return await runBoundedOperation(
         async (signal) => {
           const boundedOpts = { ...opts, signal };
-          const resolve = () => resolveContextGraphReadAuthorityDecision(
-            QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
-              this,
-              contextGraphId,
-              boundedOpts,
-              {
-                registrationTimeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
-                authorityReadMode: 'live-current',
-                hasAcceptedRfc64PublicPolicy:
-                  this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
-                    ? true
-                    : undefined,
-              },
-            ),
-          );
+          const resolve = async () => {
+            const authority = await resolveContextGraphReadAuthorityDecision(
+              QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
+                this,
+                contextGraphId,
+                boundedOpts,
+                {
+                  registrationTimeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
+                  authorityReadMode: 'live-current',
+                  hasAcceptedRfc64PublicPolicy:
+                    this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
+                      ? true
+                      : undefined,
+                },
+              ),
+            );
+            // A remote graph can be visible before its new chain binding is
+            // indexed and before its local definition arrives. During that
+            // interval the legacy fallback can mistake absent local policy
+            // for public. Only this node's durable local-create provenance
+            // may use legacy-local authority to install subscription intent;
+            // remote graphs must wait for registered or accepted signed
+            // authority. Later reads retry without leaving a phantom row.
+            if (
+              authority.outcome === 'allowed'
+              && authority.source === 'legacy-local'
+              && !this.localContextGraphProvenance.hasLocalCreate(contextGraphId)
+            ) {
+              return unavailableContextGraphReadAuthorityDecision(
+                'legacy-local',
+                'remote-local-authority-unaccepted',
+                'local-state',
+              );
+            }
+            return authority;
+          };
           const initial = await resolve();
           if (
             initial.outcome !== 'unavailable'
