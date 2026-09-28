@@ -16,7 +16,11 @@ M1_NODE=6
 CORE_NODE=1
 WRITES_COUNT=${WRITES_COUNT:-1000}
 WRITE_PAYLOAD_BYTES=${WRITE_PAYLOAD_BYTES:-32768}
-WRITES_PER_BATCH=${WRITES_PER_BATCH:-200}
+WRITES_PER_BATCH=${WRITES_PER_BATCH:-100}
+# Preserve each batch as one KA. Splitting by root turns this 1,000-triple
+# Core-restart stress into 1,000 catalog updates; 100 x 32 KiB also stays
+# below the sealed assertion's 4 MiB gossip payload limit.
+export DEVNET_PUBLISH_PRESERVE_BATCH=1
 
 log() { echo "[urr] $*"; }
 warn() { echo "[urr] WARN: $*" >&2; }
