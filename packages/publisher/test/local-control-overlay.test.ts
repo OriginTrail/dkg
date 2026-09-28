@@ -35,6 +35,16 @@ describe('locally trusted KA control overlay', () => {
     )).resolves.toEqual(incoming);
   });
 
+  it.each([
+    { label: 'another asset', quad: { ...metadata('accessPolicy', '"ownerOnly"'), subject: OTHER_UAL } },
+    { label: 'another graph', quad: { ...metadata('accessPolicy', '"ownerOnly"'), graph: `${META_GRAPH}-other` } },
+  ])('rejects metadata from $label', async ({ quad }) => {
+    const store = new OxigraphStore();
+    await expect(overlayLocallyTrustedKnowledgeAssetControls(
+      store, META_GRAPH, UAL, [...incomingMetadata(), quad],
+    )).rejects.toThrow('requires one asset in one metadata graph');
+  });
+
   it('selects the matching KA sidecar and replaces all incoming controls', async () => {
     const store = new OxigraphStore();
     const anchor = { assertionVersion: '1', merkleRoot: ROOT };

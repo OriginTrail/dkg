@@ -819,6 +819,9 @@ export async function overlayLocallyTrustedKnowledgeAssetControls(
   incomingMetadata: readonly Quad[],
   options: QueryOptions = {},
 ): Promise<Quad[]> {
+  if (incomingMetadata.some((quad) => quad.subject !== ual || quad.graph !== metaGraph)) {
+    throw new Error('Locally trusted KA control overlay requires one asset in one metadata graph');
+  }
   const locallyTrustedControls = await readLocallyTrustedKnowledgeAssetControls(
     store,
     metaGraph,
