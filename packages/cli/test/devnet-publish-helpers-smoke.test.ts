@@ -395,7 +395,13 @@ NODE
       await rm(tempDir, { recursive: true, force: true });
     }
   });
-  it('resumes a sealed named asset through the share route after a transient prerequisite', async () => {
+  for (const [label, retryableError] of [
+    ['gossip prerequisite', '[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable'],
+    ['unprefixed promote prerequisite', 'A promote prerequisite is temporarily unavailable'],
+    ['legacy boundary retirement', 'RFC-64 legacy SWM boundary retirement is in progress; retry promotion'],
+    ['changed diagnostic wording', 'The sealed share is waiting for a prerequisite'],
+  ]) {
+  it(`resumes a sealed named asset through the share route after ${label}`, async () => {
     const repoRoot = resolve(process.cwd(), '../..');
     const script = String.raw`
 set -euo pipefail
@@ -413,11 +419,11 @@ api_call() {
       const calls=fs.readFileSync(process.env.CALLS_FILE,"utf8").trim().split("\n").length;
       if (calls!==1) console.log(JSON.stringify({code:"KA_ASSERTION_ALREADY_FINALIZED"}));
       else console.log(JSON.stringify({created:true,status:"wm-sealed",errors:[
-        {phase:"swm-share",error:"[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable"}
+        {phase:"swm-share",error:process.env.RETRYABLE_PROMOTION_ERROR}
       ]}));
     } else if (/^\/api\/knowledge-assets\/retry-.*\/swm\/share$/.test(process.env.CALL_PATH)) {
       const calls=fs.readFileSync(process.env.CALLS_FILE,"utf8").trim().split("\n").length;
-      if (calls===2) console.log(JSON.stringify({error:"[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable"}));
+      if (calls===2) console.log(JSON.stringify({error:process.env.RETRYABLE_PROMOTION_ERROR}));
       else console.log(JSON.stringify({status:"swm-shared",swmShared:true,publishReady:true,
         shareOperationId:"durable-original-share",promotedCount:0}));
     } else throw new Error("unexpected route: "+process.env.CALL_PATH);
@@ -444,6 +450,7 @@ CREATE_RESPONSE="$response" node -e '
       await writeFile(scriptPath, script.replace(/\r\n/g, '\n'), 'utf8');
       await execFileAsync('bash', [toWslPath(scriptPath)], {
         cwd: repoRoot,
+        env: { ...process.env, RETRYABLE_PROMOTION_ERROR: retryableError },
         timeout: 30_000,
         maxBuffer: 1024 * 1024,
       });
@@ -451,4 +458,5 @@ CREATE_RESPONSE="$response" node -e '
       await rm(tempDir, { recursive: true, force: true });
     }
   });
+  }
 });

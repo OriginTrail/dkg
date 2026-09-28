@@ -3,9 +3,9 @@
 # End-to-end test of the curated context-graph invite & acceptance flow.
 #
 # Drives 3 devnet nodes over HTTP:
-#   N1 (port 9201) — curator, creates a private (curated) CG
+#   N1 (port 9201) — curator, registers a private (curated) CG
 #   N2 (port 9202) — invitee, allowlisted after approval; should join successfully
-#   N3 (port 9203) — invitee, never allowlisted; its catch-up must be refused
+#   N3 (port 9203) — outsider, never allowlisted; its subscription must be refused
 #
 # Focuses strictly on the invite/acceptance surface. Assumes the devnet
 # was started by `./scripts/devnet.sh start 5`.
@@ -120,77 +120,6 @@ for a in d.get('agents',[]):
   done
 }
 
-# catchup_refusal <catchup-status-json>
-# Prints `refused:<status>` when an outsider's catch-up was refused: a peer
-# denied it, or it ended `unreachable` without syncing anything. An outsider
-# holds no `_meta` and no accepted RFC-64 policy for the CG, so it may never
-# send a request a peer could deny. Otherwise prints the status and counts.
-catchup_refusal() {
-  python3 -c "
-import sys, json
-try:
-    d = json.load(sys.stdin)
-except Exception as e:
-    print(f'<parse-error: {e}>'); sys.exit(0)
-status = d.get('status', '')
-r = d.get('result') or {}
-data, swm = r.get('dataSynced'), r.get('sharedMemorySynced')
-if status == 'denied' or (status == 'unreachable' and data == 0 and swm == 0):
-    print(f'refused:{status}')
-else:
-    print(f'{status} (dataSynced={data}, sharedMemorySynced={swm})')
-"
-}
-
-# poll_catchup <node> <cg-id> <expect> [timeout]
-# <expect> is a terminal status, or `refused` (see catchup_refusal).
-poll_catchup() {
-  local node="$1" cg_id="$2" expect="$3" timeout="${4:-90}"
-  local start=$(date +%s) status last_status=""
-  local encoded
-  encoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('$cg_id',safe=''))")
-  while :; do
-    local elapsed=$(( $(date +%s) - start ))
-    if [ "$elapsed" -ge "$timeout" ]; then
-      fail "catch-up polling timed out after ${timeout}s (last status: ${last_status:-none}, expected: $expect)"
-      return 1
-    fi
-    local resp
-    resp=$(api "$node" GET "/api/sync/catchup-status?contextGraphId=$encoded" 2>/dev/null)
-    status=$(echo "$resp" | jq_field status)
-    if [ -n "$status" ] && [ "$status" != "$last_status" ]; then
-      note "  t=${elapsed}s  status=$status"
-      last_status="$status"
-    fi
-    case "$status" in
-      done|denied|failed|unreachable|deferred)
-        if [ "$expect" = "refused" ]; then
-          local verdict
-          verdict=$(echo "$resp" | catchup_refusal)
-          case "$verdict" in
-            refused:*)
-              ok "catch-up refused: status = ${verdict#refused:}, nothing synced (as expected)"
-              return 0
-              ;;
-          esac
-          note "response: $resp"
-          fail "catch-up = $verdict (expected denied, or unreachable with nothing synced)"
-          return 1
-        fi
-        if [ "$status" = "$expect" ]; then
-          ok "catch-up status = $status (as expected)"
-          return 0
-        else
-          fail "catch-up status = $status (expected $expect)"
-          note "response: $resp"
-          return 1
-        fi
-        ;;
-    esac
-    sleep 1.5
-  done
-}
-
 # assert_log_recent <log-path> <since-iso> <expected-pattern> <human-label>
 # Greps for `expected-pattern` in `log-path`, restricted to lines that
 # look like they were written after `since-iso`. Uses awk because the
@@ -245,6 +174,38 @@ print(json.dumps(match[0] if match else None, indent=2))
 "
 }
 
+# Count an exact subject in a node's backing store, below /api/query's
+# read-authority gate. A denied scoped query returns empty without inspecting
+# storage, so it cannot prove that an outsider never received private data.
+store_subject_count() {
+  local node_num="$1" subject="$2" predicate="${3:-http://schema.org/name}" config="$DEVNET_DIR/node${1}/config.json"
+  local endpoint query out status body
+  endpoint=$(python3 - "$config" <<'PYENDPOINT'
+import json,sys
+c=json.load(open(sys.argv[1]))['store']
+backend=c['backend']; options=c.get('options',{})
+if backend=='oxigraph-server': print(f"http://127.0.0.1:{options.get('port',7878)}/query")
+elif backend=='blazegraph': print(options['url'])
+elif backend=='sparql-http': print(options['queryEndpoint'])
+else: sys.exit(f'unsupported devnet store backend: {backend}')
+PYENDPOINT
+) || return 1
+  query="SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { <$subject> <$predicate> ?o . FILTER(STRSTARTS(STR(?g), \"did:dkg:context-graph:${CG_ID}/\")) } }"
+  out=$(curl -sS --max-time 30 -X POST -H 'Accept: application/sparql-results+json' \
+    --data-urlencode "query=$query" -w $'\n%{http_code}' "$endpoint") || return 1
+  status="${out##*$'\n'}"
+  [ "$status" = 200 ] || return 1
+  body="${out%$'\n'*}"
+  printf '%s' "$body" | python3 -c '
+import json,sys
+try:
+    n=int(json.load(sys.stdin)["results"]["bindings"][0]["n"]["value"])
+    assert n>=0
+    print(n)
+except Exception: sys.exit(1)
+'
+}
+
 ###############################################################################
 # Start
 ###############################################################################
@@ -260,15 +221,19 @@ print(json.dumps({
   'name': 'Invite flow test $CG_ID',
   'description': 'Curated CG for invite/acceptance test',
   'accessPolicy': 1,
+  'register': True,
   'allowedAgents': ['$N1_ADDR'],
 }))
 ")
 create_resp=$(api "$N1" POST /api/context-graph/create "$create_body")
 created=$(echo "$create_resp" | jq_field created)
-if [ "$created" = "$CG_ID" ]; then
+registered=$(echo "$create_resp" | jq_field registered)
+on_chain_id=$(echo "$create_resp" | jq_field onChainId)
+if [ "$created" = "$CG_ID" ] && [ "$registered" = True ] &&
+   [[ "$on_chain_id" =~ ^[1-9][0-9]*$ ]]; then
   ok "CG created on N1: $(echo "$create_resp" | jq_field uri)"
 else
-  fail "create failed: $create_resp"
+  fail "registered create failed or was partial: $create_resp"
   exit 1
 fi
 
@@ -327,7 +292,7 @@ else
   note "raw response: $curator_resp"
 fi
 
-hr "Step 2 — N1 publishes some durable data into the CG (so N2 has something to sync after approval)"
+hr "Step 2 — N1 stages local data before the invite"
 # Create an assertion and write two sample quads into it.
 ASSERTION_NAME="widget-info"
 create_assertion=$(api "$N1" POST /api/knowledge-assets \
@@ -363,11 +328,84 @@ else
   fail "failed to write quads: $write_resp"
 fi
 
+# Give durable catch-up a real historical VM asset. Publishing a KA removes
+# that KA's graph-scoped SWM copy, so use the separate widget assertion here
+# and create the historical SWM-only asset below after VM confirmation.
+widget_finalize_resp=$(api "$N1" POST "/api/knowledge-assets/${ASSERTION_NAME}/wm/finalize" \
+  "{\"contextGraphId\":\"$CG_ID\"}")
+[ -n "$(echo "$widget_finalize_resp" | jq_field merkleRoot)" ] ||
+  fail "historical VM assertion did not finalize: $widget_finalize_resp"
+widget_share_resp=$(api "$N1" POST "/api/knowledge-assets/${ASSERTION_NAME}/swm/share" \
+  "{\"contextGraphId\":\"$CG_ID\",\"entities\":\"all\"}")
+[ "$(echo "$widget_share_resp" | jq_field swmShared)" = True ] &&
+  [ "$(echo "$widget_share_resp" | jq_field publishReady)" = True ] ||
+  fail "historical VM assertion did not complete its full share: $widget_share_resp"
+pre_publish_resp=$(api "$N1" POST "/api/knowledge-assets/${ASSERTION_NAME}/vm/publish" \
+  "{\"contextGraphId\":\"$CG_ID\",\"options\":{\"epochs\":1}}")
+[ "$(echo "$pre_publish_resp" | jq_field status)" = confirmed ] ||
+  fail "pre-join VM publish did not confirm: $pre_publish_resp"
+pre_ka_id=$(echo "$pre_publish_resp" | jq_field kaId)
+[[ "$pre_ka_id" =~ ^[1-9][0-9]*$ ]] || fail "pre-join VM publish lacks a KA id: $pre_publish_resp"
+ok "curator confirmed the historical widget in VM before N2 joined"
+
+# A historical SWM asset must exist before the member joins. Live delivery of
+# a newly shared asset after subscription cannot prove catch-up worked.
+PRE_SUBJECT="urn:invite-flow:${CG_ID}:before"
+pre_share_body=$(CG="$CG_ID" SUBJECT="$PRE_SUBJECT" python3 - <<'PYBODY'
+import json,os
+print(json.dumps({
+  'contextGraphId':os.environ['CG'], 'name':'before-'+os.environ['CG'],
+  'quads':[{'subject':os.environ['SUBJECT'],
+            'predicate':'http://schema.org/name','object':'"Before approval"','graph':''}],
+  'finalize':True,'alsoShareSwm':True,
+}))
+PYBODY
+)
+pre_share_resp=$(api "$N1" POST /api/knowledge-assets "$pre_share_body")
+[ "$(echo "$pre_share_resp" | jq_field swmShared)" = True ] || fail "pre-join SWM share did not complete: $pre_share_resp"
+[ -n "$(echo "$pre_share_resp" | jq_field shareOperationId)" ] || fail "pre-join share lacks operation id: $pre_share_resp"
+pre_curator_count=$(store_subject_count 1 "$PRE_SUBJECT") || fail "cannot inspect curator's local SWM store"
+[ "$pre_curator_count" -ge 1 ] || fail "pre-join SWM subject was not stored on curator"
+ok "curator stored the historical SWM asset before N2 joined"
+
 hr "Step 3 — N2 attempts to subscribe before being allowlisted (expect: refused)"
 subscribe_body="{\"contextGraphId\":\"$CG_ID\"}"
-sub_resp=$(api "$N2" POST /api/subscribe "$subscribe_body")
-note "subscribe response: $sub_resp"
-poll_catchup "$N2" "$CG_ID" refused 90 || { fail "N2's catch-up was not refused"; }
+preapproval_refused=no
+for attempt in $(seq 1 30); do
+  sub_resp=$(api "$N2" POST /api/context-graph/subscribe "$subscribe_body")
+  code=$(echo "$sub_resp" | jq_field code)
+  if [ "$code" = CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE ]; then
+    note "pre-approval authority pending (attempt $attempt/30)"
+    sleep 5
+    continue
+  fi
+  error=$(echo "$sub_resp" | jq_field error)
+  case "$error" in
+    *"not authorized"*|*"invite you first"*) preapproval_refused=yes; break ;;
+  esac
+  if [ "$(echo "$sub_resp" | jq_field subscribed)" = "$CG_ID" ]; then
+    catchup_resp=$(api "$N2" GET "/api/sync/catchup-status?contextGraphId=$CG_ID")
+    catchup_status=$(echo "$catchup_resp" | jq_field status)
+    if [ "$catchup_status" = denied ]; then
+      data_synced=$(echo "$catchup_resp" | jq_field result.dataSynced)
+      swm_synced=$(echo "$catchup_resp" | jq_field result.sharedMemorySynced)
+      [ "$data_synced" = 0 ] && [ "$swm_synced" = 0 ] || fail "pre-approval catch-up denied after transferring data: $catchup_resp"
+      preapproval_refused=yes
+      break
+    fi
+    [ "$catchup_status" != done ] || fail "N2 caught up before approval: $catchup_resp"
+    note "pre-approval catch-up returned ${catchup_status:-pending}; waiting for explicit denial"
+    sleep 5
+    continue
+  fi
+  fail "N2's pre-approval response was not an explicit refusal: $sub_resp"
+done
+[ "$preapproval_refused" = yes ] || fail "N2 never received an explicit pre-approval refusal: $sub_resp"
+ok "N2 was refused before approval"
+pre_widget_member_count=$(store_subject_count 2 "did:example:widget" \
+  "http://www.w3.org/2000/01/rdf-schema#label") || fail "cannot inspect N2's pre-approval VM store"
+[ "$pre_widget_member_count" -eq 0 ] || fail "N2 received the historical VM asset before approval"
+ok "N2 has no historical VM asset before approval"
 
 hr "Step 3b — verify N2's CG list does NOT contain a phantom entry"
 n2_sees=$(list_has_cg "$N2" "$CG_ID")
@@ -377,6 +415,9 @@ else
   fail "N2 has a phantom entry for '$CG_ID' (regression)"
   list_cg_state "$N2" "$CG_ID"
 fi
+pre_member_count=$(store_subject_count 2 "$PRE_SUBJECT") || fail "cannot inspect N2's local SWM store"
+[ "$pre_member_count" = 0 ] || fail "N2 stored private SWM before approval"
+ok "N2's backing store has no pre-join private SWM data"
 
 hr "Step 4 — N2 signs & forwards a join request to N1 (curator)"
 # PR #448 review: /sign-join is now sign-only — it returns the
@@ -457,72 +498,234 @@ else
   fail "approve-join failed: $approve_resp"
 fi
 
-hr "Step 7 — N2 re-subscribes (expect: done)"
-sleep 2  # allowlist write to settle + any SSE notification
-sub2_resp=$(api "$N2" POST /api/subscribe "$subscribe_body")
-note "subscribe response: $sub2_resp"
-# Post-approval catch-up does a full multi-peer fan-out (data + meta +
-# shared-memory) for every CG the node knows about, which in devnet
-# can take ~1–2 minutes under retries. We don't want this assertion to
-# race pre-existing SWM sync cost, so poll for 180s.
-poll_catchup "$N2" "$CG_ID" done 180 || fail "N2 did not complete catch-up after approval"
+hr "Step 7 — N2 subscribes after approval (retry bounded authority reads)"
+# The registered graph's chain roster is committed before approve-join returns,
+# but a just-started devnet may still have a cold finalized authority index.
+# Retry only the documented transient 503; a foreground job's zero delta
+# needs exact historical data in the member's backing store before it passes.
+subscribed=no
+for attempt in $(seq 1 30); do
+  sub2_resp=$(api "$N2" POST /api/context-graph/subscribe "$subscribe_body")
+  sub2_id=$(echo "$sub2_resp" | jq_field subscribed)
+  if [ "$sub2_id" = "$CG_ID" ]; then subscribed=yes; break; fi
+  sub2_code=$(echo "$sub2_resp" | jq_field code)
+  [ "$sub2_code" = CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE ] || fail "N2 subscription denied after approval: $sub2_resp"
+  note "registered authority pending (attempt $attempt/30)"
+  sleep 5
+done
+[ "$subscribed" = yes ] || fail "N2 never subscribed after approval: $sub2_resp"
+ok "N2 subscribed to the registered graph"
 
-hr "Step 7b — verify N2 now sees the CG legitimately"
-n2_state_after=$(list_cg_state "$N2" "$CG_ID")
-note "N2 project state: $n2_state_after"
-echo "$n2_state_after" | python3 -c "
-import sys,json
-d=json.loads(sys.stdin.read() or 'null')
-if d and d.get('subscribed') and d.get('synced'):
-    print('  OK subscribed=True synced=True name=' + str(d.get('name')))
-else:
-    print('  FAIL: expected subscribed+synced, got:', d)
-"
+catchup_done=no
+catchup_retries=0
+for attempt in $(seq 1 90); do
+  catchup_resp=$(api "$N2" GET "/api/sync/catchup-status?contextGraphId=$CG_ID")
+  catchup_status=$(echo "$catchup_resp" | jq_field status)
+  case "$catchup_status" in
+    done)
+      historical_synced=$(echo "$catchup_resp" | jq_field result.sharedMemorySynced)
+      if ! [[ "$historical_synced" =~ ^[1-9][0-9]*$ ]]; then
+        # The on-connect lane can deliver SWM independently of this foreground
+        # job. Its zero delta is acceptable only after the exact pre-join
+        # subject appears below the API read-authority gate.
+        swm_background_count=0
+        for settle in $(seq 1 30); do
+          swm_background_count=$(store_subject_count 2 "$PRE_SUBJECT") ||
+            fail "cannot inspect N2's post-approval SWM store"
+          [ "$swm_background_count" -ge 1 ] && break
+          sleep 3
+        done
+        [ "$swm_background_count" -ge 1 ] ||
+          fail "catch-up completed without the historical SWM asset: $catchup_resp"
+        note "historical SWM arrived outside the foreground catch-up"
+      fi
+      durable_synced=$(echo "$catchup_resp" | jq_field result.dataSynced)
+      if ! [[ "$durable_synced" =~ ^[1-9][0-9]*$ ]]; then
+        # A concurrent graph-level sync can deliver VM outside this foreground
+        # catch-up, leaving its own delta count at zero. The asset was
+        # absent before approval; require it in this run's backing-store graph.
+        # Chain reconciliation may commit it shortly after the foreground job
+        # completes, so give that independent path a bounded settling window.
+        widget_background_count=0
+        for settle in $(seq 1 30); do
+          widget_background_count=$(store_subject_count 2 "did:example:widget" \
+            "http://www.w3.org/2000/01/rdf-schema#label") ||
+            fail "cannot inspect N2's post-approval VM store"
+          [ "$widget_background_count" -ge 1 ] && break
+          sleep 3
+        done
+        [ "$widget_background_count" -ge 1 ] ||
+          fail "catch-up completed without the historical VM asset: $catchup_resp"
+        note "historical VM arrived through graph-level sync before the foreground catch-up"
+      fi
+      catchup_done=yes
+      break
+      ;;
+    denied) fail "approved member's catch-up was denied: $catchup_resp" ;;
+    failed|unreachable|deferred)
+      [ "$catchup_retries" -lt 3 ] || fail "approved member's catch-up kept failing: $catchup_resp"
+      catchup_retries=$((catchup_retries + 1))
+      retry_resp=$(api "$N2" POST /api/context-graph/subscribe "$subscribe_body")
+      retry_id=$(echo "$retry_resp" | jq_field subscribed)
+      retry_code=$(echo "$retry_resp" | jq_field code)
+      [ "$retry_id" = "$CG_ID" ] || [ "$retry_code" = CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE ] ||
+        fail "approved member's catch-up retry was refused: $retry_resp"
+      note "catch-up retry $catchup_retries after $catchup_status"
+      ;;
+  esac
+  sleep 3
+done
+[ "$catchup_done" = yes ] || fail "approved member's historical catch-up never completed: $catchup_resp"
+ok "N2 received historical VM and SWM after approval"
 
-hr "Step 7c — verify N2 received the CG's _meta graph from the curator"
-# The _meta graph carries the CG declaration + allowlist post-approval; sync
-# is expected to transfer it so the invitee can prove access locally.
-query_meta=$(CG="$CG_ID" python3 <<'PY'
-import json, os
-cg = os.environ["CG"]
-meta = f"did:dkg:context-graph:{cg}/_meta"
-print(json.dumps({
-  "contextGraphId": cg,
-  "sparql": f"SELECT (COUNT(*) AS ?n) WHERE {{ GRAPH <{meta}> {{ ?s ?p ?o }} }}",
-}))
-PY
-)
-meta_resp=$(api "$N2" POST /api/query "$query_meta")
-meta_count=$(echo "$meta_resp" | python3 -c "
-import sys,json
+widget_member_count=$(store_subject_count 2 "did:example:widget" \
+  "http://www.w3.org/2000/01/rdf-schema#label") || fail "cannot inspect N2's VM backing store"
+[ "$widget_member_count" -ge 1 ] || fail "N2 lacks the historical widget VM triple after catch-up"
+ok "N2's backing store holds the historical widget VM triple"
+
+subscription_synced=no
+for attempt in $(seq 1 15); do
+  subscription_state=$(api "$N2" GET /api/context-graph/subscriptions)
+  subscription_synced=$(SUBSCRIPTIONS="$subscription_state" CG="$CG_ID" python3 - <<'PYCHECK'
+import json,os
 try:
-    d=json.load(sys.stdin)
-    b=d.get('result',{}).get('bindings',[])
-    v=b[0].get('n','0') if b else '0'
-    import re
-    m=re.search(r'\d+', str(v))
-    print(m.group(0) if m else '0')
-except Exception as e:
-    print('0')
-")
-note "_meta triple count on N2: $meta_count"
-if [ "$meta_count" -gt "0" ] 2>/dev/null; then
-  ok "N2 holds $meta_count triples in the CG's _meta graph"
-else
-  fail "N2 has no _meta triples for $CG_ID"
+    rows=json.loads(os.environ['SUBSCRIPTIONS']).get('subscriptions',[])
+    print('yes' if any(r.get('contextGraphId')==os.environ['CG'] and r.get('synced') is True for r in rows) else 'no')
+except Exception: print('no')
+PYCHECK
+)
+  [ "$subscription_synced" = yes ] && break
+  sleep 2
+done
+[ "$subscription_synced" = yes ] || fail "N2's subscription stayed unsynced after catch-up: $subscription_state"
+ok "N2's subscription reports synced"
+
+pre_query_body=$(CG="$CG_ID" SUBJECT="$PRE_SUBJECT" python3 - <<'PYQUERY'
+import json,os
+print(json.dumps({'contextGraphId':os.environ['CG'],'graphSuffix':'_shared_memory',
+  'sparql':f'SELECT ?o WHERE {{ <{os.environ["SUBJECT"]}> <http://schema.org/name> ?o }}'}))
+PYQUERY
+)
+pre_member_query=$(api "$N2" POST /api/query "$pre_query_body")
+if QUERY="$pre_member_query" python3 - <<'PYCHECK'
+import json,os,sys
+try:
+    values=[str(b.get('o','')) for b in json.loads(os.environ['QUERY']).get('result',{}).get('bindings',[])]
+    sys.exit(0 if values == ['"Before approval"'] else 1)
+except Exception: sys.exit(1)
+PYCHECK
+then ok "N2 holds the exact historical SWM triple from catch-up"
+else fail "N2 missed historical SWM data after catch-up: $pre_member_query"
 fi
 
-hr "Step 8 — N3 (never allowlisted) tries the same CG (expect: refused + no phantom)"
-sub3_resp=$(api "$N3" POST /api/subscribe "$subscribe_body")
-note "N3 subscribe response: $sub3_resp"
-poll_catchup "$N3" "$CG_ID" refused 90 || fail "N3's catch-up was not refused"
+hr "Step 7b — N2 learns its curator and approved membership"
+participants_ok=no
+for attempt in $(seq 1 30); do
+  participants_resp=$(api "$N2" GET "/api/context-graph/$ENC_CG/participants")
+  if N1_AGENT="$N1_ADDR" N2_AGENT="$N2_ADDR" PARTICIPANTS="$participants_resp" python3 - <<'PYCHECK'
+import json,os,sys
+try:
+    want={os.environ['N1_AGENT'].lower(),os.environ['N2_AGENT'].lower()}
+    got={str(a).lower() for a in json.loads(os.environ['PARTICIPANTS']).get('allowedAgents',[])}
+    sys.exit(0 if want <= got else 1)
+except Exception: sys.exit(1)
+PYCHECK
+  then participants_ok=yes; break; fi
+  sleep 5
+done
+[ "$participants_ok" = yes ] || fail "N2 did not receive approved private membership: $participants_resp"
+ok "N2 knows its curator and approved agent"
+
+hr "Step 7c — curator shares a fresh KA; N2 must receive its exact SWM triple"
+STAMP=$(date +%s)
+SUBJECT="urn:invite-flow:${STAMP}"
+share_body=$(CG="$CG_ID" SUBJECT="$SUBJECT" STAMP="$STAMP" python3 - <<'PYBODY'
+import json,os
+print(json.dumps({
+  'contextGraphId':os.environ['CG'],
+  'name':'invite-flow-'+os.environ['STAMP'],
+  'quads':[{'subject':os.environ['SUBJECT'],
+            'predicate':'http://schema.org/name','object':'"Approved member data"','graph':''}],
+  'finalize':True,'alsoShareSwm':True,
+}))
+PYBODY
+)
+share_resp=$(api "$N1" POST /api/knowledge-assets "$share_body")
+[ "$(echo "$share_resp" | jq_field swmShared)" = True ] || fail "curator SWM share did not complete: $share_resp"
+[ -n "$(echo "$share_resp" | jq_field shareOperationId)" ] || fail "curator share lacks operation id: $share_resp"
+ok "curator shared one finalized KA into the private graph"
+
+query_body=$(CG="$CG_ID" SUBJECT="$SUBJECT" python3 - <<'PYQUERY'
+import json,os
+print(json.dumps({'contextGraphId':os.environ['CG'],'graphSuffix':'_shared_memory',
+  'sparql':f'SELECT ?o WHERE {{ <{os.environ["SUBJECT"]}> <http://schema.org/name> ?o }}'}))
+PYQUERY
+)
+member_has_exact=no
+for attempt in $(seq 1 30); do
+  member_query=$(api "$N2" POST /api/query "$query_body")
+  if QUERY="$member_query" python3 - <<'PYCHECK'
+import json,os,sys
+try:
+    values=[str(b.get('o','')) for b in json.loads(os.environ['QUERY']).get('result',{}).get('bindings',[])]
+    sys.exit(0 if values == ['"Approved member data"'] else 1)
+except Exception: sys.exit(1)
+PYCHECK
+  then member_has_exact=yes; break; fi
+  sleep 5
+done
+[ "$member_has_exact" = yes ] || fail "N2 did not receive exact private SWM triple: $member_query"
+ok "N2 holds the curator's exact private SWM triple"
+
+hr "Step 8 — N3 is refused and has no private SWM triple"
+outsider_refused=no
+for attempt in $(seq 1 30); do
+  sub3_resp=$(api "$N3" POST /api/context-graph/subscribe "$subscribe_body")
+  if [ "$(echo "$sub3_resp" | jq_field code)" = CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE ]; then
+    sleep 5
+    continue
+  fi
+  sub3_error=$(echo "$sub3_resp" | jq_field error)
+  case "$sub3_error" in
+    *"not authorized"*|*"invite you first"*) outsider_refused=yes; break ;;
+  esac
+  if [ "$(echo "$sub3_resp" | jq_field subscribed)" = "$CG_ID" ]; then
+    outside_catchup=$(api "$N3" GET "/api/sync/catchup-status?contextGraphId=$CG_ID")
+    outside_status=$(echo "$outside_catchup" | jq_field status)
+    if [ "$outside_status" = denied ]; then
+      [ "$(echo "$outside_catchup" | jq_field result.dataSynced)" = 0 ] &&
+      [ "$(echo "$outside_catchup" | jq_field result.sharedMemorySynced)" = 0 ] ||
+        fail "N3 received private data before denial: $outside_catchup"
+      outsider_refused=yes
+      break
+    fi
+    [ "$outside_status" != done ] || fail "N3 caught up to private data: $outside_catchup"
+    sleep 5
+    continue
+  fi
+  fail "N3 subscription was not an authorization refusal: $sub3_resp"
+done
+[ "$outsider_refused" = yes ] || fail "N3 never returned an explicit authorization refusal: $sub3_resp"
+ok "N3's subscription was refused by the private graph's agent gate"
+outside_query=$(api "$N3" POST /api/query "$query_body")
+if QUERY="$outside_query" python3 - <<'PYCHECK'
+import json,os,sys
+try:
+    bindings=json.loads(os.environ['QUERY']).get('result',{}).get('bindings',[])
+    sys.exit(0 if len(bindings)==0 else 1)
+except Exception: sys.exit(1)
+PYCHECK
+then ok "N3's public query cannot read private SWM"; else fail "outsider N3 read private SWM: $outside_query"; fi
+curator_live_count=$(store_subject_count 1 "$SUBJECT") || fail "cannot inspect curator's live SWM store"
+[ "$curator_live_count" -ge 1 ] || fail "curator's live SWM subject is absent from its backing store"
+outsider_before_count=$(store_subject_count 3 "$PRE_SUBJECT") || fail "cannot inspect N3's historical SWM store"
+outsider_live_count=$(store_subject_count 3 "$SUBJECT") || fail "cannot inspect N3's live SWM store"
+[ "$outsider_before_count" = 0 ] && [ "$outsider_live_count" = 0 ] ||
+  fail "N3 physically stored private SWM despite denial (historical=$outsider_before_count live=$outsider_live_count)"
+ok "N3's backing store has neither private SWM subject"
 n3_sees=$(list_has_cg "$N3" "$CG_ID")
-if [ "$n3_sees" = "no" ]; then
-  ok "N3's project list correctly omits the inaccessible CG"
-else
-  fail "N3 has a phantom entry for '$CG_ID'"
-  list_cg_state "$N3" "$CG_ID"
-fi
+[ "$n3_sees" = no ] || fail "N3 has a phantom graph entry after refusal: $(list_cg_state "$N3" "$CG_ID")"
+ok "N3 has no phantom graph entry"
 
 hr "Done."
-echo "CG id used: $CG_ID"
+echo "Registered CG id used: $CG_ID"

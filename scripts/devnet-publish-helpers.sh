@@ -196,13 +196,14 @@ devnet_create_shared_ka() {
         process.stdin.on("end", () => {
           try {
             const j = JSON.parse(d);
-            const errors = j.errors;
-            const transient = (value) => typeof value === "string"
-              && value.includes("[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable");
+            // A sealed asset can safely retry the share transition by name;
+            // never re-run create or depend on human-readable error wording.
+            // The loop remains bounded and accepts only a publish-ready share.
             const retryable = process.env.RESUME_SHARE === "1"
-              ? transient(j.error)
-              : Array.isArray(errors) && errors.length > 0
-                && !j.error && errors.every((entry) => transient(entry?.error));
+              ? typeof j.error === "string" && j.error.length > 0
+              : j.created === true && j.status === "wm-sealed"
+                && !j.error && Array.isArray(j.errors) && j.errors.length > 0
+                && j.errors.every((entry) => entry?.phase === "swm-share" && typeof entry.error === "string");
             process.exit(retryable ? 0 : 1);
           } catch { process.exit(1); }
         });
