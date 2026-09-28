@@ -152,9 +152,9 @@ if [ "${SKIP_SOAK:-0}" != "1" ]; then
   register "libp2p-soak-short" "soak" \
     "env DKG_HOME=$DEVNET_DIR/node1 API=http://127.0.0.1:$API_PORT_BASE RECIPIENT_API=http://127.0.0.1:$((API_PORT_BASE + 1)) RECIPIENT_AUTH_FILE=$DEVNET_DIR/node2/auth.token RECIPIENT_PEER_ID=$SOAK_RECIPIENT_PEER RECIPIENT=devnet-node-2 SENDER_TAG=rc12 TOTAL_CYCLES=$SOAK_LIBP2P_CYCLES INTERVAL_S=60 $REPO_ROOT/scripts/libp2p-soak-test.sh"
 
-  # Use a fresh registered curated graph and two member daemons. The
-  # bootstrap graph ids do not carry finalized catalog authority, so their
-  # SWM API reads can be denied even when a local write was accepted.
+  # Use a fresh unregistered public graph and two peer daemons. The
+  # registered catalog path is exercised by the RFC-49/64 suites; this
+  # soak measures SWM transport on a proven cross-peer scoped view.
   register "swm-soak-short" "soak" \
     "env DEVNET_DIR=$DEVNET_DIR API_PORT_BASE=$API_PORT_BASE SOAK_SWM_CYCLES=$SOAK_SWM_CYCLES SWM_SOAK_RESULTS=$RESULTS/swm-soak-gate $REPO_ROOT/scripts/devnet-swm-soak-gate.sh"
 
