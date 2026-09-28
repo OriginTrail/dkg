@@ -204,6 +204,63 @@ describe('RFC-64 unchanged repair backoff', () => {
     expect(f.reconcile).toHaveBeenCalledTimes(2);
   });
 
+  it.each(['cooldown', 'in-flight'])('retains an unknown public mutation through %s with periodic retries disabled', async (phase) => {
+    const f = fixture(0);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    if (phase === 'in-flight') {
+      f.reconcile.mockImplementationOnce(async () => { await gate; throw new Error('head A failed'); });
+    }
+    f.request();
+    if (phase === 'cooldown') await f.owner.whenIdle();
+    f.setRevision('scope-1:head-2');
+    f.readRevision.mockImplementation(() => { throw new Error('hint temporarily unavailable'); });
+    for (let i = 0; i < 10; i++) expect(f.request()).toBe(true);
+    release();
+    await f.owner.whenIdle();
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+    expect(f.owner.status()?.repairs[0]).toMatchObject({ consecutiveFailures: 1, nextAttemptAtMs: 5_000 });
+    await f.advance(4_999);
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+    f.readRevision.mockImplementation(() => 'scope-1:head-2');
+    await f.advance(1);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    await f.advance(60_000);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('cancels an unknown public mutation deadline on close', async () => {
+    const f = fixture(0);
+    f.request();
+    await f.owner.whenIdle();
+    f.readRevision.mockImplementation(() => { throw new Error('hint unavailable'); });
+    f.request();
+    await f.owner.whenIdle();
+    expect(vi.getTimerCount()).toBe(1);
+    await f.owner.close();
+    expect(vi.getTimerCount()).toBe(0);
+    await f.advance(60_000);
+    expect(f.reconcile).toHaveBeenCalledTimes(1);
+  });
+
+  it('retains an unknown mutation received while the previous public attempt succeeds', async () => {
+    const f = fixture(0);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    f.reconcile.mockImplementationOnce(async () => { await gate; return null; });
+    f.request();
+    f.setRevision('scope-1:head-2');
+    f.readRevision.mockImplementation(() => { throw new Error('hint unavailable'); });
+    f.request();
+    release();
+    await f.owner.whenIdle();
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    await f.advance(60_000);
+    expect(f.reconcile).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('cancels cooldown on close and starts fresh after the same owner restarts', async () => {
     const f = fixture();
     f.request();

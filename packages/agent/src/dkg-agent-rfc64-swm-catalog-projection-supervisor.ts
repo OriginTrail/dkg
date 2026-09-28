@@ -74,6 +74,7 @@ interface MutableAuthorRepairStatusV1 {
   lastError: string | null;
   updatedAtMs: number | null;
   dirty: boolean;
+  pendingUnknownRequest: boolean;
   diagnostic: Readonly<CatalogRepairDiagnosticV1> | null;
   readonly retry: CatalogRepairRetryV1;
 }
@@ -82,6 +83,7 @@ interface ProjectionSupervisorStateV1 {
   readonly retryIntervalMs?: number;
   readonly repairs: MutableAuthorRepairStatusV1[];
   readonly runner: CoalescingRecurringTask;
+  publicMutationTimer: ReturnType<typeof setTimeout> | undefined;
   readonly finalizedPrivateRunner: CoalescingRecurringTask;
   readonly finalizedPrivateAttemptWaiters: Map<string, Set<() => void>>;
   finalizedPrivateWaiterTimer: ReturnType<typeof setTimeout> | undefined;
@@ -246,8 +248,17 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       repair = newPendingRepairV1(params.contextGraphId, params.authorAddress);
       state.repairs.push(repair);
     }
-    this.#observeRevision(repair.retry, repair.contextGraphId, repair.authorAddress);
-    if (!repair.retry.eligible(Date.now())) return true;
+    const changed = this.#observeRevision(repair.retry, repair.contextGraphId, repair.authorAddress);
+    if (changed === undefined) {
+      repair.pendingUnknownRequest = true;
+      repair.dirty = true;
+    }
+    if (!repair.retry.eligible(Date.now())) {
+      // A cheap pass arms the pending mutation's deadline without admitting
+      // canonical store work before the unchanged failure cooldown expires.
+      if (repair.pendingUnknownRequest) state.runner.request();
+      return true;
+    }
     repair.dirty = true;
     return state.runner.request();
   }
@@ -299,7 +310,9 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       retryIntervalMs: state.retryIntervalMs ?? 0,
       lastPassStartedAtMs: state.lastPassStartedAtMs,
       lastPassCompletedAtMs: state.lastPassCompletedAtMs,
-      repairs: Object.freeze(state.repairs.map(({ dirty: _dirty, retry, ...repair }) => (
+      repairs: Object.freeze(state.repairs.map(({
+        dirty: _dirty, pendingUnknownRequest: _pendingUnknownRequest, retry, ...repair
+      }) => (
         Object.freeze({ ...repair, consecutiveFailures: retry.consecutiveFailures,
           nextAttemptAtMs: retry.nextAttemptAtMs })
       ))),
@@ -316,6 +329,8 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     this.#admissionClosed = true;
     const state = this.#state;
     if (state === undefined) return;
+    clearTimeout(state.publicMutationTimer);
+    state.publicMutationTimer = undefined;
     clearTimeout(state.finalizedPrivateWaiterTimer);
     state.finalizedPrivateWaiterTimer = undefined;
     await Promise.all([state.runner.close(), state.finalizedPrivateRunner.close()]);
@@ -336,7 +351,13 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     let state!: ProjectionSupervisorStateV1;
     const runner = new CoalescingRecurringTask({
       retryIntervalMs,
-      runPass: (signal) => this.#runPass(state, signal),
+      runPass: async (signal) => {
+        try {
+          await this.#runPass(state, signal);
+        } finally {
+          this.#schedulePublicMutationWake(state);
+        }
+      },
       onError: (error) => {
         this.#dependencies.warn(
           ctx,
@@ -384,6 +405,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       retryIntervalMs,
       repairs,
       runner,
+      publicMutationTimer: undefined,
       finalizedPrivateRunner,
       finalizedPrivateAttemptWaiters: new Map(),
       finalizedPrivateWaiterTimer: undefined,
@@ -462,6 +484,29 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     if (waiters !== undefined) for (const settle of waiters) settle();
   }
 
+  /** Retain explicit mutations whose revision hint was unavailable, even in one-pass mode. */
+  #schedulePublicMutationWake(state: ProjectionSupervisorStateV1): void {
+    clearTimeout(state.publicMutationTimer);
+    state.publicMutationTimer = undefined;
+    if (this.#state !== state || this.#admissionClosed || state.runner.closed) return;
+    let earliest = Infinity;
+    for (const repair of state.repairs) {
+      if (repair.pendingUnknownRequest) {
+        earliest = Math.min(earliest, repair.retry.nextAttemptAtMs ?? Date.now());
+      }
+    }
+    if (!Number.isFinite(earliest)) return;
+    state.publicMutationTimer = setTimeout(() => {
+      state.publicMutationTimer = undefined;
+      if (this.#state !== state || this.#admissionClosed || state.runner.closed) return;
+      for (const repair of state.repairs) {
+        if (repair.pendingUnknownRequest) repair.dirty = true;
+      }
+      state.runner.request();
+    }, Math.min(2_147_483_647, Math.max(0, earliest - Date.now())));
+    state.publicMutationTimer.unref?.();
+  }
+
   /** Accepted cooldown requests need one wake even when periodic retries are disabled. */
   #schedulePrivateWaiterWake(state: ProjectionSupervisorStateV1, minimumDelayMs: number): void {
     clearTimeout(state.finalizedPrivateWaiterTimer);
@@ -496,14 +541,14 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     retry: CatalogRepairRetryV1,
     contextGraphId: ContextGraphIdV1,
     authorAddress: EvmAddressV1,
-  ): boolean {
+  ): boolean | undefined {
     try {
       const active = this.#dependencies.acceptsPublicRootLane(contextGraphId);
       return retry.observe(active
         ? this.#dependencies.readRepairRevision(contextGraphId, authorAddress) : null);
     } catch {
       // A hint failure must not reject the mutation caller or reset its cooldown.
-      return false;
+      return undefined;
     }
   }
 
@@ -521,6 +566,9 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
     retryIntervalMs: number | undefined,
     signal: AbortSignal,
   ): Promise<void> {
+    // Consume only at actual admission. A newer unknown mutation received
+    // during this attempt must survive both its success and failure paths.
+    repair.pendingUnknownRequest = false;
     this.#observeRevision(repair.retry, repair.contextGraphId, repair.authorAddress);
     const attemptGeneration = repair.retry.generation;
     repair.attempts += 1;
@@ -563,7 +611,7 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       if (repair.retry.fail(attemptGeneration, Date.now(), retryIntervalMs)) {
         // Duplicate same-head wakes received while this attempt was active do
         // not get to bypass the newly established failure deadline.
-        repair.dirty = false;
+        repair.dirty = repair.pendingUnknownRequest;
       } else {
         repair.dirty = true;
         // A head may change without an explicit notification while draining.
@@ -617,6 +665,7 @@ function newPendingRepairV1(
     lastError: null,
     updatedAtMs: null,
     dirty: true,
+    pendingUnknownRequest: false,
     diagnostic: null,
     retry: new CatalogRepairRetryV1(),
   };
