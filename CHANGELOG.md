@@ -19,12 +19,12 @@ members of public graphs that were never registered on chain keep Shared
 Working Memory after their join is approved, even across a restart, and
 auto-update applies on nodes that restart often.
 
-Members of private Context Graphs again receive the curator's Shared Working
-Memory after joining. A Knowledge Asset update now triggers a bounded refresh
-of confirmed Verifiable Memory copies on other holders, including after a
-member restarts. A private share can reach a member added by address once its
-profile is reachable, a refused outsider receives a clear result, and brief
-store or PCA funding-read outages no longer make eligible work fail permanently.
+Members pick up the update from the chain update event. A Knowledge Asset
+update now triggers a bounded refresh of confirmed Verifiable Memory copies
+on other holders, including after a member restarts. A private share can reach
+a member added by address once its profile is reachable, a refused outsider
+receives a clear result, and brief store or PCA funding-read outages no longer
+make eligible work fail permanently.
 **No smart-contract, ABI, wire-protocol or deployment registry changes are
 required.**
 
@@ -40,7 +40,7 @@ required.**
 | Managed Oxigraph runs under the parent watchdog on Linux and macOS, also without memory limits, and the daemon records each launch's owner in the store directory (#2775) | The daemon's stop and restart signals reach Oxigraph through the watchdog's process group, so a worker the supervisor kills no longer leaves Oxigraph holding the store. On the first start after upgrading, a node stops an orphaned Oxigraph from an earlier release that runs this node's store and was reparented to PID 1 | None. A lock holder the daemon cannot attribute to this node is logged and left running; stop it by hand if the node then cannot start |
 | A public graph that was never registered on chain keeps plaintext Shared Working Memory after a join approval (#2827) | SWM on such a graph works in both directions only when the curator and its members all run 10.0.20. A 10.0.19 member still rejects the curator's plaintext shares and cannot share itself. Sender Key setup gains the terminal reason `agent-gate-unavailable`, returned when the receiver cannot evaluate its agent gate without a software or configuration change; older senders already treat unknown reasons as terminal | Upgrade every node that takes part in such a graph |
 | A Knowledge Asset update refreshes other holders' confirmed Verifiable Memory copies from the `KnowledgeAssetUpdated` chain event (#2858) | Each stale held asset needs one chain-root read and an exact fetch from a holder. Pending refresh work is replayed after restart; a target that remains unsettled for 24 hours in one process is given up with a warning | Monitor `vmPromotion.refresh` in `/api/status`. If a target is given up, explicitly fetch the asset or wait for its next update |
-| Members pick up a curated graph's update from the chain update event (#2858) | A 10.0.19 member can retain the earlier version until it upgrades | Upgrade members of a curated graph with its curator |
+| Members pick up the update from the chain update event (#2858) | 10.0.20 members pick up the update from the chain update event | Upgrade participating members |
 | An inconclusive PCA funding read is retryable (#2868) | A failed funding RPC read no longer means that the wallet has insufficient funds. Async publishing retries it, and synchronous `/vm/publish` returns a retryable 503 rather than a generic 500 | Retry a 503 after `Retry-After`; investigate sustained RPC unavailability. A confirmed shortfall remains terminal |
 
 ### Known issues
@@ -76,12 +76,7 @@ required.**
 
 ### Fixed
 
-- **Members of a private Context Graph receive the curator's Shared Working
-  Memory and its updates** (#2858): the default RFC-64 selection closed the
-  earlier root-scope member lane even where its private catalog authority was
-  inactive. A joined member could lose the curator's shares and recovery of
-  the graph's root. The member lane now remains available for a member proven
-  by the graph's own metadata until RFC-64 can deliver that private root.
+- **Members pick up the update from the chain update event** (#2858).
 - **Verifiable Memory refreshes after a Knowledge Asset update** (#2858): a
   holder of an earlier confirmed copy no longer keeps that version indefinitely.
   The chain update event queues a refresh, compares the local and chain roots
@@ -347,7 +342,6 @@ required.**
 
 ### Changed
 
-- Members pick up a curated graph's update from the chain update event (#2858).
 - On a node run from a source checkout without `build-info.json`, `/api/status`
   reports the full 40-character `commit`; `commitShort` is unchanged (#2753).
 
