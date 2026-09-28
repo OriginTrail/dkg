@@ -10,7 +10,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
-import { recordVmPublishSnapshotPreflightFailure } from './vm-publish-snapshot-preflight-diagnostics.js';
+import { preflightKnowledgeAssetVmPublishSnapshot } from './vm-publish-snapshot-preflight.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -116,8 +116,6 @@ import {
   createTripleStore,
   loadSharedMemoryQuadsForScope,
   canonicalSharedMemoryScopeWriteGraph,
-  isStoreOperationTimeoutError,
-  isStoreSchedulerBusyError,
   type SharedMemoryGraphScope,
   type TripleStore,
   type TripleStoreConfig,
@@ -142,15 +140,11 @@ import {
   canonicalPublishPayload,
   generatedPrivateCatalogTripleKeys,
   appendMissingGeneratedPrivateCatalogFloor,
-  createKnowledgeAssetVmPublishSnapshotMetadata,
-  createKnowledgeAssetVmPublishSnapshotRequest,
-  resolveLiftWorkspaceSlice,
   resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
   workspaceHeadIncludesShareOperationId,
   KnowledgeAssetOperationPublicSnapshotNotFoundError,
   workspacePublicQuadsDigest,
-  validateLiftPublishPayload,
   subtractFinalizedExactQuads,
   TripleStoreAsyncLiftPublisher,
   TripleStoreAsyncPromoteQueue,
@@ -4756,43 +4750,9 @@ export class PublishMethods extends DKGAgentBase {
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
   ): Promise<void> {
-    const startedAt = performance.now();
-    const snapshot = createKnowledgeAssetVmPublishSnapshotRequest(request);
-    const snapshotMetadata = createKnowledgeAssetVmPublishSnapshotMetadata(request);
-    try {
-      const resolved = await resolveLiftWorkspaceSlice({
-        store: this.store,
-        graphManager: new GraphManager(this.store),
-        request: snapshot,
-        publicSnapshotStore: this.publicSnapshotStore,
-      });
-      validateLiftPublishPayload({
-        request: snapshot,
-        metadata: snapshotMetadata,
-        resolved,
-      });
-      if (resolved.quads.length === 0 && (resolved.privateQuads ?? []).length === 0) {
-        throw new Error(
-          `No queued shared-memory snapshot quads for context graph ${request.contextGraphId} ` +
-            `share operation ${request.shareOperationId}`,
-        );
-      }
-    } catch (err) {
-      recordVmPublishSnapshotPreflightFailure({
-        store: this.store, log: this.log, error: err, elapsedMs: performance.now() - startedAt,
-      });
-      if (err instanceof LegacyKnowledgeAssetReadOnlyError) throw err;
-      // A failed read proves nothing about snapshot validity. Preserve the typed
-      // store failure so admission can retry the same immutable share after recovery.
-      if (isStoreSchedulerBusyError(err) || isStoreOperationTimeoutError(err)) throw err;
-      const wrapped = new Error(
-        `Cannot enqueue VM publish for "${request.name}" because share snapshot ` +
-          `${request.shareOperationId} is unavailable or stale. Re-share the knowledge asset before enqueueing: ` +
-          (err instanceof Error ? err.message : String(err)),
-      );
-      (wrapped as Error & { code?: string }).code = 'PUBLISH_INTENT_STALE';
-      throw wrapped;
-    }
+    return preflightKnowledgeAssetVmPublishSnapshot({
+      store: this.store, publicSnapshotStore: this.publicSnapshotStore, log: this.log, request,
+    });
   }
 
   async preflightQueuedKnowledgeAssetVmPublishExecution(

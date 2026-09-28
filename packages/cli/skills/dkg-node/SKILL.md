@@ -800,7 +800,7 @@ dkg agent publish-profile   # retry after a partial-success rotate/revoke
 
 ### Async publishing (job queue)
 
-Use the job queue for bulk or long-running publishes, publishes that must survive the client session, or when the daemon should hold its own signing wallet. For small interactive publishes, use the synchronous per-KA `POST /api/knowledge-assets/{name}/vm/publish` instead.
+Use the job queue for bulk or long-running publishes, publishes that must survive the client session, or when the daemon should hold its own signing wallet. For small interactive publishes, use the synchronous per-KA `POST /api/knowledge-assets/{name}/vm/publish` instead. Snapshot-read backpressure returns `503` with `STORE_SCHEDULER_BUSY` or `STORE_OPERATION_TIMEOUT`, `retryable: true`, `Retry-After: 1`, and `jobCreated: false` before enqueue. Retry the same request without re-sharing. This marker describes this request, not earlier jobs; it is omitted once enqueue starts. Store `outcome` remains separate. Genuine stale snapshots still return `409 PUBLISH_INTENT_STALE`. See `docs/use-dkg/async-publisher-wallets.md` for the admission contract.
 
 CLI equivalents:
 
@@ -827,8 +827,6 @@ Async publisher wallets need native gas plus PCA agent registration or TRAC for 
 | `POST` | `/api/publisher/retry` | Reaccept every failed job that is safe to re-run. Body: `{ status: "failed" }`. Returns `200 { retried, blockedPendingRecovery, skipped }` — three counts that partition the failed jobs: reaccepted, left failed because a transaction may exist (awaiting chain proof or owned by recovery), and left failed with nothing to retry (terminal failure or spent retry budget). |
 | `POST` | `/api/publisher/clear` | Clear completed/failed jobs in BULK (`dkg publisher clear <status>`). Safe by default: it skips a failed job that is still held for chain proof and still owns its KA's lifecycle — deleting that record is what would let the next re-submit publish the same KA a second time. |
 | `POST` | `/api/publisher/clear-job` | Clear ONE terminal job by id: `{ jobId }` → `{ outcome: "cleared" \| "already_absent" }`. The deliberate override for a job bulk clear skips — you name the job and take the decision. |
-
-Before a VM publish job is enqueued, snapshot reads can return `503` with `code: "STORE_SCHEDULER_BUSY"` or `"STORE_OPERATION_TIMEOUT"`, `retryable: true`, `Retry-After: 1`, and `jobCreated: false`. Retry the same request after the store recovers; do not re-share valid content. `jobCreated: false` means this request did not reach enqueue, not that no earlier job exists for the KA. The separate `outcome` describes the store operation (`not_started` or `indeterminate`); even an indeterminate read can reject before job creation. A genuine snapshot mismatch still returns `409 PUBLISH_INTENT_STALE`. Once enqueue begins, a store failure omits `jobCreated` because a job may already have been persisted.
 
 #### Retry behaviour and its knobs (`config.publisher`)
 

@@ -11,13 +11,21 @@ import {
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
 import {
+  computeFlatKCRootV10,
   storeKnowledgeAssetOperationPublicQuads,
   type KnowledgeAssetVmPublishRequest,
 } from '@origintrail-official/dkg-publisher';
-import {
-  CG, KA_UAL, MEMBER, MERKLE, NAME, PUBLIC_QUAD, RESERVED_KA_ID, stubAgent,
-} from './_helpers/foreign-author-resolution-fixtures.js';
+import { preflightKnowledgeAssetVmPublishSnapshot } from '../src/vm-publish-snapshot-preflight.js';
 
+const CG = 'preflight';
+const NAME = 'snapshot-preflight';
+const MEMBER = '0xA32f1cc125401B55911678847426759094055B2d';
+const KA_UAL = `did:dkg:hardhat:31337/${MEMBER}/7`;
+const RESERVED_KA_ID = (BigInt(MEMBER) << 96n) | 7n;
+const PUBLIC_QUAD = {
+  subject: 'urn:preflight:subject', predicate: 'urn:preflight:predicate', object: '"value"', graph: '',
+};
+const MERKLE = computeFlatKCRootV10([PUBLIC_QUAD], []);
 const stores: OxigraphStore[] = [];
 
 afterEach(async () => {
@@ -50,8 +58,8 @@ async function fixture() {
     sealFinalizedAtIso: '2026-01-01T00:00:00.000Z', sealMerkleRoot,
     intentKey: `sha256:${'ab'.repeat(32)}`,
   };
-  // Exercise the actual composed DKGAgent method without starting networking.
-  return { store, graphManager, request, agent: stubAgent(store, MEMBER) };
+  const log = { warn: vi.fn(), debug: vi.fn() };
+  return { store, graphManager, request, log };
 }
 
 const typedFailures = [
@@ -68,57 +76,57 @@ const typedFailures = [
 
 describe('GH#2824 immutable VM publish snapshot admission', () => {
   it.each(typedFailures)('preserves %s and retries the identical intent after recovery', async (_label, makeFailure) => {
-    const { store, agent, request } = await fixture();
+    const { store, log, request } = await fixture();
     const before = JSON.stringify(request);
     const failure = makeFailure();
     vi.spyOn(store, 'query').mockRejectedValueOnce(failure);
 
-    await expect(agent.preflightKnowledgeAssetVmPublishSnapshot(request)).rejects.toBe(failure);
-    await expect(agent.preflightKnowledgeAssetVmPublishSnapshot(request)).resolves.toBeUndefined();
+    await expect(preflightKnowledgeAssetVmPublishSnapshot({ store, log, request })).rejects.toBe(failure);
+    await expect(preflightKnowledgeAssetVmPublishSnapshot({ store, log, request })).resolves.toBeUndefined();
     expect(JSON.stringify(request)).toBe(before);
   });
 
   it.each(typedFailures)('preserves a structural %s across package boundaries', async (_label, makeFailure) => {
-    const { store, agent, request } = await fixture();
+    const { store, log, request } = await fixture();
     const original = makeFailure();
     const failure = { ...original, message: original.message };
     expect(failure).not.toBeInstanceOf(Error);
     vi.spyOn(store, 'query').mockRejectedValueOnce(failure);
 
-    await expect(agent.preflightKnowledgeAssetVmPublishSnapshot(request)).rejects.toBe(failure);
+    await expect(preflightKnowledgeAssetVmPublishSnapshot({ store, log, request })).rejects.toBe(failure);
   });
 
   it('keeps a genuinely absent snapshot stale', async () => {
-    const { store, graphManager, agent, request } = await fixture();
+    const { store, graphManager, log, request } = await fixture();
     await store.dropGraph(graphManager.sharedMemoryMetaUri(CG));
 
-    await expect(agent.preflightKnowledgeAssetVmPublishSnapshot(request)).rejects.toMatchObject({
+    await expect(preflightKnowledgeAssetVmPublishSnapshot({ store, log, request })).rejects.toMatchObject({
       code: 'PUBLISH_INTENT_STALE', message: expect.stringContaining('Re-share'),
     });
   });
 
   it('keeps changed immutable snapshot bytes stale', async () => {
-    const { store, agent, request } = await fixture();
+    const { store, log, request } = await fixture();
     const graph = workspaceKnowledgeAssetOperationSnapshotGraph(CG, request.shareOperationId);
     await store.dropGraph(graph);
     await store.insert([{ ...PUBLIC_QUAD, object: '"changed after share"', graph }]);
 
-    await expect(agent.preflightKnowledgeAssetVmPublishSnapshot(request)).rejects.toMatchObject({
+    await expect(preflightKnowledgeAssetVmPublishSnapshot({ store, log, request })).rejects.toMatchObject({
       code: 'PUBLISH_INTENT_STALE', message: expect.stringContaining('Re-share'),
     });
   });
 
   it('keeps a queued triple-count mismatch stale', async () => {
-    const { agent, request } = await fixture();
-    await expect(agent.preflightKnowledgeAssetVmPublishSnapshot({ ...request, publicTripleCount: 2 }))
+    const { store, log, request } = await fixture();
+    await expect(preflightKnowledgeAssetVmPublishSnapshot({ store, log, request: { ...request, publicTripleCount: 2 } }))
       .rejects.toMatchObject({ code: 'PUBLISH_INTENT_STALE' });
   });
 
   it('preserves the existing legacy read-only exception', async () => {
-    const { store, agent, request } = await fixture();
+    const { store, log, request } = await fixture();
     const failure = new LegacyKnowledgeAssetReadOnlyError();
     vi.spyOn(store, 'query').mockRejectedValueOnce(failure);
-    await expect(agent.preflightKnowledgeAssetVmPublishSnapshot(request)).rejects.toBe(failure);
+    await expect(preflightKnowledgeAssetVmPublishSnapshot({ store, log, request })).rejects.toBe(failure);
   });
 
   it.each([
@@ -126,15 +134,15 @@ describe('GH#2824 immutable VM publish snapshot admission', () => {
     Object.assign(new Error('unrelated retryable validation failure'), { retryable: true }),
     Object.assign(new Error('untrusted partial busy shape'), { code: 'STORE_SCHEDULER_BUSY', retryable: true }),
   ])('does not infer storage retryability from text or incomplete markers: %s', async (failure) => {
-    const { store, agent, request } = await fixture();
+    const { store, log, request } = await fixture();
     vi.spyOn(store, 'query').mockRejectedValueOnce(failure);
-    await expect(agent.preflightKnowledgeAssetVmPublishSnapshot(request)).rejects.toMatchObject({
+    await expect(preflightKnowledgeAssetVmPublishSnapshot({ store, log, request })).rejects.toMatchObject({
       code: 'PUBLISH_INTENT_STALE',
     });
   });
 
   it.each(['busy', 'timeout'] as const)('records bounded, payload-free %s diagnostics', async (kind) => {
-    const { store, agent, request } = await fixture();
+    const { store, log, request } = await fixture();
     const secret = 'credential-private-query-payload';
     const failure = kind === 'busy'
       ? new StoreSchedulerBusyError('queue_wait_timeout', 'normal', secret, { cause: new Error(secret) })
@@ -149,14 +157,12 @@ describe('GH#2824 immutable VM publish snapshot admission', () => {
         backgroundQueued: secret, query: secret,
       }),
     });
-    agent.log.warn = vi.fn();
-    agent.log.debug = vi.fn();
     vi.spyOn(store, 'query').mockRejectedValueOnce(failure);
 
-    await expect(agent.preflightKnowledgeAssetVmPublishSnapshot(request)).rejects.toBe(failure);
-    expect(agent.log.warn).toHaveBeenCalledTimes(1);
-    expect(agent.log.debug).not.toHaveBeenCalled();
-    const diagnostic = JSON.parse(agent.log.warn.mock.calls[0][1]);
+    await expect(preflightKnowledgeAssetVmPublishSnapshot({ store, log, request })).rejects.toBe(failure);
+    expect(log.warn).toHaveBeenCalledTimes(1);
+    expect(log.debug).not.toHaveBeenCalled();
+    const diagnostic = JSON.parse(log.warn.mock.calls[0][1]);
     expect(diagnostic).toEqual({
       event: 'vm_publish_snapshot_preflight_rejected', phase: 'snapshot_preflight',
       classification: kind === 'busy' ? 'store_busy' : 'store_timeout',
@@ -166,7 +172,7 @@ describe('GH#2824 immutable VM publish snapshot admission', () => {
       pressure: { normalInflight: 2, normalQueued: 3, maxConcurrent: 4 },
     });
     expect(diagnostic.elapsedMs).toBeGreaterThanOrEqual(0);
-    const rendered = JSON.stringify(agent.log.warn.mock.calls);
+    const rendered = JSON.stringify(log.warn.mock.calls);
     expect(rendered).not.toContain(secret);
     expect(rendered).not.toContain(request.name);
     expect(rendered).not.toContain(request.shareOperationId);
@@ -174,29 +180,27 @@ describe('GH#2824 immutable VM publish snapshot admission', () => {
   });
 
   it.each(['pressure', 'logger'] as const)('preserves the original failure when the %s diagnostic hook throws', async (hook) => {
-    const { store, agent, request } = await fixture();
+    const { store, log, request } = await fixture();
     const failure = new StoreSchedulerBusyError('queue_full', 'normal', 'query');
     const brokenHook = () => { throw new Error('observability failed'); };
     if (hook === 'pressure') {
       Object.defineProperty(store, 'getPressureSnapshot', { value: brokenHook });
     } else {
-      agent.log.warn = brokenHook;
+      log.warn.mockImplementation(brokenHook);
     }
     vi.spyOn(store, 'query').mockRejectedValueOnce(failure);
-    await expect(agent.preflightKnowledgeAssetVmPublishSnapshot(request)).rejects.toBe(failure);
+    await expect(preflightKnowledgeAssetVmPublishSnapshot({ store, log, request })).rejects.toBe(failure);
   });
 
   it.each(['stale', 'legacy'] as const)('keeps %s diagnostics below warning level', async (kind) => {
-    const { store, agent, request } = await fixture();
-    agent.log.warn = vi.fn();
-    agent.log.debug = vi.fn();
+    const { store, log, request } = await fixture();
     const failure = kind === 'legacy' ? new LegacyKnowledgeAssetReadOnlyError() : new Error('private detail');
     vi.spyOn(store, 'query').mockRejectedValueOnce(failure);
-    await expect(agent.preflightKnowledgeAssetVmPublishSnapshot(request)).rejects.toMatchObject({
+    await expect(preflightKnowledgeAssetVmPublishSnapshot({ store, log, request })).rejects.toMatchObject({
       code: kind === 'legacy' ? 'LEGACY_KA_READ_ONLY' : 'PUBLISH_INTENT_STALE',
     });
-    expect(agent.log.warn).not.toHaveBeenCalled();
-    expect(agent.log.debug).toHaveBeenCalledTimes(1);
-    expect(JSON.stringify(agent.log.debug.mock.calls)).not.toContain('private detail');
+    expect(log.warn).not.toHaveBeenCalled();
+    expect(log.debug).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(log.debug.mock.calls)).not.toContain('private detail');
   });
 });
