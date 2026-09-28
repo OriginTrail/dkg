@@ -29,8 +29,9 @@ asynchronous component export and returns terminal output or a diagnostic.
 The component wrapper calls the existing `dkg-runtime-wasm` kernel directly,
 so there is still one parser and execution implementation. The kernel's
 internal effect state is never exported through WIT. The component can invoke
-only the explicit `investigator` and `query-catalog` imports compiled into its
-world; there is no generic operation-name import or exported effect dispatcher.
+only the explicit `investigator`, `query-catalog`, and `remote-execute` imports
+compiled into its world; there is no generic operation-name import or exported
+effect dispatcher.
 
 Each explicit import is implemented by the host as a durable broker call. The
 host journals and authorizes the request before dispatch and returns the
@@ -41,9 +42,9 @@ then the broker returns or reconciles its journaled outcome.
 ## Authority
 
 The repository-owned component imports are the host-defined
-`execution-capability` resource and the explicit `investigator` and
-`query-catalog` tool interfaces. The host creates the capability from the exact
-admitted invocation and freezes a descriptor containing:
+`execution-capability` resource and the explicit `investigator`,
+`query-catalog`, and `remote-execute` tool interfaces. The host creates the
+capability from the exact admitted invocation and freezes a descriptor containing:
 
 - execution and invocation IDs, Context Graph, caller, Program IRI, source
   hash, plan hash, and output layer;

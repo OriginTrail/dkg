@@ -25,9 +25,15 @@ import {
 
 import { createInvestigatorAdapter } from './semantic-runtime-investigator-adapter.js';
 import { createDkgQueryAdapter } from './semantic-runtime-query-adapter.js';
+import { createRemoteExecuteAdapter } from './semantic-runtime-remote-execute-adapter.js';
+import {
+  createSafeLlmAdapter,
+  type SafeLlmProgram,
+} from './semantic-runtime-safe-llm-adapter.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const PROV = 'http://www.w3.org/ns/prov#';
+const RDFS = 'http://www.w3.org/2000/01/rdf-schema#';
 const XSD_DATE_TIME = 'http://www.w3.org/2001/XMLSchema#dateTime';
 const SR = 'https://origintrail.io/semantic-runtime/v1#';
 
@@ -40,6 +46,9 @@ export interface StoredSemanticProgram {
   version: string;
   source: string;
   requiredTools: string[];
+  permittedPrograms: string[];
+  label?: string;
+  description?: string;
 }
 
 export type SemanticMemoryLayer = 'wm' | 'swm' | 'vm';
@@ -76,8 +85,18 @@ export interface SemanticInvocationResult {
   executionIri: string;
   executionLayer: SemanticMemoryLayer;
   executionUal?: string;
+  outputs?: string[];
   persisted: true;
 }
+
+export type SemanticProgramChildInvoker = (input: {
+  contextGraphId: string;
+  programIri: string;
+  invocationId: string;
+  programLayer: SemanticMemoryLayer;
+  executionLayer: SemanticMemoryLayer;
+  callerAgentAddress: string;
+}) => Promise<SemanticInvocationResult>;
 
 export interface SemanticProgramForkResult {
   programIri: string;
@@ -162,13 +181,16 @@ export async function loadStoredSemanticProgram(
   validateSemanticMemoryLayer(programLayer, 'programLayer');
   const safeProgramIri = sparqlIri(programIri);
   const result = await agent.query(`
-    SELECT DISTINCT ?g ?language ?version ?source ?tool WHERE {
+    SELECT DISTINCT ?g ?language ?version ?source ?tool ?permittedProgram ?label ?description WHERE {
       GRAPH ?g {
         ${safeProgramIri} <${RDF_TYPE}> <${SR}Program> ;
           <${SR}language> ?language ;
           <${SR}version> ?version ;
           <${SR}source> ?source .
         OPTIONAL { ${safeProgramIri} <${SR}requiresTool> ?tool }
+        OPTIONAL { ${safeProgramIri} <${SR}permitsProgram> ?permittedProgram }
+        OPTIONAL { ${safeProgramIri} <${RDFS}label> ?label }
+        OPTIONAL { ${safeProgramIri} <${RDFS}comment> ?description }
       }
     }
   `, queryOptions(
@@ -191,6 +213,9 @@ export async function loadStoredSemanticProgram(
   const definitions = new Map<string, { language: string; version: string; source: string }>();
   const authors = new Set<string>();
   const requiredTools = new Set<string>();
+  const permittedPrograms = new Set<string>();
+  const labels = new Set<string>();
+  const descriptions = new Set<string>();
   for (const { row, authorAgentAddress } of rows) {
     const definition = {
       language: literalValue(row.language),
@@ -200,8 +225,11 @@ export async function loadStoredSemanticProgram(
     definitions.set(JSON.stringify(definition), definition);
     authors.add(authorAgentAddress);
     if (row.tool !== undefined) requiredTools.add(iriValue(row.tool));
+    if (row.permittedProgram !== undefined) permittedPrograms.add(iriValue(row.permittedProgram));
+    if (row.label !== undefined) labels.add(literalValue(row.label));
+    if (row.description !== undefined) descriptions.add(literalValue(row.description));
   }
-  if (definitions.size !== 1 || authors.size !== 1) {
+  if (definitions.size !== 1 || authors.size !== 1 || labels.size > 1 || descriptions.size > 1) {
     throw new SemanticProgramError(
       'PROGRAM_AMBIGUOUS',
       'Program has multiple definitions or authors',
@@ -223,6 +251,9 @@ export async function loadStoredSemanticProgram(
     authorAgentAddress: [...authors][0],
     ...definition,
     requiredTools: [...requiredTools].sort(),
+    permittedPrograms: [...permittedPrograms].sort(),
+    ...([...labels][0] ? { label: [...labels][0] } : {}),
+    ...([...descriptions][0] ? { description: [...descriptions][0] } : {}),
   };
 }
 
@@ -347,6 +378,12 @@ export async function forkStoredSemanticProgram(
     iriQuad(newProgramIri, `${PROV}wasDerivedFrom`, sourceProgramIri),
     ...source.requiredTools.map((toolIri) =>
       iriQuad(newProgramIri, `${SR}requiresTool`, toolIri)),
+    ...source.permittedPrograms.map((permittedProgram) =>
+      iriQuad(newProgramIri, `${SR}permitsProgram`, permittedProgram)),
+    ...(source.label ? [literalQuad(newProgramIri, `${RDFS}label`, source.label)] : []),
+    ...(source.description
+      ? [literalQuad(newProgramIri, `${RDFS}comment`, source.description)]
+      : []),
   ];
   const persistence = await persistProgramKnowledgeAsset(
     agent,
@@ -398,6 +435,8 @@ export async function invokeStoredSemanticProgram(
   config: SemanticRuntimeConfig | undefined,
   llmConfig?: LlmConfig,
   callerAgentAddress?: string,
+  executingAgentAddress?: string,
+  childInvoker?: SemanticProgramChildInvoker,
 ): Promise<SemanticInvocationResult> {
   validateSemanticMemoryLayer(programLayer, 'programLayer');
   validateSemanticMemoryLayer(executionLayer, 'executionLayer');
@@ -427,6 +466,8 @@ export async function invokeStoredSemanticProgram(
     config,
     llmConfig,
     callerAgentAddress,
+    executingAgentAddress,
+    childInvoker,
   );
   runtime.inFlight.set(key, { programLayer, executionLayer, promise: invocation });
   try {
@@ -453,6 +494,9 @@ async function resolveInternal(
   config: SemanticRuntimeConfig | undefined,
   llmConfig?: LlmConfig,
   callerAgentAddress?: string,
+  executingAgentAddress?: string,
+  executionLayer: SemanticMemoryLayer = 'vm',
+  childInvoker?: SemanticProgramChildInvoker,
 ): Promise<InternalResolution> {
   const program = await loadStoredSemanticProgram(
     agent,
@@ -473,7 +517,9 @@ async function resolveInternal(
       422,
     );
   }
-  const operatorAddress = program.authorAgentAddress;
+  const operatorAddress = executingAgentAddress
+    ? checksumAgentAddress(executingAgentAddress, 'INVALID_EXECUTING_WALLET')
+    : program.authorAgentAddress;
   const operatorIri = `did:dkg:agent:${operatorAddress}`;
   const policyIri = config?.operatorPolicyIri;
   if (!policyIri) {
@@ -532,9 +578,53 @@ async function resolveInternal(
   const offerRows = resultRows(offerResult).filter((row) =>
     isOperatorVmGraph(row.g, contextGraphId, operatorAddress));
 
+  const childPrograms = await Promise.all(program.permittedPrograms.map(async (childIri) => {
+    if (childIri === programIri) {
+      throw new SemanticProgramError('PROGRAM_SELF_PERMISSION', 'A Program cannot permit itself', 409);
+    }
+    return loadStoredSemanticProgram(
+      agent,
+      contextGraphId,
+      childIri,
+      programLayer,
+      callerAgentAddress,
+    );
+  }));
+  const safePrograms = childPrograms.map((child): SafeLlmProgram => {
+    const sourceHash = createHash('sha256').update(child.source, 'utf8').digest('hex');
+    const capabilityId = hashParts([programIri, child.programIri, sourceHash]);
+    return {
+      capabilityId,
+      programIri: child.programIri,
+      name: `program_${capabilityId.slice(0, 16)}`,
+      description: ([child.label, child.description].filter(Boolean).join(': ')
+        || 'Execute the permitted DKG Program and return its persisted output.').slice(0, 512),
+    };
+  });
   const registry = new RuntimeAdapterRegistry();
   registry.register(createInvestigatorAdapter(llmConfig));
   registry.register(createDkgQueryAdapter(agent, contextGraphId, callerAgentAddress));
+  registry.register(createRemoteExecuteAdapter(
+    agent,
+    contextGraphId,
+    operatorAddress,
+    programLayer,
+    executionLayer,
+  ));
+  registry.register(createSafeLlmAdapter(
+    llmConfig,
+    safePrograms,
+    childInvoker
+      ? (childProgramIri, invocationId) => childInvoker({
+        contextGraphId,
+        programIri: childProgramIri,
+        invocationId,
+        programLayer,
+        executionLayer,
+        callerAgentAddress: operatorAddress,
+      })
+      : undefined,
+  ));
   const tools = program.requiredTools.map((toolIri): SemanticToolResolution => {
     const rows = offerRows.filter((row) => iriValue(row.tool) === toolIri);
     const definitions = new Map<string, { operation: string; version: string; wit: string }>();
@@ -634,6 +724,8 @@ async function invokeResolved(
   config: SemanticRuntimeConfig | undefined,
   llmConfig?: LlmConfig,
   callerAgentAddress?: string,
+  executingAgentAddress?: string,
+  childInvoker?: SemanticProgramChildInvoker,
 ): Promise<SemanticInvocationResult> {
   const resolved = await resolveInternal(
     agent,
@@ -643,17 +735,22 @@ async function invokeResolved(
     config,
     llmConfig,
     callerAgentAddress,
+    executingAgentAddress,
+    executionLayer,
+    childInvoker,
   );
-  const localAuthor = agent.listLocalAgents().find(({ agentAddress }) =>
+  const localOperator = agent.listLocalAgents().find(({ agentAddress }) =>
     agentAddress.toLowerCase() === resolved.operatorAddress.toLowerCase());
-  if (!localAuthor || !agent.getCustodialAgentPrivateKey(localAuthor.agentAddress)) {
+  if (!localOperator || !agent.getCustodialAgentPrivateKey(localOperator.agentAddress)) {
     throw new SemanticProgramError(
-      'PROGRAM_AUTHOR_NOT_LOCAL',
-      'This node does not host the Program author wallet as a custodial agent',
+      executingAgentAddress ? 'TARGET_EXECUTOR_NOT_LOCAL' : 'PROGRAM_AUTHOR_NOT_LOCAL',
+      executingAgentAddress
+        ? 'This node does not host the selected executor wallet as a custodial agent'
+        : 'This node does not host the Program author wallet as a custodial agent',
       409,
     );
   }
-  resolved.operatorAddress = localAuthor.agentAddress;
+  resolved.operatorAddress = localOperator.agentAddress;
   const unavailable = resolved.public.requiredTools.find((tool) => !tool.effective);
   if (unavailable) {
     throw new SemanticProgramError(
@@ -695,6 +792,13 @@ async function invokeResolved(
       executionIri,
       executionLayer,
       ...(executionLayer === 'vm' ? { executionUal: priorHistory.publishedUal } : {}),
+      outputs: await loadExecutionOutputs(
+        agent,
+        contextGraphId,
+        executionIri,
+        executionLayer,
+        resolved.operatorAddress,
+      ),
       persisted: true,
     };
   }
@@ -819,6 +923,7 @@ async function invokeResolved(
     });
   }
 
+  const childExecutions: string[] = [];
   const toolDispatcher: ComponentToolDispatcher = async (call) => {
     const binding = call.kind === 'investigator'
       ? {
@@ -826,13 +931,21 @@ async function invokeResolved(
         version: '1',
         normalizedInput: { prompt: call.prompt },
       }
-      : {
+      : call.kind === 'safe-llm' ? {
+        operation: 'llm/safe',
+        version: '1',
+        normalizedInput: { prompt: call.prompt },
+      } : call.kind === 'query-catalog' ? {
         operation: 'dkg/query',
         version: '1',
         normalizedInput: {
           selector: call.queryId,
           parameters: Object.fromEntries(call.parameters.map(({ name, value }) => [name, value])),
         },
+      } : {
+        operation: 'remote-execute',
+        version: '1',
+        normalizedInput: { nodeId: call.nodeId, programIri: call.programIri },
       };
     const tool = resolved.public.requiredTools.find((candidate) =>
       candidate.operation === binding.operation
@@ -890,9 +1003,38 @@ async function invokeResolved(
       runtime.store.setExecutionStatus(executionIri, 'failed');
       throw new SemanticProgramError('TOOL_REQUEST_FAILED', 'WASI tool request failed', 502);
     }
-    return call.kind === 'investigator'
-      ? { kind: 'investigator', output: outcome.output }
-      : { kind: 'query-catalog', json: outcome.output };
+    if (call.kind === 'investigator') return { kind: 'investigator', output: outcome.output };
+    if (call.kind === 'safe-llm') {
+      let safeResult: { output?: unknown; childExecutions?: unknown };
+      try {
+        safeResult = JSON.parse(outcome.output) as typeof safeResult;
+      } catch {
+        throw new SemanticProgramError('SAFE_LLM_RESPONSE_INVALID', 'Safe LLM result is invalid', 502);
+      }
+      if (
+        typeof safeResult.output !== 'string'
+        || !Array.isArray(safeResult.childExecutions)
+        || safeResult.childExecutions.some((iri) => typeof iri !== 'string')
+      ) throw new SemanticProgramError('SAFE_LLM_RESPONSE_INVALID', 'Safe LLM result is invalid', 502);
+      childExecutions.push(...safeResult.childExecutions);
+      return { kind: 'safe-llm', output: safeResult.output };
+    }
+    if (call.kind === 'query-catalog') return { kind: 'query-catalog', json: outcome.output };
+    let remote: { executionIri?: unknown; executionUal?: unknown };
+    try {
+      remote = JSON.parse(outcome.output) as typeof remote;
+    } catch {
+      throw new SemanticProgramError('REMOTE_INVOCATION_RESPONSE_INVALID', 'Remote Execution receipt is invalid', 502);
+    }
+    if (
+      typeof remote.executionIri !== 'string'
+      || (remote.executionUal !== undefined && typeof remote.executionUal !== 'string')
+    ) throw new SemanticProgramError('REMOTE_INVOCATION_RESPONSE_INVALID', 'Remote Execution receipt is invalid', 502);
+    return {
+      kind: 'remote-execute',
+      executionIri: remote.executionIri,
+      ...(remote.executionUal ? { executionUal: remote.executionUal } : {}),
+    };
   };
 
   const receipt = await runtime.host.startPlan(
@@ -919,12 +1061,16 @@ async function invokeResolved(
     invocationId,
     programIri,
     operatorIri: resolved.public.executingNode,
+    callerIri: callerAgentAddress
+      ? `did:dkg:agent:${checksumAgentAddress(callerAgentAddress, 'INVALID_CALLER_WALLET')}`
+      : resolved.public.executingNode,
     policy: resolved.public.selectedPolicy,
     programHash: artifactHash,
     tools: resolved.public.requiredTools,
     events: execution.events,
     outputs: execution.outputs,
     agents: inspection.agents,
+    childExecutions,
     startedAt,
     finishedAt,
   });
@@ -953,8 +1099,32 @@ async function invokeResolved(
     executionIri,
     executionLayer,
     ...(persistence.ual ? { executionUal: persistence.ual } : {}),
+    outputs: execution.outputs.map((output) => output.value),
     persisted: true,
   };
+}
+
+async function loadExecutionOutputs(
+  agent: DKGAgent,
+  contextGraphId: string,
+  executionIri: string,
+  executionLayer: SemanticMemoryLayer,
+  operatorAddress: string,
+): Promise<string[]> {
+  const result = await agent.query(`
+    SELECT ?g ?output WHERE {
+      GRAPH ?g { ${sparqlIri(executionIri)} <${SR}output> ?output }
+    }
+  `, queryOptions(
+    contextGraphId,
+    executionLayer,
+    'semantic-runtime-execution-output-load',
+    operatorAddress,
+  ));
+  return resultRows(result)
+    .filter((row) => programGraphAuthor(row.g, contextGraphId, executionLayer)
+      ?.toLowerCase() === operatorAddress.toLowerCase())
+    .map((row) => literalValue(row.output));
 }
 
 function buildExecutionQuads(input: {
@@ -962,12 +1132,14 @@ function buildExecutionQuads(input: {
   invocationId: string;
   programIri: string;
   operatorIri: string;
+  callerIri: string;
   policy: { iri: string; version: string; hash: string };
   programHash: string;
   tools: SemanticToolResolution[];
   events: Array<{ role: string; processId: Uint8Array; value: string }>;
   outputs: Array<{ role: string; processId: Uint8Array; value: string }>;
   agents: Array<{ role: string; processId: Uint8Array; status: string }>;
+  childExecutions: string[];
   startedAt: Date;
   finishedAt: Date;
 }) {
@@ -976,6 +1148,7 @@ function buildExecutionQuads(input: {
     literalQuad(input.executionIri, `${SR}invocationId`, input.invocationId),
     iriQuad(input.executionIri, `${SR}usedProgram`, input.programIri),
     iriQuad(input.executionIri, `${SR}executedBy`, input.operatorIri),
+    iriQuad(input.executionIri, `${SR}invokedBy`, input.callerIri),
     iriQuad(input.executionIri, `${SR}appliedPolicy`, input.policy.iri),
     literalQuad(input.executionIri, `${SR}version`, input.policy.version),
     literalQuad(input.executionIri, `${SR}policyHash`, input.policy.hash),
@@ -988,6 +1161,9 @@ function buildExecutionQuads(input: {
     quads.push(iriQuad(input.executionIri, `${SR}usedTool`, tool.toolIri));
     if (tool.adapterVersion) quads.push(literalQuad(input.executionIri, `${SR}adapterVersion`, tool.adapterVersion));
     if (tool.adapterHash) quads.push(literalQuad(input.executionIri, `${SR}adapterHash`, tool.adapterHash));
+  }
+  for (const childExecution of input.childExecutions) {
+    quads.push(iriQuad(input.executionIri, `${PROV}wasInformedBy`, childExecution));
   }
   for (const event of input.events) {
     quads.push(literalQuad(input.executionIri, `${SR}event`, JSON.stringify({
@@ -1175,6 +1351,14 @@ function validateGraphAndProgram(contextGraphId: string, programIri: string): vo
     sparqlIri(programIri);
   } catch {
     throw new SemanticProgramError('INVALID_PROGRAM_IRI', 'programIri must be an absolute IRI', 400);
+  }
+}
+
+function checksumAgentAddress(value: string, code: string): string {
+  try {
+    return ethers.getAddress(value);
+  } catch {
+    throw new SemanticProgramError(code, 'Executing wallet is invalid', 400);
   }
 }
 

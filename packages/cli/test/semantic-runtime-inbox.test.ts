@@ -6,11 +6,14 @@ import {
   registerSemanticRuntimeInboxSkill,
   SEMANTIC_RUNTIME_INBOX_SKILL_IRI,
 } from '../src/semantic-runtime-inbox.js';
+import { createRemoteExecuteAdapter } from '../src/semantic-runtime-remote-execute-adapter.js';
 
 const CALLER_KEY = `0x${'01'.padStart(64, '0')}`;
 const AUTHOR_KEY = `0x${'02'.padStart(64, '0')}`;
+const TARGET_KEY = `0x${'03'.padStart(64, '0')}`;
 const CALLER = new ethers.Wallet(CALLER_KEY).address;
 const AUTHOR = new ethers.Wallet(AUTHOR_KEY).address;
+const TARGET = new ethers.Wallet(TARGET_KEY).address;
 const CONTEXT_GRAPH = 'devnet-test';
 const PROGRAM = 'urn:sr:program:remote-inbox';
 const INVOCATION = '123e4567-e89b-42d3-a456-426614174099';
@@ -42,6 +45,187 @@ function membership(overrides: Record<string, unknown> = {}) {
 }
 
 describe('semantic runtime DKG inbox invocation', () => {
+  it('executes a replicated Program on the explicitly targeted node as that node operator', async () => {
+    let inboxHandler: ((request: any, senderPeerId: string) => Promise<any>) | undefined;
+    const expected = {
+      invocationId: expect.any(String),
+      executionIri: 'urn:sr:execution:remote-child',
+      executionLayer: 'vm' as const,
+      executionUal: 'did:dkg:31337/0x2222222222222222222222222222222222222222/11',
+      persisted: true as const,
+    };
+    const execute = vi.fn(async (...args: any[]) => {
+      expect(args[9]).toBe(CALLER);
+      expect(args[10]).toBe(TARGET);
+      return { ...expected, invocationId: args[4] };
+    });
+    const targetAgent = {
+      peerId: 'peer-target',
+      ...membership(),
+      getDefaultAgentAddress: () => TARGET,
+      registerSkill: vi.fn((_skillUri: string, handler: typeof inboxHandler) => {
+        inboxHandler = handler;
+      }),
+      query: vi.fn(async () => programResult()),
+      listLocalAgents: () => [{ agentAddress: TARGET }],
+      getCustodialAgentPrivateKey: (address: string) =>
+        address.toLowerCase() === TARGET.toLowerCase() ? TARGET_KEY : undefined,
+    } as any;
+    registerSemanticRuntimeInboxSkill(targetAgent, {} as any, { enabled: true }, undefined, {
+      invoke: execute as any,
+    });
+
+    const senderAgent = {
+      peerId: 'peer-sender',
+      isPrivateContextGraph: vi.fn(async () => true),
+      resolveLocalAgentAddress: () => CALLER,
+      getCustodialAgentPrivateKey: (address: string) =>
+        address.toLowerCase() === CALLER.toLowerCase() ? CALLER_KEY : undefined,
+      invokeSkill: vi.fn(async (_peer: string, skillUri: string, inputData: Uint8Array) =>
+        inboxHandler!({ skillUri, inputData }, 'peer-sender')),
+    } as any;
+    const adapter = createRemoteExecuteAdapter(
+      senderAgent,
+      CONTEXT_GRAPH,
+      CALLER,
+      'vm',
+      'vm',
+    );
+    const result = await adapter.dispatch({ effectId: 'urn:sr:effect:parent:1' } as any, {
+      nodeId: 'peer-target',
+      programIri: PROGRAM,
+    });
+    expect(result).toMatchObject({
+      status: 'succeeded',
+      output: JSON.stringify({
+        executionIri: expected.executionIri,
+        executionUal: expected.executionUal,
+      }),
+      evidenceRef: expected.executionUal,
+    });
+    expect(senderAgent.invokeSkill).toHaveBeenCalledWith(
+      'peer-target',
+      SEMANTIC_RUNTIME_INBOX_SKILL_IRI,
+      expect.any(Uint8Array),
+      expect.objectContaining({ requestOwned: true }),
+    );
+    expect(execute).toHaveBeenCalledOnce();
+  });
+
+  it('rejects remote-execute on a public Context Graph before contacting the target node', async () => {
+    const invokeSkill = vi.fn();
+    const senderAgent = {
+      peerId: 'peer-sender',
+      isPrivateContextGraph: vi.fn(async () => false),
+      resolveLocalAgentAddress: () => CALLER,
+      getCustodialAgentPrivateKey: (address: string) =>
+        address.toLowerCase() === CALLER.toLowerCase() ? CALLER_KEY : undefined,
+      invokeSkill,
+    } as any;
+    const adapter = createRemoteExecuteAdapter(
+      senderAgent,
+      CONTEXT_GRAPH,
+      CALLER,
+      'vm',
+      'vm',
+    );
+
+    await expect(adapter.dispatch({ effectId: 'urn:sr:effect:parent:1' } as any, {
+      nodeId: 'peer-target',
+      programIri: PROGRAM,
+    })).rejects.toThrow('REMOTE_INVOCATION_PRIVATE_GRAPH_REQUIRED');
+    expect(invokeSkill).not.toHaveBeenCalled();
+  });
+
+  it('treats an explicit target rejection as definitive rather than an unknown outcome', async () => {
+    const senderAgent = {
+      peerId: 'peer-sender',
+      isPrivateContextGraph: vi.fn(async () => true),
+      resolveLocalAgentAddress: () => CALLER,
+      getCustodialAgentPrivateKey: () => CALLER_KEY,
+      invokeSkill: vi.fn(async () => ({
+        success: false,
+        outputData: new TextEncoder().encode(JSON.stringify({
+          code: 'PROGRAM_CONTEXT_GRAPH_FORBIDDEN',
+          status: 403,
+          error: 'caller is not a Context Graph participant',
+        })),
+      })),
+    } as any;
+    const adapter = createRemoteExecuteAdapter(senderAgent, CONTEXT_GRAPH, CALLER, 'vm', 'vm');
+
+    let rejection: unknown;
+    try {
+      await adapter.dispatch({ effectId: 'urn:sr:effect:rejected:1' } as any, {
+        nodeId: 'peer-target',
+        programIri: PROGRAM,
+      });
+    } catch (error) {
+      rejection = error;
+    }
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toContain('PROGRAM_CONTEXT_GRAPH_FORBIDDEN');
+    expect(adapter.couldHaveReachedTarget(rejection)).toBe(false);
+  });
+
+  it('uses the current executor wallet, rather than the root caller, for the next hop', async () => {
+    let inboxHandler: ((request: any, senderPeerId: string) => Promise<any>) | undefined;
+    const execute = vi.fn(async (...args: any[]) => ({
+      invocationId: args[4],
+      executionIri: 'urn:sr:execution:on-node-c',
+      executionLayer: 'vm' as const,
+      executionUal: 'did:dkg:31337/0x3333333333333333333333333333333333333333/12',
+      persisted: true as const,
+    }));
+    const nodeC = {
+      peerId: 'peer-c',
+      ...membership({
+        getContextGraphOwner: vi.fn(async () => `did:dkg:agent:${TARGET}`),
+      }),
+      getDefaultAgentAddress: () => AUTHOR,
+      registerSkill: vi.fn((_skillUri: string, handler: typeof inboxHandler) => {
+        inboxHandler = handler;
+      }),
+      query: vi.fn(async () => programResult()),
+      listLocalAgents: () => [{ agentAddress: AUTHOR }],
+      getCustodialAgentPrivateKey: (address: string) =>
+        address.toLowerCase() === AUTHOR.toLowerCase() ? AUTHOR_KEY : undefined,
+    } as any;
+    registerSemanticRuntimeInboxSkill(nodeC, {} as any, { enabled: true }, undefined, {
+      invoke: execute as any,
+    });
+
+    const nodeB = {
+      peerId: 'peer-b',
+      isPrivateContextGraph: vi.fn(async () => true),
+      resolveLocalAgentAddress: () => TARGET,
+      getCustodialAgentPrivateKey: (address: string) =>
+        address.toLowerCase() === TARGET.toLowerCase() ? TARGET_KEY : undefined,
+      invokeSkill: vi.fn(async (_peer: string, skillUri: string, inputData: Uint8Array) =>
+        inboxHandler!({ skillUri, inputData }, 'peer-b')),
+    } as any;
+    const adapter = createRemoteExecuteAdapter(nodeB, CONTEXT_GRAPH, TARGET, 'vm', 'vm');
+
+    await expect(adapter.dispatch({ effectId: 'urn:sr:effect:on-node-b:1' } as any, {
+      nodeId: 'peer-c',
+      programIri: PROGRAM,
+    })).resolves.toMatchObject({ status: 'succeeded' });
+    expect(execute).toHaveBeenCalledWith(
+      nodeC,
+      expect.anything(),
+      CONTEXT_GRAPH,
+      PROGRAM,
+      expect.any(String),
+      'vm',
+      'vm',
+      { enabled: true },
+      undefined,
+      TARGET,
+      AUTHOR,
+      expect.any(Function),
+    );
+  });
+
   it.each(['wm', 'swm', 'vm'] as const)(
     'executes a private-CG Program on the author node with its %s persistence evidence',
     async (executionLayer) => {

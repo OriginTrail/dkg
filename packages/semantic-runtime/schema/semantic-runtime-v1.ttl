@@ -52,6 +52,7 @@ sr:language a rdf:Property .
 sr:version a rdf:Property .
 sr:source a rdf:Property .
 sr:requiresTool a rdf:Property .
+sr:permitsProgram a rdf:Property .
 sr:offersTool a rdf:Property .
 sr:usesExecutionPolicy a rdf:Property .
 sr:allowsTool a rdf:Property .
@@ -60,6 +61,7 @@ sr:witInterface a rdf:Property .
 sr:invocationId a rdf:Property .
 sr:usedProgram a rdf:Property .
 sr:executedBy a rdf:Property .
+sr:invokedBy a rdf:Property .
 sr:appliedPolicy a rdf:Property .
 sr:policyHash a rdf:Property .
 sr:programHash a rdf:Property .

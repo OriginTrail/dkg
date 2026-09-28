@@ -148,6 +148,14 @@ export function assertPortableBuildEnvironment(env = process.env) {
 function buildInto(outputRoot) {
   assertPortableBuildEnvironment();
   verifyToolchain();
+  run('cargo', [
+    `+${EXPECTED_RUST_TOOLCHAIN}`,
+    'build',
+    '--manifest-path', path.join(RUST_ROOT, 'Cargo.toml'),
+    '--package', 'dkg-safe-llm-runner',
+    '--release',
+    '--locked',
+  ]);
   const rustcWrapper = path.join(REPO_ROOT, 'scripts', 'semantic-runtime-rustc.mjs');
   const rustFlags = [
     // Cargo fingerprints RUSTFLAGS, unlike a general wrapper's source. Bind the
@@ -250,6 +258,8 @@ function buildInto(outputRoot) {
     '--async-imports',
     'origintrail:semantic-runtime/investigator@0.1.0#investigate',
     'origintrail:semantic-runtime/query-catalog@0.1.0#query',
+    'origintrail:semantic-runtime/safe-llm@0.1.0#run',
+    'origintrail:semantic-runtime/remote-execute@0.1.0#execute',
     '--instantiation', 'async',
     '--no-wasi-shim',
     '--strict',
