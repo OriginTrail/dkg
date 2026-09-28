@@ -153,6 +153,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       source: 'registered-chain' | 'legacy-local';
       reason: string;
       metadataBootstrap: 'eligible' | 'forbidden';
+      onChainId?: bigint;
     };
     readiness?: {
       version: number;
@@ -166,6 +167,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     job: any;
     runCalls: number;
     metadataBootstrapCalls: number;
+    metadataBootstrapProofs: Array<unknown>;
     runSawMetadataBootstrap: boolean;
     runRequests: CatchupRunRequest[];
     subscribeCalls: Array<{
@@ -188,6 +190,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     };
     let runCalls = 0;
     let metadataBootstrapCalls = 0;
+    const metadataBootstrapProofs: Array<unknown> = [];
     let metadataBootstrapStarted = false;
     let runSawMetadataBootstrap = false;
     const runRequests: CatchupRunRequest[] = [];
@@ -244,8 +247,11 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       reconcileRfc64CatalogResponsibilityV1: async (id: string) => {
         responsibilityCalls.push(id);
       },
-      bootstrapRfc64CatalogContextGraphMetadataFromPeersV1: async () => {
+      bootstrapRfc64CatalogContextGraphMetadataFromPeersV1: async (
+        _id: string, _signal: AbortSignal | undefined, proof: unknown,
+      ) => {
         metadataBootstrapCalls += 1;
+        metadataBootstrapProofs.push(proof);
         metadataBootstrapStarted = true;
         return 'no-accepted-public-policy';
       },
@@ -346,6 +352,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       job: jobId ? catchupTracker.jobs.get(jobId) : undefined,
       runCalls,
       metadataBootstrapCalls,
+      metadataBootstrapProofs,
       runSawMetadataBootstrap,
       runRequests,
       subscribeCalls,
@@ -370,6 +377,21 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.responsibilityCalls).toEqual([expect.any(String)]);
     expect(result.runSawMetadataBootstrap).toBe(true);
     expect(result.metadataBootstrapCalls).toBe(1);
+  });
+
+  it.each([
+    ['chain-public', { contextGraphId: expect.any(String), onChainId: '7' }],
+    ['chain-participant', undefined],
+  ] as const)('passes registered public proof only for %s admission', async (reason, proof) => {
+    const result = await subscribe({
+      hasConfirmedMeta: false,
+      authorityDecision: {
+        outcome: 'allowed', source: 'registered-chain', reason,
+        metadataBootstrap: 'eligible', onChainId: 7n,
+      },
+    });
+    expect(result.responseStatus).toBe(200);
+    expect(result.metadataBootstrapProofs).toEqual([proof]);
   });
 
   it.each([

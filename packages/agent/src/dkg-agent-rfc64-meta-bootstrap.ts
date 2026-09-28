@@ -51,6 +51,12 @@ export type Rfc64CatalogMetadataBootstrapOutcomeV1 =
   | 'fetched'
   | 'not-found';
 
+/** Public registration already authenticated by the explicit subscribe route. */
+export interface RegisteredPublicMetadataBootstrapProofV1 {
+  readonly contextGraphId: string;
+  readonly onChainId: string;
+}
+
 /** One in-flight bootstrap per (agent, graph); concurrent callers share it. */
 const rfc64MetadataBootstrapsInFlightV1 = new WeakMap<
   DKGAgent,
@@ -69,6 +75,7 @@ export class Rfc64MetaBootstrapMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     signal?: AbortSignal,
+    registeredPublicProof?: Readonly<RegisteredPublicMetadataBootstrapProofV1>,
   ): Promise<Rfc64CatalogMetadataBootstrapOutcomeV1> {
     let inFlight = rfc64MetadataBootstrapsInFlightV1.get(this);
     if (inFlight === undefined) {
@@ -77,7 +84,9 @@ export class Rfc64MetaBootstrapMethods extends DKGAgentBase {
     }
     const existing = inFlight.get(contextGraphId);
     if (existing !== undefined) return existing;
-    const run = this.runRfc64CatalogContextGraphMetadataBootstrapV1(contextGraphId, signal)
+    const run = this.runRfc64CatalogContextGraphMetadataBootstrapV1(
+      contextGraphId, signal, registeredPublicProof,
+    )
       .finally(() => {
         if (inFlight!.get(contextGraphId) === run) inFlight!.delete(contextGraphId);
       });
@@ -89,6 +98,7 @@ export class Rfc64MetaBootstrapMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     signal?: AbortSignal,
+    registeredPublicProof?: Readonly<RegisteredPublicMetadataBootstrapProofV1>,
   ): Promise<Rfc64CatalogMetadataBootstrapOutcomeV1> {
     signal?.throwIfAborted();
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
@@ -101,21 +111,15 @@ export class Rfc64MetaBootstrapMethods extends DKGAgentBase {
     }
     // Fail closed: only authenticated PUBLIC authority may drive this pull. A
     // private graph's metadata arrives through the authenticated join-approval
-    // path. The default catalog rollout can accept a registered graph from
-    // the finalized chain before the public catalog service holds a policy
-    // snapshot, so recheck that exact chain authority as a second path.
+    // path. An explicit subscribe may already have proved a registered public
+    // graph against current chain authority before the catalog service holds
+    // that policy. Carry that exact admission proof into this catch-up job;
+    // background activation without one never starts a new chain read here.
     const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
     if (accepted?.policy.accessPolicy === 1) return 'no-accepted-public-policy';
-    const chainPublic = accepted === null
-      ? await this.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
-        signal,
-      }).catch(() => null)
-      : null;
     if (accepted === null && !(
-      chainPublic?.outcome === 'allowed'
-      && chainPublic.source === 'registered-chain'
-      && chainPublic.reason === 'chain-public'
-      && chainPublic.onChainId !== undefined
+      registeredPublicProof?.contextGraphId === contextGraphId
+      && /^[1-9][0-9]*$/.test(registeredPublicProof.onChainId)
     )) return 'no-accepted-public-policy';
     // The owner this node already authenticated: the seed signer for an
     // owner-signed policy, otherwise the wallet namespace of the id. A served

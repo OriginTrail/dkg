@@ -183,11 +183,13 @@ function catchupPlaneNotAttempted(
 }
 
 /**
- * The agent's own legacy durable-sync admission: `syncFromPeerDetailed` keeps
- * only graphs whose RFC-64 receiver authority still allows legacy sync. An
- * agent without that resolver applies no such filter.
+ * Ask the agent for its canonical durable-lane decision. The compatibility
+ * fallback below is only for an older agent that does not expose this method.
  */
 async function legacyDurableSyncAllowed(agent: any, contextGraphId: string): Promise<boolean> {
+  if (typeof agent.canUseLegacyDurableSyncForContextGraphV1 === 'function') {
+    return agent.canUseLegacyDurableSyncForContextGraphV1(contextGraphId);
+  }
   if (typeof agent.resolveRfc64CatalogReceiverAuthorityV1 !== 'function'
     || agent.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed) return true;
   // An approved private member can use the legacy member lane for root SWM

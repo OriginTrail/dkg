@@ -2026,6 +2026,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           : 'This node has no agent authorized to read this project. Ask the curator to invite an agent first.',
       });
     }
+    const registeredPublicProof = readAuthority.source === 'registered-chain'
+      && readAuthority.reason === 'chain-public'
+      && readAuthority.onChainId !== undefined
+      ? { contextGraphId, onChainId: readAuthority.onChainId.toString(10) }
+      : undefined;
 
     // A graph known only by its on-chain name hash syncs nothing under that
     // id: every holder keys it by the cleartext id. Give connected peers a
@@ -2257,6 +2262,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         if (typeof agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1 === 'function') {
           await agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(
             targetContextGraphId,
+            undefined,
+            registeredPublicProof,
           ).catch(() => undefined);
         }
         let result = await daemonState.catchupRunner!.run({

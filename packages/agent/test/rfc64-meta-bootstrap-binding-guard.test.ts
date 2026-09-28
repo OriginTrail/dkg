@@ -435,24 +435,20 @@ describe('RFC-64 _meta bootstrap from connected peers: chain-binding guard (two 
       onChainId: '777',
     }));
     vi.spyOn(replica, 'readAcceptedRfc64CatalogAccessSnapshotV1').mockReturnValue(null);
-    const chainAuthority = vi.spyOn(replica, 'resolveContextGraphSubscriptionBootstrapAuthority')
-      .mockResolvedValue({
-        outcome: 'allowed', source: 'registered-chain', reason: 'chain-public',
-        metadataBootstrap: 'eligible', onChainId: 7n,
-      });
     const bind = vi.spyOn(replica, 'bindSubscriptionOnChainId');
     replica.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
 
-    const outcome = await replica.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(contextGraphId);
-    expect(['fetched', 'already-confirmed']).toContain(outcome);
-    expect(chainAuthority).toHaveBeenCalledWith(contextGraphId, expect.any(Object));
+    const outcome = await replica.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(
+      contextGraphId, undefined, { contextGraphId, onChainId: '7' },
+    );
+    expect(outcome).toBe('fetched');
     await expect(replica.getExplicitAccessPolicy(contextGraphId)).resolves.toBe('public');
     expect((await replica.getCgMeta(contextGraphId)).declared).toBe(true);
     expect(bind).not.toHaveBeenCalled();
     expect(replica.getSubscribedContextGraphs().get(contextGraphId)?.onChainId).toBeUndefined();
   }, 60_000);
 
-  it('does not fetch public metadata from a peer when chain authority is private', async () => {
+  it('does not fetch public metadata without an authenticated public proof', async () => {
     const contextGraphId = `${OWNER}/registered-private-meta` as ContextGraphIdV1;
     const { peer, replica } = await startConnectedPair('registered-private-meta');
     await storeOf(peer).insert(servedPublicMetaQuads(contextGraphId, peer.peerId, {

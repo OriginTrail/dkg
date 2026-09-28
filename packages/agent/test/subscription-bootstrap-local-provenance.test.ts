@@ -40,16 +40,16 @@ describe('subscription bootstrap local provenance', () => {
     });
   });
 
-  it('preserves legacy admission of a freshly loaded durable subscription on restart', async () => {
+  it('does not treat a freshly loaded remote subscription as public authority', async () => {
     const agent = admissionAgent();
 
     await expect(agent.resolveContextGraphSubscriptionBootstrapAuthority(CG_ID, {
       allowSubscriptionFallback: false,
       durableSubscriptionBinding: { contextGraphId: CG_ID },
     })).resolves.toMatchObject({
-      outcome: 'allowed',
+      outcome: 'unavailable',
       source: 'legacy-local',
-      reason: 'local-public',
+      reason: 'remote-local-authority-unaccepted',
     });
   });
 
