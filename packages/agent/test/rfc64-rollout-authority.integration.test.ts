@@ -6635,6 +6635,7 @@ describe('RFC-64 rollout authority integration', () => {
     expect(stopped.resolveRfc64CatalogReceiverAuthorityV1(CONTEXT_GRAPH_ID)
       .legacySyncAllowed).toBe(false);
     expect(stopped.canUseLegacySharedMemorySyncForContextGraphV1(CONTEXT_GRAPH_ID)).toBe(true);
+    await expect(stopped.canUseLegacyDurableSyncForContextGraphV1(CONTEXT_GRAPH_ID)).resolves.toBe(true);
     expect(stopped.getSyncContextGraphIds()).toContain(CONTEXT_GRAPH_ID);
     expect(stopped.rfc64PublicCatalogStatsV1()).toBeNull();
     expect(stopped.readRfc64PublicCatalogBootstrapStatusV1()).toBeNull();

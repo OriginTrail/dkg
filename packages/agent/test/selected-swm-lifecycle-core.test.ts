@@ -80,6 +80,18 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       .call(agent as never, contextGraphId)).toBe(true);
   });
 
+  it('restores durable VM admission under the global kill switch', async () => {
+    const resolveRfc64CatalogReceiverAuthorityV1 = vi.fn(() => ({ legacySyncAllowed: false }));
+    const agent = {
+      config: { rfc64CatalogExecutionPlan: { killSwitchActive: true } },
+      resolveRfc64CatalogReceiverAuthorityV1,
+    };
+
+    await expect(LifecycleSyncMethods.prototype.canUseLegacyDurableSyncForContextGraphV1
+      .call(agent as never, 'cg-configured-catalog')).resolves.toBe(true);
+    expect(resolveRfc64CatalogReceiverAuthorityV1).not.toHaveBeenCalled();
+  });
+
   it('accounts a real complete private-only no-op without reconciler backoff', async () => {
     const publicCg = 'unselected-public-control';
     const privateCg = '0x1111111111111111111111111111111111111111/private-complete-noop';

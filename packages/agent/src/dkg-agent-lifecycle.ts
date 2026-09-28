@@ -5565,6 +5565,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<boolean> {
+    // The global emergency stop restores the legacy VM lane even for a
+    // selected catalog graph whose persisted receiver policy remains catalog.
+    if (this.config.rfc64CatalogExecutionPlan.killSwitchActive) return true;
     if (this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed) {
       return true;
     }

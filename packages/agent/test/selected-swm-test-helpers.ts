@@ -356,6 +356,7 @@ export async function callTrySyncFromPeer(
       connectionKey: string | null;
     }>;
     resolveRfc64CatalogReceiverAuthorityV1: () => { legacySyncAllowed: boolean };
+    rfc64LegacySwmGossipAllowedForContextGraph: () => boolean;
     recordSyncReconcilerFailure: (peerId: string) => void;
   };
   agent.trySelectedSwmRetryFromPeer = LifecycleSyncMethods.prototype.trySelectedSwmRetryFromPeer;
@@ -366,6 +367,7 @@ export async function callTrySyncFromPeer(
     connectionKey: null,
   });
   agent.resolveRfc64CatalogReceiverAuthorityV1 = () => ({ legacySyncAllowed: true });
+  agent.rfc64LegacySwmGossipAllowedForContextGraph = () => true;
   agent.recordSyncReconcilerFailure ??= () => {};
   const applyAccounting = agent.applySyncOnConnectAccounting;
   if (onSyncAccounting) {
