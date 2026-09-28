@@ -84,11 +84,53 @@ wait_for_member_count() {
   fail "member never reached $target private triples (last count=${count:-unreadable})"
 }
 
+core_stats_entry_count() {
+  local cg="$1" wire="$2"
+  jq -er --arg cg "$cg" --arg wire "$wire" '
+    def count($key):
+      if (.perCg | has($key)) then
+        .perCg[$key].entries as $entries
+        | if (($entries | type) == "number" and $entries >= 0 and ($entries | floor) == $entries)
+          then $entries
+          else error("invalid host-mode entry count") end
+      else 0 end;
+    if (.enabled == true and (.perCg | type) == "object") then
+      count($cg) + count($wire)
+    else error("host-mode diagnostics unavailable") end
+  '
+}
+
+# A missing graph key means zero custody only when the Core reports a healthy,
+# enabled host-mode store. Keep this distinction under test on every run.
+assert_core_stats_fixtures() {
+  local healthy
+  healthy=$(printf '%s' '{"enabled":true,"perCg":{}}' | core_stats_entry_count fixture wire)
+  [ "$healthy" = 0 ] || fail "healthy empty host-mode stats fixture did not count as zero"
+  if printf '%s' '{"enabled":false,"perCg":{}}' | core_stats_entry_count fixture wire >/dev/null 2>&1; then
+    fail "disabled host-mode stats fixture counted as zero"
+  fi
+  if printf '%s' '{"error":"host-mode store failed"}' | core_stats_entry_count fixture wire >/dev/null 2>&1; then
+    fail "errored host-mode stats fixture counted as zero"
+  fi
+  if printf '%s' '{"enabled":true,"perCg":[]}' | core_stats_entry_count fixture wire >/dev/null 2>&1; then
+    fail "malformed host-mode stats fixture counted as zero"
+  fi
+  if printf '%s' '{"enabled":true,"perCg":{"fixture":{}}}' | core_stats_entry_count fixture wire >/dev/null 2>&1; then
+    fail "malformed graph entry fixture counted as zero"
+  fi
+}
+assert_core_stats_fixtures
+
 core_private_entries() {
-  local stats
-  stats=$(api_call "$CORE_NODE" GET /api/shared-memory/host-mode/stats)
-  printf '%s' "$stats" | jq -r --arg cg "$CG_ID" --arg wire "$WIRE_CG_ID" \
-    '[(.perCg[$cg].entries // 0),(.perCg[$wire].entries // 0)] | add'
+  local response status stats
+  response=$(curl -sS --max-time 30 -w '\n%{http_code}' \
+    -H "Authorization: Bearer $(node_token "$CORE_NODE")" \
+    "http://127.0.0.1:$(node_port "$CORE_NODE")/api/shared-memory/host-mode/stats") ||
+    fail "Core host-mode diagnostics request failed"
+  status=${response##*$'\n'}
+  [ "$status" = 200 ] || fail "Core host-mode diagnostics returned HTTP $status"
+  stats=${response%$'\n'*}
+  printf '%s' "$stats" | core_stats_entry_count "$CG_ID" "$WIRE_CG_ID"
 }
 
 require_core_zero_custody() {

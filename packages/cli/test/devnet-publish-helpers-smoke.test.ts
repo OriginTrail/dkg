@@ -397,7 +397,9 @@ NODE
   });
   for (const [label, retryableError] of [
     ['gossip prerequisite', '[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable'],
+    ['unprefixed promote prerequisite', 'A promote prerequisite is temporarily unavailable'],
     ['legacy boundary retirement', 'RFC-64 legacy SWM boundary retirement is in progress; retry promotion'],
+    ['changed diagnostic wording', 'The sealed share is waiting for a prerequisite'],
   ]) {
   it(`resumes a sealed named asset through the share route after ${label}`, async () => {
     const repoRoot = resolve(process.cwd(), '../..');

@@ -118,12 +118,25 @@ except Exception as e:
 status = d.get('status', '')
 r = d.get('result') or {}
 data, swm = r.get('dataSynced'), r.get('sharedMemorySynced')
-if status == 'denied' or (status == 'unreachable' and data == 0 and swm == 0):
+if status == 'denied' and data == 0 and swm == 0:
     print(f'refused:{status}')
 else:
     print(f'{status} (dataSynced={data}, sharedMemorySynced={swm})')
 "
 }
+
+# Keep transport failure distinct from the authorization result this scenario
+# is meant to prove. These fixtures run with the live flow on every sweep.
+assert_refusal_classifier_fixtures() {
+  local denied unreachable partial
+  denied=$(printf '%s' '{"status":"denied","result":{"dataSynced":0,"sharedMemorySynced":0}}' | catchup_refusal)
+  unreachable=$(printf '%s' '{"status":"unreachable","result":{"dataSynced":0,"sharedMemorySynced":0}}' | catchup_refusal)
+  partial=$(printf '%s' '{"status":"denied","result":{"dataSynced":1,"sharedMemorySynced":0}}' | catchup_refusal)
+  [ "$denied" = refused:denied ] || fail "explicit denied fixture was not classified as refusal"
+  case "$unreachable" in refused:*) fail "transport failure fixture was classified as refusal" ;; esac
+  case "$partial" in refused:*) fail "partial transfer fixture was classified as refusal" ;; esac
+}
+assert_refusal_classifier_fixtures
 
 # poll_catchup <node> <cg-id> <expect> [timeout]
 # <expect> is a terminal status, or `refused` (see catchup_refusal).
@@ -152,10 +165,13 @@ except: print('')
           local verdict
           verdict=$(echo "$resp" | catchup_refusal)
           case "$verdict" in
-            refused:*) ok "catch-up refused: ${verdict#refused:}, nothing synced (expected)"; return 0 ;;
+            refused:denied) ok "catch-up denied with zero data transferred (expected)"; return 0 ;;
           esac
-          note "response: $resp"
-          fail "catch-up=$verdict (expected denied, or unreachable with nothing synced)"; return 1
+          if [ "$status" = done ]; then
+            fail "catch-up completed before approval: $resp"
+          fi
+          note "catch-up=$verdict; retrying for explicit authorization refusal"
+          return 2
         fi
         if [ "$status" = "$expect" ]; then ok "catch-up=$status (expected)"; return 0; fi
         fail "catch-up=$status (expected $expect)"; return 1
@@ -210,9 +226,12 @@ for attempt in $(seq 1 30); do
   esac
   sub_id=$(echo "$sub_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("subscribed", ""))')
   if [ "$sub_id" = "$CG_ID" ]; then
-    poll_catchup "$N2" "$CG_ID" refused 90 || exit 1
-    refused=yes
-    break
+    if poll_catchup "$N2" "$CG_ID" refused 90; then
+      refused=yes
+      break
+    fi
+    sleep 5
+    continue
   fi
   fail "N2's pre-approval response was not an explicit refusal: $sub_resp"
 done

@@ -390,21 +390,29 @@ log "M2 sees:       $M2_FINAL triples (pre=$M2_PRE)"
 # ===========================================================================
 act "6. Encryption-side rotation: M2 must not receive the new sender-key epoch"
 # ===========================================================================
-# Direct fan-out need not broadcast to a revoked member at all. Inspect the
-# curator's setup sends instead: M1 must receive a fresh epoch, while M2 must
-# receive no setup for any epoch minted after its removal.
+# Direct fan-out need not broadcast to a revoked member at all. Inspect both
+# setup sends and pending-package queueing: M1 must receive a fresh epoch,
+# while M2 must receive neither a direct nor a deferred setup after removal.
 POST_EPOCH=$(python3 - "$CURATOR_LOG" "$CG_ID" "$M1_AGENT" "$M2_AGENT" "$PRE_EPOCH" "$POST_REVOKE_LOG_LINES" <<'PY'
 import itertools, re, sys
 path, graph, member, revoked, pre, skip = sys.argv[1:]
 by_recipient = {member: set(), revoked: set()}
 with open(path) as stream:
     for line in itertools.islice(stream, int(skip), None):
+        # A recipient without a peerId is queued before the direct-send log.
+        # Other retryable sends log both a direct attempt and a queue event.
+        if 'SWM sender-key setup for ' in line and 'queued' in line:
+            queued_recipient = re.search(r'\bSWM sender-key setup for (0x[0-9a-fA-F]{40})\b', line)
+            if queued_recipient and queued_recipient.group(1).lower() == revoked.lower():
+                sys.exit('revoked member had a sender-key setup queued after removal')
         if 'SWM sender-key setup send:' not in line or f'contextGraph={graph}' not in line:
             continue
         recipient = re.search(r'\brecipientAgent=([^ ]+)', line)
         epoch = re.search(r'\bepoch=([0-9a-f]+)', line)
-        if recipient and epoch and recipient.group(1) in by_recipient:
-            by_recipient[recipient.group(1)].add(epoch.group(1))
+        if recipient and epoch:
+            for agent in by_recipient:
+                if recipient.group(1).lower() == agent.lower():
+                    by_recipient[agent].add(epoch.group(1))
 new_epochs = by_recipient[member] - {pre}
 if not new_epochs:
     sys.exit('remaining member received no fresh sender-key epoch')
