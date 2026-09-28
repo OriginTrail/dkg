@@ -148,6 +148,9 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     includeSharedMemory?: boolean;
     syncMode?: unknown;
     forceCatchup?: unknown;
+    metadataBootstrapWaitFor?: Promise<void>;
+    onMetadataBootstrapStarted?: () => void;
+    onCatchupRun?: () => void;
     authorityDecision?: {
       outcome: 'allowed' | 'denied' | 'unavailable';
       source: 'registered-chain' | 'legacy-local';
@@ -191,7 +194,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     let runCalls = 0;
     let metadataBootstrapCalls = 0;
     const metadataBootstrapProofs: Array<unknown> = [];
-    let metadataBootstrapStarted = false;
+    let metadataBootstrapCompleted = false;
     let runSawMetadataBootstrap = false;
     const runRequests: CatchupRunRequest[] = [];
     const subscribeCalls: Array<{
@@ -206,7 +209,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     daemonState.catchupRunner = {
       run: async (request) => {
         runCalls += 1;
-        runSawMetadataBootstrap = metadataBootstrapStarted;
+        opts.onCatchupRun?.();
+        runSawMetadataBootstrap = metadataBootstrapCompleted;
         runRequests.push(request);
         return opts.result ?? cleanEmptyResult();
       },
@@ -252,7 +256,9 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       ) => {
         metadataBootstrapCalls += 1;
         metadataBootstrapProofs.push(proof);
-        metadataBootstrapStarted = true;
+        opts.onMetadataBootstrapStarted?.();
+        await opts.metadataBootstrapWaitFor;
+        metadataBootstrapCompleted = true;
         return 'no-accepted-public-policy';
       },
       hasConfirmedMetaState: async () => {
@@ -377,6 +383,30 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.responsibilityCalls).toEqual([expect.any(String)]);
     expect(result.runSawMetadataBootstrap).toBe(true);
     expect(result.metadataBootstrapCalls).toBe(1);
+  });
+
+  it('waits for metadata bootstrap to finish before starting catch-up', async () => {
+    let releaseBootstrap!: () => void;
+    let signalBootstrapStarted!: () => void;
+    const bootstrapWait = new Promise<void>((resolve) => { releaseBootstrap = resolve; });
+    const bootstrapStarted = new Promise<void>((resolve) => { signalBootstrapStarted = resolve; });
+    let catchupRuns = 0;
+    const pending = subscribe({
+      hasConfirmedMeta: false,
+      metadataBootstrapWaitFor: bootstrapWait,
+      onMetadataBootstrapStarted: signalBootstrapStarted,
+      onCatchupRun: () => { catchupRuns += 1; },
+    });
+    try {
+      await bootstrapStarted;
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(catchupRuns).toBe(0);
+    } finally {
+      releaseBootstrap();
+    }
+    const result = await pending;
+    expect(catchupRuns).toBe(1);
+    expect(result.runSawMetadataBootstrap).toBe(true);
   });
 
   it.each([
