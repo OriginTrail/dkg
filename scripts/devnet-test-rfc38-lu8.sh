@@ -71,6 +71,51 @@ parse_json() {
   "
 }
 
+# LU-8 exercises the legacy batch-verification/reporting surface. Its
+# publisher finalizes every test KA into VM, removing the source SWM copies;
+# the default RFC-64 catalog receiver has no selected SWM snapshots for those
+# assets and intentionally skips legacy VM sync. Give the member the legacy
+# receiver lane for this compatibility scenario, then restore its exact config.
+LU8_MEMBER_CONFIG_BACKUP=""
+restore_member_config() {
+  local status="$1"
+  trap - EXIT INT TERM
+  if [ -n "$LU8_MEMBER_CONFIG_BACKUP" ] && [ -f "$LU8_MEMBER_CONFIG_BACKUP" ]; then
+    if cp "$LU8_MEMBER_CONFIG_BACKUP" "$(node_dir "$MEMBER_NODE")/config.json" &&
+       "$SCRIPT_DIR/devnet.sh" restart-node "$MEMBER_NODE" >/dev/null 2>&1; then
+      rm -f "$LU8_MEMBER_CONFIG_BACKUP"
+    else
+      warn "member config restore failed; backup retained at $LU8_MEMBER_CONFIG_BACKUP"
+      status=1
+    fi
+  fi
+  exit "$status"
+}
+
+configure_legacy_member() {
+  local config
+  config="$(node_dir "$MEMBER_NODE")/config.json"
+  [ -f "$config" ] || fail "member config missing: $config"
+  LU8_MEMBER_CONFIG_BACKUP=$(mktemp "${TMPDIR:-/tmp}/rfc38-lu8-member-XXXXXX")
+  cp "$config" "$LU8_MEMBER_CONFIG_BACKUP"
+  trap 'restore_member_config $?' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  node -e '
+    const fs = require("fs");
+    const path = process.argv[1];
+    const config = JSON.parse(fs.readFileSync(path, "utf8"));
+    config.rfc64Catalog = { ...config.rfc64Catalog,
+      rollout: { ...config.rfc64Catalog?.rollout, killSwitch: true } };
+    fs.writeFileSync(path, JSON.stringify(config, null, 2));
+  ' "$config"
+  "$SCRIPT_DIR/devnet.sh" restart-node "$MEMBER_NODE" >/dev/null 2>&1 ||
+    fail "member did not restart in the legacy receiver lane"
+  log "✓ member uses the legacy receiver lane for LU-8"
+}
+
+configure_legacy_member
+
 CURATOR_AGENT=$(api_call "$CURATOR_NODE" GET /api/agent/identity | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).agentAddress))')
 CURATOR_PEER=$(api_call "$CURATOR_NODE" GET /api/agent/identity | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).peerId))')
 MEMBER_AGENT=$(api_call "$MEMBER_NODE" GET /api/agent/identity | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>console.log(JSON.parse(d).agentAddress))')
@@ -262,11 +307,38 @@ REPORT_BODY=$(VERIFY_BAD="$VERIFY_BAD" PUB_CG="$PUB_CG" STAMP="$STAMP" node -e '
     verifyResult: vr
   }));
 ')
-REPORT_RESP=$(api_call "$MEMBER_NODE" POST /api/knowledge-assets/batch-rejections/report "$REPORT_BODY")
+REPORT_DIGEST=""
+# A successful subscribe response only queues catch-up. Under a transient
+# authority RPC circuit, that job can fail before the member receives its
+# local graph declaration. Reporting a rejection is a write and must wait
+# for that declaration; retry the failed catch-up rather than counting the
+# durable subscription row itself as readiness.
+for attempt in $(seq 1 36); do
+  REPORT_RESP=$(api_call "$MEMBER_NODE" POST /api/knowledge-assets/batch-rejections/report "$REPORT_BODY")
+  REPORT_DIGEST=$(parse_json "$REPORT_RESP" '.record?.digest')
+  [ -z "$REPORT_DIGEST" ] || break
+  REPORT_CODE=$(parse_json "$REPORT_RESP" '.code')
+  case "$REPORT_CODE" in
+    CONTEXT_GRAPH_NOT_FOUND|CONTEXT_GRAPH_NOT_WRITABLE|CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE) ;;
+    *) fail "rejection report failed: $REPORT_RESP" ;;
+  esac
+  CATCHUP_RESP=$(api_call "$MEMBER_NODE" GET "/api/sync/catchup-status?contextGraphId=$PUB_CG")
+  CATCHUP_STATUS=$(parse_json "$CATCHUP_RESP" '.status')
+  [ "$CATCHUP_STATUS" != denied ] || fail "member catch-up was denied: $CATCHUP_RESP"
+  if [ "$CATCHUP_STATUS" = failed ] || [ "$CATCHUP_STATUS" = unreachable ]; then
+    RETRY_SUB=$(api_call_with_status "$MEMBER_NODE" POST /api/context-graph/subscribe "{\"contextGraphId\":\"$PUB_CG\",\"includeSharedMemory\":true}")
+    RETRY_STATUS=$(printf '%s\n' "$RETRY_SUB" | tail -n 1)
+    case "$RETRY_STATUS" in
+      200|429|503) ;;
+      *) fail "member catch-up retry failed (HTTP $RETRY_STATUS): $RETRY_SUB" ;;
+    esac
+  fi
+  log "member graph declaration pending (attempt $attempt/36; catch-up ${CATCHUP_STATUS:-unknown})"
+  sleep 10
+done
+[ -n "$REPORT_DIGEST" ] || fail "member graph declaration did not recover for rejection reporting: $REPORT_RESP"
 log "report response: $REPORT_RESP"
 REPORT_GOSSIPED=$(parse_json "$REPORT_RESP" '.gossiped')
-REPORT_DIGEST=$(parse_json "$REPORT_RESP" '.record?.digest')
-[ -n "$REPORT_DIGEST" ] || fail "no digest in report response: $REPORT_RESP"
 log "✓ Rejection record minted: digest=$REPORT_DIGEST gossiped=$REPORT_GOSSIPED"
 
 sleep 2

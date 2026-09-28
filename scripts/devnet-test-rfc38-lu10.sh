@@ -199,7 +199,10 @@ for _ in $(seq 1 60); do
       process.stdin.on("end", () => {
         try {
           const graph = JSON.parse(body).contextGraphs?.find(row => row.id === process.env.CG_ID);
-          console.log(graph?.onChain?.active === true
+          // The list projection leaves active=null until full enumeration;
+          // the catch-up request below makes the live access decision.
+          console.log(graph?.onChain
+            && graph.onChain.active !== false
             && graph.onChain.id === process.env.ON_CHAIN_ID
             && graph.accessPolicy === "public" ? "true" : "false");
         } catch { console.log("false"); }
