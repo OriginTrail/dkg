@@ -596,6 +596,47 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(withoutResolverCalls.selectedShared).toHaveLength(1);
   });
 
+  it('falls back to legacy SWM catch-up when the kill switch restores legacy transfer', async () => {
+    const { agent, calls } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: null, active: false }),
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+    });
+
+    const posted = await invokeThroughBridge(
+      agent,
+      'syncSharedMemory',
+      ['peer-curator', 'cg-public-legacy', 2000, 'catchup-foreground', true],
+    );
+
+    expect(posted.error).toBeUndefined();
+    expect(calls.selectedShared).toEqual([]);
+    expect(calls.shared).toHaveLength(1);
+    expect(calls.shared[0]).toEqual([
+      'peer-curator',
+      ['cg-public-legacy'],
+      { priority: 2000, source: 'catchup-foreground' },
+    ]);
+  });
+
+  it('does not fall back to legacy SWM when catalog authority forbids it', async () => {
+    const { agent, calls } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: null, active: false }),
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: false }),
+    });
+
+    const posted = await invokeThroughBridge(
+      agent,
+      'syncSharedMemory',
+      ['peer-curator', 'cg-catalog-only', 2000, 'catchup-foreground', true],
+    );
+
+    expect(posted.result).toEqual({
+      kind: 'catchup-plane-not-attempted', reason: 'selected-lane-refused',
+    });
+    expect(calls.selectedShared).toEqual([]);
+    expect(calls.shared).toEqual([]);
+  });
+
   it('decides the selected SWM lane on every call, not once per job', async () => {
     // A first subscribe commits the graph's RFC-64 policy in the background
     // while the job prepares, so one call can find the lane inactive and the
@@ -641,6 +682,27 @@ describe('WorkerCatchupRunner agent bridge', () => {
       kind: 'catchup-plane-not-attempted',
       reason: 'selected-lane-refused',
     });
+  });
+
+  it('uses legacy SWM if the kill switch revokes a selected-lane lease mid-call', async () => {
+    const { agent, calls } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: 'selected-public', active: true }),
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+      syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
+        calls.selectedShared.push(args);
+        throw new Rfc64SwmRecoveryTargetRevokedErrorV1('cg-transition');
+      },
+    });
+
+    const posted = await invokeThroughBridge(
+      agent,
+      'syncSharedMemory',
+      ['peer-a', 'cg-transition', 2000, 'catchup-foreground', true],
+    );
+
+    expect(posted.error).toBeUndefined();
+    expect(calls.selectedShared).toHaveLength(1);
+    expect(calls.shared).toHaveLength(1);
   });
 
   it('keeps a selected SWM transport error a failure', async () => {

@@ -212,6 +212,12 @@ function selectedSharedMemoryLaneActive(agent: any, contextGraphId: string): boo
   return authority?.active === true && authority.lane === 'selected-public';
 }
 
+/** The kill switch can revoke the selected lane while explicitly restoring legacy transfer. */
+function legacySharedMemoryLaneAllowed(agent: any, contextGraphId: string): boolean {
+  if (typeof agent.resolveRfc64CatalogReceiverAuthorityV1 !== 'function') return false;
+  return agent.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId)?.legacySyncAllowed === true;
+}
+
 /** `Rfc64SwmRecoveryTargetRevokedErrorV1`, thrown by a selected lane whose lease is not current. */
 function isRfc64SwmRecoveryLeaseRefusal(error: unknown): boolean {
   return typeof error === 'object'
@@ -1321,6 +1327,13 @@ class WorkerCatchupRunner implements CatchupRunner {
           // commits the graph's RFC-64 authority in the background while the
           // job is still preparing, and a later peer's call must then run.
           if (!selectedSharedMemoryLaneActive(agent, contextGraphId)) {
+            if (legacySharedMemoryLaneAllowed(agent, contextGraphId)) {
+              return agent.syncSharedMemoryFromPeerDetailed(
+                peerId,
+                [contextGraphId],
+                admission,
+              );
+            }
             return this.selectedLaneNotAttempted(
               contextGraphId,
               'has no active RFC-64 public policy',
@@ -1344,6 +1357,13 @@ class WorkerCatchupRunner implements CatchupRunner {
             // this graph, which says nothing about the peer. Any other error
             // keeps its failure semantics.
             if (!isRfc64SwmRecoveryLeaseRefusal(error)) throw error;
+            if (legacySharedMemoryLaneAllowed(agent, contextGraphId)) {
+              return agent.syncSharedMemoryFromPeerDetailed(
+                peerId,
+                [contextGraphId],
+                admission,
+              );
+            }
             return this.selectedLaneNotAttempted(
               contextGraphId,
               'refused by its RFC-64 recovery lease',
