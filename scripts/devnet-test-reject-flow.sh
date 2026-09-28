@@ -185,7 +185,14 @@ print(json.dumps({
 ")
 resp=$(api "$N1" POST /api/context-graph/create "$body")
 created=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('created',''))")
-[ "$created" = "$CG_ID" ] && ok "CG created on N1" || { fail "create failed: $resp"; exit 1; }
+registered=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('registered',''))")
+on_chain_id=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('onChainId',''))")
+if [ "$created" = "$CG_ID" ] && [ "$registered" = True ] && [[ "$on_chain_id" =~ ^[1-9][0-9]*$ ]]; then
+  ok "CG created and registered on N1"
+else
+  fail "registered create failed or was partial: $resp"
+  exit 1
+fi
 
 hr "Step 2 — N2 attempts to subscribe (expect refused)"
 refused=no

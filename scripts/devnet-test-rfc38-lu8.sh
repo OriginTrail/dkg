@@ -325,7 +325,7 @@ for attempt in $(seq 1 36); do
   CATCHUP_RESP=$(api_call "$MEMBER_NODE" GET "/api/sync/catchup-status?contextGraphId=$PUB_CG")
   CATCHUP_STATUS=$(parse_json "$CATCHUP_RESP" '.status')
   [ "$CATCHUP_STATUS" != denied ] || fail "member catch-up was denied: $CATCHUP_RESP"
-  if [ "$CATCHUP_STATUS" = failed ] || [ "$CATCHUP_STATUS" = unreachable ]; then
+  if [ "$CATCHUP_STATUS" = failed ] || [ "$CATCHUP_STATUS" = unreachable ] || [ "$CATCHUP_STATUS" = deferred ]; then
     RETRY_SUB=$(api_call_with_status "$MEMBER_NODE" POST /api/context-graph/subscribe "{\"contextGraphId\":\"$PUB_CG\",\"includeSharedMemory\":true}")
     RETRY_STATUS=$(printf '%s\n' "$RETRY_SUB" | tail -n 1)
     case "$RETRY_STATUS" in

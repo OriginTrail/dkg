@@ -549,7 +549,7 @@ for attempt in $(seq 1 90); do
       break
       ;;
     denied) fail "approved member's catch-up was denied: $catchup_resp" ;;
-    failed|unreachable)
+    failed|unreachable|deferred)
       [ "$catchup_retries" -lt 3 ] || fail "approved member's catch-up kept failing: $catchup_resp"
       catchup_retries=$((catchup_retries + 1))
       retry_resp=$(api "$N2" POST /api/context-graph/subscribe "$subscribe_body")

@@ -283,6 +283,9 @@ case "$PARTICIPANTS_LIST" in
   *"$M1_AGENT"*) log "✓ M1 still on the allowlist" ;;
   *)             fail "M1 unexpectedly missing from the post-revoke allowlist" ;;
 esac
+# Bound the encryption assertion to setup sends after the successful revoke.
+# Older setup sends belong to the pre-revocation membership and are valid.
+POST_REVOKE_LOG_LINES=$(wc -l < "$CURATOR_LOG")
 
 # ===========================================================================
 act "4. Curator writes post-revocation batch (3 NEW triples)"
@@ -390,12 +393,12 @@ act "6. Encryption-side rotation: M2 must not receive the new sender-key epoch"
 # Direct fan-out need not broadcast to a revoked member at all. Inspect the
 # curator's setup sends instead: M1 must receive a fresh epoch, while M2 must
 # receive no setup for any epoch minted after its removal.
-POST_EPOCH=$(python3 - "$CURATOR_LOG" "$CG_ID" "$M1_AGENT" "$M2_AGENT" "$PRE_EPOCH" <<'PY'
-import re, sys
-path, graph, member, revoked, pre = sys.argv[1:]
+POST_EPOCH=$(python3 - "$CURATOR_LOG" "$CG_ID" "$M1_AGENT" "$M2_AGENT" "$PRE_EPOCH" "$POST_REVOKE_LOG_LINES" <<'PY'
+import itertools, re, sys
+path, graph, member, revoked, pre, skip = sys.argv[1:]
 by_recipient = {member: set(), revoked: set()}
 with open(path) as stream:
-    for line in stream:
+    for line in itertools.islice(stream, int(skip), None):
         if 'SWM sender-key setup send:' not in line or f'contextGraph={graph}' not in line:
             continue
         recipient = re.search(r'\brecipientAgent=([^ ]+)', line)
@@ -405,12 +408,12 @@ with open(path) as stream:
 new_epochs = by_recipient[member] - {pre}
 if not new_epochs:
     sys.exit('remaining member received no fresh sender-key epoch')
-if by_recipient[revoked] & new_epochs:
-    sys.exit('revoked member received the fresh sender-key epoch')
+if by_recipient[revoked]:
+    sys.exit('revoked member received a sender-key setup after removal')
 print(','.join(sorted(new_epochs)))
 PY
 ) || fail "ENCRYPTION-SIDE REGRESSION: curator did not rotate exclusively to current members"
-log "✓ curator gave M1 fresh epoch $POST_EPOCH and sent no setup for it to M2"
+log "✓ curator gave M1 fresh epoch $POST_EPOCH and sent no post-revoke setup to M2"
 
 # ===========================================================================
 act "7. Authorization-side rotation: curator must deny M2's sync requests post-revoke"
