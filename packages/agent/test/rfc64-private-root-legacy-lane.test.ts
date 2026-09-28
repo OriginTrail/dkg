@@ -321,11 +321,18 @@ describe('private root SWM on the legacy member lane (#2858)', () => {
   });
 
   it.each([
-    [true, true],
-    [false, false],
-  ])('recovers the root scope of a blocked private graph: lane=%s', async (onLane, rootScope) => {
+    [false, true, true],
+    [false, false, false],
+    [true, false, true],
+  ])('recovers the root scope of a blocked private graph: legacy=%s lane=%s', async (
+    legacySwmAllowed,
+    onLane,
+    rootScope,
+  ) => {
     vi.spyOn(internals, 'resolveRfc64CatalogReceiverAuthorityV1')
       .mockReturnValue(receiverAuthority('catalog-blocked'));
+    vi.spyOn(internals, 'rfc64LegacySwmGossipAllowedForContextGraph')
+      .mockReturnValue(legacySwmAllowed);
     vi.spyOn(internals, 'rfc64PrivateRootSwmOnLegacyLaneV1').mockResolvedValue(onLane);
     const recoverPrivateTarget = vi.fn(async (_input: { includeRootScope: boolean }) => ({}));
     vi.spyOn(internals, 'createSwmTargetExecutorSessionV1')
