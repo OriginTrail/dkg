@@ -25,7 +25,7 @@ import {
 } from '@origintrail-official/dkg-agent';
 import {
   STORE_OPERATION_TIMEOUT_CODE,
-  StoreSchedulerBusyError,
+  isStoreSchedulerBusyError,
   isStoreOperationTimeoutError,
 } from '@origintrail-official/dkg-storage';
 import type { DkgConfig } from '../config.js';
@@ -86,11 +86,11 @@ export interface StoreUnavailableClassification {
 export function classifyStoreUnavailable(
   err: unknown,
 ): StoreUnavailableClassification | null {
-  if (err instanceof StoreSchedulerBusyError) {
+  if (isStoreSchedulerBusyError(err)) {
     return {
       outcome: 'not_started',
       body: {
-        error: err.message,
+        error: err.message ?? 'Store scheduler is temporarily busy; retry the request',
         code: err.code,
         reason: err.reason,
         priority: err.priority,

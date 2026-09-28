@@ -1661,6 +1661,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // failures can carry "Invalid"/"Unsafe" text and must NOT be down-classified
     // to 400 (parity with the legacy publish path).
     if (layer === "vm" && verb === "publish-async") {
+      let enqueueStarted = false;
       try {
         const publisherAvailability = ctx.publisherState.availability;
         if (!publisherAvailability.available) {
@@ -1700,6 +1701,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // Kept separate from `callerAgentAddress` so author selection is untouched.
         // Admission travels BESIDE the request (🟡 3824743779), never inside it: the operation
         // payload that execution and recovery act on carries no authorization principal.
+        enqueueStarted = true;
         const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish(intent, {
           admittedByAgentAddress: requestAgentAddress,
         });
@@ -1723,6 +1725,16 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(subGraphName ? { subGraphName } : {}),
         });
       } catch (err: any) {
+        // A store read may have an indeterminate outcome while this request has
+        // not created a publish job. Keep these separate; enqueue itself may
+        // persist a job before throwing, so never make a no-job claim then.
+        const storeUnavailable = classifyStoreUnavailable(err);
+        if (storeUnavailable) {
+          return jsonResponse(res, 503, {
+            ...storeUnavailable.body,
+            ...(!enqueueStarted ? { jobCreated: false } : {}),
+          }, undefined, { 'Retry-After': '1' });
+        }
         if (respondPublicationPricingPolicyError(res, err)) return;
         if (err instanceof AsyncLiftJobConflictError) {
           return jsonResponse(res, 409, {
@@ -1760,7 +1772,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           });
         }
         if (err?.code === "PUBLISH_NOT_FULL_SHARE" || err?.code === "PUBLISH_INTENT_STALE") {
-          return jsonResponse(res, 409, { code: err.code, error: err.message ?? String(err) });
+          return jsonResponse(res, 409, {
+            code: err.code,
+            error: err.message ?? String(err),
+            ...(!enqueueStarted ? { jobCreated: false } : {}),
+          });
         }
         // GH#2273 — a multi-valued SWM head now fails closed in the resolver. That is
         // transient SERVER-side corruption the sync repair heals, not a stale client
