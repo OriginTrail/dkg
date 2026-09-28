@@ -3348,6 +3348,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     ctx: OperationContext,
     options: {
       readonly blockNumber?: number;
+      readonly logIndex?: number;
       readonly txHash?: string;
       readonly signal?: AbortSignal;
     } = {},
@@ -3360,6 +3361,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       : undefined;
     const eventTxHash = typeof options.txHash === 'string' && options.txHash.length > 0
       ? options.txHash.toLowerCase()
+      : undefined;
+    const logIndex = options.logIndex !== undefined
+      && Number.isSafeInteger(options.logIndex)
+      && options.logIndex >= 0
+      ? options.logIndex
       : undefined;
     signal?.throwIfAborted();
     const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
@@ -3442,6 +3448,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
         kaId,
         merkleRoot: eventRoot,
         ...(blockNumber === undefined ? {} : { blockNumber }),
+        ...(logIndex === undefined ? {} : { logIndex }),
+        ...(eventTxHash === undefined ? {} : { txHash: eventTxHash }),
         ...(sameRoot ? { checkVersion: true } : {}),
       };
       const delayMs = local.staged ? DKGAgentBase.VM_REFRESH_STAGED_GRACE_MS : 0;
@@ -3449,7 +3457,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // backoff alone.
       const offered = this.vmRefreshQueue.offer(target, delayMs);
       if (offered === 'held') {
-        this.log.debug(ctx, `VM refresh: ${ual} in "${localCgId}" is already queued for this root`);
+        this.log.debug(ctx, `VM refresh: ${ual} in "${localCgId}" already has this or a newer update queued`);
         continue;
       }
       if (offered === 'full') {

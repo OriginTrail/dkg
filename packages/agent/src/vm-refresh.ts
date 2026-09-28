@@ -38,6 +38,10 @@ export interface VmRefreshTarget {
    * targets with a block hold the event lane's persisted cursor.
    */
   readonly blockNumber?: number;
+  /** Position within the block, so two updates with the same root remain distinct. */
+  readonly logIndex?: number;
+  /** Transaction identity when a log position is unavailable or a block reorganizes. */
+  readonly txHash?: string;
   /**
    * The copy already holds the announced root. Roots name content, not
    * versions, so an update that repeats content (or an A -> B -> A history)
@@ -69,8 +73,8 @@ export interface VmRefreshAttempt {
 }
 
 /**
- * What an offer did: recorded a new target, kept the one already held for the
- * same root (and its retry schedule), or refused it because the set is full.
+ * What an offer did: recorded a new update, kept the already held event (and
+ * its retry schedule), or refused it because the set is full.
  */
 export type VmRefreshOfferResult = 'recorded' | 'held' | 'full';
 
@@ -101,6 +105,24 @@ interface VmRefreshRecord {
 
 function recordKey(localCgId: string, ual: string): string {
   return `${localCgId}\0${ual}`;
+}
+
+function sameUpdate(a: VmRefreshTarget, b: VmRefreshTarget): boolean {
+  if (a.merkleRoot !== b.merkleRoot || a.blockNumber !== b.blockNumber) return false;
+  if (a.logIndex !== undefined && b.logIndex !== undefined) {
+    return a.logIndex === b.logIndex && a.txHash === b.txHash;
+  }
+  if (a.txHash !== undefined && b.txHash !== undefined) return a.txHash === b.txHash;
+  // Legacy adapters provide neither position nor transaction. Preserve their
+  // root-based replay coalescing until they can report an event identity.
+  return true;
+}
+
+function olderUpdate(incoming: VmRefreshTarget, held: VmRefreshTarget): boolean {
+  if (incoming.blockNumber === undefined || held.blockNumber === undefined) return false;
+  if (incoming.blockNumber !== held.blockNumber) return incoming.blockNumber < held.blockNumber;
+  return incoming.logIndex !== undefined && held.logIndex !== undefined
+    && incoming.logIndex < held.logIndex;
 }
 
 export class VmRefreshQueue {
@@ -136,15 +158,15 @@ export class VmRefreshQueue {
   }
 
   /**
-   * Record a target, due after `delayMs`. The same KA at the same root keeps
-   * its retry schedule, so a replayed event cannot defeat the backoff; a
-   * different root is new evidence and replaces the target. A new KA is
-   * refused while the set is full.
+   * Record a target, due after `delayMs`. A replay of the same update keeps
+   * its retry schedule. A newer update replaces it even when content is
+   * unchanged: the assertion version can advance without changing the root.
    */
   offer(target: VmRefreshTarget, delayMs = 0): VmRefreshOfferResult {
     const key = recordKey(target.localCgId, target.ual);
     const held = this.#records.get(key);
-    if (held !== undefined && held.target.merkleRoot === target.merkleRoot) return 'held';
+    if (held !== undefined
+      && (sameUpdate(held.target, target) || olderUpdate(target, held.target))) return 'held';
     if (held === undefined && this.#records.size >= this.#maxEntries) {
       this.#refusedTotal += 1;
       return 'full';
@@ -152,7 +174,10 @@ export class VmRefreshQueue {
     this.#records.delete(key);
     const now = this.#now();
     this.#records.set(key, {
-      target: Object.freeze({ ...target }),
+      target: Object.freeze({
+        ...target,
+        ...(held?.target.merkleRoot === target.merkleRoot ? { checkVersion: true } : {}),
+      }),
       firstOfferedAt: now,
       failures: 0,
       nextAttemptAt: delayMs > 0 ? now + delayMs : 0,
@@ -202,13 +227,13 @@ export class VmRefreshQueue {
 
   /**
    * Settle one attempt. Only the exact target that was attempted is settled:
-   * a newer root recorded while the attempt ran stays queued and due.
+   * a newer event recorded while the attempt ran stays queued and due.
    * Returns when a retried target is due again.
    */
   settle(target: VmRefreshTarget, outcome: VmRefreshOutcome): number | undefined {
     const key = recordKey(target.localCgId, target.ual);
     const held = this.#records.get(key);
-    if (held === undefined || held.target.merkleRoot !== target.merkleRoot) return undefined;
+    if (held === undefined || !sameUpdate(held.target, target)) return undefined;
     if (outcome !== 'retry') {
       this.#records.delete(key);
       return undefined;

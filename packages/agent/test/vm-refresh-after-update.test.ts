@@ -96,7 +96,7 @@ interface RefreshInternals {
     kaId: bigint,
     merkleRoot: Uint8Array,
     ctx: ReturnType<typeof createOperationContext>,
-    options?: { blockNumber?: number; signal?: AbortSignal },
+    options?: { blockNumber?: number; logIndex?: number; txHash?: string; signal?: AbortSignal },
   ): Promise<VmRefreshTarget[]>;
   runVmRefreshesForCg(
     localCgId: string,
@@ -319,6 +319,8 @@ async function bootMember(options: {
   connect?: (peerId: string, signal: AbortSignal | undefined) => Promise<void>;
   /** The transfer from one prepared peer; runs before the responder when set. */
   beforeFetch?: (peerId: string) => Promise<void>;
+  /** Keep the responder on the version chosen when its transfer began. */
+  captureVersionAtFetchStart?: boolean;
 } = {}) {
   const kaNumbers = options.kaNumbers ?? [7n];
   const peers = options.peers ?? [PEER];
@@ -400,11 +402,17 @@ async function bootMember(options: {
     fetchOptions?: { forceFreshExactSession?: boolean },
   ) => {
     void fetchOptions;
+    const captured = options.captureVersionAtFetchStart
+      ? new Map(requested.map((ual) => {
+          const ka = uals.get(ual);
+          return [ual, ka ? chainVersions.get(ka.kaId) : undefined] as const;
+        }))
+      : undefined;
     await options.beforeFetch?.(peerId);
     if (transport.peerHasCurrent && (options.holders === undefined || options.holders.includes(peerId))) {
       for (const ual of requested) {
         const ka = uals.get(ual);
-        const version = ka ? chainVersions.get(ka.kaId) : undefined;
+        const version = captured ? captured.get(ual) : ka ? chainVersions.get(ka.kaId) : undefined;
         if (ka && version) await materialize(internals.store, ual, ka.kaId, version);
       }
     }
@@ -456,12 +464,14 @@ describe('VmRefreshQueue', () => {
     merkleRoot: string,
     ual = 'did:dkg:mock:31337/0xabc/1',
     blockNumber?: number,
+    logIndex?: number,
   ): VmRefreshTarget => ({
     localCgId: CG,
     ual,
     kaId: 1n,
     merkleRoot,
     ...(blockNumber === undefined ? {} : { blockNumber }),
+    ...(logIndex === undefined ? {} : { logIndex }),
   });
   const queueAt = (clock: () => number, maxEntries = 8) => new VmRefreshQueue({
     maxEntries,
@@ -518,6 +528,45 @@ describe('VmRefreshQueue', () => {
     expect(queue.due(CG, 10)).toEqual([{ ...target('0xc3'), failures: 4 }]);
     queue.settle(target('0xc3'), 'refreshed');
     expect(queue.size).toBe(0);
+  });
+
+  it('retains a newer same-root event while an older refresh completes', () => {
+    const queue = queueAt(() => 0);
+    const first = target('0xb2', undefined, 150, 4);
+    const second = target('0xb2', undefined, 160, 2);
+    expect(queue.offer(first)).toBe('recorded');
+    const [attempt] = queue.due(CG, 1);
+    expect(attempt).toBeDefined();
+
+    expect(queue.offer(second)).toBe('recorded');
+    expect(queue.due(CG, 1)).toEqual([{ ...second, checkVersion: true, failures: 0 }]);
+    expect(queue.oldestBlockNumber()).toBe(160);
+    queue.settle(attempt!, 'refreshed');
+    expect(queue.due(CG, 1)).toEqual([{ ...second, checkVersion: true, failures: 0 }]);
+    expect(queue.offer(first)).toBe('held');
+    expect(queue.oldestBlockNumber()).toBe(160);
+    queue.settle(second, 'current');
+    expect(queue.size).toBe(0);
+  });
+
+  it('separates two same-root updates in one block by their log positions', () => {
+    const queue = queueAt(() => 0);
+    const first = target('0xb2', undefined, 160, 4);
+    const second = target('0xb2', undefined, 160, 7);
+    expect(queue.offer(first)).toBe('recorded');
+    expect(queue.offer(second)).toBe('recorded');
+    queue.settle(first, 'current');
+    expect(queue.due(CG, 1)).toEqual([{ ...second, checkVersion: true, failures: 0 }]);
+  });
+
+  it('uses distinct transaction hashes when an adapter has no log positions', () => {
+    const queue = queueAt(() => 0);
+    const first = { ...target('0xb2', undefined, 160), txHash: '0x01' };
+    const second = { ...target('0xb2', undefined, 160), txHash: '0x02' };
+    expect(queue.offer(first)).toBe('recorded');
+    expect(queue.offer(second)).toBe('recorded');
+    queue.settle(first, 'refreshed');
+    expect(queue.due(CG, 1)).toEqual([{ ...second, checkVersion: true, failures: 0 }]);
   });
 
   it('refuses a new KA when full, but still takes a newer root for a KA it holds', () => {
@@ -1161,6 +1210,45 @@ describe('VM refresh worker (#2858)', () => {
     expect(fetches.calls).toHaveLength(1);
     expect(await localRootHex(internals.store, ual)).toBe(rootA);
     expect(await localVersion(internals.store, ual)).toBe('2');
+    expect(internals.vmRefreshQueue.size).toBe(0);
+  });
+
+  it('refreshes a newer same-root update that arrives while the older transfer is running', async () => {
+    let entered = () => undefined;
+    const firstTransferStarted = new Promise<void>((resolve) => { entered = resolve; });
+    let release = () => undefined;
+    const firstTransferMayFinish = new Promise<void>((resolve) => { release = resolve; });
+    let transfers = 0;
+    const { internals, kas, updateOnChain, view, fetches } = await bootMember({
+      captureVersionAtFetchStart: true,
+      beforeFetch: async () => {
+        if (transfers++ === 0) {
+          entered();
+          await firstTransferMayFinish;
+        }
+      },
+    });
+    view.blockNumber = 200;
+    const { kaId, ual } = kas[0]!;
+    const rootB2 = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    await internals.handleKAUpdatedNudge(kaId, rootB2, ctx, { blockNumber: 150, logIndex: 4 });
+    const firstPass = internals.runVmRefreshesForCg(CG, CG, () => true);
+    await firstTransferStarted;
+
+    const rootB3 = updateOnChain(7n, { label: 'B', assertionVersion: 3n });
+    expect(ethers.hexlify(rootB3)).toBe(ethers.hexlify(rootB2));
+    await internals.handleKAUpdatedNudge(kaId, rootB3, ctx, { blockNumber: 160, logIndex: 2 });
+    expect(internals.vmRefreshQueue.snapshot()).toEqual([
+      expect.objectContaining({ blockNumber: 160, logIndex: 2, checkVersion: true }),
+    ]);
+
+    release();
+    await firstPass;
+    expect(await localVersion(internals.store, ual)).toBe('2');
+    expect(internals.vmRefreshQueue.size).toBe(1);
+    await internals.runVmRefreshesForCg(CG, CG, () => true);
+    expect(await localVersion(internals.store, ual)).toBe('3');
+    expect(fetches.calls).toHaveLength(2);
     expect(internals.vmRefreshQueue.size).toBe(0);
   });
 

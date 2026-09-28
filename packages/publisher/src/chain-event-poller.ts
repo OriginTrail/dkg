@@ -49,6 +49,8 @@ export type OnCollectionUpdated = (info: {
   blockNumber: number;
   /** Transaction that committed the update, when the adapter reports it. */
   txHash?: string;
+  /** Position of the update log within its block, when available. */
+  logIndex?: number;
   signal?: AbortSignal;
 }) => Promise<void>;
 
@@ -483,6 +485,10 @@ export class ChainEventPoller {
     const txHash = typeof data['txHash'] === 'string' && data['txHash'].length > 0
       ? data['txHash'] as string
       : undefined;
+    const logIndex = typeof data['logIndex'] === 'number'
+      && Number.isSafeInteger(data['logIndex']) && data['logIndex'] >= 0
+      ? data['logIndex']
+      : undefined;
 
     this.log.info(ctx,
       `Chain event: KnowledgeAssetUpdated block=${event.blockNumber} batchId=${batchId}`,
@@ -496,6 +502,7 @@ export class ChainEventPoller {
       batchId,
       blockNumber: event.blockNumber,
       ...(txHash === undefined ? {} : { txHash }),
+      ...(logIndex === undefined ? {} : { logIndex }),
       signal,
     });
   }
