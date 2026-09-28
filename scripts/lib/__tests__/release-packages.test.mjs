@@ -15,6 +15,7 @@ import {
   findNodeSqliteInstallGuardViolations,
   findMissingCliPackAssets,
   findReleaseVersionMismatches,
+  parseNpmPackReport,
   verifyReleaseTag,
   writeBuildInfo,
 } from '../../release-packages.mjs';
@@ -415,6 +416,19 @@ test('passes when the cli tarball includes every required runtime asset', () => 
   assert.deepEqual(findMissingCliPackAssets(root, packReport), []);
 }));
 
+test('npm pack lifecycle banner does not hide the JSON asset report', () => withFixture((root) => {
+  writeCliPackFixture(root);
+  const report = JSON.stringify([{ files: [
+    'project.json', 'scripts/verify-node-sqlite-runtime.mjs', 'blazegraph-image.json',
+    'blazegraph-image-metadata.cjs', 'blazegraph-namespace-contract.cjs',
+    'blazegraph-runtime-contract.d.cts', 'build-info.json',
+    'network/testnet.json', 'network/mainnet-base.json',
+  ].map((asset) => ({ path: asset })) }]);
+  const npmOutput = `\n> @origintrail-official/dkg@10.0.20 prepack\n> node ../../scripts/copy-cli-runtime-assets.mjs\n\n${report}`;
+  assert.deepEqual(findMissingCliPackAssets(root, () => npmOutput), []);
+  assert.throws(() => parseNpmPackReport('prepack completed without a report'), /JSON package file list/);
+}));
+
 test('copyCliRuntimeAssets materializes package-local assets and mirrors (drops stale overlays)', () => withFixture((root) => {
   const storageDir = path.join(root, 'packages', 'storage');
   fs.mkdirSync(storageDir, { recursive: true });
@@ -780,10 +794,10 @@ test('real npm pack --dry-run runs prepack and includes every runtime asset', { 
     cwd: cliDir, encoding: 'utf8', shell: process.platform === 'win32',
   });
   assert.equal(res.status, 0, `npm pack failed: ${res.stderr}`);
-  // JSON.parse fails if prepack polluted stdout — that is the regression guard.
-  const report = JSON.parse(res.stdout);
+  // npm versions may include a lifecycle banner before the JSON file list.
+  const report = parseNpmPackReport(res.stdout);
   const packed = new Set(
-    (Array.isArray(report) ? report : [report])
+    report
       .flatMap((entry) => entry.files ?? [])
       .map((file) => file.path.replace(/\\/g, '/')),
   );

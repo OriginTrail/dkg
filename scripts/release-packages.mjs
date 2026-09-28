@@ -410,6 +410,31 @@ function commandVerifyTag(args) {
  * dropped from the 10.0.4 publish, so this preflight hard-fails a release that
  * would ship without them.
  */
+/** npm can prefix --json output with the package's prepack lifecycle banner. */
+export function parseNpmPackReport(raw) {
+  let report;
+  try {
+    report = JSON.parse(raw);
+  } catch {
+    // Find the final complete JSON document after any lifecycle output. Keep
+    // failing closed if npm did not emit a usable package file list.
+    const lines = raw.split(/\r?\n/);
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+      const candidate = lines[i].trimStart();
+      if (!candidate.startsWith('[') && !candidate.startsWith('{')) continue;
+      try {
+        report = JSON.parse(lines.slice(i).join('\n'));
+        break;
+      } catch { /* This line was part of the lifecycle output. */ }
+    }
+  }
+  const entries = Array.isArray(report) ? report : [report];
+  if (entries.length === 0 || entries.some((entry) => !Array.isArray(entry?.files))) {
+    throw new Error('npm pack did not return a JSON package file list');
+  }
+  return entries;
+}
+
 export function findMissingCliPackAssets(rootDir = ROOT_DIR, runner = runCapture) {
   const cliDir = path.join(rootDir, 'packages', 'cli');
   // The fail-closed manifest supplies the explicit complete pack contract:
@@ -426,9 +451,9 @@ export function findMissingCliPackAssets(rootDir = ROOT_DIR, runner = runCapture
     cwd: cliDir,
     shell: process.platform === 'win32',
   });
-  const report = JSON.parse(raw);
+  const report = parseNpmPackReport(raw);
   const packed = new Set(
-    (Array.isArray(report) ? report : [report])
+    report
       .flatMap((entry) => entry.files ?? [])
       .map((file) => file.path.replace(/\\/g, '/')),
   );
