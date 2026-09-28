@@ -40,16 +40,19 @@ describe('ChainEventPoller collection updates', () => {
     expect(saveCalls).toEqual([{ lane: 'collectionUpdates', block: 100 }]);
   });
 
-  it('passes the update\'s transaction and log position to the callback', async () => {
+  it('passes the update\'s transaction and block/log identity to the callback', async () => {
     const { adapter } = makeChain({
       head: 100,
       events: [{
         type: 'KnowledgeAssetUpdated',
         blockNumber: 50,
-        data: { merkleRoot: '0x' + '44'.repeat(32), batchId: '42', txHash: '0x' + 'ab'.repeat(32), logIndex: 7 },
+        data: {
+          merkleRoot: '0x' + '44'.repeat(32), batchId: '42',
+          txHash: '0x' + 'ab'.repeat(32), logIndex: 7, blockHash: '0x' + 'cd'.repeat(32),
+        },
       }],
     });
-    const seen: Array<{ txHash?: string; logIndex?: number }> = [];
+    const seen: Array<{ txHash?: string; logIndex?: number; blockHash?: string }> = [];
     const poller = new ChainEventPoller({
       chain: adapter,
       publishHandler: makeHandler(),
@@ -61,6 +64,7 @@ describe('ChainEventPoller collection updates', () => {
 
     expect(seen.map((info) => info.txHash)).toEqual(['0x' + 'ab'.repeat(32)]);
     expect(seen.map((info) => info.logIndex)).toEqual([7]);
+    expect(seen.map((info) => info.blockHash)).toEqual(['0x' + 'cd'.repeat(32)]);
   });
 
   it('persists the cursor no higher than the ceiling of unsettled callback work', async () => {

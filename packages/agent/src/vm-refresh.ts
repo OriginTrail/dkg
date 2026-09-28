@@ -38,10 +38,14 @@ export interface VmRefreshTarget {
    * targets with a block hold the event lane's persisted cursor.
    */
   readonly blockNumber?: number;
+  /** Hash of the event's block, to distinguish a replacement fork. */
+  readonly blockHash?: string;
   /** Position within the block, so two updates with the same root remain distinct. */
   readonly logIndex?: number;
   /** Transaction identity when a log position is unavailable or a block reorganizes. */
   readonly txHash?: string;
+  /** Required chain-view height when an unseen event arrives behind a held one. */
+  readonly proofBlockNumber?: number;
   /**
    * The copy already holds the announced root. Roots name content, not
    * versions, so an update that repeats content (or an A -> B -> A history)
@@ -99,6 +103,8 @@ export interface VmRefreshQueueOptions {
 interface VmRefreshRecord {
   readonly target: VmRefreshTarget;
   readonly firstOfferedAt: number;
+  /** Event identities superseded while this target is held. */
+  readonly seenUpdateKeys: Set<string>;
   failures: number;
   nextAttemptAt: number;
 }
@@ -107,18 +113,25 @@ function recordKey(localCgId: string, ual: string): string {
   return `${localCgId}\0${ual}`;
 }
 
-function sameUpdate(a: VmRefreshTarget, b: VmRefreshTarget): boolean {
-  if (a.merkleRoot !== b.merkleRoot || a.blockNumber !== b.blockNumber) return false;
-  if (a.logIndex !== undefined && b.logIndex !== undefined) {
-    return a.logIndex === b.logIndex && a.txHash === b.txHash;
+function updateKey(target: VmRefreshTarget): string {
+  // Complete positions remain distinct, including across forks. Legacy
+  // adapters without a position can only coalesce the evidence they supply.
+  if (target.blockNumber === undefined) return JSON.stringify(['legacy', target.merkleRoot]);
+  if (target.logIndex !== undefined) {
+    return JSON.stringify([
+      'log', target.blockNumber, target.logIndex, target.blockHash,
+      target.txHash, target.merkleRoot,
+    ]);
   }
-  if (a.txHash !== undefined && b.txHash !== undefined) return a.txHash === b.txHash;
-  // Legacy adapters provide neither position nor transaction. Preserve their
-  // root-based replay coalescing until they can report an event identity.
-  return true;
+  if (target.txHash !== undefined) {
+    return JSON.stringify([
+      'transaction', target.blockNumber, target.blockHash, target.txHash, target.merkleRoot,
+    ]);
+  }
+  return JSON.stringify(['legacy-block', target.blockNumber, target.merkleRoot]);
 }
 
-function olderUpdate(incoming: VmRefreshTarget, held: VmRefreshTarget): boolean {
+function behindHeld(incoming: VmRefreshTarget, held: VmRefreshTarget): boolean {
   if (incoming.blockNumber === undefined || held.blockNumber === undefined) return false;
   if (incoming.blockNumber !== held.blockNumber) return incoming.blockNumber < held.blockNumber;
   return incoming.logIndex !== undefined && held.logIndex !== undefined
@@ -158,27 +171,44 @@ export class VmRefreshQueue {
   }
 
   /**
-   * Record a target, due after `delayMs`. A replay of the same update keeps
-   * its retry schedule. A newer update replaces it even when content is
-   * unchanged: the assertion version can advance without changing the root.
+   * Record a target, due after `delayMs`. A replay of a held or superseded
+   * update keeps the current retry schedule. An unseen update replaces it,
+   * even at a lower position: that event could be from a replacement fork.
+   * A same-root or lower-position replacement must check the chain version.
    */
   offer(target: VmRefreshTarget, delayMs = 0): VmRefreshOfferResult {
     const key = recordKey(target.localCgId, target.ual);
     const held = this.#records.get(key);
+    const keyOfUpdate = updateKey(target);
     if (held !== undefined
-      && (sameUpdate(held.target, target) || olderUpdate(target, held.target))) return 'held';
+      && (updateKey(held.target) === keyOfUpdate || held.seenUpdateKeys.has(keyOfUpdate))) {
+      return 'held';
+    }
     if (held === undefined && this.#records.size >= this.#maxEntries) {
       this.#refusedTotal += 1;
       return 'full';
     }
+    const seenUpdateKeys = new Set(held?.seenUpdateKeys);
+    if (held !== undefined) seenUpdateKeys.add(updateKey(held.target));
+    // The queue is bounded, and so is the replay memory for a busy KA.
+    if (seenUpdateKeys.size > 128) seenUpdateKeys.delete(seenUpdateKeys.values().next().value!);
+    const behind = held !== undefined && behindHeld(target, held.target);
+    const previousProof = held?.target.proofBlockNumber ?? held?.target.blockNumber;
+    const incomingProof = target.proofBlockNumber ?? target.blockNumber;
+    const proofBlockNumber = previousProof === undefined ? incomingProof
+      : incomingProof === undefined ? previousProof
+        : Math.max(previousProof, incomingProof);
     this.#records.delete(key);
     const now = this.#now();
     this.#records.set(key, {
       target: Object.freeze({
         ...target,
-        ...(held?.target.merkleRoot === target.merkleRoot ? { checkVersion: true } : {}),
+        ...(held?.target.merkleRoot === target.merkleRoot || behind ? { checkVersion: true } : {}),
+        ...(proofBlockNumber !== undefined && proofBlockNumber !== target.blockNumber
+          ? { proofBlockNumber } : {}),
       }),
       firstOfferedAt: now,
+      seenUpdateKeys,
       failures: 0,
       nextAttemptAt: delayMs > 0 ? now + delayMs : 0,
     });
@@ -233,7 +263,7 @@ export class VmRefreshQueue {
   settle(target: VmRefreshTarget, outcome: VmRefreshOutcome): number | undefined {
     const key = recordKey(target.localCgId, target.ual);
     const held = this.#records.get(key);
-    if (held === undefined || !sameUpdate(held.target, target)) return undefined;
+    if (held === undefined || updateKey(held.target) !== updateKey(target)) return undefined;
     if (outcome !== 'retry') {
       this.#records.delete(key);
       return undefined;

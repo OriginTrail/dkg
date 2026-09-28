@@ -96,7 +96,7 @@ interface RefreshInternals {
     kaId: bigint,
     merkleRoot: Uint8Array,
     ctx: ReturnType<typeof createOperationContext>,
-    options?: { blockNumber?: number; logIndex?: number; txHash?: string; signal?: AbortSignal },
+    options?: { blockNumber?: number; logIndex?: number; blockHash?: string; txHash?: string; signal?: AbortSignal },
   ): Promise<VmRefreshTarget[]>;
   runVmRefreshesForCg(
     localCgId: string,
@@ -567,6 +567,34 @@ describe('VmRefreshQueue', () => {
     expect(queue.offer(second)).toBe('recorded');
     queue.settle(first, 'refreshed');
     expect(queue.due(CG, 1)).toEqual([{ ...second, checkVersion: true, failures: 0 }]);
+  });
+
+  it('keeps the backoff of an exact positioned replay', () => {
+    const queue = queueAt(() => 1_000);
+    const event = {
+      ...target('0xb2', undefined, 160, 7),
+      txHash: '0x01', blockHash: '0xaaa',
+    };
+    expect(queue.offer(event)).toBe('recorded');
+    queue.settle(queue.due(CG, 1)[0]!, 'retry');
+    expect(queue.offer({ ...event })).toBe('held');
+    expect(queue.snapshot()).toMatchObject([{ failures: 1, nextAttemptAt: 61_000 }]);
+  });
+
+  it('keeps a newly observed lower-position fork update and its proof boundary', () => {
+    const queue = queueAt(() => 0);
+    const oldFork = { ...target('0xb2', undefined, 160, 7), txHash: '0xold', blockHash: '0xoldfork' };
+    const canonical = { ...target('0xc3', undefined, 159, 4), txHash: '0xnew', blockHash: '0xnewfork' };
+    expect(queue.offer(oldFork)).toBe('recorded');
+    const attempt = queue.due(CG, 1)[0]!;
+    expect(queue.offer(canonical)).toBe('recorded');
+    expect(queue.due(CG, 1)).toEqual([{
+      ...canonical, checkVersion: true, proofBlockNumber: 160, failures: 0,
+    }]);
+    queue.settle(attempt, 'refreshed');
+    expect(queue.oldestBlockNumber()).toBe(159);
+    expect(queue.offer(oldFork)).toBe('held');
+    expect(queue.size).toBe(1);
   });
 
   it('refuses a new KA when full, but still takes a newer root for a KA it holds', () => {
@@ -1252,6 +1280,50 @@ describe('VM refresh worker (#2858)', () => {
     expect(internals.vmRefreshQueue.size).toBe(0);
   });
 
+  it('keeps a canonical lower-log update while an old-fork transfer finishes', async () => {
+    let entered = () => undefined;
+    const firstTransferStarted = new Promise<void>((resolve) => { entered = resolve; });
+    let release = () => undefined;
+    const firstTransferMayFinish = new Promise<void>((resolve) => { release = resolve; });
+    let transfers = 0;
+    const { internals, kas, updateOnChain, view, fetches } = await bootMember({
+      captureVersionAtFetchStart: true,
+      beforeFetch: async () => {
+        if (transfers++ === 0) {
+          entered();
+          await firstTransferMayFinish;
+        }
+      },
+    });
+    view.blockNumber = 200;
+    const { kaId, ual } = kas[0]!;
+    const oldTxHash = `0x${'11'.repeat(32)}`;
+    const newTxHash = `0x${'22'.repeat(32)}`;
+    const oldRoot = updateOnChain(7n, { label: 'B', assertionVersion: 2n });
+    await internals.handleKAUpdatedNudge(kaId, oldRoot, ctx, {
+      blockNumber: 160, logIndex: 7, txHash: oldTxHash, blockHash: `0x${'33'.repeat(32)}`,
+    });
+    const firstPass = internals.runVmRefreshesForCg(CG, CG, () => true);
+    await firstTransferStarted;
+
+    const canonicalRoot = updateOnChain(7n, { label: 'C', assertionVersion: 3n });
+    await internals.handleKAUpdatedNudge(kaId, canonicalRoot, ctx, {
+      blockNumber: 160, logIndex: 4, txHash: newTxHash, blockHash: `0x${'44'.repeat(32)}`,
+    });
+    expect(internals.vmRefreshQueue.snapshot()).toEqual([
+      expect.objectContaining({ txHash: newTxHash, logIndex: 4, checkVersion: true }),
+    ]);
+
+    release();
+    await firstPass;
+    expect(await localVersion(internals.store, ual)).toBe('2');
+    expect(internals.vmRefreshQueue.size).toBe(1);
+    await internals.runVmRefreshesForCg(CG, CG, () => true);
+    expect(await localVersion(internals.store, ual)).toBe('3');
+    expect(fetches.calls).toHaveLength(2);
+    expect(internals.vmRefreshQueue.size).toBe(0);
+  });
+
   it('reaches the chain version of an A -> B -> A history it missed while offline', async () => {
     const { internals, kas, updateOnChain, view, fetches } = await bootMember();
     view.blockNumber = 200;
@@ -1690,6 +1762,8 @@ describe('lifecycle wiring (#2858)', () => {
           batchId: bigint;
           blockNumber: number;
           txHash?: string;
+          logIndex?: number;
+          blockHash?: string;
         }) => Promise<void>;
       } | null;
     }).chainPoller;
@@ -1699,11 +1773,14 @@ describe('lifecycle wiring (#2858)', () => {
     (agent as unknown as { handleKAUpdatedNudge: typeof nudges }).handleKAUpdatedNudge = nudges;
     const root = new Uint8Array(32).fill(7);
     const txHash = `0x${'ab'.repeat(32)}`;
-    await poller!.onCollectionUpdated!({ merkleRoot: root, batchId: 42n, blockNumber: 9, txHash });
+    const blockHash = `0x${'cd'.repeat(32)}`;
+    await poller!.onCollectionUpdated!({
+      merkleRoot: root, batchId: 42n, blockNumber: 9, txHash, logIndex: 7, blockHash,
+    });
 
     expect(nudges.calls).toHaveLength(1);
     expect(nudges.calls[0]!.slice(0, 2)).toEqual([42n, root]);
-    expect(nudges.calls[0]![3]).toMatchObject({ blockNumber: 9, txHash });
+    expect(nudges.calls[0]![3]).toMatchObject({ blockNumber: 9, txHash, logIndex: 7, blockHash });
     // The lane's saved cursor follows the held refresh targets.
     const ceiling = (poller as unknown as {
       collectionUpdatesPersistCeiling?: () => number | undefined;

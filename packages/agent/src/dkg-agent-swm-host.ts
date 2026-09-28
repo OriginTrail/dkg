@@ -3349,6 +3349,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     options: {
       readonly blockNumber?: number;
       readonly logIndex?: number;
+      readonly blockHash?: string;
       readonly txHash?: string;
       readonly signal?: AbortSignal;
     } = {},
@@ -3366,6 +3367,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       && Number.isSafeInteger(options.logIndex)
       && options.logIndex >= 0
       ? options.logIndex
+      : undefined;
+    const blockHash = typeof options.blockHash === 'string' && options.blockHash.length > 0
+      ? options.blockHash.toLowerCase()
       : undefined;
     signal?.throwIfAborted();
     const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
@@ -3449,6 +3453,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         merkleRoot: eventRoot,
         ...(blockNumber === undefined ? {} : { blockNumber }),
         ...(logIndex === undefined ? {} : { logIndex }),
+        ...(blockHash === undefined ? {} : { blockHash }),
         ...(eventTxHash === undefined ? {} : { txHash: eventTxHash }),
         ...(sameRoot ? { checkVersion: true } : {}),
       };
@@ -3850,7 +3855,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // is often not connected yet) yields to the next one.
         peerStepTimeoutMs: DKGAgentBase.VM_REFRESH_PEER_STEP_TIMEOUT_MS,
         // Evidence that has not seen the update would settle on the old version.
-        ...(target.blockNumber === undefined ? {} : { minVersionBlock: target.blockNumber }),
+        ...((target.proofBlockNumber ?? target.blockNumber) === undefined
+          ? {} : { minVersionBlock: target.proofBlockNumber ?? target.blockNumber }),
       });
     } catch (err) {
       // This adapter cannot prove an exact version at all. Anything else,
@@ -3921,13 +3927,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
         attempt: { outcome: 'retry', detail: 'no coherent chain view confirms the copy' },
       };
     }
-    if (target.blockNumber !== undefined && view.blockNumber < target.blockNumber) {
+    const proofBlock = target.proofBlockNumber ?? target.blockNumber;
+    if (proofBlock !== undefined && view.blockNumber < proofBlock) {
       return {
         kind: 'settled',
         attempt: {
           outcome: 'retry',
           detail: `the chain view at block ${view.blockNumber} is behind the update's block `
-            + `${target.blockNumber}`,
+            + `${proofBlock}`,
         },
       };
     }
