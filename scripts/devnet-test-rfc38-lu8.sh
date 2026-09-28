@@ -219,6 +219,8 @@ log "✓ member has an active subscription to the curator's public CG"
 # Subscription establishes read interest, not membership. This scenario's
 # rejection report writes into the public CG, so admit the reporting member
 # through the real signed join flow before testing that write.
+devnet_connect_member_to_curator "$MEMBER_NODE" "$CURATOR_NODE" ||
+  fail "member could not connect to curator before signed join"
 JOIN_REQUEST=$(devnet_request_curated_join "$MEMBER_NODE" "$CURATOR_PEER" "$PUB_CG" rfc38-lu8-member) ||
   fail "member signed request-join failed"
 [ "$(parse_json "$JOIN_REQUEST" '.status')" = pending ] || fail "member request-join failed: $JOIN_REQUEST"

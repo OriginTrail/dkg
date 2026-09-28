@@ -23,6 +23,18 @@ _devnet_member_api() {
   curl "${args[@]}" "http://127.0.0.1:$(node_port "$node")$path"
 }
 
+devnet_connect_member_to_curator() {
+  local member="$1" curator="$2" curator_addr response i
+  curator_addr=$(cat "$DEVNET_DIR/node${curator}/multiaddr") || return 1
+  [ -n "$curator_addr" ] || return 1
+  for i in 1 2 3; do
+    response=$(_devnet_member_api "$member" POST /api/connect "$(CURATOR_ADDR="$curator_addr" node -e 'console.log(JSON.stringify({multiaddr:process.env.CURATOR_ADDR}))')") || return 1
+    [ "$(devnet_json_field "$response" '.connected')" = "true" ] && return 0
+    sleep 5
+  done
+  return 1
+}
+
 # Request a signed join without assuming how the curator approves it. Callers
 # can use auto-approval or explicitly approve after a pending response.
 devnet_request_curated_join() {
@@ -47,18 +59,10 @@ devnet_approve_curated_join() {
 
 devnet_join_curated_member() {
   local member="$1" curator="$2" cg_id="$3" member_agent="$4"
-  local curator_peer curator_addr encoded connected response status delivered subscribed participants ready i
+  local curator_peer encoded response status delivered subscribed participants ready i
   curator_peer=$(api_call "$curator" GET /api/agent/identity | devnet_json_field_stdin '.peerId') || return 1
   [ -n "$curator_peer" ] || return 1
-  curator_addr=$(cat "$DEVNET_DIR/node${curator}/multiaddr") || return 1
-  [ -n "$curator_addr" ] || return 1
-  connected=0
-  for i in 1 2 3; do
-    response=$(_devnet_member_api "$member" POST /api/connect "$(CURATOR_ADDR="$curator_addr" node -e 'console.log(JSON.stringify({multiaddr:process.env.CURATOR_ADDR}))')") || return 1
-    if [ "$(devnet_json_field "$response" '.connected')" = "true" ]; then connected=1; break; fi
-    sleep 5
-  done
-  [ "$connected" -eq 1 ] || return 1
+  devnet_connect_member_to_curator "$member" "$curator" || return 1
   encoded=$(CG_ID="$cg_id" node -e 'console.log(encodeURIComponent(process.env.CG_ID))') || return 1
   status=""
   delivered=""
