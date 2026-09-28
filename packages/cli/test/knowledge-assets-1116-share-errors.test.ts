@@ -22,7 +22,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   generateEd25519Keypair,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -34,13 +34,13 @@ import {
   AsyncLiftJobConflictError,
   LiftJobPendingChainProofError,
   PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE,
-  createKnowledgeAssetVmPublishSnapshotMetadata,
-  createKnowledgeAssetVmPublishSnapshotRequest,
-  resolveLiftWorkspaceSlice,
   storeKnowledgeAssetOperationPublicQuads,
-  validateLiftPublishPayload,
+  type KnowledgeAssetVmPublishRequest,
 } from '@origintrail-official/dkg-publisher';
-import { GraphManager, createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager, createTripleStore, StoreOperationTimeoutError, StoreSchedulerBusyError,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { daemonState } from '../src/daemon/state.js';
 import { addPublisherWallet } from '../src/publisher-wallets.js';
@@ -81,6 +81,38 @@ async function seedRootlessPublicSnapshot(
     kaUal,
     kaNumber: kaNumber.toString(),
     publicTripleCount: quads.length,
+  };
+}
+
+function snapshotPreflightAgent(store: TripleStore): DKGAgent {
+  const agent = Object.create(DKGAgent.prototype);
+  agent.store = store;
+  agent.log = { debug() {}, info() {}, warn() {}, error() {} };
+  return agent;
+}
+
+function rootlessIntent(snapshot: {
+  shareOperationId: string; kaUal: string; kaNumber: string; publicTripleCount: number;
+}): KnowledgeAssetVmPublishRequest {
+  return {
+    ...snapshot,
+    contextGraphId: CG_ID,
+    name: ASSERTION_NAME,
+    roots: [],
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+    assertionVersion: '1',
+    privateTripleCount: 0,
+    seal: {
+      merkleRoot: `0x${'12'.repeat(32)}`,
+      authorAddress: ROOTLESS_AUTHOR,
+      signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+      schemeVersion: 1,
+    },
+    sealChainId: '31337',
+    sealKav10Address: '0x2222222222222222222222222222222222222222',
+    sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+    sealMerkleRoot: `0x${'12'.repeat(32)}`,
+    intentKey: `sha256:${'ab'.repeat(32)}`,
   };
 }
 
@@ -205,7 +237,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       body: JSON.stringify(body),
     });
     const json = await res.json().catch(() => null);
-    return { status: res.status, body: json };
+    return { status: res.status, body: json, headers: res.headers };
   }
 
   async function postRoot(body: Record<string, unknown>) {
@@ -453,7 +485,102 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('PUBLISH_INTENT_STALE');
     expect(String(res.body.error)).toContain('re-share');
+    expect(res.body.jobCreated).toBe(false);
     expect(enqueueCalls).toBe(0);
+  });
+
+  it.each([
+    ['queue full', () => new StoreSchedulerBusyError('queue_full', 'normal', 'query'), 'not_started'],
+    ['queue wait', () => new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'query'), 'not_started'],
+    ['structural busy', () => ({ ...new StoreSchedulerBusyError('queue_full', 'normal', 'query') }), 'not_started'],
+    ['managed recovery', () => new StoreOperationTimeoutError({
+      backend: 'oxigraph-server', operation: 'query', outcome: 'not_started',
+      message: 'Store recovery in progress; query must be retried',
+    }), 'not_started'],
+    ['dispatched read timeout', () => new StoreOperationTimeoutError({
+      backend: 'oxigraph-server', operation: 'query', timeoutMs: 30_000,
+      message: 'Invalid store response: read deadline exceeded',
+    }), 'indeterminate'],
+  ] as const)('vm/publish-async retries the unchanged real snapshot after %s', async (_label, makeError, outcome) => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const failure = makeError();
+    let pressured = false;
+    let rejectedReads = 0;
+    const readingStore = new Proxy(store, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target);
+        if (property === 'query' || property === 'getQuads') {
+          return (...args: unknown[]) => {
+            if (pressured) {
+              rejectedReads += 1;
+              return Promise.reject(failure);
+            }
+            return value.apply(target, args);
+          };
+        }
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const preflightAgent = snapshotPreflightAgent(readingStore);
+    const enqueued: KnowledgeAssetVmPublishRequest[] = [];
+    try {
+      const intent = rootlessIntent(await seedRootlessPublicSnapshot(store, {
+        shareOperationId: 'unchanged-share-2824', subject: 'urn:test:pressure', object: '"unchanged"',
+      }));
+      const originalIntent = structuredClone(intent);
+      // Establish the fixture is genuinely publishable before introducing pressure.
+      await preflightAgent.preflightKnowledgeAssetVmPublishSnapshot(intent);
+      await startWith({}, {
+        resolveFinalizedAssertionVmPublishIntent: async () => intent,
+        preflightKnowledgeAssetVmPublishSnapshot:
+          preflightAgent.preflightKnowledgeAssetVmPublishSnapshot.bind(preflightAgent),
+      }, {}, {
+        enqueueKnowledgeAssetVmPublish: async (request: KnowledgeAssetVmPublishRequest) => {
+          enqueued.push(request);
+          return 'job-after-pressure';
+        },
+      });
+      pressured = true;
+      const rejected = await post('vm/publish-async', { contextGraphId: CG_ID });
+      expect(rejectedReads).toBeGreaterThan(0);
+      expect(rejected.status).toBe(503);
+      expect(rejected.headers.get('Retry-After')).toBe('1');
+      expect(rejected.body).toMatchObject({
+        code: failure.code, retryable: true, outcome, jobCreated: false,
+      });
+      expect(rejected.body).not.toHaveProperty('jobId');
+      expect(String(rejected.body.error)).not.toMatch(/re-share|stale/i);
+      expect(enqueued).toEqual([]);
+
+      pressured = false;
+      const accepted = await post('vm/publish-async', { contextGraphId: CG_ID });
+      expect(accepted.status).toBe(202);
+      expect(accepted.body).toMatchObject({ jobId: 'job-after-pressure', shareOperationId: intent.shareOperationId });
+      expect(accepted.body).not.toHaveProperty('jobCreated');
+      expect(enqueued).toEqual([originalIntent]);
+      expect(enqueued[0]).toBe(intent);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('vm/publish-async makes no no-job claim if enqueue persists and then throws', async () => {
+    const jobs: string[] = [];
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => ({ shareOperationId: 'enqueue-boundary' }),
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        jobs.push('persisted-job');
+        throw new StoreOperationTimeoutError({ backend: 'oxigraph-server', operation: 'insert' });
+      },
+    });
+    const response = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(response.status).toBe(503);
+    expect(response.headers.get('Retry-After')).toBe('1');
+    expect(response.body).toMatchObject({ code: 'STORE_OPERATION_TIMEOUT', outcome: 'indeterminate' });
+    expect(response.body).not.toHaveProperty('jobCreated');
+    expect(jobs).toEqual(['persisted-job']);
   });
 
   it('vm/publish-async: KA_WORKSPACE_HEAD_CORRUPT → 503 { code, error, retryable }', async () => {
@@ -749,54 +876,22 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     });
   });
 
-  it('vm/publish-async rejects a missing real share snapshot before enqueue', async () => {
+  it.each(['missing', 'count mismatch'] as const)('vm/publish-async rejects a real %s share snapshot before enqueue', async (fault) => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     let enqueueCalls = 0;
-    const intent = {
-      contextGraphId: CG_ID,
-      name: ASSERTION_NAME,
-      shareOperationId: 'missing-real-share-op',
-      roots: ['urn:test:missing-root'],
-      seal: {
-        merkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
-        authorAddress: '0x1111111111111111111111111111111111111111' as `0x${string}`,
-        signature: {
-          r: `0x${'34'.repeat(32)}` as `0x${string}`,
-          vs: `0x${'56'.repeat(32)}` as `0x${string}`,
-        },
-        schemeVersion: 1,
-      },
-      sealChainId: '31337' as `${bigint}`,
-      sealKav10Address: '0x2222222222222222222222222222222222222222' as `0x${string}`,
-      sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
-      sealMerkleRoot: `0x${'12'.repeat(32)}` as `0x${string}`,
-      intentKey: `sha256:${'ef'.repeat(32)}`,
-    };
-
     try {
+      const snapshot = await seedRootlessPublicSnapshot(store, {
+        shareOperationId: 'real-share-negative-control', subject: 'urn:test:negative-control', object: '"value"',
+      });
+      const intent = rootlessIntent({
+        ...snapshot,
+        ...(fault === 'missing' ? { shareOperationId: 'missing-real-share-op' } : { publicTripleCount: 2 }),
+      });
+      const preflightAgent = snapshotPreflightAgent(store);
       await startWith({}, {
         resolveFinalizedAssertionVmPublishIntent: async () => intent,
-        preflightKnowledgeAssetVmPublishSnapshot: async (request: unknown) => {
-          const snapshot = createKnowledgeAssetVmPublishSnapshotRequest(request as any);
-          const snapshotMetadata = createKnowledgeAssetVmPublishSnapshotMetadata(request as any);
-          try {
-            const resolved = await resolveLiftWorkspaceSlice({
-              store,
-              graphManager: new GraphManager(store),
-              request: snapshot,
-            });
-            validateLiftPublishPayload({ request: snapshot, metadata: snapshotMetadata, resolved });
-          } catch (err) {
-            throw Object.assign(
-              new Error(
-                `Cannot enqueue VM publish for "${ASSERTION_NAME}" because share snapshot ` +
-                  `missing-real-share-op is unavailable or stale. Re-share the knowledge asset before enqueueing: ` +
-                  (err instanceof Error ? err.message : String(err)),
-              ),
-              { code: 'PUBLISH_INTENT_STALE' },
-            );
-          }
-        },
+        preflightKnowledgeAssetVmPublishSnapshot:
+          preflightAgent.preflightKnowledgeAssetVmPublishSnapshot.bind(preflightAgent),
       }, {}, {
         enqueueKnowledgeAssetVmPublish: async () => {
           enqueueCalls += 1;
@@ -808,6 +903,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       expect(res.status).toBe(409);
       expect(res.body.code).toBe('PUBLISH_INTENT_STALE');
       expect(String(res.body.error)).toContain('Re-share');
+      expect(res.body.jobCreated).toBe(false);
       expect(enqueueCalls).toBe(0);
     } finally {
       await store.close();

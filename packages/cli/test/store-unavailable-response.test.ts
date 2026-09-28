@@ -101,6 +101,31 @@ describe('respondIfStoreUnavailable', () => {
     });
   });
 
+  it.each(['queue_full', 'queue_wait_timeout'] as const)(
+    'accepts a canonical structural scheduler error (%s) without an Error prototype',
+    (reason) => {
+      const res = mockResponse();
+      // Error.message is non-enumerable; package-boundary copies may omit it.
+      const error = { ...new StoreSchedulerBusyError(reason, 'normal', 'query') };
+      expect(respondIfStoreUnavailable(res, error)).toBe('not_started');
+      expect(res.statusCode).toBe(503);
+      expect(res.headers['Retry-After']).toBe('1');
+      expect(JSON.parse(res.body ?? '{}')).toMatchObject({
+        code: 'STORE_SCHEDULER_BUSY', reason, priority: 'normal',
+        retryable: true, outcome: 'not_started',
+        error: expect.any(String),
+      });
+    },
+  );
+
+  it('does not treat a scheduler code or retryable flag alone as admission evidence', () => {
+    expect(classifyStoreUnavailable({ code: 'STORE_SCHEDULER_BUSY', retryable: true })).toBeNull();
+    expect(classifyStoreUnavailable({
+      ...new StoreSchedulerBusyError('queue_full', 'normal', 'query'),
+      outcome: 'indeterminate',
+    })).toBeNull();
+  });
+
   it('accepts a code-only timeout crossing a package/prototype boundary', () => {
     const res = mockResponse();
 
