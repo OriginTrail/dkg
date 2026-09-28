@@ -232,8 +232,9 @@ JOIN_APPROVAL=$(devnet_approve_curated_join "$CURATOR_NODE" "$PUB_CG" "$MEMBER_A
 [ "$(parse_json "$JOIN_APPROVAL" '.status')" = approved ] || fail "curator approve-join failed: $JOIN_APPROVAL"
 log "✓ curator approved the reporting member's signed join"
 
-# Pause for gossip + chain settling
-sleep 5
+devnet_wait_curated_member_ready "$MEMBER_NODE" "$PUB_CG" "$MEMBER_AGENT" ||
+  fail "approved member did not become locally ready for $PUB_CG"
+log "✓ reporting member has the curator allowlist locally"
 
 # ===========================================================================
 # SCENARIO 1 — Request validation + happy path on the member side.

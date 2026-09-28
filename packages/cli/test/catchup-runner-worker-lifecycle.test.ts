@@ -700,17 +700,23 @@ describe('WorkerCatchupRunner agent bridge', () => {
   });
 
   it('uses legacy SWM if the kill switch revokes a selected-lane lease mid-call', async () => {
+    let selectedActive = true;
+    const selectedAuthority = vi.fn(() => ({
+      lane: selectedActive ? 'selected-public' : null,
+      active: selectedActive,
+    }));
     const authority = vi.fn((contextGraphId: string) => ({
       contextGraphId,
       legacySyncAllowed: true,
     }));
     const { agent, calls } = bridgeAgent({
-      resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: 'selected-public', active: true }),
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: selectedAuthority,
       resolveRfc64CatalogReceiverAuthorityV1: authority,
       canUseLegacySharedMemorySyncForContextGraphV1:
         RealDKGAgent.prototype.canUseLegacySharedMemorySyncForContextGraphV1,
       syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
         calls.selectedShared.push(args);
+        selectedActive = false;
         throw new Rfc64SwmRecoveryTargetRevokedErrorV1('cg-transition');
       },
     });
@@ -725,7 +731,41 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(posted.result).toEqual({ kind: 'legacy-shared-memory-fallback', shared: {} });
     expect(calls.selectedShared).toHaveLength(1);
     expect(calls.shared).toHaveLength(1);
+    expect(selectedAuthority).toHaveBeenCalledTimes(2);
     expect(authority).toHaveBeenCalledWith('cg-transition');
+  });
+
+  it('keeps a stale selected lease closed while selected authority remains active', async () => {
+    const selectedAuthority = vi.fn(() => ({ lane: 'selected-public', active: true }));
+    const authority = vi.fn((contextGraphId: string) => ({
+      contextGraphId,
+      legacySyncAllowed: true,
+    }));
+    const { agent, calls } = bridgeAgent({
+      resolveRfc64SwmRecoveryRuntimeAuthorityV1: selectedAuthority,
+      resolveRfc64CatalogReceiverAuthorityV1: authority,
+      canUseLegacySharedMemorySyncForContextGraphV1:
+        RealDKGAgent.prototype.canUseLegacySharedMemorySyncForContextGraphV1,
+      syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
+        calls.selectedShared.push(args);
+        throw new Rfc64SwmRecoveryTargetRevokedErrorV1('cg-refreshed');
+      },
+    });
+
+    const posted = await invokeThroughBridge(
+      agent,
+      'syncSharedMemory',
+      ['peer-a', 'cg-refreshed', 2000, 'catchup-foreground', true],
+    );
+
+    expect(posted.result).toEqual({
+      kind: 'catchup-plane-not-attempted',
+      reason: 'selected-lane-refused',
+    });
+    expect(calls.selectedShared).toHaveLength(1);
+    expect(calls.shared).toEqual([]);
+    expect(selectedAuthority).toHaveBeenCalledTimes(2);
+    expect(authority).not.toHaveBeenCalled();
   });
 
   it('keeps a selected SWM transport error a failure', async () => {

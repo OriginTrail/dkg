@@ -1365,10 +1365,13 @@ class WorkerCatchupRunner implements CatchupRunner {
             );
           } catch (error) {
             // Revoked after the check above. The lease refused the lane for
-            // this graph, which says nothing about the peer. Any other error
-            // keeps its failure semantics.
+            // this graph, which says nothing about the peer. A stale lease
+            // can also follow a selected-provider refresh: only a now-inactive
+            // selected lane permits legacy fallback. Any other error keeps
+            // its failure semantics.
             if (!isRfc64SwmRecoveryLeaseRefusal(error)) throw error;
-            if (legacySharedMemoryLaneAllowed(agent, contextGraphId)) {
+            if (!selectedSharedMemoryLaneActive(agent, contextGraphId)
+              && legacySharedMemoryLaneAllowed(agent, contextGraphId)) {
               return runLegacyFallback();
             }
             return this.selectedLaneNotAttempted(
