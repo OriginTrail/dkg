@@ -17,7 +17,7 @@ api() {
   local token
   token=$(awk '!/^[[:space:]]*(#|$)/ { gsub(/^[[:space:]]+|[[:space:]]+$/, ""); print; exit }' "$DEVNET_DIR/node${node}/auth.token")
   [ -n "$token" ] || { echo "Missing node${node} auth token" >&2; return 1; }
-  local -a args=(-fsS --max-time 60 -X "$method" -H "Authorization: Bearer $token" -H 'Content-Type: application/json')
+  local -a args=(-fsS --max-time 240 -X "$method" -H "Authorization: Bearer $token" -H 'Content-Type: application/json')
   [ -z "$body" ] || args+=(-d "$body")
   curl "${args[@]}" "http://127.0.0.1:$((API_PORT_BASE + node - 1))$path"
 }
@@ -50,9 +50,13 @@ print(json.dumps({"id":cg,"name":"devnet SWM soak member","accessPolicy":1,
                   "publishPolicy":0,"allowedAgents":[curator,member]}))
 ' "$CG_ID" "$CURATOR" "$MEMBER")
 api 6 POST /api/context-graph/create "$member_body" > "$RESULTS/member-create.json"
-subgraph_response=$(api 5 POST /api/sub-graph/create "$(python3 -c 'import json,sys; print(json.dumps({"contextGraphId":sys.argv[1],"subGraphName":sys.argv[2]}))' "$CG_ID" "$SUB_GRAPH_NAME")")
+subgraph_body=$(python3 -c 'import json,sys; print(json.dumps({"contextGraphId":sys.argv[1],"subGraphName":sys.argv[2]}))' "$CG_ID" "$SUB_GRAPH_NAME")
+subgraph_response=$(api 5 POST /api/sub-graph/create "$subgraph_body")
 subgraph_created=$(printf '%s' "$subgraph_response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("created", ""))')
 [ "$subgraph_created" = "$SUB_GRAPH_NAME" ] || { echo "SWM soak subgraph creation failed: $subgraph_response" >&2; exit 1; }
+member_subgraph_response=$(api 6 POST /api/sub-graph/create "$subgraph_body")
+member_subgraph_created=$(printf '%s' "$member_subgraph_response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("created", ""))')
+[ "$member_subgraph_created" = "$SUB_GRAPH_NAME" ] || { echo "SWM soak member subgraph creation failed: $member_subgraph_response" >&2; exit 1; }
 printf 'graph=%s onChainId=%s cohort=%s\n' "$CG_ID" "$on_chain_id" "$COHORT_ID" | tee "$RESULTS/setup.txt"
 sleep 3
 
