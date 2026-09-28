@@ -4664,9 +4664,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this.config.rfc64CatalogBootstrap,
           this.config.rfc64PublicCatalogBootstrap,
         ),
-      ).filter((contextGraphId) => this.resolveRfc64CatalogReceiverAuthorityV1(
+      ).filter((contextGraphId) => this.rfc64LegacySwmGossipAllowedForContextGraph(
         contextGraphId,
-      ).legacySyncAllowed),
+      )),
     ])];
     const remotePeerIsCompleteSwmProvider = acceptedPolicies.some(
         ({ completeSwmProviders = [] }) => completeSwmProviders.includes(remotePeer),
@@ -4948,7 +4948,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
         continue;
       }
-      const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
       const completeSwmProviders = this.resolveRfc64CompleteSwmProviderPeerIdsV1(
         contextGraphId,
       );
@@ -4959,7 +4958,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ),
         contextGraphId,
       );
-      const legacyRootSyncAllowed = authority.legacySyncAllowed;
+      const legacyRootSyncAllowed = this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId);
       const namedSubgraphCompatibilityRequired = !legacyRootSyncAllowed
         && this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true;
       if (!legacyRootSyncAllowed && !namedSubgraphCompatibilityRequired) {
@@ -5558,7 +5557,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): boolean {
-    return this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed === true;
+    return this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId);
   }
 
   /** One agent-owned admission decision for the legacy durable VM lane. */
@@ -7248,7 +7247,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       remotePeerId,
       contextGraphId,
       includeRootScope: requestedScope !== null
-        || this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed
+        || this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)
         || await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId),
       recoveryGuard: recoveryLease,
       onRetry,
@@ -7408,7 +7407,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           contextGraphId,
           remainingContextGraphs,
           includeRootScope: requestedScope !== null
-            || this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed,
+            || this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId),
           stopOnBackoffWorthyFailure,
           mode,
         });
@@ -7697,9 +7696,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         .recoverPrivateTarget({
           remotePeerId,
           contextGraphId,
-          includeRootScope: this.resolveRfc64CatalogReceiverAuthorityV1(
-            contextGraphId,
-          ).legacySyncAllowed
+          includeRootScope: this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)
             // A private graph's root scope stays on the legacy member lane
             // while its RFC-64 authority is not active (#2858).
             || await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId),

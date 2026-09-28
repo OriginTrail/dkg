@@ -597,13 +597,13 @@ describe('WorkerCatchupRunner agent bridge', () => {
   });
 
   it('falls back to legacy SWM catch-up when the kill switch restores legacy transfer', async () => {
-    const authority = vi.fn((contextGraphId: string) => ({
-      contextGraphId,
-      legacySyncAllowed: true,
-    }));
+    const rawReceiverAuthority = vi.fn(() => ({ legacySyncAllowed: false }));
     const { agent, calls } = bridgeAgent({
+      config: { rfc64CatalogExecutionPlan: { killSwitchActive: true } },
       resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: null, active: false }),
-      resolveRfc64CatalogReceiverAuthorityV1: authority,
+      resolveRfc64CatalogReceiverAuthorityV1: rawReceiverAuthority,
+      rfc64LegacySwmGossipAllowedForContextGraph:
+        RealDKGAgent.prototype.rfc64LegacySwmGossipAllowedForContextGraph,
       canUseLegacySharedMemorySyncForContextGraphV1:
         RealDKGAgent.prototype.canUseLegacySharedMemorySyncForContextGraphV1,
     });
@@ -617,7 +617,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(posted.error).toBeUndefined();
     expect(posted.result).toEqual({ kind: 'legacy-shared-memory-fallback', shared: {} });
     expect(calls.selectedShared).toEqual([]);
-    expect(authority).toHaveBeenCalledWith('cg-public-legacy');
+    expect(rawReceiverAuthority).not.toHaveBeenCalled();
     expect(calls.shared).toHaveLength(1);
     expect(calls.shared[0]).toEqual([
       'peer-curator',
@@ -627,13 +627,10 @@ describe('WorkerCatchupRunner agent bridge', () => {
   });
 
   it('does not fall back to legacy SWM when catalog authority forbids it', async () => {
-    const authority = vi.fn((contextGraphId: string) => ({
-      contextGraphId,
-      legacySyncAllowed: false,
-    }));
+    const legacyAdmission = vi.fn((_contextGraphId: string) => false);
     const { agent, calls } = bridgeAgent({
       resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: null, active: false }),
-      resolveRfc64CatalogReceiverAuthorityV1: authority,
+      rfc64LegacySwmGossipAllowedForContextGraph: legacyAdmission,
       canUseLegacySharedMemorySyncForContextGraphV1:
         RealDKGAgent.prototype.canUseLegacySharedMemorySyncForContextGraphV1,
     });
@@ -649,7 +646,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
     });
     expect(calls.selectedShared).toEqual([]);
     expect(calls.shared).toEqual([]);
-    expect(authority).toHaveBeenCalledWith('cg-catalog-only');
+    expect(legacyAdmission).toHaveBeenCalledWith('cg-catalog-only');
   });
 
   it('decides the selected SWM lane on every call, not once per job', async () => {
@@ -705,13 +702,10 @@ describe('WorkerCatchupRunner agent bridge', () => {
       lane: selectedActive ? 'selected-public' : null,
       active: selectedActive,
     }));
-    const authority = vi.fn((contextGraphId: string) => ({
-      contextGraphId,
-      legacySyncAllowed: true,
-    }));
+    const legacyAdmission = vi.fn((_contextGraphId: string) => true);
     const { agent, calls } = bridgeAgent({
       resolveRfc64SwmRecoveryRuntimeAuthorityV1: selectedAuthority,
-      resolveRfc64CatalogReceiverAuthorityV1: authority,
+      rfc64LegacySwmGossipAllowedForContextGraph: legacyAdmission,
       canUseLegacySharedMemorySyncForContextGraphV1:
         RealDKGAgent.prototype.canUseLegacySharedMemorySyncForContextGraphV1,
       syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
@@ -732,18 +726,15 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(calls.selectedShared).toHaveLength(1);
     expect(calls.shared).toHaveLength(1);
     expect(selectedAuthority).toHaveBeenCalledTimes(2);
-    expect(authority).toHaveBeenCalledWith('cg-transition');
+    expect(legacyAdmission).toHaveBeenCalledWith('cg-transition');
   });
 
   it('keeps a stale selected lease closed while selected authority remains active', async () => {
     const selectedAuthority = vi.fn(() => ({ lane: 'selected-public', active: true }));
-    const authority = vi.fn((contextGraphId: string) => ({
-      contextGraphId,
-      legacySyncAllowed: true,
-    }));
+    const legacyAdmission = vi.fn((_contextGraphId: string) => true);
     const { agent, calls } = bridgeAgent({
       resolveRfc64SwmRecoveryRuntimeAuthorityV1: selectedAuthority,
-      resolveRfc64CatalogReceiverAuthorityV1: authority,
+      rfc64LegacySwmGossipAllowedForContextGraph: legacyAdmission,
       canUseLegacySharedMemorySyncForContextGraphV1:
         RealDKGAgent.prototype.canUseLegacySharedMemorySyncForContextGraphV1,
       syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
@@ -765,7 +756,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(calls.selectedShared).toHaveLength(1);
     expect(calls.shared).toEqual([]);
     expect(selectedAuthority).toHaveBeenCalledTimes(2);
-    expect(authority).not.toHaveBeenCalled();
+    expect(legacyAdmission).not.toHaveBeenCalled();
   });
 
   it('keeps a selected SWM transport error a failure', async () => {

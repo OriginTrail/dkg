@@ -531,6 +531,7 @@ export interface SelectedSwmLifecycleAgentFixture {
   resolveRfc64CatalogReceiverAuthorityV1: (
     contextGraphId: string,
   ) => { legacySyncAllowed: boolean };
+  rfc64LegacySwmGossipAllowedForContextGraph: (contextGraphId: string) => boolean;
   createSwmTargetExecutorSessionV1: () => SwmTargetExecutorV1;
   syncSharedMemoryFromPeerDetailedExecution:
     typeof LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution;
@@ -872,6 +873,7 @@ export function createSelectedSwmLifecycleHarness(
       );
     },
     resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+    rfc64LegacySwmGossipAllowedForContextGraph: () => true,
     createSwmTargetExecutorSessionV1: () => {
       createTargetExecutorSession ??=
         createSwmTargetExecutorSessionFactoryForTest(agent as never);

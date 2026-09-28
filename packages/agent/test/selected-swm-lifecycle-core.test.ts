@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { SwmSubstrateMethods } from '../src/dkg-agent-swm-substrate.js';
+import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/catalog-rollout-authority-v1.js';
 import { classifySharedMemoryFreshness } from '../src/sync/shared-memory-freshness.js';
 import {
   InMemoryPeerSyncLease,
@@ -40,19 +42,42 @@ function activeSessionWithoutJobs(): PeerSyncSession {
 }
 
 describe('selected RFC-64 SWM lifecycle wiring', () => {
-  it('uses the catalog receiver authority for legacy shared-memory admission', () => {
-    const resolveRfc64CatalogReceiverAuthorityV1 = vi.fn((contextGraphId: string) => ({
-      legacySyncAllowed: contextGraphId === 'cg-legacy',
-    }));
-    const agent = { resolveRfc64CatalogReceiverAuthorityV1 };
+  it('uses the canonical legacy SWM decision for shared-memory admission', () => {
+    const rfc64LegacySwmGossipAllowedForContextGraph = vi.fn(
+      (contextGraphId: string) => contextGraphId === 'cg-legacy',
+    );
+    const agent = { rfc64LegacySwmGossipAllowedForContextGraph };
     const allowed = LifecycleSyncMethods.prototype.canUseLegacySharedMemorySyncForContextGraphV1;
 
     expect(allowed.call(agent as never, 'cg-legacy')).toBe(true);
     expect(allowed.call(agent as never, 'cg-catalog-only')).toBe(false);
-    expect(resolveRfc64CatalogReceiverAuthorityV1.mock.calls).toEqual([
+    expect(rfc64LegacySwmGossipAllowedForContextGraph.mock.calls).toEqual([
       ['cg-legacy'],
       ['cg-catalog-only'],
     ]);
+  });
+
+  it('restores legacy SWM for a configured catalog graph under the global kill switch', () => {
+    const contextGraphId = 'cg-configured-catalog';
+    const executionPlan = resolveRfc64CatalogExecutionPlanV1({
+      configuredContextGraphs: [contextGraphId],
+      activation: {
+        enabled: true,
+        selectedContextGraphs: [contextGraphId],
+        selectedPublicContextGraphs: [contextGraphId],
+        rollout: { killSwitch: true, defaultMode: 'catalog', contextGraphModes: {} },
+      },
+    });
+    const agent = {
+      config: { rfc64CatalogExecutionPlan: executionPlan },
+      rfc64LegacySwmGossipAllowedForContextGraph:
+        SwmSubstrateMethods.prototype.rfc64LegacySwmGossipAllowedForContextGraph,
+    };
+
+    expect(executionPlan.selectedAuthority[contextGraphId]?.legacySyncAllowed).toBe(false);
+    expect(executionPlan.legacyContextGraphs).toContain(contextGraphId);
+    expect(LifecycleSyncMethods.prototype.canUseLegacySharedMemorySyncForContextGraphV1
+      .call(agent as never, contextGraphId)).toBe(true);
   });
 
   it('accounts a real complete private-only no-op without reconciler backoff', async () => {
