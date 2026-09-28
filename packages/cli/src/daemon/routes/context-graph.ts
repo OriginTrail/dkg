@@ -2248,6 +2248,17 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${jobContextGraphId} started`);
       try {
         let targetContextGraphId = jobContextGraphId;
+        // The first subscribe may activate the catalog receiver before its
+        // finalized public policy is accepted. That transition's one-shot
+        // metadata pull then declines, while subsequent catch-up retries skip
+        // legacy durable sync and cannot acquire the graph declaration.
+        // Retry the policy-gated public metadata pull for every explicit
+        // catch-up; it is a cheap no-op once the declaration is confirmed.
+        if (typeof agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1 === 'function') {
+          await agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(
+            targetContextGraphId,
+          ).catch(() => undefined);
+        }
         let result = await daemonState.catchupRunner!.run({
           contextGraphId: targetContextGraphId,
           includeSharedMemory: shouldSyncSharedMemory,

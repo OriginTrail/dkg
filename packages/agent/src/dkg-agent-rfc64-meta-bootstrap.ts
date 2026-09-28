@@ -99,19 +99,31 @@ export class Rfc64MetaBootstrapMethods extends DKGAgentBase {
     if (this.subscribedContextGraphs.get(contextGraphId)?.subscribed !== true) {
       return 'not-subscribed';
     }
-    // Fail closed: only an accepted PUBLIC policy may drive this pull. A
+    // Fail closed: only authenticated PUBLIC authority may drive this pull. A
     // private graph's metadata arrives through the authenticated join-approval
-    // path, and a graph with no accepted policy has no business fetching.
+    // path. The default catalog rollout can accept a registered graph from
+    // the finalized chain before the public catalog service holds a policy
+    // snapshot, so recheck that exact chain authority as a second path.
     const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
-    if (accepted === null || accepted.policy.accessPolicy !== 0) {
-      return 'no-accepted-public-policy';
-    }
+    if (accepted?.policy.accessPolicy === 1) return 'no-accepted-public-policy';
+    const chainPublic = accepted === null
+      ? await this.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
+        signal,
+      }).catch(() => null)
+      : null;
+    if (accepted === null && !(
+      chainPublic?.outcome === 'allowed'
+      && chainPublic.source === 'registered-chain'
+      && chainPublic.reason === 'chain-public'
+      && chainPublic.onChainId !== undefined
+    )) return 'no-accepted-public-policy';
     // The owner this node already authenticated: the seed signer for an
     // owner-signed policy, otherwise the wallet namespace of the id. A served
     // declaration that names a different curator is not this graph's.
-    const expectedCuratorAddress = accepted.policy.source.kind === 'owner-signed-unregistered'
+    const expectedCuratorAddress = accepted?.policy.source.kind === 'owner-signed-unregistered'
       ? accepted.policy.source.ownerAddress
       : rfc64UnregisteredAuthorityOwnerV1(contextGraphId) ?? undefined;
+    if (expectedCuratorAddress === undefined) return 'no-accepted-public-policy';
     if (await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
       return 'already-confirmed';
     }

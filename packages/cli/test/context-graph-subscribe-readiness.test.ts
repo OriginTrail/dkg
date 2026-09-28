@@ -165,6 +165,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     responseStatus: number;
     job: any;
     runCalls: number;
+    metadataBootstrapCalls: number;
+    runSawMetadataBootstrap: boolean;
     runRequests: CatchupRunRequest[];
     subscribeCalls: Array<{
       id: string;
@@ -185,6 +187,9 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       latestByContextGraph: new Map<string, string>(),
     };
     let runCalls = 0;
+    let metadataBootstrapCalls = 0;
+    let metadataBootstrapStarted = false;
+    let runSawMetadataBootstrap = false;
     const runRequests: CatchupRunRequest[] = [];
     const subscribeCalls: Array<{
       id: string;
@@ -198,6 +203,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     daemonState.catchupRunner = {
       run: async (request) => {
         runCalls += 1;
+        runSawMetadataBootstrap = metadataBootstrapStarted;
         runRequests.push(request);
         return opts.result ?? cleanEmptyResult();
       },
@@ -237,6 +243,11 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       },
       reconcileRfc64CatalogResponsibilityV1: async (id: string) => {
         responsibilityCalls.push(id);
+      },
+      bootstrapRfc64CatalogContextGraphMetadataFromPeersV1: async () => {
+        metadataBootstrapCalls += 1;
+        metadataBootstrapStarted = true;
+        return 'no-accepted-public-policy';
       },
       hasConfirmedMetaState: async () => {
         return runCalls > 0
@@ -334,6 +345,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       responseStatus: httpResponse.status,
       job: jobId ? catchupTracker.jobs.get(jobId) : undefined,
       runCalls,
+      metadataBootstrapCalls,
+      runSawMetadataBootstrap,
       runRequests,
       subscribeCalls,
       responsibilityCalls,
@@ -355,6 +368,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     ]);
     expect(result.state.syncMode).toBe('always-on');
     expect(result.responsibilityCalls).toEqual([expect.any(String)]);
+    expect(result.runSawMetadataBootstrap).toBe(true);
+    expect(result.metadataBootstrapCalls).toBe(1);
   });
 
   it.each([
@@ -381,6 +396,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.subscribeCalls).toEqual([]);
     expect(result.responsibilityCalls).toEqual([]);
     expect(result.runCalls).toBe(0);
+    expect(result.metadataBootstrapCalls).toBe(0);
     expect(result.job).toBeUndefined();
     expect(result.state).toEqual({});
     expect(result.patches).toEqual([]);

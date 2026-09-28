@@ -426,6 +426,50 @@ afterEach(async () => {
 });
 
 describe('RFC-64 _meta bootstrap from connected peers: chain-binding guard (two agents)', () => {
+  it('uses current registered public chain authority when the public catalog has no policy snapshot', async () => {
+    const contextGraphId = `${OWNER}/registered-public-meta` as ContextGraphIdV1;
+    const { peer, replica } = await startConnectedPair('registered-public-meta');
+    await storeOf(peer).insert(servedPublicMetaQuads(contextGraphId, peer.peerId, {
+      curatorAddress: OWNER,
+      registrationStatus: 'registered',
+      onChainId: '777',
+    }));
+    vi.spyOn(replica, 'readAcceptedRfc64CatalogAccessSnapshotV1').mockReturnValue(null);
+    const chainAuthority = vi.spyOn(replica, 'resolveContextGraphSubscriptionBootstrapAuthority')
+      .mockResolvedValue({
+        outcome: 'allowed', source: 'registered-chain', reason: 'chain-public',
+        metadataBootstrap: 'eligible', onChainId: 7n,
+      });
+    const bind = vi.spyOn(replica, 'bindSubscriptionOnChainId');
+    replica.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
+
+    const outcome = await replica.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(contextGraphId);
+    expect(['fetched', 'already-confirmed']).toContain(outcome);
+    expect(chainAuthority).toHaveBeenCalledWith(contextGraphId, expect.any(Object));
+    await expect(replica.getExplicitAccessPolicy(contextGraphId)).resolves.toBe('public');
+    expect((await replica.getCgMeta(contextGraphId)).declared).toBe(true);
+    expect(bind).not.toHaveBeenCalled();
+    expect(replica.getSubscribedContextGraphs().get(contextGraphId)?.onChainId).toBeUndefined();
+  }, 60_000);
+
+  it('does not fetch public metadata from a peer when chain authority is private', async () => {
+    const contextGraphId = `${OWNER}/registered-private-meta` as ContextGraphIdV1;
+    const { peer, replica } = await startConnectedPair('registered-private-meta');
+    await storeOf(peer).insert(servedPublicMetaQuads(contextGraphId, peer.peerId, {
+      curatorAddress: OWNER,
+    }));
+    vi.spyOn(replica, 'readAcceptedRfc64CatalogAccessSnapshotV1').mockReturnValue(null);
+    vi.spyOn(replica, 'resolveContextGraphSubscriptionBootstrapAuthority').mockResolvedValue({
+      outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
+      metadataBootstrap: 'eligible', onChainId: 8n,
+    });
+    replica.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
+
+    await expect(replica.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(contextGraphId))
+      .resolves.toBe('no-accepted-public-policy');
+    expect(await rootMetaRows(storeOf(replica), contextGraphId)).toEqual([]);
+  }, 60_000);
+
   it('review repro: a non-owner peer serving public _meta with OnChainId=777 installs the declaration but never a binding', async () => {
     const contextGraphId = `${OWNER}/binding-guard` as ContextGraphIdV1;
     const { peer, replica } = await startConnectedPair('bg-repro');
