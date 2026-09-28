@@ -35,6 +35,7 @@ import {
   catchupPlaneProvenBySelectedScope,
   isCatchupPlaneNotAttempted,
   type CatchupJobResult,
+  type CatchupLegacySharedMemoryFallback,
   type CatchupPlaneCompletionEvidence,
   type CatchupPlaneNotAttempted,
   type CatchupRunRequest,
@@ -91,11 +92,13 @@ type CatchupDurableResult = DurableSyncResult & { verifiedPrivateOnlyResponses: 
  * Ordinary fan-out keeps the historical raw result. An RFC-64 selected
  * provider returns its discriminated terminal verdict as well, so the Worker
  * never has to infer completion from diagnostic counters that deliberately
- * retain resolved voluntary yields.
+ * retain resolved voluntary yields. A typed legacy fallback preserves the
+ * host's lane switch even when the worker requested selected scheduling.
  */
 type CatchupSharedMemoryRpcResult =
   | SharedMemorySyncResult
   | SelectedSharedMemorySyncResult
+  | CatchupLegacySharedMemoryFallback
   | CatchupPlaneNotAttempted;
 
 /**
@@ -145,14 +148,17 @@ function normalizeCatchupSharedMemoryResult(
   policy: CatchupSharedMemoryPolicy,
 ): CatchupSharedMemoryPlane {
   const selected = selectedSharedMemoryResult(result);
-  const payload = selected?.shared ?? result as SharedMemorySyncResult;
+  const legacyFallback = 'kind' in result && result.kind === 'legacy-shared-memory-fallback'
+    ? result
+    : undefined;
+  const payload = selected?.shared ?? legacyFallback?.shared ?? result as SharedMemorySyncResult;
   // Only an operator-pinned graph-complete provider may terminate the whole
   // selected SWM scope. Every explicitly subscribed PUBLIC CG still uses the
   // selected scheduler/continuation lane by default, but an ordinary peer's
   // terminal verdict describes only that peer's local manifest and must not
   // replace multi-peer union convergence. A complete-provider request that
   // receives an older/raw host response remains fail-closed.
-  const progress = policy.selectedSchedulingRequested
+  const progress = policy.selectedSchedulingRequested && !legacyFallback
     ? classifySharedMemoryFreshness(payload, {
       complete: policy.terminalBoundaryRequired
         ? selected?.scopeComplete === true
@@ -162,8 +168,8 @@ function normalizeCatchupSharedMemoryResult(
   return {
     payload,
     progress,
-    terminalBoundaryRequired: policy.terminalBoundaryRequired,
-    selectedScopeProven: policy.terminalBoundaryRequired
+    terminalBoundaryRequired: policy.terminalBoundaryRequired && !legacyFallback,
+    selectedScopeProven: policy.terminalBoundaryRequired && !legacyFallback
       && selected?.scopeComplete === true
       && progress.completedWithoutFailure,
     deferredBackpressure: payload.deferredBackpressure,

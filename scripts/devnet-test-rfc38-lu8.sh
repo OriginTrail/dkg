@@ -27,6 +27,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=devnet-publish-helpers.sh
 source "$SCRIPT_DIR/devnet-publish-helpers.sh"
+# shellcheck source=devnet-curated-join-helpers.sh
+source "$SCRIPT_DIR/devnet-curated-join-helpers.sh"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE=9201
 CURATOR_NODE=5
@@ -217,22 +219,12 @@ log "✓ member has an active subscription to the curator's public CG"
 # Subscription establishes read interest, not membership. This scenario's
 # rejection report writes into the public CG, so admit the reporting member
 # through the real signed join flow before testing that write.
-CG_ENC=$(printf '%s' "$PUB_CG" | node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>process.stdout.write(encodeURIComponent(d)))')
-SIGNED_JOIN=$(api_call "$MEMBER_NODE" POST "/api/context-graph/$CG_ENC/sign-join" '{}')
-[ "$(parse_json "$SIGNED_JOIN" '.ok')" = true ] || fail "member sign-join failed"
-JOIN_BODY=$(SIGNED_JOIN="$SIGNED_JOIN" CURATOR_PEER="$CURATOR_PEER" node -e '
-  const signed = JSON.parse(process.env.SIGNED_JOIN);
-  console.log(JSON.stringify({
-    delegation: signed.delegation,
-    curatorPeerId: process.env.CURATOR_PEER,
-    agentName: "rfc38-lu8-member",
-  }));
-')
-JOIN_REQUEST=$(api_call "$MEMBER_NODE" POST "/api/context-graph/$CG_ENC/request-join" "$JOIN_BODY")
+JOIN_REQUEST=$(devnet_request_curated_join "$MEMBER_NODE" "$CURATOR_PEER" "$PUB_CG" rfc38-lu8-member) ||
+  fail "member signed request-join failed"
 [ "$(parse_json "$JOIN_REQUEST" '.status')" = pending ] || fail "member request-join failed: $JOIN_REQUEST"
 sleep 2
-APPROVE_BODY=$(MEMBER_AGENT="$MEMBER_AGENT" node -e 'console.log(JSON.stringify({agentAddress:process.env.MEMBER_AGENT}))')
-JOIN_APPROVAL=$(api_call "$CURATOR_NODE" POST "/api/context-graph/$CG_ENC/approve-join" "$APPROVE_BODY")
+JOIN_APPROVAL=$(devnet_approve_curated_join "$CURATOR_NODE" "$PUB_CG" "$MEMBER_AGENT") ||
+  fail "curator approve-join request failed"
 [ "$(parse_json "$JOIN_APPROVAL" '.status')" = approved ] || fail "curator approve-join failed: $JOIN_APPROVAL"
 log "✓ curator approved the reporting member's signed join"
 

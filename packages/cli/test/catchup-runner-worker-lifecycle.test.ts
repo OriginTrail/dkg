@@ -599,7 +599,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
   it('falls back to legacy SWM catch-up when the kill switch restores legacy transfer', async () => {
     const { agent, calls } = bridgeAgent({
       resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: null, active: false }),
-      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+      canUseLegacySharedMemorySyncForContextGraphV1: () => true,
     });
 
     const posted = await invokeThroughBridge(
@@ -609,6 +609,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
     );
 
     expect(posted.error).toBeUndefined();
+    expect(posted.result).toEqual({ kind: 'legacy-shared-memory-fallback', shared: {} });
     expect(calls.selectedShared).toEqual([]);
     expect(calls.shared).toHaveLength(1);
     expect(calls.shared[0]).toEqual([
@@ -621,7 +622,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
   it('does not fall back to legacy SWM when catalog authority forbids it', async () => {
     const { agent, calls } = bridgeAgent({
       resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: null, active: false }),
-      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: false }),
+      canUseLegacySharedMemorySyncForContextGraphV1: () => false,
     });
 
     const posted = await invokeThroughBridge(
@@ -687,7 +688,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
   it('uses legacy SWM if the kill switch revokes a selected-lane lease mid-call', async () => {
     const { agent, calls } = bridgeAgent({
       resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: 'selected-public', active: true }),
-      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+      canUseLegacySharedMemorySyncForContextGraphV1: () => true,
       syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
         calls.selectedShared.push(args);
         throw new Rfc64SwmRecoveryTargetRevokedErrorV1('cg-transition');
@@ -701,6 +702,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
     );
 
     expect(posted.error).toBeUndefined();
+    expect(posted.result).toEqual({ kind: 'legacy-shared-memory-fallback', shared: {} });
     expect(calls.selectedShared).toHaveLength(1);
     expect(calls.shared).toHaveLength(1);
   });

@@ -5553,6 +5553,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return result.insertedTriples;
   }
 
+  /** One agent-owned admission decision for the legacy shared-memory lane. */
+  canUseLegacySharedMemorySyncForContextGraphV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    return this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed === true;
+  }
+
   /** One agent-owned admission decision for the legacy durable VM lane. */
   async canUseLegacyDurableSyncForContextGraphV1(
     this: DKGAgent,

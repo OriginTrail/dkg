@@ -474,6 +474,48 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.peersSucceeded).toBe(1);
   });
 
+  it.each([
+    { label: 'typed legacy fallback', typed: true, expectedSucceeded: 2, expectedData: 1, unanswered: false },
+    { label: 'unexpected raw response', typed: false, expectedSucceeded: 1, expectedData: 0, unanswered: true },
+  ])('classifies $label from a complete provider without inventing a selected verdict', async ({
+    typed, expectedSucceeded, expectedData, unanswered,
+  }) => {
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-legacy-fallback', includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: 'peer-curator',
+              authoritativePeerId: 'peer-curator',
+              authoritativeSharedMemoryPeerIds: ['peer-swm'],
+              isPrivateContextGraph: false,
+              peerIds: ['peer-swm', 'peer-curator'],
+              connectedPeers: 2,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory':
+            expect(args[4]).toBe(true);
+            return typed
+              ? { kind: 'legacy-shared-memory-fallback', shared: sharedResult() }
+              : sharedResult();
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(result.peersSucceeded).toBe(expectedSucceeded);
+    expect(result.cleanPlaneCompletions?.sharedMemory.verifiedDataPeers).toBe(expectedData);
+    expect(result.cleanPlaneCompletions?.sharedMemory.selectedScopeCompletePeers ?? 0).toBe(0);
+    expect(result.diagnostics?.sharedMemory.authorityUnanswered).toBe(unanswered);
+  });
+
   it('uses selected scheduling for public SWM without promoting an ordinary peer to graph authority', async () => {
     const selectedFlags: unknown[] = [];
     const result = await runWorkerCatchup(
