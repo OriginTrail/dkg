@@ -99,6 +99,9 @@ describe('approved private replica authorization', () => {
       predicate: D.DKG_DELEGATION_EXPIRES_AT, object: '"1"',
     }]);
     await expect(resolveApprovedPrivateReplicaOwner(f.receiver, CG, f.address)).resolves.toBeNull();
+    await expect(f.receiver.resolveContextGraphRegistrationBinding(CG)).resolves.toMatchObject({
+      kind: 'unavailable', reason: 'finalized-name-absence-unaccepted',
+    });
     await expect(f.receiver.reconcileRfc64CatalogAccessAuthorityV1(CG, undefined, { kind: 'finalized-absence' }))
       .rejects.toMatchObject({ code: 'unregistered-owner-unresolved' });
   });
@@ -134,6 +137,9 @@ describe('approved private replica authorization', () => {
       Reflect.get(f.receiver, 'subscribedContextGraphs').get(CG).participantAgents = [OWNER, f.address];
     }
     await expect(resolveApprovedPrivateReplicaOwner(f.receiver, CG, f.approvals.get(CG))).resolves.toBeNull();
+    await expect(f.receiver.resolveContextGraphRegistrationBinding(CG)).resolves.toMatchObject({
+      kind: 'unavailable', reason: 'finalized-name-absence-unaccepted',
+    });
     await expect(f.receiver.reconcileRfc64CatalogAccessAuthorityV1(CG, undefined, { kind: 'finalized-absence' }))
       .rejects.toMatchObject({ code: 'unregistered-owner-unresolved' });
   });
@@ -142,20 +148,35 @@ describe('approved private replica authorization', () => {
     const f = await fixture();
     f.finalized.mockRejectedValue(new Error('finalized authority RPC unavailable'));
     await expect(f.receiver.getContextGraphAgentGateAddresses(CG, { requireAvailable: true }))
-      .rejects.toMatchObject({ code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE', reason: 'local-chain-binding-unavailable', detail: 'finalized authority RPC unavailable' });
+      .rejects.toMatchObject({ code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE', reason: 'chain-name-binding-unavailable', detail: 'finalized authority RPC unavailable' });
     expect(f.current).not.toHaveBeenCalled();
     await expect(f.receiver.canReadContextGraph(CG, { callerAgentAddress: f.address })).resolves.toBe(false);
   });
 
-  it('does not let an absence read race a new authoritative chain binding', async () => {
+  it.each(['index-read', 'approval-proof'] as const)('does not let %s race a new authoritative chain binding', async (phase) => {
     const f = await fixture();
-    f.finalized.mockImplementationOnce(async () => {
-      Reflect.get(f.receiver, 'subscribedContextGraphs').get(CG).onChainId = '9';
-      return new Map();
-    });
+    const bind = () => { Reflect.get(f.receiver, 'subscribedContextGraphs').get(CG).onChainId = '9'; };
+    if (phase === 'index-read') {
+      f.finalized.mockImplementationOnce(async () => { bind(); return new Map(); });
+    } else {
+      const readApproval = f.receiver.readRequesterJoinRequestState.bind(f.receiver);
+      vi.spyOn(f.receiver, 'readRequesterJoinRequestState').mockImplementationOnce(async (...args) => {
+        const result = await readApproval(...args);
+        bind();
+        return result;
+      });
+    }
     await expect(f.receiver.resolveContextGraphRegistrationBinding(CG)).resolves.toMatchObject({
       kind: 'unavailable', detail: 'Context Graph binding changed during private replica registration discovery',
     });
+    expect(f.current).not.toHaveBeenCalled();
+  });
+
+  it('does not use private approval to bypass repair of an invalid durable binding', async () => {
+    const f = await fixture();
+    await expect(f.receiver.resolveContextGraphRegistrationBinding(CG, {
+      durableSubscriptionBinding: { contextGraphId: CG, onChainId: 'invalid' },
+    })).resolves.toMatchObject({ kind: 'unavailable', reason: 'finalized-name-absence-unaccepted' });
     expect(f.current).not.toHaveBeenCalled();
   });
 
@@ -199,7 +220,7 @@ describe('approved private replica authorization', () => {
     } as ContextGraphAuthoritySnapshot]]));
     await expect(f.receiver.getContextGraphAgentGateAddresses(CG, { requireAvailable: true }))
       .rejects.toMatchObject({ code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
-        detail: 'Finalized private replica registration evidence is invalid' });
+        detail: 'finalized Context Graph authority snapshot does not match the requested active graph' });
     expect(f.current).not.toHaveBeenCalled();
   });
 });
