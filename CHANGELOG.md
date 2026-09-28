@@ -2,7 +2,7 @@
 
 All notable changes to the DKG V10 node are documented here. The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [10.0.20] - 2026-09-27
+## [10.0.20] - 2026-09-28
 
 A fast-follow to 10.0.19 that fixes both of its known issues: on-demand
 subscriptions that stopped syncing partway, and on-chain id claims in the
@@ -17,8 +17,16 @@ managed Oxigraph that outlived a killed worker and held the store.
 Edges now reach holders of public graphs they are not connected to,
 members of public graphs that were never registered on chain keep Shared
 Working Memory after their join is approved, even across a restart, and
-auto-update applies on nodes that restart often. **No smart-contract, ABI,
-wire-protocol or deployment registry changes are required.**
+auto-update applies on nodes that restart often.
+
+Members pick up the update from the chain update event. A Knowledge Asset
+update now triggers a bounded refresh of confirmed Verifiable Memory copies
+on other holders, including after a member restarts. A private share can reach
+a member added by address once its profile is reachable, a refused outsider
+receives a clear result, and brief store or PCA funding-read outages no longer
+make eligible work fail permanently.
+**No smart-contract, ABI, wire-protocol or deployment registry changes are
+required.**
 
 ### Upgrading from 10.0.19
 
@@ -31,20 +39,78 @@ wire-protocol or deployment registry changes are required.**
 | Edges fetch the `agents` phonebook on demand (#2778) | For a public wallet-scoped graph whose owner is not in the local phonebook, an Edge fetches the phonebook once from one to three connected, network-admitted peers (Cores first), bounded to 120 s and then backed off | None. `onDemandAgentsPhonebook: false`, or `DKG_ON_DEMAND_AGENTS_PHONEBOOK=0`, turns it off |
 | Managed Oxigraph runs under the parent watchdog on Linux and macOS, also without memory limits, and the daemon records each launch's owner in the store directory (#2775) | The daemon's stop and restart signals reach Oxigraph through the watchdog's process group, so a worker the supervisor kills no longer leaves Oxigraph holding the store. On the first start after upgrading, a node stops an orphaned Oxigraph from an earlier release that runs this node's store and was reparented to PID 1 | None. A lock holder the daemon cannot attribute to this node is logged and left running; stop it by hand if the node then cannot start |
 | A public graph that was never registered on chain keeps plaintext Shared Working Memory after a join approval (#2827) | SWM on such a graph works in both directions only when the curator and its members all run 10.0.20. A 10.0.19 member still rejects the curator's plaintext shares and cannot share itself. Sender Key setup gains the terminal reason `agent-gate-unavailable`, returned when the receiver cannot evaluate its agent gate without a software or configuration change; older senders already treat unknown reasons as terminal | Upgrade every node that takes part in such a graph |
+| A Knowledge Asset update refreshes other holders' confirmed Verifiable Memory copies from the `KnowledgeAssetUpdated` chain event (#2858) | Each stale held asset needs one chain-root read and an exact fetch from a holder. Pending refresh work is replayed after restart; a target that remains unsettled for 24 hours in one process is given up with a warning | Monitor `vmPromotion.refresh` in `/api/status`. If a target is given up, explicitly fetch the asset or wait for its next update |
+| Members pick up the update from the chain update event (#2858) | 10.0.20 members pick up the update from the chain update event | Upgrade participating members |
+| An inconclusive PCA funding read is retryable (#2868) | A failed funding RPC read no longer means that the wallet has insufficient funds. Async publishing retries it, and synchronous `/vm/publish` returns a retryable 503 rather than a generic 500 | Retry a 503 after `Retry-After`; investigate sustained RPC unavailability. A confirmed shortfall remains terminal |
 
 ### Known issues
 
 - **RFC-64 catalog replay loop**: replays that come back incomplete repeat on
   every reconnect. Keep `rfc64Catalog.rollout.killSwitch` on wherever it is
   set.
-- **A peer that connects while it is still starting is not used for sync**
-  (#2822): a node learns a peer's protocols when the connection opens and
-  does not refresh them. A peer that had not registered its handlers yet
-  counts as unable to sync for as long as that connection lasts, so sync on
-  connect, Random Sampling repair and exact Verifiable Memory fetches skip it
-  until the two nodes reconnect. Present since 10.0.10.
+- **Two peers that connect while both are still starting do not sync with each
+  other until they reconnect** (#2854): a node learns a peer's protocols when
+  the connection opens. 10.0.20 also accepts the pooled sync protocol, which
+  a peer's first sync request reveals, so a peer that connected while starting
+  is used as soon as it syncs (#2822). Two nodes that both connected before
+  either registered its handlers still recover on reconnect.
+- **A member added to a private Context Graph only by wallet address does not
+  receive its Shared Working Memory until it joins** (#2862): the member needs
+  the graph's metadata, which the curator sends on an approved join request.
+  Have the member send a signed join request; a pre-authorized member is
+  approved automatically.
+- **A restarted member Edge may not reconnect to its private graph's curator
+  Edge** (#2865): it reconnects to bootstrap Cores, which do not serve the
+  graph's private content. Its Shared Working Memory recovery and Verifiable
+  Memory refresh retry until it reaches the curator. Connect it to the
+  curator's multiaddr with `POST /api/connect`.
+- **A newly approved member cannot subscribe to a private Context Graph that
+  was never registered on chain** (#2871): its local membership metadata is
+  present, but the remote graph has no accepted unregistered authority, so
+  `/api/subscribe` returns `CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE`. Register the
+  private graph before inviting members on other nodes.
+- **Copies already stale before the upgrade may wait for another update**
+  (#2866): the update lane initially replays about 500 blocks. Older stale
+  copies, and refresh targets given up after 24 hours, need the next update
+  or an explicit asset fetch. A rate-limited backfill is planned for 10.0.21.
 
 ### Fixed
+
+- **Members pick up the update from the chain update event** (#2858).
+- **Verifiable Memory refreshes after a Knowledge Asset update** (#2858): a
+  holder of an earlier confirmed copy no longer keeps that version indefinitely.
+  The chain update event queues a refresh, compares the local and chain roots
+  and versions, and fetches the current assertion from a holder without
+  rolling a newer copy back. The update lane holds its durable cursor below
+  unresolved work, so a restart replays pending events. A target still
+  unresolved after 24 hours in one process is reported and released.
+- **A private share reaches a member whose encryption key was not yet in the
+  sender's phonebook** (#2849): a curator that pre-authorized a member by
+  address can fetch the `agents` phonebook for missing keys in one bounded
+  request, then resolve recipients again. A key still unavailable yields an
+  actionable share error.
+- **A peer that connected while starting is used for sync** (#2822): the
+  pooled sync protocol revealed by its first sync request now counts as sync
+  support, allowing Random Sampling repair and exact Verifiable Memory fetches
+  over that connection.
+- **An outsider's catch-up of a private graph reports the refusal** (#2856):
+  instead of failing with an ambiguous transport message, it ends
+  `unreachable` with a hint to send a signed join request.
+- **Subscription admission and catch-up follow verified graph authority**
+  (#2874): a persisted remote subscription stays dormant while current
+  authority is unavailable, while an approved member of a registered private
+  graph can still join and recover historical Verifiable Memory. A registered
+  public subscriber fetches the graph declaration from connected peers before
+  catch-up, also when its on-chain name hash resolves to the cleartext id.
+- **A finalization retries promptly after a briefly busy store** (#2819): a
+  transient busy result no longer parks the work for six hours or risks
+  rejection after its live window.
+- **An inconclusive PCA funding read no longer becomes a confirmed shortage**
+  (#2868): strict publisher selection keeps RPC failure retryable, while a
+  confirmed inadequate balance or PCA coverage remains terminal. Synchronous
+  `/vm/publish` returns a sanitized, retryable 503 for the inconclusive case.
+- **`chain.boundedAuthorityReads` takes effect** (#2753): the setting now
+  reaches the chain adapter; authority-sensitive requests still read live.
 
 - **`dkg subscribe` without `--save` no longer stops syncing a public graph
   partway** (#2782): since 10.0.13 an on-demand subscription, the CLI default, lives
@@ -281,6 +347,9 @@ wire-protocol or deployment registry changes are required.**
   answer at all, the phonebook role still decides.
 
 ### Changed
+
+- On a node run from a source checkout without `build-info.json`, `/api/status`
+  reports the full 40-character `commit`; `commitShort` is unchanged (#2753).
 
 - Closed-data snapshot validation no longer copies and sorts the key lists
   (about a quarter of CPU in a store readback profile) (#2662).

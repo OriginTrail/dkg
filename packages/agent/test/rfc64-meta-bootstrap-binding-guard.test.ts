@@ -426,6 +426,72 @@ afterEach(async () => {
 });
 
 describe('RFC-64 _meta bootstrap from connected peers: chain-binding guard (two agents)', () => {
+  it('uses current registered public chain authority when the public catalog has no policy snapshot', async () => {
+    const contextGraphId = `${OWNER}/registered-public-meta` as ContextGraphIdV1;
+    const { peer, replica } = await startConnectedPair('registered-public-meta');
+    await storeOf(peer).insert(servedPublicMetaQuads(contextGraphId, peer.peerId, {
+      curatorAddress: OWNER,
+      registrationStatus: 'registered',
+      onChainId: '777',
+    }));
+    vi.spyOn(replica, 'readAcceptedRfc64CatalogAccessSnapshotV1').mockReturnValue(null);
+    const bind = vi.spyOn(replica, 'bindSubscriptionOnChainId');
+    replica.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
+
+    const outcome = await replica.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(
+      contextGraphId, undefined, { contextGraphId, onChainId: '7' },
+    );
+    expect(outcome).toBe('fetched');
+    await expect(replica.getExplicitAccessPolicy(contextGraphId)).resolves.toBe('public');
+    expect((await replica.getCgMeta(contextGraphId)).declared).toBe(true);
+    expect(bind).not.toHaveBeenCalled();
+    expect(replica.getSubscribedContextGraphs().get(contextGraphId)?.onChainId).toBeUndefined();
+  }, 60_000);
+
+  it.each(['proofless-first', 'proved-first'] as const)(
+    'keeps authenticated metadata bootstrap when %s calls overlap', async (order) => {
+      const contextGraphId = `${OWNER}/registered-public-overlap-${order}` as ContextGraphIdV1;
+      const { peer, replica } = await startConnectedPair(`registered-public-overlap-${order}`);
+      await storeOf(peer).insert(servedPublicMetaQuads(contextGraphId, peer.peerId, {
+        curatorAddress: OWNER,
+      }));
+      vi.spyOn(replica, 'readAcceptedRfc64CatalogAccessSnapshotV1').mockReturnValue(null);
+      replica.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
+      const proof = { contextGraphId, onChainId: '7' };
+      const unproved = () => replica.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(contextGraphId);
+      const proved = () => replica.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(
+        contextGraphId, undefined, proof,
+      );
+      const first = order === 'proofless-first' ? unproved() : proved();
+      const second = order === 'proofless-first' ? proved() : unproved();
+      const outcomes = await Promise.all([first, second]);
+      expect(outcomes).toContain('fetched');
+      // The background call remains closed without its own accepted policy,
+      // regardless of which request obtained the first in-flight slot.
+      expect(outcomes).toContain('no-accepted-public-policy');
+      await expect(replica.hasConfirmedMetaState(contextGraphId)).resolves.toBe(true);
+    },
+    60_000,
+  );
+
+  it('does not fetch public metadata without an authenticated public proof', async () => {
+    const contextGraphId = `${OWNER}/registered-private-meta` as ContextGraphIdV1;
+    const { peer, replica } = await startConnectedPair('registered-private-meta');
+    await storeOf(peer).insert(servedPublicMetaQuads(contextGraphId, peer.peerId, {
+      curatorAddress: OWNER,
+    }));
+    vi.spyOn(replica, 'readAcceptedRfc64CatalogAccessSnapshotV1').mockReturnValue(null);
+    vi.spyOn(replica, 'resolveContextGraphSubscriptionBootstrapAuthority').mockResolvedValue({
+      outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant',
+      metadataBootstrap: 'eligible', onChainId: 8n,
+    });
+    replica.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
+
+    await expect(replica.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(contextGraphId))
+      .resolves.toBe('no-accepted-public-policy');
+    expect(await rootMetaRows(storeOf(replica), contextGraphId)).toEqual([]);
+  }, 60_000);
+
   it('review repro: a non-owner peer serving public _meta with OnChainId=777 installs the declaration but never a binding', async () => {
     const contextGraphId = `${OWNER}/binding-guard` as ContextGraphIdV1;
     const { peer, replica } = await startConnectedPair('bg-repro');

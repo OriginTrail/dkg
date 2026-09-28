@@ -870,6 +870,17 @@ describe('durable sync lifecycle chain binding', () => {
     );
     expect(runLegacyDurableSync).not.toHaveBeenCalled();
     expect(catalogOnly.complete).toBe(false);
+
+    // The private member predicate is a separate, authenticated exception for
+    // an unselected graph. A selected catalog graph remains excluded.
+    agentLike.rfc64PrivateRootSwmOnLegacyLaneV1 = vi.fn(async (id: string) => id === 'unselected-cg');
+    await LifecycleSyncMethods.prototype.syncFromPeerDetailed.call(
+      agentLike,
+      'peer-private-curator',
+      ['catalog-cg', 'unselected-cg'],
+    );
+    expect(runLegacyDurableSync).toHaveBeenCalledTimes(1);
+    expect(runLegacyDurableSync.mock.calls[0]?.[2]).toEqual(['unselected-cg']);
   });
 
   it('retries a transient binding read, caches only the successful proof, and persists the CG id', async () => {
