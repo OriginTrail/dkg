@@ -868,13 +868,16 @@ export class QueryMethods extends DKGAgentBase {
             // indexed and before its local definition arrives. During that
             // interval the legacy fallback can mistake absent local policy
             // for public. Only this node's durable local-create provenance
-            // may use legacy-local authority. A durable subscription row is
+            // may use the unproven local-public fallback. Explicit private
+            // allowlist and participant decisions remain valid for remote
+            // members. A durable subscription row is
             // only a name/chain-ID discovery hint during restart; it cannot
             // turn its own stored intent into public authority. Remote rows
             // remain dormant until registered or signed authority is proven.
             if (
               authority.outcome === 'allowed'
               && authority.source === 'legacy-local'
+              && authority.reason === 'local-public'
               && !this.localContextGraphProvenance.hasLocalCreate(contextGraphId)
             ) {
               return unavailableContextGraphReadAuthorityDecision(

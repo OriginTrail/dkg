@@ -448,6 +448,32 @@ describe('RFC-64 _meta bootstrap from connected peers: chain-binding guard (two 
     expect(replica.getSubscribedContextGraphs().get(contextGraphId)?.onChainId).toBeUndefined();
   }, 60_000);
 
+  it.each(['proofless-first', 'proved-first'] as const)(
+    'keeps authenticated metadata bootstrap when %s calls overlap', async (order) => {
+      const contextGraphId = `${OWNER}/registered-public-overlap-${order}` as ContextGraphIdV1;
+      const { peer, replica } = await startConnectedPair(`registered-public-overlap-${order}`);
+      await storeOf(peer).insert(servedPublicMetaQuads(contextGraphId, peer.peerId, {
+        curatorAddress: OWNER,
+      }));
+      vi.spyOn(replica, 'readAcceptedRfc64CatalogAccessSnapshotV1').mockReturnValue(null);
+      replica.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
+      const proof = { contextGraphId, onChainId: '7' };
+      const unproved = () => replica.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(contextGraphId);
+      const proved = () => replica.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(
+        contextGraphId, undefined, proof,
+      );
+      const first = order === 'proofless-first' ? unproved() : proved();
+      const second = order === 'proofless-first' ? proved() : unproved();
+      const outcomes = await Promise.all([first, second]);
+      expect(outcomes).toContain('fetched');
+      // The background call remains closed without its own accepted policy,
+      // regardless of which request obtained the first in-flight slot.
+      expect(outcomes).toContain('no-accepted-public-policy');
+      await expect(replica.hasConfirmedMetaState(contextGraphId)).resolves.toBe(true);
+    },
+    60_000,
+  );
+
   it('does not fetch public metadata without an authenticated public proof', async () => {
     const contextGraphId = `${OWNER}/registered-private-meta` as ContextGraphIdV1;
     const { peer, replica } = await startConnectedPair('registered-private-meta');

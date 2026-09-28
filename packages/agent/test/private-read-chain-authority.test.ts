@@ -1522,6 +1522,28 @@ describe('private read authorization uses the on-chain participant roster', () =
     });
   });
 
+  it('admits a remote legacy-private member with explicit agent and peer allowlists', async () => {
+    const contextGraphId = 'remote-legacy-private-allowlisted';
+    agent = await DKGAgent.create({
+      name: 'PrivateReadRemoteLegacyMember',
+      chainAdapter: new MockChainAdapter(),
+    });
+    vi.spyOn(agent, 'peerId', 'get').mockReturnValue('12D3KooWRemoteLegacyMember');
+    vi.spyOn(agent, 'resolveRegisteredContextGraphAuthority').mockResolvedValue({ kind: 'unregistered' });
+    vi.spyOn(agent, 'isPrivateContextGraph').mockResolvedValue(true);
+    vi.spyOn(agent, 'getContextGraphAllowedPeers').mockResolvedValue([agent.peerId]);
+    vi.spyOn(agent, 'getContextGraphAgentGateAddresses').mockResolvedValue([MEMBER]);
+
+    await expect(agent.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
+      callerAgentAddress: MEMBER,
+      allowSubscriptionFallback: false,
+    })).resolves.toMatchObject({
+      outcome: 'allowed',
+      source: 'legacy-local',
+      reason: 'local-agent-and-peer-allowlist',
+    });
+  });
+
   it('leaves a persisted subscription dormant when startup cannot prove current read authority', async () => {
     const contextGraphId = 'persisted-private-poison';
     const chain = new MockChainAdapter();

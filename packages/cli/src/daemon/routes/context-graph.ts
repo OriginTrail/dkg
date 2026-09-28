@@ -2026,10 +2026,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           : 'This node has no agent authorized to read this project. Ask the curator to invite an agent first.',
       });
     }
-    const registeredPublicProof = readAuthority.source === 'registered-chain'
+    const registeredPublicProofFor = (verifiedContextGraphId: string) => readAuthority.source === 'registered-chain'
       && readAuthority.reason === 'chain-public'
       && readAuthority.onChainId !== undefined
-      ? { contextGraphId, onChainId: readAuthority.onChainId.toString(10) }
+      ? { contextGraphId: verifiedContextGraphId, onChainId: readAuthority.onChainId.toString(10) }
       : undefined;
 
     // A graph known only by its on-chain name hash syncs nothing under that
@@ -2043,6 +2043,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }).catch(() => null);
       if (resolved) contextGraphId = resolved;
     }
+    const registeredPublicProof = registeredPublicProofFor(contextGraphId);
     // Two notes answer two questions about the requested id: which graph an
     // on-chain id named (`onChainReference`), and whether that graph's name
     // is known yet (`identity`, the #2744 contract that catch-up status and
@@ -2278,6 +2279,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           targetContextGraphId = resolvedContextGraphId;
           job.resolvedContextGraphId = resolvedContextGraphId;
           catchupTracker.latestByContextGraph.set(resolvedContextGraphId, jobId);
+          if (typeof agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1 === 'function') {
+            await agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(
+              targetContextGraphId,
+              undefined,
+              registeredPublicProofFor(targetContextGraphId),
+            ).catch(() => undefined);
+          }
           result = await daemonState.catchupRunner!.run({
             contextGraphId: targetContextGraphId,
             includeSharedMemory: shouldSyncSharedMemory,

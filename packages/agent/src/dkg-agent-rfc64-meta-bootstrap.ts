@@ -57,10 +57,13 @@ export interface RegisteredPublicMetadataBootstrapProofV1 {
   readonly onChainId: string;
 }
 
-/** One in-flight bootstrap per (agent, graph); concurrent callers share it. */
+/** One in-flight bootstrap per (agent, graph); only equivalent authority shares it. */
 const rfc64MetadataBootstrapsInFlightV1 = new WeakMap<
   DKGAgent,
-  Map<string, Promise<Rfc64CatalogMetadataBootstrapOutcomeV1>>
+  Map<string, {
+    proofKey?: string;
+    promise: Promise<Rfc64CatalogMetadataBootstrapOutcomeV1>;
+  }>
 >();
 
 export class Rfc64MetaBootstrapMethods extends DKGAgentBase {
@@ -82,15 +85,27 @@ export class Rfc64MetaBootstrapMethods extends DKGAgentBase {
       inFlight = new Map();
       rfc64MetadataBootstrapsInFlightV1.set(this, inFlight);
     }
+    const proofKey = registeredPublicProof === undefined
+      ? undefined
+      : `${registeredPublicProof.contextGraphId}\0${registeredPublicProof.onChainId}`;
     const existing = inFlight.get(contextGraphId);
-    if (existing !== undefined) return existing;
+    if (existing !== undefined) {
+      if (existing.proofKey === proofKey) return existing.promise;
+      // An activation pull without chain admission may be in flight when an
+      // explicit subscribe proves public registration. Run that stronger pull
+      // after the first generation settles; never reuse its weaker outcome.
+      return existing.promise.catch(() => undefined).then(() =>
+        this.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(
+          contextGraphId, signal, registeredPublicProof,
+        ));
+    }
     const run = this.runRfc64CatalogContextGraphMetadataBootstrapV1(
       contextGraphId, signal, registeredPublicProof,
     )
       .finally(() => {
-        if (inFlight!.get(contextGraphId) === run) inFlight!.delete(contextGraphId);
+        if (inFlight!.get(contextGraphId)?.promise === run) inFlight!.delete(contextGraphId);
       });
-    inFlight.set(contextGraphId, run);
+    inFlight.set(contextGraphId, { proofKey, promise: run });
     return run;
   }
 
