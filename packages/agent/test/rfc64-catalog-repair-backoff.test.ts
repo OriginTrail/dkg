@@ -27,8 +27,11 @@ function fixture(retryIntervalMs = 5_000) {
   let available = true;
   let privateRepairs: readonly Rfc64FinalizedPrivatePlacementRepairV1[] = [];
   const reconcile = vi.fn(async (): Promise<null> => { throw new Error('unchanged repair failure'); });
-  const repairPrivate = vi.fn(async (): Promise<void> => { throw new Error('unchanged private repair failure'); });
+  const repairPrivate = vi.fn(async (_repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): Promise<void> => {
+    throw new Error('unchanged private repair failure');
+  });
   const readRevision = vi.fn(() => available ? revision : null);
+  const listPrivateRepairs = vi.fn(() => privateRepairs);
   const warn = vi.fn();
   const dependencies = {
     resolvePartition: () => ({ retryIntervalMs, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
@@ -36,7 +39,7 @@ function fixture(retryIntervalMs = 5_000) {
     acceptsPublicRootLane: () => available,
     acceptsFinalizedPrivateLane: () => available,
     readRepairRevision: readRevision,
-    listFinalizedPrivateRepairs: () => privateRepairs,
+    listFinalizedPrivateRepairs: listPrivateRepairs,
     repairFinalizedPrivatePlacement: repairPrivate,
     reconcile,
     warn,
@@ -44,7 +47,7 @@ function fixture(retryIntervalMs = 5_000) {
   const owner = new Rfc64SwmCatalogProjectionOwnerV1(dependencies);
   owners.push(owner);
   return {
-    owner, reconcile, repairPrivate, readRevision, warn,
+    owner, reconcile, repairPrivate, readRevision, listPrivateRepairs, warn,
     request: () => owner.request({ contextGraphId: CG, authorAddress: AUTHOR, ctx }),
     setRevision: (value: string) => { revision = value; },
     setAvailable: (value: boolean) => { available = value; },
@@ -243,6 +246,145 @@ describe('RFC-64 unchanged repair backoff', () => {
     expect(f.repairPrivate).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps private cooldown when unrelated same-author inventory and repairs change', async () => {
+    const f = fixture();
+    const repair = privateRepair();
+    f.setPrivateRepairs([repair]);
+    await f.owner.requestFinalizedPrivate({ repair, ctx }).whenAttempted;
+    await f.advance(1_000);
+    const other = { ...repair, assertionCoordinate: 'other', kaUal: `${repair.kaUal}-other` };
+    f.setPrivateRepairs([repair, other]);
+    f.setRevision('scope-1:head-2');
+    await f.owner.requestFinalizedPrivate({ repair: other, ctx }).whenAttempted;
+    expect(f.repairPrivate.mock.calls.filter(([value]) => value === repair)).toHaveLength(1);
+    await f.advance(4_000);
+    expect(f.repairPrivate.mock.calls.filter(([value]) => value === repair)).toHaveLength(2);
+    f.setRevision('scope-1:head-3');
+    f.owner.start(ctx);
+    await f.owner.whenIdle();
+    await f.advance(5_000);
+    expect(f.repairPrivate.mock.calls.filter(([value]) => value === repair)).toHaveLength(2);
+    await f.advance(5_000);
+    expect(f.repairPrivate.mock.calls.filter(([value]) => value === repair)).toHaveLength(3);
+  });
+
+  it('wakes an accepted private cooldown request once with periodic retries disabled', async () => {
+    const f = fixture(0);
+    const repair = privateRepair();
+    f.setPrivateRepairs([repair]);
+    await f.owner.requestFinalizedPrivate({ repair, ctx }).whenAttempted;
+    await f.advance(1_000);
+    const duplicate = f.owner.requestFinalizedPrivate({ repair, ctx });
+    expect(duplicate.accepted).toBe(true);
+    let settled = false;
+    void duplicate.whenAttempted.then(() => { settled = true; });
+    await f.owner.whenIdle();
+    await f.advance(3_999);
+    expect(f.repairPrivate).toHaveBeenCalledTimes(1);
+    expect(settled).toBe(false);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    f.repairPrivate.mockImplementationOnce(async () => { await gate; throw new Error('still failed'); });
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.repairPrivate).toHaveBeenCalledTimes(2);
+    expect(settled).toBe(false);
+    release();
+    await f.owner.whenIdle();
+    await duplicate.whenAttempted;
+    expect(settled).toBe(true);
+    await f.advance(60_000);
+    expect(f.repairPrivate).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('keeps private failure history when the author head changes during an attempt', async () => {
+    const f = fixture(0);
+    const repair = privateRepair();
+    f.setPrivateRepairs([repair]);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    f.repairPrivate.mockImplementationOnce(async () => { await gate; throw new Error('failed'); });
+    const request = f.owner.requestFinalizedPrivate({ repair, ctx });
+    f.setRevision('scope-1:head-2');
+    release();
+    await request.whenAttempted;
+    await f.owner.whenIdle();
+    expect(f.repairPrivate).toHaveBeenCalledTimes(1);
+    await f.advance(60_000);
+    expect(f.repairPrivate).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses one wake for the earliest private waiter deadline and preserves later waiters', async () => {
+    const f = fixture(0);
+    const repair = privateRepair();
+    const other = { ...repair, assertionCoordinate: 'other', kaUal: `${repair.kaUal}-other` };
+    f.setPrivateRepairs([repair]);
+    await f.owner.requestFinalizedPrivate({ repair, ctx }).whenAttempted;
+    await f.advance(1_000);
+    f.setPrivateRepairs([repair, other]);
+    await f.owner.requestFinalizedPrivate({ repair: other, ctx }).whenAttempted;
+    const first = f.owner.requestFinalizedPrivate({ repair, ctx });
+    const second = f.owner.requestFinalizedPrivate({ repair: other, ctx });
+    let secondSettled = false;
+    void second.whenAttempted.then(() => { secondSettled = true; });
+    await f.owner.whenIdle();
+    expect(vi.getTimerCount()).toBe(1);
+    await f.advance(4_000);
+    await first.whenAttempted;
+    expect(secondSettled).toBe(false);
+    expect(vi.getTimerCount()).toBe(1);
+    await f.advance(1_000);
+    await second.whenAttempted;
+    expect(secondSettled).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+    await f.advance(60_000);
+    expect(f.repairPrivate).toHaveBeenCalledTimes(4);
+  });
+
+  it.each([false, true])('bounds failed queue reads while preserving a private waiter (prior failure: %s)', async (priorFailure) => {
+    const f = fixture(0);
+    const repair = privateRepair();
+    f.setPrivateRepairs([repair]);
+    if (priorFailure) await f.owner.requestFinalizedPrivate({ repair, ctx }).whenAttempted;
+    f.listPrivateRepairs.mockImplementation(() => { throw new Error('queue temporarily unavailable'); });
+    const request = f.owner.requestFinalizedPrivate({ repair, ctx });
+    let settled = false;
+    void request.whenAttempted.then(() => { settled = true; });
+    await f.owner.whenIdle();
+    f.listPrivateRepairs.mockClear();
+    await f.advance(5_000);
+    expect(f.listPrivateRepairs).toHaveBeenCalledTimes(1);
+    expect(settled).toBe(false);
+    await f.advance(4_999);
+    expect(f.listPrivateRepairs).toHaveBeenCalledTimes(1);
+    f.listPrivateRepairs.mockImplementation(() => [repair]);
+    await f.advance(1);
+    await request.whenAttempted;
+    expect(settled).toBe(true);
+    expect(f.repairPrivate).toHaveBeenCalledTimes(priorFailure ? 2 : 1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('cancels an obsolete private deadline when a real lane edge recovers early', async () => {
+    const f = fixture(0);
+    const repair = privateRepair();
+    f.setPrivateRepairs([repair]);
+    await f.owner.requestFinalizedPrivate({ repair, ctx }).whenAttempted;
+    const duplicate = f.owner.requestFinalizedPrivate({ repair, ctx });
+    await f.owner.whenIdle();
+    expect(vi.getTimerCount()).toBe(1);
+    f.setAvailable(false);
+    f.owner.observeLaneAvailability(CG);
+    f.setAvailable(true);
+    f.owner.start(ctx);
+    await f.owner.whenIdle();
+    await duplicate.whenAttempted;
+    expect(f.repairPrivate).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+    await f.advance(60_000);
+    expect(f.repairPrivate).toHaveBeenCalledTimes(2);
+  });
+
   it('does not transfer private cooldown across a changed durable confirmation scope', async () => {
     const f = fixture();
     const repair = privateRepair();
@@ -315,8 +457,11 @@ describe('RFC-64 unchanged repair backoff', () => {
     void duplicate.whenAttempted.then(() => { settled = true; });
     await f.owner.whenIdle();
     expect(settled).toBe(false);
+    expect(vi.getTimerCount()).toBe(1);
     await f.owner.close();
     await duplicate.whenAttempted;
+    expect(vi.getTimerCount()).toBe(0);
+    await f.advance(60_000);
     expect(f.repairPrivate).toHaveBeenCalledTimes(2);
   });
 
