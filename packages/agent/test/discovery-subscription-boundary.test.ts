@@ -45,7 +45,7 @@ describe('Context Graph discovery/subscription boundary', () => {
   it.each([
     ['default', undefined],
     ['explicitly enabled', true],
-  ] as const)('keeps persisted subscription rehydration %s', async (_label, enabled) => {
+  ] as const)('keeps rehydration %s but leaves an unproven remote row dormant', async (_label, enabled) => {
     const id = `rehydration-${_label.replace(/\s+/g, '-')}`;
     const record: ContextGraphSubscriptionRecord = {
       id,
@@ -73,17 +73,16 @@ describe('Context Graph discovery/subscription boundary', () => {
 
     try {
       await agent.start();
-      expect(agent.getSubscribedContextGraphs().get(id)).toMatchObject({
-        subscribed: true,
-        synced: true,
-      });
-      expect((agent as any).config.syncContextGraphs ?? []).toContain(id);
-      expect((agent as any).gossipRegistered.has(id)).toBe(true);
+      expect(agent.getSubscribedContextGraphs().has(id)).toBe(false);
+      expect((agent as any).config.syncContextGraphs ?? []).not.toContain(id);
+      expect((agent as any).gossipRegistered.has(id)).toBe(false);
+      expect(persisted.get(id)).toMatchObject(record);
       expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
         rehydrationEnabled: true,
         persistedTotal: 1,
-        activated: 1,
-        dormant: 0,
+        activated: 0,
+        dormant: 1,
+        dormantReasons: { authorityUnavailable: [id] },
       });
     } finally {
       await agent.stop().catch(() => {});
