@@ -47,7 +47,10 @@ export function retryableSchedulerBusyFailure(): StoreSchedulerBusyError {
   );
 }
 
-export function createAsyncPromoteWorkerFixture(): AsyncPromoteWorkerFixture {
+export function createAsyncPromoteWorkerFixture(options: {
+  maxRetries?: number;
+  leaseMs?: number;
+} = {}): AsyncPromoteWorkerFixture {
   const store = new OxigraphStore();
   const logs: string[] = [];
   let currentNow = 1_700_000_000_000;
@@ -66,7 +69,8 @@ export function createAsyncPromoteWorkerFixture(): AsyncPromoteWorkerFixture {
     now: clock.now,
     idGenerator: () => `job-${++idCounter}`,
     backoff: () => 60_000,
-    maxRetries: 3,
+    maxRetries: options.maxRetries ?? 3,
+    ...(options.leaseMs === undefined ? {} : { leaseMs: options.leaseMs }),
   });
   const makeRequest = (overrides: Partial<PromoteRequest> = {}): PromoteRequest => ({
     contextGraphId: 'graphify',
