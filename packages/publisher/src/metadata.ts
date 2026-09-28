@@ -811,11 +811,21 @@ export async function readLocallyTrustedKnowledgeAssetControls(
     .map((quad) => ({ ...quad, subject: ual, graph: metaGraph }));
 }
 
-/** Replace peer-provided control rows with the validated local sidecar values. */
-export function overlayLocallyTrustedKnowledgeAssetControls(
+/** Resolve this KA's trusted sidecar and replace peer-provided control rows in one step. */
+export async function overlayLocallyTrustedKnowledgeAssetControls(
+  store: TripleStore,
+  metaGraph: string,
+  ual: string,
   incomingMetadata: readonly Quad[],
-  locallyTrustedControls: readonly Quad[],
-): Quad[] {
+  options: QueryOptions = {},
+): Promise<Quad[]> {
+  const locallyTrustedControls = await readLocallyTrustedKnowledgeAssetControls(
+    store,
+    metaGraph,
+    ual,
+    incomingMetadata,
+    options,
+  );
   if (locallyTrustedControls.length === 0) return [...incomingMetadata];
   return [
     ...incomingMetadata.filter((quad) => !LOCAL_TRUSTED_KA_CONTROL_PREDICATES.has(quad.predicate)),

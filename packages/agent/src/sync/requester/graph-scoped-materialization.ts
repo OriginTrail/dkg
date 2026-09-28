@@ -13,7 +13,6 @@ import {
   mergeSameVersionGraphKnowledgeAssetMetadataV1,
   overlayLocallyTrustedKnowledgeAssetControls,
   readGraphKnowledgeAssetConfirmationKindV1,
-  readLocallyTrustedKnowledgeAssetControls,
   withMaterializationLock,
 } from '@origintrail-official/dkg-publisher';
 import {
@@ -459,16 +458,12 @@ export async function materializeVerifiedGraphScopedAsset(params: {
       }
       assertCurrent();
     }
-    const locallyTrustedMetadata = await readLocallyTrustedKnowledgeAssetControls(
+    const committedMetadata = await overlayLocallyTrustedKnowledgeAssetControls(
       store,
       asset.metaGraph,
       asset.ual,
       replacementMetadata,
       options,
-    );
-    const committedMetadata = overlayLocallyTrustedKnowledgeAssetControls(
-      replacementMetadata,
-      locallyTrustedMetadata,
     );
     // This is the last interruptible boundary. Once the atomic replacement is
     // dispatched, its real completion owns the materialization lock and stop()
