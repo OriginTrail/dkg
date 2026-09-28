@@ -22,7 +22,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
-import { DKGAgent } from '@origintrail-official/dkg-agent';
+import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   generateEd25519Keypair,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -82,13 +82,6 @@ async function seedRootlessPublicSnapshot(
     kaNumber: kaNumber.toString(),
     publicTripleCount: quads.length,
   };
-}
-
-function snapshotPreflightAgent(store: TripleStore): DKGAgent {
-  const agent = Object.create(DKGAgent.prototype);
-  agent.store = store;
-  agent.log = { debug() {}, info() {}, warn() {}, error() {} };
-  return agent;
 }
 
 function rootlessIntent(snapshot: {
@@ -501,67 +494,49 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       backend: 'oxigraph-server', operation: 'query', timeoutMs: 30_000,
       message: 'Invalid store response: read deadline exceeded',
     }), 'indeterminate'],
-  ] as const)('vm/publish-async retries the unchanged real snapshot after %s', async (_label, makeError, outcome) => {
-    const store = await createTripleStore({ backend: 'oxigraph' });
+  ] as const)('vm/publish-async retries the unchanged intent after preflight reports %s', async (_label, makeError, outcome) => {
     const failure = makeError();
-    let pressured = false;
-    let rejectedReads = 0;
-    const readingStore = new Proxy(store, {
-      get(target, property) {
-        const value = Reflect.get(target, property, target);
-        if (property === 'query' || property === 'getQuads') {
-          return (...args: unknown[]) => {
-            if (pressured) {
-              rejectedReads += 1;
-              return Promise.reject(failure);
-            }
-            return value.apply(target, args);
-          };
-        }
-        return typeof value === 'function' ? value.bind(target) : value;
+    let pressured = true;
+    const preflighted: KnowledgeAssetVmPublishRequest[] = [];
+    const enqueued: KnowledgeAssetVmPublishRequest[] = [];
+    const intent = rootlessIntent({
+      shareOperationId: 'unchanged-share-2824',
+      kaUal: `did:dkg:31337/${ROOTLESS_AUTHOR}/7`, kaNumber: '7', publicTripleCount: 1,
+    });
+    const originalIntent = structuredClone(intent);
+    // Real snapshot resolution belongs to the focused agent operation tests.
+    // Here the package boundary supplies failures to the HTTP admission policy.
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => intent,
+      preflightKnowledgeAssetVmPublishSnapshot: async (request: KnowledgeAssetVmPublishRequest) => {
+        preflighted.push(request);
+        if (pressured) throw failure;
+      },
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async (request: KnowledgeAssetVmPublishRequest) => {
+        enqueued.push(request);
+        return 'job-after-pressure';
       },
     });
-    const preflightAgent = snapshotPreflightAgent(readingStore);
-    const enqueued: KnowledgeAssetVmPublishRequest[] = [];
-    try {
-      const intent = rootlessIntent(await seedRootlessPublicSnapshot(store, {
-        shareOperationId: 'unchanged-share-2824', subject: 'urn:test:pressure', object: '"unchanged"',
-      }));
-      const originalIntent = structuredClone(intent);
-      // Establish the fixture is genuinely publishable before introducing pressure.
-      await preflightAgent.preflightKnowledgeAssetVmPublishSnapshot(intent);
-      await startWith({}, {
-        resolveFinalizedAssertionVmPublishIntent: async () => intent,
-        preflightKnowledgeAssetVmPublishSnapshot:
-          preflightAgent.preflightKnowledgeAssetVmPublishSnapshot.bind(preflightAgent),
-      }, {}, {
-        enqueueKnowledgeAssetVmPublish: async (request: KnowledgeAssetVmPublishRequest) => {
-          enqueued.push(request);
-          return 'job-after-pressure';
-        },
-      });
-      pressured = true;
-      const rejected = await post('vm/publish-async', { contextGraphId: CG_ID });
-      expect(rejectedReads).toBeGreaterThan(0);
-      expect(rejected.status).toBe(503);
-      expect(rejected.headers.get('Retry-After')).toBe('1');
-      expect(rejected.body).toMatchObject({
-        code: failure.code, retryable: true, outcome, jobCreated: false,
-      });
-      expect(rejected.body).not.toHaveProperty('jobId');
-      expect(String(rejected.body.error)).not.toMatch(/re-share|stale/i);
-      expect(enqueued).toEqual([]);
+    const rejected = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(preflighted).toEqual([originalIntent]);
+    expect(rejected.status).toBe(503);
+    expect(rejected.headers.get('Retry-After')).toBe('1');
+    expect(rejected.body).toMatchObject({
+      code: failure.code, retryable: true, outcome, jobCreated: false,
+    });
+    expect(rejected.body).not.toHaveProperty('jobId');
+    expect(String(rejected.body.error)).not.toMatch(/re-share|stale/i);
+    expect(enqueued).toEqual([]);
 
-      pressured = false;
-      const accepted = await post('vm/publish-async', { contextGraphId: CG_ID });
-      expect(accepted.status).toBe(202);
-      expect(accepted.body).toMatchObject({ jobId: 'job-after-pressure', shareOperationId: intent.shareOperationId });
-      expect(accepted.body).not.toHaveProperty('jobCreated');
-      expect(enqueued).toEqual([originalIntent]);
-      expect(enqueued[0]).toBe(intent);
-    } finally {
-      await store.close();
-    }
+    pressured = false;
+    const accepted = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(accepted.status).toBe(202);
+    expect(accepted.body).toMatchObject({ jobId: 'job-after-pressure', shareOperationId: intent.shareOperationId });
+    expect(accepted.body).not.toHaveProperty('jobCreated');
+    expect(preflighted).toEqual([originalIntent, originalIntent]);
+    expect(enqueued).toEqual([originalIntent]);
+    expect(enqueued[0]).toBe(intent);
   });
 
   it('vm/publish-async makes no no-job claim if enqueue persists and then throws', async () => {
@@ -876,38 +851,27 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     });
   });
 
-  it.each(['missing', 'count mismatch'] as const)('vm/publish-async rejects a real %s share snapshot before enqueue', async (fault) => {
-    const store = await createTripleStore({ backend: 'oxigraph' });
+  it.each(['PUBLISH_INTENT_STALE', 'PUBLISH_NOT_FULL_SHARE'] as const)('vm/publish-async rejects %s during intent resolution before preflight or enqueue', async (code) => {
+    let preflightCalls = 0;
     let enqueueCalls = 0;
-    try {
-      const snapshot = await seedRootlessPublicSnapshot(store, {
-        shareOperationId: 'real-share-negative-control', subject: 'urn:test:negative-control', object: '"value"',
-      });
-      const intent = rootlessIntent({
-        ...snapshot,
-        ...(fault === 'missing' ? { shareOperationId: 'missing-real-share-op' } : { publicTripleCount: 2 }),
-      });
-      const preflightAgent = snapshotPreflightAgent(store);
-      await startWith({}, {
-        resolveFinalizedAssertionVmPublishIntent: async () => intent,
-        preflightKnowledgeAssetVmPublishSnapshot:
-          preflightAgent.preflightKnowledgeAssetVmPublishSnapshot.bind(preflightAgent),
-      }, {}, {
-        enqueueKnowledgeAssetVmPublish: async () => {
-          enqueueCalls += 1;
-          return 'job-should-not-exist';
-        },
-      });
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => {
+        throw Object.assign(new Error('Re-share required before publishing'), { code });
+      },
+      preflightKnowledgeAssetVmPublishSnapshot: async () => { preflightCalls += 1; },
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        enqueueCalls += 1;
+        return 'job-should-not-exist';
+      },
+    });
 
-      const res = await post('vm/publish-async', { contextGraphId: CG_ID });
-      expect(res.status).toBe(409);
-      expect(res.body.code).toBe('PUBLISH_INTENT_STALE');
-      expect(String(res.body.error)).toContain('Re-share');
-      expect(res.body.jobCreated).toBe(false);
-      expect(enqueueCalls).toBe(0);
-    } finally {
-      await store.close();
-    }
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code, jobCreated: false });
+    expect(String(res.body.error)).toContain('Re-share');
+    expect(preflightCalls).toBe(0);
+    expect(enqueueCalls).toBe(0);
   });
 
   it('vm/publish-async accepts uint72 publisher identity overrides into the immutable intent', async () => {
