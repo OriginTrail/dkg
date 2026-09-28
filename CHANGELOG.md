@@ -96,6 +96,12 @@ required.**
 - **An outsider's catch-up of a private graph reports the refusal** (#2856):
   instead of failing with an ambiguous transport message, it ends
   `unreachable` with a hint to send a signed join request.
+- **Subscription admission and catch-up follow verified graph authority**
+  (#2874): a persisted remote subscription stays dormant while current
+  authority is unavailable, while an approved member of a registered private
+  graph can still join and recover historical Verifiable Memory. A registered
+  public subscriber fetches the graph declaration from connected peers before
+  catch-up, also when its on-chain name hash resolves to the cleartext id.
 - **A finalization retries promptly after a briefly busy store** (#2819): a
   transient busy result no longer parks the work for six hours or risks
   rejection after its live window.
