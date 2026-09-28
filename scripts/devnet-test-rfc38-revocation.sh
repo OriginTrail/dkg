@@ -429,8 +429,10 @@ M2_DENIED_BY_CURATOR=$(printf '%s' "${M2_DENIED_BY_CURATOR:-0}" | tr -d '[:space
 if [ "$M2_DENIED_BY_CURATOR" -lt 1 ]; then
   warn "AUTH-SIDE OBSERVATION: curator didn't log any post-revoke M2 sync-denials yet. " \
        "M2 may not have re-tried sync against the curator within the test window."
+  AUTH_SIDE_SUMMARY="not observed (M2 made no recorded post-revoke sync request)"
 else
   log "✓ Curator denied $M2_DENIED_BY_CURATOR of M2's sync requests post-revoke — auth-side rotation works"
+  AUTH_SIDE_SUMMARY="✓ curator denied $M2_DENIED_BY_CURATOR M2 sync request(s)."
 fi
 
 # ===========================================================================
@@ -459,6 +461,6 @@ log "  Pre-revoke:        3 triples; all 3 members could read."
 log "  Revoked:           M2 ($M2_AGENT)"
 log "  Post-revoke:       3 NEW triples; M1 reads all 6."
 log "  Encryption-side:   ✓ curator rotated epoch for M1 without setting up M2."
-log "  Auth-side:         ✓ curator denied $M2_DENIED_BY_CURATOR M2 sync request(s)."
+log "  Auth-side:         $AUTH_SIDE_SUMMARY"
 log "  Durable-sync gap:  M2 final count = $M2_FINAL (≤3 ideal, may leak via peer-to-peer sync — LU-4b)."
 log "================================================================"
