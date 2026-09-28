@@ -35,18 +35,24 @@ devnet_connect_member_to_curator() {
   return 1
 }
 
-# Request a signed join without assuming how the curator approves it. Callers
-# can use auto-approval or explicitly approve after a pending response.
-devnet_request_curated_join() {
+# Mint one signed delegation independently of delivery attempts. A transport
+# retry must resend the same delegation, not create a new one.
+devnet_signed_curated_join_body() {
   local member="$1" curator_peer="$2" cg_id="$3" agent_name="$4"
-  local encoded signed body
+  local encoded signed
   encoded=$(CG_ID="$cg_id" node -e 'console.log(encodeURIComponent(process.env.CG_ID))') || return 1
   signed=$(_devnet_member_api "$member" POST "/api/context-graph/${encoded}/sign-join" '{}') || return 1
-  body=$(SIGNED_JOIN="$signed" CURATOR_PEER="$curator_peer" AGENT_NAME="$agent_name" node -e '
+  SIGNED_JOIN="$signed" CURATOR_PEER="$curator_peer" AGENT_NAME="$agent_name" node -e '
     const signed = JSON.parse(process.env.SIGNED_JOIN);
     if (signed.ok !== true || !signed.delegation) process.exit(1);
     console.log(JSON.stringify({delegation:signed.delegation, curatorPeerId:process.env.CURATOR_PEER, agentName:process.env.AGENT_NAME}));
-  ') || return 1
+  '
+}
+
+# Delivery is retryable, with the signed body supplied by the caller.
+devnet_request_curated_join() {
+  local member="$1" cg_id="$2" body="$3" encoded
+  encoded=$(CG_ID="$cg_id" node -e 'console.log(encodeURIComponent(process.env.CG_ID))') || return 1
   _devnet_member_api "$member" POST "/api/context-graph/${encoded}/request-join" "$body"
 }
 
@@ -59,15 +65,16 @@ devnet_approve_curated_join() {
 
 devnet_join_curated_member() {
   local member="$1" curator="$2" cg_id="$3" member_agent="$4"
-  local curator_peer encoded response status delivered subscribed participants ready i
+  local curator_peer encoded body response status delivered subscribed participants ready i
   curator_peer=$(api_call "$curator" GET /api/agent/identity | devnet_json_field_stdin '.peerId') || return 1
   [ -n "$curator_peer" ] || return 1
   devnet_connect_member_to_curator "$member" "$curator" || return 1
   encoded=$(CG_ID="$cg_id" node -e 'console.log(encodeURIComponent(process.env.CG_ID))') || return 1
+  body=$(devnet_signed_curated_join_body "$member" "$curator_peer" "$cg_id" devnet-member) || return 1
   status=""
   delivered=""
   for i in 1 2 3 4; do
-    response=$(devnet_request_curated_join "$member" "$curator_peer" "$cg_id" devnet-member) || return 1
+    response=$(devnet_request_curated_join "$member" "$cg_id" "$body") || return 1
     status=$(devnet_json_field "$response" '.status') || return 1
     delivered=$(devnet_json_field "$response" '.delivered') || return 1
     if { [ "$status" = "approved" ] || [ "$status" = "already-member" ]; } \

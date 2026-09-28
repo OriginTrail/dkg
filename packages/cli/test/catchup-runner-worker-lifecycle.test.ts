@@ -597,9 +597,15 @@ describe('WorkerCatchupRunner agent bridge', () => {
   });
 
   it('falls back to legacy SWM catch-up when the kill switch restores legacy transfer', async () => {
+    const authority = vi.fn((contextGraphId: string) => ({
+      contextGraphId,
+      legacySyncAllowed: true,
+    }));
     const { agent, calls } = bridgeAgent({
       resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: null, active: false }),
-      canUseLegacySharedMemorySyncForContextGraphV1: () => true,
+      resolveRfc64CatalogReceiverAuthorityV1: authority,
+      canUseLegacySharedMemorySyncForContextGraphV1:
+        RealDKGAgent.prototype.canUseLegacySharedMemorySyncForContextGraphV1,
     });
 
     const posted = await invokeThroughBridge(
@@ -611,6 +617,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(posted.error).toBeUndefined();
     expect(posted.result).toEqual({ kind: 'legacy-shared-memory-fallback', shared: {} });
     expect(calls.selectedShared).toEqual([]);
+    expect(authority).toHaveBeenCalledWith('cg-public-legacy');
     expect(calls.shared).toHaveLength(1);
     expect(calls.shared[0]).toEqual([
       'peer-curator',
@@ -620,9 +627,15 @@ describe('WorkerCatchupRunner agent bridge', () => {
   });
 
   it('does not fall back to legacy SWM when catalog authority forbids it', async () => {
+    const authority = vi.fn((contextGraphId: string) => ({
+      contextGraphId,
+      legacySyncAllowed: false,
+    }));
     const { agent, calls } = bridgeAgent({
       resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: null, active: false }),
-      canUseLegacySharedMemorySyncForContextGraphV1: () => false,
+      resolveRfc64CatalogReceiverAuthorityV1: authority,
+      canUseLegacySharedMemorySyncForContextGraphV1:
+        RealDKGAgent.prototype.canUseLegacySharedMemorySyncForContextGraphV1,
     });
 
     const posted = await invokeThroughBridge(
@@ -636,6 +649,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
     });
     expect(calls.selectedShared).toEqual([]);
     expect(calls.shared).toEqual([]);
+    expect(authority).toHaveBeenCalledWith('cg-catalog-only');
   });
 
   it('decides the selected SWM lane on every call, not once per job', async () => {
@@ -686,9 +700,15 @@ describe('WorkerCatchupRunner agent bridge', () => {
   });
 
   it('uses legacy SWM if the kill switch revokes a selected-lane lease mid-call', async () => {
+    const authority = vi.fn((contextGraphId: string) => ({
+      contextGraphId,
+      legacySyncAllowed: true,
+    }));
     const { agent, calls } = bridgeAgent({
       resolveRfc64SwmRecoveryRuntimeAuthorityV1: () => ({ lane: 'selected-public', active: true }),
-      canUseLegacySharedMemorySyncForContextGraphV1: () => true,
+      resolveRfc64CatalogReceiverAuthorityV1: authority,
+      canUseLegacySharedMemorySyncForContextGraphV1:
+        RealDKGAgent.prototype.canUseLegacySharedMemorySyncForContextGraphV1,
       syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
         calls.selectedShared.push(args);
         throw new Rfc64SwmRecoveryTargetRevokedErrorV1('cg-transition');
@@ -705,6 +725,7 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(posted.result).toEqual({ kind: 'legacy-shared-memory-fallback', shared: {} });
     expect(calls.selectedShared).toHaveLength(1);
     expect(calls.shared).toHaveLength(1);
+    expect(authority).toHaveBeenCalledWith('cg-transition');
   });
 
   it('keeps a selected SWM transport error a failure', async () => {
