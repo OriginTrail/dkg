@@ -690,6 +690,57 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(recovered.result).toEqual({ insertedTriples: 3 });
   });
 
+  it('runs both durable bridge paths for an approved private member on the legacy lane', async () => {
+    const privateMember = vi.fn(async (id: string) => id === 'cg-private-member');
+    const recoveryCalls: unknown[][] = [];
+    const { agent, calls } = bridgeAgent({
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: false }),
+      rfc64PrivateRootSwmOnLegacyLaneV1: privateMember,
+      syncDurableRecoveryContextGraph: async (...args: unknown[]) => {
+        recoveryCalls.push(args);
+        return { result: { insertedTriples: 2 } };
+      },
+    });
+
+    await invokeThroughBridge(agent, 'syncDurable', ['peer-curator', 'cg-private-member']);
+    const recovered = await invokeThroughBridge(
+      agent, 'syncDurableRecovery', ['peer-curator', 'cg-private-member'],
+    );
+    expect(calls.durable).toHaveLength(1);
+    expect(recoveryCalls).toHaveLength(1);
+    expect(recovered.result).toEqual({ insertedTriples: 2 });
+
+    const outsider = await invokeThroughBridge(agent, 'syncDurable', ['peer-curator', 'cg-outsider']);
+    expect(outsider.result).toEqual({ kind: 'catchup-plane-not-attempted', reason: 'catalog-authoritative' });
+    expect(calls.durable).toHaveLength(1);
+    expect(privateMember).toHaveBeenCalledWith('cg-outsider');
+  });
+
+  it('uses the agent-owned durable admission decision for both worker paths', async () => {
+    const admission = vi.fn(async (id: string) => id === 'cg-approved');
+    const recovery = vi.fn(async () => ({ result: { insertedTriples: 2 } }));
+    const { agent, calls } = bridgeAgent({
+      canUseLegacyDurableSyncForContextGraphV1: admission,
+      // A stale bridge-side projection would allow both graphs. The agent's
+      // current authenticated decision must win for both worker operations.
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+      syncDurableRecoveryContextGraph: recovery,
+    });
+
+    const refused = await invokeThroughBridge(agent, 'syncDurable', ['peer', 'cg-refused']);
+    const refusedRecovery = await invokeThroughBridge(agent, 'syncDurableRecovery', ['peer', 'cg-refused']);
+    expect(refused.result).toEqual({ kind: 'catchup-plane-not-attempted', reason: 'catalog-authoritative' });
+    expect(refusedRecovery.result).toEqual(refused.result);
+    expect(calls.durable).toEqual([]);
+    expect(recovery).not.toHaveBeenCalled();
+
+    await invokeThroughBridge(agent, 'syncDurable', ['peer', 'cg-approved']);
+    await invokeThroughBridge(agent, 'syncDurableRecovery', ['peer', 'cg-approved']);
+    expect(calls.durable).toHaveLength(1);
+    expect(recovery).toHaveBeenCalledOnce();
+    expect(admission).toHaveBeenCalledTimes(4);
+  });
+
   it('emits worker pass diagnostics through the parent logger bridge', async () => {
     const info = vi.fn();
     const { agent } = bridgeAgent({ log: { info } });

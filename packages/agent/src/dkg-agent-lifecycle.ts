@@ -5546,6 +5546,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return result.insertedTriples;
   }
 
+  /** One agent-owned admission decision for the legacy durable VM lane. */
+  async canUseLegacyDurableSyncForContextGraphV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<boolean> {
+    if (this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed) {
+      return true;
+    }
+    // An approved private member keeps this compatibility lane while its
+    // RFC-64 private receiver authority is inactive. The predicate performs
+    // the authenticated local member proof; outsiders remain excluded.
+    return typeof this.rfc64PrivateRootSwmOnLegacyLaneV1 === 'function'
+      && await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId) === true;
+  }
+
   async syncFromPeerDetailed(this: DKGAgent,
     remotePeerId: string,
     contextGraphIds: string[],
@@ -5562,9 +5577,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return createIncompleteDurableSyncResult();
     }
     const requestedContextGraphCount = contextGraphIds.length;
-    contextGraphIds = contextGraphIds.filter((contextGraphId) => (
-      this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed
-    ));
+    const legacyDurableAllowed = await Promise.all(contextGraphIds.map((contextGraphId) =>
+      LifecycleSyncMethods.prototype.canUseLegacyDurableSyncForContextGraphV1.call(
+        this, contextGraphId,
+      )));
+    contextGraphIds = contextGraphIds.filter((_, index) => legacyDurableAllowed[index]);
     if (contextGraphIds.length !== requestedContextGraphCount) {
       this.log.debug(
         ctx,

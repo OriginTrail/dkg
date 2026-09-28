@@ -3,11 +3,20 @@ import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 
 type DKGAgent = RealDKGAgent;
 const DKGAgent = {
-  create(config: Parameters<typeof RealDKGAgent.create>[0]) {
-    return RealDKGAgent.create({
+  async create(config: Parameters<typeof RealDKGAgent.create>[0]) {
+    const agent = await RealDKGAgent.create({
       rfc64CatalogActivation: { enabled: false },
       ...config,
     });
+    // This file's synthetic persisted rows exercise persistence, caps and
+    // ordering. Give them local-create provenance so the admission guard does
+    // not turn those mechanics tests into remote-authority tests. The latter
+    // have their own rehydration coverage in private-read-chain-authority.
+    const rows = await config.contextGraphSubscriptionStore?.loadAll();
+    for (const row of rows ?? []) {
+      (agent as any).localContextGraphProvenance.recordLocalCreate(row.id);
+    }
+    return agent;
   },
 };
 
