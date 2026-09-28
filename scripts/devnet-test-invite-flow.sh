@@ -190,7 +190,7 @@ elif backend=='sparql-http': print(options['queryEndpoint'])
 else: sys.exit(f'unsupported devnet store backend: {backend}')
 PYENDPOINT
 ) || return 1
-  query="SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { <$subject> <$predicate> ?o } }"
+  query="SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { <$subject> <$predicate> ?o . FILTER(STRSTARTS(STR(?g), \"did:dkg:context-graph:${CG_ID}/\")) } }"
   out=$(curl -sS --max-time 30 -X POST -H 'Accept: application/sparql-results+json' \
     --data-urlencode "query=$query" -w $'\n%{http_code}' "$endpoint") || return 1
   status="${out##*$'\n'}"
@@ -402,6 +402,10 @@ for attempt in $(seq 1 30); do
 done
 [ "$preapproval_refused" = yes ] || fail "N2 never received an explicit pre-approval refusal: $sub_resp"
 ok "N2 was refused before approval"
+pre_widget_member_count=$(store_subject_count 2 "did:example:widget" \
+  "http://www.w3.org/2000/01/rdf-schema#label") || fail "cannot inspect N2's pre-approval VM store"
+[ "$pre_widget_member_count" -eq 0 ] || fail "N2 received the historical VM asset before approval"
+ok "N2 has no historical VM asset before approval"
 
 hr "Step 3b — verify N2's CG list does NOT contain a phantom entry"
 n2_sees=$(list_has_cg "$N2" "$CG_ID")
@@ -523,8 +527,24 @@ for attempt in $(seq 1 90); do
       [[ "$historical_synced" =~ ^[1-9][0-9]*$ ]] ||
         fail "catch-up completed without transferring the historical SWM asset: $catchup_resp"
       durable_synced=$(echo "$catchup_resp" | jq_field result.dataSynced)
-      [[ "$durable_synced" =~ ^[1-9][0-9]*$ ]] ||
-        fail "catch-up completed without transferring the historical VM asset: $catchup_resp"
+      if ! [[ "$durable_synced" =~ ^[1-9][0-9]*$ ]]; then
+        # A concurrent graph-level sync can deliver VM outside this foreground
+        # catch-up, leaving its own delta count at zero. The asset was
+        # absent before approval; require it in this run's backing-store graph.
+        # Chain reconciliation may commit it shortly after the foreground job
+        # completes, so give that independent path a bounded settling window.
+        widget_background_count=0
+        for settle in $(seq 1 30); do
+          widget_background_count=$(store_subject_count 2 "did:example:widget" \
+            "http://www.w3.org/2000/01/rdf-schema#label") ||
+            fail "cannot inspect N2's post-approval VM store"
+          [ "$widget_background_count" -ge 1 ] && break
+          sleep 3
+        done
+        [ "$widget_background_count" -ge 1 ] ||
+          fail "catch-up completed without the historical VM asset: $catchup_resp"
+        note "historical VM arrived through graph-level sync before the foreground catch-up"
+      fi
       catchup_done=yes
       break
       ;;
@@ -543,7 +563,7 @@ for attempt in $(seq 1 90); do
   sleep 3
 done
 [ "$catchup_done" = yes ] || fail "approved member's historical catch-up never completed: $catchup_resp"
-ok "N2's catch-up completed and transferred historical VM and SWM"
+ok "N2 received historical VM and SWM after approval"
 
 widget_member_count=$(store_subject_count 2 "did:example:widget" \
   "http://www.w3.org/2000/01/rdf-schema#label") || fail "cannot inspect N2's VM backing store"

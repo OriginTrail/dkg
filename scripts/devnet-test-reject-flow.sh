@@ -178,7 +178,9 @@ print(json.dumps({
   'name': 'Reject flow test $CG_ID',
   'description': 'Test curator rejection notification path',
   'accessPolicy': 1,
+  'publishPolicy': 0,
   'allowedAgents': ['$N1_ADDR'],
+  'register': True,
 }))
 ")
 resp=$(api "$N1" POST /api/context-graph/create "$body")
@@ -186,8 +188,29 @@ created=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin)
 [ "$created" = "$CG_ID" ] && ok "CG created on N1" || { fail "create failed: $resp"; exit 1; }
 
 hr "Step 2 — N2 attempts to subscribe (expect refused)"
-api "$N2" POST /api/subscribe "{\"contextGraphId\":\"$CG_ID\"}" > /dev/null
-poll_catchup "$N2" "$CG_ID" refused 90 || exit 1
+refused=no
+for attempt in $(seq 1 30); do
+  sub_resp=$(api "$N2" POST /api/context-graph/subscribe "{\"contextGraphId\":\"$CG_ID\"}")
+  sub_code=$(echo "$sub_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("code", ""))')
+  if [ "$sub_code" = CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE ]; then
+    note "registered authority pending (attempt $attempt/30)"
+    sleep 5
+    continue
+  fi
+  sub_error=$(echo "$sub_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("error", ""))')
+  case "$sub_error" in
+    *"not authorized"*|*"invite you first"*) refused=yes; break ;;
+  esac
+  sub_id=$(echo "$sub_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("subscribed", ""))')
+  if [ "$sub_id" = "$CG_ID" ]; then
+    poll_catchup "$N2" "$CG_ID" refused 90 || exit 1
+    refused=yes
+    break
+  fi
+  fail "N2's pre-approval response was not an explicit refusal: $sub_resp"
+done
+[ "$refused" = yes ] || fail "N2 never received an explicit pre-approval refusal: $sub_resp"
+ok "N2 was refused before approval"
 
 hr "Step 3 — N2 signs and forwards a join request to N1"
 # PR #448: /sign-join is sign-only; forwarding lives in /request-join.

@@ -197,8 +197,10 @@ devnet_create_shared_ka() {
           try {
             const j = JSON.parse(d);
             const errors = j.errors;
-            const transient = (value) => typeof value === "string"
-              && value.includes("[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable");
+            const transient = (value) => typeof value === "string" && (
+              value.includes("[promote:encodeWorkspaceGossipPayload] A promote prerequisite is temporarily unavailable")
+              || value.includes("RFC-64 legacy SWM boundary retirement is in progress; retry promotion")
+            );
             const retryable = process.env.RESUME_SHARE === "1"
               ? transient(j.error)
               : Array.isArray(errors) && errors.length > 0

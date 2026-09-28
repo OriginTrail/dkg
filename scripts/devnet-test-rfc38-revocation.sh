@@ -46,8 +46,7 @@
 #   ✓ The curator drops cached SWM sender-key send state for the CG so
 #     the next write mints a NEW epoch with a NEW chain key.
 #   ✓ The new epoch's setup-send wraps ONLY for current members
-#     (curator + M1). M2 receives the broadcast envelope and rejects
-#     it with `reason=no-state` (verifiable in M2's daemon log).
+#     (curator + M1); direct fan-out need not send M2 a broadcast.
 #   ✓ The curator's sync auth refuses M2's catchup request post-revoke.
 #
 # What this does NOT validate yet (full forward-security gap):
@@ -242,6 +241,24 @@ log "Waiting for M1 + M2 to catch up the pre-revocation batch..."
 M1_PRE=$(wait_for_count_at_least "$M1_NODE" "M1" 3)
 M2_PRE=$(wait_for_count_at_least "$M2_NODE" "M2" 3)
 log "✓ M1 sees $M1_PRE triples pre-revocation; M2 sees $M2_PRE triples"
+CURATOR_LOG="$DEVNET_DIR/node${CURATOR_NODE}/daemon.log"
+PRE_EPOCH=$(python3 - "$CURATOR_LOG" "$CG_ID" "$M2_AGENT" <<'PY'
+import re, sys
+path, graph, recipient = sys.argv[1:]
+with open(path) as stream:
+    epochs = {
+        match.group(1)
+        for line in stream
+        if 'SWM sender-key setup send:' in line
+        and f'contextGraph={graph}' in line
+        and f'recipientAgent={recipient}' in line
+        if (match := re.search(r'\bepoch=([0-9a-f]+)', line))
+    }
+if len(epochs) != 1:
+    sys.exit('expected exactly one pre-revocation sender-key epoch for M2')
+print(next(iter(epochs)))
+PY
+) || fail "cannot establish M2's pre-revocation sender-key epoch"
 
 # ===========================================================================
 act "3. Curator revokes M2"
@@ -316,15 +333,39 @@ wait_for_count_or_steady() {
 
 log "Polling for post-revocation steady state (up to 30s per peer)…"
 M1_FINAL=$(wait_for_count_or_steady "$M1_NODE" "M1" 6)
-M2_FINAL=$(wait_for_count_or_steady "$M2_NODE" "M2" 6)
+M2_API_FINAL=$(wait_for_count_or_steady "$M2_NODE" "M2" 6)
 CURATOR_FINAL=$(count_triples "$CURATOR_NODE")
 
-# Codex PR #621 R4: a read failure on M2 must NOT be silently treated
-# as "M2 only sees the first batch". Distinguish read errors (empty
-# string from count_triples) from real zero / low counts, and fail
-# the script if we can't actually measure M2's post-revocation state.
+# A revoked member's scoped API query can now return no bindings even while
+# its earlier decrypted data remains on disk. Inspect node 4's configured
+# backing store directly, below the read gate, to prove the exact pre-revoke
+# subjects remain and count any post-revoke delivery. Do not turn an empty API
+# result into a zero count or a passing revocation result.
+M2_STORE_URL=$(jq -r '.store.options.url // empty' "$(node_dir "$M2_NODE")/config.json")
+if [ -n "$M2_STORE_URL" ]; then
+  M2_STORE_RESPONSE=$(curl -fsS --max-time 20 -G \
+    -H 'Accept: application/sparql-results+json' \
+    --data-urlencode "query=SELECT ?s WHERE { GRAPH ?g { ?s <http://schema.org/name> ?o . FILTER(STRSTARTS(STR(?s), \"urn:rev:${STAMP}/\")) } }" \
+    "$M2_STORE_URL") || fail "M2 backing-store query failed"
+  M2_SUBJECTS=$(printf '%s' "$M2_STORE_RESPONSE" | jq -r '.results.bindings[]?.s.value') \
+    || fail "M2 backing-store response was not SPARQL JSON"
+  M2_FINAL=$(printf '%s\n' "$M2_SUBJECTS" | sed '/^$/d' | wc -l | tr -d '[:space:]')
+  for tag in pre-alpha pre-beta pre-gamma; do
+    grep -Fxq "urn:rev:${STAMP}/${tag}" <<<"$M2_SUBJECTS" \
+      || fail "M2 backing store lost pre-revocation subject $tag"
+  done
+  if [ -n "$M2_API_FINAL" ] && [ "$M2_API_FINAL" -gt "$M2_FINAL" ]; then
+    fail "M2 API count $M2_API_FINAL exceeds backing-store count $M2_FINAL"
+  fi
+  [ -n "$M2_API_FINAL" ] || log "M2 scoped API returned no count after revocation; checked its backing store directly"
+else
+  # A non-HTTP local store has no independent endpoint; retain the original
+  # API check and fail if the API no longer permits a physical count.
+  M2_FINAL=$M2_API_FINAL
+fi
+
 [ -n "$M1_FINAL" ]      || fail "M1 final read failed — can't measure post-revocation state"
-[ -n "$M2_FINAL" ]      || fail "M2 final read failed — can't measure post-revocation state"
+[ -n "$M2_FINAL" ]      || fail "M2 final count unavailable from both API and backing store"
 [ -n "$CURATOR_FINAL" ] || fail "Curator final read failed — can't sanity-check the writer's own view"
 
 log "Curator sees:  $CURATOR_FINAL triples"
@@ -344,25 +385,32 @@ log "M2 sees:       $M2_FINAL triples (pre=$M2_PRE)"
 [ "$M2_FINAL" -ge "$M2_PRE" ] || fail "FORWARD-ONLY ROTATION VIOLATED: M2 had $M2_PRE pre-revoke triples, now has $M2_FINAL post-revoke. Revocation removed history it should have left alone."
 
 # ===========================================================================
-act "6. Encryption-side rotation: M2 must reject the new sender-key epoch"
+act "6. Encryption-side rotation: M2 must not receive the new sender-key epoch"
 # ===========================================================================
-# This is what the C1-pass fix (`removeAgentFromContextGraph` writes
-# `dkg:revokedAgent` tombstone + drops sender-key cache) actually
-# enforces today. We grep M2's daemon log for the broadcast-receive
-# denial — proof that the curator's new epoch was NOT distributed to
-# the revoked member. Without this denial line the encryption-side
-# revoke is broken; with it, the only remaining gap is durable-sync
-# propagation (LU-4b — see script header).
-M2_LOG="$DEVNET_DIR/node${M2_NODE}/daemon.log"
-if [ ! -r "$M2_LOG" ]; then
-  fail "M2 daemon log not readable at $M2_LOG — can't validate sender-key denial"
-fi
-ROTATION_DENIED=$(grep -c "broadcast receive denied: reason=no-state.*${CG_ID}" "$M2_LOG" 2>/dev/null || echo 0)
-if [ -z "$ROTATION_DENIED" ] || [ "$ROTATION_DENIED" -lt 1 ]; then
-  fail "ENCRYPTION-SIDE REGRESSION: M2 did not reject the post-revoke sender-key broadcast with reason=no-state. " \
-       "Either the curator failed to rotate the epoch, OR the new epoch was distributed to the revoked member."
-fi
-log "✓ M2 rejected $ROTATION_DENIED post-revoke sender-key broadcast(s) with reason=no-state — curator-side rotation works"
+# Direct fan-out need not broadcast to a revoked member at all. Inspect the
+# curator's setup sends instead: M1 must receive a fresh epoch, while M2 must
+# receive no setup for any epoch minted after its removal.
+POST_EPOCH=$(python3 - "$CURATOR_LOG" "$CG_ID" "$M1_AGENT" "$M2_AGENT" "$PRE_EPOCH" <<'PY'
+import re, sys
+path, graph, member, revoked, pre = sys.argv[1:]
+by_recipient = {member: set(), revoked: set()}
+with open(path) as stream:
+    for line in stream:
+        if 'SWM sender-key setup send:' not in line or f'contextGraph={graph}' not in line:
+            continue
+        recipient = re.search(r'\brecipientAgent=([^ ]+)', line)
+        epoch = re.search(r'\bepoch=([0-9a-f]+)', line)
+        if recipient and epoch and recipient.group(1) in by_recipient:
+            by_recipient[recipient.group(1)].add(epoch.group(1))
+new_epochs = by_recipient[member] - {pre}
+if not new_epochs:
+    sys.exit('remaining member received no fresh sender-key epoch')
+if by_recipient[revoked] & new_epochs:
+    sys.exit('revoked member received the fresh sender-key epoch')
+print(','.join(sorted(new_epochs)))
+PY
+) || fail "ENCRYPTION-SIDE REGRESSION: curator did not rotate exclusively to current members"
+log "✓ curator gave M1 fresh epoch $POST_EPOCH and sent no setup for it to M2"
 
 # ===========================================================================
 act "7. Authorization-side rotation: curator must deny M2's sync requests post-revoke"
@@ -410,7 +458,7 @@ log "  Curated CG:        $CG_ID  (onChainId=$ON_CHAIN_ID)"
 log "  Pre-revoke:        3 triples; all 3 members could read."
 log "  Revoked:           M2 ($M2_AGENT)"
 log "  Post-revoke:       3 NEW triples; M1 reads all 6."
-log "  Encryption-side:   ✓ curator rotated epoch; M2 rejected $ROTATION_DENIED broadcast(s)."
+log "  Encryption-side:   ✓ curator rotated epoch for M1 without setting up M2."
 log "  Auth-side:         ✓ curator denied $M2_DENIED_BY_CURATOR M2 sync request(s)."
 log "  Durable-sync gap:  M2 final count = $M2_FINAL (≤3 ideal, may leak via peer-to-peer sync — LU-4b)."
 log "================================================================"
