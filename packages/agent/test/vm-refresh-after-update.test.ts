@@ -393,7 +393,13 @@ async function bootMember(options: {
   chain.getKAContextGraphId = async () => ON_CHAIN_CG;
 
   const transport = { peerHasCurrent: true };
-  const fetches = recorder(async (peerId: string, _localCgId: string, requested: readonly string[]) => {
+  const fetches = recorder(async (
+    peerId: string,
+    _localCgId: string,
+    requested: readonly string[],
+    fetchOptions?: { forceFreshExactSession?: boolean },
+  ) => {
+    void fetchOptions;
     await options.beforeFetch?.(peerId);
     if (transport.peerHasCurrent && (options.holders === undefined || options.holders.includes(peerId))) {
       for (const ual of requested) {
@@ -903,6 +909,7 @@ describe('VM refresh worker (#2858)', () => {
 
     await internals.runVmRefreshesForCg(CG, CG, () => true);
     expect(fetches.calls).toHaveLength(1);
+    expect(fetches.calls[0]?.[3]?.forceFreshExactSession).toBe(true);
     expect(await localRootHex(internals.store, ual)).toBe(rootA);
     expect(logLines(info)).toContain(
       `VM refresh of ${ual} in "${CG}" did not complete `
@@ -920,6 +927,7 @@ describe('VM refresh worker (#2858)', () => {
     vi.setSystemTime(Date.now() + 60_000);
     await internals.runVmRefreshesForCg(CG, CG, () => true);
     expect(fetches.calls).toHaveLength(2);
+    expect(fetches.calls[1]?.[3]?.forceFreshExactSession).toBe(true);
     expect(await localRootHex(internals.store, ual)).toBe(ethers.hexlify(rootB));
     expect(internals.vmRefreshQueue.size).toBe(0);
   });

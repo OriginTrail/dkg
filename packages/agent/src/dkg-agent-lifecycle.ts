@@ -1671,6 +1671,8 @@ export type DurableSyncOptions = {
   onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
   /** Atomic VM-recovery selection; challenge-pinned assets cannot omit their pins. */
   exactAssetSelection?: ExactAssetSelection;
+  /** VM update refreshes must not reuse a responder snapshot from an older KA version. */
+  forceFreshExactSession?: boolean;
   /** Owner-private retained META prefix for bounded durable recovery. */
   durableMetaContinuation?: DurableMetaContinuation;
   /** Admission override for foreground VM recovery. */
@@ -1713,6 +1715,7 @@ type LegacyDurableContextGraphOptions = {
   onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   fetchTimeoutMs?: number;
   exactAssetSelection?: ExactAssetSelection;
+  forceFreshExactSession?: boolean;
   authenticationTimeoutMs?: number;
   operationFetchDeadline?: number;
   operationDeadline?: number;
@@ -5734,6 +5737,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 stopOnBackoffWorthyFailure,
                 fetchTimeoutMs,
                 exactAssetSelection,
+                forceFreshExactSession: options?.forceFreshExactSession,
                 authenticationTimeoutMs,
                 operationFetchDeadline: operationBoundary.fetchDeadline,
                 operationDeadline: operationBoundary.deadline,
@@ -5911,6 +5915,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options?: {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
+      forceFreshExactSession?: boolean;
     },
   ): Promise<ExactKnowledgeAssetSyncResult>;
   syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
@@ -5920,6 +5925,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options?: {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
+      forceFreshExactSession?: boolean;
     },
   ): Promise<ExactKnowledgeAssetSyncResult>;
   async syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
@@ -5929,6 +5935,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options: {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
+      forceFreshExactSession?: boolean;
     } = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
     const selection: ExactAssetSelection = Array.isArray(selectionInput)
@@ -5944,6 +5951,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       undefined,
       {
         exactAssetSelection: selection,
+        forceFreshExactSession: options.forceFreshExactSession,
         stopOnBackoffWorthyFailure: true,
         priority: 1_000,
         source: 'vm-recovery',
@@ -5997,6 +6005,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onVerifiedFullSnapshot,
       fetchTimeoutMs = SYNC_TOTAL_TIMEOUT_MS,
       exactAssetSelection,
+      forceFreshExactSession,
       authenticationTimeoutMs = fetchTimeoutMs,
       operationFetchDeadline,
       operationDeadline,
@@ -6130,6 +6139,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             sinceBatchId,
             signal: fetchContext.signal,
             forceFreshSession: forceFreshSession
+              || forceFreshExactSession === true
               || onVerifiedFullSnapshot !== undefined,
             manifestDigest,
             manifestPrefixDigestAtOffset,
