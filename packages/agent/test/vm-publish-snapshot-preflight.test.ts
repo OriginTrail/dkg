@@ -15,6 +15,8 @@ import {
   storeKnowledgeAssetOperationPublicQuads,
   type KnowledgeAssetVmPublishRequest,
 } from '@origintrail-official/dkg-publisher';
+import { NoChainAdapter } from '@origintrail-official/dkg-chain';
+import { DKGAgent } from '../src/dkg-agent.js';
 import { preflightKnowledgeAssetVmPublishSnapshot } from '../src/vm-publish-snapshot-preflight.js';
 
 const CG = 'preflight';
@@ -75,6 +77,29 @@ const typedFailures = [
 ] as const;
 
 describe('GH#2824 immutable VM publish snapshot admission', () => {
+  it('wires the constructed public agent to typed rejection and unchanged-snapshot retry', async () => {
+    const { store, request } = await fixture();
+    // Construct the real composed agent with an explicit store; networking is
+    // unnecessary for this read-only operation and is never started.
+    const agent = await DKGAgent.create({
+      name: 'SnapshotPreflightDelegation', store, chainAdapter: new NoChainAdapter(),
+    });
+    const before = structuredClone(request);
+    const failure = new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'query', {
+      storeOperation: 'query',
+    });
+    vi.spyOn(agent.store, 'query').mockRejectedValueOnce(failure);
+
+    try {
+      await expect(agent.preflightKnowledgeAssetVmPublishSnapshot(request)).rejects.toBe(failure);
+      await expect(agent.preflightKnowledgeAssetVmPublishSnapshot(request)).resolves.toBeUndefined();
+      expect(request).toEqual(before);
+    } finally {
+      await agent.stop();
+      // The fixture owns the supplied store and closes it in afterEach.
+    }
+  });
+
   it.each(typedFailures)('preserves %s and retries the identical intent after recovery', async (_label, makeFailure) => {
     const { store, log, request } = await fixture();
     const before = JSON.stringify(request);

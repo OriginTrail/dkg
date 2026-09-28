@@ -87,11 +87,10 @@ export function classifyStoreUnavailable(
   err: unknown,
 ): StoreUnavailableClassification | null {
   if (isStoreSchedulerBusyError(err)) {
-    const message = (err as { message?: unknown }).message;
     return {
       outcome: 'not_started',
       body: {
-        error: typeof message === 'string' ? message : 'Store scheduler is temporarily busy; retry the request',
+        error: err.message ?? 'Store scheduler is temporarily busy; retry the request',
         code: err.code,
         reason: err.reason,
         priority: err.priority,

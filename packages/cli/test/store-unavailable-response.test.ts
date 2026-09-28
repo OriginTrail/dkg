@@ -113,8 +113,29 @@ describe('respondIfStoreUnavailable', () => {
       expect(JSON.parse(res.body ?? '{}')).toMatchObject({
         code: 'STORE_SCHEDULER_BUSY', reason, priority: 'normal',
         retryable: true, outcome: 'not_started',
-        error: expect.any(String),
+        error: 'Store scheduler is temporarily busy; retry the request',
       });
+    },
+  );
+
+  it.each(['scheduler capacity exhausted', ''])(
+    'preserves a structural scheduler error message (%j)',
+    (message) => {
+      const classified = classifyStoreUnavailable({
+        ...new StoreSchedulerBusyError('queue_full', 'normal', 'query'), message,
+      });
+      expect(classified).toMatchObject({
+        outcome: 'not_started', body: { code: 'STORE_SCHEDULER_BUSY', error: message },
+      });
+    },
+  );
+
+  it.each([null, 42, { detail: 'not a message' }])(
+    'rejects structural busy errors with malformed message metadata (%j)',
+    (message) => {
+      expect(classifyStoreUnavailable({
+        ...new StoreSchedulerBusyError('queue_full', 'normal', 'query'), message,
+      })).toBeNull();
     },
   );
 
