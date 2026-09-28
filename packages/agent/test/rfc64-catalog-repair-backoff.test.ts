@@ -215,12 +215,20 @@ describe('RFC-64 unchanged repair backoff', () => {
     expect(f.reconcile).toHaveBeenCalledTimes(2);
   });
 
-  it('backs off durable private repairs and settles duplicate waiters when their row disappears', async () => {
+  it.each([
+    ['generic failure', 'unchanged private repair failure'],
+    ['non-newer assertion', 'RFC-64 catalog upsert for KA 1 is not a newer assertion version on the same coordinate'],
+  ])('backs off durable private %s and settles duplicate waiters when their row disappears', async (_label, message) => {
     const f = fixture();
+    f.repairPrivate.mockRejectedValue(new Error(message));
     const repair = privateRepair();
     f.setPrivateRepairs([repair]);
     await f.owner.requestFinalizedPrivate({ repair, ctx }).whenAttempted;
+    const firstDuplicate = f.owner.requestFinalizedPrivate({ repair, ctx });
+    await f.owner.whenIdle();
+    expect(f.repairPrivate).toHaveBeenCalledTimes(1);
     await f.advance(5_000);
+    await firstDuplicate.whenAttempted;
     expect(f.repairPrivate).toHaveBeenCalledTimes(2);
     let settled = false;
     const duplicate = f.owner.requestFinalizedPrivate({ repair, ctx });
