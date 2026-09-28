@@ -1606,6 +1606,47 @@ describe('durable graph-scoped KA materialization', () => {
     expect(await values(store, 'materializedVersion')).toEqual([]);
   });
 
+  it('keeps one trusted policy when a finalized replay disagrees with the local publisher', async () => {
+    const store = new OxigraphStore();
+    const root = ethers.getBytes(`0x${String(1).padStart(64, '0')}`);
+    const trustedMetadata: Quad[] = [
+      ['accessPolicy', '"public"'],
+      ['publisherPeerId', '"publisher-peer"'],
+    ].map(([predicate, object]) => ({
+      subject: ual,
+      predicate: `${DKG}${predicate}`,
+      object,
+      graph: metaGraph,
+    }));
+    await store.insert([dataQuad(1), ...metadata(1), ...trustedMetadata]);
+    await replaceLocallyTrustedKnowledgeAssetControls(
+      store,
+      ual,
+      [...metadata(1), ...trustedMetadata],
+    );
+    const finalized = finalizedMaterializationMetadata(1, root).map((quad) =>
+      quad.predicate === `${DKG}accessPolicy`
+        ? { ...quad, object: '"ownerOnly"' }
+        : quad,
+    );
+
+    await expect(materializeVerifiedGraphScopedAsset({
+      store,
+      asset: {
+        contextGraphId,
+        ual,
+        assertionVersion: 1n,
+        assertionGraph,
+        metaGraph,
+        dataQuads: [dataQuad(1)],
+        metadataQuads: finalized,
+      },
+    })).resolves.toBe('applied');
+
+    expect(await values(store, 'accessPolicy')).toEqual(['"public"']);
+    expect(await values(store, 'publisherPeerId')).toEqual(['"publisher-peer"']);
+  });
+
   it('fails closed instead of falling back past a corrupt newer local-control entry', async () => {
     const store = new OxigraphStore();
     const trustedMetadata: Quad[] = [
