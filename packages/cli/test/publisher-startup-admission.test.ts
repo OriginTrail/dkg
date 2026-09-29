@@ -1,3 +1,5 @@
+import { syncBuiltinESMExports } from 'node:module';
+import timersPromises, { setTimeout as nativeDelay } from 'node:timers/promises';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { activeRpcRequestContext, RpcRequestGovernor } from '@origintrail-official/dkg-chain';
 import { PublisherStartupAdmission } from '../src/publisher-startup-admission.js';
@@ -6,12 +8,42 @@ describe('transaction-free publisher startup admission', () => {
   const budgets: PublisherStartupAdmission[] = [];
   afterEach(() => {
     for (const budget of budgets.splice(0)) budget.dispose();
+    vi.restoreAllMocks();
     vi.useRealTimers();
+    syncBuiltinESMExports();
   });
   function budget(parent?: AbortSignal) {
     const result = new PublisherStartupAdmission(parent);
     budgets.push(result);
     return result;
+  }
+
+  function usePromiseFakeClock() {
+    vi.useFakeTimers();
+    // Vitest's global clock does not drive this worker's native promise timer.
+    // Bridge only the API used here, then refresh production's static ESM import.
+    // Native-timer tests below separately pin real retry and AbortError behavior.
+    vi.spyOn(timersPromises, 'setTimeout').mockImplementation(
+      <T = void>(ms = 1, value?: T, options: { signal?: AbortSignal; ref?: boolean } = {}) =>
+        new Promise<T>((resolve, reject) => {
+          const { signal } = options;
+          const abort = () => {
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', abort);
+            reject(Object.assign(new Error('The operation was aborted', { cause: signal?.reason }), {
+              name: 'AbortError', code: 'ABORT_ERR',
+            }));
+          };
+          const timer = setTimeout(() => {
+            signal?.removeEventListener('abort', abort);
+            resolve(value as T);
+          }, ms);
+          if (options.ref === false) timer.unref?.();
+          if (signal?.aborted) abort();
+          else signal?.addEventListener('abort', abort, { once: true });
+        }),
+    );
+    syncBuiltinESMExports();
   }
 
   it.each([
@@ -73,14 +105,82 @@ describe('transaction-free publisher startup admission', () => {
     expect(read).toHaveBeenCalledTimes(1);
   });
 
-  it('bounds persistent capacity refusal and cancels the backoff without another read', async () => {
+  it.each(['inactivity', 'shutdown'] as const)('settles a signal-ignoring read on %s and observes late rejection', async (cause) => {
     vi.useFakeTimers();
-    const read = vi.fn().mockRejectedValue({ code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL' });
-    const pending = budget().readIdentity(read);
-    const rejected = expect(pending).rejects.toThrow();
-    await vi.advanceTimersByTimeAsync(60_000);
-    await rejected;
+    const parent = new AbortController();
+    const startup = budget(parent.signal);
+    const shutdownReason = new Error('stop the publisher bootstrap');
+    let rejectRead!: (error: Error) => void;
+    const read = vi.fn(() => new Promise<bigint>((_resolve, reject) => { rejectRead = reject; }));
+    let outcome: unknown;
+    const pending = startup.readIdentity(read).catch(error => { outcome = error; });
+    await vi.advanceTimersByTimeAsync(0);
+    if (cause === 'shutdown') parent.abort(shutdownReason);
+    else await vi.advanceTimersByTimeAsync(60_000);
+    await vi.advanceTimersByTimeAsync(0);
+    try {
+      if (cause === 'shutdown') expect(outcome).toBe(shutdownReason);
+      else expect(outcome).toBeInstanceOf(Error);
+      if (cause === 'inactivity') expect((outcome as Error).message).toContain('60000ms');
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      // Release the deliberately noncooperating operation even on the red run.
+      rejectRead(new Error('late physical read failure'));
+      await pending;
+    }
+    await vi.advanceTimersByTimeAsync(120_000);
     expect(read).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('bounds persistent capacity refusal and cancels the backoff without another read', async () => {
+    usePromiseFakeClock();
+    const read = vi.fn().mockRejectedValue({ code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL' });
+    const startup = budget();
+    const outcome = startup.readIdentity(read).catch(error => error as Error);
+    try {
+      await vi.advanceTimersByTimeAsync(999);
+      expect(read).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(read).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(59_000);
+      expect(await outcome).toMatchObject({
+        message: 'Publisher wallet bootstrap made no RPC progress for 60000ms',
+      });
+      expect(read).toHaveBeenCalledTimes(60);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(read).toHaveBeenCalledTimes(60);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      startup.dispose();
+      await outcome;
+    }
+  });
+
+  it('retries once after one second and hands off the successful identity', async () => {
+    usePromiseFakeClock();
+    const read = vi.fn()
+      .mockRejectedValueOnce({ code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL' })
+      .mockResolvedValue(7n);
+    const pending = budget().readIdentity(read);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(read).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(read).toHaveBeenCalledTimes(2);
+    await expect(pending).resolves.toBe(7n);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('also retries using the unmodified native promise timer', async () => {
+    const read = vi.fn()
+      .mockRejectedValueOnce({ code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL' })
+      .mockResolvedValue(9n);
+    const pending = budget().readIdentity(read);
+    await nativeDelay(0);
+    expect(read).toHaveBeenCalledTimes(1);
+    await expect(pending).resolves.toBe(9n);
+    expect(read).toHaveBeenCalledTimes(2);
   });
 
   it('ignores a retired wallet progress callback while the next wallet stalls', async () => {
@@ -106,12 +206,14 @@ describe('transaction-free publisher startup admission', () => {
 
   it('aborts backoff immediately on shutdown', async () => {
     const parent = new AbortController();
+    const reason = new Error('shutdown');
     const read = vi.fn().mockRejectedValue({ code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL' });
     const pending = budget(parent.signal).readIdentity(read);
-    const rejected = expect(pending).rejects.toThrow();
-    await Promise.resolve();
-    await Promise.resolve();
-    parent.abort(new Error('shutdown'));
+    const rejected = expect(pending).rejects.toBe(reason);
+    // Use a real event-loop turn: the rejection must already have entered the
+    // native promise delay, whose AbortError differs from fake-timer behavior.
+    await nativeDelay(0);
+    parent.abort(reason);
     await rejected;
     expect(read).toHaveBeenCalledTimes(1);
   });
@@ -122,6 +224,16 @@ describe('transaction-free publisher startup admission', () => {
     parent.abort(reason);
     const read = vi.fn();
     await expect(budget(parent.signal).readIdentity(read)).rejects.toBe(reason);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it('does not invoke a scheduled read after synchronous shutdown', async () => {
+    const parent = new AbortController();
+    const reason = new Error('shutdown before the read microtask');
+    const read = vi.fn().mockResolvedValue(1n);
+    const pending = budget(parent.signal).readIdentity(read);
+    parent.abort(reason);
+    await expect(pending).rejects.toBe(reason);
     expect(read).not.toHaveBeenCalled();
   });
 

@@ -25,11 +25,25 @@ export class PublisherStartupAdmission {
     const onProgress = () => {
       if (active && !signal.aborted) timer.refresh();
     };
+    let onAbort!: () => void;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(signal.reason);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
     try {
       for (;;) {
         signal.throwIfAborted();
         try {
-          const identity = await withRpcRequestContext({ signal, onProgress }, read);
+          // Observe late failure even when physical work cannot cooperate with
+          // cancellation. The factory owns adapter destruction after rejection.
+          const attempt = withRpcRequestContext(
+            { signal, onProgress },
+            () => Promise.resolve().then(() => {
+              signal.throwIfAborted();
+              return read();
+            }),
+          );
+          const identity = await Promise.race([attempt, aborted]);
           signal.throwIfAborted();
           return identity;
         } catch (error) {
@@ -37,12 +51,18 @@ export class PublisherStartupAdmission {
           // Refusal/backoff never refreshes the inactivity clock. Successful
           // issuer RPCs may, so healthy throttled/serial wallets have no total cap.
           if (!isRpcRequestGovernorQueueFullError(error)) throw error;
-          await delay(1_000, undefined, { signal });
+          try {
+            await delay(1_000, undefined, { signal });
+          } catch (error) {
+            signal.throwIfAborted();
+            throw error;
+          }
         }
       }
     } finally {
       active = false;
       clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
     }
   }
 

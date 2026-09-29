@@ -187,14 +187,21 @@ describe('publisher startup ownership and cancellation', () => {
     const startup = f.begin();
     await entered.promise;
     const reason = new Error('shutdown during identity bootstrap');
+    let outcome: unknown;
+    const settled = startup.catch(error => { outcome = error; });
     f.controller.abort(reason);
-    release.resolve(11n);
-
-    await expect(startup.then(() => undefined)).rejects.toBe(reason);
+    // Shutdown must release the factory and destroy its adapter BEFORE a
+    // noncooperating physical read returns, not merely reject a late result.
+    await vi.waitFor(() => expect(outcome).toBe(reason));
     expect(f.start).not.toHaveBeenCalled();
     expect(f.processNext).not.toHaveBeenCalled();
     expect(f.destroy.mock.contexts).toEqual(f.identity.mock.contexts);
     await expectBorrowedStoreOpen(f);
+    release.resolve(11n);
+    await settled;
+    await Promise.resolve();
+    expect(f.start).not.toHaveBeenCalled();
+    expect(f.destroy).toHaveBeenCalledTimes(1);
   });
 
   it('does not construct or start a publisher for an already-aborted startup', async () => {

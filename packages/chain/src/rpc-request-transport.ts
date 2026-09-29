@@ -460,19 +460,30 @@ function configuredProviderOptions(
  * debug/error events, destruction checks, response matching, and RPC errors.
  */
 class RequestContextJsonRpcProvider extends JsonRpcProvider {
+  readonly #discoveryAbortController = new AbortController();
   readonly #pendingRequestContexts: Array<{
     readonly request: RpcRequestContext;
     readonly usage: RpcUsageIssuerContext;
   }> = [];
+
+  override destroy(): void {
+    try {
+      // Mark ethers destroyed before cancellation resumes its discovery loop.
+      super.destroy();
+    } finally {
+      this.#discoveryAbortController.abort();
+    }
+  }
 
   override _detectNetwork(): Promise<Network> {
     // Network discovery belongs to the provider lifecycle. It can be triggered
     // synchronously by the first caller's `_start()`, but must not inherit that
     // caller's deadline or consumer label and leave the shared provider
     // retrying forever inside an already-aborted context (or billing a shared
-    // `eth_chainId` probe to that caller).
+    // `eth_chainId` probe to that caller). Its own signal retires admission,
+    // HTTP, and retry backoff when the provider is destroyed.
     return rpcRequestContext.run(
-      { requestClass: 'foreground' },
+      { requestClass: 'foreground', signal: this.#discoveryAbortController.signal },
       () => withRpcUsageIssuerContext({}, () => super._detectNetwork()),
     );
   }
