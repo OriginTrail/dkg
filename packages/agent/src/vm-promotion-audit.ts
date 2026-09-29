@@ -210,6 +210,30 @@ export function storageAckPromotedQuery(namespace: string, kaUal: string, versio
   } }`;
 }
 
+/** Check a bounded page of ledger copies in one VM graph with one store query. */
+export function storageAckPromotedBatchQuery(candidates: readonly StorageAckLedgerCandidate[]): string {
+  if (candidates.length === 0) throw new Error('Promoted-copy batch must not be empty');
+  const namespace = candidates[0]!.namespace;
+  if (candidates.some((candidate) => candidate.namespace !== namespace)) {
+    throw new Error('Promoted-copy batch must contain one namespace');
+  }
+  const values = candidates.map((candidate) =>
+    `(<${candidate.operationSubject}> <${candidate.kaUal}> ${candidate.assertionVersion})`,
+  ).join('\n      ');
+  // Keep the filter outside GRAPH: Oxigraph does not see the VALUES-bound
+  // minimum inside the graph pattern, even though it sees the graph's version.
+  return `SELECT DISTINCT ?op WHERE {
+    VALUES (?op ?ka ?minVersion) {
+      ${values}
+    }
+    GRAPH <${contextGraphMetaUri(namespace)}> {
+      ?ka <${DKG}status> "confirmed" ;
+        <${DKG}assertionVersion> ?confirmedVersion .
+    }
+    FILTER(?confirmedVersion >= ?minVersion)
+  }`;
+}
+
 /** Ledger rows whose ACK copy no longer exists (retired or expired). */
 export function storageAckLedgerOrphansQuery(limit: number): string {
   return `SELECT ?op WHERE {
@@ -241,7 +265,7 @@ export function parseStorageAckLedgerCandidate(
   if (!operationSubject || !namespace || !kaUal || !versionLiteral || !Number.isFinite(signedAtMs)) {
     return null;
   }
-  if (!isStorageAckNamespace(namespace) || !isSafeIri(kaUal)) return null;
+  if (!isSafeIri(operationSubject) || !isStorageAckNamespace(namespace) || !isSafeIri(kaUal)) return null;
   let assertionVersion: bigint;
   try {
     assertionVersion = BigInt(versionLiteral);

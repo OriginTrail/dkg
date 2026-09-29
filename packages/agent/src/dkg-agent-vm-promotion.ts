@@ -52,6 +52,7 @@ import {
   storageAckLedgerStateQuery,
   storageAckPendingUpdatesQuery,
   storageAckNamespaceTargetsQuery,
+  storageAckPromotedBatchQuery,
   storageAckPromotedQuery,
   stripLiteral,
   type StorageAckLedgerCandidate,
@@ -869,17 +870,29 @@ export class VmPromotionMethods extends DKGAgentBase {
     // it) keeps the rotation from passing over the same rows every time.
     let resumeAfter = this.vmPromotionAuditCursor;
     let exhausted = false;
-    for (const row of rows) {
+    let promotedCopies = new Set<string>();
+    for (let index = 0; index < rows.length; index += 1) {
       if (!active()) {
         exhausted = true;
         break;
       }
+      // Prefetch only the next bounded slice. A stale copy can exhaust the
+      // chain-check budget, so querying the whole ledger page up front would
+      // perform unnecessary store work under precisely that condition.
+      if (index % DKGAgentBase.VM_PROMOTION_AUDIT_PROMOTED_BATCH_SIZE === 0) {
+        const candidates = rows
+          .slice(index, index + DKGAgentBase.VM_PROMOTION_AUDIT_PROMOTED_BATCH_SIZE)
+          .map(parseStorageAckLedgerCandidate)
+          .filter((candidate): candidate is StorageAckLedgerCandidate => candidate !== null);
+        promotedCopies = await this.promotedStorageAckCopies(candidates);
+      }
+      const row = rows[index]!;
       const candidate = parseStorageAckLedgerCandidate(row);
       if (candidate === null) {
         resumeAfter = row['op'] ?? resumeAfter;
         continue;
       }
-      if (await this.isStorageAckCopyPromoted(candidate)) {
+      if (promotedCopies.has(candidate.operationSubject)) {
         totals.examined += 1;
         resumeAfter = candidate.operationSubject;
         continue;
@@ -1040,6 +1053,34 @@ export class VmPromotionMethods extends DKGAgentBase {
       { source: 'agent.vmPromotionAudit.promoted' },
     );
     return result.type === 'boolean' && result.value;
+  }
+
+  /** Resolve promoted copies in bounded, graph-local batches instead of one ASK per ledger row. */
+  async promotedStorageAckCopies(
+    this: DKGAgent,
+    candidates: readonly StorageAckLedgerCandidate[],
+  ): Promise<Set<string>> {
+    const byNamespace = new Map<string, StorageAckLedgerCandidate[]>();
+    for (const candidate of candidates) {
+      const group = byNamespace.get(candidate.namespace) ?? [];
+      group.push(candidate);
+      byNamespace.set(candidate.namespace, group);
+    }
+    const promoted = new Set<string>();
+    for (const group of byNamespace.values()) {
+      for (let offset = 0; offset < group.length; offset += DKGAgentBase.VM_PROMOTION_AUDIT_PROMOTED_BATCH_SIZE) {
+        const batch = group.slice(offset, offset + DKGAgentBase.VM_PROMOTION_AUDIT_PROMOTED_BATCH_SIZE);
+        const result = await this.store.query(storageAckPromotedBatchQuery(batch), {
+          source: 'agent.vmPromotionAudit.promotedBatch',
+          priority: 'background',
+        });
+        if (result.type !== 'bindings') throw new Error('Promoted-copy batch query did not return bindings');
+        for (const row of result.bindings) {
+          if (row['op'] !== undefined) promoted.add(row['op']);
+        }
+      }
+    }
+    return promoted;
   }
 
   /** The on-chain graph a ledgered copy was ACKed for. */

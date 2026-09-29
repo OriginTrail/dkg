@@ -1015,6 +1015,8 @@ export class DKGAgentBase {
   static readonly VM_PROMOTION_AUDIT_MAX_CHAIN_CHECKS = 32;
   /** Ledgered copies one audit pass examines (local reads only), keyset paged. */
   static readonly VM_PROMOTION_AUDIT_PAGE_SIZE = 1_000;
+  /** Max ledger rows checked for VM promotion in one graph-scoped store query. */
+  static readonly VM_PROMOTION_AUDIT_PROMOTED_BATCH_SIZE = 64;
   /** Ledger namespaces one backfill pass pages through. */
   static readonly VM_PROMOTION_BACKFILL_PAGE_SIZE = 256;
   /** Per-asset VM reconciles one audit pass may run for landed copies. */

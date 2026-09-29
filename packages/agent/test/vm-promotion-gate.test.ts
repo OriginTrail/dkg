@@ -138,6 +138,22 @@ interface Internals {
   }): Promise<{ ok: boolean; code?: string; message?: string }>;
   ensureStorageAckLedgerReady(): Promise<boolean>;
   runVmPromotionAudit(): Promise<AuditStatus>;
+  promotedStorageAckCopies(candidates: readonly {
+    operationSubject: string;
+    namespace: string;
+    kaUal: string;
+    assertionVersion: bigint;
+    signedAtMs: number;
+    registered: boolean;
+  }[]): Promise<Set<string>>;
+  isStorageAckCopyPromoted(candidate: {
+    operationSubject: string;
+    namespace: string;
+    kaUal: string;
+    assertionVersion: bigint;
+    signedAtMs: number;
+    registered: boolean;
+  }): Promise<boolean>;
   vmReconcileEnabled(): boolean;
   cleanupExpiredSharedMemory(): Promise<number>;
   recordStorageAckDecline(code: string, now?: number): void;
@@ -843,8 +859,13 @@ describe('core VM-promotion guarantees', () => {
         copies.push(await seedCopy(internals.store, { namespace: 'busy-cg', n: 300 + index, ageMs: 2 * HOUR + index * 60_000 }));
       }
 
+      const queries = vi.spyOn(internals.store, 'query');
       await internals.runVmPromotionAudit();
       expect(reads.calls).toHaveLength(2);
+      expect(queries.mock.calls.filter(([, options]) =>
+        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(1);
+      expect(queries.mock.calls.some(([, options]) =>
+        options?.source === 'agent.vmPromotionAudit.promoted')).toBe(false);
 
       for (let pass = 0; pass < 12; pass += 1) await internals.runVmPromotionAudit();
       const examined = new Set(reads.calls.map(([id]) => id));
@@ -1764,6 +1785,34 @@ describe('core VM-promotion guarantees', () => {
       internals.store.query = async () => { throw new Error('store down'); };
       await expect(internals.storageAckLedgerNamespaceSubGraphs('sub-list-cg')).resolves.toEqual([]);
       await expect(internals.storageAckLedgerSubGraphName('sub-list-cg', ual(1))).resolves.toBeUndefined();
+    });
+
+    it('checks promoted ACK copies across graphs and versions in graph-local batches', async () => {
+      const internals = await boot();
+      const a1 = await seedCopy(internals.store, {
+        namespace: 'batch-a', n: 201, ageMs: 2 * HOUR, version: 1, confirmedVersion: 1,
+      });
+      const a2 = await seedCopy(internals.store, {
+        namespace: 'batch-a', n: 202, ageMs: 2 * HOUR, version: 2, confirmedVersion: 1,
+      });
+      const b1 = await seedCopy(internals.store, {
+        namespace: 'batch-b', n: 203, ageMs: 2 * HOUR, version: 1, confirmedVersion: 2,
+      });
+      const b2 = await seedCopy(internals.store, {
+        namespace: 'batch-b', n: 204, ageMs: 2 * HOUR, version: 1,
+      });
+      const candidates = [
+        { operationSubject: a1.op, namespace: 'batch-a', kaUal: ual(201), assertionVersion: 1n },
+        { operationSubject: a2.op, namespace: 'batch-a', kaUal: ual(202), assertionVersion: 2n },
+        { operationSubject: b1.op, namespace: 'batch-b', kaUal: ual(203), assertionVersion: 1n },
+        { operationSubject: b2.op, namespace: 'batch-b', kaUal: ual(204), assertionVersion: 1n },
+      ].map((candidate) => ({ ...candidate, signedAtMs: 0, registered: false }));
+      const query = vi.spyOn(internals.store, 'query');
+
+      await expect(internals.isStorageAckCopyPromoted(candidates[0]!)).resolves.toBe(true);
+      await expect(internals.promotedStorageAckCopies(candidates)).resolves.toEqual(new Set([a1.op, b1.op]));
+      expect(query.mock.calls.filter(([, options]) =>
+        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(2);
     });
 
     it('passes over malformed, promoted, backed-off and targetless rows in both lanes', async () => {
