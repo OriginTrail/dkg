@@ -438,6 +438,8 @@ export class QueryMethods extends DKGAgentBase {
       priority?: import('@origintrail-official/dkg-storage').StoreWorkPriority;
       /** Store diagnostics / slow-query attribution label. */
       source?: string;
+      /** Maximum remote store response bytes accepted before parsing. */
+      maxResponseBytes?: number;
       operationCtx?: OperationContext;
       view?: GetView;
       agentAddress?: string;
@@ -692,6 +694,7 @@ export class QueryMethods extends DKGAgentBase {
       signal: opts.signal,
       priority: opts.priority,
       source: opts.source,
+      maxResponseBytes: opts.maxResponseBytes,
       view: opts.view,
       agentAddress: effectiveWmAddress,
       agentAddressAliases: wmAddressAliases,

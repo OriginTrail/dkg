@@ -86,11 +86,17 @@ export interface ViewResolution {
 }
 
 function storeOptions(options: QueryOptions | undefined): StoreQueryOptions | undefined {
-  if (!options?.signal && !options?.priority && !options?.source) return undefined;
+  if (
+    !options?.signal
+    && !options?.priority
+    && !options?.source
+    && options?.maxResponseBytes === undefined
+  ) return undefined;
   return {
     signal: options.signal,
     priority: options.priority,
     source: options.source,
+    maxResponseBytes: options.maxResponseBytes,
   };
 }
 

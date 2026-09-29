@@ -15,6 +15,7 @@ import {
   configureApiQueryPriority,
   createApiQueryRequestLifecycle,
   handleQueryRoutes,
+  API_QUERY_MAX_STORE_RESPONSE_BYTES,
   normalizePublicApiQueryResult,
   resolveApiQueryPriority,
 } from '../src/daemon/routes/query.js';
@@ -356,6 +357,7 @@ describe('/api/query request lifecycle', () => {
     expect(receivedOptions).toMatchObject({
       priority: 'background',
       source: 'api.query',
+      maxResponseBytes: API_QUERY_MAX_STORE_RESPONSE_BYTES,
     });
     expect(receivedOptions?.signal).toBeInstanceOf(AbortSignal);
     expect((receivedOptions?.signal as AbortSignal).aborted).toBe(false);

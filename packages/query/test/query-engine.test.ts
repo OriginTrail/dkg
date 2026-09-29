@@ -167,6 +167,7 @@ describe('DKGQueryEngine', () => {
         signal: controller.signal,
         priority: 'background',
         source: 'api.query',
+        maxResponseBytes: 10 * 1024 * 1024,
       },
     );
 
@@ -175,6 +176,7 @@ describe('DKGQueryEngine', () => {
       signal: controller.signal,
       priority: 'background',
       source: 'api.query',
+      maxResponseBytes: 10 * 1024 * 1024,
     }));
     expect(recordingStore.discoveryOptions).not.toHaveLength(0);
     for (const options of recordingStore.discoveryOptions) {
