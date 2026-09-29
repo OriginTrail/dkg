@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
-import { withRpcRequestContext } from '../src/rpc-request-transport.js';
+import { activeRpcRequestContext, withRpcRequestContext, type RpcRequestContext } from '../src/rpc-request-transport.js';
 
 const ADDRESS = '0x0000000000000000000000000000000000000001';
 const PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -39,7 +39,7 @@ describe('optional contract initialization preserves local refusal', () => {
 
   it.each([
     'Staking', 'ProfileStorage', 'KnowledgeAssets', 'AskStorage',
-    'ContextGraphNameRegistry', 'ContextGraphs', 'KnowledgeAssetsLifecycle',
+    'KnowledgeAssetsStorage', 'ContextGraphNameRegistry', 'ContextGraphs', 'ContextGraphStorage', 'KnowledgeAssetsLifecycle',
     'DKGPublishingConvictionNFT', 'Chronos', 'RandomSampling',
   ])('refuses incomplete %s initialization and permits the same adapter to retry', async (contract) => {
     const error = { code: 'RPC_REQUEST_GOVERNOR_QUEUE_FULL' };
@@ -65,5 +65,32 @@ describe('optional contract initialization preserves local refusal', () => {
     await expect(withRpcRequestContext({ signal: controller.signal }, () => adapter.getIdentityId()))
       .rejects.toBe(reason);
     expect(adapter.initialized).toBe(false);
+  });
+
+  it('detaches both adapter-owned background starts from transient bootstrap context', async () => {
+    const { adapter, allow } = fixture('Staking', new Error('unused'));
+    allow();
+    vi.mocked(adapter.startChainIndexRuntime).mockRestore();
+    vi.mocked(adapter.startHubRotationListener).mockRestore();
+    const contexts: RpcRequestContext[] = [];
+    const continuations: Promise<void>[] = [];
+    const capture = () => {
+      contexts.push(activeRpcRequestContext());
+      continuations.push(Promise.resolve().then(() => { contexts.push(activeRpcRequestContext()); }));
+    };
+    vi.spyOn(adapter.chainIndexOwner, 'start').mockImplementation(capture);
+    vi.spyOn(adapter.hubRotationPoller, 'start').mockImplementation(capture);
+    const controller = new AbortController();
+    const onProgress = vi.fn();
+    await expect(withRpcRequestContext({ signal: controller.signal, onProgress }, () => adapter.getIdentityId()))
+      .resolves.toBe(7n);
+    controller.abort(new Error('bootstrap disposed'));
+    await Promise.all(continuations);
+    expect(contexts).toHaveLength(4);
+    for (const context of contexts) {
+      expect(context.requestClass).toBe('foreground');
+      expect(context.signal).toBeUndefined();
+      expect(context.onProgress).toBeUndefined();
+    }
   });
 });

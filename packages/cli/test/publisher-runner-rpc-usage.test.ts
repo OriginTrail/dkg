@@ -20,6 +20,7 @@ import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-s
 import {
   RpcRequestGovernor,
   ChainRpcTransportError,
+  EVMChainAdapter,
   rpcUsageWindowTotal,
   snapshotProcessRpcUsage,
 } from '@origintrail-official/dkg-chain';
@@ -92,6 +93,33 @@ describe('publisher runtime drainRpcUsage — REAL runtime, real adapters, loopb
     if (dataDir) await rm(dataDir, { recursive: true, force: true });
     runtime = null; agent = null; store = null; loopback = null; dataDir = null;
     vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('constructs multiple serial wallets whose healthy reads take more than a minute altogether', async () => {
+    dataDir = await mkdtemp(join(tmpdir(), 'pub-serial-startup-'));
+    await writeFile(join(dataDir, 'publisher-wallets.json'), JSON.stringify({ wallets: WALLETS }));
+    store = await createTripleStore({ backend: 'oxigraph' });
+    vi.useFakeTimers();
+    const identities = vi.spyOn(EVMChainAdapter.prototype, 'getIdentityId')
+      .mockImplementation(() => new Promise<bigint>((resolve) => {
+        setTimeout(() => resolve(1n), 40_000);
+      }));
+    const pending = createPublisherRuntimeFromAgent({
+      dataDir, store, keypair: await generateEd25519Keypair(),
+      chainBase: projectRuntimeEvmChainConfig({
+        rpcUrl: 'http://127.0.0.1:1', hubAddress: HUB, chainId: 'evm:31337',
+      })!,
+    });
+    const outcome = pending.then((value) => ({ value }), (error: unknown) => ({ error }));
+    await vi.waitFor(() => expect(identities).toHaveBeenCalledTimes(1));
+    await vi.advanceTimersByTimeAsync(40_000);
+    await vi.waitFor(() => expect(identities).toHaveBeenCalledTimes(2));
+    await vi.advanceTimersByTimeAsync(40_000);
+    const result = await outcome;
+    expect(result).not.toHaveProperty('error');
+    if ('value' in result) runtime = result.value;
+    expect(runtime?.walletIds).toHaveLength(2);
   });
 
   it('recovers publisher construction after transient local admission failure without changing the governor', async () => {

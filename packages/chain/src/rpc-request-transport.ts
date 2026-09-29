@@ -61,6 +61,8 @@ export interface RpcRequestContext {
   readonly requestClass: RpcRequestClass;
   readonly admissionPriority?: RpcRequestAdmissionPriority;
   readonly signal?: AbortSignal;
+  /** Transient caller observer, notified only after its raw RPC succeeds. */
+  readonly onProgress?: () => void;
   /** Set by {@link withRpcRequestTimeout}; nested scopes inherit it. */
   readonly attemptProgress?: RpcAttemptProgress;
 }
@@ -69,6 +71,7 @@ export interface RpcRequestContextInput {
   readonly requestClass?: RpcRequestClass;
   readonly admissionPriority?: RpcRequestAdmissionPriority;
   readonly signal?: AbortSignal;
+  readonly onProgress?: () => void;
 }
 
 const rpcRequestContext = new AsyncLocalStorage<RpcRequestContext>();
@@ -90,10 +93,12 @@ export function withRpcRequestContext<T>(input: RpcRequestContextInput, fn: () =
     : input.signal === undefined || input.signal === inheritedSignal
       ? inheritedSignal
       : AbortSignal.any([inheritedSignal, input.signal]);
+  const onProgress = input.onProgress ?? parent.onProgress;
   return rpcRequestContext.run({
     requestClass: input.requestClass ?? parent.requestClass,
     ...(admissionPriority === undefined ? {} : { admissionPriority }),
     ...(signal === undefined ? {} : { signal }),
+    ...(onProgress === undefined ? {} : { onProgress }),
     ...(parent.attemptProgress === undefined ? {} : { attemptProgress: parent.attemptProgress }),
   }, fn);
 }
@@ -121,6 +126,8 @@ function runOwnedRpcRequestContext<T>(
     requestClass: input.requestClass ?? parent.requestClass,
     ...(admissionPriority === undefined ? {} : { admissionPriority }),
     ...(input.signal === undefined ? {} : { signal: input.signal }),
+    // Owned physical/background work cannot keep a first waiter's observer.
+    ...(input.onProgress === undefined ? {} : { onProgress: input.onProgress }),
     ...(attemptProgress === undefined ? {} : { attemptProgress }),
   }, fn);
 }
@@ -191,7 +198,10 @@ export async function withRpcRequestTimeout<T>(
     if (signal.aborted) onAbort();
   });
   try {
-    const attempt = Promise.resolve(runOwnedRpcRequestContext({ signal }, progress, fn));
+    const attempt = Promise.resolve(runOwnedRpcRequestContext({
+      signal,
+      onProgress: activeRpcRequestContext().onProgress,
+    }, progress, fn));
     return await Promise.race([attempt, aborted]);
   } finally {
     clearTimeout(timer);
@@ -481,7 +491,11 @@ class RequestContextJsonRpcProvider extends JsonRpcProvider {
     await this._start();
     this.#pendingRequestContexts.push(pending);
     try {
-      return await super.send(method, params);
+      const result = await super.send(method, params);
+      if (!pending.request.signal?.aborted) {
+        try { pending.request.onProgress?.(); } catch { /* observer cannot change RPC outcome */ }
+      }
+      return result;
     } finally {
       // Destruction can reject a queued request before `_send` consumes it.
       const index = this.#pendingRequestContexts.indexOf(pending);

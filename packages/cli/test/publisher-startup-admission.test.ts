@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { activeRpcRequestContext } from '@origintrail-official/dkg-chain';
+import { activeRpcRequestContext, RpcRequestGovernor } from '@origintrail-official/dkg-chain';
 import { PublisherStartupAdmission } from '../src/publisher-startup-admission.js';
 
 describe('transaction-free publisher startup admission', () => {
@@ -26,18 +26,49 @@ describe('transaction-free publisher startup admission', () => {
     expect(read).toHaveBeenCalledTimes(1);
   });
 
-  it('shares one deadline across wallets and cancels a queued read', async () => {
+  it('permits serial wallets to exceed a minute while each keeps progressing', async () => {
     vi.useFakeTimers();
     const startup = budget();
-    await vi.advanceTimersByTimeAsync(30_000);
-    await expect(startup.readIdentity(async () => 1n)).resolves.toBe(1n);
+    for (let wallet = 1; wallet <= 3; wallet++) {
+      const pending = startup.readIdentity(() => new Promise<bigint>((resolve) => {
+        setTimeout(() => resolve(BigInt(wallet)), 40_000);
+      }));
+      const resolved = expect(pending).resolves.toBe(BigInt(wallet));
+      await vi.advanceTimersByTimeAsync(40_000);
+      await resolved;
+    }
+  });
+
+  it('permits a valid low-rate small-burst wallet read that progresses beyond a minute', async () => {
+    vi.useFakeTimers();
+    const governor = new RpcRequestGovernor({ maxRequestsPerSecond: 0.1, burstRequests: 1 });
+    const pending = budget().readIdentity(async () => {
+      for (let request = 0; request < 9; request++) {
+        await governor.acquireActiveRequest();
+        activeRpcRequestContext().onProgress?.();
+      }
+      return 1n;
+    });
+    const resolved = expect(pending).resolves.toBe(1n);
+    await vi.advanceTimersByTimeAsync(80_000);
+    await resolved;
+    expect(governor.snapshot().foregroundAdmitted).toBe(9);
+    expect(governor.snapshot().maxRequestsPerSecond).toBe(0.1);
+  });
+
+  it('bounds inactivity after earlier progress and cancels the queued read', async () => {
+    vi.useFakeTimers();
+    const startup = budget();
     const read = vi.fn(() => new Promise<bigint>((_resolve, reject) => {
-      const signal = activeRpcRequestContext().signal!;
-      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+      const { signal, onProgress } = activeRpcRequestContext();
+      setTimeout(() => onProgress?.(), 30_000);
+      signal!.addEventListener('abort', () => reject(signal!.reason), { once: true });
     }));
     const pending = startup.readIdentity(read);
-    const rejected = expect(pending).rejects.toThrow('60000ms budget');
-    await vi.advanceTimersByTimeAsync(30_000);
+    const rejected = expect(pending).rejects.toThrow('60000ms');
+    await vi.advanceTimersByTimeAsync(89_999);
+    expect(startup.assertActive()).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1);
     await rejected;
     expect(read).toHaveBeenCalledTimes(1);
   });
@@ -50,6 +81,27 @@ describe('transaction-free publisher startup admission', () => {
     await vi.advanceTimersByTimeAsync(60_000);
     await rejected;
     expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores a retired wallet progress callback while the next wallet stalls', async () => {
+    vi.useFakeTimers();
+    const startup = budget();
+    let oldProgress: (() => void) | undefined;
+    await startup.readIdentity(async () => {
+      oldProgress = activeRpcRequestContext().onProgress;
+      return 1n;
+    });
+    const pending = startup.readIdentity(() => new Promise<bigint>((_resolve, reject) => {
+      const signal = activeRpcRequestContext().signal!;
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }));
+    const rejected = expect(pending).rejects.toThrow('60000ms');
+    await vi.advanceTimersByTimeAsync(50_000);
+    oldProgress!();
+    await vi.advanceTimersByTimeAsync(10_000);
+    await rejected;
+    oldProgress!();
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('aborts backoff immediately on shutdown', async () => {
@@ -73,7 +125,7 @@ describe('transaction-free publisher startup admission', () => {
     expect(read).not.toHaveBeenCalled();
   });
 
-  it('removes the successful deadline without poisoning inherited poller context', async () => {
+  it('disposes the transient signal and timer after bootstrap handoff', async () => {
     vi.useFakeTimers();
     const parent = new AbortController();
     const startup = budget(parent.signal);
@@ -86,7 +138,7 @@ describe('transaction-free publisher startup admission', () => {
     parent.abort(new Error('later shutdown is owned by runtime.stop'));
     await vi.advanceTimersByTimeAsync(120_000);
     expect(inherited).toBeDefined();
-    expect(inherited!.aborted).toBe(false);
+    expect(inherited!.aborted).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
   });
 });

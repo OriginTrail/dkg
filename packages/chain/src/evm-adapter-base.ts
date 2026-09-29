@@ -160,6 +160,12 @@ function rpcReadDescriptor(label: string, opts?: ReadOpts): RpcReadDescriptor {
   return createRpcReadDescriptor(label, consumer);
 }
 
+function rethrowInterruptedInitialization(error: unknown): void {
+  activeRpcRequestAbortSignal()?.throwIfAborted();
+  // Local refusal is not proof that an optional contract is absent.
+  if (isRpcRequestGovernorQueueFullError(error)) throw error;
+}
+
 /**
  * Maps a Hub-registered contract name to its local binding invalidation policy.
  *
@@ -3224,7 +3230,7 @@ export class EVMChainAdapterBase {
     try {
       this.contracts.staking = await this.resolveContract('Staking');
     } catch (error) {
-      this.rethrowInterruptedInitialization(error);
+      rethrowInterruptedInitialization(error);
       // V8 Staking not deployed on this Hub — V10 surface continues.
     }
 
@@ -3235,7 +3241,7 @@ export class EVMChainAdapterBase {
     try {
       this.contracts.profileStorage = await this.resolveContract('ProfileStorage');
     } catch (error) {
-      this.rethrowInterruptedInitialization(error);
+      rethrowInterruptedInitialization(error);
       // Older deployments without the relay registry surface.
     }
 
@@ -3253,20 +3259,20 @@ export class EVMChainAdapterBase {
       this.contracts.knowledgeAssets = await this.resolveContract('KnowledgeAssets');
       this.contracts.knowledgeAssetsStorage = await this.resolveAssetStorage('KnowledgeAssetsStorage');
     } catch (error) {
-      this.rethrowInterruptedInitialization(error);
+      rethrowInterruptedInitialization(error);
       // V9 contracts not deployed — V9 publish/update surface unavailable.
     }
     try {
       this.contracts.askStorage = await this.resolveContract('AskStorage');
     } catch (error) {
-      this.rethrowInterruptedInitialization(error);
+      rethrowInterruptedInitialization(error);
       // Older deployments that pre-date AskStorage — token-amount derivation unavailable.
     }
 
     try {
       this.contracts.contextGraphNameRegistry = await this.resolveContract('ContextGraphNameRegistry');
     } catch (error) {
-      this.rethrowInterruptedInitialization(error);
+      rethrowInterruptedInitialization(error);
       // ContextGraphNameRegistry not registered in Hub — createContextGraph/listContextGraphsFromChain unavailable
     }
 
@@ -3274,14 +3280,14 @@ export class EVMChainAdapterBase {
       this.contracts.contextGraphs = await this.resolveContract('ContextGraphs');
       this.contracts.contextGraphStorage = await this.resolveAssetStorage('ContextGraphStorage');
     } catch (error) {
-      this.rethrowInterruptedInitialization(error);
+      rethrowInterruptedInitialization(error);
       // ContextGraphs not deployed — context graph operations unavailable
     }
 
     try {
       this.contracts.knowledgeAssetsLifecycle = await this.resolveContract('KnowledgeAssetsLifecycle');
     } catch (error) {
-      this.rethrowInterruptedInitialization(error);
+      rethrowInterruptedInitialization(error);
       // Lifecycle not deployed — createKnowledgeAssets unavailable.
       // V10.0 KnowledgeAssetsLifecycle fallback was removed in the rc.12 rename.
     }
@@ -3289,14 +3295,14 @@ export class EVMChainAdapterBase {
     try {
       this.contracts.dkgPublishingConvictionNFT = await this.resolveContract('DKGPublishingConvictionNFT');
     } catch (error) {
-      this.rethrowInterruptedInitialization(error);
+      rethrowInterruptedInitialization(error);
       // DKGPublishingConvictionNFT not deployed — V10 PCA agent-resolution unavailable
     }
 
     try {
       this.contracts.chronos = await this.resolveContract('Chronos');
     } catch (error) {
-      this.rethrowInterruptedInitialization(error);
+      rethrowInterruptedInitialization(error);
       // Chronos not deployed — update-path growth-cost sizing falls back to
       // currentEpoch=0 (treats KC as having full `endEpoch` remaining lifetime).
       // Greenfield V10 deployments always have Chronos; this catch is for older
@@ -3306,7 +3312,7 @@ export class EVMChainAdapterBase {
     try {
       await this.resolveAndAssignRandomSamplingPair();
     } catch (error) {
-      this.rethrowInterruptedInitialization(error);
+      rethrowInterruptedInitialization(error);
       // RandomSampling not deployed — proof submission unavailable
     }
 
@@ -3314,8 +3320,12 @@ export class EVMChainAdapterBase {
     // address array, and started WITHOUT an await so a cold backfill can never
     // delay a chain write. Only the adapter the composition root gave a store
     // does anything at all here.
-    this.startChainIndexRuntime();
-    await this.startHubRotationListener();
+    // Both starts spawn detached work. Its context must belong to the adapter,
+    // not to whichever transient caller happened to initialize it first.
+    await withOwnedRpcRequestContext({}, async () => {
+      this.startChainIndexRuntime();
+      await this.startHubRotationListener();
+    });
 
     const tokenAddress: string = this.tokenAddress ?? await this.readContract(
       this.contracts.hub,
@@ -3336,13 +3346,6 @@ export class EVMChainAdapterBase {
     }
 
     this.initialized = true;
-  }
-
-  private rethrowInterruptedInitialization(error: unknown): void {
-    activeRpcRequestAbortSignal()?.throwIfAborted();
-    // Local refusal says nothing about whether an optional contract exists.
-    // Leave initialization incomplete so its owner can retry after backoff.
-    if (isRpcRequestGovernorQueueFullError(error)) throw error;
   }
 
   protected requireV9(): void {

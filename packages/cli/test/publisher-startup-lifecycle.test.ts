@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
@@ -9,9 +9,9 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { AsyncLiftRunner, TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
-import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import { createTripleStore, OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { type DkgConfig } from '../src/config.js';
-import { startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../src/publisher-runner.js';
+import { createPublisherRuntime, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../src/publisher-runner.js';
 import { addPublisherWallet } from '../src/publisher-wallets.js';
 
 function deferred<T>() {
@@ -222,23 +222,45 @@ describe('publisher startup ownership and cancellation', () => {
     await expectBorrowedStoreOpen(f);
   });
 
-  it('wires daemon cancellation before shutdown awaits and drains startup before runtime stop', async () => {
-    // Narrow composition-root guard, not a simulated daemon: runtime behavior
-    // is exercised above, while these checks pin its otherwise-private wiring.
-    const source = await readFile(new URL('../src/daemon/lifecycle.ts', import.meta.url), 'utf8');
-    const shutdownStart = source.indexOf('async function shutdown(exitCode = 0)');
-    expect(shutdownStart).toBeGreaterThan(-1);
-    const beforeFirstAwait = source.slice(shutdownStart, source.indexOf('await ', shutdownStart));
-    expect(beforeFirstAwait).toContain('clearTimeout(publisherStartupTimer)');
-    expect(beforeFirstAwait).toContain('publisherStartupController.abort(');
-    expect(source).toMatch(/startupSignal:\s*publisherStartupController\.signal/);
-    expect(source).toMatch(/stopPublisherRuntime:\s*async\s*\(\)\s*=>\s*\{\s*await publisherStartup;\s*await publisherState\.runtime/);
-    const completionStart = source.indexOf('if (publisherStartupController.signal.aborted) {');
-    const stateAssignment = source.indexOf('publisherState = outcome', completionStart);
-    expect(completionStart).toBeGreaterThan(-1);
-    expect(stateAssignment).toBeGreaterThan(completionStart);
-    const lateCompletion = source.slice(completionStart, stateAssignment);
-    expect(lateCompletion).toContain('await outcome.runtime?.stop()');
-    expect(lateCompletion).toContain('return;');
+  it.each([false, true])('closes its standalone store once and preserves identity failure (close fails: %s)', async (closeFails) => {
+    const f = await fixture();
+    const failure = new Error('standalone identity lookup failure');
+    f.identity.mockImplementationOnce(async function (this: EVMChainAdapter) {
+      chains.add(this);
+      throw failure;
+    });
+    const close = OxigraphStore.prototype.close;
+    const closeOwnedStore = vi.spyOn(OxigraphStore.prototype, 'close')
+      .mockImplementation(async function (this: OxigraphStore) {
+        await close.call(this);
+        if (closeFails) throw new Error('standalone store close failure');
+      });
+    const startup = createPublisherRuntime({
+      dataDir: dataDir!,
+      config: {
+        name: 'standalone-publisher-startup-test',
+        apiPort: 0,
+        listenPort: 0,
+        nodeRole: 'edge',
+        store: { backend: 'oxigraph' },
+        largeLiteralStorage: { enabled: false },
+        chain: {
+          type: 'evm',
+          rpcUrl: 'http://127.0.0.1:1',
+          hubAddress: '0x1111111111111111111111111111111111111111',
+          chainId: 'evm:31337',
+        },
+      },
+    });
+    startups.push(startup);
+
+    await expect(startup).rejects.toBe(failure);
+    expect(closeOwnedStore).toHaveBeenCalledTimes(1);
+    expect(closeOwnedStore.mock.contexts[0]).not.toBe(f.store);
+    expect(f.identity).toHaveBeenCalledTimes(1);
+    expect(f.destroy.mock.contexts).toEqual(f.identity.mock.contexts);
+    expect(f.start).not.toHaveBeenCalled();
+    expect(f.processNext).not.toHaveBeenCalled();
+    await expectBorrowedStoreOpen(f);
   });
 });

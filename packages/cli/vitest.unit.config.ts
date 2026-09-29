@@ -164,6 +164,7 @@ export default defineConfig({
           'test/publisher-runner-rpc-usage.test.ts',
           'test/publisher-startup-admission.test.ts',
           'test/publisher-startup-lifecycle.test.ts',
+          'test/daemon-publisher-startup-cancellation.test.ts',
           'test/publisher-availability.test.ts',
           'test/log-sink.test.ts',
           'test/log-lifecycle.test.ts',

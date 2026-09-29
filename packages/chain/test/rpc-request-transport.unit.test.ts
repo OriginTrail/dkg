@@ -75,11 +75,13 @@ describe('RPC request transport', () => {
     const owner = new AbortController();
     let composed!: RpcRequestContext;
     let owned!: RpcRequestContext;
+    const onProgress = () => {};
 
     withRpcRequestContext({
       requestClass: 'background',
       admissionPriority: 'authority',
       signal: caller.signal,
+      onProgress,
     }, () => {
       withRpcRequestContext({ signal: child.signal }, () => {
         composed = activeRpcRequestContext();
@@ -91,6 +93,7 @@ describe('RPC request transport', () => {
 
     expect(composed.requestClass).toBe('background');
     expect(composed.admissionPriority).toBe('authority');
+    expect(composed.onProgress).toBe(onProgress);
     expect(owned).toEqual({
       requestClass: 'background',
       admissionPriority: 'authority',
@@ -101,6 +104,38 @@ describe('RPC request transport', () => {
     expect(owned.signal?.aborted).toBe(false);
     owner.abort(new Error('owner stopped'));
     expect(owned.signal?.aborted).toBe(true);
+  });
+
+  it('reports successful issuer RPC progress through nested deadlines only', async () => {
+    const rpc = await startLoopbackRpc({ throttle: ['eth_getCode'] });
+    servers.push(rpc);
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0, network: Network.from(31_337),
+      providerOptions: { batchMaxCount: 1 },
+    });
+    let progress = 0;
+    const onProgress = () => { progress++; };
+    try {
+      await expect(withRpcRequestContext({ onProgress }, () =>
+        withRpcRequestTimeout(2_000, 'test read', () => provider.send('eth_blockNumber', [])),
+      )).resolves.toBe('0x10');
+      expect(progress).toBe(1);
+      await expect(withRpcRequestContext({ onProgress }, () =>
+        provider.send('eth_getCode', []),
+      )).rejects.toThrow();
+      expect(progress).toBe(1);
+      await withRpcRequestContext({ onProgress }, () =>
+        withOwnedRpcRequestContext({ requestClass: 'background' }, () =>
+          provider.send('eth_blockNumber', []),
+        ),
+      );
+      expect(progress).toBe(1);
+      await expect(withRpcRequestContext({ onProgress: () => { throw new Error('observer'); } }, () =>
+        provider.send('eth_blockNumber', []),
+      )).resolves.toBe('0x10');
+    } finally {
+      provider.destroy();
+    }
   });
 
   it('keeps a concurrent caller alive when a request queued beside it is cancelled', async () => {
@@ -121,16 +156,18 @@ describe('RPC request transport', () => {
       new Error('Shared request has no active waiters'),
       { name: 'AbortError' },
     );
+    let abandonedProgress = 0;
+    let peerProgress = 0;
 
     const abandonedRead = withOwnedRpcRequestContext(
-      { signal: abandoned.signal },
+      { signal: abandoned.signal, onProgress: () => { abandonedProgress++; } },
       () => provider.send('eth_blockNumber', []),
     );
     // Settle the abandoned read into a value so its rejection is owned from the
     // start; it fails before the peer assertion below can attach a handler.
     const abandonedOutcome = abandonedRead.then(() => undefined, (error: unknown) => error);
     const peerRead = withOwnedRpcRequestContext(
-      { signal: peer.signal },
+      { signal: peer.signal, onProgress: () => { peerProgress++; } },
       () => provider.send('eth_chainId', []),
     );
     abandoned.abort(abandonment);
@@ -141,6 +178,8 @@ describe('RPC request transport', () => {
       await expect(provider.getNetwork()).resolves.toMatchObject({ chainId: 31_337n });
       // The abandoning caller still loses its own physical request.
       expect(await abandonedOutcome).toMatchObject({ name: 'AbortError' });
+      expect(abandonedProgress).toBe(0);
+      expect(peerProgress).toBe(1);
     } finally {
       if (!peer.signal.aborted) peer.abort(new Error('test teardown'));
       await Promise.allSettled([abandonedOutcome, peerRead]);
