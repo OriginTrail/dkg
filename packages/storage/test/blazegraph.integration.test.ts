@@ -23,6 +23,7 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
+import { loadSelectedSharedMemoryQuads } from '../src/graph-manager.js';
 import { compileRfc64SemanticAuthorCommitV1 } from '../src/rfc64-semantic-author-commit-v1.js';
 import { normalizeRfc64AuthorCommitCasV1 } from '../src/rfc64-author-commit-cas.js';
 import type {
@@ -37,6 +38,7 @@ import {
   projectCanonicalGraphScopedAuthorSealRowsV1,
   projectRfc64SemanticRecordStoreRowsV1,
   renderRfc64SemanticStoreRowV1,
+  contextGraphSharedMemoryUri,
   type CanonicalGraphScopedAuthorSealCoordinateV1,
   type CanonicalGraphScopedAuthorSealV1,
   type ContextGraphIdV1,
@@ -84,6 +86,38 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
   afterAll(async () => {
     if (store) await store.dropGraph(GRAPH).catch(() => {});
   });
+
+  it('reads complete SWM graph families in bounded queries with a recurring root', async () => {
+    const swm = contextGraphSharedMemoryUri(`swm-chunks-${RUN}`);
+    const root = `urn:swm-chunks:${RUN}:root`;
+    const child = `${root}/.well-known/genid/child`;
+    const quads: Quad[] = Array.from({ length: 130 }, (_, i) => ({
+      subject: `urn:swm-chunks:${RUN}:decoy:${i}`,
+      predicate: PRED,
+      object: '"decoy"',
+      graph: `${swm}/0xabcdef0123456789abcdef0123456789abcdef01/${i + 1}`,
+    }));
+    quads.push(
+      { subject: root, predicate: PRED, object: '"same"', graph: quads[0]!.graph },
+      { subject: root, predicate: PRED, object: '"same"', graph: quads[129]!.graph },
+      { subject: child, predicate: PRED, object: '"child"', graph: quads[129]!.graph },
+    );
+    try {
+      await store.insert(quads);
+      const selected = await loadSelectedSharedMemoryQuads(
+        store,
+        swm,
+        { rootEntities: [root] },
+        { resultBudget: { pageRows: 1, maxRows: 2, maxBytesEstimate: 1024 * 1024 } },
+      );
+      expect(selected.map((q) => [q.subject, q.predicate, q.object].join('|')).sort()).toEqual([
+        `${child}|${PRED}|"child"`,
+        `${root}|${PRED}|"same"`,
+      ].sort());
+    } finally {
+      await store.delete(quads).catch(() => {});
+    }
+  }, 60_000);
 
   it('runs live requests under the configured deadline and recovers after pre-dispatch cancellation', async () => {
     const deadlineStore = new BlazegraphStore(BLAZEGRAPH_URL as string, { timeout: 5_000 });
