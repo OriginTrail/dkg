@@ -277,6 +277,14 @@ import {
   type VmRecoveryUalDisposition,
 } from './vm-recovery-provider-policy.js';
 import {
+  VmHolderHintResolver,
+  appendVmHolderTier,
+  nextVmHolderTierEntry,
+  sameVmHolderPeerIds,
+  VM_HOLDER_TIER_POLICY_TIMEOUT_MS,
+  type VmHolderTierOutcome,
+} from './vm-reconcile-holder-tier.js';
+import {
   encodeExactAssetUals,
   MAX_EXACT_SYNC_ASSETS,
 } from './sync/exact-assets.js';
@@ -535,7 +543,7 @@ import type { CuratorPeerIdsResolution } from './dkg-agent-lifecycle.js';
 import type {
   ContextGraphBindingTarget,
 } from './context-graph-binding-state.js';
-import { resolveVmReconcilerEnabled } from './sync/backpressure.js';
+import { resolveBooleanSwitch, resolveVmReconcilerEnabled } from './sync/backpressure.js';
 import { finalizedContextGraphSnapshotMismatchV1 } from
   './internal/context-graph-authority/finalized-context-graph-binding.js';
 import {
@@ -5919,10 +5927,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
     localCgId: string,
   ): string[] {
     const curatorOrder = this.vmReconcileCuratorPeersByCg.get(localCgId) ?? [];
+    // Hinted ShardingTable holders (identity->peer from an unsigned phonebook
+    // profile, bound to a sharding-table identity on chain). They only ever
+    // fill capacity the two tiers below leave free; see `appendVmHolderTier`.
+    const holderPeerIds = this.vmReconcileHolderTierByCg?.get(localCgId)?.peerIds ?? [];
     const libp2p = (this.node as any)?.libp2p;
     const getConnections = libp2p?.getConnections;
     if (typeof getConnections !== 'function') {
-      return curatorOrder.slice(0, DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX);
+      return appendVmHolderTier(
+        curatorOrder.slice(0, DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX),
+        holderPeerIds,
+        this.peerId,
+        DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
+      );
     }
     const peersById = new Map<string, { toString(): string }>();
     for (const connection of getConnections.call(libp2p) as Array<{
@@ -5961,7 +5978,93 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const boundedOrdinary = ordinaryOrder
       .filter((peerId) => !curatorSet.has(peerId))
       .slice(0, ordinaryBudget);
-    return [...boundedCurators, ...boundedOrdinary];
+    return appendVmHolderTier(
+      [...boundedCurators, ...boundedOrdinary],
+      holderPeerIds,
+      this.peerId,
+      DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
+    );
+  }
+
+  /** Kill switch for the holder tier: `DKG_VM_RECONCILE_HOLDER_TIER=0`. */
+  vmReconcileHolderTierEnabled(this: DKGAgent): boolean {
+    return resolveBooleanSwitch(undefined, 'DKG_VM_RECONCILE_HOLDER_TIER', true);
+  }
+
+  /**
+   * The node's shared resolver of observed identity->peer hints, created on
+   * first use. Every read is a routing hint: a missing or failing chain method
+   * or phonebook yields no holders (see `vm-reconcile-holder-tier.ts`).
+   */
+  vmReconcileHolderHintResolver(this: DKGAgent): VmHolderHintResolver {
+    this.vmReconcileHolderHints ??= new VmHolderHintResolver({
+      listShardingTableIdentityIds: async () => {
+        const list = this.chain.listDesignatableNodes;
+        if (typeof list !== 'function') return undefined;
+        // `ShardingTable.getShardingTable()` itself, not the identity-ring
+        // cache: membership is the chain's answer, reused for 30 s by the adapter.
+        return (await list.call(this.chain)).map((node) => node.identityId);
+      },
+      getIdentityIdForAddress: async (address) => {
+        const read = this.chain.getIdentityIdForAddress;
+        return typeof read === 'function' ? read.call(this.chain, address) : undefined;
+      },
+      listCoreProfileHints: (limit, signal) => this.discovery.findCoreAgentPeerHints({ limit, signal }),
+      selfPeerId: () => this.peerId,
+      now: () => this.vmReconcileRotationNow(),
+    });
+    return this.vmReconcileHolderHints;
+  }
+
+  /**
+   * Refresh one public graph's hinted-holder tier. Advisory and bounded: never
+   * throws, reads at most one shared resolution per TTL, and only writes this
+   * graph's own entry so no other graph's roster moves. Private and unknown
+   * policies get an empty tier: hint-derived peers are never asked about them.
+   */
+  async refreshVmReconcileHolderTier(
+    this: DKGAgent,
+    localCgId: string,
+    options: { signal?: AbortSignal; isCurrent: () => boolean },
+  ): Promise<void> {
+    const { signal, isCurrent } = options;
+    try {
+      const tiers = this.vmReconcileHolderTierByCg;
+      if (!this.vmReconcileHolderTierEnabled()) {
+        tiers.delete(localCgId);
+        return;
+      }
+      const previous = tiers.get(localCgId);
+      if (previous !== undefined && this.vmReconcileRotationNow() < previous.nextCheckAt) return;
+      const policyTimeout = AbortSignal.timeout(VM_HOLDER_TIER_POLICY_TIMEOUT_MS);
+      const policy = typeof this.readAgentsPhonebookAccessPolicy === 'function'
+        ? await this.readAgentsPhonebookAccessPolicy(
+          localCgId,
+          signal === undefined ? policyTimeout : AbortSignal.any([signal, policyTimeout]),
+        )
+        : 'unknown';
+      if (!isCurrent()) return;
+      const resolution: VmHolderTierOutcome = policy === 'public'
+        ? await this.vmReconcileHolderHintResolver().resolve(signal)
+        : policy === 'not-public'
+          ? { kind: 'not-public' }
+          : { kind: 'unavailable', reason: 'policy-unknown' };
+      if (!isCurrent()) return;
+      const next = nextVmHolderTierEntry(previous, resolution, this.vmReconcileRotationNow());
+      tiers.delete(localCgId);
+      tiers.set(localCgId, next);
+      if (resolution.kind === 'resolved' && !sameVmHolderPeerIds(previous?.peerIds ?? [], next.peerIds)) {
+        this.log.info(
+          createOperationContext('system'),
+          `VM exact fetch holder tier for "${localCgId}": ${next.peerIds.length} hinted `
+            + `ShardingTable holder(s) across ${resolution.stats.identities} identit${resolution.stats.identities === 1 ? 'y' : 'ies'} `
+            + `(profiles=${resolution.stats.profiles} unbound=${resolution.stats.unbound} `
+            + `unmatched=${resolution.stats.unmatched}); routing hints only, data is still verified against on-chain roots`,
+        );
+      }
+    } catch {
+      // Aborted or a failing read: the roster keeps whatever tier it had.
+    }
   }
 
   vmReconcilePeerMembershipMatches(
@@ -6339,6 +6442,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmReconcileRotationAdmissionCursorByCg?.clear();
     this.vmReconcileCuratorPeersByCg?.clear();
     this.vmReconcileCuratorPageCursorByCg?.clear();
+    this.vmReconcileHolderTierByCg?.clear();
+    this.vmReconcileHolderHints?.invalidate();
     this.vmReconcileExactPeerCapabilities?.clear();
     this.vmRefreshQueue?.clear();
   }
@@ -6507,6 +6612,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (oldestKey === undefined) break;
       this.vmReconcileCuratorPeersByCg.delete(oldestKey);
     }
+    const holderTiers = this.vmReconcileHolderTierByCg;
+    while (holderTiers !== undefined && holderTiers.size > DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES) {
+      const oldestKey = holderTiers.keys().next().value;
+      if (oldestKey === undefined) break;
+      holderTiers.delete(oldestKey);
+    }
     while (
       this.vmReconcileCuratorPageCursorByCg.size
       > DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES
@@ -6567,6 +6678,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.clearVmReconcileRotationStateForContextGraph(localCgId);
     this.vmReconcileCuratorPeersByCg.delete(localCgId);
     this.vmReconcileCuratorPageCursorByCg.delete(localCgId);
+    this.vmReconcileHolderTierByCg?.delete(localCgId);
     this.clearVmReconcileActiveFetchCooldown(localCgId);
     this.vmReconcileCatchupPeerCursor.delete(localCgId);
     this.vmReconcileCatchupPeerOrder.delete(localCgId);
@@ -6954,10 +7066,23 @@ export class SwmHostModeMethods extends DKGAgentBase {
       index - admissionCursor + currentTargets.length
     ) % currentTargets.length;
 
-    // Suppression consults only the already-observed, capped connection view.
-    // This is intentionally before curator resolution, dialing, protocol waits,
-    // and admission probes. Every target reached this method only after the
-    // production ordinal/finalization check proved it still pending locally.
+    // Hinted ShardingTable holders join the roster behind the curator and
+    // connected-peer tiers. Their tier is refreshed here, before the gate below
+    // reads it, and for this graph only: a set that appeared after a completed
+    // proof cycle is pure roster growth, which breaks that backoff at once, and
+    // one graph's refresh never restarts another graph's cycle. The work is one
+    // shared, cached resolution per TTL; between refreshes this is a no-op.
+    await this.refreshVmReconcileHolderTier(localCgId, {
+      signal,
+      isCurrent: isRecoveryCurrent,
+    });
+    if (!isRecoveryCurrent()) return staleRecovery();
+
+    // Suppression consults only the already-observed, capped connection view
+    // (plus the remembered curator and holder tiers). This is intentionally
+    // before curator resolution, dialing, protocol waits, and admission probes.
+    // Every target reached this method only after the production
+    // ordinal/finalization check proved it still pending locally.
     const observedCandidatePeerIds = this.vmReconcileObservedCandidatePeerIds(localCgId);
     const now = this.vmReconcileRotationNow();
     const initiallyOwnedSlotKeys = new Set(currentTargets.flatMap((target) => {
