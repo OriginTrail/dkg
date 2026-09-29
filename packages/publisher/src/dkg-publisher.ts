@@ -5381,10 +5381,10 @@ export class DKGPublisher implements Publisher {
         effectiveUpdateByteSize = updateByteSize;
       }
     } else {
-      // PUBLIC update — unchanged from the prior behaviour: send the full
-      // update N-quads inline so peers recompute `newMerkleRoot`, unless private
-      // roots are mixed in (then the peer can't recompute and we omit staging).
-      updateStagingQuads = updatePrivateRoots.length === 0
+      // A graph-scoped intent carries its private root, so the receiver can fold
+      // it over these inline public quads without relying on a local SWM copy.
+      // Legacy intents carry no such root and retain the SWM fallback instead.
+      updateStagingQuads = graphUpdate !== undefined || updatePrivateRoots.length === 0
         ? new TextEncoder().encode(updateNquadsStr)
         : undefined;
       effectiveUpdateByteSize = updateByteSize;
@@ -5563,9 +5563,9 @@ export class DKGPublisher implements Publisher {
           isEncryptedPayload: useEncryptedInlineUpdate ? true : undefined,
           // For a curated update the inline ACK payload is the PUBLIC catalog
           // N-quads (`updateStagingQuads` == the catalog bytes). For a public
-          // update it stays the full update N-quads (when no private roots are
-          // mixed in) so peers can recompute `newMerkleRoot`; otherwise the peer
-          // falls back to verifying against its SWM copy. Selected above.
+          // graph-scoped update it is the full update N-quads, with any private
+          // root carried separately on the intent. Legacy private-root updates
+          // still omit staging and fall back to an SWM copy. Selected above.
           stagingQuads: updateStagingQuads,
           swmGraphId: contextGraphId,
           subGraphName: options.subGraphName,
