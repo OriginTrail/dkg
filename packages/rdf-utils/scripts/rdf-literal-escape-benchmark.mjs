@@ -3,6 +3,11 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+// The embedded legacy implementation below is the implementation at this
+// exact testnet-canary commit. Accepting arbitrary refs would mislabel a fixed
+// fixture as code loaded from that ref, so mismatches are rejected up front.
+const LEGACY_BASELINE_COMMIT = '12645248f49e8df2d27a17dc893a44862fad6ade';
+
 // Dependency-free legacy implementation from the PR base. Keeping this small
 // fixture explicit avoids copying/rewriting the package barrel and lets the
 // worker execute on every supported Node 22+ release without a TS loader.
@@ -10,7 +15,10 @@ const LEGACY_SHORT_ESCAPES = Object.freeze({
   '\b': '\\b', '\t': '\\t', '\n': '\\n', '\f': '\\f', '\r': '\\r',
   '"': '\\"', '\\': '\\\\',
 });
-const LEGACY_PATTERN = /["\\\u0000-\u001F\u007F]/g;
+const LEGACY_PATTERN = new RegExp(
+  `["\\\\${String.fromCodePoint(0)}-${String.fromCodePoint(31)}${String.fromCodePoint(127)}]`,
+  'g',
+);
 function legacyEscapeRdfLiteral(value) {
   return value.replace(LEGACY_PATTERN, character => {
     const shortEscape = LEGACY_SHORT_ESCAPES[character];
@@ -35,12 +43,21 @@ if (process.argv[2] === '--worker') {
 }
 
 const repo = fileURLToPath(new URL('../../../', import.meta.url));
-const baseline = process.argv.find((arg) => arg.startsWith('--baseline='))?.slice(11);
-if (!baseline) throw new Error('Provide --baseline=REF');
+const baseline = process.argv.find((arg) => arg.startsWith('--baseline='))?.slice(11)
+  ?? LEGACY_BASELINE_COMMIT;
 const baselineCommit = execFileSync(
   'git', ['-C', repo, 'rev-parse', '--verify', `${baseline}^{commit}`], { encoding: 'utf8' },
 ).trim();
+if (baselineCommit !== LEGACY_BASELINE_COMMIT) {
+  throw new Error(
+    `This benchmark's frozen legacy fixture represents only ${LEGACY_BASELINE_COMMIT}; `
+    + `received ${baselineCommit}`,
+  );
+}
 const iterations = Number(process.argv.find((arg) => arg.startsWith('--iterations='))?.slice(13) ?? 5_000_000);
+if (!Number.isSafeInteger(iterations) || iterations <= 0) {
+  throw new Error('--iterations must be a positive safe integer');
+}
 const candidateFile = fileURLToPath(new URL('../dist/rdf-literal-escape.js', import.meta.url));
 
 const fixtures = {
