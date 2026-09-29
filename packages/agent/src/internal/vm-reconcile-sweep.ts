@@ -77,11 +77,12 @@ export class VmReconcileSweepPlanner {
   admit(
     boundKeys: readonly string[],
     unboundKeys: readonly string[],
-    tryAdmit: (key: string, candidate: 'bound' | 'unbound') => Promise<unknown> | undefined,
+    tryAdmitBound: (key: string) => Promise<unknown> | undefined,
+    tryAdmitUnbound: (key: string) => Promise<unknown> | undefined = tryAdmitBound,
   ): void {
     const turn = this.currentTurn();
     this.releaseTimerCapacity(turn);
-    this.advance(turn, boundKeys, unboundKeys, tryAdmit);
+    this.advance(turn, boundKeys, unboundKeys, tryAdmitBound, tryAdmitUnbound);
     if (!turn.finished.signal.aborted) {
       turn.releaseTimerCapacity = this.retainCapacity(turn.finished.signal);
     }
@@ -108,6 +109,7 @@ export class VmReconcileSweepPlanner {
     try {
       while (!turn.finished.signal.aborted && isActive() && !admission.isClosed()) {
         this.advance(turn, boundKeys, unboundKeys,
+          key => isActive() ? admission.tryAdmit(key) : undefined,
           key => isActive() ? admission.tryAdmit(key) : undefined);
         if (turn.finished.signal.aborted || !isActive() || admission.isClosed()) break;
         // Successful admissions may wake another caller finishing this turn.
@@ -156,26 +158,31 @@ export class VmReconcileSweepPlanner {
     turn: SweepTurn,
     boundKeys: readonly string[],
     unboundKeys: readonly string[],
-    tryAdmit: (key: string, candidate: 'bound' | 'unbound') => Promise<unknown> | undefined,
+    tryAdmitBound: (key: string) => Promise<unknown> | undefined,
+    tryAdmitUnbound: (key: string) => Promise<unknown> | undefined,
   ): void {
     if (turn.finished.signal.aborted) return;
     const boundRotation = turn.owner === 'completion' ? turn.fullBoundKeys : boundKeys;
-    const accept = (key: string, candidate: 'bound' | 'unbound'): boolean => {
-      const completion = tryAdmit(key, candidate);
+    const accept = (key: string, tryAdmit: (key: string) => Promise<unknown> | undefined): boolean => {
+      const completion = tryAdmit(key);
       if (completion === undefined) return false;
       // Automatic failures are reported by the dispatcher. Retain each exact
       // handle immediately, including work admitted by an earlier timer tick.
       turn.completions.push(completion.catch(() => undefined));
       return true;
     };
+    let leadingBoundRejected = false;
     if (turn.state.phase === 'leading') {
       const count = this.bound.admit(boundRotation, 1, key => {
-        if (!accept(key, 'bound')) return false;
+        if (!accept(key, tryAdmitBound)) return false;
         turn.admittedKeys.add(key);
         turn.boundAdmissions++;
         return true;
       });
-      if (boundRotation.length > 0 && count === 0) return;
+      if (boundRotation.length > 0 && count === 0) {
+        if (turn.owner === 'completion') return;
+        leadingBoundRejected = true;
+      }
       turn.state = {
         phase: 'discovery',
         remainingDiscovery: turn.state.remainingDiscovery,
@@ -187,16 +194,25 @@ export class VmReconcileSweepPlanner {
         unboundKeys.length,
       );
       this.unbound.admit(unboundKeys, remainingDiscovery, key => {
-        if (!accept(key, 'unbound')) return false;
+        if (!accept(key, tryAdmitUnbound)) return false;
         turn.admittedKeys.add(key);
         remainingDiscovery--;
         return true;
       });
       if (remainingDiscovery > 0) {
-        turn.state = { phase: 'discovery', remainingDiscovery };
+        turn.state = { phase: leadingBoundRejected ? 'leading' : 'discovery', remainingDiscovery };
         return;
       }
       turn.state = { phase: 'tail' };
+    }
+    // A bound timer cap must not keep the independent discovery budget from
+    // running, and must not retry the same rejected bound key twice in one tick.
+    if (leadingBoundRejected) {
+      // Keep the periodic capacity claim while the dispatcher is full. The
+      // next timer tick must retry this bound key, and that retained claim is
+      // what gives it a turn after the foreground burst.
+      turn.state = { phase: 'leading', remainingDiscovery: 0 };
+      return;
     }
     const tail = boundRotation.filter(key => !turn.admittedKeys.has(key));
     // The timer is a safety net, not an instruction to launch a pass for
@@ -207,7 +223,7 @@ export class VmReconcileSweepPlanner {
       ? Math.max(0, this.periodicBoundBatchSize - turn.boundAdmissions)
       : tail.length;
     const count = tailLimit === 0 ? 0 : this.bound.admit(tail, Math.min(tail.length, tailLimit), key => {
-      if (!accept(key, 'bound')) return false;
+      if (!accept(key, tryAdmitBound)) return false;
       turn.admittedKeys.add(key);
       turn.boundAdmissions++;
       return true;

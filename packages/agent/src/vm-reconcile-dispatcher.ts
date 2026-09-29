@@ -56,6 +56,11 @@ export interface VmReconcileDispatcherOptions {
   maxForegroundBurst?: number;
 }
 
+export interface VmReconcileSchedulingOptions extends VmReconcileDispatcherOptions {
+  discoveryBatchSize?: number;
+  periodicBoundBatchSize?: number;
+}
+
 function vmReconcileSourceRank(source: VmReconcileSource): number {
   if (source === 'manual') return 2;
   if (source === 'live') return 1;
@@ -85,6 +90,7 @@ export class VmReconcileDispatcher<T> {
   private readonly concurrency: number;
   private readonly maxPending: number;
   private readonly maxForegroundBurst: number;
+  private readonly boundTimerCompletions = new Set<Promise<T>>();
   constructor(
     private readonly run: (key: string, source: VmReconcileSource) => Promise<T>,
     private readonly onFailure: (key: string, error: unknown) => void,
@@ -150,6 +156,21 @@ export class VmReconcileDispatcher<T> {
     if (!('completion' in outcome)) return undefined;
     void outcome.completion.catch(() => undefined);
     return outcome.completion;
+  }
+
+  /** Limit only historical bound timer work; foreground occupancy never blocks fairness admission. */
+  protected tryDispatchBoundPeriodic(key: string): Promise<T> | undefined {
+    if (this.boundTimerCompletions.size >= 2 * this.concurrency) return undefined;
+    const completion = this.tryDispatchPeriodic(key);
+    if (completion === undefined) return undefined;
+    if (!this.boundTimerCompletions.has(completion)) {
+      this.boundTimerCompletions.add(completion);
+      void completion.then(
+        () => { this.boundTimerCompletions.delete(completion); },
+        () => { this.boundTimerCompletions.delete(completion); },
+      );
+    }
+    return completion;
   }
 
   protected waitForPeriodicStateChange(signal?: AbortSignal): Promise<void> {
@@ -469,6 +490,8 @@ class VmReconcileRuntimeDispatcher<T> extends VmReconcileDispatcher<T> {
     super(run, onFailure, options);
     installSweepAdmission(Object.freeze({
       tryAdmit: (key: string) => this.tryDispatchPeriodic(key),
+      tryAdmitBound: (key: string) => this.tryDispatchBoundPeriodic(key),
+      tryAdmitUnbound: (key: string) => this.tryDispatchPeriodic(key),
       waitForChange: (signal?: AbortSignal) => this.waitForPeriodicStateChange(signal),
       isClosed: () => this.closed,
       retainCapacity: (signal: AbortSignal) => this.retainPeriodicCapacity(signal),
@@ -487,14 +510,11 @@ export class VmReconcileSchedulingRuntime<T> {
   private readonly dispatcher: VmReconcileRuntimeDispatcher<T>;
   private readonly planner: VmReconcileSweepPlanner;
   private readonly sweepAdmission: VmReconcileSweepAdmission<T>;
-  private readonly periodicOutstandingLimit: number;
 
   constructor(
     run: (key: string, source: VmReconcileSource) => Promise<T>,
     onFailure: (key: string, error: unknown) => void,
-    options: VmReconcileDispatcherOptions = {},
-    discoveryBatchSize = 8,
-    periodicBoundBatchSize = 8,
+    options: VmReconcileSchedulingOptions = {},
   ) {
     let sweepAdmission!: VmReconcileSweepAdmission<T>;
     this.dispatcher = new VmReconcileRuntimeDispatcher(
@@ -504,16 +524,11 @@ export class VmReconcileSchedulingRuntime<T> {
       (admission) => { sweepAdmission = admission; },
     );
     this.planner = new VmReconcileSweepPlanner(
-      discoveryBatchSize,
+      options.discoveryBatchSize ?? 8,
       sweepAdmission.retainCapacity,
-      periodicBoundBatchSize,
+      options.periodicBoundBatchSize ?? 8,
     );
     this.sweepAdmission = sweepAdmission;
-    // A slow historical graph can occupy a worker for minutes. Stop admitting
-    // more bound timer work once total dispatch occupancy reaches one active
-    // plus one queued pass per worker. Unbound discovery keeps its separate
-    // attempt budget and round-robin coverage.
-    this.periodicOutstandingLimit = 2 * (options.concurrency ?? 1);
   }
 
   triggerLive(key: string): void { this.dispatcher.triggerLive(key); }
@@ -541,15 +556,8 @@ export class VmReconcileSchedulingRuntime<T> {
     this.planner.admit(
       boundKeys,
       unboundKeys,
-      (key, candidate) => {
-        if (!isCurrent()) return undefined;
-        const { active, queued } = this.dispatcher.snapshot();
-        // Discovery has its own eight-attempt budget and must retain its
-        // round-robin coverage even when historical bound work is queued.
-        return (candidate === 'unbound' || active + queued < this.periodicOutstandingLimit)
-          ? this.sweepAdmission.tryAdmit(key)
-          : undefined;
-      },
+      key => isCurrent() ? this.sweepAdmission.tryAdmitBound(key) : undefined,
+      key => isCurrent() ? this.sweepAdmission.tryAdmitUnbound(key) : undefined,
     );
   }
 

@@ -1,4 +1,4 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
 import { VmReconcileSweepPlanner, VmReconcileSweepSelector } from '../src/internal/vm-reconcile-sweep.js';
 import { VmReconcileSchedulingRuntime } from '../src/vm-reconcile-dispatcher.js';
 
@@ -80,9 +80,7 @@ it('does not accumulate historical timer work while a worker is slow', async () 
       release.set(key, resolve);
     }),
     () => undefined,
-    { concurrency: 1 },
-    2,
-    8,
+    { concurrency: 1, discoveryBatchSize: 2, periodicBoundBatchSize: 8 },
   );
   const keys = ['b0', 'b1', 'b2', 'b3'];
   runtime.scheduleSweep(keys, [], () => true);
@@ -104,6 +102,37 @@ it('does not accumulate historical timer work while a worker is slow', async () 
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
   await runtime.waitForIdle();
+});
+
+it('keeps unbound discovery admitting when the bound timer backlog is full', async () => {
+  const releases: Array<() => void> = [];
+  const started: string[] = [];
+  const runtime = new VmReconcileSchedulingRuntime<void>(
+    key => {
+      started.push(key);
+      return new Promise<void>((resolve) => { releases.push(resolve); });
+    },
+    () => undefined,
+    { concurrency: 1, maxPending: 4, discoveryBatchSize: 1 },
+  );
+  try {
+    runtime.scheduleSweep(['b0', 'b1', 'b2'], [], () => true);
+    await Promise.resolve();
+    expect(runtime.snapshot()).toMatchObject({ active: 1, queued: 1 });
+    runtime.scheduleSweep(['b2'], ['u0'], () => true);
+    expect(runtime.isInFlight('b2')).toBe(false);
+    expect(runtime.isInFlight('u0')).toBe(true);
+    for (let turn = 0; turn < 3 && !started.includes('u0'); turn++) {
+      await vi.waitFor(() => expect(releases.length).toBeGreaterThan(0));
+      releases.shift()!();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    expect(started).toContain('u0');
+  } finally {
+    const closing = runtime.close();
+    for (const release of releases.splice(0)) release();
+    await closing;
+  }
 });
 
 it('keeps a partial discovery turn ahead of bound fills, then resumes bound progress', () => {
