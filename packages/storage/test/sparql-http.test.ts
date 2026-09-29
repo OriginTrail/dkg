@@ -1909,6 +1909,97 @@ describe('SparqlHttpStore (test server)', () => {
   });
 });
 
+describe('SparqlHttpStore compact SELECT transport', () => {
+  it('rejects an unknown result format at the configuration boundary', () => {
+    expect(() => new SparqlHttpStore({
+      queryEndpoint: 'http://format.test/query',
+      selectResultFormat: 'csv' as 'tsv',
+    })).toThrow('selectResultFormat must be json or tsv');
+  });
+
+  it('uses TSV when opted in and preserves the public binding contract', async () => {
+    const originalFetch = globalThis.fetch;
+    let accept = '';
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      accept = ((init?.headers ?? {}) as Record<string, string>).Accept ?? '';
+      return new Response('?iri\t?count\t?missing\n<urn:test>\t42\t\n', {
+        status: 200,
+        headers: { 'Content-Type': 'text/tab-separated-values; charset=utf-8' },
+      });
+    }) as typeof fetch;
+    try {
+      const tsvStore = new SparqlHttpStore({
+        queryEndpoint: 'http://tsv.test/query',
+        selectResultFormat: 'tsv',
+      });
+      await expect(tsvStore.query('SELECT ?iri ?count ?missing WHERE { ?s ?p ?o }'))
+        .resolves.toEqual({
+          type: 'bindings',
+          variables: ['iri', 'count', 'missing'],
+          bindings: [{
+            iri: 'urn:test',
+            count: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+          }],
+        });
+      expect(accept).toBe('text/tab-separated-values');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('defaults managed Oxigraph SELECTs to TSV but keeps ASK on JSON', async () => {
+    const originalFetch = globalThis.fetch;
+    const accepts: string[] = [];
+    globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) => {
+      const accept = ((init?.headers ?? {}) as Record<string, string>).Accept ?? '';
+      accepts.push(accept);
+      if (accept === 'text/tab-separated-values') {
+        return new Response('?v\n<urn:v>\n', {
+          status: 200,
+          headers: { 'Content-Type': 'text/tab-separated-values' },
+        });
+      }
+      return new Response('{"head":{},"boolean":true}', {
+        status: 200,
+        headers: { 'Content-Type': 'application/sparql-results+json' },
+      });
+    }) as typeof fetch;
+    try {
+      const managed = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: 'http://127.0.0.1:7878/query',
+      });
+      await expect(managed.query('SELECT ?v WHERE { ?s ?p ?v }'))
+        .resolves.toMatchObject({ bindings: [{ v: 'urn:v' }] });
+      await expect(managed.query('ASK { ?s ?p ?o }'))
+        .resolves.toEqual({ type: 'boolean', value: true });
+      expect(accepts).toEqual([
+        'text/tab-separated-values',
+        'application/sparql-results+json',
+      ]);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('falls back to JSON when an opted-in generic endpoint ignores Accept', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(
+      '{"head":{"vars":["v"]},"results":{"bindings":[{"v":{"type":"uri","value":"urn:v"}}]}}',
+      { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } },
+    )) as typeof fetch;
+    try {
+      const store = new SparqlHttpStore({
+        queryEndpoint: 'http://fallback.test/query',
+        selectResultFormat: 'tsv',
+      });
+      await expect(store.query('SELECT ?v WHERE { ?s ?p ?v }'))
+        .resolves.toMatchObject({ bindings: [{ v: 'urn:v' }] });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 const liveQueryUrl = process.env.SPARQL_HTTP_TEST_QUERY_URL;
 const liveUpdateUrl = process.env.SPARQL_HTTP_TEST_UPDATE_URL ?? liveQueryUrl;
 
