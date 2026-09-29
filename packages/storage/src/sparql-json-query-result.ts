@@ -80,6 +80,11 @@ interface ResponseDataReader {
   exact: typeof snapshotExactOrdinaryDataRecord;
   array: typeof denseArray;
   keys: (input: Record<string, unknown>) => readonly PropertyKey[];
+  record: (
+    input: unknown,
+    label: string,
+    description: 'object' | 'plain object' | 'plain term object',
+  ) => Record<string, unknown>;
 }
 
 const closedDataReader: ResponseDataReader = {
@@ -87,6 +92,47 @@ const closedDataReader: ResponseDataReader = {
   exact: snapshotExactOrdinaryDataRecord,
   array: denseArray,
   keys: Reflect.ownKeys,
+  record(input, label, description) {
+    if (!isOrdinaryDataRecord(input)) {
+      malformed(`${label} must be ${description === 'object' ? 'an' : 'a'} ${description}`);
+    }
+    return input;
+  },
+};
+
+// Only used immediately after this module's captured JSON.parse, without a
+// reviver. The resulting private graph cannot contain accessors, symbols,
+// foreign prototypes, or sparse/adorned arrays. The semantic SELECT decoder
+// remains shared with the reflective untrusted-object entry point below.
+const parsedJsonReader: ResponseDataReader = {
+  read(input, key, label) {
+    if (input === null || typeof input !== 'object') malformed(`${label} must be an object`);
+    if (!Object.prototype.hasOwnProperty.call(input, key)) {
+      malformed(`${label}.${key} must be an enumerable data property; fields must use enumerable data properties`);
+    }
+    return (input as Record<string, unknown>)[key];
+  },
+  exact(input, keys, label) {
+    if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+      malformed(`${label} must be a plain data object`);
+    }
+    const actual = Object.keys(input);
+    if (actual.length !== keys.length || actual.some(key => !keys.includes(key))) {
+      malformed(`${label} has unknown or missing fields`);
+    }
+    return input as Record<string, unknown>;
+  },
+  array(input, label) {
+    if (!Array.isArray(input)) malformed(`${label} must be an ordinary array`);
+    return input;
+  },
+  keys: Object.keys,
+  record(input, label, description) {
+    if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+      malformed(`${label} must be ${description === 'object' ? 'an' : 'a'} ${description}`);
+    }
+    return input as Record<string, unknown>;
+  },
 };
 
 export interface AdapterSparqlJsonSelectResponse {
@@ -148,34 +194,12 @@ export function decodeSparqlJsonQueryResult(
     }
     return Object.freeze({ type: 'boolean', value: record.boolean }) satisfies AskResult;
   }
-  const parsed = parseFreshJsonSelectResponse(response);
+  const parsed = parseSelectResponse(response, parsedJsonReader);
   return Object.freeze({
     type: 'bindings',
     bindings: parsed.bindings,
     variables: parsed.variables,
   }) satisfies SelectResult;
-}
-
-function formatSparqlJsonTerm(term: AdapterSparqlJsonTerm): string {
-  if (term.type === 'bnode') return `_:${term.value}`;
-  if (term.type === 'literal' || term.type === 'typed-literal') {
-    if (term['xml:lang']) {
-      return formatCanonicalRdfLiteralTerm({
-        kind: 'language',
-        value: term.value,
-        language: term['xml:lang'],
-      });
-    }
-    if (term.datatype) {
-      return formatCanonicalRdfLiteralTerm({
-        kind: 'typed',
-        value: term.value,
-        datatype: term.datatype,
-      });
-    }
-    return formatCanonicalRdfLiteralTerm({ kind: 'plain', value: term.value });
-  }
-  return term.value;
 }
 
 /** Convert an adapter SPARQL Results JSON SELECT payload into DKG API bindings. */
@@ -219,10 +243,7 @@ function parseSelectResponse(
   const iriValidators = cachedColumns.map(createIriValidator);
   const datatypeValidators = cachedColumns.map(createIriValidator);
   const bindings = rows.map((input, rowIndex) => {
-    if (!isOrdinaryDataRecord(input)) {
-      malformed(`SPARQL JSON binding ${rowIndex} must be a plain object`);
-    }
-    const row = input as Record<string, unknown>;
+    const row = reader.record(input, `SPARQL JSON binding ${rowIndex}`, 'plain object');
     for (const key of reader.keys(row)) {
       if (typeof key !== 'string' || !variables.includes(key)) {
         malformed(`SPARQL JSON binding ${rowIndex} contains an undeclared variable`);
@@ -233,11 +254,11 @@ function parseSelectResponse(
       const variable = variables[variableIndex];
       if (!Object.prototype.hasOwnProperty.call(row, variable)) continue;
       const term = reader.read(row, variable, `SPARQL JSON binding ${rowIndex}`);
-      const formatted = formatSparqlJsonTerm(snapshotTerm(
+      const formatted = formatValidatedSparqlJsonTerm(
         term, rowIndex, variable, reader,
         iriValidators[variableIndex] ?? isSafeResultIri,
         datatypeValidators[variableIndex] ?? isSafeResultIri,
-      ));
+      );
       // `__proto__` is a legal SPARQL variable name, and a plain assignment
       // hits the inherited setter and drops the column. Define it instead, so
       // the row keeps the same prototype every other response's rows have:
@@ -255,164 +276,9 @@ function parseSelectResponse(
   return { variables: [...variables], bindings };
 }
 
-/**
- * Decode the private object graph produced by this module's captured JSON.parse.
- * JSON without a reviver cannot contain accessors, symbols, sparse arrays, or
- * foreign prototypes, so the success path can validate semantics directly
- * without paying the reflective untrusted-object machinery for every term.
- */
-function parseFreshJsonSelectResponse(response: unknown): ParsedSparqlJsonSelectResponse {
-  const envelope = freshJsonRecord(response, 'SPARQL JSON response');
-  const head = freshJsonRecord(freshJsonOwn(envelope, 'head', 'SPARQL JSON response'), 'SPARQL JSON response.head');
-  const variablesInput = freshJsonOwn(head, 'vars', 'SPARQL JSON head');
-  if (!Array.isArray(variablesInput) || variablesInput.some((value) => typeof value !== 'string')) {
-    malformed('SPARQL JSON head.vars must be an array of strings');
-  }
-  const variables = variablesInput as string[];
-  if (new Set(variables).size !== variables.length) {
-    malformed('SPARQL JSON head.vars must not contain duplicates');
-  }
-  const results = freshJsonRecord(
-    freshJsonOwn(envelope, 'results', 'SPARQL JSON response'),
-    'SPARQL JSON response.results',
-  );
-  const rowsInput = freshJsonOwn(results, 'bindings', 'SPARQL JSON results');
-  if (!Array.isArray(rowsInput)) malformed('SPARQL JSON results.bindings must be an ordinary array');
-  const rows = rowsInput as unknown[];
-  const cachedColumns = rows.length > 1 ? variables.slice(0, MAX_CACHED_IRI_VARIABLES) : [];
-  const iriValidators = cachedColumns.map(createIriValidator);
-  const datatypeValidators = cachedColumns.map(createIriValidator);
-  const bindings = rows.map((input, rowIndex) => {
-    const row = freshJsonRecord(input, `SPARQL JSON binding ${rowIndex}`);
-    for (const key of Object.keys(row)) {
-      if (!variables.includes(key)) {
-        malformed(`SPARQL JSON binding ${rowIndex} contains an undeclared variable`);
-      }
-    }
-    const binding: Record<string, string> = {};
-    for (let variableIndex = 0; variableIndex < variables.length; variableIndex += 1) {
-      const variable = variables[variableIndex];
-      if (!Object.prototype.hasOwnProperty.call(row, variable)) continue;
-      const formatted = formatFreshJsonTerm(
-        row[variable], rowIndex, variable,
-        iriValidators[variableIndex] ?? isSafeResultIri,
-        datatypeValidators[variableIndex] ?? isSafeResultIri,
-      );
-      if (variable === '__proto__') {
-        Object.defineProperty(binding, '__proto__', {
-          value: formatted, writable: true, enumerable: true, configurable: true,
-        });
-      } else {
-        binding[variable] = formatted;
-      }
-    }
-    return binding;
-  });
-  return { variables: [...variables], bindings };
-}
-
-function formatFreshJsonTerm(
-  input: unknown,
-  rowIndex: number,
-  variable: string,
-  validateIri: IriValidator,
-  validateDatatype: IriValidator,
-): string {
-  const term = freshJsonRecord(input, `SPARQL JSON binding ${rowIndex}.${variable}`);
-  if (
-    !Object.prototype.hasOwnProperty.call(term, 'type')
-    || !Object.prototype.hasOwnProperty.call(term, 'value')
-  ) {
-    malformed(`SPARQL JSON binding ${rowIndex}.${variable} has unknown or missing fields`);
-  }
-  const type = term.type;
-  const value = term.value;
-  if (typeof type !== 'string' || typeof value !== 'string') {
-    malformed(`SPARQL JSON binding ${rowIndex}.${variable} type and value must be strings`);
-  }
-  if (type === 'uri') {
-    exactFreshJsonKeys(term, ['type', 'value'], rowIndex, variable);
-    if (!validateIri(value)) {
-      malformed(`SPARQL JSON binding ${rowIndex}.${variable} URI value must be an absolute safe IRI`);
-    }
-    return value;
-  }
-  if (type === 'bnode') {
-    exactFreshJsonKeys(term, ['type', 'value'], rowIndex, variable);
-    if (!SPARQL_JSON_BLANK_NODE_LABEL.test(value) || value.endsWith('.')) {
-      malformed(`SPARQL JSON binding ${rowIndex}.${variable} blank-node value must be an RDF blank-node label`);
-    }
-    return `_:${value}`;
-  }
-  if (type !== 'literal' && type !== 'typed-literal') {
-    malformed(`SPARQL JSON binding ${rowIndex}.${variable} has an unsupported term type`);
-  }
-  const hasLanguage = Object.prototype.hasOwnProperty.call(term, 'xml:lang');
-  const hasDatatype = Object.prototype.hasOwnProperty.call(term, 'datatype');
-  if (hasLanguage && hasDatatype) {
-    malformed(`SPARQL JSON binding ${rowIndex}.${variable} cannot contain both language and datatype`);
-  }
-  if (type === 'typed-literal' && !hasDatatype) {
-    malformed(`SPARQL JSON binding ${rowIndex}.${variable} typed-literal must contain datatype`);
-  }
-  if (type === 'typed-literal' && hasLanguage) {
-    malformed(`SPARQL JSON binding ${rowIndex}.${variable} typed-literal cannot contain language`);
-  }
-  exactFreshJsonKeys(
-    term,
-    hasLanguage ? ['type', 'value', 'xml:lang'] : hasDatatype ? ['datatype', 'type', 'value'] : ['type', 'value'],
-    rowIndex,
-    variable,
-  );
-  if (hasLanguage) {
-    const language = term['xml:lang'];
-    if (typeof language !== 'string' || !SPARQL_JSON_LANGUAGE_TAG.test(language)) {
-      malformed(`SPARQL JSON binding ${rowIndex}.${variable} language must be a valid language tag`);
-    }
-    return formatCanonicalRdfLiteralTerm({ kind: 'language', value, language });
-  }
-  if (hasDatatype) {
-    const datatype = term.datatype;
-    if (typeof datatype !== 'string' || !validateDatatype(datatype)) {
-      malformed(`SPARQL JSON binding ${rowIndex}.${variable} datatype must be an absolute safe IRI`);
-    }
-    return formatCanonicalRdfLiteralTerm({ kind: 'typed', value, datatype });
-  }
-  return formatCanonicalRdfLiteralTerm({ kind: 'plain', value });
-}
-
-function freshJsonRecord(input: unknown, label: string): Record<string, unknown> {
-  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
-    malformed(`${label} must be ${label === 'SPARQL JSON response' ? 'an object' : 'a plain object'}`);
-  }
-  return input as Record<string, unknown>;
-}
-
-function freshJsonOwn(input: Record<string, unknown>, key: string, label: string): unknown {
-  if (!Object.prototype.hasOwnProperty.call(input, key)) {
-    malformed(`${label}.${key} must be an enumerable data property; fields must use enumerable data properties`);
-  }
-  return input[key];
-}
-
-function exactFreshJsonKeys(
-  term: Record<string, unknown>,
-  expected: readonly string[],
-  rowIndex: number,
-  variable: string,
-): void {
-  const actual = Object.keys(term);
-  if (actual.length !== expected.length || actual.some((key) => !expected.includes(key))) {
-    malformed(`SPARQL JSON binding ${rowIndex}.${variable} has unknown or missing fields`);
-  }
-}
-
 function ownDataRecord(input: unknown, key: string, label: string, reader = closedDataReader): Record<string, unknown> {
   const value = reader.read(input, key, label);
-  if (!isOrdinaryDataRecord(value)) {
-    malformed(`${label}.${key} must be an object`);
-  }
-  return value as Record<string, unknown>;
+  return reader.record(value, `${label}.${key}`, 'object');
 }
 
 function denseStringArray(input: unknown, label: string, reader = closedDataReader): string[] {
@@ -427,10 +293,9 @@ function denseArray(input: unknown, label: string): unknown[] {
   return [...snapshotDenseDataArray(input, label, malformed)];
 }
 
-function snapshotTerm(input: unknown, rowIndex: number, variable: string, reader: ResponseDataReader, validateIri: IriValidator, validateDatatype: IriValidator): AdapterSparqlJsonTerm {
+function formatValidatedSparqlJsonTerm(input: unknown, rowIndex: number, variable: string, reader: ResponseDataReader, validateIri: IriValidator, validateDatatype: IriValidator): string {
   const label = `SPARQL JSON binding ${rowIndex}.${variable}`;
-  if (!isOrdinaryDataRecord(input)) malformed(`${label} must be a plain term object`);
-  const term = input as Record<string, unknown>;
+  const term = reader.record(input, label, 'plain term object');
   const type = reader.read(term, 'type', label);
   const value = reader.read(term, 'value', label);
   if (typeof type !== 'string' || typeof value !== 'string') {
@@ -439,7 +304,7 @@ function snapshotTerm(input: unknown, rowIndex: number, variable: string, reader
   if (type === 'uri') {
     reader.exact(term, ['type', 'value'], label, malformed);
     if (!validateIri(value)) malformed(`${label} URI value must be an absolute safe IRI`);
-    return { type, value };
+    return value;
   }
   if (type === 'bnode') {
     reader.exact(term, ['type', 'value'], label, malformed);
@@ -449,7 +314,7 @@ function snapshotTerm(input: unknown, rowIndex: number, variable: string, reader
     ) {
       malformed(`${label} blank-node value must be an RDF blank-node label`);
     }
-    return { type, value };
+    return `_:${value}`;
   }
   if (type !== 'literal' && type !== 'typed-literal') {
     malformed(`${label} has an unsupported term type`);
@@ -474,16 +339,16 @@ function snapshotTerm(input: unknown, rowIndex: number, variable: string, reader
     if (typeof language !== 'string' || !SPARQL_JSON_LANGUAGE_TAG.test(language)) {
       malformed(`${label} language must be a valid language tag`);
     }
-    return { type, value, 'xml:lang': language };
+    return formatCanonicalRdfLiteralTerm({ kind: 'language', value, language });
   }
   if (hasDatatype) {
     const datatype = reader.read(term, 'datatype', label);
     if (typeof datatype !== 'string' || !validateDatatype(datatype)) {
       malformed(`${label} datatype must be an absolute safe IRI`);
     }
-    return { type, value, datatype };
+    return formatCanonicalRdfLiteralTerm({ kind: 'typed', value, datatype });
   }
-  return { type, value };
+  return formatCanonicalRdfLiteralTerm({ kind: 'plain', value });
 }
 
 function ownDataValue(input: unknown, key: string, label: string): unknown {
