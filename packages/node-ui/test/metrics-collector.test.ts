@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DashboardDB } from '../src/db.js';
-import { MetricsCollector, type MetricsSource } from '../src/metrics-collector.js';
+import {
+  MetricsCollector,
+  STORE_METRICS_CACHE_TTL_MS,
+  type MetricsSource,
+} from '../src/metrics-collector.js';
 
 let db: DashboardDB;
 let dir: string;
@@ -367,5 +371,48 @@ describe('MetricsCollector store-metrics presence gate', () => {
     const active = await collector.collect();
     expect(active.total_triples).toBe(1000);
     expect(calls.getTotalTriples).toBe(1);
+  });
+
+  it('reuses one complete store snapshot inside the freshness window', async () => {
+    const { source, calls } = countingSource();
+    let now = 1_000;
+    const collector = new MetricsCollector(db, source, dir, () => true, () => now);
+
+    expect((await collector.collect()).total_triples).toBe(1000);
+    now += STORE_METRICS_CACHE_TTL_MS - 1;
+    expect((await collector.collect()).total_triples).toBe(1000);
+    expect(calls.getTotalTriples).toBe(1);
+    expect(calls.getContextGraphCount).toBe(1);
+
+    now += 1;
+    await collector.collect();
+    expect(calls.getTotalTriples).toBe(2);
+    expect(calls.getContextGraphCount).toBe(2);
+  });
+
+  it('coalesces concurrent refreshes into one set of full-store scans', async () => {
+    const { source, calls } = countingSource();
+    const original = source.getTotalTriples;
+    source.getTotalTriples = async () => {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      return original();
+    };
+    const collector = new MetricsCollector(db, source, dir, () => true, () => 1_000);
+    const [first, second] = await Promise.all([collector.collect(), collector.collect()]);
+
+    expect(first.total_triples).toBe(1000);
+    expect(second.total_triples).toBe(1000);
+    expect(calls.getTotalTriples).toBe(1);
+    expect(calls.getContextGraphCount).toBe(1);
+  });
+
+  it('refreshes after a backwards clock step rather than presenting an old count as fresh', async () => {
+    const { source, calls } = countingSource();
+    let now = 10_000;
+    const collector = new MetricsCollector(db, source, dir, () => true, () => now);
+    await collector.collect();
+    now = 9_999;
+    await collector.collect();
+    expect(calls.getTotalTriples).toBe(2);
   });
 });

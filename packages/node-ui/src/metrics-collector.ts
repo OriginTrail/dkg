@@ -51,6 +51,16 @@ export interface MetricsSource {
 }
 
 const SNAPSHOT_INTERVAL_MS = 86_400_000; // 24 hours
+export const STORE_METRICS_CACHE_TTL_MS = 30_000;
+
+type StoreMetricCounts = Pick<MetricSnapshotRow,
+  | 'total_triples'
+  | 'total_kcs'
+  | 'total_kas'
+  | 'confirmed_kcs'
+  | 'tentative_kcs'
+  | 'contextGraph_count'
+>;
 
 /**
  * Clamp a bigint relay byte count to a safe JS Number for SQLite storage.
@@ -73,6 +83,8 @@ export class MetricsCollector {
   private timer: ReturnType<typeof setInterval> | null = null;
   private prevCpuTimes: { idle: number; total: number } | null = null;
   private readonly startTime = Date.now();
+  private storeMetricsCache: { fetchedAt: number; counts: StoreMetricCounts } | null = null;
+  private storeMetricsInflight: Promise<StoreMetricCounts> | null = null;
 
   constructor(
     private readonly db: DashboardDB,
@@ -84,6 +96,7 @@ export class MetricsCollector {
      * null. Defaults to always-collect so existing callers/tests are unchanged.
      */
     private readonly shouldCollectStoreMetrics: () => boolean = () => true,
+    private readonly now: () => number = () => Date.now(),
   ) {}
 
   start(): void {
@@ -161,12 +174,13 @@ export class MetricsCollector {
     // system/network metrics above always collect, so a CPU peg is still
     // recorded even while no dashboard is open. (#1066 Item 1)
     if (this.shouldCollectStoreMetrics()) {
-      try { totalTriples = await this.source.getTotalTriples(); } catch { /* ignore */ }
-      try { totalKCs = await this.source.getTotalKCs(); } catch { /* ignore */ }
-      try { totalKAs = await this.source.getTotalKAs(); } catch { /* ignore */ }
-      try { confirmedKCs = await this.source.getConfirmedKCs(); } catch { /* ignore */ }
-      try { tentativeKCs = await this.source.getTentativeKCs(); } catch { /* ignore */ }
-      try { contextGraphCount = await this.source.getContextGraphCount(); } catch { /* ignore */ }
+      const counts = await this.cachedStoreMetrics();
+      totalTriples = counts.total_triples;
+      totalKCs = counts.total_kcs;
+      totalKAs = counts.total_kas;
+      confirmedKCs = counts.confirmed_kcs;
+      tentativeKCs = counts.tentative_kcs;
+      contextGraphCount = counts.contextGraph_count;
     }
 
     let relayCapacity: number | null = null;
@@ -220,6 +234,49 @@ export class MetricsCollector {
       relay_active_circuits: relayActiveCircuits,
       relay_bytes_in: relayBytesIn,
       relay_bytes_out: relayBytesOut,
+    };
+  }
+
+  private cachedStoreMetrics(): Promise<StoreMetricCounts> {
+    const now = this.now();
+    if (
+      this.storeMetricsCache
+      && now >= this.storeMetricsCache.fetchedAt
+      && now - this.storeMetricsCache.fetchedAt < STORE_METRICS_CACHE_TTL_MS
+    ) {
+      return Promise.resolve(this.storeMetricsCache.counts);
+    }
+    if (this.storeMetricsInflight) return this.storeMetricsInflight;
+    const refresh = this.readStoreMetrics().then((counts) => {
+      this.storeMetricsCache = { fetchedAt: this.now(), counts };
+      return counts;
+    }).finally(() => {
+      if (this.storeMetricsInflight === refresh) this.storeMetricsInflight = null;
+    });
+    this.storeMetricsInflight = refresh;
+    return refresh;
+  }
+
+  private async readStoreMetrics(): Promise<StoreMetricCounts> {
+    let totalTriples: number | null = null;
+    let totalKCs: number | null = null;
+    let totalKAs: number | null = null;
+    let confirmedKCs: number | null = null;
+    let tentativeKCs: number | null = null;
+    let contextGraphCount: number | null = null;
+    try { totalTriples = await this.source.getTotalTriples(); } catch { /* ignore */ }
+    try { totalKCs = await this.source.getTotalKCs(); } catch { /* ignore */ }
+    try { totalKAs = await this.source.getTotalKAs(); } catch { /* ignore */ }
+    try { confirmedKCs = await this.source.getConfirmedKCs(); } catch { /* ignore */ }
+    try { tentativeKCs = await this.source.getTentativeKCs(); } catch { /* ignore */ }
+    try { contextGraphCount = await this.source.getContextGraphCount(); } catch { /* ignore */ }
+    return {
+      total_triples: totalTriples,
+      total_kcs: totalKCs,
+      total_kas: totalKAs,
+      confirmed_kcs: confirmedKCs,
+      tentative_kcs: tentativeKCs,
+      contextGraph_count: contextGraphCount,
     };
   }
 
