@@ -97,14 +97,9 @@ export class StoreSchedulerBusyError extends Error implements StoreOperationOutc
     readonly operation: string,
     options?: StoreSchedulerBusyErrorOptions,
   ) {
-    super(
-      `Store scheduler ${reason.replaceAll('_', ' ')} (${priority}: ${operation || 'unknown'})`
-        + (options?.activeAtTimeout?.length
-          ? `; active at timeout: ${options.activeAtTimeout.map((active) =>
-            `${active.priority}:${active.operation} (${active.count}, oldest ${active.oldestAgeMs}ms)`).join(', ')}`
-          : ''),
-      options,
-    );
+    // Error.message reaches public HTTP responses. Cross-request active work
+    // belongs only in the structured diagnostic, never in this message.
+    super(`Store scheduler ${reason.replaceAll('_', ' ')} (${priority}: ${operation || 'unknown'})`, options);
     this.name = 'StoreSchedulerBusyError';
     this.storeOperation = options?.storeOperation;
     this.activeAtTimeout = options?.activeAtTimeout;
@@ -120,6 +115,19 @@ export interface StoreSchedulerBusyErrorLike extends StoreOperationOutcomeTagged
   readonly reason: StoreSchedulerBusyReason;
   readonly priority: StoreWorkPriority;
   readonly operation: string;
+  /** Internal diagnostics; never copy into a client-facing error message. */
+  readonly activeAtTimeout?: readonly StoreSchedulerActiveAtTimeout[];
+}
+
+function validActiveAtTimeout(value: unknown): value is readonly StoreSchedulerActiveAtTimeout[] {
+  return Array.isArray(value) && value.length <= 3 && value.every((entry: unknown) => {
+    if (!entry || typeof entry !== 'object') return false;
+    const item = entry as Partial<StoreSchedulerActiveAtTimeout>;
+    return isStoreWorkPriority(item.priority)
+      && typeof item.operation === 'string'
+      && Number.isSafeInteger(item.count) && (item.count ?? 0) > 0
+      && Number.isFinite(item.oldestAgeMs) && (item.oldestAgeMs ?? -1) >= 0;
+  });
 }
 
 /** Canonical cross-package guard for retry-safe scheduler admission errors. */
@@ -136,7 +144,8 @@ export function isStoreSchedulerBusyError(
     && (shaped.reason === 'queue_full' || shaped.reason === 'queue_wait_timeout')
     && isStoreWorkPriority(shaped.priority)
     && typeof shaped.operation === 'string'
-    && (shaped.storeOperation === undefined || isStoreOperation(shaped.storeOperation));
+    && (shaped.storeOperation === undefined || isStoreOperation(shaped.storeOperation))
+    && (shaped.activeAtTimeout === undefined || validActiveAtTimeout(shaped.activeAtTimeout));
 }
 
 export type StorePriorityQueueLimits = Record<StoreWorkPriority, number>;
@@ -545,6 +554,12 @@ export class StorePriorityScheduler extends ObservableScheduler {
             activeAtTimeout,
           },
         );
+        if (activeAtTimeout.length > 0) {
+          console.warn('[store scheduler] queue wait timeout', {
+            waiting: { priority: normalizedPriority, operation },
+            activeAtTimeout,
+          });
+        }
         this.pressureRejectQueued(entry.pressureTicket, error.reason);
         this.observeRejection(error);
         reject(error);

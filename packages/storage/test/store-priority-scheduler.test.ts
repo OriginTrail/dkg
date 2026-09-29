@@ -318,8 +318,65 @@ describe('StorePriorityScheduler', () => {
     expect(isStoreSchedulerBusyError({ ...structural, storeOperation: 'unknown' })).toBe(false);
     expect(isStoreSchedulerBusyError({ ...structural, reason: undefined })).toBe(false);
     expect(isStoreSchedulerBusyError({ ...structural, priority: 'urgent' })).toBe(false);
+    const withActive = { ...structural, activeAtTimeout: [{
+      priority: 'background', operation: 'private-work', count: 1, oldestAgeMs: 42,
+    }] };
+    expect(isStoreSchedulerBusyError(withActive)).toBe(true);
+    expect(isStoreSchedulerBusyError({ ...withActive, activeAtTimeout: [{
+      priority: 'background', operation: 'private-work', count: -1, oldestAgeMs: 42,
+    }] })).toBe(false);
     expect(isStoreSchedulerBusyError({ ...structural, operation: undefined })).toBe(false);
     expect(isStoreSchedulerBusyError({ code: 'STORE_SCHEDULER_BUSY' })).toBe(false);
+  });
+
+  it('records only the three oldest active operations without exposing them in the error message', async () => {
+    vi.useFakeTimers();
+    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    let now = 0;
+    const releases: Array<() => void> = [];
+    try {
+      const scheduler = new StorePriorityScheduler({
+        maxConcurrent: 4,
+        ackReservedSlots: 0,
+        healthReservedSlots: 0,
+        normalReservedSlots: 0,
+        backgroundReservedSlots: 0,
+        queueLimits: 1,
+        queueWaitTimeoutMs: 20,
+        now: () => now,
+      });
+      const blockers = ['oldest', 'second', 'third', 'newest'].map((operation) => {
+        const task = scheduler.run('normal', operation, () => new Promise<void>((resolve) => {
+          releases.push(resolve);
+        }));
+        now += 10;
+        return task;
+      });
+      const expired = scheduler.run('normal', 'waiting', async () => undefined);
+      const expiredOutcome = expired.then(
+        () => undefined,
+        (failure: unknown) => failure,
+      );
+      now += 20;
+      await vi.advanceTimersByTimeAsync(20);
+      const error = await expiredOutcome;
+      expect(isStoreSchedulerBusyError(error)).toBe(true);
+      if (!isStoreSchedulerBusyError(error)) throw new Error('Expected scheduler busy error');
+      expect(error.activeAtTimeout?.map((active) => active.operation)).toEqual([
+        'oldest', 'second', 'third',
+      ]);
+      expect(error.activeAtTimeout?.map((active) => active.oldestAgeMs)).toEqual([60, 50, 40]);
+      expect(error.message).not.toContain('oldest');
+      expect(warning).toHaveBeenCalledWith('[store scheduler] queue wait timeout', expect.objectContaining({
+        activeAtTimeout: error.activeAtTimeout,
+      }));
+      releases.forEach((release) => release());
+      await Promise.all(blockers);
+    } finally {
+      releases.forEach((release) => release());
+      warning.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it('accepts optional string messages while retaining prototype-free copies without messages', () => {

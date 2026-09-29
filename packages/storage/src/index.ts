@@ -99,6 +99,7 @@ export {
   type StoreSchedulerOperationMetadata,
   type StoreSchedulerBusyErrorOptions,
   type StoreSchedulerBusyErrorLike,
+  type StoreSchedulerActiveAtTimeout,
 } from './store-priority-scheduler.js';
 export {
   STORE_OPERATION_TIMEOUT_CODE,
