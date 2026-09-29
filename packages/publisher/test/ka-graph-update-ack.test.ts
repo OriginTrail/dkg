@@ -37,6 +37,11 @@ import {
   computeFlatKCRootV10,
   computePrivateRootV10,
 } from '../src/merkle.js';
+import {
+  buildPublicQuadsWithByteSize,
+  encodePublicNQuads,
+  encodedPublicByteLength,
+} from './_helpers/public-nquads.js';
 import { buildUpdateSeal, mockSealCtx } from './_helpers/seal.js';
 
 const TARGET_CG_ID = '42';
@@ -134,47 +139,6 @@ function byteSizeFloor(quads: readonly Quad[]): number {
   );
 }
 
-function wireNquads(quads: readonly Quad[]): Uint8Array {
-  return new TextEncoder().encode(quads.map((quad) =>
-    `<${quad.subject}> <${quad.predicate}> ${quad.object.startsWith('"') ? quad.object : `<${quad.object}>`} <${quad.graph}> .`,
-  ).join('\n'));
-}
-
-function buildPublicQuadsWithWireByteSize(targetBytes: number, graph: string): Quad[] {
-  const quads: Quad[] = [];
-  const maxSafeLiteralBytes = 50_000;
-
-  for (let i = 0; i < 1_000; i++) {
-    const emptyQuad: Quad = {
-      subject: `urn:test:oversized-update:${i}`,
-      predicate: 'http://schema.org/description',
-      object: '""',
-      graph,
-    };
-    const currentBytes = wireNquads(quads).length;
-    const separatorBytes = quads.length === 0 ? 0 : 1;
-    const bytesNeededInsideLiteral =
-      targetBytes - currentBytes - separatorBytes - wireNquads([emptyQuad]).length;
-    const literalBytes =
-      bytesNeededInsideLiteral >= 0 && bytesNeededInsideLiteral <= maxSafeLiteralBytes
-        ? bytesNeededInsideLiteral
-        : maxSafeLiteralBytes;
-    quads.push({ ...emptyQuad, object: `"${'x'.repeat(literalBytes)}"` });
-
-    const actualBytes = wireNquads(quads).length;
-    if (actualBytes >= targetBytes) {
-      if (actualBytes !== targetBytes) {
-        throw new Error(
-          `oversized update fixture byte-size drift: expected ${targetBytes}, got ${actualBytes}`,
-        );
-      }
-      return quads;
-    }
-  }
-
-  throw new Error(`failed to build public update quads with byte size ${targetBytes}`);
-}
-
 type CapturedUpdateParams = Parameters<V10UpdateACKProvider>[0];
 
 interface GraphUpdateRun {
@@ -189,9 +153,14 @@ interface RunGraphUpdateOptions {
   fromSharedMemory?: boolean;
 }
 
-async function createGraphUpdateHarness(receiverStore = new OxigraphStore()): Promise<{
-  runGraphUpdate: (options: RunGraphUpdateOptions) => Promise<GraphUpdateRun>;
-}> {
+async function runGraphUpdate(
+  {
+    publicQuads,
+    privateQuads = [],
+    fromSharedMemory = false,
+  }: RunGraphUpdateOptions,
+  receiverStore = new OxigraphStore(),
+): Promise<GraphUpdateRun> {
   const store = new OxigraphStore();
   const publisher = new DKGPublisher({
     store,
@@ -237,71 +206,63 @@ async function createGraphUpdateHarness(receiverStore = new OxigraphStore()): Pr
     log: () => {},
   });
 
-  return {
-    runGraphUpdate: async ({
-      publicQuads,
-      privateQuads = [],
-      fromSharedMemory = false,
-    }: RunGraphUpdateOptions): Promise<GraphUpdateRun> => {
-      const privateRoot = privateQuads.length > 0
-        ? computePrivateRootV10(privateQuads)
-        : undefined;
-      if (privateQuads.length > 0 && privateRoot === undefined) {
-        throw new Error('private graph-update fixture did not produce a Merkle root');
-      }
-      const updateSeal = await buildUpdateSeal({
-        kaId: KA_ID,
-        quads: publicQuads,
-        ...(privateQuads.length > 0 ? { privateQuads } : {}),
-        author: PRODUCER_WALLET,
-        ctx: mockSealCtx(),
-      });
-      let captured: CapturedUpdateParams | undefined;
-      const v10UpdateACKProvider: V10UpdateACKProvider = async (params) => {
-        captured = params;
-        const collected = await collector.collectUpdate({
-          ...params,
-          contextGraphId: BigInt(params.contextGraphId),
-          chainId: 31337n,
-          kav10Address: '0x000000000000000000000000000000000000c10a',
-          publisherPeerId: 'publisher-peer',
-          requiredACKs: 1,
-        });
-        return collected.acks;
-      };
-      const commonOptions = {
-        contextGraphId: SOURCE_CG_ID,
-        publishContextGraphId: TARGET_CG_ID,
-        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-        kaUal: UAL,
-        assertionVersion: 2,
-        publicTripleCount: publicQuads.length,
-        privateTripleCount: privateQuads.length,
-        ...(privateRoot === undefined ? {} : { privateMerkleRoot: privateRoot }),
-        precomputedUpdateAttestation: updateSeal,
-        v10UpdateACKProvider,
-      };
+  const privateRoot = privateQuads.length > 0
+    ? computePrivateRootV10(privateQuads)
+    : undefined;
+  if (privateQuads.length > 0 && privateRoot === undefined) {
+    throw new Error('private graph-update fixture did not produce a Merkle root');
+  }
+  const updateSeal = await buildUpdateSeal({
+    kaId: KA_ID,
+    quads: publicQuads,
+    ...(privateQuads.length > 0 ? { privateQuads } : {}),
+    author: PRODUCER_WALLET,
+    ctx: mockSealCtx(),
+  });
+  let captured: CapturedUpdateParams | undefined;
+  const v10UpdateACKProvider: V10UpdateACKProvider = async (params) => {
+    captured = params;
+    const collected = await collector.collectUpdate({
+      ...params,
+      contextGraphId: BigInt(params.contextGraphId),
+      chainId: 31337n,
+      kav10Address: '0x000000000000000000000000000000000000c10a',
+      publisherPeerId: 'publisher-peer',
+      requiredACKs: 1,
+    });
+    return collected.acks;
+  };
+  const commonOptions = {
+    contextGraphId: SOURCE_CG_ID,
+    publishContextGraphId: TARGET_CG_ID,
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+    kaUal: UAL,
+    assertionVersion: 2,
+    publicTripleCount: publicQuads.length,
+    privateTripleCount: privateQuads.length,
+    ...(privateRoot === undefined ? {} : { privateMerkleRoot: privateRoot }),
+    precomputedUpdateAttestation: updateSeal,
+    v10UpdateACKProvider,
+  };
 
-      let result: PublishResult;
-      if (fromSharedMemory) {
-        await store.insert(publicQuads.map((quad) => ({ ...quad, graph: EXACT_SWM_GRAPH })));
-        result = await publisher.updateKnowledgeAssetFromSharedMemory(KA_ID, commonOptions);
-      } else {
-        result = await publisher.update(KA_ID, {
-          ...commonOptions,
-          quads: publicQuads,
-          privateQuads,
-        });
-      }
-      if (captured === undefined) {
-        throw new Error('graph-update fixture did not invoke its ACK provider');
-      }
-      return {
-        result,
-        params: captured,
-        ...(privateRoot === undefined ? {} : { privateRoot }),
-      };
-    },
+  let result: PublishResult;
+  if (fromSharedMemory) {
+    await store.insert(publicQuads.map((quad) => ({ ...quad, graph: EXACT_SWM_GRAPH })));
+    result = await publisher.updateKnowledgeAssetFromSharedMemory(KA_ID, commonOptions);
+  } else {
+    result = await publisher.update(KA_ID, {
+      ...commonOptions,
+      quads: publicQuads,
+      privateQuads,
+    });
+  }
+  if (captured === undefined) {
+    throw new Error('graph-update fixture did not invoke its ACK provider');
+  }
+  return {
+    result,
+    params: captured,
+    ...(privateRoot === undefined ? {} : { privateRoot }),
   };
 }
 
@@ -358,7 +319,6 @@ describe('StorageACKHandler graph-scoped updates', () => {
   });
 
   it('accepts the inline VM payload emitted by a public graph-update producer', async () => {
-    const harness = await createGraphUpdateHarness();
     const publicQuads: Quad[] = [{
       subject: 'urn:entity:producer',
       predicate: 'urn:p:value',
@@ -366,7 +326,7 @@ describe('StorageACKHandler graph-scoped updates', () => {
       graph: '',
     }];
 
-    const { result, params } = await harness.runGraphUpdate({
+    const { result, params } = await runGraphUpdate({
       publicQuads,
       fromSharedMemory: true,
     });
@@ -382,7 +342,7 @@ describe('StorageACKHandler graph-scoped updates', () => {
       { subject: 'urn:entity:a', predicate: 'urn:p:value', object: '"a"', graph: EXACT_VM_GRAPH },
       { subject: 'urn:entity:b', predicate: 'urn:p:value', object: '"b"', graph: EXACT_VM_GRAPH },
     ];
-    const stagingQuads = wireNquads(quads);
+    const stagingQuads = encodePublicNQuads(quads);
     const handler = createHandler();
 
     const ack = decodeStorageACK(await handler.updateHandler(intent(quads, 3, {
@@ -419,7 +379,7 @@ describe('StorageACKHandler graph-scoped updates', () => {
       object: '"a"',
       graph: EXACT_VM_GRAPH,
     }];
-    const stagingQuads = wireNquads(quads);
+    const stagingQuads = encodePublicNQuads(quads);
     const handler = createHandler();
 
     const ack = decodeStorageACK(await handler.updateHandler(intent(quads, 1, {
@@ -440,7 +400,7 @@ describe('StorageACKHandler graph-scoped updates', () => {
       object: '"a"',
       graph: EXACT_VM_GRAPH,
     }];
-    const stagingQuads = wireNquads(quads);
+    const stagingQuads = encodePublicNQuads(quads);
     const handler = createHandler();
 
     const ack = decodeStorageACK(await handler.updateHandler(intent(quads, 1, {
@@ -463,7 +423,6 @@ describe('StorageACKHandler graph-scoped updates', () => {
   });
 
   it('ships graph-scoped public quads inline with a private root so an empty core can sign', async () => {
-    const harness = await createGraphUpdateHarness();
     const publicQuads: Quad[] = [{
       subject: 'urn:entity:producer',
       predicate: 'urn:p:value',
@@ -476,7 +435,7 @@ describe('StorageACKHandler graph-scoped updates', () => {
       object: '"secret"',
       graph: '',
     }];
-    const { result, params, privateRoot } = await harness.runGraphUpdate({
+    const { result, params, privateRoot } = await runGraphUpdate({
       publicQuads,
       privateQuads,
     });
@@ -495,16 +454,47 @@ describe('StorageACKHandler graph-scoped updates', () => {
     expect(new TextDecoder().decode(stagingQuads)).not.toContain(`<${EXACT_SWM_GRAPH}>`);
   });
 
-  it('omits just-over-limit mixed update staging and verifies from exact SWM', async () => {
+  it('inlines an exact-limit public-only graph update', async () => {
+    const targetBytes = STORAGE_ACK_MAX_STAGING_BYTES;
+    const vmQuads = buildPublicQuadsWithByteSize(targetBytes, EXACT_VM_GRAPH);
+    const publicQuads = vmQuads.map((quad) => ({ ...quad, graph: '' }));
+
+    expect(encodedPublicByteLength(vmQuads)).toBe(targetBytes);
+    const { result, params } = await runGraphUpdate({ publicQuads });
+
+    expect(result.status).toBe('confirmed');
+    expect(params.stagingQuads).toHaveLength(targetBytes);
+    expect(params.newByteSize).toBe(BigInt(targetBytes));
+    expect(params.publicTripleCount).toBe(publicQuads.length);
+    expect(params.privateTripleCount).toBe(0);
+  });
+
+  it('omits just-over-limit public-only staging and verifies from exact SWM', async () => {
     const targetBytes = STORAGE_ACK_MAX_STAGING_BYTES + 1;
-    const vmQuads = buildPublicQuadsWithWireByteSize(targetBytes, EXACT_VM_GRAPH);
+    const vmQuads = buildPublicQuadsWithByteSize(targetBytes, EXACT_VM_GRAPH);
     const publicQuads = vmQuads.map((quad) => ({ ...quad, graph: '' }));
     const receiverStore = new OxigraphStore();
     await receiverStore.insert(vmQuads.map((quad) => ({ ...quad, graph: EXACT_SWM_GRAPH })));
-    const harness = await createGraphUpdateHarness(receiverStore);
 
-    expect(wireNquads(vmQuads).length).toBe(targetBytes);
-    const { result, params } = await harness.runGraphUpdate({
+    expect(encodedPublicByteLength(vmQuads)).toBe(targetBytes);
+    const { result, params } = await runGraphUpdate({ publicQuads }, receiverStore);
+
+    expect(result.status).toBe('confirmed');
+    expect(params.stagingQuads).toBeUndefined();
+    expect(params.newByteSize).toBe(BigInt(targetBytes));
+    expect(params.publicTripleCount).toBe(publicQuads.length);
+    expect(params.privateTripleCount).toBe(0);
+  });
+
+  it('omits just-over-limit mixed update staging and verifies from exact SWM', async () => {
+    const targetBytes = STORAGE_ACK_MAX_STAGING_BYTES + 1;
+    const vmQuads = buildPublicQuadsWithByteSize(targetBytes, EXACT_VM_GRAPH);
+    const publicQuads = vmQuads.map((quad) => ({ ...quad, graph: '' }));
+    const receiverStore = new OxigraphStore();
+    await receiverStore.insert(vmQuads.map((quad) => ({ ...quad, graph: EXACT_SWM_GRAPH })));
+
+    expect(encodedPublicByteLength(vmQuads)).toBe(targetBytes);
+    const { result, params } = await runGraphUpdate({
       publicQuads,
       privateQuads: [{
         subject: publicQuads[0].subject,
@@ -512,7 +502,7 @@ describe('StorageACKHandler graph-scoped updates', () => {
         object: '"secret"',
         graph: '',
       }],
-    });
+    }, receiverStore);
 
     expect(result.status).toBe('confirmed');
     expect(params.stagingQuads).toBeUndefined();
@@ -698,7 +688,7 @@ describe('StorageACKHandler graph-scoped updates', () => {
       object: '"legacy"',
       graph: `did:dkg:context-graph:${SOURCE_CG_ID}/sub/_shared_memory`,
     };
-    const stagingQuads = wireNquads([quad]);
+    const stagingQuads = encodePublicNQuads([quad]);
     const handler = createHandler();
     const encoded = encodeUpdateIntent({
       kaId: KA_ID.toString(),
@@ -730,8 +720,8 @@ describe('StorageACKHandler graph-scoped updates', () => {
     const handler = createHandler();
 
     const ack = decodeStorageACK(await handler.updateHandler(intent(malicious, 0, {
-      stagingQuads: wireNquads(malicious),
-      newByteSize: wireNquads(malicious).length,
+      stagingQuads: encodePublicNQuads(malicious),
+      newByteSize: encodedPublicByteLength(malicious),
     }), PEER));
 
     expect(isStorageACKDecline(ack)).toBe(true);
