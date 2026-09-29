@@ -291,5 +291,22 @@ describe('malformed or padded TERM is 400 on both KA write routes', () => {
       ],
     });
     expect(status, JSON.stringify(body)).toBe(200);
+
+    // Both quads reach the draft: the angle brackets are syntax, not part of
+    // the IRI, and the blank node stays a blank node.
+    const stored = await getJson(
+      daemon!,
+      `/api/knowledge-assets/ka-term-ok/wm/quads?contextGraphId=${encodeURIComponent(CG)}`,
+    );
+    expect(stored.status, JSON.stringify(stored.body)).toBe(200);
+    expect(stored.body.count, JSON.stringify(stored.body)).toBe(2);
+    expect(stored.body.quads).toEqual(expect.arrayContaining([
+      expect.objectContaining({ subject: 'urn:wq:bracketed', predicate: 'http://schema.org/name', object: '"v"' }),
+      expect.objectContaining({
+        subject: expect.stringMatching(/^_:/),
+        predicate: 'http://schema.org/name',
+        object: '"v"',
+      }),
+    ]));
   });
 });
