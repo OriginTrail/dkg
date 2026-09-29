@@ -75,11 +75,13 @@ describe('RPC request transport', () => {
     const owner = new AbortController();
     let composed!: RpcRequestContext;
     let owned!: RpcRequestContext;
+    const onProgress = () => {};
 
     withRpcRequestContext({
       requestClass: 'background',
       admissionPriority: 'authority',
       signal: caller.signal,
+      onProgress,
     }, () => {
       withRpcRequestContext({ signal: child.signal }, () => {
         composed = activeRpcRequestContext();
@@ -91,6 +93,7 @@ describe('RPC request transport', () => {
 
     expect(composed.requestClass).toBe('background');
     expect(composed.admissionPriority).toBe('authority');
+    expect(composed.onProgress).toBe(onProgress);
     expect(owned).toEqual({
       requestClass: 'background',
       admissionPriority: 'authority',
@@ -101,6 +104,38 @@ describe('RPC request transport', () => {
     expect(owned.signal?.aborted).toBe(false);
     owner.abort(new Error('owner stopped'));
     expect(owned.signal?.aborted).toBe(true);
+  });
+
+  it('reports successful issuer RPC progress through nested deadlines only', async () => {
+    const rpc = await startLoopbackRpc({ throttle: ['eth_getCode'] });
+    servers.push(rpc);
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0, network: Network.from(31_337),
+      providerOptions: { batchMaxCount: 1 },
+    });
+    let progress = 0;
+    const onProgress = () => { progress++; };
+    try {
+      await expect(withRpcRequestContext({ onProgress }, () =>
+        withRpcRequestTimeout(2_000, 'test read', () => provider.send('eth_blockNumber', [])),
+      )).resolves.toBe('0x10');
+      expect(progress).toBe(1);
+      await expect(withRpcRequestContext({ onProgress }, () =>
+        provider.send('eth_getCode', []),
+      )).rejects.toThrow();
+      expect(progress).toBe(1);
+      await withRpcRequestContext({ onProgress }, () =>
+        withOwnedRpcRequestContext({ requestClass: 'background' }, () =>
+          provider.send('eth_blockNumber', []),
+        ),
+      );
+      expect(progress).toBe(1);
+      await expect(withRpcRequestContext({ onProgress: () => { throw new Error('observer'); } }, () =>
+        provider.send('eth_blockNumber', []),
+      )).resolves.toBe('0x10');
+    } finally {
+      provider.destroy();
+    }
   });
 
   it('keeps a concurrent caller alive when a request queued beside it is cancelled', async () => {
@@ -121,16 +156,18 @@ describe('RPC request transport', () => {
       new Error('Shared request has no active waiters'),
       { name: 'AbortError' },
     );
+    let abandonedProgress = 0;
+    let peerProgress = 0;
 
     const abandonedRead = withOwnedRpcRequestContext(
-      { signal: abandoned.signal },
+      { signal: abandoned.signal, onProgress: () => { abandonedProgress++; } },
       () => provider.send('eth_blockNumber', []),
     );
     // Settle the abandoned read into a value so its rejection is owned from the
     // start; it fails before the peer assertion below can attach a handler.
     const abandonedOutcome = abandonedRead.then(() => undefined, (error: unknown) => error);
     const peerRead = withOwnedRpcRequestContext(
-      { signal: peer.signal },
+      { signal: peer.signal, onProgress: () => { peerProgress++; } },
       () => provider.send('eth_chainId', []),
     );
     abandoned.abort(abandonment);
@@ -141,6 +178,8 @@ describe('RPC request transport', () => {
       await expect(provider.getNetwork()).resolves.toMatchObject({ chainId: 31_337n });
       // The abandoning caller still loses its own physical request.
       expect(await abandonedOutcome).toMatchObject({ name: 'AbortError' });
+      expect(abandonedProgress).toBe(0);
+      expect(peerProgress).toBe(1);
     } finally {
       if (!peer.signal.aborted) peer.abort(new Error('test teardown'));
       await Promise.allSettled([abandonedOutcome, peerRead]);
@@ -169,6 +208,164 @@ describe('RPC request transport', () => {
       expect(debugActions).toContain('receiveRpcResult');
     } finally {
       provider.destroy();
+    }
+  });
+
+  it.each(['getNetwork', 'send'] as const)('destroy removes queued discovery started by %s without late HTTP', async (entrypoint) => {
+    const rpc = await startLoopbackRpc();
+    servers.push(rpc);
+    let now = 0;
+    let releaseAdmission = () => {};
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 0.1,
+      foregroundReservePercent: 0,
+      burstRequests: 1,
+      maxQueueSize: 8,
+      startupJitterMs: 0,
+    }, {
+      clock: {
+        now: () => now,
+        random: () => 0,
+        setTimeout(callback, delayMs) {
+          const timer = setTimeout(callback, delayMs);
+          timer.unref?.();
+          releaseAdmission = () => {
+            clearTimeout(timer);
+            now += 10_000;
+            callback();
+          };
+          return timer;
+        },
+        clearTimeout: (timer) => clearTimeout(timer),
+      },
+    });
+    await governor.acquire('foreground');
+    const provider = createRpcRequestProvider(rpc.url, { maxRetries: 0, admission: governor });
+    const healthyPeer = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0, admission: governor, network: Network.from(31_337),
+    });
+    const caller = new AbortController();
+    const reason = new Error('startup stopped');
+    const pending = withRpcRequestContext({ signal: caller.signal }, () =>
+      entrypoint === 'getNetwork' ? provider.getNetwork() : provider.send('eth_blockNumber', []),
+    ).then(() => undefined, (error: unknown) => error);
+    // Observe the shared discovery separately from the ordinary send, which
+    // can settle on caller cancellation before discovery is destroyed.
+    const discovery = provider.getNetwork().then(() => undefined, (error: unknown) => error);
+    try {
+      await expect.poll(() => governor.snapshot().foregroundQueued).toBe(entrypoint === 'send' ? 2 : 1);
+      caller.abort(reason);
+      await expect.poll(() => governor.snapshot().foregroundQueued).toBe(1);
+      expect(rpc.totalHits()).toBe(0);
+      provider.destroy();
+      provider.destroy();
+      expect(governor.snapshot()).toMatchObject({
+        foregroundQueued: 0,
+        cancelled: entrypoint === 'send' ? 2 : 1,
+      });
+      await expect(discovery).resolves.toBeInstanceOf(Error);
+      await expect(pending).resolves.toBeInstanceOf(Error);
+      // A cancelled wakeup must not dispatch discovery or consume the refill.
+      // A real HTTP response from another provider proves the released token
+      // remains usable, rather than merely checking an empty queue snapshot.
+      releaseAdmission();
+      await expect(healthyPeer.send('eth_blockNumber', [])).resolves.toBe('0x10');
+      expect(rpc.hits('eth_chainId')).toBe(0);
+      expect(rpc.totalHits()).toBe(1);
+      expect(governor.snapshot().foregroundAdmitted).toBe(2);
+    } finally {
+      caller.abort(reason);
+      provider.destroy();
+      // Drain the old implementation's orphan on a failing regression run.
+      releaseAdmission();
+      await Promise.all([pending, discovery]);
+      healthyPeer.destroy();
+    }
+  });
+
+  it.each(['getNetwork', 'send'] as const)('destroy physically aborts hanging discovery started by %s', async (entrypoint) => {
+    const rpc = await startLoopbackRpc({ hang: ['eth_chainId'] });
+    servers.push(rpc);
+    let discoveryContext: RpcRequestContext | undefined;
+    const provider = createRpcRequestProvider(rpc.url, {
+      maxRetries: 0,
+      onRequest(method) {
+        if (method === 'eth_chainId') discoveryContext = activeRpcRequestContext();
+      },
+    });
+    let callerProgress = 0;
+    const caller = new AbortController();
+    const pending = withRpcRequestContext({
+      requestClass: 'background', admissionPriority: 'authority', signal: caller.signal,
+      onProgress: () => { callerProgress++; },
+    }, () => entrypoint === 'getNetwork' ? provider.getNetwork() : provider.send('eth_blockNumber', []))
+      .then(() => undefined, (error: unknown) => error);
+    const discovery = provider.getNetwork().then(() => undefined, (error: unknown) => error);
+    const destroyedAtAbort: boolean[] = [];
+    try {
+      await expect.poll(() => rpc.hits('eth_chainId')).toBe(1);
+      discoveryContext?.signal?.addEventListener('abort', () => {
+        destroyedAtAbort.push(provider.destroyed);
+      }, { once: true });
+      caller.abort(new Error('startup stopped'));
+      provider.destroy();
+      provider.destroy();
+      await expect.poll(() => rpc.aborted('eth_chainId')).toBe(1);
+      await expect(discovery).resolves.toBeInstanceOf(Error);
+      expect(discoveryContext).toEqual({ requestClass: 'foreground', signal: expect.any(AbortSignal) });
+      expect(discoveryContext!.signal!.aborted).toBe(true);
+      expect(destroyedAtAbort).toEqual([true]);
+      expect(rpc.hits('eth_chainId')).toBe(1);
+      if (entrypoint === 'getNetwork') expect(callerProgress).toBe(0);
+    } finally {
+      caller.abort(new Error('test cleanup'));
+      provider.destroy();
+      // Close the old implementation's orphan before awaiting it on red runs.
+      await rpc.close();
+      await Promise.all([pending, discovery]);
+    }
+  });
+
+  it.each(['getNetwork', 'send'] as const)('keeps discovery started by %s alive for a peer after its first caller aborts', async (entrypoint) => {
+    const harness = createLoopbackJsonRpcTestHarness();
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    let discoveryClosed = 0;
+    const rpc = await harness.start(async (request, response) => {
+      if (request.method === 'eth_chainId') {
+        response.on('close', () => { if (!response.writableEnded) discoveryClosed++; });
+      }
+      await released;
+      sendJsonRpcResult(response, request, request.method === 'eth_chainId' ? CHAIN_ID_HEX : '0x10');
+    });
+    const provider = createRpcRequestProvider(rpc.url, { maxRetries: 0 });
+    const caller = new AbortController();
+    const reason = new Error('first discovery caller left');
+    const pending = withRpcRequestContext({ signal: caller.signal }, () =>
+      withRpcRequestTimeout(5_000, 'first discovery caller', () =>
+        entrypoint === 'getNetwork' ? provider.getNetwork() : provider.send('eth_blockNumber', []),
+      ),
+    ).then(() => undefined, (error: unknown) => error);
+    const peer = provider.getNetwork();
+    // Own a possible peer failure immediately, including while asserting that
+    // the cancelled caller settles before the server releases discovery.
+    const peerOutcome = peer.then((network) => network, (error: unknown) => error);
+    try {
+      await expect.poll(() => rpc.calls.filter((request) => request.method === 'eth_chainId').length).toBe(1);
+      caller.abort(reason);
+      await expect(pending).resolves.toBe(reason);
+      expect(discoveryClosed).toBe(0);
+      release();
+      await expect(peerOutcome).resolves.toMatchObject({ chainId: 31_337n });
+      expect(discoveryClosed).toBe(0);
+      expect(rpc.calls.filter((request) => request.method === 'eth_chainId')).toHaveLength(1);
+      await expect(provider.getBlockNumber()).resolves.toBe(16);
+    } finally {
+      caller.abort(reason);
+      release();
+      provider.destroy();
+      await harness.stopAll();
+      await Promise.all([pending, peerOutcome]);
     }
   });
 
