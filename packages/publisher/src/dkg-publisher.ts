@@ -5271,14 +5271,13 @@ export class DKGPublisher implements Publisher {
     // Compute real serialized byte size — must match the publish path serializer.
     // Done BEFORE `chain:writeahead:start` so any error during serialization
     // does not leave an unmatched write-ahead boundary.
-    const updateNquadsStr = allSkolemizedQuads
-      .map(
-        (q: { subject: string; predicate: string; object: string; graph?: string }) =>
-          `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph || dataGraph}> .`,
-      )
-      .join('\n');
-    const updateNquadsBytes = new TextEncoder().encode(updateNquadsStr);
-    const updateByteSize = BigInt(updateNquadsBytes.length);
+    const updatePayloadMeasurement = measureCanonicalPublicationPayload({
+      publicQuads: allSkolemizedQuads,
+      fallbackGraph: dataGraph,
+    });
+    const updateNquadsStr = updatePayloadMeasurement.publicNQuads;
+    const updateNquadsBytes = updatePayloadMeasurement.publicBytes;
+    const updateByteSize = updatePayloadMeasurement.publicByteSize;
 
     // OT-RFC-49 / WS-D (update) — mirror the curated PUBLISH producer
     // (dkg-publisher.ts:2030-2169). A value-adding curated update commits the
