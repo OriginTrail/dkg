@@ -62,6 +62,20 @@ type StoreMetricCounts = Pick<MetricSnapshotRow,
   | 'contextGraph_count'
 >;
 
+const NULL_STORE_METRICS: StoreMetricCounts = Object.freeze({
+  total_triples: null,
+  total_kcs: null,
+  total_kas: null,
+  confirmed_kcs: null,
+  tentative_kcs: null,
+  contextGraph_count: null,
+});
+
+export interface MetricsCollectorOptions {
+  /** Monotonic elapsed-time source used only for store-metric cache freshness. */
+  cacheClock?: () => number;
+}
+
 /**
  * Clamp a bigint relay byte count to a safe JS Number for SQLite storage.
  * Returns Number.MAX_SAFE_INTEGER (9.007e15) if the value would overflow,
@@ -85,6 +99,7 @@ export class MetricsCollector {
   private readonly startTime = Date.now();
   private storeMetricsCache: { fetchedAt: number; counts: StoreMetricCounts } | null = null;
   private storeMetricsInflight: Promise<StoreMetricCounts> | null = null;
+  private readonly cacheClock: () => number;
 
   constructor(
     private readonly db: DashboardDB,
@@ -96,8 +111,10 @@ export class MetricsCollector {
      * null. Defaults to always-collect so existing callers/tests are unchanged.
      */
     private readonly shouldCollectStoreMetrics: () => boolean = () => true,
-    private readonly now: () => number = () => Date.now(),
-  ) {}
+    options: MetricsCollectorOptions = {},
+  ) {
+    this.cacheClock = options.cacheClock ?? (() => performance.now());
+  }
 
   start(): void {
     if (this.timer) return;
@@ -160,28 +177,15 @@ export class MetricsCollector {
       rpcHealthy = (await this.source.isRpcHealthy()) ? 1 : 0;
     } catch { /* ignore */ }
 
-    let totalTriples: number | null = null;
-    let totalKCs: number | null = null;
-    let totalKAs: number | null = null;
-    let confirmedKCs: number | null = null;
-    let tentativeKCs: number | null = null;
-    let contextGraphCount: number | null = null;
-
     // These six getters are full-store SPARQL scans (COUNT / COUNT(DISTINCT)
     // across every graph, plus the context-graph inventory) — the expensive
     // part of a tick. Skip them when nothing is consuming metrics, leaving the
     // columns null (already nullable; charts render the gap). The cheap
     // system/network metrics above always collect, so a CPU peg is still
     // recorded even while no dashboard is open. (#1066 Item 1)
-    if (this.shouldCollectStoreMetrics()) {
-      const counts = await this.cachedStoreMetrics();
-      totalTriples = counts.total_triples;
-      totalKCs = counts.total_kcs;
-      totalKAs = counts.total_kas;
-      confirmedKCs = counts.confirmed_kcs;
-      tentativeKCs = counts.tentative_kcs;
-      contextGraphCount = counts.contextGraph_count;
-    }
+    const storeMetrics = this.shouldCollectStoreMetrics()
+      ? await this.cachedStoreMetrics()
+      : NULL_STORE_METRICS;
 
     let relayCapacity: number | null = null;
     let relayReservationCount: number | null = null;
@@ -220,13 +224,8 @@ export class MetricsCollector {
       direct_peers: this.source.getDirectPeerCount(),
       relayed_peers: this.source.getRelayedPeerCount(),
       mesh_peers: this.source.getMeshPeerCount(),
-      contextGraph_count: contextGraphCount,
-      total_triples: totalTriples,
-      total_kcs: totalKCs,
-      total_kas: totalKAs,
+      ...storeMetrics,
       store_bytes: storeBytes,
-      confirmed_kcs: confirmedKCs,
-      tentative_kcs: tentativeKCs,
       rpc_latency_ms: rpcLatency,
       rpc_healthy: rpcHealthy,
       relay_capacity: relayCapacity,
@@ -238,7 +237,7 @@ export class MetricsCollector {
   }
 
   private cachedStoreMetrics(): Promise<StoreMetricCounts> {
-    const now = this.now();
+    const now = this.cacheClock();
     if (
       this.storeMetricsCache
       && now >= this.storeMetricsCache.fetchedAt
@@ -248,7 +247,7 @@ export class MetricsCollector {
     }
     if (this.storeMetricsInflight) return this.storeMetricsInflight;
     const refresh = this.readStoreMetrics().then((counts) => {
-      this.storeMetricsCache = { fetchedAt: this.now(), counts };
+      this.storeMetricsCache = { fetchedAt: this.cacheClock(), counts };
       return counts;
     }).finally(() => {
       if (this.storeMetricsInflight === refresh) this.storeMetricsInflight = null;
