@@ -136,7 +136,7 @@ async function main() {
   }
 
   // Load distribution file
-  const distPath = path.join(__dirname, '..', 'snapshots', `${chain}_publisher_distribution.json`);
+  const distPath = path.join(__dirname, '..', 'misc', 'snapshots', `${chain}_publisher_distribution.json`);
   if (!existsSync(distPath)) {
     console.error(`Distribution file not found: ${distPath}`);
     console.error('Run generate-aggregates.ts first.');
@@ -176,7 +176,7 @@ async function main() {
   console.log('');
 
   // Load ledger (tracks completed transfers)
-  const ledgerPath = path.join(__dirname, '..', 'snapshots', `${chain}_distribution_ledger.json`);
+  const ledgerPath = path.join(__dirname, '..', 'misc', 'snapshots', `${chain}_distribution_ledger.json`);
   const ledger = loadLedger(ledgerPath, chain, walletAddress);
   const completedSet = new Map<string, string>();
   for (const entry of ledger.entries) {

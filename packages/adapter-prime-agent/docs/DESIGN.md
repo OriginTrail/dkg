@@ -65,7 +65,7 @@ Recorded before anything is built on them.
 ### Recommendation: (a) extension-hosted loopback HTTP bridge
 
 Full reasoning and the scoring matrix live in
-[`.ai/adr/0007-prime-agent-adapter-transport.md`](../../../.ai/adr/0007-prime-agent-adapter-transport.md).
+[`docs/adr/0007-prime-agent-adapter-transport.md`](../../../docs/adr/0007-prime-agent-adapter-transport.md).
 Summary of why it wins:
 
 - **It is the only option that attaches to a running session without touching an

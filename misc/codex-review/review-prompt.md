@@ -106,7 +106,7 @@ If any check fails, skip the comment.
 - Broad rewrite suggestions outside PR intent.
 - Repo-wide audits unrelated to changed behavior.
 
-For Codex-review-infrastructure files (`.github/workflows/codex-review.yml`, `.codex/review-prompt.md`, `.codex/review-schema.json`), only comment on clear blockers (broken workflow execution, security exposure, invalid schema). Skip maintainability nits for those files.
+For Codex-review-infrastructure files (`.github/workflows/codex-review.yml`, `misc/codex-review/review-prompt.md`, `misc/codex-review/review-schema.json`), only comment on clear blockers (broken workflow execution, security exposure, invalid schema). Skip maintainability nits for those files.
 
 ## Comment Format
 

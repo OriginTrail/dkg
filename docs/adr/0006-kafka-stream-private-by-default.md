@@ -54,6 +54,6 @@ public KAs.
 
 ## References
 
-- Superseded decision: `.ai/adr/0005-kafka-stream-public-partition.md`
+- Superseded decision: `docs/adr/0005-kafka-stream-public-partition.md`
 - EPCIS default-private precedent: `packages/epcis/src/handlers.ts`
 - Agent default visibility: `packages/agent/src/dkg-agent-utils.ts`
