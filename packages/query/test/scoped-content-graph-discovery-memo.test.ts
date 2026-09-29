@@ -106,6 +106,33 @@ describe('ScopedContentGraphDiscoveryMemo', () => {
     await expect(otherLane).resolves.toEqual(['urn:graph:ok']);
   });
 
+  it('can bypass in-flight sharing while retaining completed-cache reuse', async () => {
+    const firstGate = deferred<readonly string[]>();
+    const secondGate = deferred<readonly string[]>();
+    let loads = 0;
+    const memo = new ScopedContentGraphDiscoveryMemo(
+      revisionSource('all-writers', () => ({ generation: 1, stable: true })),
+    );
+    const load = () => {
+      loads += 1;
+      return loads === 1 ? firstGate.promise : secondGate.promise;
+    };
+
+    const first = memo.get({ ...REQUEST, coalesceInFlight: false, load });
+    const second = memo.get({ ...REQUEST, coalesceInFlight: false, load });
+    expect(loads).toBe(2);
+    firstGate.resolve(['urn:graph:first']);
+    secondGate.resolve(['urn:graph:second']);
+    await Promise.all([first, second]);
+
+    await memo.get({
+      ...REQUEST,
+      coalesceInFlight: false,
+      load: async () => { loads += 1; return ['urn:graph:unexpected']; },
+    });
+    expect(loads).toBe(2);
+  });
+
   it('isolates completed values and concurrent flights by authorization scope key', async () => {
     const code = deferred<readonly string[]>();
     const decisions = deferred<readonly string[]>();

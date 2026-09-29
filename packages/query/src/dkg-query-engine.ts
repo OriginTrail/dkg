@@ -114,10 +114,7 @@ function sharedDiscoveryStoreOptions(
   };
 }
 
-let nextMaterializationBudgetId = 0;
-
 class QueryMaterializationBudget {
-  readonly id = ++nextMaterializationBudgetId;
   private usedBytes = 0;
 
   constructor(readonly maxBytes: number) {}
@@ -133,18 +130,11 @@ class QueryMaterializationBudget {
 }
 
 function estimateStoreResultBytes(result: StoreQueryResult): number {
-  const strings: string[] = [];
-  if (result.type === 'bindings') {
-    if (result.variables) strings.push(...result.variables);
-    for (const row of result.bindings) strings.push(...Object.keys(row), ...Object.values(row));
-  } else if (result.type === 'quads') {
-    for (const quad of result.quads) {
-      strings.push(quad.subject, quad.predicate, quad.object, quad.graph);
-    }
-  } else {
-    return 1;
-  }
-  return strings.reduce((total, value) => total + Buffer.byteLength(value, 'utf8'), 0);
+  // Exact JSON encoding charges braces, delimiters, keys, empty rows, and
+  // escape expansion in addition to string payload. Summing complete internal
+  // responses is conservative for a later merged response because repeated
+  // envelopes are charged too.
+  return Buffer.byteLength(JSON.stringify(result), 'utf8');
 }
 
 interface StoreReadLane {
@@ -155,7 +145,10 @@ interface StoreReadLane {
 
 interface QueryStoreReadContext extends StoreReadLane {
   readonly signal: AbortSignal | undefined;
-  readonly shared: StoreReadLane & { readonly cacheKey: string };
+  readonly shared: StoreReadLane & {
+    readonly cacheKey: string;
+    readonly coalesceInFlight: boolean;
+  };
 }
 
 function createStoreReadLane(
@@ -193,11 +186,11 @@ function createQueryStoreReadContext(
         sharedOptions?.priority ?? 'normal',
         sharedOptions?.source ?? null,
         sharedOptions?.maxResponseBytes ?? null,
-        // A mutable cumulative budget cannot safely be captured by another
-        // request's in-flight discovery. Completed revision-gated results may
-        // still be reused because they perform no store materialization.
-        budget?.id ?? null,
       ]),
+      // The loader captures this request's cumulative budget. State that
+      // ownership explicitly instead of disguising request identity as a
+      // semantic cache-key dimension. Completed memo entries remain reusable.
+      coalesceInFlight: budget === undefined,
     },
   };
 }
@@ -1167,6 +1160,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       laneKey: reads.shared.cacheKey,
       graphPrefix,
       signal: reads.signal,
+      coalesceInFlight: reads.shared.coalesceInFlight,
       load: () => this.discoverScopedContentGraphAllowList(
         contextGraphId,
         reads.shared,

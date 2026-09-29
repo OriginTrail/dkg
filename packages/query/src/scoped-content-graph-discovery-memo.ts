@@ -13,6 +13,12 @@ export interface ScopedContentGraphDiscoveryRequest {
   laneKey: string;
   graphPrefix: string;
   signal?: AbortSignal;
+  /**
+   * Set false when load captures request-local mutable state such as a byte
+   * budget. Completed revision-gated values remain reusable, but the loader is
+   * never shared with another caller.
+   */
+  coalesceInFlight?: boolean;
   load: () => Promise<readonly string[]>;
 }
 
@@ -51,8 +57,10 @@ export class ScopedContentGraphDiscoveryMemo {
       request.laneKey,
       before.generation,
     ]);
-    const pending = this.inFlight.get(flightKey);
-    if (pending) return raceAgainstCallerAbort(pending, request.signal);
+    if (request.coalesceInFlight !== false) {
+      const pending = this.inFlight.get(flightKey);
+      if (pending) return raceAgainstCallerAbort(pending, request.signal);
+    }
 
     const promise = request.load().then((value) => {
       const after = this.revisionSource!.getWriteRevision(request.graphPrefix);
@@ -63,6 +71,9 @@ export class ScopedContentGraphDiscoveryMemo {
       }
       return value;
     });
+    if (request.coalesceInFlight === false) {
+      return raceAgainstCallerAbort(promise, request.signal);
+    }
     this.inFlight.set(flightKey, promise);
     void promise.finally(() => {
       if (this.inFlight.get(flightKey) === promise) this.inFlight.delete(flightKey);

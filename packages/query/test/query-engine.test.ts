@@ -10,6 +10,7 @@ import {
   asGraphWriteRevisionSource,
   type Quad,
   type QueryOptions as StoreQueryOptions,
+  type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -189,6 +190,27 @@ describe('DKGQueryEngine', () => {
     }
   });
 
+  it('charges structural JSON bytes for empty bindings', async () => {
+    const structuralStore = {
+      async query() {
+        return {
+          type: 'bindings' as const,
+          bindings: Array.from({ length: 128 }, () => ({})),
+        };
+      },
+    } as unknown as TripleStore;
+    const structuralEngine = new DKGQueryEngine(structuralStore);
+
+    await expect(structuralEngine.query(
+      'SELECT ?unbound WHERE { ?s ?p ?o }',
+      { maxResponseBytes: 100 },
+    )).rejects.toMatchObject({
+      code: 'STORE_RESPONSE_TOO_LARGE',
+      maxBytes: 100,
+      actualBytes: expect.any(Number),
+    });
+  });
+
   it('keeps caller cancellation out of shared graph-discovery flights', async () => {
     let releaseDiscovery!: () => void;
     const discoveryGate = new Promise<void>((resolve) => {
@@ -256,6 +278,53 @@ describe('DKGQueryEngine', () => {
     });
     expect(sharedStore.sharedOptions[0]?.signal).toBeUndefined();
     expect(secondController.signal.aborted).toBe(false);
+  });
+
+  it('isolates bounded discovery flights but reuses their completed result', async () => {
+    let releaseDiscovery!: () => void;
+    const discoveryGate = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
+    let bothStarted!: () => void;
+    const started = new Promise<void>((resolve) => { bothStarted = resolve; });
+
+    class BoundedFlightStore extends OxigraphStore {
+      sharedOptions: StoreQueryOptions[] = [];
+
+      async query(sparql: string, options?: StoreQueryOptions) {
+        if (sparql.includes('ontology/SubGraph')) {
+          this.sharedOptions.push(options ?? {});
+          if (this.sharedOptions.length === 2) bothStarted();
+          await discoveryGate;
+        }
+        return super.query(sparql, options);
+      }
+    }
+
+    const boundedStore = new BoundedFlightStore();
+    const boundedEngine = new DKGQueryEngine(boundedStore);
+    await boundedStore.insert([q('urn:bounded:s', 'http://schema.org/name', '"Bounded"', GRAPH)]);
+    const options = {
+      contextGraphId: CONTEXT_GRAPH,
+      includeContextGraphPartitions: true,
+      priority: 'background' as const,
+      source: 'api.query',
+      maxResponseBytes: 10 * 1024 * 1024,
+    };
+    const sparql =
+      'SELECT ?sourceGraph ?name WHERE { GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name } }';
+
+    const first = boundedEngine.query(sparql, options);
+    const second = boundedEngine.query(sparql, options);
+    await started;
+    releaseDiscovery();
+    await Promise.all([first, second]);
+    expect(boundedStore.sharedOptions).toHaveLength(2);
+    for (const seen of boundedStore.sharedOptions) {
+      expect(seen).toMatchObject({ maxResponseBytes: 10 * 1024 * 1024 });
+      expect(seen.signal).toBeUndefined();
+    }
+
+    await boundedEngine.query(sparql, options);
+    expect(boundedStore.sharedOptions).toHaveLength(2);
   });
 
   it('keeps caller cancellation out of GraphSetIndexStore refresh flights', async () => {
@@ -883,6 +952,25 @@ describe('DKGQueryEngine', () => {
       expect(result.quads).toBeDefined();
       const subjects = (result.quads ?? []).map((qd) => qd.subject).sort();
       expect(subjects).toEqual([E1, E2]);
+    });
+
+    it('enforces the cumulative budget for merged quad results', async () => {
+      const query = `CONSTRUCT { ?s <urn:out> ?v } WHERE {
+        { ?s <http://ex.org/p1> ?v } UNION { ?s <http://ex.org/p2> ?v }
+      }`;
+      await expect(engine.query(query, {
+        contextGraphId: CONTEXT_GRAPH,
+        view: 'verifiable-memory',
+        maxResponseBytes: 180,
+      })).rejects.toMatchObject({
+        code: 'STORE_RESPONSE_TOO_LARGE',
+        maxBytes: 180,
+      });
+      await expect(engine.query(query, {
+        contextGraphId: CONTEXT_GRAPH,
+        view: 'verifiable-memory',
+        maxResponseBytes: 1_000,
+      })).resolves.toMatchObject({ quads: expect.any(Array) });
     });
 
     it('ASK returns true when the pattern matches in ANY graph', async () => {
