@@ -55,17 +55,30 @@ type SweepTurn = SweepTurnBase & (
   }
 );
 
+export interface VmReconcileSweepPlannerOptions {
+  discoveryBatchSize: number;
+  periodicBoundBatchSize?: number;
+  maxOutstandingBound?: number;
+}
+
 /** Own real admissions and their completion handles throughout a discovery turn. */
 export class VmReconcileSweepPlanner {
   private readonly bound = new VmReconcileSweepSelector();
   private readonly unbound = new VmReconcileSweepSelector();
+  private readonly outstandingBound = new Set<Promise<unknown>>();
+  private readonly discoveryBatchSize: number;
+  private readonly periodicBoundBatchSize: number;
+  private readonly maxOutstandingBound: number;
   private turn: SweepTurn | undefined;
 
   constructor(
-    private readonly discoveryBatchSize: number,
+    options: VmReconcileSweepPlannerOptions,
     private readonly retainCapacity: VmReconcileSweepAdmission['retainCapacity'],
-    private readonly periodicBoundBatchSize = 8,
-  ) {}
+  ) {
+    this.discoveryBatchSize = options.discoveryBatchSize;
+    this.periodicBoundBatchSize = options.periodicBoundBatchSize ?? 8;
+    this.maxOutstandingBound = options.maxOutstandingBound ?? Number.POSITIVE_INFINITY;
+  }
 
   reset(): void {
     if (this.turn) this.finish(this.turn);
@@ -77,12 +90,12 @@ export class VmReconcileSweepPlanner {
   admit(
     boundKeys: readonly string[],
     unboundKeys: readonly string[],
-    tryAdmitBound: (key: string) => Promise<unknown> | undefined,
-    tryAdmitUnbound: (key: string) => Promise<unknown> | undefined = tryAdmitBound,
+    tryAdmit: (key: string) => Promise<unknown> | undefined,
   ): void {
     const turn = this.currentTurn();
+    if (turn.owner === 'completion') return;
     this.releaseTimerCapacity(turn);
-    this.advance(turn, boundKeys, unboundKeys, tryAdmitBound, tryAdmitUnbound);
+    this.advanceTimerTurn(turn, boundKeys, unboundKeys, tryAdmit);
     if (!turn.finished.signal.aborted) {
       turn.releaseTimerCapacity = this.retainCapacity(turn.finished.signal);
     }
@@ -108,8 +121,7 @@ export class VmReconcileSweepPlanner {
     const releaseCapacity = this.retainCapacity(waitingSignal);
     try {
       while (!turn.finished.signal.aborted && isActive() && !admission.isClosed()) {
-        this.advance(turn, boundKeys, unboundKeys,
-          key => isActive() ? admission.tryAdmit(key) : undefined,
+        this.advanceCompletionTurn(turn, unboundKeys,
           key => isActive() ? admission.tryAdmit(key) : undefined);
         if (turn.finished.signal.aborted || !isActive() || admission.isClosed()) break;
         // Successful admissions may wake another caller finishing this turn.
@@ -154,83 +166,145 @@ export class VmReconcileSweepPlanner {
     if (this.turn === turn) this.turn = undefined;
   }
 
-  private advance(
+  /** Only timer-owned bound work consumes the historical backlog allowance. */
+  private tryAdmitTimerBound(
+    key: string,
+    tryAdmit: (key: string) => Promise<unknown> | undefined,
+  ): Promise<unknown> | undefined {
+    if (this.outstandingBound.size >= this.maxOutstandingBound) return undefined;
+    const completion = tryAdmit(key);
+    if (completion === undefined) return undefined;
+    if (!this.outstandingBound.has(completion)) {
+      this.outstandingBound.add(completion);
+      void completion.then(
+        () => { this.outstandingBound.delete(completion); },
+        () => { this.outstandingBound.delete(completion); },
+      );
+    }
+    return completion;
+  }
+
+  private record(
+    turn: SweepTurn,
+    key: string,
+    tryAdmit: (key: string) => Promise<unknown> | undefined,
+    bound: boolean,
+  ): boolean {
+    const completion = tryAdmit(key);
+    if (completion === undefined) return false;
+    // Preserve the exact handle, including work coalesced with an earlier tick.
+    turn.completions.push(completion.catch(() => undefined));
+    turn.admittedKeys.add(key);
+    if (bound) turn.boundAdmissions++;
+    return true;
+  }
+
+  private admitLeadingBound(
+    turn: SweepTurn,
+    keys: readonly string[],
+    tryAdmit: (key: string) => Promise<unknown> | undefined,
+  ): boolean {
+    return keys.length === 0 || this.bound.admit(keys, 1,
+      key => this.record(turn, key, tryAdmit, true)) === 1;
+  }
+
+  private spendDiscovery(
+    turn: SweepTurn,
+    keys: readonly string[],
+    remaining: number,
+    tryAdmit: (key: string) => Promise<unknown> | undefined,
+  ): number {
+    let budget = Math.min(remaining, keys.length);
+    this.unbound.admit(keys, budget, key => {
+      if (!this.record(turn, key, tryAdmit, false)) return false;
+      budget--;
+      return true;
+    });
+    return budget;
+  }
+
+  private admitBoundTail(
+    turn: SweepTurn,
+    keys: readonly string[],
+    limit: number,
+    tryAdmit: (key: string) => Promise<unknown> | undefined,
+  ): { admitted: number; available: number } {
+    const tail = keys.filter(key => !turn.admittedKeys.has(key));
+    const admitted = limit === 0 ? 0 : this.bound.admit(tail,
+      Math.min(tail.length, limit), key => this.record(turn, key, tryAdmit, true));
+    return { admitted, available: tail.length };
+  }
+
+  /** A timer tick spends discovery independently, then fills only its bound allowance. */
+  private advanceTimerTurn(
     turn: SweepTurn,
     boundKeys: readonly string[],
     unboundKeys: readonly string[],
-    tryAdmitBound: (key: string) => Promise<unknown> | undefined,
-    tryAdmitUnbound: (key: string) => Promise<unknown> | undefined,
+    tryAdmit: (key: string) => Promise<unknown> | undefined,
   ): void {
-    if (turn.finished.signal.aborted) return;
-    const boundRotation = turn.owner === 'completion' ? turn.fullBoundKeys : boundKeys;
-    const accept = (key: string, tryAdmit: (key: string) => Promise<unknown> | undefined): boolean => {
-      const completion = tryAdmit(key);
-      if (completion === undefined) return false;
-      // Automatic failures are reported by the dispatcher. Retain each exact
-      // handle immediately, including work admitted by an earlier timer tick.
-      turn.completions.push(completion.catch(() => undefined));
-      return true;
-    };
-    let leadingBoundRejected = false;
+    if (turn.owner !== 'timer' || turn.finished.signal.aborted) return;
+    const timerBound = (key: string) => this.tryAdmitTimerBound(key, tryAdmit);
     if (turn.state.phase === 'leading') {
-      const count = this.bound.admit(boundRotation, 1, key => {
-        if (!accept(key, tryAdmitBound)) return false;
-        turn.admittedKeys.add(key);
-        turn.boundAdmissions++;
-        return true;
-      });
-      if (boundRotation.length > 0 && count === 0) {
-        if (turn.owner === 'completion') return;
-        leadingBoundRejected = true;
+      const remaining = turn.state.remainingDiscovery;
+      if (!this.admitLeadingBound(turn, boundKeys, timerBound)) {
+        // Keep the periodic capacity claim for dispatcher fairness. Discovery
+        // can still run, but the rejected bound key waits for the next tick.
+        turn.state = {
+          phase: 'leading',
+          remainingDiscovery: this.spendDiscovery(turn, unboundKeys, remaining, tryAdmit),
+        };
+        return;
       }
-      turn.state = {
-        phase: 'discovery',
-        remainingDiscovery: turn.state.remainingDiscovery,
-      };
+      turn.state = { phase: 'discovery', remainingDiscovery: remaining };
     }
     if (turn.state.phase === 'discovery') {
-      let remainingDiscovery = Math.min(
-        turn.state.remainingDiscovery,
-        unboundKeys.length,
+      const remaining = this.spendDiscovery(
+        turn, unboundKeys, turn.state.remainingDiscovery, tryAdmit,
       );
-      this.unbound.admit(unboundKeys, remainingDiscovery, key => {
-        if (!accept(key, tryAdmitUnbound)) return false;
-        turn.admittedKeys.add(key);
-        remainingDiscovery--;
-        return true;
-      });
-      if (remainingDiscovery > 0) {
-        turn.state = { phase: leadingBoundRejected ? 'leading' : 'discovery', remainingDiscovery };
+      if (remaining > 0) {
+        turn.state = { phase: 'discovery', remainingDiscovery: remaining };
         return;
       }
       turn.state = { phase: 'tail' };
     }
-    // A bound timer cap must not keep the independent discovery budget from
-    // running, and must not retry the same rejected bound key twice in one tick.
-    if (leadingBoundRejected) {
-      // Keep the periodic capacity claim while the dispatcher is full. The
-      // next timer tick must retry this bound key, and that retained claim is
-      // what gives it a turn after the foreground burst.
-      turn.state = { phase: 'leading', remainingDiscovery: 0 };
-      return;
-    }
-    const tail = boundRotation.filter(key => !turn.admittedKeys.has(key));
-    // The timer is a safety net, not an instruction to launch a pass for
-    // every historical graph at once. Retain the selector's round-robin cursor
-    // so a capped turn still reaches every graph across later ticks. Explicit
-    // completeSweep callers retain their full finite rotation contract.
-    const tailLimit = turn.owner === 'timer'
-      ? Math.max(0, this.periodicBoundBatchSize - turn.boundAdmissions)
-      : tail.length;
-    const count = tailLimit === 0 ? 0 : this.bound.admit(tail, Math.min(tail.length, tailLimit), key => {
-      if (!accept(key, tryAdmitBound)) return false;
-      turn.admittedKeys.add(key);
-      turn.boundAdmissions++;
-      return true;
-    });
-    if (turn.owner === 'completion' && count < tail.length) return;
-    // A timer's rejected tail leads its next discovery turn. Public callers
-    // retain the tail until admitted, so their finite selected rotation drains.
+    this.admitBoundTail(
+      turn,
+      boundKeys,
+      Math.max(0, this.periodicBoundBatchSize - turn.boundAdmissions),
+      timerBound,
+    );
+    // A rejected tail retains the selector's round-robin cursor for the next
+    // tick. Timer turns never own an unbounded completion drain.
     this.finish(turn);
   }
+
+  /** An explicit completion owns one full finite bound rotation and retries. */
+  private advanceCompletionTurn(
+    turn: SweepTurn,
+    unboundKeys: readonly string[],
+    tryAdmit: (key: string) => Promise<unknown> | undefined,
+  ): void {
+    if (turn.owner !== 'completion' || turn.finished.signal.aborted) return;
+    const boundKeys = turn.fullBoundKeys;
+    if (turn.state.phase === 'leading') {
+      if (!this.admitLeadingBound(turn, boundKeys, tryAdmit)) return;
+      turn.state = { phase: 'discovery', remainingDiscovery: turn.state.remainingDiscovery };
+    }
+    if (turn.state.phase === 'discovery') {
+      const remaining = this.spendDiscovery(
+        turn, unboundKeys, turn.state.remainingDiscovery, tryAdmit,
+      );
+      if (remaining > 0) {
+        turn.state = { phase: 'discovery', remainingDiscovery: remaining };
+        return;
+      }
+      turn.state = { phase: 'tail' };
+    }
+    const { admitted, available } = this.admitBoundTail(
+      turn, boundKeys, boundKeys.length, tryAdmit,
+    );
+    if (admitted < available) return;
+    this.finish(turn);
+  }
+
 }

@@ -90,7 +90,6 @@ export class VmReconcileDispatcher<T> {
   private readonly concurrency: number;
   private readonly maxPending: number;
   private readonly maxForegroundBurst: number;
-  private readonly boundTimerCompletions = new Set<Promise<T>>();
   constructor(
     private readonly run: (key: string, source: VmReconcileSource) => Promise<T>,
     private readonly onFailure: (key: string, error: unknown) => void,
@@ -156,21 +155,6 @@ export class VmReconcileDispatcher<T> {
     if (!('completion' in outcome)) return undefined;
     void outcome.completion.catch(() => undefined);
     return outcome.completion;
-  }
-
-  /** Limit only historical bound timer work; foreground occupancy never blocks fairness admission. */
-  protected tryDispatchBoundPeriodic(key: string): Promise<T> | undefined {
-    if (this.boundTimerCompletions.size >= 2 * this.concurrency) return undefined;
-    const completion = this.tryDispatchPeriodic(key);
-    if (completion === undefined) return undefined;
-    if (!this.boundTimerCompletions.has(completion)) {
-      this.boundTimerCompletions.add(completion);
-      void completion.then(
-        () => { this.boundTimerCompletions.delete(completion); },
-        () => { this.boundTimerCompletions.delete(completion); },
-      );
-    }
-    return completion;
   }
 
   protected waitForPeriodicStateChange(signal?: AbortSignal): Promise<void> {
@@ -490,8 +474,6 @@ class VmReconcileRuntimeDispatcher<T> extends VmReconcileDispatcher<T> {
     super(run, onFailure, options);
     installSweepAdmission(Object.freeze({
       tryAdmit: (key: string) => this.tryDispatchPeriodic(key),
-      tryAdmitBound: (key: string) => this.tryDispatchBoundPeriodic(key),
-      tryAdmitUnbound: (key: string) => this.tryDispatchPeriodic(key),
       waitForChange: (signal?: AbortSignal) => this.waitForPeriodicStateChange(signal),
       isClosed: () => this.closed,
       retainCapacity: (signal: AbortSignal) => this.retainPeriodicCapacity(signal),
@@ -523,11 +505,11 @@ export class VmReconcileSchedulingRuntime<T> {
       options,
       (admission) => { sweepAdmission = admission; },
     );
-    this.planner = new VmReconcileSweepPlanner(
-      options.discoveryBatchSize ?? 8,
-      sweepAdmission.retainCapacity,
-      options.periodicBoundBatchSize ?? 8,
-    );
+    this.planner = new VmReconcileSweepPlanner({
+      discoveryBatchSize: options.discoveryBatchSize ?? 8,
+      periodicBoundBatchSize: options.periodicBoundBatchSize ?? 8,
+      maxOutstandingBound: 2 * (options.concurrency ?? 1),
+    }, sweepAdmission.retainCapacity);
     this.sweepAdmission = sweepAdmission;
   }
 
@@ -556,8 +538,7 @@ export class VmReconcileSchedulingRuntime<T> {
     this.planner.admit(
       boundKeys,
       unboundKeys,
-      key => isCurrent() ? this.sweepAdmission.tryAdmitBound(key) : undefined,
-      key => isCurrent() ? this.sweepAdmission.tryAdmitUnbound(key) : undefined,
+      key => isCurrent() ? this.sweepAdmission.tryAdmit(key) : undefined,
     );
   }
 
