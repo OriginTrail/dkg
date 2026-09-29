@@ -3,6 +3,8 @@ import {
   decodeSparqlTsvSelectResult,
   SparqlTsvResultsShapeError,
 } from '../src/sparql-tsv-query-result.js';
+import { decodeSparqlJsonQueryResult } from '../src/sparql-json-query-result.js';
+import { SparqlResultsShapeError } from '../src/sparql-results-shape-error.js';
 
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 
@@ -37,6 +39,32 @@ describe('SPARQL TSV SELECT decoding', () => {
     expect(Object.getPrototypeOf(result.bindings[0])).toBe(Object.prototype);
   });
 
+  it('accepts and canonicalizes single-quoted Turtle short literals', () => {
+    const result = decodeSparqlTsvSelectResult(
+      "?plain\t?lang\t?typed\n'plain'\t'bonjour'@fr\t'7'^^<urn:test:type>\n",
+    );
+    expect(result.bindings).toEqual([{
+      plain: '"plain"',
+      lang: '"bonjour"@fr',
+      typed: '"7"^^<urn:test:type>',
+    }]);
+  });
+
+  it('normalizes equivalent JSON and TSV rows to the same public shape', () => {
+    const tsv = decodeSparqlTsvSelectResult(
+      '?iri\t?blank\t?literal\n<urn:test:i>\t_:b0\t\'bonjour\'@fr\n',
+    );
+    const json = decodeSparqlJsonQueryResult(JSON.stringify({
+      head: { vars: ['iri', 'blank', 'literal'] },
+      results: { bindings: [{
+        iri: { type: 'uri', value: 'urn:test:i' },
+        blank: { type: 'bnode', value: 'b0' },
+        literal: { type: 'literal', value: 'bonjour', 'xml:lang': 'fr' },
+      }] },
+    }), 'select');
+    expect(tsv).toEqual(json);
+  });
+
   it('supports zero-column result sets without inventing a binding', () => {
     expect(decodeSparqlTsvSelectResult('\n').bindings).toEqual([]);
     expect(decodeSparqlTsvSelectResult('\n\n').bindings).toEqual([{}]);
@@ -54,6 +82,19 @@ describe('SPARQL TSV SELECT decoding', () => {
 
   it('uses a stable typed error class', () => {
     expect(() => decodeSparqlTsvSelectResult('?v\nbad\n'))
+      .toThrow(SparqlTsvResultsShapeError);
+    expect(() => decodeSparqlTsvSelectResult('?v\nbad\n'))
+      .toThrow(SparqlResultsShapeError);
+  });
+
+  it.each([
+    '?v\n<relative>\n',
+    '?v\n<urn:test:\\q>\n',
+    '?v\n"x"^^<relative>\n',
+    '?v\n"x"^^<urn:test:\\q>\n',
+    '?v\n<urn:test:valid>\n<relative>\n',
+  ])('rejects unsafe value and datatype IRIs without cache bypass', (text) => {
+    expect(() => decodeSparqlTsvSelectResult(text))
       .toThrow(SparqlTsvResultsShapeError);
   });
 });

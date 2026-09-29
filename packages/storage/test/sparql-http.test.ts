@@ -15,6 +15,7 @@ import {
   type SparqlHttpResponseErrorLike,
   type SparqlHttpSlowQueryEvent,
 } from '../src/index.js';
+import { startOxigraphSparqlEndpoint } from './helpers/oxigraph-sparql-endpoint.js';
 
 let server: Server;
 let queryUrl: string;
@@ -1996,6 +1997,49 @@ describe('SparqlHttpStore compact SELECT transport', () => {
         .resolves.toMatchObject({ bindings: [{ v: 'urn:v' }] });
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  it('matches JSON bindings for TSV serialized from the real Oxigraph engine', async () => {
+    const endpoint = await startOxigraphSparqlEndpoint();
+    try {
+      const managed = createManagedOxigraphSparqlStoreV1({
+        queryEndpoint: endpoint.queryEndpoint,
+        updateEndpoint: endpoint.updateEndpoint,
+      });
+      const json = new SparqlHttpStore({
+        queryEndpoint: endpoint.queryEndpoint,
+        updateEndpoint: endpoint.updateEndpoint,
+        selectResultFormat: 'json',
+      });
+      await managed.insert([
+        { subject: '_:b0', predicate: 'urn:test:plain', object: '"line\\ntext"', graph: 'urn:test:g' },
+        { subject: '_:b0', predicate: 'urn:test:lang', object: '"bonjour"@fr', graph: 'urn:test:g' },
+        { subject: '_:b0', predicate: 'urn:test:typed', object: '"7"^^<urn:test:type>', graph: 'urn:test:g' },
+        { subject: 'urn:test:named', predicate: 'urn:test:plain', object: '"only plain"', graph: 'urn:test:g' },
+      ]);
+      const query = `SELECT ?s ?plain ?lang ?typed WHERE {
+        GRAPH <urn:test:g> {
+          ?s <urn:test:plain> ?plain .
+          OPTIONAL { ?s <urn:test:lang> ?lang }
+          OPTIONAL { ?s <urn:test:typed> ?typed }
+        }
+      } ORDER BY ?s`;
+
+      const [tsvResult, jsonResult] = await Promise.all([
+        managed.query(query),
+        json.query(query),
+      ]);
+      expect(tsvResult).toEqual(jsonResult);
+      expect(tsvResult).toMatchObject({
+        type: 'bindings',
+        bindings: [
+          expect.objectContaining({ plain: '"line\\ntext"', lang: '"bonjour"@fr' }),
+          { s: 'urn:test:named', plain: '"only plain"' },
+        ],
+      });
+    } finally {
+      await endpoint.close();
     }
   });
 });

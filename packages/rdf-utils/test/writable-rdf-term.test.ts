@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { parseRdfLiteralTerm, parseWritableRdfTerm } from '../src/index.js';
+import {
+  parseRdfLiteralTerm,
+  parseSparqlTsvResultTerm,
+  parseWritableRdfTerm,
+} from '../src/index.js';
 
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const kindOf = (term: string) => parseWritableRdfTerm(term)?.kind ?? null;
@@ -122,5 +126,28 @@ describe('parseWritableRdfTerm literals', () => {
     expect(parseRdfLiteralTerm('"form\ffeed"')).toBeNull();
     // Datatype policy belongs to the callers of the canonical parser.
     expect(parseRdfLiteralTerm('"42"^^<integer>')).toEqual({ kind: 'typed', value: '42', datatype: 'integer' });
+  });
+});
+
+describe('parseSparqlTsvResultTerm', () => {
+  it.each([
+    ["'plain'", { kind: 'literal', value: { kind: 'plain', value: 'plain' } }],
+    ["'bonjour'@fr", { kind: 'literal', value: { kind: 'language', value: 'bonjour', language: 'fr' } }],
+    ["'7'^^<urn:test:type>", { kind: 'literal', value: { kind: 'typed', value: '7', datatype: 'urn:test:type' } }],
+    ['<urn:test:\\u0061>', { kind: 'iri', value: 'urn:test:a' }],
+    ['42', { kind: 'literal', value: { kind: 'typed', value: '42', datatype: XSD_INTEGER } }],
+  ])('accepts TSV result term %j', (term, expected) => {
+    expect(parseSparqlTsvResultTerm(term)).toEqual(expected);
+  });
+
+  it.each([
+    'urn:test:bare',
+    '"x"^^urn:test:bare',
+    "'unterminated",
+    "'bad \\q'",
+    '<relative>',
+    '"x"^^<relative>',
+  ])('rejects non-TSV/result-only spelling %j', (term) => {
+    expect(parseSparqlTsvResultTerm(term)).toBeNull();
   });
 });

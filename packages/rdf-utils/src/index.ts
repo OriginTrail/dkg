@@ -109,7 +109,8 @@ export type RdfLiteralTerm =
   | { kind: 'language'; value: string; language: string }
   | { kind: 'typed'; value: string; datatype: string };
 
-export const XSD_STRING_DATATYPE = 'http://www.w3.org/2001/XMLSchema#string';
+const XSD_NAMESPACE = 'http://www.w3.org/2001/XMLSchema#';
+export const XSD_STRING_DATATYPE = `${XSD_NAMESPACE}string`;
 
 export type RdfLiteralLexicalTerm =
   | { body: string; suffix: { kind: 'plain' } }
@@ -410,6 +411,91 @@ export type WritableRdfTerm =
   | { kind: 'iri'; value: string }
   | { kind: 'blank-node'; value: string }
   | { kind: 'literal'; value: RdfLiteralTerm };
+
+/** One RDF term encoded in a SPARQL 1.1 TSV result cell. */
+export type SparqlTsvResultTerm = WritableRdfTerm;
+
+const SPARQL_TSV_INTEGER = /^[+-]?[0-9]+$/;
+const SPARQL_TSV_DECIMAL = /^[+-]?(?:[0-9]*\.[0-9]+)$/;
+const SPARQL_TSV_DOUBLE = /^[+-]?(?:(?:[0-9]+\.[0-9]*|\.[0-9]+)[eE][+-]?[0-9]+|[0-9]+[eE][+-]?[0-9]+)$/;
+
+/**
+ * Parse the RDF-term grammar used by SPARQL 1.1 TSV result cells. Unlike the
+ * publisher/write grammar, IRIs and datatype IRIs must use IRIREF brackets,
+ * both Turtle short-string delimiters are accepted, and numeric/boolean
+ * shorthands are expanded to their XML Schema datatypes.
+ */
+export function parseSparqlTsvResultTerm(term: string): SparqlTsvResultTerm | null {
+  if (term === 'true' || term === 'false') {
+    return {
+      kind: 'literal',
+      value: { kind: 'typed', value: term, datatype: `${XSD_NAMESPACE}boolean` },
+    };
+  }
+  const numericDatatype = SPARQL_TSV_INTEGER.test(term)
+    ? 'integer'
+    : SPARQL_TSV_DECIMAL.test(term)
+      ? 'decimal'
+      : SPARQL_TSV_DOUBLE.test(term)
+        ? 'double'
+        : undefined;
+  if (numericDatatype) {
+    return {
+      kind: 'literal',
+      value: { kind: 'typed', value: term, datatype: `${XSD_NAMESPACE}${numericDatatype}` },
+    };
+  }
+  if (term.startsWith('<') && term.endsWith('>')) {
+    const decoded = decodeNTriplesIriEscapesStrict(term.slice(1, -1));
+    return decoded !== null && isAbsoluteRfc3987IriV1(decoded)
+      ? { kind: 'iri', value: decoded }
+      : null;
+  }
+  if (term.startsWith('_:')) {
+    return BLANK_NODE_LABEL_PATTERN.test(term)
+      ? { kind: 'blank-node', value: term.slice(2) }
+      : null;
+  }
+  const literal = parseSparqlTsvShortLiteral(term);
+  return literal === null ? null : { kind: 'literal', value: literal };
+}
+
+function parseSparqlTsvShortLiteral(term: string): RdfLiteralTerm | null {
+  const delimiter = term[0];
+  if (delimiter !== '"' && delimiter !== "'") return null;
+  let closing = -1;
+  for (let index = 1; index < term.length; index += 1) {
+    const character = term[index];
+    if (character === '\n' || character === '\r') return null;
+    if (character === '\\') {
+      index += 1;
+      if (index >= term.length) return null;
+      continue;
+    }
+    if (character === delimiter) {
+      closing = index;
+      break;
+    }
+  }
+  if (closing < 0) return null;
+  const value = decodeRdfLiteralBody(term.slice(1, closing), {
+    combineSurrogatePairs: true,
+  });
+  if (value === null) return null;
+  const suffix = term.slice(closing + 1);
+  if (suffix === '') return { kind: 'plain', value };
+  if (suffix.startsWith('@')) {
+    const language = suffix.slice(1);
+    return RDF_LANGUAGE_TAG_PATTERN.test(language)
+      ? { kind: 'language', value, language }
+      : null;
+  }
+  if (!suffix.startsWith('^^<') || !suffix.endsWith('>')) return null;
+  const datatype = decodeNTriplesIriEscapesStrict(suffix.slice(3, -1));
+  return datatype !== null && isAbsoluteRfc3987IriV1(datatype)
+    ? { kind: 'typed', value, datatype }
+    : null;
+}
 
 /**
  * Parse one term of a quad written through a DKG write route, exactly as

@@ -20,7 +20,8 @@ import oxigraph from 'oxigraph';
 const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 
 function escapeLiteral(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+    .replace(/\t/g, '\\t').replace(/\n/g, '\\n').replace(/\r/g, '\\r');
 }
 
 function termToNT(t: oxigraph.Term): string {
@@ -113,6 +114,19 @@ export async function startOxigraphSparqlEndpoint(): Promise<OxigraphSparqlEndpo
         const rows = (Array.isArray(result) ? result : []) as Map<string, oxigraph.Term>[];
         const vars = new Set<string>();
         for (const row of rows) for (const k of row.keys()) vars.add(k);
+        if (accept.includes('tab-separated-values')) {
+          const variables = [...vars];
+          const header = variables.map((variable) => `?${variable}`).join('\t');
+          const bodyRows = rows.map((row) => variables
+            .map((variable) => {
+              const term = row.get(variable);
+              return term === undefined ? '' : termToNT(term);
+            })
+            .join('\t'));
+          res.writeHead(200, { 'Content-Type': 'text/tab-separated-values; charset=utf-8' });
+          res.end(`${[header, ...bodyRows].join('\n')}\n`);
+          return;
+        }
         const bindings = rows.map((row) => {
           const obj: Record<string, Record<string, string>> = {};
           for (const [k, v] of row.entries()) obj[k] = termToJson(v);
