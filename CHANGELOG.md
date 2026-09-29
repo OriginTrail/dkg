@@ -29,7 +29,10 @@ All notable changes to the DKG V10 node are documented here. The format is based
   and a write edits it in place, so comments and every key the write does
   not change keep their layout; a change the edit cannot make in place (one
   through an alias or a merge key) rewrites the whole file, without its
-  comments. The
+  comments. On such a node, `dkg mcp serve` and its inbox hook now read the
+  API port, token and default context graph from `config.yaml` under
+  `DKG_HOME`; without a `config.json` beside it, they used to read that file
+  as a workspace config and start with the default port and no token. The
   `dkg openclaw`, `dkg hermes` and `dkg mcp` setup commands still write
   `config.json` the old way.
 
