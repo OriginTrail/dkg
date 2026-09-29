@@ -884,7 +884,11 @@ export class VmPromotionMethods extends DKGAgentBase {
           .slice(index, index + DKGAgentBase.VM_PROMOTION_AUDIT_PROMOTED_BATCH_SIZE)
           .map(parseStorageAckLedgerCandidate)
           .filter((candidate): candidate is StorageAckLedgerCandidate => candidate !== null);
-        promotedCopies = await this.promotedStorageAckCopies(candidates);
+        promotedCopies = await this.promotedStorageAckCopies(candidates, active);
+        if (!active()) {
+          exhausted = true;
+          break;
+        }
       }
       const row = rows[index]!;
       const candidate = parseStorageAckLedgerCandidate(row);
@@ -1059,26 +1063,18 @@ export class VmPromotionMethods extends DKGAgentBase {
   async promotedStorageAckCopies(
     this: DKGAgent,
     candidates: readonly StorageAckLedgerCandidate[],
+    active: () => boolean = () => true,
   ): Promise<Set<string>> {
-    const byNamespace = new Map<string, StorageAckLedgerCandidate[]>();
-    for (const candidate of candidates) {
-      const group = byNamespace.get(candidate.namespace) ?? [];
-      group.push(candidate);
-      byNamespace.set(candidate.namespace, group);
-    }
     const promoted = new Set<string>();
-    for (const group of byNamespace.values()) {
-      for (let offset = 0; offset < group.length; offset += DKGAgentBase.VM_PROMOTION_AUDIT_PROMOTED_BATCH_SIZE) {
-        const batch = group.slice(offset, offset + DKGAgentBase.VM_PROMOTION_AUDIT_PROMOTED_BATCH_SIZE);
-        const result = await this.store.query(storageAckPromotedBatchQuery(batch), {
-          source: 'agent.vmPromotionAudit.promotedBatch',
-          priority: 'background',
-        });
-        if (result.type !== 'bindings') throw new Error('Promoted-copy batch query did not return bindings');
-        for (const row of result.bindings) {
-          if (row['op'] !== undefined) promoted.add(row['op']);
-        }
-      }
+    if (candidates.length === 0 || !active()) return promoted;
+    const result = await this.store.query(storageAckPromotedBatchQuery(candidates), {
+      source: 'agent.vmPromotionAudit.promotedBatch',
+      priority: 'background',
+    });
+    if (!active()) return promoted;
+    if (result.type !== 'bindings') throw new Error('Promoted-copy batch query did not return bindings');
+    for (const row of result.bindings) {
+      if (row['op'] !== undefined) promoted.add(row['op']);
     }
     return promoted;
   }

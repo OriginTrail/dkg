@@ -13,6 +13,7 @@
 import {
   contextGraphMetaUri,
   createGraphKnowledgeAssetScope,
+  assertSafeIri,
   isSafeIri,
   sparqlString,
   validateSubGraphName,
@@ -210,23 +211,26 @@ export function storageAckPromotedQuery(namespace: string, kaUal: string, versio
   } }`;
 }
 
-/** Check a bounded page of ledger copies in one VM graph with one store query. */
-export function storageAckPromotedBatchQuery(candidates: readonly StorageAckLedgerCandidate[]): string {
+/** Check one already-bounded audit slice across its exact VM metadata graphs. */
+export function storageAckPromotedBatchQuery(candidates: readonly Pick<
+  StorageAckLedgerCandidate, 'operationSubject' | 'namespace' | 'kaUal' | 'assertionVersion'
+>[]): string {
   if (candidates.length === 0) throw new Error('Promoted-copy batch must not be empty');
-  const namespace = candidates[0]!.namespace;
-  if (candidates.some((candidate) => candidate.namespace !== namespace)) {
-    throw new Error('Promoted-copy batch must contain one namespace');
-  }
-  const values = candidates.map((candidate) =>
-    `(<${candidate.operationSubject}> <${candidate.kaUal}> ${candidate.assertionVersion})`,
-  ).join('\n      ');
+  const values = candidates.map((candidate) => {
+    if (typeof candidate.assertionVersion !== 'bigint' || candidate.assertionVersion < 0n) {
+      throw new Error('Promoted-copy batch requires a non-negative assertion version');
+    }
+    return `(<${assertSafeIri(candidate.operationSubject)}> `
+      + `<${assertSafeIri(contextGraphMetaUri(candidate.namespace))}> `
+      + `<${assertSafeIri(candidate.kaUal)}> ${candidate.assertionVersion})`;
+  }).join('\n      ');
   // Keep the filter outside GRAPH: Oxigraph does not see the VALUES-bound
   // minimum inside the graph pattern, even though it sees the graph's version.
   return `SELECT DISTINCT ?op WHERE {
-    VALUES (?op ?ka ?minVersion) {
+    VALUES (?op ?graph ?ka ?minVersion) {
       ${values}
     }
-    GRAPH <${contextGraphMetaUri(namespace)}> {
+    GRAPH ?graph {
       ?ka <${DKG}status> "confirmed" ;
         <${DKG}assertionVersion> ?confirmedVersion .
     }

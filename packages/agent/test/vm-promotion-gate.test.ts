@@ -68,6 +68,7 @@ import {
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import type { ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
+import { parseStorageAckLedgerCandidate, storageAckPromotedBatchQuery } from '../src/vm-promotion-audit.js';
 
 const AUTHOR = '0x1111111111111111111111111111111111111111';
 const DKG = 'http://dkg.io/ontology/';
@@ -145,7 +146,7 @@ interface Internals {
     assertionVersion: bigint;
     signedAtMs: number;
     registered: boolean;
-  }[]): Promise<Set<string>>;
+  }[], active?: () => boolean): Promise<Set<string>>;
   isStorageAckCopyPromoted(candidate: {
     operationSubject: string;
     namespace: string;
@@ -873,6 +874,46 @@ describe('core VM-promotion guarantees', () => {
       for (let index = 0; index < 12; index += 1) {
         expect(examined.has(kaId(300 + index))).toBe(true);
       }
+    });
+
+    it('crosses the 64-copy batch boundary and classifies the next stale row', async () => {
+      setStatic('VM_PROMOTION_AUDIT_PAGE_SIZE', 70);
+      setStatic('VM_PROMOTION_AUDIT_MAX_CHAIN_CHECKS', 1);
+      const internals = await boot();
+      await internals.ensureStorageAckLedgerReady();
+      const reads = recorder(async () => 0n);
+      internals.chain.getKAContextGraphId = reads;
+      internals.chain.getMerkleRootCount = async () => 0n;
+      for (let index = 0; index < 65; index += 1) {
+        await seedCopy(internals.store, {
+          namespace: index % 2 === 0 ? 'batch-a' : 'batch-b',
+          n: 1000 + index,
+          ageMs: 2 * HOUR,
+          ...(index < 64 ? { confirmedVersion: 1 } : {}),
+        });
+      }
+      const queries = vi.spyOn(internals.store, 'query');
+      const status = await internals.runVmPromotionAudit();
+      expect(status).toMatchObject({ auditedCopies: 65, staleUnpromotedCopies: 1 });
+      expect(reads.calls).toEqual([[kaId(1064)]]);
+      expect(queries.mock.calls.filter(([, options]) =>
+        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(2);
+    });
+
+    it('does not prefetch the second slice after the chain budget is exhausted', async () => {
+      setStatic('VM_PROMOTION_AUDIT_PAGE_SIZE', 70);
+      setStatic('VM_PROMOTION_AUDIT_MAX_CHAIN_CHECKS', 1);
+      const internals = await boot();
+      await internals.ensureStorageAckLedgerReady();
+      internals.chain.getKAContextGraphId = async () => 0n;
+      internals.chain.getMerkleRootCount = async () => 0n;
+      for (let index = 0; index < 65; index += 1) {
+        await seedCopy(internals.store, { namespace: 'budget-cg', n: 2000 + index, ageMs: 2 * HOUR });
+      }
+      const queries = vi.spyOn(internals.store, 'query');
+      await internals.runVmPromotionAudit();
+      expect(queries.mock.calls.filter(([, options]) =>
+        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(1);
     });
   });
 
@@ -1812,7 +1853,52 @@ describe('core VM-promotion guarantees', () => {
       await expect(internals.isStorageAckCopyPromoted(candidates[0]!)).resolves.toBe(true);
       await expect(internals.promotedStorageAckCopies(candidates)).resolves.toEqual(new Set([a1.op, b1.op]));
       expect(query.mock.calls.filter(([, options]) =>
-        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(2);
+        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(1);
+    });
+
+    it('keeps unsafe operation IRIs out of the promoted batch formatter', async () => {
+      const unsafe = 'urn:op:bad> ?s ?p ?o . <urn:tail';
+      expect(parseStorageAckLedgerCandidate({
+        op: unsafe,
+        namespace: 'safe-cg',
+        ka: ual(301),
+        version: '"1"',
+        signedAt: xsdDateTimeLiteral(new Date()),
+      })).toBeNull();
+      expect(() => storageAckPromotedBatchQuery([{
+        operationSubject: unsafe,
+        namespace: 'safe-cg',
+        kaUal: ual(301),
+        assertionVersion: 1n,
+      }])).toThrow();
+      const internals = await boot();
+      const query = vi.spyOn(internals.store, 'query');
+      await expect(internals.promotedStorageAckCopies([{
+        operationSubject: 'urn:op:safe', namespace: 'safe-cg', kaUal: ual(302),
+        assertionVersion: 1n, signedAtMs: 0, registered: false,
+      }], () => false)).resolves.toEqual(new Set());
+      expect(query.mock.calls.filter(([, options]) =>
+        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(0);
+    });
+
+    it('discards a promoted batch result when the audit deactivates while the store query runs', async () => {
+      const internals = await boot();
+      const copy = await seedCopy(internals.store, {
+        namespace: 'batch-cancel', n: 303, ageMs: 2 * HOUR, version: 1, confirmedVersion: 1,
+      });
+      const original = internals.store.query.bind(internals.store);
+      let active = true;
+      const query = vi.spyOn(internals.store, 'query').mockImplementation(async (sparql, options) => {
+        const result = await original(sparql, options);
+        if (options?.source === 'agent.vmPromotionAudit.promotedBatch') active = false;
+        return result;
+      });
+      await expect(internals.promotedStorageAckCopies([{
+        operationSubject: copy.op, namespace: 'batch-cancel', kaUal: ual(303),
+        assertionVersion: 1n, signedAtMs: 0, registered: false,
+      }], () => active)).resolves.toEqual(new Set());
+      expect(query.mock.calls.filter(([, options]) =>
+        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(1);
     });
 
     it('passes over malformed, promoted, backed-off and targetless rows in both lanes', async () => {
