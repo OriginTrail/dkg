@@ -36,7 +36,12 @@ export class SparqlSelectResultNormalizer {
     this.datatypeValidators = Array.from({ length: cachedColumns }, createIriValidator);
   }
 
-  format(term: SparqlResultTerm, column: number, label: string): string {
+  format(
+    term: SparqlResultTerm,
+    column: number,
+    label: string,
+    canonical?: string,
+  ): string {
     if (term.kind === 'iri') return this.formatIri(term.value, column, label);
     if (term.kind === 'blank-node') return `_:${term.value}`;
     if (term.value.kind === 'typed') {
@@ -45,7 +50,7 @@ export class SparqlSelectResultNormalizer {
         this.reject(`${label} datatype must be an absolute safe IRI`);
       }
     }
-    return formatCanonicalRdfLiteralTerm(term.value);
+    return canonical ?? formatCanonicalRdfLiteralTerm(term.value);
   }
 
   /** Hot-path entry point for wire decoders that already isolated an IRIREF. */

@@ -141,6 +141,15 @@ describe('parseSparqlTsvResultTerm', () => {
   });
 
   it.each([
+    ['"plain"', "'plain'"],
+    ['"bonjour"@fr', "'bonjour'@fr"],
+    ['"7"^^<urn:test:type>', "'7'^^<urn:test:type>"],
+    ['<urn:test:a>', '<urn:test:\\u0061>'],
+  ])('normalizes optimized and fallback spellings identically', (fast, fallback) => {
+    expect(parseSparqlTsvResultTerm(fast)).toEqual(parseSparqlTsvResultTerm(fallback));
+  });
+
+  it.each([
     'urn:test:bare',
     '"x"^^urn:test:bare',
     "'unterminated",

@@ -1,0 +1,3 @@
+?s	?plain	?lang	?typed	?iri
+_:b4e54af253d96d5ba8c249e0dbe9743	"line\ntext"	"bonjour"@fr	"7"^^<urn:test:type>	<urn:test:value>
+<urn:test:named>	"only plain"			<urn:test:other>

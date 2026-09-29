@@ -114,19 +114,9 @@ export async function startOxigraphSparqlEndpoint(): Promise<OxigraphSparqlEndpo
         const rows = (Array.isArray(result) ? result : []) as Map<string, oxigraph.Term>[];
         const vars = new Set<string>();
         for (const row of rows) for (const k of row.keys()) vars.add(k);
-        if (accept.includes('tab-separated-values')) {
-          const variables = [...vars];
-          const header = variables.map((variable) => `?${variable}`).join('\t');
-          const bodyRows = rows.map((row) => variables
-            .map((variable) => {
-              const term = row.get(variable);
-              return term === undefined ? '' : termToNT(term);
-            })
-            .join('\t'));
-          res.writeHead(200, { 'Content-Type': 'text/tab-separated-values; charset=utf-8' });
-          res.end(`${[header, ...bodyRows].join('\n')}\n`);
-          return;
-        }
+        // This embedded engine does not expose Oxigraph's HTTP serializer.
+        // Always return JSON here; TSV compatibility is covered by checked-in
+        // wire captures from the repository-pinned oxigraph_server binary.
         const bindings = rows.map((row) => {
           const obj: Record<string, Record<string, string>> = {};
           for (const [k, v] of row.entries()) obj[k] = termToJson(v);

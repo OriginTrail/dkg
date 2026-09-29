@@ -1,13 +1,9 @@
 import {
-  parseSparqlTsvResultTerm,
+  normalizeSparqlTsvResultTerm,
 } from '@origintrail-official/dkg-rdf-utils';
 import { SparqlSelectResultNormalizer } from './sparql-select-result-normalizer.js';
 import { SparqlResultsShapeError } from './sparql-results-shape-error.js';
 import type { SelectResult } from './triple-store.js';
-
-const RAW_LITERAL_CONTROL = new RegExp(
-  `[${String.fromCodePoint(0)}-${String.fromCodePoint(31)}${String.fromCodePoint(127)}]`,
-);
 
 export class SparqlTsvResultsShapeError extends SparqlResultsShapeError {
   constructor(message: string) {
@@ -76,29 +72,11 @@ function formatTsvTerm(
   normalizer: SparqlSelectResultNormalizer,
 ): string {
   const label = `SPARQL TSV binding ${rowIndex}.${variable}`;
-  // These two forms dominate managed SELECT traffic. Keep the transport parser
-  // allocation-free while still routing IRI policy through the shared result
-  // normalizer. Escaped/suffixed/single-quoted terms use the complete grammar.
-  if (
-    cell.charCodeAt(0) === 60
-    && cell.charCodeAt(cell.length - 1) === 62
-    && !cell.includes('\\')
-  ) {
-    return normalizer.formatIri(cell.slice(1, -1), column, label);
-  }
-  if (
-    cell.charCodeAt(0) === 34
-    && cell.charCodeAt(cell.length - 1) === 34
-    && !cell.includes('\\')
-    && !RAW_LITERAL_CONTROL.test(cell)
-    && cell.indexOf('"', 1) === cell.length - 1
-  ) return cell;
-
-  const term = parseSparqlTsvResultTerm(cell);
-  if (term === null) {
+  const decoded = normalizeSparqlTsvResultTerm(cell);
+  if (decoded === null) {
     malformed(`${label} is not a valid RDF term`);
   }
-  return normalizer.format(term, column, label);
+  return normalizer.format(decoded.term, column, label, decoded.canonical);
 }
 
 function malformed(message: string): never {

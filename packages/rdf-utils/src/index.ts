@@ -123,35 +123,60 @@ export type RdfLiteralLexicalTerm =
 // This deliberately recognizes the broad literal boundary already accepted by
 // the consensus canonicalizer, including its legacy bare-datatype form. Callers
 // remain responsible for applying the narrower grammar their boundary requires.
-const RDF_LITERAL_LEXICAL_PATTERN =
-  /^"((?:[^"\\]|\\.)*)"(?:@([A-Za-z0-9-]+)|\^\^(?:<([^>]+)>|([^<].*)))?$/;
 const RDF_LITERAL_BODY_PATTERN =
   /^(?:[^"\\\u0000-\u0008\u000A-\u001F\u007F]|\\(?:[tbnrf"'\\]|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}))*$/;
 const RDF_LANGUAGE_TAG_PATTERN = /^[A-Za-z]+(?:-[A-Za-z0-9]+)*$/;
+const RDF_LANGUAGE_TAG_LEXICAL_PATTERN = /^[A-Za-z0-9-]+$/;
 
 /**
  * Split the broad RDF literal lexical form shared by storage parsing and hash
  * canonicalization. This does not validate or decode the literal body.
  */
 export function parseRdfLiteralLexicalTerm(term: string): RdfLiteralLexicalTerm | null {
-  const match = RDF_LITERAL_LEXICAL_PATTERN.exec(term);
-  if (!match) return null;
-  if (match[2] !== undefined) {
-    return { body: match[1], suffix: { kind: 'language', language: match[2] } };
+  return parseRdfLiteralLexicalTermWith(term, false);
+}
+
+/** One lexical scanner shared by canonical RDF and SPARQL TSV short strings. */
+function parseRdfLiteralLexicalTermWith(
+  term: string,
+  allowSingleQuoted: boolean,
+): RdfLiteralLexicalTerm | null {
+  const delimiter = term[0];
+  if (delimiter !== '"' && !(allowSingleQuoted && delimiter === "'")) return null;
+  let closing = -1;
+  for (let index = 1; index < term.length; index += 1) {
+    const character = term[index];
+    if (character === '\\') {
+      index += 1;
+      if (index >= term.length) return null;
+      continue;
+    }
+    if (character === delimiter) {
+      closing = index;
+      break;
+    }
   }
-  if (match[3] !== undefined) {
-    return {
-      body: match[1],
-      suffix: { kind: 'datatype', datatype: match[3], syntax: 'bracketed' },
-    };
+  if (closing < 0) return null;
+
+  const body = term.slice(1, closing);
+  const suffix = term.slice(closing + 1);
+  if (suffix === '') return { body, suffix: { kind: 'plain' } };
+  if (suffix.startsWith('@')) {
+    const language = suffix.slice(1);
+    return RDF_LANGUAGE_TAG_LEXICAL_PATTERN.test(language)
+      ? { body, suffix: { kind: 'language', language } }
+      : null;
   }
-  if (match[4] !== undefined) {
-    return {
-      body: match[1],
-      suffix: { kind: 'datatype', datatype: match[4], syntax: 'bare' },
-    };
+  if (!suffix.startsWith('^^')) return null;
+  const datatype = suffix.slice(2);
+  if (datatype.startsWith('<')) {
+    if (!datatype.endsWith('>')) return null;
+    const bracketed = datatype.slice(1, -1);
+    if (bracketed.length === 0 || bracketed.includes('>')) return null;
+    return { body, suffix: { kind: 'datatype', datatype: bracketed, syntax: 'bracketed' } };
   }
-  return { body: match[1], suffix: { kind: 'plain' } };
+  if (datatype.length === 0) return null;
+  return { body, suffix: { kind: 'datatype', datatype, syntax: 'bare' } };
 }
 
 /**
@@ -415,9 +440,57 @@ export type WritableRdfTerm =
 /** One RDF term encoded in a SPARQL 1.1 TSV result cell. */
 export type SparqlTsvResultTerm = WritableRdfTerm;
 
+export interface NormalizedSparqlTsvResultTerm {
+  /** Transport-neutral RDF term consumed by the shared result normalizer. */
+  readonly term: SparqlTsvResultTerm;
+  /** Canonical DKG string form, computed once inside the TSV grammar boundary. */
+  readonly canonical: string;
+}
+
 const SPARQL_TSV_INTEGER = /^[+-]?[0-9]+$/;
 const SPARQL_TSV_DECIMAL = /^[+-]?(?:[0-9]*\.[0-9]+)$/;
 const SPARQL_TSV_DOUBLE = /^[+-]?(?:(?:[0-9]+\.[0-9]*|\.[0-9]+)[eE][+-]?[0-9]+|[0-9]+[eE][+-]?[0-9]+)$/;
+const SPARQL_TSV_RAW_CONTROL_RANGE =
+  `${String.fromCodePoint(0)}-${String.fromCodePoint(31)}${String.fromCodePoint(127)}`;
+const SPARQL_TSV_FAST_PLAIN_LITERAL = new RegExp(
+  `^"[^"\\\\${SPARQL_TSV_RAW_CONTROL_RANGE}]*"$`,
+);
+
+/**
+ * Decode and canonically format one SPARQL TSV cell. Dominant unescaped
+ * Oxigraph forms are recognized here, while escaped and suffixed forms use the
+ * same parser and RDF formatter as every other caller.
+ *
+ * Unescaped IRIREFs are lexically isolated here and intentionally receive
+ * endpoint/safety validation in the transport-neutral result normalizer. The
+ * strict public parser below additionally applies RFC 3987 validation.
+ */
+export function normalizeSparqlTsvResultTerm(
+  encoded: string,
+): NormalizedSparqlTsvResultTerm | null {
+  if (SPARQL_TSV_FAST_PLAIN_LITERAL.test(encoded)) {
+    return {
+      term: { kind: 'literal', value: { kind: 'plain', value: encoded.slice(1, -1) } },
+      canonical: encoded,
+    };
+  }
+  if (
+    encoded.charCodeAt(0) === 60
+    && encoded.charCodeAt(encoded.length - 1) === 62
+    && !encoded.includes('\\')
+  ) {
+    const value = encoded.slice(1, -1);
+    return { term: { kind: 'iri', value }, canonical: value };
+  }
+  const term = parseSparqlTsvResultTerm(encoded);
+  if (term === null) return null;
+  const canonical = term.kind === 'iri'
+    ? term.value
+    : term.kind === 'blank-node'
+      ? `_:${term.value}`
+      : formatCanonicalRdfLiteralTerm(term.value);
+  return { term, canonical };
+}
 
 /**
  * Parse the RDF-term grammar used by SPARQL 1.1 TSV result cells. Unlike the
@@ -426,6 +499,12 @@ const SPARQL_TSV_DOUBLE = /^[+-]?(?:(?:[0-9]+\.[0-9]*|\.[0-9]+)[eE][+-]?[0-9]+|[
  * shorthands are expanded to their XML Schema datatypes.
  */
 export function parseSparqlTsvResultTerm(term: string): SparqlTsvResultTerm | null {
+  // Keep dominant managed-Oxigraph terms cheap, but keep the optimization
+  // inside this canonical grammar boundary so every transport caller receives
+  // the same structured RDF term and uses the same formatter/policy path.
+  if (SPARQL_TSV_FAST_PLAIN_LITERAL.test(term)) {
+    return { kind: 'literal', value: { kind: 'plain', value: term.slice(1, -1) } };
+  }
   if (term === 'true' || term === 'false') {
     return {
       kind: 'literal',
@@ -446,7 +525,10 @@ export function parseSparqlTsvResultTerm(term: string): SparqlTsvResultTerm | nu
     };
   }
   if (term.startsWith('<') && term.endsWith('>')) {
-    const decoded = decodeNTriplesIriEscapesStrict(term.slice(1, -1));
+    const encoded = term.slice(1, -1);
+    const decoded = encoded.includes('\\')
+      ? decodeNTriplesIriEscapesStrict(encoded)
+      : encoded;
     return decoded !== null && isAbsoluteRfc3987IriV1(decoded)
       ? { kind: 'iri', value: decoded }
       : null;
@@ -461,37 +543,20 @@ export function parseSparqlTsvResultTerm(term: string): SparqlTsvResultTerm | nu
 }
 
 function parseSparqlTsvShortLiteral(term: string): RdfLiteralTerm | null {
-  const delimiter = term[0];
-  if (delimiter !== '"' && delimiter !== "'") return null;
-  let closing = -1;
-  for (let index = 1; index < term.length; index += 1) {
-    const character = term[index];
-    if (character === '\n' || character === '\r') return null;
-    if (character === '\\') {
-      index += 1;
-      if (index >= term.length) return null;
-      continue;
-    }
-    if (character === delimiter) {
-      closing = index;
-      break;
-    }
-  }
-  if (closing < 0) return null;
-  const value = decodeRdfLiteralBody(term.slice(1, closing), {
+  const lexical = parseRdfLiteralLexicalTermWith(term, true);
+  if (!lexical || lexical.body.includes('\n') || lexical.body.includes('\r')) return null;
+  const value = decodeRdfLiteralBody(lexical.body, {
     combineSurrogatePairs: true,
   });
   if (value === null) return null;
-  const suffix = term.slice(closing + 1);
-  if (suffix === '') return { kind: 'plain', value };
-  if (suffix.startsWith('@')) {
-    const language = suffix.slice(1);
-    return RDF_LANGUAGE_TAG_PATTERN.test(language)
-      ? { kind: 'language', value, language }
+  if (lexical.suffix.kind === 'plain') return { kind: 'plain', value };
+  if (lexical.suffix.kind === 'language') {
+    return RDF_LANGUAGE_TAG_PATTERN.test(lexical.suffix.language)
+      ? { kind: 'language', value, language: lexical.suffix.language }
       : null;
   }
-  if (!suffix.startsWith('^^<') || !suffix.endsWith('>')) return null;
-  const datatype = decodeNTriplesIriEscapesStrict(suffix.slice(3, -1));
+  if (lexical.suffix.syntax !== 'bracketed') return null;
+  const datatype = decodeNTriplesIriEscapesStrict(lexical.suffix.datatype);
   return datatype !== null && isAbsoluteRfc3987IriV1(datatype)
     ? { kind: 'typed', value, datatype }
     : null;
