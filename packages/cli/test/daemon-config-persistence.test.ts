@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import yaml from 'js-yaml';
 import { loadConfig, updateConfigFile, type DkgConfig, type DkgConfigFileUpdate } from '../src/config.js';
+import { applyConfigEdits } from '../src/home-config-file.js';
 import { registerPublisherCommand } from '../src/commands/publisher.js';
 import {
   connectLocalAgentIntegration,
@@ -170,6 +171,33 @@ describe('daemon runtime settings', () => {
 
     expect(memoryManager.updateConfig.mock.calls).toEqual([[{ apiKey: 'first' }], [{ apiKey: 'second' }]]);
     expect(config.llm).toEqual({ apiKey: 'second' });
+  });
+
+  it('writes overlapping shared memory TTL changes one at a time, and applies them in the order they were requested', async () => {
+    const config = bootConfig();
+    const agent = { setSharedMemoryTtlMs: vi.fn() };
+    const ttl = createSharedMemoryTtlSetting({ config, agent });
+    const pending: Array<() => void> = [];
+    vi.mocked(updateConfigFile).mockImplementation(() => new Promise<DkgConfigFileUpdate>((resolve) => {
+      pending.push(() => resolve({ path: join(home, 'config.json'), changed: true, strategy: 'rename' }));
+    }));
+
+    const first = ttl.set(3_600_000);
+    const second = ttl.set(86_400_000);
+    for (let written = 1; written <= 2; written += 1) {
+      // Only one write is in flight: the next starts once this one is done.
+      await vi.waitFor(() => expect(pending).toHaveLength(1));
+      expect(updateConfigFile).toHaveBeenCalledTimes(written);
+      pending.pop()!();
+    }
+    await Promise.all([first, second]);
+
+    expect(agent.setSharedMemoryTtlMs.mock.calls).toEqual([[3_600_000], [86_400_000]]);
+    expect(config).toMatchObject({ sharedMemoryTtlMs: 86_400_000, workspaceTtlMs: 86_400_000 });
+    // The file as the two writes leave it, in the order they ran.
+    const file = vi.mocked(updateConfigFile).mock.calls
+      .reduce<Record<string, unknown>>((current, [edits]) => applyConfigEdits(current, edits).after, {});
+    expect(file).toEqual({ sharedMemoryTtlMs: 86_400_000, workspaceTtlMs: 86_400_000 });
   });
 
   // An operator's typo in config.json makes the write fail, as a lock
