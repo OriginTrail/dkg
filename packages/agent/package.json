@@ -40,6 +40,8 @@
     "./dist/rfc64/swm-author-inventory-producer-v1.js": "./dist/rfc64/swm-author-inventory-producer-v1.js",
     "./dist/rfc64/swm-inventory-catalog-reconciler-v1.js": null,
     "./dist/rfc64/swm-catalog-durable-asset-resolver-v1.js": null,
+    "./dist/rfc64/catalog-repair-diagnostics-v1.js": null,
+    "./dist/rfc64/catalog-repair-retry-v1.js": null,
     "./dist/rfc64/abort-v1.js": null,
     "./dist/rfc64/catalog-mutation-runtime-v1.js": null,
     "./dist/rfc64/catalog-replay-connection-runtime-v1.js": null,

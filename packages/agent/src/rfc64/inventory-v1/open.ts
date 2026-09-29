@@ -530,6 +530,14 @@ class InventoryV1Foundation implements Rfc64InventoryV1Foundation {
     return this.#candidate.compareAndSwapAppliedCatalogHeadV1(input);
   }
 
+  readSwmAuthorInventoryHeadDigestV1(
+    inventoryScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+  ): Digest32V1 | null {
+    this.requireOpen();
+    return this.#candidate.readSwmAuthorInventoryHeadDigestV1(inventoryScopeDigest, authorAddress);
+  }
+
   readSwmAuthorInventorySnapshotV1(
     inventoryScopeDigest: Digest32V1,
     authorAddress: EvmAddressV1,

@@ -31,6 +31,7 @@ import {
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
   computeACKDigest, computeContextGraphPolicyObjectDigestV1,
+  computeSwmAuthorInventoryScopeDigestV1,
   encodePublishRequest,
   encodeKAUpdateRequest,
   encodeGossipEnvelope,
@@ -1102,6 +1103,16 @@ export class DKGAgent extends DKGAgentBase {
           this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null)
             ?.acceptsFinalizedVmRepair === true
         ),
+        readRepairRevision: (contextGraphId, authorAddress) => {
+          const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
+          if (lane === null) return null;
+          const scopeDigest = computeSwmAuthorInventoryScopeDigestV1({
+            ...lane.scopeBase, authorAddress,
+          });
+          const headDigest = this.rfc64PersistenceV1?.swmAuthorInventory
+            .readSwmAuthorInventoryHeadDigestV1(scopeDigest, authorAddress) ?? null;
+          return JSON.stringify([lane.kind, lane.projectionTargetPolicy, scopeDigest, headDigest]);
+        },
         listFinalizedPrivateRepairs: () => (
           this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? []
         ),

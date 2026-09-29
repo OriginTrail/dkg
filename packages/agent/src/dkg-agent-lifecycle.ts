@@ -9453,6 +9453,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const receiverSelectionChanged = effects.receiverChanged;
     const recoverySelectionChanged = effects.recoveryChanged;
     if (!receiverSelectionChanged && !recoverySelectionChanged) return;
+    // Record the inactive edge synchronously: a same-tick resubscription can
+    // otherwise look like an unchanged active lane to repair backoff.
+    this.observeRfc64SwmCatalogProjectionLaneAvailabilityV1(contextGraphId);
     if (receiverSelectionChanged && !effects.nextReceiverActive) {
       this.rfc64PublicCatalogServiceV1?.deactivateReceiverContextGraph(contextGraphId);
       this.clearRfc64CatalogOperationalTargetsV1(contextGraphId);
@@ -9486,8 +9489,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         void this.replayRfc64CatalogToConnectedPeersV1(contextGraphId)
           .catch(() => undefined);
       }
-      // Re-entering the idempotent start boundary also dirties an existing
-      // failed repair for this newly active CG, including retryIntervalMs=0.
+      // The observed inactive edge makes this recovery eligible immediately,
+      // including retryIntervalMs=0; duplicate active starts retain cooldown.
       this.startRfc64SwmCatalogProjectionSupervisorV1(
         createOperationContext('system'),
       );
