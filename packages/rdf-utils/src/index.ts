@@ -13,8 +13,6 @@ const RDF_LITERAL_SHORT_ESCAPES: Readonly<Record<string, string>> = Object.freez
   '\\': '\\\\',
 });
 
-const RDF_LITERAL_ESCAPE_PATTERN = /["\\\u0000-\u001F\u007F]/g;
-
 const NTRIPLES_ECHAR_VALUES: Readonly<Record<string, string>> = Object.freeze({
   b: '\b',
   t: '\t',
@@ -97,11 +95,21 @@ export function decodeNTriplesIriEscapesPreservingLegacy(value: string): string 
  * Returns only the escaped body; callers add the surrounding quotes.
  */
 export function escapeRdfLiteral(value: string): string {
-  return value.replace(RDF_LITERAL_ESCAPE_PATTERN, (character) => {
+  let escaped = '';
+  let copyStart = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code > 0x1f && code !== 0x22 && code !== 0x5c && code !== 0x7f) continue;
+    const character = value[index];
     const shortEscape = RDF_LITERAL_SHORT_ESCAPES[character];
-    if (shortEscape !== undefined) return shortEscape;
-    return `\\u${character.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0')}`;
-  });
+    const replacement = shortEscape
+      ?? `\\u${code.toString(16).toUpperCase().padStart(4, '0')}`;
+    escaped += value.slice(copyStart, index) + replacement;
+    copyStart = index + 1;
+  }
+  // Most result literals need no escaping. Preserve the original string and
+  // avoid both callback setup and allocation on that path.
+  return copyStart === 0 ? value : escaped + value.slice(copyStart);
 }
 
 export type RdfLiteralTerm =
