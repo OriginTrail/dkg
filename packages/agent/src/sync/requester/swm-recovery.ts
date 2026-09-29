@@ -1,3 +1,4 @@
+import { withWorkspaceSnapshotWrites } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   withKeyedLocks,
@@ -364,8 +365,14 @@ async function fetchPhaseFully(
   };
 }
 
-export async function recoverContextGraphSwm(
+export function recoverContextGraphSwm(deps: RecoverContextGraphSwmDeps): Promise<RecoverContextGraphSwmResult> {
+  return withWorkspaceSnapshotWrites(deps.publicSnapshotStore, (snapshots, retain) =>
+    recoverContextGraphSwmWithLease({ ...deps, publicSnapshotStore: snapshots }, retain));
+}
+
+async function recoverContextGraphSwmWithLease(
   deps: RecoverContextGraphSwmDeps,
+  retainSnapshot: (ref: string) => Promise<boolean>,
 ): Promise<RecoverContextGraphSwmResult> {
   const admittedDeps: AdmittedRecoverContextGraphSwmDeps = {
     ...deps,
@@ -378,7 +385,7 @@ export async function recoverContextGraphSwm(
   return withKeyedLocks(
     deps.writeLocks,
     [contextGraphSwmRecoveryWriteLockKey(deps.contextGraphId)],
-    () => recoverContextGraphSwmUnlocked(admittedDeps, boundary),
+    () => recoverContextGraphSwmUnlocked(admittedDeps, boundary, retainSnapshot),
   );
 }
 
@@ -394,6 +401,7 @@ export function contextGraphSwmRecoveryWriteLockKey(contextGraphId: string): str
 async function recoverContextGraphSwmUnlocked(
   deps: AdmittedRecoverContextGraphSwmDeps,
   boundary: RecoveryExecutionAdmission,
+  retainSnapshot: (ref: string) => Promise<boolean>,
 ): Promise<RecoverContextGraphSwmResult> {
   boundary.assertCurrent();
   const wsGraph = contextGraphWorkspaceGraphUri(deps.contextGraphId);
@@ -635,6 +643,7 @@ async function recoverContextGraphSwmUnlocked(
         ? { snapshotWalk: privatePreparation.plan }
         : { metaQuads: activeGraphMeta }),
       publicSnapshotStore: deps.publicSnapshotStore,
+      retainSnapshot,
       // Raw ports: syncPublicSnapshotsForMeta is the sole owner of admission,
       // post-read checks, signal attachment, and checkpoint commits.
       fetchSyncPages: deps.fetchSyncPages,

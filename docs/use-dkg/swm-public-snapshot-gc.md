@@ -93,9 +93,12 @@ metadata. The background collector, on its existing five-minute interval:
    references without a graph-backed snapshot. Another operation/context graph
    referencing the same bytes prevents deletion.
 3. Excludes active readers, serving pages, and file-plus-metadata writes. Sync
-   recovery holds each touched file's lease through its final metadata commit.
-   Leases are shared between store instances using the same directory in the
-   process. A busy digest does not prevent collection of unrelated digests.
+   public and private recovery hold each touched file's lease through the final
+   metadata commit. Reused refs acquire an existing-file lease without decoding
+   the payload again; if collection already removed it, normal recovery fetches
+   it again before committing metadata. Leases are shared by physical directory
+   identity, including symlink/junction and case aliases. A busy digest does not
+   prevent collection of unrelated digests.
 4. Deletes the unreferenced `.nq`/legacy `.json` file, its cached validation/page
    index, and its persisted page-index row where the adapter supports deletion.
 5. Removes the retirement record last. An interrupted deletion can finish on the
@@ -126,8 +129,19 @@ RDF cleanup policy or make arbitrary operations eligible for retirement.
 
 Use one daemon per snapshot directory. Cross-process maintenance/CLI access is
 not protected by the process-local lease mechanism. Do not enable it on a
-directory concurrently used by another process. A custom snapshot store without
-the optional lifecycle methods keeps its own retention behavior.
+directory concurrently used by another process. Do not retarget a directory
+symlink/junction or replace its underlying directory while the process runs.
+A custom snapshot store without the optional `lifecycle` capability keeps its
+own retention behavior. That capability is complete (leasing, existing-file
+leasing, enabled state and retirement), rather than independent optional methods.
+
+The file store accepts `isSnapshotReferenced` once in its constructor options.
+Built-in agent and CLI composition roots supply it; direct SDK users creating a
+file store must pass `snapshotReferenceCheck(theTripleStore)` to enable collection.
+Without a checker, marked candidates are retained. Publisher construction does
+not mutate an injected store's reference checker. `FinalizedSnapshotCollector`
+owns marker persistence, bounded scheduling and reference checks; the file store
+supplies payload and derived-index removal.
 
 Existing unmarked files, legacy entity/root-scoped publishes, and candidates
 whose retirement record could not be saved remain under the original pressure

@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -53,7 +53,7 @@ describe('confirmed snapshot retirement', () => {
   it('survives a store restart and reclaims unreferenced files after grace without pressure', async () => {
     const check = vi.fn(async () => false);
     const f = await fixture(check);
-    await f.store.markPublishedSnapshots([digest]);
+    await f.store.lifecycle.markPublished([digest]);
     expect((await f.store.collectGarbage()).deletedSnapshots).toBe(0);
     expect(check).not.toHaveBeenCalled();
     f.advance();
@@ -70,7 +70,7 @@ describe('confirmed snapshot retirement', () => {
     const f = await fixture(snapshotReferenceCheck(rdf));
     await rdf.insert([{ graph: 'urn:other-context:metadata', subject: 'urn:pending-operation',
       predicate: 'http://dkg.io/ontology/publicSnapshotRef', object: JSON.stringify(digest.slice(7).toUpperCase()) }]);
-    await f.store.markPublishedSnapshots([digest]);
+    await f.store.lifecycle.markPublished([digest]);
     f.advance();
     expect((await f.store.collectGarbage()).referencedSnapshots).toBe(1);
     await expect(stat(f.path)).resolves.toBeDefined();
@@ -80,7 +80,7 @@ describe('confirmed snapshot retirement', () => {
 
   it('fails closed on a reference-check error, including under disk pressure', async () => {
     const f = await fixture(async () => { throw new Error('store unavailable'); });
-    await f.store.markPublishedSnapshots([digest]);
+    await f.store.lifecycle.markPublished([digest]);
     f.advance();
     f.pressure();
     expect(await f.store.collectGarbage()).toMatchObject({ triggered: true, failedDeletions: 1, deletedSnapshots: 0 });
@@ -90,7 +90,7 @@ describe('confirmed snapshot retirement', () => {
 
   it('does not delete when no reference checker is installed', async () => {
     const f = await fixture();
-    await f.store.markPublishedSnapshots([digest]);
+    await f.store.lifecycle.markPublished([digest]);
     f.advance();
     f.pressure();
     expect((await f.store.collectGarbage()).deletedSnapshots).toBe(0);
@@ -101,7 +101,7 @@ describe('confirmed snapshot retirement', () => {
     const checked = deferred();
     const answer = deferred();
     const f = await fixture(async () => { checked.resolve(); await answer.promise; return false; });
-    await f.store.markPublishedSnapshots([digest]);
+    await f.store.lifecycle.markPublished([digest]);
     f.advance();
     const collecting = f.store.collectGarbage();
     await checked.promise;
@@ -129,7 +129,7 @@ describe('confirmed snapshot retirement', () => {
     });
     await wrote.promise;
     // An older publication retires the same digest while the new metadata is pending.
-    await f.store.markPublishedSnapshots([digest]);
+    await f.store.lifecycle.markPublished([digest]);
     f.advance();
     expect((await f.store.collectGarbage()).deletedSnapshots).toBe(0);
     await expect(stat(f.path)).resolves.toBeDefined();
@@ -142,7 +142,7 @@ describe('confirmed snapshot retirement', () => {
     const checking = deferred();
     const finishCheck = deferred();
     const f = await fixture(async () => { checking.resolve(); await finishCheck.promise; return false; });
-    await f.store.markPublishedSnapshots([digest]);
+    await f.store.lifecycle.markPublished([digest]);
     f.advance();
     const collecting = f.store.collectGarbage();
     await checking.promise;
@@ -160,9 +160,9 @@ describe('confirmed snapshot retirement', () => {
     const otherQuads = makeQuads(1, 'other');
     const otherDigest = workspacePublicQuadsDigest(otherQuads);
     await f.store.putSnapshot({ digest: otherDigest, quads: otherQuads });
-    await f.store.markPublishedSnapshots([digest, otherDigest]);
+    await f.store.lifecycle.markPublished([digest, otherDigest]);
     f.advance();
-    const release = await f.open().acquireSnapshotLease(digest);
+    const release = await f.open().lifecycle.acquire(digest);
     expect((await f.store.collectGarbage()).finalizedSnapshots).toBe(1);
     await expect(stat(f.path)).resolves.toBeDefined();
     release();
@@ -172,7 +172,7 @@ describe('confirmed snapshot retirement', () => {
   it('also honors another store instance\'s lease during pressure collection', async () => {
     const f = await fixture(async () => false);
     f.pressure();
-    const release = await f.open().acquireSnapshotLease(digest);
+    const release = await f.open().lifecycle.acquire(digest);
     expect(await f.store.collectGarbage()).toMatchObject({ deletedSnapshots: 0, skippedActiveFiles: 1 });
     await expect(stat(f.path)).resolves.toBeDefined();
     release();
@@ -186,13 +186,13 @@ describe('confirmed snapshot retirement', () => {
     const otherQuads = makeQuads(1, 'pressure-marker');
     const otherDigest = workspacePublicQuadsDigest(otherQuads);
     await f.store.putSnapshot({ digest: otherDigest, quads: otherQuads });
-    await f.store.markPublishedSnapshots([otherDigest]);
+    await f.store.lifecycle.markPublished([otherDigest]);
     f.advance();
     f.pressure();
     const collecting = f.store.collectGarbage();
     await checking.promise;
     // This digest was unmarked in the collector's initial inventory.
-    await f.open().markPublishedSnapshots([digest]);
+    await f.open().lifecycle.markPublished([digest]);
     finishCheck.resolve();
     expect((await collecting).deletedSnapshots).toBe(0);
     await expect(stat(f.path)).resolves.toBeDefined();
@@ -200,7 +200,7 @@ describe('confirmed snapshot retirement', () => {
 
   it('cancels retirement when identical bytes are reused', async () => {
     const f = await fixture(async () => false);
-    await f.store.markPublishedSnapshots([digest]);
+    await f.store.lifecycle.markPublished([digest]);
     f.advance();
     await f.store.putSnapshot({ digest, quads });
     expect((await f.open().collectGarbage()).deletedSnapshots).toBe(0);
@@ -210,7 +210,7 @@ describe('confirmed snapshot retirement', () => {
   it('retains malformed records and retries a failed check on the next pass', async () => {
     const check = vi.fn().mockRejectedValueOnce(new Error('temporary outage')).mockResolvedValue(false);
     const f = await fixture(check);
-    await f.store.markPublishedSnapshots([digest]);
+    await f.store.lifecycle.markPublished([digest]);
     f.advance();
     const record = await readFile(f.marker, 'utf8');
     await writeFile(f.marker, '{broken');
@@ -228,7 +228,7 @@ describe('confirmed snapshot retirement', () => {
     await writeFile(join(lost, 'must-stay'), 'filesystem-owned');
     await chmod(lost, 0);
     try {
-      await f.store.markPublishedSnapshots([digest]);
+      await f.store.lifecycle.markPublished([digest]);
       f.advance();
       expect((await f.store.collectGarbage()).finalizedSnapshots).toBe(1);
     } finally { await chmod(lost, 0o700); }
@@ -244,13 +244,56 @@ describe('confirmed snapshot retirement', () => {
       getAvailableBytes: async () => 100 * GIB });
     stores.push(store);
     store.stopGarbageCollection();
-    await store.markPublishedSnapshots([digest]);
+    await store.lifecycle.markPublished([digest]);
     expect((await store.collectGarbage()).failedDeletions).toBe(1);
     await expect(stat(f.path)).rejects.toMatchObject({ code: 'ENOENT' });
     await expect(stat(f.marker)).resolves.toBeDefined();
     expect((await store.collectGarbage()).failedDeletions).toBe(0);
     expect(deleteIndex).toHaveBeenLastCalledWith(digest);
     await expect(stat(f.marker)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('honors the master opt-out even when finalized cleanup is explicitly enabled', async () => {
+    const f = await fixture();
+    const check = vi.fn(async () => false);
+    const space = vi.fn(async () => 0);
+    const store = new FileWorkspacePublicSnapshotStore(f.directory, undefined, {
+      gc: { enabled: false, finalizedCleanupEnabled: true, finalizedRetentionMs: 0 },
+      isSnapshotReferenced: check, getAvailableBytes: space,
+    });
+    stores.push(store);
+    expect(store.lifecycle.finalizedCleanupEnabled).toBe(false);
+    await store.lifecycle.markPublished([digest]);
+    await expect(stat(f.marker)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect((await store.collectGarbage()).deletedSnapshots).toBe(0);
+    expect(check).not.toHaveBeenCalled();
+    expect(space).not.toHaveBeenCalled();
+    await expect(stat(f.path)).resolves.toBeDefined();
+  });
+
+  it('shares the gate through symlink/junction and Windows case aliases', async () => {
+    const f = await fixture(async () => false);
+    const parent = await mkdtemp(join(tmpdir(), 'dkg-snapshot-alias-'));
+    directories.push(parent);
+    const alias = join(parent, 'alias');
+    await symlink(f.directory, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const other = new FileWorkspacePublicSnapshotStore(
+      process.platform === 'win32' ? alias.toUpperCase() : alias, undefined, { gc: { enabled: false } });
+    stores.push(other);
+    await f.store.lifecycle.markPublished([digest]); f.advance();
+    const release = await other.lifecycle.acquire(digest);
+    try { expect((await f.store.collectGarbage()).deletedSnapshots).toBe(0); }
+    finally { release(); }
+    expect((await f.store.collectGarbage()).finalizedSnapshots).toBe(1);
+  });
+
+  it('does not grant an existing-file lease when collection won first', async () => {
+    const f = await fixture(async () => false);
+    await f.store.lifecycle.markPublished([digest]); f.advance();
+    expect((await f.store.collectGarbage()).finalizedSnapshots).toBe(1);
+    await withWorkspaceSnapshotWrites(f.store, async (_snapshots, retain) => {
+      expect(await retain(digest)).toBe(false);
+    });
   });
 
   it('allows opting out of finalized cleanup without disabling pressure GC', async () => {
@@ -260,7 +303,7 @@ describe('confirmed snapshot retirement', () => {
     });
     stores.push(store);
     store.stopGarbageCollection();
-    await store.markPublishedSnapshots([digest]);
+    await store.lifecycle.markPublished([digest]);
     await expect(stat(f.marker)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });

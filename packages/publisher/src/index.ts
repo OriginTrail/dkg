@@ -501,6 +501,7 @@ export {
   type SnapshotPageIndexRecord,
   type SnapshotPageIndexStore,
   type WorkspacePublicSnapshotStore,
+  type WorkspaceSnapshotIO,
 } from './workspace-snapshot-store.js';
 export { acceptIncomingPublicQuads } from './incoming-public-copy.js';
 export { UpdateHandler } from './update-handler.js';
@@ -510,4 +511,4 @@ export { AccessClient, type AccessResult } from './access-client.js';
 export * from './share-batching.js';
 export { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 
-export { withWorkspaceSnapshotWrites } from './workspace-snapshot-lifecycle.js';
+export { withWorkspaceSnapshotWrites, snapshotReferenceCheck, type WorkspaceSnapshotLifecycle } from './workspace-snapshot-lifecycle.js';

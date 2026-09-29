@@ -1,3 +1,4 @@
+import { snapshotReferenceCheck } from '@origintrail-official/dkg-publisher';
 // daemon/lifecycle.ts
 //
 // `runDaemon` + `runDaemonInner` extracted verbatim from the legacy
@@ -1833,11 +1834,17 @@ async function runDaemonInnerWithStartupOwnership(
 
   const dashDb = new DashboardDB({ dataDir: dkgDir() });
   const snapshotPageIndexStore = new SqliteSnapshotPageIndexStore(dashDb);
+  // Installed once at construction; startup collection fails closed until the agent store exists.
+  let checkSnapshotReference: ((ref: string) => Promise<boolean>) | undefined;
   const publicSnapshotStore = createPublicSnapshotStore(
     dkgDir(),
     { sharedMemoryPublicSnapshotStorage: runtimeSnapshotStorage },
     snapshotPageIndexStore,
     log,
+    async ref => {
+      if (!checkSnapshotReference) throw new Error('Snapshot reference store is not ready');
+      return checkSnapshotReference(ref);
+    },
   );
   const chainCursorScope = chainBase?.type === 'mock'
     ? (chainBase.chainId ?? 'mock:31337')
@@ -2279,6 +2286,7 @@ async function runDaemonInnerWithStartupOwnership(
   }
   log(formatAuthorityIndexStartupLine(authorityIndexPlan));
   const agent = await DKGAgent.create(agentConfig);
+  checkSnapshotReference = snapshotReferenceCheck(agent.store);
 
   let publisherState: PublisherState = createInitialPublisherState(config);
   // Holds the running async-promote worker lifecycle (PR #3 of the

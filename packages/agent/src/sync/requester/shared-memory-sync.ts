@@ -445,10 +445,10 @@ function storedVersionOutranksDescriptor(stored: string, descriptorVersion: stri
 
 export function runSharedMemorySync(context: SharedMemorySyncContext): Promise<SharedMemorySyncSummary> {
   // Keep fetched/reused bytes alive through materialization and the final metadata commit.
-  return withWorkspaceSnapshotWrites(context.publicSnapshotStore, snapshots => runSharedMemorySyncWithLease({ ...context, publicSnapshotStore: snapshots }));
+  return withWorkspaceSnapshotWrites(context.publicSnapshotStore, (snapshots, retain) => runSharedMemorySyncWithLease({ ...context, publicSnapshotStore: snapshots }, retain));
 }
 
-async function runSharedMemorySyncWithLease(context: SharedMemorySyncContext): Promise<SharedMemorySyncSummary> {
+async function runSharedMemorySyncWithLease(context: SharedMemorySyncContext, retainSnapshot: (ref: string) => Promise<boolean>): Promise<SharedMemorySyncSummary> {
   const {
     ctx,
     remotePeerId,
@@ -1441,6 +1441,7 @@ async function runSharedMemorySyncWithLease(context: SharedMemorySyncContext): P
             recoveryOrder: snapshotRecoveryOrder,
           }),
         publicSnapshotStore,
+        retainSnapshot,
         fetchSyncPages,
         deleteCheckpoint,
         setCheckpoint,
@@ -1744,6 +1745,8 @@ export async function syncPublicSnapshotsForMeta(params: {
   /** Shared operation admission; legacy callers use their existing deadline. */
   workAdmission?: SyncWorkAdmission;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  /** Retain reused refs through the enclosing operation's metadata commit. */
+  retainSnapshot?: (ref: string) => Promise<boolean>;
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
@@ -1869,10 +1872,13 @@ export async function syncPublicSnapshotsForMeta(params: {
     // The owner decides which manifest-bound evidence this pass can reuse.
     // Avoid repeating blob and assertion validation when that owner has
     // already established it, leaving time for unresolved refs to advance.
-    if (reuse) {
+    if (reuse && (await params.retainSnapshot?.(snapshot.ref) ?? true)) {
+      executionBoundary.assertCurrent();
       readySnapshots += 1;
       continue;
     }
+    // Collection may have won before the reuse lease. Missing bytes follow the
+    // normal validation/fetch path; never commit metadata pointing at that gap.
     // Yield BETWEEN Knowledge Assets, and check the clock BEFORE doing any work
     // for this one. Both halves matter:
     //

@@ -1,3 +1,6 @@
+import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 /**
  * Public SWM catch-up snapshot MATERIALIZATION — the behavior that turns a
  * verified immutable snapshot into a stored per-KA assertion graph.
@@ -44,6 +47,7 @@ import {
 import { readSharedMemoryPhaseFailureAttribution } from '../src/sync/shared-memory-diagnostics.js';
 import {
   generateKnowledgeAssetShareMetadata,
+  FileWorkspacePublicSnapshotStore,
   workspacePublicQuadsDigest,
   withKeyedLocks,
   swmKaWriteLockKey,
@@ -80,7 +84,10 @@ class MemorySnapshotStore implements WorkspacePublicSnapshotStore {
 }
 
 function page(quads: Quad[], completed = true): SyncPageResult {
-  return { quads, bytesReceived: 0, resumedFromOffset: 0, nextOffset: quads.length, checkpointKey: 'k', completed, timedOut: false };
+  const fields = { quads, bytesReceived: 0, resumedFromOffset: 0, nextOffset: quads.length, checkpointKey: 'k' };
+  return completed
+    ? { ...fields, completed: true, timedOut: false }
+    : { ...fields, completed: false, timedOut: false };
 }
 
 /** One graph-scoped KA share: payload + the meta the strict parser demands. */
@@ -138,7 +145,7 @@ interface HarnessOverrides {
   reconcileDisposition?: 'preserve' | 'suppress-metadata';
   publisherPeerId?: string;
   additionalVerifiedMeta?: Quad[];
-  onStoreInsert?: () => void;
+  onStoreInsert?: () => void | Promise<void>;
   metadataFetcher?: SharedMemoryMetadataFetcher;
   recoveryGuard?: RecoveryExecutionGuard;
 }
@@ -207,12 +214,14 @@ function harness(overrides: HarnessOverrides = {}) {
         : {}),
       ensureContextGraph: async () => {},
       storeInsert: async (quads) => {
-        overrides.onStoreInsert?.();
+        await overrides.onStoreInsert?.();
         events.push('meta-inserted');
         inserted.push(quads);
       },
       snapshotMaterializer: {
         // Private-lane mutations are outside this public orchestration fixture.
+        readExactMaterializedGraph: async () => { throw new Error('unexpected private recovery'); },
+        replaceGraphWithAtomicCompanion: async () => { throw new Error('unexpected private recovery'); },
         preserveStoredIdentityForSkippedAsset: async () => { throw new Error('unexpected private recovery'); },
         replaceMetaForGraphAssets: async () => { throw new Error('unexpected private recovery'); },
         withKaWriteLock: async (contextGraphId, subGraphName, kaUal, fn) => {
@@ -280,8 +289,11 @@ describe('public SWM snapshot materialization', () => {
   it('holds snapshot leases through materialization and the final metadata write', async () => {
     let active = 0;
     const release = vi.fn(() => { active -= 1; });
-    const store: WorkspacePublicSnapshotStore = new MemorySnapshotStore();
-    store.acquireSnapshotLease = vi.fn(async () => { active += 1; return release; });
+    const acquire = vi.fn(async () => { active += 1; return release; });
+    const store: WorkspacePublicSnapshotStore = Object.assign(new MemorySnapshotStore(), {
+      lifecycle: { finalizedCleanupEnabled: false, acquire, acquireExisting: acquire,
+        markPublished: async () => {} },
+    });
     let checkedMetadata = false;
     const h = harness({
       snapshotStore: store,
@@ -690,4 +702,55 @@ describe('public SWM snapshot materialization', () => {
     expect(summary.failedPhases).toBe(1);
     expect(h.inserted.every((batch) => batch.every((q) => q.graph !== WS_META))).toBe(true);
   });
+});
+
+function barrier() {
+  let resolve!: () => void;
+  const promise = new Promise<void>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+it.each([false, true])('leases a reused public ref until metadata commits (collected first: %s)', async collectedFirst => {
+  const fx = fixture();
+  const directory = await mkdtemp(join(tmpdir(), 'dkg-public-reuse-'));
+  let referenced = false;
+  const snapshots = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+    gc: { finalizedCleanupEnabled: true, finalizedRetentionMs: 0 },
+    isSnapshotReferenced: async () => referenced,
+    getAvailableBytes: async () => 100 * 1024 ** 3,
+  });
+  snapshots.stopGarbageCollection();
+  const inserted = barrier(), commit = barrier();
+  try {
+    await snapshots.putSnapshot({ digest: fx.digest, quads: fx.payload });
+    await snapshots.lifecycle.markPublished([fx.digest]);
+    if (collectedFirst) expect((await snapshots.collectGarbage()).finalizedSnapshots).toBe(1);
+    const reads = vi.spyOn(snapshots, 'getSnapshot');
+    const validates = vi.spyOn(snapshots, 'validateSnapshot');
+    const walk: SharedMemorySnapshotWalkContinuation = {
+      prepare: () => ({ entries: [{ snapshot: { ref: fx.digest, digest: fx.digest, count: fx.payload.length }, reuse: true }] }),
+      resolvedRefsSnapshot: () => [fx.digest],
+      suppressedMetadataRows: () => [], markResolved: () => {},
+    };
+    const h = harness({ snapshotStore: snapshots, preseedSnapshot: false,
+      metadataFetcher: { fetch: async () => ({ result: page(fx.meta), continuationYielded: false }),
+        release: () => {}, snapshotWalk: () => walk },
+      onStoreInsert: async () => { inserted.resolve(); await commit.promise; referenced = true; },
+    });
+    const running = h.run();
+    // Surface a failure before the barrier rather than waiting for the test timeout.
+    await Promise.race([inserted.promise, running.then(() => { throw new Error('No metadata commit'); })]);
+    // A second retirement can arrive even when the missing-file path rewrote the bytes.
+    await snapshots.lifecycle.markPublished([fx.digest]);
+    expect((await snapshots.collectGarbage()).deletedSnapshots).toBe(0);
+    const hash = fx.digest.slice(7);
+    await expect(stat(join(directory, hash.slice(0, 2), hash.slice(2, 4), `${hash}.nq`))).resolves.toBeDefined();
+    if (!collectedFirst) { expect(reads).not.toHaveBeenCalled(); expect(validates).not.toHaveBeenCalled(); }
+    commit.resolve();
+    expect((await running).failedPhases).toBe(0);
+    expect(h.snapshotFetches).toHaveLength(collectedFirst ? 1 : 0);
+    expect((await snapshots.collectGarbage()).referencedSnapshots).toBe(1);
+    referenced = false;
+    expect((await snapshots.collectGarbage()).finalizedSnapshots).toBe(1);
+  } finally { commit.resolve(); snapshots.stopGarbageCollection(); await rm(directory, { recursive: true, force: true }); }
 });

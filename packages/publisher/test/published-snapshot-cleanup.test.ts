@@ -8,6 +8,7 @@ import { TypedEventBus, createGraphKnowledgeAssetScope, createOperationContext, 
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import { FileWorkspacePublicSnapshotStore, workspacePublicQuadsDigest } from '../src/workspace-snapshot-store.js';
+import { snapshotReferenceCheck } from '../src/workspace-snapshot-lifecycle.js';
 import { makeQuads, snapshotPath } from './_helpers/workspace-snapshot-store.js';
 
 const AUTHOR = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
@@ -20,13 +21,14 @@ const cleanups: (() => Promise<void>)[] = [];
 
 afterEach(async () => { for (const cleanup of cleanups.splice(0)) await cleanup(); });
 
-async function fixture(finalizedCleanupEnabled = true) {
+async function fixture(finalizedCleanupEnabled = true, enabled = true) {
   const directory = await mkdtemp(join(tmpdir(), 'dkg-published-snapshot-'));
   const store = new OxigraphStore();
   let now = 100_000;
   const snapshots = new FileWorkspacePublicSnapshotStore(directory, undefined, {
-    gc: { finalizedCleanupEnabled, finalizedRetentionMs: 1_000 }, now: () => now,
+    gc: { enabled, finalizedCleanupEnabled, finalizedRetentionMs: 1_000 }, now: () => now,
     getAvailableBytes: async () => 100 * 1024 ** 3,
+    isSnapshotReferenced: snapshotReferenceCheck(store),
   });
   snapshots.stopGarbageCollection();
   cleanups.push(async () => { snapshots.stopGarbageCollection(); await rm(directory, { recursive: true, force: true }); });
@@ -57,8 +59,8 @@ async function fixture(finalizedCleanupEnabled = true) {
 }
 
 describe('published snapshot cleanup integration', () => {
-  it('adds no reference-discovery query when finalized cleanup is disabled', async () => {
-    const f = await fixture(false);
+  it.each([[false, true], [true, false]])('avoids discovery with feature=%s and master=%s', async (feature, master) => {
+    const f = await fixture(feature, master);
     const asset = await f.seed(41);
     const query = vi.spyOn(f.store, 'query');
     await asset.clear();
@@ -110,7 +112,7 @@ describe('published snapshot cleanup integration', () => {
   it('does not turn a durable publish cleanup into an error when the retirement record cannot be saved', async () => {
     const f = await fixture();
     const asset = await f.seed(41);
-    vi.spyOn(f.snapshots, 'markPublishedSnapshots').mockRejectedValueOnce(new Error('disk error'));
+    vi.spyOn(f.snapshots.lifecycle, 'markPublished').mockRejectedValueOnce(new Error('disk error'));
     await expect(asset.clear()).resolves.toBeUndefined();
     expect(await f.store.countQuads(asset.swm)).toBe(0);
     expect(await f.store.countQuads(asset.vm)).toBe(quads.length);

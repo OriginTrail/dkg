@@ -1,4 +1,3 @@
-import { snapshotReferenceCheck } from './workspace-snapshot-lifecycle.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
 import type { PreBroadcastRecord } from './publisher.js';
@@ -1243,7 +1242,6 @@ export class DKGPublisher implements Publisher {
     this.setWorkspaceAgentRecipientResolver(config.workspaceAgentRecipientResolver);
     this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
     this.publicSnapshotStore = config.publicSnapshotStore;
-    this.publicSnapshotStore?.setSnapshotReferenceCheck?.(snapshotReferenceCheck(this.store));
     this.publisherPlanner = new PublisherPlanner({
       chain: this.chain,
       resolvePublisherAddressSelection: (contextGraphId, options) =>
@@ -7596,8 +7594,8 @@ export class DKGPublisher implements Publisher {
     operationSubjects: readonly string[],
     ctx: OperationContext,
   ): Promise<void> {
-    if (!this.publicSnapshotStore?.markPublishedSnapshots || operationSubjects.length === 0) return;
-    if (this.publicSnapshotStore.isFinalizedCleanupEnabled?.() === false) return;
+    const lifecycle = this.publicSnapshotStore?.lifecycle;
+    if (!lifecycle?.finalizedCleanupEnabled || operationSubjects.length === 0) return;
     try {
       const result = await this.store.query(`SELECT DISTINCT ?ref WHERE {
         GRAPH <${assertSafeIri(metaGraph)}> {
@@ -7610,7 +7608,7 @@ export class DKGPublisher implements Publisher {
       if (result.type !== 'bindings') throw new Error('Snapshot retirement lookup did not return bindings');
       const refs = result.bindings.map(row => row['ref']?.match(/^"((?:sha256:)?[a-fA-F0-9]{64})"/)?.[1])
         .filter((ref): ref is string => ref !== undefined);
-      await this.publicSnapshotStore.markPublishedSnapshots(refs);
+      await lifecycle.markPublished(refs);
     } catch (error) {
       // Confirmed publication must not be reported as failed because file GC is unavailable.
       this.log.warn(ctx, `Could not schedule finalized snapshot cleanup: ${error instanceof Error ? error.message : String(error)}`);

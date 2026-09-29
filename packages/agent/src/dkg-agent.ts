@@ -1571,7 +1571,7 @@ export class DKGAgent extends DKGAgentBase {
     const workspaceOwnedEntities = new Map<string, Map<string, string>>();
     const writeLocks = new Map<string, Promise<void>>();
     const publicSnapshotStore = config.publicSnapshotStore
-      ?? createPublicSnapshotStore(config.dataDir, config.sharedMemoryPublicSnapshotStorage);
+      ?? createPublicSnapshotStore(config.dataDir, config.sharedMemoryPublicSnapshotStorage, store);
     const legacyAdapterOperationalKey = opKeys?.[0];
     const legacyAdapterOperationalAddress = privateKeyAddress(legacyAdapterOperationalKey);
     const configuredPublisherAddress = normalizeAdapterPublisherAddress(config.publisherAddress);

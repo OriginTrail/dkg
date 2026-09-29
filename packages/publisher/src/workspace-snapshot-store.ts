@@ -1,6 +1,6 @@
+import { FinalizedSnapshotCollector, SNAPSHOT_RETIREMENT_PATTERN } from './finalized-snapshot-collector.js';
 import {
   mkdir,
-  readFile,
   readdir,
   rename,
   stat,
@@ -8,14 +8,14 @@ import {
   unlink,
   writeFile,
 } from 'node:fs/promises';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { Dirent } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { withSnapshotSource, readSnapshotSource, readSnapshotFileIdentity, sameSnapshotSource, sameSnapshotFileIdentity, snapshotPath, SnapshotSourceChangedError, type OpenedSnapshotSource, type SnapshotFileSource, type SnapshotFileIdentity, type SnapshotFileReader } from './workspace-snapshot-source.js';
 import { BoundedLruCache } from '@origintrail-official/dkg-core';
-import { snapshotLifecycleGate } from './workspace-snapshot-lifecycle.js';
+import { snapshotHash, snapshotLifecycleGate, type WorkspaceSnapshotLifecycle } from './workspace-snapshot-lifecycle.js';
 
 export interface SharedMemoryPublicSnapshotStorageConfig {
   enabled?: boolean;
@@ -73,12 +73,13 @@ export interface FileWorkspacePublicSnapshotStoreOptions {
   readonly isSnapshotReferenced?: (ref: string) => Promise<boolean>;
 }
 
-export interface WorkspacePublicSnapshotStore {
-  /** Optional lifecycle support; custom stores keep their existing retention policy. */
-  acquireSnapshotLease?(ref: string): Promise<() => void>;
-  isFinalizedCleanupEnabled?(): boolean;
-  setSnapshotReferenceCheck?(check: (ref: string) => Promise<boolean>): void;
-  markPublishedSnapshots?(refs: readonly string[]): Promise<void>;
+export interface WorkspacePublicSnapshotStore extends WorkspaceSnapshotIO {
+  /** All-or-nothing lifecycle capability; custom I/O stores retain their own policy. */
+  readonly lifecycle?: WorkspaceSnapshotLifecycle;
+}
+
+/** Snapshot bytes only: the scoped-write facade deliberately exposes this port. */
+export interface WorkspaceSnapshotIO {
   putSnapshot(input: {
     readonly digest: string;
     readonly quads: readonly Quad[];
@@ -134,8 +135,6 @@ const DEFAULT_SNAPSHOT_GC_REFERENCE_FILESYSTEM_BYTES = 75 * GIB;
 const SNAPSHOT_FILE_PATTERN = /^([a-f0-9]{64})\.(?:nq|json)$/i;
 const SNAPSHOT_TEMP_FILE_PATTERN = /^([a-f0-9]{64})\.(?:nq|json|retired)\.\d+\.[a-f0-9-]+\.tmp$/i;
 const SNAPSHOT_FILE_STAT_CONCURRENCY = 64;
-const SNAPSHOT_RETIREMENT_PATTERN = /^([a-f0-9]{64})\.retired$/i;
-const FINALIZED_COLLECTION_BATCH = 32;
 
 interface ResolvedSnapshotGarbageCollectionConfig {
   enabled: boolean;
@@ -205,8 +204,8 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
   private garbageCollectionRun?: Promise<SnapshotGarbageCollectionResult>;
   private garbageCollectionRequiredWriteBytes = 0;
   private readonly lifecycleGate: ReturnType<typeof snapshotLifecycleGate>;
-  private isSnapshotReferenced?: (ref: string) => Promise<boolean>;
-  private retirementCursor = '';
+  readonly lifecycle: WorkspaceSnapshotLifecycle;
+  private readonly finalizedCollector: FinalizedSnapshotCollector;
 
   constructor(
     private readonly directory: string,
@@ -214,7 +213,6 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     options: FileWorkspacePublicSnapshotStoreOptions = {},
   ) {
     this.lifecycleGate = snapshotLifecycleGate(directory);
-    this.isSnapshotReferenced = options.isSnapshotReferenced;
     this.gcConfig = resolveSnapshotGarbageCollectionConfig(options.gc);
     this.log = options.log;
     const getAvailableBytes = options.getAvailableBytes;
@@ -226,6 +224,41 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
         })
         : filesystemSpace);
     this.now = options.now ?? Date.now;
+    const enabled = this.gcConfig.enabled && this.gcConfig.finalizedCleanupEnabled;
+    this.finalizedCollector = new FinalizedSnapshotCollector(directory, this.lifecycleGate, this.now, {
+      enabled, retentionMs: this.gcConfig.finalizedRetentionMs,
+      isSnapshotReferenced: options.isSnapshotReferenced, log: this.log,
+      removePayloads: async (hash, removed) => {
+        for (const format of ['nq', 'json'] as const) {
+          try {
+            const path = snapshotPath(this.directory, hash, format);
+            const file = await stat(path);
+            if (!file.isFile()) throw new Error('Snapshot retirement target is not a file');
+            await unlink(path);
+            removed(file.size);
+          } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+        }
+      },
+      removeDerivedState: async hash => {
+        this.pageIndexCache.delete(hash);
+        this.validationCache.delete(hash);
+        await this.pageIndexStore?.delete?.(`sha256:${hash}`);
+      },
+    });
+    this.lifecycle = {
+      finalizedCleanupEnabled: enabled,
+      acquire: ref => this.lifecycleGate.acquire(snapshotHash(ref)),
+      acquireExisting: async ref => {
+        const hash = snapshotHash(ref);
+        const release = await this.lifecycleGate.acquire(hash);
+        try {
+          if (await withSnapshotSource(this.directory, hash, async source => source !== null)) return release;
+          release();
+          return undefined;
+        } catch (error) { release(); throw error; }
+      },
+      markPublished: refs => this.finalizedCollector.markPublishedSnapshots(refs),
+    };
     if (this.gcConfig.enabled) {
       this.gcTimer = setInterval(() => {
         void this.collectGarbage().then((result) => {
@@ -268,7 +301,7 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     hash: string,
   ): Promise<{ readonly ref: string; readonly byteLength: number }> {
     // Reuse is a new lifetime too; an earlier publish must not retire this use.
-    await this.removeRetirement(hash);
+    await this.finalizedCollector.cancel(hash);
     const filePath = snapshotPath(this.directory, hash, 'nq');
     const existingByteLength = await existingFileSize(filePath);
     if (existingByteLength !== null) {
@@ -400,114 +433,6 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     if (this.gcTimer) clearInterval(this.gcTimer);
   }
 
-  acquireSnapshotLease(ref: string): Promise<() => void> {
-    return this.lifecycleGate.acquire(snapshotHash(ref));
-  }
-
-  isFinalizedCleanupEnabled(): boolean {
-    return this.gcConfig.enabled && this.gcConfig.finalizedCleanupEnabled;
-  }
-
-  setSnapshotReferenceCheck(check: (ref: string) => Promise<boolean>): void {
-    this.isSnapshotReferenced = check;
-  }
-
-  async markPublishedSnapshots(refs: readonly string[]): Promise<void> {
-    if (!this.isFinalizedCleanupEnabled()) return;
-    for (const hash of new Set(refs.map(snapshotHash))) {
-      await this.lifecycleGate.use(hash, async () => {
-        const path = this.retirementPath(hash);
-        await mkdir(dirname(path), { recursive: true });
-        const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
-        try {
-          await writeFile(temporary, JSON.stringify({ version: 1, retiredAt: this.now() }), 'utf8');
-          await rename(temporary, path);
-        } finally {
-          await unlink(temporary).catch(error => {
-            if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-          });
-        }
-      });
-    }
-  }
-
-  private retirementPath(hash: string): string {
-    return join(this.directory, hash.slice(0, 2), hash.slice(2, 4), `${hash}.retired`);
-  }
-
-  private async removeRetirement(hash: string): Promise<void> {
-    await unlink(this.retirementPath(hash)).catch(error => {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-    });
-  }
-
-  private async collectFinalizedSnapshots(files: readonly SnapshotStoreFile[]): Promise<{
-    deleted: number; bytes: number; referenced: number; failed: number;
-  }> {
-    const result = { deleted: 0, bytes: 0, referenced: 0, failed: 0 };
-    if (!this.gcConfig.finalizedCleanupEnabled || !this.isSnapshotReferenced) return result;
-    const candidates = files.filter(file => SNAPSHOT_RETIREMENT_PATTERN.test(file.name))
-      .sort((a, b) => a.hash.localeCompare(b.hash));
-    // Rotate past retained/error candidates so one busy hash cannot starve the queue.
-    const ordered = [...candidates.filter(f => f.hash > this.retirementCursor),
-      ...candidates.filter(f => f.hash <= this.retirementCursor)].slice(0, FINALIZED_COLLECTION_BATCH);
-    const deadline = Date.now() + 5_000;
-    for (const candidate of ordered) {
-      if (Date.now() >= deadline) break;
-      this.retirementCursor = candidate.hash;
-      try {
-        await this.lifecycleGate.tryCollect(candidate.hash, async () => {
-          let record: { version?: unknown; retiredAt?: unknown };
-          try { record = JSON.parse(await readFile(candidate.path, 'utf8')); }
-          catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error; }
-          if (record.version !== 1 || typeof record.retiredAt !== 'number'
-            || !Number.isSafeInteger(record.retiredAt) || record.retiredAt < 0) {
-            throw new Error('Invalid snapshot retirement record');
-          }
-          if (this.now() - record.retiredAt < this.gcConfig.finalizedRetentionMs) return;
-          if (await this.checkSnapshotReferenceWithDeadline(`sha256:${candidate.hash}`)) {
-            result.referenced += 1;
-            return;
-          }
-          // The gate excludes reads, file reuse AND metadata writes through unlink.
-          for (const format of ['nq', 'json'] as const) {
-            const path = snapshotPath(this.directory, candidate.hash, format);
-            try {
-              const file = await stat(path);
-              if (!file.isFile()) throw new Error('Snapshot retirement target is not a file');
-              await unlink(path);
-              result.deleted += 1;
-              result.bytes += file.size;
-            } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-          }
-          this.pageIndexCache.delete(candidate.hash);
-          this.validationCache.delete(candidate.hash);
-          // Keep the retirement record if this fails; the next pass can finish
-          // deleting derived state even when the payload was already unlinked.
-          await this.pageIndexStore?.delete?.(`sha256:${candidate.hash}`);
-          await this.removeRetirement(candidate.hash);
-        });
-      } catch (error) {
-        result.failed += 1;
-        this.log?.(`[SWM-SNAPSHOT-GC] finalized collection failed for ${candidate.hash}: ${errorMessage(error)}`);
-      }
-    }
-    return result;
-  }
-
-  private async checkSnapshotReferenceWithDeadline(ref: string): Promise<boolean> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      return await Promise.race([
-        this.isSnapshotReferenced!(ref),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(() => reject(new Error('Snapshot reference check timed out')), 2_000);
-          timer.unref();
-        }),
-      ]);
-    } finally { if (timer) clearTimeout(timer); }
-  }
-
   async collectGarbage(
     options: { readonly requiredWriteBytes?: number } = {},
   ): Promise<SnapshotGarbageCollectionResult> {
@@ -553,7 +478,7 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     let failedDeletions = 0;
     const now = this.now();
     const files = await listSnapshotStoreFiles(this.directory);
-    const finalized = await this.collectFinalizedSnapshots(files);
+    const finalized = await this.finalizedCollector.collect(files);
     deletedSnapshots += finalized.deleted;
     deletedSnapshotBytes += finalized.bytes;
     availableBytesAfter += finalized.bytes;
@@ -611,7 +536,7 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
           const collected = await this.lifecycleGate.tryCollect(file.hash, async () => {
             // A retirement may have been recorded after the directory scan.
             if (this.gcConfig.finalizedCleanupEnabled
-              && await existingFileSize(this.retirementPath(file.hash)) !== null) return false;
+              && await existingFileSize(this.finalizedCollector.path(file.hash)) !== null) return false;
             await unlink(file.path);
             deletedSnapshots += 1;
             deletedSnapshotBytes += file.size;
@@ -786,15 +711,6 @@ function parseLegacyJsonSnapshot(raw: string, ref: string): Quad[] | null {
       graph: '',
     };
   });
-}
-
-function snapshotHash(ref: string): string {
-  const trimmed = ref.trim();
-  const hash = trimmed.startsWith('sha256:') ? trimmed.slice('sha256:'.length) : trimmed;
-  if (!/^[a-f0-9]{64}$/i.test(hash)) {
-    throw new Error(`Invalid shared-memory public snapshot ref ${ref}`);
-  }
-  return hash.toLowerCase();
 }
 
 function canonicalSnapshotDigest(ref: string): string {
