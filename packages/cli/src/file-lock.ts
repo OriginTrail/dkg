@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { readlinkSync } from 'node:fs';
+import { constants, readlinkSync } from 'node:fs';
 import {
-  link, mkdir, open, readdir, readFile, rename, rm, rmdir, stat, unlink, writeFile, type FileHandle,
+  link, mkdir, open, readdir, readFile, rename, rm, rmdir, stat, unlink, type FileHandle,
 } from 'node:fs/promises';
 import { hostname } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { threadId } from 'node:worker_threads';
 import { hasErrorCode } from '@origintrail-official/dkg-core';
 import { replaceFileDurably, type DurableReplaceOptions, type ReplaceStrategy } from './durable-file-replace.js';
@@ -146,6 +146,14 @@ export async function updateFileUnderLease<T>(
  * later writers while a live one keeps its lock however long it works. A
  * lock from another pid namespace is judged by its lease alone.
  *
+ * Every process that may write the lock's directory may take the lock, such
+ * as a daemon running as root and an operator's CLI on the operator's home.
+ * A lock or guard is therefore given the directory's owner and group, and
+ * its group's access where the group may write the directory, so each of
+ * them can read the others' records and clear what a dead one left. A record
+ * this process still may not read is judged by its lease, like one from
+ * another pid namespace.
+ *
  * A holder that stalls for a whole lease can be taken over, so its work is
  * published through the lease (`replaceFile`, or `commit` for any other
  * step). Every step that removes the lock or publishes under it holds the
@@ -203,7 +211,10 @@ async function commitUnderGuard<T>(
 ): Promise<T> {
   const guard = await acquireGuard(lockPath, staleMs, Date.now() + guardTimeoutMs(staleMs));
   if (guard === undefined) {
-    throw new Error(`Timed out waiting to commit under the ${label} lock: ${guardPath(lockPath)} is held`);
+    throw new Error(
+      `Timed out waiting to commit under the ${label} lock: ${guardPath(lockPath)} is held`
+      + await otherUsersNote([guardPath(lockPath)]),
+    );
   }
   try {
     if (!await holdsLock(lockPath, token)) {
@@ -239,7 +250,8 @@ async function acquireLock(
     if (Date.now() >= deadline) {
       throw new Error(
         `Timed out waiting for ${label} lock: ${lockPath} `
-        + `(remove it, and ${guardPath(lockPath)} if present, if no DKG process is still running)`,
+        + `(remove it, and ${guardPath(lockPath)} if present, if no DKG process is still running)`
+        + await otherUsersNote([lockPath, guardPath(lockPath)]),
       );
     }
     if (!retryNow) await sleep(LOCK_POLL_MS);
@@ -257,10 +269,12 @@ async function acquireLock(
 async function createLockFile(path: string, token: string): Promise<FileHandle | undefined> {
   const record = holderRecord(token);
   const stagingPath = `${path}.${token}.tmp`;
+  const directory = await lockDirectory(path);
   const staging = await open(stagingPath, 'wx', 0o600);
   let placed = false;
   try {
     await staging.writeFile(record);
+    await shareWithLockDirectory(staging, directory, 'file');
     await link(stagingPath, path);
     placed = true;
     return staging;
@@ -278,6 +292,7 @@ async function createLockFile(path: string, token: string): Promise<FileHandle |
   if (!handle) return undefined;
   try {
     await handle.writeFile(record);
+    await shareWithLockDirectory(handle, directory, 'file');
     return handle;
   } catch (error) {
     // Without its record the lock would stand until it looked abandoned.
@@ -318,7 +333,8 @@ async function holdsLock(lockPath: string, token: string): Promise<boolean> {
   try {
     raw = await readFile(lockPath, 'utf-8');
   } catch (error) {
-    if (hasErrorCode(error, 'ENOENT')) return false;
+    // Gone, or a record this process may not read: another user's, never its own.
+    if (['ENOENT', 'EACCES', 'EPERM'].some((code) => hasErrorCode(error, code))) return false;
     throw error;
   }
   const holder = parseHolder(raw);
@@ -399,9 +415,17 @@ async function acquireGuard(lockPath: string, staleMs: number, deadline: number)
 /** Take the guard by renaming a directory that holds this holder's record into place; false if it is taken. */
 async function createGuard(path: string, token: string): Promise<boolean> {
   const staging = `${path}.${token}.tmp`;
+  const directory = await lockDirectory(path);
   await mkdir(staging, { mode: 0o700 });
   try {
-    await writeFile(join(staging, token), holderRecord(token), { mode: 0o600 });
+    const record = await open(join(staging, token), 'wx', 0o600);
+    try {
+      await record.writeFile(holderRecord(token));
+      await shareWithLockDirectory(record, directory, 'file');
+    } finally {
+      await record.close();
+    }
+    await shareGuardDirectory(staging, directory);
     await rename(staging, path);
     return true;
   } catch (error) {
@@ -475,18 +499,21 @@ async function clearStaleGuard(path: string, staleMs: number): Promise<boolean> 
  * cannot be checked) and is that old.
  */
 async function inspectHolder(path: string, staleMs: number, kind: 'lock' | 'guard'): Promise<LockState> {
-  let raw: string;
+  let raw: string | undefined;
   try {
     raw = await readFile(path, 'utf-8');
   } catch (error) {
     if (hasErrorCode(error, 'ENOENT')) return 'gone';
-    raw = '';
   }
   // The age is read after the record: a file replaced in between then looks
   // freshly renewed, never lapsed.
   const st = await stat(path).catch(() => null);
   if (!st) return 'gone';
   const idleMs = Date.now() - st.mtimeMs;
+  // A record this process may not read (another user's, left by an older
+  // release) says nothing of its holder, so it is judged by its lease alone,
+  // like one from another pid namespace, and never as one still being written.
+  if (raw === undefined) return idleMs > staleMs ? 'stale' : 'live';
   const holder = parseHolder(raw);
   if (holder.kind === 'writing') return idleMs < LOCK_WRITE_GRACE_MS ? 'live' : 'stale';
   if (holder.kind === 'malformed') return 'stale';
@@ -536,6 +563,65 @@ function isPositiveInteger(value: unknown): value is number {
 
 function isThreadId(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+/** The owner and group of the directory a lock sits in, and whether that group may write it. */
+interface LockDirectory {
+  uid: number;
+  gid: number;
+  groupWrites: boolean;
+}
+
+async function lockDirectory(path: string): Promise<LockDirectory | undefined> {
+  // Windows has no POSIX owner, group or mode to share.
+  if (process.platform === 'win32') return undefined;
+  const st = await stat(dirname(path)).catch(() => undefined);
+  return st && { uid: st.uid, gid: st.gid, groupWrites: (st.mode & 0o020) !== 0 };
+}
+
+/**
+ * Give a lock file, guard or guard record the lock directory's owner and
+ * group, as far as this process may (only root may give another owner), and
+ * the group's access where the group may write the directory: read for a
+ * record, and write for a guard, so a group member can clear it. It works
+ * through the handle of the entry this process just created, never by path,
+ * and a filesystem that refuses either change keeps the entry as created.
+ */
+async function shareWithLockDirectory(
+  handle: FileHandle,
+  directory: LockDirectory | undefined,
+  kind: 'file' | 'directory',
+): Promise<void> {
+  if (!directory) return;
+  const uid = process.getuid?.();
+  if (uid !== undefined) await handle.chown(uid === 0 ? directory.uid : uid, directory.gid).catch(() => {});
+  if (directory.groupWrites) await handle.chmod(kind === 'file' ? 0o640 : 0o770).catch(() => {});
+}
+
+/** Share the guard's staging directory, through a handle, only while it is still the one this process made. */
+async function shareGuardDirectory(staging: string, directory: LockDirectory | undefined): Promise<void> {
+  if (!directory) return;
+  const handle = await open(staging, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  try {
+    if ((await handle.stat()).uid === process.getuid?.()) await shareWithLockDirectory(handle, directory, 'directory');
+  } finally {
+    await handle.close();
+  }
+}
+
+/**
+ * For a timeout error: which of `paths` belong to another user, whom this
+ * process may not be allowed to clear them for.
+ */
+async function otherUsersNote(paths: readonly string[]): Promise<string> {
+  const uid = process.getuid?.();
+  if (uid === undefined || uid === 0) return '';
+  const owned: string[] = [];
+  for (const path of paths) {
+    const st = await stat(path).catch(() => undefined);
+    if (st && st.uid !== uid) owned.push(`${path} belongs to uid ${st.uid}`);
+  }
+  return owned.length === 0 ? '' : `; ${owned.join(' and ')}, so removing it may take that user or root`;
 }
 
 /** A process we may not signal (EPERM) still holds its lock. */

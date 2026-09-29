@@ -54,6 +54,10 @@ jobs:
       - name: Build the workspace packages the config writer loads
         run: node scripts/build-runtime-packages.mjs
       - name: Run the config writer and lock suites natively
+        env:
+          # The hosted Linux and macOS runners have a passwordless sudo, which
+          # the lock suite uses to run a holder as root beside this user.
+          DKG_TEST_SUDO: ${{ matrix.os != 'windows-latest' && '1' || '' }}
         run: >-
           pnpm --dir packages/cli exec vitest run --config vitest.unit.config.ts
           test/durable-file-replace.test.ts

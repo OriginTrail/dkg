@@ -14,9 +14,11 @@ All notable changes to the DKG V10 node are documented here. The format is based
   leave a truncated file that stopped the node from starting. On a node
   configured through `config.yaml`, the first write created a `config.json`
   that took precedence, so later edits to the YAML no longer applied. Writes
-  now take a lock shared by the daemon and the CLI, re-read the file, change
-  only the values that command or setting edits (each edit is given only the
-  value it replaces), and replace the file atomically in its own format. A
+  now take a lock shared by the daemon and the CLI, also when they run as
+  different users (a daemon running as root on an operator's home), re-read
+  the file, change only the values that command or setting edits (each edit
+  is given only the value it replaces), and replace the file atomically in
+  its own format. A
   write that stalled for a minute and lost the lock fails instead of
   overwriting the write that took it over. The file keeps its owner, group
   and permissions, and a symlinked config is written through its link, even

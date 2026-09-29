@@ -2,8 +2,9 @@
 // counter, and holds the lock for `holdMs`, then commits the counter
 // incremented. It holds it awaiting (`await`, renewing its lease), with its
 // event loop blocked before the commit (`block`, so its lease lapses and it
-// loses the lock), or blocked inside the commit after its check that it
-// still holds the lock (`block-in-commit`).
+// loses the lock), blocked inside the commit after its check that it still
+// holds the lock (`block-in-commit`), or dies there, leaving the lock and its
+// guard behind (`die-in-commit`).
 import { appendFileSync, readFileSync, writeFileSync } from 'node:fs';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { withFileLease } from '../../src/file-lock.js';
@@ -21,6 +22,10 @@ try {
       if (mode === 'block-in-commit') {
         log('committing');
         block();
+      }
+      if (mode === 'die-in-commit') {
+        log('committing');
+        process.exit(9);
       }
       writeFileSync(counterPath, String(count + 1));
     });

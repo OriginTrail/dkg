@@ -1,19 +1,22 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import {
-  appendFile, link, mkdir, mkdtemp, open, readFile, readdir, rename, rm, rmdir, stat, utimes, writeFile,
+  appendFile, chmod, chown, link, mkdir, mkdtemp, open, readFile, readdir, rename, rm, rmdir, stat, utimes, writeFile,
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { threadId } from 'node:worker_threads';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { FileHandle } from 'node:fs/promises';
 import { updateFileUnderLease, withFileLease } from '../src/file-lock.js';
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   return {
     ...actual,
+    chmod: vi.fn(actual.chmod),
+    chown: vi.fn(actual.chown),
     link: vi.fn(actual.link),
     open: vi.fn(actual.open),
     readFile: vi.fn(actual.readFile),
@@ -54,7 +57,7 @@ describe('withFileLease', () => {
 
   afterEach(async () => {
     vi.restoreAllMocks();
-    for (const mocked of [link, open, readFile, rename, rmdir, stat]) vi.mocked(mocked).mockReset();
+    for (const mocked of [chmod, chown, link, open, readFile, rename, rmdir, stat]) vi.mocked(mocked).mockReset();
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -648,6 +651,165 @@ describe('withFileLease', () => {
       .rejects.toMatchObject({ code: 'ENOENT' });
   });
 
+  // A daemon running as root and an operator's CLI both write the operator's
+  // home. Each must read the other's records, and clear what a dead one left.
+  describe('a lock another user holds', () => {
+    /** Make every record naming `token` unreadable, as another user's owner-only file is. */
+    function refuseToReadRecordsOf(token: string): void {
+      vi.mocked(readFile).mockImplementation(async (...args: Parameters<typeof readFile>) => {
+        const content = await actualFs.readFile(...args);
+        if (String(content).includes(token)) throw fsError('EACCES');
+        return content;
+      });
+    }
+
+    it('judges a lock whose record it may not read by its lease, not as a record still being written', async () => {
+      await writeFile(lockPath, liveHolder());
+      // Past the five-second write grace, well within the lease.
+      await backdate(lockPath, 8_000);
+      refuseToReadRecordsOf('other-process');
+
+      await expect(withFileLease(lockPath, async () => {}, { timeoutMs: 300 })).rejects.toThrow('Timed out waiting');
+      expect(existsSync(lockPath)).toBe(true);
+    });
+
+    it('takes over a lock whose record it may not read once its lease lapses', async () => {
+      await writeFile(lockPath, liveHolder());
+      await backdate(lockPath, 70_000);
+      refuseToReadRecordsOf('other-process');
+
+      expect(await withFileLease(lockPath, async () => 'taken', { timeoutMs: 1_000 })).toBe('taken');
+    });
+
+    it.each([
+      // Past the five-second write grace, within the lease.
+      ['keeps', 8_000, false],
+      ['clears', 70_000, true],
+    ])('%s a guard whose record it may not read by that record\'s age against the lease', async (_verb, ageMs, clears) => {
+      // A dead holder's lock, which a waiter may take over only under the guard.
+      await writeFile(lockPath, JSON.stringify({ pid: EXITED_PID, token: 'dead-holder' }));
+      await mkdir(guardPath);
+      await writeFile(join(guardPath, 'other-process'), liveHolder());
+      await backdate(join(guardPath, 'other-process'), ageMs);
+      refuseToReadRecordsOf('other-process');
+
+      const taking = withFileLease(lockPath, async () => 'taken', { timeoutMs: 300 });
+
+      if (clears) await expect(taking).resolves.toBe('taken');
+      else await expect(taking).rejects.toThrow('Timed out waiting');
+    });
+
+    it('is told it lost its lock when another user\'s lock replaced it', async () => {
+      await expect(withFileLease(lockPath, async (lease) => {
+        await writeFile(lockPath, liveHolder());
+        refuseToReadRecordsOf('other-process');
+        await lease.commit(async () => {});
+      })).rejects.toThrow('Lost the file lock');
+    });
+
+    it.each([
+      ['a directory its group may write', 0o770, { lock: 0o640, guard: 0o770, record: 0o640 }],
+      ['an owner-only directory', 0o700, { lock: 0o600, guard: 0o700, record: 0o600 }],
+    ])('gives its lock and guard the group access of %s', async (_case, directoryMode, expected) => {
+      // Windows has no POSIX modes.
+      if (process.platform === 'win32') return;
+      await chmod(dir, directoryMode);
+      let modes = {};
+      await withFileLease(lockPath, async (lease) => {
+        await lease.commit(async () => {
+          const [record] = await readdir(guardPath);
+          modes = {
+            lock: (await stat(lockPath)).mode & 0o777,
+            guard: (await stat(guardPath)).mode & 0o777,
+            record: (await stat(join(guardPath, record!))).mode & 0o777,
+          };
+        });
+      });
+
+      expect(modes).toEqual(expected);
+    });
+
+    /** Report the lock directory as owned by `uid` and `gid`. */
+    function directoryOwnedBy(uid: number, gid: number): void {
+      vi.mocked(stat).mockImplementation(async (...args: Parameters<typeof stat>) => {
+        const st = await actualFs.stat(...args);
+        return String(args[0]) === dir ? Object.assign(st, { uid, gid }) : st;
+      });
+    }
+
+    /**
+     * Record each owner change made through a handle the lock opens, without
+     * making it (only root may give another owner). A guard's staging
+     * directory reports `guardStagingUid` as its owner, when given.
+     */
+    function recordOwnerChanges(guardStagingUid?: number): Array<[string, number, number]> {
+      const changes: Array<[string, number, number]> = [];
+      vi.mocked(open).mockImplementation(async (...args: Parameters<typeof open>) => {
+        const handle = await actualFs.open(...args);
+        const path = String(args[0]);
+        handle.chown = async (uid: number, gid: number) => { changes.push([path, uid, gid]); };
+        if (guardStagingUid !== undefined && /\.guard\.[0-9a-f-]+\.tmp$/.test(path)) {
+          const statHandle = handle.stat.bind(handle);
+          handle.stat = (async () => Object.assign(await statHandle(), { uid: guardStagingUid })) as FileHandle['stat'];
+        }
+        return handle;
+      });
+      return changes;
+    }
+
+    it.each([
+      ['as root, the directory\'s owner and group', 0, 4242],
+      ['otherwise, the directory\'s group', undefined, undefined],
+    ])('gives every lock file and guard it creates, through its handle, %s', async (_case, runAs, expectedUid) => {
+      // Windows has no POSIX owners.
+      if (process.platform === 'win32') return;
+      const ownUid = process.getuid!();
+      if (runAs !== undefined) vi.spyOn(process, 'getuid').mockReturnValue(runAs);
+      directoryOwnedBy(4242, 4343);
+      const changes = recordOwnerChanges(runAs);
+
+      await withFileLease(lockPath, async (lease) => { await lease.commit(async () => {}); });
+
+      const paths = changes.map(([path]) => path.slice(lockPath.length));
+      // The lock's staging file, and each guard's staging directory and record.
+      expect(paths.some((path) => /^\.[0-9a-f-]+\.tmp$/.test(path))).toBe(true);
+      expect(paths.some((path) => /^\.guard\.[0-9a-f-]+\.tmp$/.test(path))).toBe(true);
+      expect(paths.some((path) => /^\.guard\.[0-9a-f-]+\.tmp\/[0-9a-f-]+$/.test(path))).toBe(true);
+      expect(changes.every(([, uid, gid]) => uid === (expectedUid ?? ownUid) && gid === 4343)).toBe(true);
+      // Never by path, which follows a link put in the entry's place.
+      expect(chown).not.toHaveBeenCalled();
+      expect(chmod).not.toHaveBeenCalled();
+    });
+
+    it('leaves a guard staging directory that is no longer the one it made as it is', async () => {
+      // Windows has no POSIX owners.
+      if (process.platform === 'win32') return;
+      vi.spyOn(process, 'getuid').mockReturnValue(0);
+      directoryOwnedBy(4242, 4343);
+      const changes = recordOwnerChanges(4242);
+
+      await withFileLease(lockPath, async (lease) => { await lease.commit(async () => {}); });
+
+      const paths = changes.map(([path]) => path.slice(lockPath.length));
+      expect(paths.some((path) => /^\.guard\.[0-9a-f-]+\.tmp$/.test(path))).toBe(false);
+      // The record inside it, which this process created, is still given the owner.
+      expect(paths.some((path) => /^\.guard\.[0-9a-f-]+\.tmp\/[0-9a-f-]+$/.test(path))).toBe(true);
+    });
+
+    it('names another user\'s lock in its timeout error', async () => {
+      // Windows has no POSIX owners, and root may remove any lock.
+      if (process.platform === 'win32' || process.getuid?.() === 0) return;
+      await writeFile(lockPath, liveHolder());
+      vi.mocked(stat).mockImplementation(async (...args: Parameters<typeof stat>) => {
+        const st = await actualFs.stat(...args);
+        return String(args[0]) === lockPath ? Object.assign(st, { uid: 4242 }) : st;
+      });
+
+      await expect(withFileLease(lockPath, async () => {}, { timeoutMs: 200 }))
+        .rejects.toThrow(`${lockPath} belongs to uid 4242, so removing it may take that user or root`);
+    });
+  });
+
   // A holder in another process, reading a counter when it takes the lock and
   // writing it back when it is done, as a config writer reads and commits.
   describe('a holder in another process', () => {
@@ -731,6 +893,76 @@ describe('withFileLease', () => {
         expect.stringMatching(/^holder:error: Lost the file lock: .* was taken over/),
       ]);
       expect(await readFile(counterPath, 'utf-8')).toBe('1');
+    }, 60_000);
+  });
+
+  // A daemon running as root and an operator's CLI on the operator's home.
+  // These run where a passwordless sudo is available and DKG_TEST_SUDO=1 says
+  // to use it, as in the native CI job; this process is the other user.
+  describe('a holder running as root', () => {
+    const SUDO = process.env.DKG_TEST_SUDO === '1';
+    const STALE_MS = 60_000;
+    let counterPath = '';
+    let logPath = '';
+
+    beforeEach(async () => {
+      if (!SUDO) return;
+      expect(spawnSync('sudo', ['-n', 'true']).status, 'DKG_TEST_SUDO=1 needs a passwordless sudo').toBe(0);
+      counterPath = join(dir, 'counter');
+      logPath = join(dir, 'events.log');
+      await writeFile(counterPath, '0');
+      await writeFile(logPath, '');
+    });
+
+    afterEach(() => {
+      // Whatever a root holder left, before the directory itself is removed.
+      if (SUDO) spawnSync('sudo', ['-n', 'rm', '-rf', dir]);
+    });
+
+    /** Run the holder fixture as root, resolving with its exit code. */
+    function runRootHolder(mode: 'await' | 'die-in-commit', holdMs: number): Promise<number | null> {
+      const fixture = fileURLToPath(new URL('./fixtures/file-lock-holder.fixture.ts', import.meta.url));
+      const child = spawn('sudo', [
+        '-n', process.execPath, '--import', import.meta.resolve('tsx/esm'), fixture,
+        lockPath, counterPath, logPath, mode, String(holdMs), String(STALE_MS),
+      ], { stdio: 'ignore' });
+      return new Promise((resolve, reject) => {
+        child.on('error', reject);
+        child.on('exit', resolve);
+      });
+    }
+
+    async function events(): Promise<string[]> {
+      return (await readFile(logPath, 'utf-8')).split('\n').filter(Boolean);
+    }
+
+    it('does not take over its live lock once the lock is idle past the write grace', async () => {
+      if (!SUDO) return;
+      const exited = runRootHolder('await', 8_000);
+      await vi.waitFor(async () => expect(await events()).toContain('holder:enter'), { timeout: 30_000, interval: 20 });
+
+      // The holder renews its lease every ten seconds, so its lock is soon
+      // idle for more than five; its lease is still live.
+      await expect(withFileLease(lockPath, async () => {}, { staleMs: STALE_MS, timeoutMs: 6_500 }))
+        .rejects.toThrow('Timed out waiting');
+
+      expect(await exited).toBe(0);
+      expect(await readFile(counterPath, 'utf-8')).toBe('1');
+      expect(existsSync(lockPath) || existsSync(guardPath)).toBe(false);
+    }, 60_000);
+
+    it('recovers the lock and guard it left when it died while committing', async () => {
+      if (!SUDO) return;
+      expect(await runRootHolder('die-in-commit', 0)).toBe(9);
+      expect(existsSync(guardPath)).toBe(true);
+
+      await withFileLease(lockPath, async (lease) => {
+        const count = Number(await readFile(counterPath, 'utf-8'));
+        await lease.commit(async () => { await writeFile(counterPath, String(count + 1)); });
+      }, { staleMs: STALE_MS, timeoutMs: 20_000 });
+
+      expect(await readFile(counterPath, 'utf-8')).toBe('1');
+      expect(existsSync(lockPath) || existsSync(guardPath)).toBe(false);
     }, 60_000);
   });
 });
