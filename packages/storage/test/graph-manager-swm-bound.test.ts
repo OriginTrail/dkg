@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import * as storageIndex from '../src/index.js';
 import {
   createTripleStore,
@@ -517,6 +517,45 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
 });
 
 describe('bounded SWM result materialization', () => {
+  it('reads a large graph family in bounded queries without losing a recurring root', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('chunked-root-recurrence');
+    const root = 'urn:chunked:root';
+    const child = `${root}/.well-known/genid/child`;
+    const graphs = Array.from({ length: 130 }, (_, i) => `${swm}/${AUTHOR_A_MIXED}/${i + 1}`);
+    try {
+      await seedGraphs(store, graphs);
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"same"', graph: graphs[0]! },
+        { subject: root, predicate: 'urn:p', object: '"same"', graph: graphs[129]! },
+        { subject: child, predicate: 'urn:p', object: '"child"', graph: graphs[129]! },
+      ]);
+      const query = store.query.bind(store);
+      const spy = vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+        if (sparql.includes('VALUES ?g')) {
+          const values = sparql.match(/VALUES \?g \{([^}]*)\}/)?.[1] ?? '';
+          expect((values.match(/<[^>]+>/g) ?? []).length).toBeLessThanOrEqual(128);
+        }
+        return query(sparql, options);
+      });
+
+      const paged = await loadSelectedSharedMemoryQuads(
+        store, swm, { rootEntities: [root] },
+        { resultBudget: { pageRows: 1, maxRows: 2, maxBytesEstimate: 1024 * 1024 } },
+      );
+      const constructed = await loadSelectedSharedMemoryQuads(store, swm, { rootEntities: [root] });
+
+      expect(keys(paged)).toEqual(keys(constructed));
+      expect(keys(paged)).toEqual([
+        `${child}|urn:p|"child"`,
+        `${root}|urn:p|"same"`,
+      ].sort());
+      expect(spy.mock.calls.filter(([sparql]) => sparql.includes('VALUES ?g')).length).toBeGreaterThan(2);
+    } finally {
+      await store.close();
+    }
+  });
+
   it('rejects before retaining a result beyond the configured row budget', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     const swm = contextGraphSharedMemoryUri('result-budget');

@@ -692,22 +692,42 @@ async function loadSharedMemoryQuadsInternal(
       queryOptions,
     );
   }
-  const graphValues = swmGraphs.map((g) => `<${g}>`).join(' ');
+  // A complete SWM family can contain tens of thousands of per-KA graphs.
+  // Keep every graph in the read, but bound each backend query so Blazegraph
+  // does not spend its whole query deadline planning one enormous VALUES list.
+  const graphValueChunks = chunkSharedMemoryGraphValues(swmGraphs);
   if (options.resultBudget) {
     return loadSharedMemoryQuadsPaged(
       store,
-      graphValues,
+      graphValueChunks,
       innerGraphPattern,
       queryOptions,
       options,
     );
   }
-  const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE {
-        VALUES ?g { ${graphValues} }
-        GRAPH ?g { ${innerGraphPattern} }
-      }`, queryOptions);
-  if (result.type !== 'quads') return [];
-  return options.quadFilter ? result.quads.filter(options.quadFilter) : result.quads;
+  const distinct = new Map<string, Quad>();
+  for (const graphValues of graphValueChunks) {
+    const result = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE {
+          VALUES ?g { ${graphValues} }
+          GRAPH ?g { ${innerGraphPattern} }
+        }`, queryOptions);
+    if (result.type !== 'quads') continue;
+    for (const quad of result.quads) {
+      if (options.quadFilter && !options.quadFilter(quad)) continue;
+      distinct.set(JSON.stringify([quad.subject, quad.predicate, quad.object]), quad);
+    }
+  }
+  return [...distinct.values()];
+}
+
+const SHARED_MEMORY_GRAPHS_PER_QUERY = 128;
+
+function chunkSharedMemoryGraphValues(graphs: NonEmptyGraphList): string[] {
+  const chunks: string[] = [];
+  for (let i = 0; i < graphs.length; i += SHARED_MEMORY_GRAPHS_PER_QUERY) {
+    chunks.push(graphs.slice(i, i + SHARED_MEMORY_GRAPHS_PER_QUERY).map((g) => `<${g}>`).join(' '));
+  }
+  return chunks;
 }
 
 function normalizePositiveInteger(value: number, fallback: number): number {
@@ -725,7 +745,7 @@ function estimateQuadHeapBytes(quad: Quad): number {
 
 async function loadSharedMemoryQuadsPaged(
   store: TripleStore,
-  graphValues: string,
+  graphValueChunks: string[],
   innerGraphPattern: string,
   queryOptions: QueryOptions | undefined,
   options: LoadSelectedSharedMemoryQuadsOptions,
@@ -735,6 +755,7 @@ async function loadSharedMemoryQuadsPaged(
   const maxRows = normalizePositiveInteger(configured.maxRows, pageRows);
   const maxBytesEstimate = normalizePositiveInteger(configured.maxBytesEstimate, 64 * 1024 * 1024);
   const quads: Quad[] = [];
+  const seen = new Set<string>();
   let rawRows = 0;
   let bytesEstimate = 0;
   const source = queryOptions?.source ?? 'unknown';
@@ -743,38 +764,54 @@ async function loadSharedMemoryQuadsPaged(
     getMetrics().storeQueryResultBytesEstimate.record(bytesEstimate, { source });
   };
 
-  for (let offset = 0; ; offset += pageRows) {
-    const result = await store.query(`SELECT DISTINCT ?s ?p ?o WHERE {
-      VALUES ?g { ${graphValues} }
-      GRAPH ?g { ${innerGraphPattern} }
-    }
-    ORDER BY ?s ?p ?o
-    OFFSET ${offset}
-    LIMIT ${pageRows}`, queryOptions);
-    if (result.type !== 'bindings' || result.bindings.length === 0) break;
+  for (const graphValues of graphValueChunks) {
+    for (let offset = 0; ; offset += pageRows) {
+      const result = await store.query(`SELECT DISTINCT ?s ?p ?o WHERE {
+        VALUES ?g { ${graphValues} }
+        GRAPH ?g { ${innerGraphPattern} }
+      }
+      ORDER BY ?s ?p ?o
+      OFFSET ${offset}
+      LIMIT ${pageRows}`, queryOptions);
+      if (result.type !== 'bindings' || result.bindings.length === 0) break;
 
-    for (const row of result.bindings) {
-      const subject = row['s'];
-      const predicate = row['p'];
-      const object = row['o'];
-      if (!subject || !predicate || !object) continue;
-      rawRows += 1;
-      if (rawRows > maxRows) {
-        observeMaterialization();
-        throw new SharedMemoryResultBudgetError('rows', rawRows, bytesEstimate, maxRows);
+      for (const row of result.bindings) {
+        const subject = row['s'];
+        const predicate = row['p'];
+        const object = row['o'];
+        if (!subject || !predicate || !object) continue;
+        // DISTINCT within one VALUES chunk is not enough when the same root
+        // closure occurs in multiple asset graphs. Preserve the old global
+        // DISTINCT semantics before applying the result budget or filter.
+        const key = JSON.stringify([subject, predicate, object]);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        rawRows += 1;
+        if (rawRows > maxRows) {
+          observeMaterialization();
+          throw new SharedMemoryResultBudgetError('rows', rawRows, bytesEstimate, maxRows);
+        }
+        const quad: Quad = { subject, predicate, object, graph: '' };
+        bytesEstimate += estimateQuadHeapBytes(quad);
+        if (bytesEstimate > maxBytesEstimate) {
+          observeMaterialization();
+          throw new SharedMemoryResultBudgetError('bytes', rawRows, bytesEstimate, maxBytesEstimate);
+        }
+        if (!options.quadFilter || options.quadFilter(quad)) quads.push(quad);
       }
-      const quad: Quad = { subject, predicate, object, graph: '' };
-      bytesEstimate += estimateQuadHeapBytes(quad);
-      if (bytesEstimate > maxBytesEstimate) {
-        observeMaterialization();
-        throw new SharedMemoryResultBudgetError('bytes', rawRows, bytesEstimate, maxBytesEstimate);
-      }
-      if (!options.quadFilter || options.quadFilter(quad)) quads.push(quad);
+      if (result.bindings.length < pageRows) break;
     }
-    if (result.bindings.length < pageRows) break;
   }
   observeMaterialization();
-  return quads;
+  return graphValueChunks.length === 1
+    ? quads
+    : quads.sort((a, b) => {
+      for (const field of ['subject', 'predicate', 'object'] as const) {
+        if (a[field] < b[field]) return -1;
+        if (a[field] > b[field]) return 1;
+      }
+      return 0;
+    });
 }
 
 /**
