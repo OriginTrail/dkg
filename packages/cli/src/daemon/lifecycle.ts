@@ -2281,6 +2281,9 @@ async function runDaemonInnerWithStartupOwnership(
   const agent = await DKGAgent.create(agentConfig);
 
   let publisherState: PublisherState = createInitialPublisherState(config);
+  const publisherStartupController = new AbortController();
+  let publisherStartupTimer: ReturnType<typeof setTimeout> | undefined;
+  let publisherStartup: Promise<void> | undefined;
   // Holds the running async-promote worker lifecycle (PR #3 of the
   // async-promote-queue series). Initialised in `startPostApiPublishing`
   // after the API is up so a recoverOnStartup hiccup never blocks boot;
@@ -2584,8 +2587,9 @@ async function runDaemonInnerWithStartupOwnership(
       },
     });
 
-    const publisherTimer = setTimeout(() => {
-      void (async () => {
+    publisherStartupTimer = setTimeout(() => {
+      if (publisherStartupController.signal.aborted) return;
+      publisherStartup = (async () => {
         const outcome = await startPublisherRuntimeWithOutcome({
           dataDir: dkgDir(),
           config,
@@ -2604,7 +2608,12 @@ async function runDaemonInnerWithStartupOwnership(
           knowledgeAssetVmPublishHandler: createKnowledgeAssetVmPublishHandler(agent),
           publicSnapshotStore,
           log,
+          startupSignal: publisherStartupController.signal,
         });
+        if (publisherStartupController.signal.aborted) {
+          await outcome.runtime?.stop();
+          return;
+        }
         publisherState = outcome;
         if (!outcome.availability.available
           && outcome.availability.reason === 'publisher_startup_failed'
@@ -2612,9 +2621,11 @@ async function runDaemonInnerWithStartupOwnership(
           const err = outcome.error as any;
           log(`Async publisher startup failed: ${err?.message ?? String(err)}`);
         }
-      })();
+      })().catch((error) => {
+        log(`Publisher startup cleanup error: ${error instanceof Error ? error.message : String(error)}`);
+      });
     }, 0);
-    if (publisherTimer.unref) publisherTimer.unref();
+    publisherStartupTimer.unref?.();
   };
 
   log(`PeerId: ${agent.peerId}`);
@@ -3870,6 +3881,8 @@ async function runDaemonInnerWithStartupOwnership(
   async function shutdown(exitCode = 0) {
     if (shuttingDown) return;
     shuttingDown = true;
+    clearTimeout(publisherStartupTimer);
+    publisherStartupController.abort(new Error('Daemon is shutting down'));
     // Closes catch-up admission ahead of every await below, announces, and
     // performs the early `api.port` removal that tells the supervisor's
     // liveness watcher (PR #664) this is a graceful shutdown — so it reads the
@@ -3925,6 +3938,7 @@ async function runDaemonInnerWithStartupOwnership(
             drainCatchupJobs,
             flushTelemetry,
             stopPublisherRuntime: async () => {
+              await publisherStartup;
               await publisherState.runtime
                 ?.stop()
                 .catch((err: any) =>
