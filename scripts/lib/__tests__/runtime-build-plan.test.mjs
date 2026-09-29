@@ -30,6 +30,7 @@ const REQUIRED_RUNTIME_PACKAGES = [
   '@origintrail-official/dkg-epcis',
   '@origintrail-official/dkg-graph-viz',
   '@origintrail-official/dkg-mcp',
+  '@origintrail-official/dkg-node-store',
   '@origintrail-official/dkg-node-ui',
   '@origintrail-official/dkg-okf',
   '@origintrail-official/dkg-publisher',

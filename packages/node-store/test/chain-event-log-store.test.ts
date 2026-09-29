@@ -2,12 +2,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DashboardDB } from '../src/db.js';
 import {
   SqliteChainEventLogStore,
   type SqliteChainEventLogCommit,
   type SqliteChainEventLogRow,
-} from '../src/chain-event-log-store.js';
+} from '../src/index.js';
+import { DashboardDB } from './helpers/dashboard-db.js';
 
 const SCOPE = 'evm:31337:0xhub:0xstorage';
 const OTHER_SCOPE = 'evm:31337:0xother-hub:0xstorage';

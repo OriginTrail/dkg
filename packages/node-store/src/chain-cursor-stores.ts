@@ -1,5 +1,5 @@
 import Database from 'better-sqlite3';
-import type { DashboardDB } from './db.js';
+import type { NodeStoreDatabaseHandle } from './database-handle.js';
 
 function parsePositiveSafeInteger(value: number | string | undefined): number | undefined {
   if (value == null) return undefined;
@@ -61,9 +61,9 @@ export class SqliteChainEventCursorStore {
   private readonly legacyCursors: SettingsPositiveIntegerCursorStore;
   private readonly scope: string;
 
-  constructor(dashboard: DashboardDB, options: { scope?: string } = {}) {
-    this.cursors = new RuntimePositiveIntegerCursorStore(dashboard.db, 'chainEventPoller.cursor');
-    this.legacyCursors = new SettingsPositiveIntegerCursorStore(dashboard.db);
+  constructor(database: NodeStoreDatabaseHandle, options: { scope?: string } = {}) {
+    this.cursors = new RuntimePositiveIntegerCursorStore(database.db, 'chainEventPoller.cursor');
+    this.legacyCursors = new SettingsPositiveIntegerCursorStore(database.db);
     this.scope = options.scope ?? 'default';
   }
 
@@ -118,10 +118,10 @@ export class SqliteContextGraphRegistryScanCursorStore {
     },
   };
 
-  constructor(dashboard: DashboardDB) {
-    this.db = dashboard.db;
-    this.cursors = new RuntimePositiveIntegerCursorStore(dashboard.db, 'contextGraphRegistryScan.cursor');
-    this.legacyCursors = new SettingsPositiveIntegerCursorStore(dashboard.db);
+  constructor(database: NodeStoreDatabaseHandle) {
+    this.db = database.db;
+    this.cursors = new RuntimePositiveIntegerCursorStore(database.db, 'contextGraphRegistryScan.cursor');
+    this.legacyCursors = new SettingsPositiveIntegerCursorStore(database.db);
   }
 
   async load(key: { chainId: string; deploymentId: string; registryAddress: string }): Promise<number | undefined> {
@@ -172,8 +172,8 @@ export class SqliteContextGraphStorageDiscoveryStore {
   private readonly db: Database.Database;
   private readonly scope: string;
 
-  constructor(dashboard: DashboardDB, options: { scope?: string } = {}) {
-    this.db = dashboard.db;
+  constructor(database: NodeStoreDatabaseHandle, options: { scope?: string } = {}) {
+    this.db = database.db;
     this.scope = options.scope ?? 'default';
   }
 
@@ -217,8 +217,8 @@ export class SqliteContextGraphAuthorityHistoryStore {
 
   private readonly db: Database.Database;
 
-  constructor(dashboard: DashboardDB) {
-    this.db = dashboard.db;
+  constructor(database: NodeStoreDatabaseHandle) {
+    this.db = database.db;
   }
 
   async load(cacheKey: string): Promise<unknown> {
@@ -259,8 +259,8 @@ export class SqliteContextGraphAuthorityHistoryStore {
 export class SqliteContextGraphAuthorityIndexStore {
   private readonly db: Database.Database;
 
-  constructor(dashboard: DashboardDB) {
-    this.db = dashboard.db;
+  constructor(database: NodeStoreDatabaseHandle) {
+    this.db = database.db;
   }
 
   async load(scope: string): Promise<Readonly<{ token: number; value: unknown | null }> | undefined> {

@@ -47,4 +47,5 @@ pnpm build
 ## Internal Dependencies
 
 - `@origintrail-official/dkg-core` - configuration types, event bus integration
+- `@origintrail-official/dkg-node-store` - the daemon's protocol persistence stores (outbox, sync checkpoints, changelog cursors, KA numbers, chain log and cursors). They used to live here; this package re-exports them unchanged and `DashboardDB` still opens `node-ui.db` and owns the schema and every migration
 - `@origintrail-official/dkg-graph-viz` - interactive RDF graph visualization component

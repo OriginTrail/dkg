@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { InMemoryProtocolOutboxStore } from '@origintrail-official/dkg-core';
-import { DashboardDB, SqliteProtocolOutboxStore } from '../src/db.js';
+import { SqliteProtocolOutboxStore } from '../src/index.js';
+import { DashboardDB } from './helpers/dashboard-db.js';
 
 let dir: string;
 let db: DashboardDB;

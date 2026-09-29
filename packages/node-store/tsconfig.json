@@ -6,9 +6,7 @@
     "composite": true
   },
   "include": ["src"],
-  "exclude": ["src/ui"],
   "references": [
-    { "path": "../core" },
-    { "path": "../node-store" }
+    { "path": "../core" }
   ]
 }

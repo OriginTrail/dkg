@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import type { DashboardDB } from './db.js';
+import type { NodeStoreDatabaseHandle } from './database-handle.js';
 
 const CHAIN_EVENT_LOG_ZERO_HASH = `0x${'00'.repeat(32)}`;
 
@@ -173,8 +173,8 @@ export class SqliteChainEventLogStore {
    */
   private readonly indexes: ReadonlySet<string>;
 
-  constructor(dashboard: DashboardDB) {
-    this.db = dashboard.db;
+  constructor(database: NodeStoreDatabaseHandle) {
+    this.db = database.db;
     const present = this.db.prepare(`
       SELECT name FROM sqlite_master WHERE type = 'index' AND name IN (?, ?, ?)
     `).all(KA_POINT_READ_INDEX, GRAPH_READ_INDEX, TAIL_READ_INDEX) as Array<{ name: string }>;

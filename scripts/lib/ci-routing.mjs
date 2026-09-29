@@ -156,6 +156,16 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
+  'packages/node-store': {
+    // Protocol persistence split out of node-ui: node-ui re-exports it, so every
+    // lane that loads node-ui loads it too (tornado_blazegraph through the CLI's
+    // Oxigraph launcher, see packages/cli). Its own tests run in kosava_node_ui
+    // and open node-ui's DashboardDB by relative path. Daemon runtime, not UI
+    // surface: like the other packages the devnet boots, the browser suite
+    // follows it after merge rather than on the PR.
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_hardhat_plugins'],
+    evmScopes: [],
+  },
   'packages/graph-viz': {
     // tornado_blazegraph: loaded by the CLI's Oxigraph launcher (see packages/cli).
     lanes: [
@@ -239,6 +249,7 @@ export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/agent': ['tornado_agent'],
   'packages/cli': ['bura_cli'],
   'packages/node-ui': ['kosava_node_ui'],
+  'packages/node-store': ['kosava_node_ui'],
   'packages/graph-viz': ['kosava_supporting'],
   'packages/epcis': ['tornado_blazegraph', 'kosava_supporting'],
   'packages/mcp-dkg': ['kosava_supporting'],

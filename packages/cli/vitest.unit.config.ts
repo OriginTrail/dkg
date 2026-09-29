@@ -217,6 +217,9 @@ export default defineConfig({
           // Public snapshot paging — one SQLite-indexed store must reach the
           // agent sync responder, admission publisher, and background runtime.
           'test/daemon-snapshot-page-index-wiring.test.ts',
+          // Protocol persistence stores (node-store): runDaemonInner composes
+          // every one over a seeded legacy node-ui.db; no hardhat, no network.
+          'test/daemon-protocol-store-wiring.test.ts',
           // SQLite-backed vector store. Pure local DB coverage; no hardhat.
           'test/vector-store-extra.test.ts',
           'test/snapshot-page-index-store.test.ts',

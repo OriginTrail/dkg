@@ -9,6 +9,7 @@ import {
   type ProtocolOutboxQueueStats,
   validateProtocolOutboxPageBudget,
 } from '@origintrail-official/dkg-core';
+import type { NodeStoreDatabaseHandle } from './database-handle.js';
 
 interface SqliteOutboxRow {
   peer_id: string;
@@ -69,8 +70,8 @@ export class SqliteProtocolOutboxStore implements BoundedProtocolOutboxStore, Pr
   private maxAgeMs = 24 * 60 * 60 * 1000;
   private backoffFor: (attempts: number) => number = (_attempts) => 5_000;
 
-  constructor(dashboard: { readonly db: Database.Database }, options: SqliteProtocolOutboxStoreOptions = {}) {
-    this.db = dashboard.db;
+  constructor(database: NodeStoreDatabaseHandle, options: SqliteProtocolOutboxStoreOptions = {}) {
+    this.db = database.db;
     this.configurePolicy(options);
   }
 
