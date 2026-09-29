@@ -1871,6 +1871,12 @@ describe('core VM-promotion guarantees', () => {
         kaUal: ual(301),
         assertionVersion: 1n,
       }])).toThrow();
+      expect(() => storageAckPromotedBatchQuery([{
+        operationSubject: 'urn:op:safe',
+        namespace: 'safe-cg',
+        kaUal: ual(301),
+        assertionVersion: -1n,
+      }])).toThrow('non-negative assertion version');
       const internals = await boot();
       const query = vi.spyOn(internals.store, 'query');
       await expect(internals.promotedStorageAckCopies([{
@@ -1897,6 +1903,27 @@ describe('core VM-promotion guarantees', () => {
         operationSubject: copy.op, namespace: 'batch-cancel', kaUal: ual(303),
         assertionVersion: 1n, signedAtMs: 0, registered: false,
       }], () => active)).resolves.toEqual(new Set());
+      expect(query.mock.calls.filter(([, options]) =>
+        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(1);
+    });
+
+    it('stops the audit at its current cursor when promotion prefetch deactivates', async () => {
+      const internals = await boot() as Internals & Record<string, any>;
+      await seedCopy(internals.store, {
+        namespace: 'batch-audit-cancel', n: 304, ageMs: 2 * HOUR,
+        version: 1, confirmedVersion: 1,
+      });
+      const original = internals.store.query.bind(internals.store);
+      let active = true;
+      const query = vi.spyOn(internals.store, 'query').mockImplementation(async (sparql, options) => {
+        const result = await original(sparql, options);
+        if (options?.source === 'agent.vmPromotionAudit.promotedBatch') active = false;
+        return result;
+      });
+
+      const totals = await internals.auditStorageAckCopies(Date.now(), () => active);
+      expect(totals.examined).toBe(0);
+      expect(internals.vmPromotionAuditCursor).toBe('');
       expect(query.mock.calls.filter(([, options]) =>
         options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(1);
     });
