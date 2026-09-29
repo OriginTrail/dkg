@@ -26,8 +26,10 @@ export class FinalizedSnapshotCollector {
   ) {}
   async markPublishedSnapshots(refs: readonly string[]): Promise<void> {
     if (!this.options.enabled) return;
-    for (const hash of new Set(refs.map(snapshotHash))) {
-      await this.lifecycleGate.use(hash, async () => {
+    // Enqueue every digest before awaiting I/O so a later reuse of a later
+    // digest cannot be overtaken by this older multi-digest request.
+    await Promise.all([...new Set(refs.map(snapshotHash))].map(hash =>
+      this.lifecycleGate.mutate(hash, async () => {
         const path = this.path(hash);
         await mkdir(dirname(path), { recursive: true });
         const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
@@ -39,15 +41,20 @@ export class FinalizedSnapshotCollector {
             if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
           });
         }
-      });
-    }
+      }),
+    ));
   }
 
   path(hash: string): string {
     return join(this.directory, hash.slice(0, 2), hash.slice(2, 4), `${hash}.retired`);
   }
 
-  async cancel(hash: string): Promise<void> {
+  cancel(hash: string): Promise<void> {
+    return this.lifecycleGate.mutate(hash, () => this.removeMarker(hash));
+  }
+
+  /** Caller already owns the exclusive GC lease; do not re-enter the gate. */
+  private async removeMarker(hash: string): Promise<void> {
     await unlink(this.path(hash)).catch(error => {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     });
@@ -87,7 +94,7 @@ export class FinalizedSnapshotCollector {
           });
           // Keep the marker on an index failure so a later pass can retry.
           await this.options.removeDerivedState(candidate.hash);
-          await this.cancel(candidate.hash);
+          await this.removeMarker(candidate.hash);
         });
       } catch (error) {
         result.failed += 1;

@@ -425,7 +425,7 @@ export async function createPublisherRuntime(args: {
   const { network } = await loadResolvedNetworkConfig(args.config, loadNetworkConfig);
   const keypair = await loadOrCreateAgentWallet(args.dataDir);
   const store = await createPublisherStore(args.dataDir, args.config);
-  const publicSnapshotStore = createPublicSnapshotStore(args.dataDir, args.config, undefined, undefined, snapshotReferenceCheck(store));
+  const publicSnapshotStore = createPublicSnapshotStore(args.dataDir, args.config, { store });
   // Field-merge config + network/<env>.json#chain, then guard for the
   // strict { rpcUrl, hubAddress, chainId? } shape the publisher runtime
   // expects. If either required field is missing, pass undefined and let
@@ -464,7 +464,7 @@ export async function createPublisherInspector(args: {
   config: DkgConfig;
 }): Promise<PublisherInspector> {
   const store = await createPublisherStore(args.dataDir, args.config);
-  return createPublisherInspectorFromStore(store, true, createPublicSnapshotStore(args.dataDir, args.config, undefined, undefined, snapshotReferenceCheck(store)));
+  return createPublisherInspectorFromStore(store, true, createPublicSnapshotStore(args.dataDir, args.config, { store }));
 }
 
 export function createPublisherInspectorFromStore(
@@ -589,7 +589,7 @@ export async function createPublisherRuntimeFromAgent(args: {
     publishEncryptionFactory: args.publishEncryptionFactory,
     knowledgeAssetVmPublishHandler: args.knowledgeAssetVmPublishHandler,
     publicSnapshotStore: args.publicSnapshotStore
-      ?? createPublicSnapshotStore(args.dataDir, args.config, undefined, undefined, snapshotReferenceCheck(args.store)),
+      ?? createPublicSnapshotStore(args.dataDir, args.config, { store: args.store }),
     closeStoreOnStop: false,
     // #1829 — this is the daemon publisher runtime (processes named-KA jobs), so it
     // journals. Standalone `dkg publisher run` (createPublisherRuntime) does not set this.
@@ -1298,9 +1298,11 @@ function defaultLargeLiteralStorage(dataDir: string, config: DkgConfig) {
 export function createPublicSnapshotStore(
   dataDir: string,
   config?: Pick<DkgConfig, 'sharedMemoryPublicSnapshotStorage'>,
-  pageIndexStore?: SnapshotPageIndexStore,
-  log?: (message: string) => void,
-  isSnapshotReferenced?: (ref: string) => Promise<boolean>,
+  options: {
+    pageIndexStore?: SnapshotPageIndexStore;
+    log?: (message: string) => void;
+    store?: TripleStore;
+  } = {},
 ): WorkspacePublicSnapshotStore | undefined {
   const snapshotConfig = config?.sharedMemoryPublicSnapshotStorage;
   if (snapshotConfig?.enabled === false) {
@@ -1308,8 +1310,9 @@ export function createPublicSnapshotStore(
   }
   return new FileWorkspacePublicSnapshotStore(
     snapshotConfig?.directory ?? join(dataDir, 'swm-public-snapshots'),
-    pageIndexStore,
-    { gc: snapshotConfig?.gc, log, isSnapshotReferenced },
+    options.pageIndexStore,
+    { gc: snapshotConfig?.gc, log: options.log,
+      isSnapshotReferenced: options.store ? snapshotReferenceCheck(options.store) : undefined },
   );
 }
 

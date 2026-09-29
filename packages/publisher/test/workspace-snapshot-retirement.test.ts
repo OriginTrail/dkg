@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { FileWorkspacePublicSnapshotStore, workspacePublicQuadsDigest } from '../src/workspace-snapshot-store.js';
-import { snapshotReferenceCheck, withWorkspaceSnapshotWrites } from '../src/workspace-snapshot-lifecycle.js';
+import { snapshotReferenceCheck, withSnapshotScope } from '../src/workspace-snapshot-lifecycle.js';
 import { makeQuads, snapshotPath } from './_helpers/workspace-snapshot-store.js';
 
 const directories: string[] = [];
@@ -121,7 +121,7 @@ describe('confirmed snapshot retirement', () => {
     const second = f.open();
     const wrote = deferred();
     const commit = deferred();
-    const writing = withWorkspaceSnapshotWrites(second, async snapshots => {
+    const writing = withSnapshotScope(second, async snapshots => {
       await snapshots!.putSnapshot({ digest, quads });
       wrote.resolve();
       await commit.promise;
@@ -177,6 +177,28 @@ describe('confirmed snapshot retirement', () => {
     await expect(stat(f.path)).resolves.toBeDefined();
     release();
     expect((await f.store.collectGarbage()).deletedSnapshots).toBe(1);
+  });
+
+  it('protects stale temporary files through another directory alias and counts skips', async () => {
+    const f = await fixture();
+    const parent = await mkdtemp(join(tmpdir(), 'dkg-snapshot-temp-alias-'));
+    directories.push(parent);
+    const alias = join(parent, 'alias');
+    await symlink(f.directory, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    const other = new FileWorkspacePublicSnapshotStore(alias, undefined, { gc: { enabled: false } });
+    stores.push(other);
+    const collector = new FileWorkspacePublicSnapshotStore(f.directory, undefined, {
+      gc: { staleTempAgeMs: 0 }, getAvailableBytes: async () => 100 * GIB,
+    });
+    stores.push(collector); collector.stopGarbageCollection();
+    const temp = `${f.path}.123.abc.tmp`;
+    await writeFile(temp, 'pending write'); await utimes(temp, 0, 0);
+    const release = await other.lifecycle.acquire(digest);
+    try {
+      expect(await collector.collectGarbage()).toMatchObject({ deletedTempFiles: 0, skippedActiveFiles: 1 });
+      await expect(stat(temp)).resolves.toBeDefined();
+    } finally { release(); }
+    expect((await collector.collectGarbage()).deletedTempFiles).toBe(1);
   });
 
   it('does not bypass a retirement recorded after the pressure collector scanned files', async () => {
@@ -291,8 +313,8 @@ describe('confirmed snapshot retirement', () => {
     const f = await fixture(async () => false);
     await f.store.lifecycle.markPublished([digest]); f.advance();
     expect((await f.store.collectGarbage()).finalizedSnapshots).toBe(1);
-    await withWorkspaceSnapshotWrites(f.store, async (_snapshots, retain) => {
-      expect(await retain(digest)).toBe(false);
+    await withSnapshotScope(f.store, async snapshots => {
+      expect(await snapshots!.retainExisting(digest)).toBe(false);
     });
   });
 

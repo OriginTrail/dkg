@@ -135,13 +135,28 @@ A custom snapshot store without the optional `lifecycle` capability keeps its
 own retention behavior. That capability is complete (leasing, existing-file
 leasing, enabled state and retirement), rather than independent optional methods.
 
+`WorkspaceSnapshotScope` owns a complete operation's I/O and `retainExisting`
+leases. Publication and recovery use `snapshotOperation`, whose implementation
+receives a scope rather than a raw store; leases close after the final metadata
+commit, on either success or failure. Missing reused bytes follow the existing
+fetch path. The scope must account for every I/O method, including optional ones.
+
 The file store accepts `isSnapshotReferenced` once in its constructor options.
-Built-in agent and CLI composition roots supply it; direct SDK users creating a
-file store must pass `snapshotReferenceCheck(theTripleStore)` to enable collection.
-Without a checker, marked candidates are retained. Publisher construction does
-not mutate an injected store's reference checker. `FinalizedSnapshotCollector`
-owns marker persistence, bounded scheduling and reference checks; the file store
-supplies payload and derived-index removal.
+The agent's optional `publicSnapshotStoreFactory` receives the constructed RDF
+store. The daemon uses this factory to share one indexed snapshot store across
+agent and publisher, without a late-bound checker. CLI construction uses named
+options (`store`, `pageIndexStore`, `log`). Direct SDK users creating a file store
+must pass `snapshotReferenceCheck(theTripleStore)` to enable collection. Without
+a checker, marked candidates are retained.
+
+`PublishedSnapshotRetirement` owns RDF discovery and canonical literal decoding
+at the durable cleanup boundary. `FinalizedSnapshotCollector` owns marker
+persistence, bounded scheduling and reference checks; the file store supplies
+payload and derived-index removal. Marker changes are queued per digest across
+all directory aliases: a later retirement or reuse cannot be overwritten by an
+older pending rename. Physical-directory lookup/enqueue preserves request order,
+including cold aliases; marker I/O for different digests remains concurrent.
+All cleanup, including stale temporary files, uses the same shared lifecycle gate.
 
 Existing unmarked files, legacy entity/root-scoped publishes, and candidates
 whose retirement record could not be saved remain under the original pressure

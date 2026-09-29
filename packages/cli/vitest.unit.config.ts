@@ -183,6 +183,7 @@ export default defineConfig({
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',
           'test/publisher-runtime-snapshot-store-injection.test.ts',
+          'test/publisher-default-snapshot-retirement.test.ts',
           'test/publisher-runtime-chain-config.test.ts',
           'test/publisher-ka-recovery.test.ts',
           // #2270 — the runner's chain lookup reports WHICH chain fact it found

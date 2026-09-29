@@ -192,7 +192,6 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     string,
     Promise<{ readonly ref: string; readonly byteLength: number }>
   >();
-  private readonly activeSnapshots = new Map<string, number>();
   private readonly gcConfig: ResolvedSnapshotGarbageCollectionConfig;
   private readonly log?: (message: string) => void;
   private readonly getFilesystemSpace: (directory: string) => Promise<{
@@ -490,15 +489,15 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     );
 
     for (const file of staleTempFiles) {
-      if (this.isSnapshotActive(file.hash)) {
-        skippedActiveFiles += 1;
-        continue;
-      }
       try {
-        await unlink(file.path);
-        deletedTempFiles += 1;
-        deletedTempBytes += file.size;
-        availableBytesAfter += file.size;
+        const collected = await this.lifecycleGate.tryCollect(file.hash, async () => {
+          await unlink(file.path);
+          deletedTempFiles += 1;
+          deletedTempBytes += file.size;
+          availableBytesAfter += file.size;
+          return true;
+        });
+        if (collected === undefined) skippedActiveFiles += 1;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'ENOENT') failedDeletions += 1;
       }
@@ -528,10 +527,6 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
 
       for (const file of candidates) {
         if (availableBytesAfter >= targetAvailableBytes) break;
-        if (this.isSnapshotActive(file.hash)) {
-          skippedActiveFiles += 1;
-          continue;
-        }
         try {
           const collected = await this.lifecycleGate.tryCollect(file.hash, async () => {
             // A retirement may have been recorded after the directory scan.
@@ -613,20 +608,8 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     return this.withActiveSnapshot(hash, () => withSnapshotSource(this.directory, hash, operation));
   }
 
-  private async withActiveSnapshot<T>(hash: string, operation: () => Promise<T>): Promise<T> {
-    return this.lifecycleGate.use(hash, async () => {
-      this.activeSnapshots.set(hash, (this.activeSnapshots.get(hash) ?? 0) + 1);
-      try { return await operation(); }
-      finally {
-        const remaining = (this.activeSnapshots.get(hash) ?? 1) - 1;
-        if (remaining > 0) this.activeSnapshots.set(hash, remaining);
-        else this.activeSnapshots.delete(hash);
-      }
-    });
-  }
-
-  private isSnapshotActive(hash: string): boolean {
-    return (this.activeSnapshots.get(hash) ?? 0) > 0;
+  private withActiveSnapshot<T>(hash: string, operation: () => Promise<T>): Promise<T> {
+    return this.lifecycleGate.use(hash, operation);
   }
 
   private logGarbageCollection(result: SnapshotGarbageCollectionResult): void {

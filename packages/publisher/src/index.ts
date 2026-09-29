@@ -511,4 +511,4 @@ export { AccessClient, type AccessResult } from './access-client.js';
 export * from './share-batching.js';
 export { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 
-export { withWorkspaceSnapshotWrites, snapshotReferenceCheck, type WorkspaceSnapshotLifecycle } from './workspace-snapshot-lifecycle.js';
+export { withSnapshotScope, snapshotOperation, WorkspaceSnapshotScope, snapshotReferenceCheck, type WorkspaceSnapshotLifecycle } from './workspace-snapshot-lifecycle.js';

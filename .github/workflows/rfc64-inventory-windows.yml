@@ -130,3 +130,4 @@ jobs:
           --config vitest.unit.config.ts
           test/workspace-snapshot-retirement.test.ts
           test/workspace-snapshot-write-scope.test.ts
+          test/finalized-snapshot-collector.test.ts

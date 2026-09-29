@@ -83,6 +83,7 @@ export default defineConfig({
       'test/swm-slice-ack-unbounded.test.ts',
       'test/workspace-snapshot-store.test.ts',
       'test/workspace-snapshot-retirement.test.ts',
+      'test/finalized-snapshot-collector.test.ts',
       'test/workspace-snapshot-write-scope.test.ts',
       'test/published-snapshot-cleanup.test.ts',
       'test/workspace-snapshot-validation.test.ts',

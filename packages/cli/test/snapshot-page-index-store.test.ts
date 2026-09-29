@@ -47,7 +47,7 @@ describe('SqliteSnapshotPageIndexStore', () => {
     directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-index-db-'));
     dashboard = new DashboardDB({ dataDir: directory });
     const pageIndexes = new SqliteSnapshotPageIndexStore(dashboard);
-    const snapshots = createPublicSnapshotStore(directory, TEST_SNAPSHOT_CONFIG, pageIndexes)!;
+    const snapshots = createPublicSnapshotStore(directory, TEST_SNAPSHOT_CONFIG, { pageIndexStore: pageIndexes })!;
     const quads = Array.from({ length: 300 }, (_, index) => ({
       subject: `urn:snapshot:sqlite:reopen:${index}`,
       predicate: 'http://schema.org/value',
@@ -72,7 +72,7 @@ describe('SqliteSnapshotPageIndexStore', () => {
     const reopenedSnapshots = createPublicSnapshotStore(
       directory,
       TEST_SNAPSHOT_CONFIG,
-      new SqliteSnapshotPageIndexStore(dashboard),
+      { pageIndexStore: new SqliteSnapshotPageIndexStore(dashboard) },
     )!;
     await expect(reopenedSnapshots.getSnapshotPage!(DIGEST, 257, 20))
       .resolves.toEqual(quads.slice(257, 277));
@@ -118,12 +118,12 @@ describe('SqliteSnapshotPageIndexStore', () => {
       object: `"${index}"`,
       graph: '',
     }));
-    await createPublicSnapshotStore(directory, TEST_SNAPSHOT_CONFIG, pageIndexes)!
+    await createPublicSnapshotStore(directory, TEST_SNAPSHOT_CONFIG, { pageIndexStore: pageIndexes })!
       .putSnapshot({ digest: DIGEST, quads });
     dashboard.close();
     dashboard = undefined;
 
-    const fallbackStore = createPublicSnapshotStore(directory, TEST_SNAPSHOT_CONFIG, pageIndexes)!;
+    const fallbackStore = createPublicSnapshotStore(directory, TEST_SNAPSHOT_CONFIG, { pageIndexStore: pageIndexes })!;
     await expect(fallbackStore.getSnapshotPage!(DIGEST, 257, 20))
       .resolves.toEqual(quads.slice(257));
     await expect(fallbackStore.putSnapshot({

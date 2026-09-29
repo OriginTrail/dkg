@@ -1,3 +1,4 @@
+import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
 import type { PreBroadcastRecord } from './publisher.js';
@@ -1172,6 +1173,7 @@ export class DKGPublisher implements Publisher {
   private tentativeCounter = 0;
   readonly writeLocks: Map<string, Promise<void>>;
   private readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  private readonly publishedSnapshotRetirement: PublishedSnapshotRetirement;
   /** OT-RFC-43 Option 1 — deterministic KA-id allocator (optional; see DKGPublisherConfig). */
   private readonly kaAllocator?: KaIdAllocator;
   private readonly resolveDurableRootPromotionAtomicCompanion?: (
@@ -1242,6 +1244,7 @@ export class DKGPublisher implements Publisher {
     this.setWorkspaceAgentRecipientResolver(config.workspaceAgentRecipientResolver);
     this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
     this.publicSnapshotStore = config.publicSnapshotStore;
+    this.publishedSnapshotRetirement = new PublishedSnapshotRetirement(this.store, config.publicSnapshotStore?.lifecycle);
     this.publisherPlanner = new PublisherPlanner({
       chain: this.chain,
       resolvePublisherAddressSelection: (contextGraphId, options) =>
@@ -7570,7 +7573,7 @@ export class DKGPublisher implements Publisher {
     // Persist the candidate BEFORE removing its references. If cleanup fails or
     // the process exits midway, remaining metadata makes collection fail closed.
     // Only this confirmed/durable cleanup boundary creates retirement candidates.
-    await this.retirePublishedSnapshotFiles(swmMetaGraph, operationSubjects, ctx);
+    await this.publishedSnapshotRetirement.schedule(swmMetaGraph, operationSubjects, message => this.log.warn(ctx, message));
     const graphs = await resolveSharedMemoryScopeGraphs(this.store, swmGraph, scope);
     for (const graph of graphs) {
       await this.store.dropGraph(graph);
@@ -7587,32 +7590,6 @@ export class DKGPublisher implements Publisher {
       `Cleared graph-scoped KA SWM ${scope.identity.agentAddress}/${scope.identity.kaNumber.toString()} ` +
         `from ${graphs.length} exact graph(s) and ${operationSubjects.length + 1} metadata subject(s)`,
     );
-  }
-
-  private async retirePublishedSnapshotFiles(
-    metaGraph: string,
-    operationSubjects: readonly string[],
-    ctx: OperationContext,
-  ): Promise<void> {
-    const lifecycle = this.publicSnapshotStore?.lifecycle;
-    if (!lifecycle?.finalizedCleanupEnabled || operationSubjects.length === 0) return;
-    try {
-      const result = await this.store.query(`SELECT DISTINCT ?ref WHERE {
-        GRAPH <${assertSafeIri(metaGraph)}> {
-          VALUES ?operation { ${operationSubjects.map(subject => `<${assertSafeIri(subject)}>`).join(' ')} }
-          VALUES ?predicate { <http://dkg.io/ontology/publicSnapshotRef> <http://dkg.io/ontology/publicQuadsDigest> }
-          ?operation ?predicate ?ref .
-          FILTER NOT EXISTS { ?operation <http://dkg.io/ontology/publicSnapshotGraph> ?graph }
-        }
-      } LIMIT 64`, { signal: AbortSignal.timeout(2_000) });
-      if (result.type !== 'bindings') throw new Error('Snapshot retirement lookup did not return bindings');
-      const refs = result.bindings.map(row => row['ref']?.match(/^"((?:sha256:)?[a-fA-F0-9]{64})"/)?.[1])
-        .filter((ref): ref is string => ref !== undefined);
-      await lifecycle.markPublished(refs);
-    } catch (error) {
-      // Confirmed publication must not be reported as failed because file GC is unavailable.
-      this.log.warn(ctx, `Could not schedule finalized snapshot cleanup: ${error instanceof Error ? error.message : String(error)}`);
-    }
   }
 
   private async resolvePublishedSwmCleanupPlan(
