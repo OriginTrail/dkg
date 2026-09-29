@@ -617,13 +617,16 @@ describe('durable sync lifecycle chain binding', () => {
   });
 
   it.each([
-    ['catalog', false, false],
-    ['legacy', true, false],
+    ['catalog', false, false, false],
+    ['legacy', true, true, false],
     // #2858: a blocked private graph keeps its root scope on the member lane.
-    ['catalog private-member', false, true],
+    ['catalog private-member', false, false, true],
+    // The emergency stop restores the legacy root even when persisted receiver
+    // authority still describes a selected catalog graph.
+    ['catalog with kill switch', false, true, false],
   ] as const)(
     'passes includeRootScope for %s authority during standalone SWM recovery',
-    async (_mode, legacySyncAllowed, onPrivateLane) => {
+    async (_mode, legacySyncAllowed, legacySwmAllowed, onPrivateLane) => {
       const agentLike: any = {
         config: {},
         store: {},
@@ -645,6 +648,7 @@ describe('durable sync lifecycle chain binding', () => {
         invalidateListContextGraphsCache: vi.fn(),
         contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
         resolveRfc64CatalogReceiverAuthorityV1: vi.fn(() => ({ legacySyncAllowed })),
+        rfc64LegacySwmGossipAllowedForContextGraph: vi.fn(() => legacySwmAllowed),
         rfc64PrivateRootSwmOnLegacyLaneV1: vi.fn(() => onPrivateLane),
         runContextGraphSyncWithBackpressure: async (
           _ctx: unknown,
@@ -666,9 +670,52 @@ describe('durable sync lifecycle chain binding', () => {
 
       expect(mockedRecoverContextGraphSwm).toHaveBeenCalledTimes(1);
       expect(mockedRecoverContextGraphSwm.mock.calls[0]?.[0].includeRootScope)
-        .toBe(legacySyncAllowed || onPrivateLane);
+        .toBe(legacySwmAllowed || onPrivateLane);
     },
   );
+
+  it('includes a private root at the ordinary execution boundary when the canonical legacy SWM decision is restored', async () => {
+    const recoverPrivateTarget = vi.fn(async () => ({
+      completed: true,
+      insertedDataQuads: 0,
+      insertedMetaQuads: 0,
+      droppedDataTriples: 0,
+    }));
+    const privateRootLane = vi.fn(async () => false);
+    const agentLike: any = {
+      config: {},
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: false }),
+      rfc64LegacySwmGossipAllowedForContextGraph: () => true,
+      rfc64PrivateRootSwmOnLegacyLaneV1: privateRootLane,
+      createSwmTargetExecutorSessionV1: () => ({ recoverPrivateTarget }),
+      runContextGraphSyncWithBackpressure: async (
+        _ctx: unknown,
+        _contextGraphId: string,
+        _lane: string,
+        _operationId: string,
+        work: () => Promise<unknown>,
+      ) => work(),
+    };
+
+    await LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution.call(
+      agentLike,
+      '12D3KooWPrivateRootPeer',
+      ['private-root-cg'],
+      {
+        sharedMemorySyncPlan: {
+          targets: [{ contextGraphId: 'private-root-cg', lane: 'ordinary-private' }],
+        },
+      },
+    );
+
+    expect(recoverPrivateTarget).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId: 'private-root-cg',
+      includeRootScope: true,
+    }));
+    expect(privateRootLane).not.toHaveBeenCalled();
+  });
 
   it('reserves settlement time inside an explicit exact-asset timeout while internal VM recovery keeps 600 seconds', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
@@ -1281,10 +1328,11 @@ describe('durable sync lifecycle chain binding', () => {
         work: () => Promise<unknown>,
       ) => work(),
       publisher: { clearPublishedKnowledgeAssetSwm: vi.fn() },
-      // Ordinary public CG: no RFC-64 complete-provider authority applies.
-      // Required once #2271's execution-boundary source fence is in the base.
+      // The selected catalog receiver can still have legacy SWM root authority
+      // after the global emergency stop restores ordinary synchronization.
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
-      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+      resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: false }),
+      rfc64LegacySwmGossipAllowedForContextGraph: () => true,
       log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     };
     agentLike.retireFinalizedSwmTwinCandidate = (
@@ -1305,6 +1353,7 @@ describe('durable sync lifecycle chain binding', () => {
     );
 
     expect(mockedReconcileFinalizedSwmTwinFromDescriptor).toHaveBeenCalledOnce();
+    expect(mockedRunSharedMemorySync.mock.calls[0]?.[0].includeRootScope).toBe(true);
     expect(disposition).toBe('suppress-metadata');
   });
 
@@ -1375,6 +1424,7 @@ describe('durable sync lifecycle chain binding', () => {
       // Ordinary public CG: no RFC-64 complete-provider authority applies.
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
       resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+      rfc64LegacySwmGossipAllowedForContextGraph: () => true,
       log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     };
     agentLike.retireFinalizedSwmTwinCandidate = (

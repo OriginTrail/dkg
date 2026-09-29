@@ -474,6 +474,94 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.peersSucceeded).toBe(1);
   });
 
+  it.each([
+    { label: 'typed legacy fallback', typed: true, expectedSucceeded: 2, expectedData: 1, unanswered: true },
+    { label: 'unexpected raw response', typed: false, expectedSucceeded: 1, expectedData: 0, unanswered: true },
+  ])('classifies $label from a complete provider without inventing a selected verdict', async ({
+    typed, expectedSucceeded, expectedData, unanswered,
+  }) => {
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-legacy-fallback', includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: 'peer-curator',
+              authoritativePeerId: 'peer-curator',
+              authoritativeSharedMemoryPeerIds: ['peer-swm'],
+              isPrivateContextGraph: false,
+              peerIds: ['peer-swm', 'peer-curator'],
+              connectedPeers: 2,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory':
+            expect(args[4]).toBe(true);
+            return typed
+              ? { kind: 'legacy-shared-memory-fallback', shared: sharedResult() }
+              : sharedResult();
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(result.peersSucceeded).toBe(expectedSucceeded);
+    expect(result.cleanPlaneCompletions?.sharedMemory.verifiedDataPeers).toBe(expectedData);
+    expect(result.cleanPlaneCompletions?.sharedMemory.selectedScopeCompletePeers ?? 0).toBe(0);
+    expect(result.diagnostics?.sharedMemory.authorityUnanswered).toBe(unanswered);
+  });
+
+  it('keeps walking after a selected provider falls back to legacy SWM', async () => {
+    const peerIds = ['peer-swm', 'peer-curator', 'peer-ordinary'];
+    const sharedCalls: string[] = [];
+    const durableCalls: string[] = [];
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-legacy-fallback-union', includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              authoritativePeerId: 'peer-curator',
+              authoritativeSharedMemoryPeerIds: ['peer-swm'],
+              isPrivateContextGraph: false,
+              peerIds,
+              connectedPeers: peerIds.length,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            durableCalls.push(String(args[0]));
+            return durableResult();
+          case 'syncSharedMemory':
+            expect(args[4]).toBe(true);
+            sharedCalls.push(String(args[0]));
+            return { kind: 'legacy-shared-memory-fallback', shared: sharedResult() };
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    // The selected peer lost whole-graph authority after preparation. Its
+    // legacy response counts as peer progress but cannot skip a later member
+    // that supplies a distinct part of the shared-memory union.
+    expect(sharedCalls).toEqual(['peer-swm', 'peer-ordinary']);
+    expect(durableCalls).toEqual(['peer-curator']);
+    expect(result.peersTried).toBe(3);
+    expect(result.peersNotAttempted).toBe(0);
+    expect(result.sharedMemorySynced).toBe(2);
+    expect(result.cleanPlaneCompletions?.sharedMemory.verifiedDataPeers).toBe(2);
+    expect(result.cleanPlaneCompletions?.sharedMemory.selectedScopeCompletePeers ?? 0).toBe(0);
+    expect(result.diagnostics?.sharedMemory.authorityUnanswered).toBe(true);
+  });
+
   it('uses selected scheduling for public SWM without promoting an ordinary peer to graph authority', async () => {
     const selectedFlags: unknown[] = [];
     const result = await runWorkerCatchup(

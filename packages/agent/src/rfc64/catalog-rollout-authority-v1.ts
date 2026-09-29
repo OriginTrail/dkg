@@ -644,6 +644,9 @@ export function resolveRfc64CatalogExecutionPlanV1(input: Readonly<{
     ...input.configuredContextGraphs,
     ...input.activation.selectedPublicContextGraphs,
   ])].filter((contextGraphId) => {
+    // The global stop restores ordinary sync for every configured graph,
+    // including a selected catalog graph whose raw policy remains catalog.
+    if (rollout.killSwitch) return true;
     const configuredAuthority = selectedAuthority[contextGraphId];
     if (configuredAuthority !== undefined) {
       return configuredAuthority.legacySyncAllowed;

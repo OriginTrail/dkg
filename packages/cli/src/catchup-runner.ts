@@ -12,6 +12,7 @@ import {
   type DurableProgressClassification,
   type DurableSyncDiagnostics,
   type DurableSyncResult,
+  type SharedMemorySyncResult,
   type SwmSnapshotCoverage,
   type SyncPeerResolution,
 } from '@origintrail-official/dkg-agent';
@@ -170,6 +171,12 @@ export interface CatchupPlaneNotAttempted {
   readonly reason: CatchupPlaneNotAttemptedReason;
 }
 
+/** The host explicitly switched a selected request to the agent's legacy SWM lane. */
+export interface CatchupLegacySharedMemoryFallback {
+  readonly kind: 'legacy-shared-memory-fallback';
+  readonly shared: SharedMemorySyncResult;
+}
+
 export function isCatchupPlaneNotAttempted(value: unknown): value is CatchupPlaneNotAttempted {
   return typeof value === 'object'
     && value !== null
@@ -210,6 +217,12 @@ function selectedSharedMemoryLaneActive(agent: any, contextGraphId: string): boo
   if (typeof agent.resolveRfc64SwmRecoveryRuntimeAuthorityV1 !== 'function') return true;
   const authority = agent.resolveRfc64SwmRecoveryRuntimeAuthorityV1(contextGraphId);
   return authority?.active === true && authority.lane === 'selected-public';
+}
+
+/** The kill switch can revoke the selected lane while explicitly restoring legacy transfer. */
+function legacySharedMemoryLaneAllowed(agent: any, contextGraphId: string): boolean {
+  return typeof agent.canUseLegacySharedMemorySyncForContextGraphV1 === 'function'
+    && agent.canUseLegacySharedMemorySyncForContextGraphV1(contextGraphId) === true;
 }
 
 /** `Rfc64SwmRecoveryTargetRevokedErrorV1`, thrown by a selected lane whose lease is not current. */
@@ -1313,6 +1326,14 @@ class WorkerCatchupRunner implements CatchupRunner {
             typeof source === 'string' ? source : undefined,
           ),
         };
+        const runLegacyFallback = async (): Promise<CatchupLegacySharedMemoryFallback> => ({
+          kind: 'legacy-shared-memory-fallback',
+          shared: await agent.syncSharedMemoryFromPeerDetailed(
+            peerId,
+            [contextGraphId],
+            admission,
+          ),
+        });
         // One bridge operation owns producer selection. The Worker supplies a
         // closed boolean, and only literal `true` may enter the selected lane;
         // malformed structured-clone values retain ordinary behavior.
@@ -1321,6 +1342,9 @@ class WorkerCatchupRunner implements CatchupRunner {
           // commits the graph's RFC-64 authority in the background while the
           // job is still preparing, and a later peer's call must then run.
           if (!selectedSharedMemoryLaneActive(agent, contextGraphId)) {
+            if (legacySharedMemoryLaneAllowed(agent, contextGraphId)) {
+              return runLegacyFallback();
+            }
             return this.selectedLaneNotAttempted(
               contextGraphId,
               'has no active RFC-64 public policy',
@@ -1341,9 +1365,15 @@ class WorkerCatchupRunner implements CatchupRunner {
             );
           } catch (error) {
             // Revoked after the check above. The lease refused the lane for
-            // this graph, which says nothing about the peer. Any other error
-            // keeps its failure semantics.
+            // this graph, which says nothing about the peer. A stale lease
+            // can also follow a selected-provider refresh: only a now-inactive
+            // selected lane permits legacy fallback. Any other error keeps
+            // its failure semantics.
             if (!isRfc64SwmRecoveryLeaseRefusal(error)) throw error;
+            if (!selectedSharedMemoryLaneActive(agent, contextGraphId)
+              && legacySharedMemoryLaneAllowed(agent, contextGraphId)) {
+              return runLegacyFallback();
+            }
             return this.selectedLaneNotAttempted(
               contextGraphId,
               'refused by its RFC-64 recovery lease',

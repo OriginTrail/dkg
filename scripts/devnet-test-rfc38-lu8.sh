@@ -27,6 +27,8 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=devnet-publish-helpers.sh
 source "$SCRIPT_DIR/devnet-publish-helpers.sh"
+# shellcheck source=devnet-curated-join-helpers.sh
+source "$SCRIPT_DIR/devnet-curated-join-helpers.sh"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 API_PORT_BASE=9201
 CURATOR_NODE=5
@@ -214,8 +216,25 @@ done
 [ "$MEMBER_ACTIVE" = true ] || fail "member subscription is not locally active for $PUB_CG"
 log "✓ member has an active subscription to the curator's public CG"
 
-# Pause for gossip + chain settling
-sleep 5
+# Subscription establishes read interest, not membership. This scenario's
+# rejection report writes into the public CG, so admit the reporting member
+# through the real signed join flow before testing that write.
+devnet_connect_member_to_curator "$MEMBER_NODE" "$CURATOR_NODE" ||
+  fail "member could not connect to curator before signed join"
+JOIN_BODY=$(devnet_signed_curated_join_body "$MEMBER_NODE" "$CURATOR_PEER" "$PUB_CG" rfc38-lu8-member) ||
+  fail "member sign-join failed"
+JOIN_REQUEST=$(devnet_request_curated_join "$MEMBER_NODE" "$PUB_CG" "$JOIN_BODY") ||
+  fail "member request-join failed"
+[ "$(parse_json "$JOIN_REQUEST" '.status')" = pending ] || fail "member request-join failed: $JOIN_REQUEST"
+sleep 2
+JOIN_APPROVAL=$(devnet_approve_curated_join "$CURATOR_NODE" "$PUB_CG" "$MEMBER_AGENT") ||
+  fail "curator approve-join request failed"
+[ "$(parse_json "$JOIN_APPROVAL" '.status')" = approved ] || fail "curator approve-join failed: $JOIN_APPROVAL"
+log "✓ curator approved the reporting member's signed join"
+
+devnet_wait_curated_member_ready "$MEMBER_NODE" "$PUB_CG" "$MEMBER_AGENT" ||
+  fail "approved member did not become locally ready for $PUB_CG"
+log "✓ reporting member has the curator allowlist locally"
 
 # ===========================================================================
 # SCENARIO 1 — Request validation + happy path on the member side.
