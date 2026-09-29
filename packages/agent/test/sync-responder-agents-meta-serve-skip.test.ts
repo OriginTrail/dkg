@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { QuietRetryableHandlerError, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
@@ -167,5 +167,73 @@ describe('sync responder durable-meta phase — injected serve-skip predicate', 
     const graphs = lineGraphsFromNquads(out);
     expect(graphs.has(AGENTS_ENTITY)).toBe(true);
     expect(out).toContain(`${DKG_NS}nodeRole`);
+  });
+});
+
+// Not a serve-skip: a graph the node must not serve yet (production: ontology
+// until the startup metadata relocation finishes) is refused like a busy
+// responder, so the requester retries instead of reading an empty page as EOF.
+describe('sync responder — injected servingWithheld predicate', () => {
+  const ONTOLOGY_CG = SYSTEM_CONTEXT_GRAPHS.ONTOLOGY;
+  const ONTOLOGY_ENTITY = `did:dkg:context-graph:${ONTOLOGY_CG}`;
+
+  let cap: ReturnType<typeof captureHandler>;
+  let withheld: (contextGraphId: string) => boolean;
+  let authorizations: string[];
+
+  beforeEach(async () => {
+    withheld = (contextGraphId) => contextGraphId === ONTOLOGY_CG;
+    authorizations = [];
+    const store = new OxigraphStore();
+    await store.insert([
+      { graph: ONTOLOGY_ENTITY, subject: 'did:dkg:context-graph:open', predicate: 'http://schema.org/name', object: '"Open"' },
+      { graph: USER_ENTITY, subject: USER_ENTITY, predicate: `${DKG_NS}createdAt`, object: '"2026-07-08T00:00:00Z"' },
+    ]);
+    cap = captureHandler();
+    registerSyncHandler({
+      register: cap.register,
+      protocolSync: '/origintrail/dkg/sync/1.0.0',
+      syncDeniedResponse: 'sync-denied',
+      syncPageSize: 5000,
+      sharedMemoryTtlMs: 0,
+      store,
+      peerId: 'self-peer',
+      parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,
+      authorizeSyncRequest: async (request) => {
+        authorizations.push(request.contextGraphId);
+        return true;
+      },
+      servingWithheld: (contextGraphId) => withheld(contextGraphId),
+      logWarn: noopLog,
+      logDebug: noopLog,
+    });
+  });
+
+  const request = (
+    contextGraphId: string,
+    phase: SyncRequestEnvelope['phase'],
+    includeSharedMemory = false,
+  ): SyncRequestEnvelope => ({ contextGraphId, offset: 0, limit: 5000, includeSharedMemory, phase });
+
+  it('refuses a withheld graph in every phase with a retryable error, before authorizing it', async () => {
+    for (const phase of ['data', 'meta', 'catalog'] as const) {
+      await expect(cap.invoke(request(ONTOLOGY_CG, phase))).rejects.toBeInstanceOf(QuietRetryableHandlerError);
+    }
+    await expect(cap.invoke(request(ONTOLOGY_CG, 'data', true))).rejects.toBeInstanceOf(QuietRetryableHandlerError);
+    expect(authorizations).toEqual([]);
+
+    const other = await cap.invoke(request(USER_CG, 'data'));
+    expect(other).toContain(USER_ENTITY);
+    expect(authorizations).toEqual([USER_CG]);
+  });
+
+  it('serves the graph once the predicate lets it go', async () => {
+    await expect(cap.invoke(request(ONTOLOGY_CG, 'data'))).rejects.toBeInstanceOf(QuietRetryableHandlerError);
+
+    withheld = () => false;
+
+    const out = await cap.invoke(request(ONTOLOGY_CG, 'data'));
+    expect(lineGraphsFromNquads(out)).toEqual(new Set([ONTOLOGY_ENTITY]));
+    expect(out).toContain('"Open"');
   });
 });

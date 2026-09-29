@@ -256,7 +256,8 @@ test(`certifies restart-stable shadow, catalog, kill, re-enable, and legacy auth
     'killed',
   ), expectedStatus({
     service: false,
-    legacy: false,
+    // The global stop restores the configured catalog graph to legacy sync.
+    legacy: true,
     manualTargets: 0,
     bootstrap: false,
   }));

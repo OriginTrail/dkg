@@ -4,6 +4,10 @@
  * This deliberately validates only syntax. It does not apply scheme-specific
  * equivalence, case folding, Unicode normalization, percent normalization, or
  * network resolution.
+ *
+ * It is the IRI rule of the V1 CG shared-projection verifier as well as of
+ * `parseWritableRdfTerm`, so a different policy needs a new function,
+ * not an edit here.
  */
 export function isAbsoluteRfc3987IriV1(value: string): boolean {
   const schemeEnd = value.indexOf(':');

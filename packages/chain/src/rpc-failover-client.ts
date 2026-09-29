@@ -51,7 +51,14 @@ import {
   sleep,
 } from './evm-adapter-rpc.js';
 import { errorCode, errorMessage, errorRetryAfterMs } from './evm-adapter-errors.js';
-import { noteRpcFailover, noteRpcExhaustion, notePreferredEndpoint, noteRpcServed, rpcHost } from './rpc-failover-log.js';
+import {
+  hostOnlyRpcText,
+  noteRpcFailover,
+  noteRpcExhaustion,
+  notePreferredEndpoint,
+  noteRpcServed,
+  rpcHost,
+} from './rpc-failover-log.js';
 import { EndpointStickiness, type StickinessIntent } from './endpoint-stickiness.js';
 import {
   ChainRpcTransportError,
@@ -940,18 +947,21 @@ export class RpcFailoverClient {
     // peer failure, matching their long-standing saw-non-error contract.
     if (lastRetryable && !(sawEmpty && options.emptyResultPolicy === 'any-empty')) {
       // Single provider → carry the typed code but keep the original message
-      // byte-identical (there is no second endpoint, so the raw message reads
-      // cleaner and any message-inspecting caller keeps seeing it). Multiple
-      // providers → the host-only "all endpoints" aggregate (never full URLs —
-      // a configured rpcUrl may carry an API key and this message can reach HTTP
-      // clients via response paths that echo err.message). Mirrors the write
-      // preparation loop's single-vs-multi message handling. Built from CANONICAL
-      // order so the error's `rpcUrls` stays a stable configured-order contract
+      // (there is no second endpoint, so the raw message reads cleaner and any
+      // message-inspecting caller keeps seeing it). Multiple providers → the
+      // host-only "all endpoints" aggregate. Either way every URL in the
+      // provider's message is reduced to its host: ethers quotes the full
+      // request URL in the message of an HTTP-level error, a configured rpcUrl
+      // may carry an API key, and this message reaches logs and HTTP clients via
+      // response paths that echo err.message. Mirrors the write preparation
+      // loop's single-vs-multi message handling. Built from CANONICAL order so
+      // the error's `rpcUrls` stays a stable configured-order contract
       // regardless of the per-op reorder.
+      const detail = hostOnlyRpcText(errorMessage(lastRetryable));
       const message = canonical.length <= 1
-        ? errorMessage(lastRetryable)
+        ? detail
         : `${label} read failed on all configured RPC endpoints ` +
-          `(${canonical.map((e) => rpcHost(e.rpcUrl)).join(', ')}): ${errorMessage(lastRetryable)}`;
+          `(${canonical.map((e) => rpcHost(e.rpcUrl)).join(', ')}): ${detail}`;
       throw new ProviderSetExhaustedError(message, allEndpointsThrottled ? 'all-throttled' : 'mixed', {
         cause: lastRetryable,
         rpcUrls: canonical.map((e) => e.rpcUrl),

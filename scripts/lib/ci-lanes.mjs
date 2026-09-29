@@ -23,6 +23,7 @@ export const TEST_LANE_METADATA = Object.freeze({
   'browser-local': { layer: 'browser', prerequisites: [...SYSTEM_PREREQUISITES, 'Playwright Chromium'] },
   devnet: { layer: 'system', prerequisites: SYSTEM_PREREQUISITES },
   'tornado-blazegraph': { layer: 'system', prerequisites: ['built runtime packages', 'native Oxigraph binary', 'BLAZEGRAPH_TEST_URL'] },
+  'inventory-windows': { layer: 'unit/component', prerequisites: ['pnpm frozen install', 'Git'] },
   archive: { layer: 'historical', prerequisites: [] },
   scripts: { layer: 'repository tooling', prerequisites: UNIT_PREREQUISITES },
   demo: { layer: 'system', prerequisites: SYSTEM_PREREQUISITES },
@@ -86,7 +87,7 @@ export function compileCiTopology(topology = CI_LANE_TOPOLOGY) {
       for (let index = 0; index < group.shards; index++) rows.push({
         row: rows.length, suite: group.id, shard: group.shards === 1 ? 0 : index + 1, shards: group.shards,
         label: group.shards === 1 ? group.label ?? group.id : `${group.id} [${index + 1}/${group.shards}]`,
-        gate1: group.runner === 'agent' && AGENT_SHARD_POLICY.descriptors[index]?.reservedOverheadMs > 0,
+        sidecars: group.runner === 'agent' && AGENT_SHARD_POLICY.descriptors[index]?.reservedOverheadMs > 0,
       });
     }
     jobs[job] = packages;

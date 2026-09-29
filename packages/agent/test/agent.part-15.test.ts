@@ -3,11 +3,20 @@ import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 
 type DKGAgent = RealDKGAgent;
 const DKGAgent = {
-  create(config: Parameters<typeof RealDKGAgent.create>[0]) {
-    return RealDKGAgent.create({
+  async create(config: Parameters<typeof RealDKGAgent.create>[0]) {
+    const agent = await RealDKGAgent.create({
       rfc64CatalogActivation: { enabled: false },
       ...config,
     });
+    // This file's synthetic persisted rows exercise persistence, caps and
+    // ordering. Give them local-create provenance so the admission guard does
+    // not turn those mechanics tests into remote-authority tests. The latter
+    // have their own rehydration coverage in private-read-chain-authority.
+    const rows = await config.contextGraphSubscriptionStore?.loadAll();
+    for (const row of rows ?? []) {
+      (agent as any).localContextGraphProvenance.recordLocalCreate(row.id);
+    }
+    return agent;
   },
 };
 
@@ -463,10 +472,13 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       try {
         await agentA.start();
         agentA.subscribeToContextGraph(localCgId, { syncMode: 'on-demand' });
+        // The member subscription is bound to its on-chain graph: core
+        // hosting joins a bound row, and never binds an unbound one.
         agentA.markContextGraphSubscriptionState(localCgId, {
           synced: true,
           sharedMemorySynced: true,
           metaSynced: true,
+          onChainId: '14',
         });
         (agentA as any).chain.getContextGraphAccessPolicy = async () => 0;
         (agentA as any).chain.isContextGraphActiveOnChain = async () => true;
@@ -726,8 +738,11 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       ]);
 
       try {
+        // Rehydration starts the retrying recovery loop (#2832), which runs
+        // this single attempt.
+        const recoverPendingMetadata = vi.spyOn(agent, 'recoverPendingJoinApprovalMetadata');
         const resumePendingMetadata = vi.spyOn(agent, 'resumePendingJoinApprovalMetadata')
-          .mockResolvedValue(undefined);
+          .mockResolvedValue('completed');
         await agent.start();
         expect(agent.getDefaultAgentAddress()?.toLowerCase()).toBe(localAgentAddress.toLowerCase());
 
@@ -752,6 +767,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         });
         expect((agent as any).config.syncContextGraphs ?? []).not.toContain(pendingId);
         await expect(agent.canReadContextGraph(pendingId)).resolves.toBe(false);
+        expect(recoverPendingMetadata).toHaveBeenCalledWith(pendingId, '12D3KooWRestartCurator0');
         expect(resumePendingMetadata).toHaveBeenCalledWith(
           pendingId,
           '12D3KooWRestartCurator0',

@@ -20,6 +20,8 @@ export default defineConfig({
           'test/messenger-outbox-memory.test.ts',
           'test/live-daemon-isolation.test.ts',
           'test/async-vm-publish-registration.test.ts',
+          // #2892 — real in-memory queue and supervisor; no chain or daemon process.
+          'test/async-promote-supervisor-bookkeeping.test.ts',
           // #1828 — durable-admission recovery lookup route (pure handler, no hardhat).
           'test/publisher-job-by-intent-route.test.ts',
           'test/publisher-journal-route.test.ts',
@@ -79,6 +81,13 @@ export default defineConfig({
           // Subscribing by an on-chain name hash (Base #33): route, catch-up
           // text and the public status summary. Pure handler, no hardhat.
           'test/context-graph-name-hash-subscribe-route.test.ts',
+          'test/context-graph-name-adoption-crash.test.ts',
+          // Full commit /api/status reports without build-info: git in a
+          // source checkout, else <DKG home>/.current-commit. Mocked git.
+          'test/current-commit-full.test.ts',
+          // Catch-up status by a resolved name hash: who sees the job. Real
+          // agent and mock chain, no hardhat.
+          'test/context-graph-name-hash-catchup-status.test.ts',
           // Subscribing by on-chain numeric id (`dkg subscribe 32` / `#32`):
           // the real route over a real agent and a mock chain. No hardhat.
           'test/context-graph-on-chain-id-subscribe.test.ts',
@@ -96,6 +105,11 @@ export default defineConfig({
           // paying the 2-minute hardhat-boot tax of the default config.
           'test/resolve-standalone-install.test.ts',
           'test/auto-update.test.ts',
+          'test/auto-update-jitter.test.ts',
+          'test/auto-update-holdoff-gate.test.ts',
+          'test/auto-update-holdoff-store.test.ts',
+          'test/auto-update-polling.test.ts',
+          'test/auto-update-runner.test.ts',
           'test/auto-update-workspace-clean.test.ts',
           'test/maintenance-update-gate.test.ts',
           'test/node-runtime-preflight.test.ts',
@@ -126,6 +140,9 @@ export default defineConfig({
           // on the job-level scalar), and denial counts DISTINCT peers.
           'test/catchup-runner-worker-continuation-deferral.test.ts',
           'test/relay-status-block.test.ts',
+          // `/api/status` → `eventLoopDelay`: the gauge with a fake histogram
+          // plus one real-histogram smoke test, and the route block shape.
+          'test/event-loop-delay-monitor.test.ts',
           'test/supervisor-liveness.test.ts',
           'test/promote-async-routes.test.ts',
           'test/promote-async-daemon-lifecycle.test.ts',
@@ -149,6 +166,10 @@ export default defineConfig({
           'test/rpc-usage-log.test.ts',
           'test/rpc-usage-snapshot-route.test.ts',
           'test/publisher-runner-rpc-usage.test.ts',
+          'test/publisher-startup-admission.test.ts',
+          'test/publisher-startup-lifecycle.test.ts',
+          'test/daemon-publisher-startup-cancellation.test.ts',
+          'test/publisher-availability.test.ts',
           'test/log-sink.test.ts',
           'test/log-lifecycle.test.ts',
           'test/telemetry-runtime.test.ts',
@@ -170,6 +191,7 @@ export default defineConfig({
           'test/publisher-runner-lu11.test.ts',
           'test/publisher-runner-ack-transport.test.ts',
           'test/publisher-runtime-snapshot-store-injection.test.ts',
+          'test/publisher-runtime-chain-config.test.ts',
           'test/publisher-ka-recovery.test.ts',
           // #2270 — the runner's chain lookup reports WHICH chain fact it found
           // (pending vs proven-absent vs inconclusive), and the two-state
@@ -207,7 +229,12 @@ export default defineConfig({
           'test/oxigraph-binary.test.ts',
           'test/oxigraph-listen-port.test.ts',
           'test/oxigraph-server.test.ts',
+          'test/oxigraph-launch-strategy.test.ts',
           'test/oxigraph-parent-watchdog.test.ts',
+          'test/oxigraph-orphan-lifecycle.test.ts',
+          'test/oxigraph-orphan-policy.test.ts',
+          'test/oxigraph-reclaim-policy.test.ts',
+          'test/oxigraph-orphan-native.test.ts',
           'test/oxigraph-managed.test.ts',
           // Opt-in via BLAZEGRAPH_INTEGRATION_TEST=1. Skips silently
           // (no fetch / no docker spawn) when the env-var is unset, so
@@ -220,6 +247,7 @@ export default defineConfig({
           // OxigraphWorkerStore; no hardhat needed.
           'test/write-preflight-resilience.test.ts',
           'test/http-literal-size-validation.test.ts',
+          'test/http-quad-term-validation.test.ts',
           // CLI subprocess smoke with stub daemon only; no hardhat needed.
           'test/context-graph-join-policy-cli.test.ts',
           'test/context-graph-join-policy-route.test.ts',

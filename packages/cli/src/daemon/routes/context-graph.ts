@@ -193,6 +193,10 @@ import {
 import { createStoreQueryRequestLifecycle } from '../store-query-lifecycle.js';
 import { mayFollowOnChainIdToRow } from '../context-graph-on-chain-id-gate.js';
 import {
+  admitContextGraphFollow,
+  readContextGraphSubscriptionAdmission,
+} from '../context-graph-subscription-admission.js';
+import {
   type MarkItDownTarget,
   manifestRepoRoot,
   type McpDkgAssets,
@@ -494,6 +498,11 @@ function catchupAuthorityUnavailableResponse(
   includeSharedMemory: boolean,
 ): void {
   recordCatchupRequest('authority_unavailable', includeSharedMemory);
+  return authorityUnavailableResponse(res);
+}
+
+/** The retryable 503 for an admission read that could not be completed. */
+function authorityUnavailableResponse(res: ServerResponse): void {
   return jsonResponse(
     res,
     503,
@@ -1988,16 +1997,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // cannot also serve as its authorization proof. Keep a permanent denial
     // distinct from transient authority unavailability at the HTTP boundary;
     // both fail closed and leave no subscription or catch-up-job side effect.
-    const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
+    let callerAddr: string | undefined;
     let readAuthority: Awaited<ReturnType<typeof agent.resolveContextGraphSubscriptionBootstrapAuthority>>;
     try {
-      readAuthority = await agent.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
-        callerAgentAddress: callerAddr,
-        allowSubscriptionFallback: false,
-        // This explicit admission boundary may spend a bounded cold lookup to
-        // populate the chain adapter's reverse name-hash index. Ordinary
-        // queries and restart rehydration retain the short fail-closed timeout.
-      });
+      ({ callerAgentAddress: callerAddr, authority: readAuthority } =
+        await readContextGraphSubscriptionAdmission(agent, contextGraphId, requestAgentAddress));
     } catch {
       return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
     }
@@ -2021,6 +2025,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           : 'This node has no agent authorized to read this project. Ask the curator to invite an agent first.',
       });
     }
+    const registeredPublicProofFor = (verifiedContextGraphId: string) => readAuthority.source === 'registered-chain'
+      && readAuthority.reason === 'chain-public'
+      && readAuthority.onChainId !== undefined
+      ? { contextGraphId: verifiedContextGraphId, onChainId: readAuthority.onChainId.toString(10) }
+      : undefined;
 
     // A graph known only by its on-chain name hash syncs nothing under that
     // id: every holder keys it by the cleartext id. Give connected peers a
@@ -2033,6 +2042,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }).catch(() => null);
       if (resolved) contextGraphId = resolved;
     }
+    const registeredPublicProof = registeredPublicProofFor(contextGraphId);
     // Two notes answer two questions about the requested id: which graph an
     // on-chain id named (`onChainReference`), and whether that graph's name
     // is known yet (`identity`, the #2744 contract that catch-up status and
@@ -2243,6 +2253,19 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${jobContextGraphId} started`);
       try {
         let targetContextGraphId = jobContextGraphId;
+        // The first subscribe may activate the catalog receiver before its
+        // finalized public policy is accepted. That transition's one-shot
+        // metadata pull then declines, while subsequent catch-up retries skip
+        // legacy durable sync and cannot acquire the graph declaration.
+        // Retry the policy-gated public metadata pull for every explicit
+        // catch-up; it is a cheap no-op once the declaration is confirmed.
+        if (typeof agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1 === 'function') {
+          await agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(
+            targetContextGraphId,
+            undefined,
+            registeredPublicProof,
+          ).catch(() => undefined);
+        }
         let result = await daemonState.catchupRunner!.run({
           contextGraphId: targetContextGraphId,
           includeSharedMemory: shouldSyncSharedMemory,
@@ -2255,6 +2278,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           targetContextGraphId = resolvedContextGraphId;
           job.resolvedContextGraphId = resolvedContextGraphId;
           catchupTracker.latestByContextGraph.set(resolvedContextGraphId, jobId);
+          if (typeof agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1 === 'function') {
+            await agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(
+              targetContextGraphId,
+              undefined,
+              registeredPublicProofFor(targetContextGraphId),
+            ).catch(() => undefined);
+          }
           result = await daemonState.catchupRunner!.run({
             contextGraphId: targetContextGraphId,
             includeSharedMemory: shouldSyncSharedMemory,
@@ -2404,12 +2434,27 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // cleartext id, gets the same refusal, so the refusal reveals nothing.
     const onChainLookup = agent.lookupContextGraphOnChainIdReference?.(requestedContextGraphId)
       ?? { kind: 'as-given' as const };
-    let contextGraphId: string;
+    let contextGraphId: string = requestedContextGraphId;
     if (onChainLookup.kind === 'as-given') {
-      // A name hash this node resolved no longer keys any row: its
-      // subscription moved to the verified cleartext id, which is what must
-      // be stopped.
-      contextGraphId = agent.resolveContextGraphIdAlias?.(requestedContextGraphId) ?? requestedContextGraphId;
+      // A name hash this node resolved no longer keys any row: its subscription
+      // moved to the verified cleartext id, which is what must be stopped. The
+      // hash is public on chain, but following it names the graph and stops its
+      // subscription, so only a caller who could already read that graph
+      // follows it: the node operator (who can list every subscription) or an
+      // agent the subscribe route would admit to the resolved id. A caller that
+      // is refused is answered exactly as for an id that keys no row. An
+      // admission read that could not be completed gets the subscribe route's
+      // retryable 503: reporting an unsubscribe that did not happen would leave
+      // the graph syncing behind a success.
+      const alias = agent.resolveContextGraphIdAlias?.(requestedContextGraphId) ?? null;
+      if (alias !== null && alias !== requestedContextGraphId) {
+        const follow = await admitContextGraphFollow(agent, alias, {
+          isNodeAdmin: isNodeAdminCaller(),
+          agentAddress: requestAgentAddress,
+        });
+        if (follow === 'unavailable') return authorityUnavailableResponse(res);
+        if (follow === 'allowed') contextGraphId = alias;
+      }
     } else {
       const stoppable = onChainLookup.kind === 'held'
         && agent.getSubscribedContextGraphs()?.get(onChainLookup.contextGraphId)?.subscribed === true

@@ -67,7 +67,7 @@ import {
   createSwmCatchupPeerSelector,
   loadOpWallets,
 } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateContextGraphId, isSafeIri, contextGraphSharedMemoryUri, contextGraphMetaUri, escapeSparqlLiteral, advertisesSyncProtocol } from '@origintrail-official/dkg-core';
 import { buildAutoRegisterFailureBody } from "./shared-assertion-helpers.js";
 import {
   DashboardDB,
@@ -210,8 +210,6 @@ import {
 } from '../manifest.js';
 import {
   resolveNameToPeerId,
-  isWritableQuad,
-  validateQuadObjectTerms,
   validateWritableQuadLiteralSizes,
   oversizedRdfLiteralResponseBody,
   jsonResponse,
@@ -241,6 +239,7 @@ import {
   sleep,
   deriveBlockExplorerUrl,
   respondIfChainRpcTransportError,
+  respondContextGraphReadAuthorityUnavailable,
 } from '../http-utils.js';
 import { handleQueryCatalogRoutes } from './query-catalog.js';
 import {
@@ -669,7 +668,7 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
       if (!check) {
         check = Promise.resolve()
           .then(() => agent.getPeerProtocols(peerId))
-          .then((protocols) => protocols.includes(PROTOCOL_SYNC))
+          .then((protocols) => advertisesSyncProtocol(protocols))
           .catch(() => undefined);
         protocolChecks.set(peerId, check);
       }
@@ -1840,13 +1839,8 @@ export async function handleMemoryRoutes(ctx: RequestContext): Promise<void> {
         // `Retry-After`, and deliberately NO context-graph id, authority
         // source or internal reason in the body — those would turn an
         // outage response into the same enumeration oracle the denial path
-        // is careful about. The reason stays in the daemon log.
-        res.setHeader('Retry-After', '3');
-        return jsonResponse(res, 503, {
-          error: 'Context graph read authority is temporarily unavailable. Retry shortly.',
-          code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE',
-          retryable: true,
-        });
+        // is careful about. The attribution goes to the daemon log (#2834).
+        return respondContextGraphReadAuthorityUnavailable(res, authority);
       }
 
       // An `allowed` outcome is not automatically a CALLER-scoped allow.

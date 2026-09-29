@@ -4,6 +4,8 @@ import {
   StorePriorityScheduler,
   StoreSchedulerBusyError,
   isStoreSchedulerBusyError,
+  activeDefaultStoreWorkPriority,
+  withDefaultStoreWorkPriority,
 } from '../src/store-priority-scheduler.js';
 import {
   STORE_WORK_PRIORITIES,
@@ -314,6 +316,24 @@ describe('StorePriorityScheduler', () => {
     expect(isStoreSchedulerBusyError({ code: 'STORE_SCHEDULER_BUSY' })).toBe(false);
   });
 
+  it('accepts optional string messages while retaining prototype-free copies without messages', () => {
+    const original = new StoreSchedulerBusyError('queue_full', 'normal', 'query');
+    const copied = { ...original };
+    expect(copied).not.toHaveProperty('message');
+    expect(isStoreSchedulerBusyError(copied)).toBe(true);
+    for (const message of [undefined, '', original.message]) {
+      expect(isStoreSchedulerBusyError({ ...copied, message })).toBe(true);
+    }
+  });
+
+  it.each([null, 42, { detail: 'not a message' }])(
+    'rejects malformed optional message metadata (%j)',
+    (message) => {
+      const copied = { ...new StoreSchedulerBusyError('queue_full', 'normal', 'query') };
+      expect(isStoreSchedulerBusyError({ ...copied, message })).toBe(false);
+    },
+  );
+
   it('binds canonical operations at both scheduler-owned admission rejection sites', async () => {
     const scheduler = new StorePriorityScheduler({
       maxConcurrent: 1,
@@ -564,6 +584,31 @@ describe('StorePriorityScheduler', () => {
       'background-1',
       'background-2',
     ]);
+  });
+
+  it('admits work without an explicit priority in the ambient default lane, and lets an explicit one win', async () => {
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 3,
+      ackReservedSlots: 1,
+      healthReservedSlots: 0,
+      normalReservedSlots: 1,
+      backgroundReservedSlots: 1,
+      queueLimits: 64,
+      queueWaitTimeoutMs: 1_000,
+    });
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+
+    const ambient = withDefaultStoreWorkPriority('background', () => scheduler.run(undefined, 'walk.read', () => held));
+    const explicit = withDefaultStoreWorkPriority('background', () => scheduler.run('ack', 'ack.read', () => held));
+    const unset = scheduler.run(undefined, 'api.read', () => held);
+    await tick();
+
+    expect(scheduler.snapshot).toMatchObject({ backgroundInflight: 1, ackInflight: 1, normalInflight: 1 });
+    release();
+    await Promise.all([ambient, explicit, unset]);
+    expect(withDefaultStoreWorkPriority('background', () => activeDefaultStoreWorkPriority())).toBe('background');
+    expect(activeDefaultStoreWorkPriority()).toBeUndefined();
   });
 
   it('normalizes conflicting reserves so normal work can use idle capacity', async () => {

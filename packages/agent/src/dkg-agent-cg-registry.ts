@@ -94,6 +94,8 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
   assertRdfLiteralMutf8Safe,
+  contextGraphOnChainIdBindingQuery,
+  contextGraphMetadataHomeGraph,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES, withRpcUsageSite, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityProjectionServedEvidence, type ContextGraphAuthorityReadOptions, type ContextGraphAuthoritySnapshot, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
@@ -149,6 +151,10 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
+import {
+  contextGraphReadAuthorityDependencyOf,
+  type ContextGraphReadAuthorityDependency,
+} from './context-graph-authority-dependency.js';
 import { bindRandomSampling, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -392,7 +398,6 @@ import { LocalContextGraphRegistrationStatusStore } from
   './local-context-graph-registration-status.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
-  isCanonicalAuthoritativeContextGraphId,
   isCanonicalPositiveContextGraphId,
   localContextGraphIdMatchesCommittedNameHash,
 } from './context-graph-binding-state.js';
@@ -400,6 +405,12 @@ import {
   createContextGraphRegistrationReadPlan,
   type ContextGraphRegistrationReadPlan,
 } from './context-graph-registration-read-plan.js';
+import {
+  proveOnChainIdClaim,
+  provenOnChainIdsFor,
+  refutesOnChainBinding,
+  type ProvenOnChainBinding,
+} from './context-graph-claim-proof.js';
 
 const CHAIN_ATTESTED_DECLARATION_SCAN_MAX = 512;
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
@@ -420,6 +431,8 @@ export type ContextGraphRegistrationBinding =
         | 'chain-name-binding-unavailable'
         | 'authority-circuit-open';
       detail?: string;
+      /** Set where the failed lookup's own error says which dependency could not answer. */
+      dependency?: ContextGraphReadAuthorityDependency;
     };
 
 export type FinalizedContextGraphAuthorityTargetV1 =
@@ -1247,6 +1260,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
             kind: 'unavailable',
             reason: 'local-chain-binding-unavailable',
             detail: err instanceof Error ? err.message : String(err),
+            dependency: contextGraphReadAuthorityDependencyOf(err),
           };
         }
       }
@@ -1457,6 +1471,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           kind: 'unavailable',
           reason: 'local-chain-binding-unavailable',
           detail: err instanceof Error ? err.message : String(err),
+          dependency: contextGraphReadAuthorityDependencyOf(err),
         };
       }
     }
@@ -1509,22 +1524,87 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     );
     if (currentBinding !== undefined) return currentBinding;
 
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
+    // The durable RDF binding: ontology for a public graph, the graph's own
+    // `_meta` for a curated one (reported with the same provenance). Both are
+    // claims (see context-graph-claim-proof.ts), and a subject can carry any
+    // number of them, so ask only for the ones this chain proves: no other
+    // claim can then push the proven one out of the answer. With none proven
+    // the list is empty and matches nothing, but the store is still read, so
+    // a failing store fails closed instead of reading as an unregistered graph.
     const result = await this.store.query(
-      `SELECT ?id WHERE { GRAPH <${ontologyGraph}> { <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?id } } LIMIT 1`,
+      contextGraphOnChainIdBindingQuery(contextGraphId, { onChainIds: this.provenOnChainIdsFor(contextGraphId) }),
       {
         signal: options.signal,
         source: options.source ?? 'agent.contextGraph.onChainId',
       },
     );
-    if (result.type !== 'bindings' || result.bindings.length === 0) return null;
-    const value = result.bindings[0]?.['id'];
-    if (typeof value !== 'string') return null;
-    const onChainId = value.replace(/^"|"$/g, '');
-    return isCanonicalAuthoritativeContextGraphId(onChainId)
-      ? { onChainId, provenance: 'ontology' }
-      : null;
+    if (result.type !== 'bindings') return null;
+    for (const binding of result.bindings) {
+      const value = binding['id'];
+      if (typeof value !== 'string') continue;
+      const proven = this.provenOnChainContextGraphClaim(contextGraphId, value.replace(/^"|"$/g, ''));
+      if (proven !== null) return { onChainId: proven.onChainId, provenance: 'ontology' };
+    }
+    return null;
+  }
+
+  /**
+   * The on-chain ids this node's chain facts prove for `contextGraphId`
+   * (`provenOnChainIdsFor` in context-graph-claim-proof.ts).
+   */
+  provenOnChainIdsFor(this: DKGAgent, contextGraphId: string): string[] {
+    // Shared read paths also run on the partial agents unit fixtures build,
+    // which have no facts map.
+    const facts = this.onChainContextGraphFacts;
+    if (facts === undefined || facts.size === 0) return [];
+    return provenOnChainIdsFor(contextGraphId, facts, (localId) => this.isWireIdKeyedSubscription(localId));
+  }
+
+  /**
+   * The binding an off-chain claim names, when this node's own chain proves
+   * it; otherwise null (`proveOnChainIdClaim` in context-graph-claim-proof.ts,
+   * against the name hash this node read for the claimed slot). No RPC is
+   * spent: a slot this node has no facts for proves nothing.
+   */
+  provenOnChainContextGraphClaim(
+    this: DKGAgent,
+    contextGraphId: string,
+    claimedOnChainId: string,
+  ): ProvenOnChainBinding | null {
+    return proveOnChainIdClaim(
+      contextGraphId,
+      claimedOnChainId,
+      // `?.`: partial agents built by unit fixtures have no facts map.
+      this.onChainContextGraphFacts?.get(claimedOnChainId)?.nameHash,
+      (localId) => this.isWireIdKeyedSubscription(localId),
+    );
+  }
+
+  /**
+   * Clear every binding to `onChainId` that this chain refutes, now that the
+   * slot's committed name hash is known (`refutesOnChainBinding` in
+   * context-graph-claim-proof.ts decides, from the hash passed in). Returns
+   * the ids it unbound.
+   *
+   * Store discovery used to bind every ontology claim unchecked, and a Core
+   * auto-subscribes what it discovers and persists the binding, so upgraded
+   * nodes restore other networks' graphs under this chain's ids. Such a
+   * binding can only fail: RFC-64 rejects its evidence as an invalid
+   * identity, a reverse lookup of the id can return it instead of the graph
+   * the slot names, and every authority read of it fails closed as a stale
+   * mapping.
+   */
+  clearRefutedOnChainContextGraphBindings(
+    this: DKGAgent,
+    onChainId: string,
+    committedNameHash: string,
+  ): string[] {
+    const isWireIdKeyedRow = (localId: string) => this.isWireIdKeyedSubscription(localId);
+    const refuted = [...this.subscribedContextGraphs]
+      .filter(([localId, row]) => refutesOnChainBinding(localId, row, onChainId, committedNameHash, isWireIdKeyedRow))
+      .map(([localId]) => localId);
+    for (const localId of refuted) this.unbindSubscriptionOnChainId(localId);
+    return refuted;
   }
 
   /**
@@ -1650,10 +1730,38 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
      * index, which is never taken from a projection served as `stale-cache`.
      */
     publishPolicyMaxCacheAgeMs?: number;
+    /**
+     * Caller deadline for the chain lookups: the on-chain id resolution and
+     * the finalized snapshot read. An aborted lookup leaves its field unknown.
+     */
+    signal?: AbortSignal;
   }): Promise<{
     accessPolicy?: number;
     publishPolicy?: number;
   }> {
+    const signal = options?.signal;
+    // With a finalized authority index, a named graph's id comes only from the
+    // finalized registration binding. The current-state binding falls back to
+    // a live registry range scan, which a member of a graph that was never
+    // registered paid twice on every share: minutes on a public chain (#2827
+    // follow-up). A legacy adapter and a numeric id keep that binding. Either
+    // way the id is looked up at most once per call.
+    let onChainIdLookup: Promise<string | null> | undefined;
+    const resolveOnChainId = (): Promise<string | null> => {
+      onChainIdLookup ??= (async () => {
+        if (
+          this.chain?.contextGraphAuthorityIndexRevisionReader === undefined
+          || typeof this.resolveContextGraphRegistrationBinding !== 'function'
+          || isCanonicalPositiveContextGraphId(contextGraphId)
+        ) {
+          return this.getContextGraphOnChainId(contextGraphId, { signal }).catch(() => null);
+        }
+        const binding = await this.resolveContextGraphRegistrationBinding(contextGraphId, { signal })
+          .catch(() => null);
+        return binding?.kind === 'registered' ? binding.onChainId.toString() : null;
+      })();
+      return onChainIdLookup;
+    };
     // Keep the explicitly-created local-first state off the registry lookup
     // path. The registration guard below used to run only after the cache
     // re-key step had already called `getContextGraphOnChainId()` (twice on a
@@ -1708,7 +1816,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
 
     if (accessPolicy === undefined || publishPolicy === undefined) {
       onChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId
-        ?? (await this.getContextGraphOnChainId(contextGraphId).catch(() => null))
+        ?? (await resolveOnChainId())
         ?? undefined;
       if (onChainId && onChainId !== contextGraphId) {
         if (accessPolicy === undefined) accessPolicy = this.onChainAccessPolicyCache.get(onChainId);
@@ -1752,7 +1860,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       if (!registeredViaStatus) {
         if (onChainId === undefined) {
           onChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId
-            ?? (await this.getContextGraphOnChainId(contextGraphId).catch(() => null))
+            ?? (await resolveOnChainId())
             ?? undefined;
         }
         if (onChainId) {
@@ -1801,7 +1909,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     ) {
       if (onChainId === undefined) {
         onChainId = this.subscribedContextGraphs.get(contextGraphId)?.onChainId
-          ?? (await this.getContextGraphOnChainId(contextGraphId).catch(() => null))
+          ?? (await resolveOnChainId())
           ?? undefined;
       }
       let numericId: bigint | undefined;
@@ -1834,7 +1942,7 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
           ?.readContextGraphAuthorityIndexSnapshots !== undefined
           && typeof this.readFinalizedContextGraphAuthoritySnapshotV1 === 'function'
           ? (id: bigint, readOptions: { label: string }) => (
-              this.readFinalizedContextGraphAuthoritySnapshotV1(id, readOptions)
+              this.readFinalizedContextGraphAuthoritySnapshotV1(id, { ...readOptions, signal })
             )
           : undefined;
         const finalizedPolicy = await readFinalizedContextGraphPolicyV1(
@@ -2239,14 +2347,13 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     const gm = new GraphManager(this.store);
     gm.assertNewContextGraphId(opts.id);
     const contextGraphUri = contextGraphDataGraphUri(opts.id);
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const cgMetaGraph = contextGraphMetaGraphUri(opts.id);
     const now = new Date().toISOString();
 
     // Curated CGs write definition triples to _meta so they stay invisible
     // to other nodes that sync ONTOLOGY. Open CGs go to ONTOLOGY for
     // network-wide discovery.
-    const defGraph = opts.curated ? cgMetaGraph : ontologyGraph;
+    const defGraph = contextGraphMetadataHomeGraph(opts.id, { curated: opts.curated === true });
 
     // No creator/curator triples here — bootstrap is a subscriber-style
     // path. Ownership is established only when a node explicitly calls

@@ -25,7 +25,7 @@
  */
 
 import { collectEvmErrorText } from './evm-error-text.js';
-import { rpcHost } from './rpc-failover-log.js';
+import { hostOnlyRpcText, RPC_TEXT_URL_PATTERN, rpcHost } from './rpc-failover-log.js';
 
 /** What a provider's eth_getLogs refusal says about the requested range. */
 export type EvmLogRangeLimit =
@@ -140,9 +140,6 @@ const PLAN_PATTERN = new RegExp([
   String.raw`\bpersonal token\b`,
 ].join('|'));
 
-/** Any URL in error text (the request URL ethers embeds, a provider's sign-up link). */
-const URL_PATTERN = /[a-z][a-z0-9+.-]*:\/\/\S+/g;
-
 function parseBlockCount(digits: string, thousands: string | undefined): number | undefined {
   const value = Number(digits.replace(/[,_]/g, '')) * (thousands === undefined ? 1 : 1_000);
   return Number.isSafeInteger(value) && value >= 1 ? value : undefined;
@@ -175,10 +172,10 @@ export function classifyEvmLogRangeLimitError(
   err: unknown,
   requestedBlocks?: number,
 ): EvmLogRangeLimit | undefined {
-  // URLs are dropped first: ethers embeds the request URL in every HTTP-level
-  // error message, and an operator endpoint such as `base-archive.example.org`
-  // must not turn a span refusal into a depth limit.
-  const text = collectEvmErrorText(err).replace(URL_PATTERN, ' ');
+  // URLs are dropped first, host and all: ethers embeds the request URL in
+  // every HTTP-level error message, and an operator endpoint such as
+  // `base-archive.example.org` must not turn a span refusal into a depth limit.
+  const text = collectEvmErrorText(err).replace(RPC_TEXT_URL_PATTERN, ' ');
   if (DEPTH_PATTERN.test(text)) return { kind: 'depth' };
   const span = matchSpanLimit(text);
   if (span === undefined) return undefined;
@@ -233,7 +230,9 @@ function providerHost(provider: object): string {
 /**
  * The provider's own words: the JSON-RPC `{ code, message }` ethers nests
  * under `error`, or the body of an HTTP-level refusal. Falls back to the
- * error's own message.
+ * error's own message — for a refusal whose body is not JSON, ethers' message,
+ * which embeds the full request URL. Every URL is reduced to its host either
+ * way, before the text is shortened.
  */
 function providerMessage(err: unknown): string {
   const seen = new Set<unknown>();
@@ -254,9 +253,30 @@ function providerMessage(err: unknown): string {
     }
     return undefined;
   };
-  const found = visit(err, 0)
-    ?? (err instanceof Error ? err.message : collectEvmErrorText(err));
+  const found = hostOnlyRpcText(
+    visit(err, 0) ?? (err instanceof Error ? err.message : collectEvmErrorText(err)),
+  );
   return found.length > 300 ? `${found.slice(0, 300)}…` : found;
+}
+
+/**
+ * An error the reader does not classify, as it rethrows it. Callers quote its
+ * message in their own errors and logs (the RPC exhaustion message, the event
+ * lanes' failure line), and for an HTTP-level refusal ethers' message embeds
+ * the full request URL, API key included. So an error whose message names a
+ * URL is rethrown as a copy with every URL reduced to its host. The copy keeps
+ * the `name` and `code` the retry and failover classifiers read (status and
+ * `Retry-After` they find through `cause`), and carries the provider's error as
+ * `cause`. Any other error is rethrown as the same object.
+ */
+function withHostOnlyMessage(err: unknown): unknown {
+  if (!(err instanceof Error)) return err;
+  const message = hostOnlyRpcText(err.message);
+  if (message === err.message) return err;
+  const copy = new Error(message, { cause: err });
+  if (copy.name !== err.name) copy.name = err.name;
+  const { code } = err as { code?: unknown };
+  return code === undefined ? copy : Object.assign(copy, { code });
 }
 
 export interface AdaptiveEvmLogRangeParams<T> {
@@ -282,7 +302,8 @@ export interface AdaptiveEvmLogRangeParams<T> {
  *   span) and retries the refused range at it.
  * - A depth refusal is never split: it becomes a failover-eligible
  *   {@link EvmLogRangeUnavailableError} after a single request.
- * - Anything else propagates unchanged.
+ * - Anything else propagates as thrown, except that a URL in its message is
+ *   reduced to its host (see `withHostOnlyMessage`).
  *
  * Requests are sequential, so a compatibility retry never becomes a burst, and
  * bounded by {@link EVM_LOG_RANGE_MAX_REQUESTS_PER_READ}: a range the cap
@@ -356,7 +377,7 @@ export async function readAdaptiveEvmLogRange<T>(
       rows.push(...await read(lo, hi));
     } catch (err) {
       const limit = classifyEvmLogRangeLimitError(err, span);
-      if (limit === undefined) throw err;
+      if (limit === undefined) throw withHostOnlyMessage(err);
       if (limit.kind === 'depth') {
         throw unavailable('is beyond the history, archive or plan limit', limit, err);
       }

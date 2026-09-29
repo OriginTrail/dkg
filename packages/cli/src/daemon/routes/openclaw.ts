@@ -319,6 +319,10 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
+import {
+  isUndiciResponseTimeoutError,
+  localAgentChannelFetchInit,
+} from '../local-agent-channel-fetch.js';
 
 import type { RequestContext } from './context.js';
 
@@ -326,6 +330,7 @@ function isOpenClawBridgeTimeoutError(err: any): boolean {
   const message = String(err?.message ?? err ?? '');
   return err?.name === 'TimeoutError'
     || err?.cause?.name === 'TimeoutError'
+    || isUndiciResponseTimeoutError(err)
     || /agent response timeout|response timeout|aborted due to timeout/i.test(message);
 }
 
@@ -741,7 +746,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
               : {}),
             ...(uiContextGraphId ? { uiContextGraphId } : {}),
           }),
-          signal: AbortSignal.timeout(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
+          ...localAgentChannelFetchInit(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
         if (!forwardRes.ok) {
           const details = await forwardRes.text().catch(() => "");
@@ -876,7 +881,7 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
               : {}),
             ...(uiContextGraphId ? { uiContextGraphId } : {}),
           }),
-          signal: AbortSignal.timeout(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
+          ...localAgentChannelFetchInit(OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS),
         });
 
         if (!transportRes.ok) {

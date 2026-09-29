@@ -860,9 +860,12 @@ N4_SEC_CT=$(safe_bindings_count "$N4_SECRET")
 check "Node 4 cannot see WM secret data" "$N4_SEC_CT" "0"
 
 echo "--- 13k: Node 4 has NO WM lifecycle metadata ---"
+# Scoped: since v10.0.17 an unscoped query is refused on stores without
+# all-writer consistency coverage. An error answer counts as PARSE_ERR, not 0.
 N4_WM_META=$(c -X POST "http://127.0.0.1:9204/api/query" \
-  -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <did:dkg:context-graph:$CG2_ID/_meta> { ?s <http://dkg.io/ontology/memoryLayer> \\\"WM\\\" } }\"}")
+  -d "{\"sparql\":\"SELECT ?s WHERE { GRAPH <did:dkg:context-graph:$CG2_ID/_meta> { ?s <http://dkg.io/ontology/memoryLayer> \\\"WM\\\" } }\",\"contextGraphId\":\"$CG2_ID\"}")
 N4_WMM_CT=$(safe_bindings_count "$N4_WM_META")
+[[ "$N4_WMM_CT" == "0" ]] || echo "  13k answer: $N4_WM_META"
 check "Node 4 has 0 WM-layer lifecycle entries" "$N4_WMM_CT" "0"
 
 echo "--- 13l: Node 5 sends join request + gets approved ---"

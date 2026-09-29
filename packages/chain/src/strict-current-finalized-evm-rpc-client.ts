@@ -19,6 +19,7 @@ import {
 } from './strict-current-finalized-evm-errors.js';
 import type { FinalizedAnchorV1 } from './strict-current-finalized-evm-types.js';
 import { isCanonicalLowerHexBytesV1 } from './strict-finalized-evm-bytes.js';
+import { chainRpcFetch } from './rpc-http1-dispatcher.js';
 
 interface RpcErrorEnvelopeV1 {
   readonly code: number;
@@ -42,7 +43,7 @@ export async function postStrictFinalizedJsonRpcV1(
 ): Promise<unknown> {
   let response: Response;
   try {
-    response = await fetch(endpoint, {
+    response = await chainRpcFetch(endpoint, {
       method: 'POST',
       headers: Object.freeze({
         accept: 'application/json',

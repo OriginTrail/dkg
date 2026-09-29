@@ -2385,3 +2385,258 @@ describe('RFC-64 public catalog service v1 lifecycle ownership', () => {
     await service.close();
   });
 });
+
+describe('RFC-64 public catalog service v1 already-satisfied announcements', () => {
+  function satisfiedHeadHarness(options: {
+    readonly holdReconcile?: Promise<void>;
+    readonly holdDiscovery?: Promise<void>;
+    readonly withoutPullLane?: boolean;
+  } = {}) {
+    const router = new RecordingRouter();
+    const applied = new Set<string>();
+    const knownSatisfied = new Set<string>();
+    const isHeadSatisfied = vi.fn(async (head: Rfc64PublicCatalogHeadAnnouncementV1) => (
+      applied.has(head.catalogHeadObjectDigest)
+    ));
+    const isHeadKnownSatisfied = vi.fn((head: Rfc64PublicCatalogHeadAnnouncementV1) => (
+      knownSatisfied.has(head.catalogHeadObjectDigest)
+    ));
+    const reconcileHead = vi.fn(async (
+      _peerId: string,
+      head: Rfc64PublicCatalogHeadAnnouncementV1,
+    ) => {
+      await options.holdReconcile;
+      applied.add(head.catalogHeadObjectDigest);
+      return 'applied' as const;
+    });
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      ...(options.withoutPullLane === true ? {} : {
+        currentHeadDiscovery: { readCurrentAppliedCatalogHeadDigest: async () => null },
+      }),
+      receiver: { retryBackoffMs: 0 },
+      native: nativeOptions(() => ({ isHeadSatisfied, isHeadKnownSatisfied, reconcileHead })),
+    });
+    const policy = acceptPolicy(service);
+    const headAt = (catalogVersion: string, byte: string) => Object.freeze({
+      ...announcement(policy.policyDigest),
+      catalogVersion,
+      catalogHeadObjectDigest: `0x${byte.repeat(64)}` as Digest32V1,
+      signatureVariantDigest: `0x${byte.repeat(64)}` as Digest32V1,
+    }) as Rfc64PublicCatalogHeadAnnouncementV1;
+    const lastAnnounced = new Map<string, Rfc64PublicCatalogHeadAnnouncementV1>();
+    // The announcing peer's current head is the head it announced last.
+    const discovery = vi.spyOn(service, 'discoverCurrentCatalogHead').mockImplementation(
+      async ({ remotePeerId }) => {
+        await options.holdDiscovery;
+        const announced = lastAnnounced.get(remotePeerId)!;
+        return Object.freeze({ announcement: announced, head: {} as never });
+      },
+    );
+    const announce = async (head: Rfc64PublicCatalogHeadAnnouncementV1, peerId = 'peer-a') => {
+      lastAnnounced.set(peerId, head);
+      const ack = await router.invoke(
+        RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+        encodeRfc64PublicCatalogHeadAnnouncementV1(head),
+        peerId,
+      );
+      // Admitted and acknowledged, whether or not it needed any work.
+      expect([...ack]).toEqual([1]);
+    };
+    service.start();
+    return {
+      service,
+      knownSatisfied,
+      isHeadSatisfied,
+      isHeadKnownSatisfied,
+      reconcileHead,
+      discovery,
+      headAt,
+      announce,
+    };
+  }
+
+  it('answers re-announced applied heads with no head read, receiver task, or pull', async () => {
+    const f = satisfiedHeadHarness();
+    const current = f.headAt('3', 'c');
+
+    await f.announce(current);
+    await f.service.whenReceiverIdle();
+    expect(f.reconcileHead).toHaveBeenCalledTimes(1);
+    expect(f.discovery).toHaveBeenCalledTimes(1);
+    const fullPathChecks = f.isHeadSatisfied.mock.calls.length;
+    expect(fullPathChecks).toBeGreaterThanOrEqual(2);
+    const receiverBefore = f.service.stats().receiver;
+
+    // The head is applied and its staged head verified once: every later
+    // connect re-announces it, directly and through each scoped replay.
+    f.knownSatisfied.add(current.catalogHeadObjectDigest);
+    for (let connect = 0; connect < 20; connect += 1) {
+      await f.announce(current, `peer-${connect % 4}`);
+    }
+    await f.service.whenReceiverIdle();
+
+    expect(f.isHeadSatisfied).toHaveBeenCalledTimes(fullPathChecks);
+    expect(f.reconcileHead).toHaveBeenCalledTimes(1);
+    expect(f.discovery).toHaveBeenCalledTimes(1);
+    expect(f.isHeadKnownSatisfied).toHaveBeenCalledTimes(21);
+    expect(f.service.stats()).toMatchObject({
+      announcedHeadsAlreadySatisfied: 20,
+      announcedCurrentHeadPendingScopes: 0,
+      receiver: receiverBefore,
+    });
+    await f.service.close();
+  });
+
+  it('keeps full verification and application for new and conflicting heads', async () => {
+    const f = satisfiedHeadHarness();
+    const current = f.headAt('3', 'c');
+    await f.announce(current);
+    await f.service.whenReceiverIdle();
+    f.knownSatisfied.add(current.catalogHeadObjectDigest);
+    await f.announce(current);
+    expect(f.service.stats().announcedHeadsAlreadySatisfied).toBe(1);
+
+    const successor = f.headAt('4', 'd');
+    const conflicting = f.headAt('3', 'e');
+    await f.announce(successor, 'peer-b');
+    await f.service.whenReceiverIdle();
+    await f.announce(conflicting, 'peer-c');
+    await f.service.whenReceiverIdle();
+
+    expect(f.reconcileHead.mock.calls.map(([peerId, head]) => [
+      peerId,
+      head.catalogHeadObjectDigest,
+    ])).toEqual([
+      ['peer-a', current.catalogHeadObjectDigest],
+      ['peer-b', successor.catalogHeadObjectDigest],
+      ['peer-c', conflicting.catalogHeadObjectDigest],
+    ]);
+    expect(f.discovery.mock.calls.map(([{ remotePeerId }]) => remotePeerId))
+      .toEqual(['peer-a', 'peer-b', 'peer-c']);
+    const checked = f.isHeadSatisfied.mock.calls.map(([head]) => head.catalogHeadObjectDigest);
+    expect(checked).toContain(successor.catalogHeadObjectDigest);
+    expect(checked).toContain(conflicting.catalogHeadObjectDigest);
+    expect(f.service.stats().announcedHeadsAlreadySatisfied).toBe(1);
+    await f.service.close();
+  });
+
+  it('lets a hint join a pending receiver task for the head instead of skipping it', async () => {
+    const releaseReconcile = deferred<void>();
+    const f = satisfiedHeadHarness({
+      holdReconcile: releaseReconcile.promise,
+      withoutPullLane: true,
+    });
+    const current = f.headAt('3', 'c');
+
+    await f.announce(current, 'peer-a');
+    await vi.waitFor(() => expect(f.reconcileHead).toHaveBeenCalledTimes(1));
+    // Durable by another route while the ambient task is still running: the
+    // hint must still reach that task as a provider and a fresh hint.
+    f.knownSatisfied.add(current.catalogHeadObjectDigest);
+    await f.announce(current, 'peer-b');
+    expect(f.service.stats()).toMatchObject({
+      announcedHeadsAlreadySatisfied: 0,
+      receiver: { scheduled: 2, dedupedInFlight: 1 },
+    });
+
+    releaseReconcile.resolve(undefined);
+    await f.service.whenReceiverIdle();
+    await f.announce(current, 'peer-c');
+    expect(f.service.stats()).toMatchObject({
+      announcedHeadsAlreadySatisfied: 1,
+      receiver: { scheduled: 2, applied: 1 },
+    });
+    await f.service.close();
+  });
+
+  it('lets a hint join a pull still pending for its scope instead of skipping it', async () => {
+    const releaseDiscovery = deferred<void>();
+    const f = satisfiedHeadHarness({ holdDiscovery: releaseDiscovery.promise });
+    const current = f.headAt('3', 'c');
+
+    await f.announce(current, 'peer-a');
+    await vi.waitFor(() => expect(f.discovery).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(f.service.stats().receiver.applied).toBe(1));
+    f.knownSatisfied.add(current.catalogHeadObjectDigest);
+    // No receiver work is left for the head, but the scope's pull is in
+    // flight: the hint is recorded for the next pull rather than dropped.
+    expect(f.service.stats().announcedCurrentHeadPendingScopes).toBe(0);
+    await f.announce(current, 'peer-c');
+    expect(f.service.stats()).toMatchObject({
+      announcedHeadsAlreadySatisfied: 0,
+      announcedCurrentHeadPendingScopes: 1,
+    });
+
+    releaseDiscovery.resolve(undefined);
+    await f.service.whenReceiverIdle();
+    expect(f.discovery.mock.calls.map(([{ remotePeerId }]) => remotePeerId))
+      .toEqual(['peer-a', 'peer-c']);
+    await f.announce(current, 'peer-d');
+    expect(f.service.stats()).toMatchObject({
+      announcedHeadsAlreadySatisfied: 1,
+      announcedCurrentHeadPendingScopes: 0,
+    });
+    expect(f.discovery).toHaveBeenCalledTimes(2);
+    await f.service.close();
+  });
+
+  it('never skips outside the catalog-apply lane or once the receiver is closed', async () => {
+    const isHeadKnownSatisfied = vi.fn(() => true);
+    const reconcileHead = vi.fn(async () => 'applied' as const);
+    let lane: 'catalog-apply' | 'shadow-stage' = 'shadow-stage';
+    const router = new RecordingRouter();
+    const service = new Rfc64PublicCatalogServiceV1({
+      router: router.asProtocolRouter(),
+      controlObjects: controlObjects(),
+      accessPolicyAuthority: accessPolicyAuthority(),
+      receiver: { retryBackoffMs: 0, maxAttempts: 1 },
+      resolveContextGraphAuthority: (contextGraphId) => Object.freeze({
+        contextGraphId,
+        selected: true,
+        eligible: true,
+        active: true,
+        mode: lane === 'catalog-apply' ? 'catalog' : 'shadow',
+        killSwitchActive: false,
+        legacySyncAllowed: true,
+        track2Enabled: true,
+        authoringAllowed: true,
+        reconciliationLane: lane,
+      }) as never,
+      native: nativeOptions(() => ({
+        isHeadSatisfied: async () => true,
+        isHeadKnownSatisfied,
+        reconcileHead,
+      })),
+    });
+    const policy = acceptPolicy(service);
+    const head = announcement(policy.policyDigest);
+    const announce = () => router.invoke(
+      RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_PROTOCOL_V1,
+      encodeRfc64PublicCatalogHeadAnnouncementV1(head),
+    );
+    service.start();
+
+    await announce();
+    await service.whenReceiverIdle();
+    expect(isHeadKnownSatisfied).not.toHaveBeenCalled();
+    expect(service.stats()).toMatchObject({
+      announcedHeadsAlreadySatisfied: 0,
+      receiver: { scheduled: 1 },
+    });
+
+    lane = 'catalog-apply';
+    await announce();
+    expect(service.stats()).toMatchObject({
+      announcedHeadsAlreadySatisfied: 1,
+      receiver: { scheduled: 1 },
+    });
+
+    await service.closeReceiverAdmissionAndDrain();
+    await announce();
+    expect(service.stats().announcedHeadsAlreadySatisfied).toBe(1);
+    await service.close();
+  });
+});

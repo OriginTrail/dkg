@@ -143,6 +143,7 @@ async function boot(): Promise<void> {
     agentProfileHeartbeatMs: 0,
     ...(rolloutFixture === undefined ? {
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
       rfc64CatalogDeploymentProfile: GATE1_DEPLOYMENT,
     } : rolloutFixture.agentOptions),
   });

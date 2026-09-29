@@ -10,6 +10,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { preflightKnowledgeAssetVmPublishSnapshot } from './vm-publish-snapshot-preflight.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -139,15 +140,11 @@ import {
   canonicalPublishPayload,
   generatedPrivateCatalogTripleKeys,
   appendMissingGeneratedPrivateCatalogFloor,
-  createKnowledgeAssetVmPublishSnapshotMetadata,
-  createKnowledgeAssetVmPublishSnapshotRequest,
-  resolveLiftWorkspaceSlice,
   resolveKnowledgeAssetOperationPublicQuads,
   resolveKnowledgeAssetWorkspaceHead,
   workspaceHeadIncludesShareOperationId,
   KnowledgeAssetOperationPublicSnapshotNotFoundError,
   workspacePublicQuadsDigest,
-  validateLiftPublishPayload,
   subtractFinalizedExactQuads,
   TripleStoreAsyncLiftPublisher,
   TripleStoreAsyncPromoteQueue,
@@ -2304,7 +2301,17 @@ export class PublishMethods extends DKGAgentBase {
       // back to the cleartext `contextGraphId` only when the on-chain id
       // could not be resolved (the provider re-resolves the digest cgId from
       // the adapter regardless, so the digest TARGET stays chain-truth).
-      const v10UpdateACKProvider = this.createV10UpdateACKProvider(updateOnChainId ?? contextGraphId);
+      const v10UpdateACKProvider = this.createV10UpdateACKProvider(
+        updateOnChainId ?? contextGraphId,
+        queuedOperation ? {
+          shareOperationId: queuedOperation.shareOperationId,
+          publisherPeerId: queuedOperation.publisherPeerId,
+          kaUal: updateScope.ual,
+          assertionVersion: updateScope.assertionVersion,
+          accessPolicy: opts?.accessPolicy ?? 'ownerOnly',
+          allowedPeers: opts?.allowedPeers ?? [],
+        } : undefined,
+      );
 
       // OT-RFC-49 / WS-D — curated-UPDATE discrimination + floor re-projection.
       // A1: resolve the single-blob curated AEAD hook the SAME way the publish
@@ -2398,7 +2405,10 @@ export class PublishMethods extends DKGAgentBase {
     this.log.info(ctx, `Update complete — status=${result.status}`);
 
     onPhase?.('broadcast', 'start');
-    if (result.onChainResult && result.publicQuads) {
+    // Members of a curated graph pick up an update from the chain update
+    // event, which refreshes their Verifiable Memory from the curator. The
+    // graph's update topic carries public updates only.
+    if (result.onChainResult && result.publicQuads && !isCuratedUpdate) {
       try {
         const dataGraph = knowledgeAssetLayerGraphUri(
           contextGraphId,
@@ -4740,36 +4750,9 @@ export class PublishMethods extends DKGAgentBase {
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
   ): Promise<void> {
-    const snapshot = createKnowledgeAssetVmPublishSnapshotRequest(request);
-    const snapshotMetadata = createKnowledgeAssetVmPublishSnapshotMetadata(request);
-    try {
-      const resolved = await resolveLiftWorkspaceSlice({
-        store: this.store,
-        graphManager: new GraphManager(this.store),
-        request: snapshot,
-        publicSnapshotStore: this.publicSnapshotStore,
-      });
-      validateLiftPublishPayload({
-        request: snapshot,
-        metadata: snapshotMetadata,
-        resolved,
-      });
-      if (resolved.quads.length === 0 && (resolved.privateQuads ?? []).length === 0) {
-        throw new Error(
-          `No queued shared-memory snapshot quads for context graph ${request.contextGraphId} ` +
-            `share operation ${request.shareOperationId}`,
-        );
-      }
-    } catch (err) {
-      if (err instanceof LegacyKnowledgeAssetReadOnlyError) throw err;
-      const wrapped = new Error(
-        `Cannot enqueue VM publish for "${request.name}" because share snapshot ` +
-          `${request.shareOperationId} is unavailable or stale. Re-share the knowledge asset before enqueueing: ` +
-          (err instanceof Error ? err.message : String(err)),
-      );
-      (wrapped as Error & { code?: string }).code = 'PUBLISH_INTENT_STALE';
-      throw wrapped;
-    }
+    return preflightKnowledgeAssetVmPublishSnapshot({
+      store: this.store, publicSnapshotStore: this.publicSnapshotStore, log: this.log, request,
+    });
   }
 
   async preflightQueuedKnowledgeAssetVmPublishExecution(
@@ -5684,7 +5667,14 @@ export class PublishMethods extends DKGAgentBase {
         // construction.
         ...executionHooks,
         skipContextGraphEnsure: true,
-        v10ACKProvider: publishOptions.v10ACKProvider ?? this.createV10ACKProvider(request.contextGraphId),
+        v10ACKProvider: publishOptions.v10ACKProvider ?? this.createV10ACKProvider(request.contextGraphId, {
+          shareOperationId: request.shareOperationId,
+          publisherPeerId: publishOptions.publisherPeerId ?? this.peerId,
+          kaUal: request.kaUal,
+          assertionVersion: request.assertionVersion,
+          accessPolicy: request.accessPolicy ?? 'ownerOnly',
+          allowedPeers: request.allowedPeers ?? [],
+        }),
         publishEpochs: request.publishEpochs ?? publishOptions.publishEpochs,
         pricingPolicy: operationPlan.pricingPolicy,
         publisherNodeIdentityIdOverride: request.publisherNodeIdentityIdOverride !== undefined

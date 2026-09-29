@@ -18,6 +18,7 @@ import {
   contextGraphDataGraphUri,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
+  tripleContentV10,
 } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10,
@@ -202,6 +203,41 @@ async function vmQuadCount(agent: DKGAgent, contextGraphId: string): Promise<num
 }
 
 describe('Context Graph known only by its on-chain name hash (#33)', () => {
+  it('repairs challenge-pinned historical material over the real sync transport after name adoption', async () => {
+    const holderChain = await chainWithContextGraph33('0x70997970C51812dc3A010C7d01b50e0d17dc79C8');
+    const edgeChain = await chainWithContextGraph33('0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC');
+    const holder = await startAgent('RepairHolder33', holderChain);
+    const edge = await startAgent('RepairEdge33', edgeChain);
+    const { ual, quad, kaId, merkleRootHex } = await seedHolder(holder, holderChain);
+    registerKnowledgeAsset([holderChain, edgeChain], kaId, merkleRootHex);
+    seedEdge(edge);
+    await connect(edge, holder);
+    expect(await edge.resolveContextGraphNameHashNow(NAME_HASH)).toBe(CLEARTEXT_ID);
+    const exactFetch = vi.spyOn(edge, 'syncExactKnowledgeAssetsFromPeerDetailed');
+
+    // This goes through peer admission, the real libp2p sync protocol and
+    // challenge-pinned authentication; no proof material is mocked here.
+    const repaired = await edge.repairRandomSamplingKnowledgeAsset({
+      kaId,
+      cgId: BigInt(ON_CHAIN_ID),
+      expectedRoot: ethers.getBytes(merkleRootHex),
+      expectedLeafCount: 1n,
+    }).result;
+    expect(repaired).toEqual({
+      contents: [tripleContentV10(quad.subject, quad.predicate, quad.object)],
+      privateRoots: [],
+    });
+    expect(exactFetch).toHaveBeenCalledWith(
+      holder.peerId,
+      CLEARTEXT_ID,
+      expect.objectContaining({
+        kind: 'challenge-pinned',
+        commitments: [{ assetUal: ual, merkleRootHex: merkleRootHex.slice(2), merkleLeafCount: 1n }],
+      }),
+      expect.anything(),
+    );
+  }, 120_000);
+
   it('syncs nothing under the hash, then adopts the verified cleartext id and syncs the VM data', async () => {
     const holderChain = await chainWithContextGraph33('0x70997970C51812dc3A010C7d01b50e0d17dc79C8');
     const edgeChain = await chainWithContextGraph33('0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC');
@@ -325,11 +361,16 @@ describe('Context Graph known only by its on-chain name hash (#33)', () => {
   }, 120_000);
 
   it('resolves from its own store first, reading the access policy from the chain', async () => {
+    const holderChain = await chainWithContextGraph33('0x70997970C51812dc3A010C7d01b50e0d17dc79C8');
     const edgeChain = await chainWithContextGraph33('0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC');
+    const holder = await startAgent('Holder33LocalStore', holderChain);
     const edge = await startAgent('Edge33LocalStore', edgeChain);
-    seedEdge(edge);
-    // Nothing cached: the resolver must prove the policy public itself.
-    edge.onChainAccessPolicyCache.delete(ON_CHAIN_ID);
+    // A connected peer that would answer, so "never asked a peer" below is a
+    // choice the resolver made, not the only thing it could do.
+    await seedHolder(holder, holderChain);
+    await connect(edge, holder);
+    expect(edge.contextGraphNameResolutionPeers()).toContain(holder.peerId);
+    await expect(edge.peerAdvertisesProtocol(holder.peerId, PROTOCOL_CONTEXT_GRAPH_NAME)).resolves.toBe(true);
     // The creator's public definition, already in this node's own ontology
     // graph (cores re-sync it to each other), next to another graph's.
     await edge.store.insert([
@@ -346,10 +387,17 @@ describe('Context Graph known only by its on-chain name hash (#33)', () => {
         graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
       },
     ]);
+    // Subscribing wakes the background resolver on its next tick; the spies
+    // and the cleared policy are in place before it runs.
+    seedEdge(edge);
+    // Nothing cached: the resolver must prove the policy public itself.
+    edge.onChainAccessPolicyCache.delete(ON_CHAIN_ID);
     const asked = vi.spyOn(edge, 'askPeerForContextGraphName');
     const pulled = vi.spyOn(edge, 'pullPeerOntologyForContextGraphNames');
 
     expect(await edge.resolveContextGraphNameHashNow(NAME_HASH)).toBe(CLEARTEXT_ID);
+    expect(asked).not.toHaveBeenCalled();
+    expect(pulled).not.toHaveBeenCalled();
     expect(edge.getContextGraphNameResolutionStatus()).toContainEqual(expect.objectContaining({
       state: 'resolved',
       nameHash: NAME_HASH,
@@ -362,7 +410,11 @@ describe('Context Graph known only by its on-chain name hash (#33)', () => {
       onChainId: ON_CHAIN_ID,
       onChainHash: NAME_HASH,
     });
-    expect(asked).not.toHaveBeenCalled();
-    expect(pulled).not.toHaveBeenCalled();
+    // The peer the resolver skipped would have answered.
+    await expect(edge.askPeerForContextGraphName(
+      holder.peerId,
+      { nameHash: NAME_HASH, onChainId: ON_CHAIN_ID },
+      new AbortController().signal,
+    )).resolves.toBe(CLEARTEXT_ID);
   }, 120_000);
 });
