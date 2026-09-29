@@ -1,5 +1,6 @@
 import { expect, it } from 'vitest';
 import { VmReconcileSweepPlanner, VmReconcileSweepSelector } from '../src/internal/vm-reconcile-sweep.js';
+import { VmReconcileSchedulingRuntime } from '../src/vm-reconcile-dispatcher.js';
 
 it('visits at most one rotation over already-classified candidates and returns admission count', () => {
   const selector = new VmReconcileSweepSelector();
@@ -48,6 +49,61 @@ it('admits bound first, up to eight discovery candidates, then the rest of the b
   const admitted: string[] = [];
   planner.admit(['b0', 'b1', 'b2'], Array.from({ length: 10 }, (_, i) => `u${i}`), key => { admitted.push(key); return Promise.resolve(); });
   expect(admitted).toEqual(['b0', ...Array.from({ length: 8 }, (_, i) => `u${i}`), 'b1', 'b2']);
+});
+
+it('bounds timer admissions and rotates through historical graphs across ticks', () => {
+  const planner = new VmReconcileSweepPlanner(2, () => () => undefined, 3);
+  const keys = Array.from({ length: 10 }, (_, i) => `b${i}`);
+  const turns: string[][] = [];
+  for (let tick = 0; tick < 4; tick++) {
+    const admitted: string[] = [];
+    planner.admit(keys, [], (key) => {
+      admitted.push(key);
+      return Promise.resolve();
+    });
+    turns.push(admitted);
+  }
+  expect(turns).toEqual([
+    ['b0', 'b1', 'b2'],
+    ['b3', 'b4', 'b5'],
+    ['b6', 'b7', 'b8'],
+    ['b9', 'b0', 'b1'],
+  ]);
+});
+
+it('does not accumulate historical timer work while a worker is slow', async () => {
+  const started: string[] = [];
+  const release = new Map<string, () => void>();
+  const runtime = new VmReconcileSchedulingRuntime<void>(
+    (key) => new Promise<void>((resolve) => {
+      started.push(key);
+      release.set(key, resolve);
+    }),
+    () => undefined,
+    { concurrency: 1 },
+    2,
+    8,
+  );
+  const keys = ['b0', 'b1', 'b2', 'b3'];
+  runtime.scheduleSweep(keys, [], () => true);
+  await Promise.resolve();
+  expect(started).toEqual(['b0']);
+  expect(runtime.snapshot()).toMatchObject({ active: 1, queued: 1 });
+
+  runtime.scheduleSweep(keys, [], () => true);
+  expect(runtime.snapshot()).toMatchObject({ active: 1, queued: 1 });
+  expect(runtime.isInFlight('b2')).toBe(false);
+
+  release.get('b0')!();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  runtime.scheduleSweep(keys, [], () => true);
+  expect(runtime.isInFlight('b2')).toBe(true);
+
+  for (const key of ['b1', 'b2']) {
+    release.get(key)!();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  await runtime.waitForIdle();
 });
 
 it('keeps a partial discovery turn ahead of bound fills, then resumes bound progress', () => {

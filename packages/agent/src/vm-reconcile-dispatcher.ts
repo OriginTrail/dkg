@@ -487,12 +487,14 @@ export class VmReconcileSchedulingRuntime<T> {
   private readonly dispatcher: VmReconcileRuntimeDispatcher<T>;
   private readonly planner: VmReconcileSweepPlanner;
   private readonly sweepAdmission: VmReconcileSweepAdmission<T>;
+  private readonly periodicOutstandingLimit: number;
 
   constructor(
     run: (key: string, source: VmReconcileSource) => Promise<T>,
     onFailure: (key: string, error: unknown) => void,
     options: VmReconcileDispatcherOptions = {},
     discoveryBatchSize = 8,
+    periodicBoundBatchSize = 8,
   ) {
     let sweepAdmission!: VmReconcileSweepAdmission<T>;
     this.dispatcher = new VmReconcileRuntimeDispatcher(
@@ -501,8 +503,16 @@ export class VmReconcileSchedulingRuntime<T> {
       options,
       (admission) => { sweepAdmission = admission; },
     );
-    this.planner = new VmReconcileSweepPlanner(discoveryBatchSize, sweepAdmission.retainCapacity);
+    this.planner = new VmReconcileSweepPlanner(
+      discoveryBatchSize,
+      sweepAdmission.retainCapacity,
+      periodicBoundBatchSize,
+    );
     this.sweepAdmission = sweepAdmission;
+    // A slow historical graph can occupy a worker for minutes. Cap retained
+    // timer work to one queued pass per worker so later timer ticks cannot
+    // fill the entire dispatcher queue with old deferrals ahead of live work.
+    this.periodicOutstandingLimit = 2 * (options.concurrency ?? 1);
   }
 
   triggerLive(key: string): void { this.dispatcher.triggerLive(key); }
@@ -530,7 +540,13 @@ export class VmReconcileSchedulingRuntime<T> {
     this.planner.admit(
       boundKeys,
       unboundKeys,
-      key => isCurrent() ? this.sweepAdmission.tryAdmit(key) : undefined,
+      key => {
+        if (!isCurrent()) return undefined;
+        const { active, queued } = this.dispatcher.snapshot();
+        return active + queued < this.periodicOutstandingLimit
+          ? this.sweepAdmission.tryAdmit(key)
+          : undefined;
+      },
     );
   }
 
