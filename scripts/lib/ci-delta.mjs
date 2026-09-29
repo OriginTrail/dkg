@@ -231,7 +231,6 @@ function isDocumentationPath(filePath) {
 function isGlobalFullPath(filePath) {
   return GLOBAL_FULL_PATHS.has(filePath)
     || filePath.startsWith('patches/')
-    || filePath.startsWith('scripts/')
     || /^tsconfig(?:\.[^/]+)?\.json$/.test(filePath);
 }
 

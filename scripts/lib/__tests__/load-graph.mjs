@@ -76,6 +76,9 @@ const RELATIVE = String.raw`['"]((?:\.\.?\/)+[^'"]+)['"]`;
 const URL_IMPORT = new RegExp(String.raw`\bimport\s*\(\s*new\s+URL\(\s*` + RELATIVE, 'g');
 const URL_PATH = new RegExp(String.raw`(?:\bnew\s+URL\(\s*|\brequire\.resolve\s*\(\s*)` + RELATIVE, 'g');
 const REPO_PATH_LITERAL = /['"]((?:[\w@.-]+\/)+[\w.-]+\.[A-Za-z0-9]+)['"]/g;
+// A repository script named in a string, quoted or not inside it: tests embed
+// shell that runs them, and scripts outside CI tooling route by who uses them.
+const SCRIPT_MENTION = /(?<![\w/.-])(?:\.\/)?(scripts\/[\w./-]+\.(?:sh|mjs|cjs|js|ts|json))\b/g;
 // Files that list the paths a lane runs or reads: tests, and test-runner configs.
 const TEST_FILE = /(?:^|\/)(?:test|tests|test-live|__tests__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)(?:vitest|playwright)[\w.-]*\.config\.[cm]?[jt]s$/;
 const TYPE_ONLY_IMPORT = /\b(?:import|export)\s+type\s+(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s*['"][^'"]+['"]/g;
@@ -178,6 +181,23 @@ function computedLoads(file, code) {
   return computed;
 }
 
+// Repository scripts named inside the string and template literals of a test
+// or runner config (from its syntax tree, so comments do not count).
+function scriptMentions(file, code) {
+  if (!code.includes('scripts/')) return [];
+  const kind = /\.[cm]?[jt]sx$/.test(file) ? ts.ScriptKind.TSX : /\.[cm]?js$/.test(file) ? ts.ScriptKind.JS : ts.ScriptKind.TS;
+  const texts = [];
+  const visit = (node) => {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateLiteralLikeNode?.(node)
+      || node.kind === ts.SyntaxKind.TemplateHead || node.kind === ts.SyntaxKind.TemplateMiddle || node.kind === ts.SyntaxKind.TemplateTail) {
+      texts.push(node.text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(ts.createSourceFile(file, code, ts.ScriptTarget.Latest, false, kind));
+  return texts.flatMap((text) => [...text.matchAll(SCRIPT_MENTION)].map(([, script]) => script));
+}
+
 // What `file` (repo-relative, with `source` as its contents) loads by path:
 // - `modules`: relative imports (side-effect `import './x.js'` included),
 //   dynamic imports, `import(new URL(...))` and CommonJS require(), whose own
@@ -207,6 +227,7 @@ export function loadReferences(file, source) {
     ...[...code.matchAll(URL_PATH)].map(([, specifier]) => relative(specifier)),
     ...builtPaths(file, code),
     ...literals,
+    ...(TEST_FILE.test(file) ? scriptMentions(file, code) : []),
   ].map((target) => readTarget(target, walks)).filter(Boolean);
   return {
     modules,

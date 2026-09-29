@@ -208,6 +208,15 @@ test('repository support paths route to the lanes that execute them', () => {
     ['devnet/rfc64-gate2-multi-asset-completeness/adapter-process.ts', ['tornado_blazegraph', 'tornado_agent', 'bura_cli']],
     ['bench/publish-async-get.bench.ts', ['bura_cli']],
     ['tools/observability/lib/w1.mjs', []],
+    // Repository scripts outside CI tooling: the build job runs the audit
+    // scripts and their tests; manual devnet scripts run in no lane; the CLI
+    // smoke test runs the publish helpers.
+    ['scripts/audit-dial-protocol.mjs', []],
+    ['scripts/devnet-test-invite-flow.sh', []],
+    ['scripts/devnet-publish-helpers.sh', ['bura_cli']],
+    ['scripts/devnet.sh', ['tornado_blazegraph', 'tornado_agent', 'kosava_node_ui_e2e']],
+    ['scripts/lib/__tests__/devnet-curated-join-helpers.test.mjs', []],
+    ['test-policy/disabled-tests.json', []],
     ['.github/oxlint-baseline.json', []],
     ['.github/CODEOWNERS', []],
     ['.github/PULL_REQUEST_TEMPLATE.md', []],
@@ -501,6 +510,36 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   assert.deepEqual([...UNFOLLOWED_LOADS.keys()].filter((entry) => !computed.includes(entry)), [], 'stale UNFOLLOWED_LOADS entries');
 });
 
+test('every repository script a CI job runs selects that job', () => {
+  // Scripts outside CI tooling route by who runs them, so each one a job names
+  // (directly, or through what workflowJobCommands follows) must select it:
+  // the job's lane, the shared build job, or full CI for the EVM integration
+  // workflow, whose runner every scope uses. The changes job runs on every PR.
+  const laneByJob = Object.fromEntries(Object.entries(PRIMARY_LANE_JOBS).map(([lane, job]) => [job, lane]));
+  const missing = [];
+  let checked = 0;
+  for (const workflow of ['ci.yml', 'evm-integration.yml']) {
+    const source = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows', workflow), 'utf8');
+    for (const { job, condition, commands } of workflowJobCommands(source)) {
+      if (workflow === 'ci.yml' && job === 'changes') continue;
+      const lane = laneByJob[job] ?? condition.match(/needs\.changes\.outputs\.(\w+) == 'true'/)?.[1];
+      const scripts = new Set(commands.flatMap((command) => [
+        ...command.matchAll(/(?<![\w/.-])(?:\.\/)?(scripts\/[\w./-]+\.(?:sh|mjs|cjs|js|ts))\b/g),
+      ].map(([, file]) => file)));
+      for (const file of scripts) {
+        checked += 1;
+        const plan = pullRequestPlan([change(file)]);
+        if (plan.mode === 'full') continue;
+        const selected = workflow === 'ci.yml'
+          && (job === 'build' ? needsSharedBuild(plan) : Boolean(lane && plan.lanes[lane]));
+        if (!selected) missing.push(`${workflow} ${job} runs ${file}`);
+      }
+    }
+  }
+  assert.ok(checked >= 5, 'the scripts workflow jobs run are checked');
+  assert.deepEqual(missing, []);
+});
+
 test('the load-closure guard reports a planted unrouted load and an unlisted computed load', () => {
   // The guard's detection, not only its current pass: a query-lane test that
   // imports agent source (agent changes do not select the query lane) and
@@ -600,6 +639,13 @@ test('the load scanner sees these forms, and nothing it cannot resolve staticall
     'packages/node-ui/README.md',
   ]);
   assert.deepEqual(references.packages, ['@origintrail-official/dkg-core']);
+  // A repository script named inside a string (a test's embedded shell) counts
+  // as read; one named only in a comment does not.
+  const shell = loadReferences('packages/cli/test/example.test.ts', [
+    '// Runs scripts/devnet-comprehensive.sh by hand.',
+    'const script = `tr -d "\\r" < scripts/devnet-publish-helpers.sh > "$DIR/helpers.sh"`;',
+  ].join('\n'));
+  assert.deepEqual(shell.paths, ['scripts/devnet-publish-helpers.sh']);
   // A module load computed at run time cannot be followed, so it is reported.
   assert.deepEqual(references.computed, ['`../../cli/src/${name}.js`']);
   // Repo-path literals count only in test files, and a directory only when walked.

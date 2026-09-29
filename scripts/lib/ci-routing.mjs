@@ -372,6 +372,63 @@ export const PATH_TRIGGERS = Object.freeze([
 // have their own workflow).
 export const SUPPORT_PATH_ROUTES = Object.freeze([
   {
+    // The repository-script tests (and their helpers and fixtures) run only in
+    // the shared build job's script-test step.
+    pattern: /^scripts\/lib\/__tests__\//,
+    lanes: [],
+    reason: 'repository script tests run in the shared build job',
+  },
+  {
+    // CI tooling (planner-adjacent scripts, lane runners, shared CI libraries)
+    // and the fixtures package tests declare as shared inputs: every lane can
+    // depend on them.
+    pattern: /^scripts\/(?:ci|lib|testing)\//,
+    full: 'Global CI input changed',
+  },
+  {
+    // The EVM integration runner every EVM scope uses.
+    pattern: /^scripts\/(?:test-evm-integration\.sh|run-evm-integration\.mjs)$/,
+    full: 'Global CI input changed',
+  },
+  {
+    // The devnet bootstrap: the browser suite's Playwright setup and the
+    // devnet harnesses start it.
+    pattern: /^scripts\/devnet\.sh$/,
+    lanes: ['kosava_node_ui_e2e', 'tornado_agent'],
+    reason: 'the browser suite and the devnet harnesses start the devnet bootstrap',
+  },
+  {
+    pattern: /^scripts\/devnet-publish-helpers\.sh$/,
+    lanes: ['bura_cli'],
+    reason: 'the CLI devnet-publish smoke test runs the publish helpers',
+  },
+  {
+    pattern: /^scripts\/sync-chain-abis\.mjs$/,
+    lanes: ['tornado_core'],
+    reason: 'the chain vendored-ABI test runs the ABI sync script',
+  },
+  {
+    // Every other repository script is either run by the build job (its lint,
+    // script tests and repository checks) or only by hand and by workflows
+    // outside the CI gate; no lane job runs it. The load-closure test fails if
+    // a lane reads or runs one without a route above.
+    pattern: /^scripts\//,
+    lanes: [],
+    reason: 'repository scripts outside CI tooling are checked by the shared build job',
+  },
+  {
+    // Coverage baselines, read by the root vitest.coverage.ts every lane uses.
+    pattern: /^test-policy\/coverage-baselines\.json$/,
+    full: 'Global CI input changed',
+  },
+  {
+    // The disabled-test allowlist and test routes, read by the build job's lint
+    // and test inventory.
+    pattern: /^test-policy\//,
+    lanes: [],
+    reason: 'test policy is checked by the shared build job',
+  },
+  {
     // Workflows whose jobs, conditions and gates define what "CI gate" means.
     // Other top-level workflows run (or are linted) on their own.
     pattern: /^\.github\/workflows\/(?:ci|evm-integration|rfc64-inventory-windows)\.yml$/,
