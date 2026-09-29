@@ -1,10 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import {
-  assertSafeIri,
-  formatSparqlTerm,
-  unwrapIri,
-  type SparqlTermPosition,
-} from '@origintrail-official/dkg-core';
+import { assertSafeIri, formatSparqlTerm, unwrapIri } from '@origintrail-official/dkg-core';
 import type { Quad } from './triple-store.js';
 import {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
@@ -17,9 +12,11 @@ import {
   decodeRfc64AuthorCommitPlanV1,
   finalizeRfc64AuthorCommitPlanV1,
   mapRfc64AuthorCommitPlanV1,
+  rfc64AuthorCommitControlTermsV1,
   sourceFromRfc64AuthorCommitPlanV1,
   type NormalizedRfc64AuthorCommitCasV1,
   type Rfc64AuthorCommitCasMapperV1,
+  type Rfc64AuthorCommitControlTermV1,
   type Rfc64AuthorCommitGraphReplacementPlanV1,
   type Rfc64AuthorCommitGuardPlanV1,
   type Rfc64AuthorCommitPredicateReplacementPlanV1,
@@ -30,6 +27,7 @@ export type {
   NormalizedRfc64LegacyAuthorCommitCasV1,
   NormalizedRfc64SemanticAuthorCommitCasV1,
   Rfc64AuthorCommitCasMapperV1,
+  Rfc64AuthorCommitControlTermV1,
   Rfc64AuthorCommitGraphReplacementPlanV1,
   Rfc64AuthorCommitGuardPlanV1,
   Rfc64AuthorCommitPredicateReplacementPlanV1,
@@ -142,12 +140,6 @@ export type Rfc64AuthorCommitCasSourceInputV1 =
 /** Public compatibility input accepted by the TripleStore capability. */
 export type Rfc64AuthorCommitCasInputV1 = Rfc64AuthorCommitCasSourceInputV1;
 
-/** A term an RFC-64 update interpolates, and the SPARQL position it fills. */
-export interface Rfc64AuthorCommitControlTermV1 {
-  readonly term: string;
-  readonly position: SparqlTermPosition;
-}
-
 export interface Rfc64AuthorCommitCasUpdateV1 {
   readonly update: string;
   readonly cleanup: string;
@@ -155,10 +147,9 @@ export interface Rfc64AuthorCommitCasUpdateV1 {
   readonly receiptGraph: string;
   readonly semanticQuads: readonly Quad[];
   /**
-   * Every input term the update interpolates besides `semanticQuads`: each
-   * graph it references, each replaced subject, and every guard term,
-   * predecessor rows included. The storage adapters check both against the
-   * absolute-IRI rule.
+   * Every input term the update interpolates besides `semanticQuads`
+   * (`rfc64AuthorCommitControlTermsV1` in the plan codec). The storage
+   * adapters check both against the absolute-IRI rule.
    */
   readonly controlTerms: readonly Rfc64AuthorCommitControlTermV1[];
   readonly touchedGraphs: readonly string[];
@@ -653,37 +644,9 @@ export function buildRfc64AuthorCommitCasUpdateFromNormalizedV1(
     receiptAsk: `ASK WHERE { ${receiptPattern} }`,
     receiptGraph,
     semanticQuads: manifest.semanticQuads,
-    controlTerms: controlTerms(manifest),
+    controlTerms: rfc64AuthorCommitControlTermsV1(manifest),
     touchedGraphs: manifest.touchedGraphs,
   });
-}
-
-/**
- * The input terms an update interpolates outside `manifest.semanticQuads`,
- * which already hold every replacement quad and each predicate replacement.
- */
-function controlTerms(
-  manifest: NormalizedRfc64AuthorCommitCasV1,
-): readonly Rfc64AuthorCommitControlTermV1[] {
-  const terms: Rfc64AuthorCommitControlTermV1[] = manifest.referencedGraphs.map(
-    (graphUri) => ({ term: graphUri, position: 'graph' }),
-  );
-  for (const { subject } of manifest.subjectReplacements) {
-    terms.push({ term: subject, position: 'subject' });
-  }
-  for (const guard of manifest.guards) {
-    terms.push(
-      { term: guard.subject, position: 'subject' },
-      { term: guard.predicate, position: 'predicate' },
-    );
-    if (guard.expectedObject !== null) terms.push({ term: guard.expectedObject, position: 'object' });
-    if (guard.guardKind === 'exact-subject' && guard.expectedQuads !== null) {
-      for (const { predicate, object } of guard.expectedQuads) {
-        terms.push({ term: predicate, position: 'predicate' }, { term: object, position: 'object' });
-      }
-    }
-  }
-  return Object.freeze(terms);
 }
 
 function validateSemanticInput(
