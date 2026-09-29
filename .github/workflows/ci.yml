@@ -1424,7 +1424,7 @@ jobs:
           && hashFiles('slither.sarif') != ''
           && (github.event_name != 'pull_request'
               || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         continue-on-error: true
         with:
           sarif_file: ${{ steps.slither.outputs.sarif }}
@@ -1465,7 +1465,7 @@ jobs:
           && hashFiles('packages/evm-module/aderyn.sarif') != ''
           && (github.event_name != 'pull_request'
               || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         continue-on-error: true
         with:
           sarif_file: packages/evm-module/aderyn.sarif
@@ -1485,7 +1485,7 @@ jobs:
           && hashFiles('packages/evm-module/solhint.sarif') != ''
           && (github.event_name != 'pull_request'
               || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: github/codeql-action/upload-sarif@7188fc363630916deb702c7fdcf4e481b751f97a # v4.37.1
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         continue-on-error: true
         with:
           sarif_file: packages/evm-module/solhint.sarif
