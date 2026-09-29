@@ -78,6 +78,20 @@ describe('SqliteSnapshotPageIndexStore', () => {
       .resolves.toEqual(quads.slice(257, 277));
   });
 
+  it('removes derived indexes idempotently without touching another digest', async () => {
+    directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-index-db-'));
+    dashboard = new DashboardDB({ dataDir: directory });
+    const store = new SqliteSnapshotPageIndexStore(dashboard);
+    const record = makeRecord(new Uint8Array(16), 'retired');
+    const other = { ...record, snapshotDigest: `sha256:${'d'.repeat(64)}` };
+    await store.upsert(record);
+    await store.upsert(other);
+    await store.delete(DIGEST);
+    await store.delete(DIGEST);
+    expect(await store.get(DIGEST)).toBeNull();
+    expect(await store.get(other.snapshotDigest)).toEqual(other);
+  });
+
   it('migrates an existing version-30 node database before adapter use', async () => {
     directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-index-db-'));
     dashboard = new DashboardDB({ dataDir: directory });

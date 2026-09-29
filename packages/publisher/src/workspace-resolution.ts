@@ -1,3 +1,4 @@
+import { withWorkspaceSnapshotWrites } from './workspace-snapshot-lifecycle.js';
 import { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 export { workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 import { ENTITY_SHARE_METADATA_PREDICATES as ENTITY_SHARE } from './entity-share-metadata.js';
@@ -789,7 +790,11 @@ export async function resolveWorkspaceSelection(params: {
   return quads;
 }
 
-export async function storeWorkspaceOperationPublicQuads(params: {
+export function storeWorkspaceOperationPublicQuads(params: Parameters<typeof storeWorkspaceOperationPublicQuadsWithLease>[0]): Promise<void> {
+  return withWorkspaceSnapshotWrites(params.publicSnapshotStore, snapshots => storeWorkspaceOperationPublicQuadsWithLease({ ...params, publicSnapshotStore: snapshots }));
+}
+
+async function storeWorkspaceOperationPublicQuadsWithLease(params: {
   store: TripleStore;
   graphManager: GraphManager;
   contextGraphId: string;
@@ -902,7 +907,11 @@ export async function storeWorkspaceOperationPublicQuads(params: {
  * Store one immutable public snapshot for one complete graph-scoped KA.
  * Metadata and snapshot count are constant in the number of RDF subjects.
  */
-export async function storeKnowledgeAssetOperationPublicQuads(params: {
+export function storeKnowledgeAssetOperationPublicQuads(params: Parameters<typeof storeKnowledgeAssetOperationPublicQuadsWithLease>[0]): Promise<void> {
+  return withWorkspaceSnapshotWrites(params.publicSnapshotStore, snapshots => storeKnowledgeAssetOperationPublicQuadsWithLease({ ...params, publicSnapshotStore: snapshots }));
+}
+
+async function storeKnowledgeAssetOperationPublicQuadsWithLease(params: {
   store: TripleStore;
   graphManager: GraphManager;
   contextGraphId: string;

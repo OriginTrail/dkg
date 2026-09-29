@@ -28,6 +28,7 @@ import {
 } from '../shared-memory-completion.js';
 import {
   workspacePublicQuadsDigest,
+  withWorkspaceSnapshotWrites,
   type DurableRootAtomicCompanionResolver,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
@@ -442,7 +443,12 @@ function storedVersionOutranksDescriptor(stored: string, descriptorVersion: stri
   }
 }
 
-export async function runSharedMemorySync(context: SharedMemorySyncContext): Promise<SharedMemorySyncSummary> {
+export function runSharedMemorySync(context: SharedMemorySyncContext): Promise<SharedMemorySyncSummary> {
+  // Keep fetched/reused bytes alive through materialization and the final metadata commit.
+  return withWorkspaceSnapshotWrites(context.publicSnapshotStore, snapshots => runSharedMemorySyncWithLease({ ...context, publicSnapshotStore: snapshots }));
+}
+
+async function runSharedMemorySyncWithLease(context: SharedMemorySyncContext): Promise<SharedMemorySyncSummary> {
   const {
     ctx,
     remotePeerId,

@@ -138,6 +138,7 @@ interface HarnessOverrides {
   reconcileDisposition?: 'preserve' | 'suppress-metadata';
   publisherPeerId?: string;
   additionalVerifiedMeta?: Quad[];
+  onStoreInsert?: () => void;
   metadataFetcher?: SharedMemoryMetadataFetcher;
   recoveryGuard?: RecoveryExecutionGuard;
 }
@@ -206,6 +207,7 @@ function harness(overrides: HarnessOverrides = {}) {
         : {}),
       ensureContextGraph: async () => {},
       storeInsert: async (quads) => {
+        overrides.onStoreInsert?.();
         events.push('meta-inserted');
         inserted.push(quads);
       },
@@ -275,6 +277,23 @@ function harness(overrides: HarnessOverrides = {}) {
 }
 
 describe('public SWM snapshot materialization', () => {
+  it('holds snapshot leases through materialization and the final metadata write', async () => {
+    let active = 0;
+    const release = vi.fn(() => { active -= 1; });
+    const store: WorkspacePublicSnapshotStore = new MemorySnapshotStore();
+    store.acquireSnapshotLease = vi.fn(async () => { active += 1; return release; });
+    let checkedMetadata = false;
+    const h = harness({
+      snapshotStore: store,
+      replaceImpl: async () => { expect(active).toBeGreaterThan(0); },
+      onStoreInsert: () => { expect(active).toBeGreaterThan(0); checkedMetadata = true; },
+    });
+    await h.run();
+    expect(checkedMetadata).toBe(true);
+    expect(release).toHaveBeenCalled();
+    expect(active).toBe(0);
+  });
+
   it('attributes a snapshot phase stopped solely by local admission', async () => {
     let now = 0;
     const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);

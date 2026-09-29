@@ -82,6 +82,8 @@ export default defineConfig({
       'test/storage-ack-ledger-graph-index.test.ts',
       'test/swm-slice-ack-unbounded.test.ts',
       'test/workspace-snapshot-store.test.ts',
+      'test/workspace-snapshot-retirement.test.ts',
+      'test/published-snapshot-cleanup.test.ts',
       'test/workspace-snapshot-validation.test.ts',
       'test/workspace-head-cardinality.test.ts',
       'test/knowledge-asset-swm-staging.test.ts',
