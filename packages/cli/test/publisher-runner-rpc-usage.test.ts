@@ -14,11 +14,12 @@ import { createServer, type Server } from 'node:http';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   RpcRequestGovernor,
+  ChainRpcTransportError,
   rpcUsageWindowTotal,
   snapshotProcessRpcUsage,
 } from '@origintrail-official/dkg-chain';
@@ -90,6 +91,42 @@ describe('publisher runtime drainRpcUsage — REAL runtime, real adapters, loopb
     await loopback?.close().catch(() => {});
     if (dataDir) await rm(dataDir, { recursive: true, force: true });
     runtime = null; agent = null; store = null; loopback = null; dataDir = null;
+    vi.restoreAllMocks();
+  });
+
+  it('recovers publisher construction after transient local admission failure without changing the governor', async () => {
+    loopback = await startLoopback();
+    dataDir = await mkdtemp(join(tmpdir(), 'pub-startup-admission-'));
+    await writeFile(join(dataDir, 'publisher-wallets.json'), JSON.stringify({ wallets: WALLETS }));
+    store = await createTripleStore({ backend: 'oxigraph' });
+    const governor = new RpcRequestGovernor({
+      maxRequestsPerSecond: 1_000,
+      foregroundReservePercent: 80,
+      burstRequests: 1_000,
+      maxQueueSize: 32,
+      startupJitterMs: 0,
+    });
+    const admit = vi.spyOn(governor, 'acquireActiveRequest')
+      .mockRejectedValueOnce(new ChainRpcTransportError(
+        'RPC_REQUEST_GOVERNOR_QUEUE_FULL',
+        'Hub.getContractAddress(Identity) chainId validation waited 4000ms for local RPC admission and was not sent',
+      ));
+    runtime = await createPublisherRuntimeFromAgent({
+      dataDir,
+      store,
+      keypair: await generateEd25519Keypair(),
+      chainBase: bindRuntimeRpcRequestGovernor(projectRuntimeEvmChainConfig({
+        rpcUrl: loopback.url,
+        hubAddress: HUB,
+        chainId: 'evm:31337',
+      })!, governor),
+    });
+    expect(runtime.walletIds).toHaveLength(WALLETS.length);
+    expect(admit.mock.calls.length).toBeGreaterThan(1);
+    expect(governor.snapshot().maxRequestsPerSecond).toBe(1_000);
+    expect(loopback.totalHits()).toBeGreaterThan(0);
+    expect(loopback.hits('eth_sendRawTransaction')).toBe(0);
+    expect(loopback.hits('eth_sendTransaction')).toBe(0);
   });
 
   it('shares one daemon-style governor across REAL agent and publisher adapters', async () => {

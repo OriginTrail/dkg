@@ -58,6 +58,7 @@ import {
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
+import { isRpcRequestGovernorQueueFullError } from './rpc-request-governor.js';
 import { hostOnlyRpcText, rpcHost } from './rpc-failover-log.js';
 import {
   RpcEndpointsExhaustedError,
@@ -3222,7 +3223,8 @@ export class EVMChainAdapterBase {
     // only to keep stale Hub bindings on older deploys resolving cleanly.
     try {
       this.contracts.staking = await this.resolveContract('Staking');
-    } catch {
+    } catch (error) {
+      this.rethrowInterruptedInitialization(error);
       // V8 Staking not deployed on this Hub — V10 surface continues.
     }
 
@@ -3232,7 +3234,8 @@ export class EVMChainAdapterBase {
     // relay-registry methods will throw with a clear message at call time.
     try {
       this.contracts.profileStorage = await this.resolveContract('ProfileStorage');
-    } catch {
+    } catch (error) {
+      this.rethrowInterruptedInitialization(error);
       // Older deployments without the relay registry surface.
     }
 
@@ -3249,44 +3252,51 @@ export class EVMChainAdapterBase {
     try {
       this.contracts.knowledgeAssets = await this.resolveContract('KnowledgeAssets');
       this.contracts.knowledgeAssetsStorage = await this.resolveAssetStorage('KnowledgeAssetsStorage');
-    } catch {
+    } catch (error) {
+      this.rethrowInterruptedInitialization(error);
       // V9 contracts not deployed — V9 publish/update surface unavailable.
     }
     try {
       this.contracts.askStorage = await this.resolveContract('AskStorage');
-    } catch {
+    } catch (error) {
+      this.rethrowInterruptedInitialization(error);
       // Older deployments that pre-date AskStorage — token-amount derivation unavailable.
     }
 
     try {
       this.contracts.contextGraphNameRegistry = await this.resolveContract('ContextGraphNameRegistry');
-    } catch {
+    } catch (error) {
+      this.rethrowInterruptedInitialization(error);
       // ContextGraphNameRegistry not registered in Hub — createContextGraph/listContextGraphsFromChain unavailable
     }
 
     try {
       this.contracts.contextGraphs = await this.resolveContract('ContextGraphs');
       this.contracts.contextGraphStorage = await this.resolveAssetStorage('ContextGraphStorage');
-    } catch {
+    } catch (error) {
+      this.rethrowInterruptedInitialization(error);
       // ContextGraphs not deployed — context graph operations unavailable
     }
 
     try {
       this.contracts.knowledgeAssetsLifecycle = await this.resolveContract('KnowledgeAssetsLifecycle');
-    } catch {
+    } catch (error) {
+      this.rethrowInterruptedInitialization(error);
       // Lifecycle not deployed — createKnowledgeAssets unavailable.
       // V10.0 KnowledgeAssetsLifecycle fallback was removed in the rc.12 rename.
     }
 
     try {
       this.contracts.dkgPublishingConvictionNFT = await this.resolveContract('DKGPublishingConvictionNFT');
-    } catch {
+    } catch (error) {
+      this.rethrowInterruptedInitialization(error);
       // DKGPublishingConvictionNFT not deployed — V10 PCA agent-resolution unavailable
     }
 
     try {
       this.contracts.chronos = await this.resolveContract('Chronos');
-    } catch {
+    } catch (error) {
+      this.rethrowInterruptedInitialization(error);
       // Chronos not deployed — update-path growth-cost sizing falls back to
       // currentEpoch=0 (treats KC as having full `endEpoch` remaining lifetime).
       // Greenfield V10 deployments always have Chronos; this catch is for older
@@ -3295,7 +3305,8 @@ export class EVMChainAdapterBase {
 
     try {
       await this.resolveAndAssignRandomSamplingPair();
-    } catch {
+    } catch (error) {
+      this.rethrowInterruptedInitialization(error);
       // RandomSampling not deployed — proof submission unavailable
     }
 
@@ -3325,6 +3336,13 @@ export class EVMChainAdapterBase {
     }
 
     this.initialized = true;
+  }
+
+  private rethrowInterruptedInitialization(error: unknown): void {
+    activeRpcRequestAbortSignal()?.throwIfAborted();
+    // Local refusal says nothing about whether an optional contract exists.
+    // Leave initialization incomplete so its owner can retry after backoff.
+    if (isRpcRequestGovernorQueueFullError(error)) throw error;
   }
 
   protected requireV9(): void {
