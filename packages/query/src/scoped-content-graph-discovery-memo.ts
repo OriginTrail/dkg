@@ -8,14 +8,17 @@ export interface ScopedContentGraphDiscoveryMemoOptions {
   maxEntries?: number;
 }
 
-export interface ScopedContentGraphDiscoveryRequest<
-  Value extends readonly unknown[] = readonly string[],
-> {
+export interface ScopedContentGraphDiscoveryResult {
+  readonly graphs: readonly string[];
+  readonly materializedBytes: number;
+}
+
+export interface ScopedContentGraphDiscoveryRequest {
   contentKey: string;
   laneKey: string;
   graphPrefix: string;
   signal?: AbortSignal;
-  load: () => Promise<Value>;
+  load: () => Promise<ScopedContentGraphDiscoveryResult>;
 }
 
 /**
@@ -24,11 +27,9 @@ export interface ScopedContentGraphDiscoveryRequest<
  * explicitly observes every writer that can mutate the live store. A local
  * generation cannot authorize reuse for an externally mutable SPARQL backend.
  */
-export class ScopedContentGraphDiscoveryMemo<
-  Value extends readonly unknown[] = readonly string[],
-> {
-  private readonly completed: BoundedLruCache<string, Value>;
-  private readonly inFlight = new Map<string, Promise<Value>>();
+export class ScopedContentGraphDiscoveryMemo {
+  private readonly completed: BoundedLruCache<string, ScopedContentGraphDiscoveryResult>;
+  private readonly inFlight = new Map<string, Promise<ScopedContentGraphDiscoveryResult>>();
 
   constructor(
     private readonly revisionSource: GraphWriteRevisionSource | null,
@@ -37,7 +38,7 @@ export class ScopedContentGraphDiscoveryMemo<
     this.completed = new BoundedLruCache(options.maxEntries ?? DEFAULT_MAX_ENTRIES);
   }
 
-  get(request: ScopedContentGraphDiscoveryRequest<Value>): Promise<Value> {
+  get(request: ScopedContentGraphDiscoveryRequest): Promise<ScopedContentGraphDiscoveryResult> {
     if (request.signal?.aborted) return Promise.reject(callerAbortReason(request.signal));
     if (this.revisionSource?.writeRevisionCoverage !== 'all-writers') {
       return raceAgainstCallerAbort(request.load(), request.signal);
@@ -61,7 +62,10 @@ export class ScopedContentGraphDiscoveryMemo<
     const promise = request.load().then((value) => {
       const after = this.revisionSource!.getWriteRevision(request.graphPrefix);
       if (after.stable && after.generation === before.generation) {
-        const immutable = Object.freeze([...value]) as unknown as Value;
+        const immutable = Object.freeze({
+          graphs: Object.freeze([...value.graphs]),
+          materializedBytes: value.materializedBytes,
+        });
         this.completed.set(completedKey, immutable);
         return immutable;
       }

@@ -1,7 +1,6 @@
 import {
   asGraphWriteRevisionSource,
   isSparqlHttpResponseError,
-  StoreResponseTooLargeError,
 } from '@origintrail-official/dkg-storage';
 import type {
   TripleStore,
@@ -66,6 +65,7 @@ import { injectMinTrustFilter } from './sparql-min-trust.js';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { raceAgainstCallerAbort } from './caller-abort.js';
 import { ScopedContentGraphDiscoveryMemo } from './scoped-content-graph-discovery-memo.js';
+import { QueryMaterializationTooLargeError } from './query-materialization-error.js';
 
 export { ScopedQueryViolationError } from './scoped-query-error.js';
 
@@ -126,7 +126,7 @@ class QueryMaterializationBudget {
   consumeBytes(responseBytes: number): void {
     const nextUsed = this.usedBytes + responseBytes;
     if (nextUsed > this.maxBytes) {
-      throw new StoreResponseTooLargeError(this.maxBytes, nextUsed);
+      throw new QueryMaterializationTooLargeError(this.maxBytes, nextUsed);
     }
     this.usedBytes = nextUsed;
   }
@@ -154,11 +154,6 @@ interface QueryStoreReadContext extends StoreReadLane {
     readonly cacheKey: string;
   };
 }
-
-type ScopedContentGraphDiscoveryValue = readonly [
-  graphs: readonly string[],
-  materializedBytes: number,
-];
 
 function createStoreReadLane(
   store: TripleStore,
@@ -426,15 +421,12 @@ export function resolveViewGraphs(
 export class DKGQueryEngine implements GraphAwareQueryEngine {
   private readonly store: TripleStore;
   private readonly graphManager: GraphManager;
-  private readonly scopedContentGraphDiscoveryMemo:
-    ScopedContentGraphDiscoveryMemo<ScopedContentGraphDiscoveryValue>;
+  private readonly scopedContentGraphDiscoveryMemo: ScopedContentGraphDiscoveryMemo;
 
   constructor(store: TripleStore) {
     this.store = store;
     this.graphManager = new GraphManager(store);
-    this.scopedContentGraphDiscoveryMemo = new ScopedContentGraphDiscoveryMemo<
-      ScopedContentGraphDiscoveryValue
-    >(
+    this.scopedContentGraphDiscoveryMemo = new ScopedContentGraphDiscoveryMemo(
       asGraphWriteRevisionSource(store),
     );
   }
@@ -1165,7 +1157,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   ): Promise<readonly string[]> {
     const contentKey = JSON.stringify([contextGraphId, subGraphName ?? null]);
     const graphPrefix = `did:dkg:context-graph:${contextGraphId}`;
-    const [graphs, materializedBytes] = await this.scopedContentGraphDiscoveryMemo.get({
+    const discovery = await this.scopedContentGraphDiscoveryMemo.get({
       contentKey,
       laneKey: reads.shared.cacheKey,
       graphPrefix,
@@ -1186,13 +1178,13 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           discoveryReads,
           subGraphName,
         );
-        return [Object.freeze(discovered), materializedBytes] as const;
+        return { graphs: discovered, materializedBytes };
       },
     });
     // Shared discovery work is coalesced, but every logical query debits the
     // reported materialization cost against its own request-local budget.
-    reads.materializationBudget?.consumeBytes(materializedBytes);
-    return graphs;
+    reads.materializationBudget?.consumeBytes(discovery.materializedBytes);
+    return discovery.graphs;
   }
 
   private async discoverScopedContentGraphAllowList(

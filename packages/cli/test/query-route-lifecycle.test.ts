@@ -367,13 +367,19 @@ describe('/api/query request lifecycle', () => {
     expect(tracker.fail).not.toHaveBeenCalled();
   });
 
-  it('reports an oversized public query result as a stable 413 response', async () => {
-    const req = new RequestStub();
-    const res = new ResponseStub();
-    const error = new StoreResponseTooLargeError(
+  it.each([
+    ['transport', new StoreResponseTooLargeError(
       API_QUERY_MAX_STORE_RESPONSE_BYTES,
       API_QUERY_MAX_STORE_RESPONSE_BYTES + 1,
-    );
+    )],
+    ['materialization', Object.assign(new Error('query materialization exceeds byte limit'), {
+      code: 'QUERY_MATERIALIZATION_TOO_LARGE',
+      maxBytes: API_QUERY_MAX_STORE_RESPONSE_BYTES,
+      actualBytes: API_QUERY_MAX_STORE_RESPONSE_BYTES + 1,
+    })],
+  ])('reports a %s byte overflow as a stable 413 response', async (_kind, error) => {
+    const req = new RequestStub();
+    const res = new ResponseStub();
     const agent = { query: vi.fn(async () => { throw error; }) };
     const tracker = {
       start: vi.fn(), startPhase: vi.fn(), completePhase: vi.fn(),

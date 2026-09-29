@@ -1,5 +1,9 @@
 export * from './query-engine.js';
 export * from './query-types.js';
+export {
+  QUERY_MATERIALIZATION_TOO_LARGE,
+  QueryMaterializationTooLargeError,
+} from './query-materialization-error.js';
 export { DKGQueryEngine, resolveViewGraphs, type ViewResolution } from './dkg-query-engine.js';
 export {
   CALLER_SPARQL_REJECTED_CODE,

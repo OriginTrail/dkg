@@ -207,7 +207,7 @@ describe('DKGQueryEngine', () => {
       'SELECT ?unbound WHERE { ?s ?p ?o }',
       { maxResponseBytes: 1_000, maxMaterializedBytes: 100 },
     )).rejects.toMatchObject({
-      code: 'STORE_RESPONSE_TOO_LARGE',
+      code: 'QUERY_MATERIALIZATION_TOO_LARGE',
       maxBytes: 100,
       actualBytes: expect.any(Number),
     });
@@ -330,7 +330,7 @@ describe('DKGQueryEngine', () => {
     });
     releaseDiscovery();
     await expect(first).rejects.toMatchObject({
-      code: 'STORE_RESPONSE_TOO_LARGE',
+      code: 'QUERY_MATERIALIZATION_TOO_LARGE',
       maxBytes: 100,
     });
     await expect(second).resolves.toMatchObject({ bindings: expect.any(Array) });
@@ -983,7 +983,7 @@ describe('DKGQueryEngine', () => {
         view: 'verifiable-memory',
         maxMaterializedBytes: 180,
       })).rejects.toMatchObject({
-        code: 'STORE_RESPONSE_TOO_LARGE',
+        code: 'QUERY_MATERIALIZATION_TOO_LARGE',
         maxBytes: 180,
       });
       await expect(engine.query(query, {
@@ -1053,7 +1053,7 @@ describe('DKGQueryEngine', () => {
         view: 'verifiable-memory',
         maxMaterializedBytes: ceiling,
       })).rejects.toMatchObject({
-        code: 'STORE_RESPONSE_TOO_LARGE',
+        code: 'QUERY_MATERIALIZATION_TOO_LARGE',
         maxBytes: ceiling,
         actualBytes: expect.any(Number),
       });

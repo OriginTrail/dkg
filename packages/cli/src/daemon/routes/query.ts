@@ -736,7 +736,10 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         tracker.fail(ctx, err);
         return;
       }
-      if (err?.code === 'STORE_RESPONSE_TOO_LARGE') {
+      if (
+        err?.code === 'STORE_RESPONSE_TOO_LARGE'
+        || err?.code === 'QUERY_MATERIALIZATION_TOO_LARGE'
+      ) {
         tracker.fail(ctx, err);
         return jsonResponse(res, 413, {
           error: err?.message ?? 'Query result exceeded the byte limit',
