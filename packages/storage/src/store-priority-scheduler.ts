@@ -68,6 +68,15 @@ export interface StoreSchedulerOperationMetadata {
 
 export interface StoreSchedulerBusyErrorOptions extends ErrorOptions {
   storeOperation?: StoreOperation;
+  /** Admitted work observed when a queued operation timed out; not a causal claim. */
+  activeAtTimeout?: readonly StoreSchedulerActiveAtTimeout[];
+}
+
+export interface StoreSchedulerActiveAtTimeout {
+  priority: StoreWorkPriority;
+  operation: string;
+  count: number;
+  oldestAgeMs: number;
 }
 
 /**
@@ -80,6 +89,7 @@ export class StoreSchedulerBusyError extends Error implements StoreOperationOutc
   readonly outcome = 'not_started' as const;
   readonly storeOperationOutcomeTag = STORE_OPERATION_OUTCOME_TAG;
   readonly storeOperation?: StoreOperation;
+  readonly activeAtTimeout?: readonly StoreSchedulerActiveAtTimeout[];
 
   constructor(
     readonly reason: StoreSchedulerBusyReason,
@@ -88,11 +98,16 @@ export class StoreSchedulerBusyError extends Error implements StoreOperationOutc
     options?: StoreSchedulerBusyErrorOptions,
   ) {
     super(
-      `Store scheduler ${reason.replaceAll('_', ' ')} (${priority}: ${operation || 'unknown'})`,
+      `Store scheduler ${reason.replaceAll('_', ' ')} (${priority}: ${operation || 'unknown'})`
+        + (options?.activeAtTimeout?.length
+          ? `; active at timeout: ${options.activeAtTimeout.map((active) =>
+            `${active.priority}:${active.operation} (${active.count}, oldest ${active.oldestAgeMs}ms)`).join(', ')}`
+          : ''),
       options,
     );
     this.name = 'StoreSchedulerBusyError';
     this.storeOperation = options?.storeOperation;
+    this.activeAtTimeout = options?.activeAtTimeout;
   }
 }
 
@@ -509,13 +524,26 @@ export class StorePriorityScheduler extends ObservableScheduler {
         entry.waitTimer = undefined;
         if (!this.removeQueued(entry as QueueEntry<unknown>)) return;
         this.cleanupQueuedEntry(entry as QueueEntry<unknown>);
+        // A timeout's own operation names the waiter. Capture the admitted
+        // operations separately so logs expose possible slot holders without
+        // mistaking that waiter label for the cause of the delay.
+        const activeAtTimeout = this.getBackpressureSnapshot().lanes
+          .flatMap((lane) => lane.activeOperations.map((active) => ({
+            priority: lane.lane as StoreWorkPriority,
+            operation: metricOperation(active.operation),
+            count: active.count,
+            oldestAgeMs: active.oldestAgeMs,
+          })))
+          .sort((a, b) => b.oldestAgeMs - a.oldestAgeMs)
+          .slice(0, 3);
         const error = new StoreSchedulerBusyError(
           'queue_wait_timeout',
           normalizedPriority,
           operation,
-          entry.storeOperation === undefined
-            ? undefined
-            : { storeOperation: entry.storeOperation },
+          {
+            ...(entry.storeOperation === undefined ? {} : { storeOperation: entry.storeOperation }),
+            activeAtTimeout,
+          },
         );
         this.pressureRejectQueued(entry.pressureTicket, error.reason);
         this.observeRejection(error);
