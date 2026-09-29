@@ -294,6 +294,11 @@ test('control-plane changes force full Node/EVM CI without overriding the Solidi
     'scripts/testing/package.json',
     'scripts/test-evm-integration.sh',
     'test-policy/coverage-baselines.json',
+    // The CLI build copies these assets into the output every lane restores.
+    'scripts/copy-cli-runtime-assets.mjs',
+    'scripts/build.mjs',
+    // A repository script no build-only family lists fails closed.
+    'scripts/new-helper.sh',
   ];
 
   for (const filePath of controlPlanePaths) {

@@ -287,7 +287,7 @@ const INSTALL_LIFECYCLE_SCRIPTS = new Set([
   'dependencies',
 ]);
 
-function isInstallLifecycleScript(name) {
+export function isInstallLifecycleScript(name) {
   return INSTALL_LIFECYCLE_SCRIPTS.has(name) || name.startsWith('pnpm:');
 }
 

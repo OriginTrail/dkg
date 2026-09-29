@@ -362,7 +362,8 @@ export const PATH_TRIGGERS = Object.freeze([
 
 // Repository areas outside the package workspaces, in first-match order. An
 // entry with `full` keeps full CI with its own reason (the CI control plane,
-// unknown workflow paths, devnet install inputs). Every other entry selects
+// unknown workflow paths, devnet install inputs, repository scripts outside
+// the known families). Every other entry selects
 // the lanes that actually load the area in CI (a CI job running it, or a
 // package referencing it, directly or through another support file; the
 // routing tests follow those imports) plus the shared build job's own checks
@@ -409,14 +410,33 @@ export const SUPPORT_PATH_ROUTES = Object.freeze([
     lanes: ['tornado_core'],
     reason: 'the chain vendored-ABI test runs the ABI sync script',
   },
+  // Repository scripts known to run only in the shared build job or by hand,
+  // by family. The load-closure test fails if a lane reads or runs one, or
+  // assembles a script path it cannot resolve, and each family must still
+  // name an existing script.
   {
-    // Every other repository script is either run by the build job (its lint,
-    // script tests and repository checks) or only by hand and by workflows
-    // outside the CI gate; no lane job runs it. The load-closure test fails if
-    // a lane reads or runs one without a route above.
-    pattern: /^scripts\//,
+    // Devnet suites and operations run by hand, in no CI job.
+    pattern: /^scripts\/(?:devnet-[\w.-]+\.(?:sh|mjs)|(?:_devnet-full-sweep|epcis-smoke-test|libp2p-soak-test|publisher-smoke-test|seed-demo|swm-soak-orchestrate|swm-soak-test|two-laptop-test|v10-rc-validation|dkg-claude)\.sh)$/,
     lanes: [],
-    reason: 'repository scripts outside CI tooling are checked by the shared build job',
+    reason: 'devnet suites and operations run by hand, checked by the shared build job',
+  },
+  {
+    // Repository checks the shared build job runs, and their tests.
+    pattern: /^scripts\/(?:audit-[\w-]+(?:\.test)?|check-npm-metadata|release-packages|verify-w1-packet)\.mjs$/,
+    lanes: [],
+    reason: 'repository checks the shared build job runs',
+  },
+  {
+    // Operator, analysis and data tools run by hand.
+    pattern: /^scripts\/(?:(?:chain-analysis|debug-neuroweb[\w-]*|distribute-publisher-trac|epoch-snapshot|generate-aggregates|publisher-epoch-snapshot[\w-]*|verify-addresses)\.ts|(?:backfill-rs-percgid-meta|dkg-v10-[\w-]+|drain-swm-duplicates|generate-random-findings-nt|import-[\w-]+|redistribute-memory|register-laptop2-agent|seed-dkg-code-project|verify-agent-provenance-deployment)\.mjs|update-repo-refs\.js|(?:load|repro|testnet-publish-stress)\/.+)$/,
+    lanes: [],
+    reason: 'operator and data tools run by hand, checked by the shared build job',
+  },
+  {
+    // Any other script, including a new one: its consumers are not known, so it
+    // fails closed (the build, install hooks and other workflows' scripts too).
+    pattern: /^scripts\//,
+    full: 'Repository script outside the known build-only families changed',
   },
   {
     // Coverage baselines, read by the root vitest.coverage.ts every lane uses.

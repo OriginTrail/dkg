@@ -27,8 +27,9 @@ CI whenever it cannot prove that a smaller plan is safe.
 | Real-node browser E2E (Playwright, 7 devnet shards) | PRs touching the UI surface it drives (`node-ui`, `graph-viz`, and `cli`, the daemon HTTP API) or a package its harness code imports (`core` and its dependency `rdf-utils`). The rest of the daemon runtime (`agent`, `chain`, `storage`, `publisher`, `query`, adapters and the other packages `cli` depends on) is a deliberate exception: those PRs run their own lanes plus the CLI daemon tests and get the suite after merge. `ci-delta-routing.test.mjs` derives both sets from the harness imports and `scripts/devnet.sh`, and pins the exception list |
 | Windows lifecycle job (`rfc64-inventory-windows.yml`) | Every PR that runs the agent lane, whether a package, a `devnet/` harness or the Gate 0 paths selected it: `ci.yml` starts the job on the agent lane's output and the gate requires it with that lane. Besides the SQLite suites it runs the RFC-64 Gate 0 lifecycle and evidence harnesses, which start a real agent and run on no Linux lane |
 | `evm-module` | Full Node/EVM CI; Solidity only for the established contract-relevant paths |
-| Root dependency/build config, lockfile, CI control-plane workflows (`ci.yml`, `evm-integration.yml`, `rfc64-inventory-windows.yml`), any nested path under `.github/workflows/`, composite actions, the planner and other CI tooling (`scripts/ci/`, `scripts/lib/`), shared test fixtures (`scripts/testing/`), the devnet bootstrap (`scripts/devnet.sh`), the EVM integration runner, or the coverage baselines | Full Node/EVM CI; Solidity only when its independent path filter matches |
-| Any other `scripts/` file, and the rest of `test-policy/` | Shared build checks (its lint, script tests and repository checks run them) plus any lane that runs the script: a routing test fails if a lane's tests name a script, even inside embedded shell, or a workflow job runs one, without a route to that lane. Scripts run only by hand or by workflows outside the CI gate get the build checks alone, which is all full CI ever ran for them |
+| Root dependency/build config, lockfile, CI control-plane workflows (`ci.yml`, `evm-integration.yml`, `rfc64-inventory-windows.yml`), any nested path under `.github/workflows/`, composite actions, the planner and other CI tooling (`scripts/ci/`, `scripts/lib/` outside its tests), shared test fixtures (`scripts/testing/`), the EVM integration runner, the CLI runtime-asset copier, the coverage baselines, and every repository script outside the families below: the root build, release promotion and lint scripts, and any new script | Full Node/EVM CI; Solidity only when its independent path filter matches |
+| `scripts/devnet.sh`, `scripts/devnet-publish-helpers.sh`, `scripts/sync-chain-abis.mjs` | The lanes that run them (the devnet bootstrap: browser E2E, the agent lane's devnet harnesses and the CLI Blazegraph smoke fixture; the publish helpers: the CLI smoke test; the ABI sync: the chain vendored-ABI test) plus the shared build checks |
+| Repository scripts in the build-only families: devnet suites and operations run by hand (`devnet-*`, the soak and smoke suites), the repository checks the build job runs (`audit-*`, `check-npm-metadata`, `release-packages`, `verify-w1-packet`), operator and data tools run by hand (`import-*`, snapshot and analysis tools, `scripts/load/`, `scripts/repro/`, `scripts/testnet-publish-stress/`); the repository-script tests (`scripts/lib/__tests__/`); the rest of `test-policy/` | Shared build checks (its lint, script tests and repository checks run them). A routing test fails if a lane runs or reads one of these scripts without a route to that lane: named in a test, even inside embedded shell, run by a workflow job, or reached through a workspace script CI runs. It also fails on a script path a lane assembles at run time until the test lists it, and on a family that no longer matches an existing script |
 | Workspace `package.json` changing only package-scoped fields (`exports`, `scripts` other than install hooks, `version`, `files`, metadata) | Same lanes as a source change in that workspace |
 | Workspace `package.json` changing dependencies, `pnpm`/overrides, `engines`, `bin`, `directories`, `name`, `type`, install-time scripts (npm install/prepare lifecycle, `prepublish`, `dependencies`, any `pnpm:` hook) or unknown fields; added, removed or moved manifests; root and `devnet/*` manifests | Full CI because the install or dependency graph may differ |
 | Deletion, rename or copy | Routed by every old and new path, like edits |
@@ -64,7 +65,12 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   Beyond declared dependencies, a routing test seeds from what each lane runs
   (package code and tests, and the support files CI jobs run directly, through
   root `package.json` or shell scripts, or through local actions and reusable
-  workflows), follows every relative reference (imports, dynamic imports,
+  workflows, plus the repository scripts named by the workspace scripts CI
+  runs: those a job command names, the scripts they call, install hooks and
+  the build; what the build or an install hook runs needs full CI), reads
+  each file with the handler for its format (JavaScript and TypeScript
+  modules, shell scripts; other formats name nothing), follows every
+  relative reference (imports, dynamic imports,
   CommonJS `require`, `new URL(...)` paths, paths built with
   `path.resolve`/`join` or their imported aliases from a file's own directory
   and, in tests and test-runner configs, quoted repo paths naming a file;
@@ -72,9 +78,9 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   built `dist/` output stands for its `src/`) across packages and support
   areas, and fails when a file it reaches does not select that lane or EVM
   scope. It also fails on a module load it cannot follow, one whose specifier
-  is computed at run time, until the test lists that load with the reason it
-  needs no route; a file read through a computed path is still out of its
-  reach. The owning lanes it seeds from are checked against what CI executes,
+  is computed at run time, or a script path assembled at run time, until the
+  test lists it with the reason it needs no route; any other file read
+  through a computed path is still out of its reach. The owning lanes it seeds from are checked against what CI executes,
   and a negative control plants an unrouted load to show the test reports it.
   Where that reach enters another package, the workspaces it imports by
   package name (and their dependencies) must select the lane too: the chain

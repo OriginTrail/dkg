@@ -8,7 +8,8 @@ import ts from 'typescript';
 import { WORKSPACE_RULES } from '../ci-delta.mjs';
 import { REPO_ROOT } from './ci-plan-fixtures.mjs';
 
-function readWorkspaces() {
+// Every package workspace's manifest by directory, and directories by package name.
+export function readWorkspaces() {
   const manifests = new Map(Object.keys(WORKSPACE_RULES).map((workspace) => [
     workspace,
     JSON.parse(fs.readFileSync(path.join(REPO_ROOT, workspace, 'package.json'), 'utf8')),
@@ -76,22 +77,19 @@ const RELATIVE = String.raw`['"]((?:\.\.?\/)+[^'"]+)['"]`;
 const URL_IMPORT = new RegExp(String.raw`\bimport\s*\(\s*new\s+URL\(\s*` + RELATIVE, 'g');
 const URL_PATH = new RegExp(String.raw`(?:\bnew\s+URL\(\s*|\brequire\.resolve\s*\(\s*)` + RELATIVE, 'g');
 const REPO_PATH_LITERAL = /['"]((?:[\w@.-]+\/)+[\w.-]+\.[A-Za-z0-9]+)['"]/g;
-// A repository-script path, of any extension or none, wherever it appears:
-// in a string, in a workflow command, behind a variable such as
-// "$repo_root/". Callers keep only the paths that exist. Scripts outside CI
-// tooling route by who uses them, so every consumer this finds counts.
+// A repository-script path, of any extension or none, in a command, a string
+// or shell code, behind a variable such as "$repo_root/" too. Callers keep
+// only the paths that exist. Scripts outside CI tooling route by who uses
+// them, so every consumer this finds counts.
 const REPO_SCRIPT_PATH = /(?<![\w.-])(?:\.\/)?(scripts\/[\w./-]*[\w-])/g;
 export function repoScriptMentions(text) {
   return [...new Set([...text.matchAll(REPO_SCRIPT_PATH)].map(([, script]) => script))];
 }
-// Files whose text is read for script mentions when a lane reads or runs them:
-// anything but JavaScript (followed as modules), manifests (a workspace's
-// package.json scripts are mapped to its lanes by the routing test),
-// documents and binaries.
-const SCANNED_TEXT = (file) => !/(?:\.(?:[cm]?[jt]sx?|md|png|jpe?g|gif|svg|ico|wasm|node|zip|gz|tgz)|(?:^|\/)package\.json)$/i.test(file);
-// `#` comments in shell, Python and YAML, which mention scripts they do not run.
-const HASH_COMMENTED = /\.(?:sh|bash|py|ya?ml)$/;
-const withoutHashComments = (text) => text.split('\n').map((line) => line.replace(/(^|\s)#.*$/, '$1')).join('\n');
+// Text that ends inside a scripts/ path ("scripts/", "$ROOT/scripts/devnet-"),
+// so whatever follows it completes the script's path.
+const OPEN_SCRIPT_PATH = /(?:^|[^\w.-])scripts\/(?:[\w.-]+\/)*[\w.-]*$/;
+// A path segment naming a scripts directory: 'scripts', '../../scripts/'.
+const SCRIPTS_DIRECTORY = /(?:^|\/)scripts\/?$/;
 // Files that list the paths a lane runs or reads: tests, and test-runner configs.
 const TEST_FILE = /(?:^|\/)(?:test|tests|test-live|__tests__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)(?:vitest|playwright)[\w.-]*\.config\.[cm]?[jt]s$/;
 const TYPE_ONLY_IMPORT = /\b(?:import|export)\s+type\s+(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s*['"][^'"]+['"]/g;
@@ -142,6 +140,8 @@ function builtPaths(file, source) {
     .map(([, , base, text]) => joined(base, text));
 }
 
+const scriptKind = (file) => (/\.[cm]?[jt]sx$/.test(file) ? ts.ScriptKind.TSX : /\.[cm]?js$/.test(file) ? ts.ScriptKind.JS : ts.ScriptKind.TS);
+
 // The module specifiers `code` loads, read with TypeScript's import scanner
 // (ts.preProcessFile, as test-fixture-inputs.mjs reads imports): import and
 // export declarations, side-effect imports, import() of a string and
@@ -170,8 +170,7 @@ export function packageImports(source) {
 // those), is not computed; require() under another name is not seen.
 function computedLoads(file, code) {
   if (!/\b(?:import|require)\s*\(/.test(code)) return [];
-  const kind = /\.[cm]?[jt]sx$/.test(file) ? ts.ScriptKind.TSX : /\.[cm]?js$/.test(file) ? ts.ScriptKind.JS : ts.ScriptKind.TS;
-  const tree = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, false, kind);
+  const tree = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, false, scriptKind(file));
   const urlOfString = (node) => {
     let target = ts.isPropertyAccessExpression(node) && node.name.text === 'href' ? node.expression : node;
     if (ts.isCallExpression(target) && ts.isIdentifier(target.expression) && target.expression.text === 'fileURLToPath') {
@@ -194,21 +193,79 @@ function computedLoads(file, code) {
   return computed;
 }
 
-// Repository scripts named inside the string and template literals of a test
-// or runner config (from its syntax tree, so comments do not count).
+// The names `code` calls path.join and path.resolve by: join, resolve and
+// their aliases imported from node:path.
+function pathHelpers(code) {
+  const helpers = new Set(['join', 'resolve']);
+  for (const [, specifiers] of code.matchAll(/\bimport\s*\{([^}]*)\}\s*from\s*['"](?:node:)?path(?:\/posix)?['"]/g)) {
+    for (const [, alias] of specifiers.matchAll(/\b(?:resolve|join)\s+as\s+([\w$]+)/g)) helpers.add(alias);
+  }
+  return helpers;
+}
+
+// For a join/resolve call (path.join, path.posix.resolve, or a name in
+// `helpers`), the index of its argument that names a scripts directory
+// ('scripts', '../../scripts/'); otherwise -1.
+const isLiteral = (node) => ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node);
+function scriptsDirectoryArgument(node, tree, helpers) {
+  if (!ts.isCallExpression(node)) return -1;
+  const { expression } = node;
+  const helper = (ts.isIdentifier(expression) && helpers.has(expression.text))
+    || (ts.isPropertyAccessExpression(expression) && ['join', 'resolve'].includes(expression.name.text)
+      && /^(?:path|posix|path\.posix|path\.win32)$/.test(expression.expression.getText(tree)));
+  return helper ? node.arguments.findIndex((argument) => isLiteral(argument) && SCRIPTS_DIRECTORY.test(argument.text)) : -1;
+}
+
+// Repository scripts a test or runner config names (from its syntax tree, so
+// comments do not count): inside string and template literals, and as the
+// literal segments a join/resolve call joins onto a scripts directory
+// (join(root, 'scripts', 'devnet.sh')).
 function scriptMentions(file, code) {
-  if (!code.includes('scripts/')) return [];
-  const kind = /\.[cm]?[jt]sx$/.test(file) ? ts.ScriptKind.TSX : /\.[cm]?js$/.test(file) ? ts.ScriptKind.JS : ts.ScriptKind.TS;
+  if (!code.includes('scripts')) return [];
+  const tree = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, false, scriptKind(file));
+  const helpers = pathHelpers(code);
   const texts = [];
   const visit = (node) => {
-    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateLiteralLikeNode?.(node)
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)
       || node.kind === ts.SyntaxKind.TemplateHead || node.kind === ts.SyntaxKind.TemplateMiddle || node.kind === ts.SyntaxKind.TemplateTail) {
       texts.push(node.text);
     }
+    const directory = scriptsDirectoryArgument(node, tree, helpers);
+    const segments = directory >= 0 ? node.arguments.slice(directory + 1) : [];
+    if (segments.length && segments.every(isLiteral)) texts.push(['scripts', ...segments.map(({ text }) => text)].join('/'));
     ts.forEachChild(node, visit);
   };
-  visit(ts.createSourceFile(file, code, ts.ScriptTarget.Latest, false, kind));
+  visit(tree);
   return texts.flatMap(repoScriptMentions);
+}
+
+// Script paths `code` assembles at run time, as their source text: a template
+// literal or `+` that continues a scripts/ path with a value (`scripts/${name}`),
+// or a join/resolve call that joins a value onto a scripts directory
+// (join(root, 'scripts', helper)). No trace can tell which script they reach,
+// so each is reported like a computed load.
+function assembledScriptPaths(file, code) {
+  if (!code.includes('scripts')) return [];
+  const tree = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, false, scriptKind(file));
+  const helpers = pathHelpers(code);
+  const assembled = [];
+  const visit = (node) => {
+    if (ts.isTemplateExpression(node)) {
+      const beforeValues = [node.head.text, ...node.templateSpans.slice(0, -1).map(({ literal }) => literal.text)];
+      if (beforeValues.some((text) => OPEN_SCRIPT_PATH.test(text))) assembled.push(node.getText(tree));
+    } else if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken
+      && isLiteral(node.left) && !isLiteral(node.right) && OPEN_SCRIPT_PATH.test(node.left.text)) {
+      assembled.push(node.getText(tree));
+    } else {
+      const directory = scriptsDirectoryArgument(node, tree, helpers);
+      if (directory >= 0 && node.arguments.slice(directory + 1).some((argument) => !isLiteral(argument))) {
+        assembled.push(node.getText(tree));
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(tree);
+  return assembled;
 }
 
 // What `file` (repo-relative, with `source` as its contents) loads by path:
@@ -221,9 +278,10 @@ function scriptMentions(file, code) {
 //   an existing repo file (`'packages/agent/src/x.ts'`, as source-scanning
 //   tests list them);
 // - `packages`: workspaces it imports by package name (packageImports);
-// - `computed`: module loads computed at run time (computedLoads).
-// Type-only imports are erased before anything runs; paths assembled at run
-// time from variables are out of reach.
+// - `computed`: module loads computed at run time (computedLoads);
+// - `assembled`: script paths assembled at run time (assembledScriptPaths).
+// Type-only imports are erased before anything runs; other paths assembled
+// at run time from variables are out of reach.
 export function loadReferences(file, source) {
   const code = source.replace(TYPE_ONLY_IMPORT, '');
   const walks = /\b(?:readdir|opendir)(?:Sync)?\(/.test(code);
@@ -247,19 +305,69 @@ export function loadReferences(file, source) {
     paths: [...new Set(paths)].filter((target) => !modules.includes(target) && target !== file),
     packages: packageNames(specifiers),
     computed: computedLoads(file, code),
+    assembled: assembledScriptPaths(file, code),
   };
 }
 
-// Everything the seeded files load, and which requirement (a lane, or
-// `evm:<scope>`) reaches each file through which file. `seeds` maps a file to
-// a Map from requirement to where it comes from, the same shape as the result.
-// A module load carries its importer's requirements on to what it imports; a
-// path read or run is required but not followed; a package-name import
+// What a shell script runs or sources, read from its code without `#`
+// comments: repository scripts by repo path, behind any directory variable
+// ("$repo_root/scripts/devnet.sh"), and siblings by name after a directory
+// ("$SCRIPT_DIR/devnet-lib.sh"). A script path it builds from a value
+// ("$SCRIPT_DIR/${helper}.sh", scripts/$name) is `assembled`.
+const SHELL_SIBLING = /(?<=\/)[\w.-]+\.(?:sh|bash|py|[cm]?[jt]s)\b/g;
+const assemblesScriptPath = (word) => word.includes('$')
+  && (/(?:^|\/)scripts\/[^$]*\$/.test(word) || /(?:^|\/)[^/]*\$[^/]*\.(?:sh|bash|py|[cm]?[jt]s)$/.test(word));
+export function shellReferences(file, source) {
+  const code = source.split('\n').map((line) => line.replace(/(^|\s)#.*$/, '$1')).join('\n');
+  const siblings = [...code.matchAll(SHELL_SIBLING)].map(([name]) => path.posix.join(path.posix.dirname(file), name));
+  const words = code.replace(/\\\n/g, ' ').split(/[\s;|&()<>]+/).map((word) => word.replace(/["']/g, ''));
+  return {
+    modules: [],
+    paths: [...new Set([...repoScriptMentions(code), ...siblings]
+      .map((candidate) => readTarget(candidate, false))
+      .filter((target) => target && target !== file))],
+    packages: [],
+    computed: [],
+    assembled: [...new Set(words.filter(assemblesScriptPath))],
+  };
+}
+
+// The formats the guard reads, by extension; an extensionless file is shell
+// when its shebang runs a shell. Anything else (JSON, YAML, Python, TOML,
+// documents, other extensionless files) names nothing the guard follows, so
+// a path mentioned in it is not a dependency.
+const FORMATS = [
+  { format: 'module', matches: (file) => /\.[cm]?[jt]sx?$/.test(file), references: loadReferences },
+  {
+    format: 'shell',
+    matches: (file, source) => /\.(?:sh|bash)$/.test(file)
+      || (!path.posix.basename(file).includes('.') && /^#!\s*\/\S*\/(?:env\s+)?(?:ba|da|z)?sh\b/.test(source)),
+    references: shellReferences,
+  },
+];
+const NO_DEPENDENCIES = Object.freeze({ modules: [], paths: [], packages: [], computed: [], assembled: [] });
+
+// What `file` (repo-relative, `source` its contents) loads, reads or runs,
+// from the handler for its format, with that format's name (undefined for
+// a format the guard does not read).
+export function dependenciesOf(file, source) {
+  const handler = FORMATS.find(({ matches }) => matches(file, source));
+  return handler ? { format: handler.format, ...handler.references(file, source) } : { format: undefined, ...NO_DEPENDENCIES };
+}
+
+// Everything the seeded files load, and which requirement (a lane, an
+// `evm:<scope>`, or `full`) reaches each file through which file. `seeds`
+// maps a file to a Map from requirement to where it comes from, the same
+// shape as the result. Each file is read through dependenciesOf. A module
+// load carries its importer's requirements on to what it imports; a path read
+// or run is required, and followed only when it is a shell script (a lane
+// that names a module by path may only read it); a package-name import
 // requires the imported workspace and its dependencies, recorded against the
 // workspace's src/index.ts since any path in a workspace routes by its rule.
 // `read(file)` returns a file's source, or undefined when it has none.
 // Returns { loaded, unfollowed }: `unfollowed` maps each traced file to the
-// module loads it computes at run time, which the trace cannot follow.
+// module loads it computes and the script paths it assembles at run time,
+// which the trace cannot follow.
 export function traceLaneLoads(seeds, { read = readRepoFile } = {}) {
   const { workspaceByName } = readWorkspaces();
   const closures = new Map();
@@ -279,43 +387,26 @@ export function traceLaneLoads(seeds, { read = readRepoFile } = {}) {
   const readPaths = new Map();
   const workspacesLoaded = new Map();
   const unfollowed = new Map();
-  const queue = [...loaded.keys()];
+  const queue = [...loaded.keys()].map((file) => [file, loaded]);
   while (queue.length) {
-    const file = queue.shift();
-    const source = /\.[cm]?[jt]sx?$/.test(file) ? read(file) : undefined;
+    const [file, reachedBy] = queue.shift();
+    const source = read(file);
     if (source === undefined) continue;
-    const requirements = [...loaded.get(file).keys()];
-    const { modules, paths, packages, computed } = loadReferences(file, source);
-    if (computed.length) unfollowed.set(file, computed);
+    const { format, modules, paths, packages, computed, assembled } = dependenciesOf(file, source);
+    if (reachedBy === readPaths && format !== 'shell') continue;
+    const requirements = [...reachedBy.get(file).keys()];
+    if (computed.length || assembled.length) unfollowed.set(file, [...computed, ...assembled]);
     for (const target of modules) {
-      if (add(loaded, target, requirements, file)) queue.push(target);
+      if (add(loaded, target, requirements, file)) queue.push([target, loaded]);
     }
-    for (const target of paths) add(readPaths, target, requirements, file);
+    for (const target of paths) {
+      if (add(readPaths, target, requirements, file)) queue.push([target, readPaths]);
+    }
     for (const name of packages) {
       if (!workspaceByName.has(name)) continue;
       for (const workspace of closureOf(workspaceByName.get(name))) {
         add(workspacesLoaded, workspace, requirements, `${file} (imports ${name})`);
       }
-    }
-  }
-  // A shell script or other text file a lane reads or runs can run more
-  // repository scripts (a fixture that sources scripts/devnet.sh, a script
-  // that sources a sibling by name); those are read by the same lanes.
-  const scan = [...readPaths.keys()];
-  while (scan.length) {
-    const file = scan.shift();
-    if (!SCANNED_TEXT(file)) continue;
-    const raw = read(file);
-    if (raw === undefined) continue;
-    const text = HASH_COMMENTED.test(file) ? withoutHashComments(raw) : raw;
-    // A shell script runs a sibling by path ("$SCRIPT_DIR/x.mjs"), not by a
-    // bare name in prose.
-    const siblings = /\.(?:sh|bash)$/.test(file)
-      ? [...text.matchAll(/(?<=\/)[\w.-]+\.(?:sh|bash|py|[cm]?[jt]s)\b/g)].map(([name]) => path.posix.join(path.posix.dirname(file), name))
-      : [];
-    const requirements = [...readPaths.get(file).keys()];
-    for (const target of [...repoScriptMentions(text), ...siblings].map((candidate) => readTarget(candidate, false)).filter(Boolean)) {
-      if (target !== file && add(readPaths, target, requirements, file)) scan.push(target);
     }
   }
   for (const [key, needs] of [
