@@ -8,18 +8,14 @@ export interface ScopedContentGraphDiscoveryMemoOptions {
   maxEntries?: number;
 }
 
-export interface ScopedContentGraphDiscoveryRequest {
+export interface ScopedContentGraphDiscoveryRequest<
+  Value extends readonly unknown[] = readonly string[],
+> {
   contentKey: string;
   laneKey: string;
   graphPrefix: string;
   signal?: AbortSignal;
-  /**
-   * Set false when load captures request-local mutable state such as a byte
-   * budget. Completed revision-gated values remain reusable, but the loader is
-   * never shared with another caller.
-   */
-  coalesceInFlight?: boolean;
-  load: () => Promise<readonly string[]>;
+  load: () => Promise<Value>;
 }
 
 /**
@@ -28,9 +24,11 @@ export interface ScopedContentGraphDiscoveryRequest {
  * explicitly observes every writer that can mutate the live store. A local
  * generation cannot authorize reuse for an externally mutable SPARQL backend.
  */
-export class ScopedContentGraphDiscoveryMemo {
-  private readonly completed: BoundedLruCache<string, readonly string[]>;
-  private readonly inFlight = new Map<string, Promise<readonly string[]>>();
+export class ScopedContentGraphDiscoveryMemo<
+  Value extends readonly unknown[] = readonly string[],
+> {
+  private readonly completed: BoundedLruCache<string, Value>;
+  private readonly inFlight = new Map<string, Promise<Value>>();
 
   constructor(
     private readonly revisionSource: GraphWriteRevisionSource | null,
@@ -39,7 +37,7 @@ export class ScopedContentGraphDiscoveryMemo {
     this.completed = new BoundedLruCache(options.maxEntries ?? DEFAULT_MAX_ENTRIES);
   }
 
-  get(request: ScopedContentGraphDiscoveryRequest): Promise<readonly string[]> {
+  get(request: ScopedContentGraphDiscoveryRequest<Value>): Promise<Value> {
     if (request.signal?.aborted) return Promise.reject(callerAbortReason(request.signal));
     if (this.revisionSource?.writeRevisionCoverage !== 'all-writers') {
       return raceAgainstCallerAbort(request.load(), request.signal);
@@ -57,23 +55,18 @@ export class ScopedContentGraphDiscoveryMemo {
       request.laneKey,
       before.generation,
     ]);
-    if (request.coalesceInFlight !== false) {
-      const pending = this.inFlight.get(flightKey);
-      if (pending) return raceAgainstCallerAbort(pending, request.signal);
-    }
+    const pending = this.inFlight.get(flightKey);
+    if (pending) return raceAgainstCallerAbort(pending, request.signal);
 
     const promise = request.load().then((value) => {
       const after = this.revisionSource!.getWriteRevision(request.graphPrefix);
       if (after.stable && after.generation === before.generation) {
-        const immutable = Object.freeze([...value]);
+        const immutable = Object.freeze([...value]) as unknown as Value;
         this.completed.set(completedKey, immutable);
         return immutable;
       }
       return value;
     });
-    if (request.coalesceInFlight === false) {
-      return raceAgainstCallerAbort(promise, request.signal);
-    }
     this.inFlight.set(flightKey, promise);
     void promise.finally(() => {
       if (this.inFlight.get(flightKey) === promise) this.inFlight.delete(flightKey);

@@ -411,8 +411,28 @@ interface ContextGraphReadAuthorityPlan {
   hasAcceptedRfc64PublicPolicy?: boolean;
 }
 
-/** Query-engine options plus authorization and tracing owned by the agent boundary. */
-export interface AgentQueryOptions extends EngineQueryOptions {
+type AgentForwardedQueryOptions = Pick<EngineQueryOptions,
+  | 'contextGraphId'
+  | 'graphSuffix'
+  | 'includeSharedMemory'
+  | 'includeWorkspace'
+  | 'includeContextGraphPartitions'
+  | 'includePrivate'
+  | 'signal'
+  | 'priority'
+  | 'source'
+  | 'maxResponseBytes'
+  | 'view'
+  | 'agentAddress'
+  | 'verifiedGraph'
+  | 'assertionName'
+  | 'subGraphName'
+  | 'minTrust'
+  | '_minTrust'
+>;
+
+/** Deliberate agent-owned query surface plus authorization and tracing. */
+export interface AgentQueryOptions extends AgentForwardedQueryOptions {
   operationCtx?: OperationContext;
   /** Authenticated caller identity used to enforce working-memory isolation. */
   callerAgentAddress?: string;
@@ -639,6 +659,10 @@ export class QueryMethods extends DKGAgentBase {
       priority: opts.priority,
       source: opts.source,
       maxResponseBytes: opts.maxResponseBytes,
+      // The public API uses one response ceiling. At the engine boundary it
+      // becomes two explicit policies: per-store-response transport limiting
+      // and cumulative decoded materialization limiting.
+      maxMaterializedBytes: opts.maxResponseBytes,
       view: opts.view,
       agentAddress: effectiveWmAddress,
       agentAddressAliases: wmAddressAliases,

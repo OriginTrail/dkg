@@ -11,6 +11,12 @@ export interface QueryResult {
 }
 
 export interface QueryOptions extends StoreQueryOptions {
+  /**
+   * Query-wide ceiling for the cumulative decoded store results retained while
+   * evaluating one logical query. Unlike the transport-level
+   * `maxResponseBytes`, this limit is charged across every internal read.
+   */
+  maxMaterializedBytes?: number;
   contextGraphId?: string;
   timeout?: number;
   /** When set to '_shared_memory', query runs over the context graph's shared memory graph only. */

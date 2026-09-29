@@ -191,8 +191,10 @@ describe('DKGQueryEngine', () => {
   });
 
   it('charges structural JSON bytes for empty bindings', async () => {
+    let seenOptions: StoreQueryOptions | undefined;
     const structuralStore = {
-      async query() {
+      async query(_sparql: string, options?: StoreQueryOptions) {
+        seenOptions = options;
         return {
           type: 'bindings' as const,
           bindings: Array.from({ length: 128 }, () => ({})),
@@ -203,12 +205,13 @@ describe('DKGQueryEngine', () => {
 
     await expect(structuralEngine.query(
       'SELECT ?unbound WHERE { ?s ?p ?o }',
-      { maxResponseBytes: 100 },
+      { maxResponseBytes: 1_000, maxMaterializedBytes: 100 },
     )).rejects.toMatchObject({
       code: 'STORE_RESPONSE_TOO_LARGE',
       maxBytes: 100,
       actualBytes: expect.any(Number),
     });
+    expect(seenOptions?.maxResponseBytes).toBe(1_000);
   });
 
   it('keeps caller cancellation out of shared graph-discovery flights', async () => {
@@ -280,11 +283,11 @@ describe('DKGQueryEngine', () => {
     expect(secondController.signal.aborted).toBe(false);
   });
 
-  it('isolates bounded discovery flights but reuses their completed result', async () => {
+  it('coalesces bounded discovery while accounting independently per request', async () => {
     let releaseDiscovery!: () => void;
     const discoveryGate = new Promise<void>((resolve) => { releaseDiscovery = resolve; });
-    let bothStarted!: () => void;
-    const started = new Promise<void>((resolve) => { bothStarted = resolve; });
+    let discoveryStarted!: () => void;
+    const started = new Promise<void>((resolve) => { discoveryStarted = resolve; });
 
     class BoundedFlightStore extends OxigraphStore {
       sharedOptions: StoreQueryOptions[] = [];
@@ -292,8 +295,12 @@ describe('DKGQueryEngine', () => {
       async query(sparql: string, options?: StoreQueryOptions) {
         if (sparql.includes('ontology/SubGraph')) {
           this.sharedOptions.push(options ?? {});
-          if (this.sharedOptions.length === 2) bothStarted();
+          discoveryStarted();
           await discoveryGate;
+          return {
+            type: 'bindings' as const,
+            bindings: Array.from({ length: 64 }, () => ({})),
+          };
         }
         return super.query(sparql, options);
       }
@@ -302,7 +309,7 @@ describe('DKGQueryEngine', () => {
     const boundedStore = new BoundedFlightStore();
     const boundedEngine = new DKGQueryEngine(boundedStore);
     await boundedStore.insert([q('urn:bounded:s', 'http://schema.org/name', '"Bounded"', GRAPH)]);
-    const options = {
+    const commonOptions = {
       contextGraphId: CONTEXT_GRAPH,
       includeContextGraphPartitions: true,
       priority: 'background' as const,
@@ -312,19 +319,32 @@ describe('DKGQueryEngine', () => {
     const sparql =
       'SELECT ?sourceGraph ?name WHERE { GRAPH ?sourceGraph { ?s <http://schema.org/name> ?name } }';
 
-    const first = boundedEngine.query(sparql, options);
-    const second = boundedEngine.query(sparql, options);
+    const first = boundedEngine.query(sparql, {
+      ...commonOptions,
+      maxMaterializedBytes: 100,
+    });
     await started;
+    const second = boundedEngine.query(sparql, {
+      ...commonOptions,
+      maxMaterializedBytes: 10 * 1024 * 1024,
+    });
     releaseDiscovery();
-    await Promise.all([first, second]);
-    expect(boundedStore.sharedOptions).toHaveLength(2);
+    await expect(first).rejects.toMatchObject({
+      code: 'STORE_RESPONSE_TOO_LARGE',
+      maxBytes: 100,
+    });
+    await expect(second).resolves.toMatchObject({ bindings: expect.any(Array) });
+    expect(boundedStore.sharedOptions).toHaveLength(1);
     for (const seen of boundedStore.sharedOptions) {
       expect(seen).toMatchObject({ maxResponseBytes: 10 * 1024 * 1024 });
       expect(seen.signal).toBeUndefined();
     }
 
-    await boundedEngine.query(sparql, options);
-    expect(boundedStore.sharedOptions).toHaveLength(2);
+    await boundedEngine.query(sparql, {
+      ...commonOptions,
+      maxMaterializedBytes: 10 * 1024 * 1024,
+    });
+    expect(boundedStore.sharedOptions).toHaveLength(1);
   });
 
   it('keeps caller cancellation out of GraphSetIndexStore refresh flights', async () => {
@@ -961,7 +981,7 @@ describe('DKGQueryEngine', () => {
       await expect(engine.query(query, {
         contextGraphId: CONTEXT_GRAPH,
         view: 'verifiable-memory',
-        maxResponseBytes: 180,
+        maxMaterializedBytes: 180,
       })).rejects.toMatchObject({
         code: 'STORE_RESPONSE_TOO_LARGE',
         maxBytes: 180,
@@ -969,7 +989,7 @@ describe('DKGQueryEngine', () => {
       await expect(engine.query(query, {
         contextGraphId: CONTEXT_GRAPH,
         view: 'verifiable-memory',
-        maxResponseBytes: 1_000,
+        maxMaterializedBytes: 1_000,
       })).resolves.toMatchObject({ quads: expect.any(Array) });
     });
 
@@ -1009,16 +1029,35 @@ describe('DKGQueryEngine', () => {
         { ?s <http://ex.org/p1> ?v } UNION { ?s <http://ex.org/p2> ?v }
       }`;
 
-      // Each graph's decoded row is below 30 bytes by itself, but retaining
-      // both rows for the merged response crosses the request-wide ceiling.
-      await expect(engine.query(query, {
+      const originalQuery = store.query.bind(store);
+      let responseSizes: number[] = [];
+      store.query = async (...args) => {
+        const result = await originalQuery(...args);
+        responseSizes.push(Buffer.byteLength(JSON.stringify(result), 'utf8'));
+        return result;
+      };
+
+      // Measure this deterministic fixture first, then select a limit that is
+      // at least every individual response but below their cumulative total.
+      await new DKGQueryEngine(store).query(query, {
         contextGraphId: CONTEXT_GRAPH,
         view: 'verifiable-memory',
-        maxResponseBytes: 30,
+      });
+      expect(responseSizes.length).toBeGreaterThan(1);
+      const ceiling = Math.max(...responseSizes);
+      expect(responseSizes.reduce((sum, size) => sum + size, 0)).toBeGreaterThan(ceiling);
+
+      responseSizes = [];
+      await expect(new DKGQueryEngine(store).query(query, {
+        contextGraphId: CONTEXT_GRAPH,
+        view: 'verifiable-memory',
+        maxMaterializedBytes: ceiling,
       })).rejects.toMatchObject({
         code: 'STORE_RESPONSE_TOO_LARGE',
-        maxBytes: 30,
+        maxBytes: ceiling,
+        actualBytes: expect.any(Number),
       });
+      expect(responseSizes.length).toBeGreaterThan(1);
     });
 
     it('SELECT with a solution-set modifier (ORDER BY) is rejected, not silently corrupted', async () => {

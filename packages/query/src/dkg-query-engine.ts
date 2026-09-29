@@ -120,7 +120,10 @@ class QueryMaterializationBudget {
   constructor(readonly maxBytes: number) {}
 
   consume(result: StoreQueryResult): void {
-    const responseBytes = estimateStoreResultBytes(result);
+    this.consumeBytes(estimateStoreResultBytes(result));
+  }
+
+  consumeBytes(responseBytes: number): void {
     const nextUsed = this.usedBytes + responseBytes;
     if (nextUsed > this.maxBytes) {
       throw new StoreResponseTooLargeError(this.maxBytes, nextUsed);
@@ -145,21 +148,27 @@ interface StoreReadLane {
 
 interface QueryStoreReadContext extends StoreReadLane {
   readonly signal: AbortSignal | undefined;
+  readonly materializationBudget: QueryMaterializationBudget | undefined;
   readonly shared: StoreReadLane & {
+    readonly options: StoreQueryOptions | undefined;
     readonly cacheKey: string;
-    readonly coalesceInFlight: boolean;
   };
 }
+
+type ScopedContentGraphDiscoveryValue = readonly [
+  graphs: readonly string[],
+  materializedBytes: number,
+];
 
 function createStoreReadLane(
   store: TripleStore,
   options: StoreQueryOptions | undefined,
-  budget: QueryMaterializationBudget | undefined,
+  meter: Pick<QueryMaterializationBudget, 'consume'> | undefined,
 ): StoreReadLane {
   return {
     query: async (sparql) => {
       const result = await store.query(sparql, options);
-      budget?.consume(result);
+      meter?.consume(result);
       return result;
     },
     listGraphsByPrefix: (prefix) => listGraphsByPrefix(store, prefix, options),
@@ -172,25 +181,23 @@ function createQueryStoreReadContext(
   queryOptions: QueryOptions | undefined,
 ): QueryStoreReadContext {
   const options = storeOptions(queryOptions);
-  const budget = options?.maxResponseBytes === undefined
+  const budget = queryOptions?.maxMaterializedBytes === undefined
     ? undefined
-    : new QueryMaterializationBudget(options.maxResponseBytes);
+    : new QueryMaterializationBudget(queryOptions.maxMaterializedBytes);
   const lane = createStoreReadLane(store, options, budget);
   const sharedOptions = sharedDiscoveryStoreOptions(options);
   return {
     ...lane,
     signal: options?.signal,
+    materializationBudget: budget,
     shared: {
-      ...createStoreReadLane(store, sharedOptions, budget),
+      ...createStoreReadLane(store, sharedOptions, undefined),
+      options: sharedOptions,
       cacheKey: JSON.stringify([
         sharedOptions?.priority ?? 'normal',
         sharedOptions?.source ?? null,
         sharedOptions?.maxResponseBytes ?? null,
       ]),
-      // The loader captures this request's cumulative budget. State that
-      // ownership explicitly instead of disguising request identity as a
-      // semantic cache-key dimension. Completed memo entries remain reusable.
-      coalesceInFlight: budget === undefined,
     },
   };
 }
@@ -419,12 +426,15 @@ export function resolveViewGraphs(
 export class DKGQueryEngine implements GraphAwareQueryEngine {
   private readonly store: TripleStore;
   private readonly graphManager: GraphManager;
-  private readonly scopedContentGraphDiscoveryMemo: ScopedContentGraphDiscoveryMemo;
+  private readonly scopedContentGraphDiscoveryMemo:
+    ScopedContentGraphDiscoveryMemo<ScopedContentGraphDiscoveryValue>;
 
   constructor(store: TripleStore) {
     this.store = store;
     this.graphManager = new GraphManager(store);
-    this.scopedContentGraphDiscoveryMemo = new ScopedContentGraphDiscoveryMemo(
+    this.scopedContentGraphDiscoveryMemo = new ScopedContentGraphDiscoveryMemo<
+      ScopedContentGraphDiscoveryValue
+    >(
       asGraphWriteRevisionSource(store),
     );
   }
@@ -1155,18 +1165,34 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   ): Promise<readonly string[]> {
     const contentKey = JSON.stringify([contextGraphId, subGraphName ?? null]);
     const graphPrefix = `did:dkg:context-graph:${contextGraphId}`;
-    return this.scopedContentGraphDiscoveryMemo.get({
+    const [graphs, materializedBytes] = await this.scopedContentGraphDiscoveryMemo.get({
       contentKey,
       laneKey: reads.shared.cacheKey,
       graphPrefix,
       signal: reads.signal,
-      coalesceInFlight: reads.shared.coalesceInFlight,
-      load: () => this.discoverScopedContentGraphAllowList(
-        contextGraphId,
-        reads.shared,
-        subGraphName,
-      ),
+      load: async () => {
+        let materializedBytes = 0;
+        const discoveryReads = createStoreReadLane(
+          this.store,
+          reads.shared.options,
+          {
+            consume(result) {
+              materializedBytes += estimateStoreResultBytes(result);
+            },
+          },
+        );
+        const discovered = await this.discoverScopedContentGraphAllowList(
+          contextGraphId,
+          discoveryReads,
+          subGraphName,
+        );
+        return [Object.freeze(discovered), materializedBytes] as const;
+      },
     });
+    // Shared discovery work is coalesced, but every logical query debits the
+    // reported materialization cost against its own request-local budget.
+    reads.materializationBudget?.consumeBytes(materializedBytes);
+    return graphs;
   }
 
   private async discoverScopedContentGraphAllowList(

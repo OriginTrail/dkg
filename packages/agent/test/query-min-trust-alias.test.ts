@@ -80,6 +80,7 @@ describe('DKGAgent.query forwards `_minTrust` alias (PR #239 iter-6)', () => {
       priority: 'background',
       source: 'api.query',
       maxResponseBytes: 10 * 1024 * 1024,
+      maxMaterializedBytes: 10 * 1024 * 1024,
     });
   });
 
