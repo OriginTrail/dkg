@@ -265,7 +265,7 @@ log "Polling curator log for member's auth-allowed line..."
 AUTH_ALLOWED=0
 for _ in $(seq 1 30); do
   CURATOR_NEW=$(tail -n "+$((CURATOR_LOG_BASE + 1))" "$(node_log "$CURATOR_NODE")")
-  if printf '%s' "$CURATOR_NEW" | grep -qE "Private sync auth.*signer=${MEMBER_AGENT}.*allowed=true"; then
+  if grep -qE "Private sync auth.*signer=${MEMBER_AGENT}.*allowed=true" <<<"$CURATOR_NEW"; then
     AUTH_ALLOWED=1
     break
   fi
@@ -304,7 +304,7 @@ log "Polling curator log for denial line..."
 DENIAL_FOUND=0
 for _ in $(seq 1 45); do
   CURATOR_NEW2=$(tail -n "+$((CURATOR_LOG_BASE2 + 1))" "$(node_log "$CURATOR_NODE")")
-  if printf '%s' "$CURATOR_NEW2" | grep -qE "(Denied sync request for \"$CG_ID\"|Private sync auth for \"$CG_ID\".*signer=$OUTSIDER_AGENT.*allowed=false)"; then
+  if grep -qE "(Denied sync request for \"$CG_ID\"|Private sync auth for \"$CG_ID\".*signer=$OUTSIDER_AGENT.*allowed=false)" <<<"$CURATOR_NEW2"; then
     DENIAL_FOUND=1
     break
   fi

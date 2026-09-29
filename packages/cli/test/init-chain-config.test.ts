@@ -61,6 +61,13 @@ describe('init chain overrides (#1307)', () => {
       { isNetworkSwitch: true },
     )).toEqual({ type: 'evm', indexTickMs: 12_345 });
   });
+  it('preserves an explicit bounded authority read choice across network switches', () => {
+    const prior = { ...defaults, boundedAuthorityReads: true };
+    expect(buildInitChainOverrides(answers, defaults, prior, sameNetwork))
+      .toEqual({ type: 'evm', boundedAuthorityReads: true });
+    expect(buildInitChainOverrides(answers, defaults, prior, { isNetworkSwitch: true }))
+      .toEqual({ type: 'evm', boundedAuthorityReads: true });
+  });
   it('writes full answers when no network defaults exist', () => {
     expect(buildInitChainOverrides(answers, undefined, undefined, sameNetwork)).toEqual(defaults);
   });

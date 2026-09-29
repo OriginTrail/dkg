@@ -1,4 +1,5 @@
 import type { DiscoveryClient } from '../discovery.js';
+import { orderCoresFirst } from './peer-selection.js';
 import {
   connectLibp2pCandidate,
   type Libp2pConnectCandidate,
@@ -59,22 +60,40 @@ export async function ensurePeerConnected(
   }
 }
 
+export interface PrimeCatchupConnectionsOptions {
+  /**
+   * New dials one walk may attempt. Omitted keeps the unbounded walk over the
+   * whole phonebook. When set, core-role profiles come first (`orderCoresFirst`),
+   * each group in discovery order; peers that are connected, are this node, or
+   * advertise no relay do not count.
+   */
+  readonly maxDials?: number;
+}
+
 export async function primeCatchupConnections(
   libp2p: Libp2pLike,
   discovery: DiscoveryClient,
   selfPeerId: string,
   afterDialAdmissionProbe: (peerId: string) => void | Promise<void> = () => undefined,
+  options: PrimeCatchupConnectionsOptions = {},
 ): Promise<void> {
   try {
-    const agents = await discovery.findAgents();
+    const discovered = await discovery.findAgents();
+    const maxDials = options.maxDials;
+    const agents = maxDials === undefined
+      ? discovered
+      : orderCoresFirst(discovered, (agent) => agent.nodeRole === 'core');
     const { peerIdFromString } = await import('@libp2p/peer-id');
     const { multiaddr } = await import('@multiformats/multiaddr');
+    let dials = 0;
     for (const agent of agents) {
+      if (maxDials !== undefined && dials >= maxDials) break;
       if (agent.peerId === selfPeerId) continue;
       const existingConns = libp2p.getConnections()
         .filter((conn) => conn.remotePeer.toString() === agent.peerId);
       if (existingConns.length > 0) continue;
       if (!agent.relayAddress) continue;
+      dials += 1;
 
       try {
         const circuitAddr = multiaddr(`${agent.relayAddress}/p2p-circuit/p2p/${agent.peerId}`);

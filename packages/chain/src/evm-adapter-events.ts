@@ -18,7 +18,7 @@ import { resolveCapMs } from './rpc-failover-client.js';
 import { withRpcRequestTimeout } from './rpc-request-transport.js';
 
 /** One stored row, presented to the SAME parse the live branch uses. */
-type ParsedLogLike = { topics: readonly string[]; data: string; blockNumber: number; transactionHash: string };
+type ParsedLogLike = { topics: readonly string[]; data: string; blockNumber: number; blockHash: string; transactionHash: string; logIndex: number };
 
 export class EventsMethods extends EVMChainAdapterBase {
   /**
@@ -246,6 +246,54 @@ export class EventsMethods extends EVMChainAdapterBase {
                 },
               };
             }
+          }
+        }
+      }
+
+      // An update gives an existing KA (same id) a new latest root. Consumers
+      // use it as a refresh nudge for a copy they already hold and re-read the
+      // current root from chain before acting, so, as with the registration
+      // lane above, the `txIndex` a stored row cannot carry costs nothing.
+      // `batchId` repeats the id for the poller's collection-update callback:
+      // a V10 KA is its own batch.
+      if (eventType === 'KnowledgeAssetUpdated') {
+        const kaStorage = this.contracts.knowledgeAssetStorage;
+        // The legacy asset-storage ABI has no such event; nothing to scan.
+        if (kaStorage && kaStorage.interface.getEvent('KnowledgeAssetUpdated') !== null) {
+          const logged = await this.chainEventLogRows(
+            'knowledge-asset',
+            'knowledgeAssetStorageAddress',
+            kaStorage,
+            'KnowledgeAssetUpdated',
+            filter,
+          );
+          const logs = logged ?? await this.queryFilterWithFailover(
+            kaStorage, 'kas.queryFilter(KnowledgeAssetUpdated)',
+            kaStorage.filters.KnowledgeAssetUpdated(),
+            filter.fromBlock ?? 0, filter.toBlock,
+          );
+
+          for (const log of logs) {
+            const parsed = kaStorage.interface.parseLog({ topics: [...log.topics], data: log.data });
+            if (!parsed) continue;
+            const kaId = parsed.args.id.toString();
+            const txIndex = (log as { transactionIndex?: number }).transactionIndex;
+            const logIndex = 'logIndex' in log ? log.logIndex : (log as ethers.Log).index;
+            const blockHash = log.blockHash;
+            yield {
+              type: 'KnowledgeAssetUpdated',
+              blockNumber: log.blockNumber,
+              data: {
+                kaId,
+                batchId: kaId,
+                merkleRoot: parsed.args.merkleRoot,
+                author: typeof parsed.args.author === 'string' ? parsed.args.author : '',
+                txHash: log.transactionHash,
+                txIndex,
+                ...(typeof logIndex === 'number' ? { logIndex } : {}),
+                ...(typeof blockHash === 'string' ? { blockHash } : {}),
+              },
+            };
           }
         }
       }

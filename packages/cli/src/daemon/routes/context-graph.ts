@@ -2025,6 +2025,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           : 'This node has no agent authorized to read this project. Ask the curator to invite an agent first.',
       });
     }
+    const registeredPublicProofFor = (verifiedContextGraphId: string) => readAuthority.source === 'registered-chain'
+      && readAuthority.reason === 'chain-public'
+      && readAuthority.onChainId !== undefined
+      ? { contextGraphId: verifiedContextGraphId, onChainId: readAuthority.onChainId.toString(10) }
+      : undefined;
 
     // A graph known only by its on-chain name hash syncs nothing under that
     // id: every holder keys it by the cleartext id. Give connected peers a
@@ -2037,6 +2042,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }).catch(() => null);
       if (resolved) contextGraphId = resolved;
     }
+    const registeredPublicProof = registeredPublicProofFor(contextGraphId);
     // Two notes answer two questions about the requested id: which graph an
     // on-chain id named (`onChainReference`), and whether that graph's name
     // is known yet (`identity`, the #2744 contract that catch-up status and
@@ -2247,6 +2253,19 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${jobContextGraphId} started`);
       try {
         let targetContextGraphId = jobContextGraphId;
+        // The first subscribe may activate the catalog receiver before its
+        // finalized public policy is accepted. That transition's one-shot
+        // metadata pull then declines, while subsequent catch-up retries skip
+        // legacy durable sync and cannot acquire the graph declaration.
+        // Retry the policy-gated public metadata pull for every explicit
+        // catch-up; it is a cheap no-op once the declaration is confirmed.
+        if (typeof agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1 === 'function') {
+          await agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(
+            targetContextGraphId,
+            undefined,
+            registeredPublicProof,
+          ).catch(() => undefined);
+        }
         let result = await daemonState.catchupRunner!.run({
           contextGraphId: targetContextGraphId,
           includeSharedMemory: shouldSyncSharedMemory,
@@ -2259,6 +2278,13 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           targetContextGraphId = resolvedContextGraphId;
           job.resolvedContextGraphId = resolvedContextGraphId;
           catchupTracker.latestByContextGraph.set(resolvedContextGraphId, jobId);
+          if (typeof agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1 === 'function') {
+            await agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(
+              targetContextGraphId,
+              undefined,
+              registeredPublicProofFor(targetContextGraphId),
+            ).catch(() => undefined);
+          }
           result = await daemonState.catchupRunner!.run({
             contextGraphId: targetContextGraphId,
             includeSharedMemory: shouldSyncSharedMemory,

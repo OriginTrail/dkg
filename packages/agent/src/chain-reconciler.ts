@@ -293,6 +293,25 @@ function planOrdinalPass(
 }
 
 /**
+ * Keep the verified completions of a pass that is about to reject. They wait
+ * in `ahead` like any out-of-order completion, and the next pass absorbs them
+ * through the usual contiguity and confirmation-depth gate. Without this, one
+ * ordinal that keeps throwing re-reads its settled siblings on every pass.
+ */
+function holdCompletedOrdinals(
+  state: CursorState,
+  ordinals: readonly number[],
+  outcomes: ReadonlyMap<number, OrdinalOutcome>,
+): void {
+  for (const ordinal of ordinals) {
+    const outcome = outcomes.get(ordinal);
+    if (outcome?.status !== 'reconciled' && outcome?.status !== 'already') continue;
+    if (ordinal < state.watermark || state.ahead.has(ordinal)) continue;
+    state.ahead.set(ordinal, outcome.blockNumber);
+  }
+}
+
+/**
  * One bounded sweep slice for a single CG: reconcile up to
  * `maxOrdinalsPerPass` ordinals in `[watermark, head)` (skipping ones already
  * completed and held in the cursor), then advance the contiguous,
@@ -385,6 +404,20 @@ export async function reconcileContextGraph(
     let nextOrdinalIndex = 0;
     let workerFailed = false;
     let workerError: unknown;
+    // Dispatch walks `ordinals` in ascending order, so every ordinal of this
+    // pass up to the highest one dispatched has an outcome or has thrown.
+    let highestDispatched: number | undefined;
+    // A rejected pass keeps what it proved: its completions wait in `ahead`,
+    // and the scan resumes past what it dispatched, so the ordinals that threw
+    // or stayed pending are retried with the next cycle like any other gap.
+    const keepRejectedPassProgress = (): void => {
+      holdCompletedOrdinals(state, ordinals, outcomes);
+      if (highestDispatched === undefined) return;
+      state.scanOrdinal = Math.max(
+        state.watermark,
+        Math.min(highestDispatched + 1, passPlan.historicalContinuationOrdinal),
+      );
+    };
 
     const runOrdinalWorker = async (): Promise<void> => {
       // Contain failures instead of racing them: a thrown ordinal must not
@@ -403,6 +436,7 @@ export async function reconcileContextGraph(
             return;
           }
           const ordinal = ordinals[index]!;
+          highestDispatched = Math.max(highestDispatched ?? ordinal, ordinal);
           const outcome = await deps.reconcileOrdinal(
             localCgId,
             onChainCgId,
@@ -427,7 +461,10 @@ export async function reconcileContextGraph(
 
     const workerCount = Math.min(ordinalConcurrency, ordinals.length);
     await Promise.all(Array.from({ length: workerCount }, () => runOrdinalWorker()));
-    if (workerFailed) throw workerError;
+    if (workerFailed) {
+      if (!staleTarget) keepRejectedPassProgress();
+      throw workerError;
+    }
 
     const recoveryTargets = ordinals
       .map((ordinal) => outcomes.get(ordinal))
@@ -442,12 +479,21 @@ export async function reconcileContextGraph(
       // ordinal order, so this changes latency rather than correctness.
       .sort(passPlan.compareRecoveryTargets);
     if (!staleTarget && recoveryTargets.length > 0 && deps.recoverPendingOrdinals) {
-      const recoveryResult = await deps.recoverPendingOrdinals(
-        localCgId,
-        onChainCgId,
-        recoveryTargets,
-        headBlock,
-      );
+      let recoveryResult: PendingOrdinalRecoveryResult;
+      try {
+        recoveryResult = await deps.recoverPendingOrdinals(
+          localCgId,
+          onChainCgId,
+          recoveryTargets,
+          headBlock,
+        );
+      } catch (error) {
+        // Recovery is the longest await; keep progress only under the same binding.
+        const stillCurrent = !deps.isTargetCurrent
+          || await Promise.resolve(deps.isTargetCurrent(localCgId, onChainCgId)).catch(() => false);
+        if (stillCurrent) keepRejectedPassProgress();
+        throw error;
+      }
       // Recovery is the longest await in the pass; the binding can be repaired
       // while it runs. Outcomes recovered under the old binding must never
       // advance or persist cursor state for the rebound CG, so re-check before

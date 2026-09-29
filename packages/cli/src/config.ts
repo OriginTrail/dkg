@@ -251,6 +251,8 @@ export interface NetworkConfig {
     finalityConfirmations?: number;
     /** See `ChainConfig.indexTickMs`. */
     indexTickMs?: number;
+    /** See `ChainConfig.boundedAuthorityReads`. */
+    boundedAuthorityReads?: boolean;
     /** See `ChainConfig.authorityReadTimeoutMs`. */
     authorityReadTimeoutMs?: number;
     /** See `ChainConfig.authorityColdResolutionTimeoutMs`. */
@@ -446,6 +448,12 @@ export interface ChainConfig {
    * listener goes back to scanning the chain for itself.
    */
   indexTickMs?: number;
+  /**
+   * Permit bounded Context Graph authority reads at read-only gates when the
+   * local index has a provably fresh answer. Live mutation and key gates keep
+   * reading the chain. Defaults to false in the adapter.
+   */
+  boundedAuthorityReads?: boolean;
   /**
    * Request-scoped deadline (ms) for one on-chain Context Graph authority
    * read: liveness, access/publish policy, participant roster, or the
@@ -843,6 +851,13 @@ export interface DkgConfig {
    * remains available. Env DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT wins.
    */
   syncSystemContextGraphsOnConnect?: boolean;
+  /**
+   * Fetch the `agents` phonebook once, bounded and on demand, when a public
+   * wallet-scoped Context Graph needs its owner's profile to reach holders.
+   * Default true; inert when `agents` already syncs on every connect. Set
+   * false to disable. Env DKG_ON_DEMAND_AGENTS_PHONEBOOK wins.
+   */
+  onDemandAgentsPhonebook?: boolean;
   /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
   durableSyncEnabled?: boolean;
   /**
@@ -1913,6 +1928,17 @@ export function resolveChainConfig(
   const indexTickMs: unknown = operatorHasIndexTickMs ? cfg.indexTickMs : net?.indexTickMs;
   if (operatorHasIndexTickMs || indexTickMs !== undefined) {
     merged.indexTickMs = resolveContextGraphAuthorityIndexTickMs(indexTickMs);
+  }
+  const operatorHasBoundedAuthorityReads = cfg !== undefined && cfg !== null
+    && Object.prototype.hasOwnProperty.call(cfg, 'boundedAuthorityReads');
+  const boundedAuthorityReads: unknown = operatorHasBoundedAuthorityReads
+    ? cfg.boundedAuthorityReads
+    : net?.boundedAuthorityReads;
+  if (operatorHasBoundedAuthorityReads || boundedAuthorityReads !== undefined) {
+    if (typeof boundedAuthorityReads !== 'boolean') {
+      throw new TypeError('chain.boundedAuthorityReads must be a boolean');
+    }
+    merged.boundedAuthorityReads = boundedAuthorityReads;
   }
   // Presence matters for both authority deadlines: an explicit null/zero is an
   // operator error, not a request to fall back to the network or agent default.

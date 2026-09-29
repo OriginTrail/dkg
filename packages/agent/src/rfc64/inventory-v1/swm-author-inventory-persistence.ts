@@ -147,6 +147,20 @@ export class SwmAuthorInventoryPersistenceV1 {
     return this.readStored(key)?.snapshot ?? null;
   }
 
+  /** Local scheduling hint only; it does not authenticate or materialize rows. */
+  readHeadDigest(key: EncodedSwmAuthorInventoryKeyV1): Digest32V1 | null {
+    const query = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.getSwmAuthorHead);
+    const row = this.host.statement(() => query.get({
+      scope: key.scope, author: key.author,
+    }) as SqlRowV1 | undefined);
+    if (row === undefined) return null;
+    try {
+      return sqlBlobToDigest32V1(row.current_head_digest);
+    } catch (cause) {
+      throw this.host.error('swm-inventory-database-corrupt', 'stored SWM author head digest is invalid', { cause });
+    }
+  }
+
   private readStored(
     key: EncodedSwmAuthorInventoryKeyV1,
   ): StoredSwmAuthorInventoryCommitV1 | null {

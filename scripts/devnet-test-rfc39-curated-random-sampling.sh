@@ -134,7 +134,7 @@ WRITE_RESP=$(devnet_create_shared_ka "$EDGE_CURATOR_NODE" "$(cat <<EOF
 }
 EOF
 )")
-printf '%s' "$WRITE_RESP" | grep -qE '"triplesWritten":(1[0-9]|[2-9][0-9])' || warn "SWM write count low: $WRITE_RESP"
+grep -qE '"triplesWritten":(1[0-9]|[2-9][0-9])' <<<"$WRITE_RESP" || warn "SWM write count low: $WRITE_RESP"
 
 sleep 2
 
@@ -215,7 +215,7 @@ EDGE_LOG=$(node_log "$EDGE_CURATOR_NODE")
 EDGE_BASELINE=$(cat "$LOG_BASELINE_DIR/$EDGE_CURATOR_NODE")
 EDGE_NEW=$(tail -n "+$((EDGE_BASELINE + 1))" "$EDGE_LOG")
 
-if printf '%s' "$EDGE_NEW" | grep -qE 'LU-11.*chunked emit|encryptInlineChunked|chunked publish|GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED|share-write-chunked'; then
+if grep -qE 'LU-11.*chunked emit|encryptInlineChunked|chunked publish|GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED|share-write-chunked' <<<"$EDGE_NEW"; then
   log "✓ edge log shows the LU-11 chunked emit path fired"
 else
   warn "no LU-11 chunked-emit log line found on edge — may indicate publisher fell back to LU-5 single-blob path"
@@ -226,7 +226,7 @@ for n in "${CORE_NODES[@]}"; do
   log_file=$(node_log "$n")
   baseline=$(cat "$LOG_BASELINE_DIR/$n")
   new=$(tail -n "+$((baseline + 1))" "$log_file")
-  if printf '%s' "$new" | grep -qE 'LU-11|chunked|ciphertext-chunk|storage-ack.*V2|/dkg/10\.0\.2/storage-ack'; then
+  if grep -qE 'LU-11|chunked|ciphertext-chunk|storage-ack.*V2|/dkg/10\.0\.2/storage-ack' <<<"$new"; then
     log "  ✓ core node $n: LU-11 activity detected in log"
     CORE_ACK_COUNT=$((CORE_ACK_COUNT + 1))
   fi
@@ -248,7 +248,7 @@ log "Mining 250 hardhat blocks to advance into a fresh random-sampling period...
 mine_resp=$(curl -sS -X POST -H 'Content-Type: application/json' \
   --data '{"jsonrpc":"2.0","id":1,"method":"hardhat_mine","params":["0xfa"]}' \
   "http://127.0.0.1:${HARDHAT_PORT}" 2>/dev/null || true)
-if printf '%s' "$mine_resp" | grep -q '"result":true'; then
+if grep -q '"result":true' <<<"$mine_resp"; then
   log "  ✓ mined 250 blocks (proofingPeriodDurationInBlocks=100 → guaranteed new period)"
 else
   warn "hardhat_mine response was unexpected: $mine_resp"
@@ -329,7 +329,7 @@ fi
 # Best-effort: read the WAL for that period and check the kaId matches our publish.
 log "Inspecting prover WAL on node $PROOF_NODE..."
 WAL=$(api_call "$PROOF_NODE" GET /api/random-sampling/wal 2>/dev/null || echo "")
-if printf '%s' "$WAL" | grep -q "$PUBLISH_KC"; then
+if grep -q "$PUBLISH_KC" <<<"$WAL"; then
   log "✓ prover WAL on node $PROOF_NODE contains kaId=$PUBLISH_KC — curated KC was sampled successfully"
 else
   log "  prover WAL on node $PROOF_NODE: $WAL"

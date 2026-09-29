@@ -1,5 +1,6 @@
 export * from './types.js';
 export * from './constants.js';
+export * from './storage-ack-protocols.js';
 export * from './context-graph-storage-uri.js';
 export * from './context-graph-snapshot-uri.js';
 export * from './context-graph-on-chain-binding.js';

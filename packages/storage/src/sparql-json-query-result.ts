@@ -35,6 +35,17 @@ const MAX_CONSECUTIVE_IRI_MISSES = 16;
 const PAUSED_IRI_COMPARISON_ROWS = 128;
 type IriValidator = (value: string) => boolean;
 
+// RFC 3987 lets an absolute IRI's hier-part be empty, so a bare `scheme:`
+// such as `a:` is an IRI the stores accept on write and return from SELECT.
+// core's isSafeIri needs a character after the colon. This admits exactly
+// that shape, which holds only scheme characters and the colon.
+const SCHEME_ONLY_IRI = /^[a-zA-Z][a-zA-Z0-9+.-]*:$/;
+
+/** core's isSafeIri plus a bare `scheme:`; every other value gets isSafeIri's answer. */
+function isSafeResultIri(value: string): boolean {
+  return isSafeIri(value) || SCHEME_ONLY_IRI.test(value);
+}
+
 /** One last successful value per column role, never a growing per-row/global cache. */
 function createIriValidator(): IriValidator {
   let lastValidIri: string | undefined;
@@ -47,13 +58,13 @@ function createIriValidator(): IriValidator {
     // cannot cost the response the repeated run that may follow it.
     if (pausedRows > 0) {
       pausedRows--;
-      return isSafeIri(value);
+      return isSafeResultIri(value);
     }
     if (value === lastValidIri) {
       consecutiveMisses = 0;
       return true;
     }
-    const valid = isSafeIri(value);
+    const valid = isSafeResultIri(value);
     if (valid && value.length <= MAX_CACHED_IRI_LENGTH) lastValidIri = value;
     if (++consecutiveMisses >= MAX_CONSECUTIVE_IRI_MISSES) {
       pausedRows = PAUSED_IRI_COMPARISON_ROWS;
@@ -251,8 +262,8 @@ function parseSelectResponse(
       const term = reader.read(row, variable, `SPARQL JSON binding ${rowIndex}`);
       const formatted = formatSparqlJsonTerm(snapshotTerm(
         term, rowIndex, variable, reader,
-        iriValidators[variableIndex] ?? isSafeIri,
-        datatypeValidators[variableIndex] ?? isSafeIri,
+        iriValidators[variableIndex] ?? isSafeResultIri,
+        datatypeValidators[variableIndex] ?? isSafeResultIri,
       ));
       // `__proto__` is a legal SPARQL variable name, and a plain assignment
       // hits the inherited setter and drops the column. Define it instead, so

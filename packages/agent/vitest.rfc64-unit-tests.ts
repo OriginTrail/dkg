@@ -1,4 +1,7 @@
 export const RFC64_UNIT_TESTS = [
+  "test/rfc64-catalog-repair-backoff.test.ts",
+  "test/rfc64-catalog-repair-pressure.test.ts",
+  "test/rfc64-catalog-repair-diagnostics.test.ts",
   "test/rfc64-inventory-v1-scalars.test.ts",
   "test/rfc64-legacy-swm-boundary-v1.test.ts",
   "test/rfc64-inventory-v1-lifecycle.test.ts",
@@ -72,7 +75,9 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-replay-worklist.integration.test.ts",
   "test/rfc64-catalog-replay-connection-runtime-v1.test.ts",
   "test/rfc64-catalog-replay-recovery-runtime-v1.test.ts",
+  "test/rfc64-catalog-operational-applied-heads-v1.test.ts",
   "test/rfc64-replay-recovery-peer-failure-reporting.test.ts",
+  "test/rfc64-operational-row-projection-v1.test.ts",
   "test/rfc64-private-catalog-gate-artifact.test.ts",
   "test/rfc64-policy-cell-v1.test.ts",
 ] as const;

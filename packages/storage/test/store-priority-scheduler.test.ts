@@ -316,6 +316,24 @@ describe('StorePriorityScheduler', () => {
     expect(isStoreSchedulerBusyError({ code: 'STORE_SCHEDULER_BUSY' })).toBe(false);
   });
 
+  it('accepts optional string messages while retaining prototype-free copies without messages', () => {
+    const original = new StoreSchedulerBusyError('queue_full', 'normal', 'query');
+    const copied = { ...original };
+    expect(copied).not.toHaveProperty('message');
+    expect(isStoreSchedulerBusyError(copied)).toBe(true);
+    for (const message of [undefined, '', original.message]) {
+      expect(isStoreSchedulerBusyError({ ...copied, message })).toBe(true);
+    }
+  });
+
+  it.each([null, 42, { detail: 'not a message' }])(
+    'rejects malformed optional message metadata (%j)',
+    (message) => {
+      const copied = { ...new StoreSchedulerBusyError('queue_full', 'normal', 'query') };
+      expect(isStoreSchedulerBusyError({ ...copied, message })).toBe(false);
+    },
+  );
+
   it('binds canonical operations at both scheduler-owned admission rejection sites', async () => {
     const scheduler = new StorePriorityScheduler({
       maxConcurrent: 1,

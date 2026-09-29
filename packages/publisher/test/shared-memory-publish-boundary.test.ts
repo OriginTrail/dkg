@@ -704,6 +704,38 @@ describe('publishFromSharedMemory VM registration guard', () => {
     });
     expect(publishSpy.calls).toHaveLength(0);
   });
+
+  // An edge learns a public graph's id from the ContextGraphCreated event and
+  // syncs no `ontology` graph, so its store can hold only the local bootstrap's
+  // `unregistered` marker while the agent resolves the id from chain.
+  it('accepts the on-chain id the caller resolved when the store has no binding', async () => {
+    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    await store.insert([
+      q('urn:test:root:one'),
+      {
+        subject: CONTEXT_GRAPH_URI,
+        predicate: 'https://dkg.network/ontology#registrationStatus',
+        object: '"unregistered"',
+        graph: `${CONTEXT_GRAPH_URI}/_meta`,
+      },
+    ]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+      onChainContextGraphId: '7',
+    })).resolves.toMatchObject({ status: 'tentative' });
+    expect(publishSpy.calls).toHaveLength(1);
+    expect(publishSpy.calls[0][0].publishContextGraphId).toBe('7');
+  });
+
+  it('still rejects when the resolved on-chain id is blank', async () => {
+    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    await store.insert([q('urn:test:root:one')]);
+
+    await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+      onChainContextGraphId: '  ',
+    })).rejects.toMatchObject({ code: 'CG_NOT_REGISTERED' });
+    expect(publishSpy.calls).toHaveLength(0);
+  });
 });
 
 describe('SharedMemoryHandler lifecycle UAL derivation', () => {

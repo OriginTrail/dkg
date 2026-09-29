@@ -1,4 +1,5 @@
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
+import type { ACKCanonicalCandidatePeerSelectionResult } from '@origintrail-official/dkg-publisher';
 import { randomUUID } from 'node:crypto';
 import { createAuthorityIndexBootstrap } from './authority-index-bootstrap.js';
 import { planAuthorityIndexBootstrap } from './authority-index-config.js';
@@ -11,6 +12,7 @@ import {
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_QUERY_REMOTE,
   PROTOCOL_STORAGE_ACK,
+  isStorageACKProtocol, type StorageACKProtocol,
   PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2,
   PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
@@ -29,6 +31,7 @@ import {
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
   computeACKDigest, computeContextGraphPolicyObjectDigestV1,
+  computeSwmAuthorInventoryScopeDigestV1,
   encodePublishRequest,
   encodeKAUpdateRequest,
   encodeGossipEnvelope,
@@ -136,8 +139,6 @@ import {
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   resolveStorageAckTiming,
-  selectACKCandidateUniverse,
-  selectACKCandidatePeersWithDiagnostics,
   createPromotePostCommitFailure,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
   // OT-RFC-43 A2/B3 — per-layer pointers + derived status helper.
@@ -145,6 +146,7 @@ import {
   WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED,
   KA_ID_PRED, RESERVED_UAL_PRED,
   type CollectedACK, type V10CoreNodeACK, type V10ACKProviderParams,
+  type LocalStorageAckHeadExpectation,
   type ACKCollectorDeps,
   type ACKTransportFactory,
   type WorkspaceAgentRecipient,
@@ -240,6 +242,7 @@ import {
 } from './swm/ciphertext-chunk-catchup.js';
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
+import { connectedPeerIds as liveConnectedPeerIds } from './p2p/connected-peer-ids.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import {
   deleteSyncPageCheckpoint,
@@ -457,6 +460,7 @@ import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-gra
 import { reconcileAndAllocateKaNumber } from './allocator.js';
 import { chainAuthorityReadBudgetsOf, resolveChainAuthorityReadBudgets } from './chain-authority-read-budgets.js';
 import { OntologyBindingSlotClassifier } from './ontology-binding-slot-classifier.js';
+import { peekOnDemandAgentsPhonebook } from './sync/on-demand-agents-phonebook.js';
 import { peekFinalizedAuthorityColdResolution } from
   './finalized-authority-cold-resolution.js';
 import { OwnershipMethods } from './dkg-agent-ownership.js';
@@ -525,6 +529,7 @@ import {
 import { SwmHostModeMethods } from './dkg-agent-swm-host.js';
 import { VmReconcileSchedulingMethods } from './dkg-agent-vm-reconcile-scheduling.js';
 import { VmPromotionMethods } from './dkg-agent-vm-promotion.js';
+import { AgentsPhonebookMethods } from './dkg-agent-agents-phonebook.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
 import { ContextGraphNameResolutionMethods } from './dkg-agent-cg-name-resolution.js';
 import { ContextGraphOnChainIdMethods } from './dkg-agent-cg-on-chain-id.js';
@@ -734,6 +739,7 @@ function constructConfiguredChainAdapter(
       receiptTimeoutMs: config.chainConfig.receiptTimeoutMs,
       finalityConfirmations: config.chainConfig.finalityConfirmations,
       indexTickMs: config.chainConfig.indexTickMs,
+      boundedAuthorityReads: config.chainConfig.boundedAuthorityReads,
       maxFeePerGasWei: config.chainConfig.maxFeePerGasWei,
       approvalPolicy: config.chainConfig.approvalPolicy,
       cgRegistryScanPageSize: config.chainConfig.cgRegistryScanPageSize,
@@ -833,6 +839,12 @@ export function mergeRfc64CatalogBootstrapsV1(
 export class DKGAgent extends DKGAgentBase {
   /** One store discovery pass is shared by concurrent peer-connect sessions. */
   private contextGraphStoreDiscoveryInFlight?: Promise<number>;
+  /**
+   * Progress of the ontology metadata relocation (see
+   * {@link contextGraphServingWithheld}): no pass has ended yet, a pass ended
+   * without reaching every candidate, or one did.
+   */
+  private ontologyRelocation: 'pending' | 'withheld' | 'relocated' = 'pending';
   /**
    * Slots named by ontology bindings. It never writes `onChainAccessPolicyCache`,
    * which StorageACK curation checks trust, since its unproven reads can be 0.
@@ -1091,6 +1103,16 @@ export class DKGAgent extends DKGAgentBase {
           this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null)
             ?.acceptsFinalizedVmRepair === true
         ),
+        readRepairRevision: (contextGraphId, authorAddress) => {
+          const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
+          if (lane === null) return null;
+          const scopeDigest = computeSwmAuthorInventoryScopeDigestV1({
+            ...lane.scopeBase, authorAddress,
+          });
+          const headDigest = this.rfc64PersistenceV1?.swmAuthorInventory
+            .readSwmAuthorInventoryHeadDigestV1(scopeDigest, authorAddress) ?? null;
+          return JSON.stringify([lane.kind, lane.projectionTargetPolicy, scopeDigest, headDigest]);
+        },
         listFinalizedPrivateRepairs: () => (
           this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? []
         ),
@@ -2031,24 +2053,35 @@ export class DKGAgent extends DKGAgentBase {
    * `context-graph-metadata-relocation.ts`). Every store discovery pass runs
    * this first, so discovery only acts on ontology rows that belong there.
    * Without `classifyOnChain`, bare bindings of graphs this node doesn't hold
-   * are left for a later pass (no chain reads).
+   * are left for a later pass (no chain reads). Once `budgetMs` is spent or
+   * `signal` aborts, the remaining candidates are also left for a later pass,
+   * and {@link contextGraphServingWithheld} holds `ontology` back until a pass
+   * reaches them.
    */
   async relocatePrivateContextGraphMetadata(
-    options: { classifyOnChain?: boolean } = {},
+    options: { classifyOnChain?: boolean; budgetMs?: number; signal?: AbortSignal } = {},
   ): Promise<ContextGraphMetadataRelocationResult> {
-    const result = await relocatePrivateContextGraphMetadata({
-      store: this.store,
-      localAccessPolicy: async (contextGraphId) => {
-        if (await this.isPrivateContextGraph(contextGraphId)) return 'private';
-        return (await this.getExplicitAccessPolicy(contextGraphId)) === 'public' ? 'public' : null;
-      },
-      ...(options.classifyOnChain === false
-        ? {}
-        : {
-          classifyOnChainSlot: (onChainId: string) => this.classifyOntologyBindingSlot(onChainId),
-          knownSlotClass: (onChainId: string) => this.knownOntologyBindingSlotClass(onChainId),
-        }),
-    });
+    let result: ContextGraphMetadataRelocationResult;
+    try {
+      result = await relocatePrivateContextGraphMetadata({
+        store: this.store,
+        localAccessPolicy: async (contextGraphId) => {
+          if (await this.isPrivateContextGraph(contextGraphId)) return 'private';
+          return (await this.getExplicitAccessPolicy(contextGraphId)) === 'public' ? 'public' : null;
+        },
+        ...(options.classifyOnChain === false
+          ? {}
+          : {
+            classifyOnChainSlot: (onChainId: string) => this.classifyOntologyBindingSlot(onChainId),
+            knownSlotClass: (onChainId: string) => this.knownOntologyBindingSlotClass(onChainId),
+          }),
+        ...(options.budgetMs !== undefined ? { budgetMs: options.budgetMs } : {}),
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (err) {
+      if (this.ontologyRelocation === 'pending') this.ontologyRelocation = 'withheld';
+      throw err;
+    }
     if (result.movedToMeta.length > 0 || result.deletedForeign > 0) {
       this.invalidateListContextGraphsCache();
       for (const contextGraphId of result.movedToMeta) {
@@ -2060,7 +2093,35 @@ export class DKGAgent extends DKGAgentBase {
           `${result.movedToMeta.length} moved to their own _meta, ${result.deletedForeign} removed`,
       );
     }
+    if (result.deferred > 0) {
+      this.log.info(
+        createOperationContext('system'),
+        `Context graph metadata relocation stopped early: ${result.deferred} candidate(s) left for a later pass`,
+      );
+      if (this.ontologyRelocation === 'pending') this.ontologyRelocation = 'withheld';
+    } else if (this.ontologyRelocation !== 'relocated') {
+      if (this.ontologyRelocation === 'withheld') {
+        this.log.info(
+          createOperationContext('system'),
+          'Context graph metadata relocation reached every candidate; serving the ontology graph to peers again',
+        );
+      }
+      this.ontologyRelocation = 'relocated';
+    }
     return result;
+  }
+
+  /**
+   * Whether peers asking for `contextGraphId` are to be told to retry later
+   * rather than be served it: `ontology`, until a metadata relocation pass
+   * has reached every candidate. Until then it may still hold private
+   * metadata that earlier builds wrote there, and it is a public graph, so
+   * sync, changelog sync and remote queries would hand those rows to anyone.
+   * Nothing in this build writes private metadata to ontology, so once a pass
+   * finishes, the graph stays servable for the life of the agent.
+   */
+  contextGraphServingWithheld(contextGraphId: string): boolean {
+    return contextGraphId === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY && this.ontologyRelocation !== 'relocated';
   }
 
   /** The class of an ontology binding's slot this node knows without a chain read. */
@@ -2132,10 +2193,12 @@ export class DKGAgent extends DKGAgentBase {
       id: string;
       name: string;
       source: 'ontology' | 'meta';
-      onChainId?: string;
+      /** The on-chain id binding this chain proves, if any. */
+      binding?: { onChainId: string; onChainHash: string };
       /** False when only a bare on-chain id binding was found. */
       hasDefinition: boolean;
     }>();
+    let unprovenClaims = 0;
 
     const collectEntries = (
       rows: Record<string, string>[],
@@ -2150,18 +2213,24 @@ export class DKGAgent extends DKGAgentBase {
 
         const existing = discoveredEntries.get(id);
         const rowName = row['name'] ? stripLiteral(row['name']) : undefined;
-        const candidateOnChainId = row['onChainId']
+        // An `OnChainId` row is a claim, not a binding: the ontology graph is
+        // shared by every network and deployment, and one Base edge held three
+        // definitions claiming #33. Keep only a claim this chain proves, with
+        // the name hash it proves, so the row is bound exactly as a chain lane
+        // would bind it.
+        const claimedOnChainId = row['onChainId']
           ? stripLiteral(row['onChainId'])
           : undefined;
-        const rowOnChainId = isCanonicalAuthoritativeContextGraphId(candidateOnChainId)
-          ? candidateOnChainId
-          : undefined;
+        const proven = claimedOnChainId === undefined
+          ? null
+          : this.provenOnChainContextGraphClaim(id, claimedOnChainId);
+        if (claimedOnChainId !== undefined && proven === null) unprovenClaims++;
         const ontologyWins = existing?.source === 'meta' && source === 'ontology';
         discoveredEntries.set(id, {
           id,
           name: rowName ?? existing?.name ?? id,
           source: !existing || ontologyWins ? source : existing.source,
-          onChainId: rowOnChainId ?? existing?.onChainId,
+          binding: proven ?? existing?.binding,
           hasDefinition: definition || existing?.hasDefinition === true,
         });
       }
@@ -2233,7 +2302,11 @@ export class DKGAgent extends DKGAgentBase {
       collectEntries(metaResult.bindings as Record<string, string>[], 'meta', true);
     }
 
-    this.log.debug(ctx, `Discovery scan found ${discoveredEntries.size} CG(s) in store`);
+    this.log.debug(
+      ctx,
+      `Discovery scan found ${discoveredEntries.size} CG(s) in store`
+        + `${unprovenClaims > 0 ? `; ignored ${unprovenClaims} on-chain id claim(s) this chain does not prove` : ''}`,
+    );
 
     // Private classification is needed only to restore the SWM scope of an
     // already-active member. Newly catalogued rows do not need a per-row store
@@ -2250,19 +2323,33 @@ export class DKGAgent extends DKGAgentBase {
     );
     const curatedById = new Map(curatedResults);
 
+    // A definition for a graph this node wants but holds only by its name hash
+    // (`dkg subscribe <hash>`, or a Core's hosted row) is that graph's verified
+    // cleartext id. Adopt it as the name-hash resolver would, so the
+    // subscription moves to the cleartext id. Recording it below first would
+    // let the canonical setter retire the hash-keyed row and drop the
+    // subscription with it.
+    // Adoptions are independent: each targets its own name hash, is
+    // serialized per hash, and never throws.
+    await mapWithConcurrency(
+      [...discoveredEntries.values()],
+      DKGAgentBase.LIST_CONTEXT_GRAPHS_ROW_CONCURRENCY,
+      ({ id }) => this.adoptWantedContextGraphNamePlaceholder(id),
+    );
+
     // Recording and the temporary Core auto-subscribe bridge are synchronous.
     // Defer only this narrow producer burst so every discovered row enters one
     // immutable finalized responsibility batch regardless of scan duration.
     const releaseResponsibilityBatch =
       this.beginRfc64ScheduledCatalogResponsibilityBatchV1();
     try {
-      for (const { id, name, source, onChainId, hasDefinition } of discoveredEntries.values()) {
+      for (const { id, name, source, binding, hasDefinition } of discoveredEntries.values()) {
         const existing = this.subscribedContextGraphs.get(id);
         if (existing) {
           // Enrich an existing active/hosted record and persist the binding. The
           // central recorder deliberately does not reactivate an existing
           // unsubscribed row, preserving explicit unsubscribe semantics.
-          this.recordDiscoveredContextGraph(id, { name, onChainId });
+          this.recordDiscoveredContextGraph(id, { name, ...binding });
           const current = this.subscribedContextGraphs.get(id) ?? existing;
           // A restart re-seeds `subscribedContextGraphs` from persisted state but
           // does NOT re-add the CG to the SWM-sync scope (`config.syncContextGraphs`,
@@ -2290,8 +2377,13 @@ export class DKGAgent extends DKGAgentBase {
           !hasDefinition
           && (this.config.nodeRole ?? 'edge') === 'core'
           // Only verdicts the relocation above already reached count, so
-          // this pass stays within its chain read budget.
-          && await this.contextGraphAccessPolicyState(id, { declared: false, onChainId, readChain: false }) !== 'public'
+          // this pass stays within its chain read budget. An unproven claim
+          // names no slot, so it proves nothing public either.
+          && await this.contextGraphAccessPolicyState(id, {
+            declared: false,
+            ...(binding === undefined ? {} : { onChainId: binding.onChainId }),
+            readChain: false,
+          }) !== 'public'
         ) {
           // A bare binding carries no access policy of its own. Activating
           // it before the chain proves its slot public would host and
@@ -2323,7 +2415,7 @@ export class DKGAgent extends DKGAgentBase {
 
         const recorded = this.recordDiscoveredContextGraph(
           id,
-          { name, onChainId },
+          { name, ...binding },
           {
             // A persisted row left dormant during restart must not be
             // reactivated when the same definition is found in Oxigraph
@@ -2676,11 +2768,19 @@ export class DKGAgent extends DKGAgentBase {
 
   async stop(): Promise<void> {
     if (!this.started) return;
+    // Fence ACK routes, retries, and self sends before shutdown awaits.
+    const storageACKDrain = this.storageACKRegistrationRuntime.closeAndDrain();
+    void storageACKDrain.catch(() => {});
     this.peerSyncSession.close();
     // Cancelling a waiter alone does not retire the shared physical scan.
     // Detached cold authority flights are aborted here too: after stop() no
     // request can consume their result, and the chain reader closes below.
     peekFinalizedAuthorityColdResolution(this)?.close();
+    // Abort an on-demand phonebook fetch and its re-check timer. The aborted
+    // `agents` durable sync unwinds at its next page or commit boundary, and
+    // its drain joins the shutdown fence below, so store and network teardown
+    // (and a same-process restart's first fetch) never overlap it.
+    const onDemandPhonebookDrain = peekOnDemandAgentsPhonebook(this)?.close() ?? null;
     const authorityIndexSnapshotDrain = Promise.all([
       this.authorityIndexSnapshotRuntime?.close(),
       this.chain.contextGraphAuthorityIndexSnapshots?.close(),
@@ -2783,6 +2883,7 @@ export class DKGAgent extends DKGAgentBase {
     };
     const drains: Promise<unknown>[] = [drainPhysicalRuns(), rfc64BackgroundDrain];
     drains.push(authorityIndexSnapshotDrain);
+    if (onDemandPhonebookDrain) drains.push(onDemandPhonebookDrain);
     if (authorityRetryDrain) drains.push(authorityRetryDrain);
     if (rehydrationPromotionDrain) drains.push(rehydrationPromotionDrain);
     if (chainPollerDrain) drains.push(chainPollerDrain);
@@ -2885,9 +2986,9 @@ export class DKGAgent extends DKGAgentBase {
     // rc.9 PR-10: joinApprovalRetryTimer + joinApprovalRetryQueue
     // deleted; substrate outbox owns retry state and drains itself
     // via the messengerOutboxTimer cleared just above.
-    this.clearStorageACKRegistrationRetry();
-    this.storageACKRegistrationRetryInFlight = false;
-    this.storageAckHandlerRegistered = false;
+    // A timed-out or shutdown-aborted self ACK retains ownership until its
+    // physical handler work retires. Never close the store underneath it.
+    await storageACKDrain;
     // The owner joins both an installed prover and any in-flight WAL/handle
     // creation. A timeout retains ownership and blocks store/network teardown.
     await this.randomSamplingRuntime?.stop();
@@ -3081,81 +3182,70 @@ export class DKGAgent extends DKGAgentBase {
   }
 
   private connectedPeerIds(): string[] {
-    const connectedPeerIds = new Set<string>();
-    for (const peer of this.node.libp2p.getPeers()) {
-      connectedPeerIds.add(peer.toString());
-    }
-    for (const connection of this.node.libp2p.getConnections()) {
-      connectedPeerIds.add(connection.remotePeer.toString());
-    }
-    connectedPeerIds.delete(this.peerId);
-    return [...connectedPeerIds];
+    const ids = liveConnectedPeerIds(this.node.libp2p);
+    ids.delete(this.peerId);
+    return [...ids];
   }
 
   /**
-   * Resolve admission only for connected peers already known to be eligible
-   * for an ACK round. The publisher selector is the single source of truth: a
-   * configured ACK allowlist wins, otherwise every connected peer remains in
-   * the candidate universe because identify-derived core tiers may be partial.
-   * The coordinator owns admission, per-peer retry cooldown and bounded probe
-   * fan-out; signed same-network proof remains mandatory.
+   * Resolve admission only for connected peers that advertise the core-only
+   * StorageACK protocol. Unknown peers may become eligible after identify
+   * completes, but edges must never be dialled for an ACK.
+   * The admission coordinator owns same-network proof and retry cooldown;
+   * the ACK candidate coordinator owns bounded discovery for this round.
    */
   private async getACKCandidatePeersAfterAdmission(
     protocol: string | undefined,
     ctx: OperationContext,
   ): Promise<string[]> {
-    const connected = this.connectedPeerIds();
-    const eligible = selectACKCandidateUniverse({
-      connectedPeers: connected,
-      ackCandidatePeerIds: this.config.ackCandidatePeerIds,
-      selfPeerId: this.peerId,
-    });
-
-    const result = await this.networkAdmissionCoordinator.preflightPeerAdmission(
-      eligible,
-      ctx,
-      { maxConcurrency: 4 },
-    );
-    if (result.checked > 0) {
-      this.log.info(
-        ctx,
-        `[ACKCollector] Admission preflight checked ${result.checked} ACK-eligible peer(s): ` +
-        `${result.admitted} newly admitted, ${result.unresolved} still excluded`,
-      );
+    const connectedPeers = this.connectedPeerIds();
+    const requestedProtocol = protocol ?? PROTOCOL_STORAGE_ACK;
+    if (!isStorageACKProtocol(requestedProtocol)) {
+      throw new Error(`Unsupported StorageACK protocol: ${requestedProtocol}`);
     }
-    return this.getACKCandidatePeers(protocol);
+    const requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
+    const selection = await this.ackCandidateDiscovery.resolveRound({
+      connectedPeers,
+      ackCandidatePeerIds: this.config.ackCandidatePeerIds,
+      preferredACKPeerIds: this.config.preferredACKPeerIds,
+      requiredACKs,
+      protocol: requestedProtocol,
+      localCandidate: this.localACKCandidate(),
+      verifiedSameNetworkPeerIds: () => this.networkAdmissionCoordinator.enabled
+        ? this.networkAdmissionCoordinator.verifiedSameNetworkPeerIds()
+        : undefined,
+      getPeerProtocols: (peerId) => this.getPeerProtocols(peerId),
+      isAcceptedPeer: (peerId) => this.networkAdmissionCoordinator.isAcceptedPeer(peerId),
+      probeProtocol: this.router
+        ? (peerId, protocolId) => this.router.probeProtocol(peerId, protocolId)
+        : undefined,
+      preflight: async (peerIds) => {
+        const result = await this.networkAdmissionCoordinator.preflightPeerAdmission(
+          peerIds, ctx, { maxConcurrency: 4 },
+        );
+        if (result.checked > 0) {
+          this.log.info(ctx,
+            `[ACKCollector] Admission preflight checked ${result.checked} ACK-eligible peer(s): ` +
+            `${result.admitted} newly admitted, ${result.unresolved} still excluded`);
+        }
+      },
+    });
+    return this.logACKCandidatePlan(selection, requestedProtocol, requiredACKs);
   }
 
   /**
    * Candidate peer pool for ACK collection (#1093 / #1482).
    *
-   * `knownCorePeerIds` is populated from identify-time protocol lists in
-   * `runSyncOnConnect`, but identify races `connection:open` — so the set
-   * routinely contains only a SUBSET of the actually-connected core nodes
-   * (the rest were read before their protocol list was populated and were
-   * never re-classified). The old behaviour returned that subset as soon
-   * as it was non-empty, which permanently capped the ACK pool below
-   * quorum (`pool_below_quorum`) and bricked publishing on core nodes.
-   *
-   * Fix: return confirmed cores FIRST followed by the remaining connected
-   * ACK-eligible peers. Do not narrow to a quorum-sized identify-derived tier:
-   * the collector fixes the pool once and retries within it, so one stale or
-   * saturated classified peer can make quorum impossible while healthy
-   * connected-but-unclassified cores sit idle. External callers can still set
-   * `ackCandidatePeerIds` as a true allowlist; configured public networks use
-   * `preferredACKPeerIds` for relay ranking without excluding connected
-   * non-relay cores. Signer validity is enforced per collected ACK against
-   * chain truth (operational key + sharding-table membership), so a stale
-   * foreign-network connection costs a wasted dial, while hard-gating on the
-   * bundled relay list bricked publishing when those relays were degraded
-   * (2026-07-07 Base/Gnosis mainnet incident).
+   * Identify-time protocol lists can lag connection events or handler
+   * registration. Only peers confirmed by identify or live negotiation to
+   * support the core-only StorageACK protocol are eligible. Connected edges
+   * and unknown peers cannot consume collector slots. Preferences still rank
+   * all confirmed cores without restricting them to relay lists.
    *
    * Folded-private publishes require `PROTOCOL_STORAGE_ACK_V2` because their
    * PublishIntent carries field 20 (`privateMerkleRoots`). Prefer peers that
-   * explicitly advertise V2, but do not make peer-store protocol metadata the
-   * only gate: StorageACK handlers register after identity resolution, often
-   * after peers are already connected, and libp2p identify does not always
-   * refresh the stored protocol list. NOTE the wire protocol is not a
+   * explicitly advertise V2. A confirmed V1 core remains a V2 fallback if
+   * its identify metadata has not refreshed. NOTE the wire protocol is not a
    * version gate either — nodes have registered the V2 protocol id (for
    * the LU-11 chunked-ciphertext intent) since v10.0.0-rc.15, so a
    * pre-field-20 core ACCEPTS the V2 dial, silently drops
@@ -3170,24 +3260,37 @@ export class DKGAgent extends DKGAgentBase {
    * validation remain authoritative.
    */
   public getACKCandidatePeers(protocol: string = PROTOCOL_STORAGE_ACK): string[] {
-    const connectedPeerIds = this.connectedPeerIds();
+    if (!isStorageACKProtocol(protocol)) throw new Error(`Unsupported StorageACK protocol: ${protocol}`);
     const requiredACKs = this.lastKnownRequiredACKs ?? DEFAULT_REQUIRED_ACKS;
-    const selection = selectACKCandidatePeersWithDiagnostics({
-      connectedPeers: connectedPeerIds,
-      selfPeerId: this.peerId,
+    const selection = this.ackCandidateDiscovery.selectCandidates({
+      connectedPeers: this.connectedPeerIds(),
       ackCandidatePeerIds: this.config.ackCandidatePeerIds,
       preferredACKPeerIds: this.config.preferredACKPeerIds,
       verifiedSameNetworkPeerIds: this.networkAdmissionCoordinator.enabled
         ? this.networkAdmissionCoordinator.verifiedSameNetworkPeerIds()
         : undefined,
-      knownCorePeerIds: this.knownCorePeerIds,
-      knownCorePeerIdsV2: this.knownCorePeerIdsV2,
-      requiredACKs,
       protocol,
-    });
+    }, this.localACKCandidate());
+    return this.logACKCandidatePlan(selection, protocol, requiredACKs);
+  }
+
+  private localACKCandidate(): { peerId: string; available: boolean } {
+    const peerId = this.peerId || '';
+    return {
+      peerId,
+      available: peerId.length > 0 && this.config.nodeRole === 'core' && this.storageAckHandlerRegistered,
+    };
+  }
+
+  private logACKCandidatePlan(
+    selection: ACKCanonicalCandidatePeerSelectionResult,
+    protocol: StorageACKProtocol,
+    requiredACKs: number,
+  ): string[] {
     const selected = selection.diagnostics
       .filter((diagnostic) => diagnostic.selected)
-      .map((diagnostic) => `${diagnostic.peerId.slice(-8)}:${diagnostic.tier}${diagnostic.preferred ? ':preferred' : ''}`)
+      .map((diagnostic) => diagnostic.reason === 'selected-local' ? 'self'
+        : `${diagnostic.peerId.slice(-8)}:${diagnostic.tier}${diagnostic.preferred ? ':preferred' : ''}`)
       .join(',');
     const filtered = selection.diagnostics
       .filter((diagnostic) => !diagnostic.selected)
@@ -3195,8 +3298,8 @@ export class DKGAgent extends DKGAgentBase {
       .map((diagnostic) => `${diagnostic.peerId.slice(-8)}:${diagnostic.reason}`)
       .join(',');
     this.log.info(
-      createOperationContext('publish'),
-      `[ACKCollector] Selected ${selection.peers.length}/${selection.diagnostics.length} ACK candidate peer(s) ` +
+      this.ackOperationContext(protocol),
+      `[ACKCollector] Selected ${selection.peers.length}/${selection.diagnostics.length} ACK candidate core(s) ` +
       `(required=${requiredACKs}, protocol=${protocol}, selected=${selected || 'none'}, filtered=${filtered || 'none'})`,
     );
     return selection.peers;
@@ -3240,12 +3343,23 @@ export class DKGAgent extends DKGAgentBase {
 
   private createACKSendP2P(
     timeoutMs = this.config.storageAckTiming.sendTimeoutMs,
+    expectedHead?: LocalStorageAckHeadExpectation,
   ): ACKCollectorDeps['sendP2P'] {
     const send = createACKSendP2P({
       messenger: this.messenger,
       timeoutMs,
     });
+    const sendLocal = this.storageACKRegistrationRuntime.createLocalSender();
     return async (peerId: string, protocol: string, data: Uint8Array) => {
+      if (peerId === this.peerId) {
+        if (!this.localACKCandidate().available) {
+          throw new Error('Local StorageACK handler is not registered');
+        }
+        if (!isStorageACKProtocol(protocol)) throw new Error(`Unsupported StorageACK protocol: ${protocol}`);
+        return sendLocal(timeoutMs, (endpoint, signal) => endpoint.dispatch({
+          protocol, data, peerId: this.peerId, signal, context: expectedHead,
+        }));
+      }
       if (!this.networkAdmissionCoordinator.isAcceptedPeer(peerId)) {
         throw new Error(`peer ${peerId.slice(-8)} is not admitted for active-network ACK collection`);
       }
@@ -3259,7 +3373,7 @@ export class DKGAgent extends DKGAgentBase {
    * via direct P2P from connected core nodes. The required number of ACKs
    * is read from chain ParametersStorage.minimumRequiredSignatures().
    */
-  createV10ACKProvider(contextGraphId: string) {
+  createV10ACKProvider(contextGraphId: string, expectedHead?: LocalStorageAckHeadExpectation) {
     if (!this.router || !this.gossip) return undefined;
     // `isV10Ready()` is the authoritative V10 capability gate. Using it
     // (instead of probing for `createKnowledgeAssets`) keeps
@@ -3281,7 +3395,7 @@ export class DKGAgent extends DKGAgentBase {
       gossipPublish: async (topic: string, data: Uint8Array) => {
         await this.gossip.publish(topic, data);
       },
-      sendP2P: this.createACKSendP2P(),
+      sendP2P: this.createACKSendP2P(undefined, expectedHead),
       getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeersAfterAdmission(
         protocol,
         this.ackOperationContext(protocol),
@@ -3440,7 +3554,7 @@ export class DKGAgent extends DKGAgentBase {
    * the publisher leaves `v10UpdateACKs` undefined and the adapter falls
    * back to self-signing on a minSig=1 network.
    */
-  createV10UpdateACKProvider(_contextGraphId: string) {
+  createV10UpdateACKProvider(_contextGraphId: string, expectedHead?: LocalStorageAckHeadExpectation) {
     if (!this.router || !this.gossip) return undefined;
     if (typeof this.chain.isV10Ready !== 'function' || !this.chain.isV10Ready()) return undefined;
     if (typeof this.chain.verifyACKIdentity !== 'function') return undefined;
@@ -3451,7 +3565,7 @@ export class DKGAgent extends DKGAgentBase {
       gossipPublish: async (topic: string, data: Uint8Array) => {
         await this.gossip.publish(topic, data);
       },
-      sendP2P: this.createACKSendP2P(),
+      sendP2P: this.createACKSendP2P(undefined, expectedHead),
       getConnectedCorePeers: (protocol?: string) => this.getACKCandidatePeersAfterAdmission(
         protocol,
         this.ackOperationContext(protocol),
@@ -4433,5 +4547,5 @@ export class DKGAgent extends DKGAgentBase {
 }
 
 
-export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods {}
-applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods]);
+export interface DKGAgent extends ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods {}
+applyMixins(DKGAgent, [ImportedArtifactMethods, ContextGraphMethods, ContextGraphNameResolutionMethods, ContextGraphOnChainIdMethods, ContextGraphChainObservationMethods, SwmHostModeMethods, VmReconcileSchedulingMethods, VmPromotionMethods, PublishMethods, LifecycleSyncMethods, WorkspaceCryptoMethods, AgentRegistryMethods, QueryMethods, SwmSubstrateMethods, JoinRequestMethods, ContextGraphRegistryMethods, EndorseVerifyMethods, CclPolicyMethods, ContextGraphResolveMethods, OwnershipMethods, Rfc64CatalogMethods, Rfc64CatalogSyncMethods, Rfc64CatalogUpsertMethods, Rfc64SwmCatalogProjectionMethods, Rfc64SwmCatalogProjectionSupervisorMethods, Rfc64CatalogAutoPublishMethods, Rfc64SwmRecoveryRuntimeMethods, Rfc64CatalogBootstrapMethods, Rfc64SeedStoreMethods, Rfc64SeedFetchMethods, Rfc64MetaBootstrapMethods, AgentsPhonebookMethods]);

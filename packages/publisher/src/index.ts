@@ -113,7 +113,7 @@ export {
   type ValidationResult,
   type ValidationOptions,
 } from './validation.js';
-export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, generateGraphKnowledgeAssetMetadata, normalizeGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetReceiptProvenanceV1, preserveGraphKnowledgeAssetReceiptProvenanceV1, mergeSameVersionGraphKnowledgeAssetMetadataV1, GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, replaceLocallyTrustedKnowledgeAssetControls, replaceLocallyTrustedKnowledgeAssetControlEnvelope, readLocallyTrustedKnowledgeAssetControls, readLocallyTrustedKnowledgeAssetControlEnvelope, readConfirmedGraphKnowledgeAssetMetadataEnvelope, buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateShareMetadata, generateWorkspaceMetadata, generateKnowledgeAssetShareMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, promoteUpdatedKaToPerCgId, restateKaPartition, restateLabelGraphForUpdate, readMaterializedVersion, shouldApplyMaterialization, writeMaterializedVersion, materializedVersionQuad, withMaterializationLock, compareMaterializedVersion, type MaterializedVersion, generateAssertionCreatedMetadata, generateAssertionPromotedMetadata, generateAssertionUpdatedMetadata, generateAssertionDiscardedMetadata, assertionStateQuad, assertionLayerQuad, deriveStatus, assertionLayerPointerQuad, stampLayerPointerSparql, type LifecycleMetadataOptions, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, KA_ID_PRED, RESERVED_UAL_PRED, PROV_WAS_REVISION_OF, type KaStatus, type StatusPointers, type KCMetadata, type KAMetadata, type GraphKnowledgeAssetMetadata, type GraphKnowledgeAssetConfirmation, type GraphKnowledgeAssetConfirmationKind, type GraphKnowledgeAssetMetadataState, type GraphKnowledgeAssetReceiptProvenanceV1, type ConfirmedGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataRead, type LocallyTrustedKnowledgeAssetControlAnchor, type LocallyTrustedKnowledgeAssetControlEnvelope, type OnChainProvenance, type ShareMetadata, type WorkspaceMetadata, type KnowledgeAssetShareMetadata, type SubGraphRegistration, type AssertionCreatedMeta, type AssertionPromotedMeta, type AssertionUpdatedMeta, type AssertionDiscardedMeta } from './metadata.js';
+export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, generateGraphKnowledgeAssetMetadata, normalizeGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetReceiptProvenanceV1, preserveGraphKnowledgeAssetReceiptProvenanceV1, mergeSameVersionGraphKnowledgeAssetMetadataV1, GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, replaceLocallyTrustedKnowledgeAssetControls, replaceLocallyTrustedKnowledgeAssetControlEnvelope, readLocallyTrustedKnowledgeAssetControls, overlayLocallyTrustedKnowledgeAssetControls, readLocallyTrustedKnowledgeAssetControlEnvelope, readConfirmedGraphKnowledgeAssetMetadataEnvelope, buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateShareMetadata, generateWorkspaceMetadata, generateKnowledgeAssetShareMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, promoteUpdatedKaToPerCgId, restateKaPartition, restateLabelGraphForUpdate, readMaterializedVersion, shouldApplyMaterialization, writeMaterializedVersion, materializedVersionQuad, withMaterializationLock, compareMaterializedVersion, type MaterializedVersion, generateAssertionCreatedMetadata, generateAssertionPromotedMetadata, generateAssertionUpdatedMetadata, generateAssertionDiscardedMetadata, assertionStateQuad, assertionLayerQuad, deriveStatus, assertionLayerPointerQuad, stampLayerPointerSparql, type LifecycleMetadataOptions, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, KA_ID_PRED, RESERVED_UAL_PRED, PROV_WAS_REVISION_OF, type KaStatus, type StatusPointers, type KCMetadata, type KAMetadata, type GraphKnowledgeAssetMetadata, type GraphKnowledgeAssetConfirmation, type GraphKnowledgeAssetConfirmationKind, type GraphKnowledgeAssetMetadataState, type GraphKnowledgeAssetReceiptProvenanceV1, type ConfirmedGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataRead, type LocallyTrustedKnowledgeAssetControlAnchor, type LocallyTrustedKnowledgeAssetControlEnvelope, type OnChainProvenance, type ShareMetadata, type WorkspaceMetadata, type KnowledgeAssetShareMetadata, type SubGraphRegistration, type AssertionCreatedMeta, type AssertionPromotedMeta, type AssertionUpdatedMeta, type AssertionDiscardedMeta } from './metadata.js';
 export { pruneSupersededAgentRegistryMeta, insertBoundedAgentRegistryMeta } from './agent-registry-meta-retention.js';
 export { PROMOTE_STEP_NAMES, isPromoteStepName, type PromoteStepName } from './promote-step-tag.js';
 export {
@@ -148,8 +148,10 @@ export {
   type EncodedWorkspaceGossipPayload,
 } from './workspace-gossip-payload.js';
 export {
+  isWorkspaceAgentEncryptionKeyMissingError,
   resolveWorkspaceAgentRecipients,
   resolveWorkspaceAgentRecipientKeys,
+  WorkspaceAgentEncryptionKeyMissingError,
   projectWorkspaceAgentRecipientFanout,
   type WorkspaceAgentRecipientFanoutSnapshot,
   type WorkspaceAgentRecipientResolution,
@@ -170,13 +172,20 @@ export {
   type ACKTransportFactory,
 } from './ack-transport.js';
 export {
+  selectCanonicalACKCandidateUniverse,
+  selectCanonicalACKCandidatePeersWithDiagnostics,
+  type ACKCanonicalCandidatePeerSelectionInput,
+  type ACKCanonicalCandidatePeerDiagnostic,
+  type ACKCanonicalCandidatePeerSelectionResult,
+} from './ack-peer-selection.js';
+export {
   selectACKCandidatePeers,
   selectACKCandidateUniverse,
   selectACKCandidatePeersWithDiagnostics,
   type ACKCandidatePeerSelectionInput,
   type ACKCandidatePeerDiagnostic,
   type ACKCandidatePeerSelectionResult,
-} from './ack-peer-selection.js';
+} from './ack-peer-selection-compat.js';
 export {
   ACKProviderError,
   RpcPreconditionError,
@@ -196,6 +205,8 @@ export {
   type StorageAckDecisionObserver,
   type StorageACKHandlerConfig,
   type StorageAckPriorVersionRequest,
+  type StorageAckRequestContext,
+  type LocalStorageAckHeadExpectation,
   type StorageAckVmPromotionRequest,
   type StorageAckVmPromotionVerdict,
 } from './storage-ack-handler.js';
@@ -491,6 +502,7 @@ export {
   type SnapshotPageIndexStore,
   type WorkspacePublicSnapshotStore,
 } from './workspace-snapshot-store.js';
+export { acceptIncomingPublicQuads } from './incoming-public-copy.js';
 export { UpdateHandler } from './update-handler.js';
 export { ChainEventPoller, type ChainEventPollerConfig, type CursorPersistence, type OnContextGraphCreated } from './chain-event-poller.js';
 export { AccessHandler, type AccessPolicy } from './access-handler.js';

@@ -453,7 +453,7 @@ describe('E2E: Publish KC directly to context graph', () => {
     try { await nodeA?.stop(); } catch {}
   });
 
-  it('publishes KC via publishDirect from a lone core: no peer ACKs → tentative (RC11 / PR1)', async () => {
+  it('declines legacy direct publish from a lone core through its local ACK handler', async () => {
     nodeA = await createPublishProtocolAgent({
       kaNumberAllocator: makeTestKaNumberAllocator(),
       name: 'DirectCGA',
@@ -476,21 +476,11 @@ describe('E2E: Publish KC directly to context graph', () => {
     ]);
     await sleep(2000);
 
-    // RC11 / PR1 (review fix): the publisher's self-signed ACK fallback
-    // is gone. `DKGAgent.publishFromSharedMemory()` unconditionally wires
-    // `createV10ACKProvider()` on a V10-ready Hardhat chain, and that
-    // provider routes through `ACKCollector.collect()` which throws
-    // verbatim on "no connected core peers". The publisher's catch at
-    // `dkg-publisher.ts:1989-1994` rethrows verbatim (RC11 / PR1+PR3),
-    // so the publish REJECTS — it does not silently downgrade to
-    // `tentative`. Pre-PR1 the publisher synthesised a `peerId: 'self'`
-    // ACK that the contract would reject anyway on any network with
-    // `minimumRequiredSignatures >= 2`; the new behaviour fails loudly
-    // in the daemon log instead. The replicate-then-publish on-chain
-    // path is covered by the multi-node §1 / §2 tests above.
+    // The publishing core now requests its own ACK. Legacy non-graph-scoped
+    // data cannot be promoted to VM, so the local handler declines explicitly.
     await expect(
       nodeA.publishFromSharedMemory(CONTEXT_GRAPH, 'all'),
-    ).rejects.toThrow(/ACK collection failed: no connected core peers/);
+    ).rejects.toThrow(/CORE_VM_PROMOTION_DISABLED/);
   }, 20_000);
 });
 
@@ -537,22 +527,13 @@ describe('E2E: Publish rejected with insufficient receiver signatures', () => {
       { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Lonely Data"' },
     ]);
 
-    /**
-     * RC11 / PR1 (review fix): with `minimumRequiredSignatures=2`
-     * on-chain AND the lone publisher having no peer cores, the ACK
-     * collector throws "no connected core peers" before the on-chain
-     * submit branch is even reached. The publisher rethrows verbatim
-     * (no self-signed-ACK fallback in PR1+PR3), so the call REJECTS.
-     * Pre-PR1 the publisher synthesised a single self-signed ACK that
-     * the chain rejected as 1<2; the new behaviour fails earlier and
-     * the operator sees the real cause in the daemon log.
-     */
+    // Self is a candidate, but one core cannot satisfy a two-ACK quorum.
     await expect(
       nodeA.publishFromSharedMemory(
         CONTEXT_GRAPH,
         'all',
       ),
-    ).rejects.toThrow(/ACK collection failed: no connected core peers/);
+    ).rejects.toThrow(/need 2 ACKs but only 1 core peers connected/);
   }, 20_000);
 });
 
@@ -567,7 +548,7 @@ describe('E2E: Context graph registration rejected with insufficient participant
     try { await nodeA?.stop(); } catch {}
   });
 
-  it('context graph publish from a lone core: no peer ACKs → tentative (RC11 / PR1)', async () => {
+  it('declines legacy context graph publish from a lone core through its local ACK handler', async () => {
     const ctx = getSharedContext();
     nodeA = await createPublishProtocolAgent({
       kaNumberAllocator: makeTestKaNumberAllocator(),
@@ -593,24 +574,15 @@ describe('E2E: Context graph registration rejected with insufficient participant
       { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Needs Sigs"' },
     ]);
 
-    // RC11 / PR1 (review fix): V10 + LU-2 still enforces the *global*
-    // `minimumRequiredSignatures`, but the publisher no longer
-    // synthesises a self-signed ACK when peer collection yields
-    // nothing. A lone core with no other peers in its mesh therefore
-    // hits `ACKCollector.collect` with `corePeers.length === 0`, which
-    // throws "no connected core peers". The publisher rethrows
-    // verbatim and `publishFromSharedMemory` REJECTS — there is no
-    // silent tentative-downgrade. Pre-PR1 this test asserted
-    // `confirmed` because the (now-deleted) self-signed ACK satisfied
-    // the 1-of-1 quorum on the harness; that path is gone. The
-    // multi-peer happy path is covered by §1 / §2 above.
+    // The local core participates in ACK collection and declines this legacy
+    // non-graph-scoped payload because it cannot promote a copy to VM.
     await expect(
       nodeA.publishFromSharedMemory(
         CONTEXT_GRAPH,
         'all',
         { subContextGraphId: contextGraphId },
       ),
-    ).rejects.toThrow(/ACK collection failed: no connected core peers/);
+    ).rejects.toThrow(/CORE_VM_PROMOTION_DISABLED/);
   }, 20_000);
 });
 

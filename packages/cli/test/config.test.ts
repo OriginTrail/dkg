@@ -1076,6 +1076,19 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(loaded.syncSystemContextGraphsOnConnect).toBe(true);
   });
 
+  it('round-trips the on-demand agents phonebook kill switch', async () => {
+    await writeConfig({
+      name: 'test-node',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      onDemandAgentsPhonebook: false,
+    });
+
+    const loaded = await loadConfig();
+    expect(loaded.onDemandAgentsPhonebook).toBe(false);
+  });
+
   it('round-trips sync snapshot limits and Context Graph priorities', async () => {
     await writeConfig({
       name: 'test-node',
@@ -1528,6 +1541,22 @@ describe('resolveChainConfig (field-level merge)', () => {
       }, { chain: fullNetworkChain })).toThrow(
         /chain\.indexTickMs must be a positive integer/,
       );
+    }
+  });
+
+  it('resolves bounded authority reads only from an explicit boolean, with operator precedence', () => {
+    expect(resolveChainConfig({}, { chain: fullNetworkChain })?.boundedAuthorityReads).toBeUndefined();
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, boundedAuthorityReads: true },
+    })?.boundedAuthorityReads).toBe(true);
+    expect(resolveChainConfig({ chain: { boundedAuthorityReads: false } }, {
+      chain: { ...fullNetworkChain, boundedAuthorityReads: true },
+    })?.boundedAuthorityReads).toBe(false);
+
+    for (const invalid of [null, 'true', 1, {}, []]) {
+      expect(() => resolveChainConfig({
+        chain: { boundedAuthorityReads: invalid as never },
+      }, { chain: fullNetworkChain })).toThrow(/chain\.boundedAuthorityReads must be a boolean/);
     }
   });
 

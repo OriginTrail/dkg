@@ -6,6 +6,7 @@ import {
   TypedEventBus,
   buildUpdateAuthorAttestationTypedData,
   contextGraphDataUri,
+  contextGraphUpdateTopic,
   contextGraphMetaUri,
   createGraphKnowledgeAssetScope,
   generateEd25519Keypair,
@@ -691,5 +692,44 @@ describe('DKGAgent rootless update boundary', () => {
       { precomputedUpdateAttestation: attestation },
     )).rejects.toMatchObject({ code: 'LEGACY_KA_READ_ONLY' });
     expect(publisherCalls).toBe(0);
+  });
+  it.each([
+    ['public', undefined, 1],
+    ['curated', async () => new Uint8Array([1]), 0],
+  ] as const)('broadcasts a %s update on the update topic %i time(s)', async (_label, encrypt, broadcasts) => {
+    const store = new OxigraphStore();
+    await seedConfirmedRootlessHead(store);
+    const publicQuads = [q('urn:update:broadcast', 'urn:value', '"members only"')];
+    const { canonical, attestation } = await updateAttestation(publicQuads, []);
+    const agent = await makeAgentLike(store, async (kaId) => ({
+      kaId,
+      ual: UAL,
+      merkleRoot: attestation.expectedNewMerkleRoot,
+      kaManifest: [],
+      status: 'confirmed',
+      publicQuads: canonical.publicQuads,
+      onChainResult: {
+        publisherAddress: CURRENT_OWNER,
+        txHash: `0x${'12'.repeat(32)}`,
+        blockNumber: 42,
+      },
+    }));
+    agent._resolveEncryptInlinePayload = async () => encrypt;
+    agent._resolveEncryptInlineChunked = async () => encrypt;
+    const published: string[] = [];
+    agent.gossip = {
+      publish: async (topic: string) => { published.push(topic); },
+    };
+
+    await (PublishMethods.prototype as any).update.call(
+      agent,
+      KA_ID,
+      CG,
+      publicQuads,
+      [],
+      { precomputedUpdateAttestation: attestation },
+    );
+
+    expect(published).toEqual(Array(broadcasts).fill(contextGraphUpdateTopic(CG)));
   });
 });

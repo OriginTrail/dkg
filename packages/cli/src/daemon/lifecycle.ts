@@ -123,7 +123,6 @@ import {
   assertAuthorityIndexConfigPlacement,
   loadNetworkConfig,
   loadResolvedNetworkConfig,
-  resolveAutoUpdateConfig,
   resolveChainConfig,
   resolveOtherNetworkRelays,
   resolveNetworkPeerIsolationEnabled,
@@ -160,7 +159,6 @@ import {
   gitCommandEnv,
   gitCommandArgs,
   isStandaloneInstall,
-  resolveAutoUpdateSource,
   slotEntryPoint,
   CLI_NPM_PACKAGE,
   exitOnStoreConfigErrors,
@@ -264,8 +262,6 @@ import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 // the project's tsconfig (`noUnusedLocals` is off).
 import {
   daemonState,
-  resolveStandaloneInstall,
-  resolveAutoUpdatePollingMode,
   type CorsAllowlist,
 } from './state.js';
 import {
@@ -281,6 +277,10 @@ import {
   closeDaemonBackingStoresAfterTeardown,
   runProducerQuiescentTeardown,
 } from './teardown.js';
+import {
+  startEventLoopDelayMonitor,
+  type EventLoopDelayView,
+} from './event-loop-delay-monitor.js';
 import {
   closeDaemonHttpServer,
   createDaemonDetachedResponseRegistry,
@@ -311,7 +311,6 @@ import {
   loadSkillTemplate,
   buildSkillMd,
   skillEtag,
-  DAEMON_EXIT_CODE_RESTART,
   parseRequiredSignatures,
   normalizeDetectedContentType,
   currentBundledMarkItDownAssetName,
@@ -363,7 +362,6 @@ import {
 import {
   normalizeRepo,
   isValidRepoSpec,
-  repoToFetchUrl,
   githubRepoForApi,
   resolveRemoteCommitSha,
   type PendingUpdateState,
@@ -377,9 +375,8 @@ import {
   acquireUpdateLock,
   releaseUpdateLock,
 } from './auto-update.js';
-import { formatAutoUpdateTagVerificationWarning, isValidRef, resolveAutoUpdateGitRefPlan } from '../auto-update-ref.js';
-import { resolveUpdateJitterMs, createUpdateHoldoffGate } from './auto-update-jitter.js';
-import { createGitUpdateRunCheck, createNpmUpdateRunCheck } from './auto-update-runner.js';
+import { isValidRef } from '../auto-update-ref.js';
+import { startDaemonAutoUpdate } from './auto-update-polling.js';
 import {
   chainResetWipe,
   detectBackendSwitch,
@@ -737,7 +734,7 @@ export function orderACKCandidatePeerIds(input: {
   return selectACKCandidatePeers({
     connectedPeers: input.connectedPeerIds,
     selfPeerId: input.selfPeerId,
-    knownCorePeerIds: input.knownCorePeerIds,
+    capability: { mode: 'rank', corePeers: input.knownCorePeerIds },
     preferredACKPeerIds: input.preferredACKPeerIds,
     verifiedSameNetworkPeerIds: input.verifiedSameNetworkPeerIds,
     requiredACKs: Number.MAX_SAFE_INTEGER,
@@ -2021,6 +2018,7 @@ async function runDaemonInnerWithStartupOwnership(
     syncBackoffJitter: config.syncBackoffJitter,
     syncOnConnectEnabled: config.syncOnConnectEnabled,
     syncSystemContextGraphsOnConnect: config.syncSystemContextGraphsOnConnect,
+    onDemandAgentsPhonebook: config.onDemandAgentsPhonebook,
     durableSyncEnabled: config.durableSyncEnabled,
     syncGlobalMaxInflight: config.syncGlobalMaxInflight,
     syncGlobalLimit: config.syncGlobalLimit,
@@ -2284,6 +2282,9 @@ async function runDaemonInnerWithStartupOwnership(
   const agent = await DKGAgent.create(agentConfig);
 
   let publisherState: PublisherState = createInitialPublisherState(config);
+  const publisherStartupController = new AbortController();
+  let publisherStartupTimer: ReturnType<typeof setTimeout> | undefined;
+  let publisherStartup: Promise<void> | undefined;
   // Holds the running async-promote worker lifecycle (PR #3 of the
   // async-promote-queue series). Initialised in `startPostApiPublishing`
   // after the API is up so a recoverOnStartup hiccup never blocks boot;
@@ -2587,8 +2588,9 @@ async function runDaemonInnerWithStartupOwnership(
       },
     });
 
-    const publisherTimer = setTimeout(() => {
-      void (async () => {
+    publisherStartupTimer = setTimeout(() => {
+      if (publisherStartupController.signal.aborted) return;
+      publisherStartup = (async () => {
         const outcome = await startPublisherRuntimeWithOutcome({
           dataDir: dkgDir(),
           config,
@@ -2607,7 +2609,12 @@ async function runDaemonInnerWithStartupOwnership(
           knowledgeAssetVmPublishHandler: createKnowledgeAssetVmPublishHandler(agent),
           publicSnapshotStore,
           log,
+          startupSignal: publisherStartupController.signal,
         });
+        if (publisherStartupController.signal.aborted) {
+          await outcome.runtime?.stop();
+          return;
+        }
         publisherState = outcome;
         if (!outcome.availability.available
           && outcome.availability.reason === 'publisher_startup_failed'
@@ -2615,9 +2622,11 @@ async function runDaemonInnerWithStartupOwnership(
           const err = outcome.error as any;
           log(`Async publisher startup failed: ${err?.message ?? String(err)}`);
         }
-      })();
+      })().catch((error) => {
+        log(`Publisher startup cleanup error: ${error instanceof Error ? error.message : String(error)}`);
+      });
     }, 0);
-    if (publisherTimer.unref) publisherTimer.unref();
+    publisherStartupTimer.unref?.();
   };
 
   log(`PeerId: ${agent.peerId}`);
@@ -2692,110 +2701,20 @@ async function runDaemonInnerWithStartupOwnership(
   }, PING_INTERVAL_MS);
   if (pingTimer.unref) pingTimer.unref();
 
-  // Version check + auto-update.
-  // The resolver merges repo/branch/interval field-by-field across
-  // ~/.dkg/config.json → network/<env>.json → project.json, so defaults
-  // in the shipped configs take effect even when the local config
-  // omits the field (the common case after `dkg init` with default answers).
-  let updateInterval: ReturnType<typeof setInterval> | null = null;
-  const au = resolveAutoUpdateConfig(config, network);
-  const configuredAutoUpdateSource = au?.source ?? resolveAutoUpdateSource(config, network);
-  const standalone = resolveStandaloneInstall(configuredAutoUpdateSource);
-  const pollingMode = resolveAutoUpdatePollingMode(configuredAutoUpdateSource, standalone);
-
-  if (pollingMode === "git" && au) {
-    const checkIntervalMs = au.checkIntervalMinutes * 60_000;
-    let watchedRef = "";
-    let watchedRepo = "";
-    let watchedRefPlan: ReturnType<typeof resolveAutoUpdateGitRefPlan> | null = null;
-    try {
-      watchedRefPlan = resolveAutoUpdateGitRefPlan(au);
-      watchedRef = watchedRefPlan.ref;
-      watchedRepo = repoToFetchUrl(au.repo);
-    } catch (err: any) {
-      log(
-        `Auto-update (git): invalid config — ${err?.message ?? String(err)}. ` +
-          "Git polling disabled until config is fixed and the daemon is restarted.",
-      );
-    }
-
-    if (watchedRef && watchedRepo) {
-      log(
-        `Auto-update (git): enabled source="git"; watching repo="${watchedRepo}" ref="${watchedRef}" ` +
-          `(every ${au.checkIntervalMinutes}min). NPM/dist-tag updates remain recommended; git mode is advanced/experimental.`,
-      );
-      const verificationWarning = watchedRefPlan ? formatAutoUpdateTagVerificationWarning(watchedRefPlan) : null;
-      if (verificationWarning) log(verificationWarning);
-
-      // Rollout jitter: hold off a per-node random delay between detecting an
-      // available commit and applying it, so a release never restarts the whole
-      // fleet in one window (the 2026-07-10 bootstrap-storm trigger). The gate is
-      // created ONCE here so its single-flight guard holds across polling ticks.
-      const gate = createUpdateHoldoffGate({
-        jitterMs: resolveUpdateJitterMs(au.updateJitterMinutes, au.checkIntervalMinutes),
-        isShuttingDown: () => shuttingDown,
-        setUpdating: (updating) => { daemonState.isUpdating = updating; },
-        log,
-      });
-      const runCheck = createGitUpdateRunCheck({
-        gate,
-        log,
-        lastUpdateCheck: daemonState.lastUpdateCheck,
-        au,
-        onRestart: () => shutdown(DAEMON_EXIT_CODE_RESTART),
-      });
-
-      setTimeout(runCheck, 15_000);
-      updateInterval = setInterval(runCheck, checkIntervalMs);
-    }
-  } else if (pollingMode === "git") {
-    log("Auto-update (git): disabled — autoUpdate.enabled is false.");
-  } else if (pollingMode === "npm") {
-    const checkIntervalMs = (au?.checkIntervalMinutes ?? 30) * 60_000;
-    // Even in version-check-only mode (au is null because auto-apply is
-    // disabled) the policy used for the check must reflect the operator's
-    // shipped intent, and must mirror resolveAutoUpdateConfig's precedence:
-    // local config BEFORE network default. A disabled node with a local
-    // channel / allowPrerelease pin must observe its own cohort, not the
-    // network's.
-    const allowPre = au?.allowPrerelease ?? config.autoUpdate?.allowPrerelease ?? network?.autoUpdate?.allowPrerelease ?? true;
-    const channel = au?.channel ?? config.autoUpdate?.channel ?? network?.autoUpdate?.channel;
-
-    log(
-      `Auto-update (npm): ${au ? "enabled" : "disabled — version check only"}${channel ? ` channel="${channel}"` : ""} (every ${au?.checkIntervalMinutes ?? 30}min)`,
-    );
-
-    // Rollout jitter (same rationale as the git path): stagger the fleet's
-    // restarts by holding off a per-node random delay before applying. The gate
-    // is null in version-check-only mode (au disabled) — detect + record only.
-    // Created ONCE so single-flight holds across polling ticks.
-    const gate = au
-      ? createUpdateHoldoffGate({
-          jitterMs: resolveUpdateJitterMs(au.updateJitterMinutes, au.checkIntervalMinutes),
-          isShuttingDown: () => shuttingDown,
-          setUpdating: (updating) => { daemonState.isUpdating = updating; },
-          log,
-        })
-      : null;
-    const runCheck = createNpmUpdateRunCheck({
-      gate,
-      log,
-      lastUpdateCheck: daemonState.lastUpdateCheck,
-      allowPrerelease: allowPre,
-      channel,
-      nodeRole: config.nodeRole ?? "edge",
-      onRestart: () => shutdown(DAEMON_EXIT_CODE_RESTART),
-    });
-
-    setTimeout(runCheck, 15_000);
-    updateInterval = setInterval(runCheck, checkIntervalMs);
-  } else if (au?.enabled) {
-    // Monorepo dev daemon with auto-update enabled in config — log
-    // once at boot so contributors understand why polling is silent.
-    log(
-      "Auto-update: skipped — monorepo checkout detected. Use `git pull && pnpm install && pnpm build` to update.",
-    );
-  }
+  // Version check + auto-update. Each mode's gate holds off a per-node random
+  // delay between detecting an update and applying it, so a release never
+  // restarts the whole fleet in one window (the 2026-07-10 bootstrap-storm
+  // trigger); the deadline is persisted under the DKG home, so a restart
+  // mid-hold resumes it instead of drawing a fresh hold.
+  const autoUpdate = startDaemonAutoUpdate({
+    config,
+    network,
+    isShuttingDown: () => shuttingDown,
+    setUpdating: (updating) => { daemonState.isUpdating = updating; },
+    log,
+    lastUpdateCheck: daemonState.lastUpdateCheck,
+    shutdown,
+  });
 
   // --- Dashboard DB + Metrics ---
 
@@ -3145,6 +3064,13 @@ async function runDaemonInnerWithStartupOwnership(
 
   await telemetryRuntime.startConfiguredBestEffort();
   backpressureMonitor.start();
+  // Main-thread stall gauge: `/api/status` → `eventLoopDelay`, plus one
+  // rate-limited warning line when a window's max passes 2 s.
+  const eventLoopDelayMonitor = startEventLoopDelayMonitor({ log });
+  // Route/plugin code gets the reading only, never `stop()`.
+  const eventLoopDelayView: EventLoopDelayView = Object.freeze({
+    snapshot: () => eventLoopDelayMonitor.snapshot(),
+  });
 
   const PRUNE_INTERVAL_MS = 6 * 60 * 60_000; // 6 hours
   const pruneRuntimeState = async (): Promise<void> => {
@@ -3856,6 +3782,7 @@ async function runDaemonInnerWithStartupOwnership(
         apiPortRef,
         routePlugins,
         admission: admissionStats,
+        eventLoopDelay: eventLoopDelayView,
         localLlm,
         routeRpcTransport: daemonRpcRuntime?.routeTransport,
         emitMemoryGraphChanged,
@@ -3936,6 +3863,8 @@ async function runDaemonInnerWithStartupOwnership(
   async function shutdown(exitCode = 0) {
     if (shuttingDown) return;
     shuttingDown = true;
+    clearTimeout(publisherStartupTimer);
+    publisherStartupController.abort(new Error('Daemon is shutting down'));
     // Closes catch-up admission ahead of every await below, announces, and
     // performs the early `api.port` removal that tells the supervisor's
     // liveness watcher (PR #664) this is a graceful shutdown — so it reads the
@@ -3958,7 +3887,7 @@ async function runDaemonInnerWithStartupOwnership(
     };
     const cleanup = (async () => {
       try {
-        if (updateInterval) clearInterval(updateInterval);
+        autoUpdate.stop();
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
         await runChainDiscoveryScan.close().catch((err: unknown) => {
@@ -3966,6 +3895,7 @@ async function runDaemonInnerWithStartupOwnership(
         });
         logVolumePruner.stop();
         backpressureMonitor.stop();
+        eventLoopDelayMonitor.stop();
         rateLimiter.destroy();
         metricsCollector?.stop();
         natStatusWatcherStop?.();
@@ -3990,6 +3920,7 @@ async function runDaemonInnerWithStartupOwnership(
             drainCatchupJobs,
             flushTelemetry,
             stopPublisherRuntime: async () => {
+              await publisherStartup;
               await publisherState.runtime
                 ?.stop()
                 .catch((err: any) =>

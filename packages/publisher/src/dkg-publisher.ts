@@ -2301,7 +2301,20 @@ export class DKGPublisher implements Publisher {
     // Skip for mock/none chains (unit tests) — only enforce on real chains.
     // Also skip when publishContextGraphId is set (remap flow) — the source
     // CG may be unregistered while the target CG is already on-chain.
-    if (this.chain.chainId !== 'none' && !this.chain.chainId.startsWith('mock') && !options?.publishContextGraphId) {
+    // And skip when the caller resolved the on-chain id itself: the chain tx
+    // below targets that id, and the agent supplies one only from its
+    // authoritative chain binding, a live chain lookup or the durable binding
+    // read here — the same test the queued VM-publish path applies. A node
+    // can hold only the chain binding: an edge learns a public graph's id from
+    // the ContextGraphCreated event, syncs no `ontology` graph, and never sees
+    // the one-shot registration gossip if it missed it or joined later.
+    const resolvedOnChainContextGraphId = options?.onChainContextGraphId?.trim();
+    if (
+      this.chain.chainId !== 'none'
+      && !this.chain.chainId.startsWith('mock')
+      && !options?.publishContextGraphId
+      && !resolvedOnChainContextGraphId
+    ) {
       const cgMetaUri = contextGraphMetaUri(contextGraphId);
       const cgDataUri = contextGraphDataUri(contextGraphId);
 
@@ -3543,6 +3556,9 @@ export class DKGPublisher implements Publisher {
         );
       } catch (err) {
         // RC11 / PR1+PR3: no self-signed ACK fallback. ACK collection
+        // (A publishing Core's own StorageACK through its local endpoint is
+        // different: it is one verified signature of the Core quorum, not a
+        // fallback.)
         // failure is a publish failure — propagate the underlying
         // ACKProvider error verbatim so callers (and the daemon log)
         // see the real cause (RPC pre-flight, quorum unmet, transport,
@@ -5255,13 +5271,13 @@ export class DKGPublisher implements Publisher {
     // Compute real serialized byte size — must match the publish path serializer.
     // Done BEFORE `chain:writeahead:start` so any error during serialization
     // does not leave an unmatched write-ahead boundary.
-    const updateNquadsStr = allSkolemizedQuads
-      .map(
-        (q: { subject: string; predicate: string; object: string; graph?: string }) =>
-          `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph || dataGraph}> .`,
-      )
-      .join('\n');
-    const updateByteSize = BigInt(new TextEncoder().encode(updateNquadsStr).length);
+    const updatePayloadMeasurement = measureCanonicalPublicationPayload({
+      publicQuads: allSkolemizedQuads,
+      fallbackGraph: dataGraph,
+    });
+    const updateNquadsStr = updatePayloadMeasurement.publicNQuads;
+    const updateNquadsBytes = updatePayloadMeasurement.publicBytes;
+    const updateByteSize = updatePayloadMeasurement.publicByteSize;
 
     // OT-RFC-49 / WS-D (update) — mirror the curated PUBLISH producer
     // (dkg-publisher.ts:2030-2169). A value-adding curated update commits the
@@ -5365,12 +5381,17 @@ export class DKGPublisher implements Publisher {
         effectiveUpdateByteSize = updateByteSize;
       }
     } else {
-      // PUBLIC update — unchanged from the prior behaviour: send the full
-      // update N-quads inline so peers recompute `newMerkleRoot`, unless private
-      // roots are mixed in (then the peer can't recompute and we omit staging).
-      updateStagingQuads = updatePrivateRoots.length === 0
-        ? new TextEncoder().encode(updateNquadsStr)
-        : undefined;
+      // A graph-scoped intent carries its private root, so the receiver can fold
+      // it over small inline public updates without relying on a local SWM copy.
+      // Larger updates retain the exact per-KA SWM fallback because receivers
+      // reject inline staging payloads above the shared protocol ceiling.
+      // Legacy public updates keep their established inline behavior, while
+      // legacy mixed updates remain SWM-only because they carry no private root.
+      updateStagingQuads = graphUpdate !== undefined
+        ? selectPublicStagingQuads('inline-small-swm', updateNquadsBytes)
+        : updatePrivateRoots.length === 0
+          ? updateNquadsBytes
+          : undefined;
       effectiveUpdateByteSize = updateByteSize;
     }
     // B6 — deferred PUBLIC `_catalog` persist. Structurally identical to the
@@ -5547,9 +5568,9 @@ export class DKGPublisher implements Publisher {
           isEncryptedPayload: useEncryptedInlineUpdate ? true : undefined,
           // For a curated update the inline ACK payload is the PUBLIC catalog
           // N-quads (`updateStagingQuads` == the catalog bytes). For a public
-          // update it stays the full update N-quads (when no private roots are
-          // mixed in) so peers can recompute `newMerkleRoot`; otherwise the peer
-          // falls back to verifying against its SWM copy. Selected above.
+          // graph-scoped update it is the full update N-quads, with any private
+          // root carried separately on the intent. Legacy private-root updates
+          // still omit staging and fall back to an SWM copy. Selected above.
           stagingQuads: updateStagingQuads,
           swmGraphId: contextGraphId,
           subGraphName: options.subGraphName,

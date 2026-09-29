@@ -328,6 +328,13 @@ describe('metrics — bounded, low-cardinality attributes only', () => {
     m.contextGraphCatchupJobsTotal.add(1, { status: 'done', admission: 'walk' });
     m.contextGraphCatchupJobDurationMs.record(305_000, { admission: 'walk' });
 
+    // On-demand agents phonebook fetches: trigger {subscribe|vm-reconcile},
+    // outcome {complete|partial|empty|failed|no-peers}, curator_resolved {true|false}.
+    m.agentsPhonebookFetchTotal.add(1, {
+      trigger: 'subscribe', outcome: 'complete', curator_resolved: 'true',
+    });
+    m.agentsPhonebookFetchDurationMs.record(24_000, { trigger: 'vm-reconcile', outcome: 'empty' });
+
     await mp.forceFlush();
 
     const keys = new Set<string>();
@@ -343,6 +350,8 @@ describe('metrics — bounded, low-cardinality attributes only', () => {
       // W1 (I1–I9). All closed vocabularies clamped at the record site.
       'transport', 'plane', 'lane', 'scope', 'owner_source', 'joiner_source',
       'include_shared_memory', 'status', 'admission',
+      // On-demand agents phonebook fetches: closed vocabularies at the record site.
+      'trigger', 'curator_resolved',
     ]);
     expect([...keys].filter((k) => !ALLOWED.has(k))).toEqual([]);
     // high-cardinality keys must never be metric labels

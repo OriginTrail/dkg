@@ -51,10 +51,19 @@ export type Rfc64CatalogMetadataBootstrapOutcomeV1 =
   | 'fetched'
   | 'not-found';
 
-/** One in-flight bootstrap per (agent, graph); concurrent callers share it. */
+/** Public registration already authenticated by the explicit subscribe route. */
+export interface RegisteredPublicMetadataBootstrapProofV1 {
+  readonly contextGraphId: string;
+  readonly onChainId: string;
+}
+
+/** One in-flight bootstrap per (agent, graph); only equivalent authority shares it. */
 const rfc64MetadataBootstrapsInFlightV1 = new WeakMap<
   DKGAgent,
-  Map<string, Promise<Rfc64CatalogMetadataBootstrapOutcomeV1>>
+  Map<string, {
+    proofKey?: string;
+    promise: Promise<Rfc64CatalogMetadataBootstrapOutcomeV1>;
+  }>
 >();
 
 export class Rfc64MetaBootstrapMethods extends DKGAgentBase {
@@ -69,19 +78,34 @@ export class Rfc64MetaBootstrapMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     signal?: AbortSignal,
+    registeredPublicProof?: Readonly<RegisteredPublicMetadataBootstrapProofV1>,
   ): Promise<Rfc64CatalogMetadataBootstrapOutcomeV1> {
     let inFlight = rfc64MetadataBootstrapsInFlightV1.get(this);
     if (inFlight === undefined) {
       inFlight = new Map();
       rfc64MetadataBootstrapsInFlightV1.set(this, inFlight);
     }
+    const proofKey = registeredPublicProof === undefined
+      ? undefined
+      : `${registeredPublicProof.contextGraphId}\0${registeredPublicProof.onChainId}`;
     const existing = inFlight.get(contextGraphId);
-    if (existing !== undefined) return existing;
-    const run = this.runRfc64CatalogContextGraphMetadataBootstrapV1(contextGraphId, signal)
+    if (existing !== undefined) {
+      if (existing.proofKey === proofKey) return existing.promise;
+      // An activation pull without chain admission may be in flight when an
+      // explicit subscribe proves public registration. Run that stronger pull
+      // after the first generation settles; never reuse its weaker outcome.
+      return existing.promise.catch(() => undefined).then(() =>
+        this.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(
+          contextGraphId, signal, registeredPublicProof,
+        ));
+    }
+    const run = this.runRfc64CatalogContextGraphMetadataBootstrapV1(
+      contextGraphId, signal, registeredPublicProof,
+    )
       .finally(() => {
-        if (inFlight!.get(contextGraphId) === run) inFlight!.delete(contextGraphId);
+        if (inFlight!.get(contextGraphId)?.promise === run) inFlight!.delete(contextGraphId);
       });
-    inFlight.set(contextGraphId, run);
+    inFlight.set(contextGraphId, { proofKey, promise: run });
     return run;
   }
 
@@ -89,6 +113,7 @@ export class Rfc64MetaBootstrapMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     signal?: AbortSignal,
+    registeredPublicProof?: Readonly<RegisteredPublicMetadataBootstrapProofV1>,
   ): Promise<Rfc64CatalogMetadataBootstrapOutcomeV1> {
     signal?.throwIfAborted();
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
@@ -99,19 +124,25 @@ export class Rfc64MetaBootstrapMethods extends DKGAgentBase {
     if (this.subscribedContextGraphs.get(contextGraphId)?.subscribed !== true) {
       return 'not-subscribed';
     }
-    // Fail closed: only an accepted PUBLIC policy may drive this pull. A
+    // Fail closed: only authenticated PUBLIC authority may drive this pull. A
     // private graph's metadata arrives through the authenticated join-approval
-    // path, and a graph with no accepted policy has no business fetching.
+    // path. An explicit subscribe may already have proved a registered public
+    // graph against current chain authority before the catalog service holds
+    // that policy. Carry that exact admission proof into this catch-up job;
+    // background activation without one never starts a new chain read here.
     const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
-    if (accepted === null || accepted.policy.accessPolicy !== 0) {
-      return 'no-accepted-public-policy';
-    }
+    if (accepted?.policy.accessPolicy === 1) return 'no-accepted-public-policy';
+    if (accepted === null && !(
+      registeredPublicProof?.contextGraphId === contextGraphId
+      && /^[1-9][0-9]*$/.test(registeredPublicProof.onChainId)
+    )) return 'no-accepted-public-policy';
     // The owner this node already authenticated: the seed signer for an
     // owner-signed policy, otherwise the wallet namespace of the id. A served
     // declaration that names a different curator is not this graph's.
-    const expectedCuratorAddress = accepted.policy.source.kind === 'owner-signed-unregistered'
+    const expectedCuratorAddress = accepted?.policy.source.kind === 'owner-signed-unregistered'
       ? accepted.policy.source.ownerAddress
       : rfc64UnregisteredAuthorityOwnerV1(contextGraphId) ?? undefined;
+    if (expectedCuratorAddress === undefined) return 'no-accepted-public-policy';
     if (await this.hasConfirmedMetaState(contextGraphId).catch(() => false)) {
       return 'already-confirmed';
     }

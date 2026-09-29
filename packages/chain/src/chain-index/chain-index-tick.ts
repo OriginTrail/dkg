@@ -14,6 +14,7 @@ import {
   type ChainEventLogState,
   type ChainEventLogStore,
 } from './chain-event-log.js';
+import { tombstoneChainEventLogScope } from './chain-event-log-tombstones.js';
 import {
   CHAIN_EVENT_LOG_FAMILIES,
   type ChainEventDecoderRegistry,
@@ -268,7 +269,10 @@ export class ChainIndexTick {
     blockRequests += verification.blockRequests;
     if (verification.outcome !== undefined) {
       if (verification.outcome === 'tombstoned') {
-        await store.tombstone(scope, cursor.revision);
+        // Through the helper, never `store.tombstone` directly: it advances the
+        // scope's tombstone generation, which is how the in-process readers
+        // that keep folds across revisions learn that the rows are gone.
+        await tombstoneChainEventLogScope(store, scope, cursor.revision);
       } else {
         await store.commit(scope, cursor.revision, {
           cursor: { ...cursor, head: { ...observedHead, fetchedAtMs: headFetchedAtMs } },

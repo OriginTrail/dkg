@@ -800,7 +800,7 @@ dkg agent publish-profile   # retry after a partial-success rotate/revoke
 
 ### Async publishing (job queue)
 
-Use the job queue for bulk or long-running publishes, publishes that must survive the client session, or when the daemon should hold its own signing wallet. For small interactive publishes, use the synchronous per-KA `POST /api/knowledge-assets/{name}/vm/publish` instead.
+Use the job queue for bulk or long-running publishes, publishes that must survive the client session, or when the daemon should hold its own signing wallet. For small interactive publishes, use the synchronous per-KA `POST /api/knowledge-assets/{name}/vm/publish` instead. Snapshot-read backpressure returns `503` with `STORE_SCHEDULER_BUSY` or `STORE_OPERATION_TIMEOUT`, `retryable: true`, `Retry-After: 1`, and `jobCreated: false` before enqueue. Retry the same request without re-sharing. This marker describes this request, not earlier jobs; it is omitted once enqueue starts. Store `outcome` remains separate. Genuine stale snapshots still return `409 PUBLISH_INTENT_STALE`. See `docs/use-dkg/async-publisher-wallets.md` for the admission contract.
 
 CLI equivalents:
 
