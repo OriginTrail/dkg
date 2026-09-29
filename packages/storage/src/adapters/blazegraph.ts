@@ -786,8 +786,9 @@ export class BlazegraphStore implements TripleStore {
 
   async listGraphsByPrefix(prefix: string, options?: TripleStoreQueryOptions): Promise<string[]> {
     const r = await this.queryWithOperation(
-      `SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o }
-        FILTER(STRSTARTS(STR(?g), ${sparqlString(prefix)})) }`,
+      `SELECT DISTINCT ?g WHERE { GRAPH ?g { }
+        FILTER(STRSTARTS(STR(?g), ${sparqlString(prefix)}))
+        FILTER EXISTS { GRAPH ?g { ?s ?p ?o } } }`,
       options,
       'listGraphs',
     );
