@@ -183,6 +183,7 @@ describe('DKGQueryEngine', () => {
       expect(options).toMatchObject({
         priority: 'background',
         source: 'api.query',
+        maxResponseBytes: 10 * 1024 * 1024,
       });
       expect(options.signal).toBeUndefined();
     }
@@ -913,6 +914,23 @@ describe('DKGQueryEngine', () => {
       );
       const subjects = result.bindings.map((b) => b['s']).sort();
       expect(subjects).toEqual([E1, E2]);
+    });
+
+    it('enforces one cumulative materialization budget across per-graph reads', async () => {
+      const query = `SELECT ?s ?v WHERE {
+        { ?s <http://ex.org/p1> ?v } UNION { ?s <http://ex.org/p2> ?v }
+      }`;
+
+      // Each graph's decoded row is below 30 bytes by itself, but retaining
+      // both rows for the merged response crosses the request-wide ceiling.
+      await expect(engine.query(query, {
+        contextGraphId: CONTEXT_GRAPH,
+        view: 'verifiable-memory',
+        maxResponseBytes: 30,
+      })).rejects.toMatchObject({
+        code: 'STORE_RESPONSE_TOO_LARGE',
+        maxBytes: 30,
+      });
     });
 
     it('SELECT with a solution-set modifier (ORDER BY) is rejected, not silently corrupted', async () => {

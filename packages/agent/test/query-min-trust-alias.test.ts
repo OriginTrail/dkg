@@ -62,7 +62,7 @@ function makeStubAgent(observer: (opts: QueryOptions | undefined) => void): Inst
 }
 
 describe('DKGAgent.query forwards `_minTrust` alias (PR #239 iter-6)', () => {
-  it('forwards store cancellation, priority, and source attribution', async () => {
+  it('forwards store cancellation, priority, source, and response bounds', async () => {
     let seen: QueryOptions | undefined;
     const agent = makeStubAgent((o) => { seen = o; });
     const controller = new AbortController();
@@ -72,12 +72,14 @@ describe('DKGAgent.query forwards `_minTrust` alias (PR #239 iter-6)', () => {
       signal: controller.signal,
       priority: 'background',
       source: 'api.query',
+      maxResponseBytes: 10 * 1024 * 1024,
     });
 
     expect(seen).toMatchObject({
       signal: controller.signal,
       priority: 'background',
       source: 'api.query',
+      maxResponseBytes: 10 * 1024 * 1024,
     });
   });
 

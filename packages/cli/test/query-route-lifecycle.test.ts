@@ -8,6 +8,7 @@ import {
 } from '@origintrail-official/dkg-agent';
 import {
   SparqlHttpResponseError,
+  StoreResponseTooLargeError,
   StoreOperationTimeoutError,
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
@@ -364,6 +365,30 @@ describe('/api/query request lifecycle', () => {
     expect(res.statusCode).toBe(200);
     expect(tracker.complete).toHaveBeenCalledTimes(1);
     expect(tracker.fail).not.toHaveBeenCalled();
+  });
+
+  it('reports an oversized public query result as a stable 413 response', async () => {
+    const req = new RequestStub();
+    const res = new ResponseStub();
+    const error = new StoreResponseTooLargeError(
+      API_QUERY_MAX_STORE_RESPONSE_BYTES,
+      API_QUERY_MAX_STORE_RESPONSE_BYTES + 1,
+    );
+    const agent = { query: vi.fn(async () => { throw error; }) };
+    const tracker = {
+      start: vi.fn(), startPhase: vi.fn(), completePhase: vi.fn(),
+      complete: vi.fn(), fail: vi.fn(), cancel: vi.fn(),
+    };
+
+    await handleQueryRoutes(queryRouteContext(req, res, agent, tracker));
+
+    expect(res.statusCode).toBe(413);
+    expect(JSON.parse(res.body)).toEqual(expect.objectContaining({
+      code: 'QUERY_RESULT_TOO_LARGE',
+      limitBytes: API_QUERY_MAX_STORE_RESPONSE_BYTES,
+      actualBytes: API_QUERY_MAX_STORE_RESPONSE_BYTES + 1,
+    }));
+    expect(tracker.fail).toHaveBeenCalledWith(expect.anything(), error);
   });
 
   it('normalizes the legacy all sentinel before the agent query boundary', async () => {

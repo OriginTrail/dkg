@@ -736,6 +736,15 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         tracker.fail(ctx, err);
         return;
       }
+      if (err?.code === 'STORE_RESPONSE_TOO_LARGE') {
+        tracker.fail(ctx, err);
+        return jsonResponse(res, 413, {
+          error: err?.message ?? 'Query result exceeded the byte limit',
+          code: 'QUERY_RESULT_TOO_LARGE',
+          limitBytes: API_QUERY_MAX_STORE_RESPONSE_BYTES,
+          ...(typeof err?.actualBytes === 'number' ? { actualBytes: err.actualBytes } : {}),
+        });
+      }
       const storeUnavailableOutcome = respondIfStoreUnavailable(res, err);
       if (storeUnavailableOutcome !== null) {
         // Pre-dispatch shedding is a cancellation; a store deadline may have

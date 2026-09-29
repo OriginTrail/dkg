@@ -1,6 +1,7 @@
 import {
   asGraphWriteRevisionSource,
   isSparqlHttpResponseError,
+  StoreResponseTooLargeError,
 } from '@origintrail-official/dkg-storage';
 import type {
   TripleStore,
@@ -103,11 +104,47 @@ function storeOptions(options: QueryOptions | undefined): StoreQueryOptions | un
 function sharedDiscoveryStoreOptions(
   options: StoreQueryOptions | undefined,
 ): StoreQueryOptions | undefined {
-  if (!options?.priority && !options?.source) return undefined;
+  if (!options?.priority && !options?.source && options?.maxResponseBytes === undefined) {
+    return undefined;
+  }
   return {
     priority: options.priority,
     source: options.source,
+    maxResponseBytes: options.maxResponseBytes,
   };
+}
+
+let nextMaterializationBudgetId = 0;
+
+class QueryMaterializationBudget {
+  readonly id = ++nextMaterializationBudgetId;
+  private usedBytes = 0;
+
+  constructor(readonly maxBytes: number) {}
+
+  consume(result: StoreQueryResult): void {
+    const responseBytes = estimateStoreResultBytes(result);
+    const nextUsed = this.usedBytes + responseBytes;
+    if (nextUsed > this.maxBytes) {
+      throw new StoreResponseTooLargeError(this.maxBytes, nextUsed);
+    }
+    this.usedBytes = nextUsed;
+  }
+}
+
+function estimateStoreResultBytes(result: StoreQueryResult): number {
+  const strings: string[] = [];
+  if (result.type === 'bindings') {
+    if (result.variables) strings.push(...result.variables);
+    for (const row of result.bindings) strings.push(...Object.keys(row), ...Object.values(row));
+  } else if (result.type === 'quads') {
+    for (const quad of result.quads) {
+      strings.push(quad.subject, quad.predicate, quad.object, quad.graph);
+    }
+  } else {
+    return 1;
+  }
+  return strings.reduce((total, value) => total + Buffer.byteLength(value, 'utf8'), 0);
 }
 
 interface StoreReadLane {
@@ -124,9 +161,14 @@ interface QueryStoreReadContext extends StoreReadLane {
 function createStoreReadLane(
   store: TripleStore,
   options: StoreQueryOptions | undefined,
+  budget: QueryMaterializationBudget | undefined,
 ): StoreReadLane {
   return {
-    query: (sparql) => store.query(sparql, options),
+    query: async (sparql) => {
+      const result = await store.query(sparql, options);
+      budget?.consume(result);
+      return result;
+    },
     listGraphsByPrefix: (prefix) => listGraphsByPrefix(store, prefix, options),
     listGraphFamily: (rootGraph) => listGraphFamily(store, rootGraph, options),
   };
@@ -137,16 +179,24 @@ function createQueryStoreReadContext(
   queryOptions: QueryOptions | undefined,
 ): QueryStoreReadContext {
   const options = storeOptions(queryOptions);
-  const lane = createStoreReadLane(store, options);
+  const budget = options?.maxResponseBytes === undefined
+    ? undefined
+    : new QueryMaterializationBudget(options.maxResponseBytes);
+  const lane = createStoreReadLane(store, options, budget);
   const sharedOptions = sharedDiscoveryStoreOptions(options);
   return {
     ...lane,
     signal: options?.signal,
     shared: {
-      ...createStoreReadLane(store, sharedOptions),
+      ...createStoreReadLane(store, sharedOptions, budget),
       cacheKey: JSON.stringify([
         sharedOptions?.priority ?? 'normal',
         sharedOptions?.source ?? null,
+        sharedOptions?.maxResponseBytes ?? null,
+        // A mutable cumulative budget cannot safely be captured by another
+        // request's in-flight discovery. Completed revision-gated results may
+        // still be reused because they perform no store materialization.
+        budget?.id ?? null,
       ]),
     },
   };

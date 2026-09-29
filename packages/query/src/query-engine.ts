@@ -1,4 +1,7 @@
-import type { Quad, StoreWorkPriority } from '@origintrail-official/dkg-storage';
+import type {
+  Quad,
+  QueryOptions as StoreQueryOptions,
+} from '@origintrail-official/dkg-storage';
 import type { GetView } from '@origintrail-official/dkg-core';
 import { TrustLevel } from '@origintrail-official/dkg-core';
 
@@ -7,21 +10,9 @@ export interface QueryResult {
   quads?: Quad[];
 }
 
-export interface QueryOptions {
+export interface QueryOptions extends StoreQueryOptions {
   contextGraphId?: string;
   timeout?: number;
-  /** Cancel queued and in-flight store work when the caller goes away. */
-  signal?: AbortSignal;
-  /** Store admission lane. External/API reads should use `background`. */
-  priority?: StoreWorkPriority;
-  /** Bounded operation label propagated to store diagnostics and slow-query telemetry. */
-  source?: string;
-  /**
-   * Maximum remote triple-store response body accepted before parsing. HTTP
-   * adapters enforce this while streaming, so one public query cannot force
-   * an unbounded JSON/N-Quads allocation in the node process.
-   */
-  maxResponseBytes?: number;
   /** When set to '_shared_memory', query runs over the context graph's shared memory graph only. */
   graphSuffix?: '_shared_memory';
   /** When true and contextGraphId is set, query runs over both data and shared memory graphs (union). */
