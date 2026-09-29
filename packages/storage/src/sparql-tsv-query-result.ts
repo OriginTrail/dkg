@@ -14,7 +14,9 @@ export class SparqlTsvResultsShapeError extends SparqlResultsShapeError {
 
 /** Decode a complete SPARQL 1.1 TSV SELECT result into the public store shape. */
 export function decodeSparqlTsvSelectResult(text: string): SelectResult {
-  const lines = text.replace(/^\uFEFF/, '').split(/\r\n|\n|\r/);
+  const payload = text.replace(/^\uFEFF/, '');
+  if (payload.length === 0) malformed('SPARQL TSV response is missing its header');
+  const lines = payload.split(/\r\n|\n|\r/);
   // One final line terminator is framing, not an extra zero-column solution.
   if (lines.at(-1) === '') lines.pop();
   if (lines.length === 0) malformed('SPARQL TSV response is missing its header');
@@ -76,7 +78,8 @@ function formatTsvTerm(
   if (decoded === null) {
     malformed(`${label} is not a valid RDF term`);
   }
-  return normalizer.format(decoded.term, column, label, decoded.canonical);
+  if (decoded.kind === 'canonical-plain-literal') return decoded.value;
+  return normalizer.format(decoded.value, column, label);
 }
 
 function malformed(message: string): never {

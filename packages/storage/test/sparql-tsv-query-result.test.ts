@@ -70,6 +70,11 @@ describe('SPARQL TSV SELECT decoding', () => {
     expect(decodeSparqlTsvSelectResult('\n\n').bindings).toEqual([{}]);
   });
 
+  it.each(['', '\uFEFF'])('rejects a missing TSV header in %j', (text) => {
+    expect(() => decodeSparqlTsvSelectResult(text))
+      .toThrow(SparqlTsvResultsShapeError);
+  });
+
   it.each([
     ['?v\t?v\n<urn:a>\t<urn:b>\n', 'must not contain duplicates'],
     ['v\n<urn:a>\n', 'must be a variable'],

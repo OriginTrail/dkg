@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  normalizeSparqlTsvResultTerm,
   parseRdfLiteralTerm,
   parseSparqlTsvResultTerm,
   parseWritableRdfTerm,
@@ -158,5 +159,32 @@ describe('parseSparqlTsvResultTerm', () => {
     '"x"^^<relative>',
   ])('rejects non-TSV/result-only spelling %j', (term) => {
     expect(parseSparqlTsvResultTerm(term)).toBeNull();
+  });
+});
+
+describe('normalizeSparqlTsvResultTerm', () => {
+  it('returns an owned canonical value for the fast plain-literal path', () => {
+    expect(normalizeSparqlTsvResultTerm('"plain"')).toEqual({
+      kind: 'canonical-plain-literal',
+      value: '"plain"',
+    });
+  });
+
+  it('returns one semantic term for the fast IRI path', () => {
+    expect(normalizeSparqlTsvResultTerm('<urn:test:i>')).toEqual({
+      kind: 'term',
+      value: { kind: 'iri', value: 'urn:test:i' },
+    });
+  });
+
+  it('returns one semantic term for grammar-backed values', () => {
+    expect(normalizeSparqlTsvResultTerm('"line\\ntext"')).toEqual({
+      kind: 'term',
+      value: { kind: 'literal', value: { kind: 'plain', value: 'line\ntext' } },
+    });
+  });
+
+  it('rejects malformed terms', () => {
+    expect(normalizeSparqlTsvResultTerm("'unterminated")).toBeNull();
   });
 });
