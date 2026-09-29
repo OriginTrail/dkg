@@ -608,6 +608,7 @@ describe('on-demand agents phonebook across stop()', () => {
       remoteCuratorWallet: () => OWNER,
       isActiveSubscription: () => true,
       phonebookHasWallet: async () => false,
+      recipientKeyKnown: async () => false,
       readAccessPolicy: async () => 'public',
       listConnectedPeers: () => [{ peerId: CORE, core: true }],
       preparePeer: async () => true,

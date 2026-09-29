@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_ACCESS, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
+import { createOperationContext, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_NETWORK_IDENTITY, PROTOCOL_ACCESS, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import { peerIdFromString } from '@libp2p/peer-id';
 import {
   InMemoryPeerSyncLease,
@@ -21,6 +21,8 @@ import {
 } from '../src/sync/backpressure.js';
 import type { OperationContext, PeerResolver } from '@origintrail-official/dkg-core';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import type { SelectedSharedMemorySyncResult } from '../src/sync/shared-memory-freshness.js';
+import { emptySharedMemorySyncResult } from '../src/sync/shared-memory-diagnostics.js';
 import {
   asSyncOnConnectTestAgent,
   peerSyncSessionDriver,
@@ -59,6 +61,12 @@ function freshPeerIdString(): string {
 }
 
 const noopLog = (_ctx: OperationContext, _message: string) => {};
+
+/**
+ * #2822 field log: identify ran before the peer registered its sync handlers,
+ * and its later pooled pulls added only the pooled id to the peer record.
+ */
+const STALE_IDENTIFY_PROTOCOLS = [PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC_POOLED];
 
 async function flushMicrotasks(): Promise<void> {
   // The peer-job transaction now crosses explicit phase-result and accounting
@@ -448,6 +456,86 @@ describe('runSyncOnConnect callbacks', () => {
     expect(skipped).toEqual([{ peerId: remotePeer, protocols: ['/ipfs/id/1.0.0', '/meshsub/1.1.0'] }]);
     expect(synced).toEqual([]);
     expect(syncFromPeer.calls).toEqual([]);
+  });
+
+  it('syncs a peer whose stale identify lists only the pooled sync id (#2822)', async () => {
+    const remotePeer = freshPeerIdString();
+    const skipped: string[] = [];
+    const syncFromPeer = recorder(async () => 3);
+
+    const outcome = await runSyncOnConnect({
+      signal: ACTIVE_SYNC_LIFETIME,
+      ordinarySharedMemoryLane: ordinaryLane(() => [], async () => 0),
+      remotePeer,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [...STALE_IDENTIFY_PROTOCOLS],
+      peerCapabilities: new PeerCapabilityRegistry(),
+      getSyncContextGraphs: () => [],
+      syncFromPeer,
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      logInfo: noopLog,
+      onPeerSkippedNoSync: (peerId) => skipped.push(peerId),
+    });
+
+    expect(outcome).toBe('synced');
+    expect(skipped).toEqual([]);
+    expect(syncFromPeer.calls).toEqual([[remotePeer]]);
+  });
+
+  it('retries the selected lane for a peer whose stale identify lists only the pooled sync id (#2822)', async () => {
+    const remotePeer = freshPeerIdString();
+    const skipped: string[] = [];
+    const selectedSync = recorder(async (): Promise<SelectedSharedMemorySyncResult> => ({
+      kind: 'selected-shared-memory',
+      requestedScope: {
+        kind: 'selected-public',
+        targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' }],
+      },
+      shared: { ...emptySharedMemorySyncResult(), insertedTriples: 2 },
+      scopeComplete: true,
+      selectedScopeComplete: true,
+      targetDiagnostics: {
+        selectedPublic: { completed: 1, total: 1 },
+        ordinaryPrivate: { completed: 0, total: 0 },
+      },
+    }));
+
+    const outcome = await runSelectedSharedMemoryRetry({
+      signal: ACTIVE_SYNC_LIFETIME,
+      remotePeer,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [...STALE_IDENTIFY_PROTOCOLS],
+      selectedSharedMemoryLane: {
+        admitWork: () => ({ contextGraphIds: ['selected-cg'], syncFromPeer: selectedSync }),
+      },
+      logInfo: noopLog,
+      onPeerSkippedNoSync: (peerId) => skipped.push(peerId),
+    });
+
+    expect(outcome).toBe('synced');
+    expect(skipped).toEqual([]);
+    expect(selectedSync.calls).toHaveLength(1);
+  });
+
+  it('still skips a selected retry when the peer lists neither sync id', async () => {
+    const remotePeer = freshPeerIdString();
+    const skipped: string[] = [];
+    const admitWork = recorder((_peerId: string) => null);
+
+    const outcome = await runSelectedSharedMemoryRetry({
+      signal: ACTIVE_SYNC_LIFETIME,
+      remotePeer,
+      syncingPeers: new InMemoryPeerSyncLease(),
+      getPeerProtocols: async () => [PROTOCOL_NETWORK_IDENTITY, '/ipfs/id/1.0.0'],
+      selectedSharedMemoryLane: { admitWork },
+      logInfo: noopLog,
+      onPeerSkippedNoSync: (peerId) => skipped.push(peerId),
+    });
+
+    expect(outcome).toBe('skipped-no-sync');
+    expect(skipped).toEqual([remotePeer]);
+    expect(admitWork.calls).toEqual([]);
   });
 
   it('fires onSyncAccounting after a successful sync', async () => {

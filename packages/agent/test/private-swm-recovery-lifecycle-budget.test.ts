@@ -91,6 +91,7 @@ function harness(
     log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
     resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
+    rfc64LegacySwmGossipAllowedForContextGraph: () => true,
     createSwmTargetExecutorSessionV1: () => factory(),
     privateSnapshotWalks,
     syncSharedMemoryFromPeerDetailedExecution: LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,

@@ -26,7 +26,7 @@ import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
-  PROTOCOL_NETWORK_IDENTITY,
+  PROTOCOL_NETWORK_IDENTITY, advertisesSyncProtocol,
   PROTOCOL_SWM_SENDER_KEY, PROTOCOL_SWM_UPDATE, PROTOCOL_SWM_SHARE_ACK, PROTOCOL_SWM_HOST_CATCHUP, PROTOCOL_MESSAGE,
   contextGraphPublishTopic, contextGraphWorkspaceTopic, contextGraphAppTopic, contextGraphUpdateTopic, contextGraphFinalizationTopic,
   contextGraphDataGraphUri, contextGraphMetaGraphUri, contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri,
@@ -1309,6 +1309,7 @@ function durableSyncSingleFlightKey(params: {
   hasSignal: boolean;
   hasCurrentFence: boolean;
   hasChallengePinnedSelection: boolean;
+  hasForcedFreshExactSession: boolean;
   exactAssetUals?: readonly string[];
   settlementSliceTimeoutMs?: number;
   priority?: number;
@@ -1321,6 +1322,7 @@ function durableSyncSingleFlightKey(params: {
     || params.hasSignal
     || params.hasCurrentFence
     || params.hasChallengePinnedSelection
+    || params.hasForcedFreshExactSession
   ) {
     return null;
   }
@@ -1671,6 +1673,8 @@ export type DurableSyncOptions = {
   onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
   /** Atomic VM-recovery selection; challenge-pinned assets cannot omit their pins. */
   exactAssetSelection?: ExactAssetSelection;
+  /** VM update refreshes must not reuse a responder snapshot from an older KA version. */
+  forceFreshExactSession?: boolean;
   /** Owner-private retained META prefix for bounded durable recovery. */
   durableMetaContinuation?: DurableMetaContinuation;
   /** Admission override for foreground VM recovery. */
@@ -1713,6 +1717,7 @@ type LegacyDurableContextGraphOptions = {
   onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   fetchTimeoutMs?: number;
   exactAssetSelection?: ExactAssetSelection;
+  forceFreshExactSession?: boolean;
   authenticationTimeoutMs?: number;
   operationFetchDeadline?: number;
   operationDeadline?: number;
@@ -3011,6 +3016,29 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               // bind-only-the-matching-CG branch is directly testable.
               await this.handleKARegisteredNudge(onChainId, kaId, ctx, signal);
             }
+          : undefined,
+        // #2858 — refresh nudge for KA updates. An update keeps the KA id and
+        // moves its root, and the sweep never revisits a settled ordinal, so a
+        // node holding only a confirmed VM copy learns of the new version here.
+        // Decided from local state; a V10 KA is its own batch, so the event's
+        // batch id is the KA id. The event's block keeps a chain read that
+        // has not seen the update from settling the refresh, and its
+        // transaction spares a check of the publisher's own copy. A nudge that
+        // fails holds the lane, and the lane never persists its cursor past
+        // an unsettled refresh, so a restart replays that update.
+        onCollectionUpdated: this.vmReconcileEnabled()
+          ? async ({ batchId, merkleRoot, blockNumber, txHash, logIndex, blockHash, signal }) => {
+              await this.handleKAUpdatedNudge(batchId, merkleRoot, ctx, {
+                blockNumber,
+                ...(txHash === undefined ? {} : { txHash }),
+                ...(logIndex === undefined ? {} : { logIndex }),
+                ...(blockHash === undefined ? {} : { blockHash }),
+                signal,
+              });
+            }
+          : undefined,
+        collectionUpdatesPersistCeiling: this.vmReconcileEnabled()
+          ? () => this.vmRefreshPersistCeiling()
           : undefined,
       });
       await this.chainPoller.start();
@@ -4636,9 +4664,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this.config.rfc64CatalogBootstrap,
           this.config.rfc64PublicCatalogBootstrap,
         ),
-      ).filter((contextGraphId) => this.resolveRfc64CatalogReceiverAuthorityV1(
+      ).filter((contextGraphId) => this.rfc64LegacySwmGossipAllowedForContextGraph(
         contextGraphId,
-      ).legacySyncAllowed),
+      )),
     ])];
     const remotePeerIsCompleteSwmProvider = acceptedPolicies.some(
         ({ completeSwmProviders = [] }) => completeSwmProviders.includes(remotePeer),
@@ -4920,7 +4948,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
         continue;
       }
-      const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
       const completeSwmProviders = this.resolveRfc64CompleteSwmProviderPeerIdsV1(
         contextGraphId,
       );
@@ -4931,7 +4958,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ),
         contextGraphId,
       );
-      const legacyRootSyncAllowed = authority.legacySyncAllowed;
+      const legacyRootSyncAllowed = this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId);
       const namedSubgraphCompatibilityRequired = !legacyRootSyncAllowed
         && this.subscribedContextGraphs.get(contextGraphId)?.subscribed === true;
       if (!legacyRootSyncAllowed && !namedSubgraphCompatibilityRequired) {
@@ -5080,7 +5107,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * leaves a peer permanently in `skippedNoSyncPeers`. libp2p emits
    * `peer:update` whenever a peer record changes — most importantly when
    * identify completes and the protocol list gets populated for the
-   * first time. If the new list now contains `PROTOCOL_SYNC` and we
+   * first time. If the new list now contains either sync id and we
    * previously skipped this peer for that exact reason, fire one
    * `trySyncFromPeer` immediately.
    *
@@ -5109,7 +5136,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.peerCapabilityRegistry.observe(peerId, { source: 'peer-update', protocols: protocols });
     if (!peerEvents.isSkippedNoSync(peerId)) return;
     if (!syncOnConnectEnabled(this.config)) return;
-    if (!protocols.includes(PROTOCOL_SYNC)) return;
+    if (!advertisesSyncProtocol(protocols)) return;
     const ctx = createOperationContext('sync');
     void peerEvents.run(
       () => this.retrySyncAfterPeerUpdate(peerId, ctx, peerEvents),
@@ -5140,7 +5167,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * Periodic reconciler for sync-on-connect. Walks every currently
    * connected peer and retries `trySyncFromPeer` for any that either:
    *
-   *   - is in {@link skippedNoSyncPeers} and now advertises `PROTOCOL_SYNC`
+   *   - is in {@link skippedNoSyncPeers} and now advertises either sync id
    *     (covers the case where the `peer:update` listener missed the
    *     event for whatever reason), or
    *   - has no recent clean success or useful-progress cooldown marker, or
@@ -5525,6 +5552,32 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return result.insertedTriples;
   }
 
+  /** One agent-owned admission decision for the legacy shared-memory lane. */
+  canUseLegacySharedMemorySyncForContextGraphV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): boolean {
+    return this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId);
+  }
+
+  /** One agent-owned admission decision for the legacy durable VM lane. */
+  async canUseLegacyDurableSyncForContextGraphV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<boolean> {
+    // The global emergency stop restores the legacy VM lane even for a
+    // selected catalog graph whose persisted receiver policy remains catalog.
+    if (this.config.rfc64CatalogExecutionPlan.killSwitchActive) return true;
+    if (this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed) {
+      return true;
+    }
+    // An approved private member keeps this compatibility lane while its
+    // RFC-64 private receiver authority is inactive. The predicate performs
+    // the authenticated local member proof; outsiders remain excluded.
+    return typeof this.rfc64PrivateRootSwmOnLegacyLaneV1 === 'function'
+      && await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId) === true;
+  }
+
   async syncFromPeerDetailed(this: DKGAgent,
     remotePeerId: string,
     contextGraphIds: string[],
@@ -5541,9 +5594,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return createIncompleteDurableSyncResult();
     }
     const requestedContextGraphCount = contextGraphIds.length;
-    contextGraphIds = contextGraphIds.filter((contextGraphId) => (
-      this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed
-    ));
+    const legacyDurableAllowed = await Promise.all(contextGraphIds.map((contextGraphId) =>
+      LifecycleSyncMethods.prototype.canUseLegacyDurableSyncForContextGraphV1.call(
+        this, contextGraphId,
+      )));
+    contextGraphIds = contextGraphIds.filter((_, index) => legacyDurableAllowed[index]);
     if (contextGraphIds.length !== requestedContextGraphCount) {
       this.log.debug(
         ctx,
@@ -5696,6 +5751,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 stopOnBackoffWorthyFailure,
                 fetchTimeoutMs,
                 exactAssetSelection,
+                forceFreshExactSession: options?.forceFreshExactSession,
                 authenticationTimeoutMs,
                 operationFetchDeadline: operationBoundary.fetchDeadline,
                 operationDeadline: operationBoundary.deadline,
@@ -5801,6 +5857,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasSignal: Boolean(operationBoundary.signal),
       hasCurrentFence: Boolean(options?.isCurrent),
       hasChallengePinnedSelection: exactAssetSelection?.kind === 'challenge-pinned',
+      hasForcedFreshExactSession: options?.forceFreshExactSession === true,
       exactAssetUals,
       settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
       priority: options?.priority,
@@ -5873,6 +5930,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options?: {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
+      forceFreshExactSession?: boolean;
     },
   ): Promise<ExactKnowledgeAssetSyncResult>;
   syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
@@ -5882,6 +5940,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options?: {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
+      forceFreshExactSession?: boolean;
     },
   ): Promise<ExactKnowledgeAssetSyncResult>;
   async syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
@@ -5891,6 +5950,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options: {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
+      forceFreshExactSession?: boolean;
     } = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
     const selection: ExactAssetSelection = Array.isArray(selectionInput)
@@ -5906,6 +5966,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       undefined,
       {
         exactAssetSelection: selection,
+        forceFreshExactSession: options.forceFreshExactSession,
         stopOnBackoffWorthyFailure: true,
         priority: 1_000,
         source: 'vm-recovery',
@@ -5959,6 +6020,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onVerifiedFullSnapshot,
       fetchTimeoutMs = SYNC_TOTAL_TIMEOUT_MS,
       exactAssetSelection,
+      forceFreshExactSession,
       authenticationTimeoutMs = fetchTimeoutMs,
       operationFetchDeadline,
       operationDeadline,
@@ -6092,6 +6154,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             sinceBatchId,
             signal: fetchContext.signal,
             forceFreshSession: forceFreshSession
+              || forceFreshExactSession === true
               || onVerifiedFullSnapshot !== undefined,
             manifestDigest,
             manifestPrefixDigestAtOffset,
@@ -7179,7 +7242,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return execution(emptySharedMemorySyncResult());
     }
     const recoveryExecutor = this.createSwmTargetExecutorSessionV1();
-    const recoverPrivateContextGraph = (
+    const recoverPrivateContextGraph = async (
       contextGraphId: string,
       recoveryLease?: Rfc64SwmRecoveryTargetLeaseV1,
       onRetry?: Parameters<typeof recoveryExecutor.recoverPrivateTarget>[0]['onRetry'],
@@ -7187,7 +7250,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       remotePeerId,
       contextGraphId,
       includeRootScope: requestedScope !== null
-        || this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed,
+        || this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)
+        || await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId),
       recoveryGuard: recoveryLease,
       onRetry,
     });
@@ -7346,7 +7410,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           contextGraphId,
           remainingContextGraphs,
           includeRootScope: requestedScope !== null
-            || this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId).legacySyncAllowed,
+            || this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId),
           stopOnBackoffWorthyFailure,
           mode,
         });
@@ -7631,13 +7695,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphId,
       'swm_recovery',
       `swm-recovery:${contextGraphId}:${remotePeerId.slice(-8)}`,
-      () => this.createSwmTargetExecutorSessionV1()
+      async () => this.createSwmTargetExecutorSessionV1()
         .recoverPrivateTarget({
           remotePeerId,
           contextGraphId,
-          includeRootScope: this.resolveRfc64CatalogReceiverAuthorityV1(
-            contextGraphId,
-          ).legacySyncAllowed,
+          includeRootScope: this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)
+            // A private graph's root scope stays on the legacy member lane
+            // while its RFC-64 authority is not active (#2858).
+            || await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId),
         }),
       { source: 'swm-recovery' },
     );
@@ -8804,7 +8869,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return waitForPeerProtocol(
       this.node.libp2p.peerStore as any,
       pid,
-      PROTOCOL_SYNC,
+      // Either id proves sync support (#2822; see `advertisesSyncProtocol`).
+      [PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED],
       SYNC_PROTOCOL_CHECK_ATTEMPTS,
       SYNC_PROTOCOL_CHECK_DELAY_MS,
       signal,
@@ -9387,6 +9453,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const receiverSelectionChanged = effects.receiverChanged;
     const recoverySelectionChanged = effects.recoveryChanged;
     if (!receiverSelectionChanged && !recoverySelectionChanged) return;
+    // Record the inactive edge synchronously: a same-tick resubscription can
+    // otherwise look like an unchanged active lane to repair backoff.
+    this.observeRfc64SwmCatalogProjectionLaneAvailabilityV1(contextGraphId);
     if (receiverSelectionChanged && !effects.nextReceiverActive) {
       this.rfc64PublicCatalogServiceV1?.deactivateReceiverContextGraph(contextGraphId);
       this.clearRfc64CatalogOperationalTargetsV1(contextGraphId);
@@ -9420,8 +9489,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         void this.replayRfc64CatalogToConnectedPeersV1(contextGraphId)
           .catch(() => undefined);
       }
-      // Re-entering the idempotent start boundary also dirties an existing
-      // failed repair for this newly active CG, including retryIntervalMs=0.
+      // The observed inactive edge makes this recovery eligible immediately,
+      // including retryIntervalMs=0; duplicate active starts retain cooldown.
       this.startRfc64SwmCatalogProjectionSupervisorV1(
         createOperationContext('system'),
       );
@@ -11085,7 +11154,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // The accepted snapshot is itself finalized, name-bound authority for a
     // catalog-owned graph. It replaces both the legacy registration read and
     // its metadata-bootstrap proof at this internal transport boundary.
-    if (acceptedRfc64Authority !== undefined) return acceptedRfc64Authority;
+    if (acceptedRfc64Authority === true) return true;
+    // A private graph whose RFC-64 authority is not active keeps the legacy
+    // member checks below (#2858); a refusal by an active authority stands.
+    if (
+      acceptedRfc64Authority === false
+      && !(await this.rfc64PrivateRootSwmOnLegacyLaneV1(contextGraphId))
+    ) return false;
     if (!(await this.hasConfirmedSharedMemoryMetaState(contextGraphId))) {
       return false;
     }

@@ -848,21 +848,46 @@ export class QueryMethods extends DKGAgentBase {
       return await runBoundedOperation(
         async (signal) => {
           const boundedOpts = { ...opts, signal };
-          const resolve = () => resolveContextGraphReadAuthorityDecision(
-            QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
-              this,
-              contextGraphId,
-              boundedOpts,
-              {
-                registrationTimeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
-                authorityReadMode: 'live-current',
-                hasAcceptedRfc64PublicPolicy:
-                  this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
-                    ? true
-                    : undefined,
-              },
-            ),
-          );
+          const resolve = async () => {
+            const authority = await resolveContextGraphReadAuthorityDecision(
+              QueryMethods.prototype.createContextGraphReadAuthorityInput.call(
+                this,
+                contextGraphId,
+                boundedOpts,
+                {
+                  registrationTimeoutMs: CONTEXT_GRAPH_NAME_HASH_RESOLUTION_TIMEOUT_MS,
+                  authorityReadMode: 'live-current',
+                  hasAcceptedRfc64PublicPolicy:
+                    this.hasAcceptedRfc64PublicUnregisteredAuthorityV1?.(contextGraphId) === true
+                      ? true
+                      : undefined,
+                },
+              ),
+            );
+            // A remote graph can be visible before its new chain binding is
+            // indexed and before its local definition arrives. During that
+            // interval the legacy fallback can mistake absent local policy
+            // for public. Only this node's durable local-create provenance
+            // may use the unproven local-public fallback. Explicit private
+            // allowlist and participant decisions remain valid for remote
+            // members. A durable subscription row is
+            // only a name/chain-ID discovery hint during restart; it cannot
+            // turn its own stored intent into public authority. Remote rows
+            // remain dormant until registered or signed authority is proven.
+            if (
+              authority.outcome === 'allowed'
+              && authority.source === 'legacy-local'
+              && authority.reason === 'local-public'
+              && !this.localContextGraphProvenance.hasLocalCreate(contextGraphId)
+            ) {
+              return unavailableContextGraphReadAuthorityDecision(
+                'legacy-local',
+                'remote-local-authority-unaccepted',
+                'local-state',
+              );
+            }
+            return authority;
+          };
           const initial = await resolve();
           if (
             initial.outcome !== 'unavailable'

@@ -25,7 +25,7 @@ import {
 } from '@origintrail-official/dkg-agent';
 import {
   STORE_OPERATION_TIMEOUT_CODE,
-  StoreSchedulerBusyError,
+  isStoreSchedulerBusyError,
   isStoreOperationTimeoutError,
 } from '@origintrail-official/dkg-storage';
 import type { DkgConfig } from '../config.js';
@@ -86,11 +86,11 @@ export interface StoreUnavailableClassification {
 export function classifyStoreUnavailable(
   err: unknown,
 ): StoreUnavailableClassification | null {
-  if (err instanceof StoreSchedulerBusyError) {
+  if (isStoreSchedulerBusyError(err)) {
     return {
       outcome: 'not_started',
       body: {
-        error: err.message,
+        error: err.message ?? 'Store scheduler is temporarily busy; retry the request',
         code: err.code,
         reason: err.reason,
         priority: err.priority,
@@ -233,11 +233,26 @@ export function noFundedPublisherWalletBody(message: string): { code: string; er
   return { code: NO_FUNDED_PUBLISHER_WALLET_CODE, error: message };
 }
 
+/** A strict PCA funding read was inconclusive, not a proved wallet shortfall.
+ * Use a fixed message: the underlying RPC error may contain private endpoint
+ * details and its transport code is intentionally not the public error code. */
+export function respondIfPcaFundingUnknown(res: ServerResponse, err: unknown): boolean {
+  if ((err as { code?: unknown } | null)?.code !== 'PCA_FUNDING_UNKNOWN') return false;
+  res.setHeader('Retry-After', '1');
+  jsonResponse(res, 503, {
+    code: 'PCA_FUNDING_UNKNOWN',
+    error: 'PCA funding verification is inconclusive; retry when chain reads recover.',
+    retryable: true,
+  });
+  return true;
+}
+
 /**
  * Map a thrown request error to the daemon's top-level HTTP response — the
  * single neutral place that rethrowing lifecycle publish routes
  * and the lifecycle catch agree on status codes: 413 payload-too-large; 400 for
- * SyntaxError / reserved-namespace / NO_FUNDED_PUBLISHER_WALLET; otherwise a 500
+ * SyntaxError / reserved-namespace / NO_FUNDED_PUBLISHER_WALLET; 503 for
+ * inconclusive PCA funding; otherwise a 500
  * with the EVM-decoded message. Unit-testable in isolation.
  */
 export function respondWithDaemonError(res: ServerResponse, err: any): void {
@@ -257,6 +272,8 @@ export function respondWithDaemonError(res: ServerResponse, err: any): void {
     // Funded-wallet selection found no operational wallet with gas + TRAC — a
     // user-actionable funding condition (4xx), not a server bug.
     jsonResponse(res, 400, noFundedPublisherWalletBody(typeof err?.message === 'string' ? err.message : String(err)));
+  } else if (respondIfPcaFundingUnknown(res, err)) {
+    // A rethrowing publish path has the same retryable verdict as /vm/publish.
   } else if (respondIfStoreUnavailable(res, err)) {
     // Store admission pressure and adapter deadlines are transient. The typed
     // response preserves whether work never started or may have completed.

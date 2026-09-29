@@ -125,6 +125,8 @@ import {
   type SharedMemoryPublicSnapshotStorageConfig, type WorkspacePublicSnapshotStore,
   readMaterializedVersion, shouldApplyMaterialization, withMaterializationLock,
   isKnowledgeAssetWorkspaceHeadCorruptError,
+  readConfirmedGraphKnowledgeAssetMetadataEnvelope,
+  resolveKnowledgeAssetWorkspaceHead,
   type MaterializedVersion,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
@@ -281,10 +283,22 @@ import {
 import {
   MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
   ExactAssetFetchLifecycleClosedError,
+  ExactAssetVersionBehindError,
+  exactAssetFetchPeerWindow,
   runExactAssetFetch,
   type ContextGraphAssetFetchResult,
   type ExactAssetFetchEvidence,
 } from './sync/exact-asset-fetch.js';
+import type {
+  VmRefreshAttempt,
+  VmRefreshDue,
+  VmRefreshQueue,
+  VmRefreshTarget,
+} from './vm-refresh.js';
+import { isBoundedOperationTimeoutError, runBoundedOperation } from './bounded-operation.js';
+
+/** Graph-scoped KA metadata marker; its presence names the metadata graph. */
+const GRAPH_KA_CONTENT_SCOPE_VERSION_PREDICATE = 'http://dkg.io/ontology/contentScopeVersion';
 
 function rsHealStoreOptions(operation: string, signal?: AbortSignal): QueryOptions {
   return {
@@ -715,6 +729,13 @@ async function raceVmReconcileAbort<T>(
   } finally {
     if (onAbort) signal.removeEventListener('abort', onAbort);
   }
+}
+
+/** `peerIds` started `offset` places in, wrapping. */
+function rotatePeerIds(peerIds: readonly string[], offset: number): string[] {
+  if (peerIds.length === 0) return [];
+  const start = offset % peerIds.length;
+  return [...peerIds.slice(start), ...peerIds.slice(0, start)];
 }
 
 /** Track the raw dependency even if an abort race releases its caller first. */
@@ -3289,6 +3310,646 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
+   * #2858 — body of the live `KnowledgeAssetUpdated` nudge.
+   *
+   * An update keeps the KA id and moves its latest root. The ordinal sweep
+   * never revisits a settled ordinal, and a node whose only copy is a
+   * confirmed VM copy (a member of a catalog graph, a core outside the update's
+   * ACK set) has no other lane that brings the new version. This decides from
+   * local state alone, with no chain read, for every VM-reconcile target graph
+   * that holds a confirmed copy of the KA; a queued target gets a reconcile
+   * pass, whose refresh worker reads the chain and fetches the current version
+   * ({@link startVmRefreshWorker}).
+   *
+   * - A copy at another root is queued for a refresh.
+   * - A copy already at the event's root is skipped when it reflects the
+   *   update: the event's own transaction confirmed it (the publisher), or it
+   *   was materialized from a chain view at or after the event's block (a
+   *   replayed event). Otherwise it may be an older version with the same
+   *   content, so a version check is queued.
+   * - When the workspace already stages a newer version than the confirmed
+   *   copy (the publisher mid-update, a core holding the update's ACK copy, a
+   *   member that recovered its curator's shared memory), the target waits
+   *   `VM_REFRESH_STAGED_GRACE_MS` for the lane that staged it; on a member no
+   *   lane promotes it, and the refresh does.
+   *
+   * The event's root is only a trigger: an older or superseded event is
+   * settled by the worker's chain read, never materialized. Every no-op is
+   * logged at debug. A store read that fails, or a full target set, throws, so
+   * the event lane holds the event and dispatches it again after its failure
+   * backoff instead of losing it.
+   *
+   * Returns the refresh targets newly queued.
+   */
+  async handleKAUpdatedNudge(
+    this: DKGAgent,
+    kaId: bigint,
+    merkleRoot: Uint8Array,
+    ctx: OperationContext,
+    options: {
+      readonly blockNumber?: number;
+      readonly logIndex?: number;
+      readonly blockHash?: string;
+      readonly txHash?: string;
+      readonly signal?: AbortSignal;
+    } = {},
+  ): Promise<VmRefreshTarget[]> {
+    const { signal } = options;
+    const blockNumber = options.blockNumber !== undefined
+      && Number.isSafeInteger(options.blockNumber)
+      && options.blockNumber >= 0
+      ? options.blockNumber
+      : undefined;
+    const eventTxHash = typeof options.txHash === 'string' && options.txHash.length > 0
+      ? options.txHash.toLowerCase()
+      : undefined;
+    const logIndex = options.logIndex !== undefined
+      && Number.isSafeInteger(options.logIndex)
+      && options.logIndex >= 0
+      ? options.logIndex
+      : undefined;
+    const blockHash = typeof options.blockHash === 'string' && options.blockHash.length > 0
+      ? options.blockHash.toLowerCase()
+      : undefined;
+    signal?.throwIfAborted();
+    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
+    const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
+    const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
+      && !signal?.aborted
+      && !lifecycleSignal?.aborted
+      && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
+    if (!isLifecycleCurrent() || kaId <= 0n || merkleRoot.length !== 32) return [];
+    this.expireVmRefreshTargets(ctx);
+    const update = `update${blockNumber === undefined ? '' : ` at block ${blockNumber}`}`;
+
+    let ual: string;
+    let holders: string[];
+    try {
+      const storageAddr = this.chain.getDKGKnowledgeAssetsAddress
+        ? await this.chain.getDKGKnowledgeAssetsAddress()
+        : undefined;
+      if (!storageAddr) return [];
+      ual = buildReconciledKnowledgeAssetUal(this.chain.chainId, storageAddr, kaId);
+      holders = await this.localGraphsDescribingKnowledgeAsset(ual);
+    } catch (err) {
+      throw new Error(
+        `VM refresh: could not read which local graphs hold KA ${kaId} for its ${update}: `
+          + `${err instanceof Error ? err.message : String(err)}`,
+        { cause: err },
+      );
+    }
+
+    const eventRoot = ethers.hexlify(merkleRoot).toLowerCase();
+    const queued: VmRefreshTarget[] = [];
+    if (holders.length === 0) {
+      this.log.debug(ctx, `VM refresh: no local graph holds ${ual}; nothing to refresh`);
+    }
+    for (const localCgId of holders) {
+      if (!isLifecycleCurrent()) break;
+      if (!this.isVmReconcileTargetSelected(localCgId)) {
+        this.log.debug(
+          ctx,
+          `VM refresh: "${localCgId}" holds ${ual} but is not a VM reconcile target; not queued`,
+        );
+        continue;
+      }
+      let local: Awaited<ReturnType<DKGAgent['readVmRefreshLocalState']>>;
+      let coversUpdate = false;
+      try {
+        local = await this.readVmRefreshLocalState(localCgId, ual);
+        if (local.kind === 'confirmed' && local.merkleRoot === eventRoot) {
+          coversUpdate = await this.vmRefreshCopyCoversUpdate(
+            localCgId,
+            ual,
+            local.transactionHash,
+            eventTxHash,
+            blockNumber,
+            blockHash,
+          );
+        }
+      } catch (err) {
+        throw new Error(
+          `VM refresh: could not read the copy of ${ual} in "${localCgId}" for its ${update}: `
+            + `${err instanceof Error ? err.message : String(err)}`,
+          { cause: err },
+        );
+      }
+      if (local.kind !== 'confirmed') {
+        this.log.debug(ctx, `VM refresh: ${ual} in "${localCgId}" not queued: no confirmed copy`);
+        continue;
+      }
+      const sameRoot = local.merkleRoot === eventRoot;
+      if (coversUpdate) {
+        this.log.debug(
+          ctx,
+          `VM refresh: ${ual} in "${localCgId}" not queued: the copy holds this update`,
+        );
+        continue;
+      }
+      if (!isLifecycleCurrent()) break;
+      const target: VmRefreshTarget = {
+        localCgId,
+        ual,
+        kaId,
+        merkleRoot: eventRoot,
+        ...(blockNumber === undefined ? {} : { blockNumber }),
+        ...(logIndex === undefined ? {} : { logIndex }),
+        ...(blockHash === undefined ? {} : { blockHash }),
+        ...(eventTxHash === undefined ? {} : { txHash: eventTxHash }),
+        ...(sameRoot ? { checkVersion: true } : {}),
+      };
+      const delayMs = local.staged ? DKGAgentBase.VM_REFRESH_STAGED_GRACE_MS : 0;
+      // A replayed event (a lane re-scan) leaves the held target and its
+      // backoff alone.
+      const offered = this.vmRefreshQueue.offer(target, delayMs);
+      if (offered === 'held') {
+        this.log.debug(ctx, `VM refresh: ${ual} in "${localCgId}" already has this or a newer update queued`);
+        continue;
+      }
+      if (offered === 'full') {
+        throw new Error(
+          `VM refresh: ${this.vmRefreshQueue.size} targets are held, the most allowed, so the `
+            + `${update} of ${ual} in "${localCgId}" waits for some to settle`,
+        );
+      }
+      queued.push(target);
+      if (sameRoot) {
+        this.log.debug(
+          ctx,
+          `VM refresh: ${ual} in "${localCgId}" holds its update's root; version check queued`,
+        );
+      } else if (local.staged) {
+        this.log.info(
+          ctx,
+          `VM refresh: ${ual} in "${localCgId}" does not hold its update's root and stages a newer `
+            + `version; refresh queued in ${Math.round(delayMs / 1000)}s unless that version is promoted first`,
+        );
+      } else {
+        this.log.info(
+          ctx,
+          `VM refresh: ${ual} in "${localCgId}" does not hold its update's root; refresh queued`,
+        );
+      }
+      // A delayed target is not due yet: the graph's next reconcile pass
+      // starts the worker.
+      if (delayMs === 0 && this.vmReconcileScheduling && isLifecycleCurrent()) {
+        this.vmReconcileScheduling.triggerLive(localCgId);
+      }
+    }
+    return queued;
+  }
+
+  /**
+   * #2858 — whether a copy at an update's root already reflects that update:
+   * the update's own transaction confirmed it, or it was materialized from a
+   * chain view at or after the update's block, which already held the update.
+   * Neither fact proves fork lineage when the event carries a block hash,
+   * because the same transaction can be included on a replacement fork.
+   */
+  async vmRefreshCopyCoversUpdate(
+    this: DKGAgent,
+    localCgId: string,
+    ual: string,
+    copyTxHash: string | undefined,
+    eventTxHash: string | undefined,
+    eventBlock: number | undefined,
+    eventBlockHash: string | undefined,
+  ): Promise<boolean> {
+    if (eventBlockHash !== undefined) return false;
+    if (eventTxHash !== undefined && copyTxHash === eventTxHash) return true;
+    if (eventBlock === undefined) return false;
+    const materialized = await readMaterializedVersion(
+      this.store,
+      contextGraphMetaUri(localCgId),
+      ual,
+      { source: 'agent.vmRefresh.materializedVersion', priority: 'background' },
+    );
+    return materialized !== null && materialized.blockNumber >= eventBlock;
+  }
+
+  /** #2858 — give up the refresh targets held past `VM_REFRESH_MAX_AGE_MS`, with a warning each. */
+  expireVmRefreshTargets(this: DKGAgent, ctx: OperationContext): void {
+    // Narrow test agents built without the base constructor have no queue.
+    const queue = this.vmRefreshQueue as VmRefreshQueue | undefined;
+    if (queue === undefined) return;
+    for (const given of queue.expire()) {
+      this.log.warn(
+        ctx,
+        `VM refresh: gave up on ${given.ual} in "${given.localCgId}" after `
+          + `${Math.round(given.heldMs / 60_000)} min and ${given.failures} failed attempt(s) `
+          + `(${queue.givenUpTotal} given up so far); its copy waits for the KA's next update `
+          + 'or an asset fetch',
+      );
+    }
+  }
+
+  /**
+   * #2858 — highest block the update event lane may persist as scanned: just
+   * below the oldest held target's event, so a restart replays that event and
+   * its target is recorded again. Targets held past their maximum age are
+   * given up first, so one that never settles cannot hold the cursor for good.
+   */
+  vmRefreshPersistCeiling(this: DKGAgent): number | undefined {
+    this.expireVmRefreshTargets(createOperationContext('system'));
+    const oldest = (this.vmRefreshQueue as VmRefreshQueue | undefined)?.oldestBlockNumber();
+    return oldest === undefined ? undefined : oldest - 1;
+  }
+
+  /** #2858 — the refresh lane's state, for `/api/status`. */
+  getVmRefreshStatus(this: DKGAgent): {
+    heldTargets: number;
+    persistCeiling: number | null;
+    givenUpTotal: number;
+    refusedTotal: number;
+  } {
+    const queue = this.vmRefreshQueue as VmRefreshQueue | undefined;
+    const oldest = queue?.oldestBlockNumber();
+    return {
+      heldTargets: queue?.size ?? 0,
+      persistCeiling: oldest === undefined ? null : oldest - 1,
+      givenUpTotal: queue?.givenUpTotal ?? 0,
+      refusedTotal: queue?.refusedTotal ?? 0,
+    };
+  }
+
+  /**
+   * Local graphs whose root metadata graph describes this graph-scoped KA.
+   * One subject-bound read; the caller filters them to reconcile targets.
+   */
+  async localGraphsDescribingKnowledgeAsset(this: DKGAgent, ual: string): Promise<string[]> {
+    const result = await this.store.query(
+      `SELECT DISTINCT ?g WHERE { GRAPH ?g { <${assertSafeIri(ual)}> `
+        + `<${GRAPH_KA_CONTENT_SCOPE_VERSION_PREDICATE}> ?version } }`,
+      { source: 'agent.vmRefresh.holders', priority: 'background' },
+    );
+    if (result.type !== 'bindings') return [];
+    const prefix = 'did:dkg:context-graph:';
+    const suffix = '/_meta';
+    const holders = new Set<string>();
+    for (const row of result.bindings) {
+      const graph = row['g'];
+      if (typeof graph !== 'string' || !graph.startsWith(prefix) || !graph.endsWith(suffix)) {
+        continue;
+      }
+      const localCgId = graph.slice(prefix.length, graph.length - suffix.length);
+      if (localCgId.length > 0 && contextGraphMetaUri(localCgId) === graph) holders.add(localCgId);
+    }
+    return [...holders];
+  }
+
+  /**
+   * What the refresh lane decides on for one KA in one graph: the root and
+   * assertion version the confirmed graph-scoped copy recorded, the
+   * transaction that confirmed it when it is receipt-backed, and whether the
+   * workspace stages a newer version than that copy. A staged version only
+   * delays the refresh (see `VM_REFRESH_STAGED_GRACE_MS`). A head at the
+   * confirmed version or older stages nothing newer; a corrupt one is read
+   * past by the exact fetch.
+   */
+  async readVmRefreshLocalState(
+    this: DKGAgent,
+    localCgId: string,
+    ual: string,
+  ): Promise<
+    | { readonly kind: 'none' }
+    | {
+      readonly kind: 'confirmed';
+      readonly merkleRoot: string;
+      readonly assertionVersion: bigint;
+      readonly transactionHash?: string;
+      readonly staged: boolean;
+    }
+  > {
+    const read = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(this.store, {
+      contextGraphId: localCgId,
+      ual,
+    });
+    if (read.state !== 'confirmed') return { kind: 'none' };
+    let staged = false;
+    try {
+      const head = await resolveKnowledgeAssetWorkspaceHead({
+        store: this.store,
+        graphManager: new GraphManager(this.store),
+        contextGraphId: localCgId,
+        kaUal: ual,
+        ...(read.envelope.subGraphName ? { subGraphName: read.envelope.subGraphName } : {}),
+      });
+      staged = head !== undefined
+        && BigInt(head.assertionVersion) > BigInt(read.envelope.assertionVersion);
+    } catch (err) {
+      if (!isKnowledgeAssetWorkspaceHeadCorruptError(err)) throw err;
+    }
+    const transactionHash = read.envelope.transactionHash?.trim().toLowerCase();
+    return {
+      kind: 'confirmed',
+      merkleRoot: ethers.hexlify(read.envelope.merkleRoot).toLowerCase(),
+      assertionVersion: BigInt(read.envelope.assertionVersion),
+      ...(transactionHash ? { transactionHash } : {}),
+      staged,
+    };
+  }
+
+  /**
+   * #2858 — start this graph's refresh worker when it has due targets and
+   * none is running. The worker runs beside the reconcile pass that starts
+   * it, in the background RPC class and store lane, so the pass never waits
+   * on a peer for a refresh. At most `VM_REFRESH_MAX_WORKERS` run at once; a
+   * graph left waiting starts on its next pass or when a running worker ends.
+   * Returns the graph's running worker, if any.
+   */
+  startVmRefreshWorker(
+    this: DKGAgent,
+    localCgId: string,
+    onChainId: string,
+    isTargetCurrent: () => boolean,
+    signal?: AbortSignal,
+  ): Promise<void> | undefined {
+    // Narrow test agents built without the base constructor have neither.
+    const queue = this.vmRefreshQueue as VmRefreshQueue | undefined;
+    const workers = this.vmRefreshWorkers as Map<string, Promise<void>> | undefined;
+    if (queue === undefined || workers === undefined) return undefined;
+    const running = workers.get(localCgId);
+    if (running !== undefined) return running;
+    if (signal?.aborted || !isTargetCurrent() || !queue.hasDue(localCgId)) return undefined;
+    if (workers.size >= DKGAgentBase.VM_REFRESH_MAX_WORKERS) {
+      this.log.debug(
+        createOperationContext('system'),
+        `VM refresh for "${localCgId}" waits for a free worker`,
+      );
+      return undefined;
+    }
+    const worker: Promise<void> = withOwnedRpcRequestContext(
+      { requestClass: 'background', ...(signal ? { signal } : {}) },
+      () => withDefaultStoreWorkPriority(
+        'background',
+        () => this.runVmRefreshesForCg(localCgId, onChainId, isTargetCurrent, signal),
+      ),
+    ).catch((err: unknown) => {
+      this.log.warn(
+        createOperationContext('system'),
+        `VM refresh worker for "${localCgId}" stopped: `
+          + `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }).finally(() => {
+      if (workers.get(localCgId) === worker) workers.delete(localCgId);
+      if (signal?.aborted || this.vmReconcileRotationClosed) return;
+      // Hand the freed slot on: this graph past its per-run bound, or a graph
+      // that found every slot taken. Their passes start the workers.
+      let free = DKGAgentBase.VM_REFRESH_MAX_WORKERS - workers.size;
+      for (const dueCgId of queue.dueContextGraphIds()) {
+        if (free <= 0) break;
+        if (workers.has(dueCgId)) continue;
+        if (!this.isVmReconcileTargetSelected(dueCgId)) {
+          // The graph left VM reconciliation; no pass will work its targets.
+          queue.clearContextGraph(dueCgId);
+          continue;
+        }
+        void this.vmReconcileScheduling?.triggerLive(dueCgId);
+        free -= 1;
+      }
+    });
+    workers.set(localCgId, worker);
+    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, worker);
+    return worker;
+  }
+
+  /**
+   * Work off up to `VM_REFRESH_MAX_PER_PASS` of this graph's due refresh
+   * targets. Each attempt is bounded by `VM_REFRESH_ATTEMPT_TIMEOUT_MS` and
+   * its peer steps by `VM_REFRESH_PEER_STEP_TIMEOUT_MS`, and every outcome is
+   * settled and logged: an attempt that fails, times out or finds no holder
+   * backs off and asks the next peer window when it is due again. A closing
+   * lifecycle or a replaced reconcile target keeps the target for the next
+   * worker. Never throws.
+   */
+  async runVmRefreshesForCg(
+    this: DKGAgent,
+    localCgId: string,
+    onChainId: string,
+    isTargetCurrent: () => boolean,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    // Narrow test agents built without the base constructor have no queue.
+    const queue = this.vmRefreshQueue as VmRefreshQueue | undefined;
+    if (queue === undefined) return;
+    const due = queue.due(localCgId, DKGAgentBase.VM_REFRESH_MAX_PER_PASS);
+    if (due.length === 0) return;
+    const ctx = createOperationContext('system');
+    const stopped = (target: VmRefreshTarget): boolean => {
+      if (!signal?.aborted && isTargetCurrent()) return false;
+      this.log.debug(
+        ctx,
+        `VM refresh of ${target.ual} in "${localCgId}" deferred: its reconcile target closed`,
+      );
+      return true;
+    };
+    for (const target of due) {
+      if (stopped(target)) return;
+      let attempt: VmRefreshAttempt;
+      let failed = false;
+      try {
+        attempt = await runBoundedOperation(
+          (attemptSignal) => this.refreshConfirmedVmCopy(
+            target,
+            onChainId,
+            isTargetCurrent,
+            attemptSignal,
+          ),
+          {
+            timeoutMs: DKGAgentBase.VM_REFRESH_ATTEMPT_TIMEOUT_MS,
+            label: `VM refresh of ${target.ual}`,
+            ...(signal ? { signal } : {}),
+          },
+        );
+      } catch (err) {
+        if (stopped(target)) return;
+        failed = true;
+        attempt = {
+          outcome: 'retry',
+          detail: isBoundedOperationTimeoutError(err)
+            ? err.message
+            : `failed: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
+      if (stopped(target)) return;
+      const retryAt = queue.settle(target, attempt.outcome);
+      const subject = `${target.ual} in "${localCgId}"`;
+      if (attempt.outcome === 'refreshed') {
+        this.log.info(ctx, `VM refresh: ${subject} now holds the current version (${attempt.detail})`);
+      } else if (attempt.outcome === 'retry') {
+        const retry = retryAt === undefined
+          ? 'retrying on a later pass'
+          : `retrying in ${Math.max(0, Math.round((retryAt - Date.now()) / 1000))}s`;
+        const message = `VM refresh of ${subject} did not complete (${attempt.detail}); ${retry}`;
+        if (failed) this.log.warn(ctx, message);
+        else this.log.info(ctx, message);
+      } else {
+        this.log.debug(ctx, `VM refresh of ${subject} settled as ${attempt.outcome}: ${attempt.detail}`);
+      }
+    }
+  }
+
+  /**
+   * One refresh attempt: settle from local state when the copy already holds
+   * the event's root, otherwise read the chain's current root. A copy at that
+   * root is current (the event was older or superseded — nothing is rolled
+   * back); a different one is fetched as the exact current version, which
+   * replaces the older assertion in place. `signal` is the attempt's own: it
+   * stops the fetch at the attempt deadline.
+   */
+  async refreshConfirmedVmCopy(
+    this: DKGAgent,
+    target: VmRefreshDue,
+    onChainId: string,
+    isTargetCurrent: () => boolean,
+    signal?: AbortSignal,
+  ): Promise<VmRefreshAttempt> {
+    const local = await this.readVmRefreshLocalState(target.localCgId, target.ual);
+    if (local.kind === 'none') {
+      return { outcome: 'not-applicable', detail: 'no confirmed copy is held any more' };
+    }
+    // A version still staged here was not promoted by the lane that staged it
+    // (or nothing on this node promotes it). The exact fetch below verifies it
+    // against the chain like any other copy, and a staged version newer than
+    // the chain's stays in the workspace: the fetch writes only Verifiable
+    // Memory.
+    // A copy at the update's root is current, unless the nudge found it
+    // there already: then only the chain's version can tell (a repeated root).
+    if (!target.checkVersion && local.merkleRoot === target.merkleRoot) {
+      return { outcome: 'current', detail: 'the copy holds the update root' };
+    }
+    if (typeof this.chain.getLatestMerkleRoot !== 'function') {
+      return { outcome: 'not-applicable', detail: 'the chain adapter reads no latest root' };
+    }
+    let chainRoot = ethers.hexlify(
+      await this.chain.getLatestMerkleRoot(target.kaId, { signal }),
+    ).toLowerCase();
+    if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
+    let chainVersion: bigint | undefined;
+    if (chainRoot === local.merkleRoot) {
+      // An older or superseded event, a read that has not seen the update yet
+      // (a lagging endpoint, a confirmation depth above one), or an update
+      // that repeated the copy's root. Settle only on a coherent view at or
+      // after the update's block, by version as well as root.
+      const confirmed = await this.confirmVmRefreshCurrentAtEventBlock(
+        target,
+        local,
+        isTargetCurrent,
+        signal,
+      );
+      if (confirmed.kind === 'settled') return confirmed.attempt;
+      // The pinned view names a newer version: fetch it.
+      chainRoot = confirmed.chainRoot;
+      chainVersion = confirmed.rootCount;
+    }
+
+    let result: ContextGraphAssetFetchResult;
+    try {
+      result = await this.runExactAssetFetchForContextGraph(target.localCgId, [target.ual], {
+        isCurrent: () => isTargetCurrent() && !signal?.aborted,
+        ...(signal ? { signal } : {}),
+        expectedOnChainId: onChainId,
+        maxPeers: DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
+        // Each retry asks the next window of candidates, so a holder outside
+        // the first few peers is still reached.
+        peerWindowIndex: target.failures,
+        // An update keeps the UAL. Its old responder session can outlive the
+        // previous version, so every refresh attempt needs a new snapshot.
+        forceFreshExactSession: true,
+        // A candidate that cannot be reached (after a restart, the curator
+        // is often not connected yet) yields to the next one.
+        peerStepTimeoutMs: DKGAgentBase.VM_REFRESH_PEER_STEP_TIMEOUT_MS,
+        // Evidence that has not seen the update would settle on the old version.
+        ...((target.proofBlockNumber ?? target.blockNumber) === undefined
+          ? {} : { minVersionBlock: target.proofBlockNumber ?? target.blockNumber }),
+      });
+    } catch (err) {
+      // This adapter cannot prove an exact version at all. Anything else,
+      // including a conflict such as a version snapshot the endpoints did
+      // not agree on, is retried after backoff.
+      if (err instanceof VmReconcileUnavailableError) {
+        return { outcome: 'not-applicable', detail: 'this adapter cannot prove an exact version' };
+      }
+      if (err instanceof ExactAssetVersionBehindError) {
+        return { outcome: 'retry', detail: err.message };
+      }
+      throw err;
+    }
+    const status = result.items[0]?.status;
+    if (status === 'materialized' || status === 'fetched') {
+      return { outcome: 'refreshed', detail: `${status} after ${result.peerAttempts} peer attempt(s)` };
+    }
+    if (status === 'already-present') {
+      return { outcome: 'current', detail: 'the exact inspection found the current version' };
+    }
+    // The exact inspection can refuse a refreshed copy while a workspace head
+    // names another version (an older one, or one staged ahead of the chain);
+    // the confirmed copy itself is the answer here.
+    const after = await this.readVmRefreshLocalState(target.localCgId, target.ual);
+    if (
+      after.kind === 'confirmed'
+      && after.merkleRoot === chainRoot
+      && (chainVersion === undefined || after.assertionVersion >= chainVersion)
+    ) {
+      return { outcome: 'refreshed', detail: 'the confirmed copy holds the chain root' };
+    }
+    return {
+      outcome: 'retry',
+      detail: `no peer served the current version; ${result.peerAttempts} peer attempt(s)`,
+    };
+  }
+
+  /**
+   * #2858 — the copy holds the root a live chain read returned. That read can
+   * predate the update (a lagging endpoint, a confirmation depth above one),
+   * and a root names content, not a version: an update may repeat an earlier
+   * root. So settle from a coherent view at or after the event's block:
+   * `current` when it holds the copy's root at a version no newer than the
+   * copy's, `retry` while it has not reached that block, and the root and
+   * version it shows otherwise, which the caller then fetches. On an adapter
+   * that reads no pinned view, the live read settles it.
+   */
+  async confirmVmRefreshCurrentAtEventBlock(
+    this: DKGAgent,
+    target: VmRefreshDue,
+    local: { readonly merkleRoot: string; readonly assertionVersion: bigint },
+    isTargetCurrent: () => boolean,
+    signal?: AbortSignal,
+  ): Promise<
+    | { readonly kind: 'settled'; readonly attempt: VmRefreshAttempt }
+    | { readonly kind: 'newer'; readonly chainRoot: string; readonly rootCount: bigint }
+  > {
+    const current = {
+      kind: 'settled',
+      attempt: { outcome: 'current', detail: 'the copy holds the chain root and version' },
+    } as const;
+    if (typeof this.chain.readKnowledgeAssetVersionSnapshot !== 'function') return current;
+    const view = await this.chain.readKnowledgeAssetVersionSnapshot(target.kaId, { signal });
+    if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
+    if (view === null) {
+      return {
+        kind: 'settled',
+        attempt: { outcome: 'retry', detail: 'no coherent chain view confirms the copy' },
+      };
+    }
+    const proofBlock = target.proofBlockNumber ?? target.blockNumber;
+    if (proofBlock !== undefined && view.blockNumber < proofBlock) {
+      return {
+        kind: 'settled',
+        attempt: {
+          outcome: 'retry',
+          detail: `the chain view at block ${view.blockNumber} is behind the update's block `
+            + `${proofBlock}`,
+        },
+      };
+    }
+    const viewRoot = view.latestRoot.toLowerCase();
+    return viewRoot === local.merkleRoot && view.rootCount <= local.assertionVersion
+      ? current
+      : { kind: 'newer', chainRoot: viewRoot, rootCount: view.rootCount };
+  }
+
+  /**
    * Canonical evidence-gated VM reconciliation operation for one CG.
    *
    * All callers enter the same dispatcher; the admitted domain operation is
@@ -3363,6 +4024,68 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const canRead = await raceVmReconcileAbort(authorityRead, signal).catch(() => false);
     if (!isCurrent()) throw new VmReconcileQueueClosedError();
     if (!canRead) throw new ContextGraphNotFoundError(localCgId);
+    // Bound through the prototype, as narrow hosts that borrow this operator
+    // method do not carry the shared tail.
+    return SwmHostModeMethods.prototype.runExactAssetFetchForContextGraph.call(
+      this,
+      localCgId,
+      requestedUals,
+      {
+        isCurrent,
+        ...(signal ? { signal } : {}),
+        ...(options.peerIds === undefined ? {} : { peerIds: options.peerIds }),
+        ...(subscription.onChainId ? { expectedOnChainId: subscription.onChainId } : {}),
+      },
+    );
+  }
+
+  /**
+   * The exact-asset fetch once its caller has proved read authority and owns
+   * the lifecycle: chain evidence, local inspection against the current root
+   * and version, a bounded peer traversal, and re-inspection. Shared by the
+   * operator fetch above and the VM refresh lane ({@link refreshConfirmedVmCopy}).
+   */
+  async runExactAssetFetchForContextGraph(
+    this: DKGAgent,
+    localCgId: string,
+    requestedUals: readonly string[],
+    options: {
+      isCurrent: () => boolean;
+      signal?: AbortSignal;
+      peerIds?: readonly string[];
+      expectedOnChainId?: string;
+      maxPeers?: number;
+      /**
+       * Retry number of the caller. Curators head every window, since on a
+       * curated graph they may be the only holders; the curator and the
+       * ordinary tiers each start past the peers earlier windows asked.
+       */
+      peerWindowIndex?: number;
+      /** See `runExactAssetFetch`: evidence older than this block is refused. */
+      minVersionBlock?: number;
+      /**
+       * Wall clock for curator resolution and for each candidate's
+       * preparation (connect, protocol probe, admission). A candidate past it
+       * is skipped for the next one; resolution past it falls back to the
+       * preferred and connected peers. Unset leaves both to `signal`.
+       */
+      peerStepTimeoutMs?: number;
+      /** Start a new exact-asset snapshot for this update refresh attempt. */
+      forceFreshExactSession?: boolean;
+    },
+  ): Promise<ContextGraphAssetFetchResult> {
+    const { isCurrent, signal, peerStepTimeoutMs } = options;
+    /** One network step, under `peerStepTimeoutMs` when the caller set it. */
+    const runPeerStep = <T>(
+      label: string,
+      step: (stepSignal: AbortSignal | undefined) => Promise<T>,
+    ): Promise<T> => (peerStepTimeoutMs === undefined
+      ? step(signal)
+      : runBoundedOperation(step, {
+        timeoutMs: peerStepTimeoutMs,
+        label,
+        ...(signal ? { signal } : {}),
+      }));
     if (
       typeof this.chain.getKAContextGraphId !== 'function'
       || typeof this.chain.readKnowledgeAssetVersionSnapshot !== 'function'
@@ -3379,7 +4102,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       contextGraphId: localCgId,
       requestedUals,
       ...(options.peerIds === undefined ? {} : { peerIds: options.peerIds }),
-      ...(subscription.onChainId ? { expectedOnChainId: subscription.onChainId } : {}),
+      ...(options.expectedOnChainId ? { expectedOnChainId: options.expectedOnChainId } : {}),
+      ...(options.maxPeers === undefined ? {} : { maxPeers: options.maxPeers }),
+      ...(options.minVersionBlock === undefined
+        ? {}
+        : { minVersionBlock: options.minVersionBlock }),
     }, {
       chainId: this.chain.chainId,
       signal,
@@ -3421,40 +4148,71 @@ export class SwmHostModeMethods extends DKGAgentBase {
         return 'missing';
       },
       resolvePeerIds: async () => {
-        const curatorResolution = await this.resolveCuratorPeerIdsForCg(localCgId, {
-          maxPeerIds: MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
-          signal,
-          isCurrent,
-        }).catch(() => ({ peerIds: [] as string[] }));
+        const curatorResolution = await runPeerStep(
+          `Curator resolution for "${localCgId}"`,
+          (stepSignal) => this.resolveCuratorPeerIdsForCg(localCgId, {
+            maxPeerIds: MAX_CONTEXT_GRAPH_ASSET_FETCH_PEERS,
+            signal: stepSignal,
+            isCurrent,
+          }),
+        ).catch((error: unknown) => {
+          if (isBoundedOperationTimeoutError(error)) {
+            this.log.info(ctx, `Exact asset fetch: ${error.message}; asking connected peers`);
+          }
+          return { peerIds: [] as string[] };
+        });
         if (!isCurrent()) throw new VmReconcileQueueClosedError();
         const connectedPeerIds = this.node?.libp2p?.getConnections?.()
           ?.map((connection) => connection.remotePeer.toString()) ?? [];
-        return [...new Set([
-          ...curatorResolution.peerIds,
-          this.preferredSyncPeers.get(localCgId),
-          ...connectedPeerIds,
-        ].filter((peerId): peerId is string => Boolean(peerId && peerId !== this.peerId)))];
+        const usable = (peerId: string | undefined): peerId is string =>
+          Boolean(peerId && peerId !== this.peerId);
+        const curators = [...new Set(curatorResolution.peerIds.filter(usable))];
+        const curatorSet = new Set(curators);
+        const ordinary = [...new Set(
+          [this.preferredSyncPeers.get(localCgId), ...connectedPeerIds].filter(usable),
+        )].filter((peerId) => !curatorSet.has(peerId));
+        const windowIndex = options.peerWindowIndex !== undefined
+          && Number.isSafeInteger(options.peerWindowIndex)
+          && options.peerWindowIndex > 0
+          ? options.peerWindowIndex
+          : 0;
+        const windowSize = exactAssetFetchPeerWindow(options.maxPeers);
+        const curatorSlots = Math.min(curators.length, windowSize);
+        return [
+          ...rotatePeerIds(curators, windowIndex * curatorSlots),
+          ...rotatePeerIds(ordinary, windowIndex * (windowSize - curatorSlots)),
+        ];
       },
-      preparePeer: async (peerId) => {
-        await this.ensurePeerConnected(peerId, { signal });
+      // A step past its bound rejects; the traversal logs it and moves on to
+      // the next candidate.
+      preparePeer: (peerId) => runPeerStep('Peer preparation', async (stepSignal) => {
+        await this.ensurePeerConnected(peerId, { signal: stepSignal });
         if (!isCurrent()) throw new VmReconcileQueueClosedError();
         const remotePeer = this.node.libp2p.getConnections()
           .find((connection) => connection.remotePeer.toString() === peerId)
           ?.remotePeer;
-        if (!remotePeer || !(await this.waitForSyncProtocol(remotePeer, signal))) return false;
+        if (!remotePeer || !(await this.waitForSyncProtocol(remotePeer, stepSignal))) return false;
         return this.ensurePeerAdmittedForRecovery(
           peerId,
           ctx,
           'Exact asset fetch peer',
-          signal,
+          stepSignal,
         );
-      },
+      }),
       fetchFromPeer: async (peerId, uals) => {
         await this.syncExactKnowledgeAssetsFromPeerDetailed(
           peerId,
           localCgId,
           [...uals],
-          { signal, isCurrent },
+          {
+            signal,
+            isCurrent,
+            // The same UAL can move to a new root while the responder still
+            // holds its older exact-asset page session. A refresh must start
+            // from a new snapshot on every attempt; its pages still share one
+            // session within this invocation.
+            forceFreshExactSession: options.forceFreshExactSession === true,
+          },
         );
       },
       flush: async () => {
@@ -3547,6 +4305,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const isTargetCurrent = () => isLifecycleCurrent()
         && this.isVmReconcileTargetCurrent(localCgId, target, lifecycleGeneration);
       if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
+      // #2858 — confirmed copies behind an on-chain update. The ordinal cursor
+      // never revisits a settled ordinal, so a worker beside this pass
+      // refreshes them. The pass never waits on it, and a slice that fails
+      // does not hold it back.
+      this.startVmRefreshWorker(localCgId, target.onChainId, isTargetCurrent, lifecycleSignal);
 
       // Reconcile on a private cursor snapshot. The caller-facing abort race may
       // finish before an adapter physically settles; a stale continuation must
@@ -5577,6 +6340,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmReconcileCuratorPeersByCg?.clear();
     this.vmReconcileCuratorPageCursorByCg?.clear();
     this.vmReconcileExactPeerCapabilities?.clear();
+    this.vmRefreshQueue?.clear();
   }
 
   openVmReconcileRotationState(this: DKGAgent): void {
@@ -5807,6 +6571,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmReconcileCatchupPeerCursor.delete(localCgId);
     this.vmReconcileCatchupPeerOrder.delete(localCgId);
     this.clearRecentVmReconcileStateForContextGraph(localCgId);
+    this.vmRefreshQueue?.clearContextGraph(localCgId);
   }
 
   clearRecentVmReconcileStateForContextGraph(this: DKGAgent, localCgId: string): void {
@@ -6894,8 +7659,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }, ctx)
         : { kind: 'present' };
     if (localCandidate.kind === 'confirmed-vm') {
-      // Trusted at the root the copy was confirmed at; see the classifier for
-      // how an update to it still reaches VM.
+      // Trusted at the root the copy was confirmed at, with no chain read. An
+      // update to it reaches VM through the `KnowledgeAssetUpdated` refresh
+      // (`handleKAUpdatedNudge`), not through this walk: a settled ordinal is
+      // never visited again.
       if (!(await targetMayMaterialize())) return { status: 'skip' };
       this.clearVmReconcileRotationStateForSlot(localCgId, onChainCgId, ordinal);
       this.emitReplication({

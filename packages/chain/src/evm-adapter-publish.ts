@@ -32,13 +32,18 @@ import type {
 import { publisherPublishPlanByteSize } from './chain-adapter.js';
 import { floorPublishTokenAmount, computeUpdateACKDigest, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
 import { resolveQuotedPublisherCandidatePricing } from './publisher-plan.js';
-import { errorMessage } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, InsufficientPublisherFundsError, PcaFundingUnknownError } from './evm-adapter-errors.js';
+import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
 import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
 import {
 } from './evm-adapter-constants.js';
 
-type PublisherCandidatePlan = PublisherPublishPlan & { signer: Wallet; address: string };
+type PublisherCandidatePlan = PublisherPublishPlan & {
+  signer: Wallet;
+  address: string;
+  pcaProbeError?: unknown;
+};
 
 /**
  * GH#2270 PR-3 r2 — does this error mean "that ERC-721 token does not exist"?
@@ -138,7 +143,84 @@ export class PublishMethods extends EVMChainAdapterBase {
       publisherAddress: signer.address,
       publishEpochs: pricing.publishEpochs,
       tokenAmount: pricing.tokenAmount,
+      ...(diagnostics?.pcaProbeError !== undefined && (
+        isRetryableRpcError(diagnostics.pcaProbeError)
+        || errorCode(diagnostics.pcaProbeError) === 'CALL_EXCEPTION'
+      )
+        ? { pcaProbeError: diagnostics.pcaProbeError }
+        : {}),
     };
+  }
+
+  /** Reconcile an earlier pricing probe with fresh, candidate-specific evidence.
+   * A failed planning read is not itself proof that the final funding read is
+   * unknown: the wallet may have no gas, no PCA, or a recovered PCA read. */
+  private async _selectFundedPublisherPlanOrThrow(
+    plans: PublisherCandidatePlan[],
+    request: PublisherPublishPlanRequest,
+    quote: (epochs: number, purpose: 'pca' | 'direct') => Promise<bigint>,
+  ): Promise<PublisherCandidatePlan> {
+    const select = () => this._selectFundedCandidateOrThrow(
+      plans,
+      (plan) => ({
+        kind: 'native+trac',
+        nativeFloorWei: this.minPublisherNativeWei,
+        tracFloorWei: this.minPublisherTracWei,
+        requiredTracWei: plan.tokenAmount,
+        pca: { kind: 'publish', epochs: plan.publishEpochs },
+      }),
+      { preferIdle: false },
+    );
+
+    try {
+      return await select();
+    } catch (error) {
+      if (!(error instanceof InsufficientPublisherFundsError)) throw error;
+      if (!plans.some((plan) => plan.pcaProbeError !== undefined)) throw error;
+    }
+
+    // A failed lock/coverage lookup can leave a direct-spend lifetime that is
+    // wrong for a real PCA. Re-price only candidates that can still use PCA.
+    for (let index = 0; index < plans.length; index += 1) {
+      const plan = plans[index];
+      if (plan.pcaProbeError === undefined) continue;
+      const funds = await this.getWalletFunding(plan.address, { forceRefresh: true });
+      if (funds.native !== null && funds.native <= this.minPublisherNativeWei) continue;
+      if (funds.trac === null || (funds.trac > this.minPublisherTracWei && funds.trac >= plan.tokenAmount)) continue;
+      plans[index] = await this._publisherCandidatePlan(plan.signer, request, quote);
+    }
+
+    try {
+      return await select();
+    } catch (error) {
+      if (!(error instanceof InsufficientPublisherFundsError)) throw error;
+      // A strict false can be only a lifetime mismatch against direct-spend
+      // fallback pricing. It did not probe coverage at the PCA's real lock.
+      for (const plan of plans) {
+        if (plan.pcaProbeError === undefined) continue;
+        const funds = await this.getWalletFunding(plan.address, { forceRefresh: true });
+        if (funds.native !== null && funds.native <= this.minPublisherNativeWei) continue;
+        if (funds.trac === null || (funds.trac > this.minPublisherTracWei && funds.trac >= plan.tokenAmount)) continue;
+        const reader = this.publisherConvictionPlanReader();
+        if (!reader) continue;
+        let accountId: bigint;
+        let lockEpochs: number;
+        try {
+          accountId = await reader.getAccountId(plan.address);
+          if (accountId <= 0n) continue;
+          lockEpochs = await reader.getLockDurationEpochs(accountId);
+        } catch (readError) {
+          if (isRetryableRpcError(readError) || errorCode(readError) === 'CALL_EXCEPTION') {
+            throw new PcaFundingUnknownError(errorCode(readError));
+          }
+          throw readError;
+        }
+        if (lockEpochs > 0 && lockEpochs !== plan.publishEpochs) {
+          throw new PcaFundingUnknownError(errorCode(plan.pcaProbeError));
+        }
+      }
+      throw error;
+    }
   }
 
   /**
@@ -174,21 +256,11 @@ export class PublishMethods extends EVMChainAdapterBase {
         request.publisherAddress,
       );
       const plan = await this._publisherCandidatePlan(signer, request, quote);
-      await this.selectFundedSignerOrThrow(
-        [signer],
-        {
-          kind: 'native+trac',
-          nativeFloorWei: this.minPublisherNativeWei,
-          tracFloorWei: this.minPublisherTracWei,
-          requiredTracWei: plan.tokenAmount,
-          pca: { kind: 'publish', epochs: plan.publishEpochs },
-        },
-        { preferIdle: false },
-      );
+      const selected = await this._selectFundedPublisherPlanOrThrow([plan], request, quote);
       return {
-        publisherAddress: plan.publisherAddress,
-        publishEpochs: plan.publishEpochs,
-        tokenAmount: plan.tokenAmount,
+        publisherAddress: selected.publisherAddress,
+        publishEpochs: selected.publishEpochs,
+        tokenAmount: selected.tokenAmount,
       };
     }
 
@@ -202,17 +274,7 @@ export class PublishMethods extends EVMChainAdapterBase {
       for (const signer of authorized) {
         plans.push(await this._publisherCandidatePlan(signer, request, quote));
       }
-      return this._selectFundedCandidateOrThrow(
-        plans,
-        (plan) => ({
-          kind: 'native+trac',
-          nativeFloorWei: this.minPublisherNativeWei,
-          tracFloorWei: this.minPublisherTracWei,
-          requiredTracWei: plan.tokenAmount,
-          pca: { kind: 'publish', epochs: plan.publishEpochs },
-        }),
-        { preferIdle: false },
-      );
+      return this._selectFundedPublisherPlanOrThrow(plans, request, quote);
     });
     // Do not expose the internal Wallet carried only for cursor advancement.
     return {

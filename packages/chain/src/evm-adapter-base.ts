@@ -39,7 +39,7 @@ import { HubResolutionCache } from './hub-resolution-cache.js';
 import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, getPcaLogicInterface, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, PcaFundingUnknownError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { collectEvmErrorText } from './evm-error-text.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import {
@@ -2640,9 +2640,11 @@ export class EVMChainAdapterBase {
     candidates: T[],
     fundingFor: (candidate: T) => FundingMode,
     forceRefresh = false,
+    strictPcaRead = false,
   ): Promise<{
     fundings: Array<{ native: bigint | null; trac: bigint | null }>;
     fundableIdx: number[];
+    inconclusiveReads: unknown[];
   }> {
     const fundingModes = candidates.map(fundingFor);
     const fundings = await Promise.all(
@@ -2654,18 +2656,25 @@ export class EVMChainAdapterBase {
         });
       }),
     );
-    const fundable = await Promise.all(
+    const fundable = await Promise.allSettled(
       candidates.map((candidate, index) => this.isWalletFundable(
         candidate.address,
         fundings[index],
         fundingModes[index],
+        strictPcaRead,
       )),
     );
     const fundableIdx: number[] = [];
+    const inconclusiveReads: unknown[] = [];
     for (let index = 0; index < fundable.length; index += 1) {
-      if (fundable[index]) fundableIdx.push(index);
+      const result = fundable[index];
+      if (result.status === 'fulfilled' && result.value) fundableIdx.push(index);
+      if (result.status === 'rejected') {
+        if (!strictPcaRead) throw result.reason;
+        inconclusiveReads.push(result.reason);
+      }
     }
-    return { fundings, fundableIdx };
+    return { fundings, fundableIdx, inconclusiveReads };
   }
 
   private _preferredFundableCandidate<T extends { address: string }>(
@@ -2732,22 +2741,8 @@ export class EVMChainAdapterBase {
   }
 
   /**
-   * Fail-closed counterpart used only by explicit publisher reservation. The
-   * common selector stays best-effort; this path verifies its cached choice and
-   * force-refreshes every candidate before claiming that the pool is unfunded.
-   */
-  protected async selectFundedSignerOrThrow(
-    candidates: Wallet[],
-    funding: NativeAndTracFundingMode,
-    policy: { preferIdle: boolean },
-  ): Promise<Wallet> {
-    return this._selectFundedCandidateOrThrow(candidates, () => funding, policy);
-  }
-
-  /**
-   * Canonical fail-closed funded-candidate selector. Ordinary strict signer
-   * reservation and publish-plan candidates share the same cached scan, fresh
-   * terminal recheck, idle preference, diagnostics, and typed failure.
+   * Canonical fail-closed funded-candidate selector for publish plans: cached
+   * scan, fresh terminal recheck, idle preference, diagnostics, and typed failure.
    */
   protected async _selectFundedCandidateOrThrow<T extends { address: string }>(
     candidates: T[],
@@ -2762,10 +2757,13 @@ export class EVMChainAdapterBase {
     // Cached balances are appropriate for soft routing, but a terminal
     // whole-pool claim must be based on a fresh snapshot. Operators commonly
     // fund a wallet and retry immediately, inside the advisory cache TTL.
-    const refreshed = await this._scanCandidateFunding(candidates, fundingFor, true);
+    const refreshed = await this._scanCandidateFunding(candidates, fundingFor, true, true);
     if (refreshed.fundableIdx.length > 0) {
       return this._preferredFundableCandidate(candidates, refreshed.fundableIdx, policy.preferIdle);
     }
+
+    const unknown = refreshed.inconclusiveReads;
+    if (unknown.length > 0) throw new PcaFundingUnknownError(errorCode(unknown[0]));
 
     const diagnostics = candidates.map((candidate, index) => ({
       address: candidate.address,
@@ -2794,6 +2792,7 @@ export class EVMChainAdapterBase {
     address: string,
     f: { native: bigint | null; trac: bigint | null },
     funding: FundingMode,
+    strictPcaRead = false,
   ): Promise<boolean> {
     const nativeOk = f.native === null || f.native > funding.nativeFloorWei;
     if (!nativeOk) return false; // even a PCA agent needs gas
@@ -2806,6 +2805,7 @@ export class EVMChainAdapterBase {
       address,
       funding.requiredTracWei,
       funding.pca.kind === 'publish' ? funding.pca.epochs : undefined,
+      strictPcaRead,
     );
   }
 
@@ -2833,9 +2833,10 @@ export class EVMChainAdapterBase {
    * account can cover a publish costing `requiredCostWei` — i.e. it can publish
    * without holding its own TRAC. A `0n`/unknown cost falls back to a `1n`
    * liveness probe (account exists, not expired, has allowance). Cheap-exit when
-   * the PCA NFT is not deployed; best-effort otherwise (any read failure ⇒
-   * false, so the wallet then relies on its own-TRAC gate rather than being
-   * optimistically selected and reverting). NOTE: with the `1n` liveness probe
+   * the PCA NFT is not deployed; best-effort for ordinary routing (read failure
+   * means false), but strict terminal funding checks propagate inconclusive
+   * reads so an RPC outage is not reported as insufficient funds. NOTE: with
+   * the `1n` liveness probe
    * (cost unknown), a tiny consent-free "squat" PCA (RFC-001 §3.6) whose
    * allowance rounds up to ≥1 wei but cannot cover a real publish can still pass;
    * that is an attacker-induced edge that degrades to a single retry, not a fund
@@ -2848,6 +2849,7 @@ export class EVMChainAdapterBase {
     _address: string,
     _requiredCostWei: bigint,
     _publishEpochs?: number,
+    _strictRead = false,
   ): Promise<boolean> {
     return false;
   }
@@ -4555,6 +4557,10 @@ export class EVMChainAdapterBase {
    * original live head read. The exact contract handle, address, topics and
    * binding generation are fenced across the await so a Hub rotation or
    * runtime rebuild cannot lend a retired generation's horizon.
+   *
+   * The two ContextGraphStorage lanes are fenced on that contract;
+   * `KnowledgeAssetUpdated` on DKGKnowledgeAssets, whose rows the log indexes
+   * in its `knowledge-asset` family.
    */
   async acquireEventScanHorizonLease(
     eventTypes: readonly string[],
@@ -4564,36 +4570,41 @@ export class EVMChainAdapterBase {
       ? 'ContextGraphCreated' as const
       : eventTypes[0] === 'KnowledgeAssetRegisteredToContextGraph'
         ? 'KnowledgeAssetRegisteredToContextGraph' as const
-        : undefined;
+        : eventTypes[0] === 'KnowledgeAssetUpdated'
+          ? 'KnowledgeAssetUpdated' as const
+          : undefined;
     if (eventType === undefined) return undefined;
 
+    const currentContract = (): Contract | undefined => (
+      eventType === 'KnowledgeAssetUpdated'
+        ? this.contracts.knowledgeAssetStorage
+        : this.contracts.contextGraphStorage
+    );
     const binding = this.chainEventLogBinding;
     const readLease = binding?.readEventScanLease;
-    const contextGraphStorage = this.contracts.contextGraphStorage;
-    if (binding === undefined || readLease === undefined || contextGraphStorage === undefined) {
+    const contract = currentContract();
+    if (binding === undefined || readLease === undefined || contract === undefined) {
       return undefined;
     }
 
     let address: string;
     let topic0: string | undefined;
     try {
-      address = (await contextGraphStorage.getAddress()).toLowerCase();
-      topic0 = contextGraphStorage.interface.getEvent(eventType)?.topicHash.toLowerCase();
+      address = (await contract.getAddress()).toLowerCase();
+      topic0 = contract.interface.getEvent(eventType)?.topicHash.toLowerCase();
     } catch {
       return undefined;
     }
     if (topic0 === undefined) return undefined;
 
     try {
-      const logLease = await readLease.call(binding, {
-        eventType,
-        contextGraphStorageAddress: address,
-        topic0,
-      });
+      const logLease = await readLease.call(binding, eventType === 'KnowledgeAssetUpdated'
+        ? { eventType, knowledgeAssetStorageAddress: address, topic0 }
+        : { eventType, contextGraphStorageAddress: address, topic0 });
       if (
         logLease === undefined
         || !this.chainEventLogBindingIsCurrent(binding)
-        || this.contracts.contextGraphStorage !== contextGraphStorage
+        || currentContract() !== contract
         || !Number.isSafeInteger(logLease.throughBlockNumber)
         || logLease.throughBlockNumber < 0
       ) return undefined;
@@ -4601,14 +4612,14 @@ export class EVMChainAdapterBase {
       const contractGenerationHolds = async (): Promise<boolean> => {
         if (
           !this.chainEventLogBindingIsCurrent(binding)
-          || this.contracts.contextGraphStorage !== contextGraphStorage
+          || currentContract() !== contract
         ) return false;
         try {
-          const currentAddress = (await contextGraphStorage.getAddress()).toLowerCase();
-          const currentTopic0 = contextGraphStorage.interface
+          const currentAddress = (await contract.getAddress()).toLowerCase();
+          const currentTopic0 = contract.interface
             .getEvent(eventType)?.topicHash.toLowerCase();
           return this.chainEventLogBindingIsCurrent(binding)
-            && this.contracts.contextGraphStorage === contextGraphStorage
+            && currentContract() === contract
             && currentAddress === address
             && currentTopic0 === topic0;
         } catch {

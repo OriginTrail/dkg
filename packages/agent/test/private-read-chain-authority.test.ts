@@ -1487,6 +1487,63 @@ describe('private read authorization uses the on-chain participant roster', () =
   }, CHAIN_POLICY_READ_TIMEOUT_MS + 3_500);
 
 
+  it('keeps a persisted remote row dormant when missing metadata looks public', async () => {
+    const contextGraphId = 'persisted-remote-missing-private-meta';
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'PrivateReadRemoteRehydrationProvenance',
+      chainAdapter: chain,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [{
+          id: contextGraphId,
+          subscribed: true,
+          synced: true,
+          sharedMemorySynced: true,
+          metaSynced: true,
+          syncScoped: true,
+        }],
+        save: async () => undefined,
+        delete: async () => undefined,
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+    });
+    vi.spyOn(agent, 'resolveRegisteredContextGraphAuthority').mockResolvedValue({ kind: 'unregistered' });
+    vi.spyOn(agent, 'isPrivateContextGraph').mockResolvedValue(false);
+    const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
+
+    await agent.rehydrateContextGraphsFromDurableState();
+
+    expect(subscribe).not.toHaveBeenCalled();
+    expect(agent.getSubscribedContextGraphs().has(contextGraphId)).toBe(false);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 0,
+      dormant: 1,
+      dormantReasons: { authorityUnavailable: [contextGraphId] },
+    });
+  });
+
+  it('admits a remote legacy-private member with explicit agent and peer allowlists', async () => {
+    const contextGraphId = 'remote-legacy-private-allowlisted';
+    agent = await DKGAgent.create({
+      name: 'PrivateReadRemoteLegacyMember',
+      chainAdapter: new MockChainAdapter(),
+    });
+    vi.spyOn(agent, 'peerId', 'get').mockReturnValue('12D3KooWRemoteLegacyMember');
+    vi.spyOn(agent, 'resolveRegisteredContextGraphAuthority').mockResolvedValue({ kind: 'unregistered' });
+    vi.spyOn(agent, 'isPrivateContextGraph').mockResolvedValue(true);
+    vi.spyOn(agent, 'getContextGraphAllowedPeers').mockResolvedValue([agent.peerId]);
+    vi.spyOn(agent, 'getContextGraphAgentGateAddresses').mockResolvedValue([MEMBER]);
+
+    await expect(agent.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
+      callerAgentAddress: MEMBER,
+      allowSubscriptionFallback: false,
+    })).resolves.toMatchObject({
+      outcome: 'allowed',
+      source: 'legacy-local',
+      reason: 'local-agent-and-peer-allowlist',
+    });
+  });
+
   it('leaves a persisted subscription dormant when startup cannot prove current read authority', async () => {
     const contextGraphId = 'persisted-private-poison';
     const chain = new MockChainAdapter();

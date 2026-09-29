@@ -98,6 +98,8 @@ export class StoreSchedulerBusyError extends Error implements StoreOperationOutc
 
 export interface StoreSchedulerBusyErrorLike extends StoreOperationOutcomeTagged {
   readonly code: 'STORE_SCHEDULER_BUSY';
+  /** Optional because copying an Error can omit its non-enumerable message. */
+  readonly message?: string;
   readonly retryable: true;
   readonly outcome: 'not_started';
   readonly reason: StoreSchedulerBusyReason;
@@ -112,6 +114,7 @@ export function isStoreSchedulerBusyError(
   if (!error || typeof error !== 'object') return false;
   const shaped = error as Partial<StoreSchedulerBusyErrorLike>;
   return shaped.code === 'STORE_SCHEDULER_BUSY'
+    && (shaped.message === undefined || typeof shaped.message === 'string')
     && shaped.retryable === true
     && shaped.outcome === 'not_started'
     && shaped.storeOperationOutcomeTag === STORE_OPERATION_OUTCOME_TAG

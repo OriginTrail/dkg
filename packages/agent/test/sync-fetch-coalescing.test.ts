@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   createOperationContext,
   PROTOCOL_SYNC,
+  SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
@@ -933,6 +934,57 @@ describe('DKGAgent sync fetch coalescing', () => {
       expect(fetchCalls).toBe(2);
       expect(forward).toBe(reverse.result);
       expect(reverse.disposition).toBe('clean-absent');
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('runs a forced-fresh exact fetch after an identical in-flight fetch and forwards freshness to both pages', async () => {
+    const firstMetaFetch = deferred<SyncPageResult>();
+    const fetchCalls: Array<{ phase: SyncPhase; forceFreshSession?: boolean }> = [];
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    stubLifecycleFetch(agent, async ({ phase, forceFreshSession }) => {
+      fetchCalls.push({ phase, forceFreshSession });
+      if (fetchCalls.length === 1) return firstMetaFetch.promise;
+      return emptySyncPage(phase);
+    });
+    (agent as any).processDurableBatchInWorker = async () => ({
+      verifiedData: [],
+      verifiedMeta: [],
+      consumedUnpersistedMetaTriples: 0,
+      totalFetchedDataQuads: 0,
+      totalFetchedMetaQuads: 0,
+      rejectedKcs: 0,
+      emptyResponses: 1,
+      metaOnlyResponses: 0,
+      verifiedPrivateOnlyResponses: 0,
+      dataRejectedMissingMeta: 0,
+    });
+
+    try {
+      const ordinary = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
+        PEER_A,
+        SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        exactSelection(EXACT_UAL_7),
+      );
+      await waitFor(() => fetchCalls.length === 1);
+      const forced = (agent as any).syncExactKnowledgeAssetsFromPeerDetailed(
+        PEER_A,
+        SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        exactSelection(EXACT_UAL_7),
+        { forceFreshExactSession: true },
+      );
+      firstMetaFetch.resolve(emptySyncPage('meta'));
+
+      const [ordinaryResult, forcedResult] = await Promise.all([ordinary, forced]);
+      expect(ordinaryResult.result).not.toBe(forcedResult.result);
+      expect(fetchCalls).toHaveLength(4);
+      expect(fetchCalls.slice(0, 2).map(({ forceFreshSession }) => forceFreshSession))
+        .toEqual([false, false]);
+      expect(fetchCalls.slice(2)).toEqual([
+        { phase: 'meta', forceFreshSession: true },
+        { phase: 'data', forceFreshSession: true },
+      ]);
     } finally {
       await agent.stop().catch(() => {});
     }

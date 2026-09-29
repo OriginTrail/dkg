@@ -1,4 +1,7 @@
 export const RFC64_UNIT_TESTS = [
+  "test/rfc64-catalog-repair-backoff.test.ts",
+  "test/rfc64-catalog-repair-pressure.test.ts",
+  "test/rfc64-catalog-repair-diagnostics.test.ts",
   "test/rfc64-inventory-v1-scalars.test.ts",
   "test/rfc64-legacy-swm-boundary-v1.test.ts",
   "test/rfc64-inventory-v1-lifecycle.test.ts",
