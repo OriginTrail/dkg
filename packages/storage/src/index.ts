@@ -262,6 +262,7 @@ export {
   type LoadSelectedSharedMemoryQuadsOptions,
   type SharedMemoryResultBudget,
   SharedMemoryResultBudgetError,
+  SharedMemoryReadConsistencyError,
   type LoadSelectedVerifiableMemoryQuadsOptions,
   type NonEmptyGraphList,
   type NamedKnowledgeAssetGraphIdentity,

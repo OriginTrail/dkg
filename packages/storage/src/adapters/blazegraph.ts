@@ -18,6 +18,7 @@ import {
   assertQuadLiteralsMutf8Safe,
   classifySparqlOperation,
   getMetrics,
+  sparqlString,
   JAVA_WRITE_UTF_MAX_BYTES,
   type Rfc64SemanticReadOperationV1,
 } from '@origintrail-official/dkg-core';
@@ -247,6 +248,56 @@ export class BlazegraphStore implements TripleStore {
         `Blazegraph construct failed (${status}): ${excerpt}`,
       ),
     }, RFC64_BLAZEGRAPH_PROJECTION_RESPONSE_STRATEGY_V1);
+  }
+
+  /** Run related reads at one Blazegraph commit point and release its pin. */
+  async withReadSnapshot<T>(
+    read: (timestamp: string) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const endpoint = new URL(this.url);
+    const basePath = endpoint.pathname.replace(/(?:\/namespace\/[^/]+)?\/sparql\/?$/, '');
+    if (basePath === endpoint.pathname) throw new Error('Blazegraph snapshot requires a SPARQL endpoint URL');
+    endpoint.pathname = `${basePath}/tx`;
+    endpoint.search = 'timestamp=-1';
+    const beginSignal = signal
+      ? AbortSignal.any([signal, AbortSignal.timeout(this.operationTimeoutMs)])
+      : AbortSignal.timeout(this.operationTimeoutMs);
+    const begin = await fetch(endpoint.toString(), { method: 'POST', signal: beginSignal });
+    if (begin.status !== 201) throw new Error(`Blazegraph read snapshot creation failed (${begin.status})`);
+    const body = await begin.text();
+    const txId = body.match(/\btxId="(-?\d+)"/)?.[1]
+      ?? begin.headers.get('Location')?.match(/\/tx\/(-?\d+)(?:\?|$)/)?.[1];
+    const readOnly = body.match(/\breadOnly="(true|false)"/)?.[1];
+    if (!txId) throw new Error('Blazegraph did not return a snapshot transaction ID');
+    endpoint.pathname = `${basePath}/tx/${txId}`;
+    endpoint.search = 'ABORT';
+    let result!: T;
+    let readFailed = false;
+    let readFailure: unknown;
+    try {
+      if (readOnly !== 'true') throw new Error('Blazegraph did not return a read-only snapshot transaction');
+      result = await read(txId);
+    } catch (error) {
+      readFailed = true;
+      readFailure = error;
+    }
+    let releaseFailure: unknown;
+    try {
+      const end = await fetch(endpoint.toString(), {
+        method: 'POST',
+        signal: AbortSignal.timeout(this.operationTimeoutMs),
+      });
+      if (end.status !== 200) throw new Error(`Blazegraph read snapshot release failed (${end.status})`);
+    } catch (error) {
+      releaseFailure = error;
+    }
+    if (readFailed) {
+      if (releaseFailure) console.warn('Blazegraph read snapshot release failed after read error', releaseFailure);
+      throw readFailure;
+    }
+    if (releaseFailure) throw releaseFailure;
+    return result;
   }
 
   private runStreamingConstruct<T>(
@@ -607,6 +658,7 @@ export class BlazegraphStore implements TripleStore {
         deadline,
         options?.maxResponseBytes,
         'query',
+        options?.readSnapshotTimestamp,
       );
 
       const text = options?.maxResponseBytes === undefined
@@ -638,8 +690,9 @@ export class BlazegraphStore implements TripleStore {
     deadline: StoreOperationDeadline,
     errorResponseByteCeiling: number | undefined,
     failureLabel: 'query' | 'construct',
+    readSnapshotTimestamp?: string,
   ): Promise<Response> {
-    const res = await this.postReadRequest(sparql, accept, deadline);
+    const res = await this.postReadRequest(sparql, accept, deadline, readSnapshotTimestamp);
     if (!res.ok) {
       const text = await deadline.waitFor((errorResponseByteCeiling === undefined
         ? res.text()
@@ -654,8 +707,14 @@ export class BlazegraphStore implements TripleStore {
     sparql: string,
     accept: string,
     deadline: StoreOperationDeadline,
+    readSnapshotTimestamp?: string,
   ): Promise<Response> {
-    return deadline.waitFor(fetch(this.url, {
+    if (readSnapshotTimestamp !== undefined && !/^-?\d+$/.test(readSnapshotTimestamp)) {
+      throw new Error('Invalid Blazegraph read snapshot timestamp');
+    }
+    const url = new URL(this.url);
+    if (readSnapshotTimestamp !== undefined) url.searchParams.set('timestamp', readSnapshotTimestamp);
+    return deadline.waitFor(fetch(url, {
       method: 'POST',
       headers: {
         'Content-Type': SPARQL_QUERY_CONTENT_TYPE,
@@ -678,6 +737,7 @@ export class BlazegraphStore implements TripleStore {
       deadline,
       options?.maxResponseBytes,
       'construct',
+      options?.readSnapshotTimestamp,
     );
     const text = await deadline.waitFor(options?.maxResponseBytes === undefined
       ? res.text()
@@ -722,6 +782,18 @@ export class BlazegraphStore implements TripleStore {
     return r.bindings
       .map((b) => b.g)
       .filter((graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph));
+  }
+
+  async listGraphsByPrefix(prefix: string, options?: TripleStoreQueryOptions): Promise<string[]> {
+    const r = await this.queryWithOperation(
+      `SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o }
+        FILTER(STRSTARTS(STR(?g), ${sparqlString(prefix)})) }`,
+      options,
+      'listGraphs',
+    );
+    if (r.type !== 'bindings') return [];
+    return r.bindings.map((row) => row.g)
+      .filter((graph) => Boolean(graph) && graph.startsWith(prefix) && !isAtomicGraphReplaceStagingGraph(graph));
   }
 
   // -------------------------------------------------------------------

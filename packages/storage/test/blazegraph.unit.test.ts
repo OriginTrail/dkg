@@ -104,6 +104,44 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(fetchCalls).toHaveLength(0);
   });
 
+  it('pins related reads to one read-only transaction and releases it', async () => {
+    setFetch(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/tx?timestamp=-1')) {
+        return new Response('<xml><tx txId="12345" readOnly="true"/></xml>', { status: 201 });
+      }
+      if (url.endsWith('/tx/12345?ABORT')) return new Response(null, { status: 200 });
+      return blazeSelectResponse();
+    });
+    const store = new BlazegraphStore(baseUrl);
+    await store.withReadSnapshot(async (timestamp) => {
+      await Promise.all([
+        store.query('SELECT ?name WHERE { ?name ?p ?o }', { readSnapshotTimestamp: timestamp }),
+        store.query('SELECT ?name WHERE { ?name ?p ?o }', { readSnapshotTimestamp: timestamp }),
+      ]);
+    });
+    const urls = fetchCalls.map(([input]) => String(input));
+    expect(urls[0]).toBe('http://blaze.test/tx?timestamp=-1');
+    expect(urls.filter((url) => url === `${baseUrl}?timestamp=12345`)).toHaveLength(2);
+    expect(urls.at(-1)).toBe('http://blaze.test/tx/12345?ABORT');
+  });
+
+  it('releases a read-only transaction after a query failure', async () => {
+    setFetch(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/tx?timestamp=-1')) {
+        return new Response('<xml><tx txId="22" readOnly="true"/></xml>', { status: 201 });
+      }
+      if (url.endsWith('/tx/22?ABORT')) return new Response(null, { status: 200 });
+      return new Response('query failed', { status: 500 });
+    });
+    const store = new BlazegraphStore(baseUrl);
+    await expect(store.withReadSnapshot((timestamp) =>
+      store.query('SELECT ?name WHERE { ?name ?p ?o }', { readSnapshotTimestamp: timestamp }),
+    )).rejects.toThrow('Blazegraph query failed');
+    expect(String(fetchCalls.at(-1)?.[0])).toBe('http://blaze.test/tx/22?ABORT');
+  });
+
   it('insert POSTs N-Quads with correct content type', async () => {
     setFetch(async () => new Response(null, { status: 200 }));
     const s = new BlazegraphStore(baseUrl);

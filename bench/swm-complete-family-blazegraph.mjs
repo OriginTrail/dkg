@@ -35,7 +35,7 @@ const quads = Array.from({ length: count }, (_, i) => ({
   subject: `urn:swm-probe:${runId}:decoy:${i}`,
   predicate: 'urn:p',
   object: '"decoy"',
-  graph: `${swm}/0xabcdef0123456789abcdef0123456789abcdef01/${i + 1}`,
+  graph: `${swm}/0xabcdef0123456789abcdef0123456789abcdef01/${String(i + 1).padStart(5, '0')}`,
 }));
 quads.push(
   { subject: roots[0], predicate: 'urn:p', object: '"same"', graph: quads[0].graph },

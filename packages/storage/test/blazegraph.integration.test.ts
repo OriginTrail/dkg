@@ -21,9 +21,10 @@
  * BLAZEGRAPH_TEST_URL example:
  *   http://127.0.0.1:9999/bigdata/namespace/kb/sparql
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { loadSelectedSharedMemoryQuads } from '../src/graph-manager.js';
+import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
 import { compileRfc64SemanticAuthorCommitV1 } from '../src/rfc64-semantic-author-commit-v1.js';
 import { normalizeRfc64AuthorCommitCasV1 } from '../src/rfc64-author-commit-cas.js';
 import type {
@@ -95,7 +96,7 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
       subject: `urn:swm-chunks:${RUN}:decoy:${i}`,
       predicate: PRED,
       object: '"decoy"',
-      graph: `${swm}/0xabcdef0123456789abcdef0123456789abcdef01/${i + 1}`,
+      graph: `${swm}/0xabcdef0123456789abcdef0123456789abcdef01/${String(i + 1).padStart(3, '0')}`,
     }));
     quads.push(
       { subject: root, predicate: PRED, object: '"same"', graph: quads[0]!.graph },
@@ -104,6 +105,8 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
     );
     try {
       await store.insert(quads);
+      const originalQuery = store.query.bind(store);
+      const query = vi.spyOn(store, 'query');
       const selected = await loadSelectedSharedMemoryQuads(
         store,
         swm,
@@ -114,7 +117,49 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
         `${child}|${PRED}|"child"`,
         `${root}|${PRED}|"same"`,
       ].sort());
+      const unpaged = await loadSelectedSharedMemoryQuads(store, swm, { rootEntities: [root] });
+      expect(unpaged.map((q) => [q.subject, q.predicate, q.object].join('|')).sort())
+        .toEqual(selected.map((q) => [q.subject, q.predicate, q.object].join('|')).sort());
+      const chunkQueries = query.mock.calls.filter(([sparql]) => sparql.includes('VALUES ?g'));
+      expect(chunkQueries.some(([sparql]) => sparql.includes(`<${quads[0]!.graph}>`)
+        && !sparql.includes(`<${quads[129]!.graph}>`))).toBe(true);
+      expect(chunkQueries.some(([sparql]) => sparql.includes(`<${quads[129]!.graph}>`)
+        && !sparql.includes(`<${quads[0]!.graph}>`))).toBe(true);
+      expect(chunkQueries.every(([, options]) => options?.readSnapshotTimestamp !== undefined)).toBe(true);
+
+      // A write between serial SELECT chunks must not leak into the pinned
+      // read. A fresh transaction immediately afterwards must see it.
+      const added: Quad = {
+        subject: root, predicate: `${PRED}:later`, object: '"later"', graph: quads[129]!.graph,
+      };
+      let inserted = false;
+      query.mockImplementation(async (sparql, options) => {
+        const result = await originalQuery(sparql, options);
+        if (!inserted && sparql.includes('VALUES ?g') && sparql.includes(`<${quads[0]!.graph}>`)) {
+          inserted = true;
+          await store.insert([added]);
+          quads.push(added);
+        }
+        return result;
+      });
+      const pinned = await loadSelectedSharedMemoryQuads(store, swm, { rootEntities: [root] }, {
+        resultBudget: { pageRows: 1, maxRows: 3, maxBytesEstimate: 1024 * 1024 },
+      });
+      expect(inserted).toBe(true);
+      expect(pinned.some((quad) => quad.predicate === added.predicate)).toBe(false);
+      query.mockRestore();
+      const fresh = await loadSelectedSharedMemoryQuads(store, swm, { rootEntities: [root] }, {
+        resultBudget: { pageRows: 1, maxRows: 3, maxBytesEstimate: 1024 * 1024 },
+      });
+      expect(fresh.some((quad) => quad.predicate === added.predicate)).toBe(true);
+      const indexed = new GraphSetIndexStore(store, { revalidateMs: 60_000 });
+      const throughCatalog = await loadSelectedSharedMemoryQuads(indexed, swm, { rootEntities: [root] }, {
+        resultBudget: { pageRows: 1, maxRows: 3, maxBytesEstimate: 1024 * 1024 },
+      });
+      expect(throughCatalog.map((quad) => [quad.subject, quad.predicate, quad.object].join('|')).sort())
+        .toEqual(fresh.map((quad) => [quad.subject, quad.predicate, quad.object].join('|')).sort());
     } finally {
+      vi.restoreAllMocks();
       await store.delete(quads).catch(() => {});
     }
   }, 60_000);
