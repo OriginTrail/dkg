@@ -386,16 +386,18 @@ export const SUPPORT_PATH_ROUTES = Object.freeze([
     full: 'Global CI input changed',
   },
   {
-    // The EVM integration runner every EVM scope uses.
-    pattern: /^scripts\/(?:test-evm-integration\.sh|run-evm-integration\.mjs)$/,
+    // The EVM integration runner every EVM scope uses, and the runtime-asset
+    // copy the CLI package's build and prepack run, which everything using the
+    // built CLI depends on.
+    pattern: /^scripts\/(?:test-evm-integration\.sh|run-evm-integration\.mjs|copy-cli-runtime-assets\.mjs)$/,
     full: 'Global CI input changed',
   },
   {
-    // The devnet bootstrap: the browser suite's Playwright setup and the
-    // devnet harnesses start it.
+    // The devnet bootstrap: the browser suite's Playwright setup, the devnet
+    // harnesses and the CLI's Blazegraph smoke fixture (which sources it) run it.
     pattern: /^scripts\/devnet\.sh$/,
-    lanes: ['kosava_node_ui_e2e', 'tornado_agent'],
-    reason: 'the browser suite and the devnet harnesses start the devnet bootstrap',
+    lanes: ['kosava_node_ui_e2e', 'tornado_agent', 'bura_cli'],
+    reason: 'the browser suite, the devnet harnesses and the CLI Blazegraph smoke fixture run the devnet bootstrap',
   },
   {
     pattern: /^scripts\/devnet-publish-helpers\.sh$/,

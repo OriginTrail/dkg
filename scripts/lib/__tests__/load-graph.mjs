@@ -76,9 +76,22 @@ const RELATIVE = String.raw`['"]((?:\.\.?\/)+[^'"]+)['"]`;
 const URL_IMPORT = new RegExp(String.raw`\bimport\s*\(\s*new\s+URL\(\s*` + RELATIVE, 'g');
 const URL_PATH = new RegExp(String.raw`(?:\bnew\s+URL\(\s*|\brequire\.resolve\s*\(\s*)` + RELATIVE, 'g');
 const REPO_PATH_LITERAL = /['"]((?:[\w@.-]+\/)+[\w.-]+\.[A-Za-z0-9]+)['"]/g;
-// A repository script named in a string, quoted or not inside it: tests embed
-// shell that runs them, and scripts outside CI tooling route by who uses them.
-const SCRIPT_MENTION = /(?<![\w/.-])(?:\.\/)?(scripts\/[\w./-]+\.(?:sh|mjs|cjs|js|ts|json))\b/g;
+// A repository-script path, of any extension or none, wherever it appears:
+// in a string, in a workflow command, behind a variable such as
+// "$repo_root/". Callers keep only the paths that exist. Scripts outside CI
+// tooling route by who uses them, so every consumer this finds counts.
+const REPO_SCRIPT_PATH = /(?<![\w.-])(?:\.\/)?(scripts\/[\w./-]*[\w-])/g;
+export function repoScriptMentions(text) {
+  return [...new Set([...text.matchAll(REPO_SCRIPT_PATH)].map(([, script]) => script))];
+}
+// Files whose text is read for script mentions when a lane reads or runs them:
+// anything but JavaScript (followed as modules), manifests (a workspace's
+// package.json scripts are mapped to its lanes by the routing test),
+// documents and binaries.
+const SCANNED_TEXT = (file) => !/(?:\.(?:[cm]?[jt]sx?|md|png|jpe?g|gif|svg|ico|wasm|node|zip|gz|tgz)|(?:^|\/)package\.json)$/i.test(file);
+// `#` comments in shell, Python and YAML, which mention scripts they do not run.
+const HASH_COMMENTED = /\.(?:sh|bash|py|ya?ml)$/;
+const withoutHashComments = (text) => text.split('\n').map((line) => line.replace(/(^|\s)#.*$/, '$1')).join('\n');
 // Files that list the paths a lane runs or reads: tests, and test-runner configs.
 const TEST_FILE = /(?:^|\/)(?:test|tests|test-live|__tests__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)(?:vitest|playwright)[\w.-]*\.config\.[cm]?[jt]s$/;
 const TYPE_ONLY_IMPORT = /\b(?:import|export)\s+type\s+(?:\{[^}]*\}|\*\s+as\s+\w+|\w+)\s+from\s*['"][^'"]+['"]/g;
@@ -195,7 +208,7 @@ function scriptMentions(file, code) {
     ts.forEachChild(node, visit);
   };
   visit(ts.createSourceFile(file, code, ts.ScriptTarget.Latest, false, kind));
-  return texts.flatMap((text) => [...text.matchAll(SCRIPT_MENTION)].map(([, script]) => script));
+  return texts.flatMap(repoScriptMentions);
 }
 
 // What `file` (repo-relative, with `source` as its contents) loads by path:
@@ -283,6 +296,26 @@ export function traceLaneLoads(seeds, { read = readRepoFile } = {}) {
       for (const workspace of closureOf(workspaceByName.get(name))) {
         add(workspacesLoaded, workspace, requirements, `${file} (imports ${name})`);
       }
+    }
+  }
+  // A shell script or other text file a lane reads or runs can run more
+  // repository scripts (a fixture that sources scripts/devnet.sh, a script
+  // that sources a sibling by name); those are read by the same lanes.
+  const scan = [...readPaths.keys()];
+  while (scan.length) {
+    const file = scan.shift();
+    if (!SCANNED_TEXT(file)) continue;
+    const raw = read(file);
+    if (raw === undefined) continue;
+    const text = HASH_COMMENTED.test(file) ? withoutHashComments(raw) : raw;
+    // A shell script runs a sibling by path ("$SCRIPT_DIR/x.mjs"), not by a
+    // bare name in prose.
+    const siblings = /\.(?:sh|bash)$/.test(file)
+      ? [...text.matchAll(/(?<=\/)[\w.-]+\.(?:sh|bash|py|[cm]?[jt]s)\b/g)].map(([name]) => path.posix.join(path.posix.dirname(file), name))
+      : [];
+    const requirements = [...readPaths.get(file).keys()];
+    for (const target of [...repoScriptMentions(text), ...siblings].map((candidate) => readTarget(candidate, false)).filter(Boolean)) {
+      if (target !== file && add(readPaths, target, requirements, file)) scan.push(target);
     }
   }
   for (const [key, needs] of [

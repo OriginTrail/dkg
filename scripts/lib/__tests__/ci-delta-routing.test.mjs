@@ -24,7 +24,7 @@ import {
   succeeded,
   workflowJobCommands,
 } from './ci-plan-fixtures.mjs';
-import { loadReferences, packageImports, traceLaneLoads, workspaceClosure } from './load-graph.mjs';
+import { loadReferences, packageImports, repoScriptMentions, traceLaneLoads, workspaceClosure } from './load-graph.mjs';
 
 // The workspaces that `files` import by package name, plus everything those
 // workspaces depend on: what code outside the package lanes compiles against.
@@ -214,7 +214,7 @@ test('repository support paths route to the lanes that execute them', () => {
     ['scripts/audit-dial-protocol.mjs', []],
     ['scripts/devnet-test-invite-flow.sh', []],
     ['scripts/devnet-publish-helpers.sh', ['bura_cli']],
-    ['scripts/devnet.sh', ['tornado_blazegraph', 'tornado_agent', 'kosava_node_ui_e2e']],
+    ['scripts/devnet.sh', ['tornado_blazegraph', 'tornado_agent', 'bura_cli', 'kosava_node_ui_e2e']],
     ['scripts/lib/__tests__/devnet-curated-join-helpers.test.mjs', []],
     ['test-policy/disabled-tests.json', []],
     ['.github/oxlint-baseline.json', []],
@@ -469,6 +469,17 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
       }
     }
   }
+  // A workspace's own package.json scripts (build, prepack, …) run the
+  // repository scripts they name for that workspace's lanes.
+  for (const [workspace, owningLanes] of Object.entries(WORKSPACE_OWNING_LANES)) {
+    if (WORKSPACE_RULES[workspace].forceFull) continue;
+    const { scripts = {} } = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, workspace, 'package.json'), 'utf8'));
+    for (const command of Object.values(scripts)) {
+      for (const script of repoScriptMentions(command)) {
+        if (fs.statSync(path.join(REPO_ROOT, script), { throwIfNoEntry: false })?.isFile()) seed(script, owningLanes, `${workspace}/package.json scripts`);
+      }
+    }
+  }
   const laneByJob = Object.fromEntries(Object.entries(PRIMARY_LANE_JOBS).map(([lane, job]) => [job, lane]));
   // A job runs for its mapped lane or, like a job that only calls a reusable
   // workflow, for the lane output its condition reads.
@@ -510,34 +521,46 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   assert.deepEqual([...UNFOLLOWED_LOADS.keys()].filter((entry) => !computed.includes(entry)), [], 'stale UNFOLLOWED_LOADS entries');
 });
 
-test('every repository script a CI job runs selects that job', () => {
-  // Scripts outside CI tooling route by who runs them, so each one a job names
-  // (directly, or through what workflowJobCommands follows) must select it:
-  // the job's lane, the shared build job, or full CI for the EVM integration
-  // workflow, whose runner every scope uses. The changes job runs on every PR.
+// Each repository script a workflow job runs (directly, or through what
+// workflowJobCommands follows) that does not select that job: its lane, the
+// shared build job, or, for the EVM integration workflow, whose runner every
+// scope uses, full CI. The changes job runs on every PR. `workflows` maps a
+// workflow file name to its source.
+function workflowScriptGaps(workflows) {
   const laneByJob = Object.fromEntries(Object.entries(PRIMARY_LANE_JOBS).map(([lane, job]) => [job, lane]));
-  const missing = [];
+  const isRepoFile = (file) => fs.statSync(path.join(REPO_ROOT, file), { throwIfNoEntry: false })?.isFile() === true;
+  const gaps = [];
   let checked = 0;
-  for (const workflow of ['ci.yml', 'evm-integration.yml']) {
-    const source = fs.readFileSync(path.join(REPO_ROOT, '.github/workflows', workflow), 'utf8');
+  for (const [workflow, source] of workflows) {
     for (const { job, condition, commands } of workflowJobCommands(source)) {
       if (workflow === 'ci.yml' && job === 'changes') continue;
       const lane = laneByJob[job] ?? condition.match(/needs\.changes\.outputs\.(\w+) == 'true'/)?.[1];
-      const scripts = new Set(commands.flatMap((command) => [
-        ...command.matchAll(/(?<![\w/.-])(?:\.\/)?(scripts\/[\w./-]+\.(?:sh|mjs|cjs|js|ts))\b/g),
-      ].map(([, file]) => file)));
-      for (const file of scripts) {
+      for (const file of new Set(commands.flatMap(repoScriptMentions).filter(isRepoFile))) {
         checked += 1;
         const plan = pullRequestPlan([change(file)]);
         if (plan.mode === 'full') continue;
         const selected = workflow === 'ci.yml'
           && (job === 'build' ? needsSharedBuild(plan) : Boolean(lane && plan.lanes[lane]));
-        if (!selected) missing.push(`${workflow} ${job} runs ${file}`);
+        if (!selected) gaps.push(`${workflow} ${job} runs ${file}`);
       }
     }
   }
+  return { gaps, checked };
+}
+
+test('every repository script a CI job runs selects that job', () => {
+  const { gaps, checked } = workflowScriptGaps(['ci.yml', 'evm-integration.yml'].map((workflow) => [
+    workflow,
+    fs.readFileSync(path.join(REPO_ROOT, '.github/workflows', workflow), 'utf8'),
+  ]));
   assert.ok(checked >= 5, 'the scripts workflow jobs run are checked');
-  assert.deepEqual(missing, []);
+  assert.deepEqual(gaps, []);
+
+  // The check's failure path: a lane job running a script routed to the build
+  // checks alone is reported; a script routed to that lane is not.
+  const planted = (run) => [['ci.yml', `jobs:\n  bura-cli:\n    steps:\n      - run: ${run}\n`]];
+  assert.deepEqual(workflowScriptGaps(planted('node scripts/audit-dial-protocol.mjs')).gaps, ['ci.yml bura-cli runs scripts/audit-dial-protocol.mjs']);
+  assert.deepEqual(workflowScriptGaps(planted('bash "$GITHUB_WORKSPACE/scripts/devnet-publish-helpers.sh"')).gaps, []);
 });
 
 test('the load-closure guard reports a planted unrouted load and an unlisted computed load', () => {
@@ -646,6 +669,24 @@ test('the load scanner sees these forms, and nothing it cannot resolve staticall
     'const script = `tr -d "\\r" < scripts/devnet-publish-helpers.sh > "$DIR/helpers.sh"`;',
   ].join('\n'));
   assert.deepEqual(shell.paths, ['scripts/devnet-publish-helpers.sh']);
+  // One matcher finds repository scripts of any extension or none, behind a
+  // variable too; callers keep the ones that exist. Prose outside strings and
+  // shell comments do not count.
+  assert.deepEqual(
+    repoScriptMentions('python scripts/generate-fixture.py; "$repo_root/scripts/devnet.sh"; ./scripts/tool --x; scripts/nested/run.mts, myscripts/other.sh'),
+    ['scripts/generate-fixture.py', 'scripts/devnet.sh', 'scripts/tool', 'scripts/nested/run.mts'],
+  );
+  const fixture = traceLaneLoads(new Map([['packages/cli/test/example.test.ts', new Map([['bura_cli', 'seed']])]]), {
+    read: (file) => ({
+      'packages/cli/test/example.test.ts': "spawnSync('bash', ['packages/cli/test/fixtures/devnet-blazegraph-smoke.sh']);",
+      'packages/cli/test/fixtures/devnet-blazegraph-smoke.sh': [
+        '# scripts/devnet-comprehensive.sh is only mentioned here',
+        'source "$repo_root/scripts/devnet.sh"',
+      ].join('\n'),
+    })[file],
+  }).loaded;
+  assert.equal(fixture.get('scripts/devnet.sh')?.get('bura_cli'), 'packages/cli/test/fixtures/devnet-blazegraph-smoke.sh');
+  assert.equal(fixture.has('scripts/devnet-comprehensive.sh'), false);
   // A module load computed at run time cannot be followed, so it is reported.
   assert.deepEqual(references.computed, ['`../../cli/src/${name}.js`']);
   // Repo-path literals count only in test files, and a directory only when walked.
