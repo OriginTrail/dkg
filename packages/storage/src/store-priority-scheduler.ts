@@ -555,10 +555,15 @@ export class StorePriorityScheduler extends ObservableScheduler {
           },
         );
         if (activeAtTimeout.length > 0) {
-          console.warn('[store scheduler] queue wait timeout', {
-            waiting: { priority: normalizedPriority, operation },
-            activeAtTimeout,
-          });
+          try {
+            console.warn('[store scheduler] queue wait timeout', {
+              waiting: { priority: normalizedPriority, operation },
+              activeAtTimeout,
+            });
+          } catch {
+            // Diagnostics cannot prevent the timeout's rejection and pressure
+            // bookkeeping. A custom logger may throw during shutdown.
+          }
         }
         this.pressureRejectQueued(entry.pressureTicket, error.reason);
         this.observeRejection(error);
