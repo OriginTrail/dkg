@@ -5277,7 +5277,8 @@ export class DKGPublisher implements Publisher {
           `<${q.subject}> <${q.predicate}> ${q.object.startsWith('"') ? q.object : `<${q.object}>`} <${q.graph || dataGraph}> .`,
       )
       .join('\n');
-    const updateByteSize = BigInt(new TextEncoder().encode(updateNquadsStr).length);
+    const updateNquadsBytes = new TextEncoder().encode(updateNquadsStr);
+    const updateByteSize = BigInt(updateNquadsBytes.length);
 
     // OT-RFC-49 / WS-D (update) — mirror the curated PUBLISH producer
     // (dkg-publisher.ts:2030-2169). A value-adding curated update commits the
@@ -5382,11 +5383,16 @@ export class DKGPublisher implements Publisher {
       }
     } else {
       // A graph-scoped intent carries its private root, so the receiver can fold
-      // it over these inline public quads without relying on a local SWM copy.
-      // Legacy intents carry no such root and retain the SWM fallback instead.
-      updateStagingQuads = graphUpdate !== undefined || updatePrivateRoots.length === 0
-        ? new TextEncoder().encode(updateNquadsStr)
-        : undefined;
+      // it over small inline public updates without relying on a local SWM copy.
+      // Larger updates retain the exact per-KA SWM fallback because receivers
+      // reject inline staging payloads above the shared protocol ceiling.
+      // Legacy public updates keep their established inline behavior, while
+      // legacy mixed updates remain SWM-only because they carry no private root.
+      updateStagingQuads = graphUpdate !== undefined
+        ? selectPublicStagingQuads('inline-small-swm', updateNquadsBytes)
+        : updatePrivateRoots.length === 0
+          ? updateNquadsBytes
+          : undefined;
       effectiveUpdateByteSize = updateByteSize;
     }
     // B6 — deferred PUBLIC `_catalog` persist. Structurally identical to the
