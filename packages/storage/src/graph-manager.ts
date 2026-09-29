@@ -1,7 +1,7 @@
 import type { Quad, QueryOptions, TripleStore } from './triple-store.js';
 import { findTripleStoreCapability } from './triple-store.js';
 import { asGraphWriteRevisionSource } from './graph-write-gen.js';
-import { loadSwmQuadsAcrossChunks, SHARED_MEMORY_GRAPHS_PER_QUERY } from './swm-query-chunks.js';
+import { loadSwmQuadsAcrossChunks, SHARED_MEMORY_GRAPHS_PER_QUERY, type SwmChunkReadPolicy } from './swm-query-chunks.js';
 export { SharedMemoryResultBudgetError } from './swm-query-chunks.js';
 
 import {
@@ -679,8 +679,8 @@ async function loadSharedMemoryQuadsInternal(
   const read = (
     graphs: NonEmptyGraphList,
     readOptions: QueryOptions | undefined,
-    graphsPerQuery = SHARED_MEMORY_GRAPHS_PER_QUERY,
-  ) => loadSwmQuadsAcrossChunks(store, graphs, innerGraphPattern, readOptions, options, graphsPerQuery);
+    policy?: SwmChunkReadPolicy,
+  ) => loadSwmQuadsAcrossChunks(store, graphs, innerGraphPattern, readOptions, options, policy);
 
   const initialGraphs = await resolveGraphs(queryOptions);
   if (initialGraphs.length <= SHARED_MEMORY_GRAPHS_PER_QUERY) {
@@ -702,7 +702,10 @@ async function loadSharedMemoryQuadsInternal(
     // One backend query has its own snapshot on SPARQL stores. Backends with
     // neither a pinned transaction nor an all-writer fence keep the legacy
     // single-query path instead of returning a mixed multi-query view.
-    return read(initialGraphs, queryOptions, initialGraphs.length);
+    return read(initialGraphs, queryOptions, {
+      graphsPerQuery: initialGraphs.length,
+      singleQueryBudgeted: true,
+    });
   }
   for (let attempt = 0; attempt < 3; attempt++) {
     const before = revision.getWriteRevision(bucketGraph);

@@ -5,6 +5,12 @@ import type { LoadSelectedSharedMemoryQuadsOptions } from './graph-manager.js';
 
 export const SHARED_MEMORY_GRAPHS_PER_QUERY = 128;
 
+export interface SwmChunkReadPolicy {
+  graphsPerQuery?: number;
+  /** For a backend without a pinned snapshot or revision fence. */
+  singleQueryBudgeted?: boolean;
+}
+
 export class SharedMemoryResultBudgetError extends Error {
   readonly code = 'SHARED_MEMORY_RESULT_BUDGET' as const;
   readonly retryable = true as const;
@@ -54,11 +60,11 @@ export async function loadSwmQuadsAcrossChunks(
   innerGraphPattern: string,
   queryOptions: QueryOptions | undefined,
   options: Pick<LoadSelectedSharedMemoryQuadsOptions, 'resultBudget' | 'quadFilter'>,
-  graphsPerQuery = SHARED_MEMORY_GRAPHS_PER_QUERY,
+  policy: SwmChunkReadPolicy = {},
 ): Promise<Quad[]> {
-  const chunks = graphValueChunks(graphs, graphsPerQuery);
+  const chunks = graphValueChunks(graphs, policy.graphsPerQuery ?? SHARED_MEMORY_GRAPHS_PER_QUERY);
   if (options.resultBudget) {
-    return loadPaged(store, chunks, innerGraphPattern, queryOptions, options);
+    return loadPaged(store, chunks, innerGraphPattern, queryOptions, options, policy.singleQueryBudgeted === true);
   }
   const distinct = new Map<string, Quad>();
   // At most two backend slots for unbudgeted CONSTRUCT. Budgeted pages must
@@ -86,11 +92,24 @@ async function loadPaged(
   innerGraphPattern: string,
   queryOptions: QueryOptions | undefined,
   options: Pick<LoadSelectedSharedMemoryQuadsOptions, 'resultBudget' | 'quadFilter'>,
+  singleQueryBudgeted: boolean,
 ): Promise<Quad[]> {
   const configured = options.resultBudget!;
-  const pageRows = normalizePositiveInteger(configured.pageRows, 1_000);
-  const maxRows = normalizePositiveInteger(configured.maxRows, pageRows);
+  const configuredPageRows = normalizePositiveInteger(configured.pageRows, 1_000);
+  const maxRows = normalizePositiveInteger(configured.maxRows, configuredPageRows);
+  const pageRows = singleQueryBudgeted
+    ? Math.min(Number.MAX_SAFE_INTEGER, maxRows + 1)
+    : configuredPageRows;
   const maxBytesEstimate = normalizePositiveInteger(configured.maxBytesEstimate, 64 * 1024 * 1024);
+  // One snapshot-consistent SELECT must also cap its raw HTTP body before JSON
+  // parsing. Four times the heap estimate allows escaping and JSON framing.
+  const readOptions = singleQueryBudgeted ? {
+    ...queryOptions,
+    maxResponseBytes: Math.min(
+      queryOptions?.maxResponseBytes ?? Number.MAX_SAFE_INTEGER,
+      Math.min(Number.MAX_SAFE_INTEGER, 4 * maxBytesEstimate + 1024 * 1024),
+    ),
+  } : queryOptions;
   const quads: Quad[] = [];
   const seen = new Set<string>();
   let rawRows = 0;
@@ -109,7 +128,7 @@ async function loadPaged(
       }
       ORDER BY ?s ?p ?o
       OFFSET ${offset}
-      LIMIT ${pageRows}`, queryOptions);
+      LIMIT ${pageRows}`, readOptions);
       if (result.type !== 'bindings' || result.bindings.length === 0) break;
 
       for (const row of result.bindings) {
@@ -139,7 +158,11 @@ async function loadPaged(
         bytesEstimate = nextBytes;
         if (retain) quads.push(quad);
       }
-      if (result.bindings.length < pageRows) break;
+      if (singleQueryBudgeted && result.bindings.length === pageRows) {
+        observe();
+        throw new SharedMemoryResultBudgetError('rows', maxRows + 1, bytesEstimate, maxRows);
+      }
+      if (singleQueryBudgeted || result.bindings.length < pageRows) break;
     }
   }
   observe();

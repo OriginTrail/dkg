@@ -609,6 +609,13 @@ describe('bounded SWM result materialization', () => {
       expect(keys(selected)).toEqual([`${root}|urn:p|"same"`]);
       expect(query.mock.calls.filter(([sparql]) => sparql.includes('VALUES ?g')))
         .toHaveLength(1);
+      query.mockClear();
+      const budgeted = await loadSelectedSharedMemoryQuads(plain, swm, { rootEntities: [root] }, {
+        resultBudget: { pageRows: 1, maxRows: 1, maxBytesEstimate: 1024 * 1024 },
+      });
+      expect(keys(budgeted)).toEqual(keys(selected));
+      expect(query.mock.calls.filter(([sparql]) => sparql.includes('VALUES ?g')))
+        .toHaveLength(1);
     } finally {
       await store.close();
     }
