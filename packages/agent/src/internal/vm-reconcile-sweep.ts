@@ -77,7 +77,7 @@ export class VmReconcileSweepPlanner {
   admit(
     boundKeys: readonly string[],
     unboundKeys: readonly string[],
-    tryAdmit: (key: string) => Promise<unknown> | undefined,
+    tryAdmit: (key: string, candidate: 'bound' | 'unbound') => Promise<unknown> | undefined,
   ): void {
     const turn = this.currentTurn();
     this.releaseTimerCapacity(turn);
@@ -156,12 +156,12 @@ export class VmReconcileSweepPlanner {
     turn: SweepTurn,
     boundKeys: readonly string[],
     unboundKeys: readonly string[],
-    tryAdmit: (key: string) => Promise<unknown> | undefined,
+    tryAdmit: (key: string, candidate: 'bound' | 'unbound') => Promise<unknown> | undefined,
   ): void {
     if (turn.finished.signal.aborted) return;
     const boundRotation = turn.owner === 'completion' ? turn.fullBoundKeys : boundKeys;
-    const accept = (key: string): boolean => {
-      const completion = tryAdmit(key);
+    const accept = (key: string, candidate: 'bound' | 'unbound'): boolean => {
+      const completion = tryAdmit(key, candidate);
       if (completion === undefined) return false;
       // Automatic failures are reported by the dispatcher. Retain each exact
       // handle immediately, including work admitted by an earlier timer tick.
@@ -170,7 +170,7 @@ export class VmReconcileSweepPlanner {
     };
     if (turn.state.phase === 'leading') {
       const count = this.bound.admit(boundRotation, 1, key => {
-        if (!accept(key)) return false;
+        if (!accept(key, 'bound')) return false;
         turn.admittedKeys.add(key);
         turn.boundAdmissions++;
         return true;
@@ -187,7 +187,7 @@ export class VmReconcileSweepPlanner {
         unboundKeys.length,
       );
       this.unbound.admit(unboundKeys, remainingDiscovery, key => {
-        if (!accept(key)) return false;
+        if (!accept(key, 'unbound')) return false;
         turn.admittedKeys.add(key);
         remainingDiscovery--;
         return true;
@@ -207,7 +207,7 @@ export class VmReconcileSweepPlanner {
       ? Math.max(0, this.periodicBoundBatchSize - turn.boundAdmissions)
       : tail.length;
     const count = tailLimit === 0 ? 0 : this.bound.admit(tail, Math.min(tail.length, tailLimit), key => {
-      if (!accept(key)) return false;
+      if (!accept(key, 'bound')) return false;
       turn.admittedKeys.add(key);
       turn.boundAdmissions++;
       return true;

@@ -509,9 +509,10 @@ export class VmReconcileSchedulingRuntime<T> {
       periodicBoundBatchSize,
     );
     this.sweepAdmission = sweepAdmission;
-    // A slow historical graph can occupy a worker for minutes. Cap retained
-    // timer work to one queued pass per worker so later timer ticks cannot
-    // fill the entire dispatcher queue with old deferrals ahead of live work.
+    // A slow historical graph can occupy a worker for minutes. Stop admitting
+    // more bound timer work once total dispatch occupancy reaches one active
+    // plus one queued pass per worker. Unbound discovery keeps its separate
+    // attempt budget and round-robin coverage.
     this.periodicOutstandingLimit = 2 * (options.concurrency ?? 1);
   }
 
@@ -540,10 +541,12 @@ export class VmReconcileSchedulingRuntime<T> {
     this.planner.admit(
       boundKeys,
       unboundKeys,
-      key => {
+      (key, candidate) => {
         if (!isCurrent()) return undefined;
         const { active, queued } = this.dispatcher.snapshot();
-        return active + queued < this.periodicOutstandingLimit
+        // Discovery has its own eight-attempt budget and must retain its
+        // round-robin coverage even when historical bound work is queued.
+        return (candidate === 'unbound' || active + queued < this.periodicOutstandingLimit)
           ? this.sweepAdmission.tryAdmit(key)
           : undefined;
       },
