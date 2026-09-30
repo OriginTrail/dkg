@@ -304,6 +304,8 @@ test('control-plane changes force full Node/EVM CI without overriding the Solidi
     'packages/cli/scripts/bundle-markitdown-binaries.mjs',
     'packages/cli/scripts/markitdown-bundle-validation.mjs',
     'packages/cli/markitdown-build-info.json',
+    'packages/cli/markitdown-targets.json',
+    'packages/cli/scripts/markitdown-entry.py',
   ];
 
   for (const filePath of controlPlanePaths) {

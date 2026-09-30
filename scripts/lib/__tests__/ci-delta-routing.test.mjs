@@ -437,7 +437,8 @@ const UNFOLLOWED_LOADS = new Map([
 // explain. The requirements (lane-entrypoints.mjs):
 // - a lane or `evm:<scope>` that loads the file;
 // - `build`: the shared build job's own checks run it;
-// - `full`: every job runs it (an install hook), or a job outside the lanes;
+// - `install`: every job's install runs it (an install hook): full CI;
+// - `full`: a job outside the lanes runs it;
 // - `build-output:<workspace>`: that workspace's build or pack runs it, and
 //   every lane restores the output. A repository file needs full CI; a file
 //   in a package workspace must select every lane and scope the producing
@@ -458,7 +459,7 @@ function loadClosureGaps({ loaded, unfollowed }, { plan = (file) => pullRequestP
     const targetPlan = plan(target);
     if (targetPlan.mode === 'full') continue;
     for (const [requirement, via] of requirements) {
-      const selected = requirement === 'full' ? false
+      const selected = requirement === 'full' || requirement === 'install' ? false
         : requirement === 'build' ? needsSharedBuild(targetPlan)
         : requirement.startsWith('build-output:') ? coversBuildOutput(target, targetPlan, requirement.slice('build-output:'.length))
         : requirement.startsWith('evm:') ? targetPlan.evmScopes.includes(requirement.slice(4))
@@ -468,6 +469,57 @@ function loadClosureGaps({ loaded, unfollowed }, { plan = (file) => pullRequestP
   }
   const computed = [...new Set([...unfollowed].flatMap(([file, specifiers]) => specifiers.map((specifier) => `${file}: ${specifier}`)))];
   return { missing, unexplained: computed.filter((entry) => !UNFOLLOWED_LOADS.has(entry)), computed };
+}
+
+// Files that code every job's install runs reads by name from a directory
+// the trace cannot resolve, each with the repository files it reads. Each
+// file must plan full CI, unless `reason` says why a change to it cannot
+// change what an install does.
+const INSTALL_HOOK_READS = new Map([
+  ["packages/cli/scripts/bundle-markitdown-binaries.mjs: join(base, 'project.json')", { reads: ['project.json'] }],
+  ["packages/cli/scripts/bundle-markitdown-binaries.mjs: join(resolvePackageDir(packageDir), 'markitdown-targets.json')", {
+    reads: ['packages/cli/markitdown-targets.json'],
+  }],
+  ["packages/cli/scripts/bundle-markitdown-binaries.mjs: join(resolvedPackageDir, 'scripts', 'markitdown-entry.py')", {
+    reads: ['packages/cli/scripts/markitdown-entry.py'],
+  }],
+  ["packages/cli/scripts/bundle-markitdown-binaries.mjs: join(resolvePackageDir(packageDir), 'scripts', 'markitdown-entry.py')", {
+    reads: ['packages/cli/scripts/markitdown-entry.py'],
+  }],
+  ["packages/cli/scripts/bundle-markitdown-binaries.mjs: join(resolvePackageDir(packageDir), 'package.json')", {
+    reads: ['packages/cli/package.json'],
+    reason: "the CLI's version, which names the release binary an installed package downloads; the planner routes the manifest fields an install reads (install hooks, dependencies, engines) to full CI, and a version change reaches every consumer through the CLI rule",
+  }],
+  ["packages/cli/scripts/bundle-markitdown-binaries.mjs: join(dir, 'tsconfig.json')", {
+    reads: [],
+    reason: 'an existence probe that tells a workspace checkout from an installed package; editing the file does not change it',
+  }],
+  ["packages/cli/scripts/bundle-markitdown-binaries.mjs: join(venvDir, 'Scripts', 'python.exe')", {
+    reads: [],
+    reason: 'the Python virtual environment the bundler creates for a source build, outside the repository',
+  }],
+  ["packages/cli/scripts/verify-node-sqlite-runtime.mjs: path.resolve(path.dirname(SCRIPT_PATH), '..', 'package.json')", {
+    reads: ['packages/cli/package.json'],
+    reason: "the CLI's engines.node range; the planner routes an engines change to full CI",
+  }],
+]);
+
+// What the guard reports about the reads install code makes by name from a
+// directory the trace cannot resolve (a trace's `unresolvedReads` in files
+// with the `install` requirement): ones `declared` does not list, listed
+// ones no longer made, and listed files that do not plan full CI without a
+// reason.
+function installReadGaps({ loaded, unresolvedReads }, { declared = INSTALL_HOOK_READS, plan = (file) => pullRequestPlan([change(file)]) } = {}) {
+  const made = [...unresolvedReads]
+    .filter(([file]) => loaded.get(file)?.has('install'))
+    .flatMap(([file, reads]) => reads.map((read) => `${file}: ${read}`));
+  return {
+    undeclared: made.filter((read) => !declared.has(read)),
+    stale: [...declared.keys()].filter((read) => !made.includes(read)),
+    notFull: [...declared].flatMap(([read, { reads, reason }]) => (reason ? [] : reads
+      .filter((file) => plan(file).mode !== 'full')
+      .map((file) => `${file} (${read})`))),
+  };
 }
 
 test('every file a lane runs, or loads by relative path, selects that lane', () => {
@@ -491,8 +543,8 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
     ['devnet/rfc64-persistence-lifecycle/verify.ts', 'tornado_agent', 'the reusable Windows workflow, run on the agent lane, runs the Gate 0 harness'],
     ['scripts/devnet.sh', 'bura_cli', 'the CLI Blazegraph smoke fixture sources the devnet bootstrap'],
     ['scripts/copy-cli-runtime-assets.mjs', 'build-output:packages/cli', 'the CLI build copies its runtime assets into the build output every lane restores'],
-    ['packages/cli/scripts/verify-node-sqlite-runtime.mjs', 'full', "every job's install runs the root and CLI preinstall hooks"],
-    ['packages/cli/markitdown-build-info.json', 'full', "every job's install runs the CLI postinstall, which reads it"],
+    ['packages/cli/scripts/verify-node-sqlite-runtime.mjs', 'install', "every job's install runs the root and CLI preinstall hooks"],
+    ['packages/cli/markitdown-build-info.json', 'install', "every job's install runs the CLI postinstall, which reads it"],
   ]) {
     assert.ok(loadedBy.get(target)?.has(requirement), why);
   }
@@ -502,7 +554,11 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   assert.ok(loadReferences(syncTest, fs.readFileSync(path.join(REPO_ROOT, syncTest), 'utf8')).paths.includes('scripts/sync-chain-abis.mjs'));
   // Every file INSTALL_HOOK_INPUTS routes to full CI is still one an install
   // hook reaches; the gap check below finds any it misses.
-  assert.deepEqual(INSTALL_HOOK_INPUTS.filter((file) => !loadedBy.get(file)?.has('full')), [], 'stale INSTALL_HOOK_INPUTS entries');
+  const installInputs = new Set([...INSTALL_HOOK_READS.values()].filter(({ reason }) => !reason).flatMap(({ reads }) => reads));
+  assert.deepEqual(INSTALL_HOOK_INPUTS.filter((file) => !loadedBy.get(file)?.has('install') && !installInputs.has(file)), [], 'stale INSTALL_HOOK_INPUTS entries');
+  // What install code reads from a directory the trace cannot resolve is
+  // declared, and each file it reads plans full CI.
+  assert.deepEqual(installReadGaps(trace), { undeclared: [], stale: [], notFull: [] });
   const { missing, unexplained, computed } = loadClosureGaps(trace);
   assert.deepEqual(missing, [], 'a change to these files must select the lane or EVM scope that loads them');
   // A load the trace cannot follow fails closed until it is listed with the
@@ -599,12 +655,31 @@ test('the load-closure guard holds install hooks to full CI and builds to their 
   // by the CLI rule, as before, is reported.
   const preinstall = 'packages/cli/scripts/verify-node-sqlite-runtime.mjs';
   const seeds = laneSeeds({ workspaceCode: false });
-  assert.match(seeds.get(preinstall)?.get('full') ?? '', /> preinstall$/);
+  assert.match(seeds.get(preinstall)?.get('install') ?? '', /> preinstall$/);
   assert.equal(pullRequestPlan([change(preinstall)]).mode, 'full');
-  const installed = { loaded: new Map([[preinstall, new Map([['full', 'ci.yml build > preinstall']])]]), unfollowed: new Map() };
+  const installed = { loaded: new Map([[preinstall, new Map([['install', 'ci.yml build > preinstall']])]]), unfollowed: new Map() };
   assert.deepEqual(loadClosureGaps(installed).missing, []);
   const byWorkspace = (file) => pullRequestPlan([change(file === preinstall ? 'packages/cli/src/cli.ts' : file)]);
-  assert.deepEqual(loadClosureGaps(installed, { plan: byWorkspace }).missing, [`full loads ${preinstall} via ci.yml build > preinstall`]);
+  assert.deepEqual(loadClosureGaps(installed, { plan: byWorkspace }).missing, [`install loads ${preinstall} via ci.yml build > preinstall`]);
+
+  // A file install code reads from a directory the trace cannot resolve must
+  // be declared, and plan full CI: the postinstall reads markitdown-targets.json
+  // at load, so a plan routing it by the CLI rule is reported, and so is a
+  // read no declaration covers.
+  const bundler = 'packages/cli/scripts/bundle-markitdown-binaries.mjs';
+  const targets = 'packages/cli/markitdown-targets.json';
+  assert.equal(pullRequestPlan([change(targets)]).mode, 'full');
+  const reading = {
+    loaded: new Map([[bundler, new Map([['install', 'ci.yml build > packages/cli postinstall']])]]),
+    unresolvedReads: new Map([[bundler, ["join(resolvePackageDir(packageDir), 'markitdown-targets.json')", "join(root, 'new-input.json')"]]]),
+  };
+  const declared = new Map([...INSTALL_HOOK_READS].filter(([read]) => read.includes('markitdown-targets.json')));
+  const byCli = (file) => pullRequestPlan([change(file === targets ? 'packages/cli/src/cli.ts' : file)]);
+  assert.deepEqual(installReadGaps(reading, { declared, plan: byCli }), {
+    undeclared: [`${bundler}: join(root, 'new-input.json')`],
+    stale: [],
+    notFull: [`${targets} (${bundler}: join(resolvePackageDir(packageDir), 'markitdown-targets.json'))`],
+  });
 
   // What the CLI build runs carries the CLI's build output: the asset copier,
   // a repository file, needs full CI, so routing it to the CLI lane alone is

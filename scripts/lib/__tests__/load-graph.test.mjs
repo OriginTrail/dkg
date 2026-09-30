@@ -93,7 +93,7 @@ test('the load scanner sees these forms, and nothing it cannot resolve staticall
   // extensionless note is no dependency, while an extensionless file with a
   // shell shebang is read as shell.
   assert.deepEqual(dependenciesOf('packages/cli/test/fixtures/devnet.toml', 'run = "scripts/devnet.sh"'), {
-    format: undefined, modules: [], paths: [], packages: [], computed: [], assembled: [],
+    format: undefined, modules: [], paths: [], packages: [], computed: [], assembled: [], unresolvedReads: [],
   });
   assert.deepEqual(dependenciesOf('packages/cli/test/fixtures/runner.py', 'subprocess.run(["scripts/devnet.sh"])').paths, []);
   assert.deepEqual(dependenciesOf('packages/cli/test/fixtures/NOTES', 'Start scripts/devnet.sh first.').paths, []);

@@ -299,13 +299,17 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
 // ci-delta-routing.test.mjs follows every relative reference from the files
 // each lane runs and fails when a file it reaches does not select that lane.
 // Files inside package workspaces that pnpm install runs in every job: the
-// scripts install lifecycle hooks run, and what those load. A change to one
-// needs full CI, as a change to the hook itself does. The load-closure test
-// derives them from the manifests' hooks and fails when one is missing here.
+// scripts install lifecycle hooks run, and what those load or read. A change
+// to one needs full CI, as a change to the hook itself does. The load-closure
+// test derives them from the manifests' hooks, and from the reads it cannot
+// resolve that its INSTALL_HOOK_READS declares, and fails when one is
+// missing here.
 export const INSTALL_HOOK_INPUTS = Object.freeze([
   'packages/cli/markitdown-build-info.json',
+  'packages/cli/markitdown-targets.json',
   'packages/cli/scripts/bundle-markitdown-binaries.mjs',
   'packages/cli/scripts/markitdown-bundle-validation.mjs',
+  'packages/cli/scripts/markitdown-entry.py',
   'packages/cli/scripts/verify-node-sqlite-runtime.mjs',
 ]);
 

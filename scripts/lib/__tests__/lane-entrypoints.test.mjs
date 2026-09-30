@@ -44,7 +44,7 @@ test('workspace scripts count where CI runs them, not because their workspace ow
     '    steps:',
     `      - run: ${laneCommand}`,
   ].join('\n')]];
-  const shared = ['build-output:packages/cli packages/cli build', 'build-output:packages/cli packages/cli build:prepared', 'full packages/cli preinstall'];
+  const shared = ['build-output:packages/cli packages/cli build', 'build-output:packages/cli packages/cli build:prepared', 'install packages/cli preinstall'];
   assert.deepEqual(scriptRuns(workflow('pnpm install --frozen-lockfile'), execution), shared);
   assert.deepEqual(scriptRuns(workflow("pnpm --filter '@origintrail-official/dkg' run release:dry-run"), execution), [...shared, 'bura_cli packages/cli release:dry-run'].sort());
   // A filter the graph cannot resolve fails instead of hiding what runs.
@@ -65,8 +65,8 @@ test('workspace scripts count where CI runs them, not because their workspace ow
   for (const run of [
     'build-output:packages/cli packages/cli build:prepared',
     'build-output:packages/cli packages/cli prepack',
-    'full packages/cli postinstall',
-    'full . preinstall',
+    'install packages/cli postinstall',
+    'install . preinstall',
     'kosava_node_ui packages/node-ui build:ui',
     'kosava_supporting demo test',
     'kosava_supporting packages/adapter-hermes test:py',

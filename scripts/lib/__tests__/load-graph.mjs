@@ -76,7 +76,8 @@ function readTarget(target, walks) {
 // node:path) from its own directory - __dirname, import.meta.dirname or a
 // binding of either, dirname(fileURLToPath(import.meta.url)) or
 // fileURLToPath(new URL(..., import.meta.url)) - and literal segments,
-// including bindings built on earlier ones.
+// including bindings built on earlier ones; with the names of the bases it
+// resolves (`bases`).
 function builtPaths(file, source) {
   const directory = path.posix.dirname(file);
   const helpers = ['resolve', 'join'];
@@ -102,9 +103,12 @@ function builtPaths(file, source) {
       if (name && !bases.has(name) && bases.has(base)) bases.set(name, joined(base, text));
     }
   }
-  return [...source.matchAll(pathJoin)]
-    .filter(([, , base]) => bases.has(base))
-    .map(([, , base, text]) => joined(base, text));
+  return {
+    paths: [...source.matchAll(pathJoin)]
+      .filter(([, , base]) => bases.has(base))
+      .map(([, , base, text]) => joined(base, text)),
+    bases: new Set(bases.keys()),
+  };
 }
 
 const scriptKind = (file) => (/\.[cm]?[jt]sx$/.test(file) ? ts.ScriptKind.TSX : /\.[cm]?js$/.test(file) ? ts.ScriptKind.JS : ts.ScriptKind.TS);
@@ -132,7 +136,7 @@ export function packageImports(source) {
 }
 
 const isLiteral = (node) => ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node);
-const NO_ANALYSIS = Object.freeze({ computedLoads: [], strings: [], assembledScriptPaths: [] });
+const NO_ANALYSIS = Object.freeze({ computedLoads: [], strings: [], assembledScriptPaths: [], fileReads: [] });
 
 // One pass over a module's syntax tree for what TypeScript's import scanner
 // does not report, with the join and resolve helpers read from its node:path
@@ -150,8 +154,11 @@ const NO_ANALYSIS = Object.freeze({ computedLoads: [], strings: [], assembledScr
 //   value (`scripts/${name}`), or a join/resolve call that joins a value onto
 //   a scripts directory (join(root, 'scripts', helper)) - which no trace can
 //   follow either.
+// - fileReads: the join/resolve calls that end in a literal file name
+//   (join(dir, 'package.json')), with their base; loadReferences reports the
+//   ones builtPaths cannot resolve.
 function analyzeModule(file, code) {
-  if (!/\b(?:import|require)\s*\(|scripts/.test(code)) return NO_ANALYSIS;
+  if (!/\b(?:import|require)\s*\(|scripts|\b(?:join|resolve)\s*\(/.test(code)) return NO_ANALYSIS;
   const tree = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, false, scriptKind(file));
   const helpers = new Set(['join', 'resolve']);
   const pathModules = new Set(['path', 'posix', 'path.posix', 'path.win32']);
@@ -177,7 +184,7 @@ function analyzeModule(file, code) {
     return target !== undefined && ts.isNewExpression(target) && ts.isIdentifier(target.expression)
       && target.expression.text === 'URL' && target.arguments?.length > 0 && ts.isStringLiteral(target.arguments[0]);
   };
-  const analysis = { computedLoads: [], strings: [], assembledScriptPaths: [] };
+  const analysis = { computedLoads: [], strings: [], assembledScriptPaths: [], fileReads: [] };
   const visit = (node) => {
     if (isLiteral(node) || node.kind === ts.SyntaxKind.TemplateHead || node.kind === ts.SyntaxKind.TemplateMiddle
       || node.kind === ts.SyntaxKind.TemplateTail) {
@@ -199,6 +206,18 @@ function analyzeModule(file, code) {
       const segments = directory >= 0 ? node.arguments.slice(directory + 1) : [];
       if (segments.length && segments.every(isLiteral)) analysis.strings.push(['scripts', ...segments.map(({ text }) => text)].join('/'));
       if (segments.some((segment) => !isLiteral(segment))) analysis.assembledScriptPaths.push(node.getText(tree));
+      // A file it reads by name: a join/resolve call ending in a literal file
+      // name, with its base (an identifier or import.meta.dirname, else none).
+      const last = node.arguments.at(-1);
+      if (pathHelper(node) && node.arguments.length > 1 && last && ts.isStringLiteral(last) && /^[\w.-]+\.\w+$/.test(last.text)) {
+        const [base] = node.arguments;
+        analysis.fileReads.push({
+          text: node.getText(tree),
+          base: ts.isIdentifier(base) ? base.text : base.getText(tree) === 'import.meta.dirname' ? 'import.meta.dirname' : undefined,
+          literalSegments: node.arguments.slice(1).every((argument) => ts.isStringLiteral(argument)),
+          plainCall: ts.isIdentifier(node.expression) || /^path\.(?:posix\.)?(?:join|resolve)$/.test(node.expression.getText(tree)),
+        });
+      }
     }
     ts.forEachChild(node, visit);
   };
@@ -223,7 +242,10 @@ const namedScripts = (text) => commandFiles(text, { exists: followable }).filter
 //   tests list them);
 // - `packages`: workspaces it imports by package name (packageImports);
 // - `computed`: module loads computed at run time (computedLoads);
-// - `assembled`: script paths assembled at run time (assembledScriptPaths).
+// - `assembled`: script paths assembled at run time (assembledScriptPaths);
+// - `unresolvedReads`: files it reads by a literal name from a directory
+//   builtPaths cannot resolve (join(resolvePackageDir(dir), 'x.json')), as
+//   source text, which the routing guard checks in what installs run.
 // Type-only imports are erased before anything runs; other paths assembled
 // at run time from variables are out of reach.
 export function loadReferences(file, source) {
@@ -235,13 +257,14 @@ export function loadReferences(file, source) {
     .filter((specifier) => /^\.\.?\//.test(specifier))
     .map((specifier) => sourcePath(relative(specifier))))]
     .filter((target) => !outsideSources(target));
-  const { computedLoads, strings, assembledScriptPaths } = analyzeModule(file, code);
+  const { computedLoads, strings, assembledScriptPaths, fileReads } = analyzeModule(file, code);
+  const built = builtPaths(file, code);
   const literals = (TEST_FILE.test(file) ? [...code.matchAll(REPO_PATH_LITERAL)] : [])
     .map(([, literal]) => literal)
     .filter((literal) => !/(?:^|\/)\.\.?(?:\/|$)/.test(literal));
   const paths = [
     ...[...code.matchAll(URL_PATH)].map(([, specifier]) => relative(specifier)),
-    ...builtPaths(file, code),
+    ...built.paths,
     ...literals,
     ...(TEST_FILE.test(file) ? strings.flatMap(namedScripts) : []),
   ].map((target) => readTarget(target, walks)).filter(Boolean);
@@ -251,6 +274,9 @@ export function loadReferences(file, source) {
     packages: packageNames(specifiers),
     computed: computedLoads,
     assembled: assembledScriptPaths,
+    unresolvedReads: fileReads
+      .filter(({ base, literalSegments, plainCall }) => !(plainCall && literalSegments && built.bases.has(base)))
+      .map(({ text }) => text),
   };
 }
 
@@ -291,6 +317,7 @@ export function shellReferences(file, source) {
     packages: [],
     computed: [],
     assembled: [...new Set([...assembled, ...reached.filter(({ kind }) => kind === 'assembled').map(({ text }) => text)])],
+    unresolvedReads: [],
   };
 }
 
@@ -302,7 +329,7 @@ const FORMATS = [
   { format: 'module', matches: (file) => /\.[cm]?[jt]sx?$/.test(file), references: loadReferences },
   { format: 'shell', matches: isShellScript, references: shellReferences },
 ];
-const NO_DEPENDENCIES = Object.freeze({ modules: [], paths: [], packages: [], computed: [], assembled: [] });
+const NO_DEPENDENCIES = Object.freeze({ modules: [], paths: [], packages: [], computed: [], assembled: [], unresolvedReads: [] });
 
 // What `file` (repo-relative, `source` its contents) loads, reads or runs,
 // from the handler for its format, with that format's name (undefined for
@@ -322,9 +349,11 @@ export function dependenciesOf(file, source) {
 // requires the imported workspace and its dependencies, recorded against the
 // workspace's src/index.ts since any path in a workspace routes by its rule.
 // `read(file)` returns a file's source, or undefined when it has none.
-// Returns { loaded, unfollowed }: `unfollowed` maps each traced file to the
-// module loads it computes and the script paths it assembles at run time,
-// which the trace cannot follow.
+// Returns { loaded, unfollowed, unresolvedReads }: `unfollowed` maps each
+// traced file to the module loads it computes and the script paths it
+// assembles at run time, which the trace cannot follow; `unresolvedReads`
+// maps it to the files it reads by name from a directory the trace cannot
+// resolve.
 export function traceLaneLoads(seeds, { read = readRepoFile } = {}) {
   const workspaces = readWorkspaces();
   const { workspaceByName } = workspaces;
@@ -345,15 +374,17 @@ export function traceLaneLoads(seeds, { read = readRepoFile } = {}) {
   const readPaths = new Map();
   const workspacesLoaded = new Map();
   const unfollowed = new Map();
+  const unresolvedReads = new Map();
   const queue = [...loaded.keys()].map((file) => [file, loaded]);
   while (queue.length) {
     const [file, reachedBy] = queue.shift();
     const source = read(file);
     if (source === undefined) continue;
-    const { format, modules, paths, packages, computed, assembled } = dependenciesOf(file, source);
+    const { format, modules, paths, packages, computed, assembled, unresolvedReads: reads = [] } = dependenciesOf(file, source);
     if (reachedBy === readPaths && format !== 'shell') continue;
     const requirements = [...reachedBy.get(file).keys()];
     if (computed.length || assembled.length) unfollowed.set(file, [...computed, ...assembled]);
+    if (reads.length) unresolvedReads.set(file, reads);
     for (const target of modules) {
       if (add(loaded, target, requirements, file)) queue.push([target, loaded]);
     }
@@ -373,5 +404,5 @@ export function traceLaneLoads(seeds, { read = readRepoFile } = {}) {
   ]) {
     for (const [requirement, via] of needs) add(loaded, key, [requirement], via);
   }
-  return { loaded, unfollowed };
+  return { loaded, unfollowed, unresolvedReads };
 }

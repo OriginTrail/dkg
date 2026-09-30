@@ -38,13 +38,14 @@ export function jobRequirement(workflow, job, condition) {
 }
 
 // The requirement for one edge of a job with `requirement`, from the package
-// scripts that led to it: `full` under an install lifecycle hook, which
-// every job's install runs; `build-output:<workspace>` under a workspace's
+// scripts that led to it: `install` under an install lifecycle hook, which
+// every job's install runs (full CI, and the routing test checks the reads it
+// cannot resolve); `build-output:<workspace>` under a workspace's
 // script the shared build job runs (its build, or the pack
 // release:verify-pack runs), since every lane restores that workspace's
 // build output.
 export function edgeRequirement(requirement, chain) {
-  if (chain.some(({ script }) => isInstallLifecycleScript(script))) return 'full';
+  if (chain.some(({ script }) => isInstallLifecycleScript(script))) return 'install';
   const producer = requirement === 'build' ? chain.find(({ workspace }) => workspace !== '.') : undefined;
   return producer ? `build-output:${producer.workspace}` : requirement;
 }
@@ -53,8 +54,8 @@ const WORKFLOWS = ['ci.yml', 'evm-integration.yml'];
 const inPackageWorkspace = (file) => Object.keys(WORKSPACE_RULES).some((workspace) => file.startsWith(`${workspace}/`));
 
 // The load-closure guard's seeds: a Map from each file CI executes to a Map
-// from requirement (a lane, `evm:<scope>`, `build`, `build-output:<workspace>`
-// or `full`) to where it comes from.
+// from requirement (a lane, `evm:<scope>`, `build`, `build-output:<workspace>`,
+// `install` or `full`) to where it comes from.
 // - A workspace's code and tests run in its owning lanes; node-ui's browser
 //   specs in the e2e lane and integration suites in the EVM scope that lists
 //   them. A workspace's own scripts/ and fixture workspaces (test-fixtures/)
