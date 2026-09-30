@@ -16,6 +16,7 @@ import {
   withKeyedLocks,
   workspaceKnowledgeAssetHeadSubject,
   workspacePublicQuadsDigest,
+  workspacePublicQuadsDigestMatches,
   type PublishedKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
 import {
@@ -307,7 +308,13 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
     // confirmed assertion and private commitment before considering deletion.
     const vmQuads = await readExactGraph(params.store, evidence.vmGraph);
     const vmDigest = workspacePublicQuadsDigest(vmQuads);
-    if (vmDigest !== evidence.expectedVmDigest) return 'vm-changed';
+    // `expectedVmDigest` can come from a peer's SWM descriptor or from an
+    // earlier build, so it may be another accepted form of the same content.
+    // `vmDigest` stays this process's own form for the local SWM comparisons
+    // below, where both sides are recomputed here and must not be loosened.
+    const isVmDigest = (digest: string): boolean =>
+      digest === vmDigest || workspacePublicQuadsDigestMatches(vmQuads, digest);
+    if (!isVmDigest(evidence.expectedVmDigest)) return 'vm-changed';
     const vmMetadata = await readExactVmMetadata(params.store, evidence);
     if (!vmMetadataMatchesEvidence(vmMetadata, evidence, vmQuads)) {
       return 'vm-metadata-mismatch';
@@ -339,7 +346,7 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
       evidence,
       head.shareOperationId,
     );
-    if (!swmCommitmentMatchesEvidence(swmCommitment, evidence)) {
+    if (!swmCommitmentMatchesEvidence(swmCommitment, evidence, isVmDigest)) {
       return 'swm-commitment-mismatch';
     }
     const swmQuads = await readExactGraph(params.store, evidence.swmGraph);
@@ -653,11 +660,16 @@ async function readExactSwmOperationCommitment(
 function swmCommitmentMatchesEvidence(
   commitment: ExactSwmOperationCommitment | null,
   evidence: FinalizedSwmTwinEvidence,
+  isVmDigest: (digest: string) => boolean,
 ): boolean {
   return commitment !== null
     && commitment.kaUal === evidence.kaUal
     && commitment.assertionVersion === evidence.assertionVersion
-    && commitment.publicQuadsDigest === evidence.expectedVmDigest
+    // The SWM operation was committed by whichever node produced it, in that
+    // node's digest form; it commits to the VM content if it is any accepted
+    // form of that content.
+    && (commitment.publicQuadsDigest === evidence.expectedVmDigest
+      || isVmDigest(commitment.publicQuadsDigest))
     && commitment.publicQuadsCount === evidence.expectedPublicQuadsCount
     && commitment.privateTripleCount === evidence.privateTripleCount
     && commitment.privateMerkleRoot === evidence.privateMerkleRoot;

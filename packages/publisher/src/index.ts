@@ -502,6 +502,17 @@ export {
   type SnapshotPageIndexStore,
   type WorkspacePublicSnapshotStore,
 } from './workspace-snapshot-store.js';
+export {
+  WORKSPACE_DIGEST_ORDERING_ENV,
+  describeWorkspaceDigestConfiguration,
+  resolveWorkspaceDigestOrdering,
+  workspacePublicQuadsCodeUnitDigest,
+  workspacePublicQuadsDigestCandidates,
+  workspacePublicQuadsDigestMatches,
+  workspacePublicQuadsDigestWithOrdering,
+  workspacePublicQuadsLegacyDigest,
+  type WorkspaceDigestOrdering,
+} from './workspace-public-quads-digest.js';
 export { acceptIncomingPublicQuads } from './incoming-public-copy.js';
 export { UpdateHandler } from './update-handler.js';
 export { ChainEventPoller, type ChainEventPollerConfig, type CursorPersistence, type OnContextGraphCreated } from './chain-event-poller.js';

@@ -25,6 +25,7 @@ import {
   storeKnowledgeAssetWorkspaceHead,
 } from './workspace-resolution.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
+import { workspacePublicQuadsDigestMatches } from './workspace-public-quads-digest.js';
 import { workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 
@@ -95,6 +96,11 @@ export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
     };
     const swmGraph = canonicalSharedMemoryScopeWriteGraph(swmBucket, sharedMemoryScope);
     const publicQuadsDigest = workspacePublicQuadsDigest(publicQuads);
+    // A reused operation keeps the digest it was recorded with, which may be
+    // another accepted form of the same content (recorded before an upgrade or
+    // a digest-ordering change).
+    const sameRecordedDigest = (recorded: string): boolean =>
+      recorded === publicQuadsDigest || workspacePublicQuadsDigestMatches(publicQuads, recorded);
     if (input.reuseExistingOperation) {
       // A queued UPDATE already owns durable operation bytes and an access
       // envelope. Rewriting either would invalidate its retry intent or restore
@@ -121,7 +127,6 @@ export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
         !head
         || !workspaceHeadIncludesShareOperationId(head, input.shareOperationId)
         || head.assertionVersion !== scope.assertionVersion
-        || head.publicQuadsDigest !== publicQuadsDigest
         || head.publicTripleCount !== publicQuads.length
         || head.privateTripleCount !== (input.privateTripleCount ?? 0)
         || head.privateMerkleRoot?.toLowerCase() !== privateMerkleRoot
@@ -130,6 +135,7 @@ export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
         || head.access.kind !== 'persisted'
         || head.access.accessPolicy !== input.accessPolicy
         || normalizePeers(head.access.allowedPeers) !== normalizePeers(input.allowedPeers)
+        || !sameRecordedDigest(head.publicQuadsDigest)
       ) {
         throw stale();
       }
@@ -146,9 +152,9 @@ export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
         publicSnapshotStore: input.publicSnapshotStore,
       });
       if (
-        snapshot.publicQuadsDigest !== publicQuadsDigest
-        || snapshot.quads.length !== publicQuads.length
+        snapshot.quads.length !== publicQuads.length
         || snapshot.publisherPeerId !== head.publisherPeerId
+        || !sameRecordedDigest(snapshot.publicQuadsDigest)
       ) {
         throw stale();
       }
@@ -190,7 +196,9 @@ export async function stageKnowledgeAssetSharedWorkingMemoryStorageV1(
         ...(input.subGraphName === undefined ? {} : { subGraphName: input.subGraphName }),
         swmGraph,
         tripleCount: publicQuads.length,
-        publicQuadsDigest,
+        // The reused operation's own recorded digest, so the staged reference
+        // and the persisted snapshot agree byte for byte.
+        publicQuadsDigest: head.publicQuadsDigest,
       });
     }
     const priorSwmGraphs = await resolveSharedMemoryScopeGraphs(

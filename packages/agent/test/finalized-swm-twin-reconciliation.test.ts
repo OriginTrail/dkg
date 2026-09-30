@@ -22,6 +22,7 @@ import {
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import type { VerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
+import { divergentObjectQuads, useAmbientCollation } from './_helpers/digest-locale.js';
 
 const CG = 'durable-vm-swm-twin';
 const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -33,6 +34,8 @@ const OPERATION_ID = 'op-finalized-twin';
 function fixture(
   subGraphName?: string,
   privateCommitment?: Readonly<{ tripleCount: number; merkleRoot: string }>,
+  /** Eight quads whose canonical rows sort differently under en-US, da-DK and code-unit order. */
+  divergent = false,
 ): Readonly<{
   asset: VerifiedGraphScopedAsset;
   swmGraph: string;
@@ -56,10 +59,12 @@ function fixture(
     scope,
     subGraphName,
   );
-  const payload: Quad[] = [
-    { subject: 'urn:asset', predicate: 'urn:value', object: '"finalized"', graph: vmGraph },
-    { subject: 'urn:asset', predicate: 'urn:version', object: '"3"', graph: vmGraph },
-  ];
+  const payload: Quad[] = divergent
+    ? divergentObjectQuads('urn:asset').map((quad) => ({ ...quad, graph: vmGraph }))
+    : [
+        { subject: 'urn:asset', predicate: 'urn:value', object: '"finalized"', graph: vmGraph },
+        { subject: 'urn:asset', predicate: 'urn:version', object: '"3"', graph: vmGraph },
+      ];
   const privateTripleCount = privateCommitment?.tripleCount ?? 0;
   const privateMerkleRoot = privateCommitment?.merkleRoot;
   const merkleRoot = ethers.hexlify(computeFlatKCRootV10(
@@ -242,6 +247,109 @@ function catalogEvidenceFor(input: ReturnType<typeof fixture>) {
     expectedMerkleRoot,
   } as const;
 }
+
+describe('durable VM / SWM tier reconciliation across digest forms', () => {
+  // The SWM operation was committed on a host whose default collator is en-US;
+  // this node computes another digest string for the same finalized bytes (a
+  // different host locale, or a digest-ordering change since the SWM copy was
+  // written). The twin is the same content and must still be retired.
+  const retireByDropping = (store: OxigraphStore) => vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+    await store.dropGraph(candidate.swmGraph);
+  });
+
+  it('retires when a VM arrival meets an SWM commitment in another accepted form', async () => {
+    const store = new OxigraphStore();
+    const input = fixture(undefined, undefined, true);
+    await seedTwin(store, input);
+    const retire = retireByDropping(store);
+    const restore = useAmbientCollation('da-DK');
+    try {
+      await expect(reconcileFinalizedSwmTwin({
+        store, writeLocks: new Map(), asset: input.asset, retire,
+      })).resolves.toBe('retired');
+    } finally {
+      restore();
+    }
+    expect(retire).toHaveBeenCalledTimes(1);
+    expect(await store.countQuads(input.swmGraph)).toBe(0);
+  });
+
+  it('retires when an SWM descriptor advertised in another accepted form arrives after finalized VM', async () => {
+    const store = new OxigraphStore();
+    const input = fixture(undefined, undefined, true);
+    const descriptor = descriptorFor(input);
+    await seedTwin(store, input);
+    const retire = retireByDropping(store);
+    const restore = useAmbientCollation('da-DK');
+    try {
+      await expect(reconcileFinalizedSwmTwinFromDescriptor({
+        store, writeLocks: new Map(), contextGraphId: CG, descriptor, retire,
+      })).resolves.toBe('retired');
+    } finally {
+      restore();
+    }
+    expect(await store.countQuads(input.swmGraph)).toBe(0);
+  });
+
+  it('retires when a catalog projection digest computed here meets an SWM commitment in another form', async () => {
+    const store = new OxigraphStore();
+    const input = fixture(undefined, undefined, true);
+    await seedTwin(store, input);
+    const retire = retireByDropping(store);
+    const restore = useAmbientCollation('da-DK');
+    try {
+      await expect(reconcileFinalizedSwmTwinFromCatalogProjection({
+        store, writeLocks: new Map(), evidence: catalogEvidenceFor(input), retire,
+      })).resolves.toBe('retired');
+    } finally {
+      restore();
+    }
+    expect(await store.countQuads(input.swmGraph)).toBe(0);
+  });
+
+  it('still refuses a twin whose SWM commitment matches no accepted form of the VM content', async () => {
+    const store = new OxigraphStore();
+    const input = fixture(undefined, undefined, true);
+    await seedTwin(store, input);
+    await store.deleteByPattern({
+      graph: input.swmMetaGraph,
+      subject: `urn:dkg:share:${CG}:${OPERATION_ID}`,
+      predicate: `${DKG}publicQuadsDigest`,
+    });
+    await store.insert([{
+      subject: `urn:dkg:share:${CG}:${OPERATION_ID}`,
+      predicate: `${DKG}publicQuadsDigest`,
+      object: `"sha256:${'0'.repeat(64)}"`,
+      graph: input.swmMetaGraph,
+    }]);
+    const retire = retireByDropping(store);
+    const restore = useAmbientCollation('da-DK');
+    try {
+      await expect(reconcileFinalizedSwmTwin({
+        store, writeLocks: new Map(), asset: input.asset, retire,
+      })).resolves.toBe('swm-commitment-mismatch');
+    } finally {
+      restore();
+    }
+    expect(retire).not.toHaveBeenCalled();
+  });
+
+  it('still treats a VM whose content changed since the evidence as changed', async () => {
+    const store = new OxigraphStore();
+    const input = fixture(undefined, undefined, true);
+    await seedTwin(store, input, { vmObject: '"different"' });
+    const retire = retireByDropping(store);
+    const restore = useAmbientCollation('da-DK');
+    try {
+      await expect(reconcileFinalizedSwmTwin({
+        store, writeLocks: new Map(), asset: input.asset, retire,
+      })).resolves.toBe('vm-changed');
+    } finally {
+      restore();
+    }
+    expect(retire).not.toHaveBeenCalled();
+  });
+});
 
 describe('durable VM / SWM tier reconciliation', () => {
   it.each([undefined, 'code'])('retires an exact finalized twin for subgraph %s', async (subGraphName) => {

@@ -170,6 +170,7 @@ export default defineConfig({
       "test/rootless-lifecycle-graph.test.ts",
       "test/swm-recovery-apply.test.ts",
       "test/swm-recovery.test.ts",
+      "test/swm-digest-form-compat.test.ts",
       "test/swm-recovery-identity-preservation.test.ts",
       // #2083: the discoverable suffix keeps runtime/type adoption in sync.
       "test/shared-memory-sync-ownership.typechecked.test.ts",

@@ -14,6 +14,7 @@ import { StringDecoder } from 'node:string_decoder';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { withSnapshotSource, readSnapshotSource, readSnapshotFileIdentity, sameSnapshotSource, sameSnapshotFileIdentity, snapshotPath, SnapshotSourceChangedError, type OpenedSnapshotSource, type SnapshotFileSource, type SnapshotFileIdentity, type SnapshotFileReader } from './workspace-snapshot-source.js';
 import { BoundedLruCache } from '@origintrail-official/dkg-core';
+import { workspacePublicQuadsAcceptedDigests } from './workspace-public-quads-digest.js';
 
 export interface SharedMemoryPublicSnapshotStorageConfig {
   enabled?: boolean;
@@ -167,7 +168,7 @@ interface SnapshotPageIndexCore {
 
 export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshotStore {
   private readonly validationCache = new BoundedLruCache<string, {
-    source: SnapshotFileSource; digest: string; count: number;
+    source: SnapshotFileSource; digests: readonly string[]; count: number;
   }>(2048);
   private readonly pageIndexCache = new BoundedLruCache<string, Promise<SnapshotPageIndexCore>>(SNAPSHOT_PAGE_INDEX_CACHE_MAX);
   private readonly pendingWrites = new Map<
@@ -307,15 +308,17 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
         const cached = this.validationCache.get(hash);
         if (cached && sameSnapshotSource(cached.source, source.reference)) {
           await source.assertCurrent();
-          return cached.digest === expectedDigest && cached.count === expectedCount;
+          return cached.digests.includes(expectedDigest) && cached.count === expectedCount;
         }
         this.validationCache.delete(hash);
         const quads = await this.readSnapshot(source, ref);
         if (quads === null) return false;
-        const observed = { count: quads.length, digest: workspacePublicQuadsDigest(quads) };
+        // The expected digest may be any form this build accepts (legacy
+        // own-locale or code-unit), so the evidence lists every accepted form.
+        const observed = { count: quads.length, digests: workspacePublicQuadsAcceptedDigests(quads) };
         await source.assertCurrent();
         this.validationCache.set(hash, { source: source.reference, ...observed });
-        return observed.digest === expectedDigest && observed.count === expectedCount;
+        return observed.digests.includes(expectedDigest) && observed.count === expectedCount;
       });
     } catch {
       this.validationCache.delete(hash);
@@ -970,19 +973,9 @@ export function serializeWorkspacePublicSnapshotQuads(quads: readonly Quad[]): s
   return serializeWorkspacePublicSnapshotWithIndex(quads).payload;
 }
 
-export function workspacePublicQuadsDigest(quads: readonly Quad[]): string {
-  const canonical = quads
-    .map((quad) => JSON.stringify([quad.subject, quad.predicate, quad.object, '']))
-    .sort((a, b) => a.localeCompare(b));
-  const hash = createHash('sha256');
-  hash.update('[');
-  canonical.forEach((row, index) => {
-    if (index > 0) hash.update(',');
-    hash.update(row);
-  });
-  hash.update(']');
-  return `sha256:${hash.digest('hex')}`;
-}
+// The digest function, its ordering gate and the dual-accept matcher live in
+// their own module; re-exported so existing importers keep working.
+export { workspacePublicQuadsDigest } from './workspace-public-quads-digest.js';
 
 function quadToNQuad(quad: Quad): string {
   return `${formatNodeTerm(quad.subject)} <${escapeIri(quad.predicate)}> ${formatObjectTerm(quad.object)} .`;

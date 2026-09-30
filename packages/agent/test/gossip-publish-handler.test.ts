@@ -17,6 +17,7 @@ import {
   storeKnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
 import { GossipPublishHandler } from '../src/gossip-publish-handler.js';
+import { divergentObjectQuads, useAmbientCollation } from './_helpers/digest-locale.js';
 import type { ContextGraphDiscoveryMetadata, ContextGraphSub } from '../src/index.js';
 
 const CONTEXT_GRAPH = 'test-gossip-handler';
@@ -330,6 +331,75 @@ describe('GossipPublishHandler', () => {
     await handler.handlePublishMessage(data, CONTEXT_GRAPH, undefined, '12D3KooWPublisher');
 
     expect(await store.countQuads(vmGraph)).toBe(1);
+  });
+
+  it('matches a payload against a head recorded under another accepted digest form', async () => {
+    const { store, handler } = createHandler();
+    const author = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
+    const kaNumber = 43n;
+    const packedKaId = (BigInt(author) << 96n) | kaNumber;
+    const ual = `did:dkg:base:8453/${author}/${kaNumber}`;
+    const scope = createGraphKnowledgeAssetScope(ual, 1);
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.VerifiableMemory,
+      scope,
+    );
+    const graphManager = new GraphManager(store);
+    const publicQuads = divergentObjectQuads('urn:divergent:subject');
+    // The StorageACK path recorded the copy on a host whose default collator
+    // is en-US ...
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      shareOperationId: 'divergent-head',
+      kaUal: ual,
+      assertionVersion: '1',
+      quads: publicQuads,
+      privateTripleCount: 0,
+      publisherPeerId: '12D3KooWPublisher',
+      accessPolicy: 'public',
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      shareOperationId: 'divergent-head',
+      kaUal: ual,
+      assertionVersion: '1',
+    });
+    const data = encodePublishRequest({
+      ual,
+      nquads: new TextEncoder().encode(publicQuads.map((quad) =>
+        `<${quad.subject}> <${quad.predicate}> ${quad.object} <${vmGraph}> .`,
+      ).join('\n')),
+      contextGraphId: CONTEXT_GRAPH,
+      kas: [],
+      publisherIdentity: new Uint8Array(32),
+      publisherAddress: author,
+      startKAId: packedKaId,
+      endKAId: packedKaId,
+      chainId: 'base:8453',
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      assertionVersion: '1',
+      publicTripleCount: publicQuads.length,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+      allowedPeers: [],
+    });
+
+    // ... and the same publish arrives on a node whose default collator is da-DK.
+    const restore = useAmbientCollation('da-DK');
+    try {
+      await handler.handlePublishMessage(data, CONTEXT_GRAPH, undefined, '12D3KooWPublisher');
+    } finally {
+      restore();
+    }
+
+    expect(await store.countQuads(vmGraph)).toBe(publicQuads.length);
   });
 
   it('uses durable owner and allow-list metadata instead of relay-supplied values', async () => {

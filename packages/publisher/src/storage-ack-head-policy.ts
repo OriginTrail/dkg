@@ -32,6 +32,13 @@ export function planStorageAckHeadPersistence(input: {
   readonly assertionVersion: string;
   readonly publisherPeerId: string;
   readonly publicDigest: string;
+  /**
+   * Whether a head digest recorded by an earlier build (or another node) is a
+   * digest of the same content. `publicDigest` is the form this node writes now;
+   * a head persisted before an upgrade or a digest-ordering change may carry
+   * another accepted form of the same content and must not read as new content.
+   */
+  readonly headDigestMatches?: (headDigest: string) => boolean;
   readonly publicTripleCount: number;
   readonly privateTripleCount: number;
   readonly privateMerkleRoot?: string;
@@ -40,12 +47,13 @@ export function planStorageAckHeadPersistence(input: {
   const head = input.head;
   if (!head) return expected ? { kind: 'decline-stale-local-head' } : { kind: 'replace-head' };
 
+  // The digest test can recompute a digest, so it goes after the cheap fields.
   const sameContent =
     head.assertionVersion === input.assertionVersion
-    && head.publicQuadsDigest === input.publicDigest
     && head.publicTripleCount === input.publicTripleCount
     && head.privateTripleCount === input.privateTripleCount
-    && head.privateMerkleRoot?.toLowerCase() === input.privateMerkleRoot;
+    && head.privateMerkleRoot?.toLowerCase() === input.privateMerkleRoot
+    && (head.publicQuadsDigest === input.publicDigest || input.headDigestMatches?.(head.publicQuadsDigest) === true);
 
   if (expected) {
     if (
