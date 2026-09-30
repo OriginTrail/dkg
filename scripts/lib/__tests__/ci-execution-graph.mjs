@@ -257,7 +257,8 @@ export function workflowExecution(workflowSource, {
   const context = { ...workspaces, rootManifest };
   const exists = (file) => readRepoFile(file) !== undefined;
   const scriptText = (workspace, script) => (workspace === '.' ? rootManifest.scripts : workspaces.manifests.get(workspace)?.scripts)?.[script];
-  return Object.entries(parse(workflowSource).jobs ?? {}).map(([job, definition]) => {
+  const workflow = parse(workflowSource);
+  return Object.entries(workflow.jobs ?? {}).map(([job, definition]) => {
     const commands = [];
     const projected = new Set();
     const followed = new Set();
@@ -313,12 +314,26 @@ export function workflowExecution(workflowSource, {
       project(`script ${workspace} ${script}`, text);
       readCommands(text, workspace, next, where);
     };
-    const followJob = ({ steps = [], uses } = {}) => {
+    // The directory a step's `run` executes in, as GitHub picks it: the
+    // step's working-directory, else its job's defaults.run, else its
+    // workflow's, else the repository root. One the graph cannot resolve
+    // statically (an expression, a path out of the repository) throws.
+    const workingDirectory = (...settings) => {
+      const setting = settings.find((value) => value !== undefined && value !== null);
+      if (setting === undefined) return '.';
+      const directory = path.posix.normalize(String(setting));
+      if (/\$\{\{/.test(directory) || directory.startsWith('/') || directory === '..' || directory.startsWith('../')) {
+        throw new Error(`${job} runs a step in a working directory the graph cannot resolve: ${setting}`);
+      }
+      return directory;
+    };
+    const followJob = ({ steps = [], uses, defaults } = {}, workflowDirectory) => {
+      const jobDirectory = defaults?.run?.['working-directory'];
       for (const step of steps) {
         if (step.run !== undefined && step.run !== null) {
           const run = String(step.run);
           commands.push(run);
-          readCommands(run, '.', [], job);
+          readCommands(run, workingDirectory(step['working-directory'], jobDirectory, workflowDirectory), [], job);
         }
         followUses(step.uses);
       }
@@ -333,11 +348,11 @@ export function workflowExecution(workflowSource, {
         ? readRepoFile(target)
         : ['action.yml', 'action.yaml'].map((name) => readRepoFile(`${target}/${name}`)).find((text) => text !== undefined);
       if (source === undefined) throw new Error(`${uses} names no local workflow or action`);
-      const { jobs, runs } = parse(source);
-      if (jobs) for (const nested of Object.values(jobs)) followJob(nested);
+      const { jobs, runs, defaults } = parse(source);
+      if (jobs) for (const nested of Object.values(jobs)) followJob(nested, defaults?.run?.['working-directory']);
       else followJob({ steps: runs?.steps });
     };
-    followJob(definition);
+    followJob(definition, workflow.defaults?.run?.['working-directory']);
     return { job, condition: definition.if ?? '', commands, edges };
   });
 }
