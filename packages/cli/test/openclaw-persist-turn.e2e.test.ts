@@ -9,12 +9,9 @@
  * POSTs like the OpenClaw adapter does, then reads the `'chat-turns'` Working
  * Memory assertion back with SPARQL.
  *
- * Why the assertions count Messages and states rather than ChatTurn subjects:
- * `storeChatExchange` names the turn `urn:dkg:chat:turn:<turnId>`, so a resend
- * always lands on the same turn subject. The duplication a resend causes is
- * the extra user/assistant Message pair (fresh random ids each write), the
- * extra `hasUserMessage` / `hasAssistantMessage` objects on that turn, and a
- * second `persistenceState` literal.
+ * The assertions read a footprint (Message and state counts, not ChatTurn
+ * subjects) through the helper this tier shares with the devnet suite; see
+ * `_helpers/chat-turn-footprint.ts` for why a resend shows up there.
  *
  * Every test uses its own random turn id as well as its own session: the turn
  * subject is `urn:dkg:chat:turn:<turnId>` whatever the session, so two tests
@@ -28,12 +25,9 @@ import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { AGENT_CONTEXT_GRAPH, CHAT_TURNS_ASSERTION, type ChatMemoryManager } from '@origintrail-official/dkg-node-ui';
 import { buildChatMemoryStack, resolveMemoryAgentAddress } from '../src/daemon.js';
 import { handleOpenclawRoutes } from '../src/daemon/routes/openclaw.js';
+import { ONE_STORED_TURN, lexicalTerm, readChatTurnFootprint } from './_helpers/chat-turn-footprint.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
-const CHAT_NS = 'urn:dkg:chat:';
-const SCHEMA = 'http://schema.org/';
-const DKG_ONT = 'http://dkg.io/ontology/';
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const PERSIST_TURN = '/api/openclaw-channel/persist-turn';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -120,44 +114,9 @@ async function select(sparql: string): Promise<Array<Record<string, string>>> {
   return (result.bindings ?? []) as Array<Record<string, string>>;
 }
 
-/** Strip an N-Triples literal (`"x"`, `"x"^^<dt>`) to its lexical form. */
-const lexical = (term: string | undefined): string => {
-  const match = /^"((?:[^"\\]|\\.)*)"/.exec(term ?? '');
-  return match ? match[1] : (term ?? '');
-};
-
 /** Everything one `(sessionId, turnId)` left in the chat-turns assertion. */
-async function footprint(sessionId: string, turnId: string) {
-  const session = `<${CHAT_NS}session:${sessionId}>`;
-  const turn = `<${CHAT_NS}turn:${turnId}>`;
-  const turnIdLiteral = JSON.stringify(turnId);
-  const [turns, messages, userMessages, assistantMessages, states, transitions] = await Promise.all([
-    select(`SELECT ?t WHERE { ?t <${RDF_TYPE}> <${DKG_ONT}ChatTurn> . ?t <${SCHEMA}isPartOf> ${session} . ?t <${DKG_ONT}turnId> ${turnIdLiteral} }`),
-    select(`SELECT ?m WHERE { ?m <${RDF_TYPE}> <${SCHEMA}Message> . ?m <${SCHEMA}isPartOf> ${session} . ?m <${DKG_ONT}turnId> ${turnIdLiteral} }`),
-    select(`SELECT ?u WHERE { ${turn} <${DKG_ONT}hasUserMessage> ?u }`),
-    select(`SELECT ?a WHERE { ${turn} <${DKG_ONT}hasAssistantMessage> ?a }`),
-    select(`SELECT ?s WHERE { ${turn} <${DKG_ONT}persistenceState> ?s }`),
-    select(`SELECT ?x ?s ?r WHERE { ?x <${RDF_TYPE}> <${DKG_ONT}ChatTurnPersistenceTransition> . ?x <${DKG_ONT}updatesTurn> ${turn} . ?x <${DKG_ONT}persistenceState> ?s . OPTIONAL { ?x <${DKG_ONT}assistantReply> ?r } }`),
-  ]);
-  return {
-    turns: turns.length,
-    messages: messages.length,
-    userMessages: userMessages.length,
-    assistantMessages: assistantMessages.length,
-    states: states.map((row) => lexical(row.s)),
-    transitions: transitions.map((row) => ({ state: lexical(row.s), assistantReply: lexical(row.r) })),
-  };
-}
-
-/** One user + one assistant message, one turn subject, one recorded state. */
-const ONE_STORED_TURN = {
-  turns: 1,
-  messages: 2,
-  userMessages: 1,
-  assistantMessages: 1,
-  states: ['stored'],
-  transitions: [],
-};
+const footprint = (sessionId: string, turnId: string) =>
+  readChatTurnFootprint(select, lexicalTerm, sessionId, turnId);
 
 const USER_TEXT = 'what is a knowledge asset?';
 const ASSISTANT_TEXT = 'A knowledge asset is a verifiable unit of knowledge.';

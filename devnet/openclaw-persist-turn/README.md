@@ -24,7 +24,10 @@ daemons, over HTTP with the node's bearer token, the suite checks that:
 The store is read back through `POST /api/query` (`view: working-memory`,
 `assertionName: chat-turns`). Duplication shows up as extra `schema:Message`
 subjects carrying the turn id, extra `hasUserMessage` / `hasAssistantMessage`
-objects on the turn, and extra transitions; the suite counts those.
+objects on the turn, and extra transitions; the suite counts those. The footprint
+queries are shared with the CLI e2e (`packages/cli/test/openclaw-persist-turn.e2e.test.ts`)
+through `packages/cli/test/_helpers/chat-turn-footprint.ts`; this suite supplies
+only its own transport (`POST /api/query`) and result-cell shape.
 
 It runs against nodes 1, 3 and 5, which sit on different store backends
 (managed `oxigraph-server`, `blazegraph`, `sparql-http` to an external Oxigraph

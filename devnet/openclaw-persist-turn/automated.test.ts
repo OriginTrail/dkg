@@ -38,11 +38,13 @@ import {
   type DevnetNode,
   type SparqlBindingCell,
 } from '../_bootstrap/harness.js';
+import {
+  NO_CHAT_TURN,
+  ONE_STORED_TURN,
+  readChatTurnFootprint,
+  type ChatTurnFootprint,
+} from '../../packages/cli/test/_helpers/chat-turn-footprint.js';
 
-const CHAT_NS = 'urn:dkg:chat:';
-const SCHEMA = 'http://schema.org/';
-const DKG_ONT = 'http://dkg.io/ontology/';
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** One node per store backend the devnet provisions: 1 core, 3 core, 5 edge. */
@@ -58,25 +60,6 @@ interface PersistBody {
   sessionId?: string;
   error?: string;
 }
-
-interface ChatFootprint {
-  turns: number;
-  messages: number;
-  userMessages: number;
-  assistantMessages: number;
-  states: string[];
-  transitions: Array<{ state: string; assistantReply: string }>;
-}
-
-/** One user + one assistant message, one turn subject, one recorded state. */
-const ONE_STORED_TURN: ChatFootprint = {
-  turns: 1,
-  messages: 2,
-  userMessages: 1,
-  assistantMessages: 1,
-  states: ['stored'],
-  transitions: [],
-};
 
 const USER_TEXT = 'devnet: what is a knowledge asset?';
 const ASSISTANT_TEXT = 'devnet: a knowledge asset is a verifiable unit of knowledge.';
@@ -133,30 +116,8 @@ async function selectChatTurns(
 }
 
 /** Everything one `(sessionId, turnId)` left in the chat-turns assertion. */
-async function footprint(node: DevnetNode, sessionId: string, turnId: string): Promise<ChatFootprint> {
-  const session = `<${CHAT_NS}session:${sessionId}>`;
-  const turn = `<${CHAT_NS}turn:${turnId}>`;
-  const turnIdLiteral = JSON.stringify(turnId);
-  const select = (sparql: string) => selectChatTurns(node, sparql);
-  const [turns, messages, userMessages, assistantMessages, states, transitions] = await Promise.all([
-    select(`SELECT ?t WHERE { ?t <${RDF_TYPE}> <${DKG_ONT}ChatTurn> . ?t <${SCHEMA}isPartOf> ${session} . ?t <${DKG_ONT}turnId> ${turnIdLiteral} }`),
-    select(`SELECT ?m WHERE { ?m <${RDF_TYPE}> <${SCHEMA}Message> . ?m <${SCHEMA}isPartOf> ${session} . ?m <${DKG_ONT}turnId> ${turnIdLiteral} }`),
-    select(`SELECT ?u WHERE { ${turn} <${DKG_ONT}hasUserMessage> ?u }`),
-    select(`SELECT ?a WHERE { ${turn} <${DKG_ONT}hasAssistantMessage> ?a }`),
-    select(`SELECT ?s WHERE { ${turn} <${DKG_ONT}persistenceState> ?s }`),
-    select(`SELECT ?x ?s ?r WHERE { ?x <${RDF_TYPE}> <${DKG_ONT}ChatTurnPersistenceTransition> . ?x <${DKG_ONT}updatesTurn> ${turn} . ?x <${DKG_ONT}persistenceState> ?s . OPTIONAL { ?x <${DKG_ONT}assistantReply> ?r } }`),
-  ]);
-  return {
-    turns: turns.length,
-    messages: messages.length,
-    userMessages: userMessages.length,
-    assistantMessages: assistantMessages.length,
-    states: states.map((row) => lexical(row.s)).sort(),
-    transitions: transitions
-      .map((row) => ({ state: lexical(row.s), assistantReply: lexical(row.r) }))
-      .sort((a, b) => a.state.localeCompare(b.state)),
-  };
-}
+const footprint = (node: DevnetNode, sessionId: string, turnId: string): Promise<ChatTurnFootprint> =>
+  readChatTurnFootprint((sparql) => selectChatTurns(node, sparql), lexical, sessionId, turnId);
 
 /**
  * The footprint once the store reports the expected shape. A write that
@@ -168,8 +129,8 @@ async function settledFootprint(
   node: DevnetNode,
   sessionId: string,
   turnId: string,
-  expected: ChatFootprint,
-): Promise<ChatFootprint> {
+  expected: ChatTurnFootprint,
+): Promise<ChatTurnFootprint> {
   const deadline = Date.now() + 15_000;
   let last = await footprint(node, sessionId, turnId);
   while (JSON.stringify(last) !== JSON.stringify(expected) && Date.now() < deadline) {
@@ -247,7 +208,7 @@ describe.each(NODE_NUMS)('OpenClaw persist-turn on devnet node%i', (num) => {
   it('records pending -> stored as a transition, not a second exchange', async () => {
     const sessionId = newSessionId('openclaw');
     const turnId = newTurnId();
-    const expected: ChatFootprint = {
+    const expected: ChatTurnFootprint = {
       turns: 1,
       messages: 2,
       userMessages: 1,
@@ -310,14 +271,7 @@ describe.each(NODE_NUMS)('OpenClaw persist-turn on devnet node%i', (num) => {
 
     expect(missingReply.status).toBe(400);
     expect(unknownState.status).toBe(400);
-    expect(await footprint(node(), sessionId, turnId)).toEqual({
-      turns: 0,
-      messages: 0,
-      userMessages: 0,
-      assistantMessages: 0,
-      states: [],
-      transitions: [],
-    });
+    expect(await footprint(node(), sessionId, turnId)).toEqual(NO_CHAT_TURN);
   });
 });
 
@@ -357,7 +311,7 @@ describe.each(['hermes', 'prime-agent'] as const)('%s persist-turn parity on dev
     expect(resend.body).toMatchObject({ ok: true, duplicate: true, turnId });
     expect(stored.body).toMatchObject({ ok: true, transitioned: true, turnId });
     expect(storedResend.body).toMatchObject({ ok: true, duplicate: true, turnId });
-    const expected: ChatFootprint = {
+    const expected: ChatTurnFootprint = {
       turns: 1,
       messages: 2,
       userMessages: 1,
