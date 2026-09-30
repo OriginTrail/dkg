@@ -25,7 +25,7 @@ import {
 } from './ci-plan-fixtures.mjs';
 import { BUILD_ONLY_SCRIPTS, INSTALL_HOOK_INPUTS, SUPPORT_PATH_ROUTES, scriptsPattern } from '../ci-routing.mjs';
 import { COMMAND_EFFECTS, workflowExecution } from './ci-execution-graph.mjs';
-import { edgeRequirement, jobRequirement, laneSeeds } from './lane-entrypoints.mjs';
+import { edgeRequirement, jobLane, jobRequirement, laneSeeds } from './lane-entrypoints.mjs';
 import { dependenciesOf, loadReferences, packageImports, repoScriptMentions, traceLaneLoads, workspaceClosure } from './load-graph.mjs';
 
 // The workspaces that `files` import by package name, plus everything those
@@ -301,7 +301,7 @@ test('the Windows lifecycle job follows the agent lane, which covers the closure
   // lane. ci.yml starts it on the agent lane's output and the gate requires it
   // with that lane, so every plan that runs the agent lane runs it too.
   const { jobs } = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8'));
-  const windowsLane = jobs['inventory-windows'].if.match(/^needs\.changes\.outputs\.(\w+) == 'true'$/)?.[1];
+  const windowsLane = jobLane('inventory-windows', jobs['inventory-windows'].if);
   assert.equal(windowsLane, 'tornado_agent');
   const windowsSelected = (filePath) => pullRequestPlan([change(filePath)]).lanes[windowsLane];
 
@@ -784,13 +784,11 @@ test('owning lanes and scopes cover every job that runs the workspace', () => {
   // the workspaces a lane job's steps filter to (such as the Blazegraph job's
   // storage, EPCIS and agent suites) and the workspace each EVM scope's suites
   // live in.
-  const laneByJob = Object.fromEntries(Object.entries(PRIMARY_LANE_JOBS).map(([lane, job]) => [job, lane]));
   const missing = [];
   for (const [job, packages] of Object.entries(COVERAGE_JOBS)) {
+    const lane = jobLane(job, '');
     for (const name of Object.keys(packages)) {
-      if (!WORKSPACE_OWNING_LANES[`packages/${name}`]?.includes(laneByJob[job])) {
-        missing.push(`${laneByJob[job]} runs the packages/${name} Vitest suite`);
-      }
+      if (!WORKSPACE_OWNING_LANES[`packages/${name}`]?.includes(lane)) missing.push(`${lane} runs the packages/${name} Vitest suite`);
     }
   }
   for (const [scope, { packageDirectory }] of Object.entries(EVM_TEST_SCOPES)) {
