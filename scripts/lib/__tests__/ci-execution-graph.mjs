@@ -13,6 +13,7 @@
 // way. An edge records the chain of package scripts that led to it and its
 // provenance; the routing policy (lane-entrypoints.mjs) maps each edge to what
 // a change to its file must select.
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,7 +27,30 @@ import { SUBCOMMAND_CHILD_COMMANDS as RELEASE_CHILD_COMMANDS } from '../../relea
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 
+// The repository's files as a commit would hold them - tracked and new
+// files, without what .gitignore excludes (installs, builds, the runtime
+// assets a build copies) - so a checkout that has been built reads the same
+// as one that has not; read once from git, and undefined outside a git
+// checkout, where the working tree stands in.
+let repositoryFileSet;
+export function repositoryFiles() {
+  if (repositoryFileSet === undefined) {
+    try {
+      const listed = execFileSync('git', ['-C', REPO_ROOT, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], {
+        encoding: 'utf8',
+        maxBuffer: 1 << 28,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      repositoryFileSet = new Set(listed.split('\0').filter((file) => file && fs.existsSync(path.join(REPO_ROOT, file))));
+    } catch {
+      repositoryFileSet = null;
+    }
+  }
+  return repositoryFileSet ?? undefined;
+}
+
 function readRepoText(file) {
+  if (repositoryFiles() && !repositoryFiles().has(file)) return undefined;
   try {
     return fs.readFileSync(path.join(REPO_ROOT, file), 'utf8');
   } catch {

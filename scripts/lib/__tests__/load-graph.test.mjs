@@ -313,6 +313,17 @@ test('a fixture context is its files alone, manifests and directories included',
   assert.throws(() => traceLaneLoads(seeds, { read: (file) => files.get(file) }), /takes a context/);
 });
 
+test('the checkout context holds the repository\'s files, not what a build leaves beside them', () => {
+  // The CLI build copies the storage package's namespace contract next to
+  // the CLI (an ignored runtime asset): a built checkout, as in the build
+  // job, must read like an unbuilt one, so the copy is no repository file.
+  const context = checkoutContext();
+  assert.equal(context.isFile('packages/storage/blazegraph-namespace-contract.cjs'), true);
+  assert.equal(context.isFile('packages/cli/blazegraph-namespace-contract.cjs'), false);
+  assert.equal(context.read('packages/cli/blazegraph-namespace-contract.cjs'), undefined);
+  assert.equal(context.isDirectory('packages/cli/src'), true);
+});
+
 test('an overlay replaces sources in its base and keeps the base\'s manifests', () => {
   // The planted source replaces the checkout's ABI-sync script: the real
   // chain test that runs it comes from the checkout, and so does the real

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CI_LANES, PRIMARY_LANE_JOBS, planCi } from '../ci-delta.mjs';
-import { workflowExecution } from './ci-execution-graph.mjs';
+import { repositoryFiles, workflowExecution } from './ci-execution-graph.mjs';
 
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 // The trusted CI controller commit that the workflows' four trusted checkouts
@@ -56,13 +56,15 @@ export function succeeded(...jobs) {
   return Object.fromEntries(jobs.flat().map((job) => [job, 'success']));
 }
 
-// Source files (repo-relative) under `directory`, skipping installs and builds.
+// Source files (repo-relative) under `directory`, skipping installs, builds
+// and anything else the repository does not hold (repositoryFiles).
 export function sourceFiles(directory) {
   return fs.readdirSync(path.join(REPO_ROOT, directory), { withFileTypes: true }).flatMap((entry) => {
     if (['node_modules', 'dist', 'dist-ui', 'coverage'].includes(entry.name)) return [];
     const relative = path.posix.join(directory, entry.name);
     if (entry.isDirectory()) return sourceFiles(relative);
-    return /\.[cm]?[jt]sx?$/.test(entry.name) ? [relative] : [];
+    const held = !repositoryFiles() || repositoryFiles().has(relative);
+    return held && /\.[cm]?[jt]sx?$/.test(entry.name) ? [relative] : [];
   });
 }
 

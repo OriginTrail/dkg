@@ -5,13 +5,21 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
-import { analyzeShell, commandFiles, isShellScript, packageScriptEdges, scriptOperand, workspaceCatalog, workspaceClosure } from './ci-execution-graph.mjs';
+import { analyzeShell, commandFiles, isShellScript, packageScriptEdges, repositoryFiles, scriptOperand, workspaceCatalog, workspaceClosure } from './ci-execution-graph.mjs';
 import { REPO_ROOT } from './ci-plan-fixtures.mjs';
 
 export { workspaceCatalog, workspaceClosure };
 
-const isRepoFile = (candidate) => fs.statSync(path.join(REPO_ROOT, candidate), { throwIfNoEntry: false })?.isFile() === true;
-const isRepoDirectory = (candidate) => fs.statSync(path.join(REPO_ROOT, candidate), { throwIfNoEntry: false })?.isDirectory() === true;
+// What is a file or a directory in the checkout: the repository's files
+// (repositoryFiles: an ignored build output, such as a runtime asset the CLI
+// build copies, is none) and the directories that hold them.
+let repositoryDirectories;
+const isRepoFile = (candidate) => (repositoryFiles()
+  ? repositoryFiles().has(candidate)
+  : fs.statSync(path.join(REPO_ROOT, candidate), { throwIfNoEntry: false })?.isFile() === true);
+const isRepoDirectory = (candidate) => (repositoryFiles()
+  ? (repositoryDirectories ??= directoriesOf(repositoryFiles())).has(candidate.replace(/\/+$/, ''))
+  : fs.statSync(path.join(REPO_ROOT, candidate), { throwIfNoEntry: false })?.isDirectory() === true);
 const outsideSources = (target) => target === '.' || target.startsWith('../') || /(?:^|\/)node_modules\//.test(target);
 const readRepoFile = (file) => (isRepoFile(file) ? fs.readFileSync(path.join(REPO_ROOT, file), 'utf8') : undefined);
 
