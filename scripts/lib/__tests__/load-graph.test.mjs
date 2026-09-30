@@ -189,3 +189,16 @@ test('a shell script reaches what the package scripts it runs reach', () => {
   assert.equal(devnet.format, 'shell');
   assert.ok(devnet.paths.includes('scripts/build.mjs'));
 });
+
+test('an unresolved read keeps its identity when the directory expression changes', () => {
+  // INSTALL_HOOK_DEPENDENCIES keys a read by the reading file and the literal
+  // path it reads, so renaming the directory binding or switching join() for
+  // path.join() does not change the dependency.
+  const reads = (source) => loadReferences('packages/cli/scripts/example.mjs', source).unresolvedReads;
+  const before = reads("import { join } from 'node:path';\nconst entry = readFileSync(join(resolvedPackageDir, 'scripts', 'markitdown-entry.py'));");
+  const after = reads("import path from 'node:path';\nconst entry = readFileSync(path.join(packageRoot, 'scripts', 'markitdown-entry.py'));");
+  assert.deepEqual(before, ['scripts/markitdown-entry.py']);
+  assert.deepEqual(after, before);
+  // A directory the pass resolves is a path, not an unresolved read.
+  assert.deepEqual(reads("import { join } from 'node:path';\nconst entry = join(import.meta.dirname, 'markitdown-entry.py');"), []);
+});
