@@ -14,6 +14,7 @@
   "all": [
     "ack-candidate-isolation",
     "agent-provenance",
+    "agent-restart-gossip",
     "conviction-emission-bell",
     "core-peers-features",
     "edge-update-flow",
