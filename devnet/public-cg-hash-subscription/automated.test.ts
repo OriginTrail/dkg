@@ -20,8 +20,10 @@
  *      looks the job up by the hash, but only when the subscribe left it keyed by
  *      the hash; with a connected holder the request usually resolves the name
  *      itself, the job is keyed by the cleartext id and that lookup finds none, so
- *      test 2 then says on the console that it did not run it. Nothing about that
- *      lookup depends on the timing of test 2: item 7 pins it.
+ *      test 2 then says on the console that it did not run it (and, when the job
+ *      did stay keyed by the hash, asserts the cleartext aliases only if it
+ *      continued under the cleartext id). Nothing about that lookup depends on the
+ *      timing of test 2: item 7 pins it.
  *   4. A forced catch-up (`forceCatchup`, the operator's recovery) on an already
  *      converged graph mints a replacement job that both aliases follow; the
  *      superseded job stays readable by its id and the content is unchanged.
@@ -740,10 +742,19 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     } else {
       // The subscribe answered under the hash (no holder answered within the
       // request), so the job is keyed by the hash. It is the job the hash names
-      // (#2779); whether it also continued under the cleartext id depends on when
-      // the hash resolved relative to its first round, so the cleartext aliases are
-      // not asserted for it (the SWM test does the same).
-      await expectByHashLookupResolved(edgeA, vmGraph, jobId!, 'name-hash subscribe');
+      // (#2779).
+      const byHash = await expectByHashLookupResolved(edgeA, vmGraph, jobId!, 'name-hash subscribe');
+      if (byHash.resolvedContextGraphId === vmGraph.id) {
+        // The job continued under the cleartext id while it ran, so the cleartext
+        // and on-chain aliases name it too: the assertion this test always made.
+        await expectAliasesName(edgeA, vmGraph, jobId!, 'name-hash subscribe');
+      } else {
+        // The hash resolved after the job settled, so only the hash (and the job id)
+        // name it and the cleartext aliases are not expected to (the SWM test makes
+        // the same allowance). Say so rather than skip the assertion silently.
+        // eslint-disable-next-line no-console
+        console.log(`hash-sub: the cleartext aliases were NOT asserted: the subscribe answered under the hash and its job settled before the hash resolved (resolvedContextGraphId=${byHash.resolvedContextGraphId ?? 'unset'}), so only the hash names it.`);
+      }
     }
   }, 900_000);
 

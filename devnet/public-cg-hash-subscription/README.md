@@ -30,7 +30,9 @@ nodes.
    keyed by the cleartext id and a lookup by the hash finds none. The test says so
    on the console, and item 7 pins the by-hash lookup on purpose. When the
    subscribe instead answered under the hash, the job is keyed by the hash and the
-   test asserts the by-hash lookup, not the cleartext aliases.)
+   test asserts the by-hash lookup, and the cleartext aliases only if the job
+   continued under the cleartext id; it says on the console when they do not apply.
+   That branch did not run in any devnet run of this change.)
 3. A second edge subscribed with `#<on-chain id>` lands on the same cleartext
    graph and converges on the same VM content.
 4. A forced catch-up (`forceCatchup`, the operator's recovery) on an already
