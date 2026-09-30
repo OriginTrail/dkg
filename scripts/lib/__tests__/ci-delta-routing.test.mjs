@@ -411,6 +411,8 @@ const UNFOLLOWED_LOADS = new Map([
     "the agent package's own built dist/ entries, checked through its export map"],
   ['packages/agent/scripts/bench-sync-telemetry.mjs: pathToFileURL(distFile).href',
     "the agent's built dist/sync/attempt-telemetry.js, built from agent source the agent rule routes"],
+  ['scripts/devnet.sh: $cli_entry',
+    "the CLI entry a devnet node starts from (node_cli_entry): packages/cli/dist/cli.js, built from CLI source whose rule selects both lanes that reach devnet.sh (the CLI lane and the browser suite), or a released version's under .devnet-versions/, outside the repository's files"],
 ]);
 
 // What the load-closure guard reports for a trace: each load whose file does
@@ -686,10 +688,14 @@ test('a package-local helper a workspace build runs is traced with that build ou
 });
 
 test('a script path a lane assembles at run time fails the guard until it is listed', () => {
-  // The wildcard families route a new devnet-* script to the build checks
-  // alone, so a lane reaching one through a path it builds at run time would
-  // skip itself; the guard reports every such construction it reaches.
+  // The wildcard families route a new devnet-* script, and existing ones such
+  // as devnet-test-invite-flow.sh, to the build checks alone, so a lane
+  // reaching one through a path it builds or picks at run time would skip
+  // itself; the guard reports every such construction it reaches, a file a
+  // command runs through a variable included, until UNFOLLOWED_LOADS lists it
+  // with the route that covers its targets.
   assert.deepEqual(selectedLanes(pullRequestPlan([change('scripts/devnet-new-helper.sh')])), []);
+  assert.deepEqual(selectedLanes(pullRequestPlan([change('scripts/devnet-test-invite-flow.sh')])), []);
   const planted = 'packages/cli/test/planted.test.ts';
   const fixture = 'packages/cli/test/fixtures/devnet-blazegraph-smoke.sh';
   const sources = new Map([
@@ -698,10 +704,16 @@ test('a script path a lane assembles at run time fails the guard until it is lis
       `spawnSync('bash', ['${fixture}']);`,
       "spawnSync('bash', [join(process.cwd(), 'scripts', helper)]);",
     ].join('\n')],
-    [fixture, 'helper=new-helper\nsource "$SCRIPT_DIR/devnet-${helper}.sh"\n'],
+    [fixture, [
+      'helper=new-helper',
+      'source "$SCRIPT_DIR/devnet-${helper}.sh"',
+      'helper=devnet-test-invite-flow.sh',
+      'bash "$SCRIPT_DIR/$helper"',
+    ].join('\n')],
   ]);
   const trace = traceLaneLoads(new Map([[planted, new Map([['bura_cli', 'seed']])]]), { read: (file) => sources.get(file) });
   assert.deepEqual(loadClosureGaps(trace).unexplained.sort(), [
+    `${fixture}: $SCRIPT_DIR/$helper`,
     `${fixture}: $SCRIPT_DIR/devnet-\${helper}.sh`,
     `${planted}: join(process.cwd(), 'scripts', helper)`,
   ]);

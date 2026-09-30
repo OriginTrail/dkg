@@ -276,6 +276,60 @@ const withoutComments = (text) => text.split('\n').map((line) => line.replace(/(
 const assemblesScriptPath = (word) => word.includes('$')
   && (/(?:^|\/)scripts\/[^$]*\$/.test(word) || /(?:^|\/)[^/]*\$[^/]*\.(?:sh|bash|py|[cm]?[jt]s)$/.test(word));
 
+// Keywords that open a compound command, and wrappers that run the command
+// after them: what a simple command's program follows.
+const COMMAND_PREFIXES = new Set(['if', 'then', 'else', 'elif', 'do', 'while', 'until', '!', '{', 'time', 'exec', 'nohup', 'command']);
+// Programs that run the file their first operand names, each with the
+// options after which no file runs (the code is an argument, a module or
+// stdin) and the options that take the next word as their value.
+const SHELL_RUNNER = { inline: ['-c', '-s'], valued: (option) => /^[-+][A-Za-z]*[oO]$/.test(option) };
+const NODE_RUNNER = {
+  inline: ['-e', '--eval', '-p', '--print'],
+  valued: (option) => ['--import', '--require', '-r', '--loader', '--experimental-loader', '--env-file', '--conditions', '-C', '--input-type', '--tsconfig'].includes(option),
+};
+const SCRIPT_RUNNERS = new Map([
+  ...['bash', 'sh', 'zsh', 'dash'].map((program) => [program, SHELL_RUNNER]),
+  ...['source', '.'].map((program) => [program, { inline: [], valued: () => false }]),
+  ...['node', 'tsx'].map((program) => [program, NODE_RUNNER]),
+  ...['python', 'python3'].map((program) => [program, { inline: ['-c', '-m'], valued: (option) => ['-W', '-X'].includes(option) }]),
+]);
+
+// The word naming the file a simple command runs, if it runs one: past the
+// keywords and wrappers it follows (env with its assignments, timeout with
+// its duration), the operand of a script runner (bash, source, node,
+// python), or the program itself when that is a path. A program word that is
+// a URL, an assignment or a glob (a `case` pattern) names no file.
+function executedWord(words) {
+  const rest = words.map((word) => word.replace(/["']/g, '')).filter(Boolean);
+  let at = 0;
+  for (;;) {
+    if (COMMAND_PREFIXES.has(rest[at]) || /^[A-Za-z_]\w*=/.test(rest[at] ?? '')) {
+      at += 1;
+    } else if (rest[at] === 'env') {
+      for (at += 1; /^-|^[A-Za-z_]\w*=/.test(rest[at] ?? ''); at += 1);
+    } else if (rest[at] === 'timeout') {
+      for (at += 1; (rest[at] ?? '').startsWith('-'); at += /^-[sk]$/.test(rest[at]) ? 2 : 1);
+      at += 1;
+    } else {
+      break;
+    }
+  }
+  const program = rest[at];
+  const runner = SCRIPT_RUNNERS.get(program);
+  if (!runner) return program?.includes('/') && !/[=*?[]|^\/\/|:\/\//.test(program) ? program : undefined;
+  for (at += 1; at < rest.length; at += 1) {
+    if (rest[at] === '-' || runner.inline.includes(rest[at])) return undefined;
+    if (runner.valued(rest[at])) at += 1;
+    else if (!/^[-+]/.test(rest[at])) return rest[at];
+  }
+  return undefined;
+}
+
+// A path whose file is picked at run time: past a leading $VARIABLE/ root (a
+// repository or script directory, which namedFiles resolves), it still
+// expands a value ($helper, ${name}, $1), which no reading can resolve.
+const picksFileAtRunTime = (word) => /(?<!\\)\$[\w{@*#?!$]/.test(word.replace(/^\$\{?\w+\}?\//, ''));
+
 // The one reading of a piece of shell text - a workflow step, a package
 // script, a shell script - with its `#` comments dropped, as typed edges:
 // - calls: the package scripts it runs, as [workspace, script] ('.' is the
@@ -284,7 +338,10 @@ const assemblesScriptPath = (word) => word.includes('$')
 //   the directory it was named from, the child commands a declared program
 //   runs (PROGRAM_CHILD_COMMANDS) included;
 // - assembled: the script paths it builds from a value, which no reading can
-//   resolve ("$SCRIPT_DIR/${helper}.sh", scripts/$name).
+//   resolve ("$SCRIPT_DIR/${helper}.sh", scripts/$name), and each file a
+//   command runs that is picked at run time: a script runner's operand or a
+//   program path that expands a value past its directory
+//   (bash "$SCRIPT_DIR/$helper", node "$entry", "$SCRIPT_DIR/$step").
 // `cwd` is where it runs, `scriptDirectory` the directory of the shell script
 // it is (if any), `context` the manifests ({ manifests, workspaceByName,
 // rootManifest }) and `exists` what is a file.
@@ -303,6 +360,8 @@ export function analyzeShell(text, { cwd = '.', scriptDirectory, exists, context
       for (const file of words.flatMap((word) => namedFiles(word, directory, exists, scriptDirectory))) files.push({ file, directory });
     }
     for (const word of words.map((candidate) => candidate.replace(/["']/g, ''))) if (assemblesScriptPath(word)) assembled.add(word);
+    const executed = executedWord(command.words);
+    if (executed !== undefined && picksFileAtRunTime(executed)) assembled.add(executed);
   }
   return { calls, files, assembled: [...assembled] };
 }

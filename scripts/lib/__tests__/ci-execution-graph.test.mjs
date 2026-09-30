@@ -85,6 +85,38 @@ test('one shell reading yields package-script calls, files and assembled paths',
   assert.deepEqual(reading.assembled, ['$SCRIPT_DIR/devnet-${helper}.sh']);
 });
 
+test('a file a command runs is assembled when it is picked at run time', () => {
+  // A script runner's operand, or a program path, that still expands a value
+  // past its directory names a file no reading can resolve, however the
+  // value was set, so the guard must list it. Inline code, stdin, a later
+  // argument, a tool in a variable, a case pattern, a URL, regex text and an
+  // escaped $ name no such file.
+  const context = { manifests: new Map(), workspaceByName: new Map(), rootManifest: {} };
+  const assembled = (text) => analyzeShell(text, { scriptDirectory: 'scripts', exists: () => false, context }).assembled;
+  for (const [text, expected] of [
+    ['helper=devnet-test-invite-flow.sh\nbash "$SCRIPT_DIR/$helper"', ['$SCRIPT_DIR/$helper']],
+    ['cd "$REPO_ROOT" && "$SCRIPTS_DIR/$script" --quick', ['$SCRIPTS_DIR/$script']],
+    ['if ! env DKG_HOME="$dir" A=1 node "$cli_entry" start; then', ['$cli_entry']],
+    ['timeout -s KILL 600 bash -euo pipefail "$1"', ['$1']],
+    ['exec nohup python3 -u "${tool}"', ['${tool}']],
+    ['source "$lib"', ['$lib']],
+    ['pnpm exec tsx "$SCRIPT_DIR/$step"', ['$SCRIPT_DIR/$step']],
+    ['bash "$SCRIPT_DIR/lib.sh" "$RUN_DIR/$name"', []],
+    ['node "$REPO_ROOT/scripts/x.mjs"', []],
+    ['node -e "$code" "$arg"', []],
+    ['node - "$file"', []],
+    ['python3 -c "$code"', []],
+    ['bash -c "$cmd"', []],
+    ['"$tool" --version', []],
+    ['*"$DIR/node"*oxigraph*) kill "$pid" ;;', []],
+    ['http://127.0.0.1:$PORT/health', []],
+    ["  .replace(/^-+|-+$/g, '')", []],
+    ['python \\$MD_LOG', []],
+  ]) {
+    assert.deepEqual(assembled(text), expected, text);
+  }
+});
+
 test('the graph reads every workspace pnpm-workspace.yaml declares, rule or no rule', () => {
   const files = {
     'pnpm-workspace.yaml': 'packages:\n  - "packages/*"\n  - "tools/unmapped"\n',
