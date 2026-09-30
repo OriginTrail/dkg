@@ -13,8 +13,7 @@ export interface BoundedDenialLoggerOptions {
  */
 export type BoundedDenialLogger = (key: string, message: () => string) => void;
 
-export interface BoundedKeyedEmitterOptions<T> {
-  emit: (value: T, suppressedSinceLast: number) => void | Promise<void>;
+export interface BoundedKeyedLimiterOptions {
   now: () => number;
   intervalMs: number;
   cacheMax: number;
@@ -23,16 +22,16 @@ export interface BoundedKeyedEmitterOptions<T> {
   windowMs?: number;
 }
 
-/** Per-key suppression with bounded state and an optional total emission budget. */
-export function createBoundedKeyedEmitter<T>(options: BoundedKeyedEmitterOptions<T>):
-  (key: string, value: () => T) => void {
+/** Returns the suppressed count when a key may emit, or undefined when denied. */
+export function createBoundedKeyedLimiter(options: BoundedKeyedLimiterOptions):
+  (key: string) => number | undefined {
   const entries = new Map<string, { lastLoggedAt: number; suppressed: number }>();
   const globalLimit = options.maxEmitsPerWindow;
   const windowMs = options.windowMs ?? options.intervalMs;
   let windowStart: number | undefined;
   let windowEmitted = 0;
 
-  return (key, value) => {
+  return (key) => {
     const timestamp = options.now();
     if (globalLimit !== undefined && (windowStart === undefined || timestamp < windowStart
       || timestamp - windowStart >= windowMs)) {
@@ -42,7 +41,7 @@ export function createBoundedKeyedEmitter<T>(options: BoundedKeyedEmitterOptions
     const previous = entries.get(key);
     if (previous && timestamp - previous.lastLoggedAt < options.intervalMs) {
       previous.suppressed += 1;
-      return;
+      return undefined;
     }
     if (!previous && entries.size >= options.cacheMax) {
       const oldest = entries.keys().next();
@@ -53,15 +52,10 @@ export function createBoundedKeyedEmitter<T>(options: BoundedKeyedEmitterOptions
     entries.set(key, { lastLoggedAt: timestamp, suppressed: 0 });
     if (globalLimit !== undefined && windowEmitted >= globalLimit) {
       entries.get(key)!.suppressed = suppressed + 1;
-      return;
+      return undefined;
     }
     windowEmitted++;
-    try {
-      const delivery = options.emit(value(), suppressed);
-      if (delivery) void delivery.catch(() => undefined);
-    } catch {
-      // Logging and telemetry must not change the caller's outcome.
-    }
+    return suppressed;
   };
 }
 
@@ -73,12 +67,18 @@ export function createBoundedKeyedEmitter<T>(options: BoundedKeyedEmitterOptions
  * in between. The bounded cache keeps attacker-chosen peer ids from growing it.
  */
 export function createBoundedDenialLogger(options: BoundedDenialLoggerOptions): BoundedDenialLogger {
-  return createBoundedKeyedEmitter<string>({
-    emit: (message, suppressed) => options.log(
-      `${message}${suppressed > 0 ? ` suppressedSinceLast=${suppressed}` : ''}`,
-    ),
+  const decide = createBoundedKeyedLimiter({
     now: options.now,
     intervalMs: options.intervalMs,
     cacheMax: options.cacheMax,
   });
+  return (key, message) => {
+    const suppressed = decide(key);
+    if (suppressed === undefined) return;
+    try {
+      options.log(`${message()}${suppressed > 0 ? ` suppressedSinceLast=${suppressed}` : ''}`);
+    } catch {
+      // A logger failure cannot change a connection-gating decision.
+    }
+  };
 }

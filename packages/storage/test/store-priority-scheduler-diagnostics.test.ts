@@ -56,6 +56,17 @@ describe('store scheduler busy diagnostics', () => {
     });
     expect(emit).toHaveBeenCalledTimes(4);
   });
+  it('swallows synchronous diagnostic delivery failure without changing timeout handling', () => {
+    const sink = createRateLimitedStoreTimeoutDiagnosticSink({
+      emit: () => { throw new Error('telemetry unavailable'); },
+      now: () => 0,
+      intervalMs: 100,
+    });
+    expect(() => sink({
+      waiting: { priority: 'normal', operation: 'query' },
+      activeAtTimeout: [{ priority: 'background', operation: 'scan', count: 1, oldestAgeMs: 10 }],
+    })).not.toThrow();
+  });
   it('exports a distinguishable busy error type for boundary mapping', () => {
     const error = new StoreSchedulerBusyError('queue_full', 'ack', 'storage-ack.read');
     expect(error).toBeInstanceOf(Error);

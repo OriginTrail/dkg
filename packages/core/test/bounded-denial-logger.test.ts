@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createBoundedDenialLogger, createBoundedKeyedEmitter } from '../src/bounded-denial-logger.js';
+import { createBoundedDenialLogger, createBoundedKeyedLimiter } from '../src/bounded-denial-logger.js';
 
 function logger(overrides: { intervalMs?: number; cacheMax?: number } = {}) {
   let now = 0;
@@ -64,24 +64,34 @@ describe('createBoundedDenialLogger', () => {
 
     expect(lines).toEqual(['a', 'b', 'c', 'a again']);
   });
+
+  it('keeps a synchronous logger failure out of the denial decision', () => {
+    const logDenial = createBoundedDenialLogger({
+      log: () => { throw new Error('logger unavailable'); },
+      now: () => 0,
+      intervalMs: 100,
+      cacheMax: 2,
+    });
+    expect(() => logDenial('peer', () => 'deny peer')).not.toThrow();
+  });
 });
 
-describe('createBoundedKeyedEmitter', () => {
-  it('caps high-cardinality emissions across key eviction and observes async failures', async () => {
+describe('createBoundedKeyedLimiter', () => {
+  it('caps high-cardinality decisions across key eviction', () => {
     let now = 0;
-    const emit = vi.fn(async () => { throw new Error('logger unavailable'); });
-    const keyed = createBoundedKeyedEmitter<string>({
-      emit, now: () => now, intervalMs: 100, cacheMax: 2,
+    const keyed = createBoundedKeyedLimiter({
+      now: () => now, intervalMs: 100, cacheMax: 2,
       maxEmitsPerWindow: 3,
     });
+    const admitted: Array<{ key: string; suppressed: number }> = [];
     for (let cycle = 0; cycle < 2; cycle++) {
-      for (let key = 0; key < 5; key++) keyed(`op-${key}`, () => `event-${key}`);
+      for (let key = 0; key < 5; key++) {
+        const suppressed = keyed(`op-${key}`);
+        if (suppressed !== undefined) admitted.push({ key: `op-${key}`, suppressed });
+      }
     }
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(emit).toHaveBeenCalledTimes(3);
+    expect(admitted).toHaveLength(3);
     now = 101;
-    keyed('op-4', () => 'next window');
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    expect(emit).toHaveBeenCalledTimes(4);
+    expect(keyed('op-4')).toBeGreaterThanOrEqual(0);
   });
 });

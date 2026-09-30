@@ -1,5 +1,5 @@
 import type { StoreWorkPriority } from './triple-store.js';
-import { createBoundedKeyedEmitter } from '@origintrail-official/dkg-core';
+import { createBoundedKeyedLimiter } from '@origintrail-official/dkg-core';
 
 export interface StoreSchedulerTimeoutDiagnostic {
   waiting: { priority: StoreWorkPriority; operation: string };
@@ -20,8 +20,7 @@ export function createRateLimitedStoreTimeoutDiagnosticSink(options: {
   maxKeys?: number;
   maxEmitsPerWindow?: number;
 }): (diagnostic: StoreSchedulerTimeoutDiagnostic) => void {
-  const emit = createBoundedKeyedEmitter<StoreSchedulerTimeoutDiagnostic>({
-    emit: (diagnostic) => options.emit(diagnostic),
+  const decide = createBoundedKeyedLimiter({
     now: options.now ?? Date.now,
     intervalMs: options.intervalMs ?? 60_000,
     cacheMax: options.maxKeys ?? 128,
@@ -32,6 +31,12 @@ export function createRateLimitedStoreTimeoutDiagnosticSink(options: {
   return (diagnostic) => {
     if (diagnostic.activeAtTimeout.length === 0) return;
     const key = `${diagnostic.waiting.priority}:${diagnostic.waiting.operation}`;
-    emit(key, () => diagnostic);
+    if (decide(key) === undefined) return;
+    try {
+      const delivery = options.emit(diagnostic);
+      if (delivery) void delivery.catch(() => undefined);
+    } catch {
+      // Telemetry delivery cannot alter the scheduler's timeout outcome.
+    }
   };
 }
