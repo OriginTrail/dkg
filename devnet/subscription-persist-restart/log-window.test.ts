@@ -15,6 +15,7 @@ import {
   markLog,
   matchingLinesSince,
   readLogSince,
+  withLogTroubleCheck,
 } from './log-window.js';
 
 const TROUBLE = [/persistence did not drain/i, /Failed to persist/i];
@@ -324,3 +325,88 @@ describe('log window with an unterminated last line', () => {
     expect(lines).toEqual([freshTrouble.trim()]);
   });
 });
+
+/**
+ * The per-scenario check the live suite wraps every scenario in. A scenario that
+ * fails midway must still have the window read, and the daemon's trouble must
+ * never be replaced by (or lost behind) the scenario's own assertion failure.
+ */
+describe('withLogTroubleCheck', () => {
+  const WHAT = 'node5 daemon.log';
+
+  it('returns the value of a body that ran clean, ignoring old matching lines', async () => {
+    writeFileSync(file, oldTrouble(1) + quiet(1));
+    const value = await withLogTroubleCheck(file, TROUBLE, WHAT, async () => {
+      appendFileSync(file, quiet(2));
+      return 42;
+    });
+    expect(value).toBe(42);
+  });
+
+  it('fails a body that passed when the daemon logged trouble while it ran', async () => {
+    writeFileSync(file, oldTrouble(1) + quiet(1));
+    const outcome = withLogTroubleCheck(file, TROUBLE, WHAT, async () => {
+      appendFileSync(file, quiet(2) + freshTrouble);
+    });
+    await expect(outcome).rejects.toThrow(`new persistence trouble in ${WHAT}:\n${freshTrouble.trim()}`);
+    await expect(outcome).rejects.not.toThrow(/old-1/);
+  });
+
+  it('keeps the error of a failing body and adds the daemon trouble to its message', async () => {
+    writeFileSync(file, quiet(1));
+    class ScenarioFailure extends Error {}
+    const failure = new ScenarioFailure('expected 3 subscriptions, got 2');
+    const caught = await withLogTroubleCheck(file, TROUBLE, WHAT, async () => {
+      appendFileSync(file, freshTrouble);
+      throw failure;
+    }).catch((error: unknown) => error);
+
+    expect(caught, 'the scenario error itself is rethrown').toBe(failure);
+    expect(caught).toBeInstanceOf(ScenarioFailure);
+    expect((caught as Error).message).toContain('expected 3 subscriptions, got 2');
+    expect((caught as Error).message).toContain(`new persistence trouble in ${WHAT}:\n${freshTrouble.trim()}`);
+  });
+
+  it('rethrows a failing body untouched when the daemon logged no trouble', async () => {
+    writeFileSync(file, oldTrouble(1) + quiet(1));
+    const failure = new Error('the edge never came back');
+    const caught = await withLogTroubleCheck(file, TROUBLE, WHAT, async () => {
+      appendFileSync(file, quiet(2));
+      throw failure;
+    }).catch((error: unknown) => error);
+
+    expect(caught).toBe(failure);
+    expect((caught as Error).message).toBe('the edge never came back');
+  });
+
+  it('wraps a thrown value that is not an error, keeping it as the cause', async () => {
+    writeFileSync(file, quiet(1));
+    const caught = await withLogTroubleCheck(file, TROUBLE, WHAT, async () => {
+      appendFileSync(file, freshTrouble);
+      throw 'plain string failure';
+    }).catch((error: unknown) => error) as Error;
+
+    expect(caught.message).toContain('plain string failure');
+    expect(caught.message).toContain(freshTrouble.trim());
+    expect(caught.cause).toBe('plain string failure');
+  });
+
+  it('reads the window when the log is rotated during the body, and says so', async () => {
+    writeFileSync(file, Array.from({ length: 12 }, (_, i) => quiet(i, 1_500)).join(''));
+    const outcome = withLogTroubleCheck(file, TROUBLE, WHAT, async () => {
+      rotate(Math.floor(readFileSync(file).length / 2));
+      appendFileSync(file, Array.from({ length: 12 }, (_, i) => quiet(100 + i, 1_500)).join('') + freshTrouble);
+    });
+    await expect(outcome).rejects.toThrow(/the log was rotated during the run/);
+    await expect(outcome).rejects.toThrow(freshTrouble.trim());
+  });
+
+  it('finishes a line that was still being written when the body started', async () => {
+    writeFileSync(file, quiet(1) + TROUBLE_HEAD + 'x'.repeat(LOG_MARK_FINGERPRINT_BYTES * 2));
+    const outcome = withLogTroubleCheck(file, TROUBLE, WHAT, async () => {
+      appendFileSync(file, `${TROUBLE_TAIL}\n`);
+    });
+    await expect(outcome).rejects.toThrow(TROUBLE_HEAD);
+  });
+});
+

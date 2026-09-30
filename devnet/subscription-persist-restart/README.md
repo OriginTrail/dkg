@@ -8,14 +8,38 @@ daemon restart.
 Context-graph subscription store writes run through the same keyed persist
 scheduler as membership writes: serialized per context graph, bounded, closed
 and drained by `DKGAgent.stop()`, and reopened by `start()`. This suite checks
-that the integrated stack keeps its promise on real daemons:
+that the integrated stack keeps its promise on real daemons.
 
-| Step | Assertion |
-|------|-----------|
-| 1 | The suite creates 8 public context graphs on node 1 and churns subscribe / unsubscribe / re-subscribe on edge node 5. Immediately after the last acknowledged request it runs `devnet.sh restart-node 5`. After the restart, `GET /api/context-graph/subscriptions` lists exactly the last acknowledged state. |
-| 2 | A second churn round rewrites rows that already exist, then `stop-node 5` and a start. The node again serves exactly the acknowledged state. |
-| 3 | A restarted node still persists new changes: one more change, one more restart, the same check. |
-| 4 | `daemon.log` of node 5 gains no subscription or membership persistence drain timeout, no `CG_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT`, and no failed subscription persist. Only lines written after a byte offset recorded before the suite's first action count. If a restart rotated the log (a shorter file, or changed bytes before the offset), the offset is void and every matching line in the log counts as new, so a rotation can over-report but never hide a fresh line. |
+The suite is three scenarios. Each is one `it` that runs a sequence of named
+phases (create graphs, churn, bounce the edge, check the durable state) over
+context graphs it creates itself, with its own expected-state map and its own
+log window. A scenario can be selected by its name (`vitest -t`) and the
+scenarios can run in any order; none reads state another one left behind.
+
+| Scenario | Phases and assertion |
+|----------|----------------------|
+| churns subscribe and unsubscribe on an edge node, then restart-node keeps the acknowledged state | Creates 8 public context graphs on node 1 and churns subscribe / unsubscribe / re-subscribe on edge node 5. Immediately after the last acknowledged request it runs `devnet.sh restart-node 5`. After the restart, `GET /api/context-graph/subscriptions` lists exactly the scenario's last acknowledged state. |
+| a second churn round rewrites rows that already exist and survives stop-node followed by a start | Creates its own graphs, runs the first churn round and a restart that shows those rows are durable, then a second round rewrites the rows that exist, followed by `stop-node 5` and a start. The node again serves exactly the acknowledged state. |
+| a restarted edge still persists new subscription changes | Creates its own graphs, churns and restarts the edge, then makes one more change on the restarted node, restarts again and runs the same check. |
+
+Every scenario also runs inside a log check on `daemon.log` of node 5: it gains
+no subscription or membership persistence drain timeout, no
+`CG_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT`, and no failed subscription persist
+while the scenario runs. Only lines written after a byte offset recorded before
+the scenario's first action count. If a restart rotated the log (a shorter file,
+or changed bytes before the offset), the offset is void and every matching line
+in the log counts as new, so a rotation can over-report but never hide a fresh
+line. A line the daemon was still writing when the offset was recorded stays
+inside the window, however long it already is. The check runs whether the
+scenario passed or failed: a failing scenario is rethrown with the daemon's
+trouble lines added to its message. An `afterAll` check over the whole run backs
+it up for lines logged between two scenarios.
+
+A scenario leaves the edge running: if it fails between `stop-node` and the
+start, its cleanup restarts the node, so one failure does not take down the
+scenarios after it. What is not isolated: the devnet and the edge daemon are
+shared by all scenarios, and the subscriptions a scenario leaves on the edge
+stay there (under its own graph ids).
 
 The daemon's SQLite writes are fast, so this suite cannot hold one open across
 `stop()`. The drain itself is pinned by
@@ -30,14 +54,19 @@ pnpm run build:packages && pnpm --dir packages/cli run build:prepared
 pnpm test:devnet:subscription-persist-restart
 ```
 
-Runtime is about 5-8 minutes. Node 5 (an edge) blips three times. Set
+Node 5 (an edge) is bounced five times across the three scenarios, so expect
+several minutes (Vitest prints each scenario's duration). Set
 `DEVNET_SPR_EDGE_NODE` to churn a different edge node.
+To run one scenario, add its name: `pnpm test:devnet:subscription-persist-restart -t "a restarted edge still persists"`.
+The name is a regular expression, so leave out characters such as `(` and `.`.
 
-`log-window.test.ts` beside the suite pins that log-window helper. It needs no
-devnet and runs with the suite's vitest config
+`log-window.test.ts` beside the suite pins that log-window helper and the
+per-scenario log check. It needs no devnet and runs with the suite's vitest
+config
 (`pnpm vitest run --config devnet/subscription-persist-restart/vitest.config.ts log-window`
 runs it alone).
 
-The suite mutates only context graphs it creates (`spr-<stamp>-<n>`) and never
-touches the shared `devnet-test` context graph. It does not time-warp the
-chain, so it can run anywhere in a sweep.
+The suite mutates only context graphs it creates
+(`spr-<stamp>-<scenario>-<n>`) and never touches the shared `devnet-test`
+context graph. It does not time-warp the chain, so it can run anywhere in a
+sweep.

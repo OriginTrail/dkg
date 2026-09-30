@@ -31,6 +31,10 @@
  * characters, so a character index into decoded text is not a file offset. The
  * backward scan works on bytes too: 0x0a never occurs inside a multi-byte UTF-8
  * sequence, so a chunk boundary that splits a character cannot fake a line start.
+ *
+ * `withLogTroubleCheck` runs a body inside such a window and reports what the
+ * daemon logged whether the body passed or failed, so a scenario that fails
+ * midway cannot hide the trouble behind its own assertion error.
  */
 import { closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs';
 
@@ -161,3 +165,57 @@ export function matchingLinesSince(
     rotated,
   };
 }
+
+/**
+ * Append `report` to a failure's message so it is not lost behind it. An error
+ * whose message cannot be rewritten is wrapped instead, keeping it as the cause.
+ */
+function withReport(error: unknown, report: string): unknown {
+  if (error instanceof Error) {
+    try {
+      error.message = `${error.message}\n\n${report}`;
+      return error;
+    } catch {
+      /* a frozen error: wrap it below */
+    }
+  }
+  return new Error(`${error instanceof Error ? error.message : String(error)}\n\n${report}`, { cause: error });
+}
+
+/**
+ * Run `body` and fail when `file` gained a line matching `patterns` while it ran,
+ * whether `body` passed or threw: the window opens before `body` starts and is
+ * read after it settles.
+ *
+ *  - `body` returned and no line matched: its value is returned.
+ *  - `body` returned and a line matched: the call throws a report of those lines.
+ *  - `body` threw: its error is rethrown with any matching lines appended to its
+ *    message, so an earlier assertion failure never hides trouble the daemon
+ *    logged. With no matching line the error is rethrown untouched.
+ *
+ * `what` names the log in the report (for example "node5 daemon.log").
+ */
+export async function withLogTroubleCheck<T>(
+  file: string,
+  patterns: readonly RegExp[],
+  what: string,
+  body: () => Promise<T>,
+): Promise<T> {
+  const mark = markLog(file);
+  let outcome: { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown };
+  try {
+    outcome = { ok: true, value: await body() };
+  } catch (error) {
+    outcome = { ok: false, error };
+  }
+  const { lines, rotated } = matchingLinesSince(file, mark, patterns);
+  const report = lines.length === 0
+    ? ''
+    : `new persistence trouble in ${what}`
+      + `${rotated ? ' (the log was rotated during the run, so every matching line in it counts as new)' : ''}:\n`
+      + lines.join('\n');
+  if (!outcome.ok) throw report === '' ? outcome.error : withReport(outcome.error, report);
+  if (report !== '') throw new Error(report);
+  return outcome.value;
+}
+
