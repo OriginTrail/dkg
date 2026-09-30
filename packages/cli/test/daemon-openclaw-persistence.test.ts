@@ -191,7 +191,8 @@ describe('normalizeOpenClawPersistTurnPayload', () => {
       expect(normalizeOpenClawPersistTurnPayload(turn({ turnId: sent }))).toMatchObject({ turnId });
     });
 
-    it.each(['', '   ', null, 42, true, {}, []])('generates an id for a blank or non-string turn id (%j)', (sent) => {
+    // Each row is wrapped: `it.each` would spread a bare array row into arguments.
+    it.each([[''], ['   '], [null], [42], [true], [{}], [[]]])('generates an id for a blank or non-string turn id (%j)', (sent) => {
       expect(normalizeOpenClawPersistTurnPayload(turn({ turnId: sent }))).toMatchObject({
         turnId: expect.stringMatching(UUID_RE),
       });
