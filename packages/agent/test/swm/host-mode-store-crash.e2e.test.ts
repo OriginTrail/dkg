@@ -5,7 +5,9 @@
  * SIGKILLs itself at a deterministic point inside one durable write. The
  * parent then reopens the directory with a fresh store, exactly as a restarted
  * daemon would, and asserts what a hosting core cares about:
- *   - the log has no torn tail and every acknowledged frame is still served;
+ *   - the log has no torn tail and every acknowledged frame is still served,
+ *     and every retained envelope is the child's exact payload, byte for byte
+ *     (on the raw file, through the store, and page by page);
  *   - the seqno cursor never goes backwards and is never reused;
  *   - a catch-up client paging with strict-greater-than seqnos reaches the end;
  *   - leftover temp files are inert and swept.
@@ -22,6 +24,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SwmHostModeStore } from '../../src/swm/host-mode-store.js';
+import { PAYLOAD_BYTES, RECOVERY_APPEND_FILL, payloadFor } from '../_helpers/host-mode-store-crash-fixture.js';
 
 // Each case boots a tsx child process (about a second) and runs a real fsync-heavy store.
 vi.setConfig({ testTimeout: 60_000 });
@@ -29,7 +32,6 @@ vi.setConfig({ testTimeout: 60_000 });
 const AGENT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const CHILD = path.join(AGENT_ROOT, 'test/_helpers/host-mode-store-crash-child.ts');
 const HEADER_BYTES = 20;
-const PAYLOAD_BYTES = 64;
 const LIMITS = { perCgByteCap: 1024 * 1024, ttlMs: 50_000 };
 
 type Op = 'prune' | 'meta' | 'append';
@@ -37,18 +39,45 @@ type CrashAt = 'mid-write' | 'before-rename' | 'after-rename';
 
 const cgKey = (contextGraphId: string) => createHash('sha256').update(contextGraphId).digest('base64url');
 
-function parseFrames(buf: Buffer): { seqnos: number[]; validLength: number } {
+/** Independent walk of the on-disk frames (the store cannot vouch for itself), keeping each payload. */
+function parseFrames(buf: Buffer): { seqnos: number[]; payloads: Buffer[]; validLength: number } {
   const seqnos: number[] = [];
+  const payloads: Buffer[] = [];
   let offset = 0;
   while (offset + HEADER_BYTES <= buf.length) {
     const len = buf.readUInt32BE(offset + 16);
     const end = offset + HEADER_BYTES + len;
     if (end > buf.length) break;
     seqnos.push(Number(buf.readBigUInt64BE(offset + 8)));
+    payloads.push(Buffer.from(buf.subarray(offset + HEADER_BYTES, end)));
     offset = end;
   }
-  return { seqnos, validLength: offset };
+  return { seqnos, payloads, validLength: offset };
 }
+
+/**
+ * Every frame's ciphertext must be exactly what the child wrote for that seqno
+ * (`recoveryFrame` is the one frame the parent appends itself after recovery).
+ * Frame lengths, seqnos and paging can all stay valid while the bytes are
+ * zeroed or shifted, so this compares the bytes.
+ */
+function expectPayloadsIntact(
+  frames: ReadonlyArray<{ seqno: number; bytes: Uint8Array }>,
+  where: string,
+  recoveryFrame?: number,
+): void {
+  for (const { seqno, bytes } of frames) {
+    const expected = seqno === recoveryFrame
+      ? new Uint8Array(PAYLOAD_BYTES).fill(RECOVERY_APPEND_FILL)
+      : payloadFor(seqno);
+    expect(Array.from(bytes), `${where}: seqno ${seqno} ciphertext differs from what was written`).toEqual(Array.from(expected));
+  }
+}
+
+const rawFrames = (log: Buffer) => {
+  const parsed = parseFrames(log);
+  return parsed.seqnos.map((seqno, i) => ({ seqno, bytes: parsed.payloads[i]! }));
+};
 
 async function runCrashChild(spec: {
   op: Op;
@@ -121,9 +150,11 @@ describe('SwmHostModeStore survives kill -9 inside a durable write (real child p
     expect(report.corruptMetasRemoved).toBeUndefined();
     expect((await files()).filter((n) => n.includes('.tmp-'))).toEqual([]);
 
-    // Every frame acknowledged before the crash window that was not pruned away is served.
-    const served = (await restarted.iterate(cgId, 0)).map((e) => e.seqno);
-    expect(served).toEqual(expectedSeqnos);
+    // Every frame acknowledged before the crash window that was not pruned away is served,
+    // and each one still carries the exact ciphertext the child wrote.
+    const servedEntries = await restarted.iterate(cgId, 0);
+    expect(servedEntries.map((e) => e.seqno)).toEqual(expectedSeqnos);
+    expectPayloadsIntact(servedEntries.map((e) => ({ seqno: e.seqno, bytes: e.envelopeBytes })), 'after restart (store read)');
 
     // The cursor never goes backwards, even where the log lost its tail...
     const cursor = await restarted.getLastSeqno(cgId);
@@ -140,21 +171,28 @@ describe('SwmHostModeStore survives kill -9 inside a durable write (real child p
     expect(new Set(parsed.seqnos).size).toBe(parsed.seqnos.length);
     expect(parsed.seqnos).toEqual([...parsed.seqnos].sort((a, b) => a - b));
     expect(parsed.seqnos.at(-1)).toBe(next);
+    // The file itself, parsed independently of the store: the retained frames are the child's exact
+    // bytes and the last one is the frame just appended.
+    expectPayloadsIntact(rawFrames(log), 'after restart + append (raw log)', next);
 
-    // A catch-up client paging with strict-greater-than seqnos reaches the end with every frame once.
+    // A catch-up client paging with strict-greater-than seqnos reaches the end with every frame once,
+    // and every page carries the exact ciphertext (headers and paging can be valid over corrupt bytes).
     const paged: number[] = [];
+    const pagedFrames: Array<{ seqno: number; bytes: Uint8Array }> = [];
     let since = 0;
     for (;;) {
       const page = await restarted.iterate(cgId, since, 2);
       if (page.length === 0) break;
       paged.push(...page.map((e) => e.seqno));
+      pagedFrames.push(...page.map((e) => ({ seqno: e.seqno, bytes: e.envelopeBytes })));
       since = page[page.length - 1].seqno;
     }
     expect(paged).toEqual(parsed.seqnos);
+    expectPayloadsIntact(pagedFrames, 'after restart + append (paged catch-up read)', next);
 
     // The very last frame is the one just appended, byte for byte.
     const last = (await restarted.iterate(cgId, next - 1))[0];
-    expect(Array.from(last.envelopeBytes)).toEqual(Array.from({ length: PAYLOAD_BYTES }, () => 0xee));
+    expect(Array.from(last.envelopeBytes)).toEqual(Array.from({ length: PAYLOAD_BYTES }, () => RECOVERY_APPEND_FILL));
     return { restarted, next };
   }
 
@@ -168,12 +206,23 @@ describe('SwmHostModeStore survives kill -9 inside a durable write (real child p
       async (crashAt) => {
         const { acked } = await crash('prune', crashAt);
         expect(acked).toEqual(all);
-        // What the kill left on disk: the full old log plus an inert temp sibling.
+        // What the kill left on disk: the full old log (every frame's exact bytes) plus an inert temp sibling.
         const log = await readFile(logPath());
-        expect(parseFrames(log)).toEqual({ seqnos: all, validLength: log.length });
+        expect(parseFrames(log)).toMatchObject({ seqnos: all, validLength: log.length });
+        expectPayloadsIntact(rawFrames(log), `prune killed ${crashAt}: the previous log`);
         const leftovers = (await files()).filter((n) => n.includes('.tmp-'));
         expect(leftovers).toHaveLength(1);
         expect(leftovers[0]).toMatch(/\.log\.tmp-/);
+        // Where the kill really landed: the temp holds half the pruned log (mid-write) or all of it (before the rename).
+        const prunedLog = log.subarray(all.indexOf(pruned[0]!) * (HEADER_BYTES + PAYLOAD_BYTES));
+        const temp = await readFile(path.join(dataDir, leftovers[0]!));
+        if (crashAt === 'mid-write') {
+          expect(temp.length, 'mid-write: the temp is torn, not empty and not complete').toBeGreaterThan(0);
+          expect(temp.length).toBeLessThan(prunedLog.length);
+          expect(prunedLog.subarray(0, temp.length).equals(temp), 'mid-write: the temp is a prefix of the pruned log').toBe(true);
+        } else {
+          expect(temp.equals(prunedLog), 'before-rename: the temp is the complete pruned log').toBe(true);
+        }
 
         await reopenAndVerify(acked, all, 9);
       },
@@ -182,7 +231,9 @@ describe('SwmHostModeStore survives kill -9 inside a durable write (real child p
     it('killed after the rename: the pruned log is complete and well-formed', async () => {
       const { acked } = await crash('prune', 'after-rename');
       const log = await readFile(logPath());
-      expect(parseFrames(log)).toEqual({ seqnos: pruned, validLength: log.length });
+      expect(parseFrames(log)).toMatchObject({ seqnos: pruned, validLength: log.length });
+      // The rewrite kept each surviving frame's ciphertext, not just its header.
+      expectPayloadsIntact(rawFrames(log), 'prune killed after the rename: the pruned log');
       expect((await files()).filter((n) => n.includes('.tmp-'))).toEqual([]);
 
       await reopenAndVerify(acked, pruned, 9);
@@ -197,7 +248,16 @@ describe('SwmHostModeStore survives kill -9 inside a durable write (real child p
         expect(acked).toEqual([1, 2, 3]);
         // The old meta still parses: registered flag unchanged, cursor intact.
         expect(JSON.parse(await readFile(metaPath(), 'utf8'))).toMatchObject({ seqno: 3, registered: false });
-        expect((await files()).filter((n) => n.includes('.meta.tmp-'))).toHaveLength(1);
+        const leftovers = (await files()).filter((n) => n.includes('.meta.tmp-'));
+        expect(leftovers).toHaveLength(1);
+        // Where the kill really landed: the temp is half a meta (mid-write) or the complete new one (before the rename).
+        const tempText = await readFile(path.join(dataDir, leftovers[0]!), 'utf8');
+        if (crashAt === 'mid-write') {
+          expect(tempText.length, 'mid-write: the temp is not empty').toBeGreaterThan(0);
+          expect(() => JSON.parse(tempText), 'mid-write: the temp is torn JSON').toThrow();
+        } else {
+          expect(JSON.parse(tempText), 'before-rename: the temp is the complete new meta').toMatchObject({ seqno: 3, registered: true });
+        }
 
         const { restarted } = await reopenAndVerify(acked, [1, 2, 3], 3);
         expect(await restarted.isRegistered(cgId)).toBe(false);
