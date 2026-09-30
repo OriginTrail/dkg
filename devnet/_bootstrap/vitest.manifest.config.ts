@@ -5,10 +5,12 @@ import { resolve } from 'node:path';
 // runs fast (CI-friendly), unlike the harness smoke test (vitest.config.ts).
 const harnessJsonTest = resolve(import.meta.dirname, 'harness-json.test.ts').replace(/\\/g, '/');
 const suiteManifestTest = resolve(import.meta.dirname, 'suite-manifest.test.ts').replace(/\\/g, '/');
+// The request `queryNode` sends and the response shapes it decodes (fetch stubbed, no devnet).
+const harnessQueryTest = resolve(import.meta.dirname, 'harness-query.test.ts').replace(/\\/g, '/');
 
 export default defineConfig({
   test: {
-    include: [suiteManifestTest, harnessJsonTest],
+    include: [suiteManifestTest, harnessJsonTest, harnessQueryTest],
     globals: false,
   },
   resolve: {

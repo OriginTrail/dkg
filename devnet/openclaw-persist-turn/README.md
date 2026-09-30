@@ -27,16 +27,19 @@ daemons, over HTTP with the node's bearer token, the suite checks that:
 - the Hermes and Prime Agent persist-turn routes behave the same on resend and
   upward transition (parity regression: no existing devnet suite covered them).
 
-The store is read back through `POST /api/query` (`view: working-memory`,
-`assertionName: chat-turns`). Duplication shows up as extra `schema:Message`
+The store is read back through `POST /api/query` (`contextGraphId: agent-context`,
+`view: working-memory`, `assertionName: chat-turns`), sent by the harness's own
+`queryNode` (`devnet/_bootstrap/harness.ts`, which forwards `assertionName`), so
+the request shape, the response shapes it decodes and its status-and-body error
+are the ones every devnet suite uses. Duplication shows up as extra `schema:Message`
 subjects carrying the turn id, extra `hasUserMessage` / `hasAssistantMessage`
 objects on the turn, and extra transitions; the suite counts those. The footprint
 queries are shared with the CLI e2e (`packages/cli/test/openclaw-persist-turn.e2e.test.ts`)
 through `packages/cli/test/_helpers/chat-turn-footprint.ts`; they find a turn
 through its session link and `turnId`, so they read a turn the same whether it
 sits under a session-scoped subject (what the current code writes) or under the
-older `urn:dkg:chat:turn:<turnId>` one. This suite supplies only its own
-transport (`POST /api/query`) and result-cell shape.
+older `urn:dkg:chat:turn:<turnId>` one. This suite supplies only `queryNode` and
+the result-cell shape.
 
 A write that returned 200 is durable (the route awaits the store write), but an
 external SPARQL store may serve a read a beat behind it. Stopping at the first

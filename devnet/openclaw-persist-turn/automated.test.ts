@@ -13,9 +13,9 @@
  * is recorded as a transition.
  *
  * The suite drives that route on live devnet daemons over HTTP with the node's
- * bearer token and reads the assertion back through `POST /api/query` and the
- * dashboard's two history routes over `GET`. A turn id
- * is only unique inside its session, so one case reuses a turn id in two
+ * bearer token and reads the assertion back through `POST /api/query` (the
+ * harness's `queryNode`), and the dashboard's two history routes over `GET`. A
+ * turn id is only unique inside its session, so one case reuses a turn id in two
  * sessions and requires each to be created, completed and retried on its own.
  * It runs against nodes 1, 3 and 5, which sit on different store backends
  * (oxigraph-server, blazegraph, and sparql-http to an external Oxigraph), and
@@ -46,9 +46,9 @@ import {
   getJson,
   lexical,
   postJson,
+  queryNode,
   readNodeConfig,
   type DevnetNode,
-  type SparqlBindingCell,
 } from '../_bootstrap/harness.js';
 import {
   NO_CHAT_TURN,
@@ -107,30 +107,20 @@ const turnPayload = (
   ...overrides,
 });
 
-/** SELECT against the node's chat-turns Working Memory assertion, via the node's query API. */
-async function selectChatTurns(
-  node: DevnetNode,
-  sparql: string,
-): Promise<Array<Record<string, SparqlBindingCell>>> {
-  const { status, json } = await postJson(node, '/api/query', {
-    sparql,
-    contextGraphId: 'agent-context',
-    view: 'working-memory',
-    assertionName: 'chat-turns',
-  });
-  if (status !== 200) {
-    throw new Error(`query on node${node.num} failed (${status}): ${JSON.stringify(json)}`);
-  }
-  const bindings = json?.result?.bindings ?? json?.results?.bindings ?? json?.bindings;
-  if (!Array.isArray(bindings)) {
-    throw new Error(`unrecognised /api/query shape on node${node.num}: ${JSON.stringify(json).slice(0, 300)}`);
-  }
-  return bindings;
-}
+/**
+ * Where the suite reads: the node's chat-turns Working Memory assertion, through
+ * the harness's canonical query transport (`queryNode`: request shape, the three
+ * response shapes it decodes, and the status-and-body error).
+ */
+const CHAT_TURNS_QUERY = {
+  contextGraphId: 'agent-context',
+  view: 'working-memory',
+  assertionName: 'chat-turns',
+} as const;
 
 /** Everything one `(sessionId, turnId)` left in the chat-turns assertion. */
 const footprint = (node: DevnetNode, sessionId: string, turnId: string): Promise<ChatTurnFootprint> =>
-  readChatTurnFootprint((sparql) => selectChatTurns(node, sparql), lexical, sessionId, turnId);
+  readChatTurnFootprint((sparql) => queryNode(node, sparql, CHAT_TURNS_QUERY), lexical, sessionId, turnId);
 
 /**
  * The footprint once the store reports the expected shape AND keeps reporting

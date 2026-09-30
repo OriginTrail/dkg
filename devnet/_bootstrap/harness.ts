@@ -730,6 +730,27 @@ export interface QueryOpts {
   contextGraphId?: string;
   view?: string;
   subGraphName?: string;
+  /**
+   * Working Memory assertion to read (`view: 'working-memory'`), e.g.
+   * `'chat-turns'` in `agent-context`. Omitted from the request when unset, so a
+   * query without it reads exactly what it always did.
+   */
+  assertionName?: string;
+}
+
+/**
+ * The `POST /api/query` request body for `sparql` and `opts`: each option that
+ * is set is sent, each that is not is left out, in a fixed key order. Exported
+ * so the request shape every devnet suite relies on is pinned by a test
+ * (`harness-query.test.ts`) without a devnet.
+ */
+export function buildQueryBody(sparql: string, opts: QueryOpts = {}): Record<string, unknown> {
+  const body: Record<string, unknown> = { sparql };
+  if (opts.contextGraphId) body.contextGraphId = opts.contextGraphId;
+  if (opts.view) body.view = opts.view;
+  if (opts.subGraphName) body.subGraphName = opts.subGraphName;
+  if (opts.assertionName) body.assertionName = opts.assertionName;
+  return body;
 }
 
 /**
@@ -744,11 +765,7 @@ export async function queryNode(
   sparql: string,
   opts: QueryOpts = {},
 ): Promise<Array<Record<string, SparqlBindingCell>>> {
-  const body: Record<string, unknown> = { sparql };
-  if (opts.contextGraphId) body.contextGraphId = opts.contextGraphId;
-  if (opts.view) body.view = opts.view;
-  if (opts.subGraphName) body.subGraphName = opts.subGraphName;
-  const { status, json } = await postJson(node, '/api/query', body);
+  const { status, json } = await postJson(node, '/api/query', buildQueryBody(sparql, opts));
   if (status !== 200) {
     throw new Error(`query on node${node.num} failed (${status}): ${JSON.stringify(json)}`);
   }
