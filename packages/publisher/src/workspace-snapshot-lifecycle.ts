@@ -48,9 +48,9 @@ export type WorkspaceSnapshotLifecycle = WorkspaceSnapshotLifecycleMembers & (
   | { readonly finalizedCleanupEnabled: false; readonly operationLease?: SnapshotLeaseAcquirer }
 );
 
-const LIFECYCLE_CONTRACT_NOTE = 'The lifecycle contract changed: operationLease(ref) replaces acquire(ref) for '
-  + 'operation-long leases, and the existence probe is now snapshotExists(ref): Promise<boolean>, which replaces '
-  + 'acquireExisting(ref). See docs/use-dkg/swm-public-snapshot-gc.md.';
+const LIFECYCLE_CONTRACT_NOTE = 'The lifecycle contract is operationLease(ref) for operation-long leases and '
+  + 'snapshotExists(ref): Promise<boolean> for the existence probe; they replace acquire(ref) and acquireExisting(ref) '
+  + 'of an earlier development shape. See docs/use-dkg/swm-public-snapshot-gc.md.';
 
 /**
  * Fail loudly on a lifecycle that does not honor the contract, instead of running without the
@@ -180,9 +180,13 @@ export class WorkspaceSnapshotScope implements CompleteSnapshotIO {
   readonly validateSnapshot: WorkspaceSnapshotIO['validateSnapshot'];
   readonly getSnapshotPage: WorkspaceSnapshotIO['getSnapshotPage'];
 
+  /** Read once, where it is checked: a later swap of `store.lifecycle` or removal of a method cannot bypass the check. */
+  private readonly lifecycle: WorkspaceSnapshotLifecycle | undefined;
+
   private constructor(private readonly store: WorkspacePublicSnapshotStore) {
     // Every operation starts here, so a lifecycle that breaks the contract is refused before any I/O.
-    assertWorkspaceSnapshotLifecycle(store.lifecycle);
+    this.lifecycle = store.lifecycle;
+    assertWorkspaceSnapshotLifecycle(this.lifecycle);
     if (store.validateSnapshot) this.validateSnapshot = async (ref, digest, count) => {
       await this.retain(ref);
       return store.validateSnapshot!(ref, digest, count);
@@ -207,7 +211,10 @@ export class WorkspaceSnapshotScope implements CompleteSnapshotIO {
 
   /** Hold the store's operation-long lease, if it offers one, until the scope closes. */
   private async retain(ref: string): Promise<void> {
-    const lifecycle = this.store.lifecycle;
+    const lifecycle = this.lifecycle;
+    // The same check as at the start of the scope: a method removed from the lifecycle while the operation
+    // runs fails here, loudly, instead of the operation carrying on without its lease.
+    assertWorkspaceSnapshotLifecycle(lifecycle);
     if (!lifecycle?.operationLease) return;
     const hash = snapshotHash(ref);
     let lease = this.leases.get(hash);
@@ -219,7 +226,7 @@ export class WorkspaceSnapshotScope implements CompleteSnapshotIO {
     await this.retain(ref);
     // The existence probe is separate from the lease policy: a store that takes no operation-long
     // lease can still have lost the file (for example to pressure GC), and reuse must then fetch it again.
-    const lifecycle = this.store.lifecycle;
+    const lifecycle = this.lifecycle;
     if (!lifecycle) return true; // A custom I/O store without a lifecycle owns its retention policy.
     // Only the store's explicit `false` means "absent". A probe that fails for any other reason
     // (EACCES, EIO, EMFILE, a gate failure, a defect) propagates: fetching a copy would not repair a

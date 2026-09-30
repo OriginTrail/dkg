@@ -542,9 +542,9 @@ describe('operation leases are an optional capability of the store', () => {
   });
 
   describe('a lifecycle that breaks the contract is refused where it is first used', () => {
-    const CONTRACT_NOTE = ' The lifecycle contract changed: operationLease(ref) replaces acquire(ref) for operation-long leases, '
-      + 'and the existence probe is now snapshotExists(ref): Promise<boolean>, which replaces acquireExisting(ref). '
-      + 'See docs/use-dkg/swm-public-snapshot-gc.md.';
+    const CONTRACT_NOTE = ' The lifecycle contract is operationLease(ref) for operation-long leases and '
+      + 'snapshotExists(ref): Promise<boolean> for the existence probe; they replace acquire(ref) and acquireExisting(ref) '
+      + 'of an earlier development shape. See docs/use-dkg/swm-public-snapshot-gc.md.';
     const NO_LEASE = 'Invalid snapshot lifecycle. It reports finalizedCleanupEnabled but offers no operationLease(ref), so operations '
       + 'would run without operation-long leases and the collector could remove a snapshot between its write and the metadata '
       + 'commit that references it.';
@@ -594,6 +594,30 @@ describe('operation leases are an optional capability of the store', () => {
         await expect(withSnapshotScope(store, async () => 'ran')).rejects
           .toHaveProperty('message', `Invalid snapshot lifecycle.${NO_PROBE}${CONTRACT_NOTE}`);
       }
+    });
+
+    it('refuses an operation whose lifecycle loses operationLease after the scope started, and ignores a swapped store.lifecycle', async () => {
+      const operationLease = vi.fn(async () => () => {});
+      const lifecycle = lifecycleOf({ finalizedCleanupEnabled: true, operationLease }) as { operationLease?: unknown };
+      const store = customStore(lifecycle as unknown as WorkspaceSnapshotLifecycle);
+      const put = vi.spyOn(store, 'putSnapshot');
+      await expect(withSnapshotScope(store, async snapshots => {
+        await snapshots!.getSnapshot(digest);
+        delete lifecycle.operationLease;
+        await snapshots!.getSnapshot(digest);
+      })).rejects.toHaveProperty('message', `${NO_LEASE}${CONTRACT_NOTE}`);
+      expect(operationLease).toHaveBeenCalledOnce();
+      expect(put).not.toHaveBeenCalled();
+
+      // The scope keeps the lifecycle it checked: swapping the store's lifecycle mid-operation changes nothing for it.
+      const first = vi.fn(async () => () => {});
+      const second = vi.fn(async () => () => {});
+      const swapped = customStore(lifecycleOf({ finalizedCleanupEnabled: true, operationLease: first }));
+      await withSnapshotScope(swapped, async snapshots => {
+        (swapped as { lifecycle?: unknown }).lifecycle = lifecycleOf({ finalizedCleanupEnabled: true, operationLease: second });
+        await snapshots!.getSnapshot(digest);
+      });
+      expect([first.mock.calls.length, second.mock.calls.length]).toEqual([1, 0]);
     });
 
     it('does not refuse a cleanup-enabled lifecycle that offers operationLease, and leaves a custom store without a lifecycle alone', async () => {

@@ -209,8 +209,8 @@ store offers it exactly when finalized cleanup is enabled. A lifecycle that
 reports finalized cleanup enabled must offer `operationLease`, and the
 `WorkspaceSnapshotLifecycle` type requires it.
 
-Plain JavaScript, a cast, or an object written for the earlier `acquire` /
-`acquireExisting` shape gets past the type, so the same rule is enforced at run
+Plain JavaScript, a cast, or an object written for an earlier development shape
+(`acquire` / `acquireExisting`, which never shipped in a release) gets past the type, so the same rule is enforced at run
 time, where the lifecycle is first used (when an operation scope starts, and when
 the publisher is constructed): a lifecycle that reports finalized cleanup enabled
 without an `operationLease` function, or that has no `snapshotExists` function,
