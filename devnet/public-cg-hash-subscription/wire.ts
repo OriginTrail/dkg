@@ -38,8 +38,13 @@
  * a state added to the declaration without being listed here is a compile error
  * in a type-check of this file. Nothing in CI type-checks devnet suites, so that
  * tie only holds for whoever runs one (a throwaway tsconfig, an editor).
+ *
+ * One reader is not this module's: how a SELECT answer of POST /api/query is read (which
+ * envelope holds the rows, what a row and a cell may be) is the harness's own knowledge,
+ * kept in `_bootstrap/select-response.ts` and shared with `queryNode`. `parseQueryBindings`
+ * below asks it for its strict reading and only turns its rejections into `WireShapeError`s.
  */
-import type { SparqlBindingCell } from '../_bootstrap/harness.js';
+import { selectBindings, type SparqlBindingCell } from '../_bootstrap/select-response.js';
 import type { ApiClient } from '../../packages/cli/src/api-client.js';
 import {
   CATCHUP_JOB_STATES,
@@ -368,49 +373,22 @@ export function parseCatchupStatusResponse(value: unknown): CatchupStatusReply {
 }
 
 /**
- * POST /api/query: the bindings of a SELECT, wherever the daemon puts them. The
- * current daemon answers `result.bindings`; `results.bindings` (SPARQL JSON) and a
- * flat `bindings` are the older shapes the harness's `queryNode` also accepts. A
- * 200 with none of them, or with rows that are not objects, is a failure of the
- * reply, not "no rows yet". A cell is a term string or an object whose `value`,
- * `datatype`, `type`, `xml:lang` and `lang` are strings when present (the fields
- * the harness's `normTerm` reads).
+ * POST /api/query: the bindings of a SELECT, wherever the daemon puts them. The envelope
+ * selection, the rows and the cells are read by the harness's shared module
+ * (`_bootstrap/select-response.ts`, the same one `queryNode` reads through) in its strict
+ * reading: a 200 with no bindings array in any envelope, with an envelope holder that is
+ * not an object, with a row that is not an object or with a cell that is neither a term
+ * string nor an object whose `value`, `datatype`, `type`, `xml:lang` and `lang` are strings
+ * when present, is a failure of the reply, not "no rows yet". What is left to this suite
+ * is the diagnostic: every rejection becomes a `WireShapeError` naming this endpoint.
  */
 export function parseQueryBindings(value: unknown): QueryBindings {
   const endpoint = ENDPOINT.query;
-  const reply = object(endpoint, 'reply', value);
-  const holders: Array<[string, Obj | undefined]> = [
-    ['reply.result', reply.result === undefined ? undefined : object(endpoint, 'reply.result', reply.result)],
-    ['reply.results', reply.results === undefined ? undefined : object(endpoint, 'reply.results', reply.results)],
-    ['reply', reply],
-  ];
-  const found = holders.find(([, holder]) => holder?.bindings !== undefined);
-  if (found === undefined) {
-    throw new WireShapeError(endpoint, 'reply.result.bindings', 'an array (or results.bindings, or bindings)', undefined);
-  }
-  const [path, holder] = found;
-  const bindings = holder?.bindings;
-  if (!Array.isArray(bindings)) throw new WireShapeError(endpoint, `${path}.bindings`, 'an array', bindings);
-  return bindings.map((row: unknown, index: number) => {
-    const rowPath = `${path}.bindings[${index}]`;
-    const cells = object(endpoint, rowPath, row);
-    const parsed: Record<string, SparqlBindingCell> = {};
-    for (const [name, cell] of Object.entries(cells)) {
-      if (typeof cell === 'string') {
-        parsed[name] = cell;
-        continue;
-      }
-      const cellPath = `${rowPath}.${name}`;
-      const structured = object(endpoint, cellPath, cell);
-      parsed[name] = {
-        ...present('value', optionalString(endpoint, cellPath, structured, 'value')),
-        ...present('datatype', optionalString(endpoint, cellPath, structured, 'datatype')),
-        ...present('type', optionalString(endpoint, cellPath, structured, 'type')),
-        ...present('xml:lang', optionalString(endpoint, cellPath, structured, 'xml:lang')),
-        ...present('lang', optionalString(endpoint, cellPath, structured, 'lang')),
-      };
-    }
-    return parsed;
+  return selectBindings(value, {
+    strict: true,
+    reject: (path, expected, actual) => {
+      throw new WireShapeError(endpoint, path, expected, actual);
+    },
   });
 }
 

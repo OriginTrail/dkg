@@ -128,7 +128,7 @@ together, and the mechanics under them are not:
 | `fixture.ts` | the graphs (types, creation through the daemon API, registration straight on the contract, funding a throwaway wallet, the artifact files); the devnet, the author node, the run stamp and the artifact directory are passed in, not read from module state |
 | `daemon.ts` | typed reads and posts through the validators, and the observation and recovery helpers built on them (content polls, subscribe retry, adoption waits, the no-row check, the arrange step, forced catch-up, dialing); nodes and expected content are arguments, and the transport is injected |
 | `catchup-jobs.ts` | the pure classification of a graph's latest catch-up job |
-| `wire.ts` | the reply validators |
+| `wire.ts` | the reply validators (the `/api/query` answer is read by `devnet/_bootstrap/select-response.ts`, shared with `queryNode`) |
 | `flows.ts` | side-by-side scenarios |
 | `*.test.ts` other than `automated.test.ts` | unit tests of the above; no devnet |
 
@@ -178,6 +178,17 @@ together, and the mechanics under them are not:
   so the suite cannot read one by accident, and a field renamed in a declaration
   breaks a type-check of the suite (a throwaway tsconfig or an editor; nothing in CI
   type-checks devnet suites).
+
+  The one reader that is not in `wire.ts` is the `/api/query` SELECT answer: which
+  envelope holds the rows (`result.bindings`, `results.bindings`, a flat `bindings`),
+  and what a row and a cell may be, is the harness's knowledge and lives in
+  `devnet/_bootstrap/select-response.ts`, which `queryNode` reads through as well.
+  `parseQueryBindings` asks it for its strict reading (every holder, row and cell
+  checked, and a projection returned) and turns its rejections into `WireShapeError`s;
+  `queryNode` asks for the lenient one (the rows as the daemon sent them). One rule picks
+  the envelope for both: the first whose `bindings` is not null or undefined.
+  `devnet/_bootstrap/query-node.test.ts` proves, against a frozen copy of the old body,
+  that `queryNode` accepts, returns and rejects exactly what it did.
 
   What that is not: it validates mainly the fields this suite reads (and a few
   it does not, such as `synced`, `coreHosted` and the subscribe reply's
@@ -242,6 +253,9 @@ together, and the mechanics under them are not:
   `daemon.test.ts`, `catchup-jobs.test.ts` and `flows.test.ts`. They run with the
   suite's vitest config and need no devnet:
   `pnpm exec vitest run --config devnet/public-cg-hash-subscription/vitest.config.ts wire.test daemon.test catchup-jobs.test flows.test`.
+  The shared SELECT reader they lean on has its own no-devnet tests next to the harness
+  (`devnet/_bootstrap/select-response.test.ts`, `query-node.test.ts`), run by
+  `pnpm test:devnet:manifest`.
 
 ## Run
 

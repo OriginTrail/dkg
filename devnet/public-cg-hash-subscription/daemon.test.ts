@@ -123,11 +123,19 @@ describe('tryRequest', () => {
 });
 
 /**
- * A 200 whose body makes the validator throw `error`: a getter that throws is read by the
- * validators' own `Object.entries`, so this is a validator failure of the class we choose,
- * from the real parsers. The retry loops must let it through whatever its class is.
+ * A 200 whose body makes the validator throw `error`: the fields the validators read
+ * (`subscribed`, `jobId` and `contextGraphId` of the subscribe and catch-up replies,
+ * `result`, `results` and `bindings` of a SELECT answer) are getters that throw, so this is
+ * a validator failure of the class we choose, from the real parsers. The retry loops must
+ * let it through whatever its class is.
  */
-const failsWith = (error: Error): HttpReply => ok({ get subscribed(): string { throw error; } });
+function failsWith(error: Error): HttpReply {
+  const body: Record<string, unknown> = {};
+  for (const field of ['subscribed', 'jobId', 'contextGraphId', 'result', 'results', 'bindings']) {
+    Object.defineProperty(body, field, { enumerable: true, get() { throw error; } });
+  }
+  return ok(body);
+}
 const VALIDATOR_FAILURES: ReadonlyArray<[string, () => Error]> = [
   ['a plain Error', () => new Error('validator exploded')],
   ['a TypeError', () => new TypeError('cannot read the reply')],

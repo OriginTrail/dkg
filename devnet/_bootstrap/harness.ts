@@ -31,7 +31,7 @@ import {
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { ethers } from 'ethers';
-import type { SparqlBindingCell } from './select-response.js';
+import { selectBindings, type SparqlBindingCell } from './select-response.js';
 
 export const REPO_ROOT = resolve(import.meta.dirname, '../..');
 export const RPC = process.env.DEVNET_RPC ?? 'http://127.0.0.1:8545';
@@ -706,16 +706,17 @@ export async function queryNode(
   if (status !== 200) {
     throw new Error(`query on node${node.num} failed (${status}): ${JSON.stringify(json)}`);
   }
-  const bindings =
-    json?.result?.bindings ?? // current daemon shape
-    json?.results?.bindings ?? // SPARQL 1.1 JSON
-    json?.bindings; // legacy flat
-  if (!Array.isArray(bindings)) {
-    throw new Error(
-      `unrecognised /api/query response shape on node${node.num}: ${JSON.stringify(json).slice(0, 300)}`,
-    );
-  }
-  return bindings as Array<Record<string, SparqlBindingCell>>;
+  // The envelopes and the rows are read by the shared module (see select-response.ts), in its
+  // lenient reading: rows exactly as the daemon sent them, rejected only when no envelope
+  // holds an array.
+  return selectBindings(json, {
+    strict: false,
+    reject: () => {
+      throw new Error(
+        `unrecognised /api/query response shape on node${node.num}: ${JSON.stringify(json).slice(0, 300)}`,
+      );
+    },
+  });
 }
 
 export async function waitFor<T>(

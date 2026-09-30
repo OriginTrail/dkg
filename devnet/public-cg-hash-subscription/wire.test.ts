@@ -39,6 +39,7 @@ import {
   parseSubscribeResponse,
   parseSubscriptionRow,
   parseSubscriptionsResponse,
+  type QueryBindings,
 } from './wire.js';
 
 const HASH = `0x${'ab'.repeat(32)}`;
@@ -348,6 +349,129 @@ describe('parseQueryBindings', () => {
   ])('rejects %s', (_name, payload, message) => {
     expect(() => parseQueryBindings(payload)).toThrow(WireShapeError);
     expect(() => parseQueryBindings(payload)).toThrow(message);
+  });
+});
+
+/**
+ * The parser as it was before it delegated to `_bootstrap/select-response.ts`, frozen
+ * verbatim (only renamed), so the delegation is shown not to have changed what the suite
+ * accepts or how it says no. Do not edit it to follow the parser.
+ */
+function frozenParseQueryBindings(value: unknown): QueryBindings {
+  type Obj = Record<string, unknown>;
+  const endpoint = ENDPOINT.query;
+  const object = (field: string, candidate: unknown): Obj => {
+    if (candidate === null || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      throw new WireShapeError(endpoint, field, 'an object', candidate);
+    }
+    return Object.fromEntries(Object.entries(candidate));
+  };
+  const optionalString = (field: string, parent: Obj, key: string): string | undefined => {
+    const entry = parent[key];
+    if (entry === undefined) return undefined;
+    if (typeof entry !== 'string') throw new WireShapeError(endpoint, `${field}.${key}`, 'a string when present', entry);
+    return entry;
+  };
+  const present = (key: string, entry: string | undefined): Obj => (entry === undefined ? {} : { [key]: entry });
+  const reply = object('reply', value);
+  const holders: Array<[string, Obj | undefined]> = [
+    ['reply.result', reply.result === undefined ? undefined : object('reply.result', reply.result)],
+    ['reply.results', reply.results === undefined ? undefined : object('reply.results', reply.results)],
+    ['reply', reply],
+  ];
+  const found = holders.find(([, holder]) => holder?.bindings !== undefined);
+  if (found === undefined) {
+    throw new WireShapeError(endpoint, 'reply.result.bindings', 'an array (or results.bindings, or bindings)', undefined);
+  }
+  const [path, holder] = found;
+  const bindings = holder?.bindings;
+  if (!Array.isArray(bindings)) throw new WireShapeError(endpoint, `${path}.bindings`, 'an array', bindings);
+  return bindings.map((row: unknown, index: number) => {
+    const rowPath = `${path}.bindings[${index}]`;
+    const cells = object(rowPath, row);
+    const parsed: Record<string, never> = {};
+    for (const [name, cell] of Object.entries(cells)) {
+      if (typeof cell === 'string') {
+        parsed[name] = cell as never;
+        continue;
+      }
+      const cellPath = `${rowPath}.${name}`;
+      const structured = object(cellPath, cell);
+      parsed[name] = {
+        ...present('value', optionalString(cellPath, structured, 'value')),
+        ...present('datatype', optionalString(cellPath, structured, 'datatype')),
+        ...present('type', optionalString(cellPath, structured, 'type')),
+        ...present('xml:lang', optionalString(cellPath, structured, 'xml:lang')),
+        ...present('lang', optionalString(cellPath, structured, 'lang')),
+      } as never;
+    }
+    return parsed;
+  });
+}
+
+describe('parseQueryBindings reads an answer as it did before the shared module', () => {
+  type Outcome = { readonly returned: unknown } | { readonly wireShape: unknown } | { readonly threw: string };
+  const run = (parse: (value: unknown) => QueryBindings, value: unknown): Outcome => {
+    try {
+      return { returned: parse(value) };
+    } catch (error) {
+      if (error instanceof WireShapeError) {
+        const { endpoint, field, expected, actual, message } = error;
+        return { wireShape: { endpoint, field, expected, actual: actual === undefined ? 'undefined' : actual, message } };
+      }
+      return { threw: String(error) };
+    }
+  };
+
+  const ABSENT = Symbol('absent');
+  const CELLS: unknown[] = ['"a"', '<urn:x>', { value: 'x' }, { value: 'x', type: 'literal', 'xml:lang': 'en', extra: 1 }, { value: 7 }, { datatype: null }, { lang: ['en'] }, 7, null, [], true];
+  const ROW_VALUES: unknown[] = [{}, { p: '"a"' }, { p: { value: 'urn:b', type: 'uri' }, o: { value: 'x', datatype: 'urn:dt' } }, ...CELLS.map((cell) => ({ o: cell })), 'row', 7, null, []];
+  const BINDINGS: unknown[] = [ABSENT, [], [ROW_VALUES[1]], [ROW_VALUES[2], ROW_VALUES[3]], ROW_VALUES, '', 'none', 0, 7, false, {}, { rows: [] }];
+  const HOLDERS: unknown[] = [ABSENT, null, 3, 'str', true, [], {}, ...BINDINGS.filter((value) => value !== ABSENT).map((bindings) => ({ bindings }))];
+  const body = (result: unknown, results: unknown, flat: unknown): Record<string, unknown> => {
+    const out: Record<string, unknown> = { type: 'bindings' };
+    if (result !== ABSENT) out.result = result;
+    if (results !== ABSENT) out.results = results;
+    if (flat !== ABSENT) out.bindings = flat;
+    return out;
+  };
+
+  it('agrees with the frozen parser on every envelope mix, row and cell: accepted set, projections, and diagnostics (endpoint, field, expected, actual, message)', () => {
+    let cases = 0;
+    let accepted = 0;
+    let rejected = 0;
+    const disagreements: string[] = [];
+    for (const result of HOLDERS) {
+      for (const results of HOLDERS) {
+        for (const flat of BINDINGS) {
+          const answer = body(result, results, flat);
+          const now = run(parseQueryBindings, answer);
+          const was = run(frozenParseQueryBindings, answer);
+          cases += 1;
+          if ('returned' in was) accepted += 1;
+          else rejected += 1;
+          if (JSON.stringify(now) !== JSON.stringify(was)) disagreements.push(`${JSON.stringify(answer)}\n  now: ${JSON.stringify(now)}\n  was: ${JSON.stringify(was)}`);
+        }
+      }
+    }
+    expect(disagreements.slice(0, 5), `${disagreements.length} of ${cases} answers read differently`).toEqual([]);
+    expect(cases).toBeGreaterThan(1_800);
+    expect(accepted).toBeGreaterThan(200);
+    expect(rejected).toBeGreaterThan(1_000);
+  });
+
+  it.each([null, 'ok', 42, true, [], [{ p: 'a' }]])('agrees with the frozen parser on a body that is %j', (answer) => {
+    expect(run(parseQueryBindings, answer)).toStrictEqual(run(frozenParseQueryBindings, answer));
+  });
+
+  // The one difference, on purpose: the envelope is now picked by the harness's rule (the first
+  // bindings that is not null or undefined), where this parser took the first that was not
+  // undefined, so a null there used to be the answer and is now read past.
+  it('reads past a bindings that is null to the next envelope, as queryNode does (the frozen parser rejected it)', () => {
+    const answer = { result: { bindings: null }, bindings: [{ p: '"a"' }] };
+    expect(parseQueryBindings(answer)).toEqual([{ p: '"a"' }]);
+    expect(() => frozenParseQueryBindings(answer)).toThrow('reply.result.bindings is null, expected an array');
+    expect(() => parseQueryBindings({ result: { bindings: null } })).toThrow(`${ENDPOINT.query}: reply.result.bindings is missing, expected an array (or results.bindings, or bindings)`);
   });
 });
 
