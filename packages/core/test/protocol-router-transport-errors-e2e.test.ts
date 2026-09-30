@@ -236,7 +236,7 @@ describe('ProtocolRouter typed transport errors (two real libp2p nodes)', () => 
     const elapsedMs = Date.now() - startedAt;
 
     expect(failure).toBeInstanceOf(Error);
-    expect(classifyTransportError(failure)).toBe('DialExhausted');
+    expect(classifyTransportError(failure)).toBe('Transient');
     expect(isRecoverableSendError(failure)).toBe(true);
     expect(isProtocolUnsupportedError(failure)).toBe(false);
     // All three attempts ran, separated by the 500 ms + 1000 ms backoff.

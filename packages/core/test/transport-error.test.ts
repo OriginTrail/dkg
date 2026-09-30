@@ -105,34 +105,34 @@ const rows: Row[] = [
   { label: 'pooled reset wrapping the refusal text verbatim', err: new PooledStreamResetError('Protocol selection failed - could not negotiate /dkg/10.0.2/message'), category: 'ProtocolUnsupported' },
 
   // --- transient transport failures: unchanged -----------------------------
-  { label: 'StreamResetError (default)', err: new StreamResetError(), category: 'ConnectionReset' },
-  { label: 'ConnectionClosedError (default)', err: new ConnectionClosedError(), category: 'ConnectionReset' },
-  { label: 'MuxerClosedError (default)', err: new MuxerClosedError(), category: 'ConnectionReset' },
-  { label: 'StreamAbortedError (default)', err: new StreamAbortedError(), category: 'Aborted' },
-  { label: 'AbortError (default)', err: new AbortError(), category: 'Aborted' },
-  { label: 'NoValidAddressesError (real wording)', err: named('NoValidAddressesError', 'The dial request has no valid addresses for peer: 12D3KooW...'), category: 'DialExhausted' },
-  { label: 'AggregateError from the dial queue', err: new AggregateError([new Error('a'), new Error('b')], 'All multiaddr dials failed'), category: 'DialExhausted' },
-  { label: 'dialProtocol-prefixed dial exhaustion', err: new Error('dialProtocol(/dkg/10.0.1/message): All multiaddr dials failed'), category: 'DialExhausted' },
-  { label: 'relay NO_RESERVATION (InvalidMessageError)', err: new InvalidMessageError('failed to connect via relay with status NO_RESERVATION'), category: 'NoReservation' },
-  { label: 'no reservation for relay', err: new Error('no reservation for relay'), category: 'NoReservation' },
-  { label: 'ECONNREFUSED', err: new Error('connect ECONNREFUSED 127.0.0.1:1'), category: 'DialExhausted' },
-  { label: 'ECONNRESET', err: new Error('read ECONNRESET'), category: 'ConnectionReset' },
-  { label: 'EPIPE', err: new Error('write EPIPE'), category: 'ConnectionReset' },
-  { label: 'ETIMEDOUT', err: new Error('connect ETIMEDOUT'), category: 'Timeout' },
-  { label: 'send timeout', err: new Error('send timeout'), category: 'Timeout' },
-  { label: 'operation timed out', err: new Error('operation timed out'), category: 'Timeout' },
-  { label: 'AbortSignal.timeout wording', err: new Error('The operation was aborted due to timeout'), category: 'Timeout' },
-  { label: 'stream returned in closed state', err: new Error('stream returned in closed state'), category: 'ConnectionReset' },
-  { label: 'Remote closed connection during opening', err: new Error('Remote closed connection during opening'), category: 'ConnectionReset' },
-  { label: 'peer-closed-stream', err: new Error('peer-closed-stream'), category: 'ConnectionReset' },
-  { label: 'sync responder queue full', err: new Error('sync responder queue full'), category: 'ResponderBusy' },
-  { label: 'sync responder peer queue full', err: new Error('sync responder peer queue full'), category: 'ResponderBusy' },
-  { label: 'sync responder queue wait exceeded', err: new Error('sync responder queue wait exceeded'), category: 'ResponderBusy' },
-  { label: 'PooledStreamResetError (request timeout)', err: new PooledStreamResetError('request timeout'), category: 'PooledStreamReset' },
-  { label: 'PooledStreamResetError (pool closed)', err: new PooledStreamResetError('pool closed'), category: 'PooledStreamReset' },
-  { label: 'PooledStreamResetError wrapping an unrecognised error', err: new PooledStreamResetError('handler error', { cause: new Error('handler error') }), category: 'PooledStreamReset' },
-  { label: 'PooledStreamResetError wrapping a StreamResetError', err: new PooledStreamResetError('write failed', { cause: new StreamResetError() }), category: 'ConnectionReset' },
-  { label: 'PooledStreamResetError wrapping a timeout', err: new PooledStreamResetError('open failed', { cause: new Error('operation timed out') }), category: 'Timeout' },
+  { label: 'StreamResetError (default)', err: new StreamResetError(), category: 'Transient' },
+  { label: 'ConnectionClosedError (default)', err: new ConnectionClosedError(), category: 'Transient' },
+  { label: 'MuxerClosedError (default)', err: new MuxerClosedError(), category: 'Transient' },
+  { label: 'StreamAbortedError (default)', err: new StreamAbortedError(), category: 'Transient' },
+  { label: 'AbortError (default)', err: new AbortError(), category: 'Transient' },
+  { label: 'NoValidAddressesError (real wording)', err: named('NoValidAddressesError', 'The dial request has no valid addresses for peer: 12D3KooW...'), category: 'Transient' },
+  { label: 'AggregateError from the dial queue', err: new AggregateError([new Error('a'), new Error('b')], 'All multiaddr dials failed'), category: 'Transient' },
+  { label: 'dialProtocol-prefixed dial exhaustion', err: new Error('dialProtocol(/dkg/10.0.1/message): All multiaddr dials failed'), category: 'Transient' },
+  { label: 'relay NO_RESERVATION (InvalidMessageError)', err: new InvalidMessageError('failed to connect via relay with status NO_RESERVATION'), category: 'Transient' },
+  { label: 'no reservation for relay', err: new Error('no reservation for relay'), category: 'Transient' },
+  { label: 'ECONNREFUSED', err: new Error('connect ECONNREFUSED 127.0.0.1:1'), category: 'Transient' },
+  { label: 'ECONNRESET', err: new Error('read ECONNRESET'), category: 'Transient' },
+  { label: 'EPIPE', err: new Error('write EPIPE'), category: 'Transient' },
+  { label: 'ETIMEDOUT', err: new Error('connect ETIMEDOUT'), category: 'Transient' },
+  { label: 'send timeout', err: new Error('send timeout'), category: 'Transient' },
+  { label: 'operation timed out', err: new Error('operation timed out'), category: 'Transient' },
+  { label: 'AbortSignal.timeout wording', err: new Error('The operation was aborted due to timeout'), category: 'Transient' },
+  { label: 'stream returned in closed state', err: new Error('stream returned in closed state'), category: 'Transient' },
+  { label: 'Remote closed connection during opening', err: new Error('Remote closed connection during opening'), category: 'Transient' },
+  { label: 'peer-closed-stream', err: new Error('peer-closed-stream'), category: 'Transient' },
+  { label: 'sync responder queue full', err: new Error('sync responder queue full'), category: 'Transient' },
+  { label: 'sync responder peer queue full', err: new Error('sync responder peer queue full'), category: 'Transient' },
+  { label: 'sync responder queue wait exceeded', err: new Error('sync responder queue wait exceeded'), category: 'Transient' },
+  { label: 'PooledStreamResetError (request timeout)', err: new PooledStreamResetError('request timeout'), category: 'Transient' },
+  { label: 'PooledStreamResetError (pool closed)', err: new PooledStreamResetError('pool closed'), category: 'Transient' },
+  { label: 'PooledStreamResetError wrapping an unrecognised error', err: new PooledStreamResetError('handler error', { cause: new Error('handler error') }), category: 'Transient' },
+  { label: 'PooledStreamResetError wrapping a StreamResetError', err: new PooledStreamResetError('write failed', { cause: new StreamResetError() }), category: 'Transient' },
+  { label: 'PooledStreamResetError wrapping a timeout', err: new PooledStreamResetError('open failed', { cause: new Error('operation timed out') }), category: 'Transient' },
 
   // --- not retryable: unchanged --------------------------------------------
   { label: 'sync snapshot limit', err: new Error('sync responder snapshot limit exceeded (active=128/128)'), category: 'Unknown' },
@@ -153,11 +153,11 @@ const rows: Row[] = [
   { label: 'empty object', err: {}, category: 'Unknown' },
 
   // --- typed names: wording no longer decides ------------------------------
-  { label: 'StreamResetError, reworded', err: new StreamResetError('remote went away'), category: 'ConnectionReset', change: 'typed' },
-  { label: 'ConnectionClosedError, reworded', err: new ConnectionClosedError('gone'), category: 'ConnectionReset', change: 'typed' },
-  { label: 'MuxerClosedError, reworded', err: new MuxerClosedError('gone'), category: 'ConnectionReset', change: 'typed' },
-  { label: 'StreamAbortedError, reworded', err: new StreamAbortedError('gone'), category: 'Aborted', change: 'typed' },
-  { label: 'NoValidAddressesError, reworded', err: named('NoValidAddressesError', 'nowhere to dial'), category: 'DialExhausted', change: 'typed' },
+  { label: 'StreamResetError, reworded', err: new StreamResetError('remote went away'), category: 'Transient', change: 'typed' },
+  { label: 'ConnectionClosedError, reworded', err: new ConnectionClosedError('gone'), category: 'Transient', change: 'typed' },
+  { label: 'MuxerClosedError, reworded', err: new MuxerClosedError('gone'), category: 'Transient', change: 'typed' },
+  { label: 'StreamAbortedError, reworded', err: new StreamAbortedError('gone'), category: 'Transient', change: 'typed' },
+  { label: 'NoValidAddressesError, reworded', err: named('NoValidAddressesError', 'nowhere to dial'), category: 'Transient', change: 'typed' },
 ];
 
 describe('classifyTransportError', () => {
@@ -181,7 +181,7 @@ describe('classifyTransportError', () => {
     expect(foreign).not.toBeInstanceOf(UnsupportedProtocolError);
     expect(classifyTransportError(foreign)).toBe('ProtocolUnsupported');
     const foreignObject = { name: 'StreamResetError', message: 'x' };
-    expect(classifyTransportError(foreignObject)).toBe('ConnectionReset');
+    expect(classifyTransportError(foreignObject)).toBe('Transient');
   });
 
   it('does not treat inherited Object properties as error names', () => {
@@ -205,19 +205,265 @@ describe('classifyTransportError', () => {
     const a = new PooledStreamResetError('a');
     const b = new PooledStreamResetError('b', { cause: a });
     (a as { cause?: unknown }).cause = b;
-    expect(classifyTransportError(a)).toBe('PooledStreamReset');
+    expect(classifyTransportError(a)).toBe('Transient');
 
     let chain: unknown = new UnsupportedProtocolError('deep');
     for (let i = 0; i < 3; i += 1) chain = new PooledStreamResetError(`level ${i}`, { cause: chain });
     expect(classifyTransportError(chain)).toBe('ProtocolUnsupported');
     for (let i = 0; i < 8; i += 1) chain = new PooledStreamResetError(`more ${i}`, { cause: chain });
     // Beyond the depth bound the wrapper itself is what is classified.
-    expect(classifyTransportError(chain)).toBe('PooledStreamReset');
+    expect(classifyTransportError(chain)).toBe('Transient');
   });
 
   it('ignores the cause of anything that is not a pool wrapper', () => {
     const outer = new Error('handler error', { cause: new UnsupportedProtocolError('inner') });
     expect(classifyTransportError(outer)).toBe('Unknown');
+  });
+});
+
+/**
+ * The predicates' verdict for each category, spelled out here (not read from
+ * `TRANSPORT_ERROR_DISPOSITION`) so the table and the classifier are each
+ * checked against an independent statement of the policy.
+ */
+const VERDICT_BY_CATEGORY: Record<TransportErrorCategory, { recoverable: boolean; retryableLater: boolean; unsupported: boolean }> = {
+  ProtocolUnsupported: { recoverable: false, retryableLater: true, unsupported: true },
+  Transient: { recoverable: true, retryableLater: true, unsupported: false },
+  Unknown: { recoverable: false, retryableLater: false, unsupported: false },
+};
+
+/** The category and all three predicates, for one value. */
+function expectClassified(err: unknown, category: TransportErrorCategory, label: string): void {
+  expect(classifyTransportError(err), `${label}: category`).toBe(category);
+  expect(
+    {
+      recoverable: isRecoverableSendError(err),
+      retryableLater: isRetryableLaterSendError(err),
+      unsupported: isProtocolUnsupportedError(err),
+    },
+    `${label}: predicates`,
+  ).toEqual(VERDICT_BY_CATEGORY[category]);
+}
+
+/**
+ * Every message wording the classifier recognises and the near misses that it
+ * must not, hard-coded here rather than imported from the module: dropping a
+ * wording from the module (or widening one) fails the row that names it.
+ * (`econnreset`, `stream returned in closed state` and `operation was aborted
+ * due to timeout` are also matched by `reset`, `closed` and `aborted`, so their
+ * rows cannot tell the narrow needle from the broad one.)
+ */
+const REFUSAL_WORDINGS = ['protocol selection failed', 'could not negotiate', 'unsupported protocol', 'protocol mismatch'];
+const TRANSIENT_WORDINGS = [
+  'no_reservation', 'no reservation',
+  'all multiaddr dials failed', 'no valid addresses', 'econnrefused',
+  'etimedout', 'send timeout', 'operation timed out', 'operation was aborted due to timeout',
+  'closed', 'reset', 'stream returned in closed state', 'econnreset', 'epipe',
+  'aborted',
+  'sync responder queue full', 'sync responder peer queue full', 'sync responder queue wait exceeded',
+  // The two halves of the responder-busy rule are searched independently, so their order does not matter.
+  'queue full sync responder',
+];
+const UNRECOGNISED_WORDINGS = [
+  // Half of the responder-busy rule is not the rule.
+  'queue full', 'queue wait exceeded', 'sync responder', 'sync  responder queue full',
+  'sync responder snapshot limit exceeded (active=128/128)',
+  // Near misses of recognised wordings.
+  'no valid address', 'no  reservation', 'noreservation', 'dials failed', 'abort', 'aborting', 'timeout', 'Timed out',
+  'Connection timeout after 5000ms', 'Cannot write to a stream that is closing', 'The connection is closing',
+  'protocol', 'could not', 'unsupported', 'mismatch', 'negotiate',
+  // Failures the router does not retry.
+  'handler error', 'Invalid payload', 'Read limit exceeded', 'Tried to dial self', '',
+];
+
+describe('message wordings, under a generic Error name and as a bare string', () => {
+  const table: Array<[string, TransportErrorCategory]> = [
+    ...REFUSAL_WORDINGS.map((w): [string, TransportErrorCategory] => [w, 'ProtocolUnsupported']),
+    ...TRANSIENT_WORDINGS.map((w): [string, TransportErrorCategory] => [w, 'Transient']),
+    ...UNRECOGNISED_WORDINGS.map((w): [string, TransportErrorCategory] => [w, 'Unknown']),
+  ];
+  const forms: Array<[string, (wording: string) => string]> = [
+    ['as written', (w) => w],
+    ['upper case', (w) => w.toUpperCase()],
+    ['embedded in a longer message', (w) => `dialProtocol(/dkg/10.0.1/message): ${w} (peer 12D3KooWabc)`],
+  ];
+  for (const [wording, category] of table) {
+    it(`${JSON.stringify(wording)} -> ${category}`, () => {
+      for (const [form, shape] of forms) {
+        // A whitespace-only or empty wording has no upper-case or embedded form worth checking.
+        if (wording === '' && form !== 'as written') continue;
+        const text = shape(wording);
+        expectClassified(new Error(text), category, `${form}, Error`);
+        expectClassified(text, category, `${form}, bare string`);
+      }
+    });
+  }
+});
+
+describe('typed error names', () => {
+  // Each with a message that says nothing, so only the name can decide.
+  const table: Array<[string, TransportErrorCategory]> = [
+    ['UnsupportedProtocolError', 'ProtocolUnsupported'],
+    ['PooledStreamResetError', 'Transient'],
+    ['StreamResetError', 'Transient'],
+    ['ConnectionClosedError', 'Transient'],
+    ['MuxerClosedError', 'Transient'],
+    ['StreamAbortedError', 'Transient'],
+    ['NoValidAddressesError', 'Transient'],
+    // Not classified by name: a default-worded libp2p error of these names was not retried before either.
+    ['TimeoutError', 'Unknown'],
+    ['StreamStateError', 'Unknown'],
+    ['ConnectionClosingError', 'Unknown'],
+    ['ConnectionFailedError', 'Unknown'],
+    ['DialError', 'Unknown'],
+    ['AbortError', 'Unknown'],
+    ['InvalidMessageError', 'Unknown'],
+    ['AggregateError', 'Unknown'],
+    ['Error', 'Unknown'],
+    ['streamreseterror', 'Unknown'],
+    ['StreamResetError ', 'Unknown'],
+  ];
+  for (const [name, category] of table) {
+    it(`${JSON.stringify(name)} with an unrelated message -> ${category}`, () => {
+      expectClassified(named(name, 'nothing recognisable here'), category, 'Error');
+      expectClassified({ name, message: 'nothing recognisable here' }, category, 'plain object');
+    });
+  }
+
+  it('leaves a name that is not classified to its wording', () => {
+    expectClassified(named('TimeoutError', 'operation timed out'), 'Transient', 'TimeoutError + timeout wording');
+    expectClassified(named('AbortError', 'The operation was aborted'), 'Transient', 'AbortError + abort wording');
+    expectClassified(named('DialError', 'All multiaddr dials failed'), 'Transient', 'DialError + dial wording');
+    expectClassified(named('InvalidMessageError', 'status NO_RESERVATION'), 'Transient', 'InvalidMessageError + relay wording');
+    expectClassified(named('StreamStateError', 'Protocol selection failed'), 'ProtocolUnsupported', 'StreamStateError + refusal wording');
+  });
+
+  it('reads a name from an object only: a function that carries an error name is not an error', () => {
+    const namedFunction = (name: string): unknown => Object.defineProperty(() => undefined, 'name', { value: name });
+    for (const name of ['UnsupportedProtocolError', 'StreamResetError', 'PooledStreamResetError']) {
+      expectClassified(namedFunction(name), 'Unknown', name);
+    }
+    // ... nor as the cause of a pooled wrapper.
+    expectClassified(
+      new PooledStreamResetError('open failed', { cause: namedFunction('UnsupportedProtocolError') }),
+      'Transient',
+      'function as a pooled cause',
+    );
+  });
+
+  it('lets a transient name decide whatever its own wording says', () => {
+    for (const name of ['StreamResetError', 'ConnectionClosedError', 'MuxerClosedError', 'StreamAbortedError', 'NoValidAddressesError', 'PooledStreamResetError']) {
+      for (const wording of ['', 'gone', 'handler error', 'sync responder snapshot limit exceeded (active=128/128)']) {
+        expectClassified(named(name, wording), 'Transient', `${name} / ${JSON.stringify(wording)}`);
+      }
+    }
+  });
+});
+
+describe('precedence: a refusal wins over every transient reading', () => {
+  const transientNames = ['StreamResetError', 'ConnectionClosedError', 'MuxerClosedError', 'StreamAbortedError', 'NoValidAddressesError', 'PooledStreamResetError'];
+
+  it('a typed refusal name wins over transient wording in its message', () => {
+    for (const wording of TRANSIENT_WORDINGS) {
+      expectClassified(named('UnsupportedProtocolError', wording), 'ProtocolUnsupported', `UnsupportedProtocolError / ${wording}`);
+    }
+  });
+
+  it('refusal wording wins over a transient name', () => {
+    for (const name of transientNames) {
+      for (const wording of REFUSAL_WORDINGS) {
+        expectClassified(named(name, wording), 'ProtocolUnsupported', `${name} / ${wording}`);
+      }
+    }
+  });
+
+  it('a message carrying both wordings is a refusal, in either order and any case', () => {
+    for (const refusal of REFUSAL_WORDINGS) {
+      for (const transient of TRANSIENT_WORDINGS) {
+        for (const text of [`${refusal} - ${transient}`, `${transient}: ${refusal}`, `${refusal.toUpperCase()} ${transient.toUpperCase()}`]) {
+          expectClassified(new Error(text), 'ProtocolUnsupported', text);
+          expectClassified(text, 'ProtocolUnsupported', `bare ${text}`);
+        }
+      }
+    }
+  });
+});
+
+describe('PooledStreamResetError causes', () => {
+  const wrap = (cause: unknown, detail = 'open failed'): PooledStreamResetError => new PooledStreamResetError(detail, { cause });
+  /** `count` pooled wrappers around `leaf`, the outermost first. */
+  const wrapTimes = (count: number, leaf: unknown): unknown => {
+    let current = leaf;
+    for (let i = 0; i < count; i += 1) current = wrap(current, `level ${i}`);
+    return current;
+  };
+
+  it('is a refusal when its cause is one, by typed name or by each refusal wording', () => {
+    expectClassified(wrap(new UnsupportedProtocolError('declined')), 'ProtocolUnsupported', 'typed cause');
+    for (const wording of REFUSAL_WORDINGS) {
+      expectClassified(wrap(new Error(wording)), 'ProtocolUnsupported', `cause ${wording}`);
+      expectClassified(wrap(wording), 'ProtocolUnsupported', `bare cause ${wording}`);
+    }
+  });
+
+  it('is a refusal when its own text says so, whatever its cause is', () => {
+    for (const cause of [new StreamResetError(), new Error('handler error'), undefined, null]) {
+      expectClassified(wrap(cause, 'Protocol selection failed - could not negotiate /dkg/x'), 'ProtocolUnsupported', `cause ${String(cause)}`);
+    }
+  });
+
+  it('decides a wrapper whose own wording says refusal without reading its cause', () => {
+    let causeReads = 0;
+    const err = new PooledStreamResetError('Protocol selection failed - could not negotiate /dkg/x');
+    Object.defineProperty(err, 'cause', {
+      configurable: true,
+      get() {
+        causeReads += 1;
+        return new StreamResetError();
+      },
+    });
+    expectClassified(err, 'ProtocolUnsupported', 'refusal wording, readable cause');
+    expect(causeReads).toBe(0);
+  });
+
+  it('is a refusal when its cause is one even though its own text names a transient failure', () => {
+    expectClassified(wrap(new UnsupportedProtocolError('declined'), 'read ECONNRESET'), 'ProtocolUnsupported', 'text says reset');
+  });
+
+  it('stays a transient reset for any other cause: transient, unrecognised, absent or not an error', () => {
+    const causes: unknown[] = [
+      new StreamResetError(), new StreamAbortedError(), named('NoValidAddressesError', 'nowhere'),
+      new Error('operation timed out'), new Error('all multiaddr dials failed'),
+      new Error('handler error'), new TimeoutError(), new StreamStateError('closing'),
+      undefined, null, 'plain text', 42, {}, { name: 'UnsupportedProtocolErrorX' },
+    ];
+    for (const cause of causes) {
+      expectClassified(wrap(cause), 'Transient', `cause ${String(cause)}`);
+    }
+    expectClassified(new PooledStreamResetError('no cause at all'), 'Transient', 'no cause option');
+  });
+
+  it('follows exactly four wrappers to the error underneath, and no further', () => {
+    const refusal = (): unknown => new UnsupportedProtocolError('deep');
+    for (const count of [1, 2, 3, 4]) {
+      expectClassified(wrapTimes(count, refusal()), 'ProtocolUnsupported', `${count} wrappers`);
+    }
+    for (const count of [5, 6, 12]) {
+      // Beyond the depth bound the outermost wrapper is what is classified.
+      expectClassified(wrapTimes(count, refusal()), 'Transient', `${count} wrappers`);
+    }
+  });
+
+  it('follows a wrapper only, never the cause of another error', () => {
+    for (const name of ['StreamResetError', 'Error', 'TimeoutError', 'ConnectionClosedError']) {
+      const outer = named(name, 'handler error', { cause: new UnsupportedProtocolError('inner') });
+      expectClassified(outer, name === 'ConnectionClosedError' || name === 'StreamResetError' ? 'Transient' : 'Unknown', name);
+    }
+  });
+
+  it('classifies a wrapper nested in a plain error by that error, not by the wrapper', () => {
+    const inner = wrap(new UnsupportedProtocolError('declined'));
+    expectClassified(new Error('handler error', { cause: inner }), 'Unknown', 'plain error around a refusal wrapper');
   });
 });
 
@@ -294,9 +540,9 @@ describe('hostile error values (throwing accessors, Proxies)', () => {
       verdict: { category: 'ProtocolUnsupported', recoverable: false, retryableLater: true, unsupported: true },
     },
     {
-      label: 'throwing name getter, reset wording -> ConnectionReset',
+      label: 'throwing name getter, reset wording -> Transient',
       err: () => withThrowingAccessor(new Error('read ECONNRESET'), 'name'),
-      verdict: { category: 'ConnectionReset', recoverable: true, retryableLater: true, unsupported: false },
+      verdict: { category: 'Transient', recoverable: true, retryableLater: true, unsupported: false },
     },
     {
       label: 'throwing name getter, unrecognised wording -> Unknown',
@@ -321,9 +567,9 @@ describe('hostile error values (throwing accessors, Proxies)', () => {
       verdict: { category: 'ProtocolUnsupported', recoverable: false, retryableLater: true, unsupported: true },
     },
     {
-      label: 'typed reset whose message getter throws -> ConnectionReset by name',
+      label: 'typed reset whose message getter throws -> Transient by name',
       err: () => withThrowingAccessor(new StreamResetError('gone'), 'message'),
-      verdict: { category: 'ConnectionReset', recoverable: true, retryableLater: true, unsupported: false },
+      verdict: { category: 'Transient', recoverable: true, retryableLater: true, unsupported: false },
     },
     {
       label: 'generic error whose message getter throws -> Unknown',
@@ -336,16 +582,16 @@ describe('hostile error values (throwing accessors, Proxies)', () => {
       verdict: { category: 'Unknown' as const, recoverable: false, retryableLater: false, unsupported: false },
     })),
     {
-      label: 'typed reset whose message is not a string -> ConnectionReset by name',
+      label: 'typed reset whose message is not a string -> Transient by name',
       err: () => withAccessorReturning(new StreamResetError('gone'), 'message', 42),
-      verdict: { category: 'ConnectionReset', recoverable: true, retryableLater: true, unsupported: false },
+      verdict: { category: 'Transient', recoverable: true, retryableLater: true, unsupported: false },
     },
 
     // --- an unreadable pooled `cause` is an unspecified pooled reset ---
     {
-      label: 'PooledStreamResetError with a throwing cause getter -> PooledStreamReset',
+      label: 'PooledStreamResetError with a throwing cause getter -> Transient',
       err: () => withThrowingAccessor(new PooledStreamResetError('request timeout'), 'cause'),
-      verdict: { category: 'PooledStreamReset', recoverable: true, retryableLater: true, unsupported: false },
+      verdict: { category: 'Transient', recoverable: true, retryableLater: true, unsupported: false },
     },
     {
       label: 'pooled wrapper with refusal wording and a throwing cause -> ProtocolUnsupported (the message is checked first)',
@@ -356,28 +602,28 @@ describe('hostile error values (throwing accessors, Proxies)', () => {
       verdict: { category: 'ProtocolUnsupported', recoverable: false, retryableLater: true, unsupported: true },
     },
     {
-      label: 'pooled wrapper whose cause has an unreadable name and a timeout message -> Timeout',
+      label: 'pooled wrapper whose cause has an unreadable name and a timeout message -> Transient',
       err: () => new PooledStreamResetError('open failed', {
         cause: withThrowingAccessor(new Error('operation timed out'), 'name'),
       }),
-      verdict: { category: 'Timeout', recoverable: true, retryableLater: true, unsupported: false },
+      verdict: { category: 'Transient', recoverable: true, retryableLater: true, unsupported: false },
     },
     {
-      label: 'pooled wrapper whose cause has an unreadable name and no known wording -> PooledStreamReset',
+      label: 'pooled wrapper whose cause has an unreadable name and no known wording -> Transient',
       err: () => new PooledStreamResetError('open failed', {
         cause: withThrowingAccessor(new Error('handler error'), 'name'),
       }),
-      verdict: { category: 'PooledStreamReset', recoverable: true, retryableLater: true, unsupported: false },
+      verdict: { category: 'Transient', recoverable: true, retryableLater: true, unsupported: false },
     },
     {
-      label: 'pooled wrapper whose cause is a Proxy with every trap throwing -> PooledStreamReset',
+      label: 'pooled wrapper whose cause is a Proxy with every trap throwing -> Transient',
       err: () => new PooledStreamResetError('open failed', { cause: proxyWithEveryTrapThrowing() }),
-      verdict: { category: 'PooledStreamReset', recoverable: true, retryableLater: true, unsupported: false },
+      verdict: { category: 'Transient', recoverable: true, retryableLater: true, unsupported: false },
     },
     {
-      label: 'pooled wrapper whose cause is a revoked Proxy -> PooledStreamReset',
+      label: 'pooled wrapper whose cause is a revoked Proxy -> Transient',
       err: () => new PooledStreamResetError('open failed', { cause: revokedProxy() }),
-      verdict: { category: 'PooledStreamReset', recoverable: true, retryableLater: true, unsupported: false },
+      verdict: { category: 'Transient', recoverable: true, retryableLater: true, unsupported: false },
     },
     {
       label: 'pooled wrapper whose cause is a typed refusal with a throwing message getter -> ProtocolUnsupported',
@@ -414,14 +660,14 @@ describe('hostile error values (throwing accessors, Proxies)', () => {
       verdict: { category: 'ProtocolUnsupported', recoverable: false, retryableLater: true, unsupported: true },
     },
     {
-      label: 'Proxy around a StreamResetError whose message trap throws -> ConnectionReset by name',
+      label: 'Proxy around a StreamResetError whose message trap throws -> Transient by name',
       err: () => new Proxy(new StreamResetError('gone'), {
         get(target, key, receiver) {
           if (key === 'message') throw new Error(GETTER_FAILED);
           return Reflect.get(target, key, receiver);
         },
       }),
-      verdict: { category: 'ConnectionReset', recoverable: true, retryableLater: true, unsupported: false },
+      verdict: { category: 'Transient', recoverable: true, retryableLater: true, unsupported: false },
     },
     {
       label: 'string conversion that throws -> Unknown',
@@ -453,12 +699,12 @@ describe('hostile error values (throwing accessors, Proxies)', () => {
         return undefined;
       },
     });
-    expect(classifyTransportError(endless())).toBe('PooledStreamReset');
+    expect(classifyTransportError(endless())).toBe('Transient');
     // One classification follows a bounded number of links (MAX_CAUSE_DEPTH).
     expect(causeReads).toBeGreaterThan(0);
     expect(causeReads).toBeLessThanOrEqual(4);
     expect(verdictOf(endless())).toEqual({
-      category: 'PooledStreamReset',
+      category: 'Transient',
       recoverable: true,
       retryableLater: true,
       unsupported: false,
@@ -468,7 +714,7 @@ describe('hostile error values (throwing accessors, Proxies)', () => {
   it('ends a pooled cause getter that returns the wrapper itself', () => {
     const err = new PooledStreamResetError('request timeout');
     Object.defineProperty(err, 'cause', { configurable: true, get: () => err });
-    expect(verdictOf(err).category).toBe('PooledStreamReset');
+    expect(verdictOf(err).category).toBe('Transient');
   });
 });
 
@@ -476,7 +722,7 @@ describe('PooledStreamResetError classification', () => {
   it('is recoverable by name whatever its message says', () => {
     const err = new PooledStreamResetError('request timeout');
     err.message = 'completely different wording';
-    expect(classifyTransportError(err)).toBe('PooledStreamReset');
+    expect(classifyTransportError(err)).toBe('Transient');
     expect(isRecoverableSendError(err)).toBe(true);
     expect(isProtocolUnsupportedError(err)).toBe(false);
   });
@@ -550,13 +796,7 @@ describe('TRANSPORT_ERROR_DISPOSITION', () => {
   /** One representative error per category. The `Record` type keeps this list exhaustive too. */
   const sampleByCategory: Record<TransportErrorCategory, unknown> = {
     ProtocolUnsupported: new UnsupportedProtocolError('Protocol selection failed - could not negotiate /dkg/x'),
-    ConnectionReset: new StreamResetError(),
-    PooledStreamReset: new PooledStreamResetError('request timeout'),
-    Timeout: new Error('operation timed out'),
-    Aborted: new StreamAbortedError(),
-    DialExhausted: named('NoValidAddressesError', 'nowhere to dial'),
-    NoReservation: new Error('no reservation for relay'),
-    ResponderBusy: new Error('sync responder queue full'),
+    Transient: new StreamResetError(),
     Unknown: new Error('handler error'),
   };
   const categories = Object.keys(sampleByCategory) as TransportErrorCategory[];
@@ -564,18 +804,13 @@ describe('TRANSPORT_ERROR_DISPOSITION', () => {
   /** The verdicts pinned by the tests above, spelled out row by row. */
   const expected: Record<TransportErrorCategory, TransportRetryDisposition> = {
     ProtocolUnsupported: { retryNow: false, retryLater: true },
-    ConnectionReset: { retryNow: true, retryLater: true },
-    PooledStreamReset: { retryNow: true, retryLater: true },
-    Timeout: { retryNow: true, retryLater: true },
-    Aborted: { retryNow: true, retryLater: true },
-    DialExhausted: { retryNow: true, retryLater: true },
-    NoReservation: { retryNow: true, retryLater: true },
-    ResponderBusy: { retryNow: true, retryLater: true },
+    Transient: { retryNow: true, retryLater: true },
     Unknown: { retryNow: false, retryLater: false },
   };
 
-  it('has exactly one row per category', () => {
+  it('has exactly one row per category, and exactly three categories', () => {
     expect(Object.keys(TRANSPORT_ERROR_DISPOSITION).sort()).toEqual([...categories].sort());
+    expect([...categories].sort()).toEqual(['ProtocolUnsupported', 'Transient', 'Unknown']);
   });
 
   it('gives every category an explicit retryNow and retryLater decision', () => {

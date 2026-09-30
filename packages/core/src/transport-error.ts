@@ -16,7 +16,9 @@
  * `InvalidMessageError`, ...). Matching is by `name`, never `instanceof`, so a
  * second copy of `@libp2p/interface` in the dependency tree cannot defeat it.
  *
- * What to DO about a category is decided in one place,
+ * There are three outcomes because the callers need three: a peer that
+ * refused the protocol, a transport failure worth trying again, and anything
+ * else. What to DO about each is decided in one place,
  * {@link TRANSPORT_ERROR_DISPOSITION}: an explicit `retryNow` / `retryLater`
  * pair per category, checked for exhaustiveness by the compiler. A category is
  * never retryable because of what it is not (not `Unknown`, not
@@ -28,32 +30,19 @@
  */
 
 /**
- * What a failed send most plausibly means.
+ * What a failed send means for the caller's retry decision.
  *
  * - `ProtocolUnsupported`: the peer refused every offered protocol
  *   (multistream-select `na`). It does not speak the protocol on this wire.
- * - `ConnectionReset`: the stream, connection or muxer was closed or reset.
- * - `PooledStreamReset`: the pooled wire tore down a stream that carried this
- *   request (`PooledStreamResetError` with no more specific cause).
- * - `Timeout`: a transport-level timeout.
- * - `Aborted`: the stream or operation was aborted.
- * - `DialExhausted`: no address for the peer could be dialled (`no valid
- *   addresses`, `All multiaddr dials failed`, `ECONNREFUSED`).
- * - `NoReservation`: a relay had no reservation for the destination.
- * - `ResponderBusy`: the remote sync responder shed load (queue full / wait
- *   exceeded); it accepts the same request a moment later.
+ * - `Transient`: a transport failure the same request can plausibly survive: a
+ *   stream, connection or muxer reset or close, the pooled wire tearing down a
+ *   stream that carried the request, a transport timeout, an abort, no
+ *   dialable address, a relay without a reservation, or the remote sync
+ *   responder shedding load. Which of these it was is not something any caller
+ *   acts on, so it is not recorded.
  * - `Unknown`: not a transport failure this module recognises.
  */
-export type TransportErrorCategory =
-  | 'ProtocolUnsupported'
-  | 'ConnectionReset'
-  | 'PooledStreamReset'
-  | 'Timeout'
-  | 'Aborted'
-  | 'DialExhausted'
-  | 'NoReservation'
-  | 'ResponderBusy'
-  | 'Unknown';
+export type TransportErrorCategory = 'ProtocolUnsupported' | 'Transient' | 'Unknown';
 
 /** What may be done about a failure of one {@link TransportErrorCategory}. */
 export interface TransportRetryDisposition {
@@ -83,20 +72,13 @@ export interface TransportRetryDisposition {
  *   one that never will speak the protocol, so a durable queue keeps the
  *   message (and sync keeps the peer) instead of dropping it.
  * - `Unknown` is not retried by anyone.
- * - Every other category is a transient transport failure, retried now and
- *   later.
+ * - `Transient` is retried now and later.
  *
  * Exported for tests; production code goes through the predicates below.
  */
 export const TRANSPORT_ERROR_DISPOSITION: Readonly<Record<TransportErrorCategory, TransportRetryDisposition>> = {
   ProtocolUnsupported: { retryNow: false, retryLater: true },
-  ConnectionReset: { retryNow: true, retryLater: true },
-  PooledStreamReset: { retryNow: true, retryLater: true },
-  Timeout: { retryNow: true, retryLater: true },
-  Aborted: { retryNow: true, retryLater: true },
-  DialExhausted: { retryNow: true, retryLater: true },
-  NoReservation: { retryNow: true, retryLater: true },
-  ResponderBusy: { retryNow: true, retryLater: true },
+  Transient: { retryNow: true, retryLater: true },
   Unknown: { retryNow: false, retryLater: false },
 };
 
@@ -106,7 +88,7 @@ const UNSUPPORTED_PROTOCOL_ERROR_NAME = 'UnsupportedProtocolError';
 /**
  * `err.name` of the pooled wire's stream-teardown error
  * (`PooledStreamResetError` in `message-stream-pool.ts`). It wraps whatever
- * error tore the stream down, so it is classified by that cause when present.
+ * error tore the stream down, so a refusal in its cause is still a refusal.
  */
 const POOLED_STREAM_RESET_ERROR_NAME = 'PooledStreamResetError';
 
@@ -114,13 +96,15 @@ const POOLED_STREAM_RESET_ERROR_NAME = 'PooledStreamResetError';
 const MAX_CAUSE_DEPTH = 4;
 
 /**
- * Typed error names -> category. Only names whose libp2p default wording the
- * previous substring list already treated as recoverable are listed, so keying
- * on the name changes no verdict: it only stops the verdict depending on the
- * wording. (`@libp2p/interface`: `StreamResetError` "The stream has been
- * reset", `ConnectionClosedError` "The connection is closed", `MuxerClosedError`
- * "The muxer is closed", `StreamAbortedError` "The stream has been aborted";
- * `libp2p`: `NoValidAddressesError` "The dial request has no valid addresses".)
+ * Typed error names of a transient transport failure. Only names whose libp2p
+ * default wording the previous substring list already treated as recoverable
+ * are listed, so keying on the name changes no verdict: it only stops the
+ * verdict depending on the wording. (`@libp2p/interface`: `StreamResetError`
+ * "The stream has been reset", `ConnectionClosedError` "The connection is
+ * closed", `MuxerClosedError` "The muxer is closed", `StreamAbortedError` "The
+ * stream has been aborted"; `libp2p`: `NoValidAddressesError` "The dial request
+ * has no valid addresses".) `PooledStreamResetError` is this package's own: the
+ * pooled wire's stream-teardown error.
  *
  * Deliberately NOT listed, because the old list did not retry their default
  * wording and mapping them would widen what the router, the Messenger outbox and
@@ -130,14 +114,13 @@ const MAX_CAUSE_DEPTH = 4;
  * message fallback: callers also use it for their own cancellation, which must
  * not become retryable by name.
  */
-const TRANSPORT_ERROR_NAME_CATEGORY: ReadonlyMap<string, TransportErrorCategory> = new Map([
-  [UNSUPPORTED_PROTOCOL_ERROR_NAME, 'ProtocolUnsupported'],
-  [POOLED_STREAM_RESET_ERROR_NAME, 'PooledStreamReset'],
-  ['StreamResetError', 'ConnectionReset'],
-  ['ConnectionClosedError', 'ConnectionReset'],
-  ['MuxerClosedError', 'ConnectionReset'],
-  ['StreamAbortedError', 'Aborted'],
-  ['NoValidAddressesError', 'DialExhausted'],
+const TRANSIENT_ERROR_NAMES: ReadonlySet<string> = new Set([
+  POOLED_STREAM_RESET_ERROR_NAME,
+  'StreamResetError',
+  'ConnectionClosedError',
+  'MuxerClosedError',
+  'StreamAbortedError',
+  'NoValidAddressesError',
 ]);
 
 /**
@@ -195,51 +178,51 @@ function matchesUnsupportedProtocolMessage(lowerMessage: string): boolean {
 }
 
 /**
- * Last-resort message matching for errors that carry no useful name. This is
- * the previous `isRecoverableSendError` substring list, minus the two
- * negotiation entries (now `ProtocolUnsupported`), with each entry mapped to
- * the category it stands for. Order only decides which category a message that
- * matches several gets. Whether a category is worth retrying is not decided
- * here: it is `TRANSPORT_ERROR_DISPOSITION`'s row for it.
+ * Last-resort message matching for errors that carry no useful name: the
+ * previous `isRecoverableSendError` substring list, minus the two negotiation
+ * entries (those are `ProtocolUnsupported`, checked before this). A match means
+ * `Transient`; whether that is worth retrying is
+ * `TRANSPORT_ERROR_DISPOSITION`'s decision, not this list's. Needles are
+ * lower-case: the caller lower-cases the message.
+ *
+ * `econnreset`, `stream returned in closed state` and `operation was aborted
+ * due to timeout` are contained in `reset`, `closed` and `aborted`. They stay
+ * so the list still spells out the wordings it was written for.
  */
-function classifyTransportMessage(lowerMessage: string): TransportErrorCategory {
-  const msg = lowerMessage;
-  if (msg.includes('no_reservation') || msg.includes('no reservation')) return 'NoReservation';
-  if (
-    // libp2p dial exhaustion — every known multiaddr for the peer failed in
-    // one attempt (`transportManager.dial`, or `dialProtocol` after iterating
-    // every relay/transport candidate).
-    msg.includes('all multiaddr dials failed') ||
-    msg.includes('no valid addresses') ||
-    msg.includes('econnrefused')
-  ) {
-    return 'DialExhausted';
-  }
-  if (
-    msg.includes('etimedout') ||
-    msg.includes('send timeout') ||
-    msg.includes('operation timed out') ||
-    msg.includes('operation was aborted due to timeout')
-  ) {
-    return 'Timeout';
-  }
-  if (
-    msg.includes('closed') ||
-    msg.includes('reset') ||
-    msg.includes('stream returned in closed state') ||
-    msg.includes('econnreset') ||
-    msg.includes('epipe')
-  ) {
-    return 'ConnectionReset';
-  }
-  if (msg.includes('aborted')) return 'Aborted';
-  if (
-    msg.includes('sync responder') &&
-    (msg.includes('queue full') || msg.includes('queue wait exceeded'))
-  ) {
-    return 'ResponderBusy';
-  }
-  return 'Unknown';
+const TRANSIENT_MESSAGE_NEEDLES: readonly string[] = [
+  // Relay without a reservation for the destination.
+  'no_reservation',
+  'no reservation',
+  // libp2p dial exhaustion: every known multiaddr for the peer failed in one
+  // attempt (`transportManager.dial`, or `dialProtocol` after iterating every
+  // relay/transport candidate).
+  'all multiaddr dials failed',
+  'no valid addresses',
+  'econnrefused',
+  // Transport timeouts.
+  'etimedout',
+  'send timeout',
+  'operation timed out',
+  'operation was aborted due to timeout',
+  // Stream, connection or muxer closed or reset.
+  'closed',
+  'reset',
+  'stream returned in closed state',
+  'econnreset',
+  'epipe',
+  // Stream or operation aborted.
+  'aborted',
+];
+
+function matchesTransientMessage(lowerMessage: string): boolean {
+  return (
+    TRANSIENT_MESSAGE_NEEDLES.some((needle) => lowerMessage.includes(needle)) ||
+    // The remote sync responder shed load (queue full / wait exceeded); it
+    // accepts the same request a moment later. Both words are required: its
+    // other refusals (`snapshot limit exceeded`) are permanent.
+    (lowerMessage.includes('sync responder') &&
+      (lowerMessage.includes('queue full') || lowerMessage.includes('queue wait exceeded')))
+  );
 }
 
 function classifyAtDepth(err: unknown, depth: number): TransportErrorCategory {
@@ -255,33 +238,30 @@ function classifyAtDepth(err: unknown, depth: number): TransportErrorCategory {
     return 'ProtocolUnsupported';
   }
 
-  // The pooled wire wraps whatever tore a stream down. Classify by the wrapped
-  // cause when it says something specific, otherwise it is a plain pooled reset.
-  // A cause that cannot be read is an unspecified one, and the depth bound also
-  // ends a cyclic or endless chain.
-  if (name === POOLED_STREAM_RESET_ERROR_NAME) {
-    if (depth < MAX_CAUSE_DEPTH) {
-      const cause = readProperty(err, 'cause');
-      if (cause !== undefined) {
-        const inner = classifyAtDepth(cause, depth + 1);
-        if (inner !== 'Unknown') return inner;
-      }
+  // The pooled wire wraps whatever tore a stream down, so the wrapped cause
+  // may be a refusal the wrapper's own text does not show. Any other cause
+  // leaves the wrapper what its name says: a transient reset. A cause that
+  // cannot be read is an unspecified one, and the depth bound also ends a
+  // cyclic or endless chain.
+  if (name === POOLED_STREAM_RESET_ERROR_NAME && depth < MAX_CAUSE_DEPTH) {
+    const cause = readProperty(err, 'cause');
+    if (cause !== undefined && classifyAtDepth(cause, depth + 1) === 'ProtocolUnsupported') {
+      return 'ProtocolUnsupported';
     }
-    return 'PooledStreamReset';
   }
 
-  const byName = TRANSPORT_ERROR_NAME_CATEGORY.get(name);
-  if (byName !== undefined) return byName;
+  if (TRANSIENT_ERROR_NAMES.has(name)) return 'Transient';
 
-  return classifyTransportMessage(lowerMessage);
+  return matchesTransientMessage(lowerMessage) ? 'Transient' : 'Unknown';
 }
 
 /**
  * Map a send failure to a {@link TransportErrorCategory}.
  *
  * Order: (1) `ProtocolUnsupported`, by typed name or message; (2) a
- * `PooledStreamResetError` is classified by its `cause`; (3) other typed
- * names; (4) message substrings, only for what the name did not settle.
+ * `PooledStreamResetError` is looked through to its `cause`, which can only
+ * make it `ProtocolUnsupported`; (3) `Transient` typed names; (4) message
+ * substrings, only for what the name did not settle.
  * Never throws, whatever it is given: `null`, `undefined` and other non-errors
  * are `Unknown` unless their string form matches, and a `name`, `message` or
  * pooled `cause` that cannot be read (throwing getter, Proxy trap, revoked
