@@ -8,7 +8,10 @@
  *   2. A snapshot that another still-shared asset references survives the grace
  *      period and is reclaimed only after that asset is published as well.
  *   3. A recorded retirement survives a node restart and is finished by the
- *      restarted node; VM reads keep working across the restart.
+ *      restarted node; VM reads keep working across the restart. The node is
+ *      stopped first and both the payload and the retirement record are
+ *      checked on disk while it is down, so the old process cannot have
+ *      finished the work; only then is it started again.
  *   4. The collector's saved resume position is persisted next to the snapshots.
  *
  * Preconditions:
@@ -29,7 +32,6 @@ import {
   REPO_ROOT,
   detectDevnet,
   ensureAllIdentities,
-  fetchRetry,
   lexical,
   parseLastJsonBlock,
   queryNode,
@@ -186,25 +188,65 @@ async function publishAssetAndWait(name: string): Promise<void> {
   });
 }
 
-async function restartNode(node: DevnetNode): Promise<void> {
-  const restarted = spawnSync('bash', [join(REPO_ROOT, 'scripts/devnet.sh'), 'restart-node', String(node.num)], {
+/** `devnet.sh <command> <node>`; `restart-node` on a stopped node is how the script starts it again. */
+function runDevnetNodeCommand(command: 'stop-node' | 'restart-node', node: DevnetNode): void {
+  const result = spawnSync('bash', [join(REPO_ROOT, 'scripts/devnet.sh'), command, String(node.num)], {
     cwd: REPO_ROOT,
     env: process.env,
     encoding: 'utf8',
     timeout: 240_000,
   });
   expect(
-    restarted.status,
-    `devnet.sh restart-node ${node.num} failed\nstdout:\n${restarted.stdout}\nstderr:\n${restarted.stderr}`,
+    result.status,
+    `devnet.sh ${command} ${node.num} failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
   ).toBe(0);
-  await waitFor(`node${node.num} answering /api/status after the restart`, 120_000, 2_000, async () => {
-    try {
-      const res = await fetchRetry(`http://127.0.0.1:${node.apiPort}/api/status`, {}, 1);
-      return res.ok ? true : null;
-    } catch {
-      return null;
-    }
-  });
+}
+
+async function nodeAnswers(node: DevnetNode): Promise<boolean> {
+  try {
+    const res = await fetch(`http://127.0.0.1:${node.apiPort}/api/status`, { signal: AbortSignal.timeout(3_000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/** Stop the node's process (and its managed store) and confirm nothing answers on its API port any more. */
+async function stopNode(node: DevnetNode): Promise<void> {
+  runDevnetNodeCommand('stop-node', node);
+  await waitFor(`node${node.num} to stop answering /api/status`, 30_000, 500, async () =>
+    (await nodeAnswers(node)) ? null : true);
+}
+
+/** Start a stopped node again (same wallets, store and chain state) and wait until it answers. */
+async function startNode(node: DevnetNode): Promise<void> {
+  runDevnetNodeCommand('restart-node', node);
+  await waitFor(`node${node.num} answering /api/status after the start`, 120_000, 2_000, async () =>
+    (await nodeAnswers(node)) ? true : null);
+}
+
+/**
+ * Publish a fresh asset and stop the node while its retirement is recorded but not finished.
+ * Returns once the node is down and both the payload and the record are on disk, which only the
+ * stopped state can establish without racing the collector. When a slow shutdown outlasts the
+ * grace period the old process may have finished the work first; that proves nothing, so the node
+ * is started again and the scenario repeats with a new asset.
+ */
+async function stopNodeWithRetirementPending(): Promise<{ digest: string; subject: string; value: string }> {
+  const { node } = suite;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const name = unique('restart');
+    const { filePath, subject, value } = writeNtFixture(name, `reclaimed after a restart (${attempt})`);
+    await shareAsset(name, filePath);
+    const digest = await waitForSnapshotOf(node, subject);
+    await publishAssetAndWait(name);
+    await waitForRetirementRecord(node, digest);
+    await stopNode(node);
+    const onDisk = readSnapshotDirectory(node);
+    if (onDisk.payloads.has(digest) && onDisk.retired.has(digest)) return { digest, subject, value };
+    await startNode(node);
+  }
+  throw new Error('the node finished the retirement before it stopped on every attempt; nothing was proven about a restart');
 }
 
 beforeAll(async () => {
@@ -306,19 +348,20 @@ describe('finalized snapshot cleanup on devnet', () => {
 
   it('finishes a recorded retirement after a node restart without losing VM reads', async () => {
     const { node, reader, contextGraphId, retentionMs, intervalMs } = suite;
-    const name = unique('restart');
-    const { filePath, subject, value } = writeNtFixture(name, 'reclaimed after a restart');
 
-    await shareAsset(name, filePath);
-    const digest = await waitForSnapshotOf(node, subject);
-    await publishAssetAndWait(name);
-    await waitForRetirementRecord(node, digest);
+    // Stop phase: with the process gone, the payload and its retirement record are both on disk.
+    const { digest, subject, value } = await stopNodeWithRetirementPending();
+    expect(await nodeAnswers(node), 'the stopped node must not answer').toBe(false);
+    const stopped = readSnapshotDirectory(node);
+    expect(stopped.payloads.has(digest), 'the payload must still exist while the node is down').toBe(true);
+    expect(stopped.retired.has(digest), 'the retirement record must still exist while the node is down').toBe(true);
 
-    await restartNode(node);
-    // The record is durable: it is still there (or already finished) and the restarted node completes it.
-    const { sawRecord } = await waitForReclaim(node, digest, retentionMs + 40 * intervalMs + 120_000);
-    expect(readSnapshotDirectory(node).payloads.has(digest)).toBe(false);
-    expect(sawRecord || true).toBe(true);
+    // Start phase: only the new process can finish the record, and VM reads keep working.
+    await startNode(node);
+    await waitForReclaim(node, digest, retentionMs + 40 * intervalMs + 120_000);
+    const finished = readSnapshotDirectory(node);
+    expect(finished.payloads.has(digest)).toBe(false);
+    expect(finished.retired.has(digest)).toBe(false);
     await assertSubjectIn(node, contextGraphId, 'verifiable-memory', subject, value);
     await assertSubjectIn(reader, contextGraphId, 'verifiable-memory', subject, value);
   });
