@@ -149,7 +149,7 @@ describe('runDaemonInner public snapshot page-index wiring', () => {
     mocks.agentCreate.mockImplementation(async config => {
       expect(mocks.createPublicSnapshotStore).not.toHaveBeenCalled();
       const store = { query };
-      return { ...createFakeAgent(), store, publicSnapshotStore: config.publicSnapshotStoreFactory(store) };
+      return { ...createFakeDaemonAgent(), store, publicSnapshotStore: config.publicSnapshotStoreFactory(store) };
     });
 
     await runDaemonInner(true, {

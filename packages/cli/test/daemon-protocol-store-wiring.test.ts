@@ -390,7 +390,10 @@ describe('daemon composition of the protocol persistence stores', () => {
     vi.clearAllTimers();
     vi.useRealTimers();
     vi.unstubAllEnvs();
-    await rm(tempHome, { recursive: true, force: true });
+    // A recursive removal can see a directory that is not yet empty (ENOTEMPTY, seen once
+    // in a run of sixteen daemon-boot suites at the same time; its source was not
+    // identified): retry rather than fail the test on its cleanup.
+    await rm(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   /** A node that last ran before this boot: schema at the current version, protocol rows written by raw SQL. */
