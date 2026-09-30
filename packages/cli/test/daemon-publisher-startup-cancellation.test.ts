@@ -6,6 +6,11 @@ import { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import type { DkgConfig } from '../src/config.js';
 import type { PublisherRuntime, PublisherStartupOutcome, PublisherState } from '../src/publisher-runner.js';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
+import {
+  createFakeDaemonAgent,
+  createFakeDaemonHttpServer,
+  type FakeDaemonAgent,
+} from './_helpers/daemon-boot-doubles.js';
 
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
@@ -88,62 +93,13 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function createFakeServer() {
-  const server = {
-    listen: vi.fn((_port: number, _host: string, callback?: () => void) => {
-      callback?.();
-      return server;
-    }),
-    address: vi.fn(() => ({ port: 43123 })),
-    close: vi.fn((callback?: () => void) => {
-      callback?.();
-      return server;
-    }),
-    on: vi.fn(() => server),
-    once: vi.fn(() => server),
-  };
-  return server;
-}
-
-function createFakeAgent() {
-  const store = { close: vi.fn(async () => undefined) };
-  return {
-    peerId: 'self-peer',
-    multiaddrs: [],
-    wallet: { keypair: { publicKey: new Uint8Array([1]), secretKey: new Uint8Array([2]) } },
-    store,
-    node: { libp2p: { getMultiaddrs: vi.fn(() => []) } },
-    eventBus: { on: vi.fn() },
-    assertion: { create: vi.fn(), write: vi.fn() },
-    setChatAcl: vi.fn(),
-    setSkillAcl: vi.fn(),
-    onChat: vi.fn(),
-    start: vi.fn(async () => undefined),
-    stop: vi.fn(async () => { await store.close(); }),
-    ensureProfilePublished: vi.fn(async () => undefined),
-    publishRelayRegistry: vi.fn(async () => undefined),
-    ensureContextGraphLocal: vi.fn(async () => undefined),
-    getSubscribedContextGraphs: vi.fn(() => new Map()),
-    subscribeToContextGraph: vi.fn(),
-    pingPeers: vi.fn(async () => undefined),
-    listLocalAgents: vi.fn(() => []),
-    registerImportedArtifactByteStore: vi.fn(),
-    getDefaultAgentAddress: vi.fn(() => undefined),
-    query: vi.fn(async () => ({ type: 'bindings', bindings: [] })),
-    createContextGraph: vi.fn(),
-    listContextGraphs: vi.fn(async () => []),
-    createACKTransportFactory: vi.fn(() => ({})),
-    drainRpcUsage: vi.fn(() => ({ calls: 0, errors: 0, throttledMs: 0, byEndpoint: {} })),
-  };
-}
-
 describe('runDaemonInner publisher startup cancellation', () => {
   const events = ['SIGINT', 'SIGTERM', 'uncaughtException', 'unhandledRejection'] as const;
   const processEvents: NodeJS.EventEmitter = process;
   const originalListeners = new Map<string, ReturnType<typeof processEvents.listeners>>();
   const releasePending: (() => void)[] = [];
   let tempHome: string;
-  let agent: ReturnType<typeof createFakeAgent>;
+  let agent: FakeDaemonAgent;
   let shutdownHandler: (() => Promise<void>) | undefined;
   let shutdown: Promise<void> | undefined;
 
@@ -153,9 +109,9 @@ describe('runDaemonInner publisher startup cancellation', () => {
     vi.stubEnv('DKG_HOME', tempHome);
     for (const event of events) originalListeners.set(event, processEvents.listeners(event));
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
-    agent = createFakeAgent();
+    agent = createFakeDaemonAgent();
     mocks.agentCreate.mockResolvedValue(agent);
-    mocks.createServer.mockImplementation(createFakeServer);
+    mocks.createServer.mockImplementation(() => createFakeDaemonHttpServer());
     mocks.backfillOnBoot.mockResolvedValue(undefined);
     mocks.createPublisherControlFromStore.mockReturnValue({});
     mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [] });
