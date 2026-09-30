@@ -138,22 +138,6 @@ interface Internals {
   }): Promise<{ ok: boolean; code?: string; message?: string }>;
   ensureStorageAckLedgerReady(): Promise<boolean>;
   runVmPromotionAudit(): Promise<AuditStatus>;
-  promotedStorageAckCopies(candidates: readonly {
-    operationSubject: string;
-    namespace: string;
-    kaUal: string;
-    assertionVersion: bigint;
-    signedAtMs: number;
-    registered: boolean;
-  }[], active?: () => boolean): Promise<Set<string>>;
-  isStorageAckCopyPromoted(candidate: {
-    operationSubject: string;
-    namespace: string;
-    kaUal: string;
-    assertionVersion: bigint;
-    signedAtMs: number;
-    registered: boolean;
-  }): Promise<boolean>;
   vmReconcileEnabled(): boolean;
   cleanupExpiredSharedMemory(): Promise<number>;
   recordStorageAckDecline(code: string, now?: number): void;
