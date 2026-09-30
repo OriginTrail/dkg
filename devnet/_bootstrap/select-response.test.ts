@@ -160,6 +160,10 @@ describe('selectBindings, strict (the suite\'s reading)', () => {
     ['a structured cell whose value is not a string', { bindings: [{ o: { value: 7 } }] }, 'reply.bindings[0].o.value', 'a string when present', 7],
     ['a structured cell whose datatype is null', { bindings: [{ o: { datatype: null } }] }, 'reply.bindings[0].o.datatype', 'a string when present', null],
     ['a structured cell whose xml:lang is not a string', { bindings: [{ o: { 'xml:lang': ['en'] } }] }, 'reply.bindings[0].o.xml:lang', 'a string when present', ['en']],
+    ['a structured cell whose lang is not a string', { bindings: [{ o: { lang: ['en'] } }] }, 'reply.bindings[0].o.lang', 'a string when present', ['en']],
+    ['a structured cell whose type is not a string', { bindings: [{ o: { type: 1 } }] }, 'reply.bindings[0].o.type', 'a string when present', 1],
+    ['an answer whose only bindings is null', { result: { bindings: null } }, 'reply.result.bindings', 'an array', null],
+    ['an answer whose bindings are null in every envelope', { result: { bindings: null }, results: { bindings: null }, bindings: null }, 'reply.result.bindings', 'an array', null],
   ])('rejects %s, once, with the path, what was expected and what arrived', (_what, json, path, expected, actual) => {
     const { run, calls } = strict(json);
     expect(run).toThrow(Rejected);

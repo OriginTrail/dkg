@@ -471,7 +471,8 @@ describe('parseQueryBindings reads an answer as it did before the shared module'
     const answer = { result: { bindings: null }, bindings: [{ p: '"a"' }] };
     expect(parseQueryBindings(answer)).toEqual([{ p: '"a"' }]);
     expect(() => frozenParseQueryBindings(answer)).toThrow('reply.result.bindings is null, expected an array');
-    expect(() => parseQueryBindings({ result: { bindings: null } })).toThrow(`${ENDPOINT.query}: reply.result.bindings is missing, expected an array (or results.bindings, or bindings)`);
+    // An answer whose only bindings is null says so, as the frozen parser did, not "missing".
+    expect(() => parseQueryBindings({ result: { bindings: null } })).toThrow(`${ENDPOINT.query}: reply.result.bindings is null, expected an array`);
   });
 });
 

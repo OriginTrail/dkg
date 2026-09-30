@@ -166,7 +166,12 @@ export function selectBindings(json: unknown, options: SelectOptions): SparqlBin
     }
   }
   const envelope = selectEnvelope(json);
-  if (envelope === undefined) return reject('reply.result.bindings', 'an array (or results.bindings, or bindings)', undefined);
+  if (envelope === undefined) {
+    // A null is read past, but an answer whose only bindings is null says so, instead of "missing".
+    const nulled = ENVELOPES.find(({ keys }) => keys.reduce<unknown>(member, json) === null);
+    if (nulled !== undefined) return reject(`reply.${nulled.path}`, 'an array', null);
+    return reject('reply.result.bindings', 'an array (or results.bindings, or bindings)', undefined);
+  }
   if (!Array.isArray(envelope.value)) return reject(envelope.path, 'an array', envelope.value);
   const rows: unknown[] = envelope.value;
   return strict ? rows.map((row, index) => projectRow(row, `${envelope.path}[${index}]`, reject)) : (rows as SparqlBindingRow[]);
