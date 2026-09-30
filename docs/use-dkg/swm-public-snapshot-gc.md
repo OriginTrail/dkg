@@ -119,17 +119,25 @@ metadata. The background collector, on its existing five-minute interval:
 A core that signed a StorageACK for the asset also holds that copy's operation
 row (id prefix `storage-ack-`), which carries the same snapshot digest and would
 otherwise keep the file referenced until the SWM TTL. The same cleanup boundary
-removes those rows, only for the same asset at or below the version being
-cleaned up. The version boundary comes from its own lookup over the operations
-being cleaned up, and the copies below it are then read in pages until none is
-left, so the number of copies (and the order a store returns them in) does not
-change which are removed. At most 4,096 copies are read per asset and the
-whole lookup gets a 10 second budget; when either limit is reached the copies
-found so far are removed, the rest stay (and keep the file referenced), and a
-warning is logged. They go in a single store update. A later version's
-copy, another asset's copy and any other kind of operation keep counting as
-references. A failed lookup or update, or a store that cannot run an update,
-leaves the rows (and so the file) in place.
+removes those rows once the SWM graph is dropped, only for the same asset and
+only at or below the newest version being cleaned up. It does this before the
+asset's own operation rows are deleted, because that version boundary is read
+from them; with those rows gone the update finds no boundary and removes
+nothing.
+
+The rows go in one conditional store update: the store itself joins the copies
+to the cleaned operations of the same asset, so neither the number of copies
+(there is no cap) nor the order a store would return them in changes which are
+removed. Versions are compared as canonical decimal strings (by length, then
+digit by digit), so the boundary is exact for any assertion version, including
+those beyond 2^53 or 2^63 where a numeric comparison is inexact or unsupported
+on some engines. A later version's copy, another asset's copy, any other kind of
+operation and the cleaned operations themselves keep counting as references. A
+cleaned operation without a usable version gives no boundary, and then nothing
+is removed. The update is bounded on the client side (10 seconds, with no abort
+signal handed to the store, as for the other cleanup queries). An update that
+fails, is refused or times out, or a store that cannot run an update, leaves the
+rows (and so the file) in place and logs one warning.
 
 Failures to record retirement are logged and do not turn a successful publish
 into an error. A missing checker, unreadable record, failed reference query, or

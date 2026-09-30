@@ -7575,13 +7575,15 @@ export class DKGPublisher implements Publisher {
     // Only this confirmed/durable cleanup boundary creates retirement candidates.
     const warn = (message: string) => this.log.warn(ctx, message);
     await this.publishedSnapshotRetirement.schedule(swmMetaGraph, operationSubjects, warn);
-    // Plan before the asset's own operation rows go: their version bounds which ACK copies are discharged.
-    const dischargedAckCopies = await this.publishedSnapshotRetirement.findDischargedStorageAckCopies(
-      swmMetaGraph, kaScope.ual, operationSubjects, warn);
     const graphs = await resolveSharedMemoryScopeGraphs(this.store, swmGraph, scope);
     for (const graph of graphs) {
       await this.store.dropGraph(graph);
     }
+    // The SWM data is gone, so the StorageACK copies of it describe nothing. This must run BEFORE the
+    // asset's own operation rows are deleted below: the update reads its version boundary from them
+    // and, once they are gone, finds none and removes nothing. It never fails the cleanup.
+    await this.publishedSnapshotRetirement.clearStorageAckCopies(
+      swmMetaGraph, kaScope.ual, operationSubjects, warn);
     await this.deleteStoreByPatternWithoutCount({ graph: swmMetaGraph, subject: headSubject });
     for (const operationSubject of operationSubjects) {
       await this.deleteStoreByPatternWithoutCount({
@@ -7589,7 +7591,6 @@ export class DKGPublisher implements Publisher {
         subject: assertSafeIri(operationSubject),
       });
     }
-    await this.publishedSnapshotRetirement.clearStorageAckCopies(dischargedAckCopies, warn);
     this.log.info(
       ctx,
       `Cleared graph-scoped KA SWM ${scope.identity.agentAddress}/${scope.identity.kaNumber.toString()} ` +
