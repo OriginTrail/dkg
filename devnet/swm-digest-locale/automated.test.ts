@@ -14,7 +14,7 @@
  *     naming its snapshot by the en-US digest. A da-DK edge that joins AFTER the
  *     write catches the graph up through sync, which verifies that advertised
  *     digest against the bytes: it sees all the Shared Working Memory and logs
- *     no digest validation failure (before this change it rejected them).
+ *     no digest validation failure.
  *   PHASE A2 - still without the gate, the da-DK edge originates a share of its
  *     own: it records a DIFFERENT digest than an en-US node does for the same
  *     kind of content. This is the drift the change removes.
