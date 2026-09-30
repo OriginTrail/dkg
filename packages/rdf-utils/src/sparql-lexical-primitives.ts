@@ -120,6 +120,58 @@ function isSparqlVariableContinuationCodePoint(codePoint: number): boolean {
     || (codePoint >= 0x203f && codePoint <= 0x2040);
 }
 
+function rawWidthWhen(
+  source: string,
+  index: number,
+  predicate: (codePoint: number) => boolean,
+): number {
+  if (index < 0 || index >= source.length) return 0;
+  const codePoint = source.codePointAt(index);
+  return codePoint !== undefined
+    && isUnicodeScalarValue(codePoint)
+    && predicate(codePoint)
+    ? (codePoint > 0xffff ? 2 : 1)
+    : 0;
+}
+
+/** End of one raw VARNAME, without SPARQL UCHAR preprocessing. */
+export function readRawSparqlVariableNameEnd(
+  source: string,
+  start: number,
+): number | null {
+  let width = rawWidthWhen(source, start, isSparqlVariableInitialCodePoint);
+  if (!width) return null;
+  let end = start + width;
+  width = rawWidthWhen(source, end, isSparqlVariableContinuationCodePoint);
+  while (width) {
+    end += width;
+    width = rawWidthWhen(source, end, isSparqlVariableContinuationCodePoint);
+  }
+  return end;
+}
+
+/** End of one raw BLANK_NODE_LABEL body, without its `_:` prefix. */
+export function readRawSparqlBlankNodeLabelEnd(
+  source: string,
+  start: number,
+): number | null {
+  let width = rawWidthWhen(source, start, isSparqlVariableInitialCodePoint);
+  if (!width) return null;
+  let cursor = start + width;
+  let validEnd = cursor;
+  while (cursor < source.length) {
+    width = rawWidthWhen(source, cursor, isSparqlPnCharsCodePoint);
+    if (width) {
+      cursor += width;
+      validEnd = cursor;
+      continue;
+    }
+    if (source.charCodeAt(cursor) !== 0x2e) break;
+    cursor += 1;
+  }
+  return validEnd;
+}
+
 export function sparqlVariableInitialWidth(source: string, index: number): number {
   return logicalWidthWhen(source, index, isSparqlVariableInitialCodePoint);
 }

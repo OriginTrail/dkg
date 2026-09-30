@@ -67,8 +67,39 @@ describe('parseWritableRdfTerm blank nodes', () => {
     },
   );
 
-  it.each(['_:', '_:b.', '_:a b', '_:-b', '_:b\n', '_:b>', ' _:b0', '_:b0 '])('rejects %j', (term) => {
+  it.each([
+    '_:', '_:b.', '_:a b', '_:-b', '_:b\n', '_:b>', ' _:b0', '_:b0 ',
+    String.raw`_:\u0061`, '_:\ud800',
+  ])('rejects %j', (term) => {
     expect(kindOf(term)).toBeNull();
+  });
+
+  it.each([
+    [0x00d6, true],
+    [0x00d7, false],
+    [0x00d8, true],
+    [0x037d, true],
+    [0x037e, false],
+    [0x037f, true],
+    [0xd7ff, true],
+    [0xf900, true],
+    [0xfdcf, true],
+    [0xfdd0, false],
+    [0xfdf0, true],
+    [0xfffd, true],
+    [0xfffe, false],
+    [0x10000, true],
+    [0xeffff, true],
+    [0xf0000, false],
+  ])('keeps raw name consumers in parity at U+%s', (codePoint, accepted) => {
+    const character = String.fromCodePoint(codePoint);
+    expect(parseSparqlTsvHeaderVariable(`?${character}`) !== null).toBe(accepted);
+    expect(parseWritableRdfTerm(`_:${character}`) !== null).toBe(accepted);
+  });
+
+  it('does not preprocess escapes in raw result names', () => {
+    expect(parseSparqlTsvHeaderVariable(String.raw`?\u0061`)).toBeNull();
+    expect(parseSparqlTsvHeaderVariable('?\ud800')).toBeNull();
   });
 });
 
@@ -200,5 +231,35 @@ describe('SparqlTsvResultTermCanonicalizer', () => {
     const canonicalizer = new SparqlTsvResultTermCanonicalizer(1, false);
     expect(canonicalizer.canonicalize('<urn:test:b>', 0))
       .toEqual({ kind: 'iri', value: 'urn:test:b' });
+  });
+
+  it('keeps validating while comparisons are paused and after they resume', () => {
+    const canonicalizer = new SparqlTsvResultTermCanonicalizer(1, true);
+    for (let index = 0; index < 16; index += 1) {
+      expect(canonicalizer.canonicalize(`<urn:test:miss-${index}>`, 0))
+        .toEqual({ kind: 'iri', value: `urn:test:miss-${index}` });
+    }
+    expect(canonicalizer.canonicalize('<urn:test:%zz>', 0)).toBeNull();
+    for (let index = 0; index < 127; index += 1) {
+      expect(canonicalizer.canonicalize(`<urn:test:paused-${index}>`, 0)?.kind)
+        .toBe('iri');
+    }
+    expect(canonicalizer.canonicalize('<urn:test:after-pause>', 0))
+      .toEqual({ kind: 'iri', value: 'urn:test:after-pause' });
+    expect(canonicalizer.canonicalize('<urn:test:after-pause>', 0))
+      .toEqual({ kind: 'iri', value: 'urn:test:after-pause' });
+    expect(canonicalizer.canonicalize('<urn:test:%zz>', 0)).toBeNull();
+  });
+
+  it('validates uncached columns and overlength values directly', () => {
+    const canonicalizer = new SparqlTsvResultTermCanonicalizer(129, true);
+    expect(canonicalizer.canonicalize('<urn:test:%zz>', 128)).toBeNull();
+
+    const longIri = `urn:test:${'a'.repeat(1_024)}`;
+    expect(canonicalizer.canonicalize(`<${longIri}>`, 0))
+      .toEqual({ kind: 'iri', value: longIri });
+    expect(canonicalizer.canonicalize(`<${longIri}>`, 0))
+      .toEqual({ kind: 'iri', value: longIri });
+    expect(canonicalizer.canonicalize(`<${longIri}%zz>`, 0)).toBeNull();
   });
 });
