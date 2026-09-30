@@ -220,17 +220,25 @@ describe('a failing step of the snapshot walk carries the walk\'s progress out',
   const walk = (
     publicSnapshotStore: Parameters<typeof syncPublicSnapshotsForMeta>[0]['publicSnapshotStore'],
     entries: ReturnType<typeof entry>[],
-    executionBoundary?: ReturnType<typeof createRecoveryExecutionAdmission>,
+    options: {
+      executionBoundary?: ReturnType<typeof createRecoveryExecutionAdmission>;
+      workAdmission?: typeof UNRESTRICTED_SYNC_WORK;
+      /** Collects the ref of every snapshot the walk asked the transport for. */
+      fetched?: string[];
+    } = {},
   ) => syncPublicSnapshotsForMeta({
     ctx,
     remotePeerId: 'peer-throwing-step',
     contextGraphId: 'cg-throwing-step',
     deadline: Date.now() + 60_000,
-    workAdmission: UNRESTRICTED_SYNC_WORK,
+    workAdmission: options.workAdmission ?? UNRESTRICTED_SYNC_WORK,
     snapshotWalk: { entries },
     publicSnapshotStore,
-    ...(executionBoundary ? { executionBoundary } : {}),
-    fetchSyncPages: async (_ctx, _peer, contextGraphId, _swm, phase) => pageResult(contextGraphId, phase, { quads: written }),
+    ...(options.executionBoundary ? { executionBoundary: options.executionBoundary } : {}),
+    fetchSyncPages: async (_ctx, _peer, contextGraphId, _swm, phase, _graph, _deadline, fetchOptions) => {
+      options.fetched?.push(fetchOptions!.snapshotRef!);
+      return pageResult(contextGraphId, phase, { quads: written });
+    },
     deleteCheckpoint: () => {},
     setCheckpoint: () => {},
   });
@@ -268,23 +276,109 @@ describe('a failing step of the snapshot walk carries the walk\'s progress out',
     });
   });
 
-  it('lets a revoked boundary win over a failing probe, with no progress attached', async () => {
+  /** An execution boundary that can be revoked mid-step; once revoked, `assertCurrent` throws `revoked`. */
+  const revocable = () => {
     const revoked = new Error('recovery revoked');
     let current = true;
-    const boundary = createRecoveryExecutionAdmission({
+    const executionBoundary = createRecoveryExecutionAdmission({
       signal: new AbortController().signal,
       assertCurrent: () => { if (!current) throw revoked; },
     });
+    return { revoked, revoke: () => { current = false; }, executionBoundary };
+  };
+
+  it('lets a revoked boundary win over a failing probe, with no progress attached', async () => {
+    const { revoked, revoke, executionBoundary } = revocable();
     const store = storeProbing('second', new Error('probe failed'));
     const probe = store.lifecycle.acquireExisting;
     store.lifecycle.acquireExisting = async ref => {
       // The boundary is revoked while the second probe is in flight.
-      if (ref === 'second') current = false;
+      if (ref === 'second') revoke();
       return probe(ref);
     };
-    const error = await rejection(walk(store, [entry('first', true), entry('second', true)], boundary));
+    const error = await rejection(walk(store, [entry('first', true), entry('second', true)], { executionBoundary }));
     expect(error).toBe(revoked);
     expect(readPublicSnapshotWalkProgress(error)).toBeUndefined();
+  });
+
+  it('reports a boundary revoked during a probe that succeeds as the revocation, with no progress attached', async () => {
+    const { revoked, revoke, executionBoundary } = revocable();
+    const store = storeProbing('none', new Error('unused'));
+    const probe = store.lifecycle.acquireExisting;
+    store.lifecycle.acquireExisting = async ref => {
+      if (ref === 'second') revoke();
+      return probe(ref);
+    };
+    const error = await rejection(walk(store, [entry('first', true), entry('second', true)], { executionBoundary }));
+    expect(error).toBe(revoked);
+    expect(readPublicSnapshotWalkProgress(error)).toBeUndefined();
+  });
+
+  it('lets a revoked boundary win over a failing store write, with no progress attached', async () => {
+    const { revoked, revoke, executionBoundary } = revocable();
+    const store = {
+      ...storeProbing('none', new Error('unused')),
+      // The boundary is revoked while the write is in flight, which then fails on its own.
+      putSnapshot: async (): Promise<never> => { revoke(); throw new Error('disk full'); },
+    };
+    const error = await rejection(walk(store, [entry('first', true), entry(writtenDigest, false)], { executionBoundary }));
+    expect(error).toBe(revoked);
+    expect(readPublicSnapshotWalkProgress(error)).toBeUndefined();
+  });
+
+  describe('reuse comes before the work-admission check', () => {
+    const spent = { ...UNRESTRICTED_SYNC_WORK, canAdmitWork: () => false };
+    /** A store whose existence probe finds nothing: the file is gone. */
+    const storeAbsent = (probes: string[] = []) => {
+      const store = storeProbing('none', new Error('unused'));
+      return {
+        ...store,
+        lifecycle: { ...store.lifecycle, acquireExisting: async (ref: string): Promise<(() => void) | undefined> => { probes.push(ref); return undefined; } },
+      };
+    };
+
+    it('counts every reusable entry as ready while this pass\'s allowance is spent, without spending any work', async () => {
+      const probes: string[] = [];
+      const fetched: string[] = [];
+      const result = await walk(storeProbing('none', new Error('unused'), probes),
+        [entry('first', true), entry('second', true)], { workAdmission: spent, fetched });
+      expect(probes).toEqual(['first', 'second']);
+      expect(fetched).toEqual([]);
+      expect(result).toMatchObject({ readySnapshots: 2, totalSnapshots: 2, missingCount: 0, completed: true });
+      expect(result.localYield).toBeUndefined();
+    });
+
+    it('yields at the first entry that needs work, after the reused entries before it', async () => {
+      const probes: string[] = [];
+      const fetched: string[] = [];
+      const result = await walk(storeProbing('none', new Error('unused'), probes),
+        [entry('first', true), entry(writtenDigest, false), entry('third', true)], { workAdmission: spent, fetched });
+      expect(probes).toEqual(['first']);
+      expect(fetched).toEqual([]);
+      expect(result).toMatchObject({
+        readySnapshots: 1, totalSnapshots: 3, missingCount: 2, missingSample: [writtenDigest, 'third'],
+        completed: false, localYield: true,
+      });
+    });
+
+    it('falls through to the normal fetch path when the reuse probe finds the file absent', async () => {
+      const probes: string[] = [];
+      const fetched: string[] = [];
+      const result = await walk(storeAbsent(probes), [entry(writtenDigest, true)], { fetched });
+      expect(probes).toEqual([writtenDigest]);
+      expect(fetched).toEqual([writtenDigest]);
+      expect(result).toMatchObject({ readySnapshots: 1, completedPhases: 1, missingCount: 0, completed: true });
+    });
+
+    it('holds an entry whose file is absent to the work-admission check, as a local yield and not a failure', async () => {
+      const fetched: string[] = [];
+      const result = await walk(storeAbsent(), [entry(writtenDigest, true)], { workAdmission: spent, fetched });
+      expect(fetched).toEqual([]);
+      expect(result).toMatchObject({
+        readySnapshots: 0, totalSnapshots: 1, missingCount: 1, missingSample: [writtenDigest],
+        completed: false, localYield: true,
+      });
+    });
   });
 });
 

@@ -1872,46 +1872,42 @@ export async function syncPublicSnapshotsInScope(params: {
 
   for (const [index, { snapshot, reuse }] of entries.entries()) {
     executionBoundary.assertCurrent();
-    // The owner decides which manifest-bound evidence this pass can reuse.
-    // Avoid repeating blob and assertion validation when that owner has
-    // already established it, leaving time for unresolved refs to advance.
-    let reused = false;
-    if (reuse) {
-      try {
-        reused = await params.publicSnapshotStore.retainExisting(snapshot.ref);
-      } catch (err) {
-        // A failing existence probe leaves the walk like any other step of this KA: a revoked
-        // boundary wins, and otherwise the walk's progress travels out with the error.
-        executionBoundary.assertCurrent();
-        rethrowWithProgress(err, index);
-      }
-    }
-    if (reused) {
-      executionBoundary.assertCurrent();
-      readySnapshots += 1;
-      continue;
-    }
-    // Collection may have won before the reuse lease. Missing bytes follow the
-    // normal validation/fetch path; never commit metadata pointing at that gap.
-    // Yield BETWEEN Knowledge Assets, and check the clock BEFORE doing any work
-    // for this one. Both halves matter:
-    //
-    // - Before, not after: first or changed-file validation can require a full
-    //   read and digest, and a miss is a network round trip. Checking afterwards
-    //   would let one KA overrun the budget it was supposed to respect.
-    // - Before the fetch specifically: no `SyncPageResult` exists yet, so
-    //   `timedOutPhases` structurally CANNOT move on this path. That is what
-    //   keeps a local budget decision from being reported as a peer timeout and
-    //   putting a healthy responder into backoff.
-    //
-    // Never mid-KA: a snapshot is applied whole or not at all, so stopping here
-    // can never leave a partially materialized asset.
-    if (!workAdmission.canAdmitWork()) {
-      localYield = true;
-      abandonFrom(index);
-      break;
-    }
+    // ONE error boundary covers everything this Knowledge Asset does, the reuse
+    // probe included, so a failure at any step leaves the walk the same way (see
+    // the catch below).
     try {
+      // The owner decides which manifest-bound evidence this pass can reuse.
+      // Avoid repeating blob and assertion validation when that owner has
+      // already established it, leaving time for unresolved refs to advance.
+      // This comes before the work-admission check on purpose: an established
+      // ref costs no fresh work, so it counts as ready even when this pass's
+      // allowance is already spent.
+      if (reuse && (await params.publicSnapshotStore.retainExisting(snapshot.ref))) {
+        executionBoundary.assertCurrent();
+        readySnapshots += 1;
+        continue;
+      }
+      // Collection may have won before the reuse lease. Missing bytes follow the
+      // normal validation/fetch path; never commit metadata pointing at that gap.
+      // Yield BETWEEN Knowledge Assets, and check the clock BEFORE doing any work
+      // for this one. Both halves matter:
+      //
+      // - Before, not after: first or changed-file validation can require a full
+      //   read and digest, and a miss is a network round trip. Checking afterwards
+      //   would let one KA overrun the budget it was supposed to respect.
+      // - Before the fetch specifically: no `SyncPageResult` exists yet, so
+      //   `timedOutPhases` structurally CANNOT move on this path. That is what
+      //   keeps a local budget decision from being reported as a peer timeout and
+      //   putting a healthy responder into backoff.
+      //
+      // Never mid-KA: a snapshot is applied whole or not at all, so stopping here
+      // can never leave a partially materialized asset.
+      if (!workAdmission.canAdmitWork()) {
+        localYield = true;
+        abandonFrom(index);
+        break;
+      }
+
       if (await executionBoundary.read(
         () => hasValidSnapshot(params.publicSnapshotStore!, snapshot),
       )) {
@@ -2010,9 +2006,10 @@ export async function syncPublicSnapshotsInScope(params: {
       readySnapshots += 1;
     } catch (err) {
       executionBoundary.assertCurrent();
-      // Any failure in this KA's work — the blob read, the fetch, the
-      // digest check, the store write, or materialization — leaves the walk
-      // here. Carry what earlier iterations achieved out with it.
+      // Any failure in this KA's work — the reuse probe, the blob read, the
+      // fetch, the digest check, the store write, or materialization — leaves
+      // the walk here. A revoked boundary wins (above); otherwise carry what
+      // earlier iterations achieved out with the error.
       rethrowWithProgress(err, index);
     }
   }
