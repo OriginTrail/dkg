@@ -23,7 +23,7 @@ import {
   sourceFiles,
   succeeded,
 } from './ci-plan-fixtures.mjs';
-import { BUILD_ONLY_SCRIPTS, SUPPORT_PATH_ROUTES, scriptsPattern } from '../ci-routing.mjs';
+import { BUILD_ONLY_SCRIPTS, INSTALL_HOOK_INPUTS, SUPPORT_PATH_ROUTES, scriptsPattern } from '../ci-routing.mjs';
 import { COMMAND_EFFECTS, workflowExecution } from './ci-execution-graph.mjs';
 import { edgeRequirement, jobRequirement, laneSeeds } from './lane-entrypoints.mjs';
 import { dependenciesOf, loadReferences, packageImports, repoScriptMentions, traceLaneLoads, workspaceClosure } from './load-graph.mjs';
@@ -237,6 +237,26 @@ test('repository support paths route to the lanes that execute them', () => {
   }
 });
 
+// The daemon runtime the browser suite boots (scripts/devnet.sh) outside its
+// UI surface and harness: on a pull request each runs its own lanes and the
+// CLI daemon tests, and the browser suite follows after merge.
+const BROWSER_SUITE_DEFERRED = [
+  'packages/adapter-hermes',
+  'packages/adapter-openclaw',
+  'packages/adapter-prime-agent',
+  'packages/agent',
+  'packages/chain',
+  'packages/epcis',
+  'packages/http-utils',
+  'packages/local-llm',
+  'packages/mcp-dkg',
+  'packages/okf',
+  'packages/publisher',
+  'packages/query',
+  'packages/random-sampling',
+  'packages/storage',
+];
+
 test('the browser suite follows the UI surface and the packages its harness compiles against', () => {
   // UI surface: node-ui, its graph-viz dependency and the daemon HTTP API in
   // cli. Harness: the workspaces packages/node-ui/e2e imports, with their
@@ -258,22 +278,7 @@ test('the browser suite follows the UI surface and the packages its harness comp
   const booted = workspaceClosure([...devnet.matchAll(/\$REPO_ROOT\/(packages\/[a-z0-9-]+)\//g)].map(([, workspace]) => workspace));
   assert.ok(booted.has('packages/agent'), 'the devnet daemons run the agent');
   const deferred = [...booted].filter((workspace) => !triggers.has(workspace) && !WORKSPACE_RULES[workspace].forceFull).sort();
-  assert.deepEqual(deferred, [
-    'packages/adapter-hermes',
-    'packages/adapter-openclaw',
-    'packages/adapter-prime-agent',
-    'packages/agent',
-    'packages/chain',
-    'packages/epcis',
-    'packages/http-utils',
-    'packages/local-llm',
-    'packages/mcp-dkg',
-    'packages/okf',
-    'packages/publisher',
-    'packages/query',
-    'packages/random-sampling',
-    'packages/storage',
-  ]);
+  assert.deepEqual(deferred, BROWSER_SUITE_DEFERRED);
   for (const workspace of deferred) {
     const plan = pullRequestPlan([change(`${workspace}/src/index.ts`)]);
     assert.equal(plan.lanes.kosava_node_ui_e2e, false, workspace);
@@ -426,21 +431,33 @@ const UNFOLLOWED_LOADS = new Map([
 // What the load-closure guard reports for a trace: each load whose file does
 // not select the requirement that reaches it, and each module load computed
 // or script path assembled at run time that UNFOLLOWED_LOADS does not
-// explain. A requirement is a lane or EVM scope that loads the file, or
-// `full` for what runs in every job or shapes the build output every lane
-// restores (lane-entrypoints.mjs). A file inside a package workspace meets
-// `full` by its workspace's rule, which decides who a change to that
-// workspace reaches (the ownership and browser-suite tests pin those rules).
+// explain. The requirements (lane-entrypoints.mjs):
+// - a lane or `evm:<scope>` that loads the file;
+// - `build`: the shared build job's own checks run it;
+// - `full`: every job runs it (an install hook), or a job outside the lanes;
+// - `build-output:<workspace>`: that workspace's build or pack runs it, and
+//   every lane restores the output. A repository file needs full CI; a file
+//   in a package workspace must select every lane and scope the producing
+//   workspace's rule selects, except the browser suite for the runtime it
+//   follows after merge (BROWSER_SUITE_DEFERRED).
 // `plan(file)` plans a change to one file.
 function loadClosureGaps({ loaded, unfollowed }, { plan = (file) => pullRequestPlan([change(file)]) } = {}) {
-  const inWorkspace = (file) => Object.keys(WORKSPACE_RULES).some((workspace) => file.startsWith(`${workspace}/`));
+  const workspaceOf = (file) => Object.keys(WORKSPACE_RULES).find((workspace) => file.startsWith(`${workspace}/`));
+  const coversBuildOutput = (target, targetPlan, producer) => {
+    const workspace = workspaceOf(target);
+    if (!workspace) return false;
+    const { lanes, evmScopes } = WORKSPACE_RULES[producer];
+    return lanes.every((lane) => targetPlan.lanes[lane] || (lane === 'kosava_node_ui_e2e' && BROWSER_SUITE_DEFERRED.includes(workspace)))
+      && evmScopes.every((scope) => targetPlan.evmScopes.includes(scope));
+  };
   const missing = [];
   for (const [target, requirements] of loaded) {
     const targetPlan = plan(target);
     if (targetPlan.mode === 'full') continue;
     for (const [requirement, via] of requirements) {
-      const selected = requirement === 'full' ? inWorkspace(target)
+      const selected = requirement === 'full' ? false
         : requirement === 'build' ? needsSharedBuild(targetPlan)
+        : requirement.startsWith('build-output:') ? coversBuildOutput(target, targetPlan, requirement.slice('build-output:'.length))
         : requirement.startsWith('evm:') ? targetPlan.evmScopes.includes(requirement.slice(4))
         : targetPlan.lanes[requirement];
       if (!selected) missing.push(`${requirement} loads ${target} via ${via}`);
@@ -470,7 +487,9 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
     ['test-systems/storage-conformance.test.ts', 'tornado_blazegraph', 'pnpm test:conformance runs in the Blazegraph job'],
     ['devnet/rfc64-persistence-lifecycle/verify.ts', 'tornado_agent', 'the reusable Windows workflow, run on the agent lane, runs the Gate 0 harness'],
     ['scripts/devnet.sh', 'bura_cli', 'the CLI Blazegraph smoke fixture sources the devnet bootstrap'],
-    ['scripts/copy-cli-runtime-assets.mjs', 'full', "the CLI build copies its runtime assets into the build output every lane restores"],
+    ['scripts/copy-cli-runtime-assets.mjs', 'build-output:packages/cli', 'the CLI build copies its runtime assets into the build output every lane restores'],
+    ['packages/cli/scripts/verify-node-sqlite-runtime.mjs', 'full', "every job's install runs the root and CLI preinstall hooks"],
+    ['packages/cli/markitdown-build-info.json', 'full', "every job's install runs the CLI postinstall, which reads it"],
   ]) {
     assert.ok(loadedBy.get(target)?.has(requirement), why);
   }
@@ -478,6 +497,9 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   // vendored-ABI test's hint that names it.
   const syncTest = 'packages/chain/test/sync-chain-abis.unit.test.ts';
   assert.ok(loadReferences(syncTest, fs.readFileSync(path.join(REPO_ROOT, syncTest), 'utf8')).paths.includes('scripts/sync-chain-abis.mjs'));
+  // Every file INSTALL_HOOK_INPUTS routes to full CI is still one an install
+  // hook reaches; the gap check below finds any it misses.
+  assert.deepEqual(INSTALL_HOOK_INPUTS.filter((file) => !loadedBy.get(file)?.has('full')), [], 'stale INSTALL_HOOK_INPUTS entries');
   const { missing, unexplained, computed } = loadClosureGaps(trace);
   assert.deepEqual(missing, [], 'a change to these files must select the lane or EVM scope that loads them');
   // A load the trace cannot follow fails closed until it is listed with the
@@ -537,14 +559,14 @@ test('one execution graph feeds the seeds and the gap check, direct and indirect
   ]);
   const { seeds, missing } = plantedWorkflowGaps(workflow, { execution });
   assert.equal(seeds.get('scripts/audit-dial-protocol.mjs')?.has('build'), true);
-  assert.equal(seeds.get('scripts/copy-cli-runtime-assets.mjs')?.has('full'), true);
+  assert.equal(seeds.get('scripts/copy-cli-runtime-assets.mjs')?.has('build-output:packages/cli'), true);
   assert.deepEqual(missing, []);
   // A docs-only plan runs neither the build nor anything else.
   const nothing = () => pullRequestPlan([change('docs/ci-delta-policy.md')]);
   const undocumented = plantedWorkflowGaps(workflow, { execution, plan: nothing }).missing;
   for (const gap of [
     'build loads scripts/audit-dial-protocol.mjs via ci.yml build',
-    'full loads scripts/copy-cli-runtime-assets.mjs via ci.yml build > release:verify-pack > packages/cli prepack',
+    'build-output:packages/cli loads scripts/copy-cli-runtime-assets.mjs via ci.yml build > release:verify-pack > packages/cli prepack',
   ]) {
     assert.ok(undocumented.includes(gap), gap);
   }
@@ -581,8 +603,9 @@ test('workspace scripts count where CI runs them, not because their workspace ow
   // A manual script in a lane-owning workspace is no lane input; a job
   // command that runs it adds that job's lane. The shared build runs every
   // workspace's build (turbo build) for the output every lane restores, so
-  // what a build runs needs full CI, as does an install hook. A workspace
-  // script's paths resolve from its own directory.
+  // what a build runs carries that workspace's build output; an install hook
+  // runs in every job. A workspace script's paths resolve from its own
+  // directory.
   const cli = {
     name: '@origintrail-official/dkg',
     scripts: {
@@ -604,7 +627,7 @@ test('workspace scripts count where CI runs them, not because their workspace ow
     '    steps:',
     `      - run: ${laneCommand}`,
   ].join('\n')]];
-  const shared = ['full packages/cli build', 'full packages/cli build:prepared', 'full packages/cli preinstall'];
+  const shared = ['build-output:packages/cli packages/cli build', 'build-output:packages/cli packages/cli build:prepared', 'full packages/cli preinstall'];
   assert.deepEqual(scriptRuns(workflow('pnpm install --frozen-lockfile'), execution), shared);
   assert.deepEqual(scriptRuns(workflow("pnpm --filter '@origintrail-official/dkg' run release:dry-run"), execution), [...shared, 'bura_cli packages/cli release:dry-run'].sort());
   // A filter the graph cannot resolve fails instead of hiding what runs.
@@ -623,8 +646,8 @@ test('workspace scripts count where CI runs them, not because their workspace ow
     fs.readFileSync(path.join(REPO_ROOT, '.github/workflows', workflow), 'utf8'),
   ])));
   for (const run of [
-    'full packages/cli build:prepared',
-    'full packages/cli prepack',
+    'build-output:packages/cli packages/cli build:prepared',
+    'build-output:packages/cli packages/cli prepack',
     'full packages/cli postinstall',
     'full . preinstall',
     'kosava_node_ui packages/node-ui build:ui',
@@ -656,22 +679,47 @@ test('pnpm filter selectors resolve on the injected workspace graph alone', () =
   assert.deepEqual(built('fixture-*'), ['packages/a', 'packages/b', 'packages/c', 'packages/d']);
 });
 
-test('the load-closure guard holds what the build runs to full CI', () => {
-  // A planted mutation: were the CLI asset copier routed to the CLI lane
-  // alone, the guard must report it. A workspace file its imports reach keeps
-  // its workspace's rule.
+test('the load-closure guard holds install hooks to full CI and builds to their output', () => {
+  // What every job's install runs needs full CI, the CLI preinstall's own
+  // script included, though it lives in the CLI workspace: a plan routing it
+  // by the CLI rule, as before, is reported.
+  const preinstall = 'packages/cli/scripts/verify-node-sqlite-runtime.mjs';
+  const seeds = laneSeeds({ workspaceCode: false });
+  assert.match(seeds.get(preinstall)?.get('full') ?? '', /> preinstall$/);
+  assert.equal(pullRequestPlan([change(preinstall)]).mode, 'full');
+  const installed = { loaded: new Map([[preinstall, new Map([['full', 'ci.yml build > preinstall']])]]), unfollowed: new Map() };
+  assert.deepEqual(loadClosureGaps(installed).missing, []);
+  const byWorkspace = (file) => pullRequestPlan([change(file === preinstall ? 'packages/cli/src/cli.ts' : file)]);
+  assert.deepEqual(loadClosureGaps(installed, { plan: byWorkspace }).missing, [`full loads ${preinstall} via ci.yml build > preinstall`]);
+
+  // What the CLI build runs carries the CLI's build output: the asset copier,
+  // a repository file, needs full CI, so routing it to the CLI lane alone is
+  // reported. A workspace file it loads must select the CLI rule's lanes,
+  // except the browser suite for the runtime that suite follows after merge.
   const copier = 'scripts/copy-cli-runtime-assets.mjs';
-  const trace = {
+  const output = 'build-output:packages/cli';
+  const built = {
     loaded: new Map([
-      [copier, new Map([['full', 'packages/cli build:prepared']])],
-      ['packages/cli/blazegraph-image-metadata.cjs', new Map([['full', copier]])],
+      [copier, new Map([[output, 'packages/cli build:prepared']])],
+      ['packages/cli/blazegraph-image-metadata.cjs', new Map([[output, copier]])],
+      ['packages/storage/blazegraph-namespace-contract.cjs', new Map([[output, 'packages/cli/blazegraph-image-metadata.cjs']])],
     ]),
     unfollowed: new Map(),
   };
-  assert.deepEqual(loadClosureGaps(trace).missing, []);
+  assert.equal(pullRequestPlan([change('packages/storage/blazegraph-namespace-contract.cjs')]).lanes.kosava_node_ui_e2e, false);
+  assert.deepEqual(loadClosureGaps(built).missing, []);
   const narrowed = (file) => pullRequestPlan([change(file === copier ? 'scripts/devnet-publish-helpers.sh' : file)]);
   assert.deepEqual(selectedLanes(narrowed(copier)), ['bura_cli']);
-  assert.deepEqual(loadClosureGaps(trace, { plan: narrowed }).missing, [`full loads ${copier} via packages/cli build:prepared`]);
+  assert.deepEqual(loadClosureGaps(built, { plan: narrowed }).missing, [`${output} loads ${copier} via packages/cli build:prepared`]);
+  // Outside the deferred runtime, a workspace must select every CLI lane.
+  const graphViz = 'packages/graph-viz/src/index.ts';
+  const withoutBrowser = (file) => {
+    const plan = pullRequestPlan([change(file)]);
+    return file === graphViz ? { ...plan, lanes: { ...plan.lanes, kosava_node_ui_e2e: false } } : plan;
+  };
+  const viz = { loaded: new Map([[graphViz, new Map([[output, copier]])]]), unfollowed: new Map() };
+  assert.deepEqual(loadClosureGaps(viz).missing, []);
+  assert.deepEqual(loadClosureGaps(viz, { plan: withoutBrowser }).missing, [`${output} loads ${graphViz} via ${copier}`]);
 });
 
 test('a script path a lane assembles at run time fails the guard until it is listed', () => {

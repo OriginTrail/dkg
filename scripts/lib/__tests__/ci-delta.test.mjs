@@ -299,6 +299,11 @@ test('control-plane changes force full Node/EVM CI without overriding the Solidi
     'scripts/build.mjs',
     // A repository script no build-only family lists fails closed.
     'scripts/new-helper.sh',
+    // What the CLI's install hooks run, in every job's install.
+    'packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+    'packages/cli/scripts/bundle-markitdown-binaries.mjs',
+    'packages/cli/scripts/markitdown-bundle-validation.mjs',
+    'packages/cli/markitdown-build-info.json',
   ];
 
   for (const filePath of controlPlanePaths) {
