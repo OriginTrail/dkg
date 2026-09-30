@@ -88,15 +88,38 @@ const TRANSPORT_ERROR_NAME_CATEGORY: ReadonlyMap<string, TransportErrorCategory>
   ['NoValidAddressesError', 'DialExhausted'],
 ]);
 
+/**
+ * Every value a send can fail with is untrusted: a thrown object may be a
+ * Proxy, a revoked Proxy or carry accessors that throw. These classifiers run
+ * inside the catch blocks of the router, the outbox and sync, so a read that
+ * throws here would replace the send's real failure with the classifier's own
+ * and bypass the handling the verdict was meant to select. All reads of the
+ * error therefore go through the guarded helpers below: a property that cannot
+ * be read counts as absent.
+ */
+function readProperty(value: unknown, key: 'name' | 'cause'): unknown {
+  if (typeof value !== 'object' || value === null) return undefined;
+  try {
+    return (value as Record<string, unknown>)[key];
+  } catch {
+    return undefined;
+  }
+}
+
+/** `err.name`, or `''` when it is not a readable string. */
 function errorName(err: unknown): string {
-  if (typeof err !== 'object' || err === null) return '';
-  const name = (err as { name?: unknown }).name;
+  const name = readProperty(err, 'name');
   return typeof name === 'string' ? name : '';
 }
 
+/**
+ * `err.message` (or the string form of a non-Error), or `''` when it cannot be
+ * read or is not a string (a getter can return anything).
+ */
 function errorMessage(err: unknown): string {
   try {
-    return err instanceof Error ? err.message : String(err);
+    const message: unknown = err instanceof Error ? err.message : String(err);
+    return typeof message === 'string' ? message : '';
   } catch {
     return '';
   }
@@ -181,11 +204,15 @@ function classifyAtDepth(err: unknown, depth: number): TransportErrorCategory {
 
   // The pooled wire wraps whatever tore a stream down. Classify by the wrapped
   // cause when it says something specific, otherwise it is a plain pooled reset.
+  // A cause that cannot be read is an unspecified one, and the depth bound also
+  // ends a cyclic or endless chain.
   if (name === POOLED_STREAM_RESET_ERROR_NAME) {
-    const cause = (err as { cause?: unknown }).cause;
-    if (cause !== undefined && depth < MAX_CAUSE_DEPTH) {
-      const inner = classifyAtDepth(cause, depth + 1);
-      if (inner !== 'Unknown') return inner;
+    if (depth < MAX_CAUSE_DEPTH) {
+      const cause = readProperty(err, 'cause');
+      if (cause !== undefined) {
+        const inner = classifyAtDepth(cause, depth + 1);
+        if (inner !== 'Unknown') return inner;
+      }
     }
     return 'PooledStreamReset';
   }
@@ -202,8 +229,10 @@ function classifyAtDepth(err: unknown, depth: number): TransportErrorCategory {
  * Order: (1) `ProtocolUnsupported`, by typed name or message; (2) a
  * `PooledStreamResetError` is classified by its `cause`; (3) other typed
  * names; (4) message substrings, only for what the name did not settle.
- * Never throws; `null`, `undefined` and other non-errors are `Unknown` unless
- * their string form matches.
+ * Never throws, whatever it is given: `null`, `undefined` and other non-errors
+ * are `Unknown` unless their string form matches, and a `name`, `message` or
+ * pooled `cause` that cannot be read (throwing getter, Proxy trap, revoked
+ * Proxy) counts as absent.
  */
 export function classifyTransportError(err: unknown): TransportErrorCategory {
   return classifyAtDepth(err, 0);

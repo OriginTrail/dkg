@@ -1463,6 +1463,52 @@ describe('ProtocolRouter', () => {
       expect(dialCalls).toBe(1);
     });
 
+    it('rejects with the original failure, not a classifier exception, when the thrown error\'s name cannot be read', async () => {
+      let dialCalls = 0;
+      const original = new Error('handler error');
+      Object.defineProperty(original, 'name', {
+        get() {
+          throw new Error('name getter failed');
+        },
+      });
+      const router = makeRouter({
+        onResolve: () => undefined,
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw original;
+        },
+      });
+
+      await expect(
+        router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1])),
+      ).rejects.toBe(original);
+      expect(dialCalls).toBe(1);
+    });
+
+    it('still retries by message when the thrown error\'s name cannot be read', async () => {
+      let dialCalls = 0;
+      const router = makeRouter({
+        onResolve: () => undefined,
+        dialBehavior: async () => {
+          dialCalls += 1;
+          if (dialCalls < 2) {
+            const reset = new Error('read ECONNRESET');
+            Object.defineProperty(reset, 'name', {
+              get() {
+                throw new Error('name getter failed');
+              },
+            });
+            throw reset;
+          }
+          return makeStubStream(new Uint8Array([0x0C])) as any;
+        },
+      });
+
+      const result = await router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]));
+      expect(result).toEqual(new Uint8Array([0x0C]));
+      expect(dialCalls).toBe(2);
+    });
+
     it('retries a refusal when the caller opts in with retryOnProtocolRefusal (a peer that is still booting)', async () => {
       let dialCalls = 0;
       const router = makeRouter({

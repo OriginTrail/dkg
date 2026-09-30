@@ -217,6 +217,257 @@ describe('classifyTransportError', () => {
   });
 });
 
+/**
+ * A send can fail with any thrown value, including a Proxy or an object whose
+ * accessors throw. The classifiers run in the catch blocks of the router, the
+ * outbox and sync, so they must give a verdict for such a value and never
+ * replace the original failure with their own exception.
+ */
+describe('hostile error values (throwing accessors, Proxies)', () => {
+  const GETTER_FAILED = 'accessor failed';
+
+  /** Make `key` on `target` an accessor that throws. */
+  function withThrowingAccessor<T extends object>(target: T, key: string): T {
+    Object.defineProperty(target, key, {
+      configurable: true,
+      get() {
+        throw new Error(GETTER_FAILED);
+      },
+    });
+    return target;
+  }
+
+  /** Make `key` on `target` an accessor that returns `value`. */
+  function withAccessorReturning<T extends object>(target: T, key: string, value: unknown): T {
+    Object.defineProperty(target, key, { configurable: true, get: () => value });
+    return target;
+  }
+
+  const throwingTrap = (): never => {
+    throw new Error(GETTER_FAILED);
+  };
+  /** A Proxy whose every reflective trap throws. */
+  function proxyWithEveryTrapThrowing(): object {
+    return new Proxy({}, {
+      get: throwingTrap,
+      getPrototypeOf: throwingTrap,
+      has: throwingTrap,
+      ownKeys: throwingTrap,
+      getOwnPropertyDescriptor: throwingTrap,
+    });
+  }
+  function revokedProxy(): object {
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+    return proxy;
+  }
+
+  interface Verdict {
+    category: TransportErrorCategory;
+    recoverable: boolean;
+    retryableLater: boolean;
+    unsupported: boolean;
+  }
+
+  /** Run every public predicate; a throw from any of them fails the calling test. */
+  function verdictOf(err: unknown): Verdict {
+    return {
+      category: classifyTransportError(err),
+      recoverable: isRecoverableSendError(err),
+      retryableLater: isRetryableLaterSendError(err),
+      unsupported: isProtocolUnsupportedError(err),
+    };
+  }
+
+  const cases: Array<{ label: string; err: () => unknown; verdict: Verdict }> = [
+    // --- an unreadable `name` counts as absent; the message still decides ---
+    {
+      label: 'throwing name getter, refusal wording -> the message still says ProtocolUnsupported',
+      err: () => withThrowingAccessor(
+        new Error('Protocol selection failed - could not negotiate /dkg/10.0.1/message'),
+        'name',
+      ),
+      verdict: { category: 'ProtocolUnsupported', recoverable: false, retryableLater: true, unsupported: true },
+    },
+    {
+      label: 'throwing name getter, reset wording -> ConnectionReset',
+      err: () => withThrowingAccessor(new Error('read ECONNRESET'), 'name'),
+      verdict: { category: 'ConnectionReset', recoverable: true, retryableLater: true, unsupported: false },
+    },
+    {
+      label: 'throwing name getter, unrecognised wording -> Unknown',
+      err: () => withThrowingAccessor(new Error('Invalid payload'), 'name'),
+      verdict: { category: 'Unknown', recoverable: false, retryableLater: false, unsupported: false },
+    },
+    {
+      label: 'name getter returning a non-string -> treated as absent',
+      err: () => withAccessorReturning(new Error('Invalid payload'), 'name', { toString: () => 'UnsupportedProtocolError' }),
+      verdict: { category: 'Unknown', recoverable: false, retryableLater: false, unsupported: false },
+    },
+    {
+      label: 'plain object with a throwing name getter and no message -> Unknown',
+      err: () => withThrowingAccessor({}, 'name'),
+      verdict: { category: 'Unknown', recoverable: false, retryableLater: false, unsupported: false },
+    },
+
+    // --- an unreadable or non-string `message` counts as empty; the name still decides ---
+    {
+      label: 'typed refusal whose message getter throws -> ProtocolUnsupported by name',
+      err: () => withThrowingAccessor(new UnsupportedProtocolError('declined'), 'message'),
+      verdict: { category: 'ProtocolUnsupported', recoverable: false, retryableLater: true, unsupported: true },
+    },
+    {
+      label: 'typed reset whose message getter throws -> ConnectionReset by name',
+      err: () => withThrowingAccessor(new StreamResetError('gone'), 'message'),
+      verdict: { category: 'ConnectionReset', recoverable: true, retryableLater: true, unsupported: false },
+    },
+    {
+      label: 'generic error whose message getter throws -> Unknown',
+      err: () => withThrowingAccessor(new Error('unused'), 'message'),
+      verdict: { category: 'Unknown', recoverable: false, retryableLater: false, unsupported: false },
+    },
+    ...[42, null, Symbol('message'), { toString: () => 'econnreset' }].map((message, index) => ({
+      label: `generic error whose message is not a string (#${index}) -> Unknown`,
+      err: () => withAccessorReturning(new Error('unused'), 'message', message),
+      verdict: { category: 'Unknown' as const, recoverable: false, retryableLater: false, unsupported: false },
+    })),
+    {
+      label: 'typed reset whose message is not a string -> ConnectionReset by name',
+      err: () => withAccessorReturning(new StreamResetError('gone'), 'message', 42),
+      verdict: { category: 'ConnectionReset', recoverable: true, retryableLater: true, unsupported: false },
+    },
+
+    // --- an unreadable pooled `cause` is an unspecified pooled reset ---
+    {
+      label: 'PooledStreamResetError with a throwing cause getter -> PooledStreamReset',
+      err: () => withThrowingAccessor(new PooledStreamResetError('request timeout'), 'cause'),
+      verdict: { category: 'PooledStreamReset', recoverable: true, retryableLater: true, unsupported: false },
+    },
+    {
+      label: 'pooled wrapper with refusal wording and a throwing cause -> ProtocolUnsupported (the message is checked first)',
+      err: () => withThrowingAccessor(
+        new PooledStreamResetError('Protocol selection failed - could not negotiate /dkg/10.0.2/message'),
+        'cause',
+      ),
+      verdict: { category: 'ProtocolUnsupported', recoverable: false, retryableLater: true, unsupported: true },
+    },
+    {
+      label: 'pooled wrapper whose cause has an unreadable name and a timeout message -> Timeout',
+      err: () => new PooledStreamResetError('open failed', {
+        cause: withThrowingAccessor(new Error('operation timed out'), 'name'),
+      }),
+      verdict: { category: 'Timeout', recoverable: true, retryableLater: true, unsupported: false },
+    },
+    {
+      label: 'pooled wrapper whose cause has an unreadable name and no known wording -> PooledStreamReset',
+      err: () => new PooledStreamResetError('open failed', {
+        cause: withThrowingAccessor(new Error('handler error'), 'name'),
+      }),
+      verdict: { category: 'PooledStreamReset', recoverable: true, retryableLater: true, unsupported: false },
+    },
+    {
+      label: 'pooled wrapper whose cause is a Proxy with every trap throwing -> PooledStreamReset',
+      err: () => new PooledStreamResetError('open failed', { cause: proxyWithEveryTrapThrowing() }),
+      verdict: { category: 'PooledStreamReset', recoverable: true, retryableLater: true, unsupported: false },
+    },
+    {
+      label: 'pooled wrapper whose cause is a revoked Proxy -> PooledStreamReset',
+      err: () => new PooledStreamResetError('open failed', { cause: revokedProxy() }),
+      verdict: { category: 'PooledStreamReset', recoverable: true, retryableLater: true, unsupported: false },
+    },
+    {
+      label: 'pooled wrapper whose cause is a typed refusal with a throwing message getter -> ProtocolUnsupported',
+      err: () => new PooledStreamResetError('open failed', {
+        cause: withThrowingAccessor(new UnsupportedProtocolError('declined'), 'message'),
+      }),
+      verdict: { category: 'ProtocolUnsupported', recoverable: false, retryableLater: true, unsupported: true },
+    },
+
+    // --- Proxies ---
+    {
+      label: 'Proxy whose get trap always throws -> Unknown',
+      err: () => new Proxy({}, { get: throwingTrap }),
+      verdict: { category: 'Unknown', recoverable: false, retryableLater: false, unsupported: false },
+    },
+    {
+      label: 'Proxy whose every trap throws -> Unknown',
+      err: proxyWithEveryTrapThrowing,
+      verdict: { category: 'Unknown', recoverable: false, retryableLater: false, unsupported: false },
+    },
+    {
+      label: 'revoked Proxy -> Unknown',
+      err: revokedProxy,
+      verdict: { category: 'Unknown', recoverable: false, retryableLater: false, unsupported: false },
+    },
+    {
+      label: 'Proxy around a real refusal whose name trap throws -> ProtocolUnsupported by message',
+      err: () => new Proxy(new Error('Protocol selection failed - could not negotiate /dkg/x'), {
+        get(target, key, receiver) {
+          if (key === 'name') throw new Error(GETTER_FAILED);
+          return Reflect.get(target, key, receiver);
+        },
+      }),
+      verdict: { category: 'ProtocolUnsupported', recoverable: false, retryableLater: true, unsupported: true },
+    },
+    {
+      label: 'Proxy around a StreamResetError whose message trap throws -> ConnectionReset by name',
+      err: () => new Proxy(new StreamResetError('gone'), {
+        get(target, key, receiver) {
+          if (key === 'message') throw new Error(GETTER_FAILED);
+          return Reflect.get(target, key, receiver);
+        },
+      }),
+      verdict: { category: 'ConnectionReset', recoverable: true, retryableLater: true, unsupported: false },
+    },
+    {
+      label: 'string conversion that throws -> Unknown',
+      err: () => ({ toString: throwingTrap }),
+      verdict: { category: 'Unknown', recoverable: false, retryableLater: false, unsupported: false },
+    },
+  ];
+
+  for (const { label, err, verdict } of cases) {
+    it(`${label}`, () => {
+      expect(verdictOf(err())).toEqual(verdict);
+    });
+  }
+
+  it('gives the same verdict when the same hostile value is classified again', () => {
+    const value = withThrowingAccessor(new PooledStreamResetError('request timeout'), 'cause');
+    expect(verdictOf(value)).toEqual(verdictOf(value));
+  });
+
+  it('ends an endless pooled cause chain (each cause read yields a fresh wrapper) after a bounded number of reads', () => {
+    let causeReads = 0;
+    const endless = (): object => new Proxy({}, {
+      get(_target, key) {
+        if (key === 'name') return 'PooledStreamResetError';
+        if (key === 'cause') {
+          causeReads += 1;
+          return endless();
+        }
+        return undefined;
+      },
+    });
+    expect(classifyTransportError(endless())).toBe('PooledStreamReset');
+    // One classification follows a bounded number of links (MAX_CAUSE_DEPTH).
+    expect(causeReads).toBeGreaterThan(0);
+    expect(causeReads).toBeLessThanOrEqual(4);
+    expect(verdictOf(endless())).toEqual({
+      category: 'PooledStreamReset',
+      recoverable: true,
+      retryableLater: true,
+      unsupported: false,
+    });
+  });
+
+  it('ends a pooled cause getter that returns the wrapper itself', () => {
+    const err = new PooledStreamResetError('request timeout');
+    Object.defineProperty(err, 'cause', { configurable: true, get: () => err });
+    expect(verdictOf(err).category).toBe('PooledStreamReset');
+  });
+});
+
 describe('PooledStreamResetError classification', () => {
   it('is recoverable by name whatever its message says', () => {
     const err = new PooledStreamResetError('request timeout');
