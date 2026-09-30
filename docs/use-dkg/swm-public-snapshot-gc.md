@@ -136,10 +136,17 @@ when it is a canonical `xsd:integer` literal, which is what every writer emits;
 any other form is neither a boundary nor a discharged copy. A later version's
 copy, another asset's copy, any other kind of operation and the cleaned
 operations themselves keep counting as references. Without a usable version
-among the cleaned operations there is no boundary, and nothing is removed. The update is bounded on the client side (10 seconds, with no abort
-signal handed to the store, as for the other cleanup queries). An update that
-fails, is refused or times out, or a store that cannot run an update, leaves the
-rows (and so the file) in place and logs one warning.
+among the cleaned operations there is no boundary, and nothing is removed.
+
+The update is bounded on the client side (10 seconds, with no abort signal
+handed to the store, as for the other cleanup queries). An update that fails, is
+refused or times out, or a store that cannot run an update, leaves the rows (and
+so the file) in place and logs one warning. Removing the rows is the store's
+cost: measured, 700 copies take tens of milliseconds on Oxigraph and about 1.4
+seconds on Blazegraph, and 4,000 copies about 20 seconds on Blazegraph, so an
+unusually large set on a Blazegraph node can outlast the bound. Then the warning
+is logged, the cleanup carries on, and the copies stay unless the store still
+completes the update.
 
 Failures to record retirement are logged and do not turn a successful publish
 into an error. A missing checker, unreadable record, failed reference query, or
