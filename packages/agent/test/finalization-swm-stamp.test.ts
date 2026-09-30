@@ -117,6 +117,37 @@ describe('#1609 — SWM snapshot-root memo (finalization reconcile)', () => {
     }
   });
 
+  it('defers too many legacy operation rows before graph-family inventory', async () => {
+    vi.stubEnv('DKG_LEGACY_SWM_MAX_FALLBACK_OP_ROWS', '2');
+    try {
+      const store = withReadSnapshotForTest(new OxigraphStore());
+      const chain = new MockChainAdapter();
+      const fh = new FinalizationHandler(store, chain);
+      await store.insert([1, 2, 3].map((n) => ({
+        subject: `urn:dkg:share:large-${n}`,
+        predicate: 'http://dkg.io/ontology/rootEntity',
+        object: `urn:fact:large-${n}`,
+        graph: wsMetaGraph,
+      })));
+      const absent = rootFor('urn:fact:absent-large', 'published elsewhere');
+      chain.__registerKC({ kaId: 9907n, contextGraphId: ON_CHAIN_CG, merkleRootHex: ethers.hexlify(absent), chunks: [] });
+      const queries = vi.spyOn(store, 'query');
+      const graphLists = vi.spyOn(store, 'listGraphs');
+
+      expect(await reconcileOne(chain, fh, 9907n)).toBe('no-swm');
+      expect(queries.mock.calls.some(([sparql, options]) =>
+        options?.source === 'agent.finalization.swmSnapshotCandidates'
+        && /LIMIT 3\b/.test(sparql))).toBe(true);
+      expect(graphLists.mock.calls.some(([options]) =>
+        options?.source === 'agent.finalization.legacySnapshotScan.preflight')).toBe(false);
+      expect((await readStamps(store)).size).toBe(0);
+      graphLists.mockRestore();
+      queries.mockRestore();
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('still promotes a Merkle-verified stamped operation in an oversized family', async () => {
     vi.stubEnv('DKG_LEGACY_SWM_MAX_FALLBACK_GRAPHS', '2');
     try {
