@@ -5931,15 +5931,22 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // profile, bound to a sharding-table identity on chain). They only ever
     // fill capacity the two tiers below leave free; see `appendVmHolderTier`.
     const holderPeerIds = this.vmReconcileHolderTierByCg?.get(localCgId)?.peerIds ?? [];
+    // With no hint the roster is returned as composed, touching nothing new
+    // (this node's own peer id is only read when there is a hint to filter).
+    const withHolders = (roster: string[]): string[] => (
+      holderPeerIds.length === 0
+        ? roster
+        : appendVmHolderTier(
+          roster,
+          holderPeerIds,
+          this.peerId,
+          DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
+        )
+    );
     const libp2p = (this.node as any)?.libp2p;
     const getConnections = libp2p?.getConnections;
     if (typeof getConnections !== 'function') {
-      return appendVmHolderTier(
-        curatorOrder.slice(0, DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX),
-        holderPeerIds,
-        this.peerId,
-        DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
-      );
+      return withHolders(curatorOrder.slice(0, DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX));
     }
     const peersById = new Map<string, { toString(): string }>();
     for (const connection of getConnections.call(libp2p) as Array<{
@@ -5978,12 +5985,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const boundedOrdinary = ordinaryOrder
       .filter((peerId) => !curatorSet.has(peerId))
       .slice(0, ordinaryBudget);
-    return appendVmHolderTier(
-      [...boundedCurators, ...boundedOrdinary],
-      holderPeerIds,
-      this.peerId,
-      DKGAgentBase.VM_RECONCILE_EXACT_ROSTER_MAX,
-    );
+    return withHolders([...boundedCurators, ...boundedOrdinary]);
   }
 
   /** Kill switch for the holder tier: `DKG_VM_RECONCILE_HOLDER_TIER=0`. */
@@ -6019,8 +6021,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
   /**
    * Refresh one public graph's hinted-holder tier. Advisory and bounded: never
    * throws, reads at most one shared resolution per TTL, and only writes this
-   * graph's own entry so no other graph's roster moves. Private and unknown
-   * policies get an empty tier: hint-derived peers are never asked about them.
+   * graph's own entry so no other graph's roster moves. A private graph gets an
+   * empty tier (hint-derived peers are never asked about it), and a policy or
+   * chain read that fails keeps the previous set only for a bounded time.
    */
   async refreshVmReconcileHolderTier(
     this: DKGAgent,
