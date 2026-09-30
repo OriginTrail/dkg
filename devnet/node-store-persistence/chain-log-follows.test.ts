@@ -279,6 +279,7 @@ describe('judgeChainLogFollows', () => {
     ['another log index', { logIndex: PUBLISH_LOG_INDEX + 1 }],
     ['another emitting contract', { address: OTHER_CONTRACT }],
     ['another event signature', { topics: [CG_CREATED_TOPIC0, CG_TOPIC, KA_TOPIC] }],
+    ['another Context Graph id', { topics: [KA_REGISTERED_TOPIC0, OTHER_KA_TOPIC, KA_TOPIC] }],
     ['another Knowledge Asset id', { topics: [KA_REGISTERED_TOPIC0, CG_TOPIC, OTHER_KA_TOPIC] }],
     ['a missing Knowledge Asset id topic', { topics: [KA_REGISTERED_TOPIC0, CG_TOPIC] }],
   ])('does not accept an event of the right transaction with %s', async (_label, differs) => {
