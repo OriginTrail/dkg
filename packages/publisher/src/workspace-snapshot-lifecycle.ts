@@ -181,12 +181,12 @@ export class WorkspaceSnapshotScope implements CompleteSnapshotIO {
   readonly getSnapshotPage: WorkspaceSnapshotIO['getSnapshotPage'];
 
   /** Read once, where it is checked: a later swap of `store.lifecycle` or removal of a method cannot bypass the check. */
-  private readonly lifecycle: WorkspaceSnapshotLifecycle | undefined;
+  private readonly checkedLifecycle: WorkspaceSnapshotLifecycle | undefined;
 
   private constructor(private readonly store: WorkspacePublicSnapshotStore) {
     // Every operation starts here, so a lifecycle that breaks the contract is refused before any I/O.
-    this.lifecycle = store.lifecycle;
-    assertWorkspaceSnapshotLifecycle(this.lifecycle);
+    this.checkedLifecycle = store.lifecycle;
+    assertWorkspaceSnapshotLifecycle(this.checkedLifecycle);
     if (store.validateSnapshot) this.validateSnapshot = async (ref, digest, count) => {
       await this.retain(ref);
       return store.validateSnapshot!(ref, digest, count);
@@ -211,7 +211,7 @@ export class WorkspaceSnapshotScope implements CompleteSnapshotIO {
 
   /** Hold the store's operation-long lease, if it offers one, until the scope closes. */
   private async retain(ref: string): Promise<void> {
-    const lifecycle = this.lifecycle;
+    const lifecycle = this.checkedLifecycle;
     // The same check as at the start of the scope: a method removed from the lifecycle while the operation
     // runs fails here, loudly, instead of the operation carrying on without its lease.
     assertWorkspaceSnapshotLifecycle(lifecycle);
@@ -226,7 +226,7 @@ export class WorkspaceSnapshotScope implements CompleteSnapshotIO {
     await this.retain(ref);
     // The existence probe is separate from the lease policy: a store that takes no operation-long
     // lease can still have lost the file (for example to pressure GC), and reuse must then fetch it again.
-    const lifecycle = this.lifecycle;
+    const lifecycle = this.checkedLifecycle;
     if (!lifecycle) return true; // A custom I/O store without a lifecycle owns its retention policy.
     // Only the store's explicit `false` means "absent". A probe that fails for any other reason
     // (EACCES, EIO, EMFILE, a gate failure, a defect) propagates: fetching a copy would not repair a
