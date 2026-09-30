@@ -85,8 +85,6 @@ command -v curl >/dev/null 2>&1 || skip "curl not available"
 # shellcheck source=devnet-lib.sh
 . "$REPO_ROOT/scripts/devnet-lib.sh" || skip "cannot source scripts/devnet-lib.sh"
 
-node_up() { [ "$(code_of "$(api "$1" GET /api/status)")" = "200" ]; }
-
 # One line per node dir: "<n> <backend> <port> <clientTimeoutMs>"; <port> only for
 # the daemon-managed oxigraph-server backend (default bind port 7878).
 topology="$(node -e '

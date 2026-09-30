@@ -60,7 +60,8 @@ const REPO_ROOT = resolve(HERE, '..', '..');
 const SCRIPT = resolve(REPO_ROOT, 'scripts', 'devnet-test-store-outage.sh');
 const CALLER_ABORT_SCRIPT = resolve(REPO_ROOT, 'scripts', 'devnet-test-managed-oxigraph-caller-abort.sh');
 
-// Must match `SKIP_EXIT` in scripts/devnet-test-store-outage.sh.
+// Must match `SKIP_EXIT` in scripts/devnet-test-store-outage.sh and in
+// scripts/devnet-test-managed-oxigraph-caller-abort.sh.
 const SKIP_EXIT = 3;
 // Required-lane opt-in: a precondition SKIP becomes a hard FAILURE.
 const REQUIRE_RUN = process.env.DEVNET_REQUIRE_STORE_OUTAGE === '1';
@@ -109,22 +110,58 @@ type Outcome =
 
 const tailLines = (s: string, n: number): string => s.split('\n').slice(-n).join('\n');
 
-/** Last `[store-outage] SKIP: ...` (or `[oxigraph-abort] SKIP: ...`) guidance line the script printed, if any. */
-function lastSkipGuidance(stdout: string): string {
-  const hits = stdout.split('\n').filter((l) => /\[(store-outage|oxigraph-abort)\] SKIP:/.test(l));
+/**
+ * One script this wrapper runs, as far as reporting its outcome goes. Both the
+ * exit-code policy and the messages are the same for every script; only these
+ * words differ, so a failure names the script that actually failed.
+ */
+interface ScriptProfile {
+  /** File name of the script, as a failure names it. */
+  readonly script: string;
+  /** Prefix of the script's `say`/`skip` lines, e.g. `[store-outage]`. */
+  readonly logPrefix: string;
+  /** What DEVNET_REQUIRE_STORE_OUTAGE=1 demands of this script, and how to satisfy it. */
+  readonly requiredLaneGuidance: string;
+}
+
+const STORE_OUTAGE_PROFILE: ScriptProfile = {
+  script: 'devnet-test-store-outage.sh',
+  logPrefix: '[store-outage]',
+  requiredLaneGuidance:
+    `requires the store-outage integration to actually run, ` +
+    `but a precondition was unmet and the script SKIPPED (exit ${SKIP_EXIT}) — the outage was ` +
+    `NOT exercised. Stand up a 6-node devnet (./scripts/devnet.sh start 6, an EDGE publisher + ` +
+    `an oxigraph-server core to isolate) so the incident path is covered.`,
+};
+
+const CALLER_ABORT_PROFILE: ScriptProfile = {
+  script: 'devnet-test-managed-oxigraph-caller-abort.sh',
+  logPrefix: '[oxigraph-abort]',
+  requiredLaneGuidance:
+    `requires the managed-Oxigraph caller-abort scenario to actually run, ` +
+    `but a precondition was unmet and the script SKIPPED (exit ${SKIP_EXIT}) — abandoned reads and ` +
+    `the client-deadline overrun were NOT exercised. Stand up a 6-node devnet ` +
+    `(./scripts/devnet.sh start 6; a node on the daemon-managed oxigraph-server backend, ` +
+    `cores 1-2 by default) so the restart-on-abandon regression is covered.`,
+};
+
+/** Last `<logPrefix> SKIP: ...` guidance line the script printed, if any. */
+function lastSkipGuidance(stdout: string, logPrefix: string): string {
+  const hits = stdout.split('\n').filter((l) => l.includes(`${logPrefix} SKIP:`));
   return hits.length ? hits[hits.length - 1].trim() : '(no SKIP: guidance line captured)';
 }
 
 /**
- * Map the script's exit code to a test outcome (otReviewAgent #1517):
+ * Map a script's exit code to a test outcome (otReviewAgent #1517):
  *   0        → ran (the wrapper then asserts the load-bearing PASS contract)
  *   SKIP_EXIT→ precondition unmet: a SKIP normally, but a hard FAIL when the
- *              required-lane flag demands the outage actually be exercised
+ *              required-lane flag demands the scenario actually be exercised
  *   other    → a real failure
  * A SKIP is NEVER classified as `ran`, so a non-run can never be reported as a
- * passing outage-coverage result.
+ * passing coverage result.
  */
-export function classifyStoreOutageRun(
+function classifyScriptRun(
+  profile: ScriptProfile,
   exitCode: number,
   stdout: string,
   stderr: string,
@@ -132,15 +169,12 @@ export function classifyStoreOutageRun(
 ): Outcome {
   if (exitCode === 0) return { kind: 'ran' };
   if (exitCode === SKIP_EXIT) {
-    const guidance = lastSkipGuidance(stdout);
+    const guidance = lastSkipGuidance(stdout, profile.logPrefix);
     if (requireRun) {
       return {
         kind: 'fail',
         reason:
-          `DEVNET_REQUIRE_STORE_OUTAGE=1 requires the store-outage integration to actually run, ` +
-          `but a precondition was unmet and the script SKIPPED (exit ${SKIP_EXIT}) — the outage was ` +
-          `NOT exercised. Stand up a 6-node devnet (./scripts/devnet.sh start 6, an EDGE publisher + ` +
-          `an oxigraph-server core to isolate) so the incident path is covered.\n` +
+          `DEVNET_REQUIRE_STORE_OUTAGE=1 ${profile.requiredLaneGuidance}\n` +
           `Script guidance: ${guidance}`,
       };
     }
@@ -149,10 +183,20 @@ export function classifyStoreOutageRun(
   return {
     kind: 'fail',
     reason:
-      `devnet-test-store-outage.sh exited ${exitCode}\n` +
+      `${profile.script} exited ${exitCode}\n` +
       `--- last 40 lines of stderr ---\n${tailLines(stderr, 40)}\n` +
       `--- last 40 lines of stdout ---\n${tailLines(stdout, 40)}`,
   };
+}
+
+/** The store-outage script's outcome (see {@link classifyScriptRun}). */
+export function classifyStoreOutageRun(
+  exitCode: number,
+  stdout: string,
+  stderr: string,
+  requireRun: boolean,
+): Outcome {
+  return classifyScriptRun(STORE_OUTAGE_PROFILE, exitCode, stdout, stderr, requireRun);
 }
 
 describe('storage-ack-store-outage — a core store failing mid-publish degrades gracefully', () => {
@@ -222,7 +266,7 @@ describe('managed Oxigraph — a caller abort does not restart a healthy server'
       { ...process.env },
       true,
     );
-    const outcome = classifyStoreOutageRun(exitCode, stdout, stderr, REQUIRE_RUN);
+    const outcome = classifyScriptRun(CALLER_ABORT_PROFILE, exitCode, stdout, stderr, REQUIRE_RUN);
     if (outcome.kind === 'skip') {
       // eslint-disable-next-line no-console
       console.warn(`[managed-oxigraph-caller-abort] SKIPPED (precondition unmet) — ${outcome.reason}`);
@@ -277,9 +321,57 @@ describe('storage-ack-store-outage — a precondition SKIP is never reported as 
 
     expect(exitCode).toBe(SKIP_EXIT);
     expect(stdout).toMatch(/\[oxigraph-abort\] SKIP:/);
-    expect(classifyStoreOutageRun(exitCode, stdout, '', false).kind).toBe('skip');
-    expect(classifyStoreOutageRun(exitCode, stdout, '', true).kind).toBe('fail');
+    expect(classifyScriptRun(CALLER_ABORT_PROFILE, exitCode, stdout, '', false).kind).toBe('skip');
+    expect(classifyScriptRun(CALLER_ABORT_PROFILE, exitCode, stdout, '', true).kind).toBe('fail');
   }, 30_000);
+
+  it('reports a caller-abort failure, skip and required-lane miss under that script, not the outage one', () => {
+    const failed = classifyScriptRun(CALLER_ABORT_PROFILE, 1, '', 'boom', false);
+    expect(failed.kind).toBe('fail');
+    if (failed.kind === 'fail') {
+      expect(failed.reason).toMatch(/^devnet-test-managed-oxigraph-caller-abort\.sh exited 1\n/);
+      expect(failed.reason).not.toMatch(/store-outage/);
+    }
+
+    // The skip guidance is the script's own line, never the other script's.
+    const stdout = '[store-outage] SKIP: outage guidance\n[oxigraph-abort] SKIP: no devnet at ./.devnet\n';
+    expect(classifyScriptRun(CALLER_ABORT_PROFILE, SKIP_EXIT, stdout, '', false))
+      .toEqual({ kind: 'skip', reason: '[oxigraph-abort] SKIP: no devnet at ./.devnet' });
+    expect(classifyScriptRun(STORE_OUTAGE_PROFILE, SKIP_EXIT, stdout, '', false))
+      .toEqual({ kind: 'skip', reason: '[store-outage] SKIP: outage guidance' });
+
+    const required = classifyScriptRun(CALLER_ABORT_PROFILE, SKIP_EXIT, stdout, '', true);
+    expect(required.kind).toBe('fail');
+    if (required.kind === 'fail') {
+      expect(required.reason).toMatch(/DEVNET_REQUIRE_STORE_OUTAGE=1 requires the managed-Oxigraph caller-abort scenario/);
+      expect(required.reason).toMatch(/oxigraph-server backend/);
+      expect(required.reason).not.toMatch(/incident path|outage integration|EDGE publisher/);
+      expect(required.reason).toMatch(/Script guidance: \[oxigraph-abort\] SKIP: no devnet/);
+    }
+    // A run that exits 0 is the only one that ran.
+    expect(classifyScriptRun(CALLER_ABORT_PROFILE, 0, '', '', true)).toEqual({ kind: 'ran' });
+  });
+
+  it('keeps the store-outage messages exactly as they were', () => {
+    const failed = classifyStoreOutageRun(1, 'out', 'err', false);
+    expect(failed).toEqual({
+      kind: 'fail',
+      reason:
+        'devnet-test-store-outage.sh exited 1\n'
+        + '--- last 40 lines of stderr ---\nerr\n'
+        + '--- last 40 lines of stdout ---\nout',
+    });
+    const required = classifyStoreOutageRun(SKIP_EXIT, '[store-outage] SKIP: no devnet at ./.devnet', '', true);
+    expect(required).toEqual({
+      kind: 'fail',
+      reason:
+        'DEVNET_REQUIRE_STORE_OUTAGE=1 requires the store-outage integration to actually run, '
+        + 'but a precondition was unmet and the script SKIPPED (exit 3) — the outage was '
+        + 'NOT exercised. Stand up a 6-node devnet (./scripts/devnet.sh start 6, an EDGE publisher + '
+        + 'an oxigraph-server core to isolate) so the incident path is covered.\n'
+        + 'Script guidance: [store-outage] SKIP: no devnet at ./.devnet',
+    });
+  });
 
   it('the REAL script exits with the SKIP code (3), never 0, when its first precondition is unmet', async () => {
     // Point DEVNET_DIR at a directory that cannot exist so the very first
