@@ -41,28 +41,23 @@
  * waits a couple of reconcile sweeps).
  */
 import { describe, it, expect, beforeAll } from 'vitest';
-import { execFileSync, spawn } from 'node:child_process';
-import { readFileSync, existsSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import * as http from 'node:http';
 import { ethers } from 'ethers';
 import { runKaPublishLifecycle } from '../_bootstrap/harness';
+import * as lifecycle from '../_bootstrap/node-lifecycle';
 
 // ───────────────────────────── constants ─────────────────────────────────
 const REPO_ROOT = resolve(__dirname, '../..');
 const DEVNET_DIR = join(REPO_ROOT, '.devnet');
 /** RPC is read from node1's config (devnet.sh wires it from HARDHAT_PORT), so a
- *  non-default Hardhat port works without editing the test. */
+ *  non-default Hardhat port works without editing the test. `DEVNET_RPC` wins. */
 function detectRpc(): string {
-  if (process.env.DEVNET_RPC) return process.env.DEVNET_RPC;
-  try {
-    const cfg = JSON.parse(readFileSync(join(DEVNET_DIR, 'node1', 'config.json'), 'utf8'));
-    if (cfg?.chain?.rpcUrl) return cfg.chain.rpcUrl;
-  } catch { /* fall through */ }
-  return 'http://127.0.0.1:8545';
+  return process.env.DEVNET_RPC || lifecycle.rpcUrlFromNode1Config(DEVNET_DIR);
 }
 const RPC = detectRpc();
-const DEVNET_SH = join(REPO_ROOT, 'scripts/devnet.sh');
 const CONTEXT_GRAPH = 'devnet-test';
 const CORE_NODES = [1, 2, 3, 4];
 
@@ -97,65 +92,14 @@ function api(node: DevnetNode): string {
   return `http://127.0.0.1:${node.apiPort}`;
 }
 
-/** Port env for `devnet.sh restart-node`, derived from node1's config so the
- *  restart matches whatever (possibly non-default) ports this devnet uses. */
-function devnetPortEnv(): Record<string, string> {
-  const cfg = JSON.parse(readFileSync(join(DEVNET_DIR, 'node1', 'config.json'), 'utf8'));
-  const rpcPort = new URL(RPC).port || '8545';
-  return {
-    HARDHAT_PORT: rpcPort,
-    API_PORT_BASE: String(cfg.apiPort ?? 9201),
-    LIBP2P_PORT_BASE: String(cfg.listenPort ?? 10001),
-  };
-}
-
-const NODE_PID_FILES = ['daemon.pid', 'devnet.pid'] as const;
-
-interface NodePidEntry {
-  file: string;
-  pid: number;
-}
-
-/** Every pid that belongs to a node. `devnet.pid` is just the `cli.js start`
- *  launcher, which double-forks the real worker (`daemon.pid`, reparented to
- *  init) and then EXITS — so killing only `devnet.pid` leaves the API serving.
- *  Return both (daemon first) so the caller can take the node truly offline. */
-function readNodePidEntries(num: number): NodePidEntry[] {
-  const entries: NodePidEntry[] = [];
-  for (const f of NODE_PID_FILES) {
-    const pidf = join(DEVNET_DIR, `node${num}`, f);
-    if (!existsSync(pidf)) continue;
-    const pid = parseInt(readFileSync(pidf, 'utf8').trim(), 10);
-    if (Number.isFinite(pid)) entries.push({ file: f, pid });
-  }
-  return entries;
-}
-
-function readNodePids(num: number): number[] {
-  return [...new Set(readNodePidEntries(num).map((entry) => entry.pid))];
-}
-
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/** Remove only pid files whose PIDs are known dead. If a live but unhealthy
- *  daemon still owns a pid file, preserve ownership until we explicitly stop
- *  it; deleting first lets `restart-node` launch a duplicate process. */
-function clearDeadNodePidFiles(num: number): void {
-  for (const entry of readNodePidEntries(num)) {
-    if (pidAlive(entry.pid)) continue;
-    const pidf = join(DEVNET_DIR, `node${num}`, entry.file);
-    try {
-      if (existsSync(pidf)) rmSync(pidf);
-    } catch { /* best-effort */ }
-  }
-}
+// Node lifecycle (PID files, liveness, restart, readiness) is shared with the
+// other suites that kill or restart a node: see ../_bootstrap/node-lifecycle.ts.
+// This suite's own choices: the Hardhat port for `restart-node` comes from `RPC`
+// (which honours DEVNET_RPC), and readiness is probed with the node's bearer
+// token, no request timeout, every 2 s.
+const PATHS: lifecycle.DevnetPaths = { repoRoot: REPO_ROOT, devnetDir: DEVNET_DIR };
+const pidAlive = lifecycle.pidAlive;
+const clearDeadNodePidFiles = (num: number): void => lifecycle.clearDeadNodePidFiles(PATHS, num);
 
 // ───────────────────────────── HTTP helpers ──────────────────────────────
 function request(
@@ -216,14 +160,8 @@ function askIsTrue(body: any): boolean {
   return false;
 }
 
-async function nodeReachable(node: DevnetNode): Promise<boolean> {
-  try {
-    const r = await request('GET', api(node) + '/api/status', node.authToken);
-    return r.status === 200;
-  } catch {
-    return false;
-  }
-}
+const nodeReachable = (node: DevnetNode): Promise<boolean> =>
+  lifecycle.nodeReachable(node.apiPort, { authToken: node.authToken });
 
 async function waitFor<T>(
   label: string,
@@ -241,19 +179,10 @@ async function waitFor<T>(
   throw new Error(`timed out after ${timeoutMs}ms waiting for: ${label}`);
 }
 
-async function waitForPidsGone(label: string, pids: number[], timeoutMs: number): Promise<boolean> {
-  try {
-    await waitFor(label, timeoutMs, 500, async () =>
-      pids.every((pid) => !pidAlive(pid)) ? true : null,
-    );
-    return true;
-  } catch {
-    return false;
-  }
-}
+const waitForPidsGone = lifecycle.waitForPidsGone;
 
 async function stopNodeProcesses(num: number): Promise<void> {
-  const pids = readNodePids(num).filter(pidAlive);
+  const pids = lifecycle.verifiedNodePids(PATHS, num); // the live daemons of this checkout; throws on any other live PID
   if (pids.length === 0) {
     clearDeadNodePidFiles(num);
     return;
@@ -272,16 +201,16 @@ async function stopNodeProcesses(num: number): Promise<void> {
   clearDeadNodePidFiles(num);
 }
 
-async function restartNodeAndWait(num: number, node: DevnetNode, label: string, timeoutMs: number): Promise<void> {
-  execFileSync('bash', [DEVNET_SH, 'restart-node', String(num)], {
-    cwd: REPO_ROOT,
-    stdio: 'inherit',
-    env: { ...process.env, ...devnetPortEnv() },
+const restartNodeAndWait = (num: number, node: DevnetNode, label: string, timeoutMs: number): Promise<void> =>
+  lifecycle.restartNodeAndWait(PATHS, {
+    num,
+    apiPort: node.apiPort,
+    rpcUrl: RPC,
+    label,
+    timeoutMs,
+    pollIntervalMs: 2_000,
+    probe: { authToken: node.authToken },
   });
-  await waitFor(label, timeoutMs, 2_000, async () =>
-    (await nodeReachable(node)) ? true : null,
-  );
-}
 
 async function restoreNodeIfDown(num: number, node: DevnetNode, label: string, timeoutMs: number): Promise<void> {
   if (await nodeReachable(node)) return;
@@ -554,13 +483,11 @@ describe('Phase D — Cores host public CGs and fill their own gaps', () => {
       console.log(`Phase D: manufactured pure host-only core node${victim} via unsubscribe; gap fill must come from chain reconcile.`);
     }
 
-    // 1. Take the victim core OFFLINE. Kill the real worker (daemon.pid),
-    //    not just the already-exited `cli.js start` launcher (devnet.pid).
-    const pids = readNodePids(victim);
-    expect(pids.length, `node${victim} pids not found`).toBeGreaterThan(0);
-    for (const pid of pids) {
-      try { process.kill(pid, 'SIGKILL'); } catch { /* may already be gone */ }
-    }
+    // 1. Take the victim core OFFLINE. Kill the real worker (daemon.pid) and the
+    //    supervisor that would respawn it (devnet.pid), after checking that every
+    //    live PID in the files is a daemon of this checkout.
+    const pids = lifecycle.sigkillNodeProcesses(PATHS, victim);
+    expect(pids.length, `node${victim} has no live process in its PID files`).toBeGreaterThan(0);
     await waitFor(`node${victim} offline`, 45_000, 1_000, async () =>
       (await nodeReachable(victimNode)) ? null : true,
     );

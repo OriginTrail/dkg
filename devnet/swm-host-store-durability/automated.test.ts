@@ -18,8 +18,13 @@
  *        - no `<key>.<log|meta>.tmp-*` file that existed at the kill survives
  *          the restart (leftover temps are swept by `init()`),
  *        - after the next append the log is a clean frame stream with no torn
- *          tail, and seqnos are strictly increasing with no duplicate or
- *          reused value across the crash,
+ *          tail, and seqnos are strictly increasing with no duplicate value,
+ *        - every frame that was complete at the kill is still there, byte for
+ *          byte (the recovered log starts with that exact prefix), and every
+ *          frame appended after the restart sits after it with a seqno above
+ *          max(the `.meta` cursor, the last complete frame) at the kill: no
+ *          seqno is reused (`checkNoSeqnoReuse` in `log-frames.ts`, unit-tested
+ *          without a devnet),
  *        - the `.meta` cursor is never below the log's last seqno,
  *        - the host re-engages host mode from its persisted flag.
  *   3. The curator edge pages the hosting core with
@@ -54,9 +59,8 @@
  * times.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   DEVNET_DIR,
@@ -68,6 +72,8 @@ import {
   waitFor,
   type DevnetNode,
 } from '../_bootstrap/harness';
+import * as lifecycle from '../_bootstrap/node-lifecycle';
+import { checkNoSeqnoReuse, parseLog, type ParsedLog } from './log-frames.js';
 
 const HOST = 4; // core
 const CURATOR = 5; // edge: the only allowlisted agent, the writer, and the catch-up requester
@@ -121,28 +127,15 @@ function cgKey(cgId: string): string {
   return hashKey(cgId);
 }
 
-const HEADER_BYTES = 20;
-
-interface LogState {
-  size: number;
-  validLength: number;
+interface LogState extends ParsedLog {
   seqnos: number[];
 }
 
 function readLog(cgId: string): LogState {
   const path = join(storeDir, `${cgKey(cgId)}.log`);
-  if (!existsSync(path)) return { size: 0, validLength: 0, seqnos: [] };
-  const buf = readFileSync(path);
-  const seqnos: number[] = [];
-  let offset = 0;
-  while (offset + HEADER_BYTES <= buf.length) {
-    const len = buf.readUInt32BE(offset + 16);
-    const end = offset + HEADER_BYTES + len;
-    if (end > buf.length) break;
-    seqnos.push(Number(buf.readBigUInt64BE(offset + 8)));
-    offset = end;
-  }
-  return { size: buf.length, validLength: offset, seqnos };
+  if (!existsSync(path)) return { size: 0, validLength: 0, frames: [], seqnos: [] };
+  const parsed = parseLog(readFileSync(path));
+  return { ...parsed, seqnos: parsed.frames.map((frame) => frame.seqno) };
 }
 
 function logSize(cgId: string): number {
@@ -171,76 +164,40 @@ function tempFiles(): string[] {
 }
 
 // ───────────────────────── process control (node4) ────────────────────────
-const NODE_PID_FILES = ['daemon.pid', 'devnet.pid'] as const;
+// PID files, liveness, restart and readiness are shared with the other suites that
+// kill or restart a node: see ../_bootstrap/node-lifecycle.ts. This suite's own
+// choices: the kill is an immediate SIGKILL of every live process the node's PID
+// files list, the Hardhat port for `restart-node` comes from node1's config only
+// (`DEVNET_RPC` is not consulted), an unparseable PID file is removed along with
+// the dead ones, and readiness is probed without a token, with a 3 s request
+// timeout, every second.
+const PATHS: lifecycle.DevnetPaths = { repoRoot: REPO_ROOT, devnetDir: DEVNET_DIR };
 
-function readNodePids(num: number): number[] {
-  const pids = new Set<number>();
-  for (const f of NODE_PID_FILES) {
-    const pidFile = join(DEVNET_DIR, `node${num}`, f);
-    if (!existsSync(pidFile)) continue;
-    const pid = parseInt(readFileSync(pidFile, 'utf8').trim(), 10);
-    if (Number.isFinite(pid)) pids.add(pid);
-  }
-  return [...pids];
-}
+const clearDeadNodePidFiles = (num: number): void =>
+  lifecycle.clearDeadNodePidFiles(PATHS, num, { removeUnparseable: true });
 
-function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
+/**
+ * kill -9 every process that belongs to the node (the real worker is `daemon.pid`). The PID files
+ * are read and every live PID is checked to be a daemon of this checkout first, which takes a
+ * `ps` per process: a time-critical kill passes the PIDs it verified earlier (`verified`) and
+ * signals immediately.
+ */
+const sigkillNode = (num: number, verified?: readonly number[]): number[] =>
+  lifecycle.sigkillNodeProcesses(PATHS, num, verified ? { verified } : {});
 
-function clearDeadNodePidFiles(num: number): void {
-  for (const f of NODE_PID_FILES) {
-    const pidFile = join(DEVNET_DIR, `node${num}`, f);
-    if (!existsSync(pidFile)) continue;
-    const pid = parseInt(readFileSync(pidFile, 'utf8').trim(), 10);
-    if (Number.isFinite(pid) && pidAlive(pid)) continue;
-    try { rmSync(pidFile); } catch { /* best-effort */ }
-  }
-}
+const nodeReachable = (num: number): Promise<boolean> =>
+  lifecycle.nodeReachable(readNodeConfig(num).apiPort, { timeoutMs: 3_000 });
 
-/** kill -9 every process that belongs to the node (the real worker is `daemon.pid`). */
-function sigkillNode(num: number): number[] {
-  const pids = readNodePids(num).filter(pidAlive);
-  for (const pid of pids) {
-    try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
-  }
-  return pids;
-}
-
-function devnetPortEnv(): Record<string, string> {
-  const cfg = JSON.parse(readFileSync(join(DEVNET_DIR, 'node1', 'config.json'), 'utf8'));
-  const rpc = new URL(cfg?.chain?.rpcUrl ?? 'http://127.0.0.1:8545');
-  return {
-    HARDHAT_PORT: rpc.port || '8545',
-    API_PORT_BASE: String(cfg.apiPort ?? 9201),
-    LIBP2P_PORT_BASE: String(cfg.listenPort ?? 10001),
-  };
-}
-
-async function nodeReachable(num: number): Promise<boolean> {
-  try {
-    const res = await fetch(`http://127.0.0.1:${readNodeConfig(num).apiPort}/api/status`, {
-      signal: AbortSignal.timeout(3_000),
-    });
-    return res.status === 200;
-  } catch {
-    return false;
-  }
-}
-
-async function restartNodeAndWait(num: number, timeoutMs = 120_000): Promise<void> {
-  execFileSync('bash', [join(REPO_ROOT, 'scripts/devnet.sh'), 'restart-node', String(num)], {
-    cwd: REPO_ROOT,
-    stdio: 'inherit',
-    env: { ...process.env, ...devnetPortEnv() },
+const restartNodeAndWait = (num: number, timeoutMs = 120_000): Promise<void> =>
+  lifecycle.restartNodeAndWait(PATHS, {
+    num,
+    apiPort: readNodeConfig(num).apiPort,
+    rpcUrl: lifecycle.rpcUrlFromNode1Config(DEVNET_DIR),
+    label: `node${num} reachable`,
+    timeoutMs,
+    pollIntervalMs: 1_000,
+    probe: { timeoutMs: 3_000 },
   });
-  await waitFor(`node${num} reachable`, timeoutMs, 1_000, async () => ((await nodeReachable(num)) ? true : null));
-}
 
 /**
  * A restarted host is reachable from the edge only through the relay, and that relayed link
@@ -428,17 +385,20 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
 
   it(`${KILL_CYCLES} x kill -9 during live ingestion: no torn log, no leftover temp, no seqno reuse`, async () => {
     startWriter();
-    let maxSeqnoEver = readLog(cgId).seqnos.at(-1) ?? 0;
     const evidence: string[] = [];
 
     for (let cycle = 1; cycle <= KILL_CYCLES; cycle += 1) {
+      // Check who the host's processes are BEFORE the race (this throws if a PID file lists a live
+      // process that is not a daemon of this checkout), so the kill itself is immediate.
+      const hostPids = lifecycle.verifiedNodePids(PATHS, HOST);
+      expect(hostPids.length, `cycle ${cycle}: node${HOST} has no live process in its PID files`).toBeGreaterThan(0);
       // Wait for a new frame, then kill the core at that instant.
       const baseSize = logSize(cgId);
       const killAt = Date.now() + 240_000;
       let killed: number[] = [];
       while (Date.now() < killAt) {
         if (logSize(cgId) > baseSize) {
-          killed = sigkillNode(HOST);
+          killed = sigkillNode(HOST, hostPids);
           break;
         }
         await sleep(3);
@@ -447,12 +407,17 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
       await waitFor(`cycle ${cycle}: node${HOST} offline`, 45_000, 500, async () =>
         (await nodeReachable(HOST)) ? null : true,
       );
+      // An unreachable API only says the server stopped answering: read the files once the killed
+      // processes are really gone, so a write that was still in flight cannot land after the snapshot.
+      expect(
+        await lifecycle.waitForPidsGone(`cycle ${cycle}: killed processes gone`, killed, 30_000),
+        `cycle ${cycle}: killed processes still alive`,
+      ).toBe(true);
 
-      // What the kill left on disk.
+      // What the kill left on disk: the snapshot every recovery claim below is checked against.
       const afterKill = readLog(cgId);
       const metaAfterKill = readMetaSeqno(cgId);
       const tempsAtKill = tempFiles();
-      maxSeqnoEver = Math.max(maxSeqnoEver, ...afterKill.seqnos, metaAfterKill ?? 0);
       const window =
         tempsAtKill.length > 0
           ? 'temp file left (killed inside a durable meta write)'
@@ -461,7 +426,6 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
             : afterKill.validLength < afterKill.size
               ? 'torn frame tail'
               : 'between writes';
-      evidence.push(`cycle ${cycle}: ${window}; log=${afterKill.seqnos.length} frames last=${afterKill.seqnos.at(-1)} meta=${metaAfterKill}`);
 
       clearDeadNodePidFiles(HOST);
       await restartNodeAndWait(HOST);
@@ -492,16 +456,20 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
       expect(log.seqnos, `cycle ${cycle}: seqnos not strictly increasing`).toEqual(
         [...log.seqnos].sort((a, b) => a - b),
       );
-      const fresh = log.seqnos.filter((s) => s > maxSeqnoEver);
-      expect(fresh.length, `cycle ${cycle}: no frame above the pre-kill high-water mark ${maxSeqnoEver}`).toBeGreaterThan(0);
-      expect(
-        log.seqnos.slice(log.seqnos.indexOf(fresh[0]!)),
-        `cycle ${cycle}: seqno reused or reordered across the crash`,
-      ).toEqual(fresh);
+      // The frames that were complete at the kill are still there, byte for byte, and every frame
+      // appended after the restart sits after them with a seqno above max(cursor, last complete frame).
+      const recovery = checkNoSeqnoReuse({
+        atKill: { frames: afterKill.frames, metaSeqno: metaAfterKill },
+        afterRestart: { frames: log.frames },
+      });
+      expect(recovery.violations, `cycle ${cycle}: recovery lost or recycled frames`).toEqual([]);
       const meta = readMetaSeqno(cgId);
       expect(meta, `cycle ${cycle}: meta unreadable after restart`).not.toBeNull();
       expect(meta!, `cycle ${cycle}: cursor below the log tail`).toBeGreaterThanOrEqual(log.seqnos.at(-1)! - 1);
-      maxSeqnoEver = Math.max(maxSeqnoEver, ...log.seqnos, meta!);
+      evidence.push(
+        `cycle ${cycle}: ${window}; at the kill log=${afterKill.frames.length} frames last=${afterKill.seqnos.at(-1)} meta=${metaAfterKill}; ` +
+          `preserved ${afterKill.frames.length} frames byte for byte, ${recovery.newFrames.length} new above ${recovery.highWater}`,
+      );
     }
 
     await stopWriter();

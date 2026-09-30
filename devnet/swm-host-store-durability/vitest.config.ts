@@ -15,7 +15,11 @@ import { resolve } from 'node:path';
  */
 export default defineConfig({
   test: {
-    include: [resolve(import.meta.dirname, 'automated.test.ts').replace(/\\/g, '/')],
+    include: [
+      resolve(import.meta.dirname, 'automated.test.ts').replace(/\\/g, '/'),
+      // Pure (no devnet): the kill -9 recovery check the suite applies.
+      resolve(import.meta.dirname, 'log-frames.test.ts').replace(/\\/g, '/'),
+    ],
     testTimeout: 1_800_000,
     hookTimeout: 900_000,
     pool: 'forks',
