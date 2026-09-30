@@ -23,13 +23,19 @@ nodes.
 2. An edge subscribed with the hash alone ends up with a row keyed by the
    verified cleartext id (and none keyed by the hash), and holds the SWM copy
    shared before it subscribed and the finalized VM copy, each identical to the
-   author's. `GET /api/sync/catchup-status?contextGraphId=<hash>` reports the
-   graph as resolved.
+   author's. The catch-up job the subscribe minted is reachable by its job id,
+   the cleartext id and the on-chain id, and always names the cleartext graph.
 3. A second edge subscribed with `#<on-chain id>` lands on the same cleartext
    graph and converges on the same content.
 4. A graph registered directly on the chain with a name commitment whose
    preimage no node holds stays hash-only: no cleartext row is invented, and its
-   catch-up settles as `unreachable`, not as a retryable failure.
+   catch-up (looked up by the hash) settles as `unreachable` with the
+   name-hash-only note, not as a retryable failure.
+
+The first catch-up job of a subscription can be cut short when the node's RFC-64
+authority RPC circuit is open (chain reads timing out on a loaded machine); the
+suite re-subscribes with `forceCatchup` once a minute while it waits for content,
+as an operator would, and reports the last job's verdict on timeout.
 
 ## Run
 

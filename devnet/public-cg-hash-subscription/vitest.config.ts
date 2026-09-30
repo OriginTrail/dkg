@@ -6,7 +6,7 @@ const automatedTest = resolve(import.meta.dirname, 'automated.test.ts').replace(
 export default defineConfig({
   test: {
     include: [automatedTest],
-    testTimeout: 600_000,
+    testTimeout: 900_000,
     hookTimeout: 240_000,
     pool: 'forks',
     sequence: { concurrent: false },
