@@ -4312,6 +4312,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.warmedCores.delete(remotePeer);
     this.warmCoreFailedUnpins.delete(remotePeer);
     this.vmReconcileExactPeerCapabilities?.delete(remotePeer);
+    for (const [localCgId, preference] of this.vmReconcilePublicCoreTransportPreferences ?? []) {
+      if (preference.peerId === remotePeer) this.vmReconcilePublicCoreTransportPreferences.delete(localCgId);
+    }
   }
 
   queueSelectedSwmFromPeerOnConnect(

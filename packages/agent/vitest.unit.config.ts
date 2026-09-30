@@ -218,6 +218,7 @@ export default defineConfig({
       "test/vm-promotion-gate.test.ts",
       "test/vm-recovery-microbatch-planner.test.ts",
       "test/vm-recovery-provider-policy.test.ts",
+      "test/vm-recovery-core-transport-preference.test.ts",
       "test/vm-recovery-microbatch-host.test.ts",
       "test/vm-recovery-footprint-bridge.test.ts",
       "test/vm-recovery-footprint-bridge-adversarial.test.ts",

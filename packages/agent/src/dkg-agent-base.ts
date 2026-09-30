@@ -1065,6 +1065,8 @@ export class DKGAgentBase {
   static readonly VM_RECONCILE_EXACT_PEER_MAX = 3;
   /** How long a clean legacy exact-filter miss suppresses one peer. */
   static readonly VM_RECONCILE_EXACT_CAPABILITY_TTL_MS = 10 * 60_000;
+  /** Transport affinity is short-lived and never establishes asset coverage. */
+  static readonly VM_RECONCILE_PUBLIC_CORE_TRANSPORT_TTL_MS = 2 * 60_000;
   /** Bounded proof universe retained across passes; transport still uses the cap above. */
   static readonly VM_RECONCILE_EXACT_ROSTER_MAX = MAX_CONTEXT_GRAPH_PARTICIPANT_AGENTS;
   static readonly VM_RECONCILE_QUEUE_MAX_PENDING =
@@ -1343,6 +1345,13 @@ export class DKGAgentBase {
    * upgrade, and the map is bounded with the other VM recovery caches.
    */
   protected readonly vmReconcileExactPeerCapabilities = new Map<string, {
+    connectionKey: string;
+    expiresAt: number;
+  }>();
+  /** Public-VM transport hints only; separate from curator and absence evidence. */
+  protected readonly vmReconcilePublicCoreTransportPreferences = new Map<string, {
+    onChainCgId: string;
+    peerId: string;
     connectionKey: string;
     expiresAt: number;
   }>();

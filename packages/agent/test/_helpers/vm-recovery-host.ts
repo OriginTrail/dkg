@@ -1,5 +1,6 @@
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
+import type { PeerCapabilityRegistry } from '../../src/p2p/peer-capability.js';
 
 import type {
   OrdinalOutcome,
@@ -41,10 +42,28 @@ export interface VmRecoveryHostInternals {
   node: {
     peerId: string;
     libp2p: {
-      getConnections(): Array<{ remotePeer: TestPeerId }>;
+      getConnections(): Array<{
+        remotePeer: TestPeerId;
+        direction?: string;
+        timeline?: { open?: number };
+      }>;
     };
   };
   preferredSyncPeers: Map<string, string>;
+  peerCapabilityRegistry: PeerCapabilityRegistry;
+  vmReconcilePublicCoreTransportPreferences: Map<string, {
+    onChainCgId: string;
+    peerId: string;
+    connectionKey: string;
+    expiresAt: number;
+  }>;
+  readVmReconcilePublicCoreTransportPreference(localCgId: string, onChainCgId: string, eligible: readonly string[]): string | undefined;
+  rememberVmReconcilePublicCoreTransportPreference(localCgId: string, onChainCgId: string, peerId: string, connectionKey: string | null): boolean;
+  getSyncReconcilerConnectionKey(peerId: string): string | null;
+  clearVmReconcileRotationStateForContextGraph(localCgId: string): void;
+  closeVmReconcileRotationState(): void;
+  openVmReconcileRotationState(): void;
+  clearNetworkRejectedPeerState(peerId: string): void;
   vmReconcileRotationState: Map<string, VmReconcileRotationRecord>;
   vmReconcileRotationNow(): number;
   vmReconcileRotationSlotKey(target: OrdinalRecoveryTarget): string;
@@ -143,6 +162,7 @@ export interface VmRecoveryHostHarnessOptions<TTarget extends OrdinalRecoveryTar
   readonly targetCount: number;
   readonly targetForOrdinal: (ordinal: number) => TTarget;
   readonly sizingUnavailable?: boolean;
+  readonly accessPolicy?: 0 | 1;
   /**
    * Keep MockChainAdapter's prototype implementation so integration tests can
    * exercise the real stateful adapter boundary after seeding KAs with
@@ -168,7 +188,7 @@ export async function createVmRecoveryHostHarness<
 ): Promise<VmRecoveryHostHarness<TTarget>> {
   const chainAdapter = new MockChainAdapter();
   const { contextGraphId } = await chainAdapter.createOnChainContextGraph({
-    accessPolicy: 0,
+    accessPolicy: options.accessPolicy ?? 0,
     publishPolicy: 1,
   });
   if (contextGraphId !== 1n) {
