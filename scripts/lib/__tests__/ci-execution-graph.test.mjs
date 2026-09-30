@@ -72,16 +72,19 @@ test('one shell reading yields package-script calls, files and assembled paths',
   // graph reads the shell scripts lanes reach with it. Comments name nothing.
   const cli = { name: '@origintrail-official/dkg', scripts: { build: 'tsc' } };
   const context = { manifests: new Map([['packages/cli', cli]]), workspaceByName: new Map([[cli.name, 'packages/cli']]), rootManifest: {} };
-  const present = new Set(['scripts/devnet.sh', 'scripts/devnet-lib.sh']);
+  const present = new Set(['scripts/devnet.sh', 'scripts/devnet-lib.sh', 'scripts/tool.mjs', 'scripts/devnet-config.json']);
   const reading = analyzeShell([
     '# scripts/devnet-comprehensive.sh is only mentioned here',
     'source "$(dirname "$0")/devnet-lib.sh"',
     'pnpm --filter @origintrail-official/dkg run build',
     'bash "$REPO_ROOT/scripts/devnet.sh" start',
     'bash "$SCRIPT_DIR/devnet-${helper}.sh"',
+    'node "$SCRIPT_DIR/tool.mjs" --config scripts/devnet-config.json',
   ].join('\n'), { scriptDirectory: 'scripts', exists: (file) => present.has(file), context });
   assert.deepEqual(reading.calls, [['packages/cli', 'build']]);
-  assert.deepEqual(reading.files.map(({ file }) => file), ['scripts/devnet-lib.sh', 'scripts/devnet.sh']);
+  assert.deepEqual(reading.files.map(({ file }) => file), ['scripts/devnet-lib.sh', 'scripts/devnet.sh', 'scripts/tool.mjs', 'scripts/devnet-config.json']);
+  // What a command runs, as opposed to what it only names.
+  assert.deepEqual(reading.runs, ['scripts/devnet-lib.sh', 'scripts/devnet.sh', 'scripts/tool.mjs']);
   assert.deepEqual(reading.assembled, ['$SCRIPT_DIR/devnet-${helper}.sh']);
 });
 
@@ -101,6 +104,10 @@ test('a file a command runs is assembled when it is picked at run time', () => {
     ['exec nohup python3 -u "${tool}"', ['${tool}']],
     ['source "$lib"', ['$lib']],
     ['pnpm exec tsx "$SCRIPT_DIR/$step"', ['$SCRIPT_DIR/$step']],
+    ['npx tsx "$SCRIPT_DIR/$helper"', ['$SCRIPT_DIR/$helper']],
+    ['npx -y -p tsx tsx "$entry"', ['$entry']],
+    ['npx -y verdaccio@$VERSION --listen 4873', []],
+    ['npx -c "$command"', []],
     ['bash "$SCRIPT_DIR/lib.sh" "$RUN_DIR/$name"', []],
     ['node "$REPO_ROOT/scripts/x.mjs"', []],
     ['node -e "$code" "$arg"', []],

@@ -93,7 +93,7 @@ test('the load scanner sees these forms, and nothing it cannot resolve staticall
   // extensionless note is no dependency, while an extensionless file with a
   // shell shebang is read as shell.
   assert.deepEqual(dependenciesOf('packages/cli/test/fixtures/devnet.toml', 'run = "scripts/devnet.sh"'), {
-    format: undefined, modules: [], paths: [], packages: [], computed: [], assembled: [], unresolvedReads: [],
+    format: undefined, modules: [], paths: [], runs: [], packages: [], computed: [], assembled: [], unresolvedReads: [],
   });
   assert.deepEqual(dependenciesOf('packages/cli/test/fixtures/runner.py', 'subprocess.run(["scripts/devnet.sh"])').paths, []);
   assert.deepEqual(dependenciesOf('packages/cli/test/fixtures/NOTES', 'Start scripts/devnet.sh first.').paths, []);
@@ -178,6 +178,38 @@ test('traceLaneLoads carries lanes through module loads, not through reads', () 
   assert.equal(loads.has('packages/node-ui/src/ui/pca-api.ts'), false);
   // A package-name import requires the workspace and its dependencies.
   assert.match(loads.get('packages/rdf-utils/src/index.ts')?.get('kosava_node_ui') ?? '', /imports @origintrail-official\/dkg-rdf-utils/);
+});
+
+test('traceLaneLoads follows what a file runs, except workspace code the lanes seed', () => {
+  // A module a test runs as a child process runs its imports, so they carry
+  // the test's lane; a module it only reads runs none of them. Workspace code
+  // the lanes seed (workspaceSeeds, from laneExecution) is required for the
+  // lane that runs it, like a read, and its imports are traced from its own
+  // seeds.
+  const example = 'packages/node-ui/test/example.test.ts';
+  const sources = new Map([
+    [example, [
+      "import { spawnSync } from 'node:child_process';",
+      "import { join } from 'node:path';",
+      "spawnSync(process.execPath, [join(root, 'scripts', 'sync-chain-abis.mjs')]);",
+      "const text = readFileSync(join(import.meta.dirname, '..', '..', '..', 'scripts', 'audit-dial-protocol.mjs'), 'utf8');",
+      "spawnSync(process.execPath, [fileURLToPath(new URL('../src/ui/api.ts', import.meta.url))]);",
+    ].join('\n')],
+    ['scripts/sync-chain-abis.mjs', "import './check-npm-metadata.mjs';"],
+    ['scripts/audit-dial-protocol.mjs', "import './audit-create-random.mjs';"],
+    ['packages/node-ui/src/ui/api.ts', "import { http } from './http.js';"],
+  ]);
+  const seeds = new Map([[example, new Map([['kosava_node_ui', 'seed']])]]);
+  const trace = (options) => traceLaneLoads(seeds, { read: (file) => sources.get(file), ...options }).loaded;
+  const loads = trace();
+  assert.equal(loads.get('scripts/check-npm-metadata.mjs')?.get('kosava_node_ui'), 'scripts/sync-chain-abis.mjs');
+  assert.equal(loads.get('scripts/audit-dial-protocol.mjs')?.get('kosava_node_ui'), example);
+  assert.equal(loads.has('scripts/audit-create-random.mjs'), false);
+  assert.equal(loads.get('packages/node-ui/src/ui/http.ts')?.get('kosava_node_ui'), 'packages/node-ui/src/ui/api.ts');
+  const seeded = trace({ workspaceSeeds: new Set(['packages/node-ui/src/ui/api.ts']) });
+  assert.equal(seeded.get('packages/node-ui/src/ui/api.ts')?.get('kosava_node_ui'), example);
+  assert.equal(seeded.has('packages/node-ui/src/ui/http.ts'), false);
+  assert.equal(seeded.get('scripts/check-npm-metadata.mjs')?.get('kosava_node_ui'), 'scripts/sync-chain-abis.mjs');
 });
 
 test('a shell script reaches what the package scripts it runs reach', () => {

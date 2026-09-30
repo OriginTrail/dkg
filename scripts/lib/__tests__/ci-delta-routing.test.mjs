@@ -472,8 +472,8 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   // What those files load comes from traceLaneLoads and dependenciesOf in
   // load-graph.mjs, which list the forms they follow. Each file reached must
   // select the lane or scope that loads it, or plan full CI.
-  const { seeds, unresolved } = laneExecution();
-  const trace = traceLaneLoads(seeds);
+  const { seeds, unresolved, workspaceSeeds } = laneExecution();
+  const trace = traceLaneLoads(seeds, { workspaceSeeds });
   const loadedBy = trace.loaded;
 
   for (const [target, requirement, why] of [
@@ -767,6 +767,32 @@ test('a script path a lane assembles at run time fails the guard until it is lis
     `${fixture}: $SCRIPT_DIR/$helper`,
     `${fixture}: $SCRIPT_DIR/devnet-\${helper}.sh`,
     `${planted}: join(process.cwd(), 'scripts', helper)`,
+  ]);
+});
+
+test('a module a lane runs as a child process is traced through its imports', () => {
+  // The chain lane's ABI-sync test runs scripts/sync-chain-abis.mjs from a
+  // copy it makes (join(root, 'scripts', ...)). A build-only script the tool
+  // imported would run in the chain lane too, so the guard reports it, as it
+  // reports a build-only script the test reads; what that one imports does
+  // not run.
+  const planted = 'packages/chain/test/planted.unit.test.ts';
+  const tool = 'scripts/sync-chain-abis.mjs';
+  const sources = new Map([
+    [planted, [
+      "import { spawnSync } from 'node:child_process';",
+      "import { join } from 'node:path';",
+      "spawnSync(process.execPath, [join(root, 'scripts', 'sync-chain-abis.mjs'), ...names], { encoding: 'utf8' });",
+      "const text = readFileSync(join(import.meta.dirname, '..', '..', '..', 'scripts', 'audit-dial-protocol.mjs'), 'utf8');",
+    ].join('\n')],
+    [tool, "import './check-npm-metadata.mjs';"],
+    ['scripts/audit-dial-protocol.mjs', "import './audit-create-random.mjs';"],
+  ]);
+  assert.deepEqual(selectedLanes(pullRequestPlan([change(tool)])), ['tornado_core']);
+  const trace = traceLaneLoads(new Map([[planted, new Map([['tornado_core', 'seed']])]]), { read: (file) => sources.get(file) });
+  assert.deepEqual(loadClosureGaps(trace).missing.sort(), [
+    `tornado_core loads scripts/audit-dial-protocol.mjs via ${planted}`,
+    `tornado_core loads scripts/check-npm-metadata.mjs via ${tool}`,
   ]);
 });
 

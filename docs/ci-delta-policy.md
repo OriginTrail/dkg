@@ -81,7 +81,11 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   documents included, and a built directory counts when the file walks it;
   built `dist/` output stands for its `src/`) across packages and support
   areas, and fails when a file it reaches does not select that lane or EVM
-  scope. It also fails on a module load it cannot follow, one whose specifier
+  scope. A file a lane runs as a child process or worker (named in a
+  `spawn`, `execFile`, `fork`, `exec`, execa or `new Worker` call, or run by
+  a shell command) has its imports followed too, except package workspace
+  code, whose imports are traced from its own workspace's lanes; a file a
+  lane only reads is required, but its imports are not. It also fails on a module load it cannot follow, one whose specifier
   is computed at run time, a script path assembled at run time, or a file a
   shell command runs that is picked at run time (a script runner's operand
   or a program path that expands a variable past its directory, such as

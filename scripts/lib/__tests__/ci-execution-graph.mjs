@@ -296,9 +296,10 @@ const SCRIPT_RUNNERS = new Map([
 
 // The word naming the file a simple command runs, if it runs one: past the
 // keywords and wrappers it follows (env with its assignments, timeout with
-// its duration), the operand of a script runner (bash, source, node,
-// python), or the program itself when that is a path. A program word that is
-// a URL, an assignment or a glob (a `case` pattern) names no file.
+// its duration, npx with its options), the operand of a script runner (bash,
+// source, node, python), or the program itself when that is a path. A
+// program word that is a URL, an assignment or a glob (a `case` pattern)
+// names no file, and neither does npx -c, which runs a command string.
 function executedWord(words) {
   const rest = words.map((word) => word.replace(/["']/g, '')).filter(Boolean);
   let at = 0;
@@ -310,6 +311,10 @@ function executedWord(words) {
     } else if (rest[at] === 'timeout') {
       for (at += 1; (rest[at] ?? '').startsWith('-'); at += /^-[sk]$/.test(rest[at]) ? 2 : 1);
       at += 1;
+    } else if (rest[at] === 'npx' || rest[at] === 'pnpx') {
+      for (at += 1; (rest[at] ?? '').startsWith('-'); at += /^(?:-p|--package)$/.test(rest[at]) ? 2 : 1) {
+        if (/^(?:-c|--call)$/.test(rest[at])) return undefined;
+      }
     } else {
       break;
     }
@@ -337,6 +342,8 @@ const picksFileAtRunTime = (word) => /(?<!\\)\$[\w{@*#?!$]/.test(word.replace(/^
 // - files: the repository files it runs or names (namedFiles), each with
 //   the directory it was named from, the child commands a declared program
 //   runs (PROGRAM_CHILD_COMMANDS) included;
+// - runs: of those, the files a command runs (a script runner's operand or a
+//   program path: executedWord), whose own imports run too;
 // - assembled: the script paths it builds from a value, which no reading can
 //   resolve ("$SCRIPT_DIR/${helper}.sh", scripts/$name), and each file a
 //   command runs that is picked at run time: a script runner's operand or a
@@ -348,6 +355,7 @@ const picksFileAtRunTime = (word) => /(?<!\\)\$[\w{@*#?!$]/.test(word.replace(/^
 export function analyzeShell(text, { cwd = '.', scriptDirectory, exists, context }) {
   const calls = [];
   const files = [];
+  const runs = new Set();
   const assembled = new Set();
   const queue = simpleCommands(withoutComments(text), cwd);
   while (queue.length) {
@@ -361,9 +369,13 @@ export function analyzeShell(text, { cwd = '.', scriptDirectory, exists, context
     }
     for (const word of words.map((candidate) => candidate.replace(/["']/g, ''))) if (assemblesScriptPath(word)) assembled.add(word);
     const executed = executedWord(command.words);
-    if (executed !== undefined && picksFileAtRunTime(executed)) assembled.add(executed);
+    if (executed !== undefined && picksFileAtRunTime(executed)) {
+      assembled.add(executed);
+    } else if (executed !== undefined) {
+      for (const directory of directories) for (const file of namedFiles(executed, directory, exists, scriptDirectory)) runs.add(file);
+    }
   }
-  return { calls, files, assembled: [...assembled] };
+  return { calls, files, runs: [...runs], assembled: [...assembled] };
 }
 
 // The child commands a declared program runs for the subcommand a command
@@ -382,7 +394,8 @@ function childCommands({ words, cwd }, exists) {
 // Follows shell text through the package scripts and shell scripts it
 // reaches, reading each with analyzeShell, and records the `commands` it
 // reads (each once, in the order reached) and its `edges`: a `file` edge per
-// repository file named (with the shell script directory it was named in), a
+// repository file named (with the shell script directory it was named in,
+// and `run` when a command runs it), a
 // `script` edge per package script run and an `assembled` edge per script
 // path built from a value, each with the chain of package scripts
 // ({ workspace, script }) that led there and its provenance (`via`).
@@ -402,8 +415,8 @@ function executionReader({ readRepoFile, exists, context }) {
   // Read `text` as commands run in `cwd`, reached through `chain`; the text
   // of a shell script is read from `scriptDirectory`, its own directory.
   const readCommands = (text, cwd, chain, via, scriptDirectory) => {
-    const { calls, files, assembled } = analyzeShell(text, { cwd, scriptDirectory, exists, context });
-    for (const { file } of files) edges.push({ kind: 'file', file, chain, via, scriptDirectory });
+    const { calls, files, runs, assembled } = analyzeShell(text, { cwd, scriptDirectory, exists, context });
+    for (const { file } of files) edges.push({ kind: 'file', file, chain, via, scriptDirectory, run: runs.includes(file) });
     for (const word of assembled) edges.push({ kind: 'assembled', text: word, chain, via });
     for (const [workspace, script] of calls) {
       for (const name of [`pre${script}`, script, `post${script}`]) runScript(workspace, name, chain, via);

@@ -174,7 +174,9 @@ export function laneSeeds(options) {
 // package scripts and shell scripts they reach, assemble at run time, as
 // `${workflow} ${job}: ${text}`, for a job that must select something. No
 // trace can resolve those either, so the routing test fails on one it does
-// not list, as it does on a traced file's.
+// not list, as it does on a traced file's. `workspaceSeeds` are the files it
+// seeds as package workspace code, whose imports traceLaneLoads traces from
+// those seeds (its `workspaceSeeds` option).
 export function laneExecution({
   workflows = WORKFLOWS.map((workflow) => [workflow, fs.readFileSync(path.join(REPO_ROOT, '.github/workflows', workflow), 'utf8')]),
   execution,
@@ -182,9 +184,14 @@ export function laneExecution({
 } = {}) {
   const seeds = new Map();
   const unresolved = new Set();
+  const workspaceSeeds = new Set();
   const seed = (file, requirements, via) => {
     const entry = seeds.get(file) ?? seeds.set(file, new Map()).get(file);
     for (const requirement of requirements) if (!entry.has(requirement)) entry.set(requirement, via);
+  };
+  const seedWorkspaceCode = (file, requirements, via) => {
+    workspaceSeeds.add(file);
+    seed(file, requirements, via);
   };
   const evmScopeFiles = new Map(Object.entries(EVM_TEST_SCOPES).flatMap(([scope, { packageDirectory, files }]) =>
     files.map((file) => [path.posix.normalize(path.posix.join(packageDirectory, file)), requirement.evmScope(scope)])));
@@ -196,11 +203,11 @@ export function laneExecution({
       // Demo apps' run.mjs entry points run by hand; the demo lane runs tests.
       if (workspace === 'demo' && /^[^/]+\/run\.[cm]?[jt]s$/.test(inside)) continue;
       if (inside.startsWith('integration/')) {
-        if (evmScopeFiles.has(file)) seed(file, [evmScopeFiles.get(file)], 'EVM_TEST_SCOPES');
+        if (evmScopeFiles.has(file)) seedWorkspaceCode(file, [evmScopeFiles.get(file)], 'EVM_TEST_SCOPES');
       } else if (workspace === 'packages/node-ui' && inside.startsWith('e2e/')) {
-        seed(file, [requirement.lane('kosava_node_ui_e2e')], 'the browser suite');
+        seedWorkspaceCode(file, [requirement.lane('kosava_node_ui_e2e')], 'the browser suite');
       } else {
-        seed(file, [...owningLanes.map(requirement.lane), ...(evmScopeFiles.has(file) ? [evmScopeFiles.get(file)] : [])], `${workspace} lanes`);
+        seedWorkspaceCode(file, [...owningLanes.map(requirement.lane), ...(evmScopeFiles.has(file) ? [evmScopeFiles.get(file)] : [])], `${workspace} lanes`);
       }
     }
   }
@@ -215,5 +222,5 @@ export function laneExecution({
       }
     }
   }
-  return { seeds, unresolved: [...unresolved] };
+  return { seeds, unresolved: [...unresolved], workspaceSeeds };
 }
