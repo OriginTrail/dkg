@@ -1,11 +1,12 @@
 import { defineConfig } from 'vitest/config';
 import { resolve } from 'node:path';
 
-const automatedTest = resolve(import.meta.dirname, 'automated.test.ts').replace(/\\/g, '/');
+const suiteFile = (name: string): string => resolve(import.meta.dirname, name).replace(/\\/g, '/');
 
 export default defineConfig({
   test: {
-    include: [automatedTest],
+    // The live suite, and the unit test of the verdict it relies on (no devnet).
+    include: [suiteFile('automated.test.ts'), suiteFile('chain-log-follows.test.ts')],
     testTimeout: 600_000,
     hookTimeout: 300_000,
     pool: 'forks',

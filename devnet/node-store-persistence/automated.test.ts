@@ -14,11 +14,18 @@
  *      moved stores need, and there is no second protocol database next to it.
  *   2. The moved stores are live: the chain-event log that the chain adapter
  *      writes through `SqliteChainEventLogStore` is populated on every node
- *      (cores and edges index the chain), and its cursor keeps advancing as
- *      the chain does.
+ *      (cores and edges index the chain).
  *   3. KA numbering is durable protocol state: publishing a Knowledge Asset
  *      allocates through `SqliteKaNumberStore` and the per-author counter in
- *      `node-ui.db` moves forward.
+ *      `node-ui.db` moves forward. The same publish proves the chain log keeps
+ *      following the chain: on every node, the cursor of the node's OWN
+ *      chain-log scope reaches the block of the publish transaction's receipt
+ *      and `chain_events` holds that transaction's
+ *      `KnowledgeAssetRegisteredToContextGraph` event (address, log index and
+ *      topics as the receipt has them). A head that merely moved since before
+ *      the Context Graph was registered proves nothing: the registration mines
+ *      a block of its own. The decision is `chain-log-follows.ts`, unit-tested
+ *      without a devnet in `chain-log-follows.test.ts` (same vitest config).
  *
  * Isolation: the database is only ever opened READ-ONLY (a live node owns it;
  * `DashboardDB`'s constructor migrates and prunes, so it must never be
@@ -32,9 +39,10 @@
  * Run:
  *   pnpm test:devnet:node-store-persistence
  */
-import { mkdirSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
+import { ethers } from 'ethers';
 import { beforeAll, afterAll, describe, expect, it } from 'vitest';
 import {
   detectDevnet,
@@ -45,8 +53,16 @@ import {
   type CliResult,
   type DevnetNode,
   type DevnetState,
+  type PublishResult,
 } from '../_bootstrap/harness.js';
 import { SCHEMA_VERSION } from '../../packages/node-ui/src/db.js';
+import {
+  chainLogScope,
+  judgeChainLogFollows,
+  readChainLogSnapshot,
+  type ChainLogVerdict,
+  type ExpectedChainEvent,
+} from './chain-log-follows.js';
 
 const NODE_COUNT = 6;
 const CORE_NODES = [1, 2, 3, 4];
@@ -124,6 +140,97 @@ function expectCliOk(result: CliResult, label: string): void {
     result.code,
     `${label} failed with exit ${result.code}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
   ).toBe(0);
+}
+
+/**
+ * `ContextGraphStorage.KnowledgeAssetRegisteredToContextGraph(uint256 indexed
+ * contextGraphId, uint256 indexed kaId)`: the event behind `kaToContextGraph`,
+ * emitted once per published Knowledge Asset, inside the publish transaction.
+ */
+const KA_REGISTERED_TOPIC0 = ethers.id('KnowledgeAssetRegisteredToContextGraph(uint256,uint256)');
+
+/**
+ * The scope a node's chain log (`chain_index_cursor`, `chain_events`) is keyed by,
+ * from the chain id and Hub in the node's own `config.json`: the ones its daemon
+ * indexes. `chainLogScope` rebuilds the adapter's key from them; if that ever
+ * drifts, the verdict says `no-cursor` and lists the scopes the node really has.
+ */
+function nodeChainLogScope(node: DevnetNode): string {
+  const config = JSON.parse(readFileSync(join(node.home, 'config.json'), 'utf8')) as {
+    chain?: { chainId?: string; hubAddress?: string };
+  };
+  const hubAddress = config.chain?.hubAddress;
+  expect(hubAddress, `node${node.num} config.json has no chain.hubAddress`).toBeTruthy();
+  expect(hubAddress!.toLowerCase(), `node${node.num} indexes another Hub than the devnet deployed`)
+    .toBe(state.addrs.Hub!.toLowerCase());
+  return chainLogScope({ chainId: config.chain?.chainId ?? 'evm:31337', hubAddress: hubAddress! });
+}
+
+/**
+ * The event the publish transaction emitted, taken from its receipt on the chain:
+ * the transaction hash the CLI reported, its block, and its one
+ * `KnowledgeAssetRegisteredToContextGraph` log for the published Knowledge Asset.
+ */
+async function publishRegistrationEvent(result: PublishResult): Promise<ExpectedChainEvent> {
+  const txHash = result.txHash;
+  expect(txHash, `publish surfaced no tx hash\n${result.raw}`).toMatch(/^0x[0-9a-fA-F]{64}$/);
+  const receipt = await waitFor(
+    `the receipt of publish transaction ${txHash}`,
+    60_000,
+    1_000,
+    () => state.provider.getTransactionReceipt(txHash!),
+  );
+  expect(receipt.status, `publish transaction ${txHash} reverted`).toBe(1);
+
+  // ContextGraphStorage is an asset storage of the Hub, not a Hub contract.
+  const contextGraphStorage = (await state.hub.getAssetStorageAddress('ContextGraphStorage')) as string;
+  const kaTopic = ethers.zeroPadValue(ethers.toBeHex(result.kaId!), 32).toLowerCase();
+  const registrations = receipt.logs.filter((log) => log.address.toLowerCase() === contextGraphStorage.toLowerCase()
+    && log.topics[0]?.toLowerCase() === KA_REGISTERED_TOPIC0
+    && log.topics[2]?.toLowerCase() === kaTopic);
+  expect(
+    registrations.length,
+    `publish transaction ${txHash} (block ${receipt.blockNumber}) did not emit exactly one `
+      + `KnowledgeAssetRegisteredToContextGraph for KA ${result.kaId}: ${JSON.stringify(receipt.logs.map((log) => [log.address, log.topics[0]]))}`,
+  ).toBe(1);
+  const log = registrations[0]!;
+  return {
+    transactionHash: receipt.hash,
+    blockNumber: receipt.blockNumber,
+    logIndex: log.index,
+    address: log.address,
+    topics: [...log.topics],
+  };
+}
+
+/**
+ * Wait until EVERY node's chain log has followed the chain through `event`.
+ *
+ * Each node polls the same chain on its own (nothing is gossiped), so each one
+ * must show the publish. The whole verdict is polled, not the cursor alone:
+ * `head_block` is the head the tick observed, and a catch-up pass may fetch
+ * fewer blocks than that, so a cursor at the publish block does not by itself
+ * mean the event was read. A timeout names, per node, what was missing.
+ */
+async function expectChainLogsFollow(nodes: readonly DevnetNode[], event: ExpectedChainEvent): Promise<void> {
+  const watched = nodes.map((node) => ({ node, handle: openReadOnly(node), scope: nodeChainLogScope(node) }));
+  const verdicts = new Map<number, ChainLogVerdict>();
+  try {
+    await waitFor(
+      `every node's chain log follows publish transaction ${event.transactionHash} (block ${event.blockNumber})`,
+      180_000,
+      3_000,
+      async () => {
+        for (const { node, handle, scope } of watched) {
+          verdicts.set(node.num, judgeChainLogFollows(readChainLogSnapshot(handle, event.transactionHash), scope, event));
+        }
+        return [...verdicts.values()].every((verdict) => verdict.followed) ? verdicts : null;
+      },
+    );
+  } catch (err) {
+    const behind = [...verdicts].filter(([, verdict]) => !verdict.followed).map(([num, verdict]) => `node${num}: ${verdict.reason}`);
+    throw new Error(`${(err as Error).message}\n${behind.join('\n') || 'no verdict was reached'}`);
+  }
 }
 
 beforeAll(async () => {
@@ -213,14 +320,10 @@ describe('the moved stores are live on every node that indexes the chain', () =>
 });
 
 describe('KA numbering is durable protocol state', () => {
-  it('a publish allocates through the KA number store and the chain log cursor keeps up with the chain', async () => {
+  it('a publish allocates through the KA number store and every node\'s chain log indexes the publish transaction', async () => {
     const handle = openReadOnly(publisher);
     const kaTotal = () => count(handle, `SELECT COALESCE(SUM(next_number), 0) AS c FROM ka_numbers`);
-    const headBlock = () => (handle.prepare(
-      `SELECT COALESCE(MAX(head_block), 0) AS c FROM chain_index_cursor`,
-    ).get() as { c: number }).c;
     const kaBefore = kaTotal();
-    const headBefore = headBlock();
 
     // An ephemeral Context Graph of this suite's own.
     const slug = unique('node-store-persistence');
@@ -251,17 +354,12 @@ describe('KA numbering is durable protocol state', () => {
     // The counter moved forward and is stored in the dashboard file (same file).
     expect(kaTotal(), 'ka_numbers did not advance across a publish').toBeGreaterThan(kaBefore);
 
-    // The chain-event log follows the chain: registering and publishing mined
-    // blocks, and the poller's next tick lands them in the cursor.
-    const head = await waitFor(
-      'chain_index_cursor.head_block advances past the pre-publish head',
-      180_000,
-      3_000,
-      async () => {
-        const current = headBlock();
-        return current > headBefore ? current : null;
-      },
-    );
-    expect(head).toBeGreaterThan(headBefore);
+    // The chain-event log follows the chain THROUGH THE PUBLISH. Registering the
+    // graph mined a block of its own, so a head that moved past a baseline read
+    // before the registration proves nothing about the publish: identify the
+    // publish transaction on the chain, then require, on every node, the cursor
+    // of the node's own scope at that block and the transaction's event kept.
+    const event = await publishRegistrationEvent(result);
+    await expectChainLogsFollow(Object.values(state.nodes), event);
   }, 900_000);
 });
