@@ -8,11 +8,10 @@ describe('rdf-utils package façade', () => {
     expect(rdfUtils).not.toHaveProperty('isRdfBlankNodeTerm');
   });
 
-  it('retains the intentional canonical RDF and TSV APIs', () => {
+  it('retains the semantic RDF and TSV parser APIs', () => {
     expect(rdfUtils).toMatchObject({
       parseRdfLiteralLexicalTerm: expect.any(Function),
       parseSparqlTsvResultTerm: expect.any(Function),
-      canonicalizeSparqlTsvResultTerm: expect.any(Function),
       parseSparqlTsvHeaderVariable: expect.any(Function),
     });
   });

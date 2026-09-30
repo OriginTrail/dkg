@@ -9,6 +9,29 @@ import { SparqlResultsShapeError } from '../src/sparql-results-shape-error.js';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 
 describe('SPARQL TSV SELECT decoding', () => {
+  it('validates through cache pause and resume with one semantic term path', () => {
+    const unique = Array.from({ length: 16 }, (_, index) => `<urn:test:unique-${index}>`);
+    const valid = ['?v', ...unique, ...Array.from({ length: 128 }, (_, index) =>
+      `<urn:test:paused-${index}>`), '<urn:test:after-pause>', '<urn:test:after-pause>'].join('\n');
+    expect(decodeSparqlTsvSelectResult(valid).bindings.at(-1)).toEqual({ v: 'urn:test:after-pause' });
+    expect(() => decodeSparqlTsvSelectResult(`${valid}\n<urn:test:%zz>`))
+      .toThrow(SparqlTsvResultsShapeError);
+    expect(() => decodeSparqlTsvSelectResult(`?v\n${unique.join('\n')}\n<urn:test:%zz>`))
+      .toThrow(SparqlTsvResultsShapeError);
+  });
+
+  it('rejects invalid IRIs in uncached columns and overlength values', () => {
+    const variables = Array.from({ length: 129 }, (_, index) => `?v${index}`);
+    const row = variables.map((_, index) => index === 128 ? '<urn:test:%zz>' : '<urn:test:valid>');
+    expect(() => decodeSparqlTsvSelectResult(`${variables.join('\t')}\n${row.join('\t')}`))
+      .toThrow(SparqlTsvResultsShapeError);
+    const longIri = `urn:test:${'a'.repeat(1_024)}`;
+    expect(decodeSparqlTsvSelectResult(`?v\n<${longIri}>\n<${longIri}>`).bindings)
+      .toHaveLength(2);
+    expect(() => decodeSparqlTsvSelectResult(`?v\n<${longIri}>\n<${longIri}%zz>`))
+      .toThrow(SparqlTsvResultsShapeError);
+  });
+
   it('decodes every supported RDF term shape into the JSON-path contract', () => {
     const result = decodeSparqlTsvSelectResult(
       '\uFEFF?iri\t?blank\t?plain\t?lang\t?typed\t?int\t?decimal\t?double\t?bool\t?missing\r\n'

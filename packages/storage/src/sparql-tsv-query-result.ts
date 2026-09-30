@@ -1,10 +1,14 @@
 import {
   parseSparqlTsvHeaderVariable,
-  SparqlTsvResultTermCanonicalizer,
+  parseSparqlTsvResultTerm,
 } from '@origintrail-official/dkg-rdf-utils';
 import { SparqlSelectResultNormalizer } from './sparql-select-result-normalizer.js';
 import { SparqlResultsShapeError } from './sparql-results-shape-error.js';
 import type { SelectResult } from './triple-store.js';
+
+// TSV lexical parsing is followed immediately by the shared storage
+// normalizer, which owns the request-local IRI policy and validation cache.
+const deferIriPolicyToNormalizer = () => true;
 
 export class SparqlTsvResultsShapeError extends SparqlResultsShapeError {
   constructor(message: string) {
@@ -39,10 +43,6 @@ export function decodeSparqlTsvSelectResult(text: string): SelectResult {
     lines.length > 2,
     malformed,
   );
-  const termCanonicalizer = new SparqlTsvResultTermCanonicalizer(
-    variables.length,
-    lines.length > 2,
-  );
 
   const bindings: Array<Record<string, string>> = [];
   for (let rowIndex = 1; rowIndex < lines.length; rowIndex += 1) {
@@ -64,7 +64,6 @@ export function decodeSparqlTsvSelectResult(text: string): SelectResult {
         variable,
         column,
         normalizer,
-        termCanonicalizer,
       );
       normalizer.set(binding, variable, value);
     }
@@ -79,20 +78,13 @@ function formatTsvTerm(
   variable: string,
   column: number,
   normalizer: SparqlSelectResultNormalizer,
-  termCanonicalizer: SparqlTsvResultTermCanonicalizer,
 ): string {
   const label = `SPARQL TSV binding ${rowIndex}.${variable}`;
-  const decoded = termCanonicalizer.canonicalize(cell, column);
-  if (decoded === null) {
+  const term = parseSparqlTsvResultTerm(cell, deferIriPolicyToNormalizer);
+  if (term === null) {
     malformed(`${label} is not a valid RDF term`);
   }
-  if (decoded.kind === 'iri') {
-    return normalizer.formatRfc3987Iri(decoded.value, column, label);
-  }
-  if (decoded.datatype !== undefined) {
-    normalizer.assertRfc3987DatatypeIri(decoded.datatype, column, label);
-  }
-  return decoded.value;
+  return normalizer.format(term, column, label);
 }
 
 function malformed(message: string): never {

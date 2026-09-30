@@ -36,12 +36,9 @@ export type {
 } from './rdf-term.js';
 
 export {
-  canonicalizeSparqlTsvResultTerm,
   parseSparqlTsvHeaderVariable,
   parseSparqlTsvResultTerm,
-  SparqlTsvResultTermCanonicalizer,
 } from './sparql-tsv-result-term.js';
 export type {
-  CanonicalSparqlTsvResultTerm,
   SparqlTsvResultTerm,
 } from './sparql-tsv-result-term.js';

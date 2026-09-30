@@ -21,8 +21,6 @@ type IriValidator = (value: string) => boolean;
 export class SparqlSelectResultNormalizer {
   private readonly iriValidators: IriValidator[];
   private readonly datatypeValidators: IriValidator[];
-  private readonly rfc3987IriPolicyValidators: IriValidator[];
-  private readonly rfc3987DatatypePolicyValidators: IriValidator[];
 
   constructor(
     variableCount: number,
@@ -34,14 +32,6 @@ export class SparqlSelectResultNormalizer {
       : 0;
     this.iriValidators = Array.from({ length: cachedColumns }, createIriValidator);
     this.datatypeValidators = Array.from({ length: cachedColumns }, createIriValidator);
-    this.rfc3987IriPolicyValidators = Array.from(
-      { length: cachedColumns },
-      createRfc3987IriPolicyValidator,
-    );
-    this.rfc3987DatatypePolicyValidators = Array.from(
-      { length: cachedColumns },
-      createRfc3987IriPolicyValidator,
-    );
   }
 
   format(term: SparqlResultTerm, column: number, label: string): string {
@@ -55,23 +45,6 @@ export class SparqlSelectResultNormalizer {
 
   assertDatatypeIri(value: string, column: number, label: string): void {
     const validate = this.datatypeValidators[column] ?? isSafeResultIri;
-    if (!validate(value)) {
-      this.reject(`${label} datatype must be an absolute safe IRI`);
-    }
-  }
-
-  /** Safety-policy half for a TSV IRI already validated by rdf-utils. */
-  formatRfc3987Iri(value: string, column: number, label: string): string {
-    const validate = this.rfc3987IriPolicyValidators[column] ?? isSafeResultIriPolicy;
-    if (!validate(value)) {
-      this.reject(`${label} URI value must be an absolute safe IRI`);
-    }
-    return value;
-  }
-
-  /** Safety-policy half for a TSV datatype already validated by rdf-utils. */
-  assertRfc3987DatatypeIri(value: string, column: number, label: string): void {
-    const validate = this.rfc3987DatatypePolicyValidators[column] ?? isSafeResultIriPolicy;
     if (!validate(value)) {
       this.reject(`${label} datatype must be an absolute safe IRI`);
     }
@@ -111,10 +84,6 @@ function isSafeResultIriPolicy(value: string): boolean {
 /** One last successful value per column role, never a growing response cache. */
 function createIriValidator(): IriValidator {
   return createCachedIriValidator(isSafeResultIri);
-}
-
-function createRfc3987IriPolicyValidator(): IriValidator {
-  return createCachedIriValidator(isSafeResultIriPolicy);
 }
 
 function createCachedIriValidator(validateIri: IriValidator): IriValidator {
