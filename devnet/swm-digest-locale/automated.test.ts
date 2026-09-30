@@ -12,9 +12,8 @@
  *   PHASE A - today's default (no gate). Only node 5 is a da-DK host; the four
  *     cores are en-US and node 1 (en-US) originates a share, recording and
  *     naming its snapshot by the en-US digest. A da-DK edge that joins AFTER the
- *     write catches the graph up through sync, which verifies that advertised
- *     digest against the bytes: it sees all the Shared Working Memory and logs
- *     no digest validation failure.
+ *     write receives the graph: it sees all the Shared Working Memory and no node
+ *     logs a digest validation failure.
  *   PHASE A2 - still without the gate, the da-DK edge originates a share of its
  *     own: it records a DIFFERENT digest than an en-US node does for the same
  *     kind of content. This is the drift the change removes.
@@ -23,12 +22,22 @@
  *     da-DK originator (node 3) and an en-US originator (node 2) records and
  *     names its snapshot by the same digest; a late da-DK edge with the gate on
  *     and a late en-US edge WITHOUT it (a legacy-mode node running this build)
- *     both sync it. Snapshots persisted before the flip stay in place.
+ *     both receive it. Snapshots persisted before the flip stay in place.
+ *
+ * What this suite is, and is not. It is integration and regression evidence on
+ * real nodes: the gate, the startup line, per-node environments, originator
+ * digests and file names, convergence and clean logs. It does NOT by itself prove
+ * that a late joiner's data went through the digest verification: in a devnet the
+ * data can also reach a joiner over gossip or the catalog lane, and an ad-hoc run
+ * against legacy v10.0.20 edges gave results that did not track the digest (a
+ * legacy en-US control edge received 0 of 8 rows in one run and 8 of 8 in
+ * another). The tests that fail without the change are the unit tests, the
+ * real-locale child-process e2e in packages/publisher and the real-libp2p e2e in
+ * packages/agent.
  *
  * Only the node that originates a share records a digest and a snapshot file;
  * peers that receive the write hold the data but no digest, so digests are read
- * from the originators. Late joiners are where a peer-advertised digest is
- * checked against bytes.
+ * from the originators.
  *
  * Rows are chosen so the canonical order really differs between the en-US,
  * da-DK and code-unit collations: an ordinary test corpus would give every

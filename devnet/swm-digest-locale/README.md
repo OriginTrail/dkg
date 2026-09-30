@@ -17,17 +17,29 @@ read by `scripts/devnet.sh` on every launch) and asserts, through the daemon API
 the node logs and the snapshot files:
 
 1. Node 5 is a da-DK host, everything else en-US, gate off. An en-US node
-   originates a share; the da-DK edge, joining afterwards, catches it up (its
-   own digest of the same quads is different) and logs no digest failure.
+   originates a share; the da-DK edge, joining afterwards, receives it (its own
+   digest of the same quads is different) and no node logs a digest failure.
 2. Without the gate, a da-DK originator records a different digest for the same
    kind of content: the drift.
 3. With the gate on, identical content written by a da-DK originator and an
    en-US originator has the same digest and snapshot file name; a late da-DK
-   edge (gate on) and a late en-US edge (gate off) both sync it.
+   edge (gate on) and a late en-US edge (gate off) both receive it.
 4. What was persisted before the flip is still there afterwards.
 
 The rows are chosen so their canonical order really differs between the en-US,
 da-DK and code-unit collations (`aa` sorts after `z` in da-DK).
+
+## What it does not prove
+
+It is integration and regression evidence, not a proof that a late joiner's data
+went through the digest verification: in a devnet the data can also arrive over
+gossip or the catalog lane, and an ad-hoc run against legacy v10.0.20 edges did
+not track the digest (a legacy en-US control edge got 0 of 8 rows in one run and
+8 of 8 in another). The tests that fail without the change are the unit tests, the
+real-locale child-process e2e (`packages/publisher/test/workspace-snapshot-digest-locale.e2e.test.ts`)
+and the real-libp2p e2e (`packages/agent/test/e2e-swm-digest-locale.test.ts`).
+A devnet phase that forces the legacy sync path on one node (for example
+`rfc64Catalog.rollout.killSwitch`) would close this gap.
 
 ## Run
 
