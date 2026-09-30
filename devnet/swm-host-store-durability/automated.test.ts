@@ -55,7 +55,7 @@ import {
   readNodeConfig,
   sleep,
   waitFor,
-  valueOf,
+  lexical,
   type DevnetNode,
 } from '../_bootstrap/harness';
 
@@ -362,7 +362,7 @@ beforeAll(async () => {
         nodeFor(MEMBER),
         `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <did:dkg:context-graph:${cgId}/_meta> { ?s <https://dkg.network/ontology#allowedAgent> ?a } }`,
       );
-      return Number(valueOf(rows[0]?.c).replace(/[^0-9]/g, '')) >= 1 ? true : null;
+      return Number(lexical(rows[0]?.c)) >= 1 ? true : null;
     } catch {
       return null;
     }
