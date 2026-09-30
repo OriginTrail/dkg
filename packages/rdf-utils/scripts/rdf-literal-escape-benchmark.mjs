@@ -3,9 +3,9 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-// The embedded legacy implementation below is the implementation at this
-// exact testnet-canary commit. Accepting arbitrary refs would mislabel a fixed
-// fixture as code loaded from that ref, so mismatches are rejected up front.
+// The embedded legacy implementation below is a frozen fixture from this
+// exact testnet-canary commit. This benchmark has no ref-selection interface:
+// its baseline never changes when callers run it from another Git revision.
 const LEGACY_BASELINE_COMMIT = '12645248f49e8df2d27a17dc893a44862fad6ade';
 
 // Dependency-free legacy implementation from the PR base. Keeping this small
@@ -43,15 +43,16 @@ if (process.argv[2] === '--worker') {
 }
 
 const repo = fileURLToPath(new URL('../../../', import.meta.url));
-const baseline = process.argv.find((arg) => arg.startsWith('--baseline='))?.slice(11)
-  ?? LEGACY_BASELINE_COMMIT;
+if (process.argv.slice(2).some((arg) => !arg.startsWith('--iterations='))) {
+  throw new Error('Only --iterations=COUNT is supported; the legacy baseline is fixed');
+}
 const baselineCommit = execFileSync(
-  'git', ['-C', repo, 'rev-parse', '--verify', `${baseline}^{commit}`], { encoding: 'utf8' },
+  'git', ['-C', repo, 'rev-parse', '--verify', `${LEGACY_BASELINE_COMMIT}^{commit}`], { encoding: 'utf8' },
 ).trim();
 if (baselineCommit !== LEGACY_BASELINE_COMMIT) {
   throw new Error(
     `This benchmark's frozen legacy fixture represents only ${LEGACY_BASELINE_COMMIT}; `
-    + `received ${baselineCommit}`,
+    + `resolved ${baselineCommit}`,
   );
 }
 const iterations = Number(process.argv.find((arg) => arg.startsWith('--iterations='))?.slice(13) ?? 5_000_000);
@@ -89,4 +90,4 @@ const summary = Object.fromEntries(Object.keys(fixtures).map((shape) => {
   const after = median(samples.filter((sample) => sample.shape === shape && sample.mode === 'candidate').map((sample) => sample.ms));
   return [shape, { baselineMs: before, candidateMs: after, reductionPct: (1 - after / before) * 100 }];
 }));
-process.stdout.write(`${JSON.stringify({ baseline, baselineCommit, iterations, summary, samples }, null, 2)}\n`);
+process.stdout.write(`${JSON.stringify({ baseline: 'frozen-legacy-fixture', baselineCommit, iterations, summary, samples }, null, 2)}\n`);
