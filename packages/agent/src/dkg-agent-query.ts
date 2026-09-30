@@ -14,6 +14,7 @@ import {
   type ContextGraphReadCheck,
 } from './prepare-unscoped-context-graph-read-checks.js';
 import { executeUnscopedQuery } from './unscoped-query-consistency.js';
+import { asQueryResultTooLargeError } from './query-result-too-large-error.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -134,6 +135,7 @@ import {
   emptyQueryResultForKind,
   validateReadOnlySparql,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
+  type QueryResult as EngineQueryResult,
   type QueryOptions as EngineQueryOptions,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
@@ -678,28 +680,33 @@ export class QueryMethods extends DKGAgentBase {
     // Arbitrary unscoped SPARQL can reveal private data through aggregates or
     // projections without a graph column. The executor owns admission and both
     // local consistency checks, including the release of the materialized result.
-    const result = opts.contextGraphId ? await execute() : await executeUnscopedQuery({
-      store: this.store,
-      readMetadataRevision: () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
-      admit: () => canReadUnscopedQuery({
+    let result: EngineQueryResult;
+    try {
+      result = opts.contextGraphId ? await execute() : await executeUnscopedQuery({
         store: this.store,
-        knownContextGraphIds: QueryMethods.prototype.contextGraphReadAuthorityCandidateSeeds.call(this),
-        canReadContextGraph: (contextGraphId, signal) => this.canReadContextGraph(contextGraphId, {
-          callerAgentAddress: callerAgentAddressStr,
-          signal,
-        }),
-        prepareReadChecks: (ids, signal) => (
-          QueryMethods.prototype.prepareContextGraphReadAuthorityChecks.call(
-            this, ids, { callerAgentAddress: callerAgentAddressStr, signal },
-          )
-        ),
-      }, { signal: opts.signal }),
-      execute,
-      denied: () => {
-        this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');
-        return emptyQueryResultForKind(sparql);
-      },
-    });
+        readMetadataRevision: () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
+        admit: () => canReadUnscopedQuery({
+          store: this.store,
+          knownContextGraphIds: QueryMethods.prototype.contextGraphReadAuthorityCandidateSeeds.call(this),
+          canReadContextGraph: (contextGraphId, signal) => this.canReadContextGraph(contextGraphId, {
+            callerAgentAddress: callerAgentAddressStr,
+            signal,
+          }),
+          prepareReadChecks: (ids, signal) => (
+            QueryMethods.prototype.prepareContextGraphReadAuthorityChecks.call(
+              this, ids, { callerAgentAddress: callerAgentAddressStr, signal },
+            )
+          ),
+        }, { signal: opts.signal }),
+        execute,
+        denied: () => {
+          this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');
+          return emptyQueryResultForKind(sparql);
+        },
+      });
+    } catch (error) {
+      throw asQueryResultTooLargeError(error) ?? error;
+    }
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
   }

@@ -5,10 +5,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CclResourceNotFoundError,
   ContextGraphPolicyAuthorizationError,
+  QueryResultTooLargeError,
 } from '@origintrail-official/dkg-agent';
 import {
   SparqlHttpResponseError,
-  StoreResponseTooLargeError,
   StoreOperationTimeoutError,
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
@@ -367,17 +367,11 @@ describe('/api/query request lifecycle', () => {
     expect(tracker.fail).not.toHaveBeenCalled();
   });
 
-  it.each([
-    ['transport', new StoreResponseTooLargeError(
+  it('reports the canonical agent byte overflow as a stable 413 response', async () => {
+    const error = new QueryResultTooLargeError(
       API_QUERY_MAX_STORE_RESPONSE_BYTES,
       API_QUERY_MAX_STORE_RESPONSE_BYTES + 1,
-    )],
-    ['materialization', Object.assign(new Error('query materialization exceeds byte limit'), {
-      code: 'QUERY_MATERIALIZATION_TOO_LARGE',
-      maxBytes: API_QUERY_MAX_STORE_RESPONSE_BYTES,
-      actualBytes: API_QUERY_MAX_STORE_RESPONSE_BYTES + 1,
-    })],
-  ])('reports a %s byte overflow as a stable 413 response', async (_kind, error) => {
+    );
     const req = new RequestStub();
     const res = new ResponseStub();
     const agent = { query: vi.fn(async () => { throw error; }) };

@@ -171,7 +171,11 @@ export {
   type ExactGraphReadErrorKind,
   type ReadExactGraphPagedOptions,
 } from './bounded-rdf.js';
-export { StoreResponseTooLargeError } from './http-response-limit.js';
+export {
+  StoreResponseTooLargeError,
+  isStoreResponseTooLargeError,
+  type StoreResponseTooLargeErrorLike,
+} from './http-response-limit.js';
 export {
   MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1,
   Rfc64SemanticReadGatewayErrorV1,

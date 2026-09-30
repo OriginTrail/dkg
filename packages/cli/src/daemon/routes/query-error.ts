@@ -9,6 +9,7 @@
  * no way to place it wrongly.
  */
 import { isSparqlHttpResponseError } from "@origintrail-official/dkg-storage";
+import { isQueryResultTooLargeError } from '@origintrail-official/dkg-agent';
 
 /**
  * Recognised structurally rather than by importing `@origintrail-official/dkg-query`.
@@ -18,10 +19,6 @@ import { isSparqlHttpResponseError } from "@origintrail-official/dkg-storage";
  * the constant is `packages/query/src/caller-sparql-error.ts`.
  */
 const CALLER_SPARQL_REJECTED_CODE = "CALLER_SPARQL_REJECTED";
-const QUERY_RESULT_LIMIT_CODES = new Set([
-  'STORE_RESPONSE_TOO_LARGE',
-  'QUERY_MATERIALIZATION_TOO_LARGE',
-]);
 
 export type QueryFailureClassification =
   | { readonly kind: 'client' }
@@ -96,19 +93,12 @@ function isLegacyClientQueryMessage(msg: string): boolean {
  * private so the provenance-first rule cannot be bypassed.
  */
 export function classifyQueryFailure(err: unknown): QueryFailureClassification {
-  if (typeof err === 'object' && err !== null) {
-    const limited = err as { code?: unknown; message?: unknown; actualBytes?: unknown };
-    if (typeof limited.code === 'string' && QUERY_RESULT_LIMIT_CODES.has(limited.code)) {
-      return {
-        kind: 'result-too-large',
-        message: typeof limited.message === 'string'
-          ? limited.message
-          : 'Query result exceeded the byte limit',
-        ...(typeof limited.actualBytes === 'number'
-          ? { actualBytes: limited.actualBytes }
-          : {}),
-      };
-    }
+  if (isQueryResultTooLargeError(err)) {
+    return {
+      kind: 'result-too-large',
+      message: err.message,
+      actualBytes: err.actualBytes,
+    };
   }
 
   // 1. Provenance wins: the engine marked this as the caller's own SPARQL.

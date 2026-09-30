@@ -190,6 +190,33 @@ describe('DKGQueryEngine', () => {
     }
   });
 
+  it('charges a shared graph catalog to each logical request budget', async () => {
+    const catalogStore = new OxigraphStore();
+    try {
+      const catalog = Array.from(
+        { length: 16 },
+        (_, index) => `${GRAPH}/_verifiable_memory/${index}-${'x'.repeat(80)}`,
+      );
+      catalogStore.listGraphsByPrefix = async () => catalog;
+      const catalogEngine = new DKGQueryEngine(catalogStore);
+
+      await expect(catalogEngine.query(
+        'SELECT ?s WHERE { ?s <urn:missing> ?o }',
+        {
+          contextGraphId: CONTEXT_GRAPH,
+          view: 'verifiable-memory',
+          maxMaterializedBytes: 128,
+        },
+      )).rejects.toMatchObject({
+        code: 'QUERY_MATERIALIZATION_TOO_LARGE',
+        maxBytes: 128,
+        actualBytes: expect.any(Number),
+      });
+    } finally {
+      await catalogStore.close();
+    }
+  });
+
   it('charges structural JSON bytes for empty bindings', async () => {
     let seenOptions: StoreQueryOptions | undefined;
     const structuralStore = {
@@ -1044,8 +1071,12 @@ describe('DKGQueryEngine', () => {
         view: 'verifiable-memory',
       });
       expect(responseSizes.length).toBeGreaterThan(1);
-      const ceiling = Math.max(...responseSizes);
-      expect(responseSizes.reduce((sum, size) => sum + size, 0)).toBeGreaterThan(ceiling);
+      const discoveredGraphs = (await store.listGraphs())
+        .filter(graph => graph.startsWith(`${GRAPH}/_verifiable_memory/`));
+      const discoveryBytes = Buffer.byteLength(JSON.stringify(discoveredGraphs), 'utf8');
+      const ceiling = discoveryBytes + Math.max(...responseSizes);
+      expect(discoveryBytes + responseSizes.reduce((sum, size) => sum + size, 0))
+        .toBeGreaterThan(ceiling);
 
       responseSizes = [];
       await expect(new DKGQueryEngine(store).query(query, {

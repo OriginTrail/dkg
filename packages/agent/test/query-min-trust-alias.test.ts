@@ -15,6 +15,7 @@
 import { describe, it, expect } from 'vitest';
 import { TrustLevel } from '@origintrail-official/dkg-core';
 import type { QueryResult, QueryOptions } from '@origintrail-official/dkg-query';
+import { StoreResponseTooLargeError } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
 
 function makeStubAgent(observer: (opts: QueryOptions | undefined) => void): InstanceType<typeof DKGAgent> {
@@ -62,6 +63,27 @@ function makeStubAgent(observer: (opts: QueryOptions | undefined) => void): Inst
 }
 
 describe('DKGAgent.query forwards `_minTrust` alias (PR #239 iter-6)', () => {
+  it.each([
+    new StoreResponseTooLargeError(10, 11),
+    Object.assign(new Error('materialization limit'), {
+      code: 'QUERY_MATERIALIZATION_TOO_LARGE',
+      maxBytes: 10,
+      actualBytes: 12,
+    }),
+  ])('normalizes lower-layer result limits before returning to callers', async (cause) => {
+    const agent = makeStubAgent(() => { throw cause; });
+
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId: 'cg-1',
+      maxResponseBytes: 10,
+    })).rejects.toMatchObject({
+      code: 'QUERY_RESULT_TOO_LARGE',
+      maxBytes: 10,
+      actualBytes: expect.any(Number),
+      cause,
+    });
+  });
+
   it('forwards store cancellation, priority, source, and response bounds', async () => {
     let seen: QueryOptions | undefined;
     const agent = makeStubAgent((o) => { seen = o; });

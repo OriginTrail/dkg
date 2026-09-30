@@ -1,5 +1,12 @@
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 export {
+  QUERY_RESULT_TOO_LARGE,
+  QueryResultTooLargeError,
+  asQueryResultTooLargeError,
+  isQueryResultTooLargeError,
+  type QueryResultTooLargeErrorLike,
+} from './query-result-too-large-error.js';
+export {
   authorityIndexTrustDomain,
   planAuthorityIndexBootstrap,
   resolveAuthorityIndexConfig,

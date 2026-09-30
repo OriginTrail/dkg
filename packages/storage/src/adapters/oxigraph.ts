@@ -65,21 +65,22 @@ function assertJsonResponseWithinLimit(value: unknown, maxBytes: number | undefi
 }
 
 /**
- * Build a JSON-array result without retaining an unbounded second copy of the
- * native Oxigraph result. The byte count is exact for the object shape returned
- * by this adapter and stops before the overflowing row is appended.
+ * Build one typed JSON-array result without retaining an unbounded second copy
+ * of the native Oxigraph result. The same builder owns the returned envelope
+ * and the fixed overhead used by exact byte accounting.
  */
-function mapBoundedQueryArray<T, U>(
+function mapBoundedQueryArray<T, U, R extends QueryResult>(
   values: T[],
   map: (value: T) => U,
-  envelope: { prefix: string; suffix: string },
+  buildResult: (mapped: U[]) => R,
   maxBytes: number | undefined,
-): U[] {
-  if (maxBytes === undefined) return values.map(map);
-  let actualBytes = Buffer.byteLength(envelope.prefix, 'utf8')
-    + Buffer.byteLength(envelope.suffix, 'utf8');
-  if (actualBytes > maxBytes) throw new StoreResponseTooLargeError(maxBytes, actualBytes);
+): R {
+  if (maxBytes === undefined) return buildResult(values.map(map));
   const mapped: U[] = [];
+  // The empty result contains the same array brackets as the final result.
+  // Replacing [] with [row,...] adds only each row plus its separators.
+  let actualBytes = Buffer.byteLength(JSON.stringify(buildResult(mapped)), 'utf8');
+  if (actualBytes > maxBytes) throw new StoreResponseTooLargeError(maxBytes, actualBytes);
   for (const value of values) {
     const next = map(value);
     actualBytes += (mapped.length === 0 ? 0 : 1)
@@ -87,7 +88,15 @@ function mapBoundedQueryArray<T, U>(
     if (actualBytes > maxBytes) throw new StoreResponseTooLargeError(maxBytes, actualBytes);
     mapped.push(next);
   }
-  return mapped;
+  return buildResult(mapped);
+}
+
+function buildSelectResult(bindings: Array<Record<string, string>>): SelectResult {
+  return { type: 'bindings', bindings };
+}
+
+function buildConstructResult(quads: DKGQuad[]): ConstructResult {
+  return { type: 'quads', quads };
 }
 
 export class OxigraphStore implements TripleStore {
@@ -383,7 +392,7 @@ export class OxigraphStore implements TripleStore {
 
     const first = result[0];
     if (first instanceof Map) {
-      const bindings = mapBoundedQueryArray(
+      return mapBoundedQueryArray(
         result as Map<string, OxTerm>[],
         (row) => {
           const obj: Record<string, string> = {};
@@ -392,19 +401,17 @@ export class OxigraphStore implements TripleStore {
           }
           return obj;
         },
-        { prefix: '{"type":"bindings","bindings":[', suffix: ']}' },
+        buildSelectResult,
         options?.maxResponseBytes,
       );
-      return { type: 'bindings', bindings } satisfies SelectResult;
     }
 
-    const quads = mapBoundedQueryArray(
+    return mapBoundedQueryArray(
       result as OxQuad[],
       fromOxQuad,
-      { prefix: '{"type":"quads","quads":[', suffix: ']}' },
+      buildConstructResult,
       options?.maxResponseBytes,
     );
-    return { type: 'quads', quads } satisfies ConstructResult;
   }
 
   async hasGraph(graphUri: string, options?: TripleStoreQueryOptions): Promise<boolean> {

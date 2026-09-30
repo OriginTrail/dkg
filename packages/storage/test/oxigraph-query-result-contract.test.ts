@@ -1,6 +1,23 @@
 import { describe, expect, it } from 'vitest';
 
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
+import {
+  StoreResponseTooLargeError,
+  isStoreResponseTooLargeError,
+} from '../src/http-response-limit.js';
+
+describe('store response-size error contract', () => {
+  it('recognizes instances and worker-deserialized errors structurally', () => {
+    expect(isStoreResponseTooLargeError(new StoreResponseTooLargeError(10, 11))).toBe(true);
+    expect(isStoreResponseTooLargeError({
+      code: 'STORE_RESPONSE_TOO_LARGE',
+      maxBytes: 10,
+      actualBytes: 11,
+      message: 'too large',
+    })).toBe(true);
+    expect(isStoreResponseTooLargeError({ code: 'STORE_RESPONSE_TOO_LARGE' })).toBe(false);
+  });
+});
 
 describe('OxigraphStore query result contract', () => {
   it('preserves the query form for empty SELECT, CONSTRUCT, DESCRIBE, and ASK results', async () => {
@@ -83,6 +100,33 @@ describe('OxigraphStore query result contract', () => {
           code: 'STORE_RESPONSE_TOO_LARGE',
           maxBytes: exactBytes - 1,
           actualBytes: expect.any(Number),
+        });
+      await expect(store.query(sparql, { maxResponseBytes: exactBytes }))
+        .resolves.toEqual(result);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('bounds a non-empty CONSTRUCT at its exact local-adapter boundary', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert([{
+        subject: 'urn:subject',
+        predicate: 'urn:predicate',
+        object: `"${'x'.repeat(64)}"`,
+        graph: 'urn:graph',
+      }]);
+      const sparql = 'CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <urn:graph> { ?s ?p ?o } }';
+      const result = await store.query(sparql);
+      expect(result.type).toBe('quads');
+      const exactBytes = Buffer.byteLength(JSON.stringify(result), 'utf8');
+
+      await expect(store.query(sparql, { maxResponseBytes: exactBytes - 1 }))
+        .rejects.toMatchObject({
+          code: 'STORE_RESPONSE_TOO_LARGE',
+          maxBytes: exactBytes - 1,
+          actualBytes: exactBytes,
         });
       await expect(store.query(sparql, { maxResponseBytes: exactBytes }))
         .resolves.toEqual(result);

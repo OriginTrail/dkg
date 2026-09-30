@@ -890,6 +890,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       sharedReads.listGraphsByPrefix(prefix),
       callerSignal,
     );
+    // The upstream flight is deliberately shared and therefore unmetered.
+    // Debit its materialized result only after this logical caller receives it,
+    // so coalescing stays cancellation-safe without bypassing the request cap.
+    if ('shared' in reads) reads.materializationBudget?.consume(allGraphs);
     return allGraphs.filter(
       (g) => g.startsWith(prefix) && !g.includes('/_meta') && !g.includes('/staging/'),
     );
