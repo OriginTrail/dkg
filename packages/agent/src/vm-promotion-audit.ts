@@ -202,15 +202,6 @@ export function storageAckNamespaceSubGraphsQuery(namespace: string, limit: numb
   } } ORDER BY ?subGraph LIMIT ${limit}`;
 }
 
-/** Whether the namespace's VM holds the asset at `version` or later. */
-export function storageAckPromotedQuery(namespace: string, kaUal: string, version: bigint): string {
-  return `ASK { GRAPH <${contextGraphMetaUri(namespace)}> {
-    <${kaUal}> <${DKG}status> "confirmed" ;
-      <${DKG}assertionVersion> ?confirmedVersion .
-    FILTER(?confirmedVersion >= ${version})
-  } }`;
-}
-
 /** Check one already-bounded audit slice across its exact VM metadata graphs. */
 export function storageAckPromotedBatchQuery(candidates: readonly Pick<
   StorageAckLedgerCandidate, 'operationSubject' | 'namespace' | 'kaUal' | 'assertionVersion'

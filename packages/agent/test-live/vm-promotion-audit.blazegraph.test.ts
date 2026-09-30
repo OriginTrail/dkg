@@ -9,6 +9,8 @@ import { storageAckPromotedBatchQuery } from '../src/vm-promotion-audit.js';
 const BLAZEGRAPH_URL = process.env.BLAZEGRAPH_TEST_URL;
 const NAMESPACE = `ack-batch-live-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 const META_GRAPH = contextGraphMetaUri(NAMESPACE);
+const OTHER_NAMESPACE = `${NAMESPACE}-other`;
+const OTHER_META_GRAPH = contextGraphMetaUri(OTHER_NAMESPACE);
 const DKG = 'http://dkg.io/ontology/';
 const INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
@@ -32,11 +34,19 @@ describe('VM promotion audit batch query (live Blazegraph)', () => {
         graph: META_GRAPH,
       },
     ]));
+    // Keep the other metadata graph real, but confirm a different KA there.
+    await store.insert([
+      { subject: `urn:ka:${NAMESPACE}:other`, predicate: `${DKG}status`,
+        object: '"confirmed"', graph: OTHER_META_GRAPH },
+      { subject: `urn:ka:${NAMESPACE}:other`, predicate: `${DKG}assertionVersion`,
+        object: `"2"^^<${INTEGER}>`, graph: OTHER_META_GRAPH },
+    ]);
   });
 
   afterAll(async () => {
     if (store) {
       await store.dropGraph(META_GRAPH).catch(() => {});
+      await store.dropGraph(OTHER_META_GRAPH).catch(() => {});
       await store.close().catch(() => {});
     }
   });
@@ -50,6 +60,14 @@ describe('VM promotion audit batch query (live Blazegraph)', () => {
       signedAtMs: 0,
       registered: false,
     }));
+    candidates.push({
+      operationSubject: `urn:op:${NAMESPACE}:same-ka-other-graph`,
+      namespace: OTHER_NAMESPACE,
+      kaUal: `urn:ka:${NAMESPACE}:1`,
+      assertionVersion: 1n,
+      signedAtMs: 0,
+      registered: false,
+    });
     const result = await store.query(storageAckPromotedBatchQuery(candidates));
 
     expect(result).toMatchObject({ type: 'bindings' });

@@ -53,7 +53,6 @@ import {
   storageAckPendingUpdatesQuery,
   storageAckNamespaceTargetsQuery,
   storageAckPromotedBatchQuery,
-  storageAckPromotedQuery,
   stripLiteral,
   type StorageAckLedgerCandidate,
   type VmPromotionAuditStatus,
@@ -1052,11 +1051,7 @@ export class VmPromotionMethods extends DKGAgentBase {
   }
 
   async isStorageAckCopyPromoted(this: DKGAgent, candidate: StorageAckLedgerCandidate): Promise<boolean> {
-    const result = await this.store.query(
-      storageAckPromotedQuery(candidate.namespace, candidate.kaUal, candidate.assertionVersion),
-      { source: 'agent.vmPromotionAudit.promoted' },
-    );
-    return result.type === 'boolean' && result.value;
+    return (await this.promotedStorageAckCopies([candidate])).has(candidate.operationSubject);
   }
 
   /** Resolve promoted copies in bounded, graph-local batches instead of one ASK per ledger row. */

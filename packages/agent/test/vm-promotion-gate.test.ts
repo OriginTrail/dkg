@@ -1842,18 +1842,25 @@ describe('core VM-promotion guarantees', () => {
       const b2 = await seedCopy(internals.store, {
         namespace: 'batch-b', n: 204, ageMs: 2 * HOUR, version: 1,
       });
+      const shadow = await seedCopy(internals.store, {
+        namespace: 'batch-shadow', n: 205, ageMs: 2 * HOUR, version: 1,
+        confirmedVersion: 1,
+      });
       const candidates = [
         { operationSubject: a1.op, namespace: 'batch-a', kaUal: ual(201), assertionVersion: 1n },
         { operationSubject: a2.op, namespace: 'batch-a', kaUal: ual(202), assertionVersion: 2n },
         { operationSubject: b1.op, namespace: 'batch-b', kaUal: ual(203), assertionVersion: 1n },
         { operationSubject: b2.op, namespace: 'batch-b', kaUal: ual(204), assertionVersion: 1n },
+        // The same KA is confirmed in batch-a, but not in this graph.
+        { operationSubject: shadow.op, namespace: 'batch-shadow', kaUal: ual(201), assertionVersion: 1n },
       ].map((candidate) => ({ ...candidate, signedAtMs: 0, registered: false }));
       const query = vi.spyOn(internals.store, 'query');
 
       await expect(internals.isStorageAckCopyPromoted(candidates[0]!)).resolves.toBe(true);
+      await expect(internals.isStorageAckCopyPromoted(candidates[4]!)).resolves.toBe(false);
       await expect(internals.promotedStorageAckCopies(candidates)).resolves.toEqual(new Set([a1.op, b1.op]));
       expect(query.mock.calls.filter(([, options]) =>
-        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(1);
+        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(3);
     });
 
     it('keeps unsafe operation IRIs out of the promoted batch formatter', async () => {
