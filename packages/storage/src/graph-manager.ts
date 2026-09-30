@@ -586,6 +586,13 @@ export interface LoadMerkleVerifiedSharedMemorySliceOptions {
   maxCompleteFamilyGraphs?: number;
 }
 
+export interface MerkleVerifiedSharedMemorySliceResult {
+  quads: Quad[];
+  accepted: Quad[] | null;
+  /** The complete read exceeded its graph limit; candidates were not promoted. */
+  deferred?: boolean;
+}
+
 const MAX_ROOT_INDEXED_DISCOVERY_ROOTS = 128;
 const MAX_ROOT_INDEXED_DISCOVERY_GRAPHS = 4_096;
 const MAX_CACHED_GRAPH_CANDIDATE_GRAPHS = 512;
@@ -736,7 +743,7 @@ export function loadMerkleVerifiedSharedMemorySlice(
   selection: SharedMemoryReadSelection,
   kaGraphBound: SwmKaGraphBound | undefined,
   options: LoadMerkleVerifiedSharedMemorySliceOptions,
-): Promise<{ quads: Quad[]; accepted: Quad[] | null }> {
+): Promise<MerkleVerifiedSharedMemorySliceResult> {
   if (options.expectedMerkleRoot.length !== 32) {
     throw new TypeError('Expected a 32-byte on-chain merkle root');
   }
@@ -782,7 +789,7 @@ async function runSharedMemorySliceCandidates(
   createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>,
   loadOptions: Pick<LoadSelectedSharedMemoryQuadsOptions, 'queryOptions' | 'resultBudget'>,
   maxCompleteFamilyGraphs?: number,
-): Promise<{ quads: Quad[]; accepted: Quad[] | null }> {
+): Promise<MerkleVerifiedSharedMemorySliceResult> {
   const queryOptions = loadOptions.queryOptions;
   let quads: Quad[] = [];
   let accepted: Quad[] | null = null;
@@ -818,9 +825,9 @@ async function runSharedMemorySliceCandidates(
     const now = Date.now();
     if (now - lastSwmGraphLimitWarningAt >= 60_000) {
       lastSwmGraphLimitWarningAt = now;
-      console.warn(`[swm-read] deferring complete family with ${error.graphCount} graphs (limit=${error.limit}) to payload sync`);
+      console.warn(`[swm-read] deferring complete family with ${error.graphCount} graphs (limit=${error.limit}) without promoting an unverified candidate`);
     }
-    return { quads: lastCandidate, accepted: null };
+    return { quads: lastCandidate, accepted: null, deferred: true };
   }
   if (quads.length === 0) return { quads, accepted: null };
   accept ??= await traceSlowSwmReadStage('complete.prepare-verifier', queryOptions, createAccept);
