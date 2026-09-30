@@ -5,35 +5,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
-import { WORKSPACE_RULES } from '../ci-delta.mjs';
+import { readWorkspaces, workspaceClosure } from './ci-execution-graph.mjs';
 import { REPO_ROOT } from './ci-plan-fixtures.mjs';
 
-// Every package workspace's manifest by directory, and directories by package name.
-export function readWorkspaces() {
-  const manifests = new Map(Object.keys(WORKSPACE_RULES).map((workspace) => [
-    workspace,
-    JSON.parse(fs.readFileSync(path.join(REPO_ROOT, workspace, 'package.json'), 'utf8')),
-  ]));
-  return { manifests, workspaceByName: new Map([...manifests].map(([workspace, { name }]) => [name, workspace])) };
-}
-
-// `roots` plus every workspace they depend on (dependencies and
-// devDependencies), in `workspaces` ({ manifests, workspaceByName }, by
-// default the repository's). Roots that are not workspaces are ignored.
-export function workspaceClosure(roots, { manifests, workspaceByName } = readWorkspaces()) {
-  const queue = [...roots];
-  const closure = new Set();
-  while (queue.length) {
-    const workspace = queue.shift();
-    if (closure.has(workspace) || !manifests.has(workspace)) continue;
-    closure.add(workspace);
-    const { dependencies = {}, devDependencies = {} } = manifests.get(workspace);
-    for (const name of Object.keys({ ...dependencies, ...devDependencies })) {
-      if (workspaceByName.has(name)) queue.push(workspaceByName.get(name));
-    }
-  }
-  return closure;
-}
+export { readWorkspaces, workspaceClosure };
 
 const isRepoFile = (candidate) => fs.statSync(path.join(REPO_ROOT, candidate), { throwIfNoEntry: false })?.isFile() === true;
 const isRepoDirectory = (candidate) => fs.statSync(path.join(REPO_ROOT, candidate), { throwIfNoEntry: false })?.isDirectory() === true;

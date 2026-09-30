@@ -62,15 +62,17 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   skipped.
 - Shared packages run conservative reverse consumers and explicit integrations;
   this includes undeclared edges such as committed EVM ABIs consumed by `chain`.
-  Beyond declared dependencies, a routing test seeds from what each lane runs
-  (package code and tests, and the support files CI jobs run directly, through
-  root `package.json` or shell scripts, or through local actions and reusable
-  workflows, plus the repository scripts named by the workspace scripts CI
-  runs: those a job command names, the scripts they call, install hooks and
-  the build; what the build or an install hook runs needs full CI), reads
-  each file with the handler for its format (JavaScript and TypeScript
-  modules, shell scripts; other formats name nothing), follows every
-  relative reference (imports, dynamic imports,
+  Beyond declared dependencies, a routing test seeds from what CI runs, read
+  once into an execution graph (`ci-execution-graph.mjs`): each lane's
+  package code and tests, and every file outside the package workspaces that
+  a job runs or names, directly, through root or workspace `package.json`
+  scripts (install hooks, builds and packing included) and shell scripts, or
+  through local actions and reusable workflows, plus whatever an install hook
+  runs. A lane job's files need its lane, the build job's own checks need the
+  build job, and what an install hook or a workspace build runs needs full
+  CI. The test reads each file with the handler for its format (JavaScript
+  and TypeScript modules, shell scripts; other formats name nothing), follows
+  every relative reference (imports, dynamic imports,
   CommonJS `require`, `new URL(...)` paths, paths built with
   `path.resolve`/`join` or their imported aliases from a file's own directory
   and, in tests and test-runner configs, quoted repo paths naming a file;

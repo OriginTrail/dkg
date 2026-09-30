@@ -22,10 +22,10 @@ import {
   selectedLanes,
   sourceFiles,
   succeeded,
-  workflowJobCommands,
 } from './ci-plan-fixtures.mjs';
 import { BUILD_ONLY_SCRIPTS, SUPPORT_PATH_ROUTES, scriptsPattern } from '../ci-routing.mjs';
-import { laneSeeds, repositoryScriptsRun, workspaceScriptRuns } from './lane-entrypoints.mjs';
+import { COMMAND_EFFECTS, workflowExecution } from './ci-execution-graph.mjs';
+import { edgeRequirement, jobRequirement, laneSeeds } from './lane-entrypoints.mjs';
 import { dependenciesOf, loadReferences, packageImports, repoScriptMentions, traceLaneLoads, workspaceClosure } from './load-graph.mjs';
 
 // The workspaces that `files` import by package name, plus everything those
@@ -440,6 +440,7 @@ function loadClosureGaps({ loaded, unfollowed }, { plan = (file) => pullRequestP
     if (targetPlan.mode === 'full') continue;
     for (const [requirement, via] of requirements) {
       const selected = requirement === 'full' ? inWorkspace(target)
+        : requirement === 'build' ? needsSharedBuild(targetPlan)
         : requirement.startsWith('evm:') ? targetPlan.evmScopes.includes(requirement.slice(4))
         : targetPlan.lanes[requirement];
       if (!selected) missing.push(`${requirement} loads ${target} via ${via}`);
@@ -485,46 +486,72 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   assert.deepEqual([...UNFOLLOWED_LOADS.keys()].filter((entry) => !computed.includes(entry)), [], 'stale UNFOLLOWED_LOADS entries');
 });
 
-// Each repository script a workflow job runs (directly, or through what
-// workflowJobCommands follows) that does not select that job: its lane, the
-// shared build job, or, for the EVM integration workflow, whose runner every
-// scope uses, full CI. The changes job runs on every PR. `workflows` maps a
-// workflow file name to its source.
-function workflowScriptGaps(workflows) {
-  const laneByJob = Object.fromEntries(Object.entries(PRIMARY_LANE_JOBS).map(([lane, job]) => [job, lane]));
-  const isRepoFile = (file) => fs.statSync(path.join(REPO_ROOT, file), { throwIfNoEntry: false })?.isFile() === true;
-  const gaps = [];
-  let checked = 0;
-  for (const [workflow, source] of workflows) {
-    for (const { job, condition, commands } of workflowJobCommands(source)) {
-      if (workflow === 'ci.yml' && job === 'changes') continue;
-      const lane = laneByJob[job] ?? condition.match(/needs\.changes\.outputs\.(\w+) == 'true'/)?.[1];
-      for (const file of new Set(commands.flatMap(repoScriptMentions).filter(isRepoFile))) {
-        checked += 1;
-        const plan = pullRequestPlan([change(file)]);
-        if (plan.mode === 'full') continue;
-        const selected = workflow === 'ci.yml'
-          && (job === 'build' ? needsSharedBuild(plan) : Boolean(lane && plan.lanes[lane]));
-        if (!selected) gaps.push(`${workflow} ${job} runs ${file}`);
-      }
-    }
-  }
-  return { gaps, checked };
+// The load-closure gaps for what a planted ci.yml runs (laneSeeds from the
+// execution graph, without the workspace code), through the same trace and
+// check as the repository's own workflows.
+function plantedWorkflowGaps(workflowSource, options = {}) {
+  const seeds = laneSeeds({ workflows: [['ci.yml', workflowSource]], workspaceCode: false, ...options });
+  return { seeds, ...loadClosureGaps(traceLaneLoads(seeds), options) };
 }
 
 test('every repository script a CI job runs selects that job', () => {
-  const { gaps, checked } = workflowScriptGaps(['ci.yml', 'evm-integration.yml'].map((workflow) => [
-    workflow,
-    fs.readFileSync(path.join(REPO_ROOT, '.github/workflows', workflow), 'utf8'),
-  ]));
-  assert.ok(checked >= 5, 'the scripts workflow jobs run are checked');
-  assert.deepEqual(gaps, []);
+  // The repository's workflows are checked by the guard above, which seeds
+  // what each job runs from the execution graph. Its failure path: a lane job
+  // running a script routed to the build checks alone is reported; a script
+  // routed to that lane is not, however its path is spelled; the changes job
+  // runs on every pull request.
+  const planted = (job, run) => `jobs:\n  ${job}:\n    if: needs.changes.outputs.bura_cli == 'true'\n    steps:\n      - run: ${run}\n`;
+  // The trace follows the script's own imports too.
+  assert.deepEqual(plantedWorkflowGaps(planted('bura-cli', 'node scripts/audit-dial-protocol.mjs')).missing, [
+    'bura_cli loads scripts/audit-dial-protocol.mjs via ci.yml bura-cli',
+    'bura_cli loads scripts/audit-create-random.mjs via scripts/audit-dial-protocol.mjs',
+  ]);
+  assert.deepEqual(plantedWorkflowGaps(planted('bura-cli', 'bash "$GITHUB_WORKSPACE/scripts/devnet-publish-helpers.sh"')).missing, []);
+  assert.equal(jobRequirement('ci.yml', 'changes', ''), undefined);
+  assert.equal(jobRequirement('ci.yml', 'build', "needs.changes.outputs.run_node == 'true'"), 'build');
+  assert.equal(jobRequirement('evm-integration.yml', 'evm-integration', "needs.plan.outputs.evm_matrix != '[]'"), 'full');
+});
 
-  // The check's failure path: a lane job running a script routed to the build
-  // checks alone is reported; a script routed to that lane is not.
-  const planted = (run) => [['ci.yml', `jobs:\n  bura-cli:\n    steps:\n      - run: ${run}\n`]];
-  assert.deepEqual(workflowScriptGaps(planted('node scripts/audit-dial-protocol.mjs')).gaps, ['ci.yml bura-cli runs scripts/audit-dial-protocol.mjs']);
-  assert.deepEqual(workflowScriptGaps(planted('bash "$GITHUB_WORKSPACE/scripts/devnet-publish-helpers.sh"')).gaps, []);
+test('one execution graph feeds the seeds and the gap check, direct and indirect runs alike', () => {
+  // The build job runs one repository script directly and packs the CLI
+  // through release-packages.mjs (COMMAND_EFFECTS), whose prepack runs the
+  // asset copier. Both reach the seeds through the graph, and a plan that
+  // drops either from its requirement is reported.
+  const cli = { name: '@origintrail-official/dkg', scripts: { prepack: 'node ../../scripts/copy-cli-runtime-assets.mjs' } };
+  const execution = {
+    workspaces: { manifests: new Map([['packages/cli', cli]]), workspaceByName: new Map([[cli.name, 'packages/cli']]) },
+    rootManifest: { scripts: { 'release:verify-pack': 'node scripts/release-packages.mjs verify-pack' } },
+  };
+  const workflow = [
+    'jobs:',
+    '  build:',
+    "    if: needs.changes.outputs.run_node == 'true'",
+    '    steps:',
+    '      - run: node scripts/audit-dial-protocol.mjs',
+    '      - run: pnpm release:verify-pack',
+  ].join('\n');
+  const [build] = workflowExecution(workflow, execution);
+  assert.deepEqual(build.edges.filter(({ kind }) => kind === 'script').map(({ workspace, script }) => `${workspace} ${script}`), [
+    '. release:verify-pack',
+    'packages/cli prepack',
+  ]);
+  const { seeds, missing } = plantedWorkflowGaps(workflow, { execution });
+  assert.equal(seeds.get('scripts/audit-dial-protocol.mjs')?.has('build'), true);
+  assert.equal(seeds.get('scripts/copy-cli-runtime-assets.mjs')?.has('full'), true);
+  assert.deepEqual(missing, []);
+  // A docs-only plan runs neither the build nor anything else.
+  const nothing = () => pullRequestPlan([change('docs/ci-delta-policy.md')]);
+  const undocumented = plantedWorkflowGaps(workflow, { execution, plan: nothing }).missing;
+  for (const gap of [
+    'build loads scripts/audit-dial-protocol.mjs via ci.yml build',
+    'full loads scripts/copy-cli-runtime-assets.mjs via ci.yml build > release:verify-pack > packages/cli prepack',
+  ]) {
+    assert.ok(undocumented.includes(gap), gap);
+  }
+  // Each program COMMAND_EFFECTS reads still runs what it declares.
+  for (const { evidence } of COMMAND_EFFECTS) {
+    assert.ok(fs.readFileSync(path.join(REPO_ROOT, evidence.file), 'utf8').includes(evidence.text), evidence.file);
+  }
 });
 
 test('the load-closure guard reports a planted unrouted load and an unlisted computed load', () => {
@@ -542,62 +569,70 @@ test('the load-closure guard reports a planted unrouted load and an unlisted com
   assert.deepEqual(unexplained, [`${planted}: \`../../cli/src/\${name}.js\``]);
 });
 
+// The package scripts a workflow runs, as '<requirement> <workspace> <script>'.
+function scriptRuns(workflows, execution) {
+  return [...new Set(workflows.flatMap(([workflow, source]) => workflowExecution(source, execution)
+    .flatMap(({ job, condition, edges }) => edges
+      .filter(({ kind }) => kind === 'script')
+      .map(({ workspace, script, chain }) => `${edgeRequirement(jobRequirement(workflow, job, condition), chain)} ${workspace} ${script}`))))].sort();
+}
+
 test('workspace scripts count where CI runs them, not because their workspace owns a lane', () => {
   // A manual script in a lane-owning workspace is no lane input; a job
   // command that runs it adds that job's lane. The shared build runs every
   // workspace's build (turbo build) for the output every lane restores, so
-  // what a build runs needs full CI, as does an install hook.
+  // what a build runs needs full CI, as does an install hook. A workspace
+  // script's paths resolve from its own directory.
   const cli = {
     name: '@origintrail-official/dkg',
     scripts: {
-      preinstall: 'node ../../scripts/check-runtime.mjs',
+      preinstall: 'node ./scripts/verify-node-sqlite-runtime.mjs',
       build: 'pnpm run build:prepared',
-      'build:prepared': 'tsc && node ../../scripts/copy-cli-runtime-assets.mjs',
+      'build:prepared': 'tsc && node scripts/build-prerequisites.mjs && node ../../scripts/copy-cli-runtime-assets.mjs',
       'release:dry-run': 'node ../../scripts/release-helper.mjs',
     },
   };
-  const workspaces = { manifests: new Map([['packages/cli', cli]]), workspaceByName: new Map([[cli.name, 'packages/cli']]) };
-  const runs = (laneCommand) => workspaceScriptRuns([['ci.yml', [
+  const execution = { workspaces: { manifests: new Map([['packages/cli', cli]]), workspaceByName: new Map([[cli.name, 'packages/cli']]) }, rootManifest: {} };
+  const workflow = (laneCommand) => [['ci.yml', [
     'jobs:',
     '  build:',
+    "    if: needs.changes.outputs.run_node == 'true'",
     '    steps:',
     '      - run: pnpm install --frozen-lockfile && turbo build',
     '  bura-cli:',
+    "    if: needs.changes.outputs.bura_cli == 'true'",
     '    steps:',
     `      - run: ${laneCommand}`,
-  ].join('\n')]], { workspaces, rootManifest: {} }).map(({ workspace, script, requirement }) => `${requirement} ${workspace} ${script}`).sort();
+  ].join('\n')]];
   const shared = ['full packages/cli build', 'full packages/cli build:prepared', 'full packages/cli preinstall'];
-  assert.deepEqual(runs('pnpm install --frozen-lockfile'), shared);
-  assert.deepEqual(runs("pnpm --filter '@origintrail-official/dkg' run release:dry-run"), [...shared, 'bura_cli packages/cli release:dry-run'].sort());
-  // A filter the traversal cannot resolve fails instead of hiding what runs.
-  assert.throws(() => runs('pnpm --filter "[origin/main]" run build'), /unsupported pnpm filter selector/);
-  // A workspace script's paths resolve from its directory; only the root
-  // scripts/ are repository scripts.
-  assert.deepEqual(repositoryScriptsRun({
-    workspace: 'packages/cli',
-    text: 'node scripts/build-prerequisites.mjs && node ../../scripts/copy-cli-runtime-assets.mjs',
-  }), ['scripts/copy-cli-runtime-assets.mjs']);
+  assert.deepEqual(scriptRuns(workflow('pnpm install --frozen-lockfile'), execution), shared);
+  assert.deepEqual(scriptRuns(workflow("pnpm --filter '@origintrail-official/dkg' run release:dry-run"), execution), [...shared, 'bura_cli packages/cli release:dry-run'].sort());
+  // A filter the graph cannot resolve fails instead of hiding what runs.
+  assert.throws(() => scriptRuns(workflow('pnpm --filter "[origin/main]" run build'), execution), /unsupported pnpm filter selector/);
+  const [build] = workflowExecution(workflow('echo ok')[0][1], execution);
+  assert.deepEqual([...new Set(build.edges.filter(({ kind }) => kind === 'file').map(({ file }) => file))], [
+    'packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+    'packages/cli/scripts/build-prerequisites.mjs',
+    'scripts/copy-cli-runtime-assets.mjs',
+  ]);
 
   // The repository's own: the CLI build and pack run the asset copier, and
   // lane jobs run the node-ui UI build and the demo and Hermes suites.
-  const workflows = ['ci.yml', 'evm-integration.yml'].map((workflow) => [
+  const real = new Set(scriptRuns(['ci.yml', 'evm-integration.yml'].map((workflow) => [
     workflow,
     fs.readFileSync(path.join(REPO_ROOT, '.github/workflows', workflow), 'utf8'),
-  ]);
-  const real = new Set(workspaceScriptRuns(workflows).map(({ workspace, script, requirement }) => `${requirement} ${workspace} ${script}`));
+  ])));
   for (const run of [
     'full packages/cli build:prepared',
     'full packages/cli prepack',
+    'full packages/cli postinstall',
+    'full . preinstall',
     'kosava_node_ui packages/node-ui build:ui',
     'kosava_supporting demo test',
     'kosava_supporting packages/adapter-hermes test:py',
   ]) {
     assert.ok(real.has(run), run);
   }
-  // IMPLICIT_WORKSPACE_SCRIPTS: the build job still packs the CLI.
-  const buildJob = workflowJobCommands(workflows[0][1]).find(({ job }) => job === 'build');
-  assert.ok(buildJob.commands.some((command) => /\bscripts\/release-packages\.mjs verify-pack\b/.test(command)));
-  assert.match(fs.readFileSync(path.join(REPO_ROOT, 'scripts/release-packages.mjs'), 'utf8'), /runner\('npm', \['pack', '--dry-run'/);
 });
 
 test('pnpm filter selectors resolve on the injected workspace graph alone', () => {
@@ -611,10 +646,10 @@ test('pnpm filter selectors resolve on the injected workspace graph alone', () =
     ['packages/d', manifest('fixture-d')],
   ]);
   const workspaces = { manifests, workspaceByName: new Map([...manifests].map(([directory, { name }]) => [name, directory])) };
-  const built = (selector) => workspaceScriptRuns([['ci.yml', `jobs:\n  bura-cli:\n    steps:\n      - run: pnpm --filter '${selector}' run build\n`]], {
+  const built = (selector) => workflowExecution(`jobs:\n  bura-cli:\n    steps:\n      - run: pnpm --filter '${selector}' run build\n`, {
     workspaces,
     rootManifest: {},
-  }).map(({ workspace }) => workspace).sort();
+  })[0].edges.filter(({ kind }) => kind === 'script').map(({ workspace }) => workspace).sort();
   assert.deepEqual(built('fixture-a...'), ['packages/a', 'packages/b']);
   assert.deepEqual(built('...fixture-b'), ['packages/a', 'packages/b', 'packages/c']);
   assert.deepEqual(built('!fixture-d'), ['packages/a', 'packages/b', 'packages/c']);
