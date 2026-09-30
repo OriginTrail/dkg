@@ -7,6 +7,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
+  SYNC_BYTE_BUDGET_EXACT_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
   SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD,
@@ -643,7 +644,7 @@ describe('byte-budget sync pagination', () => {
       hasExactAssetFilter: true,
     })).toEqual({
       usesByteBudgetPage: true,
-      limit: SYNC_REQUEST_SAFE_PAGE_SIZE,
+      limit: SYNC_BYTE_BUDGET_EXACT_MAX_ROWS,
       cacheMode: 'page-only',
       exactGraphReadMode: 'page-only',
     });

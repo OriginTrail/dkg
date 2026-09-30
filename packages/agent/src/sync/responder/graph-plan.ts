@@ -34,7 +34,10 @@ import {
   type SyncResponderSnapshotBudget,
 } from './snapshot-budget.js';
 import { estimateStringRowHeapBytes } from '../memory-telemetry.js';
-import { SYNC_BYTE_BUDGET_RESPONSE_BYTES } from '../../dkg-agent-constants.js';
+import {
+  SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+  SYNC_REQUEST_SAFE_PAGE_SIZE,
+} from '../../dkg-agent-constants.js';
 import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/wire.js';
 import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-admission.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
@@ -247,6 +250,9 @@ interface ExactGraphPagePlan {
    * pagination session into an unbounded control-plane cache.
    */
   cursors: Map<number, ExactGraphPageCursor | null>;
+  cursorBytesEstimate?: number;
+  /** Page-only sessions reject local source writes instead of mixing generations. */
+  writeRevisions?: readonly { prefix: string; generation: number }[];
 }
 
 export interface ExactGraphPagePlanMemo {
@@ -444,6 +450,8 @@ interface SessionPlanBudgetAccounting<T> {
   budget: SyncResponderSnapshotBudget;
   phase: 'shared_memory' | 'durable_meta' | 'durable_data';
   bytesEstimate: (value: T) => number;
+  /** Keep responder admission until an aborted store load physically settles. */
+  drainOnAbort?: boolean;
 }
 
 function createSessionPlanMemo<T>(
@@ -476,7 +484,18 @@ function createSessionPlanMemo<T>(
       const now = Date.now();
       prune(now);
       const pending = inflight.get(key);
-      if (pending) return raceAgainstAbort(pending, options?.signal);
+      if (pending) {
+        if (!accounting?.drainOnAbort) return raceAgainstAbort(pending, options?.signal);
+        if (!options?.refresh) {
+          const value = await pending;
+          throwIfAborted(options?.signal);
+          return value;
+        }
+        // An explicit replacement waits for the prior physical load, then
+        // builds its own plan rather than inheriting the older generation.
+        try { await pending; } catch { throwIfAborted(options?.signal); }
+        throwIfAborted(options?.signal);
+      }
       const existing = cached.get(key);
       if (!options?.refresh && existing) {
         cached.delete(key);
@@ -496,6 +515,7 @@ function createSessionPlanMemo<T>(
       }
       const pendingLoad = load()
         .then((value) => {
+          if (accounting?.drainOnAbort) throwIfAborted(options?.signal);
           const replaced = cached.get(key);
           let budgetEntryId: symbol | undefined;
           if (accounting) {
@@ -517,12 +537,20 @@ function createSessionPlanMemo<T>(
             });
             accounting.budget.release(budgetEntryId);
           }
+          // Concurrent loads for different keys can pass the entry check
+          // before either settles. Keep the cap true at settlement as well.
+          if (!cached.has(key)) {
+            while (cached.size >= maxEntries) deleteEntry(cached.keys().next().value!, 'released');
+          }
           cached.set(key, { value, cachedAt: Date.now(), budgetEntryId });
           return value;
         })
         .finally(() => inflight.delete(key));
       inflight.set(key, pendingLoad);
-      return raceAgainstAbort(pendingLoad, options?.signal);
+      if (!accounting?.drainOnAbort) return raceAgainstAbort(pendingLoad, options?.signal);
+      const value = await pendingLoad;
+      throwIfAborted(options?.signal);
+      return value;
     },
   };
 }
@@ -539,6 +567,41 @@ export function createResponderExactGraphPagePlanMemo(
   maxEntries = 32,
 ): ExactGraphPagePlanMemo {
   return createSessionPlanMemo<ExactGraphPagePlan>(ttlMs, maxEntries);
+}
+
+/**
+ * Exact byte-budget sessions retain only bounded graph/count scalars and
+ * keyset cursors. Reserve the cursor ceiling up front so later pages cannot
+ * grow uncharged state outside the process-wide responder budget.
+ */
+export function createResponderPageOnlyExactGraphPlanMemo(
+  ttlMs: number,
+  maxEntries: number,
+  budget: SyncResponderSnapshotBudget,
+): ExactGraphPagePlanMemo {
+  const memo = createSessionPlanMemo<ExactGraphPagePlan>(ttlMs, maxEntries, {
+    budget,
+    phase: 'durable_data',
+    drainOnAbort: true,
+    bytesEstimate: (plan) => {
+      const bytes = exactGraphPlanScalarBytes(plan);
+      if (bytes > EXACT_GRAPH_PLAN_MAX_BYTES_ESTIMATE) {
+        throw snapshotBudgetError({
+          key: 'exact-data-plan', reason: 'snapshot_bytes', rows: plan.entries.length,
+          bytesEstimate: bytes, limit: EXACT_GRAPH_PLAN_MAX_BYTES_ESTIMATE,
+        });
+      }
+      return bytes + EXACT_GRAPH_CURSOR_CACHE_MAX_BYTES_ESTIMATE;
+    },
+  });
+  return {
+    get(key, load, options) {
+      // Opaque request tokens need not have a small wire spelling. Retain a
+      // fixed-size digest of the complete server-derived scope/generation.
+      const boundedKey = bytesToHex(sha256(new TextEncoder().encode(key)));
+      return memo.get(boundedKey, load, options);
+    },
+  };
 }
 
 function createSubGraphNameMemo(
@@ -1636,6 +1699,10 @@ export async function readDurableDataPage(params: {
   refreshRowList?: boolean;
   refreshGeneration?: string;
   exactGraphPlanMemo?: ExactGraphPagePlanMemo;
+  /** Server-derived peer/CG/selection/session identity, independent of row caching. */
+  exactGraphPlanCacheKey?: string;
+  /** Assemble byte-budgeted pages from conservative store chunks. */
+  maxPageBytes?: number;
   /** Keep the immutable row snapshot until an explicit empty-page EOF. */
   releaseCacheOnShortPage?: boolean;
   assetUals?: readonly string[];
@@ -1672,13 +1739,28 @@ export async function readDurableDataPage(params: {
       params.signal,
       params.exactGraphPlanMemo,
       async (planSignal) => {
+        const revisionSource = params.exactGraphReadMode === 'page-only'
+          ? asGraphWriteRevisionSource(params.store)
+          : null;
+        const prefix = contextGraphMetaGraphUri(params.contextGraphId);
+        const revision = revisionSource?.getWriteRevision(prefix);
+        if (revision && !revision.stable) {
+          throw new Error('Sync session exact-graph plan expired: store revision is unstable');
+        }
         const manifest = await readGraphScopedVmManifest(
           params.store,
           params.contextGraphId,
           planSignal,
         );
         const entries = manifest.confirmedEntries.filter((entry) => requested.has(entry.ual));
-        return buildExactGraphPagePlan(
+        const payloadRevisions = revisionSource ? entries.map((entry) => {
+          const current = revisionSource.getWriteRevision(entry.graph);
+          if (!current.stable) {
+            throw new Error('Sync session exact-graph plan expired: store revision is unstable');
+          }
+          return { prefix: entry.graph, generation: current.generation };
+        }) : [];
+        const plan = await buildExactGraphPagePlan(
           params.store,
           entries.map((entry) => entry.graph),
           () => Promise.resolve(true),
@@ -1686,7 +1768,17 @@ export async function readDurableDataPage(params: {
           new Map(entries.map((entry) => [entry.graph, entry.rowCount])),
           params.exactGraphReadMode,
         );
+        if (revision) {
+          plan.writeRevisions = [{ prefix, generation: revision.generation }, ...payloadRevisions];
+          assertExactGraphPlanRevision(params.store, plan);
+        }
+        return plan;
       },
+      params.exactGraphPlanCacheKey ? {
+        key: params.exactGraphPlanCacheKey,
+        refresh: params.refreshRowList === true,
+      } : undefined,
+      params.maxPageBytes,
     );
   }
 
@@ -1845,6 +1937,8 @@ async function readPagedRowsFromExactGraphPlanLoader(
   signal: AbortSignal | undefined,
   planMemo: ExactGraphPagePlanMemo | undefined,
   loadExactGraphPlan: (signal?: AbortSignal) => Promise<ExactGraphPagePlan>,
+  planCache?: { key: string; refresh: boolean },
+  maxPageBytes?: number,
 ): Promise<SyncRow[]> {
   const rowSnapshotLimits = cache?.memo.snapshotLoadLimits ?? {
     maxRows: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
@@ -1853,21 +1947,29 @@ async function readPagedRowsFromExactGraphPlanLoader(
   };
   const getPlan = createSessionPlanGetter(
     planMemo,
-    cache?.key,
-    cache?.refresh === true,
+    planCache?.key ?? cache?.key,
+    planCache?.refresh ?? cache?.refresh === true,
     (planSignal) => loadExactGraphPlan(planSignal),
     'Sync session exact-graph plan expired before page completion',
   );
   const loadPage: StorePageLoader = async (pageOffset, pageLimit, pageSignal) => {
     const plan = await getPlan(pageOffset, pageSignal);
-    return readRowsPageFromExactGraphPlan(
+    assertExactGraphPlanRevision(store, plan);
+    const rows = await (maxPageBytes !== undefined
+      ? readByteBoundedRowsPageFromExactGraphPlan(
+        store, plan, pageOffset, pageLimit, rowSnapshotLimits, maxPageBytes, pageSignal,
+      )
+      : readRowsPageFromExactGraphPlan(
       store,
       plan,
       pageOffset,
       pageLimit,
       rowSnapshotLimits,
       pageSignal,
-    );
+      ));
+    assertExactGraphPlanRevision(store, plan);
+    throwIfAborted(pageSignal);
+    return rows;
   };
   return readResponderRowsPage(
     cache && {
@@ -1924,9 +2026,31 @@ async function buildExactGraphPagePlan(
 interface ExactGraphSnapshotLimits {
   maxRows: number;
   maxBytesEstimate: number;
+  maxPageResponseBytes?: number;
 }
 
 const EXACT_GRAPH_CURSOR_CACHE_MAX_ENTRIES = 512;
+const EXACT_GRAPH_CURSOR_CACHE_MAX_BYTES_ESTIMATE = 256 * 1024;
+const EXACT_GRAPH_PLAN_MAX_BYTES_ESTIMATE = 1024 * 1024;
+
+function exactGraphPlanScalarBytes(plan: ExactGraphPagePlan): number {
+  return 256 + plan.entries.reduce((bytes, entry) => bytes + 128 + entry.graph.length * 4, 0);
+}
+
+function assertExactGraphPlanRevision(store: TripleStore, plan: ExactGraphPagePlan): void {
+  if (!plan.writeRevisions) return;
+  const source = asGraphWriteRevisionSource(store);
+  for (const expected of plan.writeRevisions) {
+    const revision = source?.getWriteRevision(expected.prefix);
+    if (!revision || !revision.stable || revision.generation !== expected.generation) {
+      throw new Error('Sync session exact-graph plan expired: store revision changed before page completion');
+    }
+  }
+}
+
+function exactGraphCursorBytes(cursor: ExactGraphPageCursor | null): number {
+  return cursor ? 128 + (cursor.graph.length + cursor.s.length + cursor.p.length + cursor.o.length) * 2 : 32;
+}
 
 /** Datatypes whose SPARQL value comparison is numeric/date-like, not lexical. */
 const SPARQL_VALUE_ORDERED_DATATYPES = [
@@ -2052,9 +2176,17 @@ function rememberExactGraphPageCursor(
     // longer describes the committed plan. Do not silently choose one cursor.
     throw new Error(`Sync exact-graph cursor changed at offset ${offset}`);
   }
+  plan.cursorBytesEstimate = (plan.cursorBytesEstimate ??
+    [...plan.cursors.values()].reduce((bytes, value) => bytes + exactGraphCursorBytes(value), 0))
+    - (existing ? exactGraphCursorBytes(existing) : 0);
   plan.cursors.delete(offset);
+  const cursorBytes = exactGraphCursorBytes(cursor);
+  // A single very large boundary stays on the compatible OFFSET path.
+  if (cursorBytes > EXACT_GRAPH_CURSOR_CACHE_MAX_BYTES_ESTIMATE) return;
   plan.cursors.set(offset, cursor);
-  while (plan.cursors.size > EXACT_GRAPH_CURSOR_CACHE_MAX_ENTRIES) {
+  plan.cursorBytesEstimate += cursorBytes;
+  while (plan.cursors.size > EXACT_GRAPH_CURSOR_CACHE_MAX_ENTRIES ||
+    plan.cursorBytesEstimate > EXACT_GRAPH_CURSOR_CACHE_MAX_BYTES_ESTIMATE) {
     let evict = plan.cursors.keys().next().value as number;
     // Offset zero is the session origin and is never evicted.
     if (evict === 0) {
@@ -2062,6 +2194,7 @@ function rememberExactGraphPageCursor(
       next.next();
       evict = next.next().value as number;
     }
+    plan.cursorBytesEstimate -= exactGraphCursorBytes(plan.cursors.get(evict) ?? null);
     plan.cursors.delete(evict);
   }
 }
@@ -2208,6 +2341,79 @@ async function readExactGraphPlanSnapshot(
   return rows.sort(compareRows);
 }
 
+/**
+ * A larger wire page is assembled from the same conservative store windows
+ * used by the old exact lane. No query materializes 512 maximum literals.
+ * Stop at the serialized prefix and retain its actual boundary, so the next
+ * wire offset continues by keyset even when bytes, rather than rows, fill it.
+ */
+async function readByteBoundedRowsPageFromExactGraphPlan(
+  store: TripleStore,
+  plan: ExactGraphPagePlan,
+  offset: number,
+  limit: number,
+  snapshotLimits: ExactGraphSnapshotLimits,
+  maxBytes: number,
+  signal?: AbortSignal,
+): Promise<SyncRow[]> {
+  const rows: SyncRow[] = [];
+  let bytes = 0;
+  let storePageRows = SYNC_REQUEST_SAFE_PAGE_SIZE;
+  while (rows.length < limit && offset + rows.length < plan.totalRows) {
+    throwIfAborted(signal);
+    const pageRows = Math.min(storePageRows, limit - rows.length);
+    let chunk: SyncRow[];
+    try {
+      chunk = await readRowsPageFromExactGraphPlan(
+        store, plan, offset + rows.length, pageRows,
+        { ...snapshotLimits, maxPageResponseBytes: maxBytes * 2 }, signal,
+      );
+    } catch (error) {
+      if (!(error instanceof StoreResponseTooLargeError) || pageRows <= 1) throw error;
+      storePageRows = Math.max(1, Math.floor(pageRows / 2));
+      continue;
+    }
+    for (const row of chunk) {
+      const rowBytes = serializedResponderRowByteLength(row) + (rows.length > 0 ? 1 : 0);
+      if (rows.length > 0 && bytes + rowBytes > maxBytes) {
+        rememberExactGraphReturnedPrefix(plan, offset, rows);
+        return rows;
+      }
+      if (rowBytes > maxBytes) {
+        throw snapshotBudgetError({
+          key: 'exact-data-page', reason: 'snapshot_bytes', rows: 1,
+          bytesEstimate: rowBytes, limit: maxBytes,
+        });
+      }
+      rows.push(row);
+      bytes += rowBytes;
+    }
+    if (bytes >= maxBytes) break;
+  }
+  rememberExactGraphReturnedPrefix(plan, offset, rows);
+  return rows;
+}
+
+function rememberExactGraphReturnedPrefix(
+  plan: ExactGraphPagePlan,
+  offset: number,
+  rows: readonly SyncRow[],
+): void {
+  const lastRow = rows[rows.length - 1];
+  if (!lastRow) return;
+  let graphStart = 0;
+  for (const entry of plan.entries) {
+    if (entry.graph === lastRow.g) {
+      rememberExactGraphPageCursor(plan, offset + rows.length, {
+        graph: lastRow.g, graphOffset: offset + rows.length - graphStart,
+        s: lastRow.s, p: lastRow.p, o: lastRow.o,
+      });
+      return;
+    }
+    graphStart += entry.rowCount;
+  }
+}
+
 async function readRowsPageFromExactGraphPlan(
   store: TripleStore,
   plan: ExactGraphPagePlan,
@@ -2298,7 +2504,8 @@ async function readRowsPageFromExactGraphPlan(
         LIMIT ${expectedRows + (isFinalGraphPage ? 1 : 0)}
       `, {
         ...syncResponderStoreOptions(signal, 'sync.responder.readExactGraphRowsPage'),
-        maxResponseBytes: snapshotResponseByteLimit(snapshotLimits.maxBytesEstimate),
+        maxResponseBytes: snapshotLimits.maxPageResponseBytes ??
+          snapshotResponseByteLimit(snapshotLimits.maxBytesEstimate),
       });
       if (result.type === 'bindings') {
         for (const row of result.bindings) {

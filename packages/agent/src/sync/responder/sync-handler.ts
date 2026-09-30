@@ -21,6 +21,7 @@ import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../durable-session.js';
 import {
   createResponderGraphListMemo,
   createResponderExactGraphPagePlanMemo,
+  createResponderPageOnlyExactGraphPlanMemo,
   createResponderFreshSwmDataGraphPlanMemo,
   createResponderFreshSwmMetaPlanMemo,
   createResponderSyncRowListMemo,
@@ -471,6 +472,11 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
   );
+  const pageOnlyExactGraphPlanMemo = createResponderPageOnlyExactGraphPlanMemo(
+    DURABLE_DATA_SYNC_SESSION_TTL_MS,
+    SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
+    responderSnapshotBudget,
+  );
   const swmDataExactGraphPlanMemo = createResponderExactGraphPagePlanMemo(
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
@@ -876,7 +882,15 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             : undefined,
           refreshRowList: session?.refreshRowList,
           refreshGeneration: session?.refreshGeneration,
-          exactGraphPlanMemo: durableDataExactGraphPlanMemo,
+          exactGraphPlanMemo: durableDataPolicy.cacheMode === 'page-only'
+            ? pageOnlyExactGraphPlanMemo
+            : durableDataExactGraphPlanMemo,
+          exactGraphPlanCacheKey: durableDataPolicy.cacheMode === 'page-only'
+            ? session?.refreshGeneration
+            : undefined,
+          maxPageBytes: durableDataPolicy.cacheMode === 'page-only'
+            ? SYNC_BYTE_BUDGET_RESPONSE_BYTES
+            : undefined,
           // A byte-bounded response may contain only a prefix of the row slice
           // loaded above. Do not release the immutable session snapshot merely
           // because that slice was short; the explicit empty request is EOF.
