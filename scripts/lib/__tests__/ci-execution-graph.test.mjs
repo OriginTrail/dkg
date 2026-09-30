@@ -162,6 +162,8 @@ test('each package-manager form a CI job can use reaches the scripts and files i
         build: 'node ../../scripts/build-a.mjs',
         'build:ui': 'node ../../scripts/ui-a.mjs',
         prepack: 'node ../../scripts/pack-a.mjs',
+        prepare: 'node ../../scripts/prepare-a.mjs',
+        postpack: 'node ../../scripts/postpack-a.mjs',
         postinstall: 'node ../../scripts/install-a.mjs',
       },
     }],
@@ -171,7 +173,7 @@ test('each package-manager form a CI job can use reaches the scripts and files i
   const workspaces = { manifests, workspaceByName: new Map([...manifests].map(([directory, { name }]) => [name, directory])) };
   const rootManifest = { scripts: { 'gate:build': 'pnpm -r --filter fixture-a... run build' } };
   const present = new Set([
-    'scripts/build-a.mjs', 'scripts/ui-a.mjs', 'scripts/pack-a.mjs', 'scripts/install-a.mjs', 'scripts/build-b.mjs',
+    'scripts/build-a.mjs', 'scripts/ui-a.mjs', 'scripts/pack-a.mjs', 'scripts/prepare-a.mjs', 'scripts/postpack-a.mjs', 'scripts/install-a.mjs', 'scripts/build-b.mjs',
     'scripts/extra-b.mjs', 'scripts/prebuild-c.mjs', 'scripts/build-c.mjs', 'packages/c/test/c.test.ts',
   ]);
   const run = (command, job = 'bura-cli', condition = "needs.changes.outputs.bura_cli == 'true'") => {
@@ -199,10 +201,15 @@ test('each package-manager form a CI job can use reaches the scripts and files i
     ['cd packages/c && npm run build', ['packages/c build', 'packages/c prebuild'], lane(['scripts/build-c.mjs', 'scripts/prebuild-c.mjs'])],
     ['turbo run build', ['packages/a build', 'packages/b build', 'packages/b build:extra', 'packages/c build', 'packages/c prebuild'],
       lane(['scripts/build-a.mjs', 'scripts/build-b.mjs', 'scripts/build-c.mjs', 'scripts/extra-b.mjs', 'scripts/prebuild-c.mjs'])],
-    ['pnpm --filter fixture-a pack', ['packages/a prepack'], lane(['scripts/pack-a.mjs'])],
+    // A pack runs the whole pack lifecycle; prepare runs on every install too,
+    // so what it runs needs full CI.
+    ['pnpm --filter fixture-a pack', ['packages/a postpack', 'packages/a prepack', 'packages/a prepare'],
+      [...lane(['scripts/pack-a.mjs', 'scripts/postpack-a.mjs']), 'install scripts/prepare-a.mjs']],
+    ['cd packages/a && npm pack --dry-run --json', ['packages/a postpack', 'packages/a prepack', 'packages/a prepare'],
+      [...lane(['scripts/pack-a.mjs', 'scripts/postpack-a.mjs']), 'install scripts/prepare-a.mjs']],
     ['pnpm --filter fixture-c exec vitest run test/c.test.ts', [], lane(['packages/c/test/c.test.ts'])],
     // Every job's install runs the install hooks, which need full CI.
-    ['pnpm install --frozen-lockfile', ['packages/a postinstall'], ['install scripts/install-a.mjs']],
+    ['pnpm install --frozen-lockfile', ['packages/a postinstall', 'packages/a prepare'], ['install scripts/install-a.mjs', 'install scripts/prepare-a.mjs']],
   ]) {
     assert.deepEqual(run(command), { scripts, files }, command);
   }
