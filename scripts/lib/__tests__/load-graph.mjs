@@ -72,45 +72,6 @@ function readTarget(target, walks) {
   return isRepoFile(file) ? file : undefined;
 }
 
-// Paths `file` builds with path.resolve/join (or an alias imported from
-// node:path) from its own directory - __dirname, import.meta.dirname or a
-// binding of either, dirname(fileURLToPath(import.meta.url)) or
-// fileURLToPath(new URL(..., import.meta.url)) - and literal segments,
-// including bindings built on earlier ones; with the names of the bases it
-// resolves (`bases`).
-function builtPaths(file, source) {
-  const directory = path.posix.dirname(file);
-  const helpers = ['resolve', 'join'];
-  for (const [, specifiers] of source.matchAll(/\bimport\s*\{([^}]*)\}\s*from\s*['"](?:node:)?path(?:\/posix)?['"]/g)) {
-    for (const [, alias] of specifiers.matchAll(/\b(?:resolve|join)\s+as\s+([\w$]+)/g)) helpers.push(alias);
-  }
-  const pathJoin = new RegExp(
-    String.raw`(?:\b(?:const|let)\s+([\w$]+)\s*=\s*)?(?:\bpath\.(?:posix\.)?)?\b(?:${helpers.join('|')})\(\s*([\w$]+|import\.meta\.dirname)\s*((?:,\s*(?:'[^']*'|"[^"]*"))+)\s*,?\s*\)`,
-    'g',
-  );
-  const bases = new Map([['__dirname', directory], ['import.meta.dirname', directory]]);
-  for (const [, name] of source.matchAll(/\b(?:const|let)\s+([\w$]+)\s*=\s*(?:(?:path\.)?dirname\(\s*fileURLToPath\(\s*import\.meta\.url\s*\)\s*\)|import\.meta\.dirname\b)/g)) {
-    bases.set(name, directory);
-  }
-  for (const [, name, specifier] of source.matchAll(/\b(?:const|let)\s+([\w$]+)\s*=\s*fileURLToPath\(\s*new\s+URL\(\s*['"]([^'"]+)['"]\s*,\s*import\.meta\.url\s*\)\s*\)/g)) {
-    bases.set(name, path.posix.normalize(path.posix.join(directory, specifier)));
-  }
-  const segments = (text) => [...text.matchAll(/'([^']*)'|"([^"]*)"/g)].map(([, single, double]) => single ?? double);
-  const joined = (base, text) => path.posix.normalize(path.posix.join(bases.get(base), ...segments(text)));
-  for (let size = -1; size !== bases.size;) {
-    size = bases.size;
-    for (const [, name, base, text] of source.matchAll(pathJoin)) {
-      if (name && !bases.has(name) && bases.has(base)) bases.set(name, joined(base, text));
-    }
-  }
-  return {
-    paths: [...source.matchAll(pathJoin)]
-      .filter(([, , base]) => bases.has(base))
-      .map(([, , base, text]) => joined(base, text)),
-    bases: new Set(bases.keys()),
-  };
-}
-
 const scriptKind = (file) => (/\.[cm]?[jt]sx$/.test(file) ? ts.ScriptKind.TSX : /\.[cm]?js$/.test(file) ? ts.ScriptKind.JS : ts.ScriptKind.TS);
 
 // The module specifiers `code` loads, read with TypeScript's import scanner
@@ -136,11 +97,21 @@ export function packageImports(source) {
 }
 
 const isLiteral = (node) => ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node);
-const NO_ANALYSIS = Object.freeze({ computedLoads: [], strings: [], assembledScriptPaths: [], fileReads: [] });
+const NO_ANALYSIS = Object.freeze({ builtPaths: [], unresolvedReads: [], computedLoads: [], strings: [], assembledScriptPaths: [] });
 
 // One pass over a module's syntax tree for what TypeScript's import scanner
-// does not report, with the join and resolve helpers read from its node:path
-// imports (join, resolve and their aliases; path, posix and win32 bindings):
+// does not report. It reads the join and resolve helpers from the module's
+// node:path imports (join, resolve and their aliases; path, posix and win32
+// bindings) and keeps a table of the directories const and let bindings
+// hold: the module's own directory (__dirname, import.meta.dirname,
+// dirname(fileURLToPath(import.meta.url))), fileURLToPath(new URL('...',
+// import.meta.url)), and a join/resolve of a known directory and literal
+// segments, through any chain of bindings. From each call it records:
+// - builtPaths: the path a join/resolve call builds from a known directory
+//   and string-literal segments;
+// - unresolvedReads: a join/resolve call that reads a literal file name
+//   from a directory it cannot resolve (join(resolvePackageDir(dir),
+//   'x.json')), as source text;
 // - computedLoads: module loads whose specifier is computed at run time
 //   (import(name), require(`../${file}`)), as source text; no trace can follow
 //   them. A string specifier, or new URL() of one (URL_IMPORT and URL_PATH
@@ -154,12 +125,10 @@ const NO_ANALYSIS = Object.freeze({ computedLoads: [], strings: [], assembledScr
 //   value (`scripts/${name}`), or a join/resolve call that joins a value onto
 //   a scripts directory (join(root, 'scripts', helper)) - which no trace can
 //   follow either.
-// - fileReads: the join/resolve calls that end in a literal file name
-//   (join(dir, 'package.json')), with their base; loadReferences reports the
-//   ones builtPaths cannot resolve.
 function analyzeModule(file, code) {
-  if (!/\b(?:import|require)\s*\(|scripts|\b(?:join|resolve)\s*\(/.test(code)) return NO_ANALYSIS;
+  if (!/\b(?:import|require)\s*\(|scripts|\b(?:join|resolve)\s*\(|__dirname|import\.meta/.test(code)) return NO_ANALYSIS;
   const tree = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, false, scriptKind(file));
+  const directory = path.posix.dirname(file);
   const helpers = new Set(['join', 'resolve']);
   const pathModules = new Set(['path', 'posix', 'path.posix', 'path.win32']);
   for (const statement of tree.statements) {
@@ -176,6 +145,51 @@ function analyzeModule(file, code) {
   const pathHelper = ({ expression }) => (ts.isIdentifier(expression) && helpers.has(expression.text))
     || (ts.isPropertyAccessExpression(expression) && ['join', 'resolve'].includes(expression.name.text)
       && pathModules.has(expression.expression.getText(tree)));
+  const isCallOf = (node, name) => ts.isCallExpression(node) && node.arguments.length === 1
+    && ((ts.isIdentifier(node.expression) && node.expression.text === name)
+      || (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === name));
+  const isMetaUrl = (node) => node?.getText(tree) === 'import.meta.url';
+  // The directories bindings hold, by name.
+  const bases = new Map([['__dirname', directory]]);
+  const baseOf = (node) => (node.getText(tree) === 'import.meta.dirname' ? directory : ts.isIdentifier(node) ? bases.get(node.text) : undefined);
+  // The path a join/resolve call builds from a known directory and literals.
+  const builtPath = (node) => {
+    if (!ts.isCallExpression(node) || !pathHelper(node) || node.arguments.length < 2) return undefined;
+    const [base, ...segments] = node.arguments;
+    const start = baseOf(base);
+    if (start === undefined || !segments.every((segment) => ts.isStringLiteral(segment))) return undefined;
+    return path.posix.normalize(path.posix.join(start, ...segments.map(({ text }) => text)));
+  };
+  // The directory an expression holds: the module's own, a file URL made
+  // from a literal, or a built path.
+  const heldDirectory = (node) => {
+    if (node.getText(tree) === 'import.meta.dirname') return directory;
+    if (isCallOf(node, 'dirname') && isCallOf(node.arguments[0], 'fileURLToPath') && isMetaUrl(node.arguments[0].arguments[0])) return directory;
+    if (isCallOf(node, 'fileURLToPath')) {
+      const [url] = node.arguments;
+      if (ts.isNewExpression(url) && url.expression.getText(tree) === 'URL' && url.arguments?.length === 2
+        && ts.isStringLiteral(url.arguments[0]) && isMetaUrl(url.arguments[1])) {
+        return path.posix.normalize(path.posix.join(directory, url.arguments[0].text));
+      }
+    }
+    return builtPath(node);
+  };
+  const bindings = [];
+  const collect = (node) => {
+    if (ts.isVariableDeclarationList(node) && (node.flags & (ts.NodeFlags.Const | ts.NodeFlags.Let))) {
+      bindings.push(...node.declarations.filter((declaration) => ts.isIdentifier(declaration.name) && declaration.initializer));
+    }
+    ts.forEachChild(node, collect);
+  };
+  collect(tree);
+  for (let size = -1; size !== bases.size;) {
+    size = bases.size;
+    for (const { name, initializer } of bindings) {
+      if (bases.has(name.text)) continue;
+      const held = heldDirectory(initializer);
+      if (held !== undefined) bases.set(name.text, held);
+    }
+  }
   const urlOfString = (node) => {
     let target = ts.isPropertyAccessExpression(node) && node.name.text === 'href' ? node.expression : node;
     if (ts.isCallExpression(target) && ts.isIdentifier(target.expression) && target.expression.text === 'fileURLToPath') {
@@ -184,7 +198,7 @@ function analyzeModule(file, code) {
     return target !== undefined && ts.isNewExpression(target) && ts.isIdentifier(target.expression)
       && target.expression.text === 'URL' && target.arguments?.length > 0 && ts.isStringLiteral(target.arguments[0]);
   };
-  const analysis = { computedLoads: [], strings: [], assembledScriptPaths: [], fileReads: [] };
+  const analysis = { builtPaths: [], unresolvedReads: [], computedLoads: [], strings: [], assembledScriptPaths: [] };
   const visit = (node) => {
     if (isLiteral(node) || node.kind === ts.SyntaxKind.TemplateHead || node.kind === ts.SyntaxKind.TemplateMiddle
       || node.kind === ts.SyntaxKind.TemplateTail) {
@@ -202,21 +216,17 @@ function analyzeModule(file, code) {
       if (loads && !ts.isStringLiteral(node.arguments[0]) && !urlOfString(node.arguments[0])) {
         analysis.computedLoads.push(node.arguments[0].getText(tree));
       }
-      const directory = pathHelper(node) ? node.arguments.findIndex((argument) => isLiteral(argument) && SCRIPTS_DIRECTORY.test(argument.text)) : -1;
-      const segments = directory >= 0 ? node.arguments.slice(directory + 1) : [];
-      if (segments.length && segments.every(isLiteral)) analysis.strings.push(['scripts', ...segments.map(({ text }) => text)].join('/'));
-      if (segments.some((segment) => !isLiteral(segment))) analysis.assembledScriptPaths.push(node.getText(tree));
-      // A file it reads by name: a join/resolve call ending in a literal file
-      // name, with its base (an identifier or import.meta.dirname, else none).
-      const last = node.arguments.at(-1);
-      if (pathHelper(node) && node.arguments.length > 1 && last && ts.isStringLiteral(last) && /^[\w.-]+\.\w+$/.test(last.text)) {
-        const [base] = node.arguments;
-        analysis.fileReads.push({
-          text: node.getText(tree),
-          base: ts.isIdentifier(base) ? base.text : base.getText(tree) === 'import.meta.dirname' ? 'import.meta.dirname' : undefined,
-          literalSegments: node.arguments.slice(1).every((argument) => ts.isStringLiteral(argument)),
-          plainCall: ts.isIdentifier(node.expression) || /^path\.(?:posix\.)?(?:join|resolve)$/.test(node.expression.getText(tree)),
-        });
+      if (pathHelper(node)) {
+        const scriptsAt = node.arguments.findIndex((argument) => isLiteral(argument) && SCRIPTS_DIRECTORY.test(argument.text));
+        const segments = scriptsAt >= 0 ? node.arguments.slice(scriptsAt + 1) : [];
+        if (segments.length && segments.every(isLiteral)) analysis.strings.push(['scripts', ...segments.map(({ text }) => text)].join('/'));
+        if (segments.some((segment) => !isLiteral(segment))) analysis.assembledScriptPaths.push(node.getText(tree));
+        const built = builtPath(node);
+        const last = node.arguments.at(-1);
+        if (built !== undefined) analysis.builtPaths.push(built);
+        else if (node.arguments.length > 1 && ts.isStringLiteral(last) && /^[\w.-]+\.\w+$/.test(last.text)) {
+          analysis.unresolvedReads.push(node.getText(tree));
+        }
       }
     }
     ts.forEachChild(node, visit);
@@ -236,15 +246,16 @@ const namedScripts = (text) => commandFiles(text, { exists: followable }).filter
 //   dynamic imports, `import(new URL(...))` and CommonJS require(), whose own
 //   imports load too;
 // - `paths`: files it reads or runs without importing: other `new URL(...)`
-//   paths, require.resolve(), paths built from its own directory (see
-//   builtPaths) and, in tests and test-runner configs, quoted literals naming
+//   paths, require.resolve(), paths join/resolve builds from its own
+//   directory (analyzeModule's builtPaths) and, in tests and test-runner
+//   configs, quoted literals naming
 //   an existing repo file (`'packages/agent/src/x.ts'`, as source-scanning
 //   tests list them);
 // - `packages`: workspaces it imports by package name (packageImports);
 // - `computed`: module loads computed at run time (computedLoads);
 // - `assembled`: script paths assembled at run time (assembledScriptPaths);
 // - `unresolvedReads`: files it reads by a literal name from a directory
-//   builtPaths cannot resolve (join(resolvePackageDir(dir), 'x.json')), as
+//   analyzeModule cannot resolve (join(resolvePackageDir(dir), 'x.json')), as
 //   source text, which the routing guard checks in what installs run.
 // Type-only imports are erased before anything runs; other paths assembled
 // at run time from variables are out of reach.
@@ -257,14 +268,13 @@ export function loadReferences(file, source) {
     .filter((specifier) => /^\.\.?\//.test(specifier))
     .map((specifier) => sourcePath(relative(specifier))))]
     .filter((target) => !outsideSources(target));
-  const { computedLoads, strings, assembledScriptPaths, fileReads } = analyzeModule(file, code);
-  const built = builtPaths(file, code);
+  const { builtPaths, unresolvedReads, computedLoads, strings, assembledScriptPaths } = analyzeModule(file, code);
   const literals = (TEST_FILE.test(file) ? [...code.matchAll(REPO_PATH_LITERAL)] : [])
     .map(([, literal]) => literal)
     .filter((literal) => !/(?:^|\/)\.\.?(?:\/|$)/.test(literal));
   const paths = [
     ...[...code.matchAll(URL_PATH)].map(([, specifier]) => relative(specifier)),
-    ...built.paths,
+    ...builtPaths,
     ...literals,
     ...(TEST_FILE.test(file) ? strings.flatMap(namedScripts) : []),
   ].map((target) => readTarget(target, walks)).filter(Boolean);
@@ -274,9 +284,7 @@ export function loadReferences(file, source) {
     packages: packageNames(specifiers),
     computed: computedLoads,
     assembled: assembledScriptPaths,
-    unresolvedReads: fileReads
-      .filter(({ base, literalSegments, plainCall }) => !(plainCall && literalSegments && built.bases.has(base)))
-      .map(({ text }) => text),
+    unresolvedReads,
   };
 }
 
