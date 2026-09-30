@@ -27,7 +27,8 @@
  * for an assertion or a classification (`catchupStatus`) throws on it, naming the node,
  * the endpoint, the status and the body; a poll that waits for a job (`waitForJob`,
  * `waitUntilNamed`) retries it until its budget is spent and says what the last lookup
- * answered.
+ * answered. A job read by its own id (`lookupJobById`, for the job a subscribe returned)
+ * is polled the same way, except that a 404 there fails at once: the daemon must know it.
  */
 import { expect } from 'vitest';
 import { getJson, normTerm, postJson, waitFor, type DevnetNode } from '../_bootstrap/harness.js';
@@ -224,6 +225,23 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
       : { kind: 'unavailable', why: `node${node.num} GET ${path} answered ${res.status}: ${JSON.stringify(res.body)}` };
   }
 
+  /**
+   * One lookup of a catch-up job by ITS id, as a value. The job id came from a subscribe, so
+   * the daemon knows it: a 404 here is a failure of the test and throws at once (with `label`
+   * and what the daemon said), never "not yet". A rejected request or any other non-200 is
+   * `unavailable`; a 200 of the wrong shape throws from the validator.
+   */
+  async function lookupJobById(node: DevnetNode, jobId: string, label: string): Promise<CatchupLookup> {
+    const path = `/api/sync/catchup-status?jobId=${encodeURIComponent(jobId)}`;
+    const sent = await tryRequest(() => io.get(node, path));
+    if (sent.failed) return { kind: 'unavailable', why: `node${node.num} GET ${path} was not answered: ${sent.why}` };
+    const res = checked(node, sent.reply, parseCatchupStatusResponse);
+    if (res.ok) return { kind: 'job', job: res.body };
+    const said = `node${node.num} GET ${path} answered ${res.status}: ${JSON.stringify(res.body)}`;
+    if (res.status === 404) throw new Error(`${label}: ${said}`);
+    return { kind: 'unavailable', why: said };
+  }
+
   /** A lookup that must have answered: the job, or null for the route's "no job" reply; anything else throws, naming the node, the endpoint, the status and the body. */
   function answered(found: CatchupLookup): CatchupStatusReply | null {
     if (found.kind === 'unavailable') throw new Error(found.why);
@@ -390,10 +408,12 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
    * The decision is printed, so a run never passes over a branch silently.
    */
   async function expectLatestJobNamed(node: DevnetNode, graph: JobGraph, jobId: string, label: string): Promise<LatestJobClass> {
-    const job = await io.waitFor(`${label}: node${node.num} job ${jobId} settled or continued under the cleartext id`, 180_000, 3_000, async () => {
-      const found = await catchupJob(node, jobId, `${label}: the job by its id`);
-      return isClassifiable(graph, found) ? found : null;
-    });
+    const job = await waitForJob(
+      `${label}: node${node.num} job ${jobId} settled or continued under the cleartext id`,
+      180_000,
+      () => lookupJobById(node, jobId, `${label}: the job by its id`),
+      (found) => isClassifiable(graph, found),
+    );
     const cleartextAliasJob = (await catchupStatus(node, graph.id)) ?? undefined;
     const cls = classifyLatestCatchupJob(graph, job, cleartextAliasJob);
     // eslint-disable-next-line no-console
@@ -648,6 +668,7 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
     catchupStatus,
     lookupCatchup,
     lookupLatestJob,
+    lookupJobById,
     waitForJob,
     catchupJob,
     findLatestJob,

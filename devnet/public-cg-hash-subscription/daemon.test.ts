@@ -391,6 +391,29 @@ describe('catch-up lookups: the answer "no job" is the route\'s own 404, nothing
     });
   });
 
+  describe('lookupJobById (a job the subscribe returned: the daemon must know it)', () => {
+    const BY_ID = '/api/sync/catchup-status?jobId=';
+    const look = (reply: Scripted) => createDaemon(scriptedIo({ [BY_ID]: [reply] }).io).lookupJobById(node5, 'j1', 'the job by its id');
+
+    it('is the job of a 200', async () => {
+      await expect(look(job('j1', CG))).resolves.toMatchObject({ kind: 'job', job: { jobId: 'j1' } });
+    });
+
+    it.each(FAILED)('is unavailable, not an answer and not a throw, on %s', async (_what, failure, detail) => {
+      await expect(look(failure)).resolves.toEqual({ kind: 'unavailable', why: `node5 GET ${BY_ID}j1 ${detail}` });
+    });
+
+    it('throws at once on a 404, naming the label and what the daemon said: the job must exist', async () => {
+      await expect(look({ status: 404, json: { error: 'Catch-up job "j1" not found' } })).rejects.toThrow(
+        /^the job by its id: node5 GET \/api\/sync\/catchup-status\?jobId=j1 answered 404: .*not found/,
+      );
+    });
+
+    it('keeps a 200 of the wrong shape a WireShapeError', async () => {
+      await expect(look(ok({ jobId: 'j', contextGraphId: CG, jobStatus: 'finished' }))).rejects.toBeInstanceOf(WireShapeError);
+    });
+  });
+
   describe('lookupLatestJob and findLatestJob (the cleartext id, else the hash)', () => {
     const graph = { id: CG, nameHash: hashId };
     const both = (byId: Scripted, byHash: Scripted) => scriptedIo({ [`${STATUS}${CG}`]: [byId], [`${STATUS}${hashId}`]: [byHash] });
@@ -670,6 +693,32 @@ describe('expectLatestJobNamed', () => {
       });
       await expect(expectNamed(io)).resolves.toMatchObject({ kind: 'continued' });
       expect(count(byName(graph.onChainId)), 'the on-chain id was asked again after the failure').toBe(2);
+    });
+
+    it.each([
+      ['HTTP 503', unavailable],
+      ['a rejected request', new TypeError('fetch failed')],
+    ] satisfies ReadonlyArray<[string, HttpReply | Error]>)('the settle wait (the job by its id) retries %s, then classifies the job', async (_what, failure) => {
+      const { io, count } = scriptedIo({
+        [byJobId('j1')]: [failure, failure, named],
+        [byName(graph.id)]: [named],
+        [byName(graph.onChainId)]: [named],
+      });
+      await expect(expectNamed(io)).resolves.toMatchObject({ kind: 'continued', jobId: 'j1' });
+      expect(count(byJobId('j1')), 'asked again after each failure').toBe(3);
+    });
+
+    it('the settle wait, when the job by its id keeps failing, times out saying what the daemon answered', async () => {
+      const { io } = scriptedIo({ [byJobId('j1')]: [unavailable] });
+      await expect(expectNamed(io)).rejects.toThrow(
+        /waiting for: test: node5 job j1 settled or continued under the cleartext id \(last lookup: unavailable: node5 GET \/api\/sync\/catchup-status\?jobId=j1 answered 503: /,
+      );
+    });
+
+    it('the settle wait fails at once when the daemon does not know the job, without asking again', async () => {
+      const { io, count } = scriptedIo({ [byJobId('j1')]: [{ status: 404, json: { error: 'Catch-up job "j1" not found' } }, named] });
+      await expect(expectNamed(io)).rejects.toThrow(/^test: the job by its id: node5 GET .*answered 404/);
+      expect(count(byJobId('j1'))).toBe(1);
     });
 
     it('waitUntilNamed, when a lookup keeps failing, times out saying it failed, not that no job names the id', async () => {

@@ -223,7 +223,9 @@ together, and the mechanics under them are not:
   rejected request, another kind of 404), naming the node, the endpoint, the status
   and the body, so a daemon that could not answer never satisfies "the cleartext id
   names no job". A poll that waits for a job retries such a failure until its budget
-  is spent, and its timeout says what the last lookup answered.
+  is spent, and its timeout says what the last lookup answered. That includes the wait
+  on a job read by its own id (the job a subscribe returned), where a 404 is the one
+  answer that fails at once: the daemon must know that id.
 - **Which names a job answers to** (`catchup-jobs.ts`, `daemon.ts`
   `expectLatestJobNamed`). A catch-up job is keyed by the id its subscribe was made
   with. The cleartext id names it when it was made under the cleartext id or

@@ -61,6 +61,7 @@ const {
   forceCatchup,
   listSubscriptions,
   lookupCatchup,
+  lookupJobById,
   lookupLatestJob,
   recoverUntilContent,
   subjectContent,
@@ -204,10 +205,10 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     // before the hash resolved, the cleartext id never names it, only the hash does.
     // When a subscribe made earlier left the row (no job id here), whichever job the
     // cleartext id or the hash names.
-    const first = await waitForJob(`node${edgeA.num} has a settled catch-up job for ${graph.id}`, 120_000, async () => (
+    const first = await waitForJob(`node${edgeA.num} has a settled catch-up job for ${graph.id}`, 120_000, () => (
       arranged.jobId === undefined
         ? lookupLatestJob(edgeA, graph)
-        : { kind: 'job', job: await catchupJob(edgeA, arranged.jobId, 'the arranged catch-up job by its id') }
+        : lookupJobById(edgeA, arranged.jobId, 'the arranged catch-up job by its id')
     ), (job) => isTerminalCatchupJobState(job.jobStatus));
     await expectLatestJobNamed(edgeA, graph, first.jobId, 'before the forced catch-up');
 
