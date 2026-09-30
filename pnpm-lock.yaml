@@ -715,6 +715,9 @@ importers:
       '@origintrail-official/dkg-mcp':
         specifier: workspace:*
         version: link:../mcp-dkg
+      '@origintrail-official/dkg-node-store':
+        specifier: workspace:*
+        version: link:../node-store
       '@origintrail-official/dkg-node-ui':
         specifier: workspace:*
         version: link:../node-ui

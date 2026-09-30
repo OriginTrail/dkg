@@ -17,8 +17,13 @@ The durable protocol state of a DKG V10 node, as SQLite-backed stores.
 
 These used to live in `@origintrail-official/dkg-node-ui`, the dashboard package,
 next to logs, metrics and the UI. Protocol durability is not observability, so
-it has its own package. `@origintrail-official/dkg-node-ui` re-exports every
-class unchanged, so existing importers (the daemon included) do not change.
+it has its own package. The daemon (`@origintrail-official/dkg`) depends on this
+package directly and composes the stores over the shared database handle in
+`packages/cli/src/daemon/protocol-persistence.ts`. `@origintrail-official/dkg-node-ui`
+still re-exports every class unchanged (from its entry point, from `dist/db.js`
+and from the former `dist/chain-event-log-store.js`, `dist/chain-cursor-stores.js`
+and `dist/protocol-outbox-store.js` paths), but only as a compatibility surface
+for downstream importers: first-party code imports this package.
 
 ## Usage
 

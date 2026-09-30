@@ -3,10 +3,9 @@ import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
+import { KaNumberAllocator, type DKGAgentConfig } from '@origintrail-official/dkg-agent';
 import { buildEvmDeploymentId } from '@origintrail-official/dkg-chain';
 import {
-  DashboardDB,
-  SCHEMA_VERSION,
   SqliteChainEventCursorStore,
   SqliteChainEventLogStore,
   SqliteChangelogCursorStore,
@@ -15,29 +14,46 @@ import {
   SqliteContextGraphAuthorityIndexStore,
   SqliteContextGraphRegistryScanCursorStore,
   SqliteContextGraphStorageDiscoveryStore,
-  SqliteKaNumberStore,
   SqliteMessageIdempotencyStore,
   SqliteProtocolOutboxStore,
   SqliteSyncCheckpointStore,
-} from '@origintrail-official/dkg-node-ui';
+} from '@origintrail-official/dkg-node-store';
+import { DashboardDB, SCHEMA_VERSION } from '@origintrail-official/dkg-node-ui';
+import type {
+  NodeDatabase,
+  ProtocolStoreOptions,
+  ProtocolStores,
+} from '../src/daemon/protocol-persistence.js';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
 /**
  * The daemon composes every protocol persistence store (the ones that moved to
  * `@origintrail-official/dkg-node-store`) over the dashboard's `node-ui.db` in
- * `runDaemonInner`. This boots the REAL start-up path against a `node-ui.db`
- * whose protocol tables were filled with raw SQL (no store code involved), then
- * asserts that the stores the daemon hands the agent read those rows back, and
- * that boot leaves the file, its schema and every seeded row untouched: same
- * file, same schema, no second SQLite file.
+ * `runDaemonInner`, through `openNodeDatabase` and `createProtocolStores`. This
+ * boots the REAL start-up path against a `node-ui.db` whose protocol tables were
+ * filled with raw SQL (no store code involved), then asserts that the stores the
+ * daemon hands the agent are the ones that composition returned, that they read
+ * those rows back, and that boot leaves the file, its schema and every seeded
+ * row untouched: same file, same schema, no second SQLite file.
  *
- * Only `DKGAgent.create` is replaced (it captures the wiring and stops the
- * boot); the DashboardDB, the schema and every store are real.
+ * The composition seam is observed through its typed results (the two functions
+ * are wrapped to record what they return), never through a store's private
+ * fields. Only `DKGAgent.create` is replaced (it captures the wiring and stops
+ * the boot); the DashboardDB, the schema and every store are real. The seam
+ * itself is tested directly in `protocol-persistence.test.ts`.
  */
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
   loadOpWallets: vi.fn(),
   loadNetworkConfig: vi.fn(),
+  composition: { opened: 0, composed: 0 } as {
+    owner?: NodeDatabase;
+    storesDatabase?: unknown;
+    storesOptions?: ProtocolStoreOptions;
+    stores?: ProtocolStores;
+    opened: number;
+    composed: number;
+  },
 }));
 
 vi.mock('@origintrail-official/dkg-agent', async importOriginal => {
@@ -46,10 +62,6 @@ vi.mock('@origintrail-official/dkg-agent', async importOriginal => {
     ...actual,
     DKGAgent: { create: mocks.agentCreate },
     loadOpWallets: mocks.loadOpWallets,
-    // Keep the store the daemon hands the allocator reachable from the test.
-    KaNumberAllocator: class KaNumberAllocator {
-      constructor(readonly store: unknown) {}
-    },
   };
 });
 
@@ -58,6 +70,31 @@ vi.mock('../src/config.js', async importOriginal => {
   return {
     ...actual,
     loadNetworkConfig: mocks.loadNetworkConfig,
+  };
+});
+
+vi.mock('../src/daemon/protocol-persistence.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/daemon/protocol-persistence.js')>();
+  return {
+    ...actual,
+    // The real functions, recording what they hand back to the daemon.
+    openNodeDatabase: (dataDir: string) => {
+      const owner = actual.openNodeDatabase(dataDir);
+      mocks.composition.owner = owner;
+      mocks.composition.opened += 1;
+      return owner;
+    },
+    createProtocolStores: (
+      database: Parameters<typeof actual.createProtocolStores>[0],
+      options: ProtocolStoreOptions,
+    ) => {
+      const stores = actual.createProtocolStores(database, options);
+      mocks.composition.storesDatabase = database;
+      mocks.composition.storesOptions = options;
+      mocks.composition.stores = stores;
+      mocks.composition.composed += 1;
+      return stores;
+    },
   };
 });
 
@@ -197,6 +234,12 @@ describe('daemon composition of the protocol persistence stores', () => {
   afterEach(async () => {
     vi.restoreAllMocks();
     vi.clearAllMocks();
+    mocks.composition.owner = undefined;
+    mocks.composition.stores = undefined;
+    mocks.composition.storesDatabase = undefined;
+    mocks.composition.storesOptions = undefined;
+    mocks.composition.opened = 0;
+    mocks.composition.composed = 0;
     process.stdout.write = stdoutWrite;
     process.removeAllListeners('uncaughtException');
     for (const listener of uncaughtExceptionListeners) process.on('uncaughtException', listener);
@@ -249,56 +292,81 @@ describe('daemon composition of the protocol persistence stores', () => {
         hubAddress: HUB,
         chainId: 'gnosis:100',
       },
-    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('after-agent-create');
+    } as Parameters<typeof runDaemonInner>[1], Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('after-agent-create');
 
     expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
-    const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
-    const daemonDb: Database.Database = createArg.chainEventCursorStore.cursors.db;
+    const createArg = mocks.agentCreate.mock.calls[0]?.[0] as DKGAgentConfig;
+    // The daemon opened one node database and composed its stores exactly once.
+    const { owner, stores } = mocks.composition;
+    if (!owner || !stores) throw new Error('the daemon did not compose its protocol stores through protocol-persistence');
+    expect(mocks.composition.opened).toBe(1);
+    expect(mocks.composition.composed).toBe(1);
+    const daemonDb: Database.Database = owner.dashboardDb.db;
     try {
-      // 1. The stores the daemon composes are the ones node-ui exports (the
-      //    moved classes, re-exported), not a second copy.
-      expect(createArg.messengerStores.idempotencyStore).toBeInstanceOf(SqliteMessageIdempotencyStore);
-      expect(createArg.messengerStores.outboxStore).toBeInstanceOf(SqliteProtocolOutboxStore);
-      expect(createArg.syncCheckpointStore).toBeInstanceOf(SqliteSyncCheckpointStore);
-      expect(createArg.changelogCursorStore).toBeInstanceOf(SqliteChangelogCursorStore);
-      expect(createArg.kaNumberAllocator.store).toBeInstanceOf(SqliteKaNumberStore);
-      expect(createArg.chainEventCursorStore).toBeInstanceOf(SqliteChainEventCursorStore);
-      expect(createArg.contextGraphRegistryScanCursorStore).toBeInstanceOf(SqliteContextGraphRegistryScanCursorStore);
-      expect(createArg.contextGraphStorageDiscoveryStore).toBeInstanceOf(SqliteContextGraphStorageDiscoveryStore);
-      expect(createArg.localContextGraphAuthorityHistoryStore).toBeInstanceOf(SqliteContextGraphAuthorityHistoryStore);
-      expect(createArg.localContextGraphAuthorityIndexStore).toBeInstanceOf(SqliteContextGraphAuthorityIndexStore);
-      expect(createArg.chainEventLogStore).toBeInstanceOf(SqliteChainEventLogStore);
-      const eraGuard = createArg.storeConfig?.changelog?.eraGuard;
-      expect(eraGuard).toBeInstanceOf(SqliteChangelogEraGuard);
+      // 1. The stores were built over the very DashboardDB the daemon opened
+      //    (one connection), for this chain deployment, with the changelog on.
+      expect(owner.dashboardDb).toBeInstanceOf(DashboardDB);
+      expect(mocks.composition.storesDatabase).toBe(owner.dashboardDb);
+      expect(mocks.composition.storesOptions).toEqual({ chainCursorScope: DEPLOYMENT_ID, changelogEnabled: true });
 
-      // 2. Each one reads what the legacy file holds.
-      expect(createArg.messengerStores.idempotencyStore.check(PEER, PROTOCOL, 'legacy-in-1', 'in'))
+      // 2. The agent is handed exactly those instances, of the node-store classes.
+      expect(createArg.messengerStores?.idempotencyStore).toBe(stores.messengerStores.idempotencyStore);
+      expect(createArg.messengerStores?.outboxStore).toBe(stores.messengerStores.outboxStore);
+      expect(createArg.syncCheckpointStore).toBe(stores.syncCheckpointStore);
+      expect(createArg.changelogCursorStore).toBe(stores.changelogCursorStore);
+      expect(createArg.chainEventCursorStore).toBe(stores.chainEventCursorStore);
+      expect(createArg.contextGraphRegistryScanCursorStore).toBe(stores.contextGraphRegistryScanCursorStore);
+      expect(createArg.contextGraphStorageDiscoveryStore).toBe(stores.contextGraphStorageDiscoveryStore);
+      expect(createArg.localContextGraphAuthorityHistoryStore).toBe(stores.localContextGraphAuthorityHistoryStore);
+      expect(createArg.localContextGraphAuthorityIndexStore).toBe(stores.localContextGraphAuthorityIndexStore);
+      expect(createArg.chainEventLogStore).toBe(stores.chainEventLogStore);
+      const changelog = createArg.storeConfig?.changelog;
+      const eraGuard = typeof changelog === 'object' ? changelog.eraGuard : undefined;
+      expect(eraGuard).toBe(stores.changelogEraGuard);
+      expect(createArg.kaNumberAllocator).toBeInstanceOf(KaNumberAllocator);
+      expect(stores.messengerStores.idempotencyStore).toBeInstanceOf(SqliteMessageIdempotencyStore);
+      expect(stores.messengerStores.outboxStore).toBeInstanceOf(SqliteProtocolOutboxStore);
+      expect(stores.syncCheckpointStore).toBeInstanceOf(SqliteSyncCheckpointStore);
+      expect(stores.changelogCursorStore).toBeInstanceOf(SqliteChangelogCursorStore);
+      expect(stores.changelogEraGuard).toBeInstanceOf(SqliteChangelogEraGuard);
+      expect(stores.chainEventCursorStore).toBeInstanceOf(SqliteChainEventCursorStore);
+      expect(stores.contextGraphRegistryScanCursorStore).toBeInstanceOf(SqliteContextGraphRegistryScanCursorStore);
+      expect(stores.contextGraphStorageDiscoveryStore).toBeInstanceOf(SqliteContextGraphStorageDiscoveryStore);
+      expect(stores.localContextGraphAuthorityHistoryStore).toBeInstanceOf(SqliteContextGraphAuthorityHistoryStore);
+      expect(stores.localContextGraphAuthorityIndexStore).toBeInstanceOf(SqliteContextGraphAuthorityIndexStore);
+      expect(stores.chainEventLogStore).toBeInstanceOf(SqliteChainEventLogStore);
+
+      // 3. Each one reads what the legacy file holds.
+      expect(stores.messengerStores.idempotencyStore.check(PEER, PROTOCOL, 'legacy-in-1', 'in'))
         .toEqual({ seen: true, cachedResponse: new Uint8Array([1, 2, 3]) });
-      const queued = createArg.messengerStores.outboxStore;
+      const queued = stores.messengerStores.outboxStore;
       expect(queued.size()).toBe(1);
       expect(queued.hasPendingFor(PEER)).toBe(true);
-      expect(createArg.syncCheckpointStore.get(`${PEER}|legacy-cg|durable|data`)?.offset).toBe(4096);
-      expect(createArg.changelogCursorStore.get(PEER, 'legacy-cg')).toMatchObject({ era: 'era-legacy', seq: 41 });
-      await expect(eraGuard.load()).resolves.toEqual({ era: 'era-legacy', highSeq: 41 });
-      // The next KA number for the author continues from the persisted counter.
-      expect(createArg.kaNumberAllocator.store.peekNext(AUTHOR)).toBe(7n);
-      expect(createArg.kaNumberAllocator.store.allocate(AUTHOR)).toBe(7n);
-      await expect(createArg.chainEventCursorStore.loadLane('contextGraphDiscovery')).resolves.toBe(4321);
-      await expect(createArg.contextGraphRegistryScanCursorStore.load({
+      expect(stores.syncCheckpointStore.get(`${PEER}|legacy-cg|durable|data`)?.offset).toBe(4096);
+      expect(stores.changelogCursorStore.get(PEER, 'legacy-cg')).toMatchObject({ era: 'era-legacy', seq: 41 });
+      await expect(eraGuard?.load()).resolves.toEqual({ era: 'era-legacy', highSeq: 41 });
+      // The next KA number for the author continues from the persisted counter,
+      // through the allocator the daemon built over the composed store.
+      const allocator = createArg.kaNumberAllocator;
+      expect(allocator?.peekKaId(AUTHOR)).toBe((BigInt(AUTHOR) << 96n) | 7n);
+      allocator?.markReconciled();
+      expect(allocator?.allocate(AUTHOR)).toEqual({ kaId: (BigInt(AUTHOR) << 96n) | 7n, number: 7n });
+      await expect(stores.chainEventCursorStore.loadLane('contextGraphDiscovery')).resolves.toBe(4321);
+      await expect(stores.contextGraphRegistryScanCursorStore.load({
         chainId: 'gnosis:100', deploymentId: DEPLOYMENT_ID, registryAddress: REGISTRY,
       })).resolves.toBe(5000);
-      await expect(createArg.contextGraphStorageDiscoveryStore.load()).resolves.toEqual(DISCOVERY_CHECKPOINT);
-      await expect(createArg.localContextGraphAuthorityHistoryStore.load('legacy-key'))
+      await expect(stores.contextGraphStorageDiscoveryStore.load()).resolves.toEqual(DISCOVERY_CHECKPOINT);
+      await expect(stores.localContextGraphAuthorityHistoryStore.load('legacy-key'))
         .resolves.toEqual(AUTHORITY_CHECKPOINT);
-      await expect(createArg.localContextGraphAuthorityIndexStore.load('legacy-index-scope'))
+      await expect(stores.localContextGraphAuthorityIndexStore.load('legacy-index-scope'))
         .resolves.toEqual({ token: 3, value: { version: 1, cursor: { throughBlockNumber: 30 } } });
-      const logState = await createArg.chainEventLogStore.load(CHAIN_LOG_SCOPE);
+      const logState = await stores.chainEventLogStore.load(CHAIN_LOG_SCOPE);
       expect(logState?.cursor).toMatchObject({ revision: 2, settledBlockNumber: 10, lineage: '0xlineage' });
-      await expect(createArg.chainEventLogStore.readEvents(CHAIN_LOG_SCOPE, {
+      await expect(stores.chainEventLogStore.readEvents(CHAIN_LOG_SCOPE, {
         fromBlockNumber: 0, throughBlockNumber: 20,
       })).resolves.toHaveLength(1);
 
-      // 3. Boot itself rewrote nothing: the schema, the version and every row
+      // 4. Boot itself rewrote nothing: the schema, the version and every row
       //    are as the legacy file left them. (The allocation above is the only
       //    write this test made, so account for it explicitly.)
       expect(daemonDb.pragma('user_version', { simple: true })).toBe(versionBefore);
@@ -310,11 +378,13 @@ describe('daemon composition of the protocol persistence stores', () => {
       expect(kaBefore).toEqual([JSON.stringify({ author_address: AUTHOR, next_number: 7 })]);
       expect(kaAfter).toEqual([JSON.stringify({ author_address: AUTHOR, next_number: 8 })]);
 
-      // 4. Same file: one SQLite database in the node's home, no protocol file.
+      // 5. Same file: one SQLite database in the node's home, no protocol file.
       const sqliteFiles = (await readdir(tempHome)).filter((name) => /\.db(-wal|-shm)?$/.test(name));
       expect([...new Set(sqliteFiles.map((name) => name.replace(/-(wal|shm)$/, '')))]).toEqual(['node-ui.db']);
     } finally {
-      daemonDb.close();
+      // The daemon's owner is the typed cleanup path for the connection it opened.
+      owner.close();
     }
+    expect(daemonDb.open).toBe(false);
   });
 });
