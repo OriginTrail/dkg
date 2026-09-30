@@ -713,8 +713,10 @@ describe('DKGAgent.stop() core-host recording drain (real agent)', () => {
       configurable: true,
       value: 20,
     });
-    const { agent, internals, saved, policy, recording } = await pausedRecording();
+    let paused: Awaited<ReturnType<typeof pausedRecording>> | undefined;
     try {
+      paused = await pausedRecording();
+      const { agent, internals, saved, policy, recording } = paused;
       await withinMs(agent.stop(), 20_000, 'stop() with a recording that never finishes');
       expect(internals.contextGraphSubscriptionPersistence.status()).toEqual({
         closed: true, lanes: 0, active: 0, pending: 0,
@@ -725,12 +727,13 @@ describe('DKGAgent.stop() core-host recording drain (real agent)', () => {
       expect(await recording).toBe('closed');
       expect(saved.has(HOSTED_NAMESPACE)).toBe(false);
     } finally {
-      policy.open();
+      paused?.policy.open();
+      // Restored even when the setup above threw: the static is shared by the whole file.
       Object.defineProperty(DKGAgentBase, 'CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS', {
         configurable: true,
         value: originalTimeout,
       });
-      await agent.stop().catch(() => {});
+      await paused?.agent.stop().catch(() => {});
     }
   }, 40_000);
 });

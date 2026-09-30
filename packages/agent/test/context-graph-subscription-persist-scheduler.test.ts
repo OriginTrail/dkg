@@ -38,7 +38,7 @@ describe('ContextGraphSubscriptionPersistScheduler', () => {
     await write;
   });
 
-  it('defers every write in a lane, including one that reaches the head behind another', async () => {
+  it('starts the first write after the caller and a queued write only once the write ahead of it has ended', async () => {
     const scheduler = new ContextGraphSubscriptionPersistScheduler();
     const held = gate();
     const events: string[] = [];
