@@ -268,6 +268,8 @@ export default defineConfig({
           // local-agent persist-turn routes below; a fake store, no hardhat.
           'test/chat-turn-persistence.test.ts',
           'test/daemon-openclaw-persistence.test.ts',
+          // The persist-turn answer of all three channels, per outcome, as raw text.
+          'test/durable-chat-turn-response.test.ts',
           // Real DKGAgent + real chat-memory stack behind a real HTTP server; no hardhat.
           'test/openclaw-persist-turn.e2e.test.ts',
           'test/daemon-hermes.test.ts',

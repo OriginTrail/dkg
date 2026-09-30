@@ -20,6 +20,7 @@ import {
   type DurableChatTurnPayload,
   type DurableChatTurnStore,
 } from '../chat-turn-persistence.js';
+import { durableChatTurnResponseBody } from './durable-chat-turn-response.js';
 import {
   isValidOpenClawPersistTurnPayload,
   normalizeOpenClawAttachmentRefs,
@@ -107,15 +108,7 @@ export async function persistOpenClawTurn(
       memoryManager,
       payload: { ...payload, attachmentRefs: verifiedAttachmentRefs },
     });
-    return {
-      statusCode: 200,
-      body: {
-        ok: true,
-        ...(outcome.kind === 'duplicate' ? { duplicate: true } : {}),
-        ...(outcome.kind === 'transitioned' ? { transitioned: true } : {}),
-        turnId: payload.turnId,
-      },
-    };
+    return { statusCode: 200, body: durableChatTurnResponseBody(outcome) };
   } catch (err) {
     return { statusCode: 500, body: { error: (err as Error).message } };
   }
