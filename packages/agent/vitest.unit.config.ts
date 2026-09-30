@@ -155,6 +155,9 @@ export default defineConfig({
       "test/selected-swm-meta-budget.test.ts",
       "test/legacy-sync-graph-candidate.test.ts",
       "test/outbox-shutdown-lifecycle.test.ts",
+      // Keyed persist scheduler shared by membership and subscription writes.
+      "test/keyed-persist-scheduler.test.ts",
+      "test/context-graph-membership-persist-scheduler.test.ts",
       "test/outbox-drainer.test.ts",
       "test/sync-checkpoint-key.test.ts",
       "test/map-with-concurrency.test.ts",
