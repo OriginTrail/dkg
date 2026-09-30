@@ -744,7 +744,11 @@ test('verify-pack runs exactly the child commands it declares to the CI routing 
   const { installGuardViolations, runtimeViolations, missing } = verifyPack({ rootDir: root, runner });
   assert.deepEqual([installGuardViolations, runtimeViolations], [[], []]);
   assert.ok(missing.length > 0, 'the check reads the pack report');
-  assert.deepEqual(observed, SUBCOMMAND_CHILD_COMMANDS['verify-pack'].map(({ command, args, cwd }) => ({ command, args: [...args], cwd })));
+  // The pack must stay a dry run in the CLI package: pinned here on its own,
+  // so a change to the declaration cannot move both sides of the check.
+  const pack = { command: 'npm', args: ['pack', '--dry-run', '--json'], cwd: 'packages/cli' };
+  assert.deepEqual(observed, [pack]);
+  assert.deepEqual(SUBCOMMAND_CHILD_COMMANDS['verify-pack'].map(({ command, args, cwd }) => ({ command, args: [...args], cwd })), [pack]);
 }));
 
 // The integration test the mocked-runner unit tests can't give: run the REAL
