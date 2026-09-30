@@ -526,10 +526,11 @@ describe('operation leases are an optional capability of the store', () => {
   it('takes no operation-long lease from a lifecycle that reports cleanup on but offers no operationLease', async () => {
     const acquireExisting = vi.fn(async () => () => {});
     const markPublished = vi.fn(async () => {});
-    // The type refuses this (a cleanup-enabled lifecycle must offer operationLease); a cast or plain
-    // JavaScript still gets one through, and the scope then simply takes no operation-long lease.
-    // @ts-expect-error operationLease is required when finalizedCleanupEnabled is true
-    const lifecycle: WorkspaceSnapshotLifecycle = { finalizedCleanupEnabled: true, acquireExisting, markPublished };
+    // The type refuses this (a cleanup-enabled lifecycle must offer operationLease). That refusal is
+    // pinned by the compiler-checked fixture test/_helpers/workspace-snapshot-lifecycle-types.ts, because
+    // vitest strips types and would never evaluate an expected error here. A cast or plain JavaScript still
+    // gets one through, and the scope then simply takes no operation-long lease.
+    const lifecycle = { finalizedCleanupEnabled: true, acquireExisting, markPublished } as unknown as WorkspaceSnapshotLifecycle;
     const store = customStore(lifecycle);
     await withSnapshotScope(store, async snapshots => {
       await snapshots!.putSnapshot({ digest, quads });
