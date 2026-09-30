@@ -190,6 +190,75 @@ it('finishes every bound key in an explicit sweep beyond timer and queue limits'
   await runtime.close();
 });
 
+it('resumes timer sweeps after the final capacity-blocked completion cancels', async () => {
+  const started: string[] = [];
+  const releases = new Map<string, () => void>();
+  const runtime = new VmReconcileSchedulingRuntime<void>(
+    key => new Promise<void>((resolve) => {
+      started.push(key);
+      releases.set(key, resolve);
+    }),
+    () => undefined,
+    { concurrency: 1, maxPending: 1 },
+  );
+  try {
+    const active = runtime.triggerManual('manual-active');
+    await vi.waitFor(() => expect(started).toContain('manual-active'));
+    const queued = runtime.triggerManual('manual-queued');
+    expect(runtime.snapshot()).toMatchObject({ active: 1, queued: 1 });
+
+    const controller = new AbortController();
+    const cancelled = runtime.completeSweep(['waiting'], [], () => true, controller.signal);
+    controller.abort();
+    await cancelled;
+    expect(runtime.isInFlight('waiting')).toBe(false);
+
+    releases.get('manual-active')!();
+    await vi.waitFor(() => expect(started).toContain('manual-queued'));
+    releases.get('manual-queued')!();
+    await Promise.all([active, queued]);
+    runtime.scheduleSweep(['periodic'], [], () => true);
+    await vi.waitFor(() => expect(started).toContain('periodic'));
+    releases.get('periodic')!();
+    await runtime.waitForIdle();
+  } finally {
+    for (const release of releases.values()) release();
+    await runtime.close();
+  }
+});
+
+it('keeps a shared completion turn alive when only one claimant cancels', async () => {
+  const started: string[] = [];
+  const releases = new Map<string, () => void>();
+  const runtime = new VmReconcileSchedulingRuntime<void>(
+    key => new Promise<void>((resolve) => {
+      started.push(key);
+      releases.set(key, resolve);
+    }),
+    () => undefined,
+    { concurrency: 1, maxPending: 1 },
+  );
+  try {
+    const active = runtime.triggerManual('manual-active');
+    await vi.waitFor(() => expect(started).toContain('manual-active'));
+    const queued = runtime.triggerManual('manual-queued');
+    const controller = new AbortController();
+    const cancelled = runtime.completeSweep(['waiting'], [], () => true, controller.signal);
+    const continuing = runtime.completeSweep(['waiting'], [], () => true);
+    controller.abort();
+    await cancelled;
+    releases.get('manual-active')!();
+    await vi.waitFor(() => expect(started).toContain('manual-queued'));
+    releases.get('manual-queued')!();
+    await vi.waitFor(() => expect(started).toContain('waiting'));
+    releases.get('waiting')!();
+    await Promise.all([active, queued, continuing]);
+  } finally {
+    for (const release of releases.values()) release();
+    await runtime.close();
+  }
+});
+
 it('keeps a partial discovery turn ahead of bound fills, then resumes bound progress', () => {
   const planner = new VmReconcileSweepPlanner({ discoveryBatchSize: 2 }, () => () => undefined);
   const admitted: string[] = [];

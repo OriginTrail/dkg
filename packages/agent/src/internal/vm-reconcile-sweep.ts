@@ -32,6 +32,8 @@ interface SweepTurnBase {
   readonly admittedKeys: Set<string>;
   /** Bound graphs admitted in this turn (discovery has a separate budget). */
   boundAdmissions: number;
+  /** Callers still draining this turn through complete(). */
+  completionClaimants: number;
   readonly completions: Promise<unknown>[];
   readonly finished: AbortController;
   releaseTimerCapacity?: () => void;
@@ -130,6 +132,10 @@ export class VmReconcileSweepPlanner {
       }
     } finally {
       releaseCapacity();
+      turn.completionClaimants--;
+      // A cancelled or obsolete final caller must not leave the planner in
+      // completion mode, which would suppress every later timer sweep.
+      if (turn.completionClaimants === 0 && !turn.finished.signal.aborted) this.finish(turn);
     }
     await Promise.all(turn.completions);
   }
@@ -138,7 +144,7 @@ export class VmReconcileSweepPlanner {
     return this.turn ??= {
       owner: 'timer',
       state: { phase: 'leading', remainingDiscovery: this.discoveryBatchSize },
-      admittedKeys: new Set(), boundAdmissions: 0,
+      admittedKeys: new Set(), boundAdmissions: 0, completionClaimants: 0,
       completions: [], finished: new AbortController(),
     };
   }
@@ -146,11 +152,15 @@ export class VmReconcileSweepPlanner {
   private claimForCompletion(boundKeys: readonly string[]): SweepTurn {
     const current = this.currentTurn();
     this.releaseTimerCapacity(current);
-    if (current.owner === 'completion') return current;
+    if (current.owner === 'completion') {
+      current.completionClaimants++;
+      return current;
+    }
     const claimed: SweepTurn = {
       ...current,
       owner: 'completion',
       fullBoundKeys: [...boundKeys],
+      completionClaimants: 1,
     };
     this.turn = claimed;
     return claimed;
