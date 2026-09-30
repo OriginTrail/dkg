@@ -511,14 +511,14 @@ describe('FinalizationHandler.handleChainReconciledKC (Phase B)', () => {
     const graphDiscoveryOptions: QueryOptions[] = [];
     const origQuery = store.query.bind(store);
     store.query = (async (sparql: string, options?: QueryOptions) => {
-      if (options?.source === 'agent.finalization.sharedMemorySlice') {
+      if (options?.source === 'agent.finalization.legacySnapshotScan') {
         queryOptions.push(options);
       }
       return origQuery(sparql, options);
     }) as typeof store.query;
     const origListGraphs = store.listGraphs.bind(store);
     store.listGraphs = async (options?: QueryOptions) => {
-      if (options?.source === 'agent.finalization.sharedMemorySlice') {
+      if (options?.source === 'agent.finalization.legacySnapshotScan') {
         graphDiscoveryOptions.push(options);
       }
       return origListGraphs(options);
@@ -545,7 +545,7 @@ describe('FinalizationHandler.handleChainReconciledKC (Phase B)', () => {
     const sharedMemoryReads: QueryOptions[] = [];
     const originalQuery = store.query.bind(store);
     store.query = (async (sparql: string, options?: QueryOptions) => {
-      if (options?.source === 'agent.finalization.sharedMemorySlice') {
+      if (options?.source === 'agent.finalization.legacySnapshotScan') {
         sharedMemoryReads.push(options);
       }
       return originalQuery(sparql, options);
