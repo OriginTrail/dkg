@@ -346,6 +346,23 @@ describe('finalized snapshot cleanup on devnet', () => {
     await assertSubjectIn(node, contextGraphId, 'verifiable-memory', fixture.subject, fixture.value);
   });
 
+  it('leaves an unpublished shared asset untouched', async () => {
+    const { node, contextGraphId, retentionMs, intervalMs } = suite;
+    const name = unique('unpublished');
+    const { filePath, subject, value } = writeNtFixture(name, 'shared but never published');
+
+    await shareAsset(name, filePath);
+    const digest = await waitForSnapshotOf(node, subject);
+    await sleep(retentionMs + 6 * intervalMs);
+    const dir = readSnapshotDirectory(node);
+    expect(dir.payloads.has(digest)).toBe(true);
+    expect(dir.retired.has(digest)).toBe(false);
+    await assertSubjectIn(node, contextGraphId, 'shared-working-memory', subject, value);
+  });
+
+  // Last on purpose. When the chain does not answer during a restart (seen on a loaded machine) the node
+  // leaves its context-graph subscriptions dormant, and shared-memory reads stay denied afterwards. That
+  // is outside what this suite checks, so no other scenario may run after the restart.
   it('finishes a recorded retirement after a node restart without losing VM reads', async () => {
     const { node, reader, contextGraphId, retentionMs, intervalMs } = suite;
 
@@ -364,19 +381,5 @@ describe('finalized snapshot cleanup on devnet', () => {
     expect(finished.retired.has(digest)).toBe(false);
     await assertSubjectIn(node, contextGraphId, 'verifiable-memory', subject, value);
     await assertSubjectIn(reader, contextGraphId, 'verifiable-memory', subject, value);
-  });
-
-  it('leaves an unpublished shared asset untouched', async () => {
-    const { node, contextGraphId, retentionMs, intervalMs } = suite;
-    const name = unique('unpublished');
-    const { filePath, subject, value } = writeNtFixture(name, 'shared but never published');
-
-    await shareAsset(name, filePath);
-    const digest = await waitForSnapshotOf(node, subject);
-    await sleep(retentionMs + 6 * intervalMs);
-    const dir = readSnapshotDirectory(node);
-    expect(dir.payloads.has(digest)).toBe(true);
-    expect(dir.retired.has(digest)).toBe(false);
-    await assertSubjectIn(node, contextGraphId, 'shared-working-memory', subject, value);
   });
 });
