@@ -114,14 +114,19 @@ export function requirementCoveredByPlan(text, plan, file) {
   }
 }
 
+// The ci.yml job that plans the others (ci-results.mjs requires it): it runs
+// on every pull request, from the trusted controller checkout.
+const CONTROLLER_JOB = 'changes';
+
 // What a change to a file a job runs must select, by job: a ci.yml lane
 // job's lane; `build` for the shared build job's own checks; nothing for
 // the changes job, which runs on every pull request; `full` for every other
-// job (the Solidity, artifact and gate jobs, push-only jobs, and the EVM
-// workflow's jobs, whose runner every scope uses).
+// job (the Solidity, artifact and gate jobs, push-only jobs, the EVM
+// workflow's jobs, whose runner every scope uses, and any job without a
+// condition, which may still be skipped through what it needs).
 export function jobRequirement(workflow, job, condition) {
   if (workflow === 'ci.yml') {
-    if (!condition) return undefined;
+    if (job === CONTROLLER_JOB) return undefined;
     const lane = jobLane(job, condition);
     if (lane) return requirement.lane(lane);
     if (/\bneeds\.changes\.outputs\.run_node == 'true'/.test(condition)) return requirement.build;

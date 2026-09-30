@@ -545,6 +545,17 @@ test('every repository script a CI job runs selects that job', () => {
   assert.equal(jobRequirement('ci.yml', 'changes', ''), undefined);
   assert.equal(jobRequirement('ci.yml', 'build', "needs.changes.outputs.run_node == 'true'"), 'build');
   assert.equal(jobRequirement('evm-integration.yml', 'evm-integration', "needs.plan.outputs.evm_matrix != '[]'"), 'full');
+  // Only the changes job, which plans the others, runs its files unchecked. A
+  // job without a condition is held to full CI like any other job outside
+  // the lanes, so its build-only script is reported.
+  const unconditional = (job) => `jobs:\n  ${job}:\n    steps:\n      - run: node scripts/audit-dial-protocol.mjs\n`;
+  assert.equal(jobRequirement('ci.yml', 'audit', ''), 'full');
+  assert.equal(plantedWorkflowGaps(unconditional('audit')).seeds.get('scripts/audit-dial-protocol.mjs')?.get('full'), 'ci.yml audit');
+  assert.deepEqual(plantedWorkflowGaps(unconditional('audit')).missing, [
+    'full loads scripts/audit-dial-protocol.mjs via ci.yml audit',
+    'full loads scripts/audit-create-random.mjs via scripts/audit-dial-protocol.mjs',
+  ]);
+  assert.deepEqual([...plantedWorkflowGaps(unconditional('changes')).seeds.keys()], []);
 });
 
 test('one execution graph feeds the seeds and the gap check, direct and indirect runs alike', () => {
