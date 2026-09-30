@@ -674,6 +674,64 @@ describe('bounded SWM result materialization', () => {
     }
   });
 
+  it('waits for an in-flight writer before reading a large multi-chunk family', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('chunked-transient-write');
+    const graphs = Array.from({ length: 130 }, (_, i) => `${swm}/${AUTHOR_A_MIXED}/${String(i + 1).padStart(3, '0')}`);
+    try {
+      await seedGraphs(store, graphs);
+      let stable = false;
+      let scheduled = false;
+      const query = vi.fn(store.query.bind(store));
+      const fenced = {
+        query,
+        listGraphs: store.listGraphs.bind(store),
+        writeRevisionCoverage: 'all-writers',
+        getWriteRevision: () => {
+          if (!scheduled) {
+            scheduled = true;
+            setImmediate(() => { stable = true; });
+          }
+          return { generation: 1, stable };
+        },
+      } as unknown as Parameters<typeof loadSelectedSharedMemoryQuads>[0];
+      const selected = await loadSelectedSharedMemoryQuads(fenced, swm, 'all');
+      expect(selected).toHaveLength(130);
+      expect(query.mock.calls.filter(([sparql]) => sparql.includes('VALUES ?g')).length)
+        .toBeGreaterThan(1);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('honors cancellation while waiting for an in-flight writer', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('chunked-aborted-write');
+    const graphs = Array.from({ length: 130 }, (_, i) => `${swm}/${AUTHOR_A_MIXED}/${String(i + 1).padStart(3, '0')}`);
+    try {
+      await seedGraphs(store, graphs);
+      const controller = new AbortController();
+      let scheduled = false;
+      const fenced = {
+        query: store.query.bind(store),
+        listGraphs: store.listGraphs.bind(store),
+        writeRevisionCoverage: 'all-writers',
+        getWriteRevision: () => {
+          if (!scheduled) {
+            scheduled = true;
+            setImmediate(() => controller.abort(new Error('read cancelled')));
+          }
+          return { generation: 1, stable: false };
+        },
+      } as unknown as Parameters<typeof loadSelectedSharedMemoryQuads>[0];
+      await expect(loadSelectedSharedMemoryQuads(fenced, swm, 'all', {
+        queryOptions: { signal: controller.signal },
+      })).rejects.toThrow('read cancelled');
+    } finally {
+      await store.close();
+    }
+  });
+
   it('counts dedupe identities retained for filtered rows in the byte budget', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     const swm = contextGraphSharedMemoryUri('result-filter-dedupe-budget');

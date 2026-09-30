@@ -696,9 +696,19 @@ async function loadSharedMemoryQuadsInternal(
     // single-query path instead of returning a mixed multi-query view.
     return read(store, initialGraphs, queryOptions, { kind: 'single-query' });
   }
-  for (let attempt = 0; attempt < 3; attempt++) {
+  let unstableChecks = 0;
+  for (let attempt = 0; attempt < 3;) {
+    queryOptions?.signal?.throwIfAborted();
     const before = revision.getWriteRevision(bucketGraph);
-    if (!before.stable) continue;
+    if (!before.stable) {
+      if (++unstableChecks >= 3) break;
+      // Let an in-flight writer finish before sampling again. A synchronous
+      // retry can exhaust the fence while the writer is still on this turn.
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      queryOptions?.signal?.throwIfAborted();
+      continue;
+    }
+    attempt++;
     const graphs = await resolveGraphs(store, queryOptions);
     const quads = await read(store, graphs, queryOptions);
     const after = revision.getWriteRevision(bucketGraph);

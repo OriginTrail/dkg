@@ -4,8 +4,9 @@ import { join } from 'node:path';
 import { expect, it, vi } from 'vitest';
 import { contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
-import { ChangelogStore } from '../src/changelog-store.js';
+import { ChangelogStore, CHANGELOG_GRAPH } from '../src/changelog-store.js';
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
+import { ATOMIC_GRAPH_REPLACE_STAGING_PREFIX } from '../src/atomic-graph-replace.js';
 import { loadSelectedSharedMemoryQuads } from '../src/graph-manager.js';
 import { asReadSnapshotCapability, type ReadSnapshotStore } from '../src/read-snapshot-capability.js';
 import { SharedMemoryLiteralBlobStore } from '../src/shared-memory-literal-blob-store.js';
@@ -60,4 +61,43 @@ it('preserves every read decorator over a large pinned SWM family', async () => 
     await inner.close();
     await rm(blobDir, { recursive: true, force: true });
   }
+});
+
+it('keeps the changelog graph hidden through a pinned read facade', async () => {
+  const visible = 'urn:dkg:visible';
+  const graphs = [visible, CHANGELOG_GRAPH];
+  const inner = {
+    withReadSnapshot: async <T>(read: (snapshot: ReadSnapshotStore) => Promise<T>) => read({
+      query: async () => ({ type: 'bindings', bindings: [] }) as never,
+      listGraphs: async () => graphs,
+      listGraphsByPrefix: async (prefix) => graphs.filter((graph) => graph.startsWith(prefix)),
+    }),
+  } as unknown as TripleStore;
+  const snapshot = asReadSnapshotCapability(new ChangelogStore(inner));
+  expect(snapshot).not.toBeNull();
+  await snapshot!.withReadSnapshot(async (read) => {
+    expect(await read.listGraphs()).toEqual([visible]);
+    expect(await read.listGraphsByPrefix!('urn:dkg:')).toEqual([visible]);
+    expect(await read.listGraphsByPrefix!('urn:dkg:changelog')).toEqual([]);
+  });
+});
+
+it('keeps atomic replacement staging graphs hidden through a pinned index facade', async () => {
+  const visible = 'urn:dkg:visible';
+  const staging = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}orphan`;
+  const graphs = [visible, staging];
+  const inner = {
+    withReadSnapshot: async <T>(read: (snapshot: ReadSnapshotStore) => Promise<T>) => read({
+      query: async () => ({ type: 'bindings', bindings: [] }) as never,
+      listGraphs: async () => graphs,
+      listGraphsByPrefix: async (prefix) => graphs.filter((graph) => graph.startsWith(prefix)),
+    }),
+  } as unknown as TripleStore;
+  const snapshot = asReadSnapshotCapability(new GraphSetIndexStore(inner));
+  expect(snapshot).not.toBeNull();
+  await snapshot!.withReadSnapshot(async (read) => {
+    expect(await read.listGraphs()).toEqual([visible]);
+    expect(await read.listGraphsByPrefix!('urn:')).toEqual([visible]);
+    expect(await read.listGraphsByPrefix!(ATOMIC_GRAPH_REPLACE_STAGING_PREFIX)).toEqual([]);
+  });
 });
