@@ -3,6 +3,9 @@ import {
   createManagedOxigraphSparqlStoreV1,
   SparqlHttpStore,
 } from '../src/adapters/sparql-http.js';
+import { MANAGED_OXIGRAPH_CANCELLATION_SUFFIX } from '../src/adapters/sparql-response-policy.js';
+import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
+import { createRfc64SharedProjectionTestFixture } from './helpers/rfc64-shared-projection-fixture.js';
 
 /**
  * A caller that gives up on a dispatched managed-Oxigraph read (its own budget)
@@ -23,6 +26,17 @@ interface PendingFetch {
   readonly signal: AbortSignal;
   respond(response: Response): void;
   fail(error: unknown): void;
+  /** With `holdAbort`: settle the fetch the way a real one does after its abort. */
+  release(): void;
+}
+
+interface HarnessOptions {
+  /**
+   * Record an abort but leave the fetch pending until the test calls
+   * `release()`, like a transport whose cleanup after an abort takes a while.
+   */
+  readonly holdAbort?: boolean;
+  readonly scheduler?: StorePriorityScheduler;
 }
 
 function useFakeClock() {
@@ -33,13 +47,18 @@ function useFakeClock() {
   });
 }
 
-function harness(kind: 'managed' | 'unmanaged' = 'managed', timeout = TIMEOUT_MS) {
+function harness(
+  kind: 'managed' | 'unmanaged' = 'managed',
+  timeout = TIMEOUT_MS,
+  { holdAbort = false, scheduler }: HarnessOptions = {},
+) {
   const fetches: PendingFetch[] = [];
   globalThis.fetch = vi.fn((_input: unknown, init?: RequestInit) => new Promise<Response>(
     (resolve, reject) => {
       const signal = init!.signal!;
-      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
-      fetches.push({ signal, respond: resolve, fail: reject });
+      const release = () => reject(signal.reason);
+      if (!holdAbort) signal.addEventListener('abort', release, { once: true });
+      fetches.push({ signal, respond: resolve, fail: reject, release });
     },
   )) as typeof fetch;
   const recovery = { recovering: false, generation: 0 };
@@ -49,16 +68,17 @@ function harness(kind: 'managed' | 'unmanaged' = 'managed', timeout = TIMEOUT_MS
     timeout,
     now: () => performance.now(),
     managedRecovery: { readState: () => ({ ...recovery }), recover },
+    ...(scheduler === undefined ? {} : { scheduler }),
   };
   const store = kind === 'managed'
     ? createManagedOxigraphSparqlStoreV1(options)
     : new SparqlHttpStore(options);
 
   /** Start a read, wait for its dispatch, and return the caller's handles. */
-  async function dispatch(sparql = 'ASK { ?s ?p ?o }') {
+  async function dispatch(sparql = 'ASK { ?s ?p ?o }', queryOptions: { maxResponseBytes?: number } = {}) {
     const before = fetches.length;
     const caller = new AbortController();
-    const query = store.query(sparql, { signal: caller.signal });
+    const query = store.query(sparql, { ...queryOptions, signal: caller.signal });
     const outcome = query.then(
       (value) => ({ value }),
       (error: unknown) => ({ error }),
@@ -82,6 +102,28 @@ function harness(kind: 'managed' | 'unmanaged' = 'managed', timeout = TIMEOUT_MS
 }
 
 const okResponse = () => new Response(ASK_TRUE, { headers: SPARQL_JSON });
+
+/**
+ * Answer a pending fetch with a body the test feeds by hand. Like a real
+ * fetch, the body stream errors if the fetch's own signal aborts.
+ */
+function respondStreaming(fetch: PendingFetch, init: ResponseInit = { headers: SPARQL_JSON }) {
+  let controller!: ReadableStreamDefaultController<Uint8Array>;
+  const stream = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c;
+      fetch.signal.addEventListener('abort', () => c.error(fetch.signal.reason));
+    },
+  });
+  fetch.respond(new Response(stream, init));
+  return {
+    /** Send the rest of the body and end the stream cleanly. */
+    finish(text: string) {
+      controller.enqueue(new TextEncoder().encode(text));
+      controller.close();
+    },
+  };
+}
 
 describe('managed read whose caller aborts after dispatch', () => {
   useFakeClock();
@@ -195,6 +237,73 @@ describe('managed read whose caller aborts after dispatch', () => {
     } finally { await store.close(); }
   });
 
+  // The server finished with these requests even though the answer could not be
+  // used: the body was read to its end and only then rejected. Withdrawing the
+  // retained recovery is what keeps a healthy server from being restarted at
+  // the client deadline. Each one answers (headers) BEFORE the caller leaves, so
+  // the body is consumed and decoded rather than just drained.
+  it.each([
+    ['a SELECT the server cancelled natively', 'SELECT ?s WHERE { ?s ?p ?o }', 200, `{"head":{"vars":["s"]},"results":{"bindings":[{"s":`, MANAGED_OXIGRAPH_CANCELLATION_SUFFIX],
+    ['a CONSTRUCT the server cancelled natively', 'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }', 200, '<urn:a> <urn:p> "x" <urn:g> .\n', MANAGED_OXIGRAPH_CANCELLATION_SUFFIX],
+    ['an error answer that reports the native cancellation', 'SELECT ?s WHERE { ?s ?p ?o }', 500, '', MANAGED_OXIGRAPH_CANCELLATION_SUFFIX],
+    ['an answer that is not valid SPARQL JSON', 'SELECT ?s WHERE { ?s ?p ?o }', 200, '', 'this is not json'],
+  ] as const)('treats %s as a finished read', async (_name, sparql, status, first, last) => {
+    const { store, recover, dispatch, abandon } = harness();
+    try {
+      const read = await dispatch(sparql);
+      const answer = respondStreaming(read.fetch, { status, headers: SPARQL_JSON });
+      await vi.advanceTimersByTimeAsync(10);
+      await abandon(read);
+      expect(vi.getTimerCount()).toBe(1);
+
+      answer.finish(first + last);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS * 3);
+      expect(recover).not.toHaveBeenCalled();
+    } finally { await store.close(); }
+  });
+
+  it('reports an answer without a body to a caller that is still waiting for it', async () => {
+    const { store, recover, dispatch } = harness();
+    try {
+      const read = await dispatch();
+      read.fetch.respond(new Response(null, { status: 204 }));
+      // Nothing to decode: the caller gets the decode error, and there is no
+      // abandonment, so nothing is retained or restarted.
+      expect(await read.outcome).toHaveProperty('error');
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS * 3);
+      expect(recover).not.toHaveBeenCalled();
+    } finally { await store.close(); }
+  });
+
+  it('still restarts when the abandoned read answered but its body was cut off by the size limit', async () => {
+    const { store, recover, dispatch, abandon } = harness();
+    try {
+      const read = await dispatch('SELECT ?s WHERE { ?s ?p ?o }', { maxResponseBytes: 8 });
+      let body!: ReadableStreamDefaultController<Uint8Array>;
+      let cancelled = false;
+      read.fetch.respond(new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          body = controller;
+          controller.enqueue(new TextEncoder().encode('abc'));
+        },
+        cancel() { cancelled = true; },
+      }), { headers: SPARQL_JSON }));
+      await vi.advanceTimersByTimeAsync(10);
+      await abandon(read);
+
+      body.enqueue(new TextEncoder().encode('a tail that takes the body over the limit'));
+      await vi.advanceTimersByTimeAsync(0);
+      // The consumer gave up on the body; the server was never seen to finish.
+      expect(cancelled).toBe(true);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS);
+      expect(recover).toHaveBeenCalledExactlyOnceWith('query');
+    } finally { await store.close(); }
+  });
+
   it.each([
     ['SELECT ?s WHERE { ?s ?p ?o }', 'query'],
     ['CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }', 'construct'],
@@ -279,6 +388,100 @@ describe('managed read whose caller aborts after dispatch', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('keeps close pending until the detached request has really settled', async () => {
+    // A transport whose cleanup after an abort takes a while: the fetch records
+    // that it was aborted but only settles when the test lets it.
+    const { store, recover, dispatch, abandon } = harness('managed', TIMEOUT_MS, { holdAbort: true });
+    const read = await dispatch();
+    await abandon(read);
+    // The caller was answered at once, and its request runs on.
+    expect(read.fetch.signal.aborted).toBe(false);
+
+    let closed = false;
+    const closing = store.close().then(() => { closed = true; });
+    await vi.advanceTimersByTimeAsync(0);
+    // Close aborts the detached transport...
+    expect(read.fetch.signal.aborted).toBe(true);
+    // ...but does not report the store closed while that request is unsettled.
+    await vi.advanceTimersByTimeAsync(TIMEOUT_MS * 3);
+    expect(closed).toBe(false);
+
+    read.fetch.release();
+    await closing;
+    expect(closed).toBe(true);
+    // Nothing is left to restart: close withdrew the retained recovery.
+    expect(recover).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('frees the scheduler slot when the caller leaves, as it did before detaching', async () => {
+    // Characterization, not endorsement: this pins the admission behaviour the
+    // change inherits, so altering it is a deliberate decision. Aborting the
+    // fetch used to settle the scheduled operation at once, releasing its slot
+    // while a managed Oxigraph 0.5 kept evaluating; the detached request
+    // settles the operation at the same point, and the second read starts
+    // although the first request has not finished.
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 1,
+      ackReservedSlots: 0,
+      healthReservedSlots: 0,
+      normalReservedSlots: 0,
+      backgroundReservedSlots: 0,
+      queueWaitTimeoutMs: TIMEOUT_MS * 100,
+    });
+    const { store, fetches, dispatch, abandon } = harness('managed', TIMEOUT_MS, { scheduler });
+    try {
+      const first = await dispatch();
+      const secondCaller = new AbortController();
+      const second = store.query('ASK { ?s ?p ?o }', { signal: secondCaller.signal });
+      await vi.advanceTimersByTimeAsync(0);
+      // One slot: the second read waits behind the first.
+      expect(fetches).toHaveLength(1);
+      expect(scheduler.snapshot).toMatchObject({ normalInflight: 1, normalQueued: 1 });
+
+      await abandon(first);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(first.fetch.signal.aborted).toBe(false);
+      expect(fetches).toHaveLength(2);
+      expect(scheduler.snapshot).toMatchObject({ normalInflight: 1, normalQueued: 0 });
+
+      fetches[1]!.respond(okResponse());
+      await expect(second).resolves.toEqual({ type: 'boolean', value: true });
+    } finally { await store.close(); }
+  });
+
+  it('still cancels a read that is queued behind a busy slot without ever dispatching it', async () => {
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 1,
+      ackReservedSlots: 0,
+      healthReservedSlots: 0,
+      normalReservedSlots: 0,
+      backgroundReservedSlots: 0,
+      queueWaitTimeoutMs: TIMEOUT_MS * 100,
+    });
+    const { store, recover, fetches, dispatch } = harness('managed', TIMEOUT_MS, { scheduler });
+    try {
+      const running = await dispatch();
+      const queuedCaller = new AbortController();
+      const reason = new Error('queued caller left');
+      const queued = store.query('ASK { ?s ?p ?o }', { signal: queuedCaller.signal })
+        .then(() => undefined, (error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(scheduler.snapshot).toMatchObject({ normalInflight: 1, normalQueued: 1 });
+
+      queuedCaller.abort(reason);
+      expect(await queued).toBe(reason);
+      // Nothing was sent for it, nothing is owed a restart, and the queue is empty again.
+      expect(fetches).toHaveLength(1);
+      expect(scheduler.snapshot).toMatchObject({ normalInflight: 1, normalQueued: 0 });
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS - 1);
+      expect(recover).not.toHaveBeenCalled();
+
+      running.fetch.respond(okResponse());
+      expect(await running.outcome).toEqual({ value: { type: 'boolean', value: true } });
+    } finally { await store.close(); }
+  });
+
   it('runs a read without any caller signal on the plain path and stops it at close', async () => {
     const { store, recover, fetches } = harness();
     const outcome = store.query('ASK { ?s ?p ?o }').catch((error: unknown) => error);
@@ -314,6 +517,43 @@ describe('managed read whose caller aborts after dispatch', () => {
       expect(await other.outcome).toEqual({ value: { type: 'boolean', value: true } });
       await vi.advanceTimersByTimeAsync(TIMEOUT_MS);
       expect(recover).toHaveBeenCalledExactlyOnceWith('query');
+    } finally { await store.close(); }
+  });
+});
+
+// Every read path states what a caller abort does to its request (the required
+// `SparqlHttpReadPolicy` of postQuery). Ordinary reads detach on a managed store
+// (the tests above); an unmanaged store, a read without a caller signal, and the
+// RFC-64 streaming construct below cancel.
+describe('RFC-64 shared-projection stream whose caller aborts after dispatch', () => {
+  useFakeClock();
+
+  it('cancels the request, unlike an ordinary managed read, and keeps the recovery retained', async () => {
+    // The stream's consumer owns the live body (it spools it) and stops reading
+    // when the caller leaves, so nothing could drain a detached request.
+    const { store, recover, fetches } = harness();
+    const { operation } = createRfc64SharedProjectionTestFixture();
+    const caller = new AbortController();
+    try {
+      const outcome = store.rfc64SharedProjectionStreamV1!(operation, {
+        byteCeiling: 4096,
+        signal: caller.signal,
+      }).then((value) => ({ value }), (error: unknown) => ({ error }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetches).toHaveLength(1);
+      expect(fetches[0]!.signal.aborted).toBe(false);
+
+      const reason = new Error('projection caller left');
+      caller.abort(reason);
+      expect(await outcome).toEqual({ error: reason });
+      expect(fetches[0]!.signal.aborted).toBe(true);
+
+      // Aborting the connection tells the client nothing about Oxigraph having
+      // finished, so the read stays owed a restart at the client deadline.
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS - 1);
+      expect(recover).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(recover).toHaveBeenCalledExactlyOnceWith('construct');
     } finally { await store.close(); }
   });
 });

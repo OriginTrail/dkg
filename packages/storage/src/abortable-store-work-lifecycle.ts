@@ -127,6 +127,46 @@ function createGeneration(): StoreWorkGeneration {
   };
 }
 
+function closedError(generation: StoreWorkGeneration): Error {
+  const reason = generation.controller.signal.reason;
+  return reason instanceof Error ? reason : new Error(String(reason ?? 'Store lifecycle closed'));
+}
+
+/** Put `task` under the generation's drain contract until it settles. */
+function trackInFlight<T>(
+  generation: StoreWorkGeneration,
+  task: Promise<T>,
+  onSettled?: () => void,
+): Promise<T> {
+  generation.inFlight.add(task);
+  void task.finally(() => {
+    generation.inFlight.delete(task);
+    onSettled?.();
+  }).catch(() => undefined);
+  return task;
+}
+
+/**
+ * What an admitted operation is handed besides its (caller + close) signal.
+ *
+ * An operation's caller-facing promise may settle before the work behind it
+ * has stopped, for example a dispatched HTTP request whose caller stopped
+ * waiting. Such work must not escape the lifecycle: it goes through
+ * {@link runDetached}, which keeps it in the generation's drain set until it
+ * has settled, so `close()` aborts it and waits for it.
+ */
+export interface StoreWorkContext {
+  /** The caller's own signal, without the store-close signal. */
+  readonly callerSignal: AbortSignal | undefined;
+  /**
+   * Run `start` as detached work: it is not cancelled by the caller's signal,
+   * only when the store closes (the signal it is given), and `close()` waits
+   * for the returned promise however early the operation's own result settled.
+   * Refused, without starting `start`, once the generation is closing.
+   */
+  runDetached<R>(start: (closeSignal: AbortSignal) => Promise<R>): Promise<R>;
+}
+
 /**
  * Owns admission, cancellation, and draining for reusable store adapters.
  *
@@ -141,36 +181,38 @@ export class AbortableStoreWorkLifecycle {
   private closePromise: Promise<void> | null = null;
 
   /**
-   * `start` receives the caller signal combined with the close signal, plus the
-   * close signal on its own for work that must outlive a caller's cancellation
-   * (an already dispatched request) yet still stop when the store closes.
+   * `start` receives the caller signal combined with the close signal, and a
+   * {@link StoreWorkContext} for work that may outlive the promise it returns.
    */
   run<T>(
     callerSignal: AbortSignal | undefined,
-    start: (signal: AbortSignal | undefined, closeSignal: AbortSignal) => Promise<T>,
+    start: (signal: AbortSignal | undefined, context: StoreWorkContext) => Promise<T>,
   ): Promise<T> {
     const generation = this.generation;
-    if (generation.closing) {
-      const reason = generation.controller.signal.reason;
-      return Promise.reject(
-        reason instanceof Error ? reason : new Error(String(reason ?? 'Store lifecycle closed')),
-      );
-    }
+    if (generation.closing) return Promise.reject(closedError(generation));
 
     const signalScope = composeAbortSignals(callerSignal, generation.controller.signal);
+    const context: StoreWorkContext = {
+      callerSignal,
+      runDetached: <R>(detached: (closeSignal: AbortSignal) => Promise<R>): Promise<R> => {
+        if (generation.closing) return Promise.reject(closedError(generation));
+        let work: Promise<R>;
+        try {
+          work = detached(generation.controller.signal);
+        } catch (error) {
+          work = Promise.reject(error);
+        }
+        return trackInFlight(generation, work);
+      },
+    };
     let task: Promise<T>;
     try {
-      task = start(signalScope.signal, generation.controller.signal);
+      task = start(signalScope.signal, context);
     } catch (error) {
       signalScope.dispose();
       throw error;
     }
-    generation.inFlight.add(task);
-    void task.finally(() => {
-      generation.inFlight.delete(task);
-      signalScope.dispose();
-    }).catch(() => undefined);
-    return task;
+    return trackInFlight(generation, task, signalScope.dispose);
   }
 
   close(reason: Error): Promise<void> {

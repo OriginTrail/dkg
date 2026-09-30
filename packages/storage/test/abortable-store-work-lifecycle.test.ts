@@ -3,6 +3,7 @@ import {
   AbortableStoreWorkLifecycle,
   composeAbortSignals,
   raceStoreWorkAgainstAbort,
+  type StoreWorkContext,
 } from '../src/abortable-store-work-lifecycle.js';
 
 function abortCalls(spy: ReturnType<typeof vi.spyOn>): number {
@@ -185,27 +186,118 @@ describe('AbortableStoreWorkLifecycle signal ownership', () => {
     expect(abortCalls(callerRemove)).toBe(1);
   });
 
-  it('hands work the close signal on its own, unaffected by the caller signal', async () => {
-    const caller = new AbortController();
-    const lifecycle = new AbortableStoreWorkLifecycle();
-    let combined: AbortSignal | undefined;
-    let closeSignal!: AbortSignal;
-    let finish!: () => void;
-    const running = lifecycle.run(caller.signal, (signal, close) => {
-      combined = signal;
-      closeSignal = close;
-      return new Promise<void>((resolve) => { finish = resolve; });
+  // The raw close signal that `run()` used to hand to its callback is gone on
+  // purpose: work that has to outlive its caller-facing promise now goes
+  // through `context.runDetached`, which keeps it in the drain set. These tests
+  // replace the one that asserted the raw close signal.
+  describe('detached work', () => {
+    /** A detached job that only stops when told to, and settles when released. */
+    function slowDetached() {
+      let release!: () => void;
+      let closeSignal!: AbortSignal;
+      const started = vi.fn();
+      const start = (signal: AbortSignal) => {
+        started();
+        closeSignal = signal;
+        return new Promise<string>((resolve) => { release = () => resolve('done'); });
+      };
+      return { start, started, release: () => release(), signal: () => closeSignal };
+    }
+
+    it('is not cancelled by the caller, and is aborted by close', async () => {
+      const caller = new AbortController();
+      const lifecycle = new AbortableStoreWorkLifecycle();
+      const job = slowDetached();
+      let context!: StoreWorkContext;
+      let combined: AbortSignal | undefined;
+      let finishOperation!: () => void;
+      const operation = lifecycle.run(caller.signal, (signal, ctx) => {
+        combined = signal;
+        context = ctx;
+        return new Promise<string>((resolve) => { finishOperation = () => resolve('caller-facing'); });
+      });
+      expect(context.callerSignal).toBe(caller.signal);
+
+      const detached = context.runDetached(job.start);
+      caller.abort(new Error('caller left'));
+      // The operation's own signal follows its caller; the detached work does not.
+      expect(combined?.aborted).toBe(true);
+      expect(job.signal().aborted).toBe(false);
+      finishOperation();
+      await expect(operation).resolves.toBe('caller-facing');
+      expect(job.signal().aborted).toBe(false);
+
+      const closing = lifecycle.close(new Error('store closed'));
+      expect(job.signal().aborted).toBe(true);
+      expect((job.signal().reason as Error).message).toBe('store closed');
+      job.release();
+      await expect(detached).resolves.toBe('done');
+      await closing;
     });
 
-    caller.abort(new Error('caller left'));
-    expect(combined?.aborted).toBe(true);
-    expect(closeSignal.aborted).toBe(false);
+    it('keeps close pending until the detached work settles, though the operation already did', async () => {
+      const lifecycle = new AbortableStoreWorkLifecycle();
+      const job = slowDetached();
+      let context!: StoreWorkContext;
+      await lifecycle.run(undefined, (_signal, ctx) => {
+        context = ctx;
+        return Promise.resolve();
+      });
+      void context.runDetached(job.start);
 
-    const closing = lifecycle.close(new Error('store closed'));
-    expect(closeSignal.aborted).toBe(true);
-    expect((closeSignal.reason as Error).message).toBe('store closed');
-    finish();
-    await running;
-    await closing;
+      let closed = false;
+      const closing = lifecycle.close(new Error('store closed')).then(() => { closed = true; });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(job.signal().aborted).toBe(true);
+      expect(closed).toBe(false);
+
+      job.release();
+      await closing;
+      expect(closed).toBe(true);
+    });
+
+    it('drops finished and failed detached work from the drain set', async () => {
+      const lifecycle = new AbortableStoreWorkLifecycle();
+      let context!: StoreWorkContext;
+      await lifecycle.run(undefined, (_signal, ctx) => {
+        context = ctx;
+        return Promise.resolve();
+      });
+      await expect(context.runDetached(async () => 'ok')).resolves.toBe('ok');
+      await expect(context.runDetached(async () => { throw new Error('boom'); })).rejects.toThrow('boom');
+      // A synchronous throw is the same failure, delivered as a rejection.
+      await expect(context.runDetached(() => { throw new Error('sync boom'); })).rejects.toThrow('sync boom');
+
+      // Nothing is left to wait for.
+      await lifecycle.close(new Error('store closed'));
+    });
+
+    it('is refused, without starting, once the lifecycle is closing', async () => {
+      const lifecycle = new AbortableStoreWorkLifecycle();
+      const job = slowDetached();
+      let context!: StoreWorkContext;
+      let finishOperation!: () => void;
+      const operation = lifecycle.run(undefined, (_signal, ctx) => {
+        context = ctx;
+        return new Promise<void>((resolve) => { finishOperation = resolve; });
+      });
+      const closing = lifecycle.close(new Error('store closed'));
+      await expect(context.runDetached(job.start)).rejects.toThrow('store closed');
+      expect(job.started).not.toHaveBeenCalled();
+      finishOperation();
+      await operation;
+      await closing;
+    });
+
+    it('names a non-Error close reason when refusing', async () => {
+      const lifecycle = new AbortableStoreWorkLifecycle();
+      let context!: StoreWorkContext;
+      await lifecycle.run(undefined, (_signal, ctx) => {
+        context = ctx;
+        return Promise.resolve();
+      });
+      await lifecycle.close('plain string reason' as unknown as Error);
+      await expect(context.runDetached(async () => 'late')).rejects.toThrow('plain string reason');
+    });
   });
 });
