@@ -12,6 +12,14 @@ import {
 import { OxigraphWorkerStore } from '../src/adapters/oxigraph-worker.js';
 
 describe('worker error protocol', () => {
+  it('serializes thrown non-Error values through the generic variant', () => {
+    expect(serializeWorkerErrorV1('plain worker failure')).toEqual({
+      kind: 'generic',
+      name: 'Error',
+      message: 'plain worker failure',
+    });
+  });
+
   it('round-trips generic error metadata without reconstructing feature errors', () => {
     const source = new Error('worker failed') as Error & { code?: string };
     source.name = 'UnrelatedWorkerError';

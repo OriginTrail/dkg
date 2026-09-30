@@ -30,6 +30,7 @@ import {
   emptyBindings,
   q,
 } from './graph-set-index-store-harness.js';
+import { ATOMIC_GRAPH_REPLACE_STAGING_PREFIX } from '../src/atomic-graph-replace.js';
 
 class FailingMaintenanceStore extends CountingStore {
   failHasGraph = false;
@@ -295,6 +296,21 @@ describe('GraphSetIndexStore', () => {
 
       const cold = new GraphSetIndexStore(inner);
       await expect(cold.listGraphsByPrefix(target, { maxResponseBytes: 256 }))
+        .rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE' });
+    } finally {
+      await inner.close();
+    }
+  });
+
+  it('bounds and filters sorted catalogs when the in-memory index is disabled', async () => {
+    const inner = new OxigraphStore();
+    const visible = 'did:dkg:context-graph:visible';
+    const staging = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}orphan`;
+    await inner.insert([q(visible), q(staging)]);
+    try {
+      const store = new GraphSetIndexStore(inner, { enabled: false });
+      await expect(store.listGraphsSorted()).resolves.toEqual([visible]);
+      await expect(store.listGraphsSorted({ maxResponseBytes: 2 }))
         .rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE' });
     } finally {
       await inner.close();
