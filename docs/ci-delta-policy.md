@@ -52,8 +52,11 @@ only; nothing from the candidate is executed); any read or parse failure keeps
 full CI. Its routing tables live in
 `scripts/lib/ci-routing.mjs`, next to the planner in `scripts/lib/ci-delta.mjs`, and are covered by table/snapshot-style tests in
 `scripts/lib/__tests__/`: `ci-delta.test.mjs` (planner policy),
-`ci-delta-routing.test.mjs` (path routing), `ci-controller.test.mjs` (trusted
-controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
+`ci-delta-routing.test.mjs` (path routing and the load-closure guard),
+`ci-execution-routing.test.mjs` and `ci-install-routing.test.mjs` (the guard
+on planted workflows, runs and install hooks, sharing `load-closure.mjs`),
+`ci-controller.test.mjs` (trusted controller and workflow wiring) and
+`ci-results.test.mjs` (aggregate gates).
 
 ## Reliability controls
 
@@ -87,9 +90,11 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   package workspace code, whose imports are traced from its own workspace's
   lanes; a file a lane only reads is required, but its imports are not. A
   file a runner runs that no reading resolves (a wrapper's parameter, a
-  computed argument list), or a program no reading identifies (a
-  parameter, a property, the environment) where no literal names a tool,
-  fails the test until it is listed with a reason. It also fails on a module load it cannot follow, one whose specifier
+  computed argument list), a program no reading identifies (a parameter, a
+  property, the environment) where no literal names a tool, or a runner
+  handed to other code (an argument, an object, a default) other than as a
+  const alias or `promisify` of it fails the test until it is listed with a
+  reason. It also fails on a module load it cannot follow, one whose specifier
   is computed at run time, a script path assembled at run time, or a file a
   shell command runs that is picked at run time (a script runner's operand
   or a program path that expands a variable past its directory, such as
@@ -265,6 +270,7 @@ and test variance still affect elapsed time.
 # The pin provenance test reads both protected branches.
 git fetch origin testnet-canary main
 node --test scripts/lib/__tests__/ci-delta.test.mjs scripts/lib/__tests__/ci-delta-routing.test.mjs \
+  scripts/lib/__tests__/ci-execution-routing.test.mjs scripts/lib/__tests__/ci-install-routing.test.mjs \
   scripts/lib/__tests__/ci-controller.test.mjs scripts/lib/__tests__/ci-results.test.mjs
 actionlint .github/workflows/ci.yml .github/workflows/evm-integration.yml
 ```

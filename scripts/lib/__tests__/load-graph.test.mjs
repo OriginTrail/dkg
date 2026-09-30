@@ -250,6 +250,22 @@ test('a module runs what its imported runners name, and reports an operand no re
   }
 });
 
+test('a source file runs what a promisified runner names, and reports a runner it lets escape', () => {
+  // Not a test file, so only the run analysis names these: a
+  // promisify(execFile) alias - through a type assertion too - runs its
+  // target; a runner passed to other code, put in an object or given as a
+  // default may be called with anything, so it is reported; a test's
+  // expect(spawn) only inspects it.
+  const file = 'packages/cli/src/example-runner.ts';
+  const header = "import { execFile, spawn } from 'node:child_process';\nimport { promisify } from 'node:util';\nimport { join } from 'node:path';\n";
+  const references = (source) => loadReferences(file, header + source);
+  const aliased = references("const run = promisify(execFile) as Runner;\nawait run(process.execPath, [join(root, 'scripts', 'sync-chain-abis.mjs')]);");
+  assert.deepEqual([aliased.runs, aliased.assembled], [['scripts/sync-chain-abis.mjs'], []]);
+  assert.deepEqual(references("await promisify(execFile)('git', ['status']);\nexpect(spawn).toHaveBeenCalled();").assembled, []);
+  const escaped = references('export const io = { execFile };\nawait withRetry(execFile);\nexport function start({ spawnProcess = spawn } = {}) { return spawnProcess; }');
+  assert.deepEqual(escaped.assembled, ['execFile', 'withRetry(execFile)', 'spawnProcess = spawn']);
+});
+
 test('a fixture context is its files alone, manifests and directories included', () => {
   // Sources, files, directories, workspaces (pnpm-workspace.yaml) and the
   // root manifest all come from the one file map: a fixture shell script

@@ -211,7 +211,7 @@ const NO_MANIFESTS = Object.freeze({ manifests: new Map(), workspaceByName: new 
 // fixtureContext).
 function analyzeModule(file, code, context) {
   if (!/\b(?:import|require)\s*\(|scripts|\b(?:join|resolve)\s*\(|__dirname|import\.meta|child_process|worker_threads|execa/.test(code)) return NO_ANALYSIS;
-  const tree = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, false, scriptKind(file));
+  const tree = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, true, scriptKind(file));
   const directory = path.posix.dirname(file);
   const helpers = new Set(['join', 'resolve']);
   const pathModules = new Set(['path', 'posix', 'path.posix', 'path.win32']);
@@ -355,13 +355,73 @@ function analyzeModule(file, code, context) {
   };
   // How a call runs a file (RUNNER_MODULES), when its callee is an imported
   // runner or a runner module's member.
-  const runnerOf = (node) => {
-    if (!ts.isCallExpression(node) && !ts.isNewExpression(node)) return undefined;
-    const callee = node.expression;
-    if (ts.isIdentifier(callee)) return runnerNames.get(callee.text);
-    if (!ts.isPropertyAccessExpression(callee)) return undefined;
-    const kinds = ts.isIdentifier(callee.expression) ? runnerModules.get(callee.expression.text) : requiredModule(callee.expression);
-    return kinds?.[callee.name.text];
+  // The runner an expression names: an imported runner, a runner module's
+  // member, or an alias of one.
+  // An expression without its type assertions, parentheses and `!`.
+  const unwrap = (node) => (ts.isAsExpression(node) || ts.isTypeAssertionExpression(node) || ts.isParenthesizedExpression(node)
+    || ts.isNonNullExpression(node) || ts.isSatisfiesExpression(node) ? unwrap(node.expression) : node);
+  const runnerNamed = (expression) => {
+    const node = unwrap(expression);
+    if (ts.isIdentifier(node)) return runnerNames.get(node.text);
+    if (ts.isCallExpression(node)) return aliasedRunner(node);
+    if (!ts.isPropertyAccessExpression(node)) return undefined;
+    const kinds = ts.isIdentifier(node.expression) ? runnerModules.get(node.expression.text) : requiredModule(node.expression);
+    return kinds?.[node.name.text];
+  };
+  // An alias keeps its runner: a sole const bound to a runner, to
+  // promisify(runner) or to runner.bind(thisValue) calls the same way.
+  const aliasedRunner = (value) => {
+    if (value === undefined) return undefined;
+    const initializer = unwrap(value);
+    if (!ts.isCallExpression(initializer)) return runnerNamed(initializer);
+    const { expression, arguments: args } = initializer;
+    const promisify = (ts.isIdentifier(expression) && expression.text === 'promisify')
+      || (ts.isPropertyAccessExpression(expression) && expression.name.text === 'promisify');
+    if (promisify && args.length === 1) return runnerNamed(args[0]);
+    const binds = ts.isPropertyAccessExpression(expression) && expression.name.text === 'bind' && args.length <= 1;
+    return binds ? runnerNamed(expression.expression) : undefined;
+  };
+  for (let size = -1; size !== runnerNames.size;) {
+    size = runnerNames.size;
+    for (const [name, initializer] of constInitializers) {
+      const kind = bindingCounts.get(name) === 1 && !runnerNames.has(name) ? aliasedRunner(initializer) : undefined;
+      if (kind !== undefined) runnerNames.set(name, kind);
+    }
+  }
+  const runnerOf = (node) => (ts.isCallExpression(node) || ts.isNewExpression(node) ? runnerNamed(node.expression) : undefined);
+  // Whether a reference to a runner (`node`) only calls it, aliases it,
+  // names it (a declaration, a property) or types it: anywhere else - an
+  // argument, an object, a default - it escapes into code that may call it
+  // with anything, so the run analysis reports it.
+  const INSPECTORS = new Set(['expect', 'vi.mocked', 'jest.mocked']);
+  const staysKnown = (reference) => {
+    // Step out through type assertions and parentheses.
+    let node = reference;
+    while (node.parent && unwrap(node.parent) !== node.parent && unwrap(node.parent) === unwrap(node)) node = node.parent;
+    const { parent } = node;
+    if ((ts.isCallExpression(parent) || ts.isNewExpression(parent)) && parent.expression === node) return true;
+    // A test's expect(spawn) or vi.mocked(spawn) inspects a mock and runs nothing.
+    if (ts.isCallExpression(parent) && parent.arguments.length === 1 && parent.arguments[0] === node
+      && INSPECTORS.has(parent.expression.getText(tree))) return true;
+    if (ts.isPropertyAccessExpression(parent) && parent.name === node) return true;
+    if ((ts.isPropertyAssignment(parent) || ts.isVariableDeclaration(parent) || ts.isParameter(parent) || ts.isBindingElement(parent)
+      || ts.isPropertyDeclaration(parent) || ts.isPropertySignature(parent) || ts.isMethodDeclaration(parent)) && parent.name === node) return true;
+    if (ts.isBindingElement(parent) && parent.propertyName === node) return true;
+    if (ts.isImportSpecifier(parent) || ts.isImportClause(parent) || ts.isNamespaceImport(parent)) return true;
+    for (let ancestor = parent; ancestor; ancestor = ancestor.parent) {
+      if (ts.isTypeNode(ancestor) || ts.isTypeQueryNode(ancestor)) return true;
+      if (ts.isExpressionStatement(ancestor) || ts.isBlock(ancestor) || ts.isSourceFile(ancestor)) break;
+    }
+    // Aliases: const run = spawn, promisify(spawn), spawn.bind(null) - bound
+    // to a const the analysis follows, or called on the spot.
+    let alias = node;
+    if (ts.isCallExpression(parent) && parent.arguments.includes(node)) alias = parent;
+    else if (ts.isPropertyAccessExpression(parent) && parent.expression === node && parent.name.text === 'bind') alias = parent.parent;
+    if (alias !== node && aliasedRunner(alias) === undefined) return false;
+    while (alias.parent && unwrap(alias.parent) === unwrap(alias) && alias.parent !== alias) alias = alias.parent;
+    const holder = alias.parent;
+    if (alias !== node && (ts.isCallExpression(holder) || ts.isNewExpression(holder)) && holder.expression === alias) return true;
+    return ts.isVariableDeclaration(holder) && holder.initializer === alias && ts.isIdentifier(holder.name) && runnerNames.has(holder.name.text);
   };
   // The program a spawn-like call runs, when process.execPath (node), a
   // literal or a path built from a known directory names it
@@ -459,6 +519,12 @@ function analyzeModule(file, code, context) {
       const { paths, unresolved } = runsOf(runner, node.arguments ?? []);
       analysis.runPaths.push(...paths);
       analysis.unresolvedRuns.push(...unresolved);
+    }
+    const reference = (ts.isIdentifier(node) && runnerNames.has(node.text))
+      || (ts.isPropertyAccessExpression(node) && runnerNamed(node) !== undefined && !ts.isIdentifier(node.parent));
+    if (reference && !(ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node && runnerNamed(node.parent) === undefined && node.parent.name.text !== 'bind')
+      && !staysKnown(node)) {
+      analysis.unresolvedRuns.push(node.parent.getText(tree).replace(/\s+/g, ' '));
     }
     if (isLiteral(node) || node.kind === ts.SyntaxKind.TemplateHead || node.kind === ts.SyntaxKind.TemplateMiddle
       || node.kind === ts.SyntaxKind.TemplateTail) {
