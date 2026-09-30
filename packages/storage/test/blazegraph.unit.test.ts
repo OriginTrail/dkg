@@ -197,6 +197,25 @@ describe('BlazegraphStore (mocked HTTP)', () => {
       .rejects.toThrow('release failed (503)');
   });
 
+  it('preserves the read failure when release and diagnostic logging also fail', async () => {
+    setFetch(async (input) => String(input).endsWith('/tx?timestamp=-1')
+      ? new Response('<tx txId="126" readOnly="true"/>', { status: 201 })
+      : new Response(null, { status: 503 }));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {
+      throw new Error('logger failed');
+    });
+    try {
+      const store = new BlazegraphStore(baseUrl);
+      await expect(store.withReadSnapshot(async () => {
+        throw new Error('read failed');
+      })).rejects.toThrow('read failed');
+      expect(String(fetchCalls.at(-1)?.[0])).toBe('http://blaze.test/tx/126?ABORT');
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('insert POSTs N-Quads with correct content type', async () => {
     setFetch(async () => new Response(null, { status: 200 }));
     const s = new BlazegraphStore(baseUrl);
