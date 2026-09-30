@@ -299,38 +299,73 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
 // ci-delta-routing.test.mjs follows every relative reference from the files
 // each lane runs and fails when a file it reaches does not select that lane.
 // What pnpm install runs in every job, inside the package workspaces: the one
-// table both the planner and the load-closure test read. `path` is a file
-// whose change needs full CI, as a change to an install hook does. An entry
-// with `reader` and `name` is a file an install script reads through a
-// directory it builds at run time (`reader` reads `name` from it): the file
-// that reaches (`path`), or the reason the read needs no full CI (`exempt`).
-// The test checks the install scripts read exactly what this table says.
+// table the planner and the load-closure test both read, as explicit
+// variants that installDependency builds and checks:
+// - entrypoint(path): a file an install hook runs or loads;
+// - repositoryRead(reader, name, path): a file `reader` reads as `name` from
+//   a directory it builds at run time, which is the repository's `path`;
+// - exemption(reader, name, reason): such a read that names no repository
+//   input, and why.
+// The planner reads only INSTALL_HOOK_INPUTS, the entrypoints' and repository
+// reads' paths: a change to one needs full CI, as a change to an install hook
+// does. The routing test checks the install scripts read exactly what the
+// reads and exemptions say.
+const nonEmpty = (value, field) => {
+  if (typeof value !== 'string' || value === '') throw new Error(`an install dependency needs a ${field}`);
+  return value;
+};
+export const installDependency = Object.freeze({
+  entrypoint: (path) => Object.freeze({ kind: 'entrypoint', path: nonEmpty(path, 'path') }),
+  repositoryRead: (reader, name, path) => Object.freeze({
+    kind: 'repositoryRead', reader: nonEmpty(reader, 'reader'), name: nonEmpty(name, 'name'), path: nonEmpty(path, 'path'),
+  }),
+  exemption: (reader, name, reason) => Object.freeze({
+    kind: 'exemption', reader: nonEmpty(reader, 'reader'), name: nonEmpty(name, 'name'), reason: nonEmpty(reason, 'reason'),
+  }),
+});
+const { entrypoint, repositoryRead, exemption } = installDependency;
 const MARKITDOWN_BUNDLER = 'packages/cli/scripts/bundle-markitdown-binaries.mjs';
 export const INSTALL_HOOK_DEPENDENCIES = Object.freeze([
   // The root and CLI preinstall, the CLI postinstall, and what they load.
-  { path: 'packages/cli/scripts/verify-node-sqlite-runtime.mjs' },
-  { path: MARKITDOWN_BUNDLER },
-  { path: 'packages/cli/scripts/markitdown-bundle-validation.mjs' },
-  { path: 'packages/cli/markitdown-build-info.json' },
+  entrypoint('packages/cli/scripts/verify-node-sqlite-runtime.mjs'),
+  entrypoint(MARKITDOWN_BUNDLER),
+  entrypoint('packages/cli/scripts/markitdown-bundle-validation.mjs'),
+  entrypoint('packages/cli/markitdown-build-info.json'),
   // What they read from directories they build at run time.
-  { reader: MARKITDOWN_BUNDLER, name: 'markitdown-targets.json', path: 'packages/cli/markitdown-targets.json' },
-  { reader: MARKITDOWN_BUNDLER, name: 'scripts/markitdown-entry.py', path: 'packages/cli/scripts/markitdown-entry.py' },
-  { reader: MARKITDOWN_BUNDLER, name: 'project.json', path: 'project.json' },
-  {
-    reader: MARKITDOWN_BUNDLER,
-    name: 'package.json',
-    exempt: "the CLI's version, which names the release binary an installed package downloads; the manifest fields an install reads (install hooks, dependencies, engines) already route to full CI",
-  },
-  { reader: MARKITDOWN_BUNDLER, name: 'tsconfig.json', exempt: 'an existence probe that tells a workspace checkout from an installed package' },
-  { reader: MARKITDOWN_BUNDLER, name: 'Scripts/python.exe', exempt: 'the Python virtual environment a source build creates, outside the repository' },
-  {
-    reader: 'packages/cli/scripts/verify-node-sqlite-runtime.mjs',
-    name: '../package.json',
-    exempt: "the CLI's engines.node range; an engines change already routes to full CI",
-  },
+  repositoryRead(MARKITDOWN_BUNDLER, 'markitdown-targets.json', 'packages/cli/markitdown-targets.json'),
+  repositoryRead(MARKITDOWN_BUNDLER, 'scripts/markitdown-entry.py', 'packages/cli/scripts/markitdown-entry.py'),
+  repositoryRead(MARKITDOWN_BUNDLER, 'project.json', 'project.json'),
+  // The postinstall skips the release download only in a workspace checkout,
+  // which it tells by the CLI's tsconfig.json and src/ (isWorkspaceCheckout):
+  // without either, every job's install downloads a binary for its platform.
+  // Emptying or moving src/ changes more files than the planner's large-PR
+  // limit, which plans full CI; the routing test pins that.
+  repositoryRead(MARKITDOWN_BUNDLER, 'tsconfig.json', 'packages/cli/tsconfig.json'),
+  exemption(
+    MARKITDOWN_BUNDLER,
+    'package.json',
+    "the CLI's version, which names the release binary an installed package downloads; the manifest fields an install reads (install hooks, dependencies, engines) already route to full CI",
+  ),
+  exemption(MARKITDOWN_BUNDLER, 'Scripts/python.exe', 'the Python virtual environment a source build creates, outside the repository'),
+  exemption('packages/cli/scripts/verify-node-sqlite-runtime.mjs', '../package.json', "the CLI's engines.node range; an engines change already routes to full CI"),
 ]);
-// The files whose change needs full CI because an install runs or reads them.
-export const INSTALL_HOOK_INPUTS = Object.freeze([...new Set(INSTALL_HOOK_DEPENDENCIES.flatMap(({ path: file }) => (file ? [file] : [])))]);
+// The files whose change needs full CI because an install runs or reads them:
+// the entrypoints' and repository reads' paths. A dependency of another kind
+// throws, so the planner never skips one.
+export function installHookInputs(dependencies) {
+  return Object.freeze([...new Set(dependencies.flatMap((dependency) => {
+    switch (dependency.kind) {
+      case 'entrypoint':
+      case 'repositoryRead':
+        return [dependency.path];
+      case 'exemption':
+        return [];
+      default:
+        throw new Error(`unknown install dependency: ${JSON.stringify(dependency)}`);
+    }
+  }))]);
+}
+export const INSTALL_HOOK_INPUTS = installHookInputs(INSTALL_HOOK_DEPENDENCIES);
 
 export const PATH_TRIGGERS = Object.freeze([
   {

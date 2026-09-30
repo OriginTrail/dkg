@@ -1,5 +1,5 @@
 import { createServer } from 'node:http';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -9,6 +9,7 @@ import {
   downloadBinaryAsset,
   ensureCurrentPlatformBinary,
   getSupportedTarget,
+  isWorkspaceCheckout,
   metadataPathFor,
   parseSha256File,
   pyInstallerNameForTarget,
@@ -434,6 +435,26 @@ describe('bundle-markitdown-binaries helpers', () => {
     expect(pkg.files).toContain('markitdown-build-info.json');
     expect(pkg.files).toContain('markitdown-targets.json');
     expect(pkg.files).toContain('scripts');
+  });
+
+  it('tells a workspace checkout by src/ and tsconfig.json, which the published package leaves out', async () => {
+    // The postinstall skips the release download only in a workspace
+    // checkout, so removing or renaming either probe makes every install
+    // download a binary; the CI planner routes such a change to full CI.
+    const pkgDir = await mkdtemp(join(tmpdir(), 'dkg-markitdown-checkout-'));
+    tmpPaths.push(pkgDir);
+    await mkdir(join(pkgDir, 'src'));
+    await writeFile(join(pkgDir, 'tsconfig.json'), '{}\n');
+    expect(isWorkspaceCheckout(pkgDir)).toBe(true);
+    await rm(join(pkgDir, 'tsconfig.json'));
+    expect(isWorkspaceCheckout(pkgDir)).toBe(false);
+    await writeFile(join(pkgDir, 'tsconfig.json'), '{}\n');
+    await rm(join(pkgDir, 'src'), { recursive: true });
+    expect(isWorkspaceCheckout(pkgDir)).toBe(false);
+
+    const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf-8')) as { files?: string[] };
+    expect(pkg.files).not.toContain('src');
+    expect(pkg.files).not.toContain('tsconfig.json');
   });
 
   it('keeps MarkItDown target metadata packaged for manual releases', async () => {

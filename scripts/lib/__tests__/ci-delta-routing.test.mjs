@@ -23,7 +23,7 @@ import {
   sourceFiles,
   succeeded,
 } from './ci-plan-fixtures.mjs';
-import { INSTALL_HOOK_DEPENDENCIES, INSTALL_HOOK_INPUTS } from '../ci-routing.mjs';
+import { INSTALL_HOOK_DEPENDENCIES, INSTALL_HOOK_INPUTS, installDependency, installHookInputs } from '../ci-routing.mjs';
 import { PROGRAM_CHILD_COMMANDS, workflowExecution } from './ci-execution-graph.mjs';
 import { SUBCOMMAND_CHILD_COMMANDS } from '../../release-packages.mjs';
 import { BROWSER_SUITE_DEFERRED, jobLane, jobRequirement, laneExecution, laneSeeds, requirement, requirementCoveredByPlan } from './lane-entrypoints.mjs';
@@ -438,11 +438,12 @@ function loadClosureGaps({ loaded, unfollowed }, { plan = (file) => pullRequestP
 }
 
 // The reads install code makes from directories it builds at run time, as
-// INSTALL_HOOK_DEPENDENCIES declares them: `${reader}: ${name}` -> the file
-// each reaches (none for an exempt read) and the exemption's reason.
+// INSTALL_HOOK_DEPENDENCIES declares them (its repositoryRead and exemption
+// variants): `${reader}: ${name}` -> the file each reaches (none for an
+// exemption) and the exemption's reason.
 const INSTALL_HOOK_READS = new Map(INSTALL_HOOK_DEPENDENCIES
-  .filter(({ reader }) => reader)
-  .map(({ reader, name, path: file, exempt }) => [`${reader}: ${name}`, { name, reads: file ? [file] : [], reason: exempt }]));
+  .filter(({ kind }) => kind === 'repositoryRead' || kind === 'exemption')
+  .map(({ kind, reader, name, path: file, reason }) => [`${reader}: ${name}`, kind === 'exemption' ? { name, reads: [], reason } : { name, reads: [file] }]));
 
 // What the guard reports about those reads, from a trace's `unresolvedReads`
 // in files with the `install` requirement: ones `declared` does not list,
@@ -678,6 +679,45 @@ test('the load-closure guard holds install hooks to full CI and builds to their 
   const viz = { loaded: new Map([[graphViz, new Map([[output, copier]])]]), unfollowed: new Map() };
   assert.deepEqual(loadClosureGaps(viz).missing, []);
   assert.deepEqual(loadClosureGaps(viz, { plan: withoutBrowser }).missing, [`${output} loads ${graphViz} via ${copier}`]);
+});
+
+test('install dependencies are explicit variants, and only their repository paths reach the planner', () => {
+  // Each constructor checks its fields, so a record cannot be ambiguous or
+  // incomplete; the planner's full-CI inputs are the entrypoints' and
+  // repository reads' paths, never an exemption's.
+  const reader = 'packages/cli/scripts/bundle-markitdown-binaries.mjs';
+  assert.throws(() => installDependency.entrypoint(undefined), /needs a path/);
+  assert.throws(() => installDependency.repositoryRead(reader, 'targets.json'), /needs a path/);
+  assert.throws(() => installDependency.exemption(reader, 'targets.json', ''), /needs a reason/);
+  assert.deepEqual(installDependency.repositoryRead(reader, 'targets.json', 'packages/cli/targets.json'), {
+    kind: 'repositoryRead', reader, name: 'targets.json', path: 'packages/cli/targets.json',
+  });
+  assert.deepEqual(installHookInputs([installDependency.entrypoint('a.mjs'), installDependency.exemption(reader, 'b.json', 'why')]), ['a.mjs']);
+  assert.throws(() => installHookInputs([{ kind: 'repositoryReed', reader, name: 'targets.json', path: 'packages/cli/targets.json' }]), /unknown install dependency/);
+  assert.deepEqual([...new Set(INSTALL_HOOK_DEPENDENCIES.map(({ kind }) => kind))].sort(), ['entrypoint', 'exemption', 'repositoryRead']);
+  for (const dependency of INSTALL_HOOK_DEPENDENCIES) {
+    assert.ok(Object.isFrozen(dependency));
+    assert.equal(INSTALL_HOOK_INPUTS.includes(dependency.path), dependency.kind !== 'exemption', JSON.stringify(dependency));
+  }
+});
+
+test('what tells the install hook it runs in a workspace checkout plans full CI', () => {
+  // The CLI postinstall skips the release download only when the CLI has its
+  // src/ and tsconfig.json (isWorkspaceCheckout, which the CLI's
+  // markitdown-binaries test pins): deleting or moving either would make
+  // every job's install download a binary for its platform. tsconfig.json
+  // is an install input; src/ holds more files than the large-PR limit, so
+  // emptying or moving it plans full CI too, while one deleted source file
+  // is an ordinary CLI change.
+  const tsconfig = 'packages/cli/tsconfig.json';
+  for (const entry of [change(tsconfig, 'D'), { status: 'R100', paths: [tsconfig, 'packages/cli/tsconfig.base.json'] }, change(tsconfig)]) {
+    assert.equal(pullRequestPlan([entry]).mode, 'full', JSON.stringify(entry));
+  }
+  const cliSource = sourceFiles('packages/cli/src');
+  assert.equal(pullRequestPlan(cliSource.map((file) => change(file, 'D'))).mode, 'full');
+  const moved = cliSource.map((file) => ({ status: 'R100', paths: [file, file.replace(/^packages\/cli\/src\//, 'packages/cli/source/')] }));
+  assert.equal(pullRequestPlan(moved).mode, 'full');
+  assert.notEqual(pullRequestPlan([change(cliSource[0], 'D')]).mode, 'full');
 });
 
 test('a package-local helper a workspace build runs is traced with that build output', () => {
