@@ -193,11 +193,17 @@ together, and the mechanics under them are not:
   `wire.ts` keeps a copy tied to the type.
 - **Daemon helpers** (`daemon.ts`). The reads, posts and polls the scenarios use,
   built on an injected transport (the harness's by default). A reply of the wrong
-  shape is a failure, never "not yet": `checked()` adds the node to the validator's
-  error without changing its type, and every retry or poll lets that error through
-  (only a rejected request or a non-200 status is retried). `daemon.test.ts` proves
-  it without a devnet, including that a malformed forced-subscribe reply rejects
-  the SWM scenario's recovery instead of being swallowed.
+  shape is a failure, never "not yet", and that is a matter of where a failure is
+  caught, not of what is thrown: every retry or poll catches around the request
+  only (`tryRequest`: a rejected request comes back as a value, and a non-200 status
+  is read by the caller), and validates the reply outside that catch (`checked()`,
+  which adds the node to the validator's error and keeps a `WireShapeError` a
+  `WireShapeError`). Only a rejected request or a non-200 status is retried, in the
+  content polls, the subscribe retry and the SWM recovery; whatever a validator throws,
+  of any class, rejects the wait. `daemon.test.ts` proves it without a devnet for each
+  of those loops, with validators that throw a plain `Error`, a `TypeError` and a
+  `RangeError`, including that a malformed forced-subscribe reply rejects the SWM
+  scenario's recovery instead of being swallowed.
 
   The same holds for "no job". A catch-up lookup by graph id answers "no job" only
   with the route's own 404 (`{ error: "No catch-up job found" }`, matched by status

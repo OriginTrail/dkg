@@ -1,8 +1,9 @@
 /**
  * The suite's daemon helpers, proven without a devnet through an injected
- * transport: how a reply is checked, which failures a poll may retry, and that a
- * reply of the wrong shape rejects a recovery instead of being swallowed as "not
- * yet".
+ * transport: how a reply is checked, which failures a poll may retry (a rejected
+ * request, a non-200), and that a reply the validator rejects, whatever the class of
+ * what it throws, rejects a recovery, a subscribe or a poll instead of being swallowed
+ * as "not yet".
  *
  * The transport is scripted per path (a reply, or an error to throw, per call; the
  * last entry repeats). The poller is fake too, so nothing sleeps: it probes up to a
@@ -11,11 +12,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DevnetNode } from '../_bootstrap/harness.js';
 import {
-  attemptOnce,
   checked,
   createDaemon,
-  isTransientFailure,
-  withNote,
+  tryRequest,
   type DaemonIo,
   type HttpReply,
 } from './daemon.js';
@@ -104,30 +103,36 @@ describe('checked', () => {
   });
 });
 
-describe('what a wait may retry', () => {
-  const shape = new WireShapeError(ENDPOINT.subscribe, 'reply.catchup.jobId', 'a string when present', 7);
-
-  it('treats every failure but a wire-shape failure as transient', () => {
-    expect(isTransientFailure(shape)).toBe(false);
-    expect(isTransientFailure(shape.withContext('node5'))).toBe(false);
-    expect(isTransientFailure(new TypeError('fetch failed'))).toBe(true);
-    expect(isTransientFailure(new DOMException('The operation timed out', 'TimeoutError'))).toBe(true);
-    expect(isTransientFailure(new Error('boom'))).toBe(true);
+describe('tryRequest', () => {
+  it('hands back the reply of an answered request, whatever its status', async () => {
+    await expect(tryRequest(async () => ok({ a: 1 }))).resolves.toEqual({ failed: false, reply: ok({ a: 1 }) });
+    await expect(tryRequest(async () => ({ status: 503, json: null }))).resolves.toEqual({ failed: false, reply: { status: 503, json: null } });
   });
 
-  it('attemptOnce turns a transient failure into null and lets a wire-shape failure through', async () => {
-    await expect(attemptOnce(async () => 'done')).resolves.toBe('done');
-    await expect(attemptOnce(async () => { throw new TypeError('fetch failed'); })).resolves.toBeNull();
-    await expect(attemptOnce(async () => { throw shape.withContext('node5'); })).rejects.toBeInstanceOf(WireShapeError);
+  it('hands back why a request was rejected, whatever it threw, instead of throwing', async () => {
+    await expect(tryRequest(async () => { throw new TypeError('fetch failed'); })).resolves.toEqual({ failed: true, why: 'fetch failed' });
+    await expect(tryRequest(async () => { throw new DOMException('The operation timed out', 'TimeoutError'); })).resolves.toEqual({ failed: true, why: 'The operation timed out' });
+    await expect(tryRequest(() => Promise.reject('refused'))).resolves.toEqual({ failed: true, why: 'refused' });
   });
 
-  it('withNote explains a timeout but passes a wire-shape failure through unchanged', () => {
-    const timeout = withNote(new Error('timed out after 10ms waiting for: x'), 'last catch-up job: none');
-    expect(timeout.message).toBe('timed out after 10ms waiting for: x (last catch-up job: none)');
-    const contextual = shape.withContext('node5');
-    expect(withNote(contextual, 'last catch-up job: none')).toBe(contextual);
+  it('catches only the send: validating the reply afterwards is the caller\'s, and it throws', async () => {
+    const sent = await tryRequest(async () => queuedReply(7));
+    expect(sent.failed).toBe(false);
+    if (!sent.failed) expect(() => checked(node5, sent.reply, parseSubscribeResponse)).toThrow(WireShapeError);
   });
 });
+
+/**
+ * A 200 whose body makes the validator throw `error`: a getter that throws is read by the
+ * validators' own `Object.entries`, so this is a validator failure of the class we choose,
+ * from the real parsers. The retry loops must let it through whatever its class is.
+ */
+const failsWith = (error: Error): HttpReply => ok({ get subscribed(): string { throw error; } });
+const VALIDATOR_FAILURES: ReadonlyArray<[string, () => Error]> = [
+  ['a plain Error', () => new Error('validator exploded')],
+  ['a TypeError', () => new TypeError('cannot read the reply')],
+  ['a RangeError', () => new RangeError('reply out of range')],
+];
 
 describe('recoverUntilContent', () => {
   const recover = (io: DaemonIo, firstJobId = 'job-1') =>
@@ -142,6 +147,19 @@ describe('recoverUntilContent', () => {
     expect(outcome).toMatchObject({ endpoint: ENDPOINT.subscribe, field: 'reply.catchup.jobId', actual: 7 });
     expect((outcome as Error).message).toContain(`node5 ${ENDPOINT.subscribe}: reply.catchup.jobId is the number 7`);
     expect(count(QUERY), 'it stopped at the malformed reply').toBe(1);
+  });
+
+  it.each(VALIDATOR_FAILURES)('rejects when the forced catch-up reply makes the validator throw %s, and never reaches a later good read', async (_name, make) => {
+    // The boundary: only the request is caught for a retry, so what the validator throws
+    // does not depend on its class to get out (the old classifier let through one class).
+    const error = make();
+    const { io, count } = scriptedIo({ [QUERY]: [NO_ROWS, HAS_CONTENT], [SUBSCRIBE]: [failsWith(error)] });
+    const outcome = await recover(io).then(() => undefined, (err: unknown) => err);
+    expect(outcome, 'the recovery must reject').toBeInstanceOf(Error);
+    expect((outcome as Error).message).toBe(`node5 ${error.message}`);
+    expect((outcome as Error).cause).toBe(error);
+    expect(count(QUERY), 'it stopped at the malformed reply').toBe(1);
+    expect(count(SUBSCRIBE), 'and did not ask again').toBe(1);
   });
 
   it.each([
@@ -212,6 +230,26 @@ describe('waiting for content', () => {
     expect(count(SUBSCRIBE)).toBe(0);
   });
 
+  it.each(VALIDATOR_FAILURES)('fails at once, unannotated, when the query reply makes the validator throw %s', async (_name, make) => {
+    const error = make();
+    const { io, count } = scriptedIo({ [QUERY]: [failsWith(error), HAS_CONTENT], '/api/sync/catchup-status': [NO_JOB_REPLY] });
+    const outcome = await wait(io).then(() => undefined, (err: unknown) => err);
+    expect((outcome as Error).message, 'the validator\'s own message: no note, no catch-up verdict').toBe(`node5 ${error.message}`);
+    expect((outcome as Error).cause).toBe(error);
+    expect(count(QUERY), 'not polled on').toBe(1);
+    expect(count('/api/sync/catchup-status'), 'the failure is the answer: no extra lookup to decorate it').toBe(0);
+  });
+
+  it('keeps polling through a rejected query request and a non-200, and notes the job only on a timeout', async () => {
+    const { io, count } = scriptedIo({
+      [QUERY]: [new TypeError('fetch failed'), { status: 503, json: { error: 'busy' } }, HAS_CONTENT],
+      '/api/sync/catchup-status': [NO_JOB_REPLY],
+    });
+    await wait(io);
+    expect(count(QUERY)).toBe(3);
+    expect(count('/api/sync/catchup-status')).toBe(0);
+  });
+
   it('names the latest catch-up job when it times out', async () => {
     const { io } = scriptedIo({
       [QUERY]: [NO_ROWS],
@@ -249,10 +287,34 @@ describe('subscribeWhenAdmitted', () => {
     expect(count(SUBSCRIBE)).toBe(2);
   });
 
-  it('fails at once on a refusal, with the last response in the message', async () => {
+  it('fails at once on a refusal, with the status and the body in the message', async () => {
     const { io, count } = scriptedIo({ [SUBSCRIBE]: [{ status: 403, json: { error: 'forbidden' } }] });
-    await expect(subscribe(io)).rejects.toThrow(/subscribe devnet-hash-sub-daemon-test refused: 403 .*\(last response: 403 /);
+    const outcome = await subscribe(io).then(() => undefined, (err: unknown) => err);
+    expect((outcome as Error).message).toBe('node5 subscribe devnet-hash-sub-daemon-test refused: 403 {"error":"forbidden"}');
     expect(count(SUBSCRIBE)).toBe(1);
+  });
+
+  it.each([
+    ['a rejected request', new TypeError('fetch failed')],
+    ['a request that timed out', new DOMException('The operation timed out', 'TimeoutError')],
+  ])('retries %s', async (_name, failure) => {
+    const { io, count } = scriptedIo({ [SUBSCRIBE]: [failure, queuedReply('job-1')] });
+    await expect(subscribe(io)).resolves.toMatchObject({ subscribed: CG, catchup: { jobId: 'job-1' } });
+    expect(count(SUBSCRIBE), 'asked again after the rejection').toBe(2);
+  });
+
+  it('says that the request itself kept failing when that is what ran the wait out', async () => {
+    const { io } = scriptedIo({ [SUBSCRIBE]: [new TypeError('fetch failed')] });
+    await expect(subscribe(io)).rejects.toThrow(/timed out after 120000ms waiting for: node5 subscribes devnet-hash-sub-daemon-test \(last response: request failed: fetch failed\)/);
+  });
+
+  it.each(VALIDATOR_FAILURES)('fails at once, unannotated, when the reply makes the validator throw %s', async (_name, make) => {
+    const error = make();
+    const { io, count } = scriptedIo({ [SUBSCRIBE]: [failsWith(error), queuedReply('job-1')] });
+    const outcome = await subscribe(io).then(() => undefined, (err: unknown) => err);
+    expect((outcome as Error).message).toBe(`node5 ${error.message}`);
+    expect((outcome as Error).cause).toBe(error);
+    expect(count(SUBSCRIBE), 'a malformed reply is not retried, whatever threw').toBe(1);
   });
 
   it('lets a reply of the wrong shape through as the validator failure it is, not as a decorated Error', async () => {
@@ -389,6 +451,14 @@ describe('catch-up lookups: the answer "no job" is the route\'s own 404, nothing
       await expect(wait(io)).rejects.toThrow('(last lookup: no job)');
     });
 
+    it.each(VALIDATOR_FAILURES)('fails at once, unannotated, when the validator throws %s', async (_name, make) => {
+      const error = make();
+      const { io, count } = scriptedIo({ [STATUS]: [failsWith(error), job('j1', CG)] });
+      const outcome = await wait(io).then(() => undefined, (err: unknown) => err);
+      expect((outcome as Error).message).toBe(`node5 ${error.message}`);
+      expect(count(STATUS)).toBe(1);
+    });
+
     it('fails at once, unannotated, on a reply of the wrong shape', async () => {
       const { io, count } = scriptedIo({ [STATUS]: [ok({ jobId: 'j', contextGraphId: CG, jobStatus: 'finished' }), job('j1', CG)] });
       const outcome = await wait(io).then(() => undefined, (err: unknown) => err);
@@ -396,6 +466,33 @@ describe('catch-up lookups: the answer "no job" is the route\'s own 404, nothing
       expect((outcome as Error).message).not.toContain('last lookup');
       expect(count(STATUS)).toBe(1);
     });
+  });
+});
+
+describe('forceCatchup (the test\'s own call: one request, strict)', () => {
+  const force = (io: DaemonIo) => createDaemon(io).forceCatchup(node5, CG);
+
+  it('returns the status, the job it made and the body', async () => {
+    const { io, calls } = scriptedIo({ [SUBSCRIBE]: [queuedReply('job-2')] });
+    await expect(force(io)).resolves.toMatchObject({ status: 200, jobId: 'job-2' });
+    expect(calls).toEqual([{ method: 'POST', node: 5, path: SUBSCRIBE }]);
+  });
+
+  it('returns a non-200 as a status with no job, not as a failure', async () => {
+    const { io } = scriptedIo({ [SUBSCRIBE]: [{ status: 503, json: { error: 'shutting down' } }] });
+    await expect(force(io)).resolves.toEqual({ status: 503, jobId: undefined, detail: '{"error":"shutting down"}' });
+  });
+
+  it('rejects when the request is rejected: a caller that asked once gets the failure, it is not retried', async () => {
+    const { io, count } = scriptedIo({ [SUBSCRIBE]: [new TypeError('fetch failed')] });
+    await expect(force(io)).rejects.toThrow('fetch failed');
+    expect(count(SUBSCRIBE)).toBe(1);
+  });
+
+  it.each(VALIDATOR_FAILURES)('rejects when the validator throws %s', async (_name, make) => {
+    const error = make();
+    const { io } = scriptedIo({ [SUBSCRIBE]: [failsWith(error)] });
+    await expect(force(io)).rejects.toThrow(`node5 ${error.message}`);
   });
 });
 

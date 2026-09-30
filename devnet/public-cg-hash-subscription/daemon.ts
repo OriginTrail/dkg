@@ -9,10 +9,16 @@
  * handling and the recovery decision are proven without a devnet (daemon.test.ts).
  *
  * ONE RULE FOR ERRORS. A reply of the wrong shape is a failure of the test, never
- * "not yet": `checked()` adds the node to a validator's `WireShapeError` and keeps
- * its class (`withContext`), and every place that catches to retry or to decorate a
- * message lets a `WireShapeError` through unchanged. What a poll may treat as "not
- * yet" is a transport failure (a rejected fetch, a timeout) or a non-200 status.
+ * "not yet". It is enforced by where a failure is caught, not by what is thrown: a
+ * retry or a poll catches around the REQUEST only (`tryRequest`: a rejected request
+ * comes back as a value, and a status is not a failure at all), and the reply is
+ * validated outside of that catch (`checked`). Whatever a validator throws, of any
+ * class, therefore propagates; nothing here decides anything from an exception's
+ * class. `checked()` adds the node to a validator's message and keeps a
+ * `WireShapeError` a `WireShapeError` (`withContext`), so a test can read its endpoint
+ * and field. What a poll may treat as "not yet" is a rejected request (a refused
+ * connection, a timeout) or a non-200 status. A wait that ran out says what it last
+ * saw (`waitWithNote`); a failure its probe threw is left as it is.
  *
  * ONE RULE FOR "NO JOB". A catch-up lookup answers a job, `none` or `unavailable`
  * (`CatchupLookup`). `none` is only the route's own 404 "No catch-up job found"
@@ -146,37 +152,21 @@ export function expectOk<T>(reply: Reply<T>, label: string): T {
   return (reply as Extract<Reply<T>, { ok: true }>).body;
 }
 
-/**
- * Whether a failure of a best-effort attempt may be retried on the next round: any
- * failure except a reply of the wrong shape, which is the test's failure.
- */
-export function isTransientFailure(error: unknown): boolean {
-  return !(error instanceof WireShapeError);
-}
-
-/** Run `attempt`; a transient failure is `null` (try again later), a wire-shape failure is thrown. */
-export async function attemptOnce<T>(attempt: () => Promise<T>): Promise<T | null> {
-  try {
-    return await attempt();
-  } catch (error) {
-    if (isTransientFailure(error)) return null;
-    throw error;
-  }
-}
-
-/**
- * The failure to show when a wait ran out: `note` is added to a timeout or an
- * assertion message, but a `WireShapeError` already says what is wrong with which
- * reply, so it goes through unchanged.
- */
-export function withNote(error: unknown, note: string): Error {
-  if (error instanceof WireShapeError) return error;
-  return new Error(`${error instanceof Error ? error.message : String(error)} (${note})`, { cause: error });
-}
-
 /** The id of the catch-up job a subscribe queued (the completed-catch-up variant of the reply has none). */
 export function queuedJobId(reply: SubscribeReply): string | undefined {
   return reply.catchup?.jobId;
+}
+
+const SUBSCRIBE_PATH = '/api/context-graph/subscribe';
+
+/** The subscribe request; `forceCatchup` asks for a replacement job instead of the one already there. */
+function subscribeBody(contextGraphId: string, forceCatchup = false) {
+  return { contextGraphId, includeSharedMemory: true, syncMode: 'always-on', ...(forceCatchup ? { forceCatchup: true } : {}) };
+}
+
+/** What a forced catch-up came back with: its status, the job it made (none on a non-200 or a completed-catch-up reply) and the raw body. */
+function forcedOutcome(res: Reply<SubscribeReply>): { status: number; jobId?: string; detail: string } {
+  return { status: res.status, jobId: res.ok ? queuedJobId(res.body) : undefined, detail: JSON.stringify(res.body) };
 }
 
 export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = {}) {
@@ -426,10 +416,11 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
 
   /** The rows of a SELECT against one memory view: `null` when the node could not answer it (yet). */
   async function tryRows(node: DevnetNode, contextGraphId: string, sparql: string, view: View) {
-    // A transport failure is "no answer yet"; a 200 that is not a SELECT answer is not.
-    const res = await io.post(node, '/api/query', { sparql, contextGraphId, view }).then((reply) => reply, () => null);
-    if (res === null || res.status !== 200) return null;
-    const reply = checked(node, res, parseQueryBindings);
+    // A rejected request or a non-200 is "no answer yet"; a 200 that is not a SELECT answer is
+    // not: it is validated outside of the request's catch.
+    const sent = await tryRequest(() => io.post(node, '/api/query', { sparql, contextGraphId, view }));
+    if (sent.failed || sent.reply.status !== 200) return null;
+    const reply = checked(node, sent.reply, parseQueryBindings);
     return reply.ok ? reply.body : null;
   }
 
@@ -485,16 +476,12 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
     budgetMs: number,
     whileWaiting?: () => Promise<void>,
   ): Promise<void> {
-    try {
-      await io.waitFor(`${label}: node${node.num} ${view} content of ${subject}`, budgetMs, 3_000, async () => {
-        const rows = await pollSubjectContent(node, contextGraphId, subject, view);
-        if (rows.length > 0 && JSON.stringify(rows) === JSON.stringify(expected)) return rows;
-        await whileWaiting?.();
-        return null;
-      });
-    } catch (err) {
-      throw withNote(err, await describeLatestJob(node, contextGraphId));
-    }
+    await waitWithNote(`${label}: node${node.num} ${view} content of ${subject}`, budgetMs, 3_000, async () => {
+      const rows = await pollSubjectContent(node, contextGraphId, subject, view);
+      if (rows.length > 0 && JSON.stringify(rows) === JSON.stringify(expected)) return rows;
+      await whileWaiting?.();
+      return null;
+    }, () => describeLatestJob(node, contextGraphId));
   }
 
   /**
@@ -516,26 +503,24 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
   }
 
   /**
-   * Subscribe, retrying only while the node has not yet read the graph from the
-   * chain (a retryable 503, or a numeric id the node has not seen yet: 404).
+   * Subscribe, retrying while the request is rejected or the node has not yet read the graph
+   * from the chain (a retryable 503, or a numeric id the node has not seen yet: 404). Any
+   * other status is a refusal; a 200 of the wrong shape fails at once.
    */
   async function subscribeWhenAdmitted(node: DevnetNode, contextGraphId: string): Promise<SubscribeReply> {
-    let last = '';
-    try {
-      return await io.waitFor(`node${node.num} subscribes ${contextGraphId}`, 120_000, 3_000, async () => {
-        const res = await postChecked(node, '/api/context-graph/subscribe', {
-          contextGraphId,
-          includeSharedMemory: true,
-          syncMode: 'always-on',
-        }, parseSubscribeResponse);
-        if (res.ok) return res.body;
-        last = `${res.status} ${JSON.stringify(res.body)}`;
-        if (res.status === 503 || res.status === 404) return null;
-        throw new Error(`node${node.num} subscribe ${contextGraphId} refused: ${last}`);
-      });
-    } catch (err) {
-      throw withNote(err, `last response: ${last}`);
-    }
+    let last = 'no response';
+    return waitWithNote(`node${node.num} subscribes ${contextGraphId}`, 120_000, 3_000, async () => {
+      const sent = await tryRequest(() => io.post(node, SUBSCRIBE_PATH, subscribeBody(contextGraphId)));
+      if (sent.failed) {
+        last = `request failed: ${sent.why}`;
+        return null;
+      }
+      const res = checked(node, sent.reply, parseSubscribeResponse);
+      if (res.ok) return res.body;
+      last = `${res.status} ${JSON.stringify(res.body)}`;
+      if (res.status === 503 || res.status === 404) return null;
+      throw new Error(`node${node.num} subscribe ${contextGraphId} refused: ${last}`);
+    }, () => `last response: ${last}`);
   }
 
   /**
@@ -609,17 +594,7 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
     node: DevnetNode,
     contextGraphId: string,
   ): Promise<{ status: number; jobId?: string; detail: string }> {
-    const res = await postChecked(node, '/api/context-graph/subscribe', {
-      contextGraphId,
-      includeSharedMemory: true,
-      syncMode: 'always-on',
-      forceCatchup: true,
-    }, parseSubscribeResponse);
-    return {
-      status: res.status,
-      jobId: res.ok ? queuedJobId(res.body) : undefined,
-      detail: JSON.stringify(res.body),
-    };
+    return forcedOutcome(await postChecked(node, SUBSCRIBE_PATH, subscribeBody(contextGraphId, true), parseSubscribeResponse));
   }
 
   /**
@@ -632,8 +607,9 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
    * aliases must name afterwards: `firstJobId` when no recovery replaced it.
    *
    * A failed forced catch-up (a rejected request, a non-200) is retried on the
-   * next round. A reply of the wrong shape is not: it rejects the whole wait with
-   * the validator's endpoint and field, so a later good reply cannot hide it.
+   * next round. A reply of the wrong shape is not: only the request is tried, so
+   * whatever a validator throws (whatever its class) rejects the whole wait, and a
+   * later good reply cannot hide it.
    */
   async function recoverUntilContent(
     node: DevnetNode,
@@ -650,8 +626,10 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
     await pollContent(node, contextGraphId, subject, view, expected, label, budgetMs, async () => {
       if (Date.now() - lastRetryAt < recoveryRetryEveryMs) return;
       lastRetryAt = Date.now();
-      const forced = await attemptOnce(() => forceCatchup(node, contextGraphId));
-      if (forced?.jobId !== undefined) latestJobId = forced.jobId;
+      const sent = await tryRequest(() => io.post(node, SUBSCRIBE_PATH, subscribeBody(contextGraphId, true)));
+      if (sent.failed) return;
+      const forced = forcedOutcome(checked(node, sent.reply, parseSubscribeResponse));
+      if (forced.jobId !== undefined) latestJobId = forced.jobId;
     });
     return latestJobId;
   }
