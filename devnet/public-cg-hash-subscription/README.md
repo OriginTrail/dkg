@@ -19,7 +19,8 @@ nodes.
 ## What it proves
 
 1. A public graph registered through the daemon API commits exactly
-   `keccak256(utf8(id))` on the real `ContextGraphStorage`.
+   `keccak256(utf8(id))` on the real `ContextGraphStorage`, and the author holds
+   the content it published and shared.
 2. An edge subscribed with the hash alone ends up with a row keyed by the
    verified cleartext id (and none keyed by the hash), and holds the finalized
    VM copy published before it subscribed, identical to the author's. The
@@ -34,7 +35,8 @@ nodes.
 4. A forced catch-up (`forceCatchup`, the operator's recovery) on an already
    converged graph mints a replacement job. Both aliases (cleartext id and
    on-chain id) then name it, the superseded job stays readable by its id, and
-   the content is unchanged.
+   the content is unchanged. The test converges an edge on a graph of its own
+   first (see "Structure").
 5. The SWM copy of a second graph, shared but never published, backfills on
    both edges after they subscribe by hash (edge 5) and by numeric id (edge 6).
    This is its own graph and its own test because it depends on something the
@@ -61,12 +63,56 @@ only reads, and reports the latest job's verdict on timeout. Recovery covers onl
 a short circuit window: a node whose circuit stays open needs a restart, and the
 suite fails rather than hiding it.
 
+## Structure
+
+Every test runs correctly alone or after any other test; none reads state left by
+another.
+
+- **Fixture** (`beforeAll`): the graphs are created once, before any test, and
+  never change afterwards: two published to VM (`vm`, `forced`), one only shared
+  to SWM (`swm`), and one registered on chain with a name nobody can resolve
+  (`unheld`). No test creates a graph. The devnet detection and identity setup is
+  shared the same way.
+- **Arrange** (inside each test): a test makes the edge state it needs. No
+  (edge, graph) pair is used by two tests:
+
+  | test | edge | graph | subscribed |
+  | --- | --- | --- | --- |
+  | 2 | edge 5 | `vm` | by name hash |
+  | 3 | edge 6 | `vm` | by numeric id |
+  | 4 | edge 5 | `forced` | arranged converged, then forced catch-up |
+  | 5 | edges 5 and 6 | `swm` | by hash and by numeric id |
+  | 6 | edge 6 | `unheld` | by hash |
+
+  Tests 2, 3, 5 and 6 have a subscribe as their subject, so they need an edge that
+  has never seen the graph, and they check that instead of asserting on leftovers.
+  Test 4 is the only one that needs a state a subscribe leaves behind (an edge
+  converged on VM), so it makes it itself with an idempotent arrange step
+  (`ensureConverged`: subscribe only when the edge has no row for the graph, then
+  wait for adoption and content). It uses a graph of its own so it cannot consume
+  test 2's "never seen" precondition when it runs first, and it stays a separate
+  test so a failure names the behavior and it can run by name.
+- **Wire types** come from the daemon's own declarations
+  (`packages/cli/src/catchup-status.ts` for the catch-up status and the identity
+  note, `packages/cli/src/api-client.ts` for the subscribe and list replies),
+  imported as types only, so a renamed field fails the type-check instead of a
+  long devnet run. The one row shape with no exported declaration (an entry of
+  `GET /api/context-graph/subscriptions`) is stated locally, with a comment naming
+  the route.
+
 ## Run
 
 ```bash
 pnpm run build:packages && pnpm --dir packages/cli run build:prepared
 ./scripts/devnet.sh clean && ./scripts/devnet.sh start 6
 pnpm test:devnet:public-cg-hash-subscription
+```
+
+One test alone, by a name filter (the fixture is still created first; the filter is
+a regex, so use plain words):
+
+```bash
+pnpm exec vitest run --config devnet/public-cg-hash-subscription/vitest.config.ts -t "forced catch-up mints"
 ```
 
 Node 1 (core) is the author; nodes 5 and 6 (edges) only read. The suite creates

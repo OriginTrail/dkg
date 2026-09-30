@@ -14,6 +14,16 @@
 import { expect } from 'vitest';
 import type { DKGAgent } from '../../src/index.js';
 
+/**
+ * How long the route waits for a connected peer to reveal the cleartext id:
+ * `SUBSCRIBE_NAME_RESOLUTION_TIMEOUT_MS` in packages/cli/src/daemon/routes/
+ * context-graph.ts (5 s), which is private to that module and not importable
+ * from the agent package. Keep it equal: a shorter wait here would subscribe
+ * under the hash in a case where the real route resolves and subscribes under
+ * the cleartext id.
+ */
+const NAME_RESOLUTION_TIMEOUT_MS = 5_000;
+
 export async function subscribeByNameHash(agent: DKGAgent, requested: string) {
   let contextGraphId = agent.resolveContextGraphIdAlias(requested) ?? requested;
   const authority = await agent.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
@@ -26,7 +36,7 @@ export async function subscribeByNameHash(agent: DKGAgent, requested: string) {
   ).toBe('allowed');
   if (agent.contextGraphNameTargetFor(contextGraphId)) {
     const resolved = await agent.resolveContextGraphNameHashNow(contextGraphId, {
-      signal: AbortSignal.timeout(2_000),
+      signal: AbortSignal.timeout(NAME_RESOLUTION_TIMEOUT_MS),
     }).catch(() => null);
     if (resolved) contextGraphId = resolved;
   }
