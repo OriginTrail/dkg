@@ -1,5 +1,7 @@
 import { mergeQueryOptions, listGraphsByPrefix } from './read-store-query-utils.js';
 export {
+  admitSharedMemoryGraphCount,
+  type SharedMemoryGraphAdmission,
   resolveSharedMemoryReadGraphs,
   resolveKaBoundedSharedMemoryReadGraphs,
   loadSelectedSharedMemoryQuads,

@@ -24,6 +24,7 @@ import {
   sparqlString,
 } from '@origintrail-official/dkg-core';
 import {
+  admitSharedMemoryGraphCount,
   deleteByPatternWithoutCount,
   GraphManager,
   loadMerkleVerifiedSharedMemorySlice,
@@ -4082,11 +4083,12 @@ export class FinalizationHandler {
         this.finalizationSwmBucketUri(contextGraphId, subGraphName),
         { priority: 'background', source: `${LEGACY_SWM_SCAN_SOURCE}.preflight` },
       );
-      if (familyGraphs.length > graphLimit) {
+      const admission = admitSharedMemoryGraphCount(familyGraphs.length, graphLimit);
+      if (admission.status === 'deferred') {
         const now = Date.now();
         if (now - this.lastLegacySwmDeferralWarningAt >= 60_000) {
           this.lastLegacySwmDeferralWarningAt = now;
-          console.warn(`[swm-read] deferring legacy operation scan with ${familyGraphs.length} graphs (limit=${graphLimit}) to peer recovery`);
+          console.warn(`[swm-read] deferring legacy operation scan with ${admission.graphCount} graphs (limit=${admission.limit}) to peer recovery`);
         }
         return null;
       }
