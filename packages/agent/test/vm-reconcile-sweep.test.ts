@@ -159,6 +159,37 @@ it('uses non-default runtime batch sizes for bound work and discovery', async ()
   }
 });
 
+it('finishes every bound key in an explicit sweep beyond timer and queue limits', async () => {
+  const started: string[] = [];
+  const releases = new Map<string, () => void>();
+  const runtime = new VmReconcileSchedulingRuntime<void>(
+    key => new Promise<void>((resolve) => {
+      started.push(key);
+      releases.set(key, resolve);
+    }),
+    () => undefined,
+    { concurrency: 1, maxPending: 1, periodicBoundBatchSize: 1, discoveryBatchSize: 1 },
+  );
+  let finished = false;
+  const completion = runtime.completeSweep(['b0', 'b1', 'b2'], [], () => true)
+    .then(() => { finished = true; });
+  await vi.waitFor(() => expect(started).toEqual(['b0']));
+  expect(finished).toBe(false);
+
+  releases.get('b0')!();
+  await vi.waitFor(() => expect(started).toEqual(['b0', 'b1']));
+  expect(finished).toBe(false);
+
+  releases.get('b1')!();
+  await vi.waitFor(() => expect(started).toEqual(['b0', 'b1', 'b2']));
+  expect(finished).toBe(false);
+
+  releases.get('b2')!();
+  await completion;
+  expect(finished).toBe(true);
+  await runtime.close();
+});
+
 it('keeps a partial discovery turn ahead of bound fills, then resumes bound progress', () => {
   const planner = new VmReconcileSweepPlanner({ discoveryBatchSize: 2 }, () => () => undefined);
   const admitted: string[] = [];
