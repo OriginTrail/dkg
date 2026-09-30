@@ -3,27 +3,16 @@ import {
   decodeNTriplesIriEscapesStrict,
   decodeRdfLiteralBody,
   type RdfLiteralTerm,
-} from './index.js';
+  type RdfTerm,
+} from './rdf-term.js';
 import {
   isRdfBlankNodeTerm,
   isRdfLanguageTag,
   parseRdfLiteralLexicalTermWith,
 } from './rdf-term-lexical.js';
 
-/** One RDF term encoded in a SPARQL 1.1 TSV result cell. */
-export type SparqlTsvResultTerm =
-  | { kind: 'iri'; value: string }
-  | { kind: 'blank-node'; value: string }
-  | { kind: 'literal'; value: RdfLiteralTerm };
-
-/**
- * A canonical plain literal is already the final output and cannot diverge
- * from a parallel semantic term. Every other variant carries only the RDF
- * term that the shared storage normalizer validates and formats.
- */
-export type NormalizedSparqlTsvResultTerm =
-  | { readonly kind: 'canonical-plain-literal'; readonly value: string }
-  | { readonly kind: 'term'; readonly value: SparqlTsvResultTerm };
+/** One semantic RDF term encoded in a SPARQL 1.1 TSV result cell. */
+export type SparqlTsvResultTerm = RdfTerm;
 
 const XSD_NAMESPACE = 'http://www.w3.org/2001/XMLSchema#';
 const SPARQL_TSV_INTEGER = /^[+-]?[0-9]+$/;
@@ -34,30 +23,6 @@ const SPARQL_TSV_RAW_CONTROL_RANGE =
 const SPARQL_TSV_FAST_PLAIN_LITERAL = new RegExp(
   `^"[^"\\\\${SPARQL_TSV_RAW_CONTROL_RANGE}]*"$`,
 );
-
-/**
- * Decode one SPARQL TSV cell. Dominant unescaped Oxigraph forms stay cheap,
- * while escaped and suffixed forms use the complete grammar below.
- */
-export function normalizeSparqlTsvResultTerm(
-  encoded: string,
-): NormalizedSparqlTsvResultTerm | null {
-  if (SPARQL_TSV_FAST_PLAIN_LITERAL.test(encoded)) {
-    return { kind: 'canonical-plain-literal', value: encoded };
-  }
-  if (
-    encoded.charCodeAt(0) === 60
-    && encoded.charCodeAt(encoded.length - 1) === 62
-    && !encoded.includes('\\')
-  ) {
-    // The storage result normalizer applies the endpoint's stricter safe-IRI
-    // policy exactly once. The public parser below still performs RFC 3987
-    // validation when this transport-neutral fast path is not in use.
-    return { kind: 'term', value: { kind: 'iri', value: encoded.slice(1, -1) } };
-  }
-  const term = parseSparqlTsvResultTerm(encoded);
-  return term === null ? null : { kind: 'term', value: term };
-}
 
 /** Parse the complete RDF-term grammar used by SPARQL 1.1 TSV cells. */
 export function parseSparqlTsvResultTerm(term: string): SparqlTsvResultTerm | null {

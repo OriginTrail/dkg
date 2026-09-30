@@ -6,7 +6,7 @@
 export const INCOMING_COPY_ALLOWED_USERS = Object.freeze({
   canonicalizeRdfObjectTerm: Object.freeze([
     'packages/publisher/src/incoming-public-copy.ts',
-    'packages/rdf-utils/src/index.ts',
+    'packages/rdf-utils/src/rdf-object-term.ts',
   ]),
   acceptIncomingPublicQuads: Object.freeze([
     'packages/agent/src/gossip-publish-handler.ts',

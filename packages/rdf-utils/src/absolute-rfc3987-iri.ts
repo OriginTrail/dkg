@@ -13,6 +13,13 @@ export function isAbsoluteRfc3987IriV1(value: string): boolean {
   const schemeEnd = value.indexOf(':');
   if (schemeEnd <= 0 || !isScheme(value.slice(0, schemeEnd))) return false;
 
+  // Dominant DKG `did:`, `urn:` and other non-authority ASCII IRIs can be
+  // validated without substring allocation. This scanner is a conservative
+  // subset of the complete grammar below; authority and Unicode forms fall
+  // through rather than weakening the shared predicate.
+  const fastOpaque = validateFastOpaqueAsciiIri(value, schemeEnd);
+  if (fastOpaque !== undefined) return fastOpaque;
+
   const remainder = value.slice(schemeEnd + 1);
   const fragmentAt = remainder.indexOf('#');
   const beforeFragment = fragmentAt < 0
@@ -33,6 +40,46 @@ export function isAbsoluteRfc3987IriV1(value: string): boolean {
   if (query !== undefined && !isIQuery(query)) return false;
 
   return isIHierPart(hierarchy);
+}
+
+function validateFastOpaqueAsciiIri(
+  value: string,
+  schemeEnd: number,
+): boolean | undefined {
+  const first = value.charCodeAt(schemeEnd + 1);
+  if (first === 0x2f) return undefined;
+  let component: 'hierarchy' | 'query' | 'fragment' = 'hierarchy';
+  for (let index = schemeEnd + 1; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code > 0x7f) return undefined;
+    if (code === 0x25) {
+      if (
+        index + 2 >= value.length
+        || !isAsciiHex(value.charCodeAt(index + 1))
+        || !isAsciiHex(value.charCodeAt(index + 2))
+      ) return false;
+      index += 2;
+      continue;
+    }
+    if (code === 0x23) {
+      if (component === 'fragment') return false;
+      component = 'fragment';
+      continue;
+    }
+    if (code === 0x3f) {
+      if (component === 'hierarchy') component = 'query';
+      continue;
+    }
+    if (
+      isAsciiUnreserved(code)
+      || isSubDelimiter(code)
+      || code === 0x3a
+      || code === 0x40
+      || code === 0x2f
+    ) continue;
+    return false;
+  }
+  return true;
 }
 
 function isScheme(value: string): boolean {

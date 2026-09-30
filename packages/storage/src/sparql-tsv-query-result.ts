@@ -1,9 +1,15 @@
 import {
-  normalizeSparqlTsvResultTerm,
+  parseSparqlTsvResultTerm,
 } from '@origintrail-official/dkg-rdf-utils';
 import { SparqlSelectResultNormalizer } from './sparql-select-result-normalizer.js';
 import { SparqlResultsShapeError } from './sparql-results-shape-error.js';
 import type { SelectResult } from './triple-store.js';
+
+const SPARQL_TSV_RAW_CONTROL_RANGE =
+  `${String.fromCodePoint(0)}-${String.fromCodePoint(31)}${String.fromCodePoint(127)}`;
+const SPARQL_TSV_FAST_PLAIN_LITERAL = new RegExp(
+  `^"[^"\\\\${SPARQL_TSV_RAW_CONTROL_RANGE}]*"$`,
+);
 
 export class SparqlTsvResultsShapeError extends SparqlResultsShapeError {
   constructor(message: string) {
@@ -74,12 +80,21 @@ function formatTsvTerm(
   normalizer: SparqlSelectResultNormalizer,
 ): string {
   const label = `SPARQL TSV binding ${rowIndex}.${variable}`;
-  const decoded = normalizeSparqlTsvResultTerm(cell);
+  // These two dominant Oxigraph encodings are transport optimizations only;
+  // the public rdf-utils parser always returns one semantic RDF-term model.
+  if (SPARQL_TSV_FAST_PLAIN_LITERAL.test(cell)) return cell;
+  if (
+    cell.charCodeAt(0) === 60
+    && cell.charCodeAt(cell.length - 1) === 62
+    && !cell.includes('\\')
+  ) {
+    return normalizer.formatIri(cell.slice(1, -1), column, label);
+  }
+  const decoded = parseSparqlTsvResultTerm(cell);
   if (decoded === null) {
     malformed(`${label} is not a valid RDF term`);
   }
-  if (decoded.kind === 'canonical-plain-literal') return decoded.value;
-  return normalizer.format(decoded.value, column, label);
+  return normalizer.format(decoded, column, label);
 }
 
 function malformed(message: string): never {

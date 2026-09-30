@@ -94,6 +94,8 @@ describe('SPARQL TSV SELECT decoding', () => {
 
   it.each([
     '?v\n<relative>\n',
+    '?v\n<urn:test:%zz>\n',
+    '?v\n<urn:test:\\u0025zz>\n',
     '?v\n<urn:test:\\q>\n',
     '?v\n"x"^^<relative>\n',
     '?v\n"x"^^<urn:test:\\q>\n',

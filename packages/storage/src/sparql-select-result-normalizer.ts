@@ -1,6 +1,7 @@
 import {
   formatCanonicalRdfLiteralTerm,
-  type RdfLiteralTerm,
+  isAbsoluteRfc3987IriV1,
+  type RdfTerm,
 } from '@origintrail-official/dkg-rdf-utils';
 import { isSafeIri } from '@origintrail-official/dkg-core';
 
@@ -10,10 +11,7 @@ const MAX_CONSECUTIVE_IRI_MISSES = 16;
 const PAUSED_IRI_COMPARISON_ROWS = 128;
 const SCHEME_ONLY_IRI = /^[a-zA-Z][a-zA-Z0-9+.-]*:$/;
 
-export type SparqlResultTerm =
-  | { kind: 'iri'; value: string }
-  | { kind: 'blank-node'; value: string }
-  | { kind: 'literal'; value: RdfLiteralTerm };
+export type SparqlResultTerm = RdfTerm;
 
 export type SparqlResultReject = (message: string) => never;
 
@@ -70,9 +68,10 @@ export class SparqlSelectResultNormalizer {
   }
 }
 
-/** core's safe-IRI policy plus RFC 3987's valid empty-hier-part `scheme:` form. */
+/** One RFC 3987 policy for optimized and grammar-backed result IRIs. */
 export function isSafeResultIri(value: string): boolean {
-  return isSafeIri(value) || SCHEME_ONLY_IRI.test(value);
+  return (isSafeIri(value) || SCHEME_ONLY_IRI.test(value))
+    && isAbsoluteRfc3987IriV1(value);
 }
 
 /** One last successful value per column role, never a growing response cache. */
