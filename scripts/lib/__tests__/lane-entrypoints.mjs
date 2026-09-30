@@ -7,7 +7,7 @@
 // never because its workspace owns a lane.
 import fs from 'node:fs';
 import path from 'node:path';
-import { CI_LANES, WORKSPACE_OWNING_LANES, WORKSPACE_RULES, isInstallLifecycleScript } from '../ci-delta.mjs';
+import { CI_LANES, EVM_SCOPES, WORKSPACE_OWNING_LANES, WORKSPACE_RULES, isInstallLifecycleScript, needsSharedBuild } from '../ci-delta.mjs';
 import { PRIMARY_LANE_JOBS } from '../ci-results.mjs';
 import { EVM_TEST_SCOPES } from '../../ci/evm-test-scopes.mjs';
 import { REPO_ROOT, sourceFiles } from './ci-plan-fixtures.mjs';
@@ -22,6 +22,98 @@ export function jobLane(job, condition) {
     .find((lane) => CI_LANES.includes(lane));
 }
 
+// What a change to a file CI executes must select. The trace carries each
+// as a string, so identical requirements merge; these build them, and
+// parseRequirement reads one back:
+// - lane(<lane>): that lane runs the file;
+// - evmScope(<scope>): that EVM integration scope's suites run it;
+// - build: the shared build job's own checks run it;
+// - install: every job's install runs it (an install lifecycle hook): full
+//   CI, and the routing test checks the reads it cannot resolve;
+// - full: a job outside the lanes runs it: full CI;
+// - buildOutput(<workspace>): that workspace's build or pack in the shared
+//   build job runs it, and every lane restores the output.
+export const requirement = Object.freeze({
+  lane: (lane) => {
+    if (!CI_LANES.includes(lane)) throw new Error(`unknown CI lane: ${lane}`);
+    return lane;
+  },
+  evmScope: (scope) => {
+    if (!EVM_SCOPES.includes(scope)) throw new Error(`unknown EVM scope: ${scope}`);
+    return `evm:${scope}`;
+  },
+  build: 'build',
+  install: 'install',
+  full: 'full',
+  buildOutput: (workspace) => {
+    if (!workspace) throw new Error('a build-output requirement names the workspace that builds');
+    return `build-output:${workspace}`;
+  },
+});
+
+// A requirement string as { kind, lane | scope | workspace }; a string no
+// kind matches (a misspelled lane, an unknown scope) throws.
+export function parseRequirement(text) {
+  if (CI_LANES.includes(text)) return { kind: 'lane', lane: text };
+  if (text === requirement.build || text === requirement.install || text === requirement.full) return { kind: text };
+  const [kind, value] = text.split(/:(.*)/s);
+  if (kind === 'evm' && EVM_SCOPES.includes(value)) return { kind, scope: value };
+  if (kind === 'build-output' && value) return { kind, workspace: value };
+  throw new Error(`unknown routing requirement: ${text}`);
+}
+
+// The daemon runtime the browser suite boots (scripts/devnet.sh) outside its
+// UI surface and harness: on a pull request each runs its own lanes and the
+// CLI daemon tests, and the browser suite follows after merge. The routing
+// test pins this list against devnet.sh and the rules.
+export const BROWSER_SUITE_DEFERRED = Object.freeze([
+  'packages/adapter-hermes',
+  'packages/adapter-openclaw',
+  'packages/adapter-prime-agent',
+  'packages/agent',
+  'packages/chain',
+  'packages/epcis',
+  'packages/http-utils',
+  'packages/local-llm',
+  'packages/mcp-dkg',
+  'packages/okf',
+  'packages/publisher',
+  'packages/query',
+  'packages/random-sampling',
+  'packages/storage',
+]);
+
+const workspaceOf = (file) => Object.keys(WORKSPACE_RULES).find((workspace) => file.startsWith(`${workspace}/`));
+
+// Whether `plan`, the plan for a change to `file`, selects what the
+// requirement string `text` asks; a full plan selects everything, and an
+// unknown requirement throws. What a workspace's build output reaches: a
+// repository file needs full CI; a file in a package workspace, every lane
+// and scope the producing workspace's rule selects, except the browser suite
+// for the runtime it follows after merge (BROWSER_SUITE_DEFERRED); a
+// producer without a rule is met only by full CI.
+export function requirementCoveredByPlan(text, plan, file) {
+  const required = parseRequirement(text);
+  if (plan.mode === 'full') return true;
+  switch (required.kind) {
+    case 'lane':
+      return Boolean(plan.lanes[required.lane]);
+    case 'evm':
+      return plan.evmScopes.includes(required.scope);
+    case 'build':
+      return needsSharedBuild(plan);
+    case 'build-output': {
+      const workspace = workspaceOf(file);
+      const rule = WORKSPACE_RULES[required.workspace];
+      return Boolean(workspace && rule)
+        && rule.lanes.every((lane) => plan.lanes[lane] || (lane === 'kosava_node_ui_e2e' && BROWSER_SUITE_DEFERRED.includes(workspace)))
+        && rule.evmScopes.every((scope) => plan.evmScopes.includes(scope));
+    }
+    default:
+      return false;
+  }
+}
+
 // What a change to a file a job runs must select, by job: a ci.yml lane
 // job's lane; `build` for the shared build job's own checks; nothing for
 // the changes job, which runs on every pull request; `full` for every other
@@ -31,10 +123,10 @@ export function jobRequirement(workflow, job, condition) {
   if (workflow === 'ci.yml') {
     if (!condition) return undefined;
     const lane = jobLane(job, condition);
-    if (lane) return lane;
-    if (/\bneeds\.changes\.outputs\.run_node == 'true'/.test(condition)) return 'build';
+    if (lane) return requirement.lane(lane);
+    if (/\bneeds\.changes\.outputs\.run_node == 'true'/.test(condition)) return requirement.build;
   }
-  return 'full';
+  return requirement.full;
 }
 
 // The requirement for one edge of a job with `requirement`, from the package
@@ -44,10 +136,10 @@ export function jobRequirement(workflow, job, condition) {
 // script the shared build job runs (its build, or the pack
 // release:verify-pack runs), since every lane restores that workspace's
 // build output.
-export function edgeRequirement(requirement, chain) {
-  if (chain.some(({ script }) => isInstallLifecycleScript(script))) return 'install';
-  const producer = requirement === 'build' ? chain.find(({ workspace }) => workspace !== '.') : undefined;
-  return producer ? `build-output:${producer.workspace}` : requirement;
+export function edgeRequirement(jobRequired, chain) {
+  if (chain.some(({ script }) => isInstallLifecycleScript(script))) return requirement.install;
+  const producer = jobRequired === requirement.build ? chain.find(({ workspace }) => workspace !== '.') : undefined;
+  return producer ? requirement.buildOutput(producer.workspace) : jobRequired;
 }
 
 const WORKFLOWS = ['ci.yml', 'evm-integration.yml'];
@@ -79,7 +171,7 @@ export function laneSeeds({
     for (const requirement of requirements) if (!entry.has(requirement)) entry.set(requirement, via);
   };
   const evmScopeFiles = new Map(Object.entries(EVM_TEST_SCOPES).flatMap(([scope, { packageDirectory, files }]) =>
-    files.map((file) => [path.posix.normalize(path.posix.join(packageDirectory, file)), `evm:${scope}`])));
+    files.map((file) => [path.posix.normalize(path.posix.join(packageDirectory, file)), requirement.evmScope(scope)])));
   for (const [workspace, owningLanes] of workspaceCode ? Object.entries(WORKSPACE_OWNING_LANES) : []) {
     if (WORKSPACE_RULES[workspace].forceFull) continue;
     for (const file of sourceFiles(workspace)) {
@@ -90,9 +182,9 @@ export function laneSeeds({
       if (inside.startsWith('integration/')) {
         if (evmScopeFiles.has(file)) seed(file, [evmScopeFiles.get(file)], 'EVM_TEST_SCOPES');
       } else if (workspace === 'packages/node-ui' && inside.startsWith('e2e/')) {
-        seed(file, ['kosava_node_ui_e2e'], 'the browser suite');
+        seed(file, [requirement.lane('kosava_node_ui_e2e')], 'the browser suite');
       } else {
-        seed(file, [...owningLanes, ...(evmScopeFiles.has(file) ? [evmScopeFiles.get(file)] : [])], `${workspace} lanes`);
+        seed(file, [...owningLanes.map(requirement.lane), ...(evmScopeFiles.has(file) ? [evmScopeFiles.get(file)] : [])], `${workspace} lanes`);
       }
     }
   }

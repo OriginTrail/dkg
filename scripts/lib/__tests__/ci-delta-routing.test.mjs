@@ -26,7 +26,7 @@ import {
 import { INSTALL_HOOK_INPUTS } from '../ci-routing.mjs';
 import { PROGRAM_CHILD_COMMANDS, workflowExecution } from './ci-execution-graph.mjs';
 import { SUBCOMMAND_CHILD_COMMANDS } from '../../release-packages.mjs';
-import { jobLane, jobRequirement, laneSeeds } from './lane-entrypoints.mjs';
+import { BROWSER_SUITE_DEFERRED, jobLane, jobRequirement, laneSeeds, requirement, requirementCoveredByPlan } from './lane-entrypoints.mjs';
 import { loadReferences, packageImports, traceLaneLoads, workspaceClosure } from './load-graph.mjs';
 
 // The workspaces that `files` import by package name, plus everything those
@@ -240,26 +240,6 @@ test('repository support paths route to the lanes that execute them', () => {
   }
 });
 
-// The daemon runtime the browser suite boots (scripts/devnet.sh) outside its
-// UI surface and harness: on a pull request each runs its own lanes and the
-// CLI daemon tests, and the browser suite follows after merge.
-const BROWSER_SUITE_DEFERRED = [
-  'packages/adapter-hermes',
-  'packages/adapter-openclaw',
-  'packages/adapter-prime-agent',
-  'packages/agent',
-  'packages/chain',
-  'packages/epcis',
-  'packages/http-utils',
-  'packages/local-llm',
-  'packages/mcp-dkg',
-  'packages/okf',
-  'packages/publisher',
-  'packages/query',
-  'packages/random-sampling',
-  'packages/storage',
-];
-
 test('the browser suite follows the UI surface and the packages its harness compiles against', () => {
   // UI surface: node-ui, its graph-viz dependency and the daemon HTTP API in
   // cli. Harness: the workspaces packages/node-ui/e2e imports, with their
@@ -434,37 +414,14 @@ const UNFOLLOWED_LOADS = new Map([
 // What the load-closure guard reports for a trace: each load whose file does
 // not select the requirement that reaches it, and each module load computed
 // or script path assembled at run time that UNFOLLOWED_LOADS does not
-// explain. The requirements (lane-entrypoints.mjs):
-// - a lane or `evm:<scope>` that loads the file;
-// - `build`: the shared build job's own checks run it;
-// - `install`: every job's install runs it (an install hook): full CI;
-// - `full`: a job outside the lanes runs it;
-// - `build-output:<workspace>`: that workspace's build or pack runs it, and
-//   every lane restores the output. A repository file needs full CI; a file
-//   in a package workspace must select every lane and scope the producing
-//   workspace's rule selects, except the browser suite for the runtime it
-//   follows after merge (BROWSER_SUITE_DEFERRED).
-// `plan(file)` plans a change to one file.
+// explain. What each requirement asks of a plan is requirementCoveredByPlan's
+// (lane-entrypoints.mjs). `plan(file)` plans a change to one file.
 function loadClosureGaps({ loaded, unfollowed }, { plan = (file) => pullRequestPlan([change(file)]) } = {}) {
-  const workspaceOf = (file) => Object.keys(WORKSPACE_RULES).find((workspace) => file.startsWith(`${workspace}/`));
-  const coversBuildOutput = (target, targetPlan, producer) => {
-    const workspace = workspaceOf(target);
-    if (!workspace) return false;
-    const { lanes, evmScopes } = WORKSPACE_RULES[producer];
-    return lanes.every((lane) => targetPlan.lanes[lane] || (lane === 'kosava_node_ui_e2e' && BROWSER_SUITE_DEFERRED.includes(workspace)))
-      && evmScopes.every((scope) => targetPlan.evmScopes.includes(scope));
-  };
   const missing = [];
   for (const [target, requirements] of loaded) {
     const targetPlan = plan(target);
-    if (targetPlan.mode === 'full') continue;
-    for (const [requirement, via] of requirements) {
-      const selected = requirement === 'full' || requirement === 'install' ? false
-        : requirement === 'build' ? needsSharedBuild(targetPlan)
-        : requirement.startsWith('build-output:') ? coversBuildOutput(target, targetPlan, requirement.slice('build-output:'.length))
-        : requirement.startsWith('evm:') ? targetPlan.evmScopes.includes(requirement.slice(4))
-        : targetPlan.lanes[requirement];
-      if (!selected) missing.push(`${requirement} loads ${target} via ${via}`);
+    for (const [required, via] of requirements) {
+      if (!requirementCoveredByPlan(required, targetPlan, target)) missing.push(`${required} loads ${target} via ${via}`);
     }
   }
   const computed = [...new Set([...unfollowed].flatMap(([file, specifiers]) => specifiers.map((specifier) => `${file}: ${specifier}`)))];
@@ -511,7 +468,7 @@ const INSTALL_HOOK_READS = new Map([
 // reason.
 function installReadGaps({ loaded, unresolvedReads }, { declared = INSTALL_HOOK_READS, plan = (file) => pullRequestPlan([change(file)]) } = {}) {
   const made = [...unresolvedReads]
-    .filter(([file]) => loaded.get(file)?.has('install'))
+    .filter(([file]) => loaded.get(file)?.has(requirement.install))
     .flatMap(([file, reads]) => reads.map((read) => `${file}: ${read}`));
   return {
     undeclared: made.filter((read) => !declared.has(read)),

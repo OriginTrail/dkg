@@ -5,8 +5,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 import { workflowExecution } from './ci-execution-graph.mjs';
-import { REPO_ROOT } from './ci-plan-fixtures.mjs';
-import { edgeRequirement, jobRequirement } from './lane-entrypoints.mjs';
+import { REPO_ROOT, change, pullRequestPlan } from './ci-plan-fixtures.mjs';
+import { edgeRequirement, jobRequirement, parseRequirement, requirement, requirementCoveredByPlan } from './lane-entrypoints.mjs';
 
 // The package scripts a workflow runs, as '<requirement> <workspace> <script>'.
 function scriptRuns(workflows, execution) {
@@ -73,4 +73,40 @@ test('workspace scripts count where CI runs them, not because their workspace ow
   ]) {
     assert.ok(real.has(run), run);
   }
+});
+
+test('each requirement kind is evaluated against a plan, and an unknown one is rejected', () => {
+  const plan = (file) => pullRequestPlan([change(file)]);
+  const covered = (required, file) => requirementCoveredByPlan(required, plan(file), file);
+  // A lane, an EVM scope and the shared build.
+  assert.equal(covered(requirement.lane('bura_cli'), 'packages/cli/src/cli.ts'), true);
+  assert.equal(covered(requirement.lane('tornado_core'), 'packages/cli/src/cli.ts'), false);
+  assert.equal(covered(requirement.evmScope('chain'), 'packages/chain/src/index.ts'), true);
+  assert.equal(covered(requirement.evmScope('chain'), 'packages/cli/src/cli.ts'), false);
+  assert.equal(covered(requirement.build, 'scripts/audit-dial-protocol.mjs'), true);
+  assert.equal(covered(requirement.build, 'docs/ci-delta-policy.md'), false);
+  // install and full need a full plan.
+  for (const required of [requirement.install, requirement.full]) {
+    assert.equal(covered(required, 'packages/cli/scripts/verify-node-sqlite-runtime.mjs'), true, required);
+    assert.equal(covered(required, 'packages/cli/src/cli.ts'), false, required);
+  }
+  // Build output: a repository file needs full CI; a workspace file needs
+  // the producer's lanes, less the browser suite for the deferred runtime; a
+  // producer without a rule is met only by a full plan.
+  const cli = requirement.buildOutput('packages/cli');
+  assert.equal(covered(cli, 'scripts/copy-cli-runtime-assets.mjs'), true);
+  assert.equal(covered(cli, 'scripts/devnet-publish-helpers.sh'), false);
+  assert.equal(covered(cli, 'packages/storage/blazegraph-namespace-contract.cjs'), true);
+  const withoutBrowser = { ...plan('packages/graph-viz/src/index.ts'), lanes: { ...plan('packages/graph-viz/src/index.ts').lanes, kosava_node_ui_e2e: false } };
+  assert.equal(requirementCoveredByPlan(cli, withoutBrowser, 'packages/graph-viz/src/index.ts'), false);
+  assert.equal(covered(requirement.buildOutput('devnet/_bootstrap'), 'packages/cli/src/cli.ts'), false);
+  assert.equal(covered(requirement.buildOutput('devnet/_bootstrap'), 'package.json'), true);
+  // Unknown kinds are rejected, not read as lanes.
+  for (const text of ['bura-cli', 'evm:nope', 'build-output:', 'lane:bura_cli', '']) {
+    assert.throws(() => parseRequirement(text), /unknown routing requirement/, text);
+    assert.throws(() => requirementCoveredByPlan(text, plan('package.json'), 'package.json'), /unknown routing requirement/, text);
+  }
+  assert.throws(() => requirement.lane('bura-cli'), /unknown CI lane/);
+  assert.throws(() => requirement.evmScope('nope'), /unknown EVM scope/);
+  assert.throws(() => requirement.buildOutput(''), /names the workspace/);
 });
