@@ -31,14 +31,15 @@ nodes.
    covered here.)
 3. A second edge subscribed with `#<on-chain id>` lands on the same cleartext
    graph and converges on the same VM content.
-4. The SWM copy shared before either edge subscribed backfills on both. This is
-   its own test because it depends on something the hash path does not: holders
-   serve a graph's shared working memory only once their RFC-64 authority
-   pipeline has accepted it (a finalized authority index polled every few
-   minutes), and right after `devnet.sh start` that pipeline can lag or trip its
-   RPC circuit for many minutes (`chain event log moved`, `RFC-64 authority RPC
-   circuit is open`). Give a freshly started devnet a few minutes, or run this
-   suite after others, as the sweep does.
+4. The SWM copy of a second graph, shared but never published, backfills on
+   both edges after they subscribe by hash (edge 5) and by numeric id (edge 6).
+   This is its own graph and its own test because it depends on something the
+   hash path does not: holders serve a graph's shared working memory only once
+   their RFC-64 authority pipeline has accepted it (a finalized authority index
+   polled every few minutes), and right after `devnet.sh start` that pipeline can
+   lag or trip its RPC circuit for many minutes (`chain event log moved`,
+   `RFC-64 authority RPC circuit is open`). If it fails on a freshly started devnet,
+   give the devnet time or run the suite after others, as the sweep does.
 5. A graph registered directly on the chain with a name commitment whose
    preimage no node holds stays hash-only: no cleartext row is invented, and its
    catch-up (looked up by the hash) settles as `unreachable` with the
