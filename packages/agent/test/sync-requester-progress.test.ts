@@ -209,10 +209,10 @@ describe('a failing step of the snapshot walk carries the walk\'s progress out',
     putSnapshot: async ({ digest }: { digest: string }) => ({ ref: digest, byteLength: 1 }),
     lifecycle: {
       finalizedCleanupEnabled: false as const,
-      acquireExisting: async (ref: string) => {
+      snapshotExists: async (ref: string) => {
         probes.push(ref);
         if (ref === failing) throw failure;
-        return () => {};
+        return true;
       },
       markPublished: async () => {},
     },
@@ -290,8 +290,8 @@ describe('a failing step of the snapshot walk carries the walk\'s progress out',
   it('lets a revoked boundary win over a failing probe, with no progress attached', async () => {
     const { revoked, revoke, executionBoundary } = revocable();
     const store = storeProbing('second', new Error('probe failed'));
-    const probe = store.lifecycle.acquireExisting;
-    store.lifecycle.acquireExisting = async ref => {
+    const probe = store.lifecycle.snapshotExists;
+    store.lifecycle.snapshotExists = async ref => {
       // The boundary is revoked while the second probe is in flight.
       if (ref === 'second') revoke();
       return probe(ref);
@@ -304,8 +304,8 @@ describe('a failing step of the snapshot walk carries the walk\'s progress out',
   it('reports a boundary revoked during a probe that succeeds as the revocation, with no progress attached', async () => {
     const { revoked, revoke, executionBoundary } = revocable();
     const store = storeProbing('none', new Error('unused'));
-    const probe = store.lifecycle.acquireExisting;
-    store.lifecycle.acquireExisting = async ref => {
+    const probe = store.lifecycle.snapshotExists;
+    store.lifecycle.snapshotExists = async ref => {
       if (ref === 'second') revoke();
       return probe(ref);
     };
@@ -333,7 +333,7 @@ describe('a failing step of the snapshot walk carries the walk\'s progress out',
       const store = storeProbing('none', new Error('unused'));
       return {
         ...store,
-        lifecycle: { ...store.lifecycle, acquireExisting: async (ref: string): Promise<(() => void) | undefined> => { probes.push(ref); return undefined; } },
+        lifecycle: { ...store.lifecycle, snapshotExists: async (ref: string): Promise<boolean> => { probes.push(ref); return false; } },
       };
     };
 

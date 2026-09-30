@@ -254,18 +254,11 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
           operationLease: (ref: string) => this.lifecycleGate.acquire(snapshotHash(ref)),
         }
         : { finalizedCleanupEnabled: false as const }),
-      // `undefined` means the file is absent (ENOENT for every payload format) and nothing else does: any
+      // `false` means the file is absent (ENOENT for every payload format) and nothing else does: any
       // other failure to open it (EACCES, EIO, a directory or device at the path) rejects, and so does a
-      // failing gate, so reuse cannot mistake a present, unreadable file for a missing one.
-      acquireExisting: async ref => {
-        const hash = snapshotHash(ref);
-        const release = await this.lifecycleGate.acquire(hash);
-        try {
-          if (await withSnapshotSource(this.directory, hash, async source => source !== null)) return release;
-          release();
-          return undefined;
-        } catch (error) { release(); throw error; }
-      },
+      // failing gate, so reuse cannot mistake a present, unreadable file for a missing one. The lease the
+      // check needs is taken and released inside this call; the caller never owns one.
+      snapshotExists: async ref => this.withActiveSnapshotSource(snapshotHash(ref), async source => source !== null),
       markPublished: refs => this.finalizedCollector.markPublishedSnapshots(refs),
     };
     if (this.gcConfig.enabled) {

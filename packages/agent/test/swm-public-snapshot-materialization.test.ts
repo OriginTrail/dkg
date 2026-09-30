@@ -292,7 +292,7 @@ describe('public SWM snapshot materialization', () => {
     const acquire = vi.fn(async () => { active += 1; return release; });
     const store: WorkspacePublicSnapshotStore = Object.assign(new MemorySnapshotStore(), {
       // The cleanup flag says off in both cases: the scope follows the capability, not the flag.
-      lifecycle: { finalizedCleanupEnabled: false as const, acquireExisting: async () => () => {},
+      lifecycle: { finalizedCleanupEnabled: false as const, snapshotExists: async () => true,
         ...(offered ? { operationLease: acquire } : {}), markPublished: async () => {} },
     });
     let checkedMetadata = false;

@@ -8,16 +8,19 @@ type SnapshotLeaseAcquirer = (ref: string) => Promise<() => void>;
 
 interface WorkspaceSnapshotLifecycleMembers {
   /**
-   * Lease an existing source without decoding it. This is the authoritative existence probe, so
-   * it is consulted whether or not the store also offers `operationLease`.
+   * Whether the snapshot payload exists, checked without decoding it. This is the authoritative
+   * existence probe, so it is consulted whether or not the store also offers `operationLease`.
    *
-   * It resolves `undefined` ONLY when the snapshot is absent, and the caller then fetches it again.
+   * It resolves `false` ONLY when the snapshot is absent, and the caller then fetches it again.
    * Every other outcome must reject: a file that is present but cannot be opened (EACCES, EIO, not a
    * regular file), an exhausted resource (EMFILE) or a failing lease gate. The caller must not read
    * a rejection as "absent", because fetching a copy does not repair a present file (a write skips an
    * existing path), so the operation would report success while reads keep failing.
+   *
+   * Any lease the check needs stays inside the store: it is taken and released before this resolves,
+   * so the caller never owns one. What holds a file for a whole operation is `operationLease`.
    */
-  acquireExisting(ref: string): Promise<(() => void) | undefined>;
+  snapshotExists(ref: string): Promise<boolean>;
   markPublished(refs: readonly string[]): Promise<void>;
 }
 
@@ -33,14 +36,43 @@ interface WorkspaceSnapshotLifecycleMembers {
  *
  * The two are tied together where it matters: a lifecycle that reports finalized cleanup enabled must
  * offer `operationLease` (retirement scheduling and ACK-copy cleanup rely on operations holding their
- * files), so the type rejects one that does not. A cleanup-disabled lifecycle may still offer it. A
- * value that gets past the type anyway (a cast, plain JavaScript) is not repaired: it simply gets no
- * operation-long lease.
+ * files), so the type rejects one that does not. A cleanup-disabled lifecycle may still offer it.
+ *
+ * The type cannot see a value built outside the compiler (plain JavaScript, a cast, an object written
+ * for the earlier `acquire`/`acquireExisting` shape). {@link assertWorkspaceSnapshotLifecycle} refuses
+ * such a lifecycle where it is first used, with a message that names the new contract, instead of
+ * letting a cleanup-enabled store run without operation-long leases.
  */
 export type WorkspaceSnapshotLifecycle = WorkspaceSnapshotLifecycleMembers & (
   | { readonly finalizedCleanupEnabled: true; readonly operationLease: SnapshotLeaseAcquirer }
   | { readonly finalizedCleanupEnabled: false; readonly operationLease?: SnapshotLeaseAcquirer }
 );
+
+const LIFECYCLE_CONTRACT_NOTE = 'The lifecycle contract changed: operationLease(ref) replaces acquire(ref) for '
+  + 'operation-long leases, and the existence probe is now snapshotExists(ref): Promise<boolean>, which replaces '
+  + 'acquireExisting(ref). See docs/use-dkg/swm-public-snapshot-gc.md.';
+
+/**
+ * Fail loudly on a lifecycle that does not honor the contract, instead of running without the
+ * protection it promises. The type already rejects these shapes at compile time; this covers a value
+ * the compiler never saw. A cleanup-disabled lifecycle may omit `operationLease` (that is its policy),
+ * so only a cleanup-enabled one is required to offer it. The contract has never shipped in a release, so
+ * an object written for the earlier shape is not adapted: it is refused, and the message says what to change.
+ */
+export function assertWorkspaceSnapshotLifecycle(lifecycle: WorkspaceSnapshotLifecycle | undefined): void {
+  if (!lifecycle) return;
+  const shape = lifecycle as unknown as Readonly<Record<string, unknown>>;
+  const problems: string[] = [];
+  if (shape.finalizedCleanupEnabled && typeof shape.operationLease !== 'function') {
+    problems.push('It reports finalizedCleanupEnabled but offers no operationLease(ref), so operations would run without '
+      + 'operation-long leases and the collector could remove a snapshot between its write and the metadata commit that references it.');
+    if (typeof shape.acquire === 'function') {
+      problems.push('It still has the earlier acquire(ref) method, which is no longer read: offer the same lease as operationLease(ref).');
+    }
+  }
+  if (typeof shape.snapshotExists !== 'function') problems.push('It offers no snapshotExists(ref).');
+  if (problems.length > 0) throw new Error(`Invalid snapshot lifecycle. ${problems.join(' ')} ${LIFECYCLE_CONTRACT_NOTE}`);
+}
 
 /** All aliases of a physical directory in this process share one gate. */
 const directories = new Map<string, SnapshotLifecycleGate>();
@@ -149,6 +181,8 @@ export class WorkspaceSnapshotScope implements CompleteSnapshotIO {
   readonly getSnapshotPage: WorkspaceSnapshotIO['getSnapshotPage'];
 
   private constructor(private readonly store: WorkspacePublicSnapshotStore) {
+    // Every operation starts here, so a lifecycle that breaks the contract is refused before any I/O.
+    assertWorkspaceSnapshotLifecycle(store.lifecycle);
     if (store.validateSnapshot) this.validateSnapshot = async (ref, digest, count) => {
       await this.retain(ref);
       return store.validateSnapshot!(ref, digest, count);
@@ -187,13 +221,18 @@ export class WorkspaceSnapshotScope implements CompleteSnapshotIO {
     // lease can still have lost the file (for example to pressure GC), and reuse must then fetch it again.
     const lifecycle = this.store.lifecycle;
     if (!lifecycle) return true; // A custom I/O store without a lifecycle owns its retention policy.
-    // Only the store's explicit `undefined` means "absent". A probe that fails for any other reason
+    // Only the store's explicit `false` means "absent". A probe that fails for any other reason
     // (EACCES, EIO, EMFILE, a gate failure, a defect) propagates: fetching a copy would not repair a
     // file that is present but unreadable, because a write skips an existing path.
-    const existing = await lifecycle.acquireExisting(ref);
-    if (!existing) return false;
-    existing();
-    return true;
+    const exists: unknown = await lifecycle.snapshotExists(ref);
+    // Not a boolean is a broken probe, never "absent": for example the earlier acquireExisting, which
+    // resolved a lease (truthy, never released here) or undefined, renamed without changing its body.
+    if (typeof exists !== 'boolean') {
+      throw new TypeError('Snapshot lifecycle snapshotExists(ref) must resolve a boolean (true when the snapshot is present, '
+        + `false when it is absent), but it resolved ${exists === null ? 'null' : typeof exists}. It replaces acquireExisting(ref), `
+        + 'which resolved a lease or undefined. See docs/use-dkg/swm-public-snapshot-gc.md.');
+    }
+    return exists;
   }
 
   async putSnapshot(input: Parameters<WorkspaceSnapshotIO['putSnapshot']>[0]) {

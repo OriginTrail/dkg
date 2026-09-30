@@ -94,17 +94,18 @@ metadata. The background collector, on its existing five-minute interval:
    referencing the same bytes prevents deletion.
 3. Excludes active readers, serving pages, and file-plus-metadata writes. With
    finalized cleanup enabled, sync public and private recovery hold each
-   touched file's lease through the final metadata commit. Reused refs acquire
-   an existing-file lease without decoding the payload again; if collection
-   already removed it, normal recovery fetches it again before committing
-   metadata. Leases are shared by physical directory identity, including
+   touched file's lease through the final metadata commit. Reused refs take the
+   same lease and the store checks that the file still exists without decoding
+   the payload again; if collection already removed it, normal recovery fetches
+   it again before committing metadata. Leases are shared by physical directory identity, including
    symlink/junction and case aliases. A busy digest does not prevent collection
    of unrelated digests. With cleanup disabled these operation-long leases are
    not taken, so pressure GC treats a file only as in use while an individual
    read or write is running, as before this feature. Reuse still asks the store
-   whether the file exists, with a short-lived probe: a file that pressure GC
-   removed between rounds is fetched again rather than reported as present.
-   The probe answers "absent" only for a file that does not exist. A file that
+   whether the file exists (`snapshotExists`, a check whose short lease stays
+   inside the store): a file that pressure GC removed between rounds is fetched
+   again rather than reported as present. The probe answers "absent" only for a
+   file that does not exist. A file that
    is present but cannot be opened (a permission or I/O error, something that is
    not a regular file) makes the probe fail, and that failure ends the
    operation instead of being read as a missing file: fetching a copy would not
@@ -196,18 +197,29 @@ not protected by the process-local lease mechanism. Do not enable it on a
 directory concurrently used by another process. Do not retarget a directory
 symlink/junction or replace its underlying directory while the process runs.
 A custom snapshot store without the optional `lifecycle` capability keeps its
-own retention behavior. A store that has one implements `acquireExisting` (the
-existence probe, which resolves `undefined` only for an absent file and rejects
-for anything else) and `markPublished` (retirement scheduling), and reports
-`finalizedCleanupEnabled`. The lease itself is one optional operation,
-`operationLease(ref)`: a store that offers it makes every publication and
-recovery hold one lease per touched digest until its final metadata commit, and
-a store that omits it takes none. The file store offers it exactly when
-finalized cleanup is enabled. A lifecycle that reports finalized cleanup enabled
-must offer `operationLease`, and the `WorkspaceSnapshotLifecycle` type requires
-it; a value that omits it anyway (a cast, plain JavaScript) is not rejected at
-run time, it just gets no operation-long lease, so nothing keeps its files out
-of the collector for the length of an operation.
+own retention behavior. A store that has one implements `snapshotExists(ref)`
+(the existence probe: it resolves `true` for a present file and `false` only for
+an absent one, and rejects for anything else, such as an unreadable file or a
+failing lease gate; any short lease it needs stays inside the store),
+`markPublished` (retirement scheduling), and reports `finalizedCleanupEnabled`.
+The lease itself is one optional operation, `operationLease(ref)`: a store that
+offers it makes every publication and recovery hold one lease per touched digest
+until its final metadata commit, and a store that omits it takes none. The file
+store offers it exactly when finalized cleanup is enabled. A lifecycle that
+reports finalized cleanup enabled must offer `operationLease`, and the
+`WorkspaceSnapshotLifecycle` type requires it.
+
+Plain JavaScript, a cast, or an object written for the earlier `acquire` /
+`acquireExisting` shape gets past the type, so the same rule is enforced at run
+time, where the lifecycle is first used (when an operation scope starts, and when
+the publisher is constructed): a lifecycle that reports finalized cleanup enabled
+without an `operationLease` function, or that has no `snapshotExists` function,
+makes the scope or the publisher throw an error that names the current contract.
+It does not fall back to another method, and nothing runs without the
+operation-long leases that cleanup relies on. A cleanup-disabled lifecycle may
+omit `operationLease`; that is its retention policy, and it raises no error. A
+`snapshotExists` that resolves anything other than a boolean is refused too,
+rather than read as "absent".
 
 `WorkspaceSnapshotScope` owns a complete operation's I/O and `retainExisting`
 leases. Publication and recovery use `snapshotOperation`, whose implementation

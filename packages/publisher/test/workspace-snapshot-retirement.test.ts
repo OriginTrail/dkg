@@ -9,6 +9,7 @@ import {
 import {
   snapshotHash, snapshotLifecycleGate, snapshotReferenceCheck, withSnapshotScope, type WorkspaceSnapshotLifecycle,
 } from '../src/workspace-snapshot-lifecycle.js';
+import { PublishedSnapshotRetirement } from '../src/published-snapshot-retirement.js';
 import { makeQuads, snapshotPath } from './_helpers/workspace-snapshot-store.js';
 
 const directories: string[] = [];
@@ -439,7 +440,7 @@ describe('operation leases follow the finalized cleanup opt-in', () => {
   it('reports a file that pressure GC removed as missing while cleanup is off, so reuse fetches it again', async () => {
     const f = await fixture(undefined, { finalizedCleanupEnabled: false });
     const store = f.open();
-    const probe = vi.spyOn(store.lifecycle, 'acquireExisting');
+    const probe = vi.spyOn(store.lifecycle, 'snapshotExists');
     await withSnapshotScope(store, async snapshots => {
       expect(await snapshots!.retainExisting(digest)).toBe(true);
     });
@@ -502,7 +503,7 @@ describe('operation leases are an optional capability of the store', () => {
     };
   }
   const lifecycleOf = (over: Partial<WorkspaceSnapshotLifecycle>) => ({
-    finalizedCleanupEnabled: false, acquireExisting: async () => () => {},
+    finalizedCleanupEnabled: false, snapshotExists: async () => true,
     markPublished: async () => {}, ...over,
   }) as WorkspaceSnapshotLifecycle;
 
@@ -523,36 +524,103 @@ describe('operation leases are an optional capability of the store', () => {
     expect(active).toBe(0);
   });
 
-  it('takes no operation-long lease from a lifecycle that reports cleanup on but offers no operationLease', async () => {
-    const acquireExisting = vi.fn(async () => () => {});
+  it('takes no operation-long lease from a cleanup-disabled lifecycle that offers none, and raises no error', async () => {
+    const snapshotExists = vi.fn(async () => true);
     const markPublished = vi.fn(async () => {});
-    // The type refuses this (a cleanup-enabled lifecycle must offer operationLease). That refusal is
-    // pinned by the compiler-checked fixture test/_helpers/workspace-snapshot-lifecycle-types.ts, because
-    // vitest strips types and would never evaluate an expected error here. A cast or plain JavaScript still
-    // gets one through, and the scope then simply takes no operation-long lease.
-    const lifecycle = { finalizedCleanupEnabled: true, acquireExisting, markPublished } as unknown as WorkspaceSnapshotLifecycle;
-    const store = customStore(lifecycle);
+    const store = customStore(lifecycleOf({ finalizedCleanupEnabled: false, snapshotExists, markPublished }));
     await withSnapshotScope(store, async snapshots => {
       await snapshots!.putSnapshot({ digest, quads });
       await snapshots!.getSnapshot(digest);
       await snapshots!.validateSnapshot!(digest, digest, 1);
       await snapshots!.getSnapshotPage!(digest, 0, 1);
+      // Reuse still asks the probe: the lease policy and the existence question are separate.
+      expect(await snapshots!.retainExisting(digest)).toBe(true);
     });
     // Nothing but the existence probe (through retainExisting) and retirement scheduling touch a lifecycle.
-    expect(acquireExisting).not.toHaveBeenCalled();
+    expect(snapshotExists).toHaveBeenCalledExactlyOnceWith(digest);
     expect(markPublished).not.toHaveBeenCalled();
   });
 
+  describe('a lifecycle that breaks the contract is refused where it is first used', () => {
+    const CONTRACT_NOTE = ' The lifecycle contract changed: operationLease(ref) replaces acquire(ref) for operation-long leases, '
+      + 'and the existence probe is now snapshotExists(ref): Promise<boolean>, which replaces acquireExisting(ref). '
+      + 'See docs/use-dkg/swm-public-snapshot-gc.md.';
+    const NO_LEASE = 'Invalid snapshot lifecycle. It reports finalizedCleanupEnabled but offers no operationLease(ref), so operations '
+      + 'would run without operation-long leases and the collector could remove a snapshot between its write and the metadata '
+      + 'commit that references it.';
+    const LEGACY_ACQUIRE = ' It still has the earlier acquire(ref) method, which is no longer read: offer the same lease as operationLease(ref).';
+    const NO_PROBE = ' It offers no snapshotExists(ref).';
+
+    it('rejects a cleanup-enabled lifecycle without operationLease before any operation work', async () => {
+      const snapshotExists = vi.fn(async () => true);
+      const markPublished = vi.fn(async () => {});
+      const store = customStore({ finalizedCleanupEnabled: true, snapshotExists, markPublished } as unknown as WorkspaceSnapshotLifecycle);
+      const put = vi.spyOn(store, 'putSnapshot');
+      const operation = vi.fn(async () => 'ran');
+      // The type refuses this shape (the compiler-checked fixture pins that); a cast or plain JavaScript gets it here.
+      await expect(withSnapshotScope(store, operation)).rejects.toHaveProperty('message', `${NO_LEASE}${CONTRACT_NOTE}`);
+      expect(operation).not.toHaveBeenCalled();
+      expect(put).not.toHaveBeenCalled();
+      expect(snapshotExists).not.toHaveBeenCalled();
+      expect(markPublished).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['an explicit undefined operationLease', { operationLease: undefined }],
+      ['an operationLease that is a string', { operationLease: 'lease' }],
+    ])('rejects a cleanup-enabled lifecycle with %s', async (_label, extra) => {
+      const store = customStore({ finalizedCleanupEnabled: true, snapshotExists: async () => true, markPublished: async () => {}, ...extra } as unknown as WorkspaceSnapshotLifecycle);
+      await expect(withSnapshotScope(store, async () => 'ran')).rejects.toHaveProperty('message', `${NO_LEASE}${CONTRACT_NOTE}`);
+    });
+
+    it('says so when the lifecycle still has the earlier acquire/acquireExisting shape, and never calls it', async () => {
+      const acquire = vi.fn(async () => () => {});
+      const acquireExisting = vi.fn(async () => () => {});
+      const markPublished = vi.fn(async () => {});
+      const store = customStore({ finalizedCleanupEnabled: true, acquire, acquireExisting, markPublished } as unknown as WorkspaceSnapshotLifecycle);
+      const operation = vi.fn(async () => 'ran');
+      await expect(withSnapshotScope(store, operation)).rejects
+        .toHaveProperty('message', `${NO_LEASE}${LEGACY_ACQUIRE}${NO_PROBE}${CONTRACT_NOTE}`);
+      expect(operation).not.toHaveBeenCalled();
+      expect([acquire, acquireExisting, markPublished].map(fn => fn.mock.calls.length)).toEqual([0, 0, 0]);
+    });
+
+    it('refuses a lifecycle without the boolean existence probe, cleanup enabled or not', async () => {
+      for (const finalizedCleanupEnabled of [false, true]) {
+        const store = customStore({
+          finalizedCleanupEnabled, markPublished: async () => {}, acquireExisting: async () => () => {},
+          ...(finalizedCleanupEnabled ? { operationLease: async () => () => {} } : {}),
+        } as unknown as WorkspaceSnapshotLifecycle);
+        await expect(withSnapshotScope(store, async () => 'ran')).rejects
+          .toHaveProperty('message', `Invalid snapshot lifecycle.${NO_PROBE}${CONTRACT_NOTE}`);
+      }
+    });
+
+    it('does not refuse a cleanup-enabled lifecycle that offers operationLease, and leaves a custom store without a lifecycle alone', async () => {
+      const operationLease = vi.fn(async () => () => {});
+      await expect(withSnapshotScope(customStore(lifecycleOf({ finalizedCleanupEnabled: true, operationLease })),
+        async snapshots => { await snapshots!.getSnapshot(digest); return 'ran'; })).resolves.toBe('ran');
+      expect(operationLease).toHaveBeenCalledOnce();
+      await expect(withSnapshotScope(customStore(undefined), async () => 'ran')).resolves.toBe('ran');
+    });
+
+    it('fails a publisher\'s retirement at construction too, and accepts the file store\'s own lifecycle', async () => {
+      const f = await fixture();
+      const bad = { finalizedCleanupEnabled: true, snapshotExists: async () => true, markPublished: async () => {} } as unknown as WorkspaceSnapshotLifecycle;
+      expect(() => new PublishedSnapshotRetirement({} as OxigraphStore, bad)).toThrow(`${NO_LEASE}${CONTRACT_NOTE}`);
+      expect(() => new PublishedSnapshotRetirement({} as OxigraphStore, f.store.lifecycle)).not.toThrow();
+      expect(() => new PublishedSnapshotRetirement({} as OxigraphStore, undefined)).not.toThrow();
+    });
+  });
+
   it.each([true, false])('answers reuse from the existence probe of a custom lifecycle (present: %s)', async present => {
-    const release = vi.fn();
-    const acquireExisting = vi.fn(async () => present ? release : undefined);
+    const snapshotExists = vi.fn(async () => present);
     const operationLease = vi.fn(async () => () => {});
-    const store = customStore(lifecycleOf({ acquireExisting, operationLease }));
+    const store = customStore(lifecycleOf({ snapshotExists, operationLease }));
     await withSnapshotScope(store, async snapshots => {
       expect(await snapshots!.retainExisting(digest)).toBe(present);
     });
-    expect(acquireExisting).toHaveBeenCalledExactlyOnceWith(digest);
-    expect(release).toHaveBeenCalledTimes(present ? 1 : 0);
+    expect(snapshotExists).toHaveBeenCalledExactlyOnceWith(digest);
     expect(operationLease).toHaveBeenCalledOnce();
   });
 
@@ -561,25 +629,38 @@ describe('operation leases are an optional capability of the store', () => {
     ['a lifecycle gate failure', new Error('Snapshot directory needs a stable physical identity')],
     ['an implementation defect', new TypeError('probe is broken')],
   ])('lets an existence probe that throws (%s) fail the operation instead of reading as absent', async (_label, failure) => {
-    const acquireExisting = vi.fn(async (): Promise<(() => void) | undefined> => { throw failure; });
+    const snapshotExists = vi.fn(async (): Promise<boolean> => { throw failure; });
     const release = vi.fn();
     const operationLease = vi.fn(async () => release);
-    const store = customStore(lifecycleOf({ acquireExisting, operationLease }));
+    const store = customStore(lifecycleOf({ snapshotExists, operationLease }));
     await withSnapshotScope(store, async snapshots => {
       await expect(snapshots!.retainExisting(digest)).rejects.toBe(failure);
     });
-    expect(acquireExisting).toHaveBeenCalledExactlyOnceWith(digest);
+    expect(snapshotExists).toHaveBeenCalledExactlyOnceWith(digest);
     // The failed probe still closes with the operation: its lease is released.
     expect(release).toHaveBeenCalledOnce();
   });
 
-  it('keeps the store\'s explicit undefined as the one answer for absent, without any error', async () => {
-    const acquireExisting = vi.fn(async (): Promise<(() => void) | undefined> => undefined);
-    const store = customStore(lifecycleOf({ acquireExisting, operationLease: vi.fn(async () => () => {}) }));
+  it.each([
+    ['a lease function, as the earlier acquireExisting resolved', () => {}],
+    ['undefined', undefined],
+    ['null', null],
+    ['a string', 'true'],
+  ])('refuses a probe that resolves %s, which is neither present nor absent', async (_label, answer) => {
+    const snapshotExists = vi.fn(async () => answer as unknown as boolean);
+    const store = customStore(lifecycleOf({ snapshotExists, operationLease: vi.fn(async () => () => {}) }));
+    await withSnapshotScope(store, async snapshots => {
+      await expect(snapshots!.retainExisting(digest)).rejects.toThrow(/snapshotExists\(ref\) must resolve a boolean .* replaces acquireExisting\(ref\)/);
+    });
+  });
+
+  it('keeps the store\'s explicit false as the one answer for absent, without any error', async () => {
+    const snapshotExists = vi.fn(async () => false);
+    const store = customStore(lifecycleOf({ snapshotExists, operationLease: vi.fn(async () => () => {}) }));
     await withSnapshotScope(store, async snapshots => {
       await expect(snapshots!.retainExisting(digest)).resolves.toBe(false);
     });
-    expect(acquireExisting).toHaveBeenCalledExactlyOnceWith(digest);
+    expect(snapshotExists).toHaveBeenCalledExactlyOnceWith(digest);
   });
 
   it('lets a store without a lifecycle own reuse', async () => {

@@ -7,7 +7,7 @@ import { TypedEventBus, createGraphKnowledgeAssetScope, createOperationContext, 
   knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/dkg-publisher.js';
-import { FileWorkspacePublicSnapshotStore, workspacePublicQuadsDigest } from '../src/workspace-snapshot-store.js';
+import { FileWorkspacePublicSnapshotStore, workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '../src/workspace-snapshot-store.js';
 import { snapshotReferenceCheck } from '../src/workspace-snapshot-lifecycle.js';
 import { PublishedSnapshotRetirement } from '../src/published-snapshot-retirement.js';
 import { generateKnowledgeAssetShareMetadata } from '../src/metadata.js';
@@ -146,6 +146,23 @@ describe('published snapshot cleanup integration', () => {
     expect(await f.store.countQuads(asset.vm)).toBe(quads.length);
     f.advance();
     expect((await f.snapshots.collectGarbage()).deletedSnapshots).toBe(0);
+  });
+});
+
+describe('published snapshot cleanup: the publisher refuses a lifecycle that breaks the contract', () => {
+  it('fails at construction for a cleanup-enabled lifecycle without operationLease, and not for the file store\'s own', async () => {
+    const f = await fixture();
+    const base = { store: f.store, chain: new NoChainAdapter(), eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair() };
+    const custom = (lifecycle: unknown): WorkspacePublicSnapshotStore => ({
+      putSnapshot: async input => ({ ref: input.digest, byteLength: 1 }), getSnapshot: async () => null, lifecycle,
+    } as WorkspacePublicSnapshotStore);
+    const markPublished = async () => {};
+    expect(() => new DKGPublisher({ ...base, publicSnapshotStore: custom({ finalizedCleanupEnabled: true, snapshotExists: async () => true, markPublished }) }))
+      .toThrow(/^Invalid snapshot lifecycle\. It reports finalizedCleanupEnabled but offers no operationLease\(ref\)/);
+    expect(() => new DKGPublisher({ ...base, publicSnapshotStore: custom({ finalizedCleanupEnabled: false, acquireExisting: async () => () => {}, markPublished }) }))
+      .toThrow('It offers no snapshotExists(ref).');
+    expect(() => new DKGPublisher({ ...base, publicSnapshotStore: f.snapshots })).not.toThrow();
+    expect(() => new DKGPublisher({ ...base, publicSnapshotStore: custom(undefined) })).not.toThrow();
   });
 });
 
