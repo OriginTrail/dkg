@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import {
   createTripleStore,
+  loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
   loadMerkleVerifiedSharedMemorySlice,
 } from '../src/index.js';
@@ -229,6 +230,31 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       expect(result.quads.map((quad) => quad.object).sort()).toEqual(['"child"', '"root"']);
       expect(sources).toContain('test.cachedGraphSet');
       expect(sources).toContain(SOURCES.unbounded);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('enumerates an unrestricted complete family only inside the read snapshot', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('fb-complete-one-inventory');
+    const root = 'urn:fb:complete-one-inventory';
+    const outerListGraphs = vi.fn(store.listGraphs.bind(store));
+    const snapshotListGraphs = vi.fn(store.listGraphs.bind(store));
+    const snapshotRead = { query: store.query.bind(store), listGraphs: snapshotListGraphs };
+    const snapshotted = {
+      query: store.query.bind(store),
+      listGraphs: outerListGraphs,
+      withReadSnapshot: async (fn: (value: typeof snapshotRead) => Promise<unknown>) => fn(snapshotRead),
+    } as unknown as Parameters<typeof loadSelectedSharedMemoryQuads>[0];
+    try {
+      await store.insert([{ subject: root, predicate: 'urn:p', object: '"value"', graph: swm }]);
+      const quads = await loadSelectedSharedMemoryQuads(
+        snapshotted, swm, { rootEntities: [root] },
+      );
+      expect(quads.map((quad) => quad.object)).toEqual(['"value"']);
+      expect(outerListGraphs).not.toHaveBeenCalled();
+      expect(snapshotListGraphs).toHaveBeenCalledTimes(1);
     } finally {
       await store.close();
     }

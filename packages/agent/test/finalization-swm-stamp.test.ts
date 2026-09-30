@@ -167,6 +167,43 @@ describe('#1609 — SWM snapshot-root memo (finalization reconcile)', () => {
     }
   });
 
+  it('checks later stamped operations after an oversized stale candidate defers', async () => {
+    vi.stubEnv('DKG_LEGACY_SWM_MAX_FALLBACK_GRAPHS', '2');
+    try {
+      const store = withReadSnapshotForTest(new OxigraphStore());
+      const chain = new MockChainAdapter();
+      const fh = new FinalizationHandler(store, chain);
+      const wsGraph = contextGraphWorkspaceGraphUri(LOCAL_CG);
+      const rootEntity = 'urn:fact:later-valid';
+      const extraEntity = 'urn:fact:earlier-stale';
+      const expectedRoot = rootFor(rootEntity, 'verified content');
+      const stamp = `"${ethers.hexlify(expectedRoot)}"`;
+      const staleOp = 'urn:dkg:share:0-stale';
+      const validOp = 'urn:dkg:share:1-valid';
+      await store.insert([
+        { subject: rootEntity, predicate: 'http://schema.org/name', object: '"verified content"', graph: wsGraph },
+        { subject: extraEntity, predicate: 'http://schema.org/name', object: '"new content"', graph: wsGraph },
+        { subject: staleOp, predicate: 'http://dkg.io/ontology/rootEntity', object: rootEntity, graph: wsMetaGraph },
+        { subject: staleOp, predicate: 'http://dkg.io/ontology/rootEntity', object: extraEntity, graph: wsMetaGraph },
+        { subject: staleOp, predicate: SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE, object: stamp, graph: wsMetaGraph },
+        { subject: validOp, predicate: 'http://dkg.io/ontology/rootEntity', object: rootEntity, graph: wsMetaGraph },
+        { subject: validOp, predicate: SWM_SNAPSHOT_MERKLE_ROOT_PREDICATE, object: stamp, graph: wsMetaGraph },
+        ...[1, 2].map((n) => ({
+          subject: `urn:fact:decoy:${n}`, predicate: 'http://schema.org/name',
+          object: `"decoy ${n}"`, graph: `${wsGraph}/author/${n}`,
+        })),
+      ]);
+      chain.__registerKC({ kaId: 9906n, contextGraphId: ON_CHAIN_CG, merkleRootHex: ethers.hexlify(expectedRoot), chunks: [] });
+
+      expect(await reconcileOne(chain, fh, 9906n)).toBe('promoted');
+      expect(await isInVm(store, rootEntity, 'verified content')).toBe(true);
+      expect(await isInVm(store, extraEntity, 'new content')).toBe(false);
+      expect((await readStamps(store)).get(staleOp)).toBe(ethers.hexlify(expectedRoot));
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
   it('stamps every recomputed op with the exact computeFlatKCRoot value on an absent-KA miss', async () => {
     const store = new OxigraphStore();
     const chain = new MockChainAdapter();
