@@ -10,6 +10,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   LOG_MARK_FINGERPRINT_BYTES,
+  LOG_MARK_MAX_LINE_SCAN_BYTES,
+  LOG_MARK_SCAN_CHUNK_BYTES,
   markLog,
   matchingLinesSince,
   readLogSince,
@@ -38,6 +40,10 @@ const oldTrouble = (index: number): string =>
   `2026-09-29 09:00:0${index} [DKGAgent] Failed to persist context-graph subscription for "old-${index}": disk full\n`;
 
 const freshTrouble = 'DKGAgent.stop: context-graph subscription persistence did not drain within 5000ms\n';
+
+/** The start of a matching line that a test leaves unterminated and finishes after the mark. */
+const TROUBLE_HEAD = 'Failed to persist context-graph subscription for "big": ';
+const TROUBLE_TAIL = ' disk full';
 
 /** The daemon's startup rotation: keep only the tail of an oversized log, in place. */
 function rotate(keepLastBytes: number): void {
@@ -172,5 +178,149 @@ describe('log window', () => {
     const mark = markLog(file);
     expect(mark.fingerprint.length).toBeLessThanOrEqual(LOG_MARK_FINGERPRINT_BYTES);
     expect(mark.offset).toBe(readFileSync(file).length);
+  });
+});
+
+/**
+ * The mark of a log whose last line is still being written must never advance
+ * past the START of that line, however long the line already is. A mark inside
+ * the line (or at the end of the file) would leave the line's beginning, which
+ * is where a failure prefix such as "Failed to persist ..." lives, outside the
+ * window, so the finished line would no longer match.
+ */
+describe('log window with an unterminated last line', () => {
+  const unterminated = (length: number): string => TROUBLE_HEAD + 'x'.repeat(length - TROUBLE_HEAD.length);
+  const lineLengths = [
+    ['just under the fingerprint window', LOG_MARK_FINGERPRINT_BYTES - 1],
+    ['exactly the fingerprint window', LOG_MARK_FINGERPRINT_BYTES],
+    ['one byte over the fingerprint window', LOG_MARK_FINGERPRINT_BYTES + 1],
+    ['several fingerprint windows', LOG_MARK_FINGERPRINT_BYTES * 5 + 7],
+    ['one byte under a scan chunk', LOG_MARK_SCAN_CHUNK_BYTES - 1],
+    ['exactly a scan chunk', LOG_MARK_SCAN_CHUNK_BYTES],
+    ['one byte over a scan chunk', LOG_MARK_SCAN_CHUNK_BYTES + 1],
+    ['several scan chunks', LOG_MARK_SCAN_CHUNK_BYTES * 3 + 11],
+  ] as const;
+
+  it("reports a matching line that was longer than the fingerprint window when it was marked (the reviewer's case)", () => {
+    const partial = unterminated(LOG_MARK_FINGERPRINT_BYTES + 100);
+    writeFileSync(file, quiet(1) + partial);
+    const mark = markLog(file);
+    expect(mark.offset, 'the window starts where the unfinished line starts').toBe(Buffer.byteLength(quiet(1)));
+
+    appendFileSync(file, `${TROUBLE_TAIL}\n${quiet(2)}`);
+    const { lines, rotated } = matchingLinesSince(file, mark, TROUBLE);
+    expect(rotated).toBe(false);
+    expect(lines).toEqual([partial + TROUBLE_TAIL]);
+  });
+
+  it.each(lineLengths)('starts the window at an unfinished line that is %s, and reports the finished line whole', (_label, length) => {
+    const before = quiet(1, 300) + oldTrouble(1) + quiet(2, 300);
+    const partial = unterminated(length);
+    writeFileSync(file, before + partial);
+    const mark = markLog(file);
+    expect(mark.offset).toBe(Buffer.byteLength(before));
+    expect(mark.fingerprint.length).toBeLessThanOrEqual(LOG_MARK_FINGERPRINT_BYTES);
+
+    appendFileSync(file, `${TROUBLE_TAIL}\n${quiet(3)}${freshTrouble}`);
+    const { lines, rotated } = matchingLinesSince(file, mark, TROUBLE);
+    expect(rotated).toBe(false);
+    // The old matching line before the mark stays outside; the finished line and a later one count.
+    expect(lines).toEqual([partial + TROUBLE_TAIL, freshTrouble.trim()]);
+  });
+
+  it.each([
+    ['empty', 0],
+    ['shorter than the fingerprint window', 40],
+    ['exactly the fingerprint window', LOG_MARK_FINGERPRINT_BYTES],
+    ['one byte over the fingerprint window', LOG_MARK_FINGERPRINT_BYTES + 1],
+    ['one byte over a scan chunk', LOG_MARK_SCAN_CHUNK_BYTES + 1],
+    ['exactly the scan bound', LOG_MARK_MAX_LINE_SCAN_BYTES],
+    ['over the scan bound', LOG_MARK_MAX_LINE_SCAN_BYTES + LOG_MARK_SCAN_CHUNK_BYTES + 3],
+  ] as const)('reads a log with no newline at all, %s, from its start', (_label, length) => {
+    const partial = length === 0 ? '' : unterminated(Math.max(length, TROUBLE_HEAD.length));
+    writeFileSync(file, partial);
+    const mark = markLog(file);
+    expect(mark).toEqual({ offset: 0, fingerprint: Buffer.alloc(0) });
+
+    appendFileSync(file, `${partial === '' ? TROUBLE_HEAD : ''}${TROUBLE_TAIL}\n`);
+    const { lines, rotated } = matchingLinesSince(file, mark, TROUBLE);
+    expect(rotated).toBe(false);
+    expect(lines).toEqual([(partial === '' ? TROUBLE_HEAD : partial) + TROUBLE_TAIL]);
+  });
+
+  it('marks the end of a log that ends exactly on a newline, even after a line longer than the fingerprint window', () => {
+    const long = `${unterminated(LOG_MARK_FINGERPRINT_BYTES * 3)}\n`;
+    writeFileSync(file, quiet(1) + long);
+    const mark = markLog(file);
+    expect(mark.offset).toBe(Buffer.byteLength(quiet(1) + long));
+    expect(mark.fingerprint.length).toBe(LOG_MARK_FINGERPRINT_BYTES);
+
+    appendFileSync(file, quiet(2));
+    expect(matchingLinesSince(file, mark, TROUBLE)).toEqual({ lines: [], rotated: false });
+  });
+
+  it('finds the line start of an unfinished line that spans scan chunks and starts with multi-byte text', () => {
+    // A 3-byte character straddles every chunk boundary the backward scan reads.
+    const wide = '—'.repeat(Math.ceil((LOG_MARK_SCAN_CHUNK_BYTES * 2 + 100) / 3));
+    const partial = `${TROUBLE_HEAD}${wide}`;
+    const before = `${'é'.repeat(50)} restart ${'—'.repeat(20)}\n`;
+    writeFileSync(file, before + partial);
+    const bytes = readFileSync(file);
+    for (const boundary of [bytes.length - LOG_MARK_SCAN_CHUNK_BYTES, bytes.length - 2 * LOG_MARK_SCAN_CHUNK_BYTES]) {
+      expect(bytes[boundary]! & 0xc0, `the byte at ${boundary} must be inside a character`).toBe(0x80);
+    }
+
+    const mark = markLog(file);
+    expect(mark.offset).toBe(Buffer.byteLength(before));
+    expect(mark.offset).toBeGreaterThan(before.length);
+
+    appendFileSync(file, `${TROUBLE_TAIL}\n`);
+    const { lines, rotated } = matchingLinesSince(file, mark, TROUBLE);
+    expect(rotated).toBe(false);
+    expect(lines).toEqual([partial + TROUBLE_TAIL]);
+    expect(lines[0]).not.toContain('\uFFFD');
+  });
+
+  it('scans back as far as the bound: an unfinished line one byte shorter than it is still found', () => {
+    const before = oldTrouble(1) + quiet(1, 300);
+    const partial = unterminated(LOG_MARK_MAX_LINE_SCAN_BYTES - 1);
+    writeFileSync(file, before + partial);
+    const mark = markLog(file);
+    expect(mark.offset).toBe(Buffer.byteLength(before));
+
+    appendFileSync(file, `${TROUBLE_TAIL}\n`);
+    const { lines } = matchingLinesSince(file, mark, TROUBLE);
+    expect(lines).toEqual([partial + TROUBLE_TAIL]);
+  });
+
+  it('falls back to the whole file, over-reporting but never hiding a line, when the unfinished line is longer than the bound', () => {
+    const before = oldTrouble(1) + quiet(1, 300);
+    const partial = unterminated(LOG_MARK_MAX_LINE_SCAN_BYTES);
+    writeFileSync(file, before + partial);
+    const mark = markLog(file);
+    expect(mark).toEqual({ offset: 0, fingerprint: Buffer.alloc(0) });
+
+    appendFileSync(file, `${TROUBLE_TAIL}\n`);
+    const { lines, rotated } = matchingLinesSince(file, mark, TROUBLE);
+    expect(rotated).toBe(false);
+    // The old line is blamed on this run (the price of not finding the line start), and the finished line is there.
+    expect(lines).toEqual([oldTrouble(1).trim(), partial + TROUBLE_TAIL]);
+  });
+
+  it('still detects a rotation when the mark sits at the start of an oversized unfinished line', () => {
+    const before = Array.from({ length: 10 }, (_, i) => quiet(i, 1_000)).join('');
+    const partial = unterminated(LOG_MARK_FINGERPRINT_BYTES * 3);
+    writeFileSync(file, before + partial);
+    const mark = markLog(file);
+    expect(mark.offset).toBe(Buffer.byteLength(before));
+    expect(mark.fingerprint.length).toBe(LOG_MARK_FINGERPRINT_BYTES);
+
+    // The daemon restarts and rotates in place, dropping the oldest bytes, then logs on.
+    rotate(Math.floor(readFileSync(file).length / 2));
+    appendFileSync(file, `${TROUBLE_TAIL}\n${quiet(50)}${freshTrouble}`);
+
+    const { lines, rotated } = matchingLinesSince(file, mark, TROUBLE);
+    expect(rotated).toBe(true);
+    expect(lines).toEqual([freshTrouble.trim()]);
   });
 });
