@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { commandFiles } from './ci-execution-graph.mjs';
 import { REPO_ROOT } from './ci-plan-fixtures.mjs';
-import { dependenciesOf, loadReferences, traceLaneLoads } from './load-graph.mjs';
+import { dependenciesOf, loadReferences, repositoryContext, traceLaneLoads } from './load-graph.mjs';
 
 test('the load scanner sees these forms, and nothing it cannot resolve statically', () => {
   // The load-closure guard sees only what loadReferences recognises, so its
@@ -210,6 +210,61 @@ test('traceLaneLoads follows what a file runs, except workspace code the lanes s
   assert.equal(seeded.get('packages/node-ui/src/ui/api.ts')?.get('kosava_node_ui'), example);
   assert.equal(seeded.has('packages/node-ui/src/ui/http.ts'), false);
   assert.equal(seeded.get('scripts/check-npm-metadata.mjs')?.get('kosava_node_ui'), 'scripts/sync-chain-abis.mjs');
+});
+
+test('a module runs what its imported runners name, and reports an operand no reading resolves', () => {
+  // Runners are known by their import (an alias, a namespace or a require()
+  // binding runs as what it names; a RegExp's exec runs nothing), and every
+  // value an operand may take must name a repository file: one no reading
+  // resolves - a wrapper's parameter, a computed argument list, a template
+  // command - is reported (`assembled`) until the routing test lists it.
+  const references = (source) => loadReferences('packages/chain/test/example.test.ts', `import { join } from 'node:path';\n${source}`);
+  const tool = 'scripts/sync-chain-abis.mjs';
+  const toolPath = "join(root, 'scripts', 'sync-chain-abis.mjs')";
+  for (const [source, runs, assembled] of [
+    [`import { spawnSync as run } from 'node:child_process';\nrun(process.execPath, [${toolPath}]);`, [tool], []],
+    [`import * as cp from 'child_process';\ncp.execFileSync('node', ['--import', 'tsx', ${toolPath}]);`, [tool], []],
+    [`const { fork } = require('node:child_process');\nfork(${toolPath});`, [tool], []],
+    [`import { spawn } from 'node:child_process';\nconst script = fast ? ${toolPath} : ${toolPath};\nspawn(process.execPath, [script]);`, [tool], []],
+    [`import { spawn } from 'node:child_process';\nconst script = options.script ?? ${toolPath};\nspawn(process.execPath, [script]);`, [tool], ['script']],
+    ["import { spawnSync } from 'node:child_process';\nconst run = (file) => spawnSync(process.execPath, [file]);", [], ['file']],
+    ["import { spawnSync } from 'node:child_process';\nspawnSync(process.execPath, argumentsFor(name));", [], ['argumentsFor(name)']],
+    ["import { execSync } from 'node:child_process';\nexecSync(`node ${script}`);", [], ['`node ${script}`']],
+    ["import { execSync, spawnSync } from 'node:child_process';\nexecSync(`git clone \"${url}\"`);\nspawnSync('git', ['add', 'package.json']);\nspawnSync(process.execPath, ['-e', code]);", [], []],
+    ["import { Worker } from 'node:worker_threads';\nnew Worker(code, { eval: true });\n/x/.exec(name);", [], []],
+  ]) {
+    const { runs: found, assembled: reported } = references(source);
+    assert.deepEqual({ runs: found, assembled: reported }, { runs, assembled }, source);
+  }
+});
+
+test('a trace reads one repository context, a fixture workspace and its package scripts included', () => {
+  // Sources, files, workspaces and the root manifest all come from the
+  // context: a fixture shell script running a fixture workspace's package
+  // script reaches the repository script that package script runs, and its
+  // import, with no checkout file involved. Given only `read`, the rest is
+  // the checkout's, which has none of them.
+  const files = new Map([
+    ['fixture/run.sh', 'pnpm --filter fixture-a run build\n'],
+    ['fixture/a/package.json', JSON.stringify({ name: 'fixture-a', scripts: { build: 'node ../../scripts/fixture-build.mjs' } })],
+    ['scripts/fixture-build.mjs', "import './fixture-helper.mjs';\n"],
+    ['scripts/fixture-helper.mjs', ''],
+  ]);
+  const context = repositoryContext({
+    read: (file) => files.get(file),
+    isFile: (file) => files.has(file),
+    isDirectory: () => false,
+    workspaces: {
+      manifests: new Map([['fixture/a', JSON.parse(files.get('fixture/a/package.json'))]]),
+      workspaceByName: new Map([['fixture-a', 'fixture/a']]),
+    },
+    rootManifest: {},
+  });
+  const seeds = new Map([['fixture/run.sh', new Map([['bura_cli', 'seed']])]]);
+  const { loaded } = traceLaneLoads(seeds, { context });
+  assert.equal(loaded.get('scripts/fixture-build.mjs')?.get('bura_cli'), 'fixture/run.sh');
+  assert.equal(loaded.get('scripts/fixture-helper.mjs')?.get('bura_cli'), 'scripts/fixture-build.mjs');
+  assert.equal(traceLaneLoads(seeds, { read: (file) => files.get(file) }).loaded.has('scripts/fixture-build.mjs'), false);
 });
 
 test('a shell script reaches what the package scripts it runs reach', () => {

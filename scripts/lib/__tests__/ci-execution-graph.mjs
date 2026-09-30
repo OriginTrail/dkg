@@ -320,14 +320,29 @@ function executedWord(words) {
     }
   }
   const program = rest[at];
+  const operand = scriptOperand(program, rest.slice(at + 1));
+  if (operand === undefined) return program?.includes('/') && !/[=*?[]|^\/\/|:\/\//.test(program) ? program : undefined;
+  return operand >= 0 ? rest[at + 1 + operand] : undefined;
+}
+
+// Which of a script runner's arguments names the file it runs: the index of
+// its first operand past its options (an option that takes a value skips
+// that value), -1 when it runs inline code, a module or stdin instead, and
+// undefined when `program` (bash, source, node, python...) is no script
+// runner. An argument that is no literal text (undefined, from a module's
+// spawn call) could be anything, so it ends the search as the operand. The
+// shell reading (executedWord) and the module reading (load-graph.mjs) both
+// ask this.
+export function scriptOperand(program, args) {
   const runner = SCRIPT_RUNNERS.get(program);
-  if (!runner) return program?.includes('/') && !/[=*?[]|^\/\/|:\/\//.test(program) ? program : undefined;
-  for (at += 1; at < rest.length; at += 1) {
-    if (rest[at] === '-' || runner.inline.includes(rest[at])) return undefined;
-    if (runner.valued(rest[at])) at += 1;
-    else if (!/^[-+]/.test(rest[at])) return rest[at];
+  if (!runner) return undefined;
+  for (let at = 0; at < args.length; at += 1) {
+    if (args[at] === undefined) return at;
+    if (args[at] === '-' || runner.inline.includes(args[at])) return -1;
+    if (runner.valued(args[at])) at += 1;
+    else if (!/^[-+]/.test(args[at])) return at;
   }
-  return undefined;
+  return -1;
 }
 
 // A path whose file is picked at run time: past a leading $VARIABLE/ root (a

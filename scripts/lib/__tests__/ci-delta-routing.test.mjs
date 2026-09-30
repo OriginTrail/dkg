@@ -413,6 +413,28 @@ const UNFOLLOWED_LOADS = new Map([
     "the agent's built dist/sync/attempt-telemetry.js, built from agent source the agent rule routes"],
   ['scripts/devnet.sh: $cli_entry',
     "the CLI entry a devnet node starts from (node_cli_entry): packages/cli/dist/cli.js, built from CLI source whose rule selects both lanes that reach devnet.sh (the CLI lane and the browser suite), or a released version's under .devnet-versions/, outside the repository's files"],
+  // Files a child-process or worker call runs that no reading resolves.
+  ["devnet/rfc64-persistence-lifecycle/run.ts: childArguments(AGENT_PROCESS, stage ? ['--stage'] : [])",
+    'agent-process.ts beside it, run under tsx (childArguments puts the script after the loader flags); a devnet file with run.ts\'s own route'],
+  ['devnet/rfc64-persistence-lifecycle/run.ts: childArguments(LEASE_PROBE)',
+    'lease-probe.ts beside it, run under tsx; a devnet file with run.ts\'s own route'],
+  ['packages/agent/devnet/rfc64-private-catalog/run.mjs: agentProcess',
+    "agent-process.mjs beside it (AGENT_PROCESS) unless a caller passes its own; agent code with run.mjs's own route"],
+  ['packages/agent/src/sync-verify-worker.ts: workerPath',
+    "the agent's own sync-verify-worker-impl build (beside it, or under dist/), from agent source the agent rule routes"],
+  ['packages/chain/test/hardhat-harness.ts: hardhatCli', "hardhat's CLI, resolved from node_modules, not a repository file"],
+  ['packages/cli/src/migration.ts: cmd',
+    'the pnpm install and runtime build commands it runs in an update slot, a checkout outside the repository\'s files'],
+  ['packages/cli/test/auto-update-versioned-e2e.test.ts: cmd', 'the git commands its git() helper runs in temporary repositories'],
+  ["packages/cli/test/blazegraph-image-metadata.test.ts: join(cleanCliDir, 'blazegraph-image-metadata.cjs')",
+    "a copy of packages/cli/blazegraph-image-metadata.cjs in a temporary checkout; the file itself routes by the CLI rule"],
+  ['packages/cli/test/blue-green-integration.test.ts: cmd', 'the git commands its git() helper runs in temporary repositories'],
+  ['packages/cli/test/foreground-supervisor.test.ts: workerScript', 'a worker script the test writes to a temporary directory'],
+  ['packages/evm-module/utils/helpers.ts: command', 'git rev-parse commands; every evm-module change runs full CI'],
+  ['packages/random-sampling/src/proof-worker.ts: this.entryPath',
+    "the package's own proof-worker-entry beside it, or one a caller passes; random-sampling code its rule routes"],
+  ['packages/storage/src/adapters/oxigraph-worker.ts: this.workerPath',
+    "the storage package's own oxigraph-worker-impl (beside it, or its dist/ build), storage code its rule routes"],
 ]);
 
 // What the load-closure guard reports for a trace: each load whose file does
@@ -789,11 +811,29 @@ test('a module a lane runs as a child process is traced through its imports', ()
     ['scripts/audit-dial-protocol.mjs', "import './audit-create-random.mjs';"],
   ]);
   assert.deepEqual(selectedLanes(pullRequestPlan([change(tool)])), ['tornado_core']);
-  const trace = traceLaneLoads(new Map([[planted, new Map([['tornado_core', 'seed']])]]), { read: (file) => sources.get(file) });
-  assert.deepEqual(loadClosureGaps(trace).missing.sort(), [
+  const gaps = (test) => loadClosureGaps(traceLaneLoads(new Map([[test, new Map([['tornado_core', 'seed']])]]), { read: (file) => sources.get(file) }));
+  assert.deepEqual(gaps(planted).missing.sort(), [
     `tornado_core loads scripts/audit-dial-protocol.mjs via ${planted}`,
     `tornado_core loads scripts/check-npm-metadata.mjs via ${tool}`,
   ]);
+  // Through an aliased spawnSync the helper is still reported; through a
+  // wrapper whose parameter names the file, the call fails the guard itself
+  // until UNFOLLOWED_LOADS lists it.
+  const aliased = 'packages/chain/test/aliased.unit.test.ts';
+  const wrapped = 'packages/chain/test/wrapped.unit.test.ts';
+  sources.set(aliased, [
+    "import { spawnSync as run } from 'node:child_process';",
+    "import { join } from 'node:path';",
+    "run(process.execPath, [join(root, 'scripts', 'sync-chain-abis.mjs')]);",
+  ].join('\n'));
+  sources.set(wrapped, [
+    "import { spawnSync } from 'node:child_process';",
+    "import { join } from 'node:path';",
+    'const runScript = (file) => spawnSync(process.execPath, [file]);',
+    "runScript(join(root, 'scripts', 'sync-chain-abis.mjs'));",
+  ].join('\n'));
+  assert.deepEqual(gaps(aliased).missing, [`tornado_core loads scripts/check-npm-metadata.mjs via ${tool}`]);
+  assert.deepEqual(gaps(wrapped).unexplained, [`${wrapped}: file`]);
 });
 
 test('owning lanes and scopes cover every job that runs the workspace', () => {
