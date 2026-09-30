@@ -7,10 +7,11 @@ const automatedTest = suiteFile('automated.test.ts');
 const wireTest = suiteFile('wire.test.ts');
 const flowsTest = suiteFile('flows.test.ts');
 const daemonTest = suiteFile('daemon.test.ts');
+const catchupJobsTest = suiteFile('catchup-jobs.test.ts');
 
 export default defineConfig({
   test: {
-    include: [automatedTest, wireTest, flowsTest, daemonTest],
+    include: [automatedTest, wireTest, flowsTest, daemonTest, catchupJobsTest],
     testTimeout: 900_000,
     hookTimeout: 240_000,
     pool: 'forks',

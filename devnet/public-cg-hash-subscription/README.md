@@ -24,22 +24,28 @@ nodes.
 2. An edge subscribed with the hash alone ends up with a row keyed by the
    verified cleartext id (and none keyed by the hash), and holds the finalized
    VM copy published before it subscribed, identical to the author's. The
-   catch-up job the subscribe minted is reachable by its job id, the cleartext
-   id and the on-chain id, and names the cleartext graph. (That is asserted when
-   the subscribe request resolved the hash itself, the usual case: the job is then
-   keyed by the cleartext id and a lookup by the hash finds none. The test says so
-   on the console, and item 7 pins the by-hash lookup on purpose. When the
-   subscribe instead answered under the hash, the job is keyed by the hash and the
-   test asserts the by-hash lookup, and the cleartext aliases only if the job
-   continued under the cleartext id; it says on the console when they do not apply.
-   That branch did not run in any devnet run of this change.)
+   catch-up job the subscribe minted is readable by its job id, and which names
+   find it depends on how it came about (see "Which names a job answers to"):
+   - The subscribe request resolved the hash itself (the usual case): the job is
+     keyed by the cleartext id, so the cleartext id and the on-chain id name it and
+     a lookup by the hash finds none. The test says so on the console, and item 7
+     pins the by-hash lookup on purpose.
+   - The subscribe answered under the hash: the job is keyed by the hash and the
+     test asserts the by-hash lookup. Once the job has settled, it is either a job
+     that continued under the cleartext id (then the cleartext and on-chain ids name
+     it) or one that settled before the hash resolved and never continued (then the
+     hash names it, the on-chain id reaches it through the hash, and the cleartext id
+     names no job). The test prints which one it found. That branch did not run in
+     any devnet run of this change.
 3. A second edge subscribed with `#<on-chain id>` lands on the same cleartext
    graph and converges on the same VM content.
 4. A forced catch-up (`forceCatchup`, the operator's recovery) on an already
    converged graph mints a replacement job. Both aliases (cleartext id and
    on-chain id) then name it, the superseded job stays readable by its id, and
    the content is unchanged. The test converges an edge on a graph of its own
-   first (see "Structure").
+   first (see "Structure"). It reads the job that arrangement started by its id
+   (the cleartext id may never name it, see item 2) and classifies it before
+   forcing.
 5. The SWM copy of the shared-only graph (shared but never published) backfills on
    both edges after they subscribe by hash (edge 5) and by numeric id (edge 6).
    This is its own graph and its own test because it depends on something the
@@ -53,7 +59,10 @@ nodes.
    so it is not the hash path, and a forced re-subscribe recovers it only
    sometimes. The adoption and VM tests do not depend on it. Its two edges (one
    subscribed by hash, one by numeric id) are two scenarios run side by side, so
-   neither waits for the other's recovery.
+   neither waits for the other's recovery. Afterwards it asserts what is true of
+   whichever job is latest: a forced job (made under the cleartext id) is named by
+   the cleartext and on-chain ids; a first job that settled under the hash and never
+   continued is named by the hash, although the content converged.
 6. A graph registered directly on the chain with a name commitment whose
    preimage no node holds stays hash-only: no cleartext row is invented, and its
    catch-up (looked up by the hash) settles as `unreachable` with the
@@ -62,8 +71,11 @@ nodes.
    retrievable by that hash after a holder appears and the edge adopts the
    cleartext id (#2779): the same job id comes back by the hash and by its id, with
    the verdict it settled with (`unreachable`), and its identity note now reads
-   `resolved` with the cleartext id. It is arranged without stopping or restarting
-   any node:
+   `resolved` with the cleartext id. That job never continued under the cleartext id,
+   so the test also asserts its class: it is the hash-keyed settled job (the cleartext
+   id names no job) after a new connection, and it is replaced (the cleartext id names
+   the second subscribe's job) on the already-connected path. It is arranged without
+   stopping or restarting any node:
    1. The slot is registered straight on the contract with a name whose preimage
       only the suite knows, so no peer can reveal it and edge 5's subscribe by the
       hash is keyed by the hash, with the name-hash-only note.
@@ -168,6 +180,18 @@ another.
   (only a rejected request or a non-200 status is retried). `daemon.test.ts` proves
   it without a devnet, including that a malformed forced-subscribe reply rejects
   the SWM scenario's recovery instead of being swallowed.
+- **Which names a job answers to** (`catchup-jobs.ts`, `daemon.ts`
+  `expectLatestJobNamed`). A catch-up job is keyed by the id its subscribe was made
+  with. The cleartext id names it when it was made under the cleartext id or
+  continued under it (the hash resolved while it ran); a job that settled under the
+  hash before the hash resolved never continues, so only the hash and its job id name
+  it (and the on-chain id, which falls back to the hash) while the cleartext id names
+  no job, or a later job made under it. Asserting "the cleartext id names the latest
+  job" is therefore wrong for that job although the content converged. A pure
+  classification (continued, replaced, hash-keyed settled; anything else is a
+  failure) decides which of the three a job is, once it has settled, and the test
+  asserts what is true of that state and prints the decision. `catchup-jobs.test.ts`
+  and `daemon.test.ts` cover all three states without a devnet.
 - **Side-by-side scenarios** (`flows.ts`). The SWM test's two edges are scenario
   records (node, requested id, label) run through `runLabeledFlows`: all flows are
   awaited to their end even after one fails (so none keeps polling unobserved into
@@ -175,9 +199,9 @@ another.
 - **Unit tests without a devnet**: `wire.test.ts` (each validator accepts a
   real-shaped payload, the catch-up status ones built by the daemon's own
   `toCatchupStatusResponse`, and rejects a renamed or retyped field),
-  `daemon.test.ts` and `flows.test.ts`. They run with the suite's vitest config and
+  `daemon.test.ts`, `catchup-jobs.test.ts` and `flows.test.ts`. They run with the suite's vitest config and
   need no devnet:
-  `pnpm exec vitest run --config devnet/public-cg-hash-subscription/vitest.config.ts wire.test daemon.test flows.test`.
+  `pnpm exec vitest run --config devnet/public-cg-hash-subscription/vitest.config.ts wire.test daemon.test catchup-jobs.test flows.test`.
 
 ## Run
 

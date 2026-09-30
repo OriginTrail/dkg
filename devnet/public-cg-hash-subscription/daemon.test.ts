@@ -8,7 +8,7 @@
  * last entry repeats). The poller is fake too, so nothing sleeps: it probes up to a
  * fixed number of times and then times out the way the harness's `waitFor` does.
  */
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DevnetNode } from '../_bootstrap/harness.js';
 import {
   attemptOnce,
@@ -19,6 +19,7 @@ import {
   type DaemonIo,
   type HttpReply,
 } from './daemon.js';
+import { CatchupJobClassificationError } from './catchup-jobs.js';
 import { ENDPOINT, WireShapeError, parseSubscribeResponse } from './wire.js';
 
 const node5 = { num: 5 } as DevnetNode;
@@ -251,5 +252,111 @@ describe('subscribeWhenAdmitted', () => {
     expect(outcome).toBeInstanceOf(WireShapeError);
     expect(outcome).toMatchObject({ field: 'reply.catchup.jobId' });
     expect(count(SUBSCRIBE), 'a malformed reply is not retried').toBe(1);
+  });
+});
+
+describe('expectLatestJobNamed', () => {
+  const graph = { id: CG, nameHash: `0x${'ef'.repeat(32)}`, onChainId: '41' };
+  const status = '/api/sync/catchup-status?';
+  const byJobId = (jobId: string) => `${status}jobId=${jobId}`;
+  const byName = (name: string) => `${status}contextGraphId=${encodeURIComponent(name)}`;
+  const NO_JOB: HttpReply = { status: 404, json: { error: 'No catch-up job found' } };
+  const jobReply = (jobId: string, contextGraphId: string, jobStatus: string, extra: Record<string, unknown> = {}): HttpReply =>
+    ok({ jobId, contextGraphId, jobStatus, includeWorkspace: true, ...extra });
+  let logged: string[];
+
+  beforeEach(() => {
+    logged = [];
+    vi.spyOn(console, 'log').mockImplementation((line: unknown) => { logged.push(String(line)); });
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  const expectNamed = (io: DaemonIo, jobId = 'j1') => createDaemon(io).expectLatestJobNamed(node5, graph, jobId, 'test');
+
+  it('a job made under the cleartext id: the cleartext and on-chain ids must name it', async () => {
+    const named = jobReply('j1', graph.id, 'running');
+    const { io } = scriptedIo({ [byJobId('j1')]: [named], [byName(graph.id)]: [named], [byName(graph.onChainId)]: [named] });
+    await expect(expectNamed(io)).resolves.toEqual({ kind: 'continued', jobId: 'j1', how: 'created-under-cleartext-id' });
+    expect(logged.join('\n')).toContain('was made under the cleartext id');
+  });
+
+  it('fails when the on-chain id names another job than a job that continued under the cleartext id', async () => {
+    const continued = jobReply('j1', graph.nameHash, 'done', { resolvedContextGraphId: graph.id });
+    const { io } = scriptedIo({
+      [byJobId('j1')]: [continued],
+      [byName(graph.id)]: [continued],
+      [byName(graph.onChainId)]: [jobReply('j9', graph.id, 'done')],
+    });
+    await expect(expectNamed(io)).rejects.toThrow(/timed out after 30000ms waiting for: test: node5 names job j1 by devnet-hash-sub-daemon-test and 41/);
+  });
+
+  it('a hash-keyed job that settled and never continued: the hash and the on-chain id name it, the cleartext id names none', async () => {
+    const settled = jobReply('j1', graph.nameHash, 'unreachable');
+    const { io } = scriptedIo({
+      [byJobId('j1')]: [settled],
+      [byName(graph.id)]: [NO_JOB],
+      [byName(graph.nameHash)]: [settled],
+      [byName(graph.onChainId)]: [settled],
+    });
+    await expect(expectNamed(io)).resolves.toEqual({ kind: 'hash-keyed-settled', jobId: 'j1' });
+    expect(logged.join('\n')).toContain('NOT asserted: that the cleartext id names it');
+  });
+
+  it('waits for a hash-keyed job that has neither settled nor continued before it decides', async () => {
+    const settled = jobReply('j1', graph.nameHash, 'unreachable');
+    const { io, count } = scriptedIo({
+      [byJobId('j1')]: [jobReply('j1', graph.nameHash, 'queued'), jobReply('j1', graph.nameHash, 'running'), settled],
+      [byName(graph.id)]: [NO_JOB],
+      [byName(graph.nameHash)]: [settled],
+      [byName(graph.onChainId)]: [settled],
+    });
+    await expect(expectNamed(io)).resolves.toMatchObject({ kind: 'hash-keyed-settled' });
+    expect(count(byJobId('j1'))).toBe(3);
+  });
+
+  it('a hash-keyed job that settled without continuing, yet the cleartext id names it, is a failure of the reply', async () => {
+    const settled = jobReply('j1', graph.nameHash, 'unreachable');
+    const { io } = scriptedIo({ [byJobId('j1')]: [settled], [byName(graph.id)]: [settled] });
+    await expect(expectNamed(io)).rejects.toBeInstanceOf(CatchupJobClassificationError);
+  });
+
+  it('fails when the hash does not name the settled hash-keyed job', async () => {
+    const settled = jobReply('j1', graph.nameHash, 'unreachable');
+    const { io } = scriptedIo({
+      [byJobId('j1')]: [settled],
+      [byName(graph.id)]: [NO_JOB],
+      [byName(graph.nameHash)]: [NO_JOB],
+      [byName(graph.onChainId)]: [settled],
+    });
+    await expect(expectNamed(io)).rejects.toThrow(/names job j1 by 0x/);
+  });
+
+  it('fails when the cleartext id names a job after all, once the classification saw none', async () => {
+    const settled = jobReply('j1', graph.nameHash, 'unreachable');
+    const { io } = scriptedIo({
+      [byJobId('j1')]: [settled],
+      // none when classified, then a job appears: the assertion of the state re-reads it
+      [byName(graph.id)]: [NO_JOB, jobReply('j2', graph.id, 'running')],
+      [byName(graph.nameHash)]: [settled],
+      [byName(graph.onChainId)]: [settled],
+    });
+    await expect(expectNamed(io)).rejects.toThrow(/the cleartext id names no job while the settled job stayed under the hash/);
+  });
+
+  it('a hash-keyed job replaced by one under the cleartext id: the hash names the old job, the cleartext and on-chain ids the successor', async () => {
+    const settled = jobReply('j1', graph.nameHash, 'unreachable');
+    const successor = jobReply('j2', graph.id, 'running');
+    const { io } = scriptedIo({
+      [byJobId('j1')]: [settled],
+      [byName(graph.id)]: [successor],
+      [byName(graph.nameHash)]: [settled],
+      [byName(graph.onChainId)]: [successor],
+    });
+    await expect(expectNamed(io)).resolves.toEqual({ kind: 'replaced', jobId: 'j1', successorJobId: 'j2' });
+  });
+
+  it('fails on a job by its id that the daemon does not know', async () => {
+    const { io } = scriptedIo({ [byJobId('j1')]: [{ status: 404, json: { error: 'Catch-up job "j1" not found' } }] });
+    await expect(expectNamed(io)).rejects.toThrow(/test: the job by its id: .*not found/);
   });
 });

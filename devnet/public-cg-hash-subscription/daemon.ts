@@ -17,6 +17,13 @@
 import { expect } from 'vitest';
 import { getJson, normTerm, postJson, waitFor, type DevnetNode } from '../_bootstrap/harness.js';
 import {
+  classifyLatestCatchupJob,
+  describeLatestJobClass,
+  isClassifiable,
+  type GraphNames,
+  type LatestJobClass,
+} from './catchup-jobs.js';
+import {
   WireShapeError,
   parseCatchupStatusResponse,
   parseQueryBindings,
@@ -41,6 +48,11 @@ export interface DaemonIo {
 }
 
 export const harnessIo: DaemonIo = { get: getJson, post: postJson, waitFor };
+
+/** A graph as the catch-up assertions need it: both of its ids and its on-chain id. */
+export interface JobGraph extends GraphNames {
+  readonly onChainId: string;
+}
 
 export interface DaemonOptions {
   /** How long a recovery waits between two forced catch-ups. */
@@ -129,6 +141,70 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
       parseCatchupStatusResponse,
     );
     return res.ok ? res.body : null;
+  }
+
+  /** A catch-up job by its id; anything but a 200 fails with `label` and the raw body. */
+  async function catchupJob(node: DevnetNode, jobId: string, label: string): Promise<CatchupStatusReply> {
+    return expectOk(
+      await getChecked(node, `/api/sync/catchup-status?jobId=${encodeURIComponent(jobId)}`, parseCatchupStatusResponse),
+      label,
+    );
+  }
+
+  /** The latest job the graph has under either name: the cleartext id's, else the hash's; null when neither names one. */
+  async function findLatestJob(node: DevnetNode, graph: GraphNames): Promise<CatchupStatusReply | null> {
+    return (await catchupStatus(node, graph.id)) ?? catchupStatus(node, graph.nameHash);
+  }
+
+  /** Wait until a lookup by each of `ids` names job `jobId` as the latest job. */
+  async function waitUntilNamed(node: DevnetNode, label: string, jobId: string, ids: readonly string[]): Promise<void> {
+    await io.waitFor(`${label}: node${node.num} names job ${jobId} by ${ids.join(' and ')}`, 30_000, 2_000, async () => {
+      const found = await Promise.all(ids.map((id) => catchupStatus(node, id)));
+      return found.every((job) => job?.jobId === jobId) ? true : null;
+    });
+  }
+
+  /**
+   * Assert what is true of the graph's latest catch-up job `jobId`, whichever way
+   * it came about (see catchup-jobs.ts), and return how it was classified. It waits
+   * until a job made under the hash has settled or continued, because whether it
+   * continues under the cleartext id is only known then.
+   *
+   *   - continued (made under the cleartext id, or continued under it): the job
+   *     names the cleartext graph, and the cleartext id and the on-chain id name it.
+   *   - replaced (settled under the hash, a later job under the cleartext id): the
+   *     hash still names the job, and the cleartext id and the on-chain id name the
+   *     successor.
+   *   - hash-keyed-settled (settled under the hash, never continued, no successor):
+   *     the hash names it, the on-chain id reaches it through the hash, and the
+   *     cleartext id names no job. That the cleartext id names it is NOT asserted:
+   *     it cannot.
+   * The decision is printed, so a run never passes over a branch silently.
+   */
+  async function expectLatestJobNamed(node: DevnetNode, graph: JobGraph, jobId: string, label: string): Promise<LatestJobClass> {
+    const job = await io.waitFor(`${label}: node${node.num} job ${jobId} settled or continued under the cleartext id`, 180_000, 3_000, async () => {
+      const found = await catchupJob(node, jobId, `${label}: the job by its id`);
+      return isClassifiable(graph, found) ? found : null;
+    });
+    const cleartextAliasJob = (await catchupStatus(node, graph.id)) ?? undefined;
+    const cls = classifyLatestCatchupJob(graph, job, cleartextAliasJob);
+    // eslint-disable-next-line no-console
+    console.log(`hash-sub: ${label}: node${node.num}: ${describeLatestJobClass(graph, cls)}`);
+    switch (cls.kind) {
+      case 'continued':
+        expect(job.resolvedContextGraphId ?? job.contextGraphId, `${label}: the job names the cleartext graph`).toBe(graph.id);
+        await waitUntilNamed(node, label, jobId, [graph.id, graph.onChainId]);
+        break;
+      case 'replaced':
+        await waitUntilNamed(node, label, jobId, [graph.nameHash]);
+        await waitUntilNamed(node, label, cls.successorJobId, [graph.id, graph.onChainId]);
+        break;
+      case 'hash-keyed-settled':
+        await waitUntilNamed(node, label, jobId, [graph.nameHash, graph.onChainId]);
+        expect(await catchupStatus(node, graph.id), `${label}: the cleartext id names no job while the settled job stayed under the hash`).toBeNull();
+        break;
+    }
+    return cls;
   }
 
   /** The rows of a SELECT against one memory view: `null` when the node could not answer it (yet). */
@@ -307,6 +383,9 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
     getChecked,
     postChecked,
     catchupStatus,
+    catchupJob,
+    findLatestJob,
+    expectLatestJobNamed,
     subjectContent,
     pollSubjectContent,
     tryRowCount,

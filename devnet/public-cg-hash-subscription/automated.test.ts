@@ -21,8 +21,9 @@
  *      the hash; with a connected holder the request usually resolves the name
  *      itself, the job is keyed by the cleartext id and that lookup finds none, so
  *      test 2 then says on the console that it did not run it (and, when the job
- *      did stay keyed by the hash, asserts the cleartext aliases only if it
- *      continued under the cleartext id). Nothing about that lookup depends on the
+ *      did stay keyed by the hash, classifies the job once it settled: the cleartext
+ *      aliases must name it only if it continued under the cleartext id). Nothing
+ *      about that lookup depends on the
  *      timing of test 2: item 7 pins it.
  *   4. A forced catch-up (`forceCatchup`, the operator's recovery) on an already
  *      converged graph mints a replacement job that both aliases follow; the
@@ -34,8 +35,10 @@
  *      their RFC-64 authority pipeline has accepted the graph, and that pipeline
  *      can lag for many minutes after a devnet starts; the adoption and VM tests
  *      above do not depend on it. It is the one scenario that recovers
- *      explicitly (a forced catch-up once a minute), and afterwards it expects
- *      the aliases to name whichever job is latest. Its two edges are two
+ *      explicitly (a forced catch-up once a minute), and afterwards it asserts what
+ *      is true of whichever job is latest (a forced job is named by the cleartext and
+ *      on-chain ids; a first job that settled under the hash and never continued is
+ *      named by the hash only, see catchup-jobs.ts). Its two edges are two
  *      scenarios run side by side (flows.ts), so neither waits for the other's
  *      recovery.
  *   6. A graph registered on chain whose cleartext no peer holds stays hash-only:
@@ -169,6 +172,9 @@ const NAME_PREDICATE = 'https://schema.org/name';
 const {
   getChecked,
   catchupStatus,
+  catchupJob,
+  findLatestJob,
+  expectLatestJobNamed,
   subjectContent,
   pollSubjectContent,
   tryRowCount,
@@ -326,36 +332,21 @@ async function waitForAdoption(node: DevnetNode, graph: NamedGraph): Promise<Sub
  * `requestedId`) only when the node has no row for the graph, keyed by either
  * id; adoption and content are waits, which return at once when they already
  * hold. So it does the same thing whether or not another test, or an earlier
- * attempt of the same test, already subscribed this node.
+ * attempt of the same test, already subscribed this node. Returns the id of the
+ * catch-up job its own subscribe queued, or none when it did not subscribe (the
+ * job is then whichever the graph's names find).
  */
-async function ensureConverged(node: DevnetNode, graph: RegisteredGraph, requestedId: string, label: string): Promise<void> {
+async function ensureConverged(node: DevnetNode, graph: RegisteredGraph, requestedId: string, label: string): Promise<{ jobId?: string }> {
+  let jobId: string | undefined;
   const rows = await listSubscriptions(node);
   if (!rows.some((row) => row.contextGraphId === graph.id || row.contextGraphId === graph.nameHash)) {
     await waitUntilChainSlotObserved(node, graph.onChainId);
-    await subscribeWhenAdmitted(node, requestedId);
+    jobId = queuedJobId(await subscribeWhenAdmitted(node, requestedId));
   }
   await waitForAdoption(node, graph);
   const expected = await subjectContent(author, graph.id, graph.subject, 'verifiable-memory');
   await waitForContent(node, graph.id, graph.subject, 'verifiable-memory', expected, label);
-}
-
-/**
- * A catch-up job is readable by its id and names the graph, and both aliases of
- * the graph (its cleartext id and its on-chain id) name it as the latest job.
- */
-async function expectAliasesName(node: DevnetNode, graph: RegisteredGraph, jobId: string, label: string): Promise<void> {
-  const named = expectOk(
-    await getChecked(node, `/api/sync/catchup-status?jobId=${encodeURIComponent(jobId)}`, parseCatchupStatusResponse),
-    label,
-  );
-  expect(named.resolvedContextGraphId ?? named.contextGraphId, `${label}: the job names the cleartext graph`).toBe(graph.id);
-  await waitFor(`${label}: node${node.num} names job ${jobId} by cleartext id and on-chain id`, 30_000, 2_000, async () => {
-    const [byCleartextId, byOnChainId] = await Promise.all([
-      catchupStatus(node, graph.id),
-      catchupStatus(node, graph.onChainId),
-    ]);
-    return byCleartextId?.jobId === jobId && byOnChainId?.jobId === jobId ? true : null;
-  });
+  return jobId === undefined ? {} : { jobId };
 }
 
 /** Register a public, open graph through the daemon API. */
@@ -553,14 +544,15 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     expect(vmExpected.some((entry) => entry.includes(vmGraph.value))).toBe(true);
     await waitForContent(edgeA, vmGraph.id, vmGraph.subject, 'verifiable-memory', vmExpected, 'name-hash subscribe');
 
-    // The catch-up job the subscribe minted is reachable by its id, by the
-    // cleartext id and by the on-chain id, and names the cleartext graph. The wait
-    // above only reads, so nothing has replaced it: the job the subscribe returned
-    // is still the latest one.
+    // The catch-up job the subscribe minted is still the latest one (the wait above
+    // only reads, so nothing has replaced it) and is reachable by its id. Which names
+    // find it depends on how it came about, so it is classified first (see
+    // expectLatestJobNamed): made under the cleartext id, or continued under it, the
+    // cleartext and on-chain ids name it; settled under the hash before the hash
+    // resolved, only the hash does.
     const jobId = queuedJobId(subscribed);
     expect(jobId, JSON.stringify(subscribed)).toEqual(expect.any(String));
     if (subscribed.subscribed === vmGraph.id) {
-      await expectAliasesName(edgeA, vmGraph, jobId!, 'name-hash subscribe');
       // The subscribe request resolved the hash itself (the usual case with a
       // connected holder), so its job is keyed by the cleartext id and a lookup by
       // the hash finds no job (404 "No catch-up job found"). The by-hash lookup
@@ -574,25 +566,8 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
       // request), so the job is keyed by the hash. It is the job the hash names
       // (#2779).
       await expectByHashLookupResolved(edgeA, vmGraph, jobId!, 'name-hash subscribe');
-      // Decide only once the job is over: `resolvedContextGraphId` is set while the
-      // job runs, after its first round, so a job still in its first pass would
-      // wrongly take the "not asserted" path below.
-      const byHash = await waitFor(`node${edgeA.num} catch-up settles for the hash-keyed job`, 120_000, 3_000, async () => {
-        const found = await catchupStatus(edgeA, vmGraph.nameHash);
-        return found !== null && isTerminalCatchupJobState(found.jobStatus) ? found : null;
-      });
-      if (byHash.resolvedContextGraphId === vmGraph.id) {
-        // The job continued under the cleartext id while it ran, so the cleartext
-        // and on-chain aliases name it too: the assertion this test always made.
-        await expectAliasesName(edgeA, vmGraph, jobId!, 'name-hash subscribe');
-      } else {
-        // The hash resolved after the job settled, so only the hash (and the job id)
-        // name it and the cleartext aliases are not expected to (the SWM test makes
-        // the same allowance). Say so rather than skip the assertion silently.
-        // eslint-disable-next-line no-console
-        console.log(`hash-sub: the cleartext aliases were NOT asserted: the subscribe answered under the hash and its job settled before the hash resolved (resolvedContextGraphId=${byHash.resolvedContextGraphId ?? 'unset'}), so only the hash names it.`);
-      }
     }
+    await expectLatestJobNamed(edgeA, vmGraph, jobId!, 'name-hash subscribe');
   }, 900_000);
 
   it('a second edge subscribed by numeric on-chain id lands on the same cleartext graph and converges on VM (#2758)', async () => {
@@ -617,24 +592,31 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
   // the test neither needs nor disturbs the edges' state in the tests around it.
   it('a forced catch-up mints a replacement job that both aliases follow, keeps the superseded job readable, and leaves the content intact', async () => {
     const graph = fixture.forced;
-    await ensureConverged(edgeA, graph, graph.nameHash, 'arranging the converged edge');
+    const arranged = await ensureConverged(edgeA, graph, graph.nameHash, 'arranging the converged edge');
 
+    // The job the graph has before the forced catch-up. The arrange step's own job is
+    // polled by its id: when the subscribe answered under the hash and its job settled
+    // before the hash resolved, the cleartext id never names it, only the hash does.
+    // When a subscribe made earlier left the row (no job id here), whichever job the
+    // cleartext id or the hash names.
     const first = await waitFor(`node${edgeA.num} has a settled catch-up job for ${graph.id}`, 120_000, 3_000, async () => {
-      const found = await catchupStatus(edgeA, graph.id);
+      const found = arranged.jobId === undefined
+        ? await findLatestJob(edgeA, graph)
+        : await catchupJob(edgeA, arranged.jobId, 'the arranged catch-up job by its id');
       return found !== null && isTerminalCatchupJobState(found.jobStatus) ? found : null;
     });
+    await expectLatestJobNamed(edgeA, graph, first.jobId, 'before the forced catch-up');
 
     const forced = await forceCatchup(edgeA, graph.id);
     expect(forced.status, forced.detail).toBe(200);
     expect(forced.jobId, forced.detail).toEqual(expect.any(String));
     expect(forced.jobId, 'a settled graph gets a REPLACEMENT job, not the old one back').not.toBe(first.jobId);
 
-    // Both aliases now name the replacement; the superseded job is still there by its id.
-    await expectAliasesName(edgeA, graph, forced.jobId!, 'forced catch-up');
-    const superseded = expectOk(
-      await getChecked(edgeA, `/api/sync/catchup-status?jobId=${encodeURIComponent(first.jobId)}`, parseCatchupStatusResponse),
-      'the superseded job',
-    );
+    // Both aliases now name the replacement (made under the cleartext id, whatever
+    // the first job was keyed by); the superseded job is still there by its id.
+    const replacement = await expectLatestJobNamed(edgeA, graph, forced.jobId!, 'forced catch-up');
+    expect(replacement, 'the forced job is made under the cleartext id').toMatchObject({ kind: 'continued', how: 'created-under-cleartext-id' });
+    const superseded = await catchupJob(edgeA, first.jobId, 'the superseded job');
     expect(superseded.jobId).toBe(first.jobId);
 
     // The replacement runs to a verdict, and the content is exactly what it was.
@@ -680,18 +662,27 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
         await waitForAdoption(node, swmGraph);
 
         // The job the subscribe minted, checked before any recovery can replace
-        // it. (A subscribe that answered under the hash keyed its job by the hash,
-        // and its cleartext alias is not asserted here.)
+        // it. A subscribe that answered under the hash keyed its job by the hash, so
+        // it is classified only once it has settled: the check of the latest job below
+        // covers it.
         const firstJobId = queuedJobId(subscribed);
         expect(firstJobId, JSON.stringify(subscribed)).toEqual(expect.any(String));
-        if (subscribed.subscribed === swmGraph.id) await expectAliasesName(node, swmGraph, firstJobId!, `${label} (first job)`);
+        if (subscribed.subscribed === swmGraph.id) {
+          await expectLatestJobNamed(node, swmGraph, firstJobId!, `${label} (first job)`);
+        } else {
+          // eslint-disable-next-line no-console
+          console.log(`hash-sub: ${label}: node${node.num}: the first job ${firstJobId} is keyed by the hash (subscribed=${subscribed.subscribed}): it is classified once it has settled, with the latest job.`);
+        }
 
-        // Recover explicitly, and expect the aliases to follow whichever job is latest.
+        // Recover explicitly, then assert what is true of whichever job is latest: the
+        // forced job (made under the cleartext id) or, when content arrived without
+        // one, the first job, which may have settled under the hash and never gained a
+        // cleartext alias although the content converged.
         const latestJobId = await recoverUntilContent(
           node, swmGraph.id, swmGraph.subject, 'shared-working-memory', swmExpected, label,
           firstJobId!, 600_000,
         );
-        await expectAliasesName(node, swmGraph, latestJobId, `${label} (latest job)`);
+        await expectLatestJobNamed(node, swmGraph, latestJobId, `${label} (latest job)`);
       },
     })));
   }, 1_800_000);
@@ -803,6 +794,13 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     // hash resolved to.
     const byHash = await expectByHashLookupResolved(edgeA, graph, jobId!, 'late holder');
     expect(byHash.jobStatus, 'adopting the name does not rewrite the settled job').toBe(settled.jobStatus);
+    // This arrangement fixes what the job is: it settled under the hash before the hash
+    // resolved, so it never continued. With no second subscribe (a new connection) it is
+    // the hash-keyed settled job: only the hash, and the on-chain id through it, name it
+    // and the cleartext id names no job. With the second subscribe, that job under the
+    // cleartext id has replaced it as the cleartext id's and the on-chain id's latest.
+    const latest = await expectLatestJobNamed(edgeA, graph, jobId!, 'late holder');
+    expect(latest.kind, 'the late-adopted job settled under the hash and never continued').toBe(successorJobId === undefined ? 'hash-keyed-settled' : 'replaced');
     if (successorJobId !== undefined) {
       // The second subscribe's job is the cleartext id's latest; it did not take the hash's job over.
       expect(successorJobId, 'the explicit subscribe minted its own job').not.toBe(jobId);
