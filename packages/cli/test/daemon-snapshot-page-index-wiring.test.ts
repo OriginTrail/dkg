@@ -3,6 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
+import { createFakeDaemonAgent, createFakeDaemonHttpServer } from './_helpers/daemon-boot-doubles.js';
 
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
@@ -56,55 +57,6 @@ vi.mock('../src/publisher-runner.js', async importOriginal => {
 const { runDaemonInner } = await import('../src/daemon/lifecycle.js');
 const { SqliteSnapshotPageIndexStore } = await import('../src/daemon/snapshot-page-index-store.js');
 
-function createFakeServer() {
-  const server = {
-    listen: vi.fn((_port: number, _host: string, callback?: () => void) => {
-      callback?.();
-      return server;
-    }),
-    address: vi.fn(() => ({ port: 43123 })),
-    close: vi.fn((callback?: () => void) => {
-      callback?.();
-      return server;
-    }),
-    on: vi.fn(() => server),
-    once: vi.fn(() => server),
-  };
-  return server;
-}
-
-function createFakeAgent() {
-  return {
-    peerId: 'self-peer',
-    multiaddrs: [],
-    wallet: { keypair: { publicKey: new Uint8Array([1]), secretKey: new Uint8Array([2]) } },
-    store: {},
-    node: { libp2p: { getMultiaddrs: vi.fn(() => []) } },
-    eventBus: { on: vi.fn() },
-    assertion: { create: vi.fn(), write: vi.fn() },
-    setChatAcl: vi.fn(),
-    setSkillAcl: vi.fn(),
-    onChat: vi.fn(),
-    start: vi.fn(async () => undefined),
-    stop: vi.fn(async () => undefined),
-    publishProfile: vi.fn(async () => undefined),
-    ensureProfilePublished: vi.fn(async () => undefined),
-    publishRelayRegistry: vi.fn(async () => undefined),
-    ensureContextGraphLocal: vi.fn(async () => undefined),
-    getSubscribedContextGraphs: vi.fn(() => new Map()),
-    subscribeToContextGraph: vi.fn(),
-    pingPeers: vi.fn(async () => undefined),
-    listLocalAgents: vi.fn(() => []),
-    registerImportedArtifactByteStore: vi.fn(),
-    getDefaultAgentAddress: vi.fn(() => undefined),
-    query: vi.fn(async () => ({ type: 'bindings', bindings: [] })),
-    createContextGraph: vi.fn(),
-    listContextGraphs: vi.fn(async () => []),
-    createACKTransportFactory: vi.fn(() => ({})),
-    drainRpcUsage: vi.fn(() => ({ calls: 0, errors: 0, throttledMs: 0, byEndpoint: {} })),
-  };
-}
-
 function closeDashboardDbFromAgentCreateArg(createArg: any): void {
   const db =
     createArg?.chainEventCursorStore?.cursors?.db
@@ -129,8 +81,8 @@ describe('runDaemonInner public snapshot page-index wiring', () => {
     sigintListeners = process.listeners('SIGINT') as NodeJS.SignalsListener[];
     sigtermListeners = process.listeners('SIGTERM') as NodeJS.SignalsListener[];
 
-    mocks.createServer.mockImplementation(createFakeServer);
-    mocks.agentCreate.mockResolvedValue(createFakeAgent());
+    mocks.createServer.mockImplementation(() => createFakeDaemonHttpServer());
+    mocks.agentCreate.mockResolvedValue(createFakeDaemonAgent());
     mocks.backfillOnBoot.mockResolvedValue(undefined);
     mocks.createPublisherControlFromStore.mockReturnValue({ __brand: 'publisher-control' });
     mocks.startPublisherRuntimeWithOutcome.mockResolvedValue({
