@@ -35,6 +35,8 @@ const ENCODER = new TextEncoder();
 export interface ExactAssetExportLease {
   readonly rows: readonly SyncRow[];
   readonly identity: string;
+  /** Observational count for this successful lease; absent on custom fixtures. */
+  readonly wholePayloadExports?: 0 | 1;
   /** Source/metadata fence after the handler's last asynchronous encoding boundary. */
   assertCurrent(): Promise<void>;
   /** The handler holds the charge through serialization and physical compression. */
@@ -232,6 +234,7 @@ export function createBoundedExactAssetExportCache(params: {
     keep: boolean,
     request: ExactAssetExportRequest,
     sourceRevision: string | null,
+    wholePayloadExports: 0 | 1,
   ): ExactAssetExportLease | null => {
     const responseId = Symbol('exact-export-response');
     budget.touch(entry.id);
@@ -245,6 +248,7 @@ export function createBoundedExactAssetExportCache(params: {
     return Object.freeze({
       rows: entry.rows,
       identity: entry.identity,
+      wholePayloadExports,
       async assertCurrent() {
         if (released) throw changed();
         const metadata = await readMetadata({ ...request, expectedIdentity: entry.identity });
@@ -282,7 +286,7 @@ export function createBoundedExactAssetExportCache(params: {
           throwIfAborted(request.signal);
           if (revisionKey(request.graph, metadata.metaGraph) !== revision) throw changed();
           cacheHits += 1;
-          return lease(hit, true, request, revision);
+          return lease(hit, true, request, revision, 0);
         }
       }
       const id = Symbol('exact-asset-export');
@@ -338,7 +342,7 @@ export function createBoundedExactAssetExportCache(params: {
           }
           if (cache.size < maxEntries) cache.set(key, entry);
         }
-        const acquired = lease(entry, cache.get(key) === entry, request, revision);
+        const acquired = lease(entry, cache.get(key) === entry, request, revision, 1);
         if (!acquired) discard(entry);
         retained = acquired !== null;
         return acquired;

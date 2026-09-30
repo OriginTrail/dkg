@@ -19,11 +19,14 @@ import {
 import { createHash } from 'node:crypto';
 import { setTimeout as waitForPeerEventTurn } from 'node:timers/promises';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
+import { exactBatchStreamUnsupported, rememberExactBatchStreamUnsupported } from './sync/exact-batch-stream-capability.js';
+import { observeExactBatch } from './sync/exact-batch-observation.js';
 import { createStorageACKRegistrationPlan } from './p2p/storage-ack-registrar.js';
 import { syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
+  exchangeExperimentalExactBatch, registerExperimentalExactBatchResponder, ExperimentalExactBatchUnsupportedError, type ExactBatchTransportEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
   PROTOCOL_ACCESS, PROTOCOL_PUBLISH, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC_CHANGELOG, PROTOCOL_QUERY_REMOTE, PROTOCOL_GET_CIPHERTEXT_CHUNK, PROTOCOL_VERIFY_PROPOSAL, PROTOCOL_JOIN_REQUEST,
   PROTOCOL_NETWORK_IDENTITY, advertisesSyncProtocol,
@@ -390,6 +393,11 @@ import {
   registerSyncHandler,
   resolveSyncResponderSnapshotPolicy,
 } from './sync/responder/sync-handler.js';
+import { createExactBatchResponderBinding } from './sync/responder/exact-batch-stream.js';
+import {
+  EXACT_BATCH_AGENT_CODEC, exactBatchTransportOptions, exactBatchStartFrame, exchangeExactBatchVerified,
+} from './sync/requester/exact-batch-stream.js';
+import { EXACT_BATCH_STREAM_PROTOCOL } from './sync/exact-batch-stream-contract.js';
 import {
   runSelectedSharedMemoryRetry,
   runRegistrySyncOnConnect,
@@ -1318,6 +1326,8 @@ function durableSyncSingleFlightKey(params: {
   exactAssetUals?: readonly string[];
   settlementSliceTimeoutMs?: number;
   priority?: number;
+  experimentalExactBatchStreamOnly?: boolean;
+  experimentalExactBatchStreamDisabled?: boolean;
 }): string | null {
   if (
     params.hasPhaseCallback
@@ -1340,6 +1350,8 @@ function durableSyncSingleFlightKey(params: {
     syncAgentsMeta: params.syncAgentsMeta,
     exactAssetUals: params.exactAssetUals ?? null,
     settlementSliceTimeoutMs: params.settlementSliceTimeoutMs ?? null,
+    experimentalExactBatchStreamOnly: params.experimentalExactBatchStreamOnly === true,
+    experimentalExactBatchStreamDisabled: params.experimentalExactBatchStreamDisabled === true,
     priority: params.priority ?? null,
   });
 }
@@ -1680,6 +1692,10 @@ export type DurableSyncOptions = {
   exactAssetSelection?: ExactAssetSelection;
   /** VM update refreshes must not reuse a responder snapshot from an older KA version. */
   forceFreshExactSession?: boolean;
+  /** Internal streaming plan: never replay an enlarged selection through legacy aggregation. */
+  experimentalExactBatchStreamOnly?: boolean;
+  /** Internal sizing decision: keep unknown/oversize KAs on the ordinary singleton wire. */
+  experimentalExactBatchStreamDisabled?: boolean;
   /** Owner-private retained META prefix for bounded durable recovery. */
   durableMetaContinuation?: DurableMetaContinuation;
   /** Admission override for foreground VM recovery. */
@@ -1704,6 +1720,8 @@ export interface ExactKnowledgeAssetSyncResult {
   readonly disposition: ExactDurableFetchDisposition;
   readonly responderCapability?: ExactAssetResponderCapability;
   readonly authenticatedAssets?: readonly ChallengePinnedGraphScopedAsset[];
+  /** Physically applied by the experimental stream, even if final transport close failed. */
+  readonly committedExactAssetUals?: readonly string[];
 }
 
 type PhysicalDurableSyncResult = {
@@ -1711,6 +1729,7 @@ type PhysicalDurableSyncResult = {
   readonly exactFetchDisposition?: ExactDurableFetchDisposition;
   readonly exactResponderCapability?: ExactAssetResponderCapability;
   readonly authenticatedExactAssets?: readonly ChallengePinnedGraphScopedAsset[];
+  readonly committedExactAssetUals?: readonly string[];
 };
 
 type LegacyDurableContextGraphOptions = {
@@ -1730,6 +1749,8 @@ type LegacyDurableContextGraphOptions = {
   signal?: AbortSignal;
   isCurrent?: () => boolean;
   durableMetaContinuation?: DurableMetaContinuation;
+  experimentalExactBatchStreamOnly?: boolean;
+  experimentalExactBatchStreamDisabled?: boolean;
 };
 
 const DURABLE_AUTHENTICATION_MAX_ATTEMPTS = 5;
@@ -3240,6 +3261,31 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       peerId: this.peerId,
       parseSyncRequest: this.parseSyncRequest.bind(this),
       authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
+      onExperimentalExactBatchResources: process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1'
+        && this.config.nodeRole === 'core'
+        ? (resources) => {
+            const binding = createExactBatchResponderBinding({
+              localPeerId: this.peerId,
+              store: this.store,
+              exportCache: resources.exportCache,
+              admission: resources,
+              parseSyncRequest: this.parseSyncRequest.bind(this),
+              authorizeSyncRequest: this.authorizeSyncRequest.bind(this),
+              isPublicContextGraph: async (cg, signal) => (await this.resolveRegisteredContextGraphAuthority(cg, {
+                authorityReadMode: 'finalized-index-or-live', signal,
+              })).kind === 'public',
+              servingWithheld: (cg) => this.contextGraphServingWithheld(cg),
+              onExport: (assetIndex, wholePayloadExports, operationContext) => this.log.info(operationContext,
+                `Exact batch responder export asset=${assetIndex} wholePayloadExports=${wholePayloadExports}`),
+              onPayload: (assetIndex, plainBytes, encodedBytes, operationContext) => this.log.info(operationContext,
+                `Exact batch responder payload asset=${assetIndex} plainBytes=${plainBytes} encodedBytes=${encodedBytes}`),
+              onStage: (stage, assetIndex, durationMs, operationContext) => this.log.info(operationContext,
+                `Exact batch responder stage=${stage} asset=${assetIndex} durationMs=${durationMs.toFixed(3)}`),
+            });
+            registerExperimentalExactBatchResponder(this.router, EXACT_BATCH_AGENT_CODEC,
+              exactBatchTransportOptions(120_000), binding.authorizeRequest, binding.respond);
+          }
+        : undefined,
       // Serve-skip policy (#1233): withhold the no-consumer agents/_meta snapshot
       // unless the operator opts in. This is the env boundary — the pure
       // `shouldWithholdAgentsDurableMeta` resolver is called directly with a FRESH
@@ -5731,6 +5777,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let exactFetchDisposition: ExactDurableFetchDisposition | undefined;
     let exactResponderCapability: ExactAssetResponderCapability | undefined;
     const authenticatedExactAssets: ChallengePinnedGraphScopedAsset[] = [];
+    const committedExactAssetUals: string[] = [];
     const markExactFetchIncomplete = () => {
       if (exactAssetUals === undefined) return;
       exactFetchDisposition = mergeExactDurableFetchDisposition(
@@ -5760,6 +5807,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 fetchTimeoutMs,
                 exactAssetSelection,
                 forceFreshExactSession: options?.forceFreshExactSession,
+                experimentalExactBatchStreamOnly: options?.experimentalExactBatchStreamOnly,
+                experimentalExactBatchStreamDisabled: options?.experimentalExactBatchStreamDisabled,
                 authenticationTimeoutMs,
                 operationFetchDeadline: operationBoundary.fetchDeadline,
                 operationDeadline: operationBoundary.deadline,
@@ -5781,6 +5830,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             );
             if (detailed.authenticatedExactAssets !== undefined) {
               authenticatedExactAssets.push(...detailed.authenticatedExactAssets);
+            }
+            if (detailed.committedExactAssetUals !== undefined) {
+              committedExactAssetUals.push(...detailed.committedExactAssetUals);
             }
             return durableSyncAccumulatorFromResult(detailed.result);
           },
@@ -5848,6 +5900,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ...(authenticatedExactAssets.length === 0
           ? {}
           : { authenticatedExactAssets: Object.freeze([...authenticatedExactAssets]) }),
+        ...(committedExactAssetUals.length === 0
+          ? {}
+          : { committedExactAssetUals: Object.freeze([...committedExactAssetUals]) }),
       };
     };
 
@@ -5868,6 +5923,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasForcedFreshExactSession: options?.forceFreshExactSession === true,
       exactAssetUals,
       settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
+      experimentalExactBatchStreamOnly: options?.experimentalExactBatchStreamOnly,
+      experimentalExactBatchStreamDisabled: options?.experimentalExactBatchStreamDisabled,
       priority: options?.priority,
     });
     const runWithinBoundary = async () => {
@@ -5939,6 +5996,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
       forceFreshExactSession?: boolean;
+      experimentalExactBatchStreamOnly?: boolean;
+      experimentalExactBatchStreamDisabled?: boolean;
     },
   ): Promise<ExactKnowledgeAssetSyncResult>;
   syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
@@ -5949,6 +6008,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
       forceFreshExactSession?: boolean;
+      experimentalExactBatchStreamOnly?: boolean;
+      experimentalExactBatchStreamDisabled?: boolean;
     },
   ): Promise<ExactKnowledgeAssetSyncResult>;
   async syncExactKnowledgeAssetsFromPeerDetailed(this: DKGAgent,
@@ -5959,6 +6020,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       signal?: AbortSignal;
       isCurrent?: () => boolean;
       forceFreshExactSession?: boolean;
+      experimentalExactBatchStreamOnly?: boolean;
+      experimentalExactBatchStreamDisabled?: boolean;
     } = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
     const selection: ExactAssetSelection = Array.isArray(selectionInput)
@@ -5975,6 +6038,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       {
         exactAssetSelection: selection,
         forceFreshExactSession: options.forceFreshExactSession,
+        experimentalExactBatchStreamOnly: options.experimentalExactBatchStreamOnly,
+        experimentalExactBatchStreamDisabled: options.experimentalExactBatchStreamDisabled,
         stopOnBackoffWorthyFailure: true,
         priority: 1_000,
         source: 'vm-recovery',
@@ -5991,6 +6056,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...(detailed.authenticatedExactAssets === undefined
         ? {}
         : { authenticatedAssets: detailed.authenticatedExactAssets }),
+      ...(detailed.committedExactAssetUals === undefined
+        ? {}
+        : { committedExactAssetUals: detailed.committedExactAssetUals }),
     };
   }
 
@@ -6029,6 +6097,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       fetchTimeoutMs = SYNC_TOTAL_TIMEOUT_MS,
       exactAssetSelection,
       forceFreshExactSession,
+      experimentalExactBatchStreamOnly,
+      experimentalExactBatchStreamDisabled,
       authenticationTimeoutMs = fetchTimeoutMs,
       operationFetchDeadline,
       operationDeadline,
@@ -6398,6 +6468,121 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       };
     }
     if (exactAssetSelection !== undefined) {
+      const connectionKey = process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1' && !experimentalExactBatchStreamDisabled
+        ? this.getSyncReconcilerConnectionKey(remotePeerId)
+        : null;
+      if (process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1'
+        && !experimentalExactBatchStreamDisabled
+        && exactAssetSelection.kind === 'ual-only'
+        && this.chain.chainId !== 'none'
+        && !exactBatchStreamUnsupported(this, remotePeerId, connectionKey, Date.now())
+        && (await this.getPeerProtocols(remotePeerId)).includes(EXACT_BATCH_STREAM_PROTOCOL)
+        && (await this.resolveRegisteredContextGraphAuthority(contextGraphId, {
+          authorityReadMode: 'finalized-index-or-live', signal,
+        })).kind === 'public') {
+        // This method already runs inside normal global/CG admission. Keep the
+        // exact same guarded chain+binding+atomic+retirement callback above.
+        // Named fetch-assets preflight and challenge-pinned requests stay on
+        // their existing boundaries. Positive registered public authority
+        // permits the unchanged public pipe START, without imposing a node
+        // identity/signing prerequisite on a fresh Blackbox Edge.
+        const accumulator = createDurableSyncAccumulator();
+        const committedExactAssetUals: string[] = [];
+        const selected = exactAssetUalsForSelection(exactAssetSelection);
+        const start = await buildSyncRequestEnvelope({
+          contextGraphId, offset: 0, limit: SYNC_PAGE_SIZE, includeSharedMemory: false,
+          targetPeerId: remotePeerId, requesterPeerId: this.peerId, phase: 'data',
+          assetUals: selected, needsAuth: false,
+          computeSyncDigest: this.computeSyncDigest.bind(this),
+          getIdentityId: () => this.chain.getIdentityId(),
+          signMessage: typeof this.chain.signMessage === 'function' ? this.chain.signMessage.bind(this.chain) : undefined,
+        });
+        const remainingMs = Math.floor(contextGraphBudget.fetchDeadline - Date.now());
+        const exchangeStartedAtMs = Date.now();
+        let streamComplete = false, streamReadyMs = -1, startSent = 0, nativeAcceptedSentBytes = 0, receivedPayloadBytes = 0;
+        const sentFrames = [0, 0, 0, 0, 0, 0, 0, 0], receivedFrames = [0, 0, 0, 0, 0, 0, 0, 0];
+        const onTransportEvent = (event: ExactBatchTransportEvent) => {
+          if (event.event === 'streamReady') streamReadyMs = event.elapsedMs;
+          else if (event.event === 'bytes') {
+            if (event.direction === 'sent') nativeAcceptedSentBytes += event.byteLength;
+            else receivedPayloadBytes += event.byteLength;
+          } else {
+            const frames = event.direction === 'sent' ? sentFrames : receivedFrames;
+            frames[event.frameKind]! += 1;
+            if (event.direction === 'sent' && event.frameKind === 1) {
+              startSent += 1;
+              observeExactBatch(() => this.log.info(ctx,
+                `Exact batch requester start assetCount=${selected.length} requestEncodedBytes=${start.byteLength} sentAtMs=${Date.now()}`));
+            }
+          }
+        };
+        try {
+          if (remainingMs < 1) throw new Error('Exact batch recovery fetch deadline expired');
+          await exchangeExactBatchVerified(consume => exchangeExperimentalExactBatch(this.router, remotePeerId,
+            exactBatchStartFrame(start), EXACT_BATCH_AGENT_CODEC,
+            { ...exactBatchTransportOptions(Math.min(120_000, remainingMs), signal), assetUals: selected, onTransportEvent }, consume), {
+            contextGraphId, assetUals: selected, ctx,
+            parseAndFilter: (text, graph, cg) => this.getOrCreateSyncVerifyWorker().parseAndFilter(text, graph, cg),
+            processDurableBatchInWorker: durableContext.processDurableBatchInWorker,
+            authenticationDeadline: contextGraphBudget.createGraphScopedAuthenticationDeadline,
+            storeGraphScopedAsset: async request => {
+              const outcome = await durableContext.storeGraphScopedAsset!(request);
+              if (outcome === 'applied') {
+                recordDurableSyncDiagnostics(accumulator, {
+                  insertedDataTriples: request.asset.dataQuads.length,
+                  insertedMetaTriples: request.asset.metadataQuads.length,
+                  insertedTriples: request.asset.dataQuads.length + request.asset.metadataQuads.length,
+                  fetchedDataTriples: request.asset.dataQuads.length,
+                  fetchedMetaTriples: request.asset.metadataQuads.length,
+                });
+              }
+              return outcome;
+            },
+            onStage: (stage, assetIndex, durationMs) => this.log.info(ctx,
+              `Exact batch requester stage=${stage} asset=${assetIndex} durationMs=${durationMs.toFixed(3)}`),
+            onCommitted: (ual) => {
+              committedExactAssetUals.push(ual);
+              observeExactBatch(() => this.log.info(ctx, `Exact batch committed asset=${committedExactAssetUals.length - 1} committedAssets=${committedExactAssetUals.length}`));
+            },
+          });
+          streamComplete = true;
+          markDurableTerminalBoundary(accumulator, true, { countCompletedPhase: true });
+          return {
+            result: finalizeDurableSyncCompletion(accumulator), exactFetchDisposition: 'found',
+            committedExactAssetUals: Object.freeze([...committedExactAssetUals]),
+          };
+        } catch (error) {
+          // The exchange owns physical stream/decoder cleanup before rejection.
+          // Only unsupported BEFORE START may use a fresh legacy request. A
+          // later error retains already-applied progress; it never replays the
+          // full selection or infers that an atomic write rolled back.
+          const outerCause = error instanceof Error ? error.cause : undefined;
+          if (error instanceof ExperimentalExactBatchUnsupportedError || outerCause instanceof ExperimentalExactBatchUnsupportedError) {
+            rememberExactBatchStreamUnsupported(this, remotePeerId, connectionKey,
+              this.getSyncReconcilerConnectionKey(remotePeerId), Date.now());
+            if (!experimentalExactBatchStreamOnly) return runDurableSyncDetailed(durableContext);
+          }
+          recordDurableSyncDiagnostics(accumulator, { failedPhases: 1 });
+          markDurableTerminalBoundary(accumulator, false);
+          return {
+            result: finalizeDurableSyncCompletion(accumulator), exactFetchDisposition: 'incomplete',
+            committedExactAssetUals: Object.freeze([...committedExactAssetUals]),
+          };
+        } finally {
+          // Encoded native payload totals include DKB frame headers, excluding
+          // Noise/TCP overhead. Success means Core's final close also settled.
+          observeExactBatch(() => this.log.info(ctx,
+            `Exact batch requester transport assetCount=${selected.length} streamComplete=${streamComplete ? 1 : 0} committedAssets=${committedExactAssetUals.length} startSent=${startSent} nativeAcceptedSentBytes=${nativeAcceptedSentBytes} receivedPayloadBytes=${receivedPayloadBytes} sentAckFrames=${sentFrames[5]} receivedMetaFrames=${receivedFrames[2]} receivedDataFrames=${receivedFrames[3]} receivedAssetEndFrames=${receivedFrames[4]} receivedBatchEndFrames=${receivedFrames[6]} streamReadyMs=${streamReadyMs.toFixed(3)} exchangeElapsedMs=${Date.now() - exchangeStartedAtMs}`));
+        }
+      }
+      if (experimentalExactBatchStreamOnly) {
+        // Capability/public-authority changes leave all targets pending. A
+        // later ordinary plan may use its original smaller legacy bounds.
+        const accumulator = createDurableSyncAccumulator();
+        recordDurableSyncDiagnostics(accumulator, { failedPhases: 1 });
+        markDurableTerminalBoundary(accumulator, false);
+        return { result: finalizeDurableSyncCompletion(accumulator), exactFetchDisposition: 'incomplete' };
+      }
       return runDurableSyncDetailed(durableContext);
     }
     return { result: await runDurableSync(durableContext) };

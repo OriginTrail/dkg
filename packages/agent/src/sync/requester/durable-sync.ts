@@ -1611,7 +1611,7 @@ async function runDurableSyncWithBudget(
   };
 }
 
-function partitionVerifiedGraphScopedAssets(
+export function partitionVerifiedGraphScopedAssets(
   contextGraphId: string,
   verifiedData: Quad[],
   verifiedMeta: Quad[],
@@ -1790,7 +1790,7 @@ function partitionVerifiedGraphScopedAssets(
   };
 }
 
-function assertNoLegacyRfc64ControlGraphs(
+export function assertNoLegacyRfc64ControlGraphs(
   contextGraphId: string,
   verifiedData: readonly Quad[],
   verifiedMeta: readonly Quad[],

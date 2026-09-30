@@ -271,6 +271,9 @@ import {
   type VmRecoveryTargetFootprint,
 } from './vm-recovery-microbatch.js';
 import { enrichVmRecoveryFootprints } from './vm-recovery-footprint.js';
+import { planVmRecoveryStreamMicrobatch } from './vm-recovery-stream-profile.js';
+import { EXACT_BATCH_STREAM_PROTOCOL } from './sync/exact-batch-stream-contract.js';
+import { exactBatchStreamUnsupported } from './sync/exact-batch-stream-capability.js';
 import {
   VmRecoveryProviderPolicy,
   type VmRecoveryProviderAttempt,
@@ -6254,7 +6257,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     record: VmReconcileRotationRecord | undefined,
     fallbackCandidatePeerIds: readonly string[],
     policy: VmRecoveryProviderPolicy,
-    binding?: { localCgId: string; onChainCgId: string },
+    binding?: { localCgId: string; onChainCgId: string; experimentalStreamPeerIds?: ReadonlySet<string> },
   ): string | undefined {
     const uncreditedCandidateOrder = record
       ? this.vmReconcileUncreditedCandidateOrder(record)
@@ -6266,9 +6269,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
       : undefined;
     // Reorder only the already capped, uncredited transport list. Never add a
     // hinted peer to curator membership or earn a clean-absence/presence credit.
-    const transportOrder = preferredPeerId
+    const ordinaryTransportOrder = preferredPeerId
       ? [preferredPeerId, ...uncreditedCandidateOrder.filter((peerId) => peerId !== preferredPeerId)]
       : uncreditedCandidateOrder;
+    const streamCandidates = uncreditedCandidateOrder.filter((peerId) =>
+      binding?.experimentalStreamPeerIds?.has(peerId));
+    const transportOrder = streamCandidates.length === 0
+      ? ordinaryTransportOrder
+      : [...streamCandidates, ...ordinaryTransportOrder.filter((peerId) => !streamCandidates.includes(peerId))];
     return policy.selectNextCandidate(
       transportOrder,
       DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
@@ -6806,6 +6814,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     isRecoveryCurrent: () => boolean;
     revalidateTarget?: () => Promise<boolean>;
     ctx: OperationContext;
+    experimentalExactBatchStreamOnly?: boolean;
+    experimentalExactBatchStreamDisabled?: boolean;
   }): Promise<VmRecoveryBatchExecutionResult> {
     const {
       localCgId,
@@ -6818,6 +6828,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       isRecoveryCurrent,
       revalidateTarget,
       ctx,
+      experimentalExactBatchStreamOnly,
+      experimentalExactBatchStreamDisabled,
     } = input;
     const unavailablePeerIdSet = new Set(unavailablePeerIds);
 
@@ -6826,7 +6838,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // until this exact lifecycle has been re-proved at the ownership boundary.
     if (!isRecoveryCurrent()) return { kind: 'not-started-stale' };
 
-    const useCachedLegacyFallback = this.vmReconcileExactFilterUnsupported(peerId);
+    const useCachedLegacyFallback = !experimentalExactBatchStreamOnly
+      && this.vmReconcileExactFilterUnsupported(peerId);
 
     const handledOrdinals: number[] = [];
     const attemptedOrdinals: number[] = [];
@@ -6919,14 +6932,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
           peerId,
           localCgId,
           attempts.map(({ entry }) => entry.target.ual),
-          { signal, isCurrent: isRecoveryCurrent },
+          { signal, isCurrent: isRecoveryCurrent, experimentalExactBatchStreamOnly, experimentalExactBatchStreamDisabled },
         );
         const { result } = detailed;
         disposition = detailed.disposition;
         localAdmissionDeferred = disposition === 'incomplete'
           && detailed.responderCapability === undefined
           && isZeroWorkVmAdmissionDeferral(result);
-        if (detailed.responderCapability === 'legacy-filter-unsupported') {
+        if (!experimentalExactBatchStreamOnly && detailed.responderCapability === 'legacy-filter-unsupported') {
           this.rememberVmReconcileExactFilterUnsupported(peerId);
           if (isRecoveryCurrent() && disposition === 'incomplete') {
             await runLegacyFallback();
@@ -7327,6 +7340,32 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Curator resolution may connect a missing peer, but it must not substitute
     // a different ranking algorithm and invalidate an otherwise stable roster.
     const orderedPeerIds = this.vmReconcileObservedCandidatePeerIds(localCgId);
+    // Only an explicit experimental run may reorder these existing capped
+    // transport candidates. The proof roster and every target's independent
+    // attempted/absence credits stay unchanged. Identify does not prove data.
+    const experimentalStreamPeerIds = new Set<string>();
+    let experimentalPublicRecovery = false;
+    if (process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1') {
+      const advertised = await Promise.all(orderedPeerIds
+        .filter((peerId) => connectedByPeerId.has(peerId)
+          && this.peerCapabilityRegistry.supportsCore(peerId)
+          && !exactBatchStreamUnsupported(this, peerId, this.getSyncReconcilerConnectionKey(peerId), Date.now()))
+        .map(async (peerId) => {
+          try { return (await this.getPeerProtocols(peerId)).includes(EXACT_BATCH_STREAM_PROTOCOL) ? peerId : undefined; }
+          catch { return undefined; }
+        }));
+      if (advertised.some((peerId) => peerId !== undefined)) {
+        try {
+          experimentalPublicRecovery = (await this.resolveRegisteredContextGraphAuthority(localCgId, {
+            authorityReadMode: 'finalized-index-or-live', signal,
+          })).kind === 'public';
+        } catch { experimentalPublicRecovery = false; }
+        if (!isRecoveryCurrent()) return staleRecovery();
+        if (experimentalPublicRecovery) for (const peerId of advertised) {
+          if (peerId !== undefined) experimentalStreamPeerIds.add(peerId);
+        }
+      }
+    }
 
     // Curator preparation may have grown or shrunk the connected candidate
     // set. Re-evaluate every target against that observed change. Any roster
@@ -7432,7 +7471,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         installedRecord,
         orderedPeerIds,
         providerPolicy,
-        { localCgId, onChainCgId: expectedOnChainCgId },
+        { localCgId, onChainCgId: expectedOnChainCgId, experimentalStreamPeerIds },
       );
       if (candidatePeerId) {
         let connectedPeer = connectedByPeerId.get(candidatePeerId);
@@ -7510,6 +7549,26 @@ export class SwmHostModeMethods extends DKGAgentBase {
         installedRecord,
         candidatePeerIds,
       }];
+      let experimentalExactBatchStreamOnly = false;
+      let experimentalExactBatchStreamDisabled = process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1';
+      const streamEligibleProvider = experimentalPublicRecovery && experimentalStreamPeerIds.has(peerId)
+        && !exactBatchStreamUnsupported(this, peerId, admittedConnectionKey, Date.now());
+      if (streamEligibleProvider && providerAttempt.kind === 'probe') {
+        // A known public Core still earns holder reuse only by fetching one KA.
+        // Choose its wire from one bounded sizing observation; unknown or
+        // oversized work retains the original legacy singleton transport.
+        const readContext = this.chain.getKnowledgeAssetUpdateContext;
+        const singleton = await enrichVmRecoveryFootprints([{ kaId: target.kaId, target }], onChainCgId, {
+          resolvePublicAccess: async () => true,
+          sizing: typeof readContext === 'function'
+            ? { readUpdateContext: (id, readOptions) => readContext.call(this.chain, id, readOptions) }
+            : null,
+        }, { maxContextReads: 1, signal, isCurrent: isRecoveryCurrent });
+        if (!isRecoveryCurrent()) return staleRecovery();
+        const profile = planVmRecoveryStreamMicrobatch(singleton, entries => Buffer.byteLength(
+          encodeExactAssetUals(entries.map(({ target: candidate }) => candidate.ual)), 'utf8'));
+        experimentalExactBatchStreamDisabled = profile === undefined;
+      }
 
       // The first exact request to a peer remains a single-KA probe. Once that
       // probe has proved the peer is a holder, pack a stable compatible prefix
@@ -7557,6 +7616,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
           onChainCgId,
           {
             resolvePublicAccess: async (contextGraphId) => {
+              if (experimentalPublicRecovery) {
+                // Public policy is immutable after registration. Reuse the
+                // positive registered-public observation used for ranking;
+                // canonical KA/root/version/binding checks remain per asset.
+                publicRecoveryAccessVerified = true;
+                return true;
+              }
               publicRecoveryAccessVerified = (await withRpcUsageSite(
                 CG_AUTH_RPC_SITES.vmSizing,
                 // Sizing a recovery batch: this decides how much to READ, not
@@ -7587,16 +7653,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
           attempt,
           recoveryFootprint,
         } satisfies VmRecoveryTargetFootprint & { attempt: VmRecoveryBatchAttempt }));
-        const plan = planVmRecoveryMicrobatch(
+        const selectorBytesFor = (plannedTargets: readonly typeof plannableTargets[number][]) => Buffer.byteLength(
+          encodeExactAssetUals(plannedTargets.map(({ attempt }) => attempt.entry.target.ual)), 'utf8');
+        const streamPlan = streamEligibleProvider
+          ? planVmRecoveryStreamMicrobatch(plannableTargets, selectorBytesFor)
+          : undefined;
+        const plan = streamPlan ?? planVmRecoveryMicrobatch(
           plannableTargets,
           VM_EXACT_MICROBATCH_LIMITS,
-          (plannedTargets) => Buffer.byteLength(
-            encodeExactAssetUals(plannedTargets.map(
-              ({ attempt }) => attempt.entry.target.ual,
-            )),
-            'utf8',
-          ),
+          selectorBytesFor,
         );
+        experimentalExactBatchStreamOnly = streamPlan !== undefined;
+        experimentalExactBatchStreamDisabled = streamPlan === undefined
+          && process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1';
         if (plan.targets.length === 0) {
           this.forgetVmReconcilePublicCoreTransportPreference(localCgId, peerId);
           this.log.warn(
@@ -7627,7 +7696,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           `VM exact recovery plan for "${localCgId}" from ${peerId.slice(-8)}: `
             + `assets=${batchAttempts.length} estimatedBytes=${plan.estimatedBytes} `
             + `estimatedLeaves=${plan.estimatedLeaves} `
-            + `completeFootprints=${plan.completeFootprints}`,
+            + `completeFootprints=${plan.completeFootprints} streamOnly=${experimentalExactBatchStreamOnly}`,
         );
       }
 
@@ -7642,6 +7711,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
         isRecoveryCurrent,
         revalidateTarget,
         ctx,
+        experimentalExactBatchStreamOnly,
+        experimentalExactBatchStreamDisabled,
       });
       if (execution.kind === 'local-admission-deferred') {
         // Capacity is node-local, so trying other providers would burn their

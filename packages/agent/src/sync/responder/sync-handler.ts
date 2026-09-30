@@ -57,7 +57,7 @@ import {
   type PriorityAdmission,
 } from '../priority-admission-queue.js';
 import { resolveDurableDataRequestPolicy } from './durable-data-request-policy.js';
-import { createBoundedExactAssetExportCache, type ExactAssetExportLease } from './exact-asset-export-cache.js';
+import { createBoundedExactAssetExportCache, type ExactAssetExportLease, type ExactAssetExportCache } from './exact-asset-export-cache.js';
 import { encodeNegotiatedExactSyncResponse } from '../wire-compression.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
@@ -76,6 +76,13 @@ type PreparedResponderSession = {
 type PreparedResponderStage =
   | { kind: 'respond'; bytes: Uint8Array }
   | { kind: 'authorized'; authDurationMs: number };
+
+export interface ExperimentalExactBatchResponderResources {
+  readonly exportCache: ExactAssetExportCache;
+  readonly snapshotBudget: import('./snapshot-budget.js').SyncResponderSnapshotBudget;
+  withPreAuthorizationAdmission<T>(peerId: string, signal: AbortSignal, work: () => Promise<T>): Promise<T>;
+  withAuthorizedResponseAdmission<T>(peerId: string, contextGraphId: string, signal: AbortSignal, work: () => Promise<T>): Promise<T>;
+}
 
 interface RegisterSyncHandlerParams {
   /**
@@ -104,6 +111,8 @@ interface RegisterSyncHandlerParams {
     remotePeerId: string,
     options?: { signal?: AbortSignal },
   ) => Promise<boolean>;
+  /** Default absent. Experimental registrations reuse these exact owned resources. */
+  onExperimentalExactBatchResources?: (resources: ExperimentalExactBatchResponderResources) => void;
   /**
    * Injected policy predicate (#1233): return `true` to WITHHOLD the durable
    * `_meta` snapshot for `contextGraphId` — the responder then replies with an
@@ -493,6 +502,20 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
   // compatibility no-op for responder scheduling.
   const prioritySchedulingEnabled = Object.values(contextGraphPriorities ?? {})
     .some((priority) => priority !== 0);
+  // The opt-in batch profile uses two separately bounded stages. Unlike the
+  // legacy runTwoStage path, it does not claim a reserved FIFO handoff between
+  // authorization and response. No admission remains held across that gap.
+  params.onExperimentalExactBatchResources?.({
+    exportCache: exactAssetExportCache,
+    snapshotBudget: responderSnapshotBudget,
+    withPreAuthorizationAdmission: (remotePeerId, signal, work) => limiter.run(remotePeerId, signal,
+      { lane: 'pre_authorization', priority: 0, priorityClass: 'default' }, work),
+    withAuthorizedResponseAdmission: (remotePeerId, contextGraphId, signal, work) => {
+      const priority = prioritySchedulingEnabled ? contextGraphPriority(contextGraphPriorities, contextGraphId) : 0;
+      return limiter.run(remotePeerId, signal,
+        { contextGraphId, lane: 'responder', priority, priorityClass: syncPriorityClass(priority) }, work);
+    },
+  });
   let warnedPreDispatchCancellation = false;
 
   const pruneSyncSessionTokens = (now = Date.now()) => {

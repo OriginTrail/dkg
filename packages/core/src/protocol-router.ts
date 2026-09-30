@@ -214,6 +214,21 @@ export interface ProtocolRegistrationOptions {
   maxReadBytes?: number;
 }
 
+/** Explicit experimental duplex capability; no default protocol is installed. */
+export interface ExperimentalExactBatchStreamOptions {
+  timeoutMs: number;
+  signal?: AbortSignal;
+  maxReadBufferBytes: number;
+}
+
+export interface ExperimentalExactBatchRequest<T> {
+  requestData: Uint8Array;
+  /** The same bounded decoder/session continues reading ACK/control frames. */
+  continuation: T;
+  /** Release parser resources only after the router has closed/aborted its stream. */
+  dispose?: () => Promise<void>;
+}
+
 /**
  * The pooling options a ProtocolRouter caller may supply. `rejectInboundStream`
  * is omitted: the router owns the pooled pre-read admission gate (installed in
@@ -695,6 +710,175 @@ export class ProtocolRouter {
     }
   }
 
+  /**
+   * Own one dedicated duplex stream. Only negotiation may change routes;
+   * after callback entry no authenticated request is retried or replayed.
+   */
+  async withExperimentalExactBatchStream<T>(
+    peerIdStr: string,
+    protocolId: string,
+    options: ExperimentalExactBatchStreamOptions,
+    exchange: (stream: Stream, signal: AbortSignal) => Promise<T>,
+  ): Promise<T> {
+    this.validateExperimentalExactBatchOptions(protocolId, options);
+    const lifecycle = startRequestAbortLifecycle(options.timeoutMs, [options.signal, this.node.stopSignal]);
+    const signal = lifecycle.signal;
+    let stream: Stream | undefined;
+    const abortOwned = () => { if (stream) abortStream(stream, signal.reason); };
+    signal.addEventListener('abort', abortOwned, { once: true });
+    try {
+      if (signal.aborted) throw asAbortError(signal.reason);
+      await this.requirePeerAccepted(peerIdStr, protocolId, 'outbound', { signal, timeoutMs: options.timeoutMs });
+      if (signal.aborted) throw asAbortError(signal.reason);
+      const { peerIdFromString } = await import('@libp2p/peer-id');
+      const peerId = peerIdFromString(peerIdStr);
+      const libp2p = this.node.libp2p;
+      const considered = new WeakSet<ReusableConnection>();
+      const connections = () => {
+        const found = rawGetConnectionsFor(libp2p, peerId);
+        for (const connection of found) considered.add(connection);
+        return found;
+      };
+      const reuseOptions = {
+        peerHasDirectAddrs: async () => {
+          const peer = await libp2p.peerStore.get(peerId);
+          return (peer.addresses ?? []).some(({ multiaddr }) => !multiaddr.toString().includes('/p2p-circuit'));
+        },
+      };
+      let reused = await tryReuseExistingConnection(connections, protocolId, signal, reuseOptions);
+      if (!reused && this.peerResolver) {
+        const connected = watchForNewPeerConnection(libp2p, peerId, considered);
+        const resolution = composeAbortSignalsScoped(signal, connected?.signal);
+        try {
+          if (!connected?.signal.aborted) {
+            await this.peerResolver.resolve(peerIdStr, {
+              signal: resolution.signal ?? signal, perStepTimeoutMs: options.timeoutMs,
+            }).catch(() => undefined);
+          }
+        } finally {
+          resolution.dispose();
+          connected?.dispose();
+        }
+        if (connected?.signal.aborted) reused = await tryReuseExistingConnection(connections, protocolId, signal, reuseOptions);
+      }
+      if (signal.aborted) {
+        if (reused) abortStream(reused.stream, signal.reason);
+        throw asAbortError(signal.reason);
+      }
+      if (reused) stream = reused.stream;
+      else {
+        try {
+          stream = await this.dialAdmittedPeer(peerIdStr, protocolId, signal);
+        } catch (error) {
+          if (signal.aborted) throw asAbortError(signal.reason);
+          // No application bytes have been sent. After an actual direct dial
+          // failure, the existing limited connection is a safe final route.
+          const relay = await tryReuseExistingConnection(connections, protocolId, signal,
+            { ...reuseOptions, allowLimitedWithDirectAddrs: true });
+          if (!relay) throw error;
+          stream = relay.stream;
+        }
+      }
+      if (signal.aborted) throw asAbortError(signal.reason);
+      this.boundExperimentalStreamBuffers(stream, options.maxReadBufferBytes);
+      const result = await exchange(stream, signal);
+      if (signal.aborted) throw asAbortError(signal.reason);
+      await this.closeExperimentalStream(stream, signal);
+      return result;
+    } finally {
+      if (stream && stream.status !== 'closed') abortStream(stream, new Error('experimental exact-batch scope ended'));
+      signal.removeEventListener('abort', abortOwned);
+      lifecycle.release();
+    }
+  }
+
+  /** Read only the bounded START frame, then retain its parser for duplex ACKs. */
+  registerExperimentalExactBatchStream<T>(
+    protocolId: string,
+    readRequest: (stream: Stream, signal: AbortSignal) => Promise<ExperimentalExactBatchRequest<T>>,
+    handler: (request: ExperimentalExactBatchRequest<T> & {
+      peerId: string; stream: Stream; signal: AbortSignal;
+    }) => Promise<void>,
+    options: ExperimentalExactBatchStreamOptions & { maxRequestBytes: number },
+  ): void {
+    this.validateExperimentalExactBatchOptions(protocolId, options);
+    if (!Number.isSafeInteger(options.maxRequestBytes) || options.maxRequestBytes <= 0
+      || options.maxRequestBytes > this.maxReadBytes) throw new RangeError('Invalid experimental request limit');
+    this.node.libp2p.handle(protocolId, async (stream, connection) => {
+      const peerId = connection.remotePeer.toString();
+      const closed = new AbortController();
+      const onClose = () => closed.abort(new Error('experimental peer stream closed'));
+      const lifecycle = startRequestAbortLifecycle(options.timeoutMs, [options.signal, this.node.stopSignal, closed.signal]);
+      const signal = lifecycle.signal;
+      const onAbort = () => abortStream(stream, signal.reason);
+      let request: ExperimentalExactBatchRequest<T> | undefined;
+      stream.addEventListener('close', onClose, { once: true });
+      signal.addEventListener('abort', onAbort, { once: true });
+      try {
+        if (signal.aborted) throw asAbortError(signal.reason);
+        this.rejectKnownRejectedInboundPeer(peerId, protocolId);
+        this.boundExperimentalStreamBuffers(stream, options.maxReadBufferBytes);
+        request = await readRequest(stream, signal);
+        if (request.requestData.byteLength > options.maxRequestBytes) throw new RangeError('Experimental request byte limit exceeded');
+        await this.requirePeerAccepted(peerId, protocolId, 'inbound', { signal, timeoutMs: options.timeoutMs });
+        if (signal.aborted) throw asAbortError(signal.reason);
+        await handler({ ...request, peerId, stream, signal });
+        if (signal.aborted) throw asAbortError(signal.reason);
+        stream.removeEventListener('close', onClose);
+        await this.closeExperimentalStream(stream, signal);
+      } catch (error) {
+        // Do not log authenticated request bytes, metadata, URLs or tokens.
+        abortStream(stream, error instanceof Error ? error : new Error('experimental stream failed'));
+      } finally {
+        stream.removeEventListener('close', onClose);
+        signal.removeEventListener('abort', onAbort);
+        if (stream.status !== 'closed') abortStream(stream, new Error('experimental exact-batch scope ended'));
+        await request?.dispose?.().catch(() => undefined);
+        lifecycle.release();
+      }
+    }, { runOnLimitedConnection: true });
+  }
+
+  private validateExperimentalExactBatchOptions(protocolId: string, options: ExperimentalExactBatchStreamOptions): void {
+    if (protocolId !== '/dkg/experimental/exact-batch-stream/1.0.0') throw new Error('Unexpected experimental exact-batch protocol');
+    if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs <= 0
+      || !Number.isSafeInteger(options.maxReadBufferBytes) || options.maxReadBufferBytes <= 0
+      || options.maxReadBufferBytes > this.maxReadBytes) throw new RangeError('Invalid experimental stream limits');
+  }
+
+  private boundExperimentalStreamBuffers(stream: Stream, limit: number): void {
+    stream.maxReadBufferLength = Math.min(stream.maxReadBufferLength || limit, limit);
+    stream.maxWriteBufferLength = Math.min(stream.maxWriteBufferLength || limit, limit);
+  }
+
+  private async closeExperimentalStream(stream: Stream, signal: AbortSignal): Promise<void> {
+    // close() flushes and half-closes only the writable end. Wait for the
+    // peer's half-close too: resetting immediately could discard BATCH_END
+    // already handed to the transport but not yet consumed by the peer.
+    let onClose!: () => void;
+    let onAbort!: () => void;
+    const settled = new Promise<void>((resolve, reject) => {
+      onClose = () => stream.status === 'closed' ? resolve() : reject(new Error('Experimental stream closed before settlement'));
+      onAbort = () => reject(asAbortError(signal.reason));
+      stream.addEventListener('close', onClose, { once: true });
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+    // The close operation may fail before the close-event promise is awaited.
+    void settled.catch(() => undefined);
+    try {
+      if (signal.aborted) throw asAbortError(signal.reason);
+      await stream.close({ signal });
+      if (stream.status !== 'closed') await settled;
+    } finally {
+      stream.removeEventListener('close', onClose);
+      signal.removeEventListener('abort', onAbort);
+    }
+  }
+
+  private dialAdmittedPeer(peerId: string, protocolId: string, signal: AbortSignal): Promise<Stream> {
+    return this.network.dialProtocol(peerId, protocolId, { signal });
+  }
+
   private async sendInner(
     peerIdStr: string,
     protocolId: string,
@@ -1123,7 +1307,7 @@ export class ProtocolRouter {
           stream = fastStream;
         } else {
           attemptedNormalDial = true;
-          stream = await this.network.dialProtocol(peerIdStr, protocolId, { signal: attemptSignal });
+          stream = await this.dialAdmittedPeer(peerIdStr, protocolId, attemptSignal);
         }
         const dialDurationMs = Date.now() - dialStartedAt;
 

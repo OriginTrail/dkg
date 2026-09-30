@@ -233,6 +233,19 @@ export {
   isRecoverableSendError,
   isProtocolUnsupportedError,
 } from './protocol-router.js';
+// Explicit experimental capability only; importing Core installs no handler.
+export {
+  EXPERIMENTAL_EXACT_BATCH_STREAM_PROTOCOL,
+  EXPERIMENTAL_EXACT_BATCH_STREAM_WINDOW_SIZE,
+  exchangeExperimentalExactBatch,
+  registerExperimentalExactBatchResponder,
+  ExperimentalExactBatchUnsupportedError,
+  type ExactBatchTransportSession,
+  type ExactBatchTransportFrame,
+  type ExactBatchTransportCodec,
+  type ExactBatchTransportOptions,
+  type ExactBatchTransportEvent,
+} from './experimental-exact-batch-stream.js';
 export {
   MessageStreamPool,
   POOLED_MESSAGE_PROTOCOL,
