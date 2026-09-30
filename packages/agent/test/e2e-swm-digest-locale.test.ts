@@ -12,6 +12,12 @@
  *
  * The rows are chosen so their canonical order really differs between the
  * two collations (`aa` sorts after `z` in da-DK), asserted below.
+ *
+ * Both agents live in one process, so the simulated da-DK collation is
+ * process-wide: node A also computes under it while B catches up. The test
+ * therefore proves the pair converges only with the dual-accept change; it does
+ * not isolate B's verifier from A's serving path (the child-process e2e in the
+ * publisher package and the devnet suite give each node its own real locale).
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
