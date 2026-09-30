@@ -298,20 +298,39 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
 // belong in this table, never as special cases inside planCi.
 // ci-delta-routing.test.mjs follows every relative reference from the files
 // each lane runs and fails when a file it reaches does not select that lane.
-// Files inside package workspaces that pnpm install runs in every job: the
-// scripts install lifecycle hooks run, and what those load or read. A change
-// to one needs full CI, as a change to the hook itself does. The load-closure
-// test derives them from the manifests' hooks, and from the reads it cannot
-// resolve that its INSTALL_HOOK_READS declares, and fails when one is
-// missing here.
-export const INSTALL_HOOK_INPUTS = Object.freeze([
-  'packages/cli/markitdown-build-info.json',
-  'packages/cli/markitdown-targets.json',
-  'packages/cli/scripts/bundle-markitdown-binaries.mjs',
-  'packages/cli/scripts/markitdown-bundle-validation.mjs',
-  'packages/cli/scripts/markitdown-entry.py',
-  'packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+// What pnpm install runs in every job, inside the package workspaces: the one
+// table both the planner and the load-closure test read. `path` is a file
+// whose change needs full CI, as a change to an install hook does. An entry
+// with `reader` and `name` is a file an install script reads through a
+// directory it builds at run time (`reader` reads `name` from it): the file
+// that reaches (`path`), or the reason the read needs no full CI (`exempt`).
+// The test checks the install scripts read exactly what this table says.
+const MARKITDOWN_BUNDLER = 'packages/cli/scripts/bundle-markitdown-binaries.mjs';
+export const INSTALL_HOOK_DEPENDENCIES = Object.freeze([
+  // The root and CLI preinstall, the CLI postinstall, and what they load.
+  { path: 'packages/cli/scripts/verify-node-sqlite-runtime.mjs' },
+  { path: MARKITDOWN_BUNDLER },
+  { path: 'packages/cli/scripts/markitdown-bundle-validation.mjs' },
+  { path: 'packages/cli/markitdown-build-info.json' },
+  // What they read from directories they build at run time.
+  { reader: MARKITDOWN_BUNDLER, name: 'markitdown-targets.json', path: 'packages/cli/markitdown-targets.json' },
+  { reader: MARKITDOWN_BUNDLER, name: 'scripts/markitdown-entry.py', path: 'packages/cli/scripts/markitdown-entry.py' },
+  { reader: MARKITDOWN_BUNDLER, name: 'project.json', path: 'project.json' },
+  {
+    reader: MARKITDOWN_BUNDLER,
+    name: 'package.json',
+    exempt: "the CLI's version, which names the release binary an installed package downloads; the manifest fields an install reads (install hooks, dependencies, engines) already route to full CI",
+  },
+  { reader: MARKITDOWN_BUNDLER, name: 'tsconfig.json', exempt: 'an existence probe that tells a workspace checkout from an installed package' },
+  { reader: MARKITDOWN_BUNDLER, name: 'Scripts/python.exe', exempt: 'the Python virtual environment a source build creates, outside the repository' },
+  {
+    reader: 'packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+    name: '../package.json',
+    exempt: "the CLI's engines.node range; an engines change already routes to full CI",
+  },
 ]);
+// The files whose change needs full CI because an install runs or reads them.
+export const INSTALL_HOOK_INPUTS = Object.freeze([...new Set(INSTALL_HOOK_DEPENDENCIES.flatMap(({ path: file }) => (file ? [file] : [])))]);
 
 export const PATH_TRIGGERS = Object.freeze([
   {

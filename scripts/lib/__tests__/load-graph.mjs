@@ -109,9 +109,10 @@ const NO_ANALYSIS = Object.freeze({ builtPaths: [], unresolvedReads: [], compute
 // segments, through any chain of bindings. From each call it records:
 // - builtPaths: the path a join/resolve call builds from a known directory
 //   and string-literal segments;
-// - unresolvedReads: a join/resolve call that reads a literal file name
-//   from a directory it cannot resolve (join(resolvePackageDir(dir),
-//   'x.json')), as source text;
+// - unresolvedReads: the literal path a join/resolve call reads from a
+//   directory it cannot resolve (join(resolvePackageDir(dir), 'x.json')
+//   reads 'x.json'), which stays the same when the directory's expression
+//   changes;
 // - computedLoads: module loads whose specifier is computed at run time
 //   (import(name), require(`../${file}`)), as source text; no trace can follow
 //   them. A string specifier, or new URL() of one (URL_IMPORT and URL_PATH
@@ -225,7 +226,12 @@ function analyzeModule(file, code) {
         const last = node.arguments.at(-1);
         if (built !== undefined) analysis.builtPaths.push(built);
         else if (node.arguments.length > 1 && ts.isStringLiteral(last) && /^[\w.-]+\.\w+$/.test(last.text)) {
-          analysis.unresolvedReads.push(node.getText(tree));
+          const tail = [];
+          for (const argument of [...node.arguments].reverse()) {
+            if (!ts.isStringLiteral(argument)) break;
+            tail.unshift(argument.text);
+          }
+          analysis.unresolvedReads.push(path.posix.join(...tail));
         }
       }
     }
@@ -254,9 +260,9 @@ const namedScripts = (text) => commandFiles(text, { exists: followable }).filter
 // - `packages`: workspaces it imports by package name (packageImports);
 // - `computed`: module loads computed at run time (computedLoads);
 // - `assembled`: script paths assembled at run time (assembledScriptPaths);
-// - `unresolvedReads`: files it reads by a literal name from a directory
-//   analyzeModule cannot resolve (join(resolvePackageDir(dir), 'x.json')), as
-//   source text, which the routing guard checks in what installs run.
+// - `unresolvedReads`: the literal paths it reads from a directory
+//   analyzeModule cannot resolve (join(resolvePackageDir(dir), 'x.json')
+//   reads 'x.json'), which the routing guard checks in what installs run.
 // Type-only imports are erased before anything runs; other paths assembled
 // at run time from variables are out of reach.
 export function loadReferences(file, source) {
