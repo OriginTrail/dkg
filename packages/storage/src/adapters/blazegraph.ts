@@ -21,7 +21,6 @@ import {
   assertQuadLiteralsMutf8Safe,
   classifySparqlOperation,
   getMetrics,
-  sparqlString,
   JAVA_WRITE_UTF_MAX_BYTES,
   type Rfc64SemanticReadOperationV1,
 } from '@origintrail-official/dkg-core';
@@ -763,16 +762,11 @@ export class BlazegraphStore implements TripleStore {
   }
 
   private async listGraphsByPrefixInternal(prefix: string, options?: BlazegraphReadQueryOptions): Promise<string[]> {
-    const r = await this.queryWithOperation(
-      `SELECT DISTINCT ?g WHERE { GRAPH ?g { }
-        FILTER(STRSTARTS(STR(?g), ${sparqlString(prefix)}))
-        FILTER EXISTS { GRAPH ?g { ?s ?p ?o } } }`,
-      options,
-      'listGraphs',
-    );
-    if (r.type !== 'bindings') return [];
-    return r.bindings.map((row) => row.g)
-      .filter((graph) => Boolean(graph) && graph.startsWith(prefix) && !isAtomicGraphReplaceStagingGraph(graph));
+    // Blazegraph's prefix-filtered GRAPH ?g / FILTER EXISTS shape repeatedly
+    // timed out on a large live namespace, while its plain graph inventory
+    // completed. Keep the same pinned snapshot/options and filter that inventory
+    // locally so callers still see only non-empty, non-staging graphs.
+    return (await this.listGraphsInternal(options)).filter((graph) => graph.startsWith(prefix));
   }
 
   // -------------------------------------------------------------------
