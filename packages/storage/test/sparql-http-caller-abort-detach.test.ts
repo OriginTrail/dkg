@@ -328,6 +328,52 @@ describe('managed read whose caller aborts after dispatch', () => {
     } finally { await store.close(); }
   });
 
+  // The store-lifetime close signal is shared by every read: a read that leaves a listener on it
+  // leaks one per query for as long as the store lives. Listeners are counted per signal, by
+  // wrapping add/removeEventListener, because the store's own signals are not exposed.
+  it('leaves no abort listener on any signal after successful reads with a caller signal', async () => {
+    const { store, dispatch } = harness('managed', TIMEOUT_MS, { holdAbort: true });
+    const live = new Map<EventTarget, number>();
+    const add = EventTarget.prototype.addEventListener;
+    const remove = EventTarget.prototype.removeEventListener;
+    const bump = (target: EventTarget, by: number) => live.set(target, (live.get(target) ?? 0) + by);
+    const spies = [
+      vi.spyOn(EventTarget.prototype, 'addEventListener').mockImplementation(function (this: EventTarget, type, listener, options) {
+        if (type === 'abort') bump(this, 1);
+        return add.call(this, type, listener, options);
+      }),
+      vi.spyOn(EventTarget.prototype, 'removeEventListener').mockImplementation(function (this: EventTarget, type, listener, options) {
+        if (type === 'abort') bump(this, -1);
+        return remove.call(this, type, listener, options);
+      }),
+    ];
+    try {
+      for (let index = 0; index < 40; index += 1) {
+        const read = await dispatch();
+        read.fetch.respond(okResponse());
+        expect(await read.outcome).toEqual({ value: { type: 'boolean', value: true } });
+      }
+      expect(Math.max(0, ...live.values())).toBe(0);
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+      await store.close();
+    }
+  });
+
+  it('still enforces maxResponseBytes for a caller that waits, through the relay', async () => {
+    const { store, recover, dispatch } = harness();
+    try {
+      const read = await dispatch('SELECT ?s WHERE { ?s ?p ?o }', { maxResponseBytes: 5_000 });
+      const answer = streamingAnswer(read.fetch, { totalBytes: RUNAWAY_BYTES });
+      expect(await read.outcome).toMatchObject({ error: { code: 'STORE_RESPONSE_TOO_LARGE' } });
+      // The client stopped reading at the limit instead of taking the whole runaway answer.
+      expect(answer.cancelled()).toBe(true);
+      expect(answer.pulled()).toBeLessThan(RUNAWAY_BYTES);
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS * 3);
+      expect(recover).not.toHaveBeenCalled();
+    } finally { await store.close(); }
+  });
+
   it('withdraws the recovery of a read whose caller left just after its answer was completely read', async () => {
     // The last moment a caller can leave without failing the read: the body has
     // been read to its end, and the read is about to be decoded and returned.
