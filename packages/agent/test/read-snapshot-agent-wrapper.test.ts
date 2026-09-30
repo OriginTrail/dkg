@@ -111,15 +111,15 @@ describe('read snapshot through the agent store wrapper', () => {
 
   it('uses the root-indexed candidate in chain reconciliation before a complete-family read', async () => {
     const inner = await createTripleStore({ backend: 'oxigraph' });
-    const snapshotQueries: string[] = [];
-    const ordinaryQueries: string[] = [];
+    const snapshotQueries: Array<{ sparql: string; source: string | undefined }> = [];
+    const ordinaryQueries: Array<{ sparql: string; source: string | undefined }> = [];
     const capable = new Proxy(inner, {
       get(target, property) {
         if (property === 'innerStore') return undefined;
         if (property === 'withReadSnapshot') {
           const withReadSnapshot: ReadSnapshotCapability['withReadSnapshot'] = async (read) => read({
             query: (sparql, options) => {
-              snapshotQueries.push(sparql);
+              snapshotQueries.push({ sparql, source: options?.source });
               return inner.query(sparql, options);
             },
             listGraphs: (options) => inner.listGraphs(options),
@@ -128,7 +128,7 @@ describe('read snapshot through the agent store wrapper', () => {
           return withReadSnapshot;
         }
         if (property === 'query') return (sparql: string, options?: Parameters<TripleStore['query']>[1]) => {
-          ordinaryQueries.push(sparql);
+          ordinaryQueries.push({ sparql, source: options?.source });
           return inner.query(sparql, options);
         };
         const value = Reflect.get(target, property, target);
@@ -169,9 +169,21 @@ describe('read snapshot through the agent store wrapper', () => {
         contextGraphId, [root], expected, false,
       );
       expect(result.matched).toEqual([{ ...quad, graph: '' }]);
-      expect(snapshotQueries.some((query) => query.includes('SELECT DISTINCT ?g'))).toBe(true);
-      expect(snapshotQueries.some((query) => query.includes('VALUES ?g {'))).toBe(true);
-      expect(ordinaryQueries.some((query) => query.includes('VALUES ?g {'))).toBe(false);
+      const rootIndexed = 'agent.finalization.legacySnapshotScan.rootIndexed';
+      const allQueries = [...ordinaryQueries, ...snapshotQueries];
+      expect(snapshotQueries.some(({ sparql, source }) =>
+        source === rootIndexed && sparql.includes('SELECT DISTINCT ?g'))).toBe(true);
+      expect(allQueries.some(({ source }) =>
+        source === 'agent.finalization.legacySnapshotScan.cachedGraphSet'
+        || source === 'agent.finalization.legacySnapshotScan')).toBe(false);
+      const materializations = allQueries.filter(({ sparql }) =>
+        /VALUES \?g\s*\{/.test(sparql) && /SELECT DISTINCT \?s \?p \?o|CONSTRUCT/i.test(sparql));
+      expect(materializations).toHaveLength(1);
+      expect(materializations[0]?.source).toBe(rootIndexed);
+      const graphValues = materializations[0]?.sparql.match(/VALUES \?g\s*\{([^}]*)\}/)?.[1] ?? '';
+      expect(graphValues).toContain(`<${bucket}>`);
+      expect(graphValues).toContain(`<${quad.graph}>`);
+      expect(graphValues).not.toContain(`<${bucket}/author/2>`);
     } finally {
       await inner.close();
     }
