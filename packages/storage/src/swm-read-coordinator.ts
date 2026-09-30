@@ -791,6 +791,17 @@ async function loadSharedMemoryQuadsInternal(
     return loadSwmQuadsAcrossChunks(readStore, graphs, innerGraphPattern, readOptions, options, plan);
   };
 
+  const snapshot = asReadSnapshotCapability(store);
+  if (graphScope.kind === 'complete-family' && snapshot && options.maxGraphsToRead === undefined) {
+    // No outer preflight is needed. Resolve the authoritative complete graph
+    // set once, at the same backend commit point used for materialization.
+    return snapshot.withReadSnapshot(async (snapshotStore) => {
+      const graphs = await traceSlowSwmReadStage('selected.resolve-snapshot', queryOptions, () =>
+        resolveGraphs(snapshotStore, queryOptions));
+      return traceSlowSwmReadStage('selected.materialize-snapshot', queryOptions, () =>
+        read(snapshotStore, graphs, queryOptions));
+    }, queryOptions?.signal);
+  }
   const initialGraphs = await traceSlowSwmReadStage('selected.resolve-initial', queryOptions, () =>
     resolveGraphs(store, queryOptions));
   assertSharedMemoryGraphReadLimit(initialGraphs, options.maxGraphsToRead);
@@ -800,7 +811,6 @@ async function loadSharedMemoryQuadsInternal(
     return traceSlowSwmReadStage('selected.materialize', queryOptions, () =>
       read(store, initialGraphs, queryOptions));
   }
-  const snapshot = asReadSnapshotCapability(store);
   if (snapshot) {
     // A complete-family outer catalog can be stale even when it fits in one
     // query. Resolve that set at the backend commit point before claiming a

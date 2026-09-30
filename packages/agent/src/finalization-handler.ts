@@ -4208,11 +4208,13 @@ export class FinalizationHandler {
       }
     } catch { return null; }
 
-    for (const [op, roots] of rootsByOp) {
+    for (const [op, roots] of [...rootsByOp].sort(([a], [b]) => a.localeCompare(b))) {
       const swmResult = await this.getSharedMemoryQuadsForRoots(
         contextGraphId, roots, merkleRoot, false, subGraphName,
       );
-      if (swmResult.status === 'deferred') return null;
+      // This stamp is still plausible: the graph cap prevented verification.
+      // Another stamped operation may have a smaller, verifiable slice.
+      if (swmResult.status === 'deferred') continue;
       const sharedMemoryQuads = swmResult.quads;
       const merkleMatchedQuads = swmResult.status === 'verified' ? swmResult.matched : null;
       if (sharedMemoryQuads.length > 0) {
