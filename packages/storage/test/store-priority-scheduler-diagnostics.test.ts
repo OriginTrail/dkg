@@ -160,6 +160,46 @@ describe('store scheduler busy diagnostics', () => {
     }
   });
 
+  it('attributes duplicate active work to its lane rather than the waiting lane', async () => {
+    vi.useFakeTimers();
+    const diagnosticSink = vi.fn();
+    const releases: Array<() => void> = [];
+    let now = 0;
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 2,
+      ackReservedSlots: 0,
+      healthReservedSlots: 0,
+      normalReservedSlots: 0,
+      backgroundReservedSlots: 0,
+      queueLimits: 1,
+      queueWaitTimeoutMs: 20,
+      now: () => now,
+      timeoutDiagnosticSink: diagnosticSink,
+    });
+    const blockers = [0, 1].map(() => scheduler.run('health', 'shared.health-work', () =>
+      new Promise<void>((resolve) => { releases.push(resolve); })));
+    try {
+      const expired = scheduler.run('background', 'waiting.background-work', async () => undefined);
+      now = 42;
+      const outcome = expired.then(() => undefined, (error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(20);
+      await expect(outcome).resolves.toMatchObject({
+        code: 'STORE_SCHEDULER_BUSY',
+        reason: 'queue_wait_timeout',
+      });
+      expect(diagnosticSink).toHaveBeenCalledWith({
+        waiting: { priority: 'background', operation: 'waiting.background-work' },
+        activeAtTimeout: [{
+          priority: 'health', operation: 'shared.health-work', count: 2, oldestAgeMs: 42,
+        }],
+      });
+    } finally {
+      releases.forEach((release) => release());
+      await Promise.all(blockers);
+      vi.useRealTimers();
+    }
+  });
+
   it('accepts optional string messages while retaining prototype-free copies without messages', () => {
     const original = new StoreSchedulerBusyError('queue_full', 'normal', 'query');
     const copied = { ...original };
