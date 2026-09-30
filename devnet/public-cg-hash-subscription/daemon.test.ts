@@ -31,9 +31,9 @@ type Scripted = HttpReply | Error;
 
 /** A transport that answers each path from its script and records every call. */
 function scriptedIo(script: Record<string, Scripted[]>) {
-  const calls: Array<{ method: 'GET' | 'POST'; path: string }> = [];
-  const next = (method: 'GET' | 'POST', path: string): HttpReply => {
-    calls.push({ method, path });
+  const calls: Array<{ method: 'GET' | 'POST'; node: number; path: string }> = [];
+  const next = (method: 'GET' | 'POST', node: number, path: string): HttpReply => {
+    calls.push({ method, node, path });
     const key = Object.keys(script).find((prefix) => path.startsWith(prefix));
     if (key === undefined) throw new Error(`no script for ${method} ${path}`);
     const queue = script[key]!;
@@ -42,8 +42,8 @@ function scriptedIo(script: Record<string, Scripted[]>) {
     return step;
   };
   const io: DaemonIo = {
-    get: async (_node, path) => next('GET', path),
-    post: async (_node, path) => next('POST', path),
+    get: async (node, path) => next('GET', node.num, path),
+    post: async (node, path) => next('POST', node.num, path),
     // Probe up to 12 times without sleeping, then time out like the harness.
     waitFor: async <T>(label: string, timeoutMs: number, _intervalMs: number, probe: () => Promise<T | null>): Promise<T> => {
       for (let attempt = 0; attempt < 12; attempt++) {
@@ -62,6 +62,7 @@ const NO_ROWS = rows();
 const HAS_CONTENT = rows({ p: '<https://schema.org/name>', o: '"kept"' });
 const queuedReply = (jobId: unknown): HttpReply => ok({ subscribed: CG, catchup: { status: 'queued', includeWorkspace: true, jobId } });
 const QUERY = '/api/query';
+const NO_JOB_REPLY: HttpReply = { status: 404, json: { error: 'No catch-up job found' } };
 const SUBSCRIBE = '/api/context-graph/subscribe';
 
 describe('checked', () => {
@@ -358,5 +359,79 @@ describe('expectLatestJobNamed', () => {
   it('fails on a job by its id that the daemon does not know', async () => {
     const { io } = scriptedIo({ [byJobId('j1')]: [{ status: 404, json: { error: 'Catch-up job "j1" not found' } }] });
     await expect(expectNamed(io)).rejects.toThrow(/test: the job by its id: .*not found/);
+  });
+});
+
+describe('the arrange and precondition helpers', () => {
+  const author = { num: 1 } as DevnetNode;
+  const graph = { id: CG, nameHash: `0x${'ab'.repeat(32)}`, onChainId: '41', subject: SUBJECT };
+  const LIST = '/api/context-graph/list';
+  const SUBSCRIPTIONS = '/api/context-graph/subscriptions';
+  const row = (contextGraphId: string, subscribed = true) => ({ contextGraphId, subscribed, synced: false, coreHosted: false });
+  const rowsReply = (...rowsIn: Array<ReturnType<typeof row>>): HttpReply => ok({ subscriptions: rowsIn });
+  const observedSlot = ok({ contextGraphs: [{ onChainId: '41' }] });
+
+  it('expectNoRowFor passes for an edge with no row under either id, and names the row it finds otherwise', async () => {
+    const daemon = createDaemon(scriptedIo({ [SUBSCRIPTIONS]: [rowsReply(row('another-graph'))] }).io);
+    await expect(daemon.expectNoRowFor(node5, graph)).resolves.toBeUndefined();
+    for (const id of [graph.id, graph.nameHash]) {
+      const busy = createDaemon(scriptedIo({ [SUBSCRIPTIONS]: [rowsReply(row(id, false))] }).io);
+      await expect(busy.expectNoRowFor(node5, graph)).rejects.toThrow(`node5 must not yet be subscribed to ${graph.id}`);
+    }
+  });
+
+  it('waitForAdoption waits for a subscribed row under the cleartext id and none under the hash', async () => {
+    const { io, count } = scriptedIo({
+      [SUBSCRIPTIONS]: [rowsReply(row(graph.nameHash)), rowsReply(row(graph.nameHash), row(graph.id)), rowsReply(row(graph.id, false)), rowsReply(row(graph.id))],
+    });
+    await expect(createDaemon(io).waitForAdoption(node5, graph)).resolves.toMatchObject({ contextGraphId: graph.id, subscribed: true });
+    expect(count(SUBSCRIPTIONS)).toBe(4);
+  });
+
+  it('waitUntilChainSlotObserved reads the on-chain id from the row or from its chain view, and retries a non-200', async () => {
+    const { io, count } = scriptedIo({
+      [LIST]: [{ status: 503, json: { error: 'starting' } }, ok({ contextGraphs: [{ id: 'x' }] }), ok({ contextGraphs: [{ onChain: { id: '41' } }] })],
+    });
+    await createDaemon(io).waitUntilChainSlotObserved(node5, '41');
+    expect(count(LIST)).toBe(3);
+  });
+
+  it('ensureConverged subscribes an edge that has no row, and hands back the job its subscribe queued', async () => {
+    const { io, calls } = scriptedIo({
+      [SUBSCRIPTIONS]: [rowsReply(), rowsReply(row(graph.id))],
+      [LIST]: [observedSlot],
+      [SUBSCRIBE]: [queuedReply('job-arranged')],
+      [QUERY]: [HAS_CONTENT],
+    });
+    await expect(createDaemon(io).ensureConverged(node5, author, graph, graph.nameHash, 'arrange')).resolves.toEqual({ jobId: 'job-arranged' });
+    const subscribes = calls.filter((call) => call.path === SUBSCRIBE);
+    expect(subscribes).toEqual([{ method: 'POST', node: 5, path: SUBSCRIBE }]);
+  });
+
+  it.each([
+    ['the cleartext id', CG],
+    ['the hash', `0x${'ab'.repeat(32)}`],
+  ])('ensureConverged does not subscribe an edge that already has a row under %s, and has no job id to hand back', async (_name, id) => {
+    const { io, count } = scriptedIo({ [SUBSCRIPTIONS]: [rowsReply(row(id)), rowsReply(row(graph.id))], [QUERY]: [HAS_CONTENT] });
+    await expect(createDaemon(io).ensureConverged(node5, author, graph, graph.nameHash, 'arrange')).resolves.toEqual({});
+    expect(count(SUBSCRIBE)).toBe(0);
+  });
+
+  it('ensureConverged takes the expected content from the author it is given, and waits for it on the edge', async () => {
+    const { io, calls } = scriptedIo({ [SUBSCRIPTIONS]: [rowsReply(row(graph.id))], [QUERY]: [HAS_CONTENT] });
+    await createDaemon(io).ensureConverged(node5, author, graph, graph.nameHash, 'arrange');
+    expect(calls.filter((call) => call.path === QUERY).map((call) => call.node)).toEqual([1, 5]);
+  });
+
+  it('ensureConverged fails when the edge never holds the author\'s content, naming the wait', async () => {
+    let queries = 0;
+    const { io } = scriptedIo({
+      [SUBSCRIPTIONS]: [rowsReply(row(graph.id))],
+      [QUERY]: [HAS_CONTENT],
+      '/api/sync/catchup-status': [NO_JOB_REPLY],
+    });
+    const original = io.post;
+    io.post = async (node, path, body) => (path === QUERY && ++queries > 1 ? ok({ result: { bindings: [] } }) : original(node, path, body));
+    await expect(createDaemon(io).ensureConverged(node5, author, graph, graph.nameHash, 'arrange')).rejects.toThrow(/timed out after 420000ms waiting for: arrange: node5 verifiable-memory content/);
   });
 });

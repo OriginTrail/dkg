@@ -26,10 +26,16 @@ import {
 import {
   WireShapeError,
   parseCatchupStatusResponse,
+  parseConnectedPeerIds,
+  parseContextGraphListResponse,
+  parseNodePeerInfo,
   parseQueryBindings,
   parseSubscribeResponse,
+  parseSubscriptionsResponse,
+  type CatchupContextGraphIdentity,
   type CatchupStatusReply,
   type SubscribeReply,
+  type SubscriptionRow,
 } from './wire.js';
 
 export type View = 'shared-working-memory' | 'verifiable-memory';
@@ -141,6 +147,69 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
       parseCatchupStatusResponse,
     );
     return res.ok ? res.body : null;
+  }
+
+  async function listSubscriptions(node: DevnetNode): Promise<readonly SubscriptionRow[]> {
+    const res = await getChecked(node, '/api/context-graph/subscriptions', parseSubscriptionsResponse);
+    return expectOk(res, `node${node.num} GET /api/context-graph/subscriptions`).subscriptions;
+  }
+
+  /** A node's peer id and a direct TCP address it can be dialed on, as the node reports them. */
+  async function dialTarget(node: DevnetNode): Promise<{ peerId: string; multiaddr: string }> {
+    const info = expectOk(await getChecked(node, '/api/status', parseNodePeerInfo), `node${node.num} GET /api/status`);
+    const direct = info.multiaddrs.filter((addr) => addr.includes('/tcp/') && !addr.includes('/p2p-circuit'));
+    const chosen = direct.find((addr) => addr.startsWith('/ip4/127.0.0.1/')) ?? direct[0];
+    expect(chosen, `node${node.num} reports a direct TCP address: ${JSON.stringify(info.multiaddrs)}`).toBeDefined();
+    return { peerId: info.peerId, multiaddr: chosen!.includes('/p2p/') ? chosen! : `${chosen}/p2p/${info.peerId}` };
+  }
+
+  async function connectedPeerIds(node: DevnetNode): Promise<string[]> {
+    return expectOk(await getChecked(node, '/api/connections', parseConnectedPeerIds), `node${node.num} GET /api/connections`);
+  }
+
+  /** Ask `from` to dial `to` (POST /api/connect), then wait until `from` lists the connection. */
+  async function dial(from: DevnetNode, to: DevnetNode): Promise<void> {
+    const target = await dialTarget(to);
+    const res = await io.post(from, '/api/connect', { multiaddr: target.multiaddr });
+    expect(res.status, `node${from.num} POST /api/connect to node${to.num}: ${JSON.stringify(res.json)}`).toBe(200);
+    await io.waitFor(`node${from.num} lists node${to.num} as connected`, 60_000, 1_000, async () => (
+      (await connectedPeerIds(from)).includes(target.peerId) ? true : null
+    ));
+  }
+
+  /**
+   * Wait until the node has observed the graph's slot on chain (its own chain
+   * poller staged a row for it): only then does a name-hash subscribe find the
+   * hash-keyed row it promotes.
+   */
+  async function waitUntilChainSlotObserved(node: DevnetNode, onChainId: string): Promise<void> {
+    await io.waitFor(`node${node.num} observes on-chain slot ${onChainId}`, 120_000, 3_000, async () => {
+      const res = await getChecked(node, '/api/context-graph/list', parseContextGraphListResponse);
+      if (!res.ok) return null;
+      return res.body.contextGraphs.some((row) => (row.onChainId ?? row.onChain?.id) === onChainId) ? true : null;
+    });
+  }
+
+  /**
+   * Arrange check for a test whose subject is the first subscribe: the edge holds no
+   * subscription row for the graph, under either of its ids. It fails with that
+   * message instead of letting a later assertion read someone else's leftovers.
+   */
+  async function expectNoRowFor(node: DevnetNode, graph: GraphNames): Promise<void> {
+    const ids = (await listSubscriptions(node)).map((row) => row.contextGraphId);
+    expect(ids, `node${node.num} must not yet be subscribed to ${graph.id}`).not.toContain(graph.id);
+    expect(ids, `node${node.num} must not yet be subscribed to ${graph.id} by its hash`).not.toContain(graph.nameHash);
+  }
+
+  /** Wait for the promotion: a subscribed row keyed by the cleartext id, none keyed by the hash. */
+  async function waitForAdoption(node: DevnetNode, graph: GraphNames): Promise<SubscriptionRow> {
+    return io.waitFor(`node${node.num} adopts ${graph.id}`, 180_000, 3_000, async () => {
+      const rows = await listSubscriptions(node);
+      const adopted = rows.find((candidate) => candidate.contextGraphId === graph.id && candidate.subscribed);
+      return adopted !== undefined && !rows.some((candidate) => candidate.contextGraphId === graph.nameHash)
+        ? adopted
+        : null;
+    });
   }
 
   /** A catch-up job by its id; anything but a 200 fails with `label` and the raw body. */
@@ -322,6 +391,66 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
   }
 
   /**
+   * ARRANGE, idempotent: leave `graph` subscribed, adopted under its cleartext id
+   * and converged on `author`'s VM content on `node`. It subscribes (under
+   * `requestedId`) only when the node has no row for the graph, keyed by either
+   * id; adoption and content are waits, which return at once when they already
+   * hold. So it does the same thing whether or not another test, or an earlier
+   * attempt of the same test, already subscribed this node. Returns the id of the
+   * catch-up job its own subscribe queued, or none when it did not subscribe (the
+   * job is then whichever the graph's names find).
+   */
+  async function ensureConverged(
+    node: DevnetNode,
+    author: DevnetNode,
+    graph: JobGraph & { readonly subject: string },
+    requestedId: string,
+    label: string,
+  ): Promise<{ jobId?: string }> {
+    let jobId: string | undefined;
+    const rows = await listSubscriptions(node);
+    if (!rows.some((row) => row.contextGraphId === graph.id || row.contextGraphId === graph.nameHash)) {
+      await waitUntilChainSlotObserved(node, graph.onChainId);
+      jobId = queuedJobId(await subscribeWhenAdmitted(node, requestedId));
+    }
+    await waitForAdoption(node, graph);
+    const expected = await subjectContent(author, graph.id, graph.subject, 'verifiable-memory');
+    await waitForContent(node, graph.id, graph.subject, 'verifiable-memory', expected, label);
+    return jobId === undefined ? {} : { jobId };
+  }
+
+  /**
+   * A job made under a name hash is still there under that hash once the hash has
+   * resolved (#2779): the hash names the job it was subscribed with, the job is
+   * readable by its id, and its identity note is read live, so it now names the
+   * cleartext graph. `contextGraphId` stays the hash (the job never changes the id it
+   * was created under); `resolvedContextGraphId` is set only when the job continued
+   * under the cleartext id while it ran, and then it names that graph.
+   */
+  async function expectByHashLookupResolved(node: DevnetNode, graph: GraphNames, jobId: string, label: string): Promise<CatchupStatusReply> {
+    const byHash = await io.waitFor(`${label}: node${node.num} catch-up status by name hash`, 60_000, 2_000, async () => catchupStatus(node, graph.nameHash));
+    expect(byHash.jobId, `${label}: the hash names the job it was subscribed with`).toBe(jobId);
+    if (byHash.resolvedContextGraphId === undefined) {
+      // The job never continued under another id: it is still keyed by the hash it was made with.
+      expect(byHash.contextGraphId, `${label}: a job that did not continue stays keyed by the hash`).toBe(graph.nameHash);
+    } else {
+      expect(byHash.resolvedContextGraphId, `${label}: a job that continued names the cleartext graph`).toBe(graph.id);
+    }
+    expect(byHash.identity, `${label}: ${JSON.stringify(byHash)}`).toMatchObject(
+      // `satisfies` types the expected object against the daemon's declaration:
+      // vitest types toMatchObject loosely, so without it a changed identity state
+      // spelling would compile here and fail only in a long devnet run.
+      { state: 'resolved', nameHash: graph.nameHash, contextGraphId: graph.id } satisfies Partial<CatchupContextGraphIdentity>,
+    );
+    const byJobId = await catchupJob(node, jobId, `${label}: the job by its id`);
+    expect(byJobId.jobId).toBe(jobId);
+    expect(byJobId.identity, `${label}: the job by its id`).toMatchObject(
+      { state: 'resolved', nameHash: graph.nameHash, contextGraphId: graph.id } satisfies Partial<CatchupContextGraphIdentity>,
+    );
+    return byHash;
+  }
+
+  /**
    * The operator's recovery for a catch-up job that ended `failed`: a fresh
    * subscribe with `forceCatchup`. It mints a REPLACEMENT job (or, while a job is
    * still queued or running, hands that one back), and from then on the cleartext
@@ -382,10 +511,19 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
   return {
     getChecked,
     postChecked,
+    listSubscriptions,
+    dialTarget,
+    connectedPeerIds,
+    dial,
+    waitUntilChainSlotObserved,
+    expectNoRowFor,
+    waitForAdoption,
+    ensureConverged,
     catchupStatus,
     catchupJob,
     findLatestJob,
     expectLatestJobNamed,
+    expectByHashLookupResolved,
     subjectContent,
     pollSubjectContent,
     tryRowCount,

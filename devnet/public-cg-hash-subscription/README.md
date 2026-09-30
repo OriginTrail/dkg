@@ -105,22 +105,40 @@ The first catch-up job of a subscription can be cut short when the node's RFC-64
 authority RPC circuit is open. Only the SWM scenario (5 above, the one that
 depends on a holder's authority pipeline) recovers from that: while it waits for
 content it re-subscribes with `forceCatchup` once a minute, and afterwards it
-expects the aliases to name whichever job is latest. Every other content wait
-only reads, and reports the latest job's verdict on timeout. Recovery covers only
-a short circuit window: a node whose circuit stays open needs a restart, and the
-suite fails rather than hiding it.
+asserts what is true of whichever job is latest (a forced job is named by the
+cleartext and on-chain ids; see "Which names a job answers to"). Every other
+content wait only reads (it never re-subscribes, so the job a test started stays the
+latest one until the test replaces it), and reports the latest job's verdict on
+timeout. Recovery covers only a short circuit window: a node whose circuit stays
+open needs a restart, and the suite fails rather than hiding it. A failed forced
+catch-up (a rejected request, a non-200) is retried on the next round; a reply of
+the wrong shape is not, it rejects the whole scenario.
 
 ## Structure
 
 Every test runs correctly alone or after any other test; none reads state left by
 another.
 
-- **Fixture** (`beforeAll`): the graphs are created once, before any test, and
-  never change afterwards: two published to VM (`vm`, `forced`), one only shared
-  to SWM (`swm`), and one registered on chain with a name nobody can resolve
+The suite is split so that each scenario's arrangement and assertions are read
+together, and the mechanics under them are not:
+
+| file | what it holds |
+| --- | --- |
+| `automated.test.ts` | the seven tests: each scenario's arrangement and its assertions |
+| `fixture.ts` | the graphs (types, creation through the daemon API, registration straight on the contract, funding a throwaway wallet, the artifact files); the devnet, the author node, the run stamp and the artifact directory are passed in, not read from module state |
+| `daemon.ts` | typed reads and posts through the validators, and the observation and recovery helpers built on them (content polls, subscribe retry, adoption waits, the no-row check, the arrange step, forced catch-up, dialing); nodes and expected content are arguments, and the transport is injected |
+| `catchup-jobs.ts` | the pure classification of a graph's latest catch-up job |
+| `wire.ts` | the reply validators |
+| `flows.ts` | side-by-side scenarios |
+| `*.test.ts` other than `automated.test.ts` | unit tests of the above; no devnet |
+
+- **Fixture** (`beforeAll`, `fixture.ts`): the graphs are created once, before any
+  test, and never change afterwards: two published to VM (`vm`, `forced`), one only
+  shared to SWM (`swm`), and one registered on chain with a name nobody can resolve
   (`unheld`), and one registered on chain with a name only the suite knows (`late`,
-  revealed by test 7 alone). No test creates a graph. The devnet detection and
-  identity setup is shared the same way.
+  revealed by test 7 alone). No test creates a graph (test 7 reveals a name to the
+  network by subscribing it; the slot it uses is in the fixture). The devnet
+  detection and identity setup is shared the same way.
 - **Arrange** (inside each test): a test makes the edge state it needs. No
   (edge, graph) pair is used by two tests:
 
@@ -199,8 +217,8 @@ another.
 - **Unit tests without a devnet**: `wire.test.ts` (each validator accepts a
   real-shaped payload, the catch-up status ones built by the daemon's own
   `toCatchupStatusResponse`, and rejects a renamed or retyped field),
-  `daemon.test.ts`, `catchup-jobs.test.ts` and `flows.test.ts`. They run with the suite's vitest config and
-  need no devnet:
+  `daemon.test.ts`, `catchup-jobs.test.ts` and `flows.test.ts`. They run with the
+  suite's vitest config and need no devnet:
   `pnpm exec vitest run --config devnet/public-cg-hash-subscription/vitest.config.ts wire.test daemon.test catchup-jobs.test flows.test`.
 
 ## Run
@@ -219,7 +237,8 @@ pnpm exec vitest run --config devnet/public-cg-hash-subscription/vitest.config.t
 ```
 
 Node 1 (core) is the author; nodes 5 and 6 (edges) subscribe and read, and test 7
-has edge 5 dial edge 6. The suite creates and mutates only its own Context Graphs,
+has edge 5 dial edge 6. The suite creates and mutates only its own Context Graphs
+(the ISOLATION INVARIANT in `devnet/_bootstrap/harness.ts`),
 and throwaway funded wallets for the hash-only and late-holder graphs; it never
 touches a node's wallet or the shared `devnet-test` graph, and it does not stop or
 restart nodes or warp the chain clock. The one change it leaves behind is the
