@@ -112,6 +112,13 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
       await store.insert(quads);
       const originalFetch = globalThis.fetch;
       const requests = vi.spyOn(globalThis, 'fetch');
+      const pinnedGraphs = await store.withReadSnapshot((snapshot) =>
+        snapshot.listGraphsByPrefix!(swm));
+      expect(pinnedGraphs.sort()).toEqual(quads.slice(0, 130).map((quad) => quad.graph).sort());
+      expect(requests.mock.calls.some(([input, init]) =>
+        String(input).includes('?timestamp=')
+        && String(init?.body) === 'SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
+      )).toBe(true);
       const selected = await loadSelectedSharedMemoryQuads(
         store,
         swm,

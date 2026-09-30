@@ -1,6 +1,7 @@
 /** Read-only Blazegraph snapshot lifecycle with mocked HTTP. */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
+import { ATOMIC_GRAPH_REPLACE_STAGING_PREFIX } from '../src/atomic-graph-replace.js';
 
 const baseUrl = 'http://blaze.test/sparql';
 let fetchCalls: [input: string | URL | Request, init?: RequestInit][];
@@ -60,6 +61,33 @@ describe('Blazegraph read snapshot lifecycle (mocked HTTP)', () => {
     expect(fetchCalls.filter(([, init]) => String(init?.body).includes('SELECT DISTINCT ?g')))
       .toHaveLength(2);
     expect(urls.at(-1)).toBe('http://blaze.test/tx/12345?ABORT');
+  });
+
+  it('filters the plain graph inventory under the same pinned snapshot', async () => {
+    const graphs = [
+      'did:dkg:context-graph:foodie-network/_shared_memory/a',
+      'did:dkg:context-graph:foodie-network/_shared_memory/b',
+      'did:dkg:context-graph:another/_shared_memory/c',
+      `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}temporary`,
+    ];
+    setFetch(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/tx?timestamp=-1')) {
+        return new Response('<tx txId="456" readOnly="true"/>', { status: 201 });
+      }
+      if (url.endsWith('/tx/456?ABORT')) return new Response(null, { status: 200 });
+      expect(url).toBe(`${baseUrl}?timestamp=456`);
+      expect(String(init?.body)).toBe('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }');
+      return new Response(JSON.stringify({
+        head: { vars: ['g'] },
+        results: { bindings: graphs.map((g) => ({ g: { type: 'uri', value: g } })) },
+      }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    const store = new BlazegraphStore(baseUrl);
+    const prefix = 'did:dkg:context-graph:foodie-network/_shared_memory/';
+    await expect(store.withReadSnapshot((snapshot) => snapshot.listGraphsByPrefix!(prefix)))
+      .resolves.toEqual(graphs.slice(0, 2));
+    expect(fetchCalls).toHaveLength(3);
   });
 
   it('sends snapshot-bound CONSTRUCT through the pinned HTTP endpoint', async () => {
