@@ -31,7 +31,11 @@ nodes.
    covered here.)
 3. A second edge subscribed with `#<on-chain id>` lands on the same cleartext
    graph and converges on the same VM content.
-4. The SWM copy of a second graph, shared but never published, backfills on
+4. A forced catch-up (`forceCatchup`, the operator's recovery) on an already
+   converged graph mints a replacement job. Both aliases (cleartext id and
+   on-chain id) then name it, the superseded job stays readable by its id, and
+   the content is unchanged.
+5. The SWM copy of a second graph, shared but never published, backfills on
    both edges after they subscribe by hash (edge 5) and by numeric id (edge 6).
    This is its own graph and its own test because it depends on something the
    hash path does not: holders serve a graph's shared working memory only once
@@ -43,16 +47,19 @@ nodes.
    subscribed by hash and, in a control, for one that subscribed by cleartext id,
    so it is not the hash path, and a forced re-subscribe recovers it only
    sometimes. The adoption and VM tests do not depend on it.
-5. A graph registered directly on the chain with a name commitment whose
+6. A graph registered directly on the chain with a name commitment whose
    preimage no node holds stays hash-only: no cleartext row is invented, and its
    catch-up (looked up by the hash) settles as `unreachable` with the
    name-hash-only note, not as a retryable failure.
 
 The first catch-up job of a subscription can be cut short when the node's RFC-64
-authority RPC circuit is open. While it waits for content the suite
-re-subscribes with `forceCatchup` once a minute and reports the last job's
-verdict on timeout. That recovers only a short circuit window: a node whose
-circuit stays open needs a restart, and the suite fails rather than hiding it.
+authority RPC circuit is open. Only the SWM scenario (5 above, the one that
+depends on a holder's authority pipeline) recovers from that: while it waits for
+content it re-subscribes with `forceCatchup` once a minute, and afterwards it
+expects the aliases to name whichever job is latest. Every other content wait
+only reads, and reports the latest job's verdict on timeout. Recovery covers only
+a short circuit window: a node whose circuit stays open needs a restart, and the
+suite fails rather than hiding it.
 
 ## Run
 

@@ -33,6 +33,7 @@ import {
   contextGraphDataGraphUri,
 } from '@origintrail-official/dkg-core';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
+import { subscribeByNameHash } from './_helpers/subscribe-by-name-hash.js';
 import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
 import { DKGAgent } from '../src/index.js';
 import {
@@ -176,30 +177,6 @@ async function swmNames(agent: DKGAgent, contextGraphId: string, subject: string
   return result.bindings.map((row) => String(row['name']));
 }
 
-/**
- * The calls `POST /api/context-graph/subscribe` makes for a name hash, in its
- * order (packages/cli/src/daemon/routes/context-graph.ts).
- */
-async function subscribeByNameHash(agent: DKGAgent, requested: string) {
-  let contextGraphId = agent.resolveContextGraphIdAlias(requested) ?? requested;
-  const authority = await agent.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
-    callerAgentAddress: agent.getDefaultAgentAddress(),
-    allowSubscriptionFallback: false,
-  });
-  expect(authority.outcome, JSON.stringify(authority, (_key, value) => (typeof value === 'bigint' ? value.toString() : value))).toBe('allowed');
-  if (agent.contextGraphNameTargetFor(contextGraphId)) {
-    const resolved = await agent.resolveContextGraphNameHashNow(contextGraphId, {
-      signal: AbortSignal.timeout(2_000),
-    }).catch(() => null);
-    if (resolved) contextGraphId = resolved;
-  }
-  agent.subscribeToContextGraph(contextGraphId, {
-    syncMode: 'always-on',
-    ...(authority.onChainId === undefined ? {} : { onChainId: authority.onChainId.toString(10) }),
-  });
-  return { contextGraphId, authority };
-}
-
 function row(agent: DKGAgent, id: string) {
   return agent.getSubscribedContextGraphs().get(id);
 }
@@ -330,6 +307,9 @@ describe('E2E: subscribe by on-chain name hash on a real ContextGraphStorage', (
     await subscribeByNameHash(edge.agent, graph.nameHash);
     const asked = vi.spyOn(edge.agent, 'askPeerForContextGraphName');
     const pulled = vi.spyOn(edge.agent, 'pullPeerOntologyForContextGraphNames');
+    // The raw sync fetch sits below the function that filters the pulled
+    // ontology, so what it returns is what actually crossed the network.
+    const fetched = vi.spyOn(edge.agent, 'fetchSyncPages');
 
     await connect(edge.agent, liar.agent);
     await connect(edge.agent, forger.agent);
@@ -342,6 +322,20 @@ describe('E2E: subscribe by on-chain name hash on a real ContextGraphStorage', (
     await expect(Promise.all(asked.mock.results.map((result) => result.value)))
       .resolves.toContain(WRONG_ANSWER);
     expect(pulled, 'the forging peer\'s ontology was pulled').toHaveBeenCalled();
+    // ...and the forged claim really arrived: a fetch of the forger's ontology
+    // graph over the sync protocol returned the forged definition's own rows.
+    // Without this, an empty page from a broken transport or fixture would pass
+    // every assertion below as "rejected".
+    const forgerOntologyFetches = fetched.mock.calls
+      .map((call, index) => ({ call, result: fetched.mock.results[index]!.value as Promise<{ quads: Array<{ subject: string; predicate: string; object: string }> }> }))
+      .filter(({ call }) => String(call[1]) === String(forger.agent.peerId) && call[2] === SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    expect(forgerOntologyFetches.length, 'the forger\'s ontology graph was fetched over the sync protocol').toBeGreaterThan(0);
+    const received = (await Promise.all(forgerOntologyFetches.map(({ result }) => result))).flatMap((page) => page.quads);
+    const forgedRows = received.filter((quad) => quad.subject === contextGraphDataGraphUri(FORGED_CLAIM));
+    expect(
+      forgedRows.some((quad) => quad.predicate === CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE && quad.object.includes(graph.onChainId)),
+      `the forged claim for slot ${graph.onChainId} reached the edge (received ${received.length} ontology rows, ${forgedRows.length} of them the forged definition)`,
+    ).toBe(true);
     expect(resolvedByLiars).toBeNull();
     expect(edge.agent.resolveContextGraphIdAlias(graph.nameHash)).toBeNull();
     expect(edge.agent.describeContextGraphIdentity(graph.nameHash)).toMatchObject({ state: 'name-hash-only' });

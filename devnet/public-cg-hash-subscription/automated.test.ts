@@ -19,14 +19,20 @@
  *      only when the job was created under the hash; when the subscribe request
  *      itself resolved the hash (the usual case here) the job is keyed by the
  *      cleartext id and a lookup by the hash finds none, so that branch is not
- *      exercised by this suite.
- *   4. The shared working memory of a second graph, shared but never published,
+ *      exercised by this suite. The content waits only read: they never
+ *      re-subscribe, so the job a test started stays the latest one.
+ *   4. A forced catch-up (`forceCatchup`, the operator's recovery) on an already
+ *      converged graph mints a replacement job that both aliases follow; the
+ *      superseded job stays readable by its id and the content is unchanged.
+ *   5. The shared working memory of a second graph, shared but never published,
  *      backfills on both edges after they subscribe by hash and by numeric id.
  *      It is its own graph and its own test because holders serve SWM only once
  *      their RFC-64 authority pipeline has accepted the graph, and that pipeline
  *      can lag for many minutes after a devnet starts; the adoption and VM tests
- *      above do not depend on it.
- *   5. A graph registered on chain whose cleartext no peer holds stays hash-only:
+ *      above do not depend on it. It is the one scenario that recovers
+ *      explicitly (a forced catch-up once a minute), and afterwards it expects
+ *      the aliases to name whichever job is latest.
+ *   6. A graph registered on chain whose cleartext no peer holds stays hash-only:
  *      no cleartext row is invented, and its catch-up settles as `unreachable`
  *      with the name-hash-only note rather than as a retryable failure.
  *
@@ -211,15 +217,44 @@ async function tryRowCount(node: DevnetNode, contextGraphId: string, subject: st
   return Array.isArray(bindings) ? bindings.length : 0;
 }
 
+/** The latest catch-up job's verdict, for a failure message. */
+async function describeLatestJob(node: DevnetNode, contextGraphId: string): Promise<string> {
+  const job = await catchupStatus(node, contextGraphId).catch(() => null);
+  return `last catch-up job: ${job?.jobStatus ?? 'none'}${job?.error ? `, ${job.error}` : ''}`;
+}
+
 /**
- * Wait for a subject's content to match the author's on an edge.
- *
- * The first catch-up job of a subscription can be cut short by a transient
- * authority failure (an RFC-64 authority RPC circuit that is open for a while
- * after chain reads time out on a loaded machine): the job then ends `failed`
- * and nothing retries it by itself. An operator recovers with a fresh subscribe
- * and `forceCatchup`, so this helper does the same once a minute, and reports
- * the last job's verdict if the content never arrives.
+ * Poll an edge until a subject's content in one view matches the author's, and
+ * report the latest catch-up job's verdict if it never does. `whileWaiting`
+ * runs on every poll that found no match yet; without it the poll only reads.
+ */
+async function pollContent(
+  node: DevnetNode,
+  contextGraphId: string,
+  subject: string,
+  view: View,
+  expected: string[],
+  label: string,
+  budgetMs: number,
+  whileWaiting?: () => Promise<void>,
+): Promise<void> {
+  try {
+    await waitFor(`${label}: node${node.num} ${view} content of ${subject}`, budgetMs, 3_000, async () => {
+      const rows = await subjectContent(node, contextGraphId, subject, view).catch(() => [] as string[]);
+      if (rows.length > 0 && JSON.stringify(rows) === JSON.stringify(expected)) return rows;
+      await whileWaiting?.();
+      return null;
+    });
+  } catch (err) {
+    throw new Error(`${err instanceof Error ? err.message : String(err)} (${await describeLatestJob(node, contextGraphId)})`);
+  }
+}
+
+/**
+ * Wait for a subject's content to match the author's on an edge. Purely
+ * observational: it never subscribes, retries or otherwise changes the node, so
+ * the catch-up job a test started stays the latest one until the test itself
+ * replaces it.
  */
 async function waitForContent(
   node: DevnetNode,
@@ -230,29 +265,79 @@ async function waitForContent(
   label: string,
   budgetMs = 420_000,
 ): Promise<void> {
+  await pollContent(node, contextGraphId, subject, view, expected, label, budgetMs);
+}
+
+/**
+ * The operator's recovery for a catch-up job that ended `failed`: a fresh
+ * subscribe with `forceCatchup`. It mints a REPLACEMENT job (or, while a job is
+ * still queued or running, hands that one back), and from then on the cleartext
+ * id and the on-chain id name the latest job, not the one the first subscribe
+ * returned. The superseded job stays readable by its own id.
+ */
+async function forceCatchup(
+  node: DevnetNode,
+  contextGraphId: string,
+): Promise<{ status: number; jobId?: string; detail: string }> {
+  const res = await postJson(node, '/api/context-graph/subscribe', {
+    contextGraphId,
+    includeSharedMemory: true,
+    syncMode: 'always-on',
+    forceCatchup: true,
+  });
+  return {
+    status: res.status,
+    jobId: res.status === 200 ? (res.json as SubscribeResponse).catchup?.jobId : undefined,
+    detail: JSON.stringify(res.json),
+  };
+}
+
+/**
+ * Wait for content and, once a minute while it is missing, recover with a forced
+ * catch-up. Only the SWM scenario calls this: its content depends on a holder's
+ * RFC-64 authority pipeline, which can lag or trip its RPC circuit for a while
+ * after a devnet starts (an operator recovers a short window this way; a node
+ * whose circuit stays open needs a restart, and the suite fails rather than hide
+ * it). Returns the id of the latest catch-up job, which is what the graph's
+ * aliases must name afterwards: `firstJobId` when no recovery replaced it.
+ */
+async function recoverUntilContent(
+  node: DevnetNode,
+  contextGraphId: string,
+  subject: string,
+  view: View,
+  expected: string[],
+  label: string,
+  firstJobId: string,
+  budgetMs: number,
+): Promise<string> {
+  let latestJobId = firstJobId;
   let lastRetryAt = Date.now();
-  try {
-    await waitFor(`${label}: node${node.num} ${view} content of ${subject}`, budgetMs, 3_000, async () => {
-      const rows = await subjectContent(node, contextGraphId, subject, view).catch(() => [] as string[]);
-      if (rows.length > 0 && JSON.stringify(rows) === JSON.stringify(expected)) return rows;
-      if (Date.now() - lastRetryAt >= 60_000) {
-        lastRetryAt = Date.now();
-        await postJson(node, '/api/context-graph/subscribe', {
-          contextGraphId,
-          includeSharedMemory: true,
-          syncMode: 'always-on',
-          forceCatchup: true,
-        }).catch(() => undefined);
-      }
-      return null;
-    });
-  } catch (err) {
-    const job = await catchupStatus(node, contextGraphId).catch(() => null);
-    throw new Error(
-      `${err instanceof Error ? err.message : String(err)} (last catch-up job: ${job?.jobStatus ?? 'none'}`
-      + `${job?.error ? `, ${job.error}` : ''})`,
-    );
-  }
+  await pollContent(node, contextGraphId, subject, view, expected, label, budgetMs, async () => {
+    if (Date.now() - lastRetryAt < 60_000) return;
+    lastRetryAt = Date.now();
+    const forced = await forceCatchup(node, contextGraphId).catch(() => null);
+    if (forced?.jobId !== undefined) latestJobId = forced.jobId;
+  });
+  return latestJobId;
+}
+
+/**
+ * A catch-up job is readable by its id and names the graph, and both aliases of
+ * the graph (its cleartext id and its on-chain id) name it as the latest job.
+ */
+async function expectAliasesName(node: DevnetNode, graph: RegisteredGraph, jobId: string, label: string): Promise<void> {
+  const byJobId = await getJson(node, `/api/sync/catchup-status?jobId=${encodeURIComponent(jobId)}`);
+  expect(byJobId.status, `${label}: ${JSON.stringify(byJobId.json)}`).toBe(200);
+  const named = byJobId.json as CatchupStatus;
+  expect(named.resolvedContextGraphId ?? named.contextGraphId, `${label}: the job names the cleartext graph`).toBe(graph.id);
+  await waitFor(`${label}: node${node.num} names job ${jobId} by cleartext id and on-chain id`, 30_000, 2_000, async () => {
+    const [byCleartextId, byOnChainId] = await Promise.all([
+      catchupStatus(node, graph.id),
+      catchupStatus(node, graph.onChainId),
+    ]);
+    return byCleartextId?.jobId === jobId && byOnChainId?.jobId === jobId ? true : null;
+  });
 }
 
 /** Register a public, open graph through the daemon API and check the chain commits keccak256(id). */
@@ -351,15 +436,11 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
 
     // The catch-up job the subscribe minted is reachable by its id, by the
     // cleartext id and by the on-chain id, and always names the cleartext graph.
+    // The wait above only reads, so nothing has replaced it: the job the subscribe
+    // returned is still the latest one.
     const jobId = subscribed.catchup?.jobId;
     expect(jobId, JSON.stringify(subscribed)).toEqual(expect.any(String));
-    const byJobId = await getJson(edgeA, `/api/sync/catchup-status?jobId=${encodeURIComponent(jobId!)}`);
-    expect(byJobId.status, JSON.stringify(byJobId.json)).toBe(200);
-    expect((byJobId.json as CatchupStatus).resolvedContextGraphId ?? (byJobId.json as CatchupStatus).contextGraphId).toBe(vmGraph.id);
-    const byCleartextId = await catchupStatus(edgeA, vmGraph.id);
-    expect(byCleartextId?.jobId).toBe(jobId);
-    const byOnChainId = await catchupStatus(edgeA, vmGraph.onChainId);
-    expect(byOnChainId?.jobId).toBe(jobId);
+    await expectAliasesName(edgeA, vmGraph, jobId!, 'name-hash subscribe');
     // Looked up by the hash it was subscribed with (#2779), a job created under
     // the hash names the cleartext graph once it resolved. When the subscribe
     // request itself resolved the hash (the usual case with a connected holder)
@@ -388,25 +469,80 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     await waitForContent(edgeB, vmGraph.id, vmGraph.subject, 'verifiable-memory', vmExpected, 'numeric-id subscribe');
   }, 900_000);
 
+  // The operator's recovery for a catch-up job that did not deliver: a forced
+  // catch-up replaces the graph's latest job. The recovery step of the SWM
+  // scenario below depends on that, so it is pinned here on its own, on a graph
+  // that has already converged and so needs no fault to be injected.
+  it('a forced catch-up mints a replacement job that both aliases follow, keeps the superseded job readable, and leaves the content intact', async () => {
+    const first = await waitFor(`node${edgeA.num} has a settled catch-up job for ${vmGraph.id}`, 120_000, 3_000, async () => {
+      const found = await catchupStatus(edgeA, vmGraph.id);
+      return found !== null && found.jobStatus !== 'queued' && found.jobStatus !== 'running' ? found : null;
+    });
+
+    const forced = await forceCatchup(edgeA, vmGraph.id);
+    expect(forced.status, forced.detail).toBe(200);
+    expect(forced.jobId, forced.detail).toEqual(expect.any(String));
+    expect(forced.jobId, 'a settled graph gets a REPLACEMENT job, not the old one back').not.toBe(first.jobId);
+
+    // Both aliases now name the replacement; the superseded job is still there by its id.
+    await expectAliasesName(edgeA, vmGraph, forced.jobId!, 'forced catch-up');
+    const superseded = await getJson(edgeA, `/api/sync/catchup-status?jobId=${encodeURIComponent(first.jobId)}`);
+    expect(superseded.status, JSON.stringify(superseded.json)).toBe(200);
+    expect((superseded.json as CatchupStatus).jobId).toBe(first.jobId);
+
+    // The replacement runs to a verdict, and the content is exactly what it was.
+    // The verdict itself is not what this test pins: this graph has no shared
+    // working memory, so a catch-up that also asks for it can settle as
+    // `unreachable` (the SWM plane stalls on empty answers) while the VM content
+    // is intact, and the aliases follow that latest job all the same.
+    const settled = await waitFor(`node${edgeA.num} replacement catch-up job settles`, 240_000, 3_000, async () => {
+      const found = await catchupStatus(edgeA, vmGraph.id);
+      return found?.jobId === forced.jobId && found.jobStatus !== 'queued' && found.jobStatus !== 'running' ? found : null;
+    });
+    // eslint-disable-next-line no-console
+    console.log(`hash-sub: forced catch-up job ${settled.jobId} settled as ${settled.jobStatus}`);
+    const vmExpected = await subjectContent(author, vmGraph.id, vmGraph.subject, 'verifiable-memory');
+    await waitForContent(edgeA, vmGraph.id, vmGraph.subject, 'verifiable-memory', vmExpected, 'after the forced catch-up');
+  }, 900_000);
+
   // Kept apart from the tests above on purpose, on a graph that was only shared.
   // Holders serve a graph's shared working memory only once their RFC-64
   // authority pipeline has accepted it (a finalized authority index polled every
   // few minutes), and that pipeline can lag or trip its RPC circuit for many
   // minutes after a devnet starts (`chain event log moved`, `RFC-64 authority
-  // RPC circuit is open`).
+  // RPC circuit is open`). This is the one scenario that recovers explicitly.
   it('the SWM a holder shared before the edges subscribed backfills on both, subscribed by hash and by numeric id', async () => {
     const swmExpected = await subjectContent(author, swmGraph.id, swmGraph.subject, 'shared-working-memory');
     expect(swmExpected.some((entry) => entry.includes(swmGraph.value))).toBe(true);
 
     await waitUntilChainSlotObserved(edgeA, swmGraph.onChainId);
-    await subscribeWhenAdmitted(edgeA, swmGraph.nameHash);
+    const subscribedA = await subscribeWhenAdmitted(edgeA, swmGraph.nameHash);
     await waitForAdoption(edgeA, swmGraph);
     await waitUntilChainSlotObserved(edgeB, swmGraph.onChainId);
-    await subscribeWhenAdmitted(edgeB, `#${swmGraph.onChainId}`);
+    const subscribedB = await subscribeWhenAdmitted(edgeB, `#${swmGraph.onChainId}`);
     await waitForAdoption(edgeB, swmGraph);
 
-    await waitForContent(edgeA, swmGraph.id, swmGraph.subject, 'shared-working-memory', swmExpected, 'name-hash subscribe', 600_000);
-    await waitForContent(edgeB, swmGraph.id, swmGraph.subject, 'shared-working-memory', swmExpected, 'numeric-id subscribe', 600_000);
+    // The jobs the subscribes minted, checked before any recovery can replace
+    // them. (A subscribe that answered under the hash keyed its job by the hash,
+    // and its cleartext alias is not asserted here.)
+    const edges = [
+      { node: edgeA, subscribed: subscribedA, label: 'name-hash subscribe' },
+      { node: edgeB, subscribed: subscribedB, label: 'numeric-id subscribe' },
+    ];
+    for (const { node, subscribed, label } of edges) {
+      const jobId = subscribed.catchup?.jobId;
+      expect(jobId, JSON.stringify(subscribed)).toEqual(expect.any(String));
+      if (subscribed.subscribed === swmGraph.id) await expectAliasesName(node, swmGraph, jobId!, `${label} (first job)`);
+    }
+
+    // Recover explicitly, and expect the aliases to follow whichever job is latest.
+    for (const { node, subscribed, label } of edges) {
+      const latestJobId = await recoverUntilContent(
+        node, swmGraph.id, swmGraph.subject, 'shared-working-memory', swmExpected, label,
+        subscribed.catchup!.jobId, 600_000,
+      );
+      await expectAliasesName(node, swmGraph, latestJobId, `${label} (latest job)`);
+    }
   }, 1_800_000);
 
   it('a graph registered on chain whose cleartext no peer holds stays hash-only: nothing is invented', async () => {
