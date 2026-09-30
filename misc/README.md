@@ -23,4 +23,5 @@ The mainnet-ops scripts below are run by hand with `npx tsx` and read or write
 `distribute-publisher-trac.ts` records transfers it has already sent in an
 untracked `<chain>_distribution_ledger.json` in this folder, so it does not pay
 twice. If you have such a ledger under the old root `snapshots/` folder, move it
-to `misc/snapshots/` before running the script again.
+to `misc/snapshots/`. The script refuses to run while a ledger is left at the
+old path.
