@@ -3,15 +3,14 @@
  *
  * A core that hosts a curated context graph's Shared Working Memory keeps the
  * opaque ciphertext envelopes in `<home>/swm-host/<sha256(cg)>.{log,meta}`
- * (`SwmHostModeStore`). This suite proves, on a real 6-node devnet, that
- * `kill -9` of that core while it is ingesting live gossip cannot corrupt the
- * store or recycle a seqno, and that a member's host catch-up (strict
- * greater-than seqno paging) still completes afterwards:
+ * (`SwmHostModeStore`). This suite proves, on a real devnet, that `kill -9` of
+ * that core while it is ingesting live gossip cannot corrupt the store or
+ * recycle a seqno, and that host catch-up (strict greater-than seqno paging)
+ * still completes afterwards:
  *
- *   1. The hosting core (node4, `swmHostMode.stripCiphertext=false`) receives
- *      the curator's (node5) SWM shares for a curated CG and stores them.
- *      This is the first, non-vacuous gate: without entries on disk nothing
- *      below means anything.
+ *   1. The hosting core (node4) receives the curator's (node5) SWM shares for a
+ *      curated CG and stores them. This is the first, non-vacuous gate: without
+ *      entries on disk nothing below means anything.
  *   2. For several cycles the suite SIGKILLs the core the moment a new frame
  *      lands in its log (the writer keeps producing shares throughout, so the
  *      kill falls inside the append -> persistMeta -> directory-fsync window
@@ -22,13 +21,25 @@
  *          tail, and seqnos are strictly increasing with no duplicate or
  *          reused value across the crash,
  *        - the `.meta` cursor is never below the log's last seqno,
- *        - the host re-engages host mode for the CG from its persisted flag.
- *   3. The member edge (node6) pages the hosting core with
+ *        - the host re-engages host mode from its persisted flag.
+ *   3. The curator edge pages the hosting core with
  *      `POST /api/shared-memory/host-catchup`, one round per call, resuming
  *      from the returned cursor until the host has nothing more, from several
  *      starting cursors: the core serves exactly the frames with seqno > the
  *      starting cursor across the pages and the final cursor is the true last
  *      seqno (catch-up "pages to completion").
+ *
+ * Why the setup looks the way it does (this release):
+ *   - The RFC-64 kill switch is on for node4 and node5: in catalog mode the
+ *     legacy SWM transport, and with it host-mode custody, is inert.
+ *   - `swmHostMode.stripCiphertext=false` on node4: by default a core keeps no
+ *     private ciphertext for a curated graph.
+ *   - The curated graph allowlists ONLY the curator. A private graph whose
+ *     roster has a reachable peer besides the author is delivered point-to-point
+ *     and never gossiped (OT-RFC-49 WS-A), which a hosting core (not a member)
+ *     cannot receive; with the author as the only agent the roster is empty, so
+ *     the gossip leg the host store consumes stays on. The author is an
+ *     allowlisted agent, so it is also a legitimate host-catchup requester.
  *
  * Preconditions:
  *   pnpm run build && pnpm --dir packages/cli run build:prepared
@@ -38,8 +49,9 @@
  *   pnpm test:devnet:swm-host-store-durability
  *
  * The suite mutates only its own ephemeral entities: a fresh curated CG it
- * creates, and node4's `swmHostMode` config block (backed up and restored, with
- * a restart, on every exit path). It restarts node4 several times.
+ * creates, and the `config.json` of node4 and node5 (both backed up and
+ * restored, with a restart, on every exit path). It restarts node4 several
+ * times.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
@@ -51,17 +63,14 @@ import {
   REPO_ROOT,
   getJson,
   postJson,
-  queryNode,
   readNodeConfig,
   sleep,
   waitFor,
-  lexical,
   type DevnetNode,
 } from '../_bootstrap/harness';
 
 const HOST = 4; // core
-const CURATOR = 5; // edge
-const MEMBER = 6; // edge
+const CURATOR = 5; // edge: the only allowlisted agent, the writer, and the catch-up requester
 const KILL_CYCLES = Number(process.env.SWM_HOST_KILL_CYCLES ?? 5);
 const STAMP = Date.now().toString(36);
 
@@ -85,7 +94,6 @@ function nodeFor(num: number, asAgent = false): DevnetNode {
 
 const hostHome = join(DEVNET_DIR, `node${HOST}`);
 const storeDir = join(hostHome, 'swm-host');
-const hostConfigPath = join(hostHome, 'config.json');
 
 const hashKey = (cgId: string) => createHash('sha256').update(cgId).digest('base64url');
 
@@ -234,6 +242,21 @@ async function restartNodeAndWait(num: number, timeoutMs = 120_000): Promise<voi
   await waitFor(`node${num} reachable`, timeoutMs, 1_000, async () => ((await nodeReachable(num)) ? true : null));
 }
 
+/**
+ * A restarted host is reachable from the edge only through the relay, and that relayed link
+ * flaps (it opens and closes within milliseconds), so live gossip never reaches the host again
+ * on its own. Dial it directly, as an operator would.
+ */
+let lastConnectAt = 0;
+async function connectCuratorToHost(force = false): Promise<void> {
+  if (!force && Date.now() - lastConnectAt < 5_000) return;
+  lastConnectAt = Date.now();
+  try {
+    const multiaddr = readFileSync(join(hostHome, 'multiaddr'), 'utf8').trim();
+    await postJson(nodeFor(CURATOR, true), '/api/connect', { multiaddr });
+  } catch { /* retried on the next probe */ }
+}
+
 // ─────────────────────────────── API helpers ──────────────────────────────
 interface HostStats {
   enabled: boolean;
@@ -252,7 +275,6 @@ async function hostStats(): Promise<HostStats | null> {
 
 let cgId = '';
 let curatorAgent = '';
-let memberAgent = '';
 let hostPeerId = '';
 
 async function writeShare(seq: number): Promise<boolean> {
@@ -271,7 +293,8 @@ async function writeShare(seq: number): Promise<boolean> {
     finalize: true,
     alsoShareSwm: true,
   });
-  return res.status === 200 && res.json?.swmShared === true;
+  // The one-shot create + share answers 201 Created.
+  return res.status >= 200 && res.status < 300 && res.json?.swmShared === true;
 }
 
 // Continuous writer, so the kills land in the middle of live ingestion.
@@ -300,95 +323,84 @@ async function stopWriter(): Promise<void> {
 }
 
 // ─────────────────────────────── suite state ──────────────────────────────
-let originalHostConfig: string | null = null;
+/** node -> original config.json text, for every config this suite edits. */
+const originalConfigs = new Map<number, string>();
+
+function configPath(num: number): string {
+  return join(DEVNET_DIR, `node${num}`, 'config.json');
+}
+
+/** Back up `config.json` (once) and rewrite it with `mutate` applied. */
+function patchConfig(num: number, mutate: (config: any) => void): void {
+  const text = readFileSync(configPath(num), 'utf8');
+  if (!originalConfigs.has(num)) originalConfigs.set(num, text);
+  const config = JSON.parse(text);
+  mutate(config);
+  writeFileSync(configPath(num), JSON.stringify(config, null, 2));
+}
 
 beforeAll(async () => {
-  for (const n of [HOST, CURATOR, MEMBER]) {
+  for (const n of [HOST, CURATOR]) {
     expect(await nodeReachable(n), `node${n} must be reachable - start the devnet first`).toBe(true);
   }
   const role = (await getJson(nodeFor(HOST), '/api/status')).json?.nodeRole;
   expect(role, `node${HOST} must be a core`).toBe('core');
   expect((await getJson(nodeFor(CURATOR), '/api/status')).json?.nodeRole).toBe('edge');
-  expect((await getJson(nodeFor(MEMBER), '/api/status')).json?.nodeRole).toBe('edge');
 
-  // Turn the private-ciphertext strip off on the hosting core (it is ON by default and
-  // then the core keeps nothing for a curated CG), remembering the original config.
-  originalHostConfig = readFileSync(hostConfigPath, 'utf8');
-  const config = JSON.parse(originalHostConfig);
-  config.swmHostMode = { ...config.swmHostMode, enabled: true, stripCiphertext: false };
-  writeFileSync(hostConfigPath, JSON.stringify(config, null, 2));
-  await restartNodeAndWait(HOST);
+  // See the header for why each switch is needed. Every edited config is backed up and
+  // restored (with a restart) on any exit path.
+  for (const n of [HOST, CURATOR]) {
+    patchConfig(n, (config) => {
+      config.rfc64Catalog = { ...config.rfc64Catalog, rollout: { ...config.rfc64Catalog?.rollout, killSwitch: true } };
+      if (n === HOST) {
+        config.swmHostMode = { ...config.swmHostMode, enabled: true, stripCiphertext: false };
+      }
+    });
+  }
+  for (const n of [HOST, CURATOR]) await restartNodeAndWait(n);
 
   hostPeerId = (await getJson(nodeFor(HOST), '/api/status')).json?.peerId ?? '';
   expect(hostPeerId, 'host peer id').toBeTruthy();
   curatorAgent = (await getJson(nodeFor(CURATOR, true), '/api/agent/identity')).json?.agentAddress ?? '';
-  memberAgent = (await getJson(nodeFor(MEMBER, true), '/api/agent/identity')).json?.agentAddress ?? '';
-  expect(curatorAgent && memberAgent, 'edge agent addresses').toBeTruthy();
+  expect(curatorAgent, 'curator agent address').toBeTruthy();
 
-  // Fresh curated (private) CG owned by the curator edge, with the member allowlisted.
+  // Fresh curated (private) CG owned by the curator edge, allowlisting only the curator.
   cgId = `swmhost-${STAMP}`;
   const created = await postJson(nodeFor(CURATOR, true), '/api/context-graph/create', {
     id: cgId,
     name: `SWM host durability ${STAMP}`,
     accessPolicy: 1,
     publishPolicy: 0,
-    allowedAgents: [curatorAgent, memberAgent],
+    allowedAgents: [curatorAgent],
     register: true,
   });
   expect(created.status, `create CG: ${JSON.stringify(created.json)}`).toBe(200);
+  await sleep(10_000); // let the create beacon / chain event reach the core
 
-  // The member joins through the supported signed-join flow.
-  const enc = encodeURIComponent(cgId);
-  const curatorPeerId = (await getJson(nodeFor(CURATOR, true), '/api/agent/identity')).json?.peerId;
-  const curatorMultiaddr = readFileSync(join(DEVNET_DIR, `node${CURATOR}`, 'multiaddr'), 'utf8').trim();
-  await postJson(nodeFor(MEMBER, true), '/api/connect', { multiaddr: curatorMultiaddr });
-  const signed = await postJson(nodeFor(MEMBER, true), `/api/context-graph/${enc}/sign-join`, {});
-  expect(signed.json?.delegation, `sign-join: ${JSON.stringify(signed.json)}`).toBeTruthy();
-  let joined = false;
-  for (let attempt = 1; attempt <= 4 && !joined; attempt += 1) {
-    const join_ = await postJson(nodeFor(MEMBER, true), `/api/context-graph/${enc}/request-join`, {
-      delegation: signed.json.delegation,
-      curatorPeerId,
-      agentName: 'swm-host-durability-member',
-    });
-    const delivered = join_.json?.delivered === 1 || join_.json?.delivered === 'local';
-    joined = delivered && ['approved', 'already-member'].includes(join_.json?.status);
-    if (!joined) await sleep(20_000);
-  }
-  expect(joined, 'member join approved and delivered').toBe(true);
-  await waitFor('member receives the curator _meta', 120_000, 2_000, async () => {
-    try {
-      const rows = await queryNode(
-        nodeFor(MEMBER),
-        `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <did:dkg:context-graph:${cgId}/_meta> { ?s <https://dkg.network/ontology#allowedAgent> ?a } }`,
-      );
-      return Number(lexical(rows[0]?.c)) >= 1 ? true : null;
-    } catch {
-      return null;
-    }
-  });
-  const subscribed = await postJson(nodeFor(MEMBER, true), '/api/subscribe', {
-    contextGraphId: cgId,
-    includeSharedMemory: true,
-  });
-  expect(subscribed.json?.subscribed, `member subscribe: ${JSON.stringify(subscribed.json)}`).toBe(cgId);
-
-  // The operator hatch: designate the hosting core for this CG.
+  // The operator hatch: designate the hosting core for this CG (idempotent if the beacon
+  // already engaged it).
   const enabled = await postJson(nodeFor(HOST), '/api/shared-memory/host-mode/subscribe', { contextGraphId: cgId });
   expect(enabled.json?.hostingEnabled, `host-mode subscribe: ${JSON.stringify(enabled.json)}`).toBe(true);
-  await sleep(10_000); // let the SWM gossip mesh include the host before the first share
+  // `hostingEnabled` is also true when the subscribe was a no-op (strip on, or the CG is on the
+  // RFC-64 catalog lane): require an actual subscription.
+  expect(
+    enabled.json?.subscribed === true || enabled.json?.alreadySubscribed === true,
+    `host-mode subscribe did not wire a handler: ${JSON.stringify(enabled.json)}`,
+  ).toBe(true);
+  await connectCuratorToHost(true);
+  await sleep(5_000); // let the SWM gossip mesh include the host before the first share
 }, 900_000);
 
 afterAll(async () => {
   await stopWriter().catch(() => undefined);
-  if (originalHostConfig !== null) {
+  for (const [num, text] of originalConfigs) {
     try {
-      writeFileSync(hostConfigPath, originalHostConfig);
-      sigkillNode(HOST);
-      clearDeadNodePidFiles(HOST);
-      await restartNodeAndWait(HOST, 180_000);
+      writeFileSync(configPath(num), text);
+      sigkillNode(num);
+      clearDeadNodePidFiles(num);
+      await restartNodeAndWait(num, 180_000);
     } catch (err) {
-      console.warn(`cleanup: could not restore node${HOST}: ${(err as Error).message}`);
+      console.warn(`cleanup: could not restore node${num}: ${(err as Error).message}`);
     }
   }
 }, 300_000);
@@ -467,9 +479,11 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
 
       // New frames arrive after the restart (the writer never stopped).
       const sizeAfterRestart = logSize(cgId);
-      await waitFor(`cycle ${cycle}: new frames after restart`, 240_000, 500, async () =>
-        logSize(cgId) > sizeAfterRestart ? true : null,
-      );
+      await connectCuratorToHost(true);
+      await waitFor(`cycle ${cycle}: new frames after restart`, 240_000, 500, async () => {
+        await connectCuratorToHost();
+        return logSize(cgId) > sizeAfterRestart ? true : null;
+      });
       await sleep(1_500);
 
       const log = readLog(cgId);
@@ -495,7 +509,7 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
     for (const line of evidence) console.log(line);
   }, 1_800_000);
 
-  it('a member pages the restarted host with strict-greater-than seqnos and reaches the end', async () => {
+  it('the curator edge pages the restarted host with strict-greater-than seqnos and reaches the end', async () => {
     // Quiesce: the writer is stopped; wait for the log to stop growing.
     let last = logSize(cgId);
     await waitFor('host log quiescent', 120_000, 4_000, async () => {
@@ -510,7 +524,7 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
     const lastSeqno = log.seqnos.at(-1)!;
     const mid = log.seqnos[Math.floor(log.seqnos.length / 2)]!;
 
-    // Page like a real member: one round per call, resuming from the returned cursor until the
+    // Page like a real requester: one round per call, resuming from the returned cursor until the
     // host has nothing more, from several starting cursors.
     for (const start of [0, mid, lastSeqno - 1, lastSeqno]) {
       const expectedTotal = log.seqnos.filter((s) => s > start).length;
@@ -520,7 +534,7 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
       for (;;) {
         calls += 1;
         expect(calls, `start=${start}: paging did not terminate`).toBeLessThan(200);
-        const res = await postJson(nodeFor(MEMBER, true), '/api/shared-memory/host-catchup', {
+        const res = await postJson(nodeFor(CURATOR, true), '/api/shared-memory/host-catchup', {
           contextGraphId: cgId,
           peerId: hostPeerId,
           sinceSeqno: since,
