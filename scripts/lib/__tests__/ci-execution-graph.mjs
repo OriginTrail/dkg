@@ -84,22 +84,35 @@ const PNPM_VALUE_FLAGS = new Set(['--filter', '-F', '--dir', '-C', '--prefix', '
 // What `pack` runs: npm and pnpm run these around creating the tarball.
 const PACK_LIFECYCLE = ['prepack', 'prepare', 'postpack'];
 
+// A shell script's own directory, however the script spells it: "$(dirname
+// "$0")", "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" or
+// "${BASH_SOURCE%/*}". The tokenizer reads each as $SCRIPT_DIR.
+const SOURCE = String.raw`"?\$(?:0|BASH_SOURCE|\{BASH_SOURCE(?:\[0\])?\})"?`;
+const DIRNAME = String.raw`\$\(\s*dirname\s+(?:--\s+)?${SOURCE}\s*\)`;
+const SCRIPT_DIRECTORY = new RegExp(String.raw`\$\(\s*cd\s+(?:--\s+)?"?${DIRNAME}"?\s*(?:>\s*\/dev\/null\s*)?(?:2>&1\s*)?&&\s*pwd(?:\s+-P)?\s*\)|${DIRNAME}|\$\{(?:BASH_SOURCE(?:\[0\])?|0)%\/\*\}`, 'g');
+
 // The simple commands of shell `text` - split at newlines, ;, &&, || and |,
-// line continuations joined, command substitutions and subshells opened up,
-// a GitHub expression read as a variable - as words without their quotes,
-// each with the directory it runs in: a `cd` to a literal directory moves
-// the commands after it, any other `cd` returns to the repository root.
+// line continuations joined, a script's own directory read as $SCRIPT_DIR,
+// command substitutions, subshells and redirections opened up, a GitHub
+// expression read as a variable - as words without their quotes, each with
+// the directory it runs in (a `cd` to a literal directory moves the commands
+// after it, any other `cd` returns to the repository root) and the variable
+// assignments it starts with.
 export function simpleCommands(text, cwd = '.') {
   const commands = [];
   let directory = cwd;
-  const shell = text.replace(/\\\n/g, ' ').replace(/\$\{\{[^}]*\}\}/g, '$GITHUB_EXPRESSION').replace(/\$\(|[()`]/g, ' ');
+  const shell = text.replace(/\\\n/g, ' ')
+    .replace(/\$\{\{[^}]*\}\}/g, '$GITHUB_EXPRESSION')
+    .replace(SCRIPT_DIRECTORY, '$SCRIPT_DIR')
+    .replace(/\$\(|[()`<>]/g, ' ');
   for (const part of shell.split(/\n|;|&&|\|\|?/)) {
     const words = part.trim().split(/\s+/).filter(Boolean).map((word) => word.replace(/^['"]+|['"]+$/g, ''));
-    while (/^[A-Za-z_]\w*=/.test(words[0] ?? '')) words.shift();
+    const assignments = [];
+    while (/^[A-Za-z_]\w*=/.test(words[0] ?? '')) assignments.push(words.shift());
     if (words[0] === 'cd') {
       directory = words[1] && !/[$~`]|^-$/.test(words[1]) ? path.posix.normalize(path.posix.join(directory, words[1])) : '.';
-    } else if (words.length) {
-      commands.push({ words, cwd: directory });
+    } else if (words.length || assignments.length) {
+      commands.push({ words, assignments, cwd: directory });
     }
   }
   return commands;
@@ -189,23 +202,39 @@ function packageManagerCalls({ words, cwd }, context) {
   return { ...none, scripts: script ? withScript(targets, script) : [] };
 }
 
-// The repository file a command word names, if any: a path from the
-// command's directory, or from the repository root behind a leading
-// $VARIABLE/ or ${VARIABLE}/ ("$GITHUB_WORKSPACE/scripts/x.sh"). A word with
-// another expansion or a glob names no single file; so does an option.
-function namedFiles(word, cwd, exists) {
-  return word.split(/=(.*)/s).filter(Boolean).flatMap((part) => {
-    let candidate = part.replace(/^['"]+|['"]+$/g, '');
-    let base = cwd;
-    const rooted = candidate.match(/^\$(?:\{\w+\}|\w+)\/(.+)$/);
-    if (rooted) {
-      [, candidate] = rooted;
-      base = '.';
-    }
-    if (!/\/|\.\w+$/.test(candidate) || /[$*?{}`()<>|]|^-|^\//.test(candidate)) return [];
-    const file = path.posix.normalize(path.posix.join(base, candidate));
-    return file === '.' || file.startsWith('../') || !exists(file) ? [] : [file];
+// The repository files a command word names: each part of it (split at =,
+// commas, quotes, braces and brackets, so a --flag=value, a list or a JSON
+// value is read too; a trailing . or : ends a sentence, not a path) that is a
+// path from the command's directory, or from the repository root behind a
+// leading $VARIABLE/ or ${VARIABLE}/ ("$GITHUB_WORKSPACE/scripts/x.sh"). In
+// a shell script, `scriptDirectory` is its own directory: a path behind a
+// variable, or one starting ./ or ../, may be relative to it too
+// ("$SCRIPT_DIR/lib.sh"). A path that names no file that way but runs
+// through a scripts/ directory - under another checkout (candidate/), a
+// relative climb, a template's value or an absolute root - names that
+// repository script. A part with another expansion or a glob names no single
+// file; neither does an option. `exists` decides what is a file.
+function namedFiles(word, cwd, exists, scriptDirectory) {
+  return word.replace(/\$\{(\w+)\}/g, '$$$1').split(/[=,"'{}[\]]+/).filter(Boolean).flatMap((part) => {
+    let candidate = part.replace(/(?<=\w)[.:]+$/, '');
+    const rooted = candidate.match(/^\$\w+\/(.+)$/);
+    if (rooted) [, candidate] = rooted;
+    if (!/\/|\.\w+$/.test(candidate) || /[$*?`()<>|]|^-/.test(candidate) || [...candidate].some((character) => character < ' ')) return [];
+    const bases = candidate.startsWith('/') ? [] : rooted ? ['.', scriptDirectory] : [cwd, /^\.\.?\//.test(candidate) ? scriptDirectory : undefined];
+    const files = [...new Set(bases.filter((base) => base !== undefined).map((base) => path.posix.normalize(path.posix.join(base, candidate))))]
+      .filter((file) => file !== '.' && !file.startsWith('../') && exists(file));
+    if (files.length) return files;
+    const script = candidate.match(/(?:^|\/)(scripts\/[^/].*)$/)?.[1];
+    return script && exists(path.posix.normalize(script)) ? [path.posix.normalize(script)] : [];
   });
+}
+
+// The repository files command or shell `text` names (namedFiles, for each
+// word of each simple command), for commands run in `cwd`; `scriptDirectory`
+// is the directory of the shell script the text is, if any.
+export function commandFiles(text, { cwd = '.', scriptDirectory, exists }) {
+  return [...new Set(simpleCommands(text, cwd).flatMap(({ words, assignments, cwd: directory }) => [...assignments, ...words]
+    .flatMap((word) => namedFiles(word, directory, exists, scriptDirectory))))];
 }
 
 const SHELL_SCRIPT = /\.(?:sh|bash)$/;
@@ -239,8 +268,9 @@ export function workflowExecution(workflowSource, {
         commands.push(text);
       }
     };
-    // Read `text` as commands run in `cwd`, reached through `chain`.
-    const readCommands = (text, cwd, chain, via) => {
+    // Read `text` as commands run in `cwd`, reached through `chain`; the text
+    // of a shell script is read from `scriptDirectory`, its own directory.
+    const readCommands = (text, cwd, chain, via, scriptDirectory) => {
       const scripts = [];
       const shells = [];
       const queue = simpleCommands(text, cwd);
@@ -253,7 +283,7 @@ export function workflowExecution(workflowSource, {
         queue.push(...nested);
         scripts.push(...calls);
         for (const directory of directories) {
-          for (const file of command.words.flatMap((word) => namedFiles(word, directory, exists))) {
+          for (const file of [...(command.assignments ?? []), ...command.words].flatMap((word) => namedFiles(word, directory, exists, scriptDirectory))) {
             edges.push({ kind: 'file', file, chain, via });
             if (SHELL_SCRIPT.test(file)) shells.push([file, directory]);
           }
@@ -268,7 +298,7 @@ export function workflowExecution(workflowSource, {
         if (source === undefined || followed.has(key)) continue;
         followed.add(key);
         project(`shell ${file}`, source);
-        readCommands(source, directory, chain, `${via} > ${file}`);
+        readCommands(source, directory, chain, `${via} > ${file}`, path.posix.dirname(file));
       }
     };
     const runScript = (workspace, script, chain, via) => {

@@ -24,9 +24,9 @@ import {
   succeeded,
 } from './ci-plan-fixtures.mjs';
 import { BUILD_ONLY_SCRIPTS, INSTALL_HOOK_INPUTS, SUPPORT_PATH_ROUTES, scriptsPattern } from '../ci-routing.mjs';
-import { COMMAND_EFFECTS, workflowExecution } from './ci-execution-graph.mjs';
+import { COMMAND_EFFECTS, commandFiles, workflowExecution } from './ci-execution-graph.mjs';
 import { edgeRequirement, jobLane, jobRequirement, laneSeeds } from './lane-entrypoints.mjs';
-import { dependenciesOf, loadReferences, packageImports, repoScriptMentions, traceLaneLoads, workspaceClosure } from './load-graph.mjs';
+import { dependenciesOf, loadReferences, packageImports, traceLaneLoads, workspaceClosure } from './load-graph.mjs';
 
 // The workspaces that `files` import by package name, plus everything those
 // workspaces depend on: what code outside the package lanes compiles against.
@@ -866,12 +866,35 @@ test('the load scanner sees these forms, and nothing it cannot resolve staticall
     'const script = `tr -d "\\r" < scripts/devnet-publish-helpers.sh > "$DIR/helpers.sh"`;',
   ].join('\n'));
   assert.deepEqual(shell.paths, ['scripts/devnet-publish-helpers.sh']);
-  // One matcher finds repository scripts of any extension or none, behind a
-  // variable too; callers keep the ones that exist.
+  // One command resolver (commandFiles) reads workflow commands, package
+  // scripts, shell scripts and test strings: paths of any extension or none,
+  // behind a variable, a flag or JSON punctuation, a script's own directory
+  // however it is spelled, and a scripts/ path under another root. `exists`
+  // decides which exist.
+  const present = new Set([
+    'scripts/generate-fixture.py', 'scripts/devnet.sh', 'scripts/tool', 'scripts/nested/run.mts', 'scripts/lib.sh',
+    'packages/cli/test/fixtures/helper.sh',
+  ]);
+  const resolve = (text, options = {}) => commandFiles(text, { exists: (file) => present.has(file), ...options });
   assert.deepEqual(
-    repoScriptMentions('python scripts/generate-fixture.py; "$repo_root/scripts/devnet.sh"; ./scripts/tool --x; scripts/nested/run.mts, myscripts/other.sh'),
+    resolve('python scripts/generate-fixture.py; "$repo_root/scripts/devnet.sh"; ./scripts/tool --x; scripts/nested/run.mts, myscripts/other.sh'),
     ['scripts/generate-fixture.py', 'scripts/devnet.sh', 'scripts/tool', 'scripts/nested/run.mts'],
   );
+  for (const text of [
+    'source "$(dirname "$0")/lib.sh"',
+    '. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"',
+    'source "${BASH_SOURCE%/*}/lib.sh"',
+    'source "${SCRIPT_DIR}/lib.sh"',
+  ]) {
+    assert.deepEqual(resolve(text, { scriptDirectory: 'scripts' }), ['scripts/lib.sh'], text);
+  }
+  assert.deepEqual(resolve('bash ./helper.sh', { scriptDirectory: 'packages/cli/test/fixtures' }), ['packages/cli/test/fixtures/helper.sh']);
+  assert.deepEqual(resolve('Run scripts/devnet.sh, or scripts/lib.sh).'), ['scripts/devnet.sh', 'scripts/lib.sh']);
+  assert.deepEqual(resolve('{"run":"scripts/devnet.sh","env":["LIB=scripts/lib.sh"]}'), ['scripts/devnet.sh', 'scripts/lib.sh']);
+  assert.deepEqual(resolve("import '../../../scripts/devnet.sh'; node candidate/scripts/lib.sh; cd path/to/dkg && bash scripts/tool"), [
+    'scripts/devnet.sh', 'scripts/lib.sh', 'scripts/tool',
+  ]);
+  assert.deepEqual(resolve('ls /tmp/x.sh; cat myscripts/devnet.sh; echo "$HOME/$name.sh"'), []);
   const fixture = traceLaneLoads(new Map([['packages/cli/test/example.test.ts', new Map([['bura_cli', 'seed']])]]), {
     read: (file) => ({
       'packages/cli/test/example.test.ts': "spawnSync('bash', ['packages/cli/test/fixtures/devnet-blazegraph-smoke.sh']);",
