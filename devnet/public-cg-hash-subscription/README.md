@@ -139,9 +139,9 @@ another.
   identity state spelled differently therefore fails at the reply with that
   message, instead of as an `undefined` inside a test. Covered: the subscribe
   reply, the context-graph list, the subscriptions list and its rows, the
-  catch-up status, and the status and connections replies test 7 needs to dial
-  one edge from another. The graph-create reply, the `/api/query` answers and the
-  `/api/connect` status are still read loosely.
+  catch-up status, the `/api/query` answers, and the status and connections
+  replies test 7 needs to dial one edge from another. The graph-create reply and
+  the `/api/connect` status are still read loosely.
 
   What that is not: it validates mainly the fields this suite reads (and a few
   it does not, such as `synced`, `coreHosted` and the catch-up `status`, which
@@ -154,15 +154,23 @@ another.
   declarations at the type level (a type-check of the suite, through a throwaway
   tsconfig or an editor, catches a state the list lacks; nothing in CI type-checks
   devnet suites) and, for the job states, at run time by `wire.test.ts`.
+- **Daemon helpers** (`daemon.ts`). The reads, posts and polls the scenarios use,
+  built on an injected transport (the harness's by default). A reply of the wrong
+  shape is a failure, never "not yet": `checked()` adds the node to the validator's
+  error without changing its type, and every retry or poll lets that error through
+  (only a rejected request or a non-200 status is retried). `daemon.test.ts` proves
+  it without a devnet, including that a malformed forced-subscribe reply rejects
+  the SWM scenario's recovery instead of being swallowed.
 - **Side-by-side scenarios** (`flows.ts`). The SWM test's two edges are scenario
   records (node, requested id, label) run through `runLabeledFlows`: all flows are
   awaited to their end even after one fails (so none keeps polling unobserved into
   the next test), and every failure is reported under its label.
 - **Unit tests without a devnet**: `wire.test.ts` (each validator accepts a
   real-shaped payload, the catch-up status ones built by the daemon's own
-  `toCatchupStatusResponse`, and rejects a renamed or retyped field) and
-  `flows.test.ts`. They run with the suite's vitest config and need no devnet:
-  `pnpm exec vitest run --config devnet/public-cg-hash-subscription/vitest.config.ts wire.test flows.test`.
+  `toCatchupStatusResponse`, and rejects a renamed or retyped field),
+  `daemon.test.ts` and `flows.test.ts`. They run with the suite's vitest config and
+  need no devnet:
+  `pnpm exec vitest run --config devnet/public-cg-hash-subscription/vitest.config.ts wire.test daemon.test flows.test`.
 
 ## Run
 

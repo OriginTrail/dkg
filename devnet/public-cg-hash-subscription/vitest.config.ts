@@ -6,10 +6,11 @@ const automatedTest = suiteFile('automated.test.ts');
 // Unit tests of the suite's own helpers: no devnet needed.
 const wireTest = suiteFile('wire.test.ts');
 const flowsTest = suiteFile('flows.test.ts');
+const daemonTest = suiteFile('daemon.test.ts');
 
 export default defineConfig({
   test: {
-    include: [automatedTest, wireTest, flowsTest],
+    include: [automatedTest, wireTest, flowsTest, daemonTest],
     testTimeout: 900_000,
     hookTimeout: 240_000,
     pool: 'forks',

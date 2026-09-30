@@ -116,12 +116,13 @@
  * graphs and subscriptions is test 7's connection from edge 5 to edge 6 (the daemon
  * has no disconnect, so it lasts until either edge restarts).
  *
- * The subscribe, context-graph list, subscriptions, catch-up status, node status
- * and connections replies are read through the validators in wire.ts (a renamed or
- * retyped field fails at the reply, naming the endpoint and the field); the
- * graph-create reply, the /api/query answers and the /api/connect status are still
- * read loosely. The SWM test runs its two edges side by side through flows.ts.
- * Both have unit tests that need no devnet (wire.test.ts, flows.test.ts).
+ * The subscribe, context-graph list, subscriptions, catch-up status, node status,
+ * connections and query replies are read through the validators in wire.ts (a
+ * renamed or retyped field fails at the reply, naming the endpoint and the field,
+ * and no retry or poll swallows it: see daemon.ts); the graph-create reply and the
+ * /api/connect status are still read loosely. The SWM test runs its two edges side
+ * by side through flows.ts. All three have unit tests that need no devnet
+ * (wire.test.ts, daemon.test.ts, flows.test.ts).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
@@ -130,13 +131,10 @@ import {
   detectDevnet,
   ensureAllIdentities,
   fundTrac,
-  getJson,
   makeNquadsFile,
   nextNonce,
-  normTerm,
   postJson,
   publishViaCli,
-  queryNode,
   runDkgCli,
   setEth,
   sleep,
@@ -149,23 +147,32 @@ import {
 // loads at runtime): a renamed or retyped field fails at the reply, naming the
 // endpoint and the field. They check the fields this suite reads, not the whole
 // contract; see wire.ts for what that does and does not guarantee.
+import { createDaemon, expectOk, queuedJobId } from './daemon.js';
 import { runLabeledFlows } from './flows.js';
 import {
   parseCatchupStatusResponse,
   parseConnectedPeerIds,
   parseContextGraphListResponse,
   parseNodePeerInfo,
-  parseSubscribeResponse,
   parseSubscriptionsResponse,
   type CatchupContextGraphIdentity,
   type CatchupJobState,
   type CatchupStatusResponse,
-  type SubscribeResponse,
   type SubscriptionRow,
-  WireShapeError,
 } from './wire.js';
 
 const NAME_PREDICATE = 'https://schema.org/name';
+const {
+  getChecked,
+  catchupStatus,
+  subjectContent,
+  pollSubjectContent,
+  tryRowCount,
+  waitForContent,
+  subscribeWhenAdmitted,
+  forceCatchup,
+  recoverUntilContent,
+} = createDaemon();
 const keccak = (id: string): string => ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
 const STAMP = Date.now().toString(36);
 
@@ -241,39 +248,7 @@ async function contextGraphStorage(): Promise<ethers.Contract> {
   return new ethers.Contract(await facade.contextGraphStorage(), CG_STORAGE_ABI, state.provider);
 }
 
-/**
- * A daemon reply. A 200 body has been checked by the endpoint's validator
- * (wire.ts): a renamed or retyped field it reads throws there, naming the
- * endpoint and the field. Any other status carries the body untouched (an error
- * reply is `{ error }`).
- */
-type Reply<T> =
-  | { readonly ok: true; readonly status: 200; readonly body: T }
-  | { readonly ok: false; readonly status: number; readonly body: unknown };
-
-function checked<T>(node: DevnetNode, res: { status: number; json: unknown }, parse: (value: unknown) => T): Reply<T> {
-  if (res.status !== 200) return { ok: false, status: res.status, body: res.json };
-  try {
-    return { ok: true, status: 200, body: parse(res.json) };
-  } catch (err) {
-    throw new Error(`node${node.num} ${err instanceof Error ? err.message : String(err)}`, { cause: err });
-  }
-}
-
-async function getChecked<T>(node: DevnetNode, path: string, parse: (value: unknown) => T): Promise<Reply<T>> {
-  return checked(node, await getJson(node, path), parse);
-}
-
-async function postChecked<T>(node: DevnetNode, path: string, body: unknown, parse: (value: unknown) => T): Promise<Reply<T>> {
-  return checked(node, await postJson(node, path, body), parse);
-}
-
 /** The checked body of a reply that must be a 200: anything else fails with `label` and the raw body. */
-function expectOk<T>(reply: Reply<T>, label: string): T {
-  expect(reply.status, `${label}: ${JSON.stringify(reply.body)}`).toBe(200);
-  return (reply as Extract<Reply<T>, { ok: true }>).body;
-}
-
 async function listSubscriptions(node: DevnetNode): Promise<SubscriptionRow[]> {
   const res = await getChecked(node, '/api/context-graph/subscriptions', parseSubscriptionsResponse);
   return expectOk(res, `node${node.num} GET /api/context-graph/subscriptions`).subscriptions;
@@ -303,32 +278,6 @@ async function dial(from: DevnetNode, to: DevnetNode): Promise<void> {
 }
 
 /** The id of the catch-up job a subscribe queued (the completed-catch-up variant of the reply has none). */
-function queuedJobId(reply: SubscribeResponse): string | undefined {
-  const catchup = reply.catchup;
-  return catchup !== undefined && 'jobId' in catchup ? catchup.jobId : undefined;
-}
-
-/**
- * Subscribe, retrying only while the node has not yet read the graph from the
- * chain (a retryable 503, or a numeric id the node has not seen yet: 404).
- */
-async function subscribeWhenAdmitted(node: DevnetNode, contextGraphId: string): Promise<SubscribeResponse> {
-  let last = '';
-  return waitFor(`node${node.num} subscribes ${contextGraphId}`, 120_000, 3_000, async () => {
-    const res = await postChecked(node, '/api/context-graph/subscribe', {
-      contextGraphId,
-      includeSharedMemory: true,
-      syncMode: 'always-on',
-    }, parseSubscribeResponse);
-    if (res.ok) return res.body;
-    last = `${res.status} ${JSON.stringify(res.body)}`;
-    if (res.status === 503 || res.status === 404) return null;
-    throw new Error(`node${node.num} subscribe ${contextGraphId} refused: ${last}`);
-  }).catch((err: unknown) => {
-    throw new Error(`${err instanceof Error ? err.message : String(err)} (last response: ${last})`);
-  });
-}
-
 /**
  * Wait until the node has observed the graph's slot on chain (its own chain
  * poller staged a row for it): only then does a name-hash subscribe find the
@@ -364,86 +313,9 @@ async function waitForAdoption(node: DevnetNode, graph: NamedGraph): Promise<Sub
   });
 }
 
-async function catchupStatus(node: DevnetNode, contextGraphId: string): Promise<CatchupStatusResponse | null> {
-  const res = await getChecked(
-    node,
-    `/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`,
-    parseCatchupStatusResponse,
-  );
-  return res.ok ? res.body : null;
-}
-
-type View = 'shared-working-memory' | 'verifiable-memory';
-
 /** Every (predicate, object) of one subject in one memory view, as a sorted list. */
-async function subjectContent(node: DevnetNode, contextGraphId: string, subject: string, view: View): Promise<string[]> {
-  const rows = await queryNode(node, `SELECT ?p ?o WHERE { <${subject}> ?p ?o }`, { contextGraphId, view });
-  return rows.map((row) => `${normTerm(row.p)} ${normTerm(row.o)}`).sort();
-}
-
 /** The same read, tolerating a node that does not know the graph at all yet. */
-async function tryRowCount(node: DevnetNode, contextGraphId: string, subject: string, view: View): Promise<number> {
-  const res = await postJson(node, '/api/query', {
-    sparql: `SELECT ?o WHERE { <${subject}> <${NAME_PREDICATE}> ?o }`,
-    contextGraphId,
-    view,
-  });
-  if (res.status !== 200) return 0;
-  const bindings = res.json?.result?.bindings ?? res.json?.results?.bindings ?? res.json?.bindings ?? [];
-  return Array.isArray(bindings) ? bindings.length : 0;
-}
-
 /** The latest catch-up job's verdict, for a failure message. */
-async function describeLatestJob(node: DevnetNode, contextGraphId: string): Promise<string> {
-  const job = await catchupStatus(node, contextGraphId).catch(() => null);
-  return `last catch-up job: ${job?.jobStatus ?? 'none'}${job?.error ? `, ${job.error}` : ''}`;
-}
-
-/**
- * Poll an edge until a subject's content in one view matches the author's, and
- * report the latest catch-up job's verdict if it never does. `whileWaiting`
- * runs on every poll that found no match yet; without it the poll only reads.
- */
-async function pollContent(
-  node: DevnetNode,
-  contextGraphId: string,
-  subject: string,
-  view: View,
-  expected: string[],
-  label: string,
-  budgetMs: number,
-  whileWaiting?: () => Promise<void>,
-): Promise<void> {
-  try {
-    await waitFor(`${label}: node${node.num} ${view} content of ${subject}`, budgetMs, 3_000, async () => {
-      const rows = await subjectContent(node, contextGraphId, subject, view).catch(() => [] as string[]);
-      if (rows.length > 0 && JSON.stringify(rows) === JSON.stringify(expected)) return rows;
-      await whileWaiting?.();
-      return null;
-    });
-  } catch (err) {
-    throw new Error(`${err instanceof Error ? err.message : String(err)} (${await describeLatestJob(node, contextGraphId)})`);
-  }
-}
-
-/**
- * Wait for a subject's content to match the author's on an edge. Purely
- * observational: it never subscribes, retries or otherwise changes the node, so
- * the catch-up job a test started stays the latest one until the test itself
- * replaces it.
- */
-async function waitForContent(
-  node: DevnetNode,
-  contextGraphId: string,
-  subject: string,
-  view: View,
-  expected: string[],
-  label: string,
-  budgetMs = 420_000,
-): Promise<void> {
-  await pollContent(node, contextGraphId, subject, view, expected, label, budgetMs);
-}
-
 /**
  * ARRANGE, idempotent: leave `graph` subscribed, adopted under its cleartext id
  * and converged on the author's VM content on `node`. It subscribes (under
@@ -461,65 +333,6 @@ async function ensureConverged(node: DevnetNode, graph: RegisteredGraph, request
   await waitForAdoption(node, graph);
   const expected = await subjectContent(author, graph.id, graph.subject, 'verifiable-memory');
   await waitForContent(node, graph.id, graph.subject, 'verifiable-memory', expected, label);
-}
-
-/**
- * The operator's recovery for a catch-up job that ended `failed`: a fresh
- * subscribe with `forceCatchup`. It mints a REPLACEMENT job (or, while a job is
- * still queued or running, hands that one back), and from then on the cleartext
- * id and the on-chain id name the latest job, not the one the first subscribe
- * returned. The superseded job stays readable by its own id.
- */
-async function forceCatchup(
-  node: DevnetNode,
-  contextGraphId: string,
-): Promise<{ status: number; jobId?: string; detail: string }> {
-  const res = await postChecked(node, '/api/context-graph/subscribe', {
-    contextGraphId,
-    includeSharedMemory: true,
-    syncMode: 'always-on',
-    forceCatchup: true,
-  }, parseSubscribeResponse);
-  return {
-    status: res.status,
-    jobId: res.ok ? queuedJobId(res.body) : undefined,
-    detail: JSON.stringify(res.body),
-  };
-}
-
-/**
- * Wait for content and, once a minute while it is missing, recover with a forced
- * catch-up. Only the SWM scenario calls this: its content depends on a holder's
- * RFC-64 authority pipeline, which can lag or trip its RPC circuit for a while
- * after a devnet starts (an operator recovers a short window this way; a node
- * whose circuit stays open needs a restart, and the suite fails rather than hide
- * it). Returns the id of the latest catch-up job, which is what the graph's
- * aliases must name afterwards: `firstJobId` when no recovery replaced it.
- */
-async function recoverUntilContent(
-  node: DevnetNode,
-  contextGraphId: string,
-  subject: string,
-  view: View,
-  expected: string[],
-  label: string,
-  firstJobId: string,
-  budgetMs: number,
-): Promise<string> {
-  let latestJobId = firstJobId;
-  let lastRetryAt = Date.now();
-  await pollContent(node, contextGraphId, subject, view, expected, label, budgetMs, async () => {
-    if (Date.now() - lastRetryAt < 60_000) return;
-    lastRetryAt = Date.now();
-    // A transient failure of the forced catch-up is retried on the next round, but a reply
-    // of the wrong shape is a real failure and must not be hidden here.
-    const forced = await forceCatchup(node, contextGraphId).catch((error: unknown) => {
-      if (error instanceof WireShapeError) throw error;
-      return null;
-    });
-    if (forced?.jobId !== undefined) latestJobId = forced.jobId;
-  });
-  return latestJobId;
 }
 
 /**
@@ -680,7 +493,7 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
       [swm, 'shared-working-memory'],
     ] as const) {
       await waitFor(`author ${view} content of ${graph.subject}`, 120_000, 3_000, async () => {
-        const rows = await subjectContent(author, graph.id, graph.subject, view).catch(() => [] as string[]);
+        const rows = await pollSubjectContent(author, graph.id, graph.subject, view);
         return rows.length > 0 ? rows : null;
       });
     }
@@ -715,7 +528,7 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     const vmGraph = fixture.vm;
     // The edge knows nothing of the graph but what the chain says.
     await expectNoRowFor(edgeA, vmGraph);
-    expect(await tryRowCount(edgeA, vmGraph.id, vmGraph.subject, 'verifiable-memory')).toBe(0);
+    expect(await tryRowCount(edgeA, vmGraph.id, vmGraph.subject, NAME_PREDICATE, 'verifiable-memory')).toBe(0);
 
     await waitUntilChainSlotObserved(edgeA, vmGraph.onChainId);
     const subscribed = await subscribeWhenAdmitted(edgeA, vmGraph.nameHash);

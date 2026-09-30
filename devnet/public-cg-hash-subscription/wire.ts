@@ -31,6 +31,7 @@
  * error in a type-check of this file. Nothing in CI type-checks devnet suites,
  * so that tie only holds for whoever runs one (a throwaway tsconfig, an editor).
  */
+import type { SparqlBindingCell } from '../_bootstrap/harness.js';
 import type { ApiClient } from '../../packages/cli/src/api-client.js';
 import type {
   CatchupContextGraphIdentity,
@@ -75,6 +76,7 @@ export const ENDPOINT = {
   catchupStatus: 'GET /api/sync/catchup-status',
   status: 'GET /api/status',
   connections: 'GET /api/connections',
+  query: 'POST /api/query',
 } as const;
 
 // The vocabularies, tied to their declarations at the type level (see the header).
@@ -92,16 +94,36 @@ export type IdentityStatesListed = MustBeNever<
 /** A type error here means the declaration gained a job state that the list above lacks. */
 export type JobStatesListed = MustBeNever<Exclude<CatchupJobState, (typeof WIRE_JOB_STATES)[number]>>;
 
-/** A reply that does not have the shape the suite reads. `field` is a dotted path from the reply root. */
+/**
+ * A reply that does not have the shape the suite reads. `field` is a dotted path
+ * from the reply root. `context` is what a caller added to the message, such as
+ * the node the reply came from: `withContext` keeps the class and every field, so
+ * a caller that must tell a malformed reply from a transport failure can still
+ * recognise it with `instanceof WireShapeError` after it was annotated.
+ */
 export class WireShapeError extends Error {
   constructor(
     readonly endpoint: string,
     readonly field: string,
     readonly expected: string,
     readonly actual: unknown,
+    readonly context?: string,
+    options?: ErrorOptions,
   ) {
-    super(`${endpoint}: ${field} is ${describeActual(actual)}, expected ${expected}`);
+    super(`${context === undefined ? '' : `${context} `}${endpoint}: ${field} is ${describeActual(actual)}, expected ${expected}`, options);
     this.name = 'WireShapeError';
+  }
+
+  /** The same failure with `context` in front of the message (the original stays as `cause`). */
+  withContext(context: string): WireShapeError {
+    return new WireShapeError(
+      this.endpoint,
+      this.field,
+      this.expected,
+      this.actual,
+      this.context === undefined ? context : `${context} ${this.context}`,
+      { cause: this },
+    );
   }
 }
 
@@ -250,6 +272,38 @@ export function parseCatchupStatusResponse(value: unknown): CatchupStatusRespons
   optionalString(endpoint, 'reply', reply, 'error');
   optionalIdentity(endpoint, 'reply', reply);
   return reply as unknown as CatchupStatusResponse;
+}
+
+/**
+ * POST /api/query: the bindings of a SELECT, wherever the daemon puts them. The
+ * current daemon answers `result.bindings`; `results.bindings` (SPARQL JSON) and a
+ * flat `bindings` are the older shapes the harness's `queryNode` also accepts. A
+ * 200 with none of them, or with rows that are not objects, is a failure of the
+ * reply, not "no rows yet".
+ */
+export function parseQueryBindings(value: unknown): Array<Record<string, SparqlBindingCell>> {
+  const endpoint = ENDPOINT.query;
+  const reply = object(endpoint, 'reply', value);
+  const holders: Array<[string, Obj | undefined]> = [
+    ['reply.result', reply.result === undefined ? undefined : object(endpoint, 'reply.result', reply.result)],
+    ['reply.results', reply.results === undefined ? undefined : object(endpoint, 'reply.results', reply.results)],
+    ['reply', reply],
+  ];
+  const found = holders.find(([, holder]) => holder?.bindings !== undefined);
+  if (found === undefined) {
+    throw new WireShapeError(endpoint, 'reply.result.bindings', 'an array (or results.bindings, or bindings)', undefined);
+  }
+  const [path, holder] = found;
+  const bindings = holder!.bindings;
+  if (!Array.isArray(bindings)) throw new WireShapeError(endpoint, `${path}.bindings`, 'an array', bindings);
+  bindings.forEach((row: unknown, index: number) => {
+    const rowPath = `${path}.bindings[${index}]`;
+    const cells = object(endpoint, rowPath, row);
+    for (const [name, cell] of Object.entries(cells)) {
+      if (typeof cell !== 'string') object(endpoint, `${rowPath}.${name}`, cell);
+    }
+  });
+  return bindings as Array<Record<string, SparqlBindingCell>>;
 }
 
 /** What the suite needs of a node to dial it: its peer id and the addresses it listens on. */

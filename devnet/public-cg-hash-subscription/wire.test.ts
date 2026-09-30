@@ -27,6 +27,7 @@ import {
   parseConnectedPeerIds,
   parseContextGraphListResponse,
   parseNodePeerInfo,
+  parseQueryBindings,
   parseSubscribeResponse,
   parseSubscriptionRow,
   parseSubscriptionsResponse,
@@ -229,7 +230,46 @@ describe('parseNodePeerInfo and parseConnectedPeerIds', () => {
   });
 });
 
+describe('parseQueryBindings', () => {
+  const bindings = [{ p: '<https://schema.org/name>', o: '"kept"' }, { p: { value: 'https://schema.org/description', type: 'uri' }, o: { value: 'x', datatype: 'http://www.w3.org/2001/XMLSchema#string' } }];
+
+  it.each([
+    ['the current daemon shape (result.bindings)', { type: 'bindings', result: { bindings }, bindings: [] }],
+    ['SPARQL JSON (results.bindings)', { head: { vars: ['p', 'o'] }, results: { bindings } }],
+    ['the legacy flat shape (bindings)', { bindings }],
+  ])('accepts %s and returns the rows', (_name, payload) => {
+    expect(parseQueryBindings(payload)).toBe(bindings);
+  });
+
+  it('accepts a SELECT with no rows', () => {
+    expect(parseQueryBindings({ result: { bindings: [] } })).toEqual([]);
+  });
+
+  it.each([
+    ['a body that is not an object', 'ok', `${ENDPOINT.query}: reply is the string "ok", expected an object`],
+    ['a body with no bindings anywhere', { result: {}, type: 'quads' }, `${ENDPOINT.query}: reply.result.bindings is missing, expected an array (or results.bindings, or bindings)`],
+    ['bindings that are not an array', { result: { bindings: 'none' } }, `${ENDPOINT.query}: reply.result.bindings is the string "none", expected an array`],
+    ['a result that is not an object', { result: 3, bindings: [] }, `${ENDPOINT.query}: reply.result is the number 3, expected an object`],
+    ['a row that is not an object', { results: { bindings: [{ p: 'a' }, 'row'] } }, `${ENDPOINT.query}: reply.results.bindings[1] is the string "row", expected an object`],
+    ['a cell that is neither a term string nor an object', { bindings: [{ p: 'a', o: 7 }] }, `${ENDPOINT.query}: reply.bindings[0].o is the number 7, expected an object`],
+  ])('rejects %s', (_name, payload, message) => {
+    expect(() => parseQueryBindings(payload)).toThrow(WireShapeError);
+    expect(() => parseQueryBindings(payload)).toThrow(message);
+  });
+});
+
 describe('WireShapeError', () => {
+  it('keeps its class and fields when a caller adds context, and keeps the original as the cause', () => {
+    const original = new WireShapeError(ENDPOINT.subscribe, 'reply.catchup.jobId', 'a string when present', 7);
+    const annotated = original.withContext('node5');
+    expect(annotated).toBeInstanceOf(WireShapeError);
+    expect(annotated).toMatchObject({ name: 'WireShapeError', endpoint: ENDPOINT.subscribe, field: 'reply.catchup.jobId', expected: 'a string when present', actual: 7, context: 'node5' });
+    expect(annotated.message).toBe(`node5 ${ENDPOINT.subscribe}: reply.catchup.jobId is the number 7, expected a string when present`);
+    expect(annotated.cause).toBe(original);
+    expect(original.message).toBe(`${ENDPOINT.subscribe}: reply.catchup.jobId is the number 7, expected a string when present`);
+    expect(annotated.withContext('flow').message.startsWith(`flow node5 ${ENDPOINT.subscribe}:`)).toBe(true);
+  });
+
   it('carries the endpoint, the field, what was expected and what arrived', () => {
     let caught: unknown;
     try {
