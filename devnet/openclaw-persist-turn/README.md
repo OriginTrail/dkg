@@ -15,6 +15,9 @@ daemons, over HTTP with the node's bearer token, the suite checks that:
 - `pending` -> `stored` is recorded as one transition (the final assistant reply
   rides on it) instead of a second exchange, and a late `failed` report after
   `stored` is a duplicate, never a downgrade;
+- two sessions that reuse one `turnId` are kept apart: each is created, completed
+  and retried on its own, so one session's stored state never turns another's
+  completion into a duplicate;
 - a POST without a `turnId` still writes every time, under a generated id that
   the response returns so the caller can retry idempotently;
 - an invalid payload answers 400 and writes nothing;
@@ -26,8 +29,11 @@ The store is read back through `POST /api/query` (`view: working-memory`,
 subjects carrying the turn id, extra `hasUserMessage` / `hasAssistantMessage`
 objects on the turn, and extra transitions; the suite counts those. The footprint
 queries are shared with the CLI e2e (`packages/cli/test/openclaw-persist-turn.e2e.test.ts`)
-through `packages/cli/test/_helpers/chat-turn-footprint.ts`; this suite supplies
-only its own transport (`POST /api/query`) and result-cell shape.
+through `packages/cli/test/_helpers/chat-turn-footprint.ts`; they find a turn
+through its session link and `turnId`, so they read a turn the same whether it
+sits under a session-scoped subject (what the current code writes) or under the
+older `urn:dkg:chat:turn:<turnId>` one. This suite supplies only its own
+transport (`POST /api/query`) and result-cell shape.
 
 A write that returned 200 is durable (the route awaits the store write), but an
 external SPARQL store may serve a read a beat behind it. Stopping at the first
@@ -57,7 +63,7 @@ pnpm test:devnet:openclaw-persist-turn
 
 ## Side effects
 
-Every test writes only turns of its own random session and turn id into the
+Every test writes only turns of its own random sessions and turn id into the
 node's own `agent-context` / `chat-turns` assertion. It never touches the shared
 `devnet-test` context graph, a node wallet or the chain, and needs no funds.
 There is no API to delete a chat turn, so the turns remain in the node data until

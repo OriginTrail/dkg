@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { isSafeIri } from '@origintrail-official/dkg-core';
 import { LlmClient } from './llm/client.js';
 import type { LlmConfig } from './llm/types.js';
@@ -176,6 +177,32 @@ const OPENCLAW_LOCAL_SESSION_URI = `${CHAT_NS}session:${OPENCLAW_LOCAL_SESSION_I
 const CHAT_ATTACHMENT_REFS_PREDICATE = `${DKG_ONT}attachmentRefs`;
 const CHAT_TURN_PERSISTENCE_TRANSITION_TYPE = `${DKG_ONT}ChatTurnPersistenceTransition`;
 const CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE = `${DKG_ONT}updatesTurn`;
+
+/**
+ * The subject a NEW chat turn is written under: one per `(sessionId, turnId)`.
+ *
+ * A turn id is only unique inside its session (an adapter numbers the turns of
+ * each conversation, Prime Agent uses a request's correlation id), and the
+ * turn's durable state lives on this subject: `persistenceState`, the message
+ * links, `isPartOf`, and the transitions that point at it. Turns written
+ * before this scheme (and any that a caller wrote straight to the store) sit
+ * under `urn:dkg:chat:turn:<turnId>`, which two sessions that reused an id
+ * shared, so one session's state, duplicate check and completed reply were
+ * read as the other's. Those subjects are neither rewritten nor migrated:
+ * every read goes through the turn's session link and `turnId` literal rather
+ * than the subject's name, so both shapes are found, and a transition is
+ * attached to whichever subject the turn already has (`resolveChatTurnUri`).
+ *
+ * The suffix is a hash of the JSON form of the pair, so the subject is
+ * injective in `(sessionId, turnId)` whatever characters either holds (a `:`
+ * in a Hermes id, a lone surrogate in a free-form OpenClaw session id), stays
+ * a safe IRI, and its `session-turn:` namespace cannot collide with a legacy
+ * `turn:<turnId>` subject, whatever that turn id looks like.
+ */
+function chatTurnUri(sessionId: string, turnId: string): string {
+  const digest = createHash('sha256').update(JSON.stringify([sessionId, turnId])).digest('hex');
+  return `${CHAT_NS}session-turn:${digest}`;
+}
 const PERSISTENCE_STATUS_RANK: Record<ChatTurnPersistenceDisplayState, number> = {
   skipped: 1,
   pending: 2,
@@ -616,7 +643,7 @@ export class ChatMemoryManager {
     const failureReason = typeof opts?.failureReason === 'string'
       ? opts.failureReason.trim()
       : (opts?.failureReason === null ? null : undefined);
-    const turnUri = turnId ? `${CHAT_NS}turn:${turnId}` : undefined;
+    const turnUri = turnId ? chatTurnUri(sessionId, turnId) : undefined;
 
     const isNewSession = !this.knownSessions.has(sessionId);
 
@@ -740,6 +767,27 @@ export class ChatMemoryManager {
     return null;
   }
 
+  /**
+   * The subject `(sessionId, turnId)` is stored under: found through the turn's
+   * session link and `turnId` literal, so a turn written under the legacy
+   * `turn:<turnId>` subject keeps receiving its transitions there, and a turn
+   * of another session that reuses the id is never touched. When the turn does
+   * not exist yet, the subject it would be created under.
+   */
+  private async resolveChatTurnUri(sessionId: string, turnId: string): Promise<string> {
+    const sessionUri = `${CHAT_NS}session:${sessionId}`;
+    const result = await this.tools.query(
+      `SELECT ?turn WHERE {
+        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+        ?turn <${DKG_ONT}turnId> ${JSON.stringify(turnId)} .
+      } ORDER BY ?turn LIMIT 1`,
+      this.wmReadOpts(),
+    );
+    const found = String(result.bindings?.[0]?.turn ?? '').replace(/[<>]/g, '');
+    return found && isSafeIri(found) ? found : chatTurnUri(sessionId, turnId);
+  }
+
   async recordChatTurnPersistenceTransition(
     sessionId: string,
     turnId: string,
@@ -755,7 +803,7 @@ export class ChatMemoryManager {
     const trimmedTurnId = turnId.trim();
     if (!trimmedTurnId) return;
     const transitionId = crypto.randomUUID().slice(0, 8);
-    const turnUri = `${CHAT_NS}turn:${trimmedTurnId}`;
+    const turnUri = await this.resolveChatTurnUri(sessionId, trimmedTurnId);
     const transitionUri = `${CHAT_NS}turn-transition:${transitionId}`;
     const now = new Date().toISOString();
     const failureReason = typeof opts?.failureReason === 'string'
@@ -1272,19 +1320,23 @@ export class ChatMemoryManager {
       };
     }
 
-    const turnUri = `${CHAT_NS}turn:${turnId}`;
+    // The turn's subject is found through its session link and `turnId`, not
+    // built from the id: a turn is stored under a session-scoped subject, or
+    // under the legacy `turn:<turnId>` one (see `chatTurnUri`).
     const currentTurnResult = await this.tools.query(
-      `SELECT ?tid ?ts WHERE {
-        <${turnUri}> <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
-        <${turnUri}> <${SCHEMA}isPartOf> <${sessionUri}> .
-        <${turnUri}> <${DKG_ONT}turnId> ?tid .
-        OPTIONAL { <${turnUri}> <${SCHEMA}dateCreated> ?ts }
-      } LIMIT 1`,
+      `SELECT ?turn ?tid ?ts WHERE {
+        ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+        ?turn <${SCHEMA}isPartOf> <${sessionUri}> .
+        ?turn <${DKG_ONT}turnId> ${JSON.stringify(turnId)} .
+        ?turn <${DKG_ONT}turnId> ?tid .
+        OPTIONAL { ?turn <${SCHEMA}dateCreated> ?ts }
+      } ORDER BY ?turn LIMIT 1`,
       this.wmReadOpts(),
     );
     const currentTurn = (currentTurnResult.bindings ?? [])[0];
     const currentTurnId = stripRdfLiteral(currentTurn?.tid ?? '').trim();
     const currentTurnTs = stripRdfLiteral(currentTurn?.ts ?? '').trim();
+    const turnUri = String(currentTurn?.turn ?? '').replace(/[<>]/g, '');
     const latestTurnResult = await this.tools.query(
       `SELECT ?latestTurnId ?latestTs WHERE {
         ?latestTurn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
@@ -1295,7 +1347,7 @@ export class ChatMemoryManager {
       this.wmReadOpts(),
     );
     const latestTurnId = stripRdfLiteral((latestTurnResult.bindings ?? [])[0]?.latestTurnId ?? '').trim() || null;
-    if (!currentTurnId || currentTurnId !== turnId) {
+    if (!currentTurnId || currentTurnId !== turnId || !isSafeIri(turnUri)) {
       return {
         mode: 'full_refresh_required',
         reason: 'turn_not_found',

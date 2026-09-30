@@ -9,11 +9,17 @@
  * relative path the way it already loads `packages/publisher/test/_helpers`.
  *
  * Why the footprint counts Messages and states rather than ChatTurn subjects:
- * `storeChatExchange` names the turn `urn:dkg:chat:turn:<turnId>`, so a resend
- * always lands on the same turn subject. The duplication a resend causes is the
- * extra user/assistant Message pair (fresh random ids each write), the extra
- * `hasUserMessage` / `hasAssistantMessage` objects on that turn, and a second
- * `persistenceState` literal.
+ * a resend used to land on the turn's one subject, and the duplication it caused
+ * is the extra user/assistant Message pair (fresh random ids each write), the
+ * extra `hasUserMessage` / `hasAssistantMessage` objects on that turn, and a
+ * second `persistenceState` literal. Counting those does not depend on how the
+ * turn's subject is named.
+ *
+ * The turn is found through its session link and its `turnId` literal, never by
+ * building the subject from the id. A turn written by the current code sits
+ * under a subject scoped to `(sessionId, turnId)`, one written before that under
+ * `urn:dkg:chat:turn:<turnId>` (which two sessions that reused an id shared),
+ * and the footprint of a `(sessionId, turnId)` has to read the same for both.
  */
 
 export const CHAT_NS = 'urn:dkg:chat:';
@@ -59,15 +65,16 @@ export const lexicalTerm = (term: string | undefined): string => {
 /** The six SELECTs whose result counts make up a footprint. */
 export function chatTurnFootprintQueries(sessionId: string, turnId: string) {
   const session = `<${CHAT_NS}session:${sessionId}>`;
-  const turn = `<${CHAT_NS}turn:${turnId}>`;
   const turnIdLiteral = JSON.stringify(turnId);
+  // The turn subject(s) of this session that carry this turn id, whatever they are named.
+  const turn = `?t <${RDF_TYPE}> <${DKG_ONT}ChatTurn> . ?t <${SCHEMA}isPartOf> ${session} . ?t <${DKG_ONT}turnId> ${turnIdLiteral}`;
   return {
-    turns: `SELECT ?t WHERE { ?t <${RDF_TYPE}> <${DKG_ONT}ChatTurn> . ?t <${SCHEMA}isPartOf> ${session} . ?t <${DKG_ONT}turnId> ${turnIdLiteral} }`,
+    turns: `SELECT ?t WHERE { ${turn} }`,
     messages: `SELECT ?m WHERE { ?m <${RDF_TYPE}> <${SCHEMA}Message> . ?m <${SCHEMA}isPartOf> ${session} . ?m <${DKG_ONT}turnId> ${turnIdLiteral} }`,
-    userMessages: `SELECT ?u WHERE { ${turn} <${DKG_ONT}hasUserMessage> ?u }`,
-    assistantMessages: `SELECT ?a WHERE { ${turn} <${DKG_ONT}hasAssistantMessage> ?a }`,
-    states: `SELECT ?s WHERE { ${turn} <${DKG_ONT}persistenceState> ?s }`,
-    transitions: `SELECT ?x ?s ?r WHERE { ?x <${RDF_TYPE}> <${DKG_ONT}ChatTurnPersistenceTransition> . ?x <${DKG_ONT}updatesTurn> ${turn} . ?x <${DKG_ONT}persistenceState> ?s . OPTIONAL { ?x <${DKG_ONT}assistantReply> ?r } }`,
+    userMessages: `SELECT ?u WHERE { ${turn} . ?t <${DKG_ONT}hasUserMessage> ?u }`,
+    assistantMessages: `SELECT ?a WHERE { ${turn} . ?t <${DKG_ONT}hasAssistantMessage> ?a }`,
+    states: `SELECT ?s WHERE { ${turn} . ?t <${DKG_ONT}persistenceState> ?s }`,
+    transitions: `SELECT ?x ?s ?r WHERE { ${turn} . ?x <${RDF_TYPE}> <${DKG_ONT}ChatTurnPersistenceTransition> . ?x <${DKG_ONT}updatesTurn> ?t . ?x <${DKG_ONT}persistenceState> ?s . OPTIONAL { ?x <${DKG_ONT}assistantReply> ?r } }`,
   };
 }
 

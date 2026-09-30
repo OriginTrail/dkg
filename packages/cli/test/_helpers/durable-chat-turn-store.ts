@@ -5,7 +5,12 @@ import type { ChatTurnPersistenceState } from '../../src/daemon/chat-turn-persis
 type StoreExchangeArgs = Parameters<ChatMemoryManager['storeChatExchange']>;
 type RecordTransitionArgs = Parameters<ChatMemoryManager['recordChatTurnPersistenceTransition']>;
 
-/** The key a `(sessionId, turnId)` has in the fake store; the real store trims the turn id too. */
+/**
+ * The key a `(sessionId, turnId)` has in the fake store; the real store trims the
+ * turn id too. The session is part of the key because a turn id is only unique
+ * inside its session (the real store scopes a turn's subject the same way, and
+ * `openclaw-persist-turn.e2e.test.ts` checks it against the real store).
+ */
 export const turnStateKey = (sessionId: string, turnId: string): string => `${sessionId}\n${turnId.trim()}`;
 
 /**

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
+import { isSafeIri } from '@origintrail-official/dkg-core';
 import { ChatMemoryManager, decodeRdfStringLiteral } from '../src/chat-memory.js';
 
 interface TrackingFn {
@@ -196,7 +197,10 @@ describe('ChatMemoryManager', () => {
   });
 
   it('records chat turn persistence transitions without appending messages', async () => {
-    mockQuery.returns.push({ bindings: [] });
+    // The second answer is the lookup of the turn's subject: a turn stored
+    // before session-scoped subjects sits under `turn:<turnId>` and keeps
+    // receiving its transitions there.
+    mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: 'urn:dkg:chat:turn:turn-1' }] });
 
     await manager.recordChatTurnPersistenceTransition('session-1', 'turn-1', 'stored', {
       assistantReply: 'Final reply',
@@ -772,6 +776,7 @@ describe('ChatMemoryManager', () => {
       {
         bindings: [
           {
+            turn: 'urn:dkg:chat:turn:t2',
             tid: '"t2"',
             ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
           },
@@ -838,7 +843,7 @@ describe('ChatMemoryManager', () => {
         bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
       },
       {
-        bindings: [{ tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
+        bindings: [{ turn: 'urn:dkg:chat:turn:t2', tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
       {
         bindings: [{ latestTurnId: '"t2"', latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
@@ -865,7 +870,7 @@ describe('ChatMemoryManager', () => {
         bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
       },
       {
-        bindings: [{ tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
+        bindings: [{ turn: 'urn:dkg:chat:turn:t2', tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
       {
         bindings: [{ latestTurnId: '"t2"', latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
@@ -892,7 +897,7 @@ describe('ChatMemoryManager', () => {
         bindings: [{ c: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' }],
       },
       {
-        bindings: [{ tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
+        bindings: [{ turn: 'urn:dkg:chat:turn:t2', tid: '"t2"', ts: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
       },
       {
         bindings: [{ latestTurnId: '"t2"', latestTs: '"2026-03-08T10:00:10Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }],
@@ -990,7 +995,7 @@ describe('ChatMemoryManager WM write discipline', () => {
 
   it('recordChatTurnPersistenceTransition writes to chat-turns with the manager agentAddress', async () => {
     const manager = createManager();
-    mockQuery.returns.push({ bindings: [] });
+    mockQuery.returns.push({ bindings: [] }, { bindings: [] });
 
     await manager.recordChatTurnPersistenceTransition('s-transition', 'turn-9', 'stored');
 
@@ -1107,5 +1112,267 @@ describe('ChatMemoryManager WM write discipline', () => {
 
     expect(mockWriteAssertion.calls.length).toBe(2);
     expect(mockShare.calls).toHaveLength(0);
+  });
+});
+
+// A turn id is only unique inside its session, and the durable state of a turn
+// (persistence state, message links, transitions) hangs off the turn's subject.
+// A new turn is therefore written under one subject per (sessionId, turnId),
+// while turns stored before that (`urn:dkg:chat:turn:<turnId>`) stay where they
+// are and are found through their session link. The cross-session behavior
+// against a real store lives in packages/cli's openclaw-persist-turn e2e.
+describe('ChatMemoryManager chat-turn identity: one subject per session and turn id', () => {
+  const CHAT = 'urn:dkg:chat:';
+  const DKG = 'http://dkg.io/ontology/';
+  const SCHEMA_ORG = 'http://schema.org/';
+  const RDF_TYPE_IRI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+  const LEGACY_TURN_PREFIX = `${CHAT}turn:`;
+  const SCOPED_TURN_PREFIX = `${CHAT}session-turn:`;
+  const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+  const XSD_DATETIME_IRI = 'http://www.w3.org/2001/XMLSchema#dateTime';
+
+  let mockQuery: TrackingFn;
+  let mockWriteAssertion: TrackingFn;
+
+  beforeEach(() => {
+    mockQuery = trackFn(undefined);
+    mockWriteAssertion = trackFn({ written: 0 });
+  });
+
+  function createManager() {
+    return new ChatMemoryManager(
+      {
+        query: mockQuery,
+        createAssertion: trackFn({ assertionUri: 'urn:test:assertion', alreadyExists: false }),
+        writeAssertion: mockWriteAssertion,
+        createContextGraph: trackFn(undefined),
+        listContextGraphs: trackFn([{ id: 'agent-context', name: 'Agent Context' }]),
+      },
+      { apiKey: '' },
+      { agentAddress: 'did:dkg:agent:test' },
+    );
+  }
+
+  type Quad = { subject: string; predicate: string; object: string };
+  const lastWrittenQuads = (): Quad[] => mockWriteAssertion.calls.at(-1)![2] as Quad[];
+
+  /** Write one turn through the manager and hand back the quads it wrote. */
+  async function storeTurn(sessionId: string, turnId: string): Promise<Quad[]> {
+    mockQuery.returns.push({ bindings: [] });
+    await createManager().storeChatExchange(sessionId, 'question', 'answer', undefined, { turnId });
+    return lastWrittenQuads();
+  }
+
+  /** The subject the manager names the turn's ChatTurn resource. */
+  const turnSubjectOf = (quads: Quad[]): string =>
+    quads.find((quad) => quad.predicate === RDF_TYPE_IRI && quad.object === `${DKG}ChatTurn`)!.subject;
+
+  describe('a new turn', () => {
+    it('is named after its session and turn id, in a namespace no legacy turn subject can share', async () => {
+      const quads = await storeTurn('session-1', 'turn-1');
+      const subject = turnSubjectOf(quads);
+
+      expect(subject.startsWith(SCOPED_TURN_PREFIX)).toBe(true);
+      expect(subject.slice(SCOPED_TURN_PREFIX.length)).toMatch(/^[0-9a-f]{64}$/);
+      expect(subject.startsWith(LEGACY_TURN_PREFIX)).toBe(false);
+      expect(subject).not.toContain('turn-1');
+    });
+
+    it('carries every fact of the turn on that one subject, and keeps the caller-visible ids as literals', async () => {
+      const quads = await storeTurn('session-1', 'turn-1');
+      const subject = turnSubjectOf(quads);
+      const onTurn = quads.filter((quad) => quad.subject === subject);
+
+      expect(onTurn.map((quad) => quad.predicate).sort()).toEqual([
+        `${DKG}hasAssistantMessage`,
+        `${DKG}hasUserMessage`,
+        `${DKG}persistenceState`,
+        `${DKG}turnId`,
+        RDF_TYPE_IRI,
+        `${SCHEMA_ORG}dateCreated`,
+        `${SCHEMA_ORG}isPartOf`,
+      ].sort());
+      expect(onTurn.find((quad) => quad.predicate === `${SCHEMA_ORG}isPartOf`)?.object).toBe(`${CHAT}session:session-1`);
+      expect(onTurn.find((quad) => quad.predicate === `${DKG}turnId`)?.object).toBe('"turn-1"');
+      // The messages keep the plain turn id, which is what getSession joins on.
+      const messages = quads.filter((quad) => quad.predicate === RDF_TYPE_IRI && quad.object === `${SCHEMA_ORG}Message`);
+      expect(messages).toHaveLength(2);
+      for (const message of messages) {
+        expect(quads.find((quad) => quad.subject === message.subject && quad.predicate === `${DKG}turnId`)?.object).toBe('"turn-1"');
+      }
+      // Nothing is left under a subject named after the bare turn id.
+      expect(quads.some((quad) => quad.subject === `${LEGACY_TURN_PREFIX}turn-1`)).toBe(false);
+    });
+
+    it('gets the same subject for the same session and turn id, a different one for a different session or turn', async () => {
+      const first = turnSubjectOf(await storeTurn('session-a', 'turn-1'));
+      const again = turnSubjectOf(await storeTurn('session-a', 'turn-1'));
+      const padded = turnSubjectOf(await storeTurn('session-a', '  turn-1 '));
+      const otherSession = turnSubjectOf(await storeTurn('session-b', 'turn-1'));
+      const otherTurn = turnSubjectOf(await storeTurn('session-a', 'turn-2'));
+
+      expect(again).toBe(first);
+      expect(padded).toBe(first);
+      expect(otherSession).not.toBe(first);
+      expect(otherTurn).not.toBe(first);
+      expect(otherSession).not.toBe(otherTurn);
+    });
+
+    it('never shares a subject between two (sessionId, turnId) pairs, and is always a safe IRI', async () => {
+      const pairs: Array<[string, string]> = [
+        ['a:b', 'c'],
+        ['a', 'b:c'],
+        ['a\n', 'b'],
+        ['a', '\nb'],
+        ['s', 't"<>{}|^` \\'],
+        ['s ', 't'],
+        ['s', 't'],
+        ['s\ud800', 't'],
+        ['s\ud801', 't'],
+        ['openclaw:dkg-ui', 'turn:1'],
+        ['openclaw', 'dkg-ui:turn:1'],
+        ['', 't'],
+      ];
+      const subjects = new Set<string>();
+      for (const [sessionId, turnId] of pairs) {
+        const subject = turnSubjectOf(await storeTurn(sessionId, turnId));
+        expect(isSafeIri(subject), `${JSON.stringify([sessionId, turnId])}`).toBe(true);
+        subjects.add(subject);
+      }
+      expect(subjects.size).toBe(pairs.length);
+    });
+
+    it('is found by the reads through the session link and turn id literal, never by a subject named after the id', async () => {
+      const manager = createManager();
+      mockQuery.returns.push({ bindings: [] }, { bindings: [] }, { bindings: [] });
+
+      await manager.getChatTurnPersistenceState('session-1', ' turn-1 ');
+      await manager.hasChatTurn('session-1', 'turn-1');
+      const reads = mockQuery.calls.slice(-2).map((call) => String(call[0]));
+
+      expect(reads).toHaveLength(2);
+      for (const read of reads) {
+        expect(read).toContain(`<${SCHEMA_ORG}isPartOf> <${CHAT}session:session-1>`);
+        expect(read).toContain(`<${DKG}turnId> "turn-1"`);
+        expect(read).not.toContain(LEGACY_TURN_PREFIX);
+        expect(read).not.toContain(SCOPED_TURN_PREFIX);
+      }
+    });
+  });
+
+  describe('recordChatTurnPersistenceTransition', () => {
+    const transitionTarget = (): string =>
+      lastWrittenQuads().find((quad) => quad.predicate === `${DKG}updatesTurn`)!.object;
+
+    it('attaches the transition to the session-scoped subject a new turn was written under', async () => {
+      const scoped = turnSubjectOf(await storeTurn('session-1', 'turn-1'));
+      mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: scoped }] });
+
+      await createManager().recordChatTurnPersistenceTransition('session-1', 'turn-1', 'stored', { assistantReply: 'done' });
+
+      expect(transitionTarget()).toBe(scoped);
+    });
+
+    it('attaches the transition to the legacy subject a turn stored before the scheme sits under', async () => {
+      mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: `${LEGACY_TURN_PREFIX}turn-1` }] });
+
+      await createManager().recordChatTurnPersistenceTransition('session-1', 'turn-1', 'stored', { assistantReply: 'done' });
+
+      expect(transitionTarget()).toBe(`${LEGACY_TURN_PREFIX}turn-1`);
+    });
+
+    it('looks the subject up through the session and the trimmed turn id, so another session that reuses the id is never targeted', async () => {
+      mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: `${LEGACY_TURN_PREFIX}turn-1` }] });
+
+      await createManager().recordChatTurnPersistenceTransition('session-1', ' turn-1 ', 'stored');
+      const lookup = String(mockQuery.calls.at(-1)![0]);
+
+      expect(lookup).toContain(`<${RDF_TYPE_IRI}> <${DKG}ChatTurn>`);
+      expect(lookup).toContain(`<${SCHEMA_ORG}isPartOf> <${CHAT}session:session-1>`);
+      expect(lookup).toContain(`<${DKG}turnId> "turn-1"`);
+      expect(lookup).toContain('LIMIT 1');
+      expect(mockQuery.calls.at(-1)![1]).toMatchObject({ view: 'working-memory', assertionName: 'chat-turns' });
+    });
+
+    it('falls back to the subject a new turn of that session would get when the turn does not exist', async () => {
+      const wouldBe = turnSubjectOf(await storeTurn('session-1', 'turn-1'));
+      mockQuery.returns.push({ bindings: [] }, { bindings: [] });
+
+      await createManager().recordChatTurnPersistenceTransition('session-1', 'turn-1', 'stored');
+
+      expect(transitionTarget()).toBe(wouldBe);
+    });
+
+    it('does not follow a lookup answer that is not a safe IRI', async () => {
+      const wouldBe = turnSubjectOf(await storeTurn('session-1', 'turn-1'));
+      mockQuery.returns.push({ bindings: [] }, { bindings: [{ turn: 'not an iri<' }] });
+
+      await createManager().recordChatTurnPersistenceTransition('session-1', 'turn-1', 'stored');
+
+      expect(transitionTarget()).toBe(wouldBe);
+    });
+
+    it('writes nothing, and looks nothing up, for a blank turn id', async () => {
+      mockQuery.returns.push({ bindings: [] });
+      mockWriteAssertion.calls.length = 0;
+
+      await createManager().recordChatTurnPersistenceTransition('session-1', '   ', 'stored');
+
+      expect(mockWriteAssertion.calls).toHaveLength(0);
+      expect(mockQuery.calls).toHaveLength(1);
+    });
+  });
+
+  describe('getSessionGraphDelta', () => {
+    const integer = (n: number) => `"${n}"^^<${XSD_INTEGER}>`;
+    const dateTime = (iso: string) => `"${iso}"^^<${XSD_DATETIME_IRI}>`;
+
+    /** The store's answers to a delta request for turn `t2`, whose subject the first lookup names. */
+    function pushDeltaAnswers(turnSubject: string | undefined) {
+      mockQuery.returns.push(
+        { bindings: [] },
+        { bindings: [{ c: integer(2) }] },
+        { bindings: [{ ...(turnSubject ? { turn: turnSubject } : {}), tid: '"t2"', ts: dateTime('2026-03-08T10:00:10Z') }] },
+        { bindings: [{ latestTurnId: '"t2"', latestTs: dateTime('2026-03-08T10:00:10Z') }] },
+        { bindings: [{ previousTurnId: '"t1"' }] },
+        { bindings: [{ c: integer(2) }] },
+        { bindings: [{ user: `${CHAT}msg:user-2`, assistant: `${CHAT}msg:assistant-2` }] },
+        { bindings: [{ s: `${CHAT}msg:user-2` }, { s: `${CHAT}msg:assistant-2` }] },
+        { quads: [{ subject: turnSubject ?? '', predicate: `${DKG}turnId`, object: '"t2"' }] },
+      );
+    }
+
+    it.each([
+      ['a session-scoped subject', `${SCOPED_TURN_PREFIX}${'ab'.repeat(32)}`],
+      ['a legacy subject', `${LEGACY_TURN_PREFIX}t2`],
+    ])('follows the subject the turn is stored under: %s', async (_label, subject) => {
+      pushDeltaAnswers(subject);
+
+      const delta = await createManager().getSessionGraphDelta('s-graph', 't2', { baseTurnId: 't1' });
+      const queries = mockQuery.calls.map((call) => String(call[0]));
+
+      expect(delta.mode).toBe('delta');
+      expect(delta.watermark.appliedTurnId).toBe('t2');
+      // Found through the session link and the turn id, not built from the id.
+      expect(queries[2]).toContain(`<${SCHEMA_ORG}isPartOf> <${CHAT}session:s-graph>`);
+      expect(queries[2]).toContain(`<${DKG}turnId> "t2"`);
+      expect(queries[2]).not.toContain(LEGACY_TURN_PREFIX);
+      // ...and then used for everything that hangs off the turn.
+      expect(queries[6]).toContain(`<${subject}> <${DKG}hasUserMessage> ?user`);
+      expect(queries[6]).toContain(`<${subject}> <${DKG}hasAssistantMessage> ?assistant`);
+      expect(queries[7]).toContain(`BIND(<${subject}> AS ?s)`);
+      expect(queries[8]).toContain(`<${subject}>`);
+    });
+
+    it('asks for a full refresh when the store names no usable subject for the turn', async () => {
+      for (const subject of [undefined, 'not an iri<']) {
+        mockQuery.calls.length = 0;
+        pushDeltaAnswers(subject);
+
+        const delta = await createManager().getSessionGraphDelta('s-graph', 't2', { baseTurnId: 't1' });
+
+        expect(delta).toMatchObject({ mode: 'full_refresh_required', reason: 'turn_not_found', triples: [] });
+      }
+    });
   });
 });

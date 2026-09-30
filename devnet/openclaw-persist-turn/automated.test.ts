@@ -13,8 +13,10 @@
  * is recorded as a transition.
  *
  * The suite drives that route on live devnet daemons over HTTP with the node's
- * bearer token and reads the assertion back through `POST /api/query`. It runs
- * against nodes 1, 3 and 5, which sit on different store backends
+ * bearer token and reads the assertion back through `POST /api/query`. A turn id
+ * is only unique inside its session, so one case reuses a turn id in two
+ * sessions and requires each to be created, completed and retried on its own.
+ * It runs against nodes 1, 3 and 5, which sit on different store backends
  * (oxigraph-server, blazegraph, and sparql-http to an external Oxigraph), and
  * repeats the resend check on the Hermes and Prime Agent routes as the parity
  * regression: all three channels must behave the same on retry.
@@ -28,7 +30,7 @@
  * taken for the final state. The window is short; it cannot see a store that
  * lags for longer than that.
  *
- * Isolation: every test writes only turns of its own random session and turn
+ * Isolation: every test writes only turns of its own random sessions and turn
  * id into the node's own `agent-context` / `chat-turns` assertion. It never
  * touches the shared `devnet-test` context graph, a node wallet or the chain.
  * There is no API to delete a chat turn, so those turns stay in the devnet's
@@ -248,6 +250,44 @@ describe.each(NODE_NUMS)('OpenClaw persist-turn on devnet node%i', (num) => {
     expect(resend.body).toEqual({ ok: true, duplicate: true, turnId });
     expect(late.body).toEqual({ ok: true, duplicate: true, turnId });
     expect(await settledFootprint(node(), sessionId, turnId, expected)).toEqual(expected);
+  });
+
+  it('keeps two sessions that reuse one turnId apart: each is created, completed and retried on its own', async () => {
+    const sessionA = newSessionId('openclaw');
+    const sessionB = newSessionId('openclaw');
+    const turnId = newTurnId();
+    const expectedA = ONE_STORED_TURN;
+    const expectedB: ChatTurnFootprint = {
+      turns: 1,
+      messages: 2,
+      userMessages: 1,
+      assistantMessages: 1,
+      states: ['pending'],
+      transitions: [{ state: 'stored', assistantReply: 'devnet: the final answer of b' }],
+    };
+
+    const aStored = await persist(node(), 'openclaw', turnPayload(sessionA, turnId, { assistantReply: 'devnet: answer of a' }));
+    const bPending = await persist(node(), 'openclaw', turnPayload(sessionB, turnId, {
+      assistantReply: 'devnet: b is working on it',
+      persistenceState: 'pending',
+    }));
+    const bStored = await persist(node(), 'openclaw', turnPayload(sessionB, turnId, {
+      assistantReply: 'devnet: the final answer of b',
+      persistenceState: 'stored',
+    }));
+    const aResend = await persist(node(), 'openclaw', turnPayload(sessionA, turnId, { assistantReply: 'devnet: answer of a' }));
+    const bResend = await persist(node(), 'openclaw', turnPayload(sessionB, turnId, {
+      assistantReply: 'devnet: the final answer of b',
+      persistenceState: 'stored',
+    }));
+
+    expect(aStored.body).toEqual({ ok: true, turnId });
+    expect(bPending.body).toEqual({ ok: true, turnId });
+    expect(bStored.body).toEqual({ ok: true, transitioned: true, turnId });
+    expect(aResend.body).toEqual({ ok: true, duplicate: true, turnId });
+    expect(bResend.body).toEqual({ ok: true, duplicate: true, turnId });
+    expect(await settledFootprint(node(), sessionA, turnId, expectedA)).toEqual(expectedA);
+    expect(await settledFootprint(node(), sessionB, turnId, expectedB)).toEqual(expectedB);
   });
 
   it('still writes every POST that carries no turnId, each under a generated one', async () => {
