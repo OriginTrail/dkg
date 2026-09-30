@@ -16,6 +16,13 @@
  * `InvalidMessageError`, ...). Matching is by `name`, never `instanceof`, so a
  * second copy of `@libp2p/interface` in the dependency tree cannot defeat it.
  *
+ * What to DO about a category is decided in one place,
+ * {@link TRANSPORT_ERROR_DISPOSITION}: an explicit `retryNow` / `retryLater`
+ * pair per category, checked for exhaustiveness by the compiler. A category is
+ * never retryable because of what it is not (not `Unknown`, not
+ * `ProtocolUnsupported`), so a newly recognised category cannot start being
+ * retried until someone decides that for it.
+ *
  * This module deliberately imports nothing from `protocol-router.ts` or
  * `message-stream-pool.ts`, so both can depend on it.
  */
@@ -47,6 +54,51 @@ export type TransportErrorCategory =
   | 'NoReservation'
   | 'ResponderBusy'
   | 'Unknown';
+
+/** What may be done about a failure of one {@link TransportErrorCategory}. */
+export interface TransportRetryDisposition {
+  /**
+   * Re-send the same request on the same protocol right away, with the
+   * router's backoff (the in-line retry loop of `ProtocolRouter.send`).
+   */
+  readonly retryNow: boolean;
+  /**
+   * Keep the failure retryable for a caller that can try again LATER because
+   * it holds durable state: the substrate outbox and sync's peer backoff.
+   * Every `retryNow` category is also `retryLater`.
+   */
+  readonly retryLater: boolean;
+}
+
+/**
+ * The retry policy, category by category. `Readonly<Record<TransportErrorCategory,
+ * ...>>` makes it exhaustive at compile time: adding a category to the union
+ * without a row here (or a row for something that is not a category) does not
+ * compile, so no category can inherit a retry verdict by default.
+ *
+ * - `ProtocolUnsupported` is `retryLater` only. Re-negotiating a protocol the
+ *   peer just refused inside one `send()` only burns the retry budget and the
+ *   deadline. But multistream answers `na` between `libp2p.start()` and the
+ *   peer's handler registration, and a booting peer cannot be told apart from
+ *   one that never will speak the protocol, so a durable queue keeps the
+ *   message (and sync keeps the peer) instead of dropping it.
+ * - `Unknown` is not retried by anyone.
+ * - Every other category is a transient transport failure, retried now and
+ *   later.
+ *
+ * Exported for tests; production code goes through the predicates below.
+ */
+export const TRANSPORT_ERROR_DISPOSITION: Readonly<Record<TransportErrorCategory, TransportRetryDisposition>> = {
+  ProtocolUnsupported: { retryNow: false, retryLater: true },
+  ConnectionReset: { retryNow: true, retryLater: true },
+  PooledStreamReset: { retryNow: true, retryLater: true },
+  Timeout: { retryNow: true, retryLater: true },
+  Aborted: { retryNow: true, retryLater: true },
+  DialExhausted: { retryNow: true, retryLater: true },
+  NoReservation: { retryNow: true, retryLater: true },
+  ResponderBusy: { retryNow: true, retryLater: true },
+  Unknown: { retryNow: false, retryLater: false },
+};
 
 /** `err.name` of the peer's "no such protocol" answer (`@libp2p/interface`). */
 const UNSUPPORTED_PROTOCOL_ERROR_NAME = 'UnsupportedProtocolError';
@@ -147,7 +199,8 @@ function matchesUnsupportedProtocolMessage(lowerMessage: string): boolean {
  * the previous `isRecoverableSendError` substring list, minus the two
  * negotiation entries (now `ProtocolUnsupported`), with each entry mapped to
  * the category it stands for. Order only decides which category a message that
- * matches several gets; every category returned here is transient.
+ * matches several gets. Whether a category is worth retrying is not decided
+ * here: it is `TRANSPORT_ERROR_DISPOSITION`'s row for it.
  */
 function classifyTransportMessage(lowerMessage: string): TransportErrorCategory {
   const msg = lowerMessage;
@@ -261,18 +314,18 @@ export function isProtocolUnsupportedError(err: unknown): boolean {
  * instead of spending the retry budget and the send deadline on it. (The
  * router's in-line pooled -> one-shot fallback has already run inside `send()`
  * before its retry loop consults this.) Also false for anything unrecognised.
- *
- * Exported for tests.
+ * The per-category answer is the `retryNow` column of
+ * {@link TRANSPORT_ERROR_DISPOSITION}.
  */
 export function isRecoverableSendError(err: unknown): boolean {
-  const category = classifyTransportError(err);
-  return category !== 'Unknown' && category !== 'ProtocolUnsupported';
+  return TRANSPORT_ERROR_DISPOSITION[classifyTransportError(err)].retryNow;
 }
 
 /**
  * True when a caller that can try again LATER (the substrate outbox, sync's
  * peer backoff) should keep the failure retryable: everything
- * {@link isRecoverableSendError} accepts, plus `ProtocolUnsupported`.
+ * {@link isRecoverableSendError} accepts, plus `ProtocolUnsupported` (the
+ * `retryLater` column of {@link TRANSPORT_ERROR_DISPOSITION}).
  *
  * A peer that answers "no such protocol" may still be booting (multistream
  * answers `na` in the window between `libp2p.start()` and its handler
@@ -282,5 +335,5 @@ export function isRecoverableSendError(err: unknown): boolean {
  * inside a single `send()`.
  */
 export function isRetryableLaterSendError(err: unknown): boolean {
-  return classifyTransportError(err) !== 'Unknown';
+  return TRANSPORT_ERROR_DISPOSITION[classifyTransportError(err)].retryLater;
 }

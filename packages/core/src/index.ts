@@ -232,11 +232,7 @@ export {
   isRecoverableSendError,
   isProtocolUnsupportedError,
 } from './protocol-router.js';
-export {
-  classifyTransportError,
-  isRetryableLaterSendError,
-  type TransportErrorCategory,
-} from './transport-error.js';
+export { isRetryableLaterSendError } from './transport-error.js';
 export {
   MessageStreamPool,
   POOLED_MESSAGE_PROTOCOL,

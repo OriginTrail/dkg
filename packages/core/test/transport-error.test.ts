@@ -18,7 +18,9 @@ import {
   isProtocolUnsupportedError,
   isRecoverableSendError,
   isRetryableLaterSendError,
+  TRANSPORT_ERROR_DISPOSITION,
   type TransportErrorCategory,
+  type TransportRetryDisposition,
 } from '../src/transport-error.js';
 import * as coreIndex from '../src/index.js';
 import { PooledStreamResetError } from '../src/message-stream-pool.js';
@@ -165,11 +167,13 @@ describe('classifyTransportError', () => {
     });
   }
 
-  it('is exported from the package entry point', () => {
-    expect(coreIndex.classifyTransportError).toBe(classifyTransportError);
+  it('exports the three retry predicates from the package entry point and keeps the category detail internal', () => {
     expect(coreIndex.isRecoverableSendError).toBe(isRecoverableSendError);
     expect(coreIndex.isProtocolUnsupportedError).toBe(isProtocolUnsupportedError);
     expect(coreIndex.isRetryableLaterSendError).toBe(isRetryableLaterSendError);
+    // Nothing outside the classifier consumes the categories or the table.
+    expect(coreIndex).not.toHaveProperty('classifyTransportError');
+    expect(coreIndex).not.toHaveProperty('TRANSPORT_ERROR_DISPOSITION');
   });
 
   it('classifies by error name, not instanceof (a lookalike from another copy of libp2p still counts)', () => {
@@ -534,5 +538,83 @@ describe('isRetryableLaterSendError', () => {
     expect(isRecoverableSendError(refusal)).toBe(false);
     expect(isRetryableLaterSendError(refusal)).toBe(true);
     expect(isRetryableLaterSendError(new Error('Invalid payload'))).toBe(false);
+  });
+});
+
+/**
+ * The retry policy is an explicit table with one row per category, checked for
+ * exhaustiveness by the compiler (`Record<TransportErrorCategory, ...>`), so a
+ * category added later cannot inherit "retryable" from being not `Unknown`.
+ */
+describe('TRANSPORT_ERROR_DISPOSITION', () => {
+  /** One representative error per category. The `Record` type keeps this list exhaustive too. */
+  const sampleByCategory: Record<TransportErrorCategory, unknown> = {
+    ProtocolUnsupported: new UnsupportedProtocolError('Protocol selection failed - could not negotiate /dkg/x'),
+    ConnectionReset: new StreamResetError(),
+    PooledStreamReset: new PooledStreamResetError('request timeout'),
+    Timeout: new Error('operation timed out'),
+    Aborted: new StreamAbortedError(),
+    DialExhausted: named('NoValidAddressesError', 'nowhere to dial'),
+    NoReservation: new Error('no reservation for relay'),
+    ResponderBusy: new Error('sync responder queue full'),
+    Unknown: new Error('handler error'),
+  };
+  const categories = Object.keys(sampleByCategory) as TransportErrorCategory[];
+
+  /** The verdicts pinned by the tests above, spelled out row by row. */
+  const expected: Record<TransportErrorCategory, TransportRetryDisposition> = {
+    ProtocolUnsupported: { retryNow: false, retryLater: true },
+    ConnectionReset: { retryNow: true, retryLater: true },
+    PooledStreamReset: { retryNow: true, retryLater: true },
+    Timeout: { retryNow: true, retryLater: true },
+    Aborted: { retryNow: true, retryLater: true },
+    DialExhausted: { retryNow: true, retryLater: true },
+    NoReservation: { retryNow: true, retryLater: true },
+    ResponderBusy: { retryNow: true, retryLater: true },
+    Unknown: { retryNow: false, retryLater: false },
+  };
+
+  it('has exactly one row per category', () => {
+    expect(Object.keys(TRANSPORT_ERROR_DISPOSITION).sort()).toEqual([...categories].sort());
+  });
+
+  it('gives every category an explicit retryNow and retryLater decision', () => {
+    for (const category of categories) {
+      const row = TRANSPORT_ERROR_DISPOSITION[category];
+      expect(row, category).toBeDefined();
+      expect(Object.keys(row).sort(), category).toEqual(['retryLater', 'retryNow']);
+      expect(typeof row.retryNow, `${category}.retryNow`).toBe('boolean');
+      expect(typeof row.retryLater, `${category}.retryLater`).toBe('boolean');
+    }
+  });
+
+  it('pins each category\'s decisions', () => {
+    expect(TRANSPORT_ERROR_DISPOSITION).toEqual(expected);
+  });
+
+  it('never retries in-line what a durable caller would drop (retryNow implies retryLater)', () => {
+    for (const category of categories) {
+      const row = TRANSPORT_ERROR_DISPOSITION[category];
+      if (row.retryNow) expect(row.retryLater, category).toBe(true);
+    }
+  });
+
+  it('refuses to retry anything unrecognised, now or later', () => {
+    expect(TRANSPORT_ERROR_DISPOSITION.Unknown).toEqual({ retryNow: false, retryLater: false });
+  });
+
+  it('is reachable: every category is what its sample classifies as', () => {
+    for (const category of categories) {
+      expect(classifyTransportError(sampleByCategory[category]), category).toBe(category);
+    }
+  });
+
+  it('drives the predicates: each is a lookup of its column for the classified category', () => {
+    for (const category of categories) {
+      const sample = sampleByCategory[category];
+      expect(isRecoverableSendError(sample), `${category} retryNow`).toBe(TRANSPORT_ERROR_DISPOSITION[category].retryNow);
+      expect(isRetryableLaterSendError(sample), `${category} retryLater`).toBe(TRANSPORT_ERROR_DISPOSITION[category].retryLater);
+      expect(isProtocolUnsupportedError(sample), `${category} unsupported`).toBe(category === 'ProtocolUnsupported');
+    }
   });
 });
