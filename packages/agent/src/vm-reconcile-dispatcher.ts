@@ -47,7 +47,7 @@ interface VmReconcileDispatchState<T> {
 }
 
 type VmReconcileAdmission<T> =
-  | { kind: 'admitted' | 'coalesced'; completion: Promise<T> }
+  | { kind: 'admitted' | 'coalesced'; completion: Promise<T>; work: VmReconcileDispatchWork<T> }
   | { kind: 'full' | 'closed' };
 
 export interface VmReconcileDispatcherOptions {
@@ -90,6 +90,8 @@ export class VmReconcileDispatcher<T> {
   private readonly concurrency: number;
   private readonly maxPending: number;
   private readonly maxForegroundBurst: number;
+  private readonly timerBoundOutstanding = new Set<VmReconcileDispatchWork<T>>();
+  private readonly timerBoundOutstandingLimit: number;
   constructor(
     private readonly run: (key: string, source: VmReconcileSource) => Promise<T>,
     private readonly onFailure: (key: string, error: unknown) => void,
@@ -112,6 +114,7 @@ export class VmReconcileDispatcher<T> {
     this.concurrency = concurrency;
     this.maxPending = maxPending;
     this.maxForegroundBurst = maxForegroundBurst;
+    this.timerBoundOutstandingLimit = 2 * concurrency;
   }
 
   /** Enqueue a low-latency chain-event nudge; suppressed until a sweep after failure. */
@@ -153,6 +156,26 @@ export class VmReconcileDispatcher<T> {
   protected tryDispatchPeriodic(key: string): Promise<T> | undefined {
     const outcome = this.admit(key, 'periodic');
     if (!('completion' in outcome)) return undefined;
+    void outcome.completion.catch(() => undefined);
+    return outcome.completion;
+  }
+
+  /** Limit newly created historical timer work using dispatcher-owned work tokens. */
+  protected tryDispatchPeriodicBoundTimer(key: string): Promise<T> | undefined {
+    if (this.timerBoundOutstanding.size >= this.timerBoundOutstandingLimit) {
+      const state = this.states.get(key);
+      // Pending/trailing work can coalesce without creating another task.
+      if (!state?.pending && !state?.trailing) return undefined;
+    }
+    const outcome = this.admit(key, 'periodic');
+    if (!('completion' in outcome)) return undefined;
+    if (outcome.kind === 'admitted') {
+      this.timerBoundOutstanding.add(outcome.work);
+      void outcome.completion.then(
+        () => { this.timerBoundOutstanding.delete(outcome.work); },
+        () => { this.timerBoundOutstanding.delete(outcome.work); },
+      );
+    }
     void outcome.completion.catch(() => undefined);
     return outcome.completion;
   }
@@ -285,7 +308,7 @@ export class VmReconcileDispatcher<T> {
     if (state.pending) {
       this.mergeWork(state.pending, source);
       this.sortPending();
-      return { kind: 'coalesced', completion: state.pending.promise };
+      return { kind: 'coalesced', completion: state.pending.promise, work: state.pending };
     }
 
     if (state.active) {
@@ -294,16 +317,16 @@ export class VmReconcileDispatcher<T> {
       // an older automatic pass. In that case it joins or creates one fresh
       // trailing pass; repeated operator requests coalesce there.
       if (source === 'manual' && state.active.source === 'manual') {
-        return { kind: 'coalesced', completion: state.active.promise };
+        return { kind: 'coalesced', completion: state.active.promise, work: state.active };
       }
       if (state.trailing) {
         this.mergeWork(state.trailing, source);
-        return { kind: 'coalesced', completion: state.trailing.promise };
+        return { kind: 'coalesced', completion: state.trailing.promise, work: state.trailing };
       }
       const trailing = this.createQueuedWork(key, source, 'trailing');
       if (!trailing) return { kind: 'full' };
       state.trailing = trailing;
-      return { kind: 'admitted', completion: trailing.promise };
+      return { kind: 'admitted', completion: trailing.promise, work: trailing };
     }
 
     const work = this.createQueuedWork(key, source, 'pending');
@@ -315,7 +338,7 @@ export class VmReconcileDispatcher<T> {
     this.pending.push(work);
     this.sortPending();
     this.drain();
-    return { kind: 'admitted', completion: work.promise };
+    return { kind: 'admitted', completion: work.promise, work };
   }
 
   private createQueuedWork(
@@ -474,6 +497,7 @@ class VmReconcileRuntimeDispatcher<T> extends VmReconcileDispatcher<T> {
     super(run, onFailure, options);
     installSweepAdmission(Object.freeze({
       tryAdmit: (key: string) => this.tryDispatchPeriodic(key),
+      tryAdmitBoundTimer: (key: string) => this.tryDispatchPeriodicBoundTimer(key),
       waitForChange: (signal?: AbortSignal) => this.waitForPeriodicStateChange(signal),
       isClosed: () => this.closed,
       retainCapacity: (signal: AbortSignal) => this.retainPeriodicCapacity(signal),
@@ -508,7 +532,6 @@ export class VmReconcileSchedulingRuntime<T> {
     this.planner = new VmReconcileSweepPlanner({
       discoveryBatchSize: options.discoveryBatchSize ?? 8,
       periodicBoundBatchSize: options.periodicBoundBatchSize ?? 8,
-      maxOutstandingBound: 2 * (options.concurrency ?? 1),
     }, sweepAdmission.retainCapacity);
     this.sweepAdmission = sweepAdmission;
   }
@@ -538,7 +561,11 @@ export class VmReconcileSchedulingRuntime<T> {
     this.planner.admit(
       boundKeys,
       unboundKeys,
-      key => isCurrent() ? this.sweepAdmission.tryAdmit(key) : undefined,
+      {
+        tryAdmit: key => isCurrent() ? this.sweepAdmission.tryAdmit(key) : undefined,
+        tryAdmitBoundTimer: key => isCurrent()
+          ? this.sweepAdmission.tryAdmitBoundTimer(key) : undefined,
+      },
     );
   }
 

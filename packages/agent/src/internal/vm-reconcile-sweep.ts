@@ -60,17 +60,14 @@ type SweepTurn = SweepTurnBase & (
 export interface VmReconcileSweepPlannerOptions {
   discoveryBatchSize: number;
   periodicBoundBatchSize?: number;
-  maxOutstandingBound?: number;
 }
 
 /** Own real admissions and their completion handles throughout a discovery turn. */
 export class VmReconcileSweepPlanner {
   private readonly bound = new VmReconcileSweepSelector();
   private readonly unbound = new VmReconcileSweepSelector();
-  private readonly outstandingBound = new Set<Promise<unknown>>();
   private readonly discoveryBatchSize: number;
   private readonly periodicBoundBatchSize: number;
-  private readonly maxOutstandingBound: number;
   private turn: SweepTurn | undefined;
 
   constructor(
@@ -79,7 +76,6 @@ export class VmReconcileSweepPlanner {
   ) {
     this.discoveryBatchSize = options.discoveryBatchSize;
     this.periodicBoundBatchSize = options.periodicBoundBatchSize ?? 8;
-    this.maxOutstandingBound = options.maxOutstandingBound ?? Number.POSITIVE_INFINITY;
   }
 
   reset(): void {
@@ -92,12 +88,12 @@ export class VmReconcileSweepPlanner {
   admit(
     boundKeys: readonly string[],
     unboundKeys: readonly string[],
-    tryAdmit: (key: string) => Promise<unknown> | undefined,
+    admission: Pick<VmReconcileSweepAdmission, 'tryAdmit' | 'tryAdmitBoundTimer'>,
   ): void {
     const turn = this.currentTurn();
     if (turn.owner === 'completion') return;
     this.releaseTimerCapacity(turn);
-    this.advanceTimerTurn(turn, boundKeys, unboundKeys, tryAdmit);
+    this.advanceTimerTurn(turn, boundKeys, unboundKeys, admission);
     if (!turn.finished.signal.aborted) {
       turn.releaseTimerCapacity = this.retainCapacity(turn.finished.signal);
     }
@@ -176,24 +172,6 @@ export class VmReconcileSweepPlanner {
     if (this.turn === turn) this.turn = undefined;
   }
 
-  /** Only timer-owned bound work consumes the historical backlog allowance. */
-  private tryAdmitTimerBound(
-    key: string,
-    tryAdmit: (key: string) => Promise<unknown> | undefined,
-  ): Promise<unknown> | undefined {
-    if (this.outstandingBound.size >= this.maxOutstandingBound) return undefined;
-    const completion = tryAdmit(key);
-    if (completion === undefined) return undefined;
-    if (!this.outstandingBound.has(completion)) {
-      this.outstandingBound.add(completion);
-      void completion.then(
-        () => { this.outstandingBound.delete(completion); },
-        () => { this.outstandingBound.delete(completion); },
-      );
-    }
-    return completion;
-  }
-
   private record(
     turn: SweepTurn,
     key: string,
@@ -250,10 +228,10 @@ export class VmReconcileSweepPlanner {
     turn: SweepTurn,
     boundKeys: readonly string[],
     unboundKeys: readonly string[],
-    tryAdmit: (key: string) => Promise<unknown> | undefined,
+    admission: Pick<VmReconcileSweepAdmission, 'tryAdmit' | 'tryAdmitBoundTimer'>,
   ): void {
     if (turn.owner !== 'timer' || turn.finished.signal.aborted) return;
-    const timerBound = (key: string) => this.tryAdmitTimerBound(key, tryAdmit);
+    const timerBound = admission.tryAdmitBoundTimer;
     if (turn.state.phase === 'leading') {
       const remaining = turn.state.remainingDiscovery;
       if (!this.admitLeadingBound(turn, boundKeys, timerBound)) {
@@ -261,7 +239,7 @@ export class VmReconcileSweepPlanner {
         // can still run, but the rejected bound key waits for the next tick.
         turn.state = {
           phase: 'leading',
-          remainingDiscovery: this.spendDiscovery(turn, unboundKeys, remaining, tryAdmit),
+          remainingDiscovery: this.spendDiscovery(turn, unboundKeys, remaining, admission.tryAdmit),
         };
         return;
       }
@@ -269,7 +247,7 @@ export class VmReconcileSweepPlanner {
     }
     if (turn.state.phase === 'discovery') {
       const remaining = this.spendDiscovery(
-        turn, unboundKeys, turn.state.remainingDiscovery, tryAdmit,
+        turn, unboundKeys, turn.state.remainingDiscovery, admission.tryAdmit,
       );
       if (remaining > 0) {
         turn.state = { phase: 'discovery', remainingDiscovery: remaining };
