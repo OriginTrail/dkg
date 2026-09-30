@@ -160,6 +160,39 @@ it('counts dispatcher work once when a bounded timer admission coalesces', async
   }
 });
 
+it('releases a bounded timer slot when admitted work rejects', async () => {
+  const started: string[] = [];
+  const resolve = new Map<string, () => void>();
+  const reject = new Map<string, (error: Error) => void>();
+  const runtime = new VmReconcileSchedulingRuntime<void>(
+    key => new Promise<void>((done, fail) => {
+      started.push(key);
+      resolve.set(key, done);
+      reject.set(key, fail);
+    }),
+    () => undefined,
+    { concurrency: 1, maxPending: 3, periodicBoundBatchSize: 2 },
+  );
+  try {
+    runtime.scheduleSweep(['b0', 'b1'], [], () => true);
+    await vi.waitFor(() => expect(started).toEqual(['b0']));
+    runtime.scheduleSweep(['b2'], [], () => true);
+    expect(runtime.isInFlight('b2')).toBe(false);
+
+    reject.get('b0')!(new Error('store read failed'));
+    await vi.waitFor(() => expect(started).toContain('b1'));
+    runtime.scheduleSweep(['b2'], [], () => true);
+    expect(runtime.isInFlight('b2')).toBe(true);
+    resolve.get('b1')!();
+    await vi.waitFor(() => expect(started).toContain('b2'));
+    resolve.get('b2')!();
+    await runtime.waitForIdle();
+  } finally {
+    for (const done of resolve.values()) done();
+    await runtime.close();
+  }
+});
+
 it('keeps unbound discovery admitting when the bound timer backlog is full', async () => {
   const releases: Array<() => void> = [];
   const started: string[] = [];
