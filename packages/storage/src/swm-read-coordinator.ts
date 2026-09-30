@@ -622,6 +622,9 @@ export function loadMerkleVerifiedSharedMemorySlice(
   kaGraphBound: SwmKaGraphBound | undefined,
   options: LoadMerkleVerifiedSharedMemorySliceOptions,
 ): Promise<MerkleVerifiedSharedMemorySliceResult> {
+  // Candidate discovery constructs SPARQL before the complete-family loader's
+  // graph resolver can validate this bucket. Reject unsafe input up front.
+  assertSafeIri(bucketGraph);
   if (options.expectedMerkleRoot.length !== 32) {
     throw new TypeError('Expected a 32-byte on-chain merkle root');
   }
@@ -793,18 +796,25 @@ async function loadSharedMemoryQuadsInternal(
   assertSharedMemoryGraphReadLimit(initialGraphs, options.maxGraphsToRead);
   const graphsPerQuery = options.resultBudget
     ? BUDGETED_SHARED_MEMORY_GRAPHS_PER_QUERY : SHARED_MEMORY_GRAPHS_PER_QUERY;
-  if (initialGraphs.length <= graphsPerQuery) {
+  if (graphScope.kind !== 'complete-family' && initialGraphs.length <= graphsPerQuery) {
     return traceSlowSwmReadStage('selected.materialize', queryOptions, () =>
       read(store, initialGraphs, queryOptions));
   }
   const snapshot = asReadSnapshotCapability(store);
   if (snapshot) {
+    // A complete-family outer catalog can be stale even when it fits in one
+    // query. Resolve that set at the backend commit point before claiming a
+    // complete unmatched read. Multi-query scoped reads also need one snapshot.
     return snapshot.withReadSnapshot(async (snapshotStore) => {
       const graphs = await traceSlowSwmReadStage('selected.resolve-snapshot', queryOptions, () =>
         resolveGraphs(snapshotStore, queryOptions));
       return traceSlowSwmReadStage('selected.materialize-snapshot', queryOptions, () =>
         read(snapshotStore, graphs, queryOptions));
     }, queryOptions?.signal);
+  }
+  if (initialGraphs.length <= graphsPerQuery) {
+    return traceSlowSwmReadStage('selected.materialize', queryOptions, () =>
+      read(store, initialGraphs, queryOptions));
   }
   const revision = asGraphWriteRevisionSource(store);
   if (revision?.writeRevisionCoverage !== 'all-writers') {
@@ -836,4 +846,3 @@ async function loadSharedMemoryQuadsInternal(
   }
   throw new SharedMemoryReadConsistencyError();
 }
-

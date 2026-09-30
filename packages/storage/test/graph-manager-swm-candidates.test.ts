@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   createTripleStore,
   loadSharedMemorySliceWithKaBoundFallback,
@@ -13,6 +13,25 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
     widened: 'test.widened',
     unbounded: 'test.unbounded',
   } as const;
+
+  it('rejects an unsafe bucket before root-indexed discovery can query the backend', () => {
+    const query = vi.fn();
+    const withReadSnapshot = vi.fn();
+    const store = { query, withReadSnapshot, listGraphs: vi.fn() } as unknown as
+      Parameters<typeof loadMerkleVerifiedSharedMemorySlice>[0];
+    const unsafe = 'urn:unused> UNDEF } SERVICE <http://internal.example/sparql> { ?s ?p ?o } VALUES ?dummy { <urn:unused';
+    expect(() => loadMerkleVerifiedSharedMemorySlice(
+      store, unsafe, { rootEntities: ['urn:safe:root'] }, undefined,
+      {
+        sources: { ...SOURCES, rootIndexed: 'test.rootIndexed', cachedGraphSet: 'test.cachedGraphSet' },
+        expectedMerkleRoot: new Uint8Array(32),
+        createMerkleAccept: async () => (quads) => quads,
+      },
+    )).toThrow();
+    expect(query).not.toHaveBeenCalled();
+    expect(withReadSnapshot).not.toHaveBeenCalled();
+    expect(store.listGraphs).not.toHaveBeenCalled();
+  });
 
   it('bounded hit: reads the bound and never widens or re-accepts', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
@@ -173,7 +192,7 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
     }
   });
 
-  it('never accepts a stale warm catalog that omits a skolem-only graph', async () => {
+  it('rejects a stale warm candidate and refreshes a small complete family in a snapshot', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     const swm = contextGraphSharedMemoryUri('fb-stale-catalog');
     const root = 'urn:fb:stale-catalog';
@@ -205,9 +224,57 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
           resultBudget: { pageRows: 100, maxRows: 1000, maxBytesEstimate: 1024 * 1024 },
         },
       );
-      expect(result.status).toBe('complete-unmatched');
-      if (result.status !== 'complete-unmatched') throw new Error('Expected complete unmatched SWM slice');
-      expect(result.quads.map((quad) => quad.object)).toEqual(['"root"']);
+      expect(result.status).toBe('verified');
+      if (result.status !== 'verified') throw new Error('Expected verified SWM slice');
+      expect(result.quads.map((quad) => quad.object).sort()).toEqual(['"child"', '"root"']);
+      expect(sources).toContain('test.cachedGraphSet');
+      expect(sources).toContain(SOURCES.unbounded);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('refreshes an omitted child after a stale catalog spans multiple graph chunks', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('fb-stale-catalog-chunked');
+    const root = 'urn:fb:stale-catalog-chunked';
+    const rootGraph = `${swm}/${AUTHOR_A_MIXED}/7`;
+    const childGraph = `${swm}/${AUTHOR_B}/12`;
+    const staleGraphs = [rootGraph, ...Array.from({ length: 17 }, (_, i) => `${swm}/decoy-${i}`)];
+    const sources: string[] = [];
+    const query = async (...args: Parameters<typeof store.query>) => {
+      sources.push(args[1]?.source ?? '');
+      return store.query(...args);
+    };
+    const snapshotListGraphs = vi.fn(store.listGraphs.bind(store));
+    const snapshotRead = { query, listGraphs: snapshotListGraphs };
+    const snapshotted = {
+      query,
+      listGraphs: async () => staleGraphs,
+      withReadSnapshot: async (fn: (value: typeof snapshotRead) => Promise<unknown>) => fn(snapshotRead),
+    } as unknown as Parameters<typeof loadMerkleVerifiedSharedMemorySlice>[0];
+    try {
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"root"', graph: rootGraph },
+        { subject: `${root}/.well-known/genid/child`, predicate: 'urn:p', object: '"child"', graph: childGraph },
+        ...staleGraphs.slice(1).map((graph, i) => ({
+          subject: `urn:decoy:${i}`, predicate: 'urn:p', object: '"decoy"', graph,
+        })),
+      ]);
+      const result = await loadMerkleVerifiedSharedMemorySlice(
+        snapshotted, swm, { rootEntities: [root] }, undefined,
+        {
+          sources: { ...SOURCES, rootIndexed: 'test.rootIndexed', cachedGraphSet: 'test.cachedGraphSet' },
+          expectedMerkleRoot: new Uint8Array(32),
+          createMerkleAccept: async () => (candidate) =>
+            candidate.some((quad) => quad.object === '"child"') ? candidate : null,
+          resultBudget: { pageRows: 100, maxRows: 1000, maxBytesEstimate: 1024 * 1024 },
+        },
+      );
+      expect(result.status).toBe('verified');
+      if (result.status !== 'verified') throw new Error('Expected verified SWM slice');
+      expect(result.quads.map((quad) => quad.object).sort()).toEqual(['"child"', '"root"']);
+      expect(snapshotListGraphs).toHaveBeenCalled();
       expect(sources).toContain('test.cachedGraphSet');
       expect(sources).toContain(SOURCES.unbounded);
     } finally {
@@ -312,4 +379,3 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
     }
   });
 });
-
