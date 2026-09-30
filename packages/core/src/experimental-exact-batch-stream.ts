@@ -88,7 +88,6 @@ export class ExperimentalExactBatchUnsupportedError extends Error {
 
 export class ExactBatchTransportSession<F extends ExactBatchTransportFrame> {
   private readonly frames: AsyncGenerator<F>;
-  private wireBytes = 0;
   readonly windowSize = EXPERIMENTAL_EXACT_BATCH_STREAM_WINDOW_SIZE;
   private authorizedAssets?: readonly string[];
   get assetUals(): readonly string[] {
@@ -104,15 +103,15 @@ export class ExactBatchTransportSession<F extends ExactBatchTransportFrame> {
     assetUals?: readonly string[],
   ) {
     if (assetUals) this.authorizeAssets(assetUals);
-    const session = this;
+    let wireBytes = 0;
     const source: AsyncIterable<Uint8Array> = {
       async *[Symbol.asyncIterator]() {
         for await (const incoming of stream) {
           checkSignal(signal);
           const length = incoming.byteLength;
           observe(options, { event: 'bytes', direction: 'received', byteLength: length });
-          if (length > options.maxResponseBytes - session.wireBytes) throw new RangeError('Exact batch wire byte limit exceeded');
-          session.wireBytes += length;
+          if (length > options.maxResponseBytes - wireBytes) throw new RangeError('Exact batch wire byte limit exceeded');
+          wireBytes += length;
           // Preserve one iterator; never end it after reading the START frame.
           for (let offset = 0; offset < length; offset += options.maxFrameBytes) {
             yield incoming.subarray(offset, Math.min(offset + options.maxFrameBytes, length));
