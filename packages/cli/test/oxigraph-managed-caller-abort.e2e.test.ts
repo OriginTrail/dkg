@@ -2,10 +2,17 @@
  * Managed Oxigraph, caller aborts: REAL `oxigraph-server`, NO mocks.
  *
  * On the daemon-managed backend a store read whose caller stops waiting after
- * dispatch used to be retained for a supervised restart at the client deadline
- * (Oxigraph 0.5 keeps evaluating a query when the HTTP connection closes), even
- * when the abandoned query had long since finished. A caller with a short budget
- * of its own therefore got a healthy server SIGKILLed 30 s later.
+ * dispatch used to be retained for a supervised restart at the client deadline,
+ * even when the abandoned query had long since finished: a caller with a short
+ * budget of its own got a healthy server SIGKILLed 30 s later. (Once the client
+ * has aborted the fetch it cannot tell a finished evaluation from a running
+ * one: a streamed SELECT stops when it next writes to the closed socket, but a
+ * blocking evaluation, an aggregate or an ORDER BY, sends nothing until it is
+ * done and keeps evaluating.) The store now leaves a request the server has not
+ * answered yet running, and withdraws the recovery when it visibly finishes.
+ * From the first byte of the answer on, though, it never reads or buffers an
+ * answer for a caller who has left: a STREAMED read would otherwise keep the
+ * server producing, and the client buffering, for the whole client deadline.
  *
  * This suite runs the production wiring end to end: `startManagedOxigraph` spawns
  * a real, checksum-pinned Oxigraph binary and hands back the managed store
@@ -14,8 +21,13 @@
  * run for real, and a restart is a real SIGKILL and respawn. It asserts:
  *   - a read the caller abandons mid-flight, which the server then finishes
  *     inside the client deadline, does NOT restart the server;
- *   - a read that genuinely overruns the client deadline still does, whether or
- *     not its caller had already given up, and the store recovers.
+ *   - a STREAMED read the caller abandons is not read on (the bytes the client
+ *     reads after the caller left stay within a small bound, and the server
+ *     stops producing), whether the caller leaves while the answer streams or
+ *     before it has started;
+ *   - a read that genuinely overruns the client deadline still restarts the
+ *     server, whether or not its caller had already given up, and the store
+ *     recovers.
  *
  * The binary is resolved by the product's own resolver into a scratch cache: it
  * is downloaded once (pinned release, sha256-verified) unless
@@ -23,7 +35,7 @@
  * still has to match the pinned checksum.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { copyFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -41,6 +53,18 @@ const CLIENT_TIMEOUT_MS = 6_000;
 const ABORT_AFTER_MS = 60;
 const TRIPLES = 400;
 const RESTART_LINE = 'terminating server for supervised recovery';
+// A caller that has left may cost the client at most the store's drain budget
+// (1 MiB, plus a chunk) of an answer that starts after it left, and nothing of
+// one it left mid-body. This bound is four times the budget: generous enough
+// that it never flakes, while an abandoned answer that is read on runs to tens
+// of MB within a second (about 35 MB/s).
+const MAX_READ_AFTER_ABANDON_BYTES = 4 * 1024 * 1024;
+// A streamed evaluation that is still being produced burns about 0.7 CPU-seconds
+// per second; an idle server burns none. The quiet window starts a second after
+// the abandon, and must end before the client deadline restarts the server.
+const CPU_SETTLE_MS = 1_000;
+const CPU_WINDOW_MS = 3_000;
+const MAX_SERVER_CPU_IN_WINDOW_S = 1.5;
 
 let root: string;
 let handle: OxigraphServerHandle;
@@ -48,14 +72,30 @@ let store: TripleStore;
 const logLines: string[] = [];
 const spawnedPids: Array<number | undefined> = [];
 
-/** A cross product of `arms` independent LIMIT-ed sub-selects: limit^arms rows. */
-function crossProduct(limit: number, arms: number): string {
+/** `arms` independent LIMIT-ed sub-selects joined without a shared variable: limit^arms rows. */
+function crossProductPattern(limit: number, arms: number): { vars: string[]; where: string } {
   const vars = ['a', 'b', 'c', 'd'].slice(0, arms);
   // The managed server has no union default graph: read through GRAPH.
   const groups = vars.map(
     (v, i) => `{ SELECT ?${v} WHERE { GRAPH ?g${i} { ?${v} ?p${i} ?o${i} } } LIMIT ${limit} }`,
   );
-  return `SELECT (COUNT(*) AS ?n) WHERE { ${groups.join(' ')} }`;
+  return { vars, where: groups.join(' ') };
+}
+
+/** A blocking aggregate over the cross product: nothing is sent until it is done. */
+function crossProduct(limit: number, arms: number): string {
+  return `SELECT (COUNT(*) AS ?n) WHERE { ${crossProductPattern(limit, arms).where} }`;
+}
+
+/** The same rows, streamed to the client as they are produced. */
+function streamedCrossProduct(limit: number, arms: number): string {
+  const { vars, where } = crossProductPattern(limit, arms);
+  return `SELECT ${vars.map((v) => `?${v}`).join(' ')} WHERE { ${where} }`;
+}
+
+/** The same rows, but ordered: nothing is sent until they are all sorted, then a large answer. */
+function sortedCrossProduct(limit: number, arms: number): string {
+  return `${streamedCrossProduct(limit, arms)} ORDER BY ?a`;
 }
 
 async function timedQuery(sparql: string): Promise<number> {
@@ -88,6 +128,66 @@ async function abandon(sparql: string): Promise<unknown> {
 }
 
 const restarts = () => handle.getRecoveryState().generation;
+
+/**
+ * Count every response body byte the store's reads pull off the network. The
+ * wrapper reads the real body only as fast as the store's consumer does (no
+ * read-ahead), and passes a cancel through to it, so what it counts is what the
+ * store actually read, and cancelling it closes the real connection.
+ */
+function meterQueryResponses(): { readonly bytes: () => number; readonly stop: () => void } {
+  const realFetch = globalThis.fetch;
+  let bytes = 0;
+  globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+    const response = await realFetch(input, init);
+    if (init?.method !== 'POST' || response.body === null) return response;
+    const reader = response.body.getReader();
+    return new Response(new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          controller.close();
+          return;
+        }
+        bytes += chunk.value.byteLength;
+        controller.enqueue(chunk.value);
+      },
+      cancel: (reason) => reader.cancel(reason),
+    }, { highWaterMark: 0 }), { status: response.status, statusText: response.statusText, headers: response.headers });
+  }) as typeof fetch;
+  return { bytes: () => bytes, stop: () => { globalThis.fetch = realFetch; } };
+}
+
+/** CPU seconds a process has used so far (`ps`, macOS and Linux), or undefined where it cannot be read. */
+function cpuSeconds(pid: number | undefined): number | undefined {
+  if (pid === undefined || process.platform === 'win32') return undefined;
+  const result = spawnSync('ps', ['-o', 'cputime=', '-p', String(pid)], { encoding: 'utf8' });
+  const text = result.status === 0 ? result.stdout.trim() : '';
+  if (text === '') return undefined;
+  // [[dd-]hh:]mm:ss[.ss]
+  const [days, clock] = text.includes('-') ? text.split('-') : ['0', text];
+  return Number(days) * 86_400 + clock!.split(':').reduce((total, part) => total * 60 + Number(part), 0);
+}
+
+const storeAnswers = async (): Promise<boolean> => {
+  try {
+    return (await store.query('ASK { GRAPH ?g { ?s ?p ?o } }')).type === 'boolean';
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * A read that is cancelled instead of being seen to finish is still owed a
+ * supervised restart at its client deadline, as it always was: nothing shows the
+ * server stopped (it may be stalled between writes). Wait for that restart and
+ * for the server to be back, so the next test starts from a settled server.
+ */
+async function settleCancelledRead(dispatchedAt: number, restartsBefore: number): Promise<void> {
+  await sleep(Math.max(0, dispatchedAt + CLIENT_TIMEOUT_MS + 500 - Date.now()));
+  expect(await waitForCondition(() => restarts() > restartsBefore, 30_000)).toBe(true);
+  expect(await waitForCondition(async () => !handle.getRecoveryState().recovering && await storeAnswers(), 60_000)).toBe(true);
+}
 
 beforeAll(async () => {
   root = await mkdtemp(join(tmpdir(), 'oxi-caller-abort-e2e-'));
@@ -168,6 +268,70 @@ describe('managed oxigraph-server: a caller that abandons a dispatched read', ()
     await expect(store.query('ASK { GRAPH ?g { ?s ?p ?o } }'))
       .resolves.toMatchObject({ type: 'boolean', value: true });
   }, 90_000);
+
+  it('reads no more of a STREAMED answer once its caller has left it mid-body, and the server stops', async () => {
+    expect(await waitForCondition(() => !handle.getRecoveryState().recovering, 60_000)).toBe(true);
+    const restartsBefore = restarts();
+    const metered = meterQueryResponses();
+    try {
+      // 400^4 rows, streamed as they are produced: about 35 MB/s until the deadline.
+      const sparql = streamedCrossProduct(TRIPLES, 4);
+      const caller = new AbortController();
+      const dispatchedAt = Date.now();
+      const outcome = store.query(sparql, { signal: caller.signal }).then(
+        () => new Error('the read finished before its caller left'),
+        (error: unknown) => error,
+      );
+      // The answer is under way once the client has read some of it.
+      expect(await waitForCondition(() => metered.bytes() > 64 * 1024, 30_000)).toBe(true);
+      caller.abort(new Error('caller budget exhausted'));
+      expect(await outcome).toMatchObject({ message: 'caller budget exhausted' });
+      const readWhenLeft = metered.bytes();
+
+      const serverPid = spawnedPids.at(-1);
+      await sleep(CPU_SETTLE_MS);
+      const cpuBefore = cpuSeconds(serverPid);
+      await sleep(CPU_WINDOW_MS);
+      const cpuAfter = cpuSeconds(serverPid);
+
+      // Deterministic: nothing is read, let alone buffered, for a caller who left.
+      expect(metered.bytes() - readWhenLeft).toBeLessThan(MAX_READ_AFTER_ABANDON_BYTES);
+      // And the server stopped writing to the closed connection.
+      if (cpuBefore !== undefined && cpuAfter !== undefined) {
+        expect(cpuAfter - cpuBefore).toBeLessThan(MAX_SERVER_CPU_IN_WINDOW_S);
+      }
+      await settleCancelledRead(dispatchedAt, restartsBefore);
+    } finally { metered.stop(); }
+  }, 120_000);
+
+  it('reads only a bounded part of a large answer that starts after its caller left', async () => {
+    expect(await waitForCondition(() => !handle.getRecoveryState().recovering, 60_000)).toBe(true);
+    const restartsBefore = restarts();
+    const metered = meterQueryResponses();
+    try {
+      // 45^3 = 91125 sorted rows (about 12 MB): nothing is sent until the sort is
+      // done, so the caller leaves before the first byte, and then a large answer starts.
+      const sparql = sortedCrossProduct(45, 3);
+      const caller = new AbortController();
+      const dispatchedAt = Date.now();
+      const outcome = store.query(sparql, { signal: caller.signal }).then(
+        () => new Error('the read finished before its caller left'),
+        (error: unknown) => error,
+      );
+      await sleep(ABORT_AFTER_MS);
+      expect(metered.bytes()).toBe(0);
+      caller.abort(new Error('caller budget exhausted'));
+      expect(await outcome).toMatchObject({ message: 'caller budget exhausted' });
+
+      // The answer starts (the premise: it began after the caller left), a small
+      // part of it is read and thrown away, and the rest is cancelled. A client
+      // that read it all would have read about 12 MB by now.
+      expect(await waitForCondition(() => metered.bytes() > 0, CLIENT_TIMEOUT_MS)).toBe(true);
+      await sleep(2_000);
+      expect(metered.bytes()).toBeLessThan(MAX_READ_AFTER_ABANDON_BYTES);
+      await settleCancelledRead(dispatchedAt, restartsBefore);
+    } finally { metered.stop(); }
+  }, 120_000);
 
   it('still restarts the server when an abandoned read overruns the client deadline', async () => {
     // Settle any recovery left over from an earlier test before measuring.

@@ -4,18 +4,26 @@
 # it was dispatched must not get a healthy managed Oxigraph restarted.
 #
 # On the daemon-managed `oxigraph-server` backend a read is retained for
-# recovery when its caller stops waiting after dispatch: Oxigraph 0.5 keeps
-# evaluating a query when the HTTP connection closes, so an abandoned read that
-# never finishes has to be reclaimed by restarting the server at the client
-# deadline (dispatch + 30s by default). Before the fix that retained deadline
-# fired even when the abandoned query had long since completed, so any caller
-# with a short budget of its own (an API client that disconnects, listContext
-# Graphs' 200ms per-row reads, a 2s budget) got a healthy server SIGKILLed 30s
-# later: an unexplained restart and a store-down blip.
+# recovery when its caller stops waiting after dispatch: once the client has
+# aborted the fetch it cannot tell a finished evaluation from a running one (a
+# streamed SELECT stops when it next writes to the closed socket, but a blocking
+# evaluation, an aggregate or an ORDER BY, sends nothing until it is done and
+# keeps evaluating), so an abandoned read that never finishes has to be
+# reclaimed by restarting the server at the client deadline (dispatch + 30s by
+# default). Before the fix that retained deadline fired even when the abandoned
+# query had long since completed, so any caller with a short budget of its own
+# (an API client that disconnects, listContextGraphs' 200ms per-row reads, a 2s
+# budget) got a healthy server SIGKILLed 30s later: an unexplained restart and a
+# store-down blip.
 #
-# The fix keeps the dispatched request running under the client deadline alone
-# and withdraws the retained recovery when the server visibly finishes. This
-# script proves both halves against a REAL node with a REAL managed Oxigraph:
+# The fix keeps a request the server has not answered yet running under the
+# client deadline alone and withdraws the retained recovery when the server
+# visibly finishes. (From the first byte of an answer on, a caller that left gets
+# nothing buffered: a short answer is read out and discarded, a long, streaming
+# one is cancelled. This script's query is an aggregate, so it takes the first
+# path; the streamed paths are covered against a real Oxigraph by
+# packages/cli/test/oxigraph-managed-caller-abort.e2e.test.ts.) This script
+# proves both halves of the fix against a REAL node with a REAL managed Oxigraph:
 #
 #   1. ABANDONED BUT COMPLETED. Send /api/query reads whose HTTP client
 #      disconnects while the query is running (the daemon aborts the store read
