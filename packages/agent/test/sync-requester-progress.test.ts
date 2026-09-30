@@ -4,7 +4,8 @@ import { type Quad } from '@origintrail-official/dkg-storage';
 import { runDurableSync, runDurableSyncDetailed, type DurableSyncCheckpointWrite, type DurableSyncFetchRequest, type DurableSyncStoreInsertRequest } from '../src/sync/requester/durable-sync.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
-import { runSharedMemorySync, syncPublicSnapshotsForMeta } from '../src/sync/requester/shared-memory-sync.js';
+import { readPublicSnapshotWalkProgress, runSharedMemorySync, syncPublicSnapshotsForMeta } from '../src/sync/requester/shared-memory-sync.js';
+import { createRecoveryExecutionAdmission } from '../src/sync/requester/recovery-execution-guard.js';
 import { SyncPageAccumulationLimitError, type SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
@@ -195,6 +196,96 @@ describe('selected snapshot walk continuation', () => {
       completed: true,
       missingCount: 0,
     });
+  });
+});
+
+describe('a failing step of the snapshot walk carries the walk\'s progress out', () => {
+  const entry = (ref: string, reuse: boolean, count = 1) => ({ snapshot: { ref, digest: ref, count }, reuse });
+  const written = [{ ...quad('written'), graph: '' }];
+  const writtenDigest = workspacePublicQuadsDigest(written);
+  /** A store whose existence probe (the reuse step) fails for `failing` and finds every other snapshot present. */
+  const storeProbing = (failing: string, failure: Error, probes: string[] = []) => ({
+    getSnapshot: async () => null,
+    putSnapshot: async ({ digest }: { digest: string }) => ({ ref: digest, byteLength: 1 }),
+    lifecycle: {
+      finalizedCleanupEnabled: false as const,
+      acquire: async () => () => {},
+      acquireExisting: async (ref: string) => {
+        probes.push(ref);
+        if (ref === failing) throw failure;
+        return () => {};
+      },
+      markPublished: async () => {},
+    },
+  });
+  const walk = (
+    publicSnapshotStore: Parameters<typeof syncPublicSnapshotsForMeta>[0]['publicSnapshotStore'],
+    entries: ReturnType<typeof entry>[],
+    executionBoundary?: ReturnType<typeof createRecoveryExecutionAdmission>,
+  ) => syncPublicSnapshotsForMeta({
+    ctx,
+    remotePeerId: 'peer-throwing-step',
+    contextGraphId: 'cg-throwing-step',
+    deadline: Date.now() + 60_000,
+    workAdmission: UNRESTRICTED_SYNC_WORK,
+    snapshotWalk: { entries },
+    publicSnapshotStore,
+    ...(executionBoundary ? { executionBoundary } : {}),
+    fetchSyncPages: async (_ctx, _peer, contextGraphId, _swm, phase) => pageResult(contextGraphId, phase, { quads: written }),
+    deleteCheckpoint: () => {},
+    setCheckpoint: () => {},
+  });
+  const rejection = async (run: Promise<unknown>): Promise<unknown> => {
+    try { await run; } catch (error) { return error; }
+    throw new Error('expected the walk to reject');
+  };
+
+  it('carries the progress out of an existence probe that throws on the second of two reuse entries', async () => {
+    const failure = Object.assign(new Error('too many open files'), { code: 'EMFILE' });
+    const error = await rejection(walk(storeProbing('second', failure), [entry('first', true), entry('second', true)]));
+    expect(error).toBe(failure);
+    expect(readPublicSnapshotWalkProgress(error)).toEqual({
+      readySnapshots: 1, totalSnapshots: 2, missingCount: 1, missingSample: ['second'],
+    });
+  });
+
+  it('reports the same progress for a store write that throws after a reused entry (the step that already did)', async () => {
+    const failure = new Error('disk full');
+    const store = { ...storeProbing('none', failure), putSnapshot: async (): Promise<never> => { throw failure; } };
+    const error = await rejection(walk(store, [entry('first', true), { snapshot: { ref: writtenDigest, digest: writtenDigest, count: 1 }, reuse: false }]));
+    expect(error).toBe(failure);
+    expect(readPublicSnapshotWalkProgress(error)).toEqual({
+      readySnapshots: 1, totalSnapshots: 2, missingCount: 1, missingSample: [writtenDigest],
+    });
+  });
+
+  it('counts the failed entry and every one after it as unresolved, and probes none of the later ones', async () => {
+    const probes: string[] = [];
+    const error = await rejection(walk(storeProbing('second', new Error('probe failed'), probes),
+      [entry('first', true), entry('second', true), entry('third', true)]));
+    expect(probes).toEqual(['first', 'second']);
+    expect(readPublicSnapshotWalkProgress(error)).toEqual({
+      readySnapshots: 1, totalSnapshots: 3, missingCount: 2, missingSample: ['second', 'third'],
+    });
+  });
+
+  it('lets a revoked boundary win over a failing probe, with no progress attached', async () => {
+    const revoked = new Error('recovery revoked');
+    let current = true;
+    const boundary = createRecoveryExecutionAdmission({
+      signal: new AbortController().signal,
+      assertCurrent: () => { if (!current) throw revoked; },
+    });
+    const store = storeProbing('second', new Error('probe failed'));
+    const probe = store.lifecycle.acquireExisting;
+    store.lifecycle.acquireExisting = async ref => {
+      // The boundary is revoked while the second probe is in flight.
+      if (ref === 'second') current = false;
+      return probe(ref);
+    };
+    const error = await rejection(walk(store, [entry('first', true), entry('second', true)], boundary));
+    expect(error).toBe(revoked);
+    expect(readPublicSnapshotWalkProgress(error)).toBeUndefined();
   });
 });
 

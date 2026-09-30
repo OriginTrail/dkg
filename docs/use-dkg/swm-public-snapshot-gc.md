@@ -104,6 +104,12 @@ metadata. The background collector, on its existing five-minute interval:
    read or write is running, as before this feature. Reuse still asks the store
    whether the file exists, with a short-lived probe: a file that pressure GC
    removed between rounds is fetched again rather than reported as present.
+   The probe answers "absent" only for a file that does not exist. A file that
+   is present but cannot be opened (a permission or I/O error, something that is
+   not a regular file) makes the probe fail, and that failure ends the
+   operation instead of being read as a missing file: fetching a copy would not
+   repair the file, because a write skips a path that already exists. A failure
+   inside a sync pass still reports the progress the pass had made.
 4. Deletes the unreferenced `.nq`/legacy `.json` file, its cached validation/page
    index, and its persisted page-index row where the adapter supports deletion.
 5. Removes the retirement record last. An interrupted deletion can finish on the

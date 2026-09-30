@@ -15,9 +15,14 @@ export interface WorkspaceSnapshotLifecycle {
   /** A plain shared lease on the digest; only {@link operationLease} makes a scope hold one for a whole operation. */
   acquire(ref: string): Promise<() => void>;
   /**
-   * Lease an existing source without decoding it; absent bytes must be fetched again.
-   * This is the authoritative existence probe, so it is consulted whether or not the store
-   * also offers {@link operationLease}.
+   * Lease an existing source without decoding it. This is the authoritative existence probe, so
+   * it is consulted whether or not the store also offers {@link operationLease}.
+   *
+   * It resolves `undefined` ONLY when the snapshot is absent, and the caller then fetches it again.
+   * Every other outcome must reject: a file that is present but cannot be opened (EACCES, EIO, not a
+   * regular file), an exhausted resource (EMFILE) or a failing lease gate. The caller must not read
+   * a rejection as "absent", because fetching a copy does not repair a present file (a write skips an
+   * existing path), so the operation would report success while reads keep failing.
    */
   acquireExisting(ref: string): Promise<(() => void) | undefined>;
   markPublished(refs: readonly string[]): Promise<void>;
@@ -168,14 +173,10 @@ export class WorkspaceSnapshotScope implements CompleteSnapshotIO {
     // lease can still have lost the file (for example to pressure GC), and reuse must then fetch it again.
     const lifecycle = this.store.lifecycle;
     if (!lifecycle) return true; // A custom I/O store without a lifecycle owns its retention policy.
-    let existing: (() => void) | undefined;
-    try {
-      existing = await lifecycle.acquireExisting(ref);
-    } catch {
-      // A probe that cannot read the file (EMFILE, EACCES, EIO, a gate failure) counts as "not present":
-      // reuse then takes the normal fetch path instead of aborting the whole pass and losing its coverage record.
-      return false;
-    }
+    // Only the store's explicit `undefined` means "absent". A probe that fails for any other reason
+    // (EACCES, EIO, EMFILE, a gate failure, a defect) propagates: fetching a copy would not repair a
+    // file that is present but unreadable, because a write skips an existing path.
+    const existing = await lifecycle.acquireExisting(ref);
     if (!existing) return false;
     existing();
     return true;

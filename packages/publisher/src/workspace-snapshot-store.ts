@@ -251,6 +251,9 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
       // an individual read or write runs), so it does not offer the capability.
       ...(enabled ? { operationLease: (ref: string) => this.lifecycle.acquire(ref) } : {}),
       acquire: ref => this.lifecycleGate.acquire(snapshotHash(ref)),
+      // `undefined` means the file is absent (ENOENT for every payload format) and nothing else does: any
+      // other failure to open it (EACCES, EIO, a directory or device at the path) rejects, and so does a
+      // failing gate, so reuse cannot mistake a present, unreadable file for a missing one.
       acquireExisting: async ref => {
         const hash = snapshotHash(ref);
         const release = await this.lifecycleGate.acquire(hash);

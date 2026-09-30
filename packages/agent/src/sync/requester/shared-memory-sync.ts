@@ -1875,7 +1875,18 @@ export async function syncPublicSnapshotsInScope(params: {
     // The owner decides which manifest-bound evidence this pass can reuse.
     // Avoid repeating blob and assertion validation when that owner has
     // already established it, leaving time for unresolved refs to advance.
-    if (reuse && (await params.publicSnapshotStore.retainExisting(snapshot.ref))) {
+    let reused = false;
+    if (reuse) {
+      try {
+        reused = await params.publicSnapshotStore.retainExisting(snapshot.ref);
+      } catch (err) {
+        // A failing existence probe leaves the walk like any other step of this KA: a revoked
+        // boundary wins, and otherwise the walk's progress travels out with the error.
+        executionBoundary.assertCurrent();
+        rethrowWithProgress(err, index);
+      }
+    }
+    if (reused) {
       executionBoundary.assertCurrent();
       readySnapshots += 1;
       continue;

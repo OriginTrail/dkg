@@ -456,6 +456,43 @@ describe('operation leases follow the finalized cleanup opt-in', () => {
   });
 });
 
+describe('the file store\'s existence probe', () => {
+  it.each([
+    ['a file without read permission', false],
+    ['a file without read permission', true],
+    ['a directory in the payload\'s place', false],
+    ['a directory in the payload\'s place', true],
+  ] as const)('rejects for %s (cleanup: %s), so a fetch is never mistaken for a repair', async (kind, cleanup) => {
+    const noPermission = kind.startsWith('a file');
+    // root and Windows do not enforce the mode bit: only the directory variant can run there.
+    if (noPermission && (process.platform === 'win32' || process.getuid?.() === 0)) return;
+    const f = await fixture(undefined, { finalizedCleanupEnabled: cleanup });
+    const store = f.open();
+    if (noPermission) await chmod(f.path, 0o000);
+    else { await rm(f.path); await mkdir(f.path); }
+    try {
+      await withSnapshotScope(store, async snapshots => {
+        // The payload is present, so it is not "absent": the probe fails visibly.
+        await expect(snapshots!.retainExisting(digest)).rejects.toThrow(noPermission ? /EACCES/ : /not a regular file/);
+        // Fetching would not help: writing skips an existing path, and reads keep failing.
+        await expect(snapshots!.putSnapshot({ digest, quads })).resolves.toMatchObject({ ref: digest });
+        await expect(snapshots!.getSnapshot(digest)).rejects.toThrow();
+      });
+    } finally {
+      if (noPermission) await chmod(f.path, 0o644);
+    }
+  });
+
+  it.each([false, true])('reports a snapshot that does not exist as absent, not as a failure (cleanup: %s)', async cleanup => {
+    const f = await fixture(undefined, { finalizedCleanupEnabled: cleanup });
+    const store = f.open();
+    await rm(f.path);
+    await withSnapshotScope(store, async snapshots => {
+      await expect(snapshots!.retainExisting(digest)).resolves.toBe(false);
+    });
+  });
+});
+
 describe('operation leases are an optional capability of the store', () => {
   /** A custom I/O store; `lifecycle` is whatever the test wants the scope to see. */
   function customStore(lifecycle: WorkspaceSnapshotLifecycle | undefined): WorkspacePublicSnapshotStore {
@@ -513,10 +550,25 @@ describe('operation leases are an optional capability of the store', () => {
     expect(operationLease).toHaveBeenCalledOnce();
   });
 
-  it('treats an existence probe that throws as not present, so reuse fetches again instead of failing the caller', async () => {
-    const acquireExisting = vi.fn(async (): Promise<(() => void) | undefined> => {
-      throw Object.assign(new Error('too many open files'), { code: 'EMFILE' });
+  it.each([
+    ['a filesystem error', Object.assign(new Error('too many open files'), { code: 'EMFILE' })],
+    ['a lifecycle gate failure', new Error('Snapshot directory needs a stable physical identity')],
+    ['an implementation defect', new TypeError('probe is broken')],
+  ])('lets an existence probe that throws (%s) fail the operation instead of reading as absent', async (_label, failure) => {
+    const acquireExisting = vi.fn(async (): Promise<(() => void) | undefined> => { throw failure; });
+    const release = vi.fn();
+    const operationLease = vi.fn(async () => release);
+    const store = customStore(lifecycleOf({ acquireExisting, operationLease }));
+    await withSnapshotScope(store, async snapshots => {
+      await expect(snapshots!.retainExisting(digest)).rejects.toBe(failure);
     });
+    expect(acquireExisting).toHaveBeenCalledExactlyOnceWith(digest);
+    // The failed probe still closes with the operation: its lease is released.
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the store\'s explicit undefined as the one answer for absent, without any error', async () => {
+    const acquireExisting = vi.fn(async (): Promise<(() => void) | undefined> => undefined);
     const store = customStore(lifecycleOf({ acquireExisting, operationLease: vi.fn(async () => () => {}) }));
     await withSnapshotScope(store, async snapshots => {
       await expect(snapshots!.retainExisting(digest)).resolves.toBe(false);
