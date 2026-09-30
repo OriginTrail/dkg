@@ -7,7 +7,7 @@ import {
   FileWorkspacePublicSnapshotStore, workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore,
 } from '../src/workspace-snapshot-store.js';
 import {
-  snapshotLifecycleGate, snapshotReferenceCheck, withSnapshotScope, type WorkspaceSnapshotLifecycle,
+  snapshotHash, snapshotLifecycleGate, snapshotReferenceCheck, withSnapshotScope, type WorkspaceSnapshotLifecycle,
 } from '../src/workspace-snapshot-lifecycle.js';
 import { makeQuads, snapshotPath } from './_helpers/workspace-snapshot-store.js';
 
@@ -167,7 +167,7 @@ describe('confirmed snapshot retirement', () => {
     await f.store.putSnapshot({ digest: otherDigest, quads: otherQuads });
     await f.store.lifecycle.markPublished([digest, otherDigest]);
     f.advance();
-    const release = await f.open().lifecycle.acquire(digest);
+    const release = await f.open().lifecycle.operationLease!(digest);
     expect((await f.store.collectGarbage()).finalizedSnapshots).toBe(1);
     await expect(stat(f.path)).resolves.toBeDefined();
     release();
@@ -177,7 +177,7 @@ describe('confirmed snapshot retirement', () => {
   it('also honors another store instance\'s lease during pressure collection', async () => {
     const f = await fixture(async () => false);
     f.pressure();
-    const release = await f.open().lifecycle.acquire(digest);
+    const release = await f.open().lifecycle.operationLease!(digest);
     expect(await f.store.collectGarbage()).toMatchObject({ deletedSnapshots: 0, skippedActiveFiles: 1 });
     await expect(stat(f.path)).resolves.toBeDefined();
     release();
@@ -190,15 +190,13 @@ describe('confirmed snapshot retirement', () => {
     directories.push(parent);
     const alias = join(parent, 'alias');
     await symlink(f.directory, alias, process.platform === 'win32' ? 'junction' : 'dir');
-    const other = new FileWorkspacePublicSnapshotStore(alias, undefined, { gc: { enabled: false } });
-    stores.push(other);
     const collector = new FileWorkspacePublicSnapshotStore(f.directory, undefined, {
       gc: { staleTempAgeMs: 0 }, getAvailableBytes: async () => 100 * GIB,
     });
     stores.push(collector); collector.stopGarbageCollection();
     const temp = `${f.path}.123.abc.tmp`;
     await writeFile(temp, 'pending write'); await utimes(temp, 0, 0);
-    const release = await other.lifecycle.acquire(digest);
+    const release = await snapshotLifecycleGate(alias).acquire(snapshotHash(digest));
     try {
       expect(await collector.collectGarbage()).toMatchObject({ deletedTempFiles: 0, skippedActiveFiles: 1 });
       await expect(stat(temp)).resolves.toBeDefined();
@@ -304,11 +302,10 @@ describe('confirmed snapshot retirement', () => {
     directories.push(parent);
     const alias = join(parent, 'alias');
     await symlink(f.directory, alias, process.platform === 'win32' ? 'junction' : 'dir');
-    const other = new FileWorkspacePublicSnapshotStore(
-      process.platform === 'win32' ? alias.toUpperCase() : alias, undefined, { gc: { enabled: false } });
-    stores.push(other);
     await f.store.lifecycle.markPublished([digest]); f.advance();
-    const release = await other.lifecycle.acquire(digest);
+    // A lease taken through the alias path is the one the collector must honor.
+    const release = await snapshotLifecycleGate(process.platform === 'win32' ? alias.toUpperCase() : alias)
+      .acquire(snapshotHash(digest));
     try { expect((await f.store.collectGarbage()).deletedSnapshots).toBe(0); }
     finally { release(); }
     expect((await f.store.collectGarbage()).finalizedSnapshots).toBe(1);
@@ -504,10 +501,10 @@ describe('operation leases are an optional capability of the store', () => {
       ...(lifecycle ? { lifecycle } : {}),
     };
   }
-  const lifecycleOf = (over: Partial<WorkspaceSnapshotLifecycle>): WorkspaceSnapshotLifecycle => ({
-    finalizedCleanupEnabled: false, acquire: async () => () => {}, acquireExisting: async () => () => {},
+  const lifecycleOf = (over: Partial<WorkspaceSnapshotLifecycle>) => ({
+    finalizedCleanupEnabled: false, acquireExisting: async () => () => {},
     markPublished: async () => {}, ...over,
-  });
+  }) as WorkspaceSnapshotLifecycle;
 
   it('honors a custom capability even though finalized cleanup is reported off, and closes it with the operation', async () => {
     let active = 0;
@@ -526,15 +523,23 @@ describe('operation leases are an optional capability of the store', () => {
     expect(active).toBe(0);
   });
 
-  it('takes no operation-long lease from a lifecycle without the capability, whatever its cleanup flag says', async () => {
-    const acquire = vi.fn(async () => () => {});
-    const store = customStore(lifecycleOf({ finalizedCleanupEnabled: true, acquire }));
+  it('takes no operation-long lease from a lifecycle that reports cleanup on but offers no operationLease', async () => {
+    const acquireExisting = vi.fn(async () => () => {});
+    const markPublished = vi.fn(async () => {});
+    // The type refuses this (a cleanup-enabled lifecycle must offer operationLease); a cast or plain
+    // JavaScript still gets one through, and the scope then simply takes no operation-long lease.
+    // @ts-expect-error operationLease is required when finalizedCleanupEnabled is true
+    const lifecycle: WorkspaceSnapshotLifecycle = { finalizedCleanupEnabled: true, acquireExisting, markPublished };
+    const store = customStore(lifecycle);
     await withSnapshotScope(store, async snapshots => {
       await snapshots!.putSnapshot({ digest, quads });
       await snapshots!.getSnapshot(digest);
       await snapshots!.validateSnapshot!(digest, digest, 1);
+      await snapshots!.getSnapshotPage!(digest, 0, 1);
     });
-    expect(acquire).not.toHaveBeenCalled();
+    // Nothing but the existence probe (through retainExisting) and retirement scheduling touch a lifecycle.
+    expect(acquireExisting).not.toHaveBeenCalled();
+    expect(markPublished).not.toHaveBeenCalled();
   });
 
   it.each([true, false])('answers reuse from the existence probe of a custom lifecycle (present: %s)', async present => {

@@ -3,20 +3,13 @@ import { ENTITY_SHARE_METADATA_PREDICATES as F } from './entity-share-metadata.j
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { WorkspacePublicSnapshotStore, WorkspaceSnapshotIO } from './workspace-snapshot-store.js';
 
-/** A store opts into the complete leasing/retirement contract, or keeps its own policy. */
-export interface WorkspaceSnapshotLifecycle {
-  readonly finalizedCleanupEnabled: boolean;
-  /**
-   * Optional capability: when present, an operation scope holds this lease on every snapshot
-   * the operation touches until the whole operation (metadata commit included) ends. A store
-   * that omits it keeps its own retention policy, and the scope takes no operation-long lease.
-   */
-  readonly operationLease?: (ref: string) => Promise<() => void>;
-  /** A plain shared lease on the digest; only {@link operationLease} makes a scope hold one for a whole operation. */
-  acquire(ref: string): Promise<() => void>;
+/** The one lease primitive: a shared lease on a snapshot digest, released by calling the result. */
+type SnapshotLeaseAcquirer = (ref: string) => Promise<() => void>;
+
+interface WorkspaceSnapshotLifecycleMembers {
   /**
    * Lease an existing source without decoding it. This is the authoritative existence probe, so
-   * it is consulted whether or not the store also offers {@link operationLease}.
+   * it is consulted whether or not the store also offers `operationLease`.
    *
    * It resolves `undefined` ONLY when the snapshot is absent, and the caller then fetches it again.
    * Every other outcome must reject: a file that is present but cannot be opened (EACCES, EIO, not a
@@ -27,6 +20,27 @@ export interface WorkspaceSnapshotLifecycle {
   acquireExisting(ref: string): Promise<(() => void) | undefined>;
   markPublished(refs: readonly string[]): Promise<void>;
 }
+
+/**
+ * A store opts into the complete leasing/retirement contract, or keeps its own policy (a store
+ * without a `lifecycle` at all).
+ *
+ * `operationLease` is the lease primitive itself and the only operation-scope capability: when a
+ * store offers it, an operation scope takes it once per digest the operation touches and holds it
+ * until the whole operation (metadata commit included) ends. A store that omits it keeps its own
+ * retention policy, and the scope takes no operation-long lease. The scope reads nothing else to
+ * decide this, in particular not `finalizedCleanupEnabled`.
+ *
+ * The two are tied together where it matters: a lifecycle that reports finalized cleanup enabled must
+ * offer `operationLease` (retirement scheduling and ACK-copy cleanup rely on operations holding their
+ * files), so the type rejects one that does not. A cleanup-disabled lifecycle may still offer it. A
+ * value that gets past the type anyway (a cast, plain JavaScript) is not repaired: it simply gets no
+ * operation-long lease.
+ */
+export type WorkspaceSnapshotLifecycle = WorkspaceSnapshotLifecycleMembers & (
+  | { readonly finalizedCleanupEnabled: true; readonly operationLease: SnapshotLeaseAcquirer }
+  | { readonly finalizedCleanupEnabled: false; readonly operationLease?: SnapshotLeaseAcquirer }
+);
 
 /** All aliases of a physical directory in this process share one gate. */
 const directories = new Map<string, SnapshotLifecycleGate>();

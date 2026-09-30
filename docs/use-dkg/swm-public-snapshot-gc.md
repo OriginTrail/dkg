@@ -174,8 +174,18 @@ not protected by the process-local lease mechanism. Do not enable it on a
 directory concurrently used by another process. Do not retarget a directory
 symlink/junction or replace its underlying directory while the process runs.
 A custom snapshot store without the optional `lifecycle` capability keeps its
-own retention behavior. That capability is complete (leasing, existing-file
-leasing, enabled state and retirement), rather than independent optional methods.
+own retention behavior. A store that has one implements `acquireExisting` (the
+existence probe, which resolves `undefined` only for an absent file and rejects
+for anything else) and `markPublished` (retirement scheduling), and reports
+`finalizedCleanupEnabled`. The lease itself is one optional operation,
+`operationLease(ref)`: a store that offers it makes every publication and
+recovery hold one lease per touched digest until its final metadata commit, and
+a store that omits it takes none. The file store offers it exactly when
+finalized cleanup is enabled. A lifecycle that reports finalized cleanup enabled
+must offer `operationLease`, and the `WorkspaceSnapshotLifecycle` type requires
+it; a value that omits it anyway (a cast, plain JavaScript) is not rejected at
+run time, it just gets no operation-long lease, so nothing keeps its files out
+of the collector for the length of an operation.
 
 `WorkspaceSnapshotScope` owns a complete operation's I/O and `retainExisting`
 leases. Publication and recovery use `snapshotOperation`, whose implementation

@@ -46,7 +46,7 @@ describe('retirement marker mutation ordering', () => {
     const quads = makeQuads(1, 'ordering'); const digest = workspacePublicQuadsDigest(quads);
     await first.putSnapshot({ digest, quads });
     // Resolve both physical identities before starting the ordering experiment.
-    (await second.lifecycle.acquire(digest))();
+    (await second.lifecycle.operationLease!(digest))();
     const entered = deferred(); const resume = deferred();
     const realRename = (await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')).rename;
     vi.mocked(rename).mockImplementationOnce(async (from, to) => {

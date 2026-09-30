@@ -209,7 +209,6 @@ describe('a failing step of the snapshot walk carries the walk\'s progress out',
     putSnapshot: async ({ digest }: { digest: string }) => ({ ref: digest, byteLength: 1 }),
     lifecycle: {
       finalizedCleanupEnabled: false as const,
-      acquire: async () => () => {},
       acquireExisting: async (ref: string) => {
         probes.push(ref);
         if (ref === failing) throw failure;
