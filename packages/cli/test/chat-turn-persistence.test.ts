@@ -331,6 +331,46 @@ describe('persistDurableChatTurn afterStored hook', () => {
     expect((await second).kind).toBe('duplicate');
     expect(store.getChatTurnPersistenceState).toHaveBeenCalledTimes(2);
   });
+
+  // The same two contracts on the other route to `stored`: an upward transition
+  // (pending or failed to stored) instead of a created turn.
+  it('rejects with the hook error once an upward transition to stored is written, and the retry is a duplicate', async () => {
+    const store = makeDurableChatTurnStore();
+    const key = freshKey();
+    store.seed(key.sessionId, key.turnId, 'pending');
+    const failure = new Error('import failed');
+
+    await expect(persist(store, turnPayload(key), async () => { throw failure; })).rejects.toBe(failure);
+    const retry = await persist(store, turnPayload(key));
+
+    expect(store.states.get(turnStateKey(key.sessionId, key.turnId))).toBe('stored');
+    expect(retry.kind).toBe('duplicate');
+    expect(store.recordChatTurnPersistenceTransition).toHaveBeenCalledTimes(1);
+    expect(store.storeChatExchange).not.toHaveBeenCalled();
+  });
+
+  it('keeps the turn key held until the hook settles when a failed turn becomes stored', async () => {
+    const store = makeDurableChatTurnStore();
+    const key = freshKey();
+    store.seed(key.sessionId, key.turnId, 'failed');
+    const hookGate = deferred();
+    const hookStarted = deferred();
+
+    const first = persist(store, turnPayload(key), async () => {
+      hookStarted.resolve();
+      await hookGate.promise;
+    });
+    await hookStarted.promise;
+    const second = persist(store, turnPayload(key));
+    await settle();
+
+    expect(store.getChatTurnPersistenceState).toHaveBeenCalledTimes(1);
+    hookGate.resolve();
+    expect((await first).kind).toBe('transitioned');
+    expect((await second).kind).toBe('duplicate');
+    expect(store.getChatTurnPersistenceState).toHaveBeenCalledTimes(2);
+    expect(store.recordChatTurnPersistenceTransition).toHaveBeenCalledTimes(1);
+  });
 });
 
 // -- Failure paths ----------------------------------------------------------------------
