@@ -32,10 +32,13 @@ import {
   SYSTEM_CONTEXT_GRAPHS,
   contextGraphDataGraphUri,
 } from '@origintrail-official/dkg-core';
-import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
+import {
+  RealChainAgents,
+  connectWithIdentify as connect,
+  pollUntil,
+} from './_helpers/real-chain-agent.js';
 import { subscribeByNameHash } from './_helpers/subscribe-by-name-hash.js';
-import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
-import { DKGAgent } from '../src/index.js';
+import type { DKGAgent } from '../src/index.js';
 import {
   PROTOCOL_CONTEXT_GRAPH_NAME,
   encodeContextGraphNameResponse,
@@ -47,98 +50,25 @@ import {
   revertSnapshot,
   takeSnapshot,
 } from '../../chain/test/evm-test-context.js';
-import { makeAdapterConfig, mintTokens } from '../../chain/test/hardhat-harness.js';
-import { MemoryAuthorityIndexStore } from '../../chain/test/helpers/context-graph-authority-index.js';
-import { EVMChainAdapter } from '../../chain/src/evm-adapter.js';
+import { mintTokens } from '../../chain/test/hardhat-harness.js';
 
 const NAME = 'http://schema.org/name';
 const keccak = (id: string): string => ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
 let assertionCounter = 0;
-const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** Same on every node: a run of this file never collides with another run's graphs. */
 const RUN = Date.now().toString(36);
 
-/**
- * A daemon wires the finalized Context Graph authority index into its chain
- * adapter; the plain test adapter does not.
- */
-function createIndexedEVMAdapter(privateKey: string): EVMChainAdapter {
-  const { rpcUrl, hubAddress } = getSharedContext();
-  return new EVMChainAdapter({
-    ...makeAdapterConfig(rpcUrl, hubAddress, privateKey),
-    localContextGraphAuthorityIndexStore: new MemoryAuthorityIndexStore(),
-  });
-}
-
-async function pollUntil<T>(
-  fn: () => Promise<T> | T,
-  pred: (value: T) => boolean,
-  timeoutMs = 60_000,
-  stepMs = 250,
-): Promise<T> {
-  const deadline = Date.now() + timeoutMs;
-  let last = await fn();
-  while (!pred(last) && Date.now() < deadline) {
-    await sleep(stepMs);
-    last = await fn();
-  }
-  return last;
-}
-
-const agents: DKGAgent[] = [];
+// Real agents on the real chain come from the shared fixture (indexed adapter,
+// startup, connect with identify, polling); this file keeps the scenario. Agents
+// are stopped after every test, newest first.
+const pool = new RealChainAgents();
 afterEach(async () => {
   vi.restoreAllMocks();
-  while (agents.length > 0) {
-    try { await agents.pop()!.stop(); } catch { /* already stopped */ }
-  }
+  await pool.stopAll();
 });
-
-interface Node {
-  readonly agent: DKGAgent;
-  readonly chain: EVMChainAdapter;
-  readonly address: string;
-}
-
-async function startNode(name: string, operationalKey: string): Promise<Node> {
-  const { rpcUrl, hubAddress } = getSharedContext();
-  const chain = createIndexedEVMAdapter(operationalKey);
-  const agent = await DKGAgent.create({
-    ...TEST_SNAPSHOT_CONFIG,
-    kaNumberAllocator: makeTestKaNumberAllocator(),
-    name,
-    listenHost: '127.0.0.1',
-    listenPort: 0,
-    skills: [],
-    chainAdapter: chain,
-    nodeRole: 'edge',
-    chainConfig: {
-      rpcUrl,
-      hubAddress,
-      operationalKeys: [operationalKey],
-      chainId: 'evm:31337',
-    },
-  });
-  agents.push(agent);
-  await agent.start();
-  const address = agent.getDefaultAgentAddress()!.toLowerCase();
-  return { agent, chain, address };
-}
-
-async function connect(from: DKGAgent, to: DKGAgent): Promise<void> {
-  const address = to.multiaddrs.find((a) => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!;
-  await from.connectTo(address);
-  // Identify must finish before the requester can see which protocols the peer speaks.
-  const advertised = await pollUntil(
-    () => from.node.libp2p.peerStore.get(to.node.libp2p.peerId)
-      .then((peer) => peer.protocols.length)
-      .catch(() => 0),
-    (count) => count > 0,
-    15_000,
-    100,
-  );
-  expect(advertised, 'identify completed').toBeGreaterThan(0);
-}
+const startNode = (name: string, operationalKey: string) => pool.startNode(name, operationalKey);
+type Node = Awaited<ReturnType<typeof startNode>>;
 
 /** Create the graph locally and register it, public and open, on the real chain. */
 async function createRegisteredPublicGraph(holder: Node, label: string): Promise<{ id: string; onChainId: string; nameHash: string }> {
@@ -233,6 +163,8 @@ describe('E2E: subscribe by on-chain name hash on a real ContextGraphStorage', (
     const adopted = await pollUntil(
       () => edge.agent.resolveContextGraphIdAlias(graph.nameHash),
       (alias) => alias === graph.id,
+      60_000,
+      250,
     );
     expect(adopted).toBe(graph.id);
     expect(keccak(adopted!)).toBe(graph.nameHash);
