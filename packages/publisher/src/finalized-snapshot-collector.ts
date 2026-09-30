@@ -34,6 +34,36 @@ function compareHashes(left: string, right: string): number {
   return left < right ? -1 : left > right ? 1 : 0;
 }
 
+/** What examining one candidate did, whatever the pass then decides to do next. */
+interface CandidateEffects { readonly deleted: number; readonly bytes: number }
+type CandidateOutcome = CandidateEffects & (
+  /** Removed (or already gone): the record is finished. */
+  | { readonly kind: 'cleared' }
+  /** Kept: still inside its grace period, or another graph references it. */
+  | { readonly kind: 'retained'; readonly referenced: boolean }
+  /** Skipped: a reader or writer holds the digest right now. */
+  | { readonly kind: 'busy' }
+  /** Left in place for a later pass; effects of any partial removal are kept. */
+  | { readonly kind: 'failed'; readonly error: unknown }
+);
+
+/**
+ * The pass policy: whether another candidate may be examined. It is bounded by time and by the
+ * reclaim target under pressure, and past the minimum batch it continues only while the candidate
+ * just examined cleared, so the first retained, busy or failed one ends a long pass.
+ */
+function mayExamineNext(pass: {
+  readonly examined: number;
+  readonly previous: CandidateOutcome | undefined;
+  readonly timeLeft: boolean;
+  readonly bytesReclaimed: number;
+  readonly pressure: FinalizedCollectionOptions['pressure'];
+}): boolean {
+  if (!pass.timeLeft) return false;
+  if (pass.examined >= FINALIZED_COLLECTION_BATCH && pass.previous?.kind !== 'cleared') return false;
+  return !pass.pressure || pass.bytesReclaimed < pass.pressure.bytesNeeded;
+}
+
 /** Owns durable retirement records, scheduling and fail-closed reference checks. */
 export class FinalizedSnapshotCollector {
   private retirementCursor = '';
@@ -94,45 +124,57 @@ export class FinalizedSnapshotCollector {
       ...candidates.filter(f => compareHashes(f.hash, this.retirementCursor) <= 0)];
     const deadline = Date.now() + COLLECTION_TIME_BUDGET_MS;
     let examined = 0;
-    let cleared = false;
+    let previous: CandidateOutcome | undefined;
     for (const candidate of ordered) {
-      if (Date.now() >= deadline) break;
-      // Cover a backlog quickly while candidates clear, but stop at the first retained one past the batch.
-      if (examined >= FINALIZED_COLLECTION_BATCH && !cleared) break;
-      if (options.pressure && result.bytes >= options.pressure.bytesNeeded) break;
+      if (!mayExamineNext({
+        examined, previous, timeLeft: Date.now() < deadline, bytesReclaimed: result.bytes, pressure: options.pressure,
+      })) break;
       examined += 1;
       this.retirementCursor = candidate.hash;
-      cleared = false;
-      try {
-        cleared = await this.lifecycleGate.tryCollect(candidate.hash, async () => {
-          let record: { version?: unknown; retiredAt?: unknown };
-          try { record = JSON.parse(await readFile(candidate.path, 'utf8')); }
-          catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true; throw error; }
-          if (record.version !== 1 || typeof record.retiredAt !== 'number'
-            || !Number.isSafeInteger(record.retiredAt) || record.retiredAt < 0) {
-            throw new Error('Invalid snapshot retirement record');
-          }
-          if (!options.pressure && this.now() - record.retiredAt < this.options.retentionMs) return false;
-          if (await this.checkSnapshotReferenceWithDeadline(`sha256:${candidate.hash}`)) {
-            result.referenced += 1;
-            return false;
-          }
-          await this.options.removePayloads(candidate.hash, bytes => {
-            result.deleted += 1;
-            result.bytes += bytes;
-          });
-          // Keep the marker on an index failure so a later pass can retry.
-          await this.options.removeDerivedState(candidate.hash);
-          await this.removeMarker(candidate.hash);
-          return true;
-        }) === true;
-      } catch (error) {
+      previous = await this.collectCandidate(candidate, options);
+      result.deleted += previous.deleted;
+      result.bytes += previous.bytes;
+      if (previous.kind === 'retained' && previous.referenced) result.referenced += 1;
+      if (previous.kind === 'failed') {
         result.failed += 1;
-        this.options.log?.(`[SWM-SNAPSHOT-GC] finalized collection failed for ${candidate.hash}: ${error instanceof Error ? error.message : String(error)}`);
+        this.options.log?.(`[SWM-SNAPSHOT-GC] finalized collection failed for ${candidate.hash}: ${previous.error instanceof Error ? previous.error.message : String(previous.error)}`);
       }
     }
     await this.saveResumeKey();
     return result;
+  }
+
+  /** Examine one candidate under its exclusive lease; it never throws, it reports what happened. */
+  private async collectCandidate(candidate: RetirementCandidate, options: FinalizedCollectionOptions): Promise<CandidateOutcome> {
+    let deleted = 0;
+    let bytes = 0;
+    try {
+      const outcome = await this.lifecycleGate.tryCollect(candidate.hash, async () => {
+        let record: { version?: unknown; retiredAt?: unknown };
+        try { record = JSON.parse(await readFile(candidate.path, 'utf8')); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'cleared' as const; throw error; }
+        if (record.version !== 1 || typeof record.retiredAt !== 'number'
+          || !Number.isSafeInteger(record.retiredAt) || record.retiredAt < 0) {
+          throw new Error('Invalid snapshot retirement record');
+        }
+        if (!options.pressure && this.now() - record.retiredAt < this.options.retentionMs) return 'waiting' as const;
+        if (await this.checkSnapshotReferenceWithDeadline(`sha256:${candidate.hash}`)) return 'referenced' as const;
+        await this.options.removePayloads(candidate.hash, removed => {
+          deleted += 1;
+          bytes += removed;
+        });
+        // Keep the marker on an index failure so a later pass can retry.
+        await this.options.removeDerivedState(candidate.hash);
+        await this.removeMarker(candidate.hash);
+        return 'cleared' as const;
+      });
+      if (outcome === undefined) return { kind: 'busy', deleted, bytes };
+      if (outcome === 'cleared') return { kind: 'cleared', deleted, bytes };
+      return { kind: 'retained', referenced: outcome === 'referenced', deleted, bytes };
+    } catch (error) {
+      // Bytes already removed before the failure still count toward the pass.
+      return { kind: 'failed', error, deleted, bytes };
+    }
   }
 
   private async loadResumeKey(): Promise<void> {

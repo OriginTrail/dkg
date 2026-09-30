@@ -196,6 +196,43 @@ describe('bounded retirement collection', () => {
   });
 });
 
+describe('candidate outcomes feed the pass policy', () => {
+  it('counts bytes removed before a failure toward the pass, and reports the candidate as failed', async () => {
+    const log = vi.fn();
+    const f = await scheduled(async () => false, 2, undefined, log);
+    const options = { enabled: true, retentionMs: 0, isSnapshotReferenced: async () => false,
+      removePayloads: async (_hash: string, done: (bytes: number) => void) => { done(7); done(5); },
+      removeDerivedState: async () => { throw new Error('index busy'); }, log };
+    const collector = new FinalizedSnapshotCollector(f.directory, f.gate, () => 10_000, options);
+    expect(await collector.collect(f.files)).toEqual({ deleted: 4, bytes: 24, referenced: 0, failed: 2 });
+    expect(log).toHaveBeenCalledTimes(2);
+    // The failed candidates keep their records for a later pass.
+    for (const file of f.files) await expect(stat(file.path)).resolves.toBeDefined();
+  });
+
+  it('treats a record that disappeared as finished and keeps going past the batch', async () => {
+    const f = await scheduled(async () => true, 40);
+    for (const file of f.files) await rm(file.path);
+    const attempts = vi.spyOn(f.gate, 'tryCollect');
+    expect(await f.collector.collect(f.files)).toMatchObject({ deleted: 0, referenced: 0, failed: 0 });
+    expect(attempts).toHaveBeenCalledTimes(40);
+  });
+
+  it('ends a long pass at a retained candidate that is still inside its grace period', async () => {
+    const f = await scheduled(async () => false, 40);
+    // Candidate 33 (index 32) was retired "just now", so it waits out its grace period.
+    const waiting = f.files[32]!;
+    await writeFile(waiting.path, JSON.stringify({ version: 1, retiredAt: 10_000 }));
+    const collector = new FinalizedSnapshotCollector(f.directory, f.gate, () => 10_000, {
+      enabled: true, retentionMs: 1_000, isSnapshotReferenced: async () => false,
+      removePayloads: async (_hash, done) => { done(1); }, removeDerivedState: async () => {},
+    });
+    expect(await collector.collect(f.files)).toMatchObject({ deleted: 32, referenced: 0, failed: 0 });
+    // The next pass starts after the candidate that ended the previous one.
+    expect((await collector.collect(f.files)).deleted).toBe(7);
+  });
+});
+
 describe('collection order, resume position and pass size', () => {
   const RESUME_FILE = 'finalized-collection-cursor.json';
 
