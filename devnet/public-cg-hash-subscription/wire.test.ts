@@ -20,13 +20,17 @@
  * What this cannot prove: that a live daemon still emits these shapes. The devnet
  * run does that, through the same validators.
  */
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { CATCHUP_JOB_STATES } from '../../packages/cli/src/catchup-status.js';
 import { toCatchupStatusResponse, type CatchupJob } from '../../packages/cli/src/daemon/types.js';
 import {
   ENDPOINT,
+  NO_CATCHUP_JOB_ERROR,
   type CatchupContextGraphIdentity,
   WireShapeError,
+  isNoCatchupJobReply,
   parseCatchupStatusResponse,
   parseConnectedPeerIds,
   parseContextGraphListResponse,
@@ -280,6 +284,36 @@ describe('parseNodePeerInfo and parseConnectedPeerIds', () => {
     ['a connection without its `peerId`', () => parseConnectedPeerIds({ connections: [{ remotePeer: 'x' }] }), `${ENDPOINT.connections}: reply.connections[0].peerId is missing, expected a string`],
   ])('reject %s', (_name, parse, detail) => {
     expect(parse).toThrow(detail);
+  });
+});
+
+describe('isNoCatchupJobReply', () => {
+  it('is the route\'s own 404 "No catch-up job found", and nothing else', () => {
+    expect(isNoCatchupJobReply(404, { error: NO_CATCHUP_JOB_ERROR })).toBe(true);
+    expect(isNoCatchupJobReply(404, { error: 'No catch-up job found', extra: 1 })).toBe(true);
+  });
+
+  it.each([
+    ['another status with the same message', 400, { error: NO_CATCHUP_JOB_ERROR }],
+    ['a 200 with the same message', 200, { error: NO_CATCHUP_JOB_ERROR }],
+    ['the unmatched-route 404', 404, { error: 'Not found' }],
+    ['the unknown-job-id 404', 404, { error: 'Catch-up job "j1" not found' }],
+    ['a 404 whose message is reworded', 404, { error: 'no catch-up job found' }],
+    ['a 404 with no error field', 404, {}],
+    ['a 404 whose error is not a string', 404, { error: [NO_CATCHUP_JOB_ERROR] }],
+    ['a 404 with a body that is not an object', 404, NO_CATCHUP_JOB_ERROR],
+    ['a 404 with an array body', 404, [NO_CATCHUP_JOB_ERROR]],
+    ['a 404 that is not JSON', 404, null],
+    ['a 404 with no body', 404, undefined],
+  ])('is not %s', (_what, status, body) => {
+    expect(isNoCatchupJobReply(status, body)).toBe(false);
+  });
+
+  it('matches what the route sends: the message is the literal of the route\'s no-job reply', () => {
+    // The daemon's 404 body is built inline and exported nowhere, so the suite's copy of the
+    // message is tied to the route's source: a reworded route fails here, without a devnet.
+    const route = readFileSync(resolve(import.meta.dirname, '../../packages/cli/src/daemon/routes/query.ts'), 'utf8');
+    expect(route).toMatch(new RegExp(`jsonResponse\\(res,\\s*404,\\s*\\{\\s*error:\\s*["']${NO_CATCHUP_JOB_ERROR}["']\\s*\\}\\)`));
   });
 });
 

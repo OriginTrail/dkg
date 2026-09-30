@@ -198,6 +198,15 @@ together, and the mechanics under them are not:
   (only a rejected request or a non-200 status is retried). `daemon.test.ts` proves
   it without a devnet, including that a malformed forced-subscribe reply rejects
   the SWM scenario's recovery instead of being swallowed.
+
+  The same holds for "no job". A catch-up lookup by graph id answers "no job" only
+  with the route's own 404 (`{ error: "No catch-up job found" }`, matched by status
+  and message, because an unmatched route is also a 404). A read made for an
+  assertion or a classification throws on any other answer (a 500, a 503, a 403, a
+  rejected request, another kind of 404), naming the node, the endpoint, the status
+  and the body, so a daemon that could not answer never satisfies "the cleartext id
+  names no job". A poll that waits for a job retries such a failure until its budget
+  is spent, and its timeout says what the last lookup answered.
 - **Which names a job answers to** (`catchup-jobs.ts`, `daemon.ts`
   `expectLatestJobNamed`). A catch-up job is keyed by the id its subscribe was made
   with. The cleartext id names it when it was made under the cleartext id or

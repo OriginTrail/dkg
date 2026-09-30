@@ -13,6 +13,15 @@
  * its class (`withContext`), and every place that catches to retry or to decorate a
  * message lets a `WireShapeError` through unchanged. What a poll may treat as "not
  * yet" is a transport failure (a rejected fetch, a timeout) or a non-200 status.
+ *
+ * ONE RULE FOR "NO JOB". A catch-up lookup answers a job, `none` or `unavailable`
+ * (`CatchupLookup`). `none` is only the route's own 404 "No catch-up job found"
+ * (`isNoCatchupJobReply`): any other status, another kind of 404 and a rejected request
+ * are `unavailable`, which no assertion of absence can take for an answer. A read made
+ * for an assertion or a classification (`catchupStatus`) throws on it, naming the node,
+ * the endpoint, the status and the body; a poll that waits for a job (`waitForJob`,
+ * `waitUntilNamed`) retries it until its budget is spent and says what the last lookup
+ * answered.
  */
 import { expect } from 'vitest';
 import { getJson, normTerm, postJson, waitFor, type DevnetNode } from '../_bootstrap/harness.js';
@@ -25,6 +34,7 @@ import {
 } from './catchup-jobs.js';
 import {
   WireShapeError,
+  isNoCatchupJobReply,
   parseCatchupStatusResponse,
   parseConnectedPeerIds,
   parseContextGraphListResponse,
@@ -54,6 +64,46 @@ export interface DaemonIo {
 }
 
 export const harnessIo: DaemonIo = { get: getJson, post: postJson, waitFor };
+
+/** What a request came back with: the reply, or, when the request itself was rejected (refused, reset, timed out), why. */
+export type Attempt =
+  | { readonly failed: false; readonly reply: HttpReply }
+  | { readonly failed: true; readonly why: string };
+
+/**
+ * Send a request and return what happened to IT. Only the send is inside the catch:
+ * what the caller then does with the reply (validating it, reading its body) is outside,
+ * so a retry decided on an `Attempt` can never swallow a validation failure, whatever
+ * class it is. A status is not a failure here; the caller decides what a non-200 means.
+ */
+export async function tryRequest(send: () => Promise<HttpReply>): Promise<Attempt> {
+  try {
+    return { failed: false, reply: await send() };
+  } catch (error) {
+    return { failed: true, why: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/**
+ * What a lookup of the latest catch-up job for an id answered. `none` is ONLY the
+ * route's own "no job names this id" reply (`isNoCatchupJobReply`). Anything else that
+ * is not a job is `unavailable`: a rejected request or a status the lookup does not
+ * understand. It carries what the daemon said, and it is never an answer: it cannot
+ * satisfy "names no job", and a poll treats it as "not yet".
+ */
+export type CatchupLookup =
+  | { readonly kind: 'job'; readonly job: CatchupStatusReply }
+  | { readonly kind: 'none' }
+  | { readonly kind: 'unavailable'; readonly why: string };
+
+/** One lookup, for a failure message or a timeout. */
+export function describeLookup(found: CatchupLookup): string {
+  switch (found.kind) {
+    case 'job': return `${found.job.jobId} (${found.job.contextGraphId}, ${found.job.jobStatus})`;
+    case 'none': return 'no job';
+    case 'unavailable': return `unavailable: ${found.why}`;
+  }
+}
 
 /** A graph as the catch-up assertions need it: both of its ids and its on-chain id. */
 export interface JobGraph extends GraphNames {
@@ -140,13 +190,84 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
     return checked(node, await io.post(node, path, body), parse);
   }
 
+  /**
+   * `io.waitFor` that says what it last saw when it runs out. A failure the probe itself
+   * throws (a reply of the wrong shape, a refusal) is the diagnostic and goes through
+   * untouched: it is told from a timeout by having been thrown by the probe, not by its class.
+   */
+  async function waitWithNote<T>(
+    label: string,
+    budgetMs: number,
+    intervalMs: number,
+    probe: () => Promise<T | null>,
+    note: () => string | Promise<string>,
+  ): Promise<T> {
+    const thrownByProbe = new Set<unknown>();
+    try {
+      return await io.waitFor(label, budgetMs, intervalMs, async () => {
+        try {
+          return await probe();
+        } catch (error) {
+          thrownByProbe.add(error);
+          throw error;
+        }
+      });
+    } catch (error) {
+      if (thrownByProbe.has(error)) throw error;
+      throw new Error(`${error instanceof Error ? error.message : String(error)} (${await note()})`, { cause: error });
+    }
+  }
+
+  /**
+   * One lookup of the latest catch-up job for an id, as a value. A validator failure (a 200
+   * of the wrong shape) is thrown from here, outside of the request's own catch; every
+   * other way of not getting a job is `none` (the route's own 404) or `unavailable`.
+   */
+  async function lookupCatchup(node: DevnetNode, contextGraphId: string): Promise<CatchupLookup> {
+    const path = `/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`;
+    const sent = await tryRequest(() => io.get(node, path));
+    if (sent.failed) return { kind: 'unavailable', why: `node${node.num} GET ${path} was not answered: ${sent.why}` };
+    if (isNoCatchupJobReply(sent.reply.status, sent.reply.json)) return { kind: 'none' };
+    const res = checked(node, sent.reply, parseCatchupStatusResponse);
+    return res.ok
+      ? { kind: 'job', job: res.body }
+      : { kind: 'unavailable', why: `node${node.num} GET ${path} answered ${res.status}: ${JSON.stringify(res.body)}` };
+  }
+
+  /** A lookup that must have answered: the job, or null for the route's "no job" reply; anything else throws, naming the node, the endpoint, the status and the body. */
+  function answered(found: CatchupLookup): CatchupStatusReply | null {
+    if (found.kind === 'unavailable') throw new Error(found.why);
+    return found.kind === 'job' ? found.job : null;
+  }
+
+  /**
+   * The latest job for an id, or null when the route says none names it. One read, for an
+   * assertion or a classification: a lookup that failed throws instead of reading as "no
+   * job" (a poll that waits for a job uses `lookupCatchup` through `waitForJob`).
+   */
   async function catchupStatus(node: DevnetNode, contextGraphId: string): Promise<CatchupStatusReply | null> {
-    const res = await getChecked(
-      node,
-      `/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`,
-      parseCatchupStatusResponse,
-    );
-    return res.ok ? res.body : null;
+    return answered(await lookupCatchup(node, contextGraphId));
+  }
+
+  /**
+   * Wait until `find` answers a job that `accept` likes. "No job yet" (the route's 404) and
+   * a lookup that failed (a rejected request, any other non-200) both mean "not yet" and
+   * are retried until the budget is spent; a failure is never read as an answer. A timeout
+   * says what the last lookup said. A reply of the wrong shape fails the wait at once.
+   */
+  async function waitForJob(
+    label: string,
+    budgetMs: number,
+    find: () => Promise<CatchupLookup>,
+    accept: (job: CatchupStatusReply) => boolean = () => true,
+    intervalMs = 3_000,
+  ): Promise<CatchupStatusReply> {
+    let last = 'no lookup made';
+    return waitWithNote(label, budgetMs, intervalMs, async () => {
+      const found = await find();
+      last = describeLookup(found);
+      return found.kind === 'job' && accept(found.job) ? found.job : null;
+    }, () => `last lookup: ${last}`);
   }
 
   async function listSubscriptions(node: DevnetNode): Promise<readonly SubscriptionRow[]> {
@@ -220,9 +341,19 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
     );
   }
 
-  /** The latest job the graph has under either name: the cleartext id's, else the hash's; null when neither names one. */
+  /**
+   * The latest job the graph has under either name, as a lookup: the cleartext id's, else the
+   * hash's. The hash is asked only when the cleartext id answered "no job": a lookup that
+   * failed is not an answer to fall through on.
+   */
+  async function lookupLatestJob(node: DevnetNode, graph: GraphNames): Promise<CatchupLookup> {
+    const byId = await lookupCatchup(node, graph.id);
+    return byId.kind === 'none' ? lookupCatchup(node, graph.nameHash) : byId;
+  }
+
+  /** The latest job the graph has under either name; null when neither names one, and a lookup that failed throws. */
   async function findLatestJob(node: DevnetNode, graph: GraphNames): Promise<CatchupStatusReply | null> {
-    return (await catchupStatus(node, graph.id)) ?? catchupStatus(node, graph.nameHash);
+    return answered(await lookupLatestJob(node, graph));
   }
 
   /**
@@ -232,16 +363,22 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
    */
   async function waitUntilNamed(node: DevnetNode, label: string, jobId: string, ids: readonly string[]): Promise<void> {
     let lastSeen = 'no lookup made';
-    try {
-      await io.waitFor(`${label}: node${node.num} names job ${jobId} by ${ids.join(' and ')}`, 30_000, 2_000, async () => {
-        const found = await Promise.all(ids.map((id) => catchupStatus(node, id)));
-        lastSeen = ids.map((id, i) => `${id} -> ${found[i] ? `${found[i]!.jobId} (${found[i]!.contextGraphId}, ${found[i]!.jobStatus})` : 'no job'}`).join('; ');
-        return found.every((job) => job?.jobId === jobId) ? true : null;
-      });
-    } catch (err) {
-      if (err instanceof Error) err.message = `${err.message} (last lookups: ${lastSeen})`;
-      throw err;
-    }
+    await waitWithNote(`${label}: node${node.num} names job ${jobId} by ${ids.join(' and ')}`, 30_000, 2_000, async () => {
+      const found = await Promise.all(ids.map((id) => lookupCatchup(node, id)));
+      lastSeen = ids.map((id, i) => `${id} -> ${describeLookup(found[i]!)}`).join('; ');
+      return found.every((lookup) => lookup.kind === 'job' && lookup.job.jobId === jobId) ? true : null;
+    }, () => `last lookups: ${lastSeen}`);
+  }
+
+  /**
+   * Assert that no job names `contextGraphId`: the route answered "No catch-up job found". A
+   * lookup that failed (a rejected request, any other status, even a 404 of another kind)
+   * did not answer, so it fails the assertion as a failed lookup instead of satisfying it.
+   */
+  async function expectNoJob(node: DevnetNode, contextGraphId: string, message: string): Promise<void> {
+    const found = await lookupCatchup(node, contextGraphId);
+    if (found.kind === 'unavailable') throw new Error(`${message}: the lookup did not answer "no job": ${found.why}`);
+    expect(found.kind === 'job' ? found.job : null, message).toBeNull();
   }
 
   /**
@@ -281,7 +418,7 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
         break;
       case 'hash-keyed-settled':
         await waitUntilNamed(node, label, jobId, [graph.nameHash, graph.onChainId]);
-        expect(await catchupStatus(node, graph.id), `${label}: the cleartext id names no job while the settled job stayed under the hash`).toBeNull();
+        await expectNoJob(node, graph.id, `${label}: the cleartext id names no job while the settled job stayed under the hash`);
         break;
     }
     return cls;
@@ -439,7 +576,7 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
    * under the cleartext id while it ran, and then it names that graph.
    */
   async function expectByHashLookupResolved(node: DevnetNode, graph: GraphNames, jobId: string, label: string): Promise<CatchupStatusReply> {
-    const byHash = await io.waitFor(`${label}: node${node.num} catch-up status by name hash`, 60_000, 2_000, async () => catchupStatus(node, graph.nameHash));
+    const byHash = await waitForJob(`${label}: node${node.num} catch-up status by name hash`, 60_000, () => lookupCatchup(node, graph.nameHash), undefined, 2_000);
     expect(byHash.jobId, `${label}: the hash names the job it was subscribed with`).toBe(jobId);
     if (byHash.resolvedContextGraphId === undefined) {
       // The job never continued under another id: it is still keyed by the hash it was made with.
@@ -531,6 +668,9 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
     waitForAdoption,
     ensureConverged,
     catchupStatus,
+    lookupCatchup,
+    lookupLatestJob,
+    waitForJob,
     catchupJob,
     findLatestJob,
     expectLatestJobNamed,

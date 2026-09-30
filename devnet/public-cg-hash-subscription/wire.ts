@@ -137,6 +137,29 @@ export const ENDPOINT = {
   query: 'POST /api/query',
 } as const;
 
+/**
+ * What GET /api/sync/catchup-status answers when no job is named by the id it was
+ * given: 404 with this `error` (packages/cli/src/daemon/routes/query.ts). The route
+ * answers a refusal, an id the caller may not follow, the same way.
+ */
+export const NO_CATCHUP_JOB_ERROR = 'No catch-up job found';
+
+/**
+ * Whether a reply of GET /api/sync/catchup-status is the route's own "no job names
+ * this id" answer. Only that is an absence: the status AND the body are matched,
+ * because a bare 404 is also what an unmatched route answers (`{ error: 'Not found' }`,
+ * packages/cli/src/daemon/handle-request.ts, e.g. a daemon without the endpoint) and what
+ * the same route answers for a job id it does not hold (`Catch-up job "<id>" not found`,
+ * which a lookup by graph id reaches only when a job was evicted behind an alias).
+ * Neither says that no job names the id, so neither may satisfy an absence assertion.
+ * If the route rewords its message, the lookup fails loudly (the failure names the status
+ * and the body) instead of passing silently.
+ */
+export function isNoCatchupJobReply(status: number, body: unknown): boolean {
+  if (status !== 404 || body === null || typeof body !== 'object' || Array.isArray(body)) return false;
+  return Object.entries(body).some(([key, value]) => key === 'error' && value === NO_CATCHUP_JOB_ERROR);
+}
+
 // The identity-note states: a copy, tied to its declaration at the type level (see the header).
 export const WIRE_IDENTITY_STATES = ['name-hash-only', 'name-hash-only-private', 'resolved'] as const satisfies
   readonly CatchupContextGraphIdentity['state'][];
