@@ -14,9 +14,12 @@
  *      verifiable memory the author published BEFORE the edge subscribed. Before
  *      the fix for the dead zone (#2744) the subscription synced 0 quads.
  *   3. The catch-up job the subscribe minted is reachable by its job id, by the
- *      cleartext id and by the on-chain id (and by the hash when the job was
- *      created under it, #2779), and an on-chain numeric id (`#<n>`) subscribes
- *      the same graph (#2758).
+ *      cleartext id and by the on-chain id, and an on-chain numeric id (`#<n>`)
+ *      subscribes the same graph (#2758). The by-hash lookup (#2779) is asserted
+ *      only when the job was created under the hash; when the subscribe request
+ *      itself resolved the hash (the usual case here) the job is keyed by the
+ *      cleartext id and a lookup by the hash finds none, so that branch is not
+ *      exercised by this suite.
  *   4. A graph registered on chain whose cleartext no peer holds stays hash-only:
  *      no cleartext row is invented, and its catch-up settles as `unreachable`
  *      with the name-hash-only note rather than as a retryable failure.
@@ -350,7 +353,9 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     // the hash names the cleartext graph once it resolved. When the subscribe
     // request itself resolved the hash (the usual case with a connected holder)
     // the job is keyed by the cleartext id only and a lookup by the hash finds
-    // no job: reported with this PR, not asserted here.
+    // no job (404 "No catch-up job found"). That is a product inconsistency
+    // reported in the PR that added this suite, not pinned here; this branch
+    // therefore does not run when the holder answers within the request.
     if (subscribed.subscribed === graph.nameHash) {
       const byHash = await waitFor(`node${edgeA.num} catch-up status by name hash`, 60_000, 2_000, async () => catchupStatus(edgeA, graph.nameHash));
       expect(byHash.resolvedContextGraphId ?? byHash.contextGraphId).toBe(graph.id);

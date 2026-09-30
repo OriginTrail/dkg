@@ -25,6 +25,10 @@ nodes.
    shared before it subscribed and the finalized VM copy, each identical to the
    author's. The catch-up job the subscribe minted is reachable by its job id,
    the cleartext id and the on-chain id, and always names the cleartext graph.
+   (A lookup by the hash itself is asserted only when the job was created under
+   the hash; when the subscribe request resolved the hash, the job is keyed by
+   the cleartext id and the by-hash lookup finds none, so that path is not
+   covered here.)
 3. A second edge subscribed with `#<on-chain id>` lands on the same cleartext
    graph and converges on the same content.
 4. A graph registered directly on the chain with a name commitment whose
@@ -33,9 +37,11 @@ nodes.
    name-hash-only note, not as a retryable failure.
 
 The first catch-up job of a subscription can be cut short when the node's RFC-64
-authority RPC circuit is open (chain reads timing out on a loaded machine); the
-suite re-subscribes with `forceCatchup` once a minute while it waits for content,
-as an operator would, and reports the last job's verdict on timeout.
+authority RPC circuit is open (chain reads timing out on a loaded machine). While
+it waits for content the suite re-subscribes with `forceCatchup` once a minute and
+reports the last job's verdict on timeout. That recovers only a short circuit
+window: a node whose circuit stays open needs a restart, and the suite fails
+rather than hiding it.
 
 ## Run
 
