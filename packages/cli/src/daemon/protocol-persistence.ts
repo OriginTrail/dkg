@@ -1,4 +1,3 @@
-import { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import {
   SqliteChainEventCursorStore,
   SqliteChainEventLogStore,
@@ -18,26 +17,6 @@ import {
   DEFAULT_PROTOCOL_OUTBOX_BACKOFFS_MS,
   DEFAULT_PROTOCOL_OUTBOX_MAX_AGE_MS,
 } from '@origintrail-official/dkg-core';
-
-/**
- * The daemon's ONE `node-ui.db` connection, and the single place that closes it.
- *
- * `DashboardDB` still opens, migrates and owns the file (protocol persistence
- * moved to `@origintrail-official/dkg-node-store`, but its schema did not), so
- * the composition root opens it here once and hands the same handle to every
- * store and to the dashboard code that shares it. Whoever holds this owner
- * closes the connection through {@link NodeDatabase.close}; nothing else does.
- */
-export interface NodeDatabase {
-  readonly dashboardDb: DashboardDB;
-  /** Closes the connection every protocol store and the dashboard share. */
-  close(): void;
-}
-
-export function openNodeDatabase(dataDir: string): NodeDatabase {
-  const dashboardDb = new DashboardDB({ dataDir });
-  return { dashboardDb, close: () => dashboardDb.close() };
-}
 
 export interface ProtocolStoreOptions {
   /**
@@ -107,6 +86,11 @@ export interface ProtocolStores {
  * Every store is built from the same `database`, so they all read and write the
  * same connection, transactions included. The construction order and options
  * are the ones the daemon has always used.
+ *
+ * The daemon passes the `DashboardDB` it constructs once at start-up. That class
+ * still creates and migrates `node-ui.db` (the schema did not move with the
+ * stores), and it stays the handle the shutdown paths close; the stores never
+ * open or close a connection of their own.
  */
 export function createProtocolStores(
   database: NodeStoreDatabaseHandle,

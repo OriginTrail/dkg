@@ -220,8 +220,8 @@ export default defineConfig({
           // Protocol persistence stores (node-store): runDaemonInner composes
           // every one over a seeded legacy node-ui.db; no hardhat, no network.
           'test/daemon-protocol-store-wiring.test.ts',
-          // The typed composition seam behind that wiring: openNodeDatabase +
-          // createProtocolStores over one shared connection, real DashboardDB.
+          // The typed composition seam behind that wiring: createProtocolStores
+          // over one shared connection, real DashboardDB.
           'test/protocol-persistence.test.ts',
           // SQLite-backed vector store. Pure local DB coverage; no hardhat.
           'test/vector-store-extra.test.ts',

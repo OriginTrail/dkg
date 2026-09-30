@@ -93,7 +93,7 @@ import {
   type AsyncLiftPublisherConfig,
 } from '@origintrail-official/dkg-publisher';
 import {
-  type DashboardDB,
+  DashboardDB,
   MetricsCollector,
   OperationTracker,
   handleNodeUIRequest,
@@ -195,7 +195,7 @@ import { createDaemonTelemetryLifecycle } from './telemetry-lifecycle.js';
 import { startRpcUsageTelemetry } from './rpc-usage-log.js';
 import { handleRpcUsageSnapshotRequest } from './rpc-usage-snapshot-route.js';
 import { SqliteSnapshotPageIndexStore } from './snapshot-page-index-store.js';
-import { createProtocolStores, openNodeDatabase } from './protocol-persistence.js';
+import { createProtocolStores } from './protocol-persistence.js';
 import {
   decodeVmReconcileNegativeRow,
   encodeVmReconcileNegativeRow,
@@ -1820,10 +1820,7 @@ async function runDaemonInnerWithStartupOwnership(
       })()
     : undefined;
 
-  // The node's ONE node-ui.db connection. `nodeDatabase` is its owner: every
-  // close below goes through it, and every protocol store shares this handle.
-  const nodeDatabase = openNodeDatabase(dkgDir());
-  const dashDb = nodeDatabase.dashboardDb;
+  const dashDb = new DashboardDB({ dataDir: dkgDir() });
   const snapshotPageIndexStore = new SqliteSnapshotPageIndexStore(dashDb);
   const publicSnapshotStore = createPublicSnapshotStore(
     dkgDir(),
@@ -1862,7 +1859,7 @@ async function runDaemonInnerWithStartupOwnership(
           `Set core.allowDegradedRelay: true to downgrade this to a warning.`,
       );
       try {
-        nodeDatabase.close();
+        dashDb.close();
       } catch (err: any) {
         log(`Core prereq fatal DB close error: ${err?.message ?? String(err)}`);
       }
@@ -2468,7 +2465,7 @@ async function runDaemonInnerWithStartupOwnership(
               log(`Core prereq fatal-stop error: ${err?.message ?? String(err)}`),
             );
             try {
-              nodeDatabase.close();
+              dashDb.close();
             } catch (err: any) {
               log(`Core prereq fatal DB close error: ${err?.message ?? String(err)}`);
             }
@@ -3925,7 +3922,7 @@ async function runDaemonInnerWithStartupOwnership(
         const backingStoresClosed = await closeDaemonBackingStoresAfterTeardown(teardown, {
           retryAgentStop: () => agent.stop(),
           stopManagedOxigraph: () => managedOxigraph?.stop() ?? Promise.resolve(),
-          closeDashboardDb: () => nodeDatabase.close(),
+          closeDashboardDb: () => dashDb.close(),
           log,
         });
         if (backingStoresClosed) log("Stopped.");

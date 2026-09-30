@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -22,31 +22,14 @@ import {
   type SqliteChainEventLogCommit,
 } from '@origintrail-official/dkg-node-store';
 import { DashboardDB, SCHEMA_VERSION } from '@origintrail-official/dkg-node-ui';
-import {
-  createProtocolStores,
-  openNodeDatabase,
-  type NodeDatabase,
-  type ProtocolStores,
-} from '../src/daemon/protocol-persistence.js';
-
-// Counts every DashboardDB the module under test constructs (the real class, only observed), so a
-// second connection opened and forgotten inside `openNodeDatabase` cannot go unnoticed.
-const constructed = vi.hoisted(() => [] as unknown[]);
-vi.mock('@origintrail-official/dkg-node-ui', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('@origintrail-official/dkg-node-ui')>();
-  class CountingDashboardDB extends actual.DashboardDB {
-    constructor(...args: ConstructorParameters<typeof actual.DashboardDB>) {
-      super(...args);
-      constructed.push(this);
-    }
-  }
-  return { ...actual, DashboardDB: CountingDashboardDB };
-});
+import { createProtocolStores, type ProtocolStores } from '../src/daemon/protocol-persistence.js';
 
 /**
- * The daemon's protocol-persistence composition seam. Everything here goes
- * through its typed result and the stores' and DashboardDB's public API: no
- * private fields, no casts.
+ * The daemon's protocol-persistence composition: `createProtocolStores` over a
+ * real `DashboardDB`, opened and closed here exactly as the daemon does. That the
+ * daemon builds ONE such database and closes it once on every path is pinned in
+ * `daemon-protocol-store-wiring.test.ts`. Everything here goes through the typed
+ * result and the stores' and DashboardDB's public API: no private fields, no casts.
  */
 const SCOPE = 'evm:31337:hub=0xhub';
 const PEER = '12D3KooWProtocolPersistencePeer';
@@ -161,51 +144,39 @@ const STORE_WRITES: readonly StoreWrite[] = [
 
 describe('protocol persistence composition', () => {
   let dir: string;
-  let node: NodeDatabase;
+  let dashboardDb: DashboardDB;
 
   const countRows = (tables: readonly string[]): number => tables.reduce(
-    (total, table) => total + (node.dashboardDb.db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c: number }).c,
+    (total, table) => total + (dashboardDb.db.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c: number }).c,
     0,
   );
 
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), 'dkg-protocol-persistence-'));
-    node = openNodeDatabase(dir);
+    dashboardDb = new DashboardDB({ dataDir: dir });
   });
 
   afterEach(() => {
-    node.close();
+    dashboardDb.close();
     rmSync(dir, { recursive: true, force: true });
   });
 
-  describe('openNodeDatabase', () => {
-    it('opens the dashboard database at the current schema in node-ui.db, and only there', () => {
-      expect(node.dashboardDb).toBeInstanceOf(DashboardDB);
-      expect(node.dashboardDb.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+  describe('over the dashboard database', () => {
+    it('composes every store over the current schema in node-ui.db, and opens no other SQLite file', () => {
+      createProtocolStores(dashboardDb, { chainCursorScope: SCOPE, changelogEnabled: true });
+      expect(dashboardDb.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
       expect(new Set(readdirSync(dir).filter((name) => /\.db(-wal|-shm)?$/.test(name)).map((name) => name.replace(/-(wal|shm)$/, ''))))
         .toEqual(new Set(['node-ui.db']));
     });
 
-    it('opens exactly one DashboardDB and hands out that instance', () => {
-      constructed.length = 0;
-      const other = mkdtempSync(join(tmpdir(), 'dkg-protocol-persistence-one-'));
-      const opened = openNodeDatabase(other);
-      try {
-        expect(constructed).toEqual([opened.dashboardDb]);
-      } finally {
-        opened.close();
-        rmSync(other, { recursive: true, force: true });
-      }
-    });
-
-    it('closes the shared connection through the owner, so every store stops working', () => {
-      const stores = createProtocolStores(node.dashboardDb, { chainCursorScope: SCOPE, changelogEnabled: false });
+    it('closing the database ends the shared connection, so every store stops working', () => {
+      const stores = createProtocolStores(dashboardDb, { chainCursorScope: SCOPE, changelogEnabled: false });
       stores.kaNumberStore.allocate(AUTHOR);
-      expect(node.dashboardDb.db.open).toBe(true);
+      expect(dashboardDb.db.open).toBe(true);
 
-      node.close();
+      dashboardDb.close();
 
-      expect(node.dashboardDb.db.open).toBe(false);
+      expect(dashboardDb.db.open).toBe(false);
       expect(() => stores.kaNumberStore.allocate(AUTHOR)).toThrow(/not open/i);
       expect(() => stores.syncCheckpointStore.get('peer|cg|durable|meta')).toThrow(/not open/i);
     });
@@ -215,7 +186,7 @@ describe('protocol persistence composition', () => {
     let stores: ProtocolStores & { readonly changelogEraGuard: SqliteChangelogEraGuard };
 
     beforeEach(() => {
-      const composed = createProtocolStores(node.dashboardDb, { chainCursorScope: SCOPE, changelogEnabled: true });
+      const composed = createProtocolStores(dashboardDb, { chainCursorScope: SCOPE, changelogEnabled: true });
       if (composed.changelogEraGuard === undefined) throw new Error('the era guard is built when the changelog is enabled');
       stores = { ...composed, changelogEraGuard: composed.changelogEraGuard };
     });
@@ -241,12 +212,12 @@ describe('protocol persistence composition', () => {
     // just the file.
     it.each(STORE_WRITES)('$store shares the one connection: its write joins, and rolls back with, its transaction', async ({ tables, write }) => {
       const before = countRows(tables);
-      node.dashboardDb.db.exec('BEGIN IMMEDIATE');
+      dashboardDb.db.exec('BEGIN IMMEDIATE');
       try {
         await write(stores);
         expect(countRows(tables), 'written inside the transaction, visible on the shared connection').toBeGreaterThan(before);
       } finally {
-        node.dashboardDb.db.exec('ROLLBACK');
+        dashboardDb.db.exec('ROLLBACK');
       }
       expect(countRows(tables), 'gone after the rollback').toBe(before);
     });
@@ -258,7 +229,7 @@ describe('protocol persistence composition', () => {
     });
 
     it('hands the stores a bare `{ db }` handle: nothing DashboardDB-specific is needed', async () => {
-      const bare = createProtocolStores({ db: node.dashboardDb.db }, {
+      const bare = createProtocolStores({ db: dashboardDb.db }, {
         chainCursorScope: SCOPE,
         changelogEnabled: false,
       });
@@ -289,11 +260,11 @@ describe('protocol persistence composition', () => {
       await stores.chainEventCursorStore.saveLane('contextGraphDiscovery', 9);
       await stores.contextGraphStorageDiscoveryStore.save({ version: 1, nextId: '7', entries: [] });
 
-      const cursorScopes = node.dashboardDb.db
+      const cursorScopes = dashboardDb.db
         .prepare(`SELECT scope FROM runtime_cursors WHERE namespace = 'chainEventPoller.cursor'`)
         .all() as Array<{ scope: string }>;
       expect(cursorScopes).toEqual([{ scope: SCOPE }]);
-      const discoveryKeys = node.dashboardDb.db
+      const discoveryKeys = dashboardDb.db
         .prepare(`SELECT key FROM settings WHERE key LIKE 'contextGraphStorageDiscovery.checkpoint:v1:%'`)
         .all() as Array<{ key: string }>;
       expect(discoveryKeys).toEqual([{ key: `${SqliteContextGraphStorageDiscoveryStore.KEY_PREFIX}${SCOPE}` }]);
@@ -301,18 +272,18 @@ describe('protocol persistence composition', () => {
 
     it('reads back through the same scope another composition of the same file wrote', async () => {
       await stores.chainEventCursorStore.saveLane('contextGraphDiscovery', 9);
-      const again = createProtocolStores(node.dashboardDb, { chainCursorScope: SCOPE, changelogEnabled: false });
+      const again = createProtocolStores(dashboardDb, { chainCursorScope: SCOPE, changelogEnabled: false });
       await expect(again.chainEventCursorStore.loadLane('contextGraphDiscovery')).resolves.toBe(9);
-      const otherDeployment = createProtocolStores(node.dashboardDb, { chainCursorScope: `${SCOPE}:other`, changelogEnabled: false });
+      const otherDeployment = createProtocolStores(dashboardDb, { chainCursorScope: `${SCOPE}:other`, changelogEnabled: false });
       await expect(otherDeployment.chainEventCursorStore.loadLane('contextGraphDiscovery')).resolves.toBeUndefined();
     });
   });
 
   describe('the durable era guard follows the changelog intent', () => {
     it('is built when the changelog is enabled and absent when it is not', () => {
-      expect(createProtocolStores(node.dashboardDb, { chainCursorScope: SCOPE, changelogEnabled: true }).changelogEraGuard)
+      expect(createProtocolStores(dashboardDb, { chainCursorScope: SCOPE, changelogEnabled: true }).changelogEraGuard)
         .toBeInstanceOf(SqliteChangelogEraGuard);
-      expect(createProtocolStores(node.dashboardDb, { chainCursorScope: SCOPE, changelogEnabled: false }).changelogEraGuard)
+      expect(createProtocolStores(dashboardDb, { chainCursorScope: SCOPE, changelogEnabled: false }).changelogEraGuard)
         .toBeUndefined();
     });
   });
