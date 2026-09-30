@@ -20,14 +20,22 @@
  * argv is `<node> <repoRoot>/packages/cli/dist/cli.js daemon-supervisor|daemon-worker`
  * (`devnet.sh` starts nodes with `DKG_NO_BLUE_GREEN=1`, so the entry point is
  * the CLI of the checkout itself; mixed-version nodes live under
- * `<repoRoot>/.devnet-versions`). The home (`DKG_HOME`) is only in the process
+ * `<repoRoot>/.devnet-versions` by default, but `devnet.sh` honours a
+ * `DEVNET_VERSIONS_DIR` override: with one outside the checkout a healthy
+ * mixed-version daemon would be refused, loudly, and none of the suites that use
+ * this module run mixed-version nodes). The home (`DKG_HOME`) is only in the process
  * environment, which `ps` shows with its `e` flag, and as whatever text
  * `devnet.sh` exported. A check that needed it would refuse a healthy daemon
  * whose home is spelled differently, and a refused daemon that keeps running
  * turns a kill -9 test into a graceful stop. The entry point path is resolved
  * by node itself (symlinks followed), so it is compared with the repo root as
  * given and with its `realpath`. Not distinguished: a stale PID that has been
- * recycled by another daemon of this same checkout.
+ * recycled by another daemon of this same checkout. Also not covered: PIDs are
+ * verified once and signalled later (a suite that verifies before it waits for
+ * its kill point, or a stop that escalates to SIGKILL ten seconds after
+ * SIGTERM), and only liveness is checked again at the signal, so a verified PID
+ * that exits and is recycled inside that window of seconds would still be
+ * signalled.
  *
  * Deliberately NOT unified between the suites (they pass their own choice):
  *   - where `restart-node`'s HARDHAT_PORT comes from (`rpcUrl` argument;
