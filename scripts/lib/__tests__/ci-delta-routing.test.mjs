@@ -24,7 +24,8 @@ import {
   succeeded,
 } from './ci-plan-fixtures.mjs';
 import { INSTALL_HOOK_INPUTS } from '../ci-routing.mjs';
-import { COMMAND_EFFECTS, workflowExecution } from './ci-execution-graph.mjs';
+import { PROGRAM_CHILD_COMMANDS, workflowExecution } from './ci-execution-graph.mjs';
+import { SUBCOMMAND_CHILD_COMMANDS } from '../../release-packages.mjs';
 import { jobLane, jobRequirement, laneSeeds } from './lane-entrypoints.mjs';
 import { loadReferences, packageImports, traceLaneLoads, workspaceClosure } from './load-graph.mjs';
 
@@ -538,9 +539,9 @@ test('every repository script a CI job runs selects that job', () => {
 
 test('one execution graph feeds the seeds and the gap check, direct and indirect runs alike', () => {
   // The build job runs one repository script directly and packs the CLI
-  // through release-packages.mjs (COMMAND_EFFECTS), whose prepack runs the
-  // asset copier. Both reach the seeds through the graph, and a plan that
-  // drops either from its requirement is reported.
+  // through release-packages.mjs (a child command it declares), whose
+  // prepack runs the asset copier. Both reach the seeds through the graph,
+  // and a plan that drops either from its requirement is reported.
   const cli = { name: '@origintrail-official/dkg', scripts: { prepack: 'node ../../scripts/copy-cli-runtime-assets.mjs' } };
   const execution = {
     workspaces: { manifests: new Map([['packages/cli', cli]]), workspaceByName: new Map([[cli.name, 'packages/cli']]) },
@@ -572,10 +573,9 @@ test('one execution graph feeds the seeds and the gap check, direct and indirect
   ]) {
     assert.ok(undocumented.includes(gap), gap);
   }
-  // Each program COMMAND_EFFECTS reads still runs what it declares.
-  for (const { evidence } of COMMAND_EFFECTS) {
-    assert.ok(fs.readFileSync(path.join(REPO_ROOT, evidence.file), 'utf8').includes(evidence.text), evidence.file);
-  }
+  // The graph reads the release program's own declaration, which
+  // release-packages.test.mjs checks the program runs.
+  assert.equal(PROGRAM_CHILD_COMMANDS.get('scripts/release-packages.mjs'), SUBCOMMAND_CHILD_COMMANDS);
 });
 
 test('the load-closure guard reports a planted unrouted load and an unlisted computed load', () => {

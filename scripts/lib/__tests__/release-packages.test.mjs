@@ -9,12 +9,15 @@ import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
 import {
+  NODE_SQLITE_INSTALL_GUARD,
+  SUBCOMMAND_CHILD_COMMANDS,
   buildInfoPayload,
   discoverPublishablePackages,
   findNodeSqliteEngineViolations,
   findNodeSqliteInstallGuardViolations,
   findMissingCliPackAssets,
   findReleaseVersionMismatches,
+  verifyPack,
   verifyReleaseTag,
   writeBuildInfo,
 } from '../../release-packages.mjs';
@@ -720,6 +723,28 @@ test('findMissingCliPackAssets runs npm pack in the cli package dir (correct cwd
   };
   findMissingCliPackAssets(root, spyRunner);
   assert.equal(seenCwd, path.join(root, 'packages', 'cli'));
+}));
+
+test('verify-pack runs exactly the child commands it declares to the CI routing guard', () => withFixture((root) => {
+  // SUBCOMMAND_CHILD_COMMANDS is what the routing guard's execution graph
+  // reads for `release-packages.mjs verify-pack` (its route to the CLI's
+  // prepack), so the subcommand must run those commands and no others. The
+  // fixture passes the install-guard and engine checks so the pack runs.
+  writeCliPackFixture(root);
+  writePackage(root, '.', { name: 'dkg-v10', version: '1.2.3', private: true, scripts: { preinstall: NODE_SQLITE_INSTALL_GUARD.rootCommand } });
+  writePackage(root, 'packages/cli', { name: '@origintrail-official/dkg', version: '1.2.3', scripts: { preinstall: NODE_SQLITE_INSTALL_GUARD.cliCommand } });
+  const guard = path.join(root, 'packages', 'cli', ...NODE_SQLITE_INSTALL_GUARD.cliAsset.split('/'));
+  fs.mkdirSync(path.dirname(guard), { recursive: true });
+  fs.writeFileSync(guard, '');
+  const observed = [];
+  const runner = (command, args, { cwd }) => {
+    observed.push({ command, args, cwd: path.relative(root, cwd).split(path.sep).join('/') });
+    return JSON.stringify([{ files: [] }]);
+  };
+  const { installGuardViolations, runtimeViolations, missing } = verifyPack({ rootDir: root, runner });
+  assert.deepEqual([installGuardViolations, runtimeViolations], [[], []]);
+  assert.ok(missing.length > 0, 'the check reads the pack report');
+  assert.deepEqual(observed, SUBCOMMAND_CHILD_COMMANDS['verify-pack'].map(({ command, args, cwd }) => ({ command, args: [...args], cwd })));
 }));
 
 // The integration test the mocked-runner unit tests can't give: run the REAL

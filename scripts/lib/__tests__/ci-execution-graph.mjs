@@ -5,9 +5,9 @@
 // - `script`: a package.json script it runs - a root script named by pnpm,
 //   npm or yarn; a workspace's script (pnpm --filter, -r or --dir, turbo, or
 //   pnpm/npm run in that workspace's directory); the install lifecycle hooks
-//   an install runs; the pack lifecycle a pack runs; and the scripts a
-//   program runs itself, which COMMAND_EFFECTS declares. A script's pre and
-//   post hooks run with it.
+//   an install runs; the pack lifecycle a pack runs; and what a repository
+//   program runs as child processes, which the program declares
+//   (PROGRAM_CHILD_COMMANDS). A script's pre and post hooks run with it.
 // - `file`: a repository file it runs or names, from its working directory.
 // The interpreter reads each script and shell script it reaches the same
 // way. An edge records the chain of package scripts that led to it and its
@@ -18,6 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { WORKSPACE_RULES, isInstallLifecycleScript } from '../ci-delta.mjs';
+import { SUBCOMMAND_CHILD_COMMANDS as RELEASE_CHILD_COMMANDS } from '../../release-packages.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 
@@ -58,18 +59,14 @@ export function workspaceClosure(roots, { manifests, workspaceByName } = readWor
   return closure;
 }
 
-// Programs that run commands of their own, keyed by the command that starts
-// one: `release-packages.mjs verify-pack` runs `npm pack --dry-run` in
-// packages/cli, which runs the CLI's pack lifecycle. The interpreter reads
-// `runs` like any other command; the routing test checks each program's
-// source still contains `evidence`.
-export const COMMAND_EFFECTS = Object.freeze([
-  {
-    command: /\bscripts\/release-packages\.mjs\s+verify-pack\b/,
-    runs: { text: 'npm pack --dry-run --json', cwd: 'packages/cli' },
-    evidence: { file: 'scripts/release-packages.mjs', text: "runner('npm', ['pack', '--dry-run', '--json']" },
-  },
-]);
+// Repository programs that run commands as child processes, by subcommand,
+// as each program declares and runs them: `node scripts/release-packages.mjs
+// verify-pack` packs the CLI with npm (release-packages.test.mjs checks the
+// subcommand runs exactly what it declares). The interpreter reads each
+// declared command like any other, in its declared directory.
+export const PROGRAM_CHILD_COMMANDS = Object.freeze(new Map([
+  ['scripts/release-packages.mjs', RELEASE_CHILD_COMMANDS],
+]));
 
 const PROGRAMS = new Set(['pnpm', 'npm', 'yarn', 'turbo', 'npx', 'pnpx']);
 // pnpm's own commands, which never name a package script.
@@ -237,6 +234,18 @@ export function commandFiles(text, { cwd = '.', scriptDirectory, exists }) {
     .flatMap((word) => namedFiles(word, directory, exists, scriptDirectory))))];
 }
 
+// The child commands a declared program runs for the subcommand a command
+// gives it (PROGRAM_CHILD_COMMANDS), as commands in their declared
+// directories.
+function childCommands({ words, cwd }, exists) {
+  for (const [index, word] of words.entries()) {
+    const program = namedFiles(word, cwd, exists).find((file) => PROGRAM_CHILD_COMMANDS.has(file));
+    const children = program ? PROGRAM_CHILD_COMMANDS.get(program)[words[index + 1]] : undefined;
+    if (children) return children.map(({ command, args, cwd: directory }) => ({ words: [command, ...args], assignments: [], cwd: directory }));
+  }
+  return [];
+}
+
 const SHELL_SCRIPT = /\.(?:sh|bash)$/;
 
 // Every job of a workflow as { job, condition, commands, edges }:
@@ -275,13 +284,10 @@ export function workflowExecution(workflowSource, {
       const scripts = [];
       const shells = [];
       const queue = simpleCommands(text, cwd);
-      for (const effect of COMMAND_EFFECTS) {
-        if (effect.command.test(text)) queue.push(...simpleCommands(effect.runs.text, effect.runs.cwd));
-      }
       while (queue.length) {
         const command = queue.shift();
         const { scripts: calls, nested, directories } = packageManagerCalls(command, context);
-        queue.push(...nested);
+        queue.push(...nested, ...childCommands(command, exists));
         scripts.push(...calls);
         for (const directory of directories) {
           for (const file of [...(command.assignments ?? []), ...command.words].flatMap((word) => namedFiles(word, directory, exists, scriptDirectory))) {
