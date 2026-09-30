@@ -6,7 +6,7 @@ import test from 'node:test';
 import { change, pullRequestPlan, selectedLanes } from './ci-plan-fixtures.mjs';
 import { PROGRAM_CHILD_COMMANDS, workflowExecution } from './ci-execution-graph.mjs';
 import { SUBCOMMAND_CHILD_COMMANDS } from '../../release-packages.mjs';
-import { jobRequirement, laneSeeds, requirement } from './lane-entrypoints.mjs';
+import { jobRequirement, laneExecution, laneSeeds, requirement } from './lane-entrypoints.mjs';
 import { fixtureContext, traceLaneLoads } from './load-graph.mjs';
 import { loadClosureGaps, plantedWorkflowGaps } from './load-closure.mjs';
 
@@ -48,6 +48,21 @@ test('every repository script a CI job runs selects that job', () => {
     'full loads scripts/audit-create-random.mjs via scripts/audit-dial-protocol.mjs',
   ]);
   assert.deepEqual([...plantedWorkflowGaps(unconditional('changes')).seeds.keys()], []);
+});
+
+test('a package-local helper a job runs itself carries that job', () => {
+  // The CLI rule does not select the query lane, so a query job running a
+  // CLI helper directly, outside any package script, is reported. Workspace
+  // code the lanes seed keeps its workspace's lanes when a job only names it
+  // (in a message), and carries the job when the job runs it.
+  const helper = 'packages/cli/scripts/build-prerequisites.mjs';
+  const job = (run) => `jobs:\n  bura-query:\n    if: needs.changes.outputs.bura_query == 'true'\n    steps:\n      - run: ${run}\n`;
+  assert.deepEqual(plantedWorkflowGaps(job(`node ${helper}`)).missing.filter((gap) => gap.includes(` ${helper} `)), [
+    `bura_query loads ${helper} via ci.yml bura-query`,
+  ]);
+  const seedsFor = (run) => laneExecution({ workflows: [['ci.yml', job(run)]] }).seeds.get('packages/cli/src/cli.ts');
+  assert.equal(seedsFor('echo "see packages/cli/src/cli.ts"')?.has('bura_query'), false);
+  assert.equal(seedsFor('node --import tsx packages/cli/src/cli.ts')?.has('bura_query'), true);
 });
 
 test('one execution graph feeds the seeds and the gap check, direct and indirect runs alike', () => {

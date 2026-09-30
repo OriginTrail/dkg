@@ -546,6 +546,9 @@ test('identity-wallet browser actions select the real-EVM chain scope', () => {
 test('Blazegraph provisioning changes include the native arm64 contract lane', () => {
   const rootContract = pullRequestPlan([change('blazegraph-image.json')]);
   assert.deepEqual(selectedLanes(rootContract), ['bura_cli', 'bura_blazegraph_arm64']);
+  // The arm64 job's contract check runs the CLI's metadata parser, which
+  // loads the storage package's namespace contract.
+  assert.ok(pullRequestPlan([change('packages/storage/blazegraph-namespace-contract.cjs')]).lanes.bura_blazegraph_arm64);
 
   const cliProvisioner = pullRequestPlan([
     change('packages/cli/src/daemon/blazegraph-new-provisioner.ts'),

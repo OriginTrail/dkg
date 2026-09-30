@@ -265,6 +265,9 @@ export const WORKSPACE_OWNING_EVM_SCOPES = Object.freeze({
 const BLAZEGRAPH_ARM64_PATTERNS = [
   /^blazegraph-image\.json$/,
   /^packages\/cli\/blazegraph-image-metadata\.cjs$/,
+  // The namespace contract the metadata parser loads, which the arm64 job's
+  // contract check runs.
+  /^packages\/storage\/blazegraph-namespace-contract\.cjs$/,
   /^packages\/cli\/(?:src|test)\/.*blazegraph.*\.(?:[cm]?[jt]s|json)$/i,
 ];
 
@@ -336,10 +339,10 @@ export const INSTALL_HOOK_DEPENDENCIES = Object.freeze([
   repositoryRead(MARKITDOWN_BUNDLER, 'scripts/markitdown-entry.py', 'packages/cli/scripts/markitdown-entry.py'),
   repositoryRead(MARKITDOWN_BUNDLER, 'project.json', 'project.json'),
   // The postinstall skips the release download only in a workspace checkout,
-  // which it tells by the CLI's tsconfig.json and src/ (isWorkspaceCheckout):
-  // without either, every job's install downloads a binary for its platform.
-  // Emptying or moving src/ changes more files than the planner's large-PR
-  // limit, which plans full CI; the routing test pins that.
+  // which it tells by the CLI's tsconfig.json (isWorkspaceCheckout): without
+  // it, every job's install downloads a binary for its platform. The CLI's
+  // markitdown test packs the CLI to check the published package leaves it
+  // out.
   repositoryRead(MARKITDOWN_BUNDLER, 'tsconfig.json', 'packages/cli/tsconfig.json'),
   exemption(
     MARKITDOWN_BUNDLER,

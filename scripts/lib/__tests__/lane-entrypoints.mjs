@@ -148,7 +148,6 @@ export function edgeRequirement(jobRequired, chain) {
 }
 
 const WORKFLOWS = ['ci.yml', 'evm-integration.yml'];
-const inPackageWorkspace = (file) => Object.keys(WORKSPACE_RULES).some((workspace) => file.startsWith(`${workspace}/`));
 
 // The load-closure guard's seeds: a Map from each file CI executes to a Map
 // from requirement (a lane, `evm:<scope>`, `build`, `build-output:<workspace>`,
@@ -160,10 +159,11 @@ const inPackageWorkspace = (file) => Object.keys(WORKSPACE_RULES).some((workspac
 // - Every repository file a workflow job runs or names, directly or through
 //   the package scripts and shell scripts it reaches, with the edge's
 //   requirement, so what it loads is traced too: a package-local helper a
-//   workspace's build runs carries that build's output. A file inside a
-//   package workspace that a job's own commands name, outside any package
-//   script, is that workspace's code in a job the ownership test checks, and
-//   routes by its rule.
+//   workspace's build runs carries that build's output, and so does one a
+//   job runs itself (node packages/cli/scripts/x.mjs). Only workspace code
+//   the lanes seed that a job's own commands name without running it (a
+//   test file a runner gets, a path in a message) routes by its workspace
+//   rule alone: the ownership test checks the jobs that run a workspace.
 // `workflows` maps a workflow file name to its source; `execution` options
 // go to workflowExecution.
 export function laneSeeds(options) {
@@ -217,7 +217,7 @@ export function laneExecution({
       if (!requirement) continue;
       for (const edge of edges) {
         if (edge.kind === 'assembled') unresolved.add(`${workflow} ${job}: ${edge.text}`);
-        if (edge.kind !== 'file' || (inPackageWorkspace(edge.file) && edge.chain.length === 0)) continue;
+        if (edge.kind !== 'file' || (edge.chain.length === 0 && !edge.run && workspaceSeeds.has(edge.file))) continue;
         seed(edge.file, [edgeRequirement(requirement, edge.chain)], `${workflow} ${edge.via}`);
       }
     }

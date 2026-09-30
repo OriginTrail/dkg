@@ -1,8 +1,10 @@
+import { execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   checksumPathFor,
@@ -437,25 +439,43 @@ describe('bundle-markitdown-binaries helpers', () => {
     expect(pkg.files).toContain('scripts');
   });
 
-  it('tells a workspace checkout by src/ and tsconfig.json, which the published package leaves out', async () => {
+  it('tells a workspace checkout by its tsconfig.json alone', async () => {
     // The postinstall skips the release download only in a workspace
-    // checkout, so removing or renaming either probe makes every install
+    // checkout, so removing or renaming the marker makes every install
     // download a binary; the CI planner routes such a change to full CI.
     const pkgDir = await mkdtemp(join(tmpdir(), 'dkg-markitdown-checkout-'));
     tmpPaths.push(pkgDir);
     await mkdir(join(pkgDir, 'src'));
+    expect(isWorkspaceCheckout(pkgDir)).toBe(false);
     await writeFile(join(pkgDir, 'tsconfig.json'), '{}\n');
     expect(isWorkspaceCheckout(pkgDir)).toBe(true);
-    await rm(join(pkgDir, 'tsconfig.json'));
-    expect(isWorkspaceCheckout(pkgDir)).toBe(false);
-    await writeFile(join(pkgDir, 'tsconfig.json'), '{}\n');
     await rm(join(pkgDir, 'src'), { recursive: true });
-    expect(isWorkspaceCheckout(pkgDir)).toBe(false);
-
-    const pkg = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf-8')) as { files?: string[] };
-    expect(pkg.files).not.toContain('src');
-    expect(pkg.files).not.toContain('tsconfig.json');
+    expect(isWorkspaceCheckout(pkgDir)).toBe(true);
   });
+
+  it('packs no workspace marker, so the installed CLI is no workspace checkout', async () => {
+    // What npm packs (the files field and npm's own rules), not the
+    // manifest's entries: laid out in a directory as an install unpacks it,
+    // the packed CLI must not read as a workspace checkout.
+    const cache = await mkdtemp(join(tmpdir(), 'dkg-markitdown-npm-cache-'));
+    const installed = await mkdtemp(join(tmpdir(), 'dkg-markitdown-packed-'));
+    tmpPaths.push(cache, installed);
+    const report = execFileSync('npm', ['pack', '--dry-run', '--json', '--ignore-scripts'], {
+      cwd: fileURLToPath(new URL('..', import.meta.url)),
+      encoding: 'utf8',
+      env: { ...process.env, npm_config_cache: cache, npm_config_update_notifier: 'false' },
+      shell: process.platform === 'win32',
+    });
+    const [{ files }] = JSON.parse(report) as Array<{ files: Array<{ path: string }> }>;
+    const packed = files.map(({ path: file }) => file);
+    expect(packed).toContain('scripts/bundle-markitdown-binaries.mjs');
+    expect(packed.filter((file) => file === 'tsconfig.json' || file.startsWith('src/'))).toEqual([]);
+    for (const file of packed) {
+      await mkdir(dirname(join(installed, file)), { recursive: true });
+      await writeFile(join(installed, file), '');
+    }
+    expect(isWorkspaceCheckout(installed)).toBe(false);
+  }, 60_000);
 
   it('keeps MarkItDown target metadata packaged for manual releases', async () => {
     const targetsRaw = await readFile(new URL('../markitdown-targets.json', import.meta.url), 'utf-8');

@@ -96,19 +96,14 @@ test('install dependencies are explicit variants, and only their repository path
 
 test('what tells the install hook it runs in a workspace checkout plans full CI', () => {
   // The CLI postinstall skips the release download only when the CLI has its
-  // src/ and tsconfig.json (isWorkspaceCheckout, which the CLI's
-  // markitdown-binaries test pins): deleting or moving either would make
-  // every job's install download a binary for its platform. tsconfig.json
-  // is an install input; src/ holds more files than the large-PR limit, so
-  // emptying or moving it plans full CI too, while one deleted source file
-  // is an ordinary CLI change.
+  // tsconfig.json (isWorkspaceCheckout; the CLI's markitdown-binaries test
+  // pins it, and packs the CLI to check the published package leaves it
+  // out): any change to it plans full CI, since deleting or moving it would
+  // make every job's install download a binary for its platform. Its src/
+  // marks nothing, so a deleted source file is an ordinary CLI change.
   const tsconfig = 'packages/cli/tsconfig.json';
   for (const entry of [change(tsconfig, 'D'), { status: 'R100', paths: [tsconfig, 'packages/cli/tsconfig.base.json'] }, change(tsconfig)]) {
     assert.equal(pullRequestPlan([entry]).mode, 'full', JSON.stringify(entry));
   }
-  const cliSource = sourceFiles('packages/cli/src');
-  assert.equal(pullRequestPlan(cliSource.map((file) => change(file, 'D'))).mode, 'full');
-  const moved = cliSource.map((file) => ({ status: 'R100', paths: [file, file.replace(/^packages\/cli\/src\//, 'packages/cli/source/')] }));
-  assert.equal(pullRequestPlan(moved).mode, 'full');
-  assert.notEqual(pullRequestPlan([change(cliSource[0], 'D')]).mode, 'full');
+  assert.notEqual(pullRequestPlan([change(sourceFiles('packages/cli/src')[0], 'D')]).mode, 'full');
 });

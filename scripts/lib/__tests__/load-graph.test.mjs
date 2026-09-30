@@ -266,6 +266,28 @@ test('a source file runs what a promisified runner names, and reports a runner i
   assert.deepEqual(escaped.assembled, ['execFile', 'withRetry(execFile)', 'spawnProcess = spawn']);
 });
 
+test('a package subpath import loads the one file its exports map names', () => {
+  // Through the require, import or default condition; a bare import, a
+  // subpath the map does not list and one whose file does not exist count as
+  // the whole package.
+  const files = new Map([
+    ['pnpm-workspace.yaml', 'packages:\n  - fixture/*\n'],
+    ['fixture/pkg/package.json', JSON.stringify({
+      name: '@origintrail-official/dkg-fixture',
+      exports: { '.': './dist/index.js', './contract': { types: './contract.d.cts', require: './contract.cjs' }, './missing': './missing.cjs' },
+    })],
+    ['fixture/pkg/contract.cjs', ''],
+    ['fixture/pkg/src/index.ts', ''],
+  ]);
+  const context = fixtureContext(files);
+  const references = (specifier) => loadReferences('fixture/app.mjs', `require('${specifier}');`, context);
+  const contract = references('@origintrail-official/dkg-fixture/contract');
+  assert.deepEqual([contract.modules, contract.packages], [['fixture/pkg/contract.cjs'], []]);
+  for (const specifier of ['@origintrail-official/dkg-fixture', '@origintrail-official/dkg-fixture/missing', '@origintrail-official/dkg-fixture/unlisted']) {
+    assert.deepEqual(references(specifier).packages, ['@origintrail-official/dkg-fixture'], specifier);
+  }
+});
+
 test('a fixture context is its files alone, manifests and directories included', () => {
   // Sources, files, directories, workspaces (pnpm-workspace.yaml) and the
   // root manifest all come from the one file map: a fixture shell script
