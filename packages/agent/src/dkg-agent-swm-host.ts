@@ -4264,8 +4264,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
           concurrency: DKGAgentBase.VM_RECONCILE_CONCURRENCY,
           maxPending: DKGAgentBase.VM_RECONCILE_QUEUE_MAX_PENDING,
           maxForegroundBurst: DKGAgentBase.VM_RECONCILE_MAX_FOREGROUND_BURST,
+          discoveryBatchSize: DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE,
+          periodicBoundBatchSize: DKGAgentBase.VM_RECONCILE_PERIODIC_BOUND_BATCH_SIZE,
         },
-        DKGAgentBase.VM_RECONCILE_UNBOUND_BATCH_SIZE,
       );
       this.vmReconcileScheduling = scheduling;
     }
