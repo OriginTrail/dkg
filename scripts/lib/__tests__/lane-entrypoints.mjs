@@ -152,12 +152,13 @@ const inPackageWorkspace = (file) => Object.keys(WORKSPACE_RULES).some((workspac
 //   specs in the e2e lane and integration suites in the EVM scope that lists
 //   them. A workspace's own scripts/ and fixture workspaces (test-fixtures/)
 //   run only where something runs them.
-// - Every repository file outside the package workspaces that a workflow
-//   job runs or names, directly or through the package scripts and shell
-//   scripts it reaches, with the edge's requirement. A file inside a package
-//   workspace is that workspace's code, which its rule routes (the ownership
-//   test checks the jobs that run each workspace), except what an install
-//   hook runs: every job installs, whatever its lane.
+// - Every repository file a workflow job runs or names, directly or through
+//   the package scripts and shell scripts it reaches, with the edge's
+//   requirement, so what it loads is traced too: a package-local helper a
+//   workspace's build runs carries that build's output. A file inside a
+//   package workspace that a job's own commands name, outside any package
+//   script, is that workspace's code in a job the ownership test checks, and
+//   routes by its rule.
 // `workflows` maps a workflow file name to its source; `execution` options
 // go to workflowExecution.
 export function laneSeeds({
@@ -193,9 +194,7 @@ export function laneSeeds({
       const requirement = jobRequirement(workflow, job, condition);
       if (!requirement) continue;
       for (const edge of edges) {
-        if (edge.kind !== 'file') continue;
-        const installed = edge.chain.some(({ script }) => isInstallLifecycleScript(script));
-        if (inPackageWorkspace(edge.file) && !installed) continue;
+        if (edge.kind !== 'file' || (inPackageWorkspace(edge.file) && edge.chain.length === 0)) continue;
         seed(edge.file, [edgeRequirement(requirement, edge.chain)], `${workflow} ${edge.via}`);
       }
     }

@@ -403,6 +403,14 @@ const UNFOLLOWED_LOADS = new Map([
   ['packages/cli/test/blazegraph-image-metadata.test.ts: parserPath', "the CLI's own blazegraph-image-metadata.cjs"],
   ['packages/mcp-dkg/src/adapters.ts: pkg', 'a third-party adapter package named at run time; ADAPTER_MAP names no workspace'],
   ['packages/adapter-openclaw/test/openclaw-entry.test.ts: href', 'a module the test writes to a temporary directory'],
+  ['packages/agent/scripts/test-package-root.mjs: representativeInternalSpecifier',
+    "the agent package's own built dist/, imported by package name to check its export map; agent source changes run the agent's lanes"],
+  ['packages/agent/scripts/test-package-root.mjs: `@origintrail-official/dkg-agent/dist/rfc64/${path}`',
+    "the agent package's own built dist/rfc64/ entries, checked through its export map"],
+  ['packages/agent/scripts/test-package-root.mjs: `@origintrail-official/dkg-agent/dist/${path}`',
+    "the agent package's own built dist/ entries, checked through its export map"],
+  ['packages/agent/scripts/bench-sync-telemetry.mjs: pathToFileURL(distFile).href',
+    "the agent's built dist/sync/attempt-telemetry.js, built from agent source the agent rule routes"],
 ]);
 
 // What the load-closure guard reports for a trace: each load whose file does
@@ -660,6 +668,24 @@ test('the load-closure guard holds install hooks to full CI and builds to their 
   const viz = { loaded: new Map([[graphViz, new Map([[output, copier]])]]), unfollowed: new Map() };
   assert.deepEqual(loadClosureGaps(viz).missing, []);
   assert.deepEqual(loadClosureGaps(viz, { plan: withoutBrowser }).missing, [`${output} loads ${graphViz} via ${copier}`]);
+});
+
+test('a package-local helper a workspace build runs is traced with that build output', () => {
+  // The CLI build runs a helper under packages/cli/scripts/, which imports a
+  // build-only repository script: that script now shapes the CLI's build
+  // output, so a plan with the build checks alone is reported.
+  const helper = 'packages/cli/scripts/planted-helper.mjs';
+  const cli = { name: '@origintrail-official/dkg', scripts: { build: 'node scripts/planted-helper.mjs' } };
+  const execution = {
+    workspaces: { manifests: new Map([['packages/cli', cli]]), workspaceByName: new Map([[cli.name, 'packages/cli']]) },
+    rootManifest: { scripts: { 'build:packages': 'turbo build' } },
+    readRepoFile: (file) => (file === helper ? '' : undefined),
+  };
+  const workflow = "jobs:\n  build:\n    if: needs.changes.outputs.run_node == 'true'\n    steps:\n      - run: pnpm run build:packages\n";
+  const seeds = laneSeeds({ workflows: [['ci.yml', workflow]], execution, workspaceCode: false });
+  assert.equal(seeds.get(helper)?.has(requirement.buildOutput('packages/cli')), true);
+  const trace = traceLaneLoads(seeds, { read: (file) => (file === helper ? "import '../../../scripts/audit-dial-protocol.mjs';" : undefined) });
+  assert.deepEqual(loadClosureGaps(trace).missing, [`build-output:packages/cli loads scripts/audit-dial-protocol.mjs via ${helper}`]);
 });
 
 test('a script path a lane assembles at run time fails the guard until it is listed', () => {
