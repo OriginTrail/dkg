@@ -220,6 +220,8 @@ test('repository support paths route to the lanes that execute them', () => {
     ['scripts/import-ontology.mjs', []],
     ['scripts/repro/wm-persistence-regression.mjs', []],
     ['scripts/devnet-publish-helpers.sh', ['bura_cli']],
+    // The chain lane runs the ABI sync script (sync-chain-abis.unit.test.ts).
+    ['scripts/sync-chain-abis.mjs', ['tornado_core']],
     ['scripts/devnet.sh', ['tornado_blazegraph', 'tornado_agent', 'bura_cli', 'kosava_node_ui_e2e']],
     ['scripts/lib/__tests__/devnet-curated-join-helpers.test.mjs', []],
     ['test-policy/disabled-tests.json', []],
