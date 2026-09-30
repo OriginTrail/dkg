@@ -37,7 +37,7 @@ nodes.
    on-chain id) then name it, the superseded job stays readable by its id, and
    the content is unchanged. The test converges an edge on a graph of its own
    first (see "Structure").
-5. The SWM copy of a second graph, shared but never published, backfills on
+5. The SWM copy of the shared-only graph (shared but never published) backfills on
    both edges after they subscribe by hash (edge 5) and by numeric id (edge 6).
    This is its own graph and its own test because it depends on something the
    hash path does not: holders serve a graph's shared working memory only once
@@ -84,21 +84,26 @@ another.
   | 5 | edges 5 and 6 | `swm` | by hash and by numeric id |
   | 6 | edge 6 | `unheld` | by hash |
 
-  Tests 2, 3, 5 and 6 have a subscribe as their subject, so they need an edge that
-  has never seen the graph, and they check that instead of asserting on leftovers.
+  Tests 2, 3, 5 and 6 have a subscribe as their subject, so they need an edge with
+  no subscribed row for the graph, and they check that instead of asserting on
+  leftovers (the edge's chain poller may already know the slot: that is not a
+  subscription).
   Test 4 is the only one that needs a state a subscribe leaves behind (an edge
   converged on VM), so it makes it itself with an idempotent arrange step
   (`ensureConverged`: subscribe only when the edge has no row for the graph, then
   wait for adoption and content). It uses a graph of its own so it cannot consume
   test 2's "never seen" precondition when it runs first, and it stays a separate
   test so a failure names the behavior and it can run by name.
-- **Wire types** come from the daemon's own declarations
-  (`packages/cli/src/catchup-status.ts` for the catch-up status and the identity
-  note, `packages/cli/src/api-client.ts` for the subscribe and list replies),
-  imported as types only, so a renamed field fails the type-check instead of a
-  long devnet run. The one row shape with no exported declaration (an entry of
-  `GET /api/context-graph/subscriptions`) is stated locally, with a comment naming
-  the route.
+- **Wire types** are imported as types only. The catch-up status and the identity
+  note use the daemon's own declarations (`packages/cli/src/catchup-status.ts`);
+  the subscribe and list replies use the CLI client's declarations
+  (`packages/cli/src/api-client.ts`), which nothing binds to the route's output.
+  A type-check of the suite (a throwaway tsconfig or an editor: nothing in CI
+  type-checks devnet suites) then catches a renamed field and, through
+  `satisfies` on the expected identity objects and job state, a changed
+  identity-state or job-state spelling, instead of a long devnet run. The one row
+  shape with no exported declaration (an entry of `GET /api/context-graph/
+  subscriptions`) is stated locally, with a comment naming the route.
 
 ## Run
 

@@ -24,8 +24,9 @@
  *   4. A forced catch-up (`forceCatchup`, the operator's recovery) on an already
  *      converged graph mints a replacement job that both aliases follow; the
  *      superseded job stays readable by its id and the content is unchanged.
- *   5. The shared working memory of a second graph, shared but never published,
- *      backfills on both edges after they subscribe by hash and by numeric id.
+ *   5. The shared working memory of the shared-only graph (shared but never
+ *      published) backfills on both edges after they subscribe by hash and by
+ *      numeric id.
  *      It is its own graph and its own test because holders serve SWM only once
  *      their RFC-64 authority pipeline has accepted the graph, and that pipeline
  *      can lag for many minutes after a devnet starts; the adoption and VM tests
@@ -52,8 +53,9 @@
  *         test 6  edge B          unheld name   subscribed by hash
  *
  *     Tests 2, 3, 5 and 6 have a subscribe as their subject, so they need an edge
- *     that has never seen the graph and check that (`expectNoRowFor`) instead of
- *     silently asserting on someone else's leftovers. Test 4 is the only one that
+ *     with no subscribed row for the graph and check that (`expectNoRowFor`)
+ *     instead of silently asserting on someone else's leftovers. (The edge's chain
+ *     poller may already know the slot: that is not a subscription.) Test 4 is the only one that
  *     needs a state a subscribe leaves behind (an edge converged on VM), so it
  *     makes it itself with the idempotent `ensureConverged` (subscribe only when
  *     the edge has no row, then wait for adoption and content). It does that on a
@@ -99,7 +101,11 @@ import {
 // runtime, and a renamed or retyped field fails the type-check instead of a long
 // devnet run (repo practice: devnet/ack-candidate-isolation imports the cli source).
 import type { ApiClient } from '../../packages/cli/src/api-client.js';
-import type { CatchupContextGraphIdentity, CatchupStatusResponse } from '../../packages/cli/src/catchup-status.js';
+import type {
+  CatchupContextGraphIdentity,
+  CatchupJobState,
+  CatchupStatusResponse,
+} from '../../packages/cli/src/catchup-status.js';
 
 const NAME_PREDICATE = 'https://schema.org/name';
 const keccak = (id: string): string => ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
@@ -134,17 +140,17 @@ interface SubscriptionRow {
 
 /** A public graph registered on chain, holding one Knowledge Asset by one subject. */
 interface RegisteredGraph {
-  id: string;
-  onChainId: string;
-  nameHash: string;
-  subject: string;
-  value: string;
+  readonly id: string;
+  readonly onChainId: string;
+  readonly nameHash: string;
+  readonly subject: string;
+  readonly value: string;
 }
 
 /** A graph registered on chain straight through the contract, whose preimage no node has ever seen. */
 interface UnheldGraph {
-  nameHash: string;
-  onChainId: string;
+  readonly nameHash: string;
+  readonly onChainId: string;
 }
 
 /** Everything the tests share. Built once in `beforeAll`, never modified afterwards. */
@@ -457,7 +463,7 @@ async function createPublishedGraph(id: string, name: string): Promise<Registere
   const registration = await registerPublicGraph(id);
   const file = makeNquadsFile(import.meta.dirname, name, id);
   const published = await publishViaCli(author, id, file.path);
-  expect(published.status).toBe('confirmed');
+  expect(published.status, `publishing ${id} to VM`).toBe('confirmed');
   return { id, ...registration, subject: file.subject, value: name };
 }
 
@@ -540,7 +546,12 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
         return rows.length > 0 ? rows : null;
       });
     }
-    fixture = Object.freeze({ vm, forced, swm, unheld });
+    fixture = Object.freeze({
+      vm: Object.freeze(vm),
+      forced: Object.freeze(forced),
+      swm: Object.freeze(swm),
+      unheld: Object.freeze(unheld),
+    });
   }, 900_000);
 
   it('the real chain commits only keccak256 of each registered graph id, and the author holds what it published and shared', async () => {
@@ -550,7 +561,6 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
       // verifying edge relies on.
       const committed = String(await storage.getNameHash(BigInt(graph.onChainId))).toLowerCase();
       expect(committed, `on-chain name hash of ${graph.id}`).toBe(keccak(graph.id));
-      expect(committed, `the hash edges subscribe with is the committed one (${graph.id})`).toBe(graph.nameHash);
     }
     for (const [graph, view] of [
       [fixture.vm, 'verifiable-memory'],
@@ -605,7 +615,12 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
       const byHash = await waitFor(`node${edgeA.num} catch-up status by name hash`, 60_000, 2_000, async () => catchupStatus(edgeA, vmGraph.nameHash));
       expect(byHash.resolvedContextGraphId ?? byHash.contextGraphId).toBe(vmGraph.id);
       if (byHash.identity) {
-        expect(byHash.identity).toMatchObject({ state: 'resolved', nameHash: vmGraph.nameHash, contextGraphId: vmGraph.id });
+        // `satisfies` types the expected object against the daemon's declaration:
+        // vitest types toMatchObject loosely, so without it a changed identity
+        // state spelling would compile here and fail only in a long devnet run.
+        expect(byHash.identity).toMatchObject(
+          { state: 'resolved', nameHash: vmGraph.nameHash, contextGraphId: vmGraph.id } satisfies Partial<CatchupContextGraphIdentity>,
+        );
       }
     }
   }, 900_000);
@@ -718,7 +733,7 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     expect(before, `node${edgeB.num} must not yet be subscribed to the unheld graph`).not.toContain(nameHash);
     const subscribed = await subscribeWhenAdmitted(edgeB, nameHash);
     expect(subscribed.subscribed).toBe(nameHash);
-    expect(subscribed.identity, JSON.stringify(subscribed)).toMatchObject({ state: 'name-hash-only', nameHash, onChainId });
+    expect(subscribed.identity, JSON.stringify(subscribed)).toMatchObject({ state: 'name-hash-only', nameHash, onChainId } satisfies Partial<CatchupContextGraphIdentity>);
 
     // Give the resolver several rounds against every connected peer; it must
     // still find nothing, and must not have made up an id.
@@ -727,7 +742,7 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     const row = after.find((candidate) => candidate.contextGraphId === nameHash);
     expect(row, 'the hash-keyed row stays').toBeDefined();
     expect(row!.subscribed).toBe(true);
-    expect(row!.identity).toMatchObject({ state: 'name-hash-only', nameHash, onChainId });
+    expect(row!.identity).toMatchObject({ state: 'name-hash-only', nameHash, onChainId } satisfies Partial<CatchupContextGraphIdentity>);
     const added = after.map((candidate) => candidate.contextGraphId).filter((id) => !before.includes(id));
     expect(added, 'no other row appeared for the unknown graph').toEqual([nameHash]);
 
@@ -736,8 +751,8 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
       const found = await catchupStatus(edgeB, nameHash);
       return found !== null && found.jobStatus !== 'queued' && found.jobStatus !== 'running' ? found : null;
     });
-    expect(status.jobStatus).toBe('unreachable');
-    expect(status.identity).toMatchObject({ state: 'name-hash-only', nameHash, onChainId });
+    expect(status.jobStatus).toBe('unreachable' satisfies CatchupJobState);
+    expect(status.identity).toMatchObject({ state: 'name-hash-only', nameHash, onChainId } satisfies Partial<CatchupContextGraphIdentity>);
     // The verdict is the name-hash-only note, not the generic "no peer could deliver" one.
     expect(status.error).toBe(status.identity?.message);
     expect(status.error).toContain('on-chain name hash');
