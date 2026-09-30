@@ -40,6 +40,16 @@
 #                 Local snapshot-store watermarks (defaults: 256 MiB, 512 MiB,
 #                 and 1 GiB) so devnet keeps capacity admission without
 #                 requiring production-scale free disk.
+#   DEVNET_SNAPSHOT_GC_FINALIZED_CLEANUP=1
+#                 Opt every node into the finalized-snapshot collector
+#                 (sharedMemoryPublicSnapshotStorage.gc.finalizedCleanupEnabled).
+#   DEVNET_SNAPSHOT_GC_FINALIZED_RETENTION_MS
+#                 Grace period after a confirmed publish before a snapshot may
+#                 be reclaimed (only written with FINALIZED_CLEANUP=1; the node
+#                 default is 24 hours).
+#   DEVNET_SNAPSHOT_GC_INTERVAL_MS
+#                 How often the snapshot collector runs (only written when set;
+#                 the node default is 5 minutes).
 #
 set -euo pipefail
 
@@ -687,6 +697,21 @@ create_node_config() {
     rs_block="\"randomSampling\": { \"walPath\": \"${node_dir}/random-sampling.wal\", \"tickIntervalMs\": 5000 },"
   fi
 
+  # Optional snapshot collector tuning; nothing is written unless requested.
+  local snapshot_gc_extra=""
+  if [ "${DEVNET_SNAPSHOT_GC_FINALIZED_CLEANUP:-}" = "1" ]; then
+    snapshot_gc_extra="${snapshot_gc_extra},
+      \"finalizedCleanupEnabled\": true"
+    if [ -n "${DEVNET_SNAPSHOT_GC_FINALIZED_RETENTION_MS:-}" ]; then
+      snapshot_gc_extra="${snapshot_gc_extra},
+      \"finalizedRetentionMs\": ${DEVNET_SNAPSHOT_GC_FINALIZED_RETENTION_MS}"
+    fi
+  fi
+  if [ -n "${DEVNET_SNAPSHOT_GC_INTERVAL_MS:-}" ]; then
+    snapshot_gc_extra="${snapshot_gc_extra},
+      \"intervalMs\": ${DEVNET_SNAPSHOT_GC_INTERVAL_MS}"
+  fi
+
   cat > "$node_dir/config.json" <<EOCONF
 {
   "name": "devnet-node-${node_num}",
@@ -704,7 +729,7 @@ create_node_config() {
     "gc": {
       "hardReserveBytes": ${DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES},
       "triggerFreeBytes": ${DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES},
-      "targetFreeBytes": ${DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES}
+      "targetFreeBytes": ${DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES}${snapshot_gc_extra}
     }
   },
   "publisher": {
