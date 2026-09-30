@@ -1,3 +1,4 @@
+import { snapshotOperation, type WorkspaceSnapshotScope } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   withKeyedLocks,
@@ -20,7 +21,7 @@ import {
 } from './swm-recovery-apply.js';
 import {
   collectPublicSnapshotMetadata,
-  syncPublicSnapshotsForMeta,
+  syncPublicSnapshotsInScope,
   type PublicSnapshotMetadata,
 } from './shared-memory-sync.js';
 import { preparePrivateSwmSnapshotWalk } from './private-swm-snapshot-walk-registry.js';
@@ -364,9 +365,7 @@ async function fetchPhaseFully(
   };
 }
 
-export async function recoverContextGraphSwm(
-  deps: RecoverContextGraphSwmDeps,
-): Promise<RecoverContextGraphSwmResult> {
+export const recoverContextGraphSwm = snapshotOperation<RecoverContextGraphSwmDeps, RecoverContextGraphSwmResult>(async deps => {
   const admittedDeps: AdmittedRecoverContextGraphSwmDeps = {
     ...deps,
     workAdmission: deps.workAdmission ?? composeSyncWorkAdmission({
@@ -378,9 +377,9 @@ export async function recoverContextGraphSwm(
   return withKeyedLocks(
     deps.writeLocks,
     [contextGraphSwmRecoveryWriteLockKey(deps.contextGraphId)],
-    () => recoverContextGraphSwmUnlocked(admittedDeps, boundary),
+    () => recoverContextGraphSwmUnlocked(admittedDeps, boundary, deps.publicSnapshotStore),
   );
-}
+});
 
 /**
  * Recovery-level lock key. Per-KA materialization keeps using the canonical
@@ -394,6 +393,7 @@ export function contextGraphSwmRecoveryWriteLockKey(contextGraphId: string): str
 async function recoverContextGraphSwmUnlocked(
   deps: AdmittedRecoverContextGraphSwmDeps,
   boundary: RecoveryExecutionAdmission,
+  snapshotScope: WorkspaceSnapshotScope | undefined,
 ): Promise<RecoverContextGraphSwmResult> {
   boundary.assertCurrent();
   const wsGraph = contextGraphWorkspaceGraphUri(deps.contextGraphId);
@@ -533,7 +533,7 @@ async function recoverContextGraphSwmUnlocked(
       const asset = await boundary.read(() => materializeGraphScopedSwmRecoveryAsset({
         descriptor,
         fetchedDataQuads: [],
-        publicSnapshotStore: deps.publicSnapshotStore,
+        publicSnapshotStore: snapshotScope,
       }));
       // Admit the retry-safe graph+metadata sequence once. A lease revoked
       // before admission prevents every mutation; one revoked after graph
@@ -625,7 +625,7 @@ async function recoverContextGraphSwmUnlocked(
       };
     }
     boundary.assertCurrent();
-    const snapshotSync = await syncPublicSnapshotsForMeta({
+    const snapshotSync = await syncPublicSnapshotsInScope({
       ctx: deps.ctx,
       remotePeerId: deps.remotePeerId,
       contextGraphId: deps.contextGraphId,
@@ -634,8 +634,8 @@ async function recoverContextGraphSwmUnlocked(
       ...(privatePreparation?.kind === 'prepared'
         ? { snapshotWalk: privatePreparation.plan }
         : { metaQuads: activeGraphMeta }),
-      publicSnapshotStore: deps.publicSnapshotStore,
-      // Raw ports: syncPublicSnapshotsForMeta is the sole owner of admission,
+      publicSnapshotStore: snapshotScope,
+      // Raw ports: syncPublicSnapshotsInScope is the sole owner of admission,
       // post-read checks, signal attachment, and checkpoint commits.
       fetchSyncPages: deps.fetchSyncPages,
       deleteCheckpoint: deps.deleteCheckpoint,
@@ -750,7 +750,7 @@ async function recoverContextGraphSwmUnlocked(
     const asset = await boundary.read(() => materializeGraphScopedSwmRecoveryAsset({
       descriptor,
       fetchedDataQuads: dataQuads,
-      publicSnapshotStore: deps.publicSnapshotStore,
+      publicSnapshotStore: snapshotScope,
     }));
     graphAssets.push(Object.freeze({
       kind: 'replace',

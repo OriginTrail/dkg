@@ -1,3 +1,4 @@
+import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
 import type { PreBroadcastRecord } from './publisher.js';
@@ -1173,6 +1174,7 @@ export class DKGPublisher implements Publisher {
   private tentativeCounter = 0;
   readonly writeLocks: Map<string, Promise<void>>;
   private readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  private readonly publishedSnapshotRetirement: PublishedSnapshotRetirement;
   /** OT-RFC-43 Option 1 — deterministic KA-id allocator (optional; see DKGPublisherConfig). */
   private readonly kaAllocator?: KaIdAllocator;
   private readonly resolveDurableRootPromotionAtomicCompanion?: (
@@ -1243,6 +1245,7 @@ export class DKGPublisher implements Publisher {
     this.setWorkspaceAgentRecipientResolver(config.workspaceAgentRecipientResolver);
     this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
     this.publicSnapshotStore = config.publicSnapshotStore;
+    this.publishedSnapshotRetirement = new PublishedSnapshotRetirement(this.store, config.publicSnapshotStore?.lifecycle);
     this.publisherPlanner = new PublisherPlanner({
       chain: this.chain,
       resolvePublisherAddressSelection: (contextGraphId, options) =>
@@ -7573,6 +7576,10 @@ export class DKGPublisher implements Publisher {
     const operationSubjects = operationRows.type === 'bindings'
       ? [...new Set(operationRows.bindings.map((row) => row['operation']).filter(Boolean))]
       : [];
+    // Persist the candidate BEFORE removing its references. If cleanup fails or
+    // the process exits midway, remaining metadata makes collection fail closed.
+    // Only this confirmed/durable cleanup boundary creates retirement candidates.
+    await this.publishedSnapshotRetirement.schedule(swmMetaGraph, operationSubjects, message => this.log.warn(ctx, message));
     const graphs = await resolveSharedMemoryScopeGraphs(this.store, swmGraph, scope);
     for (const graph of graphs) {
       await this.store.dropGraph(graph);

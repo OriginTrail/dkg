@@ -193,6 +193,12 @@ describe('runDaemonInner public snapshot page-index wiring', () => {
       getSnapshotPage: vi.fn(),
     };
     mocks.createPublicSnapshotStore.mockReturnValue(publicSnapshotStore);
+    const query = vi.fn(async () => ({ type: 'boolean', value: true }));
+    mocks.agentCreate.mockImplementation(async config => {
+      expect(mocks.createPublicSnapshotStore).not.toHaveBeenCalled();
+      const store = { query };
+      return { ...createFakeAgent(), store, publicSnapshotStore: config.publicSnapshotStoreFactory(store) };
+    });
 
     await runDaemonInner(true, {
       name: 'snapshot-index-wiring-test',
@@ -216,11 +222,14 @@ describe('runDaemonInner public snapshot page-index wiring', () => {
     await vi.advanceTimersByTimeAsync(0);
 
     expect(mocks.createPublicSnapshotStore).toHaveBeenCalledTimes(1);
-    const [, , pageIndexStore] = mocks.createPublicSnapshotStore.mock.calls[0] as unknown[];
-    expect(pageIndexStore).toBeInstanceOf(SqliteSnapshotPageIndexStore);
+    const options = mocks.createPublicSnapshotStore.mock.calls[0]?.[2];
+    expect(options.pageIndexStore).toBeInstanceOf(SqliteSnapshotPageIndexStore);
+    expect(options.store.query).toBe(query);
+    expect(options.log).toBeTypeOf('function');
 
     const agentCreateArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
-    expect(agentCreateArg.publicSnapshotStore).toBe(publicSnapshotStore);
+    expect(agentCreateArg.publicSnapshotStore).toBeUndefined();
+    expect(agentCreateArg.publicSnapshotStoreFactory).toBeTypeOf('function');
 
     const [, publisherControlOptions] = mocks.createPublisherControlFromStore.mock.calls[0] as [
       unknown,
