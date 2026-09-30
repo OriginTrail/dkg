@@ -10,15 +10,25 @@
  * snapshot files on disk, that:
  *
  *   PHASE A - today's default (no gate). Only node 5 is a da-DK host; the four
- *     cores are en-US and write en-US digests. A late-joining da-DK edge syncs
- *     that public graph, sees all its Shared Working Memory, stores the
- *     snapshot under the digest its peers advertised, and logs no digest
- *     validation failure. Before this change it rejected them.
+ *     cores are en-US and node 1 (en-US) originates a share, recording and
+ *     naming its snapshot by the en-US digest. A da-DK edge that joins AFTER the
+ *     write catches the graph up through sync, which verifies that advertised
+ *     digest against the bytes: it sees all the Shared Working Memory and logs
+ *     no digest validation failure (before this change it rejected them).
+ *   PHASE A2 - still without the gate, the da-DK edge originates a share of its
+ *     own: it records a DIFFERENT digest than an en-US node does for the same
+ *     kind of content. This is the drift the change removes.
  *   PHASE B - `DKG_SWM_DIGEST_ORDERING=code-unit` on the cores and one edge,
- *     mixed locales (cores 1 and 3 are da-DK): every core writes the SAME
- *     snapshot file name, a late da-DK edge with the gate on and a late en-US
- *     edge WITHOUT it (a legacy-mode node running this build) both sync it,
- *     and the snapshots written in phase A stay readable after the flip.
+ *     mixed locales (nodes 1, 3 and 5 are da-DK): identical content written by a
+ *     da-DK originator (node 3) and an en-US originator (node 2) records and
+ *     names its snapshot by the same digest; a late da-DK edge with the gate on
+ *     and a late en-US edge WITHOUT it (a legacy-mode node running this build)
+ *     both sync it. Snapshots persisted before the flip stay in place.
+ *
+ * Only the node that originates a share records a digest and a snapshot file;
+ * peers that receive the write hold the data but no digest, so digests are read
+ * from the originators. Late joiners are where a peer-advertised digest is
+ * checked against bytes.
  *
  * Rows are chosen so the canonical order really differs between the en-US,
  * da-DK and code-unit collations: an ordinary test corpus would give every
@@ -31,25 +41,26 @@
  *   pnpm test:devnet:swm-digest-locale
  *
  * Isolation: only self-created context graphs are written to; the shared
- * devnet-test graph and every node wallet are untouched. The nodes are left
- * running with the environment of the last phase; restart the devnet before
- * running another suite that assumes default nodes.
+ * devnet-test graph and every node wallet are untouched. Every node is
+ * restarted with the default environment at the start and again at the end.
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   DEVNET_DIR,
   REPO_ROOT,
   detectDevnet,
   ensureAllIdentities,
+  lexical,
   postJson,
   queryNode,
   sleep,
   waitFor,
   type DevnetNode,
+  type DevnetState,
 } from '../_bootstrap/harness.js';
 
 const PREDICATE = 'https://schema.org/name';
@@ -64,6 +75,7 @@ const CONFIG_LINE = /SWM public-quads digest ordering=(\S+) collatorLocale=(\S+)
 const DIGEST_FAILURE = /failed digest\/count validation|snapshot is missing or corrupt|failed integrity/i;
 
 let nodes: Record<number, DevnetNode>;
+let provider: DevnetState['provider'];
 let counter = 0;
 
 const unique = (prefix: string): string =>
@@ -209,12 +221,22 @@ async function createContextGraph(node: DevnetNode, id: string): Promise<void> {
   expect(created.status, `create ${id}: ${JSON.stringify(created.json)}`).toBe(200);
   const registered = await postJson(node, '/api/context-graph/register', { id });
   expect(registered.status, `register ${id}: ${JSON.stringify(registered.json)}`).toBe(200);
+  // A node treats the graph as confirmed once its registration is a few blocks
+  // deep, and Hardhat only mines when a transaction arrives: mine them here so a
+  // node that restarted moments ago is not left waiting on an idle chain.
+  for (let block = 0; block < 10; block++) await provider.send('evm_mine', []);
 }
 
 async function subscribe(node: DevnetNode, contextGraphId: string): Promise<void> {
-  const result = await postJson(node, '/api/context-graph/subscribe', {
-    contextGraphId,
-    includeSharedMemory: true,
+  // A node that just restarted answers 503 CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE
+  // (retryable) until its chain and metadata reads have recovered.
+  const result = await waitFor(`node${node.num} subscribes to ${contextGraphId}`, 120_000, 4_000, async () => {
+    const attempt = await postJson(node, '/api/context-graph/subscribe', {
+      contextGraphId,
+      includeSharedMemory: true,
+    });
+    if (attempt.status === 503 && attempt.json?.retryable === true) return null;
+    return attempt;
   });
   expect(result.status, `subscribe node${node.num} ${contextGraphId}: ${JSON.stringify(result.json)}`).toBe(200);
 }
@@ -228,16 +250,31 @@ async function shareKnowledgeAsset(node: DevnetNode, contextGraphId: string, tag
     finalize: true,
     alsoShareSwm: true,
   });
-  expect(result.status, `share ${name}: ${JSON.stringify(result.json)}`).toBe(200);
+  expect([200, 201], `share ${name} (HTTP ${result.status}): ${JSON.stringify(result.json)}`).toContain(result.status);
 }
 
 async function visibleSubjects(node: DevnetNode, contextGraphId: string, tag: string): Promise<number> {
   const rows = await queryNode(
     node,
-    `SELECT ?s WHERE { GRAPH ?g { ?s <${PREDICATE}> ?o } FILTER(STRCONTAINS(STR(?s), "urn:swm-digest:${tag}:")) }`,
+    `SELECT ?s WHERE { GRAPH ?g { ?s <${PREDICATE}> ?o } FILTER(CONTAINS(STR(?s), "urn:swm-digest:${tag}:")) }`,
     { contextGraphId, view: 'shared-working-memory' },
   );
   return new Set(rows.map((row) => String((row as Record<string, unknown>).s))).size;
+}
+
+/**
+ * The `dkg:publicQuadsDigest` values a node recorded for a context graph, read
+ * from its shared-memory metadata. Only the node that originated a share (and a
+ * node that caught one up from a descriptor) records one: peers that receive the
+ * write over gossip hold the data but no digest.
+ */
+async function recordedDigests(node: DevnetNode, contextGraphId: string): Promise<string[]> {
+  const rows = await queryNode(
+    node,
+    'SELECT ?d WHERE { GRAPH ?g { ?op <http://dkg.io/ontology/publicQuadsDigest> ?d } }',
+    { contextGraphId },
+  );
+  return rows.map((row) => lexical((row as Record<string, unknown>).d as string)).sort();
 }
 
 async function waitForSharedMemory(node: DevnetNode, contextGraphId: string, tag: string): Promise<void> {
@@ -264,7 +301,14 @@ beforeAll(async () => {
   }
   await ensureAllIdentities(detected, 4);
   nodes = detected.nodes;
+  provider = detected.provider;
 }, 300_000);
+
+afterAll(() => {
+  // Leave the devnet as the next suite expects it: every node on the default
+  // locale with the legacy digest ordering.
+  for (const n of [1, 2, 3, 4, 5, 6]) restartNode(n, '');
+}, 600_000);
 
 describe('the divergent corpus', () => {
   it('sorts three different ways, so no assertion below can pass vacuously', () => {
@@ -275,9 +319,13 @@ describe('the divergent corpus', () => {
 
 describe('SWM digests across host locales on a real devnet', () => {
   const phaseA = { tag: 'a', cg: unique('swm-digest-a') };
+  const phaseA2 = { tag: 'a2', cg: phaseA.cg };
   const phaseB = { tag: 'b', cg: unique('swm-digest-b') };
+  const phaseB2 = { tag: 'b', cg: unique('swm-digest-c') };
 
   it('starts node 5 on a da-DK host and every other node on the default locale', async () => {
+    // A known starting point whatever an earlier run left behind.
+    for (const n of [1, 2, 3, 4, 6]) restartNode(n, '');
     restartNode(5, DA);
     expect(lastDigestConfiguration(5)).toMatchObject({ ordering: 'locale' });
     expect(lastDigestConfiguration(5)?.collatorLocale).toMatch(/^da/);
@@ -289,16 +337,23 @@ describe('SWM digests across host locales on a real devnet', () => {
     }
   });
 
-  it('phase A: a late da-DK edge syncs digests that en-US nodes wrote, with no digest failure', async () => {
+  it('phase A: a late da-DK edge syncs digests that an en-US node wrote, with no digest failure', async () => {
     const offsets = logOffsets();
     await createContextGraph(nodes[1]!, phaseA.cg);
     for (const n of [2, 3, 4]) await subscribe(nodes[n]!, phaseA.cg);
     await shareKnowledgeAsset(nodes[1]!, phaseA.cg, phaseA.tag);
     for (const n of [1, 2, 3, 4]) await waitForSharedMemory(nodes[n]!, phaseA.cg, phaseA.tag);
 
-    // The edge subscribes AFTER the write: its data arrives through catch-up
-    // sync from the en-US cores, which verifies the digest a peer advertised
-    // against the bytes. A da-DK node's own digest for them would differ.
+    const rows = quadsFor(phaseA.tag);
+    const [enUS, daDK] = [oracle.enUS(rows), oracle.daDK(rows)];
+    expect(enUS).not.toBe(daDK);
+    // The en-US originator recorded the en-US digest and named its snapshot by it.
+    expect(await recordedDigests(nodes[1]!, phaseA.cg)).toEqual([enUS]);
+    expect(snapshotDigestsFor(1, phaseA.tag)).toEqual([enUS]);
+
+    // The edge subscribes AFTER the write: its data arrives through catch-up,
+    // which verifies the digest the peer advertised against the bytes. The
+    // digest a da-DK node computes for the same quads is different.
     await subscribe(nodes[5]!, phaseA.cg);
     await waitForSharedMemory(nodes[5]!, phaseA.cg, phaseA.tag);
     await sleep(3_000);
@@ -307,21 +362,29 @@ describe('SWM digests across host locales on a real devnet', () => {
       expect(digestFailures(n, offsets[n]!), `node${n} logged a digest validation failure`).toEqual([]);
       assertNoHeadIdentityConflict(n, offsets[n]!);
     }
-
-    const rows = quadsFor(phaseA.tag);
-    const [enUS, daDK] = [oracle.enUS(rows), oracle.daDK(rows)];
-    expect(enUS).not.toBe(daDK);
-    // Every en-US core wrote the en-US digest ...
-    for (const n of [1, 2, 3, 4]) {
-      expect(snapshotDigestsFor(n, phaseA.tag), `core node${n} snapshot name`).toEqual([enUS]);
-    }
-    // ... and the da-DK edge, whose own-locale digest would be different, holds
-    // the snapshot under the digest its peers advertised.
-    expect(snapshotDigestsFor(5, phaseA.tag)).toEqual([enUS]);
+    // Whatever the edge recorded is the advertised digest, never its own-locale one.
+    const recorded = await recordedDigests(nodes[5]!, phaseA.cg);
+    // eslint-disable-next-line no-console
+    console.log(`phase A: node5 recorded digests ${JSON.stringify(recorded)} (advertised ${enUS})`);
+    expect(recorded.filter((digest) => digest !== enUS)).toEqual([]);
     expect(snapshotRows(1, phaseA.tag)).toHaveLength(NAMES.length);
   });
 
-  it('phase B: with the gate on, every core writes the same snapshot file whatever its locale', async () => {
+  it('phase A2: without the gate, a da-DK node still writes a different digest for the same content', async () => {
+    // The drift this change removes: the same rows, another host locale.
+    await shareKnowledgeAsset(nodes[5]!, phaseA2.cg, phaseA2.tag);
+    const rows = quadsFor(phaseA2.tag);
+    const [enUS, daDK] = [oracle.enUS(rows), oracle.daDK(rows)];
+    expect(enUS).not.toBe(daDK);
+    const recorded = await waitFor('node5 records the digest of its own share', 60_000, 3_000, async () => {
+      const digests = (await recordedDigests(nodes[5]!, phaseA2.cg)).filter((digest) => digest === daDK || digest === enUS);
+      return digests.length > 0 ? digests : null;
+    });
+    expect(recorded).toEqual([daDK]);
+    expect(snapshotDigestsFor(5, phaseA2.tag)).toEqual([daDK]);
+  });
+
+  it('phase B: with the gate on, originators on different locales write the same digest', async () => {
     restartNode(1, `${CODE_UNIT} ${DA}`);
     restartNode(2, `${CODE_UNIT} ${EN}`);
     restartNode(3, `${CODE_UNIT} ${DA}`);
@@ -336,15 +399,23 @@ describe('SWM digests across host locales on a real devnet', () => {
     expect(lastDigestConfiguration(6)).toMatchObject({ ordering: 'locale', collatorLocale: 'en-US' });
 
     const offsets = logOffsets();
-    await createContextGraph(nodes[3]!, phaseB.cg);
-    for (const n of [1, 2, 4]) await subscribe(nodes[n]!, phaseB.cg);
-    await shareKnowledgeAsset(nodes[3]!, phaseB.cg, phaseB.tag);
-    for (const n of [1, 2, 3, 4]) await waitForSharedMemory(nodes[n]!, phaseB.cg, phaseB.tag);
-
     const codeUnit = oracle.codeUnit(quadsFor(phaseB.tag));
-    for (const n of [1, 2, 3, 4]) {
-      expect(snapshotDigestsFor(n, phaseB.tag), `node${n} snapshot name`).toEqual([codeUnit]);
-    }
+    // Identical content written by a da-DK originator (node 3) and an en-US
+    // originator (node 2), into two different graphs.
+    await createContextGraph(nodes[3]!, phaseB.cg);
+    await createContextGraph(nodes[2]!, phaseB2.cg);
+    for (const n of [1, 2, 4]) await subscribe(nodes[n]!, phaseB.cg);
+    for (const n of [1, 3, 4]) await subscribe(nodes[n]!, phaseB2.cg);
+    await shareKnowledgeAsset(nodes[3]!, phaseB.cg, phaseB.tag);
+    await shareKnowledgeAsset(nodes[2]!, phaseB2.cg, phaseB2.tag);
+    for (const n of [1, 2, 3, 4]) await waitForSharedMemory(nodes[n]!, phaseB.cg, phaseB.tag);
+    for (const n of [1, 2, 3, 4]) await waitForSharedMemory(nodes[n]!, phaseB2.cg, phaseB2.tag);
+
+    expect(await recordedDigests(nodes[3]!, phaseB.cg)).toEqual([codeUnit]);
+    expect(await recordedDigests(nodes[2]!, phaseB2.cg)).toEqual([codeUnit]);
+    // Both originators named their snapshot file by that one digest.
+    expect(snapshotDigestsFor(3, phaseB.tag)).toEqual([codeUnit]);
+    expect(snapshotDigestsFor(2, phaseB2.tag)).toEqual([codeUnit]);
 
     // Late subscribers: one with the gate on (da-DK), one without it (en-US).
     for (const n of [5, 6]) {
@@ -357,18 +428,23 @@ describe('SWM digests across host locales on a real devnet', () => {
       assertNoHeadIdentityConflict(n, offsets[n]!);
     }
     for (const n of [5, 6]) {
-      expect(snapshotDigestsFor(n, phaseB.tag), `late node${n} snapshot name`).toEqual([codeUnit]);
+      const recorded = await recordedDigests(nodes[n]!, phaseB.cg);
+      // eslint-disable-next-line no-console
+      console.log(`phase B: node${n} recorded digests ${JSON.stringify(recorded)} (advertised ${codeUnit})`);
+      expect(recorded.filter((digest) => digest !== codeUnit)).toEqual([]);
     }
   });
 
-  it('keeps phase A snapshots readable after the gate flipped: nothing renamed, nothing orphaned', async () => {
-    const rows = quadsFor(phaseA.tag);
-    const enUS = oracle.enUS(rows);
-    // The file a node persisted before the flip is still there under its
-    // original name, and its shared memory still answers.
-    for (const n of [1, 2]) {
-      expect(snapshotDigestsFor(n, phaseA.tag), `node${n} phase A snapshot after flip`).toEqual([enUS]);
-      expect(await visibleSubjects(nodes[n]!, phaseA.cg, phaseA.tag)).toBe(NAMES.length);
-    }
+  it('keeps what phase A persisted readable after the gate flipped: nothing renamed, nothing orphaned', async () => {
+    const enUS = oracle.enUS(quadsFor(phaseA.tag));
+    const daDK = oracle.daDK(quadsFor(phaseA2.tag));
+    // Restarted with the gate on, node 1 still holds its en-US-named snapshot and
+    // digest, and its shared memory still answers; node 5 still holds the da-DK-named
+    // snapshot it wrote before the flip (its on-demand subscription did not survive
+    // the restart, so its shared memory is not queried).
+    expect(snapshotDigestsFor(1, phaseA.tag)).toEqual([enUS]);
+    expect(await recordedDigests(nodes[1]!, phaseA.cg)).toEqual([enUS]);
+    expect(await visibleSubjects(nodes[1]!, phaseA.cg, phaseA.tag)).toBe(NAMES.length);
+    expect(snapshotDigestsFor(5, phaseA2.tag)).toEqual([daDK]);
   });
 });
