@@ -12,6 +12,7 @@ export interface WorkspaceSnapshotLifecycle {
    * that omits it keeps its own retention policy, and the scope takes no operation-long lease.
    */
   readonly operationLease?: (ref: string) => Promise<() => void>;
+  /** A plain shared lease on the digest; only {@link operationLease} makes a scope hold one for a whole operation. */
   acquire(ref: string): Promise<() => void>;
   /**
    * Lease an existing source without decoding it; absent bytes must be fetched again.
