@@ -172,6 +172,8 @@ describe('byte-budget sync pagination', () => {
       limit: SYNC_REQUEST_SAFE_PAGE_SIZE,
       cacheMode: 'page-only',
       exactGraphReadMode: 'page-only',
+      maxPageBytes: SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+      usesExactAssetExport: false,
     });
   });
 
@@ -647,6 +649,8 @@ describe('byte-budget sync pagination', () => {
       limit: SYNC_BYTE_BUDGET_EXACT_MAX_ROWS,
       cacheMode: 'page-only',
       exactGraphReadMode: 'page-only',
+      maxPageBytes: SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+      usesExactAssetExport: false,
     });
 
     expect(resolveDurableDataRequestPolicy({
@@ -661,6 +665,8 @@ describe('byte-budget sync pagination', () => {
       limit: SYNC_REQUEST_PAGE_SIZE,
       cacheMode: 'session-snapshot',
       exactGraphReadMode: 'snapshot-or-page',
+      maxPageBytes: SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+      usesExactAssetExport: false,
     });
   });
 });

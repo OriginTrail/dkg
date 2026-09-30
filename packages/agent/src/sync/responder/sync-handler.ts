@@ -57,6 +57,8 @@ import {
   type PriorityAdmission,
 } from '../priority-admission-queue.js';
 import { resolveDurableDataRequestPolicy } from './durable-data-request-policy.js';
+import { createBoundedExactAssetExportCache, type ExactAssetExportLease } from './exact-asset-export-cache.js';
+import { encodeNegotiatedExactSyncResponse } from '../wire-compression.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
 
@@ -477,6 +479,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT,
     responderSnapshotBudget,
   );
+  const exactAssetExportCache = createBoundedExactAssetExportCache({ store, budget: responderSnapshotBudget });
   const swmDataExactGraphPlanMemo = createResponderExactGraphPagePlanMemo(
     DURABLE_DATA_SYNC_SESSION_TTL_MS,
     SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT,
@@ -552,6 +555,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     // recorded by its own .then/.catch (no double counting).
     try {
     const request = parseSyncRequest(data);
+    const exactExportLeases: ExactAssetExportLease[] = [];
     // A durable rootless snapshot can legitimately contain millions of rows.
     // Never clamp a valid cursor: doing so silently replays the row slice at
     // the clamp boundary forever while the requester keeps advancing its local
@@ -578,6 +582,8 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       pageMode: request.pageMode,
       pageRowsHint: request.pageRowsHint,
       hasExactAssetFilter: assetUals !== undefined,
+      responseEncoding: request.responseEncoding,
+      exactAssetCount: assetUals?.length,
     });
     const usesByteBudgetPage = durableDataPolicy.usesByteBudgetPage;
     // Durable meta negotiated its byte-budget page mode on the wire (#1916 /
@@ -889,7 +895,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             ? session?.refreshGeneration
             : undefined,
           maxPageBytes: durableDataPolicy.cacheMode === 'page-only'
-            ? SYNC_BYTE_BUDGET_RESPONSE_BYTES
+            ? durableDataPolicy.maxPageBytes
             : undefined,
           // A byte-bounded response may contain only a prefix of the row slice
           // loaded above. Do not release the immutable session snapshot merely
@@ -897,11 +903,15 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           releaseCacheOnShortPage: !usesByteBudgetPage,
           assetUals,
           exactGraphReadMode: durableDataPolicy.exactGraphReadMode,
+          exactAssetExportCache: durableDataPolicy.usesExactAssetExport ? exactAssetExportCache : undefined,
+          onExactAssetExportLease: durableDataPolicy.usesExactAssetExport
+            ? (lease) => exactExportLeases.push(lease)
+            : undefined,
         });
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();
         const serialized = usesByteBudgetPage
-          ? serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES)
+          ? serializeResponderRowsWithinByteBudget(rows, durableDataPolicy.maxPageBytes)
           : serializeResponderRows(rows);
         if (serialized) nquads.push(serialized);
         const serializeDurationMs = Date.now() - serializeStartedAt;
@@ -912,7 +922,10 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       if (totalDurationMs > 100) {
         logDebug(createOperationContext('sync'), `Sync responder total for "${contextGraphId}" (phase=${phase}, workspace=${isWorkspace}): ${totalDurationMs}ms`);
       }
-      return new TextEncoder().encode(nquads.join('\n'));
+      const bytes = await encodeNegotiatedExactSyncResponse(new TextEncoder().encode(nquads.join('\n')), { request, signal });
+      for (const lease of exactExportLeases) await lease.assertCurrent();
+      throwIfAborted(signal);
+      return bytes;
     };
 
     const preAuthorizationScheduling: SyncResponderScheduling = {
@@ -1015,6 +1028,8 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       }
       getMetrics().syncResponseTotal.add(1, { outcome: 'error' });
       throw err;
+    }).finally(() => {
+      for (const lease of exactExportLeases) lease.release();
     });
     } catch (preLimiterErr) {
       // Malformed/unparseable request or a pre-limiter validation/abort throw —

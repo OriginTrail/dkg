@@ -1,4 +1,5 @@
 export * from './types.js';
+export { gzipBounded, gunzipBounded, BoundedGzipLimitError, BoundedGzipCapacityError, type BoundedGzipOptions } from './bounded-gzip.js';
 export * from './constants.js';
 export * from './storage-ack-protocols.js';
 export * from './context-graph-storage-uri.js';

@@ -49,6 +49,7 @@ import {
   createGraphMembershipSnapshotFromSortedCatalog,
   type GraphMembershipSnapshot,
 } from '../graph-membership-snapshot.js';
+import type { ExactAssetExportCache, ExactAssetExportLease } from './exact-asset-export-cache.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -253,6 +254,15 @@ interface ExactGraphPagePlan {
   cursorBytesEstimate?: number;
   /** Page-only sessions reject local source writes instead of mixing generations. */
   writeRevisions?: readonly { prefix: string; generation: number }[];
+  /** One exact export retains its metadata identity for this server-owned session. */
+  exportIdentities?: Map<string, string>;
+}
+
+interface ExactAssetExportScope {
+  readonly contextGraphId: string;
+  readonly assetUalsByGraph: ReadonlyMap<string, string>;
+  readonly cache: ExactAssetExportCache;
+  readonly onLease: (lease: ExactAssetExportLease) => void;
 }
 
 export interface ExactGraphPagePlanMemo {
@@ -1712,6 +1722,9 @@ export async function readDurableDataPage(params: {
    * this planner only consumes the neutral read strategy.
    */
   exactGraphReadMode?: ExactGraphReadMode;
+  /** Negotiated single-KA gzip only; plain and older readers keep conservative paging. */
+  exactAssetExportCache?: ExactAssetExportCache;
+  onExactAssetExportLease?: (lease: ExactAssetExportLease) => void;
 }): Promise<SyncRow[]> {
   const cache = params.rowListMemo
     ? {
@@ -1731,6 +1744,7 @@ export async function readDurableDataPage(params: {
   if (params.assetUals !== undefined) {
     if (params.assetUals.length === 0) return [];
     const requested = new Set(params.assetUals);
+    const assetUalsByGraph = new Map<string, string>();
     return readPagedRowsFromExactGraphPlanLoader(
       params.store,
       params.offset,
@@ -1753,6 +1767,7 @@ export async function readDurableDataPage(params: {
           planSignal,
         );
         const entries = manifest.confirmedEntries.filter((entry) => requested.has(entry.ual));
+        for (const entry of entries) assetUalsByGraph.set(entry.graph, entry.ual);
         const payloadRevisions = revisionSource ? entries.map((entry) => {
           const current = revisionSource.getWriteRevision(entry.graph);
           if (!current.stable) {
@@ -1779,6 +1794,15 @@ export async function readDurableDataPage(params: {
         refresh: params.refreshRowList === true,
       } : undefined,
       params.maxPageBytes,
+      params.exactAssetExportCache && params.onExactAssetExportLease ? {
+        contextGraphId: params.contextGraphId,
+        // Cached plans do not rerun their loader, so the one selected UAL also
+        // supplies the lookup for the already-validated sole graph entry.
+        assetUalsByGraph,
+        cache: params.exactAssetExportCache,
+        onLease: params.onExactAssetExportLease,
+        assetUal: params.assetUals.length === 1 ? params.assetUals[0] : undefined,
+      } : undefined,
     );
   }
 
@@ -1939,6 +1963,7 @@ async function readPagedRowsFromExactGraphPlanLoader(
   loadExactGraphPlan: (signal?: AbortSignal) => Promise<ExactGraphPagePlan>,
   planCache?: { key: string; refresh: boolean },
   maxPageBytes?: number,
+  exportScope?: ExactAssetExportScope & { readonly assetUal?: string },
 ): Promise<SyncRow[]> {
   const rowSnapshotLimits = cache?.memo.snapshotLoadLimits ?? {
     maxRows: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
@@ -1957,7 +1982,7 @@ async function readPagedRowsFromExactGraphPlanLoader(
     assertExactGraphPlanRevision(store, plan);
     const rows = await (maxPageBytes !== undefined
       ? readByteBoundedRowsPageFromExactGraphPlan(
-        store, plan, pageOffset, pageLimit, rowSnapshotLimits, maxPageBytes, pageSignal,
+      store, plan, pageOffset, pageLimit, rowSnapshotLimits, maxPageBytes, pageSignal, exportScope,
       )
       : readRowsPageFromExactGraphPlan(
       store,
@@ -2355,7 +2380,39 @@ async function readByteBoundedRowsPageFromExactGraphPlan(
   snapshotLimits: ExactGraphSnapshotLimits,
   maxBytes: number,
   signal?: AbortSignal,
+  exportScope?: ExactAssetExportScope & { readonly assetUal?: string },
 ): Promise<SyncRow[]> {
+  if (exportScope && plan.entries.length === 1) {
+    const entry = plan.entries[0]!;
+    const assetUal = exportScope.assetUalsByGraph.get(entry.graph) ?? exportScope.assetUal;
+    if (assetUal) {
+      const lease = await exportScope.cache.acquire({
+        contextGraphId: exportScope.contextGraphId, assetUal,
+        graph: entry.graph, expectedRows: entry.rowCount,
+        expectedIdentity: plan.exportIdentities?.get(entry.graph), signal,
+      });
+      if (lease) {
+        exportScope.onLease(lease);
+        (plan.exportIdentities ??= new Map()).set(entry.graph, lease.identity);
+        const page: SyncRow[] = [];
+        let pageBytes = 0;
+        for (const row of lease.rows.slice(offset, offset + limit)) {
+          const next = serializedResponderRowByteLength(row) + (page.length > 0 ? 1 : 0);
+          if (pageBytes + next > maxBytes) {
+            if (page.length === 0) throw snapshotBudgetError({
+              key: 'exact-export-page', reason: 'snapshot_bytes', rows: 1,
+              bytesEstimate: next, limit: maxBytes,
+            });
+            break;
+          }
+          page.push(row);
+          pageBytes += next;
+        }
+        rememberExactGraphReturnedPrefix(plan, offset, page);
+        return page;
+      }
+    }
+  }
   const rows: SyncRow[] = [];
   let bytes = 0;
   let storePageRows = SYNC_REQUEST_SAFE_PAGE_SIZE;
@@ -2366,7 +2423,7 @@ async function readByteBoundedRowsPageFromExactGraphPlan(
     try {
       chunk = await readRowsPageFromExactGraphPlan(
         store, plan, offset + rows.length, pageRows,
-        { ...snapshotLimits, maxPageResponseBytes: maxBytes * 2 }, signal,
+        { ...snapshotLimits, maxPageResponseBytes: Math.min(maxBytes * 2, SYNC_BYTE_BUDGET_RESPONSE_BYTES * 2) }, signal,
       );
     } catch (error) {
       if (!(error instanceof StoreResponseTooLargeError) || pageRows <= 1) throw error;

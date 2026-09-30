@@ -320,6 +320,7 @@ import {
   type ExactAssetSelection,
 } from './sync/exact-assets.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
+import { EXACT_SYNC_GZIP_ENCODING } from './sync/wire-compression.js';
 import {
   getSyncCheckpointKey,
   MemorySyncCheckpointStore,
@@ -1176,6 +1177,8 @@ function syncPageFetchCoalescingKey(params: {
   assetUals?: readonly string[];
   returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   requesterScope?: SyncCheckpointScope;
+  responseEncoding?: typeof EXACT_SYNC_GZIP_ENCODING;
+  maxAcceptedBytes?: number;
   maxAcceptedQuads?: number;
   maxAcceptedHeapBytesEstimate?: number;
 }): string {
@@ -1193,6 +1196,8 @@ function syncPageFetchCoalescingKey(params: {
     params.assetUals === undefined ? null : exactAssetFilterKey(params.assetUals),
     params.returnAcceptedPrefixOnRetryableTransportFailure === true,
     params.requesterScope ?? null,
+    params.responseEncoding ?? null,
+    params.maxAcceptedBytes ?? null,
     params.maxAcceptedQuads ?? null,
     params.maxAcceptedHeapBytesEstimate ?? null,
   ]);
@@ -6835,9 +6840,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       deadline,
       fetchSharingIdentity: defaultPageFetchSharingIdentity,
     });
+    // Match the additive builder negotiation. Authorization is still evaluated
+    // by buildSyncRequest and by the responder before any export is admitted.
+    const responseEncoding = !includeSharedMemory
+      && (phase === 'data' || phase === 'meta')
+      && assetUals?.length === 1
+      ? EXACT_SYNC_GZIP_ENCODING
+      : undefined;
     const exactAccumulationLimits = assetUals === undefined
       ? undefined
-      : exactSyncPhaseAccumulationLimits(assetUals);
+      : exactSyncPhaseAccumulationLimits(assetUals, responseEncoding);
+    const effectiveMaxAcceptedQuads = exactAccumulationLimits?.maxQuads === undefined
+      ? maxAcceptedQuads
+      : maxAcceptedQuads === undefined
+        ? exactAccumulationLimits.maxQuads
+        : Math.min(exactAccumulationLimits.maxQuads, maxAcceptedQuads);
+    const exactHeapLimit = exactAccumulationLimits?.maxHeapBytesEstimate;
+    const effectiveMaxAcceptedHeapBytesEstimate = exactHeapLimit === undefined
+      ? maxAcceptedHeapBytesEstimate
+      : maxAcceptedHeapBytesEstimate === undefined
+        ? exactHeapLimit
+        : Math.min(exactHeapLimit, maxAcceptedHeapBytesEstimate);
     // Coalescing is declared by the capability, never inferred from singleton
     // identity. Exclusive private rounds cannot inherit another job's clock.
     const fetchSharingIdentity = effectiveWorkAdmission.fetchSharingIdentity;
@@ -6857,8 +6880,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         assetUals,
         returnAcceptedPrefixOnRetryableTransportFailure,
         requesterScope,
-        maxAcceptedQuads,
-        maxAcceptedHeapBytesEstimate,
+        responseEncoding,
+        maxAcceptedBytes: exactAccumulationLimits?.maxBytes,
+        maxAcceptedQuads: effectiveMaxAcceptedQuads,
+        maxAcceptedHeapBytesEstimate: effectiveMaxAcceptedHeapBytesEstimate,
       });
     const inFlight = inFlightSyncPageFetchesFor(this);
     // Read once, here: this fetch runs inside the admitted operation, so the
@@ -6915,15 +6940,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       snapshotRef,
       sinceBatchId,
       assetUals,
+      responseEncoding,
       returnAcceptedPrefixOnRetryableTransportFailure,
       requesterScope,
       maxAcceptedBytes: exactAccumulationLimits?.maxBytes,
-      maxAcceptedQuads: exactAccumulationLimits?.maxQuads === undefined
-        ? maxAcceptedQuads
-        : maxAcceptedQuads === undefined
-          ? exactAccumulationLimits.maxQuads
-          : Math.min(exactAccumulationLimits.maxQuads, maxAcceptedQuads),
-      maxAcceptedHeapBytesEstimate,
+      maxAcceptedQuads: effectiveMaxAcceptedQuads,
+      maxAcceptedHeapBytesEstimate: effectiveMaxAcceptedHeapBytesEstimate,
       pageSizeProfileCache: syncPageSizeProfileCacheFor(this),
       deadline,
       recovery,

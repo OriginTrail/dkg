@@ -1,13 +1,13 @@
+// Frozen old 10.0.20/150d1232ff parser; only import paths are adapted.
 import {
   SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_PAGE_SIZE,
-} from '../../dkg-agent-constants.js';
+} from '../../src/dkg-agent-constants.js';
 import {
   decodeExactAssetUals,
   encodeExactAssetUals,
-} from '../exact-assets.js';
-import { normalizeExactSyncResponseEncoding, type EXACT_SYNC_GZIP_ENCODING } from '../wire-compression.js';
+} from '../../src/sync/exact-assets.js';
 
 export interface ByteBudgetPageHint {
   pageMode?: typeof SYNC_BYTE_BUDGET_PAGE_MODE;
@@ -15,7 +15,6 @@ export interface ByteBudgetPageHint {
 }
 
 export interface PipeSyncRequestTail extends ByteBudgetPageHint {
-  responseEncoding?: typeof EXACT_SYNC_GZIP_ENCODING;
   syncSessionId?: string;
   sinceBatchId?: string;
   assetUals?: string[];
@@ -53,7 +52,6 @@ export function normalizeByteBudgetPageHint(
  */
 export function encodePipeSyncRequestTail(tail: PipeSyncRequestTail): string {
   const parts: string[] = [];
-  if (tail.responseEncoding) parts.push('response-encoding', tail.responseEncoding);
   const page = normalizeByteBudgetPageHint(tail.pageMode, tail.pageRowsHint);
   if (page.pageMode && page.pageRowsHint !== undefined) {
     parts.push('page-mode', page.pageMode, 'page-rows', String(page.pageRowsHint));
@@ -76,7 +74,6 @@ export function decodePipeSyncRequestTail(parts: readonly string[]): PipeSyncReq
   let assetUals: string[] | undefined;
   let rawPageMode: unknown;
   let rawPageRowsHint: unknown;
-  let responseEncoding: typeof EXACT_SYNC_GZIP_ENCODING | undefined;
 
   if (tail >= 2 && parts[tail - 2] === 'assets') {
     assetUals = decodeExactAssetUals(parts[tail - 1]);
@@ -112,13 +109,10 @@ export function decodePipeSyncRequestTail(parts: readonly string[]): PipeSyncReq
     parts[tail - 2] === 'page-mode'
   ) {
     rawPageMode = parts[tail - 1];
-    tail -= 2;
   }
-  if (tail >= 2 && parts[tail - 2] === 'response-encoding') responseEncoding = normalizeExactSyncResponseEncoding(parts[tail - 1]);
 
   return {
     ...normalizeByteBudgetPageHint(rawPageMode, rawPageRowsHint),
-    responseEncoding,
     syncSessionId,
     sinceBatchId,
     assetUals,

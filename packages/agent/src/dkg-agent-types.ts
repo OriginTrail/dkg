@@ -202,6 +202,7 @@ export type ACKSignerResolution = {
 };
 
 export interface SyncRequestEnvelope {
+  responseEncoding?: 'gzip-nquads-v1';
   contextGraphId: string;
   offset: number;
   limit: number;
