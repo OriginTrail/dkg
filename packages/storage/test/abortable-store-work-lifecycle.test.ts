@@ -184,4 +184,28 @@ describe('AbortableStoreWorkLifecycle signal ownership', () => {
 
     expect(abortCalls(callerRemove)).toBe(1);
   });
+
+  it('hands work the close signal on its own, unaffected by the caller signal', async () => {
+    const caller = new AbortController();
+    const lifecycle = new AbortableStoreWorkLifecycle();
+    let combined: AbortSignal | undefined;
+    let closeSignal!: AbortSignal;
+    let finish!: () => void;
+    const running = lifecycle.run(caller.signal, (signal, close) => {
+      combined = signal;
+      closeSignal = close;
+      return new Promise<void>((resolve) => { finish = resolve; });
+    });
+
+    caller.abort(new Error('caller left'));
+    expect(combined?.aborted).toBe(true);
+    expect(closeSignal.aborted).toBe(false);
+
+    const closing = lifecycle.close(new Error('store closed'));
+    expect(closeSignal.aborted).toBe(true);
+    expect((closeSignal.reason as Error).message).toBe('store closed');
+    finish();
+    await running;
+    await closing;
+  });
 });

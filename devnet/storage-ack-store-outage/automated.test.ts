@@ -58,6 +58,7 @@ import { existsSync } from 'node:fs';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, '..', '..');
 const SCRIPT = resolve(REPO_ROOT, 'scripts', 'devnet-test-store-outage.sh');
+const CALLER_ABORT_SCRIPT = resolve(REPO_ROOT, 'scripts', 'devnet-test-managed-oxigraph-caller-abort.sh');
 
 // Must match `SKIP_EXIT` in scripts/devnet-test-store-outage.sh.
 const SKIP_EXIT = 3;
@@ -108,9 +109,9 @@ type Outcome =
 
 const tailLines = (s: string, n: number): string => s.split('\n').slice(-n).join('\n');
 
-/** Last `[store-outage] SKIP: ...` guidance line the script printed, if any. */
+/** Last `[store-outage] SKIP: ...` (or `[oxigraph-abort] SKIP: ...`) guidance line the script printed, if any. */
 function lastSkipGuidance(stdout: string): string {
-  const hits = stdout.split('\n').filter((l) => /\[store-outage\] SKIP:/.test(l));
+  const hits = stdout.split('\n').filter((l) => /\[(store-outage|oxigraph-abort)\] SKIP:/.test(l));
   return hits.length ? hits[hits.length - 1].trim() : '(no SKIP: guidance line captured)';
 }
 
@@ -207,6 +208,40 @@ describe('managed-store status outage', () => {
   }, 120_000);
 });
 
+// A caller abandoning a dispatched read must not get a healthy managed Oxigraph
+// restarted, while a read that overruns the client deadline still must.
+// The orchestration lives in `scripts/devnet-test-managed-oxigraph-caller-abort.sh`.
+// Run: pnpm test:devnet:managed-oxigraph-caller-abort
+describe('managed Oxigraph — a caller abort does not restart a healthy server', () => {
+  it('abandoned-but-completed reads leave the server alone; a genuine overrun still restarts it', async (ctx) => {
+    expect(existsSync(CALLER_ABORT_SCRIPT), `expected ${CALLER_ABORT_SCRIPT} to exist`).toBe(true);
+
+    const { exitCode, stdout, stderr } = await runScript(
+      CALLER_ABORT_SCRIPT,
+      REPO_ROOT,
+      { ...process.env },
+      true,
+    );
+    const outcome = classifyStoreOutageRun(exitCode, stdout, stderr, REQUIRE_RUN);
+    if (outcome.kind === 'skip') {
+      // eslint-disable-next-line no-console
+      console.warn(`[managed-oxigraph-caller-abort] SKIPPED (precondition unmet) — ${outcome.reason}`);
+      ctx.skip();
+      return;
+    }
+    if (outcome.kind === 'fail') throw new Error(outcome.reason);
+
+    // Anchor on the load-bearing contract so a regression that quietly stops
+    // exercising the scenario still fails.
+    expect(stdout).toMatch(/calibrated: \d+ VALUES lists of \d+ take \d+ms to complete/);
+    expect(stdout).toMatch(/OK: \d+\/\d+ requests were disconnected mid-flight/);
+    expect(stdout).toMatch(/OK: no supervised-recovery restart, listener pid \d+ unchanged/);
+    expect(stdout).toMatch(/OK: the overrun restarted node\d+'s managed Oxigraph/);
+    expect(stdout).toMatch(/OK: supervised recovery brought the store back/);
+    expect(stdout).toMatch(/\[oxigraph-abort\] PASS/);
+  }, 420_000);
+});
+
 // Harness assertions (otReviewAgent #1517) — unit-level, NO live devnet needed.
 // Prove that a script-level SKIP is surfaced as a vitest SKIP (or a FAILURE in
 // the required lane), and NEVER as a passing outage-coverage result.
@@ -231,6 +266,20 @@ describe('storage-ack-store-outage — a precondition SKIP is never reported as 
     expect(classifyStoreOutageRun(1, '', 'boom', false).kind).toBe('fail');
     expect(classifyStoreOutageRun(2, '', 'boom', true).kind).toBe('fail');
   });
+
+  it('the caller-abort script also exits with the SKIP code (3), never 0, when there is no devnet', async () => {
+    const env = { ...process.env };
+    delete env.DEVNET_REQUIRE_STORE_OUTAGE;
+    const { exitCode, stdout } = await runScript(CALLER_ABORT_SCRIPT, REPO_ROOT, {
+      ...env,
+      DEVNET_DIR: resolve(REPO_ROOT, '.devnet-caller-abort-harness-does-not-exist'),
+    }, false);
+
+    expect(exitCode).toBe(SKIP_EXIT);
+    expect(stdout).toMatch(/\[oxigraph-abort\] SKIP:/);
+    expect(classifyStoreOutageRun(exitCode, stdout, '', false).kind).toBe('skip');
+    expect(classifyStoreOutageRun(exitCode, stdout, '', true).kind).toBe('fail');
+  }, 30_000);
 
   it('the REAL script exits with the SKIP code (3), never 0, when its first precondition is unmet', async () => {
     // Point DEVNET_DIR at a directory that cannot exist so the very first

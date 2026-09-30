@@ -106,6 +106,62 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
 }
 
+/**
+ * The two halves of a read's cancellation, kept apart so that a caller giving
+ * up on a dispatched managed read does not have to cancel the request itself.
+ */
+interface SparqlHttpReadSignals {
+  /** The caller's own signal (its budget), never the store's. */
+  readonly caller: AbortSignal | undefined;
+  /** Aborts when the store closes. */
+  readonly close: AbortSignal;
+}
+
+/**
+ * Settle with `work`, or reject at once with the caller's abort reason while
+ * `work` keeps running. `onAbandon` runs first, only when the abort wins.
+ */
+function raceCallerAbandon<T>(
+  work: Promise<T>,
+  caller: AbortSignal,
+  onAbandon: () => void,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      onAbandon();
+      reject(caller.reason);
+    };
+    caller.addEventListener('abort', onAbort, { once: true });
+    const finish = (settle: () => void) => {
+      if (settled) return;
+      settled = true;
+      caller.removeEventListener('abort', onAbort);
+      settle();
+    };
+    work.then(
+      (value) => finish(() => resolve(value)),
+      (cause) => finish(() => reject(cause)),
+    );
+  });
+}
+
+/** Read a response body to its end, discarding it. */
+async function drainResponseBody(response: Response): Promise<void> {
+  const body = response.body;
+  if (body === null || body === undefined) return;
+  const reader = body.getReader();
+  try {
+    for (;;) {
+      if ((await reader.read()).done) return;
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 const DEFAULT_SLOW_QUERY_THRESHOLD_MS = 10_000;
 const DEFAULT_SLOW_QUERY_SAMPLE_RATE = 1;
 const MANAGED_LIST_GRAPHS_CACHE_MS = 30_000;
@@ -443,7 +499,7 @@ export class SparqlHttpStore implements TripleStore {
   private runStoreWork<T>(
     operation: StoreOperation,
     options: QueryOptions | undefined,
-    work: (signal: AbortSignal | undefined) => Promise<T>,
+    work: (signal: AbortSignal | undefined, closeSignal: AbortSignal) => Promise<T>,
   ): Promise<T> {
     const recovery = this.readRecoveryState();
     if (recovery?.recovering) {
@@ -451,11 +507,11 @@ export class SparqlHttpStore implements TripleStore {
     }
     return this.workLifecycle.run(
       options?.signal,
-      (signal) => {
+      (signal, closeSignal) => {
         return this.scheduler.run(
           options?.priority,
           options?.source ?? `sparql-http.${operation}`,
-          () => work(signal),
+          () => work(signal, closeSignal),
           signal,
           { storeOperation: operation },
         );
@@ -532,6 +588,7 @@ export class SparqlHttpStore implements TripleStore {
     storeOperation: StoreOperation,
     options: SparqlHttpQueryOptions | undefined,
     consume: (response: Response) => Promise<T>,
+    readSignals?: SparqlHttpReadSignals,
   ): Promise<T> {
     const recoveryAtStart = this.readRecoveryState();
     if (recoveryAtStart?.recovering) {
@@ -551,28 +608,78 @@ export class SparqlHttpStore implements TripleStore {
     const timeoutSignal = AbortSignal.timeout(this.timeout);
     const deadline = this.now() + this.timeout;
     const recoveryToken = this.managedReadRecovery.begin(recoveryAtStart);
-    const signalScope = composeAbortSignals(options?.signal, timeoutSignal);
+    // A managed Oxigraph keeps evaluating a query after its HTTP connection
+    // closes, and once the fetch is aborted the client can no longer see that
+    // evaluation finish. So a caller that merely stops waiting (its own budget,
+    // not a slow store) must not cancel the request: the fetch keeps running
+    // under the store-close and client-deadline signals alone, and only a
+    // request that outlives that deadline is reclaimed by a supervised restart.
+    const detached = recoveryToken !== null && readSignals?.caller !== undefined
+      ? { caller: readSignals.caller, close: readSignals.close }
+      : undefined;
+    const signalScope = detached
+      ? composeAbortSignals(detached.close, timeoutSignal)
+      : composeAbortSignals(options?.signal, timeoutSignal);
     const signal = signalScope.signal ?? timeoutSignal;
     let dispatched = false;
+    let abandoned = false;
+    let serverFinished = false;
+    let work: Promise<T> | undefined;
     try {
       throwIfAborted(signal);
+      if (detached) throwIfAborted(detached.caller);
       dispatched = true;
-      const response = await fetch(this.queryEndpoint, {
-        method: 'POST',
-        headers: { ...this.headers, 'Content-Type': SPARQL_QUERY_CONTENT_TYPE, Accept: accept },
-        body: sparql,
-        signal,
-      });
-      // Keep the composed caller/deadline signal linked until the response body
-      // has settled. A fetch promise may resolve as soon as headers arrive,
-      // while JSON/N-Quads parsing is still holding the scheduler admission.
-      return await consume(response);
+      const dispatch = async (): Promise<T> => {
+        const response = await fetch(this.queryEndpoint, {
+          method: 'POST',
+          headers: { ...this.headers, 'Content-Type': SPARQL_QUERY_CONTENT_TYPE, Accept: accept },
+          body: sparql,
+          signal,
+        });
+        try {
+          if (detached?.caller.aborted) {
+            // Nobody is waiting for this answer any more: read the body only to
+            // learn that the server has finished with the request.
+            await drainResponseBody(response);
+            serverFinished = true;
+            return undefined as T;
+          }
+          // Keep the composed caller/deadline signal linked until the response body
+          // has settled. A fetch promise may resolve as soon as headers arrive,
+          // while JSON/N-Quads parsing is still holding the scheduler admission.
+          const result = await consume(response);
+          serverFinished = true;
+          return result;
+        } catch (error) {
+          // A non-OK answer whose body was read is still a finished request.
+          if (error instanceof SparqlHttpResponseError) serverFinished = true;
+          throw error;
+        }
+      };
+      work = dispatch();
+      return await (detached
+        ? raceCallerAbandon(work, detached.caller, () => { abandoned = true; })
+        : work);
     } catch (error) {
-      if (signal.aborted) {
+      if (signal.aborted || detached?.caller.aborted) {
         getMetrics().storeCancellationCompletedTotal.add(1, {
           operation,
           source: options?.source ?? `sparql-http.${operation}`,
         });
+      }
+      if (abandoned) {
+        // The caller is gone but the request is still running. Hand it to the
+        // lifecycle-owned retained-deadline coordinator: it is reclaimed by a
+        // supervised restart only if it outlives the client deadline, and is
+        // withdrawn as soon as the server has visibly finished.
+        const retention = timeoutSignal.aborted
+          ? null
+          : this.managedReadRecovery.retain(operation, deadline, recoveryToken);
+        const settled = () => {
+          if (serverFinished) retention?.release();
+          signalScope.dispose();
+        };
+        void work?.then(settled, settled);
       }
       if (timeoutSignal.aborted) {
         this.notifyClientTimeout(operation);
@@ -584,7 +691,7 @@ export class SparqlHttpStore implements TripleStore {
           cause: error,
         });
       }
-      if (dispatched && signal.aborted) {
+      if (!abandoned && dispatched && signal.aborted) {
         // Closing the HTTP connection does not cancel Oxigraph 0.5
         // evaluation. Hand the dispatched read to the lifecycle-owned
         // retained-deadline coordinator instead of extending the caller wait.
@@ -595,7 +702,8 @@ export class SparqlHttpStore implements TripleStore {
       }
       throw error;
     } finally {
-      signalScope.dispose();
+      // A detached request keeps the composed signal linked until it settles.
+      if (!abandoned) signalScope.dispose();
     }
   }
 
@@ -1059,17 +1167,26 @@ export class SparqlHttpStore implements TripleStore {
     const isConstruct = operation.kind === 'read'
       && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE');
     const canonicalOperation = storeOperation ?? (isConstruct ? 'construct' : 'query');
-    return this.runStoreWork(canonicalOperation, options, async (lifecycleSignal) => {
+    return this.runStoreWork(canonicalOperation, options, async (lifecycleSignal, closeSignal) => {
       const effectiveOptions: SparqlHttpQueryOptions = {
         ...options,
         signal: lifecycleSignal,
+      };
+      const readSignals: SparqlHttpReadSignals = {
+        caller: options?.signal,
+        close: closeSignal,
       };
       const startedAt = this.now();
       throwIfAborted(lifecycleSignal);
 
       try {
         if (isConstruct) {
-          return await this.queryConstruct(trimmed, effectiveOptions, canonicalOperation);
+          return await this.queryConstruct(
+            trimmed,
+            effectiveOptions,
+            canonicalOperation,
+            readSignals,
+          );
         }
 
         return await this.postQuery(
@@ -1096,6 +1213,7 @@ export class SparqlHttpStore implements TripleStore {
             });
             return decodeSparqlJsonQueryResult(text, isAsk ? 'ask' : 'select');
           },
+          readSignals,
         );
       } finally {
         this.maybeEmitSlowQuery({
@@ -1111,6 +1229,7 @@ export class SparqlHttpStore implements TripleStore {
     sparql: string,
     options: SparqlHttpQueryOptions | undefined,
     storeOperation: StoreOperation,
+    readSignals: SparqlHttpReadSignals,
   ): Promise<ConstructResult> {
     return this.postQuery(
       sparql,
@@ -1136,6 +1255,7 @@ export class SparqlHttpStore implements TripleStore {
         const quads = parseNQuadsTextTolerant(text);
         return { type: 'quads', quads };
       },
+      readSignals,
     );
   }
 

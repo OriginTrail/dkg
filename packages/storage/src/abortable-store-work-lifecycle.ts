@@ -140,9 +140,14 @@ export class AbortableStoreWorkLifecycle {
   private generation = createGeneration();
   private closePromise: Promise<void> | null = null;
 
+  /**
+   * `start` receives the caller signal combined with the close signal, plus the
+   * close signal on its own for work that must outlive a caller's cancellation
+   * (an already dispatched request) yet still stop when the store closes.
+   */
   run<T>(
     callerSignal: AbortSignal | undefined,
-    start: (signal: AbortSignal | undefined) => Promise<T>,
+    start: (signal: AbortSignal | undefined, closeSignal: AbortSignal) => Promise<T>,
   ): Promise<T> {
     const generation = this.generation;
     if (generation.closing) {
@@ -155,7 +160,7 @@ export class AbortableStoreWorkLifecycle {
     const signalScope = composeAbortSignals(callerSignal, generation.controller.signal);
     let task: Promise<T>;
     try {
-      task = start(signalScope.signal);
+      task = start(signalScope.signal, generation.controller.signal);
     } catch (error) {
       signalScope.dispose();
       throw error;
