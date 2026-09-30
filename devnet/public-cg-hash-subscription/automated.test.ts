@@ -10,9 +10,12 @@
  *   2. An edge that subscribes with only that hash (`POST /api/context-graph/
  *      subscribe { contextGraphId: <nameHash> }`) is moved to the cleartext id
  *      once a peer reveals it and the edge verifies the keccak commitment, and
- *      then converges on both the shared working memory and the finalized
- *      verifiable memory the author published BEFORE the edge subscribed. Before
- *      the fix for the dead zone (#2744) the subscription synced 0 quads.
+ *      then converges on the finalized verifiable memory the author published
+ *      BEFORE the edge subscribed (before the fix for the dead zone, #2744, the
+ *      subscription synced 0 quads). The shared working memory published before
+ *      the edges subscribed backfills too, in its own test: it depends on the
+ *      holders' RFC-64 authority pipeline, which can take minutes after a devnet
+ *      starts.
  *   3. The catch-up job the subscribe minted is reachable by its job id, by the
  *      cleartext id and by the on-chain id, and an on-chain numeric id (`#<n>`)
  *      subscribes the same graph (#2758). The by-hash lookup (#2779) is asserted
@@ -302,7 +305,7 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     }
   }, 900_000);
 
-  it('an edge subscribed by name hash alone adopts the verified cleartext id and converges on SWM and VM', async () => {
+  it('an edge subscribed by name hash alone adopts the verified cleartext id and converges on the finalized VM data', async () => {
     // The edge knows nothing of the graph but what the chain says.
     const before = await listSubscriptions(edgeA);
     expect(before.map((row) => row.contextGraphId)).not.toContain(graph.id);
@@ -329,13 +332,10 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     expect(keccak(row.contextGraphId), 'the adopted id is the preimage of the on-chain hash').toBe(graph.nameHash);
     expect(row.identity, 'a resolved row carries no name-hash-only note').toBeUndefined();
 
-    // What the hash could never reach: the SWM copy published before the edge
-    // subscribed, and the finalized VM copy, each byte-identical to the author's.
-    const swmExpected = await subjectContent(author, graph.id, graph.swm.subject, 'shared-working-memory');
+    // What the hash could never reach: the finalized VM copy, published before
+    // the edge subscribed, byte-identical to the author's.
     const vmExpected = await subjectContent(author, graph.id, graph.vm.subject, 'verifiable-memory');
     await waitForContent(edgeA, graph.id, graph.vm.subject, 'verifiable-memory', vmExpected, 'name-hash subscribe');
-    await waitForContent(edgeA, graph.id, graph.swm.subject, 'shared-working-memory', swmExpected, 'name-hash subscribe');
-    expect(swmExpected.some((entry) => entry.includes(graph.swm.value))).toBe(true);
     expect(vmExpected.some((entry) => entry.includes(graph.vm.value))).toBe(true);
 
     // The catch-up job the subscribe minted is reachable by its id, by the
@@ -365,7 +365,7 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     }
   }, 900_000);
 
-  it('a second edge subscribed by numeric on-chain id lands on the same cleartext graph (#2758)', async () => {
+  it('a second edge subscribed by numeric on-chain id lands on the same cleartext graph and converges on VM (#2758)', async () => {
     await waitUntilChainSlotObserved(edgeB, graph.onChainId);
     const subscribed = await subscribeWhenAdmitted(edgeB, `#${graph.onChainId}`);
     expect(subscribed.onChainReference, JSON.stringify(subscribed)).toMatchObject({ onChainId: graph.onChainId });
@@ -377,11 +377,22 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     });
     expect((await listSubscriptions(edgeB)).map((row) => row.contextGraphId)).not.toContain(graph.onChainId);
 
-    const swmExpected = await subjectContent(author, graph.id, graph.swm.subject, 'shared-working-memory');
     const vmExpected = await subjectContent(author, graph.id, graph.vm.subject, 'verifiable-memory');
     await waitForContent(edgeB, graph.id, graph.vm.subject, 'verifiable-memory', vmExpected, 'numeric-id subscribe');
-    await waitForContent(edgeB, graph.id, graph.swm.subject, 'shared-working-memory', swmExpected, 'numeric-id subscribe');
   }, 900_000);
+
+  // Kept apart from the tests above on purpose. The shared working memory of a
+  // graph is served only by holders whose RFC-64 authority pipeline has accepted
+  // the graph (a finalized authority index polled every few minutes), and that
+  // pipeline can lag or trip its RPC circuit for many minutes after a devnet
+  // starts (`chain event log moved`, `RFC-64 authority RPC circuit is open`).
+  // The adoption and VM tests above do not depend on it.
+  it('the SWM published before the edges subscribed backfills on both once the holders serve it', async () => {
+    const swmExpected = await subjectContent(author, graph.id, graph.swm.subject, 'shared-working-memory');
+    expect(swmExpected.some((entry) => entry.includes(graph.swm.value))).toBe(true);
+    await waitForContent(edgeA, graph.id, graph.swm.subject, 'shared-working-memory', swmExpected, 'name-hash subscribe', 600_000);
+    await waitForContent(edgeB, graph.id, graph.swm.subject, 'shared-working-memory', swmExpected, 'numeric-id subscribe', 600_000);
+  }, 1_500_000);
 
   it('a graph registered on chain whose cleartext no peer holds stays hash-only: nothing is invented', async () => {
     // Registered straight on the real ContextGraphs contract by a throwaway

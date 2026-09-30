@@ -21,27 +21,34 @@ nodes.
 1. A public graph registered through the daemon API commits exactly
    `keccak256(utf8(id))` on the real `ContextGraphStorage`.
 2. An edge subscribed with the hash alone ends up with a row keyed by the
-   verified cleartext id (and none keyed by the hash), and holds the SWM copy
-   shared before it subscribed and the finalized VM copy, each identical to the
-   author's. The catch-up job the subscribe minted is reachable by its job id,
-   the cleartext id and the on-chain id, and always names the cleartext graph.
+   verified cleartext id (and none keyed by the hash), and holds the finalized
+   VM copy published before it subscribed, identical to the author's. The
+   catch-up job the subscribe minted is reachable by its job id, the cleartext
+   id and the on-chain id, and always names the cleartext graph.
    (A lookup by the hash itself is asserted only when the job was created under
    the hash; when the subscribe request resolved the hash, the job is keyed by
    the cleartext id and the by-hash lookup finds none, so that path is not
    covered here.)
 3. A second edge subscribed with `#<on-chain id>` lands on the same cleartext
-   graph and converges on the same content.
-4. A graph registered directly on the chain with a name commitment whose
+   graph and converges on the same VM content.
+4. The SWM copy shared before either edge subscribed backfills on both. This is
+   its own test because it depends on something the hash path does not: holders
+   serve a graph's shared working memory only once their RFC-64 authority
+   pipeline has accepted it (a finalized authority index polled every few
+   minutes), and right after `devnet.sh start` that pipeline can lag or trip its
+   RPC circuit for many minutes (`chain event log moved`, `RFC-64 authority RPC
+   circuit is open`). Give a freshly started devnet a few minutes, or run this
+   suite after others, as the sweep does.
+5. A graph registered directly on the chain with a name commitment whose
    preimage no node holds stays hash-only: no cleartext row is invented, and its
    catch-up (looked up by the hash) settles as `unreachable` with the
    name-hash-only note, not as a retryable failure.
 
 The first catch-up job of a subscription can be cut short when the node's RFC-64
-authority RPC circuit is open (chain reads timing out on a loaded machine). While
-it waits for content the suite re-subscribes with `forceCatchup` once a minute and
-reports the last job's verdict on timeout. That recovers only a short circuit
-window: a node whose circuit stays open needs a restart, and the suite fails
-rather than hiding it.
+authority RPC circuit is open. While it waits for content the suite
+re-subscribes with `forceCatchup` once a minute and reports the last job's
+verdict on timeout. That recovers only a short circuit window: a node whose
+circuit stays open needs a restart, and the suite fails rather than hiding it.
 
 ## Run
 
