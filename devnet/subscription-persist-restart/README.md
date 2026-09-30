@@ -15,7 +15,7 @@ that the integrated stack keeps its promise on real daemons:
 | 1 | The suite creates 8 public context graphs on node 1 and churns subscribe / unsubscribe / re-subscribe on edge node 5. Immediately after the last acknowledged request it runs `devnet.sh restart-node 5`. After the restart, `GET /api/context-graph/subscriptions` lists exactly the last acknowledged state. |
 | 2 | A second churn round rewrites rows that already exist, then `stop-node 5` and a start. The node again serves exactly the acknowledged state. |
 | 3 | A restarted node still persists new changes: one more change, one more restart, the same check. |
-| 4 | `daemon.log` of node 5 gains no subscription or membership persistence drain timeout, no `CG_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT`, and no failed subscription persist. |
+| 4 | `daemon.log` of node 5 gains no subscription or membership persistence drain timeout, no `CG_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT`, and no failed subscription persist. Only lines written after a byte offset recorded before the suite's first action count. If a restart rotated the log (a shorter file, or changed bytes before the offset), the offset is void and every matching line in the log counts as new, so a rotation can over-report but never hide a fresh line. |
 
 The daemon's SQLite writes are fast, so this suite cannot hold one open across
 `stop()`. The drain itself is pinned by
@@ -32,6 +32,11 @@ pnpm test:devnet:subscription-persist-restart
 
 Runtime is about 5-8 minutes. Node 5 (an edge) blips three times. Set
 `DEVNET_SPR_EDGE_NODE` to churn a different edge node.
+
+`log-window.test.ts` beside the suite pins that log-window helper. It needs no
+devnet and runs with the suite's vitest config
+(`pnpm vitest run --config devnet/subscription-persist-restart/vitest.config.ts log-window`
+runs it alone).
 
 The suite mutates only context graphs it creates (`spr-<stamp>-<n>`) and never
 touches the shared `devnet-test` context graph. It does not time-warp the

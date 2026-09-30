@@ -21,7 +21,9 @@
  *       round layered on the first, so the durable rows are rewritten, not just
  *       created.
  *   (3) The daemon logs no subscription- or membership-persistence drain timeout
- *       and no failed subscription persist across the whole run.
+ *       and no failed subscription persist during the run. "During the run" is a
+ *       byte window of daemon.log recorded before the first action (see
+ *       log-window.ts): a log rotated by a daemon restart cannot hide a fresh line.
  *
  * Node roles on the standard 6-node devnet: nodes 1-4 are cores, nodes 5-6 are
  * edges. Node 1 authors the context graphs; node 5 (an edge) churns them.
@@ -40,7 +42,7 @@
  */
 import { describe, it, expect, beforeAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   DEVNET_DIR,
@@ -55,6 +57,7 @@ import {
   type DevnetNode,
   type DevnetState,
 } from '../_bootstrap/harness.js';
+import { markLog, matchingLinesSince, type LogMark } from './log-window.js';
 
 const AUTHOR_NODE = 1;
 const EDGE_NODE = Number(process.env.DEVNET_SPR_EDGE_NODE ?? 5);
@@ -104,13 +107,8 @@ async function waitUntilReachable(node: DevnetNode, timeoutMs = 120_000): Promis
   await waitFor(`node${node.num} API reachable`, timeoutMs, 2_000, async () => ((await reachable(node)) ? true : null));
 }
 
-function daemonLog(node: DevnetNode): string {
-  const file = join(node.home, 'daemon.log');
-  return existsSync(file) ? readFileSync(file, 'utf8') : '';
-}
-
-function persistenceTroubleLines(log: string): string[] {
-  return log.split('\n').filter((line) => PERSISTENCE_TROUBLE.some((pattern) => pattern.test(line)));
+function daemonLogFile(node: DevnetNode): string {
+  return join(node.home, 'daemon.log');
 }
 
 async function subscribedSpr(node: DevnetNode): Promise<string[]> {
@@ -140,7 +138,8 @@ describe('subscription persistence across a real node restart', () => {
   const state: { v: DevnetState | null } = { v: null };
   let author: DevnetNode;
   let edge: DevnetNode;
-  let troubleBefore: string[] = [];
+  /** Where daemon.log stood before the suite acted; only what is written after it counts. */
+  let logMark: LogMark;
   /** Acknowledged subscription intent per graph; the durable state must equal it after every restart. */
   const expected = new Map<string, boolean>();
 
@@ -155,7 +154,7 @@ describe('subscription persistence across a real node restart', () => {
     edge = state.v.nodes[EDGE_NODE]!;
     const role = (await fetchStatus(edge)).nodeRole;
     expect(role, `node${EDGE_NODE} must be an edge node`).toBe('edge');
-    troubleBefore = persistenceTroubleLines(daemonLog(edge));
+    logMark = markLog(daemonLogFile(edge));
 
     // Self-created, registered public context graphs the edge can subscribe to.
     for (const id of graphIds) {
@@ -240,8 +239,16 @@ describe('subscription persistence across a real node restart', () => {
   }, 480_000);
 
   it('the edge daemon logged no persistence drain timeout or failed subscription persist', () => {
-    const now = persistenceTroubleLines(daemonLog(edge));
-    const fresh = now.slice(troubleBefore.length);
-    expect(fresh, `new persistence trouble in node${EDGE_NODE} daemon.log:\n${fresh.join('\n')}`).toEqual([]);
+    // The window is delimited by the byte offset recorded in beforeAll, never by
+    // a count of earlier matches: a restart can rotate daemon.log, which drops
+    // old matching lines and would let a count-based skip swallow a fresh one.
+    // A rotated log has no meaningful offset, so every matching line in it counts.
+    const { lines, rotated } = matchingLinesSince(daemonLogFile(edge), logMark, PERSISTENCE_TROUBLE);
+    expect(
+      lines,
+      `new persistence trouble in node${EDGE_NODE} daemon.log`
+      + `${rotated ? ' (the log was rotated during the run, so every matching line in it counts as new)' : ''}:\n`
+      + lines.join('\n'),
+    ).toEqual([]);
   });
 });
