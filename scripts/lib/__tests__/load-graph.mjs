@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
-import { commandFiles, readWorkspaces, simpleCommands, workspaceClosure } from './ci-execution-graph.mjs';
+import { analyzeShell, commandFiles, isShellScript, packageScriptEdges, readWorkspaces, workspaceClosure } from './ci-execution-graph.mjs';
 import { REPO_ROOT } from './ci-plan-fixtures.mjs';
 
 export { readWorkspaces, workspaceClosure };
@@ -254,26 +254,43 @@ export function loadReferences(file, source) {
   };
 }
 
-// What a shell script runs or sources, read from its code without `#`
-// comments by the command resolver (commandFiles): repository scripts by
-// repo path, behind any directory variable ("$repo_root/scripts/devnet.sh"),
-// and files beside it by its own directory ("$SCRIPT_DIR/devnet-lib.sh",
-// "$(dirname "$0")/x.sh", ./x.sh). A script path it builds from a value
-// ("$SCRIPT_DIR/${helper}.sh", scripts/$name) is `assembled`.
-const assemblesScriptPath = (word) => word.includes('$')
-  && (/(?:^|\/)scripts\/[^$]*\$/.test(word) || /(?:^|\/)[^/]*\$[^/]*\.(?:sh|bash|py|[cm]?[jt]s)$/.test(word));
+// The repository's manifests, as the shell analyzer reads package-manager
+// calls against them; read once.
+let repository;
+const repositoryManifests = () => repository ??= {
+  workspaces: readWorkspaces(),
+  rootManifest: JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')),
+};
+
+// What a shell script runs or sources, from the one shell reading
+// (analyzeShell) the execution graph uses too: of the files it names, the
+// repository scripts (by repo path, behind any directory variable:
+// "$repo_root/scripts/devnet.sh") and the files beside it
+// ("$SCRIPT_DIR/devnet-lib.sh", "$(dirname "$0")/x.sh", ./x.sh); of what the
+// package scripts it runs reach (packageScriptEdges), the repository scripts
+// and the files beside the shell scripts they run. A script path it or they
+// build from a value ("$SCRIPT_DIR/${helper}.sh", scripts/$name) is
+// `assembled`.
 export function shellReferences(file, source) {
-  const code = source.split('\n').map((line) => line.replace(/(^|\s)#.*$/, '$1')).join('\n');
   const directory = path.posix.dirname(file);
-  const named = commandFiles(code, { scriptDirectory: directory, exists: followable })
-    .filter((target) => target.startsWith('scripts/') || path.posix.dirname(target) === directory);
-  const words = simpleCommands(code).flatMap(({ words: commandWords, assignments }) => [...assignments, ...commandWords]);
+  const { workspaces, rootManifest } = repositoryManifests();
+  const { calls, files, assembled } = analyzeShell(source, {
+    scriptDirectory: directory,
+    exists: followable,
+    context: { ...workspaces, rootManifest },
+  });
+  const reached = calls.length ? packageScriptEdges(calls, { exists: followable, workspaces, rootManifest }) : [];
+  const beside = (target, scriptDirectory) => target.startsWith('scripts/') || path.posix.dirname(target) === scriptDirectory;
+  const named = [
+    ...files.filter(({ file: target }) => beside(target, directory)).map(({ file: target }) => target),
+    ...reached.filter(({ kind, file: target, scriptDirectory }) => kind === 'file' && beside(target, scriptDirectory)).map(({ file: target }) => target),
+  ];
   return {
     modules: [],
     paths: [...new Set(named.map((target) => readTarget(target, false)).filter((target) => target && target !== file))],
     packages: [],
     computed: [],
-    assembled: [...new Set(words.map((word) => word.replace(/["']/g, '')).filter(assemblesScriptPath))],
+    assembled: [...new Set([...assembled, ...reached.filter(({ kind }) => kind === 'assembled').map(({ text }) => text)])],
   };
 }
 
@@ -283,12 +300,7 @@ export function shellReferences(file, source) {
 // a path mentioned in it is not a dependency.
 const FORMATS = [
   { format: 'module', matches: (file) => /\.[cm]?[jt]sx?$/.test(file), references: loadReferences },
-  {
-    format: 'shell',
-    matches: (file, source) => /\.(?:sh|bash)$/.test(file)
-      || (!path.posix.basename(file).includes('.') && /^#!\s*\/\S*\/(?:env\s+)?(?:ba|da|z)?sh\b/.test(source)),
-    references: shellReferences,
-  },
+  { format: 'shell', matches: isShellScript, references: shellReferences },
 ];
 const NO_DEPENDENCIES = Object.freeze({ modules: [], paths: [], packages: [], computed: [], assembled: [] });
 

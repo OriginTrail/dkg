@@ -234,6 +234,53 @@ export function commandFiles(text, { cwd = '.', scriptDirectory, exists }) {
     .flatMap((word) => namedFiles(word, directory, exists, scriptDirectory))))];
 }
 
+// A shell script: a .sh or .bash file, or an extensionless one whose shebang
+// runs a shell.
+export function isShellScript(file, source) {
+  return /\.(?:sh|bash)$/.test(file)
+    || (!path.posix.basename(file).includes('.') && /^#!\s*\/\S*\/(?:env\s+)?(?:ba|da|z)?sh\b/.test(source));
+}
+
+// Shell text without its `#` comments: a # at a line's start or after
+// whitespace (${#var} and a#b are not comments).
+const withoutComments = (text) => text.split('\n').map((line) => line.replace(/(^|\s)#.*$/, '$1')).join('\n');
+
+// A word that builds a script path from a value: an expansion inside a
+// scripts/ path, or in a script's file name ("$SCRIPT_DIR/${helper}.sh").
+const assemblesScriptPath = (word) => word.includes('$')
+  && (/(?:^|\/)scripts\/[^$]*\$/.test(word) || /(?:^|\/)[^/]*\$[^/]*\.(?:sh|bash|py|[cm]?[jt]s)$/.test(word));
+
+// The one reading of a piece of shell text - a workflow step, a package
+// script, a shell script - with its `#` comments dropped, as typed edges:
+// - calls: the package scripts it runs, as [workspace, script] ('.' is the
+//   root manifest): named by a package manager, turbo, install or pack;
+// - files: the repository files it runs or names (namedFiles), each with
+//   the directory it was named from, the child commands a declared program
+//   runs (PROGRAM_CHILD_COMMANDS) included;
+// - assembled: the script paths it builds from a value, which no reading can
+//   resolve ("$SCRIPT_DIR/${helper}.sh", scripts/$name).
+// `cwd` is where it runs, `scriptDirectory` the directory of the shell script
+// it is (if any), `context` the manifests ({ manifests, workspaceByName,
+// rootManifest }) and `exists` what is a file.
+export function analyzeShell(text, { cwd = '.', scriptDirectory, exists, context }) {
+  const calls = [];
+  const files = [];
+  const assembled = new Set();
+  const queue = simpleCommands(withoutComments(text), cwd);
+  while (queue.length) {
+    const command = queue.shift();
+    const { scripts, nested, directories } = packageManagerCalls(command, context);
+    queue.push(...nested, ...childCommands(command, exists));
+    calls.push(...scripts);
+    const words = [...(command.assignments ?? []), ...command.words];
+    for (const directory of directories) {
+      for (const file of words.flatMap((word) => namedFiles(word, directory, exists, scriptDirectory))) files.push({ file, directory });
+    }
+    for (const word of words.map((candidate) => candidate.replace(/["']/g, ''))) if (assemblesScriptPath(word)) assembled.add(word);
+  }
+  return { calls, files, assembled: [...assembled] };
+}
+
 // The child commands a declared program runs for the subcommand a command
 // gives it (PROGRAM_CHILD_COMMANDS), as commands in their declared
 // directories.
@@ -246,7 +293,75 @@ function childCommands({ words, cwd }, exists) {
   return [];
 }
 
-const SHELL_SCRIPT = /\.(?:sh|bash)$/;
+
+// Follows shell text through the package scripts and shell scripts it
+// reaches, reading each with analyzeShell, and records the `commands` it
+// reads (each once, in the order reached) and its `edges`: a `file` edge per
+// repository file named (with the shell script directory it was named in), a
+// `script` edge per package script run and an `assembled` edge per script
+// path built from a value, each with the chain of package scripts
+// ({ workspace, script }) that led there and its provenance (`via`).
+function executionReader({ readRepoFile, exists, context }) {
+  const commands = [];
+  const projected = new Set();
+  const followed = new Set();
+  const edges = [];
+  const scriptText = (workspace, script) => (workspace === '.' ? context.rootManifest.scripts : context.manifests.get(workspace)?.scripts)?.[script];
+  const chainKey = (chain) => chain.map((link) => `${link.workspace}:${link.script}`).join('>');
+  const project = (key, text) => {
+    if (!projected.has(key)) {
+      projected.add(key);
+      commands.push(text);
+    }
+  };
+  // Read `text` as commands run in `cwd`, reached through `chain`; the text
+  // of a shell script is read from `scriptDirectory`, its own directory.
+  const readCommands = (text, cwd, chain, via, scriptDirectory) => {
+    const { calls, files, assembled } = analyzeShell(text, { cwd, scriptDirectory, exists, context });
+    for (const { file } of files) edges.push({ kind: 'file', file, chain, via, scriptDirectory });
+    for (const word of assembled) edges.push({ kind: 'assembled', text: word, chain, via });
+    for (const [workspace, script] of calls) {
+      for (const name of [`pre${script}`, script, `post${script}`]) runScript(workspace, name, chain, via);
+    }
+    for (const { file, directory } of files) {
+      const key = `${file}@${chainKey(chain)}`;
+      const source = followed.has(key) ? undefined : readRepoFile(file);
+      if (source === undefined || !isShellScript(file, source)) continue;
+      followed.add(key);
+      project(`shell ${file}`, source);
+      readCommands(source, directory, chain, `${via} > ${file}`, path.posix.dirname(file));
+    }
+  };
+  const runScript = (workspace, script, chain, via) => {
+    const text = scriptText(workspace, script);
+    if (text === undefined || chain.some((link) => link.workspace === workspace && link.script === script)) return;
+    const next = [...chain, { workspace, script }];
+    const key = chainKey(next);
+    if (followed.has(key)) return;
+    followed.add(key);
+    const where = `${via} > ${workspace === '.' ? '' : `${workspace} `}${script}`;
+    edges.push({ kind: 'script', workspace, script, chain: next, via: where });
+    project(`script ${workspace} ${script}`, text);
+    readCommands(text, workspace, next, where);
+  };
+  return { commands, edges, readCommands, runScript };
+}
+
+// The edges package scripts reach, followed as a job's commands are: each
+// [workspace, script] call with its pre and post hooks. Options as for
+// workflowExecution, plus `exists`.
+export function packageScriptEdges(calls, {
+  readRepoFile = readRepoText,
+  exists = (file) => readRepoFile(file) !== undefined,
+  workspaces = readWorkspaces({ readRepoFile }),
+  rootManifest = JSON.parse(readRepoFile('package.json') ?? '{}'),
+} = {}) {
+  const reader = executionReader({ readRepoFile, exists, context: { ...workspaces, rootManifest } });
+  for (const [workspace, script] of calls) {
+    for (const name of [`pre${script}`, script, `post${script}`]) reader.runScript(workspace, name, [], workspace === '.' ? script : `${workspace} ${script}`);
+  }
+  return reader.edges;
+}
 
 // Every job of a workflow as { job, condition, commands, edges }:
 // - `commands`: the text of every command it runs (steps, and the package
@@ -265,61 +380,9 @@ export function workflowExecution(workflowSource, {
 } = {}) {
   const context = { ...workspaces, rootManifest };
   const exists = (file) => readRepoFile(file) !== undefined;
-  const scriptText = (workspace, script) => (workspace === '.' ? rootManifest.scripts : workspaces.manifests.get(workspace)?.scripts)?.[script];
   const workflow = parse(workflowSource);
   return Object.entries(workflow.jobs ?? {}).map(([job, definition]) => {
-    const commands = [];
-    const projected = new Set();
-    const followed = new Set();
-    const edges = [];
-    const project = (key, text) => {
-      if (!projected.has(key)) {
-        projected.add(key);
-        commands.push(text);
-      }
-    };
-    // Read `text` as commands run in `cwd`, reached through `chain`; the text
-    // of a shell script is read from `scriptDirectory`, its own directory.
-    const readCommands = (text, cwd, chain, via, scriptDirectory) => {
-      const scripts = [];
-      const shells = [];
-      const queue = simpleCommands(text, cwd);
-      while (queue.length) {
-        const command = queue.shift();
-        const { scripts: calls, nested, directories } = packageManagerCalls(command, context);
-        queue.push(...nested, ...childCommands(command, exists));
-        scripts.push(...calls);
-        for (const directory of directories) {
-          for (const file of [...(command.assignments ?? []), ...command.words].flatMap((word) => namedFiles(word, directory, exists, scriptDirectory))) {
-            edges.push({ kind: 'file', file, chain, via });
-            if (SHELL_SCRIPT.test(file)) shells.push([file, directory]);
-          }
-        }
-      }
-      for (const [workspace, script] of scripts) {
-        for (const name of [`pre${script}`, script, `post${script}`]) runScript(workspace, name, chain, via);
-      }
-      for (const [file, directory] of shells) {
-        const key = `${file}@${chain.map((link) => `${link.workspace}:${link.script}`).join('>')}`;
-        const source = readRepoFile(file);
-        if (source === undefined || followed.has(key)) continue;
-        followed.add(key);
-        project(`shell ${file}`, source);
-        readCommands(source, directory, chain, `${via} > ${file}`, path.posix.dirname(file));
-      }
-    };
-    const runScript = (workspace, script, chain, via) => {
-      const text = scriptText(workspace, script);
-      if (text === undefined || chain.some((link) => link.workspace === workspace && link.script === script)) return;
-      const next = [...chain, { workspace, script }];
-      const key = next.map((link) => `${link.workspace}:${link.script}`).join('>');
-      if (followed.has(key)) return;
-      followed.add(key);
-      const where = `${via} > ${workspace === '.' ? '' : `${workspace} `}${script}`;
-      edges.push({ kind: 'script', workspace, script, chain: next, via: where });
-      project(`script ${workspace} ${script}`, text);
-      readCommands(text, workspace, next, where);
-    };
+    const reader = executionReader({ readRepoFile, exists, context });
     // The directory a step's `run` executes in, as GitHub picks it: the
     // step's working-directory, else its job's defaults.run, else its
     // workflow's, else the repository root. One the graph cannot resolve
@@ -338,8 +401,8 @@ export function workflowExecution(workflowSource, {
       for (const step of steps) {
         if (step.run !== undefined && step.run !== null) {
           const run = String(step.run);
-          commands.push(run);
-          readCommands(run, workingDirectory(step['working-directory'], jobDirectory, workflowDirectory), [], job);
+          reader.commands.push(run);
+          reader.readCommands(run, workingDirectory(step['working-directory'], jobDirectory, workflowDirectory), [], job);
         }
         followUses(step.uses);
       }
@@ -359,6 +422,6 @@ export function workflowExecution(workflowSource, {
       else followJob({ steps: runs?.steps });
     };
     followJob(definition, workflow.defaults?.run?.['working-directory']);
-    return { job, condition: definition.if ?? '', commands, edges };
+    return { job, condition: definition.if ?? '', commands: reader.commands, edges: reader.edges };
   });
 }

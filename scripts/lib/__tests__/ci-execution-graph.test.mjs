@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
-import { workflowExecution } from './ci-execution-graph.mjs';
+import { analyzeShell, workflowExecution } from './ci-execution-graph.mjs';
 import { REPO_ROOT } from './ci-plan-fixtures.mjs';
 import { laneSeeds } from './lane-entrypoints.mjs';
 
@@ -64,4 +64,23 @@ test('a step runs in its working directory, its job default or its workflow defa
   assert.ok(scripts.includes('packages/evm-module test:coverage'));
   assert.equal(scripts.includes('. test:coverage'), false);
   assert.ok(coverage.edges.some(({ kind, file }) => kind === 'file' && file === 'scripts/check-evm-coverage.mjs'));
+});
+
+test('one shell reading yields package-script calls, files and assembled paths', () => {
+  // analyzeShell is the one reading of shell text: the execution graph reads
+  // workflow steps, package scripts and shell scripts with it, and the load
+  // graph reads the shell scripts lanes reach with it. Comments name nothing.
+  const cli = { name: '@origintrail-official/dkg', scripts: { build: 'tsc' } };
+  const context = { manifests: new Map([['packages/cli', cli]]), workspaceByName: new Map([[cli.name, 'packages/cli']]), rootManifest: {} };
+  const present = new Set(['scripts/devnet.sh', 'scripts/devnet-lib.sh']);
+  const reading = analyzeShell([
+    '# scripts/devnet-comprehensive.sh is only mentioned here',
+    'source "$(dirname "$0")/devnet-lib.sh"',
+    'pnpm --filter @origintrail-official/dkg run build',
+    'bash "$REPO_ROOT/scripts/devnet.sh" start',
+    'bash "$SCRIPT_DIR/devnet-${helper}.sh"',
+  ].join('\n'), { scriptDirectory: 'scripts', exists: (file) => present.has(file), context });
+  assert.deepEqual(reading.calls, [['packages/cli', 'build']]);
+  assert.deepEqual(reading.files.map(({ file }) => file), ['scripts/devnet-lib.sh', 'scripts/devnet.sh']);
+  assert.deepEqual(reading.assembled, ['$SCRIPT_DIR/devnet-${helper}.sh']);
 });

@@ -1,8 +1,11 @@
 // The load graph's scanner and trace (load-graph.mjs): the forms each format
 // handler reads, and how a trace carries requirements.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
 import { commandFiles } from './ci-execution-graph.mjs';
+import { REPO_ROOT } from './ci-plan-fixtures.mjs';
 import { dependenciesOf, loadReferences, traceLaneLoads } from './load-graph.mjs';
 
 test('the load scanner sees these forms, and nothing it cannot resolve statically', () => {
@@ -175,4 +178,14 @@ test('traceLaneLoads carries lanes through module loads, not through reads', () 
   assert.equal(loads.has('packages/node-ui/src/ui/pca-api.ts'), false);
   // A package-name import requires the workspace and its dependencies.
   assert.match(loads.get('packages/rdf-utils/src/index.ts')?.get('kosava_node_ui') ?? '', /imports @origintrail-official\/dkg-rdf-utils/);
+});
+
+test('a shell script reaches what the package scripts it runs reach', () => {
+  // The load graph reads a shell script with the execution graph's analyzer
+  // and follows the package scripts it runs with the graph's reader, keeping
+  // the repository scripts they reach: devnet.sh's `pnpm run build` runs
+  // scripts/build.mjs.
+  const devnet = dependenciesOf('scripts/devnet.sh', fs.readFileSync(path.join(REPO_ROOT, 'scripts/devnet.sh'), 'utf8'));
+  assert.equal(devnet.format, 'shell');
+  assert.ok(devnet.paths.includes('scripts/build.mjs'));
 });
