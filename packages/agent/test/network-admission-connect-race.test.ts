@@ -3,6 +3,7 @@ import { peerIdFromString } from '@libp2p/peer-id';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   DEFAULT_GENESIS_ID,
+  PROTOCOL_NETWORK_IDENTITY,
   computeNetworkId,
   createOperationContext,
   type DKGNodeConfig,
@@ -80,6 +81,34 @@ describe('network admission when the peer connects mid-probe', () => {
 
     await expect(admitted).resolves.toBe(true);
     expect(Date.now() - startedAt).toBeLessThan(PROBE_TIMEOUT_MS - 1_000);
+    expect(b.networkAdmission.isAcceptedPeer(a.peerId)).toBe(true);
+    expect(b.networkAdmission.getRetryableProbeBackoff(a.peerId)).toBeUndefined();
+  }, 20_000);
+
+  // A peer that is still booting answers the identity probe with multistream
+  // `na` until it registers the identity handler, and admission gates every
+  // other protocol. ProtocolRouter fails a refused protocol fast, so the probe
+  // opts back into its in-line retry (`retryOnProtocolRefusal`): a peer whose
+  // handler shows up within the retry window must be admitted, not pushed
+  // into a transient probe backoff.
+  it('admits a peer that registers its identity handler a moment after the probe starts', async () => {
+    const networkId = await computeNetworkId(DEFAULT_GENESIS_ID);
+    const a = await startAgent('BootingPeerA', networkId);
+    const b = await startAgent('BootingPeerB', networkId);
+    // A is "still booting": the identity handler is not registered yet.
+    a.router.unregister(PROTOCOL_NETWORK_IDENTITY);
+    setTimeout(() => a.networkAdmissionCoordinator.registerIdentityProtocol(a.router), 700);
+
+    const aAddress = a.multiaddrs.find((addr) => addr.includes('/tcp/') && !addr.includes('/p2p-circuit'));
+    expect(aAddress).toBeDefined();
+    const startedAt = Date.now();
+    await b.node.libp2p.dial(multiaddr(aAddress!));
+
+    await expect(
+      b.networkAdmissionCoordinator.ensureAdmitted(a.peerId, createOperationContext('connect')),
+    ).resolves.toBe(true);
+    // The refusals at ~0 ms and ~500 ms were retried; the third attempt (~1500 ms) found the handler.
+    expect(Date.now() - startedAt).toBeLessThan(PROBE_TIMEOUT_MS);
     expect(b.networkAdmission.isAcceptedPeer(a.peerId)).toBe(true);
     expect(b.networkAdmission.getRetryableProbeBackoff(a.peerId)).toBeUndefined();
   }, 20_000);

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest';
+import { UnsupportedProtocolError } from '@libp2p/interface';
 import {
   ProtocolRouter,
   isProtocolUnsupportedError,
@@ -272,6 +273,79 @@ describe('ProtocolRouter pooled overlay', () => {
     expect(dialCallNo).toBe(2);
 
     // Verify the peer is memoized as one-shot for subsequent sends.
+    expect(fixture.router.peerWireVariantFor(PEER_OLD, '/dkg/10.0.1/message')).toBe('one-shot');
+
+    await fixture.router.closePooling();
+  });
+
+  // The pool wraps the dial error in a PooledStreamResetError, whose message
+  // embeds the inner one. libp2p's typed UnsupportedProtocolError must still be
+  // recognised THROUGH that wrapper when its wording carries none of the old
+  // substrings: the wrapper keeps the original as `cause`.
+  it('falls back to one-shot and memoizes it when the pooled dial fails with a typed UnsupportedProtocolError', async () => {
+    let pooledDials = 0;
+    let oneShotDials = 0;
+    const fixture = makeRouterFixture({
+      onDial: async (_peer, protocols) => {
+        if (protocols === POOLED_MESSAGE_PROTOCOL) {
+          pooledDials += 1;
+          throw new UnsupportedProtocolError('the remote declined every offered protocol');
+        }
+        oneShotDials += 1;
+        const s = new FakeStream();
+        queueMicrotask(() => {
+          s.feed(new TextEncoder().encode('one-shot-resp'));
+          s.endRemote();
+        });
+        return s;
+      },
+    });
+    fixture.router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+
+    const resp = await fixture.router.send(PEER_OLD, '/dkg/10.0.1/message', new TextEncoder().encode('x'));
+    expect(new TextDecoder().decode(resp)).toBe('one-shot-resp');
+    expect(pooledDials).toBe(1);
+    expect(oneShotDials).toBe(1);
+    expect(fixture.router.peerWireVariantFor(PEER_OLD, '/dkg/10.0.1/message')).toBe('one-shot');
+
+    await fixture.router.closePooling();
+  });
+
+  // The in-line wire-variant fallback runs first; a refusal that survives the
+  // one-shot attempt too is definitive and must not be retried on that wire.
+  it('fails fast when the peer refuses BOTH wire variants: one pooled and one one-shot attempt, no backoff retries', async () => {
+    const dials: string[] = [];
+    const fixture = makeRouterFixture({
+      onDial: async (_peer, protocols) => {
+        dials.push(Array.isArray(protocols) ? protocols.join(',') : protocols);
+        throw new UnsupportedProtocolError(
+          `Protocol selection failed - could not negotiate ${String(protocols)}`,
+        );
+      },
+    });
+    fixture.router.enablePooling('/dkg/10.0.1/message', {
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+      peerIdFromString: (s) => ({ toString: () => s }) as unknown,
+    });
+
+    const startedAt = Date.now();
+    const failure = await fixture.router
+      .send(PEER_OLD, '/dkg/10.0.1/message', new TextEncoder().encode('x'))
+      .then(() => undefined, (err: unknown) => err);
+    const elapsedMs = Date.now() - startedAt;
+
+    expect((failure as Error).name).toBe('UnsupportedProtocolError');
+    expect(isProtocolUnsupportedError(failure)).toBe(true);
+    // The pooled wire once, then the logical one-shot wire once. Before the
+    // typed classification the one-shot wire was retried three times with a
+    // 500 ms + 1000 ms backoff (>= 1.5 s) against a peer that had already said no.
+    expect(dials).toEqual([POOLED_MESSAGE_PROTOCOL, '/dkg/10.0.1/message']);
+    expect(elapsedMs).toBeLessThan(400);
     expect(fixture.router.peerWireVariantFor(PEER_OLD, '/dkg/10.0.1/message')).toBe('one-shot');
 
     await fixture.router.closePooling();

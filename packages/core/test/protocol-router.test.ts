@@ -1,11 +1,14 @@
 import { describe, it, expect } from 'vitest';
+import { StreamResetError, UnsupportedProtocolError } from '@libp2p/interface';
 import {
   composeAbortSignals,
+  isProtocolUnsupportedError,
   isRecoverableSendError,
   DEFAULT_SEND_TIMEOUT_MS,
   ProtocolRouter,
   QuietRetryableHandlerError,
 } from '../src/protocol-router.js';
+import { PooledStreamResetError } from '../src/message-stream-pool.js';
 import type { DKGNode } from '../src/node.js';
 import type { PeerResolver } from '../src/network/peer-resolver.js';
 
@@ -17,9 +20,50 @@ function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
 
 describe('ProtocolRouter', () => {
   describe('isRecoverableSendError', () => {
-    it('returns true for protocol selection / negotiation errors (relay sync)', () => {
-      expect(isRecoverableSendError(new Error('Protocol selection failed - could not negotiate /dkg/sync/1.0.0'))).toBe(true);
-      expect(isRecoverableSendError(new Error('could not negotiate /dkg/sync/1.0.0'))).toBe(true);
+    // A peer that answers "no such protocol" (multistream-select `na`) does not
+    // speak it on any wire the router tried: by the time the retry loop
+    // consults this predicate the in-line pooled -> one-shot fallback has run.
+    // Retrying the same protocol only burns the retry budget and the send
+    // deadline, so it is NOT recoverable. It stays `isProtocolUnsupportedError`,
+    // which is what the wire-variant fallback and the quorum accounting use.
+    it('does not retry protocol selection / negotiation errors (peer refuses the protocol)', () => {
+      const messages = [
+        'Protocol selection failed - could not negotiate /dkg/sync/1.0.0',
+        'could not negotiate /dkg/sync/1.0.0',
+      ];
+      for (const message of messages) {
+        expect(isRecoverableSendError(new Error(message))).toBe(false);
+        expect(isProtocolUnsupportedError(new Error(message))).toBe(true);
+      }
+    });
+
+    it('does not retry the real libp2p UnsupportedProtocolError, whatever its wording', () => {
+      const real = new UnsupportedProtocolError('Protocol selection failed - could not negotiate /dkg/sync/1.0.0');
+      expect(isRecoverableSendError(real)).toBe(false);
+      expect(isProtocolUnsupportedError(real)).toBe(true);
+      const reworded = new UnsupportedProtocolError('the remote does not handle this');
+      expect(isRecoverableSendError(reworded)).toBe(false);
+      expect(isProtocolUnsupportedError(reworded)).toBe(true);
+    });
+
+    it('keeps a PooledStreamResetError retryable by name, even if its wording changes', () => {
+      const reset = new PooledStreamResetError('peer closed stream');
+      reset.message = 'stream torn down by the pool';
+      expect(isRecoverableSendError(reset)).toBe(true);
+      expect(isProtocolUnsupportedError(reset)).toBe(false);
+    });
+
+    it('classifies a PooledStreamResetError by the error it wraps', () => {
+      const wrappedRefusal = new PooledStreamResetError('open failed', {
+        cause: new UnsupportedProtocolError('no handler'),
+      });
+      expect(isRecoverableSendError(wrappedRefusal)).toBe(false);
+      expect(isProtocolUnsupportedError(wrappedRefusal)).toBe(true);
+      const wrappedReset = new PooledStreamResetError('write failed', {
+        cause: new StreamResetError(),
+      });
+      expect(isRecoverableSendError(wrappedReset)).toBe(true);
+      expect(isProtocolUnsupportedError(wrappedReset)).toBe(false);
     });
 
     it('returns true for connection/stream errors', () => {
@@ -70,9 +114,13 @@ describe('ProtocolRouter', () => {
       expect(isRecoverableSendError(new Error('Invalid payload'))).toBe(false);
     });
 
-    it('handles non-Error values', () => {
-      expect(isRecoverableSendError('protocol selection failed')).toBe(true);
+    it('handles non-Error values (bare strings fall back to message matching)', () => {
+      expect(isRecoverableSendError('econnreset')).toBe(true);
+      expect(isRecoverableSendError('all multiaddr dials failed')).toBe(true);
+      expect(isRecoverableSendError('protocol selection failed')).toBe(false);
+      expect(isProtocolUnsupportedError('protocol selection failed')).toBe(true);
       expect(isRecoverableSendError(null)).toBe(false);
+      expect(isProtocolUnsupportedError(null)).toBe(false);
     });
   });
 
@@ -1374,6 +1422,118 @@ describe('ProtocolRouter', () => {
       // including the third one that succeeds.
       expect(resolveCalls).toBe(3);
       expect(result).toEqual(new Uint8Array([0xAA, 0xBB]));
+    });
+
+    it('fails fast when the peer refuses the protocol: one dial, one re-prime, no backoff', async () => {
+      let resolveCalls = 0;
+      let dialCalls = 0;
+      const router = makeRouter({
+        onResolve: () => { resolveCalls += 1; },
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new UnsupportedProtocolError('Protocol selection failed - could not negotiate /dkg/test/1.0.0');
+        },
+      });
+
+      const startedAt = Date.now();
+      await expect(
+        router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1])),
+      ).rejects.toMatchObject({ name: 'UnsupportedProtocolError' });
+      const elapsedMs = Date.now() - startedAt;
+
+      // Before: 3 dials with 500 ms + 1000 ms of backoff (>= 1.5 s).
+      expect(dialCalls).toBe(1);
+      expect(resolveCalls).toBe(1);
+      expect(elapsedMs).toBeLessThan(400);
+    });
+
+    it('fails fast on a bare-string refusal too (no typed name to key on)', async () => {
+      let dialCalls = 0;
+      const router = makeRouter({
+        onResolve: () => undefined,
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new Error('protocol selection failed');
+        },
+      });
+
+      await expect(
+        router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1])),
+      ).rejects.toThrow(/protocol selection failed/);
+      expect(dialCalls).toBe(1);
+    });
+
+    it('retries a refusal when the caller opts in with retryOnProtocolRefusal (a peer that is still booting)', async () => {
+      let dialCalls = 0;
+      const router = makeRouter({
+        onResolve: () => undefined,
+        dialBehavior: async () => {
+          dialCalls += 1;
+          // multistream answers `na` until the peer registers its handler.
+          if (dialCalls < 2) throw new UnsupportedProtocolError('Protocol selection failed - could not negotiate /dkg/test/1.0.0');
+          return makeStubStream(new Uint8Array([0x0B])) as any;
+        },
+      });
+
+      const startedAt = Date.now();
+      const result = await router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), {
+        retryOnProtocolRefusal: true,
+      });
+      expect(result).toEqual(new Uint8Array([0x0B]));
+      expect(dialCalls).toBe(2);
+      // One backoff step (500 ms) before the second attempt, as for any recoverable error.
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(450);
+    });
+
+    it('with retryOnProtocolRefusal a persistent refusal still ends after the router\'s three attempts', async () => {
+      let dialCalls = 0;
+      const router = makeRouter({
+        onResolve: () => undefined,
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new UnsupportedProtocolError('Protocol selection failed - could not negotiate /dkg/test/1.0.0');
+        },
+      });
+
+      await expect(
+        router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), { retryOnProtocolRefusal: true }),
+      ).rejects.toMatchObject({ name: 'UnsupportedProtocolError' });
+      expect(dialCalls).toBe(3);
+    });
+
+    it('does not replay a single-use payload after a refusal even when the caller opts in', async () => {
+      let dialCalls = 0;
+      const router = makeRouter({
+        onResolve: () => undefined,
+        dialBehavior: async () => {
+          dialCalls += 1;
+          throw new UnsupportedProtocolError('Protocol selection failed - could not negotiate /dkg/test/1.0.0');
+        },
+      });
+
+      await expect(
+        router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), {
+          payloadReuse: 'single-use',
+          retryOnProtocolRefusal: true,
+        }),
+      ).rejects.toMatchObject({ name: 'UnsupportedProtocolError' });
+      expect(dialCalls).toBe(1);
+    });
+
+    it('still retries a libp2p StreamResetError by name when its wording carries no known substring', async () => {
+      let dialCalls = 0;
+      const router = makeRouter({
+        onResolve: () => undefined,
+        dialBehavior: async () => {
+          dialCalls += 1;
+          if (dialCalls < 2) throw new StreamResetError('remote went away');
+          return makeStubStream(new Uint8Array([0x0A])) as any;
+        },
+      });
+
+      const result = await router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]));
+      expect(result).toEqual(new Uint8Array([0x0A]));
+      expect(dialCalls).toBe(2);
     });
 
     it('stops at attempt 1 for non-recoverable errors and only re-primes once', async () => {

@@ -2500,8 +2500,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       identity: this.config.networkIdentity,
       selfPeerId: this.node.peerId.toString(),
       sign: (payload) => this.wallet.sign(payload),
+      // A peer that is still booting answers this probe with multistream `na`
+      // until it registers the identity handler, and admission is the gate for
+      // every other protocol, so a refusal keeps the router's short in-line
+      // retry (other protocols fail fast on a refusal).
       sendIdentityProbe: (peerId, data, options) =>
-        this.router.send(peerId, PROTOCOL_NETWORK_IDENTITY, data, options),
+        this.router.send(peerId, PROTOCOL_NETWORK_IDENTITY, data, {
+          ...options,
+          retryOnProtocolRefusal: true,
+        }),
       getConnections: () => this.node.libp2p.getConnections() as any,
       deletePeerFromPeerStore: async (peerId) => {
         const { peerIdFromString } = await import('@libp2p/peer-id');

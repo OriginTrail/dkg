@@ -8,6 +8,7 @@ import {
   PROTOCOL_STORAGE_ACK,
   PROTOCOL_STORAGE_ACK_V2,
   PROTOCOL_STORAGE_UPDATE_ACK,
+  PooledStreamResetError,
 } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10, computeFlatKCMerkleLeafCountV10, computePrivateRootV10 } from '../src/merkle.js';
 import { ethers } from 'ethers';
@@ -789,6 +790,68 @@ describe('ACKCollector', () => {
     expect(caught!.message).toContain('storage_ack_insufficient');
     expect(caught!.message).toContain('PROTOCOL_UNSUPPORTED');
 
+    for (const peerId of ['peer-0', 'peer-1', 'peer-2']) {
+      expect(callsByPeer.get(peerId)).toBe(1);
+    }
+  });
+
+  // The refusal is recognised by libp2p's typed error name, and through the
+  // pooled wire's wrapper by its `cause`, not only by the message wording: a
+  // reworded refusal must still be counted as an unreachable peer (protocol
+  // unsupported) against the quorum, exactly once and with no transport retries.
+  it.each([
+    ['a typed UnsupportedProtocolError with different wording', () => {
+      const err = new Error('the remote declined every offered protocol');
+      err.name = 'UnsupportedProtocolError';
+      return err;
+    }],
+    ['a pooled-wire reset that wraps a typed refusal as its cause', () => {
+      const refusal = new Error('nothing to see here');
+      refusal.name = 'UnsupportedProtocolError';
+      return new PooledStreamResetError('open failed', { cause: refusal });
+    }],
+  ])('counts %s as PROTOCOL_UNSUPPORTED without transport retries', async (_label, makeError) => {
+    const callsByPeer = new Map<string, number>();
+    const deps: ACKCollectorDeps = {
+      gossipPublish: async () => {},
+      sleep: async () => {},
+      sendP2P: async (peerId) => {
+        callsByPeer.set(peerId, (callsByPeer.get(peerId) ?? 0) + 1);
+        throw makeError();
+      },
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
+      log: () => {},
+    };
+
+    const collector = new ACKCollector(deps);
+    let caught: QuorumUnmetError | undefined;
+    try {
+      await collector.collect({
+        merkleRoot,
+        contextGraphId: testCGId,
+        contextGraphIdStr: testCGIdStr,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: 100n,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: ['urn:a'],
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
+        merkleLeafCount,
+        ackMode: { kind: 'public' },
+      });
+    } catch (err) {
+      caught = err as QuorumUnmetError;
+    }
+
+    expect(caught).toBeDefined();
+    expect(caught!.message).toContain('storage_ack_insufficient');
+    expect(caught!.message).toContain('PROTOCOL_UNSUPPORTED');
+    expect(caught).toMatchObject({
+      peerOutcomes: expect.arrayContaining([
+        expect.objectContaining({ dialOk: true, protocolSupported: false, reason: 'PROTOCOL_UNSUPPORTED' }),
+      ]),
+    });
     for (const peerId of ['peer-0', 'peer-1', 'peer-2']) {
       expect(callsByPeer.get(peerId)).toBe(1);
     }

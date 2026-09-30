@@ -116,6 +116,7 @@ export default defineConfig({
       "test/context-graph-metadata-placement.test.ts",
       "test/swm-plaintext-oracle-wiring.test.ts",
       "test/oversize-filter.test.ts",
+      "test/sync-error-tags-send-classification.test.ts",
       "test/cg-registration-oversize-guard.test.ts",
       "test/sync-responder-concurrent-interleaving.test.ts",
       "test/durable-meta-admission.test.ts",
