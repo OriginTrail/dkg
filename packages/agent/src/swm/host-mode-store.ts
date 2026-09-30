@@ -20,15 +20,24 @@
  * larger TTL and cap so the host can serve catchup for days/weeks of
  * gossip after registration.
  *
+ * Durability: every acknowledged `append` is fsynced (the frame, then the
+ * per-CG `.meta` cursor, then the directory entry), and every whole-file
+ * rewrite (`.meta` updates, the prune rewrite of a `.log`) goes through a
+ * sibling temp file + fsync + rename + directory fsync, so a crash or power
+ * loss leaves either the old file or the new file, never a torn one. Leftover
+ * `<file>.tmp-*` siblings from a crash are inert and swept by `init()`.
+ *
  * The store is intentionally simple: append-only writes, sequential
  * reads, periodic prune. No indexes, no compaction, no checkpoints.
  * The expected steady-state size is small (a few MB per active CG
  * in Phase A); when this becomes a hot path, swap for a sqlite-backed
  * implementation behind the same interface.
  */
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { promises as fs, type Dirent } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import path from 'node:path';
+import { fsyncRfc64DirectoryV1 } from '../rfc64/secure-filesystem-policy-v1.js';
 
 export interface SwmHostModeEntry {
   /** Monotonic per-store sequence number assigned at append time. */
@@ -85,6 +94,13 @@ export interface SwmHostModeStartupReconcileReport {
    * pre-fix report shape.
    */
   corruptMetasRemoved?: number;
+  /**
+   * Number of leftover `<log|meta>.tmp-*` files (a crash between creating
+   * the temp file and renaming it over its target) swept by this pass.
+   * Reported only when non-zero; never folded into the orphan-log totals
+   * above and never fires `onStartupReconcile` on its own.
+   */
+  staleTempFilesRemoved?: number;
 }
 
 export interface SwmHostModeStats {
@@ -118,6 +134,13 @@ const DEFAULT_REGISTERED_LIMITS: SwmHostModeStoreLimits = {
 
 const ENTRY_HEADER_BYTES = 8 + 8 + 4;
 const META_FILE = '_meta.json';
+/**
+ * Infix of the sibling temp file used for crash-safe whole-file writes:
+ * `<key>.<log|meta>.tmp-<pid>-<uuid>`. It never ends in `.log` / `.meta`,
+ * so the directory scans that key off those suffixes ignore it.
+ */
+const TEMP_FILE_INFIX = '.tmp-';
+const TEMP_FILE_NAME = /^[A-Za-z0-9_-]+\.(?:log|meta)\.tmp-/;
 
 interface CgMetaState {
   seqno: number;
@@ -158,6 +181,10 @@ export class SwmHostModeStore {
   private readonly onStartupReconcile?: (report: SwmHostModeStartupReconcileReport) => void;
   private readonly metaCache = new Map<string, CgMetaState>();
   private readonly inflightWrites = new Map<string, Promise<void>>();
+  /** Temp files currently being written by this instance; the init sweep must not reap them. */
+  private readonly liveTempPaths = new Set<string>();
+  /** CGs whose log tail has been checked (and repaired) since this process started. */
+  private readonly verifiedLogTails = new Set<string>();
   private initialized = false;
   private lastStartupReconcileReport: SwmHostModeStartupReconcileReport | undefined;
 
@@ -233,10 +260,10 @@ export class SwmHostModeStore {
     }
     // Codex PR #619 R2: only count a .meta as "healthy pairing
     // candidate" if it parses as valid JSON with a contextGraphId.
-    // A crash mid-`writeFile(metaPath, ...)` can leave a truncated
-    // file; `loadMeta()` / `listKnownCgs()` already treat that as
-    // unusable, so the paired .log is still unservable + unprunable
-    // and must be reaped here too.
+    // A truncated .meta (written by a build that predates the atomic
+    // temp+rename `persistMeta`, or damaged out-of-band); `loadMeta()` /
+    // `listKnownCgs()` already treat that as unusable, so the paired .log
+    // is still unservable + unprunable and must be reaped here too.
     const validMetaKeys = new Set<string>();
     const corruptMetaNames: string[] = [];
     // Codex PR #619 follow-up: transient fs errors (EACCES, EMFILE,
@@ -246,9 +273,14 @@ export class SwmHostModeStore {
     // read so the paired `.log` is also retained for a later retry.
     const ioSkippedMetaKeys = new Set<string>();
     const logFiles: { key: string; name: string }[] = [];
+    const tempFileNames: string[] = [];
     for (const e of entries) {
       if (!e.isFile()) continue;
-      if (e.name.endsWith('.meta')) {
+      if (TEMP_FILE_NAME.test(e.name)) {
+        // A crash between creating a `writeFileDurable` temp and renaming it
+        // over its target. The target is intact; the temp is dead weight.
+        tempFileNames.push(e.name);
+      } else if (e.name.endsWith('.meta')) {
         const metaPath = path.join(this.dataDir, e.name);
         const metaKey = e.name.slice(0, -'.meta'.length);
         let raw: string;
@@ -306,6 +338,19 @@ export class SwmHostModeStore {
         // best-effort
       }
     }
+    let staleTempFilesRemoved = 0;
+    for (const name of tempFileNames) {
+      const fullPath = path.join(this.dataDir, name);
+      // A write of this very instance may be mid-flight (only reachable via
+      // `reconcileOrphanLogsNow()` after init): leave its temp alone.
+      if (this.liveTempPaths.has(fullPath)) continue;
+      try {
+        await fs.rm(fullPath, { force: true });
+        staleTempFilesRemoved += 1;
+      } catch {
+        // best-effort
+      }
+    }
     const report: SwmHostModeStartupReconcileReport = {
       // Backwards-compatible aggregate: older callers treat these as
       // "files/bytes reaped by startup reconcile", including corrupt
@@ -315,6 +360,7 @@ export class SwmHostModeStore {
       orphanBytesRemoved: orphanBytesRemoved + corruptMetaBytesRemoved,
     };
     if (corruptMetasRemoved > 0) report.corruptMetasRemoved = corruptMetasRemoved;
+    if (staleTempFilesRemoved > 0) report.staleTempFilesRemoved = staleTempFilesRemoved;
     return report;
   }
 
@@ -364,6 +410,7 @@ export class SwmHostModeStore {
     if (envelopeBytes.length === 0) {
       throw new Error('SwmHostModeStore.append: refusing zero-length envelope');
     }
+    await this.repairLogTailOnce(contextGraphId);
     const meta = await this.loadMeta(contextGraphId);
     const seqno = meta.seqno + 1;
     const timestampMs = this.now();
@@ -372,8 +419,22 @@ export class SwmHostModeStore {
     header.writeBigUInt64BE(BigInt(seqno), 8);
     header.writeUInt32BE(envelopeBytes.length, 16);
     const payload = Buffer.concat([header, Buffer.from(envelopeBytes)]);
-    await fs.appendFile(this.logPath(contextGraphId), payload);
+    // Reserve the seqno before touching the disk: if the write or its fsync
+    // fails after the frame's bytes landed, a retry must not append a second
+    // frame with the same seqno (strict-greater-than catch-up paging would
+    // skip one of the two). A failed append burns its seqno instead.
     meta.seqno = seqno;
+    // Frame first, cursor second: the frame is fsynced BEFORE `persistMeta`
+    // publishes its seqno, so an acknowledged append is on disk in both
+    // files and a durable cursor never points past a frame that was lost.
+    try {
+      await this.appendFileDurable(this.logPath(contextGraphId), payload);
+    } catch (err) {
+      // A failed write (ENOSPC, EIO, ...) may have left a partial frame at
+      // the tail; the next append must re-check it rather than write after it.
+      this.verifiedLogTails.delete(this.cgKey(contextGraphId));
+      throw err;
+    }
     await this.persistMeta(contextGraphId, meta);
     await this.enforceLimitsAfterAppend(contextGraphId, meta);
     return seqno;
@@ -613,7 +674,10 @@ export class SwmHostModeStore {
     }
     const parts: Buffer[] = [];
     for (const s of kept) parts.push(Buffer.from(buf.subarray(s.start, s.end)));
-    await fs.writeFile(filePath, Buffer.concat(parts));
+    // Atomic replace: a crash leaves the whole old log or the whole pruned
+    // log, never a truncated one, and concurrent readers never see a
+    // half-written file.
+    await this.writeFileDurable(filePath, Buffer.concat(parts));
     return bytesPruned;
   }
 
@@ -635,9 +699,10 @@ export class SwmHostModeStore {
   /**
    * Load (and cache) the per-CG metadata. On a cold load the seqno
    * cursor is reconciled against the actual log file: a crash
-   * between `appendFile` (durable) and `persistMeta` (durable) would
-   * otherwise let the next append reuse the same seqno, which would
-   * break host-catchup paging that uses strict-greater-than seqno.
+   * between `appendFileDurable` and `persistMeta` (both fsynced, in
+   * that order) would otherwise let the next append reuse the same
+   * seqno, which would break host-catchup paging that uses
+   * strict-greater-than seqno.
    *
    * The log is the source of truth for what was actually persisted;
    * the meta file is a cache of the highest-known seqno plus the
@@ -669,8 +734,15 @@ export class SwmHostModeStore {
     // reconciled cursor so subsequent cold loads don't have to
     // re-scan the log tail.
     if (parsed && state.seqno !== parsed.seqno) {
-      await fs.writeFile(metaPath, JSON.stringify(state)).catch(() => { /* best-effort */ });
+      await this.writeFileDurable(metaPath, JSON.stringify(state)).catch(() => { /* best-effort */ });
     }
+    // Unlocked callers (`isRegistered`, `getLastSeqno`, `stats`) can cold-load
+    // concurrently with a locked append. Whoever installed a state first owns
+    // the cache: overwriting it with this (older) snapshot would roll the
+    // in-memory cursor back and let the next append reuse a seqno. The
+    // durable reconcile write above widens this window, so close it.
+    const installed = this.metaCache.get(cgKey);
+    if (installed) return installed;
     this.metaCache.set(cgKey, state);
     return state;
   }
@@ -691,23 +763,110 @@ export class SwmHostModeStore {
     } catch {
       return 0;
     }
-    let lastSeqno = 0;
-    let offset = 0;
-    while (offset + ENTRY_HEADER_BYTES <= buf.length) {
-      const seqno = Number(buf.readBigUInt64BE(offset + 8));
-      const len = buf.readUInt32BE(offset + 16);
-      const end = offset + ENTRY_HEADER_BYTES + len;
-      if (end > buf.length) break;
-      if (seqno > lastSeqno) lastSeqno = seqno;
-      offset = end;
-    }
-    return lastSeqno;
+    return scanLogFrames(buf).lastSeqno;
   }
 
   private async persistMeta(contextGraphId: string, meta: CgMetaState): Promise<void> {
     const cgKey = this.cgKey(contextGraphId);
     this.metaCache.set(cgKey, meta);
-    await fs.writeFile(this.metaPath(contextGraphId), JSON.stringify(meta));
+    // Authoritative write: a failure rejects so the caller sees it.
+    try {
+      await this.writeFileDurable(this.metaPath(contextGraphId), JSON.stringify(meta));
+    } catch (err) {
+      // The caller mutated the cached object before calling us, so on failure
+      // the cache is ahead of the disk. Drop it: the next access re-reads the
+      // durable state (the cursor is re-derived from the log tail) and a retry
+      // of the same mutation actually retries the write instead of no-op'ing
+      // against a flag the disk never saw.
+      if (this.metaCache.get(cgKey) === meta) this.metaCache.delete(cgKey);
+      throw err;
+    }
+  }
+
+  /**
+   * Crash-safe whole-file replace: write a sibling temp file, fsync it,
+   * `rename` it over `targetPath`, then fsync the directory so the rename
+   * itself survives a power loss. A crash at any point leaves `targetPath`
+   * holding either its previous contents or the new ones; the worst leftover
+   * is an inert `<target>.tmp-*` sibling that `init()` sweeps. On failure the
+   * temp file is removed (best-effort) and the error is rethrown.
+   *
+   * The temp handle is opened for writing and synced in place, so no
+   * separate re-open is needed (which also keeps `FlushFileBuffers` happy on
+   * Windows). The directory fsync is `fsyncRfc64DirectoryV1`, which is
+   * already a no-op on Windows. Not adopting the RFC-64 owner-only file
+   * policy: the temp keeps the default mode the previous `writeFile` used.
+   */
+  private async writeFileDurable(targetPath: string, bytes: Uint8Array | string): Promise<void> {
+    const tempPath = `${targetPath}${TEMP_FILE_INFIX}${process.pid}-${randomUUID()}`;
+    this.liveTempPaths.add(tempPath);
+    let handle: FileHandle | undefined;
+    try {
+      handle = await fs.open(tempPath, 'wx');
+      await handle.writeFile(bytes);
+      await handle.sync();
+      await handle.close();
+      handle = undefined;
+      await fs.rename(tempPath, targetPath);
+      await fsyncRfc64DirectoryV1(path.dirname(targetPath));
+    } catch (err) {
+      if (handle) await handle.close().catch(() => { /* already failing */ });
+      await fs.rm(tempPath, { force: true }).catch(() => { /* best-effort */ });
+      throw err;
+    } finally {
+      this.liveTempPaths.delete(tempPath);
+    }
+  }
+
+  /**
+   * Append `bytes` to `filePath` and fsync it before returning. Creating a
+   * brand-new log leaves its directory entry to the directory fsync that the
+   * paired `persistMeta` performs right after (same directory); a crash in
+   * between yields, at worst, an orphan `.log` that `init()` reaps.
+   */
+  private async appendFileDurable(filePath: string, bytes: Uint8Array): Promise<void> {
+    const handle = await fs.open(filePath, 'a');
+    try {
+      await handle.appendFile(bytes);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /**
+   * Once per CG per process (and again after a failed append), make sure the
+   * log ends on a frame boundary before anything is appended. A crash or
+   * power loss mid-append (or an `ENOSPC`) can leave a partial frame at the
+   * tail; appending after it would bury every later frame behind a header
+   * whose length swallows them, hiding acknowledged entries from `iterate`
+   * and recycling their seqnos. Truncating to the last complete frame is
+   * safe: readers already stop at that boundary, so those bytes were never
+   * servable. Runs under the per-CG write lock (callers: `appendUnlocked`).
+   */
+  private async repairLogTailOnce(contextGraphId: string): Promise<void> {
+    const cgKey = this.cgKey(contextGraphId);
+    if (this.verifiedLogTails.has(cgKey)) return;
+    const filePath = this.logPath(contextGraphId);
+    let buf: Buffer | undefined;
+    try {
+      buf = await fs.readFile(filePath);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    if (buf) {
+      const { validLength } = scanLogFrames(buf);
+      if (validLength < buf.length) {
+        const handle = await fs.open(filePath, 'r+');
+        try {
+          await handle.truncate(validLength);
+          await handle.sync();
+        } finally {
+          await handle.close();
+        }
+      }
+    }
+    this.verifiedLogTails.add(cgKey);
   }
 
   private async listKnownCgs(): Promise<{ contextGraphId: string }[]> {
@@ -741,6 +900,26 @@ export class SwmHostModeStore {
   private metaPath(contextGraphId: string): string {
     return path.join(this.dataDir, `${this.cgKey(contextGraphId)}.meta`);
   }
+}
+
+/**
+ * Walk the length-prefixed frames of a log buffer the same way `iterate`
+ * does. `validLength` is the offset just past the last complete frame; any
+ * bytes after it are an unparseable tail (a partial header, or a header whose
+ * length overruns the file).
+ */
+function scanLogFrames(buf: Buffer): { lastSeqno: number; validLength: number } {
+  let lastSeqno = 0;
+  let offset = 0;
+  while (offset + ENTRY_HEADER_BYTES <= buf.length) {
+    const seqno = Number(buf.readBigUInt64BE(offset + 8));
+    const len = buf.readUInt32BE(offset + 16);
+    const end = offset + ENTRY_HEADER_BYTES + len;
+    if (end > buf.length) break;
+    if (seqno > lastSeqno) lastSeqno = seqno;
+    offset = end;
+  }
+  return { lastSeqno, validLength: offset };
 }
 
 async function fileExists(p: string): Promise<boolean> {
