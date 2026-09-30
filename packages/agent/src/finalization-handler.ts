@@ -26,7 +26,6 @@ import {
 import {
   deleteByPatternWithoutCount,
   GraphManager,
-  loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
   asGraphWriteRevisionSource,
   resolveGraphScopedOrLegacyMetadata,
@@ -2964,24 +2963,41 @@ export class FinalizationHandler {
     });
   }
 
-  /** Complete (unbounded) SWM read for the chain-reconcile backstop. */
+  /** Merkle-checked root-index candidate, followed by the complete chain backstop on mismatch. */
   private async getSharedMemoryQuadsForRoots(
     contextGraphId: string,
     rootEntities: string[],
+    expectedMerkleRoot: Uint8Array,
+    allowGeneratedCatalogFloor: boolean,
     subGraphName?: string,
-  ): Promise<Quad[]> {
+  ): Promise<{ quads: Quad[]; matched: Quad[] | null; privateRoots: Uint8Array[] }> {
     const safeRoots = rootEntities.filter(isSafeIri);
-    if (safeRoots.length === 0) return [];
-    return loadSelectedSharedMemoryQuads(
+    if (safeRoots.length === 0) return { quads: [], matched: null, privateRoots: [] };
+    let privateRoots: Uint8Array[] | undefined;
+    const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
       this.store,
       this.finalizationSwmBucketUri(contextGraphId, subGraphName),
       { rootEntities: safeRoots },
+      undefined,
       {
-        querySource: SWM_SLICE_SOURCE,
+        sources: {
+          bounded: SWM_SLICE_SOURCE_BOUNDED,
+          widened: SWM_SLICE_SOURCE_WIDENED,
+          unbounded: SWM_SLICE_SOURCE,
+          rootIndexed: SWM_SLICE_SOURCE_ROOT_INDEXED,
+        },
+        createAccept: async () => {
+          privateRoots ??= await this.getPrivateRootsFromMeta(contextGraphId, safeRoots, subGraphName);
+          return (candidate) => this.sharedMemoryQuadsMatchingMerkle(
+            contextGraphId, candidate, privateRoots!, expectedMerkleRoot, allowGeneratedCatalogFloor,
+          );
+        },
+        merkleVerifiedRootIndex: true,
         queryOptions: { priority: 'background' },
         resultBudget: finalizationSwmResultBudget(),
       },
     );
+    return { quads, matched: accepted, privateRoots: privateRoots ?? [] };
   }
 
   private runScanSingleFlight<T>(key: string, work: () => Promise<T>): Promise<T> {
@@ -4019,9 +4035,11 @@ export class FinalizationHandler {
     let hit: { rootEntities: string[]; sharedMemoryQuads: Quad[] } | null = null;
     for (const [op, memo] of opsSorted) {
       const roots = memo.roots;
-      const sharedMemoryQuads = await this.getSharedMemoryQuadsForRoots(contextGraphId, roots, subGraphName);
+      const { quads: sharedMemoryQuads, matched: merkleMatchedQuads, privateRoots } =
+        await this.getSharedMemoryQuadsForRoots(
+          contextGraphId, roots, merkleRoot, allowGeneratedCatalogFloor, subGraphName,
+        );
       if (sharedMemoryQuads.length === 0) continue;
-      const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, roots, subGraphName);
       if (useStampIndex) {
         const digest = this.swmContentDigest(sharedMemoryQuads, privateRoots);
         let computedHex: string;
@@ -4040,13 +4058,6 @@ export class FinalizationHandler {
           break;
         }
       } else {
-        const merkleMatchedQuads = this.sharedMemoryQuadsMatchingMerkle(
-          contextGraphId,
-          sharedMemoryQuads,
-          privateRoots,
-          merkleRoot,
-          allowGeneratedCatalogFloor,
-        );
         if (merkleMatchedQuads) {
           return { rootEntities: roots, sharedMemoryQuads: merkleMatchedQuads };
         }
@@ -4143,10 +4154,10 @@ export class FinalizationHandler {
     } catch { return null; }
 
     for (const [op, roots] of rootsByOp) {
-      const sharedMemoryQuads = await this.getSharedMemoryQuadsForRoots(contextGraphId, roots, subGraphName);
+      const { quads: sharedMemoryQuads, matched: merkleMatchedQuads } =
+        await this.getSharedMemoryQuadsForRoots(contextGraphId, roots, merkleRoot, false, subGraphName);
       if (sharedMemoryQuads.length > 0) {
-        const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, roots, subGraphName);
-        if (this.verifyMerkleMatch(sharedMemoryQuads, privateRoots, merkleRoot)) {
+        if (merkleMatchedQuads) {
           return { rootEntities: roots, sharedMemoryQuads };
         }
       }
