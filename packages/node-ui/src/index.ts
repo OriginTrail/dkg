@@ -9,9 +9,9 @@ export {
   parseActivityDigestKey,
 } from './db.js';
 // Protocol persistence lives in `@origintrail-official/dkg-node-store`. It is
-// re-exported here unchanged so the daemon wiring and every other importer of
-// this package keep working (Phase 1 of the extraction moves the store
-// classes, not the SQLite file).
+// re-exported here unchanged as a compatibility surface, so importers of this
+// package keep working (Phase 1 of the extraction moves the store classes,
+// not the SQLite file). The daemon imports them from node-store directly.
 export {
   SqliteMessageIdempotencyStore,
   SqliteProtocolOutboxStore,

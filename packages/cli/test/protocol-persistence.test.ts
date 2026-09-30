@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -28,6 +28,20 @@ import {
   type NodeDatabase,
   type ProtocolStores,
 } from '../src/daemon/protocol-persistence.js';
+
+// Counts every DashboardDB the module under test constructs (the real class, only observed), so a
+// second connection opened and forgotten inside `openNodeDatabase` cannot go unnoticed.
+const constructed = vi.hoisted(() => [] as unknown[]);
+vi.mock('@origintrail-official/dkg-node-ui', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@origintrail-official/dkg-node-ui')>();
+  class CountingDashboardDB extends actual.DashboardDB {
+    constructor(...args: ConstructorParameters<typeof actual.DashboardDB>) {
+      super(...args);
+      constructed.push(this);
+    }
+  }
+  return { ...actual, DashboardDB: CountingDashboardDB };
+});
 
 /**
  * The daemon's protocol-persistence composition seam. Everything here goes
@@ -170,6 +184,18 @@ describe('protocol persistence composition', () => {
       expect(node.dashboardDb.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
       expect(new Set(readdirSync(dir).filter((name) => /\.db(-wal|-shm)?$/.test(name)).map((name) => name.replace(/-(wal|shm)$/, ''))))
         .toEqual(new Set(['node-ui.db']));
+    });
+
+    it('opens exactly one DashboardDB and hands out that instance', () => {
+      constructed.length = 0;
+      const other = mkdtempSync(join(tmpdir(), 'dkg-protocol-persistence-one-'));
+      const opened = openNodeDatabase(other);
+      try {
+        expect(constructed).toEqual([opened.dashboardDb]);
+      } finally {
+        opened.close();
+        rmSync(other, { recursive: true, force: true });
+      }
     });
 
     it('closes the shared connection through the owner, so every store stops working', () => {
