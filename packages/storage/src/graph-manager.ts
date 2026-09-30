@@ -1,4 +1,5 @@
 import type { Quad, QueryOptions, TripleStore } from './triple-store.js';
+import { performance } from 'node:perf_hooks';
 import { asReadSnapshotCapability, type ReadSnapshotStore } from './read-snapshot-capability.js';
 import { asGraphWriteRevisionSource } from './graph-write-gen.js';
 import { loadSwmQuadsAcrossChunks, SHARED_MEMORY_GRAPHS_PER_QUERY, BUDGETED_SHARED_MEMORY_GRAPHS_PER_QUERY, type SwmReadPlan, type SharedMemoryResultBudget } from './swm-query-chunks.js';
@@ -37,6 +38,32 @@ const ROOT_CONTEXT_GRAPH_TYPES = Object.freeze([
 const SYSTEM_ONTOLOGY_GRAPH = contextGraphDataUri('ontology');
 const SYSTEM_AGENTS_GRAPH = contextGraphDataUri('agents');
 const MAX_CONTEXT_GRAPH_DECLARATION_BATCH = 256;
+const SLOW_SWM_READ_STAGE_MS = 5_000;
+
+/** Identify the slow backend stage while it still occupies a store slot. */
+async function traceSlowSwmReadStage<T>(
+  stage: string,
+  options: QueryOptions | undefined,
+  read: () => Promise<T>,
+): Promise<T> {
+  const source = (options?.source ?? 'unknown').replace(/[^\w:./-]/g, '_').slice(0, 80);
+  const startedAt = performance.now();
+  let warned = false;
+  const timer = setTimeout(() => {
+    warned = true;
+    console.warn(`[swm-read] slow stage=${stage} source=${source} elapsedMs=${Math.round(performance.now() - startedAt)} state=active`);
+  }, SLOW_SWM_READ_STAGE_MS);
+  timer.unref();
+  try {
+    return await read();
+  } finally {
+    clearTimeout(timer);
+    const elapsedMs = Math.round(performance.now() - startedAt);
+    if (warned || elapsedMs >= SLOW_SWM_READ_STAGE_MS) {
+      console.warn(`[swm-read] slow stage=${stage} source=${source} elapsedMs=${elapsedMs} state=settled`);
+    }
+  }
+}
 
 export type NonEmptyGraphList = [string, ...string[]];
 export type SharedMemoryReadSelection = 'all' | { rootEntities: readonly string[] };
@@ -559,9 +586,10 @@ async function loadRootIndexedSharedMemoryCandidate(
   const innerGraphPattern = sharedMemorySelectionGraphPattern(selection, options);
   const branches = roots.map((root) => `{ GRAPH ?g { <${root}> ?p ?o } }`).join(' UNION ');
   return snapshot.withReadSnapshot(async (readStore) => {
-    const result = await readStore.query(`SELECT DISTINCT ?g WHERE {
+    const result = await traceSlowSwmReadStage('root-index.discover', queryOptions, () =>
+      readStore.query(`SELECT DISTINCT ?g WHERE {
       ${branches}
-    } LIMIT ${MAX_ROOT_INDEXED_DISCOVERY_GRAPHS + 1}`, queryOptions);
+    } LIMIT ${MAX_ROOT_INDEXED_DISCOVERY_GRAPHS + 1}`, queryOptions));
     if (result.type !== 'bindings' || result.bindings.length > MAX_ROOT_INDEXED_DISCOVERY_GRAPHS) {
       return null;
     }
@@ -574,13 +602,13 @@ async function loadRootIndexedSharedMemoryCandidate(
         graphs.add(graph);
       }
     }
-    return loadSwmQuadsAcrossChunks(
+    return traceSlowSwmReadStage('root-index.materialize', queryOptions, () => loadSwmQuadsAcrossChunks(
       readStore,
       [...graphs].sort(),
       innerGraphPattern,
       queryOptions,
       options,
-    );
+    ));
   }, queryOptions?.signal);
 }
 
@@ -600,12 +628,13 @@ async function loadCachedGraphSetSharedMemoryCandidate(
   const snapshot = asReadSnapshotCapability(store);
   if (!snapshot) return null;
   const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
-  const graphs = await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions);
+  const graphs = await traceSlowSwmReadStage('cached-candidate.catalog', queryOptions, () =>
+    resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions));
   if (graphs.length > MAX_CACHED_GRAPH_CANDIDATE_GRAPHS) return null;
   const innerGraphPattern = sharedMemorySelectionGraphPattern(selection, options);
-  return snapshot.withReadSnapshot((readStore) => loadSwmQuadsAcrossChunks(
+  return snapshot.withReadSnapshot((readStore) => traceSlowSwmReadStage('cached-candidate.materialize', queryOptions, () => loadSwmQuadsAcrossChunks(
     readStore, graphs, innerGraphPattern, queryOptions, options,
-  ), queryOptions?.signal);
+  )), queryOptions?.signal);
 }
 
 /**
@@ -680,28 +709,32 @@ export async function loadSharedMemorySliceWithKaBoundFallback(
   let accept: ((quads: Quad[]) => Quad[] | null) | undefined;
   const testCandidate = async (candidate: Quad[]): Promise<boolean> => {
     if (candidate.length === 0) return false;
-    accept ??= await createAccept();
-    accepted = accept(candidate);
+    accept ??= await traceSlowSwmReadStage('candidate.prepare-verifier', queryOptions, createAccept);
+    accepted = await traceSlowSwmReadStage('candidate.verify', queryOptions, async () => accept!(candidate));
     if (!accepted) return false;
     quads = candidate;
     return true;
   };
 
   if (kaGraphBound) {
-    const bounded = await loadKaBoundedSharedMemoryQuads(store, bucketGraph, selection, kaGraphBound, {
+    const bounded = await traceSlowSwmReadStage('bounded.total', queryOptions, () => loadKaBoundedSharedMemoryQuads(store, bucketGraph, selection, kaGraphBound, {
       ...loadOptions,
       querySource: sources.bounded,
-    });
+    }));
     if (await testCandidate(bounded)) return { quads, accepted };
   }
-  const rootIndexed = await readRootIndexed();
+  const rootIndexed = await traceSlowSwmReadStage('root-index.total', queryOptions, readRootIndexed);
   if (rootIndexed && await testCandidate(rootIndexed)) return { quads, accepted };
-  const cachedGraphSet = await readCachedGraphSet();
+  const cachedGraphSet = await traceSlowSwmReadStage('cached-candidate.total', queryOptions, readCachedGraphSet);
   if (cachedGraphSet && await testCandidate(cachedGraphSet)) return { quads, accepted };
-  quads = await readComplete(kaGraphBound ? sources.widened : sources.unbounded);
+  quads = await traceSlowSwmReadStage('complete.total', queryOptions, () =>
+    readComplete(kaGraphBound ? sources.widened : sources.unbounded));
   if (quads.length === 0) return { quads, accepted: null };
-  accept ??= await createAccept();
-  return { quads, accepted: accept(quads) };
+  accept ??= await traceSlowSwmReadStage('complete.prepare-verifier', queryOptions, createAccept);
+  return {
+    quads,
+    accepted: await traceSlowSwmReadStage('complete.verify', queryOptions, async () => accept!(quads)),
+  };
 }
 
 function normalizeLoadSharedMemorySliceOptions(
@@ -775,16 +808,21 @@ async function loadSharedMemoryQuadsInternal(
     plan?: SwmReadPlan,
   ) => loadSwmQuadsAcrossChunks(readStore, graphs, innerGraphPattern, readOptions, options, plan);
 
-  const initialGraphs = await resolveGraphs(store, queryOptions);
+  const initialGraphs = await traceSlowSwmReadStage('selected.resolve-initial', queryOptions, () =>
+    resolveGraphs(store, queryOptions));
   const graphsPerQuery = options.resultBudget
     ? BUDGETED_SHARED_MEMORY_GRAPHS_PER_QUERY : SHARED_MEMORY_GRAPHS_PER_QUERY;
   if (initialGraphs.length <= graphsPerQuery) {
-    return read(store, initialGraphs, queryOptions);
+    return traceSlowSwmReadStage('selected.materialize', queryOptions, () =>
+      read(store, initialGraphs, queryOptions));
   }
   const snapshot = asReadSnapshotCapability(store);
   if (snapshot) {
     return snapshot.withReadSnapshot(async (snapshotStore) => {
-      return read(snapshotStore, await resolveGraphs(snapshotStore, queryOptions), queryOptions);
+      const graphs = await traceSlowSwmReadStage('selected.resolve-snapshot', queryOptions, () =>
+        resolveGraphs(snapshotStore, queryOptions));
+      return traceSlowSwmReadStage('selected.materialize-snapshot', queryOptions, () =>
+        read(snapshotStore, graphs, queryOptions));
     }, queryOptions?.signal);
   }
   const revision = asGraphWriteRevisionSource(store);
@@ -792,7 +830,8 @@ async function loadSharedMemoryQuadsInternal(
     // One backend query has its own snapshot on SPARQL stores. Backends with
     // neither a pinned transaction nor an all-writer fence keep the legacy
     // single-query path instead of returning a mixed multi-query view.
-    return read(store, initialGraphs, queryOptions, { kind: 'single-query' });
+    return traceSlowSwmReadStage('selected.materialize-single', queryOptions, () =>
+      read(store, initialGraphs, queryOptions, { kind: 'single-query' }));
   }
   let unstableChecks = 0;
   for (let attempt = 0; attempt < 3;) {
@@ -807,8 +846,10 @@ async function loadSharedMemoryQuadsInternal(
       continue;
     }
     attempt++;
-    const graphs = await resolveGraphs(store, queryOptions);
-    const quads = await read(store, graphs, queryOptions);
+    const graphs = await traceSlowSwmReadStage('selected.resolve-retry', queryOptions, () =>
+      resolveGraphs(store, queryOptions));
+    const quads = await traceSlowSwmReadStage('selected.materialize-retry', queryOptions, () =>
+      read(store, graphs, queryOptions));
     const after = revision.getWriteRevision(bucketGraph);
     if (after.stable && after.generation === before.generation) return quads;
   }
