@@ -390,6 +390,8 @@ test('each changed path gets one routing decision with a fixed precedence', () =
 // Module loads computed at run time that the load-closure guard cannot
 // follow, each with the reason it needs no route of its own.
 const UNFOLLOWED_LOADS = new Map([
+  ['packages/agent/test/sync-native-export-hostile.test.ts: pathToFileURL(`${oldDist}/dkg-agent-cg-resolve.js`).href',
+    'an optional user-supplied external frozen 10.0.20 build; compatibility cases always execute the repository historical source fixture, and no repository lane can route the external build'],
   ['packages/agent/src/generic-sql-source.ts: moduleName', 'the optional mssql driver and node:sqlite, neither a repository file'],
   ['packages/agent/src/sqlite/module-loader-v1.ts: name', 'node:sqlite, the default loader, not a repository file'],
   ['packages/agent/test/generic-sql-source.test.ts: moduleName', 'node:sqlite, not a repository file'],
