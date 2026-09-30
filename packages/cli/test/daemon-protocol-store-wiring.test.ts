@@ -23,6 +23,7 @@ import type { DkgConfig } from '../src/config.js';
 import type { CorePrereqResult } from '../src/daemon/core-prereq-check.js';
 import type { ProtocolStoreOptions, ProtocolStores } from '../src/daemon/protocol-persistence.js';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
+import { createFakeDaemonAgent, createFakeDaemonHttpServer } from './_helpers/daemon-boot-doubles.js';
 
 /**
  * The daemon builds ONE `DashboardDB` at its composition root, composes every
@@ -60,6 +61,13 @@ import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
  * Only the agent, the HTTP server and a few unrelated collaborators are replaced;
  * the DashboardDB, the schema and every store are real. `createProtocolStores`
  * itself is tested in `protocol-persistence.test.ts`.
+ *
+ * The fake agent and fake HTTP server are the shared daemon-boot doubles in
+ * `_helpers/daemon-boot-doubles.ts` (also used by the publisher-cancellation and
+ * snapshot-wiring suites). This file adds only what it observes: the fake agent's
+ * Core transport listeners (the post-start prerequisite check reads them, see
+ * `coreLibp2p`) and the position of the agent stop in the shutdown order, plus
+ * everything about the database.
  */
 const mocks = vi.hoisted(() => ({
   agentCreate: vi.fn(),
@@ -278,70 +286,6 @@ function fingerprintSchema(db: Database.Database): Array<Record<string, unknown>
   `).all() as Array<Record<string, unknown>>;
 }
 
-function createFakeServer() {
-  const server = {
-    listen: vi.fn((_port: number, _host: string, callback?: () => void) => {
-      callback?.();
-      return server;
-    }),
-    address: vi.fn(() => ({ port: 43123 })),
-    close: vi.fn((callback?: () => void) => {
-      callback?.();
-      return server;
-    }),
-    on: vi.fn(() => server),
-    once: vi.fn(() => server),
-  };
-  return server;
-}
-
-/** The slice of a DKGAgent the daemon's boot and shutdown touch. */
-function createFakeAgent(boundListenAddresses: string[] = []) {
-  const store = { close: vi.fn(async () => undefined) };
-  return {
-    peerId: 'self-peer',
-    multiaddrs: [],
-    wallet: { keypair: { publicKey: new Uint8Array([1]), secretKey: new Uint8Array([2]) } },
-    store,
-    node: {
-      libp2p: {
-        getMultiaddrs: vi.fn(() => []),
-        addEventListener: vi.fn(),
-        removeEventListener: vi.fn(),
-        components: {
-          transportManager: {
-            getListeners: () => boundListenAddresses.map((addr) => ({ getAddrs: () => [addr] })),
-          },
-        },
-      },
-    },
-    eventBus: { on: vi.fn() },
-    assertion: { create: vi.fn(), write: vi.fn() },
-    setChatAcl: vi.fn(),
-    setSkillAcl: vi.fn(),
-    onChat: vi.fn(),
-    start: vi.fn(async () => undefined),
-    stop: vi.fn(async () => {
-      mocks.events.push('agent.stop');
-      await store.close();
-    }),
-    ensureProfilePublished: vi.fn(async () => undefined),
-    publishRelayRegistry: vi.fn(async () => undefined),
-    ensureContextGraphLocal: vi.fn(async () => undefined),
-    getSubscribedContextGraphs: vi.fn(() => new Map()),
-    subscribeToContextGraph: vi.fn(),
-    pingPeers: vi.fn(async () => undefined),
-    listLocalAgents: vi.fn(() => []),
-    registerImportedArtifactByteStore: vi.fn(),
-    getDefaultAgentAddress: vi.fn(() => undefined),
-    query: vi.fn(async () => ({ type: 'bindings', bindings: [] })),
-    createContextGraph: vi.fn(),
-    listContextGraphs: vi.fn(async () => []),
-    createACKTransportFactory: vi.fn(() => ({})),
-    drainRpcUsage: vi.fn(() => ({ calls: 0, errors: 0, throttledMs: 0, byEndpoint: {} })),
-  };
-}
-
 const BASE_CONFIG = {
   name: 'protocol-store-wiring-test',
   networkConfig: 'mainnet-gnosis',
@@ -361,6 +305,29 @@ const BASE_CONFIG = {
     chainId: 'gnosis:100',
   },
 } satisfies DkgConfig;
+
+/**
+ * What a started Core node's libp2p adds for the post-start steps: the AutoNAT
+ * watcher's event-listener methods, and a transport manager whose listeners report
+ * exactly these addresses (what the core-prerequisite check reads). The normal
+ * boot below is an Edge node, which touches none of it.
+ */
+function coreLibp2p(boundListenAddresses: readonly string[]) {
+  return {
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    components: {
+      transportManager: {
+        getListeners: () => boundListenAddresses.map((addr) => ({ getAddrs: () => [addr] })),
+      },
+    },
+  };
+}
+
+/** Where the agent stop sits in a shutdown sequence, recorded for the ordering assertions. */
+const recordAgentStop = (): void => {
+  mocks.events.push('agent.stop');
+};
 
 /** A degraded / not-degraded verdict for the core-relay prerequisite check. */
 function relayVerdict(looksDegraded: boolean): CorePrereqResult {
@@ -394,7 +361,7 @@ describe('daemon composition of the protocol persistence stores', () => {
     for (const event of signals) originalListeners.set(event, processEvents.listeners(event));
     // The daemon's deferred start-up work and intervals never run: only boot and shutdown do.
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval'] });
-    mocks.createServer.mockImplementation(createFakeServer);
+    mocks.createServer.mockImplementation(() => createFakeDaemonHttpServer());
     mocks.checkCoreRelayPrereqs.mockReset();
     if (mocks.realCheckCoreRelayPrereqs) mocks.checkCoreRelayPrereqs.mockImplementation(mocks.realCheckCoreRelayPrereqs);
     mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [] });
@@ -459,7 +426,7 @@ describe('daemon composition of the protocol persistence stores', () => {
 
   it('boots against a legacy node-ui.db on ONE DashboardDB, hands the agent its stores, and closes it once at shutdown', async () => {
     const { rowsBefore, schemaBefore, versionBefore } = seedLegacyHome();
-    const agent = createFakeAgent();
+    const agent = createFakeDaemonAgent({ onStop: recordAgentStop });
     mocks.agentCreate.mockResolvedValue(agent);
 
     await boot(BASE_CONFIG);
@@ -596,7 +563,10 @@ describe('daemon composition of the protocol persistence stores', () => {
 
     it('after the agent started: stops the agent, then closes the one DashboardDB once', async () => {
       seedLegacyHome();
-      const agent = createFakeAgent(['/ip4/10.0.0.5/tcp/9090']);
+      const agent = createFakeDaemonAgent({
+        libp2p: coreLibp2p(['/ip4/10.0.0.5/tcp/9090']),
+        onStop: recordAgentStop,
+      });
       mocks.agentCreate.mockResolvedValue(agent);
       mocks.checkCoreRelayPrereqs
         .mockReturnValueOnce(relayVerdict(false))
