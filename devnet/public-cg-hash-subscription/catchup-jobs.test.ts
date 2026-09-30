@@ -117,5 +117,6 @@ describe('describeLatestJobClass', () => {
     const settled = describeLatestJobClass(graph, { kind: 'hash-keyed-settled', jobId: 'j1' });
     expect(settled).toContain('NOT asserted');
     expect(settled).toContain(graph.nameHash);
+    expect(settled).toContain('on-chain id');
   });
 });

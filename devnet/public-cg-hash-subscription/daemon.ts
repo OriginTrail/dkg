@@ -225,12 +225,23 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
     return (await catchupStatus(node, graph.id)) ?? catchupStatus(node, graph.nameHash);
   }
 
-  /** Wait until a lookup by each of `ids` names job `jobId` as the latest job. */
+  /**
+   * Wait until a lookup by each of `ids` names job `jobId` as the latest job. A timeout
+   * says what the last lookups named, since "names job X by A and B" alone does not say
+   * which of the two did not, or what it named instead.
+   */
   async function waitUntilNamed(node: DevnetNode, label: string, jobId: string, ids: readonly string[]): Promise<void> {
-    await io.waitFor(`${label}: node${node.num} names job ${jobId} by ${ids.join(' and ')}`, 30_000, 2_000, async () => {
-      const found = await Promise.all(ids.map((id) => catchupStatus(node, id)));
-      return found.every((job) => job?.jobId === jobId) ? true : null;
-    });
+    let lastSeen = 'no lookup made';
+    try {
+      await io.waitFor(`${label}: node${node.num} names job ${jobId} by ${ids.join(' and ')}`, 30_000, 2_000, async () => {
+        const found = await Promise.all(ids.map((id) => catchupStatus(node, id)));
+        lastSeen = ids.map((id, i) => `${id} -> ${found[i] ? `${found[i]!.jobId} (${found[i]!.contextGraphId}, ${found[i]!.jobStatus})` : 'no job'}`).join('; ');
+        return found.every((job) => job?.jobId === jobId) ? true : null;
+      });
+    } catch (err) {
+      if (err instanceof Error) err.message = `${err.message} (last lookups: ${lastSeen})`;
+      throw err;
+    }
   }
 
   /**
@@ -239,8 +250,9 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
    * until a job made under the hash has settled or continued, because whether it
    * continues under the cleartext id is only known then.
    *
-   *   - continued (made under the cleartext id, or continued under it): the job
-   *     names the cleartext graph, and the cleartext id and the on-chain id name it.
+   *   - continued (made under the cleartext id, or continued under it): the cleartext
+   *     id and the on-chain id name it. That the job itself names the cleartext graph
+   *     is what the classification checks, and it throws when it does not.
    *   - replaced (settled under the hash, a later job under the cleartext id): the
    *     hash still names the job, and the cleartext id and the on-chain id name the
    *     successor.
@@ -261,7 +273,6 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
     console.log(`hash-sub: ${label}: node${node.num}: ${describeLatestJobClass(graph, cls)}`);
     switch (cls.kind) {
       case 'continued':
-        expect(job.resolvedContextGraphId ?? job.contextGraphId, `${label}: the job names the cleartext graph`).toBe(graph.id);
         await waitUntilNamed(node, label, jobId, [graph.id, graph.onChainId]);
         break;
       case 'replaced':

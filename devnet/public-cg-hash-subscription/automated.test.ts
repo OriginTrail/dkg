@@ -326,8 +326,8 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
   // Pins #2779 deterministically, where test 2 can only reach it by a race. Nothing
   // is stopped or restarted: the name is unknowable until this test reveals it, and
   // the holder is an edge that the subscriber is not connected to (or has already
-  // asked, see below) until the test makes the subscriber ask it again. See the
-  // header (item 7) for the order and for what it does not reach.
+  // asked, see below) until the test makes the subscriber ask it again. See README.md
+  // (item 7) for the order and for what it does not reach.
   it('a job created under a name hash no peer could reveal is still found by that hash once a holder appears and the hash resolves (#2779)', async () => {
     const graph = fixture.late;
     await expectNoRowFor(edgeA, graph);

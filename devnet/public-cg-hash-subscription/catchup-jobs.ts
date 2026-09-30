@@ -39,7 +39,7 @@ export type LatestJobClass =
   | { readonly kind: 'continued'; readonly jobId: string; readonly how: 'created-under-cleartext-id' | 'continued-under-cleartext-id' }
   /** A settled hash-keyed job that never continued, and a later job under the cleartext id took the cleartext and on-chain names over. */
   | { readonly kind: 'replaced'; readonly jobId: string; readonly successorJobId: string }
-  /** A settled hash-keyed job that never continued and has no successor: the hash and the job id name it, the cleartext id names no job. */
+  /** A settled hash-keyed job that never continued and has no successor: the hash and the on-chain id (through the hash) name it, the cleartext id names no job. */
   | { readonly kind: 'hash-keyed-settled'; readonly jobId: string };
 
 /** The daemon's report does not fit any state the tracker can produce: a failure of the reply, not a case to pass over. */
@@ -110,6 +110,6 @@ export function describeLatestJobClass(graph: GraphNames, cls: LatestJobClass): 
     case 'replaced':
       return `job ${cls.jobId} settled under the hash without continuing and job ${cls.successorJobId} replaced it under the cleartext id: the hash names ${cls.jobId}, the cleartext and on-chain ids must name ${cls.successorJobId}`;
     case 'hash-keyed-settled':
-      return `job ${cls.jobId} settled under the hash ${graph.nameHash} before the hash resolved and never continued: only the hash (and the job id) name it, the cleartext id ${graph.id} names no job (NOT asserted: that the cleartext id names it)`;
+      return `job ${cls.jobId} settled under the hash ${graph.nameHash} before the hash resolved and never continued: only the hash and the on-chain id (which reaches it through the hash) name it, the cleartext id ${graph.id} names no job (NOT asserted: that the cleartext id names it)`;
   }
 }

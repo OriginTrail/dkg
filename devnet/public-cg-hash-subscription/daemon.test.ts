@@ -360,6 +360,98 @@ describe('expectLatestJobNamed', () => {
     const { io } = scriptedIo({ [byJobId('j1')]: [{ status: 404, json: { error: 'Catch-up job "j1" not found' } }] });
     await expect(expectNamed(io)).rejects.toThrow(/test: the job by its id: .*not found/);
   });
+
+  // Each case below breaks one lookup of one branch and names the lookup the failure must
+  // be about: which job was being waited for, and by which ids. A branch that stopped
+  // asserting one of its lookups would pass the case instead, so it would fail here.
+  describe('what each branch asserts', () => {
+    const CLEARTEXT_AND_ON_CHAIN = `${graph.id} and ${graph.onChainId}`;
+    const HASH_AND_ON_CHAIN = `${graph.nameHash} and ${graph.onChainId}`;
+    const waitingFor = (jobId: string, ids: string) => new RegExp(`waiting for: test: node5 names job ${jobId} by ${ids} \\(last lookups: `);
+    const other = (contextGraphId: string) => jobReply('j9', contextGraphId, 'running');
+
+    const continuedGraphs = [
+      ['made under the cleartext id', jobReply('j1', graph.id, 'running')],
+      ['made under the hash and continued under the cleartext id', jobReply('j1', graph.nameHash, 'done', { resolvedContextGraphId: graph.id })],
+    ] as const;
+
+    describe.each(continuedGraphs)('a job %s', (_how, job) => {
+      const script = (over: Record<string, HttpReply[]>) => scriptedIo({
+        [byJobId('j1')]: [job],
+        [byName(graph.id)]: [job],
+        [byName(graph.onChainId)]: [job],
+        ...over,
+      }).io;
+
+      it('resolves when the cleartext and on-chain ids both name it', async () => {
+        await expect(expectNamed(script({}))).resolves.toMatchObject({ kind: 'continued', jobId: 'j1' });
+      });
+
+      it.each([
+        ['the on-chain id names no job', { [byName(graph.onChainId)]: [NO_JOB] }],
+        ['the on-chain id names another job', { [byName(graph.onChainId)]: [other(graph.id)] }],
+        ['the cleartext id names no job', { [byName(graph.id)]: [NO_JOB] }],
+        ['the cleartext id names another job', { [byName(graph.id)]: [other(graph.id)] }],
+      ])('fails when %s', async (_what, over) => {
+        await expect(expectNamed(script(over))).rejects.toThrow(waitingFor('j1', CLEARTEXT_AND_ON_CHAIN));
+      });
+    });
+
+    describe('a hash-keyed job that settled without continuing or being replaced', () => {
+      const settled = jobReply('j1', graph.nameHash, 'unreachable');
+      const script = (over: Record<string, HttpReply[]>) => scriptedIo({
+        [byJobId('j1')]: [settled],
+        [byName(graph.id)]: [NO_JOB],
+        [byName(graph.nameHash)]: [settled],
+        [byName(graph.onChainId)]: [settled],
+        ...over,
+      }).io;
+
+      it.each([
+        ['the hash names no job', { [byName(graph.nameHash)]: [NO_JOB] }],
+        ['the hash names another job', { [byName(graph.nameHash)]: [other(graph.nameHash)] }],
+        ['the on-chain id names no job', { [byName(graph.onChainId)]: [NO_JOB] }],
+        ['the on-chain id names another job', { [byName(graph.onChainId)]: [other(graph.nameHash)] }],
+      ])('fails when %s', async (_what, over) => {
+        await expect(expectNamed(script(over))).rejects.toThrow(waitingFor('j1', HASH_AND_ON_CHAIN));
+      });
+    });
+
+    describe('a hash-keyed job that settled and was replaced by one under the cleartext id', () => {
+      const settled = jobReply('j1', graph.nameHash, 'unreachable');
+      const successor = jobReply('j2', graph.id, 'running');
+      const script = (over: Record<string, HttpReply[]>) => scriptedIo({
+        [byJobId('j1')]: [settled],
+        [byName(graph.id)]: [successor],
+        [byName(graph.nameHash)]: [settled],
+        [byName(graph.onChainId)]: [successor],
+        ...over,
+      }).io;
+
+      it.each([
+        ['the hash names no job', { [byName(graph.nameHash)]: [NO_JOB] }, waitingFor('j1', graph.nameHash)],
+        ['the hash names the successor instead', { [byName(graph.nameHash)]: [successor] }, waitingFor('j1', graph.nameHash)],
+        ['the on-chain id still names the settled job', { [byName(graph.onChainId)]: [settled] }, waitingFor('j2', CLEARTEXT_AND_ON_CHAIN)],
+        ['the on-chain id names no job', { [byName(graph.onChainId)]: [NO_JOB] }, waitingFor('j2', CLEARTEXT_AND_ON_CHAIN)],
+        ['the cleartext id names another job once the successor was read', { [byName(graph.id)]: [successor, other(graph.id)] }, waitingFor('j2', CLEARTEXT_AND_ON_CHAIN)],
+      ])('fails when %s', async (_what, over, message) => {
+        await expect(expectNamed(script(over))).rejects.toThrow(message);
+      });
+    });
+
+    it('says what the lookups named when they do not name the job', async () => {
+      const settled = jobReply('j1', graph.nameHash, 'unreachable');
+      const { io } = scriptedIo({
+        [byJobId('j1')]: [settled],
+        [byName(graph.id)]: [NO_JOB],
+        [byName(graph.nameHash)]: [settled],
+        [byName(graph.onChainId)]: [other(graph.nameHash)],
+      });
+      await expect(expectNamed(io)).rejects.toThrow(
+        new RegExp(`\\(last lookups: ${graph.nameHash} -> j1 \\(${graph.nameHash}, unreachable\\); ${graph.onChainId} -> j9 \\(${graph.nameHash}, running\\)\\)`),
+      );
+    });
+  });
 });
 
 describe('the arrange and precondition helpers', () => {
