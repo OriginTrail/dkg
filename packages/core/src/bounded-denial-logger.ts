@@ -25,7 +25,7 @@ export interface BoundedKeyedLimiterOptions {
 /** Returns the suppressed count when a key may emit, or undefined when denied. */
 export function createBoundedKeyedLimiter(options: BoundedKeyedLimiterOptions):
   (key: string) => number | undefined {
-  const entries = new Map<string, { lastLoggedAt: number; suppressed: number }>();
+  const entries = new Map<string, { lastLoggedAt: number | null; suppressed: number }>();
   const globalLimit = options.maxEmitsPerWindow;
   const windowMs = options.windowMs ?? options.intervalMs;
   let windowStart: number | undefined;
@@ -39,8 +39,22 @@ export function createBoundedKeyedLimiter(options: BoundedKeyedLimiterOptions):
       windowEmitted = 0;
     }
     const previous = entries.get(key);
-    if (previous && timestamp - previous.lastLoggedAt < options.intervalMs) {
+    if (previous && previous.lastLoggedAt !== null
+      && timestamp - previous.lastLoggedAt < options.intervalMs) {
       previous.suppressed += 1;
+      return undefined;
+    }
+    if (globalLimit !== undefined && windowEmitted >= globalLimit) {
+      if (previous) previous.suppressed += 1;
+      else {
+        if (entries.size >= options.cacheMax) {
+          const oldest = entries.keys().next();
+          if (!oldest.done) entries.delete(oldest.value);
+        }
+        // Remember suppression without starting a cooldown for a key that has
+        // never emitted. It may log as soon as the global window reopens.
+        entries.set(key, { lastLoggedAt: null, suppressed: 1 });
+      }
       return undefined;
     }
     if (!previous && entries.size >= options.cacheMax) {
@@ -50,10 +64,6 @@ export function createBoundedKeyedLimiter(options: BoundedKeyedLimiterOptions):
     const suppressed = previous?.suppressed ?? 0;
     entries.delete(key);
     entries.set(key, { lastLoggedAt: timestamp, suppressed: 0 });
-    if (globalLimit !== undefined && windowEmitted >= globalLimit) {
-      entries.get(key)!.suppressed = suppressed + 1;
-      return undefined;
-    }
     windowEmitted++;
     return suppressed;
   };

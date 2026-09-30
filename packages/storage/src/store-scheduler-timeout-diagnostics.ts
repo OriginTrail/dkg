@@ -17,12 +17,6 @@ export interface StoreSchedulerTimeoutWaiter {
   operation: string;
 }
 
-function metricOperation(operation: string): string {
-  const trimmed = operation.trim();
-  if (!trimmed) return 'unknown';
-  return trimmed.replace(/[^\w:./-]/g, '_').slice(0, 80) || 'unknown';
-}
-
 /** Admit first, then collect and project only diagnostics that can be emitted. */
 export function createRateLimitedStoreTimeoutDiagnosticReporter(options: {
   emit: (diagnostic: StoreSchedulerTimeoutDiagnostic) => void | Promise<void>;
@@ -52,7 +46,7 @@ export function createRateLimitedStoreTimeoutDiagnosticReporter(options: {
       const activeAtTimeout = snapshot().lanes
         .flatMap((lane) => lane.activeOperations.map((active) => ({
           priority: lane.lane as StoreWorkPriority,
-          operation: metricOperation(active.operation),
+          operation: active.operation,
           count: active.count,
           oldestAgeMs: active.oldestAgeMs,
         })))
