@@ -1,0 +1,370 @@
+/**
+ * OpenClaw persist-turn idempotency - devnet regression.
+ *
+ * Preconditions:
+ *   pnpm run build
+ *   ./scripts/devnet.sh clean && ./scripts/devnet.sh start 6
+ *
+ * `POST /api/openclaw-channel/persist-turn` hands each turn to the daemon-wide
+ * durable-turn owner (`persistDurableChatTurn`, shared with Hermes and Prime
+ * Agent), so a resent `(sessionId, turnId)` is suppressed instead of writing a
+ * second user/assistant Message pair into the `'chat-turns'` Working Memory
+ * assertion of the node's `agent-context` graph, and a higher `persistenceState`
+ * is recorded as a transition.
+ *
+ * The suite drives that route on live devnet daemons over HTTP with the node's
+ * bearer token and reads the assertion back through `POST /api/query`. It runs
+ * against nodes 1, 3 and 5, which sit on different store backends
+ * (oxigraph-server, blazegraph, and sparql-http to an external Oxigraph), and
+ * repeats the resend check on the Hermes and Prime Agent routes as the parity
+ * regression: all three channels must behave the same on retry.
+ *
+ * Isolation: every test writes only turns of its own random session and turn
+ * id into the node's own `agent-context` / `chat-turns` assertion. It never
+ * touches the shared `devnet-test` context graph, a node wallet or the chain.
+ * There is no API to delete a chat turn, so those turns stay in the devnet's
+ * node data until `./scripts/devnet.sh clean`.
+ */
+import { beforeAll, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import {
+  fetchRetry,
+  lexical,
+  postJson,
+  readNodeConfig,
+  sleep,
+  type DevnetNode,
+  type SparqlBindingCell,
+} from '../_bootstrap/harness.js';
+
+const CHAT_NS = 'urn:dkg:chat:';
+const SCHEMA = 'http://schema.org/';
+const DKG_ONT = 'http://dkg.io/ontology/';
+const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** One node per store backend the devnet provisions: 1 core, 3 core, 5 edge. */
+const NODE_NUMS = [1, 3, 5] as const;
+
+type Channel = 'openclaw' | 'hermes' | 'prime-agent';
+
+interface PersistBody {
+  ok?: boolean;
+  duplicate?: boolean;
+  transitioned?: boolean;
+  turnId?: string;
+  sessionId?: string;
+  error?: string;
+}
+
+interface ChatFootprint {
+  turns: number;
+  messages: number;
+  userMessages: number;
+  assistantMessages: number;
+  states: string[];
+  transitions: Array<{ state: string; assistantReply: string }>;
+}
+
+/** One user + one assistant message, one turn subject, one recorded state. */
+const ONE_STORED_TURN: ChatFootprint = {
+  turns: 1,
+  messages: 2,
+  userMessages: 1,
+  assistantMessages: 1,
+  states: ['stored'],
+  transitions: [],
+};
+
+const USER_TEXT = 'devnet: what is a knowledge asset?';
+const ASSISTANT_TEXT = 'devnet: a knowledge asset is a verifiable unit of knowledge.';
+
+const nodes = new Map<number, DevnetNode>();
+
+function storeBackend(node: DevnetNode): string {
+  const config = JSON.parse(readFileSync(join(node.home, 'config.json'), 'utf8')) as {
+    store?: { backend?: string };
+  };
+  return config.store?.backend ?? 'oxigraph (default)';
+}
+
+async function persist(
+  node: DevnetNode,
+  channel: Channel,
+  payload: Record<string, unknown>,
+): Promise<{ status: number; body: PersistBody }> {
+  const { status, json } = await postJson(node, `/api/${channel}-channel/persist-turn`, payload);
+  return { status, body: (json ?? {}) as PersistBody };
+}
+
+const turnPayload = (
+  sessionId: string,
+  turnId: string | undefined,
+  overrides: Record<string, unknown> = {},
+) => ({
+  sessionId,
+  userMessage: USER_TEXT,
+  assistantReply: ASSISTANT_TEXT,
+  ...(turnId === undefined ? {} : { turnId }),
+  ...overrides,
+});
+
+/** SELECT against the node's chat-turns Working Memory assertion, via the node's query API. */
+async function selectChatTurns(
+  node: DevnetNode,
+  sparql: string,
+): Promise<Array<Record<string, SparqlBindingCell>>> {
+  const { status, json } = await postJson(node, '/api/query', {
+    sparql,
+    contextGraphId: 'agent-context',
+    view: 'working-memory',
+    assertionName: 'chat-turns',
+  });
+  if (status !== 200) {
+    throw new Error(`query on node${node.num} failed (${status}): ${JSON.stringify(json)}`);
+  }
+  const bindings = json?.result?.bindings ?? json?.results?.bindings ?? json?.bindings;
+  if (!Array.isArray(bindings)) {
+    throw new Error(`unrecognised /api/query shape on node${node.num}: ${JSON.stringify(json).slice(0, 300)}`);
+  }
+  return bindings;
+}
+
+/** Everything one `(sessionId, turnId)` left in the chat-turns assertion. */
+async function footprint(node: DevnetNode, sessionId: string, turnId: string): Promise<ChatFootprint> {
+  const session = `<${CHAT_NS}session:${sessionId}>`;
+  const turn = `<${CHAT_NS}turn:${turnId}>`;
+  const turnIdLiteral = JSON.stringify(turnId);
+  const select = (sparql: string) => selectChatTurns(node, sparql);
+  const [turns, messages, userMessages, assistantMessages, states, transitions] = await Promise.all([
+    select(`SELECT ?t WHERE { ?t <${RDF_TYPE}> <${DKG_ONT}ChatTurn> . ?t <${SCHEMA}isPartOf> ${session} . ?t <${DKG_ONT}turnId> ${turnIdLiteral} }`),
+    select(`SELECT ?m WHERE { ?m <${RDF_TYPE}> <${SCHEMA}Message> . ?m <${SCHEMA}isPartOf> ${session} . ?m <${DKG_ONT}turnId> ${turnIdLiteral} }`),
+    select(`SELECT ?u WHERE { ${turn} <${DKG_ONT}hasUserMessage> ?u }`),
+    select(`SELECT ?a WHERE { ${turn} <${DKG_ONT}hasAssistantMessage> ?a }`),
+    select(`SELECT ?s WHERE { ${turn} <${DKG_ONT}persistenceState> ?s }`),
+    select(`SELECT ?x ?s ?r WHERE { ?x <${RDF_TYPE}> <${DKG_ONT}ChatTurnPersistenceTransition> . ?x <${DKG_ONT}updatesTurn> ${turn} . ?x <${DKG_ONT}persistenceState> ?s . OPTIONAL { ?x <${DKG_ONT}assistantReply> ?r } }`),
+  ]);
+  return {
+    turns: turns.length,
+    messages: messages.length,
+    userMessages: userMessages.length,
+    assistantMessages: assistantMessages.length,
+    states: states.map((row) => lexical(row.s)).sort(),
+    transitions: transitions
+      .map((row) => ({ state: lexical(row.s), assistantReply: lexical(row.r) }))
+      .sort((a, b) => a.state.localeCompare(b.state)),
+  };
+}
+
+/**
+ * The footprint once the store reports the expected shape. A write that
+ * returned 200 is durable, but external SPARQL stores may serve a read a beat
+ * behind it, so poll briefly instead of asserting on the first read. A
+ * footprint that never converges throws with the last one seen.
+ */
+async function settledFootprint(
+  node: DevnetNode,
+  sessionId: string,
+  turnId: string,
+  expected: ChatFootprint,
+): Promise<ChatFootprint> {
+  const deadline = Date.now() + 15_000;
+  let last = await footprint(node, sessionId, turnId);
+  while (JSON.stringify(last) !== JSON.stringify(expected) && Date.now() < deadline) {
+    await sleep(500);
+    last = await footprint(node, sessionId, turnId);
+  }
+  return last;
+}
+
+const newSessionId = (channel: Channel) => `devnet-${channel}-${randomUUID()}`;
+const newTurnId = () => `turn-${randomUUID()}`;
+
+beforeAll(async () => {
+  for (const num of NODE_NUMS) {
+    const node = readNodeConfig(num);
+    const res = await fetchRetry(`http://127.0.0.1:${node.apiPort}/api/status`);
+    if (!res.ok) {
+      throw new Error(
+        `devnet node${num} /api/status failed (${res.status}). Run ./scripts/devnet.sh start 6 first.`,
+      );
+    }
+    nodes.set(num, node);
+    // Recorded in the run output so a green run says which backends it covered.
+    console.log(`[openclaw-persist-turn] node${num} store backend: ${storeBackend(node)}`);
+  }
+}, 60_000);
+
+describe.each(NODE_NUMS)('OpenClaw persist-turn on devnet node%i', (num) => {
+  const node = () => nodes.get(num)!;
+
+  it('writes a new turn once', async () => {
+    const sessionId = newSessionId('openclaw');
+    const turnId = newTurnId();
+
+    const first = await persist(node(), 'openclaw', turnPayload(sessionId, turnId));
+
+    expect(first).toEqual({ status: 200, body: { ok: true, turnId } });
+    expect(await settledFootprint(node(), sessionId, turnId, ONE_STORED_TURN)).toEqual(ONE_STORED_TURN);
+  });
+
+  it('suppresses sequential and concurrent resends of the same (sessionId, turnId)', async () => {
+    const sessionId = newSessionId('openclaw');
+    const turnId = newTurnId();
+
+    const created = await persist(node(), 'openclaw', turnPayload(sessionId, turnId));
+    const sequential = [
+      await persist(node(), 'openclaw', turnPayload(sessionId, turnId)),
+      await persist(node(), 'openclaw', turnPayload(sessionId, turnId)),
+    ];
+    const concurrent = await Promise.all(
+      Array.from({ length: 6 }, () => persist(node(), 'openclaw', turnPayload(sessionId, turnId))),
+    );
+
+    expect(created.body).toEqual({ ok: true, turnId });
+    for (const resend of [...sequential, ...concurrent]) {
+      expect(resend).toEqual({ status: 200, body: { ok: true, duplicate: true, turnId } });
+    }
+    expect(await settledFootprint(node(), sessionId, turnId, ONE_STORED_TURN)).toEqual(ONE_STORED_TURN);
+  });
+
+  it('suppresses concurrent first writes of one turn down to a single exchange', async () => {
+    const sessionId = newSessionId('openclaw');
+    const turnId = newTurnId();
+
+    const responses = await Promise.all(
+      Array.from({ length: 8 }, () => persist(node(), 'openclaw', turnPayload(sessionId, turnId))),
+    );
+
+    expect(responses.every((response) => response.status === 200)).toBe(true);
+    expect(responses.filter((response) => response.body.duplicate === undefined)).toHaveLength(1);
+    expect(responses.filter((response) => response.body.duplicate === true)).toHaveLength(7);
+    expect(await settledFootprint(node(), sessionId, turnId, ONE_STORED_TURN)).toEqual(ONE_STORED_TURN);
+  });
+
+  it('records pending -> stored as a transition, not a second exchange', async () => {
+    const sessionId = newSessionId('openclaw');
+    const turnId = newTurnId();
+    const expected: ChatFootprint = {
+      turns: 1,
+      messages: 2,
+      userMessages: 1,
+      assistantMessages: 1,
+      states: ['pending'],
+      transitions: [{ state: 'stored', assistantReply: 'devnet: the final answer' }],
+    };
+
+    const pending = await persist(node(), 'openclaw', turnPayload(sessionId, turnId, {
+      assistantReply: 'devnet: working on it',
+      persistenceState: 'pending',
+    }));
+    const stored = await persist(node(), 'openclaw', turnPayload(sessionId, turnId, {
+      assistantReply: 'devnet: the final answer',
+      persistenceState: 'stored',
+    }));
+    const resend = await persist(node(), 'openclaw', turnPayload(sessionId, turnId, {
+      assistantReply: 'devnet: the final answer',
+      persistenceState: 'stored',
+    }));
+    const late = await persist(node(), 'openclaw', turnPayload(sessionId, turnId, {
+      persistenceState: 'failed',
+      failureReason: 'late failure',
+    }));
+
+    expect(pending.body).toEqual({ ok: true, turnId });
+    expect(stored.body).toEqual({ ok: true, transitioned: true, turnId });
+    expect(resend.body).toEqual({ ok: true, duplicate: true, turnId });
+    expect(late.body).toEqual({ ok: true, duplicate: true, turnId });
+    expect(await settledFootprint(node(), sessionId, turnId, expected)).toEqual(expected);
+  });
+
+  it('still writes every POST that carries no turnId, each under a generated one', async () => {
+    const sessionId = newSessionId('openclaw');
+
+    const first = await persist(node(), 'openclaw', turnPayload(sessionId, undefined));
+    const second = await persist(node(), 'openclaw', turnPayload(sessionId, undefined));
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(first.body.duplicate).toBeUndefined();
+    expect(second.body.duplicate).toBeUndefined();
+    expect(first.body.turnId).toMatch(UUID_RE);
+    expect(second.body.turnId).toMatch(UUID_RE);
+    expect(second.body.turnId).not.toBe(first.body.turnId);
+    expect(await settledFootprint(node(), sessionId, first.body.turnId!, ONE_STORED_TURN)).toEqual(ONE_STORED_TURN);
+    expect(await settledFootprint(node(), sessionId, second.body.turnId!, ONE_STORED_TURN)).toEqual(ONE_STORED_TURN);
+
+    // The generated id comes back in the response, so a caller can retry idempotently.
+    const resend = await persist(node(), 'openclaw', turnPayload(sessionId, first.body.turnId));
+    expect(resend.body).toEqual({ ok: true, duplicate: true, turnId: first.body.turnId });
+  });
+
+  it('rejects an invalid payload with 400 and writes nothing', async () => {
+    const sessionId = newSessionId('openclaw');
+    const turnId = newTurnId();
+
+    const missingReply = await persist(node(), 'openclaw', { sessionId, userMessage: 'hi', turnId });
+    const unknownState = await persist(node(), 'openclaw', turnPayload(sessionId, turnId, { persistenceState: 'complete' }));
+
+    expect(missingReply.status).toBe(400);
+    expect(unknownState.status).toBe(400);
+    expect(await footprint(node(), sessionId, turnId)).toEqual({
+      turns: 0,
+      messages: 0,
+      userMessages: 0,
+      assistantMessages: 0,
+      states: [],
+      transitions: [],
+    });
+  });
+});
+
+/**
+ * Parity regression: Hermes and Prime Agent already route persist-turn through
+ * the same durable-turn owner. All three channels must give one exchange for a
+ * resent turn and one transition for an upward state change.
+ */
+describe.each(['hermes', 'prime-agent'] as const)('%s persist-turn parity on devnet', (channel) => {
+  it.each(NODE_NUMS)('suppresses resends and records an upward transition on node%i', async (num) => {
+    const node = nodes.get(num)!;
+    const requestedSession = newSessionId(channel);
+    const turnId = newTurnId();
+
+    const pending = await persist(node, channel, turnPayload(requestedSession, turnId, {
+      assistantReply: 'devnet: working on it',
+      persistenceState: 'pending',
+    }));
+    expect(pending.status).toBe(200);
+    expect(pending.body).toMatchObject({ ok: true, turnId });
+    // Prime Agent namespaces the session it stores; it reports the stored id back.
+    const storedSession = pending.body.sessionId ?? requestedSession;
+
+    const resend = await persist(node, channel, turnPayload(requestedSession, turnId, {
+      assistantReply: 'devnet: working on it',
+      persistenceState: 'pending',
+    }));
+    const stored = await persist(node, channel, turnPayload(requestedSession, turnId, {
+      assistantReply: 'devnet: the final answer',
+      persistenceState: 'stored',
+    }));
+    const storedResend = await persist(node, channel, turnPayload(requestedSession, turnId, {
+      assistantReply: 'devnet: the final answer',
+      persistenceState: 'stored',
+    }));
+
+    expect(resend.body).toMatchObject({ ok: true, duplicate: true, turnId });
+    expect(stored.body).toMatchObject({ ok: true, transitioned: true, turnId });
+    expect(storedResend.body).toMatchObject({ ok: true, duplicate: true, turnId });
+    const expected: ChatFootprint = {
+      turns: 1,
+      messages: 2,
+      userMessages: 1,
+      assistantMessages: 1,
+      states: ['pending'],
+      transitions: [{ state: 'stored', assistantReply: 'devnet: the final answer' }],
+    };
+    expect(await settledFootprint(node, storedSession, turnId, expected)).toEqual(expected);
+  });
+});

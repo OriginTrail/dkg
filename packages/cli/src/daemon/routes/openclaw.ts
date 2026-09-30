@@ -236,6 +236,7 @@ import {
   performNpmUpdate,
 } from '../auto-update.js';
 import { isValidRef, parseTagName } from '../../auto-update-ref.js';
+import { persistDurableChatTurn } from '../chat-turn-persistence.js';
 import {
   OPENCLAW_UI_CONNECT_TIMEOUT_MS,
   OPENCLAW_UI_CONNECT_POLL_MS,
@@ -992,6 +993,10 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
   // ChatMemoryManager default since the openclaw-dkg-primary-memory retarget).
   // Uses the same ChatMemoryManager pathway as the node-owned local-agent
   // chat flow — chat-turn content never reaches Shared Working Memory in v1.
+  // The write goes through `persistDurableChatTurn`, the daemon-wide owner of
+  // durable-turn idempotency shared with Hermes and Prime Agent: a resent
+  // `(sessionId, turnId)` is a duplicate, and a higher `persistenceState`
+  // becomes a transition instead of a second exchange.
   if (req.method === 'POST' && path === '/api/openclaw-channel/persist-turn') {
     const body = await readBody(req, SMALL_BODY_BYTES);
     let payload: any;
@@ -1024,8 +1029,12 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
     if (attachmentRefs != null && verifiedAttachmentRefs === undefined) {
       return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
     }
-    const normalizedTurnId =
-      typeof turnId === "string" ? turnId : crypto.randomUUID();
+    // A resent turn is only deduped when the caller sends the same stable
+    // `turnId`; a POST without one gets a fresh id and can never match an
+    // earlier turn. Trim before keying: the store and the state read both trim,
+    // so `" t1 "` and `"t1"` are one turn and must share one lock key.
+    const trimmedTurnId = typeof turnId === "string" ? turnId.trim() : "";
+    const normalizedTurnId = trimmedTurnId || crypto.randomUUID();
     const normalizedPersistenceState = persistenceState === 'failed' || persistenceState === 'pending'
       ? persistenceState
       : 'stored';
@@ -1033,19 +1042,25 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
       ? failureReason.trim() || undefined
       : undefined;
     try {
-      await memoryManager.storeChatExchange(
-        sessionId,
-        userMessage,
-        assistantReply,
-        normalizedToolCalls,
-        {
+      const outcome = await persistDurableChatTurn({
+        memoryManager,
+        payload: {
+          sessionId,
           turnId: normalizedTurnId,
-          attachmentRefs: verifiedAttachmentRefs,
+          userMessage,
+          assistantReply,
           persistenceState: normalizedPersistenceState,
           failureReason: normalizedFailureReason,
+          toolCalls: normalizedToolCalls,
+          attachmentRefs: verifiedAttachmentRefs,
         },
-      );
-      return jsonResponse(res, 200, { ok: true });
+      });
+      return jsonResponse(res, 200, {
+        ok: true,
+        ...(outcome.kind === 'duplicate' ? { duplicate: true } : {}),
+        ...(outcome.kind === 'transitioned' ? { transitioned: true } : {}),
+        turnId: normalizedTurnId,
+      });
     } catch (err: any) {
       return jsonResponse(res, 500, { error: err.message });
     }
