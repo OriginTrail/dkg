@@ -10,11 +10,14 @@
  * against the on-chain merkle roots; the profiles decide only whom to dial.
  *
  * Topology built by the suite (a default `devnet.sh start 6` is enough):
- *   - Core 1 is stopped while core 4 creates the graph and publishes N KAs, so
- *     core 1 signs no ACK and never hosts the graph. Cores 2 and 3 sign and hold
- *     it. Core 1 is restarted afterwards, empty of it, and core 4 - the graph's
- *     curator and author - is stopped for the rest of the suite, so the curator
- *     tier of the recovery roster points at an offline peer.
+ *   - Core 1 (the edges' only peer) is restarted with `DKG_VM_RECONCILER_ENABLED=0`
+ *     before anything is published: a Core with VM reconciliation off declines
+ *     every public StorageACK and never back-fills a public graph, so it never
+ *     holds this one (a Core with it on fills its gaps from the other Cores within
+ *     a minute of a restart, which the first live run showed). Core 4 then creates
+ *     the graph and publishes N KAs: cores 2 and 3 sign and hold them. Core 4 - the
+ *     graph's curator and author - is stopped afterwards, for the rest of the
+ *     suite, so the curator tier of the recovery roster points at an offline peer.
  *   - Edges 5 and 6 are restarted with `DEVNET_EDGE_BOOTSTRAP_CORES=1`, so their
  *     only bootstrap peer (and relay) is core 1, with the periodic peer-sync
  *     reconciler off so nothing but the subscribe catch-up and the VM reconcile
@@ -189,9 +192,10 @@ beforeAll(async () => {
   const peerIds: Record<number, string> = {};
   for (const n of [1, 2, 3, 4, EDGE_TIER_ON, EDGE_CONTROL]) peerIds[n] = await peerIdOf(state.nodes[n]!);
 
-  // 1. Core 4 creates its own public graph and publishes while core 1 is down,
-  //    so core 1 signs no ACK and never hosts the graph.
-  expectOk(await devnetSh(['stop-node', String(RELAY_CORE)]), `stop-node ${RELAY_CORE}`);
+  // 1. Core 1 declines ACKs and never back-fills; core 4 then creates its own
+  //    public graph and publishes, so only cores 2, 3 and 4 hold it.
+  await restartNode(RELAY_CORE, { DKG_VM_RECONCILER_ENABLED: '0' });
+  await sleep(20_000); // let cores 2-4 re-reserve their relay slots on core 1
   const slug = `vm-holder-tier-${Date.now().toString(36)}`;
   const created = await runDkgCli(author, [
     'context-graph', 'create', slug,
@@ -219,8 +223,7 @@ beforeAll(async () => {
     await sleep(3_000);
   } while (Date.now() < deadline);
 
-  // 3. Core 1 returns holding none of it; the curator/author goes away.
-  await restartNode(RELAY_CORE);
+  // 3. Core 1 holds none of it; the curator/author goes away.
   holderCounts[RELAY_CORE] = await vmCount(state.nodes[RELAY_CORE]!, cgId);
   expectOk(await devnetSh(['stop-node', String(AUTHOR_CORE)]), `stop-node ${AUTHOR_CORE}`);
   evidence.holderCounts = holderCounts;

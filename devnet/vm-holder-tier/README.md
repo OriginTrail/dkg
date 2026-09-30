@@ -10,10 +10,14 @@ that the chain vouches for.
 
 The suite builds it itself on a default 6-node devnet (4 cores, 2 edges):
 
-1. stops core 1, has core 4 create a graph and publish 6 KAs (core 1 signs no
-   ACK, so it never hosts the graph; cores 2 and 3 sign and hold it), then
-   restarts core 1 empty of it and **stops core 4**, the graph's curator and
-   author, so the curator tier of the recovery roster points at an offline peer;
+1. restarts core 1 (the edges' only peer) with `DKG_VM_RECONCILER_ENABLED=0`: a
+   Core with VM reconciliation off declines every public StorageACK and never
+   back-fills a public graph, so it never holds the graph (a Core with it on
+   fills its gaps from the other Cores within a minute of a restart, as the
+   first live run showed). Core 4 then creates a graph and publishes 6 KAs; cores
+   2 and 3 sign and hold them. Core 4, the graph's curator and author, is then
+   **stopped**, so the curator tier of the recovery roster points at an offline
+   peer;
 2. restarts edges 5 and 6 with `DEVNET_EDGE_BOOTSTRAP_CORES=1`
    (`scripts/devnet.sh`), so their only bootstrap peer and relay is core 1, and
    with `DKG_SYNC_RECONCILER_ENABLED=0` so the periodic peer-sync reconciler
@@ -63,6 +67,6 @@ Tuning: `HOLDER_TIER_CONVERGE_MS` (default 600000) bounds the wait for the edge
 and `HOLDER_TIER_CONTROL_EXTRA_MS` (default 90000) is how much longer the
 control is given.
 
-The suite restarts nodes 1, 5 and 6 and stops node 4 (never identities, wallets
+The suite restarts nodes 1, 5 and 6 (node 1 with VM reconciliation off) and stops node 4 (never identities, wallets
 or chain state) and publishes only into its own freshly created Context Graph;
 restart the devnet before running another suite that needs core 4.
