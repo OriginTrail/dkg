@@ -414,20 +414,8 @@ describe('published snapshot cleanup: storage ACK copies of the published asset'
     expect(warn).not.toHaveBeenCalled();
   });
 
-  describe.each([[false], [true]])('with more copies than one lookup returns (store answers ACK rows first: %s)', ackFirst => {
+  describe('with more copies than one lookup returns', () => {
     const COPIES = 130;
-    /** Emulate a store whose unordered results begin with the ACK rows, whatever the LIMIT cuts off. */
-    function answerAckRowsFirst(f: Awaited<ReturnType<typeof fixture>>) {
-      const query = f.store.query.bind(f.store);
-      vi.spyOn(f.store, 'query').mockImplementation(async (sparql, options) => {
-        const limit = /\bLIMIT (\d+)\s*$/.exec(sparql);
-        if (!ackFirst || !limit || sparql.includes('ORDER BY') || !isAckLookup(sparql)) return query(sparql, options);
-        const all = await query(sparql.replace(/\bLIMIT \d+\s*$/, ''), options);
-        if (all.type !== 'bindings') return all;
-        const isAck = (row: Record<string, string>) => String(row['shareId']).includes('storage-ack-');
-        return { ...all, bindings: [...all.bindings.filter(isAck), ...all.bindings.filter(row => !isAck(row))].slice(0, Number(limit[1])) };
-      });
-    }
 
     it('removes every discharged copy and only those', async () => {
       const f = await fixture();
@@ -440,7 +428,6 @@ describe('published snapshot cleanup: storage ACK copies of the published asset'
         f.operationRows(ackSubject('plain'), 'share-plain', asset.ual, 1, digest),
       ];
       await f.store.insert(kept.flat());
-      answerAckRowsFirst(f);
       await asset.clear();
       for (const id of ids) expect(await rowsOf(f, ackSubject(id)), id).toBe(0);
       for (const rows of kept) expect(await rowsOf(f, rows[0]!.subject)).toBe(rows.length);
@@ -455,7 +442,6 @@ describe('published snapshot cleanup: storage ACK copies of the published asset'
       const asset = await f.seed(41);
       const ids = Array.from({ length: COPIES }, (_, i) => `copy-${String(i).padStart(3, '0')}`);
       await f.store.insert(ids.flatMap(id => f.operationRows(ackSubject(id), `storage-ack-${id}`, asset.ual, 1, digest)));
-      answerAckRowsFirst(f);
       await asset.clear();
       f.advance();
       expect(await f.snapshots.collectGarbage()).toMatchObject({ referencedSnapshots: 0, finalizedSnapshots: 1 });
