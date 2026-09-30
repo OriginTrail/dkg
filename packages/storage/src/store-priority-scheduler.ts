@@ -516,18 +516,6 @@ export class StorePriorityScheduler extends ObservableScheduler {
         entry.waitTimer = undefined;
         if (!this.removeQueued(entry as QueueEntry<unknown>)) return;
         this.cleanupQueuedEntry(entry as QueueEntry<unknown>);
-        // A timeout's own operation names the waiter. Capture the admitted
-        // operations separately so logs expose possible slot holders without
-        // mistaking that waiter label for the cause of the delay.
-        const activeAtTimeout = this.getBackpressureSnapshot().lanes
-          .flatMap((lane) => lane.activeOperations.map((active) => ({
-            priority: lane.lane as StoreWorkPriority,
-            operation: metricOperation(active.operation),
-            count: active.count,
-            oldestAgeMs: active.oldestAgeMs,
-          })))
-          .sort((a, b) => b.oldestAgeMs - a.oldestAgeMs)
-          .slice(0, 3);
         const error = new StoreSchedulerBusyError(
           'queue_wait_timeout',
           normalizedPriority,
@@ -536,6 +524,18 @@ export class StorePriorityScheduler extends ObservableScheduler {
         );
         if (this.timeoutDiagnosticSink) {
           try {
+            // A timeout's own operation names the waiter. Capture admitted
+            // work separately; snapshot collection is observability too and
+            // must not interrupt the rejection if it fails.
+            const activeAtTimeout = this.getBackpressureSnapshot().lanes
+              .flatMap((lane) => lane.activeOperations.map((active) => ({
+                priority: lane.lane as StoreWorkPriority,
+                operation: metricOperation(active.operation),
+                count: active.count,
+                oldestAgeMs: active.oldestAgeMs,
+              })))
+              .sort((a, b) => b.oldestAgeMs - a.oldestAgeMs)
+              .slice(0, 3);
             this.timeoutDiagnosticSink({
               waiting: { priority: normalizedPriority, operation },
               activeAtTimeout,
