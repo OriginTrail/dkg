@@ -5,6 +5,9 @@ import { join } from 'node:path';
 import * as nodeStore from '@origintrail-official/dkg-node-store';
 import * as nodeUi from '../src/index.js';
 import * as dbModule from '../src/db.js';
+import * as legacyChainCursorStores from '../src/chain-cursor-stores.js';
+import * as legacyChainEventLogStore from '../src/chain-event-log-store.js';
+import * as legacyProtocolOutboxStore from '../src/protocol-outbox-store.js';
 
 /**
  * Protocol persistence moved to `@origintrail-official/dkg-node-store`. The
@@ -46,6 +49,41 @@ describe('node-ui re-exports the moved protocol stores', () => {
     for (const name of ['DashboardDB', 'SCHEMA_VERSION', 'StructuredLogger', 'OperationTracker', 'MetricsCollector']) {
       expect((nodeUi as Record<string, unknown>)[name], name).toBeDefined();
       expect((nodeStore as Record<string, unknown>)[name], name).toBeUndefined();
+    }
+  });
+});
+
+/**
+ * This package has no `exports` map, so `dist/<module>.js` has always been a
+ * public import path. Three modules moved to node-store; the files left at
+ * their old paths must keep forwarding EXACTLY what the former modules exported
+ * (values here, types in `legacy-module-paths.typecheck.ts`), as the same
+ * objects. The lists are the base commit's exports
+ * (31aff226187c13aec5b4ad05b615a31ef6e42aae, `packages/node-ui/src/<file>.ts`).
+ */
+const LEGACY_MODULES = [
+  ['chain-event-log-store', legacyChainEventLogStore, ['SqliteChainEventLogStore']],
+  [
+    'chain-cursor-stores',
+    legacyChainCursorStores,
+    [
+      'SqliteChainEventCursorStore',
+      'SqliteContextGraphAuthorityHistoryStore',
+      'SqliteContextGraphAuthorityIndexStore',
+      'SqliteContextGraphRegistryScanCursorStore',
+      'SqliteContextGraphStorageDiscoveryStore',
+    ],
+  ],
+  ['protocol-outbox-store', legacyProtocolOutboxStore, ['SqliteProtocolOutboxStore']],
+] as const;
+
+describe('node-ui keeps the module paths the moved stores used to live at', () => {
+  it.each(LEGACY_MODULES)('%s.js still exports exactly its former values, as the node-store classes', (_file, mod, values) => {
+    expect(Object.keys(mod).sort()).toEqual([...values].sort());
+    for (const name of values) {
+      expect((mod as Record<string, unknown>)[name], name).toBeTypeOf('function');
+      expect((mod as Record<string, unknown>)[name], name)
+        .toBe((nodeStore as Record<string, unknown>)[name]);
     }
   });
 });
