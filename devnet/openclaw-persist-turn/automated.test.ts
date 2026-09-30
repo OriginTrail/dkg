@@ -19,6 +19,15 @@
  * repeats the resend check on the Hermes and Prime Agent routes as the parity
  * regression: all three channels must behave the same on retry.
  *
+ * Read lag: a write that returned 200 is durable, but external SPARQL stores may
+ * serve a read a beat behind it. Every footprint check therefore waits for the
+ * expected footprint and then requires it to stay unchanged for a quiet window
+ * (`settleOnExpected` in settle.ts, unit-tested without a devnet in
+ * settle.test.ts), so a lagging read that shows the expected one-exchange
+ * footprint before the duplicates of a broken resend path become visible is not
+ * taken for the final state. The window is short; it cannot see a store that
+ * lags for longer than that.
+ *
  * Isolation: every test writes only turns of its own random session and turn
  * id into the node's own `agent-context` / `chat-turns` assertion. It never
  * touches the shared `devnet-test` context graph, a node wallet or the chain.
@@ -34,7 +43,6 @@ import {
   lexical,
   postJson,
   readNodeConfig,
-  sleep,
   type DevnetNode,
   type SparqlBindingCell,
 } from '../_bootstrap/harness.js';
@@ -44,6 +52,7 @@ import {
   readChatTurnFootprint,
   type ChatTurnFootprint,
 } from '../../packages/cli/test/_helpers/chat-turn-footprint.js';
+import { FOOTPRINT_SETTLE, settleOnExpected } from './settle.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -120,10 +129,15 @@ const footprint = (node: DevnetNode, sessionId: string, turnId: string): Promise
   readChatTurnFootprint((sparql) => selectChatTurns(node, sparql), lexical, sessionId, turnId);
 
 /**
- * The footprint once the store reports the expected shape. A write that
- * returned 200 is durable, but external SPARQL stores may serve a read a beat
- * behind it, so poll briefly instead of asserting on the first read. A
- * footprint that never converges throws with the last one seen.
+ * The footprint once the store reports the expected shape AND keeps reporting
+ * it. A write that returned 200 is durable (the route awaits the store write),
+ * but external SPARQL stores may serve a read a beat behind it. Polling only
+ * until the first read that equals `expected` would pass on such a stale read
+ * while a duplicate write is still on its way to becoming visible, so
+ * `settleOnExpected` keeps reading for a quiet window after the first match and
+ * returns the first read that differs (settle.ts). A footprint that never
+ * converges returns the last one seen. Callers assert the result equals
+ * `expected`, so both a late footprint and an unconverged one fail there.
  */
 async function settledFootprint(
   node: DevnetNode,
@@ -131,13 +145,8 @@ async function settledFootprint(
   turnId: string,
   expected: ChatTurnFootprint,
 ): Promise<ChatTurnFootprint> {
-  const deadline = Date.now() + 15_000;
-  let last = await footprint(node, sessionId, turnId);
-  while (JSON.stringify(last) !== JSON.stringify(expected) && Date.now() < deadline) {
-    await sleep(500);
-    last = await footprint(node, sessionId, turnId);
-  }
-  return last;
+  const { value } = await settleOnExpected(() => footprint(node, sessionId, turnId), expected, FOOTPRINT_SETTLE);
+  return value;
 }
 
 const newSessionId = (channel: Channel) => `devnet-${channel}-${randomUUID()}`;
@@ -271,7 +280,8 @@ describe.each(NODE_NUMS)('OpenClaw persist-turn on devnet node%i', (num) => {
 
     expect(missingReply.status).toBe(400);
     expect(unknownState.status).toBe(400);
-    expect(await footprint(node(), sessionId, turnId)).toEqual(NO_CHAT_TURN);
+    // A read that shows nothing once could be a lagging one, so the absence has to hold for the quiet window too.
+    expect(await settledFootprint(node(), sessionId, turnId, NO_CHAT_TURN)).toEqual(NO_CHAT_TURN);
   });
 });
 

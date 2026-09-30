@@ -29,6 +29,18 @@ queries are shared with the CLI e2e (`packages/cli/test/openclaw-persist-turn.e2
 through `packages/cli/test/_helpers/chat-turn-footprint.ts`; this suite supplies
 only its own transport (`POST /api/query`) and result-cell shape.
 
+A write that returned 200 is durable (the route awaits the store write), but an
+external SPARQL store may serve a read a beat behind it. Stopping at the first
+read that shows the expected one-exchange footprint would therefore pass on a
+stale snapshot while the extra writes of a broken resend path are still on their
+way to becoming visible. Every footprint check instead waits for the expected
+footprint and then requires it to stay identical for a quiet window (2 s and at
+least 3 further reads, `FOOTPRINT_SETTLE` in `settle.ts`); a read that differs
+after the first match fails the test with that late footprint. The window
+narrows the gap, it does not close it: a store that lags for longer than 2 s is
+not caught. The polling logic is pure and is unit-tested without a devnet in
+`settle.test.ts`, which `vitest.config.ts` runs together with the live suite.
+
 It runs against nodes 1, 3 and 5, which sit on different store backends
 (managed `oxigraph-server`, `blazegraph`, `sparql-http` to an external Oxigraph
 when Docker provisions them; otherwise the devnet falls back as described in
