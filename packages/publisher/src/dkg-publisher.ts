@@ -7575,7 +7575,7 @@ export class DKGPublisher implements Publisher {
     // Only this confirmed/durable cleanup boundary creates retirement candidates.
     const warn = (message: string) => this.log.warn(ctx, message);
     await this.publishedSnapshotRetirement.schedule(swmMetaGraph, operationSubjects, warn);
-    // Read before the asset's own operation rows go: their version bounds which ACK copies are discharged.
+    // Plan before the asset's own operation rows go: their version bounds which ACK copies are discharged.
     const dischargedAckCopies = await this.publishedSnapshotRetirement.findDischargedStorageAckCopies(
       swmMetaGraph, kaScope.ual, operationSubjects, warn);
     const graphs = await resolveSharedMemoryScopeGraphs(this.store, swmGraph, scope);
@@ -7589,7 +7589,7 @@ export class DKGPublisher implements Publisher {
         subject: assertSafeIri(operationSubject),
       });
     }
-    await this.publishedSnapshotRetirement.clearStorageAckCopies(swmMetaGraph, dischargedAckCopies, warn);
+    await this.publishedSnapshotRetirement.clearStorageAckCopies(dischargedAckCopies, warn);
     this.log.info(
       ctx,
       `Cleared graph-scoped KA SWM ${scope.identity.agentAddress}/${scope.identity.kaNumber.toString()} ` +

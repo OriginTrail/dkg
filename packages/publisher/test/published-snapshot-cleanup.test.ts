@@ -244,6 +244,8 @@ describe('published snapshot cleanup: pressure and restarts', () => {
 
 describe('published snapshot cleanup: storage ACK copies of the published asset', () => {
   const ackSubject = (id: string) => `urn:dkg:share:${CG}:storage-ack-${id}`;
+  /** The StorageACK lookups are the store queries that read assertion versions. */
+  const isAckLookup = (sparql: string) => sparql.includes(`${DKG}assertionVersion`);
   const rowsOf = async (f: Awaited<ReturnType<typeof fixture>>, subject: string) => {
     const result = await f.store.query(`SELECT ?p WHERE { GRAPH <${META}> { <${subject}> ?p ?o } }`);
     return result.type === 'bindings' ? result.bindings.length : 0;
@@ -304,7 +306,7 @@ describe('published snapshot cleanup: storage ACK copies of the published asset'
     const query = vi.spyOn(f.store, 'query');
     await asset.clear();
     expect(await rowsOf(f, ackSubject('own'))).toBe(5);
-    expect(query.mock.calls.some(([sparql]) => sparql.includes('?shareId ?version'))).toBe(false);
+    expect(query.mock.calls.some(([sparql]) => isAckLookup(sparql))).toBe(false);
   });
 
   it('keeps the copy and still completes the cleanup when its lookup fails', async () => {
@@ -313,7 +315,7 @@ describe('published snapshot cleanup: storage ACK copies of the published asset'
     await f.store.insert(f.operationRows(ackSubject('own'), 'storage-ack-own', asset.ual, 1, digest));
     const query = f.store.query.bind(f.store);
     vi.spyOn(f.store, 'query').mockImplementation((sparql, options) =>
-      sparql.includes('?shareId ?version') ? Promise.reject(new Error('store unavailable')) : query(sparql, options));
+      isAckLookup(sparql) ? Promise.reject(new Error('store unavailable')) : query(sparql, options));
     await expect(asset.clear()).resolves.toBeUndefined();
     expect(await f.store.countQuads(asset.swm)).toBe(0);
     expect(await rowsOf(f, ackSubject('own'))).toBe(5);
@@ -321,24 +323,188 @@ describe('published snapshot cleanup: storage ACK copies of the published asset'
     expect((await f.snapshots.collectGarbage()).referencedSnapshots).toBe(1);
   });
 
-  it('reports a failed deletion through the warning channel and keeps going', async () => {
+  it('reports a failed deletion through the warning channel and leaves every copy in place', async () => {
     const f = await fixture();
+    const asset = await f.seed(41);
     const warn = vi.fn();
     const retirement = new PublishedSnapshotRetirement(f.store, f.snapshots.lifecycle);
-    vi.spyOn(f.store, 'deleteByPattern').mockRejectedValueOnce(new Error('disk full'));
-    await expect(retirement.clearStorageAckCopies(META, [ackSubject('one'), ackSubject('two')], warn)).resolves.toBeUndefined();
+    for (const id of ['one', 'two']) await f.store.insert(f.operationRows(ackSubject(id), `storage-ack-${id}`, asset.ual, 1, digest));
+    const plan = await retirement.findDischargedStorageAckCopies(META, asset.ual, ['urn:dkg:share:snapshot-cleanup:share-41'], warn);
+    expect([...plan.operations].sort()).toEqual([ackSubject('one'), ackSubject('two')]);
+    vi.spyOn(f.store, 'update').mockRejectedValueOnce(new Error('disk full'));
+    await expect(retirement.clearStorageAckCopies(plan, warn)).resolves.toBeUndefined();
     expect(warn).toHaveBeenCalledExactlyOnceWith('Could not clear storage ACK copy metadata after publication: disk full');
+    // One mutation failed as a whole: no prefix of the list was applied.
+    expect(await rowsOf(f, ackSubject('one'))).toBe(5);
+    expect(await rowsOf(f, ackSubject('two'))).toBe(5);
   });
 
-  it('finds nothing without a cleaned operation to take the version from', async () => {
+  it('removes the discharged set with one store mutation', async () => {
+    const f = await fixture();
+    const asset = await f.seed(41);
+    const ids = ['a', 'b', 'c'];
+    for (const id of ids) await f.store.insert(f.operationRows(ackSubject(id), `storage-ack-${id}`, asset.ual, 1, digest));
+    const touchesAck = (arg: unknown) => JSON.stringify(arg).includes('storage-ack-');
+    const update = vi.spyOn(f.store, 'update');
+    const deleteByPattern = vi.spyOn(f.store, 'deleteByPattern');
+    const deleteWithoutCount = vi.spyOn(f.store, 'deleteByPatternWithoutCount');
+    const remove = vi.spyOn(f.store, 'delete');
+    await asset.clear();
+    const ackUpdates = update.mock.calls.filter(([sparql]) => touchesAck(sparql));
+    expect(ackUpdates).toHaveLength(1);
+    for (const id of ids) expect(ackUpdates[0]![0]).toContain(`<${ackSubject(id)}>`);
+    expect(ackUpdates[0]![1]).toMatchObject({ touchedGraphs: [META] });
+    // No per-subject mutation for any copy.
+    expect([...deleteByPattern.mock.calls, ...deleteWithoutCount.mock.calls, ...remove.mock.calls]
+      .filter(([arg]) => touchesAck(arg))).toEqual([]);
+    for (const id of ids) expect(await rowsOf(f, ackSubject(id))).toBe(0);
+  });
+
+  it('reports a failed mutation once and keeps the copies, the file and the rest of the cleanup', async () => {
+    const f = await fixture();
+    const asset = await f.seed(41);
+    for (const id of ['a', 'b']) await f.store.insert(f.operationRows(ackSubject(id), `storage-ack-${id}`, asset.ual, 1, digest));
+    const update = f.store.update!.bind(f.store);
+    vi.spyOn(f.store, 'update').mockImplementation((sparql, options) =>
+      sparql.includes('storage-ack-') ? Promise.reject(new Error('store offline')) : update(sparql, options));
+    await expect(asset.clear()).resolves.toBeUndefined();
+    expect(await f.store.countQuads(asset.swm)).toBe(0);
+    expect(await f.store.countQuads(asset.vm)).toBe(quads.length);
+    for (const id of ['a', 'b']) expect(await rowsOf(f, ackSubject(id))).toBe(5);
+    f.advance();
+    expect((await f.snapshots.collectGarbage()).referencedSnapshots).toBe(1);
+    await expect(stat(f.path)).resolves.toBeDefined();
+  });
+
+  it('applies nothing when one planned subject cannot be written into the update', async () => {
+    const f = await fixture();
+    const asset = await f.seed(41);
+    await f.store.insert(f.operationRows(ackSubject('one'), 'storage-ack-one', asset.ual, 1, digest));
+    const warn = vi.fn();
+    const retirement = new PublishedSnapshotRetirement(f.store, f.snapshots.lifecycle);
+    await retirement.clearStorageAckCopies({ metaGraph: META, operations: [ackSubject('one'), 'not an iri'], truncated: false }, warn);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(await rowsOf(f, ackSubject('one'))).toBe(5);
+  });
+
+  it('keeps the copies and reports it when the store cannot run an update', async () => {
+    const f = await fixture();
+    const asset = await f.seed(41);
+    await f.store.insert(f.operationRows(ackSubject('one'), 'storage-ack-one', asset.ual, 1, digest));
+    const warn = vi.fn();
+    const withoutUpdate = { query: f.store.query.bind(f.store) } as unknown as OxigraphStore;
+    const retirement = new PublishedSnapshotRetirement(withoutUpdate, f.snapshots.lifecycle);
+    const plan = await retirement.findDischargedStorageAckCopies(META, asset.ual, ['urn:dkg:share:snapshot-cleanup:share-41'], warn);
+    expect(plan.operations).toEqual([ackSubject('one')]);
+    await retirement.clearStorageAckCopies(plan, warn);
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      'Could not clear storage ACK copy metadata after publication: the triple store cannot run a single update for the whole set');
+    expect(await rowsOf(f, ackSubject('one'))).toBe(5);
+  });
+
+  it('plans nothing without a cleaned operation to take the version from', async () => {
     const f = await fixture();
     const asset = await f.seed(41);
     await f.store.insert(f.operationRows(ackSubject('own'), 'storage-ack-own', asset.ual, 1, digest));
     const retirement = new PublishedSnapshotRetirement(f.store, f.snapshots.lifecycle);
     const warn = vi.fn();
-    expect(await retirement.findDischargedStorageAckCopies(META, asset.ual, [], warn)).toEqual([]);
+    expect((await retirement.findDischargedStorageAckCopies(META, asset.ual, [], warn)).operations).toEqual([]);
     // An operation id that is not in the graph gives no version either.
-    expect(await retirement.findDischargedStorageAckCopies(META, asset.ual, ['urn:dkg:share:unknown'], warn)).toEqual([]);
+    expect((await retirement.findDischargedStorageAckCopies(META, asset.ual, ['urn:dkg:share:unknown'], warn)).operations).toEqual([]);
     expect(warn).not.toHaveBeenCalled();
+  });
+
+  describe.each([[false], [true]])('with more copies than one lookup returns (store answers ACK rows first: %s)', ackFirst => {
+    const COPIES = 130;
+    /** Emulate a store whose unordered results begin with the ACK rows, whatever the LIMIT cuts off. */
+    function answerAckRowsFirst(f: Awaited<ReturnType<typeof fixture>>) {
+      const query = f.store.query.bind(f.store);
+      vi.spyOn(f.store, 'query').mockImplementation(async (sparql, options) => {
+        const limit = /\bLIMIT (\d+)\s*$/.exec(sparql);
+        if (!ackFirst || !limit || sparql.includes('ORDER BY') || !isAckLookup(sparql)) return query(sparql, options);
+        const all = await query(sparql.replace(/\bLIMIT \d+\s*$/, ''), options);
+        if (all.type !== 'bindings') return all;
+        const isAck = (row: Record<string, string>) => String(row['shareId']).includes('storage-ack-');
+        return { ...all, bindings: [...all.bindings.filter(isAck), ...all.bindings.filter(row => !isAck(row))].slice(0, Number(limit[1])) };
+      });
+    }
+
+    it('removes every discharged copy and only those', async () => {
+      const f = await fixture();
+      const asset = await f.seed(41);
+      const ids = Array.from({ length: COPIES }, (_, i) => `copy-${String(i).padStart(3, '0')}`);
+      await f.store.insert(ids.flatMap(id => f.operationRows(ackSubject(id), `storage-ack-${id}`, asset.ual, 1, digest)));
+      const kept = [
+        f.operationRows(ackSubject('later'), 'storage-ack-later', asset.ual, 2, digest),
+        f.operationRows(ackSubject('other'), 'storage-ack-other', `did:dkg:base:8453/${AUTHOR}/99`, 1, digest),
+        f.operationRows(ackSubject('plain'), 'share-plain', asset.ual, 1, digest),
+      ];
+      await f.store.insert(kept.flat());
+      answerAckRowsFirst(f);
+      await asset.clear();
+      for (const id of ids) expect(await rowsOf(f, ackSubject(id)), id).toBe(0);
+      for (const rows of kept) expect(await rowsOf(f, rows[0]!.subject)).toBe(rows.length);
+      expect(await f.store.countQuads(asset.vm)).toBe(quads.length);
+      // The three rows that stay still reference the file.
+      f.advance();
+      expect(await f.snapshots.collectGarbage()).toMatchObject({ referencedSnapshots: 1, deletedSnapshots: 0 });
+    });
+
+    it('lets the file go once nothing else references it', async () => {
+      const f = await fixture();
+      const asset = await f.seed(41);
+      const ids = Array.from({ length: COPIES }, (_, i) => `copy-${String(i).padStart(3, '0')}`);
+      await f.store.insert(ids.flatMap(id => f.operationRows(ackSubject(id), `storage-ack-${id}`, asset.ual, 1, digest)));
+      answerAckRowsFirst(f);
+      await asset.clear();
+      f.advance();
+      expect(await f.snapshots.collectGarbage()).toMatchObject({ referencedSnapshots: 0, finalizedSnapshots: 1 });
+      await expect(stat(f.path)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
+  });
+
+  it('bounds a stuck copy lookup on the client side and plans nothing', async () => {
+    const f = await fixture();
+    const warn = vi.fn();
+    const stuck = { query: () => new Promise<never>(() => {}) } as unknown as OxigraphStore;
+    const retirement = new PublishedSnapshotRetirement(stuck, f.snapshots.lifecycle);
+    vi.useFakeTimers();
+    try {
+      const finding = retirement.findDischargedStorageAckCopies(META, 'did:dkg:base:8453/0xabc/1', ['urn:dkg:share:x'], warn);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect((await finding).operations).toEqual([]);
+    } finally { vi.useRealTimers(); }
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      'Could not look up storage ACK copy metadata for cleanup: Storage ACK copy lookup timed out');
+  });
+
+  it('warns when a plan reaches its page limit and still hands back the copies it read', async () => {
+    const f = await fixture();
+    const warn = vi.fn();
+    let pages = 0;
+    // A store with an endless supply of copies: every page is full and starts after the previous one.
+    const endless = { query: async (sparql: string) => sparql.includes('ORDER BY')
+      ? { type: 'bindings' as const, bindings: Array.from({ length: 64 }, (_, i) => ({
+        operation: `urn:dkg:share:${CG}:storage-ack-${String(pages++ * 64 + i).padStart(6, '0')}` })) }
+      : { type: 'bindings' as const, bindings: [{ version: version(1) }] } } as unknown as OxigraphStore;
+    const retirement = new PublishedSnapshotRetirement(endless, f.snapshots.lifecycle);
+    const plan = await retirement.findDischargedStorageAckCopies(META, 'did:dkg:base:8453/0xabc/1', ['urn:dkg:share:x'], warn);
+    expect(plan.truncated).toBe(true);
+    expect(plan.operations).toHaveLength(64 * 64);
+    expect(warn).toHaveBeenCalledExactlyOnceWith(
+      'Storage ACK copy cleanup reached its page limit; 4096 copies are planned for removal and any others stay');
+  });
+
+  it('plans nothing when a later page fails, even though the boundary was found', async () => {
+    const f = await fixture();
+    const asset = await f.seed(41);
+    await f.store.insert(f.operationRows(ackSubject('own'), 'storage-ack-own', asset.ual, 1, digest));
+    const query = f.store.query.bind(f.store);
+    vi.spyOn(f.store, 'query').mockImplementation((sparql, options) =>
+      sparql.includes('ORDER BY ?operation') ? Promise.reject(new Error('page failed')) : query(sparql, options));
+    await expect(asset.clear()).resolves.toBeUndefined();
+    expect(await rowsOf(f, ackSubject('own'))).toBe(5);
+    f.advance();
+    expect((await f.snapshots.collectGarbage()).referencedSnapshots).toBe(1);
   });
 });

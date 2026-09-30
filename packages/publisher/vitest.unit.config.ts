@@ -80,6 +80,7 @@ export default defineConfig({
       'test/storage-ack-handler-local-self-ack.test.ts',
       'test/storage-ack-priority-lane.test.ts',
       'test/storage-ack-ledger-graph-index.test.ts',
+      'test/storage-ack-copy-cleanup.test.ts',
       'test/swm-slice-ack-unbounded.test.ts',
       'test/workspace-snapshot-store.test.ts',
       'test/workspace-snapshot-retirement.test.ts',
