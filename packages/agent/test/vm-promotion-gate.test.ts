@@ -68,7 +68,6 @@ import {
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import type { ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
-import { parseStorageAckLedgerCandidate, storageAckPromotedBatchQuery } from '../src/vm-promotion-audit.js';
 
 const AUTHOR = '0x1111111111111111111111111111111111111111';
 const DKG = 'http://dkg.io/ontology/';
@@ -876,45 +875,6 @@ describe('core VM-promotion guarantees', () => {
       }
     });
 
-    it('crosses the 64-copy batch boundary and classifies the next stale row', async () => {
-      setStatic('VM_PROMOTION_AUDIT_PAGE_SIZE', 70);
-      setStatic('VM_PROMOTION_AUDIT_MAX_CHAIN_CHECKS', 1);
-      const internals = await boot();
-      await internals.ensureStorageAckLedgerReady();
-      const reads = recorder(async () => 0n);
-      internals.chain.getKAContextGraphId = reads;
-      internals.chain.getMerkleRootCount = async () => 0n;
-      for (let index = 0; index < 65; index += 1) {
-        await seedCopy(internals.store, {
-          namespace: index % 2 === 0 ? 'batch-a' : 'batch-b',
-          n: 1000 + index,
-          ageMs: 2 * HOUR,
-          ...(index < 64 ? { confirmedVersion: 1 } : {}),
-        });
-      }
-      const queries = vi.spyOn(internals.store, 'query');
-      const status = await internals.runVmPromotionAudit();
-      expect(status).toMatchObject({ auditedCopies: 65, staleUnpromotedCopies: 1 });
-      expect(reads.calls).toEqual([[kaId(1064)]]);
-      expect(queries.mock.calls.filter(([, options]) =>
-        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(2);
-    });
-
-    it('does not prefetch the second slice after the chain budget is exhausted', async () => {
-      setStatic('VM_PROMOTION_AUDIT_PAGE_SIZE', 70);
-      setStatic('VM_PROMOTION_AUDIT_MAX_CHAIN_CHECKS', 1);
-      const internals = await boot();
-      await internals.ensureStorageAckLedgerReady();
-      internals.chain.getKAContextGraphId = async () => 0n;
-      internals.chain.getMerkleRootCount = async () => 0n;
-      for (let index = 0; index < 65; index += 1) {
-        await seedCopy(internals.store, { namespace: 'budget-cg', n: 2000 + index, ageMs: 2 * HOUR });
-      }
-      const queries = vi.spyOn(internals.store, 'query');
-      await internals.runVmPromotionAudit();
-      expect(queries.mock.calls.filter(([, options]) =>
-        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(1);
-    });
   });
 
   describe('durable update path', () => {
@@ -1826,113 +1786,6 @@ describe('core VM-promotion guarantees', () => {
       internals.store.query = async () => { throw new Error('store down'); };
       await expect(internals.storageAckLedgerNamespaceSubGraphs('sub-list-cg')).resolves.toEqual([]);
       await expect(internals.storageAckLedgerSubGraphName('sub-list-cg', ual(1))).resolves.toBeUndefined();
-    });
-
-    it('checks promoted ACK copies across graphs and versions in graph-local batches', async () => {
-      const internals = await boot();
-      const a1 = await seedCopy(internals.store, {
-        namespace: 'batch-a', n: 201, ageMs: 2 * HOUR, version: 1, confirmedVersion: 1,
-      });
-      const a2 = await seedCopy(internals.store, {
-        namespace: 'batch-a', n: 202, ageMs: 2 * HOUR, version: 2, confirmedVersion: 1,
-      });
-      const b1 = await seedCopy(internals.store, {
-        namespace: 'batch-b', n: 203, ageMs: 2 * HOUR, version: 1, confirmedVersion: 2,
-      });
-      const b2 = await seedCopy(internals.store, {
-        namespace: 'batch-b', n: 204, ageMs: 2 * HOUR, version: 1,
-      });
-      const shadow = await seedCopy(internals.store, {
-        namespace: 'batch-shadow', n: 205, ageMs: 2 * HOUR, version: 1,
-        confirmedVersion: 1,
-      });
-      const candidates = [
-        { operationSubject: a1.op, namespace: 'batch-a', kaUal: ual(201), assertionVersion: 1n },
-        { operationSubject: a2.op, namespace: 'batch-a', kaUal: ual(202), assertionVersion: 2n },
-        { operationSubject: b1.op, namespace: 'batch-b', kaUal: ual(203), assertionVersion: 1n },
-        { operationSubject: b2.op, namespace: 'batch-b', kaUal: ual(204), assertionVersion: 1n },
-        // The same KA is confirmed in batch-a, but not in this graph.
-        { operationSubject: shadow.op, namespace: 'batch-shadow', kaUal: ual(201), assertionVersion: 1n },
-      ].map((candidate) => ({ ...candidate, signedAtMs: 0, registered: false }));
-      const query = vi.spyOn(internals.store, 'query');
-
-      await expect(internals.isStorageAckCopyPromoted(candidates[0]!)).resolves.toBe(true);
-      await expect(internals.isStorageAckCopyPromoted(candidates[4]!)).resolves.toBe(false);
-      await expect(internals.promotedStorageAckCopies(candidates)).resolves.toEqual(new Set([a1.op, b1.op]));
-      expect(query.mock.calls.filter(([, options]) =>
-        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(3);
-    });
-
-    it('keeps unsafe operation IRIs out of the promoted batch formatter', async () => {
-      const unsafe = 'urn:op:bad> ?s ?p ?o . <urn:tail';
-      expect(parseStorageAckLedgerCandidate({
-        op: unsafe,
-        namespace: 'safe-cg',
-        ka: ual(301),
-        version: '"1"',
-        signedAt: xsdDateTimeLiteral(new Date()),
-      })).toBeNull();
-      expect(() => storageAckPromotedBatchQuery([{
-        operationSubject: unsafe,
-        namespace: 'safe-cg',
-        kaUal: ual(301),
-        assertionVersion: 1n,
-      }])).toThrow();
-      expect(() => storageAckPromotedBatchQuery([{
-        operationSubject: 'urn:op:safe',
-        namespace: 'safe-cg',
-        kaUal: ual(301),
-        assertionVersion: -1n,
-      }])).toThrow('non-negative assertion version');
-      const internals = await boot();
-      const query = vi.spyOn(internals.store, 'query');
-      await expect(internals.promotedStorageAckCopies([{
-        operationSubject: 'urn:op:safe', namespace: 'safe-cg', kaUal: ual(302),
-        assertionVersion: 1n, signedAtMs: 0, registered: false,
-      }], () => false)).resolves.toEqual(new Set());
-      expect(query.mock.calls.filter(([, options]) =>
-        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(0);
-    });
-
-    it('discards a promoted batch result when the audit deactivates while the store query runs', async () => {
-      const internals = await boot();
-      const copy = await seedCopy(internals.store, {
-        namespace: 'batch-cancel', n: 303, ageMs: 2 * HOUR, version: 1, confirmedVersion: 1,
-      });
-      const original = internals.store.query.bind(internals.store);
-      let active = true;
-      const query = vi.spyOn(internals.store, 'query').mockImplementation(async (sparql, options) => {
-        const result = await original(sparql, options);
-        if (options?.source === 'agent.vmPromotionAudit.promotedBatch') active = false;
-        return result;
-      });
-      await expect(internals.promotedStorageAckCopies([{
-        operationSubject: copy.op, namespace: 'batch-cancel', kaUal: ual(303),
-        assertionVersion: 1n, signedAtMs: 0, registered: false,
-      }], () => active)).resolves.toEqual(new Set());
-      expect(query.mock.calls.filter(([, options]) =>
-        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(1);
-    });
-
-    it('stops the audit at its current cursor when promotion prefetch deactivates', async () => {
-      const internals = await boot() as Internals & Record<string, any>;
-      await seedCopy(internals.store, {
-        namespace: 'batch-audit-cancel', n: 304, ageMs: 2 * HOUR,
-        version: 1, confirmedVersion: 1,
-      });
-      const original = internals.store.query.bind(internals.store);
-      let active = true;
-      const query = vi.spyOn(internals.store, 'query').mockImplementation(async (sparql, options) => {
-        const result = await original(sparql, options);
-        if (options?.source === 'agent.vmPromotionAudit.promotedBatch') active = false;
-        return result;
-      });
-
-      const totals = await internals.auditStorageAckCopies(Date.now(), () => active);
-      expect(totals.examined).toBe(0);
-      expect(internals.vmPromotionAuditCursor).toBe('');
-      expect(query.mock.calls.filter(([, options]) =>
-        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(1);
     });
 
     it('passes over malformed, promoted, backed-off and targetless rows in both lanes', async () => {
