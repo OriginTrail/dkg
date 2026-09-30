@@ -156,6 +156,24 @@ function suiteLog(node: DevnetNode, offset: number, cgId: string): string[] {
     .filter((line) => line.includes(cgId));
 }
 
+/**
+ * `dkg subscribe` right after a (re)start can meet an authority index that is
+ * still scanning the chain: the daemon answers a retryable 503 ("read authority
+ * is temporarily unavailable"). Retry until it takes, as its own message says.
+ */
+async function subscribeWithRetry(node: DevnetNode, cgId: string, budgetMs = 300_000): Promise<void> {
+  const deadline = Date.now() + budgetMs;
+  let last: CliResult | undefined;
+  do {
+    last = await runDkgCli(node, ['subscribe', cgId, '--save'], 240_000);
+    if (last.code === 0) return;
+    const retryable = /temporarily unavailable|retry once/i.test(`${last.stdout}\n${last.stderr}`);
+    if (!retryable) break;
+    await sleep(5_000);
+  } while (Date.now() < deadline);
+  expectOk(last!, `subscribe node${node.num}`);
+}
+
 async function restartNode(num: number, env: Record<string, string> = {}): Promise<void> {
   expectOk(await devnetSh(['restart-node', String(num)], env), `restart-node ${num}`);
 }
@@ -238,9 +256,7 @@ describe('VM exact recovery holder tier on a live devnet', () => {
     const { state, cgId, peerIds, logOffsets } = topology;
     const edge = state.nodes[EDGE_TIER_ON]!;
     const control = state.nodes[EDGE_CONTROL]!;
-    for (const node of [edge, control]) {
-      expectOk(await runDkgCli(node, ['subscribe', cgId, '--save'], 240_000), `subscribe node${node.num}`);
-    }
+    for (const node of [edge, control]) await subscribeWithRetry(node, cgId);
 
     const started = Date.now();
     let edgeCount = 0;
