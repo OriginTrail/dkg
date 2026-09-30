@@ -13,6 +13,9 @@
  *    a `stop()` that lands while the slow store is mid-write.
  *  - The same agent restarts with subscription admission reopened, and a fresh
  *    agent on the same stores rehydrates exactly the durable subscriptions.
+ *  - A core-host recording that a real chain read has paused when `stop()` begins
+ *    still writes its host row: recordings retire before subscription admission
+ *    closes, so the row is on disk when `stop()` returns.
  */
 import { describe, it, expect, afterAll, beforeAll, vi } from 'vitest';
 import { mkdir, mkdtemp, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
@@ -156,6 +159,7 @@ describe('E2E: subscription persistence across stop() and restart (real libp2p, 
   let curator: DKGAgent;
   let node: DKGAgent;
   let churner: DKGAgent;
+  let host: DKGAgent | undefined;
   let stores: Awaited<ReturnType<typeof createSlowStores>>;
   let churnStores: Awaited<ReturnType<typeof createSlowStores>>;
   let joinAddr: string;
@@ -165,6 +169,7 @@ describe('E2E: subscription persistence across stop() and restart (real libp2p, 
     try { await curator?.stop(); } catch { /* ignore */ }
     try { await node?.stop(); } catch { /* ignore */ }
     try { await churner?.stop(); } catch { /* ignore */ }
+    try { await host?.stop(); } catch { /* ignore */ }
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
@@ -362,6 +367,75 @@ describe('E2E: subscription persistence across stop() and restart (real libp2p, 
     for (const id of churnIds.filter((candidate) => !unsubscribed.has(candidate))) {
       expect(rows.get(id), `${id} survives the restart`).toMatchObject({ id, subscribed: true });
     }
+  }, 90_000);
+
+  it('stop() lets a core-host recording that is paused on a chain read write its host row first', async () => {
+    const hostedId = 'e2e-subpersist-core-host';
+    await curator.createContextGraph({ id: hostedId, name: 'Subscription Persist Core Host', description: '', accessPolicy: 0 });
+    const { onChainId } = await curator.registerContextGraph(hostedId);
+    expect(onChainId).toMatch(/^\d+$/);
+
+    const hostRoot = await mkdtemp(join(tmpdir(), 'dkg-e2e-subpersist-host-'));
+    tempDirs.push(hostRoot);
+    const hostStores = await createSlowStores(hostRoot);
+    host = await DKGAgent.create({
+      ...TEST_SNAPSHOT_CONFIG,
+      kaNumberAllocator: makeTestKaNumberAllocator(),
+      name: 'SubPersistCoreHost',
+      listenPort: 0,
+      skills: [],
+      chainAdapter: sharedChain,
+      nodeRole: 'edge',
+      contextGraphSubscriptionStore: hostStores.subscriptionStore,
+      contextGraphMembershipStore: hostStores.membershipStore,
+      chainConfig: makeSharedChainConfig(),
+    });
+    await host.start();
+
+    // Pause the recording on its access-policy read, the last step before its
+    // strict persist, and let the real chain answer once it is released.
+    const internals = host as any;
+    const realRead = internals.readCoreHostedPublicCgAccessPolicy.bind(host);
+    let readReached!: () => void;
+    const reached = new Promise<void>((resolve) => { readReached = resolve; });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    internals.readCoreHostedPublicCgAccessPolicy = async (id: string) => {
+      readReached();
+      await released;
+      return realRead(id);
+    };
+    const recording: Promise<string> = internals.awaitTrackedCoreHostRecording(
+      internals.recordCoreHostedPublicCg(onChainId, hostedId, { durable: true, nudge: false }),
+    );
+    await Promise.race([
+      reached,
+      sleep(30_000).then(() => { throw new Error('the recording never reached its policy read'); }),
+    ]);
+    expect(await hostStores.subscriptions.readAll(), 'nothing is durable while the recording is paused').toEqual([]);
+
+    const stopping = host.stop();
+    expect(
+      await pollUntil(async () => internals.coreHostRecordingsClosed === true, (closed) => closed, 10_000, 20),
+      'stop() fences new core-host recordings',
+    ).toBe(true);
+    await sleep(WRITE_DELAY_MS);
+    // stop() waits on the tracked recording, and the queue still takes its write.
+    expect(internals.contextGraphSubscriptionPersistence.status().closed).toBe(false);
+    release();
+    await stopping;
+
+    expect(await recording).toBe('recorded');
+    expect(hostStores.subscriptions.inFlight).toBe(0);
+    const rows = await hostStores.subscriptions.readAll();
+    expect(rows.find((row) => row.id === hostedId)).toMatchObject({
+      id: hostedId,
+      coreHosted: true,
+      onChainId,
+    });
+    expect(internals.contextGraphSubscriptionPersistence.status()).toEqual({
+      closed: true, lanes: 0, active: 0, pending: 0,
+    });
   }, 90_000);
 
   it('a fresh agent on the same stores rehydrates exactly the durable subscriptions', async () => {

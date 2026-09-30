@@ -488,6 +488,48 @@ describe('DKGAgent.stop() subscription persistence drain', () => {
     }
   });
 
+  it('lets a core-host recording persist its host row through the queue while stop() drains it', async () => {
+    const saved: string[] = [];
+    const seenAtDrain: Array<{ fenced: boolean; subscriptionClosed: boolean }> = [];
+    const agent: any = shutdownAgent({
+      drainCoreHostRecordings: vi.fn(async () => {
+        seenAtDrain.push({
+          fenced: agent.coreHostRecordingsClosed,
+          subscriptionClosed: agent.contextGraphSubscriptionPersistence.status().closed,
+        });
+        // The strict persist of a recording that was paused when stop() began.
+        await agent.enqueueContextGraphSubscriptionPersistWrite('hosted', async () => { saved.push('host-row'); });
+      }),
+    });
+
+    await agent.stop();
+
+    expect(seenAtDrain).toEqual([{ fenced: true, subscriptionClosed: false }]);
+    expect(saved).toEqual(['host-row']);
+    expect(agent.contextGraphSubscriptionPersistence.status().closed).toBe(true);
+    expect(agent.node.stop).toHaveBeenCalledOnce();
+  });
+
+  it('lets an in-flight promotion audit write through the queue before admission closes', async () => {
+    const auditGate = gate();
+    const saved: string[] = [];
+    const agent: any = shutdownAgent();
+    agent.vmPromotionAuditInFlight = (async () => {
+      await auditGate.promise;
+      await agent.enqueueContextGraphSubscriptionPersistWrite('audited', async () => { saved.push('audit-row'); });
+    })();
+
+    const stopping = agent.stop();
+    await flush();
+    expect(agent.node.stop).not.toHaveBeenCalled();
+    expect(agent.contextGraphSubscriptionPersistence.status().closed).toBe(false);
+    auditGate.open();
+    await stopping;
+
+    expect(saved).toEqual(['audit-row']);
+    expect(agent.contextGraphSubscriptionPersistence.status().closed).toBe(true);
+  });
+
   it('still stops a synthetic agent that has no subscription scheduler', async () => {
     const agent = shutdownAgent({ contextGraphSubscriptionPersistence: undefined });
     await expect(agent.stop()).resolves.toBeUndefined();
@@ -566,4 +608,123 @@ describe('DKGAgent restart', () => {
       await agent.stop().catch(() => {});
     }
   }, 30_000);
+});
+
+describe('DKGAgent.stop() core-host recording drain (real agent)', () => {
+  const ON_CHAIN_ID = '48';
+  const HOSTED_NAMESPACE = 'hosted-cg';
+
+  /**
+   * A started agent whose recording of `ON_CHAIN_ID` pauses in the access-policy
+   * read (`reached` opens once it is there, `policy.open()` lets it answer
+   * public), which is before its strict subscription-store persist.
+   */
+  async function pausedRecording() {
+    const saved = new Map<string, ContextGraphSubscriptionRecord>();
+    const chain = new MockChainAdapter() as MockChainAdapter & {
+      getContextGraphAccessPolicy?: (id: bigint) => Promise<number>;
+    };
+    const agent = await DKGAgent.create({
+      name: 'CoreHostRecordingDrain',
+      listenHost: '127.0.0.1',
+      chainAdapter: chain,
+      rfc64CatalogActivation: { enabled: false },
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...saved.values()],
+        save: async (record: ContextGraphSubscriptionRecord) => { saved.set(record.id, { ...record }); },
+        delete: async (id: string) => { saved.delete(id); },
+      } as any,
+    });
+    const policy = gate();
+    const reached = gate();
+    chain.getContextGraphAccessPolicy = async () => {
+      reached.open();
+      await policy.promise;
+      return 0;
+    };
+    (chain as { isContextGraphActiveOnChain?: unknown }).isContextGraphActiveOnChain = undefined;
+    await agent.start();
+    const internals = agent as any;
+    const recording: Promise<string> = internals.awaitTrackedCoreHostRecording(
+      internals.recordCoreHostedPublicCg(ON_CHAIN_ID, HOSTED_NAMESPACE, { durable: true, nudge: false }),
+    );
+    await withinMs(reached.promise, 5_000, 'the recording reaching its policy read');
+    return { agent, internals, saved, policy, recording };
+  }
+
+  it('finishes a tracked recording paused before its strict persist: the durable host row exists when stop() returns', async () => {
+    const { agent, internals, saved, policy, recording } = await pausedRecording();
+    try {
+      const stopping = agent.stop();
+      await vi.waitFor(() => expect(internals.coreHostRecordingsClosed).toBe(true));
+      await flush();
+      policy.open();
+      await withinMs(stopping, 20_000, 'stop()');
+
+      expect(await recording).toBe('recorded');
+      expect(saved.get(HOSTED_NAMESPACE)).toMatchObject({
+        id: HOSTED_NAMESPACE,
+        coreHosted: true,
+        onChainId: ON_CHAIN_ID,
+      });
+      expect(internals.contextGraphSubscriptionPersistence.status()).toEqual({
+        closed: true, lanes: 0, active: 0, pending: 0,
+      });
+    } finally {
+      policy.open();
+      await agent.stop().catch(() => {});
+    }
+  }, 40_000);
+
+  it('fences new recordings while draining, and keeps subscription admission open for the tracked one', async () => {
+    const { agent, internals, saved, policy, recording } = await pausedRecording();
+    try {
+      const stopping = agent.stop();
+      await vi.waitFor(() => expect(internals.coreHostRecordingsClosed).toBe(true));
+      await flush();
+
+      // stop() is parked on the tracked recording, which still owes a write.
+      expect(internals.coreHostRecordings.size).toBe(1);
+      expect(internals.contextGraphSubscriptionPersistence.status().closed).toBe(false);
+      await expect(internals.recordCoreHostedPublicCg('49', 'refused-cg', { durable: true, nudge: false }))
+        .resolves.toBe('closed');
+      expect(internals.coreHostRecordings.size).toBe(1);
+
+      policy.open();
+      await withinMs(stopping, 20_000, 'stop()');
+      await recording;
+      expect(saved.has('refused-cg')).toBe(false);
+      expect(saved.has(HOSTED_NAMESPACE)).toBe(true);
+    } finally {
+      policy.open();
+      await agent.stop().catch(() => {});
+    }
+  }, 40_000);
+
+  it('abandons a recording that never finishes after the bounded drain, and still closes subscription admission', async () => {
+    const originalTimeout = DKGAgentBase.CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS;
+    Object.defineProperty(DKGAgentBase, 'CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS', {
+      configurable: true,
+      value: 20,
+    });
+    const { agent, internals, saved, policy, recording } = await pausedRecording();
+    try {
+      await withinMs(agent.stop(), 20_000, 'stop() with a recording that never finishes');
+      expect(internals.contextGraphSubscriptionPersistence.status()).toEqual({
+        closed: true, lanes: 0, active: 0, pending: 0,
+      });
+
+      // The abandoned recording resumes into a newer generation and writes nothing.
+      policy.open();
+      expect(await recording).toBe('closed');
+      expect(saved.has(HOSTED_NAMESPACE)).toBe(false);
+    } finally {
+      policy.open();
+      Object.defineProperty(DKGAgentBase, 'CORE_HOST_RECORDING_DRAIN_TIMEOUT_MS', {
+        configurable: true,
+        value: originalTimeout,
+      });
+      await agent.stop().catch(() => {});
+    }
+  }, 40_000);
 });

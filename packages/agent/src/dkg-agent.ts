@@ -2950,28 +2950,13 @@ export class DKGAgent extends DKGAgentBase {
       );
     }
     this.contextGraphMembershipPersistenceShutdownBlocked = false;
-    // Subscription writes come from graph-scoped sync and reconciliation (cursor
-    // and binding snapshots) and from inside a join approval's membership write.
-    // Both have finished by here, so admission closes now: a run that stop()
-    // just waited for still had its write admitted, and only a late network
-    // callback finds the queue closed. The drain has the same bounded budget as
-    // membership's, and a timeout blocks store teardown until stop() is retried.
-    if (!await drainsWithin(
-      this.contextGraphSubscriptionPersistence?.closeAndDrain() ?? Promise.resolve(),
-      DKGAgentBase.CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS,
-    )) {
-      this.contextGraphSubscriptionPersistenceShutdownBlocked = true;
-      this.log.warn(
-        createOperationContext('system'),
-        `DKGAgent.stop: context-graph subscription persistence did not drain within `
-        + `${DKGAgentBase.CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS}ms; `
-        + `store teardown is blocked until stop() is retried`,
-      );
-      throw new ContextGraphSubscriptionPersistShutdownTimeoutError(
-        DKGAgentBase.CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS,
-      );
-    }
-    this.contextGraphSubscriptionPersistenceShutdownBlocked = false;
+    // A core-host recording persists its host row through the strict
+    // subscription queue, so it has to retire while that queue still admits
+    // writes. Fence new recordings first, then drain the tracked ones: a
+    // StorageACK gate or promotion-audit recording paused before its persist
+    // finishes here instead of being refused by a closed queue. The audit and
+    // promotion flights, which reach subscription state only through
+    // recordings, drain right behind them.
     this.coreHostRecordingsClosed = true;
     await this.drainCoreHostRecordings();
     // An in-flight ACK promotion audit stops at its next checkpoint once the
@@ -2991,6 +2976,29 @@ export class DKGAgent extends DKGAgentBase {
         }),
       ]).finally(() => { if (auditDrainTimer) clearTimeout(auditDrainTimer); });
     }
+    // Subscription writes come from graph-scoped sync and reconciliation (cursor
+    // and binding snapshots), from inside a join approval's membership write,
+    // and from core-host recordings. All three have finished by here, so
+    // admission closes now: a run that stop() just waited for still had its
+    // write admitted, and only a late network callback finds the queue closed.
+    // The drain has the same bounded budget as membership's, and a timeout
+    // blocks store teardown until stop() is retried.
+    if (!await drainsWithin(
+      this.contextGraphSubscriptionPersistence?.closeAndDrain() ?? Promise.resolve(),
+      DKGAgentBase.CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS,
+    )) {
+      this.contextGraphSubscriptionPersistenceShutdownBlocked = true;
+      this.log.warn(
+        createOperationContext('system'),
+        `DKGAgent.stop: context-graph subscription persistence did not drain within `
+        + `${DKGAgentBase.CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS}ms; `
+        + `store teardown is blocked until stop() is retried`,
+      );
+      throw new ContextGraphSubscriptionPersistShutdownTimeoutError(
+        DKGAgentBase.CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS,
+      );
+    }
+    this.contextGraphSubscriptionPersistenceShutdownBlocked = false;
     if (this.messengerOutboxTimer) {
       clearInterval(this.messengerOutboxTimer);
       this.messengerOutboxTimer = null;
