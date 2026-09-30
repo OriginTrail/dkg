@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
-import { TypedEventBus, createGraphKnowledgeAssetScope, createOperationContext, generateEd25519Keypair,
+import { Logger, TypedEventBus, createGraphKnowledgeAssetScope, createOperationContext, generateEd25519Keypair,
   knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/dkg-publisher.js';
@@ -523,6 +523,91 @@ describe('published snapshot cleanup: storage ACK copies of the published asset'
     // The bound is applied by the caller: the store is handed no abort signal.
     expect(update).toHaveBeenCalledOnce();
     expect((update.mock.calls[0] as unknown[])[1]).not.toHaveProperty('signal');
+  });
+
+  describe('an ACK update that outlives its client-side bound', () => {
+    const OWN_OPERATION = 'urn:dkg:share:snapshot-cleanup:share-41';
+    /**
+     * Holds the StorageACK update at the real store: the test's wrapper receives it, reports that it was
+     * issued, and forwards it to the real `update` only when the test releases it. Every other update runs at once.
+     */
+    const holdAckUpdate = (store: OxigraphStore) => {
+      const real = store.update!.bind(store);
+      let release!: () => void;
+      const gate = new Promise<void>(resolve => { release = resolve; });
+      let issue!: () => void;
+      const issued = new Promise<void>(resolve => { issue = resolve; });
+      let forwarded: Promise<void> | undefined;
+      vi.spyOn(store, 'update').mockImplementation((sparql, options) => {
+        if (!isAckUpdate(sparql)) return real(sparql, options);
+        issue();
+        forwarded = gate.then(() => real(sparql, options));
+        return forwarded;
+      });
+      return { issued, release, finished: () => forwarded! };
+    };
+    const seedCopies = async (f: Awaited<ReturnType<typeof fixture>>, ual: string, ids: string[]) => {
+      for (const id of ids) await f.store.insert(f.operationRows(ackSubject(id), `storage-ack-${id}`, ual, 1, digest));
+    };
+
+    it('removes nothing when it finally runs after the cleanup deleted the asset\'s rows, and the copies keep the file referenced', async () => {
+      // What this pins: the client-side bound cannot cancel the update (no abort signal reaches the store), so
+      // it may still run after clear() has moved on. By then the cleaned operations' rows, which are where the
+      // update reads its version boundary, are deleted, so it finds no boundary and removes nothing, by
+      // construction. The cost is the documented safe direction: the copies stay in the meta graph and keep
+      // the file referenced until the SWM TTL, instead of a late update deleting rows it has no authority over.
+      const f = await fixture();
+      const asset = await f.seed(41);
+      const copies = ['a', 'b'];
+      await seedCopies(f, asset.ual, copies);
+      await f.store.insert(f.operationRows(ackSubject('later'), 'storage-ack-later', asset.ual, 2, digest));
+      const held = holdAckUpdate(f.store);
+      const records: { level: string; message: string }[] = [];
+      Logger.setSink(record => { records.push({ level: record.level, message: record.message }); });
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const clearing = asset.clear();
+        await held.issued;
+        await vi.advanceTimersByTimeAsync(10_000);
+        await clearing;
+      } finally { vi.useRealTimers(); Logger.setSink(null); }
+      // The cleanup went on without the update: one warning, the SWM graph dropped, the asset's own rows gone.
+      const warnings = records.filter(record => record.level === 'warn');
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]!.message).toContain('Could not clear storage ACK copy metadata after publication: Storage ACK copy cleanup timed out');
+      expect(await f.store.countQuads(asset.swm)).toBe(0);
+      expect(await rowsOf(f, OWN_OPERATION)).toBe(0);
+      expect(await rowsOf(f, `${asset.ual}#dkg-swm-head`)).toBe(0);
+      for (const id of copies) expect(await rowsOf(f, ackSubject(id)), id).toBe(5);
+      // The store now runs the update it was handed before the bound passed.
+      held.release();
+      await held.finished();
+      for (const id of [...copies, 'later']) expect(await rowsOf(f, ackSubject(id)), id).toBe(5);
+      expect(await f.store.countQuads(asset.vm)).toBe(quads.length);
+      f.advance();
+      expect(await f.snapshots.collectGarbage()).toMatchObject({ referencedSnapshots: 1, deletedSnapshots: 0 });
+      await expect(stat(f.path)).resolves.toBeDefined();
+    });
+
+    it('removes the copies when the same update is released before the asset\'s rows are deleted', async () => {
+      const f = await fixture();
+      const asset = await f.seed(41);
+      const copies = ['a', 'b'];
+      await seedCopies(f, asset.ual, copies);
+      const held = holdAckUpdate(f.store);
+      const clearing = asset.clear();
+      await held.issued;
+      // Issued, not yet run: the asset's own rows (the boundary) and every copy are still there.
+      expect(await rowsOf(f, OWN_OPERATION)).toBeGreaterThan(0);
+      for (const id of copies) expect(await rowsOf(f, ackSubject(id)), id).toBe(5);
+      held.release();
+      await clearing;
+      for (const id of copies) expect(await rowsOf(f, ackSubject(id)), id).toBe(0);
+      expect(await rowsOf(f, OWN_OPERATION)).toBe(0);
+      f.advance();
+      expect(await f.snapshots.collectGarbage()).toMatchObject({ referencedSnapshots: 0, finalizedSnapshots: 1 });
+      await expect(stat(f.path)).rejects.toMatchObject({ code: 'ENOENT' });
+    });
   });
 
   it('removes the copies after the SWM graph is dropped and before the asset\'s own rows, which give the boundary', async () => {
