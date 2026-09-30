@@ -6,6 +6,9 @@
 export const INCOMING_COPY_ALLOWED_USERS = Object.freeze({
   canonicalizeRdfObjectTerm: Object.freeze([
     'packages/publisher/src/incoming-public-copy.ts',
+    // The package root re-exports the helper but does not call it. Keep the
+    // public facade explicit while retaining the executable-use boundary.
+    'packages/rdf-utils/src/index.ts',
     'packages/rdf-utils/src/rdf-object-term.ts',
   ]),
   acceptIncomingPublicQuads: Object.freeze([

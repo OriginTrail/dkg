@@ -1,8 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import {
+  canonicalizeSparqlTsvResultTerm,
   parseRdfLiteralTerm,
+  parseSparqlTsvHeaderVariable,
   parseSparqlTsvResultTerm,
   parseWritableRdfTerm,
+  SparqlTsvResultTermCanonicalizer,
 } from '../src/index.js';
 
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
@@ -147,6 +150,8 @@ describe('parseSparqlTsvResultTerm', () => {
     ['<urn:test:a>', '<urn:test:\\u0061>'],
   ])('normalizes optimized and fallback spellings identically', (fast, fallback) => {
     expect(parseSparqlTsvResultTerm(fast)).toEqual(parseSparqlTsvResultTerm(fallback));
+    expect(canonicalizeSparqlTsvResultTerm(fast))
+      .toEqual(canonicalizeSparqlTsvResultTerm(fallback));
   });
 
   it.each([
@@ -158,5 +163,42 @@ describe('parseSparqlTsvResultTerm', () => {
     '"x"^^<relative>',
   ])('rejects non-TSV/result-only spelling %j', (term) => {
     expect(parseSparqlTsvResultTerm(term)).toBeNull();
+    expect(canonicalizeSparqlTsvResultTerm(term)).toBeNull();
+  });
+});
+
+describe('parseSparqlTsvHeaderVariable', () => {
+  it.each([
+    ['?v', 'v'],
+    ['?9value', '9value'],
+    ['?café', 'café'],
+    ['?变量', '变量'],
+    ['?𐀀value', '𐀀value'],
+  ])('accepts complete SPARQL VARNAME %j', (cell, expected) => {
+    expect(parseSparqlTsvHeaderVariable(cell)).toBe(expected);
+  });
+
+  it.each(['', '?', '$v', '?bad-name', '?bad.name', '?bad value', '?bad\tvalue'])
+    ('rejects malformed TSV header cell %j', (cell) => {
+      expect(parseSparqlTsvHeaderVariable(cell)).toBeNull();
+    });
+});
+
+describe('SparqlTsvResultTermCanonicalizer', () => {
+  it('keeps a bounded per-column IRI validation cache without changing results', () => {
+    const canonicalizer = new SparqlTsvResultTermCanonicalizer(2, true);
+    expect(canonicalizer.canonicalize('<urn:test:a>', 0))
+      .toEqual({ kind: 'iri', value: 'urn:test:a' });
+    expect(canonicalizer.canonicalize('<urn:test:a>', 0))
+      .toEqual({ kind: 'iri', value: 'urn:test:a' });
+    expect(canonicalizer.canonicalize('"plain"', 1))
+      .toEqual({ kind: 'non-iri', value: '"plain"' });
+    expect(canonicalizer.canonicalize('<urn:test:%zz>', 0)).toBeNull();
+  });
+
+  it('uses the canonical validator directly when row caching is disabled', () => {
+    const canonicalizer = new SparqlTsvResultTermCanonicalizer(1, false);
+    expect(canonicalizer.canonicalize('<urn:test:b>', 0))
+      .toEqual({ kind: 'iri', value: 'urn:test:b' });
   });
 });

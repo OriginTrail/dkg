@@ -78,11 +78,23 @@ describe('SPARQL TSV SELECT decoding', () => {
   it.each([
     ['?v\t?v\n<urn:a>\t<urn:b>\n', 'must not contain duplicates'],
     ['v\n<urn:a>\n', 'must be a variable'],
+    ['$v\n<urn:a>\n', 'must be a variable'],
+    ['?bad-name\n<urn:a>\n', 'must be a variable'],
+    ['?bad.name\n<urn:a>\n', 'must be a variable'],
+    ['?bad value\n<urn:a>\n', 'must be a variable'],
     ['?a\t?b\n<urn:a>\n', 'has 1 columns; expected 2'],
     ['?v\nnot-an-rdf-term\n', 'is not a valid RDF term'],
   ])('rejects malformed endpoint output', (text, message) => {
     expect(() => decodeSparqlTsvSelectResult(text))
       .toThrow(message);
+  });
+
+  it('accepts legal Unicode SPARQL variable names', () => {
+    expect(decodeSparqlTsvSelectResult('?变量\n<urn:value>\n')).toEqual({
+      type: 'bindings',
+      variables: ['变量'],
+      bindings: [{ 变量: 'urn:value' }],
+    });
   });
 
   it('uses a stable typed error class', () => {

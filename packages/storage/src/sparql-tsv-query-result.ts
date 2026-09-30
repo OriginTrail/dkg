@@ -1,15 +1,10 @@
 import {
-  parseSparqlTsvResultTerm,
+  parseSparqlTsvHeaderVariable,
+  SparqlTsvResultTermCanonicalizer,
 } from '@origintrail-official/dkg-rdf-utils';
 import { SparqlSelectResultNormalizer } from './sparql-select-result-normalizer.js';
 import { SparqlResultsShapeError } from './sparql-results-shape-error.js';
 import type { SelectResult } from './triple-store.js';
-
-const SPARQL_TSV_RAW_CONTROL_RANGE =
-  `${String.fromCodePoint(0)}-${String.fromCodePoint(31)}${String.fromCodePoint(127)}`;
-const SPARQL_TSV_FAST_PLAIN_LITERAL = new RegExp(
-  `^"[^"\\\\${SPARQL_TSV_RAW_CONTROL_RANGE}]*"$`,
-);
 
 export class SparqlTsvResultsShapeError extends SparqlResultsShapeError {
   constructor(message: string) {
@@ -30,10 +25,11 @@ export function decodeSparqlTsvSelectResult(text: string): SelectResult {
   const header = lines[0]!;
   const cells = header === '' ? [] : header.split('\t');
   const variables = cells.map((cell, index) => {
-    if ((cell[0] !== '?' && cell[0] !== '$') || cell.length === 1) {
+    const variable = parseSparqlTsvHeaderVariable(cell);
+    if (variable === null) {
       malformed(`SPARQL TSV header column ${index} must be a variable`);
     }
-    return cell.slice(1);
+    return variable;
   });
   if (new Set(variables).size !== variables.length) {
     malformed('SPARQL TSV header variables must not contain duplicates');
@@ -42,6 +38,10 @@ export function decodeSparqlTsvSelectResult(text: string): SelectResult {
     variables.length,
     lines.length > 2,
     malformed,
+  );
+  const termCanonicalizer = new SparqlTsvResultTermCanonicalizer(
+    variables.length,
+    lines.length > 2,
   );
 
   const bindings: Array<Record<string, string>> = [];
@@ -64,6 +64,7 @@ export function decodeSparqlTsvSelectResult(text: string): SelectResult {
         variable,
         column,
         normalizer,
+        termCanonicalizer,
       );
       normalizer.set(binding, variable, value);
     }
@@ -78,23 +79,20 @@ function formatTsvTerm(
   variable: string,
   column: number,
   normalizer: SparqlSelectResultNormalizer,
+  termCanonicalizer: SparqlTsvResultTermCanonicalizer,
 ): string {
   const label = `SPARQL TSV binding ${rowIndex}.${variable}`;
-  // These two dominant Oxigraph encodings are transport optimizations only;
-  // the public rdf-utils parser always returns one semantic RDF-term model.
-  if (SPARQL_TSV_FAST_PLAIN_LITERAL.test(cell)) return cell;
-  if (
-    cell.charCodeAt(0) === 60
-    && cell.charCodeAt(cell.length - 1) === 62
-    && !cell.includes('\\')
-  ) {
-    return normalizer.formatIri(cell.slice(1, -1), column, label);
-  }
-  const decoded = parseSparqlTsvResultTerm(cell);
+  const decoded = termCanonicalizer.canonicalize(cell, column);
   if (decoded === null) {
     malformed(`${label} is not a valid RDF term`);
   }
-  return normalizer.format(decoded, column, label);
+  if (decoded.kind === 'iri') {
+    return normalizer.formatRfc3987Iri(decoded.value, column, label);
+  }
+  if (decoded.datatype !== undefined) {
+    normalizer.assertRfc3987DatatypeIri(decoded.datatype, column, label);
+  }
+  return decoded.value;
 }
 
 function malformed(message: string): never {
