@@ -185,12 +185,6 @@ describe('StorePriorityScheduler', () => {
         retryable: true,
         reason: 'queue_wait_timeout',
         priority,
-        activeAtTimeout: [{
-          priority,
-          operation: `${priority}.blocker`,
-          count: 1,
-          oldestAgeMs: expect.any(Number),
-        }],
       });
       expect(expiredStarted).toBe(false);
       expect(scheduler.snapshot[`${priority}Queued`]).toBe(0);

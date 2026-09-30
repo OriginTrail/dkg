@@ -43,20 +43,13 @@ describe('store scheduler busy diagnostics', () => {
     expect(isStoreSchedulerBusyError({ ...structural, storeOperation: 'unknown' })).toBe(false);
     expect(isStoreSchedulerBusyError({ ...structural, reason: undefined })).toBe(false);
     expect(isStoreSchedulerBusyError({ ...structural, priority: 'urgent' })).toBe(false);
-    const withActive = { ...structural, activeAtTimeout: [{
-      priority: 'background', operation: 'private-work', count: 1, oldestAgeMs: 42,
-    }] };
-    expect(isStoreSchedulerBusyError(withActive)).toBe(true);
-    expect(isStoreSchedulerBusyError({ ...withActive, activeAtTimeout: [{
-      priority: 'background', operation: 'private-work', count: -1, oldestAgeMs: 42,
-    }] })).toBe(false);
     expect(isStoreSchedulerBusyError({ ...structural, operation: undefined })).toBe(false);
     expect(isStoreSchedulerBusyError({ code: 'STORE_SCHEDULER_BUSY' })).toBe(false);
   });
 
   it('records only the three oldest active operations without exposing them in the error message', async () => {
     vi.useFakeTimers();
-    const warning = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const diagnosticSink = vi.fn();
     let now = 0;
     const releases: Array<() => void> = [];
     try {
@@ -69,6 +62,7 @@ describe('store scheduler busy diagnostics', () => {
         queueLimits: 1,
         queueWaitTimeoutMs: 20,
         now: () => now,
+        timeoutDiagnosticSink: diagnosticSink,
       });
       const blockers = ['oldest', 'second', 'third', 'newest'].map((operation) => {
         const task = scheduler.run('normal', operation, () => new Promise<void>((resolve) => {
@@ -87,19 +81,21 @@ describe('store scheduler busy diagnostics', () => {
       const error = await expiredOutcome;
       expect(isStoreSchedulerBusyError(error)).toBe(true);
       if (!isStoreSchedulerBusyError(error)) throw new Error('Expected scheduler busy error');
-      expect(error.activeAtTimeout?.map((active) => active.operation)).toEqual([
+      const diagnostic = diagnosticSink.mock.calls[0]?.[0];
+      expect(diagnostic.activeAtTimeout.map((active: { operation: string }) => active.operation)).toEqual([
         'oldest', 'second', 'third',
       ]);
-      expect(error.activeAtTimeout?.map((active) => active.oldestAgeMs)).toEqual([60, 50, 40]);
+      expect(diagnostic.activeAtTimeout.map((active: { oldestAgeMs: number }) => active.oldestAgeMs))
+        .toEqual([60, 50, 40]);
       expect(error.message).not.toContain('oldest');
-      expect(warning).toHaveBeenCalledWith('[store scheduler] queue wait timeout', expect.objectContaining({
-        activeAtTimeout: error.activeAtTimeout,
+      expect(error).not.toHaveProperty('activeAtTimeout');
+      expect(diagnosticSink).toHaveBeenCalledWith(expect.objectContaining({
+        waiting: { priority: 'normal', operation: 'waiting' },
       }));
       releases.forEach((release) => release());
       await Promise.all(blockers);
     } finally {
       releases.forEach((release) => release());
-      warning.mockRestore();
       vi.useRealTimers();
     }
   });
@@ -124,7 +120,7 @@ describe('store scheduler busy diagnostics', () => {
 
   it('still rejects and clears queue pressure when diagnostic logging throws', async () => {
     vi.useFakeTimers();
-    const warning = vi.spyOn(console, 'warn').mockImplementation(() => {
+    const diagnosticSink = vi.fn(() => {
       throw new Error('logger unavailable');
     });
     const scheduler = new StorePriorityScheduler({
@@ -134,6 +130,7 @@ describe('store scheduler busy diagnostics', () => {
       backgroundReservedSlots: 0,
       queueLimits: 1,
       queueWaitTimeoutMs: 20,
+      timeoutDiagnosticSink: diagnosticSink,
     });
     let release: (() => void) | undefined;
     const blocker = scheduler.run('normal', 'active.private-work', () => new Promise<void>((resolve) => {
@@ -152,7 +149,7 @@ describe('store scheduler busy diagnostics', () => {
         reason: 'queue_wait_timeout',
         outcome: 'not_started',
       });
-      expect(warning).toHaveBeenCalledTimes(1);
+      expect(diagnosticSink).toHaveBeenCalledTimes(1);
       expect(scheduler.snapshot.normalQueued).toBe(0);
       expect(scheduler.getBackpressureSnapshot().totals.queued).toBe(0);
       release?.();
@@ -161,7 +158,6 @@ describe('store scheduler busy diagnostics', () => {
     } finally {
       release?.();
       await blocker;
-      warning.mockRestore();
       vi.useRealTimers();
     }
   });
