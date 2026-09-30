@@ -1,11 +1,15 @@
-// Frozen old 10.0.20/150d1232ff request field allowlist and pipe parser.
-// Only method receiver/names and import paths are adapted for a fixture.
-import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
-import { SYNC_PAGE_SIZE } from '../../src/dkg-agent-constants.js';
-import { normalizeSyncPhase } from '../../src/dkg-agent-helpers.js';
+// Frozen 10.0.20 request parser from abfd785d3cf4da01147c3dbfea8d62dd0772150a.
+// Source: packages/agent/src/dkg-agent-cg-resolve.ts. Only method receivers,
+// names and imports are adapted. Phase normalization and the agents graph
+// constant are copied from that commit, not borrowed from the new parser.
 import type { SyncRequestEnvelope } from '../../src/dkg-agent-types.js';
-import { normalizeExactAssetUals } from '../../src/sync/exact-assets.js';
-import { normalizeByteBudgetPageHint, decodePipeSyncRequestTail } from './sync-pipe-tail-10.0.20.fixture.js';
+import { normalizeExactAssetUals } from './sync-exact-assets-10.0.20.fixture.js';
+import { SYNC_PAGE_SIZE, normalizeByteBudgetPageHint, decodePipeSyncRequestTail } from './sync-pipe-tail-10.0.20.fixture.js';
+const SYSTEM_CONTEXT_GRAPHS = { AGENTS: 'agents' } as const;
+function normalizeSyncPhase(value: unknown): 'data' | 'meta' | 'snapshot' | 'catalog' {
+  if (value === 'meta' || value === 'snapshot' || value === 'catalog') return value;
+  return 'data';
+}
 export function parseOldSyncRequest(data: Uint8Array): SyncRequestEnvelope {
     const text = new TextDecoder().decode(data).trim();
     if (text.startsWith('{')) {
@@ -71,4 +75,3 @@ export function parseOldPipeDelimitedSyncRequest(text: string): SyncRequestEnvel
       ...tail,
     };
   }
-

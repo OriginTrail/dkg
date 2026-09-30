@@ -1,13 +1,13 @@
-// Frozen old 10.0.20/150d1232ff parser; only import paths are adapted.
-import {
-  SYNC_BYTE_BUDGET_MAX_ROWS,
-  SYNC_BYTE_BUDGET_PAGE_MODE,
-  SYNC_PAGE_SIZE,
-} from '../../src/dkg-agent-constants.js';
+// Frozen 10.0.20 parser from abfd785d3cf4da01147c3dbfea8d62dd0772150a.
+// Source: packages/agent/src/sync/auth/pipe-request-tail.ts. Constants are
+// copied from that commit's dkg-agent-constants.ts; only imports are adapted.
+export const SYNC_PAGE_SIZE = 500;
+const SYNC_BYTE_BUDGET_MAX_ROWS = 8_192;
+const SYNC_BYTE_BUDGET_PAGE_MODE = 'byte-budget-v1' as const;
 import {
   decodeExactAssetUals,
   encodeExactAssetUals,
-} from '../../src/sync/exact-assets.js';
+} from './sync-exact-assets-10.0.20.fixture.js';
 
 export interface ByteBudgetPageHint {
   pageMode?: typeof SYNC_BYTE_BUDGET_PAGE_MODE;

@@ -21,6 +21,7 @@ import {
 } from '../src/sync/exact-assets.js';
 import { filterExactAssetDurablePayload } from '../src/sync/requester/exact-durable-fetch.js';
 import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
+import { parseOldSyncRequest } from './fixtures/sync-request-parser-10.0.20.fixture.js';
 import { serializeResponderRows } from '../src/sync/responder/graph-plan.js';
 import { createSyncResponderSnapshotBudget } from '../src/sync/responder/snapshot-budget.js';
 import { createBoundedExactAssetExportCache, EXACT_ASSET_EXPORT_MAX_STORE_BYTES } from '../src/sync/responder/exact-asset-export-cache.js';
@@ -313,15 +314,19 @@ describe('actual HTTP Blazegraph export boundary', () => {
   });
 });
 
-// Local certification uses an actually built, frozen 10.0.20 responder rather
-// than another implementation of its parser. CI can supply a baseline build
-// with this environment variable; the independent hostile suite above does
-// not depend on a neighbouring checkout.
+// CI always executes the historical 10.0.20 source fixture. A supplied frozen
+// build exercises the actual compiled responder additionally in the same
+// cases; its absence never disables compatibility coverage.
 const oldDist = process.env.DKG_SYNC_COMPAT_OLD_AGENT_DIST;
-describe.skipIf(!oldDist)('actual old20 parser compatibility', () => {
-  async function oldParser() {
-    const module = await import(/* @vite-ignore */ pathToFileURL(`${oldDist}/dkg-agent-cg-resolve.js`).href);
-    return Object.create(module.ContextGraphResolveMethods.prototype) as { parseSyncRequest(data: Uint8Array): Record<string, unknown> };
+describe('historical 10.0.20 parser compatibility', () => {
+  async function oldParsers() {
+    const parsers = [{ label: 'frozen 10.0.20 source', parseSyncRequest: parseOldSyncRequest }];
+    if (oldDist) {
+      const module = await import(/* @vite-ignore */ pathToFileURL(`${oldDist}/dkg-agent-cg-resolve.js`).href);
+      const parser = Object.create(module.ContextGraphResolveMethods.prototype) as { parseSyncRequest: typeof parseOldSyncRequest };
+      parsers.push({ label: 'supplied compiled 10.0.20 build', parseSyncRequest: parser.parseSyncRequest.bind(parser) });
+    }
+    return parsers;
   }
   it.each(['data', 'meta'] as const)('preserves exact public %s narrowing and ignores compression', async (phase) => {
     const wire = await buildSyncRequestEnvelope({
@@ -330,10 +335,12 @@ describe.skipIf(!oldDist)('actual old20 parser compatibility', () => {
       sinceBatchId: '42', assetUals: [UAL], needsAuth: false,
       computeSyncDigest: () => new Uint8Array(32), getIdentityId: async () => 0n,
     });
-    const parsed = (await oldParser()).parseSyncRequest(wire);
-    expect(parsed).toMatchObject({ contextGraphId: CG, offset: 17, limit: 500, phase,
-      assetUals: [UAL], syncSessionId: 'retained-session', sinceBatchId: '42' });
-    expect(parsed.responseEncoding).toBeUndefined();
+    for (const parser of await oldParsers()) {
+      const parsed = parser.parseSyncRequest(wire);
+      expect(parsed, parser.label).toMatchObject({ contextGraphId: CG, offset: 17, limit: 500, phase,
+        assetUals: [UAL], syncSessionId: 'retained-session', sinceBatchId: '42' });
+      expect(parsed.responseEncoding, parser.label).toBeUndefined();
+    }
   });
 
   it('keeps signed limit and old JSON authorization fields unchanged', async () => {
@@ -344,12 +351,14 @@ describe.skipIf(!oldDist)('actual old20 parser compatibility', () => {
       assetUals: [UAL], needsAuth: true, computeSyncDigest: digest, getIdentityId: async () => 1n,
       signMessage: async () => ({ r: new Uint8Array(32).fill(1), vs: new Uint8Array(32).fill(2) }),
     });
-    const parsed = (await oldParser()).parseSyncRequest(wire);
-    expect(parsed).toMatchObject({ contextGraphId: CG, offset: 17, limit: 500, phase: 'data',
-      targetPeerId: 'source', requesterPeerId: 'requester', requesterIdentityId: '1', assetUals: [UAL] });
-    expect(parsed.requesterSignatureR).toBeTruthy();
-    expect(parsed.requesterSignatureVS).toBeTruthy();
-    expect(parsed.responseEncoding).toBeUndefined();
+    for (const parser of await oldParsers()) {
+      const parsed = parser.parseSyncRequest(wire);
+      expect(parsed, parser.label).toMatchObject({ contextGraphId: CG, offset: 17, limit: 500, phase: 'data',
+        targetPeerId: 'source', requesterPeerId: 'requester', requesterIdentityId: '1', assetUals: [UAL] });
+      expect(parsed.requesterSignatureR, parser.label).toBeTruthy();
+      expect(parsed.requesterSignatureVS, parser.label).toBeTruthy();
+      expect(parsed.responseEncoding, parser.label).toBeUndefined();
+    }
     expect(digest.mock.calls[0]![2]).toBe(500);
   });
 });
