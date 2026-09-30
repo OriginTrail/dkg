@@ -13,8 +13,9 @@
  *      version `DashboardDB` ships, carries every protocol table and index the
  *      moved stores need, and there is no second protocol database next to it.
  *   2. The moved stores are live: the chain-event log that the chain adapter
- *      writes through `SqliteChainEventLogStore` is populated on the nodes
- *      that index the chain, and its cursor keeps advancing as the chain does.
+ *      writes through `SqliteChainEventLogStore` is populated on every node
+ *      (cores and edges index the chain), and its cursor keeps advancing as
+ *      the chain does.
  *   3. KA numbering is durable protocol state: publishing a Knowledge Asset
  *      allocates through `SqliteKaNumberStore` and the per-author counter in
  *      `node-ui.db` moves forward.
@@ -178,14 +179,14 @@ describe('node-ui.db keeps the protocol schema on every live node (same file, sa
   }
 });
 
-describe('the moved stores are live on nodes that index the chain', () => {
-  for (const num of CORE_NODES) {
-    it(`core node${num} has a populated chain-event log with a cursor at the chain head`, () => {
+describe('the moved stores are live on every node that indexes the chain', () => {
+  for (let num = 1; num <= NODE_COUNT; num++) {
+    it(`node${num} has a populated chain-event log with a consistent cursor`, () => {
       const handle = openReadOnly(state.nodes[num]!);
       const cursors = handle.prepare(
         `SELECT scope, revision, head_block, settled_block, deployment_block FROM chain_index_cursor`,
       ).all() as Array<{ scope: string; revision: number; head_block: number; settled_block: number; deployment_block: number }>;
-      expect(cursors.length, `core node${num}: no chain_index_cursor row`).toBeGreaterThan(0);
+      expect(cursors.length, `node${num}: no chain_index_cursor row`).toBeGreaterThan(0);
       for (const cursor of cursors) {
         expect(cursor.revision).toBeGreaterThan(0);
         expect(cursor.head_block).toBeGreaterThanOrEqual(cursor.deployment_block);
@@ -197,7 +198,16 @@ describe('the moved stores are live on nodes that index the chain', () => {
         handle,
         `SELECT COUNT(*) AS c FROM chain_events WHERE scope NOT IN (SELECT scope FROM chain_index_cursor)`,
       );
-      expect(orphaned, `core node${num}: chain events with no cursor`).toBe(0);
+      expect(orphaned, `node${num}: chain events with no cursor`).toBe(0);
+      expect(count(handle, `SELECT COUNT(*) AS c FROM chain_events`), `node${num}: empty chain_events`).toBeGreaterThan(0);
+      // The other chain stores write through the same handle: the poller's lane
+      // cursors (`SqliteChainEventCursorStore`) and the authority index
+      // (`SqliteContextGraphAuthorityIndexStore`).
+      expect(count(handle, `SELECT COUNT(*) AS c FROM runtime_cursors`), `node${num}: no runtime_cursors`).toBeGreaterThan(0);
+      expect(
+        count(handle, `SELECT COUNT(*) AS c FROM context_graph_authority_indexes`),
+        `node${num}: no authority index checkpoint`,
+      ).toBeGreaterThan(0);
     });
   }
 });
