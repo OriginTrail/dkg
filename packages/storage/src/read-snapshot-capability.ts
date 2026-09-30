@@ -8,19 +8,9 @@ export interface ReadSnapshotCapability {
 }
 
 export function asReadSnapshotCapability(store: TripleStore): ReadSnapshotCapability | null {
-  // A snapshot returns another read store. Traversing past a decorator would
-  // silently discard its query transformations (for example blob hydration).
-  // Every layer must explicitly compose a snapshot facade, or the caller must
-  // use the consistent single-query fallback.
-  let candidate: unknown = store;
-  const seen = new Set<unknown>();
-  for (let depth = 0; candidate && depth < 16; depth += 1) {
-    if (typeof candidate !== 'object' || seen.has(candidate)
-      || !('withReadSnapshot' in candidate)
-      || typeof candidate.withReadSnapshot !== 'function') return null;
-    seen.add(candidate);
-    if (!('innerStore' in candidate)) return store as unknown as ReadSnapshotCapability;
-    candidate = candidate.innerStore;
-  }
-  return null;
+  // Each decorator exposes this function only if it composes its inner read
+  // facade. Never inspect an inner store here or bypass outer transformations.
+  const candidate = store as TripleStore & Partial<ReadSnapshotCapability>;
+  return typeof candidate.withReadSnapshot === 'function'
+    ? candidate as ReadSnapshotCapability : null;
 }
