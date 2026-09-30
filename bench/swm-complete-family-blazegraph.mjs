@@ -12,7 +12,7 @@ import { BlazegraphStore } from '../packages/storage/dist/adapters/blazegraph.js
 import { GraphSetIndexStore } from '../packages/storage/dist/graph-set-index-store.js';
 import { loadSelectedSharedMemoryQuads } from '../packages/storage/dist/graph-manager.js';
 import { contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
-import { withSwmProbeSeed } from './swm-probe-seed.mjs';
+import { withSwmProbeSeed } from '../packages/storage/bench/swm-probe-seed.mjs';
 
 const url = process.env.BLAZEGRAPH_TEST_URL;
 if (!url) throw new Error('BLAZEGRAPH_TEST_URL is required');

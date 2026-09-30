@@ -1,5 +1,5 @@
 import { expect, it, vi } from 'vitest';
-import { withSwmProbeSeed } from '../../../bench/swm-probe-seed.mjs';
+import { withSwmProbeSeed } from '../bench/swm-probe-seed.mjs';
 
 it('deletes a remotely committed probe even when insert loses its response', async () => {
   const persisted = new Set<string>();
