@@ -4018,6 +4018,14 @@ export class FinalizationHandler {
     // reuse the memoized root only when the op's current content still hashes to the
     // same cheap digest; any content change flips the digest → full recompute → the
     // op is re-evaluated and re-stamped. No op can be stranded by a stale stamp.
+    // On snapshot-capable stores, bound this *legacy fallback* before reading
+    // every metadata row. An over-limit result is deferred whole: never scan a
+    // truncated operation set or promote from it. The stamped fast path above
+    // has already had its chance to verify an exact candidate.
+    const boundedLegacyScan = asReadSnapshotCapability(this.store) !== null;
+    const maxCandidateRows = boundedLegacyScan
+      ? Math.min(positiveIntegerEnv('DKG_LEGACY_SWM_MAX_FALLBACK_OP_ROWS', 512), Number.MAX_SAFE_INTEGER - 1)
+      : undefined;
     type OpMemo = { roots: string[]; memoRoot?: string; memoDigest?: string };
     const opsBySubject = new Map<string, OpMemo>();
     try {
@@ -4031,10 +4039,18 @@ export class FinalizationHandler {
             ?op <${DKG_NS}rootEntity> ?root .
             ${memoPatterns}
           }
-        }`,
+        }${maxCandidateRows === undefined ? '' : ` LIMIT ${maxCandidateRows + 1}`}`,
         { source: 'agent.finalization.swmSnapshotCandidates' },
       );
       if (result.type === 'bindings') {
+        if (maxCandidateRows !== undefined && result.bindings.length > maxCandidateRows) {
+          const now = Date.now();
+          if (now - this.lastLegacySwmDeferralWarningAt >= 60_000) {
+            this.lastLegacySwmDeferralWarningAt = now;
+            console.warn(`[swm-read] deferring legacy operation scan with >${maxCandidateRows} metadata rows to peer recovery`);
+          }
+          return null;
+        }
         for (const row of result.bindings) {
           const op = typeof row['op'] === 'string' ? row['op'].replace(/^<(.*)>$/, '$1') : '';
           const root = typeof row['root'] === 'string' ? row['root'].replace(/^<(.*)>$/, '$1') : '';
@@ -4059,7 +4075,7 @@ export class FinalizationHandler {
     // the background store slot for minutes. Leave that recovery pending for
     // peer fetch instead; matching stamped operations were tried above. The
     // operator can raise this bound for an isolated recovery run.
-    if (asReadSnapshotCapability(this.store)) {
+    if (boundedLegacyScan) {
       const graphLimit = positiveIntegerEnv('DKG_LEGACY_SWM_MAX_FALLBACK_GRAPHS', 512);
       const familyGraphs = await resolveSharedMemoryReadGraphs(
         this.store,
