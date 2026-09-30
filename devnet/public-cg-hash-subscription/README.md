@@ -209,7 +209,14 @@ together, and the mechanics under them are not:
   classification (continued, replaced, hash-keyed settled; anything else is a
   failure) decides which of the three a job is, once it has settled, and the test
   asserts what is true of that state and prints the decision. `catchup-jobs.test.ts`
-  and `daemon.test.ts` cover all three states without a devnet.
+  and `daemon.test.ts` cover all three states without a devnet. On a devnet, test 7
+  produces two of them: the hash-keyed settled job on the first run after a fresh
+  `devnet.sh start` (the edge is dialed, so nothing mints a job under the cleartext
+  id), and the replaced one on every later run (the already-connected path). The
+  forced catch-up and SWM scenarios produced neither in any run of this change
+  (their subscribe resolved the hash within the request, so their first job was
+  made under the cleartext id); for them the unit tests are the evidence that a
+  settled hash-keyed job is handled.
 - **Side-by-side scenarios** (`flows.ts`). The SWM test's two edges are scenario
   records (node, requested id, label) run through `runLabeledFlows`: all flows are
   awaited to their end even after one fails (so none keeps polling unobserved into
