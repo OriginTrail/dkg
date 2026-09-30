@@ -10,7 +10,9 @@ const PROTOCOL = '/test/late-handler/1.0.0';
 const refusal = () => Object.assign(new Error('could not negotiate'), { name: 'UnsupportedProtocolError' });
 
 // A fake host with its own peer, options and result types: the watcher infers them from it, exactly
-// as it does from a real libp2p node, and the tests call it through the declared signature.
+// as it does from a real libp2p node, and the tests call it through the declared signature. The type
+// surface is asserted in packages/core/type-tests/protocol-refusal.ts, which `tsc` runs; vitest
+// strips the types of this file, so nothing here is a type check.
 interface FakeDialOptions {
   readonly timeoutMs?: number;
 }
@@ -29,27 +31,6 @@ function hostThatRejectsWith(makeError: () => unknown): FakeHost {
 async function dial(host: FakeHost, protocols: string | string[]): Promise<unknown> {
   return host.dialProtocol('peer', protocols).then(() => 'resolved', (error: unknown) => error);
 }
-
-// Compile-time only: vitest strips types and never calls this. The watcher leaves the host's dial
-// signature as declared, so a wrong peer, options or result is an error at the call site. The
-// directives are checked by a type-aware pass over this file (an editor, or `tsc --noEmit` with
-// this file and the helper in `files`); no repository tsconfig includes `packages/core/test`.
-async function dialSignatureReachesTheCaller(host: FakeHost, protocols: string[]): Promise<void> {
-  watchProtocolRefusal(host, PROTOCOL, () => {});
-  const stream: string = await host.dialProtocol('peer', protocols, { timeoutMs: 1 });
-  // @ts-expect-error the peer is a string
-  await host.dialProtocol(42, protocols);
-  // @ts-expect-error the options' timeoutMs is a number
-  await host.dialProtocol('peer', protocols, { timeoutMs: 'soon' });
-  // @ts-expect-error the result is a string
-  const count: number = await host.dialProtocol('peer', protocols);
-  // @ts-expect-error a host without a dialProtocol is not watchable
-  watchProtocolRefusal({}, PROTOCOL, () => {});
-  // @ts-expect-error type arguments that disagree with the host's own
-  watchProtocolRefusal<number, FakeDialOptions, string>(host, PROTOCOL, () => {});
-  void [stream, count];
-}
-void dialSignatureReachesTheCaller;
 
 describe('watchProtocolRefusal', () => {
   it('runs the callback once, on the first refused dial of exactly the watched protocol, and rethrows', async () => {
