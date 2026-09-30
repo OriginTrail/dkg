@@ -94,4 +94,18 @@ describe('createBoundedKeyedLimiter', () => {
     now = 101;
     expect(keyed('op-4')).toBeGreaterThanOrEqual(0);
   });
+
+  it('does not start a per-key cooldown when the global window denies emission', () => {
+    let now = 0;
+    const keyed = createBoundedKeyedLimiter({
+      now: () => now, intervalMs: 100, windowMs: 100,
+      cacheMax: 2, maxEmitsPerWindow: 1,
+    });
+    expect(keyed('a')).toBe(0);
+    now = 99;
+    expect(keyed('b')).toBeUndefined();
+    now = 100;
+    expect(keyed('b')).toBe(1);
+    expect(keyed('b')).toBeUndefined();
+  });
 });
