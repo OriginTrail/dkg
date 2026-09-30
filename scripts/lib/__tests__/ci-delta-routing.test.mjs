@@ -473,6 +473,10 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   ]) {
     assert.ok(loadedBy.get(target)?.has(requirement), why);
   }
+  // The ABI sync route rests on a chain test that runs the script, not on the
+  // vendored-ABI test's hint that names it.
+  const syncTest = 'packages/chain/test/sync-chain-abis.unit.test.ts';
+  assert.ok(loadReferences(syncTest, fs.readFileSync(path.join(REPO_ROOT, syncTest), 'utf8')).paths.includes('scripts/sync-chain-abis.mjs'));
   const { missing, unexplained, computed } = loadClosureGaps(trace);
   assert.deepEqual(missing, [], 'a change to these files must select the lane or EVM scope that loads them');
   // A load the trace cannot follow fails closed until it is listed with the
