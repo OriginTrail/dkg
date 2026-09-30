@@ -117,7 +117,10 @@ removes those rows, only for the same asset at or below the version being
 cleaned up. The version boundary comes from its own lookup over the operations
 being cleaned up, and the copies below it are then read in pages until none is
 left, so the number of copies (and the order a store returns them in) does not
-change which are removed. They go in a single store update. A later version's
+change which are removed. At most 4,096 copies are read per asset and the
+whole lookup gets a 10 second budget; when either limit is reached the copies
+found so far are removed, the rest stay (and keep the file referenced), and a
+warning is logged. They go in a single store update. A later version's
 copy, another asset's copy and any other kind of operation keep counting as
 references. A failed lookup or update, or a store that cannot run an update,
 leaves the rows (and so the file) in place.

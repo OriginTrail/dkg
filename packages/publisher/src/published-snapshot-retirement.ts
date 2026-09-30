@@ -9,6 +9,8 @@ import {
 import { withClientDeadline, type WorkspaceSnapshotLifecycle } from './workspace-snapshot-lifecycle.js';
 
 const RETIREMENT_LOOKUP_TIMEOUT_MS = 2_000;
+/** The whole StorageACK copy plan (boundary query plus every page), not one round trip. */
+const STORAGE_ACK_COPY_PLAN_BUDGET_MS = 10_000;
 
 /** Schedule only at the durable publication boundary, before removing SWM refs. */
 export class PublishedSnapshotRetirement {
@@ -58,8 +60,8 @@ export class PublishedSnapshotRetirement {
       const plan = await planDischargedStorageAckCopies({
         query: sparql => withClientDeadline(this.store.query(sparql), RETIREMENT_LOOKUP_TIMEOUT_MS,
           'Storage ACK copy lookup timed out'),
-      }, { metaGraph, kaUal, cleanedOperations });
-      if (plan.truncated) warn(`Storage ACK copy cleanup reached its page limit; ${plan.operations.length} copies are planned for removal and any others stay`);
+      }, { metaGraph, kaUal, cleanedOperations }, { deadlineAt: Date.now() + STORAGE_ACK_COPY_PLAN_BUDGET_MS });
+      if (plan.truncated) warn(`Storage ACK copy cleanup reached its page or time limit; ${plan.operations.length} copies are planned for removal and any others stay`);
       return plan;
     } catch (error) {
       warn(`Could not look up storage ACK copy metadata for cleanup: ${error instanceof Error ? error.message : String(error)}`);

@@ -14,6 +14,10 @@
  *      finished the work; only then is it started again.
  *   4. The collector's saved resume position is persisted next to the snapshots.
  *
+ * Scenario order matters: the restart scenario (3) runs last on purpose. A node that restarts while
+ * the chain is not answering leaves its context-graph subscriptions dormant, so no scenario that
+ * needs shared-memory reads may come after it.
+ *
  * Preconditions:
  *   pnpm run build:packages && pnpm --dir packages/cli run build:prepared
  *   DEVNET_ENABLE_PUBLISHER=1 DEVNET_SNAPSHOT_GC_FINALIZED_CLEANUP=1 \

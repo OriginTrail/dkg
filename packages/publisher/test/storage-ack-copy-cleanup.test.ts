@@ -37,7 +37,7 @@ async function open(...rows: Quad[][]) {
   await store.insert(rows.flat());
   return store;
 }
-const plan = (store: Pick<OxigraphStore, 'query'>, cleaned: string[], limits?: { pageSize?: number; maxPages?: number }) =>
+const plan = (store: Pick<OxigraphStore, 'query'>, cleaned: string[], limits?: { pageSize?: number; maxPages?: number; deadlineAt?: number }) =>
   planDischargedStorageAckCopies(store, { metaGraph: META, kaUal: UAL, cleanedOperations: cleaned }, limits);
 const bindings = (rows: Array<Record<string, string>>): QueryResult => ({ type: 'bindings', bindings: rows });
 
@@ -61,7 +61,7 @@ describe('StorageACK copy plan', () => {
       operation('cleaned-a', 'share-a', UAL, 1), operation('cleaned-b', 'share-b', UAL, 3),
       ack('v1', UAL, 1), ack('v3', UAL, 3), ack('v4', UAL, 4), ack('elsewhere', OTHER_UAL, 1),
     );
-    expect((await plan(store, [subject('cleaned-a'), subject('cleaned-b')])).operations.sort())
+    expect([...(await plan(store, [subject('cleaned-a'), subject('cleaned-b')])).operations].sort())
       .toEqual([subject('v1'), subject('v3')]);
     // Only the lower cleaned operation: the boundary moves down with it.
     expect((await plan(store, [subject('cleaned-a')])).operations).toEqual([subject('v1')]);
@@ -106,6 +106,28 @@ describe('StorageACK copy plan', () => {
     expect(await plan(store, [subject('cleaned')], { pageSize: 2, maxPages: 2 })).toEqual({
       metaGraph: META, operations: ['a', 'b', 'c', 'd'].map(subject), truncated: true,
     });
+  });
+
+  it('stops reading pages once the time budget is spent and keeps what it has', async () => {
+    let clock = 1_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
+    const pages = [['a', 'b'], ['c', 'd'], ['e']].map(page => page.map(id => ({ operation: subject(id) })));
+    let served = 0;
+    const query = vi.fn(async (sparql: string) => {
+      if (!sparql.includes('ORDER BY')) return bindings([{ version: `"1"^^<${INTEGER}>` }]);
+      clock += 400; // every page costs 400 ms of the budget
+      return bindings(pages[served++] ?? []);
+    });
+    // The deadline falls between the second and third page: the third is never asked for.
+    const planned = await plan({ query }, [subject('cleaned')], { pageSize: 2, deadlineAt: 1_500 });
+    expect(planned).toEqual({ metaGraph: META, operations: ['a', 'b', 'c', 'd'].map(subject), truncated: true });
+    expect(query).toHaveBeenCalledTimes(1 + 2);
+    // A deadline that is already past reads no page at all.
+    query.mockClear();
+    served = 0;
+    expect(await plan({ query }, [subject('cleaned')], { pageSize: 2, deadlineAt: 0 }))
+      .toEqual({ metaGraph: META, operations: [], truncated: true });
+    expect(query).toHaveBeenCalledTimes(1);
   });
 
   it('stops when a store keeps answering the same full page', async () => {

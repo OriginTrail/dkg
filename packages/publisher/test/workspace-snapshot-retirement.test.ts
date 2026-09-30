@@ -513,6 +513,17 @@ describe('operation leases are an optional capability of the store', () => {
     expect(operationLease).toHaveBeenCalledOnce();
   });
 
+  it('treats an existence probe that throws as not present, so reuse fetches again instead of failing the caller', async () => {
+    const acquireExisting = vi.fn(async (): Promise<(() => void) | undefined> => {
+      throw Object.assign(new Error('too many open files'), { code: 'EMFILE' });
+    });
+    const store = customStore(lifecycleOf({ acquireExisting, operationLease: vi.fn(async () => () => {}) }));
+    await withSnapshotScope(store, async snapshots => {
+      await expect(snapshots!.retainExisting(digest)).resolves.toBe(false);
+    });
+    expect(acquireExisting).toHaveBeenCalledExactlyOnceWith(digest);
+  });
+
   it('lets a store without a lifecycle own reuse', async () => {
     await withSnapshotScope(customStore(undefined), async snapshots => {
       expect(await snapshots!.retainExisting(digest)).toBe(true);

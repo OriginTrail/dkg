@@ -168,7 +168,14 @@ export class WorkspaceSnapshotScope implements CompleteSnapshotIO {
     // lease can still have lost the file (for example to pressure GC), and reuse must then fetch it again.
     const lifecycle = this.store.lifecycle;
     if (!lifecycle) return true; // A custom I/O store without a lifecycle owns its retention policy.
-    const existing = await lifecycle.acquireExisting(ref);
+    let existing: (() => void) | undefined;
+    try {
+      existing = await lifecycle.acquireExisting(ref);
+    } catch {
+      // A probe that cannot read the file (EMFILE, EACCES, EIO, a gate failure) counts as "not present":
+      // reuse then takes the normal fetch path instead of aborting the whole pass and losing its coverage record.
+      return false;
+    }
     if (!existing) return false;
     existing();
     return true;

@@ -492,7 +492,7 @@ describe('published snapshot cleanup: storage ACK copies of the published asset'
     expect(plan.truncated).toBe(true);
     expect(plan.operations).toHaveLength(64 * 64);
     expect(warn).toHaveBeenCalledExactlyOnceWith(
-      'Storage ACK copy cleanup reached its page limit; 4096 copies are planned for removal and any others stay');
+      'Storage ACK copy cleanup reached its page or time limit; 4096 copies are planned for removal and any others stay');
   });
 
   it('plans nothing when a later page fails, even though the boundary was found', async () => {

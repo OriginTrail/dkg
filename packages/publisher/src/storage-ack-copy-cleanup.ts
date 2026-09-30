@@ -38,13 +38,18 @@ export interface DischargedStorageAckCopies {
   readonly metaGraph: string;
   /** Operation subjects (one per copy) in the meta graph. */
   readonly operations: readonly string[];
-  /** The page cap was reached: any copies beyond it stay in place. */
+  /** The page cap or the time budget was reached: any copies beyond it stay in place. */
   readonly truncated: boolean;
 }
 
 export interface StorageAckCopyPlanLimits {
   readonly pageSize?: number;
   readonly maxPages?: number;
+  /**
+   * Epoch milliseconds after which no further page is read. Each store round trip is bounded by
+   * its caller; this bounds the whole plan (one boundary query plus up to `maxPages` pages).
+   */
+  readonly deadlineAt?: number;
 }
 
 export function noDischargedStorageAckCopies(metaGraph: string): DischargedStorageAckCopies {
@@ -131,6 +136,8 @@ export async function planDischargedStorageAckCopies(
   const operations = new Set<string>();
   let after = '';
   for (let page = 0; page < maxPages; page += 1) {
+    // Out of time: plan what was found so far and leave the rest referenced (the safe direction).
+    if (limits.deadlineAt !== undefined && Date.now() >= limits.deadlineAt) break;
     const result = await store.query(storageAckDischargedCopiesPageQuery({
       metaGraph, kaUal, maxVersion, after, limit: pageSize,
     }));
