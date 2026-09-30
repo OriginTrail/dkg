@@ -12,6 +12,7 @@ import { BlazegraphStore } from '../packages/storage/dist/adapters/blazegraph.js
 import { GraphSetIndexStore } from '../packages/storage/dist/graph-set-index-store.js';
 import { loadSelectedSharedMemoryQuads } from '../packages/storage/dist/graph-manager.js';
 import { contextGraphSharedMemoryUri } from '@origintrail-official/dkg-core';
+import { withSwmProbeSeed } from './swm-probe-seed.mjs';
 
 const url = process.env.BLAZEGRAPH_TEST_URL;
 if (!url) throw new Error('BLAZEGRAPH_TEST_URL is required');
@@ -48,11 +49,8 @@ quads.push(
   },
 );
 
-let seeded = false;
-try {
-  const seedAt = performance.now();
-  await store.insert(quads);
-  seeded = true;
+const seedAt = performance.now();
+await withSwmProbeSeed(store, quads, async () => {
   const seededMs = Math.round(performance.now() - seedAt);
   const indexed = new GraphSetIndexStore(store);
   const readAt = performance.now();
@@ -65,10 +63,4 @@ try {
   const readMs = Math.round(performance.now() - readAt);
   if (selected.length !== 2) throw new Error(`Expected 2 unique quads, got ${selected.length}`);
   process.stdout.write(`${JSON.stringify({ graphs: count, roots: rootCount, seededMs, readMs, resultQuads: selected.length })}\n`);
-} finally {
-  try {
-    if (seeded) await store.delete(quads);
-  } finally {
-    await store.close();
-  }
-}
+});
