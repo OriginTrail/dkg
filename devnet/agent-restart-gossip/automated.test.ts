@@ -20,9 +20,11 @@
  *     in-process agent restart, so an SDK `DKGAgent` joins the devnet as an
  *     edge (real libp2p, real Hardhat chain adapter, real core daemons). It
  *     subscribes, receives a core's share over gossip, is stopped and started
- *     again on the SAME instance, and must receive the next share over gossip.
- *     Automatic catch-up is off for the SDK agent, so a write that arrives
- *     after its one explicit metadata sync can only have come over gossip.
+ *     again on the SAME instance, and must receive the next share live, with
+ *     no subscribe() call. Automatic catch-up is off for the SDK agent, so a
+ *     write that arrives after its one explicit metadata sync was delivered
+ *     live (a gossip message on the SWM topic, asserted, and the fan-out to the
+ *     topic's subscribers, which needs the same topic subscription).
  *     This is the check that fails without the fix.
  *
  * Run (see README.md):

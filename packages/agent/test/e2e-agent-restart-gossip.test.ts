@@ -191,9 +191,11 @@ describe('Agent restart gossip E2E (2 nodes)', () => {
     );
     expect(nodeB.gossip.subscribedTopics).toContain(swmTopic);
     receivedOnB.length = 0;
-    // Every shared-memory message funnels into this handler singleton. B runs
-    // no catch-up sync, so an applied write is proof that a live delivery
-    // reached B's restarted node.
+    // Every shared-memory message funnels into this handler singleton, whether
+    // it came over gossip or over the point-to-point fan-out to the topic's
+    // subscribers. B runs no catch-up sync, so an applied write proves a live
+    // delivery reached the restarted node; the gossip event and the handler on
+    // the new manager, asserted below, pin the gossip path itself.
     const handleSpy = vi.spyOn(
       (nodeB as unknown as SharedMemoryHandlerSource).getOrCreateSharedMemoryHandler(),
       'handle',
@@ -206,8 +208,9 @@ describe('Agent restart gossip E2E (2 nodes)', () => {
       (result) => result.bindings.length > 0,
     );
     expect(String(rows.bindings[0]['name'])).toMatch(/After restart/);
-    // The write reached the restarted node's own gossip layer, from A, and the
-    // shared-memory handler applied it. The topic handler is on the NEW manager.
+    // A gossip message on the topic reached the restarted node, from A, its
+    // shared-memory handler applied the write, and the topic handler sits on
+    // the NEW manager.
     expect(receivedOnB.some((m) => m.topic === swmTopic && m.from === nodeA.peerId)).toBe(true);
     const outcomes = await Promise.all(
       handleSpy.mock.calls
