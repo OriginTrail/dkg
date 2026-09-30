@@ -8,11 +8,12 @@
  * has aborted the fetch it cannot tell a finished evaluation from a running
  * one: a streamed SELECT stops when it next writes to the closed socket, but a
  * blocking evaluation, an aggregate or an ORDER BY, sends nothing until it is
- * done and keeps evaluating.) The store now leaves a request the server has not
- * answered yet running, and withdraws the recovery when it visibly finishes.
- * From the first byte of the answer on, though, it never reads or buffers an
- * answer for a caller who has left: a STREAMED read would otherwise keep the
- * server producing, and the client buffering, for the whole client deadline.
+ * done and keeps evaluating.) The store now leaves a request running when its
+ * caller leaves, and withdraws the recovery when the server visibly finishes.
+ * From the first byte of the answer on, though, it reads and buffers nothing
+ * beyond a small budget for a caller who has left: a STREAMED read would
+ * otherwise keep the server producing, and the client buffering, for the whole
+ * client deadline.
  *
  * This suite runs the production wiring end to end: `startManagedOxigraph` spawns
  * a real, checksum-pinned Oxigraph binary and hands back the managed store
@@ -21,10 +22,13 @@
  * run for real, and a restart is a real SIGKILL and respawn. It asserts:
  *   - a read the caller abandons mid-flight, which the server then finishes
  *     inside the client deadline, does NOT restart the server;
- *   - a STREAMED read the caller abandons is not read on (the bytes the client
- *     reads after the caller left stay within a small bound, and the server
- *     stops producing), whether the caller leaves while the answer streams or
- *     before it has started;
+ *   - a STREAMED read the caller abandons is not read on beyond a small budget
+ *     (the bytes the client reads after the caller left stay within a small
+ *     bound, and the server stops producing), whether the caller leaves while
+ *     the answer streams or before it has started;
+ *   - a streamed read whose caller leaves mid-body, and whose answer is then
+ *     short but slow to finish (the server is silent for seconds, so it cannot
+ *     notice a closed connection), does NOT restart the server either;
  *   - a read that genuinely overruns the client deadline still restarts the
  *     server, whether or not its caller had already given up, and the store
  *     recovers.
@@ -54,10 +58,9 @@ const ABORT_AFTER_MS = 60;
 const TRIPLES = 400;
 const RESTART_LINE = 'terminating server for supervised recovery';
 // A caller that has left may cost the client at most the store's drain budget
-// (1 MiB, plus a chunk) of an answer that starts after it left, and nothing of
-// one it left mid-body. This bound is four times the budget: generous enough
-// that it never flakes, while an abandoned answer that is read on runs to tens
-// of MB within a second (about 35 MB/s).
+// (1 MiB, plus a chunk) of what remains of its answer. This bound is four times
+// the budget: generous enough that it never flakes, while an abandoned answer
+// that is read on runs to tens of MB within a second (about 35 MB/s).
 const MAX_READ_AFTER_ABANDON_BYTES = 4 * 1024 * 1024;
 // A streamed evaluation that is still being produced burns about 0.7 CPU-seconds
 // per second; an idle server burns none. The quiet window starts a second after
@@ -98,6 +101,26 @@ function sortedCrossProduct(limit: number, arms: number): string {
   return `${streamedCrossProduct(limit, arms)} ORDER BY ?a`;
 }
 
+/**
+ * A streamed answer that starts at once and then goes quiet: a fast branch
+ * returns 3600 rows (about 320 KB, enough for the server to send its headers and
+ * the first chunks) and a slow branch scans a `limit`^3 cross product for rows
+ * that never match, so the answer ends only when that scan does. Once the first
+ * rows are out the server writes nothing, and cannot notice a closed connection.
+ */
+function slowTailQuery(limit: number): string {
+  const arm = (v: string, i: number, n: number) =>
+    `{ SELECT ?${v} WHERE { GRAPH ?g${i} { ?${v} ?p${i} ?o${i} } } LIMIT ${n} }`;
+  return `SELECT ?x ?y WHERE {
+    { SELECT ?x ?y WHERE { ${arm('x', 5, 60)} ${arm('y', 6, 60)} } }
+    UNION
+    { SELECT (?a AS ?x) (?b AS ?y) WHERE {
+      ${arm('a', 1, limit)} ${arm('b', 2, limit)} ${arm('c', 3, limit)}
+      FILTER(STRLEN(STR(?a)) + STRLEN(STR(?b)) + STRLEN(STR(?c)) < 3)
+    } }
+  }`;
+}
+
 async function timedQuery(sparql: string): Promise<number> {
   const started = Date.now();
   await store.query(sparql);
@@ -113,6 +136,42 @@ async function calibrate(minMs: number): Promise<number> {
     limit = Math.min(TRIPLES, Math.ceil(limit * 1.4));
   }
   throw new Error('no cross-product size took long enough; the store is too small');
+}
+
+/**
+ * A full read of the slow-tail query through the store: when its first byte
+ * arrived, and how long the whole answer took.
+ */
+async function timeSlowTail(limit: number): Promise<{ firstByteMs: number; totalMs: number }> {
+  const metered = meterQueryResponses();
+  const started = Date.now();
+  let firstByteMs = Number.POSITIVE_INFINITY;
+  const poll = setInterval(() => {
+    if (firstByteMs === Number.POSITIVE_INFINITY && metered.bytes() > 0) firstByteMs = Date.now() - started;
+  }, 5);
+  try {
+    await store.query(slowTailQuery(limit));
+  } finally {
+    clearInterval(poll);
+    metered.stop();
+  }
+  return { firstByteMs, totalMs: Date.now() - started };
+}
+
+/**
+ * The smallest slow-tail query whose first rows arrive at once and whose answer
+ * then takes 1.2 s or more (and still well inside the client deadline). Oxigraph
+ * plans a UNION differently from one size to the next, and for some sizes runs
+ * the slow branch first, so it sends nothing until the end: those sizes do not
+ * have the shape this test needs, and are skipped.
+ */
+async function calibrateSlowTail(): Promise<number> {
+  for (let limit = 60; limit <= TRIPLES; limit += 2) {
+    const { firstByteMs, totalMs } = await timeSlowTail(limit);
+    if (totalMs > CLIENT_TIMEOUT_MS / 2) break;
+    if (firstByteMs < 300 && totalMs >= 1_200) return limit;
+  }
+  throw new Error('no slow-tail size answered early and took long enough on this machine');
 }
 
 /** Start `sparql`, disconnect the caller `ABORT_AFTER_MS` in, and return its outcome. */
@@ -269,7 +328,7 @@ describe('managed oxigraph-server: a caller that abandons a dispatched read', ()
       .resolves.toMatchObject({ type: 'boolean', value: true });
   }, 90_000);
 
-  it('reads no more of a STREAMED answer once its caller has left it mid-body, and the server stops', async () => {
+  it('reads only a bounded part of a STREAMED answer once its caller has left it mid-body, and the server stops', async () => {
     expect(await waitForCondition(() => !handle.getRecoveryState().recovering, 60_000)).toBe(true);
     const restartsBefore = restarts();
     const metered = meterQueryResponses();
@@ -294,7 +353,7 @@ describe('managed oxigraph-server: a caller that abandons a dispatched read', ()
       await sleep(CPU_WINDOW_MS);
       const cpuAfter = cpuSeconds(serverPid);
 
-      // Deterministic: nothing is read, let alone buffered, for a caller who left.
+      // Deterministic: at most the drain budget is read (and none of it kept) for a caller who left.
       expect(metered.bytes() - readWhenLeft).toBeLessThan(MAX_READ_AFTER_ABANDON_BYTES);
       // And the server stopped writing to the closed connection.
       if (cpuBefore !== undefined && cpuAfter !== undefined) {
@@ -330,6 +389,42 @@ describe('managed oxigraph-server: a caller that abandons a dispatched read', ()
       await sleep(2_000);
       expect(metered.bytes()).toBeLessThan(MAX_READ_AFTER_ABANDON_BYTES);
       await settleCancelledRead(dispatchedAt, restartsBefore);
+    } finally { metered.stop(); }
+  }, 120_000);
+
+  it('does not restart a healthy server when the caller leaves a streamed read mid-body and the rest is short but slow', async () => {
+    expect(await waitForCondition(() => !handle.getRecoveryState().recovering, 60_000)).toBe(true);
+    // The premise: the answer starts at once, the tail is slow (the read is
+    // still running when the caller leaves) and still finishes well inside the
+    // client deadline.
+    const limit = await calibrateSlowTail();
+
+    const restartsBefore = restarts();
+    const spawnsBefore = spawnedPids.length;
+    const linesBefore = logLines.length;
+    const metered = meterQueryResponses();
+    try {
+      const caller = new AbortController();
+      const outcome = store.query(slowTailQuery(limit), { signal: caller.signal }).then(
+        () => new Error('the read finished before its caller left'),
+        (error: unknown) => error,
+      );
+      // The answer is under way: the server has sent headers and the first rows,
+      // and is now silent while it scans for the rest.
+      expect(await waitForCondition(() => metered.bytes() > 64 * 1024, 30_000)).toBe(true);
+      caller.abort(new Error('caller budget exhausted'));
+      expect(await outcome).toMatchObject({ message: 'caller budget exhausted' });
+      const readWhenLeft = metered.bytes();
+
+      // Past the client deadline a retained recovery would have fired.
+      await sleep(CLIENT_TIMEOUT_MS + 3_000);
+      expect(restarts()).toBe(restartsBefore);
+      expect(spawnedPids).toHaveLength(spawnsBefore);
+      expect(logLines.slice(linesBefore).some((line) => line.includes(RESTART_LINE))).toBe(false);
+      expect(handle.getRecoveryState().recovering).toBe(false);
+      // The rest of the answer was small: it was read out, and none of it kept.
+      expect(metered.bytes() - readWhenLeft).toBeLessThan(MAX_READ_AFTER_ABANDON_BYTES);
+      await expect(storeAnswers()).resolves.toBe(true);
     } finally { metered.stop(); }
   }, 120_000);
 

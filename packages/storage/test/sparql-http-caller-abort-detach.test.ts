@@ -19,15 +19,15 @@ import { createRfc64SharedProjectionTestFixture } from './helpers/rfc64-shared-p
  * blocking evaluation (an aggregate, an ORDER BY) sends nothing until it is done
  * and keeps evaluating, and once the fetch is aborted the client can no longer
  * see it finish. So the managed store leaves a dispatched request running, under
- * the store close and client deadline signals alone, only until the server's
- * answer starts to arrive, and withdraws the retained recovery when the server
- * visibly finishes. From the first byte on nothing is buffered for a caller who
- * left: an answer that starts after the caller left is read and discarded up to
- * ABANDONED_READ_DRAIN_BUDGET_BYTES (a short one shows the server finished, a
- * longer one is cancelled), and a caller that leaves while its answer is being
- * read cancels the request. A request that is cancelled is not seen to finish,
- * so its recovery stays retained; one that outlives the client deadline is
- * still reclaimed by a restart.
+ * the store close and client deadline signals alone, and withdraws the retained
+ * recovery when the server visibly finishes. From the first byte of the answer
+ * on, though, nothing is buffered for a caller who left: what remains of the
+ * answer (or all of it, when it starts after the caller left) is read and
+ * discarded up to ABANDONED_READ_DRAIN_BUDGET_BYTES. A short answer ends inside
+ * that budget and shows the server finished; a longer one is streaming, so it is
+ * cancelled. A cancelled or failed answer shows nothing, so its recovery stays
+ * retained; one that outlives the client deadline is still reclaimed by a
+ * restart.
  */
 
 const TIMEOUT_MS = 1_000;
@@ -160,6 +160,8 @@ function streamingAnswer(
     readonly chunkBytes?: number;
     readonly stallAfterBytes?: number;
     readonly init?: ResponseInit;
+    /** A transport whose body does not react to the fetch's abort (its cleanup takes a while). */
+    readonly ignoreAbort?: boolean;
   },
 ) {
   const { totalBytes, chunkBytes = CHUNK_BYTES, stallAfterBytes = Number.POSITIVE_INFINITY } = options;
@@ -172,10 +174,12 @@ function streamingAnswer(
   const stream = new ReadableStream<Uint8Array>({
     start(c) {
       controller = c;
-      fetch.signal.addEventListener('abort', () => {
-        over = true;
-        c.error(fetch.signal.reason);
-      }, { once: true });
+      if (options.ignoreAbort !== true) {
+        fetch.signal.addEventListener('abort', () => {
+          over = true;
+          c.error(fetch.signal.reason);
+        }, { once: true });
+      }
     },
     async pull(c) {
       if (pulled >= stallAfterBytes) await gate;
@@ -230,13 +234,14 @@ describe('managed read whose caller aborts after dispatch', () => {
 
   // A caller that leaves while its answer is being read must not leave the client
   // reading on: a streamed answer keeps the server producing, and the client
-  // buffering, for the whole client deadline. The request is cancelled instead,
-  // and since a cancelled stream does not show the server stopped (it may be
-  // stalled between writes), its recovery stays retained, as it always did.
+  // buffering, for the whole client deadline. What remains of the answer is read
+  // and discarded up to the drain budget, then cancelled; a cancelled answer does
+  // not show the server stopped (it may be stalled between writes), so its
+  // recovery stays retained, as it always did.
   it.each([
     ['SELECT ?s WHERE { ?s ?p ?o }', 'query'],
     ['CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }', 'construct'],
-  ] as const)('cancels the request and reads no further when the caller leaves while a %s answer is streaming', async (sparql, operation) => {
+  ] as const)('reads at most the drain budget of a long %s answer once its caller left it mid-body, then cancels it', async (sparql, operation) => {
     const { store, recover, dispatch, abandon } = harness();
     try {
       const read = await dispatch(sparql);
@@ -244,19 +249,21 @@ describe('managed read whose caller aborts after dispatch', () => {
       const answer = streamingAnswer(read.fetch, { totalBytes: RUNAWAY_BYTES, stallAfterBytes: 4 * CHUNK_BYTES });
       await vi.advanceTimersByTimeAsync(10);
       expect(answer.pulled()).toBe(4 * CHUNK_BYTES);
-      expect(read.fetch.signal.aborted).toBe(false);
 
       await abandon(read);
-      // The caller was answered at once, and its request is cancelled.
-      expect(read.fetch.signal.aborted).toBe(true);
+      // The caller was answered at once; the request itself is left running.
+      expect(read.fetch.signal.aborted).toBe(false);
 
-      // The server writes on; nothing is read, let alone buffered.
+      // The server writes on: a bounded part is read, and none of it is kept.
       answer.resume();
       await vi.advanceTimersByTimeAsync(0);
-      expect(answer.pulled()).toBe(4 * CHUNK_BYTES);
+      const readAfterLeaving = answer.pulled() - 4 * CHUNK_BYTES;
+      expect(answer.cancelled()).toBe(true);
+      expect(readAfterLeaving).toBeGreaterThan(ABANDONED_READ_DRAIN_BUDGET_BYTES);
+      expect(readAfterLeaving).toBeLessThanOrEqual(ABANDONED_READ_DRAIN_BUDGET_BYTES + CHUNK_BYTES);
 
-      // The cancelled stream shows nothing about the server: still owed a restart
-      // at the client deadline (dispatch + TIMEOUT_MS, 10 ms of which have passed).
+      // Not seen to finish: still owed a restart at the client deadline
+      // (dispatch + TIMEOUT_MS, 10 ms of which have passed).
       expect(vi.getTimerCount()).toBe(1);
       await vi.advanceTimersByTimeAsync(TIMEOUT_MS - 10 - 1);
       expect(recover).not.toHaveBeenCalled();
@@ -265,16 +272,50 @@ describe('managed read whose caller aborts after dispatch', () => {
     } finally { await store.close(); }
   });
 
-  it('does not touch an answer whose caller is still waiting, and leaves no listener behind', async () => {
+  it('withdraws the recovery of a read whose caller left mid-body when the rest of the answer is short', async () => {
+    const { store, recover, dispatch, abandon } = harness();
+    try {
+      const read = await dispatch();
+      const answer = streamingAnswer(read.fetch, {
+        totalBytes: ABANDONED_READ_DRAIN_BUDGET_BYTES,
+        stallAfterBytes: 4 * CHUNK_BYTES,
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      await abandon(read);
+      expect(vi.getTimerCount()).toBe(1);
+
+      answer.resume();
+      await vi.advanceTimersByTimeAsync(0);
+      // Read out to its clean end: the server finished, whatever the body said.
+      expect(answer.cancelled()).toBe(false);
+      expect(answer.pulled()).toBe(ABANDONED_READ_DRAIN_BUDGET_BYTES);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS * 3);
+      expect(recover).not.toHaveBeenCalled();
+    } finally { await store.close(); }
+  });
+
+  it('still restarts when the caller left mid-body and the rest of the answer never comes', async () => {
+    const { store, recover, dispatch, abandon } = harness();
+    try {
+      const read = await dispatch();
+      streamingAnswer(read.fetch, { totalBytes: RUNAWAY_BYTES, stallAfterBytes: 4 * CHUNK_BYTES });
+      await vi.advanceTimersByTimeAsync(10);
+      await abandon(read);
+      // The discard is left waiting on the stalled body until the client deadline.
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS - 10 - 1);
+      expect(recover).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(recover).toHaveBeenCalledExactlyOnceWith('query');
+    } finally { await store.close(); }
+  });
+
+  it('leaves nothing behind for a caller that stays, and ignores a later abort', async () => {
     const { store, recover, dispatch } = harness();
     try {
       const read = await dispatch();
-      const response = okResponse();
-      // Nothing sits between the caller's read and the transport's body.
-      const readText = vi.spyOn(response, 'text');
-      read.fetch.respond(response);
+      read.fetch.respond(okResponse());
       expect(await read.outcome).toEqual({ value: { type: 'boolean', value: true } });
-      expect(readText).toHaveBeenCalledOnce();
       // A finished read leaves nothing listening on a caller's (long-lived) signal.
       expect(getEventListeners(read.caller.signal, 'abort')).toHaveLength(0);
 
@@ -285,6 +326,36 @@ describe('managed read whose caller aborts after dispatch', () => {
       expect(vi.getTimerCount()).toBe(0);
       expect(recover).not.toHaveBeenCalled();
     } finally { await store.close(); }
+  });
+
+  it('withdraws the recovery of a read whose caller left just after its answer was completely read', async () => {
+    // The last moment a caller can leave without failing the read: the body has
+    // been read to its end, and the read is about to be decoded and returned.
+    const { store, recover, dispatch } = harness();
+    const readText = Response.prototype.text;
+    const read = await dispatch();
+    let leftJustAfterReading!: Promise<void>;
+    const spy = vi.spyOn(Response.prototype, 'text').mockImplementation(async function (this: Response) {
+      const text = await readText.call(this);
+      read.caller.abort(new Error('caller budget exhausted'));
+      leftJustAfterReading = Promise.resolve();
+      return text;
+    });
+    try {
+      read.fetch.respond(okResponse());
+      await vi.advanceTimersByTimeAsync(0);
+      await leftJustAfterReading;
+      expect(spy).toHaveBeenCalledOnce();
+      expect(await read.outcome).toEqual({ error: new Error('caller budget exhausted') });
+      // The read still ran to its end: the server is done, nothing is owed a restart.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS * 3);
+      expect(recover).not.toHaveBeenCalled();
+    } finally {
+      spy.mockRestore();
+      await store.close();
+    }
   });
 
   it('treats a server error answer as a finished read, not a runaway one', async () => {
@@ -300,11 +371,11 @@ describe('managed read whose caller aborts after dispatch', () => {
     } finally { await store.close(); }
   });
 
-  it('keeps the recovery of an error answer whose body was cut, or reset, mid-read', async () => {
-    // An error status is an answer, but the server is only seen to finish when
-    // its diagnostic body has been read out. The read tolerates a body that
-    // fails (the status is still reported), so a failed body must not be taken
-    // for a finished server: here the caller's departure cancels it.
+  // An error status is an answer, but the server is only seen to finish when
+  // its diagnostic body has been read out. The read tolerates a body that fails
+  // (the status is still reported), so a failed body must not be taken for a
+  // finished server, and a diagnostic body that is read out must be.
+  it('keeps the recovery of an error answer whose body is reset after the caller left mid-body', async () => {
     const { store, recover, dispatch, abandon } = harness();
     try {
       const read = await dispatch();
@@ -321,6 +392,27 @@ describe('managed read whose caller aborts after dispatch', () => {
       expect(vi.getTimerCount()).toBe(1);
       await vi.advanceTimersByTimeAsync(TIMEOUT_MS);
       expect(recover).toHaveBeenCalledExactlyOnceWith('query');
+    } finally { await store.close(); }
+  });
+
+  it('treats an error answer read out after the caller left mid-body as a finished read', async () => {
+    const { store, recover, dispatch, abandon } = harness();
+    try {
+      const read = await dispatch();
+      const answer = streamingAnswer(read.fetch, {
+        totalBytes: 4 * CHUNK_BYTES,
+        stallAfterBytes: CHUNK_BYTES,
+        init: { status: 500 },
+      });
+      await vi.advanceTimersByTimeAsync(10);
+      await abandon(read);
+      expect(vi.getTimerCount()).toBe(1);
+
+      answer.resume();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS * 3);
+      expect(recover).not.toHaveBeenCalled();
     } finally { await store.close(); }
   });
 
@@ -356,16 +448,35 @@ describe('managed read whose caller aborts after dispatch', () => {
 
   // The server finished with these requests even though the answer could not be
   // used: the body was read to its end and only then would have been rejected.
-  // Each answers AFTER the caller left, so the body is read out and discarded
-  // (within the drain budget) rather than decoded. Withdrawing the retained
-  // recovery is what keeps a healthy server from being restarted at the client
-  // deadline.
-  it.each([
+  // Withdrawing the retained recovery is what keeps a healthy server from being
+  // restarted at the client deadline. The caller leaves either while the answer
+  // is being read (headers in, body pending) or before it began; either way the
+  // rest is read out and discarded (within the drain budget), not decoded.
+  const FINISHED_BUT_UNUSABLE = [
     ['a SELECT the server cancelled natively', 'SELECT ?s WHERE { ?s ?p ?o }', 200, `{"head":{"vars":["s"]},"results":{"bindings":[{"s":`, MANAGED_OXIGRAPH_CANCELLATION_SUFFIX],
     ['a CONSTRUCT the server cancelled natively', 'CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }', 200, '<urn:a> <urn:p> "x" <urn:g> .\n', MANAGED_OXIGRAPH_CANCELLATION_SUFFIX],
     ['an error answer that reports the native cancellation', 'SELECT ?s WHERE { ?s ?p ?o }', 500, '', MANAGED_OXIGRAPH_CANCELLATION_SUFFIX],
     ['an answer that is not valid SPARQL JSON', 'SELECT ?s WHERE { ?s ?p ?o }', 200, '', 'this is not json'],
-  ] as const)('treats %s that arrives after the caller left as a finished read', async (_name, sparql, status, first, last) => {
+  ] as const;
+
+  it.each(FINISHED_BUT_UNUSABLE)('treats %s whose caller left it mid-body as a finished read', async (_name, sparql, status, first, last) => {
+    const { store, recover, dispatch, abandon } = harness();
+    try {
+      const read = await dispatch(sparql);
+      const answer = respondStreaming(read.fetch, { status, headers: SPARQL_JSON });
+      await vi.advanceTimersByTimeAsync(10);
+      await abandon(read);
+      expect(vi.getTimerCount()).toBe(1);
+
+      answer.finish(first + last);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS * 3);
+      expect(recover).not.toHaveBeenCalled();
+    } finally { await store.close(); }
+  });
+
+  it.each(FINISHED_BUT_UNUSABLE)('treats %s that arrives after the caller left as a finished read', async (_name, sparql, status, first, last) => {
     const { store, recover, dispatch, abandon } = harness();
     try {
       const read = await dispatch(sparql);
@@ -580,14 +691,24 @@ describe('managed read whose caller aborts after dispatch', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
-  it('keeps close pending while a discarded answer is still being read, and stops the read', async () => {
-    // Draining an abandoned answer is lifecycle work too, not a background task
-    // that outlives close(). (Preservation: the drain was already inside the
-    // lifecycle before it was bounded.)
+  // Discarding what remains of an abandoned answer is lifecycle work too, not a
+  // background task that outlives close(). (Preservation: the discard was
+  // already inside the lifecycle before it was bounded.)
+  it.each([
+    ['before the answer began', false],
+    ['while the answer was being read', true],
+  ] as const)('keeps close pending while an answer whose caller left %s is being discarded, and stops the read', async (_when, midBody) => {
     const { store, recover, dispatch, abandon } = harness('managed', TIMEOUT_MS, { holdAbort: true });
     const read = await dispatch();
-    await abandon(read);
-    const answer = streamingAnswer(read.fetch, { totalBytes: RUNAWAY_BYTES, stallAfterBytes: CHUNK_BYTES });
+    let answer!: ReturnType<typeof streamingAnswer>;
+    if (midBody) {
+      answer = streamingAnswer(read.fetch, { totalBytes: RUNAWAY_BYTES, stallAfterBytes: CHUNK_BYTES });
+      await vi.advanceTimersByTimeAsync(0);
+      await abandon(read);
+    } else {
+      await abandon(read);
+      answer = streamingAnswer(read.fetch, { totalBytes: RUNAWAY_BYTES, stallAfterBytes: CHUNK_BYTES });
+    }
     await vi.advanceTimersByTimeAsync(0);
     expect(answer.pulled()).toBe(CHUNK_BYTES);
 
@@ -602,6 +723,44 @@ describe('managed read whose caller aborts after dispatch', () => {
     await vi.advanceTimersByTimeAsync(TIMEOUT_MS * 3);
     expect(recover).not.toHaveBeenCalled();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each([
+    ['before the answer began', false],
+    ['while the answer was being read', true],
+  ] as const)('keeps close pending until the discard of an answer whose caller left %s has really settled', async (_when, midBody) => {
+    // A transport whose body does not react to the abort: the discard's read
+    // stays pending, and close() must not report the store closed meanwhile.
+    const { store, recover, dispatch, abandon } = harness();
+    const read = await dispatch();
+    let answer!: ReturnType<typeof streamingAnswer>;
+    const start = () => streamingAnswer(read.fetch, {
+      totalBytes: 4 * CHUNK_BYTES,
+      stallAfterBytes: CHUNK_BYTES,
+      ignoreAbort: true,
+    });
+    if (midBody) {
+      answer = start();
+      await vi.advanceTimersByTimeAsync(0);
+      await abandon(read);
+    } else {
+      await abandon(read);
+      answer = start();
+    }
+    await vi.advanceTimersByTimeAsync(0);
+    expect(answer.pulled()).toBe(CHUNK_BYTES);
+
+    let closed = false;
+    const closing = store.close().then(() => { closed = true; });
+    await vi.advanceTimersByTimeAsync(TIMEOUT_MS * 3);
+    expect(read.fetch.signal.aborted).toBe(true);
+    // The discard is still waiting on the body.
+    expect(closed).toBe(false);
+
+    answer.resume();
+    await closing;
+    expect(closed).toBe(true);
+    expect(recover).not.toHaveBeenCalled();
   });
 
   it('frees the scheduler slot when the caller leaves, as it did before detaching', async () => {
