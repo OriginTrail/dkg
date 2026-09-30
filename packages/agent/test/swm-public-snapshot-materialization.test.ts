@@ -286,24 +286,26 @@ function harness(overrides: HarnessOverrides = {}) {
 }
 
 describe('public SWM snapshot materialization', () => {
-  it('holds snapshot leases through materialization and the final metadata write', async () => {
+  it.each([true, false])('takes snapshot leases only when finalized cleanup is on (cleanup: %s)', async cleanup => {
     let active = 0;
     const release = vi.fn(() => { active -= 1; });
     const acquire = vi.fn(async () => { active += 1; return release; });
     const store: WorkspacePublicSnapshotStore = Object.assign(new MemorySnapshotStore(), {
-      lifecycle: { finalizedCleanupEnabled: false, acquire, acquireExisting: acquire,
+      lifecycle: { finalizedCleanupEnabled: cleanup, acquire, acquireExisting: acquire,
         markPublished: async () => {} },
     });
     let checkedMetadata = false;
     const h = harness({
       snapshotStore: store,
-      replaceImpl: async () => { expect(active).toBeGreaterThan(0); },
-      onStoreInsert: () => { expect(active).toBeGreaterThan(0); checkedMetadata = true; },
+      // Leases exist to keep files through the metadata commit; a store without cleanup takes none.
+      replaceImpl: async () => { if (cleanup) expect(active).toBeGreaterThan(0); },
+      onStoreInsert: () => { if (cleanup) expect(active).toBeGreaterThan(0); checkedMetadata = true; },
     });
     await h.run();
     expect(checkedMetadata).toBe(true);
-    expect(release).toHaveBeenCalled();
     expect(active).toBe(0);
+    if (cleanup) expect(release).toHaveBeenCalled();
+    else expect(acquire).not.toHaveBeenCalled();
   });
 
   it('attributes a snapshot phase stopped solely by local admission', async () => {

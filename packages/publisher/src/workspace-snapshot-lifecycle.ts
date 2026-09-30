@@ -115,10 +115,14 @@ type CompleteSnapshotIO = { [K in keyof Required<WorkspaceSnapshotIO>]: Workspac
 /** One operation's snapshot I/O and leases, owned and closed by the coordinator. */
 export class WorkspaceSnapshotScope implements CompleteSnapshotIO {
   private readonly leases = new Map<string, Promise<() => void>>();
+  /** Operation-long leases exist only for finalized cleanup; otherwise the store keeps its own policy.
+   * Not named `lifecycle`: the scope is passed where a WorkspacePublicSnapshotStore is expected. */
+  private readonly leasing: WorkspaceSnapshotLifecycle | undefined;
   readonly validateSnapshot: WorkspaceSnapshotIO['validateSnapshot'];
   readonly getSnapshotPage: WorkspaceSnapshotIO['getSnapshotPage'];
 
   private constructor(private readonly store: WorkspacePublicSnapshotStore) {
+    this.leasing = store.lifecycle?.finalizedCleanupEnabled ? store.lifecycle : undefined;
     if (store.validateSnapshot) this.validateSnapshot = async (ref, digest, count) => {
       await this.retain(ref);
       return store.validateSnapshot!(ref, digest, count);
@@ -142,7 +146,7 @@ export class WorkspaceSnapshotScope implements CompleteSnapshotIO {
   }
 
   private async retain(ref: string): Promise<void> {
-    const lifecycle = this.store.lifecycle;
+    const lifecycle = this.leasing;
     if (!lifecycle) return;
     const hash = snapshotHash(ref);
     let lease = this.leases.get(hash);
@@ -152,8 +156,8 @@ export class WorkspaceSnapshotScope implements CompleteSnapshotIO {
 
   async retainExisting(ref: string): Promise<boolean> {
     await this.retain(ref);
-    if (!this.store.lifecycle) return true; // Custom stores own their retention policy.
-    const existing = await this.store.lifecycle.acquireExisting(ref);
+    if (!this.leasing) return true; // Cleanup off, or a custom store: it owns its retention policy.
+    const existing = await this.leasing.acquireExisting(ref);
     if (!existing) return false;
     existing();
     return true;
@@ -182,6 +186,25 @@ export function snapshotOperation<Params extends { publicSnapshotStore?: Workspa
     operation({ ...params, publicSnapshotStore: scope }));
 }
 
+/**
+ * Bound how long the caller waits for a store query without handing the store
+ * an abort signal. A short caller-owned signal on a managed store can restart
+ * the store process even when the query already finished (the store layer's own
+ * deadline governs the query itself), so the limit is applied on the client side only.
+ */
+export async function withClientDeadline<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+        timer.unref();
+      }),
+    ]);
+  } finally { if (timer) clearTimeout(timer); }
+}
+
 export function snapshotReferenceCheck(store: TripleStore): (ref: string) => Promise<boolean> {
   return async ref => {
     // Accept the legacy bare hash and case variants as well as the canonical ref.
@@ -197,7 +220,7 @@ export function snapshotReferenceCheck(store: TripleStore): (ref: string) => Pro
         }
         FILTER(LCASE(STR(?ref)) IN (${JSON.stringify(hash)}, ${JSON.stringify(`sha256:${hash}`)}))
       }
-    }`, { signal: AbortSignal.timeout(2_000) });
+    }`);
     if (result.type !== 'boolean') throw new Error('Snapshot reference check did not return a boolean');
     return result.value;
   };

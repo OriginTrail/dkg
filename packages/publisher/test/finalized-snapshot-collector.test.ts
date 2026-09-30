@@ -133,24 +133,35 @@ describe('retirement marker mutation ordering', () => {
   });
 });
 
-describe('bounded retirement collection', () => {
-  async function scheduled(check: (ref: string) => Promise<boolean>, count = 33) {
-    const directory = await fixture(); const gate = snapshotLifecycleGate(directory);
-    const removed = vi.fn(async (_hash: string, done: (bytes: number) => void) => { done(1); });
-    const collector = new FinalizedSnapshotCollector(directory, gate, () => 10_000, {
-      enabled: true, retentionMs: 0, isSnapshotReferenced: check,
-      removePayloads: removed, removeDerivedState: async () => {},
-    });
-    const hashes = Array.from({ length: count }, (_, i) => i.toString(16).padStart(64, '0'));
-    const files = await Promise.all(hashes.map(async hash => {
-      const path = collector.path(hash);
-      await mkdir(dirname(path), { recursive: true });
-      await writeFile(path, JSON.stringify({ version: 1, retiredAt: 0 }));
-      return { name: basename(path), path, hash };
-    }));
-    return { gate, collector, files, hashes, removed };
-  }
+async function scheduled(check: (ref: string) => Promise<boolean>, count = 33,
+  hashes = Array.from({ length: count }, (_, i) => i.toString(16).padStart(64, '0')),
+  log?: (message: string) => void) {
+  const directory = await fixture(); const gate = snapshotLifecycleGate(directory);
+  const removed = vi.fn(async (_hash: string, done: (bytes: number) => void) => { done(1); });
+  const options = {
+    enabled: true, retentionMs: 0, isSnapshotReferenced: check,
+    removePayloads: removed, removeDerivedState: async () => {}, log,
+  };
+  const open = () => new FinalizedSnapshotCollector(directory, gate, () => 10_000, options);
+  const collector = open();
+  const files = await Promise.all(hashes.map(async hash => {
+    const path = collector.path(hash);
+    await mkdir(dirname(path), { recursive: true });
+    await writeFile(path, JSON.stringify({ version: 1, retiredAt: 0 }));
+    return { name: basename(path), path, hash };
+  }));
+  return { directory, gate, collector, open, files, hashes, removed };
+}
+/** Each reference check consumes 3 s of the 5 s scheduling budget, so a pass examines two candidates. */
+function slowChecks() {
+  let wall = 0;
+  const check = vi.fn(async (_ref: string) => { wall += 3_000; return true; });
+  vi.spyOn(Date, 'now').mockImplementation(() => wall);
+  return check;
+}
+const visited = (check: ReturnType<typeof slowChecks>) => check.mock.calls.map(([ref]) => ref.slice('sha256:'.length));
 
+describe('bounded retirement collection', () => {
   it.each(['referenced', 'failed', 'busy'] as const)('caps at 32 and rotates past %s candidates', async mode => {
     const check = vi.fn(async (ref: string) => {
       if (ref.endsWith('20')) return false; // 33rd candidate
@@ -182,5 +193,74 @@ describe('bounded retirement collection', () => {
     check.mockClear();
     await f.collector.collect(f.files);
     expect(check.mock.calls.map(([ref]) => ref)).toEqual(f.hashes.slice(2, 4).map(hash => `sha256:${hash}`));
+  });
+});
+
+describe('collection order, resume position and pass size', () => {
+  const RESUME_FILE = 'finalized-collection-cursor.json';
+
+  it('orders and resumes by code unit, whatever the process collation is', async () => {
+    // A locale with the "aa" contraction (for example da-DK) sorts "aa..." after "z...".
+    vi.spyOn(String.prototype, 'localeCompare').mockImplementation(function (this: string, other: string) {
+      const left = String(this).replaceAll('aa', '{'); const right = String(other).replaceAll('aa', '{');
+      return left < right ? -1 : left > right ? 1 : 0;
+    });
+    const hashes = ['aa', 'ab', 'b0', 'c0'].map(prefix => prefix.padEnd(64, '0'));
+    const check = slowChecks();
+    const f = await scheduled(check, 4, hashes);
+    for (let pass = 0; pass < 3; pass += 1) await f.collector.collect(f.files);
+    expect(visited(check)).toEqual([hashes[0], hashes[1], hashes[2], hashes[3], hashes[0], hashes[1]]);
+  });
+
+  it('resumes from its saved position after a restart instead of re-scanning from the start', async () => {
+    const check = slowChecks();
+    const f = await scheduled(check, 5);
+    await f.collector.collect(f.files);
+    expect(visited(check)).toEqual(f.hashes.slice(0, 2));
+    check.mockClear();
+    await f.open().collect(f.files); // a new process: no in-memory position
+    expect(visited(check)).toEqual(f.hashes.slice(2, 4));
+    expect(JSON.parse(await readFile(join(f.directory, RESUME_FILE), 'utf8'))).toEqual({ version: 1, cursor: f.hashes[3] });
+  });
+
+  it.each([
+    ['unparseable', '{broken'],
+    ['not a digest', JSON.stringify({ version: 1, cursor: 'not-a-digest' })],
+    ['an unknown version', JSON.stringify({ version: 2, cursor: 'f'.repeat(64) })],
+  ])('starts from the beginning when the saved position is %s', async (_label, saved) => {
+    const check = slowChecks();
+    const f = await scheduled(check, 4);
+    await writeFile(join(f.directory, RESUME_FILE), saved);
+    await f.collector.collect(f.files);
+    expect(visited(check)).toEqual(f.hashes.slice(0, 2));
+  });
+
+  it('does not fail a pass when the position cannot be saved, and reports it', async () => {
+    const log = vi.fn();
+    const f = await scheduled(async () => true, 3, undefined, log);
+    const real = (await vi.importActual<typeof import('node:fs/promises')>('node:fs/promises')).rename;
+    vi.mocked(rename).mockImplementationOnce(async (from, to) => {
+      if (String(to).endsWith(RESUME_FILE)) throw new Error('disk full');
+      return real(from, to);
+    });
+    expect(await f.collector.collect(f.files)).toMatchObject({ failed: 0, referenced: 3 });
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('could not save the finalized collection position: disk full'));
+    await expect(stat(join(f.directory, RESUME_FILE))).rejects.toMatchObject({ code: 'ENOENT' });
+    // The next pass tries again.
+    await f.collector.collect(f.files);
+    await expect(stat(join(f.directory, RESUME_FILE))).resolves.toBeDefined();
+  });
+
+  it('keeps going past the batch while candidates clear, and stops at the first retained one after it', async () => {
+    const f = await scheduled(async ref => ref.endsWith('28'), 100); // index 40 stays referenced
+    expect((await f.collector.collect(f.files)).deleted).toBe(40);
+    expect(f.removed).toHaveBeenCalledTimes(40);
+    // The next pass continues after the retained candidate and drains the rest.
+    expect((await f.collector.collect(f.files)).deleted).toBe(59);
+  });
+
+  it('clears an entire due backlog in one pass when every candidate is unreferenced', async () => {
+    const f = await scheduled(async () => false, 100);
+    expect(await f.collector.collect(f.files)).toMatchObject({ deleted: 100, failed: 0, referenced: 0 });
   });
 });

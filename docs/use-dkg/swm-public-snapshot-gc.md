@@ -92,27 +92,54 @@ metadata. The background collector, on its existing five-minute interval:
 2. Checks all RDF graphs for explicit snapshot references or implicit digest
    references without a graph-backed snapshot. Another operation/context graph
    referencing the same bytes prevents deletion.
-3. Excludes active readers, serving pages, and file-plus-metadata writes. Sync
-   public and private recovery hold each touched file's lease through the final
-   metadata commit. Reused refs acquire an existing-file lease without decoding
-   the payload again; if collection already removed it, normal recovery fetches
-   it again before committing metadata. Leases are shared by physical directory
-   identity, including symlink/junction and case aliases. A busy digest does not
-   prevent collection of unrelated digests.
+3. Excludes active readers, serving pages, and file-plus-metadata writes. With
+   finalized cleanup enabled, sync public and private recovery hold each
+   touched file's lease through the final metadata commit. Reused refs acquire
+   an existing-file lease without decoding the payload again; if collection
+   already removed it, normal recovery fetches it again before committing
+   metadata. Leases are shared by physical directory identity, including
+   symlink/junction and case aliases. A busy digest does not prevent collection
+   of unrelated digests. With cleanup disabled these operation-long leases are
+   not taken, so pressure GC treats a file only as in use while an individual
+   read or write is running, as before this feature.
 4. Deletes the unreferenced `.nq`/legacy `.json` file, its cached validation/page
    index, and its persisted page-index row where the adapter supports deletion.
 5. Removes the retirement record last. An interrupted deletion can finish on the
    next pass after restart. Reusing a digest with `putSnapshot` cancels retirement;
    another confirmed publication starts a new grace period.
 
+A core that signed a StorageACK for the asset also holds that copy's operation
+row (id prefix `storage-ack-`), which carries the same snapshot digest and would
+otherwise keep the file referenced until the SWM TTL. The same cleanup boundary
+removes those rows, only for the same asset at or below the version being
+cleaned up. A later version's copy, another asset's copy and any other kind of
+operation keep counting as references. A failed lookup or delete leaves the rows
+(and so the file) in place.
+
 Failures to record retirement are logged and do not turn a successful publish
 into an error. A missing checker, unreadable record, failed reference query, or
-failed unlink retains/retries the candidate. Pressure GC does not bypass the
-grace or reference check for a marked candidate while this feature is enabled.
-After the directory scan, collection considers at most 32 records and a
-five-second scheduling budget per pass (an in-flight reference query may run to
-its two-second deadline). It
-rotates past busy, retained and failed candidates to avoid starving later files.
+failed unlink retains/retries the candidate. Pressure GC never age-evicts a
+marked candidate. While free space is above the hard reserve, a candidate waits
+out its grace period. When free space (less the size of a pending write) is
+below `hardReserveBytes`, marked candidates become eligible before their grace
+period ends, until the reclaim target is met. They still go through the same
+reference check, so an unavailable checker, a malformed record or a failed query
+retains the file, and a referenced file is kept.
+
+Each pass examines at least 32 records and a pass keeps going past that while
+candidates keep clearing, within a five-second scheduling budget (an in-flight
+reference query may run to its two-second deadline). It stops at the first
+retained candidate after the first 32, rotating past busy, retained and failed
+candidates to avoid starving later files. Records are visited in digest order
+(code-unit comparison, independent of the process locale), starting after the
+last one examined. That position is saved in `finalized-collection-cursor.json`
+in the snapshot directory, so a restart resumes instead of re-scanning from the
+start of a large backlog; a missing or unreadable file restarts from the
+beginning.
+
+The retirement lookup and the reference check bound their wait on the client
+side. They do not pass an abort signal to the triple store, whose own deadline
+governs the query.
 
 `[SWM-SNAPSHOT-GC]` logs distinguish `finalized`, `referenced`, and `failed` counts.
 The collector visits only the expected two hexadecimal directory levels. It

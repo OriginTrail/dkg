@@ -19,14 +19,14 @@ function deferred() {
   return { promise, resolve };
 }
 
-async function fixture(check?: (ref: string) => Promise<boolean>) {
+async function fixture(check?: (ref: string) => Promise<boolean>, gc: Record<string, unknown> = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-retirement-'));
   directories.push(directory);
   let now = 100_000;
   let free = 100 * GIB;
   const open = () => {
     const store = new FileWorkspacePublicSnapshotStore(directory, undefined, {
-      gc: { finalizedCleanupEnabled: true, finalizedRetentionMs: 1_000, minAgeMs: 0 }, now: () => now,
+      gc: { finalizedCleanupEnabled: true, finalizedRetentionMs: 1_000, minAgeMs: 0, ...gc }, now: () => now,
       getAvailableBytes: async () => free, isSnapshotReferenced: check,
     });
     store.stopGarbageCollection();
@@ -41,6 +41,7 @@ async function fixture(check?: (ref: string) => Promise<boolean>) {
     directory, store, open, path: snapshotPath(directory, digest),
     marker: snapshotPath(directory, digest).replace(/\.nq$/, '.retired'),
     advance: () => { now += 1_001; }, pressure: () => { free = 1 * GIB; },
+    setFree: (bytes: number) => { free = bytes; },
   };
 }
 
@@ -327,5 +328,133 @@ describe('confirmed snapshot retirement', () => {
     store.stopGarbageCollection();
     await store.lifecycle.markPublished([digest]);
     await expect(stat(f.marker)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+});
+
+describe('capacity pressure and retirement candidates', () => {
+  const SOFT = 10 * GIB; // below the 15 GiB trigger, above the 5 GiB hard reserve
+
+  it('reclaims an unreferenced candidate under hard pressure without waiting for its grace period', async () => {
+    const check = vi.fn(async () => false);
+    const f = await fixture(check);
+    await f.store.lifecycle.markPublished([digest]);
+    f.pressure();
+    expect(await f.store.collectGarbage()).toMatchObject({ triggered: true, finalizedSnapshots: 1, deletedSnapshots: 1 });
+    expect(check).toHaveBeenCalledWith(digest);
+    await expect(stat(f.path)).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(stat(f.marker)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('treats a write that would breach the hard reserve as hard pressure', async () => {
+    const check = vi.fn(async () => false);
+    const f = await fixture(check);
+    await f.store.lifecycle.markPublished([digest]);
+    f.setFree(6 * GIB);
+    expect((await f.store.collectGarbage()).finalizedSnapshots).toBe(0);
+    await expect(stat(f.path)).resolves.toBeDefined();
+    expect(await f.store.collectGarbage({ requiredWriteBytes: 2 * GIB })).toMatchObject({ finalizedSnapshots: 1 });
+    await expect(stat(f.path)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('keeps a referenced candidate and its record under hard pressure', async () => {
+    const check = vi.fn(async () => true);
+    const f = await fixture(check);
+    await f.store.lifecycle.markPublished([digest]);
+    f.pressure();
+    expect(await f.store.collectGarbage()).toMatchObject({ referencedSnapshots: 1, deletedSnapshots: 0 });
+    await expect(stat(f.path)).resolves.toBeDefined();
+    await expect(stat(f.marker)).resolves.toBeDefined();
+  });
+
+  it.each([
+    ['a failing checker', async () => { throw new Error('store unavailable'); }],
+    ['no checker', undefined],
+  ] as const)('fails closed with %s even under hard pressure and inside the grace period', async (_label, check) => {
+    const f = await fixture(check);
+    await f.store.lifecycle.markPublished([digest]);
+    f.pressure();
+    expect((await f.store.collectGarbage()).deletedSnapshots).toBe(0);
+    await expect(stat(f.path)).resolves.toBeDefined();
+    await expect(stat(f.marker)).resolves.toBeDefined();
+  });
+
+  it('keeps the grace period under soft pressure and does not age-evict a marked file', async () => {
+    const check = vi.fn(async () => false);
+    const f = await fixture(check);
+    await f.store.lifecycle.markPublished([digest]);
+    f.setFree(SOFT);
+    expect(await f.store.collectGarbage()).toMatchObject({ triggered: true, deletedSnapshots: 0 });
+    expect(check).not.toHaveBeenCalled();
+    await expect(stat(f.path)).resolves.toBeDefined();
+    f.advance();
+    expect((await f.store.collectGarbage()).finalizedSnapshots).toBe(1);
+  });
+
+  it('stops retiring candidates once the reclaim target is met', async () => {
+    const check = vi.fn(async () => false);
+    const f = await fixture(check, { hardReserveBytes: 10, triggerFreeBytes: 20, targetFreeBytes: 20 });
+    const otherQuads = makeQuads(3, 'second-candidate');
+    const otherDigest = workspacePublicQuadsDigest(otherQuads);
+    await f.store.putSnapshot({ digest: otherDigest, quads: otherQuads });
+    await f.store.lifecycle.markPublished([digest, otherDigest]);
+    // Need is 15 bytes (target 20 vs 5 available): one candidate covers it.
+    f.setFree(5);
+    expect(await f.store.collectGarbage()).toMatchObject({ finalizedSnapshots: 1, deletedSnapshots: 1 });
+    const markers = await Promise.all([digest, otherDigest].map(ref =>
+      stat(snapshotPath(f.directory, ref).replace(/\.nq$/, '.retired')).then(() => true, () => false)));
+    expect(markers.filter(Boolean)).toHaveLength(1);
+  });
+});
+
+describe('operation leases follow the finalized cleanup opt-in', () => {
+  it.each([
+    ['is off, so pressure GC may reclaim a file an ordinary operation touched', false, { deletedSnapshots: 1, skippedActiveFiles: 0 }],
+    ['is on, so an operation keeps the files it touched until it finishes', true, { deletedSnapshots: 0, skippedActiveFiles: 1 }],
+  ] as const)('cleanup %s', async (_label, cleanup, expected) => {
+    const f = await fixture(undefined, { finalizedCleanupEnabled: cleanup });
+    const store = f.open();
+    f.pressure();
+    await withSnapshotScope(store, async snapshots => {
+      expect(await snapshots!.getSnapshot(digest)).toEqual(quads);
+      expect(await store.collectGarbage()).toMatchObject(expected);
+    });
+    // Once the operation ends, an enabled store's file is evictable again.
+    if (cleanup) expect((await store.collectGarbage()).deletedSnapshots).toBe(1);
+  });
+
+  it('does not require an existing-file lease or fail reuse while cleanup is off', async () => {
+    const f = await fixture(undefined, { finalizedCleanupEnabled: false });
+    const store = f.open();
+    const acquire = vi.spyOn(store.lifecycle, 'acquireExisting');
+    await withSnapshotScope(store, async snapshots => {
+      expect(await snapshots!.retainExisting(digest)).toBe(true);
+    });
+    expect(acquire).not.toHaveBeenCalled();
+  });
+});
+
+describe('reference check store queries', () => {
+  it('issues no abort signal into the store', async () => {
+    const rdf = new OxigraphStore();
+    const query = vi.spyOn(rdf, 'query');
+    try {
+      expect(await snapshotReferenceCheck(rdf)(digest)).toBe(false);
+      expect(query).toHaveBeenCalledOnce();
+      // A short caller signal on a managed store can restart it; only the client-side deadline may apply.
+      expect(query.mock.calls[0]?.[1]).toBeUndefined();
+    } finally { await rdf.close(); }
+  });
+
+  it('gives the collector no signal path either, while still bounding its own wait', async () => {
+    const rdf = new OxigraphStore();
+    const query = vi.spyOn(rdf, 'query');
+    const f = await fixture(snapshotReferenceCheck(rdf));
+    try {
+      await f.store.lifecycle.markPublished([digest]);
+      f.advance();
+      expect((await f.store.collectGarbage()).finalizedSnapshots).toBe(1);
+      expect(query.mock.calls.length).toBeGreaterThan(0);
+      expect(query.mock.calls.every(call => call[1] === undefined)).toBe(true);
+    } finally { await rdf.close(); }
   });
 });

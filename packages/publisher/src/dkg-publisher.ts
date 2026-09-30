@@ -7573,7 +7573,11 @@ export class DKGPublisher implements Publisher {
     // Persist the candidate BEFORE removing its references. If cleanup fails or
     // the process exits midway, remaining metadata makes collection fail closed.
     // Only this confirmed/durable cleanup boundary creates retirement candidates.
-    await this.publishedSnapshotRetirement.schedule(swmMetaGraph, operationSubjects, message => this.log.warn(ctx, message));
+    const warn = (message: string) => this.log.warn(ctx, message);
+    await this.publishedSnapshotRetirement.schedule(swmMetaGraph, operationSubjects, warn);
+    // Read before the asset's own operation rows go: their version bounds which ACK copies are discharged.
+    const dischargedAckCopies = await this.publishedSnapshotRetirement.findDischargedStorageAckCopies(
+      swmMetaGraph, kaScope.ual, operationSubjects, warn);
     const graphs = await resolveSharedMemoryScopeGraphs(this.store, swmGraph, scope);
     for (const graph of graphs) {
       await this.store.dropGraph(graph);
@@ -7585,6 +7589,7 @@ export class DKGPublisher implements Publisher {
         subject: assertSafeIri(operationSubject),
       });
     }
+    await this.publishedSnapshotRetirement.clearStorageAckCopies(swmMetaGraph, dischargedAckCopies, warn);
     this.log.info(
       ctx,
       `Cleared graph-scoped KA SWM ${scope.identity.agentAddress}/${scope.identity.kaNumber.toString()} ` +

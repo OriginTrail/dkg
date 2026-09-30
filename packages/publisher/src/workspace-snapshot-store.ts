@@ -477,7 +477,16 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     let failedDeletions = 0;
     const now = this.now();
     const files = await listSnapshotStoreFiles(this.directory);
-    const finalized = await this.finalizedCollector.collect(files);
+    const targetAvailableBytes = Math.max(
+      watermarks.targetFreeBytes,
+      watermarks.hardReserveBytes + requiredWriteBytes,
+    );
+    // Below the hard reserve, retirement candidates need not wait out their grace
+    // period. They still go through the same reference check (and fail closed).
+    const hardPressure = availableBytesBefore - requiredWriteBytes < watermarks.hardReserveBytes;
+    const finalized = await this.finalizedCollector.collect(files, hardPressure
+      ? { pressure: { bytesNeeded: Math.max(0, targetAvailableBytes - availableBytesBefore) } }
+      : {});
     deletedSnapshots += finalized.deleted;
     deletedSnapshotBytes += finalized.bytes;
     availableBytesAfter += finalized.bytes;
@@ -506,12 +515,9 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     const triggered = availableBytesBefore < watermarks.triggerFreeBytes
       || availableBytesBefore - requiredWriteBytes < watermarks.hardReserveBytes;
     if (triggered) {
-      const targetAvailableBytes = Math.max(
-        watermarks.targetFreeBytes,
-        watermarks.hardReserveBytes + requiredWriteBytes,
-      );
-      // Pressure must not bypass the finalized grace/reference check (including
-      // an unavailable checker or malformed retirement record).
+      // Marked files were just judged by the collector (grace and reference check,
+      // or the reference check alone under hard pressure). Whatever it kept, including
+      // an unavailable checker or malformed record, must not fall to age-based eviction.
       const retiredHashes = new Set(this.gcConfig.finalizedCleanupEnabled
         ? files.filter(file => SNAPSHOT_RETIREMENT_PATTERN.test(file.name)).map(file => file.hash)
         : []);
