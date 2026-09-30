@@ -17,7 +17,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
-import { WORKSPACE_RULES, isInstallLifecycleScript } from '../ci-delta.mjs';
+// The one routing-layer definition the graph reads: which package scripts an
+// install runs. The planner owns it (it routes install-hook changes to full
+// CI), and the trusted controller cannot import anything outside its own
+// files, so this is the only place the two can share it.
+import { isInstallLifecycleScript } from '../ci-delta.mjs';
 import { SUBCOMMAND_CHILD_COMMANDS as RELEASE_CHILD_COMMANDS } from '../../release-packages.mjs';
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
@@ -30,13 +34,35 @@ function readRepoText(file) {
   }
 }
 
-// Every package workspace's manifest by directory, and directories by package
-// name. A workspace whose manifest `readRepoFile` cannot read is left out.
-export function readWorkspaces({ readRepoFile = readRepoText } = {}) {
+const listRepoDirectories = (directory) => {
+  try {
+    return fs.readdirSync(path.join(REPO_ROOT, directory), { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort();
+  } catch {
+    return [];
+  }
+};
+
+// Every workspace pnpm installs, from pnpm-workspace.yaml's `packages`
+// (exact directories, and `<dir>/*` for each directory below one; any other
+// pattern throws): each one's manifest by directory, and directories by
+// package name. The graph reads what pnpm installs and runs from this; which
+// workspaces a routing rule covers is the policy's (lane-entrypoints.mjs).
+// `listDirectories(dir)` names a repository directory's subdirectories.
+export function workspaceCatalog({ readRepoFile = readRepoText, listDirectories = listRepoDirectories } = {}) {
+  const { packages: patterns = [] } = parse(readRepoFile('pnpm-workspace.yaml') ?? '{}') ?? {};
+  const directories = patterns.flatMap((pattern) => {
+    if (/^[\w@.-]+(?:\/[\w@.-]+)*$/.test(pattern)) return [path.posix.normalize(pattern)];
+    const parent = pattern.match(/^([\w@.-]+(?:\/[\w@.-]+)*)\/\*$/)?.[1];
+    if (parent) return listDirectories(parent).map((name) => `${parent}/${name}`);
+    throw new Error(`unsupported pnpm-workspace.yaml pattern: ${pattern}`);
+  });
   const manifests = new Map();
-  for (const workspace of Object.keys(WORKSPACE_RULES)) {
-    const source = readRepoFile(`${workspace}/package.json`);
-    if (source !== undefined) manifests.set(workspace, JSON.parse(source));
+  for (const directory of directories) {
+    const source = readRepoFile(`${directory}/package.json`);
+    if (source !== undefined) manifests.set(directory, JSON.parse(source));
   }
   return { manifests, workspaceByName: new Map([...manifests].map(([workspace, { name }]) => [name, workspace])) };
 }
@@ -44,7 +70,7 @@ export function readWorkspaces({ readRepoFile = readRepoText } = {}) {
 // `roots` plus every workspace they depend on (dependencies and
 // devDependencies), in `workspaces` ({ manifests, workspaceByName }, by
 // default the repository's). Roots that are not workspaces are ignored.
-export function workspaceClosure(roots, { manifests, workspaceByName } = readWorkspaces()) {
+export function workspaceClosure(roots, { manifests, workspaceByName } = workspaceCatalog()) {
   const queue = [...roots];
   const closure = new Set();
   while (queue.length) {
@@ -353,7 +379,7 @@ function executionReader({ readRepoFile, exists, context }) {
 export function packageScriptEdges(calls, {
   readRepoFile = readRepoText,
   exists = (file) => readRepoFile(file) !== undefined,
-  workspaces = readWorkspaces({ readRepoFile }),
+  workspaces = workspaceCatalog({ readRepoFile }),
   rootManifest = JSON.parse(readRepoFile('package.json') ?? '{}'),
 } = {}) {
   const reader = executionReader({ readRepoFile, exists, context: { ...workspaces, rootManifest } });
@@ -375,7 +401,7 @@ export function packageScriptEdges(calls, {
 // `workspaces` and `rootManifest` default to what it reads.
 export function workflowExecution(workflowSource, {
   readRepoFile = readRepoText,
-  workspaces = readWorkspaces({ readRepoFile }),
+  workspaces = workspaceCatalog({ readRepoFile }),
   rootManifest = JSON.parse(readRepoFile('package.json') ?? '{}'),
 } = {}) {
   const context = { ...workspaces, rootManifest };

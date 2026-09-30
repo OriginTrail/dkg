@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
-import { analyzeShell, workflowExecution } from './ci-execution-graph.mjs';
+import { analyzeShell, workflowExecution, workspaceCatalog } from './ci-execution-graph.mjs';
 import { REPO_ROOT } from './ci-plan-fixtures.mjs';
 import { laneSeeds } from './lane-entrypoints.mjs';
 
@@ -83,4 +83,30 @@ test('one shell reading yields package-script calls, files and assembled paths',
   assert.deepEqual(reading.calls, [['packages/cli', 'build']]);
   assert.deepEqual(reading.files.map(({ file }) => file), ['scripts/devnet-lib.sh', 'scripts/devnet.sh']);
   assert.deepEqual(reading.assembled, ['$SCRIPT_DIR/devnet-${helper}.sh']);
+});
+
+test('the graph reads every workspace pnpm-workspace.yaml declares, rule or no rule', () => {
+  const files = {
+    'pnpm-workspace.yaml': 'packages:\n  - "packages/*"\n  - "tools/unmapped"\n',
+    'packages/cli/package.json': JSON.stringify({ name: '@origintrail-official/dkg', scripts: { build: 'tsc' } }),
+    'tools/unmapped/package.json': JSON.stringify({ name: '@example/unmapped', scripts: { postinstall: 'node setup.mjs', build: 'tsc' } }),
+  };
+  const catalog = workspaceCatalog({ readRepoFile: (file) => files[file], listDirectories: (directory) => (directory === 'packages' ? ['cli', 'no-manifest'] : []) });
+  assert.deepEqual([...catalog.manifests.keys()], ['packages/cli', 'tools/unmapped']);
+  assert.equal(catalog.workspaceByName.get('@example/unmapped'), 'tools/unmapped');
+  const [build] = workflowExecution('jobs:\n  build:\n    steps:\n      - run: pnpm install && turbo build\n', { workspaces: catalog, rootManifest: {} });
+  assert.deepEqual(build.edges.filter(({ kind }) => kind === 'script').map(({ workspace, script }) => `${workspace} ${script}`).sort(), [
+    'packages/cli build',
+    'tools/unmapped build',
+    'tools/unmapped postinstall',
+  ]);
+  // A pattern the catalog cannot expand fails instead of dropping workspaces.
+  for (const pattern of ['packages/**', '!packages/private', 'packages/*/nested']) {
+    assert.throws(() => workspaceCatalog({ readRepoFile: (file) => (file === 'pnpm-workspace.yaml' ? `packages:\n  - "${pattern}"\n` : undefined) }), /unsupported/, pattern);
+  }
+  // The repository's catalog covers the fixture and devnet workspaces the
+  // routing rules leave out.
+  const repository = workspaceCatalog();
+  assert.ok(repository.manifests.has('packages/cli/test-fixtures/sample-kafka-plugin'));
+  assert.ok(repository.manifests.has('devnet/_bootstrap'));
 });

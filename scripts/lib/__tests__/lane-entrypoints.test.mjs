@@ -110,3 +110,22 @@ test('each requirement kind is evaluated against a plan, and an unknown one is r
   assert.throws(() => requirement.evmScope('nope'), /unknown EVM scope/);
   assert.throws(() => requirement.buildOutput(''), /names the workspace/);
 });
+
+test('what a workspace without a routing rule runs is held to full CI', () => {
+  // The graph discovers an unmapped workspace's hooks and scripts like any
+  // other; the policy decides what they need. Its install hook runs in every
+  // job (full CI); its build's output is met only by full CI, since no rule
+  // says who consumes it. Both named files here plan less, so both report.
+  const unmapped = { name: '@example/unmapped', scripts: { postinstall: 'node ../../scripts/devnet-publish-helpers.sh', build: 'node ../../scripts/audit-dial-protocol.mjs' } };
+  const workspaces = { manifests: new Map([['tools/unmapped', unmapped]]), workspaceByName: new Map([[unmapped.name, 'tools/unmapped']]) };
+  const [build] = workflowExecution("jobs:\n  build:\n    if: needs.changes.outputs.run_node == 'true'\n    steps:\n      - run: pnpm install && turbo build\n", { workspaces, rootManifest: {} });
+  const job = jobRequirement('ci.yml', 'build', "needs.changes.outputs.run_node == 'true'");
+  const required = build.edges.filter(({ kind }) => kind === 'file').map(({ file, chain }) => [file, edgeRequirement(job, chain)]);
+  assert.deepEqual(required, [
+    ['scripts/devnet-publish-helpers.sh', 'install'],
+    ['scripts/audit-dial-protocol.mjs', 'build-output:tools/unmapped'],
+  ]);
+  for (const [file, text] of required) {
+    assert.equal(requirementCoveredByPlan(text, pullRequestPlan([change(file)]), file), false, `${text} ${file}`);
+  }
+});

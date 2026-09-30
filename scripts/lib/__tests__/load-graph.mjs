@@ -5,10 +5,10 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
-import { analyzeShell, commandFiles, isShellScript, packageScriptEdges, readWorkspaces, workspaceClosure } from './ci-execution-graph.mjs';
+import { analyzeShell, commandFiles, isShellScript, packageScriptEdges, workspaceCatalog, workspaceClosure } from './ci-execution-graph.mjs';
 import { REPO_ROOT } from './ci-plan-fixtures.mjs';
 
-export { readWorkspaces, workspaceClosure };
+export { workspaceCatalog, workspaceClosure };
 
 const isRepoFile = (candidate) => fs.statSync(path.join(REPO_ROOT, candidate), { throwIfNoEntry: false })?.isFile() === true;
 const isRepoDirectory = (candidate) => fs.statSync(path.join(REPO_ROOT, candidate), { throwIfNoEntry: false })?.isDirectory() === true;
@@ -284,7 +284,7 @@ export function loadReferences(file, source) {
 // calls against them; read once.
 let repository;
 const repositoryManifests = () => repository ??= {
-  workspaces: readWorkspaces(),
+  workspaces: workspaceCatalog(),
   rootManifest: JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')),
 };
 
@@ -355,7 +355,7 @@ export function dependenciesOf(file, source) {
 // maps it to the files it reads by name from a directory the trace cannot
 // resolve.
 export function traceLaneLoads(seeds, { read = readRepoFile } = {}) {
-  const workspaces = readWorkspaces();
+  const workspaces = workspaceCatalog();
   const { workspaceByName } = workspaces;
   const closures = new Map();
   const closureOf = (workspace) => closures.get(workspace) ?? closures.set(workspace, workspaceClosure([workspace], workspaces)).get(workspace);

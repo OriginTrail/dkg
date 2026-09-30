@@ -27,7 +27,7 @@ import { INSTALL_HOOK_INPUTS } from '../ci-routing.mjs';
 import { PROGRAM_CHILD_COMMANDS, workflowExecution } from './ci-execution-graph.mjs';
 import { SUBCOMMAND_CHILD_COMMANDS } from '../../release-packages.mjs';
 import { BROWSER_SUITE_DEFERRED, jobLane, jobRequirement, laneSeeds, requirement, requirementCoveredByPlan } from './lane-entrypoints.mjs';
-import { loadReferences, packageImports, traceLaneLoads, workspaceClosure } from './load-graph.mjs';
+import { loadReferences, packageImports, traceLaneLoads, workspaceCatalog, workspaceClosure } from './load-graph.mjs';
 
 // The workspaces that `files` import by package name, plus everything those
 // workspaces depend on: what code outside the package lanes compiles against.
@@ -177,16 +177,10 @@ test('every pnpm workspace manifest is compared field by field or keeps full CI'
   // Manifests are install inputs. Package roots are compared field by field
   // (see the test above); every other workspace pnpm installs - devnet
   // suites, CLI test fixtures - must keep the full profile.
-  const { packages: globs } = parse(fs.readFileSync(path.join(REPO_ROOT, 'pnpm-workspace.yaml'), 'utf8'));
-  const directories = globs.flatMap((glob) => (glob.endsWith('/*')
-    ? fs.readdirSync(path.join(REPO_ROOT, glob.slice(0, -2)), { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
-      .map((entry) => `${glob.slice(0, -2)}/${entry.name}`)
-    : [glob]));
   let checked = 0;
-  for (const directory of directories) {
+  for (const directory of workspaceCatalog().manifests.keys()) {
     const manifest = `${directory}/package.json`;
-    if (!fs.existsSync(path.join(REPO_ROOT, manifest)) || Object.hasOwn(WORKSPACE_RULES, directory)) continue;
+    if (Object.hasOwn(WORKSPACE_RULES, directory)) continue;
     assert.equal(pullRequestPlan([change(manifest)]).mode, 'full', manifest);
     checked++;
   }
