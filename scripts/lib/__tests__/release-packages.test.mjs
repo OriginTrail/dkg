@@ -725,17 +725,62 @@ test('findMissingCliPackAssets runs npm pack in the cli package dir (correct cwd
   assert.equal(seenCwd, path.join(root, 'packages', 'cli'));
 }));
 
+// The install guards verify-pack checks first: both preinstall hooks and the
+// CLI's guard script.
+function writeInstallGuards(root) {
+  writePackage(root, '.', { name: 'dkg-v10', version: '1.2.3', private: true, scripts: { preinstall: NODE_SQLITE_INSTALL_GUARD.rootCommand } });
+  writePackage(root, 'packages/cli', { name: '@origintrail-official/dkg', version: '1.2.3', scripts: { preinstall: NODE_SQLITE_INSTALL_GUARD.cliCommand } });
+  const guard = path.join(root, 'packages', 'cli', ...NODE_SQLITE_INSTALL_GUARD.cliAsset.split('/'));
+  fs.mkdirSync(path.dirname(guard), { recursive: true });
+  fs.writeFileSync(guard, '');
+}
+
+// A publishable package that imports node:sqlite without the supported
+// engines range, which verify-pack checks second.
+function writeUndeclaredNodeSqliteConsumer(root) {
+  fs.mkdirSync(path.join(root, 'packages', 'query', 'src'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'packages', 'query', 'src', 'index.js'), "import 'node:sqlite';\n");
+}
+
+const refusePack = () => {
+  throw new Error('verify-pack ran the pack after a failed check');
+};
+
+test('verify-pack stops at a missing install guard, before the engines check and the pack', () => withFixture((root) => {
+  // The engines range is wrong too: the install guards are checked first, so
+  // only their violations are returned, and nothing is packed.
+  writeCliPackFixture(root);
+  writeUndeclaredNodeSqliteConsumer(root);
+  assert.equal(findNodeSqliteEngineViolations(root).length, 1);
+  assert.deepEqual(verifyPack({ rootDir: root, runner: refusePack }), {
+    installGuardViolations: findNodeSqliteInstallGuardViolations(root),
+    runtimeViolations: [],
+    missing: [],
+  });
+  assert.deepEqual(findNodeSqliteInstallGuardViolations(root).map(({ path: file }) => file), [
+    'package.json',
+    'packages/cli/package.json',
+    'packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+  ]);
+}));
+
+test('verify-pack stops at a wrong node:sqlite engines range, before the pack', () => withFixture((root) => {
+  writeCliPackFixture(root);
+  writeInstallGuards(root);
+  writeUndeclaredNodeSqliteConsumer(root);
+  const { installGuardViolations, runtimeViolations, missing } = verifyPack({ rootDir: root, runner: refusePack });
+  assert.deepEqual(installGuardViolations, []);
+  assert.deepEqual(runtimeViolations.map(({ name, actual }) => [name, actual]), [['@origintrail-official/dkg-query', undefined]]);
+  assert.deepEqual(missing, []);
+}));
+
 test('verify-pack runs exactly the child commands it declares to the CI routing guard', () => withFixture((root) => {
   // SUBCOMMAND_CHILD_COMMANDS is what the routing guard's execution graph
   // reads for `release-packages.mjs verify-pack` (its route to the CLI's
   // prepack), so the subcommand must run those commands and no others. The
   // fixture passes the install-guard and engine checks so the pack runs.
   writeCliPackFixture(root);
-  writePackage(root, '.', { name: 'dkg-v10', version: '1.2.3', private: true, scripts: { preinstall: NODE_SQLITE_INSTALL_GUARD.rootCommand } });
-  writePackage(root, 'packages/cli', { name: '@origintrail-official/dkg', version: '1.2.3', scripts: { preinstall: NODE_SQLITE_INSTALL_GUARD.cliCommand } });
-  const guard = path.join(root, 'packages', 'cli', ...NODE_SQLITE_INSTALL_GUARD.cliAsset.split('/'));
-  fs.mkdirSync(path.dirname(guard), { recursive: true });
-  fs.writeFileSync(guard, '');
+  writeInstallGuards(root);
   const observed = [];
   const runner = (command, args, { cwd }) => {
     observed.push({ command, args, cwd: path.relative(root, cwd).split(path.sep).join('/') });
