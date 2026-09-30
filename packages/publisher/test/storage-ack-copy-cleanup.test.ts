@@ -222,6 +222,28 @@ describe('StorageACK copy removal', () => {
     expect(update.mock.calls[0]![0]).not.toMatch(/\bSELECT\b|\bMAX\s*\(|\bEXISTS\b/i);
   });
 
+  // Blazegraph's regular expressions are Java's, where `$` also matches before a trailing line
+  // terminator: `"5\n"^^xsd:integer` would pass `^[1-9][0-9]*$` and be compared as a two-digit
+  // version, deleting copies above the boundary. Oxigraph is strict, so the behavior cannot be
+  // seen here; pin the generated text instead.
+  it('validates a version without a $-anchored pattern, which Blazegraph lets match before a line terminator', async () => {
+    const store = await open(operation('cleaned', 'share-own', UAL, 1), ack('a'));
+    const update = vi.spyOn(store, 'update');
+    await clear(store, ['cleaned']);
+    const text = update.mock.calls[0]![0] as string;
+    const patterns = [...text.matchAll(/REGEX\(STR\([^)]*\),\s*"((?:[^"\\]|\\.)*)"\)/g)].map(match => match[1]!);
+    expect(patterns.length, 'the version filters must use REGEX').toBeGreaterThanOrEqual(4);
+    for (const pattern of patterns) expect(pattern, `pattern ${pattern}`).not.toContain('$');
+  });
+
+  it('does not use a cleaned version that ends in a line terminator as a boundary', async () => {
+    const store = await open(
+      operation('cleaned', 'share-own', UAL, `"5\\n"^^<${INTEGER}>`),
+      ack('v3', 3), ack('v9', 9), ack('v12', 12),
+    );
+    expect(await removed(store, ['cleaned'])).toEqual([]);
+  });
+
   it('refuses an IRI that cannot be written into an update, and issues nothing', async () => {
     const store = await open(operation('cleaned', 'share-own', UAL, 1), ack('a'));
     const update = vi.spyOn(store, 'update');

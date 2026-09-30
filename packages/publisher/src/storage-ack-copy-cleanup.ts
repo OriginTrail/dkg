@@ -50,9 +50,14 @@ function assetOperationPattern(operation: string, shareId: string, version: stri
 /**
  * A canonical positive integer literal: the form every writer emits (`"<BigInt>"^^xsd:integer`).
  * Anything else has no usable version, so it is neither a boundary nor a discharged copy.
+ *
+ * The pattern deliberately has no `$` anchor: on Blazegraph (Java regular expressions) `$` also
+ * matches before a trailing line terminator, so `"5\n"^^xsd:integer` would pass `^[1-9][0-9]*$` and
+ * be compared as a two-digit version, deleting copies numerically above the boundary. Requiring a
+ * leading non-zero digit and no character other than a digit is strict on every engine.
  */
 const canonicalVersion = (variable: string): string =>
-  `DATATYPE(?${variable}) = <${XSD_INTEGER}> && REGEX(STR(?${variable}), "^[1-9][0-9]*$")`;
+  `DATATYPE(?${variable}) = <${XSD_INTEGER}> && REGEX(STR(?${variable}), "^[1-9]") && !REGEX(STR(?${variable}), "[^0-9]")`;
 
 /**
  * The one update that removes every discharged copy of `kaUal`.

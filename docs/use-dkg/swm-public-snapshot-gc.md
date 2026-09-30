@@ -132,8 +132,12 @@ removed. Versions are compared as canonical decimal strings (by length, then
 digit by digit), so the boundary is exact for any positive assertion version:
 beyond 2^53 a JavaScript number is inexact, and beyond 2^63 - 1 a numeric
 comparison in the store is no longer supported on Oxigraph. A version is usable
-when it is a canonical `xsd:integer` literal, which is what every writer emits;
-any other form is neither a boundary nor a discharged copy. A later version's
+when the store reads it as a canonical positive integer (`xsd:integer` with only
+digits and no leading zero, which is what every writer emits); a literal that is
+not one is neither a boundary nor a discharged copy. Which other spellings a
+store still folds to an integer (a datatype such as `xsd:int`, a leading `+` or
+zero) depends on the store, and none of them is ever treated as a larger version
+than it is. A later version's
 copy, another asset's copy, any other kind of operation and the cleaned
 operations themselves keep counting as references. Without a usable version
 among the cleaned operations there is no boundary, and nothing is removed.
@@ -142,9 +146,10 @@ The update is bounded on the client side (10 seconds, with no abort signal
 handed to the store, as for the other cleanup queries). An update that fails, is
 refused or times out, or a store that cannot run an update, leaves the rows (and
 so the file) in place and logs one warning. Removing the rows is the store's
-cost: measured, 700 copies take tens of milliseconds on Oxigraph and about 1.4
-seconds on Blazegraph, and 4,000 copies about 20 seconds on Blazegraph, so an
-unusually large set on a Blazegraph node can outlast the bound. Then the warning
+cost: measured, 700 copies take tens of milliseconds on Oxigraph and seconds on
+Blazegraph, and 4,000 copies on the order of ten seconds or more on Blazegraph
+(machine dependent, and about the same as removing them one page at a time), so
+an unusually large set on a Blazegraph node can outlast the bound. Then the warning
 is logged, the cleanup carries on, and the copies stay unless the store still
 completes the update.
 
