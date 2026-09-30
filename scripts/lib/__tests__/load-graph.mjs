@@ -18,9 +18,9 @@ export function readWorkspaces() {
 }
 
 // `roots` plus every workspace they depend on (dependencies and
-// devDependencies). Roots that are not workspaces are ignored.
-export function workspaceClosure(roots) {
-  const { manifests, workspaceByName } = readWorkspaces();
+// devDependencies), in `workspaces` ({ manifests, workspaceByName }, by
+// default the repository's). Roots that are not workspaces are ignored.
+export function workspaceClosure(roots, { manifests, workspaceByName } = readWorkspaces()) {
   const queue = [...roots];
   const closure = new Set();
   while (queue.length) {
@@ -369,9 +369,10 @@ export function dependenciesOf(file, source) {
 // module loads it computes and the script paths it assembles at run time,
 // which the trace cannot follow.
 export function traceLaneLoads(seeds, { read = readRepoFile } = {}) {
-  const { workspaceByName } = readWorkspaces();
+  const workspaces = readWorkspaces();
+  const { workspaceByName } = workspaces;
   const closures = new Map();
-  const closureOf = (workspace) => closures.get(workspace) ?? closures.set(workspace, workspaceClosure([workspace])).get(workspace);
+  const closureOf = (workspace) => closures.get(workspace) ?? closures.set(workspace, workspaceClosure([workspace], workspaces)).get(workspace);
   const needsOf = (map, key) => map.get(key) ?? map.set(key, new Map()).get(key);
   const add = (map, key, requirements, via) => {
     const entry = needsOf(map, key);

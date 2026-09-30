@@ -63,7 +63,8 @@ function simpleCommands(text, cwd) {
 // `*` pattern), `<name>...` with its dependencies, `...<name>` with its
 // dependents, `./<dir>` or `{<dir>}`. Any other selector throws, so a new
 // form fails the guard instead of hiding what a job runs.
-function selectWorkspaces(selector, cwd, { manifests, workspaceByName }) {
+function selectWorkspaces(selector, cwd, workspaces) {
+  const { manifests, workspaceByName } = workspaces;
   const withDependencies = selector.endsWith('...');
   const withDependents = selector.startsWith('...');
   const core = selector.replace(/^\.\.\./, '').replace(/\.\.\.$/, '');
@@ -76,9 +77,9 @@ function selectWorkspaces(selector, cwd, { manifests, workspaceByName }) {
   } else {
     throw new Error(`unsupported pnpm filter selector: ${selector}`);
   }
-  if (withDependencies) return [...workspaceClosure(named)];
+  if (withDependencies) return [...workspaceClosure(named, workspaces)];
   if (withDependents) {
-    return [...manifests.keys()].filter((workspace) => named.some((target) => workspaceClosure([workspace]).has(target)));
+    return [...manifests.keys()].filter((workspace) => named.some((target) => workspaceClosure([workspace], workspaces).has(target)));
   }
   return named;
 }
