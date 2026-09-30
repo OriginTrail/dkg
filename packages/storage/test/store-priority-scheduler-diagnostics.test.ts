@@ -5,67 +5,80 @@ import {
   isStoreSchedulerBusyError,
 } from '../src/store-priority-scheduler.js';
 import { STORE_WORK_PRIORITIES } from '../src/triple-store.js';
-import { createRateLimitedStoreTimeoutDiagnosticSink } from '../src/store-scheduler-timeout-diagnostics.js';
+import { createRateLimitedStoreTimeoutDiagnosticReporter } from '../src/store-scheduler-timeout-diagnostics.js';
+import type { BackpressureSnapshot } from '@origintrail-official/dkg-core';
+
+function snapshot(active: Array<{ operation: string; oldestAgeMs: number }> = [
+  { operation: 'active.private-work', oldestAgeMs: 42 },
+]): BackpressureSnapshot {
+  return { lanes: [{
+    lane: 'background',
+    activeOperations: active.map((entry) => ({ ...entry, count: 1 })),
+  }] } as BackpressureSnapshot;
+}
 
 describe('store scheduler busy diagnostics', () => {
   it('rate-limits repeated waiter diagnostics and bounds retained keys', () => {
     const emit = vi.fn();
     let now = 0;
-    const sink = createRateLimitedStoreTimeoutDiagnosticSink({
+    const report = createRateLimitedStoreTimeoutDiagnosticReporter({
       emit, now: () => now, intervalMs: 100, maxKeys: 2,
     });
-    const diagnostic = (operation: string) => ({
-      waiting: { priority: 'normal' as const, operation },
-      activeAtTimeout: [{
-        priority: 'background' as const, operation: 'active.private-work', count: 1, oldestAgeMs: 42,
-      }],
-    });
-    sink({ ...diagnostic('empty'), activeAtTimeout: [] });
-    sink(diagnostic('first'));
-    sink(diagnostic('first'));
-    expect(emit).toHaveBeenCalledTimes(1);
+    const waiting = (operation: string) => ({ priority: 'normal' as const, operation });
+    report(waiting('empty'), () => snapshot([]));
+    report(waiting('empty'), () => snapshot());
+    report(waiting('first'), () => snapshot());
+    report(waiting('first'), () => snapshot());
+    expect(emit).toHaveBeenCalledTimes(2);
     now = 101;
-    sink(diagnostic('first'));
-    sink(diagnostic('second'));
-    sink(diagnostic('third'));
-    sink(diagnostic('first'));
+    report(waiting('first'), () => snapshot());
+    report(waiting('second'), () => snapshot());
+    report(waiting('third'), () => snapshot());
+    report(waiting('first'), () => snapshot());
     expect(emit.mock.calls.map(([event]) => event.waiting.operation)).toEqual([
-      'first', 'first', 'second', 'third', 'first',
+      'empty', 'first', 'first', 'second', 'third', 'first',
     ]);
   });
   it('caps warning volume when rotating waiter labels exceed the key cache', async () => {
     const emit = vi.fn(async () => { throw new Error('telemetry unavailable'); });
     let now = 0;
-    const sink = createRateLimitedStoreTimeoutDiagnosticSink({
+    const report = createRateLimitedStoreTimeoutDiagnosticReporter({
       emit, now: () => now, intervalMs: 100, maxKeys: 2, maxEmitsPerWindow: 3,
     });
     for (let cycle = 0; cycle < 2; cycle++) {
-      for (let key = 0; key < 5; key++) sink({
-        waiting: { priority: 'normal', operation: `op-${key}` },
-        activeAtTimeout: [{
-          priority: 'normal', operation: 'active', count: 1, oldestAgeMs: 10,
-        }],
-      });
+      for (let key = 0; key < 5; key++) report(
+        { priority: 'normal', operation: `op-${key}` },
+        () => snapshot([{ operation: 'active', oldestAgeMs: 10 }]),
+      );
     }
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(emit).toHaveBeenCalledTimes(3);
     now = 101;
-    sink({
-      waiting: { priority: 'normal', operation: 'new' },
-      activeAtTimeout: [{ priority: 'normal', operation: 'active', count: 1, oldestAgeMs: 10 }],
-    });
+    report({ priority: 'normal', operation: 'new' }, () => snapshot());
     expect(emit).toHaveBeenCalledTimes(4);
   });
+  it('does not collect a snapshot for suppressed warnings', () => {
+    const collect = vi.fn(() => snapshot());
+    const emit = vi.fn();
+    const report = createRateLimitedStoreTimeoutDiagnosticReporter({
+      emit, now: () => 0, intervalMs: 100,
+    });
+    for (let index = 0; index < 1000; index++) {
+      report({ priority: 'normal', operation: 'same-waiter' }, collect);
+    }
+    expect(collect).toHaveBeenCalledTimes(1);
+    expect(emit).toHaveBeenCalledTimes(1);
+  });
   it('swallows synchronous diagnostic delivery failure without changing timeout handling', () => {
-    const sink = createRateLimitedStoreTimeoutDiagnosticSink({
+    const report = createRateLimitedStoreTimeoutDiagnosticReporter({
       emit: () => { throw new Error('telemetry unavailable'); },
       now: () => 0,
       intervalMs: 100,
     });
-    expect(() => sink({
-      waiting: { priority: 'normal', operation: 'query' },
-      activeAtTimeout: [{ priority: 'background', operation: 'scan', count: 1, oldestAgeMs: 10 }],
-    })).not.toThrow();
+    expect(() => report(
+      { priority: 'normal', operation: 'query' },
+      () => snapshot([{ operation: 'scan', oldestAgeMs: 10 }]),
+    )).not.toThrow();
   });
   it('exports a distinguishable busy error type for boundary mapping', () => {
     const error = new StoreSchedulerBusyError('queue_full', 'ack', 'storage-ack.read');
@@ -196,6 +209,46 @@ describe('store scheduler busy diagnostics', () => {
     } finally {
       releases.forEach((release) => release());
       await Promise.all(blockers);
+      vi.useRealTimers();
+    }
+  });
+
+  it('collects one diagnostic snapshot for repeated timeouts and clears every waiter', async () => {
+    vi.useFakeTimers();
+    const diagnosticSink = vi.fn();
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 1,
+      ackReservedSlots: 0,
+      healthReservedSlots: 0,
+      backgroundReservedSlots: 0,
+      queueLimits: 3,
+      queueWaitTimeoutMs: 20,
+      timeoutDiagnosticSink: diagnosticSink,
+    });
+    let release: (() => void) | undefined;
+    const blocker = scheduler.run('normal', 'active.work', () => new Promise<void>((resolve) => {
+      release = resolve;
+    }));
+    const collect = vi.spyOn(scheduler, 'getBackpressureSnapshot');
+    try {
+      const outcomes = Array.from({ length: 3 }, () =>
+        scheduler.run('normal', 'repeated.waiter', async () => undefined)
+          .then(() => undefined, (error: unknown) => error));
+      await vi.advanceTimersByTimeAsync(20);
+      const errors = await Promise.all(outcomes);
+      for (const error of errors) {
+        expect(error).toMatchObject({
+          code: 'STORE_SCHEDULER_BUSY',
+          reason: 'queue_wait_timeout',
+        });
+      }
+      expect(collect).toHaveBeenCalledTimes(1);
+      expect(diagnosticSink).toHaveBeenCalledTimes(1);
+      expect(scheduler.snapshot.normalQueued).toBe(0);
+    } finally {
+      collect.mockRestore();
+      release?.();
+      await blocker;
       vi.useRealTimers();
     }
   });
