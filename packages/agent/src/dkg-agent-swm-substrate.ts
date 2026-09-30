@@ -468,6 +468,57 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   }
 
   /**
+   * Same-instance restart: `start()` has just built a `GossipSubManager` with
+   * no subscriptions (restart contract on {@link DKGAgentBase}), yet
+   * `subscribedContextGraphs` still says which graphs were live. Durable rows
+   * are replayed by `rehydrateContextGraphsFromDurableState()` behind its
+   * authority gate; this re-arms the remaining live ones, the process-local
+   * subscriptions (on-demand, or no subscription store) that no durable row
+   * can bring back. Returns the number of graphs re-armed.
+   *
+   * Never revives what rehydration decided about: a row it accounts for, or
+   * left dormant (authority denied or unavailable, activation cap, the
+   * rehydration kill-switch). The restricted `pendingMeta` bootstrap is skipped
+   * for the same reason: it holds no live gossip until its authority resolves.
+   * Subscriptions and sync scope are only re-wired, never re-persisted.
+   */
+  restoreLiveContextGraphGossipSubscriptions(this: DKGAgent): number {
+    const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
+    let restored = 0;
+    for (const contextGraphId of [...this.subscribedContextGraphs.keys()]) {
+      const subscription = this.subscribedContextGraphs.get(contextGraphId);
+      if (
+        subscription?.subscribed !== true
+        || subscription.pendingMeta === true
+        || systemContextGraphs.has(contextGraphId)
+        || this.gossipRegistered.has(contextGraphId)
+        || this.contextGraphSubscriptionRehydrationAccountedIds.has(contextGraphId)
+        || this.contextGraphSubscriptionDormancyById.has(contextGraphId)
+      ) continue;
+      try {
+        this.subscribeToContextGraph(contextGraphId, {
+          trackSyncScope: false,
+          persist: false,
+          syncMode: subscription.syncMode,
+        });
+        restored += 1;
+      } catch (err) {
+        this.log.warn(
+          createOperationContext('system'),
+          `Failed to re-arm gossip for "${contextGraphId}" after restart: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    if (restored > 0) {
+      this.log.info(
+        createOperationContext('system'),
+        `Re-armed gossip for ${restored} process-local context-graph subscription(s) after restart`,
+      );
+    }
+    return restored;
+  }
+
+  /**
    * Install one subscription after alias adoption: the row, its sync scope
    * and its gossip handlers, or the RFC-64 catalog-owned equivalent.
    */
