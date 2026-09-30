@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'vitest';
+import { contextGraphWorkspaceGraphUri } from '@origintrail-official/dkg-core';
+import { computeFlatKCRootV10 } from '@origintrail-official/dkg-publisher';
 import {
   asReadSnapshotCapability,
   createTripleStore,
@@ -7,6 +9,7 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
+import { FinalizationHandler } from '../src/finalization-handler.js';
 
 describe('read snapshot through the agent store wrapper', () => {
   it('preserves the production Blazegraph decorator chain capability', async () => {
@@ -101,6 +104,74 @@ describe('read snapshot through the agent store wrapper', () => {
       const store = createListContextGraphsCacheInvalidatingStore(opaque, () => undefined);
       expect(asReadSnapshotCapability(store)).toBeNull();
       expect('withReadSnapshot' in store).toBe(false);
+    } finally {
+      await inner.close();
+    }
+  });
+
+  it('uses the root-indexed candidate in chain reconciliation before a complete-family read', async () => {
+    const inner = await createTripleStore({ backend: 'oxigraph' });
+    const snapshotQueries: string[] = [];
+    const ordinaryQueries: string[] = [];
+    const capable = new Proxy(inner, {
+      get(target, property) {
+        if (property === 'innerStore') return undefined;
+        if (property === 'withReadSnapshot') {
+          const withReadSnapshot: ReadSnapshotCapability['withReadSnapshot'] = async (read) => read({
+            query: (sparql, options) => {
+              snapshotQueries.push(sparql);
+              return inner.query(sparql, options);
+            },
+            listGraphs: (options) => inner.listGraphs(options),
+            listGraphsByPrefix: (prefix, options) => inner.listGraphsByPrefix!(prefix, options),
+          });
+          return withReadSnapshot;
+        }
+        if (property === 'query') return (sparql: string, options?: Parameters<TripleStore['query']>[1]) => {
+          ordinaryQueries.push(sparql);
+          return inner.query(sparql, options);
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+      has(target, property) {
+        if (property === 'innerStore') return false;
+        if (property === 'withReadSnapshot') return true;
+        return Reflect.has(target, property);
+      },
+    });
+    const store = createListContextGraphsCacheInvalidatingStore(capable, () => undefined);
+    const contextGraphId = 'snapshot-pilot';
+    const bucket = contextGraphWorkspaceGraphUri(contextGraphId);
+    const root = 'urn:dkg:test:chain-root';
+    const quad = {
+      graph: `${bucket}/author/1`, subject: root,
+      predicate: 'urn:dkg:test:value', object: '"verified"',
+    };
+    try {
+      await store.insert([
+        quad,
+        ...Array.from({ length: 50 }, (_, i) => ({
+          graph: `${bucket}/author/${i + 2}`,
+          subject: `urn:dkg:test:decoy:${i}`,
+          predicate: 'urn:dkg:test:value', object: '"decoy"',
+        })),
+      ]);
+      const expected = computeFlatKCRootV10([{ ...quad, graph: '' }], []);
+      const handler = new FinalizationHandler(store, undefined);
+      const chainRead = handler as unknown as {
+        getSharedMemoryQuadsForRoots(
+          contextGraphId: string, rootEntities: string[], expectedMerkleRoot: Uint8Array,
+          allowGeneratedCatalogFloor: boolean,
+        ): Promise<{ quads: typeof quad[]; matched: typeof quad[] | null }>;
+      };
+      const result = await chainRead.getSharedMemoryQuadsForRoots(
+        contextGraphId, [root], expected, false,
+      );
+      expect(result.matched).toEqual([{ ...quad, graph: '' }]);
+      expect(snapshotQueries.some((query) => query.includes('SELECT DISTINCT ?g'))).toBe(true);
+      expect(snapshotQueries.some((query) => query.includes('VALUES ?g {'))).toBe(true);
+      expect(ordinaryQueries.some((query) => query.includes('VALUES ?g {'))).toBe(false);
     } finally {
       await inner.close();
     }
