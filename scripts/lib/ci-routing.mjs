@@ -371,6 +371,75 @@ export const PATH_TRIGGERS = Object.freeze([
 // repository-script tests and test-inventory checks cover these files, and for
 // routes with no lanes they are the only CI consumer (the suites are manual or
 // have their own workflow).
+// Repository scripts known to run only in the shared build job or by hand, by
+// family: exact script names, file-name prefixes with the extensions they
+// take, and whole directories under scripts/. The load-closure test fails if
+// a lane reads or runs one, or assembles a script path it cannot resolve, and
+// an inventory test requires every name to exist and every prefix and
+// directory to be the first route for an existing script.
+export const BUILD_ONLY_SCRIPTS = Object.freeze([
+  {
+    reason: 'devnet suites and operations run by hand, checked by the shared build job',
+    prefixes: [{ prefix: 'devnet-', extensions: ['sh', 'mjs'] }],
+    files: [
+      '_devnet-full-sweep.sh',
+      'dkg-claude.sh',
+      'epcis-smoke-test.sh',
+      'libp2p-soak-test.sh',
+      'publisher-smoke-test.sh',
+      'seed-demo.sh',
+      'swm-soak-orchestrate.sh',
+      'swm-soak-test.sh',
+      'two-laptop-test.sh',
+      'v10-rc-validation.sh',
+    ],
+  },
+  {
+    reason: 'repository checks the shared build job runs',
+    prefixes: [{ prefix: 'audit-', extensions: ['mjs', 'test.mjs'] }],
+    files: ['check-npm-metadata.mjs', 'release-packages.mjs', 'verify-w1-packet.mjs'],
+  },
+  {
+    reason: 'operator and data tools run by hand, checked by the shared build job',
+    prefixes: [
+      { prefix: 'debug-neuroweb', extensions: ['ts'] },
+      { prefix: 'dkg-v10-', extensions: ['mjs'] },
+      { prefix: 'import-', extensions: ['mjs'] },
+      { prefix: 'publisher-epoch-snapshot', extensions: ['ts'] },
+    ],
+    files: [
+      'backfill-rs-percgid-meta.mjs',
+      'chain-analysis.ts',
+      'distribute-publisher-trac.ts',
+      'drain-swm-duplicates.mjs',
+      'epoch-snapshot.ts',
+      'generate-aggregates.ts',
+      'generate-random-findings-nt.mjs',
+      'redistribute-memory.mjs',
+      'register-laptop2-agent.mjs',
+      'seed-dkg-code-project.mjs',
+      'update-repo-refs.js',
+      'verify-addresses.ts',
+      'verify-agent-provenance-deployment.mjs',
+    ],
+    directories: ['load', 'repro', 'testnet-publish-stress'],
+  },
+]);
+
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// The route pattern for scripts under scripts/: an exact name, a prefix
+// followed by word characters or hyphens and one of its extensions, or
+// anything under a directory.
+export function scriptsPattern({ files = [], prefixes = [], directories = [] }) {
+  const alternatives = [
+    ...files.map(escapeRegExp),
+    ...prefixes.map(({ prefix, extensions }) => `${escapeRegExp(prefix)}[\\w-]*\\.(?:${extensions.map(escapeRegExp).join('|')})`),
+    ...directories.map((directory) => `${escapeRegExp(directory)}\\/.+`),
+  ];
+  return new RegExp(`^scripts\\/(?:${alternatives.join('|')})$`);
+}
+
 export const SUPPORT_PATH_ROUTES = Object.freeze([
   {
     // The repository-script tests (and their helpers and fixtures) run only in
@@ -390,7 +459,7 @@ export const SUPPORT_PATH_ROUTES = Object.freeze([
     // The EVM integration runner every EVM scope uses, and the runtime-asset
     // copy the CLI package's build and prepack run, which everything using the
     // built CLI depends on.
-    pattern: /^scripts\/(?:test-evm-integration\.sh|run-evm-integration\.mjs|copy-cli-runtime-assets\.mjs)$/,
+    pattern: scriptsPattern({ files: ['test-evm-integration.sh', 'run-evm-integration.mjs', 'copy-cli-runtime-assets.mjs'] }),
     full: 'Global CI input changed',
   },
   {
@@ -410,28 +479,7 @@ export const SUPPORT_PATH_ROUTES = Object.freeze([
     lanes: ['tornado_core'],
     reason: 'the chain vendored-ABI test runs the ABI sync script',
   },
-  // Repository scripts known to run only in the shared build job or by hand,
-  // by family. The load-closure test fails if a lane reads or runs one, or
-  // assembles a script path it cannot resolve, and each family must still
-  // name an existing script.
-  {
-    // Devnet suites and operations run by hand, in no CI job.
-    pattern: /^scripts\/(?:devnet-[\w.-]+\.(?:sh|mjs)|(?:_devnet-full-sweep|epcis-smoke-test|libp2p-soak-test|publisher-smoke-test|seed-demo|swm-soak-orchestrate|swm-soak-test|two-laptop-test|v10-rc-validation|dkg-claude)\.sh)$/,
-    lanes: [],
-    reason: 'devnet suites and operations run by hand, checked by the shared build job',
-  },
-  {
-    // Repository checks the shared build job runs, and their tests.
-    pattern: /^scripts\/(?:audit-[\w-]+(?:\.test)?|check-npm-metadata|release-packages|verify-w1-packet)\.mjs$/,
-    lanes: [],
-    reason: 'repository checks the shared build job runs',
-  },
-  {
-    // Operator, analysis and data tools run by hand.
-    pattern: /^scripts\/(?:(?:chain-analysis|debug-neuroweb[\w-]*|distribute-publisher-trac|epoch-snapshot|generate-aggregates|publisher-epoch-snapshot[\w-]*|verify-addresses)\.ts|(?:backfill-rs-percgid-meta|dkg-v10-[\w-]+|drain-swm-duplicates|generate-random-findings-nt|import-[\w-]+|redistribute-memory|register-laptop2-agent|seed-dkg-code-project|verify-agent-provenance-deployment)\.mjs|update-repo-refs\.js|(?:load|repro|testnet-publish-stress)\/.+)$/,
-    lanes: [],
-    reason: 'operator and data tools run by hand, checked by the shared build job',
-  },
+  ...BUILD_ONLY_SCRIPTS.map((family) => ({ pattern: scriptsPattern(family), lanes: [], reason: family.reason })),
   {
     // Any other script, including a new one: its consumers are not known, so it
     // fails closed (the build, install hooks and other workflows' scripts too).
