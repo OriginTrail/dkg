@@ -33,6 +33,29 @@ describe('store scheduler busy diagnostics', () => {
       'first', 'first', 'second', 'third', 'first',
     ]);
   });
+  it('caps warning volume when rotating waiter labels exceed the key cache', async () => {
+    const emit = vi.fn(async () => { throw new Error('telemetry unavailable'); });
+    let now = 0;
+    const sink = createRateLimitedStoreTimeoutDiagnosticSink({
+      emit, now: () => now, intervalMs: 100, maxKeys: 2, maxEmitsPerWindow: 3,
+    });
+    for (let cycle = 0; cycle < 2; cycle++) {
+      for (let key = 0; key < 5; key++) sink({
+        waiting: { priority: 'normal', operation: `op-${key}` },
+        activeAtTimeout: [{
+          priority: 'normal', operation: 'active', count: 1, oldestAgeMs: 10,
+        }],
+      });
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(emit).toHaveBeenCalledTimes(3);
+    now = 101;
+    sink({
+      waiting: { priority: 'normal', operation: 'new' },
+      activeAtTimeout: [{ priority: 'normal', operation: 'active', count: 1, oldestAgeMs: 10 }],
+    });
+    expect(emit).toHaveBeenCalledTimes(4);
+  });
   it('exports a distinguishable busy error type for boundary mapping', () => {
     const error = new StoreSchedulerBusyError('queue_full', 'ack', 'storage-ack.read');
     expect(error).toBeInstanceOf(Error);
@@ -144,55 +167,58 @@ describe('store scheduler busy diagnostics', () => {
     },
   );
 
-  it.each(['sink', 'snapshot'] as const)(
+  it.each(['sink', 'async-sink', 'snapshot'] as const)(
     'still rejects and clears queue pressure when diagnostic %s fails', async (failure) => {
-    vi.useFakeTimers();
-    const diagnosticSink = vi.fn(() => {
-      if (failure === 'sink') throw new Error('logger unavailable');
-    });
-    const scheduler = new StorePriorityScheduler({
-      maxConcurrent: 1,
-      ackReservedSlots: 0,
-      healthReservedSlots: 0,
-      backgroundReservedSlots: 0,
-      queueLimits: 1,
-      queueWaitTimeoutMs: 20,
-      timeoutDiagnosticSink: diagnosticSink,
-    });
-    let release: (() => void) | undefined;
-    const blocker = scheduler.run('normal', 'active.private-work', () => new Promise<void>((resolve) => {
-      release = resolve;
-    }));
-    const expired = scheduler.run('normal', 'waiting.read', async () => undefined);
-    const expiredOutcome = expired.then(
-      () => undefined,
-      (error: unknown) => error,
-    );
-    const snapshot = failure === 'snapshot'
-      ? vi.spyOn(scheduler, 'getBackpressureSnapshot').mockImplementation(() => {
-        throw new Error('snapshot unavailable');
-      })
-      : undefined;
-    try {
-      await vi.advanceTimersByTimeAsync(20);
-      const error = await expiredOutcome;
-      expect(error).toMatchObject({
-        code: 'STORE_SCHEDULER_BUSY',
-        reason: 'queue_wait_timeout',
-        outcome: 'not_started',
+      vi.useFakeTimers();
+      const diagnosticSink = vi.fn(() => {
+        if (failure === 'sink') throw new Error('logger unavailable');
+        if (failure === 'async-sink') return Promise.reject(new Error('async logger unavailable'));
       });
-      expect(diagnosticSink).toHaveBeenCalledTimes(failure === 'sink' ? 1 : 0);
-      snapshot?.mockRestore();
-      expect(scheduler.snapshot.normalQueued).toBe(0);
-      expect(scheduler.getBackpressureSnapshot().totals.queued).toBe(0);
-      release?.();
-      await blocker;
-      await expect(scheduler.run('normal', 'recovered.read', async () => 'ok')).resolves.toBe('ok');
-    } finally {
-      snapshot?.mockRestore();
-      release?.();
-      await blocker;
-      vi.useRealTimers();
-    }
-  });
+      const scheduler = new StorePriorityScheduler({
+        maxConcurrent: 1,
+        ackReservedSlots: 0,
+        healthReservedSlots: 0,
+        backgroundReservedSlots: 0,
+        queueLimits: 1,
+        queueWaitTimeoutMs: 20,
+        timeoutDiagnosticSink: diagnosticSink,
+      });
+      let release: (() => void) | undefined;
+      const blocker = scheduler.run('normal', 'active.private-work', () => new Promise<void>((resolve) => {
+        release = resolve;
+      }));
+      const expired = scheduler.run('normal', 'waiting.read', async () => undefined);
+      const expiredOutcome = expired.then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      const snapshot = failure === 'snapshot'
+        ? vi.spyOn(scheduler, 'getBackpressureSnapshot').mockImplementation(() => {
+          throw new Error('snapshot unavailable');
+        })
+        : undefined;
+      try {
+        await vi.advanceTimersByTimeAsync(20);
+        const error = await expiredOutcome;
+        expect(error).toMatchObject({
+          code: 'STORE_SCHEDULER_BUSY',
+          reason: 'queue_wait_timeout',
+          outcome: 'not_started',
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(diagnosticSink).toHaveBeenCalledTimes(failure === 'snapshot' ? 0 : 1);
+        snapshot?.mockRestore();
+        expect(scheduler.snapshot.normalQueued).toBe(0);
+        expect(scheduler.getBackpressureSnapshot().totals.queued).toBe(0);
+        release?.();
+        await blocker;
+        await expect(scheduler.run('normal', 'recovered.read', async () => 'ok')).resolves.toBe('ok');
+      } finally {
+        snapshot?.mockRestore();
+        release?.();
+        await blocker;
+        vi.useRealTimers();
+      }
+    },
+  );
 });

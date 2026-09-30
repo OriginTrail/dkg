@@ -1,4 +1,5 @@
 import type { StoreWorkPriority } from './triple-store.js';
+import { createBoundedKeyedEmitter } from '@origintrail-official/dkg-core';
 
 export interface StoreSchedulerTimeoutDiagnostic {
   waiting: { priority: StoreWorkPriority; operation: string };
@@ -13,26 +14,24 @@ export interface StoreSchedulerTimeoutDiagnostic {
 
 /** Bound repeated timeout warnings while leaving scheduler outcomes independent of logging. */
 export function createRateLimitedStoreTimeoutDiagnosticSink(options: {
-  emit: (diagnostic: StoreSchedulerTimeoutDiagnostic) => void;
+  emit: (diagnostic: StoreSchedulerTimeoutDiagnostic) => void | Promise<void>;
   now?: () => number;
   intervalMs?: number;
   maxKeys?: number;
+  maxEmitsPerWindow?: number;
 }): (diagnostic: StoreSchedulerTimeoutDiagnostic) => void {
-  const lastByWaiter = new Map<string, number>();
-  const now = options.now ?? Date.now;
-  const intervalMs = options.intervalMs ?? 60_000;
-  const maxKeys = options.maxKeys ?? 128;
+  const emit = createBoundedKeyedEmitter<StoreSchedulerTimeoutDiagnostic>({
+    emit: (diagnostic) => options.emit(diagnostic),
+    now: options.now ?? Date.now,
+    intervalMs: options.intervalMs ?? 60_000,
+    cacheMax: options.maxKeys ?? 128,
+    // One outage can create many distinct operation labels. Bound the total
+    // synchronous warning volume as well as the per-label frequency.
+    maxEmitsPerWindow: options.maxEmitsPerWindow ?? 16,
+  });
   return (diagnostic) => {
     if (diagnostic.activeAtTimeout.length === 0) return;
     const key = `${diagnostic.waiting.priority}:${diagnostic.waiting.operation}`;
-    const at = now();
-    const last = lastByWaiter.get(key);
-    if (last !== undefined && at - last < intervalMs) return;
-    if (!lastByWaiter.has(key) && lastByWaiter.size >= maxKeys) {
-      lastByWaiter.delete(lastByWaiter.keys().next().value!);
-    }
-    lastByWaiter.delete(key);
-    lastByWaiter.set(key, at);
-    options.emit(diagnostic);
+    emit(key, () => diagnostic);
   };
 }

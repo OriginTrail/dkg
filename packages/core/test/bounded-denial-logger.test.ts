@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { createBoundedDenialLogger } from '../src/bounded-denial-logger.js';
+import { createBoundedDenialLogger, createBoundedKeyedEmitter } from '../src/bounded-denial-logger.js';
 
 function logger(overrides: { intervalMs?: number; cacheMax?: number } = {}) {
   let now = 0;
@@ -63,5 +63,25 @@ describe('createBoundedDenialLogger', () => {
     logDenial('c', () => 'c again');
 
     expect(lines).toEqual(['a', 'b', 'c', 'a again']);
+  });
+});
+
+describe('createBoundedKeyedEmitter', () => {
+  it('caps high-cardinality emissions across key eviction and observes async failures', async () => {
+    let now = 0;
+    const emit = vi.fn(async () => { throw new Error('logger unavailable'); });
+    const keyed = createBoundedKeyedEmitter<string>({
+      emit, now: () => now, intervalMs: 100, cacheMax: 2,
+      maxEmitsPerWindow: 3,
+    });
+    for (let cycle = 0; cycle < 2; cycle++) {
+      for (let key = 0; key < 5; key++) keyed(`op-${key}`, () => `event-${key}`);
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(emit).toHaveBeenCalledTimes(3);
+    now = 101;
+    keyed('op-4', () => 'next window');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(emit).toHaveBeenCalledTimes(4);
   });
 });

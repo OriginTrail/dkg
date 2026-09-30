@@ -139,7 +139,7 @@ export interface StorePrioritySchedulerOptions {
   queueWaitTimeoutMs?: number;
   now?: () => number;
   /** Observability only. Failures here cannot alter admission outcomes. */
-  timeoutDiagnosticSink?: (diagnostic: StoreSchedulerTimeoutDiagnostic) => void;
+  timeoutDiagnosticSink?: (diagnostic: StoreSchedulerTimeoutDiagnostic) => void | Promise<void>;
 }
 
 interface QueueEntry<T> {
@@ -331,7 +331,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
   private readonly healthReservedSlots: number;
   private readonly queueWaitTimeoutMs: number;
   private readonly now: () => number;
-  private readonly timeoutDiagnosticSink?: (diagnostic: StoreSchedulerTimeoutDiagnostic) => void;
+  private readonly timeoutDiagnosticSink?: (diagnostic: StoreSchedulerTimeoutDiagnostic) => void | Promise<void>;
   private readonly queueLimits: StorePriorityQueueLimits;
   private readonly nonAckLanePolicy: NonAckLanePolicy;
 
@@ -536,10 +536,11 @@ export class StorePriorityScheduler extends ObservableScheduler {
               })))
               .sort((a, b) => b.oldestAgeMs - a.oldestAgeMs)
               .slice(0, 3);
-            this.timeoutDiagnosticSink({
+            const delivery = this.timeoutDiagnosticSink({
               waiting: { priority: normalizedPriority, operation },
               activeAtTimeout,
             });
+            if (delivery) void delivery.catch(() => undefined);
           } catch {
             // Observability cannot alter the timeout outcome or queue cleanup.
           }

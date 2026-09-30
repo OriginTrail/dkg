@@ -82,7 +82,9 @@ describe('respondIfStoreUnavailable', () => {
   it('keeps other active work out of a scheduler-busy HTTP response', () => {
     const res = mockResponse();
     const error = new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'request.read');
-    expect(error).not.toHaveProperty('activeAtTimeout');
+    Object.assign(error, { activeAtTimeout: [{
+      priority: 'normal', operation: 'tenant/acme/private-sync', count: 7, oldestAgeMs: 1234,
+    }] });
     expect(respondIfStoreUnavailable(res, error)).toBe('not_started');
     expect(res.statusCode).toBe(503);
     expect(res.body).not.toContain('tenant/acme/private-sync');
