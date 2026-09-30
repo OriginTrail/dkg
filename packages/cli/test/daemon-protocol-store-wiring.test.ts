@@ -36,7 +36,9 @@ import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
  * involved) and asserts, for the normal boot and shutdown:
  *
  *  - the daemon constructs exactly one `DashboardDB` (the real class, observed
- *    through a counting subclass), and `createProtocolStores` receives that one;
+ *    through a counting subclass installed for the package entry point, so a
+ *    `DashboardDB` built through a deep `dist` import would not be counted; the
+ *    production source has none), and `createProtocolStores` receives that one;
  *  - the agent is handed exactly the stores that composition returned, and they
  *    read the seeded rows back;
  *  - boot leaves the file, its schema and every seeded row untouched, and creates
@@ -50,7 +52,8 @@ import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
  * (`checkCoreRelayPrereqs` is replaced, and the post-start one also relies on
  * the fake agent's fake transport listeners), because the real verdict depends
  * on the host's network interfaces; `core-prereq-check.test.ts` covers the real
- * checker. `process.exit` is stubbed, so what is pinned is the close, not the exit.
+ * checker. `process.exit` is stubbed: the tests assert it was called with the
+ * status the path uses, but the real process termination is not exercised.
  *
  * The composition is observed through its typed results (`createProtocolStores`
  * is wrapped to record what it returns), never through a store's private fields.
