@@ -9255,19 +9255,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphId: string,
     write: () => Promise<void>,
   ): Promise<void> {
-    // The scheduler owns per-context-graph ordering, shutdown drain and bounds;
-    // the revision maps below stay the cancel/supersede layer on top of it.
-    // The returned promise rejects when the write (or admission) fails, so an
-    // awaiting caller sees the failure. The lane keeps draining, so a failed
+    // The scheduler owns per-context-graph ordering, strict non-coalescing,
+    // write-start timing (a microtask after admission), shutdown drain and
+    // bounds; the revision maps below stay the cancel/supersede layer on top of
+    // it. The returned promise rejects when the write (or admission) fails, so
+    // an awaiting caller sees the failure. The lane keeps draining, so a failed
     // write does not stall the next one for this context graph.
-    //
-    // The write starts a microtask after admission, as it did when this was a
-    // promise chain, so a caller finishes its synchronous section before the
-    // store sees the write.
-    const run = this.contextGraphSubscriptionPersistence.enqueue(contextGraphId, async () => {
-      await Promise.resolve();
-      await write();
-    });
+    const run = this.contextGraphSubscriptionPersistence.enqueue(contextGraphId, write);
     // Idle cleanup runs after the caller's own handlers and marks a failure as
     // handled for a caller that drops the promise, as the chain tail did.
     void run.catch(() => undefined).finally(() => {

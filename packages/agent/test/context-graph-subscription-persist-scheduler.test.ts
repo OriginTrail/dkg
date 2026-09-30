@@ -26,6 +26,48 @@ describe('ContextGraphSubscriptionPersistScheduler', () => {
     expect(executed).toEqual(Array.from({ length: 51 }, (_, index) => index));
   });
 
+  it('starts a write a microtask after admission, so the caller finishes its synchronous section first', async () => {
+    const scheduler = new ContextGraphSubscriptionPersistScheduler();
+    const events: string[] = [];
+    const write = scheduler.enqueue('cg', async () => { events.push('write:start'); });
+    events.push('caller-sync-done');
+    expect(events).toEqual(['caller-sync-done']);
+    // One microtask is enough: the write is deferred, not delayed to a macrotask.
+    await Promise.resolve();
+    expect(events).toEqual(['caller-sync-done', 'write:start']);
+    await write;
+  });
+
+  it('defers every write in a lane, including one that reaches the head behind another', async () => {
+    const scheduler = new ContextGraphSubscriptionPersistScheduler();
+    const held = gate();
+    const events: string[] = [];
+    const first = scheduler.enqueue('cg', async () => {
+      events.push('first:start');
+      await held.promise;
+      events.push('first:end');
+    });
+    const second = scheduler.enqueue('cg', async () => { events.push('second:start'); });
+    events.push('caller-sync-done');
+    held.open();
+    await Promise.all([first, second]);
+    expect(events).toEqual(['caller-sync-done', 'first:start', 'first:end', 'second:start']);
+  });
+
+  it('rejects only the caller of a write that throws before returning a promise, and keeps draining', async () => {
+    const scheduler = new ContextGraphSubscriptionPersistScheduler();
+    const boom = new Error('store threw synchronously');
+    const failed = scheduler.enqueue('cg', (() => { throw boom; }) as () => Promise<void>);
+    const ran: string[] = [];
+    const next = scheduler.enqueue('cg', async () => { ran.push('next'); });
+    const other = scheduler.enqueue('other', async () => { ran.push('other'); });
+    await expect(failed).rejects.toBe(boom);
+    await expect(next).resolves.toBeUndefined();
+    await expect(other).resolves.toBeUndefined();
+    expect(ran).toEqual(expect.arrayContaining(['next', 'other']));
+    expect(scheduler.status()).toMatchObject({ lanes: 0, active: 0, pending: 0 });
+  });
+
   it('overlaps different context graphs', async () => {
     const scheduler = new ContextGraphSubscriptionPersistScheduler();
     const held = gate();

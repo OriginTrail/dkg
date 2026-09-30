@@ -53,6 +53,12 @@ export const CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_MAX_PENDING_PER_LANE = 4_096;
  * write, `clearContextGraphSubscriptions` counts a delete only when it ran, and
  * rehydration status follows a record that was actually saved. Coalescing a
  * displaced write would settle its caller successfully without any of that.
+ *
+ * A write never starts inside `enqueue`: it starts a microtask after admission,
+ * as it did when these writes were a promise chain, so a caller finishes its
+ * own synchronous section before the store sees the write. The scheduler owns
+ * that start rule together with the strict policy, so every entry point sees
+ * the same execution model.
  */
 export class ContextGraphSubscriptionPersistScheduler extends KeyedPersistScheduler {
   constructor(
@@ -69,7 +75,10 @@ export class ContextGraphSubscriptionPersistScheduler extends KeyedPersistSchedu
   }
 
   override enqueue(key: string, write: () => Promise<void>): Promise<void> {
-    return super.enqueue(key, write, { strict: true });
+    // Each write is deferred on its own, including one that reaches the head of
+    // its lane behind another write. A synchronous throw from `write` becomes
+    // this caller's rejection, and the lane keeps draining.
+    return super.enqueue(key, () => Promise.resolve().then(write), { strict: true });
   }
 
   /**
