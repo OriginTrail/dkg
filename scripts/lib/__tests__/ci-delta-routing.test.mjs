@@ -26,7 +26,7 @@ import {
 import { INSTALL_HOOK_DEPENDENCIES, INSTALL_HOOK_INPUTS } from '../ci-routing.mjs';
 import { PROGRAM_CHILD_COMMANDS, workflowExecution } from './ci-execution-graph.mjs';
 import { SUBCOMMAND_CHILD_COMMANDS } from '../../release-packages.mjs';
-import { BROWSER_SUITE_DEFERRED, jobLane, jobRequirement, laneSeeds, requirement, requirementCoveredByPlan } from './lane-entrypoints.mjs';
+import { BROWSER_SUITE_DEFERRED, jobLane, jobRequirement, laneExecution, laneSeeds, requirement, requirementCoveredByPlan } from './lane-entrypoints.mjs';
 import { loadReferences, packageImports, traceLaneLoads, workspaceCatalog, workspaceClosure } from './load-graph.mjs';
 
 // The workspaces that `files` import by package name, plus everything those
@@ -416,9 +416,11 @@ const UNFOLLOWED_LOADS = new Map([
 // What the load-closure guard reports for a trace: each load whose file does
 // not select the requirement that reaches it, and each module load computed
 // or script path assembled at run time that UNFOLLOWED_LOADS does not
-// explain. What each requirement asks of a plan is requirementCoveredByPlan's
-// (lane-entrypoints.mjs). `plan(file)` plans a change to one file.
-function loadClosureGaps({ loaded, unfollowed }, { plan = (file) => pullRequestPlan([change(file)]) } = {}) {
+// explain - in a traced file, or in a job's commands (`unresolved`, from
+// laneExecution). What each requirement asks of a plan is
+// requirementCoveredByPlan's (lane-entrypoints.mjs). `plan(file)` plans a
+// change to one file.
+function loadClosureGaps({ loaded, unfollowed }, { plan = (file) => pullRequestPlan([change(file)]), unresolved = [] } = {}) {
   const missing = [];
   for (const [target, requirements] of loaded) {
     const targetPlan = plan(target);
@@ -426,7 +428,10 @@ function loadClosureGaps({ loaded, unfollowed }, { plan = (file) => pullRequestP
       if (!requirementCoveredByPlan(required, targetPlan, target)) missing.push(`${required} loads ${target} via ${via}`);
     }
   }
-  const computed = [...new Set([...unfollowed].flatMap(([file, specifiers]) => specifiers.map((specifier) => `${file}: ${specifier}`)))];
+  const computed = [...new Set([
+    ...[...unfollowed].flatMap(([file, specifiers]) => specifiers.map((specifier) => `${file}: ${specifier}`)),
+    ...unresolved,
+  ])];
   return { missing, unexplained: computed.filter((entry) => !UNFOLLOWED_LOADS.has(entry)), computed };
 }
 
@@ -464,7 +469,8 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   // What those files load comes from traceLaneLoads and dependenciesOf in
   // load-graph.mjs, which list the forms they follow. Each file reached must
   // select the lane or scope that loads it, or plan full CI.
-  const trace = traceLaneLoads(laneSeeds());
+  const { seeds, unresolved } = laneExecution();
+  const trace = traceLaneLoads(seeds);
   const loadedBy = trace.loaded;
 
   for (const [target, requirement, why] of [
@@ -494,7 +500,7 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   // What install code reads from a directory the trace cannot resolve is
   // declared in INSTALL_HOOK_DEPENDENCIES, and each file it reads plans full CI.
   assert.deepEqual(installReadGaps(trace), { undeclared: [], stale: [], notFull: [], misnamed: [] });
-  const { missing, unexplained, computed } = loadClosureGaps(trace);
+  const { missing, unexplained, computed } = loadClosureGaps(trace, { unresolved });
   assert.deepEqual(missing, [], 'a change to these files must select the lane or EVM scope that loads them');
   // A load the trace cannot follow fails closed until it is listed with the
   // reason it needs no route, and a listed load that is gone is dropped.
@@ -506,8 +512,8 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
 // execution graph, without the workspace code), through the same trace and
 // check as the repository's own workflows.
 function plantedWorkflowGaps(workflowSource, options = {}) {
-  const seeds = laneSeeds({ workflows: [['ci.yml', workflowSource]], workspaceCode: false, ...options });
-  return { seeds, ...loadClosureGaps(traceLaneLoads(seeds), options) };
+  const { seeds, unresolved } = laneExecution({ workflows: [['ci.yml', workflowSource]], workspaceCode: false, ...options });
+  return { seeds, ...loadClosureGaps(traceLaneLoads(seeds), { ...options, unresolved }) };
 }
 
 test('every repository script a CI job runs selects that job', () => {
@@ -523,6 +529,17 @@ test('every repository script a CI job runs selects that job', () => {
     'bura_cli loads scripts/audit-create-random.mjs via scripts/audit-dial-protocol.mjs',
   ]);
   assert.deepEqual(plantedWorkflowGaps(planted('bura-cli', 'bash "$GITHUB_WORKSPACE/scripts/devnet-publish-helpers.sh"')).missing, []);
+  // A script path a step or a package script assembles at run time fails the
+  // guard until it is listed: a devnet-* script it reaches would route to the
+  // build checks alone.
+  assert.deepEqual(plantedWorkflowGaps(planted('bura-cli', 'bash "scripts/devnet-${SUITE}.sh"')).unexplained, [
+    'ci.yml bura-cli: scripts/devnet-${SUITE}.sh',
+  ]);
+  const suite = { name: '@origintrail-official/dkg', scripts: { 'test:suite': 'bash ../../scripts/devnet-$SUITE.sh' } };
+  const execution = { workspaces: { manifests: new Map([['packages/cli', suite]]), workspaceByName: new Map([[suite.name, 'packages/cli']]) }, rootManifest: {} };
+  assert.deepEqual(plantedWorkflowGaps(planted('bura-cli', 'pnpm --filter @origintrail-official/dkg run test:suite'), { execution }).unexplained, [
+    'ci.yml bura-cli: ../../scripts/devnet-$SUITE.sh',
+  ]);
   assert.equal(jobRequirement('ci.yml', 'changes', ''), undefined);
   assert.equal(jobRequirement('ci.yml', 'build', "needs.changes.outputs.run_node == 'true'"), 'build');
   assert.equal(jobRequirement('evm-integration.yml', 'evm-integration', "needs.plan.outputs.evm_matrix != '[]'"), 'full');

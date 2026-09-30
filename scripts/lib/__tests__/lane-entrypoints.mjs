@@ -161,12 +161,22 @@ const inPackageWorkspace = (file) => Object.keys(WORKSPACE_RULES).some((workspac
 //   routes by its rule.
 // `workflows` maps a workflow file name to its source; `execution` options
 // go to workflowExecution.
-export function laneSeeds({
+export function laneSeeds(options) {
+  return laneExecution(options).seeds;
+}
+
+// laneSeeds' seeds, and `unresolved`: each script path a job's steps, or the
+// package scripts and shell scripts they reach, assemble at run time, as
+// `${workflow} ${job}: ${text}`, for a job that must select something. No
+// trace can resolve those either, so the routing test fails on one it does
+// not list, as it does on a traced file's.
+export function laneExecution({
   workflows = WORKFLOWS.map((workflow) => [workflow, fs.readFileSync(path.join(REPO_ROOT, '.github/workflows', workflow), 'utf8')]),
   execution,
   workspaceCode = true,
 } = {}) {
   const seeds = new Map();
+  const unresolved = new Set();
   const seed = (file, requirements, via) => {
     const entry = seeds.get(file) ?? seeds.set(file, new Map()).get(file);
     for (const requirement of requirements) if (!entry.has(requirement)) entry.set(requirement, via);
@@ -194,10 +204,11 @@ export function laneSeeds({
       const requirement = jobRequirement(workflow, job, condition);
       if (!requirement) continue;
       for (const edge of edges) {
+        if (edge.kind === 'assembled') unresolved.add(`${workflow} ${job}: ${edge.text}`);
         if (edge.kind !== 'file' || (inPackageWorkspace(edge.file) && edge.chain.length === 0)) continue;
         seed(edge.file, [edgeRequirement(requirement, edge.chain)], `${workflow} ${edge.via}`);
       }
     }
   }
-  return seeds;
+  return { seeds, unresolved: [...unresolved] };
 }
