@@ -469,9 +469,13 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       sources.push(args[1]?.source ?? '');
       return store.query(...args);
     };
-    const read = { query, listGraphs: store.listGraphs.bind(store) };
+    const read = {
+      query,
+      listGraphs: async () => { throw new Error('snapshot graph enumeration must not run'); },
+    };
     const snapshotted = {
-      ...read,
+      query,
+      listGraphs: store.listGraphs.bind(store),
       withReadSnapshot: async (fn: (value: typeof read) => Promise<unknown>) => fn(read),
     } as unknown as Parameters<typeof loadSharedMemorySliceWithKaBoundFallback>[0];
     try {
@@ -501,7 +505,7 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
     }
   });
 
-  it('widens when a skolem-only graph is invisible to exact-root discovery', async () => {
+  it('uses a merkle-checked warm graph catalog when exact-root discovery misses a skolem-only graph', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     const swm = contextGraphSharedMemoryUri('fb-root-indexed-skolem');
     const root = 'urn:fb:root-indexed-skolem';
@@ -510,9 +514,13 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       sources.push(args[1]?.source ?? '');
       return store.query(...args);
     };
-    const read = { query, listGraphs: store.listGraphs.bind(store) };
+    const read = {
+      query,
+      listGraphs: async () => { throw new Error('snapshot graph enumeration must not run'); },
+    };
     const snapshotted = {
-      ...read,
+      query,
+      listGraphs: store.listGraphs.bind(store),
       withReadSnapshot: async (fn: (value: typeof read) => Promise<unknown>) => fn(read),
     } as unknown as Parameters<typeof loadSharedMemorySliceWithKaBoundFallback>[0];
     try {
@@ -527,7 +535,7 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
         snapshotted, swm, { rootEntities: [root] },
         { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
         {
-          sources: { ...SOURCES, rootIndexed: 'test.rootIndexed' },
+          sources: { ...SOURCES, rootIndexed: 'test.rootIndexed', cachedGraphSet: 'test.cachedGraphSet' },
           merkleVerifiedRootIndex: true,
           createAccept: async () => (candidate) =>
             candidate.some((quad) => quad.object === '"child"') ? candidate : null,
@@ -537,7 +545,49 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       expect(keys(quads)).toEqual(keys(accepted ?? []));
       expect(quads.map((quad) => quad.object).sort()).toEqual(['"child"', '"root"']);
       expect(sources).toContain('test.rootIndexed');
-      expect(sources).toContain(SOURCES.widened);
+      expect(sources).toContain('test.cachedGraphSet');
+      expect(sources).not.toContain(SOURCES.widened);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('never accepts a stale warm catalog that omits a skolem-only graph', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('fb-stale-catalog');
+    const root = 'urn:fb:stale-catalog';
+    const rootGraph = `${swm}/${AUTHOR_A_MIXED}/7`;
+    const childGraph = `${swm}/${AUTHOR_B}/12`;
+    const sources: string[] = [];
+    const query = async (...args: Parameters<typeof store.query>) => {
+      sources.push(args[1]?.source ?? '');
+      return store.query(...args);
+    };
+    const snapshotRead = { query, listGraphs: store.listGraphs.bind(store) };
+    const snapshotted = {
+      query,
+      listGraphs: async () => [rootGraph],
+      withReadSnapshot: async (fn: (value: typeof snapshotRead) => Promise<unknown>) => fn(snapshotRead),
+    } as unknown as Parameters<typeof loadSharedMemorySliceWithKaBoundFallback>[0];
+    try {
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"root"', graph: rootGraph },
+        { subject: `${root}/.well-known/genid/child`, predicate: 'urn:p', object: '"child"', graph: childGraph },
+      ]);
+      const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+        snapshotted, swm, { rootEntities: [root] }, undefined,
+        {
+          sources: { ...SOURCES, rootIndexed: 'test.rootIndexed', cachedGraphSet: 'test.cachedGraphSet' },
+          merkleVerifiedRootIndex: true,
+          createAccept: async () => (candidate) =>
+            candidate.some((quad) => quad.object === '"child"') ? candidate : null,
+          resultBudget: { pageRows: 100, maxRows: 1000, maxBytesEstimate: 1024 * 1024 },
+        },
+      );
+      expect(quads.map((quad) => quad.object)).toEqual(['"root"']);
+      expect(accepted).toBeNull();
+      expect(sources).toContain('test.cachedGraphSet');
+      expect(sources).toContain(SOURCES.unbounded);
     } finally {
       await store.close();
     }

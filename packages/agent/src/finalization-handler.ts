@@ -77,6 +77,7 @@ const SWM_SLICE_SOURCE = 'agent.finalization.sharedMemorySlice';
 const SWM_SLICE_SOURCE_BOUNDED = `${SWM_SLICE_SOURCE}.bounded`;
 const SWM_SLICE_SOURCE_WIDENED = `${SWM_SLICE_SOURCE}.fallbackUnbounded`;
 const SWM_SLICE_SOURCE_ROOT_INDEXED = `${SWM_SLICE_SOURCE}.rootIndexed`;
+const SWM_SLICE_SOURCE_CACHED_GRAPH_SET = `${SWM_SLICE_SOURCE}.cachedGraphSet`;
 import { ethers } from 'ethers';
 import { createHash } from 'node:crypto';
 import { deriveSwmKaGraphBound } from './swm-ka-bound.js';
@@ -2952,6 +2953,7 @@ export class FinalizationHandler {
             widened: SWM_SLICE_SOURCE_WIDENED,
             unbounded: SWM_SLICE_SOURCE,
             rootIndexed: SWM_SLICE_SOURCE_ROOT_INDEXED,
+            cachedGraphSet: SWM_SLICE_SOURCE_CACHED_GRAPH_SET,
           },
           createAccept,
           merkleVerifiedRootIndex: true,
@@ -2985,6 +2987,7 @@ export class FinalizationHandler {
           widened: SWM_SLICE_SOURCE_WIDENED,
           unbounded: SWM_SLICE_SOURCE,
           rootIndexed: SWM_SLICE_SOURCE_ROOT_INDEXED,
+          cachedGraphSet: SWM_SLICE_SOURCE_CACHED_GRAPH_SET,
         },
         createAccept: async () => {
           privateRoots ??= await this.getPrivateRootsFromMeta(contextGraphId, safeRoots, subGraphName);

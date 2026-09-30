@@ -521,6 +521,8 @@ export interface SwmSliceSourceTags {
   unbounded: QueryOptions['source'];
   /** indexed root-graph discovery and its candidate read */
   rootIndexed?: QueryOptions['source'];
+  /** warmed graph catalog read, admitted only after merkle verification */
+  cachedGraphSet?: QueryOptions['source'];
 }
 
 export interface LoadSharedMemorySliceWithKaBoundFallbackOptions {
@@ -534,6 +536,7 @@ export interface LoadSharedMemorySliceWithKaBoundFallbackOptions {
 
 const MAX_ROOT_INDEXED_DISCOVERY_ROOTS = 128;
 const MAX_ROOT_INDEXED_DISCOVERY_GRAPHS = 4_096;
+const MAX_CACHED_GRAPH_CANDIDATE_GRAPHS = 512;
 
 /**
  * Find graphs containing an exact root through Blazegraph's subject index.
@@ -579,6 +582,30 @@ async function loadRootIndexedSharedMemoryCandidate(
       options,
     );
   }, queryOptions?.signal);
+}
+
+/**
+ * Use the outer store's fast graph catalog as a bounded candidate when exact
+ * root discovery misses skolem-only graphs. The catalog is sampled before the
+ * backend snapshot, so it can omit a concurrent or out-of-process write. Only
+ * a caller checking the expected on-chain merkle root may accept these quads;
+ * otherwise the complete snapshot read remains the correctness backstop.
+ */
+async function loadCachedGraphSetSharedMemoryCandidate(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  options: LoadSelectedSharedMemoryQuadsOptions,
+): Promise<Quad[] | null> {
+  const snapshot = asReadSnapshotCapability(store);
+  if (!snapshot) return null;
+  const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
+  const graphs = await resolveSharedMemoryReadGraphs(store, bucketGraph, queryOptions);
+  if (graphs.length > MAX_CACHED_GRAPH_CANDIDATE_GRAPHS) return null;
+  const innerGraphPattern = sharedMemorySelectionGraphPattern(selection, options);
+  return snapshot.withReadSnapshot((readStore) => loadSwmQuadsAcrossChunks(
+    readStore, graphs, innerGraphPattern, queryOptions, options,
+  ), queryOptions?.signal);
 }
 
 /**
@@ -643,6 +670,11 @@ export async function loadSharedMemorySliceWithKaBoundFallback(
       ...loadOptions,
       querySource: sources.rootIndexed ?? sources.widened,
     }) : Promise.resolve(null);
+  const readCachedGraphSet = (): Promise<Quad[] | null> =>
+    merkleVerifiedRootIndex ? loadCachedGraphSetSharedMemoryCandidate(store, bucketGraph, selection, {
+      ...loadOptions,
+      querySource: sources.cachedGraphSet ?? sources.widened,
+    }) : Promise.resolve(null);
   let quads: Quad[] = [];
   let accepted: Quad[] | null = null;
   let accept: ((quads: Quad[]) => Quad[] | null) | undefined;
@@ -664,6 +696,8 @@ export async function loadSharedMemorySliceWithKaBoundFallback(
   }
   const rootIndexed = await readRootIndexed();
   if (rootIndexed && await testCandidate(rootIndexed)) return { quads, accepted };
+  const cachedGraphSet = await readCachedGraphSet();
+  if (cachedGraphSet && await testCandidate(cachedGraphSet)) return { quads, accepted };
   quads = await readComplete(kaGraphBound ? sources.widened : sources.unbounded);
   if (quads.length === 0) return { quads, accepted: null };
   accept ??= await createAccept();
