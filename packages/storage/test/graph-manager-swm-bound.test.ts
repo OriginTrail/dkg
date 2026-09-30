@@ -5,6 +5,7 @@ import {
   loadSharedMemoryQuadsForScope,
   loadSelectedSharedMemoryQuads,
   loadSharedMemorySliceWithKaBoundFallback,
+  loadMerkleVerifiedSharedMemorySlice,
   canonicalSharedMemoryScopeWriteGraph,
   resolveSharedMemoryScopeWriteGraph,
   resolveSharedMemoryScopeGraphs,
@@ -383,6 +384,7 @@ describe('the generic SWM loader cannot be pruned (bound is not an option)', () 
     expect(storageIndex).not.toHaveProperty('resolveKaBoundedSharedMemoryReadGraphs');
     // The safe, fallback-owning primitive IS public.
     expect(typeof storageIndex.loadSharedMemorySliceWithKaBoundFallback).toBe('function');
+    expect(typeof storageIndex.loadMerkleVerifiedSharedMemorySlice).toBe('function');
     // Named publish flows get a scoped API, not a second range-shaped loader.
     expect(typeof storageIndex.loadSharedMemoryQuadsForScope).toBe('function');
     expect(storageIndex).not.toHaveProperty('loadGraphQualifiedSharedMemoryQuads');
@@ -477,7 +479,7 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       query,
       listGraphs: store.listGraphs.bind(store),
       withReadSnapshot: async (fn: (value: typeof read) => Promise<unknown>) => fn(read),
-    } as unknown as Parameters<typeof loadSharedMemorySliceWithKaBoundFallback>[0];
+    } as unknown as Parameters<typeof loadMerkleVerifiedSharedMemorySlice>[0];
     try {
       await store.insert([
         { subject: root, predicate: 'urn:p', object: '"own"', graph: `${swm}/${AUTHOR_A_MIXED}/7` },
@@ -485,14 +487,17 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
         { subject: root, predicate: 'urn:p', object: '"staging"', graph: `${swm}/staging/tmp` },
         { subject: root, predicate: 'urn:p', object: '"other bucket"', graph: `${swm}-other/${AUTHOR_B}/12` },
       ]);
-      const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+      const expectedMerkleRoot = new Uint8Array(32).fill(7);
+      const { quads, accepted } = await loadMerkleVerifiedSharedMemorySlice(
         snapshotted, swm, { rootEntities: [root] },
         { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
         {
-          sources: { ...SOURCES, rootIndexed: 'test.rootIndexed' },
-          merkleVerifiedRootIndex: true,
-          createAccept: async () => (candidate) =>
-            candidate.some((quad) => quad.object === '"recurred"') ? candidate : null,
+          sources: { ...SOURCES, rootIndexed: 'test.rootIndexed', cachedGraphSet: 'test.cachedGraphSet' },
+          expectedMerkleRoot,
+          createMerkleAccept: async (merkleRoot) => {
+            expect(merkleRoot).toEqual(expectedMerkleRoot);
+            return (candidate) => candidate.some((quad) => quad.object === '"recurred"') ? candidate : null;
+          },
           resultBudget: { pageRows: 100, maxRows: 1000, maxBytesEstimate: 1024 * 1024 },
         },
       );
@@ -522,7 +527,7 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       query,
       listGraphs: store.listGraphs.bind(store),
       withReadSnapshot: async (fn: (value: typeof read) => Promise<unknown>) => fn(read),
-    } as unknown as Parameters<typeof loadSharedMemorySliceWithKaBoundFallback>[0];
+    } as unknown as Parameters<typeof loadMerkleVerifiedSharedMemorySlice>[0];
     try {
       await store.insert([
         { subject: root, predicate: 'urn:p', object: '"root"', graph: `${swm}/${AUTHOR_A_MIXED}/7` },
@@ -531,13 +536,13 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
           object: '"child"', graph: `${swm}/${AUTHOR_B}/12`,
         },
       ]);
-      const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+      const { quads, accepted } = await loadMerkleVerifiedSharedMemorySlice(
         snapshotted, swm, { rootEntities: [root] },
         { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
         {
           sources: { ...SOURCES, rootIndexed: 'test.rootIndexed', cachedGraphSet: 'test.cachedGraphSet' },
-          merkleVerifiedRootIndex: true,
-          createAccept: async () => (candidate) =>
+          expectedMerkleRoot: new Uint8Array(32),
+          createMerkleAccept: async () => (candidate) =>
             candidate.some((quad) => quad.object === '"child"') ? candidate : null,
           resultBudget: { pageRows: 100, maxRows: 1000, maxBytesEstimate: 1024 * 1024 },
         },
@@ -568,18 +573,18 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       query,
       listGraphs: async () => [rootGraph],
       withReadSnapshot: async (fn: (value: typeof snapshotRead) => Promise<unknown>) => fn(snapshotRead),
-    } as unknown as Parameters<typeof loadSharedMemorySliceWithKaBoundFallback>[0];
+    } as unknown as Parameters<typeof loadMerkleVerifiedSharedMemorySlice>[0];
     try {
       await store.insert([
         { subject: root, predicate: 'urn:p', object: '"root"', graph: rootGraph },
         { subject: `${root}/.well-known/genid/child`, predicate: 'urn:p', object: '"child"', graph: childGraph },
       ]);
-      const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+      const { quads, accepted } = await loadMerkleVerifiedSharedMemorySlice(
         snapshotted, swm, { rootEntities: [root] }, undefined,
         {
           sources: { ...SOURCES, rootIndexed: 'test.rootIndexed', cachedGraphSet: 'test.cachedGraphSet' },
-          merkleVerifiedRootIndex: true,
-          createAccept: async () => (candidate) =>
+          expectedMerkleRoot: new Uint8Array(32),
+          createMerkleAccept: async () => (candidate) =>
             candidate.some((quad) => quad.object === '"child"') ? candidate : null,
           resultBudget: { pageRows: 100, maxRows: 1000, maxBytesEstimate: 1024 * 1024 },
         },
@@ -588,6 +593,45 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
       expect(accepted).toBeNull();
       expect(sources).toContain('test.cachedGraphSet');
       expect(sources).toContain(SOURCES.unbounded);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('defers an unmatched huge family before issuing hundreds of graph chunks', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('fb-huge-family');
+    const root = 'urn:fb:huge-family';
+    const rootGraph = `${swm}/${AUTHOR_A_MIXED}/7`;
+    const graphs = [rootGraph, ...Array.from({ length: 513 }, (_, i) => `${swm}/decoy-${i}`)];
+    const sources: string[] = [];
+    const query = async (...args: Parameters<typeof store.query>) => {
+      sources.push(args[1]?.source ?? '');
+      return store.query(...args);
+    };
+    const snapshotted = {
+      query,
+      listGraphs: async () => graphs,
+      withReadSnapshot: async (read: (value: typeof store) => Promise<unknown>) => read({
+        query, listGraphs: store.listGraphs.bind(store),
+      } as typeof store),
+    } as unknown as Parameters<typeof loadMerkleVerifiedSharedMemorySlice>[0];
+    try {
+      await store.insert([{ subject: root, predicate: 'urn:p', object: '"root"', graph: rootGraph }]);
+      const { quads, accepted } = await loadMerkleVerifiedSharedMemorySlice(
+        snapshotted, swm, { rootEntities: [root] }, undefined,
+        {
+          sources: { ...SOURCES, rootIndexed: 'test.rootIndexed', cachedGraphSet: 'test.cachedGraphSet' },
+          expectedMerkleRoot: new Uint8Array(32),
+          createMerkleAccept: async () => () => null,
+          resultBudget: { pageRows: 100, maxRows: 1000, maxBytesEstimate: 1024 * 1024 },
+          maxCompleteFamilyGraphs: 512,
+        },
+      );
+      expect(quads.map((quad) => quad.object)).toEqual(['"root"']);
+      expect(accepted).toBeNull();
+      expect(sources).toContain('test.rootIndexed');
+      expect(sources).not.toContain(SOURCES.unbounded);
     } finally {
       await store.close();
     }

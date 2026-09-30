@@ -39,6 +39,7 @@ const SYSTEM_ONTOLOGY_GRAPH = contextGraphDataUri('ontology');
 const SYSTEM_AGENTS_GRAPH = contextGraphDataUri('agents');
 const MAX_CONTEXT_GRAPH_DECLARATION_BATCH = 256;
 const SLOW_SWM_READ_STAGE_MS = 5_000;
+let lastSwmGraphLimitWarningAt = 0;
 
 /** Identify the slow backend stage while it still occupies a store slot. */
 async function traceSlowSwmReadStage<T>(
@@ -84,8 +85,8 @@ export type SharedMemoryReadSelection = 'all' | { rootEntities: readonly string[
  * This is a PURE ACCELERATOR: it narrows a graph SET, never the CONSTRUCT body,
  * and non-parsing / bucket graphs are always kept (fail-open). Correctness of a
  * bounded read therefore reduces to "same graph set ⇒ same quads", and any call
- * site that narrows a merkle-gated read MUST widen to the unbounded read on an
- * empty-or-mismatch result before it defers.
+ * site that narrows a merkle-gated read MUST either widen to the unbounded
+ * read or defer without promoting the candidate on an empty-or-mismatch result.
  */
 export interface SwmKaGraphBound {
   agentAddress: string;
@@ -149,6 +150,8 @@ export interface LoadSelectedSharedMemoryQuadsOptions {
    * empty or complete snapshot.
    */
   resultBudget?: SharedMemoryResultBudget;
+  /** Bound graph fan-out before issuing backend chunks; exceeding it is retryable. */
+  maxGraphsToRead?: number;
   rootEntitiesErrorMessage?: (input: {
     inputCount: number;
     hadInput: boolean;
@@ -162,6 +165,19 @@ export class SharedMemoryReadConsistencyError extends Error {
   constructor() {
     super('Shared-memory graph family changed during materialization; retry later');
     this.name = 'SharedMemoryReadConsistencyError';
+  }
+}
+
+class SharedMemoryGraphScanDeferredError extends Error {
+  constructor(readonly graphCount: number, readonly limit: number) {
+    super(`Shared-memory graph family has ${graphCount} graphs, above the ${limit}-graph read limit`);
+    this.name = 'SharedMemoryGraphScanDeferredError';
+  }
+}
+
+function assertSharedMemoryGraphReadLimit(graphs: readonly string[], limit: number | undefined): void {
+  if (limit !== undefined && graphs.length > limit) {
+    throw new SharedMemoryGraphScanDeferredError(graphs.length, limit);
   }
 }
 
@@ -322,7 +338,7 @@ export async function resolveSharedMemoryReadGraphs(
  * result is a STRICT SUBSET of the complete read set, and INV-1 is refuted under
  * root recurrence, so a bounded resolution can omit graphs the on-chain merkle root
  * commits to. Only `loadKaBoundedSharedMemoryQuads` may call this, and only because
- * its own caller (`FinalizationHandler.loadSwmSliceWithFallback`) owns the widen.
+ * its own caller owns the widen-or-defer protocol.
  * Never build a `VALUES ?g` from this and hash or decline on the result.
  *
  * Pruning is FAIL-OPEN: an under-graph is dropped ONLY when it is positively a
@@ -407,8 +423,8 @@ export async function loadSelectedSharedMemoryQuads(
  * pruned graph set is a strict subset of the set `loadSelectedSharedMemoryQuads`
  * reads, and INV-1 — "a root's quads live only under its own KA number" — is
  * REFUTED under root recurrence, so this read can legitimately miss quads the
- * on-chain merkle root commits to. The only safe caller is
- * `loadSharedMemorySliceWithKaBoundFallback`, which owns the widen; this is a
+ * on-chain merkle root commits to. Safe callers use one of the fallback-owning
+ * slice operations below; this is a
  * module-internal primitive it builds on, kept exported only so the graph-set
  * behaviour can be unit-tested directly.
  */
@@ -557,8 +573,17 @@ export interface LoadSharedMemorySliceWithKaBoundFallbackOptions {
   createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>;
   queryOptions?: Omit<QueryOptions, 'source'>;
   resultBudget?: SharedMemoryResultBudget;
-  /** Only for a cryptographic completeness predicate, such as the on-chain KC merkle root. */
-  merkleVerifiedRootIndex?: boolean;
+}
+
+/** Root-index and cached-catalog candidates require an expected on-chain merkle root. */
+export interface LoadMerkleVerifiedSharedMemorySliceOptions {
+  sources: SwmSliceSourceTags & Required<Pick<SwmSliceSourceTags, 'rootIndexed' | 'cachedGraphSet'>>;
+  expectedMerkleRoot: Uint8Array;
+  createMerkleAccept: (expectedMerkleRoot: Uint8Array) => Promise<(quads: Quad[]) => Quad[] | null>;
+  queryOptions?: Omit<QueryOptions, 'source'>;
+  resultBudget?: SharedMemoryResultBudget;
+  /** Gossip finalization may defer a huge unmatched family to payload sync. */
+  maxCompleteFamilyGraphs?: number;
 }
 
 const MAX_ROOT_INDEXED_DISCOVERY_ROOTS = 128;
@@ -638,8 +663,7 @@ async function loadCachedGraphSetSharedMemoryCandidate(
 }
 
 /**
- * The ONLY safe way to read a KA-bounded SWM slice: read bounded first, then
- * optionally try exact-root graph discovery and WIDEN to the complete read on mismatch.
+ * Read a KA-bounded SWM slice, then WIDEN to the complete read on mismatch.
  * This owns the fallback protocol that `loadKaBoundedSharedMemoryQuads` requires,
  * so callers cannot hold a pruned `Quad[]` without the widen.
  *
@@ -651,8 +675,7 @@ async function loadCachedGraphSetSharedMemoryCandidate(
  * caller-side work. The complete-family widen fires at most once.
  *
  * A candidate is only accepted through the caller's completeness predicate.
- * Root-indexed discovery requires explicit opt-in with a cryptographic
- * completeness predicate; arbitrary accept callbacks retain the old read path.
+ * Merkle-verified root discovery has a separate entry point below.
  * `queryOptions` is applied to graph discovery and every bounded or widened read.
  */
 export function loadSharedMemorySliceWithKaBoundFallback(
@@ -686,26 +709,84 @@ export async function loadSharedMemorySliceWithKaBoundFallback(
     legacyCreateAccept,
     legacyLoadOptions,
   );
-  const { sources, createAccept, queryOptions = {}, resultBudget, merkleVerifiedRootIndex = false } = options;
+  const { sources, createAccept, queryOptions = {}, resultBudget } = options;
   const loadOptions = { queryOptions, resultBudget };
-  const readComplete = (source: QueryOptions['source']): Promise<Quad[]> =>
-    loadSelectedSharedMemoryQuads(store, bucketGraph, selection, {
-      ...loadOptions,
-      querySource: source,
-    });
+  const candidates: SwmSliceCandidate[] = kaGraphBound ? [{
+    stage: 'bounded.total',
+    read: () => loadKaBoundedSharedMemoryQuads(store, bucketGraph, selection, kaGraphBound, {
+      ...loadOptions, querySource: sources.bounded,
+    }),
+  }] : [];
+  return runSharedMemorySliceCandidates(
+    store, bucketGraph, selection, candidates,
+    kaGraphBound ? sources.widened : sources.unbounded,
+    createAccept, loadOptions,
+  );
+}
 
-  const readRootIndexed = (): Promise<Quad[] | null> =>
-    merkleVerifiedRootIndex ? loadRootIndexedSharedMemoryCandidate(store, bucketGraph, selection, {
-      ...loadOptions,
-      querySource: sources.rootIndexed ?? sources.widened,
-    }) : Promise.resolve(null);
-  const readCachedGraphSet = (): Promise<Quad[] | null> =>
-    merkleVerifiedRootIndex ? loadCachedGraphSetSharedMemoryCandidate(store, bucketGraph, selection, {
-      ...loadOptions,
-      querySource: sources.cachedGraphSet ?? sources.widened,
-    }) : Promise.resolve(null);
+/**
+ * Try bounded, exact-root and warm-catalog candidates in that order, accepting
+ * one only when the caller verifies it against the expected on-chain merkle
+ * root. A failed candidate widens to the complete snapshot read unless an
+ * explicit graph limit defers it to payload sync without promotion.
+ */
+export function loadMerkleVerifiedSharedMemorySlice(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  kaGraphBound: SwmKaGraphBound | undefined,
+  options: LoadMerkleVerifiedSharedMemorySliceOptions,
+): Promise<{ quads: Quad[]; accepted: Quad[] | null }> {
+  if (options.expectedMerkleRoot.length !== 32) {
+    throw new TypeError('Expected a 32-byte on-chain merkle root');
+  }
+  const { sources, queryOptions = {}, resultBudget } = options;
+  const loadOptions = { queryOptions, resultBudget };
+  const candidates: SwmSliceCandidate[] = [];
+  if (kaGraphBound) candidates.push({
+    stage: 'bounded.total',
+    read: () => loadKaBoundedSharedMemoryQuads(store, bucketGraph, selection, kaGraphBound, {
+      ...loadOptions, querySource: sources.bounded,
+    }),
+  });
+  candidates.push({
+    stage: 'root-index.total',
+    read: () => loadRootIndexedSharedMemoryCandidate(store, bucketGraph, selection, {
+      ...loadOptions, querySource: sources.rootIndexed,
+    }),
+  }, {
+    stage: 'cached-candidate.total',
+    read: () => loadCachedGraphSetSharedMemoryCandidate(store, bucketGraph, selection, {
+      ...loadOptions, querySource: sources.cachedGraphSet,
+    }),
+  });
+  return runSharedMemorySliceCandidates(
+    store, bucketGraph, selection, candidates,
+    kaGraphBound ? sources.widened : sources.unbounded,
+    () => options.createMerkleAccept(options.expectedMerkleRoot), loadOptions,
+    options.maxCompleteFamilyGraphs,
+  );
+}
+
+interface SwmSliceCandidate {
+  stage: string;
+  read: () => Promise<Quad[] | null>;
+}
+
+async function runSharedMemorySliceCandidates(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  candidates: readonly SwmSliceCandidate[],
+  completeSource: QueryOptions['source'],
+  createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>,
+  loadOptions: Pick<LoadSelectedSharedMemoryQuadsOptions, 'queryOptions' | 'resultBudget'>,
+  maxCompleteFamilyGraphs?: number,
+): Promise<{ quads: Quad[]; accepted: Quad[] | null }> {
+  const queryOptions = loadOptions.queryOptions;
   let quads: Quad[] = [];
   let accepted: Quad[] | null = null;
+  let lastCandidate: Quad[] = [];
   let accept: ((quads: Quad[]) => Quad[] | null) | undefined;
   const testCandidate = async (candidate: Quad[]): Promise<boolean> => {
     if (candidate.length === 0) return false;
@@ -716,19 +797,31 @@ export async function loadSharedMemorySliceWithKaBoundFallback(
     return true;
   };
 
-  if (kaGraphBound) {
-    const bounded = await traceSlowSwmReadStage('bounded.total', queryOptions, () => loadKaBoundedSharedMemoryQuads(store, bucketGraph, selection, kaGraphBound, {
-      ...loadOptions,
-      querySource: sources.bounded,
-    }));
-    if (await testCandidate(bounded)) return { quads, accepted };
+  for (const candidate of candidates) {
+    const result = await traceSlowSwmReadStage(candidate.stage, queryOptions, candidate.read);
+    if (result?.length) lastCandidate = result;
+    if (result && await testCandidate(result)) return { quads, accepted };
   }
-  const rootIndexed = await traceSlowSwmReadStage('root-index.total', queryOptions, readRootIndexed);
-  if (rootIndexed && await testCandidate(rootIndexed)) return { quads, accepted };
-  const cachedGraphSet = await traceSlowSwmReadStage('cached-candidate.total', queryOptions, readCachedGraphSet);
-  if (cachedGraphSet && await testCandidate(cachedGraphSet)) return { quads, accepted };
-  quads = await traceSlowSwmReadStage('complete.total', queryOptions, () =>
-    readComplete(kaGraphBound ? sources.widened : sources.unbounded));
+  try {
+    quads = await traceSlowSwmReadStage('complete.total', queryOptions, () =>
+      loadSelectedSharedMemoryQuads(store, bucketGraph, selection, {
+        ...loadOptions, querySource: completeSource,
+        maxGraphsToRead: maxCompleteFamilyGraphs,
+      }));
+  } catch (error) {
+    if (maxCompleteFamilyGraphs === undefined || !(error instanceof SharedMemoryGraphScanDeferredError)) {
+      throw error;
+    }
+    // An unverified candidate is never promoted. The finalization caller can
+    // request the complete payload from peers while the legacy chain scan keeps
+    // its unrestricted fallback for local recovery.
+    const now = Date.now();
+    if (now - lastSwmGraphLimitWarningAt >= 60_000) {
+      lastSwmGraphLimitWarningAt = now;
+      console.warn(`[swm-read] deferring complete family with ${error.graphCount} graphs (limit=${error.limit}) to payload sync`);
+    }
+    return { quads: lastCandidate, accepted: null };
+  }
   if (quads.length === 0) return { quads, accepted: null };
   accept ??= await traceSlowSwmReadStage('complete.prepare-verifier', queryOptions, createAccept);
   return {
@@ -806,10 +899,14 @@ async function loadSharedMemoryQuadsInternal(
     graphs: NonEmptyGraphList,
     readOptions: QueryOptions | undefined,
     plan?: SwmReadPlan,
-  ) => loadSwmQuadsAcrossChunks(readStore, graphs, innerGraphPattern, readOptions, options, plan);
+  ) => {
+    assertSharedMemoryGraphReadLimit(graphs, options.maxGraphsToRead);
+    return loadSwmQuadsAcrossChunks(readStore, graphs, innerGraphPattern, readOptions, options, plan);
+  };
 
   const initialGraphs = await traceSlowSwmReadStage('selected.resolve-initial', queryOptions, () =>
     resolveGraphs(store, queryOptions));
+  assertSharedMemoryGraphReadLimit(initialGraphs, options.maxGraphsToRead);
   const graphsPerQuery = options.resultBudget
     ? BUDGETED_SHARED_MEMORY_GRAPHS_PER_QUERY : SHARED_MEMORY_GRAPHS_PER_QUERY;
   if (initialGraphs.length <= graphsPerQuery) {
