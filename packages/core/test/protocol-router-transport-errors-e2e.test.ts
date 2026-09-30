@@ -8,6 +8,7 @@ import {
 } from '../src/protocol-router.js';
 import { POOLED_MESSAGE_PROTOCOL } from '../src/message-stream-pool.js';
 import { classifyTransportError } from '../src/transport-error.js';
+import { watchProtocolRefusal } from '../../../scripts/testing/protocol-refusal.js';
 
 /**
  * End-to-end coverage of the typed transport-error classification: two REAL
@@ -34,114 +35,6 @@ const dec = new TextDecoder();
 
 /** Before the typed classification an unsupported peer cost >= 500 ms + 1000 ms of backoff. */
 const FAIL_FAST_BUDGET_MS = 1_000;
-
-type StreamOpenOutcome = 'refused' | 'opened' | 'failed';
-
-interface ProtocolOpenWatch {
-  /**
-   * Every attempt to open `protocol` on a stream from the watched node, in
-   * order, however the router reached it: libp2p's `dialProtocol`, or
-   * `newStream` on a connection the router reuses. A refused attempt is the
-   * peer's multistream `na`.
-   */
-  readonly opens: readonly StreamOpenOutcome[];
-  /**
-   * How many `libp2p.dialProtocol` calls for `protocol` rejected as a refusal.
-   * That rejection is what ends a ProtocolRouter attempt: the router first
-   * tries `newStream` on an open connection (a refusal there is swallowed),
-   * then falls through to `dialProtocol` inside the same attempt.
-   */
-  readonly refusedDials: number;
-  /**
-   * How many stream opens had been observed when the first refused
-   * `dialProtocol` ended a router attempt. One attempt can make several opens
-   * (the reuse path's `newStream`, then `dialProtocol`'s own), so counting opens
-   * does not count attempts; this index marks where the refused attempt ends.
-   * Every open at or after it belongs to a later attempt, that is, the retry.
-   */
-  readonly opensAtFirstRefusedDial: number;
-  dispose(): void;
-}
-
-/**
- * Observe, on the sending side, every stream the node opens for `protocol`.
- * `onFirstRefusedDial` runs once, synchronously, when a `dialProtocol` of
- * `protocol` has just been rejected as unsupported, before that rejection
- * reaches the router. Registering the peer's handler from it therefore puts the
- * handler in place after the refusal and before the router's retry, whatever
- * the timing of the dial. It must not run on the reuse path's refusal: that one
- * is followed, in the same attempt, by a `dialProtocol` the fresh handler
- * would already answer, so the attempt would succeed without any retry.
- */
-function watchProtocolOpens(
-  libp2p: DKGNode['libp2p'],
-  protocol: string,
-  onFirstRefusedDial: () => void,
-): ProtocolOpenWatch {
-  const opens: StreamOpenOutcome[] = [];
-  let refusedDials = 0;
-  let opensAtFirstRefusedDial = 0;
-  const forProtocol = (protocols: unknown): boolean =>
-    (Array.isArray(protocols) ? protocols : [protocols]).includes(protocol);
-  const outcomeOf = (err: unknown): StreamOpenOutcome =>
-    (isProtocolUnsupportedError(err) ? 'refused' : 'failed');
-  const spies: Array<{ mockRestore(): void }> = [];
-
-  const target = libp2p as unknown as {
-    dialProtocol(peer: unknown, protocols: unknown, options?: unknown): Promise<unknown>;
-  };
-  const originalDial = target.dialProtocol.bind(target);
-  spies.push(vi.spyOn(target, 'dialProtocol').mockImplementation(async (peer, protocols, options) => {
-    try {
-      return await originalDial(peer, protocols, options);
-    } catch (err) {
-      if (forProtocol(protocols) && isProtocolUnsupportedError(err)) {
-        refusedDials += 1;
-        if (refusedDials === 1) {
-          opensAtFirstRefusedDial = opens.length;
-          onFirstRefusedDial();
-        }
-      }
-      throw err;
-    }
-  }));
-
-  type WatchedConnection = {
-    newStream(protocols: unknown, options?: unknown): Promise<unknown>;
-  };
-  const patched = new WeakSet<object>();
-  const watchConnection = (connection: WatchedConnection): void => {
-    if (patched.has(connection)) return;
-    patched.add(connection);
-    const originalNewStream = connection.newStream.bind(connection);
-    spies.push(vi.spyOn(connection, 'newStream').mockImplementation(async (protocols, options) => {
-      if (!forProtocol(protocols)) return originalNewStream(protocols, options);
-      try {
-        const stream = await originalNewStream(protocols, options);
-        opens.push('opened');
-        return stream;
-      } catch (err) {
-        opens.push(outcomeOf(err));
-        throw err;
-      }
-    }));
-  };
-  for (const connection of libp2p.getConnections()) watchConnection(connection as unknown as WatchedConnection);
-  const onConnectionOpen = (evt: Event): void => {
-    watchConnection((evt as CustomEvent<WatchedConnection>).detail);
-  };
-  libp2p.addEventListener('connection:open', onConnectionOpen);
-
-  return {
-    opens,
-    get refusedDials() { return refusedDials; },
-    get opensAtFirstRefusedDial() { return opensAtFirstRefusedDial; },
-    dispose() {
-      libp2p.removeEventListener('connection:open', onConnectionOpen);
-      for (const spy of spies) spy.mockRestore();
-    },
-  };
-}
 
 function newNode(): DKGNode {
   return new DKGNode({ listenAddresses: ['/ip4/127.0.0.1/tcp/0'], enableMdns: false });
@@ -275,20 +168,14 @@ describe('ProtocolRouter typed transport errors (two real libp2p nodes)', () => 
 
     // A booting peer: multistream answers `na` until the handler is registered.
     // The handler appears only once the sender has seen its own `dialProtocol`
-    // refused, never on a timer: a timer started before the send (say 700 ms)
-    // lets a slow dial or an event-loop pause install the handler before the
-    // first attempt, and the send then succeeds without any retry, so the test
-    // would pass with the retry removed. retryOnProtocolRefusal keeps the
-    // router's in-line retry, which is what the network-identity probe uses.
-    let handlerRegistrations = 0;
-    let refusedAt = 0;
-    const watch = watchProtocolOpens(sender.libp2p, protocol, () => {
-      handlerRegistrations += 1;
-      refusedAt = Date.now();
+    // refused, never on a timer (see `watchProtocolRefusal`), so the send can
+    // only get through by a retry. retryOnProtocolRefusal keeps the router's
+    // in-line retry, which is what the network-identity probe uses.
+    const watch = watchProtocolRefusal(sender.libp2p, protocol, () => {
       receiverRouter.register(protocol, echo);
     });
     let response: Uint8Array;
-    let respondedAt = 0;
+    let respondedAfterRefusalMs = 0;
     try {
       // Bounded by the send's own deadline: if the refusal is never seen the
       // handler is never registered and this rejects, it does not hang.
@@ -297,35 +184,19 @@ describe('ProtocolRouter typed transport errors (two real libp2p nodes)', () => 
           retryOnProtocolRefusal: true,
           timeoutMs: 10_000,
         })
-        .catch((err: unknown) => {
-          throw new Error(
-            `send did not get through (stream opens seen on the sender: [${watch.opens.join(', ')}], ` +
-              `refused dials: ${watch.refusedDials}, handler registrations: ${handlerRegistrations}): ` +
-              `${err instanceof Error ? err.message : String(err)}`,
-            { cause: err },
-          );
-        });
-      respondedAt = Date.now();
+        .catch(watch.failWithContext('send did not get through'));
+      respondedAfterRefusalMs = watch.msSinceFirstRefusal();
     } finally {
       watch.dispose();
     }
     expect(dec.decode(response)).toBe('echo:two');
-    // The refusal was observed, and it is what registered the handler.
-    expect(watch.refusedDials).toBeGreaterThanOrEqual(1);
-    expect(handlerRegistrations).toBe(1);
+    // The refusal was observed, and it is what registered the handler. The one
+    // refused dial ended the first attempt; the retry got through.
+    expect(watch.refusedDials).toBe(1);
+    expect(watch.registrations).toBe(1);
     expect(handled).toBe(1);
-    // Direct retry signal. Counting opens does not count attempts (one refused
-    // attempt is two refused opens: the reuse path's, then `dialProtocol`'s), so
-    // split the opens at the refusal that ended the first attempt: everything
-    // before it was refused, and a stream was then opened, and got through to the
-    // handler registered in between, by a LATER attempt: the retry.
-    const beforeRefusal = watch.opens.slice(0, watch.opensAtFirstRefusedDial);
-    const afterRefusal = watch.opens.slice(watch.opensAtFirstRefusedDial);
-    expect(beforeRefusal.length).toBeGreaterThanOrEqual(1);
-    expect(beforeRefusal.every((outcome) => outcome === 'refused')).toBe(true);
-    expect(afterRefusal.at(-1)).toBe('opened');
     // The retry waited out at least one backoff step (500 ms) after the refusal.
-    expect(respondedAt - refusedAt).toBeGreaterThanOrEqual(450);
+    expect(respondedAfterRefusalMs).toBeGreaterThanOrEqual(450);
   }, 20_000);
 
   it('still retries a stream the responder resets mid-send, and succeeds on the retry', async () => {

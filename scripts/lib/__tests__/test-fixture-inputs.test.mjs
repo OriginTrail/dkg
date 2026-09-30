@@ -36,6 +36,7 @@ test('fixture edits invalidate only consumer fingerprints and Turbo tasks', (t) 
     ['property-options', ['core', 'agent', 'publisher'], []],
     ['ka-vm-publish', ['publisher'], ['publisher']],
     ['snapshot-storage', ['agent', 'cli'], []],
+    ['protocol-refusal', ['core', 'agent'], []],
     ['oxigraph', [], []],
   ]) {
     const before = fingerprint(); const beforeHashes = hashes();
