@@ -1,54 +1,88 @@
 /**
  * The daemon replies the hash-subscription devnet suite reads, checked at the
  * HTTP boundary: the four the suite is about (subscribe, context-graph list,
- * subscriptions, catch-up status) and the two it needs to bring two edges
- * together (status, connections).
+ * subscriptions, catch-up status), the query answers its content checks read, and
+ * the two it needs to bring two edges together (status, connections).
  *
- * WHAT THIS IS, AND WHAT IT IS NOT
+ * WHAT THIS GUARANTEES
  *
  * Each `parse*` function takes the JSON of a 200 reply as `unknown` and either
- * returns it typed as the canonical declaration (imported type-only from the
- * CLI package, so nothing under packages/ loads at runtime) or throws a
- * `WireShapeError` that names the endpoint and the missing or mistyped field.
- * A renamed field, a retyped field or an identity or job state spelled
- * differently therefore fails HERE, at the reply, with that message, instead of
- * as an `undefined` deep inside a test.
+ * returns a PROJECTION or throws a `WireShapeError` that names the endpoint and the
+ * missing or mistyped field. The projection is a new object holding exactly the
+ * fields the parser checked, and its type says so: it is built from the fields of
+ * the CLI package's own declarations (indexed access types over `import type`s), so
+ * a field the parser did not check is not in the type (reading it is a compile
+ * error) and not in the value, and a field renamed in the declaration breaks the
+ * type check of this file. A renamed field, a retyped field or an identity or job
+ * state spelled differently therefore fails HERE, at the reply, with that message,
+ * instead of as an `undefined` deep inside a test. Fields the parser does not
+ * check may be present, absent or changed in the reply without failing anything.
  *
- * It checks mainly the fields this suite reads, plus a few it does not read (for
- * example `synced`, `coreHosted` and the catch-up `status`), so a change to those
- * fails here too. It is not the daemon's contract: the routes build these bodies
- * inline and export no schema, and the CLI client's declarations are hand-written,
- * so the canonical contract (one schema the route constructs its reply from and
- * every client parses with) would live at the CLI boundary, not in a devnet
- * suite. A field it does not check can change without failing here, and the
- * returned value is typed as the whole declaration although only the checked
- * fields are verified. No schema
- * library is used: the checks are a few plain functions.
+ * WHAT IT IS NOT
  *
- * The state vocabularies below are copied, not imported (a runtime import would
- * load the CLI package). Each copy is tied to its declaration at the TYPE level,
- * so adding a state to the declaration without listing it here is a compile
- * error in a type-check of this file. Nothing in CI type-checks devnet suites,
- * so that tie only holds for whoever runs one (a throwaway tsconfig, an editor).
+ * It is not the daemon's contract: the routes build these bodies inline and export
+ * no schema, and the CLI client's declarations are hand-written, so the canonical
+ * contract (one schema the route constructs its reply from and every client parses
+ * with) would live at the CLI boundary, not in a devnet suite. A few fields are
+ * checked although the suite does not read them (`synced` and `coreHosted` of a
+ * subscription row, the subscribe reply's `catchup.status`), so a change to those
+ * fails here too. No schema library is used: the checks are a few plain functions.
+ *
+ * WHAT IS IMPORTED
+ *
+ * The catch-up job states are the CLI's own runtime list (`CATCHUP_JOB_STATES` of
+ * packages/cli/src/catchup-status.ts). That module has only type imports, so
+ * importing it loads neither the agent nor the CLI runtime; everything else from
+ * packages/ is imported as a type and erased. The identity-note states have no
+ * runtime list there, only a type, so a copy is kept below and tied to the type:
+ * a state added to the declaration without being listed here is a compile error
+ * in a type-check of this file. Nothing in CI type-checks devnet suites, so that
+ * tie only holds for whoever runs one (a throwaway tsconfig, an editor).
  */
 import type { SparqlBindingCell } from '../_bootstrap/harness.js';
 import type { ApiClient } from '../../packages/cli/src/api-client.js';
-import type {
-  CatchupContextGraphIdentity,
-  CatchupJobState,
-  CatchupStatusResponse,
+import {
+  CATCHUP_JOB_STATES,
+  type CatchupContextGraphIdentity,
+  type CatchupJobState,
+  type CatchupStatusResponse,
 } from '../../packages/cli/src/catchup-status.js';
 
-/**
- * Response of POST /api/context-graph/subscribe: the CLI client's declaration of
- * it (`ApiClient.subscribeToContextGraph`), which carries the `identity` and
- * `onChainReference` notes. The route builds the body inline and exports no type
- * of its own.
- */
-export type SubscribeResponse = Awaited<ReturnType<ApiClient['subscribeToContextGraph']>>;
+/** The CLI client's declaration of the subscribe reply (the route builds the body inline and exports none). */
+type SubscribeDeclaration = Awaited<ReturnType<ApiClient['subscribeToContextGraph']>>;
+/** The queued variant of its `catchup` member: the one that carries a job id. */
+type QueuedCatchupDeclaration = Extract<NonNullable<SubscribeDeclaration['catchup']>, { jobId: string }>;
+/** One row of the CLI client's declaration of the context-graph list. */
+type ListRowDeclaration = Awaited<ReturnType<ApiClient['listContextGraphs']>>['contextGraphs'][number];
 
-/** Response of GET /api/context-graph/list (`ApiClient.listContextGraphs`). */
-export type ContextGraphListResponse = Awaited<ReturnType<ApiClient['listContextGraphs']>>;
+/**
+ * POST /api/context-graph/subscribe. `catchup` is what the request queued or
+ * replayed: `jobId` is absent in the completed-catch-up variant, whose counters
+ * the suite does not read. The client declares `catchup.status` as `'queued'`
+ * only, but the route also replays a running or done job, so it is promised only
+ * as a string. `syncMode` and the rest are not checked and not here.
+ */
+export interface SubscribeReply {
+  readonly subscribed: SubscribeDeclaration['subscribed'];
+  readonly catchup?: Partial<Pick<QueuedCatchupDeclaration, 'jobId'>> & { readonly [K in keyof Pick<QueuedCatchupDeclaration, 'status'>]?: string };
+  readonly identity?: SubscribeDeclaration['identity'];
+  readonly onChainReference?: SubscribeDeclaration['onChainReference'];
+}
+
+/**
+ * One row of GET /api/context-graph/list: the on-chain id a node observed for it,
+ * as the row's `onChainId` or, when the node has chain facts, its `onChain.id`.
+ * The row's `id`, `uri`, `name` and the rest are not checked and not here.
+ */
+export interface ContextGraphListRow {
+  readonly onChainId?: ListRowDeclaration['onChainId'];
+  readonly onChain?: Pick<NonNullable<ListRowDeclaration['onChain']>, 'id'>;
+}
+
+/** GET /api/context-graph/list. */
+export interface ContextGraphListReply {
+  readonly contextGraphs: readonly ContextGraphListRow[];
+}
 
 /**
  * One row of GET /api/context-graph/subscriptions. The route builds it inline
@@ -59,14 +93,38 @@ export type ContextGraphListResponse = Awaited<ReturnType<ApiClient['listContext
  * catch-up status carry.
  */
 export interface SubscriptionRow {
-  contextGraphId: string;
-  subscribed: boolean;
-  synced: boolean;
-  coreHosted: boolean;
-  identity?: CatchupContextGraphIdentity;
+  readonly contextGraphId: string;
+  readonly subscribed: boolean;
+  readonly synced: boolean;
+  readonly coreHosted: boolean;
+  readonly identity?: CatchupContextGraphIdentity;
 }
 
-export type { CatchupContextGraphIdentity, CatchupJobState, CatchupStatusResponse };
+/** GET /api/context-graph/subscriptions. */
+export interface SubscriptionsReply {
+  readonly subscriptions: readonly SubscriptionRow[];
+}
+
+/**
+ * GET /api/sync/catchup-status: the job's identity and verdict. The counters, the
+ * timestamps, the graph sync status and the rest of `CatchupStatusResponse` are not
+ * checked and not here.
+ */
+export type CatchupStatusReply = Pick<
+  CatchupStatusResponse,
+  'jobId' | 'contextGraphId' | 'jobStatus' | 'resolvedContextGraphId' | 'error' | 'identity'
+>;
+
+/** What the suite needs of a node to dial it: its peer id and the addresses it listens on. */
+export interface NodePeerInfo {
+  readonly peerId: string;
+  readonly multiaddrs: readonly string[];
+}
+
+/** The rows of a SELECT: each variable is a term string or the structured SPARQL-JSON cell. */
+export type QueryBindings = ReadonlyArray<Readonly<Record<string, SparqlBindingCell>>>;
+
+export type { CatchupContextGraphIdentity, CatchupJobState };
 
 /** The endpoints, spelled once so an error names the same string a reader greps for. */
 export const ENDPOINT = {
@@ -79,20 +137,15 @@ export const ENDPOINT = {
   query: 'POST /api/query',
 } as const;
 
-// The vocabularies, tied to their declarations at the type level (see the header).
+// The identity-note states: a copy, tied to its declaration at the type level (see the header).
 export const WIRE_IDENTITY_STATES = ['name-hash-only', 'name-hash-only-private', 'resolved'] as const satisfies
   readonly CatchupContextGraphIdentity['state'][];
-export const WIRE_JOB_STATES = [
-  'queued', 'running', 'done', 'failed', 'denied', 'deferred', 'partial', 'unreachable',
-] as const satisfies readonly CatchupJobState[];
 
 type MustBeNever<T extends never> = T;
-/** A type error here means the declaration gained a state that the list above lacks. */
+/** A type error here means the declaration gained an identity state that the list above lacks. */
 export type IdentityStatesListed = MustBeNever<
   Exclude<CatchupContextGraphIdentity['state'], (typeof WIRE_IDENTITY_STATES)[number]>
 >;
-/** A type error here means the declaration gained a job state that the list above lacks. */
-export type JobStatesListed = MustBeNever<Exclude<CatchupJobState, (typeof WIRE_JOB_STATES)[number]>>;
 
 /**
  * A reply that does not have the shape the suite reads. `field` is a dotted path
@@ -142,7 +195,7 @@ function object(endpoint: string, field: string, value: unknown): Obj {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new WireShapeError(endpoint, field, 'an object', value);
   }
-  return value as Obj;
+  return Object.fromEntries(Object.entries(value));
 }
 
 function requiredString(endpoint: string, field: string, parent: Obj, key: string): string {
@@ -172,10 +225,20 @@ function oneOf<T extends string>(
   allowed: readonly T[],
 ): T {
   const value = parent[key];
-  if (typeof value !== 'string' || !(allowed as readonly string[]).includes(value)) {
+  const match = allowed.find((entry) => entry === value);
+  if (match === undefined) {
     throw new WireShapeError(endpoint, `${field}.${key}`, `one of ${allowed.map((entry) => JSON.stringify(entry)).join(', ')}`, value);
   }
-  return value as T;
+  return match;
+}
+
+/**
+ * `{ [key]: value }`, or nothing when `value` is undefined, so a projection never
+ * carries `key: undefined`. The one cast of this module: TypeScript cannot type a
+ * computed key of a generic literal type.
+ */
+function present<K extends string, V>(key: K, value: V | undefined): { [P in K]?: V } {
+  return (value === undefined ? {} : { [key]: value }) as { [P in K]?: V };
 }
 
 /** The name-hash identity note every one of the four replies can carry; absent means "no note". */
@@ -184,73 +247,79 @@ function optionalIdentity(endpoint: string, field: string, parent: Obj): Catchup
   if (raw === undefined) return undefined;
   const path = `${field}.identity`;
   const note = object(endpoint, path, raw);
-  oneOf(endpoint, path, note, 'state', WIRE_IDENTITY_STATES);
-  requiredString(endpoint, path, note, 'nameHash');
-  requiredString(endpoint, path, note, 'message');
-  optionalString(endpoint, path, note, 'onChainId');
-  optionalString(endpoint, path, note, 'contextGraphId');
-  return note as unknown as CatchupContextGraphIdentity;
+  return {
+    state: oneOf(endpoint, path, note, 'state', WIRE_IDENTITY_STATES),
+    nameHash: requiredString(endpoint, path, note, 'nameHash'),
+    message: requiredString(endpoint, path, note, 'message'),
+    ...present('onChainId', optionalString(endpoint, path, note, 'onChainId')),
+    ...present('contextGraphId', optionalString(endpoint, path, note, 'contextGraphId')),
+  };
 }
 
-/**
- * POST /api/context-graph/subscribe. Reads: `subscribed`, the queued job's
- * `catchup.jobId` (the completed-catch-up variant has none), `identity` and
- * `onChainReference`.
- */
-export function parseSubscribeResponse(value: unknown): SubscribeResponse {
+/** POST /api/context-graph/subscribe. Checks `subscribed`, `catchup.jobId`, `catchup.status`, `identity` and `onChainReference`. */
+export function parseSubscribeResponse(value: unknown): SubscribeReply {
   const endpoint = ENDPOINT.subscribe;
   const reply = object(endpoint, 'reply', value);
-  requiredString(endpoint, 'reply', reply, 'subscribed');
+  const subscribed = requiredString(endpoint, 'reply', reply, 'subscribed');
+  let catchup: SubscribeReply['catchup'];
   if (reply.catchup !== undefined) {
-    const catchup = object(endpoint, 'reply.catchup', reply.catchup);
-    optionalString(endpoint, 'reply.catchup', catchup, 'jobId');
-    optionalString(endpoint, 'reply.catchup', catchup, 'status');
+    const raw = object(endpoint, 'reply.catchup', reply.catchup);
+    catchup = {
+      ...present('jobId', optionalString(endpoint, 'reply.catchup', raw, 'jobId')),
+      ...present('status', optionalString(endpoint, 'reply.catchup', raw, 'status')),
+    };
   }
-  optionalIdentity(endpoint, 'reply', reply);
+  let onChainReference: SubscribeReply['onChainReference'];
   if (reply.onChainReference !== undefined) {
-    const note = object(endpoint, 'reply.onChainReference', reply.onChainReference);
-    requiredString(endpoint, 'reply.onChainReference', note, 'onChainId');
-    requiredString(endpoint, 'reply.onChainReference', note, 'message');
+    const raw = object(endpoint, 'reply.onChainReference', reply.onChainReference);
+    onChainReference = {
+      onChainId: requiredString(endpoint, 'reply.onChainReference', raw, 'onChainId'),
+      message: requiredString(endpoint, 'reply.onChainReference', raw, 'message'),
+    };
   }
-  return reply as unknown as SubscribeResponse;
+  return {
+    subscribed,
+    ...present('catchup', catchup),
+    ...present('identity', optionalIdentity(endpoint, 'reply', reply)),
+    ...present('onChainReference', onChainReference),
+  };
 }
 
-/**
- * GET /api/context-graph/list. Reads, per row, the on-chain id a node observed:
- * `onChainId`, else `onChain.id`.
- */
-export function parseContextGraphListResponse(value: unknown): ContextGraphListResponse {
+/** GET /api/context-graph/list. Checks, per row, `onChainId` and `onChain.id`. */
+export function parseContextGraphListResponse(value: unknown): ContextGraphListReply {
   const endpoint = ENDPOINT.list;
   const reply = object(endpoint, 'reply', value);
   if (!Array.isArray(reply.contextGraphs)) {
     throw new WireShapeError(endpoint, 'reply.contextGraphs', 'an array', reply.contextGraphs);
   }
-  reply.contextGraphs.forEach((raw: unknown, index: number) => {
-    const field = `reply.contextGraphs[${index}]`;
-    const row = object(endpoint, field, raw);
-    optionalString(endpoint, field, row, 'onChainId');
-    if (row.onChain !== undefined) {
-      const onChain = object(endpoint, `${field}.onChain`, row.onChain);
-      requiredString(endpoint, `${field}.onChain`, onChain, 'id');
-    }
-  });
-  return reply as unknown as ContextGraphListResponse;
+  return {
+    contextGraphs: reply.contextGraphs.map((raw: unknown, index: number): ContextGraphListRow => {
+      const field = `reply.contextGraphs[${index}]`;
+      const row = object(endpoint, field, raw);
+      const onChainId = optionalString(endpoint, field, row, 'onChainId');
+      const onChain = row.onChain === undefined
+        ? undefined
+        : { id: requiredString(endpoint, `${field}.onChain`, object(endpoint, `${field}.onChain`, row.onChain), 'id') };
+      return { ...present('onChainId', onChainId), ...present('onChain', onChain) };
+    }),
+  };
 }
 
 /** One entry of GET /api/context-graph/subscriptions. */
 export function parseSubscriptionRow(value: unknown, field = 'row'): SubscriptionRow {
   const endpoint = ENDPOINT.subscriptions;
   const row = object(endpoint, field, value);
-  requiredString(endpoint, field, row, 'contextGraphId');
-  requiredBoolean(endpoint, field, row, 'subscribed');
-  requiredBoolean(endpoint, field, row, 'synced');
-  requiredBoolean(endpoint, field, row, 'coreHosted');
-  optionalIdentity(endpoint, field, row);
-  return row as unknown as SubscriptionRow;
+  return {
+    contextGraphId: requiredString(endpoint, field, row, 'contextGraphId'),
+    subscribed: requiredBoolean(endpoint, field, row, 'subscribed'),
+    synced: requiredBoolean(endpoint, field, row, 'synced'),
+    coreHosted: requiredBoolean(endpoint, field, row, 'coreHosted'),
+    ...present('identity', optionalIdentity(endpoint, field, row)),
+  };
 }
 
 /** GET /api/context-graph/subscriptions: the list and each of its rows. */
-export function parseSubscriptionsResponse(value: unknown): { subscriptions: SubscriptionRow[] } {
+export function parseSubscriptionsResponse(value: unknown): SubscriptionsReply {
   const reply = object(ENDPOINT.subscriptions, 'reply', value);
   if (!Array.isArray(reply.subscriptions)) {
     throw new WireShapeError(ENDPOINT.subscriptions, 'reply.subscriptions', 'an array', reply.subscriptions);
@@ -259,19 +328,20 @@ export function parseSubscriptionsResponse(value: unknown): { subscriptions: Sub
 }
 
 /**
- * GET /api/sync/catchup-status. Reads: `jobId`, `contextGraphId`, `jobStatus`,
- * `resolvedContextGraphId`, `error` and `identity`.
+ * GET /api/sync/catchup-status. Checks `jobId`, `contextGraphId`, `jobStatus` (one of
+ * the CLI's `CATCHUP_JOB_STATES`), `resolvedContextGraphId`, `error` and `identity`.
  */
-export function parseCatchupStatusResponse(value: unknown): CatchupStatusResponse {
+export function parseCatchupStatusResponse(value: unknown): CatchupStatusReply {
   const endpoint = ENDPOINT.catchupStatus;
   const reply = object(endpoint, 'reply', value);
-  requiredString(endpoint, 'reply', reply, 'jobId');
-  requiredString(endpoint, 'reply', reply, 'contextGraphId');
-  oneOf(endpoint, 'reply', reply, 'jobStatus', WIRE_JOB_STATES);
-  optionalString(endpoint, 'reply', reply, 'resolvedContextGraphId');
-  optionalString(endpoint, 'reply', reply, 'error');
-  optionalIdentity(endpoint, 'reply', reply);
-  return reply as unknown as CatchupStatusResponse;
+  return {
+    jobId: requiredString(endpoint, 'reply', reply, 'jobId'),
+    contextGraphId: requiredString(endpoint, 'reply', reply, 'contextGraphId'),
+    jobStatus: oneOf(endpoint, 'reply', reply, 'jobStatus', CATCHUP_JOB_STATES),
+    ...present('resolvedContextGraphId', optionalString(endpoint, 'reply', reply, 'resolvedContextGraphId')),
+    ...present('error', optionalString(endpoint, 'reply', reply, 'error')),
+    ...present('identity', optionalIdentity(endpoint, 'reply', reply)),
+  };
 }
 
 /**
@@ -279,9 +349,11 @@ export function parseCatchupStatusResponse(value: unknown): CatchupStatusRespons
  * current daemon answers `result.bindings`; `results.bindings` (SPARQL JSON) and a
  * flat `bindings` are the older shapes the harness's `queryNode` also accepts. A
  * 200 with none of them, or with rows that are not objects, is a failure of the
- * reply, not "no rows yet".
+ * reply, not "no rows yet". A cell is a term string or an object whose `value`,
+ * `datatype`, `type`, `xml:lang` and `lang` are strings when present (the fields
+ * the harness's `normTerm` reads).
  */
-export function parseQueryBindings(value: unknown): Array<Record<string, SparqlBindingCell>> {
+export function parseQueryBindings(value: unknown): QueryBindings {
   const endpoint = ENDPOINT.query;
   const reply = object(endpoint, 'reply', value);
   const holders: Array<[string, Obj | undefined]> = [
@@ -294,38 +366,46 @@ export function parseQueryBindings(value: unknown): Array<Record<string, SparqlB
     throw new WireShapeError(endpoint, 'reply.result.bindings', 'an array (or results.bindings, or bindings)', undefined);
   }
   const [path, holder] = found;
-  const bindings = holder!.bindings;
+  const bindings = holder?.bindings;
   if (!Array.isArray(bindings)) throw new WireShapeError(endpoint, `${path}.bindings`, 'an array', bindings);
-  bindings.forEach((row: unknown, index: number) => {
+  return bindings.map((row: unknown, index: number) => {
     const rowPath = `${path}.bindings[${index}]`;
     const cells = object(endpoint, rowPath, row);
+    const parsed: Record<string, SparqlBindingCell> = {};
     for (const [name, cell] of Object.entries(cells)) {
-      if (typeof cell !== 'string') object(endpoint, `${rowPath}.${name}`, cell);
+      if (typeof cell === 'string') {
+        parsed[name] = cell;
+        continue;
+      }
+      const cellPath = `${rowPath}.${name}`;
+      const structured = object(endpoint, cellPath, cell);
+      parsed[name] = {
+        ...present('value', optionalString(endpoint, cellPath, structured, 'value')),
+        ...present('datatype', optionalString(endpoint, cellPath, structured, 'datatype')),
+        ...present('type', optionalString(endpoint, cellPath, structured, 'type')),
+        ...present('xml:lang', optionalString(endpoint, cellPath, structured, 'xml:lang')),
+        ...present('lang', optionalString(endpoint, cellPath, structured, 'lang')),
+      };
     }
+    return parsed;
   });
-  return bindings as Array<Record<string, SparqlBindingCell>>;
 }
 
-/** What the suite needs of a node to dial it: its peer id and the addresses it listens on. */
-export interface NodePeerInfo {
-  readonly peerId: string;
-  readonly multiaddrs: readonly string[];
-}
-
-/** GET /api/status. Reads: `peerId` and `multiaddrs`. */
+/** GET /api/status. Checks `peerId` and `multiaddrs`. */
 export function parseNodePeerInfo(value: unknown): NodePeerInfo {
   const endpoint = ENDPOINT.status;
   const reply = object(endpoint, 'reply', value);
   const peerId = requiredString(endpoint, 'reply', reply, 'peerId');
   const raw = reply.multiaddrs;
   if (!Array.isArray(raw)) throw new WireShapeError(endpoint, 'reply.multiaddrs', 'an array', raw);
-  raw.forEach((entry: unknown, index: number) => {
+  const multiaddrs = raw.map((entry: unknown, index: number) => {
     if (typeof entry !== 'string') throw new WireShapeError(endpoint, `reply.multiaddrs[${index}]`, 'a string', entry);
+    return entry;
   });
-  return { peerId, multiaddrs: raw as string[] };
+  return { peerId, multiaddrs };
 }
 
-/** GET /api/connections. Reads: the `peerId` of every entry of `connections`. */
+/** GET /api/connections. Checks the `peerId` of every entry of `connections`. */
 export function parseConnectedPeerIds(value: unknown): string[] {
   const endpoint = ENDPOINT.connections;
   const reply = object(endpoint, 'reply', value);

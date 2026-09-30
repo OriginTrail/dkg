@@ -132,28 +132,35 @@ another.
   test 2's "never seen" precondition when it runs first, and it stays a separate
   test so a failure names the behavior and it can run by name.
 - **Wire validators** (`wire.ts`). These daemon replies are read through small
-  functions that take the JSON of a 200 reply as `unknown` and either return it typed
-  as the CLI package's own declaration (imported as a type only, so nothing under
-  `packages/` loads at runtime) or throw an error naming the endpoint and the
-  missing or mistyped field. A renamed `subscriptions`, a retyped `synced` or an
-  identity state spelled differently therefore fails at the reply with that
-  message, instead of as an `undefined` inside a test. Covered: the subscribe
-  reply, the context-graph list, the subscriptions list and its rows, the
-  catch-up status, the `/api/query` answers, and the status and connections
-  replies test 7 needs to dial one edge from another. The graph-create reply and
-  the `/api/connect` status are still read loosely.
+  functions that take the JSON of a 200 reply as `unknown` and either return a
+  projection or throw an error naming the endpoint and the missing or mistyped
+  field. A renamed `subscriptions`, a retyped `synced` or an identity state spelled
+  differently therefore fails at the reply with that message, instead of as an
+  `undefined` inside a test. Covered: the subscribe reply, the context-graph list,
+  the subscriptions list and its rows, the catch-up status, the `/api/query`
+  answers, and the status and connections replies test 7 needs to dial one edge
+  from another. The graph-create reply and the `/api/connect` status are still read
+  loosely.
+
+  What a validator returns: a new object holding exactly the fields it checked,
+  typed by indexed access over the CLI package's own declarations (imported as
+  types only). A field it does not check is neither in the value nor in the type,
+  so the suite cannot read one by accident, and a field renamed in a declaration
+  breaks a type-check of the suite (a throwaway tsconfig or an editor; nothing in CI
+  type-checks devnet suites).
 
   What that is not: it validates mainly the fields this suite reads (and a few
-  it does not, such as `synced`, `coreHosted` and the catch-up `status`, which
-  therefore fail here too if they change), not the daemon's contract. The routes build these bodies inline and export no schema, and the CLI
-  client's declarations are hand-written, so the canonical contract (one schema
-  that the route builds its reply from and every client parses with) would live at
-  the CLI boundary. A field it does not check can change without failing
-  here, and the result is typed as the whole declaration although only the checked
-  fields are verified. The copied job and identity state lists are tied to the
-  declarations at the type level (a type-check of the suite, through a throwaway
-  tsconfig or an editor, catches a state the list lacks; nothing in CI type-checks
-  devnet suites) and, for the job states, at run time by `wire.test.ts`.
+  it does not, such as `synced`, `coreHosted` and the subscribe reply's
+  `catchup.status`, which therefore fail here too if they change), not the daemon's
+  contract. The routes build these bodies inline and export no schema, and the CLI
+  client's declarations are hand-written, so the canonical contract (one schema that
+  the route builds its reply from and every client parses with) would live at the
+  CLI boundary. A field it does not check can change without failing here.
+  The catch-up job states are the CLI's own `CATCHUP_JOB_STATES`, and the suite's
+  terminal-state checks use the CLI's `isTerminalCatchupJobState`: `catchup-status.ts`
+  has only type imports, so importing it loads neither the agent nor the CLI
+  runtime. The identity-note states have no runtime list there (only a type), so
+  `wire.ts` keeps a copy tied to the type.
 - **Daemon helpers** (`daemon.ts`). The reads, posts and polls the scenarios use,
   built on an injected transport (the harness's by default). A reply of the wrong
   shape is a failure, never "not yet": `checked()` adds the node to the validator's

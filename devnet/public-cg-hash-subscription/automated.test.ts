@@ -142,11 +142,15 @@ import {
   type DevnetNode,
   type DevnetState,
 } from '../_bootstrap/harness.js';
+// The catch-up job vocabulary and its terminal-state check are the CLI's own
+// (catchup-status.ts has only type imports, so this loads neither the agent nor the
+// CLI runtime).
+import { isTerminalCatchupJobState } from '../../packages/cli/src/catchup-status.js';
 // The daemon's replies are read through these validators, whose result types are
-// the CLI package's own declarations imported type-only (nothing under packages/
-// loads at runtime): a renamed or retyped field fails at the reply, naming the
-// endpoint and the field. They check the fields this suite reads, not the whole
-// contract; see wire.ts for what that does and does not guarantee.
+// built from the CLI package's own declarations (imported type-only): a renamed or
+// retyped field fails at the reply, naming the endpoint and the field. They check
+// the fields this suite reads, not the whole contract; see wire.ts for what that
+// does and does not guarantee.
 import { createDaemon, expectOk, queuedJobId } from './daemon.js';
 import { runLabeledFlows } from './flows.js';
 import {
@@ -157,7 +161,7 @@ import {
   parseSubscriptionsResponse,
   type CatchupContextGraphIdentity,
   type CatchupJobState,
-  type CatchupStatusResponse,
+  type CatchupStatusReply,
   type SubscriptionRow,
 } from './wire.js';
 
@@ -249,7 +253,7 @@ async function contextGraphStorage(): Promise<ethers.Contract> {
 }
 
 /** The checked body of a reply that must be a 200: anything else fails with `label` and the raw body. */
-async function listSubscriptions(node: DevnetNode): Promise<SubscriptionRow[]> {
+async function listSubscriptions(node: DevnetNode): Promise<readonly SubscriptionRow[]> {
   const res = await getChecked(node, '/api/context-graph/subscriptions', parseSubscriptionsResponse);
   return expectOk(res, `node${node.num} GET /api/context-graph/subscriptions`).subscriptions;
 }
@@ -436,7 +440,7 @@ async function registerSlotOnChain(nameHash: string): Promise<UnheldGraph> {
  * was created under); `resolvedContextGraphId` is set only when the job continued
  * under the cleartext id while it ran, and then it names that graph.
  */
-async function expectByHashLookupResolved(node: DevnetNode, graph: NamedGraph, jobId: string, label: string): Promise<CatchupStatusResponse> {
+async function expectByHashLookupResolved(node: DevnetNode, graph: NamedGraph, jobId: string, label: string): Promise<CatchupStatusReply> {
   const byHash = await waitFor(`${label}: node${node.num} catch-up status by name hash`, 60_000, 2_000, async () => catchupStatus(node, graph.nameHash));
   expect(byHash.jobId, `${label}: the hash names the job it was subscribed with`).toBe(jobId);
   if (byHash.resolvedContextGraphId === undefined) {
@@ -575,7 +579,7 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
       // wrongly take the "not asserted" path below.
       const byHash = await waitFor(`node${edgeA.num} catch-up settles for the hash-keyed job`, 120_000, 3_000, async () => {
         const found = await catchupStatus(edgeA, vmGraph.nameHash);
-        return found !== null && found.jobStatus !== 'queued' && found.jobStatus !== 'running' ? found : null;
+        return found !== null && isTerminalCatchupJobState(found.jobStatus) ? found : null;
       });
       if (byHash.resolvedContextGraphId === vmGraph.id) {
         // The job continued under the cleartext id while it ran, so the cleartext
@@ -617,7 +621,7 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
 
     const first = await waitFor(`node${edgeA.num} has a settled catch-up job for ${graph.id}`, 120_000, 3_000, async () => {
       const found = await catchupStatus(edgeA, graph.id);
-      return found !== null && found.jobStatus !== 'queued' && found.jobStatus !== 'running' ? found : null;
+      return found !== null && isTerminalCatchupJobState(found.jobStatus) ? found : null;
     });
 
     const forced = await forceCatchup(edgeA, graph.id);
@@ -640,7 +644,7 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     // is intact, and the aliases follow that latest job all the same.
     const settled = await waitFor(`node${edgeA.num} replacement catch-up job settles`, 240_000, 3_000, async () => {
       const found = await catchupStatus(edgeA, graph.id);
-      return found !== null && found.jobId === forced.jobId && found.jobStatus !== 'queued' && found.jobStatus !== 'running' ? found : null;
+      return found !== null && found.jobId === forced.jobId && isTerminalCatchupJobState(found.jobStatus) ? found : null;
     });
     // eslint-disable-next-line no-console
     console.log(`hash-sub: forced catch-up job ${settled.jobId} settled as ${settled.jobStatus}`);
@@ -716,7 +720,7 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     // Catch-up cannot succeed under a name nobody holds; it says so instead of asking for a retry.
     const status = await waitFor(`node${edgeB.num} catch-up settles for the hash-only graph`, 120_000, 3_000, async () => {
       const found = await catchupStatus(edgeB, nameHash);
-      return found !== null && found.jobStatus !== 'queued' && found.jobStatus !== 'running' ? found : null;
+      return found !== null && isTerminalCatchupJobState(found.jobStatus) ? found : null;
     });
     expect(status.jobStatus).toBe('unreachable' satisfies CatchupJobState);
     expect(status.identity).toMatchObject({ state: 'name-hash-only', nameHash, onChainId } satisfies Partial<CatchupContextGraphIdentity>);
@@ -757,7 +761,7 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     // for that first fixes the order: the hash resolves AFTER the job settled.
     const settled = await waitFor(`node${edgeA.num} catch-up settles for the hash-keyed job`, 120_000, 3_000, async () => {
       const found = await catchupStatus(edgeA, graph.nameHash);
-      return found !== null && found.jobStatus !== 'queued' && found.jobStatus !== 'running' ? found : null;
+      return found !== null && isTerminalCatchupJobState(found.jobStatus) ? found : null;
     });
     expect(settled.jobId, 'the hash names the job the subscribe returned').toBe(jobId);
     expect(settled.jobStatus).toBe('unreachable' satisfies CatchupJobState);

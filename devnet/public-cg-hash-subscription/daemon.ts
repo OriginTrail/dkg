@@ -21,8 +21,8 @@ import {
   parseCatchupStatusResponse,
   parseQueryBindings,
   parseSubscribeResponse,
-  type CatchupStatusResponse,
-  type SubscribeResponse,
+  type CatchupStatusReply,
+  type SubscribeReply,
 } from './wire.js';
 
 export type View = 'shared-working-memory' | 'verifiable-memory';
@@ -107,9 +107,8 @@ export function withNote(error: unknown, note: string): Error {
 }
 
 /** The id of the catch-up job a subscribe queued (the completed-catch-up variant of the reply has none). */
-export function queuedJobId(reply: SubscribeResponse): string | undefined {
-  const catchup = reply.catchup;
-  return catchup !== undefined && 'jobId' in catchup ? catchup.jobId : undefined;
+export function queuedJobId(reply: SubscribeReply): string | undefined {
+  return reply.catchup?.jobId;
 }
 
 export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = {}) {
@@ -123,7 +122,7 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
     return checked(node, await io.post(node, path, body), parse);
   }
 
-  async function catchupStatus(node: DevnetNode, contextGraphId: string): Promise<CatchupStatusResponse | null> {
+  async function catchupStatus(node: DevnetNode, contextGraphId: string): Promise<CatchupStatusReply | null> {
     const res = await getChecked(
       node,
       `/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`,
@@ -227,7 +226,7 @@ export function createDaemon(io: DaemonIo = harnessIo, options: DaemonOptions = 
    * Subscribe, retrying only while the node has not yet read the graph from the
    * chain (a retryable 503, or a numeric id the node has not seen yet: 404).
    */
-  async function subscribeWhenAdmitted(node: DevnetNode, contextGraphId: string): Promise<SubscribeResponse> {
+  async function subscribeWhenAdmitted(node: DevnetNode, contextGraphId: string): Promise<SubscribeReply> {
     let last = '';
     try {
       return await io.waitFor(`node${node.num} subscribes ${contextGraphId}`, 120_000, 3_000, async () => {
