@@ -15,12 +15,13 @@
  *      subscription synced 0 quads).
  *   3. The catch-up job the subscribe minted is reachable by its job id, by the
  *      cleartext id and by the on-chain id, and an on-chain numeric id (`#<n>`)
- *      subscribes the same graph (#2758). The by-hash lookup (#2779) is asserted
- *      only when the job was created under the hash; when the subscribe request
- *      itself resolved the hash (the usual case here) the job is keyed by the
- *      cleartext id and a lookup by the hash finds none, so that branch is not
- *      exercised by this suite. The content waits only read: they never
- *      re-subscribe, so the job a test started stays the latest one.
+ *      subscribes the same graph (#2758). The content waits only read: they never
+ *      re-subscribe, so the job a test started stays the latest one. Test 2 also
+ *      looks the job up by the hash, but only when the subscribe left it keyed by
+ *      the hash; with a connected holder the request usually resolves the name
+ *      itself, the job is keyed by the cleartext id and that lookup finds none, so
+ *      test 2 then says on the console that it did not run it. Nothing about that
+ *      lookup depends on the timing of test 2: item 7 pins it.
  *   4. A forced catch-up (`forceCatchup`, the operator's recovery) on an already
  *      converged graph mints a replacement job that both aliases follow; the
  *      superseded job stays readable by its id and the content is unchanged.
@@ -32,17 +33,50 @@
  *      can lag for many minutes after a devnet starts; the adoption and VM tests
  *      above do not depend on it. It is the one scenario that recovers
  *      explicitly (a forced catch-up once a minute), and afterwards it expects
- *      the aliases to name whichever job is latest.
+ *      the aliases to name whichever job is latest. Its two edges are two
+ *      scenarios run side by side (flows.ts), so neither waits for the other's
+ *      recovery.
  *   6. A graph registered on chain whose cleartext no peer holds stays hash-only:
  *      no cleartext row is invented, and its catch-up settles as `unreachable`
  *      with the name-hash-only note rather than as a retryable failure.
+ *   7. A catch-up job created under a name hash that no peer could reveal stays
+ *      retrievable by that hash after a holder appears and the edge adopts the
+ *      cleartext id (#2779): the same job id comes back by the hash and by its
+ *      id, still with the verdict it settled with, and its identity note now
+ *      reads `resolved` with the cleartext id. It is arranged, without stopping
+ *      or restarting any node, so that the order is fixed:
+ *        a. the slot is registered straight on the contract with a name whose
+ *           preimage only this suite knows (`fixture.late`), so no peer can reveal
+ *           it and edge 5's subscribe by the hash is keyed by the hash;
+ *        b. the job settles as `unreachable` under the hash;
+ *        c. edge 6 subscribes the cleartext id (what a user who knows the name
+ *           does), which is what makes its node answer the name protocol for the
+ *           hash;
+ *        d. edge 5 is asked to dial edge 6 (`POST /api/connect`), the one
+ *           connection the devnet does not make (edges dial only the cores), so
+ *           its resolver asks that new peer at once. Nothing can undo that dial
+ *           (there is no disconnect), so on a devnet where the edges are already
+ *           connected (an earlier run) edge 5 asks again the way an operator does,
+ *           with a second subscribe by the hash: an explicit request skips the
+ *           ten-minute wait before a peer is asked again. That subscribe resolves
+ *           the hash within the request and mints its own job under the cleartext
+ *           id; the hash still names the original job. The test says on the console
+ *           which of the two it took.
+ *      What it does NOT reach: a job that continues under the cleartext id while
+ *      its first catch-up round is still running (`resolvedContextGraphId` set).
+ *      That needs the hash to resolve during a round of a few seconds, which no
+ *      devnet control can time; it is pinned by packages/cli/test/
+ *      context-graph-name-hash-catchup-status.test.ts and
+ *      context-graph-name-hash-subscribe-route.test.ts.
  *
  * Structure: every test runs correctly alone or after any other test.
  *
  *   - FIXTURE (`beforeAll`): the graphs are created once, before any test, and
  *     never change afterwards (`Fixture`: ids, on-chain ids, name hashes,
  *     subjects, values). The expensive devnet detection and identity setup is
- *     shared the same way. Creation is not a test and no test creates a graph.
+ *     shared the same way. Creation is not a test and no test creates a graph
+ *     (test 7 reveals a name to the network by subscribing it; the slot it uses
+ *     is in the fixture).
  *   - ARRANGE (inside each test): the edge state a test needs is made by that
  *     test. No (edge, graph) pair is used by two tests:
  *
@@ -51,9 +85,10 @@
  *         test 4  edge A          forced graph  arranged converged, then forced
  *         test 5  edge A, edge B  swm graph     subscribed by hash / numeric id
  *         test 6  edge B          unheld name   subscribed by hash
+ *         test 7  edge A, edge B  late name     by hash / by cleartext id, then dialed
  *
- *     Tests 2, 3, 5 and 6 have a subscribe as their subject, so they need an edge
- *     with no subscribed row for the graph and check that (`expectNoRowFor`)
+ *     Tests 2, 3, 5, 6 and 7 have a subscribe as their subject, so they need an
+ *     edge with no subscribed row for the graph and check that (`expectNoRowFor`)
  *     instead of silently asserting on someone else's leftovers. (The edge's chain
  *     poller may already know the slot: that is not a subscription.) Test 4 is the only one that
  *     needs a state a subscribe leaves behind (an edge converged on VM), so it
@@ -72,9 +107,17 @@
  *   pnpm run build:packages && pnpm --dir packages/cli run build:prepared
  *   ./scripts/devnet.sh clean && ./scripts/devnet.sh start 6
  *
- * Node 1 is a core and the author. Nodes 5 and 6 are edges: they only ever read.
- * The suite mutates only the Context Graphs it creates itself (ISOLATION
- * INVARIANT in devnet/_bootstrap/harness.ts).
+ * Node 1 is a core and the author. Nodes 5 and 6 are edges: they subscribe and
+ * read, and test 7 has edge 5 dial edge 6. The suite mutates only the Context
+ * Graphs it creates itself (ISOLATION INVARIANT in devnet/_bootstrap/harness.ts);
+ * it stops and restarts no node. The one change it leaves behind besides its own
+ * graphs and subscriptions is test 7's connection from edge 5 to edge 6 (the daemon
+ * has no disconnect, so it lasts until either edge restarts).
+ *
+ * The daemon's replies are read through the validators in wire.ts (a renamed or
+ * retyped field fails at the reply, naming the endpoint and the field), and the
+ * SWM test runs its two edges side by side through flows.ts. Both have unit tests
+ * that need no devnet (wire.test.ts, flows.test.ts).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
@@ -97,46 +140,29 @@ import {
   type DevnetNode,
   type DevnetState,
 } from '../_bootstrap/harness.js';
-// The daemon's own wire declarations, type-only: nothing under packages/ loads at
-// runtime, and a renamed or retyped field fails the type-check instead of a long
-// devnet run (repo practice: devnet/ack-candidate-isolation imports the cli source).
-import type { ApiClient } from '../../packages/cli/src/api-client.js';
-import type {
-  CatchupContextGraphIdentity,
-  CatchupJobState,
-  CatchupStatusResponse,
-} from '../../packages/cli/src/catchup-status.js';
+// The daemon's replies are read through these validators, whose result types are
+// the CLI package's own declarations imported type-only (nothing under packages/
+// loads at runtime): a renamed or retyped field fails at the reply, naming the
+// endpoint and the field. They check the fields this suite reads, not the whole
+// contract; see wire.ts for what that does and does not guarantee.
+import { runLabeledFlows } from './flows.js';
+import {
+  parseCatchupStatusResponse,
+  parseConnectedPeerIds,
+  parseContextGraphListResponse,
+  parseNodePeerInfo,
+  parseSubscribeResponse,
+  parseSubscriptionsResponse,
+  type CatchupContextGraphIdentity,
+  type CatchupJobState,
+  type CatchupStatusResponse,
+  type SubscribeResponse,
+  type SubscriptionRow,
+} from './wire.js';
 
 const NAME_PREDICATE = 'https://schema.org/name';
 const keccak = (id: string): string => ethers.keccak256(ethers.toUtf8Bytes(id)).toLowerCase();
 const STAMP = Date.now().toString(36);
-
-/**
- * Response of POST /api/context-graph/subscribe: the CLI client's declaration of
- * it (`ApiClient.subscribeToContextGraph`), which carries the `identity` and
- * `onChainReference` notes. The route builds the body inline and exports no type
- * of its own.
- */
-type SubscribeResponse = Awaited<ReturnType<ApiClient['subscribeToContextGraph']>>;
-
-/** Response of GET /api/context-graph/list (`ApiClient.listContextGraphs`). */
-type ContextGraphListResponse = Awaited<ReturnType<ApiClient['listContextGraphs']>>;
-
-/**
- * One row of GET /api/context-graph/subscriptions. The route builds it inline
- * (packages/cli/src/daemon/routes/context-graph.ts, "GET /api/context-graph/
- * subscriptions") and no exported declaration exists, so the four scalar fields
- * are stated here exactly as the route emits them; `identity` is the daemon's
- * name-hash identity note, the same declaration the subscribe reply and the
- * catch-up status carry.
- */
-interface SubscriptionRow {
-  contextGraphId: string;
-  subscribed: boolean;
-  synced: boolean;
-  coreHosted: boolean;
-  identity?: CatchupContextGraphIdentity;
-}
 
 /** A public graph registered on chain, holding one Knowledge Asset by one subject. */
 interface RegisteredGraph {
@@ -153,6 +179,24 @@ interface UnheldGraph {
   readonly onChainId: string;
 }
 
+/**
+ * Registered the same way, but the preimage (`id`) is known to this suite: no node
+ * holds it until test 7 reveals it by subscribing the cleartext id.
+ */
+interface RevealableGraph extends UnheldGraph {
+  readonly id: string;
+}
+
+/** What adoption is checked against: the cleartext id and the hash that resolves to it. */
+type NamedGraph = Pick<RegisteredGraph, 'id' | 'nameHash'>;
+
+/** One edge of a scenario that treats two edges alike: how it subscribes, and what a failure calls it. */
+interface EdgeScenario {
+  readonly node: DevnetNode;
+  readonly requestedId: string;
+  readonly label: string;
+}
+
 /** Everything the tests share. Built once in `beforeAll`, never modified afterwards. */
 interface Fixture {
   /** Its Knowledge Asset is published to VM on chain: edges must fetch it from a holder (tests 2 and 3). */
@@ -163,6 +207,8 @@ interface Fixture {
   readonly swm: RegisteredGraph;
   /** Registered on chain with a name commitment nobody can resolve (test 6). */
   readonly unheld: UnheldGraph;
+  /** Registered on chain with a name only this suite knows, revealed by test 7 alone. */
+  readonly late: RevealableGraph;
 }
 
 // The devnet handles, found once in `beforeAll` and never reassigned.
@@ -191,21 +237,64 @@ async function contextGraphStorage(): Promise<ethers.Contract> {
 }
 
 /**
- * A daemon reply. `json` is typed as the endpoint's 200 body: check `status`
- * before reading it (an error reply carries `{ error }` instead).
+ * A daemon reply. A 200 body has been checked by the endpoint's validator
+ * (wire.ts): a renamed or retyped field it reads throws there, naming the
+ * endpoint and the field. Any other status carries the body untouched (an error
+ * reply is `{ error }`).
  */
-interface Reply<T> {
-  status: number;
-  json: T;
+type Reply<T> =
+  | { readonly ok: true; readonly status: 200; readonly body: T }
+  | { readonly ok: false; readonly status: number; readonly body: unknown };
+
+function checked<T>(node: DevnetNode, res: { status: number; json: unknown }, parse: (value: unknown) => T): Reply<T> {
+  if (res.status !== 200) return { ok: false, status: res.status, body: res.json };
+  try {
+    return { ok: true, status: 200, body: parse(res.json) };
+  } catch (err) {
+    throw new Error(`node${node.num} ${err instanceof Error ? err.message : String(err)}`, { cause: err });
+  }
 }
 
-const getTyped = <T>(node: DevnetNode, path: string): Promise<Reply<T>> => getJson(node, path);
-const postTyped = <T>(node: DevnetNode, path: string, body: unknown): Promise<Reply<T>> => postJson(node, path, body);
+async function getChecked<T>(node: DevnetNode, path: string, parse: (value: unknown) => T): Promise<Reply<T>> {
+  return checked(node, await getJson(node, path), parse);
+}
+
+async function postChecked<T>(node: DevnetNode, path: string, body: unknown, parse: (value: unknown) => T): Promise<Reply<T>> {
+  return checked(node, await postJson(node, path, body), parse);
+}
+
+/** The checked body of a reply that must be a 200: anything else fails with `label` and the raw body. */
+function expectOk<T>(reply: Reply<T>, label: string): T {
+  expect(reply.status, `${label}: ${JSON.stringify(reply.body)}`).toBe(200);
+  return (reply as Extract<Reply<T>, { ok: true }>).body;
+}
 
 async function listSubscriptions(node: DevnetNode): Promise<SubscriptionRow[]> {
-  const res = await getTyped<{ subscriptions: SubscriptionRow[] }>(node, '/api/context-graph/subscriptions');
-  expect(res.status, `node${node.num} GET /api/context-graph/subscriptions: ${JSON.stringify(res.json)}`).toBe(200);
-  return res.json.subscriptions;
+  const res = await getChecked(node, '/api/context-graph/subscriptions', parseSubscriptionsResponse);
+  return expectOk(res, `node${node.num} GET /api/context-graph/subscriptions`).subscriptions;
+}
+
+/** A node's peer id and a direct TCP address it can be dialed on, as the node reports them. */
+async function dialTarget(node: DevnetNode): Promise<{ peerId: string; multiaddr: string }> {
+  const info = expectOk(await getChecked(node, '/api/status', parseNodePeerInfo), `node${node.num} GET /api/status`);
+  const direct = info.multiaddrs.filter((addr) => addr.includes('/tcp/') && !addr.includes('/p2p-circuit'));
+  const chosen = direct.find((addr) => addr.startsWith('/ip4/127.0.0.1/')) ?? direct[0];
+  expect(chosen, `node${node.num} reports a direct TCP address: ${JSON.stringify(info.multiaddrs)}`).toBeDefined();
+  return { peerId: info.peerId, multiaddr: chosen!.includes('/p2p/') ? chosen! : `${chosen}/p2p/${info.peerId}` };
+}
+
+async function connectedPeerIds(node: DevnetNode): Promise<string[]> {
+  return expectOk(await getChecked(node, '/api/connections', parseConnectedPeerIds), `node${node.num} GET /api/connections`);
+}
+
+/** Ask `from` to dial `to` (POST /api/connect), then wait until `from` lists the connection. */
+async function dial(from: DevnetNode, to: DevnetNode): Promise<void> {
+  const target = await dialTarget(to);
+  const res = await postJson(from, '/api/connect', { multiaddr: target.multiaddr });
+  expect(res.status, `node${from.num} POST /api/connect to node${to.num}: ${JSON.stringify(res.json)}`).toBe(200);
+  await waitFor(`node${from.num} lists node${to.num} as connected`, 60_000, 1_000, async () => (
+    (await connectedPeerIds(from)).includes(target.peerId) ? true : null
+  ));
 }
 
 /** The id of the catch-up job a subscribe queued (the completed-catch-up variant of the reply has none). */
@@ -221,13 +310,13 @@ function queuedJobId(reply: SubscribeResponse): string | undefined {
 async function subscribeWhenAdmitted(node: DevnetNode, contextGraphId: string): Promise<SubscribeResponse> {
   let last = '';
   return waitFor(`node${node.num} subscribes ${contextGraphId}`, 120_000, 3_000, async () => {
-    const res = await postTyped<SubscribeResponse>(node, '/api/context-graph/subscribe', {
+    const res = await postChecked(node, '/api/context-graph/subscribe', {
       contextGraphId,
       includeSharedMemory: true,
       syncMode: 'always-on',
-    });
-    if (res.status === 200) return res.json;
-    last = `${res.status} ${JSON.stringify(res.json)}`;
+    }, parseSubscribeResponse);
+    if (res.ok) return res.body;
+    last = `${res.status} ${JSON.stringify(res.body)}`;
     if (res.status === 503 || res.status === 404) return null;
     throw new Error(`node${node.num} subscribe ${contextGraphId} refused: ${last}`);
   }).catch((err: unknown) => {
@@ -242,10 +331,9 @@ async function subscribeWhenAdmitted(node: DevnetNode, contextGraphId: string): 
  */
 async function waitUntilChainSlotObserved(node: DevnetNode, onChainId: string): Promise<void> {
   await waitFor(`node${node.num} observes on-chain slot ${onChainId}`, 120_000, 3_000, async () => {
-    const res = await getTyped<ContextGraphListResponse>(node, '/api/context-graph/list');
-    if (res.status !== 200) return null;
-    const rows = res.json.contextGraphs ?? [];
-    return rows.some((row) => (row.onChainId ?? row.onChain?.id) === onChainId) ? true : null;
+    const res = await getChecked(node, '/api/context-graph/list', parseContextGraphListResponse);
+    if (!res.ok) return null;
+    return res.body.contextGraphs.some((row) => (row.onChainId ?? row.onChain?.id) === onChainId) ? true : null;
   });
 }
 
@@ -254,14 +342,14 @@ async function waitUntilChainSlotObserved(node: DevnetNode, onChainId: string): 
  * subscription row for the graph, under either of its ids. It fails with that
  * message instead of letting a later assertion read someone else's leftovers.
  */
-async function expectNoRowFor(node: DevnetNode, graph: RegisteredGraph): Promise<void> {
+async function expectNoRowFor(node: DevnetNode, graph: NamedGraph): Promise<void> {
   const ids = (await listSubscriptions(node)).map((row) => row.contextGraphId);
   expect(ids, `node${node.num} must not yet be subscribed to ${graph.id}`).not.toContain(graph.id);
   expect(ids, `node${node.num} must not yet be subscribed to ${graph.id} by its hash`).not.toContain(graph.nameHash);
 }
 
 /** Wait for the promotion: a subscribed row keyed by the cleartext id, none keyed by the hash. */
-async function waitForAdoption(node: DevnetNode, graph: RegisteredGraph): Promise<SubscriptionRow> {
+async function waitForAdoption(node: DevnetNode, graph: NamedGraph): Promise<SubscriptionRow> {
   return waitFor(`node${node.num} adopts ${graph.id}`, 180_000, 3_000, async () => {
     const rows = await listSubscriptions(node);
     const adopted = rows.find((candidate) => candidate.contextGraphId === graph.id && candidate.subscribed);
@@ -272,11 +360,12 @@ async function waitForAdoption(node: DevnetNode, graph: RegisteredGraph): Promis
 }
 
 async function catchupStatus(node: DevnetNode, contextGraphId: string): Promise<CatchupStatusResponse | null> {
-  const res = await getTyped<CatchupStatusResponse>(
+  const res = await getChecked(
     node,
     `/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`,
+    parseCatchupStatusResponse,
   );
-  return res.status === 200 ? res.json : null;
+  return res.ok ? res.body : null;
 }
 
 type View = 'shared-working-memory' | 'verifiable-memory';
@@ -380,16 +469,16 @@ async function forceCatchup(
   node: DevnetNode,
   contextGraphId: string,
 ): Promise<{ status: number; jobId?: string; detail: string }> {
-  const res = await postTyped<SubscribeResponse>(node, '/api/context-graph/subscribe', {
+  const res = await postChecked(node, '/api/context-graph/subscribe', {
     contextGraphId,
     includeSharedMemory: true,
     syncMode: 'always-on',
     forceCatchup: true,
-  });
+  }, parseSubscribeResponse);
   return {
     status: res.status,
-    jobId: res.status === 200 ? queuedJobId(res.json) : undefined,
-    detail: JSON.stringify(res.json),
+    jobId: res.ok ? queuedJobId(res.body) : undefined,
+    detail: JSON.stringify(res.body),
   };
 }
 
@@ -428,9 +517,10 @@ async function recoverUntilContent(
  * the graph (its cleartext id and its on-chain id) name it as the latest job.
  */
 async function expectAliasesName(node: DevnetNode, graph: RegisteredGraph, jobId: string, label: string): Promise<void> {
-  const byJobId = await getTyped<CatchupStatusResponse>(node, `/api/sync/catchup-status?jobId=${encodeURIComponent(jobId)}`);
-  expect(byJobId.status, `${label}: ${JSON.stringify(byJobId.json)}`).toBe(200);
-  const named = byJobId.json;
+  const named = expectOk(
+    await getChecked(node, `/api/sync/catchup-status?jobId=${encodeURIComponent(jobId)}`, parseCatchupStatusResponse),
+    label,
+  );
   expect(named.resolvedContextGraphId ?? named.contextGraphId, `${label}: the job names the cleartext graph`).toBe(graph.id);
   await waitFor(`${label}: node${node.num} names job ${jobId} by cleartext id and on-chain id`, 30_000, 2_000, async () => {
     const [byCleartextId, byOnChainId] = await Promise.all([
@@ -482,11 +572,12 @@ async function createSharedGraph(id: string, name: string): Promise<RegisteredGr
 }
 
 /**
- * Register a graph straight on the real ContextGraphs contract, from a throwaway
- * wallet, with a name commitment whose preimage no node has ever seen.
+ * Register a public, open graph straight on the real ContextGraphs contract, from a
+ * throwaway wallet, committing `nameHash`. No node holds its preimage unless the
+ * caller makes one hold it: the daemon never registered it, so nothing but the
+ * chain event tells the network it exists.
  */
-async function registerGraphNobodyHolds(): Promise<UnheldGraph> {
-  const nameHash = keccak(`devnet-nobody-holds-this-name/${STAMP}`);
+async function registerSlotOnChain(nameHash: string): Promise<UnheldGraph> {
   const wallet = ethers.Wallet.createRandom().connect(state.provider);
   await setEth(state, wallet.address, '100');
   await fundTrac(state, wallet.address, ethers.parseEther('100000'));
@@ -514,6 +605,35 @@ async function registerGraphNobodyHolds(): Promise<UnheldGraph> {
   return { nameHash, onChainId };
 }
 
+/**
+ * A job made under a name hash is still there under that hash once the hash has
+ * resolved (#2779): the hash names the job it was subscribed with, the job is
+ * readable by its id, and its identity note is read live, so it now names the
+ * cleartext graph. `contextGraphId` stays the hash (the job never changes the id it
+ * was created under); `resolvedContextGraphId` is set only when the job continued
+ * under the cleartext id while it ran, and then it names that graph.
+ */
+async function expectByHashLookupResolved(node: DevnetNode, graph: NamedGraph, jobId: string, label: string): Promise<CatchupStatusResponse> {
+  const byHash = await waitFor(`${label}: node${node.num} catch-up status by name hash`, 60_000, 2_000, async () => catchupStatus(node, graph.nameHash));
+  expect(byHash.jobId, `${label}: the hash names the job it was subscribed with`).toBe(jobId);
+  expect(byHash.resolvedContextGraphId ?? graph.id, `${label}: a job that continued names the cleartext graph`).toBe(graph.id);
+  expect(byHash.identity, `${label}: ${JSON.stringify(byHash)}`).toMatchObject(
+    // `satisfies` types the expected object against the daemon's declaration:
+    // vitest types toMatchObject loosely, so without it a changed identity state
+    // spelling would compile here and fail only in a long devnet run.
+    { state: 'resolved', nameHash: graph.nameHash, contextGraphId: graph.id } satisfies Partial<CatchupContextGraphIdentity>,
+  );
+  const byJobId = expectOk(
+    await getChecked(node, `/api/sync/catchup-status?jobId=${encodeURIComponent(jobId)}`, parseCatchupStatusResponse),
+    `${label}: the job by its id`,
+  );
+  expect(byJobId.jobId).toBe(jobId);
+  expect(byJobId.identity, `${label}: the job by its id`).toMatchObject(
+    { state: 'resolved', nameHash: graph.nameHash, contextGraphId: graph.id } satisfies Partial<CatchupContextGraphIdentity>,
+  );
+  return byHash;
+}
+
 beforeAll(async () => {
   const detected = await detectDevnet(6);
   if (!detected) {
@@ -533,7 +653,10 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     const vm = await createPublishedGraph(`devnet-hash-sub-${STAMP}`, 'hashsub-vm');
     const forced = await createPublishedGraph(`devnet-hash-sub-forced-${STAMP}`, 'hashsub-forced');
     const swm = await createSharedGraph(`devnet-hash-sub-swm-${STAMP}`, 'hashsub-swm');
-    const unheld = await registerGraphNobodyHolds();
+    const unheld = await registerSlotOnChain(keccak(`devnet-nobody-holds-this-name/${STAMP}`));
+    // Test 7's name: only this suite knows it, and nothing has been created under it.
+    const lateId = `devnet-hash-sub-late-${STAMP}`;
+    const late: RevealableGraph = { id: lateId, ...(await registerSlotOnChain(keccak(lateId))) };
 
     // The author holds all of it (store materialization can lag the CLI's return).
     for (const [graph, view] of [
@@ -551,6 +674,7 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
       forced: Object.freeze(forced),
       swm: Object.freeze(swm),
       unheld: Object.freeze(unheld),
+      late: Object.freeze(late),
     });
   }, 900_000);
 
@@ -598,30 +722,28 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     await waitForContent(edgeA, vmGraph.id, vmGraph.subject, 'verifiable-memory', vmExpected, 'name-hash subscribe');
 
     // The catch-up job the subscribe minted is reachable by its id, by the
-    // cleartext id and by the on-chain id, and always names the cleartext graph.
-    // The wait above only reads, so nothing has replaced it: the job the subscribe
-    // returned is still the latest one.
+    // cleartext id and by the on-chain id, and names the cleartext graph. The wait
+    // above only reads, so nothing has replaced it: the job the subscribe returned
+    // is still the latest one.
     const jobId = queuedJobId(subscribed);
     expect(jobId, JSON.stringify(subscribed)).toEqual(expect.any(String));
-    await expectAliasesName(edgeA, vmGraph, jobId!, 'name-hash subscribe');
-    // Looked up by the hash it was subscribed with (#2779), a job created under
-    // the hash names the cleartext graph once it resolved. When the subscribe
-    // request itself resolved the hash (the usual case with a connected holder)
-    // the job is keyed by the cleartext id only and a lookup by the hash finds
-    // no job (404 "No catch-up job found"). That is a product inconsistency
-    // reported in the PR that added this suite, not pinned here; this branch
-    // therefore does not run when the holder answers within the request.
-    if (subscribed.subscribed === vmGraph.nameHash) {
-      const byHash = await waitFor(`node${edgeA.num} catch-up status by name hash`, 60_000, 2_000, async () => catchupStatus(edgeA, vmGraph.nameHash));
-      expect(byHash.resolvedContextGraphId ?? byHash.contextGraphId).toBe(vmGraph.id);
-      if (byHash.identity) {
-        // `satisfies` types the expected object against the daemon's declaration:
-        // vitest types toMatchObject loosely, so without it a changed identity
-        // state spelling would compile here and fail only in a long devnet run.
-        expect(byHash.identity).toMatchObject(
-          { state: 'resolved', nameHash: vmGraph.nameHash, contextGraphId: vmGraph.id } satisfies Partial<CatchupContextGraphIdentity>,
-        );
-      }
+    if (subscribed.subscribed === vmGraph.id) {
+      await expectAliasesName(edgeA, vmGraph, jobId!, 'name-hash subscribe');
+      // The subscribe request resolved the hash itself (the usual case with a
+      // connected holder), so its job is keyed by the cleartext id and a lookup by
+      // the hash finds no job (404 "No catch-up job found"). The by-hash lookup
+      // (#2779) therefore needs a job created under the hash, which depends on a
+      // race the devnet cannot control here: test 7 arranges it and pins it. Say so
+      // rather than pass silently.
+      // eslint-disable-next-line no-console
+      console.log(`hash-sub: the by-hash catch-up lookup was NOT exercised here: the subscribe resolved the hash within the request (subscribed=${subscribed.subscribed}), so its job is keyed by the cleartext id. Test 7 (late holder) pins it.`);
+    } else {
+      // The subscribe answered under the hash (no holder answered within the
+      // request), so the job is keyed by the hash. It is the job the hash names
+      // (#2779); whether it also continued under the cleartext id depends on when
+      // the hash resolved relative to its first round, so the cleartext aliases are
+      // not asserted for it (the SWM test does the same).
+      await expectByHashLookupResolved(edgeA, vmGraph, jobId!, 'name-hash subscribe');
     }
   }, 900_000);
 
@@ -661,9 +783,11 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
 
     // Both aliases now name the replacement; the superseded job is still there by its id.
     await expectAliasesName(edgeA, graph, forced.jobId!, 'forced catch-up');
-    const superseded = await getTyped<CatchupStatusResponse>(edgeA, `/api/sync/catchup-status?jobId=${encodeURIComponent(first.jobId)}`);
-    expect(superseded.status, JSON.stringify(superseded.json)).toBe(200);
-    expect(superseded.json.jobId).toBe(first.jobId);
+    const superseded = expectOk(
+      await getChecked(edgeA, `/api/sync/catchup-status?jobId=${encodeURIComponent(first.jobId)}`, parseCatchupStatusResponse),
+      'the superseded job',
+    );
+    expect(superseded.jobId).toBe(first.jobId);
 
     // The replacement runs to a verdict, and the content is exactly what it was.
     // The verdict itself is not what this test pins: this graph has no shared
@@ -691,38 +815,37 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     const swmExpected = await subjectContent(author, swmGraph.id, swmGraph.subject, 'shared-working-memory');
     expect(swmExpected.some((entry) => entry.includes(swmGraph.value))).toBe(true);
 
-    await expectNoRowFor(edgeA, swmGraph);
-    await expectNoRowFor(edgeB, swmGraph);
-    await waitUntilChainSlotObserved(edgeA, swmGraph.onChainId);
-    const subscribedA = await subscribeWhenAdmitted(edgeA, swmGraph.nameHash);
-    await waitForAdoption(edgeA, swmGraph);
-    await waitUntilChainSlotObserved(edgeB, swmGraph.onChainId);
-    const subscribedB = await subscribeWhenAdmitted(edgeB, `#${swmGraph.onChainId}`);
-    await waitForAdoption(edgeB, swmGraph);
-
-    // The jobs the subscribes minted, checked before any recovery can replace
-    // them. (A subscribe that answered under the hash keyed its job by the hash,
-    // and its cleartext alias is not asserted here.)
-    const edges = [
-      { node: edgeA, subscribed: subscribedA, label: 'name-hash subscribe' },
-      { node: edgeB, subscribed: subscribedB, label: 'numeric-id subscribe' },
+    // Two scenarios from the start: the same flow, run for each edge side by side.
+    // Nothing in one depends on the other, so a slow recovery on one edge does not
+    // spend the other's budget.
+    const scenarios: readonly EdgeScenario[] = [
+      { node: edgeA, requestedId: swmGraph.nameHash, label: 'name-hash subscribe' },
+      { node: edgeB, requestedId: `#${swmGraph.onChainId}`, label: 'numeric-id subscribe' },
     ];
-    const firstJobIds = new Map<DevnetNode, string>();
-    for (const { node, subscribed, label } of edges) {
-      const jobId = queuedJobId(subscribed);
-      expect(jobId, JSON.stringify(subscribed)).toEqual(expect.any(String));
-      firstJobIds.set(node, jobId!);
-      if (subscribed.subscribed === swmGraph.id) await expectAliasesName(node, swmGraph, jobId!, `${label} (first job)`);
-    }
+    for (const { node } of scenarios) await expectNoRowFor(node, swmGraph);
 
-    // Recover explicitly, and expect the aliases to follow whichever job is latest.
-    for (const { node, label } of edges) {
-      const latestJobId = await recoverUntilContent(
-        node, swmGraph.id, swmGraph.subject, 'shared-working-memory', swmExpected, label,
-        firstJobIds.get(node)!, 600_000,
-      );
-      await expectAliasesName(node, swmGraph, latestJobId, `${label} (latest job)`);
-    }
+    await runLabeledFlows(scenarios.map(({ node, requestedId, label }) => ({
+      label,
+      run: async () => {
+        await waitUntilChainSlotObserved(node, swmGraph.onChainId);
+        const subscribed = await subscribeWhenAdmitted(node, requestedId);
+        await waitForAdoption(node, swmGraph);
+
+        // The job the subscribe minted, checked before any recovery can replace
+        // it. (A subscribe that answered under the hash keyed its job by the hash,
+        // and its cleartext alias is not asserted here.)
+        const firstJobId = queuedJobId(subscribed);
+        expect(firstJobId, JSON.stringify(subscribed)).toEqual(expect.any(String));
+        if (subscribed.subscribed === swmGraph.id) await expectAliasesName(node, swmGraph, firstJobId!, `${label} (first job)`);
+
+        // Recover explicitly, and expect the aliases to follow whichever job is latest.
+        const latestJobId = await recoverUntilContent(
+          node, swmGraph.id, swmGraph.subject, 'shared-working-memory', swmExpected, label,
+          firstJobId!, 600_000,
+        );
+        await expectAliasesName(node, swmGraph, latestJobId, `${label} (latest job)`);
+      },
+    })));
   }, 1_800_000);
 
   it('a graph registered on chain whose cleartext no peer holds stays hash-only: nothing is invented', async () => {
@@ -756,5 +879,86 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
     // The verdict is the name-hash-only note, not the generic "no peer could deliver" one.
     expect(status.error).toBe(status.identity?.message);
     expect(status.error).toContain('on-chain name hash');
+  }, 900_000);
+
+  // Pins #2779 deterministically, where test 2 can only reach it by a race. Nothing
+  // is stopped or restarted: the name is unknowable until this test reveals it, and
+  // the holder is an edge that the subscriber is not connected to (or has already
+  // asked, see below) until the test makes the subscriber ask it again. See the
+  // header (item 7) for the order and for what it does not reach.
+  it('a job created under a name hash no peer could reveal is still found by that hash once a holder appears and the hash resolves (#2779)', async () => {
+    const graph = fixture.late;
+    await expectNoRowFor(edgeA, graph);
+    await expectNoRowFor(edgeB, graph);
+    // The devnet's edges dial only the cores, so on a devnet that has not run this
+    // test yet, edge A has no connection to edge B. Nothing can undo the dial this
+    // test makes (there is no disconnect), so a second run finds them connected; that
+    // matters because edge A asks each peer once per hash and does not ask it again
+    // for ten minutes unless asked explicitly. Decided here, once, from the state.
+    const holder = await dialTarget(edgeB);
+    const alreadyConnected = (await connectedPeerIds(edgeA)).includes(holder.peerId);
+
+    // Subscribed by the hash while no peer holds the name: nothing to resolve it, so
+    // the route reports the hash and keys the job by it.
+    await waitUntilChainSlotObserved(edgeA, graph.onChainId);
+    const subscribed = await subscribeWhenAdmitted(edgeA, graph.nameHash);
+    expect(subscribed.subscribed, JSON.stringify(subscribed)).toBe(graph.nameHash);
+    expect(subscribed.identity, JSON.stringify(subscribed)).toMatchObject(
+      { state: 'name-hash-only', nameHash: graph.nameHash, onChainId: graph.onChainId } satisfies Partial<CatchupContextGraphIdentity>,
+    );
+    const jobId = queuedJobId(subscribed);
+    expect(jobId, JSON.stringify(subscribed)).toEqual(expect.any(String));
+
+    // The job settles under the hash, as unreachable, and the hash finds it. Waiting
+    // for that first fixes the order: the hash resolves AFTER the job settled.
+    const settled = await waitFor(`node${edgeA.num} catch-up settles for the hash-keyed job`, 120_000, 3_000, async () => {
+      const found = await catchupStatus(edgeA, graph.nameHash);
+      return found !== null && found.jobStatus !== 'queued' && found.jobStatus !== 'running' ? found : null;
+    });
+    expect(settled.jobId, 'the hash names the job the subscribe returned').toBe(jobId);
+    expect(settled.jobStatus).toBe('unreachable' satisfies CatchupJobState);
+    expect(settled.identity).toMatchObject(
+      { state: 'name-hash-only', nameHash: graph.nameHash, onChainId: graph.onChainId } satisfies Partial<CatchupContextGraphIdentity>,
+    );
+
+    // A holder appears: a user who knows the name subscribes it on edge B, and that
+    // node then answers the name protocol for the hash.
+    await waitUntilChainSlotObserved(edgeB, graph.onChainId);
+    const revealed = await subscribeWhenAdmitted(edgeB, graph.id);
+    expect(revealed.subscribed, JSON.stringify(revealed)).toBe(graph.id);
+
+    // Edge A now has to ask that peer.
+    let successorJobId: string | undefined;
+    if (!alreadyConnected) {
+      // A new connection makes edge A's resolver ask the new peer at once, and the
+      // hash resolves in the background, with no request from anyone.
+      await dial(edgeA, edgeB);
+    } else {
+      // Edge A asked edge B when it subscribed (B knew nothing then), so it would not
+      // ask again for ten minutes. An explicit request skips that: it is what a
+      // repeated `dkg subscribe <hash>` is, and the route resolves the hash inside
+      // the request. That subscribe mints its own job, keyed by the cleartext id;
+      // the job under the hash is untouched, which is what is asserted below.
+      // eslint-disable-next-line no-console
+      console.log(`hash-sub: late holder: node${edgeA.num} is already connected to node${edgeB.num} (an earlier run dialed it), so it would not ask again for ten minutes; resolving through an explicit second subscribe instead of a new connection.`);
+      const again = await subscribeWhenAdmitted(edgeA, graph.nameHash);
+      expect(again.subscribed, `an explicit subscribe resolves the hash within the request: ${JSON.stringify(again)}`).toBe(graph.id);
+      successorJobId = queuedJobId(again);
+    }
+
+    const row = await waitForAdoption(edgeA, graph);
+    expect(row.identity, 'a resolved row carries no name-hash-only note').toBeUndefined();
+    expect(keccak(row.contextGraphId), 'the adopted id is the preimage of the on-chain hash').toBe(graph.nameHash);
+
+    // The job made under the hash is still the one the hash names, with the verdict
+    // it settled with (adopting the name did not rewrite it), and now says whom the
+    // hash resolved to.
+    const byHash = await expectByHashLookupResolved(edgeA, graph, jobId!, 'late holder');
+    expect(byHash.jobStatus, 'adopting the name does not rewrite the settled job').toBe(settled.jobStatus);
+    if (successorJobId !== undefined) {
+      // The second subscribe's job is the cleartext id's latest; it did not take the hash's job over.
+      expect(successorJobId, 'the explicit subscribe minted its own job').not.toBe(jobId);
+      expect((await catchupStatus(edgeA, graph.id))?.jobId, 'the cleartext id names the job of the second subscribe').toBe(successorJobId);
+    }
   }, 900_000);
 });
