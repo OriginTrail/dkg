@@ -38,8 +38,11 @@ nodes.
    their RFC-64 authority pipeline has accepted it (a finalized authority index
    polled every few minutes), and right after `devnet.sh start` that pipeline can
    lag or trip its RPC circuit for many minutes (`chain event log moved`,
-   `RFC-64 authority RPC circuit is open`). If it fails on a freshly started devnet,
-   give the devnet time or run the suite after others, as the sweep does.
+   `RFC-64 authority RPC circuit is open`). This is the least stable test of the
+   suite: on freshly started devnets it failed in some runs for an edge that
+   subscribed by hash and, in a control, for one that subscribed by cleartext id,
+   so it is not the hash path, and a forced re-subscribe recovers it only
+   sometimes. The adoption and VM tests do not depend on it.
 5. A graph registered directly on the chain with a name commitment whose
    preimage no node holds stays hash-only: no cleartext row is invented, and its
    catch-up (looked up by the hash) settles as `unreachable` with the
