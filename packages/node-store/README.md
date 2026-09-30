@@ -52,6 +52,19 @@ Phase 1 is a pure package move with no behavior change.
   stores' tests therefore open the real `DashboardDB` (a relative, test-only
   import from `packages/node-ui`) instead of a hand-copied schema that could
   drift from it.
+- **Why there is no schema installer here either.** `DashboardDB.migrate()` is
+  one `PRAGMA user_version` ladder (currently 38) that interleaves dashboard and
+  protocol steps: the protocol DDL sits at V12, V20 to V24, V33 and V34, V36 and
+  V38, plus an idempotent repair pass on every open of a current-version file.
+  The `settings` table (V6) is shared by the dashboard's own settings and four
+  stores here (the two cursor stores' legacy keys, storage discovery and authority
+  history), and `DashboardDB.prune()` owns the retention of
+  `sync_checkpoints` and `message_idempotency`. DDL fragments exported from this
+  package and called from that ladder would still need a `SCHEMA_VERSION` bump in
+  node-ui for every schema change, and would be frozen migration history that a
+  package which does not own the version could silently edit (a fresh file would
+  get the edit, an upgraded one never would). A package that really owns its
+  schema needs its own version marker and its own file: that is Phase 2.
 - **Not moved:** the Context Graph subscription, membership, join-policy and
   approval-ledger tables, the VM reconcile cursors, `snapshot_page_indexes` and
   `local_context_graph_origins`. They are protocol state too, but they are
@@ -65,6 +78,10 @@ never depends on node-ui (the workspace graph must stay acyclic).
 
 Give protocol state its own SQLite file (for example `node-protocol.db`) with a
 one-time, marker-guarded migration out of `node-ui.db`, behind a config flag.
+This package then owns a current-state installer for that file with its own
+version marker (so a test fixture is just that installer), a baseline migration
+copies the rows out of `node-ui.db`, and the protocol `settings` keys move to a
+table of their own instead of sharing the dashboard's.
 It must keep the property `node-ui.db` has today: it survives a `store.nq` RDF
 restore, so changelog eras, sync checkpoints and chain cursors are never
 rewound. Because every store takes a handle, the split needs no store change.
