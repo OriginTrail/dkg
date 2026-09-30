@@ -179,9 +179,14 @@ describe('StorageACK copy removal', () => {
       ? operation(`other-${i}`, `share-other-${i}`, `did:dkg:base:8453/0x70997970c51812dc3a010c7d01b50e0d17dc79c8/${1000 + (i % 300)}`, 1)
       : ack(`other-${i}`, 1, `did:dkg:base:8453/0x70997970c51812dc3a010c7d01b50e0d17dc79c8/${1000 + (i % 300)}`));
     const store = await open(operation('cleaned', 'share-own', UAL, 1), ack('copy-a'), ack('copy-b'), unrelated.flat());
+    const before = await subjectsIn(store);
+    // Only the update is timed, not the scans that check its effect.
     const started = Date.now();
-    expect(await removed(store, ['cleaned'])).toEqual(['copy-a', 'copy-b']);
-    expect(Date.now() - started).toBeLessThan(2_000);
+    await clear(store, ['cleaned']);
+    const elapsed = Date.now() - started;
+    const after = new Set(await subjectsIn(store));
+    expect(before.filter(each => !after.has(each))).toEqual([subject('copy-a'), subject('copy-b')]);
+    expect(elapsed).toBeLessThan(2_000);
   }, 60_000);
 
   it('handles IRIs with unusual characters', async () => {

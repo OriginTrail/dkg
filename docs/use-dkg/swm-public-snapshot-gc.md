@@ -129,12 +129,14 @@ The rows go in one conditional store update: the store itself joins the copies
 to the cleaned operations of the same asset, so neither the number of copies
 (there is no cap) nor the order a store would return them in changes which are
 removed. Versions are compared as canonical decimal strings (by length, then
-digit by digit), so the boundary is exact for any assertion version, including
-those beyond 2^53 or 2^63 where a numeric comparison is inexact or unsupported
-on some engines. A later version's copy, another asset's copy, any other kind of
-operation and the cleaned operations themselves keep counting as references. A
-cleaned operation without a usable version gives no boundary, and then nothing
-is removed. The update is bounded on the client side (10 seconds, with no abort
+digit by digit), so the boundary is exact for any positive assertion version:
+beyond 2^53 a JavaScript number is inexact, and beyond 2^63 - 1 a numeric
+comparison in the store is no longer supported on Oxigraph. A version is usable
+when it is a canonical `xsd:integer` literal, which is what every writer emits;
+any other form is neither a boundary nor a discharged copy. A later version's
+copy, another asset's copy, any other kind of operation and the cleaned
+operations themselves keep counting as references. Without a usable version
+among the cleaned operations there is no boundary, and nothing is removed. The update is bounded on the client side (10 seconds, with no abort
 signal handed to the store, as for the other cleanup queries). An update that
 fails, is refused or times out, or a store that cannot run an update, leaves the
 rows (and so the file) in place and logs one warning.

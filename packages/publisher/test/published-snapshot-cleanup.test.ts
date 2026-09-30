@@ -343,6 +343,23 @@ describe('published snapshot cleanup: storage ACK copies of the published asset'
     for (const id of ids) expect(await rowsOf(f, ackSubject(id))).toBe(0);
   });
 
+  it('keeps the cleaned operations themselves even when their share id carries the copy prefix', async () => {
+    const f = await fixture();
+    const asset = await f.seed(41);
+    const warn = vi.fn();
+    const retirement = new PublishedSnapshotRetirement(f.store, f.snapshots.lifecycle);
+    await f.store.insert([
+      ...f.operationRows(ackSubject('cleaned'), 'storage-ack-cleaned', asset.ual, 2, digest),
+      ...f.operationRows(ackSubject('sibling'), 'storage-ack-sibling', asset.ual, 1, digest),
+      ...f.operationRows(ackSubject('later'), 'storage-ack-later', asset.ual, 3, digest),
+    ]);
+    await retirement.clearStorageAckCopies(META, asset.ual, [ackSubject('cleaned')], warn);
+    expect(await rowsOf(f, ackSubject('cleaned'))).toBe(5);
+    expect(await rowsOf(f, ackSubject('sibling'))).toBe(0);
+    expect(await rowsOf(f, ackSubject('later'))).toBe(5);
+    expect(warn).not.toHaveBeenCalled();
+  });
+
   it('keeps the copies and the file, and finishes the rest of the cleanup, when the update fails', async () => {
     const f = await fixture();
     const asset = await f.seed(41);
