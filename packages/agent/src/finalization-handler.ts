@@ -77,6 +77,7 @@ const CHAIN_FINALIZED_RECONCILE_PEER_ID = 'chain-finalized-reconcile-v1';
 const SWM_SLICE_SOURCE = 'agent.finalization.sharedMemorySlice';
 const SWM_SLICE_SOURCE_BOUNDED = `${SWM_SLICE_SOURCE}.bounded`;
 const SWM_SLICE_SOURCE_WIDENED = `${SWM_SLICE_SOURCE}.fallbackUnbounded`;
+const SWM_SLICE_SOURCE_ROOT_INDEXED = `${SWM_SLICE_SOURCE}.rootIndexed`;
 import { ethers } from 'ethers';
 import { createHash } from 'node:crypto';
 import { deriveSwmKaGraphBound } from './swm-ka-bound.js';
@@ -2951,8 +2952,10 @@ export class FinalizationHandler {
             bounded: SWM_SLICE_SOURCE_BOUNDED,
             widened: SWM_SLICE_SOURCE_WIDENED,
             unbounded: SWM_SLICE_SOURCE,
+            rootIndexed: SWM_SLICE_SOURCE_ROOT_INDEXED,
           },
           createAccept,
+          merkleVerifiedRootIndex: true,
           queryOptions: { priority: 'background' },
           resultBudget: finalizationSwmResultBudget(),
         },

@@ -112,6 +112,52 @@ describe('Blazegraph read snapshot lifecycle (mocked HTTP)', () => {
     expect(String(fetchCalls.at(-1)?.[0])).toBe('http://blaze.test/tx/123?ABORT');
   });
 
+  it('cancels snapshot creation through the caller signal', async () => {
+    const controller = new AbortController();
+    let beginSignal: AbortSignal | undefined;
+    setFetch(async (_input, init) => new Promise<Response>((_resolve, reject) => {
+      beginSignal = init?.signal as AbortSignal;
+      beginSignal.addEventListener('abort', () => reject(beginSignal?.reason), { once: true });
+    }));
+    const store = new BlazegraphStore(baseUrl);
+    const read = vi.fn(async () => undefined);
+    const pending = store.withReadSnapshot(read, controller.signal);
+    await vi.waitFor(() => expect(beginSignal).toBeDefined());
+    controller.abort(new Error('caller cancelled begin'));
+    await expect(pending).rejects.toThrow('caller cancelled begin');
+    expect(beginSignal?.aborted).toBe(true);
+    expect(read).not.toHaveBeenCalled();
+    expect(fetchCalls).toHaveLength(1);
+  });
+
+  it('releases a created transaction when cancellation interrupts its begin body', async () => {
+    const controller = new AbortController();
+    let beginSignal: AbortSignal | undefined;
+    setFetch(async (input, init) => {
+      const url = String(input);
+      if (url.endsWith('/tx?timestamp=-1')) {
+        beginSignal = init?.signal as AbortSignal;
+        return new Response(new ReadableStream({
+          start(stream) {
+            beginSignal?.addEventListener('abort', () => {
+              stream.error(beginSignal?.reason);
+            }, { once: true });
+          },
+        }), { status: 201, headers: { Location: 'http://blaze.test/tx/127' } });
+      }
+      if (url.endsWith('/tx/127?ABORT')) return new Response(null, { status: 200 });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    const store = new BlazegraphStore(baseUrl);
+    const read = vi.fn(async () => undefined);
+    const pending = store.withReadSnapshot(read, controller.signal);
+    await vi.waitFor(() => expect(beginSignal).toBeDefined());
+    controller.abort(new Error('caller cancelled body'));
+    await expect(pending).rejects.toThrow('caller cancelled body');
+    expect(read).not.toHaveBeenCalled();
+    expect(String(fetchCalls.at(-1)?.[0])).toBe('http://blaze.test/tx/127?ABORT');
+  });
+
   it('releases a created transaction after a malformed begin response', async () => {
     setFetch(async (input) => String(input).endsWith('/tx?timestamp=-1')
       ? new Response('<tx readOnly="false"/>', {

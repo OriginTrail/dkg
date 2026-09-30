@@ -3,6 +3,7 @@ import { getMetrics } from '@origintrail-official/dkg-core';
 import type { Quad, QueryOptions, TripleStore } from './triple-store.js';
 
 export const SHARED_MEMORY_GRAPHS_PER_QUERY = 128;
+export const BUDGETED_SHARED_MEMORY_GRAPHS_PER_QUERY = 16;
 
 export interface SharedMemoryResultBudget {
   pageRows: number;
@@ -71,7 +72,8 @@ export async function loadSwmQuadsAcrossChunks(
   plan: SwmReadPlan = { kind: 'chunked' },
 ): Promise<Quad[]> {
   const chunks = graphValueChunks(graphs, plan.kind === 'single-query'
-    ? graphs.length : plan.graphsPerQuery ?? SHARED_MEMORY_GRAPHS_PER_QUERY);
+    ? graphs.length : plan.graphsPerQuery ?? (options.resultBudget
+      ? BUDGETED_SHARED_MEMORY_GRAPHS_PER_QUERY : SHARED_MEMORY_GRAPHS_PER_QUERY));
   if (options.resultBudget) {
     return plan.kind === 'single-query'
       ? loadSingleQueryBudgeted(store, chunks[0]!, innerGraphPattern, queryOptions, options)

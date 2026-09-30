@@ -460,6 +460,89 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
     }
   });
 
+  it('finds a recurring exact root in another author graph without a complete-family scan', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('fb-root-indexed');
+    const root = 'urn:fb:root-indexed';
+    const sources: string[] = [];
+    const query = async (...args: Parameters<typeof store.query>) => {
+      sources.push(args[1]?.source ?? '');
+      return store.query(...args);
+    };
+    const read = { query, listGraphs: store.listGraphs.bind(store) };
+    const snapshotted = {
+      ...read,
+      withReadSnapshot: async (fn: (value: typeof read) => Promise<unknown>) => fn(read),
+    } as unknown as Parameters<typeof loadSharedMemorySliceWithKaBoundFallback>[0];
+    try {
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"own"', graph: `${swm}/${AUTHOR_A_MIXED}/7` },
+        { subject: root, predicate: 'urn:p', object: '"recurred"', graph: `${swm}/${AUTHOR_B}/12` },
+        { subject: root, predicate: 'urn:p', object: '"staging"', graph: `${swm}/staging/tmp` },
+        { subject: root, predicate: 'urn:p', object: '"other bucket"', graph: `${swm}-other/${AUTHOR_B}/12` },
+      ]);
+      const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+        snapshotted, swm, { rootEntities: [root] },
+        { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
+        {
+          sources: { ...SOURCES, rootIndexed: 'test.rootIndexed' },
+          merkleVerifiedRootIndex: true,
+          createAccept: async () => (candidate) =>
+            candidate.some((quad) => quad.object === '"recurred"') ? candidate : null,
+          resultBudget: { pageRows: 100, maxRows: 1000, maxBytesEstimate: 1024 * 1024 },
+        },
+      );
+      expect(keys(quads)).toEqual(keys(accepted ?? []));
+      expect(quads.map((quad) => quad.object).sort()).toEqual(['"own"', '"recurred"']);
+      expect(sources).toContain('test.rootIndexed');
+      expect(sources).not.toContain(SOURCES.widened);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('widens when a skolem-only graph is invisible to exact-root discovery', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('fb-root-indexed-skolem');
+    const root = 'urn:fb:root-indexed-skolem';
+    const sources: string[] = [];
+    const query = async (...args: Parameters<typeof store.query>) => {
+      sources.push(args[1]?.source ?? '');
+      return store.query(...args);
+    };
+    const read = { query, listGraphs: store.listGraphs.bind(store) };
+    const snapshotted = {
+      ...read,
+      withReadSnapshot: async (fn: (value: typeof read) => Promise<unknown>) => fn(read),
+    } as unknown as Parameters<typeof loadSharedMemorySliceWithKaBoundFallback>[0];
+    try {
+      await store.insert([
+        { subject: root, predicate: 'urn:p', object: '"root"', graph: `${swm}/${AUTHOR_A_MIXED}/7` },
+        {
+          subject: `${root}/.well-known/genid/child`, predicate: 'urn:p',
+          object: '"child"', graph: `${swm}/${AUTHOR_B}/12`,
+        },
+      ]);
+      const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+        snapshotted, swm, { rootEntities: [root] },
+        { agentAddress: AUTHOR_A, startNumber: 7n, endNumber: 7n },
+        {
+          sources: { ...SOURCES, rootIndexed: 'test.rootIndexed' },
+          merkleVerifiedRootIndex: true,
+          createAccept: async () => (candidate) =>
+            candidate.some((quad) => quad.object === '"child"') ? candidate : null,
+          resultBudget: { pageRows: 100, maxRows: 1000, maxBytesEstimate: 1024 * 1024 },
+        },
+      );
+      expect(keys(quads)).toEqual(keys(accepted ?? []));
+      expect(quads.map((quad) => quad.object).sort()).toEqual(['"child"', '"root"']);
+      expect(sources).toContain('test.rootIndexed');
+      expect(sources).toContain(SOURCES.widened);
+    } finally {
+      await store.close();
+    }
+  });
+
   it('deprecated positional options preserve bounded widening behavior', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     const swm = contextGraphSharedMemoryUri('fb-legacy');

@@ -1,7 +1,7 @@
 import type { Quad, QueryOptions, TripleStore } from './triple-store.js';
 import { asReadSnapshotCapability, type ReadSnapshotStore } from './read-snapshot-capability.js';
 import { asGraphWriteRevisionSource } from './graph-write-gen.js';
-import { loadSwmQuadsAcrossChunks, SHARED_MEMORY_GRAPHS_PER_QUERY, type SwmReadPlan, type SharedMemoryResultBudget } from './swm-query-chunks.js';
+import { loadSwmQuadsAcrossChunks, SHARED_MEMORY_GRAPHS_PER_QUERY, BUDGETED_SHARED_MEMORY_GRAPHS_PER_QUERY, type SwmReadPlan, type SharedMemoryResultBudget } from './swm-query-chunks.js';
 export type { SharedMemoryResultBudget } from './swm-query-chunks.js';
 export { SharedMemoryResultBudgetError } from './swm-query-chunks.js';
 
@@ -519,6 +519,8 @@ export interface SwmSliceSourceTags {
   widened: QueryOptions['source'];
   /** the initial read when no bound is supplied */
   unbounded: QueryOptions['source'];
+  /** indexed root-graph discovery and its candidate read */
+  rootIndexed?: QueryOptions['source'];
 }
 
 export interface LoadSharedMemorySliceWithKaBoundFallbackOptions {
@@ -526,24 +528,75 @@ export interface LoadSharedMemorySliceWithKaBoundFallbackOptions {
   createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>;
   queryOptions?: Omit<QueryOptions, 'source'>;
   resultBudget?: SharedMemoryResultBudget;
+  /** Only for a cryptographic completeness predicate, such as the on-chain KC merkle root. */
+  merkleVerifiedRootIndex?: boolean;
+}
+
+const MAX_ROOT_INDEXED_DISCOVERY_ROOTS = 128;
+const MAX_ROOT_INDEXED_DISCOVERY_GRAPHS = 4_096;
+
+/**
+ * Find graphs containing an exact root through Blazegraph's subject index.
+ * A root's skolem descendants can live in other graphs, so this is only a
+ * candidate read: the caller MUST check the expected merkle root and widen on
+ * mismatch. Discovery and materialization share one pinned snapshot.
+ */
+async function loadRootIndexedSharedMemoryCandidate(
+  store: TripleStore,
+  bucketGraph: string,
+  selection: SharedMemoryReadSelection,
+  options: LoadSelectedSharedMemoryQuadsOptions,
+): Promise<Quad[] | null> {
+  if (selection === 'all') return null;
+  const snapshot = asReadSnapshotCapability(store);
+  if (!snapshot) return null;
+  const roots = [...new Set(selection.rootEntities.map((root) => String(root).trim()).filter(isSafeIri))];
+  if (roots.length === 0 || roots.length > MAX_ROOT_INDEXED_DISCOVERY_ROOTS) return null;
+  const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
+  const innerGraphPattern = sharedMemorySelectionGraphPattern(selection, options);
+  const branches = roots.map((root) => `{ GRAPH ?g { <${root}> ?p ?o } }`).join(' UNION ');
+  return snapshot.withReadSnapshot(async (readStore) => {
+    const result = await readStore.query(`SELECT DISTINCT ?g WHERE {
+      ${branches}
+    } LIMIT ${MAX_ROOT_INDEXED_DISCOVERY_GRAPHS + 1}`, queryOptions);
+    if (result.type !== 'bindings' || result.bindings.length > MAX_ROOT_INDEXED_DISCOVERY_GRAPHS) {
+      return null;
+    }
+    const graphs = new Set<string>([bucketGraph]);
+    for (const row of result.bindings) {
+      const graph = row['g'];
+      if (graph && isSafeIri(graph)
+        && graph.startsWith(`${bucketGraph}/`)
+        && !graph.startsWith(`${bucketGraph}/staging/`)) {
+        graphs.add(graph);
+      }
+    }
+    return loadSwmQuadsAcrossChunks(
+      readStore,
+      [...graphs].sort(),
+      innerGraphPattern,
+      queryOptions,
+      options,
+    );
+  }, queryOptions?.signal);
 }
 
 /**
- * The ONLY safe way to read a KA-bounded SWM slice: read bounded first, then WIDEN
- * to the complete read on an empty-or-mismatched result before returning (#1549).
- * This owns the two-step protocol that `loadKaBoundedSharedMemoryQuads` requires,
+ * The ONLY safe way to read a KA-bounded SWM slice: read bounded first, then
+ * optionally try exact-root graph discovery and WIDEN to the complete read on mismatch.
+ * This owns the fallback protocol that `loadKaBoundedSharedMemoryQuads` requires,
  * so callers cannot hold a pruned `Quad[]` without the widen.
  *
  * `accept` is the caller's completeness predicate — e.g. a merkle recompute — that
  * returns the accepted quads or `null` on mismatch. It decides both when a bounded
  * read is "good enough" and what the caller ultimately consumes; storage stays
- * agnostic to merkle. It is built lazily via `createAccept` and invoked at most
- * once (only when there are quads), so a genuine no-data read triggers no extra
- * caller-side work. The widen fires at most once.
+ * agnostic to merkle. It is built lazily via `createAccept` and invoked
+ * only when there are quads, so a genuine no-data read triggers no extra
+ * caller-side work. The complete-family widen fires at most once.
  *
- * With no bound this is a single complete read (safe by construction). With a
- * bound the result is exactly what the unbounded read would have produced on any
- * input — never accept→defer, sometimes defer→accept under recurrence.
+ * A candidate is only accepted through the caller's completeness predicate.
+ * Root-indexed discovery requires explicit opt-in with a cryptographic
+ * completeness predicate; arbitrary accept callbacks retain the old read path.
  * `queryOptions` is applied to graph discovery and every bounded or widened read.
  */
 export function loadSharedMemorySliceWithKaBoundFallback(
@@ -577,7 +630,7 @@ export async function loadSharedMemorySliceWithKaBoundFallback(
     legacyCreateAccept,
     legacyLoadOptions,
   );
-  const { sources, createAccept, queryOptions = {}, resultBudget } = options;
+  const { sources, createAccept, queryOptions = {}, resultBudget, merkleVerifiedRootIndex = false } = options;
   const loadOptions = { queryOptions, resultBudget };
   const readComplete = (source: QueryOptions['source']): Promise<Quad[]> =>
     loadSelectedSharedMemoryQuads(store, bucketGraph, selection, {
@@ -585,27 +638,36 @@ export async function loadSharedMemorySliceWithKaBoundFallback(
       querySource: source,
     });
 
-  let quads = kaGraphBound
-    ? await loadKaBoundedSharedMemoryQuads(store, bucketGraph, selection, kaGraphBound, {
-        ...loadOptions,
-        querySource: sources.bounded,
-      })
-    : await readComplete(sources.unbounded);
-  let widened = false;
+  const readRootIndexed = (): Promise<Quad[] | null> =>
+    merkleVerifiedRootIndex ? loadRootIndexedSharedMemoryCandidate(store, bucketGraph, selection, {
+      ...loadOptions,
+      querySource: sources.rootIndexed ?? sources.widened,
+    }) : Promise.resolve(null);
+  let quads: Quad[] = [];
+  let accepted: Quad[] | null = null;
+  let accept: ((quads: Quad[]) => Quad[] | null) | undefined;
+  const testCandidate = async (candidate: Quad[]): Promise<boolean> => {
+    if (candidate.length === 0) return false;
+    accept ??= await createAccept();
+    accepted = accept(candidate);
+    if (!accepted) return false;
+    quads = candidate;
+    return true;
+  };
 
-  if (kaGraphBound && quads.length === 0) {
-    quads = await readComplete(sources.widened);
-    widened = true;
+  if (kaGraphBound) {
+    const bounded = await loadKaBoundedSharedMemoryQuads(store, bucketGraph, selection, kaGraphBound, {
+      ...loadOptions,
+      querySource: sources.bounded,
+    });
+    if (await testCandidate(bounded)) return { quads, accepted };
   }
+  const rootIndexed = await readRootIndexed();
+  if (rootIndexed && await testCandidate(rootIndexed)) return { quads, accepted };
+  quads = await readComplete(kaGraphBound ? sources.widened : sources.unbounded);
   if (quads.length === 0) return { quads, accepted: null };
-
-  const accept = await createAccept();
-  let accepted = accept(quads);
-  if (kaGraphBound && !widened && !accepted) {
-    quads = await readComplete(sources.widened);
-    accepted = accept(quads);
-  }
-  return { quads, accepted };
+  accept ??= await createAccept();
+  return { quads, accepted: accept(quads) };
 }
 
 function normalizeLoadSharedMemorySliceOptions(
@@ -680,7 +742,9 @@ async function loadSharedMemoryQuadsInternal(
   ) => loadSwmQuadsAcrossChunks(readStore, graphs, innerGraphPattern, readOptions, options, plan);
 
   const initialGraphs = await resolveGraphs(store, queryOptions);
-  if (initialGraphs.length <= SHARED_MEMORY_GRAPHS_PER_QUERY) {
+  const graphsPerQuery = options.resultBudget
+    ? BUDGETED_SHARED_MEMORY_GRAPHS_PER_QUERY : SHARED_MEMORY_GRAPHS_PER_QUERY;
+  if (initialGraphs.length <= graphsPerQuery) {
     return read(store, initialGraphs, queryOptions);
   }
   const snapshot = asReadSnapshotCapability(store);
