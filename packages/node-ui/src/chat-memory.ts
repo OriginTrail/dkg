@@ -254,6 +254,33 @@ function choosePersistenceStatus(
   return PERSISTENCE_STATUS_RANK[candidate] > PERSISTENCE_STATUS_RANK[current] ? candidate : current;
 }
 
+/**
+ * The reply a turn's agent message shows once the turn completed, or `undefined`
+ * when this row does not complete it.
+ *
+ * A turn that first reported `pending` or `failed` and completed later is not
+ * written a second time: a `stored` transition records the completion and
+ * carries the final reply, and the assistant Message keeps the `schema:text`
+ * of the first report. Every reader that returns a turn's reply has to resolve
+ * it through here, so `getSession` and `getRecentChats` cannot disagree about
+ * which reply a turn ended with. `row` is one result row of a query that joins
+ * a turn to its transitions.
+ *
+ * The transition's `assistantReply` is written with `JSON.stringify`, exactly
+ * like the base `schema:text`, so it needs the same decode. Without it a
+ * stored turn (the dominant path on reload) would replace the correctly decoded
+ * base text with a literal-`\n` string and markdown would break after a refresh.
+ */
+function completedTurnReply(row: {
+  transitionState?: string;
+  persistenceState?: string;
+  transitionAssistantReply?: string;
+}): string | undefined {
+  const status = normalizePersistenceStatus(row.transitionState ?? row.persistenceState ?? '');
+  const reply = String(row.transitionAssistantReply ?? '');
+  return status === 'stored' && reply ? decodeRdfStringLiteral(reply) : undefined;
+}
+
 function normalizeChatAttachmentRef(raw: unknown): ChatAttachmentRef | null {
   if (!raw || typeof raw !== 'object') return null;
   const record = raw as Record<string, unknown>;
@@ -1181,15 +1208,9 @@ export class ChatMemoryManager {
           messagesByUri.set(key, message);
         }
         const candidateStatus = normalizePersistenceStatus(mb.transitionState ?? mb.persistenceState ?? '');
-        const transitionAssistantReply = String(mb.transitionAssistantReply ?? '');
-        if (message.author === 'agent' && candidateStatus === 'stored' && transitionAssistantReply) {
-          // The transition `assistantReply` is written via `JSON.stringify`
-          // (see opts.assistantReply quad) exactly like the base
-          // `schema:text`, so it needs the same decode — otherwise a
-          // stored turn (the dominant path on reload) overwrites the
-          // correctly-decoded base text with a literal-`\n` string and
-          // markdown breaks after refresh again.
-          message.text = decodeRdfStringLiteral(transitionAssistantReply);
+        const completedReply = completedTurnReply(mb);
+        if (message.author === 'agent' && completedReply !== undefined) {
+          message.text = completedReply;
         }
         const transitionAttachmentRefs = parseAttachmentRefsLiteral(String(mb.transitionAttachmentRefs ?? ''));
         if (message.author === 'user' && candidateStatus === 'stored' && transitionAttachmentRefs?.length) {
@@ -1252,34 +1273,89 @@ export class ChatMemoryManager {
         .map((entry: { sessionUri: string; sessionId: string }) => `<${entry.sessionUri}>`)
         .join(' ');
 
+      // One round trip for both: the messages of the listed sessions, and the
+      // turns among them that completed by a `stored` transition. Such a turn
+      // keeps the reply of its first report on its assistant Message and carries
+      // the final one on the transition, so each message is joined to the
+      // transitions of the turn it is the assistant Message of (through the
+      // turn's `hasAssistantMessage` link), and `completedTurnReply`, the
+      // resolver `getSession` uses, decides which reply wins. The turn is matched
+      // to its transitions through its own session link, so a turn of another
+      // session that reuses the id never contributes.
+      //
+      // The completed turns are an independent subquery over the listed
+      // sessions' turns, joined to the messages on the assistant Message. The
+      // query must not use a UNION: a read of the working-memory view can span
+      // more than one graph (a by-name read also includes the assertion's scoped
+      // child graphs, and an agent address can have several candidate layer
+      // graphs), and the query engine refuses a UNION combined with ORDER BY
+      // across graphs, so the whole list would come back empty. An OPTIONAL
+      // join of `turnId` onto every message would cost more on this query, and
+      // would pair a message that has no `turnId` with the transitions of the
+      // session's other turns.
       const allMsgs = await this.tools.query(
-        `SELECT ?session ?author ?text ?ts WHERE {
+        `SELECT ?session ?author ?text ?ts ?m ?transitionState ?transitionAssistantReply WHERE {
           VALUES ?session { ${values} }
           ?m <${SCHEMA}isPartOf> ?session .
           ?m <${SCHEMA}author> ?author .
           ?m <${SCHEMA}text> ?text .
           ?m <${SCHEMA}dateCreated> ?ts
-        } ORDER BY ?session ?ts`,
+          OPTIONAL {
+            {
+              SELECT ?m ?transitionState ?transitionAssistantReply ?transitionTs WHERE {
+                VALUES ?turnSession { ${values} }
+                ?turn <${SCHEMA}isPartOf> ?turnSession .
+                ?transition <${CHAT_TURN_PERSISTENCE_TRANSITION_PREDICATE}> ?turn .
+                ?turn <${RDF_TYPE}> <${DKG_ONT}ChatTurn> .
+                ?transition <${RDF_TYPE}> <${CHAT_TURN_PERSISTENCE_TRANSITION_TYPE}> .
+                ?transition <${DKG_ONT}persistenceState> ?transitionState .
+                ?transition <${DKG_ONT}assistantReply> ?transitionAssistantReply .
+                ?turn <${DKG_ONT}hasAssistantMessage> ?m .
+                OPTIONAL { ?transition <${SCHEMA}dateCreated> ?transitionTs }
+              }
+            }
+          }
+        } ORDER BY ?session ?ts ?transitionTs`,
         this.wmReadOpts(),
       );
 
-      const bySession = new Map<string, Array<{ author: string; text: string; ts: string }>>();
+      const bySession = new Map<string, Array<{ uri: string; author: string; text: string; ts: string }>>();
+      // A message with several transitions comes back once per transition, in
+      // transition order (the rows of one message are adjacent and ordered by
+      // `transitionTs`), so the first row lists the message and the latest
+      // completion wins.
+      const listedMessages = new Set<string>();
+      const completedReplies = new Map<string, string>();
       for (const row of allMsgs.bindings ?? []) {
+        const uri = String(row.m ?? '').replace(/[<>]/g, '');
+        if (uri && row.transitionAssistantReply) {
+          const reply = completedTurnReply(row);
+          if (reply !== undefined) completedReplies.set(uri, reply);
+        }
+        if (uri && listedMessages.has(uri)) continue;
+        if (uri) listedMessages.add(uri);
         const sessionUri = String(row.session ?? '').replace(/[<>]/g, '');
         if (!sessionUri) continue;
         if (!bySession.has(sessionUri)) bySession.set(sessionUri, []);
         const msgs = bySession.get(sessionUri)!;
         if (msgs.length >= 100) continue;
         msgs.push({
+          uri,
           author: row.author?.includes('user') ? 'user' : 'agent',
           text: decodeRdfStringLiteral(row.text ?? ''),
           ts: stripRdfLiteral(row.ts ?? ''),
         });
       }
+      for (const msgs of bySession.values()) {
+        for (const msg of msgs) {
+          const completedReply = msg.author === 'agent' ? completedReplies.get(msg.uri) : undefined;
+          if (completedReply !== undefined) msg.text = completedReply;
+        }
+      }
 
       return sessionEntries.map((entry: { sessionUri: string; sessionId: string }) => ({
         session: entry.sessionId,
-        messages: bySession.get(entry.sessionUri) ?? [],
+        messages: (bySession.get(entry.sessionUri) ?? []).map(({ author, text, ts }) => ({ author, text, ts })),
       }));
     } catch {
       return [];

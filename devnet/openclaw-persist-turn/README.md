@@ -18,6 +18,9 @@ daemons, over HTTP with the node's bearer token, the suite checks that:
 - two sessions that reuse one `turnId` are kept apart: each is created, completed
   and retried on its own, so one session's stored state never turns another's
   completion into a duplicate;
+- after `pending` -> `stored`, both history routes (`GET /api/memory/sessions`,
+  the session list, and `GET /api/memory/sessions/:id`) return the final reply
+  and one exchange for the turn;
 - a POST without a `turnId` still writes every time, under a generated id that
   the response returns so the caller can retry idempotently;
 - an invalid payload answers 400 and writes nothing;

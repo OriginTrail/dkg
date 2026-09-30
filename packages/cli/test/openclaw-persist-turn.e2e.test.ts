@@ -1,32 +1,41 @@
 /**
- * E2E: `POST /api/openclaw-channel/persist-turn` over real HTTP, into a real
- * store.
+ * E2E: the `persist-turn` routes of the local-agent channels over real HTTP, into
+ * a real store, and the dashboard's chat-history routes over what they wrote.
  *
  * Nothing under test is mocked. A real `DKGAgent` (real libp2p, real Oxigraph
  * store, `MockChainAdapter` for the chain) backs the daemon's real chat-memory
- * stack (`buildChatMemoryStack`, the same wiring `runDaemonInner` uses), and
- * the real `handleOpenclawRoutes` sits behind a real `http.Server`. Each test
- * POSTs like the OpenClaw adapter does, then reads the `'chat-turns'` Working
- * Memory assertion back with SPARQL.
+ * stack (`buildChatMemoryStack`, the same wiring `runDaemonInner` uses), and the
+ * real OpenClaw, Hermes and Prime Agent route handlers and the dashboard's
+ * chat-history handler (`handleNodeUIRequest`, which serves
+ * `GET /api/memory/sessions[/:id]`) sit behind a real `http.Server`. Each test
+ * POSTs like the adapters do, then reads the `'chat-turns'` Working Memory
+ * assertion back with SPARQL and through the chat memory manager.
  *
- * The assertions read a footprint (Message and state counts, not ChatTurn
+ * The OpenClaw tests read a footprint (Message and state counts, not ChatTurn
  * subjects) through the helper this tier shares with the devnet suite; see
  * `_helpers/chat-turn-footprint.ts` for why a resend shows up there.
  *
  * A turn id is only unique inside its session, so the durable state of a turn
- * (its duplicate check, its transitions) is keyed by `(sessionId, turnId)`:
- * `describe.each(CHANNELS)` below reuses one turn id in two sessions behind each
- * of the three local-agent routes, and the last `describe` reads turns that were
- * stored under the subject scheme that shared one subject per turn id. Every
- * other test uses its own random turn id as well as its own session, so a
- * failure in one cannot be caused by another's turns.
+ * (its duplicate check, its transitions) is keyed by `(sessionId, turnId)`.
+ * `describe.each(CHANNELS)` reuses one turn id in two sessions behind each of the
+ * three routes. The legacy-subject `describe` reads turns that were stored under
+ * the subject scheme that shared one subject per turn id. The next `describe`
+ * reads the session list and the single-session route over turns that completed
+ * by transition, and the last repeats those reads on a working-memory view that
+ * spans more than one graph. Every other test uses its own random turn id as well
+ * as its own session, so a failure in one cannot be caused by another's turns.
  */
 import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '@origintrail-official/dkg-agent';
-import { AGENT_CONTEXT_GRAPH, CHAT_TURNS_ASSERTION, type ChatMemoryManager } from '@origintrail-official/dkg-node-ui';
+import {
+  AGENT_CONTEXT_GRAPH,
+  CHAT_TURNS_ASSERTION,
+  handleNodeUIRequest,
+  type ChatMemoryManager,
+} from '@origintrail-official/dkg-node-ui';
 import { buildChatMemoryStack, resolveMemoryAgentAddress } from '../src/daemon.js';
 import { handleHermesRoutes } from '../src/daemon/routes/hermes.js';
 import { handleOpenclawRoutes } from '../src/daemon/routes/openclaw.js';
@@ -83,6 +92,11 @@ beforeAll(async () => {
       await handle(ctx);
       if (res.writableEnded) break;
     }
+    // The dashboard's chat-history routes (`GET /api/memory/sessions[/:id]`), the
+    // same handler the daemon runs, over the same real manager.
+    if (!res.writableEnded) {
+      await handleNodeUIRequest(req, res, url, {} as any, '.', undefined, undefined, undefined, memoryManager);
+    }
     if (!res.writableEnded) {
       res.statusCode = 404;
       res.end('{}');
@@ -112,6 +126,26 @@ async function persistTurn(payload: Record<string, unknown>, path = PERSIST_TURN
     body: JSON.stringify(payload),
   });
   return { status: response.status, body: await response.json() as PersistResponse['body'] };
+}
+
+type HistoryMessage = { author: string; text: string };
+
+async function getJson<T>(path: string): Promise<T> {
+  const response = await fetch(`${baseUrl}${path}`);
+  expect(response.status).toBe(200);
+  return await response.json() as T;
+}
+
+/** The session as `GET /api/memory/sessions` lists it. */
+async function listed(sessionId: string): Promise<HistoryMessage[] | undefined> {
+  const { sessions } = await getJson<{ sessions: Array<{ session: string; messages: HistoryMessage[] }> }>('/api/memory/sessions?limit=100');
+  return sessions.find((entry) => entry.session === sessionId)?.messages.map(({ author, text }) => ({ author, text }));
+}
+
+/** The session as `GET /api/memory/sessions/:id` returns it. */
+async function single(sessionId: string): Promise<HistoryMessage[]> {
+  const { messages } = await getJson<{ messages: HistoryMessage[] }>(`/api/memory/sessions/${encodeURIComponent(sessionId)}`);
+  return messages.map(({ author, text }) => ({ author, text }));
 }
 
 const newSessionId = () => `openclaw:e2e:${randomUUID()}`;
@@ -663,6 +697,11 @@ describe('turns stored under the legacy turn subject, against the real store', (
     ]);
     expect(await memoryManager.hasChatTurn(sessionId, turnId)).toBe(true);
     expect(await memoryManager.getChatTurnPersistenceState(sessionId, turnId)).toBe('stored');
+    expect(await listed(sessionId)).toEqual(await single(sessionId));
+    expect(await single(sessionId)).toEqual([
+      { author: 'user', text: 'legacy question' },
+      { author: 'agent', text: 'legacy answer' },
+    ]);
   });
 
   it.each([
@@ -701,6 +740,12 @@ describe('turns stored under the legacy turn subject, against the real store', (
       ['agent', 'legacy final answer', 'stored'],
     ]);
     expect(await memoryManager.getChatTurnPersistenceState(sessionId, turnId)).toBe('stored');
+    // Both history routes resolve the reply from the transition on the legacy subject.
+    expect(await single(sessionId)).toEqual([
+      { author: 'user', text: 'legacy question' },
+      { author: 'agent', text: 'legacy final answer' },
+    ]);
+    expect(await listed(sessionId)).toEqual(await single(sessionId));
     // graph-delta finds the legacy subject through the session link.
     expect(await memoryManager.getSessionGraphDelta(sessionId, turnId)).toMatchObject({
       mode: 'delta',
@@ -736,5 +781,210 @@ describe('turns stored under the legacy turn subject, against the real store', (
       ['agent', 'new answer', 'stored'],
     ]);
     expect(await footprint(newSession, turnId)).toEqual(ONE_STORED_TURN);
+  });
+});
+
+/**
+ * The dashboard reads chat history through two routes: `GET /api/memory/sessions`
+ * (the session list, `getRecentChats`) and `GET /api/memory/sessions/:id` (one
+ * session, `getSession`). A turn that completes after it was first reported
+ * (`pending` or `failed`, then `stored`) is recorded as a transition that carries
+ * the final reply and does not rewrite the assistant Message, so both routes have
+ * to resolve the reply from the transition, and to agree.
+ */
+describe('chat history routes over a turn that completes by transition, against the real store', () => {
+  /**
+   * A message is stamped with the millisecond it was written, and the agent
+   * message one millisecond after the user's. Turns written within a millisecond
+   * of each other would tie on that stamp and come back in either order, so the
+   * tests that compare the order of several turns leave a few milliseconds
+   * between their POSTs.
+   */
+  const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 4));
+
+  const exchange = (userText: string, agentText: string): HistoryMessage[] => [
+    { author: 'user', text: userText },
+    { author: 'agent', text: agentText },
+  ];
+
+  it('lists and returns the final reply after pending -> stored, one exchange for the turn', async () => {
+    const sessionId = newSessionId();
+    const turnId = newTurnId();
+
+    await persistTurn(turn(sessionId, turnId, { assistantReply: 'working on it', persistenceState: 'pending' }));
+    const beforeCompletion = { listed: await listed(sessionId), single: await single(sessionId) };
+    const completed = await persistTurn(turn(sessionId, turnId, { assistantReply: 'the final answer', persistenceState: 'stored' }));
+
+    expect(completed.body).toEqual({ ok: true, transitioned: true, turnId });
+    expect(beforeCompletion.listed).toEqual(exchange(USER_TEXT, 'working on it'));
+    expect(beforeCompletion.single).toEqual(exchange(USER_TEXT, 'working on it'));
+    expect(await single(sessionId)).toEqual(exchange(USER_TEXT, 'the final answer'));
+    expect(await listed(sessionId)).toEqual(exchange(USER_TEXT, 'the final answer'));
+  });
+
+  it('lists and returns the recovered reply after failed -> stored', async () => {
+    const sessionId = newSessionId();
+    const turnId = newTurnId();
+
+    await persistTurn(turn(sessionId, turnId, { assistantReply: 'the run failed', persistenceState: 'failed', failureReason: 'provider timed out' }));
+    await persistTurn(turn(sessionId, turnId, { assistantReply: 'recovered answer', persistenceState: 'stored' }));
+
+    expect(await single(sessionId)).toEqual(exchange(USER_TEXT, 'recovered answer'));
+    expect(await listed(sessionId)).toEqual(exchange(USER_TEXT, 'recovered answer'));
+  });
+
+  it('lists one exchange with the final reply for a turn that went pending -> failed -> stored', async () => {
+    const sessionId = newSessionId();
+    const turnId = newTurnId();
+
+    const pending = await persistTurn(turn(sessionId, turnId, { assistantReply: 'working on it', persistenceState: 'pending' }));
+    const failed = await persistTurn(turn(sessionId, turnId, { assistantReply: 'the run failed', persistenceState: 'failed', failureReason: 'provider timed out' }));
+    const stored = await persistTurn(turn(sessionId, turnId, { assistantReply: 'the final answer', persistenceState: 'stored' }));
+
+    expect(pending.body).toEqual({ ok: true, turnId });
+    expect(failed.body).toEqual({ ok: true, transitioned: true, turnId });
+    expect(stored.body).toEqual({ ok: true, transitioned: true, turnId });
+    // Two transitions point at the turn, and neither makes a second exchange.
+    expect(await footprint(sessionId, turnId)).toMatchObject({ messages: 2, states: ['pending'] });
+    expect(await footprint(sessionId, turnId)).toMatchObject({
+      transitions: [{ state: 'failed', assistantReply: 'the run failed' }, { state: 'stored', assistantReply: 'the final answer' }],
+    });
+    expect(await single(sessionId)).toEqual(exchange(USER_TEXT, 'the final answer'));
+    expect(await listed(sessionId)).toEqual(exchange(USER_TEXT, 'the final answer'));
+  });
+
+  it('keeps a reply that is only reported as failed or pending, and a turn with no transition, as first written', async () => {
+    const sessionId = newSessionId();
+    const failedTurn = newTurnId();
+    const pendingTurn = newTurnId();
+    const storedTurn = newTurnId();
+
+    await persistTurn(turn(sessionId, failedTurn, { userMessage: 'q1', assistantReply: 'failed reply', persistenceState: 'failed', failureReason: 'boom' }));
+    await tick();
+    await persistTurn(turn(sessionId, pendingTurn, { userMessage: 'q2', assistantReply: 'pending reply', persistenceState: 'pending' }));
+    await tick();
+    await persistTurn(turn(sessionId, storedTurn, { userMessage: 'q3', assistantReply: 'stored reply' }));
+    await tick();
+    // A pending report after a failed one is a downgrade, so it is a duplicate and adds no reply anywhere.
+    await persistTurn(turn(sessionId, failedTurn, { userMessage: 'q1', assistantReply: 'pending again', persistenceState: 'pending' }));
+    // A pending turn that then fails is a transition too, but only a stored one completes a turn.
+    const failedAfterPending = newTurnId();
+    await tick();
+    await persistTurn(turn(sessionId, failedAfterPending, { userMessage: 'q4', assistantReply: 'first report', persistenceState: 'pending' }));
+    const failure = await persistTurn(turn(sessionId, failedAfterPending, { userMessage: 'q4', assistantReply: 'the failure text', persistenceState: 'failed', failureReason: 'boom' }));
+
+    expect(failure.body).toEqual({ ok: true, transitioned: true, turnId: failedAfterPending });
+    const expected = [
+      ...exchange('q1', 'failed reply'),
+      ...exchange('q2', 'pending reply'),
+      ...exchange('q3', 'stored reply'),
+      ...exchange('q4', 'first report'),
+    ];
+    expect(await single(sessionId)).toEqual(expected);
+    expect(await listed(sessionId)).toEqual(expected);
+  });
+
+  it('resolves each turn of a session from its own transition, in order, and leaves other sessions alone', async () => {
+    const sessionId = newSessionId();
+    const otherSession = newSessionId();
+    const [first, second, third] = [newTurnId(), newTurnId(), newTurnId()];
+
+    await persistTurn(turn(sessionId, first, { userMessage: 'q1', assistantReply: 'first working', persistenceState: 'pending' }));
+    await tick();
+    await persistTurn(turn(sessionId, second, { userMessage: 'q2', assistantReply: 'second, stored at once' }));
+    await tick();
+    await persistTurn(turn(sessionId, third, { userMessage: 'q3', assistantReply: 'third working', persistenceState: 'pending' }));
+    await persistTurn(turn(otherSession, first, { userMessage: 'other q', assistantReply: 'other working', persistenceState: 'pending' }));
+    await persistTurn(turn(sessionId, first, { userMessage: 'q1', assistantReply: 'first, final', persistenceState: 'stored' }));
+
+    expect(await single(sessionId)).toEqual([
+      ...exchange('q1', 'first, final'),
+      ...exchange('q2', 'second, stored at once'),
+      ...exchange('q3', 'third working'),
+    ]);
+    expect(await listed(sessionId)).toEqual(await single(sessionId));
+    // The other session reuses `first` as its turn id and has not completed.
+    expect(await listed(otherSession)).toEqual(exchange('other q', 'other working'));
+    expect(await single(otherSession)).toEqual(exchange('other q', 'other working'));
+  });
+
+  it('decodes a multi-line final reply the way the single-session route does', async () => {
+    const sessionId = newSessionId();
+    const turnId = newTurnId();
+    const finalReply = '# Answer\n\n- one\n- two "quoted"\n\n```ts\nconst a = 1;\n```';
+
+    await persistTurn(turn(sessionId, turnId, { assistantReply: 'working', persistenceState: 'pending' }));
+    await persistTurn(turn(sessionId, turnId, { assistantReply: finalReply, persistenceState: 'stored' }));
+
+    expect(await single(sessionId)).toEqual(exchange(USER_TEXT, finalReply));
+    expect(await listed(sessionId)).toEqual(exchange(USER_TEXT, finalReply));
+  });
+
+  it.each(CHANNELS)('$name: the list and the session route agree once a turn completed by transition', async (channel) => {
+    const sessionId = channel.newSession();
+    const storeSessionId = channel.storeSessionId(sessionId);
+    const turnId = newTurnId();
+    const post = (overrides: Record<string, unknown>) => persistTurn(turn(sessionId, turnId, overrides), channel.path);
+
+    await post({ assistantReply: 'working on it', persistenceState: 'pending' });
+    await post({ assistantReply: 'the final answer', persistenceState: 'stored' });
+
+    expect(await single(storeSessionId)).toEqual(exchange(USER_TEXT, 'the final answer'));
+    expect(await listed(storeSessionId)).toEqual(exchange(USER_TEXT, 'the final answer'));
+  });
+});
+
+/**
+ * A by-name read of the working-memory view also spans the assertion's scoped
+ * child graphs (`<assertion>/_named_graph/...`), and a node whose agent address
+ * has more than one candidate layer graph reads several graphs as well. The
+ * query engine cannot evaluate a query that combines a UNION with a solution-set
+ * modifier (ORDER BY, LIMIT, ...) across graphs and refuses it, so the session
+ * list, whose query was such a UNION, failed on a real node and came back empty
+ * (the failure was caught), while a single graph, which every test above runs
+ * on, reads fine. This describe gives the chat-turns assertion a scoped child
+ * graph, so every by-name read spans two, and repeats the history reads there.
+ */
+describe('the chat-history reads when the working-memory view spans more than one graph, against the real store', () => {
+  beforeAll(async () => {
+    // The assertion has to exist before a child graph can hang off it.
+    await persistTurn(turn(newSessionId(), newTurnId()));
+    const graphs = await agent.store.query(`SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s <http://dkg.io/ontology/turnId> ?o } }`);
+    const root = graphs.type === 'bindings' ? String(graphs.bindings[0]?.g ?? '').replace(/[<>]/g, '') : '';
+    expect(root).toContain('/assertion/');
+    await agent.store.insert([{
+      subject: 'urn:e2e:scoped-child',
+      predicate: 'urn:e2e:note',
+      object: '"a draft of a named graph"',
+      graph: `${root}/_named_graph/e2e-child`,
+    }]);
+  });
+
+  it('reads more than one graph now: a UNION with a modifier is refused', async () => {
+    await expect(agent.query('SELECT ?s WHERE { { ?s ?p ?o } UNION { ?o ?p ?s } } LIMIT 1', {
+      contextGraphId: AGENT_CONTEXT_GRAPH,
+      view: 'working-memory',
+      agentAddress,
+      assertionName: CHAT_TURNS_ASSERTION,
+    })).rejects.toThrow(/Multi-graph query combines an inner UNION/);
+  });
+
+  it('lists and returns the final reply after pending -> stored, and reads the turn state', async () => {
+    const sessionId = newSessionId();
+    const turnId = newTurnId();
+
+    await persistTurn(turn(sessionId, turnId, { assistantReply: 'working on it', persistenceState: 'pending' }));
+    const completed = await persistTurn(turn(sessionId, turnId, { assistantReply: 'the final answer', persistenceState: 'stored' }));
+    const resend = await persistTurn(turn(sessionId, turnId, { assistantReply: 'the final answer', persistenceState: 'stored' }));
+
+    expect(completed.body).toEqual({ ok: true, transitioned: true, turnId });
+    expect(resend.body).toEqual({ ok: true, duplicate: true, turnId });
+    const expected = [
+      { author: 'user', text: USER_TEXT },
+      { author: 'agent', text: 'the final answer' },
+    ];
+    expect(await single(sessionId)).toEqual(expected);
+    expect(await listed(sessionId)).toEqual(expected);
+    expect(await memoryManager.getChatTurnPersistenceState(sessionId, turnId)).toBe('stored');
   });
 });

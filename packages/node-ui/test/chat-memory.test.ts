@@ -1376,3 +1376,227 @@ describe('ChatMemoryManager chat-turn identity: one subject per session and turn
     });
   });
 });
+
+// A turn that reported `pending` or `failed` and completed later is recorded as a
+// `stored` transition carrying the final reply, not as a second exchange, so the
+// assistant Message keeps the reply of the first report. `getSession` resolves
+// the reply from the transition; the session list (`getRecentChats`, behind
+// GET /api/memory/sessions) has to as well, through the same resolver. The real
+// store, and the two routes side by side, are covered in packages/cli's
+// openclaw-persist-turn e2e.
+describe('ChatMemoryManager.getRecentChats: replies of turns completed by transition', () => {
+  const CHAT = 'urn:dkg:chat:';
+  const DKG = 'http://dkg.io/ontology/';
+  const SESSION_A = `${CHAT}session:s-a`;
+  const SESSION_B = `${CHAT}session:s-b`;
+  const stamp = (n: number) => `"2026-03-08T10:00:${String(n).padStart(2, '0')}Z"`;
+
+  let mockQuery: TrackingFn;
+
+  beforeEach(() => {
+    mockQuery = trackFn(undefined);
+  });
+
+  function createManager() {
+    return new ChatMemoryManager(
+      {
+        query: mockQuery,
+        createAssertion: trackFn({ assertionUri: 'urn:test:assertion', alreadyExists: false }),
+        writeAssertion: trackFn({ written: 0 }),
+        createContextGraph: trackFn(undefined),
+        listContextGraphs: trackFn([{ id: 'agent-context', name: 'Agent Context' }]),
+      },
+      { apiKey: '' },
+      { agentAddress: 'did:dkg:agent:test' },
+    );
+  }
+
+  /** The URI of the message `message(session, ..., n)` returns. */
+  const uriOf = (session: string, n: number) => `${CHAT}msg:${session.slice(-1)}-${n}`;
+  /** One row of the list query for a message; `n` orders it and names its URI. */
+  const message = (session: string, author: 'user' | 'agent', text: string, n: number) => ({
+    session,
+    m: uriOf(session, n),
+    author: `${CHAT}actor:${author}`,
+    text: JSON.stringify(text),
+    ts: stamp(n),
+  });
+  /** The same message joined to one transition of the turn it completes. */
+  const completedBy = (row: ReturnType<typeof message>, state: string, reply: string) => ({
+    ...row,
+    transitionState: JSON.stringify(state),
+    transitionAssistantReply: JSON.stringify(reply),
+  });
+
+  /** The store's answers: known sessions, the session list, then the one query for messages and completed turns. */
+  function answers(sessions: string[], rows: unknown[]) {
+    mockQuery.returns.push(
+      { bindings: [] },
+      { bindings: sessions.map((s) => ({ s, sid: JSON.stringify(s.slice(`${CHAT}session:`.length)) })) },
+      { bindings: rows },
+    );
+  }
+
+  it('shows the reply of the stored transition, and keeps one exchange per turn', async () => {
+    answers([SESSION_A], [
+      message(SESSION_A, 'user', 'question', 1),
+      completedBy(message(SESSION_A, 'agent', 'working on it', 2), 'stored', 'the final answer'),
+      message(SESSION_A, 'user', 'and another', 3),
+      message(SESSION_A, 'agent', 'stored at once', 4),
+    ]);
+
+    const chats = await createManager().getRecentChats(10);
+
+    expect(chats).toEqual([{
+      session: 's-a',
+      messages: [
+        { author: 'user', text: 'question', ts: '2026-03-08T10:00:01Z' },
+        { author: 'agent', text: 'the final answer', ts: '2026-03-08T10:00:02Z' },
+        { author: 'user', text: 'and another', ts: '2026-03-08T10:00:03Z' },
+        { author: 'agent', text: 'stored at once', ts: '2026-03-08T10:00:04Z' },
+      ],
+    }]);
+  });
+
+  it('lists a message with several transitions once, and the stored one completes it wherever it sits', async () => {
+    const agentMessage = message(SESSION_A, 'agent', 'working', 2);
+    answers([SESSION_A], [
+      message(SESSION_A, 'user', 'q', 1),
+      completedBy(agentMessage, 'failed', 'a failed retry'),
+      completedBy(agentMessage, 'stored', 'the final answer'),
+    ]);
+
+    const [chat] = await createManager().getRecentChats(10);
+
+    expect(chat.messages.map((m) => m.text)).toEqual(['q', 'the final answer']);
+  });
+
+  it('decodes the transition reply like the message text, so markdown survives', async () => {
+    answers([SESSION_A], [
+      message(SESSION_A, 'user', 'q', 1),
+      completedBy(message(SESSION_A, 'agent', 'working', 2), 'stored', '# Title\n\n- a "quoted" item\n\n```ts\nconst a = 1;\n```'),
+    ]);
+
+    const [chat] = await createManager().getRecentChats(10);
+
+    expect(chat.messages[1].text).toBe('# Title\n\n- a "quoted" item\n\n```ts\nconst a = 1;\n```');
+  });
+
+  it('only a stored transition completes a turn: a failed or pending one leaves the first reply', async () => {
+    answers([SESSION_A], [
+      message(SESSION_A, 'user', 'q1', 1),
+      completedBy(message(SESSION_A, 'agent', 'first reply 1', 2), 'failed', 'a failed retry'),
+      message(SESSION_A, 'user', 'q2', 3),
+      completedBy(message(SESSION_A, 'agent', 'first reply 2', 4), 'pending', 'a pending retry'),
+    ]);
+
+    const [chat] = await createManager().getRecentChats(10);
+
+    expect(chat.messages.map((m) => m.text)).toEqual(['q1', 'first reply 1', 'q2', 'first reply 2']);
+  });
+
+  it('completes the agent message of a turn only, never a user message, and never another session\'s', async () => {
+    answers([SESSION_A, SESSION_B], [
+      message(SESSION_A, 'user', 'a asks', 1),
+      completedBy(message(SESSION_A, 'agent', 'a working', 2), 'stored', 'a final'),
+      // Even a row that names a user message (a malformed link) does not rewrite it.
+      completedBy(message(SESSION_B, 'user', 'b asks', 3), 'stored', 'rewrites the question?'),
+      message(SESSION_B, 'agent', 'b working', 4),
+    ]);
+
+    const chats = await createManager().getRecentChats(10);
+
+    expect(chats.map((chat) => [chat.session, chat.messages.map((m) => m.text)])).toEqual([
+      ['s-a', ['a asks', 'a final']],
+      ['s-b', ['b asks', 'b working']],
+    ]);
+  });
+
+  it('the latest stored transition of a turn wins', async () => {
+    const agentMessage = message(SESSION_A, 'agent', 'working', 2);
+    answers([SESSION_A], [
+      message(SESSION_A, 'user', 'the question', 1),
+      completedBy(agentMessage, 'stored', 'earlier'),
+      completedBy(agentMessage, 'stored', 'later'),
+    ]);
+
+    const [chat] = await createManager().getRecentChats(10);
+
+    expect(chat.messages.map((m) => m.text)).toEqual(['the question', 'later']);
+  });
+
+  it('counts each message once toward the 100 a session lists, however many transitions it comes back with', async () => {
+    const first = message(SESSION_A, 'user', 'm0', 0);
+    const messages = Array.from({ length: 101 }, (_, i) => message(SESSION_A, i % 2 === 0 ? 'user' : 'agent', `m${i}`, i));
+    const agentMessage = messages[1];
+    answers([SESSION_A], [
+      first,
+      ...Array.from({ length: 5 }, () => completedBy(agentMessage, 'failed', 'x')),
+      completedBy(agentMessage, 'stored', 'final'),
+      ...messages.slice(2),
+    ]);
+
+    const [chat] = await createManager().getRecentChats(10);
+
+    expect(chat.messages).toHaveLength(100);
+    expect(chat.messages[1].text).toBe('final');
+    expect(chat.messages[99].text).toBe('m99');
+  });
+
+  it('asks once for messages and completed turns together, without a UNION, for the listed sessions, through each turn\'s own session link', async () => {
+    answers([SESSION_A, SESSION_B], [message(SESSION_A, 'user', 'a asks', 1), message(SESSION_B, 'user', 'b asks', 3)]);
+
+    await createManager().getRecentChats(10);
+    const queries = mockQuery.calls.map((call) => String(call[0]));
+
+    // known sessions, the session list, and the one query for the rest
+    expect(queries).toHaveLength(3);
+    const list = queries[2];
+    // A read of the working-memory view that spans several graphs refuses a
+    // UNION combined with ORDER BY, which would leave the list empty.
+    expect(list).not.toMatch(/\bUNION\b/i);
+    expect(list.match(/VALUES \?session \{ <urn:dkg:chat:session:s-a> <urn:dkg:chat:session:s-b> \}/g)).toHaveLength(1);
+    expect(list.match(/VALUES \?turnSession \{ <urn:dkg:chat:session:s-a> <urn:dkg:chat:session:s-b> \}/g)).toHaveLength(1);
+    expect(list).toContain('?m <http://schema.org/isPartOf> ?session');
+    expect(list).toContain('?turn <http://schema.org/isPartOf> ?turnSession');
+    expect(list).toContain(`<${DKG}updatesTurn> ?turn`);
+    expect(list).toContain(`<${DKG}hasAssistantMessage> ?m`);
+    expect(list).toContain('OPTIONAL');
+    expect(mockQuery.calls[2][1]).toMatchObject({ view: 'working-memory', assertionName: 'chat-turns' });
+  });
+
+  it('never leaks a message URI or a transition field into the listed messages', async () => {
+    answers([SESSION_A], [
+      message(SESSION_A, 'user', 'q', 1),
+      completedBy(message(SESSION_A, 'agent', 'a', 2), 'stored', 'final'),
+    ]);
+
+    const [chat] = await createManager().getRecentChats(10);
+
+    for (const listed of chat.messages) expect(Object.keys(listed).sort()).toEqual(['author', 'text', 'ts']);
+  });
+
+  it('agrees with getSession on the reply of the same completed turn', async () => {
+    const finalReply = 'Line one\n\n**Line two**';
+    answers([SESSION_A], [
+      message(SESSION_A, 'user', 'q', 1),
+      completedBy(message(SESSION_A, 'agent', 'working', 2), 'stored', finalReply),
+    ]);
+    const fromList = (await createManager().getRecentChats(10))[0].messages[1].text;
+
+    mockQuery = trackFn(undefined);
+    mockQuery.returns.push(
+      { bindings: [] },
+      {
+        bindings: [
+          { m: `${CHAT}msg:u`, author: `${CHAT}actor:user`, text: JSON.stringify('q'), ts: stamp(1), turnId: '"t1"', persistenceState: '"pending"', transitionState: '"stored"', transitionAssistantReply: JSON.stringify(finalReply) },
+          { m: `${CHAT}msg:a`, author: `${CHAT}actor:agent`, text: JSON.stringify('working'), ts: stamp(2), turnId: '"t1"', persistenceState: '"pending"', transitionState: '"stored"', transitionAssistantReply: JSON.stringify(finalReply) },
+        ],
+      },
+    );
+    const fromSession = (await createManager().getSession('s-a'))!.messages.find((m) => m.author === 'agent')!.text;
+
+    expect(fromList).toBe(finalReply);
+    expect(fromSession).toBe(finalReply);
+  });
+});

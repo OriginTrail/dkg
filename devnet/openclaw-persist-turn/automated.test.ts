@@ -13,7 +13,8 @@
  * is recorded as a transition.
  *
  * The suite drives that route on live devnet daemons over HTTP with the node's
- * bearer token and reads the assertion back through `POST /api/query`. A turn id
+ * bearer token and reads the assertion back through `POST /api/query` and the
+ * dashboard's two history routes over `GET`. A turn id
  * is only unique inside its session, so one case reuses a turn id in two
  * sessions and requires each to be created, completed and retried on its own.
  * It runs against nodes 1, 3 and 5, which sit on different store backends
@@ -42,6 +43,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
   fetchRetry,
+  getJson,
   lexical,
   postJson,
   readNodeConfig,
@@ -288,6 +290,47 @@ describe.each(NODE_NUMS)('OpenClaw persist-turn on devnet node%i', (num) => {
     expect(bResend.body).toEqual({ ok: true, duplicate: true, turnId });
     expect(await settledFootprint(node(), sessionA, turnId, expectedA)).toEqual(expectedA);
     expect(await settledFootprint(node(), sessionB, turnId, expectedB)).toEqual(expectedB);
+  });
+
+  it('lists and returns the final reply on both history routes after pending -> stored', async () => {
+    const sessionId = newSessionId('openclaw');
+    const turnId = newTurnId();
+    const expected = [
+      { author: 'user', text: USER_TEXT },
+      { author: 'agent', text: 'devnet: the final answer' },
+    ];
+    const history = async () => {
+      const single = await getJson(node(), `/api/memory/sessions/${encodeURIComponent(sessionId)}`);
+      const list = await getJson(node(), '/api/memory/sessions?limit=100');
+      const listed = (list.json?.sessions ?? []).find((entry: { session?: string }) => entry.session === sessionId);
+      const texts = (messages: Array<{ author: string; text: string }> | undefined) =>
+        (messages ?? []).map(({ author, text }) => ({ author, text }));
+      return { statuses: [single.status, list.status], single: texts(single.json?.messages), listed: texts(listed?.messages) };
+    };
+
+    await persist(node(), 'openclaw', turnPayload(sessionId, turnId, {
+      assistantReply: 'devnet: working on it',
+      persistenceState: 'pending',
+    }));
+    const stored = await persist(node(), 'openclaw', turnPayload(sessionId, turnId, {
+      assistantReply: 'devnet: the final answer',
+      persistenceState: 'stored',
+    }));
+    expect(stored.body).toEqual({ ok: true, transitioned: true, turnId });
+
+    // The reads may lag the writes on an external store, so wait for the routes to agree and then keep reading.
+    const expectedHistory = { statuses: [200, 200], single: expected, listed: expected };
+    const { value } = await settleOnExpected(history, expectedHistory, FOOTPRINT_SETTLE);
+    if (value.listed.length === 0) {
+      // An empty list says nothing about why: report what the list route did hold.
+      const list = await getJson(node(), '/api/memory/sessions?limit=100');
+      const ids = ((list.json?.sessions ?? []) as Array<{ session?: string }>).map((entry) => entry.session);
+      throw new Error(
+        `node${num} /api/memory/sessions (status ${list.status}) lists ${ids.length} sessions`
+        + ` and ${ids.includes(sessionId) ? 'holds' : 'does not hold'} ${sessionId}; the last read was ${JSON.stringify(value)}`,
+      );
+    }
+    expect(value).toEqual(expectedHistory);
   });
 
   it('still writes every POST that carries no turnId, each under a generated one', async () => {
