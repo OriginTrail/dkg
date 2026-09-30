@@ -485,7 +485,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
   restoreLiveContextGraphGossipSubscriptions(this: DKGAgent): number {
     const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
     let restored = 0;
-    for (const contextGraphId of [...this.subscribedContextGraphs.keys()]) {
+    // A snapshot: re-arming can retire or replace rows while it runs.
+    const candidateIds = Array.from(this.subscribedContextGraphs.keys());
+    for (const contextGraphId of candidateIds) {
       const subscription = this.subscribedContextGraphs.get(contextGraphId);
       if (
         subscription?.subscribed !== true
