@@ -27,6 +27,46 @@
  * loss leaves either the old file or the new file, never a torn one. Leftover
  * `<file>.tmp-*` siblings from a crash are inert and swept by `init()`.
  *
+ * A rename can succeed while its directory fsync fails: the write rejects, but
+ * the new file is already visible, so a retry that merely reads the file would
+ * find the requested state and acknowledge it without ever making the rename
+ * durable. The store therefore remembers every target whose rename is not yet
+ * covered by a successful directory fsync (`pendingDirSync`) and completes that
+ * fsync before it acknowledges an idempotent no-op on such a file (a `mark*`
+ * whose flag already matches, a prune that finds nothing left to drop).
+ *
+ * Guaranteed, per store instance: an acknowledged `.meta` write, prune rewrite
+ * or prune unlink (a log whose every entry expired is removed) was covered by a
+ * directory fsync that STARTED after its rename or unlink returned and then
+ * succeeded. A mark is about one directory change, not about a path: each
+ * rename or unlink gets a generation, and a directory fsync forgets only the
+ * targets (with the generations) it had seen when it started. So a target that
+ * is changed again, and whose own fsync fails, stays pending even while an
+ * older fsync that had already seen it is still in flight. A failing retry
+ * keeps the mark, and with nothing pending no extra fsync is issued. For an
+ * unlink the retry is a prune that finds the log already gone.
+ *
+ * Not guaranteed: a rename or unlink applied by a process that was killed
+ * before its directory fsync (the next process cannot know and takes the
+ * visible directory as current; only a power loss inside the kernel's
+ * write-back window can still revert it); the unlinks of `init()`'s sweep of
+ * orphan logs, corrupt metas and stale temps (nothing acknowledges them: a
+ * resurrected orphan is reaped again by the next init); and anything across two
+ * store instances on one directory (they share no lock, no cold-load
+ * initialization and no pending marks).
+ *
+ * Cold load: the first access to a CG's metadata after process start runs ONE
+ * initialization per CG (read `.meta`, recover the log tail's highest seqno,
+ * take the max, best-effort persist the reconciled cursor, install the result
+ * in the cache). Every caller, locked mutators and unlocked readers alike,
+ * awaits that same initialization, so no mutation can interleave with it and
+ * no stale snapshot can be renamed over a newer `.meta`. The guarantee is per
+ * store instance and per process: use one instance per `dataDir` (the agent
+ * does). A second instance on the same directory has its own lock and its own
+ * initialization, so two instances running concurrently are NOT ordered
+ * against each other; opening a fresh instance after the previous one is idle
+ * (a restart) is safe, it re-derives everything from the files.
+ *
  * The store is intentionally simple: append-only writes, sequential
  * reads, periodic prune. No indexes, no compaction, no checkpoints.
  * The expected steady-state size is small (a few MB per active CG
@@ -180,7 +220,25 @@ export class SwmHostModeStore {
   private readonly now: () => number;
   private readonly onStartupReconcile?: (report: SwmHostModeStartupReconcileReport) => void;
   private readonly metaCache = new Map<string, CgMetaState>();
+  /**
+   * Cold initialization in flight per CG (see `loadMeta`). It is deliberately
+   * NOT behind `inflightWrites`: mutators hold that lock while they await the
+   * initialization, so taking it here would deadlock.
+   */
+  private readonly metaInitializations = new Map<string, Promise<CgMetaState>>();
   private readonly inflightWrites = new Map<string, Promise<void>>();
+  /**
+   * Targets (`.meta` / `.log`) whose directory entry changed (a rename over it,
+   * or the unlink of the log) but whose directory fsync has not (yet)
+   * succeeded, each with the generation of the change it stands for. The
+   * generation is what makes a mark about ONE change rather than about a path:
+   * see `syncDirectory`. Same-target writers never overlap within an instance
+   * (the per-CG write lock, plus the cold-load initialization that every
+   * mutator awaits), so a target's generations are recorded in change order.
+   */
+  private readonly pendingDirSync = new Map<string, number>();
+  /** Source of generations (one per rename or unlink this instance applied). */
+  private directoryChangeGeneration = 0;
   /** Temp files currently being written by this instance; the init sweep must not reap them. */
   private readonly liveTempPaths = new Set<string>();
   /** CGs whose log tail has been checked (and repaired) since this process started. */
@@ -486,11 +544,10 @@ export class SwmHostModeStore {
    * before the chain-event poller catches up. Idempotent.
    */
   async markHostModeSubscribed(contextGraphId: string): Promise<void> {
-    await this.withCgWriteLock(contextGraphId, async () => {
-      const meta = await this.loadMeta(contextGraphId);
-      if (meta.hostModeSubscribed === true) return;
+    await this.mutateMeta(contextGraphId, (meta) => {
+      if (meta.hostModeSubscribed === true) return false;
       meta.hostModeSubscribed = true;
-      await this.persistMeta(contextGraphId, meta);
+      return true;
     });
   }
 
@@ -501,11 +558,10 @@ export class SwmHostModeStore {
    * Persisted so a restart does NOT re-engage.
    */
   async markHostModeUnsubscribed(contextGraphId: string): Promise<void> {
-    await this.withCgWriteLock(contextGraphId, async () => {
-      const meta = await this.loadMeta(contextGraphId);
-      if (meta.hostModeSubscribed !== true) return;
+    await this.mutateMeta(contextGraphId, (meta) => {
+      if (meta.hostModeSubscribed !== true) return false;
       meta.hostModeSubscribed = false;
-      await this.persistMeta(contextGraphId, meta);
+      return true;
     });
   }
 
@@ -527,20 +583,41 @@ export class SwmHostModeStore {
 
   /** Mark a CG as on-chain registered. Switches it to the larger limits. */
   async markRegistered(contextGraphId: string): Promise<void> {
-    await this.withCgWriteLock(contextGraphId, async () => {
-      const meta = await this.loadMeta(contextGraphId);
-      if (meta.registered) return;
+    await this.mutateMeta(contextGraphId, (meta) => {
+      if (meta.registered) return false;
       meta.registered = true;
-      await this.persistMeta(contextGraphId, meta);
+      return true;
     });
   }
 
   /** Mark a CG as no-longer-registered. Useful for revoke flows. */
   async markUnregistered(contextGraphId: string): Promise<void> {
+    await this.mutateMeta(contextGraphId, (meta) => {
+      if (!meta.registered) return false;
+      meta.registered = false;
+      return true;
+    });
+  }
+
+  /**
+   * The one path every `.meta` flag mutator goes through (under the per-CG
+   * write lock). `apply` mutates the loaded state and returns whether it
+   * changed anything. When it did not (the flag already has the requested
+   * value) nothing is rewritten, but the caller is still only told "done" once
+   * the visible file is durable: if an earlier attempt renamed this file into
+   * place and then failed its directory fsync, that fsync is completed here
+   * first (and a failure of it rejects, keeping the pending mark).
+   */
+  private async mutateMeta(
+    contextGraphId: string,
+    apply: (meta: CgMetaState) => boolean,
+  ): Promise<void> {
     await this.withCgWriteLock(contextGraphId, async () => {
       const meta = await this.loadMeta(contextGraphId);
-      if (!meta.registered) return;
-      meta.registered = false;
+      if (!apply(meta)) {
+        await this.completePendingDirSync(this.metaPath(contextGraphId));
+        return;
+      }
       await this.persistMeta(contextGraphId, meta);
     });
   }
@@ -643,7 +720,13 @@ export class SwmHostModeStore {
     limits: SwmHostModeStoreLimits,
   ): Promise<number> {
     const filePath = this.logPath(contextGraphId);
-    if (!(await fileExists(filePath))) return 0;
+    if (!(await fileExists(filePath))) {
+      // No log. If an earlier prune unlinked it and then failed its directory
+      // fsync, this "already gone" view is not durable yet: finish that fsync
+      // before reporting done. (Free when nothing is pending.)
+      await this.completePendingDirSync(filePath);
+      return 0;
+    }
     const buf = await fs.readFile(filePath);
     const ttlCutoff = this.now() - limits.ttlMs;
     // First pass: locate TTL cut point + total post-TTL size.
@@ -667,9 +750,18 @@ export class SwmHostModeStore {
     }
     const kept = survivors.slice(dropIndex);
     const bytesPruned = buf.length - survivorBytes;
-    if (bytesPruned === 0) return 0;
+    if (bytesPruned === 0) {
+      // Nothing (left) to drop. If a previous attempt already renamed the pruned
+      // log into place but its directory fsync failed, this "already pruned"
+      // view is not durable yet: finish that fsync before reporting done.
+      await this.completePendingDirSync(filePath);
+      return 0;
+    }
     if (kept.length === 0) {
       await fs.rm(filePath, { force: true });
+      // An unlink is a directory-entry change exactly like a rename: without this
+      // fsync a power loss could bring the expired ciphertext back.
+      await this.syncDirectoryChange(filePath);
       return bytesPruned;
     }
     const parts: Buffer[] = [];
@@ -697,24 +789,58 @@ export class SwmHostModeStore {
   }
 
   /**
-   * Load (and cache) the per-CG metadata. On a cold load the seqno
-   * cursor is reconciled against the actual log file: a crash
-   * between `appendFileDurable` and `persistMeta` (both fsynced, in
-   * that order) would otherwise let the next append reuse the same
-   * seqno, which would break host-catchup paging that uses
-   * strict-greater-than seqno.
+   * Load (and cache) the per-CG metadata. A cold load reconciles the seqno
+   * cursor against the actual log file: a crash between `appendFileDurable`
+   * and `persistMeta` (both fsynced, in that order) would otherwise let the
+   * next append reuse the same seqno, which would break host-catchup paging
+   * that uses strict-greater-than seqno.
    *
-   * The log is the source of truth for what was actually persisted;
-   * the meta file is a cache of the highest-known seqno plus the
-   * `registered` flag. After process start we always trust the log
-   * tail's max seqno over the meta file's cursor if the two disagree
-   * — taking `max(metaSeqno, lastLogSeqno)` guarantees we never
-   * recycle a seqno even if the meta write lost a race to the crash.
+   * The log is the source of truth for what was actually persisted; the meta
+   * file is a cache of the highest-known seqno plus the `registered` flag.
+   * After process start we always trust the log tail's max seqno over the
+   * meta file's cursor if the two disagree: taking
+   * `max(metaSeqno, lastLogSeqno)` guarantees we never recycle a seqno even if
+   * the meta write lost a race to the crash.
+   *
+   * There is exactly one owner of a cold load per CG: the first caller starts
+   * the initialization and every concurrent caller (the unlocked
+   * `isRegistered` / `getLastSeqno` / `stats` and the locked mutators, which
+   * call this while holding the per-CG write lock) awaits that same promise.
+   * The initialization never takes the write lock, so a mutator waiting on it
+   * cannot deadlock, and a mutator cannot start its own work until the
+   * initialization, including its reconcile write, has finished. That is what
+   * keeps a delayed reconcile rename from overwriting a newer `.meta`.
+   * A rejected initialization is not cached: the entry is dropped when it
+   * settles and the next caller starts a fresh one.
+   *
+   * This stays `async`, but the body has no `await`: an async function runs
+   * synchronously up to its first `await`, so the cache check, the in-flight
+   * lookup and the registration of a new initialization are one step that
+   * nothing can interleave with (an `await` between the lookup and the
+   * registration would let two callers each start an initialization). Being
+   * `async` also keeps a synchronous throw (`cgKey` on a non-string id) a
+   * rejection, which the unlocked readers' `.catch(() => null)` absorbs.
    */
   private async loadMeta(contextGraphId: string): Promise<CgMetaState> {
     const cgKey = this.cgKey(contextGraphId);
     const cached = this.metaCache.get(cgKey);
-    if (cached) return cached;
+    if (cached) return Promise.resolve(cached);
+    const pending = this.metaInitializations.get(cgKey);
+    if (pending) return pending;
+    const initialization = this.initializeMeta(contextGraphId, cgKey).finally(() => {
+      this.metaInitializations.delete(cgKey);
+    });
+    this.metaInitializations.set(cgKey, initialization);
+    return initialization;
+  }
+
+  /**
+   * The single cold-load pass behind `loadMeta`: read `.meta`, scan the log
+   * tail, reconcile, best-effort persist the reconciled cursor, install into
+   * the cache. The cache is written only on success (and, by construction,
+   * before the promise resolves, so a waiter never observes a cache miss).
+   */
+  private async initializeMeta(contextGraphId: string, cgKey: string): Promise<CgMetaState> {
     const metaPath = this.metaPath(contextGraphId);
     let parsed: CgMetaState | undefined;
     try {
@@ -730,19 +856,12 @@ export class SwmHostModeStore {
       contextGraphId,
       ...(parsed?.hostModeSubscribed === true ? { hostModeSubscribed: true } : {}),
     };
-    // If the log says more than the meta does, persist the
-    // reconciled cursor so subsequent cold loads don't have to
-    // re-scan the log tail.
+    // If the log says more than the meta does, persist the reconciled cursor
+    // so subsequent cold loads don't have to re-scan the log tail. Best-effort:
+    // the cursor is re-derived from the log on the next cold load anyway.
     if (parsed && state.seqno !== parsed.seqno) {
       await this.writeFileDurable(metaPath, JSON.stringify(state)).catch(() => { /* best-effort */ });
     }
-    // Unlocked callers (`isRegistered`, `getLastSeqno`, `stats`) can cold-load
-    // concurrently with a locked append. Whoever installed a state first owns
-    // the cache: overwriting it with this (older) snapshot would roll the
-    // in-memory cursor back and let the next append reuse a seqno. The
-    // durable reconcile write above widens this window, so close it.
-    const installed = this.metaCache.get(cgKey);
-    if (installed) return installed;
     this.metaCache.set(cgKey, state);
     return state;
   }
@@ -774,10 +893,13 @@ export class SwmHostModeStore {
       await this.writeFileDurable(this.metaPath(contextGraphId), JSON.stringify(meta));
     } catch (err) {
       // The caller mutated the cached object before calling us, so on failure
-      // the cache is ahead of the disk. Drop it: the next access re-reads the
-      // durable state (the cursor is re-derived from the log tail) and a retry
+      // the cache may be ahead of the disk. Drop it: the next access re-reads
+      // what is on disk (the cursor is re-derived from the log tail) and a retry
       // of the same mutation actually retries the write instead of no-op'ing
-      // against a flag the disk never saw.
+      // against a flag the disk never saw. If the failure was the directory
+      // fsync after the rename, the new file IS what the next access reads;
+      // `writeFileDurable` has then recorded it in `pendingDirSync`, and the
+      // retry's idempotent early return completes that fsync (see `mutateMeta`).
       if (this.metaCache.get(cgKey) === meta) this.metaCache.delete(cgKey);
       throw err;
     }
@@ -790,6 +912,12 @@ export class SwmHostModeStore {
    * holding either its previous contents or the new ones; the worst leftover
    * is an inert `<target>.tmp-*` sibling that `init()` sweeps. On failure the
    * temp file is removed (best-effort) and the error is rethrown.
+   *
+   * If the directory fsync is the step that fails, the rename has already
+   * happened: the new file is visible even though this call rejects, and the
+   * target stays in `pendingDirSync` until a directory fsync succeeds (see
+   * `syncDirectoryChange`). (A `rename` that rejects is taken not to have
+   * happened: it is atomic.)
    *
    * The temp handle is opened for writing and synced in place, so no
    * separate re-open is needed (which also keeps `FlushFileBuffers` happy on
@@ -808,7 +936,6 @@ export class SwmHostModeStore {
       await handle.close();
       handle = undefined;
       await fs.rename(tempPath, targetPath);
-      await fsyncRfc64DirectoryV1(path.dirname(targetPath));
     } catch (err) {
       if (handle) await handle.close().catch(() => { /* already failing */ });
       await fs.rm(tempPath, { force: true }).catch(() => { /* best-effort */ });
@@ -816,6 +943,59 @@ export class SwmHostModeStore {
     } finally {
       this.liveTempPaths.delete(tempPath);
     }
+    await this.syncDirectoryChange(targetPath);
+  }
+
+  /**
+   * The step after a rename over `targetPath`, or the unlink of it, has
+   * returned: the new directory state is visible, and the directory fsync
+   * decides whether it is also durable. The change's generation is taken now,
+   * synchronously, right after the call returned (nothing can interleave before
+   * it). If the fsync fails the target stays in `pendingDirSync` with that
+   * generation and the error is rethrown.
+   */
+  private async syncDirectoryChange(targetPath: string): Promise<void> {
+    const generation = (this.directoryChangeGeneration += 1);
+    try {
+      await this.syncDirectory(path.dirname(targetPath));
+    } catch (err) {
+      this.pendingDirSync.set(targetPath, generation);
+      throw err;
+    }
+  }
+
+  /**
+   * fsync `dir` and, only once that succeeded, forget the pending targets in it
+   * that this fsync covers: a pending mark is about one directory change, and
+   * an fsync covers exactly the changes (renames, unlinks) that had returned
+   * before it started. So the targets (with their generations) are snapshotted
+   * BEFORE the fsync, and a target is deleted afterwards only if its entry
+   * still has the snapshotted generation. A target that was changed again in
+   * the meantime and failed its own fsync has a newer generation and stays
+   * pending, even though its path was already in the map; a change that lands,
+   * and fails, while this fsync is in flight is not in the snapshot at all.
+   *
+   * Conservative in one direction only: a change that returned before this
+   * fsync started but whose own (failing) fsync only recorded it afterwards is
+   * not in the snapshot, so it is synced once more on retry.
+   */
+  private async syncDirectory(dir: string): Promise<void> {
+    const covered = [...this.pendingDirSync].filter(([target]) => path.dirname(target) === dir);
+    await fsyncRfc64DirectoryV1(dir);
+    for (const [target, generation] of covered) {
+      if (this.pendingDirSync.get(target) === generation) this.pendingDirSync.delete(target);
+    }
+  }
+
+  /**
+   * Make a rename (or unlink) of `targetPath` that an earlier attempt left
+   * without a successful directory fsync durable. A no-op (no fsync at all) when
+   * nothing is pending for the target; rejects, keeping the mark, when the fsync
+   * fails.
+   */
+  private async completePendingDirSync(targetPath: string): Promise<void> {
+    if (!this.pendingDirSync.has(targetPath)) return;
+    await this.syncDirectory(path.dirname(targetPath));
   }
 
   /**

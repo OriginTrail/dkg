@@ -142,6 +142,42 @@ describe('SwmHostModeStore durable writes', () => {
     return (await readdir(dir)).filter((n) => n.includes('.tmp-')).sort();
   }
 
+  const wait = (ms: number) => new Promise<void>((resolve) => { setTimeout(resolve, ms); });
+
+  /** Log holds frames 1..3; the meta on disk lags at seqno 1 (the crash-recovery shape). */
+  async function seedLaggingMeta(
+    cg: string,
+    flags: { registered?: boolean; hostModeSubscribed?: boolean } = {},
+  ): Promise<string> {
+    const first = newStore(dir);
+    for (let i = 1; i <= 3; i += 1) await first.append(cg, new Uint8Array([i]));
+    const metaPath = path.join(dir, `${cgKey(cg)}.meta`);
+    await writeFile(
+      metaPath,
+      JSON.stringify({ seqno: 1, registered: flags.registered ?? false, contextGraphId: cg, ...(flags.hostModeSubscribed ? { hostModeSubscribed: true } : {}) }),
+    );
+    return metaPath;
+  }
+
+  /** Pause the FIRST rename after this call (the first cold load's reconcile write) until released. */
+  function gateFirstRename() {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let atRename: () => void = () => {};
+    const reached = new Promise<void>((resolve) => { atRename = resolve; });
+    const realRename = fsp.rename.bind(fsp);
+    const spy = vi.spyOn(fsp, 'rename').mockImplementationOnce(async (from, to) => {
+      atRename();
+      await gate;
+      return realRename(from, to);
+    });
+    return { reached, release, spy };
+  }
+
+  function readCalls(suffix: string): number {
+    return vi.mocked(fsp.readFile).mock.calls.filter(([p]) => String(p).endsWith(suffix)).length;
+  }
+
   describe('atomic write sequence', () => {
     it('append fsyncs the frame, then writes the cursor via temp + fsync + rename + directory fsync', async () => {
       const store = newStore(dir);
@@ -209,7 +245,7 @@ describe('SwmHostModeStore durable writes', () => {
       expect(await tempFiles()).toEqual([]);
     });
 
-    it('prune that drops every entry still just removes the log (no temp file involved)', async () => {
+    it('prune that drops every entry removes the log (no temp file, no rename) and then syncs the directory entry', async () => {
       let nowMs = 1_000_000;
       const store = newStore(dir, {
         unregisteredLimits: { perCgByteCap: 1024 * 1024, ttlMs: 100 },
@@ -224,7 +260,8 @@ describe('SwmHostModeStore durable writes', () => {
 
       await store.prune();
 
-      expect(events).toEqual([]);
+      // The unlink is a directory-entry change like a rename: the directory fsync is the only durability step.
+      expect(events).toEqual(['dirsync:dataDir']);
       await expect(stat(path.join(dir, `${cgKey(cg)}.log`))).rejects.toMatchObject({ code: 'ENOENT' });
       // The cursor survives the log, so a later append cannot recycle a seqno.
       expect(await newStore(dir).append(cg, new Uint8Array([3]))).toBe(3);
@@ -637,8 +674,693 @@ describe('SwmHostModeStore durable writes', () => {
     });
   });
 
+  describe('cold metadata initialization has a single owner per CG', () => {
+    it('a delayed cold-load reconcile cannot restore a flag a later mutation cleared: a fresh store reads the mutation', async () => {
+      const cg = 'cg/init-stale-rename';
+      const metaPath = await seedLaggingMeta(cg, { hostModeSubscribed: true });
+      const store = newStore(dir);
+      await store.init();
+      const gate = gateFirstRename();
+
+      const reader = store.isRegistered(cg); // unlocked cold load, paused right before its reconcile rename
+      await gate.reached;
+      let unsubscribed = false;
+      const unsubscribe = store.markHostModeUnsubscribed(cg).then(() => { unsubscribed = true; });
+      // Give the mutation every chance to finish while the reader is paused. Before the fix it did
+      // (it cold-loaded on its own); now it must wait for the reader's initialization.
+      await Promise.race([unsubscribe, wait(600)]);
+      const finishedWhilePaused = unsubscribed;
+      gate.release();
+      await Promise.all([reader, unsubscribe]);
+
+      // Outcome first: the acknowledged unsubscribe is what disk and a restarted store see.
+      const onDisk = JSON.parse(await readFile(metaPath, 'utf8'));
+      expect(onDisk.hostModeSubscribed, 'a stale reconcile rename restored the cleared flag').not.toBe(true);
+      expect(onDisk.seqno).toBe(3);
+      // A restart must not re-engage the subscription the unsubscribe acknowledged.
+      const fresh = newStore(dir);
+      expect(await fresh.listHostModeSubscribedCgs()).toEqual([]);
+      expect(await fresh.getLastSeqno(cg)).toBe(3);
+      // Mechanism: the mutation waited for the in-flight initialization instead of racing it.
+      expect(finishedWhilePaused, 'the mutation must wait for the in-flight initialization').toBe(false);
+    });
+
+    it.each([
+      { name: 'markRegistered', pre: {}, run: (s: SwmHostModeStore, cg: string) => s.markRegistered(cg), expectMeta: { registered: true, seqno: 3 } },
+      { name: 'markUnregistered', pre: { registered: true }, run: (s: SwmHostModeStore, cg: string) => s.markUnregistered(cg), expectMeta: { registered: false, seqno: 3 } },
+      { name: 'markHostModeSubscribed', pre: {}, run: (s: SwmHostModeStore, cg: string) => s.markHostModeSubscribed(cg), expectMeta: { hostModeSubscribed: true, seqno: 3 } },
+      { name: 'markHostModeUnsubscribed', pre: { hostModeSubscribed: true }, run: (s: SwmHostModeStore, cg: string) => s.markHostModeUnsubscribed(cg), expectMeta: { hostModeSubscribed: false, seqno: 3 } },
+      { name: 'append', pre: {}, run: (s: SwmHostModeStore, cg: string) => s.append(cg, new Uint8Array([4])), expectMeta: { seqno: 4 } },
+    ])('$name arriving during a paused unlocked cold load waits for it and lands on top of the reconciled cursor', async ({ name, pre, run, expectMeta }) => {
+      const cg = `cg/init-wait-${name}`;
+      const metaPath = await seedLaggingMeta(cg, pre);
+      const store = newStore(dir);
+      await store.init();
+      const gate = gateFirstRename();
+
+      const reader = store.getLastSeqno(cg);
+      await gate.reached;
+      let done = false;
+      const mutation = run(store, cg).then(() => { done = true; });
+      await Promise.race([mutation, wait(400)]);
+      expect(done, `${name} must not complete while the initialization is paused`).toBe(false);
+      gate.release();
+      await Promise.all([reader, mutation]);
+
+      expect(JSON.parse(await readFile(metaPath, 'utf8'))).toMatchObject(expectMeta);
+      // What a restarted store sees is what the mutation acknowledged.
+      const fresh = newStore(dir);
+      expect(await fresh.getLastSeqno(cg)).toBe(expectMeta.seqno);
+      expect(await fresh.isRegistered(cg)).toBe('registered' in expectMeta ? expectMeta.registered : false);
+    });
+
+    it('a mutation that starts the initialization is joined by later readers: one reconcile, both orders consistent', async () => {
+      const cg = 'cg/init-mutator-first';
+      const metaPath = await seedLaggingMeta(cg);
+      const store = newStore(dir);
+      await store.init();
+      const readFileSpy = vi.spyOn(fsp, 'readFile');
+      const gate = gateFirstRename();
+
+      const mutation = store.markRegistered(cg); // owns the cold load (inside its lock)
+      await gate.reached;
+      const readers = Promise.all([store.getLastSeqno(cg), store.getLastSeqno(cg), store.isRegistered(cg)]);
+      gate.release();
+      const [seqnoA, seqnoB] = await readers;
+      await mutation;
+
+      expect([seqnoA, seqnoB]).toEqual([3, 3]);
+      expect(await store.isRegistered(cg)).toBe(true);
+      // Exactly one initialization: one meta read, one log scan, and only two renames
+      // (its reconcile write and the mutation's own write).
+      expect(readFileSpy.mock.calls.filter(([p]) => String(p).endsWith('.meta'))).toHaveLength(1);
+      expect(readFileSpy.mock.calls.filter(([p]) => String(p).endsWith('.log'))).toHaveLength(1);
+      expect(gate.spy).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(await readFile(metaPath, 'utf8'))).toMatchObject({ seqno: 3, registered: true });
+    });
+
+    it('concurrent cold loads (readers and a mutator) share exactly one initialization', async () => {
+      const cg = 'cg/init-shared';
+      const metaPath = await seedLaggingMeta(cg);
+      const store = newStore(dir);
+      await store.init();
+      vi.spyOn(fsp, 'readFile');
+      const renameSpy = vi.spyOn(fsp, 'rename');
+      const dirSyncBefore = vi.mocked(fsPolicy.fsyncRfc64DirectoryV1).mock.calls.length;
+
+      const results = await Promise.all([
+        store.getLastSeqno(cg),
+        store.getLastSeqno(cg),
+        store.isRegistered(cg),
+        store.markRegistered(cg),
+        store.getLastSeqno(cg),
+        store.isRegistered(cg),
+      ]);
+
+      expect(results[0]).toBe(3);
+      expect(results[1]).toBe(3);
+      expect(results[4]).toBe(3);
+      expect(await store.isRegistered(cg)).toBe(true);
+      expect(readCalls('.meta')).toBe(1);
+      expect(readCalls('.log')).toBe(1);
+      // One reconcile write for the initialization plus the mutator's own write; each with one directory fsync.
+      expect(renameSpy).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(fsPolicy.fsyncRfc64DirectoryV1).mock.calls.length - dirSyncBefore).toBe(2);
+      expect(JSON.parse(await readFile(metaPath, 'utf8'))).toMatchObject({ seqno: 3, registered: true });
+
+      // Warm now: further callers touch the disk zero times.
+      await store.getLastSeqno(cg);
+      await store.isRegistered(cg);
+      expect(readCalls('.meta')).toBe(1);
+      expect(readCalls('.log')).toBe(1);
+    });
+
+    it('a rejected initialization is not cached: every waiter sees it and the next caller retries', async () => {
+      const cg = 'cg/init-retry';
+      const metaPath = await seedLaggingMeta(cg);
+      const store = newStore(dir);
+      await store.init();
+      // I/O errors are swallowed by the cold load by design (unchanged). Only an unexpected fault
+      // rejects it, so inject one: the log read yields a non-buffer, which the tail scan cannot parse.
+      const realReadFile = fsp.readFile.bind(fsp) as (...args: unknown[]) => Promise<unknown>;
+      let failLogRead = true;
+      vi.spyOn(fsp, 'readFile').mockImplementation((async (p: unknown, ...rest: unknown[]) => {
+        if (failLogRead && String(p).endsWith('.log')) {
+          failLogRead = false;
+          return null;
+        }
+        return realReadFile(p, ...rest);
+      }) as never);
+
+      // Two unlocked readers share the failing initialization (their `catch` turns it into 0)...
+      expect(await Promise.all([store.getLastSeqno(cg), store.getLastSeqno(cg)])).toEqual([0, 0]);
+      expect(readCalls('.log')).toBe(1);
+      // ...nothing was cached, so the next caller runs a fresh initialization and recovers the cursor.
+      expect(await store.getLastSeqno(cg)).toBe(3);
+      expect(readCalls('.log')).toBe(2);
+      expect(JSON.parse(await readFile(metaPath, 'utf8')).seqno).toBe(3);
+    });
+
+    it('a mutator whose initialization rejects does not poison the caller queued behind it', async () => {
+      const cg = 'cg/init-retry-queued';
+      const metaPath = await seedLaggingMeta(cg);
+      const store = newStore(dir);
+      await store.init();
+      const realReadFile = fsp.readFile.bind(fsp) as (...args: unknown[]) => Promise<unknown>;
+      let failLogRead = true;
+      vi.spyOn(fsp, 'readFile').mockImplementation((async (p: unknown, ...rest: unknown[]) => {
+        if (failLogRead && String(p).endsWith('.log')) {
+          failLogRead = false;
+          return null;
+        }
+        return realReadFile(p, ...rest);
+      }) as never);
+
+      const failing = store.markRegistered(cg);
+      const queued = store.markHostModeSubscribed(cg);
+      await expect(failing).rejects.toBeInstanceOf(TypeError);
+      await queued;
+
+      // The failed mutation left no trace; the queued one ran its own (successful) initialization.
+      expect(JSON.parse(await readFile(metaPath, 'utf8'))).toMatchObject({ seqno: 3, registered: false, hostModeSubscribed: true });
+      expect(await store.isRegistered(cg)).toBe(false);
+      await store.markRegistered(cg);
+      expect(await newStore(dir).isRegistered(cg)).toBe(true);
+    });
+
+    it('best-effort reconcile persistence never fails or poisons the shared initialization', async () => {
+      const cg = 'cg/init-best-effort';
+      const metaPath = await seedLaggingMeta(cg);
+      const store = newStore(dir);
+      await store.init();
+      vi.spyOn(fsp, 'rename').mockRejectedValueOnce(errnoError('EACCES', 'injected reconcile rename failure'));
+
+      // Both callers share the initialization whose persistence step fails; neither sees an error.
+      const [seqno] = await Promise.all([store.getLastSeqno(cg), store.markRegistered(cg)]);
+      expect(seqno).toBe(3);
+      // The cache holds the reconciled cursor, so the mutation's own write publishes it durably.
+      expect(JSON.parse(await readFile(metaPath, 'utf8'))).toMatchObject({ seqno: 3, registered: true });
+      expect(await tempFiles()).toEqual([]);
+    });
+
+    it('the cache check and the registration of an initialization are one synchronous step: two loads in the same tick share one initialization', async () => {
+      const cg = 'cg/init-sync-step';
+      await seedLaggingMeta(cg);
+      const store = newStore(dir);
+      await store.init();
+      vi.spyOn(fsp, 'readFile');
+      const loadMeta = (store as unknown as { loadMeta(contextGraphId: string): Promise<unknown> }).loadMeta.bind(store);
+
+      const first = loadMeta(cg);
+      const second = loadMeta(cg); // no yield between the two calls
+      expect(await second).toBe(await first);
+      expect(readCalls('.meta')).toBe(1);
+      expect(readCalls('.log')).toBe(1);
+    });
+
+    it('a context graph id that is not a string is a rejected lookup the readers swallow, not a synchronous throw', async () => {
+      const store = newStore(dir);
+      await store.init();
+      // The same answers the store gave before the initialization had an owner (loadMeta was async).
+      await expect(store.getLastSeqno(undefined as never)).resolves.toBe(0);
+      await expect(store.isRegistered(undefined as never)).resolves.toBe(false);
+      await expect(store.getLastSeqno(42 as never)).resolves.toBe(0);
+
+      // A meta whose contextGraphId is not a string (init() reaps those, so it has to appear afterwards)
+      // is skipped by the listing instead of failing it.
+      await store.markHostModeSubscribed('cg/listed');
+      await writeFile(
+        path.join(dir, `${cgKey('cg/not-a-string')}.meta`),
+        JSON.stringify({ seqno: 1, registered: false, contextGraphId: 123, hostModeSubscribed: true }),
+      );
+      await expect(store.listHostModeSubscribedCgs()).resolves.toEqual(['cg/listed']);
+    });
+
+    it('a failed cursor write drops the cache; the next cold load (a reader) and a queued append share one recovery and stay monotonic', async () => {
+      const cg = 'cg/init-evict';
+      const store = newStore(dir);
+      expect(await store.append(cg, new Uint8Array([1]))).toBe(1);
+      vi.spyOn(fsp, 'rename').mockRejectedValueOnce(errnoError('EIO', 'injected cursor rename failure'));
+      await expect(store.append(cg, new Uint8Array([2]))).rejects.toThrow('injected cursor rename failure');
+      vi.spyOn(fsp, 'readFile');
+
+      // The cache was dropped, so the reader starts a new initialization (frame 2 is in the log,
+      // the meta still says 1) and the append queued behind it joins it instead of scanning again.
+      const reader = store.getLastSeqno(cg);
+      const appended = store.append(cg, new Uint8Array([3]));
+
+      expect(await reader).toBeGreaterThanOrEqual(2);
+      expect(await appended).toBe(3);
+      expect((await store.iterate(cg, 0)).map((e) => e.seqno)).toEqual([1, 2, 3]);
+      expect(readCalls('.meta')).toBe(1);
+      expect(await newStore(dir).getLastSeqno(cg)).toBe(3);
+    });
+  });
+
+  describe('a retry after a failed directory fsync completes durability before it acknowledges', () => {
+    const dirSyncCount = () => vi.mocked(fsPolicy.fsyncRfc64DirectoryV1).mock.calls.length;
+    const failNextDirSync = (message = 'injected dir fsync failure') =>
+      vi.mocked(fsPolicy.fsyncRfc64DirectoryV1).mockRejectedValueOnce(new Error(message));
+    /**
+     * Hold the NEXT directory fsync open: `reached` resolves once it has started (it has
+     * then taken its snapshot of the pending targets), `release(outcome)` lets it finish,
+     * either for real or by failing.
+     */
+    function holdNextDirSync() {
+      let settle: (outcome: 'ok' | Error) => void = () => {};
+      const gate = new Promise<'ok' | Error>((resolve) => { settle = resolve; });
+      let started: () => void = () => {};
+      const reached = new Promise<void>((resolve) => { started = resolve; });
+      vi.mocked(fsPolicy.fsyncRfc64DirectoryV1).mockImplementationOnce(async (p) => {
+        started();
+        const outcome = await gate;
+        if (outcome !== 'ok') throw outcome;
+        return actualDirFsync(p);
+      });
+      return { reached, release: (outcome: 'ok' | Error = 'ok') => settle(outcome) };
+    }
+
+    type Mutator = {
+      name: string;
+      /** Puts the CG in the state the mutator will flip, durably. */
+      prepare: (s: SwmHostModeStore, cg: string) => Promise<void>;
+      run: (s: SwmHostModeStore, cg: string) => Promise<void>;
+      /** What the meta file shows once `run` has renamed its new file into place. */
+      visible: Record<string, unknown>;
+    };
+    const noop = async () => {};
+    // Every mutator of the store that has an idempotency early return.
+    const MUTATORS: Mutator[] = [
+      { name: 'markRegistered', prepare: noop, run: (s, cg) => s.markRegistered(cg), visible: { registered: true } },
+      { name: 'markUnregistered', prepare: (s, cg) => s.markRegistered(cg), run: (s, cg) => s.markUnregistered(cg), visible: { registered: false } },
+      { name: 'markHostModeSubscribed', prepare: noop, run: (s, cg) => s.markHostModeSubscribed(cg), visible: { hostModeSubscribed: true } },
+      { name: 'markHostModeUnsubscribed', prepare: (s, cg) => s.markHostModeSubscribed(cg), run: (s, cg) => s.markHostModeUnsubscribed(cg), visible: { hostModeSubscribed: false } },
+    ];
+
+    it.each(MUTATORS)('$name: the retry finds the renamed file, completes the failed directory fsync, and only then is idempotent', async ({ name, prepare, run, visible }) => {
+      const store = newStore(dir);
+      const cg = `cg/dirsync-${name}`;
+      await prepare(store, cg);
+      const metaPath = path.join(dir, `${cgKey(cg)}.meta`);
+
+      failNextDirSync();
+      await expect(run(store, cg)).rejects.toThrow('injected dir fsync failure');
+      // The gap: the rename went through, the file already shows the requested state.
+      expect(JSON.parse(await readFile(metaPath, 'utf8'))).toMatchObject(visible);
+
+      const renames = vi.spyOn(fsp, 'rename');
+      const before = dirSyncCount();
+      await run(store, cg); // the retry
+      expect(dirSyncCount() - before, 'the retry must complete the failed directory fsync').toBe(1);
+      expect(path.resolve(String(vi.mocked(fsPolicy.fsyncRfc64DirectoryV1).mock.calls.at(-1)?.[0]))).toBe(path.resolve(dir));
+      expect(renames, 'the retry must not rewrite an already-correct file').not.toHaveBeenCalled();
+
+      // Durable now: further identical calls stay free (idempotency preserved).
+      const settled = dirSyncCount();
+      await run(store, cg);
+      await run(store, cg);
+      expect(dirSyncCount()).toBe(settled);
+      expect(JSON.parse(await readFile(metaPath, 'utf8'))).toMatchObject(visible);
+      expect(await tempFiles()).toEqual([]);
+    });
+
+    it.each(MUTATORS)('$name: a second failure keeps the pending mark, the next retry syncs again, then it is free', async ({ name, prepare, run }) => {
+      const store = newStore(dir);
+      const cg = `cg/dirsync-twice-${name}`;
+      await prepare(store, cg);
+
+      failNextDirSync('first failure');
+      await expect(run(store, cg)).rejects.toThrow('first failure');
+      failNextDirSync('second failure');
+      // The retry's own fsync fails: it must not acknowledge.
+      await expect(run(store, cg)).rejects.toThrow('second failure');
+
+      const before = dirSyncCount();
+      await run(store, cg);
+      expect(dirSyncCount() - before, 'the mark survived the failed retry').toBe(1);
+      const settled = dirSyncCount();
+      await run(store, cg);
+      expect(dirSyncCount()).toBe(settled);
+    });
+
+    it('prune: a retry that finds the log already pruned completes the failed directory fsync', async () => {
+      let nowMs = 1_000_000;
+      const limits = { perCgByteCap: 1024 * 1024, ttlMs: 100 };
+      const store = newStore(dir, { unregisteredLimits: limits, registeredLimits: limits, now: () => nowMs });
+      const cg = 'cg/dirsync-prune';
+      await store.append(cg, new Uint8Array([1]));
+      nowMs += 1_000;
+      await store.append(cg, new Uint8Array([2]));
+      await store.append(cg, new Uint8Array([3]));
+      const logPath = path.join(dir, `${cgKey(cg)}.log`);
+
+      failNextDirSync();
+      await expect(store.prune()).rejects.toThrow('injected dir fsync failure');
+      // The gap: the pruned log is already in place, so a retry sees nothing left to drop.
+      expect(parseFrames(await readFile(logPath)).seqnos).toEqual([2, 3]);
+
+      const renames = vi.spyOn(fsp, 'rename');
+      const before = dirSyncCount();
+      expect(await store.prune()).toEqual({ bytesPruned: 0, cgsPruned: 0 });
+      expect(dirSyncCount() - before, 'the retry must complete the failed directory fsync').toBe(1);
+      expect(renames).not.toHaveBeenCalled();
+      const settled = dirSyncCount();
+      await store.prune();
+      expect(dirSyncCount()).toBe(settled);
+    });
+
+    it('prune: a second failure keeps the pending mark too', async () => {
+      let nowMs = 1_000_000;
+      const limits = { perCgByteCap: 1024 * 1024, ttlMs: 100 };
+      const store = newStore(dir, { unregisteredLimits: limits, registeredLimits: limits, now: () => nowMs });
+      const cg = 'cg/dirsync-prune-twice';
+      await store.append(cg, new Uint8Array([1]));
+      nowMs += 1_000;
+      await store.append(cg, new Uint8Array([2]));
+
+      failNextDirSync('first failure');
+      await expect(store.prune()).rejects.toThrow('first failure');
+      failNextDirSync('second failure');
+      await expect(store.prune()).rejects.toThrow('second failure');
+
+      const before = dirSyncCount();
+      await store.prune();
+      expect(dirSyncCount() - before).toBe(1);
+      const settled = dirSyncCount();
+      await store.prune();
+      expect(dirSyncCount()).toBe(settled);
+    });
+
+    it('a cold-load reconcile write whose directory fsync fails leaves the mark for the next idempotent mutation', async () => {
+      const cg = 'cg/dirsync-reconcile';
+      await seedLaggingMeta(cg, { registered: true });
+      const store = newStore(dir);
+      await store.init();
+
+      failNextDirSync(); // the reconcile write renames, then its fsync fails: swallowed (best-effort)
+      expect(await store.getLastSeqno(cg)).toBe(3);
+
+      const before = dirSyncCount();
+      await store.markRegistered(cg); // already registered: nothing to write, but the rename is not durable yet
+      expect(dirSyncCount() - before).toBe(1);
+      const settled = dirSyncCount();
+      await store.markRegistered(cg);
+      expect(dirSyncCount()).toBe(settled);
+    });
+
+    it('a later successful directory fsync of the same directory covers the pending rename (append, or another CG)', async () => {
+      const store = newStore(dir);
+      const x = 'cg/dirsync-cover-x';
+      const y = 'cg/dirsync-cover-y';
+
+      failNextDirSync();
+      await expect(store.markRegistered(x)).rejects.toThrow('injected dir fsync failure');
+      // The append's own cursor write ends with a directory fsync that succeeds.
+      await store.append(x, new Uint8Array([1]));
+      let before = dirSyncCount();
+      await store.markRegistered(x);
+      expect(dirSyncCount() - before, 'covered by the append\'s directory fsync').toBe(0);
+
+      failNextDirSync();
+      await expect(store.markHostModeSubscribed(x)).rejects.toThrow('injected dir fsync failure');
+      // A different CG's successful write in the same directory covers it too.
+      await store.markRegistered(y);
+      before = dirSyncCount();
+      await store.markHostModeSubscribed(x);
+      expect(dirSyncCount() - before, 'covered by the other CG\'s directory fsync').toBe(0);
+    });
+
+    it('a rename that fails its own fsync while another fsync is in flight is not cleared by the other one', async () => {
+      const store = newStore(dir);
+      await store.init();
+      const x = 'cg/dirsync-inflight-x';
+      const y = 'cg/dirsync-inflight-y';
+      const dirSync = vi.mocked(fsPolicy.fsyncRfc64DirectoryV1);
+
+      failNextDirSync();
+      await expect(store.markRegistered(x)).rejects.toThrow('injected dir fsync failure');
+
+      // X's retry completes its fsync; hold that fsync open.
+      let releaseX: () => void = () => {};
+      const gate = new Promise<void>((resolve) => { releaseX = resolve; });
+      let reachedX: () => void = () => {};
+      const xInFlight = new Promise<void>((resolve) => { reachedX = resolve; });
+      dirSync.mockImplementationOnce(async (p) => {
+        reachedX();
+        await gate;
+        return actualDirFsync(p);
+      });
+      const retryX = store.markRegistered(x);
+      // (Race against the retry itself so a build whose retry never syncs fails here instead of hanging.)
+      expect(await Promise.race([xInFlight.then(() => true), retryX.then(() => false)]), 'the retry must start a directory fsync').toBe(true);
+
+      // Meanwhile Y renames its meta into place and ITS directory fsync fails.
+      failNextDirSync('y failure');
+      await expect(store.markRegistered(y)).rejects.toThrow('y failure');
+      releaseX();
+      await retryX;
+
+      // X's fsync started before Y's rename returned, so it cannot vouch for Y.
+      const before = dirSyncCount();
+      await store.markRegistered(y);
+      expect(dirSyncCount() - before, 'Y stayed pending').toBe(1);
+      const settled = dirSyncCount();
+      await store.markRegistered(y);
+      await store.markRegistered(x);
+      expect(dirSyncCount()).toBe(settled);
+    });
+
+    // A pending mark is about ONE rename of its target. A directory fsync covers the renames
+    // that had returned before it started and nothing later, so a target renamed AGAIN while
+    // such an fsync is in flight must stay pending even though the path was already in the set.
+    it('a target that is already pending and is renamed again while a covering fsync is in flight stays pending', async () => {
+      const store = newStore(dir);
+      await store.init();
+      const x = 'cg/dirsync-rerename-x';
+      const y = 'cg/dirsync-rerename-y';
+
+      failNextDirSync('x first failure');
+      await expect(store.markRegistered(x)).rejects.toThrow('x first failure'); // X: rename 1, not durable
+      const held = holdNextDirSync();
+      const writeY = store.markRegistered(y); // Y's fsync snapshots X as covered and stays in flight
+      await held.reached;
+      failNextDirSync('x second failure');
+      // X flips again: rename 2 happens AFTER the in-flight fsync started, and its own fsync fails.
+      await expect(store.markUnregistered(x)).rejects.toThrow('x second failure');
+      held.release();
+      await writeY;
+
+      // The retry finds the file already saying registered=false (rename 2). The fsync that just
+      // finished started before that rename, so it cannot vouch for it: the retry must sync.
+      const before = dirSyncCount();
+      await store.markUnregistered(x);
+      expect(dirSyncCount() - before, 'rename 2 of X was acknowledged without a directory fsync that started after it').toBe(1);
+      const settled = dirSyncCount();
+      await store.markUnregistered(x);
+      await store.markRegistered(y);
+      expect(dirSyncCount()).toBe(settled);
+    });
+
+    it('with three targets, a covering fsync clears exactly the ones whose rename it had seen', async () => {
+      const store = newStore(dir);
+      await store.init();
+      const [x, y, z] = ['cg/dirsync-three-x', 'cg/dirsync-three-y', 'cg/dirsync-three-z'];
+
+      failNextDirSync('x failure');
+      await expect(store.markRegistered(x)).rejects.toThrow('x failure');
+      failNextDirSync('y failure');
+      await expect(store.markRegistered(y)).rejects.toThrow('y failure');
+      const held = holdNextDirSync();
+      const writeZ = store.markRegistered(z); // snapshots X and Y
+      await held.reached;
+      failNextDirSync('x again');
+      await expect(store.markUnregistered(x)).rejects.toThrow('x again'); // X: a newer rename the snapshot never saw
+      held.release();
+      await writeZ;
+
+      const settled = dirSyncCount();
+      await store.markRegistered(y);
+      await store.markRegistered(z);
+      expect(dirSyncCount() - settled, 'Y (seen by the fsync) and Z (its own fsync) are durable').toBe(0);
+      await store.markUnregistered(x);
+      expect(dirSyncCount() - settled, 'X\'s second rename is not').toBe(1);
+      await store.markUnregistered(x);
+      expect(dirSyncCount() - settled).toBe(1);
+    });
+
+    it('overlapping directory fsyncs: whichever one covers a pending rename clears it, and the other finishing either way changes nothing', async () => {
+      for (const order of [
+        { first: 'ok', second: 'fail' },
+        { first: 'fail', second: 'ok' },
+      ] as const) {
+        const store = newStore(dir); // a fresh instance per round: the previous one is idle
+        const x = `cg/dirsync-overlap-x-${order.first}`;
+        const a = `cg/dirsync-overlap-a-${order.first}`;
+        const b = `cg/dirsync-overlap-b-${order.first}`;
+        await store.init();
+        failNextDirSync('x failure');
+        await expect(store.markRegistered(x)).rejects.toThrow('x failure');
+
+        const heldA = holdNextDirSync();
+        const writeA = store.markRegistered(a); // both fsyncs below have X in their snapshot
+        await heldA.reached;
+        const heldB = holdNextDirSync();
+        const writeB = store.markRegistered(b);
+        await heldB.reached;
+        const settle = (held: ReturnType<typeof holdNextDirSync>, outcome: 'ok' | 'fail') =>
+          held.release(outcome === 'ok' ? 'ok' : new Error('overlap failure'));
+        settle(heldA, order.first);
+        await (order.first === 'ok' ? writeA : expect(writeA).rejects.toThrow('overlap failure'));
+        settle(heldB, order.second);
+        await (order.second === 'ok' ? writeB : expect(writeB).rejects.toThrow('overlap failure'));
+
+        // One of the two succeeded after X's rename returned, so X is durable either way.
+        const before = dirSyncCount();
+        await store.markRegistered(x);
+        expect(dirSyncCount() - before, `first ${order.first}, second ${order.second}`).toBe(0);
+        // The one that failed stays pending itself.
+        const failed = order.first === 'fail' ? a : b;
+        await store.markRegistered(failed);
+        expect(dirSyncCount() - before, `the failed write (${failed}) must complete its own fsync`).toBe(1);
+      }
+    });
+
+    it('one directory fsync completes every pending target in the directory, and a failing one keeps all of them', async () => {
+      const store = newStore(dir);
+      await store.init();
+      const cgs = ['cg/dirsync-all-x', 'cg/dirsync-all-y', 'cg/dirsync-all-z'];
+      for (const cg of cgs) {
+        failNextDirSync(`${cg} failure`);
+        await expect(store.markRegistered(cg)).rejects.toThrow(`${cg} failure`);
+      }
+
+      failNextDirSync('retry failure');
+      await expect(store.markRegistered(cgs[0])).rejects.toThrow('retry failure');
+      let before = dirSyncCount();
+      await store.markRegistered(cgs[0]); // succeeds: covers all three
+      expect(dirSyncCount() - before).toBe(1);
+      before = dirSyncCount();
+      await store.markRegistered(cgs[1]);
+      await store.markRegistered(cgs[2]);
+      expect(dirSyncCount() - before, 'the one successful fsync covered the other two').toBe(0);
+    });
+
+    describe('prune that drops every entry (the log is unlinked)', () => {
+      const EXPIRED_LIMITS = { perCgByteCap: 1024 * 1024, ttlMs: 100 };
+      let nowMs = 1_000_000;
+
+      /** A store holding two frames that have both expired by the time `prune()` runs. */
+      async function expiredLog(cg: string) {
+        nowMs = 1_000_000;
+        const store = newStore(dir, { unregisteredLimits: EXPIRED_LIMITS, registeredLimits: EXPIRED_LIMITS, now: () => nowMs });
+        await store.append(cg, new Uint8Array([1]));
+        await store.append(cg, new Uint8Array([2]));
+        nowMs += 10_000;
+        return { store, logPath: path.join(dir, `${cgKey(cg)}.log`) };
+      }
+
+      it('a failed directory fsync rejects; the retry finds the log already gone, completes the fsync, and only then reports done', async () => {
+        const { store, logPath } = await expiredLog('cg/dirsync-unlink');
+
+        failNextDirSync();
+        await expect(store.prune()).rejects.toThrow('injected dir fsync failure');
+        // The gap: the unlink went through, so a retry finds no log and nothing to drop.
+        await expect(stat(logPath)).rejects.toMatchObject({ code: 'ENOENT' });
+
+        const rm = vi.spyOn(fsp, 'rm');
+        const before = dirSyncCount();
+        expect(await store.prune()).toEqual({ bytesPruned: 0, cgsPruned: 0 });
+        expect(dirSyncCount() - before, 'the retry must complete the failed directory fsync').toBe(1);
+        expect(rm, 'the retry must not unlink again').not.toHaveBeenCalled();
+        const settled = dirSyncCount();
+        await store.prune();
+        expect(dirSyncCount()).toBe(settled);
+      });
+
+      it('a second failure keeps the pending mark, the next retry syncs again, then it is free', async () => {
+        const { store } = await expiredLog('cg/dirsync-unlink-twice');
+
+        failNextDirSync('first failure');
+        await expect(store.prune()).rejects.toThrow('first failure');
+        failNextDirSync('second failure');
+        await expect(store.prune()).rejects.toThrow('second failure');
+
+        const before = dirSyncCount();
+        await store.prune();
+        expect(dirSyncCount() - before, 'the mark survived the failed retry').toBe(1);
+        const settled = dirSyncCount();
+        await store.prune();
+        expect(dirSyncCount()).toBe(settled);
+      });
+
+      it('a later successful directory fsync covers the unlink: a meta write of another CG', async () => {
+        const { store } = await expiredLog('cg/dirsync-unlink-cover');
+
+        failNextDirSync();
+        await expect(store.prune()).rejects.toThrow('injected dir fsync failure');
+        await store.markRegistered('cg/dirsync-unlink-cover-other'); // meta rename + a successful directory fsync, after the unlink
+        const before = dirSyncCount();
+        expect(await store.prune()).toEqual({ bytesPruned: 0, cgsPruned: 0 });
+        expect(dirSyncCount() - before, 'covered by the other CG\'s directory fsync').toBe(0);
+      });
+
+      it('a later successful directory fsync covers the unlink: an append that recreates the log', async () => {
+        const cg = 'cg/dirsync-unlink-recreate';
+        const { store, logPath } = await expiredLog(cg);
+
+        failNextDirSync();
+        await expect(store.prune()).rejects.toThrow('injected dir fsync failure');
+        await expect(stat(logPath)).rejects.toMatchObject({ code: 'ENOENT' });
+        expect(await store.append(cg, new Uint8Array([3]))).toBe(3); // the log is back; its cursor write syncs the directory
+        const before = dirSyncCount();
+        expect(await store.prune()).toEqual({ bytesPruned: 0, cgsPruned: 0 }); // the fresh frame stays, nothing pending
+        expect(dirSyncCount() - before).toBe(0);
+        expect(parseFrames(await readFile(logPath)).seqnos).toEqual([3]);
+      });
+
+      it('a cap eviction that removes the log is covered too: the failing fsync rejects the append, and the retry completes it', async () => {
+        const tiny = { perCgByteCap: 10, ttlMs: 60_000 }; // a 20-byte frame alone exceeds the cap
+        const store = newStore(dir, { unregisteredLimits: tiny, registeredLimits: tiny });
+        const cg = 'cg/dirsync-unlink-cap';
+        const logPath = path.join(dir, `${cgKey(cg)}.log`);
+        const dirSync = vi.mocked(fsPolicy.fsyncRfc64DirectoryV1);
+
+        // The append's own cursor write syncs the directory first (passes), the eviction's unlink second (fails).
+        dirSync.mockImplementationOnce(async (p) => actualDirFsync(p));
+        failNextDirSync('eviction failure');
+        await expect(store.append(cg, new Uint8Array(20).fill(7))).rejects.toThrow('eviction failure');
+        await expect(stat(logPath)).rejects.toMatchObject({ code: 'ENOENT' }); // evicted (the cursor did advance: seqno 1 is burnt)
+        expect(await store.getLastSeqno(cg)).toBe(1);
+
+        // The retry takes the next seqno; its cursor write's directory fsync also covers the pending unlink.
+        expect(await store.append(cg, new Uint8Array(20).fill(8))).toBe(2);
+        await expect(stat(logPath)).rejects.toMatchObject({ code: 'ENOENT' });
+        const settled = dirSyncCount();
+        await store.prune(); // nothing to do, nothing pending
+        expect(dirSyncCount()).toBe(settled);
+      });
+    });
+
+    it('prune and meta writes share the directory: a successful meta write covers a prune rename whose fsync failed', async () => {
+      let nowMs = 1_000_000;
+      const limits = { perCgByteCap: 1024 * 1024, ttlMs: 100 };
+      const store = newStore(dir, { unregisteredLimits: limits, registeredLimits: limits, now: () => nowMs });
+      const cg = 'cg/dirsync-prune-meta';
+      await store.append(cg, new Uint8Array([1]));
+      nowMs += 1_000;
+      await store.append(cg, new Uint8Array([2]));
+
+      failNextDirSync();
+      await expect(store.prune()).rejects.toThrow('injected dir fsync failure'); // the log rename is pending
+      await store.markRegistered(cg); // meta rename + a successful directory fsync, after the log rename
+      const before = dirSyncCount();
+      expect(await store.prune()).toEqual({ bytesPruned: 0, cgsPruned: 0 });
+      expect(dirSyncCount() - before, 'covered by the meta write\'s directory fsync').toBe(0);
+    });
+  });
+
   describe('seqno monotonicity across crash windows', () => {
-    it('a slow unlocked cold load cannot roll the in-memory cursor back under a concurrent append', async () => {
+    it('a slow unlocked cold load cannot roll the cursor back: a concurrent append waits for that one initialization and stays monotonic', async () => {
       const cg = 'cg/mono-race';
       const first = newStore(dir);
       for (let i = 1; i <= 3; i += 1) await first.append(cg, new Uint8Array([i]));
@@ -656,7 +1378,7 @@ describe('SwmHostModeStore durable writes', () => {
       let atRename: () => void = () => {};
       const reachedRename = new Promise<void>((resolve) => { atRename = resolve; });
       const realRename = fsp.rename.bind(fsp);
-      vi.spyOn(fsp, 'rename').mockImplementationOnce(async (from, to) => {
+      const renameSpy = vi.spyOn(fsp, 'rename').mockImplementationOnce(async (from, to) => {
         atRename();
         await gate;
         return realRename(from, to);
@@ -664,13 +1386,28 @@ describe('SwmHostModeStore durable writes', () => {
       const slowReader = store.getLastSeqno(cg);
       await reachedRename;
 
-      // A locked append cold-loads, appends seqno 4 and publishes the cursor meanwhile.
-      expect(await store.append(cg, new Uint8Array([4]))).toBe(4);
+      // A locked append arrives meanwhile. It does NOT start a second cold load: it joins the
+      // reader's initialization and cannot get past it while that (including its reconcile write)
+      // is still in flight. Before the single-owner initialization it cold-loaded on its own here,
+      // wrote its own reconcile and finished while the reader was still paused.
+      let appendDone = false;
+      const appended = store.append(cg, new Uint8Array([4])).then((seqno) => {
+        appendDone = true;
+        return seqno;
+      });
+      await Promise.race([appended, wait(400)]);
+      expect(appendDone, 'the append must wait for the reader\'s initialization').toBe(false);
+      expect(renameSpy, 'no second cold load, so no second reconcile write yet').toHaveBeenCalledTimes(1);
       release();
-      // The stale reader must observe the installed cursor, not overwrite it with its older snapshot.
-      expect(await slowReader).toBe(4);
+      expect(await appended).toBe(4);
+      // The reader linearises with the initialization it shared: it reports the reconciled cursor
+      // (3), or the appended one (4) if the append's continuation ran first. Never the stale 1.
+      expect([3, 4]).toContain(await slowReader);
       expect(await store.append(cg, new Uint8Array([5]))).toBe(5);
       expect((await store.iterate(cg, 0)).map((e) => e.seqno)).toEqual([1, 2, 3, 4, 5]);
+      // One reconcile write for the shared initialization, then one cursor write per append.
+      expect(renameSpy).toHaveBeenCalledTimes(3);
+      expect(JSON.parse(await readFile(path.join(dir, `${cgKey(cg)}.meta`), 'utf8')).seqno).toBe(5);
     });
 
     it('a durable cursor ahead of a lost frame leaves a gap instead of recycling the seqno', async () => {

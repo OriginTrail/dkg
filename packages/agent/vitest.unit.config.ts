@@ -70,6 +70,7 @@ export default defineConfig({
       "test/swm/host-catchup-wire.test.ts",
       "test/swm/host-mode-store.test.ts",
       "test/swm/host-mode-store-durability.test.ts",
+      "test/swm/host-mode-store-dirsync-model.test.ts",
       "test/swm/host-mode-store-crash.e2e.test.ts",
       "test/swm/host-mode-key-canonicalization.test.ts",
       "test/rs-heal-stranded-kc-decorated.test.ts",
