@@ -20,6 +20,10 @@ import {
   type StoreOperation,
   type StoreOperationOutcomeTagged,
 } from './store-operation-outcome.js';
+import {
+  createRateLimitedStoreTimeoutDiagnosticSink,
+  type StoreSchedulerTimeoutDiagnostic,
+} from './store-scheduler-timeout-diagnostics.js';
 
 const defaultStoreWorkPriority = new AsyncLocalStorage<StoreWorkPriority>();
 
@@ -68,19 +72,6 @@ export interface StoreSchedulerOperationMetadata {
 
 export interface StoreSchedulerBusyErrorOptions extends ErrorOptions {
   storeOperation?: StoreOperation;
-}
-
-interface StoreSchedulerActiveAtTimeout {
-  priority: StoreWorkPriority;
-  operation: string;
-  count: number;
-  oldestAgeMs: number;
-}
-
-interface StoreSchedulerTimeoutDiagnostic {
-  waiting: { priority: StoreWorkPriority; operation: string };
-  /** Possible slot holders, never proof of which operation delayed the waiter. */
-  activeAtTimeout: readonly StoreSchedulerActiveAtTimeout[];
 }
 
 /**
@@ -713,24 +704,10 @@ export class StorePriorityScheduler extends ObservableScheduler {
   }
 }
 
-const lastTimeoutDiagnosticAt = new Map<string, number>();
-const timeoutDiagnosticLogIntervalMs = 60_000;
-
-function logExternalStoreTimeout(diagnostic: StoreSchedulerTimeoutDiagnostic): void {
-  if (diagnostic.activeAtTimeout.length === 0) return;
-  const key = `${diagnostic.waiting.priority}:${diagnostic.waiting.operation}`;
-  const now = Date.now();
-  const last = lastTimeoutDiagnosticAt.get(key);
-  if (last !== undefined && now - last < timeoutDiagnosticLogIntervalMs) return;
-  if (lastTimeoutDiagnosticAt.size >= 128) {
-    lastTimeoutDiagnosticAt.delete(lastTimeoutDiagnosticAt.keys().next().value!);
-  }
-  lastTimeoutDiagnosticAt.set(key, now);
-  console.warn('[store scheduler] queue wait timeout', diagnostic);
-}
-
 export const externalStorePriorityScheduler = new StorePriorityScheduler({
-  timeoutDiagnosticSink: logExternalStoreTimeout,
+  timeoutDiagnosticSink: createRateLimitedStoreTimeoutDiagnosticSink({
+    emit: (diagnostic) => console.warn('[store scheduler] queue wait timeout', diagnostic),
+  }),
 });
 backpressureRegistry.register(externalStorePriorityScheduler);
 

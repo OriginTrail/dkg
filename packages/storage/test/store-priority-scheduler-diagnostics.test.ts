@@ -5,8 +5,34 @@ import {
   isStoreSchedulerBusyError,
 } from '../src/store-priority-scheduler.js';
 import { STORE_WORK_PRIORITIES } from '../src/triple-store.js';
+import { createRateLimitedStoreTimeoutDiagnosticSink } from '../src/store-scheduler-timeout-diagnostics.js';
 
 describe('store scheduler busy diagnostics', () => {
+  it('rate-limits repeated waiter diagnostics and bounds retained keys', () => {
+    const emit = vi.fn();
+    let now = 0;
+    const sink = createRateLimitedStoreTimeoutDiagnosticSink({
+      emit, now: () => now, intervalMs: 100, maxKeys: 2,
+    });
+    const diagnostic = (operation: string) => ({
+      waiting: { priority: 'normal' as const, operation },
+      activeAtTimeout: [{
+        priority: 'background' as const, operation: 'active.private-work', count: 1, oldestAgeMs: 42,
+      }],
+    });
+    sink({ ...diagnostic('empty'), activeAtTimeout: [] });
+    sink(diagnostic('first'));
+    sink(diagnostic('first'));
+    expect(emit).toHaveBeenCalledTimes(1);
+    now = 101;
+    sink(diagnostic('first'));
+    sink(diagnostic('second'));
+    sink(diagnostic('third'));
+    sink(diagnostic('first'));
+    expect(emit.mock.calls.map(([event]) => event.waiting.operation)).toEqual([
+      'first', 'first', 'second', 'third', 'first',
+    ]);
+  });
   it('exports a distinguishable busy error type for boundary mapping', () => {
     const error = new StoreSchedulerBusyError('queue_full', 'ack', 'storage-ack.read');
     expect(error).toBeInstanceOf(Error);
