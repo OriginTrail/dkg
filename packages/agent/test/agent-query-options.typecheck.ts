@@ -10,5 +10,9 @@ const supported: AgentQueryOptions = {
 // @ts-expect-error excludeGraphPrefixes is intentionally engine-only
 const engineOnly: AgentQueryOptions = { excludeGraphPrefixes: ['urn:private:'] };
 
+// @ts-expect-error maxMaterializedBytes is an engine-internal aggregate budget
+const internalBudget: AgentQueryOptions = { maxMaterializedBytes: 1024 };
+
 void supported;
 void engineOnly;
+void internalBudget;

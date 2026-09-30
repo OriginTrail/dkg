@@ -18,6 +18,19 @@ import { isSparqlHttpResponseError } from "@origintrail-official/dkg-storage";
  * the constant is `packages/query/src/caller-sparql-error.ts`.
  */
 const CALLER_SPARQL_REJECTED_CODE = "CALLER_SPARQL_REJECTED";
+const QUERY_RESULT_LIMIT_CODES = new Set([
+  'STORE_RESPONSE_TOO_LARGE',
+  'QUERY_MATERIALIZATION_TOO_LARGE',
+]);
+
+export type QueryFailureClassification =
+  | { readonly kind: 'client' }
+  | {
+      readonly kind: 'result-too-large';
+      readonly message: string;
+      readonly actualBytes?: number;
+    }
+  | { readonly kind: 'server' };
 
 function isCallerSparqlRejected(err: unknown): boolean {
   if (typeof err !== "object" || err === null) return false;
@@ -82,9 +95,24 @@ function isLegacyClientQueryMessage(msg: string): boolean {
  * This is the sole exported classifier. The legacy message matcher stays
  * private so the provenance-first rule cannot be bypassed.
  */
-export function isClientQueryFailure(err: unknown): boolean {
+export function classifyQueryFailure(err: unknown): QueryFailureClassification {
+  if (typeof err === 'object' && err !== null) {
+    const limited = err as { code?: unknown; message?: unknown; actualBytes?: unknown };
+    if (typeof limited.code === 'string' && QUERY_RESULT_LIMIT_CODES.has(limited.code)) {
+      return {
+        kind: 'result-too-large',
+        message: typeof limited.message === 'string'
+          ? limited.message
+          : 'Query result exceeded the byte limit',
+        ...(typeof limited.actualBytes === 'number'
+          ? { actualBytes: limited.actualBytes }
+          : {}),
+      };
+    }
+  }
+
   // 1. Provenance wins: the engine marked this as the caller's own SPARQL.
-  if (isCallerSparqlRejected(err)) return true;
+  if (isCallerSparqlRejected(err)) return { kind: 'client' };
 
   // 2. A TYPED store error that was NOT marked is terminal — it came from an
   //    engine-generated query, so it is a server fault no matter what its
@@ -92,9 +120,16 @@ export function isClientQueryFailure(err: unknown): boolean {
   //    whose body contained e.g. "Query must start with SELECT" would fall
   //    through to the legacy families below and be reported as the caller's
   //    fault, defeating the provenance rule (PR #2330 review).
-  if (isSparqlHttpResponseError(err)) return false;
+  if (isSparqlHttpResponseError(err)) return { kind: 'server' };
 
   // 3. Legacy families, for errors with no typed carrier at all.
   const msg = (err as { message?: unknown })?.message;
-  return typeof msg === "string" && isLegacyClientQueryMessage(msg);
+  return typeof msg === "string" && isLegacyClientQueryMessage(msg)
+    ? { kind: 'client' }
+    : { kind: 'server' };
+}
+
+/** Backward-compatible predicate for callers that only need the 400 branch. */
+export function isClientQueryFailure(err: unknown): boolean {
+  return classifyQueryFailure(err).kind === 'client';
 }

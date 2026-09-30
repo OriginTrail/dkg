@@ -6,7 +6,6 @@ import type {
   TripleStore,
   Quad,
   QueryResult as StoreQueryResult,
-  QueryOptions as StoreQueryOptions,
 } from '@origintrail-official/dkg-storage';
 import {
   ExactGraphReadError,
@@ -65,7 +64,13 @@ import { injectMinTrustFilter } from './sparql-min-trust.js';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { raceAgainstCallerAbort } from './caller-abort.js';
 import { ScopedContentGraphDiscoveryMemo } from './scoped-content-graph-discovery-memo.js';
-import { QueryMaterializationTooLargeError } from './query-materialization-error.js';
+import {
+  createQueryStoreReadContext,
+  createStoreReadLane,
+  estimateMaterializedBytes,
+  type QueryStoreReadContext,
+  type StoreReadLane,
+} from './query-store-read-context.js';
 
 export { ScopedQueryViolationError } from './scoped-query-error.js';
 
@@ -84,117 +89,6 @@ export interface ViewResolution {
    * assertions) and verifiable-memory (multiple quorum graphs).
    */
   graphPrefixes: string[];
-}
-
-function storeOptions(options: QueryOptions | undefined): StoreQueryOptions | undefined {
-  if (
-    !options?.signal
-    && !options?.priority
-    && !options?.source
-    && options?.maxResponseBytes === undefined
-  ) return undefined;
-  return {
-    signal: options.signal,
-    priority: options.priority,
-    source: options.source,
-    maxResponseBytes: options.maxResponseBytes,
-  };
-}
-
-function sharedDiscoveryStoreOptions(
-  options: StoreQueryOptions | undefined,
-): StoreQueryOptions | undefined {
-  if (!options?.priority && !options?.source && options?.maxResponseBytes === undefined) {
-    return undefined;
-  }
-  return {
-    priority: options.priority,
-    source: options.source,
-    maxResponseBytes: options.maxResponseBytes,
-  };
-}
-
-class QueryMaterializationBudget {
-  private usedBytes = 0;
-
-  constructor(readonly maxBytes: number) {}
-
-  consume(result: StoreQueryResult): void {
-    this.consumeBytes(estimateStoreResultBytes(result));
-  }
-
-  consumeBytes(responseBytes: number): void {
-    const nextUsed = this.usedBytes + responseBytes;
-    if (nextUsed > this.maxBytes) {
-      throw new QueryMaterializationTooLargeError(this.maxBytes, nextUsed);
-    }
-    this.usedBytes = nextUsed;
-  }
-}
-
-function estimateStoreResultBytes(result: StoreQueryResult): number {
-  // Exact JSON encoding charges braces, delimiters, keys, empty rows, and
-  // escape expansion in addition to string payload. Summing complete internal
-  // responses is conservative for a later merged response because repeated
-  // envelopes are charged too.
-  return Buffer.byteLength(JSON.stringify(result), 'utf8');
-}
-
-interface StoreReadLane {
-  query(sparql: string): Promise<StoreQueryResult>;
-  listGraphsByPrefix(prefix: string): Promise<string[]>;
-  listGraphFamily(rootGraph: string): Promise<string[]>;
-}
-
-interface QueryStoreReadContext extends StoreReadLane {
-  readonly signal: AbortSignal | undefined;
-  readonly materializationBudget: QueryMaterializationBudget | undefined;
-  readonly shared: StoreReadLane & {
-    readonly options: StoreQueryOptions | undefined;
-    readonly cacheKey: string;
-  };
-}
-
-function createStoreReadLane(
-  store: TripleStore,
-  options: StoreQueryOptions | undefined,
-  meter: Pick<QueryMaterializationBudget, 'consume'> | undefined,
-): StoreReadLane {
-  return {
-    query: async (sparql) => {
-      const result = await store.query(sparql, options);
-      meter?.consume(result);
-      return result;
-    },
-    listGraphsByPrefix: (prefix) => listGraphsByPrefix(store, prefix, options),
-    listGraphFamily: (rootGraph) => listGraphFamily(store, rootGraph, options),
-  };
-}
-
-function createQueryStoreReadContext(
-  store: TripleStore,
-  queryOptions: QueryOptions | undefined,
-): QueryStoreReadContext {
-  const options = storeOptions(queryOptions);
-  const budget = queryOptions?.maxMaterializedBytes === undefined
-    ? undefined
-    : new QueryMaterializationBudget(queryOptions.maxMaterializedBytes);
-  const lane = createStoreReadLane(store, options, budget);
-  const sharedOptions = sharedDiscoveryStoreOptions(options);
-  return {
-    ...lane,
-    signal: options?.signal,
-    materializationBudget: budget,
-    shared: {
-      ...createStoreReadLane(store, sharedOptions, undefined),
-      options: sharedOptions,
-      cacheKey: JSON.stringify([
-        sharedOptions?.priority ?? 'normal',
-        sharedOptions?.source ?? null,
-        sharedOptions?.maxResponseBytes ?? null,
-      ]),
-    },
-  };
 }
 
 /**
@@ -1169,7 +1063,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
           reads.shared.options,
           {
             consume(result) {
-              materializedBytes += estimateStoreResultBytes(result);
+              materializedBytes += estimateMaterializedBytes(result);
             },
           },
         );
@@ -1616,28 +1510,6 @@ function parseCanonicalIntegerBinding(value: string | undefined): bigint | undef
   } catch {
     return undefined;
   }
-}
-
-async function listGraphsByPrefix(
-  store: TripleStore,
-  prefix: string,
-  options?: StoreQueryOptions,
-): Promise<string[]> {
-  return store.listGraphsByPrefix
-    ? store.listGraphsByPrefix(prefix, options)
-    : (await store.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
-}
-
-async function listGraphFamily(
-  store: TripleStore,
-  rootGraph: string,
-  options?: StoreQueryOptions,
-): Promise<string[]> {
-  const graphs = await listGraphsByPrefix(store, `${rootGraph}/`, options);
-  if (await store.hasGraph(rootGraph, options)) {
-    graphs.unshift(rootGraph);
-  }
-  return graphs;
 }
 
 function mergeSharedMemoryAndDataResults(

@@ -17,7 +17,7 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { isClientQueryFailure } from "./query-error.js";
+import { classifyQueryFailure } from "./query-error.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFile,
@@ -736,16 +736,16 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         tracker.fail(ctx, err);
         return;
       }
-      if (
-        err?.code === 'STORE_RESPONSE_TOO_LARGE'
-        || err?.code === 'QUERY_MATERIALIZATION_TOO_LARGE'
-      ) {
+      const queryFailure = classifyQueryFailure(err);
+      if (queryFailure.kind === 'result-too-large') {
         tracker.fail(ctx, err);
         return jsonResponse(res, 413, {
-          error: err?.message ?? 'Query result exceeded the byte limit',
+          error: queryFailure.message,
           code: 'QUERY_RESULT_TOO_LARGE',
           limitBytes: API_QUERY_MAX_STORE_RESPONSE_BYTES,
-          ...(typeof err?.actualBytes === 'number' ? { actualBytes: err.actualBytes } : {}),
+          ...(queryFailure.actualBytes === undefined
+            ? {}
+            : { actualBytes: queryFailure.actualBytes }),
         });
       }
       const storeUnavailableOutcome = respondIfStoreUnavailable(res, err);
@@ -761,7 +761,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       const msg = err?.message ?? "";
       // #1758 — one classifier: a typed upstream status decides, otherwise
       // legacy message families apply. See ./query-error.ts.
-      if (isClientQueryFailure(err)) {
+      if (queryFailure.kind === 'client') {
         return jsonResponse(res, 400, { error: msg });
       }
       throw err;

@@ -71,4 +71,28 @@ describe('worker error protocol', () => {
       await store.close();
     }
   });
+
+  it('rejects an oversized query inside the worker before transferring its result', async () => {
+    const store = new OxigraphWorkerStore();
+    try {
+      await store.insert(Array.from({ length: 64 }, (_, index) => ({
+        subject: `urn:worker-subject:${index}`,
+        predicate: 'urn:predicate',
+        object: `"${'x'.repeat(128)}"`,
+        graph: 'urn:worker-graph',
+      })));
+
+      await expect(store.query(
+        'SELECT ?s ?o WHERE { GRAPH <urn:worker-graph> { ?s <urn:predicate> ?o } }',
+        { maxResponseBytes: 256 },
+      )).rejects.toMatchObject({
+        name: 'StoreResponseTooLargeError',
+        code: 'STORE_RESPONSE_TOO_LARGE',
+        maxBytes: 256,
+        actualBytes: expect.any(Number),
+      });
+    } finally {
+      await store.close();
+    }
+  });
 });

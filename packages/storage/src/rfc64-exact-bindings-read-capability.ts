@@ -82,6 +82,16 @@ export async function executeRfc64ExactBindingsReadCapabilityV1(
         { cause },
       );
     }
+    if (
+      typeof cause === 'object'
+      && cause !== null
+      && (cause as { code?: unknown }).code === 'STORE_RESPONSE_TOO_LARGE'
+    ) {
+      throw new Rfc64ExactBindingsReadResultErrorV1(
+        'exact-bindings read exceeded its response-byte ceiling',
+        { cause },
+      );
+    }
     throw cause;
   }
   return normalizeRfc64ExactBindingsReadResultV1(result, operation);

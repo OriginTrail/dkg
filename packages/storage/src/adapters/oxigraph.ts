@@ -45,6 +45,10 @@ import {
   executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
+import {
+  assertValidMaxResponseBytes,
+  StoreResponseTooLargeError,
+} from '../http-response-limit.js';
 
 // SWM DATA segment (bucket `…/_shared_memory` + per-KA `…/_shared_memory/{author}/{n}`),
 // NOT the sibling `…/_shared_memory_meta`. Kept in sync with the sync-ingest guard.
@@ -53,6 +57,38 @@ const SHARED_MEMORY_DATA_SEGMENT_RE = /\/_shared_memory(\/|$)/;
 type OxStore = InstanceType<typeof oxigraph.Store>;
 type OxTerm = oxigraph.Term;
 type OxQuad = oxigraph.Quad;
+
+function assertJsonResponseWithinLimit(value: unknown, maxBytes: number | undefined): void {
+  if (maxBytes === undefined) return;
+  const actualBytes = Buffer.byteLength(JSON.stringify(value), 'utf8');
+  if (actualBytes > maxBytes) throw new StoreResponseTooLargeError(maxBytes, actualBytes);
+}
+
+/**
+ * Build a JSON-array result without retaining an unbounded second copy of the
+ * native Oxigraph result. The byte count is exact for the object shape returned
+ * by this adapter and stops before the overflowing row is appended.
+ */
+function mapBoundedQueryArray<T, U>(
+  values: T[],
+  map: (value: T) => U,
+  envelope: { prefix: string; suffix: string },
+  maxBytes: number | undefined,
+): U[] {
+  if (maxBytes === undefined) return values.map(map);
+  let actualBytes = Buffer.byteLength(envelope.prefix, 'utf8')
+    + Buffer.byteLength(envelope.suffix, 'utf8');
+  if (actualBytes > maxBytes) throw new StoreResponseTooLargeError(maxBytes, actualBytes);
+  const mapped: U[] = [];
+  for (const value of values) {
+    const next = map(value);
+    actualBytes += (mapped.length === 0 ? 0 : 1)
+      + Buffer.byteLength(JSON.stringify(next), 'utf8');
+    if (actualBytes > maxBytes) throw new StoreResponseTooLargeError(maxBytes, actualBytes);
+    mapped.push(next);
+  }
+  return mapped;
+}
 
 export class OxigraphStore implements TripleStore {
   readonly writeRevisionCoverage = 'all-writers' as const;
@@ -309,6 +345,9 @@ export class OxigraphStore implements TripleStore {
 
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     throwIfAborted(options?.signal);
+    if (options?.maxResponseBytes !== undefined) {
+      assertValidMaxResponseBytes(options.maxResponseBytes);
+    }
     // The embedded Oxigraph binding executes synchronously, so a caller abort
     // cannot interrupt this native call mid-flight. Use oxigraph-worker or an
     // HTTP backend when long sync queries need prompt cancellation.
@@ -316,11 +355,15 @@ export class OxigraphStore implements TripleStore {
     throwIfAborted(options?.signal);
 
     if (typeof result === 'boolean') {
-      return { type: 'boolean', value: result } satisfies AskResult;
+      const answer = { type: 'boolean', value: result } satisfies AskResult;
+      assertJsonResponseWithinLimit(answer, options?.maxResponseBytes);
+      return answer;
     }
 
     if (typeof result === 'string') {
-      return { type: 'bindings', bindings: [] } satisfies SelectResult;
+      const empty = { type: 'bindings', bindings: [] } satisfies SelectResult;
+      assertJsonResponseWithinLimit(empty, options?.maxResponseBytes);
+      return empty;
     }
 
     if (!Array.isArray(result) || result.length === 0) {
@@ -329,25 +372,38 @@ export class OxigraphStore implements TripleStore {
         operation.kind === 'read'
         && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')
       ) {
-        return { type: 'quads', quads: [] } satisfies ConstructResult;
+        const empty = { type: 'quads', quads: [] } satisfies ConstructResult;
+        assertJsonResponseWithinLimit(empty, options?.maxResponseBytes);
+        return empty;
       }
-      return { type: 'bindings', bindings: [] } satisfies SelectResult;
+      const empty = { type: 'bindings', bindings: [] } satisfies SelectResult;
+      assertJsonResponseWithinLimit(empty, options?.maxResponseBytes);
+      return empty;
     }
 
     const first = result[0];
     if (first instanceof Map) {
-      const bindings = (result as Map<string, OxTerm>[]).map((row) => {
-        const obj: Record<string, string> = {};
-        for (const [key, term] of row.entries()) {
-          obj[key] = termToString(term);
-        }
-        return obj;
-      });
+      const bindings = mapBoundedQueryArray(
+        result as Map<string, OxTerm>[],
+        (row) => {
+          const obj: Record<string, string> = {};
+          for (const [key, term] of row.entries()) {
+            obj[key] = termToString(term);
+          }
+          return obj;
+        },
+        { prefix: '{"type":"bindings","bindings":[', suffix: ']}' },
+        options?.maxResponseBytes,
+      );
       return { type: 'bindings', bindings } satisfies SelectResult;
     }
 
-
-    const quads = (result as OxQuad[]).map(fromOxQuad);
+    const quads = mapBoundedQueryArray(
+      result as OxQuad[],
+      fromOxQuad,
+      { prefix: '{"type":"quads","quads":[', suffix: ']}' },
+      options?.maxResponseBytes,
+    );
     return { type: 'quads', quads } satisfies ConstructResult;
   }
 

@@ -16,14 +16,18 @@ export class StoreResponseTooLargeError extends Error {
   }
 }
 
+export function assertValidMaxResponseBytes(maxBytes: number): void {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+    throw new RangeError('maxResponseBytes must be a non-negative safe integer');
+  }
+}
+
 /** Read a fetch response body without ever buffering more than `maxBytes`. */
 export async function readResponseTextBounded(
   response: Response,
   maxBytes: number,
 ): Promise<string> {
-  if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
-    throw new RangeError('maxResponseBytes must be a non-negative safe integer');
-  }
+  assertValidMaxResponseBytes(maxBytes);
 
   try {
     const bytes = await readResponseBodyBytesBounded(response, maxBytes);

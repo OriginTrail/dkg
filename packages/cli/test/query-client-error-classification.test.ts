@@ -1,6 +1,31 @@
 import { describe, expect, it } from 'vitest';
 import { SparqlHttpResponseError } from '@origintrail-official/dkg-storage';
-import { isClientQueryFailure } from '../src/daemon/routes/query-error.js';
+import {
+  classifyQueryFailure,
+  isClientQueryFailure,
+} from '../src/daemon/routes/query-error.js';
+
+describe('classifyQueryFailure — bounded result policy', () => {
+  it.each([
+    'STORE_RESPONSE_TOO_LARGE',
+    'QUERY_MATERIALIZATION_TOO_LARGE',
+  ])('classifies %s as a stable result-too-large response', (code) => {
+    expect(classifyQueryFailure(Object.assign(new Error('too large'), {
+      code,
+      maxBytes: 10,
+      actualBytes: 11,
+    }))).toEqual({
+      kind: 'result-too-large',
+      message: 'too large',
+      actualBytes: 11,
+    });
+  });
+
+  it('does not classify a lookalike message without a structural code', () => {
+    expect(classifyQueryFailure(new Error('Triple-store response exceeds byte limit')))
+      .toEqual({ kind: 'server' });
+  });
+});
 
 // GH#1758 — invalid SPARQL was AGAIN reported as HTTP 500, a silent
 // re-regression of #889. #889's anchored `/^error at \d+:\d+:/` matched only

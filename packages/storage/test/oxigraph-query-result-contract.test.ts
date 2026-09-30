@@ -64,4 +64,30 @@ describe('OxigraphStore query result contract', () => {
       await store.close();
     }
   });
+
+  it('bounds normalized SELECT production at the local adapter boundary', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert(Array.from({ length: 32 }, (_, index) => ({
+        subject: `urn:subject:${index}`,
+        predicate: 'urn:predicate',
+        object: `"${'x'.repeat(64)}"`,
+        graph: 'urn:graph',
+      })));
+      const sparql = 'SELECT ?s ?o WHERE { GRAPH <urn:graph> { ?s <urn:predicate> ?o } }';
+      const result = await store.query(sparql);
+      const exactBytes = Buffer.byteLength(JSON.stringify(result), 'utf8');
+
+      await expect(store.query(sparql, { maxResponseBytes: exactBytes - 1 }))
+        .rejects.toMatchObject({
+          code: 'STORE_RESPONSE_TOO_LARGE',
+          maxBytes: exactBytes - 1,
+          actualBytes: expect.any(Number),
+        });
+      await expect(store.query(sparql, { maxResponseBytes: exactBytes }))
+        .resolves.toEqual(result);
+    } finally {
+      await store.close();
+    }
+  });
 });
