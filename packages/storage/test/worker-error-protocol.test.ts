@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  StoreResponseTooLargeError,
+  isStoreResponseTooLargeError,
+} from '../src/http-response-limit.js';
+import {
   deserializeWorkerErrorV1,
   serializeWorkerErrorV1,
   type WorkerResponseV1,
@@ -14,6 +18,7 @@ describe('worker error protocol', () => {
     source.code = 'UNRELATED_V1';
     const envelope = serializeWorkerErrorV1(source);
     expect(envelope).toEqual({
+      kind: 'generic',
       name: 'UnrelatedWorkerError',
       message: 'worker failed',
       code: 'UNRELATED_V1',
@@ -38,6 +43,7 @@ describe('worker error protocol', () => {
     expect(response).toEqual({
       id: 7,
       error: {
+        kind: 'generic',
         name: 'UnknownWorkerMethodError',
         message: 'Unknown method: missing',
         code: 'UNKNOWN_METHOD',
@@ -49,6 +55,34 @@ describe('worker error protocol', () => {
       message: 'Unknown method: missing',
       code: 'UNKNOWN_METHOD',
     });
+  });
+
+  it('does not attach response-limit metadata to unrelated error codes', () => {
+    const source = Object.assign(new Error('unrelated'), {
+      code: 'UNRELATED',
+      maxBytes: 10,
+      actualBytes: 11,
+    });
+    expect(serializeWorkerErrorV1(source)).toEqual({
+      kind: 'generic',
+      name: 'Error',
+      message: 'unrelated',
+      code: 'UNRELATED',
+    });
+  });
+
+  it('round-trips response-limit metadata only through its discriminated variant', () => {
+    const envelope = serializeWorkerErrorV1(new StoreResponseTooLargeError(256, 257n));
+    expect(envelope).toEqual({
+      kind: 'store-response-too-large',
+      name: 'StoreResponseTooLargeError',
+      message: 'Triple-store response exceeds byte limit: found 257, limit 256',
+      code: 'STORE_RESPONSE_TOO_LARGE',
+      maxBytes: 256,
+      actualBytes: 257n,
+    });
+    const restored = deserializeWorkerErrorV1(envelope);
+    expect(isStoreResponseTooLargeError(restored)).toBe(true);
   });
 
   it('routes an unknown worker method through the structured error envelope', async () => {

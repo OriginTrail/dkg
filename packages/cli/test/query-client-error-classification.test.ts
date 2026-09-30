@@ -11,8 +11,7 @@ describe('classifyQueryFailure — bounded result policy', () => {
     const error = new QueryResultTooLargeError(10, 11);
     expect(classifyQueryFailure(error)).toEqual({
       kind: 'result-too-large',
-      message: error.message,
-      actualBytes: 11,
+      error,
     });
   });
 

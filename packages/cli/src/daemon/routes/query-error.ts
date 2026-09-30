@@ -9,7 +9,10 @@
  * no way to place it wrongly.
  */
 import { isSparqlHttpResponseError } from "@origintrail-official/dkg-storage";
-import { isQueryResultTooLargeError } from '@origintrail-official/dkg-agent';
+import {
+  isQueryResultTooLargeError,
+  type QueryResultTooLargeErrorLike,
+} from '@origintrail-official/dkg-agent';
 
 /**
  * Recognised structurally rather than by importing `@origintrail-official/dkg-query`.
@@ -24,8 +27,7 @@ export type QueryFailureClassification =
   | { readonly kind: 'client' }
   | {
       readonly kind: 'result-too-large';
-      readonly message: string;
-      readonly actualBytes?: number;
+      readonly error: QueryResultTooLargeErrorLike;
     }
   | { readonly kind: 'server' };
 
@@ -96,8 +98,7 @@ export function classifyQueryFailure(err: unknown): QueryFailureClassification {
   if (isQueryResultTooLargeError(err)) {
     return {
       kind: 'result-too-large',
-      message: err.message,
-      actualBytes: err.actualBytes,
+      error: err,
     };
   }
 

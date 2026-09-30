@@ -740,12 +740,10 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       if (queryFailure.kind === 'result-too-large') {
         tracker.fail(ctx, err);
         return jsonResponse(res, 413, {
-          error: queryFailure.message,
-          code: 'QUERY_RESULT_TOO_LARGE',
-          limitBytes: API_QUERY_MAX_STORE_RESPONSE_BYTES,
-          ...(queryFailure.actualBytes === undefined
-            ? {}
-            : { actualBytes: queryFailure.actualBytes }),
+          error: queryFailure.error.message,
+          code: queryFailure.error.code,
+          limitBytes: queryFailure.error.maxBytes,
+          actualBytes: queryFailure.error.actualBytes,
         });
       }
       const storeUnavailableOutcome = respondIfStoreUnavailable(res, err);

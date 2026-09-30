@@ -1,4 +1,5 @@
 import { isStoreResponseTooLargeError } from '@origintrail-official/dkg-storage';
+import { isQueryMaterializationTooLargeError } from '@origintrail-official/dkg-query';
 
 export const QUERY_RESULT_TOO_LARGE = 'QUERY_RESULT_TOO_LARGE' as const;
 
@@ -55,18 +56,6 @@ export function asQueryResultTooLargeError(
   }
   if (!isQueryMaterializationTooLargeError(error)) return undefined;
   return new QueryResultTooLargeError(error.maxBytes, error.actualBytes, { cause: error });
-}
-
-function isQueryMaterializationTooLargeError(error: unknown): error is {
-  readonly code: 'QUERY_MATERIALIZATION_TOO_LARGE';
-  readonly maxBytes: number;
-  readonly actualBytes: number;
-} {
-  if (typeof error !== 'object' || error === null) return false;
-  const candidate = error as { code?: unknown; maxBytes?: unknown; actualBytes?: unknown };
-  return candidate.code === 'QUERY_MATERIALIZATION_TOO_LARGE'
-    && isNonNegativeSafeInteger(candidate.maxBytes)
-    && isNonNegativeFiniteNumber(candidate.actualBytes);
 }
 
 function isNonNegativeSafeInteger(value: unknown): value is number {

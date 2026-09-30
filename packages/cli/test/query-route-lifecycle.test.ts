@@ -369,8 +369,8 @@ describe('/api/query request lifecycle', () => {
 
   it('reports the canonical agent byte overflow as a stable 413 response', async () => {
     const error = new QueryResultTooLargeError(
-      API_QUERY_MAX_STORE_RESPONSE_BYTES,
-      API_QUERY_MAX_STORE_RESPONSE_BYTES + 1,
+      1_024,
+      2_048,
     );
     const req = new RequestStub();
     const res = new ResponseStub();
@@ -385,8 +385,8 @@ describe('/api/query request lifecycle', () => {
     expect(res.statusCode).toBe(413);
     expect(JSON.parse(res.body)).toEqual(expect.objectContaining({
       code: 'QUERY_RESULT_TOO_LARGE',
-      limitBytes: API_QUERY_MAX_STORE_RESPONSE_BYTES,
-      actualBytes: API_QUERY_MAX_STORE_RESPONSE_BYTES + 1,
+      limitBytes: 1_024,
+      actualBytes: 2_048,
     }));
     expect(tracker.fail).toHaveBeenCalledWith(expect.anything(), error);
   });
