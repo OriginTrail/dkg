@@ -9,20 +9,47 @@ import { watchProtocolRefusal, type DialProtocolHost } from '../../../scripts/te
 const PROTOCOL = '/test/late-handler/1.0.0';
 const refusal = () => Object.assign(new Error('could not negotiate'), { name: 'UnsupportedProtocolError' });
 
+// A fake host with its own peer, options and result types: the watcher infers them from it, exactly
+// as it does from a real libp2p node, and the tests call it through the declared signature.
+interface FakeDialOptions {
+  readonly timeoutMs?: number;
+}
+type FakeHost = DialProtocolHost<string, FakeDialOptions, string>;
+
 // Plain methods, not vi.fn mocks: the helper spies on `dialProtocol` itself, and a spy on an
 // existing mock would be that same mock (the wrapper would call itself).
-function hostThatRejectsWith(makeError: () => unknown): DialProtocolHost {
+function hostThatRejectsWith(makeError: () => unknown): FakeHost {
   return {
     async dialProtocol() {
       throw makeError();
     },
-  } as unknown as DialProtocolHost;
+  };
 }
 
-async function dial(host: DialProtocolHost, protocols: string | string[]): Promise<unknown> {
-  return (host.dialProtocol as (peer: unknown, protocols: string | string[]) => Promise<unknown>)('peer', protocols)
-    .then(() => 'resolved', (error: unknown) => error);
+async function dial(host: FakeHost, protocols: string | string[]): Promise<unknown> {
+  return host.dialProtocol('peer', protocols).then(() => 'resolved', (error: unknown) => error);
 }
+
+// Compile-time only: vitest strips types and never calls this. The watcher leaves the host's dial
+// signature as declared, so a wrong peer, options or result is an error at the call site. The
+// directives are checked by a type-aware pass over this file (an editor, or `tsc --noEmit` with
+// this file and the helper in `files`); no repository tsconfig includes `packages/core/test`.
+async function dialSignatureReachesTheCaller(host: FakeHost, protocols: string[]): Promise<void> {
+  watchProtocolRefusal(host, PROTOCOL, () => {});
+  const stream: string = await host.dialProtocol('peer', protocols, { timeoutMs: 1 });
+  // @ts-expect-error the peer is a string
+  await host.dialProtocol(42, protocols);
+  // @ts-expect-error the options' timeoutMs is a number
+  await host.dialProtocol('peer', protocols, { timeoutMs: 'soon' });
+  // @ts-expect-error the result is a string
+  const count: number = await host.dialProtocol('peer', protocols);
+  // @ts-expect-error a host without a dialProtocol is not watchable
+  watchProtocolRefusal({}, PROTOCOL, () => {});
+  // @ts-expect-error type arguments that disagree with the host's own
+  watchProtocolRefusal<number, FakeDialOptions, string>(host, PROTOCOL, () => {});
+  void [stream, count];
+}
+void dialSignatureReachesTheCaller;
 
 describe('watchProtocolRefusal', () => {
   it('runs the callback once, on the first refused dial of exactly the watched protocol, and rethrows', async () => {
@@ -70,7 +97,7 @@ describe('watchProtocolRefusal', () => {
     const failing = hostThatRejectsWith(() => Object.assign(new Error('dial timed out'), { name: 'TimeoutError' }));
     const onFirstRefusal = vi.fn();
     const watchFailing = watchProtocolRefusal(failing, PROTOCOL, onFirstRefusal);
-    const succeeding = { async dialProtocol() { return 'stream'; } } as unknown as DialProtocolHost;
+    const succeeding: FakeHost = { async dialProtocol() { return 'stream'; } };
     const watchSucceeding = watchProtocolRefusal(succeeding, PROTOCOL, onFirstRefusal);
     try {
       expect((await dial(failing, PROTOCOL) as Error).name).toBe('TimeoutError');
@@ -81,6 +108,36 @@ describe('watchProtocolRefusal', () => {
     } finally {
       watchFailing.dispose();
       watchSucceeding.dispose();
+    }
+  });
+
+  it('forwards the peer, protocols and options untouched, on the host, and resolves with the wrapped dial result', async () => {
+    const seen: { self: unknown; peer: string; protocols: string | string[]; options: FakeDialOptions | undefined }[] = [];
+    const host: FakeHost = {
+      async dialProtocol(peer, protocols, options) {
+        seen.push({ self: this, peer, protocols, options });
+        return `stream:${peer}`;
+      },
+    };
+    const watch = watchProtocolRefusal(host, PROTOCOL, () => {});
+    try {
+      const protocols = [PROTOCOL];
+      const options = { timeoutMs: 5 };
+      expect(await host.dialProtocol('peer-1', protocols, options)).toBe('stream:peer-1');
+      expect(await host.dialProtocol('peer-2', PROTOCOL)).toBe('stream:peer-2');
+
+      expect(seen).toHaveLength(2);
+      // The same array and options objects, and the host as receiver (a real libp2p node needs it).
+      expect(seen[0].self).toBe(host);
+      expect(seen[0].peer).toBe('peer-1');
+      expect(seen[0].protocols).toBe(protocols);
+      expect(seen[0].options).toBe(options);
+      expect(seen[1].self).toBe(host);
+      expect(seen[1].protocols).toBe(PROTOCOL);
+      expect(seen[1].options).toBeUndefined();
+      expect(watch.refusedDials).toBe(0);
+    } finally {
+      watch.dispose();
     }
   });
 

@@ -1,17 +1,17 @@
 import { vi } from 'vitest';
 
 /**
- * The one method of libp2p's `Libp2p` this helper wraps. `Libp2p['dialProtocol']`
- * (peer or multiaddrs, protocols, dial options) is assignable to it, so a test
- * passes its real libp2p node with no cast. The peer and options are `never`
- * because the wrapper only forwards them untouched and never builds one; typing
- * them that way also keeps this file free of a libp2p import, which the repo
- * root (where `scripts/testing` lives) does not resolve.
+ * The one method of libp2p's `Libp2p` this helper wraps, over the peer, options
+ * and result types of its signature. `watchProtocolRefusal` infers all three
+ * from the host it is given: a real node (`Libp2p['dialProtocol']` is
+ * `(DialTarget, string | string[], DialProtocolOptions?) => Promise<Stream>`)
+ * passes with no cast and no type arguments, and a test's own fake host is
+ * called through the same signature the wrapper forwards. They are type
+ * parameters, not libp2p's types, because this file must not import libp2p: the
+ * repo root, where `scripts/testing` lives, does not resolve it.
  */
-type DialProtocol = (peer: never, protocols: string | string[], options?: never) => Promise<unknown>;
-
-export interface DialProtocolHost {
-  dialProtocol: DialProtocol;
+export interface DialProtocolHost<Peer, Options, Result> {
+  dialProtocol: (peer: Peer, protocols: string | string[], options?: Options) => Promise<Result>;
 }
 
 export interface ProtocolRefusalWatch {
@@ -63,8 +63,8 @@ function offersOnly(protocols: string | string[], protocol: string): boolean {
  * refusal the router answers with an in-line fallback inside the same send)
  * never fires it.
  */
-export function watchProtocolRefusal(
-  host: DialProtocolHost,
+export function watchProtocolRefusal<Peer, Options, Result>(
+  host: DialProtocolHost<Peer, Options, Result>,
   protocol: string,
   onFirstRefusal: () => void,
 ): ProtocolRefusalWatch {
