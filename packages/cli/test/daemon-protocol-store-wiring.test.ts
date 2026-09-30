@@ -28,10 +28,12 @@ import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
  * The daemon builds ONE `DashboardDB` at its composition root, composes every
  * protocol persistence store (the ones that moved to
  * `@origintrail-official/dkg-node-store`) over it through `createProtocolStores`,
- * and closes it exactly once on whichever path ends the process. This boots the
- * REAL `runDaemonInner` against a `node-ui.db` whose protocol tables were filled
- * with raw SQL (no store code involved) and asserts, for the normal boot and
- * shutdown:
+ * and closes it exactly once on each of the three paths that close it: the
+ * shutdown teardown and the two core-relay-prerequisite fatal exits. (A boot that
+ * fails elsewhere, for example `DKGAgent.create` rejecting, closes nothing here
+ * and is not covered.) This boots the REAL `runDaemonInner` against a
+ * `node-ui.db` whose protocol tables were filled with raw SQL (no store code
+ * involved) and asserts, for the normal boot and shutdown:
  *
  *  - the daemon constructs exactly one `DashboardDB` (the real class, observed
  *    through a counting subclass), and `createProtocolStores` receives that one;
@@ -44,8 +46,11 @@ import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
  *
  * The two core-relay-prerequisite fatal exits also close the database, each
  * once: the pre-start one before any store is composed, the post-start one after
- * the agent stopped. Those need the prerequisite verdict (`checkCoreRelayPrereqs`)
- * forced, because it depends on the host's network interfaces.
+ * the agent stopped. Both are reached with a FORCED prerequisite verdict
+ * (`checkCoreRelayPrereqs` is replaced, and the post-start one also relies on
+ * the fake agent's fake transport listeners), because the real verdict depends
+ * on the host's network interfaces; `core-prereq-check.test.ts` covers the real
+ * checker. `process.exit` is stubbed, so what is pinned is the close, not the exit.
  *
  * The composition is observed through its typed results (`createProtocolStores`
  * is wrapped to record what it returns), never through a store's private fields.

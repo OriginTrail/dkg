@@ -27,7 +27,8 @@ import { createProtocolStores, type ProtocolStores } from '../src/daemon/protoco
 /**
  * The daemon's protocol-persistence composition: `createProtocolStores` over a
  * real `DashboardDB`, opened and closed here exactly as the daemon does. That the
- * daemon builds ONE such database and closes it once on every path is pinned in
+ * daemon constructs exactly ONE such database and closes it exactly once on its
+ * shutdown path and on each core-prerequisite fatal exit is pinned in
  * `daemon-protocol-store-wiring.test.ts`. Everything here goes through the typed
  * result and the stores' and DashboardDB's public API: no private fields, no casts.
  */
