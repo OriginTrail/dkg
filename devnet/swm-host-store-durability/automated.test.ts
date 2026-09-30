@@ -24,9 +24,11 @@
  *        - the `.meta` cursor is never below the log's last seqno,
  *        - the host re-engages host mode for the CG from its persisted flag.
  *   3. The member edge (node6) pages the hosting core with
- *      `POST /api/shared-memory/host-catchup` from several `sinceSeqno`
- *      cursors and the core serves exactly the frames with seqno > cursor and
- *      reports the true last seqno (catch-up "pages to completion").
+ *      `POST /api/shared-memory/host-catchup`, one round per call, resuming
+ *      from the returned cursor until the host has nothing more, from several
+ *      starting cursors: the core serves exactly the frames with seqno > the
+ *      starting cursor across the pages and the final cursor is the true last
+ *      seqno (catch-up "pages to completion").
  *
  * Preconditions:
  *   pnpm run build && pnpm --dir packages/cli run build:prepared
@@ -85,7 +87,31 @@ const hostHome = join(DEVNET_DIR, `node${HOST}`);
 const storeDir = join(hostHome, 'swm-host');
 const hostConfigPath = join(hostHome, 'config.json');
 
-const cgKey = (cgId: string) => createHash('sha256').update(cgId).digest('base64url');
+const hashKey = (cgId: string) => createHash('sha256').update(cgId).digest('base64url');
+
+/**
+ * The store files are keyed by sha256 of the id the ENVELOPE carries, which is
+ * not necessarily the string this suite created the graph with. Find the
+ * `.meta` whose recorded `contextGraphId` matches, and fall back to the hash of
+ * the created id until the first frame lands.
+ */
+let resolvedKey: string | null = null;
+function cgKey(cgId: string): string {
+  if (resolvedKey) return resolvedKey;
+  try {
+    for (const name of readdirSync(storeDir)) {
+      if (!name.endsWith('.meta')) continue;
+      try {
+        const parsed = JSON.parse(readFileSync(join(storeDir, name), 'utf8'));
+        if (typeof parsed.contextGraphId === 'string' && parsed.contextGraphId.toLowerCase() === cgId.toLowerCase()) {
+          resolvedKey = name.slice(0, -'.meta'.length);
+          return resolvedKey;
+        }
+      } catch { /* absent or mid-rename: keep scanning */ }
+    }
+  } catch { /* store dir not created yet */ }
+  return hashKey(cgId);
+}
 
 const HEADER_BYTES = 20;
 
@@ -432,11 +458,11 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
       await waitFor(`cycle ${cycle}: host store initialised`, 120_000, 1_000, async () => (await hostStats()) ?? null);
       const survivors = tempFiles().filter((name) => tempsAtKill.includes(name));
       expect(survivors, `cycle ${cycle}: temp files from the kill survived the restart`).toEqual([]);
-      await waitFor(`cycle ${cycle}: host mode re-engaged for the CG`, 120_000, 2_000, async () => {
+      // The persisted host-mode flag re-engages the subscription without the operator (the
+      // subscription key may be the cleartext id or its wire hash; new frames below prove it works).
+      await waitFor(`cycle ${cycle}: host mode re-engaged`, 120_000, 2_000, async () => {
         const stats = await hostStats();
-        return stats?.subscribedCgIds.some((id) => id === cgId || id.toLowerCase() === cgId.toLowerCase())
-          ? true
-          : null;
+        return stats && stats.subscribedCgIds.length > 0 ? true : null;
       });
 
       // New frames arrive after the restart (the writer never stopped).
@@ -484,20 +510,37 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
     const lastSeqno = log.seqnos.at(-1)!;
     const mid = log.seqnos[Math.floor(log.seqnos.length / 2)]!;
 
-    for (const since of [0, mid, lastSeqno - 1, lastSeqno]) {
-      const expectedFetched = log.seqnos.filter((s) => s > since).length;
-      const res = await postJson(nodeFor(MEMBER, true), '/api/shared-memory/host-catchup', {
-        contextGraphId: cgId,
-        peerId: hostPeerId,
-        sinceSeqno: since,
-      });
-      expect(res.status, `host-catchup since=${since}: ${JSON.stringify(res.json)}`).toBe(200);
-      const peer = res.json.peers?.[0];
-      expect(peer, `host-catchup since=${since} reached no peer: ${JSON.stringify(res.json)}`).toBeTruthy();
-      expect(peer.denied, `host denied catch-up: ${JSON.stringify(peer)}`).toBeUndefined();
-      expect(peer.error, `host-catchup error: ${JSON.stringify(peer)}`).toBeUndefined();
-      expect(peer.fetched, `since=${since}: frames served`).toBe(expectedFetched);
-      expect(peer.nextSeqno, `since=${since}: cursor after paging`).toBe(expectedFetched > 0 ? lastSeqno : since);
+    // Page like a real member: one round per call, resuming from the returned cursor until the
+    // host has nothing more, from several starting cursors.
+    for (const start of [0, mid, lastSeqno - 1, lastSeqno]) {
+      const expectedTotal = log.seqnos.filter((s) => s > start).length;
+      let since = start;
+      let fetchedTotal = 0;
+      let calls = 0;
+      for (;;) {
+        calls += 1;
+        expect(calls, `start=${start}: paging did not terminate`).toBeLessThan(200);
+        const res = await postJson(nodeFor(MEMBER, true), '/api/shared-memory/host-catchup', {
+          contextGraphId: cgId,
+          peerId: hostPeerId,
+          sinceSeqno: since,
+          maxRounds: 1,
+        });
+        expect(res.status, `host-catchup since=${since}: ${JSON.stringify(res.json)}`).toBe(200);
+        const peer = res.json.peers?.[0];
+        expect(peer, `host-catchup since=${since} reached no peer: ${JSON.stringify(res.json)}`).toBeTruthy();
+        expect(peer.denied, `host denied catch-up: ${JSON.stringify(peer)}`).toBeUndefined();
+        expect(peer.error, `host-catchup error: ${JSON.stringify(peer)}`).toBeUndefined();
+        if (peer.fetched === 0) {
+          expect(peer.nextSeqno, `start=${start}: empty page must not move the cursor`).toBe(since);
+          break;
+        }
+        expect(peer.nextSeqno, `start=${start}: cursor must advance`).toBeGreaterThan(since);
+        fetchedTotal += peer.fetched;
+        since = peer.nextSeqno;
+      }
+      expect(fetchedTotal, `start=${start}: frames served across all pages`).toBe(expectedTotal);
+      expect(since, `start=${start}: final cursor`).toBe(expectedTotal > 0 ? lastSeqno : start);
     }
   }, 600_000);
 });

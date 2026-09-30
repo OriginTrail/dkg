@@ -17,7 +17,7 @@ Knowledge Assets.
 |------|-----------|
 | Baseline | The core's `<key>.log` holds the curator's shares as frames, seqnos start at 1 and are strictly increasing, the API stats agree, and the `.meta` cursor equals the last seqno. Without this the rest would be vacuous. |
 | N x kill -9 | The core is SIGKILLed the moment a new frame lands in its log (so the kill falls in the append -> cursor write -> directory fsync window, or right after it) and restarted. No `<key>.<log\|meta>.tmp-*` file that existed at the kill survives the restart; host mode is re-engaged from the persisted flag; after new frames arrive the log has no torn tail, seqnos are strictly increasing with no duplicate or reused value across the crash (every new seqno is above the pre-kill high-water mark), and the `.meta` cursor is never below the log tail. The suite prints which crash window each kill hit. |
-| Member catch-up | The member calls `POST /api/shared-memory/host-catchup` against the core from several `sinceSeqno` cursors. The core serves exactly the frames with seqno greater than the cursor and reports the true last seqno as `nextSeqno`. |
+| Member catch-up | The member pages the core with `POST /api/shared-memory/host-catchup`, one round per call, resuming from the returned `nextSeqno` until the core has nothing more, from several starting cursors. Across the pages the core serves exactly the frames with seqno greater than the starting cursor and the final cursor is the true last seqno. |
 
 The unit tests (`packages/agent/test/swm/host-mode-store-durability.test.ts`)
 and the real-file SIGKILL e2e
