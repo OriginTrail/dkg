@@ -16,10 +16,15 @@ import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 
 import type { DkgConfig } from '../src/config.js';
+import {
+  normalizeOpenClawPersistTurnPayload,
+  persistOpenClawTurn,
+} from '../src/daemon/routes/openclaw-persist-turn.js';
 import { handleOpenclawRoutes } from '../src/daemon/routes/openclaw.js';
 
 const PERSIST_TURN_PATH = '/api/openclaw-channel/persist-turn';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const MISSING_FIELDS = 'Missing required fields: sessionId, userMessage, assistantReply';
 
 type PersistenceState = 'stored' | 'failed' | 'pending';
 
@@ -119,7 +124,7 @@ async function persistTurn(
     path: PERSIST_TURN_PATH,
     ...overrides,
   } as any);
-  return { statusCode: res.statusCode as number, body: JSON.parse(res.body) as any };
+  return { statusCode: res.statusCode as number, body: JSON.parse(res.body) as any, raw: res.body as string };
 }
 
 const turn = (overrides: Record<string, unknown> = {}) => ({
@@ -570,5 +575,199 @@ describe('POST /api/openclaw-channel/persist-turn idempotency', () => {
       expect(body).toEqual({ ok: true, turnId: 'turn-1' });
       expect(memoryManager.storeChatExchange).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+const attachment = {
+  assertionUri: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+  fileHash: 'sha256:abc123',
+  contextGraphId: 'cg1',
+  fileName: 'chat-doc.pdf',
+  detectedContentType: 'application/pdf',
+  extractionStatus: 'completed' as const,
+  tripleCount: 42,
+  rootEntity: 'did:dkg:context-graph:cg1/assertion/chat-doc',
+};
+
+// -- The normalized payload -------------------------------------------------------------
+
+describe('normalizeOpenClawPersistTurnPayload', () => {
+  it('normalizes a minimal turn to exactly the durable-turn payload fields', () => {
+    expect(normalizeOpenClawPersistTurnPayload(turn())).toStrictEqual({
+      sessionId: 'openclaw:dkg-ui',
+      turnId: 'turn-1',
+      userMessage: 'hello',
+      assistantReply: 'hi there',
+      persistenceState: 'stored',
+      failureReason: undefined,
+      toolCalls: undefined,
+      attachmentRefs: undefined,
+    });
+  });
+
+  it('forwards the session id as sent, untrimmed, and accepts empty message strings', () => {
+    expect(normalizeOpenClawPersistTurnPayload(turn({ sessionId: '  sess  ', userMessage: '', assistantReply: '' })))
+      .toMatchObject({ sessionId: '  sess  ', userMessage: '', assistantReply: '' });
+  });
+
+  it('ignores fields that are not part of the durable turn', () => {
+    const normalized = normalizeOpenClawPersistTurnPayload(turn({ metadata: { a: 1 }, correlationId: 'c', extra: true }));
+
+    expect(Object.keys(normalized).sort()).toEqual([
+      'assistantReply', 'attachmentRefs', 'failureReason', 'persistenceState',
+      'sessionId', 'toolCalls', 'turnId', 'userMessage',
+    ]);
+  });
+
+  describe('turn id', () => {
+    it.each([
+      { sent: 'turn-1', turnId: 'turn-1' },
+      { sent: '  turn-padded ', turnId: 'turn-padded' },
+      { sent: '\tturn-tabbed\n', turnId: 'turn-tabbed' },
+    ])('takes $sent as the trimmed id $turnId', ({ sent, turnId }) => {
+      expect(normalizeOpenClawPersistTurnPayload(turn({ turnId: sent }))).toMatchObject({ turnId });
+    });
+
+    it.each(['', '   ', null, 42, true, {}, []])('generates an id for a blank or non-string turn id (%j)', (sent) => {
+      expect(normalizeOpenClawPersistTurnPayload(turn({ turnId: sent }))).toMatchObject({
+        turnId: expect.stringMatching(UUID_RE),
+      });
+    });
+
+    it('generates a fresh id for every payload without one', () => {
+      const { turnId: _omitted, ...withoutTurnId } = turn();
+
+      const first = normalizeOpenClawPersistTurnPayload(withoutTurnId) as { turnId: string };
+      const second = normalizeOpenClawPersistTurnPayload(withoutTurnId) as { turnId: string };
+
+      expect(first.turnId).toMatch(UUID_RE);
+      expect(second.turnId).toMatch(UUID_RE);
+      expect(second.turnId).not.toBe(first.turnId);
+    });
+  });
+
+  it.each([
+    { sent: 'pending', persistenceState: 'pending' },
+    { sent: 'failed', persistenceState: 'failed' },
+    { sent: 'stored', persistenceState: 'stored' },
+    { sent: undefined, persistenceState: 'stored' },
+  ])('takes persistenceState $sent as $persistenceState', ({ sent, persistenceState }) => {
+    expect(normalizeOpenClawPersistTurnPayload(turn({ persistenceState: sent }))).toMatchObject({ persistenceState });
+  });
+
+  it.each([
+    { sent: '  provider timed out ', failureReason: 'provider timed out' },
+    { sent: 'x', failureReason: 'x' },
+    { sent: '   ', failureReason: undefined },
+    { sent: '', failureReason: undefined },
+    { sent: null, failureReason: undefined },
+    { sent: undefined, failureReason: undefined },
+  ])('takes failureReason $sent as $failureReason', ({ sent, failureReason }) => {
+    expect(normalizeOpenClawPersistTurnPayload(turn({ failureReason: sent }))).toMatchObject({ failureReason });
+  });
+
+  describe('tool calls', () => {
+    it('passes an array through as sent, without checking its entries', () => {
+      const toolCalls = [{ name: 'search', args: { query: 'dkg' }, result: { hits: 1 } }, null, 'junk'];
+
+      const normalized = normalizeOpenClawPersistTurnPayload(turn({ toolCalls })) as { toolCalls: unknown };
+
+      expect(normalized.toolCalls).toEqual(toolCalls);
+    });
+
+    it('keeps an empty array empty', () => {
+      expect(normalizeOpenClawPersistTurnPayload(turn({ toolCalls: [] }))).toMatchObject({ toolCalls: [] });
+    });
+
+    it.each(['x', {}, null, 0])('drops a non-array (%j)', (toolCalls) => {
+      expect(normalizeOpenClawPersistTurnPayload(turn({ toolCalls }))).toMatchObject({ toolCalls: undefined });
+    });
+  });
+
+  describe('attachment refs', () => {
+    it('normalizes the refs (trimmed, unknown fields dropped) without verifying them', () => {
+      const normalized = normalizeOpenClawPersistTurnPayload(turn({
+        attachmentRefs: [{ ...attachment, fileName: ' chat-doc.pdf ', junk: 1 }],
+      }));
+
+      expect(normalized).toMatchObject({ attachmentRefs: [attachment] });
+    });
+
+    it('keeps an empty list empty and leaves absent refs undefined', () => {
+      expect(normalizeOpenClawPersistTurnPayload(turn({ attachmentRefs: [] }))).toMatchObject({ attachmentRefs: [] });
+      expect(normalizeOpenClawPersistTurnPayload(turn())).toMatchObject({ attachmentRefs: undefined });
+    });
+  });
+
+  it.each([
+    { label: 'a missing sessionId', body: { userMessage: 'hi', assistantReply: 'yo', turnId: 't' } },
+    { label: 'a blank sessionId', body: { sessionId: '  ', userMessage: 'hi', assistantReply: 'yo', turnId: 't' } },
+    { label: 'a non-string sessionId', body: turn({ sessionId: 5 }) },
+    { label: 'a missing userMessage', body: { sessionId: 's', assistantReply: 'yo', turnId: 't' } },
+    { label: 'a missing assistantReply', body: { sessionId: 's', userMessage: 'hi', turnId: 't' } },
+    { label: 'an unknown persistenceState', body: turn({ persistenceState: 'complete' }) },
+    { label: 'a null persistenceState', body: turn({ persistenceState: null }) },
+    { label: 'a non-string failureReason', body: turn({ failureReason: 7 }) },
+    { label: 'null attachmentRefs', body: turn({ attachmentRefs: null }) },
+    { label: 'non-array attachmentRefs', body: turn({ attachmentRefs: 'nope' }) },
+    { label: 'a malformed attachment ref', body: turn({ attachmentRefs: [{ assertionUri: attachment.assertionUri }] }) },
+    { label: 'an empty object', body: {} },
+    { label: 'an array', body: [] },
+    { label: 'a number', body: 42 },
+    { label: 'a string', body: 'text' },
+  ])('answers the missing-fields error for $label', ({ body }) => {
+    expect(normalizeOpenClawPersistTurnPayload(body)).toEqual({ error: MISSING_FIELDS });
+  });
+});
+
+describe('POST /api/openclaw-channel/persist-turn response bytes', () => {
+  it.each([
+    { label: 'created', existing: undefined, raw: '{"ok":true,"turnId":"turn-1"}' },
+    { label: 'duplicate', existing: 'stored' as const, raw: '{"ok":true,"duplicate":true,"turnId":"turn-1"}' },
+    { label: 'transitioned', existing: 'pending' as const, raw: '{"ok":true,"transitioned":true,"turnId":"turn-1"}' },
+  ])('answers a  outcome with exactly ', async ({ existing, raw }) => {
+    const memoryManager = makeMemoryManager();
+    if (existing) memoryManager.states.set('openclaw:dkg-ui\nturn-1', existing);
+
+    const response = await persistTurn(memoryManager, turn());
+
+    expect(response.statusCode).toBe(200);
+    expect(response.raw).toBe(raw);
+  });
+
+  it('leaves a failing provenance lookup to the daemon-wide error handler instead of the persist 500', async () => {
+    const memoryManager = makeMemoryManager();
+    const agent = { store: { query: vi.fn(async () => { throw new Error('query down'); }) } };
+
+    await expect(persistTurn(memoryManager, turn({ attachmentRefs: [attachment] }), { agent }))
+      .rejects.toThrow('query down');
+    expect(memoryManager.storeChatExchange).not.toHaveBeenCalled();
+  });
+});
+
+describe('persistOpenClawTurn', () => {
+  const payload = {
+    sessionId: 'openclaw:dkg-ui',
+    turnId: 'turn-1',
+    userMessage: 'hello',
+    assistantReply: 'hi there',
+    persistenceState: 'stored' as const,
+  };
+
+  it('persists the verified refs in place of the ones the payload carries', async () => {
+    const memoryManager = makeMemoryManager();
+
+    const result = await persistOpenClawTurn(memoryManager, { ...payload, attachmentRefs: [{ ...attachment, fileName: 'unverified.pdf' }] }, [attachment]);
+
+    expect(result).toEqual({ statusCode: 200, body: { ok: true, turnId: 'turn-1' } });
+    expect((memoryManager.storeChatExchange.mock.calls[0][4] as { attachmentRefs?: unknown } | undefined)?.attachmentRefs).toEqual([attachment]);
+  });
+
+  it('persists no refs when verification produced none', async () => {
+    const memoryManager = makeMemoryManager();
+
+    await persistOpenClawTurn(memoryManager, { ...payload, attachmentRefs: [attachment] }, undefined);
+
+    expect((memoryManager.storeChatExchange.mock.calls[0][4] as { attachmentRefs?: unknown } | undefined)?.attachmentRefs).toBeUndefined();
   });
 });
