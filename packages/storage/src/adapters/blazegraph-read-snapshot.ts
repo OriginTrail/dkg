@@ -19,9 +19,8 @@ export async function withBlazegraphReadSnapshot<T>(
   // Location is available as soon as the server has created the transaction.
   // Body parsing can fail or be aborted, so register its cleanup first.
   let transactionId = begin.headers.get('Location')?.match(/\/tx\/(-?\d+)(?:\?|$)/)?.[1];
+  let readSucceeded = false;
   let result!: T;
-  let readFailed = false;
-  let readFailure: unknown;
   let releaseFailure: unknown;
   try {
     const body = await begin.text();
@@ -31,9 +30,7 @@ export async function withBlazegraphReadSnapshot<T>(
       throw new Error('Blazegraph did not return a read-only snapshot transaction');
     }
     result = await read(transactionId);
-  } catch (error) {
-    readFailed = true;
-    readFailure = error;
+    readSucceeded = true;
   } finally {
     if (transactionId) {
       endpoint.pathname = `${basePath}/tx/${transactionId}`;
@@ -42,23 +39,18 @@ export async function withBlazegraphReadSnapshot<T>(
         const end = await fetch(endpoint.toString(), {
           method: 'POST', signal: AbortSignal.timeout(timeoutMs),
         });
-        if (end.status !== 200) {
-          releaseFailure = new Error(`Blazegraph read snapshot release failed (${end.status})`);
-        }
+        if (end.status !== 200) releaseFailure = new Error(`Blazegraph read snapshot release failed (${end.status})`);
       } catch (error) {
         releaseFailure = error;
       }
-    }
-  }
-  if (readFailed) {
-    if (releaseFailure) {
-      try {
-        console.warn('Blazegraph read snapshot release failed after read error', releaseFailure);
-      } catch {
-        // Diagnostics must not replace the original read failure.
+      if (releaseFailure && !readSucceeded) {
+        try {
+          console.warn('Blazegraph read snapshot release failed after read error', releaseFailure);
+        } catch {
+          // Diagnostics must not replace the original read failure.
+        }
       }
     }
-    throw readFailure;
   }
   if (releaseFailure) throw releaseFailure;
   return result;

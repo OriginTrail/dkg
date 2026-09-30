@@ -22,9 +22,14 @@
  *   http://127.0.0.1:9999/bigdata/namespace/kb/sparql
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { loadSelectedSharedMemoryQuads } from '../src/graph-manager.js';
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
+import { ChangelogStore } from '../src/changelog-store.js';
+import { SharedMemoryLiteralBlobStore, EXTERNAL_LITERAL_REF_DATATYPE } from '../src/shared-memory-literal-blob-store.js';
 import { compileRfc64SemanticAuthorCommitV1 } from '../src/rfc64-semantic-author-commit-v1.js';
 import { normalizeRfc64AuthorCommitCasV1 } from '../src/rfc64-author-commit-cas.js';
 import type {
@@ -159,9 +164,75 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
       });
       expect(throughCatalog.map((quad) => [quad.subject, quad.predicate, quad.object].join('|')).sort())
         .toEqual(fresh.map((quad) => [quad.subject, quad.predicate, quad.object].join('|')).sort());
+
+      // Remove a graph after the read transaction starts but before family
+      // enumeration. Both membership and selected triples must remain pinned.
+      let removedGraph = false;
+      const membershipRequests = vi.spyOn(globalThis, 'fetch');
+      membershipRequests.mockImplementation(async (input, init) => {
+        const result = await originalFetch(input, init);
+        if (!removedGraph && String(input).endsWith('/tx?timestamp=-1')) {
+          removedGraph = true;
+          await store.dropGraph(quads[129]!.graph);
+        }
+        return result;
+      });
+      const retained = await loadSelectedSharedMemoryQuads(store, swm, { rootEntities: [root] }, {
+        resultBudget: { pageRows: 1, maxRows: 3, maxBytesEstimate: 1024 * 1024 },
+      });
+      expect(removedGraph).toBe(true);
+      expect(retained.some((quad) => quad.subject === child)).toBe(true);
+      membershipRequests.mockRestore();
     } finally {
       vi.restoreAllMocks();
       await store.delete(quads).catch(() => {});
+    }
+  }, 60_000);
+
+  it('hydrates large literals through decorated pinned multi-chunk reads', async () => {
+    const swm = contextGraphSharedMemoryUri(`swm-decorated-${RUN}`);
+    const root = `urn:swm-decorated:${RUN}:root`;
+    const decoys: Quad[] = Array.from({ length: 130 }, (_, i) => ({
+      subject: `urn:swm-decorated:${RUN}:decoy:${i}`,
+      predicate: PRED,
+      object: '"decoy"',
+      graph: `${swm}/0xabcdef0123456789abcdef0123456789abcdef01/${String(i + 1).padStart(3, '0')}`,
+    }));
+    const large: Quad = {
+      subject: root,
+      predicate: PRED,
+      object: `"${'hydrated-literal-'.repeat(12)}"`,
+      graph: decoys[129]!.graph,
+    };
+    const blobDir = await mkdtemp(join(tmpdir(), 'dkg-pinned-blob-'));
+    const blob = new SharedMemoryLiteralBlobStore(store, { blobDir, thresholdBytes: 16 });
+    try {
+      await store.insert(decoys);
+      await blob.insert([large]);
+      const raw = await store.query(`CONSTRUCT { <${root}> <${PRED}> ?o } WHERE {
+        GRAPH <${large.graph}> { <${root}> <${PRED}> ?o }
+      }`);
+      expect(raw.type).toBe('quads');
+      if (raw.type === 'quads') expect(raw.quads[0]?.object).toContain(EXTERNAL_LITERAL_REF_DATATYPE);
+
+      const decorated = new ChangelogStore(
+        new GraphSetIndexStore(blob, { revalidateMs: 60_000 }),
+      );
+      for (const options of [
+        undefined,
+        { resultBudget: { pageRows: 1, maxRows: 1, maxBytesEstimate: 1024 * 1024 } },
+      ]) {
+        const selected = await loadSelectedSharedMemoryQuads(
+          decorated, swm, { rootEntities: [root] }, options,
+        );
+        expect(selected).toMatchObject([{
+          subject: root, predicate: PRED, object: large.object,
+        }]);
+      }
+    } finally {
+      await blob.delete([large]).catch(() => {});
+      await store.delete(decoys).catch(() => {});
+      await rm(blobDir, { recursive: true, force: true });
     }
   }, 60_000);
 

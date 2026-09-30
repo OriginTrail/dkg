@@ -73,7 +73,9 @@ export async function loadSwmQuadsAcrossChunks(
   const chunks = graphValueChunks(graphs, plan.kind === 'single-query'
     ? graphs.length : plan.graphsPerQuery ?? SHARED_MEMORY_GRAPHS_PER_QUERY);
   if (options.resultBudget) {
-    return loadPaged(store, chunks, innerGraphPattern, queryOptions, options, plan.kind === 'single-query');
+    return plan.kind === 'single-query'
+      ? loadSingleQueryBudgeted(store, chunks[0]!, innerGraphPattern, queryOptions, options)
+      : loadChunkedPaged(store, chunks, innerGraphPattern, queryOptions, options);
   }
   const distinct = new Map<string, Quad>();
   // At most two backend slots for unbudgeted CONSTRUCT. Budgeted pages must
@@ -95,39 +97,83 @@ export async function loadSwmQuadsAcrossChunks(
   return [...distinct.values()];
 }
 
-async function loadPaged(
+class BudgetedQuadCollector {
+  readonly quads: Quad[] = [];
+  private readonly seen = new Set<string>();
+  private rawRows = 0;
+  private bytesEstimate = 0;
+
+  constructor(
+    private readonly maxRows: number,
+    private readonly maxBytesEstimate: number,
+    private readonly source: string,
+    private readonly quadFilter?: (quad: Quad) => boolean,
+  ) {}
+
+  ingest(rows: readonly Record<string, string>[]): void {
+    for (const row of rows) {
+      const subject = row['s'];
+      const predicate = row['p'];
+      const object = row['o'];
+      if (!subject || !predicate || !object) continue;
+      const key = JSON.stringify([subject, predicate, object]);
+      if (this.seen.has(key)) continue;
+      const nextRows = this.rawRows + 1;
+      if (nextRows > this.maxRows) {
+        this.observe();
+        throw new SharedMemoryResultBudgetError('rows', nextRows, this.bytesEstimate, this.maxRows);
+      }
+      const quad: Quad = { subject, predicate, object, graph: '' };
+      const retain = !this.quadFilter || this.quadFilter(quad);
+      const nextBytes = this.bytesEstimate + 64 + 2 * key.length
+        + (retain ? estimateQuadHeapBytes(quad) : 0);
+      if (nextBytes > this.maxBytesEstimate) {
+        this.observe();
+        throw new SharedMemoryResultBudgetError('bytes', nextRows, nextBytes, this.maxBytesEstimate);
+      }
+      this.seen.add(key);
+      this.rawRows = nextRows;
+      this.bytesEstimate = nextBytes;
+      if (retain) this.quads.push(quad);
+    }
+  }
+
+  rowLimitExceeded(): never {
+    this.observe();
+    throw new SharedMemoryResultBudgetError('rows', this.maxRows + 1, this.bytesEstimate, this.maxRows);
+  }
+
+  finish(sort: boolean): Quad[] {
+    this.observe();
+    return sort ? this.quads.sort(compareSpo) : this.quads;
+  }
+
+  private observe(): void {
+    getMetrics().storeQueryResultRows.record(this.rawRows, { source: this.source });
+    getMetrics().storeQueryResultBytesEstimate.record(this.bytesEstimate, { source: this.source });
+  }
+}
+
+function budgetCollector(options: SwmMaterializationOptions, queryOptions?: QueryOptions): BudgetedQuadCollector {
+  const configured = options.resultBudget!;
+  return new BudgetedQuadCollector(
+    normalizePositiveInteger(configured.maxRows, normalizePositiveInteger(configured.pageRows, 1_000)),
+    normalizePositiveInteger(configured.maxBytesEstimate, 64 * 1024 * 1024),
+    queryOptions?.source ?? 'unknown',
+    options.quadFilter,
+  );
+}
+
+async function loadChunkedPaged(
   store: Pick<TripleStore, 'query'>,
   chunks: string[],
   innerGraphPattern: string,
   queryOptions: QueryOptions | undefined,
   options: SwmMaterializationOptions,
-  singleQueryBudgeted: boolean,
 ): Promise<Quad[]> {
   const configured = options.resultBudget!;
-  const configuredPageRows = normalizePositiveInteger(configured.pageRows, 1_000);
-  const maxRows = normalizePositiveInteger(configured.maxRows, configuredPageRows);
-  const pageRows = singleQueryBudgeted
-    ? Math.min(Number.MAX_SAFE_INTEGER, maxRows + 1)
-    : configuredPageRows;
-  const maxBytesEstimate = normalizePositiveInteger(configured.maxBytesEstimate, 64 * 1024 * 1024);
-  // One snapshot-consistent SELECT must also cap its raw HTTP body before JSON
-  // parsing. Four times the heap estimate allows escaping and JSON framing.
-  const readOptions = singleQueryBudgeted ? {
-    ...queryOptions,
-    maxResponseBytes: Math.min(
-      queryOptions?.maxResponseBytes ?? Number.MAX_SAFE_INTEGER,
-      Math.min(Number.MAX_SAFE_INTEGER, 4 * maxBytesEstimate + 1024 * 1024),
-    ),
-  } : queryOptions;
-  const quads: Quad[] = [];
-  const seen = new Set<string>();
-  let rawRows = 0;
-  let bytesEstimate = 0;
-  const source = queryOptions?.source ?? 'unknown';
-  const observe = () => {
-    getMetrics().storeQueryResultRows.record(rawRows, { source });
-    getMetrics().storeQueryResultBytesEstimate.record(bytesEstimate, { source });
-  };
+  const pageRows = normalizePositiveInteger(configured.pageRows, 1_000);
+  const collector = budgetCollector(options, queryOptions);
 
   for (const values of chunks) {
     for (let offset = 0; ; offset += pageRows) {
@@ -137,43 +183,45 @@ async function loadPaged(
       }
       ORDER BY ?s ?p ?o
       OFFSET ${offset}
-      LIMIT ${pageRows}`, readOptions);
+      LIMIT ${pageRows}`, queryOptions);
       if (result.type !== 'bindings' || result.bindings.length === 0) break;
-
-      for (const row of result.bindings) {
-        const subject = row['s'];
-        const predicate = row['p'];
-        const object = row['o'];
-        if (!subject || !predicate || !object) continue;
-        const key = JSON.stringify([subject, predicate, object]);
-        if (seen.has(key)) continue;
-        const nextRows = rawRows + 1;
-        if (nextRows > maxRows) {
-          observe();
-          throw new SharedMemoryResultBudgetError('rows', nextRows, bytesEstimate, maxRows);
-        }
-        const quad: Quad = { subject, predicate, object, graph: '' };
-        const retain = !options.quadFilter || options.quadFilter(quad);
-        // The Set keeps this identity even for a filtered Quad. Count its
-        // serialized string and hash entry before retaining either allocation.
-        const nextBytes = bytesEstimate + 64 + 2 * key.length
-          + (retain ? estimateQuadHeapBytes(quad) : 0);
-        if (nextBytes > maxBytesEstimate) {
-          observe();
-          throw new SharedMemoryResultBudgetError('bytes', nextRows, nextBytes, maxBytesEstimate);
-        }
-        seen.add(key);
-        rawRows = nextRows;
-        bytesEstimate = nextBytes;
-        if (retain) quads.push(quad);
-      }
-      if (singleQueryBudgeted && result.bindings.length === pageRows) {
-        observe();
-        throw new SharedMemoryResultBudgetError('rows', maxRows + 1, bytesEstimate, maxRows);
-      }
-      if (singleQueryBudgeted || result.bindings.length < pageRows) break;
+      collector.ingest(result.bindings);
+      if (result.bindings.length < pageRows) break;
     }
   }
-  observe();
-  return chunks.length === 1 ? quads : quads.sort(compareSpo);
+  return collector.finish(chunks.length > 1);
+}
+
+async function loadSingleQueryBudgeted(
+  store: Pick<TripleStore, 'query'>,
+  values: string,
+  innerGraphPattern: string,
+  queryOptions: QueryOptions | undefined,
+  options: SwmMaterializationOptions,
+): Promise<Quad[]> {
+  const configured = options.resultBudget!;
+  const maxRows = normalizePositiveInteger(
+    configured.maxRows, normalizePositiveInteger(configured.pageRows, 1_000));
+  const maxBytesEstimate = normalizePositiveInteger(configured.maxBytesEstimate, 64 * 1024 * 1024);
+  const limit = Math.min(Number.MAX_SAFE_INTEGER, maxRows + 1);
+  // Cap the raw response before JSON parsing as well as the materialized rows.
+  const readOptions = {
+    ...queryOptions,
+    maxResponseBytes: Math.min(
+      queryOptions?.maxResponseBytes ?? Number.MAX_SAFE_INTEGER,
+      Math.min(Number.MAX_SAFE_INTEGER, 4 * maxBytesEstimate + 1024 * 1024),
+    ),
+  };
+  const result = await store.query(`SELECT DISTINCT ?s ?p ?o WHERE {
+    VALUES ?g { ${values} }
+    GRAPH ?g { ${innerGraphPattern} }
+  }
+  ORDER BY ?s ?p ?o
+  OFFSET 0
+  LIMIT ${limit}`, readOptions);
+  const collector = budgetCollector(options, queryOptions);
+  if (result.type !== 'bindings') return collector.finish(false);
+  collector.ingest(result.bindings);
+  if (result.bindings.length === limit) collector.rowLimitExceeded();
+  return collector.finish(false);
 }

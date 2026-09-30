@@ -322,7 +322,7 @@ describe('GraphSetIndexStore', () => {
     expect(capability).not.toBeNull();
     await expect(capability!.withReadSnapshot((snapshot) =>
       snapshot.listGraphsByPrefix!(prefix))).resolves.toEqual([pinned]);
-    expect(snapshotPrefix).toHaveBeenCalledWith(prefix);
+    expect(snapshotPrefix).toHaveBeenCalledWith(prefix, undefined);
     await expect(store.listGraphsByPrefix(prefix)).resolves.toEqual([ordinary]);
     await inner.close();
   });

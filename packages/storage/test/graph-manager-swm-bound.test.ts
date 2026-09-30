@@ -638,8 +638,17 @@ describe('bounded SWM result materialization', () => {
         resultBudget: { pageRows: 1, maxRows: 1, maxBytesEstimate: 1024 * 1024 },
       });
       expect(keys(budgeted)).toEqual(keys(selected));
-      expect(query.mock.calls.filter(([sparql]) => sparql.includes('VALUES ?g')))
-        .toHaveLength(1);
+      const budgetRequests = query.mock.calls.filter(([sparql]) => sparql.includes('VALUES ?g'));
+      expect(budgetRequests).toHaveLength(1);
+      expect(budgetRequests[0]?.[1]?.maxResponseBytes).toBe(5 * 1024 * 1024);
+      query.mockClear();
+      await loadSelectedSharedMemoryQuads(plain, swm, { rootEntities: [root] }, {
+        queryOptions: { maxResponseBytes: 1_024 },
+        resultBudget: { pageRows: 1, maxRows: 1, maxBytesEstimate: 1024 * 1024 },
+      });
+      const stricter = query.mock.calls.filter(([sparql]) => sparql.includes('VALUES ?g'));
+      expect(stricter).toHaveLength(1);
+      expect(stricter[0]?.[1]?.maxResponseBytes).toBe(1_024);
     } finally {
       await store.close();
     }

@@ -111,7 +111,8 @@ describe('BlazegraphStore (mocked HTTP)', () => {
         return new Response('<xml><tx txId="12345" readOnly="true"/></xml>', { status: 201 });
       }
       if (url.endsWith('/tx/12345?ABORT')) return new Response(null, { status: 200 });
-      return blazeSelectResponse();
+      return String(fetchCalls.at(-1)?.[1]?.body).includes('SELECT DISTINCT ?g')
+        ? blazeListGraphsResponse() : blazeSelectResponse();
     });
     const store = new BlazegraphStore(baseUrl);
     await store.withReadSnapshot(async (snapshot) => {
@@ -119,10 +120,14 @@ describe('BlazegraphStore (mocked HTTP)', () => {
         snapshot.query('SELECT ?name WHERE { ?name ?p ?o }'),
         snapshot.query('SELECT ?name WHERE { ?name ?p ?o }'),
       ]);
+      expect(await snapshot.listGraphs()).toEqual(['http://g1']);
+      expect(await snapshot.listGraphsByPrefix?.('http://g')).toEqual(['http://g1']);
     });
     const urls = fetchCalls.map(([input]) => String(input));
     expect(urls[0]).toBe('http://blaze.test/tx?timestamp=-1');
-    expect(urls.filter((url) => url === `${baseUrl}?timestamp=12345`)).toHaveLength(2);
+    expect(urls.filter((url) => url === `${baseUrl}?timestamp=12345`)).toHaveLength(4);
+    expect(fetchCalls.filter(([, init]) => String(init?.body).includes('SELECT DISTINCT ?g')))
+      .toHaveLength(2);
     expect(urls.at(-1)).toBe('http://blaze.test/tx/12345?ABORT');
   });
 

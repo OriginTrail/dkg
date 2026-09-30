@@ -16,6 +16,7 @@ import type {
   UpdateOptions,
 } from './triple-store.js';
 import { deleteByPatternWithoutCount } from './triple-store.js';
+import { asReadSnapshotCapability, type ReadSnapshotStore } from './read-snapshot-capability.js';
 import { storeWorkPriorityRank } from './store-priority-scheduler.js';
 import {
   UnsupportedTripleStoreCapabilityError,
@@ -280,6 +281,25 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     this.now = options.now ?? (() => performance.now());
     this.onMutation = options.onMutation;
     this.onDiagnostic = (options as GraphSetIndexStoreInternalOptions).onDiagnostic;
+  }
+
+  async withReadSnapshot<T>(
+    read: (snapshot: ReadSnapshotStore) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const capability = asReadSnapshotCapability(this.inner);
+    if (!capability) throw new Error('Inner store does not support read snapshots');
+    // The current catalog belongs to the latest commit. Enumerate through the
+    // pinned inner facade and retain this decorator's staging-graph visibility.
+    const visible = (graphs: string[]) => graphs.filter((graph) =>
+      !isAtomicGraphReplaceStagingGraph(graph));
+    return capability.withReadSnapshot((innerRead) => read({
+      query: (sparql, options) => innerRead.query(sparql, options),
+      listGraphs: async (options) => visible(await innerRead.listGraphs(options)),
+      listGraphsByPrefix: async (prefix, options) => visible(innerRead.listGraphsByPrefix
+        ? await innerRead.listGraphsByPrefix(prefix, options)
+        : (await innerRead.listGraphs(options)).filter((graph) => graph.startsWith(prefix))),
+    }), signal);
   }
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {

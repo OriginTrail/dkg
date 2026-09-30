@@ -13,6 +13,7 @@ import type {
   TripleStoreDecorator,
 } from './triple-store.js';
 import { deleteByPatternWithoutCount } from './triple-store.js';
+import { asReadSnapshotCapability, type ReadSnapshotStore } from './read-snapshot-capability.js';
 import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 import type {
   Rfc64AuthorCommitCasInputV1,
@@ -74,6 +75,21 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     this.blobWrites = new ContentAddressedBlobSingleFlight({
       createOrVerify: (hash, term) => this.writeBlobFile(hash, term),
     });
+  }
+
+  async withReadSnapshot<T>(
+    read: (snapshot: ReadSnapshotStore) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const capability = asReadSnapshotCapability(this.inner);
+    if (!capability) throw new Error('Inner store does not support read snapshots');
+    return capability.withReadSnapshot((innerRead) => read({
+      query: (sparql, options) => this.queryFrom(innerRead, sparql, options),
+      listGraphs: (options) => innerRead.listGraphs(options),
+      listGraphsByPrefix: (prefix, options) => innerRead.listGraphsByPrefix
+        ? innerRead.listGraphsByPrefix(prefix, options)
+        : innerRead.listGraphs(options).then((graphs) => graphs.filter((graph) => graph.startsWith(prefix))),
+    }), signal);
   }
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
@@ -215,15 +231,23 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
+    return this.queryFrom(this.inner, sparql, options);
+  }
+
+  private async queryFrom(
+    readStore: Pick<TripleStore, 'query'>,
+    sparql: string,
+    options?: QueryOptions,
+  ): Promise<QueryResult> {
     const rewritten = this.rewriteLargeLiteralConstants(sparql);
     if (!rewritten) {
-      const result = await this.inner.query(sparql, options);
+      const result = await readStore.query(sparql, options);
       return this.hydrateQueryResult(result);
     }
 
     const [original, placeholder] = await Promise.all([
-      this.inner.query(sparql, options),
-      this.inner.query(rewritten, options),
+      readStore.query(sparql, options),
+      readStore.query(rewritten, options),
     ]);
     return this.hydrateQueryResult(mergeQueryResults(original, placeholder));
   }

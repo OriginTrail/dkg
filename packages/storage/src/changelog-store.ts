@@ -5,6 +5,7 @@ import {
 } from './graph-set-index-store.js';
 import { SortedGraphCatalogProjection } from './sorted-graph-catalog-projection.js';
 import { deleteByPatternWithoutCount, findTripleStoreCapability } from './triple-store.js';
+import { asReadSnapshotCapability, type ReadSnapshotStore } from './read-snapshot-capability.js';
 import type {
   Quad,
   QueryOptions,
@@ -268,6 +269,22 @@ export class ChangelogStore implements TripleStoreDecorator, ChangelogReader, So
     );
     this.onAppend = options.onAppend;
     this.eraGuard = options.eraGuard;
+  }
+
+  async withReadSnapshot<T>(
+    read: (snapshot: ReadSnapshotStore) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    const capability = asReadSnapshotCapability(this.inner);
+    if (!capability) throw new Error('Inner store does not support read snapshots');
+    const visible = (graphs: string[]) => graphs.filter((graph) => !this.isReservedGraph(graph));
+    return capability.withReadSnapshot((innerRead) => read({
+      query: (sparql, options) => innerRead.query(sparql, options),
+      listGraphs: async (options) => visible(await innerRead.listGraphs(options)),
+      listGraphsByPrefix: async (prefix, options) => visible(innerRead.listGraphsByPrefix
+        ? await innerRead.listGraphsByPrefix(prefix, options)
+        : (await innerRead.listGraphs(options)).filter((graph) => graph.startsWith(prefix))),
+    }), signal);
   }
 
   // ------------------------------------------------------------------
