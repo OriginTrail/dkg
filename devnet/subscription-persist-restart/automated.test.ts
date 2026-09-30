@@ -47,9 +47,11 @@
  * devnet-test context graph. The devnet, its nodes and the edge daemon are shared
  * infrastructure: scenarios run one after another and each leaves the edge
  * running, restarting it in its own cleanup if it failed between `stop-node` and
- * the start. What is NOT isolated: the subscriptions a scenario leaves on the edge
- * stay there (its graphs use their own ids, so no other scenario reads them), and
- * a scenario that hangs the daemon or the devnet fails the ones after it.
+ * the start, and unsubscribes its graphs again (the edge rehydrates every durable
+ * subscription on each start, under a cap, so leftovers from many runs would slow
+ * the next scenario's restart down). What is NOT isolated: a scenario that hangs
+ * the daemon or the devnet fails the ones after it, and the cleanup is best
+ * effort.
  *
  * HONEST SCOPE: the daemon's SQLite writes are fast, so this suite proves durability
  * and consistency across graceful restarts on the real stack; it cannot hold a write
@@ -224,21 +226,37 @@ describe('subscription persistence across a real node restart', () => {
   }
 
   /**
+   * Drop every graph the scenario may have subscribed, best effort, so the edge is
+   * left as the scenario found it. The subscriptions are durable rows that the
+   * daemon rehydrates on every start, under an activation cap and a startup
+   * authority budget: scenarios (and repeated runs) that leave theirs behind pile
+   * them up until a restarted edge serves the next scenario's graphs late.
+   */
+  async function releaseGraphs(s: Scenario): Promise<void> {
+    await Promise.allSettled(s.graphIds.map((id) => postJson(edge, '/api/context-graph/unsubscribe', { contextGraphId: id })));
+  }
+
+  /**
    * One scenario: a named `it` that runs `run` over a fresh {@link Scenario}, inside
    * the log check. The edge is up when `run` starts and again when it ends, however
-   * it ends, so a failed scenario cannot take the following ones down with it; and
-   * the log window is read whether `run` passed or failed.
+   * it ends, so a failed scenario cannot take the following ones down with it, and
+   * the scenario's subscriptions are dropped again; the log window is read whether
+   * `run` passed or failed.
    */
   function scenario(name: string, key: string, bounces: number, run: (s: Scenario) => Promise<void>): void {
     it(name, async () => {
       await withLogTroubleCheck(daemonLogFile(edge), PERSISTENCE_TROUBLE, `node${EDGE_NODE} daemon.log`, async () => {
         await ensureEdgeUp();
+        const s = newScenario(key);
         try {
-          await run(newScenario(key));
+          await run(s);
         } finally {
-          await ensureEdgeUp().catch((error) => {
-            console.error(`scenario "${key}": could not bring node${EDGE_NODE} back up: ${String(error)}`);
-          });
+          try {
+            await ensureEdgeUp();
+            await releaseGraphs(s);
+          } catch (error) {
+            console.error(`scenario "${key}": cleanup of node${EDGE_NODE} failed: ${String(error)}`);
+          }
         }
       });
     }, SETUP_BUDGET_MS + bounces * BOUNCE_BUDGET_MS);

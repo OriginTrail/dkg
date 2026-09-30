@@ -37,9 +37,12 @@ it up for lines logged between two scenarios.
 
 A scenario leaves the edge running: if it fails between `stop-node` and the
 start, its cleanup restarts the node, so one failure does not take down the
-scenarios after it. What is not isolated: the devnet and the edge daemon are
-shared by all scenarios, and the subscriptions a scenario leaves on the edge
-stay there (under its own graph ids).
+scenarios after it. The cleanup also unsubscribes the scenario's graphs (best
+effort): the edge rehydrates every durable subscription on each start under an
+activation cap, so subscriptions left behind by many scenarios or runs would
+slow a later scenario's restart down. What is not isolated: the devnet and the
+edge daemon are shared by all scenarios, and a scenario that hangs the daemon or
+the devnet fails the ones after it.
 
 The daemon's SQLite writes are fast, so this suite cannot hold one open across
 `stop()`. The drain itself is pinned by
