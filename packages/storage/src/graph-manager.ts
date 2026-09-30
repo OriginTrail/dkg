@@ -1,7 +1,8 @@
 import type { Quad, QueryOptions, TripleStore } from './triple-store.js';
-import { findTripleStoreCapability } from './triple-store.js';
+import { asReadSnapshotCapability, type ReadSnapshotStore } from './read-snapshot-capability.js';
 import { asGraphWriteRevisionSource } from './graph-write-gen.js';
-import { loadSwmQuadsAcrossChunks, SHARED_MEMORY_GRAPHS_PER_QUERY, type SwmChunkReadPolicy } from './swm-query-chunks.js';
+import { loadSwmQuadsAcrossChunks, SHARED_MEMORY_GRAPHS_PER_QUERY, type SwmReadPlan, type SharedMemoryResultBudget } from './swm-query-chunks.js';
+export type { SharedMemoryResultBudget } from './swm-query-chunks.js';
 export { SharedMemoryResultBudgetError } from './swm-query-chunks.js';
 
 import {
@@ -127,12 +128,6 @@ export interface LoadSelectedSharedMemoryQuadsOptions {
   }) => string;
 }
 
-export interface SharedMemoryResultBudget {
-  pageRows: number;
-  maxRows: number;
-  maxBytesEstimate: number;
-}
-
 export class SharedMemoryReadConsistencyError extends Error {
   readonly code = 'SWM_READ_CONSISTENCY' as const;
   readonly retryable = true as const;
@@ -160,7 +155,7 @@ function mergeQueryOptions(
 }
 
 async function listGraphsByPrefix(
-  store: TripleStore,
+  store: ReadSnapshotStore,
   prefix: string,
   options?: QueryOptions,
 ): Promise<string[]> {
@@ -286,7 +281,7 @@ async function listDeclaredSlashContextGraphs(
  * separate semantic boundary, not a range-pruning escape hatch.
  */
 export async function resolveSharedMemoryReadGraphs(
-  store: TripleStore,
+  store: ReadSnapshotStore,
   bucketGraph: string,
   options?: QueryOptions,
 ): Promise<NonEmptyGraphList> {
@@ -310,7 +305,7 @@ export async function resolveSharedMemoryReadGraphs(
  * under-read a graph it does not understand. The bucket is always in the set.
  */
 export async function resolveKaBoundedSharedMemoryReadGraphs(
-  store: TripleStore,
+  store: ReadSnapshotStore,
   bucketGraph: string,
   bound: SwmKaGraphBound,
   options?: QueryOptions,
@@ -319,7 +314,7 @@ export async function resolveKaBoundedSharedMemoryReadGraphs(
 }
 
 async function resolveSwmReadGraphs(
-  store: TripleStore,
+  store: ReadSnapshotStore,
   bucketGraph: string,
   options: QueryOptions | undefined,
   bound: SwmKaGraphBound | undefined,
@@ -430,7 +425,7 @@ interface NamedLifecycleGraphResolution {
  * data is written.
  */
 async function resolveNamedLifecycleReadPolicy(
-  store: TripleStore,
+  store: ReadSnapshotStore,
   bucketGraph: string,
   identity: NamedKnowledgeAssetGraphIdentity,
   options?: QueryOptions,
@@ -451,7 +446,7 @@ async function resolveNamedLifecycleReadPolicy(
 
 /** Resolve the concrete graph set for an explicit semantic SWM scope. */
 export async function resolveSharedMemoryScopeGraphs(
-  store: TripleStore,
+  store: ReadSnapshotStore,
   bucketGraph: string,
   scope: SharedMemoryGraphScope,
   options?: QueryOptions,
@@ -673,28 +668,25 @@ async function loadSharedMemoryQuadsInternal(
 ): Promise<Quad[]> {
   const innerGraphPattern = sharedMemorySelectionGraphPattern(selection, options);
   const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
-  const resolveGraphs = (readOptions: QueryOptions | undefined) => graphScope?.kind === 'bounded'
-    ? resolveKaBoundedSharedMemoryReadGraphs(store, bucketGraph, graphScope.bound, readOptions)
-    : resolveSharedMemoryScopeGraphs(store, bucketGraph, graphScope, readOptions);
+  const resolveGraphs = (readStore: ReadSnapshotStore, readOptions: QueryOptions | undefined) =>
+    graphScope?.kind === 'bounded'
+      ? resolveKaBoundedSharedMemoryReadGraphs(readStore, bucketGraph, graphScope.bound, readOptions)
+      : resolveSharedMemoryScopeGraphs(readStore, bucketGraph, graphScope, readOptions);
   const read = (
+    readStore: ReadSnapshotStore,
     graphs: NonEmptyGraphList,
     readOptions: QueryOptions | undefined,
-    policy?: SwmChunkReadPolicy,
-  ) => loadSwmQuadsAcrossChunks(store, graphs, innerGraphPattern, readOptions, options, policy);
+    plan?: SwmReadPlan,
+  ) => loadSwmQuadsAcrossChunks(readStore, graphs, innerGraphPattern, readOptions, options, plan);
 
-  const initialGraphs = await resolveGraphs(queryOptions);
+  const initialGraphs = await resolveGraphs(store, queryOptions);
   if (initialGraphs.length <= SHARED_MEMORY_GRAPHS_PER_QUERY) {
-    return read(initialGraphs, queryOptions);
+    return read(store, initialGraphs, queryOptions);
   }
-  type SnapshotReader = { withReadSnapshot<T>(read: (timestamp: string) => Promise<T>, signal?: AbortSignal): Promise<T> };
-  const snapshot = findTripleStoreCapability(store, (candidate): candidate is SnapshotReader =>
-    typeof candidate === 'object' && candidate !== null
-    && 'withReadSnapshot' in candidate
-    && typeof candidate.withReadSnapshot === 'function');
+  const snapshot = asReadSnapshotCapability(store);
   if (snapshot) {
-    return snapshot.withReadSnapshot(async (timestamp) => {
-      const readOptions = { ...queryOptions, readSnapshotTimestamp: timestamp };
-      return read(await resolveGraphs(readOptions), readOptions);
+    return snapshot.withReadSnapshot(async (snapshotStore) => {
+      return read(snapshotStore, await resolveGraphs(snapshotStore, queryOptions), queryOptions);
     }, queryOptions?.signal);
   }
   const revision = asGraphWriteRevisionSource(store);
@@ -702,16 +694,13 @@ async function loadSharedMemoryQuadsInternal(
     // One backend query has its own snapshot on SPARQL stores. Backends with
     // neither a pinned transaction nor an all-writer fence keep the legacy
     // single-query path instead of returning a mixed multi-query view.
-    return read(initialGraphs, queryOptions, {
-      graphsPerQuery: initialGraphs.length,
-      singleQueryBudgeted: true,
-    });
+    return read(store, initialGraphs, queryOptions, { kind: 'single-query' });
   }
   for (let attempt = 0; attempt < 3; attempt++) {
     const before = revision.getWriteRevision(bucketGraph);
     if (!before.stable) continue;
-    const graphs = await resolveGraphs(queryOptions);
-    const quads = await read(graphs, queryOptions);
+    const graphs = await resolveGraphs(store, queryOptions);
+    const quads = await read(store, graphs, queryOptions);
     const after = revision.getWriteRevision(bucketGraph);
     if (after.stable && after.generation === before.generation) return quads;
   }

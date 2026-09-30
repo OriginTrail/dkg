@@ -1,15 +1,23 @@
 /** Bounded backend queries and global SPO materialization for one SWM read. */
 import { getMetrics } from '@origintrail-official/dkg-core';
 import type { Quad, QueryOptions, TripleStore } from './triple-store.js';
-import type { LoadSelectedSharedMemoryQuadsOptions } from './graph-manager.js';
 
 export const SHARED_MEMORY_GRAPHS_PER_QUERY = 128;
 
-export interface SwmChunkReadPolicy {
-  graphsPerQuery?: number;
-  /** For a backend without a pinned snapshot or revision fence. */
-  singleQueryBudgeted?: boolean;
+export interface SharedMemoryResultBudget {
+  pageRows: number;
+  maxRows: number;
+  maxBytesEstimate: number;
 }
+
+export interface SwmMaterializationOptions {
+  resultBudget?: SharedMemoryResultBudget;
+  quadFilter?: (quad: Quad) => boolean;
+}
+
+export type SwmReadPlan =
+  | { kind: 'chunked'; graphsPerQuery?: number }
+  | { kind: 'single-query' };
 
 export class SharedMemoryResultBudgetError extends Error {
   readonly code = 'SHARED_MEMORY_RESULT_BUDGET' as const;
@@ -55,16 +63,17 @@ function compareSpo(a: Quad, b: Quad): number {
 
 /** The one identity/merge boundary shared by paged and CONSTRUCT reads. */
 export async function loadSwmQuadsAcrossChunks(
-  store: TripleStore,
+  store: Pick<TripleStore, 'query'>,
   graphs: readonly string[],
   innerGraphPattern: string,
   queryOptions: QueryOptions | undefined,
-  options: Pick<LoadSelectedSharedMemoryQuadsOptions, 'resultBudget' | 'quadFilter'>,
-  policy: SwmChunkReadPolicy = {},
+  options: SwmMaterializationOptions,
+  plan: SwmReadPlan = { kind: 'chunked' },
 ): Promise<Quad[]> {
-  const chunks = graphValueChunks(graphs, policy.graphsPerQuery ?? SHARED_MEMORY_GRAPHS_PER_QUERY);
+  const chunks = graphValueChunks(graphs, plan.kind === 'single-query'
+    ? graphs.length : plan.graphsPerQuery ?? SHARED_MEMORY_GRAPHS_PER_QUERY);
   if (options.resultBudget) {
-    return loadPaged(store, chunks, innerGraphPattern, queryOptions, options, policy.singleQueryBudgeted === true);
+    return loadPaged(store, chunks, innerGraphPattern, queryOptions, options, plan.kind === 'single-query');
   }
   const distinct = new Map<string, Quad>();
   // At most two backend slots for unbudgeted CONSTRUCT. Budgeted pages must
@@ -87,11 +96,11 @@ export async function loadSwmQuadsAcrossChunks(
 }
 
 async function loadPaged(
-  store: TripleStore,
+  store: Pick<TripleStore, 'query'>,
   chunks: string[],
   innerGraphPattern: string,
   queryOptions: QueryOptions | undefined,
-  options: Pick<LoadSelectedSharedMemoryQuadsOptions, 'resultBudget' | 'quadFilter'>,
+  options: SwmMaterializationOptions,
   singleQueryBudgeted: boolean,
 ): Promise<Quad[]> {
   const configured = options.resultBudget!;

@@ -105,8 +105,8 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
     );
     try {
       await store.insert(quads);
-      const originalQuery = store.query.bind(store);
-      const query = vi.spyOn(store, 'query');
+      const originalFetch = globalThis.fetch;
+      const requests = vi.spyOn(globalThis, 'fetch');
       const selected = await loadSelectedSharedMemoryQuads(
         store,
         swm,
@@ -120,12 +120,12 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
       const unpaged = await loadSelectedSharedMemoryQuads(store, swm, { rootEntities: [root] });
       expect(unpaged.map((q) => [q.subject, q.predicate, q.object].join('|')).sort())
         .toEqual(selected.map((q) => [q.subject, q.predicate, q.object].join('|')).sort());
-      const chunkQueries = query.mock.calls.filter(([sparql]) => sparql.includes('VALUES ?g'));
-      expect(chunkQueries.some(([sparql]) => sparql.includes(`<${quads[0]!.graph}>`)
-        && !sparql.includes(`<${quads[129]!.graph}>`))).toBe(true);
-      expect(chunkQueries.some(([sparql]) => sparql.includes(`<${quads[129]!.graph}>`)
-        && !sparql.includes(`<${quads[0]!.graph}>`))).toBe(true);
-      expect(chunkQueries.every(([, options]) => options?.readSnapshotTimestamp !== undefined)).toBe(true);
+      const chunkRequests = requests.mock.calls.filter(([, init]) => String(init?.body).includes('VALUES ?g'));
+      expect(chunkRequests.some(([, init]) => String(init?.body).includes(`<${quads[0]!.graph}>`)
+        && !String(init?.body).includes(`<${quads[129]!.graph}>`))).toBe(true);
+      expect(chunkRequests.some(([, init]) => String(init?.body).includes(`<${quads[129]!.graph}>`)
+        && !String(init?.body).includes(`<${quads[0]!.graph}>`))).toBe(true);
+      expect(chunkRequests.every(([input]) => String(input).includes('?timestamp='))).toBe(true);
 
       // A write between serial SELECT chunks must not leak into the pinned
       // read. A fresh transaction immediately afterwards must see it.
@@ -133,9 +133,10 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
         subject: root, predicate: `${PRED}:later`, object: '"later"', graph: quads[129]!.graph,
       };
       let inserted = false;
-      query.mockImplementation(async (sparql, options) => {
-        const result = await originalQuery(sparql, options);
-        if (!inserted && sparql.includes('VALUES ?g') && sparql.includes(`<${quads[0]!.graph}>`)) {
+      requests.mockImplementation(async (input, init) => {
+        const result = await originalFetch(input, init);
+        if (!inserted && String(init?.body).includes('VALUES ?g')
+          && String(init?.body).includes(`<${quads[0]!.graph}>`)) {
           inserted = true;
           await store.insert([added]);
           quads.push(added);
@@ -147,7 +148,7 @@ describe.skipIf(!BLAZEGRAPH_URL)('BlazegraphStore integration (live server)', ()
       });
       expect(inserted).toBe(true);
       expect(pinned.some((quad) => quad.predicate === added.predicate)).toBe(false);
-      query.mockRestore();
+      requests.mockRestore();
       const fresh = await loadSelectedSharedMemoryQuads(store, swm, { rootEntities: [root] }, {
         resultBudget: { pageRows: 1, maxRows: 3, maxBytesEstimate: 1024 * 1024 },
       });

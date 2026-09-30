@@ -560,6 +560,30 @@ describe('bounded SWM result materialization', () => {
     }
   });
 
+  it('enforces row and byte budgets across separate graph chunks', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('chunked-cumulative-budget');
+    const root = 'urn:chunked:budget-root';
+    const graphs = Array.from({ length: 130 }, (_, i) =>
+      `${swm}/${AUTHOR_A_MIXED}/${String(i + 1).padStart(3, '0')}`);
+    const first = { subject: root, predicate: 'urn:p:first', object: '"first"', graph: graphs[0]! };
+    const second = { subject: root, predicate: 'urn:p:second', object: '"second"', graph: graphs[129]! };
+    try {
+      await seedGraphs(store, graphs);
+      await store.insert([first, second]);
+      await expect(loadSelectedSharedMemoryQuads(store, swm, { rootEntities: [root] }, {
+        resultBudget: { pageRows: 1, maxRows: 1, maxBytesEstimate: 1024 * 1024 },
+      })).rejects.toMatchObject({ reason: 'rows', rows: 2 });
+      const keyBytes = 64 + 2 * JSON.stringify([first.subject, first.predicate, first.object]).length;
+      const quadBytes = 96 + 2 * (first.subject.length + first.predicate.length + first.object.length);
+      await expect(loadSelectedSharedMemoryQuads(store, swm, { rootEntities: [root] }, {
+        resultBudget: { pageRows: 1, maxRows: 3, maxBytesEstimate: keyBytes + quadBytes + 1 },
+      })).rejects.toMatchObject({ reason: 'bytes', rows: 2 });
+    } finally {
+      await store.close();
+    }
+  });
+
   it('retries a multi-chunk read when an all-writer revision changes between queries', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     const swm = contextGraphSharedMemoryUri('chunked-revision-fence');

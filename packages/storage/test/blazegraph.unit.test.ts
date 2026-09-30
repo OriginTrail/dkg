@@ -114,16 +114,33 @@ describe('BlazegraphStore (mocked HTTP)', () => {
       return blazeSelectResponse();
     });
     const store = new BlazegraphStore(baseUrl);
-    await store.withReadSnapshot(async (timestamp) => {
+    await store.withReadSnapshot(async (snapshot) => {
       await Promise.all([
-        store.query('SELECT ?name WHERE { ?name ?p ?o }', { readSnapshotTimestamp: timestamp }),
-        store.query('SELECT ?name WHERE { ?name ?p ?o }', { readSnapshotTimestamp: timestamp }),
+        snapshot.query('SELECT ?name WHERE { ?name ?p ?o }'),
+        snapshot.query('SELECT ?name WHERE { ?name ?p ?o }'),
       ]);
     });
     const urls = fetchCalls.map(([input]) => String(input));
     expect(urls[0]).toBe('http://blaze.test/tx?timestamp=-1');
     expect(urls.filter((url) => url === `${baseUrl}?timestamp=12345`)).toHaveLength(2);
     expect(urls.at(-1)).toBe('http://blaze.test/tx/12345?ABORT');
+  });
+
+  it('sends snapshot-bound CONSTRUCT through the pinned HTTP endpoint', async () => {
+    setFetch(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/tx?timestamp=-1')) {
+        return new Response('<tx txId="12346" readOnly="true"/>', { status: 201 });
+      }
+      return new Response(null, { status: 200 });
+    });
+    const store = new BlazegraphStore(baseUrl);
+    const result = await store.withReadSnapshot((snapshot) =>
+      snapshot.query('CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }'));
+    expect(result).toMatchObject({ type: 'quads', quads: [] });
+    const urls = fetchCalls.map(([input]) => String(input));
+    expect(urls).toContain(`${baseUrl}?timestamp=12346`);
+    expect(urls.at(-1)).toBe('http://blaze.test/tx/12346?ABORT');
   });
 
   it('releases a read-only transaction after a query failure', async () => {
@@ -136,10 +153,48 @@ describe('BlazegraphStore (mocked HTTP)', () => {
       return new Response('query failed', { status: 500 });
     });
     const store = new BlazegraphStore(baseUrl);
-    await expect(store.withReadSnapshot((timestamp) =>
-      store.query('SELECT ?name WHERE { ?name ?p ?o }', { readSnapshotTimestamp: timestamp }),
+    await expect(store.withReadSnapshot((snapshot) =>
+      snapshot.query('SELECT ?name WHERE { ?name ?p ?o }'),
     )).rejects.toThrow('Blazegraph query failed');
     expect(String(fetchCalls.at(-1)?.[0])).toBe('http://blaze.test/tx/22?ABORT');
+  });
+
+  it('releases a created transaction when its begin response body fails', async () => {
+    setFetch(async (input) => {
+      const url = String(input);
+      if (url.endsWith('/tx?timestamp=-1')) {
+        return new Response(new ReadableStream({
+          start(controller) { controller.error(new Error('begin body unavailable')); },
+        }), { status: 201, headers: { Location: 'http://blaze.test/tx/123' } });
+      }
+      if (url.endsWith('/tx/123?ABORT')) return new Response(null, { status: 200 });
+      throw new Error(`Unexpected fetch: ${url}`);
+    });
+    const store = new BlazegraphStore(baseUrl);
+    await expect(store.withReadSnapshot(async () => undefined))
+      .rejects.toThrow('begin body unavailable');
+    expect(String(fetchCalls.at(-1)?.[0])).toBe('http://blaze.test/tx/123?ABORT');
+  });
+
+  it('releases a created transaction after a malformed begin response', async () => {
+    setFetch(async (input) => String(input).endsWith('/tx?timestamp=-1')
+      ? new Response('<tx readOnly="false"/>', {
+        status: 201, headers: { Location: 'http://blaze.test/tx/124' },
+      })
+      : new Response(null, { status: 200 }));
+    const store = new BlazegraphStore(baseUrl);
+    await expect(store.withReadSnapshot(async () => undefined))
+      .rejects.toThrow('read-only snapshot');
+    expect(String(fetchCalls.at(-1)?.[0])).toBe('http://blaze.test/tx/124?ABORT');
+  });
+
+  it('reports release failures after a successful snapshot read', async () => {
+    setFetch(async (input) => String(input).endsWith('/tx?timestamp=-1')
+      ? new Response('<tx txId="125" readOnly="true"/>', { status: 201 })
+      : new Response(null, { status: 503 }));
+    const store = new BlazegraphStore(baseUrl);
+    await expect(store.withReadSnapshot(async () => 'read result'))
+      .rejects.toThrow('release failed (503)');
   });
 
   it('insert POSTs N-Quads with correct content type', async () => {

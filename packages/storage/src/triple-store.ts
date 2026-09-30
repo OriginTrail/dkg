@@ -110,8 +110,6 @@ export interface QueryOptions {
    * and reject above this bound before JSON/N-Quads materialization.
    */
   maxResponseBytes?: number;
-  /** Pinned Blazegraph read-only transaction, set only by its snapshot capability. */
-  readSnapshotTimestamp?: string;
 }
 
 export type TripleStoreQueryOptions = QueryOptions;

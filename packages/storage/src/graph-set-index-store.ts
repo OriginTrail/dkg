@@ -585,16 +585,6 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async listGraphsByPrefix(prefix: string, options?: QueryOptions): Promise<string[]> {
-    // The ordinary catalog tracks the latest commit. A pinned read must
-    // enumerate through the backend at that exact transaction timestamp.
-    if (options?.readSnapshotTimestamp !== undefined) {
-      const graphs = this.inner.listGraphsByPrefix
-        ? await this.inner.listGraphsByPrefix(prefix, options)
-        : await this.inner.listGraphs(options);
-      return graphs.filter(
-        (graph) => graph.startsWith(prefix) && !isAtomicGraphReplaceStagingGraph(graph),
-      );
-    }
     if (!this.enabled) {
       if (this.inner.listGraphsByPrefix) {
         return (await this.inner.listGraphsByPrefix(prefix, options)).filter(
