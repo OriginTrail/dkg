@@ -529,12 +529,6 @@ describe('DKGAgent.stop() subscription persistence drain', () => {
     expect(saved).toEqual(['audit-row']);
     expect(agent.contextGraphSubscriptionPersistence.status().closed).toBe(true);
   });
-
-  it('still stops a synthetic agent that has no subscription scheduler', async () => {
-    const agent = shutdownAgent({ contextGraphSubscriptionPersistence: undefined });
-    await expect(agent.stop()).resolves.toBeUndefined();
-    expect(agent.node.stop).toHaveBeenCalledOnce();
-  });
 });
 
 describe('DKGAgent restart', () => {
@@ -547,6 +541,18 @@ describe('DKGAgent restart', () => {
       contextGraphSubscriptionStore: store as any,
     });
   }
+
+  it('constructs the subscription scheduler with the agent, open, so stop() and start() need no guard', async () => {
+    const agent = await createAgent({
+      loadAll: async () => [],
+      save: async () => undefined,
+      delete: async () => undefined,
+    });
+    expect((agent as any).contextGraphSubscriptionPersistence).toBeInstanceOf(ContextGraphSubscriptionPersistScheduler);
+    expect((agent as any).contextGraphSubscriptionPersistence.status()).toEqual({
+      closed: false, lanes: 0, active: 0, pending: 0,
+    });
+  });
 
   it('closes subscription admission on stop() and reopens it on the same-object restart', async () => {
     const saved = new Map<string, ContextGraphSubscriptionRecord>();

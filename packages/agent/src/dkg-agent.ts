@@ -2984,7 +2984,7 @@ export class DKGAgent extends DKGAgentBase {
     // The drain has the same bounded budget as membership's, and a timeout
     // blocks store teardown until stop() is retried.
     if (!await drainsWithin(
-      this.contextGraphSubscriptionPersistence?.closeAndDrain() ?? Promise.resolve(),
+      this.contextGraphSubscriptionPersistence.closeAndDrain(),
       DKGAgentBase.CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS,
     )) {
       this.contextGraphSubscriptionPersistenceShutdownBlocked = true;

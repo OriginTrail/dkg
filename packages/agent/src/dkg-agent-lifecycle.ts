@@ -2235,7 +2235,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.contextGraphMembershipPersistence.reopen();
     // stop() drained and closed subscription writes; a restarted agent admits
     // them again. Writes issued before the first start() left it open.
-    this.contextGraphSubscriptionPersistence?.reopenIfClosed();
+    this.contextGraphSubscriptionPersistence.reopenIfClosed();
     // stop() aborts detached cold authority flights; a restarted agent admits
     // new ones (the runtime is created lazily on first use otherwise).
     peekFinalizedAuthorityColdResolution(this)?.reopen();
