@@ -1,3 +1,4 @@
+import { snapshotOperation } from './workspace-snapshot-lifecycle.js';
 import { workspaceOperationSubject, workspaceOperationPublicSliceSubject, workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 export { workspaceKnowledgeAssetHeadSubject } from './workspace-metadata-subjects.js';
 import { ENTITY_SHARE_METADATA_PREDICATES as ENTITY_SHARE } from './entity-share-metadata.js';
@@ -789,7 +790,7 @@ export async function resolveWorkspaceSelection(params: {
   return quads;
 }
 
-export async function storeWorkspaceOperationPublicQuads(params: {
+type StoreWorkspaceOperationPublicQuadsParams = {
   store: TripleStore;
   graphManager: GraphManager;
   contextGraphId: string;
@@ -811,7 +812,9 @@ export async function storeWorkspaceOperationPublicQuads(params: {
   subGraphName?: string;
   timestamp?: Date;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
-}): Promise<void> {
+};
+
+export const storeWorkspaceOperationPublicQuads = snapshotOperation<StoreWorkspaceOperationPublicQuadsParams, void>(async params => {
   const roots = normalizeRoots(params.rootEntities);
   if (roots.length === 0) return;
 
@@ -896,13 +899,13 @@ export async function storeWorkspaceOperationPublicQuads(params: {
     // read-both (an explicit legacy ref row wins when present).
   }
   await params.store.insert(snapshotQuads);
-}
+});
 
 /**
  * Store one immutable public snapshot for one complete graph-scoped KA.
  * Metadata and snapshot count are constant in the number of RDF subjects.
  */
-export async function storeKnowledgeAssetOperationPublicQuads(params: {
+type StoreKnowledgeAssetOperationPublicQuadsParams = {
   store: TripleStore;
   graphManager: GraphManager;
   contextGraphId: string;
@@ -919,7 +922,9 @@ export async function storeKnowledgeAssetOperationPublicQuads(params: {
   subGraphName?: string;
   timestamp?: Date;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
-}): Promise<void> {
+};
+
+export const storeKnowledgeAssetOperationPublicQuads = snapshotOperation<StoreKnowledgeAssetOperationPublicQuadsParams, void>(async params => {
   const scope = createGraphKnowledgeAssetScope(params.kaUal, params.assertionVersion);
   const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
   const workspaceMetaGraph = params.graphManager.sharedMemoryMetaUri(
@@ -986,7 +991,7 @@ export async function storeKnowledgeAssetOperationPublicQuads(params: {
     });
   }
   await params.store.insert(metadata);
-}
+});
 
 /** Resolve and integrity-check a complete graph-scoped KA operation snapshot. */
 export async function resolveKnowledgeAssetOperationPublicQuads(params: {
