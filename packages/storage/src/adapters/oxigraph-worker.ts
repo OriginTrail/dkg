@@ -837,7 +837,10 @@ export class OxigraphWorkerStore implements TripleStore {
     );
   }
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
-    return this.callWithTimeout<string[]>(this.operationTimeoutMs, options?.signal, 'listGraphs');
+    const workerOptions = options?.maxResponseBytes === undefined
+      ? undefined
+      : { maxResponseBytes: options.maxResponseBytes };
+    return this.callWithTimeout<string[]>(this.operationTimeoutMs, options?.signal, 'listGraphs', workerOptions);
   }
   async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> {
     return this.runTrackedWrite({ kind: 'graphs', graphs: [graphUri] }, () =>

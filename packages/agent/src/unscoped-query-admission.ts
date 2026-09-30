@@ -7,6 +7,7 @@ import {
   SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
 import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
+import type { QueryMaterializationBudget } from '@origintrail-official/dkg-query';
 import { runBoundedOperation } from './bounded-operation.js';
 import { strip } from './dkg-agent-utils.js';
 import { everyWithConcurrency } from './map-with-concurrency.js';
@@ -30,7 +31,11 @@ export interface UnscopedQueryAdmissionDependencies {
  */
 export async function canReadUnscopedQuery(
   deps: UnscopedQueryAdmissionDependencies,
-  opts: { signal?: AbortSignal } = {},
+  opts: {
+    signal?: AbortSignal;
+    maxResponseBytes?: number;
+    materializationBudget?: QueryMaterializationBudget;
+  } = {},
 ): Promise<boolean> {
   return runBoundedOperation(async (signal) => {
     signal.throwIfAborted();
@@ -42,11 +47,20 @@ export async function canReadUnscopedQuery(
             ?cg <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> "private"
           }
         }`,
-        { source: 'agent.query.privateGraphAccessPolicy', signal },
+        {
+          source: 'agent.query.privateGraphAccessPolicy',
+          signal,
+          maxResponseBytes: opts.maxResponseBytes,
+        },
       ),
-      new GraphManager(deps.store).listStoredContextGraphOwnerCandidates({ signal }),
+      new GraphManager(deps.store).listStoredContextGraphOwnerCandidates({
+        signal,
+        maxResponseBytes: opts.maxResponseBytes,
+      }),
     ]);
     signal.throwIfAborted();
+    opts.materializationBudget?.consume(result);
+    opts.materializationBudget?.consume(storedIds);
     if (result.type !== 'bindings') {
       throw new Error('Cannot authorize unscoped query: invalid access-policy discovery result');
     }

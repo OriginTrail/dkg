@@ -132,6 +132,7 @@ import { ethers } from 'ethers';
 import { join } from 'node:path';
 import {
   DKGQueryEngine, QueryHandler,
+  QueryMaterializationBudget,
   emptyQueryResultForKind,
   validateReadOnlySparql,
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
@@ -651,6 +652,9 @@ export class QueryMethods extends DKGAgentBase {
         effectiveWmAddress.toLowerCase() === defaultEvmLc ? [this.peerId!] : [this.defaultAgentAddress!];
     }
 
+    const materializationBudget = opts.maxResponseBytes === undefined
+      ? undefined
+      : new QueryMaterializationBudget(opts.maxResponseBytes);
     const execute = () => this.queryEngine.query(sparql, {
       contextGraphId: opts.contextGraphId,
       graphSuffix: opts.graphSuffix,
@@ -665,6 +669,7 @@ export class QueryMethods extends DKGAgentBase {
       // becomes two explicit policies: per-store-response transport limiting
       // and cumulative decoded materialization limiting.
       maxMaterializedBytes: opts.maxResponseBytes,
+      materializationBudget,
       view: opts.view,
       agentAddress: effectiveWmAddress,
       agentAddressAliases: wmAddressAliases,
@@ -697,7 +702,11 @@ export class QueryMethods extends DKGAgentBase {
               this, ids, { callerAgentAddress: callerAgentAddressStr, signal },
             )
           ),
-        }, { signal: opts.signal }),
+        }, {
+          signal: opts.signal,
+          maxResponseBytes: opts.maxResponseBytes,
+          materializationBudget,
+        }),
         execute,
         denied: () => {
           this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');

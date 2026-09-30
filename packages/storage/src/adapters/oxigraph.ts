@@ -1,5 +1,6 @@
 import oxigraph from 'oxigraph';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
+import { assertGraphCatalogWithinResponseLimit } from '../graph-catalog-response-limit.js';
 import { existsSync, readFileSync, renameSync } from 'node:fs';
 import { mkdir, open, rename } from 'node:fs/promises';
 import { dirname } from 'node:path';
@@ -579,15 +580,19 @@ export class OxigraphStore implements TripleStore {
     // NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY.
     const result = this.store.query(NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY);
     throwIfAborted(options?.signal);
-    if (typeof result === 'boolean' || typeof result === 'string') return [];
-    if (!Array.isArray(result)) return [];
-    return (result as Map<string, OxTerm>[])
+    if (typeof result === 'boolean' || typeof result === 'string' || !Array.isArray(result)) {
+      assertGraphCatalogWithinResponseLimit([], options?.maxResponseBytes);
+      return [];
+    }
+    const graphs = (result as Map<string, OxTerm>[])
       .filter((row): row is Map<string, OxTerm> => row instanceof Map)
       .map((row) => {
         const g = row.get('g');
         return g ? g.value : '';
       })
       .filter((graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph));
+    assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
+    return graphs;
   }
 
   async deleteBySubjectPrefix(

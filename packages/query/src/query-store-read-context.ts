@@ -119,9 +119,10 @@ export function createQueryStoreReadContext(
   queryOptions: QueryOptions | undefined,
 ): QueryStoreReadContext {
   const options = storeOptions(queryOptions);
-  const budget = queryOptions?.maxMaterializedBytes === undefined
-    ? undefined
-    : new QueryMaterializationBudget(queryOptions.maxMaterializedBytes);
+  const budget = queryOptions?.materializationBudget
+    ?? (queryOptions?.maxMaterializedBytes === undefined
+      ? undefined
+      : new QueryMaterializationBudget(queryOptions.maxMaterializedBytes));
   const lane = createStoreReadLane(store, options, budget);
   const sharedOptions = sharedDiscoveryStoreOptions(options);
   return {

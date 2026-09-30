@@ -8,6 +8,7 @@ import {
   BlazegraphStore,
   GraphSetIndexStore,
   OxigraphStore,
+  OxigraphWorkerStore,
   SparqlHttpStore,
   StoreSchedulerBusyError,
   StorePriorityScheduler,
@@ -277,6 +278,39 @@ describe('GraphSetIndexStore', () => {
     ]));
     expect(backend.listGraphsCalls).toBe(2);
     await inner.close();
+  });
+
+  it('rejects an oversized full catalog even when the requested prefix matches one graph', async () => {
+    const inner = new OxigraphStore();
+    const target = 'did:dkg:context-graph:target';
+    await inner.insert([
+      q(target),
+      ...Array.from({ length: 80 }, (_, index) => q(`did:dkg:context-graph:unrelated-${index}`)),
+    ]);
+    try {
+      const warm = new GraphSetIndexStore(inner);
+      await expect(warm.listGraphs()).resolves.toHaveLength(81);
+      await expect(warm.listGraphsByPrefix(target, { maxResponseBytes: 256 }))
+        .rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE' });
+
+      const cold = new GraphSetIndexStore(inner);
+      await expect(cold.listGraphsByPrefix(target, { maxResponseBytes: 256 }))
+        .rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE' });
+    } finally {
+      await inner.close();
+    }
+  });
+
+  it('rejects a large worker graph catalog before it crosses the worker boundary', async () => {
+    const worker = new OxigraphWorkerStore();
+    try {
+      await worker.insert(Array.from({ length: 80 }, (_, index) =>
+        q(`did:dkg:context-graph:worker-${index}`)));
+      await expect(worker.listGraphs({ maxResponseBytes: 256 }))
+        .rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE' });
+    } finally {
+      await worker.close();
+    }
   });
 
   it('seeds from one listGraphs scan and serves prefix lookups from memory', async () => {

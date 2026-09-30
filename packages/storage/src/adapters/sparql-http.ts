@@ -31,6 +31,7 @@ import type {
   StorePressureSnapshot,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
+import { assertGraphCatalogWithinResponseLimit } from '../graph-catalog-response-limit.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
 import {
@@ -1174,12 +1175,16 @@ export class SparqlHttpStore implements TripleStore {
       this.listGraphsCache &&
       this.now() - this.listGraphsCachedAt < MANAGED_LIST_GRAPHS_CACHE_MS
     ) {
+      assertGraphCatalogWithinResponseLimit(this.listGraphsCache, options?.maxResponseBytes);
       return [...this.listGraphsCache];
     }
 
-    const refreshOptions = options?.source ? { source: options.source } : undefined;
+    const refreshOptions = options?.source || options?.maxResponseBytes !== undefined
+      ? { source: options?.source, maxResponseBytes: options?.maxResponseBytes }
+      : undefined;
     const inFlight = this.listGraphsInFlight ?? this.refreshListGraphsCache(refreshOptions);
     const graphs = await raceStoreWorkAgainstAbort(inFlight, options?.signal);
+    assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
     return [...graphs];
   }
 

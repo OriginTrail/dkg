@@ -4,6 +4,7 @@ import type {
 } from '@origintrail-official/dkg-storage';
 import type { GetView } from '@origintrail-official/dkg-core';
 import { TrustLevel } from '@origintrail-official/dkg-core';
+import type { QueryMaterializationBudget } from './query-store-read-context.js';
 
 export interface QueryResult {
   bindings: Array<Record<string, string>>;
@@ -17,6 +18,8 @@ export interface QueryOptions extends StoreQueryOptions {
    * `maxResponseBytes`, this limit is charged across every internal read.
    */
   maxMaterializedBytes?: number;
+  /** Request-local budget shared with pre-execution admission reads. */
+  materializationBudget?: QueryMaterializationBudget;
   contextGraphId?: string;
   timeout?: number;
   /** When set to '_shared_memory', query runs over the context graph's shared memory graph only. */
