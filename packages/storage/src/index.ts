@@ -255,6 +255,8 @@ export {
 export {
   ContextGraphManager,
   GraphManager,
+  admitSharedMemoryGraphCount,
+  type SharedMemoryGraphAdmission,
   loadSelectedSharedMemoryQuads,
   loadSharedMemoryQuadsForScope,
   loadSharedMemorySliceWithKaBoundFallback,

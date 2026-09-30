@@ -131,8 +131,6 @@ export interface LoadSelectedSharedMemoryQuadsOptions {
    * empty or complete snapshot.
    */
   resultBudget?: SharedMemoryResultBudget;
-  /** Bound graph fan-out before issuing backend chunks; exceeding it is retryable. */
-  maxGraphsToRead?: number;
   rootEntitiesErrorMessage?: (input: {
     inputCount: number;
     hadInput: boolean;
@@ -149,17 +147,27 @@ export class SharedMemoryReadConsistencyError extends Error {
   }
 }
 
-class SharedMemoryGraphScanDeferredError extends Error {
-  constructor(readonly graphCount: number, readonly limit: number) {
-    super(`Shared-memory graph family has ${graphCount} graphs, above the ${limit}-graph read limit`);
-    this.name = 'SharedMemoryGraphScanDeferredError';
-  }
+export type SharedMemoryGraphAdmission =
+  | { status: 'admitted' }
+  | { status: 'deferred'; graphCount: number; limit: number };
+
+/** A scan policy decision, independent of graph materialization. */
+export function admitSharedMemoryGraphCount(
+  graphCount: number,
+  limit: number | undefined,
+): SharedMemoryGraphAdmission {
+  return limit !== undefined && graphCount > limit
+    ? { status: 'deferred', graphCount, limit }
+    : { status: 'admitted' };
 }
 
-function assertSharedMemoryGraphReadLimit(graphs: readonly string[], limit: number | undefined): void {
-  if (limit !== undefined && graphs.length > limit) {
-    throw new SharedMemoryGraphScanDeferredError(graphs.length, limit);
-  }
+type SharedMemoryGraphReadResult =
+  | { status: 'admitted'; quads: Quad[] }
+  | Extract<SharedMemoryGraphAdmission, { status: 'deferred' }>;
+
+function unrestrictedQuads(result: SharedMemoryGraphReadResult): Quad[] {
+  if (result.status === 'admitted') return result.quads;
+  throw new Error('Unexpected graph admission deferral in an unrestricted shared-memory read');
 }
 
 /**
@@ -309,10 +317,10 @@ export async function loadKaBoundedSharedMemoryQuads(
   kaGraphBound: SwmKaGraphBound,
   options: LoadSelectedSharedMemoryQuadsOptions = {},
 ): Promise<Quad[]> {
-  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, {
+  return unrestrictedQuads(await loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, {
     kind: 'bounded',
     bound: kaGraphBound,
-  });
+  }));
 }
 
 /**
@@ -328,7 +336,9 @@ export async function loadSharedMemoryQuadsForScope(
   scope: SharedMemoryGraphScope,
   options: LoadSelectedSharedMemoryQuadsOptions = {},
 ): Promise<Quad[]> {
-  return loadSharedMemoryQuadsInternal(store, bucketGraph, selection, options, scope);
+  return unrestrictedQuads(await loadSharedMemoryQuadsInternal(
+    store, bucketGraph, selection, options, scope,
+  ));
 }
 
 interface NamedLifecycleGraphResolution {
@@ -688,27 +698,25 @@ async function runSharedMemorySliceCandidates(
       if (accepted) return { status: 'verified', quads: result, accepted };
     }
   }
-  let quads: Quad[];
-  try {
-    quads = await traceSlowSwmReadStage('complete.total', queryOptions, () =>
-      loadSelectedSharedMemoryQuads(store, bucketGraph, selection, {
-        ...loadOptions, querySource: completeSource,
-        maxGraphsToRead: maxCompleteFamilyGraphs,
-      }));
-  } catch (error) {
-    if (maxCompleteFamilyGraphs === undefined || !(error instanceof SharedMemoryGraphScanDeferredError)) {
-      throw error;
-    }
+  const complete = await traceSlowSwmReadStage('complete.total', queryOptions, () =>
+    loadSharedMemoryQuadsInternal(
+      store, bucketGraph, selection,
+      { ...loadOptions, querySource: completeSource },
+      { kind: 'complete-family' },
+      maxCompleteFamilyGraphs,
+    ));
+  if (complete.status === 'deferred') {
     // An unverified candidate is never promoted. The finalization caller can
-    // request the complete payload from peers while the legacy chain scan keeps
-    // its unrestricted fallback for local recovery.
+    // request the complete payload from peers; bounded legacy recovery may
+    // also retry locally when the family is small enough.
     const now = Date.now();
     if (now - lastSwmGraphLimitWarningAt >= 60_000) {
       lastSwmGraphLimitWarningAt = now;
-      console.warn(`[swm-read] deferring complete family with ${error.graphCount} graphs (limit=${error.limit}) without promoting an unverified candidate`);
+      console.warn(`[swm-read] deferring complete family with ${complete.graphCount} graphs (limit=${complete.limit}) without promoting an unverified candidate`);
     }
     return { status: 'deferred', candidateQuads: lastCandidate };
   }
+  const quads = complete.quads;
   if (quads.length === 0) return { status: 'complete-unmatched', quads };
   accept ??= await traceSlowSwmReadStage('complete.prepare-verifier', queryOptions, createAccept);
   const accepted = await traceSlowSwmReadStage('complete.verify', queryOptions, async () => accept!(quads));
@@ -774,47 +782,49 @@ async function loadSharedMemoryQuadsInternal(
   graphScope:
     | { kind: 'bounded'; bound: SwmKaGraphBound }
     | SharedMemoryGraphScope,
-): Promise<Quad[]> {
+  maxGraphsToRead?: number,
+): Promise<SharedMemoryGraphReadResult> {
   const innerGraphPattern = sharedMemorySelectionGraphPattern(selection, options);
   const queryOptions = mergeQueryOptions(options.queryOptions, options.querySource);
   const resolveGraphs = (readStore: ReadSnapshotStore, readOptions: QueryOptions | undefined) =>
     graphScope?.kind === 'bounded'
       ? resolveKaBoundedSharedMemoryReadGraphs(readStore, bucketGraph, graphScope.bound, readOptions)
       : resolveSharedMemoryScopeGraphs(readStore, bucketGraph, graphScope, readOptions);
-  const read = (
+  const read = async (
     readStore: ReadSnapshotStore,
     graphs: NonEmptyGraphList,
     readOptions: QueryOptions | undefined,
     plan?: SwmReadPlan,
-  ) => {
-    assertSharedMemoryGraphReadLimit(graphs, options.maxGraphsToRead);
-    return loadSwmQuadsAcrossChunks(readStore, graphs, innerGraphPattern, readOptions, options, plan);
+  ): Promise<SharedMemoryGraphReadResult> => {
+    const admission = admitSharedMemoryGraphCount(graphs.length, maxGraphsToRead);
+    if (admission.status === 'deferred') return admission;
+    const quads = await loadSwmQuadsAcrossChunks(
+      readStore, graphs, innerGraphPattern, readOptions, options, plan,
+    );
+    return { status: 'admitted', quads };
   };
 
   const snapshot = asReadSnapshotCapability(store);
-  if (graphScope.kind === 'complete-family' && snapshot && options.maxGraphsToRead === undefined) {
-    // No outer preflight is needed. Resolve the authoritative complete graph
-    // set once, at the same backend commit point used for materialization.
-    return snapshot.withReadSnapshot(async (snapshotStore) => {
-      const graphs = await traceSlowSwmReadStage('selected.resolve-snapshot', queryOptions, () =>
-        resolveGraphs(snapshotStore, queryOptions));
-      return traceSlowSwmReadStage('selected.materialize-snapshot', queryOptions, () =>
-        read(snapshotStore, graphs, queryOptions));
-    }, queryOptions?.signal);
+  let initialGraphs: NonEmptyGraphList | undefined;
+  if (!(graphScope.kind === 'complete-family' && snapshot && maxGraphsToRead === undefined)) {
+    // An unrestricted complete-family read discovers its authoritative graph
+    // set only inside the snapshot. Limited reads can reject a known oversized
+    // family before opening a snapshot or issuing any materialization query.
+    initialGraphs = await traceSlowSwmReadStage('selected.resolve-initial', queryOptions, () =>
+      resolveGraphs(store, queryOptions));
+    const preflight = admitSharedMemoryGraphCount(initialGraphs.length, maxGraphsToRead);
+    if (preflight.status === 'deferred') return preflight;
   }
-  const initialGraphs = await traceSlowSwmReadStage('selected.resolve-initial', queryOptions, () =>
-    resolveGraphs(store, queryOptions));
-  assertSharedMemoryGraphReadLimit(initialGraphs, options.maxGraphsToRead);
   const graphsPerQuery = options.resultBudget
     ? BUDGETED_SHARED_MEMORY_GRAPHS_PER_QUERY : SHARED_MEMORY_GRAPHS_PER_QUERY;
-  if (graphScope.kind !== 'complete-family' && initialGraphs.length <= graphsPerQuery) {
+  if (initialGraphs && graphScope.kind !== 'complete-family' && initialGraphs.length <= graphsPerQuery) {
     return traceSlowSwmReadStage('selected.materialize', queryOptions, () =>
       read(store, initialGraphs, queryOptions));
   }
   if (snapshot) {
     // A complete-family outer catalog can be stale even when it fits in one
-    // query. Resolve that set at the backend commit point before claiming a
-    // complete unmatched read. Multi-query scoped reads also need one snapshot.
+    // query. Resolve the authoritative graph set in the same snapshot used for
+    // materialization; scoped multi-query reads also use one snapshot.
     return snapshot.withReadSnapshot(async (snapshotStore) => {
       const graphs = await traceSlowSwmReadStage('selected.resolve-snapshot', queryOptions, () =>
         resolveGraphs(snapshotStore, queryOptions));
@@ -822,6 +832,7 @@ async function loadSharedMemoryQuadsInternal(
         read(snapshotStore, graphs, queryOptions));
     }, queryOptions?.signal);
   }
+  if (!initialGraphs) throw new Error('Missing graph inventory for non-snapshot shared-memory read');
   if (initialGraphs.length <= graphsPerQuery) {
     return traceSlowSwmReadStage('selected.materialize', queryOptions, () =>
       read(store, initialGraphs, queryOptions));
@@ -851,6 +862,7 @@ async function loadSharedMemoryQuadsInternal(
       resolveGraphs(store, queryOptions));
     const quads = await traceSlowSwmReadStage('selected.materialize-retry', queryOptions, () =>
       read(store, graphs, queryOptions));
+    if (quads.status === 'deferred') return quads;
     const after = revision.getWriteRevision(bucketGraph);
     if (after.stable && after.generation === before.generation) return quads;
   }

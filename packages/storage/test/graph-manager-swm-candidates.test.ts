@@ -349,6 +349,48 @@ describe('loadSharedMemorySliceWithKaBoundFallback — the safe bounded read', (
     }
   });
 
+  it('defers when the snapshot inventory grows beyond the outer preflight limit', async () => {
+    const store = await createTripleStore({ backend: 'oxigraph' });
+    const swm = contextGraphSharedMemoryUri('fb-snapshot-huge-family');
+    const root = 'urn:fb:snapshot-huge-family';
+    const rootGraph = `${swm}/${AUTHOR_A_MIXED}/7`;
+    const snapshotGraphs = [rootGraph, ...Array.from({ length: 512 }, (_, i) => `${swm}/decoy-${i}`)];
+    const sources: string[] = [];
+    const query = async (...args: Parameters<typeof store.query>) => {
+      sources.push(args[1]?.source ?? '');
+      return store.query(...args);
+    };
+    const outerListGraphs = vi.fn(async () => [rootGraph]);
+    const snapshotListGraphs = vi.fn(async () => snapshotGraphs);
+    const snapshotRead = { query, listGraphs: snapshotListGraphs };
+    const snapshotted = {
+      query,
+      listGraphs: outerListGraphs,
+      withReadSnapshot: async (read: (value: typeof snapshotRead) => Promise<unknown>) => read(snapshotRead),
+    } as unknown as Parameters<typeof loadMerkleVerifiedSharedMemorySlice>[0];
+    try {
+      await store.insert([{ subject: root, predicate: 'urn:p', object: '"root"', graph: rootGraph }]);
+      const result = await loadMerkleVerifiedSharedMemorySlice(
+        snapshotted, swm, { rootEntities: [root] }, undefined,
+        {
+          sources: { ...SOURCES, rootIndexed: 'test.rootIndexed', cachedGraphSet: 'test.cachedGraphSet' },
+          expectedMerkleRoot: new Uint8Array(32),
+          createMerkleAccept: async () => () => null,
+          resultBudget: { pageRows: 100, maxRows: 1000, maxBytesEstimate: 1024 * 1024 },
+          maxCompleteFamilyGraphs: 512,
+        },
+      );
+      expect(result.status).toBe('deferred');
+      if (result.status !== 'deferred') throw new Error('Expected deferred SWM slice');
+      expect(result.candidateQuads.map((quad) => quad.object)).toEqual(['"root"']);
+      expect(outerListGraphs).toHaveBeenCalled();
+      expect(snapshotListGraphs).toHaveBeenCalled();
+      expect(sources).not.toContain(SOURCES.unbounded);
+    } finally {
+      await store.close();
+    }
+  });
+
   it('deprecated positional options preserve bounded widening behavior', async () => {
     const store = await createTripleStore({ backend: 'oxigraph' });
     const swm = contextGraphSharedMemoryUri('fb-legacy');
