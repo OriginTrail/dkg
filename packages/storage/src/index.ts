@@ -43,6 +43,11 @@ export {
   type SparqlEndpoint,
 } from './triple-store.js';
 export {
+  asReadSnapshotCapability,
+  type ReadSnapshotCapability,
+  type ReadSnapshotStore,
+} from './read-snapshot-capability.js';
+export {
   ATOMIC_GRAPH_REPLACE_STAGING_PREFIX,
   assertSubjectReplacementPayload,
   buildAtomicGraphAndSubjectReplaceUpdate,
