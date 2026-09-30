@@ -63,6 +63,22 @@ it('preserves every read decorator over a large pinned SWM family', async () => 
   }
 });
 
+it('advertises snapshots only when every decorator composes the inner capability', async () => {
+  const inner = new OxigraphStore();
+  const blobDir = await mkdtemp(join(tmpdir(), 'dkg-no-snapshot-decorator-'));
+  try {
+    const blob = new SharedMemoryLiteralBlobStore(inner, { blobDir, thresholdBytes: 16 });
+    const indexed = new GraphSetIndexStore(blob);
+    const decorated = new ChangelogStore(indexed);
+    for (const store of [inner, blob, indexed, decorated]) {
+      expect(asReadSnapshotCapability(store)).toBeNull();
+    }
+  } finally {
+    await inner.close();
+    await rm(blobDir, { recursive: true, force: true });
+  }
+});
+
 it('keeps the changelog graph hidden through a pinned read facade', async () => {
   const visible = 'urn:dkg:visible';
   const graphs = [visible, CHANGELOG_GRAPH];

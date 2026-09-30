@@ -56,6 +56,9 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   readonly innerStore: TripleStore;
+  readonly withReadSnapshot?: <T>(
+    read: (snapshot: ReadSnapshotStore) => Promise<T>, signal?: AbortSignal,
+  ) => Promise<T>;
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
@@ -75,20 +78,15 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
     this.blobWrites = new ContentAddressedBlobSingleFlight({
       createOrVerify: (hash, term) => this.writeBlobFile(hash, term),
     });
-  }
-
-  async withReadSnapshot<T>(
-    read: (snapshot: ReadSnapshotStore) => Promise<T>,
-    signal?: AbortSignal,
-  ): Promise<T> {
-    const capability = asReadSnapshotCapability(this.inner);
-    if (!capability) throw new Error('Inner store does not support read snapshots');
-    return capability.withReadSnapshot((innerRead) => read({
-      query: (sparql, options) => this.queryFrom(innerRead, sparql, options),
-      listGraphs: (options) => innerRead.listGraphs(options),
-      listGraphsByPrefix: (prefix, options) => innerRead.listGraphsByPrefix
-        ? innerRead.listGraphsByPrefix(prefix, options)
-        : innerRead.listGraphs(options).then((graphs) => graphs.filter((graph) => graph.startsWith(prefix))),
+    const snapshot = asReadSnapshotCapability(inner);
+    if (snapshot) this.withReadSnapshot = <T>(
+      read: (readStore: ReadSnapshotStore) => Promise<T>, signal?: AbortSignal,
+    ) => snapshot.withReadSnapshot((innerRead) => read({
+      query: (sparql, queryOptions) => this.queryFrom(innerRead, sparql, queryOptions),
+      listGraphs: (queryOptions) => innerRead.listGraphs(queryOptions),
+      listGraphsByPrefix: (prefix, queryOptions) => innerRead.listGraphsByPrefix
+        ? innerRead.listGraphsByPrefix(prefix, queryOptions)
+        : innerRead.listGraphs(queryOptions).then((graphs) => graphs.filter((graph) => graph.startsWith(prefix))),
     }), signal);
   }
 

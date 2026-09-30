@@ -89,7 +89,7 @@ async function isInVm(store: OxigraphStore, entity: string, value: string): Prom
 }
 
 describe('#1609 — SWM snapshot-root memo (finalization reconcile)', () => {
-  it('defers an oversized unstamped legacy family before any complete CONSTRUCT', async () => {
+  it('defers an oversized unstamped legacy family before SWM materialization', async () => {
     vi.stubEnv('DKG_LEGACY_SWM_MAX_FALLBACK_GRAPHS', '2');
     try {
       const store = withReadSnapshotForTest(new OxigraphStore());
@@ -108,7 +108,8 @@ describe('#1609 — SWM snapshot-root memo (finalization reconcile)', () => {
       const queries = vi.spyOn(store, 'query');
 
       expect(await reconcileOne(chain, fh, 9903n)).toBe('no-swm');
-      expect(queries.mock.calls.some(([sparql]) => sparql.includes('CONSTRUCT'))).toBe(false);
+      expect(queries.mock.calls.some(([sparql]) =>
+        /SELECT DISTINCT \?s \?p \?o[\s\S]*VALUES \?g\s*\{/i.test(sparql))).toBe(false);
       expect((await readStamps(store)).size).toBe(0);
       queries.mockRestore();
     } finally {

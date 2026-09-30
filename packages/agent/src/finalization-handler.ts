@@ -2948,7 +2948,7 @@ export class FinalizationHandler {
         : 'unknown',
     ].join('\u0000');
     return this.runScanSingleFlight(key, async () => {
-      const { quads, accepted } = await loadMerkleVerifiedSharedMemorySlice(
+      const result = await loadMerkleVerifiedSharedMemorySlice(
         this.store,
         this.finalizationSwmBucketUri(contextGraphId, subGraphName),
         { rootEntities: safeRoots },
@@ -2968,7 +2968,11 @@ export class FinalizationHandler {
           maxCompleteFamilyGraphs: positiveIntegerEnv('DKG_FINALIZATION_SWM_MAX_FALLBACK_GRAPHS', 512),
         },
       );
-      return { quads, matched: accepted };
+      switch (result.status) {
+        case 'verified': return { quads: result.quads, matched: result.accepted };
+        case 'complete-unmatched': return { quads: result.quads, matched: null };
+        case 'deferred': return { quads: [], matched: null };
+      }
     });
   }
 
@@ -2979,11 +2983,15 @@ export class FinalizationHandler {
     expectedMerkleRoot: Uint8Array,
     allowGeneratedCatalogFloor: boolean,
     subGraphName?: string,
-  ): Promise<{ quads: Quad[]; matched: Quad[] | null; privateRoots: Uint8Array[]; deferred: boolean }> {
+  ): Promise<
+    | { status: 'verified'; quads: Quad[]; matched: Quad[]; privateRoots: Uint8Array[] }
+    | { status: 'complete-unmatched'; quads: Quad[]; privateRoots: Uint8Array[] }
+    | { status: 'deferred' }
+  > {
     const safeRoots = rootEntities.filter(isSafeIri);
-    if (safeRoots.length === 0) return { quads: [], matched: null, privateRoots: [], deferred: false };
+    if (safeRoots.length === 0) return { status: 'complete-unmatched', quads: [], privateRoots: [] };
     let privateRoots: Uint8Array[] | undefined;
-    const { quads, accepted, deferred } = await loadMerkleVerifiedSharedMemorySlice(
+    const result = await loadMerkleVerifiedSharedMemorySlice(
       this.store,
       this.finalizationSwmBucketUri(contextGraphId, subGraphName),
       { rootEntities: safeRoots },
@@ -3010,9 +3018,17 @@ export class FinalizationHandler {
           : undefined,
       },
     );
-    // An indexed candidate is not a complete legacy snapshot after the limit
-    // fires. The caller must neither stamp nor promote its partial quads.
-    return { quads: deferred ? [] : quads, matched: accepted, privateRoots: privateRoots ?? [], deferred: deferred === true };
+    // Incomplete candidates remain inside storage and cannot reach promotion.
+    switch (result.status) {
+      case 'verified': return {
+        status: 'verified', quads: result.quads, matched: result.accepted,
+        privateRoots: privateRoots ?? [],
+      };
+      case 'complete-unmatched': return {
+        status: 'complete-unmatched', quads: result.quads, privateRoots: privateRoots ?? [],
+      };
+      case 'deferred': return { status: 'deferred' };
+    }
   }
 
   private runScanSingleFlight<T>(key: string, work: () => Promise<T>): Promise<T> {
@@ -4071,11 +4087,13 @@ export class FinalizationHandler {
     let hit: { rootEntities: string[]; sharedMemoryQuads: Quad[] } | null = null;
     for (const [op, memo] of opsSorted) {
       const roots = memo.roots;
-      const { quads: sharedMemoryQuads, matched: merkleMatchedQuads, privateRoots, deferred } =
-        await this.getSharedMemoryQuadsForRoots(
+      const swmResult = await this.getSharedMemoryQuadsForRoots(
           contextGraphId, roots, merkleRoot, allowGeneratedCatalogFloor, subGraphName,
         );
-      if (deferred) return null;
+      if (swmResult.status === 'deferred') return null;
+      const sharedMemoryQuads = swmResult.quads;
+      const privateRoots = swmResult.privateRoots;
+      const merkleMatchedQuads = swmResult.status === 'verified' ? swmResult.matched : null;
       if (sharedMemoryQuads.length === 0) continue;
       if (useStampIndex) {
         const digest = this.swmContentDigest(sharedMemoryQuads, privateRoots);
@@ -4191,9 +4209,12 @@ export class FinalizationHandler {
     } catch { return null; }
 
     for (const [op, roots] of rootsByOp) {
-      const { quads: sharedMemoryQuads, matched: merkleMatchedQuads, deferred } =
-        await this.getSharedMemoryQuadsForRoots(contextGraphId, roots, merkleRoot, false, subGraphName);
-      if (deferred) return null;
+      const swmResult = await this.getSharedMemoryQuadsForRoots(
+        contextGraphId, roots, merkleRoot, false, subGraphName,
+      );
+      if (swmResult.status === 'deferred') return null;
+      const sharedMemoryQuads = swmResult.quads;
+      const merkleMatchedQuads = swmResult.status === 'verified' ? swmResult.matched : null;
       if (sharedMemoryQuads.length > 0) {
         if (merkleMatchedQuads) {
           return { rootEntities: roots, sharedMemoryQuads };
