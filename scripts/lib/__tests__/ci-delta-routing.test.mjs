@@ -27,7 +27,7 @@ import { INSTALL_HOOK_DEPENDENCIES, INSTALL_HOOK_INPUTS, installDependency, inst
 import { PROGRAM_CHILD_COMMANDS, workflowExecution } from './ci-execution-graph.mjs';
 import { SUBCOMMAND_CHILD_COMMANDS } from '../../release-packages.mjs';
 import { BROWSER_SUITE_DEFERRED, jobLane, jobRequirement, laneExecution, laneSeeds, requirement, requirementCoveredByPlan } from './lane-entrypoints.mjs';
-import { loadReferences, packageImports, traceLaneLoads, workspaceCatalog, workspaceClosure } from './load-graph.mjs';
+import { fixtureContext, loadReferences, packageImports, traceLaneLoads, workspaceCatalog, workspaceClosure } from './load-graph.mjs';
 
 // The workspaces that `files` import by package name, plus everything those
 // workspaces depend on: what code outside the package lanes compiles against.
@@ -418,8 +418,8 @@ const UNFOLLOWED_LOADS = new Map([
     'agent-process.ts beside it, run under tsx (childArguments puts the script after the loader flags); a devnet file with run.ts\'s own route'],
   ['devnet/rfc64-persistence-lifecycle/run.ts: childArguments(LEASE_PROBE)',
     'lease-probe.ts beside it, run under tsx; a devnet file with run.ts\'s own route'],
-  ['packages/agent/devnet/rfc64-private-catalog/run.mjs: agentProcess',
-    "agent-process.mjs beside it (AGENT_PROCESS) unless a caller passes its own; agent code with run.mjs's own route"],
+  ['packages/agent/devnet/rfc64-private-catalog/run.mjs: args',
+    "agent-process.mjs beside it (AGENT_PROCESS) unless a caller passes its own, under tsx with a load hook when it records provenance; agent code with run.mjs's own route"],
   ['packages/agent/src/sync-verify-worker.ts: workerPath',
     "the agent's own sync-verify-worker-impl build (beside it, or under dist/), from agent source the agent rule routes"],
   ['packages/chain/test/hardhat-harness.ts: hardhatCli', "hardhat's CLI, resolved from node_modules, not a repository file"],
@@ -435,6 +435,39 @@ const UNFOLLOWED_LOADS = new Map([
     "the package's own proof-worker-entry beside it, or one a caller passes; random-sampling code its rule routes"],
   ['packages/storage/src/adapters/oxigraph-worker.ts: this.workerPath',
     "the storage package's own oxigraph-worker-impl (beside it, or its dist/ build), storage code its rule routes"],
+  // Programs a child-process call runs that no reading identifies: tools, or
+  // node running the file named.
+  ['devnet/rfc64-gate1-public-open/agent-child.ts: options.spawn.command',
+    "the process its caller configures: run.ts starts the Gate 1 adapter process beside it under tsx; its tests start fixtures"],
+  ['packages/adapter-hermes/pytests/run-pytest.mjs: cmd', 'the Python interpreters it probes and runs pytest with (-m pytest)'],
+  ["packages/adapter-hermes/test/hermes-adapter.part-11.test.ts: process.env.PYTHON ?? 'python3'", 'Python (PYTHON or python3) running inline code (-c)'],
+  ['packages/cli/scripts/bundle-markitdown-binaries.mjs: candidate.command', 'the Python interpreters it probes with --version (PYTHON, python3, python, py)'],
+  ['packages/cli/src/cli-supervisor.ts: daemonCommand.executable',
+    "process.execPath running the CLI's own daemon entry (resolveDaemonNodeCommand), CLI code the CLI rule routes"],
+  ['packages/cli/src/commands/lifecycle.ts: daemonCommand.executable',
+    "process.execPath running the CLI's own daemon entry (resolveDaemonNodeCommand), CLI code the CLI rule routes"],
+  ['packages/cli/src/daemon/oxigraph-binary.ts: path', 'the Oxigraph server binary it checks with --version'],
+  ['packages/cli/src/doctor/index.ts: cmd', "the system tools the doctor's checks probe"],
+  ['packages/cli/src/extraction/markitdown-converter.ts: bin', 'the bundled MarkItDown binary (getMarkItDownBin)'],
+  ['packages/cli/src/integrations/install-npm-global.ts: cmd', 'the npm global-install command its callers pass'],
+  ['packages/cli/src/mcp-config-metadata.ts: command', 'a command it probes with --help'],
+  ['packages/cli/src/mcp-config-metadata.ts: executable', 'Windows PowerShell'],
+  ['packages/cli/src/mcp-config-metadata.ts: copyCommand', 'the copy command it installs an MCP config with: cp, or a metadata-preserving copy on Linux'],
+  ['packages/cli/test/edge-auto-update-entrypoint-e2e.test.ts: pathDkg', 'a dkg shim the test writes to a temporary bin directory'],
+  ['packages/cli/test/fixtures/mcp-config-wsl.fixture.ts: shadowExecutable', 'a shadow executable the fixture writes to a temporary directory'],
+  ["packages/cli/test/fixtures/mcp-config-wsl.fixture.ts: windowsPowerShellExecutable('windows-wsl')", 'Windows PowerShell'],
+  ['packages/cli/test/fixtures/oxigraph-orphan-harness.ts: tool', 'the host tools hostHas() probes with -h'],
+  ['packages/cli/test/mcp-config-metadata.test.ts: shadowExecutable', 'a shadow executable the test writes to a temporary directory'],
+  ['packages/cli/test/mcp-config-metadata.test.ts: systemPowerShell', 'Windows PowerShell'],
+  ['packages/cli/test/oxigraph-orphan-lifecycle.test.ts: ...args', 'what the Oxigraph lifecycle spawns, passed through a counting wrapper: the Oxigraph binary or its standin'],
+  ['packages/cli/test/oxigraph-orphan-native.test.ts: lockingStandin.binaryPath', 'an Oxigraph standin binary the test builds in a temporary directory'],
+  ['packages/cli/test/oxigraph-parent-watchdog.test.ts: cmd', 'what the watchdog spawns, passed through its injected spawnChild: the Oxigraph binary or its standin'],
+  ['packages/cli/test/oxigraph-server.test.ts: binaryPath', 'the Oxigraph binary or its standin, checked with --version'],
+  ['packages/cli/test/oxigraph-server.test.ts: command', 'what the server spawns, passed through an injected spawnProcess: the Oxigraph binary or its standin'],
+  ['packages/cli/test/oxigraph-server.test.ts: standin', 'an Oxigraph standin binary fixture'],
+  ['packages/core/src/daemon-lifecycle.ts: node',
+    'process.execPath running the CLI entry resolveDkgCli() finds (packages/cli/dist/cli.js, or an installed CLI), CLI code the CLI rule routes'],
+  ['scripts/release-packages.mjs: cmd', "the npm, pnpm and git commands its run helpers take; verify-pack's is declared in SUBCOMMAND_CHILD_COMMANDS"],
 ]);
 
 // What the load-closure guard reports for a trace: each load whose file does
@@ -517,7 +550,7 @@ test('every file a lane runs, or loads by relative path, selects that lane', () 
   // The ABI sync route rests on a chain test that runs the script, not on the
   // vendored-ABI test's hint that names it.
   const syncTest = 'packages/chain/test/sync-chain-abis.unit.test.ts';
-  assert.ok(loadReferences(syncTest, fs.readFileSync(path.join(REPO_ROOT, syncTest), 'utf8')).paths.includes('scripts/sync-chain-abis.mjs'));
+  assert.ok(loadReferences(syncTest, fs.readFileSync(path.join(REPO_ROOT, syncTest), 'utf8')).runs.includes('scripts/sync-chain-abis.mjs'));
   // Every file INSTALL_HOOK_INPUTS routes to full CI is still one an install
   // hook reaches; the gap check below finds any it misses.
   const readInputs = new Set([...INSTALL_HOOK_READS.values()].flatMap(({ reads }) => reads));
@@ -631,7 +664,8 @@ test('the load-closure guard reports a planted unrouted load and an unlisted com
     "import { DKGAgent } from '../../agent/src/dkg-agent.js';",
     'const late = await import(`../../cli/src/${name}.js`);',
   ].join('\n')]]);
-  const trace = traceLaneLoads(new Map([[planted, new Map([['bura_query', 'seed']])]]), { read: (file) => sources.get(file) });
+  const context = fixtureContext(new Map([...sources, ['packages/agent/src/dkg-agent.ts', '']]));
+  const trace = traceLaneLoads(new Map([[planted, new Map([['bura_query', 'seed']])]]), { context });
   const { missing, unexplained } = loadClosureGaps(trace);
   assert.deepEqual(missing, [`bura_query loads packages/agent/src/dkg-agent.ts via ${planted}`]);
   assert.deepEqual(unexplained, [`${planted}: \`../../cli/src/\${name}.js\``]);
@@ -756,7 +790,8 @@ test('a package-local helper a workspace build runs is traced with that build ou
   const workflow = "jobs:\n  build:\n    if: needs.changes.outputs.run_node == 'true'\n    steps:\n      - run: pnpm run build:packages\n";
   const seeds = laneSeeds({ workflows: [['ci.yml', workflow]], execution, workspaceCode: false });
   assert.equal(seeds.get(helper)?.has(requirement.buildOutput('packages/cli')), true);
-  const trace = traceLaneLoads(seeds, { read: (file) => (file === helper ? "import '../../../scripts/audit-dial-protocol.mjs';" : undefined) });
+  const context = fixtureContext(new Map([[helper, "import '../../../scripts/audit-dial-protocol.mjs';"], ['scripts/audit-dial-protocol.mjs', '']]));
+  const trace = traceLaneLoads(seeds, { context });
   assert.deepEqual(loadClosureGaps(trace).missing, [`build-output:packages/cli loads scripts/audit-dial-protocol.mjs via ${helper}`]);
 });
 
@@ -784,7 +819,7 @@ test('a script path a lane assembles at run time fails the guard until it is lis
       'bash "$SCRIPT_DIR/$helper"',
     ].join('\n')],
   ]);
-  const trace = traceLaneLoads(new Map([[planted, new Map([['bura_cli', 'seed']])]]), { read: (file) => sources.get(file) });
+  const trace = traceLaneLoads(new Map([[planted, new Map([['bura_cli', 'seed']])]]), { context: fixtureContext(sources) });
   assert.deepEqual(loadClosureGaps(trace).unexplained.sort(), [
     `${fixture}: $SCRIPT_DIR/$helper`,
     `${fixture}: $SCRIPT_DIR/devnet-\${helper}.sh`,
@@ -811,7 +846,9 @@ test('a module a lane runs as a child process is traced through its imports', ()
     ['scripts/audit-dial-protocol.mjs', "import './audit-create-random.mjs';"],
   ]);
   assert.deepEqual(selectedLanes(pullRequestPlan([change(tool)])), ['tornado_core']);
-  const gaps = (test) => loadClosureGaps(traceLaneLoads(new Map([[test, new Map([['tornado_core', 'seed']])]]), { read: (file) => sources.get(file) }));
+  const gaps = (test) => loadClosureGaps(traceLaneLoads(new Map([[test, new Map([['tornado_core', 'seed']])]]), {
+    context: fixtureContext(new Map([...sources, ['scripts/check-npm-metadata.mjs', ''], ['scripts/audit-create-random.mjs', '']])),
+  }));
   assert.deepEqual(gaps(planted).missing.sort(), [
     `tornado_core loads scripts/audit-dial-protocol.mjs via ${planted}`,
     `tornado_core loads scripts/check-npm-metadata.mjs via ${tool}`,
@@ -834,6 +871,25 @@ test('a module a lane runs as a child process is traced through its imports', ()
   ].join('\n'));
   assert.deepEqual(gaps(aliased).missing, [`tornado_core loads scripts/check-npm-metadata.mjs via ${tool}`]);
   assert.deepEqual(gaps(wrapped).unexplained, [`${wrapped}: file`]);
+  // A wrapper that takes the program too, and a child class that spawns the
+  // command its options configure (the Gate 1 AgentChild shape), name a
+  // program no reading identifies: each fails the guard until listed.
+  const programWrapper = 'packages/chain/test/program-wrapper.unit.test.ts';
+  const agentChild = 'packages/chain/test/agent-child.unit.test.ts';
+  sources.set(programWrapper, [
+    "import { spawnSync } from 'node:child_process';",
+    "import { join } from 'node:path';",
+    'const run = (command, args) => spawnSync(command, args);',
+    "run(process.execPath, [join(root, 'scripts', 'audit-dial-protocol.mjs')]);",
+  ].join('\n'));
+  sources.set(agentChild, [
+    "import { spawn } from 'node:child_process';",
+    'class AgentChild {',
+    '  constructor(options) { this.child = spawn(options.spawn.command, [...options.spawn.args]); }',
+    '}',
+  ].join('\n'));
+  assert.deepEqual(gaps(programWrapper).unexplained, [`${programWrapper}: command`]);
+  assert.deepEqual(gaps(agentChild).unexplained, [`${agentChild}: options.spawn.command`]);
 });
 
 test('owning lanes and scopes cover every job that runs the workspace', () => {

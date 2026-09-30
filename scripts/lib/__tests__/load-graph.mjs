@@ -64,7 +64,7 @@ const TYPE_ONLY_IMPORT = /\b(?:import|export)\s+type\s+(?:\{[^}]*\}|\*\s+as\s+\w
 // A path a file reads or runs (not a module it imports): an existing file,
 // or a directory when the file walks directories; otherwise it names a
 // location rather than contents. `context` is the repository it is in
-// (repositoryContext).
+// (checkoutContext, overlayContext or fixtureContext).
 function readTarget(target, walks, { isFile, isDirectory }) {
   const mapped = /(?:^|\/)dist(?:\/|$)/.test(target) ? sourcePath(target, isFile) : target;
   if (outsideSources(mapped)) return undefined;
@@ -76,28 +76,56 @@ function readTarget(target, walks, { isFile, isDirectory }) {
 // The repository a trace reads: `read(file)` returns a file's source
 // (undefined when there is none), `isFile` and `isDirectory` say what a path
 // is, and `workspaces` ({ manifests, workspaceByName }) and `rootManifest`
-// are what pnpm installs and runs. Each part left out is the checkout's: a
-// fixture passes every part and reads nothing else, and passing only `read`
-// replaces some sources in the checkout, as the planted routing tests do.
-// Every reading below takes one; the checkout's is built once.
-export function repositoryContext(parts = {}) {
-  const part = (name) => parts[name] ?? checkoutContext()[name];
-  return Object.freeze({
-    read: part('read'),
-    isFile: part('isFile'),
-    isDirectory: part('isDirectory'),
-    workspaces: part('workspaces'),
-    rootManifest: part('rootManifest'),
+// are what pnpm installs and runs. Every reading below takes one, built by
+// one of three constructors, each with a single boundary:
+// - checkoutContext(): the repository checkout, built once;
+// - overlayContext(base, files): `base` with the sources in `files` (a Map
+//   from path to text) added or replaced; the manifests stay the base's, so
+//   an overlay naming a manifest throws;
+// - fixtureContext(files): nothing but `files`, from which the directories,
+//   the workspaces (pnpm-workspace.yaml) and the root manifest come too.
+let checkout;
+export function checkoutContext() {
+  return checkout ??= Object.freeze({
+    read: readRepoFile,
+    isFile: isRepoFile,
+    isDirectory: isRepoDirectory,
+    workspaces: workspaceCatalog(),
+    rootManifest: JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')),
   });
 }
-let checkout;
-const checkoutContext = () => checkout ??= {
-  read: readRepoFile,
-  isFile: isRepoFile,
-  isDirectory: isRepoDirectory,
-  workspaces: workspaceCatalog(),
-  rootManifest: JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8')),
-};
+const isManifest = (file) => file === 'pnpm-workspace.yaml' || path.posix.basename(file) === 'package.json';
+// Every directory above the files.
+const directoriesOf = (files) => new Set([...files].flatMap((file) => {
+  const parts = file.split('/').slice(0, -1);
+  return parts.map((part, index) => parts.slice(0, index + 1).join('/'));
+}));
+export function overlayContext(base, files) {
+  const manifest = [...files.keys()].find(isManifest);
+  if (manifest !== undefined) throw new Error(`an overlay keeps its base's manifests; ${manifest} needs a fixtureContext`);
+  const directories = directoriesOf(files.keys());
+  return Object.freeze({
+    ...base,
+    read: (file) => (files.has(file) ? files.get(file) : base.read(file)),
+    isFile: (file) => files.has(file) || base.isFile(file),
+    isDirectory: (candidate) => directories.has(candidate) || base.isDirectory(candidate),
+  });
+}
+export function fixtureContext(files) {
+  const directories = directoriesOf(files.keys());
+  const read = (file) => files.get(file);
+  const listDirectories = (parent) => [...directories]
+    .filter((candidate) => path.posix.dirname(candidate) === parent)
+    .map((candidate) => path.posix.basename(candidate))
+    .sort();
+  return Object.freeze({
+    read,
+    isFile: (file) => files.has(file),
+    isDirectory: (candidate) => directories.has(candidate),
+    workspaces: workspaceCatalog({ readRepoFile: read, listDirectories }),
+    rootManifest: JSON.parse(read('package.json') ?? '{}'),
+  });
+}
 
 const scriptKind = (file) => (/\.[cm]?[jt]sx$/.test(file) ? ts.ScriptKind.TSX : /\.[cm]?js$/.test(file) ? ts.ScriptKind.JS : ts.ScriptKind.TS);
 
@@ -179,7 +207,8 @@ const NO_MANIFESTS = Object.freeze({ manifests: new Map(), workspaceByName: new 
 //   parameter, a property, a temporary copy), as source text, which the
 //   routing guard fails on until it is listed, as it does a computed load. A
 //   program other than a script runner (git, docker) is a tool, not a file.
-// `context` is the repository it is in (repositoryContext).
+// `context` is the repository it is in (checkoutContext, overlayContext or
+// fixtureContext).
 function analyzeModule(file, code, context) {
   if (!/\b(?:import|require)\s*\(|scripts|\b(?:join|resolve)\s*\(|__dirname|import\.meta|child_process|worker_threads|execa/.test(code)) return NO_ANALYSIS;
   const tree = ts.createSourceFile(file, code, ts.ScriptTarget.Latest, false, scriptKind(file));
@@ -207,17 +236,18 @@ function analyzeModule(file, code, context) {
   // The directories bindings hold, by name.
   const bases = new Map([['__dirname', directory]]);
   const baseOf = (node) => (ts.isIdentifier(node) ? bases.get(node.text) : heldDirectory(node));
-  // The path a join/resolve call builds from a known directory and literals.
-  const builtPath = (node) => {
+  // The path a join/resolve call builds from a known directory and literals;
+  // `base` reads a directory expression (baseOf, or runBaseOf for a run).
+  const builtPath = (node, base = baseOf) => {
     if (!ts.isCallExpression(node) || !pathHelper(node) || node.arguments.length < 2) return undefined;
-    const [base, ...segments] = node.arguments;
-    const start = baseOf(base);
+    const [first, ...segments] = node.arguments;
+    const start = base(first);
     if (start === undefined || !segments.every((segment) => ts.isStringLiteral(segment))) return undefined;
     return path.posix.normalize(path.posix.join(start, ...segments.map(({ text }) => text)));
   };
   // The directory an expression holds: the module's own, a file URL made
   // from a literal, or a built path.
-  const heldDirectory = (node) => {
+  const heldDirectory = (node, base = baseOf) => {
     if (node.getText(tree) === 'import.meta.dirname') return directory;
     if (isCallOf(node, 'dirname') && isCallOf(node.arguments[0], 'fileURLToPath') && isMetaUrl(node.arguments[0].arguments[0])) return directory;
     if (isCallOf(node, 'fileURLToPath')) {
@@ -227,7 +257,7 @@ function analyzeModule(file, code, context) {
         return path.posix.normalize(path.posix.join(directory, url.arguments[0].text));
       }
     }
-    return builtPath(node);
+    return builtPath(node, base);
   };
   // The runners the module imports (RUNNER_MODULES), by local name, and the
   // bindings that hold a runner module whole (import * as cp, import cp,
@@ -249,11 +279,30 @@ function analyzeModule(file, code, context) {
   }
   const requiredModule = (node) => (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'require'
     && node.arguments.length === 1 && isLiteral(node.arguments[0]) ? runnerKinds(node.arguments[0].text) : undefined);
+  // How many bindings each name has in the module - declarations,
+  // parameters, imports, function and class names - so the run analysis reads
+  // a name through its declaration only when that is its one binding, a
+  // const: a parameter or another scope's declaration could shadow any other.
+  const bindingCounts = new Map();
+  const countBinding = (name) => {
+    if (name === undefined) return;
+    if (ts.isIdentifier(name)) bindingCounts.set(name.text, (bindingCounts.get(name.text) ?? 0) + 1);
+    else if (ts.isObjectBindingPattern(name) || ts.isArrayBindingPattern(name)) {
+      for (const element of name.elements) if (!ts.isOmittedExpression(element)) countBinding(element.name);
+    }
+  };
+  const constInitializers = new Map();
   const bindings = [];
   const collect = (node) => {
     if (ts.isVariableDeclarationList(node) && (node.flags & (ts.NodeFlags.Const | ts.NodeFlags.Let))) {
       bindings.push(...node.declarations.filter((declaration) => ts.isIdentifier(declaration.name) && declaration.initializer));
     }
+    if (ts.isVariableDeclarationList(node) && (node.flags & ts.NodeFlags.Const)) {
+      for (const { name, initializer } of node.declarations) if (ts.isIdentifier(name) && initializer) constInitializers.set(name.text, initializer);
+    }
+    if (ts.isVariableDeclaration(node) || ts.isParameter(node) || ts.isImportSpecifier(node) || ts.isNamespaceImport(node)) countBinding(node.name);
+    if ((ts.isImportClause(node) || ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)
+      || ts.isClassDeclaration(node) || ts.isClassExpression(node)) && node.name) countBinding(node.name);
     const kinds = ts.isVariableDeclaration(node) && node.initializer ? requiredModule(node.initializer) : undefined;
     if (kinds && ts.isIdentifier(node.name)) bindRunners(kinds, node.name.text, []);
     if (kinds && ts.isObjectBindingPattern(node.name)) {
@@ -280,7 +329,11 @@ function analyzeModule(file, code, context) {
     const segments = scriptsAt >= 0 ? node.arguments.slice(scriptsAt + 1) : [];
     return segments.length && segments.every(isLiteral) ? ['scripts', ...segments.map(({ text }) => text)].join('/') : undefined;
   };
-  const initializers = new Map(bindings.map(({ name, initializer }) => [name.text, initializer]));
+  // A name's const initializer, and the directory it holds, when that const
+  // is the name's one binding in the module.
+  const soleInitializer = (name) => (bindingCounts.get(name) === 1 ? constInitializers.get(name) : undefined);
+  const soleBase = (name) => (soleInitializer(name) !== undefined ? bases.get(name) : undefined);
+  const runBaseOf = (node) => (ts.isIdentifier(node) ? soleBase(node.text) : heldDirectory(node, runBaseOf));
   // The files an expression names as something to run (runPaths).
   const runTargets = (node, depth = 0) => {
     if (node === undefined || depth > 8) return [];
@@ -292,9 +345,12 @@ function analyzeModule(file, code, context) {
       && ts.isStringLiteral(node.arguments[0]) && isMetaUrl(node.arguments[1])) {
       return [path.posix.normalize(path.posix.join(directory, node.arguments[0].text))];
     }
-    if (isLiteral(node)) return /^[\w@.+~/-]+$/.test(node.text) ? [node.text] : [];
-    if (ts.isIdentifier(node)) return bases.has(node.text) ? [bases.get(node.text)] : runTargets(initializers.get(node.text), depth + 1);
-    const built = builtPath(node) ?? scriptsPath(node);
+    if (isLiteral(node)) return /^[\w@.+~/-]+$/.test(node.text) ? [path.posix.normalize(node.text)] : [];
+    if (ts.isIdentifier(node)) {
+      const base = soleBase(node.text);
+      return base !== undefined ? [base] : runTargets(soleInitializer(node.text), depth + 1);
+    }
+    const built = builtPath(node, runBaseOf) ?? scriptsPath(node);
     return built === undefined ? [] : [built];
   };
   // How a call runs a file (RUNNER_MODULES), when its callee is an imported
@@ -307,13 +363,16 @@ function analyzeModule(file, code, context) {
     const kinds = ts.isIdentifier(callee.expression) ? runnerModules.get(callee.expression.text) : requiredModule(callee.expression);
     return kinds?.[callee.name.text];
   };
-  // The program a spawn-like call runs, when a literal or process.execPath
-  // (node) names it, through bindings; and its argument list's elements.
+  // The program a spawn-like call runs, when process.execPath (node), a
+  // literal or a path built from a known directory names it
+  // (node_modules/.bin/tsx), through bindings.
   const programOf = (node, depth = 0) => {
     if (node === undefined || depth > 8) return undefined;
     if (node.getText(tree) === 'process.execPath') return 'node';
     if (isLiteral(node)) return path.posix.basename(node.text);
-    return ts.isIdentifier(node) ? programOf(initializers.get(node.text), depth + 1) : undefined;
+    if (ts.isIdentifier(node) && soleBase(node.text) === undefined) return programOf(soleInitializer(node.text), depth + 1);
+    const [built] = runTargets(node);
+    return built === undefined ? undefined : path.posix.basename(built);
   };
   // The values an expression may take: each branch of a ?:, ?? or ||, through
   // parentheses, file-URL conversions and bindings.
@@ -326,7 +385,9 @@ function analyzeModule(file, code, context) {
     }
     if (isCallOf(node, 'fileURLToPath') || isCallOf(node, 'pathToFileURL')) return alternatives(node.arguments[0], depth + 1);
     if (ts.isPropertyAccessExpression(node) && ['href', 'pathname'].includes(node.name.text)) return alternatives(node.expression, depth + 1);
-    if (ts.isIdentifier(node) && !bases.has(node.text) && initializers.has(node.text)) return alternatives(initializers.get(node.text), depth + 1);
+    if (ts.isIdentifier(node) && soleBase(node.text) === undefined && soleInitializer(node.text) !== undefined) {
+      return alternatives(soleInitializer(node.text), depth + 1);
+    }
     return [node];
   };
   // The shell line a command-line runner runs: a literal, or a template whose
@@ -339,10 +400,11 @@ function analyzeModule(file, code, context) {
     if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
       return [node.left, node.right].map((part) => commandLine(part, depth + 1) ?? '$VALUE').join('');
     }
-    return ts.isIdentifier(node) ? commandLine(initializers.get(node.text), depth + 1) : undefined;
+    return ts.isIdentifier(node) ? commandLine(soleInitializer(node.text), depth + 1) : undefined;
   };
   // What a runner call runs: the repository files it names (paths), or the
   // text of the operand no reading resolves (unresolved).
+  const merged = (results) => ({ paths: results.flatMap(({ paths }) => paths), unresolved: [...new Set(results.flatMap(({ unresolved }) => unresolved))] });
   const runsOf = (kind, [first, second] = []) => {
     const none = { paths: [], unresolved: [] };
     // Every value the operand may take must name a repository file.
@@ -362,16 +424,25 @@ function analyzeModule(file, code, context) {
         && property.name.getText(tree) === 'eval' && property.initializer.kind === ts.SyntaxKind.TrueKeyword);
       return evaluates ? none : operand(first);
     }
-    // A script runner runs the operand of each argument list it may get.
-    const program = programOf(first);
-    if (scriptOperand(program, []) === undefined) return { paths: runTargets(first), unresolved: [] };
+    // Each value the program may take is a script runner (node, bash,
+    // python), which runs the operand of each argument list it may get; a
+    // repository file, which runs itself; or a tool its literal name names
+    // (git, docker). One no reading identifies (a parameter, a property, the
+    // environment) may be any of them, so it is reported.
     const lists = second === undefined ? [[]] : alternatives(second).map((value) => (ts.isArrayLiteralExpression(value) ? [...value.elements] : undefined));
-    const runs = lists.map((elements) => {
-      if (elements === undefined) return { paths: [], unresolved: [second.getText(tree)] };
-      const at = scriptOperand(program, elements.map((element) => (isLiteral(element) ? element.text : undefined)));
-      return at < 0 ? none : operand(elements[at]);
-    });
-    return { paths: runs.flatMap(({ paths }) => paths), unresolved: [...new Set(runs.flatMap(({ unresolved }) => unresolved))] };
+    return merged(alternatives(first).map((value) => {
+      const program = programOf(value);
+      if (program !== undefined && scriptOperand(program, []) !== undefined) {
+        return merged(lists.map((elements) => {
+          if (elements === undefined) return { paths: [], unresolved: [second.getText(tree)] };
+          const at = scriptOperand(program, elements.map((element) => (isLiteral(element) ? element.text : undefined)));
+          return at < 0 ? none : operand(elements[at]);
+        }));
+      }
+      const files = runTargets(value).filter((target) => readTarget(target, false, context) !== undefined);
+      if (files.length) return { paths: files, unresolved: [] };
+      return program === undefined ? { paths: [], unresolved: [first.getText(tree)] } : none;
+    }));
   };
   const urlOfString = (node) => {
     let target = ts.isPropertyAccessExpression(node) && node.name.text === 'href' ? node.expression : node;
@@ -441,14 +512,15 @@ const namedScripts = (text, context) => commandFiles(text, { exists: followable(
 // - `modules`: relative imports (side-effect `import './x.js'` included),
 //   dynamic imports, `import(new URL(...))` and CommonJS require(), whose own
 //   imports load too;
-// - `paths`: files it reads or runs without importing: other `new URL(...)`
+// - `paths`: files it reads without importing or running: other `new URL(...)`
 //   paths, require.resolve(), paths join/resolve builds from its own
 //   directory (analyzeModule's builtPaths) and, in tests and test-runner
 //   configs, quoted literals naming
 //   an existing repo file (`'packages/agent/src/x.ts'`, as source-scanning
 //   tests list them);
 // - `runs`: the files it runs as a child process or worker (analyzeModule's
-//   runPaths), whose own imports run too, unlike a file it only reads;
+//   runPaths), whose own imports run too, unlike the files it only reads;
+//   each reference is in one of `modules`, `paths` and `runs`;
 // - `packages`: workspaces it imports by package name (packageImports);
 // - `computed`: module loads computed at run time (computedLoads);
 // - `assembled`: script paths assembled at run time (assembledScriptPaths)
@@ -458,8 +530,8 @@ const namedScripts = (text, context) => commandFiles(text, { exists: followable(
 //   reads 'x.json'), which the routing guard checks in what installs run.
 // Type-only imports are erased before anything runs; other paths assembled
 // at run time from variables are out of reach. `context` is the repository
-// (repositoryContext; the checkout by default).
-export function loadReferences(file, source, context = repositoryContext()) {
+// (checkoutContext by default).
+export function loadReferences(file, source, context = checkoutContext()) {
   const code = source.replace(TYPE_ONLY_IMPORT, '');
   const walks = /\b(?:readdir|opendir)(?:Sync)?\(/.test(code);
   const relative = (specifier) => path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier));
@@ -482,7 +554,7 @@ export function loadReferences(file, source, context = repositoryContext()) {
     .filter((target) => !modules.includes(target) && target !== file);
   return {
     modules,
-    paths: [...new Set([...paths, ...runs])].filter((target) => !modules.includes(target) && target !== file),
+    paths: [...new Set(paths)].filter((target) => !modules.includes(target) && !runs.includes(target) && target !== file),
     runs,
     packages: packageNames(specifiers),
     computed: computedLoads,
@@ -499,15 +571,14 @@ export function loadReferences(file, source, context = repositoryContext()) {
 // package scripts it runs reach (packageScriptEdges), the repository scripts
 // and the files beside the shell scripts they run. A script path it or they
 // build from a value ("$SCRIPT_DIR/${helper}.sh", scripts/$name) is
-// `assembled`. Of those files, `runs` are the ones a command runs
-// (node scripts/x.mjs), whose own imports run too. Package scripts, files and
-// manifests all come from `context` (repositoryContext; the checkout by
-// default).
-export function shellReferences(file, source, context = repositoryContext()) {
+// `assembled`. Those a command runs (node scripts/x.mjs), whose own imports
+// run too, are its `runs`, and the rest its `paths`. Package scripts, files and
+// manifests all come from `context` (checkoutContext by default).
+export function shellReferences(file, source, context = checkoutContext()) {
   const directory = path.posix.dirname(file);
   const { read, workspaces, rootManifest } = context;
   const exists = followable(context);
-  const { calls, files, runs, assembled } = analyzeShell(source, {
+  const { calls, files, runs: executed, assembled } = analyzeShell(source, {
     scriptDirectory: directory,
     exists,
     context: { ...workspaces, rootManifest },
@@ -518,12 +589,13 @@ export function shellReferences(file, source, context = repositoryContext()) {
     ...files.filter(({ file: target }) => beside(target, directory)).map(({ file: target }) => target),
     ...reached.filter(({ kind, file: target, scriptDirectory }) => kind === 'file' && beside(target, scriptDirectory)).map(({ file: target }) => target),
   ];
-  const run = new Set([...runs, ...reached.filter((edge) => edge.kind === 'file' && edge.run).map(({ file: target }) => target)]);
+  const run = new Set([...executed, ...reached.filter((edge) => edge.kind === 'file' && edge.run).map(({ file: target }) => target)]);
   const targets = (list) => [...new Set(list.map((target) => readTarget(target, false, context)).filter((target) => target && target !== file))];
+  const runs = targets(named.filter((target) => run.has(target)));
   return {
     modules: [],
-    paths: targets(named),
-    runs: targets(named.filter((target) => run.has(target))),
+    paths: targets(named).filter((target) => !runs.includes(target)),
+    runs,
     packages: [],
     computed: [],
     assembled: [...new Set([...assembled, ...reached.filter(({ kind }) => kind === 'assembled').map(({ text }) => text)])],
@@ -543,9 +615,9 @@ const NO_DEPENDENCIES = Object.freeze({ modules: [], paths: [], runs: [], packag
 
 // What `file` (repo-relative, `source` its contents) loads, reads or runs,
 // from the handler for its format, with that format's name (undefined for
-// a format the guard does not read), in `context` (repositoryContext; the
-// checkout by default).
-export function dependenciesOf(file, source, context = repositoryContext()) {
+// a format the guard does not read), in `context` (checkoutContext by
+// default).
+export function dependenciesOf(file, source, context = checkoutContext()) {
   const handler = FORMATS.find(({ matches }) => matches(file, source));
   return handler ? { format: handler.format, ...handler.references(file, source, context) } : { format: undefined, ...NO_DEPENDENCIES };
 }
@@ -567,14 +639,15 @@ export function dependenciesOf(file, source, context = repositoryContext()) {
 // package-name import
 // requires the imported workspace and its dependencies, recorded against the
 // workspace's src/index.ts since any path in a workspace routes by its rule.
-// `context` is the repository it reads (repositoryContext; by default the
-// checkout, with `read(file)`, when given, supplying the sources).
+// `context` is the repository it reads: checkoutContext by default, an
+// overlayContext or fixtureContext for a planted trace.
 // Returns { loaded, unfollowed, unresolvedReads }: `unfollowed` maps each
 // traced file to the module loads it computes and the script paths it
 // assembles at run time, which the trace cannot follow; `unresolvedReads`
 // maps it to the files it reads by name from a directory the trace cannot
 // resolve.
-export function traceLaneLoads(seeds, { read, context = repositoryContext(read ? { read } : {}), workspaceSeeds = new Set() } = {}) {
+export function traceLaneLoads(seeds, { context = checkoutContext(), workspaceSeeds = new Set(), ...unknown } = {}) {
+  if (Object.keys(unknown).length) throw new Error(`traceLaneLoads takes a context, not ${Object.keys(unknown).join(', ')}`);
   const { workspaces } = context;
   const { workspaceByName } = workspaces;
   const closures = new Map();
@@ -605,11 +678,10 @@ export function traceLaneLoads(seeds, { read, context = repositoryContext(read ?
     const requirements = [...reachedBy.get(file).keys()];
     if (computed.length || assembled.length) unfollowed.set(file, [...computed, ...assembled]);
     if (reads.length) unresolvedReads.set(file, reads);
-    const followed = runs.filter((target) => !workspaceSeeds.has(target));
-    for (const target of [...modules, ...followed]) {
+    for (const target of [...modules, ...runs.filter((target) => !workspaceSeeds.has(target))]) {
       if (add(loaded, target, requirements, file)) queue.push([target, loaded]);
     }
-    for (const target of paths.filter((target) => !followed.includes(target))) {
+    for (const target of [...paths, ...runs.filter((target) => workspaceSeeds.has(target))]) {
       if (add(readPaths, target, requirements, file)) queue.push([target, readPaths]);
     }
     for (const name of packages) {

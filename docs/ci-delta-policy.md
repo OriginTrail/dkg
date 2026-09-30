@@ -87,8 +87,9 @@ controller and workflow wiring) and `ci-results.test.mjs` (aggregate gates).
   package workspace code, whose imports are traced from its own workspace's
   lanes; a file a lane only reads is required, but its imports are not. A
   file a runner runs that no reading resolves (a wrapper's parameter, a
-  computed argument list) fails the test until it is listed with a
-  reason. It also fails on a module load it cannot follow, one whose specifier
+  computed argument list), or a program no reading identifies (a
+  parameter, a property, the environment) where no literal names a tool,
+  fails the test until it is listed with a reason. It also fails on a module load it cannot follow, one whose specifier
   is computed at run time, a script path assembled at run time, or a file a
   shell command runs that is picked at run time (a script runner's operand
   or a program path that expands a variable past its directory, such as

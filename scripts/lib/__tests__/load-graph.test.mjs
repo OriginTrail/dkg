@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { commandFiles } from './ci-execution-graph.mjs';
 import { REPO_ROOT } from './ci-plan-fixtures.mjs';
-import { dependenciesOf, loadReferences, repositoryContext, traceLaneLoads } from './load-graph.mjs';
+import { checkoutContext, dependenciesOf, fixtureContext, loadReferences, overlayContext, traceLaneLoads } from './load-graph.mjs';
 
 test('the load scanner sees these forms, and nothing it cannot resolve statically', () => {
   // The load-closure guard sees only what loadReferences recognises, so its
@@ -78,13 +78,15 @@ test('the load scanner sees these forms, and nothing it cannot resolve staticall
   ]);
   assert.deepEqual(resolve('ls /tmp/x.sh; cat myscripts/devnet.sh; echo "$HOME/$name.sh"'), []);
   const fixture = traceLaneLoads(new Map([['packages/cli/test/example.test.ts', new Map([['bura_cli', 'seed']])]]), {
-    read: (file) => ({
-      'packages/cli/test/example.test.ts': "spawnSync('bash', ['packages/cli/test/fixtures/devnet-blazegraph-smoke.sh']);",
-      'packages/cli/test/fixtures/devnet-blazegraph-smoke.sh': [
+    context: fixtureContext(new Map([
+      ['packages/cli/test/example.test.ts', "spawnSync('bash', ['packages/cli/test/fixtures/devnet-blazegraph-smoke.sh']);"],
+      ['packages/cli/test/fixtures/devnet-blazegraph-smoke.sh', [
         '# scripts/devnet-comprehensive.sh is only mentioned here',
         'source "$repo_root/scripts/devnet.sh"',
-      ].join('\n'),
-    })[file],
+      ].join('\n')],
+      ['scripts/devnet.sh', ''],
+      ['scripts/devnet-comprehensive.sh', ''],
+    ])),
   }).loaded;
   assert.equal(fixture.get('scripts/devnet.sh')?.get('bura_cli'), 'packages/cli/test/fixtures/devnet-blazegraph-smoke.sh');
   assert.equal(fixture.has('scripts/devnet-comprehensive.sh'), false);
@@ -98,7 +100,7 @@ test('the load scanner sees these forms, and nothing it cannot resolve staticall
   assert.deepEqual(dependenciesOf('packages/cli/test/fixtures/runner.py', 'subprocess.run(["scripts/devnet.sh"])').paths, []);
   assert.deepEqual(dependenciesOf('packages/cli/test/fixtures/NOTES', 'Start scripts/devnet.sh first.').paths, []);
   const shebang = dependenciesOf('packages/cli/test/fixtures/start-devnet', '#!/usr/bin/env bash\nsource "$repo_root/scripts/devnet.sh"\n');
-  assert.deepEqual([shebang.format, shebang.paths], ['shell', ['scripts/devnet.sh']]);
+  assert.deepEqual([shebang.format, shebang.runs, shebang.paths], ['shell', ['scripts/devnet.sh'], []]);
   // A module load computed at run time cannot be followed, so it is reported.
   assert.deepEqual(references.computed, ['`../../cli/src/${name}.js`']);
   // So is a script path assembled at run time; literal segments joined onto
@@ -169,9 +171,12 @@ test('traceLaneLoads carries lanes through module loads, not through reads', () 
     ['packages/node-ui/src/ui/http.ts', ''],
     // A path read is required but never followed.
     ['packages/node-ui/README.md', "import { never } from './src/ui/pca-api.js';"],
+    ['packages/node-ui/src/ui/pca-api.ts', ''],
+    ['pnpm-workspace.yaml', 'packages:\n  - packages/*\n'],
+    ['packages/rdf-utils/package.json', JSON.stringify({ name: '@origintrail-official/dkg-rdf-utils' })],
   ]);
   const seeds = new Map([['packages/node-ui/test/example.test.ts', new Map([['kosava_node_ui', 'seed']])]]);
-  const { loaded: loads } = traceLaneLoads(seeds, { read: (file) => sources.get(file) });
+  const { loaded: loads } = traceLaneLoads(seeds, { context: fixtureContext(sources) });
   assert.equal(loads.get('packages/node-ui/src/ui/api.ts')?.get('kosava_node_ui'), 'packages/node-ui/test/example.test.ts');
   assert.equal(loads.get('packages/node-ui/src/ui/http.ts')?.get('kosava_node_ui'), 'packages/node-ui/src/ui/api.ts');
   assert.equal(loads.get('packages/node-ui/README.md')?.get('kosava_node_ui'), 'packages/node-ui/test/example.test.ts');
@@ -196,11 +201,14 @@ test('traceLaneLoads follows what a file runs, except workspace code the lanes s
       "spawnSync(process.execPath, [fileURLToPath(new URL('../src/ui/api.ts', import.meta.url))]);",
     ].join('\n')],
     ['scripts/sync-chain-abis.mjs', "import './check-npm-metadata.mjs';"],
+    ['scripts/check-npm-metadata.mjs', ''],
     ['scripts/audit-dial-protocol.mjs', "import './audit-create-random.mjs';"],
+    ['scripts/audit-create-random.mjs', ''],
     ['packages/node-ui/src/ui/api.ts', "import { http } from './http.js';"],
+    ['packages/node-ui/src/ui/http.ts', ''],
   ]);
   const seeds = new Map([[example, new Map([['kosava_node_ui', 'seed']])]]);
-  const trace = (options) => traceLaneLoads(seeds, { read: (file) => sources.get(file), ...options }).loaded;
+  const trace = (options) => traceLaneLoads(seeds, { context: fixtureContext(sources), ...options }).loaded;
   const loads = trace();
   assert.equal(loads.get('scripts/check-npm-metadata.mjs')?.get('kosava_node_ui'), 'scripts/sync-chain-abis.mjs');
   assert.equal(loads.get('scripts/audit-dial-protocol.mjs')?.get('kosava_node_ui'), example);
@@ -228,6 +236,10 @@ test('a module runs what its imported runners name, and reports an operand no re
     [`import { spawn } from 'node:child_process';\nconst script = fast ? ${toolPath} : ${toolPath};\nspawn(process.execPath, [script]);`, [tool], []],
     [`import { spawn } from 'node:child_process';\nconst script = options.script ?? ${toolPath};\nspawn(process.execPath, [script]);`, [tool], ['script']],
     ["import { spawnSync } from 'node:child_process';\nconst run = (file) => spawnSync(process.execPath, [file]);", [], ['file']],
+    // A name bound more than once is read through none of its declarations:
+    // the parameter here is not the other function's const.
+    ["import { spawnSync } from 'node:child_process';\nfunction runCapture(cmd, args) { return spawnSync(cmd, args); }\nfunction tag() { const cmd = ['dist-tag']; return cmd; }", [], ['cmd']],
+    ["import { spawnSync } from 'node:child_process';\nconst run = (command, args) => spawnSync(command, args);", [], ['command']],
     ["import { spawnSync } from 'node:child_process';\nspawnSync(process.execPath, argumentsFor(name));", [], ['argumentsFor(name)']],
     ["import { execSync } from 'node:child_process';\nexecSync(`node ${script}`);", [], ['`node ${script}`']],
     ["import { execSync, spawnSync } from 'node:child_process';\nexecSync(`git clone \"${url}\"`);\nspawnSync('git', ['add', 'package.json']);\nspawnSync(process.execPath, ['-e', code]);", [], []],
@@ -238,33 +250,41 @@ test('a module runs what its imported runners name, and reports an operand no re
   }
 });
 
-test('a trace reads one repository context, a fixture workspace and its package scripts included', () => {
-  // Sources, files, workspaces and the root manifest all come from the
-  // context: a fixture shell script running a fixture workspace's package
-  // script reaches the repository script that package script runs, and its
-  // import, with no checkout file involved. Given only `read`, the rest is
-  // the checkout's, which has none of them.
+test('a fixture context is its files alone, manifests and directories included', () => {
+  // Sources, files, directories, workspaces (pnpm-workspace.yaml) and the
+  // root manifest all come from the one file map: a fixture shell script
+  // running a fixture workspace's package script reaches the repository
+  // script that package script runs, and its import, with no checkout file
+  // involved. The checkout has none of these files, and a trace takes a
+  // context, never a bare `read`.
   const files = new Map([
+    ['pnpm-workspace.yaml', 'packages:\n  - fixture/*\n'],
     ['fixture/run.sh', 'pnpm --filter fixture-a run build\n'],
     ['fixture/a/package.json', JSON.stringify({ name: 'fixture-a', scripts: { build: 'node ../../scripts/fixture-build.mjs' } })],
     ['scripts/fixture-build.mjs', "import './fixture-helper.mjs';\n"],
     ['scripts/fixture-helper.mjs', ''],
   ]);
-  const context = repositoryContext({
-    read: (file) => files.get(file),
-    isFile: (file) => files.has(file),
-    isDirectory: () => false,
-    workspaces: {
-      manifests: new Map([['fixture/a', JSON.parse(files.get('fixture/a/package.json'))]]),
-      workspaceByName: new Map([['fixture-a', 'fixture/a']]),
-    },
-    rootManifest: {},
-  });
+  const context = fixtureContext(files);
+  assert.deepEqual([context.isFile('fixture/run.sh'), context.isDirectory('fixture/a'), context.isFile('scripts/devnet.sh')], [true, true, false]);
+  assert.deepEqual([...context.workspaces.workspaceByName], [['fixture-a', 'fixture/a']]);
   const seeds = new Map([['fixture/run.sh', new Map([['bura_cli', 'seed']])]]);
   const { loaded } = traceLaneLoads(seeds, { context });
   assert.equal(loaded.get('scripts/fixture-build.mjs')?.get('bura_cli'), 'fixture/run.sh');
   assert.equal(loaded.get('scripts/fixture-helper.mjs')?.get('bura_cli'), 'scripts/fixture-build.mjs');
-  assert.equal(traceLaneLoads(seeds, { read: (file) => files.get(file) }).loaded.has('scripts/fixture-build.mjs'), false);
+  assert.equal(traceLaneLoads(seeds).loaded.has('scripts/fixture-build.mjs'), false);
+  assert.throws(() => traceLaneLoads(seeds, { read: (file) => files.get(file) }), /takes a context/);
+});
+
+test('an overlay replaces sources in its base and keeps the base\'s manifests', () => {
+  // The planted source replaces the checkout's ABI-sync script: the real
+  // chain test that runs it comes from the checkout, and so does the real
+  // script its planted import names. An overlay cannot change a manifest.
+  const context = overlayContext(checkoutContext(), new Map([['scripts/sync-chain-abis.mjs', "import './check-npm-metadata.mjs';\n"]]));
+  const chainTest = 'packages/chain/test/sync-chain-abis.unit.test.ts';
+  const { loaded } = traceLaneLoads(new Map([[chainTest, new Map([['tornado_core', 'seed']])]]), { context });
+  assert.equal(loaded.get('scripts/sync-chain-abis.mjs')?.get('tornado_core'), chainTest);
+  assert.equal(loaded.get('scripts/check-npm-metadata.mjs')?.get('tornado_core'), 'scripts/sync-chain-abis.mjs');
+  assert.throws(() => overlayContext(checkoutContext(), new Map([['packages/cli/package.json', '{}']])), /fixtureContext/);
 });
 
 test('a shell script reaches what the package scripts it runs reach', () => {
@@ -274,7 +294,7 @@ test('a shell script reaches what the package scripts it runs reach', () => {
   // scripts/build.mjs.
   const devnet = dependenciesOf('scripts/devnet.sh', fs.readFileSync(path.join(REPO_ROOT, 'scripts/devnet.sh'), 'utf8'));
   assert.equal(devnet.format, 'shell');
-  assert.ok(devnet.paths.includes('scripts/build.mjs'));
+  assert.ok(devnet.runs.includes('scripts/build.mjs'));
 });
 
 test('an unresolved read keeps its identity when the directory expression changes', () => {
