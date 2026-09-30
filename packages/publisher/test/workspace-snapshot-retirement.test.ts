@@ -3,8 +3,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
-import { FileWorkspacePublicSnapshotStore, workspacePublicQuadsDigest } from '../src/workspace-snapshot-store.js';
-import { snapshotReferenceCheck, withSnapshotScope } from '../src/workspace-snapshot-lifecycle.js';
+import {
+  FileWorkspacePublicSnapshotStore, workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore,
+} from '../src/workspace-snapshot-store.js';
+import {
+  snapshotLifecycleGate, snapshotReferenceCheck, withSnapshotScope, type WorkspaceSnapshotLifecycle,
+} from '../src/workspace-snapshot-lifecycle.js';
 import { makeQuads, snapshotPath } from './_helpers/workspace-snapshot-store.js';
 
 const directories: string[] = [];
@@ -422,14 +426,97 @@ describe('operation leases follow the finalized cleanup opt-in', () => {
     if (cleanup) expect((await store.collectGarbage()).deletedSnapshots).toBe(1);
   });
 
-  it('does not require an existing-file lease or fail reuse while cleanup is off', async () => {
+  it.each([false, true])('holds no lease beyond an existence probe unless the store offers one (cleanup: %s)', async cleanup => {
+    const f = await fixture(undefined, { finalizedCleanupEnabled: cleanup });
+    const store = f.open();
+    const hash = digest.slice('sha256:'.length);
+    expect('operationLease' in store.lifecycle).toBe(cleanup);
+    await withSnapshotScope(store, async snapshots => {
+      expect(await snapshots!.retainExisting(digest)).toBe(true);
+      // A probe alone is short-lived: only an operation-long lease leaves the digest busy afterwards.
+      expect(await snapshotLifecycleGate(f.directory).tryCollect(hash, async () => 'idle')).toBe(cleanup ? undefined : 'idle');
+    });
+    expect(await snapshotLifecycleGate(f.directory).tryCollect(hash, async () => 'idle')).toBe('idle');
+  });
+
+  it('reports a file that pressure GC removed as missing while cleanup is off, so reuse fetches it again', async () => {
     const f = await fixture(undefined, { finalizedCleanupEnabled: false });
     const store = f.open();
-    const acquire = vi.spyOn(store.lifecycle, 'acquireExisting');
+    const probe = vi.spyOn(store.lifecycle, 'acquireExisting');
     await withSnapshotScope(store, async snapshots => {
       expect(await snapshots!.retainExisting(digest)).toBe(true);
     });
+    f.pressure();
+    expect(await store.collectGarbage()).toMatchObject({ deletedSnapshots: 1 });
+    await expect(stat(f.path)).rejects.toMatchObject({ code: 'ENOENT' });
+    await withSnapshotScope(store, async snapshots => {
+      expect(await snapshots!.retainExisting(digest)).toBe(false);
+    });
+    expect(probe).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('operation leases are an optional capability of the store', () => {
+  /** A custom I/O store; `lifecycle` is whatever the test wants the scope to see. */
+  function customStore(lifecycle: WorkspaceSnapshotLifecycle | undefined): WorkspacePublicSnapshotStore {
+    return {
+      putSnapshot: async input => ({ ref: input.digest, byteLength: 1 }),
+      getSnapshot: async () => [],
+      validateSnapshot: async () => true,
+      getSnapshotPage: async () => [],
+      ...(lifecycle ? { lifecycle } : {}),
+    };
+  }
+  const lifecycleOf = (over: Partial<WorkspaceSnapshotLifecycle>): WorkspaceSnapshotLifecycle => ({
+    finalizedCleanupEnabled: false, acquire: async () => () => {}, acquireExisting: async () => () => {},
+    markPublished: async () => {}, ...over,
+  });
+
+  it('honors a custom capability even though finalized cleanup is reported off, and closes it with the operation', async () => {
+    let active = 0;
+    const leased: string[] = [];
+    const operationLease = vi.fn(async (ref: string) => { leased.push(ref); active += 1; return () => { active -= 1; }; });
+    const store = customStore(lifecycleOf({ finalizedCleanupEnabled: false, operationLease }));
+    await withSnapshotScope(store, async snapshots => {
+      await snapshots!.putSnapshot({ digest, quads });
+      await snapshots!.getSnapshot(digest);
+      await snapshots!.validateSnapshot!(digest, digest, 1);
+      await snapshots!.getSnapshotPage!(digest, 0, 1);
+      // One lease per digest for the whole operation, however many times it is touched.
+      expect(leased).toEqual([digest]);
+      expect(active).toBe(1);
+    });
+    expect(active).toBe(0);
+  });
+
+  it('takes no operation-long lease from a lifecycle without the capability, whatever its cleanup flag says', async () => {
+    const acquire = vi.fn(async () => () => {});
+    const store = customStore(lifecycleOf({ finalizedCleanupEnabled: true, acquire }));
+    await withSnapshotScope(store, async snapshots => {
+      await snapshots!.putSnapshot({ digest, quads });
+      await snapshots!.getSnapshot(digest);
+      await snapshots!.validateSnapshot!(digest, digest, 1);
+    });
     expect(acquire).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('answers reuse from the existence probe of a custom lifecycle (present: %s)', async present => {
+    const release = vi.fn();
+    const acquireExisting = vi.fn(async () => present ? release : undefined);
+    const operationLease = vi.fn(async () => () => {});
+    const store = customStore(lifecycleOf({ acquireExisting, operationLease }));
+    await withSnapshotScope(store, async snapshots => {
+      expect(await snapshots!.retainExisting(digest)).toBe(present);
+    });
+    expect(acquireExisting).toHaveBeenCalledExactlyOnceWith(digest);
+    expect(release).toHaveBeenCalledTimes(present ? 1 : 0);
+    expect(operationLease).toHaveBeenCalledOnce();
+  });
+
+  it('lets a store without a lifecycle own reuse', async () => {
+    await withSnapshotScope(customStore(undefined), async snapshots => {
+      expect(await snapshots!.retainExisting(digest)).toBe(true);
+    });
   });
 });
 

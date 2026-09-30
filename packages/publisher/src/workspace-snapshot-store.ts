@@ -246,6 +246,10 @@ export class FileWorkspacePublicSnapshotStore implements WorkspacePublicSnapshot
     });
     this.lifecycle = {
       finalizedCleanupEnabled: enabled,
+      // Operation-long leases keep files out of the collectors for a whole operation. They belong to
+      // finalized cleanup; a store without it keeps its earlier policy (a file is in use only while
+      // an individual read or write runs), so it does not offer the capability.
+      ...(enabled ? { operationLease: (ref: string) => this.lifecycle.acquire(ref) } : {}),
       acquire: ref => this.lifecycleGate.acquire(snapshotHash(ref)),
       acquireExisting: async ref => {
         const hash = snapshotHash(ref);

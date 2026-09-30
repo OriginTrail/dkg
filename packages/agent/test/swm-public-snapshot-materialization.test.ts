@@ -1,4 +1,4 @@
-import { mkdtemp, rm, stat } from 'node:fs/promises';
+import { mkdtemp, rm, stat, utimes } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 /**
@@ -286,25 +286,26 @@ function harness(overrides: HarnessOverrides = {}) {
 }
 
 describe('public SWM snapshot materialization', () => {
-  it.each([true, false])('takes snapshot leases only when finalized cleanup is on (cleanup: %s)', async cleanup => {
+  it.each([true, false])('takes operation-long snapshot leases exactly when the store offers the capability (offered: %s)', async offered => {
     let active = 0;
     const release = vi.fn(() => { active -= 1; });
     const acquire = vi.fn(async () => { active += 1; return release; });
     const store: WorkspacePublicSnapshotStore = Object.assign(new MemorySnapshotStore(), {
-      lifecycle: { finalizedCleanupEnabled: cleanup, acquire, acquireExisting: acquire,
-        markPublished: async () => {} },
+      // The cleanup flag says off in both cases: the scope follows the capability, not the flag.
+      lifecycle: { finalizedCleanupEnabled: false, acquire: async () => () => {}, acquireExisting: async () => () => {},
+        ...(offered ? { operationLease: acquire } : {}), markPublished: async () => {} },
     });
     let checkedMetadata = false;
     const h = harness({
       snapshotStore: store,
-      // Leases exist to keep files through the metadata commit; a store without cleanup takes none.
-      replaceImpl: async () => { if (cleanup) expect(active).toBeGreaterThan(0); },
-      onStoreInsert: () => { if (cleanup) expect(active).toBeGreaterThan(0); checkedMetadata = true; },
+      // Leases exist to keep files through the metadata commit; a store that does not offer one takes none.
+      replaceImpl: async () => { if (offered) expect(active).toBeGreaterThan(0); },
+      onStoreInsert: () => { if (offered) expect(active).toBeGreaterThan(0); checkedMetadata = true; },
     });
     await h.run();
     expect(checkedMetadata).toBe(true);
     expect(active).toBe(0);
-    if (cleanup) expect(release).toHaveBeenCalled();
+    if (offered) expect(release).toHaveBeenCalled();
     else expect(acquire).not.toHaveBeenCalled();
   });
 
@@ -711,6 +712,44 @@ function barrier() {
   const promise = new Promise<void>(done => { resolve = done; });
   return { promise, resolve };
 }
+
+it('fetches a reused public ref again when pressure GC removed it while finalized cleanup is off', async () => {
+  const fx = fixture();
+  const directory = await mkdtemp(join(tmpdir(), 'dkg-public-reuse-off-'));
+  let free = 100 * 1024 ** 3;
+  const snapshots = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+    gc: { finalizedCleanupEnabled: false, minAgeMs: 0 }, getAvailableBytes: async () => free,
+  });
+  snapshots.stopGarbageCollection();
+  const walk: SharedMemorySnapshotWalkContinuation = {
+    prepare: () => ({ entries: [{ snapshot: { ref: fx.digest, digest: fx.digest, count: fx.payload.length }, reuse: true }] }),
+    resolvedRefsSnapshot: () => [fx.digest],
+    suppressedMetadataRows: () => [], markResolved: () => {},
+  };
+  const run = (preseedSnapshot: boolean) => harness({ snapshotStore: snapshots, preseedSnapshot,
+    metadataFetcher: { fetch: async () => ({ result: page(fx.meta), continuationYielded: false }),
+      release: () => {}, snapshotWalk: () => walk } });
+  try {
+    const first = run(true);
+    expect((await first.run()).failedPhases).toBe(0);
+    // The file is present and this round resolved it: reuse needs no transfer.
+    expect(first.snapshotFetches).toHaveLength(0);
+    const hash = fx.digest.slice(7);
+    const path = join(directory, hash.slice(0, 2), hash.slice(2, 4), `${hash}.nq`);
+    await expect(stat(path)).resolves.toBeDefined();
+    // Capacity pressure removes it between rounds; with cleanup off no lease protects it.
+    free = 1024 ** 3;
+    await utimes(path, 0, 0);
+    expect((await snapshots.collectGarbage()).deletedSnapshots).toBe(1);
+    await expect(stat(path)).rejects.toMatchObject({ code: 'ENOENT' });
+    free = 100 * 1024 ** 3;
+    // The next round still asks for reuse, but the file is gone: the bytes are fetched again.
+    const second = run(false);
+    expect((await second.run()).failedPhases).toBe(0);
+    expect(second.snapshotFetches).toHaveLength(1);
+    await expect(stat(path)).resolves.toBeDefined();
+  } finally { snapshots.stopGarbageCollection(); await rm(directory, { recursive: true, force: true }); }
+});
 
 it.each([false, true])('leases a reused public ref until metadata commits (collected first: %s)', async collectedFirst => {
   const fx = fixture();

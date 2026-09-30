@@ -101,7 +101,9 @@ metadata. The background collector, on its existing five-minute interval:
    symlink/junction and case aliases. A busy digest does not prevent collection
    of unrelated digests. With cleanup disabled these operation-long leases are
    not taken, so pressure GC treats a file only as in use while an individual
-   read or write is running, as before this feature.
+   read or write is running, as before this feature. Reuse still asks the store
+   whether the file exists, with a short-lived probe: a file that pressure GC
+   removed between rounds is fetched again rather than reported as present.
 4. Deletes the unreferenced `.nq`/legacy `.json` file, its cached validation/page
    index, and its persisted page-index row where the adapter supports deletion.
 5. Removes the retirement record last. An interrupted deletion can finish on the

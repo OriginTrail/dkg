@@ -6,8 +6,18 @@ import type { WorkspacePublicSnapshotStore, WorkspaceSnapshotIO } from './worksp
 /** A store opts into the complete leasing/retirement contract, or keeps its own policy. */
 export interface WorkspaceSnapshotLifecycle {
   readonly finalizedCleanupEnabled: boolean;
+  /**
+   * Optional capability: when present, an operation scope holds this lease on every snapshot
+   * the operation touches until the whole operation (metadata commit included) ends. A store
+   * that omits it keeps its own retention policy, and the scope takes no operation-long lease.
+   */
+  readonly operationLease?: (ref: string) => Promise<() => void>;
   acquire(ref: string): Promise<() => void>;
-  /** Lease an existing source without decoding it; absent bytes must be fetched again. */
+  /**
+   * Lease an existing source without decoding it; absent bytes must be fetched again.
+   * This is the authoritative existence probe, so it is consulted whether or not the store
+   * also offers {@link operationLease}.
+   */
   acquireExisting(ref: string): Promise<(() => void) | undefined>;
   markPublished(refs: readonly string[]): Promise<void>;
 }
@@ -115,14 +125,10 @@ type CompleteSnapshotIO = { [K in keyof Required<WorkspaceSnapshotIO>]: Workspac
 /** One operation's snapshot I/O and leases, owned and closed by the coordinator. */
 export class WorkspaceSnapshotScope implements CompleteSnapshotIO {
   private readonly leases = new Map<string, Promise<() => void>>();
-  /** Operation-long leases exist only for finalized cleanup; otherwise the store keeps its own policy.
-   * Not named `lifecycle`: the scope is passed where a WorkspacePublicSnapshotStore is expected. */
-  private readonly leasing: WorkspaceSnapshotLifecycle | undefined;
   readonly validateSnapshot: WorkspaceSnapshotIO['validateSnapshot'];
   readonly getSnapshotPage: WorkspaceSnapshotIO['getSnapshotPage'];
 
   private constructor(private readonly store: WorkspacePublicSnapshotStore) {
-    this.leasing = store.lifecycle?.finalizedCleanupEnabled ? store.lifecycle : undefined;
     if (store.validateSnapshot) this.validateSnapshot = async (ref, digest, count) => {
       await this.retain(ref);
       return store.validateSnapshot!(ref, digest, count);
@@ -145,19 +151,23 @@ export class WorkspaceSnapshotScope implements CompleteSnapshotIO {
     }
   }
 
+  /** Hold the store's operation-long lease, if it offers one, until the scope closes. */
   private async retain(ref: string): Promise<void> {
-    const lifecycle = this.leasing;
-    if (!lifecycle) return;
+    const lifecycle = this.store.lifecycle;
+    if (!lifecycle?.operationLease) return;
     const hash = snapshotHash(ref);
     let lease = this.leases.get(hash);
-    if (!lease) { lease = lifecycle.acquire(ref); this.leases.set(hash, lease); }
+    if (!lease) { lease = lifecycle.operationLease(ref); this.leases.set(hash, lease); }
     await lease;
   }
 
   async retainExisting(ref: string): Promise<boolean> {
     await this.retain(ref);
-    if (!this.leasing) return true; // Cleanup off, or a custom store: it owns its retention policy.
-    const existing = await this.leasing.acquireExisting(ref);
+    // The existence probe is separate from the lease policy: a store that takes no operation-long
+    // lease can still have lost the file (for example to pressure GC), and reuse must then fetch it again.
+    const lifecycle = this.store.lifecycle;
+    if (!lifecycle) return true; // A custom I/O store without a lifecycle owns its retention policy.
+    const existing = await lifecycle.acquireExisting(ref);
     if (!existing) return false;
     existing();
     return true;
