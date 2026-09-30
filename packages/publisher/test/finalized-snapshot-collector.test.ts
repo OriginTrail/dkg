@@ -210,6 +210,21 @@ describe('candidate outcomes feed the pass policy', () => {
     for (const file of f.files) await expect(stat(file.path)).resolves.toBeDefined();
   });
 
+  it.each([
+    ['an unknown version', { version: 2, retiredAt: 0 }],
+    ['a non-numeric time', { version: 1, retiredAt: 'yesterday' }],
+    ['a negative time', { version: 1, retiredAt: -1 }],
+    ['a fractional time', { version: 1, retiredAt: 0.5 }],
+  ])('reports a record with %s as failed and keeps it without touching the payload', async (_label, record) => {
+    const log = vi.fn();
+    const f = await scheduled(async () => false, 1, undefined, log);
+    await writeFile(f.files[0]!.path, JSON.stringify(record));
+    expect(await f.collector.collect(f.files)).toEqual({ deleted: 0, bytes: 0, referenced: 0, failed: 1 });
+    expect(f.removed).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('Invalid snapshot retirement record'));
+    await expect(stat(f.files[0]!.path)).resolves.toBeDefined();
+  });
+
   it('treats a record that disappeared as finished and keeps going past the batch', async () => {
     const f = await scheduled(async () => true, 40);
     for (const file of f.files) await rm(file.path);
