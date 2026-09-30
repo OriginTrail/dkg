@@ -14,13 +14,15 @@
  * differently therefore fails HERE, at the reply, with that message, instead of
  * as an `undefined` deep inside a test.
  *
- * It checks the fields THIS SUITE READS and nothing else. It is not the
- * daemon's contract: the routes build these bodies inline and export no schema,
- * and the CLI client's declarations are hand-written, so the canonical contract
- * (one schema the route constructs its reply from and every client parses with)
- * would live at the CLI boundary, not in a devnet suite. A field the suite does
- * not read can change without failing here, and the returned value is typed as
- * the whole declaration although only the checked fields are verified. No schema
+ * It checks mainly the fields this suite reads, plus a few it does not read (for
+ * example `synced`, `coreHosted` and the catch-up `status`), so a change to those
+ * fails here too. It is not the daemon's contract: the routes build these bodies
+ * inline and export no schema, and the CLI client's declarations are hand-written,
+ * so the canonical contract (one schema the route constructs its reply from and
+ * every client parses with) would live at the CLI boundary, not in a devnet
+ * suite. A field it does not check can change without failing here, and the
+ * returned value is typed as the whole declaration although only the checked
+ * fields are verified. No schema
  * library is used: the checks are a few plain functions.
  *
  * The state vocabularies below are copied, not imported (a runtime import would

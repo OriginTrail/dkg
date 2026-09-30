@@ -131,7 +131,7 @@ another.
   wait for adoption and content). It uses a graph of its own so it cannot consume
   test 2's "never seen" precondition when it runs first, and it stays a separate
   test so a failure names the behavior and it can run by name.
-- **Wire validators** (`wire.ts`). The daemon's replies are read through small
+- **Wire validators** (`wire.ts`). These daemon replies are read through small
   functions that take the JSON of a 200 reply as `unknown` and either return it typed
   as the CLI package's own declaration (imported as a type only, so nothing under
   `packages/` loads at runtime) or throw an error naming the endpoint and the
@@ -140,13 +140,15 @@ another.
   message, instead of as an `undefined` inside a test. Covered: the subscribe
   reply, the context-graph list, the subscriptions list and its rows, the
   catch-up status, and the status and connections replies test 7 needs to dial
-  one edge from another.
+  one edge from another. The graph-create reply, the `/api/query` answers and the
+  `/api/connect` status are still read loosely.
 
-  What that is not: it validates the fields THIS SUITE READS, not the daemon's
-  contract. The routes build these bodies inline and export no schema, and the CLI
+  What that is not: it validates mainly the fields this suite reads (and a few
+  it does not, such as `synced`, `coreHosted` and the catch-up `status`, which
+  therefore fail here too if they change), not the daemon's contract. The routes build these bodies inline and export no schema, and the CLI
   client's declarations are hand-written, so the canonical contract (one schema
   that the route builds its reply from and every client parses with) would live at
-  the CLI boundary. A field the suite does not read can change without failing
+  the CLI boundary. A field it does not check can change without failing
   here, and the result is typed as the whole declaration although only the checked
   fields are verified. The copied job and identity state lists are tied to the
   declarations at the type level (a type-check of the suite, through a throwaway

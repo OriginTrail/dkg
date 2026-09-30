@@ -116,10 +116,12 @@
  * graphs and subscriptions is test 7's connection from edge 5 to edge 6 (the daemon
  * has no disconnect, so it lasts until either edge restarts).
  *
- * The daemon's replies are read through the validators in wire.ts (a renamed or
- * retyped field fails at the reply, naming the endpoint and the field), and the
- * SWM test runs its two edges side by side through flows.ts. Both have unit tests
- * that need no devnet (wire.test.ts, flows.test.ts).
+ * The subscribe, context-graph list, subscriptions, catch-up status, node status
+ * and connections replies are read through the validators in wire.ts (a renamed or
+ * retyped field fails at the reply, naming the endpoint and the field); the
+ * graph-create reply, the /api/query answers and the /api/connect status are still
+ * read loosely. The SWM test runs its two edges side by side through flows.ts.
+ * Both have unit tests that need no devnet (wire.test.ts, flows.test.ts).
  */
 import { beforeAll, describe, expect, it } from 'vitest';
 import { ethers } from 'ethers';
@@ -160,6 +162,7 @@ import {
   type CatchupStatusResponse,
   type SubscribeResponse,
   type SubscriptionRow,
+  WireShapeError,
 } from './wire.js';
 
 const NAME_PREDICATE = 'https://schema.org/name';
@@ -508,7 +511,12 @@ async function recoverUntilContent(
   await pollContent(node, contextGraphId, subject, view, expected, label, budgetMs, async () => {
     if (Date.now() - lastRetryAt < 60_000) return;
     lastRetryAt = Date.now();
-    const forced = await forceCatchup(node, contextGraphId).catch(() => null);
+    // A transient failure of the forced catch-up is retried on the next round, but a reply
+    // of the wrong shape is a real failure and must not be hidden here.
+    const forced = await forceCatchup(node, contextGraphId).catch((error: unknown) => {
+      if (error instanceof WireShapeError) throw error;
+      return null;
+    });
     if (forced?.jobId !== undefined) latestJobId = forced.jobId;
   });
   return latestJobId;
@@ -618,7 +626,12 @@ async function registerSlotOnChain(nameHash: string): Promise<UnheldGraph> {
 async function expectByHashLookupResolved(node: DevnetNode, graph: NamedGraph, jobId: string, label: string): Promise<CatchupStatusResponse> {
   const byHash = await waitFor(`${label}: node${node.num} catch-up status by name hash`, 60_000, 2_000, async () => catchupStatus(node, graph.nameHash));
   expect(byHash.jobId, `${label}: the hash names the job it was subscribed with`).toBe(jobId);
-  expect(byHash.resolvedContextGraphId ?? graph.id, `${label}: a job that continued names the cleartext graph`).toBe(graph.id);
+  if (byHash.resolvedContextGraphId === undefined) {
+    // The job never continued under another id: it is still keyed by the hash it was made with.
+    expect(byHash.contextGraphId, `${label}: a job that did not continue stays keyed by the hash`).toBe(graph.nameHash);
+  } else {
+    expect(byHash.resolvedContextGraphId, `${label}: a job that continued names the cleartext graph`).toBe(graph.id);
+  }
   expect(byHash.identity, `${label}: ${JSON.stringify(byHash)}`).toMatchObject(
     // `satisfies` types the expected object against the daemon's declaration:
     // vitest types toMatchObject loosely, so without it a changed identity state
@@ -743,7 +756,14 @@ describe('public Context Graph subscribed by on-chain name hash on devnet', () =
       // The subscribe answered under the hash (no holder answered within the
       // request), so the job is keyed by the hash. It is the job the hash names
       // (#2779).
-      const byHash = await expectByHashLookupResolved(edgeA, vmGraph, jobId!, 'name-hash subscribe');
+      await expectByHashLookupResolved(edgeA, vmGraph, jobId!, 'name-hash subscribe');
+      // Decide only once the job is over: `resolvedContextGraphId` is set while the
+      // job runs, after its first round, so a job still in its first pass would
+      // wrongly take the "not asserted" path below.
+      const byHash = await waitFor(`node${edgeA.num} catch-up settles for the hash-keyed job`, 120_000, 3_000, async () => {
+        const found = await catchupStatus(edgeA, vmGraph.nameHash);
+        return found !== null && found.jobStatus !== 'queued' && found.jobStatus !== 'running' ? found : null;
+      });
       if (byHash.resolvedContextGraphId === vmGraph.id) {
         // The job continued under the cleartext id while it ran, so the cleartext
         // and on-chain aliases name it too: the assertion this test always made.
