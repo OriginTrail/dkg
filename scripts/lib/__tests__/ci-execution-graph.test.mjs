@@ -6,7 +6,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { analyzeShell, workflowExecution, workspaceCatalog } from './ci-execution-graph.mjs';
 import { REPO_ROOT } from './ci-plan-fixtures.mjs';
-import { laneSeeds } from './lane-entrypoints.mjs';
+import { edgeRequirement, jobRequirement, laneSeeds } from './lane-entrypoints.mjs';
 
 test('pnpm filter selectors resolve on the injected workspace graph alone', () => {
   // a depends on b, c on a; d stands apart. None of these names exists in the
@@ -109,4 +109,68 @@ test('the graph reads every workspace pnpm-workspace.yaml declares, rule or no r
   const repository = workspaceCatalog();
   assert.ok(repository.manifests.has('packages/cli/test-fixtures/sample-kafka-plugin'));
   assert.ok(repository.manifests.has('devnet/_bootstrap'));
+});
+
+test('each package-manager form a CI job can use reaches the scripts and files it runs', () => {
+  // Independent of the repository and of the routing guard: injected
+  // manifests and files, and the edges each command form must produce, with
+  // the requirement its job gives them. a depends on b; c stands apart.
+  const manifests = new Map([
+    ['packages/a', {
+      name: 'fixture-a',
+      dependencies: { 'fixture-b': 'workspace:*' },
+      scripts: {
+        build: 'node ../../scripts/build-a.mjs',
+        'build:ui': 'node ../../scripts/ui-a.mjs',
+        prepack: 'node ../../scripts/pack-a.mjs',
+        postinstall: 'node ../../scripts/install-a.mjs',
+      },
+    }],
+    ['packages/b', { name: 'fixture-b', scripts: { build: 'node ../../scripts/build-b.mjs && pnpm run build:extra', 'build:extra': 'node ../../scripts/extra-b.mjs' } }],
+    ['packages/c', { name: 'fixture-c', scripts: { prebuild: 'node ../../scripts/prebuild-c.mjs', build: 'node ../../scripts/build-c.mjs' } }],
+  ]);
+  const workspaces = { manifests, workspaceByName: new Map([...manifests].map(([directory, { name }]) => [name, directory])) };
+  const rootManifest = { scripts: { 'gate:build': 'pnpm -r --filter fixture-a... run build' } };
+  const present = new Set([
+    'scripts/build-a.mjs', 'scripts/ui-a.mjs', 'scripts/pack-a.mjs', 'scripts/install-a.mjs', 'scripts/build-b.mjs',
+    'scripts/extra-b.mjs', 'scripts/prebuild-c.mjs', 'scripts/build-c.mjs', 'packages/c/test/c.test.ts',
+  ]);
+  const run = (command, job = 'bura-cli', condition = "needs.changes.outputs.bura_cli == 'true'") => {
+    const [graph] = workflowExecution(`jobs:\n  ${job}:\n    if: ${condition}\n    steps:\n      - run: ${command}\n`, {
+      readRepoFile: (file) => (present.has(file) ? '' : undefined),
+      workspaces,
+      rootManifest,
+    });
+    const required = jobRequirement('ci.yml', job, condition);
+    return {
+      scripts: graph.edges.filter(({ kind }) => kind === 'script').map(({ workspace, script }) => `${workspace} ${script}`).sort(),
+      files: [...new Set(graph.edges.filter(({ kind }) => kind === 'file').map(({ file, chain }) => `${edgeRequirement(required, chain)} ${file}`))].sort(),
+    };
+  };
+  const lane = (files) => files.map((file) => `bura_cli ${file}`);
+  for (const [command, scripts, files] of [
+    // A root script running a recursive filtered build: the package and its dependencies.
+    ['pnpm run gate:build', ['. gate:build', 'packages/a build', 'packages/b build', 'packages/b build:extra'],
+      lane(['scripts/build-a.mjs', 'scripts/build-b.mjs', 'scripts/extra-b.mjs'])],
+    ['pnpm -r --filter "!fixture-a" run build', ['packages/b build', 'packages/b build:extra', 'packages/c build', 'packages/c prebuild'],
+      lane(['scripts/build-b.mjs', 'scripts/build-c.mjs', 'scripts/extra-b.mjs', 'scripts/prebuild-c.mjs'])],
+    ['pnpm --filter fixture-a run build:ui', ['packages/a build:ui'], lane(['scripts/ui-a.mjs'])],
+    ['pnpm --dir packages/c run build', ['packages/c build', 'packages/c prebuild'], lane(['scripts/build-c.mjs', 'scripts/prebuild-c.mjs'])],
+    ['pnpm -C packages/c build', ['packages/c build', 'packages/c prebuild'], lane(['scripts/build-c.mjs', 'scripts/prebuild-c.mjs'])],
+    ['cd packages/c && npm run build', ['packages/c build', 'packages/c prebuild'], lane(['scripts/build-c.mjs', 'scripts/prebuild-c.mjs'])],
+    ['turbo run build', ['packages/a build', 'packages/b build', 'packages/b build:extra', 'packages/c build', 'packages/c prebuild'],
+      lane(['scripts/build-a.mjs', 'scripts/build-b.mjs', 'scripts/build-c.mjs', 'scripts/extra-b.mjs', 'scripts/prebuild-c.mjs'])],
+    ['pnpm --filter fixture-a pack', ['packages/a prepack'], lane(['scripts/pack-a.mjs'])],
+    ['pnpm --filter fixture-c exec vitest run test/c.test.ts', [], lane(['packages/c/test/c.test.ts'])],
+    // Every job's install runs the install hooks, which need full CI.
+    ['pnpm install --frozen-lockfile', ['packages/a postinstall'], ['install scripts/install-a.mjs']],
+  ]) {
+    assert.deepEqual(run(command), { scripts, files }, command);
+  }
+  // The build job's workspace builds carry each producer's build output.
+  assert.deepEqual(run('pnpm run gate:build', 'build', "needs.changes.outputs.run_node == 'true'").files, [
+    'build-output:packages/a scripts/build-a.mjs',
+    'build-output:packages/b scripts/build-b.mjs',
+    'build-output:packages/b scripts/extra-b.mjs',
+  ]);
 });
