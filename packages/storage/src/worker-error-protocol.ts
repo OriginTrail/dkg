@@ -1,4 +1,4 @@
-import { isStoreResponseTooLargeError } from './http-response-limit.js';
+import { isStoreResponseTooLargeError, StoreResponseTooLargeError } from './http-response-limit.js';
 
 export interface GenericWorkerErrorEnvelopeV1 {
   readonly kind: 'generic';
@@ -9,9 +9,6 @@ export interface GenericWorkerErrorEnvelopeV1 {
 
 export interface StoreResponseTooLargeWorkerErrorEnvelopeV1 {
   readonly kind: 'store-response-too-large';
-  readonly name: string;
-  readonly message: string;
-  readonly code: 'STORE_RESPONSE_TOO_LARGE';
   readonly maxBytes: number;
   readonly actualBytes: number | bigint;
 }
@@ -27,14 +24,8 @@ export type WorkerResponseV1 =
 /** Keep generic errors minimal; only recognized variants receive typed metadata. */
 export function serializeWorkerErrorV1(error: unknown): WorkerErrorEnvelopeV1 {
   if (isStoreResponseTooLargeError(error)) {
-    const candidateName = (error as { readonly name?: unknown }).name;
     return Object.freeze({
       kind: 'store-response-too-large',
-      name: typeof candidateName === 'string'
-        ? candidateName
-        : 'StoreResponseTooLargeError',
-      message: error.message,
-      code: error.code,
       maxBytes: error.maxBytes,
       actualBytes: error.actualBytes,
     });
@@ -55,16 +46,7 @@ export function deserializeWorkerErrorV1(
   envelope: WorkerErrorEnvelopeV1,
 ): Error {
   if (envelope.kind === 'store-response-too-large') {
-    const error = new Error(envelope.message) as Error & {
-      code: 'STORE_RESPONSE_TOO_LARGE';
-      maxBytes: number;
-      actualBytes: number | bigint;
-    };
-    error.name = envelope.name;
-    error.code = envelope.code;
-    error.maxBytes = envelope.maxBytes;
-    error.actualBytes = envelope.actualBytes;
-    return error;
+    return new StoreResponseTooLargeError(envelope.maxBytes, envelope.actualBytes);
   }
   const error = new Error(envelope.message) as Error & { code?: string };
   error.name = envelope.name;

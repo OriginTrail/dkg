@@ -75,14 +75,13 @@ describe('worker error protocol', () => {
     const envelope = serializeWorkerErrorV1(new StoreResponseTooLargeError(256, 257n));
     expect(envelope).toEqual({
       kind: 'store-response-too-large',
-      name: 'StoreResponseTooLargeError',
-      message: 'Triple-store response exceeds byte limit: found 257, limit 256',
-      code: 'STORE_RESPONSE_TOO_LARGE',
       maxBytes: 256,
       actualBytes: 257n,
     });
     const restored = deserializeWorkerErrorV1(envelope);
+    expect(restored).toBeInstanceOf(StoreResponseTooLargeError);
     expect(isStoreResponseTooLargeError(restored)).toBe(true);
+    expect(restored).toMatchObject({ maxBytes: 256, actualBytes: 257n });
   });
 
   it('routes an unknown worker method through the structured error envelope', async () => {
