@@ -570,6 +570,46 @@ describe('a widen that still mismatches defers exactly as today (T6c)', () => {
   });
 });
 
+describe('huge unmatched SWM families defer to payload sync', () => {
+  afterEach(() => {
+    Logger.setSink(null);
+    delete process.env.DKG_FINALIZATION_SWM_MAX_FALLBACK_GRAPHS;
+  });
+
+  it('does not promote an unverified candidate or materialize the complete family', async () => {
+    process.env.DKG_FINALIZATION_SWM_MAX_FALLBACK_GRAPHS = '2';
+    const store = new OxigraphStore();
+    const root = 'urn:test:large-family:root';
+    const bucket = contextGraphWorkspaceGraphUri(CG);
+    await store.insert([
+      { subject: root, predicate: 'http://schema.org/name', object: '"candidate"', graph: swmGraph(AUTHOR_A, 9) },
+      ...[0, 1, 2].map((n) => ({
+        subject: `urn:test:large-family:decoy-${n}`,
+        predicate: 'http://schema.org/name', object: '"decoy"', graph: `${bucket}/decoy-${n}`,
+      })),
+    ]);
+    const wrongRoot = new Uint8Array(32).fill(7);
+    const packed = packKnowledgeAssetIdFromIdentity({ agentAddress: AUTHOR_A, kaNumber: 9 });
+    const msg = makeMsg({
+      startKAId: packed, endKAId: packed, kcMerkleRoot: wrongRoot, rootEntities: [root],
+    });
+    const logs: string[] = [];
+    Logger.setSink((record: LogRecord) => logs.push(record.message));
+    const sources = captureQuerySources(store);
+    const handler = new FinalizationHandler(store, makeVerifyingChain({
+      blockNumber: 100, txHash: msg.txHash, merkleRoot: wrongRoot,
+      publisher: AUTHOR_A, startKAId: packed, endKAId: packed,
+    }));
+
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(msg), CG);
+
+    expect(await promotedTo(store, root)).toBe(false);
+    expect(logs.some((message) => message.includes('event=finalization_payload_sync_required'))).toBe(true);
+    expect(logs.some((message) => message.includes('event=finalization_applied'))).toBe(false);
+    expect(sources).not.toContain(SLICE_WIDENED);
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────
 // T5c — the advertised defer→accept improvement, end to end.
 //

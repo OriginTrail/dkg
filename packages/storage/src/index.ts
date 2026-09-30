@@ -258,6 +258,7 @@ export {
   loadSelectedSharedMemoryQuads,
   loadSharedMemoryQuadsForScope,
   loadSharedMemorySliceWithKaBoundFallback,
+  loadMerkleVerifiedSharedMemorySlice,
   canonicalSharedMemoryScopeWriteGraph,
   resolveSharedMemoryScopeGraphs,
   resolveSharedMemoryScopeWriteGraph,
@@ -276,6 +277,7 @@ export {
   type SwmKaGraphBound,
   type SwmSliceSourceTags,
   type LoadSharedMemorySliceWithKaBoundFallbackOptions,
+  type LoadMerkleVerifiedSharedMemorySliceOptions,
 } from './graph-manager.js';
 export {
   PrivateContentStore,

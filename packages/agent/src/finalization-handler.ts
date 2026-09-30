@@ -26,7 +26,7 @@ import {
 import {
   deleteByPatternWithoutCount,
   GraphManager,
-  loadSharedMemorySliceWithKaBoundFallback,
+  loadMerkleVerifiedSharedMemorySlice,
   asGraphWriteRevisionSource,
   resolveGraphScopedOrLegacyMetadata,
   resolveSharedMemoryScopeGraphs,
@@ -947,24 +947,26 @@ export class FinalizationHandler {
         return 'already-confirmed';
       }
 
-      // #1549: read this KA's per-author SWM under-graphs first, widening to today's
-      // unbounded read on empty-or-mismatch. All of the bound/widen policy — and the
+      // #1549: read this KA's per-author SWM under-graphs first, widening on
+      // mismatch when the complete family is within the graph budget. A huge
+      // unmatched family defers to payload sync without promoting partial data.
+      // All of the bound/widen policy — and the
       // reasoning for why it is safe — lives in storage's
-      // `loadSharedMemorySliceWithKaBoundFallback`, which owns the widen.
+      // `loadMerkleVerifiedSharedMemorySlice`, which owns the widen.
       const { quads: sharedMemoryQuads, matched: merkleMatchedQuads } = await this.loadFinalizationSwmSlice(
         contextGraphId,
         msg.rootEntities,
         subGraphName,
         swmKaBoundDisabled() ? undefined : deriveSwmKaGraphBound(startKAId, endKAId),
         msg.kcMerkleRoot,
-        async () => {
+        async (merkleRoot) => {
           const privateRoots = await this.getPrivateRootsFromMeta(contextGraphId, msg.rootEntities, subGraphName);
           const allowGeneratedCatalogFloor = await this.allowsGeneratedCatalogFloor(contextGraphId, ctxGraphId);
           return (quads) => this.sharedMemoryQuadsMatchingMerkle(
             contextGraphId,
             quads,
             privateRoots,
-            msg.kcMerkleRoot,
+            merkleRoot,
             allowGeneratedCatalogFloor,
           );
         },
@@ -2905,11 +2907,11 @@ export class FinalizationHandler {
 
   /**
    * Read the finalization SWM slice, preferring this KA's per-author under-graphs
-   * and widening to the complete read on empty-or-mismatch (#1549). The widen — and
+   * and widening or deferring on empty-or-mismatch (#1549). That policy — and
    * the reasoning for why the bound is a safe pure accelerator (INV-1 is refuted
    * under root recurrence, so the bounded read may miss and must widen before the
    * caller records anything) — lives in storage's
-   * `loadSharedMemorySliceWithKaBoundFallback`. This method only resolves the bucket
+   * `loadMerkleVerifiedSharedMemorySlice`. This method only resolves the bucket
    * URI and the accept predicate; it is a thin finalization-specific adapter.
    *
    * #1098/#1099: replicas store gossiped SWM shares in the PER-KA graphs
@@ -2923,7 +2925,7 @@ export class FinalizationHandler {
     subGraphName: string | undefined,
     kaGraphBound: SwmKaGraphBound | undefined,
     expectedMerkleRoot: Uint8Array,
-    createAccept: () => Promise<(quads: Quad[]) => Quad[] | null>,
+    createMerkleAccept: (expectedMerkleRoot: Uint8Array) => Promise<(quads: Quad[]) => Quad[] | null>,
   ): Promise<{ quads: Quad[]; matched: Quad[] | null }> {
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return { quads: [], matched: null };
@@ -2942,7 +2944,7 @@ export class FinalizationHandler {
         : 'unknown',
     ].join('\u0000');
     return this.runScanSingleFlight(key, async () => {
-      const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+      const { quads, accepted } = await loadMerkleVerifiedSharedMemorySlice(
         this.store,
         this.finalizationSwmBucketUri(contextGraphId, subGraphName),
         { rootEntities: safeRoots },
@@ -2955,10 +2957,11 @@ export class FinalizationHandler {
             rootIndexed: SWM_SLICE_SOURCE_ROOT_INDEXED,
             cachedGraphSet: SWM_SLICE_SOURCE_CACHED_GRAPH_SET,
           },
-          createAccept,
-          merkleVerifiedRootIndex: true,
+          expectedMerkleRoot,
+          createMerkleAccept,
           queryOptions: { priority: 'background' },
           resultBudget: finalizationSwmResultBudget(),
+          maxCompleteFamilyGraphs: positiveIntegerEnv('DKG_FINALIZATION_SWM_MAX_FALLBACK_GRAPHS', 512),
         },
       );
       return { quads, matched: accepted };
@@ -2976,7 +2979,7 @@ export class FinalizationHandler {
     const safeRoots = rootEntities.filter(isSafeIri);
     if (safeRoots.length === 0) return { quads: [], matched: null, privateRoots: [] };
     let privateRoots: Uint8Array[] | undefined;
-    const { quads, accepted } = await loadSharedMemorySliceWithKaBoundFallback(
+    const { quads, accepted } = await loadMerkleVerifiedSharedMemorySlice(
       this.store,
       this.finalizationSwmBucketUri(contextGraphId, subGraphName),
       { rootEntities: safeRoots },
@@ -2989,13 +2992,13 @@ export class FinalizationHandler {
           rootIndexed: SWM_SLICE_SOURCE_ROOT_INDEXED,
           cachedGraphSet: SWM_SLICE_SOURCE_CACHED_GRAPH_SET,
         },
-        createAccept: async () => {
+        expectedMerkleRoot,
+        createMerkleAccept: async (merkleRoot) => {
           privateRoots ??= await this.getPrivateRootsFromMeta(contextGraphId, safeRoots, subGraphName);
           return (candidate) => this.sharedMemoryQuadsMatchingMerkle(
-            contextGraphId, candidate, privateRoots!, expectedMerkleRoot, allowGeneratedCatalogFloor,
+            contextGraphId, candidate, privateRoots!, merkleRoot, allowGeneratedCatalogFloor,
           );
         },
-        merkleVerifiedRootIndex: true,
         queryOptions: { priority: 'background' },
         resultBudget: finalizationSwmResultBudget(),
       },
