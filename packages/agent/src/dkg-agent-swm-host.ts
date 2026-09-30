@@ -678,6 +678,7 @@ interface VmRecoveryBatchAttempt {
 type VmRecoveryBatchExecutionResult =
   | { readonly kind: 'not-started-stale' }
   | { readonly kind: 'stale-after-attempt' }
+  | { readonly kind: 'local-admission-deferred' }
   | {
     readonly kind: 'completed';
     readonly outcomes: readonly (readonly [number, OrdinalOutcome])[];
@@ -688,6 +689,19 @@ type VmRecoveryBatchExecutionResult =
       readonly [string, VmRecoveryUalDisposition]
     )[];
   };
+
+/** A local refusal with no evidence that peer work or a commit ran. */
+function isZeroWorkVmAdmissionDeferral(result: DurableSyncResult): boolean {
+  return (result.deferredBackpressure ?? 0) > 0
+    && result.complete !== true
+    && [
+      result.fetchedDataTriples, result.fetchedMetaTriples, result.insertedTriples,
+      result.failedPeers, result.failedPhases, result.deniedPhases,
+      result.timedOutPhases, result.completedPhases, result.checkpointAdvances,
+      result.metaOnlyResponses, result.verifiedPrivateOnlyResponses,
+      result.dataRejectedMissingMeta, result.rejectedKcs,
+    ].every((count) => (count ?? 0) === 0);
+}
 
 function normalizeHostModeReconcileBatchSize(value: number | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE;
@@ -4376,7 +4390,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // The reconciler owns the continuation policy: productive slices, stale
       // bindings, and explicit provider rotations continue immediately, while
       // pending-only historical inventory yields to the periodic sweep.
-      if (isLifecycleCurrent() && result.shouldContinueImmediately) {
+      if (isTargetCurrent() && result.localAdmissionDeferred) {
+        this.vmReconcileScheduling?.retryLocalAdmission(localCgId, {
+          signal: lifecycleSignal,
+          isCurrent: isTargetCurrent,
+        });
+      } else if (isLifecycleCurrent() && result.shouldContinueImmediately) {
         this.vmReconcileScheduling?.triggerLive(localCgId);
       } else if (isTargetCurrent()) {
         // RS heal is bounded, best-effort maintenance. Run it only after the
@@ -6745,16 +6764,33 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const handledOrdinals: number[] = [];
     const attemptedOrdinals: number[] = [];
     const outcomes: Array<readonly [number, OrdinalOutcome]> = [];
+    const ownedRotationAttempts: Array<{
+      target: OrdinalRecoveryTarget;
+      record: VmReconcileRotationRecord;
+      addedPeer: boolean;
+      previousLastPeer: string | undefined;
+      previousDeadline: number;
+      installedDeadline: number;
+    }> = [];
 
     for (const attempt of attempts) {
       const batchTarget = attempt.entry.target;
       handledOrdinals.push(batchTarget.ordinal);
       attemptedOrdinals.push(batchTarget.ordinal);
       if (attempt.installedRecord) {
+        const installedDeadline = this.vmReconcileRotationNow()
+          + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
+        ownedRotationAttempts.push({
+          target: batchTarget,
+          record: attempt.installedRecord,
+          addedPeer: !attempt.installedRecord.attemptedPeerIds.has(peerId),
+          previousLastPeer: attempt.installedRecord.lastAttemptedPeerId,
+          previousDeadline: attempt.installedRecord.collectionDeadlineAt,
+          installedDeadline,
+        });
         attempt.installedRecord.lastAttemptedPeerId = peerId;
         attempt.installedRecord.attemptedPeerIds.add(peerId);
-        attempt.installedRecord.collectionDeadlineAt = this.vmReconcileRotationNow()
-          + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
+        attempt.installedRecord.collectionDeadlineAt = installedDeadline;
         this.touchVmReconcileRotationRecord(
           this.vmReconcileRotationSlotKey(batchTarget),
           attempt.installedRecord,
@@ -6773,6 +6809,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       });
     }
     let disposition: VmRecoveryUalDisposition = 'incomplete';
+    let localAdmissionDeferred = false;
     const runLegacyFallback = async (): Promise<void> => {
       try {
         const fallback = await this.runLegacyDurableSyncDetailed(
@@ -6790,6 +6827,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
             isCurrent: isRecoveryCurrent,
           },
         );
+        // A fresh exact request may already have crossed the wire before its
+        // legacy fallback was locally refused. Only a cached legacy-only turn
+        // can be proved never-started from this fallback's result.
+        if (useCachedLegacyFallback && isZeroWorkVmAdmissionDeferral(fallback.result)) {
+          localAdmissionDeferred = true;
+        }
         this.log.info(
           ctx,
           `VM legacy fallback for "${localCgId}" from ${peerId.slice(-8)}: fetched=${fallback.result.fetchedDataTriples + fallback.result.fetchedMetaTriples} inserted=${fallback.result.insertedTriples} failed=${fallback.result.failedPeers + fallback.result.failedPhases}`,
@@ -6813,6 +6856,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
         );
         const { result } = detailed;
         disposition = detailed.disposition;
+        localAdmissionDeferred = disposition === 'incomplete'
+          && detailed.responderCapability === undefined
+          && isZeroWorkVmAdmissionDeferral(result);
         if (detailed.responderCapability === 'legacy-filter-unsupported') {
           this.rememberVmReconcileExactFilterUnsupported(peerId);
           if (isRecoveryCurrent() && disposition === 'incomplete') {
@@ -6831,6 +6877,22 @@ export class SwmHostModeMethods extends DKGAgentBase {
       );
     }
     if (!isRecoveryCurrent()) return { kind: 'stale-after-attempt' };
+    if (localAdmissionDeferred) {
+      // The per-CG dispatcher owns this physical operation. Roll back only its
+      // new attempt marks while the captured record/target/marker still owns
+      // the slot; a rebind, roster refresh, or newer rotation wins unchanged.
+      for (const owned of ownedRotationAttempts) {
+        const slotKey = this.vmReconcileRotationSlotKey(owned.target);
+        if (this.vmReconcileRotationState.get(slotKey) !== owned.record
+          || owned.record.fingerprint !== this.vmReconcileRotationFingerprint(owned.target)
+          || owned.record.lastAttemptedPeerId !== peerId
+          || owned.record.collectionDeadlineAt !== owned.installedDeadline) continue;
+        if (owned.addedPeer) owned.record.attemptedPeerIds.delete(peerId);
+        owned.record.lastAttemptedPeerId = owned.previousLastPeer;
+        owned.record.collectionDeadlineAt = owned.previousDeadline;
+      }
+      return { kind: 'local-admission-deferred' };
+    }
 
     const perUalDispositions = new Map<string, VmRecoveryUalDisposition>();
     for (const attempt of attempts) {
@@ -7277,6 +7339,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const providerPolicy = new VmRecoveryProviderPolicy();
     const handledBatchOrdinals = new Set<number>();
     let recoveryWorkRan = false;
+    let localAdmissionDeferred = false;
 
     for (let eligibleIndex = 0; eligibleIndex < eligible.length; eligibleIndex += 1) {
       if (!isRecoveryCurrent()) break;
@@ -7304,17 +7367,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
         providerPolicy,
       );
       if (candidatePeerId) {
-        attemptedOrdinals.add(target.ordinal);
-        if (installedRecord) {
-          installedRecord.lastAttemptedPeerId = candidatePeerId;
-          installedRecord.attemptedPeerIds.add(candidatePeerId);
-          installedRecord.collectionDeadlineAt = this.vmReconcileRotationNow()
-            + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
-          this.touchVmReconcileRotationRecord(
-            this.vmReconcileRotationSlotKey(target),
-            installedRecord,
-          );
-        }
         let connectedPeer = connectedByPeerId.get(candidatePeerId);
         if (!connectedPeer) {
           await this.ensurePeerConnected(candidatePeerId, { signal }).catch((error) => {
@@ -7352,6 +7404,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }
       }
       if (!peerId) {
+        // A failed connection/protocol/network-admission probe still consumes
+        // its bounded provider turn. A ready peer is marked only by the exact
+        // executor, which can undo a never-started local sync refusal.
+        if (candidatePeerId) {
+          attemptedOrdinals.add(target.ordinal);
+          if (installedRecord) {
+            installedRecord.lastAttemptedPeerId = candidatePeerId;
+            installedRecord.attemptedPeerIds.add(candidatePeerId);
+            installedRecord.collectionDeadlineAt = this.vmReconcileRotationNow()
+              + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
+            this.touchVmReconcileRotationRecord(this.vmReconcileRotationSlotKey(target), installedRecord);
+          }
+        }
         if (installedRecord) {
           this.settleVmReconcileRotationAttempt(
             target,
@@ -7390,8 +7455,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
             ) === candidateRecord
             ? candidateRecord
             : undefined;
-          // The current target was selected and marked attempted before the
-          // connection/admission boundary. Later candidates must still prove
+          // The current target already passed connection/network admission.
+          // Later candidates must still prove
           // this peer remains uncredited in their independent rotation record.
           const peerEligible = candidateIndex === eligibleIndex
             || (candidateInstalledRecord
@@ -7503,6 +7568,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
         revalidateTarget,
         ctx,
       });
+      if (execution.kind === 'local-admission-deferred') {
+        // Capacity is node-local, so trying other providers would burn their
+        // turns under the same refusal. Retain all peer evidence and yield the
+        // whole slice for the scheduler's bounded local retry.
+        localAdmissionDeferred = true;
+        break;
+      }
       if (execution.kind !== 'completed') return staleRecovery();
       for (const [ordinal, outcome] of execution.outcomes) outcomes.set(ordinal, outcome);
       for (const ordinal of execution.handledOrdinals) handledBatchOrdinals.add(ordinal);
@@ -7547,6 +7619,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // Once every retained provider cycle is exhausted, the ordinary cooldown /
     // negative backoff applies exactly as before.
     if (!isRecoveryCurrent()) return staleRecovery();
+    if (localAdmissionDeferred) {
+      if (activeFetchCooldownOwner !== undefined) {
+        this.clearVmReconcileActiveFetchCooldown(localCgId, activeFetchCooldownOwner);
+      }
+      return {
+        outcomes,
+        attemptedOrdinals: [...attemptedOrdinals],
+        continuationOrdinal: unattemptedContinuationOrdinal,
+        hasImmediateRecoveryWork: false,
+        cooldownOnly: false,
+        localAdmissionDeferred: true,
+      };
+    }
     const recoveredAny = [...outcomes.values()]
       .some((outcome) => outcome.status === 'reconciled' || outcome.status === 'already');
     if (

@@ -65,6 +65,7 @@ export default defineConfig({
       "test/rfc64-precommit-owner-attribution.test.ts",
       "test/exact-assets.test.ts",
       "test/exact-graph-content-export.test.ts",
+      "test/vm-recovery-local-admission.test.ts",
       "test/exact-asset-responder.test.ts",
       "test/exact-asset-wire-parse.test.ts",
       "test/swm/host-catchup-sign.test.ts",

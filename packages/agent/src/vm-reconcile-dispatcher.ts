@@ -487,6 +487,9 @@ export class VmReconcileSchedulingRuntime<T> {
   private readonly dispatcher: VmReconcileRuntimeDispatcher<T>;
   private readonly planner: VmReconcileSweepPlanner;
   private readonly sweepAdmission: VmReconcileSweepAdmission<T>;
+  private readonly localAdmissionRetries = new Map<string, () => void>();
+  private readonly maxLocalAdmissionRetries: number;
+  private closed = false;
 
   constructor(
     run: (key: string, source: VmReconcileSource) => Promise<T>,
@@ -494,6 +497,7 @@ export class VmReconcileSchedulingRuntime<T> {
     options: VmReconcileDispatcherOptions = {},
     discoveryBatchSize = 8,
   ) {
+    this.maxLocalAdmissionRetries = options.maxPending ?? 256;
     let sweepAdmission!: VmReconcileSweepAdmission<T>;
     this.dispatcher = new VmReconcileRuntimeDispatcher(
       run,
@@ -506,6 +510,35 @@ export class VmReconcileSchedulingRuntime<T> {
   }
 
   triggerLive(key: string): void { this.dispatcher.triggerLive(key); }
+  /**
+   * Local sync pressure earns one bounded retry, rather than peer backoff.
+   * The timer owns no sync lease or VM worker; its nudge re-enters the ordinary
+   * bounded dispatcher, including foreground-burst and periodic fairness.
+   */
+  retryLocalAdmission(key: string, options: {
+    signal?: AbortSignal;
+    isCurrent: () => boolean;
+  }): void {
+    if (this.closed || options.signal?.aborted || !options.isCurrent()) return;
+    this.localAdmissionRetries.get(key)?.();
+    if (this.localAdmissionRetries.size >= this.maxLocalAdmissionRetries) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cancel = () => {
+      if (timer !== undefined) clearTimeout(timer);
+      options.signal?.removeEventListener('abort', cancel);
+      if (this.localAdmissionRetries.get(key) === cancel) this.localAdmissionRetries.delete(key);
+    };
+    this.localAdmissionRetries.set(key, cancel);
+    options.signal?.addEventListener('abort', cancel, { once: true });
+    timer = setTimeout(() => {
+      cancel();
+      if (!this.closed && !options.signal?.aborted && options.isCurrent()) {
+        this.dispatcher.triggerLive(key);
+      }
+    }, 2_500);
+    timer.unref?.();
+    if (options.signal?.aborted) cancel();
+  }
   releaseLiveHold(key: string): void { this.dispatcher.releaseLiveHold(key); }
   triggerPeriodic(key: string): void { this.dispatcher.triggerPeriodic(key); }
   tryTriggerPeriodic(key: string): boolean { return this.dispatcher.tryTriggerPeriodic(key); }
@@ -552,6 +585,8 @@ export class VmReconcileSchedulingRuntime<T> {
   resetSweep(): void { this.planner.reset(); }
 
   close(): Promise<void> {
+    this.closed = true;
+    for (const cancel of this.localAdmissionRetries.values()) cancel();
     this.planner.reset();
     return this.dispatcher.close();
   }

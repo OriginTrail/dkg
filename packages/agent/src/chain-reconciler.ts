@@ -85,11 +85,14 @@ export interface PendingOrdinalRecoveryResult {
    * the fair scan moving through unvisited ordinals.
    */
   cooldownOnly?: boolean;
+  /** No peer work ran because node-local sync admission was unavailable. */
+  localAdmissionDeferred?: boolean;
 }
 
 type PendingOrdinalRecoveryDisposition =
   | { kind: 'not-attempted' }
   | { kind: 'cooldown'; continuationOrdinal: number | undefined }
+  | { kind: 'local-admission'; continuationOrdinal: number | undefined }
   | { kind: 'ordinal-continuation'; continuationOrdinal: number }
   | { kind: 'provider-continuation' }
   | { kind: 'exhausted' };
@@ -102,6 +105,9 @@ type PendingOrdinalRecoveryDisposition =
 function recoveryDisposition(
   result: PendingOrdinalRecoveryResult,
 ): PendingOrdinalRecoveryDisposition {
+  if (result.localAdmissionDeferred === true) {
+    return { kind: 'local-admission', continuationOrdinal: result.continuationOrdinal };
+  }
   if (result.cooldownOnly === true) {
     return { kind: 'cooldown', continuationOrdinal: result.continuationOrdinal };
   }
@@ -193,6 +199,8 @@ export interface ReconcileResult {
   shouldContinueImmediately: boolean;
   /** True when this pass stopped because its captured chain binding changed. */
   staleTarget: boolean;
+  /** Internal bounded retry signal; local pressure is not peer evidence. */
+  localAdmissionDeferred?: boolean;
 }
 
 interface OrdinalPassPlan {
@@ -269,6 +277,11 @@ function planOrdinalPass(
       watermark: currentWatermark,
       recovery,
     }) => {
+      if (recovery.kind === 'local-admission') {
+        // Retry the same historical slice after local capacity becomes usable.
+        // A never-started fetch cannot move this cursor past untouched KAs.
+        return Math.max(currentWatermark, historicalOrdinals[0] ?? currentWatermark);
+      }
       if (usesRecentLane) {
         return hasUnvisitedCandidates
           ? Math.max(currentWatermark, historicalContinuationOrdinal)
@@ -556,6 +569,7 @@ export async function reconcileContextGraph(
   const hasMore = !headUnavailable
     && !staleTarget
     && recovery.kind !== 'cooldown'
+    && recovery.kind !== 'local-admission'
     && (
       recoveryAttempted
         ? hasImmediateRecoveryContinuation
@@ -581,6 +595,7 @@ export async function reconcileContextGraph(
     hasMore,
     shouldContinueImmediately,
     staleTarget,
+    ...(recovery.kind === 'local-admission' ? { localAdmissionDeferred: true } : {}),
   };
 }
 
