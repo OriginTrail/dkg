@@ -3327,13 +3327,12 @@ export class TripleStoreAsyncLiftPublisher
     const origin: LiftJobState = preDispatchRecoverable ? 'validated' : failedFromState;
     if (origin === 'claimed' || origin === 'validated') {
       const rawMessage = error instanceof Error ? error.message : String(error);
-      // A transport message is the provider's own text, and ethers embeds the request URL in it; a
-      // configured URL can carry an API key. The persisted message is echoed by the job routes, so
-      // reduce every URL in it to its host.
-      const message = transientRpc && (preDispatchRecoverable || claimedTransientRpc)
-        ? hostOnlyRpcText(rawMessage)
-        : rawMessage;
-      const lower = message.toLowerCase();
+      // The keyword chain below classifies the RAW text; what is PERSISTED is host-only. A provider's
+      // own text carries the request URL (ethers embeds it) and a configured URL can carry an API key,
+      // while the failure record is echoed by the job routes - for every failure code, not just the
+      // typed transient lanes (GH#2945).
+      const message = hostOnlyRpcText(rawMessage);
+      const lower = rawMessage.toLowerCase();
       const code =
         // Structured precondition failures (author capability / stale intent /
         // corrupt head) come from the SAME classifier that routed the failure

@@ -4,6 +4,7 @@ import {
   messageIndicatesNoFundedPublisherWallet,
   messageIndicatesPublishAuthorNotCustodial,
 } from '@origintrail-official/dkg-core';
+import { hostOnlyRpcText } from '@origintrail-official/dkg-chain';
 import type { PublishResult } from './publisher.js';
 import { isQuorumUnmetError } from './ack-errors.js';
 import {
@@ -220,7 +221,9 @@ export function mapPublishExceptionToLiftJobFailure(
   return createLiftJobFailureMetadata({
     failedFromState: input.failedFromState,
     code,
-    message,
+    // Classified from the raw text above, PERSISTED host-only: a configured RPC URL can carry an API
+    // key, and the failure record is echoed by the job routes (GH#2945).
+    message: hostOnlyRpcText(message),
     errorPayloadRef: input.errorPayloadRef,
     stackTraceRef: input.stackTraceRef,
     rpcResponseRef: input.rpcResponseRef,
