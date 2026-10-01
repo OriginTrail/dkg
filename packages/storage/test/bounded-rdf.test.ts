@@ -1,11 +1,16 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   BlazegraphStore,
+  EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES,
+  EXACT_GRAPH_EXPORT_MAX_ROWS,
   ExactGraphReadError,
   SparqlHttpStore,
+  StoreResponseTooLargeError,
   quadToNQuad,
   quadsToNQuads,
+  readExactGraph,
   readExactGraphPaged,
+  supportsBoundedExactGraphExport,
   type Quad,
   type QueryOptions,
   type QueryResult,
@@ -407,6 +412,168 @@ describe('readExactGraphPaged', () => {
       code: 'INVALID_QUERY_RESULT',
       graphIri: graph,
     });
+  });
+});
+
+describe('storage-owned exact graph profiles', () => {
+  const graph = 'urn:test:exact-profile';
+  const row = { s: 'urn:s', p: 'urn:p', o: '"😀"' };
+  const quad = { subject: row.s, predicate: row.p, object: row.o, graph: '' };
+  const profiles = ['paged', 'bounded-single-result'] as const;
+
+  function httpStore(rows: Array<Record<string, string>>, options: {
+    counts?: string[];
+    oversized?: boolean;
+  } = {}) {
+    const store = new BlazegraphStore('http://store.test/query');
+    let counts = 0;
+    const query = vi.spyOn(store, 'query').mockImplementation(async (sparql): Promise<QueryResult> => {
+      if (sparql.includes('COUNT(*)')) {
+        return { type: 'bindings', bindings: [{ count: options.counts?.[counts++] ?? String(rows.length) }] };
+      }
+      if (options.oversized && !sparql.includes('ORDER BY')) {
+        throw new StoreResponseTooLargeError(EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES,
+          EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES + 1);
+      }
+      const offset = Number(/OFFSET\s+(\d+)/.exec(sparql)?.[1] ?? 0);
+      const limit = Number(/LIMIT\s+(\d+)/.exec(sparql)![1]);
+      return { type: 'bindings', bindings: rows.slice(offset, offset + limit) };
+    });
+    return { store, query };
+  }
+
+  it('uses one bounded payload between count fences and keeps queries on decorators', async () => {
+    const { store: innerStore, query } = httpStore([row]);
+    const outerQuery = vi.fn((sparql: string, options?: QueryOptions) => innerStore.query(sparql, options));
+    const store = { innerStore, query: outerQuery } as unknown as TripleStore;
+    const signal = new AbortController().signal;
+    expect(supportsBoundedExactGraphExport(store)).toBe(true);
+    await expect(readExactGraph(store, graph, {
+      expectedQuadCount: 1, profile: 'bounded-single-result', outputGraph: '',
+      queryOptions: { source: 'test.exact-profile', priority: 'background', signal },
+    })).resolves.toEqual([quad]);
+    expect(outerQuery).toHaveBeenCalledTimes(3);
+    expect(query.mock.calls[1]![0]).toContain('LIMIT 2');
+    expect(query.mock.calls[1]![0]).not.toMatch(/ORDER BY|OFFSET/);
+    expect(query.mock.calls.map(([, options]) => options?.maxResponseBytes)).toEqual([
+      64 * 1024, EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES, 64 * 1024,
+    ]);
+    for (const [, options] of query.mock.calls) {
+      expect(options).toMatchObject({ source: 'test.exact-profile', priority: 'background', signal });
+    }
+  });
+
+  it.each(profiles)('%s applies the same canonical duplicate and COUNT validators', async (profile) => {
+    const duplicate = httpStore([
+      { s: 'urn:s', p: 'urn:p', o: '"1"^^urn:type' },
+      { s: 'urn:s', p: 'urn:p', o: '"1"^^<urn:type>' },
+    ]);
+    await expect(readExactGraph(duplicate.store, graph, {
+      expectedQuadCount: 2, profile, outputGraph: '',
+    })).rejects.toMatchObject({ kind: 'integrity', code: 'INVALID_QUERY_RESULT' });
+    const count = httpStore([row], { counts: ['1.0'] });
+    await expect(readExactGraph(count.store, graph, {
+      expectedQuadCount: 1, profile,
+    })).rejects.toMatchObject({ kind: 'integrity', code: 'INVALID_QUERY_RESULT' });
+    expect(count.query).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(profiles)('%s enforces caller row, UTF-8 and response ceilings', async (profile) => {
+    const { store, query } = httpStore([row]);
+    await expect(readExactGraph(store, graph, {
+      expectedQuadCount: 1, profile, maxQuadCount: 0,
+    })).rejects.toMatchObject({ code: 'QUAD_COUNT_LIMIT_EXCEEDED', actual: 1, limit: 0 });
+    expect(query).not.toHaveBeenCalled();
+    await expect(readExactGraph(store, graph, {
+      expectedQuadCount: 1, profile, outputGraph: '', maxNQuadsBytes: 22,
+    })).rejects.toMatchObject({ code: 'NQUADS_BYTE_LIMIT_EXCEEDED', actual: 24, limit: 22 });
+    query.mockClear();
+    await expect(readExactGraph(store, graph, {
+      expectedQuadCount: 1, profile, outputGraph: '', maxNQuadsBytes: 24,
+      queryOptions: { maxResponseBytes: 1024 },
+    })).resolves.toEqual([quad]);
+    for (const [, options] of query.mock.calls) expect(options?.maxResponseBytes).toBe(1024);
+  });
+
+  it.each(profiles)('%s rejects preflight and postflight count races', async (profile) => {
+    const before = httpStore([row], { counts: ['2'] });
+    await expect(readExactGraph(before.store, graph, {
+      expectedQuadCount: 1, profile,
+    })).rejects.toMatchObject({ code: 'QUAD_COUNT_MISMATCH', expected: 1, actual: 2 });
+    expect(before.query).toHaveBeenCalledTimes(1);
+    const after = httpStore([row], { counts: ['"1"^^<urn:integer>', '2'] });
+    await expect(readExactGraph(after.store, graph, {
+      expectedQuadCount: 1, profile,
+    })).rejects.toMatchObject({ code: 'QUAD_COUNT_MISMATCH', expected: 1, actual: 2 });
+    expect(after.query).toHaveBeenCalledTimes(3);
+  });
+
+  it('falls back to complete bounded pages for an unsupported store', async () => {
+    const { store: innerStore, query } = httpStore([row]);
+    const store = { query: (sparql: string, options?: QueryOptions) => innerStore.query(sparql, options) } as TripleStore;
+    expect(supportsBoundedExactGraphExport(store)).toBe(false);
+    await expect(readExactGraph(store, graph, {
+      expectedQuadCount: 1, profile: 'bounded-single-result', outputGraph: '',
+    })).resolves.toEqual([quad]);
+    expect(query.mock.calls[1]![0]).toMatch(/ORDER BY[\s\S]+LIMIT 2[\s\S]+OFFSET 0/);
+  });
+
+  it('falls back before a large payload when the expected count exceeds the profile', async () => {
+    const rows = Array.from({ length: EXACT_GRAPH_EXPORT_MAX_ROWS + 1 }, (_, index) => ({
+      s: `urn:s:${index}`, p: 'urn:p', o: 'urn:o',
+    }));
+    const { store, query } = httpStore(rows);
+    await expect(readExactGraph(store, graph, {
+      expectedQuadCount: rows.length, profile: 'bounded-single-result', outputGraph: '',
+    })).resolves.toHaveLength(rows.length);
+    const payloads = query.mock.calls.filter(([sparql]) => !sparql.includes('COUNT(*)'));
+    expect(payloads.length).toBeGreaterThan(1);
+    for (const [sparql] of payloads) {
+      expect(sparql).toContain('ORDER BY');
+      expect(Number(/LIMIT\s+(\d+)/.exec(sparql)![1])).toBeLessThanOrEqual(256);
+    }
+  });
+
+  it('restarts oversized results with fresh count fences instead of retaining a prefix', async () => {
+    const rows = Array.from({ length: 300 }, (_, index) => ({ s: `urn:s:${index}`, p: 'urn:p', o: 'urn:o' }));
+    const { store, query } = httpStore(rows, { oversized: true });
+    await expect(readExactGraph(store, graph, {
+      expectedQuadCount: rows.length, profile: 'bounded-single-result',
+    })).resolves.toHaveLength(rows.length);
+    expect(query.mock.calls.filter(([sparql]) => sparql.includes('COUNT(*)'))).toHaveLength(3);
+    expect(query.mock.calls.filter(([sparql]) => sparql.includes('OFFSET'))).toHaveLength(2);
+    const raced = httpStore([row], { oversized: true, counts: ['1', '2'] });
+    await expect(readExactGraph(raced.store, graph, {
+      expectedQuadCount: 1, profile: 'bounded-single-result',
+    })).rejects.toMatchObject({ code: 'QUAD_COUNT_MISMATCH', expected: 1, actual: 2 });
+    expect(raced.query.mock.calls.filter(([sparql]) => sparql.includes('OFFSET'))).toHaveLength(0);
+  });
+
+  it('restarts blank-node rows in one bounded CONSTRUCT document', async () => {
+    const { store, query } = httpStore([{ s: 'urn:root', p: 'urn:p', o: '_:select-local' }]);
+    query.mockImplementation(async (sparql): Promise<QueryResult> => {
+      if (sparql.includes('COUNT(*)')) return { type: 'bindings', bindings: [{ count: '1' }] };
+      if (sparql.includes('CONSTRUCT')) return {
+        type: 'quads', quads: [{ subject: 'urn:root', predicate: 'urn:p', object: '_:document', graph: '' }],
+      };
+      return { type: 'bindings', bindings: [{ s: 'urn:root', p: 'urn:p', o: '_:select-local' }] };
+    });
+    await expect(readExactGraph(store, graph, {
+      expectedQuadCount: 1, profile: 'bounded-single-result', outputGraph: '',
+    })).resolves.toEqual([{ subject: 'urn:root', predicate: 'urn:p', object: '_:document', graph: '' }]);
+    expect(query.mock.calls.filter(([sparql]) => sparql.includes('CONSTRUCT'))).toHaveLength(1);
+    expect(query.mock.calls.filter(([sparql]) => sparql.includes('COUNT(*)'))).toHaveLength(3);
+  });
+
+  it('rejects a server ignoring the single-result overflow LIMIT', async () => {
+    const { store, query } = httpStore([row]);
+    query.mockImplementation(async (sparql): Promise<QueryResult> => sparql.includes('COUNT(*)')
+      ? { type: 'bindings', bindings: [{ count: '1' }] }
+      : { type: 'bindings', bindings: [row, row, row] });
+    await expect(readExactGraph(store, graph, {
+      expectedQuadCount: 1, profile: 'bounded-single-result',
+    })).rejects.toMatchObject({ code: 'INVALID_QUERY_RESULT' });
+    expect(query).toHaveBeenCalledTimes(2);
   });
 });
 

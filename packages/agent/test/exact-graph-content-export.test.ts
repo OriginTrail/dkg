@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   BlazegraphStore,
+  EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES,
+  EXACT_GRAPH_EXPORT_MAX_ROWS,
   ExactGraphReadError,
   OxigraphStore,
   StoreResponseTooLargeError,
+  readExactGraph,
+  supportsBoundedExactGraphExport,
   type QueryOptions,
   type QueryResult,
   type Quad,
@@ -15,11 +19,6 @@ import { MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUr
 import { ethers } from 'ethers';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { authenticateVerifiedGraphScopedAsset, materializeVerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
-import {
-  EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES,
-  EXACT_GRAPH_EXPORT_MAX_ROWS,
-  readBoundedExactGraphExport,
-} from '../src/bounded-exact-graph-export.js';
 import { verifyExactGraphContent } from '../src/exact-graph-content-verifier.js';
 import { createVmRecoveryHostHarness } from './_helpers/vm-recovery-host.js';
 
@@ -147,11 +146,16 @@ describe('bounded exact graph export', () => {
 
   it('refuses unknown adapters and over-profile counts without issuing a large query', async () => {
     const unknown = { query: vi.fn() } as unknown as TripleStore;
-    expect(await readBoundedExactGraphExport(unknown, graph, 1, {})).toBeNull();
+    expect(supportsBoundedExactGraphExport(unknown)).toBe(false);
     expect(unknown.query).not.toHaveBeenCalled();
-    const { store, query } = httpStore([]);
-    expect(await readBoundedExactGraphExport(store, graph, EXACT_GRAPH_EXPORT_MAX_ROWS + 1, {})).toBeNull();
-    expect(query).not.toHaveBeenCalled();
+    const expectedQuadCount = EXACT_GRAPH_EXPORT_MAX_ROWS + 1;
+    const { store, query } = httpStore([], { beforeCount: String(expectedQuadCount) });
+    await expect(readExactGraph(store, graph, {
+      expectedQuadCount, profile: 'bounded-single-result',
+    })).rejects.toMatchObject({ code: 'QUAD_COUNT_MISMATCH' });
+    const payloads = query.mock.calls.filter(([sparql]) => !sparql.includes('COUNT(*)'));
+    expect(payloads).toHaveLength(1);
+    expect(payloads[0]![0]).toMatch(/ORDER BY[\s\S]+LIMIT 256[\s\S]+OFFSET 0/);
   });
 
   it('retains the original reader for embedded stores', async () => {
@@ -168,7 +172,9 @@ describe('bounded exact graph export', () => {
     const { store, query } = httpStore(body(2));
     const signal = new AbortController().signal;
     const options: QueryOptions = { source: 'test.signal', signal, priority: 'background' };
-    expect(await readBoundedExactGraphExport(store, graph, 2, options)).toHaveLength(2);
+    expect(await readExactGraph(store, graph, {
+      expectedQuadCount: 2, profile: 'bounded-single-result', queryOptions: options,
+    })).toHaveLength(2);
     for (const [, observed] of query.mock.calls) {
       expect(observed?.signal).toBe(signal);
       expect(observed?.priority).toBe('background');
@@ -177,7 +183,9 @@ describe('bounded exact graph export', () => {
 
   it('does not widen a caller response ceiling', async () => {
     const { store, query } = httpStore(body(2));
-    expect(await readBoundedExactGraphExport(store, graph, 2, { maxResponseBytes: 1024 })).toHaveLength(2);
+    expect(await readExactGraph(store, graph, {
+      expectedQuadCount: 2, profile: 'bounded-single-result', queryOptions: { maxResponseBytes: 1024 },
+    })).toHaveLength(2);
     for (const [, options] of query.mock.calls) expect(options?.maxResponseBytes).toBe(1024);
   });
 });

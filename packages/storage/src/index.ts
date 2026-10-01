@@ -162,14 +162,19 @@ export {
   type GraphWriteScope,
 } from './graph-write-gen.js';
 export {
+  EXACT_GRAPH_EXPORT_MAX_ROWS,
+  EXACT_GRAPH_EXPORT_MAX_RESPONSE_BYTES,
   ExactGraphReadError,
   quadToNQuad,
   quadsToNQuads,
+  readExactGraph,
   readExactGraphPaged,
   readExactGraphPagedWithDiscoveredCount,
+  supportsBoundedExactGraphExport,
   type ExactGraphReadErrorCode,
   type ExactGraphReadErrorKind,
   type ReadExactGraphPagedOptions,
+  type ReadExactGraphOptions,
 } from './bounded-rdf.js';
 export { StoreResponseTooLargeError } from './http-response-limit.js';
 export {

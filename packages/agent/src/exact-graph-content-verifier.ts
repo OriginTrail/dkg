@@ -4,11 +4,10 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import {
   ExactGraphReadError,
-  readExactGraphPaged,
+  readExactGraph,
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
-import { readBoundedExactGraphExport } from './bounded-exact-graph-export.js';
 
 export type ExactGraphContentVerification =
   | {
@@ -50,12 +49,8 @@ export async function verifyExactGraphContent(
 ): Promise<ExactGraphContentVerification> {
   let quads: Quad[];
   try {
-    quads = await readBoundedExactGraphExport(
-      store,
-      input.graphUri,
-      input.publicTripleCount,
-      { source: input.source },
-    ) ?? await readExactGraphPaged(store, input.graphUri, {
+    quads = await readExactGraph(store, input.graphUri, {
+      profile: 'bounded-single-result',
       expectedQuadCount: input.publicTripleCount,
       outputGraph: '',
       queryOptions: { source: input.source },
