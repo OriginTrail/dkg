@@ -13,12 +13,19 @@ import {
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
   SYNC_PAGE_SIZE,
+  SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD,
   SYNC_REQUEST_PAGE_SIZE,
   SYNC_REQUEST_SAFE_PAGE_SIZE,
 } from '../src/dkg-agent-constants.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
 import { verifySyncedData } from '../src/sync-verify-worker-impl.js';
-import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
+import { buildSyncRequestEnvelope, type SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
+import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
+import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
+import { fetchSyncPages, SyncPageSizeProfileCache } from '../src/sync/requester/page-fetch.js';
+import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
+import { EXACT_SYNC_GZIP_ENCODING } from '../src/sync/wire-compression.js';
+import { parseOldSyncRequest } from './fixtures/sync-request-parser-10.0.20.fixture.js';
 import { serializeResponderRows } from '../src/sync/responder/graph-plan.js';
 import {
   TEST_SYNC_DENIED,
@@ -44,6 +51,7 @@ interface AssetFixture {
 function asset(contextGraphId: string, index: number, rows: number, options: {
   readonly version?: number;
   readonly literal?: string;
+  readonly integerObjects?: boolean;
 } = {}): AssetFixture {
   const version = options.version ?? 1;
   const ual = `did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/${index}`;
@@ -52,9 +60,11 @@ function asset(contextGraphId: string, index: number, rows: number, options: {
   );
   const payload = Array.from({ length: rows }, (_, row): Quad => ({
     graph,
-    subject: `urn:exact-serving:${index}:${row.toString().padStart(5, '0')}`,
+    subject: options.integerObjects ? 'urn:exact-serving:integer'
+      : `urn:exact-serving:${index}:${row.toString().padStart(5, '0')}`,
     predicate: 'urn:exact-serving:value',
-    object: `"${options.literal ?? `version-${version}-row-${row}`}"`,
+    object: options.integerObjects ? `"${row}"^^<http://www.w3.org/2001/XMLSchema#integer>`
+      : `"${options.literal ?? `version-${version}-row-${row}`}"`,
   }));
   const meta = generateGraphKnowledgeAssetMetadata({
     ual, contextGraphId, assertionGraph: graph, assertionVersion: String(version),
@@ -63,7 +73,10 @@ function asset(contextGraphId: string, index: number, rows: number, options: {
     publicTripleCount: payload.length, privateTripleCount: 0,
   }, {
     status: 'confirmed',
-    confirmation: { kind: 'transaction', provenance: { txHash: `0x${'11'.repeat(32)}`, batchId: BigInt(index) } },
+    confirmation: { kind: 'transaction', provenance: {
+      txHash: `0x${'11'.repeat(32)}`, batchId: BigInt(index), blockNumber: 1, blockTimestamp: 0,
+      publisherAddress: '0x00000000000000000000000000000000000000ab', chainId: '31337',
+    } },
   });
   return { contextGraphId, ual, graph, payload, meta };
 }
@@ -369,6 +382,110 @@ describe('bounded exact DATA serving recovery', () => {
         name: 'QuietRetryableHandlerError',
         message: expect.stringContaining('exceeds global estimated bytes budget'),
       });
+    } finally { await store.close(); }
+  });
+});
+
+
+describe('adaptive exact DATA wire continuations', () => {
+  it.each(['JSON', 'pipe'] as const)('keeps one plan and numeric row order across learned 64 to 512 pages for %s requests', async wire => {
+    const store = new OxigraphStore();
+    try {
+      const fixture = asset(`adaptive-exact-${wire.toLowerCase()}`, 15, 4_000, { integerObjects: true });
+      await store.insert([...fixture.meta, ...fixture.payload]);
+      const reads = observe(store, [fixture.graph]);
+      const parsedRequests: SyncRequestEnvelope[] = [];
+      const rawRequests: string[] = [];
+      const requestedSizes: number[] = [];
+      const responderFailures: Array<{ offset: number; rows?: number; message: string }> = [];
+      const signedLimits: number[] = [];
+      const parser = { parsePipeDelimitedSyncRequest: ContextGraphResolveMethods.prototype.parsePipeDelimitedSyncRequest };
+      let handler!: (bytes: Uint8Array, peer: string) => Promise<Uint8Array>;
+      registerSyncHandler({
+        register: (_protocol, callback) => { handler = callback; },
+        protocolSync: '/test/adaptive-exact-sync', syncDeniedResponse: TEST_SYNC_DENIED,
+        syncPageSize: SYNC_PAGE_SIZE, sharedMemoryTtlMs: 0, store, peerId: 'adaptive-source',
+        parseSyncRequest: bytes => {
+          rawRequests.push(new TextDecoder().decode(bytes));
+          const parsed = ContextGraphResolveMethods.prototype.parseSyncRequest.call(parser as never, bytes);
+          parsedRequests.push(parsed);
+          return parsed;
+        },
+        authorizeSyncRequest: async () => true, logWarn: () => {}, logDebug: () => {},
+      });
+      const pageSizeProfileCache = new SyncPageSizeProfileCache();
+      pageSizeProfileCache.remember({ remotePeerId: 'adaptive-source', contextGraphId: fixture.contextGraphId,
+        includeSharedMemory: false, phase: 'data', responseEncoding: EXACT_SYNC_GZIP_ENCODING }, 64);
+      const quadsByLine = new Map(expectedLines(fixture.payload).map((line, index) => [line, fixture.payload[index]!]));
+      const delivered: string[] = [];
+      const fetched = await fetchSyncPages({
+        ctx: { kind: 'system', id: 'adaptive-exact-wire', startedAt: Date.now() } as never,
+        remotePeerId: 'adaptive-source', contextGraphId: fixture.contextGraphId,
+        graphUri: fixture.graph, includeSharedMemory: false, phase: 'data',
+        assetUals: [fixture.ual], responseEncoding: EXACT_SYNC_GZIP_ENCODING,
+        deadline: Date.now() + 30_000, syncPageTimeoutMs: 5_000, syncRouterAttempts: 1,
+        syncPageRetryAttempts: 1, syncPageSize: EXACT_PAGE_ROWS, pageSizeProfileCache,
+        syncDeniedResponse: TEST_SYNC_DENIED, protocolSync: '/test/adaptive-exact-sync',
+        debugSyncProgress: false, checkpointStore: new MemorySyncCheckpointStore(), forceFreshSession: true,
+        buildSyncRequest: async (cg, offset, limit, swm, peer, phase, snapshot, since, token, recovery, assets) => {
+          requestedSizes.push(limit);
+          return buildSyncRequestEnvelope({ contextGraphId: cg, offset, limit, includeSharedMemory: swm,
+            targetPeerId: peer, requesterPeerId: 'adaptive-requester', phase, snapshotRef: snapshot,
+            sinceBatchId: since, syncSessionId: token, recovery, assetUals: assets, needsAuth: wire === 'JSON',
+            computeSyncDigest: (_cg, _offset, signedLimit) => { signedLimits.push(signedLimit); return new Uint8Array(32); },
+            getIdentityId: async () => 1n,
+            signMessage: async () => ({ r: new Uint8Array(32).fill(1), vs: new Uint8Array(32).fill(2) }) });
+        },
+        send: async (_peer, _protocol, bytes) => {
+          try { return await handler(bytes, 'adaptive-requester'); }
+          catch (error) {
+            const last = parsedRequests.at(-1)!;
+            responderFailures.push({ offset: last.offset, rows: last.pageRowsHint, message: (error as Error).message });
+            throw error;
+          }
+        },
+        parseAndFilter: async text => {
+          const lines = linesFromNquads(text);
+          delivered.push(...lines);
+          const quads = lines.map(line => {
+            const quad = quadsByLine.get(line);
+            if (!quad) throw new Error('Unexpected exact assertion row');
+            return quad;
+          });
+          return { quads, totalQuads: lines.length };
+        },
+        logWarn: () => {}, logInfo: () => {}, logDebug: () => {},
+      });
+      expect(responderFailures).toEqual([]);
+      expect(fetched).toMatchObject({ completed: true, nextOffset: 4_000 });
+      expect(requestedSizes).toEqual([
+        ...[64, 128, 256].flatMap(rows => Array(SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD).fill(rows)), 512, 512,
+      ]);
+      expect(parsedRequests[24]).toMatchObject({ offset: 3_584, limit: 500, pageRowsHint: 512 });
+      expect(parsedRequests.map(request => request.pageRowsHint)).toEqual(requestedSizes);
+      expect(new Set(parsedRequests.map(request => request.syncSessionId)).size).toBe(1);
+      expect(delivered).toEqual(expectedLines(fixture.payload));
+      expect(new Set(delivered).size).toBe(4_000);
+      expect(verifySyncedData(fetched.quads, fixture.meta).data).toEqual(fixture.payload);
+      // The frozen previous-version parser still sees the same signed limit,
+      // exact selection and token while ignoring the additive small-row hint.
+      for (const [index, raw] of rawRequests.entries()) {
+        expect(parseOldSyncRequest(new TextEncoder().encode(raw))).toMatchObject({
+          limit: Math.min(requestedSizes[index]!, SYNC_PAGE_SIZE), assetUals: [fixture.ual],
+          syncSessionId: parsedRequests[index]!.syncSessionId,
+        });
+      }
+      expect(reads.manifestSources).toEqual([...MANIFEST_SOURCES]);
+      expect(reads.payloadSnapshots).toBe(0);
+      expect(reads.payloadQueries.every(read => Number(/LIMIT (\d+)/.exec(read.query)?.[1]) <= 65)).toBe(true);
+      if (wire === 'JSON') {
+        expect(signedLimits).toEqual(requestedSizes.map(rows => Math.min(rows, SYNC_PAGE_SIZE)));
+        expect(rawRequests.every(raw => raw.startsWith('{'))).toBe(true);
+      } else {
+        expect(signedLimits).toEqual([]);
+        expect(rawRequests.every(raw => !raw.startsWith('{'))).toBe(true);
+        expect(rawRequests[0]).toContain('|page-mode|byte-budget-v1|page-rows|64|');
+      }
     } finally { await store.close(); }
   });
 });

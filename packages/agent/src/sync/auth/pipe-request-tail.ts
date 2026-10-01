@@ -1,7 +1,6 @@
 import {
   SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
-  SYNC_PAGE_SIZE,
 } from '../../dkg-agent-constants.js';
 import {
   decodeExactAssetUals,
@@ -24,7 +23,9 @@ export interface PipeSyncRequestTail extends ByteBudgetPageHint {
 /**
  * Normalize the additive byte-budget hint identically for authenticated JSON
  * envelopes and public pipe requests. A row hint without the matching
- * capability is intentionally inert.
+ * capability is intentionally inert. Positive hints below the legacy signed
+ * limit remain meaningful: exact DATA keeps its page-only plan and row order
+ * while the requester grows back from its learned transport floor.
  */
 export function normalizeByteBudgetPageHint(
   pageMode: unknown,
@@ -38,7 +39,7 @@ export function normalizeByteBudgetPageHint(
     pageMode: normalizedMode,
     pageRowsHint: normalizedMode !== undefined &&
       Number.isSafeInteger(rows) &&
-      rows > SYNC_PAGE_SIZE
+      rows > 0
       ? Math.min(rows, SYNC_BYTE_BUDGET_MAX_ROWS)
       : undefined,
   };
