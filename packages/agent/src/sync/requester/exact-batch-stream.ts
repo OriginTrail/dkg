@@ -3,7 +3,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   EXACT_BATCH_BATCH_INDEX, EXACT_BATCH_FRAME_KIND as K, EXACT_BATCH_STREAM_WINDOW_SIZE,
   ExactBatchReceiveWindow, decodeExactBatchAsset, encodeExactBatchFrame, decodeExactBatchFrames,
-  type ExactBatchFrame, type ReceivedExactBatchAsset,
+  type ExactBatchFrame, type ExactBatchRefusal, type ReceivedExactBatchAsset,
 } from '../exact-batch-stream-contract.js';
 import { requireExactAssetUals } from '../exact-assets.js';
 import { observeExactBatch } from '../exact-batch-observation.js';
@@ -46,9 +46,24 @@ export function exactBatchTransportOptions(timeoutMs: number, signal?: AbortSign
     maxResponseBytes: 10 * (4 * 1024 * 1024 + 65_536 + 1026 * 16) + 8192 + 16,
     windowSize: EXACT_BATCH_STREAM_WINDOW_SIZE };
 }
+/** Settled local observations only; these never grant recovery or holder credit. */
+export interface ExactBatchRefusalObservation {
+  readonly code: ExactBatchRefusal;
+  readonly startedAssets: number;
+  readonly committedAssets: number;
+  readonly acknowledgedAssets: number;
+  readonly atAssetBoundary: boolean;
+  readonly verifiedPrefix: boolean;
+}
+class ExactBatchRefusalError extends Error {
+  constructor(readonly refusal: ExactBatchRefusal, readonly startedCount: number, readonly atAssetBoundary: boolean) {
+    super(`Exact batch responder refused: ${refusal}`);
+  }
+}
 export class ExactBatchPartialSyncError extends Error {
   readonly code = 'EXACT_BATCH_PARTIAL';
-  constructor(readonly committedAssetUals: readonly string[], cause: unknown) {
+  constructor(readonly committedAssetUals: readonly string[], cause: unknown,
+    readonly refusalObservation?: ExactBatchRefusalObservation) {
     super('Exact batch stopped before verified completion', { cause });
   }
 }
@@ -122,7 +137,7 @@ export async function consumeExactBatchVerifiedSession(session: ExactBatchAgentS
   const commit = createExactBatchVerifiedCommitter({ ...options, onCommitted: ual => {
     committed.push(ual); observeExactBatch(() => options.onCommitted?.(ual));
   } });
-  let stopped = false, batchEnded = false;
+  let stopped = false, batchEnded = false, acknowledgedAssets = 0;
   let wake: (() => void) | undefined;
   const notify = () => { const waiting = wake; wake = undefined; waiting?.(); };
   const reader = (async () => {
@@ -131,7 +146,7 @@ export async function consumeExactBatchVerifiedSession(session: ExactBatchAgentS
       if (stopped) return;
       if (!incoming) throw new Error('Exact batch ended without explicit completion');
       window.accept(incoming); notify();
-      if (incoming.kind === K.REFUSE) throw new Error('Exact batch responder refused');
+      if (incoming.kind === K.REFUSE) throw new ExactBatchRefusalError(window.refusal!, window.startedCount, window.atAssetBoundary);
       if (incoming.kind === K.BATCH_END) { batchEnded = true; notify(); return; }
     }
   })();
@@ -142,6 +157,7 @@ export async function consumeExactBatchVerifiedSession(session: ExactBatchAgentS
       if (!asset) { await new Promise<void>(resolve => { wake = resolve; }); continue; }
       const acknowledged = await window.commitAsset(asset, commit, { signal });
       await session.send(acknowledged);
+      acknowledgedAssets += 1;
     }
   })();
   try {
@@ -151,7 +167,16 @@ export async function consumeExactBatchVerifiedSession(session: ExactBatchAgentS
   } catch (cause) {
     stopped = true; cancellation.abort(cause); notify();
     await window.close();
-    throw new ExactBatchPartialSyncError(Object.freeze([...committed]), cause);
+    const prefix = Object.freeze([...committed]);
+    const refusalObservation = cause instanceof ExactBatchRefusalError && !session.signal.aborted
+      ? Object.freeze({ code: cause.refusal, startedAssets: cause.startedCount,
+          committedAssets: prefix.length, acknowledgedAssets, atAssetBoundary: cause.atAssetBoundary,
+          verifiedPrefix: cause.atAssetBoundary && !batchEnded
+            && prefix.length > 0 && prefix.length < selected.length
+            && cause.startedCount === prefix.length && acknowledgedAssets === prefix.length
+            && prefix.every((ual, index) => ual === selected[index]) })
+      : undefined;
+    throw new ExactBatchPartialSyncError(prefix, cause, refusalObservation);
   } finally {
     stopped = true; notify();
     await window.close(); // physically await any verifier/write still running
@@ -173,12 +198,17 @@ export async function exchangeExactBatchVerified(
   options: ExactBatchVerifiedReceiverOptions,
 ): Promise<ExactBatchVerifiedResult> {
   const committed: string[] = [];
+  let sessionSignal: AbortSignal | undefined;
   try {
-    return await exchange(session => consumeExactBatchVerifiedSession(session, {
-      ...options,
-      onCommitted: ual => { committed.push(ual); observeExactBatch(() => options.onCommitted?.(ual)); },
-    }));
+    return await exchange(session => {
+      sessionSignal = session.signal;
+      return consumeExactBatchVerifiedSession(session, {
+        ...options,
+        onCommitted: ual => { committed.push(ual); observeExactBatch(() => options.onCommitted?.(ual)); },
+      });
+    });
   } catch (cause) {
-    throw new ExactBatchPartialSyncError(Object.freeze([...committed]), cause);
+    throw new ExactBatchPartialSyncError(Object.freeze([...committed]), cause,
+      cause instanceof ExactBatchPartialSyncError && !sessionSignal?.aborted ? cause.refusalObservation : undefined);
   }
 }

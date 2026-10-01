@@ -128,6 +128,8 @@ export class ExactBatchReceiveWindow {
     if (this.windowSize !== 1 && this.windowSize !== 2) throw new Error('Invalid exact batch receive window');
   }
   get committedCount(): number { return this.committed; }
+  get startedCount(): number { return this.started; }
+  get atAssetBoundary(): boolean { return this.receiving === undefined; }
   get complete(): boolean { return !this.closed && this.ended && this.committed === this.assetUals.length; }
   get refusal(): ExactBatchRefusal | undefined { return this.refusalCode; }
   get retainedWireBytes(): number { let total = 0; for (const slot of this.slots.values()) total += slot.bytes + slot.metadata.byteLength; return total; }

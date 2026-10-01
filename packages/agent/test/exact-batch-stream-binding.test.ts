@@ -4,7 +4,7 @@ import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
-import { BlazegraphStore, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { BlazegraphStore, OxigraphStore, StoreResponseTooLargeError, type Quad } from '@origintrail-official/dkg-storage';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { buildSyncRequestEnvelope } from '../src/sync/auth/request-build.js';
@@ -70,9 +70,10 @@ async function fixture(assetCount = 10, rows = 2000) {
   const exportCounts: number[] = [];
   const payloadSizes: Array<{ plain: number; encoded: number }> = [];
   const responderStage = vi.fn((_stage: string, _assetIndex: number, _durationMs: number) => {});
+  const responderFallback = vi.fn((_reason: string, _assetIndex: number, _context: unknown, _budgetReason?: string) => {});
   // The exact SAME legacy cache and admission limiter guard this binding.
   const binding = createExactBatchResponderBinding({ localPeerId: 'source', store, exportCache, parseSyncRequest: parse, authorizeSyncRequest: authorize, isPublicContextGraph: isPublic,
-    admission: resources, onStage: responderStage,
+    admission: resources, onStage: responderStage, onFallback: responderFallback,
     onExport: (_index, count) => exportCounts.push(count),
     onPayload: (_index, plain, encoded) => payloadSizes.push({ plain, encoded }) });
   const wallet = ethers.Wallet.createRandom();
@@ -101,7 +102,7 @@ async function fixture(assetCount = 10, rows = 2000) {
       if (outcome === 'applied') applied.push(asset.ual); return outcome;
     },
   } satisfies Parameters<typeof consumeExactBatchVerifiedSession>[1];
-  return { items, contextGraphId, backing, target, binding, signed, receiver, reads, chainReads, applied, exportCache, authorize, parse, isPublic, resources, legacyHandler, exportCounts, payloadSizes, responderStage,
+  return { items, contextGraphId, backing, store, target, binding, signed, receiver, reads, chainReads, applied, exportCache, authorize, parse, isPublic, resources, legacyHandler, exportCounts, payloadSizes, responderStage, responderFallback,
     async close() { await worker.close(); vi.restoreAllMocks(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve())); await backing.close(); await target.close(); } };
 }
 
@@ -153,6 +154,7 @@ describe('exact batch normal verifier/materializer binding', () => {
       expect(wire.sent[1]!.filter(frame => frame.kind === K.DATA).length).toBeGreaterThan(10);
       expect(f.exportCache.stats().exports).toBe(10);
       expect(f.exportCounts).toEqual(Array(10).fill(1));
+      expect(f.responderFallback).not.toHaveBeenCalled();
       expect(f.payloadSizes).toHaveLength(10);
       expect(f.payloadSizes.every(size => size.plain > size.encoded && size.encoded > 0)).toBe(true);
       for (const stage of ['export', 'export-metadata-before', 'export-store-payload-query',
@@ -184,6 +186,30 @@ describe('exact batch normal verifier/materializer binding', () => {
     } finally { await f.close(); }
   });
 
+  it.each(['throw', 'reject'] as const)('logs the operation and asset refusal without letting an observer %s change RESOURCE_LIMIT', async failure => {
+    const f = await fixture(1, 2), wire = duplex(f.receiver.assetUals);
+    const query = vi.mocked(f.store.query).getMockImplementation()!;
+    vi.mocked(f.store.query).mockImplementation(async (sparql, options) => {
+      if (options?.source?.endsWith('.payload')) throw new StoreResponseTooLargeError(8 * 1024 * 1024, 8 * 1024 * 1024 + 1);
+      return query(sparql, options);
+    });
+    f.responderFallback.mockImplementation(() => {
+      if (failure === 'throw') throw new Error('Observation failure');
+      return Promise.reject(new Error('Observation failure'));
+    });
+    try {
+      await expect(run(f, wire)).rejects.toMatchObject({ code: 'EXACT_BATCH_PARTIAL', committedAssetUals: [] });
+      expect(f.responderFallback).toHaveBeenCalledExactlyOnceWith('store-byte-profile', 0,
+        expect.objectContaining({ operationId: expect.any(String), operationName: 'sync' }), undefined);
+      const refusal = wire.sent[1]!.find(frame => frame.kind === K.REFUSE)!;
+      expect(new TextDecoder().decode(refusal.payload)).toBe('RESOURCE_LIMIT');
+      expect(wire.sent[1]!.some(frame => frame.kind === K.META || frame.kind === K.DATA)).toBe(false);
+      expect(wire.sent[0]!.some(frame => frame.kind === K.ACK)).toBe(false);
+      expect(f.applied).toEqual([]);
+      expect(f.resources.snapshotBudget.stats()).toEqual({ snapshots: 0, rows: 0, bytesEstimate: 0 });
+    } finally { wire.abort(); await f.close(); }
+  });
+
   it('repeats a warm revisionless transfer with no payload export and full normal chain verification and ACK', async () => {
     const f = await fixture(3, 30), cold = duplex(f.receiver.assetUals), warm = duplex(f.receiver.assetUals);
     try {
@@ -202,6 +228,41 @@ describe('exact batch normal verifier/materializer binding', () => {
       expect(warm.sent[1]!.filter(frame => frame.kind === K.ASSET_END)).toHaveLength(3);
       expect(f.authorize).toHaveBeenCalledTimes(2);
     } finally { cold.abort(); warm.abort(); await f.close(); }
+  });
+
+  it('serves legacy missing-policy metadata cold and warm through fresh public CG authority and normal chain verification', async () => {
+    const f = await fixture(1, 20), cold = duplex(f.receiver.assetUals), warm = duplex(f.receiver.assetUals);
+    try {
+      await f.backing.delete(f.items[0]!.meta.filter(quad => quad.predicate === 'http://dkg.io/ontology/accessPolicy'));
+      await run(f, cold); await run(f, warm);
+      expect(f.exportCounts).toEqual([1, 0]);
+      expect(f.isPublic).toHaveBeenCalledTimes(9); // START, per-asset, and every metadata fence.
+      expect(f.chainReads).toHaveLength(6);
+      expect(f.applied).toEqual([...f.receiver.assetUals, ...f.receiver.assetUals]);
+      expect(cold.sent[0]!.filter(frame => frame.kind === K.ACK)).toHaveLength(1);
+      expect(warm.sent[0]!.filter(frame => frame.kind === K.ACK)).toHaveLength(1);
+      expect(f.responderFallback).not.toHaveBeenCalled();
+    } finally { cold.abort(); warm.abort(); await f.close(); }
+  });
+
+  it.each(['cold', 'warm'] as const)('stops legacy %s transfer before ASSET_END when CG authority changes at the final fence', async mode => {
+    const f = await fixture(1, 20), wire = duplex(f.receiver.assetUals);
+    try {
+      await f.backing.delete(f.items[0]!.meta.filter(quad => quad.predicate === 'http://dkg.io/ontology/accessPolicy'));
+      if (mode === 'warm') {
+        const first = duplex(f.receiver.assetUals);
+        try { await run(f, first); } finally { first.abort(); }
+        f.applied.length = 0;
+      }
+      let reads = 0;
+      f.isPublic.mockImplementation(async () => ++reads < (mode === 'cold' ? 5 : 4));
+      await expect(run(f, wire)).rejects.toMatchObject({ code: 'EXACT_BATCH_PARTIAL', committedAssetUals: [], cause: { code: 'SYNC_EXACT_EXPORT_CHANGED' } });
+      expect(wire.sent[1]!.some(frame => frame.kind === K.DATA)).toBe(true);
+      expect(wire.sent[1]!.some(frame => frame.kind === K.ASSET_END)).toBe(false);
+      expect(wire.sent[0]!.some(frame => frame.kind === K.ACK)).toBe(false);
+      expect(f.applied).toEqual([]);
+      expect(f.resources.snapshotBudget.stats().bytesEstimate).toBe(f.exportCache.stats().encodedCacheBytes);
+    } finally { wire.abort(); await f.close(); }
   });
 
   it('checks public CG authority again before serving a retained body', async () => {

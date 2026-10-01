@@ -83,6 +83,14 @@ export interface ExactAssetExportRequest {
   readonly signal?: AbortSignal;
   /** Optional local observation; never controls export ownership or proof. */
   readonly onStage?: (stage: ExactAssetExportStage, durationMs: number) => unknown;
+  /** Request-scoped bounded reason; never exposes a selector or budget key. */
+  readonly onFallback?: (reason: ExactAssetExportFallbackReason, budgetReason?: SyncRowSnapshotBudgetError['reason']) => unknown;
+  /**
+   * Trusted local authority read for legacy metadata with no KA accessPolicy.
+   * Absence stays strict by default. Every metadata fence reads authority again;
+   * explicit policy or private commitments can never use this exception.
+   */
+  readonly authorizeMissingAccessPolicy?: () => Promise<boolean>;
 }
 
 export interface ExactAssetExportCache {
@@ -213,8 +221,13 @@ export function createBoundedExactAssetExportCache(params: {
   let cacheHits = 0;
   let encodedCacheHits = 0;
   const fallbacks: Partial<Record<ExactAssetExportFallbackReason, number>> = {};
-  const refuse = (reason: ExactAssetExportFallbackReason): null => {
+  const refuse = (
+    reason: ExactAssetExportFallbackReason,
+    request: ExactAssetExportRequest,
+    budgetReason?: SyncRowSnapshotBudgetError['reason'],
+  ): null => {
     fallbacks[reason] = (fallbacks[reason] ?? 0) + 1;
+    observeExactBatch(() => request.onFallback?.(reason, budgetReason));
     return null;
   };
 
@@ -236,9 +249,9 @@ export function createBoundedExactAssetExportCache(params: {
   const reserve = (id: symbol, key: string, rows: number, bytesEstimate: number, onEvict: () => void) => {
     try {
       budget.admit({ id, key, rows, bytesEstimate, phase: 'durable_data', onEvict });
-      return true;
+      return null;
     } catch (error) {
-      if (error instanceof SyncRowSnapshotBudgetError) return false;
+      if (error instanceof SyncRowSnapshotBudgetError) return error;
       throw error;
     }
   };
@@ -257,14 +270,14 @@ export function createBoundedExactAssetExportCache(params: {
     }); } catch (error) {
       if (error instanceof StoreResponseTooLargeError) {
         if (request.expectedIdentity !== undefined) throw changed();
-        return refuse('metadata-profile');
+        return refuse('metadata-profile', request);
       }
       throw error;
     }
     throwIfAborted(request.signal);
     if (result.type !== 'bindings' || result.bindings.length > METADATA_MAX_ROWS) {
       if (request.expectedIdentity !== undefined) throw changed();
-      return refuse('metadata-profile');
+      return refuse('metadata-profile', request);
     }
     if (result.bindings.some((row) => typeof row.predicate !== 'string' || typeof row.object !== 'string')) {
       if (request.expectedIdentity !== undefined) throw changed();
@@ -289,9 +302,15 @@ export function createBoundedExactAssetExportCache(params: {
     if (parsed.state !== 'confirmed') throw invalid();
     const publicPolicies = result.bindings.filter((row) => row.predicate === `${DKG}accessPolicy`);
     if (publicPolicies.length !== 1 || !/^"public"(?:\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#string>)?$/.test(publicPolicies[0]!.object!)) {
-      return refuse('non-public');
+      if (publicPolicies.length !== 0 || parsed.envelope.privateTripleCount !== 0
+        || !request.authorizeMissingAccessPolicy || (await request.authorizeMissingAccessPolicy()) !== true) {
+        return refuse('non-public', request);
+      }
+      // Authorization is mandatory control flow, never an observation. Its
+      // rejection propagates, and cancellation cannot turn it into a grant.
+      throwIfAborted(request.signal);
     }
-    if (parsed.envelope.privateTripleCount !== 0) return refuse('private-commitments');
+    if (parsed.envelope.privateTripleCount !== 0) return refuse('private-commitments', request);
     if (parsed.envelope.assertionGraph !== request.graph || parsed.envelope.publicTripleCount !== request.expectedRows) {
       throw changed();
     }
@@ -315,10 +334,11 @@ export function createBoundedExactAssetExportCache(params: {
   ): ExactAssetExportLease | null => {
     const responseId = Symbol('exact-export-response');
     budget.touch(entry.id);
-    if (!reserve(responseId, `${entry.key}:response`, 0, RESPONSE_RESERVATION_BYTES, () => {})) {
+    const rejected = reserve(responseId, `${entry.key}:response`, 0, RESPONSE_RESERVATION_BYTES, () => {});
+    if (rejected) {
       if (entry.active === 0) budget.release(entry.id);
       if (!keep) discard(entry);
-      return refuse('response-admission');
+      return refuse('response-admission', request, rejected.reason);
     }
     entry.active += 1;
     let released = false;
@@ -353,9 +373,9 @@ export function createBoundedExactAssetExportCache(params: {
         observeExactBatch(() => request.onStage?.(stage, performance.now() - started));
       };
       throwIfAborted(request.signal);
-      if (!canReadWholeAsset) return refuse('store-capability');
+      if (!canReadWholeAsset) return refuse('store-capability', request);
       if (!Number.isSafeInteger(request.expectedRows) || request.expectedRows < 1
-        || request.expectedRows > EXACT_ASSET_EXPORT_MAX_ROWS) return refuse('row-profile');
+        || request.expectedRows > EXACT_ASSET_EXPORT_MAX_ROWS) return refuse('row-profile', request);
       let stageStarted = performance.now();
       const metadata = knownMetadata ?? await readMetadata(request);
       if (!knownMetadata) observeStage('export-metadata-before', stageStarted);
@@ -373,7 +393,8 @@ export function createBoundedExactAssetExportCache(params: {
         }
       }
       const id = Symbol('exact-asset-export');
-      if (!reserve(id, key, request.expectedRows + 1, BUILD_RESERVATION_BYTES, () => {})) return refuse('build-admission');
+      const rejected = reserve(id, key, request.expectedRows + 1, BUILD_RESERVATION_BYTES, () => {});
+      if (rejected) return refuse('build-admission', request, rejected.reason);
       let retained = false;
       try {
         stageStarted = performance.now();
@@ -394,14 +415,14 @@ export function createBoundedExactAssetExportCache(params: {
         let canonicalBytes = 0;
         for (const row of result.bindings) {
           if (typeof row.s !== 'string' || typeof row.p !== 'string' || typeof row.o !== 'string') throw invalid();
-          if (row.s.startsWith('_:') || row.o.startsWith('_:')) return refuse('blank-nodes');
+          if (row.s.startsWith('_:') || row.o.startsWith('_:')) return refuse('blank-nodes', request);
           const value = Object.freeze({ s: row.s, p: row.p, o: row.o, g: request.graph });
           heapBytes += rowHeapBytes(value);
-          if (heapBytes > EXACT_ASSET_EXPORT_MAX_HEAP_BYTES) return refuse('heap-profile');
+          if (heapBytes > EXACT_ASSET_EXPORT_MAX_HEAP_BYTES) return refuse('heap-profile', request);
           canonicalBytes += ENCODER.encode(quadToNQuad({
             subject: value.s, predicate: value.p, object: value.o, graph: '',
           })).byteLength + (rows.length > 0 ? 1 : 0);
-          if (canonicalBytes > EXACT_ASSET_EXPORT_CANONICAL_BYTES) return refuse('canonical-byte-profile');
+          if (canonicalBytes > EXACT_ASSET_EXPORT_CANONICAL_BYTES) return refuse('canonical-byte-profile', request);
           rows.push(value);
         }
         rows.sort(compareRows);
@@ -437,8 +458,8 @@ export function createBoundedExactAssetExportCache(params: {
         retained = acquired !== null;
         return acquired;
       } catch (error) {
-        if (error instanceof StoreResponseTooLargeError) return refuse('store-byte-profile');
-        if (error instanceof SyncRowSnapshotBudgetError) return refuse('build-admission');
+        if (error instanceof StoreResponseTooLargeError) return refuse('store-byte-profile', request);
+        if (error instanceof SyncRowSnapshotBudgetError) return refuse('build-admission', request, error.reason);
         throw error;
       } finally {
         // Cancellation waits for the actual query promise above before its charge disappears.
@@ -485,7 +506,7 @@ export function createBoundedExactAssetExportCache(params: {
     }
     const id = Symbol('exact-asset-encoded-cache');
     // Reserve before taking ownership of an extra physical copy.
-    if (!reserve(id, key, 0, heapBytes, () => {
+    if (reserve(id, key, 0, heapBytes, () => {
       const entry = encodedCache.get(key);
       if (entry?.id !== id) return;
       encodedCache.delete(key);
@@ -514,9 +535,9 @@ export function createBoundedExactAssetExportCache(params: {
     acquire: acquireRows,
     async acquireEncoded(request) {
       throwIfAborted(request.signal);
-      if (!canReadWholeAsset) return refuse('store-capability');
+      if (!canReadWholeAsset) return refuse('store-capability', request);
       if (!Number.isSafeInteger(request.expectedRows) || request.expectedRows < 1
-        || request.expectedRows > EXACT_ASSET_EXPORT_MAX_ROWS) return refuse('row-profile');
+        || request.expectedRows > EXACT_ASSET_EXPORT_MAX_ROWS) return refuse('row-profile', request);
       const started = performance.now();
       const metadata = await readMetadata(request);
       observeExactBatch(() => request.onStage?.('export-metadata-before', performance.now() - started));
@@ -537,9 +558,10 @@ export function createBoundedExactAssetExportCache(params: {
         }
         const responseId = Symbol('exact-encoded-response');
         budget.touch(hit.id);
-        if (!reserve(responseId, `${key}:response`, 0, RESPONSE_RESERVATION_BYTES, () => {})) {
+        const rejected = reserve(responseId, `${key}:response`, 0, RESPONSE_RESERVATION_BYTES, () => {});
+        if (rejected) {
           if (hit.active === 0) budget.release(hit.id);
-          return refuse('response-admission');
+          return refuse('response-admission', request, rejected.reason);
         }
         hit.active += 1;
         let released = false;

@@ -38,11 +38,11 @@ const cleanups: Array<() => Promise<void>> = [];
  * fence, chain authenticator, Oxigraph atomic materializer and SWM reconciliation
  * run here. This is not encrypted-network or live-chain certification.
  */
-function fixture() {
+function fixture(assetCount = 2) {
   const store = new OxigraphStore();
   const worker = new SyncVerifyWorker();
   cleanups.push(async () => { await worker.close(); await store.close(); });
-  const items = [1, 2].map(number => {
+  const items = Array.from({ length: assetCount }, (_, index) => index + 1).map(number => {
     const ual = `did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/${number}`;
     const graph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(ual, 1));
     const data: Quad[] = [{ graph, subject: `urn:host:asset:${number}`, predicate: 'urn:host:value', object: `"asset ${number}"` }];
@@ -99,11 +99,40 @@ function fixture() {
     { kind: K.ASSET_END, assetIndex, sequence: 1, payload: new Uint8Array() },
   ]);
   frames.push({ kind: K.BATCH_END, assetIndex: 255, sequence: items.length, payload: new Uint8Array() });
-  const signal = new AbortController().signal;
-  const session: ExactBatchAgentSession = { signal, assetUals: selection.assetUals, windowSize: 2,
+  const controller = new AbortController();
+  const session: ExactBatchAgentSession = { signal: controller.signal, assetUals: selection.assetUals, windowSize: 2,
     next: vi.fn(async () => frames.shift()), send: vi.fn(async () => {}) };
   vi.mocked(exchangeExperimentalExactBatch).mockImplementation(async (_router, _peer, _start, _codec, _options, consume) => consume(session as never));
-  return { host, store, items, run, session, atomicStarted, selection };
+  return { host, store, items, run, session, atomicStarted, selection, frames, controller };
+}
+
+/** A responder stops between assets only after the first two real commit ACKs. */
+function refuseAfterVerifiedPrefix(f: ReturnType<typeof fixture>, code: string, midAsset = false,
+  beforeRefusal?: () => void) {
+  const prefix = f.frames.slice(0, 6);
+  const tail: ExactBatchFrame[] = [
+    ...(midAsset ? [f.frames[6]!] : []),
+    { kind: K.REFUSE, assetIndex: 255, sequence: 0, payload: new TextEncoder().encode(code) },
+  ];
+  let resolveAcknowledged!: () => void;
+  const acknowledged = new Promise<void>(resolve => { resolveAcknowledged = resolve; });
+  vi.mocked(f.session.send).mockImplementation(async frame => {
+    if (frame.assetIndex === 1) resolveAcknowledged();
+  });
+  vi.mocked(f.session.next).mockImplementation(async () => {
+    if (prefix.length > 0) return prefix.shift();
+    await acknowledged;
+    // The responder receives ACK after the requester send has settled.
+    await Promise.resolve();
+    const incoming = tail.shift();
+    if (incoming?.kind === K.REFUSE) beforeRefusal?.();
+    return incoming;
+  });
+}
+
+function refusalLogs(f: ReturnType<typeof fixture>) {
+  return f.host.log.info.mock.calls.map(([, message]: [unknown, string]) => message)
+    .filter((message: string) => message.startsWith('Exact batch requester refusal '));
 }
 
 async function storedRows(store: OxigraphStore, graph: string) {
@@ -182,6 +211,146 @@ describe('experimental exact batch actual host completion verdict', () => {
     expect(await storedRows(f.store, f.items[1]!.graph)).toBe(0);
     expect(vi.mocked(f.session.send).mock.calls.map(([frame]) => frame.assetIndex)).toEqual([0]);
     expect(f.host.graphScopedStorePhysicalRuns.size).toBe(0);
+    expect(runDurableSyncDetailed).not.toHaveBeenCalled();
+    expect(refusalLogs(f)).toEqual([]);
+  });
+
+  it.each(['RESOURCE_LIMIT', 'DENIED', 'SOURCE_CHANGED', 'ASSET_MISSING', 'UNSUPPORTED'])(
+    'observes validated %s after two verified ACKs and keeps the five-asset batch incomplete', async code => {
+      const f = fixture(5);
+      refuseAfterVerifiedPrefix(f, code);
+      const outcome = await f.run();
+      expect(outcome).toMatchObject({ exactFetchDisposition: 'incomplete',
+        committedExactAssetUals: f.selection.assetUals.slice(0, 2),
+        result: { complete: false, completedPhases: 0, failedPhases: 1, insertedDataTriples: 2 } });
+      for (const [index, item] of f.items.entries()) expect(await storedRows(f.store, item.graph)).toBe(index < 2 ? 1 : 0);
+      expect(refusalLogs(f)).toEqual([
+        `Exact batch requester refusal code=${code} startedAssets=2 committedAssets=2 acknowledgedAssets=2 atAssetBoundary=1 verifiedPrefix=1`,
+      ]);
+      expect(f.host.graphScopedStorePhysicalRuns.size).toBe(0);
+      expect(f.session.send).toHaveBeenCalledTimes(2);
+      expect(exchangeExperimentalExactBatch).toHaveBeenCalledOnce();
+      expect(runDurableSyncDetailed).not.toHaveBeenCalled();
+    });
+
+  it('observes a mid-asset refusal without labelling it a verified boundary prefix', async () => {
+    const f = fixture(5);
+    refuseAfterVerifiedPrefix(f, 'RESOURCE_LIMIT', true);
+    const outcome = await f.run();
+    expect(outcome).toMatchObject({ exactFetchDisposition: 'incomplete',
+      committedExactAssetUals: f.selection.assetUals.slice(0, 2), result: { complete: false, insertedDataTriples: 2 } });
+    expect(refusalLogs(f)).toEqual([
+      'Exact batch requester refusal code=RESOURCE_LIMIT startedAssets=3 committedAssets=2 acknowledgedAssets=2 atAssetBoundary=0 verifiedPrefix=0',
+    ]);
+    expect(await storedRows(f.store, f.items[2]!.graph)).toBe(0);
+    expect(f.session.send).toHaveBeenCalledTimes(2);
+    expect(exchangeExperimentalExactBatch).toHaveBeenCalledOnce();
+    expect(runDurableSyncDetailed).not.toHaveBeenCalled();
+  });
+
+  it('observes a valid zero-work refusal without inventing a verified prefix', async () => {
+    const f = fixture(5);
+    f.frames.splice(0, f.frames.length,
+      { kind: K.REFUSE, assetIndex: 255, sequence: 0, payload: new TextEncoder().encode('RESOURCE_LIMIT') });
+    const outcome = await f.run();
+    expect(outcome).toMatchObject({ exactFetchDisposition: 'incomplete', committedExactAssetUals: [],
+      result: { complete: false, insertedTriples: 0 } });
+    expect(refusalLogs(f)).toEqual([
+      'Exact batch requester refusal code=RESOURCE_LIMIT startedAssets=0 committedAssets=0 acknowledgedAssets=0 atAssetBoundary=1 verifiedPrefix=0',
+    ]);
+    expect(f.session.send).not.toHaveBeenCalled();
+    expect(exchangeExperimentalExactBatch).toHaveBeenCalledOnce();
+    expect(runDurableSyncDetailed).not.toHaveBeenCalled();
+  });
+
+  it('does not expose a typed refusal for an unknown wire code', async () => {
+    const f = fixture(5);
+    refuseAfterVerifiedPrefix(f, 'unvalidated wire text');
+    const outcome = await f.run();
+    expect(outcome).toMatchObject({ exactFetchDisposition: 'incomplete',
+      committedExactAssetUals: f.selection.assetUals.slice(0, 2), result: { complete: false } });
+    expect(refusalLogs(f)).toEqual([]);
+    expect(f.session.send).toHaveBeenCalledTimes(2);
+    expect(exchangeExperimentalExactBatch).toHaveBeenCalledOnce();
+    expect(runDurableSyncDetailed).not.toHaveBeenCalled();
+  });
+
+  it('does not expose a typed refusal when cancellation also ends the session', async () => {
+    const f = fixture(5);
+    refuseAfterVerifiedPrefix(f, 'RESOURCE_LIMIT', false, () => f.controller.abort(new Error('Fixture cancellation')));
+    const outcome = await f.run();
+    expect(outcome).toMatchObject({ exactFetchDisposition: 'incomplete',
+      committedExactAssetUals: f.selection.assetUals.slice(0, 2), result: { complete: false } });
+    expect(refusalLogs(f)).toEqual([]);
+    expect(f.host.graphScopedStorePhysicalRuns.size).toBe(0);
+    expect(runDurableSyncDetailed).not.toHaveBeenCalled();
+  });
+
+  it('publishes refusal observations only after transport physical cleanup has settled', async () => {
+    const f = fixture(5);
+    refuseAfterVerifiedPrefix(f, 'RESOURCE_LIMIT');
+    let enteredClose = false, settled = false, finishClose!: () => void;
+    const close = new Promise<void>(resolve => { finishClose = resolve; });
+    vi.mocked(exchangeExperimentalExactBatch).mockImplementation(async (_router, _peer, _start, _codec, _options, consume) => {
+      try { return await consume(f.session as never); }
+      catch (error) { enteredClose = true; await close; throw error; }
+    });
+    const running = f.run().then(outcome => { settled = true; return outcome; });
+    await vi.waitFor(() => expect(enteredClose).toBe(true));
+    expect(settled).toBe(false);
+    expect(refusalLogs(f)).toEqual([]);
+    expect(await storedRows(f.store, f.items[1]!.graph)).toBe(1);
+    finishClose();
+    expect(await running).toMatchObject({ exactFetchDisposition: 'incomplete', result: { complete: false } });
+    expect(refusalLogs(f)).toEqual([
+      'Exact batch requester refusal code=RESOURCE_LIMIT startedAssets=2 committedAssets=2 acknowledgedAssets=2 atAssetBoundary=1 verifiedPrefix=1',
+    ]);
+  });
+
+  it('discards refusal classification when final physical transport close fails', async () => {
+    const f = fixture(5);
+    refuseAfterVerifiedPrefix(f, 'RESOURCE_LIMIT');
+    vi.mocked(exchangeExperimentalExactBatch).mockImplementation(async (_router, _peer, _start, _codec, _options, consume) => {
+      try { return await consume(f.session as never); }
+      catch { throw new Error('Fixture final physical close failed'); }
+    });
+    const outcome = await f.run();
+    expect(outcome).toMatchObject({ exactFetchDisposition: 'incomplete',
+      committedExactAssetUals: f.selection.assetUals.slice(0, 2), result: { complete: false, insertedDataTriples: 2 } });
+    expect(refusalLogs(f)).toEqual([]);
+    expect(f.host.graphScopedStorePhysicalRuns.size).toBe(0);
+    expect(f.session.send).toHaveBeenCalledTimes(2);
+    expect(runDurableSyncDetailed).not.toHaveBeenCalled();
+  });
+
+  it('discards refusal classification when cancellation arrives during transport cleanup', async () => {
+    const f = fixture(5);
+    refuseAfterVerifiedPrefix(f, 'RESOURCE_LIMIT');
+    vi.mocked(exchangeExperimentalExactBatch).mockImplementation(async (_router, _peer, _start, _codec, _options, consume) => {
+      try { return await consume(f.session as never); }
+      catch (error) { f.controller.abort(new Error('Fixture final cleanup cancellation')); throw error; }
+    });
+    const outcome = await f.run();
+    expect(outcome).toMatchObject({ exactFetchDisposition: 'incomplete',
+      committedExactAssetUals: f.selection.assetUals.slice(0, 2), result: { complete: false, insertedDataTriples: 2 } });
+    expect(refusalLogs(f)).toEqual([]);
+    expect(f.host.graphScopedStorePhysicalRuns.size).toBe(0);
+    expect(f.session.send).toHaveBeenCalledTimes(2);
+    expect(runDurableSyncDetailed).not.toHaveBeenCalled();
+  });
+
+  it('preserves incomplete progress when the refusal observer throws', async () => {
+    const f = fixture(5);
+    refuseAfterVerifiedPrefix(f, 'RESOURCE_LIMIT');
+    f.host.log.info.mockImplementation((_ctx: unknown, message: string) => {
+      if (message.startsWith('Exact batch requester refusal ')) throw new Error('Fixture observer failure');
+    });
+    const outcome = await f.run();
+    expect(outcome).toMatchObject({ exactFetchDisposition: 'incomplete',
+      committedExactAssetUals: f.selection.assetUals.slice(0, 2), result: { complete: false, insertedDataTriples: 2 } });
+    expect(f.host.graphScopedStorePhysicalRuns.size).toBe(0);
+    expect(f.session.send).toHaveBeenCalledTimes(2);
+    expect(exchangeExperimentalExactBatch).toHaveBeenCalledOnce();
     expect(runDurableSyncDetailed).not.toHaveBeenCalled();
   });
 

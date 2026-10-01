@@ -12,7 +12,8 @@ import {
   EXACT_BATCH_STREAM_WINDOW_SIZE, ExactBatchSendWindow, type ExactBatchFrame,
 } from '../exact-batch-stream-contract.js';
 import type { ExactBatchAgentSession } from '../requester/exact-batch-stream.js';
-import type { ExactAssetExportCache, ExactAssetExportStage } from './exact-asset-export-cache.js';
+import type { ExactAssetExportCache, ExactAssetExportFallbackReason, ExactAssetExportStage } from './exact-asset-export-cache.js';
+import type { SyncRowSnapshotBudgetError } from './snapshot-budget.js';
 import type { ExperimentalExactBatchResponderResources } from './sync-handler.js';
 import { serializeResponderRows } from './graph-plan.js';
 
@@ -34,6 +35,8 @@ export interface ExactBatchResponderBindingOptions {
   /** Successful cache lease export count, never a peer/body authority claim. */
   readonly onExport?: (assetIndex: number, wholePayloadExports: 0 | 1, context: OperationContext) => void;
   readonly onPayload?: (assetIndex: number, plainBytes: number, encodedBytes: number, context: OperationContext) => void;
+  /** Local closed reason bound to the request's operation and canonical asset index. */
+  readonly onFallback?: (reason: ExactAssetExportFallbackReason, assetIndex: number, context: OperationContext, budgetReason?: SyncRowSnapshotBudgetError['reason']) => unknown;
 }
 type Authorized = { readonly request: SyncRequestEnvelope; readonly assetUals: readonly string[]; readonly context: OperationContext };
 class ProfileRefusal extends Error {}
@@ -96,7 +99,9 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
         started = performance.now();
         const lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal,
           graph: metadata.graph, expectedRows: metadata.rows, expectedIdentity: metadata.identity, signal: session.signal,
-          onStage: (stage, durationMs) => options.onStage?.(stage, assetIndex, durationMs, context) });
+          authorizeMissingAccessPolicy: () => options.isPublicContextGraph(request.contextGraphId, session.signal),
+          onStage: (stage, durationMs) => options.onStage?.(stage, assetIndex, durationMs, context),
+          onFallback: (reason, budgetReason) => observeExactBatch(() => options.onFallback?.(reason, assetIndex, context, budgetReason)) });
         observeExactBatch(() => options.onStage?.('export', assetIndex,
           Math.max(0, performance.now() - started - (lease?.encodingDurationMs ?? 0)), context));
         if (!lease) throw new ProfileRefusal('Exact batch exporter profile refused');

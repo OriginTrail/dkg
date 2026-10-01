@@ -1,7 +1,10 @@
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
+import { MemoryLayer, compareCodePoint, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { BlazegraphStore, StoreResponseTooLargeError, type Quad, type QueryOptions } from '@origintrail-official/dkg-storage';
-import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
+import { decodeSparqlJsonQueryResult } from '@origintrail-official/dkg-storage/dist/sparql-json-query-result.js';
+import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, readConfirmedGraphKnowledgeAssetMetadataEnvelope } from '@origintrail-official/dkg-publisher';
 import { createSyncResponderSnapshotBudget, SyncRowSnapshotBudgetError } from '../src/sync/responder/snapshot-budget.js';
 import { createBoundedExactAssetExportCache, EXACT_ASSET_EXPORT_MAX_ROWS, EXACT_ASSET_EXPORT_MAX_STORE_BYTES,
   EXACT_ASSET_ENCODED_CACHE_MAX_BYTES, type ExactAssetExportCache } from '../src/sync/responder/exact-asset-export-cache.js';
@@ -40,7 +43,298 @@ function fixture(rows = 10_000, literal = 'bounded-value', contextGraphId = 'bou
 
 afterEach(() => vi.restoreAllMocks());
 
+function useLegacyMetadata(f: ReturnType<typeof fixture>) {
+  // Only the canonical confirmed immutable envelope; no publisher policy hint.
+  const predicates = new Set(['contentScopeVersion', 'assertionVersion', 'publicTripleCount',
+    'privateTripleCount', 'batchId', 'merkleRoot', 'assertionGraph', 'kaUal', 'status']
+    .map(name => `http://dkg.io/ontology/${name}`));
+  f.meta.splice(0, f.meta.length, ...f.meta.filter(quad => predicates.has(quad.predicate)));
+}
+
+function capturedLegacyMetadata() {
+  const source = readFileSync(new URL('./fixtures/luigi-ka744-full-public-metadata-20261001.json', import.meta.url), 'utf8');
+  const captured = JSON.parse(source) as { contextGraphId: string; assetUal: string; bindings: unknown[] };
+  // Use the same term validation/serialization as the production HTTP adapter.
+  const result = decodeSparqlJsonQueryResult(JSON.stringify({
+    head: { vars: ['predicate', 'object'] }, results: { bindings: captured.bindings },
+  }));
+  if (result.type !== 'bindings') throw new Error('Captured metadata SELECT absent');
+  const identity = createHash('sha256').update(JSON.stringify(result.bindings
+    .map(row => [row.predicate!, row.object!])
+    .sort((a, b) => compareCodePoint(a[0]!, b[0]!) || compareCodePoint(a[1]!, b[1]!)))).digest('hex');
+  const store = new BlazegraphStore('http://127.0.0.1:1/unused');
+  const noCapturedData = Object.assign(new Error('Fixture contains captured metadata only'), { code: 'FIXTURE_NO_CAPTURED_DATA' });
+  const query = vi.spyOn(store, 'query').mockImplementation(async (_sparql, options) => {
+    // This fixture deliberately supplies no DATA, synthetic or captured.
+    if (options?.source?.endsWith('.payload')) throw noCapturedData;
+    return result;
+  });
+  const budget = createSyncResponderSnapshotBudget({ maxRows: 750_000,
+    maxBytesEstimate: 384 * 1024 * 1024, maxSnapshotRows: 250_000,
+    maxSnapshotBytesEstimate: 128 * 1024 * 1024 });
+  const request = { contextGraphId: captured.contextGraphId, assetUal: captured.assetUal,
+    graph: `did:dkg:context-graph:${captured.contextGraphId}/_verifiable_memory/0x37b1fdfd134e2b17583bcbdd3034f91504cd9c70/744`,
+    expectedRows: 10_000, expectedIdentity: identity };
+  return { source, result, identity, store, query, budget, request, noCapturedData,
+    cache: createBoundedExactAssetExportCache({ store, budget }) };
+}
+
+describe('captured Core KA744 metadata without captured DATA', () => {
+  it('validates the untouched 14-row capture with the production serializer and confirmed envelope parser', async () => {
+    const f = capturedLegacyMetadata();
+    expect(createHash('sha256').update(f.source).digest('hex')).toBe('b1577083bbd8ac899f82692e731ed480fdbd4338537b311321598a0bb0713b4c');
+    expect(f.result.bindings).toHaveLength(14);
+    expect(f.identity).toBe('053f40f6a296e0022676c257093cb1d35b1b0fc4de402c7986d5d3170a207dc3');
+    expect(f.result.bindings.some(row => row.predicate === 'http://dkg.io/ontology/accessPolicy')).toBe(false);
+    expect(f.request.assetUal).toBe('did:dkg:base:8453/0x37b1fdfd134e2b17583bcbdd3034f91504cd9c70/744');
+    const parsed = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(f.store,
+      { contextGraphId: f.request.contextGraphId, ual: f.request.assetUal });
+    expect(parsed.state).toBe('confirmed');
+    if (parsed.state !== 'confirmed') throw new Error('Captured confirmed envelope absent');
+    expect(parsed.envelope).toMatchObject({ assertionVersion: '1', publicTripleCount: 10_000,
+      privateTripleCount: 0, assertionGraph: f.request.graph,
+      transactionHash: '0xbe3c156879b35e56f5b342a44fa5ae309bc88f33e77bcf6b18e4042fa4542393',
+      batchId: 25191691567270760314062235701068010715288728691171855589300500455534398276328n });
+    expect(Buffer.from(parsed.envelope.merkleRoot).toString('hex')).toBe('bc5422191d40c47e7c2d222b2804ca575585c1bac0f8494ab6e00145d1b3efdb');
+    expect(f.query.mock.calls.some(([, options]) => options?.source?.endsWith('.payload'))).toBe(false);
+  });
+
+  it.each(['absent', 'false'] as const)('refuses the captured legacy policy when trusted authority is %s', async grant => {
+    const f = capturedLegacyMetadata(), authorizeMissingAccessPolicy = vi.fn(async () => false), onFallback = vi.fn();
+    expect(await f.cache.acquireEncoded({ ...f.request, onFallback,
+      ...(grant === 'false' ? { authorizeMissingAccessPolicy } : {}) })).toBeNull();
+    expect(onFallback.mock.calls).toEqual([['non-public', undefined]]);
+    expect(authorizeMissingAccessPolicy).toHaveBeenCalledTimes(grant === 'false' ? 1 : 0);
+    expect(f.query.mock.calls.some(([, options]) => options?.source?.endsWith('.payload'))).toBe(false);
+    expect(f.budget.stats()).toEqual({ snapshots: 0, rows: 0, bytesEstimate: 0 });
+  });
+
+  it('requires fresh public authority before a captured-metadata attempt can reach the local DATA sentinel', async () => {
+    const f = capturedLegacyMetadata();
+    let isPublic = true;
+    const authorizeMissingAccessPolicy = vi.fn(async () => isPublic);
+    const request = { ...f.request, authorizeMissingAccessPolicy };
+    // A grant passes the policy gate only. No body exists to verify or retain.
+    await expect(f.cache.acquireEncoded(request)).rejects.toBe(f.noCapturedData);
+    expect(f.query.mock.calls.filter(([, options]) => options?.source?.endsWith('.payload'))).toHaveLength(1);
+    expect(f.cache.stats().exports).toBe(0);
+    expect(f.cache.stats().encodedCacheEntries).toBe(0);
+    expect(f.budget.stats()).toEqual({ snapshots: 0, rows: 0, bytesEstimate: 0 });
+    isPublic = false;
+    expect(await f.cache.acquireEncoded(request)).toBeNull();
+    expect(authorizeMissingAccessPolicy).toHaveBeenCalledTimes(2);
+    expect(f.query.mock.calls.filter(([, options]) => options?.source?.endsWith('.payload'))).toHaveLength(1);
+  });
+
+  it('rejects captured metadata identity drift before consulting the trusted public grant', async () => {
+    const f = capturedLegacyMetadata(), authorizeMissingAccessPolicy = vi.fn(async () => true);
+    f.query.mockResolvedValue({ type: 'bindings', bindings: f.result.bindings.map(row =>
+      row.predicate === 'http://dkg.io/ontology/publishedAt' ? { ...row, object: '"changed"' } : row) });
+    await expect(f.cache.acquireEncoded({ ...f.request, authorizeMissingAccessPolicy })).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });
+    expect(authorizeMissingAccessPolicy).not.toHaveBeenCalled();
+    expect(f.query.mock.calls.some(([, options]) => options?.source?.endsWith('.payload'))).toBe(false);
+  });
+});
+
+describe('legacy missing KA policy authority', () => {
+  it.each(['acquire', 'acquireEncoded'] as const)('keeps %s strict without a trusted local grant', async method => {
+    const f = fixture(20); useLegacyMetadata(f);
+    const onFallback = vi.fn();
+    expect(await f.cache[method]({ ...f, onFallback })).toBeNull();
+    expect(onFallback.mock.calls).toEqual([['non-public', undefined]]);
+    expect(f.reads.some(read => read.options?.source?.endsWith('.payload'))).toBe(false);
+    expect(f.budget.stats().snapshots).toBe(0);
+  });
+
+  it('serves a verified legacy assertion cold and warm only with fresh authority at every metadata fence', async () => {
+    const f = fixture(20); useLegacyMetadata(f);
+    const authorizeMissingAccessPolicy = vi.fn(async () => true), onFallback = vi.fn();
+    const request = { ...f, authorizeMissingAccessPolicy, onFallback };
+    const cold = await f.cache.acquireEncoded(request);
+    expect(cold!.wholePayloadExports).toBe(1);
+    expect(authorizeMissingAccessPolicy).toHaveBeenCalledTimes(2);
+    await cold!.assertCurrent(); cold!.release();
+    expect(authorizeMissingAccessPolicy).toHaveBeenCalledTimes(3);
+    const warm = await f.cache.acquireEncoded(request);
+    expect(warm!.wholePayloadExports).toBe(0);
+    expect(warm!.body).toEqual(cold!.body);
+    await warm!.assertCurrent(); warm!.release();
+    expect(authorizeMissingAccessPolicy).toHaveBeenCalledTimes(5);
+    expect(f.reads.filter(read => read.options?.source?.endsWith('.payload'))).toHaveLength(1);
+    expect(f.cache.stats().encodedCacheEntries).toBe(1);
+    expect(onFallback).not.toHaveBeenCalled();
+    expect(await f.cache.acquireEncoded({ ...f, onFallback })).toBeNull();
+    expect(onFallback.mock.calls).toEqual([['non-public', undefined]]);
+    expect(f.cache.stats().encodedCacheHits).toBe(1);
+  });
+
+  it.each(['false', 'throw', 'cancel'] as const)('does not grant legacy access when authority returns %s', async failure => {
+    const f = fixture(1); useLegacyMetadata(f);
+    const controller = new AbortController(), denied = new Error('Authority read failed');
+    const authorizeMissingAccessPolicy = vi.fn(async () => {
+      if (failure === 'throw') throw denied;
+      if (failure === 'cancel') { controller.abort(denied); return true; }
+      return false;
+    });
+    const result = f.cache.acquireEncoded({ ...f, signal: controller.signal, authorizeMissingAccessPolicy });
+    if (failure === 'false') expect(await result).toBeNull();
+    else await expect(result).rejects.toBe(denied);
+    expect(authorizeMissingAccessPolicy).toHaveBeenCalledOnce();
+    expect(f.reads.some(read => read.options?.source?.endsWith('.payload'))).toBe(false);
+    expect(f.budget.stats().snapshots).toBe(0);
+  });
+
+  it.each(['private', 'unknown', 'duplicate-public', 'public-and-private'] as const)('never overrides an explicit %s policy', async policy => {
+    const f = fixture(1);
+    const publicQuad = f.meta.find(quad => quad.predicate === 'http://dkg.io/ontology/accessPolicy')!;
+    if (policy === 'duplicate-public') f.meta.push({ ...publicQuad });
+    else if (policy === 'public-and-private') f.meta.push({ ...publicQuad, object: '"private"' });
+    else publicQuad.object = JSON.stringify(policy);
+    const authorizeMissingAccessPolicy = vi.fn(async () => true);
+    expect(await f.cache.acquireEncoded({ ...f, authorizeMissingAccessPolicy })).toBeNull();
+    expect(authorizeMissingAccessPolicy).not.toHaveBeenCalled();
+    expect(f.reads.some(read => read.options?.source?.endsWith('.payload'))).toBe(false);
+  });
+
+  it('never uses the legacy grant for a confirmed private commitment', async () => {
+    const f = fixture(1); useLegacyMetadata(f);
+    f.meta.find(quad => quad.predicate === 'http://dkg.io/ontology/privateTripleCount')!.object = '"1"';
+    f.meta.push({ ...f.meta[0]!, predicate: 'http://dkg.io/ontology/privateMerkleRoot', object: `"0x${'11'.repeat(32)}"` });
+    const authorizeMissingAccessPolicy = vi.fn(async () => true);
+    expect(await f.cache.acquireEncoded({ ...f, authorizeMissingAccessPolicy })).toBeNull();
+    expect(authorizeMissingAccessPolicy).not.toHaveBeenCalled();
+    expect(f.reads.some(read => read.options?.source?.endsWith('.payload'))).toBe(false);
+  });
+
+  it.each(['cold', 'warm'] as const)('rejects %s completion when fresh CG authority becomes private', async mode => {
+    const f = fixture(20); useLegacyMetadata(f);
+    const authorizeMissingAccessPolicy = vi.fn(async () => true);
+    const request = { ...f, authorizeMissingAccessPolicy };
+    if (mode === 'warm') {
+      const cold = await f.cache.acquireEncoded(request); await cold!.assertCurrent(); cold!.release();
+    }
+    const lease = await f.cache.acquireEncoded(request);
+    authorizeMissingAccessPolicy.mockResolvedValue(false);
+    try { await expect(lease!.assertCurrent()).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' }); }
+    finally { lease!.release(); }
+    expect(f.cache.stats().encodedCacheEntries).toBe(mode === 'warm' ? 1 : 0);
+    expect(f.budget.stats().bytesEstimate).toBe(f.cache.stats().encodedCacheBytes);
+  });
+
+  it('checks the complete metadata identity before considering a legacy authority grant', async () => {
+    const f = fixture(20); useLegacyMetadata(f);
+    const authorizeMissingAccessPolicy = vi.fn(async () => true), request = { ...f, authorizeMissingAccessPolicy };
+    const cold = await f.cache.acquireEncoded(request); await cold!.assertCurrent(); cold!.release();
+    const calls = authorizeMissingAccessPolicy.mock.calls.length;
+    f.meta.push({ ...f.meta[0]!, predicate: 'urn:changed-immutable-metadata', object: '"changed"' });
+    await expect(f.cache.acquireEncoded({ ...request, expectedIdentity: cold!.identity })).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_CHANGED' });
+    expect(authorizeMissingAccessPolicy).toHaveBeenCalledTimes(calls);
+    expect(f.cache.stats().encodedCacheHits).toBe(0);
+  });
+
+  it('still rejects a corrupt body despite a successful legacy authority grant', async () => {
+    const f = fixture(20); useLegacyMetadata(f); f.payload[0]!.object = '"corrupted"';
+    await expect(f.cache.acquireEncoded({ ...f, authorizeMissingAccessPolicy: async () => true })).rejects.toMatchObject({ code: 'SYNC_EXACT_EXPORT_INVALID' });
+    expect(f.cache.stats().encodedCacheEntries).toBe(0);
+    expect(f.budget.stats().snapshots).toBe(0);
+  });
+});
+
 describe('bounded exact asset export ownership', () => {
+  it.each([
+    { maxBytesEstimate: 32 * 1024 * 1024, maxSnapshotBytesEstimate: 128 * 1024 * 1024, reason: 'global_bytes' },
+    { maxBytesEstimate: 384 * 1024 * 1024, maxSnapshotBytesEstimate: 32 * 1024 * 1024, reason: 'snapshot_bytes' },
+  ] as const)('reports build refusal with its request-scoped $reason quota', async limits => {
+    const f = fixture(1);
+    const budget = createSyncResponderSnapshotBudget({
+      maxRows: 100_000, maxSnapshotRows: 100_000, ...limits,
+    });
+    const cache = createBoundedExactAssetExportCache({ store: f.store, budget });
+    const onFallback = vi.fn();
+    expect(await cache.acquireEncoded({ ...f, onFallback })).toBeNull();
+    expect(onFallback.mock.calls).toEqual([['build-admission', limits.reason]]);
+    expect(cache.stats().fallbacks).toEqual({ 'build-admission': 1 });
+    expect(f.reads.some(read => read.options?.source?.endsWith('.payload'))).toBe(false);
+    expect(budget.stats()).toEqual({ snapshots: 0, rows: 0, bytesEstimate: 0 });
+  });
+
+  it('reports an oversize attempted query despite absence of its fulfilled payload stage', async () => {
+    const f = fixture(1), normal = f.query.getMockImplementation()!;
+    const onFallback = vi.fn(), onStage = vi.fn();
+    f.query.mockImplementation(async (sparql, options) => {
+      if (options?.source?.endsWith('.payload')) {
+        throw new StoreResponseTooLargeError(EXACT_ASSET_EXPORT_MAX_STORE_BYTES, EXACT_ASSET_EXPORT_MAX_STORE_BYTES + 1);
+      }
+      return normal(sparql, options);
+    });
+    expect(await f.cache.acquireEncoded({ ...f, onFallback, onStage })).toBeNull();
+    expect(f.query.mock.calls.some(([, options]) => options?.source?.endsWith('.payload'))).toBe(true);
+    expect(onFallback.mock.calls).toEqual([['store-byte-profile', undefined]]);
+    expect(onStage.mock.calls.map(([stage]) => stage)).toEqual(['export-metadata-before']);
+    expect(f.budget.stats()).toEqual({ snapshots: 0, rows: 0, bytesEstimate: 0 });
+  });
+
+  it.each(['throw', 'reject'] as const)('preserves refusal when its observation %s fails', async failure => {
+    const f = fixture(1);
+    const onFallback = vi.fn(() => {
+      if (failure === 'throw') throw new Error('Observation failure');
+      return Promise.reject(new Error('Observation failure'));
+    });
+    expect(await f.cache.acquireEncoded({ ...f, expectedRows: EXACT_ASSET_EXPORT_MAX_ROWS + 1, onFallback })).toBeNull();
+    expect(onFallback.mock.calls).toEqual([['row-profile', undefined]]);
+    expect(f.cache.stats().fallbacks).toEqual({ 'row-profile': 1 });
+    expect(f.reads).toHaveLength(0);
+    await Promise.resolve();
+  });
+
+  it('keeps concurrently observed refusal reasons bound to their own requests', async () => {
+    const f = fixture(1), normal = f.query.getMockImplementation()!;
+    let entered!: () => void, finish!: () => void;
+    const started = new Promise<void>(resolve => { entered = resolve; });
+    const held = new Promise<void>(resolve => { finish = resolve; });
+    f.query.mockImplementation(async (sparql, options) => {
+      if (options?.source?.endsWith('.payload')) {
+        entered(); await held;
+        throw new StoreResponseTooLargeError(EXACT_ASSET_EXPORT_MAX_STORE_BYTES, EXACT_ASSET_EXPORT_MAX_STORE_BYTES + 1);
+      }
+      return normal(sparql, options);
+    });
+    const oversized = vi.fn(), overRows = vi.fn();
+    const first = f.cache.acquireEncoded({ ...f, onFallback: oversized });
+    try {
+      await started;
+      expect(await f.cache.acquireEncoded({ ...f, expectedRows: EXACT_ASSET_EXPORT_MAX_ROWS + 1, onFallback: overRows })).toBeNull();
+      expect(overRows.mock.calls).toEqual([['row-profile', undefined]]);
+      expect(oversized).not.toHaveBeenCalled();
+      finish();
+      expect(await first).toBeNull();
+      expect(oversized.mock.calls).toEqual([['store-byte-profile', undefined]]);
+      expect(overRows).toHaveBeenCalledOnce();
+      expect(f.cache.stats().fallbacks).toEqual({ 'row-profile': 1, 'store-byte-profile': 1 });
+      expect(f.budget.stats()).toEqual({ snapshots: 0, rows: 0, bytesEstimate: 0 });
+    } finally { finish(); await first; }
+  });
+
+  it('reports warm response admission pressure and preserves the retained body for a later response', async () => {
+    const f = fixture(1), onFallback = vi.fn();
+    const cold = await f.cache.acquireEncoded({ ...f, onFallback });
+    await cold!.assertCurrent(); cold!.release();
+    const ids = Array.from({ length: 3 }, () => Symbol('other-pinned-response'));
+    for (const id of ids) f.budget.admit({ id, key: 'bounded-fixture', rows: 0,
+      bytesEstimate: 96 * 1024 * 1024, phase: 'durable_data', onEvict: () => {} });
+    try {
+      expect(await f.cache.acquireEncoded({ ...f, onFallback })).toBeNull();
+      expect(onFallback.mock.calls).toEqual([['response-admission', 'global_bytes']]);
+      expect(f.cache.stats().encodedCacheEntries).toBe(1);
+      expect(f.reads.filter(read => read.options?.source?.endsWith('.payload'))).toHaveLength(1);
+    } finally { for (const id of ids) f.budget.remove(id); }
+    const warm = await f.cache.acquireEncoded({ ...f, onFallback });
+    expect(warm!.wholePayloadExports).toBe(0);
+    await warm!.assertCurrent(); warm!.release();
+    expect(onFallback).toHaveBeenCalledOnce();
+    expect(f.budget.stats()).toEqual({ snapshots: 1, rows: 0, bytesEstimate: f.cache.stats().encodedCacheBytes });
+  });
+
   it('observes export substages while preserving bounded reads and the final metadata fence', async () => {
     const f = fixture(20);
     const onStage = vi.fn();

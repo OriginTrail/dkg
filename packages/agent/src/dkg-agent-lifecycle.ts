@@ -396,6 +396,7 @@ import {
 import { createExactBatchResponderBinding } from './sync/responder/exact-batch-stream.js';
 import {
   EXACT_BATCH_AGENT_CODEC, exactBatchTransportOptions, exactBatchStartFrame, exchangeExactBatchVerified,
+  ExactBatchPartialSyncError,
 } from './sync/requester/exact-batch-stream.js';
 import { EXACT_BATCH_STREAM_PROTOCOL } from './sync/exact-batch-stream-contract.js';
 import {
@@ -3279,6 +3280,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 `Exact batch responder export asset=${assetIndex} wholePayloadExports=${wholePayloadExports}`),
               onPayload: (assetIndex, plainBytes, encodedBytes, operationContext) => this.log.info(operationContext,
                 `Exact batch responder payload asset=${assetIndex} plainBytes=${plainBytes} encodedBytes=${encodedBytes}`),
+              onFallback: (reason, assetIndex, operationContext, budgetReason) => this.log.info(operationContext,
+                `Exact batch responder refusal asset=${assetIndex} reason=${reason}${budgetReason ? ` budgetReason=${budgetReason}` : ''}`),
               onStage: (stage, assetIndex, durationMs, operationContext) => this.log.info(operationContext,
                 `Exact batch responder stage=${stage} asset=${assetIndex} durationMs=${durationMs.toFixed(3)}`),
             });
@@ -6556,6 +6559,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           // Only unsupported BEFORE START may use a fresh legacy request. A
           // later error retains already-applied progress; it never replays the
           // full selection or infers that an atomic write rolled back.
+          if (error instanceof ExactBatchPartialSyncError && error.refusalObservation !== undefined) {
+            const observed = error.refusalObservation;
+            observeExactBatch(() => this.log.info(ctx,
+              `Exact batch requester refusal code=${observed.code} startedAssets=${observed.startedAssets} committedAssets=${observed.committedAssets} acknowledgedAssets=${observed.acknowledgedAssets} atAssetBoundary=${observed.atAssetBoundary ? 1 : 0} verifiedPrefix=${observed.verifiedPrefix ? 1 : 0}`));
+          }
           const outerCause = error instanceof Error ? error.cause : undefined;
           if (error instanceof ExperimentalExactBatchUnsupportedError || outerCause instanceof ExperimentalExactBatchUnsupportedError) {
             rememberExactBatchStreamUnsupported(this, remotePeerId, connectionKey,
