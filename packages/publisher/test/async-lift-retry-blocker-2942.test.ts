@@ -22,6 +22,7 @@ import type { PersistedFailedJob } from '../src/async-lift-publisher-utils.js';
 import {
   LIFT_JOB_RETRY_BLOCKER_SUMMARY,
   describeAutomaticRecoveryExit,
+  decideChainProofDisposition,
   describeRetryProjection,
   hasAutomaticRecoveryExit,
   type HeldRecoveryGap,
@@ -125,6 +126,21 @@ describe('GH#2942 derived retry blocker', () => {
       // And the read view of the SAME publisher says so: wired, so the chain is being re-checked.
       const reread = expectFailed(await publisher.getStatus(job.jobId));
       expect(publisher.describeConfiguredRetryState(reread).blocker?.code).toBe('chain_recheck_pending');
+    });
+
+    it('agrees with the dispatcher for a raw-lift CREATE (marker and transitionType say the same)', async () => {
+      // A raw lift carries its operation in `request.lift.transitionType`, a named KA in the durable marker.
+      // For a CREATE they agree, so the exit the 503 promises and the release the dispatcher takes coincide.
+      // (A raw MUTATE/REVOKE would read `create` from the marker but `update` from `transitionType`: a
+      // divergence recorded in #2945, deliberately not changed here - a fix needs a ruling.)
+      const base = await completeCreate();
+      const raw = {
+        ...base,
+        request: { lift: { transitionType: 'CREATE', seal: { reservedKaId: '7' } } },
+      } as unknown as PersistedFailedJob;
+
+      expect(hasAutomaticRecoveryExit(raw)).toBe(true);
+      expect(decideChainProofDisposition(raw, 'not-found')).toEqual({ action: 'reset' });
     });
 
     it('never asks about a record that has no hash or no preserved signer — the shapes whose exit is denied', async () => {

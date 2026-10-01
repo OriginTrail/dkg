@@ -3790,20 +3790,6 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   /**
-   * GH#2270 — re-record a held job's failure as `tx_reverted` once the chain has PROVEN its
-   * transaction reverted.
-   *
-   * The code is not cosmetic: `isHeldForChainProof` is `hasBroadcastEvidence && !provenIneffective`,
-   * and `tx_reverted` is one of the two codes the registry marks proven-ineffective. Writing it is
-   * therefore how the hold is released — through the disposition module's own rule rather than
-   * around it — while the evidence stays on the job (the merge keeps `broadcast`/`recovery`), so
-   * an operator can still see which transaction was checked. `isOccupyingLifecycleJob` then stops
-   * binding the KA's lifecycle, which is what lets the same KA be published again.
-   *
-   * No retry is scheduled: a revert is terminal by registry policy, and re-running it would spend
-   * gas to revert again.
-   */
-  /**
    * GH#2270 PR-3 — the facts a chain-proof lookup needs, from whichever carrier holds them, or
    * `null` when this job cannot be asked about at all.
    *
@@ -3838,6 +3824,20 @@ export class TripleStoreAsyncLiftPublisher
     });
   }
 
+  /**
+   * GH#2270 — re-record a held job's failure as `tx_reverted` once the chain has PROVEN its
+   * transaction reverted.
+   *
+   * The code is not cosmetic: `isHeldForChainProof` is `hasBroadcastEvidence && !provenIneffective`,
+   * and `tx_reverted` is one of the two codes the registry marks proven-ineffective. Writing it is
+   * therefore how the hold is released — through the disposition module's own rule rather than
+   * around it — while the evidence stays on the job (the merge keeps `broadcast`/`recovery`), so
+   * an operator can still see which transaction was checked. `isOccupyingLifecycleJob` then stops
+   * binding the KA's lifecycle, which is what lets the same KA be published again.
+   *
+   * No retry is scheduled: a revert is terminal by registry policy, and re-running it would spend
+   * gas to revert again.
+   */
   private failProvenRevertedJob(
     job: PersistedFailedJob,
     failedFromState: 'broadcast' | 'included',
@@ -3861,7 +3861,9 @@ export class TripleStoreAsyncLiftPublisher
       message:
         `Named knowledge asset VM publish job ${job.jobId} reached ${job.status} state with tx ${job.broadcast.txHash}, ` +
         `but generic chain recovery cannot safely perform lifecycle finalization for this job type. ` +
-        `Inspect the on-chain transaction and re-run the named lifecycle publish if needed.`,
+        `The transaction's fate is unknown: do not re-run or re-submit this publish while it may have mined ` +
+        `(re-submits are refused until chain recovery accounts for it). Inspect the transaction on chain; ` +
+        `this job's retryState says what recovery is waiting for.`,
       errorPayloadRef: `urn:dkg:publisher:error:${job.jobId}:ka-recovery-inconclusive`,
     });
 

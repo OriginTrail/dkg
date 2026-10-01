@@ -135,7 +135,10 @@ export function isHeldForChainProof(job: PersistedFailedJob): boolean {
  *    the transaction actually mined. An update has no absence lane at all (the ABA hazard), so a
  *    dropped update keeps answering 503 until the operator acts — the record cannot distinguish
  *    that world from the about-to-converge one, and this cell is where the honest per-job answer
- *    bottoms out.
+ *    bottoms out. The same holds for an update that carries an earlier attempt's INHERITED hash and
+ *    a later `reverted` verdict: a revert proves that transaction had no effect, not that the
+ *    queued request is still current, so recovery holds it (see `decideChainProofDisposition`)
+ *    until an operator acts.
  *  - UPDATE without a derivable recognition identity, and any job whose lookup cannot even be
  *    formed (no hash, no wallet) → FALSE: nothing automatic can ever ask a question about it.
  */

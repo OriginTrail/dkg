@@ -9,9 +9,10 @@
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { ActiveLiftJobClaim } from '../src/index.js';
-import { createAsyncLift2270Harness, expectFailed } from './_helpers/async-lift-2270-harness.js';
+import { TX_HASH, createAsyncLift2270Harness, expectFailed } from './_helpers/async-lift-2270-harness.js';
 import { KA_VM_VALIDATION, kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
-import { RETRY_LANE, createStoreRejectionFixtures } from './_helpers/store-rejection-2940.js';
+import { RETRY_LANE, createStoreRejectionFixtures, rawLiftRequest } from './_helpers/store-rejection-2940.js';
+import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
 import { KEYED_RPC_URL } from './_helpers/rpc-prep-failure-2942.js';
 
 describe('GH#2945 persisted failure messages are host-only for every failure code', () => {
@@ -92,6 +93,30 @@ describe('GH#2945 persisted failure messages are host-only for every failure cod
     expect(failed.failure.code).toBe('workspace_unavailable');
     expect(failed.failure.message).not.toContain('SECRET-API-KEY');
     expect(failed.failure.message).not.toContain('/timeout/');
+  });
+
+  it('a held job that recovery cannot finalize no longer tells the operator to re-run the publish', async () => {
+    // No resolver is wired, so a transaction-bearing job times out of recovery into a HELD failure.
+    // Its text used to read "re-run the named lifecycle publish if needed" - an invitation to publish
+    // the same KA twice while the first transaction may have mined.
+    const publisher = h.createPublisher(RETRY_LANE);
+    await stage();
+    const jobId = await seedLegacyRawLiftTestJob(h.store, rawLiftRequest(), {
+      now: () => 1_000,
+      idGenerator: () => 'raw-job-1',
+    });
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId: 'wallet-1' } });
+    h.advance(60 * 60_000);
+    await publisher.recover();
+
+    const failed = expectFailed(await publisher.getStatus(jobId));
+
+    expect(failed.failure.code).toBe('recovery_state_inconsistent');
+    expect(failed.failure.message).toContain(TX_HASH);
+    expect(failed.failure.message).toContain('do not re-run or re-submit');
+    expect(failed.failure.message).not.toContain('re-run the named lifecycle publish');
   });
 
   it('text without a URL is persisted exactly as before', async () => {

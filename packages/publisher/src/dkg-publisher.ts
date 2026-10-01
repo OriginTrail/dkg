@@ -122,7 +122,7 @@ import {
   CuratorRejectedError,
   type CASCondition,
 } from './errors.js';
-import { isQuorumUnmetError } from './ack-errors.js';
+import { RpcPreconditionError, isQuorumUnmetError } from './ack-errors.js';
 import { stripOptionalLiteral } from './sparql-binding-literal.js';
 import {
   runLegacyWorkingMemoryMigration,
@@ -9526,10 +9526,16 @@ export class DKGPublisher implements Publisher {
           // A flaky/incapable oracle must not silently let the allocator reuse a
           // number; surface it so the operator notices rather than burning ids.
           // (The contract's _safeMint revert remains the ultimate backstop.)
-          throw new Error(
-            `OT-RFC-43 Option 1: failed to reconcile KA-number floor for author ${author} ` +
-            `against chain: ${err instanceof Error ? err.message : String(err)}`,
-          );
+          // Thrown as the publisher's own RPC-precondition wrapper with the oracle's error kept as
+          // `cause`, so a typed transient transport failure raised here can still qualify for the
+          // same-job retry lane (the failure writer unwraps this wrapper by exactly one level).
+          throw new RpcPreconditionError({
+            method: 'getMaxKaNumberForAuthor',
+            message:
+              `OT-RFC-43 Option 1: failed to reconcile KA-number floor for author ${author} ` +
+              `against chain: ${err instanceof Error ? err.message : String(err)}`,
+            cause: err,
+          });
         }
       }
       if (chainMax >= 0n) {
