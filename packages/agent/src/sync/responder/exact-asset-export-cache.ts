@@ -18,6 +18,13 @@ import { bytesToHex } from '@noble/hashes/utils.js';
 import type { SyncRow } from './snapshot-cache.js';
 import { SyncRowSnapshotBudgetError, type SyncResponderSnapshotBudget } from './snapshot-budget.js';
 import { observeExactBatch } from '../exact-batch-observation.js';
+import {
+  EXACT_SYNC_GZIP_ENCODING,
+  EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES,
+  EXACT_SYNC_GZIP_MAX_INFLATED_BYTES,
+  encodeNegotiatedExactSyncResponse,
+} from '../wire-compression.js';
+import { serializeResponderRows } from './graph-plan.js';
 
 /** Separate from the broad snapshot loader: unsigned public hints cannot raise these. */
 export const EXACT_ASSET_EXPORT_MAX_ROWS = 16_384;
@@ -32,6 +39,13 @@ const METADATA_MAX_ROWS = 128;
 const METADATA_MAX_BYTES = 64 * 1024;
 const DKG = 'http://dkg.io/ontology/';
 const ENCODER = new TextEncoder();
+// Compressed performance copies share the ordinary responder budget. These
+// bounds are local construction limits, never unsigned request allowances.
+export const EXACT_ASSET_ENCODED_CACHE_MAX_BYTES = 192 * 1024 * 1024;
+export const EXACT_ASSET_ENCODED_CACHE_MAX_ENTRIES = 1_024;
+export const EXACT_ASSET_ENCODED_CACHE_TTL_MS = 6 * 60 * 60 * 1_000;
+const ENCODED_ENTRY_OVERHEAD_BYTES = 4_096;
+const ENCODED_CACHE_FORMAT = 'exact-asset-body-nquads-v1';
 
 export interface ExactAssetExportLease {
   readonly rows: readonly SyncRow[];
@@ -41,6 +55,19 @@ export interface ExactAssetExportLease {
   /** Source/metadata fence after the handler's last asynchronous encoding boundary. */
   assertCurrent(): Promise<void>;
   /** The handler holds the charge through serialization and physical compression. */
+  release(): void;
+}
+
+export interface ExactAssetEncodedExportLease {
+  /** Response-owned bytes. Mutating them cannot change the retained copy. */
+  readonly body: Uint8Array;
+  readonly plainBytes: number;
+  readonly identity: string;
+  readonly wholePayloadExports: 0 | 1;
+  /** Local observation only; a warm copy performs no serialization/codec. */
+  readonly encodingDurationMs: number;
+  /** Fresh full metadata and available source revision fence before ASSET_END. */
+  assertCurrent(): Promise<void>;
   release(): void;
 }
 
@@ -61,9 +88,14 @@ export interface ExactAssetExportRequest {
 export interface ExactAssetExportCache {
   /** null is a resource/capability refusal; the existing conservative reader remains available. */
   acquire(request: ExactAssetExportRequest): Promise<ExactAssetExportLease | null>;
+  /** Experimental batch only; legacy row export ownership remains unchanged. */
+  acquireEncoded(request: ExactAssetExportRequest): Promise<ExactAssetEncodedExportLease | null>;
   stats(): Readonly<{
     exports: number;
     cacheHits: number;
+    encodedCacheHits: number;
+    encodedCacheEntries: number;
+    encodedCacheBytes: number;
     fallbacks: Readonly<Partial<Record<ExactAssetExportFallbackReason, number>>>;
   }>;
 }
@@ -80,6 +112,24 @@ interface ExportEntry {
   readonly identity: string;
   readonly heapBytes: number;
   readonly cachedAt: number;
+  active: number;
+}
+
+interface VerifiedMetadata {
+  readonly identity: string;
+  readonly envelope: ConfirmedGraphKnowledgeAssetMetadataEnvelope;
+  readonly metaGraph: string;
+}
+
+interface EncodedEntry {
+  readonly id: symbol;
+  readonly key: string;
+  readonly body: Uint8Array;
+  readonly digest: string;
+  readonly plainBytes: number;
+  readonly identity: string;
+  readonly heapBytes: number;
+  lastUsedAt: number;
   active: number;
 }
 
@@ -121,14 +171,20 @@ function rowHeapBytes(row: SyncRow): number {
 
 /**
  * Bounded, per-KA export. Cached rows are performance data, never chain authority.
- * Stores lacking stable revisions recompute every page and bracket each export
- * with the complete immutable metadata identity and count/root verification.
+ * The legacy row path recomputes every page on stores lacking stable revisions.
+ * The experimental encoded path may retain an earlier root-verified immutable
+ * assertion copy, always fenced by fresh full public metadata. Neither copy
+ * establishes chain authority or proves present revisionless physical DATA.
  */
 export function createBoundedExactAssetExportCache(params: {
   readonly store: TripleStore;
   readonly budget: SyncResponderSnapshotBudget;
   readonly ttlMs?: number;
   readonly maxEntries?: number;
+  /** Test/operator construction may shrink, never raise, encoded retention. */
+  readonly encodedTtlMs?: number;
+  readonly encodedMaxEntries?: number;
+  readonly encodedMaxBytes?: number;
 }): ExactAssetExportCache {
   const { store, budget } = params;
   const ttlMs = params.ttlMs ?? 60_000;
@@ -138,9 +194,24 @@ export function createBoundedExactAssetExportCache(params: {
   }
   const revisions = asGraphWriteRevisionSource(store);
   const cache = new Map<string, ExportEntry>();
+  const encodedCache = new Map<string, EncodedEntry>();
+  const encodedTtlMs = params.encodedTtlMs ?? EXACT_ASSET_ENCODED_CACHE_TTL_MS;
+  const encodedMaxEntries = params.encodedMaxEntries ?? EXACT_ASSET_ENCODED_CACHE_MAX_ENTRIES;
+  const encodedMaxBytes = params.encodedMaxBytes ?? EXACT_ASSET_ENCODED_CACHE_MAX_BYTES;
+  for (const [value, limit] of [
+    [encodedTtlMs, EXACT_ASSET_ENCODED_CACHE_TTL_MS],
+    [encodedMaxEntries, EXACT_ASSET_ENCODED_CACHE_MAX_ENTRIES],
+    [encodedMaxBytes, EXACT_ASSET_ENCODED_CACHE_MAX_BYTES],
+  ] as const) {
+    if (!Number.isSafeInteger(value) || value < 1 || value > limit) {
+      throw new RangeError('Exact asset encoded cache limits must be positive bounded safe integers');
+    }
+  }
+  let encodedCacheBytes = 0;
   const canReadWholeAsset = boundedHttpStore(store);
   let exports = 0;
   let cacheHits = 0;
+  let encodedCacheHits = 0;
   const fallbacks: Partial<Record<ExactAssetExportFallbackReason, number>> = {};
   const refuse = (reason: ExactAssetExportFallbackReason): null => {
     fallbacks[reason] = (fallbacks[reason] ?? 0) + 1;
@@ -172,7 +243,7 @@ export function createBoundedExactAssetExportCache(params: {
     }
   };
 
-  const readMetadata = async (request: ExactAssetExportRequest) => {
+  const readMetadata = async (request: ExactAssetExportRequest): Promise<VerifiedMetadata | null> => {
     throwIfAborted(request.signal);
     const metaGraph = `did:dkg:context-graph:${request.contextGraphId}/_meta`;
     let result;
@@ -274,9 +345,10 @@ export function createBoundedExactAssetExportCache(params: {
     });
   };
 
-  return {
-    stats() { return Object.freeze({ exports, cacheHits, fallbacks: Object.freeze({ ...fallbacks }) }); },
-    async acquire(request) {
+  const acquireRows = async (
+    request: ExactAssetExportRequest,
+    knownMetadata?: VerifiedMetadata,
+  ): Promise<ExactAssetExportLease | null> => {
       const observeStage = (stage: ExactAssetExportStage, started: number): void => {
         observeExactBatch(() => request.onStage?.(stage, performance.now() - started));
       };
@@ -285,8 +357,8 @@ export function createBoundedExactAssetExportCache(params: {
       if (!Number.isSafeInteger(request.expectedRows) || request.expectedRows < 1
         || request.expectedRows > EXACT_ASSET_EXPORT_MAX_ROWS) return refuse('row-profile');
       let stageStarted = performance.now();
-      const metadata = await readMetadata(request);
-      observeStage('export-metadata-before', stageStarted);
+      const metadata = knownMetadata ?? await readMetadata(request);
+      if (!knownMetadata) observeStage('export-metadata-before', stageStarted);
       if (!metadata) return null;
       const revision = revisionKey(request.graph, metadata.metaGraph);
       const key = JSON.stringify([request.graph, metadata.identity, revision]);
@@ -371,6 +443,179 @@ export function createBoundedExactAssetExportCache(params: {
       } finally {
         // Cancellation waits for the actual query promise above before its charge disappears.
         if (!retained) budget.remove(id);
+      }
+  };
+
+  const discardEncoded = (entry: EncodedEntry): boolean => {
+    if (entry.active !== 0) return false;
+    if (encodedCache.get(entry.key) === entry) {
+      encodedCache.delete(entry.key);
+      encodedCacheBytes -= entry.heapBytes;
+    }
+    budget.remove(entry.id);
+    return true;
+  };
+  const pruneEncoded = () => {
+    for (const entry of encodedCache.values()) {
+      if (Date.now() - entry.lastUsedAt >= encodedTtlMs) discardEncoded(entry);
+    }
+  };
+  const encodedKey = (request: ExactAssetExportRequest, metadata: VerifiedMetadata, revision: string | null) => (
+    JSON.stringify([ENCODED_CACHE_FORMAT, request.contextGraphId, request.assetUal, request.graph,
+      metadata.identity, metadata.envelope.assertionVersion, bytesToHex(metadata.envelope.merkleRoot),
+      metadata.envelope.publicTripleCount, metadata.envelope.privateTripleCount, EXACT_SYNC_GZIP_ENCODING, revision])
+  );
+  const assertEncodedCurrent = async (
+    request: ExactAssetExportRequest, identity: string, revision: string | null,
+  ) => {
+    const after = await readMetadata({ ...request, expectedIdentity: identity });
+    if (!after || revisionKey(request.graph, after.metaGraph) !== revision) throw changed();
+    throwIfAborted(request.signal);
+  };
+  const retainEncoded = (key: string, body: Uint8Array, plainBytes: number, identity: string): void => {
+    // This is opportunistic retention after a completed source fence. A cache
+    // admission failure must not turn a valid current response into refusal.
+    if (encodedCache.has(key)) return;
+    pruneEncoded();
+    const heapBytes = body.byteLength + ENCODED_ENTRY_OVERHEAD_BYTES + 2 * key.length;
+    if (heapBytes > encodedMaxBytes) return;
+    while (encodedCache.size >= encodedMaxEntries || encodedCacheBytes + heapBytes > encodedMaxBytes) {
+      const idle = [...encodedCache.values()].find(entry => entry.active === 0);
+      if (!idle || !discardEncoded(idle)) return;
+    }
+    const id = Symbol('exact-asset-encoded-cache');
+    // Reserve before taking ownership of an extra physical copy.
+    if (!reserve(id, key, 0, heapBytes, () => {
+      const entry = encodedCache.get(key);
+      if (entry?.id !== id) return;
+      encodedCache.delete(key);
+      encodedCacheBytes -= entry.heapBytes;
+    })) return;
+    try {
+      const owned = body.slice();
+      const entry: EncodedEntry = { id, key, body: owned, digest: bytesToHex(sha256(owned)),
+        plainBytes, identity, heapBytes, lastUsedAt: Date.now(), active: 0 };
+      encodedCache.set(key, entry);
+      encodedCacheBytes += heapBytes;
+      budget.release(id);
+    } catch (error) {
+      budget.remove(id);
+      throw error;
+    }
+  };
+
+  return {
+    stats() {
+      pruneEncoded();
+      return Object.freeze({ exports, cacheHits, encodedCacheHits,
+        encodedCacheEntries: encodedCache.size, encodedCacheBytes,
+        fallbacks: Object.freeze({ ...fallbacks }) });
+    },
+    acquire: acquireRows,
+    async acquireEncoded(request) {
+      throwIfAborted(request.signal);
+      if (!canReadWholeAsset) return refuse('store-capability');
+      if (!Number.isSafeInteger(request.expectedRows) || request.expectedRows < 1
+        || request.expectedRows > EXACT_ASSET_EXPORT_MAX_ROWS) return refuse('row-profile');
+      const started = performance.now();
+      const metadata = await readMetadata(request);
+      observeExactBatch(() => request.onStage?.('export-metadata-before', performance.now() - started));
+      if (!metadata) return null;
+      const revision = revisionKey(request.graph, metadata.metaGraph);
+      const key = encodedKey(request, metadata, revision);
+      pruneEncoded();
+      const hit = encodedCache.get(key);
+      if (hit && Date.now() - hit.lastUsedAt < encodedTtlMs) {
+        // Only the independently verified immutable assertion copy is reused.
+        // On revisionless stores this is not evidence that present physical
+        // DATA remains unchanged. Fresh metadata/public profile and the final
+        // fence still apply, and the receiver still authenticates chain truth.
+        if (revisionKey(request.graph, metadata.metaGraph) !== revision) throw changed();
+        if (bytesToHex(sha256(hit.body)) !== hit.digest) {
+          discardEncoded(hit);
+          throw invalid();
+        }
+        const responseId = Symbol('exact-encoded-response');
+        budget.touch(hit.id);
+        if (!reserve(responseId, `${key}:response`, 0, RESPONSE_RESERVATION_BYTES, () => {})) {
+          if (hit.active === 0) budget.release(hit.id);
+          return refuse('response-admission');
+        }
+        hit.active += 1;
+        let released = false;
+        try {
+          const body = hit.body.slice();
+          hit.lastUsedAt = Date.now();
+          encodedCache.delete(key); encodedCache.set(key, hit);
+          encodedCacheHits += 1;
+          return Object.freeze({ body, plainBytes: hit.plainBytes, identity: hit.identity,
+            wholePayloadExports: 0 as const, encodingDurationMs: 0,
+            async assertCurrent() {
+              if (released) throw changed();
+              await assertEncodedCurrent(request, hit.identity, revision);
+            },
+            release() {
+              if (released) return;
+              released = true;
+              budget.remove(responseId);
+              hit.active -= 1;
+              if (hit.active === 0) {
+                if (Date.now() - hit.lastUsedAt >= encodedTtlMs) discardEncoded(hit);
+                else budget.release(hit.id);
+              }
+            },
+          });
+        } catch (error) {
+          budget.remove(responseId);
+          hit.active -= 1;
+          if (hit.active === 0) budget.release(hit.id);
+          throw error;
+        }
+      }
+
+      const rows = await acquireRows(request, metadata);
+      if (!rows) return null;
+      let transferred = false;
+      try {
+        const encodeStarted = performance.now();
+        const plain = ENCODER.encode(serializeResponderRows(rows.rows));
+        const plainBytes = plain.byteLength;
+        const body = await encodeNegotiatedExactSyncResponse(plain, {
+          request: { phase: 'data', assetUals: [request.assetUal], responseEncoding: EXACT_SYNC_GZIP_ENCODING },
+          signal: request.signal,
+        });
+        throwIfAborted(request.signal);
+        // Keep the physical codec's existing compressed and plaintext bounds.
+        if (body.byteLength < 1 || body.byteLength > EXACT_SYNC_GZIP_MAX_COMPRESSED_BYTES
+          || plainBytes > EXACT_SYNC_GZIP_MAX_INFLATED_BYTES) throw invalid();
+        const encodingDurationMs = performance.now() - encodeStarted;
+        const digest = bytesToHex(sha256(body));
+        let released = false;
+        let retained = false;
+        const encoded = Object.freeze({ body, plainBytes, identity: rows.identity,
+          wholePayloadExports: rows.wholePayloadExports ?? 1, encodingDurationMs,
+          async assertCurrent() {
+            if (released) throw changed();
+            await rows.assertCurrent();
+            // The cold response is caller-owned until promotion. Never retain
+            // bytes changed by a send adapter or another response consumer.
+            if (bytesToHex(sha256(body)) !== digest) throw invalid();
+            if (!retained) {
+              retainEncoded(key, body, plainBytes, rows.identity);
+              retained = true;
+            }
+          },
+          release() {
+            if (released) return;
+            released = true;
+            rows.release();
+          },
+        });
+        transferred = true;
+        return encoded;
+      } finally {
+        // The physical encoder settles before its row/response charge ends.
+        if (!transferred) rows.release();
       }
     },
   };

@@ -11,7 +11,6 @@ import {
   EXACT_BATCH_BATCH_INDEX, EXACT_BATCH_FRAME_KIND as K, EXACT_BATCH_MAX_FRAME_BYTES,
   EXACT_BATCH_STREAM_WINDOW_SIZE, ExactBatchSendWindow, type ExactBatchFrame,
 } from '../exact-batch-stream-contract.js';
-import { EXACT_SYNC_GZIP_ENCODING, encodeNegotiatedExactSyncResponse } from '../wire-compression.js';
 import type { ExactBatchAgentSession } from '../requester/exact-batch-stream.js';
 import type { ExactAssetExportCache, ExactAssetExportStage } from './exact-asset-export-cache.js';
 import type { ExperimentalExactBatchResponderResources } from './sync-handler.js';
@@ -95,30 +94,21 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
         const metadata = await readMetadata(options.store, request.contextGraphId, assetUal, session.signal);
         observeExactBatch(() => options.onStage?.('metadata', assetIndex, performance.now() - started, context));
         started = performance.now();
-        const lease = await options.exportCache.acquire({ contextGraphId: request.contextGraphId, assetUal,
+        const lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal,
           graph: metadata.graph, expectedRows: metadata.rows, expectedIdentity: metadata.identity, signal: session.signal,
           onStage: (stage, durationMs) => options.onStage?.(stage, assetIndex, durationMs, context) });
-        observeExactBatch(() => options.onStage?.('export', assetIndex, performance.now() - started, context));
+        observeExactBatch(() => options.onStage?.('export', assetIndex,
+          Math.max(0, performance.now() - started - (lease?.encodingDurationMs ?? 0)), context));
         if (!lease) throw new ProfileRefusal('Exact batch exporter profile refused');
         try {
           // Bounded observation cannot affect exporter ownership or response.
           if (lease.wholePayloadExports !== undefined) {
             observeExactBatch(() => options.onExport?.(assetIndex, lease.wholePayloadExports!, context));
           }
-          started = performance.now();
-          // The new protocol negotiates gzip per KA, including the codec's
-          // existing bounded plaintext fallback when compression is unsuitable.
-          // The normal public/signed START remains unchanged; response
-          // encoding is the existing unsigned shape hint.
-          let body: Uint8Array, plainBytes: number;
-          {
-            const plain = ENCODER.encode(serializeResponderRows(lease.rows));
-            plainBytes = plain.byteLength;
-            body = await encodeNegotiatedExactSyncResponse(plain, {
-              request: { ...request, phase: 'data', assetUals: [assetUal], responseEncoding: EXACT_SYNC_GZIP_ENCODING }, signal: session.signal,
-            });
-          }
-          observeExactBatch(() => options.onStage?.('encode', assetIndex, performance.now() - started, context));
+          // A lease owns the unchanged bounded gzip/plain representation. A
+          // warm lease reuses only verified bytes, never cached read authority.
+          const { body, plainBytes } = lease;
+          observeExactBatch(() => options.onStage?.('encode', assetIndex, lease.encodingDurationMs, context));
           observeExactBatch(() => options.onPayload?.(assetIndex, plainBytes, body.byteLength, context));
           started = performance.now();
           await send({ kind: K.META, assetIndex, sequence: 0, payload: metadata.bytes });
@@ -128,10 +118,10 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
           }
           observeExactBatch(() => options.onStage?.('send', assetIndex, performance.now() - started, context));
           started = performance.now();
-          // One charged lease retains the independently root-verified copy.
-          // On revisionless HTTP stores this fences metadata/root/version;
-          // it does not re-read a later DATA-only mutation. Receiver canonical
-          // authentication independently binds the copied body to chain truth.
+          // A warm revisionless lease is an earlier independently verified
+          // immutable assertion, not proof that present physical DATA remains
+          // unchanged. Fresh metadata/public profile and available revisions
+          // fence every serve. Receiver chain authentication remains required.
           await lease.assertCurrent();
           session.signal.throwIfAborted();
           observeExactBatch(() => options.onStage?.('source-fence', assetIndex, performance.now() - started, context));

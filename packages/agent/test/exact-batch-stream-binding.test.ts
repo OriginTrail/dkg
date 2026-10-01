@@ -184,6 +184,60 @@ describe('exact batch normal verifier/materializer binding', () => {
     } finally { await f.close(); }
   });
 
+  it('repeats a warm revisionless transfer with no payload export and full normal chain verification and ACK', async () => {
+    const f = await fixture(3, 30), cold = duplex(f.receiver.assetUals), warm = duplex(f.receiver.assetUals);
+    try {
+      await run(f, cold);
+      const payloadReads = f.reads.filter(source => source === 'sync.responder.exactAssetExport.payload').length;
+      const chainReads = f.chainReads.length;
+      const metadataReads = f.reads.filter(source => source === 'sync.responder.exactAssetExport.metadata').length;
+      await run(f, warm);
+      expect(f.reads.filter(source => source === 'sync.responder.exactAssetExport.payload')).toHaveLength(payloadReads);
+      expect(f.reads.filter(source => source === 'sync.responder.exactAssetExport.metadata')).toHaveLength(metadataReads + 6);
+      expect(f.exportCounts).toEqual([1, 1, 1, 0, 0, 0]);
+      expect(f.exportCache.stats()).toMatchObject({ exports: 3, encodedCacheHits: 3, encodedCacheEntries: 3 });
+      expect(f.chainReads.length - chainReads).toBe(9);
+      expect(f.applied).toEqual([...f.receiver.assetUals, ...f.receiver.assetUals]);
+      expect(warm.sent[0]!.filter(frame => frame.kind === K.ACK)).toHaveLength(3);
+      expect(warm.sent[1]!.filter(frame => frame.kind === K.ASSET_END)).toHaveLength(3);
+      expect(f.authorize).toHaveBeenCalledTimes(2);
+    } finally { cold.abort(); warm.abort(); await f.close(); }
+  });
+
+  it('checks public CG authority again before serving a retained body', async () => {
+    const f = await fixture(1, 30), cold = duplex(f.receiver.assetUals), warm = duplex(f.receiver.assetUals);
+    try {
+      await run(f, cold);
+      await f.binding.authorizeRequest(f.signed, 'requester', warm.server.signal);
+      f.isPublic.mockResolvedValue(false);
+      await expect(f.binding.respond(f.signed, warm.server, 'requester')).rejects.toThrow('public');
+      expect(warm.sent[1]).toEqual([]);
+      expect(f.exportCache.stats().encodedCacheHits).toBe(0);
+      expect(f.reads.filter(source => source === 'sync.responder.exactAssetExport.payload')).toHaveLength(1);
+    } finally { cold.abort(); warm.abort(); await f.close(); }
+  });
+
+  it('rejects corrupted warm bytes before commit without poisoning the next retained transfer', async () => {
+    const f = await fixture(1, 30), cold = duplex(f.receiver.assetUals);
+    const corrupt = duplex(f.receiver.assetUals, frame => {
+      if (frame.kind !== K.DATA) return frame;
+      const payload = frame.payload.slice(); payload[payload.length - 3] ^= 0xff;
+      return { ...frame, payload };
+    });
+    const retry = duplex(f.receiver.assetUals);
+    try {
+      await run(f, cold);
+      f.applied.length = 0;
+      await expect(run(f, corrupt)).rejects.toMatchObject({ code: 'EXACT_BATCH_PARTIAL', committedAssetUals: [] });
+      expect(corrupt.sent[0]!.some(frame => frame.kind === K.ACK)).toBe(false);
+      expect(f.applied).toEqual([]);
+      await run(f, retry);
+      expect(f.applied).toEqual(f.receiver.assetUals);
+      expect(retry.sent[0]!.filter(frame => frame.kind === K.ACK)).toHaveLength(1);
+      expect(f.reads.filter(source => source === 'sync.responder.exactAssetExport.payload')).toHaveLength(1);
+    } finally { cold.abort(); corrupt.abort(); retry.abort(); await f.close(); }
+  });
+
   it('accepts the ordinary public pipe START from an unregistered Edge without identity or signing work', async () => {
     const f = await fixture(2, 20), wire = duplex(f.receiver.assetUals);
     const getIdentityId = vi.fn(async () => 0n);
@@ -279,10 +333,15 @@ describe('exact batch normal verifier/materializer binding', () => {
     } finally { wire.abort(); await f.close(); }
   });
 
-  it('fences source metadata after chunks and before ASSET_END, releasing its physical export lease', async () => {
-    const f = await fixture(1, 30), wire = duplex(f.receiver.assetUals), acquire = f.exportCache.acquire.bind(f.exportCache);
+  it.each(['cold', 'warm'] as const)('fences %s source metadata after chunks and before ASSET_END, releasing its physical export lease', async mode => {
+    const f = await fixture(1, 30), wire = duplex(f.receiver.assetUals), acquire = f.exportCache.acquireEncoded.bind(f.exportCache);
+    if (mode === 'warm') {
+      const first = duplex(f.receiver.assetUals);
+      try { await run(f, first); } finally { first.abort(); }
+      f.applied.length = 0;
+    }
     const released = vi.fn();
-    vi.spyOn(f.exportCache, 'acquire').mockImplementation(async request => {
+    vi.spyOn(f.exportCache, 'acquireEncoded').mockImplementation(async request => {
       const lease = await acquire(request); if (!lease) return null;
       return { ...lease, async assertCurrent() {
         await f.backing.insert([{ graph: f.items[0]!.meta[0]!.graph, subject: f.items[0]!.ual, predicate: 'urn:source:generation', object: '"changed"' }]);
@@ -357,7 +416,9 @@ describe('exact batch normal verifier/materializer binding', () => {
       expect(f.authorize).toHaveBeenCalledOnce(); expect(legacySettled).toBe(false);
       release(); await streamed; await legacy;
       expect(f.authorize).toHaveBeenCalledTimes(2); expect(legacySettled).toBe(true);
-      expect(f.resources.snapshotBudget.stats().bytesEstimate).toBe(0);
+      expect(f.resources.snapshotBudget.stats()).toEqual({ snapshots: 1, rows: 0,
+        bytesEstimate: f.exportCache.stats().encodedCacheBytes });
+      expect(f.exportCache.stats().encodedCacheEntries).toBe(1);
     } finally { release(); wire.abort(); await Promise.allSettled([streamed, ...(legacy ? [legacy] : [])]); await f.close(); }
   });
 });
