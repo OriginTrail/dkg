@@ -26,7 +26,6 @@ import type { DetailedDurableSyncResult } from './durable-sync.js';
 export interface ExactBatchStreamDriverOptions {
   readonly contextGraphId: string;
   readonly remotePeerId: string;
-  readonly requesterPeerId: string;
   readonly selection: UalOnlyExactAssetSelection;
   readonly transportMode: ExactRecoveryTransportMode;
   readonly streamEnabled: boolean;
@@ -45,7 +44,7 @@ export interface ExactBatchStreamDriverPorts {
   readonly getPeerProtocols: () => Promise<readonly string[]>;
   readonly isRegisteredPublic: () => Promise<boolean>;
   readonly requestIdentity: () => Pick<Parameters<typeof buildSyncRequestEnvelope>[0],
-    'computeSyncDigest' | 'getIdentityId' | 'signMessage'>;
+    'requesterPeerId' | 'computeSyncDigest' | 'getIdentityId' | 'signMessage'>;
   readonly verification: Omit<ExactBatchVerifiedReceiverOptions,
     'contextGraphId' | 'assetUals' | 'onStage' | 'onCommitted'>;
   readonly logInfo: (message: string) => void;
@@ -95,7 +94,7 @@ export async function runExactBatchStreamDriver(
   // requiring an identity/signature from a requester that has not joined yet.
   const start = await buildSyncRequestEnvelope({
     contextGraphId, offset: 0, limit: SYNC_PAGE_SIZE, includeSharedMemory: false,
-    targetPeerId: remotePeerId, requesterPeerId: options.requesterPeerId, phase: 'data',
+    targetPeerId: remotePeerId, phase: 'data',
     assetUals: selected, needsAuth: false, ...ports.requestIdentity(),
   });
   const remainingMs = Math.floor(options.fetchDeadline - Date.now());

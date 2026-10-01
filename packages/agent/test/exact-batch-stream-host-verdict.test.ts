@@ -157,12 +157,29 @@ afterEach(async () => {
 });
 
 describe('experimental exact batch actual host completion verdict', () => {
-  it('uses ordinary recovery in legacy mode without inspecting stream capability or authority', async () => {
+  it.each([
+    ['legacy mode', 'legacy'],
+    ['opt-in absent', 'stream-preferred'],
+    ['protocol absent', 'stream-preferred'],
+    ['public authority absent', 'stream-preferred'],
+  ] as const)('does not read requester identity when ordinary recovery is selected: %s', async (boundary, mode) => {
     const f = fixture();
-    await f.run(f.selection, 'legacy');
-    expect(f.host.getSyncReconcilerConnectionKey).not.toHaveBeenCalled();
-    expect(f.host.getPeerProtocols).not.toHaveBeenCalled();
-    expect(f.host.resolveRegisteredContextGraphAuthority).not.toHaveBeenCalled();
+    if (boundary === 'opt-in absent') vi.stubEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM', '0');
+    else if (boundary === 'protocol absent') f.host.getPeerProtocols.mockResolvedValue([]);
+    else if (boundary === 'public authority absent') f.host.resolveRegisteredContextGraphAuthority.mockResolvedValue({ kind: 'private' });
+    const peerIdRead = vi.fn(() => { throw new Error('An unstarted requester has no peer identity'); });
+    const signingPortRead = vi.fn(() => { throw new Error('An unused START must not inspect signing identity'); });
+    Object.defineProperty(f.host, 'peerId', { get: peerIdRead });
+    Object.defineProperty(f.host.chain, 'signMessage', { get: signingPortRead });
+    await f.run(f.selection, mode);
+    expect(peerIdRead).not.toHaveBeenCalled();
+    expect(signingPortRead).not.toHaveBeenCalled();
+    expect(f.host.chain.getIdentityId).not.toHaveBeenCalled();
+    if (boundary === 'legacy mode' || boundary === 'opt-in absent') {
+      expect(f.host.getSyncReconcilerConnectionKey).not.toHaveBeenCalled();
+      expect(f.host.getPeerProtocols).not.toHaveBeenCalled();
+      expect(f.host.resolveRegisteredContextGraphAuthority).not.toHaveBeenCalled();
+    }
     expect(exchangeExperimentalExactBatch).not.toHaveBeenCalled();
     expect(runDurableSyncDetailed).toHaveBeenCalledOnce();
   });

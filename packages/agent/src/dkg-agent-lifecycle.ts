@@ -6489,7 +6489,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     if (exactAssetSelection !== undefined) {
       const outcome = await runExactBatchStreamDriver({
-        contextGraphId, remotePeerId, requesterPeerId: this.peerId,
+        contextGraphId, remotePeerId,
         selection: exactAssetSelection, transportMode: exactRecoveryTransportMode,
         streamEnabled: process.env.DKG_EXPERIMENTAL_EXACT_BATCH_STREAM === '1',
         fetchDeadline: contextGraphBudget.fetchDeadline, signal, isCurrent,
@@ -6503,6 +6503,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           authorityReadMode: 'finalized-index-or-live', signal,
         })).kind === 'public',
         requestIdentity: () => ({
+          requesterPeerId: this.peerId,
           computeSyncDigest: (...args) => this.computeSyncDigest(...args),
           getIdentityId: () => this.chain.getIdentityId(),
           signMessage: typeof this.chain.signMessage === 'function' ? this.chain.signMessage.bind(this.chain) : undefined,
